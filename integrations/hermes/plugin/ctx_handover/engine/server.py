@@ -31,9 +31,9 @@ iterable), ``plugin_version``, ``hermes_version``, ``rate_per_s`` (20), ``rate_b
 ``pair_failures_per_hour`` (30). Schema keys (``inbound``, ``max_request_mb``) and the flags ``operator_api``/
 ``hosted`` are read through the one settings reader ``settings`` (contract V22): a bare YAML ``off``/``on`` arrives
 as a boolean and means ``off``/``on``, a YAML boolean word for ``operator_api``/``hosted`` counts like the boolean,
-a rejected ``max_request_mb`` is its schema default. An ``inbound`` value the reader does not recognise keeps
-inbound closed here (the reader's default ``auto`` would answer paired peers). The listener's own knobs outside the
-schema fall back to their default when missing, non-numeric or not positive.
+a rejected ``max_request_mb`` is its schema default; an ``inbound`` value the reader does not recognise is ``off``
+(the reader's fail-closed rule — its default ``auto`` would answer paired peers). The listener's own knobs outside
+the schema fall back to their default when missing, non-numeric or not positive.
 """
 
 from __future__ import annotations
@@ -432,16 +432,10 @@ def _flag(value: object) -> bool:
 
 
 def inbound_mode(value: object) -> str:
-    """``inbound`` as ``auto``|``on``|``off`` (DESIGN §12.4) by the one settings reader (contract V22):
-    ``hermes_yaml`` reads a bare ``off``/``on`` as False/True, None is the default ``auto``. A value the reader does
-    not recognise as one of the words keeps inbound closed (``off``) — its schema default ``auto`` would answer
-    paired peers."""
-    if value is None:
-        return "auto"
-    mode = settings_mod.coerce("inbound", value)
-    if isinstance(value, bool) or (isinstance(value, str) and value.strip().lower() == mode):
-        return mode
-    return "off"
+    """``inbound`` as ``auto``|``on``|``off`` (DESIGN §12.4) — exactly the one settings reader (contract V22):
+    YAML booleans and the boolean words read as ``on``/``off``, None is the default ``auto``, a value it does not
+    recognise is ``off`` (fail-closed, ``settings.FAIL_CLOSED_KEYS``). No second rule here."""
+    return settings_mod.coerce("inbound", value)
 
 
 class Server:
@@ -472,9 +466,8 @@ class Server:
         self.name = _text(s.get("name"))
         raw_inbound = s.get("inbound")
         self.inbound = inbound_mode(raw_inbound)
-        word = None if raw_inbound is None or isinstance(raw_inbound, bool) else str(raw_inbound).strip().lower()
-        if word is not None and word not in settings_mod.SCHEMA["inbound"]["choices"]:
-            log.warning("ctx_handover: unknown inbound setting %r; inbound stays closed", str(raw_inbound)[:40])
+        for text in settings_mod.problems({"inbound": raw_inbound}):
+            log.warning("ctx_handover: %s", text)
         self.max_request_bytes = int(settings_mod.coerce("max_request_mb", s.get("max_request_mb")) * MIB)
         self.max_json_bytes = min(int(_positive(s.get("max_json_bytes"), DEFAULT_MAX_JSON)), self.max_request_bytes)
         self._rate = _Buckets(_positive(s.get("rate_per_s"), 20), _positive(s.get("rate_burst"), 60), clock)

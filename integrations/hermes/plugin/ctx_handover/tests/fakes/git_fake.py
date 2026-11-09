@@ -102,11 +102,12 @@ class DirBlockStore:
 
 @dataclass
 class FakeGitProbe:
-    """Scripted ``GitProbe`` (paths are compared as strings)."""
+    """Scripted ``GitProbe`` (paths are compared as strings; satisfies ``contracts.GitProbe``)."""
 
     toplevels: dict[str, str] = field(default_factory=dict)
     common_dirs: dict[str, str] = field(default_factory=dict)
     shallow: set[str] = field(default_factory=set)
+    partial: set[str] = field(default_factory=set)
     infos: dict[str, GitInfo] = field(default_factory=dict)
     clean: dict[str, tuple[bool, str]] = field(default_factory=dict)
     roots: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -130,6 +131,11 @@ class FakeGitProbe:
     def is_shallow(self, path: str) -> bool:
         self._rec("is_shallow", path)
         return path in self.shallow
+
+    def is_partial(self, path: str) -> bool:
+        """Like ``gitops.GitProbe.is_partial`` (V30): True for a scripted partial-clone root and any path in it."""
+        self._rec("is_partial", path)
+        return any(path == root or path.startswith(root.rstrip("/") + "/") for root in self.partial)
 
     def info(self, root: str, cfg) -> GitInfo:
         self._rec("info", root)

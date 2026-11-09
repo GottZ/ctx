@@ -33,7 +33,16 @@ from pathlib import Path
 
 from .contracts import BlockSink, BlockSource
 from .errors import BadRequest, BlockCorrupt, ConflictError, PayloadTooLarge, PolicyDenied
-from .gitops import dec_path, enc_path, object_manifest, put_stream, read_json_object, sha256_file, write_object_to
+from .gitops import (
+    dec_path,
+    enc_path,
+    object_manifest,
+    put_stream,
+    read_json_object,
+    sha256_file,
+    undo_failed,
+    write_object_to,
+)
 from .ignore import IgnoreMatcher
 from .model import DestMode, NotTransferred, ObjectManifest
 from .paths import PlatformRules, check_rel, fold_key
@@ -284,11 +293,22 @@ class _ManifestReader:
 
 
 def pack_tree(
-    entries: Sequence[TreeEntry], root: Path, store: BlockSink, cancelled: Callable[[], bool] = _never
+    entries: Sequence[TreeEntry],
+    root: Path,
+    store: BlockSink,
+    cancelled: Callable[[], bool] = _never,
+    *,
+    dropped: list[NotTransferred] | None = None,
 ) -> str:
-    """Stream every file of ``entries`` (read with ``O_NOFOLLOW``; a file that turned into something else is
-    skipped) into ``store`` and return the object id of the tree manifest."""
+    """Stream every file of ``entries`` (read with ``O_NOFOLLOW``) into ``store`` and return the object id of the
+    tree manifest. A file that is gone (``missing``), cannot be opened (``unreadable``) or turned into something
+    else (``special``) since the scan is left out of the manifest and appended to ``dropped`` (when given) — the
+    caller reports it and does not count it."""
     root = Path(root)
+
+    def drop(e: TreeEntry, why: str) -> None:
+        if dropped is not None:
+            dropped.append(NotTransferred(e.path, why))
 
     def docs() -> Iterator[dict]:
         for e in entries:
@@ -298,11 +318,16 @@ def pack_tree(
             path = _join(root, entry_rel_bytes(e))
             try:
                 fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            except FileNotFoundError:
+                drop(e, "missing")
+                continue
             except OSError:
+                drop(e, "unreadable")
                 continue
             with os.fdopen(fd, "rb") as fh:
                 st = os.fstat(fh.fileno())
                 if not stat.S_ISREG(st.st_mode):
+                    drop(e, "special")
                     continue
                 m = put_stream(store, fh, media=FILE_MEDIA, cancelled=cancelled)
             yield _entry_doc(TreeEntry(e.path, "file", e.mode, m.size, st.st_mtime_ns, m.object_id, None, e.raw))
@@ -675,7 +700,8 @@ def commit(state: TreeApplyState) -> dict:
 
     Update mode is repeatable (contract X11): a backup slot that exists already holds its file (moved by an earlier
     run of this step), a staged file that is gone was swapped in already — a process that resumes after a crash
-    only does what is missing. An exception in the middle undoes the step (``rollback``) before it propagates.
+    only does what is missing. An exception in the middle undoes the step (``rollback``) before it propagates; an
+    undo that fails too raises ``gitops.undo_failed`` (``details.needs_attention``).
     Fresh mode is one rename; resuming it is the caller's (directory identity)."""
     if state.mode is DestMode.FRESH:
         assert state.partial is not None  # noqa: S101 - fresh states carry their partial
@@ -714,9 +740,11 @@ def commit(state: TreeApplyState) -> dict:
         for temp, final in state.staged:
             if os.path.lexists(temp):
                 os.replace(temp, final)
-    except Exception:
-        with contextlib.suppress(Exception):
+    except Exception as exc:
+        try:
             _undo_update(state)
+        except Exception as undo:  # the destination is half-swapped: report it, never as untouched
+            raise undo_failed(exc, undo, path=state.dest) from exc
         raise
     return {"dest": str(state.dest), "fingerprint": state.fingerprint}
 

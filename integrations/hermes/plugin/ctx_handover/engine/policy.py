@@ -2,7 +2,9 @@
 
 Source side (I6): a file leaves the source only when it is not on the secrets denylist (name, directory,
 content sniff), not inside the Hermes root, a Hermes credential store or a protected system path, not a
-special file, and within the limits. ``include_secret`` — local flags of this job only, never from a peer,
+special file, and within the limits. The reserved ``<HERMES_HOME>/handover-workspaces`` (R29) is the one Hermes-home
+area a source may read from (return trip R4 from a Docker host; integrator decision G′); credential stores and the
+plugin data dir stay protected there too. ``include_secret`` — local flags of this job only, never from a peer,
 never from settings (R18) — lifts the name/directory/content denylist for exactly the named paths; it never
 lifts the Hermes root, Hermes credential stores or system paths (R19).
 
@@ -11,7 +13,9 @@ local user typed) and never on the target denylist: the Hermes root and every pr
 credential directories, shell/login startup files, autostart locations, ``~/.local/bin``, ``~/bin``, git/ssh/
 package configuration, every dot entry directly under ``$HOME`` that is not opened by an allow-root — and never
 at ``$HOME`` itself or any ancestor of a denied location (a tree written there would land its entries inside
-one).
+one). The one exception for the Hermes home (R29) is the directory the plugin reserves there,
+``<HERMES_HOME>/handover-workspaces`` (``paths.HERMES_WORKSPACES_DIR``) and everything below it — the default
+write root when ``~/hermes-handover`` lies in the Hermes home (``paths.default_workspace_root``).
 
 Every check looks at the path as given **and** at its ``realpath``; components are compared NFC-normalised and,
 on case-insensitive filesystems, case-folded. No check reads a file before the never-releasable rules passed.
@@ -34,7 +38,15 @@ from typing import NamedTuple
 
 from .errors import PolicyDenied
 from .model import Options
-from .paths import PlatformRules, expand_root, reject_windows_device_prefix, rules_for, under_any
+from .paths import (
+    HERMES_WORKSPACES_DIR,
+    PlatformRules,
+    expand_handover_root,
+    expand_root,
+    reject_windows_device_prefix,
+    rules_for,
+    under_any,
+)
 
 SNIFF_BYTES = 8 * 1024
 
@@ -311,9 +323,12 @@ class PolicyConfig:
     ) -> PolicyConfig:
         """Build the policy from resolved options. ``include_secret`` must hold only flags typed locally for this
         job; ``o.hints.include_secret`` is deliberately NOT read (a remote peer's hints may carry it, R18).
-        ``plugin_dir`` is the plugin's data directory (``hostcompat.plugin_dir``)."""
+        ``plugin_dir`` is the plugin's data directory (``hostcompat.plugin_dir``). ``allow_roots`` expand through
+        ``paths.expand_handover_root``: the default ``~/hermes-handover`` is ``<HERMES_HOME>/handover-workspaces``
+        when it lies in the Hermes home or root (R29)."""
         home = Path(home)
         lifted = frozenset(os.path.normpath(str(expand_root(p, home))) for p in include_secret if str(p).strip())
+        ci = bool(case_insensitive)
         return cls(
             max_file_bytes=o.max_file_bytes,
             max_extra_dir_bytes=o.max_extra_dir_bytes,
@@ -321,14 +336,17 @@ class PolicyConfig:
             max_files=o.max_files,
             max_untracked_files=o.max_untracked_files,
             max_total_bytes=o.max_total_bytes,
-            allow_roots=tuple(expand_root(r, home) for r in o.allow_roots),
+            allow_roots=tuple(
+                expand_handover_root(r, home, hermes_home, hermes_root=hermes_root, case_insensitive=ci)
+                for r in o.allow_roots
+            ),
             export_roots=tuple(expand_root(r, home) for r in o.export_roots),
             home=home,
             hermes_home=Path(hermes_home),
             hermes_root=Path(hermes_root),
             plugin_dir=Path(plugin_dir),
             include_secret=lifted,
-            case_insensitive=bool(case_insensitive),
+            case_insensitive=ci,
             target_os=target_os,
             document_cache=Path(document_cache) if document_cache is not None else None,
         )
@@ -506,7 +524,7 @@ class SourceCheckCache:
     every call uses a fresh one, i.e. resolves everything itself.
     """
 
-    __slots__ = ("_cfg", "_credential", "_item_roots", "_locations", "_protected", "_real")
+    __slots__ = ("_cfg", "_credential", "_item_roots", "_liftable", "_locations", "_protected", "_real", "_reserved")
 
     def __init__(self) -> None:
         self._cfg: PolicyConfig | None = None
@@ -516,6 +534,8 @@ class SourceCheckCache:
         self._protected: tuple[tuple[str, ...], ...] | None = None
         self._credential: tuple[tuple[str, ...], ...] | None = None
         self._locations: tuple[tuple[str, ...] | None, ...] | None = None
+        self._reserved: tuple[tuple[str, ...], ...] | None = None
+        self._liftable: frozenset[tuple[str, ...]] | None = None
         self._item_roots: dict[str, tuple[str, ...] | None] = {}
         self._real: dict[str, str] = {}
 
@@ -544,6 +564,25 @@ class SourceCheckCache:
             keys = (_root_key(b, ci) for b in _hermes_bases(self._cfg, self._resolve))
             self._protected = tuple(k for k in keys if k is not None)
         return self._protected
+
+    def _reserved_keys(self) -> tuple[tuple[str, ...], ...]:
+        """Keys of the reserved workspace directory (``reserved_workspace_roots``: the active home as given and
+        resolved, plus ``handover-workspaces`` — never the realpath of the reserved directory itself)."""
+        if self._reserved is None:
+            cfg = self._cfg
+            homes = (Path(os.path.normpath(cfg.hermes_home)), Path(self._resolve(cfg.hermes_home)))
+            keys = (_root_key(h / HERMES_WORKSPACES_DIR, cfg.case_insensitive) for h in homes)
+            self._reserved = tuple(dict.fromkeys(k for k in keys if k is not None))
+        return self._reserved
+
+    def _liftable_keys(self) -> frozenset[tuple[str, ...]]:
+        """Keys of the bases the reserved directory is exempt from: the active home and the Hermes root (as
+        given and resolved) — never the plugin data dir."""
+        if self._liftable is None:
+            cfg = self._cfg
+            bases = (b for h in (cfg.hermes_home, cfg.hermes_root) for b in (Path(h), Path(self._resolve(h))))
+            self._liftable = frozenset(k for k in (_root_key(b, cfg.case_insensitive) for b in bases) if k)
+        return self._liftable
 
     def _credential_keys(self) -> tuple[tuple[str, ...], ...]:
         """Keys of the bases whose credential stores are protected (active home and Hermes root, as given and
@@ -647,7 +686,9 @@ def _protected(
             return True
         if session_file_kind is not None and _in_session_area(Path(cand.text), session_file_kind, cfg):
             continue
-        if any(_under(cand.key, base) for base in memo._protected_keys()):
+        reserved = any(_under(cand.key, r) for r in memo._reserved_keys())
+        lifted = memo._liftable_keys() if reserved else frozenset()
+        if any(_under(cand.key, base) for base in memo._protected_keys() if base not in lifted):
             return True
     return False
 
@@ -656,7 +697,9 @@ def is_hermes_protected(
     path: Path, cfg: PolicyConfig, *, session_file_kind: str | None = None, cache: SourceCheckCache | None = None
 ) -> bool:
     """True when ``path`` (as given or resolved) lies in the Hermes root, the active Hermes home, the plugin data
-    dir or a Hermes credential store — never liftable (R19, SEC 2.4). With ``session_file_kind`` (one of
+    dir or a Hermes credential store — never liftable (R19, SEC 2.4) — except inside the reserved
+    ``<HERMES_HOME>/handover-workspaces`` (R29; each spelling judged on its own, so a link out of it is still
+    protected; credential stores and the plugin data dir are never exempt). With ``session_file_kind`` (one of
     ``HERMES_FILE_KINDS``), a path inside that kind's area is not protected unless it is a credential store.
     ``cache``: the ``SourceCheckCache`` of the current scan (optional)."""
     if session_file_kind is not None and session_file_kind not in HERMES_FILE_KINDS:
@@ -854,10 +897,23 @@ def check_extra(
 # ---------------------------------------------------------------------------------------------------------
 
 
+def reserved_workspace_roots(cfg: PolicyConfig) -> tuple[Path, ...]:
+    """The directory the plugin reserves in the active Hermes home (R29), as given and with the Hermes home
+    resolved: ``<hermes_home>/handover-workspaces`` (``paths.HERMES_WORKSPACES_DIR``). Never the realpath of the
+    reserved directory itself — a link there into the Hermes home must not widen the exception."""
+    lexical = Path(os.path.normpath(cfg.hermes_home)) / HERMES_WORKSPACES_DIR
+    real = Path(os.path.realpath(cfg.hermes_home)) / HERMES_WORKSPACES_DIR
+    return (lexical,) if real == lexical else (lexical, real)
+
+
 def _target_denied(path: Path, cfg: PolicyConfig) -> bool:
     ci = cfg.case_insensitive
+    reserved = any(_inside(path, r, ci) for r in reserved_workspace_roots(cfg))
+    liftable = {Path(b) for h in (cfg.hermes_home, cfg.hermes_root) for b in (h, os.path.realpath(h))}
     for base in _hermes_bases(cfg):
-        if _inside(path, base, ci) or _inside(base, path, ci):
+        if _inside(base, path, ci):
+            return True
+        if _inside(path, base, ci) and not (reserved and base in liftable):
             return True
     homes = {Path(cfg.home), Path(os.path.realpath(cfg.home))}
     for home in homes:
@@ -967,7 +1023,8 @@ def _link_target_inside(link_path: str, target: str) -> bool:
 def check_tree_entry(entry: dict) -> Verdict:
     """Validate one tree-manifest entry from a peer (DESIGN §10.3, SEC 2.3): ``type`` ∈ file|dir|symlink, mode
     permission bits 0644 or 0755 (symlinks: 0644/0755/0777 or none), no setuid/setgid/sticky, type bits (when
-    present, e.g. ``100644``) matching the type, and a symlink target that is relative, stays inside the tree
+    present, e.g. ``100644``) matching the type, a whole non-negative ``size`` (required for a file, optional for a
+    directory or symlink), and a symlink target that is relative, stays inside the tree
     and does not point into a ``.git`` directory. The entry's own ``path`` is checked separately with
     ``paths.check_rel``."""
     if not isinstance(entry, dict):
@@ -986,7 +1043,7 @@ def check_tree_entry(entry: dict) -> Verdict:
     perm = mode & 0o7777
     if perm & 0o7000 or perm not in _ALLOWED_PERMS[kind]:
         return Verdict(False, "special")
-    size = entry.get("size", 0)
+    size = entry.get("size", None if kind == "file" else 0)  # a file's size is never assumed (success sweep G′)
     if isinstance(size, bool) or not isinstance(size, int) or size < 0:
         return Verdict(False, "special")
     if kind == "symlink":

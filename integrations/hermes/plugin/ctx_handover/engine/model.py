@@ -439,6 +439,11 @@ class EnvFacts:
     capabilities: frozenset[str] = frozenset()
     python_version: str = added_field("")
     """``python3 --version`` of this side (DESIGN §11.1 ``python_toolchain``; diagnostics only, W075)."""
+    workspace_root_ok: bool | None = added_field(None)
+    """R29: this side checked its ``workspace_root`` when it probed its facts. True = usable, False = unusable
+    (``workspace_root_problem`` says why), None = not checked (facts not built by ``envfacts.probe``)."""
+    workspace_root_problem: str = added_field("")
+    """Empty when ``workspace_root_ok`` is True; else one of ``envfacts.ROOT_PROBLEMS`` (D)."""
 
 
 # ---------------------------------------------------------------------------------------------------------

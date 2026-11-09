@@ -33,6 +33,8 @@ FUNCTIONS = {
         "route_path": ["route"],
         "msys_to_windows": ["path"],
         "strip_url_userinfo": ["url"],
+        "default_workspace_root": ["home", "hermes_home"],
+        "expand_handover_root": ["spec", "home", "hermes_home"],
     },
     policy: {
         "is_denied_name": ["rel_or_path", "case_insensitive"],
@@ -45,6 +47,7 @@ FUNCTIONS = {
         "exclude_pathspecs": ["paths"],
         "check_extra": ["path", "cfg", "explicit", "redact"],
         "sniff_bytes": ["head"],
+        "reserved_workspace_roots": ["cfg"],
     },
     jsonutil: {
         "canonical_bytes": ["obj"],
@@ -101,6 +104,8 @@ ADDED_PARAMETERS = {
     (policy, "check_source_file"): {"item_root": None, "cache": None, "follow_link": None},
     (policy, "check_extra"): {"cache": None, "follow_link": None},
     (paths, "check_rel"): {"allow_control": False},
+    (paths, "default_workspace_root"): {"hermes_root": None, "case_insensitive": False},
+    (paths, "expand_handover_root"): {"hermes_root": None, "case_insensitive": False},
 }
 """Keyword-only parameters added after a frozen prefix, with their defaults (contract K-4)."""
 
@@ -292,7 +297,7 @@ DATACLASS_FIELDS = {
 ADDED_FIELDS = {
     model.PlanItem: {"hermes_kind": None, "instruction_files": ()},
     model.ResourcePlan: {"warnings": ()},
-    model.EnvFacts: {"python_version": ""},
+    model.EnvFacts: {"python_version": "", "workspace_root_ok": None, "workspace_root_problem": ""},
 }
 """Fields added by contract K-3, with their defaults; declared with ``model.added_field``."""
 

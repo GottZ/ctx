@@ -449,7 +449,7 @@ def test_pairing_wiring_creates_identity_only_in_operator_verbs(backend, monkeyp
 
     def redeem_dialer(client_factory, identity, pair, *, name, gate, allow_insecure, ledger):
         redeemed.append(dict(name=name, gate=gate, allow_insecure=allow_insecure, client=client_factory))
-        return make_peer(name)
+        return make_peer(name or pair["name"])  # C names the listener when F passes no name (V44)
 
     _stub_module(monkeypatch, "crypto", Identity=Identity)
     _stub_module(
@@ -473,6 +473,7 @@ def test_pairing_wiring_creates_identity_only_in_operator_verbs(backend, monkeyp
     gate = GateAuth(mode=GateMode.SESSION_TOKEN)
     peer = backend.redeem_pair("ctxh-pair:ZZZ", name=None, gate=gate, allow_insecure=True)
     assert peer.name == "srv" and redeemed[0]["gate"] is gate and redeemed[0]["allow_insecure"] is True
+    assert redeemed[0]["name"] == ""  # no --name: the choice (paste-string name or the next free one) is C's
     assert redeemed[0]["client"](make_peer("srv")) == ("client", "srv")
 
 

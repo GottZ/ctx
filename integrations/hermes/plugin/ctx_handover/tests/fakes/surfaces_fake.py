@@ -292,6 +292,7 @@ class FakeBackend:
         self.confirm_reasons: list[str] = []
         self.confirm_answers: list[str] = []
         self.confirm_even_with_yes = False
+        self.summary_extra: dict = {}  # keys merged into D's presend_summary (e.g. workspace_excluded, R30)
         self.instruction_files: list[dict] = []
         self.pull_log: list[dict] = []
         self.start_error: BaseException | None = None
@@ -414,7 +415,7 @@ class FakeBackend:
             answer = confirm(
                 {
                     "reasons": list(self.confirm_reasons),
-                    "summary": _plan.presend_summary(self.final),
+                    "summary": {**_plan.presend_summary(self.final), **self.summary_extra},
                     "final_plan": self.final,
                     "suspected_secrets": [
                         i.source_path
@@ -494,7 +495,9 @@ class FakeBackend:
         self.suggestions.append((session_id, data))
 
     def presend_summary(self, final) -> dict:
-        return _surfaces.plan_summary(final)
+        if not self.summary_extra:
+            return _surfaces.plan_summary(final)
+        return _surfaces.plan_summary(final, {**_plan.presend_summary(final), **self.summary_extra})
 
     def doctor_checks(self, *, measure: bool = False) -> list[dict]:
         self._rec("doctor_checks", measure=measure)

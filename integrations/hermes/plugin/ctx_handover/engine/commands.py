@@ -84,6 +84,9 @@ NOTE_MAX_OFFERS = 3
 SIDE_QUESTION_CAPABILITY = "llm.side_question"
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_BUSY, EXIT_AUTH, EXIT_DOUBT = 0, 1, 2, 3, 4, 5
+FINISHED_STATES = frozenset({"committed", "retiring", "retired", "continuing", "done"})
+"""Conductor states after the commit point (DESIGN §3.2): the only ones a closing text calls a success. Every other
+state — missing, running, unknown — gets "has not finished" (success only on an explicitly positive value)."""
 _EXIT_BY_CODE = {
     "bad_request": EXIT_USAGE,
     "not_found": EXIT_USAGE,
@@ -370,6 +373,7 @@ class _ConfirmState:
     answer: str | None = None
     timed_out: bool = False
     reasons: list[str] = field(default_factory=list)
+    yes_refused: list[str] = field(default_factory=list)
 
 
 class Plugin:
@@ -563,9 +567,12 @@ class Plugin:
             summary["suspected_secrets"] = suspected
             state.summary = summary
             state.reasons = reasons
-            if options.yes:  # R25: a blanket yes never takes suspected secrets along
+            exempt = surfaces.yes_exempt(reasons)
+            if options.yes and not exempt:  # R25: a blanket yes never takes suspected secrets along
                 state.answer = "no_proposed" if suspected else "yes"
                 return state.answer
+            if options.yes:  # R30: --yes does not confirm these; a person does, or nothing is locked
+                state.yes_refused = exempt
             question = surfaces.confirm_question(summary, peer_name)
             why = [surfaces.REASON_TEXT.get(r, r) for r in reasons]
             if suspected:  # an item marker, not a reason code (X03): it explains reason (a)
@@ -644,6 +651,8 @@ class Plugin:
             elif state.timed_out and state.answer == "cancel":
                 if summary is not None:
                     call.say(surfaces.render_plan(summary))
+                if state.yes_refused:
+                    call.say(_yes_refused_text(summary))
                 call.say("No answer to the confirmation, so the handover was cancelled. Nothing was locked.")
                 call.exit_code = EXIT_FAILED
             else:
@@ -707,6 +716,11 @@ class Plugin:
             if state == "suspended" and "/handover resume" not in text:
                 text += f" /handover resume {short} continues it."
             return text
+        if state not in FINISHED_STATES:  # success only after the commit point, never by default
+            return (
+                f"Handover {short} has not finished ({state or 'state not recorded'}). /handover status {short} "
+                "shows where it is."
+            )
         from .jsonutil import from_wire
         from .model import CommitAck
 
@@ -718,7 +732,7 @@ class Plugin:
                 ack = None
         cont = job.get("continuation")
         cont_result = None
-        if isinstance(cont, Mapping) and cont.get("started"):
+        if isinstance(cont, Mapping) and cont.get("started") is True:
             cont_result = ContinueResult(started=True, pid=cont.get("pid"), log=cont.get("log"))
         cont_error = None
         if isinstance(cont, Mapping) and cont.get("error"):
@@ -746,8 +760,11 @@ class Plugin:
             continue_error=cont_error,
             bundle_path=bundle.get("path"),
             bundle_bytes=bundle.get("size"),
-            keep=options.keep_source,
+            # the job's own record says whether the source was kept (O3/V36); the command's --keep only stands
+            # in for a status that does not carry it
+            keep=job.get("source_kept") is True if "source_kept" in job else options.keep_source,
             remote_gateway=bool(bundle.get("remote")),
+            job=job_id,
         )
         if state == "retiring" and job.get("next_action") and mode not in (Mode.PULL, Mode.IMPORT):
             text += f"\nNext: {job['next_action']}"
@@ -950,7 +967,14 @@ class Plugin:
             return
         if sub == "remove":
             peer = self._peer(names[0])
-            backend.remove_peer(peer.name)
+            if peer.direction != "dial":  # the ledger removes dial entries only (Ledger.remove_peer)
+                raise BadRequest(
+                    f"{peer.name} dials in to this gateway; remove is for gateways this device dials. "
+                    f"/handover peers revoke {peer.name} takes its key away here.",
+                    peer=peer.name,
+                )
+            if backend.remove_peer(peer.name) is not True:
+                raise NotFound(f"{peer.name} was not removed; /handover peers lists what is paired.", peer=peer.name)
             call.say(f"Removed {peer.name} from this device. Pair again to use it.")
             return
         if sub == "rename":
@@ -1044,7 +1068,7 @@ class Plugin:
             else "Nothing to reclaim."
         )
         call.say(str(message))
-        if result.get("target_notified"):
+        if result.get("target_notified") is True:
             call.say("The other gateway was told that this session is active here again.")
         for warning in result.get("warnings") or ():
             call.say(f"warning: {warning}")
@@ -1134,9 +1158,10 @@ class Plugin:
             )
             if choice in {"auto", "on", "off"} and choice != current:
                 lines.append(_set_or_explain(backend, "inbound", choice))
+        roots = ", ".join(_root_shown(r) for r in settings.get("allow_roots") or [])
         lines.append(
-            f"Received workspaces go to {settings.get('workspace_root')} (setting workspace_root; "
-            f"writes only under {', '.join(settings.get('allow_roots') or [])})."
+            f"Received workspaces go to {_root_shown(settings.get('workspace_root'))} (setting workspace_root; "
+            f"writes only under {roots})."
         )
         server = ctxrecords.detect(backend.config())
         if server is None:
@@ -1305,16 +1330,14 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
         try:
             off = hostcompat.approvals_off(config)
         except Exception:
-            off = False
-        checks.append(
-            {
-                "name": "allow_remote_continue",
-                "ok": None if off else True,
-                "detail": "on, but approvals are off on this gateway, so no remote continuation ever starts"
-                if off
-                else "on: a paired device with --continue may start one turn here (approvals apply)",
-            }
-        )
+            off = None
+        if off is True:
+            ok, detail = None, "on, but approvals are off on this gateway, so no remote continuation ever starts"
+        elif off is False:
+            ok, detail = True, "on: a paired device with --continue may start one turn here (approvals apply)"
+        else:  # unknown is not "approvals apply"
+            ok, detail = None, "on; not checked whether approvals apply here (the approval setting could not be read)"
+        checks.append({"name": "allow_remote_continue", "ok": ok, "detail": detail})
     server = ctxrecords.server_for(config, settings)
     if server is not None:
         granted = ctxrecords.allowed(config, server)
@@ -1335,6 +1358,40 @@ def _job_error_text(job_id: str, err: Mapping | None, peer: str | None) -> str:
     klass = error_class(str(err.get("code"))) or HandoverError
     details = {"job": job_id, **dict(err.get("details") or {})}
     return surfaces.render_error(klass(str(err.get("message") or ""), details=details), peer)
+
+
+def _root_shown(spec: object) -> str:
+    """A configured root as this gateway resolves it (``paths.expand_handover_root``, R29: the default
+    ``~/hermes-handover`` is ``<HERMES_HOME>/handover-workspaces`` when it lies inside the Hermes home); the setting as
+    written when it cannot be resolved here."""
+    text = str(spec or "")
+    try:
+        from .paths import expand_handover_root
+
+        return str(
+            expand_handover_root(
+                text,
+                Path(os.path.expanduser("~")),
+                Path(hostcompat.hermes_paths().home),
+                hermes_root=hostcompat.hermes_root(),
+            )
+        )
+    except Exception:
+        return text
+
+
+def _yes_refused_text(summary: Mapping | None) -> str:
+    """Why ``--yes`` did not go ahead (R30): it does not confirm that the working folder stays here."""
+    excluded = (summary or {}).get("workspace_excluded")
+    what = (
+        surfaces.workspace_excluded_text(excluded)
+        if isinstance(excluded, Mapping)
+        else ("the session's working folder stays here")
+    )
+    return (
+        f"--yes does not confirm that {what}. Answer the question in an interactive "
+        "session, or add --no-workspace to hand over without it."
+    )
 
 
 def _set_or_explain(backend: Backend, key: str, value: str) -> str:
@@ -1569,6 +1626,21 @@ def _gc_usage(data: Path) -> int:
     return total
 
 
+def _job_known(ledger: Any, data: Path, job_id: str) -> bool:
+    """True when this gateway holds anything of ``job_id`` that ``gc --job`` removes: a ledger row in any role, an
+    object reference, its staging folder, its report or a continuation file (``continuation.job_files``)."""
+    from .continuation import job_files
+    from .model import Role
+
+    if any(ledger.job(job_id, role) is not None for role in Role):
+        return True
+    objects = getattr(ledger, "job_objects", None)
+    if callable(objects) and objects(job_id):
+        return True
+    leftovers = (data / "staging" / job_id, data / "reports" / f"{job_id}.md", *job_files(data / "logs", job_id))
+    return any(os.path.lexists(path) for path in leftovers)
+
+
 def _last_body_limit(ledger: Any, peer: Peer) -> dict | None:
     """``{"bytes", "at"}`` of the last ``doctor --measure`` for this peer, or None."""
     try:
@@ -1768,7 +1840,8 @@ class EngineBackend:
             lambda peer: WireClient(peer, ident, read_secret=hostcompat.read_secret),
             ident,
             pair,
-            name=name or str(pair.get("name") or "server"),
+            # empty = C picks: the listener's paste-string name or, when taken here, the next free one (V44)
+            name=name or "",
             gate=gate,
             allow_insecure=allow_insecure,
             ledger=self._ledger(),
@@ -1925,6 +1998,12 @@ class EngineBackend:
         if job_id:
             if not ULID_RE.match(str(job_id)):
                 raise BadRequest(f"{job_id!r} is not a job id (/handover status lists them).", field="job")
+            if not _job_known(rt.ledger, data, str(job_id)):  # "removed" only for a job that left something here
+                raise NotFound(
+                    f"no such job {surfaces.short_job(job_id)} on this gateway; nothing was removed "
+                    "(/handover status lists the jobs).",
+                    job=str(job_id),
+                )
             ids = [str(job_id)]
         elif all_jobs:  # every job; gc_job alone decides what is finished
             seen = {str(j.get("job_id")) for role in Role for j in rt.ledger.jobs(role=role, limit=1_000_000)}

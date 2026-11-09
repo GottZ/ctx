@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
@@ -208,3 +209,32 @@ def marker_script(path: Path, marker_dir: Path, name: str) -> Path:
     path.write_text(f'#!/bin/sh\ntouch "{marker_dir}/{name}"\ncat\n', encoding="utf-8")
     os.chmod(path, 0o755)  # noqa: S103 - executable test fixture
     return path
+
+
+class FailingGit(gitops.Git):
+    """A real ``Git`` whose runs of the named subcommands fail like a git process that died (``rc``, no output,
+    an error line) — for the success sweep (G′): a failed git answer must never read as a positive one.
+    ``fail`` holds word sequences matched anywhere in the argv (``("stash", "drop")``); ``failed`` records hits."""
+
+    def __init__(self, *fail: tuple[str, ...], rc: int = 128):
+        super().__init__()
+        self.fail = [tuple(f) for f in fail]
+        self.rc = rc
+        self.failed: list[tuple[str, ...]] = []
+
+    def _hit(self, args) -> tuple[str, ...] | None:
+        words = [os.fsdecode(a) if isinstance(a, bytes) else a for a in args]
+        for f in self.fail:
+            if any(tuple(words[i : i + len(f)]) == f for i in range(len(words) - len(f) + 1)):
+                return f
+        return None
+
+    def run(self, args, *, cwd, spec, check: bool = True, **kw):
+        hit = self._hit(args)
+        if hit is None:
+            return super().run(args, cwd=cwd, spec=spec, check=check, **kw)
+        self.failed.append(hit)
+        err = b"fatal: injected failure"
+        if check:
+            raise self._error(args, self.rc, err)
+        return subprocess.CompletedProcess([self.exe, *args], self.rc, b"", err)

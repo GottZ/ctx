@@ -579,7 +579,7 @@ def test_target_hermes_file_placement(lay):
     [
         ({"type": "file", "mode": "0644", "size": 3, "path": "a"}, True),
         ({"type": "file", "mode": "100755", "size": 3, "path": "a"}, True),
-        ({"type": "file", "mode": 0o644, "path": "a"}, True),
+        ({"type": "file", "mode": 0o644, "size": 3, "path": "a"}, True),
         ({"type": "dir", "mode": "0755", "path": "d"}, True),
         ({"type": "symlink", "path": "d/l", "target": "../a"}, True),
         ({"type": "symlink", "mode": "120777", "path": "d/e/l", "target": "../../a"}, True),

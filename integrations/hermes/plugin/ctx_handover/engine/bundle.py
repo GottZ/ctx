@@ -942,11 +942,15 @@ def _validate(reader: _Reader) -> tuple[dict, bytes, bytes, dict[str, ObjectMani
 
 
 def _trusted_keys(ledger: Ledger | None, trusted_pubkeys) -> dict[str, str]:
+    """``{public key: name}`` of the keys a bundle signature may verify with. A key several non-revoked peers share
+    (one device paired both ways, or a duplicate a failed pairing left, L3-F05) names one of them by a fixed rule —
+    the ``dial`` peer first (the way back to the exporter, contract V13), then the oldest entry — never whichever
+    name happens to sort last."""
     keys: dict[str, str] = {}
     if ledger is not None:
-        for peer in ledger.peers():
-            if peer.revoked_at is None and peer.pubkey:
-                keys[peer.pubkey] = peer.name
+        live = [p for p in ledger.peers() if p.revoked_at is None and p.pubkey]
+        for peer in sorted(live, key=lambda p: (p.direction != "dial", float(p.created_at or 0.0), p.name)):
+            keys.setdefault(peer.pubkey, peer.name)
     for key in trusted_pubkeys or ():
         keys.setdefault(key, "trusted key")
     return keys

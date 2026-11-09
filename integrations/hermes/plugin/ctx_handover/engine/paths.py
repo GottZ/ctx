@@ -25,6 +25,13 @@ MAX_REL_BYTES = 4096
 WINDOWS_MAX_PATH = 260
 MAX_ROUTE_CHARS = 1024
 
+DEFAULT_WORKSPACE_SPEC = "~/hermes-handover"
+"""Schema default of ``workspace_root`` and ``allow_roots`` (DESIGN §14.4)."""
+HERMES_WORKSPACES_DIR = "handover-workspaces"
+"""The directory the plugin reserves in a Hermes home (R29): the default write root when ``~/hermes-handover`` lies
+in the Hermes home (``HOME`` = ``HERMES_HOME`` in the official Docker image), and the one exception from the target
+denylist for the Hermes home (``policy.check_target_dest``)."""
+
 # git utf8.c next_hfs_char(): code points HFS+ ignores when comparing names (git's core.protectHFS).
 HFS_IGNORABLE = frozenset(
     "\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u206a\u206b\u206c\u206d\u206e\u206f\ufeff"
@@ -211,6 +218,64 @@ def expand_root(spec: str, home: Path) -> Path:
         if not expanded.is_absolute():
             expanded = Path(home) / expanded
     return Path(os.path.normpath(expanded))
+
+
+def _absolute(path: Path | str) -> Path:
+    text = os.fspath(path)
+    if not isinstance(text, str) or not Path(text).is_absolute():
+        raise _deny(text, "root_not_absolute")
+    return Path(os.path.normpath(text))
+
+
+def default_workspace_root(
+    home: Path | str,
+    hermes_home: Path | str,
+    *,
+    hermes_root: Path | str | None = None,
+    case_insensitive: bool = False,
+) -> Path:
+    """The default write root on this host (R29): ``<home>/hermes-handover``, unless that lies in the Hermes home
+    (``hermes_home``, or ``hermes_root`` — the root of all profiles, which the target denylist refuses as well) as
+    given or resolved (``os.path.realpath``, as the denylist compares) — then ``<hermes_home>/handover-workspaces``.
+
+    Both paths must be absolute (``PolicyDenied`` with reason ``root_not_absolute`` otherwise); the result is
+    lexically normalised in the spelling of ``hermes_home`` (never a realpath). Pass ``hermes_root`` whenever it is
+    known: with a profile in the Docker image ``HOME`` is the Hermes root, not the active home."""
+    base = _absolute(home)
+    hh = _absolute(hermes_home)
+    bases = [hh]
+    if hermes_root is not None:
+        bases.append(_absolute(hermes_root))
+    candidate = base / DEFAULT_WORKSPACE_SPEC[2:]
+    spellings = {candidate, Path(os.path.realpath(candidate))}
+    roots = {spelling for b in bases for spelling in (b, Path(os.path.realpath(b)))}
+    if any(under_any(c, list(roots), case_insensitive=case_insensitive) for c in spellings):
+        return hh / HERMES_WORKSPACES_DIR
+    return candidate
+
+
+def expand_handover_root(
+    spec: str,
+    home: Path | str,
+    hermes_home: Path | str,
+    *,
+    hermes_root: Path | str | None = None,
+    case_insensitive: bool = False,
+) -> Path:
+    """``expand_root(spec, home)`` for ``workspace_root`` and each ``allow_roots`` entry; a spelling that expands to
+    ``<home>/hermes-handover`` (the schema default however written) is ``default_workspace_root(...)``. Any other
+    root stays as configured — an explicit root inside the Hermes home is still refused by the target denylist.
+
+    R29 needs ``home``, ``hermes_home`` and a given ``hermes_root`` absolute on this host; when one is not (a home of
+    another OS, e.g. ``C:\\Users\\x`` on a POSIX host), the result is ``expand_root(spec, home)`` — no error."""
+    expanded = expand_root(spec, Path(home))
+    default = Path(os.path.normpath(Path(home) / DEFAULT_WORKSPACE_SPEC[2:]))
+    if _norm_parts(expanded, case_insensitive) != _norm_parts(default, case_insensitive):
+        return expanded
+    given = (home, hermes_home) if hermes_root is None else (home, hermes_home, hermes_root)
+    if not all(Path(os.fspath(p)).is_absolute() for p in given):
+        return expanded
+    return default_workspace_root(home, hermes_home, hermes_root=hermes_root, case_insensitive=case_insensitive)
 
 
 def _flavour(*paths: str) -> type[PurePath]:

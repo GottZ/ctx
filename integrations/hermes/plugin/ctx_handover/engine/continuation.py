@@ -349,7 +349,7 @@ def inject_after_adoption(ctx, session_key: str, prompt: str) -> bool:
     if not callable(inject):
         return False
     try:
-        return bool(inject(prompt, "user", session_key=session_key))
+        return inject(prompt, "user", session_key=session_key) is True  # only the declared True counts
     except Exception:
         logger.debug("inject_message for %s failed", session_key, exc_info=True)
         return False

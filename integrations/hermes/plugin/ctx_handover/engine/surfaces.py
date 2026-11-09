@@ -565,6 +565,14 @@ CONFIRM_CHOICES: list[dict] = [
 REASONS: dict[str, str] = {letter: code for code, letter in planning.CONFIRM_LETTERS.items()}
 """Confirmation reasons (a)–(g) of DESIGN §14.1: letter → cluster D's reason code (``plan.CONFIRM_*``, X03)."""
 
+CONFIRM_WORKSPACE_EXCLUDED: str = planning.CONFIRM_WORKSPACE_EXCLUDED
+"""Reason (h) of cluster D (``reports/L2/gp-d-api.md`` §2a, R30): the policy left the session's working folder out
+(for example it lies inside the Hermes home), so its project does not come along."""
+
+YES_EXEMPT: frozenset[str] = planning.YES_EXEMPT
+"""Reasons a blanket yes (``--yes``) never confirms: D's ``plan.YES_EXEMPT`` (R30; suspected secrets, R25, are an
+item marker and handled apart)."""
+
 REASON_TEXT = {
     planning.CONFIRM_PROPOSED: "some items are only proposed (found by the model, the agent or outside the project)",
     planning.CONFIRM_CONFLICT: "a destination has local changes, so a fresh folder is used",
@@ -573,6 +581,8 @@ REASON_TEXT = {
     planning.CONFIRM_MODEL: "the model there does not work offline, or the session is larger than its context window",
     planning.CONFIRM_OUTSIDE: "items outside the project folder (or tracked secret files) are included",
     planning.CONFIRM_INSTRUCTIONS: "instruction files (AGENTS.md, .hermes.md …) arrive from an unverified source",
+    CONFIRM_WORKSPACE_EXCLUDED: "the session's working folder stays here because the policy leaves it out, so its "
+    "project does not come along (--yes does not confirm this; --no-workspace does)",
 }
 
 SUSPECTED_SECRET: str = planning.SUSPECTED_SECRET
@@ -596,6 +606,44 @@ def reason_names(reasons: Sequence[str]) -> list[str]:
         if name not in out:
             out.append(name)
     return out
+
+
+def yes_exempt(reasons: Sequence[str]) -> list[str]:
+    """The reasons (letters or codes) a blanket ``--yes`` does not confirm: D's ``plan.yes_exempt`` over the codes
+    (R30), in order."""
+    return planning.yes_exempt(reason_names(reasons))
+
+
+_WORKSPACE_WHY = {
+    "hermes": "it lies inside the Hermes home, which is never sent",
+    "home": "it is the home folder itself",
+    "secret": "it is on the secrets list",
+    "too_large": "it is larger than the size limits allow",
+    "missing": "it does not exist",
+    "unreadable": "it cannot be read",
+}
+"""Sentences for the ``reason`` codes of ``plan.workspace_excluded`` (gp-d-api §2b); any other code (``other``)
+shows D's ``why`` text."""
+
+
+def _workspace_excluded(value: Any) -> dict | None:
+    """D's ``presend_summary["workspace_excluded"]`` when it has its form — a mapping with a non-empty string
+    ``path`` (plus ``reason`` and ``why``) — else None: the surface invents no folder."""
+    if not isinstance(value, Mapping):
+        return None
+    path = value.get("path")
+    if not isinstance(path, str) or not path:
+        return None
+    return {"path": path, "reason": str(value.get("reason") or ""), "why": str(value.get("why") or "")}
+
+
+def _workspace_why(entry: Mapping) -> str:
+    return _WORKSPACE_WHY.get(str(entry.get("reason") or "")) or str(entry.get("why") or "") or "left out by the policy"
+
+
+def workspace_excluded_text(entry: Mapping) -> str:
+    """``the working folder <path> stays here (<why>)`` for an excluded working folder (R30, L3-F02)."""
+    return f"the working folder {entry.get('path')} stays here ({_workspace_why(entry)})"
 
 
 def suspected_secrets(info: Mapping | None) -> list[str]:
@@ -630,7 +678,8 @@ def _instruction_lines(entries: Sequence[Any]) -> list[str]:
     out = []
     for e in entries or ():
         if isinstance(e, Mapping):
-            out.append(f"{e.get('rel') or e.get('path') or '?'} ({e.get('status') or 'new'})")
+            # "new"/"changed" is D's statement (plan.instruction_files); a missing status is not "new"
+            out.append(f"{e.get('rel') or e.get('path') or '?'} ({e.get('status') or 'status unknown'})")
         else:
             out.append(str(e))
     return out
@@ -649,7 +698,8 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
     D's ``plan.presend_summary`` (``plan.PRESEND_KEYS``) exactly as the conductor handed them over (``presend``;
     computed from ``final`` only when there is none) — ``items_count``, ``total_bytes``, ``excluded_secrets``,
     ``denied_tracked``, ``withheld_stash``, ``outside_workspace``, ``instruction_files``, ``model``, ``offline`` —
-    plus the per-item rows, proposals, conflicts and need of D's ``plan.summarize`` when ``final`` is known. F adds
+    plus the per-item rows, proposals, conflicts and need of D's ``plan.summarize`` when ``final`` is known, and
+    ``workspace_excluded`` (the working folder the policy left out, R30; None unless it has D's form). F adds
     nothing of its own except the suspected-secret list (R25). ``instruction_files`` (the target's result, with
     ``status``) replaces the summary's list when given."""
     pre: dict = dict(presend) if isinstance(presend, Mapping) else {}
@@ -680,6 +730,7 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
         "denied_tracked": _texts(pre.get("denied_tracked")),
         "withheld_stash": _texts(pre.get("withheld_stash")),
         "outside_workspace": _texts(pre.get("outside_workspace")),
+        "workspace_excluded": _workspace_excluded(pre.get("workspace_excluded")),
         "item_list": item_list,
         "proposed": int(full.get("proposed") or 0),
         "conflicts": int(full.get("conflicts") or 0),
@@ -695,12 +746,14 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
 
 def confirm_question(summary: Mapping, peer: str | None) -> str:
     """``Hand over to <peer>: <n> items, <size>, <k> proposed, <c> conflicts, model <m> (offline: yes/no).
-    Continue?``"""
+    [The working folder <path> stays here (<why>).] Continue?``"""
+    excluded = _workspace_excluded(summary.get("workspace_excluded"))
+    folder = f"The {workspace_excluded_text(excluded).removeprefix('the ')}. " if excluded else ""
     return (
         f"Hand over to {peer or 'the bundle'}: {summary.get('items_count', 0)} items, "
         f"{human_bytes(summary.get('total_bytes', 0))}, {summary.get('proposed', 0)} proposed, "
         f"{summary.get('conflicts', 0)} conflicts, model {summary.get('model') or 'unchanged'} "
-        f"(offline: {_yn(summary.get('offline'))}). Continue?"
+        f"(offline: {_yn(summary.get('offline'))}). {folder}Continue?"
     )
 
 
@@ -725,6 +778,12 @@ def render_plan(summary: dict) -> str:
     ]
     if s.get("need_bytes"):
         lines.append(f"Space needed on the receiving side: {human_bytes(s['need_bytes'])}.")
+    excluded = _workspace_excluded(s.get("workspace_excluded"))
+    if excluded:
+        lines.append(
+            f"Working folder left out: {excluded['path']} ({_workspace_why(excluded)}); the session continues there "
+            "without its project."
+        )
     for row in s.get("items") or ():
         dest = f" → {row.get('dest')}" if row.get("dest") else ""
         conflict = f" (conflict: {row['conflict']})" if row.get("conflict") else ""
@@ -750,7 +809,7 @@ def render_plan(summary: dict) -> str:
 
 def render_presend(summary: dict, peer: str | None, mode: Mode | str) -> str:
     """First progress message (SEC 5.8): what leaves, how much, what stays behind — cluster D's
-    ``presend_summary`` numbers through ``plan_summary`` (W125)."""
+    ``presend_summary`` numbers through ``plan_summary`` (W125), and the working folder the policy left out (R30)."""
     s = summary or {}
     arrow = "←" if str(mode) in {"pull", "import"} else "→"
     secrets = s.get("excluded_secrets") or 0
@@ -766,6 +825,9 @@ def render_presend(summary: dict, peer: str | None, mode: Mode | str) -> str:
         extras.append(f"{len(s['withheld_stash'])} stash entries withheld")
     if s.get("outside_workspace"):
         extras.append(f"{len(s['outside_workspace'])} items outside the project")
+    excluded = _workspace_excluded(s.get("workspace_excluded"))
+    if excluded:
+        extras.append(workspace_excluded_text(excluded))
     return head + ("; " + "; ".join(extras) if extras else "") + "."
 
 
@@ -811,11 +873,13 @@ def _job_line(job: Mapping) -> list[str]:
     err = job.get("last_error")
     if isinstance(err, Mapping) and err:
         lines.append(f"    last error: {err.get('code', '?')}: {err.get('message', '')}")
+    if job.get("source_kept") is True:  # export --keep (O3): the session was not locked or retired
+        lines.append("    copy (--keep): this session stays active here; the bundle is a copy")
     if job.get("next_action"):
         lines.append(f"    next: {job['next_action']}")
     cont = job.get("continuation")
-    if isinstance(cont, Mapping) and cont.get("started"):
-        if cont.get("running"):
+    if isinstance(cont, Mapping) and cont.get("started") is True:
+        if cont.get("running") is True:
             state = "running"
         elif cont.get("exit_code") is not None:
             state = f"exit code {cont.get('exit_code')}"
@@ -1087,12 +1151,15 @@ def render_final(
     bundle_bytes: int | None = None,
     keep: bool = False,
     remote_gateway: bool = False,
+    job: str | None = None,
 ) -> str:
     """Success text naming target session, folder, model, offline capability and the next step (R14, BX P6).
 
     ``state`` is the conductor's final state; for a pull, anything before ``retired``/``done`` means the remote
     source is released on the next contact (SK L8). ``withheld`` are the paths a pull asked for (``--include``) that
-    the source does not release (V29, R18: local hints only narrow); the message lists them.
+    the source does not release (V29, R18: local hints only narrow); the message lists them. Without ``ack`` (the
+    target's acknowledgement is not recorded yet) the text names no session, model or offline capability — it points
+    to ``/handover status <job>`` instead (L3-F03: never "session ?, model default").
     """
     mode = Mode(mode)
     peer_name = peer or "the other gateway"
@@ -1118,14 +1185,18 @@ def render_final(
             lines.append("Copy the file to the other machine and run /handover import <file> there.")
         lines += _note_block(None, None, {"excluded_secrets": excluded_secrets, "warnings": warnings})
         return "\n".join(lines)
-    sid = ack.session_id if ack is not None else "?"
-    cwd = _ack_cwd(ack)
-    model = ack.model if ack is not None else None
-    where = ", ".join(x for x in (f"session {sid}", cwd, f"model {model or 'default'}") if x)
-    offline = f"works offline: {_yn(ack.offline_capable if ack is not None else None)}"
+    if ack is not None:
+        where = ", ".join(
+            x for x in (f"session {ack.session_id}", _ack_cwd(ack), f"model {ack.model or 'default'}") if x
+        )
+        details = f"{where}; works offline: {_yn(ack.offline_capable)}"
+    else:
+        details = "the session details are not recorded yet" + (
+            f"; /handover status {short_job(job)} shows them" if job else ""
+        )
     if mode in (Mode.PUSH, Mode.OFFER):
         lines = [
-            f'Handed over to {peer_name}: "{t}" continues there ({where}; {offline}). This session is now '
+            f'Handed over to {peer_name}: "{t}" continues there ({details}). This session is now '
             "read-only here; /handover reclaim takes it back."
         ]
         if continue_result is not None and continue_result.started:
@@ -1137,9 +1208,9 @@ def render_final(
     # pull, import: the session is here now
     retired = str(state).lower() in {"retired", "continuing", "done"}
     if mode is Mode.PULL and not retired:
-        lines = [f'"{t}" is active here ({where}; {offline}); {peer_name} will be released on the next contact.']
+        lines = [f'"{t}" is active here ({details}); {peer_name} will be released on the next contact.']
     else:
-        lines = [f'"{t}" is here now ({where}; {offline}).']
+        lines = [f'"{t}" is here now ({details}).']
     if continue_result is not None and continue_result.started:
         lines.append("The agent is continuing in that session now.")
     else:

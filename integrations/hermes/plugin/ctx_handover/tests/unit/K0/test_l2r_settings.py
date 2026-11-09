@@ -53,12 +53,16 @@ def test_defaults_are_the_schema_defaults_of_plugin_yaml():
 @pytest.mark.parametrize("key", WORDS_WITH_OFF)
 def test_word_settings_off_false_quoted_and_none(key):
     """A word setting: bare YAML ``off`` (``False``) and the quoted word ``"off"`` both mean ``off``; ``None`` is
-    the schema default, never ``off`` and never ``None``."""
+    the schema default, never ``off`` and never ``None``. An unknown word is the schema default — except
+    ``inbound``, where it is ``off`` (fail-closed)."""
     s = _settings()
     assert s.normalize({key: False})[key] == "off"
     assert s.normalize({key: "off"})[key] == "off"
     assert s.normalize({key: None})[key] == s.DEFAULTS[key]
-    assert s.normalize({key: "nonsense"})[key] == s.DEFAULTS[key]
+    # Specification correction by the integrator (reports/L2/pkg/Gp-K0.md §1, round G′): an unknown ``inbound``
+    # word is ``off`` (fail-closed, the L2-C security fix stays in force), not the default ``auto``.
+    unknown = "off" if key == "inbound" else s.DEFAULTS[key]
+    assert s.normalize({key: "nonsense"})[key] == unknown
 
 
 def test_word_setting_on_true_and_words_without_on():

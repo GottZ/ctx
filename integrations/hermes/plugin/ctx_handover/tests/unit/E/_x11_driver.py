@@ -12,6 +12,11 @@ Faults (``spec["crash"]``) end the process with ``os._exit`` — no ``finally``,
 ``{"at": "intent", "step"}`` right after the commit op journaled the intent of a step (between steps),
 ``{"at": "call", "target": "<module>.<attr>[.<attr>]", "nth", "when": "before"|"after"}`` around the nth call of
 a plugin function (inside a step). ``spec["fail_last"]`` adds a last step that raises (the commit then rolls back).
+
+``needs_attention`` (DESIGN §3.4): an inverse that raises, and a forward step whose error carries
+``details.needs_attention`` (it could not undo its own partial change, e.g. an orphaned ``index.lock``), are journaled
+as ``needs_attention`` events; the commit then ends ``needs_attention`` and keeps its staging. ``local_target`` books
+the inverse case so today; the forward case is the G′ wish to A (``reports/L2/gp-e.md``).
 """
 
 from __future__ import annotations
@@ -125,15 +130,18 @@ def main(spec_path: str) -> int:
 
         steps.append(("c9:fail", boom, lambda *_a: None))
 
-    direction, done_fwd, done_inv = "forward", [], set()
+    direction, done_fwd, done_inv, attention = "forward", [], set(), []
     for ev in _events(journal):
         if ev["kind"] == "direction":
             direction = ev["direction"]
+        elif ev["kind"] == "needs_attention":
+            attention.append(ev["step"])
         elif ev["kind"] == "done" and ev.get("direction") == "rollback":
             done_inv.add(ev["step"])
         elif ev["kind"] == "done" and ev["step"] not in done_fwd:
             done_fwd.append(ev["step"])
     if direction == "forward":
+        name = None
         try:
             for name, fwd, _inv in steps:
                 if name in done_fwd:
@@ -145,6 +153,9 @@ def main(spec_path: str) -> int:
                 _append(journal, {"kind": "done", "step": name, "direction": "forward", "result": result})
                 done_fwd.append(name)
         except Exception as exc:  # the commit op's rollback switch
+            if (getattr(exc, "details", None) or {}).get("needs_attention"):
+                _attention(journal, name, exc)
+                attention.append(name)
             _append(journal, {"kind": "direction", "direction": "rollback", "cause": str(exc)[:200]})
             direction = "rollback"
         else:
@@ -156,11 +167,32 @@ def main(spec_path: str) -> int:
         if name in done_inv or name not in inverse:
             continue
         _append(journal, {"kind": "intent", "step": name, "direction": "rollback"})
-        result = inverse[name]()
+        result = None
+        try:
+            result = inverse[name]()
+        except Exception as exc:  # a failing inverse: needs_attention, the rollback goes on
+            _attention(journal, name, exc)
+            attention.append(name)
         _append(journal, {"kind": "done", "step": name, "direction": "rollback", "result": result})
+    if attention:
+        _append(journal, {"kind": "finished", "outcome": "needs_attention", "steps": attention})
+        return 0
     txn.discard()
     _append(journal, {"kind": "finished", "outcome": "rolled_back"})
     return 0
+
+
+def _attention(journal: Path, step: str | None, exc: BaseException) -> None:
+    details = getattr(exc, "details", None) or {}
+    message = getattr(exc, "message", None) or str(exc)
+    _append(
+        journal,
+        {
+            "kind": "needs_attention",
+            "step": step,
+            "error": {"type": type(exc).__name__, "message": str(message)[:2000], "details": details},
+        },
+    )
 
 
 if __name__ == "__main__":

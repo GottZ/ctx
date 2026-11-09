@@ -90,7 +90,8 @@ back here; the copy on the other gateway stays active.
    `ctxh-pair:` and run `/handover pair ctxh-pair:…` in a chat on the laptop. The line carries the address, a
    one-time code (10 minutes, single use) and the server's key fingerprint, which the laptop checks itself — it
    never carries a dashboard credential. For a plain-HTTP address that only your VPN reaches (e.g. Tailscale) add
-   `--allow-insecure`.
+   `--allow-insecure`. The laptop names the server as the line does, or takes the next free name (`server-2`) when
+   that one is taken there; with `--name` you choose it, and a taken name is refused before the code is used.
 5. `/handover doctor` on both sides checks the setup and says what to fix. `/handover doctor --measure` also finds
    the request-body limit of a proxy in front of each paired gateway (test uploads, see Disclosure).
 
@@ -103,18 +104,22 @@ back here; the copy on the other gateway stays active.
 | Back to the server after landing | the laptop session | `/handover to server` — repositories return into their original folders when nothing changed there meanwhile |
 | Before closing time, let the agent keep working | the session | `/handover to server --continue "run the tests and fix what fails"` (needs `allow_remote_continue` on the server) |
 | A turn is still running | the session | add `--wait` to hand over as soon as it finishes |
-| No connection | source / target | `/handover export` writes one `.ctxh.tar`; `/handover import <file>` on the other machine |
+| No connection | source / target | `/handover export` writes one `.ctxh.tar`; `/handover import <file>` on the other machine (`export --keep` leaves this session active and marks the bundle as a copy; status and the final message say so) |
 | Take it back here | the source session | `/handover reclaim` (`--force` while a handover is being committed) |
 
 Before anything is locked the plugin shows what would move. It asks for a confirmation when items are only
 proposed, a destination has local changes (a fresh folder is used), the handover is larger than
 `confirm_above_mb`, a secret is included with `--include-secret`, the model there does not work offline or the
-session is larger than its context window, items outside the project are included, or instruction files arrive
-from an unverified source. The choices are *yes*, *yes without the proposed items*, *show the plan and stop*,
-*cancel*; `--yes` skips the question. Files that look like secrets are never sent by a blanket yes (neither
-`--yes` nor the *yes* choice takes them along); name each one with `--include-secret <path>`. An unanswered
-question (no reply within Hermes' question timeout `agent.clarify_timeout`, 90 s by default) continues without the
-proposed items when those are the only reason and cancels otherwise — nothing is locked in either case.
+session is larger than its context window, items outside the project are included, instruction files arrive
+from an unverified source, or the session's working folder is left out by the policy (for example because it lies
+inside the Hermes home; the summary names the folder, and the project does not come along). The choices are *yes*,
+*yes without the proposed items*, *show the plan and stop*, *cancel*; `--yes` skips the question. `--yes` does not
+confirm a left-out working folder: a person answers that question (without an answer nothing is locked), or
+`--no-workspace` hands the session over without its folder on purpose. Files that look like secrets are never sent
+by a blanket yes (neither `--yes` nor the *yes* choice takes them along); name each one with
+`--include-secret <path>`. An unanswered question (no reply within Hermes' question timeout
+`agent.clarify_timeout`, 90 s by default) continues without the proposed items when those are the only reason and
+cancels otherwise — nothing is locked in either case.
 
 The final message names the session on the other side, its folder, the model and whether it works offline, and
 what to do next; after a pull it also lists paths you asked for with `--include` that the other side does not
@@ -144,7 +149,7 @@ working default; the most relevant:
 | `inbound` | `auto` | accept handovers only while a device is paired or a pairing code is pending; `on`, `off` |
 | `listen_url` | `""` | address put into pairing strings (else `webapp.public_url` / `dashboard.public_url`) |
 | `peer_gate`, `peer_token`, `peer_username`, `peer_password`, `peer_extra_headers` | `session_token` | how this device signs in to the other gateway's dashboard |
-| `workspace_root`, `allow_roots` | `~/hermes-handover` | where received workspaces and bundles go; writes land only under `allow_roots` |
+| `workspace_root`, `allow_roots` | `~/hermes-handover` | where received workspaces and bundles go; writes land only under `allow_roots`. When the home folder lies inside the Hermes home (the official Docker image), the default is `<HERMES_HOME>/handover-workspaces`, the one folder of the Hermes home a handover may write to; `/handover setup` shows the folder in use |
 | `export_roots` | `[]` | extra paths a device with the pull right may request beyond this machine's own plan |
 | `max_total_gb`, `max_file_mb`, `max_session_mb`, `confirm_above_mb` | 10, 100, 512, 500 | size limits and the confirmation threshold |
 | `refine` | `auto` | ask a model once per handover which resources the work needs (`side_question`, `llm`, `off`) |

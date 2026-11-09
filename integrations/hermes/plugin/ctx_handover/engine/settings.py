@@ -7,10 +7,14 @@ fresh dict with exactly the keys of ``DEFAULTS``. Hermes only warns about a bad 
 schema default, and every rejected value is a warning (once per process on the ``ctx_handover.settings`` logger;
 ``problems`` returns the same sentences without logging, for doctor and setup).
 
-YAML 1.1 turns a bare ``on``/``off`` into a boolean and ``hermes config set`` turns ``1`` into an int, so a word
-setting reads ``False`` as ``off`` (``True`` as ``on``) when that word is one of its choices, and a boolean setting
-reads the words of ``BOOL_WORDS`` (quoted words are no truthy strings). ``None`` — an empty value in
-``config.yaml`` or ``hermes config set … null`` — is the default, never ``off``/``False``.
+YAML 1.1 turns a bare ``on``/``off``/``no``/``yes`` into a boolean and ``hermes config set`` turns ``1`` into an int.
+A boolean setting reads the words of ``BOOL_WORDS`` (quoted words are no truthy strings). A word setting whose
+choices hold ``off`` (integrator decision G′-K0 §1) reads every false word of ``BOOL_WORDS`` — any case, quoted or
+bare, ``False``, the integer 0 — as ``off``, and every true word as ``on`` when ``on`` is one of its choices, else
+as its default (no problem: "yes" only says "not off"); a word setting without ``off`` takes only its own words.
+Any other value is the default and a problem — except ``inbound`` (``FAIL_CLOSED_KEYS``), where it is ``off``: the
+default ``auto`` would answer paired peers. ``None`` — an empty value in ``config.yaml`` or ``hermes config set …
+null`` — is the default, never ``off``/``False``.
 
 Secret keys (``SECRET_ENVS``) are not settings: their values live in ``.env`` and never appear in the result.
 """
@@ -112,6 +116,10 @@ POSITIVE_KEYS: frozenset[str] = frozenset(
 """Integer settings where 0 cannot work (a lease, an idle or stall timer, the staging time, the request cap): 0 is
 the default there. Every other number may be 0 (``confirm_above_mb: 0`` = always ask)."""
 
+FAIL_CLOSED_KEYS: frozenset[str] = frozenset({"inbound"})
+"""Word settings where a value the reader does not recognise is ``off``, not the schema default (fail-closed: the
+default ``auto`` of ``inbound`` answers paired peers). ``None`` is still the default."""
+
 _UNSET_WORDS = frozenset({"", "null", "none", "~"})
 _HEADER_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 _ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
@@ -153,17 +161,30 @@ def _bool(value: object) -> bool:
     raise _Rejected("not a boolean (use true or false)")
 
 
-def _word(spec: Mapping, value: object) -> str:
-    choices: tuple[str, ...] = spec.get("choices") or ()
+def _truth(value: object) -> bool | None:
+    """The boolean a YAML boolean, the integer 0/1 or a word of ``BOOL_WORDS`` stands for; None for anything else."""
     if isinstance(value, bool):
-        word = "on" if value else "off"
-        if word in choices:
-            return word
-        raise _Rejected(f"a bare {word} is not one of {', '.join(choices)}")
+        return value
+    if isinstance(value, int):
+        return bool(value) if value in (0, 1) else None
     if isinstance(value, str):
-        word = value.strip().lower()
-        if word in choices:
-            return word
+        return BOOL_WORDS.get(value.strip().lower())
+    return None
+
+
+def _word(spec: Mapping, value: object) -> str | None:
+    """The canonical choice ``value`` names; None when it is a true word of a setting without the choice ``on``
+    (the default, silently). See the module docstring."""
+    choices: tuple[str, ...] = spec.get("choices") or ()
+    if isinstance(value, str) and value.strip().lower() in choices:
+        return value.strip().lower()
+    truth = _truth(value)
+    if truth is not None and "off" in choices:
+        if not truth:
+            return "off"
+        return "on" if "on" in choices else None
+    if isinstance(value, bool):
+        raise _Rejected(f"a bare {'on' if value else 'off'} is not one of {', '.join(choices)}")
     raise _Rejected(f"not one of {', '.join(choices)}")
 
 
@@ -233,8 +254,11 @@ def _check(key: str, value: object) -> tuple[Any, list[str]]:
     try:
         if typ == "bool":
             out: Any = _bool(value)
+        elif typ == "str" and spec.get("choices"):
+            word = _word(spec, value)
+            out = _copy(default) if word is None else word
         elif typ == "str":
-            out = _word(spec, value) if spec.get("choices") else _text(value)
+            out = _text(value)
         elif typ in ("int", "float"):
             out = _number(key, value, integer=typ == "int")
         elif typ == "list":
@@ -245,6 +269,9 @@ def _check(key: str, value: object) -> tuple[Any, list[str]]:
             raise _Rejected(f"unknown type {typ}")
     except _Rejected as exc:
         shown = "" if typ == "dict" else f" {_quote(value)}"
+        if key in FAIL_CLOSED_KEYS:
+            text = f"{key}{shown} ignored: {exc.reason}; using off (fail-closed) ({_fix(key)})"
+            return "off", [text]
         text = f"{key}{shown} ignored: {exc.reason}; using the default {_quote(default)} ({_fix(key)})"
         return _copy(default), [text]
     found = []
@@ -351,6 +378,7 @@ def _warn_once(text: str) -> None:
 __all__ = [
     "BOOL_WORDS",
     "DEFAULTS",
+    "FAIL_CLOSED_KEYS",
     "PLUGIN_ID",
     "POSITIVE_KEYS",
     "SCHEMA",

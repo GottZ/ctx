@@ -530,8 +530,6 @@ class WireClient:
 
     def put_blocks(self, job_id: str, epoch: int, frames: Iterable[bytes]) -> tuple[int, list]:
         """``PUT /v1/jobs/{id}/blocks`` in batches of at most ``request_bytes`` (frames are never split)."""
-        import json
-
         stored = 0
         rejected: list[tuple[str, str]] = []
         pending: deque[bytes] = deque()
@@ -569,9 +567,22 @@ class WireClient:
                 self._adaptive.too_large(size)
                 pending.extendleft(reversed(batch))
                 continue
-            data = json.loads(resp.content)
-            stored += int(data.get("stored", 0))
-            rejected.extend((str(r.get("id")), str(r.get("reason"))) for r in data.get("rejected", []))
+            data = self._json(resp)
+            count, refused = data.get("stored"), data.get("rejected")
+            # a count and a list of ``{id, reason}`` or the answer is malformed — never "stored, nothing rejected"
+            if (
+                isinstance(count, bool)
+                or not isinstance(count, int)
+                or count < 0
+                or not isinstance(refused, list)
+                or not all(
+                    isinstance(r, dict) and isinstance(r.get("id"), str) and isinstance(r.get("reason"), str)
+                    for r in refused
+                )
+            ):
+                raise BadResponseSignature(f"malformed block upload answer from {self.peer.name}")
+            stored += count
+            rejected.extend((r["id"], r["reason"]) for r in refused)
 
     def get_blocks(self, job_id: str, epoch: int, ids: Sequence[str]) -> Iterator[tuple[str, bytes]]:
         """``POST /v1/jobs/{id}/blocks/get`` until every id arrived; each frame is hash-verified."""
@@ -646,8 +657,8 @@ class WireClient:
                     )
                 except PayloadTooLarge:
                     break
-                except (GateRejected, PeerUnreachable, BadResponseSignature):
-                    break
+                except (GateRejected, PeerUnreachable, BadResponseSignature, ListenerMissing, RateLimited):
+                    break  # no answer of the plugin (unsigned 404/429 included): the size did not pass (yet)
                 except HandoverError:
                     pass  # the plugin read the body and refused the job: the size passed every proxy
                 passed = size

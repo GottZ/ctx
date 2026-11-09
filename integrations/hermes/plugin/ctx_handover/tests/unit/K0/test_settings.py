@@ -72,10 +72,13 @@ def test_bool_words_numbers_and_rejects():
 
 
 def test_word_settings_trim_and_fold_to_the_canonical_word():
-    """★ ``" Off "`` and ``"LLM"`` are the words ``off`` and ``llm``; a non-text is the default."""
-    out = settings.normalize({"refine": " Off ", "extra_paths": "AUTO", "peer_gate": "Bearer", "inbound": 1.0})
+    """★ ``" Off "`` and ``"LLM"`` are the words ``off`` and ``llm``; a non-text is the default — for ``inbound``
+    ``off`` (fail-closed, G′-K0 §1)."""
+    out = settings.normalize(
+        {"refine": " Off ", "extra_paths": "AUTO", "peer_gate": "Bearer", "inbound": 1.0, "ctx_persist": 2.5}
+    )
     assert (out["refine"], out["extra_paths"], out["peer_gate"]) == ("off", "auto", "bearer")
-    assert out["inbound"] == "auto"
+    assert out["inbound"] == "off" and out["ctx_persist"] == "auto"
 
 
 def test_plain_text_settings_take_text_only():

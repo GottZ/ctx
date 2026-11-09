@@ -174,6 +174,28 @@ class GitCommandError(HandoverError):
     retryable = False
 
 
+def _said(exc: BaseException) -> str:
+    return str(getattr(exc, "message", None) or exc or type(exc).__name__)[:600]
+
+
+def undo_failed(cause: BaseException, undo: BaseException, *, path: str | os.PathLike) -> ConflictError:
+    """The error of a forward workspace step that failed (``cause``) and could not undo its partial change
+    (``undo``): the destination needs a person (DESIGN §3.4 — like a failing rollback step, ``needs_attention``).
+    ``details.needs_attention`` is True; the orchestration books the step ``needs_attention`` and keeps its staging
+    instead of rolling the other steps back as if this one had changed nothing (G′ wish to A). ``details.lock``
+    is copied from an orphaned-lock refusal."""
+    extra = getattr(undo, "details", None) or {}
+    return ConflictError(
+        f"{_said(cause)}; undoing the partial change at {os.fspath(path)} failed: {_said(undo)}",
+        kind="undo_failed",
+        needs_attention=True,
+        path=os.fspath(path),
+        cause=str(getattr(cause, "code", None) or type(cause).__name__),
+        undo_error=_said(undo),
+        **({"lock": extra["lock"]} if "lock" in extra else {}),
+    )
+
+
 def is_sha(value: object) -> bool:
     """True for a lower-case 40 (SHA-1) or 64 (SHA-256) hex object id."""
     return isinstance(value, str) and _SHA_RE.fullmatch(value) is not None
@@ -480,6 +502,7 @@ class Git:
             )
             assert proc.stdout is not None  # noqa: S101 - PIPE requested
             buf = b""
+            drained = False
             try:
                 while True:
                     if cancelled():
@@ -490,10 +513,13 @@ class Git:
                     buf += chunk
                     *records, buf = buf.split(sep)
                     yield from records
+                drained = True
                 if buf:
                     yield buf
             finally:
-                if proc.poll() is None:
+                # a git that closed its output may still be exiting: wait for its own exit code; kill only when
+                # the reader stopped early (cancel, error, closed generator)
+                if not drained and proc.poll() is None:
                     proc.kill()
                 proc.stdout.close()
                 rc = proc.wait()
@@ -591,6 +617,8 @@ def local_filter_names(git: Git, repo: Path) -> list[str]:
         spec=GitEnvSpec(profile="received"),
         check=False,
     )
+    if proc.returncode not in (0, 1):  # 1 = no filter; a failed read is no "no filters" (they would stay active)
+        raise git._error(["config", "--file"], proc.returncode, proc.stderr)
     names = set()
     for line in proc.stdout.decode("utf-8", errors="replace").split("\n"):
         if line.startswith("filter.") and line.count(".") >= 2:
@@ -733,8 +761,11 @@ def head_info(git: Git, root: Path) -> tuple[str | None, str | None]:
     """``(HEAD commit or None for an unborn branch, symbolic ref or None when detached)``."""
     spec = _ceiling(root)
     ref = git.run(["symbolic-ref", "-q", "HEAD"], cwd=Path(root), spec=spec, check=False)
-    head_ref = ref.stdout.decode("utf-8", errors="surrogateescape").strip() if ref.returncode == 0 else None
     commit = git.run(["rev-parse", "--verify", "-q", "HEAD^{commit}"], cwd=Path(root), spec=spec, check=False)
+    for args, proc in ((["symbolic-ref"], ref), (["rev-parse", "--verify"], commit)):
+        if proc.returncode not in (0, 1):  # 1 = detached / unborn; anything else is a failed call, neither of both
+            raise git._error(args, proc.returncode, proc.stderr)
+    head_ref = ref.stdout.decode("utf-8", errors="surrogateescape").strip() if ref.returncode == 0 else None
     sha = commit.stdout.decode("ascii", errors="replace").strip() if commit.returncode == 0 else None
     return (sha or None), (head_ref or None)
 
@@ -835,12 +866,13 @@ def compute_state(
     if excluded_paths:
         ps = _write_pathspec_file(scratch / "reset.ps", (b":(literal)" + p for p in excluded_paths))
         if head is not None:
+            # must succeed (rc 0 also for paths that match nothing): a failed reset would ship the staged denied
+            # file in the index tree
             git.run(
                 ["reset", "-q", "--pathspec-from-file=" + str(ps), "--pathspec-file-nul", head],
                 cwd=root,
                 spec=spec,
                 env_extra={**extra, "GIT_INDEX_FILE": str(idx1)},
-                check=False,
                 cancelled=cancelled,
             )
         else:
@@ -849,7 +881,6 @@ def compute_state(
                 cwd=root,
                 spec=spec,
                 env_extra={**extra, "GIT_INDEX_FILE": str(idx1)},
-                check=False,
                 cancelled=cancelled,
             )
     unmerged = _unmerged_paths(git, root, idx1, extra)
@@ -1017,9 +1048,18 @@ class GitProbe:
 
     def is_partial(self, path: str) -> bool:
         """True for a partial clone (a promisor remote) containing ``path`` — like a shallow clone it lacks objects,
-        so it travels as a file tree (W107; ``gitpack.pack_repo`` refuses both)."""
-        proc = self._discover(path, ["config", "--get-regexp", r"^remote\..*\.promisor$"])
-        return proc is not None and proc.returncode == 0 and b"true" in proc.stdout
+        so it travels as a file tree (W107; ``gitpack.pack_repo`` refuses both). The promisor flag is read as a git
+        boolean (``yes``/``on``/``1``); ``extensions.partialClone`` marks one too; an unreadable flag counts as
+        partial (fail closed: a file tree always travels, a partial clone packed as git fails)."""
+        proc = self._discover(path, ["config", "--type=bool", "--get-regexp", r"^remote\..*\.promisor$"])
+        if proc is None:
+            return False
+        if proc.returncode not in (0, 1):  # 1 = no promisor key; anything else: an unreadable answer
+            return True
+        if any(line.rsplit(b" ", 1)[-1] == b"true" for line in proc.stdout.splitlines()):
+            return True
+        ext = self._discover(path, ["config", "--get", "extensions.partialclone"])
+        return ext is not None and ext.returncode == 0 and bool(ext.stdout.strip())
 
     def in_progress(self, root: str) -> str | None:
         try:
@@ -1156,6 +1196,8 @@ class GitProbe:
                 denied.append(display_path(path))
         remotes = []
         rem = self.git.run(["config", "-z", "--get-regexp", r"^remote\..*\.url$"], cwd=r, spec=spec, check=False)
+        if rem.returncode not in (0, 1):  # 1 = no remote; anything else is a failed read, not "none"
+            raise self.git._error(["config", "--get-regexp"], rem.returncode, rem.stderr)
         for rec in rem.stdout.split(b"\x00"):
             if not rec:
                 continue
@@ -1209,9 +1251,12 @@ def _flush(store: BlockSink, frames: list[tuple[str, bytes]]) -> None:
     unique = dict(frames)
     need = set(store.missing(list(unique)))
     if need:
-        _, errors = store.write_blocks([(bid, unique[bid]) for bid in unique if bid in need])
+        frames_out = [(bid, unique[bid]) for bid in unique if bid in need]
+        accepted, errors = store.write_blocks(frames_out)
         if errors:
             raise BlockCorrupt("block store refused blocks", errors=[list(e) for e in errors[:5]])
+        if accepted != len(frames_out):  # stored only when every block sent was accepted, not "no error named"
+            raise BlockCorrupt("block store accepted fewer blocks than sent", accepted=accepted, sent=len(frames_out))
 
 
 def put_stream(

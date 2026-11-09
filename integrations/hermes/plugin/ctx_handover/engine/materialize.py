@@ -49,6 +49,7 @@ from .gitops import (
     name_report,
     object_manifest,
     sha256_file,
+    undo_failed,
     worktree_state,
 )
 from .ignore import IgnoreMatcher
@@ -357,13 +358,31 @@ class _StepLog:
         os.replace(tmp, path)
         _fsync_dir(self.root)
 
-    def get(self, name: str) -> dict | None:
+    def _read(self, path: Path) -> dict | None:
+        """The record at ``path``; None only when it does not exist. A record that exists but cannot be read is no
+        "step never began" (a git step would rerun without its resume check): ``ConflictError`` with
+        ``needs_attention``."""
         try:
-            with open(self._path(name), "rb") as fh:
+            with open(path, "rb") as fh:
                 data = json.loads(fh.read(1024 * 1024))
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return None
-        return data if isinstance(data, dict) and data.get("name") == name else None
+        except (OSError, ValueError) as exc:
+            raise ConflictError(
+                f"unreadable workspace step record {path}: {exc}",
+                kind="step_record",
+                needs_attention=True,
+                path=str(path),
+            ) from exc
+        if not isinstance(data, dict) or not isinstance(data.get("name"), str):
+            raise ConflictError(
+                f"malformed workspace step record {path}", kind="step_record", needs_attention=True, path=str(path)
+            )
+        return data
+
+    def get(self, name: str) -> dict | None:
+        data = self._read(self._path(name))
+        return data if data is not None and data["name"] == name else None
 
     def drop(self, name: str) -> None:
         with contextlib.suppress(FileNotFoundError):
@@ -374,17 +393,13 @@ class _StepLog:
         out = []
         try:
             entries = sorted(os.listdir(self.root))
-        except OSError:
+        except FileNotFoundError:  # no record yet; an unreadable directory is no "no records"
             return out
         for entry in entries:
             if not entry.endswith(".json"):
                 continue
-            try:
-                with open(self.root / entry, "rb") as fh:
-                    data = json.loads(fh.read(1024 * 1024))
-            except (OSError, ValueError):
-                continue
-            if isinstance(data, dict) and str(data.get("name", "")).startswith(prefix):
+            data = self._read(self.root / entry)
+            if data is not None and data["name"].startswith(prefix):
                 out.append(data)
         return sorted(out, key=lambda d: d["name"])
 
@@ -704,10 +719,21 @@ class WorkspaceTxn:
 
         return run
 
+    def _ours_by_content(self, p: _Prepared, path: Path) -> bool:
+        """A snapshot of format 1 carries no file identity: a file at ``path`` counts as this step's only when it is
+        a regular file holding the packed content (never just because something exists there)."""
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(st.st_mode):
+            return False
+        return sha256_file(path) == object_manifest(self.store, p.pack_item.get("object")).sha256
+
     def _extra_forward(self, p: _Prepared) -> Path:
         temp: Path = p.state
         if not os.path.lexists(temp):
-            if _same(p.dest, p.ident) or (p.ident is None and os.path.lexists(p.dest)):
+            if _same(p.dest, p.ident) or (p.ident is None and self._ours_by_content(p, p.dest)):
                 return p.dest  # linked and the temp name removed by a process that died
             raise ConflictError("the prepared file is gone", kind="partial_missing", path=str(temp))
         try:
@@ -742,7 +768,7 @@ class WorkspaceTxn:
                 filetree.rollback(replace(p.state, dest=final))
             else:
                 temp: Path = p.state
-                ours = _same(final, p.ident) if p.ident is not None else True
+                ours = _same(final, p.ident) if p.ident is not None else self._ours_by_content(p, final)
                 if ours and os.path.lexists(final):
                     if not os.path.lexists(temp):
                         os.link(final, temp)
@@ -764,16 +790,19 @@ class WorkspaceTxn:
         written file are recorded under ``staging/ws-steps/``; a resumed forward step counts a target holding that
         identity as placed by this job, and the inverse removes exactly those targets (and the directories it
         created), also when the snapshot that names them was never journaled. A failing forward step undoes itself
-        before the error propagates."""
+        before the error propagates; an undo that fails too raises ``gitops.undo_failed`` (``needs_attention``)."""
         cfg = self._require_cfg()
 
         def forward() -> None:
             try:
                 for pack_item, target in files:
                     self._place_one(cfg, pack_item, Path(target))
-            except Exception:
-                with contextlib.suppress(Exception):
+            except Exception as exc:
+                try:
                     inverse()
+                except Exception as undo:  # placed files stay in the session area: report it, never as untouched
+                    where = files[0][1] if files else self.staging
+                    raise undo_failed(exc, undo, path=Path(where).parent) from exc
                 raise
             self.journal("done", "c3", {"placed": [str(p) for p in self._hermes_placed]})
 
@@ -1067,7 +1096,12 @@ def pack_plan_item(
     if item.kind in (ItemKind.FILE_TREE, ItemKind.EXTRA_DIR):
         root = Path(item.source_path)
         entries, left = filetree.scan(root, IgnoreMatcher.for_tree(root, tuple(extra_ignore)), cfg, cancelled)
-        manifest = filetree.pack_tree(entries, root, store, cancelled)
+        dropped: list[NotTransferred] = []
+        manifest = filetree.pack_tree(entries, root, store, cancelled, dropped=dropped)
+        if dropped:  # gone or changed since the scan: reported, not counted
+            gone = {n.path for n in dropped}
+            entries = [e for e in entries if not (e.type == "file" and e.path in gone)]
+            left = [*left, *dropped]
         pairs, invalid, warnings = name_report(os.fsdecode(filetree.entry_rel_bytes(e)) for e in entries)
         excluded = tuple(n for n in left if n.why == "secret")
         skipped = tuple(n for n in left if n.why != "secret")
