@@ -24,6 +24,7 @@ recorded out-state, dirty work included; R4). Every forward step has an inverse 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import errno
 import hashlib
 import os
@@ -595,6 +596,10 @@ def path_issues(paths: Sequence[str], rules: PlatformRules) -> list[tuple[str, s
     targets control characters and non-UTF-8 bytes are legal file names that git reproduces
     (``check_rel(..., allow_control=True)``, W095); every other rule (``.git`` spellings, traversal, length,
     Windows names) applies."""
+    if rules.windows and not rules.long_paths:
+        # git runs with core.longpaths=true on a Windows host (gitops, DESIGN §9.2/§9.4, M25): over-long paths
+        # check out; the rest of the Windows rules still apply
+        rules = dataclasses.replace(rules, long_paths=True)
     issues = []
     for p in paths:
         try:
@@ -1269,10 +1274,31 @@ def _apply_refs(git: Git, repo: Path, state: GitApplyState) -> None:
     _update_refs(git, repo, cmds)
 
 
-def _post_state(git: Git, state: GitApplyState, item: _Item, repo: Path, tmp: Path) -> bool:
+def _peer_filters(git: Git, state: GitApplyState, item: _Item, repo: Path) -> tuple[str, ...]:
+    """Filter drivers the received trees (W, I) name in a ``.gitattributes`` and the destination's own trees
+    (H0; the out-state W and I) do not (M22). A state check over a destination that may hold received files
+    empties them: a received ``.gitattributes`` never picks a driver of the user the repository did not use."""
+    bare = _bare_of(git, repo)
+    alt = _alt_env(state)
+    theirs = {
+        n for t in {item.worktree_tree, item.index_tree} for n in attribute_filter_names(git, bare, t, env_extra=alt)
+    }
+    if state.mode is DestMode.UPDATE:
+        base = [state.h0]
+    else:
+        assert state.out_state is not None  # noqa: S101 - return states carry it
+        base = [state.out_state.worktree_tree, state.out_state.index_tree]
+    ours = {n for t in base if t for n in attribute_filter_names(git, bare, t, env_extra=alt)}
+    return tuple(sorted(theirs - ours))
+
+
+def _post_state(
+    git: Git, state: GitApplyState, item: _Item, repo: Path, tmp: Path, filters: Sequence[str] = ()
+) -> bool:
     """True when the repository already shows the whole effect of ``commit`` (refs, HEAD, index tree and
     work-tree tree as planned): a forward step that finished in a process which died before its result was
-    journaled. Stash and LFS checkout are idempotent and are repeated by the caller."""
+    journaled. Stash and LFS checkout are idempotent and are repeated by the caller. ``filters``: the drivers
+    the received tree introduced (``_peer_filters``), emptied for the state check (M22)."""
     current = _current_refs(git, repo)
     if any(current.get(name) != new for name, new in state.planned_refs.items()):
         return False
@@ -1281,12 +1307,13 @@ def _post_state(git: Git, state: GitApplyState, item: _Item, repo: Path, tmp: Pa
     if ref_now != want_ref or (item.head_commit is not None and h_now != item.head_commit):
         return False
     excl = state.out_state.exclude_pathspecs if state.out_state is not None else ()
-    now = worktree_state(git, str(repo), excl, tmp)
+    now = worktree_state(git, str(repo), excl, tmp, filter_names=filters)
     return (now.index_tree, now.worktree_tree) == (item.index_tree, item.worktree_tree)
 
 
-def _pre_state(git: Git, state: GitApplyState, repo: Path, tmp: Path) -> bool:
-    """True when nothing of ``commit`` has touched the repository yet (the preconditions PREPARE recorded)."""
+def _pre_state(git: Git, state: GitApplyState, repo: Path, tmp: Path, filters: Sequence[str] = ()) -> bool:
+    """True when nothing of ``commit`` has touched the repository yet (the preconditions PREPARE recorded).
+    ``filters`` as in ``_post_state``."""
     current = _current_refs(git, repo)
     if any(current.get(name) != old for name, old in state.old_refs.items()):
         return False
@@ -1299,7 +1326,7 @@ def _pre_state(git: Git, state: GitApplyState, repo: Path, tmp: Path) -> bool:
         clean, _ = GitProbe(git, profile="received").status_clean(str(repo))
         return clean and h_now == state.h0
     assert state.out_state is not None  # noqa: S101 - return states carry it
-    now = worktree_state(git, str(repo), state.out_state.exclude_pathspecs, tmp)
+    now = worktree_state(git, str(repo), state.out_state.exclude_pathspecs, tmp, filter_names=filters)
     return not _state_diff(now, state.out_state)
 
 
@@ -1333,11 +1360,12 @@ def commit(
         refuse_orphaned_lock(git, repo)
     _open_existing(git, repo)
     scratch = Path(tmp or state.tmp or (Path(state.qdir).parent if state.qdir is not None else repo.parent))
+    peer = _peer_filters(git, state, item, repo)
     if resume:
-        if _post_state(git, state, item, repo, scratch / "resume"):
+        if _post_state(git, state, item, repo, scratch / "resume", peer):
             _tail(git, repo, item)
             return repo
-        if not _pre_state(git, state, repo, scratch / "resume"):
+        if not _pre_state(git, state, repo, scratch / "resume", peer):
             rollback(git, state, item_pack, partial=True)
     h_now, ref_now = head_info(git, repo)
     if state.mode is DestMode.UPDATE:
@@ -1346,7 +1374,7 @@ def commit(
             raise ConflictError("the destination changed since prepare", kind="dirty", detail=why, path=str(repo))
     else:
         assert state.out_state is not None and state.tmp is not None  # noqa: S101 - return states carry both
-        now = worktree_state(git, str(repo), state.out_state.exclude_pathspecs, state.tmp)
+        now = worktree_state(git, str(repo), state.out_state.exclude_pathspecs, state.tmp, filter_names=peer)
         diff = _state_diff(now, state.out_state)
         if diff or ref_now != state.head_ref_before:
             raise ConflictError(
@@ -1395,7 +1423,7 @@ def commit(
         # undo the partial change; an undo that fails (an orphaned index.lock of the killed git, …) is reported as
         # such — the caller must not take the repository for untouched
         try:
-            if not _pre_state(git, state, repo, scratch / "resume"):
+            if not _pre_state(git, state, repo, scratch / "resume", peer):
                 rollback(git, state, item_pack, partial=True)
         except Exception as undo:
             raise undo_failed(exc, undo, path=repo) from exc

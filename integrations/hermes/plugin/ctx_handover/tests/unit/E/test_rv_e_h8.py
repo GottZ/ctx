@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 from pathlib import Path
 
 import pytest
@@ -61,15 +60,6 @@ def lfs_stand_in(tmp_path, monkeypatch) -> Path:
     os.chmod(script, 0o755)  # noqa: S103 - executable test stand-in
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
     return log
-
-
-@pytest.fixture
-def no_lfs(tmp_path, monkeypatch, git) -> None:
-    bindir = tmp_path / "no-lfs-bin"
-    bindir.mkdir()
-    os.symlink(shutil.which("git") or "/usr/bin/git", bindir / "git")
-    monkeypatch.setenv("PATH", str(bindir))
-    assert shutil.which("git-lfs") is None
 
 
 def test_rv_e_h8_fresh_checks_out_lfs_content(git, user_home, staging, cfg, store, handover_root, lfs_stand_in):

@@ -12,7 +12,10 @@ the plugin feeds it, a timeout, an environment built by ``Git.env``. That enviro
 * in the ``received`` profile additionally nulls the user's global and system configuration (only the
   ``SAFELIST`` keys come back, read once per process) and empties every filter driver it knows about,
 * carries the technical identity and the fixed time of a synthetic commit only when the caller asks for it
-  (``GitEnvSpec.technical_identity_at``, R5) — in the environment of that one subprocess.
+  (``GitEnvSpec.technical_identity_at``, R5) — in the environment of that one subprocess,
+* sets ``HOME`` to the home the runner was pinned to (``Git(home=…)``: the home Hermes gives the agent's terminal),
+  so the source profile reads the same global configuration as the user's own git there; no git process sees a
+  ``HOME`` that depends on whether the plugin runs in-process or in a plugin host (W5).
 
 Objects (pack streams, file contents, tree manifests) travel as content-addressed blocks through the
 ``contracts.BlockSink``/``BlockSource`` protocols; ``put_stream``/``iter_object`` never hold more than one batch of
@@ -38,7 +41,16 @@ from pathlib import Path
 from typing import IO
 
 from .contracts import BlockSink, BlockSource
-from .errors import BlockCorrupt, Cancelled, CapabilityMissing, ConflictError, HandoverError, NotFound, PolicyDenied
+from .errors import (
+    BlockCorrupt,
+    Cancelled,
+    CapabilityMissing,
+    ConflictError,
+    HandoverError,
+    NotFound,
+    PayloadTooLarge,
+    PolicyDenied,
+)
 from .jsonutil import OBJECT_BLOCK_SIZE, check_object_manifest, loads_bounded, object_manifest_doc
 from .jsonutil import object_id as _object_id
 from .jsonutil import object_manifest as _split_object
@@ -115,9 +127,22 @@ FORCED_OPTIONS: tuple[tuple[str, str], ...] = (
 stream large blobs instead of holding them for delta search: index-pack of a 256 MiB blob 262 → 13 MiB RSS,
 pack-objects 533 → 277 MiB (measured with git 2.56, cluster E report)."""
 
-RECEIVED_EXTRA_OPTIONS: tuple[tuple[str, str], ...] = (("core.attributesFile", os.devnull),)
-"""Received profile only: the user's global attributes file (read by default from ``$XDG_CONFIG_HOME/git``
-even when the global config is nulled) must not select conversions for a received tree."""
+RECEIVED_EXTRA_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("core.attributesFile", os.devnull),
+    ("core.excludesFile", os.devnull),
+)
+"""Received profile only: the user's global attributes and ignore files (read by default from
+``$XDG_CONFIG_HOME/git`` or ``~/.config/git`` even when the global config is nulled) must not select conversions
+for a received tree, nor decide which files of a destination count as untracked — that answer would follow
+``HOME`` and differ from the one for a ``core.excludesFile`` set in ``~/.gitconfig``, which the nulled global
+config already drops (W5)."""
+
+SPLIT_INDEX_OFF: tuple[str, str] = ("core.splitIndex", "false")
+"""Added to every call that points git at a temporary index (``GIT_INDEX_FILE``): with a split index git would
+write a new ``sharedindex.*`` into the repository's git dir — the user's ``.git`` on the source (L15, §9.3)."""
+
+_WINDOWS = os.name == "nt"
+"""Windows host: every call gets ``core.longpaths=true`` (DESIGN §9.2, §9.4; M25)."""
 
 SAFELIST: tuple[str, ...] = (
     "core.autocrlf",
@@ -284,9 +309,11 @@ class GitEnvSpec:
     produces the objects the user's own ``git add`` would) or ``"received"`` (everything touching received
     objects or plugin-created repositories: global/system config nulled, safelist passed back, filters emptied).
     ``filters_from``: a repository (work tree or git dir) whose local-config filter drivers are emptied;
-    ``filter_names``: further driver names (e.g. from a received tree's ``.gitattributes``).
-    ``file_protocol`` allows ``protocol.file`` (explicit local transfer only). ``technical_identity_at`` sets the
-    technical identity and that fixed time for a synthetic commit (R5).
+    ``filter_names``: further driver names (e.g. from a received tree's ``.gitattributes``). Both are emptied in
+    either profile — a source-profile call over a destination that holds received files names the drivers the
+    received tree introduced (M22). ``file_protocol`` allows ``protocol.file`` (explicit local transfer only).
+    ``windows_long_paths`` adds ``core.longpaths=true`` (always on on a Windows host). ``technical_identity_at``
+    sets the technical identity and that fixed time for a synthetic commit (R5).
     """
 
     profile: str = "received"
@@ -302,7 +329,7 @@ SOURCE = GitEnvSpec(profile="source")
 RECEIVED = GitEnvSpec(profile="received")
 
 _VERSION_CACHE: dict[str, tuple[int, int, int] | None] = {}
-_SAFELIST_CACHE: dict[str, dict[str, list[str]]] = {}
+_SAFELIST_CACHE: dict[tuple[str, str | None, str | None], dict[str, list[str]]] = {}
 _CACHE_LOCK = threading.Lock()
 
 
@@ -310,13 +337,30 @@ def _strip_git_vars(env: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in env.items() if not k.upper().startswith("GIT_")}
 
 
-class Git:
-    """The plugin's only way to run git (see module docstring)."""
+def _add_pairs(env: dict[str, str], pairs: Sequence[tuple[str, str]]) -> None:
+    """Append config pairs behind the ones ``Git.env`` set (a later pair wins)."""
+    n = int(env.get("GIT_CONFIG_COUNT", "0"))
+    for i, (key, value) in enumerate(pairs, start=n):
+        env[f"GIT_CONFIG_KEY_{i}"] = key
+        env[f"GIT_CONFIG_VALUE_{i}"] = value
+    env["GIT_CONFIG_COUNT"] = str(n + len(pairs))
 
-    def __init__(self, git_exe: str | None = None, timeout_s: float = 600):
+
+class Git:
+    """The plugin's only way to run git (see module docstring).
+
+    ``home``: the ``HOME`` of every git process (absolute) — the composition passes the home Hermes gives the
+    agent's terminal, so the user's global configuration (``~/.gitconfig``, ``$XDG_CONFIG_HOME/git``) read by the
+    source profile and by the safelist is the one the user's own git reads there, in-process and in a plugin host
+    alike (W5). None: the process ``HOME``."""
+
+    def __init__(self, git_exe: str | None = None, timeout_s: float = 600, *, home: str | os.PathLike | None = None):
         exe = git_exe or shutil.which("git") or "git"
         self.exe = str(exe)
         self.timeout_s = float(timeout_s)
+        if home is not None and not os.path.isabs(os.fspath(home)):
+            raise ValueError("the git home must be an absolute directory")
+        self.home = Path(home) if home is not None else None
 
     # -- version ------------------------------------------------------------------------------------------
 
@@ -349,11 +393,17 @@ class Git:
 
     # -- environment --------------------------------------------------------------------------------------
 
-    @staticmethod
-    def _base_env() -> dict[str, str]:
+    def _base_env(self) -> dict[str, str]:
         env = _strip_git_vars(dict(os.environ))
+        if self.home is not None:
+            env["HOME"] = str(self.home)
         env.update(SET_ENV)
         return env
+
+    def _home_key(self) -> tuple[str, str | None, str | None]:
+        """What the user's global configuration of this runner depends on (safelist cache key)."""
+        env = self._base_env()
+        return self.exe, env.get("HOME"), env.get("XDG_CONFIG_HOME")
 
     def env(self, spec: GitEnvSpec) -> dict[str, str]:
         """The full environment of one git process for ``spec`` (DESIGN §9.2). Never writes any config."""
@@ -371,12 +421,12 @@ class Git:
         pairs.extend(FORCED_OPTIONS)
         if spec.file_protocol:
             pairs.append(("protocol.file.allow", "always"))
-        if spec.windows_long_paths:
+        if spec.windows_long_paths or _WINDOWS:
             pairs.append(("core.longpaths", "true"))
-        if spec.profile == "received":
-            names = set(spec.filter_names)
-            if spec.filters_from is not None:
-                names |= set(local_filter_names(self, Path(spec.filters_from)))
+        names = set(spec.filter_names)
+        if spec.filters_from is not None:
+            names |= set(local_filter_names(self, Path(spec.filters_from)))
+        if names:
             for name in sorted(n for n in names if _FILTER_NAME_RE.fullmatch(n)):
                 pairs.extend(
                     [
@@ -406,6 +456,16 @@ class Git:
         return env
 
     # -- running ------------------------------------------------------------------------------------------
+
+    def _env_with(self, spec: GitEnvSpec, env_extra: dict | None) -> dict[str, str]:
+        """``env(spec)`` plus the caller's variables; one naming a temporary index (``GIT_INDEX_FILE``) adds
+        ``core.splitIndex=false`` (L15)."""
+        env = self.env(spec)
+        if env_extra:
+            env.update({k: str(v) for k, v in env_extra.items()})
+            if "GIT_INDEX_FILE" in env_extra:
+                _add_pairs(env, [SPLIT_INDEX_OFF])
+        return env
 
     def _argv(self, args: Sequence[str | bytes]) -> list[str | bytes]:
         if not args or not all(isinstance(a, (str, bytes)) for a in args):
@@ -440,12 +500,11 @@ class Git:
         cancelled: Callable[[], bool] = _never,
     ) -> subprocess.CompletedProcess:
         """Run git once (bytes in, bytes out). ``check`` raises ``GitCommandError`` on a non-zero exit;
-        ``cancelled`` is polled twice a second and kills the process (``Cancelled``)."""
+        ``cancelled`` is polled twice a second and kills the process (``Cancelled``). An ``env_extra`` naming a
+        temporary index (``GIT_INDEX_FILE``) adds ``core.splitIndex=false`` (L15)."""
         if cancelled():
             raise Cancelled("cancelled before git ran")
-        env = self.env(spec)
-        if env_extra:
-            env.update({k: str(v) for k, v in env_extra.items()})
+        env = self._env_with(spec, env_extra)
         limit = self.timeout_s if timeout is None else float(timeout)
         proc = subprocess.Popen(  # noqa: S603 - argv list, shell=False
             self._argv(args),
@@ -521,19 +580,42 @@ class Git:
         spec: GitEnvSpec,
         cancelled: Callable[[], bool] = _never,
         sep: bytes = b"\x00",
+        timeout: float | None = None,
+        env_extra: dict | None = None,
     ) -> Iterator[bytes]:
         """Stream the ``sep``-separated records of a git command's stdout (never the whole output in memory);
-        raises ``GitCommandError`` after the last record when git failed."""
+        raises ``GitCommandError`` after the last record when git failed. The deadline of ``run`` applies
+        (``timeout``, default ``timeout_s``, counted from the start): a watchdog kills git when it passes, the
+        record the kill cut off is dropped and the read ends in ``GitCommandError`` (M24). ``cancelled`` is polled
+        by the reader between reads; ``env_extra`` as in ``run``."""
+        limit = self.timeout_s if timeout is None else float(timeout)
         with tempfile.TemporaryFile() as errf:
             proc = subprocess.Popen(  # noqa: S603 - argv list, shell=False
                 self._argv(args),
                 cwd=str(cwd) if cwd is not None else None,
-                env=self.env(spec),
+                env=self._env_with(spec, env_extra),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=errf,
             )
             assert proc.stdout is not None  # noqa: S101 - PIPE requested
+            # the watchdog kills git only while the output is still being read: once git closed it, a slow
+            # consumer of the last record cannot turn a finished call into a timeout
+            expired = threading.Event()
+            reading = threading.Lock()
+            read_all: list[bool] = []
+
+            def _expire() -> None:
+                with reading:
+                    if read_all:
+                        return
+                    expired.set()
+                with contextlib.suppress(OSError):
+                    proc.kill()
+
+            watchdog = threading.Timer(limit, _expire)
+            watchdog.daemon = True
+            watchdog.start()
             buf = b""
             drained = False
             try:
@@ -545,17 +627,24 @@ class Git:
                         break
                     buf += chunk
                     *records, buf = buf.split(sep)
+                    if expired.is_set():
+                        break
                     yield from records
-                drained = True
-                if buf:
+                with reading:
+                    read_all.append(True)
+                drained = not expired.is_set()  # output that ended because git was killed is cut off
+                if buf and drained:
                     yield buf
             finally:
+                watchdog.cancel()
                 # a git that closed its output may still be exiting: wait for its own exit code; kill only when
                 # the reader stopped early (cancel, error, closed generator)
                 if not drained and proc.poll() is None:
                     proc.kill()
                 proc.stdout.close()
                 rc = proc.wait()
+            if expired.is_set():
+                raise GitCommandError(f"git timed out after {limit:.0f}s", rc=-1, subcommand=str(args[0]))
             if rc != 0:
                 errf.seek(0)
                 raise self._error(args, rc, errf.read()[-_STDERR_CAP:])
@@ -572,9 +661,11 @@ class Git:
 
 def user_safelist(git: Git) -> dict[str, list[str]]:
     """The user's global/system values of ``SAFELIST`` keys (system first, global wins), read once per process
-    with ``git config --system/--global --get-all`` (DESIGN §9.2). Multi-valued keys keep every value."""
+    and home (the runner's ``HOME``/``XDG_CONFIG_HOME``) with ``git config --system/--global --get-all``
+    (DESIGN §9.2). Multi-valued keys keep every value."""
+    cache_key = git._home_key()
     with _CACHE_LOCK:
-        cached = _SAFELIST_CACHE.get(git.exe)
+        cached = _SAFELIST_CACHE.get(cache_key)
     if cached is not None:
         return {k: list(v) for k, v in cached.items()}
     found: dict[str, list[str]] = {}
@@ -603,7 +694,7 @@ def user_safelist(git: Git) -> dict[str, list[str]]:
             else:
                 found[key] = [values[-1]]
     with _CACHE_LOCK:
-        _SAFELIST_CACHE[git.exe] = found
+        _SAFELIST_CACHE[cache_key] = found
     return {k: list(v) for k, v in found.items()}
 
 
@@ -659,8 +750,9 @@ def local_filter_names(git: Git, repo: Path) -> list[str]:
     return sorted(names)
 
 
-def attribute_filter_names(git: Git, gitdir: Path, tree: str) -> list[str]:
-    """Filter names named by any ``.gitattributes`` blob of ``tree`` (a received tree, read from objects only)."""
+def attribute_filter_names(git: Git, gitdir: Path, tree: str, *, env_extra: dict | None = None) -> list[str]:
+    """Filter names named by any ``.gitattributes`` blob of ``tree`` (a received tree, read from objects only).
+    ``env_extra``: e.g. ``GIT_ALTERNATE_OBJECT_DIRECTORIES`` for trees whose objects lie outside ``gitdir``."""
     tree = require_sha(tree, "tree")
     names: set[str] = set()
     blobs: list[str] = []
@@ -668,6 +760,7 @@ def attribute_filter_names(git: Git, gitdir: Path, tree: str) -> list[str]:
         ["--git-dir", str(gitdir), "ls-tree", "-r", "-z", "--full-tree", "--end-of-options", tree],
         cwd=None,
         spec=RECEIVED,
+        env_extra=env_extra,
     ):
         meta, _, path = rec.partition(b"\t")
         parts = meta.split()
@@ -675,7 +768,10 @@ def attribute_filter_names(git: Git, gitdir: Path, tree: str) -> list[str]:
             blobs.append(parts[2].decode("ascii"))
     for blob in blobs:
         data = git.run(
-            ["--git-dir", str(gitdir), "cat-file", "blob", "--end-of-options", blob], cwd=None, spec=RECEIVED
+            ["--git-dir", str(gitdir), "cat-file", "blob", "--end-of-options", blob],
+            cwd=None,
+            spec=RECEIVED,
+            env_extra=env_extra,
         ).stdout[: 1024 * 1024]
         names.update(m.decode("utf-8", errors="replace") for m in _FILTER_ATTR_RE.findall(data))
     return sorted(n for n in names if _FILTER_NAME_RE.fullmatch(n))
@@ -766,6 +862,19 @@ def validate_remote(name: str, url: str) -> tuple[str, str]:
 
 def _ceiling(root: Path) -> GitEnvSpec:
     return GitEnvSpec(profile="source", ceiling=Path(root).parent)
+
+
+def _state_spec(root: Path, profile: str, filter_names: Sequence[str]) -> GitEnvSpec:
+    """The spec of a temp-index state computation over the work tree at ``root`` (M22): ``source`` keeps the
+    user's configuration — the result compares with a state recorded in the source profile — and empties the
+    drivers in ``filter_names``; ``received`` also empties the repository's own drivers."""
+    if profile not in {"source", "received"}:
+        raise ValueError(f"unknown git profile {profile!r}")
+    root = Path(root)
+    names = tuple(sorted({str(n) for n in filter_names}))
+    if profile == "received":
+        return GitEnvSpec(profile="received", ceiling=root.parent, filters_from=root, filter_names=names)
+    return GitEnvSpec(profile="source", ceiling=root.parent, filter_names=names)
 
 
 def git_dirs(git: Git, root: Path) -> tuple[Path, Path]:
@@ -865,6 +974,8 @@ def compute_state(
     *,
     force: bool = False,
     cancelled: Callable[[], bool] = _never,
+    profile: str = "source",
+    filter_names: Sequence[str] = (),
 ) -> StateWork:
     """Index tree and work-tree tree of the repository at ``root`` without touching it (DESIGN §9.3 4–5).
 
@@ -872,7 +983,13 @@ def compute_state(
     the repository's objects are an alternate). Paths named by ``exclude_pathspecs`` are reset to HEAD in the index
     copy (a denied file staged in the index never leaves) and skipped by ``git add -A`` (they keep the index
     copy's content in the work-tree tree). Unmerged entries are refused unless ``force`` (then their work-tree
-    content is taken)."""
+    content is taken).
+
+    ``profile``/``filter_names`` (M22): the source uses the default (the user's own repository, the user's own
+    drivers). A target recomputing a destination that may hold received files passes the filter names the
+    received tree introduced (``source``, stays comparable to a state recorded in the source profile) or
+    ``profile="received"`` (no driver of the user runs at all); a received ``.gitattributes`` then picks none of
+    the user's drivers."""
     root = Path(root)
     _, common = git_dirs(git, root)
     head, branch = head_info(git, root)
@@ -894,7 +1011,7 @@ def compute_state(
         "GIT_OBJECT_DIRECTORY": str(objdir),
         "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(common / "objects"),
     }
-    spec = _ceiling(root)
+    spec = _state_spec(root, profile, filter_names)
     excluded_paths = [pathspec_path(s) for s in exclude_pathspecs]
     if excluded_paths:
         ps = _write_pathspec_file(scratch / "reset.ps", (b":(literal)" + p for p in excluded_paths))
@@ -916,7 +1033,7 @@ def compute_state(
                 env_extra={**extra, "GIT_INDEX_FILE": str(idx1)},
                 cancelled=cancelled,
             )
-    unmerged = _unmerged_paths(git, root, idx1, extra)
+    unmerged = _unmerged_paths(git, root, idx1, extra, spec)
     if unmerged:
         if not force:
             raise ConflictError(
@@ -935,7 +1052,7 @@ def compute_state(
     )
     if idx1.is_file():
         shutil.copy2(idx1, idx2)
-    nested = nested_repositories(git, root, cancelled=cancelled)
+    nested = nested_repositories(git, root, cancelled=cancelled, spec=spec)
     ps_w = _write_pathspec_file(
         scratch / "add.ps",
         [
@@ -965,26 +1082,31 @@ def compute_state(
     )
 
 
-def nested_repositories(git: Git, root: Path, *, cancelled: Callable[[], bool] = _never) -> list[bytes]:
+def nested_repositories(
+    git: Git, root: Path, *, cancelled: Callable[[], bool] = _never, spec: GitEnvSpec | None = None
+) -> list[bytes]:
     """Untracked directories that are repositories of their own (``ls-files -o`` lists them with a trailing
-    slash). They are never added to the work-tree tree (``git add`` would record a bare gitlink or fail); the
-    collector plans them as separate items."""
+    slash). They are never added to the work-tree tree (``git add`` would record a bare gitlink or fail): such a
+    repository stays here with its files and changes; the plan names it (``plan.WHY_NESTED_REPO``) and asks with
+    reason (k) ``repos_left`` (H15). ``spec``: that of the ``git add`` they are excluded from (its ignore rules
+    decide what is untracked; default: the source profile)."""
     found = []
     for rec in git.iter_z(
-        ["ls-files", "-o", "--exclude-standard", "-z"], cwd=Path(root), spec=_ceiling(Path(root)), cancelled=cancelled
+        ["ls-files", "-o", "--exclude-standard", "-z"],
+        cwd=Path(root),
+        spec=spec or _ceiling(Path(root)),
+        cancelled=cancelled,
     ):
         if rec.endswith(b"/"):
             found.append(rec.rstrip(b"/"))
     return found
 
 
-def _unmerged_paths(git: Git, root: Path, index: Path, extra: dict) -> list[bytes]:
+def _unmerged_paths(git: Git, root: Path, index: Path, extra: dict, spec: GitEnvSpec) -> list[bytes]:
     if not index.is_file():
         return []
     found: list[bytes] = []
-    proc = git.run(
-        ["ls-files", "-u", "-z"], cwd=root, spec=_ceiling(root), env_extra={**extra, "GIT_INDEX_FILE": str(index)}
-    )
+    proc = git.run(["ls-files", "-u", "-z"], cwd=root, spec=spec, env_extra={**extra, "GIT_INDEX_FILE": str(index)})
     for rec in proc.stdout.split(b"\x00"):
         if rec:
             path = rec.partition(b"\t")[2]
@@ -993,15 +1115,34 @@ def _unmerged_paths(git: Git, root: Path, index: Path, extra: dict) -> list[byte
     return found
 
 
-def worktree_state(git: Git, root: str, exclude_pathspecs: Sequence[str], tmp: Path) -> GitState:
+def worktree_state(
+    git: Git,
+    root: str,
+    exclude_pathspecs: Sequence[str],
+    tmp: Path,
+    *,
+    profile: str = "source",
+    filter_names: Sequence[str] = (),
+) -> GitState:
     """``(HEAD, index tree, work-tree tree)`` of the repository at ``root`` with the recorded exclusions, computed
     in a temporary index and object directory under ``tmp`` (deleted afterwards). Read-only for the repository;
-    used by the source's prepare re-check (§9.3 step 8) and the return-mode check (§9.5)."""
+    used by the source's prepare re-check (§9.3 step 8) and the return-mode check (§9.5). ``profile`` and
+    ``filter_names`` as in ``compute_state`` (M22)."""
+    _state_spec(Path(root), profile, filter_names)  # an unknown profile is refused before anything is created
     tmp = Path(tmp)
     tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
     work = Path(tempfile.mkdtemp(prefix="state-", dir=tmp))
     try:
-        st = compute_state(git, Path(root), exclude_pathspecs, work / "objects", work, force=True)
+        st = compute_state(
+            git,
+            Path(root),
+            exclude_pathspecs,
+            work / "objects",
+            work,
+            force=True,
+            profile=profile,
+            filter_names=filter_names,
+        )
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return GitState(
@@ -1210,20 +1351,37 @@ class GitProbe:
             if rec
         ]
 
-    def ls_tree_sizes(self, gitdir: str, tree: str) -> tuple[int, int]:
-        """``(blob bytes, entries)`` of ``tree`` without reading blob contents (pre-checkout check, SEC 2.5)."""
+    def ls_tree_sizes(
+        self, gitdir: str, tree: str, *, max_entries: int | None = None, max_bytes: int | None = None
+    ) -> tuple[int, int]:
+        """``(blob bytes, entries)`` of ``tree`` without reading blob contents (pre-checkout check, SEC 2.5).
+        ``max_entries``/``max_bytes``: ``PayloadTooLarge`` as soon as the listing passes one — git is stopped
+        there instead of listing everything a few KiB of pack can describe (M24)."""
         require_sha(tree, "tree")
         pre, cwd, spec = self._tree_args(gitdir)
         total = entries = 0
-        for rec in self.git.iter_z(
+        records = self.git.iter_z(
             [*pre, "ls-tree", "-r", "-l", "-z", "--full-tree", "--end-of-options", tree], cwd=cwd, spec=spec
-        ):
-            if not rec:
-                continue
-            entries += 1
-            meta = rec.partition(b"\t")[0].split()
-            if len(meta) == 4 and meta[1] == b"blob" and meta[3].isdigit():
-                total += int(meta[3])
+        )
+        try:
+            for rec in records:
+                if not rec:
+                    continue
+                entries += 1
+                if max_entries is not None and entries > max_entries:
+                    raise PayloadTooLarge(
+                        "the tree has more entries than allowed",
+                        entries=entries,
+                        max_files=max_entries,
+                        field="max_files",
+                    )
+                meta = rec.partition(b"\t")[0].split()
+                if len(meta) == 4 and meta[1] == b"blob" and meta[3].isdigit():
+                    total += int(meta[3])
+                    if max_bytes is not None and total > max_bytes:
+                        raise PayloadTooLarge("the tree is larger than allowed", bytes=total, max_bytes=max_bytes)
+        finally:
+            records.close()
         return total, entries
 
     def info(self, root: str, cfg: PolicyConfig) -> GitInfo:

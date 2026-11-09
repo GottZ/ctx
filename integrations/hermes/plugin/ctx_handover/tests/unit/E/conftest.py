@@ -3,6 +3,9 @@ test home. Repositories are built only through ``tests.fakes.repo_builder`` (plu
 
 from __future__ import annotations
 
+import os
+import shutil
+
 import pytest
 
 pytest.register_assert_rewrite("ctx_handover.tests.unit.E._support")
@@ -49,3 +52,14 @@ def handover_root(user_home):
     root = user_home / "hermes-handover"
     root.mkdir()
     return root
+
+
+@pytest.fixture
+def no_lfs(tmp_path, monkeypatch, git) -> None:
+    """A ``PATH`` holding only git: no git-lfs, whatever this host has installed (the fresh/update LFS checkout of
+    DESIGN §9.4 runs only with git-lfs — tests of the pointer-stays path must not depend on the host)."""
+    bindir = tmp_path / "no-lfs-bin"
+    bindir.mkdir()
+    os.symlink(shutil.which("git") or "/usr/bin/git", bindir / "git")
+    monkeypatch.setenv("PATH", str(bindir))
+    assert shutil.which("git-lfs") is None

@@ -496,9 +496,12 @@ def _lfs_pointer(data: bytes) -> tuple[str, bytes]:
     return oid, f"version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {len(data)}\n".encode()
 
 
-def test_apply_lfs_objects_oid_verified_no_network(git, user_home, tmp_path, staging, cfg, store, handover_root):
+def test_apply_lfs_objects_oid_verified_no_network(
+    git, user_home, tmp_path, staging, cfg, store, handover_root, no_lfs
+):
     """LFS objects travel and are placed after ``sha256 == oid`` and size checks; a forged object is refused; the
-    ``.lfsconfig`` URL is never contacted [SEC 3.5]."""
+    ``.lfsconfig`` URL is never contacted [SEC 3.5]. Without git-lfs (``no_lfs``: a ``PATH`` holding only git) the
+    pointer stays — with git-lfs the fresh mode checks the content out (``test_rv_e_h8.py``)."""
     import socket
 
     listener = socket.socket()

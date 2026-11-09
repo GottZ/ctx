@@ -298,7 +298,7 @@ def _git(prof: _Profile):
         if prof.git is None:
             from . import gitops
 
-            prof.git = gitops.Git()
+            prof.git = gitops.Git(home=hostcompat.effective_home())  # W5: same ~/.gitconfig as the terminal
         return prof.git
 
 
