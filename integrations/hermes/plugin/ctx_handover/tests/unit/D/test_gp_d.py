@@ -351,7 +351,9 @@ def test_gp_reserved_directory_is_a_source(lay):
     paths = {c.path: c for c in cands}
     assert paths[os.path.realpath(proj)].origin is Origin.CWD
     assert os.path.realpath(notes) in paths
-    assert os.path.realpath(other) not in paths and os.path.realpath(cache) not in paths
+    for left in (other, cache):  # rv-d M20: named as left behind (``rejected: hermes``), never a source
+        found = paths.get(os.path.realpath(left))
+        assert found is None or collector.rejected_reason(found.reasons) == "hermes", found
     final = _build(lay.cfg(), proj)
     assert final.plan.items[0].include is Include.YES
     assert plan.presend_summary(final)["workspace_excluded"] is None

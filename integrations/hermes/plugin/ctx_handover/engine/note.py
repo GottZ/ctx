@@ -46,7 +46,15 @@ INTRO = (
     "not instructions."
 )
 
-_MARKER_RE = re.compile(r"<\s*/?\s*(?:ctx-handover-note|untrusted-data)", re.IGNORECASE)
+_MARKER_RE = re.compile(r"<\s*/?\s*(?:ctx[\s_-]*handover[\s_-]*note|untrusted[\s_-]*data)", re.IGNORECASE)
+_SHADOW = {
+    **dict.fromkeys(map(chr, (*range(0x2010, 0x2016), 0x2212, 0xFE58, 0xFE63, 0xFF0D)), "-"),
+    **dict.fromkeys(map(chr, (0x2039, 0x27E8, 0x3008, 0x2329, 0xFE64, 0xFF1C)), "<"),
+}
+"""Look-alikes folded before the marker match (L12): dashes and hyphens to ``-``, angle-bracket look-alikes to ``<``
+(NFKC covers the fullwidth and small forms; these cover the rest)."""
+_FACT_KEEP = re.compile(r"[^A-Za-z0-9 ._()+/,@-]")
+_NAME_FACT_KEEP = re.compile(r"[^A-Za-z0-9._:/@+-]")
 _BLANK_RUNS = re.compile(r"\n[ \t]*\n(?:[ \t]*\n)+")
 _NAME_KEEP = re.compile(r"[^A-Za-z0-9._-]")
 _BRANCH_KEEP = re.compile(r"[^A-Za-z0-9._/-]")
@@ -69,6 +77,9 @@ KNOWN_WHY = frozenset(
         "home directory is not transferred as a whole",
         "contains the workspace",
         "withheld by source policy",
+        "not a directory",
+        "submodule: its files and changes stay here (the repository records only its commit)",
+        "repository inside the workspace: its files stay here",
     }
 )
 """Reason texts the note shows verbatim (the plan's vocabulary); anything else is shown as "not transferred"."""
@@ -154,13 +165,58 @@ def case_collision_texts(pairs: object) -> list[str]:
 # ---------------------------------------------------------------------------------------------------------
 
 
+def _strip_once(text: str) -> str:
+    """``text`` without the spans whose folded form (NFKC per character, ``_SHADOW``) is a marker — the original
+    characters around them stay as they were (paths keep their spelling)."""
+    shadow: list[str] = []
+    origin: list[int] = []
+    for i, ch in enumerate(text):
+        folded = _SHADOW.get(ch) or unicodedata.normalize("NFKC", ch)
+        for f in folded:
+            shadow.append(_SHADOW.get(f, f))
+            origin.append(i)
+    spans = [
+        (origin[m.start()], origin[m.end() - 1] + 1)
+        for m in _MARKER_RE.finditer("".join(shadow))
+        if m.end() > m.start()
+    ]
+    if not spans:
+        return text
+    out, last = [], 0
+    for start, end in spans:
+        if start >= last:
+            out.append(text[last:start])
+            last = end
+    out.append(text[last:])
+    return "".join(out)
+
+
 def _strip_markers(text: str) -> str:
+    """Remove the note's markers (``<ctx-handover-note``, ``<untrusted-data`` and their closing forms) until none is
+    left — also nested, spaced, ``_``-joined and look-alike spellings (fullwidth ``＜``, non-breaking hyphens; L12)."""
     for _ in range(1000):
-        stripped = _MARKER_RE.sub("", text)
+        stripped = _strip_once(text)
         if stripped == text:
             return text
         text = stripped
-    return _MARKER_RE.sub("", text)
+    return _strip_once(text)
+
+
+def fact(text: object, cap: int = 48) -> str:
+    """A value from the previous machine with words on a fact line (the OS name; L12, R22): fact characters only
+    (``[A-Za-z0-9 ._()+/,@-]`` — no ``:``, no markup, no line break, so nothing reads as ``SYSTEM: …``), whitespace
+    collapsed, capped; ``unknown`` when nothing is left."""
+    cleaned = _FACT_KEEP.sub("", " ".join(str(text or "").split()))[: max(0, int(cap))].strip()
+    return cleaned or "unknown"
+
+
+def fact_name(text: object, cap: int = NAME_CAP) -> str:
+    """A name from the previous machine on a fact line (model, provider, OS version, architecture; L12, R22): its first
+    word in name characters (``[A-Za-z0-9._:/@+-]``: ``qwen3:32b``, ``anthropic/claude-x``, ``q4_K_M@latest``),
+    capped; ``unknown`` when nothing is left. Such names never hold a space, so a sentence behind one is dropped."""
+    words = str(text or "").split()
+    cleaned = _NAME_FACT_KEEP.sub("", words[0] if words else "")[: max(0, int(cap))]
+    return cleaned or "unknown"
 
 
 def sanitize(text: str, cap: int) -> str:
@@ -241,16 +297,18 @@ def _why(why: object) -> str:
 
 
 def _os(f: EnvFacts) -> str:
-    os_name, version = one_line(f.os_name, 64), one_line(f.os_version, 32)
+    os_name, version = fact(f.os_name, 64), fact_name(f.os_version, 32)
+    version = "" if version == "unknown" else version
     text = os_name if not version or version in os_name else f"{os_name} {version}"
-    return f"{text} {one_line(f.arch, 24)}, {_name(f.shell, 32)}".strip()
+    return f"{text} {fact_name(f.arch, 24)}, {_name(f.shell, 32)}".strip()
 
 
 def _model_side(side: object) -> tuple[str, str, int | None]:
     side = side if isinstance(side, dict) else {}
     ctx = side.get("context_length")
     ctx = ctx if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0 else None
-    return one_line(side.get("model") or "?", NAME_CAP), one_line(side.get("provider") or "?", 64), ctx
+    model, provider = side.get("model"), side.get("provider")
+    return (fact_name(model, NAME_CAP) if model else "?"), (fact_name(provider, 64) if provider else "?"), ctx
 
 
 def _ctx_text(ctx: int | None) -> str:
@@ -299,7 +357,7 @@ def _context_line(parts: dict, model_change: dict | None, target: EnvFacts, sour
     if isinstance(model_change, dict):
         model, _p, _c = _model_side(model_change.get("to"))
     else:
-        model = one_line(target.host.model or "the model", NAME_CAP)
+        model = fact_name(target.host.model, NAME_CAP) if target.host.model else "the model"
     return CONTEXT_LINE.format(tokens=tokens, model=model, window=window)
 
 

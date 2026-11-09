@@ -630,6 +630,15 @@ def _homes_of(path: Path, cfg: PolicyConfig, windows: bool) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(homes))
 
 
+def homes_of(path: Path, cfg: PolicyConfig, *, windows: bool) -> tuple[Path, ...]:
+    """The homes ``path`` is judged against (``_homes_of``; additive, rv-d M35): the process's ``$HOME`` (as given and
+    resolved), every account home of the password database, the superuser homes (POSIX, ``windows`` False) and
+    ``<parent>/<x>`` when ``path`` lies below a ``HOME_PARENTS`` directory (in the path's own spelling). The target
+    denylist and the source's home rule (``collector.HomeRule``: no home and no ancestor of one is a workspace or an
+    extra) read the same list."""
+    return _homes_of(Path(path), cfg, bool(windows))
+
+
 def _home_denied(path: Path, home: Path, cfg: PolicyConfig, windows: bool) -> bool:
     """The home rules of the target denylist for one home: the home itself and its ancestors, ``TARGET_DENY`` (plus
     ``TARGET_DENY_WINDOWS`` on a Windows target) and every dot entry directly under the home that no allow-root

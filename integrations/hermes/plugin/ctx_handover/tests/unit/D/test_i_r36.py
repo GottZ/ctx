@@ -326,7 +326,7 @@ def test_r36a_an_untracked_subfolder_of_a_repository_needs_an_answer(transcript,
         assert plan.CONFIRM_WORKSPACE_DIFFERS in reasons, reasons
         assert plan.yes_exempt(reasons) == [plan.CONFIRM_WORKSPACE_DIFFERS]
     assert plan.CONFIRM_LETTERS[plan.CONFIRM_WORKSPACE_DIFFERS] == "j"
-    assert plan.REASON_CODES[-1] == plan.CONFIRM_WORKSPACE_DIFFERS
+    assert plan.REASON_CODES[9] == plan.CONFIRM_WORKSPACE_DIFFERS  # rv-d: (k) repos_left follows (H15)
     assert plan.CONFIRM_WORKSPACE_DIFFERS in plan.YES_EXEMPT
 
 

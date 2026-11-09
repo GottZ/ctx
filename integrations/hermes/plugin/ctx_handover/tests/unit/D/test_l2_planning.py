@@ -72,8 +72,9 @@ def test_reason_codes_and_markers_are_public():
         "workspace_excluded",
         "context_over",
         "workspace_differs",
+        "repos_left",
     )
-    assert [plan.CONFIRM_LETTERS[code] for code in plan.REASON_CODES] == list("abcdefghij")
+    assert [plan.CONFIRM_LETTERS[code] for code in plan.REASON_CODES] == list("abcdefghijk")
     assert (plan.SUSPECTED_SECRET, plan.UNVERIFIED) == ("suspected_secret", "unverified")
     assert set(surfaces.REASON_TEXT) == set(plan.REASON_CODES)
     assert surfaces.SUSPECTED_SECRET is plan.SUSPECTED_SECRET
@@ -315,6 +316,11 @@ def test_presend_summary_has_the_keys_the_surfaces_read(lay):
         "workspace_excluded",
         "context_over",
         "workspace",
+        "outside_items",
+        "outside_more",
+        "repos_left",
+        "repos_left_more",
+        "context_unknown",
     }
     assert set(plan.PRESEND_KEYS) <= set(summary)
     included = [i for i in rp.items if i.include is Include.YES]

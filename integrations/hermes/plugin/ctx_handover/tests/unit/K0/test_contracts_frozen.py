@@ -48,6 +48,7 @@ FUNCTIONS = {
         "check_extra": ["path", "cfg", "explicit", "redact"],
         "sniff_bytes": ["head"],
         "reserved_workspace_roots": ["cfg"],
+        "homes_of": ["path", "cfg", "windows"],
     },
     jsonutil: {
         "canonical_bytes": ["obj"],
