@@ -20,8 +20,10 @@ Config keys: ``plugin_dir``, ``env`` (identity seed), ``settings``, ``gate_token
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
+import os
 import secrets
 import socket
 import sys
@@ -54,7 +56,14 @@ def build_app(cfg: dict):
 
     def factory(eng):
         plugin_dir = Path(cfg["plugin_dir"])
-        ledger = LedgerStub(plugin_dir / "ledger.sqlite3", model=eng.model)
+        ledger = None
+        if os.environ.get("CTXH_C_LEDGER", "auto") != "stub":
+            try:  # the same ledger the test process opens (make_ledger): the real one once cluster A exists
+                ledger = importlib.import_module(eng.__name__ + ".ledger").Ledger(plugin_dir / "ledger.sqlite3")
+            except ImportError:
+                ledger = None
+        if ledger is None:
+            ledger = LedgerStub(plugin_dir / "ledger.sqlite3", model=eng.model)
         env = cfg.get("env") or {}
         identity = eng.crypto.Identity.load(ledger, read_secret=env.get, read_env_fresh=env.get)
         store = eng.blocks.BlockStore(plugin_dir, ledger)

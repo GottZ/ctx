@@ -46,11 +46,12 @@ from . import ctxrecords, hostcompat, surfaces
 from .continuation import Spawner
 from .errors import (
     BadRequest,
-    CapabilityMissing,
     ConflictError,
     Forbidden,
     HandoverError,
+    InDoubt,
     NotFound,
+    error_class,
 )
 from .model import (
     ContinueResult,
@@ -99,6 +100,11 @@ _EXIT_BY_CODE = {
     "in_doubt": EXIT_DOUBT,
     "peer_unreachable": EXIT_DOUBT,
 }
+
+
+_BROKER = ReporterBroker()
+"""One broker per process: the profile's single ``JobRunner`` (``jobs.runner_for``) is built with one
+``reporter_factory``, so every ``Plugin`` of this process binds its reporters to the same broker."""
 
 
 def allowed_on(platform: str | None, verb: str) -> bool:
@@ -370,7 +376,7 @@ class Plugin:
         self._backend: Backend | None = None
         self._backend_lock = threading.Lock()
         self.tokens = SideQuestionTokens()
-        self.broker = ReporterBroker()
+        self.broker = _BROKER
         self.hooks = HookSet(self._hook_runtime, self.tokens)
 
     # -- backend ----------------------------------------------------------------------------------------
@@ -444,6 +450,9 @@ class Plugin:
                         reporter=reporter,
                     )
                 if final is not None:
+                    reporter.start(
+                        surfaces.render_presend(self.backend.presend_summary(final), peer.name, Mode.PUSH)
+                    )
                     self.backend.continue_async(job_id)
             except HandoverError as err:
                 reporter.finish(surfaces.render_error(err, peer.name))
@@ -540,23 +549,26 @@ class Plugin:
 
     def _confirm_fn(self, call: Call, peer_name: str | None, options: Options, state: _ConfirmState):
         def confirm(info: dict) -> str:
-            reasons = surfaces.reason_names((info or {}).get("reasons") or [])
-            summary = (info or {}).get("summary")
-            if not isinstance(summary, Mapping):
-                final = (info or {}).get("final_plan")
-                summary = surfaces.plan_summary(final) if final is not None else {}
-            state.summary = dict(summary)
-            state.reasons = reasons
+            info = info or {}
+            reasons = surfaces.reason_names(info.get("reasons") or [])
+            summary = surfaces.plan_summary(
+                info.get("final_plan"),
+                info.get("summary") if isinstance(info.get("summary"), Mapping) else None,
+                instruction_files=info.get("instruction_files") or (),
+            )
             suspected = surfaces.suspected_secrets(info)
+            summary["suspected_secrets"] = suspected
+            state.summary = summary
+            state.reasons = reasons
             if options.yes:  # R25: a blanket yes never takes suspected secrets along
                 state.answer = "no_proposed" if suspected else "yes"
                 return state.answer
             question = surfaces.confirm_question(summary, peer_name)
-            if suspected and "suspected_secret" not in reasons:
-                reasons = [*reasons, "suspected_secret"]
-            why = "; ".join(surfaces.REASON_TEXT.get(r, r) for r in reasons)
+            why = [surfaces.REASON_TEXT.get(r, r) for r in reasons]
+            if suspected:  # an item marker, not a reason code (X03): it explains reason (a)
+                why.append(surfaces.SUSPECTED_TEXT)
             if why:
-                question = f"{question}\n({why})"
+                question = f"{question}\n({'; '.join(why)})"
             if suspected:
                 question += "\nSuspected secrets: " + ", ".join(suspected[:5])
             answer = None
@@ -669,19 +681,22 @@ class Plugin:
             return surfaces.render_error(err, peer)
         job = status.get("job") if isinstance(status.get("job"), Mapping) else status
         state = str(job.get("state") or "")
-        err = job.get("last_error")
-        if state in {"aborted", "failed", "cancelled", "suspended", "in_doubt"}:
-            code = (err or {}).get("code") if isinstance(err, Mapping) else None
-            if isinstance(err, Mapping) and code:
-                from .errors import error_class
-
+        err = job.get("last_error") if isinstance(job.get("last_error"), Mapping) else None
+        short = surfaces.short_job(job_id)
+        if state == "in_doubt":
+            return surfaces.render_error(InDoubt("commit outcome unknown", job=job_id), peer)
+        if state in {"aborted", "suspended"}:
+            # a cancel by the user ends ``aborted`` with last_error.code == "cancelled" (rendered as such)
+            code = (err or {}).get("code")
+            if code:
                 klass = error_class(str(code)) or HandoverError
-                return surfaces.render_error(
-                    klass(str(err.get("message") or ""), details=dict(err.get("details") or {})), peer
-                )
-            return (
-                f"Handover {surfaces.short_job(job_id)} ended: {state}. /handover status {surfaces.short_job(job_id)}."
-            )
+                details = {"job": job_id, **dict((err or {}).get("details") or {})}
+                text = surfaces.render_error(klass(str((err or {}).get("message") or ""), details=details), peer)
+            else:
+                text = f"Handover {short} ended: {state}. /handover status {short}."
+            if state == "suspended" and "/handover resume" not in text:
+                text += f" /handover resume {short} continues it."
+            return text
         from .jsonutil import from_wire
         from .model import CommitAck
 
@@ -703,7 +718,7 @@ class Plugin:
                 str(cont["error"].get("message", "")), details=dict(cont["error"].get("details") or {})
             )
         bundle = job.get("bundle") if isinstance(job.get("bundle"), Mapping) else {}
-        return surfaces.render_final(
+        text = surfaces.render_final(
             mode,
             ack if not isinstance(ack, Mapping) else None,
             state,
@@ -723,6 +738,9 @@ class Plugin:
             keep=options.keep_source,
             remote_gateway=bool(bundle.get("remote")),
         )
+        if state == "retiring" and job.get("next_action") and mode not in (Mode.PULL, Mode.IMPORT):
+            text += f"\nNext: {job['next_action']}"
+        return text
 
     # -- verbs ------------------------------------------------------------------------------------------
     def _verb_help(self, parsed: surfaces.Parsed, call: Call) -> None:
@@ -864,7 +882,7 @@ class Plugin:
         if call.local:
             return status
         jobs = [j for j in status.get("jobs") or () if call.session_id and j.get("calling_session") == call.session_id]
-        return {**status, "jobs": jobs, "pulled_by": [], "disk": {}}
+        return {**status, "jobs": jobs, "pulled_by": [], "pull_log": [], "outbox_pending": 0, "disk": {}}
 
     def _verb_status(self, parsed: surfaces.Parsed, call: Call) -> None:
         backend = self.backend
@@ -1011,6 +1029,8 @@ class Plugin:
             else "Nothing to reclaim."
         )
         call.say(str(message))
+        if result.get("target_notified"):
+            call.say("The other gateway was told that this session is active here again.")
         for warning in result.get("warnings") or ():
             call.say(f"warning: {warning}")
 
@@ -1446,10 +1466,10 @@ class EngineBackend:
     """``Backend`` over the engine and Hermes. Every engine module is imported lazily inside a method, so
     ``register()`` and the unit tests never load them; ``hostcompat.<fn>`` is reached as a module attribute.
 
-    Assumptions on other clusters (INTERFACES §4, wishes in reports/F.md): ``jobs.ensure_started(ctx)`` may return
-    a runtime with ``ledger``/``veto``/``store`` attributes (else this class builds its own ``Ledger`` and
-    ``VetoIndex``); ``JobRunner.plan_sync`` accepts ``bundle_path`` and ``side_question``; ``create_offer``
-    accepts ``options`` and ``side_question``.
+    The profile runtime is cluster A's: ``jobs.ensure_started(ctx)`` returns the profile (``ledger``, ``store``,
+    ``veto``, ``identity``) and ``jobs.runner_for(ctx, reporter_factory)`` its one ``JobRunner``; this class builds
+    no second ledger, block store or veto index. Revoke and reclaim go through ``jobs.revoke_peer`` /
+    ``jobs.reclaim`` (W067, W047).
     """
 
     def __init__(self, ctx: Any, plugin: Plugin) -> None:
@@ -1472,40 +1492,27 @@ class EngineBackend:
         def build() -> Any:
             from . import jobs
 
+            # The runner first: ensure_started's janitor would otherwise create the profile's runner without a
+            # reporter factory, and progress of every later job would go nowhere (runner_for keeps the first).
+            jobs.runner_for(self._ctx, self._plugin.broker.factory)
             return jobs.ensure_started(self._ctx)
 
         return self._part("runtime", build)
 
     def _ledger(self) -> Any:
-        def build() -> Any:
-            rt = self._started()
-            ledger = getattr(rt, "ledger", None)
-            if ledger is not None:
-                return ledger
-            from .ledger import Ledger
-
-            return Ledger(self._data_dir() / "ledger.sqlite3")
-
-        return self._part("ledger", build)
+        return self._started().ledger
 
     def _runner(self) -> Any:
         def build() -> Any:
-            from .jobs import JobRunner
+            from . import jobs
 
-            return JobRunner(self._ledger(), self._plugin.broker.factory)
+            self._started()
+            return jobs.runner_for(self._ctx, self._plugin.broker.factory)  # one runner + janitor per profile
 
         return self._part("runner", build)
 
     def _store(self) -> Any:
-        def build() -> Any:
-            store = getattr(self._started(), "store", None)
-            if store is not None:
-                return store
-            from .blocks import BlockStore
-
-            return BlockStore(self._data_dir() / "blocks", self._ledger())
-
-        return self._part("store", build)
+        return self._started().store
 
     def _spawner(self) -> Spawner:
         def build() -> Spawner:
@@ -1561,7 +1568,10 @@ class EngineBackend:
         return self._ledger().peer(name)
 
     def revoke_peer(self, name: str) -> list[str]:
-        return list(self._ledger().revoke_peer(name))
+        from . import jobs
+
+        self._started()
+        return list(jobs.revoke_peer(name))  # ledger cascade + abort of the peer's participant jobs (W067)
 
     def remove_peer(self, name: str) -> bool:
         return bool(self._ledger().remove_peer(name))
@@ -1609,17 +1619,18 @@ class EngineBackend:
     def rotate_identity(self) -> dict:
         from .crypto import Identity
 
-        rotate = getattr(Identity, "rotate", None)
-        if not callable(rotate):
-            raise CapabilityMissing(
-                "Key rotation is not available in this build.", capability="identity rotate", local=True
-            )
-        ident = rotate(
-            self._ledger(),
+        rt = self._started()
+        ident = Identity.create(
+            rt.ledger,
             env_writable=hostcompat.env_writable,
             save_env=hostcompat.save_env,
             read_env_fresh=hostcompat.read_env_fresh,
+            rotate=True,
         )
+        # the profile caches its identity for the runner and the pull client; the old key must not sign again
+        with rt.lock:
+            rt.identity = ident
+            rt.identity_error = None
         return {"instance_id": ident.instance_id, "fingerprint": ident.fingerprint()}
 
     def start_job(
@@ -1637,12 +1648,7 @@ class EngineBackend:
         reporter: Any,
     ) -> tuple[str, FinalPlan | None]:
         self._flush_quietly()
-        extra: dict[str, Any] = {}
-        if bundle_path is not None:
-            extra["bundle_path"] = Path(bundle_path)
-        if side_question is not None:
-            extra["side_question"] = side_question
-        return self._runner().plan_sync(
+        job_id, final = self._runner().plan_sync(
             mode,
             peer,
             options,
@@ -1651,8 +1657,28 @@ class EngineBackend:
             session_key=session_key,
             ctx=self._ctx,
             confirm=confirm,
-            **extra,
+            bundle_path=Path(bundle_path) if bundle_path is not None else None,
+            # only flags typed here: this surface is local (R24); a peer's include_secret never gets here (X07)
+            include_secret=tuple(options.hints.include_secret),
+            side_question=side_question,
         )
+        if final is None and options.dry_run:
+            final = self._ended_plan(job_id)  # a dry run ends after NEGOTIATED with nothing locked (W113)
+        return job_id, final
+
+    def _ended_plan(self, job_id: str) -> FinalPlan | None:
+        """The plan a job ended with before anything was locked (``result.plan`` of the conductor row)."""
+        from .jsonutil import from_wire
+        from .model import Role
+
+        row = self._ledger().job(job_id, Role.CONDUCTOR) or {}
+        raw = (row.get("result") or {}).get("plan")
+        if not isinstance(raw, Mapping):
+            return None
+        try:
+            return from_wire(FinalPlan, dict(raw))
+        except (HandoverError, TypeError, ValueError):
+            return None
 
     def continue_async(self, job_id: str) -> None:
         self._runner().continue_async(job_id)
@@ -1668,6 +1694,18 @@ class EngineBackend:
 
     def job_status(self, job_id: str | None) -> dict:
         status = dict(self._runner().status(job_id) or {})
+        if job_id is None and status.get("pull_log"):
+            ledger = self._ledger()
+            names: dict[str, str] = {}
+            for row in status["pull_log"]:
+                pid = str(row.get("peer_id") or "")
+                if pid and pid not in names:
+                    peer = ledger.peer(pid)
+                    names[pid] = peer.name if peer is not None else pid
+            status["pulled_by"] = [
+                {"peer": names.get(str(r.get("peer_id") or ""), "?"), "at": r.get("at"), "items": r.get("items") or []}
+                for r in status["pull_log"]
+            ]
         if job_id and isinstance(status.get("job"), Mapping):
             cont = self._spawner().result(job_id)
             if cont.get("started"):
@@ -1682,10 +1720,9 @@ class EngineBackend:
         *,
         side_question: Callable[[str], str | None] | None,
     ) -> dict:
-        extra: dict[str, Any] = {"options": options}
-        if side_question is not None:
-            extra["side_question"] = side_question
-        return dict(self._runner().create_offer(peer, session_ref, ctx=self._ctx, **extra))
+        return dict(
+            self._runner().create_offer(peer, session_ref, ctx=self._ctx, options=options, side_question=side_question)
+        )
 
     def remote_choices(self, peer: Peer, *, limit: int) -> dict:
         client = self._client(peer)
@@ -1697,14 +1734,10 @@ class EngineBackend:
         return {"sessions": list(sessions), "offers": list(offers)}
 
     def reclaim(self, session_id: str, *, force: bool) -> dict:
-        from . import lock
+        from . import jobs
 
-        db = hostcompat.session_db()
-        try:
-            return dict(lock.reclaim(db, self._ledger(), session_id, force=force) or {})
-        finally:
-            with contextlib.suppress(Exception):
-                db.close()
+        self._started()
+        return dict(jobs.reclaim(session_id, force=force) or {})  # tells the target ``source_reclaimed`` (W047)
 
     def gc(self, *, job_id: str | None, all_jobs: bool) -> dict:
         import shutil
@@ -1772,12 +1805,7 @@ class EngineBackend:
         self._ledger().suggestion_put(session_id, data)
 
     def presend_summary(self, final: FinalPlan) -> dict:
-        try:
-            from .plan import presend_summary
-        except ImportError:
-            return surfaces.plan_summary(final)
-        summary = presend_summary(final)
-        return {**surfaces.plan_summary(final), **(summary or {})}
+        return surfaces.plan_summary(final)  # cluster D's presend_summary/summarize, keyed for rendering (W125)
 
     def doctor_checks(self) -> list[dict]:
         checks: list[dict] = []
@@ -1843,15 +1871,9 @@ class EngineBackend:
             )
             for peer in (p for p in ledger.peers() if p.direction == "dial"):
                 try:
-                    probe = self._client(peer).probe_gate()
-                    checks.append(
-                        {
-                            "name": f"peer {peer.name}",
-                            "ok": bool(probe.get("ok")),
-                            "detail": str(probe.get("detail") or probe),
-                            "remedy": probe.get("remedy"),
-                        }
-                    )
+                    client = self._client(peer)
+                    probe = client.probe_gate(measure_limit=True)
+                    checks.append(peer_check(peer, probe, getattr(client, "clock_skew", None)))
                 except HandoverError as err:
                     checks.append(
                         {"name": f"peer {peer.name}", "ok": False, "detail": surfaces.render_error(err, peer.name)}
@@ -1901,9 +1923,5 @@ class EngineBackend:
     def hook_runtime(self) -> HookRuntime | None:
         from . import lock
 
-        rt = self._started()
-        veto = getattr(rt, "veto", None)
-        if veto is None:
-            veto = lock.VetoIndex(self._data_dir() / "ledger.sqlite3")
-            veto.start()
-        return _VetoAdapter(veto, self._ledger(), lock.veto_texts)
+        rt = self._started()  # the profile's one VetoIndex (started by ensure_started); never a second one
+        return _VetoAdapter(rt.veto, rt.ledger, lock.veto_texts)

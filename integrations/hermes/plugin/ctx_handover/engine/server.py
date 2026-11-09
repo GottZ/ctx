@@ -22,7 +22,10 @@ itself owns no job state. It calls: ``open``, ``get``, ``job_context`` (requeste
 ``settings`` keys (all optional): ``inbound`` (auto|on|off), ``name``, ``max_request_mb`` (8),
 ``max_json_bytes`` (4 MiB), ``operator_api`` (False), ``hosted`` (False), ``capabilities`` (restricting
 iterable), ``plugin_version``, ``hermes_version``, ``rate_per_s`` (20), ``rate_burst`` (60),
-``max_jobs_per_peer`` (2), ``max_jobs_total`` (4), ``pair_failures_per_hour`` (30).
+``max_jobs_per_peer`` (2), ``max_jobs_total`` (4), ``pair_failures_per_hour`` (30). The composition root passes
+the plugin settings as loaded from ``config.yaml`` plus ``hosted``/``plugin_version``/``hermes_version``, so values
+are normalised here: a bare YAML ``off``/``on`` arrives as a boolean and means ``off``/``on``, an unknown
+``inbound`` value keeps inbound closed, and a missing, non-numeric or non-positive number falls back to its default.
 """
 
 from __future__ import annotations
@@ -394,6 +397,32 @@ async def _one(body: bytes) -> AsyncIterator[bytes]:
         yield body
 
 
+def _positive(value: object, default: float) -> float:
+    """A positive number from a setting (int, float or numeric string), else ``default``."""
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) and number > 0 else default
+
+
+def _text(value: object) -> str:
+    return "" if value is None else str(value)
+
+
+def inbound_mode(value: object) -> str:
+    """``inbound`` as ``auto``|``on``|``off`` (DESIGN §12.4). ``hermes_yaml`` reads a bare ``off``/``on`` as
+    False/True; any other unknown value keeps inbound closed (``off``)."""
+    if value is None:
+        return "auto"
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    mode = str(value).strip().lower()
+    return mode if mode in {"auto", "on", "off"} else "off"
+
+
 class Server:
     """See module docstring."""
 
@@ -416,10 +445,16 @@ class Server:
         self._redact = redact or (lambda text: text)
         self._clock = clock
         s = self._settings
-        self.max_request_bytes = int(float(s.get("max_request_mb", 8)) * MIB)
-        self.max_json_bytes = min(int(s.get("max_json_bytes", DEFAULT_MAX_JSON)), self.max_request_bytes)
-        self._rate = _Buckets(s.get("rate_per_s", 20), s.get("rate_burst", 60), clock)
-        self._pair_failures = _Window(int(s.get("pair_failures_per_hour", 30)), 3600, clock)
+        self.name = _text(s.get("name"))
+        raw_inbound = s.get("inbound")
+        self.inbound = inbound_mode(raw_inbound)
+        if not isinstance(raw_inbound, bool) and raw_inbound is not None:
+            if str(raw_inbound).strip().lower() not in {"auto", "on", "off"}:
+                log.warning("ctx_handover: unknown inbound setting %r; inbound stays closed", str(raw_inbound)[:40])
+        self.max_request_bytes = int(_positive(s.get("max_request_mb"), 8) * MIB)
+        self.max_json_bytes = min(int(_positive(s.get("max_json_bytes"), DEFAULT_MAX_JSON)), self.max_request_bytes)
+        self._rate = _Buckets(_positive(s.get("rate_per_s"), 20), _positive(s.get("rate_burst"), 60), clock)
+        self._pair_failures = _Window(int(_positive(s.get("pair_failures_per_hour"), 30)), 3600, clock)
         self._allowed_cache: collections.OrderedDict[str, tuple[frozenset[str], frozenset[str]]] = (
             collections.OrderedDict()
         )
@@ -441,8 +476,8 @@ class Server:
         if not ZSTD_AVAILABLE:
             caps.discard("enc.zstd")
         restrict = self._settings.get("capabilities")
-        if restrict is not None:
-            caps &= set(restrict)
+        if isinstance(restrict, (list, tuple, set, frozenset)):
+            caps &= {str(c) for c in restrict}
         if self.operator_enabled():
             caps.add("operator.v1")
         return frozenset(caps)
@@ -511,10 +546,9 @@ class Server:
     def _inbound_active(self) -> bool:
         if self._identity is None:
             return False
-        mode = str(self._settings.get("inbound", "auto")).lower()
-        if mode == "off":
+        if self.inbound == "off":
             return False
-        if mode == "on":
+        if self.inbound == "on":
             return True
         if self._ledger.pairing_pending(self._clock()):
             return True
@@ -594,7 +628,7 @@ class Server:
                 identity,
                 body,
                 req.client_ip,
-                name=str(self._settings.get("name", "")),
+                name=self.name,
                 clock=self._clock,
             )
         except HandoverError:
@@ -618,9 +652,9 @@ class Server:
         identity = self._identity
         out = self._unsigned("hello", req)
         out.update(
-            plugin_version=str(self._settings.get("plugin_version", "")),
-            hermes_version=str(self._settings.get("hermes_version", "")),
-            name=str(self._settings.get("name", "")),
+            plugin_version=_text(self._settings.get("plugin_version")),
+            hermes_version=_text(self._settings.get("hermes_version")),
+            name=self.name,
             capabilities=sorted(self.capabilities()),
             limits=self._limits(),
             server_time=int(self._clock()),
@@ -681,8 +715,8 @@ class Server:
                 *self._ledger.jobs(role=Role.TARGET, active=True, limit=1000),
             )
         ]
-        per_peer = int(self._settings.get("max_jobs_per_peer", 2))
-        total = int(self._settings.get("max_jobs_total", 4))
+        per_peer = int(_positive(self._settings.get("max_jobs_per_peer"), 2))
+        total = int(_positive(self._settings.get("max_jobs_total"), 4))
         mine = [r for r in rows if auth.peer is not None and r.get("peer_id") == auth.peer.peer_id]
         if len(mine) >= per_peer or len(rows) >= total:
             raise RateLimited("too many concurrent jobs on this listener", retry_after=60)
@@ -732,10 +766,12 @@ class Server:
         return {"state": status.state}
 
     def _h_job_cancel(self, auth, params, body, req) -> dict:
+        cancel = getattr(self._registry, "cancel", None)
+        if callable(cancel):  # the registry applies the participant rules (prepared source / committing target refuse)
+            return cancel(auth, params["id"], body)
         role = self._job_role(auth, params["id"])
         api, job = self._participant(auth, params["id"], role)
         reason = str(body.get("reason", "cancelled"))[:200]
-        self._ledger.set_cancel(params["id"])
         if role == Role.SOURCE:
             api.start_release(job, reason)
         else:
@@ -879,10 +915,16 @@ class Server:
         if not isinstance(raw, list) or len(raw) > MAX_OBJECT_IDS:
             raise BadRequest(f"manifests must hold at most {MAX_OBJECT_IDS} entries", field="manifests")
         ms = [verify_manifest(from_wire(ObjectManifest, m)) for m in raw]
-        stored = api.blocks().put_manifests(ms)
+        stored = self._sink(api, _job).put_manifests(ms)
         for m in ms:
             self._ledger.job_object(params["id"], m.object_id)
         return {"stored": stored}
+
+    @staticmethod
+    def _sink(api, job):
+        """The job's quota-enforcing sink when the target offers one (R28), else its store."""
+        blocks_for = getattr(api, "blocks_for", None)
+        return blocks_for(job) if callable(blocks_for) else api.blocks()
 
     def _h_blocks_need(self, auth, params, body, req) -> dict:
         api, _job = self._tgt(auth, params)
@@ -898,7 +940,7 @@ class Server:
                 rejected.append({"id": block_id, "reason": reason})
             else:
                 good.append((block_id, raw))
-        stored, sink_rejects = api.blocks().write_blocks(good)
+        stored, sink_rejects = self._sink(api, _job).write_blocks(good)
         rejected.extend({"id": i, "reason": code} for i, code in sink_rejects)
         return {"stored": stored, "rejected": rejected}
 

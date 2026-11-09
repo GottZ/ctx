@@ -7,6 +7,7 @@ import io
 import os
 import stat
 import struct
+import time
 import zlib
 from dataclasses import replace
 
@@ -280,3 +281,75 @@ def test_release_job_frees_over_cap(plugin_data, ledger):
     # keep=False frees everything of the job that no live job needs
     store.release_job(job, keep=False)
     assert not any(store.has(b) for b in m.blocks)
+
+
+def _manifest_gone(store, ledger, m) -> bool:
+    return not store.manifest_path(m.object_id).exists() and ledger.object_get(m.object_id) is None
+
+
+def _manifest_kept(store, ledger, m) -> bool:
+    return store.manifest_path(m.object_id).is_file() and ledger.object_get(m.object_id) is not None
+
+
+def test_manifest_gc_collects_finished_and_aborted_jobs(plugin_data, ledger):
+    """★ R28: ``release_job(keep=False)`` and ``gc`` remove the manifest files and ``objects`` rows of objects that
+    no non-terminal job references (committed and aborted jobs, unreferenced objects); objects of a live job — also
+    one shared with a finished job — keep both, and so does a manifest (re-)stored within the grace window.
+
+    Red proof: mutant = ``release_job`` and ``gc`` without ``self.collect_manifests(…)`` → the aborted job's
+    manifest file is still there after ``release_job(keep=False)``.
+    """
+    later = time.time() + 2 * blocks.MANIFEST_GRACE_S
+    store = BlockStore(plugin_data, ledger, clock=lambda: later)
+    done, aborted, live = "01JOBDONE00000000000000000", "01JOBABRT00000000000000000", "01JOBLIVE00000000000000000"
+    for job in (done, aborted, live):
+        ledger.create_job(job, Role.TARGET, Mode.PUSH, None, {})
+    m_done = store.put_bytes(_noise(BLOCK_SIZE + 9, seed=11), "application/octet-stream")
+    m_aborted = store.put_bytes(_noise(700, seed=12), "application/json")
+    m_live = store.put_bytes(_noise(800, seed=13), "application/json")
+    m_shared = store.put_bytes(_noise(900, seed=14), "application/json")
+    m_orphan = store.put_bytes(_noise(1000, seed=15), "application/json")
+    for job, m in ((done, m_done), (done, m_shared), (aborted, m_aborted), (live, m_live), (live, m_shared)):
+        ledger.job_object(job, m.object_id)
+    end_job(ledger, done, Role.TARGET, "committed")
+    end_job(ledger, aborted, Role.TARGET, "aborted")
+
+    store.release_job(aborted, keep=False)
+    assert _manifest_gone(store, ledger, m_aborted)
+    assert not any(store.has(b) for b in m_aborted.blocks)
+    for m in (m_done, m_live, m_shared, m_orphan):  # not objects of the released job
+        assert _manifest_kept(store, ledger, m)
+
+    store.gc(keep_days=3, max_bytes=1 << 40)
+    assert _manifest_gone(store, ledger, m_done)
+    assert _manifest_gone(store, ledger, m_orphan)
+    assert _manifest_kept(store, ledger, m_live)
+    assert _manifest_kept(store, ledger, m_shared)
+    assert store.has_object(m_live.object_id) and store.has_object(m_shared.object_id)
+    assert all(store.has(b) for b in m_done.blocks)  # blocks stay cached within the cap; only manifests go
+    # a collected object stored again is a new manifest; a live job's object is never collected
+    assert store.put_manifests([m_done]) == 1
+    end_job(ledger, live, Role.TARGET, "committed")
+    assert store.collect_manifests() == 3  # m_done (re-stored, unreferenced), m_live, m_shared
+    assert not [p for p in (plugin_data / "manifests").rglob("*.json")]
+
+
+def test_manifest_gc_grace_covers_store_before_job_object(plugin_data, ledger):
+    """A manifest (re-)stored within ``MANIFEST_GRACE_S`` survives GC although no job references it yet: the
+    window between ``put_manifests`` and ``ledger.job_object``. Re-storing an old manifest refreshes it.
+
+    Red proof: mutant = ``_store_manifest`` without ``os.utime`` (an existing file is left as it is) → the re-stored
+    old manifest is collected.
+    """
+    store = BlockStore(plugin_data, ledger)
+    fresh = store.put_bytes(_noise(600, seed=21), "application/json")
+    old = store.put_bytes(_noise(650, seed=22), "application/json")
+    stale = time.time() - 2 * blocks.MANIFEST_GRACE_S
+    os.utime(store.manifest_path(old.object_id), (stale, stale))
+    assert store.put_manifests([old]) == 0  # known already: only refreshed
+    assert store.collect_manifests() == 0
+    assert _manifest_kept(store, ledger, fresh) and _manifest_kept(store, ledger, old)
+    os.utime(store.manifest_path(old.object_id), (stale, stale))
+    assert store.collect_manifests() == 1
+    assert _manifest_gone(store, ledger, old)
+    assert _manifest_kept(store, ledger, fresh)

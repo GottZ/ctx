@@ -48,8 +48,17 @@ def format_progress(p: Progress, peer: str | None, direction: str, *, eta_s: flo
     return " · ".join(parts)
 
 
-TERMINAL_STEPS = frozenset({"done", "aborted", "failed", "suspended", "in_doubt", "cancelled"})
-"""``Progress.step`` values with which the runner ends a job; they trigger the final text (never throttled)."""
+CLOSING_STEPS = frozenset({"done", "aborted", "suspended"})
+"""Conductor stop states (``conductor.STOP_STATES``): the runner reports one of them last and nothing follows — the
+final text replaces the notice for good. A cancel by the user ends ``aborted`` with ``last_error.code ==
+"cancelled"``."""
+
+PARKING_STEPS = frozenset({"in_doubt", "retiring"})
+"""States the runner may park in (the janitor resumes them) or pass through on the way to ``done``: the final text
+is shown, but later progress may still replace it."""
+
+TERMINAL_STEPS = CLOSING_STEPS | PARKING_STEPS
+"""``Progress.step`` values that may be the last a runner reports (W111); they render the final text, unthrottled."""
 
 _MAX_WARNINGS = 5
 
@@ -93,7 +102,9 @@ class PostMessageReporter:
     """A sticky ``post_message`` notice edited in place (see module docstring).
 
     ``on_done`` renders the final text when the runner reports a terminal step; without it the last progress
-    line stays. The handle is created by ``start`` in the handler thread (the conversation is bound there).
+    line stays. Nothing is posted before ``start`` (the planning part runs inside the handler, which answers
+    itself). After a closing step (``CLOSING_STEPS``) the notice is final; after a parking step it stays open,
+    because the runner may continue to ``done`` from there. The handle is created by ``start`` in the handler thread (the conversation is bound there).
     """
 
     def __init__(
@@ -121,6 +132,7 @@ class PostMessageReporter:
         self._rate = _Rate()
         self._lock = threading.Lock()
         self._closed = False
+        self._started = False
 
     def _post(self, text: str) -> None:
         # Feature detection, not a hard call: in the plugin host ``post_message`` is a stub that raises
@@ -159,6 +171,7 @@ class PostMessageReporter:
     def start(self, text: str) -> None:
         """Post the first message (the pre-send summary, SEC 5.8) and keep its handle."""
         with self._lock:
+            self._started = True
             self._line = str(text)
             self._last_edit = self._clock()
             self._post(self._line)
@@ -166,8 +179,8 @@ class PostMessageReporter:
     def progress(self, p: Progress) -> None:
         try:
             with self._lock:
-                if self._closed:
-                    return
+                if self._closed or not self._started:
+                    return  # planning runs inside the handler, which answers itself; the notice starts with start()
                 if p.step in TERMINAL_STEPS:
                     text = None
                     if self._on_done is not None:
@@ -176,7 +189,7 @@ class PostMessageReporter:
                         except Exception:
                             logger.debug("final text failed", exc_info=True)
                     self._line = text or format_progress(p, self._peer, self._direction)
-                    self._closed = text is not None
+                    self._closed = text is not None and p.step in CLOSING_STEPS
                     self._edit(self._compose() if text is None else text, force=True)
                     return
                 eta = self._rate.eta(self._clock(), p)
@@ -188,7 +201,7 @@ class PostMessageReporter:
     def info(self, text: str) -> None:
         try:
             with self._lock:
-                if not self._closed:
+                if self._started and not self._closed:
                     self._line = str(text)
                     self._edit(self._compose(), force=False)
         except Exception:

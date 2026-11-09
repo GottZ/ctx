@@ -231,6 +231,8 @@ class ParticipantRegistry:
         """The ``JobContext`` to pass to the API of that job (same checks as ``get``)."""
         return self.bind(auth, job_id, role)[1]
 
+    job_context = context  # name used by server.Server (cluster C)
+
     def list_sessions(self, auth: AuthContext, body: dict) -> dict:
         """Route #4: the session picker of a pull (needs ``pull``; titles of non-archived sessions, §8.7)."""
         self._require(auth, Right.PULL)

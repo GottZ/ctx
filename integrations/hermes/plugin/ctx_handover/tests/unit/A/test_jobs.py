@@ -243,10 +243,11 @@ def test_runner_threads_inherit_context_and_cancel(tmp_path, clock):
     assert seen and seen[0] == "work"
     assert e.state(job_id) == "done"
     assert "Too late to cancel" in e.runner.cancel(job_id)
-    st = e.runner.status(job_id)
-    assert st["outcome"] == "done" and st["exit_code"] == 0 and st["ack"].session_id == "new-tip"
+    st = e.runner.status(job_id)["job"]
+    assert st["outcome"] == "done" and st["exit_code"] == 0 and st["ack"]["session_id"] == "new-tip"
+    assert st["active"] is False and st["calling_session"] is None
     overview = e.runner.status(None)
-    assert overview["recent"][0]["job_id"] == job_id
+    assert overview["jobs"][0]["job_id"] == job_id
     e.ledger.close()
 
 
@@ -297,12 +298,12 @@ def _transport(log):
         pass
 
     class BundleTarget:
-        def __init__(self, out, identity, *, as_dir, declared_facts, ledger):
-            log.append(("bundle_target", str(out), as_dir))
+        def __init__(self, out, identity, *, as_dir, declared_facts, ledger, retire=True, **kw):
+            log.append(("bundle_target", str(out), as_dir, retire))
 
     class BundleSource:
-        def __init__(self, path, *, trusted_pubkeys, trust_unsigned, ledger):
-            log.append(("bundle_source", sorted(trusted_pubkeys), trust_unsigned))
+        def __init__(self, path, *, trusted_pubkeys, trust_unsigned, ledger, again=False):
+            log.append(("bundle_source", sorted(trusted_pubkeys), trust_unsigned, again))
 
     return SimpleNamespace(
         wire=SimpleNamespace(WireClient=Client),
@@ -380,8 +381,8 @@ def test_apis_for_wiring(tmp_path, clock, fake_host):
         ledger=led,
         transport=t,
     )
-    assert ("bundle_target", "/b.ctxh.tar", True) in log
-    assert ("bundle_source", ["pkD", "pkI"], False) in log
+    assert ("bundle_target", "/b.ctxh.tar", True, True) in log  # retire unless --keep (O3)
+    assert ("bundle_source", ["pkD", "pkI"], False, False) in log
     with pytest.raises(BadRequest):
         jobs.apis_for(
             Mode.OFFER,

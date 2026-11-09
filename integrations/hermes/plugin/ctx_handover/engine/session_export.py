@@ -7,10 +7,19 @@ transcript only grew (delta) or changed otherwise (``stale_session``).
 
 Every read goes through public ``SessionDB`` methods; ``db`` is passed in (built by ``hostcompat`` in the
 composition roots). Nothing here writes to the session store.
+
+Identity completion (``complete_identity``): rows an older Hermes build wrote carry no ``message_uid`` (the core
+mints one lazily, one bounded slice per store open, ``hermes_state_schema.py:1127-1156``) and assistant rows no
+``tool_call_uids`` (never backfilled; ``agent/message_metadata.py:341-348``). Every insert path of the target
+mints the missing ids at random (``hermes_state_messages.py:417-418, 674-677``), so such a row could never verify.
+The capsule therefore carries, for exactly the ids the target's insert would mint, a stable id derived from the
+source row (``ctxh-legacy-uid-v1``: sha256 of the session id, the row id and, for a call, its pairing key) — the
+rows the core already stamped stay byte-true. Source hashes, delta hashes and the target all see the same ids.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Iterator, Mapping, Sequence
 
@@ -40,6 +49,9 @@ SIDE_STATE_KEYS: tuple[str, ...] = ("goal", "heartbeat", "loop")
 ROW_OBJECT_DROP: frozenset[str] = frozenset({"messages", "timings", "segments", "system_prompt", "tool_names"})
 """Session-row keys the capsule never carries. ``system_prompt``/``tool_names`` are rebuilt by the target
 (DESIGN §6.4) and would only ship the source's prompt text (memory, context files) for nothing."""
+
+LEGACY_UID_ALGO = "ctxh-legacy-uid-v1"
+"""Namespace of the ids ``complete_identity`` derives for rows without core-stamped identities."""
 
 DEFAULT_PAGE_ROWS = 2000
 DEFAULT_PAGE_BYTES = 4 * 1024**2
@@ -133,6 +145,103 @@ def iter_segment_rows(db, session_id: str, *, after_id: int = 0, batch: int = _R
             return
 
 
+def coalesce_call_id(tc: object) -> str:
+    """The core's pairing key of one decoded tool call (stdlib mirror of
+    ``agent.message_sanitization.coalesce_tool_call_id``, ``agent/message_sanitization.py:551-559``): ``call_id``
+    before ``id``, stripped, a bridge suffix ``|…`` cut; ``""`` when the entry names none."""
+    if not isinstance(tc, Mapping):
+        return ""
+    for key in ("call_id", "id"):
+        raw = tc.get(key)
+        value = raw.strip() if isinstance(raw, str) else ""
+        if value:
+            return value.split("|", 1)[0].strip() or value
+    return ""
+
+
+def uid_map(value: object) -> dict:
+    """A stored ``{call id: uid | [uid, …]}`` map as the core's insert keeps it (stdlib mirror of
+    ``hermes_state_identity._uid_map``, ``hermes_state_identity.py:28-37``): JSON text decoded, invalid entries
+    dropped, anything else ``{}``."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = {}
+    if not isinstance(value, dict):
+        return {}
+    return {
+        k: v
+        for k, v in value.items()
+        if isinstance(k, str)
+        and k
+        and ((isinstance(v, str) and v) or (isinstance(v, list) and v and all(isinstance(u, str) and u for u in v)))
+    }
+
+
+def _derived_uid(*parts: object) -> str:
+    text = "\n".join((LEGACY_UID_ALGO, *(str(p) for p in parts)))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+
+
+_INVALID = object()
+
+
+def _decoded(value: object) -> object:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return _INVALID
+    return value
+
+
+def complete_identity(row: dict, session_id: str) -> bool:
+    """Give ``row`` (in place) every identity the target's insert would otherwise mint at random; ``True`` when
+    it changed something.
+
+    * ``message_uid`` missing or not a non-empty string ⇒ ``sha256(algo, session id, row id)[:32]`` (the shape of
+      the core's ids, ``lower(hex(randomblob(16)))``);
+    * an assistant row's ``tool_calls`` name a pairing key without an entry in ``tool_call_uids`` ⇒ one derived
+      uid per key (a key repeated inside the row shares it, as at the core's insert,
+      ``hermes_state_messages.py:306-322``); the map is written in the core's column form
+      (``json.dumps(…, sort_keys=True)``, ``NULL`` when empty) only when it differs from the stored one.
+
+    Rows that already carry the core's identities are left untouched (byte-true). ``tool_call_uid`` of a result
+    row stays as stored: the target derives it from the pairing and the hashes leave it out
+    (``session_hash.ALL_DERIVED``).
+    """
+    changed = False
+    sid = str(row.get("session_id") or session_id)
+    rid = str(row.get("id"))
+    uid = row.get("message_uid")
+    if not (isinstance(uid, str) and uid):
+        row["message_uid"] = _derived_uid("message", sid, rid)
+        changed = True
+    stored = row.get("tool_call_uids")
+    uids = uid_map(stored)
+    if row.get("role") == "assistant":
+        calls = _decoded(row.get("tool_calls"))
+        if isinstance(calls, list):
+            for tc in calls:
+                key = coalesce_call_id(tc)
+                if key and key not in uids:
+                    uids[key] = _derived_uid("tool_call", sid, rid, key)
+    if _decoded(stored) != (uids or None):
+        row["tool_call_uids"] = json.dumps(uids, sort_keys=True) if uids else None
+        changed = True
+    return changed
+
+
+def export_rows(db, session_id: str, *, after_id: int = 0, stats: dict | None = None) -> Iterator[dict]:
+    """Rows of one segment as the capsule, the delta and every source-side hash see them: ``iter_segment_rows``
+    with ``complete_identity`` applied; ``stats["identity_completed"]`` counts the rows it changed."""
+    for row in iter_segment_rows(db, session_id, after_id=after_id):
+        if complete_identity(row, session_id) and stats is not None:
+            stats["identity_completed"] = int(stats.get("identity_completed", 0)) + 1
+        yield row
+
+
 def row_object(row: Mapping) -> dict:
     """The capsule's copy of a session row: every column except ``ROW_OBJECT_DROP`` and in-memory ``_`` keys."""
     return {k: v for k, v in row.items() if k not in ROW_OBJECT_DROP and not str(k).startswith("_")}
@@ -217,6 +326,7 @@ def export_capsule(
     total_bytes = 0
     max_segment_bytes = 0
     approx_chars = 0
+    completion: dict = {"identity_completed": 0}
     for seg_id in lineage:
         if cancelled():
             raise Cancelled("export cancelled")
@@ -228,7 +338,7 @@ def export_capsule(
         counts = {"rows": 0, "active": 0, "archived": 0, "rewind": 0}
         rows_bytes = 0
         batch: list[dict] = []
-        for row in iter_segment_rows(db, seg_id):
+        for row in export_rows(db, seg_id, stats=completion):
             counts["rows"] += 1
             if is_rewind_row(row):
                 counts["rewind"] += 1
@@ -292,6 +402,7 @@ def export_capsule(
             "bytes": total_bytes,
             "max_segment_bytes": max_segment_bytes,
             "approx_tokens": approx_chars // 4,
+            "identity_completed": completion["identity_completed"],
         },
     }
     manifest = put_json(store, capsule)
@@ -333,7 +444,7 @@ def _appended_rows(db, tip: str, base: tuple, now: tuple) -> list[dict] | None:
         return None
     if tuple(ids_old) != tuple(ids_new) or trev_old != trev_new or count_new <= count_old or max_new <= max_old:
         return None
-    above = [r for r in iter_segment_rows(db, tip, after_id=int(max_old)) if r.get("active", 1)]
+    above = [r for r in export_rows(db, tip, after_id=int(max_old)) if r.get("active", 1)]
     if len(above) != count_new - count_old:
         return None
     return above
@@ -365,7 +476,7 @@ def _hashes_now(db, tip: str, lineage: Sequence[str]) -> tuple[str, str, str]:
     all_stream = HashStream(ALL_ALGO)
     rows_stream = HashStream(ROWS_ALGO)
     for seg in lineage:
-        for row in iter_segment_rows(db, seg):
+        for row in export_rows(db, seg):
             if not is_rewind_row(row):
                 all_stream.add(row)
             if seg == tip and is_live_model_row(row):
@@ -376,7 +487,10 @@ def _hashes_now(db, tip: str, lineage: Sequence[str]) -> tuple[str, str, str]:
 def export_delta(db, info: SessionInfo, exported: CapsuleInfo, new_rows: list[dict], *, store) -> DeltaInfo:
     """Write the ``ctxh.delta`` object: the tip rows appended since the capsule and the hashes of the whole
     lineage after them. The rows are re-read inside a revision bracket; ``new_rows`` from ``check_revision`` must
-    name the same row ids, else ``StaleSession``."""
+    name the same row ids, else ``StaleSession``. The expected hashes come from the store as it is now (identities
+    completed as in the capsule): when the core's backfill minted its own ids onto legacy rows after the export
+    (no revision step), they differ from the target's and ``apply_delta`` raises ``VerifyFailed`` ⇒ reset and
+    re-export, never a silent mismatch."""
     tip = info.tip_id
     rev_before = _freeze(db.conversation_revision(tip, include_ancestors=True))
     base = _freeze(exported.revision)

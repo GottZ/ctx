@@ -16,6 +16,10 @@ Release rules (R18, I11): ``restrict_to_releasable`` reduces a remote conductor'
 plan plus paths under the operator's ``export_roots``; the counterpart can narrow, never widen, and its
 ``include_secret`` is ignored (with a warning). ``build_plan(remote_driven=True)`` ignores the counterpart's include
 hints for the same reason.
+
+Suspected secrets (R25): an extra file the policy suspects (or could not check, no redactor) carries the exact reason
+element ``SUSPECTED_SECRET``; ``apply_choice(final, "yes")`` never confirms it and ``restrict_to_releasable`` never
+lets a counterpart confirm it. Only a local ``include_secret`` (``yes`` already in the plan) releases it.
 """
 
 from __future__ import annotations
@@ -87,6 +91,11 @@ CONFIRM_LETTERS: dict[str, str] = {
 except ``proposed`` alone, which only excludes the proposals (BX L5)."""
 
 CHOICES = ("yes", "no_proposed")
+
+SUSPECTED_SECRET = "suspected_secret"  # noqa: S105 - reason marker, not a secret
+"""Exact ``PlanItem.reasons`` element of an item the policy suspects to hold a secret, or could not check (R25,
+X05). ``apply_choice(final, "yes")`` turns such a proposal into ``no``."""
+MAX_REFUSED_IDS = 256
 
 WHY_OUTSIDE_HOME = "outside home"
 WHY_SECRET = "secret"  # noqa: S105 - reason text, not a secret
@@ -263,7 +272,7 @@ class _Builder:
             return check_source_file(p, self.cfg, explicit=explicit), False
         if self.redact is None:
             verdict = check_source_file(p, self.cfg, explicit=explicit)
-            return verdict, verdict.allowed
+            return verdict, verdict.allowed and not lifted
         verdict = check_extra(p, self.cfg, explicit=explicit, redact=self.redact)
         return verdict, verdict.reason == "suspected_secret"
 
@@ -551,9 +560,12 @@ def _assign_ids(drafts: Sequence[_Draft], taken: Iterable[str] = ()) -> None:
 
 
 def _to_item(d: _Draft, suggest_dest: Callable[[str], str | None] | None) -> PlanItem:
-    reasons = list(dict.fromkeys(d.reasons))
-    if len(reasons) > MAX_REASONS:
-        reasons = [*reasons[: MAX_REASONS - 1], f"… {len(reasons) - MAX_REASONS + 1} more"]
+    marker = [SUSPECTED_SECRET] if d.suspected or SUSPECTED_SECRET in d.reasons else []
+    reasons = list(dict.fromkeys(r for r in d.reasons if r != SUSPECTED_SECRET))
+    cap = MAX_REASONS - len(marker)
+    if len(reasons) > cap:
+        reasons = [*reasons[: cap - 1], f"… {len(reasons) - cap + 1} more"]
+    reasons += marker
     suggested = None
     if suggest_dest is not None:
         try:
@@ -701,8 +713,7 @@ def build_plan(
         for path in hints.include:
             b.suggested_path(path, Origin.USER, "", explicit=True)
     for path in sorted(cfg.include_secret):
-        if path not in b.by_path:
-            b.suggested_path(path, Origin.USER, "include-secret", explicit=True)
+        b.suggested_path(path, Origin.USER, "include-secret", explicit=True)
     b.exclude(hints.exclude, "excluded (--exclude)")
 
     for d in b.drafts:
@@ -807,14 +818,22 @@ def with_plan_id(final: FinalPlan) -> FinalPlan:
 
 
 def apply_choice(final: FinalPlan, choice: str) -> FinalPlan:
-    """Apply the user's answer to the confirmation (DESIGN §14.1): ``"yes"`` confirms every proposal (``yes``);
-    ``"no_proposed"`` ("yes without proposed items", also the non-interactive agent start and an unanswered
-    confirmation of reason (a), SEC 5.6, BX L5) turns every proposal into ``no``. Decisions of ``no`` items become
+    """Apply the user's answer to the confirmation (DESIGN §14.1): ``"yes"`` confirms every proposal (``yes``)
+    except suspected secrets (``SUSPECTED_SECRET`` in ``reasons``), which become ``no`` (R25: a blanket yes never
+    takes them along); ``"no_proposed"`` ("yes without proposed items", also the non-interactive agent start and an
+    unanswered confirmation of reason (a), SEC 5.6, BX L5) turns every proposal into ``no``. Items that are not
+    proposals (a local ``include_secret`` is ``yes`` already) are left alone. Decisions of ``no`` items become
     ``skip``; the result carries no proposal and a recomputed ``plan_id``."""
     if choice not in CHOICES:
         raise ValueError(f"unknown choice {choice!r}")
-    to = Include.YES if choice == "yes" else Include.NO
-    items = tuple(replace(i, include=to) if i.include is Include.PROPOSED else i for i in final.plan.items)
+
+    def decide(item: PlanItem) -> PlanItem:
+        if item.include is not Include.PROPOSED:
+            return item
+        confirm = choice == "yes" and SUSPECTED_SECRET not in item.reasons
+        return replace(item, include=Include.YES if confirm else Include.NO)
+
+    items = tuple(decide(i) for i in final.plan.items)
     no = {i.item_id for i in items if i.include is Include.NO}
     freed = 0
     decisions = []
@@ -871,35 +890,47 @@ def restrict_to_releasable(
       ``no``; a proposal not confirmed stays out), never re-included when the own plan says ``no``.
     * Any other item is a remote addition: released only under ``cfg.export_roots`` and through the policy (no
       suspected secret); with ``export_roots`` empty there are none.
+    * A proposal the source flagged as a suspected secret (``SUSPECTED_SECRET``) is never confirmed by the
+      counterpart (R25: only a local ``include_secret`` releases it).
     * Own items the remote plan omits are not transferred.
     * ``remote_hints.include_secret`` is ignored and recorded (``include_secret from peer ignored``).
     * Plan-level free text, tool/env names, refusals and busy lists come from the own plan.
 
-    Anything else raises ``PolicyDenied`` (``policy_denied``). The result carries a recomputed ``plan_id``."""
+    Anything else raises ``PolicyDenied`` (``policy_denied``) once for the whole plan: ``details["items"]`` lists
+    every refused item id (plan order, each once, at most ``MAX_REFUSED_IDS``; W017), the other details are the first
+    refusal's. The result carries a recomputed ``plan_id``."""
     if remote_final.plan.job_id != own_plan.job_id:
         raise PolicyDenied("the remote plan belongs to another job", reason="not_allowed_root")
     own = {i.item_id: i for i in own_plan.items}
     export = [Path(_real(str(r))) for r in cfg.export_roots]
     out: list[PlanItem] = []
     seen: set[str] = set()
+    refused: list[tuple[str, PolicyDenied]] = []
     for item in remote_final.plan.items:
         if item.item_id in seen:
-            raise PolicyDenied(f"duplicate item {item.item_id}", reason="not_allowed_root", item=item.item_id)
+            refused.append(
+                (
+                    item.item_id,
+                    PolicyDenied(f"duplicate item {item.item_id}", reason="not_allowed_root", item=item.item_id),
+                )
+            )
+            continue
         seen.add(item.item_id)
         mine = own.get(item.item_id)
         if mine is not None:
-            if item.source_path != mine.source_path or item.kind is not mine.kind:
-                raise PolicyDenied(
-                    f"item {item.item_id} differs from the source's plan", reason="not_allowed_root", item=item.item_id
-                )
-            if mine.include is Include.NO and item.include is not Include.NO:
-                raise PolicyDenied(
-                    f"item {item.item_id} is not released by the source", reason="not_allowed_root", item=item.item_id
-                )
+            error = _own_item_refusal(item, mine)
+            if error is not None:
+                refused.append((item.item_id, error))
+                continue
             include = Include.YES if item.include is Include.YES else Include.NO
             out.append(replace(mine, include=include))
             continue
-        out.append(_remote_addition(item, cfg, export, redact))
+        try:
+            out.append(_remote_addition(item, cfg, export, redact))
+        except PolicyDenied as exc:
+            refused.append((item.item_id, exc))
+    if refused:
+        raise _refusal(refused)
     for item in own_plan.items:
         if item.item_id not in seen:
             out.append(replace(item, include=Include.NO))
@@ -912,6 +943,37 @@ def restrict_to_releasable(
     decisions = tuple(d for d in remote_final.decisions if d.item_id in ids)
     plan = replace(own_plan, items=tuple(out), not_transferred=tuple(nt))
     return with_plan_id(replace(remote_final, plan=plan, decisions=decisions))
+
+
+def _own_item_refusal(item: PlanItem, mine: PlanItem) -> PolicyDenied | None:
+    """Why the counterpart's version of an own item is refused (None: it only narrows)."""
+    if item.source_path != mine.source_path or item.kind is not mine.kind:
+        return PolicyDenied(
+            f"item {item.item_id} differs from the source's plan", reason="not_allowed_root", item=item.item_id
+        )
+    if mine.include is Include.NO and item.include is not Include.NO:
+        return PolicyDenied(
+            f"item {item.item_id} is not released by the source", reason="not_allowed_root", item=item.item_id
+        )
+    if mine.include is Include.PROPOSED and item.include is Include.YES and SUSPECTED_SECRET in mine.reasons:
+        return PolicyDenied(
+            f"item {item.item_id} is a suspected secret; only a local --include-secret releases it",
+            reason=SUSPECTED_SECRET,
+            item=item.item_id,
+        )
+    return None
+
+
+def _refusal(refused: Sequence[tuple[str, PolicyDenied]]) -> PolicyDenied:
+    """One ``PolicyDenied`` for every refused item: the first refusal's message and details plus
+    ``details["items"]`` (W017)."""
+    ids = list(dict.fromkeys(str(item_id)[:128] for item_id, _exc in refused))
+    first = refused[0][1]
+    message = first.message if len(ids) == 1 else f"{first.message} (and {len(ids) - 1} more refused items)"
+    details = {**first.details, "items": ids[:MAX_REFUSED_IDS]}
+    if len(ids) > MAX_REFUSED_IDS:
+        details["items_total"] = len(ids)
+    return PolicyDenied(message, details=details)
 
 
 def _remote_addition(item: PlanItem, cfg: PolicyConfig, export: list[Path], redact) -> PlanItem:

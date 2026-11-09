@@ -7,6 +7,8 @@ filesystem layout.
 
 Extra test hooks: ``corrupt(block_id, raw)`` replaces a stored block's bytes; ``job_objects`` maps job id → object
 ids (``track(job_id, object_id)``); ``live_jobs`` names jobs GC must keep; ``reads``/``writes`` count block I/O.
+Like the real store, ``gc`` and ``release_job`` also drop the manifests of tracked objects that no live job
+references (R28); the fake has no clock, so untracked objects and the grace window of the real store are left out.
 """
 
 from __future__ import annotations
@@ -144,13 +146,24 @@ class MemoryBlockStore:
     def track(self, job_id: str, object_id: str) -> None:
         self.job_objects.setdefault(job_id, set()).add(object_id)
 
+    def _live_objects(self) -> set[str]:
+        return {oid for job in self.live_jobs for oid in self.job_objects.get(job, ())}
+
     def _live_blocks(self) -> set[str]:
         out: set[str] = set()
-        for job in self.live_jobs:
-            for oid in self.job_objects.get(job, ()):
-                if oid in self.objects:
-                    out.update(self.objects[oid].blocks)
+        for oid in self._live_objects():
+            if oid in self.objects:
+                out.update(self.objects[oid].blocks)
         return out
+
+    def collect_manifests(self, object_ids: Iterable[str] | None = None) -> int:
+        """Drop the manifests of tracked objects no live job references (R28)."""
+        tracked = {oid for oids in self.job_objects.values() for oid in oids}
+        candidates = tracked if object_ids is None else tracked & set(object_ids)
+        dead = [oid for oid in sorted(candidates - self._live_objects()) if oid in self.objects]
+        for oid in dead:
+            del self.objects[oid]
+        return len(dead)
 
     def gc(self, *, keep_days: float, max_bytes: int) -> int:
         live = self._live_blocks()
@@ -162,11 +175,13 @@ class MemoryBlockStore:
             if keep_days <= 0 or total > max_bytes:
                 total -= len(self.blocks.pop(block_id))
                 freed += 1
+        self.collect_manifests()
         return freed
 
     def release_job(self, job_id: str, *, keep: bool) -> None:
         self.live_jobs.discard(job_id)
         if keep:
+            self.collect_manifests()
             return
         live = self._live_blocks()
         for oid in self.job_objects.get(job_id, ()):
@@ -174,3 +189,4 @@ class MemoryBlockStore:
             for block_id in m.blocks if m else ():
                 if block_id not in live:
                     self.blocks.pop(block_id, None)
+        self.collect_manifests(self.job_objects.get(job_id, ()))

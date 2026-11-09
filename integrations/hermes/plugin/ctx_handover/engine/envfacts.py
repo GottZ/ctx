@@ -4,7 +4,17 @@ Deterministic and without a shell on every platform: values come from ``platform
 ``locale``, ``shutil.which``, ``shutil.disk_usage`` and ``os.stat``; tool versions from ``<tool> --version`` run as
 an argument list (``shell=False``, ``stdin`` closed, a 3 s timeout, a minimal environment that carries no secret of
 the parent) in parallel. Names the transcript or the counterpart supplies (``tools_seen``) are only looked up with
-``which`` — never executed (a peer could name any binary). Hermes facts (WSL/container, profile, versions,
+``which`` — never executed (a peer could name any binary).
+
+Probes leave no trace in the user's home (R26): many tools create state when they start (rustup its toolchain
+home, Go its telemetry counters under the config directory, gradle its user home, npm its logs). Every child of
+one probe therefore runs in a scratch root made with ``tempfile.mkdtemp`` (the system temp directory or
+``scratch_dir``): ``HOME`` — also the working directory, so no project file in the caller's directory steers a
+toolchain — the XDG base directories, ``TMPDIR`` (``TEMP``/``TMP``, ``USERPROFILE``, ``APPDATA`` and
+``LOCALAPPDATA`` on Windows), ``GRADLE_USER_HOME`` and the JVM ``user.home`` (a JVM reads the passwd entry, not
+``$HOME``) point into it, and it is removed when the last child has ended. Without a usable scratch root no tool is
+executed. A tool that needs its real home to answer (a rustup or asdf shim) fails there and is reported with an
+unknown version — a non-zero exit never yields a version. Hermes facts (WSL/container, profile, versions,
 configured model) arrive as ``HostFacts`` from ``hostcompat.host_facts`` — this module imports no Hermes code.
 
 All platform calls go through ``SystemOps`` (``default_system()``), the one seam tests use to run the macOS and
@@ -25,6 +35,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import time
 import unicodedata
 import urllib.parse
@@ -41,6 +52,8 @@ PROBE_TIMEOUT_S = 3.0
 PROBE_WORKERS = 16
 MAX_TOOLS_SEEN = 64
 MAX_VERSION_CHARS = 128
+SCRATCH_PREFIX = "ctxh-probe-"
+"""Name prefix of a probe's scratch root in the temp directory (R26)."""
 
 TOOL_ALLOWLIST: tuple[str, ...] = (
     "git", "python3", "python", "node", "npm", "pnpm", "yarn", "bun", "deno", "go", "cargo", "rustc", "java",
@@ -76,7 +89,15 @@ _TOOL_RE = re.compile(r"^[A-Za-z0-9._+-]{1,64}$")
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SEPARATORS = re.compile(r"&&|\|\||[;|&\n(){}`]|\$\(")
 _CHILD_ENV_POSIX = ("PATH",)
-_CHILD_ENV_WINDOWS = ("PATH", "SYSTEMROOT", "PATHEXT", "WINDIR", "TEMP", "TMP", "USERPROFILE")
+_CHILD_ENV_WINDOWS = ("PATH", "SYSTEMROOT", "PATHEXT", "WINDIR")
+_XDG_DIRS = (
+    ("XDG_CONFIG_HOME", (".config",)),
+    ("XDG_CACHE_HOME", (".cache",)),
+    ("XDG_DATA_HOME", (".local", "share")),
+    ("XDG_STATE_HOME", (".local", "state")),
+)
+_JVM_SAFE = re.compile(r"[^\s\"']+")
+_JVM_NOTICE = re.compile(r"^(?:NOTE: )?Picked up [A-Z_]+:")
 
 
 def _os_release() -> dict[str, str]:
@@ -95,10 +116,14 @@ def _os_release() -> dict[str, str]:
 
 
 def _run(argv: list[str], timeout: float, env: dict[str, str]) -> tuple[int, str, str] | None:
-    """Run ``argv`` without a shell in its own process group; on timeout the whole group is killed (a tool that
-    spawns helpers — gradle, a shell wrapper — leaves nothing behind) and None is returned."""
+    """Run ``argv`` without a shell in its own process group, in the child's own ``HOME`` (the probe's scratch home,
+    R26 — without an existing one nothing runs); on timeout the whole group is killed (a tool that spawns helpers —
+    gradle, a shell wrapper — leaves nothing behind) and None is returned."""
     posix = os.name == "posix"
     flags = 0 if posix else getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    cwd = env.get("HOME")
+    if not cwd or not os.path.isdir(cwd):
+        return None
     try:
         proc = subprocess.Popen(  # noqa: S603 - fixed argv from an allowlist or the operator's tool_probe, no shell
             argv,
@@ -107,6 +132,7 @@ def _run(argv: list[str], timeout: float, env: dict[str, str]) -> tuple[int, str
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
+            cwd=cwd,
             start_new_session=posix,
             creationflags=flags,
         )
@@ -224,27 +250,62 @@ def _family(system: str) -> str:
     return name or "unknown"
 
 
-def _child_env(sys_ops: SystemOps, family: str, home: str) -> dict[str, str]:
+def _scratch_root(parent: str | os.PathLike | None) -> str | None:
+    """A fresh scratch root (mode 0700) with ``home`` and ``tmp`` below ``parent`` (None: the system temp
+    directory), or None when none can be made (R26: then nothing is executed)."""
+    try:
+        root = tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=parent)
+    except (OSError, ValueError):
+        return None
+    try:
+        for sub in ("home", "tmp"):
+            os.mkdir(os.path.join(root, sub), 0o700)
+    except OSError:
+        shutil.rmtree(root, ignore_errors=True)
+        return None
+    return root
+
+
+def _child_env(sys_ops: SystemOps, family: str, scratch: str) -> dict[str, str]:
+    """The children's environment: ``PATH`` (plus the Windows system variables) from the parent, every home, config,
+    cache and temp location inside ``scratch``; nothing else of the parent (no secret, no ``HOME``, no XDG)."""
     keys = _CHILD_ENV_WINDOWS if family == "windows" else _CHILD_ENV_POSIX
     env = {k: sys_ops.environ[k] for k in keys if isinstance(sys_ops.environ.get(k), str)}
     env.setdefault("PATH", os.defpath)
-    if family != "windows":
-        env["HOME"] = home
+    home = os.path.join(scratch, "home")
+    tmp = os.path.join(scratch, "tmp")
+    env["HOME"] = home
+    env["GRADLE_USER_HOME"] = os.path.join(home, ".gradle")
+    if _JVM_SAFE.fullmatch(home):
+        env["JAVA_TOOL_OPTIONS"] = f"-Duser.home={home}"
+    if family == "windows":
+        env["USERPROFILE"] = home
+        env["APPDATA"] = os.path.join(home, "AppData", "Roaming")
+        env["LOCALAPPDATA"] = os.path.join(home, "AppData", "Local")
+        env["TEMP"] = env["TMP"] = tmp
+    else:
+        env["TMPDIR"] = tmp
+        for key, parts in _XDG_DIRS:
+            env[key] = os.path.join(home, *parts)
         env["LANG"] = "C"
         env["LC_ALL"] = "C"
     return env
 
 
 def _version(sys_ops: SystemOps, name: str, path: str, env: dict[str, str]) -> str | None:
+    """First output line of a successful ``<tool> --version`` (stdout before stderr); a JVM's "Picked up …" notice
+    is skipped, a non-zero exit (a shim without its real home) means "unknown"."""
     argv = [path, *VERSION_ARGS.get(name, ("--version",))]
     result = sys_ops.run(argv, PROBE_TIMEOUT_S, env)
     if result is None:
         return None
-    _rc, out, err = result
+    rc, out, err = result
+    if rc != 0:
+        return None
     for text in (out, err):
         for line in str(text).splitlines():
             line = _one_line(line)
-            if line:
+            if line and not _JVM_NOTICE.match(line):
                 return line
     return None
 
@@ -355,10 +416,12 @@ def probe(
     tools_seen: Iterable[str] = (),
     capabilities: frozenset[str] = frozenset(),
     system: SystemOps | None = None,
+    scratch_dir: str | os.PathLike | None = None,
 ) -> EnvFacts:
     """Deterministic facts of this host (DESIGN §11.1). ``tools_seen`` are names to look up (the source's transcript
     tools, or on the target the names the source reported) — never executed. ``system`` (additive) replaces the
-    platform calls."""
+    platform calls; ``scratch_dir`` (additive) is where the probe's scratch root is made instead of the system temp
+    directory (R26, see the module docstring)."""
     s = system or default_system()
     family = _family(s.system())
     home = s.home()
@@ -381,21 +444,26 @@ def probe(
     if flags:
         os_name = f"{os_name} ({', '.join(flags)})"
 
-    env = _child_env(s, family, home)
     names = _tool_names([*TOOL_ALLOWLIST, *options.tool_probe])
     paths = {n: s.which(n) for n in names}
     tools: dict[str, ToolInfo] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=PROBE_WORKERS, thread_name_prefix="ctxh-probe") as pool:
-        futures = {n: pool.submit(_version, s, n, p, env) for n, p in paths.items() if p}
-        for n in names:
-            path = paths[n]
-            version = None
-            if path is not None:
-                try:
-                    version = futures[n].result(timeout=PROBE_TIMEOUT_S + 2)
-                except Exception:  # a hung or crashing probe leaves the version unknown
-                    version = None
-            tools[n] = ToolInfo(path=path, version=version)
+    scratch = _scratch_root(scratch_dir) if any(paths.values()) else None
+    try:
+        env = _child_env(s, family, scratch) if scratch else None
+        # leaving the pool waits for every child: the scratch root is removed only after the last one ended
+        with concurrent.futures.ThreadPoolExecutor(max_workers=PROBE_WORKERS, thread_name_prefix="ctxh-probe") as pool:
+            futures = {n: pool.submit(_version, s, n, p, env) for n, p in paths.items() if p and env is not None}
+            for n in names:
+                version = None
+                if n in futures:
+                    try:
+                        version = futures[n].result(timeout=PROBE_TIMEOUT_S + 2)
+                    except Exception:  # a hung or crashing probe leaves the version unknown
+                        version = None
+                tools[n] = ToolInfo(path=paths[n], version=version)
+    finally:
+        if scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
     seen = {n: s.which(n) for n in _tool_names(tools_seen)[:MAX_TOOLS_SEEN]}
 
     base = Path(home)

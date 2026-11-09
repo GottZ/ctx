@@ -49,7 +49,7 @@ from .gitops import (
 from .jsonutil import canonical_bytes
 from .model import GitState, NotTransferred
 from .paths import strip_url_userinfo
-from .policy import PolicyConfig, check_source_file, is_denied_name, sniff_secret
+from .policy import PolicyConfig, SourceCheckCache, check_source_file, is_denied_name, sniff_secret
 
 PACK_MEDIA = "application/x-git-pack"
 TREE_MEDIA = "application/json"
@@ -114,6 +114,7 @@ def _scan_untracked(
     spec = GitEnvSpec(profile="source", ceiling=root.parent)
     count = 0
     per_dir: Counter[str] = Counter()
+    policy_cache = SourceCheckCache()  # one scan, one cache (never across scans)
     for rec in git.iter_z(["ls-files", "-o", "--exclude-standard", "-z"], cwd=root, spec=spec, cancelled=cancelled):
         if not rec:
             continue
@@ -142,7 +143,7 @@ def _scan_untracked(
             out.pathspecs.add(encode_pathspec(rec))
             continue
         explicit = os.path.normpath(str(path)) in include
-        verdict = check_source_file(path, cfg, explicit=explicit, item_root=root)
+        verdict = check_source_file(path, cfg, explicit=explicit, item_root=root, cache=policy_cache)
         if verdict.allowed:
             continue
         why = verdict.reason or "special"

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import logging
 import os
 import secrets
 import shutil
@@ -54,7 +55,6 @@ from .ledger import JOURNAL_KEEP_S, STALE_OWNER_S, Ledger, private_dir, process_
 from .local_source import LocalSource
 from .local_target import LocalTarget
 from .model import (
-    CommitAck,
     ConductorState,
     FinalPlan,
     Mode,
@@ -70,6 +70,7 @@ from .participant import ParticipantRegistry
 from .policy import PolicyConfig
 
 PLUGIN_ID = "ctx_handover"
+log = logging.getLogger("ctx_handover.jobs")
 OFFER_TTL_S = 2 * 3600
 MAINTENANCE_S = 10.0
 
@@ -155,6 +156,7 @@ class _Profile:
     runner: JobRunner | None = None
     janitor_ran: bool = False
     maintenance: threading.Thread | None = None
+    db_factories: dict = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -169,7 +171,8 @@ def _profile() -> _Profile:
         prof = _PROFILES.get(key)
         if prof is None:
             ledger = Ledger(data_dir / "ledger.sqlite3")
-            prof = _Profile(data_dir=data_dir, ledger=ledger, ops=OpRunner(ledger, hostcompat.run_in_context))
+            ops = OpRunner(ledger, hostcompat.run_in_context, lock_dir=data_dir / "locks")
+            prof = _Profile(data_dir=data_dir, ledger=ledger, ops=ops)
             _PROFILES[key] = prof
         return prof
 
@@ -188,7 +191,7 @@ def _store(prof: _Profile):
         if prof.store is None:
             from . import blocks
 
-            prof.store = blocks.BlockStore(private_dir(prof.data_dir / "blocks"), prof.ledger)
+            prof.store = blocks.BlockStore(prof.data_dir, prof.ledger)  # root = plugin data dir (DESIGN §5.1)
         return prof.store
 
 
@@ -199,6 +202,26 @@ def _git(prof: _Profile):
 
             prof.git = gitops.Git()
         return prof.git
+
+
+def _db_factory(prof: _Profile, state_db: Path) -> Callable:
+    """One ``SessionDB`` per thread and ``state.db`` path, pinned at composition time (worker threads never resolve
+    the profile from the environment of the moment)."""
+    key = str(state_db)
+    with prof.lock:
+        factory = prof.db_factories.get(key)
+        if factory is None:
+            local = threading.local()
+
+            def factory():
+                db = getattr(local, "db", None)
+                if db is None:
+                    db = hostcompat.session_db(state_db)
+                    local.db = db
+                return db
+
+            prof.db_factories[key] = factory
+        return factory
 
 
 def _identity(prof: _Profile):
@@ -213,6 +236,7 @@ def _identity(prof: _Profile):
                 )
             except HandoverError as exc:
                 prof.identity_error = exc.code
+                log.warning("ctx_handover identity not usable: %s (run /handover doctor)", exc.code)
         return prof.identity
 
 
@@ -230,14 +254,14 @@ def _policy(opts: Options, prof: _Profile, hermes, *, include_secret=()) -> Poli
     )
 
 
-def _side_question(ctx, features) -> Callable[[str], str | None] | None:
+def _side_question(ctx, features, timeout_s: float = 45.0) -> Callable[[str], str | None] | None:
     if ctx is None or not features.side_question:
         return None
     token = getattr(ctx, "side_question_token", None)
 
     def ask(prompt: str) -> str | None:
         try:
-            return ctx.side_question(token, prompt, timeout=45.0) if token else None
+            return ctx.side_question(token, prompt, timeout=float(timeout_s)) if token else None
         except Exception:
             return None
 
@@ -271,6 +295,7 @@ def make_local_apis(
     remote_driven: bool = False,
     peer: Peer | None = None,
     include_secret=(),
+    side_question: Callable[[str], str | None] | None = None,
 ) -> tuple[LocalSource, LocalTarget]:
     """``LocalSource`` and ``LocalTarget`` of this profile (composition root; Hermes only via ``hostcompat``)."""
     prof = _profile()
@@ -282,13 +307,15 @@ def make_local_apis(
     features = hostcompat.features(ctx_or_none)
     policy = _policy(opts, prof, hermes, include_secret=include_secret)
     store = _store(prof)
+    state_db = hostcompat.state_db_path()
+    db_factory = _db_factory(prof, state_db)
     git = _git(prof)
     source_ports = getattr(ports, "source", None) if ports is not None else None
     target_ports = getattr(ports, "target", None) if ports is not None else None
     source = LocalSource(
         ledger=prof.ledger,
         store=store,
-        db_factory=hostcompat.session_db,
+        db_factory=db_factory,
         hermes=hermes,
         host=host,
         config=config,
@@ -296,11 +323,11 @@ def make_local_apis(
         git=git,
         calling_session=calling_session,
         session_key=session_key,
-        side_question=_side_question(ctx_or_none, features),
+        side_question=side_question or _side_question(ctx_or_none, features, opts.refine_timeout_s),
         llm=_llm(ctx_or_none),
         read_secret=hostcompat.read_secret,
         redact=hostcompat.redact,
-        state_db=hostcompat.state_db_path(),
+        state_db=state_db,
         remote_driven=remote_driven,
         policy=policy,
         ports=source_ports,
@@ -313,11 +340,12 @@ def make_local_apis(
         log_dir=private_dir(prof.data_dir / "logs"),
         profile=host.profile if host.profile not in ("", "default") else None,
         approvals_off=lambda: hostcompat.approvals_off(hostcompat.load_config()),
+        allow_remote=lambda: bool(plugin_settings(hostcompat.load_config()).get("allow_remote_continue")),
     )
     target = LocalTarget(
         ledger=prof.ledger,
         store=store,
-        db_factory=hostcompat.session_db,
+        db_factory=db_factory,
         hermes=hermes,
         host=host,
         config=config,
@@ -377,16 +405,32 @@ def apis_for(
     if mode is Mode.EXPORT:
         if local_source is None or bundle_path is None:
             raise BadRequest("export needs the local source and a bundle path", field="bundle")
+        host = getattr(local_source, "host", None)
         return local_source, t.bundle.BundleTarget(
-            Path(bundle_path), identity, as_dir=options.as_dir, declared_facts=None, ledger=ledger
+            Path(bundle_path),
+            identity,
+            as_dir=options.as_dir,
+            declared_facts=None,
+            ledger=ledger,
+            retire=not options.keep_source,  # --keep exports a copy and leaves the source active (O3)
+            exporter_name=getattr(local_source, "instance_name", "") or "",
+            plugin_version=getattr(host, "plugin_version", "") or "",
+            hermes_version=getattr(host, "hermes_version", "") or "",
         )
     if mode is Mode.IMPORT:
         if local_target is None or bundle_path is None:
             raise BadRequest("import needs the local target and a bundle path", field="bundle")
-        trusted = {p.pubkey for p in ledger.peers() if p.revoked_at is None}
+        trusted = {p.pubkey for p in ledger.peers() if p.revoked_at is None and p.pubkey}
+        own = ledger.meta_get("identity_pubkey")
+        if own:
+            trusted.add(own)  # a bundle this profile exported itself
         return (
             t.bundle.BundleSource(
-                Path(bundle_path), trusted_pubkeys=trusted, trust_unsigned=options.trust_unsigned, ledger=ledger
+                Path(bundle_path),
+                trusted_pubkeys=trusted,
+                trust_unsigned=options.trust_unsigned,
+                ledger=ledger,
+                again=options.again,
             ),
             local_target,
         )
@@ -395,7 +439,9 @@ def apis_for(
 
 def listener_server():
     """The ``server.Server`` behind ``dashboard/plugin_api.py`` (cached per profile; starts the maintenance
-    sweep of remote-driven participants)."""
+    sweep of remote-driven participants). Without an identity nothing is paired: ``None`` — every route then
+    answers like a missing plugin (DESIGN §12.2, §12.4) and the next request tries again, so a ``/handover pair``
+    in another process of this profile takes effect without a restart."""
     prof = _profile()
     with prof.lock:
         if getattr(prof, "server", None) is not None:
@@ -403,18 +449,36 @@ def listener_server():
         from . import server
 
         identity = _identity(prof)
+        if identity is None:
+            return None
         registry = _registry(prof)
-        settings = plugin_settings(hostcompat.load_config())
-        srv = server.Server(
-            prof.ledger,
-            identity,
-            registry,
-            settings,
-            [server.PeerSignatureAuth(prof.ledger, identity), server.OperatorSessionAuth(enabled=False)],
-        )
+        settings = server_settings(hostcompat.load_config())
+        auths = [server.OperatorSessionAuth(enabled=False)]
+        if identity is not None:
+            auths.append(server.PeerSignatureAuth(prof.ledger, identity))
+        srv = server.Server(prof.ledger, identity, registry, settings, auths, redact=hostcompat.redact)
         prof.server = srv  # type: ignore[attr-defined]
     _start_maintenance(prof)
     return srv
+
+
+def server_settings(config: dict) -> dict:
+    """The listener's settings: the plugin settings plus what the server reports in ``hello`` (W055)."""
+    host = hostcompat.host_facts()
+    settings = dict(plugin_settings(config))
+    settings.setdefault("inbound", "auto")
+    settings.setdefault("name", host.profile if host.profile not in ("", "default") else _hostname())
+    settings.setdefault("max_request_mb", 8)
+    settings["hosted"] = bool(hostcompat.features().host_isolated)
+    settings["plugin_version"] = host.plugin_version
+    settings["hermes_version"] = host.hermes_version
+    return settings
+
+
+def _hostname() -> str:
+    import socket
+
+    return socket.gethostname().split(".")[0][:64] or "hermes"
 
 
 def _registry(prof: _Profile) -> ParticipantRegistry:
@@ -487,6 +551,57 @@ def exit_code(row: dict | None) -> int:
     return EXIT_FAILED
 
 
+def _size_of(path: Path) -> int | None:
+    try:
+        if path.is_dir():
+            return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def _plan_lists(plan_doc: dict) -> dict:
+    """Lists the final message and ``status`` show from the confirmed plan (SEC 4.6): excluded secrets, withheld
+    stash entries, conflicts, instruction files."""
+    plan = plan_doc.get("plan") or {}
+    items = plan.get("items") or []
+    secrets = [
+        n.get("path") for n in plan.get("not_transferred") or () if n.get("why") in ("secret", "suspected_secret")
+    ]
+    stash = [n.get("path") for n in plan.get("not_transferred") or () if "stash" in str(n.get("why"))]
+    conflicts = [
+        {"item_id": d.get("item_id"), "kind": (d.get("conflict") or {}).get("kind"), "dest": d.get("dest")}
+        for d in plan_doc.get("decisions") or ()
+        if d.get("conflict")
+    ]
+    instructions = sorted(
+        {
+            str(r).split(":", 1)[1].strip()
+            for i in items
+            for r in i.get("reasons") or ()
+            if str(r).startswith("instruction file:")
+        }
+    )
+    return {
+        "excluded_secrets": secrets,
+        "withheld_stash": stash,
+        "conflicts": conflicts,
+        "instruction_files": instructions,
+    }
+
+
+def _next_action(row: dict, outcome: str) -> str | None:
+    s = short(row["job_id"])
+    state = row["state"]
+    if state == "suspended":
+        return f"/handover resume {s}"
+    if state in ("in_doubt", "committing"):
+        return "/handover status shows progress; /handover reclaim --force takes the session back here"
+    if outcome == "active_source_pending" or state == "retiring":
+        return "the other side is released on the next contact (the janitor retries)"
+    return None
+
+
 class JobRunner:
     """Conductor jobs of this process (see module docstring)."""
 
@@ -516,6 +631,7 @@ class JobRunner:
         self._threads: dict[str, threading.Thread] = {}
         self._owners: dict[str, tuple[str, int]] = {}
         self._ctxs: dict[str, object] = {}
+        self._sides: dict[str, Callable[[str], str | None]] = {}
 
     # -- wiring -------------------------------------------------------------------------------------------------
     def _default_apis(self, row: dict) -> tuple[SourceAPI, TargetAPI]:
@@ -530,6 +646,7 @@ class JobRunner:
             session_key=params.get("session_key"),
             peer=peer,
             include_secret=tuple(params.get("include_secret") or ()),
+            side_question=self._sides.get(row["job_id"]),
         )
         prof = _profile()
         bundle = params.get("bundle_path")
@@ -558,6 +675,17 @@ class JobRunner:
         with self._lock:
             self._owners[job_id] = (owner, epoch)
         return owner, epoch
+
+    def _session_title(self, session_ref: SessionRef, calling_session: str | None) -> str | None:
+        sid = session_ref.id or calling_session
+        if not sid:
+            return None
+        try:
+            db = hostcompat.session_db(hostcompat.state_db_path())
+            row = db.get_session(sid) or {}
+            return row.get("title")
+        except Exception:
+            return None
 
     def _release(self, job_id: str) -> None:
         with self._lock:
@@ -614,12 +742,15 @@ class JobRunner:
         confirm: Callable[[dict], str | None] | None = None,
         bundle_path: Path | None = None,
         include_secret: tuple[str, ...] = (),
+        side_question: Callable[[str], str | None] | None = None,
     ) -> tuple[str, FinalPlan | None]:
         """Create the job and run it to NEGOTIATED with the user's confirmation (synchronous; the slash handler
         can ask). Returns ``(job_id, FinalPlan)``; ``None`` when the job ended there (``show_plan``/``cancel``).
         Other failures are raised after the job was aborted (nothing locked)."""
         if self._before_job is not None:
             self._before_job()
+        if mode is Mode.EXPORT and bundle_path is None:
+            bundle_path = default_bundle_path(self._session_title(session_ref, calling_session), options)
         job_id = ulid()
         params = {
             "mode": str(mode),
@@ -634,6 +765,8 @@ class JobRunner:
         self.ledger.create_job(job_id, Role.CONDUCTOR, mode, peer.peer_id if peer else None, params)
         if ctx is not None:
             self._ctxs[job_id] = ctx
+        if side_question is not None:
+            self._sides[job_id] = side_question
         conductor = self._conductor(job_id, confirm=confirm)
         try:
             final = conductor.run_until_negotiated()
@@ -656,6 +789,7 @@ class JobRunner:
             with self._lock:
                 self._threads.pop(job_id, None)
                 self._ctxs.pop(job_id, None)
+                self._sides.pop(job_id, None)
 
     def _spawn(self, job_id: str, how: str) -> threading.Thread:
         with self._lock:
@@ -701,13 +835,18 @@ class JobRunner:
         return f"Cancel requested for job {short(job_id)}."
 
     def status(self, job_id: str | None) -> dict:
-        """Machine-readable status (F renders it): active and last jobs, or one job with its journal tail."""
+        """Machine-readable status for the surfaces (cluster F renders it, X20): ``{"jobs": [...], …}`` without a
+        job, ``{"job": {...}}`` with one (journal tail in ``job.events``)."""
         if job_id is None:
-            jobs = self.ledger.jobs(role=Role.CONDUCTOR, limit=5)
+            recent = self.ledger.jobs(role=Role.CONDUCTOR, limit=5)
             active = self.ledger.jobs(role=Role.CONDUCTOR, active=True, limit=20)
+            seen, jobs = set(), []
+            for r in [*active, *recent]:
+                if r["job_id"] not in seen:
+                    seen.add(r["job_id"])
+                    jobs.append(self._summary(r))
             return {
-                "active": [self._summary(r) for r in active],
-                "recent": [self._summary(r) for r in jobs],
+                "jobs": jobs,
                 "pull_log": self.ledger.pull_log(5),
                 "outbox_pending": len(self.ledger.outbox_due(self.ledger.now() + 10**9, limit=1000)),
             }
@@ -719,28 +858,48 @@ class JobRunner:
             {"kind": e["kind"], "state": e["state"], "step": e["step"], "at": e["ts"]}
             for e in self.ledger.events(job_id, Role.CONDUCTOR)[-20:]
         ]
-        return out
+        return {"job": out}
 
     def _summary(self, row: dict) -> dict:
         result = row.get("result") or {}
-        outcome = result.get("outcome")
-        if outcome is None:
-            outcome = "running" if row["state"] not in _STOP else row["state"]
-        ack = result.get("ack")
-        return {
+        params = row.get("params") or {}
+        state = row["state"]
+        outcome = result.get("outcome") or ("running" if state not in _STOP else state)
+        ack = result.get("ack") if isinstance(result.get("ack"), dict) else None
+        plan = result.get("plan") if isinstance(result.get("plan"), dict) else None
+        peer = self.ledger.peer(row["peer_id"]) if row["peer_id"] else None
+        out = {
             "job_id": row["job_id"],
             "short": short(row["job_id"]),
             "mode": row["mode"],
-            "state": row["state"],
+            "state": state,
+            "active": state not in ("done", "aborted"),
             "outcome": outcome,
             "peer_id": row["peer_id"],
+            "peer": peer.name if peer else None,
+            "calling_session": params.get("calling_session"),
+            "session_ref": params.get("session_ref"),
+            "progress": {"step": state},
             "restarts": row["restarts"],
             "last_error": row["last_error"],
-            "ack": from_wire(CommitAck, ack) if isinstance(ack, dict) else None,
-            "continue": result.get("continue"),
+            "next_action": _next_action(row, outcome),
+            "ack": ack,
+            "title": (ack or {}).get("title"),
+            "continuation": result.get("continue"),
             "warnings": result.get("warnings") or [],
             "exit_code": exit_code(row),
         }
+        if params.get("bundle_path"):
+            path = Path(params["bundle_path"])
+            out["bundle"] = {"path": str(path), "size": _size_of(path)}
+        if plan is not None:
+            out.update(_plan_lists(plan))
+        if ack is not None:
+            arrival = self.ledger.arrival_for(str(ack.get("session_id") or ""))
+            if arrival is not None:
+                out["note"] = arrival.get("note")
+                out["origin"] = "verified peer" if row["mode"] == str(Mode.PULL) else "local"
+        return out
 
     def create_offer(
         self,
@@ -750,19 +909,24 @@ class JobRunner:
         ctx,
         local_source: LocalSource | None = None,
         note: str | None = None,
+        options: Options | None = None,
+        side_question: Callable[[str], str | None] | None = None,
     ) -> dict:
         """``/handover to <dial-only peer>`` on the source: store an offer with a refinement computed by the
         session's own model now (DESIGN §2.2 ``offer``, §8.3); the peer claims it with ``/handover take``. Offers
         are never auto-claimed (O6)."""
         if peer.direction != "inbound" or peer.revoked_at is not None:
             raise BadRequest("offers are for paired devices that connect to this gateway", field="peer")
-        source = local_source or make_local_apis(ctx, calling_session=session_ref.id, session_key=None)[0]
+        source = (
+            local_source
+            or make_local_apis(ctx, calling_session=session_ref.id, session_key=None, side_question=side_question)[0]
+        )
         offer_id = ulid()
         job = JobContext(
             job_id=offer_id,
             mode=Mode.OFFER,
             peer=peer,
-            options=Options(),
+            options=options or Options(),
             epoch=0,
             reporter=_NullReporter(),
             cancelled=lambda: False,
@@ -911,9 +1075,10 @@ def runner_for(ctx=None, reporter_factory: Callable[[str], Reporter] | None = No
         return prof.runner
 
 
-def ensure_started(ctx=None) -> None:
+def ensure_started(ctx=None) -> _Profile:
     """First real use in a process (slash, CLI, route, tool, hook): ledger, veto index, janitor once; loads but
-    never creates the identity (R16). Never called from ``register()`` (BX L2)."""
+    never creates the identity (R16). Never called from ``register()`` (BX L2). Returns the profile runtime
+    (``ledger``, ``store``, ``veto``, ``identity``) for the surfaces (cluster F)."""
     prof = _profile()
     with prof.lock:
         first = not prof.janitor_ran
@@ -924,8 +1089,65 @@ def ensure_started(ctx=None) -> None:
             prof.veto = lock.VetoIndex(prof.ledger.path)
             prof.veto.start()
     _identity(prof)
+    _store(prof)
     if first:
         janitor(prof.ledger, runner_for(ctx), _registry(prof), flush_outbox=_flush(ctx))
+    return prof
+
+
+def revoke_peer(name_or_id: str) -> list[str]:
+    """``/handover peers revoke``: the ledger marks the peer revoked and its jobs ``aborting`` in one transaction,
+    then the registry discards target staging and releases sources not yet prepared (DESIGN §12.5, W067)."""
+    prof = _profile()
+    ids = prof.ledger.revoke_peer(name_or_id)
+    _registry(prof).abort_jobs(ids, "peer_revoked")
+    return ids
+
+
+def reclaim(session_id: str, *, force: bool) -> dict:
+    """``/handover reclaim`` (DESIGN §7.7) through cluster B's ``lock.reclaim``; when this side was the source of a
+    job this process dialed, the target is told ``source_reclaimed`` best effort (route #8, W047)."""
+    from . import lock
+
+    prof = _profile()
+    db = hostcompat.session_db(hostcompat.state_db_path())
+    try:
+        out = dict(lock.reclaim(db, prof.ledger, session_id, force=force) or {})
+    finally:
+        with contextlib.suppress(Exception):
+            db.close()
+    job_id = out.get("job_id")
+    if job_id and out.get("state") == "reclaimed":
+        out["target_notified"] = _notify_reclaimed(prof, str(job_id))
+    return out
+
+
+def _notify_reclaimed(prof: _Profile, job_id: str) -> bool:
+    row = prof.ledger.job(job_id, Role.CONDUCTOR)
+    peer = prof.ledger.peer(row["peer_id"]) if row and row["peer_id"] else None
+    identity = _identity(prof)
+    if row is None or peer is None or peer.direction != "dial" or identity is None:
+        return False
+    try:
+        from . import wire
+
+        client = wire.WireClient(peer, identity, read_secret=hostcompat.read_secret)
+        epoch = int(row["owner_epoch"])
+        client.call("POST", f"jobs/{job_id}/status", {"epoch": epoch, "note": "source_reclaimed"}, epoch=epoch)
+    except HandoverError:
+        return False
+    return True
+
+
+def default_bundle_path(title: str | None, options: Options, now: float | None = None) -> Path:
+    """``<workspace_root>/<title-slug>-<YYYYmmdd-HHMMSS>.ctxh.tar`` (DESIGN §5.4, W127); a directory with ``--dir``."""
+    import re
+    from datetime import datetime
+
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", str(title or "session")).strip("-").lower()[:48] or "session"
+    stamp = datetime.fromtimestamp(now if now is not None else time.time()).strftime("%Y%m%d-%H%M%S")
+    root = Path(os.path.expanduser(options.workspace_root))
+    return root / (f"{slug}-{stamp}" + ("" if options.as_dir else ".ctxh.tar"))
 
 
 __all__ = [

@@ -239,6 +239,10 @@ def _stub_module(monkeypatch, name: str, **attrs) -> types.ModuleType:
     for key, value in attrs.items():
         setattr(module, key, value)
     monkeypatch.setitem(sys.modules, f"ctx_handover.engine.{name}", module)
+    import ctx_handover.engine as engine_pkg
+
+    # ``from . import x`` prefers the package attribute once the real module was imported by another suite
+    monkeypatch.setattr(engine_pkg, name, module, raising=False)
     return module
 
 

@@ -12,7 +12,11 @@ On disk (``root`` = the plugin data directory)::
     manifests/<2 hex>/<62 hex>.json    canonical manifest document, 0600
 
 Directories are created 0700 before the first file (SEC 6.1). The ledger (cluster A) indexes blocks and objects
-and records which jobs use which objects; GC frees blocks no non-terminal job needs (DESIGN §5.1, SK M3).
+and records which jobs use which objects; GC frees blocks no non-terminal job needs (DESIGN §5.1, SK M3) and
+removes the manifest files and ``objects`` rows of objects no non-terminal job references any more — those of
+finished and aborted jobs and unreferenced ones (R28). Storing a manifest and collecting it run under the
+ledger's write transaction (``Ledger.tx``), and a manifest stored or re-stored within ``MANIFEST_GRACE_S`` is
+never collected: that covers the step between storing an object and registering it with its job.
 
 Wire frame ``application/vnd.ctxh.blocks+v1``: ``"CXB1" | block_id (32 raw) | enc (1) | payload_len (u32 BE) |
 payload``. The receiver checks magic and length, decodes with an output cap of one block (a decompression bomb
@@ -80,8 +84,15 @@ MAX_OBJECT_BYTES = 30 * 1024**3
 MAX_MANIFEST_JSON = 64 * 1024**2
 """Object JSON and manifest documents ≤ 64 MiB (DESIGN §10.2, T7)."""
 
+MANIFEST_GRACE_S = 600.0
+"""A manifest stored or re-stored this recently is never collected (``put_manifests`` → ``ledger.job_object``)."""
+GC_BATCH = 1024
+"""Manifests checked and removed per ledger write transaction."""
+
 ZSTD_AVAILABLE = _zstd is not None
 _HEX64 = re.compile(r"[0-9a-f]{64}")
+_HEX2 = re.compile(r"[0-9a-f]{2}")
+_MANIFEST_NAME = re.compile(r"[0-9a-f]{62}\.json")
 _GAIN_MIN = 0.05
 _ENC_NAMES = {ENC_IDENTITY: "identity", ENC_ZLIB: "zlib", ENC_ZSTD: "zstd"}
 
@@ -363,8 +374,9 @@ class BlockStore:
     """Per-profile block store (implements ``BlockSource`` and ``BlockSink``; DESIGN §5.1).
 
     ``root`` is the plugin data directory; ``ledger`` is ``ledger.Ledger`` (cluster A). Methods used:
-    ``block_put``, ``block_touch``, ``object_put``, ``job_objects``, ``live_objects``, ``gc_candidates``,
-    ``blocks_delete``. ``cache_days``/``cache_bytes`` are ``block_cache_days``/``block_cache_gb`` (§14.4).
+    ``tx`` (re-entrant within a thread), ``block_put``, ``block_touch``, ``object_put``, ``object_delete``,
+    ``job_objects``, ``live_objects``, ``gc_candidates``, ``blocks_delete``. ``cache_days``/``cache_bytes`` are
+    ``block_cache_days``/``block_cache_gb`` (§14.4).
     """
 
     def __init__(
@@ -457,11 +469,17 @@ class BlockStore:
 
     # -- objects -------------------------------------------------------------------------------------------
     def _store_manifest(self, m: ObjectManifest) -> bool:
+        """Write (or refresh the mtime of) the manifest file and index it, under the ledger's write lock so the
+        manifest GC never removes a file between this check and the caller's ``job_object``."""
         path = self.manifest_path(m.object_id)
-        new = not path.is_file()
-        if new:
-            write_private(path, canonical_bytes(manifest_doc(m)), self._tmp)
-        self._ledger.object_put(m)
+        with self._ledger.tx():
+            try:
+                os.utime(path)  # re-stored: fresh again for MANIFEST_GRACE_S
+                new = False
+            except FileNotFoundError:
+                write_private(path, canonical_bytes(manifest_doc(m)), self._tmp)
+                new = True
+            self._ledger.object_put(m)
         return new
 
     def put_stream(self, fileobj, *, media: str, cancelled: Callable[[], bool]) -> ObjectManifest:
@@ -550,23 +568,79 @@ class BlockStore:
             self._ledger.blocks_delete(freed)
         return len(freed)
 
+    def _manifest_ids(self) -> Iterator[list[str]]:
+        """Object ids of the stored manifests, one ``manifests/<2 hex>/`` directory at a time (foreign names are
+        skipped)."""
+        try:
+            tops = sorted(e.name for e in os.scandir(self._manifests) if e.is_dir(follow_symlinks=False))
+        except FileNotFoundError:
+            return
+        for top in tops:
+            if not _HEX2.fullmatch(top):
+                continue
+            try:
+                names = os.listdir(self._manifests / top)
+            except FileNotFoundError:
+                continue
+            yield [top + name[:-5] for name in sorted(names) if _MANIFEST_NAME.fullmatch(name)]
+
+    def _drop_manifests(self, object_ids: Sequence[str], cutoff: float) -> int:
+        """One write transaction: remove the manifest files and ``objects`` rows of the given objects that no
+        non-terminal job references and that were not (re-)stored after ``cutoff``."""
+        gone: list[str] = []
+        with self._ledger.tx():
+            live = self._ledger.live_objects()
+            for oid in object_ids:
+                if oid in live:
+                    continue
+                path = self.manifest_path(oid)
+                try:
+                    if path.stat().st_mtime > cutoff:
+                        continue
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                gone.append(oid)
+            if gone:
+                self._ledger.object_delete(gone)
+        return len(gone)
+
+    def collect_manifests(self, object_ids: Iterable[str] | None = None) -> int:
+        """Remove manifests and index rows of objects no non-terminal job references (R28): finished and aborted
+        jobs' objects and unreferenced ones, except those (re-)stored within ``MANIFEST_GRACE_S``. ``object_ids``
+        None walks every stored manifest. Returns the number of removed objects."""
+        cutoff = self._clock() - MANIFEST_GRACE_S
+        groups = self._manifest_ids() if object_ids is None else [sorted(set(object_ids))]
+        removed = 0
+        for ids in groups:
+            for start in range(0, len(ids), GC_BATCH):
+                removed += self._drop_manifests(ids[start : start + GC_BATCH], cutoff)
+        return removed
+
     def gc(self, *, keep_days: float, max_bytes: int) -> int:
-        """Free blocks no non-terminal job needs that are older than ``keep_days`` or beyond ``max_bytes`` (LRU);
-        returns the number of freed blocks."""
+        """Free blocks no non-terminal job needs that are older than ``keep_days`` or beyond ``max_bytes`` (LRU),
+        then collect the manifests of objects no non-terminal job references (R28); returns the number of freed
+        blocks."""
         live = self._blocks_of(self._ledger.live_objects())
         older_than = self._clock() - keep_days * 86_400
         candidates = [b for b in self._ledger.gc_candidates(older_than, int(max_bytes)) if b not in live]
-        return self._free(candidates)
+        freed = self._free(candidates)
+        self.collect_manifests()
+        return freed
 
     def release_job(self, job_id: str, *, keep: bool) -> None:
         """At a job's end: ``keep`` ⇒ its blocks stay cached within the cap (LRU beyond it is freed); otherwise
-        every block of its objects that no live job needs is freed now (DESIGN §4.6, SK M3)."""
+        every block of its objects that no live job needs is freed now (DESIGN §4.6, SK M3). Either way the
+        manifests of objects no live job references go (R28); blocks first, because they are found through the
+        manifests."""
         if keep:
             self.gc(keep_days=self.cache_days, max_bytes=self.cache_bytes)
             return
+        objects = self._ledger.job_objects(job_id)
         live = self._blocks_of(self._ledger.live_objects())
-        mine = self._blocks_of(self._ledger.job_objects(job_id))
+        mine = self._blocks_of(objects)
         self._free(sorted(mine - live))
+        self.collect_manifests(objects)
 
 
 def _read_full(fileobj, n: int) -> bytes:

@@ -19,7 +19,13 @@ from ctx_handover.engine import envfacts
 from ctx_handover.engine.model import Options, ToolInfo
 from ctx_handover.tests.fakes.planning_fake import env_facts, host_facts
 
-ALLOWED_CHILD_ENV = {"PATH", "HOME", "LANG", "LC_ALL", "SYSTEMROOT", "PATHEXT", "WINDIR", "TEMP", "TMP", "USERPROFILE"}
+ALLOWED_CHILD_ENV = {
+    "PATH", "HOME", "LANG", "LC_ALL", "SYSTEMROOT", "PATHEXT", "WINDIR", "TEMP", "TMP", "USERPROFILE", "APPDATA",
+    "LOCALAPPDATA", "TMPDIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+    "GRADLE_USER_HOME", "JAVA_TOOL_OPTIONS",
+}  # fmt: skip
+"""Fixed names only: ``PATH`` (and the Windows system variables) from the parent, every home, config, cache and temp
+location pointing into the probe's scratch root (R26, ``test_envfacts_traces.py``)."""
 
 
 def _bin(tmp_path: Path, scripts: dict[str, str]) -> Path:
@@ -112,7 +118,7 @@ def test_envfacts_host_facts_as_parameters(tmp_path, monkeypatch, user_home):
 
 def test_envfacts_case_probe_is_read_only(tmp_path, user_home, monkeypatch):
     """The case probe only stats existing paths (a swapped-case spelling of one component): nothing is created.
-    (``PATH`` is empty here: real tools probed with ``--version`` may write their own caches into the home.)"""
+    (``PATH`` is empty here; real tools run in a scratch home, R26 — ``test_envfacts_traces.py``.)"""
     empty = tmp_path / "empty-bin"
     empty.mkdir()
     monkeypatch.setenv("PATH", str(empty))

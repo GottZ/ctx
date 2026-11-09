@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from . import plan as planning
 from .errors import HandoverError
 from .model import (
     CommitAck,
@@ -637,7 +638,15 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
 
 
 def fingerprint_of(pubkey_b64: str) -> str:
-    """16 hex characters of sha256 over the raw public key (the paste string's ``fp``)."""
+    """16 hex characters of sha256 over the raw public key (the paste string's ``fp``): cluster C's
+    ``crypto.fingerprint_of`` (W120); a key that is not canonical base64url (a display of a damaged row) is hashed
+    as given, so listing peers never fails."""
+    try:
+        from .crypto import fingerprint_of as canonical
+
+        return canonical(pubkey_b64)
+    except (ImportError, ValueError, TypeError):
+        pass
     try:
         raw = base64.urlsafe_b64decode(pubkey_b64 + "=" * (-len(pubkey_b64) % 4))
     except (ValueError, TypeError):
@@ -656,37 +665,33 @@ CONFIRM_CHOICES: list[dict] = [
     {"value": "cancel", "label": "Cancel"},
 ]
 
-REASONS = {
-    "a": "proposed",
-    "b": "conflict",
-    "c": "large",
-    "d": "secret",
-    "e": "model",
-    "f": "outside_workspace",
-    "g": "instruction_files",
-}
-"""Confirmation reasons (a)–(g) of DESIGN §14.1 by letter → canonical name (both spellings are accepted)."""
+REASONS: dict[str, str] = {letter: code for code, letter in planning.CONFIRM_LETTERS.items()}
+"""Confirmation reasons (a)–(g) of DESIGN §14.1: letter → cluster D's reason code (``plan.CONFIRM_*``, X03)."""
 
 REASON_TEXT = {
-    "proposed": "some items are only proposed (found by the model, the agent or outside the project)",
-    "conflict": "a destination has local changes, so a fresh folder is used",
-    "large": "the handover is larger than confirm_above_mb",
-    "secret": "--include-secret sends a file from the secrets list",
-    "model": "the model there does not work offline, or the session is larger than its context window",
-    "outside_workspace": "items outside the project folder (or tracked secret files) are included",
-    "instruction_files": "instruction files (AGENTS.md, .hermes.md …) arrive from an unverified source",
-    "suspected_secret": "some proposed files look like secrets; they stay here unless you name each one with "
-    "--include-secret <path>",
-    "unverified": "the bundle is not signed by a paired device",
+    planning.CONFIRM_PROPOSED: "some items are only proposed (found by the model, the agent or outside the project)",
+    planning.CONFIRM_CONFLICT: "a destination has local changes, so a fresh folder is used",
+    planning.CONFIRM_LARGE: "the handover is larger than confirm_above_mb",
+    planning.CONFIRM_SECRET: "--include-secret sends a file from the secrets list",
+    planning.CONFIRM_MODEL: "the model there does not work offline, or the session is larger than its context window",
+    planning.CONFIRM_OUTSIDE: "items outside the project folder (or tracked secret files) are included",
+    planning.CONFIRM_INSTRUCTIONS: "instruction files (AGENTS.md, .hermes.md …) arrive from an unverified source",
 }
 
+SUSPECTED_SECRET: str = planning.SUSPECTED_SECRET
+"""Item marker (an exact element of ``PlanItem.reasons``) of a proposal the policy flagged as a suspected secret
+(R25, X05). It is not a reason code: such an item is a proposal, i.e. reason (a)."""
 
-_PROPOSAL_REASONS = frozenset({"proposed", "suspected_secret"})
-"""Reason (a): proposed items, suspected secrets among them — dropping all proposals answers it."""
+SUSPECTED_TEXT = (
+    "some proposed files look like secrets; they stay here unless you name each one with --include-secret <path>"
+)
+
+_PROPOSAL_REASONS = frozenset({planning.CONFIRM_PROPOSED})
+"""Reason (a) alone — dropping all proposals answers it (BX L5; the conductor's own timeout rule)."""
 
 
 def reason_names(reasons: Sequence[str]) -> list[str]:
-    """Canonical reason names for letters or names; unknown entries are kept (they still require a person)."""
+    """Reason codes for letters or codes; unknown entries are kept (they still require a person)."""
     out: list[str] = []
     for r in reasons or ():
         key = str(r).strip().lower()
@@ -697,20 +702,19 @@ def reason_names(reasons: Sequence[str]) -> list[str]:
 
 
 def suspected_secrets(info: Mapping | None) -> list[str]:
-    """Proposed items the policy flagged as suspected secrets (R25): from the reason list or from the plan items
-    (``include == proposed`` with a ``suspected_secret`` reason)."""
+    """Proposals the policy flagged as suspected secrets (R25): plan items with ``include == proposed`` whose
+    ``reasons`` contain the exact element ``SUSPECTED_SECRET`` (X05, W126), plus the conductor's
+    ``suspected_secrets`` list."""
     info = info or {}
     found: list[str] = []
     final = info.get("final_plan")
     for item in _get(_get(final, "plan"), "items", ()) or ():
-        reasons = " ".join(str(r) for r in (_get(item, "reasons", ()) or ()))
-        if str(_get(item, "include", "")) == "proposed" and "suspected_secret" in reasons:
+        reasons = [str(r) for r in (_get(item, "reasons", ()) or ())]
+        if _enum_text(_get(item, "include", "")) == "proposed" and SUSPECTED_SECRET in reasons:
             found.append(str(_get(item, "source_path", "")))
     for path in info.get("suspected_secrets") or ():
         if str(path) not in found:
             found.append(str(path))
-    if not found and "suspected_secret" in reason_names(info.get("reasons") or ()):
-        found.append("(see the plan)")
     return found
 
 
@@ -721,57 +725,87 @@ def choice_on_timeout(reasons: Sequence[str]) -> str:
     return "no_proposed" if names and all(n in _PROPOSAL_REASONS for n in names) else "cancel"
 
 
-def plan_summary(final: Any) -> dict:
-    """The summary ``render_plan``/``confirm_question`` show, computed from a ``FinalPlan`` (fallback when the
-    planning cluster's own summary is not at hand)."""
-    plan = _get(final, "plan")
-    items = list(_get(plan, "items", ()) or ())
-    decisions = {(_get(d, "item_id")): d for d in (_get(final, "decisions", ()) or ())}
-    rows = []
-    total = 0
-    proposed = 0
-    denied_tracked: list[str] = []
-    outside: list[str] = []
-    for item in items:
-        include = str(_get(item, "include", "") or "")
-        size = int(_get(item, "size_estimate", 0) or 0)
-        decision = decisions.get(_get(item, "item_id"))
-        conflict = _get(decision, "conflict") if decision is not None else None
-        if include == "yes":
-            total += size
-            if str(_get(item, "role", "")) != "primary":
-                outside.append(str(_get(item, "source_path", "")))
-        elif include == "proposed":
-            proposed += 1
-        git = _get(item, "git")
-        denied_tracked.extend(str(x) for x in (_get(git, "denied_tracked", ()) or ()))
-        rows.append(
-            {
-                "item_id": _get(item, "item_id"),
-                "kind": str(_get(item, "kind", "")),
-                "source_path": _get(item, "source_path"),
-                "include": include,
-                "size": size,
-                "dest": _get(decision, "dest") if decision is not None else None,
-                "mode": str(_get(decision, "mode", "")) if decision is not None else "",
-                "conflict": _get(conflict, "detail") if conflict is not None else None,
-            }
-        )
-    not_transferred = list(_get(plan, "not_transferred", ()) or ())
-    change = _get(final, "model_change") or {}
+def _enum_text(value: Any) -> str:
+    return str(getattr(value, "value", value) or "")
+
+
+def model_text(model_change: Any) -> str | None:
+    """The target model of a ``FinalPlan.model_change`` (``{"to": {"model", "provider"}, …}``) as text."""
+    if not isinstance(model_change, Mapping):
+        return None
+    to = model_change.get("to")
+    if isinstance(to, Mapping):
+        name = to.get("model") or to.get("name")
+        provider = to.get("provider")
+        if name and provider:
+            return f"{name} ({provider})"
+        return str(name or provider) if (name or provider) else None
+    return str(to) if to else None
+
+
+def _offline(model_change: Any) -> bool | None:
+    if not isinstance(model_change, Mapping):
+        return None
+    for key in ("offline_capable", "offline"):
+        if isinstance(model_change.get(key), bool):
+            return model_change[key]
+    return None
+
+
+def _instruction_lines(entries: Sequence[Any]) -> list[str]:
+    out = []
+    for e in entries or ():
+        if isinstance(e, Mapping):
+            out.append(f"{e.get('rel') or e.get('path') or '?'} ({e.get('status') or 'new'})")
+        else:
+            out.append(str(e))
+    return out
+
+
+def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_files: Sequence[Any] = ()) -> dict:
+    """What ``confirm_question``, ``render_plan`` and ``render_presend`` show (W125): the totals and lists of
+    cluster D's ``plan.presend_summary`` (``presend`` when the conductor passed it, else computed from ``final``)
+    and the per-item rows, proposals, conflicts and need of D's ``plan.summarize``; F adds nothing of its own
+    except the model text and the suspected-secret list (R25)."""
+    pre: dict = dict(presend) if isinstance(presend, Mapping) else {}
+    full: dict = {}
+    if final is not None:
+        if not pre:
+            pre = planning.presend_summary(final)
+        full = planning.summarize(final)
+    item_list = list(pre.get("item_list") or ())
+    count = pre.get("items")
+    change = full.get("model_change") if full else None
+    rows = [
+        {
+            "item_id": r.get("item_id"),
+            "kind": r.get("kind"),
+            "source_path": r.get("source_path"),
+            "include": r.get("include"),
+            "size": r.get("size") or 0,
+            "dest": r.get("dest"),
+            "mode": r.get("mode"),
+            "conflict": r.get("conflict"),
+        }
+        for r in full.get("items") or ()
+    ]
     return {
-        "items_count": sum(1 for r in rows if r["include"] == "yes"),
-        "total_bytes": total,
-        "proposed": proposed,
-        "conflicts": sum(1 for r in rows if r["conflict"]),
-        "need_bytes": _get(final, "need_bytes", 0),
-        "model": _get(change, "to") if isinstance(change, Mapping) else None,
-        "offline": _get(change, "offline_capable") if isinstance(change, Mapping) else None,
-        "excluded_secrets": [str(_get(n, "path")) for n in not_transferred if "secret" in str(_get(n, "why", ""))],
-        "not_transferred": [f"{_get(n, 'path')} ({_get(n, 'why')})" for n in not_transferred],
-        "denied_tracked": denied_tracked,
-        "outside_workspace": [p for p in outside if p],
+        "items_count": int(count) if isinstance(count, int) else len(item_list),
+        "total_bytes": int(pre.get("total_bytes") or 0),
+        "excluded_secrets": int(pre.get("excluded_secrets") or 0),
+        "denied_tracked": [str(p) for p in pre.get("denied_tracked") or ()],
+        "withheld_stash": [str(p) for p in pre.get("withheld_stash") or ()],
+        "outside_workspace": [str(p) for p in pre.get("extras_outside_workspace") or ()],
+        "item_list": item_list,
+        "proposed": int(full.get("proposed") or 0),
+        "conflicts": int(full.get("conflicts") or 0),
+        "need_bytes": int(full.get("need_bytes") or 0),
+        "model": model_text(change),
+        "offline": _offline(change),
         "items": rows,
+        "not_transferred": [f"{n.get('path')} ({n.get('why')})" for n in full.get("not_transferred") or ()],
+        "suspected_secrets": suspected_secrets({"final_plan": final}),
+        "instruction_files": _instruction_lines(instruction_files),
     }
 
 
@@ -814,25 +848,32 @@ def render_plan(summary: dict) -> str:
             f"  [{row.get('include', '?')}] {row.get('source_path')}{dest} · "
             f"{human_bytes(row.get('size', 0))}{conflict}"
         )
-    lines += _bullets("Secrets left out:", s.get("excluded_secrets") or ())
+    if s.get("excluded_secrets"):
+        lines.append(f"Secrets left out: {s['excluded_secrets']} (listed under 'Not transferred').")
     lines += _bullets(
         "Tracked files on the secrets list (they travel with the git history):", s.get("denied_tracked") or ()
     )
     lines += _bullets("Stash entries withheld:", s.get("withheld_stash") or ())
     lines += _bullets("Outside the project folder:", s.get("outside_workspace") or ())
+    lines += _bullets(
+        "Proposed files that look like secrets (they stay here unless named with --include-secret <path>):",
+        s.get("suspected_secrets") or (),
+    )
     lines += _bullets("Instruction files that will shape the agent there:", s.get("instruction_files") or ())
     lines += _bullets("Not transferred:", s.get("not_transferred") or ())
     return "\n".join(lines)
 
 
 def render_presend(summary: dict, peer: str | None, mode: Mode | str) -> str:
-    """First progress message (SEC 5.8): what leaves, how much, what stays behind."""
+    """First progress message (SEC 5.8): what leaves, how much, what stays behind — cluster D's
+    ``presend_summary`` numbers through ``plan_summary`` (W125)."""
     s = summary or {}
     arrow = "←" if str(mode) in {"pull", "import"} else "→"
+    secrets = s.get("excluded_secrets") or 0
     head = (
         f"Handover {arrow} {peer or 'bundle'}: {s.get('items_count', 0)} items, "
         f"{human_bytes(s.get('total_bytes', 0))}; "
-        f"{len(s.get('excluded_secrets') or ())} secrets left out"
+        f"{secrets if isinstance(secrets, int) else len(secrets)} secrets left out"
     )
     extras = []
     if s.get("denied_tracked"):
@@ -876,10 +917,10 @@ def _job_line(job: Mapping) -> list[str]:
         f"{short_job(job.get('job_id'))} · {job.get('mode', '?')} · {job.get('peer') or 'bundle'} · "
         f"{job.get('state', '?')}"
     )
-    if step:
+    if step and step != job.get("state"):
         head += f" · {step}"
-        if isinstance(prog, Mapping) and prog.get("bytes_total"):
-            head += f" · {human_bytes(prog.get('bytes_done', 0))}/{human_bytes(prog['bytes_total'])}"
+    if isinstance(prog, Mapping) and prog.get("bytes_total"):
+        head += f" · {human_bytes(prog.get('bytes_done', 0))}/{human_bytes(prog['bytes_total'])}"
     lines = [head]
     for w in job.get("warnings") or ():
         lines.append(f"    warning: {w}")
@@ -890,8 +931,15 @@ def _job_line(job: Mapping) -> list[str]:
         lines.append(f"    next: {job['next_action']}")
     cont = job.get("continuation")
     if isinstance(cont, Mapping) and cont.get("started"):
-        state = "running" if cont.get("running") else f"exit code {cont.get('exit_code')}"
+        if cont.get("running"):
+            state = "running"
+        elif cont.get("exit_code") is not None:
+            state = f"exit code {cont.get('exit_code')}"
+        else:
+            state = "started"
         lines.append(f"    continuation: pid {cont.get('pid')} ({state}), log {cont.get('log')}")
+    elif isinstance(cont, Mapping) and isinstance(cont.get("error"), Mapping):
+        lines.append(f"    continuation not started: {cont['error'].get('code', '?')}: {cont['error'].get('message', '')}")
     return lines
 
 

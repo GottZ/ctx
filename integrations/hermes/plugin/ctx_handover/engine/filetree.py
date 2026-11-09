@@ -37,7 +37,7 @@ from .gitops import dec_path, enc_path, object_manifest, put_stream, read_json_o
 from .ignore import IgnoreMatcher
 from .model import DestMode, NotTransferred, ObjectManifest
 from .paths import PlatformRules, check_rel, fold_key
-from .policy import PolicyConfig, check_source_file, check_tree_entry, is_denied_name
+from .policy import PolicyConfig, SourceCheckCache, check_source_file, check_tree_entry, is_denied_name
 
 TREE_KIND = "ctxh.tree"
 TREE_MEDIA = "application/json"
@@ -179,6 +179,7 @@ def scan(
     entries: list[TreeEntry] = []
     left: list[NotTransferred] = []
     stack: list[bytes] = [b""]
+    policy_cache = SourceCheckCache()  # one scan, one cache (never across scans)
     while stack:
         if cancelled():
             from .errors import Cancelled
@@ -223,7 +224,7 @@ def scan(
                     continue
                 entries.append(entry)
             elif is_dir or stat.S_ISREG(st.st_mode):
-                verdict = check_source_file(path, cfg, explicit=False, item_root=root)
+                verdict = check_source_file(path, cfg, explicit=False, item_root=root, cache=policy_cache)
                 if not verdict.allowed:
                     left.append(NotTransferred(shown, verdict.reason or "special"))
                     continue

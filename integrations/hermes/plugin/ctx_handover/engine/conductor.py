@@ -34,10 +34,9 @@ from __future__ import annotations
 import collections
 import contextlib
 import dataclasses
-import re
 import threading
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 
@@ -63,7 +62,7 @@ from .errors import (
     WaitTimeout,
     error_class,
 )
-from .jsonutil import from_wire, loads_bounded, sha256_hex, to_wire
+from .jsonutil import from_wire, sha256_hex, to_wire
 from .ledger import Fenced, Ledger, process_owner
 from .model import (
     CapsuleInfo,
@@ -75,6 +74,7 @@ from .model import (
     FinalPlan,
     Hello,
     Include,
+    Mode,
     ObjectManifest,
     OpState,
     OpStatus,
@@ -89,6 +89,7 @@ from .model import (
     SessionInfo,
     SessionRef,
 )
+from .ops import object_closure
 
 S = ConductorState
 MiB = 1024 * 1024
@@ -113,7 +114,6 @@ LEASE_STATES = (SUSPENDABLE - {S.LOCKING}) | PREPARE_PHASE | {S.COMMITTING, S.IN
 FORWARD_STATES = frozenset({S.COMMITTING, S.IN_DOUBT, S.COMMITTED, S.RETIRING, S.RETIRED, S.CONTINUING})
 
 REQUIRED_CAPS = ("session.v1", "blocks.v1")
-_HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
@@ -168,86 +168,6 @@ def _encode(value: object) -> object:
 # ---------------------------------------------------------------------------------------------------------
 # object closure and block mover (DESIGN §4.6)
 # ---------------------------------------------------------------------------------------------------------
-
-
-def _check_ids(ids: Iterable[object], where: str) -> list[str]:
-    out = []
-    for i in ids:
-        if not isinstance(i, str) or not _HEX64.match(i):
-            raise BadRequest(f"invalid object id in {where}", field=where)
-        out.append(i)
-    return out
-
-
-def doc_refs(doc: dict) -> tuple[list[str], list[str]]:
-    """Objects a top-level document references: ``(leaf objects, nested documents)`` (DESIGN §5.3, §6.2, §9.1)."""
-    leaves: list[object] = []
-    docs: list[object] = []
-    kind = doc.get("kind") if isinstance(doc, dict) else None
-    if kind == "ctxh.capsule":
-        for seg in doc.get("segments") or []:
-            leaves.append(seg.get("row_object"))
-            leaves.extend(seg.get("pages") or [])
-    elif kind == "ctxh.delta":
-        leaves.extend(doc.get("pages") or [])
-        if doc.get("row_object"):
-            leaves.append(doc["row_object"])
-    elif kind == "ctxh.pack":
-        for item in doc.get("items") or []:
-            for key in ("pack", "object"):
-                if item.get(key):
-                    leaves.append(item[key])
-            for key in ("manifest", "lfs_objects"):
-                if item.get(key):
-                    docs.append(item[key])
-    elif kind == "ctxh.tree":
-        for entry in doc.get("entries") or []:
-            if entry.get("object"):
-                leaves.append(entry["object"])
-    return _check_ids(leaves, f"{kind}.refs"), _check_ids(docs, f"{kind}.docs")
-
-
-def read_object(src: BlockSource, object_id: str, *, max_bytes: int, cache: dict[str, bytes] | None = None) -> bytes:
-    """Assemble one object from ``src`` (size-capped, sha256-verified); raw blocks land in ``cache``."""
-    (m,) = src.manifests([object_id])
-    if m.size > max_bytes:
-        raise BadRequest("document object too large", field="object", size=m.size, max_bytes=max_bytes)
-    got: dict[str, bytes] = {}
-    want = list(dict.fromkeys(m.blocks))
-    for start in range(0, len(want), 4096):
-        for bid, raw in src.read_blocks(want[start : start + 4096]):
-            if sha256_hex(raw) == bid:
-                got[bid] = raw
-    if any(b not in got for b in want):
-        raise BlockCorrupt("source is missing blocks of a document", object_id=object_id)
-    data = b"".join(got[b] for b in m.blocks)
-    if sha256_hex(data) != m.sha256 or len(data) != m.size:
-        raise BlockCorrupt("document object hash mismatch", object_id=object_id)
-    if cache is not None:
-        cache.update(got)
-    return data
-
-
-def object_closure(src: BlockSource, root_id: str, *, max_doc_bytes: int, cache: dict[str, bytes]) -> list[str]:
-    """``root_id`` plus every object it references, transitively through nested documents (tree manifests)."""
-    out, seen = [root_id], {root_id}
-    queue = collections.deque([root_id])
-    while queue:
-        oid = queue.popleft()
-        doc = loads_bounded(read_object(src, oid, max_bytes=max_doc_bytes, cache=cache), max_bytes=max_doc_bytes)
-        if not isinstance(doc, dict):
-            raise BadRequest("document is not an object", field="object")
-        leaves, docs = doc_refs(doc)
-        for x in leaves:
-            if x not in seen:
-                seen.add(x)
-                out.append(x)
-        for x in docs:
-            if x not in seen:
-                seen.add(x)
-                out.append(x)
-                queue.append(x)
-    return out
 
 
 def _block_sizes(m: ObjectManifest) -> list[tuple[str, int]]:
@@ -393,6 +313,14 @@ def move_object(
 # ---------------------------------------------------------------------------------------------------------
 # the conductor
 # ---------------------------------------------------------------------------------------------------------
+
+
+SUSPECTED_SECRET = "suspected_secret"  # noqa: S105 - plan item marker, not a secret
+
+
+def suspected_secrets(final: FinalPlan) -> list[str]:
+    """Source paths of proposals the policy flagged as suspected secrets (``plan.SUSPECTED_SECRET`` in reasons)."""
+    return [i.source_path for i in final.plan.items if i.include is Include.PROPOSED and SUSPECTED_SECRET in i.reasons]
 
 
 def _default_planning():
@@ -856,8 +784,8 @@ class Conductor:
         return bool(h.limits.hosted), min(self.poll.request_bytes, peer_max), peer_max
 
     def _move(self, root_id: str, *, src_side: str = "source") -> None:
-        src = self.source.blocks()
-        dst = self.target.blocks()
+        src = self._side_blocks(self.source)
+        dst = self._side_blocks(self.target)
         cache: dict[str, bytes] = {}
         ids = object_closure(src, root_id, max_doc_bytes=self.poll.max_doc_bytes, cache=cache)
         hosted_s, req_s, max_s = self._remote_limits("source")
@@ -874,6 +802,12 @@ class Conductor:
             on_batch=self._pulse,
             prefetched=cache,
         )
+
+    def _side_blocks(self, api):
+        """``api.blocks_for(job)`` when the participant offers it (job-bound remote blocks, the target's quota sink),
+        else ``api.blocks()``."""
+        blocks_for = getattr(api, "blocks_for", None)
+        return blocks_for(self.job) if callable(blocks_for) else api.blocks()
 
     def _planner(self):
         if self._planning is None:
@@ -924,26 +858,56 @@ class Conductor:
             return final
         sf = self._get("source_facts", EnvFacts)
         planner = self._planner()
-        reasons = list(planner.confirmation_reasons(final, self.job.options, bool(sf and sf.offline_capable)))
+        instructions = self._instruction_files(final)
+        offline = bool(sf and sf.offline_capable)
+        if instructions:
+            reasons = list(planner.confirmation_reasons(final, self.job.options, offline, instructions=instructions))
+        else:
+            reasons = list(planner.confirmation_reasons(final, self.job.options, offline))
         choice: str | None = "yes"
         if reasons and not self.job.options.yes:
             choice = None
             if interactive and self.confirm is not None:
                 summary = planner.presend_summary(final)
-                choice = self.confirm({"reasons": reasons, "summary": summary, "final_plan": final})
+                choice = self.confirm(
+                    {
+                        "reasons": reasons,
+                        "summary": summary,
+                        "final_plan": final,
+                        "suspected_secrets": suspected_secrets(final),
+                        "instruction_files": instructions,
+                    }
+                )
             if choice is None:
                 choice = "no_proposed" if set(reasons) <= {"proposed"} else "cancel"
-        if choice in ("show_plan", "cancel"):
+        if self.job.options.dry_run and choice not in ("show_plan", "cancel"):
+            choice = "dry_run"  # the plan is shown, nothing is locked (W113)
+        if choice in ("show_plan", "cancel", "dry_run"):
             self._info("planning_ended", ended_by=choice, reasons=reasons)
             self._note(ended_by=choice)
             err = Cancelled("ended after planning; nothing was locked", ended_by=choice)
             self._fail(err)
             self._drain_abort()
             raise err
-        if choice == "no_proposed":
-            final = planner.apply_choice(final, "no_proposed")
+        if choice in ("yes", "no_proposed") and any(i.include is Include.PROPOSED for i in final.plan.items):
+            # "yes" takes proposals along except suspected secrets (R25, plan.apply_choice); "no_proposed" drops them
+            final = planner.apply_choice(final, choice)
         self._note(final_plan=final, confirmed=True, choice=choice, reasons=reasons)
         return final
+
+    def _instruction_files(self, final: FinalPlan) -> list[dict]:
+        """Instruction files new or different here that arrive from an unverified source — a pull from a remote
+        source or an unverified bundle (DESIGN §8.7, SEC 4.3, reason g). Read on the target, i.e. here."""
+        mode = self.job.mode
+        if mode is Mode.PULL or (mode is Mode.IMPORT and not bool(getattr(self.source, "verified", False))):
+            fn = getattr(self._planner(), "instruction_files", None)
+            if callable(fn):
+                dests = {d.item_id: d.dest for d in final.decisions}
+                try:
+                    return list(fn(final.plan.items, lambda item_id: dests.get(item_id)))
+                except HandoverError:
+                    return []
+        return []
 
     def _negotiated(self) -> None:
         self._check_cancel()
@@ -1081,6 +1045,21 @@ class Conductor:
 
     def _note_parts(self) -> dict:
         final = self._get("final_plan", FinalPlan)
+        base = self._conductor_note_parts(final)
+        fn = getattr(self._planner(), "note_parts_from", None)
+        if callable(fn) and final is not None:
+            kept = (
+                bool(getattr(self.source, "is_copy", False))
+                if self.job.mode is Mode.IMPORT
+                else bool(self.job.options.keep_source and self.job.mode is Mode.EXPORT)
+            )
+            try:
+                return dict(fn(final, source_kept=kept, extra=base))
+            except HandoverError:
+                return base
+        return base
+
+    def _conductor_note_parts(self, final: FinalPlan | None) -> dict:
         return {
             "mode": str(self.job.mode),
             "pack_time": self._ctx.get("pack_time"),
@@ -1261,7 +1240,8 @@ class Conductor:
                 raise
             except HandoverError as err:
                 self._warn(f"continuation not started: {err.code}")
-                self._note(**{"continue": to_wire(ContinueResult(started=False)) | {"error": err.code}})
+                error = {"code": err.code, "message": err.message, "details": dict(err.details)}
+                self._note(**{"continue": to_wire(ContinueResult(started=False)) | {"error": error}})
         self._go(S.DONE)
         self._finish_result()
 

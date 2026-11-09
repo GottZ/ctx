@@ -129,13 +129,15 @@ def features(ctx=None) -> HostFeatures:
     )
 
 
-def session_db():
-    """A ``hermes_state.SessionDB()`` of the active profile (its default path, resolved at call time)."""
+def session_db(path: Path | None = None):
+    """A ``hermes_state.SessionDB()`` of the active profile (its default path, resolved at call time), or of the
+    ``state.db`` at ``path`` (additive: composition roots pin the profile's database once, so worker threads do
+    not depend on the environment of the moment)."""
     try:
         from hermes_state import SessionDB
     except ImportError as exc:
         raise _missing("hermes_state.SessionDB") from exc
-    return SessionDB()
+    return SessionDB() if path is None else SessionDB(Path(path))
 
 
 def _hermes_home() -> Path:

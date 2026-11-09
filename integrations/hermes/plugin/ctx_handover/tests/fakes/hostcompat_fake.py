@@ -93,11 +93,11 @@ class FakeHost:
         )
         return replace(base, **self.feature_overrides)
 
-    def session_db(self):
+    def session_db(self, path: Path | None = None):
         self._record("session_db")
         from hermes_state import SessionDB
 
-        return SessionDB(self.hermes_home / "state.db")
+        return SessionDB(Path(path) if path is not None else self.hermes_home / "state.db")
 
     def state_db_path(self) -> Path:
         self._record("state_db_path")

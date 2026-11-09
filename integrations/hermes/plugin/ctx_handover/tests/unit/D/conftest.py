@@ -4,11 +4,18 @@
 ``cfg``        ``PolicyConfig`` for ``lay`` (``cfg(**over)`` builds variants)
 ``session``    builds a real ``SessionDB`` transcript through the core's own write paths and returns the rows
                and the session row exactly as the export path reads them
+``scratch_tmp`` (autouse) the process temp directory of the test (``tempfile.tempdir`` and ``TMPDIR``) under the
+               test's basetemp: the scratch homes of version probes (R26) never land in the host's ``/tmp``
+
+``tree_state(root)`` / ``tree_diff(a, b)`` record and compare a directory tree (paths, types, sizes, mtimes).
 """
 
 from __future__ import annotations
 
 import json
+import os
+import stat
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -45,6 +52,36 @@ def write(path: Path, text: str = "hello\n") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def tree_state(root: Path) -> dict[str, tuple[int, int, int]]:
+    """``{relative path: (file type, size, mtime_ns)}`` of ``root`` and everything below it (``lstat``, links are
+    not followed). A created, removed or rewritten entry changes the entry or its directory's mtime."""
+    out: dict[str, tuple[int, int, int]] = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in [".", *dirnames, *filenames]:
+            path = Path(dirpath) / name if name != "." else Path(dirpath)
+            st = path.lstat()
+            out[str(path.relative_to(root))] = (stat.S_IFMT(st.st_mode), st.st_size, st.st_mtime_ns)
+    return out
+
+
+def tree_diff(before: dict, after: dict) -> dict[str, list[str]]:
+    """``{"added": …, "removed": …, "changed": …}`` between two ``tree_state`` results (empty lists: unchanged)."""
+    return {
+        "added": sorted(set(after) - set(before)),
+        "removed": sorted(set(before) - set(after)),
+        "changed": sorted(k for k in set(before) & set(after) if before[k] != after[k]),
+    }
+
+
+@pytest.fixture(autouse=True)
+def scratch_tmp(tmp_path, monkeypatch) -> Path:
+    d = tmp_path / "systmp"
+    d.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(d))
+    monkeypatch.setenv("TMPDIR", str(d))
+    return d
 
 
 @pytest.fixture

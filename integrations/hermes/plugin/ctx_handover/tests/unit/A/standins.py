@@ -213,7 +213,7 @@ def plan_import(
     )
 
 
-def import_hidden(db, store, capsule_id, plan, *, cancelled=lambda: False) -> PreparedInfo:
+def import_hidden(db, store, capsule_id, plan, *, cancelled=lambda: False, **_kw) -> PreparedInfo:
     doc = store.doc(capsule_id)
     page = store.doc(doc["segments"][0]["pages"][0])
     sid = plan.segments[0].new_id
@@ -353,8 +353,12 @@ class PlanStandIn:
         suggestions,
         options,
         approx_tokens,
+        *,
+        redact=None,
+        remote_driven=False,
+        suggest_dest=None,
     ):
-        self.build_calls.append({"suggestions": list(suggestions), "hints": hints})
+        self.build_calls.append({"suggestions": list(suggestions), "hints": hints, "remote_driven": remote_driven})
         return ResourcePlan(
             job_id=job_id,
             revision=tuple(revision),
@@ -370,7 +374,7 @@ class PlanStandIn:
             approx_tokens=approx_tokens,
         )
 
-    def restrict_to_releasable(self, remote_final, own_plan, cfg):
+    def restrict_to_releasable(self, remote_final, own_plan, cfg, *, remote_hints=None, redact=None):
         own = {(i.item_id, i.source_path) for i in own_plan.items}
         extra = [
             i.item_id
@@ -389,7 +393,17 @@ def collect(rows, session_row, hermes, cfg, git, *, source_os):
     return []
 
 
-def refine(candidates, target, *, approx_tokens, options, side_question, llm, stored):
+def hermes_kind(reasons):
+    return next((r for r in reasons if r in ("spillover", "hook_outputs", "native_inputs")), None)
+
+
+def pack_file(path, store, cancelled=lambda: False):
+    with open(path, "rb") as fh:
+        m = store.put_bytes(fh.read(), "application/octet-stream")
+    return {"kind": "extra_file", "object": m.object_id, "size": m.size, "mode": "100644", "mtime_ns": 0}
+
+
+def refine(candidates, target, *, approx_tokens, options, side_question, llm, stored, rows=None, redact=None):
     return stored, RefineReport(used="stored" if stored else "off")
 
 
@@ -411,8 +425,8 @@ def compose(**kw):
 
 
 class GitProbe:
-    def __init__(self, git) -> None:
-        self.git = git
+    def __init__(self, git, *, profile: str = "source") -> None:
+        self.git, self.profile = git, profile
 
     def info(self, root, cfg):
         return None
@@ -437,17 +451,21 @@ class WorkspaceTxn:
 
     fail: ClassVar[dict[str, BaseException]] = {}  # step name -> exception raised by forward/inverse
 
-    def __init__(self, job_id, staging, git, store, journal) -> None:
+    def __init__(self, job_id, staging, git, store, journal, *, cfg=None, rules=None, now=None, cancelled=None):
         self.job_id, self.staging, self.store, self.journal = job_id, Path(staging), store, journal
         self.items: dict[str, dict] = {}
 
+    def snapshot(self) -> dict:
+        return {"v": 1, "job_id": self.job_id, "items": {k: dict(v) for k, v in self.items.items()}}
+
     @classmethod
-    def restore(cls, job_id, staging, git, store, journal, entries):
-        txn = cls(job_id, staging, git, store, journal)
-        for e in entries:
-            if e.get("ws_kind") == "prepared":
-                txn.items[e["step"]] = e["data"]
+    def restore(cls, snapshot, staging, git, store, journal, **kw):
+        txn = cls(snapshot["job_id"], staging, git, store, journal, **kw)
+        txn.items = {k: dict(v) for k, v in snapshot["items"].items()}
         return txn
+
+    def map_states(self) -> dict:
+        return {k: {"tree": {"v": 1, "files": {}}} for k in self.items}
 
     def prepare_item(self, item, decision, pack_item, *, out_row) -> None:
         partial = self.staging / "partial" / item.item_id
@@ -517,6 +535,11 @@ def choose_dest(item, *, source_facts, target_facts, lookup, options):
     return str(root / Path(item.source_path).name), "workspace-root"
 
 
+def choose_all(items, *, source_facts, target_facts, lookup, options, local_choice=True, job_id="", cfg=None):
+    return [choose_dest(i, source_facts=source_facts, target_facts=target_facts, lookup=lookup, options=options)
+            for i in items]
+
+
 def fallback_dest(dest, *, now, workspace_root, allow_roots):
     return dest + "-handover-1"
 
@@ -539,11 +562,15 @@ def enqueue(ledger, kind, data, *, redact):
     ledger.outbox_put(kind, data)
 
 
+def server_for(config, settings):
+    return "ctx"
+
+
 class Spawner:
     def __init__(self) -> None:
         self.spawned: list[tuple] = []
 
-    def spawn(self, session_id, prompt, job_id, *, requested_by):
+    def spawn(self, session_id, prompt, job_id, *, requested_by, verified=True, cwd=None):
         self.spawned.append((session_id, prompt, job_id, requested_by))
         return ContinueResult(started=True, pid=4321, log="/log")
 
@@ -551,10 +578,10 @@ class Spawner:
 def source_ports(items, lock=None, plan=None):
     plan = plan or PlanStandIn(items)
     return SimpleNamespace(
-        collector=SimpleNamespace(collect=collect),
-        ctxrecords=SimpleNamespace(enqueue=enqueue),
+        collector=SimpleNamespace(collect=collect, hermes_kind=hermes_kind),
+        ctxrecords=SimpleNamespace(enqueue=enqueue, server_for=server_for),
         envfacts=SimpleNamespace(probe=probe, delta=delta),
-        filetree=None,
+        filetree=SimpleNamespace(pack_file=pack_file),
         gitops=SimpleNamespace(GitProbe=GitProbe, worktree_state=worktree_state),
         gitpack=None,
         hermes_files=None,
@@ -569,13 +596,15 @@ def source_ports(items, lock=None, plan=None):
 
 def target_ports(txn_cls=WorkspaceTxn):
     return SimpleNamespace(
-        ctxrecords=SimpleNamespace(enqueue=enqueue),
+        ctxrecords=SimpleNamespace(enqueue=enqueue, server_for=server_for),
         envfacts=SimpleNamespace(probe=probe, delta=delta),
         gitops=SimpleNamespace(GitProbe=GitProbe),
         hermes_files=SimpleNamespace(target_path=target_path),
         materialize=SimpleNamespace(assess=assess, WorkspaceTxn=txn_cls),
         note=SimpleNamespace(compose=compose),
-        pathmap=SimpleNamespace(choose_dest=choose_dest, fallback_dest=fallback_dest, map_cwd=map_cwd),
+        pathmap=SimpleNamespace(
+            choose_dest=choose_dest, choose_all=choose_all, fallback_dest=fallback_dest, map_cwd=map_cwd
+        ),
         plan=PlanStandIn(()),
         session_export=SimpleNamespace(read_capsule=read_capsule),
         session_import=SimpleNamespace(

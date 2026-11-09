@@ -82,10 +82,21 @@ from .policy import PolicyConfig, check_target_dest
 
 MAX_DOC_BYTES = 64 * 1024 * 1024
 DISK_MARGIN = 1.1
+QUOTA_MARGIN = 1.1
+"""Staging quota per job on the receiving side: ``need_bytes`` + 10 % (DESIGN §4.7, R28)."""
 STATE_DB_FACTOR = 3.5
 """A capsule needs its blocks plus ≈ 3.5 × its size in ``state.db`` (DESIGN §8.6, [RB §B8])."""
 
 _HERMES_KINDS = ("spillover", "hook_outputs", "native_inputs")
+CAPSULE_BYTES_PER_TOKEN = 16
+"""Capsule bytes per token of the plan's estimate: ≈ 4 characters per token, × 4 for row metadata, tool calls,
+``api_content`` sidecars and JSON framing (DESIGN §6.2 example: 980 k tokens ⇒ 12.8 MB capsule)."""
+CAPSULE_FIXED_BYTES = 1024 * 1024
+
+
+def capsule_estimate(approx_tokens: int) -> int:
+    """Upper estimate of the capsule's block bytes before it exists (disk check and staging quota, §8.6, R28)."""
+    return max(0, int(approx_tokens)) * CAPSULE_BYTES_PER_TOKEN + CAPSULE_FIXED_BYTES
 
 
 def default_target_ports() -> SimpleNamespace:
@@ -119,6 +130,58 @@ def default_target_ports() -> SimpleNamespace:
 
 def _digest(*parts: object) -> str:
     return sha256_hex(canonical_bytes([p if not dataclasses.is_dataclass(p) else to_wire(p) for p in parts]))
+
+
+class QuotaSink:
+    """The block sink of one target job: every newly stored byte is charged against the job's staging quota
+    (``need_bytes`` of the confirmed plan + 10 %, R28); a peer can never store more than the plan allows."""
+
+    def __init__(self, store, ledger: Ledger, job_id: str) -> None:
+        self._store, self._ledger, self._job_id = store, ledger, job_id
+
+    def _charge(self, nbytes: int) -> None:
+        if nbytes <= 0:
+            return
+        ok, used, quota = self._ledger.quota_charge(self._job_id, Role.TARGET, nbytes)
+        if not ok:
+            if quota < 0:
+                raise InvalidState("no confirmed plan for this job on the target", reason="no_quota")
+            raise InsufficientStorage(
+                "The peer sent more data than the confirmed plan allows.",
+                reason="job_quota",
+                quota_bytes=quota,
+                used_bytes=used,
+                request_bytes=nbytes,
+            )
+
+    def put_manifests(self, manifests) -> int:
+        new = [m for m in manifests if not self._has_manifest(m.object_id)]
+        self._charge(sum(256 + 70 * len(m.blocks) for m in new))
+        stored = self._store.put_manifests(manifests)
+        self._ledger.job_objects_add(self._job_id, [m.object_id for m in manifests])  # GC keeps them (§5.1)
+        return stored
+
+    def _has_manifest(self, object_id: str) -> bool:
+        try:
+            self._store.manifests([object_id])
+        except HandoverError:
+            return False
+        return True
+
+    def missing(self, ids):
+        return self._store.missing(ids)
+
+    def write_blocks(self, frames):
+        frames = list(frames)
+        new_ids = set(self._store.missing([bid for bid, _raw in frames]))
+        self._charge(sum(len(raw) for bid, raw in frames if bid in new_ids))
+        return self._store.write_blocks(frames)
+
+    def manifests(self, ids):
+        return self._store.manifests(ids)
+
+    def read_blocks(self, ids):
+        return self._store.read_blocks(ids)
 
 
 def _existing_ancestor(path: Path) -> Path:
@@ -221,9 +284,13 @@ class LocalTarget:
         enc = {k: (to_wire(v) if dataclasses.is_dataclass(v) else v) for k, v in ctx.items()}
         self.ledger.transition(job.job_id, Role.TARGET, expect, to, {"ctx": enc} if enc else {}, epoch=self._epoch(job))
 
-    def _start(self, job: JobContext, op: str, digest: str, fn, *, restart_failed: bool = False) -> OpStatus:
+    def _start(
+        self, job: JobContext, op: str, digest: str, fn, *, restart_failed: bool = False, exclusive: bool = False
+    ) -> OpStatus:
         self._epoch(job)
-        return self.ops.start(job.job_id, op, _digest(op, digest), fn, restart_failed=restart_failed)
+        return self.ops.start(
+            job.job_id, op, _digest(op, digest), fn, restart_failed=restart_failed, exclusive=exclusive
+        )
 
     def _staging(self, job_id: str) -> Path:
         return private_dir(self.data_dir / "staging" / job_id)
@@ -286,28 +353,37 @@ class LocalTarget:
         tmp = private_dir(self._staging(job.job_id) / "assess")
         now = datetime.fromtimestamp(self._clock())
         decisions: list[TargetDecision] = []
-        for item in plan.items:
-            if item.include is Include.NO:
-                continue
-            dest, reason = p.pathmap.choose_dest(
-                item, source_facts=sf, target_facts=tf, lookup=self.ledger.map_lookup, options=job.options
-            )
+        items = [i for i in plan.items if i.include is not Include.NO]
+        local_choice = not self._remote_driven(job)  # destinations a counterpart typed stay inside allow_roots (R19)
+        chosen = p.pathmap.choose_all(
+            items,
+            source_facts=sf,
+            target_facts=tf,
+            lookup=lambda remote_path, direction: self.ledger.map_find(peer_id, remote_path, direction),
+            options=job.options,
+            local_choice=local_choice,
+            job_id=job.job_id,
+            cfg=self.policy,
+        )
+        probe = p.gitops.GitProbe(self.git, profile="received")
+        for item, (dest, reason) in zip(items, chosen, strict=True):
             out_row = self.ledger.map_out(dest, peer_id)
+            in_row = self.ledger.map_in(dest, peer_id)
             a = p.materialize.assess(
                 item,
                 dest,
                 git=self.git,
-                probe=p.gitops.GitProbe(self.git),
+                probe=probe,
                 out_row=out_row,
-                tree_fingerprint=(out_row.state or {}).get("tree") if out_row and out_row.state else None,
+                tree_fingerprint=in_row.state if in_row is not None and isinstance(in_row.state, dict) else None,
                 target_facts=tf,
                 fallback=lambda d: p.pathmap.fallback_dest(
                     d, now=now, workspace_root=job.options.workspace_root, allow_roots=job.options.allow_roots
                 ),
                 tmp=tmp,
                 cfg=self.policy,
-                recorded=out_row is not None or reason == "return-mapping",
-                local_choice=reason == "user" and not self._remote_driven(job),
+                recorded=out_row is not None or in_row is not None or reason == "return-mapping",
+                local_choice=reason == "user" and local_choice,
             )
             final_dest = a.conflict.fallback_dest if a.conflict is not None else dest
             decisions.append(
@@ -344,6 +420,7 @@ class LocalTarget:
         doc.pop("plan_id", None)
         final = dataclasses.replace(final, plan_id=p.plan.plan_id(doc))
         self._remember(job, final_plan=final)
+        self.ledger.quota_set(job.job_id, Role.TARGET, int(need * QUOTA_MARGIN))
         row = self._row(job)
         if row["state"] in ("open", "negotiated"):
             self._go(job, ("open", "negotiated"), "negotiated")
@@ -362,7 +439,7 @@ class LocalTarget:
         for d in decisions:
             if d.mode is not DestMode.SKIP:
                 add(Path(os.path.expanduser(d.dest)), d.need_bytes)
-        capsule_bytes = int(plan.approx_tokens) * 4
+        capsule_bytes = capsule_estimate(plan.approx_tokens)
         add(self.data_dir, int(capsule_bytes * (1 + STATE_DB_FACTOR)))
         free: dict[str, int] = {}
         short = None
@@ -446,25 +523,39 @@ class LocalTarget:
 
         return journal
 
+    def _latest_snapshot(self, job_id: str) -> dict | None:
+        """The newest ``WorkspaceTxn.snapshot()`` in the journal: after PREPARE (ctx ``ws_snapshot``) and after each
+        c1/c3 step of the commit, forward or rollback (step ``result.ws``)."""
+        snap = None
+        for ev in self.ledger.events(job_id, Role.TARGET):
+            data = ev["data"] or {}
+            ctx = data.get("ctx")
+            if isinstance(ctx, dict) and "ws_snapshot" in ctx:
+                snap = ctx["ws_snapshot"]
+            result = data.get("result")
+            if ev["kind"] == "done" and isinstance(result, dict) and "ws" in result:
+                snap = result["ws"]
+        return snap
+
     def _txn(self, job: JobContext, *, restore: bool):
+        """The job's workspace transaction: new, or rebuilt in this process from the journaled snapshot (E's
+        ``WorkspaceTxn.snapshot``/``restore``) — a crashed commit continues in another process."""
         ws = self.ports.materialize.WorkspaceTxn
         staging = self._staging(job.job_id)
         journal = self._journal_fn(job)
-        if restore:
-            entries: list[dict] = []
-            for e in self.ledger.events(job.job_id, Role.TARGET):
-                if e["kind"] == "ws_reset":
-                    entries = []  # a re-pack discarded everything prepared before
-                elif e["kind"] == "ws":
-                    entries.append(e["data"])
-            return ws.restore(job.job_id, staging, self.git, self.store, journal, entries)
-        return ws(job.job_id, staging, self.git, self.store, journal)
+        kw = {"cfg": self.policy, "cancelled": job.cancelled}
+        snap = self._latest_snapshot(job.job_id) if restore else None
+        if snap is not None:
+            return ws.restore(snap, staging, self.git, self.store, journal, **kw)
+        return ws(job.job_id, staging, self.git, self.store, journal, **kw)
 
     def start_prepare(self, job: JobContext, req: PrepareRequest) -> OpStatus:
         def fn(report) -> dict:
             return to_wire(self._prepare(job, req, report))
 
-        return self._start(job, "prepare", _digest(req.capsule.capsule_id, req.pack.pack_id, req.final_plan_id), fn)
+        return self._start(
+            job, "prepare", _digest(req.capsule.capsule_id, req.pack.pack_id, req.final_plan_id), fn, exclusive=True
+        )
 
     def _prepare(self, job: JobContext, req: PrepareRequest, report) -> PreparedInfo:
         p = self.ports
@@ -485,8 +576,8 @@ class LocalTarget:
         # workspace: prepare items not yet prepared (a re-pack prepares again from scratch)
         prior_pack = ctx.get("prepared_pack")
         if prior_pack is not None and prior_pack != req.pack.pack_id:
-            self._txn(job, restore=True).discard()
-            self.ledger.event(job.job_id, Role.TARGET, "ws_reset", {"pack": prior_pack}, epoch=self._epoch(job))
+            self._txn(job, restore=True).discard()  # a re-pack prepares the work trees again from scratch
+            self._remember(job, ws_snapshot=None, prepared_pack=None)
         hermes_files = []
         if prior_pack != req.pack.pack_id:
             txn = self._txn(job, restore=False)
@@ -502,8 +593,10 @@ class LocalTarget:
                 if item.kind is ItemKind.HERMES_FILE:
                     hermes_files.append(pack_item)
                     continue
-                txn.prepare_item(item, decision, pack_item, out_row=self.ledger.map_out(decision.dest, peer_id))
+                row = self.ledger.map_out(decision.dest, peer_id) or self.ledger.map_in(decision.dest, peer_id)
+                txn.prepare_item(item, decision, pack_item, out_row=row)
             dests = [list(d) for d in txn.dests()]
+            self._remember(job, ws_snapshot=txn.snapshot())
         else:
             dests = ctx.get("dests") or []
             hermes_files = ctx.get("hermes_files") or []
@@ -514,7 +607,13 @@ class LocalTarget:
         else:
             import_plan = self._import_plan(job, capsule_doc, final)
             prepared = p.session_import.import_hidden(
-                db, self.store, req.capsule.capsule_id, import_plan, cancelled=job.cancelled
+                db,
+                self.store,
+                req.capsule.capsule_id,
+                import_plan,
+                cancelled=job.cancelled,
+                local_hermes_version=self.host.hermes_version,
+                max_session_bytes=job.options.max_session_bytes,
             )
             if (prepared.h_all, prepared.h_rows, prepared.h_model) != (
                 req.capsule.h_all,
@@ -561,6 +660,16 @@ class LocalTarget:
         reports = private_dir(self.data_dir / "reports")
         report_path = reports / f"{job.job_id}.md"
         origin = "verified peer" if self.peer_verified else "unverified bundle"
+        if job.mode in (Mode.PULL, Mode.IMPORT) and self.source_peer_id is None and not self.peer_verified:
+            origin = "unverified bundle" if job.mode is Mode.IMPORT else "local"
+        note_parts = dict(req.note_parts or {})
+        listing = getattr(p.plan, "instruction_files", None)
+        if callable(listing) and not note_parts.get("instruction_files"):
+            dests = {d.item_id: d.dest for d in final.decisions}
+            try:  # new or changed here, read on this host (SEC 4.3)
+                note_parts["instruction_files"] = list(listing(final.plan.items, lambda iid: dests.get(iid)))
+            except HandoverError:
+                pass
         note_text, report_md = p.note.compose(
             job_id=job.job_id,
             source=sf,
@@ -568,14 +677,15 @@ class LocalTarget:
             delta=p.envfacts.delta(sf, tf),
             path_map=path_map,
             items=items,
-            note_parts=req.note_parts,
+            note_parts=note_parts,
             model_change=final.model_change,
-            pack_time=req.note_parts.get("pack_time") or 0,
+            pack_time=note_parts.get("pack_time") or 0,
             delta_message=delta_message,
             report_path=str(report_path),
             redact=self.redact,
             untrusted_text=final.plan.notes_for_target,
             origin=origin,
+            peer_name=self.peer_name,
         )
         fd = os.open(report_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -603,7 +713,7 @@ class LocalTarget:
             self._go(job, "delta_applying", "prepared", prepared=new, note=note_text, report_path=report_path)
             return to_wire(new)
 
-        return self._start(job, "apply_delta", delta.delta_id, fn)
+        return self._start(job, "apply_delta", delta.delta_id, fn, exclusive=True)
 
     def start_reset_session(self, job: JobContext) -> OpStatus:
         def fn(report) -> dict:
@@ -618,7 +728,7 @@ class LocalTarget:
             return {}
 
         ctx = self._ctx(job.job_id)
-        return self._start(job, "reset_session", str(ctx.get("prepared_capsule")), fn)
+        return self._start(job, "reset_session", str(ctx.get("prepared_capsule")), fn, exclusive=True)
 
     # -- commit (DESIGN §3.4) --------------------------------------------------------------------------------------
     def start_commit(self, job: JobContext) -> OpStatus:
@@ -627,7 +737,7 @@ class LocalTarget:
             self._go(job, "prepared", "committing")
         elif row["state"] not in ("committing", "committed"):
             raise InvalidState(f"the target is {row['state']}", reason="state", state=row["state"])
-        return self._start(job, "commit", "commit", lambda report: self._commit_body(job, report))
+        return self._start(job, "commit", "commit", lambda report: self._commit_body(job, report), exclusive=True)
 
     def recover(self, job: JobContext) -> OpStatus | None:
         """Janitor: a ``committing`` target whose process died continues its commit op in the journaled direction
@@ -638,7 +748,9 @@ class LocalTarget:
         op = self.ledger.op_get(job.job_id, "commit", _digest("commit", "commit"))
         if op is not None:
             self.ops.status(job.job_id, op["op_id"])  # marks a dead running op interrupted
-        return self._start(job, "commit", "commit", lambda report: self._commit_body(job, report), restart_failed=True)
+        return self._start(
+            job, "commit", "commit", lambda report: self._commit_body(job, report), restart_failed=True, exclusive=True
+        )
 
     def _cwd_step(self, cwd: str | None):
         def forward() -> dict:
@@ -677,8 +789,16 @@ class LocalTarget:
         db = self.db_factory()
         txn = self._txn(job, restore=True)
         steps: list = []
+
+        def snap_after(fn):  # every workspace step journals the transaction's new snapshot (restore point)
+            def run(*_a):
+                fn()
+                return {"ws": txn.snapshot()}
+
+            return run
+
         for name, fwd, inv in txn.commit_steps():
-            steps.append((f"c1:{name}", (lambda f=fwd: f() or None), (lambda d, i=inv: i())))
+            steps.append((name if name.startswith("c1:") else f"c1:{name}", snap_after(fwd), snap_after(inv)))
         fwd2, inv2 = self._cwd_step(ctx.get("cwd"))
         steps.append(("c2:cwd", fwd2, inv2))
         files = []
@@ -692,7 +812,7 @@ class LocalTarget:
             )
             files.append((pack_item, Path(dest)))
         f3, i3 = txn.place_hermes_files(files)
-        steps.append(("c3:hermes_files", (lambda: f3() or None), (lambda d: i3())))
+        steps.append(("c3:hermes_files", snap_after(f3), snap_after(i3)))
         capsule = from_wire(CapsuleInfo, ctx["capsule"]) if ctx.get("capsule") else None
 
         def side_fwd() -> None:
@@ -795,8 +915,9 @@ class LocalTarget:
             if name in done_inv or name not in inverse:
                 continue
             self._step_event(job, "intent", name, "rollback")
+            undo_result = None
             try:
-                inverse[name](results.get(name))
+                undo_result = inverse[name](results.get(name))
             except Fenced:
                 raise
             except Exception as exc:
@@ -808,7 +929,7 @@ class LocalTarget:
                     {"step": name, "error": error_dict(exc)},
                     epoch=self._epoch(job),
                 )
-            self._step_event(job, "done", name, "rollback")
+            self._step_event(job, "done", name, "rollback", undo_result if isinstance(undo_result, dict) else None)
         if not attention:
             self._cleanup(job, discard_session=True)
         last_error = dict(failure or {"code": "import_failed", "message": "commit failed"})
@@ -846,7 +967,13 @@ class LocalTarget:
             committed_at=self._clock(),
         )
         self._go(job, "committing", "committed", ack=ack)
-        for item_id, dest, _mode in prepared.dests:
+        try:
+            txn = self._txn(job, restore=True)
+            states = txn.map_states() if callable(getattr(txn, "map_states", None)) else {}
+            dests = [(i, d, m) for i, d, m in txn.dests()] or list(prepared.dests)
+        except HandoverError:
+            states, dests = {}, list(prepared.dests)
+        for item_id, dest, _mode in dests:
             item = items.get(item_id)
             if item is None:
                 continue
@@ -857,17 +984,33 @@ class LocalTarget:
                     remote_path=item.source_path,
                     direction="in",
                     repo_identity=item.git.root_commits[0] if item.git and item.git.root_commits else None,
-                    state=None,
+                    state=states.get(item_id),
                     last_job_id=job.job_id,
                 )
             )
         try:
-            self.ports.ctxrecords.enqueue(
-                self.ledger,
-                "arrival",
-                {"job_id": job.job_id, "mode": str(job.mode), "peer": self.peer_name, "ack": to_wire(ack)},
-                redact=self.redact,
-            )
+            rec = self.ports.ctxrecords
+            if rec.server_for(self.config, self.settings) is not None:
+                capsule_raw = ctx.get("capsule") or {}
+                rec.enqueue(
+                    self.ledger,
+                    "arrival",
+                    {
+                        "job_id": job.job_id,
+                        "source_root": (sf.instance_name if sf else ""),
+                        "target_root": ack.root_id,
+                        "source_session": capsule_raw.get("capsule_id", ""),
+                        "target_session": ack.session_id,
+                        "peer": self.peer_name or (job.peer.name if job.peer else None),
+                        "local_name": self.instance_name,
+                        "title": ack.title,
+                        "at": ack.committed_at,
+                        "path_map": [to_wire(e) for e in ack.path_map],
+                        "model_change": final.model_change,
+                        "plugin_version": self.host.plugin_version,
+                    },
+                    redact=self.redact,
+                )
         except HandoverError:
             pass
         self._cleanup(job, discard_session=False)
@@ -915,7 +1058,14 @@ class LocalTarget:
             raise ContinueRefused("Unverified handovers never start a continuation.", reason="unverified")
         ack = from_wire(CommitAck, ctx["ack"])
         requested_by = (self.peer_name or (job.peer.name if job.peer else None)) if remote else None
-        res = self.continuation.spawn(ack.session_id, str(prompt)[:2000], job.job_id, requested_by=requested_by)
+        res = self.continuation.spawn(
+            ack.session_id,
+            str(prompt)[:2000],
+            job.job_id,
+            requested_by=requested_by,
+            verified=self.peer_verified,
+            cwd=self._ctx(job.job_id).get("cwd"),
+        )
         self._remember(job, **{"continue": res})
         return res
 
@@ -930,6 +1080,16 @@ class LocalTarget:
         if state in ("aborted", "expired"):
             return
         final_state = "expired" if reason == "expired" else "aborted"
+        lock = self.ops.job_lock(job.job_id)
+        if lock is not None and not lock.acquire():
+            raise InvalidState("another process still works on this job", reason="busy_elsewhere", retryable=True)
+        try:
+            self._abort_locked(job, state, reason, final_state)
+        finally:
+            if lock is not None:
+                lock.release()
+
+    def _abort_locked(self, job: JobContext, state: str, reason: str, final_state: str) -> None:
         if state != "aborting":
             self._go(job, state, "aborting", abort_reason=reason)
         self._cleanup(job, discard_session=True)
@@ -962,3 +1122,7 @@ class LocalTarget:
 
     def blocks(self):
         return self.store
+
+    def blocks_for(self, job: JobContext) -> QuotaSink:
+        """The quota-enforcing sink of one job (server route #25 and a local conductor's block mover)."""
+        return QuotaSink(self.store, self.ledger, job.job_id)

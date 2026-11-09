@@ -414,7 +414,15 @@ class FakeSession:
                 h["state"] = SourceState.RECLAIMED.value
                 s = self.sessions[session_id]
                 s.update(hidden=False, archived=False, ended=None, title=s.pop("saved_title", s["title"]))
-                return {"ok": True, "state": "reclaimed", "job_id": job_id, "withheld": []}
+                return {
+                    "ok": True,
+                    "state": "reclaimed",
+                    "job_id": job_id,
+                    "withheld": [],
+                    "rewound": 0,
+                    "kept": 0,
+                    "warnings": [],
+                }
         return {"ok": False, "state": None, "message": "Nothing to reclaim."}
 
     def mark_exported(self, db, ledger, info, holder, job_id, bundle_path):

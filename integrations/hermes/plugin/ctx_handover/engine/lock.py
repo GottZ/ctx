@@ -22,6 +22,7 @@ transaction) — a contract point for cluster A. Sub-steps are journaled as ``st
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import os
 import queue
@@ -291,11 +292,6 @@ def _now_ts(now: datetime | float | None) -> float:
     return time.time()
 
 
-def _max_row_id(db, session_id: str) -> int:
-    rows = db.get_messages(session_id, include_inactive=True, latest=True, limit=1)
-    return int(rows[-1]["id"]) if rows else 0
-
-
 def _release_leases(db, tip: str, holder: str | None) -> None:
     if not holder:
         return
@@ -422,8 +418,6 @@ def prepare(db, ledger, info: SessionInfo, job_id: str, peer_name: str, now: dat
     if "p1" not in done:
         with _tx(ledger):
             _require(_state(ledger, job_id), allowed, "prepare", job_id)
-            existing = _backups(ledger, job_id)
-            _backup_once(ledger, job_id, f"mark:{tip}", str(_max_row_id(db, tip)), existing)
             ledger.source_set(job_id, SourceState.PREPARING, peer=peer_name, prepared_at=_now_ts(now))
             ledger.veto_add(job_id, list(lineage), info.root_id)
             _mark(ledger, job_id, "p1")
@@ -692,16 +686,34 @@ def _withheld(row: Mapping) -> str | None:
     return None
 
 
-def _placeholder_run(rows: Sequence[Mapping], texts: set[str]) -> tuple[int | None, list[str]]:
-    """The first row id of the trailing run of veto pairs (user row + assistant row with a veto text of this
-    job) and the withheld prompts of that run. Real turns after a placeholder end the run's candidacy, so only
-    rows that provably are veto pairs are ever rewound."""
+def _is_placeholder(row: Mapping) -> bool:
+    """The core's withheld placeholder of a vetoed prompt: a ``user`` row with ``withheld_prompt`` in its display
+    metadata (``agent/turn_context.py:862-893``)."""
+    return row.get("role") == "user" and _withheld(row) is not None
+
+
+def _is_veto_reply(row: Mapping, texts: set[str]) -> bool:
+    return row.get("role") == "assistant" and row.get("content") in texts
+
+
+def _veto_pairs(rows: Sequence[Mapping], texts: set[str]) -> list[Mapping]:
+    """Placeholders of this job in ``rows`` (storage order, any state): a placeholder directly followed by a reply
+    with one of this job's veto texts. The texts name the job, so no other turn qualifies."""
+    seq = [r for r in rows if r.get("role") != "session_meta"]
+    return [a for a, b in itertools.pairwise(seq) if _is_placeholder(a) and _is_veto_reply(b, texts)]
+
+
+def _placeholder_run(rows: Sequence[Mapping], texts: set[str]) -> tuple[int | None, list[Mapping]]:
+    """The first row id of the trailing run of veto pairs among the live ``rows`` of the tip, and the run's
+    placeholders. A pair is a withheld placeholder that is not a compaction summary carrier, followed by a reply
+    with a veto text of this job; anything else — a real turn, the compaction summary, a veto reply whose
+    placeholder the compaction left behind — ends the run, so a rewind never takes more than vetoed attempts."""
     live = [r for r in rows if r.get("role") != "session_meta"]
     start = len(live)
     i = len(live) - 2
     while i >= 0:
         user, reply = live[i], live[i + 1]
-        if user.get("role") == "user" and reply.get("role") == "assistant" and reply.get("content") in texts:
+        if _is_placeholder(user) and not user.get("_compressed_summary") and _is_veto_reply(reply, texts):
             start = i
             i -= 2
             continue
@@ -709,37 +721,72 @@ def _placeholder_run(rows: Sequence[Mapping], texts: set[str]) -> tuple[int | No
     if start >= len(live):
         return None, []
     run = live[start:]
-    withheld = [w for w in (_withheld(r) for r in run[::2]) if w is not None]
-    return int(run[0]["id"]), withheld
+    return int(run[0]["id"]), list(run[::2])
+
+
+def _copy_key(row: Mapping) -> object:
+    """Copies of one message (carried tails, rotation clones) share ``message_uid``."""
+    return row.get("message_uid") or ("id", row.get("id"))
 
 
 def _rewind_placeholders(
-    db, entry: Mapping, backups: Mapping[str, str | None], warnings: list[str], sleep: Callable[[float], None]
-) -> tuple[int, list[str]]:
-    """Rewind the vetoed attempts of this job on the current tip (DESIGN §7.7). Returns (rows rewound, texts)."""
-    root = str(entry.get("root_id"))
-    tip = db.resolve_resume_session_id(root) or str(entry.get("tip_id"))
-    mark = 0
-    if tip == entry.get("tip_id"):
-        with contextlib.suppress(TypeError, ValueError):
-            mark = int(backups.get(f"mark:{tip}") or 0)
-    rows = [r for r in _rows_after(db, tip, mark) if r.get("active", 1)]
-    target, withheld = _placeholder_run(rows, _all_texts(entry))
-    if target is None:
-        return 0, []
-    for attempt in range(_REWIND_ATTEMPTS):
-        try:
-            result = db.rewind_to_message(tip, target)
-            return int(result.get("rewound_count") or 0), withheld
-        except ValueError as exc:
-            warnings.append(f"placeholder rows not rewound: {exc}")
-            return 0, withheld
-        except Exception as exc:
-            if attempt + 1 == _REWIND_ATTEMPTS:
-                warnings.append(f"placeholder rows not rewound: {exc.__class__.__name__}: {exc}")
-                return 0, withheld
-            sleep(_REWIND_PAUSE_S)
-    return 0, withheld
+    db, entry: Mapping, warnings: list[str], sleep: Callable[[float], None]
+) -> tuple[int, list[str], int]:
+    """Clean up the vetoed attempts of this job (DESIGN §7.7). Returns (rows rewound, typed texts, kept).
+
+    Scope: the session's segments from the handed-over tip to the current tip (a compaction after the retire
+    rotates or compacts in place). Only the trailing run of veto pairs on the live tip is rewound
+    (``rewind_to_message``, non-destructive). Vetoed attempts a compaction moved out of reach stay: the core
+    refuses every write on a segment closed by compression (``hermes_state_messages.py:268-269``), a rewind never
+    touches archived rows, and a veto reply carried right behind the compaction summary can only go together with
+    the summary. Their typed texts are still returned (in transcript order, one per message across copies) and
+    ``kept`` counts them; nothing is ever written to an ancestor segment.
+    """
+    texts = _all_texts(entry)
+    origin = str(entry.get("tip_id"))
+    tip = db.resolve_resume_session_id(str(entry.get("root_id"))) or origin
+    lineage = list(db.get_compression_lineage(tip)) or [tip]
+    segments = lineage[lineage.index(origin) :] if origin in lineage else [tip]
+    shown: list[Mapping] = []
+    tip_live: list[dict] = []
+    for seg in segments:
+        rows = list(_rows_after(db, seg, 0))
+        shown.extend(r for r in _veto_pairs(rows, texts) if r.get("active", 1) or r.get("compacted"))
+        if seg == tip:
+            tip_live = [r for r in rows if r.get("active", 1)]
+    target, run = _placeholder_run(tip_live, texts)
+    rewound = 0
+    if target is not None:
+        for attempt in range(_REWIND_ATTEMPTS):
+            try:
+                rewound = int(db.rewind_to_message(tip, target).get("rewound_count") or 0)
+                break
+            except ValueError as exc:
+                warnings.append(f"placeholder rows not rewound: {exc}")
+                break
+            except Exception as exc:
+                if attempt + 1 == _REWIND_ATTEMPTS:
+                    warnings.append(f"placeholder rows not rewound: {exc.__class__.__name__}: {exc}")
+                    break
+                sleep(_REWIND_PAUSE_S)
+    gone = {_copy_key(r) for r in run} if rewound else set()
+    withheld: list[str] = []
+    kept = 0
+    seen: set[object] = set()
+    for row in shown:
+        key = _copy_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        withheld.append(str(_withheld(row)))
+        if key not in gone:
+            kept += 1
+    if kept:
+        warnings.append(
+            f"{kept} vetoed message(s) stay in this session's history: a compaction after the handover moved them "
+            "where Hermes allows no changes; their typed text is listed as withheld"
+        )
+    return rewound, withheld, kept
 
 
 def _rows_after(db, session_id: str, after_id: int) -> Iterator[dict]:
@@ -790,9 +837,9 @@ def _undo(
     with _tx(ledger):
         _require(_state(ledger, job_id), (*from_states, middle.value), action, job_id)
         _release_leases(db, tip, holder)
-    rewound, withheld = 0, []
+    rewound, withheld, kept = 0, [], 0
     if _done(ledger, job_id) & {"p1"}:
-        rewound, withheld = _rewind_placeholders(db, _entry(ledger, job_id), _backups(ledger, job_id), warnings, sleep)
+        rewound, withheld, kept = _rewind_placeholders(db, _entry(ledger, job_id), warnings, sleep)
     with _tx(ledger):
         state = _state(ledger, job_id)
         _require(state, (*from_states, middle.value), action, job_id)
@@ -804,7 +851,14 @@ def _undo(
     with _tx(ledger):
         _require(_state(ledger, job_id), (middle.value, final.value), action, job_id)
         ledger.source_set(job_id, final)
-    return {"state": final.value, "job_id": job_id, "warnings": warnings, "withheld": withheld, "rewound": rewound}
+    return {
+        "state": final.value,
+        "job_id": job_id,
+        "warnings": warnings,
+        "withheld": withheld,
+        "rewound": rewound,
+        "kept": kept,
+    }
 
 
 def release(

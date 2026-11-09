@@ -7,13 +7,15 @@ involved and the transaction rules of DESIGN §12.3 (``BEGIN IMMEDIATE``, ``DELE
 expires_at > ?`` with ``rowcount == 1``). ``make_ledger`` prefers the real ``ledger.Ledger`` as soon as it is
 importable, so layer 2 re-runs every C test against A's implementation without edits.
 
-Two methods are not in INTERFACES §4.5 and are requested from cluster A in the C report: ``job_objects`` and
-``blocks_delete``.
+Methods beyond INTERFACES §4.5, requested from cluster A in the C reports: ``job_objects``, ``blocks_delete``,
+``object_delete`` (manifest GC, R28) and the staging quota ``quota_set``/``quota_get``/``quota_charge`` (R28;
+same semantics as ``engine/ledger.py``).
 
 Every method opens its own connection (process- and thread-safe, like several Hermes processes sharing one
-profile directory). ``tx()`` is a dedicated connection holding ``BEGIN IMMEDIATE``; ``meta_get`` called inside it
-reads the committed state through another connection, which equals the current state because the open
-transaction holds the database's only write lock.
+profile directory). ``tx()`` is a dedicated connection holding ``BEGIN IMMEDIATE`` and, like the real ledger, is
+re-entrant within a thread: a write method called inside it joins the open transaction. Reads called inside it
+see the committed state through another connection, which equals the current state as long as the transaction
+has not written yet (it holds the database's only write lock).
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import contextlib
 import json
 import os
 import sqlite3
+import threading
 import time
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -47,6 +50,8 @@ CREATE TABLE IF NOT EXISTS job_objects(job_id TEXT NOT NULL, object_id TEXT NOT 
 CREATE TABLE IF NOT EXISTS offers(offer_id TEXT PRIMARY KEY, peer_id TEXT NOT NULL, session_id TEXT NOT NULL,
   note TEXT, refinement TEXT, created_at REAL NOT NULL, expires_at REAL NOT NULL, claimed_job TEXT);
 CREATE TABLE IF NOT EXISTS bundle_imports(bundle_job_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS job_quota(job_id TEXT NOT NULL, role TEXT NOT NULL, quota INTEGER NOT NULL,
+  used INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(job_id, role));
 """
 
 _TERMINAL = ("aborted", "expired", "committed", "retired", "released", "reclaimed", "done", "exported")
@@ -63,6 +68,7 @@ class LedgerStub:
         self.path = Path(path)
         self._m = model
         self._clock = clock
+        self._local = threading.local()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             fd = os.open(self.path, os.O_WRONLY | os.O_CREAT, 0o600)
@@ -84,14 +90,22 @@ class LedgerStub:
 
     @contextlib.contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
-        """``BEGIN IMMEDIATE`` transaction on a dedicated connection; commit on success, roll back on error."""
+        """``BEGIN IMMEDIATE`` transaction on a dedicated connection; commit on success, roll back on error.
+        Re-entrant within a thread (the outermost commits), like ``engine.ledger.Ledger.tx``."""
+        outer = getattr(self._local, "conn", None)
+        if outer is not None:
+            yield outer
+            return
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._local.conn = conn
             try:
                 yield conn
             except BaseException:
+                self._local.conn = None
                 conn.execute("ROLLBACK")
                 raise
+            self._local.conn = None
             conn.execute("COMMIT")
 
     # -- meta ----------------------------------------------------------------------------------------------
@@ -426,6 +440,41 @@ class LedgerStub:
         """Requested from cluster A (C report): forget freed blocks."""
         with self.tx() as conn:
             conn.executemany("DELETE FROM blocks WHERE block_id=?", [(i,) for i in ids])
+
+    def object_delete(self, ids: Sequence[str]) -> None:
+        """Requested from cluster A (C layer-2 report): forget the index rows of collected objects (R28)."""
+        with self.tx() as conn:
+            conn.executemany("DELETE FROM objects WHERE object_id=?", [(i,) for i in ids])
+
+    # -- staging quota (R28; mirrors engine/ledger.py) --------------------------------------------------------
+    def quota_set(self, job_id: str, role, quota_bytes: int) -> None:
+        with self.tx() as conn:
+            conn.execute(
+                "INSERT INTO job_quota(job_id, role, quota, used) VALUES(?,?,?,0) ON CONFLICT(job_id, role)"
+                " DO UPDATE SET quota=MAX(job_quota.quota, excluded.quota)",
+                (job_id, str(role), max(0, int(quota_bytes))),
+            )
+
+    def quota_get(self, job_id: str, role) -> tuple[int, int] | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT quota, used FROM job_quota WHERE job_id=? AND role=?", (job_id, str(role))
+            ).fetchone()
+        return None if row is None else (int(row[0]), int(row[1]))
+
+    def quota_charge(self, job_id: str, role, nbytes: int) -> tuple[bool, int, int]:
+        n = max(0, int(nbytes))
+        with self.tx() as conn:
+            row = conn.execute(
+                "SELECT quota, used FROM job_quota WHERE job_id=? AND role=?", (job_id, str(role))
+            ).fetchone()
+            if row is None:
+                return False, 0, -1
+            quota, used = int(row[0]), int(row[1])
+            if used + n > quota:
+                return False, used, quota
+            conn.execute("UPDATE job_quota SET used=used+? WHERE job_id=? AND role=?", (n, job_id, str(role)))
+            return True, used + n, quota
 
     def block_rows(self) -> dict[str, tuple[int, float]]:
         """Test helper: ``{block_id: (size, last_used_at)}``."""

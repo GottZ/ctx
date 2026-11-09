@@ -6,6 +6,7 @@ Other clusters use these to drive planning without a real host:
 ``plan_item(...)`` / ``resource_plan(...)``  plan documents with sensible defaults
 ``final_plan(plan, decisions)``             a ``FinalPlan`` whose ``plan_id`` is computed by ``plan.plan_id``
 ``decision(item, dest)``                    a ``TargetDecision``
+``model_change(...)``                       ``FinalPlan.model_change`` in the form the target delivers
 ``Busy``                                    a ``contracts.BusyReportLike``
 ``StaticGitProbe``                          ``contracts.GitProbe`` from a fixed ``{work tree root: shallow}`` map
 ``CeilingGitProbe``                         ``contracts.GitProbe`` over real ``git rev-parse`` with a ceiling dir,
@@ -161,6 +162,28 @@ def final_plan(plan: ResourcePlan, decisions: Sequence[TargetDecision] | None = 
     }
     base.update(overrides)
     return plan_mod.with_plan_id(FinalPlan(**base))
+
+
+def model_change(
+    *,
+    from_model: str = "qwen3:32b",
+    from_provider: str = "ollama",
+    to_model: str = "gpt-x",
+    to_provider: str = "openrouter",
+    context_length: int | None = 131072,
+    changed: bool = True,
+    offline_capable: bool | None = False,
+    reason: str = "provider_not_configured_here",
+) -> dict:
+    """``FinalPlan.model_change`` exactly as the target delivers it: ``{"from": {"model", "provider"}, "to":
+    {"model", "provider", "context_length"}, "changed": bool, "offline_capable": bool | None, "reason": str}``."""
+    return {
+        "from": {"model": from_model, "provider": from_provider},
+        "to": {"model": to_model, "provider": to_provider, "context_length": context_length},
+        "changed": changed,
+        "offline_capable": offline_capable,
+        "reason": reason,
+    }
 
 
 @dataclass(frozen=True)

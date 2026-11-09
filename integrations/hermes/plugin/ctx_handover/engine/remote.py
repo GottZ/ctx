@@ -103,6 +103,11 @@ class _Remote:
                 return op
         raise NotFound("operation not known to the peer", op_id=op_id)
 
+    def blocks_for(self, job: JobContext) -> RemoteBlocks:
+        """The job's blocks on the peer (a fresh conductor instance has not called a job method yet)."""
+        self._job = job
+        return RemoteBlocks(self.client, job.job_id, job.epoch)
+
     def _blocks(self) -> RemoteBlocks:
         if self._job is None:
             raise NotFound("no job yet: call a job method before blocks()")

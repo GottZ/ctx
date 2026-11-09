@@ -116,6 +116,8 @@ _SCHEMA = (
     " note TEXT, refinement TEXT, created_at REAL NOT NULL, expires_at REAL NOT NULL, claimed_job TEXT)",
     "CREATE TABLE IF NOT EXISTS pull_log(job_id TEXT NOT NULL, peer_id TEXT NOT NULL, at REAL NOT NULL,"
     " items TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS job_quota(job_id TEXT NOT NULL, role TEXT NOT NULL, quota INTEGER NOT NULL,"
+    " used INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(job_id, role))",
     "CREATE TABLE IF NOT EXISTS ctx_outbox(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,"
     " payload TEXT NOT NULL, created_at REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,"
     " next_try_at REAL NOT NULL, done_at REAL)",
@@ -490,6 +492,7 @@ class Ledger:
             )
             if cur.rowcount != 1:
                 return False
+            redeemed = True
             name, n = peer.name, 1
             while c.execute("SELECT 1 FROM peers WHERE name=?", (name,)).fetchone():
                 n += 1
@@ -509,7 +512,10 @@ class Ledger:
                 last_ip=peer.last_ip,
             )
             self._insert_peer(c, stored, upsert=False)
-            return True
+        if redeemed:  # the burned code must not linger in WAL frames either (T2, SEC 6.2)
+            with contextlib.suppress(sqlite3.Error):
+                self._conn().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return True
 
     def fail_pair_code(self, code_id: str) -> int:
         """Count a failed proof; never above 5 (the code is burned at 5). Returns the failure count."""
@@ -1140,6 +1146,23 @@ class Ledger:
         )
         return None if row is None else self._map(row)
 
+    def map_in(self, local_path: str, peer_id: str) -> MapRow | None:
+        """This host's ``in`` row for a destination it received into from ``peer_id`` (tree fingerprint, §9.6)."""
+        row = self._q1(
+            "SELECT * FROM workspace_map WHERE local_path=? AND peer_id=? AND direction='in' ORDER BY at DESC",
+            (local_path, peer_id),
+        )
+        return None if row is None else self._map(row)
+
+    def map_find(self, peer_id: str, remote_path: str, direction: str) -> MapRow | None:
+        """The row of ``direction`` that maps ``remote_path`` on ``peer_id`` to a local path (``pathmap`` lookup,
+        DESIGN §9.7 rule 3: ``out`` = handed away from here, ``in`` = received here)."""
+        row = self._q1(
+            "SELECT * FROM workspace_map WHERE peer_id=? AND remote_path=? AND direction=? ORDER BY at DESC",
+            (peer_id, remote_path, direction),
+        )
+        return None if row is None else self._map(row)
+
     def map_by_local(self, local_path: str) -> list[MapRow]:
         return [
             self._map(r) for r in self._q("SELECT * FROM workspace_map WHERE local_path=? ORDER BY at", (local_path,))
@@ -1184,9 +1207,22 @@ class Ledger:
         with self._w() as c:
             c.executemany("DELETE FROM blocks WHERE block_id=?", [(i,) for i in ids])
 
+    blocks_delete = block_delete  # name used by blocks.BlockStore (cluster C)
+
     def job_object(self, job_id: str, object_id: str) -> None:
         with self._w() as c:
             c.execute("INSERT OR IGNORE INTO job_objects(job_id, object_id) VALUES(?,?)", (job_id, object_id))
+
+    def job_objects_add(self, job_id: str, object_ids: Sequence[str]) -> None:
+        """Reference many objects from a job in one transaction (a pack can hold 200 000 file objects)."""
+        with self._w() as c:
+            c.executemany(
+                "INSERT OR IGNORE INTO job_objects(job_id, object_id) VALUES(?,?)", [(job_id, o) for o in object_ids]
+            )
+
+    def job_objects(self, job_id: str) -> list[str]:
+        """Object ids referenced by a job (what a pull peer may read of it, R18)."""
+        return [r[0] for r in self._q("SELECT object_id FROM job_objects WHERE job_id=? ORDER BY object_id", (job_id,))]
 
     def live_objects(self) -> set[str]:
         """Objects referenced by a job that is not terminal in some role on this host."""
@@ -1315,6 +1351,37 @@ class Ledger:
                 (attempts, float(now) + delay, int(row_id)),
             )
 
+    # -- staging quota per job (R28, DESIGN §4.7: need_bytes from negotiation + 10 %) -------------------------
+    def quota_set(self, job_id: str, role: Role, quota_bytes: int) -> None:
+        """Set (or raise) the receiver-side staging quota of a job; already charged bytes are kept."""
+        with self._w() as c:
+            c.execute(
+                "INSERT INTO job_quota(job_id, role, quota, used) VALUES(?,?,?,0) ON CONFLICT(job_id, role)"
+                " DO UPDATE SET quota=MAX(job_quota.quota, excluded.quota)",
+                (job_id, str(role), max(0, int(quota_bytes))),
+            )
+
+    def quota_get(self, job_id: str, role: Role) -> tuple[int, int] | None:
+        """``(quota, used)`` of a job, or None when no plan was confirmed for it on this side."""
+        row = self._q1("SELECT quota, used FROM job_quota WHERE job_id=? AND role=?", (job_id, str(role)))
+        return None if row is None else (int(row[0]), int(row[1]))
+
+    def quota_charge(self, job_id: str, role: Role, nbytes: int) -> tuple[bool, int, int]:
+        """Atomically charge ``nbytes`` newly stored bytes: ``(ok, used, quota)``. Without a quota row or above
+        the quota nothing is charged and ``ok`` is False (a peer can never store more than the confirmed plan)."""
+        with self._w() as c:
+            row = c.execute("SELECT quota, used FROM job_quota WHERE job_id=? AND role=?", (job_id, str(role)))
+            row = row.fetchone()
+            if row is None:
+                return False, 0, -1
+            quota, used = int(row[0]), int(row[1])
+            if used + max(0, int(nbytes)) > quota:
+                return False, used, quota
+            c.execute(
+                "UPDATE job_quota SET used=used+? WHERE job_id=? AND role=?", (max(0, int(nbytes)), job_id, str(role))
+            )
+            return True, used + max(0, int(nbytes)), quota
+
     def pull_log_put(self, job_id: str, peer_id: str, items: Sequence[str]) -> None:
         """ "pulled by <peer>: <items>" for the source's ``/handover status`` (DESIGN §8.7, SEC 5.8)."""
         with self._w() as c:
@@ -1337,5 +1404,5 @@ class Ledger:
             for r in c.execute("SELECT role, state FROM jobs WHERE job_id=?", (job_id,)).fetchall():
                 if r["state"] not in TERMINAL[Role(r["role"])]:
                     raise InvalidState(f"job {job_id} is still {r['state']}", reason="active", state=r["state"])
-            for table in ("job_events", "ops", "job_objects", "pull_log", "jobs"):
+            for table in ("job_events", "ops", "job_objects", "pull_log", "job_quota", "jobs"):
                 c.execute(f"DELETE FROM {table} WHERE job_id=?", (job_id,))  # noqa: S608

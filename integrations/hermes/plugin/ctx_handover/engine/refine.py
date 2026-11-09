@@ -405,7 +405,9 @@ def build_llm_input(
 
 def _bounded(fn: Callable[[], object], timeout_s: float) -> object:
     """Run ``fn`` in a daemon thread (copied ``contextvars`` context, so profile-scoped lookups resolve) and wait at
-    most ``timeout_s``; a late thread is abandoned. Exceptions of ``fn`` propagate."""
+    most ``timeout_s``; a late thread is abandoned. Exceptions of ``fn`` propagate. An abandoned call's outcome lands
+    only in this call's own ``box`` and goes with its thread: no later call can see it, nothing of it stays in the
+    module (R26, ``test_refine_abandoned.py``)."""
     box: dict[str, object] = {}
 
     def run() -> None:
