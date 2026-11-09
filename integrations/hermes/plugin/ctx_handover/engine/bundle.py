@@ -463,7 +463,11 @@ class BundleTarget:
             )
             if need > free:
                 raise InsufficientStorage(
-                    "not enough space for the bundle", need_bytes=need, free_bytes=free, path=str(self.out.parent)
+                    "not enough space for the bundle",
+                    need_bytes=need,
+                    free_bytes=free,
+                    path=str(self.out.parent),
+                    side="This machine",
                 )
         return replace(final, plan_id=planning.plan_id(planning.final_doc(final)))
 

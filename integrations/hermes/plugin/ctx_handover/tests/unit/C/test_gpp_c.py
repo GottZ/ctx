@@ -364,3 +364,22 @@ def test_harness_arrived_session_names_the_tip_of_a_multi_segment_lineage(homes)
     assert new_root and new_tip and new_root != new_tip, (new_root, new_tip)
     assert arrived_session(laptop, job_i) == (new_root, new_tip)
     assert arrived_session(laptop, "01JC0000000000000000NOJOB0") == (None, None)
+
+
+def test_bundle_export_without_space_names_this_machine(tmp_path, monkeypatch):
+    """★ (wishes N94): a bundle export that lacks space on this machine says so — the error carries
+    ``side="This machine"``, so the message does not blame "the other gateway".
+
+    Red (before the fix): ``assert None == 'This machine'`` — ``_negotiated`` raised without ``side``.
+    """
+    from ctx_handover.engine.errors import InsufficientStorage
+
+    exp = Exporter(tmp_path)
+    target = BundleTarget(tmp_path / "x.ctxh.tar", exp.identity, as_dir=False, declared_facts=None, ledger=exp.ledger)
+    job = _job()
+    target.open_job(job)
+    monkeypatch.setattr(bundle_mod.shutil, "disk_usage", lambda _p: type("U", (), {"free": 1})())
+    target.facts(job, sample_facts(M, "server"))
+    with pytest.raises(InsufficientStorage) as info:
+        target.negotiate(job, _plan(job))
+    assert info.value.details.get("side") == "This machine", info.value.details
