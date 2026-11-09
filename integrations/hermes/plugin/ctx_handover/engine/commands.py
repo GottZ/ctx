@@ -1085,8 +1085,10 @@ class Plugin:
                 "ctx_handover — the URL the other device uses for this gateway — then run /handover pair again.",
                 field="listen_url",
             )
+        from . import pairing  # lazy like every engine import of this verb path (create_pair_code imports it too)
+
         rights = args.get("rights") or frozenset({Right.PUSH, Right.PULL})
-        ttl = int(args.get("ttl_s") or 600)
+        ttl = int(args.get("ttl_s") or pairing.DEFAULT_TTL_S)
         code = backend.create_pair_code(rights=rights, name_hint=str(args.get("name") or ""), ttl_s=ttl, url=url)
         call.data["pair"] = {k: v for k, v in code.items() if k != "pair_string"}
         minutes = max(1, ttl // 60)

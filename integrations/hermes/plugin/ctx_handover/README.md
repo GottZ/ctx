@@ -46,7 +46,9 @@ session-relay (fresh session on the same gateway).
 - **Sessions from older Hermes builds.** Messages written before Hermes stamped message and tool-call identities
   get stable identities derived from the original rows during the transfer; the source session is not modified.
   If Hermes backfills those identities on the source while a handover is running, the target refuses the late
-  changes (`verify_failed`) and the handover starts over from a fresh export — nothing is accepted silently.
+  changes (`verify_failed`) and the handover starts over from a fresh export when you start it again: the failed run
+  ends before anything is committed and leaves the source session usable and unlocked — nothing is accepted
+  silently.
 - **Messages typed into a handed-over session.** While ctx_handover is loaded, every message sent in the
   handed-over session is withheld (no model call) and answered with a notice where the session continues.
   `/handover reclaim` removes these attempts from the end of the conversation and lists their text. Attempts that
@@ -56,8 +58,8 @@ session-relay (fresh session on the same gateway).
   source, the target's chat display shows the earlier copy of that message again. What the model sees is
   identical on both sides; undone messages themselves are not transferred.
 - **Pulling from a machine that goes quiet.** When a pull stops talking to the source for
-  `participant_idle_timeout` (15 minutes), the source releases its locks and the session there is usable again;
-  `/handover resume` locks it again and continues.
+  `participant_idle_timeout_min` (15 minutes by default), the source releases its locks and the session there is
+  usable again; `/handover resume` locks it again and continues.
 - **A git command that died mid-way.** A git process killed in the middle of a command in a destination
   repository (power loss, killed process) can leave `.git/index.lock` behind. The plugin never removes it (it may
   belong to another git process): the step that resumes the handover refuses that repository and the handover

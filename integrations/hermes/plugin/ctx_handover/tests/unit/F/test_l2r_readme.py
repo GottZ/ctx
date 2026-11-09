@@ -50,7 +50,10 @@ SESSION_LIMITS = {
     ),
     "quiet-pull-source": (
         "**Pulling from a machine that goes quiet.**",
-        "`participant_idle_timeout` (15 minutes), the source releases its locks",
+        # Spec correction by the integrator (layer I, i-readme decision 2, readme-check #20): the setting is
+        # `participant_idle_timeout_min` (settings.SCHEMA, plugin.yaml config_schema); `participant_idle_timeout`
+        # names no key.
+        "`participant_idle_timeout_min` (15 minutes by default), the source releases its locks",
     ),
 }
 

@@ -523,8 +523,9 @@ def export_delta(db, info: SessionInfo, exported: CapsuleInfo, new_rows: list[di
     lineage after them. The rows are re-read inside a revision bracket; ``new_rows`` from ``check_revision`` must
     name the same row ids, else ``StaleSession``. The expected hashes come from the store as it is now (identities
     completed as in the capsule): when the core's backfill minted its own ids onto legacy rows after the export
-    (no revision step), they differ from the target's and ``apply_delta`` raises ``VerifyFailed`` ⇒ reset and
-    re-export, never a silent mismatch."""
+    (no revision step), they differ from the target's and ``apply_delta`` raises ``VerifyFailed``: the conductor
+    aborts before the commit point and releases the source (no restart); a new handover starts from a fresh export.
+    Never a silent mismatch."""
     tip = info.tip_id
     rev_before = _freeze(db.conversation_revision(tip, include_ancestors=True))
     base = _freeze(exported.revision)

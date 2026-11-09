@@ -155,8 +155,9 @@ def test_legacy_backfill_between_export_and_delta_fails_safe(
 ):
     """The core's own backfill (any ``SessionDB`` open of the source store) mints random ids onto the legacy rows
     after the export: the source changed under the capsule without a revision step, so the delta's expected
-    hashes differ and ``apply_delta`` refuses (``VerifyFailed`` ⇒ the conductor resets and re-exports). Nothing is
-    accepted silently."""
+    hashes differ and ``apply_delta`` refuses (``VerifyFailed`` ⇒ the conductor aborts before the commit point and
+    releases the source; a new handover starts from a fresh export — F ``test_i_readme.py``). Nothing is accepted
+    silently."""
     from hermes_state import SessionDB
 
     b = make_session
