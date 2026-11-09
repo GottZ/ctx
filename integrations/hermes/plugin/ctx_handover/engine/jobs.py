@@ -38,7 +38,7 @@ from types import SimpleNamespace
 
 from . import hostcompat
 from . import settings as settings_mod
-from .conductor import Conductor, PollPolicy
+from .conductor import Conductor, PollPolicy, error_from, unexpected
 from .contracts import JobContext, Reporter, SourceAPI, TargetAPI
 from .errors import (
     BadRequest,
@@ -102,6 +102,8 @@ _PARTICIPANT_OK = frozenset({"committed", "retired", "exported"})
 """Participant end states of a handover that went through (target committed, source retired or exported)."""
 RECLAIM_SETTLE_S = 15.0
 """How long ``reclaim`` waits for this process's runner of an export to settle it (V39)."""
+CANCEL_SETTLE_S = 15.0
+"""How long ``cancel`` of a SUSPENDED job waits for its abort before it answers (L3-F07)."""
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -342,17 +344,27 @@ def _llm(ctx) -> Callable | None:
         complete = getattr(ctx.llm, "complete_structured", None)
         if callable(complete):
 
-            def call(instructions: str, input_blocks: list, schema: dict, timeout_s: int):
-                return complete(
+            def call(instructions: str, input_blocks: list, schema: dict, timeout_s: int) -> dict | None:
+                result = complete(
                     instructions=instructions,
                     input=input_blocks,
                     json_schema=schema,
-                    timeout=timeout_s,
+                    timeout=float(timeout_s),
                     purpose="ctx_handover.refine",
                 )
+                return structured_answer(result)
 
             return call
     return hostcompat.plugin_llm()
+
+
+def structured_answer(result: object) -> dict | None:
+    """The JSON object of a ``complete_structured`` answer (R34, L3-F09): ``ctx.llm`` returns
+    ``PluginLlmStructuredResult`` whose ``parsed`` holds it (set only when the reply was JSON) — the same unpacking
+    as ``hostcompat.plugin_llm``. Without a JSON object there is no answer; the result object itself is never passed
+    on as if it were the refinement."""
+    parsed = getattr(result, "parsed", None)
+    return parsed if isinstance(parsed, dict) else None
 
 
 def make_local_apis(
@@ -997,6 +1009,11 @@ class JobRunner:
             self._abort_unbuilt(job_id, exc)
             self._forget(job_id)
             raise
+        except Exception as exc:  # composition failed outside the error model: the job ends, nothing is locked
+            err = unexpected(exc)
+            self._abort_unbuilt(job_id, err)
+            self._forget(job_id)
+            raise err from exc
         try:
             final = conductor.run_until_negotiated()
         except Cancelled:
@@ -1016,15 +1033,24 @@ class JobRunner:
             self._pairs.pop(job_id, None)
 
     def _run(self, job_id: str, how: str) -> None:
+        """One run of a job in this thread. The conductor turns every failure of a step into the job's state;
+        what escapes it (the composition of the participants, the ledger itself) is logged, and a job that locked
+        nothing yet ends ``aborted`` — a failure never leaves the thread with the job held by this runner."""
         try:
             try:
                 conductor = self._conductor(job_id)
             except HandoverError as exc:
                 self._abort_unbuilt(job_id, exc)
                 return
+            except Exception as exc:
+                log.warning("ctx_handover job %s: participants not composed", short(job_id), exc_info=True)
+                self._abort_unbuilt(job_id, unexpected(exc))
+                return
             getattr(conductor, how)()
         except HandoverError:
             pass
+        except Exception:
+            log.warning("ctx_handover job %s: unexpected failure", short(job_id), exc_info=True)
         finally:
             self._release(job_id)
             with self._lock:
@@ -1071,16 +1097,40 @@ class JobRunner:
 
     def cancel(self, job_id: str) -> str:
         """Request cancellation; the answer says it was requested only when the ledger holds the request (a job
-        that already ended keeps no request — ``set_cancel`` returns without writing)."""
+        that already ended keeps no request — ``set_cancel`` returns without writing). A SUSPENDED job has no runner
+        that would see the request (L3-F07): the cancel drives its abort itself (``_abort_suspended``)."""
         try:
             self.ledger.set_cancel(job_id)
         except InvalidState as exc:
             return exc.message
         if self.ledger.cancel_requested(job_id) is True:
+            row = self.ledger.job(job_id, Role.CONDUCTOR)
+            if row is not None and row["state"] == str(ConductorState.SUSPENDED):
+                return self._abort_suspended(job_id)
             return f"Cancel requested for job {short(job_id)}."
         row = self.ledger.job(job_id, Role.CONDUCTOR)
         state = row["state"] if row is not None else "gone"
         return f"Job {short(job_id)} is already {state}; nothing to cancel."
+
+    def _abort_suspended(self, job_id: str) -> str:
+        """``/handover cancel`` of a SUSPENDED job (L3-F07): the abort runs now — ``target.abort``, then
+        ``source.release`` (V37 order) ⇒ ABORTED, which frees the source and the target's participant slot. The answer
+        waits at most ``CANCEL_SETTLE_S``; a target that cannot be reached keeps the job ``aborting`` (the session's
+        turn lease runs out on its own, DESIGN §7.3) and the janitor finishes it on the next start."""
+        thread = self._spawn(job_id, "recover")
+        thread.join(CANCEL_SETTLE_S)
+        row = self.ledger.job(job_id, Role.CONDUCTOR) or {}
+        state, sid = row.get("state"), short(job_id)
+        if state == str(ConductorState.ABORTED):
+            return f"Handover {sid} cancelled; the session is yours again."
+        if state == str(ConductorState.ABORTING):
+            err = row.get("last_error") or {}
+            why = f" ({err.get('message')})" if isinstance(err, dict) and err.get("message") else ""
+            return (
+                f"Cancelling handover {sid}: the other side has not confirmed yet{why}. It finishes on the next "
+                f"contact; /handover status {sid} shows it."
+            )
+        return f"Cancel requested for job {sid}."
 
     def status(self, job_id: str | None) -> dict:
         """Machine-readable status for the surfaces (cluster F renders it, X20): ``{"jobs": [...], …}`` without a
@@ -1127,6 +1177,8 @@ class JobRunner:
                 if key in seen:
                     continue
                 seen.add(key)
+                if (r.get("params") or {}).get("local") is True:
+                    continue  # this host's own participant rows (its conductor jobs, an offer's planning row)
                 if self.ledger.job(r["job_id"], Role.CONDUCTOR) is None:
                     out.append(r)
         return out
@@ -1175,6 +1227,7 @@ class JobRunner:
             "next_action": None,
             "ack": ack,
             "title": title,
+            "target_session": _target_session(ack, session if role is Role.TARGET else None),
             "note": note,
             "origin": origin,
             "exclusions": [],
@@ -1220,6 +1273,7 @@ class JobRunner:
             "next_action": _next_action(row, outcome),
             "ack": ack,
             "title": (ack or {}).get("title"),
+            "target_session": _target_session(ack, None),
             "note": None,
             "origin": None,
             "exclusions": [],
@@ -1316,7 +1370,13 @@ class JobRunner:
                         notes=plan.notes_for_target,
                     )
                 )
-        sid = session_ref.id or ""
+        planned = _journal_ctx(self.ledger, offer_id, Role.SOURCE).get("planned_info")
+        # the session the plan resolved (its tip): an offer from the calling session has no id in ``session_ref``
+        sid = str(planned.get("tip_id") or "") if isinstance(planned, dict) else ""
+        sid = sid or str(session_ref.id or "")
+        self._close_offer_row(offer_id)
+        if not sid:
+            raise error_from(st.error) if st.error else BadRequest("no session given", field="session_ref")
         expires = self._clock() + OFFER_TTL_S
         self.ledger.offer_put(offer_id, peer.peer_id, sid, note, refinement, expires)
         return {
@@ -1326,6 +1386,21 @@ class JobRunner:
             "expires_at": expires,
             "has_refinement": refinement is not None,
         }
+
+    def _close_offer_row(self, offer_id: str) -> None:
+        """The source row the offer's planning opened (``LocalSource._ensure_job``) is no job: it ends ``released``
+        at once, so it neither counts against the peer's job caps nor shows up in ``status`` as a running source
+        (L3-F07: an open offer held one of the two slots of its peer). The offer itself lives in ``offers``."""
+        with contextlib.suppress(HandoverError):
+            row = self.ledger.job(offer_id, Role.SOURCE)
+            if row is None or row["state"] in TERMINAL[Role.SOURCE]:
+                return
+            owner = process_owner()
+            epoch = self.ledger.claim_owner(offer_id, Role.SOURCE, owner, STALE_OWNER_S)
+            if epoch is None:
+                return
+            self.ledger.transition(offer_id, Role.SOURCE, "*", "released", {"reason": "offer"}, epoch=epoch)
+            self.ledger.release_owner(offer_id, Role.SOURCE, owner, epoch)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -1359,7 +1434,7 @@ def janitor(
     for row in stale:
         role = Role(row["role"])
         if role is Role.CONDUCTOR:
-            if runner is None or row["state"] in ("suspended",):
+            if runner is None or (row["state"] == "suspended" and not ledger.cancel_requested(row["job_id"])):
                 continue
             seen.add(row["job_id"])
             done["conductor"].append((row["job_id"], row["state"]))
@@ -1373,7 +1448,10 @@ def janitor(
         for row in ledger.jobs(role=Role.CONDUCTOR, active=True, limit=1000):
             if row["job_id"] in seen or row["owner"] is not None:
                 continue
-            if row["state"] in (
+            cancelled_suspended = row["state"] == str(ConductorState.SUSPENDED) and ledger.cancel_requested(
+                row["job_id"]
+            )  # a cancel whose abort did not finish (its process ended): abort it now (L3-F07)
+            if cancelled_suspended or row["state"] in (
                 str(ConductorState.COMMITTED),
                 str(ConductorState.RETIRING),
                 str(ConductorState.IN_DOUBT),
@@ -1425,6 +1503,17 @@ def gc_job(ledger: Ledger, job_id: str, *, data_dir: Path, store=None) -> None:
         with contextlib.suppress(FileNotFoundError):
             path.unlink()
     ledger.purge_job(job_id)
+
+
+def _target_session(ack: dict | None, arrived: str | None) -> dict | None:
+    """L17 (A part): the session the handover created on the target — ``{"id", "title"}`` from the target's ack
+    (``arrived``: the session id this host's arrival row names, a target without its journaled ack yet); None before
+    the commit. Surfaces name it in the final message and say how to open it (F)."""
+    sid = (ack or {}).get("session_id") or arrived
+    if not isinstance(sid, str) or not sid:
+        return None
+    title = (ack or {}).get("title")
+    return {"id": sid, "title": title if isinstance(title, str) else None}
 
 
 def _journal_ctx(ledger: Ledger, job_id: str, role: Role) -> dict:
@@ -1522,6 +1611,7 @@ def reclaim(session_id: str, *, force: bool) -> dict:
         with contextlib.suppress(Exception):
             db.close()
     job_id = out.get("job_id")
+    _reclaim_outcome(prof, out)
     row = prof.ledger.job(str(job_id), Role.CONDUCTOR) if job_id else None
     if row is not None and row["mode"] == str(Mode.EXPORT):
         if out.get("state") in ("reclaimed", "released"):
@@ -1566,21 +1656,81 @@ def _settle_export(prof: _Profile, row: dict, out: dict) -> None:
     out["warnings"] = warnings
 
 
+_RECLAIM_REFUSALS = {
+    "prepared": "committing",
+    "retiring": "committing",
+    "locking": "in_progress",
+    "locked": "in_progress",
+    "preparing": "in_progress",
+}
+
+
+def _reclaim_outcome(prof: _Profile, out: dict) -> None:
+    """L3-F14 (A part): ``ok`` is True only when the session is active here again (``reclaimed``/``released``); a
+    refusal or "nothing to reclaim" carries ``ok: False`` and ``error`` (``code``, ``message``, ``details.reason``:
+    ``committing`` — prepared/retiring without ``--force`` —, ``in_progress`` — use cancel —, or
+    ``nothing_to_reclaim``) so the CLI's ``--json`` and exit code can show it."""
+    out["ok"] = out.get("state") in ("reclaimed", "released")
+    if out["ok"]:
+        return
+    job_id = out.get("job_id")
+    src = None
+    with contextlib.suppress(HandoverError):
+        src = prof.ledger.source_state(str(job_id)) if job_id else None
+    state = str(src["state"]) if src else None
+    reason = _RECLAIM_REFUSALS.get(state or "", "nothing_to_reclaim")
+    code = "invalid_state" if reason != "nothing_to_reclaim" else "not_found"
+    out["error"] = {
+        "code": code,
+        "message": str(out.get("message") or "Nothing to reclaim."),
+        "details": {"reason": reason, "state": state, "job": short(str(job_id)) if job_id else None},
+    }
+
+
+NOTIFY_TIMEOUT_S = 5.0
+"""Read timeout of the ``source_reclaimed`` notice (one attempt, L3-F16)."""
+NOTIFY_WAIT_S = 5.0
+"""How long ``reclaim`` waits for that notice before it answers; the notice is best effort (DESIGN §7.7)."""
+
+
 def _notify_reclaimed(prof: _Profile, job_id: str) -> bool:
+    """Tell the target of a job this host dialed that the source took the session back (route #8, best effort,
+    DESIGN §7.7). Bounded (L3-F16): one attempt with a short read timeout in a background thread, ``reclaim`` waits
+    at most ``NOTIFY_WAIT_S`` — a target that does not answer (stopped, in doubt) never holds the reclaim; True only
+    when the target accepted the notice in time."""
     row = prof.ledger.job(job_id, Role.CONDUCTOR)
     peer = prof.ledger.peer(row["peer_id"]) if row and row["peer_id"] else None
     identity = _identity(prof)
     if row is None or peer is None or peer.direction != "dial" or identity is None:
         return False
-    try:
-        from . import wire
+    from . import wire
 
-        client = wire.WireClient(peer, identity, read_secret=hostcompat.read_secret)
-        epoch = int(row["owner_epoch"])
-        client.call("POST", f"jobs/{job_id}/status", {"epoch": epoch, "note": "source_reclaimed"}, epoch=epoch)
-    except HandoverError:
-        return False
-    return True
+    epoch = int(row["owner_epoch"])
+    delivered = threading.Event()
+
+    def send() -> None:
+        try:
+            client = wire.WireClient(
+                peer, identity, read_secret=hostcompat.read_secret, timeout=NOTIFY_TIMEOUT_S, max_attempts=1
+            )
+            try:
+                body = {"epoch": epoch, "note": "source_reclaimed"}
+                client.call("POST", f"jobs/{job_id}/status", body, epoch=epoch)
+            finally:
+                with contextlib.suppress(Exception):
+                    client.close()
+        except HandoverError:
+            return
+        except Exception:  # a notice must never break the reclaim that already happened
+            log.warning("ctx_handover source_reclaimed notice failed", exc_info=True)
+            return
+        delivered.set()
+
+    ctx = contextvars.copy_context()  # the profile scope (secrets, HERMES_HOME) travels with the thread (V33)
+    thread = threading.Thread(target=ctx.run, args=(send,), name=f"ctxh-reclaimed-{short(job_id)}", daemon=True)
+    thread.start()
+    thread.join(NOTIFY_WAIT_S)
+    return delivered.is_set()
 
 
 def default_bundle_path(

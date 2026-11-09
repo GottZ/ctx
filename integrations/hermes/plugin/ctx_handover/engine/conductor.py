@@ -43,6 +43,7 @@ import collections
 import contextlib
 import contextvars
 import dataclasses
+import logging
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -113,6 +114,7 @@ from .ops import object_closure, read_object
 from .plan import CONFIRM_PROPOSED, SUSPECTED_SECRET, yes_exempt
 
 S = ConductorState
+log = logging.getLogger("ctx_handover.conductor")
 MiB = 1024 * 1024
 
 STOP_STATES = frozenset({S.DONE, S.ABORTED, S.SUSPENDED})
@@ -180,6 +182,13 @@ class PollPolicy:
 
 class _Park(Exception):
     """Stop the runner and leave the job in its state for the janitor (retire/abort retries exhausted)."""
+
+
+def unexpected(exc: BaseException) -> HandoverError:
+    """A failure outside the error model as a non-retryable ``internal`` error (type and a short text, no
+    traceback): repeating the same step does not help a full disk or a bug."""
+    text = f"{type(exc).__name__}: {exc}"
+    return HandoverError(text[:300], retryable=False, exception=type(exc).__name__)
 
 
 def is_busy_elsewhere(err: BaseException) -> bool:
@@ -519,6 +528,9 @@ class Conductor:
                 raise
             except HandoverError as err:
                 self._fail(err)
+            except Exception as exc:  # the surface's confirmation failed: nothing is locked yet, end the job
+                log.warning("ctx_handover job %s: confirmation failed", self.job.job_id, exc_info=True)
+                self._fail(unexpected(exc))
         if self._state is S.ABORTING:
             self._drain_abort()
         raise self._last_error_exc()
@@ -551,9 +563,14 @@ class Conductor:
         return self.run()
 
     def recover(self) -> CommitAck | None:
-        """Janitor action for a job whose owner died (DESIGN §3.6), then continue where that leads."""
+        """Janitor action for a job whose owner died (DESIGN §3.6), then continue where that leads. A job the user
+        cancelled is aborted instead of parked: a SUSPENDED one (nobody drives it — ``/handover cancel`` only sets
+        the flag, L3-F07) and one whose runner died before the commit point (DESIGN §3.8)."""
         self._load()
         st = self._state
+        if st is S.SUSPENDED and self.ledger.cancel_requested(self.job.job_id):
+            self._fail(Cancelled("cancelled by the user"))
+            return self.run()
         if st in STOP_STATES:
             return self._ack()
         if st is S.IN_DOUBT:
@@ -568,6 +585,8 @@ class Conductor:
                 epoch=self.job.epoch,
                 last_error={"code": "internal", "message": "the process running this handover stopped"},
             )
+        elif st in SUSPENDABLE and self.ledger.cancel_requested(self.job.job_id):
+            self._fail(Cancelled("cancelled by the user"))
         elif st in SUSPENDABLE:
             self._go(S.SUSPENDED, recovered=True)
             return None
@@ -711,7 +730,10 @@ class Conductor:
     # driving loop, errors, liveness
     # ======================================================================================================
     def _step(self) -> bool:
-        """Run the handler of the current state once; returns False when the runner must stop."""
+        """Run the handler of the current state once; returns False when the runner must stop. A failure outside the
+        error model (``OSError`` of a full disk, a bug in a port) is a non-retryable ``internal`` error of this step
+        (``unexpected``) and takes the same path as any other: before the commit point ABORTING, while committing
+        IN_DOUBT, after it the job parks — it never leaves the runner's thread with the job left as it was."""
         self._check_fenced()
         handler = self._handlers[self._state]
         try:
@@ -721,14 +743,20 @@ class Conductor:
         except _Park:
             return False
         except HandoverError as err:
-            try:
-                return self._on_error(err)
-            except Fenced:
-                raise
-            except HandoverError as during:  # the pause itself failed (e.g. the lease was lost while waiting)
-                return self._on_error(during)
+            return self._handle(err)
+        except Exception as exc:
+            log.warning("ctx_handover job %s: unexpected failure in %s", self.job.job_id, self._state, exc_info=True)
+            return self._handle(unexpected(exc))
         self._busy_since = None
         return True
+
+    def _handle(self, err: HandoverError) -> bool:
+        try:
+            return self._on_error(err)
+        except Fenced:
+            raise
+        except HandoverError as during:  # the pause itself failed (e.g. the lease was lost while waiting)
+            return self._on_error(during)
 
     def _on_error(self, err: HandoverError) -> bool:
         st = self._state
@@ -1676,10 +1704,19 @@ class Conductor:
             raise
         except NotFound:
             pass
-        raw = self._side_effect(
-            "source.release",
-            lambda: self._await(self.source, self.source.start_release(self.job, reason), cancellable=False),
-        )
+        self._intent("source.release")
+        try:
+            started = self.source.start_release(self.job, reason)
+        except NotFound:
+            # L3-F11: the source does not know the job — it never opened it (it refused at FACTS, e.g.
+            # ``rate_limited``), so it holds nothing for it, which is what a release confirms. Only the refusal of
+            # the release request counts; a lost operation while polling it stays an error. The job's error stays
+            # the cause, not "not found".
+            self._done("source.release", source="not_found")
+            raw: object = {"state": "released"}
+        else:
+            raw = self._await(self.source, started, cancellable=False)
+            self._done("source.release")
         if source_state_of(raw) not in SOURCE_GIVEN_BACK:
             raise self._unconfirmed("released", raw)
         self._go(S.ABORTED)

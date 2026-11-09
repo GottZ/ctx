@@ -803,9 +803,11 @@ class LocalTarget:
         if job.mode is Mode.IMPORT and not self.source_peer_id:
             # V13: no paired peer is bound to this import, so nothing that arrived can find its way back
             origin += "; no return path to the origin"
-        if job.mode is Mode.IMPORT:  # DESIGN §5.4 (re-import guard): every bundle import note says so
-            origin += "; this bundle may have been imported elsewhere too"
         note_parts = dict(req.note_parts or {})
+        if job.mode is Mode.IMPORT:
+            # DESIGN §5.4 (re-import guard): every bundle import note says so — ``note`` renders the sentence
+            # (``note.BUNDLE_IMPORT_SENTENCE``), the origin line names only the origin
+            note_parts["bundle_import"] = True
         dests = {d.item_id: d.dest for d in final.decisions}
         note_parts["instruction_files"] = list(p.plan.instruction_files(final.plan.items, dests.get))
         pairs = ctx.get("case_pairs") or []

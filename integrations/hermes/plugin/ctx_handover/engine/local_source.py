@@ -252,6 +252,29 @@ class LocalSource:
                 return from_wire(SessionRef, raw)
         return None
 
+    def _describe(self, db, job: JobContext, ref: SessionRef) -> SessionInfo:
+        """``session_export.describe`` of the job's session; a claimed offer (``take --offer``, L3-F12) resolves
+        through ``_offer_session`` (B's offer branch, ``reports/L2/g3-b-api.md``)."""
+        if not ref.offer_id:
+            return self.ports.session_export.describe(db, ref, calling_session=self.calling_session)
+        return self.ports.session_export.describe(
+            db, ref, calling_session=self.calling_session, offer_session=self._offer_session(job)
+        )
+
+    def _offer_session(self, job: JobContext) -> Callable[[str], str | None]:
+        """The session an offer names — for the peer it was made for only, claimed for this job (route #6 rules:
+        idempotent for the same job; another peer's, an expired or an otherwise claimed offer is ``not_found``). The
+        claim happens because that peer asked for the offer (``take --offer``), never on its own (O6)."""
+        peer_id = job.peer.peer_id if job.peer is not None else None
+
+        def lookup(offer_id: str) -> str | None:
+            if peer_id is None:
+                raise NotFound(f"offer {offer_id} not found")
+            claimed = self.ledger.offer_claim(str(offer_id), peer_id, job.job_id)
+            return str(claimed.get("session_id") or "") or None
+
+        return lookup
+
     def _tools_seen(self, job: JobContext) -> set[str]:
         """Tool names the transcript runs (``envfacts.tools_seen_from_rows``, W084); empty when the session is
         unknown here (the facts then carry no transcript tools)."""
@@ -260,7 +283,7 @@ class LocalSource:
             return set()
         db = self.db_factory()
         try:
-            info = self.ports.session_export.describe(db, ref, calling_session=self.calling_session)
+            info = self._describe(db, job, ref)
         except HandoverError:
             return set()
         return set(self.ports.envfacts.tools_seen_from_rows(self._rows(db, info)))
@@ -354,7 +377,7 @@ class LocalSource:
         def fn(report) -> dict:
             p = self.ports
             db = self.db_factory()
-            info = p.session_export.describe(db, session_ref, calling_session=self.calling_session)
+            info = self._describe(db, job, session_ref)
             rows = self._rows(db, info)
             session_row = db.get_session(info.tip_id) or {}
             cfg = self._cfg(job)
@@ -404,7 +427,7 @@ class LocalSource:
         p = self.ports
         self._epoch(job)
         db = self.db_factory()
-        info = p.session_export.describe(db, session_ref, calling_session=self.calling_session)
+        info = self._describe(db, job, session_ref)
         busy = p.lock.probe_busy(db, self.state_db, info, Path(self.hermes.home), self.session_key)
         if busy.busy and not job.options.force:
             raise SessionBusy(
@@ -424,7 +447,7 @@ class LocalSource:
                 "A turn is still running in this session; waiting continues.", reason="turn", waited_s=wait_s
             ) from exc
         # DESIGN §7.2 step 6: the revision under the held lease decides (a turn may have ended in between)
-        info = p.session_export.describe(db, session_ref, calling_session=self.calling_session)
+        info = self._describe(db, job, session_ref)
         info = dataclasses.replace(info, revision_changed=tuple(info.revision) != tuple(plan_revision))
         self._remember(job, info=info, holder=holder, busy_warnings=list(busy.warnings))
         self._sync_state(job)

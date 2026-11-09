@@ -236,7 +236,14 @@ class ParticipantRegistry:
         return {"job_id": job_id, "state": row["state"], "epoch": epoch}
 
     def _check_caps(self, peer_id: str) -> None:
-        active = [j for j in self.ledger.jobs(active=True, limit=10_000) if j["role"] != str(Role.CONDUCTOR)]
+        """The caps count the jobs remote conductors opened here (route #7). The participant rows of this host's own
+        conductor jobs and the planning row of an offer (``params.local``) are no such job (L3-F07: an open offer
+        and a pending export used up the slots of the peer)."""
+        active = [
+            j
+            for j in self.ledger.jobs(active=True, limit=10_000)
+            if j["role"] != str(Role.CONDUCTOR) and (j.get("params") or {}).get("local") is not True
+        ]
         if sum(1 for j in active if j["peer_id"] == peer_id) >= self._max_per_peer:
             raise RateLimited("too many concurrent handovers for this device", reason="concurrent_jobs")
         if len(active) >= self._max_jobs:

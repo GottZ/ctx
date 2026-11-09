@@ -71,14 +71,18 @@ def test_import_from_a_bound_peer_has_a_return_path(env):
 
 def test_every_bundle_import_note_says_it_may_have_been_imported_elsewhere(env):
     """DESIGN §5.4: the re-import guard is per profile, so every bundle import note says "this bundle may have been
-    imported elsewhere too" (verified or not); a pull's note does not."""
+    imported elsewhere too" (verified or not); a pull's note does not. The sentence is the note part
+    ``bundle_import`` (``note.BUNDLE_IMPORT_SENTENCE``, gp-d-api Nachtrag), no longer part of the origin line."""
     env.job = dataclasses.replace(env.job, mode=Mode.IMPORT)
-    assert "may have been imported elsewhere too" in _prepare(env)["origin"]
+    seen = _prepare(env)
+    assert seen["note_parts"]["bundle_import"] is True
+    assert "imported elsewhere" not in seen["origin"], seen["origin"]
 
 
 def test_a_pull_note_says_nothing_about_bundles(env):
     seen = _prepare(env)
     assert seen["origin"] == "verified peer"
+    assert "bundle_import" not in seen["note_parts"]
 
 
 def test_case_collisions_are_named_on_a_case_insensitive_target(env):
