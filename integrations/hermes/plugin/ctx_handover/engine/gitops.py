@@ -36,7 +36,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import IO
 
@@ -184,7 +184,12 @@ _REMOTE_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _URL_SCHEMES = frozenset({"https", "http", "ssh", "git"})
 _SCP_RE = re.compile(r"^(?:(?P<user>[A-Za-z0-9._~+-]+)@)?(?P<host>[A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\]):(?P<path>.+)$")
 _VERSION_RE = re.compile(rb"(\d+)\.(\d+)(?:\.(\d+))?")
-_FILTER_ATTR_RE = re.compile(rb"(?:^|\s)filter=([^\s]+)")
+_FILTER_ATTR_RE = re.compile(rb"(?<![^\s])filter=([^\s]+)")
+"""``filter=<name>`` at the start of the text or after whitespace (a lookbehind, so a scan that starts inside a line
+— ``pos`` — still sees the byte before)."""
+_ATTR_LONG_LINE = 64 * 1024
+_ATTR_TAIL = 256
+"""Longer than any token the scan keeps (whitespace, ``filter=``, a name of at most 128 bytes)."""
 _FILTER_NAME_RE = re.compile(r"[A-Za-z0-9._+-]{1,128}")
 _STDERR_CAP = 2048
 
@@ -313,7 +318,9 @@ class GitEnvSpec:
     either profile — a source-profile call over a destination that holds received files names the drivers the
     received tree introduced (M22). ``file_protocol`` allows ``protocol.file`` (explicit local transfer only).
     ``windows_long_paths`` adds ``core.longpaths=true`` (always on on a Windows host). ``technical_identity_at``
-    sets the technical identity and that fixed time for a synthetic commit (R5).
+    sets the technical identity and that fixed time for a synthetic commit (R5). ``user_excludes`` (received
+    profile): ``core.excludesFile`` is the user's global ignore file (``user_excludes_file``) instead of
+    ``/dev/null`` — only for the update precondition ``GitProbe.status_clean`` (R2-M4).
     """
 
     profile: str = "received"
@@ -323,6 +330,7 @@ class GitEnvSpec:
     windows_long_paths: bool = False
     technical_identity_at: float | None = None
     filter_names: tuple[str, ...] = ()
+    user_excludes: bool = False
 
 
 SOURCE = GitEnvSpec(profile="source")
@@ -330,6 +338,7 @@ RECEIVED = GitEnvSpec(profile="received")
 
 _VERSION_CACHE: dict[str, tuple[int, int, int] | None] = {}
 _SAFELIST_CACHE: dict[tuple[str, str | None, str | None], dict[str, list[str]]] = {}
+_EXCLUDES_CACHE: dict[tuple[str, str | None, str | None], str | None] = {}
 _CACHE_LOCK = threading.Lock()
 
 
@@ -418,6 +427,10 @@ class Git:
             for key, values in user_safelist(self).items():
                 pairs.extend((key, v) for v in values)
             pairs.extend(RECEIVED_EXTRA_OPTIONS)
+            if spec.user_excludes:
+                excludes = user_excludes_file(self)
+                if excludes:
+                    pairs.append(("core.excludesFile", excludes))  # a later pair wins over /dev/null
         pairs.extend(FORCED_OPTIONS)
         if spec.file_protocol:
             pairs.append(("protocol.file.allow", "always"))
@@ -579,12 +592,13 @@ class Git:
         cwd: Path | None,
         spec: GitEnvSpec,
         cancelled: Callable[[], bool] = _never,
-        sep: bytes = b"\x00",
+        sep: bytes | None = b"\x00",
         timeout: float | None = None,
         env_extra: dict | None = None,
     ) -> Iterator[bytes]:
-        """Stream the ``sep``-separated records of a git command's stdout (never the whole output in memory);
-        raises ``GitCommandError`` after the last record when git failed. The deadline of ``run`` applies
+        """Stream the ``sep``-separated records of a git command's stdout (never the whole output in memory;
+        ``sep=None``: the raw output in reads of up to 64 KiB); raises ``GitCommandError`` after the last record
+        when git failed. The deadline of ``run`` applies
         (``timeout``, default ``timeout_s``, counted from the start): a watchdog kills git when it passes, the
         record the kill cut off is dropped and the read ends in ``GitCommandError`` (M24). ``cancelled`` is polled
         by the reader between reads; ``env_extra`` as in ``run``."""
@@ -625,8 +639,11 @@ class Git:
                     chunk = proc.stdout.read(65536)
                     if not chunk:
                         break
-                    buf += chunk
-                    *records, buf = buf.split(sep)
+                    if sep is None:
+                        records = [chunk]
+                    else:
+                        buf += chunk
+                        *records, buf = buf.split(sep)
                     if expired.is_set():
                         break
                     yield from records
@@ -703,6 +720,43 @@ def reset_process_caches() -> None:
     with _CACHE_LOCK:
         _VERSION_CACHE.clear()
         _SAFELIST_CACHE.clear()
+        _EXCLUDES_CACHE.clear()
+
+
+def user_excludes_file(git: Git) -> str | None:
+    """The user's global ignore file as their own git finds it under the runner's home (R2-M4): the value of
+    ``core.excludesFile`` in the system or global configuration (global wins, includes followed; git expands
+    ``~/`` itself), else the XDG default ``$XDG_CONFIG_HOME/git/ignore`` (``~/.config/git/ignore`` without it).
+    Read once per process and home like the safelist; None when no home is known. Only a list of patterns: reading
+    it runs nothing."""
+    cache_key = git._home_key()
+    with _CACHE_LOCK:
+        if cache_key in _EXCLUDES_CACHE:
+            return _EXCLUDES_CACHE[cache_key]
+    found: str | None = None
+    for scope in ("--system", "--global"):
+        try:
+            proc = git.run(
+                ["config", scope, "--includes", "-z", "--get", "core.excludesFile"],
+                cwd=None,
+                spec=SOURCE,
+                check=False,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError, GitCommandError):
+            continue
+        value = proc.stdout.split(b"\x00", 1)[0] if proc.returncode == 0 else b""
+        if value:
+            found = value.decode("utf-8", errors="surrogateescape")
+    if found is None:
+        env = git._base_env()
+        if env.get("XDG_CONFIG_HOME"):
+            found = os.path.join(env["XDG_CONFIG_HOME"], "git", "ignore")
+        elif env.get("HOME"):
+            found = os.path.join(env["HOME"], ".config", "git", "ignore")
+    with _CACHE_LOCK:
+        _EXCLUDES_CACHE[cache_key] = found
+    return found
 
 
 def _config_file_of(path: Path) -> Path | None:
@@ -767,14 +821,39 @@ def attribute_filter_names(git: Git, gitdir: Path, tree: str, *, env_extra: dict
         if len(parts) == 3 and parts[1] == b"blob" and (path == b".gitattributes" or path.endswith(b"/.gitattributes")):
             blobs.append(parts[2].decode("ascii"))
     for blob in blobs:
-        data = git.run(
+        chunks = git.iter_z(
             ["--git-dir", str(gitdir), "cat-file", "blob", "--end-of-options", blob],
             cwd=None,
             spec=RECEIVED,
             env_extra=env_extra,
-        ).stdout[: 1024 * 1024]
-        names.update(m.decode("utf-8", errors="replace") for m in _FILTER_ATTR_RE.findall(data))
+            sep=None,
+        )
+        names.update(m.decode("utf-8", errors="replace") for m in _filter_names_in(chunks))
     return sorted(n for n in names if _FILTER_NAME_RE.fullmatch(n))
+
+
+def _filter_names_in(chunks: Iterable[bytes]) -> set[bytes]:
+    """The names after ``filter=`` in an attributes file read in chunks — the whole file, however large (git reads
+    attribute files up to 100 MiB; M22), never all of it in memory. Complete lines are scanned as lines; the
+    unfinished last line goes on with the next chunk. Of a line longer than ``_ATTR_LONG_LINE`` (git ≥ 2.38.3
+    ignores lines over 2 KiB) what is read is scanned except a token at its very end (it may be cut), and only its
+    tail goes on, scanned from its second byte so its first counts as context — no name is cut in two or taken from
+    the middle of a word."""
+    found: set[bytes] = set()
+    carry = b""
+    start = 0  # where a scan of ``carry + chunk`` begins: 1 when ``carry`` is the tail of an over-long line
+    for chunk in chunks:
+        data = carry + chunk
+        cut = data.rfind(b"\n") + 1
+        if cut > start:
+            found.update(_FILTER_ATTR_RE.findall(data, start, cut))
+            data, start = data[cut:], 0
+        if len(data) > _ATTR_LONG_LINE:
+            found.update(m.group(1) for m in _FILTER_ATTR_RE.finditer(data, start) if m.end() < len(data))
+            data, start = data[-_ATTR_TAIL:], 1
+        carry = data
+    found.update(_FILTER_ATTR_RE.findall(carry, start))
+    return found
 
 
 def check_version(git: Git) -> tuple[bool, str | None]:
@@ -1265,6 +1344,47 @@ class GitProbe:
             records.close()
         return first is not None
 
+    def carried_files(self, path: str, limit: int) -> tuple[str, ...] | None:
+        """The files the work tree around the directory ``path`` carries below it — tracked, or untracked and not
+        ignored (what ``git add -A`` would record): ``git ls-files -z --cached --others --exclude-standard
+        --end-of-options .`` run in ``path``, streamed through ``Git.iter_z``; after ``limit`` distinct records git is
+        stopped. Paths relative to ``path`` (an untracked repository of its own ends in ``/``). The collector's
+        placeholder rule asks it (R36, R2-M3: ``tmp/*`` with ``!tmp/.gitkeep``). None when git cannot answer — no
+        directory, outside every work tree, a git that refused or died."""
+        p = Path(path)
+        if not p.is_dir():
+            return None
+        records = self.git.iter_z(
+            ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--end-of-options", "."],
+            cwd=p,
+            spec=self._discovery_spec(),
+        )
+        found: dict[str, None] = {}
+        try:
+            for rec in records:
+                if rec:
+                    found[os.fsdecode(rec)] = None
+                if len(found) >= max(0, int(limit)):
+                    break
+        except (GitCommandError, OSError):
+            return None
+        finally:
+            records.close()
+        return tuple(found)
+
+    def nested_repos(self, root: str) -> tuple[str, ...] | None:
+        """The untracked, not ignored directories below the work-tree root ``root`` that are repositories of their own
+        (``nested_repositories`` — the clones the pack step leaves out, H15), as absolute paths in listing order. The
+        collector names each, also one the transcript never touched (R2-M2, reason (k)). None when git cannot answer."""
+        r = Path(root)
+        if not r.is_dir():
+            return None
+        try:
+            found = nested_repositories(self.git, r, spec=self._spec(r))
+        except (GitCommandError, OSError):
+            return None
+        return tuple(os.path.join(os.fspath(r), os.fsdecode(n)) for n in found)
+
     def in_progress(self, root: str) -> str | None:
         try:
             gitdir, _ = git_dirs(self.git, Path(root))
@@ -1274,17 +1394,23 @@ class GitProbe:
 
     def status_clean(self, root: str) -> tuple[bool, str]:
         """``(clean, why)``: no change in index or work tree including untracked files, no in-progress
-        operation, no ``index.lock`` (DESIGN §9.5 update preconditions)."""
+        operation, no ``index.lock`` (DESIGN §9.5 update preconditions). Untracked files count as in the user's own
+        ``git status``: the repository's ignore rules and, in the received profile too, the user's global ignore
+        file (``user_excludes_file``, R2-M4) hide them. That buys no protection away: whatever lies where an update
+        or return writes is refused by ``gitapply.obstructions`` whatever ignores it (B2)."""
         gitdir, _ = git_dirs(self.git, Path(root))
         op = in_progress_op(gitdir)
         if op:
             return False, f"{op} in progress"
         if (gitdir / "index.lock").exists():
             return False, "index.lock present"
+        spec = self._spec(Path(root))
+        if spec.profile == "received":
+            spec = replace(spec, user_excludes=True)
         proc = self.git.run(
             ["status", "--porcelain=v2", "-z", "--untracked-files=all", "--ignore-submodules=none"],
             cwd=Path(root),
-            spec=self._spec(Path(root)),
+            spec=spec,
         )
         if proc.stdout:
             first = proc.stdout.split(b"\x00", 1)[0]

@@ -1602,8 +1602,11 @@ def janitor(
 
 def _retention(ledger: Ledger, data_dir: Path | None) -> dict:
     """The janitor's retention step (review H4); a failure is logged and named, never raised (like ``_gc_store``)."""
-    out: dict = {"retention": None, "staging": None, "reports": None}
-    steps = [("retention", lambda: ledger.purge_retention(JOURNAL_KEEP_S))]
+    out: dict = {"retention": None, "notes": None, "staging": None, "reports": None}
+    steps = [
+        ("retention", lambda: ledger.purge_retention(JOURNAL_KEEP_S)),
+        ("notes", lambda: ledger.purge_delivered(JOURNAL_KEEP_S)),  # delivered notes, pull log (H4 rest)
+    ]
     if data_dir is not None:
         root = Path(data_dir)
         steps += [
@@ -1734,7 +1737,8 @@ def ensure_started(
     janitor once per process. Loads but never creates the identity (R16). Never called from ``register()``
     (BX L2). ``janitor_background`` (additive, review M6): that one janitor run — recovery, retention, GC, outbox
     flush — goes to a daemon thread ``ctxh-janitor`` once veto, identity and store stand, so the first hook of a
-    process does not wait for it."""
+    process does not wait for it. The veto index has read the ledger once before any caller gets the runtime
+    (review R2-H1)."""
     prof = _profile()
     runner_for(ctx, reporter_factory)
     with prof.lock:
@@ -1745,7 +1749,11 @@ def ensure_started(
 
             # the index reads this runtime's ledger: no second Ledger object in the process (X19)
             prof.veto = lock.VetoIndex(prof.ledger.path, ledger_factory=lambda _path: prof.ledger)
-            prof.veto.start()
+        veto = prof.veto
+    # every caller — the hooks' build first of all — returns only once the index has read the ledger (review R2-H1:
+    # the first turn of a fresh process must meet the veto); ``start`` is idempotent and serialises that first read
+    # itself, so it runs outside the profile lock and before the janitor, which stays in the background (M6)
+    veto.start()
     _identity(prof)
     _store(prof)
     if first and janitor_background:

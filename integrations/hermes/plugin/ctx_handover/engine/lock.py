@@ -739,14 +739,24 @@ def veto_texts(entry: Mapping) -> str:
 
     retired/retiring → handed over to ``peer`` at ``ack.committed_at`` as ``ack.title``; exported → bundle at
     ``prepared_at``; otherwise (prepared) → a handover is being completed. Times are UTC.
+
+    An export prepares with the peer ``""`` (``local_source``, N55; the same rule names the title mark "exported to
+    bundle"): its prepared and retired texts speak of the bundle, not of "another machine" where the session would
+    continue (review L1).
     """
     state = str(entry.get("state") or "")
+    bundle = entry.get("peer") == ""
     peer = entry.get("peer") or "another machine"
     job = str(entry.get("job_id") or entry.get("job") or "")
     job_short = short(job)
     if state in (SourceState.RETIRING.value, SourceState.RETIRED.value):
         ack = _ack_dict(entry.get("ack"))
         when = _fmt_time(ack.get("committed_at") or entry.get("prepared_at"))
+        if bundle:
+            return (
+                f"This session was exported to a handover bundle on {when} (job {job_short}); it continues where the "
+                "bundle is imported. Your message was not sent. To continue here instead, run /handover reclaim."
+            )
         title = ack.get("title")
         where = f' and continues there as "{title}"' if title else " and continues there"
         return (
@@ -758,8 +768,9 @@ def veto_texts(entry: Mapping) -> str:
             f"This session was exported to a handover bundle on {_fmt_time(entry.get('prepared_at'))}. "
             "Run /handover reclaim to continue here."
         )
+    what = "An export of this session to a handover bundle" if bundle else f"A handover of this session to {peer}"
     return (
-        f"A handover of this session to {peer} is being completed (job {job_short}). Your message was not sent. "
+        f"{what} is being completed (job {job_short}). Your message was not sent. "
         "/handover status shows progress; /handover reclaim --force takes the session back if it is stuck."
     )
 
@@ -1114,6 +1125,7 @@ class VetoIndex:
         self._pending: queue.Queue = queue.Queue()
         self._overlay: dict[str, dict] = {}
         self._swap = threading.Lock()
+        self._start_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_version: int | None = None
@@ -1122,12 +1134,18 @@ class VetoIndex:
 
     # -- lifecycle ---------------------------------------------------------------------------------------
     def start(self) -> None:
-        """Start the refresher thread (idempotent)."""
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="ctx_handover-veto", daemon=True)
-        self._thread.start()
+        """Start the refresher thread (idempotent). The first call reads the ledger once on the calling thread before
+        it returns, and a concurrent call waits for that read (review R2-H1): the first turn of a fresh process never
+        meets an index that has not read the ledger yet. A failed first read stays in ``last_error``; the thread
+        retries it every ``poll_s``."""
+        with self._start_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            if self.refreshed_at is None:
+                self.refresh_now(force=True)
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, name="ctx_handover-veto", daemon=True)
+            self._thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()

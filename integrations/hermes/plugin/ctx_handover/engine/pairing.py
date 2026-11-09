@@ -234,6 +234,23 @@ def credential_owner(
     return None
 
 
+def paired_gateway(ledger: Ledger, fp: str, profile: str | None = None) -> Peer | None:
+    """The stored dial entry (revoked ones included) for the same gateway profile — listener key with fingerprint
+    ``fp`` and the same ``profile`` (None = default): this device is paired with it already (L3-F25). Another profile
+    keeps a ledger of its own, so a pairing there ends nothing here."""
+    want = profile or "default"
+    for other in ledger.peers(include_revoked=True):
+        if other.direction != "dial" or not other.pubkey or (other.profile or "default") != want:
+            continue
+        try:
+            theirs = fingerprint_of(other.pubkey)
+        except ValueError:
+            continue
+        if consteq(theirs, str(fp or "")):
+            return other
+    return None
+
+
 def _random_crockford(n: int) -> str:
     return "".join(secrets.choice(CROCKFORD_ALPHABET) for _ in range(n))
 
@@ -534,13 +551,29 @@ def redeem_dialer(
             name=wanted,
             code_used=False,
         )
+    same = paired_gateway(ledger, pair["fp"], pair.get("profile"))
+    if same is not None:
+        # L3-F25: the listener keeps one live row per device key (review M13), so a second entry for the same
+        # gateway — another address or another name — would end this one on its side without a word here
+        raise ConflictError(
+            f"this device is already paired with that gateway as {same.name} ({same.url}); it keeps one pairing per "
+            f"device, so a second one would end {same.name}. Nothing was sent to {pair['url']} and the pairing code "
+            f"was not used. To pair with it at {pair['url']} — or again after it revoked this device — run "
+            f"/handover peers remove {same.name} first, then paste the pairing string again.",
+            field="pair",
+            peer=same.name,
+            code_used=False,
+        )
     owner = credential_owner(ledger, gate, pair["url"], secret_store.read if secret_store is not None else None)
     if owner is not None:
         other, what, env = owner
         raise ConflictError(
             f"the {what} in {env} is the one stored for {other.name} ({other.url}); a credential only ever goes to the "
             f"address it was stored for, so nothing was sent to {pair['url']} and the pairing code was not used. Enter "
-            f"the {what} of {pair['url']} in Settings → Plugins → ctx_handover, then paste the pairing string again.",
+            f"the {what} of {pair['url']} in Settings → Plugins → ctx_handover, then paste the pairing string again. "
+            f"If that address takes the same {what} (one dashboard under two addresses), pair through the address of "
+            f"{other.name} instead, where entries may share it, or remove {other.name} first "
+            f"(/handover peers remove {other.name}).",
             field="gate",
             peer=other.name,
             variable=env,

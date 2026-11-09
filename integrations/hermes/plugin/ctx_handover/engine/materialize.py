@@ -5,6 +5,15 @@ target denylist and allow-roots first (R19), then fresh / update / return / conf
 Local uncommitted changes are never overwritten (I5): a dirty repository, a foreign directory, a file, a changed
 tree or anything an extra would write into without a local choice goes to a fresh directory instead.
 
+Every fallback the transaction builds itself — a conflict PREPARE finds in update or return mode, a fresh
+destination taken at c1 — comes from ``WorkspaceTxn._fallback`` = ``pathmap.fallback_dest`` with the target's
+policy, the rule ``LocalTarget`` applies at negotiation (DESIGN §9.7, V35): the sibling ``<dest>-handover-<stamp>``
+only under ``allow_roots``, else ``<workspace_root>/<basename>-handover-<stamp>`` (R29: the schema default is
+``<HERMES_HOME>/handover-workspaces`` when it lies in the Hermes home). A destination outside ``allow_roots`` — a
+return-trip origin, a recorded or typed path — never gets a fallback beside it (L3-F23): a conflict in PREPARE goes
+under ``workspace_root``; at c1, where only a rename beside the destination is possible, a taken destination of
+that kind ends the step (``dest_appeared``) instead.
+
 ``WorkspaceTxn`` runs one target job's workspace part: ``prepare_item`` (heavy, invisible: partial directories,
 quarantined git objects, staged files), then ``commit_steps`` hands the conductor's commit op the c1 steps as
 ``(name, forward, inverse)`` in plan order, ``place_hermes_files`` the c3 pair; ``discard`` drops whatever was
@@ -40,11 +49,12 @@ import stat
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 
-from . import filetree, gitapply, gitpack
+from . import filetree, gitapply, gitpack, pathmap
 from .contracts import BlockSink
-from .errors import BadRequest, ConflictError, PolicyDenied
+from .errors import BadRequest, ConflictError, InsufficientStorage, PayloadTooLarge, PolicyDenied
 from .gitops import (
     Git,
     GitProbe,
@@ -72,7 +82,7 @@ from .model import (
     PlanItem,
     TargetDecision,
 )
-from .paths import PlatformRules
+from .paths import DEFAULT_WORKSPACE_SPEC, PlatformRules
 from .policy import HERMES_FILE_KINDS, PolicyConfig, check_source_file, check_target_dest, is_hermes_protected
 
 SNAPSHOT_VERSION = 2
@@ -100,7 +110,9 @@ class Assessment:
 
 
 def fallback_dest(dest: str, now: float | None = None) -> str:
-    """``<dest>-handover-<YYYYmmdd-HHMMSS>`` (DESIGN §9.7)."""
+    """The bare sibling name ``<dest>-handover-<YYYYmmdd-HHMMSS>`` without any root or policy check — kept for callers
+    that hand ``assess`` a fallback of their own (tests). The transaction never uses it: its fallbacks come from
+    ``WorkspaceTxn._fallback`` (``pathmap.fallback_dest``, L3-F23)."""
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now if now is not None else time.time()))
     return f"{str(dest).rstrip('/')}-handover-{stamp}"
 
@@ -302,6 +314,63 @@ def assess(
 # Workspace transaction
 # ---------------------------------------------------------------------------------------------------------
 
+_DISK_MARGIN = 1.1
+
+
+class _JobRoom:
+    """The room one job's workspace items take at the target (H11, R28; DESIGN §10.2: ``max_total_gb`` per job).
+    ``max_bytes`` (``cfg.max_total_bytes``) caps the declared bytes of all items together — each item's own check
+    (``filetree.check_room``, ``gitapply._precheck``) compares the same quantity per item — and the bytes they write
+    × 1.1 must fit the free space each file system had when the job first measured it: measured once, so items that
+    each fit the space the ones before them left cannot fill the disk together.
+
+    ``check`` is handed to the item functions, which call it right before an item writes its first byte; it only
+    checks. ``settle`` counts the item once it is prepared, so an update that fell back to a fresh directory (checked
+    twice) counts once; ``reset`` drops what an item that failed had checked."""
+
+    def __init__(self, max_bytes: int):
+        self.max_bytes = int(max_bytes)
+        self.declared = 0
+        self._free: dict[int, int] = {}  # st_dev -> free bytes when the job first measured it
+        self._writes: dict[int, int] = {}  # st_dev -> bytes the job's prepared items write there
+        self._pending: tuple[int, int, int] | None = None
+
+    def check(self, declared: int, where: Path, write: int, what: str) -> None:
+        total = self.declared + int(declared)
+        if total > self.max_bytes:
+            raise PayloadTooLarge(
+                f"the handover's workspace items together are larger than allowed (refused at a {what})",
+                bytes=total,
+                max_bytes=self.max_bytes,
+                item_bytes=int(declared),
+            )
+        probe = Path(where)
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        dev = os.stat(probe).st_dev
+        free = self._free.get(dev)
+        if free is None:
+            free = self._free[dev] = shutil.disk_usage(probe).free
+        need = int((self._writes.get(dev, 0) + int(write)) * _DISK_MARGIN)
+        if need > free:
+            raise InsufficientStorage(
+                f"not enough free space for the handover's workspace items (refused at a {what})",
+                need_bytes=need,
+                free_bytes=free,
+                path=str(probe),
+            )
+        self._pending = (int(declared), dev, int(write))
+
+    def settle(self) -> None:
+        if self._pending is not None:
+            declared, dev, write = self._pending
+            self.declared += declared
+            self._writes[dev] = self._writes.get(dev, 0) + write
+        self._pending = None
+
+    def reset(self) -> None:
+        self._pending = None
+
 
 @dataclass
 class _Prepared:
@@ -422,7 +491,9 @@ class _StepLog:
 
 class WorkspaceTxn:
     """One target job's workspace work (see module docstring). ``cfg``/``rules`` (additions with defaults) are
-    the target's policy and path rules; ``now`` the clock for fallback names."""
+    the target's policy and path rules; ``now`` the clock for fallback names; ``workspace_root`` (additive) the
+    job's configured ``Options.workspace_root`` — the root of every fallback outside ``allow_roots`` (``_fallback``);
+    None = the schema default ``~/hermes-handover`` (R29-resolved)."""
 
     def __init__(
         self,
@@ -436,8 +507,10 @@ class WorkspaceTxn:
         rules: PlatformRules | None = None,
         now: Callable[[], float] = time.time,
         cancelled: Callable[[], bool] = _never,
+        workspace_root: str | None = None,
     ):
         self.job_id = job_id
+        self.workspace_root = workspace_root
         self.job6 = job_id[-6:].lower()
         self.staging = Path(staging)
         self.git = git
@@ -453,6 +526,7 @@ class WorkspaceTxn:
         self._hermes_placed: list[Path] = []
         self._hermes_dirs: list[Path] = []
         self._steps = _StepLog(self.staging)
+        self._room = _JobRoom(cfg.max_total_bytes if cfg is not None else filetree.DEFAULT_MAX_BYTES)
 
     # -- helpers ------------------------------------------------------------------------------------------
 
@@ -479,14 +553,40 @@ class WorkspaceTxn:
             created.append(d)
         return created
 
-    def _fresh_target(self, decision: TargetDecision) -> tuple[Path, Path]:
+    def _fallback(self, dest: Path, *, later: float = 0.0) -> Path:
+        """Where an item goes when ``dest`` cannot take it — the one rule of every fallback this transaction builds
+        (L3-F23): ``pathmap.fallback_dest`` with this host's policy (home, Hermes home and root, denylist), the rule
+        ``LocalTarget`` uses at negotiation (DESIGN §9.7, V35, R19, R29). ``<dest>-handover-<stamp>`` while that
+        sibling lies under ``allow_roots`` and passes the target check, else ``<workspace_root>/<basename>-handover-
+        <stamp>``; ``later`` seconds move the stamp (the fallback of a fallback)."""
+        cfg = self._require_cfg()
+        return Path(
+            pathmap.fallback_dest(
+                str(dest),
+                now=datetime.fromtimestamp(self.now() + later),
+                workspace_root=self.workspace_root or DEFAULT_WORKSPACE_SPEC,
+                allow_roots=tuple(str(r) for r in cfg.allow_roots),
+                cfg=cfg,
+            )
+        )
+
+    def _c1_fallback(self, dest: Path, *, later: float = 0.0) -> Path | None:
+        """The fallback of a fresh item whose destination is taken when c1 renames (``gitapply.commit_fresh``,
+        ``filetree.commit``): ``_fallback(dest)`` when it lies in ``dest``'s directory — the partial sits there, so
+        only that rename needs no new parent and stays on one file system. Beyond it (a destination outside
+        ``allow_roots``: ``_fallback`` answers under ``workspace_root``) None — the step then ends with
+        ``dest_appeared`` and nothing is written beside a destination the policy accepts only as recorded or typed."""
+        fb = self._fallback(dest, later=later)
+        return fb if fb.parent == dest.parent else None
+
+    def _fresh_target(self, decision: TargetDecision) -> tuple[Path, Path | None]:
         cfg = self._require_cfg()
         dest = Path(decision.conflict.fallback_dest if decision.conflict else decision.dest)
         recorded = decision.reason in {"return-mapping", "user"} and decision.conflict is None
         verdict = check_target_dest(dest, cfg, recorded=recorded, local_choice=recorded)
         if not verdict.allowed:
             raise PolicyDenied(f"destination not allowed ({verdict.reason})", reason="target_denied", path=str(dest))
-        return dest, Path(fallback_dest(str(dest), self.now()))
+        return dest, self._c1_fallback(dest)
 
     def _check_fresh(self, dest: Path) -> None:
         verdict = check_target_dest(dest, self._require_cfg(), recorded=False, local_choice=False)
@@ -496,7 +596,7 @@ class WorkspaceTxn:
             )
 
     def _prepare_git_fresh(
-        self, item_id: str, dest: Path, fb: Path, pack_item: dict, *, alternates: Path | None = None
+        self, item_id: str, dest: Path, fb: Path | None, pack_item: dict, *, alternates: Path | None = None
     ) -> _Prepared:
         cfg = self._require_cfg()
         partial = self._partial_for(dest, item_id)
@@ -515,13 +615,14 @@ class WorkspaceTxn:
                 qdir=self.staging / "quarantine" / item_id,
                 alternates=alternates,
                 claimed=True,
+                room=self._room.check,
             )
         except BaseException:
             self._unclaim(partial, created)
             raise
         return _Prepared(item_id, "git", state.mode, dest, pack_item, state, created, ident=_ident(state.partial))
 
-    def _prepare_tree_fresh(self, item_id: str, dest: Path, fb: Path, pack_item: dict) -> _Prepared:
+    def _prepare_tree_fresh(self, item_id: str, dest: Path, fb: Path | None, pack_item: dict) -> _Prepared:
         cfg = self._require_cfg()
         partial = self._partial_for(dest, item_id)
         created = self._claim(partial, dest, item_id, "dir")
@@ -537,6 +638,7 @@ class WorkspaceTxn:
                 fallback=fb,
                 claimed=True,
                 max_bytes=cfg.max_total_bytes,
+                room=self._room.check,
             )
         except BaseException:
             self._unclaim(partial, created)
@@ -644,7 +746,9 @@ class WorkspaceTxn:
         """PREPARE one item according to ``decision`` (DESIGN §3.4 step 1). Update/return attempts that turn out
         to conflict (dirty, diverged, changed since the handover, case collision) fall back to a fresh directory at
         the conflict's fallback. ``out_row`` is the map row whose state applies: the ``out`` row (return mode) or
-        the ``in`` row with the tree fingerprint (tree update mode)."""
+        the ``in`` row with the tree fingerprint (tree update mode). The target's byte cap and free space hold for
+        all items of the job together (``_JobRoom``, H11)."""
+        self._room.reset()
         if decision.mode is DestMode.SKIP:
             self.journal("info", f"prepare:{item.item_id}", {"mode": "skip"})
             return
@@ -658,6 +762,7 @@ class WorkspaceTxn:
             prepared = self._prepare_extra_file(item, decision, pack_item)
         else:
             raise PolicyDenied(f"unknown pack item kind {kind!r}", reason="special")
+        self._room.settle()
         self.items.append(prepared)
         warnings = list(getattr(prepared.state, "warnings", ()) or ())
         self.warnings.extend(warnings)
@@ -687,6 +792,7 @@ class WorkspaceTxn:
                         cancelled=self.cancelled,
                         qdir=self.staging / "quarantine" / item.item_id,
                         rules=self.rules,
+                        room=self._room.check,
                     )
                 else:
                     state = gitapply.prepare_update(
@@ -698,10 +804,11 @@ class WorkspaceTxn:
                         cancelled=self.cancelled,
                         qdir=self.staging / "quarantine" / item.item_id,
                         rules=self.rules,
+                        room=self._room.check,
                     )
                 return _Prepared(item.item_id, "git", state.mode, dest, pack_item, state)
             except ConflictError as exc:
-                fb = Path(fallback_dest(str(dest), self.now()))
+                fb = self._fallback(dest)
                 self.warnings.append(f"{dest}: {exc.message}; materialised fresh at {fb}")
                 self.journal("info", f"prepare:{item.item_id}", {"fallback": str(fb), "why": exc.details.get("kind")})
                 self._check_fresh(fb)
@@ -709,7 +816,7 @@ class WorkspaceTxn:
                 with contextlib.suppress(Exception):
                     alt = git_dirs(self.git, dest)[1] / "objects"
                 return self._prepare_git_fresh(
-                    item.item_id, fb, Path(fallback_dest(str(fb), self.now() + 1)), pack_item, alternates=alt
+                    item.item_id, fb, self._c1_fallback(fb, later=1), pack_item, alternates=alt
                 )
         dest, fb = self._fresh_target(decision)
         return self._prepare_git_fresh(item.item_id, dest, fb, pack_item)
@@ -735,17 +842,17 @@ class WorkspaceTxn:
                     tag=self.job6,
                     max_files=cfg.max_files,
                     max_bytes=cfg.max_total_bytes,
+                    room=self._room.check,
                 )
                 self.skipped.extend(state.skipped)
                 return _Prepared(item.item_id, "tree", decision.mode, dest, pack_item, state)
             except ConflictError as exc:
                 self._steps.drop("staged:" + enc_path(str(dest)))  # prepare_update removed what it staged
-                fb = Path(fallback_dest(str(dest), self.now()))
+                fb = self._fallback(dest)
                 self.warnings.append(f"{dest}: {exc.message}; materialised fresh at {fb}")
+                self.journal("info", f"prepare:{item.item_id}", {"fallback": str(fb), "why": exc.details.get("kind")})
                 self._check_fresh(fb)
-                return self._prepare_tree_fresh(
-                    item.item_id, fb, Path(fallback_dest(str(fb), self.now() + 1)), pack_item
-                )
+                return self._prepare_tree_fresh(item.item_id, fb, self._c1_fallback(fb, later=1), pack_item)
         dest, fb = self._fresh_target(decision)
         return self._prepare_tree_fresh(item.item_id, dest, fb, pack_item)
 
@@ -761,7 +868,9 @@ class WorkspaceTxn:
         size = pack_item.get("size")
         if isinstance(size, bool) or not isinstance(size, int) or size < 0:
             raise BadRequest("extra file size must be a whole non-negative number", field="size")
-        filetree.check_room(size, dest.parent, max_bytes=self._require_cfg().max_total_bytes, what="file")  # H11
+        filetree.check_room(  # H11: the item, then the job (``_JobRoom``)
+            size, dest.parent, max_bytes=self._require_cfg().max_total_bytes, what="file", room=self._room.check
+        )
         temp = dest.parent / f".{dest.name}.ctxh-{self.job6}"
         created = self._claim(temp, dest, item.item_id, "file")
         entry = {
@@ -1039,12 +1148,24 @@ class WorkspaceTxn:
         rules: PlatformRules | None = None,
         now: Callable[[], float] = time.time,
         cancelled: Callable[[], bool] = _never,
+        workspace_root: str | None = None,
     ) -> WorkspaceTxn:
         """A transaction rebuilt from ``snapshot()`` in another process (same staging directory): its steps continue
         in the journaled direction and run only what is missing (module docstring). Reads formats 1 and 2."""
         if not isinstance(snapshot, dict) or snapshot.get("v") not in (1, SNAPSHOT_VERSION):
             raise BadRequest("unknown workspace snapshot format", field="snapshot.v")
-        txn = cls(snapshot["job_id"], staging, git, store, journal, cfg=cfg, rules=rules, now=now, cancelled=cancelled)
+        txn = cls(
+            snapshot["job_id"],
+            staging,
+            git,
+            store,
+            journal,
+            cfg=cfg,
+            rules=rules,
+            now=now,
+            cancelled=cancelled,
+            workspace_root=workspace_root,
+        )
         for d in snapshot.get("items") or ():
             kind = d["kind"]
             if kind == "git":
@@ -1139,6 +1260,12 @@ class PackedItem:
     warnings: tuple[str, ...] = ()
 
 
+_LEFT_BEHIND = frozenset({"secret", "symlink"})
+"""Reasons a tree entry goes into the pack item's ``excluded`` list — the one the conductor reports as left behind
+(report, note, status): secrets, and links the policy keeps out of the tree with the links through them (L3-F27).
+Everything else the scan leaves out (ignored, special, unreadable …) is listed as ``skipped``."""
+
+
 def _listed(entries: Sequence[NotTransferred], what: str, warnings: list[str]) -> list[dict]:
     if len(entries) > DOC_LIST_CAP:
         warnings.append(f"{len(entries) - DOC_LIST_CAP} more {what} paths not listed in the pack document")
@@ -1181,8 +1308,9 @@ def pack_plan_item(
       ``basis_candidates`` (the target's ``git_have``), item from ``gitpack.pack_item``: ``lfs_objects``,
       ``case_collisions``, ``ntfs_invalid``; ``state`` = the outgoing git state (R4).
     * ``file_tree`` and ``extra_dir`` — ``filetree.scan`` (ignore rules incl. ``extra_ignore``, the policy) and
-      ``pack_tree``; one ``file_tree`` item with ``manifest``, ``entries``, ``bytes``, ``excluded``, ``skipped``,
-      ``case_collisions``, ``ntfs_invalid``; ``state`` = ``{"tree": fingerprint}``.
+      ``pack_tree``; one ``file_tree`` item with ``manifest``, ``entries``, ``bytes``, ``excluded`` (secrets, links
+      left out: ``_LEFT_BEHIND``), ``skipped``, ``case_collisions``, ``ntfs_invalid``; ``state`` =
+      ``{"tree": fingerprint}``.
     * ``extra_file`` — the policy again (``check_source_file``, explicit, no link following), then
       ``filetree.pack_file`` (modes ``100644``/``100755``).
     * ``hermes_file`` — kind from ``PlanItem.hermes_kind``, the session-file checks of planning again (known kind,
@@ -1217,8 +1345,8 @@ def pack_plan_item(
             entries = [e for e in entries if not (e.type == "file" and e.path in gone)]
             left = [*left, *dropped]
         pairs, invalid, warnings = name_report(os.fsdecode(filetree.entry_rel_bytes(e)) for e in entries)
-        excluded = tuple(n for n in left if n.why == "secret")
-        skipped = tuple(n for n in left if n.why != "secret")
+        excluded = tuple(n for n in left if n.why in _LEFT_BEHIND)
+        skipped = tuple(n for n in left if n.why not in _LEFT_BEHIND)
         doc = {
             "item_id": item.item_id,
             "kind": "file_tree",

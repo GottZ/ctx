@@ -633,6 +633,7 @@ class Plugin:
                 info.get("summary") if isinstance(info.get("summary"), Mapping) else None,
                 instruction_files=info.get("instruction_files") or (),
             )
+            summary = surfaces.with_include_refused(summary, info.get("final_plan"), options.hints.include)
             suspected = surfaces.suspected_secrets(info)
             summary["suspected_secrets"] = suspected
             # R30: what --yes does not confirm — the conductor's info["yes_exempt"] (it calls back despite --yes for
@@ -737,6 +738,8 @@ class Plugin:
                     call.data["error"] = _not_confirmed(state, "cancelled at the confirmation; nothing was locked")
             return
         summary = backend.presend_summary(final, job_id=job_id)
+        # L3-F24: an --include this machine's plan refused is named in the first message
+        summary = surfaces.with_include_refused(summary, final, _includes(options, parsed))
         presend = surfaces.render_presend(summary, peer_name, mode)
         if call.cli:
             call.say(presend) if call.json_mode else reporter.info(presend)
@@ -757,7 +760,9 @@ class Plugin:
                     call.exit_code = EXIT_DOUBT
                     return
             status = self._status_or_error(job_id)
-            call.say(self._final_text(job_id, mode, peer_name, options, status=status))
+            call.say(
+                self._final_text(job_id, mode, peer_name, options, status=status, include=_includes(options, parsed))
+            )
             call.exit_code = int(code)
             self._job_outcome(status, call)
             return
@@ -817,6 +822,7 @@ class Plugin:
         options: Options,
         *,
         status: dict | HandoverError | None = None,
+        include: Sequence[str] | None = None,
     ) -> str:
         if not job_id:
             return "Handover finished. /handover status shows the result."
@@ -888,6 +894,10 @@ class Plugin:
             instruction_files=job.get("instruction_files") or (),
             warnings=job.get("warnings") or (),
             withheld=[str(p) for p in job.get("withheld") or ()],  # V29: summary["withheld"], a list of paths
+            # L3-F24: the --include paths the job left out (its ``exclusions``), as the first message named them
+            include_refused=surfaces.refused_includes(
+                job.get("exclusions"), include if include is not None else options.hints.include
+            ),
             continue_error=cont_error,
             bundle_path=bundle.get("path"),
             bundle_bytes=bundle.get("size"),
@@ -1511,16 +1521,7 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
     except Exception as exc:
         checks.append({"name": "profile .env permissions", "ok": None, "detail": f"not checked ({type(exc).__name__})"})
     if settings.get("allow_remote_continue"):
-        try:
-            off = hostcompat.approvals_off(config)
-        except Exception:
-            off = None
-        if off is True:
-            ok, detail = None, "on, but approvals are off on this gateway, so no remote continuation ever starts"
-        elif off is False:
-            ok, detail = True, "on: a paired device with --continue may start one turn here (approvals apply)"
-        else:  # unknown is not "approvals apply"
-            ok, detail = None, "on; not checked whether approvals apply here (the approval setting could not be read)"
+        ok, detail = _continue_check(config)
         checks.append({"name": "allow_remote_continue", "ok": ok, "detail": detail})
     server = ctxrecords.server_for(config, settings)
     if server is not None:
@@ -1670,6 +1671,101 @@ def _set_or_explain(backend: Backend, key: str, value: str) -> str:
     except CapabilityMissing:
         return f"{key}: not saved from here; run: hermes config set plugins.entries.ctx_handover.settings.{key} {value}"
     return f"{key}: {value}"
+
+
+_ELSEWHERE = (
+    "a continuation started by a separate `hermes serve`/`hermes dashboard` or by `hermes handover take|import "
+    "--continue` in a terminal sees only a --yolo on the gateway's command line, not HERMES_YOLO_MODE in its "
+    "environment"
+)
+
+
+def _continue_check(config: dict) -> tuple[bool | None, str]:
+    """The ``doctor`` line for ``allow_remote_continue`` (review H2, R2-M5; R22, R33a): "approvals apply" only where
+    this process checked it (``hostcompat.approval_check``); "not checked" with the limit where the gateway that runs
+    the turn is another process whose environment is not visible here. ``approvals_off`` is what the spawner decides."""
+    try:
+        off = hostcompat.approvals_off(config)
+    except Exception:
+        return None, "on; not checked whether approvals apply here (the approval setting could not be read)"
+    try:
+        check = hostcompat.approval_check(config)
+    except Exception:
+        check = None
+    why = getattr(check, "why", "")
+    pid = getattr(check, "pid", None)
+    gw = f"the gateway of this profile (pid {pid})" if pid else "the gateway of this profile"
+    if off is True:
+        if why == "config_single_query":
+            return None, (
+                "on, but approvals.single_query_mode approves every command, so no remote continuation ever starts"
+            )
+        if why == "gateway_flag":
+            return None, f"on, but {gw} was started with --yolo (approvals off), so no remote continuation starts"
+        if why == "process_env":
+            return None, (
+                "on, but this process runs with HERMES_YOLO_MODE (approvals off), so no continuation starts from "
+                "this process"
+            )
+        if why == "gateway_env":
+            if getattr(check, "flag", False):
+                return None, (
+                    "on, but this gateway runs with --yolo (approvals off), so no remote continuation starts; other "
+                    "processes of this profile see the flag on its command line and refuse too"
+                )
+            return None, (
+                "on, but this gateway runs with HERMES_YOLO_MODE (approvals off): a continuation started in this "
+                "gateway is refused, but one started by a separate `hermes serve`/`hermes dashboard` or by "
+                "`hermes handover take|import --continue` in a terminal is not (the variable is not visible there) "
+                "— turn allow_remote_continue off"
+            )
+        return None, "on, but approvals are off on this gateway, so no remote continuation ever starts"
+    if off is False and getattr(check, "off", None) is False:
+        if why == "no_gateway":
+            return True, (
+                "on: a paired device with --continue may start one turn here (approvals apply; no gateway of this "
+                "profile runs now, so the continuation starts one without auto-approve variables)"
+            )
+        return True, (
+            "on: a paired device with --continue may start one turn here (approvals apply; checked in this gateway's "
+            "process)"
+        )
+    if why == "gateway_elsewhere":
+        reason = f"{gw} is another process; whether it runs with HERMES_YOLO_MODE is not visible here"
+    elif why == "gateway_unverified":
+        reason = "a gateway of this profile runs, but this process cannot identify it (another PID namespace or user)"
+    else:
+        reason = "the gateway of this profile could not be checked"
+    return None, (
+        f"on; not checked whether approvals apply for a continuation started here: {reason} — {_ELSEWHERE}; leave "
+        "allow_remote_continue off on a gateway given HERMES_YOLO_MODE"
+    )
+
+
+def _includes(options: Options, parsed: surfaces.Parsed) -> tuple[str, ...]:
+    """The paths this command named to be included: ``--include`` and ``--include-secret`` (L3-F24)."""
+    return (*options.hints.include, *surfaces.include_secret_from(parsed))
+
+
+def _slots_held_only_by(peer: Peer, dial: list[Peer], own: list[str], store: Any) -> list[str]:
+    """The settings form's token/password slots (``surfaces.SECRET_ENVS``) that hold a value copied for ``peer``
+    (its ``own`` variables) and that no other dial entry names or holds (review R2-L1)."""
+    from . import pairing
+    from .crypto import consteq
+
+    mine = [v for env in own if (v := store.read(env))]
+    if not mine:
+        return []
+    others = {env for p in dial if p.peer_id != peer.peer_id for _what, env in pairing.gate_secrets(p.gate)}
+    theirs = [v for env in sorted(others) if (v := store.read(env))]
+    slots: list[str] = []
+    for env in (surfaces.SECRET_ENVS["peer_token"], surfaces.SECRET_ENVS["peer_password"]):
+        if env in own or env in others:
+            continue
+        value = store.read(env)
+        if value and any(consteq(value, m) for m in mine) and not any(consteq(value, t) for t in theirs):
+            slots.append(env)
+    return slots
 
 
 def _gate_warnings() -> Callable[..., list[str]] | None:
@@ -1997,9 +2093,9 @@ class EngineBackend:
                 self._parts[name] = build()
             return self._parts[name]
 
-    def _started(self, *, janitor_background: bool = False) -> Any:
-        """The profile runtime (X19). ``janitor_background`` (the hooks, review M6): when this call starts it, the
-        process's first janitor run goes to a thread of its own instead of the caller's."""
+    def _started(self) -> Any:
+        """The profile runtime (X19) for the verbs; a process's first use runs the janitor in the caller. The hooks
+        take the same runtime without this lock (``hook_runtime``, review R2-H1)."""
 
         def build() -> Any:
             from . import jobs
@@ -2007,8 +2103,6 @@ class EngineBackend:
             # The factory first: ensure_started's janitor may create the profile's runner, and a runner without
             # the surfaces' reporter factory would send the progress of every later job nowhere.
             jobs.runner_for(self._ctx, self._plugin.broker.factory)
-            if janitor_background:
-                return jobs.ensure_started(self._ctx, janitor_background=True)
             return jobs.ensure_started(self._ctx)
 
         return self._part("runtime", build)
@@ -2087,7 +2181,12 @@ class EngineBackend:
         """Dialer side: drop a dial peer's entry (``Ledger.remove_peer``) after blanking the ``.env`` variables the
         pairing wrote for that peer alone (rv-final; ``pairing.own_secret_names``) through the same path — Hermes'
         writer, then the read-back (R16). A variable not proven blank keeps the entry: ``EnvNotWritable`` names it
-        (a secret no entry names would otherwise stay in ``.env`` for good). Shared slots are never touched."""
+        (a secret no entry names would otherwise stay in ``.env`` for good).
+
+        The settings form's token/password slot is blanked first when it still holds the value copied for this peer
+        and no other dial entry uses that value (review R2-L1: unbound, it would go out with the next pairing to
+        another address). A slot with another value, a slot an entry names itself (paired before per-peer copies) and
+        the user's own ``peer_extra_headers`` variables are never touched."""
         from . import pairing
 
         ledger = self._ledger()
@@ -2095,11 +2194,17 @@ class EngineBackend:
         peer = next((p for p in dial if p.peer_id == name), None) or next((p for p in dial if p.name == name), None)
         if peer is None:
             return False
-        left = pairing.forget_credentials(self._secret_store(), pairing.own_secret_names(peer.gate, peer.peer_id))
+        store = self._secret_store()
+        own = pairing.own_secret_names(peer.gate, peer.peer_id)
+        # the slots first: while the peer's own copy still exists, a refused slot write can be retried as it is
+        left = pairing.forget_credentials(store, _slots_held_only_by(peer, dial, own, store))
+        # a refused slot leaves the peer's own copy untouched (and named): it still holds the credential
+        left = left + [env for env in own if store.read(env)] if left else pairing.forget_credentials(store, own)
         if left:
+            lines = "those lines" if len(left) > 1 else "that line"
             raise EnvNotWritable(
                 f"{peer.name} was not removed: its credential in this profile's .env could not be blanked "
-                f"({', '.join(left)}; the .env is managed or the write was refused). Delete that line from the .env, "
+                f"({', '.join(left)}; the .env is managed or the write was refused). Delete {lines} from the .env, "
                 f"then run /handover peers remove {peer.name} again.",
                 variable=left[0],
                 variables=left,
@@ -2558,9 +2663,16 @@ class EngineBackend:
         setter(key, value)
 
     def hook_runtime(self) -> HookRuntime | None:
-        from . import lock
+        from . import jobs, lock
 
         # the profile's one VetoIndex (started by ensure_started); never a second one. The janitor of a process's
-        # first use runs on its own thread, so the hook's build is the ledger and the index only (M6)
-        rt = self._started(janitor_background=True)
+        # first use runs on its own thread, so the hook's build is the ledger and the index only (M6). Not through
+        # ``_part`` (review R2-H1): a verb's first use holds that lock through its foreground janitor, and the hook
+        # would wait past HOOK_BUILD_WAIT_S and let the turn through. ``ensure_started`` is idempotent and returns
+        # the same runtime (X19) once the index has read the ledger. A runtime a verb finished already is read
+        # without the lock (one dict read).
+        rt = self._parts.get("runtime")
+        if rt is None:
+            jobs.runner_for(self._ctx, self._plugin.broker.factory)
+            rt = jobs.ensure_started(self._ctx, janitor_background=True)
         return _VetoAdapter(rt.veto, rt.ledger, lock.veto_texts)

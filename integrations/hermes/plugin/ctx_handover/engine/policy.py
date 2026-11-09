@@ -23,7 +23,11 @@ everything below it — the default write root when ``~/hermes-handover`` lies i
 (``paths.default_workspace_root``).
 
 Every check looks at the path as given **and** at its ``realpath``; components are compared NFC-normalised and,
-on case-insensitive filesystems, case-folded. No check reads a file before the never-releasable rules passed.
+on case-insensitive filesystems, case-folded. No check reads a file before the never-releasable rules passed. A regular
+file with more than one link is compared by identity ``(st_dev, st_ino)`` with the credential files the policy knows
+(``$HOME``'s secrets stores and denied names, the Hermes credential stores; L9): a hard link to one is refused like a
+symlink to it. The walk that learns those identities runs once per scan, only when a linked file shows up, and stops
+after ``LINKED_SCAN_MAX`` entries; other accounts' homes are not walked.
 
 ``PolicyConfig`` describes the host where the checks run: ``case_insensitive`` is its filesystem's behaviour,
 ``target_os`` the OS whose naming rules apply to paths written here.
@@ -188,19 +192,54 @@ TARGET_DENY: tuple[str, ...] = (
 """Home-relative target denylist (DESIGN §10.4, R19); applies even inside ``allow_roots``, under every home of the
 host (``_homes_of``), to the location itself, everything below it and every ancestor up to the home."""
 
+ONEDRIVE_DOCUMENTS_NAMES: tuple[str, ...] = (
+    "Documents",
+    "Dokumente",
+    "Documentos",
+    "Documenti",
+    "Documenten",
+    "Documente",
+    "Dokumenty",
+    "Dokument",
+    "Dokumenter",
+    "Dokumenti",
+    "Dokumentai",
+    "Dokumendid",
+    "Dokumentumok",
+    "Dokumen",
+    "Tiedostot",
+    "Belgeler",
+    "Tài liệu",
+    "Документы",
+    "Документи",
+    "Έγγραφα",
+    "מסמכים",
+    "المستندات",
+    "เอกสาร",
+    "ドキュメント",
+    "文档",
+    "文件",
+    "문서",
+)
+"""On-disk names of the documents folder OneDrive's known-folder move creates, by display language (English, German,
+Spanish/Portuguese, Italian, Dutch, Romanian, Polish/Czech/Slovak, Swedish, Danish/Norwegian, Croatian/Slovenian/
+Latvian, Lithuanian, Estonian, Hungarian, Indonesian, Finnish, Turkish, Vietnamese, Russian, Ukrainian/Bulgarian,
+Greek, Hebrew, Arabic, Thai, Japanese, Chinese, Korean). Windows' own ``C:\\Users\\<x>\\Documents`` keeps its English
+name on disk in every language; only OneDrive localises it. A language not listed here is a named limit: a glob on
+that level would deny every direct subfolder of OneDrive as a destination (ancestor rule)."""
+
 TARGET_DENY_WINDOWS: tuple[str, ...] = (
     "Documents/PowerShell",
     "Documents/WindowsPowerShell",
-    "OneDrive*/Documents/PowerShell",
-    "OneDrive*/Documents/WindowsPowerShell",
+    *(f"OneDrive*/{name}/{ps}" for name in ONEDRIVE_DOCUMENTS_NAMES for ps in ("PowerShell", "WindowsPowerShell")),
     "AppData/Local/Microsoft/WindowsApps",
 )
-"""Home-relative target denylist of Windows targets in addition to ``TARGET_DENY`` (R19): the profile
-folders of PowerShell 7 and Windows PowerShell 5.1 (run at every PowerShell start), in ``Documents`` and in its
-OneDrive known-folder place (``OneDrive`` or ``OneDrive - <organisation>``), and the per-user folder Windows puts on
-``PATH``. Components may be ``fnmatch`` globs; compared case-insensitively. A localised OneDrive documents folder
-(e.g. ``OneDrive/Dokumente``) is not covered: a glob on that level would deny every direct subfolder of OneDrive
-as a destination (ancestor rule)."""
+"""Home-relative target denylist of Windows homes in addition to ``TARGET_DENY`` (R19): the profile folders of
+PowerShell 7 and Windows PowerShell 5.1 (run at every PowerShell start), in ``Documents`` and in its OneDrive
+known-folder place (``OneDrive`` or ``OneDrive - <organisation>``, the documents folder under each name of
+``ONEDRIVE_DOCUMENTS_NAMES``), and the per-user folder Windows puts on ``PATH``. Components may be ``fnmatch`` globs;
+compared case-insensitively. Applies on Windows targets and to the Windows homes a POSIX target sees through WSL's
+drive mounts (``WSL_HOME_PARENTS``)."""
 
 TARGET_SYSTEM_DENY: tuple[str, ...] = (
     "etc",
@@ -244,6 +283,19 @@ HOME_PARENTS: tuple[str, ...] = ("home", "Users", "var/home")
 
 FIXED_HOMES: tuple[str, ...] = ("root", "var/root", "private/var/root")
 """Homes of the superuser on Linux and macOS (POSIX hosts only)."""
+
+WSL_DRIVES: tuple[str, ...] = ("mnt/[a-z]", "[a-z]")
+"""Where a POSIX host sees Windows drives through WSL (``/mnt/c``; ``/c`` with ``automount.root = /``): a single
+letter, so ``/mnt/data`` is never taken for a drive."""
+WSL_HOME_PARENTS: tuple[str, ...] = tuple(f"{drive}/Users" for drive in WSL_DRIVES)
+"""Windows user folders through WSL's drive mounts (POSIX hosts): ``<parent>/<x>`` is a Windows home and gets the rules
+of a Windows target there (``TARGET_DENY`` and ``TARGET_DENY_WINDOWS``, case-folded: the drives are case-insensitive);
+the parent and its ancestors are never a destination."""
+TARGET_SYSTEM_DENY_WSL: tuple[str, ...] = tuple(
+    f"{drive}/{name}" for drive in WSL_DRIVES for name in TARGET_SYSTEM_DENY_WINDOWS
+)
+"""``TARGET_SYSTEM_DENY_WINDOWS`` on the WSL drive mounts of a POSIX host (``/mnt/c/Windows``, ``/mnt/c/ProgramData``
+…), compared case-insensitively."""
 
 HERMES_CREDENTIAL_PATHS: tuple[str, ...] = (
     ".anthropic_oauth.json",
@@ -585,7 +637,67 @@ _TARGET_DENY_WINDOWS_SEQS = tuple(_seq(spec, True) for spec in TARGET_DENY_WINDO
 _SYSTEM_TARGET_SEQS = {ci: tuple(_seq(spec, ci) for spec in TARGET_SYSTEM_DENY) for ci in (False, True)}
 _SYSTEM_TARGET_WINDOWS_SEQS = tuple(_seq(spec, True) for spec in TARGET_SYSTEM_DENY_WINDOWS)
 _HOME_PARENT_SEQS = tuple(_seq(spec, True) for spec in HOME_PARENTS)
+_WSL_PARENT_SEQS = tuple(_seq(spec, True) for spec in WSL_HOME_PARENTS)
+_SYSTEM_TARGET_WSL_SEQS = tuple(_seq(spec, True) for spec in TARGET_SYSTEM_DENY_WSL)
 _ACCOUNT_HOMES_MAX = 65536
+
+
+def _prefix_match(folded: tuple[str, ...], seq: tuple[str, ...]) -> bool:
+    """The first ``len(seq)`` folded components match ``seq`` (``fnmatch`` per component, ``_comp_match``)."""
+    return len(folded) >= len(seq) and all(_comp_match(folded[i], seq[i]) for i in range(len(seq)))
+
+
+def _wsl_homes(path: Path) -> tuple[Path, ...]:
+    """``<drive>/Users/<x>`` when ``path`` lies below a WSL user folder (``WSL_HOME_PARENTS``), in the path's own
+    spelling; POSIX hosts only (the caller decides)."""
+    pure = PurePath(path)
+    folded = _parts_abs(path, True)
+    out = []
+    for parent in _WSL_PARENT_SEQS:
+        k = len(parent)
+        if len(folded) > k and _prefix_match(folded, parent):
+            out.append(Path(pure.parts[0], *pure.parts[1 : k + 2]))
+    return tuple(out)
+
+
+@functools.lru_cache(maxsize=256)
+def _uid_home(uid: int) -> Path | None:
+    """The home of account ``uid`` by the name service (``pwd.getpwuid`` — also accounts the password database does
+    not enumerate, e.g. LDAP), normalised; None without one, for ``/`` and for a non-absolute entry."""
+    try:
+        import pwd
+    except ImportError:
+        return None
+    try:
+        text = pwd.getpwuid(uid).pw_dir
+    except (KeyError, OSError, OverflowError, TypeError):
+        return None
+    if not isinstance(text, str) or not text.startswith("/") or text.startswith("//"):
+        return None
+    home = Path(os.path.normpath(text))
+    return home if len(home.parts) >= 2 else None
+
+
+def _owner_homes(path: Path) -> tuple[Path, ...]:
+    """The homes of the accounts owning the existing directories on the way to ``path`` (``_uid_home``, as given and
+    resolved): a home outside the enumerated password database and the ``HOME_PARENTS`` (``/srv/users/alice`` of an
+    LDAP account) is known once its owner is (H5 rest). POSIX targets only."""
+    homes: dict[Path, None] = {}
+    seen: set[int] = set()
+    pure = Path(path)
+    for directory in (pure, *pure.parents):
+        try:
+            uid = os.lstat(directory).st_uid
+        except (OSError, ValueError):
+            continue
+        if uid in seen:
+            continue
+        seen.add(uid)
+        home = _uid_home(uid)
+        if home is not None:
+            homes[home] = None
+            homes[Path(os.path.realpath(home))] = None
+    return tuple(homes)
 
 
 @functools.lru_cache(maxsize=1)
@@ -627,6 +739,8 @@ def _homes_of(path: Path, cfg: PolicyConfig, windows: bool) -> tuple[Path, ...]:
         k = len(parent)
         if len(folded) > k and folded[:k] == parent:
             homes.append(Path(pure.parts[0], *pure.parts[1 : k + 2]))
+    if not windows:
+        homes.extend(_wsl_homes(path))
     return tuple(dict.fromkeys(homes))
 
 
@@ -639,11 +753,11 @@ def homes_of(path: Path, cfg: PolicyConfig, *, windows: bool) -> tuple[Path, ...
     return _homes_of(Path(path), cfg, bool(windows))
 
 
-def _home_denied(path: Path, home: Path, cfg: PolicyConfig, windows: bool) -> bool:
+def _home_denied(path: Path, home: Path, cfg: PolicyConfig, windows: bool, ci: bool | None = None) -> bool:
     """The home rules of the target denylist for one home: the home itself and its ancestors, ``TARGET_DENY`` (plus
-    ``TARGET_DENY_WINDOWS`` on a Windows target) and every dot entry directly under the home that no allow-root
-    opens."""
-    ci = cfg.case_insensitive
+    ``TARGET_DENY_WINDOWS`` for a Windows home: on a Windows target, or through WSL) and every dot entry directly
+    under the home that no allow-root opens. ``ci`` overrides the host's case rule (a WSL drive is case-insensitive)."""
+    ci = cfg.case_insensitive if ci is None else bool(ci)
     if _inside(home, path, ci):
         return True
     if not _inside(path, home, ci):
@@ -668,13 +782,20 @@ def _home_denied(path: Path, home: Path, cfg: PolicyConfig, windows: bool) -> bo
 
 def _system_target_denied(path: Path, windows: bool, case_insensitive: bool) -> bool:
     """``TARGET_SYSTEM_DENY`` (``TARGET_SYSTEM_DENY_WINDOWS`` on Windows) on the components after the anchor, plus
-    the ``HOME_PARENTS`` directories and their ancestors."""
-    if windows:
-        if _seq_hits(_parts_abs(path, True), _SYSTEM_TARGET_WINDOWS_SEQS):
-            return True
-    elif _seq_hits(_parts_abs(path, case_insensitive), _SYSTEM_TARGET_SEQS[bool(case_insensitive)]):
-        return True
+    the ``HOME_PARENTS`` directories and their ancestors; on POSIX also the Windows system folders and user folders
+    of WSL's drive mounts (``TARGET_SYSTEM_DENY_WSL``, ``WSL_HOME_PARENTS``) and their ancestors."""
     folded = _parts_abs(path, True)
+    if windows:
+        if _seq_hits(folded, _SYSTEM_TARGET_WINDOWS_SEQS):
+            return True
+    else:
+        if _seq_hits(_parts_abs(path, case_insensitive), _SYSTEM_TARGET_SEQS[bool(case_insensitive)]):
+            return True
+        if _seq_hits(folded, _SYSTEM_TARGET_WSL_SEQS):
+            return True
+        for parent in _WSL_PARENT_SEQS:
+            if len(folded) <= len(parent) and all(_comp_match(folded[i], parent[i]) for i in range(len(folded))):
+                return True
     return any(len(folded) <= len(parent) and folded == parent[: len(folded)] for parent in _HOME_PARENT_SEQS)
 
 
@@ -691,6 +812,135 @@ def _candidates(path: Path) -> tuple[Path, Path]:
 _REAL_MEMO_MAX = 65536
 _RESOLVE_BY_PARENT = os.name == "posix"
 
+LINKED_SCAN_MAX = 4096
+"""Directory entries looked at per scan to learn the identities of the known credential files (hard links, L9). The
+small credential stores come first, browser profiles last; a credential file beyond the bound is not compared (the
+README names this limit)."""
+_LINKED_DEPTH = 8
+_BROWSER_DENY_DIRS = (
+    ".mozilla",
+    ".config/google-chrome",
+    ".config/chromium",
+    "Library/Cookies",
+    "Library/Application Support/Google/Chrome",
+)
+"""``SOURCE_DENY_DIRS`` entries that hold browser profiles (many files): walked after every other credential place."""
+
+
+class _IdentityWalk:
+    """Collects ``(st_dev, st_ino) → reason`` of the regular files with more than one link at the credential places a
+    policy knows (``_credential_identities``); bounded by ``LINKED_SCAN_MAX`` entries. Only files with
+    ``st_nlink > 1`` can be the other name of a hard link, so only those are kept."""
+
+    __slots__ = ("budget", "found")
+
+    def __init__(self) -> None:
+        self.budget = LINKED_SCAN_MAX
+        self.found: dict[tuple[int, int], str] = {}
+
+    def note(self, st: os.stat_result, reason: str) -> None:
+        if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+            key = (st.st_dev, st.st_ino)
+            if self.found.get(key) != "hermes":
+                self.found[key] = reason
+
+    def place(self, path: Path, reason: str, *, defer: list[tuple[Path, str]] | None = None) -> None:
+        """A credential place: a file is noted, a directory walked (or kept in ``defer`` for later). A link at the
+        place is followed: its target is the credential."""
+        if self.budget <= 0:
+            return
+        try:
+            st = os.stat(path)
+        except (OSError, ValueError):
+            return
+        self.budget -= 1
+        if not stat.S_ISDIR(st.st_mode):
+            self.note(st, reason)
+        elif defer is not None:
+            defer.append((path, reason))
+        else:
+            self.walk(path, reason)
+
+    def entries(self, directory: Path) -> list[os.DirEntry]:
+        try:
+            with os.scandir(directory) as it:
+                return sorted(it, key=lambda e: e.name)
+        except (OSError, ValueError):
+            return []
+
+    def walk(self, top: Path, reason: str) -> None:
+        stack = [(top, 0)]
+        while stack and self.budget > 0:
+            directory, depth = stack.pop()
+            for entry in self.entries(directory):
+                if self.budget <= 0:
+                    return
+                self.budget -= 1
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        if depth < _LINKED_DEPTH:
+                            stack.append((Path(entry.path), depth + 1))
+                        continue
+                    self.note(entry.stat(follow_symlinks=True), reason)
+                except OSError:
+                    continue
+
+    def named(self, directory: Path, depth: int) -> None:
+        """Files with a denied name (``SOURCE_DENY_NAMES``) directly in ``directory`` and, with ``depth`` 1, one folder
+        below it."""
+        for entry in self.entries(directory):
+            if self.budget <= 0:
+                return
+            self.budget -= 1
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if depth > 0:
+                        self.named(Path(entry.path), depth - 1)
+                elif _name_denied(entry.name):
+                    self.note(entry.stat(follow_symlinks=True), "secret")
+            except OSError:
+                continue
+
+
+def _credential_identities(cfg: PolicyConfig, resolve: Callable[[str], str]) -> dict[tuple[int, int], str]:
+    """``(st_dev, st_ino) → "secret" | "hermes"`` of the credential files this policy knows that have more than one
+    link (L9, SEC 5.3): in ``$HOME`` the ``SOURCE_DENY_DIRS`` stores and the files with a denied name at the top level
+    and one folder below ``~/.config`` (``secret``); the ``HERMES_CREDENTIAL_PATHS`` of the active Hermes home, the
+    Hermes root and every profile below it (``hermes``). Order: small stores, names, Hermes files, Hermes directories,
+    browser profiles — so the bound (``LINKED_SCAN_MAX``) cuts the large places first. Other accounts' homes are not
+    looked at (a named limit)."""
+    w = _IdentityWalk()
+    homes = list(dict.fromkeys(Path(resolve(str(h))) for h in (cfg.home,)))
+    for home in homes:
+        for spec in SOURCE_DENY_DIRS:
+            if spec not in _BROWSER_DENY_DIRS:
+                w.place(home.joinpath(*spec.split("/")), "secret")
+    for home in homes:
+        w.named(home, 0)
+        w.named(home / ".config", 1)
+    bases: dict[Path, None] = {}
+    for base in (cfg.hermes_home, cfg.hermes_root):
+        bases[Path(resolve(str(base)))] = None
+    for profile in w.entries(Path(resolve(str(cfg.hermes_root))) / "profiles"):
+        if w.budget <= 0:
+            break
+        w.budget -= 1
+        try:
+            if profile.is_dir(follow_symlinks=True):
+                bases[Path(resolve(profile.path))] = None
+        except OSError:
+            continue
+    deferred: list[tuple[Path, str]] = []
+    for base in bases:
+        for spec in HERMES_CREDENTIAL_PATHS:
+            w.place(base.joinpath(*spec.split("/")), "hermes", defer=deferred)
+    for directory, reason in deferred:
+        w.walk(directory, reason)
+    for home in homes:
+        for spec in _BROWSER_DENY_DIRS:
+            w.place(home.joinpath(*spec.split("/")), "secret")
+    return w.found
+
 
 class SourceCheckCache:
     """Memo for the source checks of **one** scan (one tree walk, one ``git ls-files`` listing).
@@ -705,13 +955,24 @@ class SourceCheckCache:
     every call uses a fresh one, i.e. resolves everything itself.
     """
 
-    __slots__ = ("_cfg", "_credential", "_item_roots", "_liftable", "_locations", "_protected", "_real", "_reserved")
+    __slots__ = (
+        "_cfg",
+        "_credential",
+        "_item_roots",
+        "_liftable",
+        "_linked",
+        "_locations",
+        "_protected",
+        "_real",
+        "_reserved",
+    )
 
     def __init__(self) -> None:
         self._cfg: PolicyConfig | None = None
         self._clear()
 
     def _clear(self) -> None:
+        self._linked: dict[tuple[int, int], str] | None = None
         self._protected: tuple[tuple[str, ...], ...] | None = None
         self._credential: tuple[tuple[str, ...], ...] | None = None
         self._locations: tuple[tuple[str, ...] | None, ...] | None = None
@@ -786,6 +1047,14 @@ class SourceCheckCache:
             roots = (cfg.home, *cfg.export_roots)
             self._locations = tuple(_root_key(self._resolve(r), cfg.case_insensitive) for r in roots)
         return self._locations
+
+    def _linked_reason(self, st: os.stat_result) -> str | None:
+        """``"secret"``/``"hermes"`` when the regular file ``st`` is another name of a known credential file (hard link,
+        L9), else None. The identities are collected on the first linked file of the scan (``_credential_identities``);
+        a file with one name never gets here."""
+        if self._linked is None:
+            self._linked = _credential_identities(self._cfg, self._resolve)
+        return self._linked.get((st.st_dev, st.st_ino))
 
     def _item_root_key(self, item_root: Path) -> tuple[str, ...] | None:
         text = os.fspath(item_root)
@@ -981,8 +1250,10 @@ def check_source_file(
     (only an ``explicit`` path — an item root or an ``--include`` — is resolved, everything else is recorded as a
     link by the walker), special files, the name/directory denylist on the given path and its realpath, the
     location (``item_root`` given: the realpath must stay inside it; otherwise under ``$HOME`` or an
-    ``export_roots`` entry), the size limit (``explicit`` lifts it), and the content sniff of every regular file
-    (hard-linked files included, SEC 5.3). ``include_secret`` lifts the denylist and the sniff for those paths.
+    ``export_roots`` entry), a hard link (``st_nlink > 1``) to a known credential file — judged like a symlink to it
+    (``secret``, or ``hermes`` for a Hermes credential store; ``_credential_identities``, L9, SEC 5.3) — the size
+    limit (``explicit`` lifts it), and the content sniff of every regular file (hard-linked files included).
+    ``include_secret`` lifts the denylist, the hard-link rule for ``secret`` and the sniff for those paths.
 
     ``follow_link`` decouples "resolve a symlink" from "lift the size limit" (W074): ``None`` keeps the coupling
     (a link is followed exactly when ``explicit``), ``True`` follows a link without lifting the size limit,
@@ -1039,6 +1310,11 @@ def check_source_file(
             return Verdict(False, "symlink")
     elif not any(_under(real.key, root) for root in memo._location_keys()):
         return Verdict(False, "outside_home")
+    if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+        # L9: a hard link is a second name of a credential file — judged like a symlink to it (never a read first)
+        linked = memo._linked_reason(st)
+        if linked == "hermes" or (linked is not None and not lifted):
+            return Verdict(False, linked)
     if stat.S_ISDIR(st.st_mode):
         return _OK
     if st.st_size > cfg.max_file_bytes and not explicit:
@@ -1101,7 +1377,15 @@ def _target_denied(path: Path, cfg: PolicyConfig) -> bool:
     windows = cfg.platform_rules().windows
     if _system_target_denied(path, windows, ci):
         return True
-    return any(_home_denied(path, home, cfg, windows) for home in _homes_of(path, cfg, windows))
+    if any(_home_denied(path, home, cfg, windows) for home in _homes_of(path, cfg, windows)):
+        return True
+    if windows:
+        return False
+    # H5 rest: a Windows home through WSL gets the Windows rules, case-folded; a home only the name service knows
+    # (the owner of a directory on the way) gets the home rules
+    if any(_home_denied(path, home, cfg, True, ci=True) for home in _wsl_homes(path)):
+        return True
+    return any(_home_denied(path, home, cfg, False) for home in _owner_homes(path))
 
 
 def check_target_dest(

@@ -11,10 +11,12 @@ Other clusters use these to drive planning without a real host:
 ``StaticGitProbe``                          ``contracts.GitProbe`` from a fixed ``{work tree root: shallow}`` map
                                             (``partial=`` names partial clones, ``is_partial`` as E's probe;
                                             ``ignored=`` names ignored directories, ``is_ignored``;
-                                            ``tracked=``/``untracked=`` for ``has_tracked_files``, else None)
-``CeilingGitProbe``                         ``contracts.GitProbe`` over real ``git rev-parse`` with a ceiling dir,
-                                            so a probe below the test's tmp dir never finds an enclosing repo;
-                                            read-only, no identity, no config writes
+                                            ``tracked=``/``untracked=`` for ``has_tracked_files``, else None;
+                                            ``carried=``/``nested=`` for ``carried_files``/``nested_repos``)
+``CeilingGitProbe``                         ``contracts.GitProbe`` over real ``git rev-parse``/``ls-files`` with a
+                                            ceiling dir, so a probe below the test's tmp dir never finds an enclosing
+                                            repo; read-only, no identity, no config writes; also ``carried_files`` and
+                                            ``nested_repos`` (r3-kd, the wish for ``gitops.GitProbe``)
 ``HermesFileStub`` / ``static_discover``    stand-ins for ``hermes_files.HermesFile``/``discover`` (cluster B),
                                             including its ``rejected=`` list
 ``ScriptedModel``                           a side question or ``llm`` callable with scripted replies; records
@@ -210,12 +212,16 @@ class StaticGitProbe:
         ignored: Iterable[str] = (),
         tracked: Iterable[str] = (),
         untracked: Iterable[str] = (),
+        carried: dict[str, Sequence[str]] | None = None,
+        nested: dict[str, Sequence[str]] | None = None,
     ) -> None:
         self.roots = {os.path.normpath(k): bool(v) for k, v in (roots or {}).items()}
         self.partial = {os.path.normpath(p) for p in partial}
         self.ignored = {os.path.normpath(p) for p in ignored}
         self.tracked = {os.path.normpath(p) for p in tracked}
         self.untracked = {os.path.normpath(p) for p in untracked}
+        self.carried = {os.path.normpath(k): tuple(v) for k, v in (carried or {}).items()}
+        self.nested = {os.path.normpath(k): tuple(v) for k, v in (nested or {}).items()}
         self.calls: list[tuple[str, str]] = []
 
     @staticmethod
@@ -258,6 +264,40 @@ class StaticGitProbe:
         if self._below(path, self.tracked):
             return True
         return False if self._below(path, self.untracked) else None
+
+    def carried_files(self, path: str, limit: int) -> tuple[str, ...] | None:
+        """``carried={dir: [rel, …]}``: the files git carries below ``dir`` (R36, R2-M3), at most ``limit``; None
+        (git could not tell) for a directory not named."""
+        self.calls.append(("carried_files", path))
+        found = self.carried.get(os.path.normpath(path))
+        return None if found is None else found[: max(0, int(limit))]
+
+    def nested_repos(self, root: str) -> tuple[str, ...] | None:
+        """``nested={root: [abs path, …]}``: the untracked clones below a work-tree root (H15, R2-M2); None for a root
+        not named."""
+        self.calls.append(("nested_repos", root))
+        return self.nested.get(os.path.normpath(root))
+
+
+def _ls_files(path: str, args: Sequence[str], env: dict[str, str], limit: int | None = None) -> list[bytes] | None:
+    """``git ls-files -z <args> --end-of-options .`` in the directory ``path``: the NUL-separated records (at most
+    ``limit``), or None when git fails (read-only test helper)."""
+    if not os.path.isdir(path):
+        return None
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            ["git", "-C", path, "ls-files", "-z", *args, "--end-of-options", "."],  # noqa: S607 - test helper
+            capture_output=True,
+            env=env,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    records = [r for r in proc.stdout.split(b"\x00") if r]
+    return records if limit is None else records[: max(0, limit)]
 
 
 class CeilingGitProbe:
@@ -342,6 +382,24 @@ class CeilingGitProbe:
         if proc.returncode != 0:
             return None
         return bool(proc.stdout)
+
+    def carried_files(self, path: str, limit: int) -> tuple[str, ...] | None:
+        """The files git carries below the directory ``path`` — tracked, or untracked and not ignored
+        (``git ls-files -z --cached --others --exclude-standard``, the wish for ``gitops.GitProbe.carried_files``; R36,
+        R2-M3) — relative to ``path``, at most ``limit``; None when git fails."""
+        records = _ls_files(path, ["--cached", "--others", "--exclude-standard"], self._env(), limit)
+        if records is None:
+            return None
+        return tuple(dict.fromkeys(os.fsdecode(r) for r in records))
+
+    def nested_repos(self, root: str) -> tuple[str, ...] | None:
+        """Untracked, not ignored directories below the work-tree root ``root`` that are repositories of their own
+        (``git ls-files -z -o --exclude-standard`` records ending in ``/``, as ``gitops.nested_repositories``; the wish
+        for ``gitops.GitProbe.nested_repos``; H15, R2-M2), as absolute paths; None when git fails."""
+        records = _ls_files(root, ["--others", "--exclude-standard"], self._env())
+        if records is None:
+            return None
+        return tuple(os.path.join(root, os.fsdecode(r.rstrip(b"/"))) for r in records if r.endswith(b"/"))
 
     def is_partial(self, path: str) -> bool:
         """A promisor remote in the repository's config (``gitops.GitProbe.is_partial``, V30), read with

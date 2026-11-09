@@ -29,7 +29,7 @@ import json
 import os
 import shutil
 import stat
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -181,16 +181,73 @@ def _mode_of(st: os.stat_result) -> str:
     return "100755" if st.st_mode & 0o111 else "100644"
 
 
+_MAX_LINK_HOPS = 40
+"""Links followed in one resolution (Linux ``SYMLOOP_MAX``); beyond it, and in a loop, the chain rule stops."""
+_GONE = object()
+_STOP = object()
+
+
+def links_through_left_out(
+    links: Mapping[str, str], gone: Iterable[str], key: Callable[[str], str] = lambda s: s
+) -> list[str]:
+    """The links of a tree whose target leads through a link the tree leaves out (L3-F27, rest of H9): ``links``
+    maps each kept link (path relative to the root, ``/``-separated) to its target — inside the tree by
+    ``policy.check_tree_entry``, so ``..`` only leads and climbs real directories — and ``gone`` names the links left
+    out. A target is followed component by component through the kept links (resolved once each); one that meets a
+    left-out link, or a kept link that does, is listed — so a chain is transferred whole or not at all, never as a
+    dangling half. A target that only names a missing path stays as the user made it; so do a loop and a chain longer
+    than ``_MAX_LINK_HOPS`` (nothing left out on their way). ``key``: the path comparison (``paths.fold_key``)."""
+    links = {key(p): t for p, t in links.items()}
+    gone_keys = {key(p) for p in gone}
+    memo: dict[str, object] = {}  # link -> its resolved path or _GONE
+
+    def expand(path: str, depth: int) -> object:
+        if path in memo:
+            return memo[path]
+        if depth >= _MAX_LINK_HOPS:
+            return _STOP
+        res = walk(path.rpartition("/")[0], links[path], depth + 1)
+        if res is not _STOP:
+            memo[path] = res
+        return res
+
+    def walk(base: str, target: str, depth: int) -> object:
+        cur = base.split("/") if base else []
+        for comp in target.replace("\\", "/").split("/"):
+            if comp in ("", "."):
+                continue
+            if comp == "..":
+                if cur:
+                    cur.pop()
+                continue
+            cur.append(comp)
+            k = key("/".join(cur))
+            if k in gone_keys:
+                return _GONE
+            if k in links:
+                res = expand(k, depth)
+                if res is _GONE or res is _STOP:
+                    return res
+                cur = str(res).split("/") if res else []
+        return "/".join(cur)
+
+    if not gone_keys:
+        return []
+    return [p for p in sorted(links) if expand(p, 0) is _GONE]
+
+
 def scan(
     root: Path, matcher: IgnoreMatcher, cfg: PolicyConfig, cancelled: Callable[[], bool] = _never
 ) -> tuple[list[TreeEntry], list[NotTransferred]]:
     """Walk ``root`` (DESIGN §9.6): ignored entries pruned (one report per pruned directory or file), denied and
-    special files reported, symlinks recorded as links (only relative targets inside the tree), at most
+    special files reported, symlinks recorded as links (only relative targets inside the tree; a link whose target
+    leads through a link left out goes too, reported ``symlink`` — ``links_through_left_out``, L3-F27), at most
     ``cfg.max_files`` entries (``PolicyDenied(reason=max_files)`` beyond). Entries are sorted by raw name."""
     root = Path(root)
     base = os.fsencode(root)
     entries: list[TreeEntry] = []
     left: list[NotTransferred] = []
+    gone_links: set[str] = set()
     stack: list[bytes] = [b""]
     policy_cache = SourceCheckCache()  # one scan, one cache (never across scans)
     while stack:
@@ -219,21 +276,26 @@ def scan(
             is_dir = stat.S_ISDIR(st.st_mode)
             if matcher.ignored(text, is_dir):
                 left.append(NotTransferred(shown, "ignored"))
+                if stat.S_ISLNK(st.st_mode):
+                    gone_links.add(text)
                 continue
             path = _join(root, rel)
             if stat.S_ISLNK(st.st_mode):
                 if is_denied_name(text, case_insensitive=cfg.case_insensitive):
                     left.append(NotTransferred(shown, "secret"))
+                    gone_links.add(text)
                     continue
                 try:
                     target = os.readlink(path)
                     target.encode("utf-8")
                 except (OSError, UnicodeEncodeError):
                     left.append(NotTransferred(shown, "symlink"))
+                    gone_links.add(text)
                     continue
                 entry = TreeEntry(shown, "symlink", "120000", 0, st.st_mtime_ns, None, target, raw)
                 if not check_tree_entry({**entry.__dict__, "path": text}).allowed:
                     left.append(NotTransferred(shown, "symlink"))
+                    gone_links.add(text)
                     continue
                 entries.append(entry)
             elif is_dir or stat.S_ISREG(st.st_mode):
@@ -253,6 +315,18 @@ def scan(
                     f"more than {cfg.max_files} entries", reason="max_files", max_files=cfg.max_files, path=str(root)
                 )
         stack.extend(reversed(subdirs))
+    if gone_links:
+        rules = cfg.platform_rules()
+        linked = {os.fsdecode(entry_rel_bytes(e)): e for e in entries if e.type == "symlink"}
+        chained = set(
+            links_through_left_out(
+                {p: str(e.target) for p, e in linked.items()}, gone_links, key=lambda s: fold_key(s, rules)
+            )
+        )
+        if chained:
+            drop = {id(e) for p, e in linked.items() if fold_key(p, rules) in chained}
+            left.extend(NotTransferred(e.path, "symlink") for e in entries if id(e) in drop)
+            entries = [e for e in entries if id(e) not in drop]
     entries.sort(key=entry_rel_bytes)
     return entries, left
 
@@ -378,14 +452,25 @@ def load_manifest(store: BlockSource, manifest_id: str, *, max_files: int) -> li
     return entries
 
 
-def check_room(nbytes: int, where: Path, *, max_bytes: int, write_bytes: int | None = None, what: str) -> None:
+def check_room(
+    nbytes: int,
+    where: Path,
+    *,
+    max_bytes: int,
+    write_bytes: int | None = None,
+    what: str,
+    room: Callable[[int, Path, int, str], None] | None = None,
+) -> None:
     """Before the first byte is written (H11, R28): ``nbytes`` (the declared size of what arrives) must not exceed
     ``max_bytes`` (the target's own cap), and ``write_bytes`` (default ``nbytes``: what is written now) × 1.1 must
     fit into the free space of the file system holding ``where`` (its nearest existing ancestor). One stored block
-    can stand for any number of identical files, so the stored size bounds nothing."""
+    can stand for any number of identical files, so the stored size bounds nothing. ``room``: the workspace
+    transaction's job-wide check of the same numbers (``(nbytes, where, write_bytes, what)``; the cap holds per job,
+    not per item — ``materialize``), called last."""
     if nbytes > max_bytes:
         raise PayloadTooLarge(f"the {what} is larger than allowed", bytes=nbytes, max_bytes=max_bytes)
-    need = int((nbytes if write_bytes is None else write_bytes) * _DISK_MARGIN)
+    write = nbytes if write_bytes is None else write_bytes
+    need = int(write * _DISK_MARGIN)
     probe = Path(where)
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
@@ -394,6 +479,8 @@ def check_room(nbytes: int, where: Path, *, max_bytes: int, write_bytes: int | N
         raise InsufficientStorage(
             f"not enough free space for the {what}", need_bytes=need, free_bytes=free, path=str(probe)
         )
+    if room is not None:
+        room(nbytes, probe, write, what)
 
 
 @dataclass
@@ -412,17 +499,23 @@ def _check_entries(entries: Sequence[dict], rules: PlatformRules) -> tuple[list[
     ok: list[_Checked] = []
     skipped: list[NotTransferred] = []
     seen: dict[str, str] = {}
+    gone_links: set[str] = set()
     for e in entries:
         shown = str(e.get("path"))[:300]
+        is_link = e.get("type") == "symlink"
         try:
             rel = entry_rel_bytes(e)
             text = safe_rel(rel, rules)
         except (PolicyDenied, BadRequest) as exc:
             skipped.append(NotTransferred(shown, "unsafe_path:" + str(exc.details.get("reason", "invalid"))))
+            if is_link:
+                gone_links.add(shown)
             continue
         verdict = check_tree_entry({**e, "path": text})
         if not verdict.allowed:
             skipped.append(NotTransferred(shown, verdict.reason or "special"))
+            if is_link:
+                gone_links.add(text)
             continue
         if e["type"] == "file" and not isinstance(e.get("object"), str):
             skipped.append(NotTransferred(shown, "special"))
@@ -430,9 +523,18 @@ def _check_entries(entries: Sequence[dict], rules: PlatformRules) -> tuple[list[
         folded = fold_key(text, rules)
         if folded in seen:
             skipped.append(NotTransferred(shown, "case_collision"))
+            if is_link:
+                gone_links.add(text)
             continue
         seen[folded] = text
         ok.append(_Checked(rel, e, fp_key(rel)))
+    # a link through a link left out is never created dangling: the whole chain is skipped (L3-F27)
+    links = {os.fsdecode(c.rel): str(c.entry.get("target")) for c in ok if c.entry["type"] == "symlink"}
+    chained = set(links_through_left_out(links, gone_links, key=lambda s: fold_key(s, rules)))
+    if chained:
+        out = {id(c) for c in ok if c.entry["type"] == "symlink" and fold_key(os.fsdecode(c.rel), rules) in chained}
+        skipped.extend(NotTransferred(str(c.entry.get("path"))[:300], "symlink") for c in ok if id(c) in out)
+        ok = [c for c in ok if id(c) not in out]
     return ok, skipped
 
 
@@ -478,12 +580,13 @@ def prepare_fresh(
     fallback: Path | None = None,
     claimed: bool = False,
     max_bytes: int = DEFAULT_MAX_BYTES,
+    room: Callable[[int, Path, int, str], None] | None = None,
 ) -> TreeApplyState:
     """Fresh mode PREPARE: build the tree in ``partial`` (created 0700; must not exist — ``claimed``: created empty
     and recorded by the caller). Something already at the path is never used or removed:
     ``ConflictError(kind=partial_exists)`` (L3-F08). Unsafe, colliding or unknown-type entries are skipped and
     reported in ``skipped``. The declared bytes of the files are checked against ``max_bytes`` and the free space
-    first (``check_room``: ``PayloadTooLarge`` | ``InsufficientStorage``, H11)."""
+    first (``check_room``: ``PayloadTooLarge`` | ``InsufficientStorage``, H11; ``room`` the job-wide check)."""
     entries = load_manifest(store, manifest_id, max_files=max_files)
     checked, skipped = _check_entries(entries, rules)
     partial = Path(partial)
@@ -491,7 +594,7 @@ def prepare_fresh(
     fp: dict[str, list] = {}
     dirs: list[_Checked] = []
     try:
-        check_room(_file_bytes(checked), partial.parent, max_bytes=max_bytes, what="file tree")
+        check_room(_file_bytes(checked), partial.parent, max_bytes=max_bytes, what="file tree", room=room)
         for c in sorted((c for c in checked if c.entry["type"] == "dir"), key=lambda c: c.rel.count(b"/")):
             path = _join(partial, c.rel)
             _parents_real(partial, c.rel)
@@ -621,6 +724,7 @@ def prepare_update(
     tag: str = "000000",
     max_files: int = 200_000,
     max_bytes: int = DEFAULT_MAX_BYTES,
+    room: Callable[[int, Path, int, str], None] | None = None,
 ) -> TreeApplyState:
     """Update mode PREPARE (DESIGN §9.6): allowed only when ``dest`` still equals ``fingerprint`` (the plugin's
     last write there, or the out-state recorded at retire for the return trip); any foreign change ⇒
@@ -629,7 +733,8 @@ def prepare_update(
 
     Repeatable (L3-F08 class): files staged by an earlier PREPARE with the same ``tag`` whose process died are no
     foreign change — they are staged again or removed (``tag`` is the job's). The tree's declared bytes are checked
-    against ``max_bytes`` and the files to stage against the free space before anything is written (H11)."""
+    against ``max_bytes`` and the files to stage against the free space before anything is written (H11; ``room``
+    the job-wide check)."""
     dest = Path(dest)
     recorded = dict((fingerprint or {}).get("files") or {})
     leftover: list[bytes] = []
@@ -653,7 +758,9 @@ def prepare_update(
             new_fp[c.key] = rec
             continue
         todo.append(c)
-    check_room(_file_bytes(checked), dest, max_bytes=max_bytes, write_bytes=_file_bytes(todo), what="file tree")
+    check_room(
+        _file_bytes(checked), dest, max_bytes=max_bytes, write_bytes=_file_bytes(todo), what="file tree", room=room
+    )
     staging = Path(staging)
     staging.mkdir(parents=True, exist_ok=True, mode=0o700)
     staged: list[tuple[Path, Path]] = []

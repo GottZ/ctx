@@ -243,14 +243,29 @@ class ParticipantRegistry:
         row = self.ledger.job(job_id, role)
         return {"job_id": job_id, "state": row["state"], "epoch": epoch}
 
+    def _unlocked_idle(self, row: dict, now: float, after_s: float) -> bool:
+        """A remote conductor's source job that never locked its session (opened at FACTS; ``source_handovers`` has
+        no row for it) and had no request for ``after_s`` (review R2-M1): it holds no session and no lease."""
+        return (
+            row["role"] == str(Role.SOURCE)
+            and (row.get("params") or {}).get("local") is not True
+            and float(row["updated_at"]) < now - float(after_s)
+            and self.ledger.source_state(row["job_id"]) is None
+        )
+
     def _check_caps(self, peer_id: str) -> None:
         """The caps count the jobs remote conductors opened here (route #7). The participant rows of this host's own
         conductor jobs and the planning row of an offer (``params.local``) are no such job (L3-F07: an open offer
-        and a pending export used up the slots of the peer)."""
+        and a pending export used up the slots of the peer). Neither is a source job that never locked anything and
+        had no request for ``participant_idle_timeout`` (review R2-M1: its conductor aborted while this side was
+        offline); it stays open for a conductor that comes back and ends in ``sweep`` after ``staging_ttl``."""
+        now, idle_s = self.ledger.now(), self._options().participant_idle_timeout_s
         active = [
             j
             for j in self.ledger.jobs(active=True, limit=10_000)
-            if j["role"] != str(Role.CONDUCTOR) and (j.get("params") or {}).get("local") is not True
+            if j["role"] != str(Role.CONDUCTOR)
+            and (j.get("params") or {}).get("local") is not True
+            and not self._unlocked_idle(j, now, idle_s)
         ]
         if sum(1 for j in active if j["peer_id"] == peer_id) >= self._max_per_peer:
             raise RateLimited("too many concurrent handovers for this device", reason="concurrent_jobs")
@@ -379,7 +394,8 @@ class ParticipantRegistry:
         return self._api(Role(row["role"]), peer), self._context(row, peer, row["max_peer_epoch"])
 
     def sweep(self, now: float) -> None:
-        """Heartbeat owned jobs, idle source leases, staging TTL, pending aborts, journal compaction."""
+        """Heartbeat owned jobs, idle source leases, staging TTL (also of a source job that never locked anything,
+        review R2-M1), pending aborts, journal compaction."""
         opts = self._options()
         me = process_owner()
         for row in self.ledger.jobs(active=True, limit=10_000):
@@ -405,6 +421,12 @@ class ParticipantRegistry:
                     elif row["state"] == "aborting":
                         api, job = self._internal_job(row)
                         api.start_release(job, "aborting")
+                    elif src is None and self._unlocked_idle(row, now, opts.staging_ttl_s):
+                        # opened at FACTS, never locked, no request since: the conductor is gone (it aborted while
+                        # this side was offline, or never came back) — the row ends like the staging of a target
+                        # (DESIGN §3.5) instead of staying active for ever (review R2-M1)
+                        api, job = self._internal_job(row)
+                        api.start_release(job, "expired")
                 else:
                     state = row["state"]
                     if state == "aborting":

@@ -216,6 +216,10 @@ class FakeHost:
         self._record("approvals_off")
         return self._real["approvals_off"](config)
 
+    def approval_check(self, config: dict):
+        self._record("approval_check")
+        return self._real["approval_check"](config)
+
     def hermes_version(self) -> str:
         self._record("hermes_version")
         return "0.0.0"

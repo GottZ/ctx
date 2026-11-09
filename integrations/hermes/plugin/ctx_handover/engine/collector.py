@@ -14,9 +14,12 @@ candidate list.
    home would silently ride along. A ``cwd`` that git ignores in the work tree around it (``GitProbe.is_ignored``: a
    scratch or build folder of somebody's checkout) is no part of that repository: the ``cwd`` itself is the item root
    (``FILE_TREE``, reason ``IGNORED_REASON``), and evidence in that repository never brings it back as a secondary
-   item (R36, L3-F19). For a ``cwd`` below the root it does belong to, the primary records whether the ``cwd`` holds
-   tracked files (``GitProbe.has_tracked_files``; reasons ``CWD_TRACKED_REASON``/``CWD_UNTRACKED_REASON``, read back
-   with ``cwd_tracked``): the plan asks about the larger workspace only when it does not (R36a).
+   item (R36, L3-F19). The same holds for a ``cwd`` git does not ignore itself but carries nothing from except
+   placeholders while it holds other entries (``tmp/*`` with ``!tmp/.gitkeep``; ``CONTENT_IGNORED_REASON``, the probe's
+   optional ``carried_files``; R2-M3). For a ``cwd`` below the root it does belong to, the primary records whether
+   the ``cwd`` holds tracked files (``GitProbe.has_tracked_files``; reasons ``CWD_TRACKED_REASON``/
+   ``CWD_UNTRACKED_REASON``, read back with ``cwd_tracked``): the plan asks about the larger workspace only when it
+   does not (R36a).
 2. **Evidence** from the transcript, walked in storage order with a running directory (start: ``cwd``; a terminal
    result's ``cwd`` field moves it, ``tools/terminal_tool_result.py:247-263``): ``write_file``/``patch`` arguments
    and results (``resolved_path``, ``files_modified``) weigh *write*; ``read_file``/``search_files`` arguments weigh
@@ -25,8 +28,10 @@ candidate list.
 3. **Classification after realpath** (SEC 5.3): a missing path is dropped; the realpath decides — inside the
    primary root ⇒ covered (recorded as a reason on the primary) — unless it lies in a repository of its own below a
    git workspace (an initialised submodule, a clone in the work tree: ``inner_repo``), whose files never travel with
-   it: a ``GIT_REPO`` candidate with ``INNER_REPO_REASON`` the plan names and never makes an item (H15); inside
-   another work tree ⇒ a secondary ``GIT_REPO``; otherwise an ``EXTRA_FILE``/``EXTRA_DIR`` candidate. Paths in the
+   it: a ``GIT_REPO`` candidate with ``INNER_REPO_REASON`` the plan names and never makes an item (H15) — also every
+   untracked clone of a git item the transcript never touched (the probe's optional ``nested_repos``, R2-M2); inside
+   another work tree ⇒ a secondary ``GIT_REPO``, unless git ignores the path's folder there — then the path itself
+   (L3-F26, R36 for mentions); otherwise an ``EXTRA_FILE``/``EXTRA_DIR`` candidate. Paths in the
    Hermes home, the plugin data directory, the document cache or another account's Hermes home are never extras
    (session files come from ``hermes_files.discover``); a file there that the discovery neither delivers nor refuses
    is a ``"rejected: hermes"`` candidate, so the plan names it (M20). Mentions outside ``$HOME``/``export_roots`` and
@@ -42,6 +47,7 @@ Size estimates and inclusion defaults are the plan's job (``plan.build_plan``).
 
 from __future__ import annotations
 
+import fnmatch
 import ntpath
 import os
 import posixpath
@@ -58,7 +64,14 @@ from .errors import BadRequest
 from .jsonutil import loads_bounded
 from .model import Candidate, HermesPaths, ItemKind, Origin, Weight
 from .paths import msys_to_windows
-from .policy import HERMES_FILE_KINDS, HOME_PARENTS, PolicyConfig, is_denied_name, reserved_workspace_roots
+from .policy import (
+    HERMES_FILE_KINDS,
+    HOME_PARENTS,
+    WSL_HOME_PARENTS,
+    PolicyConfig,
+    is_denied_name,
+    reserved_workspace_roots,
+)
 
 RANK: dict[Weight, int] = {Weight.MENTION: 0, Weight.READ: 1, Weight.WRITE: 2}
 """Order of evidence weights (DESIGN §8.2)."""
@@ -76,6 +89,18 @@ CWD_REL_PREFIX = "cwd: "
 SHALLOW_REASON = "shallow clone: packed as a file tree"
 IGNORED_REASON = "ignored in the git repository around it: packed as a file tree"
 """Reason of a primary whose ``cwd`` git ignores in the enclosing work tree (R36, L3-F19): the ``cwd`` alone travels."""
+CONTENT_IGNORED_REASON = "its files are ignored in the git repository around it: packed as a file tree"
+"""Reason of a primary whose ``cwd`` git does not ignore itself, but carries nothing from except placeholders
+(``PLACEHOLDER_NAMES``) while it holds other entries — ``tmp/*`` with ``!tmp/.gitkeep`` (R36, R2-M3): a scratch folder
+of the repository around it, so the ``cwd`` alone travels, like an ignored one."""
+PLACEHOLDER_NAMES = frozenset({".gitkeep", ".keep", ".gitignore", ".placeholder", ".empty", ".keepme"})
+"""File names that only keep a folder in a repository (R2-M3); a folder git carries only these from is no part of the
+repository's work."""
+MAX_CARRIED_PROBE = 64
+"""Files of the cwd asked from git for the placeholder rule; more than this means real content (the rule does not
+apply)."""
+MAX_NESTED_REPOS = 256
+"""Untracked clones named per git item (H15, R2-M2); the plan names the same number of submodules."""
 CWD_TRACKED_REASON = "cwd holds tracked files"
 CWD_UNTRACKED_REASON = "cwd holds no tracked file"
 """Reasons of a primary whose root is the repository around the ``cwd`` (R36a): the ``cwd`` holds files the repository
@@ -121,6 +146,7 @@ class FsOps:
 
     lstat: Callable[[str], os.stat_result] = os.lstat
     realpath: Callable[[str], str] = os.path.realpath
+    listdir: Callable[[str], list[str]] = os.listdir
 
 
 def sort_key(candidate: Candidate) -> tuple:
@@ -227,9 +253,11 @@ class HomeRule:
                 if real is not None:
                     own.append(flav.parts(real(p)))
         self._own_hermes = own
-        depth = max(len([c for c in spec.split("/") if c]) for spec in HOME_PARENTS)
+        # the memo key must reach a home below every home parent — WSL's ``mnt/<drive>/Users/<x>`` included (H5 rest)
+        specs = HOME_PARENTS if flav.windows else (*HOME_PARENTS, *WSL_HOME_PARENTS)
+        depth = max(len([c for c in spec.split("/") if c]) for spec in specs)
         self._key_depth = depth + (2 if flav.windows else 1)
-        self._parents = [tuple(c.casefold() for c in spec.split("/") if c) for spec in HOME_PARENTS]
+        self._parents = [tuple(c.casefold() for c in spec.split("/") if c) for spec in specs]
         self._memo: dict[tuple[str, ...], tuple[list[tuple[str, ...]], list[tuple[str, ...]]]] = {}
 
     @classmethod
@@ -274,7 +302,10 @@ class HomeRule:
         if self.cfg is None:
             return False
         after = tuple(c.casefold() for c in (pp[1:] if self.flav.windows else pp))
-        return any(len(after) <= len(par) and par[: len(after)] == after for par in self._parents)
+        return any(
+            len(after) <= len(par) and all(fnmatch.fnmatchcase(a, p) for a, p in zip(after, par, strict=False))
+            for par in self._parents
+        )
 
     def in_foreign_hermes(self, path: str) -> bool:
         """``path`` lies in ``<home>/.hermes`` of a home that is not the active Hermes home or root."""
@@ -519,6 +550,7 @@ class _Classifier:
         }
         self._toplevel: dict[str, str | None] = {}
         self._dotgit: dict[str, bool] = {}
+        self._ignored: dict[str, bool] = {}
         # M35: every home the policy knows counts (``HomeRule``)
         own = [p for p in (cfg.hermes_home, cfg.hermes_root, hermes.home) if p is not None and str(p) != ""]
         self.homes = HomeRule(flav, str(cfg.home), cfg, own_hermes=[str(p) for p in own], real=self._real)
@@ -604,6 +636,66 @@ class _Classifier:
         except Exception:  # an unclear answer: fail closed (the directory alone travels)
             return True
 
+    def ignored_below(self, directory: str, root: str) -> bool:
+        """``directory`` lies strictly below the work-tree root ``root`` and git ignores it there (R36 for evidence,
+        L3-F26): a path there is no part of that repository. Asked once per directory; beyond ``MAX_GIT_PROBES``
+        directories the answer is "ignored" (fail closed: the path stays a single extra)."""
+        if self.flav.parts(directory) == self.flav.parts(root) or not self.flav.under(directory, root):
+            return False
+        found = self._ignored.get(directory)
+        if found is None:
+            if len(self._ignored) >= MAX_GIT_PROBES:
+                return True
+            found = self._ignored[directory] = self.ignored(directory)
+        return found
+
+    def placeholder_only(self, directory: str) -> bool:
+        """R36, second form (R2-M3): git carries nothing from ``directory`` but placeholders (``PLACEHOLDER_NAMES``,
+        ``tmp/*`` with ``!tmp/.gitkeep``) while it holds other entries — the work there is ignored. Asked through the
+        probe's ``carried_files`` (additive; a probe without it, an error or an unclear answer leaves the old rule)."""
+        ask = getattr(self.git, "carried_files", None)
+        if not callable(ask):
+            return False
+        try:
+            carried = ask(directory, MAX_CARRIED_PROBE)
+        except Exception:  # an unclear answer: the old rule (R36a) decides
+            return False
+        if not isinstance(carried, (tuple, list)) or len(carried) >= MAX_CARRIED_PROBE:
+            return False
+        kept: set[str] = set()
+        for rel in carried:
+            comps = [c for c in str(rel).replace("\\", "/").split("/") if c] if isinstance(rel, str) else []
+            if not comps or comps[-1] not in PLACEHOLDER_NAMES:
+                return False
+            kept.add(comps[0])
+        try:
+            names = self.fs.listdir(directory)
+        except (OSError, ValueError):
+            return False
+        return any(name not in kept for name in names)
+
+    def nested(self, root: str) -> list[str]:
+        """The untracked clones inside the work tree ``root`` (H15, R2-M2) — git's own list (the probe's
+        ``nested_repos``, the one the pack step leaves out), realpaths strictly below ``root``, at most
+        ``MAX_NESTED_REPOS``; empty for a probe without it or an unclear answer."""
+        ask = getattr(self.git, "nested_repos", None)
+        if not callable(ask):
+            return []
+        try:
+            found = ask(root)
+        except Exception:  # an unclear answer: nothing named here, the pack step still leaves clones out
+            return []
+        out: list[str] = []
+        for path in found if isinstance(found, (tuple, list)) else ():
+            if not isinstance(path, str) or not path:
+                continue
+            real = self._real(path if self.flav.isabs(path) else self.flav.join(root, path))
+            if real not in out and self.flav.under(real, root) and self.flav.parts(real) != self.flav.parts(root):
+                out.append(real)
+            if len(out) >= MAX_NESTED_REPOS:
+                break
+        return out
+
     def tracked(self, directory: str) -> bool | None:
         """Whether ``directory`` holds files the work tree around it tracks (R36a): the probe's ``True``/``False``;
         an exception or any other answer is unknown (None) — the plan then asks."""
@@ -683,9 +775,13 @@ def collect(
         if top is not None and cls.home_like(top):
             top = None
         head = [CWD_REASON]
-        if top is not None and flav.parts(top) != flav.parts(real_cwd) and cls.ignored(real_cwd):
-            enclosing, top = top, None
-            head.append(IGNORED_REASON)
+        if top is not None and flav.parts(top) != flav.parts(real_cwd):
+            if cls.ignored(real_cwd):
+                enclosing, top = top, None
+                head.append(IGNORED_REASON)
+            elif cls.placeholder_only(real_cwd):  # R2-M3: ``tmp/*`` + ``!tmp/.gitkeep`` is a scratch folder too
+                enclosing, top = top, None
+                head.append(CONTENT_IGNORED_REASON)
         if top is not None:
             root = top
             flat = cls.flat_reason(root)
@@ -754,11 +850,15 @@ def collect(
             continue
         owner = next((r for r in repo_roots if flav.under(real, r)), None)
         exportable = cls.exportable(real)
-        if owner is None and exportable:
-            probe_dir = real if cls.is_dir(real) else flav.parent(real)
+        probe_dir = real if cls.is_dir(real) else flav.parent(real)
+        if owner is not None and cls.ignored_below(probe_dir, owner):
+            owner = None  # L3-F26: a path git ignores is no part of the repository — the path itself
+        elif owner is None and exportable:
             top = cls.toplevel(probe_dir)
             if top is not None and enclosing is not None and covering is not None and flav.under(covering, top):
                 top = None  # R36: a repository around a cwd it ignores never comes back; its files are single extras
+            if top is not None and cls.ignored_below(probe_dir, top):
+                top = None  # L3-F26 (R36 for mentions): an ignored path never makes its repository a candidate
             if top is not None and not cls.home_like(top) and not (covering and flav.under(top, covering)):
                 owner = top
                 repo_roots.append(top)
@@ -776,6 +876,18 @@ def collect(
         if item is None:
             item = items[real] = _Item(kind, real, Origin.TRANSCRIPT, ev.weight)
         item.note("", ev.weight, ev.tools)
+
+    # R2-M2 (H15): every untracked clone inside a git item stays here, also one the transcript never touched — a
+    # candidate with ``INNER_REPO_REASON`` (no evidence: weight mention), which the plan names and asks about (k)
+    git_items = [i for i in items.values() if i.kind is ItemKind.GIT_REPO and INNER_REPO_REASON not in i.head]
+    for owner_item in git_items:
+        if owner_item.origin is Origin.CWD and covering is None:
+            continue  # a home-like primary never covers anything (M35): nothing of it travels
+        for inner in cls.nested(owner_item.path):
+            if inner not in items:
+                items[inner] = _Item(
+                    ItemKind.GIT_REPO, inner, Origin.TRANSCRIPT, Weight.MENTION, head=[INNER_REPO_REASON]
+                )
 
     out = [
         Candidate(kind=i.kind, path=i.path, weight=i.weight, reasons=i.reasons(), origin=i.origin)

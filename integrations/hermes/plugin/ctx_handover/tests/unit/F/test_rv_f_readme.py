@@ -73,9 +73,11 @@ def test_rv_f_r33a_host_isolation_named_exactly():
     assert "reachable only through `hermes serve`" in host, host
     assert "the gateway's own listener does not serve them" in host, host
     assert "`hermes serve` forwards the ctx_handover routes there" in host
-    yolo = host.split("`--yolo`", 1)[1].split(". ", 2)
-    assert "`--yolo`" in host and "cannot see" in host, host
-    assert "does not apply" in " ".join(yolo) and "`allow_remote_continue` off" in " ".join(yolo), yolo
+    # r3-f (H2 rest, REVIEW-2 §1/§2): the ``--yolo`` limit holds under every isolation, so it is its own Limits point
+    # now ("Continuation and approvals", ``test_r3_f_h2.py``) instead of a sentence inside this paragraph
+    yolo = _bullet(_limits(), "**Continuation and approvals.**")
+    assert "--yolo" not in host and "`--yolo`" in yolo, (host, yolo)
+    assert "the continuation is not refused" in yolo and "leave `allow_remote_continue` off" in yolo, yolo
     assert "`hermes serve`" in commands.HOST_ISOLATION_DETAIL and "own listener" in commands.HOST_ISOLATION_DETAIL
 
 
@@ -98,7 +100,9 @@ def test_rv_f_bot_chat_exception_of_mark_4():
 
     Red before the fix: no Bot Chat sentence."""
     lock_section = _section("## What the lock on the source guarantees", "## Set up")
-    assert "*Bot Chat*" in lock_section and "keeps its title" in lock_section, lock_section
+    # r3-f (M9, REVIEW-2 §4): "keeps its title" was wrong — archiving releases the name (real SessionDB, title None
+    # while handed over; ``test_r3_f_m9.py``); the sentence now says so
+    assert "*Bot Chat*" in lock_section and "loses its title while it is handed over" in lock_section, lock_section
     assert "`Bot Chat (before handover)`" in lock_section
     assert "(before handover)" in inspect.getsource(lock)
 
@@ -117,7 +121,9 @@ def test_rv_f_m33_writes_name_return_trip_and_local_choice():
     assert "the folder it came from (return trip" in row and "`--dest`/`--map` typed here" in row, row
     assert "the denylist under **Rights** applies to every destination" in row, row
     rights = _section("**Rights:**", "**Unredacted:**")
-    assert "and a returning repository in the folder this machine handed it away from" in rights, rights
+    # r3-f (M33 rest, REVIEW-2 §5): Rights also names the third ``recorded`` case (an earlier delivery of the same
+    # peer), so the list is no longer "… and a returning repository"; ``test_r3_f_disclosure.py`` binds all three
+    assert "a returning repository in the folder this machine handed it away from" in rights, rights
 
 
 def test_rv_f_k0_target_denylist_named_from_policy():
@@ -318,7 +324,9 @@ def test_rv_f_m34_env_reads_disclosed():
 
     reads = _section("**Reads:**", "**Writes:**")
     assert f"`{crypto.IDENTITY_ENV}` through `get_secret`" in reads, reads
-    assert "the profile `.env` file itself only when `get_secret` does not return it" in reads
+    # r3-f (M34 rest, REVIEW-2 §5): the ``.env`` is also read when ``get_secret`` returns a stale key (g7 probe
+    # ``test_g7_identity_env.py``); the old wording "only when `get_secret` does not return it" was wrong
+    assert "the profile `.env` file itself only when `get_secret` returns no key or one that does not match" in reads
     assert "whether the provider of the session's model has a key here" in reads
     usable = inspect.getsource(hostcompat.provider_usable)
     assert "read_secret(var)" in usable and "read_env_fresh(var)" in usable

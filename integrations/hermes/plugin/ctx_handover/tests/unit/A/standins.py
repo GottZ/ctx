@@ -527,7 +527,20 @@ class WorkspaceTxn:
 
     fail: ClassVar[dict[str, BaseException]] = {}  # step name -> exception raised by forward/inverse
 
-    def __init__(self, job_id, staging, git, store, journal, *, cfg=None, rules=None, now=None, cancelled=None):
+    def __init__(
+        self,
+        job_id,
+        staging,
+        git,
+        store,
+        journal,
+        *,
+        cfg=None,
+        rules=None,
+        now=None,
+        cancelled=None,
+        workspace_root=None,
+    ):
         self.job_id, self.staging, self.store, self.journal = job_id, Path(staging), store, journal
         self.items: dict[str, dict] = {}
 
