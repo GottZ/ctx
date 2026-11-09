@@ -1,0 +1,705 @@
+"""The in-process source participant (layer L6, stdlib only; INTERFACES §4.5, DESIGN §6–§9, §7).
+
+``LocalSource`` implements ``SourceAPI`` on the machine where the session lives — called directly by a local
+conductor (push, export) or through the registry by a remote one (pull, offer claim). It composes the session
+(B), planning (D) and workspace (E) subsystems in the order of DESIGN §3.2/§7:
+
+* ``start_plan`` — collector + optional refinement + agent suggestions, **no lock** [BX M9]; the busy probe is
+  read-only.
+* ``lock`` — busy probe, turn lease + compression lock (``lock.acquire``), revision compared with the plan's.
+* ``start_export`` / ``start_pack`` — capsule with revision bracket; pack of the confirmed final plan. A
+  remote-driven source (``remote_driven``) restricts the remote final plan to what it releases itself
+  (``plan.restrict_to_releasable``, R18) and logs "pulled by <peer>" (SEC 5.8).
+* ``start_prepare`` — revision and work-tree re-check (``delta`` / ``stale_session`` / ``stale_worktree``), then the
+  primary lock while the leases are held (``lock.prepare``, p1–p7).
+* ``start_retire`` — only after the target's ACK; ``lock.retire`` releases the leases only after the ledger, the
+  veto rows and the workspace-map ``out`` rows are durable (R1, r1–r5).
+* ``start_release`` — undo everything of lock/prepare (abort path, I2).
+
+Its own working data (session info, holder, plan, capsule, pack states) is journaled on the job's ``source``
+row, so another process can continue (janitor, DESIGN §3.6). The B/D/E functions are reached through
+``ports`` (default: the real modules, imported lazily) so this class runs against stand-ins in layer 1.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import os
+import time
+from collections.abc import Callable, Iterator
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
+
+from . import CAPABILITIES_V1, PROTOCOL, WIRE_MAJOR, WIRE_MINOR
+from .contracts import JobContext
+from .errors import (
+    HandoverError,
+    InvalidState,
+    LeaseLost,
+    NotFound,
+    SessionBusy,
+    VerifyFailed,
+)
+from .ignore import IgnoreMatcher
+from .jsonutil import canonical_bytes, from_wire, sha256_hex, to_wire
+from .ledger import STALE_OWNER_S, Ledger, private_dir, process_owner
+from .model import (
+    CapsuleInfo,
+    CommitAck,
+    EnvFacts,
+    FinalPlan,
+    Hello,
+    HermesPaths,
+    HostFacts,
+    Include,
+    ItemKind,
+    Limits,
+    MapRow,
+    OpStatus,
+    PackInfo,
+    ParticipantStatus,
+    PreparedInfo,
+    PrepareOutcome,
+    PrepareResult,
+    Refinement,
+    ResourcePlan,
+    Role,
+    SessionInfo,
+    SessionRef,
+)
+from .ops import OpRunner
+from .policy import PolicyConfig, check_source_file
+
+_ROW_PAGE = 2000
+
+
+def default_source_ports() -> SimpleNamespace:
+    """The real B/D/E/F modules (layer 2 wiring); imported lazily so the module loads without them."""
+    from . import (
+        collector,
+        ctxrecords,
+        envfacts,
+        filetree,
+        gitops,
+        gitpack,
+        hermes_files,
+        lock,
+        plan,
+        refine,
+        session_export,
+    )
+
+    return SimpleNamespace(
+        collector=collector,
+        ctxrecords=ctxrecords,
+        envfacts=envfacts,
+        filetree=filetree,
+        gitops=gitops,
+        gitpack=gitpack,
+        hermes_files=hermes_files,
+        lock=lock,
+        plan=plan,
+        refine=refine,
+        session_export=session_export,
+    )
+
+
+def _digest(*parts: object) -> str:
+    return sha256_hex(canonical_bytes([p if not dataclasses.is_dataclass(p) else to_wire(p) for p in parts]))
+
+
+class LocalSource:
+    """``SourceAPI`` over this machine's session store and working directories (see module docstring)."""
+
+    def __init__(
+        self,
+        *,
+        ledger: Ledger,
+        store,
+        db_factory: Callable,
+        hermes: HermesPaths,
+        host: HostFacts,
+        config: dict,
+        ops: OpRunner,
+        git,
+        calling_session: str | None,
+        session_key: str | None,
+        side_question: Callable[[str], str | None] | None,
+        llm: Callable | None,
+        read_secret: Callable,
+        redact: Callable[[str], str],
+        state_db: Path,
+        remote_driven: bool,
+        policy: PolicyConfig,
+        ports: SimpleNamespace | None = None,
+        clock: Callable[[], float] | None = None,
+        data_dir: Path | None = None,
+        instance_name: str = "",
+        peer_name: str | None = None,
+    ) -> None:
+        self.ledger = ledger
+        self.store = store
+        self.db_factory = db_factory
+        self.hermes = hermes
+        self.host = host
+        self.config = config
+        self.ops = ops
+        self.git = git
+        self.calling_session = calling_session
+        self.session_key = session_key
+        self.side_question = side_question
+        self.llm = llm
+        self.read_secret = read_secret
+        self.redact = redact
+        self.state_db = Path(state_db)
+        self.remote_driven = remote_driven
+        self.policy = policy
+        self._ports = ports
+        self._clock = clock or time.time
+        self.data_dir = Path(data_dir) if data_dir else Path(hermes.home) / "plugin-data" / "ctx_handover"
+        self.instance_name = instance_name or host.profile
+        self.peer_name = peer_name
+
+    # -- plumbing ------------------------------------------------------------------------------------------------
+    @property
+    def ports(self) -> SimpleNamespace:
+        if self._ports is None:
+            self._ports = default_source_ports()
+        return self._ports
+
+    def _ensure_job(self, job: JobContext) -> None:
+        if self.ledger.job(job.job_id, Role.SOURCE) is None:
+            peer_id = job.peer.peer_id if job.peer is not None else None
+            self.ledger.create_job(job.job_id, Role.SOURCE, job.mode, peer_id, {"role": "source", "local": True})
+
+    def _epoch(self, job: JobContext) -> int:
+        self._ensure_job(job)
+        epoch = self.ledger.claim_owner(job.job_id, Role.SOURCE, process_owner(), STALE_OWNER_S)
+        if epoch is None:
+            raise InvalidState("another process is working on this job", reason="busy_elsewhere", retryable=True)
+        return epoch
+
+    def _ctx(self, job_id: str) -> dict:
+        out: dict = {}
+        for ev in self.ledger.events(job_id, Role.SOURCE):
+            data = ev["data"] or {}
+            if isinstance(data.get("ctx"), dict):
+                out.update(data["ctx"])
+        return out
+
+    def _remember(self, job: JobContext, **values: object) -> None:
+        enc = {k: (to_wire(v) if dataclasses.is_dataclass(v) else v) for k, v in values.items()}
+        self.ledger.event(job.job_id, Role.SOURCE, "ctx", {"ctx": enc}, epoch=self._epoch(job))
+
+    def _sync_state(self, job: JobContext) -> None:
+        src = self.ledger.source_state(job.job_id)
+        if src is not None:
+            row = self.ledger.job(job.job_id, Role.SOURCE)
+            if row is not None and row["state"] != src["state"]:
+                self.ledger.transition(job.job_id, Role.SOURCE, "*", src["state"], {}, epoch=self._epoch(job))
+
+    def _info(self, job: JobContext) -> SessionInfo:
+        raw = self._ctx(job.job_id).get("info")
+        if raw is None:
+            raise InvalidState("the source of this job is not locked", reason="not_locked")
+        return from_wire(SessionInfo, raw)
+
+    def _start(self, job: JobContext, op: str, digest: str, fn, *, restart_failed: bool = False) -> OpStatus:
+        self._epoch(job)
+        return self.ops.start(job.job_id, op, _digest(op, digest), fn, restart_failed=restart_failed)
+
+    def _cfg(self, job: JobContext) -> PolicyConfig:
+        return self.policy
+
+    def _rows(self, db, info: SessionInfo) -> Iterator[dict]:
+        """Every stored row of the lineage in storage order, paged (bounded memory per page)."""
+        for sid in info.lineage_ids:
+            after = None
+            while True:
+                page = db.get_messages(
+                    sid, include_inactive=True, include_compacted=True, limit=_ROW_PAGE, after_id=after
+                )
+                if not page:
+                    break
+                yield from page
+                after = page[-1].get("id")
+                if len(page) < _ROW_PAGE or after is None:
+                    break
+
+    # -- SourceAPI -----------------------------------------------------------------------------------------------
+    def hello(self) -> Hello:
+        caps = set(CAPABILITIES_V1) - {"operator.v1"}
+        if self.llm is None:
+            caps.discard("refine.llm")
+        if self.side_question is None:
+            caps.discard("refine.side_question")
+        return Hello(
+            protocol=PROTOCOL,
+            majors=(WIRE_MAJOR,),
+            minor=WIRE_MINOR,
+            instance_id=self.ledger.instance_id(),
+            listener_pubkey="",
+            plugin_version=self.host.plugin_version,
+            hermes_version=self.host.hermes_version,
+            name=self.instance_name,
+            capabilities=frozenset(caps),
+            limits=Limits(),
+        )
+
+    def list_sessions(self, limit: int, query: str | None, include_archived: bool) -> list[dict]:
+        """The pull picker (route #4): newest sessions of this profile with at least one message."""
+        db = self.db_factory()
+        rows = db.list_sessions_rich(
+            limit=int(limit),
+            order_by_last_active=True,
+            include_archived=bool(include_archived),
+            search_query=query or None,
+            min_message_count=1,
+        )
+        out = []
+        for r in rows:
+            sid = r.get("id")
+            handover = self.ledger.source_by_session(sid) if sid else None
+            out.append(
+                {
+                    "id": sid,
+                    "root_id": r.get("root_id") or sid,
+                    "title": r.get("title"),
+                    "started_at": r.get("started_at"),
+                    "last_active_at": r.get("last_active") or r.get("last_active_at"),
+                    "message_count": r.get("message_count"),
+                    "cwd": r.get("cwd"),
+                    "model": r.get("model"),
+                    "busy": False,
+                    "handover_state": handover["state"] if handover else None,
+                }
+            )
+        return out
+
+    def facts(self, job: JobContext) -> EnvFacts:
+        self._ensure_job(job)
+        return self.ports.envfacts.probe(
+            instance_name=self.instance_name,
+            options=job.options,
+            host=self.host,
+            config=self.config,
+            capabilities=self.hello().capabilities,
+        )
+
+    def _stored_refinement(self, ref: SessionRef) -> Refinement | None:
+        """The refinement an offer stored when it was created in the session's own gateway (DESIGN §8.3, R9)."""
+        if not ref.offer_id:
+            return None
+        offer = self.ledger.offer_get(ref.offer_id)
+        if offer is None or not isinstance(offer.get("refinement"), dict):
+            return None
+        return from_wire(Refinement, offer["refinement"])
+
+    def start_plan(self, job: JobContext, target_facts: EnvFacts, session_ref: SessionRef) -> OpStatus:
+        def fn(report) -> dict:
+            p = self.ports
+            db = self.db_factory()
+            info = p.session_export.describe(db, session_ref, calling_session=self.calling_session)
+            rows = list(self._rows(db, info))
+            session_row = db.get_session(info.tip_id) or {}
+            cfg = self._cfg(job)
+            probe = p.gitops.GitProbe(self.git)
+            candidates = p.collector.collect(rows, session_row, self.hermes, cfg, probe, source_os=os.name)
+            approx = sum(len(str(r.get("content") or "")) for r in rows) // 4
+            refinement, refine_report = p.refine.refine(
+                candidates,
+                target_facts,
+                approx_tokens=approx,
+                options=job.options,
+                side_question=self.side_question,
+                llm=self.llm,
+                stored=self._stored_refinement(session_ref),
+            )
+            busy = p.lock.probe_busy(db, self.state_db, info, Path(self.hermes.home), self.session_key)
+            suggestions = self.ledger.suggestions(info.tip_id, self._clock())
+            if info.root_id != info.tip_id:
+                suggestions = suggestions + self.ledger.suggestions(info.root_id, self._clock())
+            plan = p.plan.build_plan(
+                job.job_id,
+                tuple(info.revision),
+                candidates,
+                refinement,
+                refine_report,
+                job.options.hints,
+                cfg,
+                lambda root: probe.info(root, cfg),
+                busy,
+                suggestions,
+                job.options,
+                approx,
+            )
+            self._remember(job, plan=plan, planned_info=info)
+            return to_wire(plan)
+
+        digest = _digest(job.job_id, session_ref, target_facts, job.options.refine, job.options.hints)
+        return self._start(job, "plan", digest, fn)
+
+    def lock(self, job: JobContext, session_ref: SessionRef, plan_revision: tuple) -> SessionInfo:
+        """Busy probe, leases, revision check (DESIGN §7.2). Idempotent per job (re-acquires a lost lease)."""
+        p = self.ports
+        self._epoch(job)
+        db = self.db_factory()
+        info = p.session_export.describe(db, session_ref, calling_session=self.calling_session)
+        busy = p.lock.probe_busy(db, self.state_db, info, Path(self.hermes.home), self.session_key)
+        if busy.busy and not job.options.force:
+            raise SessionBusy(
+                "A turn is running in this session. Wait for it, or use --wait to hand over as soon as it finishes.",
+                reasons=list(busy.reasons),
+            )
+        ttl, _refresh = p.lock.lease_timing(job.options)
+        holder = p.lock.acquire(db, self.ledger, info, job.job_id, ttl_s=ttl, wait_s=0, cancelled=job.cancelled)
+        info = dataclasses.replace(info, revision_changed=tuple(info.revision) != tuple(plan_revision))
+        self._remember(job, info=info, holder=holder, busy_warnings=list(busy.warnings))
+        self._sync_state(job)
+        return info
+
+    def heartbeat(self, job: JobContext) -> None:
+        ctx = self._ctx(job.job_id)
+        src = self.ledger.source_state(job.job_id)
+        if src is None or src["state"] not in ("locking", "locked", "preparing", "prepared", "retiring"):
+            if src is not None and src["state"] in ("released", "reclaimed", "suspended"):
+                raise LeaseLost(f"the source is {src['state']}")
+            return
+        info = from_wire(SessionInfo, ctx["info"])
+        ttl, _refresh = self.ports.lock.lease_timing(job.options)
+        refreshed = self.ports.lock.refresh(self.db_factory(), info, ctx.get("holder"), ttl_s=ttl)
+        if not refreshed and src["state"] in ("locking", "locked", "preparing"):
+            raise LeaseLost("the session's turn lease was lost")
+
+    def suspend(self, job: JobContext) -> None:
+        """Idle remote conductor (DESIGN §7.3): give up the leases, keep the export/pack caches."""
+        src = self.ledger.source_state(job.job_id)
+        if src is None or src["state"] not in ("locking", "locked"):
+            return
+        info = self._info(job)
+        self.ports.lock.suspend(self.db_factory(), self.ledger, info, src.get("holder"), job.job_id)
+        self._sync_state(job)
+
+    def start_export(self, job: JobContext) -> OpStatus:
+        info = self._info(job)
+        db = self.db_factory()
+        revision = tuple(db.conversation_revision(info.tip_id, include_ancestors=True))
+
+        def fn(report) -> dict:
+            source_meta = {
+                "instance_id": self.ledger.instance_id(),
+                "profile": self.host.profile,
+                "hermes_home": self.hermes.home,
+                "document_cache": self.hermes.document_cache,
+                "hermes_version": self.host.hermes_version,
+            }
+            capsule = self.ports.session_export.export_capsule(
+                self.db_factory(),
+                info,
+                job_id=job.job_id,
+                store=self.store,
+                source_meta=source_meta,
+                hermes=self.hermes,
+                cancelled=job.cancelled,
+            )
+            self.ledger.job_object(job.job_id, capsule.capsule_id)
+            self._remember(job, capsule=capsule, exported=capsule)
+            return to_wire(capsule)
+
+        return self._start(job, "export", _digest(revision), fn)
+
+    def _git_states(self, final: FinalPlan) -> dict:
+        tmp = self.data_dir / "staging" / final.plan.job_id / "recheck"
+        states = {}
+        for item in final.plan.items:
+            if item.include is Include.YES and item.kind is ItemKind.GIT_REPO:
+                private_dir(tmp)
+                st = self.ports.gitops.worktree_state(self.git, item.source_path, (), tmp)
+                states[item.item_id] = [st.head, st.index_tree, st.worktree_tree]
+        return states
+
+    def start_pack(self, job: JobContext, final_plan: FinalPlan) -> OpStatus:
+        p = self.ports
+        own_raw = self._ctx(job.job_id).get("plan")
+        if self.remote_driven:
+            if own_raw is None:
+                raise InvalidState("plan before pack", reason="no_plan")
+            final_plan = p.plan.restrict_to_releasable(final_plan, from_wire(ResourcePlan, own_raw), self._cfg(job))
+            peer_id = job.peer.peer_id if job.peer is not None else "unknown"
+            items = [i.item_id for i in final_plan.plan.items if i.include is Include.YES]
+            self.ledger.pull_log_put(job.job_id, peer_id, items)
+        doc = to_wire(final_plan)
+        doc.pop("plan_id", None)
+        plan_id = p.plan.plan_id(doc)
+        final_plan = dataclasses.replace(final_plan, plan_id=plan_id)
+        states = self._git_states(final_plan)
+
+        def fn(report) -> dict:
+            return self._pack(job, final_plan, report)
+
+        return self._start(job, "pack", _digest(plan_id, states), fn)
+
+    def _pack(self, job: JobContext, final: FinalPlan, report) -> dict:
+        p = self.ports
+        cfg = self._cfg(job)
+        decisions = {d.item_id: d for d in final.decisions}
+        workdir = self.data_dir / "staging" / job.job_id / "git"
+        items, states = [], {}
+        for item in final.plan.items:
+            if item.include is not Include.YES:
+                continue
+            if job.cancelled():
+                from .errors import Cancelled
+
+                raise Cancelled("cancelled")
+            decision = decisions.get(item.item_id)
+            if item.kind is ItemKind.GIT_REPO:
+                wd = private_dir(workdir / item.item_id)
+                res = p.gitpack.pack_repo(
+                    self.git,
+                    item.source_path,
+                    wd,
+                    basis_candidates=tuple(decision.git_have) if decision else (),
+                    cfg=cfg,
+                    store=self.store,
+                    created_at=self._clock(),
+                    force=job.options.force,
+                    cancelled=job.cancelled,
+                )
+                st = res.state
+                states[item.item_id] = {"git": to_wire(st), "branch": st.branch}
+                items.append(
+                    {
+                        "item_id": item.item_id,
+                        "kind": str(ItemKind.GIT_REPO),
+                        "pack": res.pack_object,
+                        "object_format": res.object_format,
+                        "basis": list(res.basis),
+                        "head": res.head,
+                        "index_commit": res.index_commit,
+                        "worktree_commit": res.worktree_commit,
+                        "index_tree": st.index_tree,
+                        "worktree_tree": st.worktree_tree,
+                        "refs": dict(res.refs),
+                        "stash": list(res.stash),
+                        "remotes": list(res.remotes),
+                        "upstreams": dict(res.upstreams),
+                        "excluded": [to_wire(x) for x in res.excluded],
+                        "skipped": [to_wire(x) for x in res.skipped],
+                        "exclude_pathspecs": list(st.exclude_pathspecs),
+                        "lfs_objects": None,
+                    }
+                )
+            elif item.kind in (ItemKind.FILE_TREE, ItemKind.EXTRA_DIR):
+                root = Path(item.source_path)
+                matcher = IgnoreMatcher.for_tree(root, job.options.extra_ignore)
+                entries, skipped = p.filetree.scan(root, matcher, cfg, job.cancelled)
+                manifest = p.filetree.pack_tree(entries, root, self.store, job.cancelled)
+                fp = p.filetree.fingerprint(root, entries)
+                states[item.item_id] = {"tree": fp}
+                items.append(
+                    {
+                        "item_id": item.item_id,
+                        "kind": str(item.kind),
+                        "manifest": manifest,
+                        "entries": len(entries),
+                        "bytes": sum(int(getattr(e, "size", 0) or 0) for e in entries),
+                        "skipped": [to_wire(x) for x in skipped],
+                    }
+                )
+            else:  # EXTRA_FILE, HERMES_FILE
+                path = Path(item.source_path)
+                verdict = check_source_file(path, cfg, explicit=item.include is Include.YES)
+                if not verdict.allowed:
+                    items.append(
+                        {"item_id": item.item_id, "kind": str(item.kind), "object": None, "skipped": verdict.reason}
+                    )
+                    continue
+                with open(path, "rb") as fh:
+                    m = self.store.put_stream(fh, media="application/octet-stream", cancelled=job.cancelled)
+                entry = {
+                    "item_id": item.item_id,
+                    "kind": str(item.kind),
+                    "object": m.object_id,
+                    "size": m.size,
+                    "mode": "0755" if os.access(path, os.X_OK) else "0644",
+                }
+                if item.kind is ItemKind.HERMES_FILE:
+                    entry["rel"] = (
+                        os.path.relpath(path, self.hermes.home)
+                        if str(path).startswith(str(self.hermes.home))
+                        else path.name
+                    )
+                items.append(entry)
+        doc = {"kind": "ctxh.pack", "v": 1, "job_id": job.job_id, "final_plan_id": final.plan_id, "items": items}
+        m = self.store.put_bytes(canonical_bytes(doc), "application/json")
+        self.ledger.job_object(job.job_id, m.object_id)
+        pack = PackInfo(pack_id=m.object_id, size=m.size)
+        self._remember(
+            job,
+            pack=pack,
+            pack_states=states,
+            final_plan=final,
+            pack_time=self._clock(),
+            git_states=self._git_states(final),
+        )
+        return to_wire(pack)
+
+    def start_prepare(self, job: JobContext, prepared: PreparedInfo) -> OpStatus:
+        ctx = self._ctx(job.job_id)
+        capsule_id = (ctx.get("exported") or {}).get("capsule_id")
+        pack_id = (ctx.get("pack") or {}).get("pack_id")
+        info = self._info(job)
+        revision = tuple(self.db_factory().conversation_revision(info.tip_id, include_ancestors=True))
+
+        def fn(report) -> dict:
+            return to_wire(self._prepare(job, prepared))
+
+        return self._start(job, "prepare", _digest(prepared, capsule_id, pack_id, revision), fn)
+
+    def _prepare(self, job: JobContext, prepared: PreparedInfo) -> PrepareResult:
+        p = self.ports
+        ctx = self._ctx(job.job_id)
+        src = self.ledger.source_state(job.job_id)
+        if src is not None and src["state"] == "prepared":
+            return PrepareResult(outcome=PrepareOutcome.OK)
+        if src is None or src["state"] not in ("locked", "preparing"):
+            raise InvalidState(
+                f"the source is {src['state'] if src else 'not locked'}",
+                reason="state",
+                state=src["state"] if src else None,
+            )
+        info = from_wire(SessionInfo, ctx["info"])
+        exported = from_wire(CapsuleInfo, ctx["exported"])
+        db = self.db_factory()
+        outcome, new_rows = p.session_export.check_revision(db, info, exported)
+        outcome = PrepareOutcome(outcome)
+        if outcome is PrepareOutcome.DELTA:
+            delta = p.session_export.export_delta(db, info, exported, new_rows, store=self.store)
+            self.ledger.job_object(job.job_id, delta.delta_id)
+            baseline = dataclasses.replace(
+                exported,
+                h_all=delta.h_all,
+                h_rows=delta.h_rows,
+                h_model=delta.h_model,
+                revision=delta.revision,
+                rows=exported.rows + delta.rows,
+            )
+            self._remember(job, exported=baseline, deltas=int(ctx.get("deltas") or 0) + 1)
+            return PrepareResult(outcome=PrepareOutcome.DELTA, delta=delta)
+        if outcome is PrepareOutcome.STALE_SESSION:
+            return PrepareResult(outcome=PrepareOutcome.STALE_SESSION, detail="session changed")
+        final = from_wire(FinalPlan, ctx["final_plan"]) if ctx.get("final_plan") else None
+        if final is not None and self._git_states(final) != (ctx.get("git_states") or {}):
+            return PrepareResult(outcome=PrepareOutcome.STALE_WORKTREE, detail="work tree changed since packing")
+        if (prepared.h_all, prepared.h_rows) != (exported.h_all, exported.h_rows):
+            raise VerifyFailed("the target's import does not match the source transcript", which="h_all")
+        peer = self.peer_name or (job.peer.name if job.peer is not None else "")
+        p.lock.prepare(db, self.ledger, info, job.job_id, peer, datetime.fromtimestamp(self._clock()))
+        self._sync_state(job)
+        return PrepareResult(outcome=PrepareOutcome.OK)
+
+    def _out_rows(self, job: JobContext, ack: CommitAck) -> list[MapRow]:
+        """r3: workspace-map ``out`` rows incl. the outgoing git state / tree fingerprint per item (R4, §9.8)."""
+        ctx = self._ctx(job.job_id)
+        final = from_wire(FinalPlan, ctx["final_plan"]) if ctx.get("final_plan") else None
+        states = ctx.get("pack_states") or {}
+        peer_id = job.peer.peer_id if job.peer is not None else (ack.root_id and "bundle") or "local"
+        dests = {item_id: dest for item_id, dest, _mode in ack.dests}
+        rows = []
+        for item in final.plan.items if final else ():
+            if item.item_id in dests and item.kind in (ItemKind.GIT_REPO, ItemKind.FILE_TREE, ItemKind.EXTRA_DIR):
+                rows.append(
+                    MapRow(
+                        local_path=item.source_path,
+                        peer_id=peer_id,
+                        remote_path=dests[item.item_id],
+                        direction="out",
+                        repo_identity=(item.git.root_commits[0] if item.git and item.git.root_commits else None),
+                        state=states.get(item.item_id),
+                        last_job_id=job.job_id,
+                    )
+                )
+        return rows
+
+    def start_retire(self, job: JobContext, ack: CommitAck) -> OpStatus:
+        def fn(report) -> dict:
+            src = self.ledger.source_state(job.job_id)
+            if src is None:
+                raise NotFound("no source handover for this job")
+            if src["state"] in ("released", "reclaimed"):
+                raise InvalidState(f"the source is {src['state']}", reason="state", state=src["state"])
+            info = self._info(job)
+            holder = self._ctx(job.job_id).get("holder")
+            self.ports.lock.retire(
+                self.db_factory(), self.ledger, info, holder, job.job_id, ack, self._out_rows(job, ack)
+            )
+            self._sync_state(job)
+            self._record("departure", job, ack)
+            return {"state": self.ledger.source_state(job.job_id)["state"]}
+
+        return self._start(job, "retire", _digest(ack), fn, restart_failed=True)
+
+    def start_release(self, job: JobContext, reason: str) -> OpStatus:
+        def fn(report) -> dict:
+            src = self.ledger.source_state(job.job_id)
+            if src is None:
+                self._epoch(job)
+                row = self.ledger.job(job.job_id, Role.SOURCE)
+                if row is not None and row["state"] not in ("released",):
+                    self.ledger.transition(
+                        job.job_id, Role.SOURCE, "*", "released", {"reason": reason}, epoch=self._epoch(job)
+                    )
+                return {"state": "released"}
+            if src["state"] in ("retired", "exported"):
+                raise InvalidState(f"the source is {src['state']}", reason="state", state=src["state"])
+            if src["state"] not in ("released", "reclaimed"):
+                info = self._info(job)
+                self.ports.lock.release(self.db_factory(), self.ledger, info, src.get("holder"), job.job_id)
+            self._sync_state(job)
+            return {"state": self.ledger.source_state(job.job_id)["state"]}
+
+        self._ensure_job(job)
+        return self._start(job, "release", "release", fn, restart_failed=True)
+
+    def _record(self, kind: str, job: JobContext, ack: CommitAck) -> None:
+        try:
+            self.ports.ctxrecords.enqueue(
+                self.ledger,
+                kind,
+                {
+                    "job_id": job.job_id,
+                    "mode": str(job.mode),
+                    "peer": job.peer.name if job.peer else None,
+                    "ack": to_wire(ack),
+                },
+                redact=self.redact,
+            )
+        except HandoverError:
+            pass
+
+    def op_status(self, job: JobContext, op_id: str) -> OpStatus:
+        return self.ops.status(job.job_id, op_id)
+
+    def status(self, job: JobContext) -> ParticipantStatus:
+        row = self.ledger.job(job.job_id, Role.SOURCE)
+        if row is None:
+            raise NotFound(f"job {job.job_id} not found")
+        src = self.ledger.source_state(job.job_id)
+        ops = {}
+        for r in self.ledger.ops_for_job(job.job_id):
+            ops[r["op"]] = self.ops.status(job.job_id, r["op_id"])
+        notes = ("source_reclaimed",) if src and src["state"] == "reclaimed" else ()
+        return ParticipantStatus(
+            state=src["state"] if src else row["state"],
+            step="",
+            epoch=int(row["max_peer_epoch"]),
+            progress=None,
+            ops=ops,
+            last_error=row["last_error"],
+            notes=notes,
+        )
+
+    def blocks(self):
+        return self.store

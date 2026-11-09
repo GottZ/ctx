@@ -1,0 +1,415 @@
+"""Listener-side participants of remote-driven jobs (layer L7, stdlib only; INTERFACES §4.5, DESIGN §4.5, §7.3).
+
+The ``ParticipantRegistry`` sits between the HTTP server (cluster C) and the local participant APIs
+(``LocalSource``/``LocalTarget``). It owns the binding rules of DESIGN §4.5 [SEC 1.7]:
+
+* ``POST /jobs`` with ``role = source`` needs the peer right ``pull``, ``role = target`` needs ``push``; every
+  later call re-checks the job's role against the caller's rights.
+* Jobs are keyed by ``(peer_id, job_id)``: another peer gets ``not_found`` and cannot reuse the id.
+* Every job request carries the conductor's epoch; a lower epoch than the highest seen ⇒
+  ``invalid_state(stale_epoch)`` (DESIGN §3.1).
+* Offers are listed and claimed only by their own peer.
+* A remote conductor's options can only narrow: security settings (roots, limits, secrets) stay local
+  (``participant_options``; R18, R19).
+
+``sweep`` runs periodically in the listener process: it heartbeats the participant jobs this process owns,
+gives up the leases of a source whose conductor went quiet for ``participant_idle_timeout`` (``suspended``,
+DESIGN §7.3), expires target staging after ``staging_ttl`` (§3.5) and continues aborts left by a revocation.
+"""
+
+from __future__ import annotations
+
+import re
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import fields, replace
+
+from .contracts import JobContext, SourceAPI, TargetAPI
+from .errors import BadRequest, Forbidden, HandoverError, InvalidState, JobConflict, NotFound, RateLimited
+from .jsonutil import from_wire
+from .ledger import JOURNAL_KEEP_S, TERMINAL, Ledger, process_owner
+from .model import AuthContext, Mode, Options, ParticipantStatus, Peer, Progress, Right, Role, SessionRef
+
+MAX_JOBS_PER_PEER = 2
+MAX_JOBS = 4
+MAX_SESSIONS_LIST = 200
+CONTINUE_PROMPT_MAX = 2000
+_JOB_ID = re.compile(r"^[0-9A-Za-z_-]{1,64}$")
+
+_REMOTE_FIELDS = ("dest", "maps", "model", "force", "wait", "continue_prompt", "yes", "dry_run")
+"""Options a remote conductor may set for its job; everything else comes from the local settings."""
+
+_RELEASABLE_SOURCE = frozenset({"locking", "locked", "preparing", "suspended"})
+_TARGET_TTL_EXEMPT = frozenset({"committing", "committed", "aborted", "expired"})
+
+
+def participant_options(local: Options, remote: dict | None) -> Options:
+    """The job options a participant uses: its own settings, narrowed by what the remote conductor asked for.
+
+    A remote side never widens roots, limits or secret releases: ``export_roots``/``allow_roots``/sizes stay
+    local, ``hints.include_secret`` is dropped (R18), ``wait_timeout_s`` is capped at the local value, ``refine``
+    can only be switched off, the continuation prompt is capped at 2000 characters (DESIGN §11.5)."""
+    remote = dict(remote or {})
+    names = {f.name for f in fields(Options)}
+    picked: dict = {}
+    for key in _REMOTE_FIELDS:
+        if key in remote and key in names:
+            picked[key] = remote[key]
+    hints_in = remote.get("hints") if isinstance(remote.get("hints"), dict) else {}
+    hints = {k: v for k, v in hints_in.items() if k in ("include", "exclude", "dest_overrides", "no_workspace")}
+    decoded = from_wire(Options, {**picked, "hints": hints})
+    out = replace(
+        local,
+        **{k: getattr(decoded, k) for k in picked},
+        hints=replace(decoded.hints, include_secret=()),
+    )
+    if isinstance(remote.get("wait_timeout_s"), int) and not isinstance(remote.get("wait_timeout_s"), bool):
+        out = replace(out, wait_timeout_s=max(0, min(local.wait_timeout_s, int(remote["wait_timeout_s"]))))
+    if remote.get("refine") == "off":
+        out = replace(out, refine="off")
+    if out.continue_prompt is not None:
+        out = replace(out, continue_prompt=str(out.continue_prompt)[:CONTINUE_PROMPT_MAX])
+    return out
+
+
+class _NullReporter:
+    def progress(self, p: Progress) -> None:
+        pass
+
+    def info(self, text: str) -> None:
+        pass
+
+    def warn(self, text: str) -> None:
+        pass
+
+
+_NULL = _NullReporter()
+
+
+class ParticipantRegistry:
+    """Binds remote requests to local participant APIs (see module docstring)."""
+
+    def __init__(
+        self,
+        ledger: Ledger,
+        factory: Callable[[Role, Peer | None], SourceAPI | TargetAPI],
+        *,
+        clock: Callable[[], float] | None = None,
+        local_options: Options | Callable[[], Options] | None = None,
+        max_jobs_per_peer: int = MAX_JOBS_PER_PEER,
+        max_jobs: int = MAX_JOBS,
+        on_error: Callable[[str, BaseException], None] | None = None,
+    ) -> None:
+        self.ledger = ledger
+        self._factory = factory
+        self._clock = clock or time.time
+        self._local_options = local_options
+        self._max_per_peer = max_jobs_per_peer
+        self._max_jobs = max_jobs
+        self._on_error = on_error or (lambda where, exc: None)
+        self._last_compaction = 0.0
+
+    # -- helpers -------------------------------------------------------------------------------------------------
+    def _options(self) -> Options:
+        lo = self._local_options
+        if callable(lo):
+            return lo()
+        return lo or Options()
+
+    @staticmethod
+    def _peer(auth: AuthContext) -> Peer:
+        if auth.peer is None:
+            raise Forbidden("this route needs a paired peer")
+        return auth.peer
+
+    @staticmethod
+    def _right_for(role: Role) -> Right:
+        if role is Role.SOURCE:
+            return Right.PULL
+        if role is Role.TARGET:
+            return Right.PUSH
+        raise BadRequest("role must be source or target", field="role")
+
+    def _require(self, auth: AuthContext, right: Right) -> None:
+        if right not in auth.rights:
+            raise Forbidden(f"this device has no {right} right here", right=str(right))
+
+    def _context(self, row: dict, peer: Peer | None, epoch: int) -> JobContext:
+        params = row["params"] or {}
+        job_id = row["job_id"]
+        return JobContext(
+            job_id=job_id,
+            mode=Mode(row["mode"]),
+            peer=peer,
+            options=participant_options(self._options(), params.get("options")),
+            epoch=int(epoch),
+            reporter=_NULL,
+            cancelled=lambda: self._cancelled(job_id, Role(row["role"])),
+            created_at=float(row["created_at"]),
+        )
+
+    def _cancelled(self, job_id: str, role: Role) -> bool:
+        row = self.ledger.job(job_id, role)
+        return row is None or row["state"] in ("aborting", "aborted", "expired")
+
+    def _api(self, role: Role, peer: Peer | None):
+        return self._factory(role, peer)
+
+    def _row(self, auth: AuthContext, job_id: str, role: Role) -> dict:
+        peer = self._peer(auth)
+        row = self.ledger.job(job_id, role)
+        if row is None or row["peer_id"] != peer.peer_id:
+            raise NotFound(f"job {job_id} not found")
+        return row
+
+    def bind(self, auth: AuthContext, job_id: str, role: Role) -> tuple[SourceAPI | TargetAPI, JobContext]:
+        """Job bound to the calling peer, role right re-checked, epoch fenced; returns ``(api, job context)``."""
+        row = self._row(auth, job_id, role)
+        self._require(auth, self._right_for(role))
+        epoch = row["max_peer_epoch"]
+        if auth.epoch is not None:
+            epoch = self.ledger.peer_epoch(job_id, role, int(auth.epoch))
+        self.ledger.touch_job(job_id, role)
+        return self._api(role, auth.peer), self._context(row, auth.peer, epoch)
+
+    def _find(self, auth: AuthContext, job_id: str) -> Role:
+        peer = self._peer(auth)
+        for role in (Role.SOURCE, Role.TARGET):
+            row = self.ledger.job(job_id, role)
+            if row is not None and row["peer_id"] == peer.peer_id:
+                return role
+        raise NotFound(f"job {job_id} not found")
+
+    # -- routes ------------------------------------------------------------------------------------------------------
+    def open(self, auth: AuthContext, body: dict) -> dict:
+        """``POST /jobs`` (route #7): create or re-open the participant job (idempotent per params)."""
+        peer = self._peer(auth)
+        job_id = str(body.get("job_id") or "")
+        if not _JOB_ID.match(job_id):
+            raise BadRequest("invalid job id", field="job_id")
+        try:
+            role = Role(str(body.get("role")))
+            mode = Mode(str(body.get("mode")))
+            epoch = int(body.get("epoch"))
+        except (TypeError, ValueError):
+            raise BadRequest("role, mode and epoch are required", field="role") from None
+        self._require(auth, self._right_for(role))
+        existing = self.ledger.job(job_id, role)
+        if existing is not None and existing["peer_id"] != peer.peer_id:
+            raise JobConflict("job id not available")
+        if existing is None:
+            self._check_caps(peer.peer_id)
+        params = {
+            "role": str(role),
+            "mode": str(mode),
+            "conductor": dict(body.get("conductor") or {}),
+            "session_ref": body.get("session_ref"),
+            "options": dict(body.get("options") or {}),
+        }
+        self.ledger.create_job(job_id, role, mode, peer.peer_id, params)
+        epoch = self.ledger.peer_epoch(job_id, role, epoch)
+        row = self.ledger.job(job_id, role)
+        job = self._context(row, peer, epoch)
+        if role is Role.TARGET:
+            self._api(role, peer).open_job(job)
+        self.ledger.touch_job(job_id, role)
+        row = self.ledger.job(job_id, role)
+        return {"job_id": job_id, "state": row["state"], "epoch": epoch}
+
+    def _check_caps(self, peer_id: str) -> None:
+        active = [j for j in self.ledger.jobs(active=True, limit=10_000) if j["role"] != str(Role.CONDUCTOR)]
+        if sum(1 for j in active if j["peer_id"] == peer_id) >= self._max_per_peer:
+            raise RateLimited("too many concurrent handovers for this device", reason="concurrent_jobs")
+        if len(active) >= self._max_jobs:
+            raise RateLimited("too many concurrent handovers on this gateway", reason="concurrent_jobs")
+
+    def get(self, auth: AuthContext, job_id: str, role: Role) -> SourceAPI | TargetAPI:
+        """The participant API of a job (bound to the calling peer, role right re-checked, epoch fenced)."""
+        return self.bind(auth, job_id, role)[0]
+
+    def context(self, auth: AuthContext, job_id: str, role: Role) -> JobContext:
+        """The ``JobContext`` to pass to the API of that job (same checks as ``get``)."""
+        return self.bind(auth, job_id, role)[1]
+
+    def list_sessions(self, auth: AuthContext, body: dict) -> dict:
+        """Route #4: the session picker of a pull (needs ``pull``; titles of non-archived sessions, §8.7)."""
+        self._require(auth, Right.PULL)
+        try:
+            limit = int(body.get("limit") or 20)
+        except (TypeError, ValueError):
+            raise BadRequest("limit must be an integer", field="limit") from None
+        limit = max(1, min(MAX_SESSIONS_LIST, limit))
+        query = body.get("query")
+        query = str(query)[:200] if query else None
+        api = self._api(Role.SOURCE, auth.peer)
+        return {"sessions": api.list_sessions(limit, query, bool(body.get("include_archived")))}
+
+    def offers(self, auth: AuthContext) -> dict:
+        """Route #5: offers of the calling peer only."""
+        peer = self._peer(auth)
+        self._require(auth, Right.PULL)
+        rows = self.ledger.offers_for(peer.peer_id, self._clock())
+        return {
+            "offers": [
+                {
+                    "offer_id": r["offer_id"],
+                    "session": r["session_id"],
+                    "created_at": r["created_at"],
+                    "expires_at": r["expires_at"],
+                    "note": r["note"],
+                    "has_refinement": r["refinement"] is not None,
+                }
+                for r in rows
+            ]
+        }
+
+    def claim(self, auth: AuthContext, offer_id: str, job_id: str) -> dict:
+        """Route #6: claim an offer of the calling peer for ``job_id`` (never auto-claimed, O6)."""
+        peer = self._peer(auth)
+        self._require(auth, Right.PULL)
+        if not _JOB_ID.match(str(job_id or "")):
+            raise BadRequest("invalid job id", field="job_id")
+        row = self.ledger.offer_claim(str(offer_id), peer.peer_id, str(job_id))
+        out: dict = {"session_ref": {"id": row["session_id"], "latest": False, "offer_id": row["offer_id"]}}
+        if row["refinement"] is not None:
+            out["refinement"] = row["refinement"]
+        return out
+
+    def touch(self, job_id: str) -> None:
+        """Record a request for the job (idle timeout, DESIGN §7.3)."""
+        for role in (Role.SOURCE, Role.TARGET):
+            if self.ledger.job(job_id, role) is not None:
+                self.ledger.touch_job(job_id, role)
+
+    def heartbeat(self, auth: AuthContext, job_id: str, body: dict) -> dict:
+        """Route #9: keep a source's leases alive while the conductor works (DESIGN §7.3)."""
+        role = self._find(auth, job_id)
+        auth = replace(auth, epoch=body.get("epoch", auth.epoch))
+        api, job = self.bind(auth, job_id, role)
+        if role is Role.SOURCE:
+            api.heartbeat(job)
+        row = self.ledger.job(job_id, role)
+        return {"state": row["state"]}
+
+    def cancel(self, auth: AuthContext, job_id: str, body: dict) -> dict:
+        """Route #10: only the conductor's peer, current epoch; a prepared source or committing target refuse."""
+        role = self._find(auth, job_id)
+        auth = replace(auth, epoch=body.get("epoch", auth.epoch))
+        api, job = self.bind(auth, job_id, role)
+        reason = "cancelled: " + str(body.get("reason") or "conductor")[:200]
+        if role is Role.SOURCE:
+            src = self.ledger.source_state(job_id)
+            state = src["state"] if src else "open"
+            if state not in _RELEASABLE_SOURCE and state != "open":
+                raise InvalidState(f"the source is {state}", reason="state", state=state)
+            api.start_release(job, reason)
+        else:
+            api.abort(job, reason)
+        return {"state": self.ledger.job(job_id, role)["state"]}
+
+    def status(self, auth: AuthContext, job_id: str, body: dict) -> ParticipantStatus:
+        """Route #8; ``note = "source_reclaimed"`` tells a target that the source took the session back (§7.7)."""
+        role = self._find(auth, job_id)
+        auth = replace(auth, epoch=body.get("epoch", auth.epoch))
+        api, job = self.bind(auth, job_id, role)
+        if role is Role.TARGET and body.get("note") == "source_reclaimed":
+            self.ledger.arrival_source_reclaimed(job_id)
+        return api.status(job)
+
+    # -- maintenance -------------------------------------------------------------------------------------------------
+    def _internal_job(self, row: dict) -> tuple[SourceAPI | TargetAPI, JobContext]:
+        peer = self.ledger.peer(row["peer_id"]) if row["peer_id"] else None
+        return self._api(Role(row["role"]), peer), self._context(row, peer, row["max_peer_epoch"])
+
+    def sweep(self, now: float) -> None:
+        """Heartbeat owned jobs, idle source leases, staging TTL, pending aborts, journal compaction."""
+        opts = self._options()
+        me = process_owner()
+        for row in self.ledger.jobs(active=True, limit=10_000):
+            role = Role(row["role"])
+            if role is Role.CONDUCTOR:
+                continue
+            try:
+                if row["owner"] == me:
+                    self.ledger.heartbeat(row["job_id"], role, me, row["owner_epoch"])
+                if role is Role.SOURCE:
+                    src = self.ledger.source_state(row["job_id"])
+                    if (
+                        src is not None
+                        and src["state"] in ("locking", "locked")
+                        and row["updated_at"] < now - float(opts.participant_idle_timeout_s)
+                    ):
+                        api, job = self._internal_job(row)
+                        api.suspend(job)
+                    elif row["state"] == "aborting":
+                        api, job = self._internal_job(row)
+                        api.start_release(job, "aborting")
+                else:
+                    state = row["state"]
+                    if state == "aborting":
+                        api, job = self._internal_job(row)
+                        api.abort(job, "aborting")
+                    elif state not in _TARGET_TTL_EXEMPT and row["created_at"] < now - float(opts.staging_ttl_s):
+                        api, job = self._internal_job(row)
+                        api.abort(job, "expired")
+            except HandoverError as exc:
+                self._on_error(f"sweep {row['job_id']}", exc)
+        if now - self._last_compaction > 3600:
+            self._last_compaction = now
+            try:
+                self.ledger.compact_terminal(JOURNAL_KEEP_S)
+            except HandoverError as exc:
+                self._on_error("compaction", exc)
+
+    def recover(self, row: dict) -> str:
+        """Janitor action for a participant job whose owning process died (DESIGN §3.6); returns what was done.
+
+        source ``locked``/``preparing`` ⇒ release (undo the journaled prepare steps) · ``prepared`` ⇒ nothing
+        (fail-closed until the conductor or the user resolves it) · ``retiring``/``releasing``/``reclaiming`` ⇒
+        continue in their direction · target ``committing`` ⇒ continue the commit op · other target states are
+        handled by the conductor (interrupted ops are restarted) and by ``sweep`` (staging TTL)."""
+        role = Role(row["role"])
+        api, job = self._internal_job(row)
+        if role is Role.SOURCE:
+            src = self.ledger.source_state(row["job_id"])
+            state = src["state"] if src else row["state"]
+            if state in ("locking", "locked", "preparing", "releasing"):
+                api.start_release(job, "owner_died")
+                return "released"
+            if state == "retiring" and src and src.get("ack"):
+                from .model import CommitAck
+
+                api.start_retire(job, from_wire(CommitAck, src["ack"]))
+                return "retire_continued"
+            return "kept"
+        if row["state"] == "committing":
+            recover = getattr(api, "recover", None)
+            if callable(recover):
+                recover(job)
+                return "commit_continued"
+        return "kept"
+
+    def abort_jobs(self, job_ids: Sequence[str], reason: str) -> None:
+        """After ``revoke_peer`` (DESIGN §12.5): targets discard their staging, sources not yet prepared are
+        released; a prepared source follows the in-doubt rule and stays locked."""
+        for job_id in job_ids:
+            for role in (Role.TARGET, Role.SOURCE):
+                row = self.ledger.job(job_id, role)
+                if row is None or row["state"] in TERMINAL[role]:
+                    continue
+                try:
+                    api, job = self._internal_job(row)
+                    if role is Role.TARGET:
+                        api.abort(job, reason)
+                    else:
+                        src = self.ledger.source_state(job_id)
+                        if src is None or src["state"] in _RELEASABLE_SOURCE:
+                            api.start_release(job, reason)
+                except HandoverError as exc:
+                    self._on_error(f"abort {job_id}", exc)
+
+
+def session_ref_of(row: dict) -> SessionRef:
+    """The ``SessionRef`` a participant job was opened with (``None`` fields when absent)."""
+    raw = (row.get("params") or {}).get("session_ref") or {}
+    return from_wire(SessionRef, raw) if isinstance(raw, dict) else SessionRef()
