@@ -1,7 +1,7 @@
 ---
 name: ctx-memory
 description: "Use the ctx knowledge store as long-term memory and evidence layer: query as a question, search to browse, get by id, verify before acting, persist one durable fact per block."
-version: 0.6.2
+version: 0.7.0
 author: ctx (GottZ/ctx)
 license: MPL-2.0
 metadata:

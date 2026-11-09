@@ -94,13 +94,14 @@ the checkpoint-only versions before 0.6.0. Mirror, facts and digests are skipped
 `cron`, `flush` and `subagent` agent contexts; the checkpoint chain is written in
 every context (labelled via `metadata.agent_context`).
 
-**Transport.** Over the default MCP dispatch, retrieval-only recall uses the ctx
-`search` tool (lexical hybrid: fulltext + trigram) because the MCP `query` tool
-always runs the LLM synthesis. `transport: rest` (plus `CTX_BASE_URL`/`CTX_KEY` in
-the profile's `.env`, or `rest_base_url` in the section) uses `/api/query` with
-`synthesize: false` for recall — the semantic hybrid without the LLM step — and
-enables the CLI's read/write commands. A server-side `synthesize` flag on the MCP
-query tool is the planned way to close that gap.
+**Transport.** Over the default MCP dispatch, retrieval-only recall calls the ctx
+`query` tool with `synthesize: false, include_content: true` — the semantic hybrid
+without the LLM step, in one call, the same retrieval `transport: rest` gets from
+`/api/query`. A ctx server from before that flag (GottZ/ctx #183) refuses the two
+arguments; the plugin then recalls through the `search` tool (lexical hybrid:
+fulltext + trigram) after one refused call, until the provider connects again.
+`transport: rest` (plus `CTX_BASE_URL`/`CTX_KEY` in the profile's `.env`, or
+`rest_base_url` in the section) enables the CLI's read/write commands.
 
 **Two tool surfaces.** With `memory: true` the model sees this plugin's `ctx_*`
 tools next to the `mcp__ctx__*` tools of the same server entry. Nothing breaks;
@@ -152,9 +153,9 @@ ctx get <manifest-id>    # → source part IDs, parent manifest chain
 ## What it does on your machine
 
 - **Network:** only the MCP calls Hermes makes to the ctx server you configured
-  (`search`/`get` to find the session's checkpoint head and for recall, `store` for
-  the blocks, `query` for
-  `ctx_query(synthesize=true)`). With `transport: rest`, HTTPS calls of the
+  (`search`/`get` to find the session's checkpoint head, `query` for recall and
+  `ctx_query`, `search` for recall on a server without `synthesize: false`, `store`
+  for the blocks). With `transport: rest`, HTTPS calls of the
   plugin's own stdlib client to `CTX_BASE_URL` instead. No third-party services,
   no telemetry.
 - **Data sent:** direct user/assistant text of the turns about to be compacted;

@@ -443,6 +443,12 @@ and manifest are deliberately small so routine recall stays cheap.
   `prefetch()` stay on the client they started with, and a binding change drops the
   manifest-lineage cache (under `transport: mcp` the binding is the profile home plus
   the MCP server name, so a backend switch under the same name is not detected).
+- 0.7.0 (uses ctx #183 when the server has it): `transport: mcp` recalls through the
+  `query` tool with `synthesize: false, include_content: true` — the semantic hybrid
+  `transport: rest` already used, without the LLM step — instead of the lexical
+  `search` tool; as on REST, recalled rows carry no `type`. A server from before #183
+  refuses the two arguments; the client then recalls through `search` as before, after
+  one refused call per client (calls overlapping that first one use `search`).
 
 ## Licensing
 

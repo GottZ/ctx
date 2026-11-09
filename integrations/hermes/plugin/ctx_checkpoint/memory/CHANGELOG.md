@@ -6,6 +6,39 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.7.0] — 2026-11-09
+
+`transport: mcp` recalls with the semantic hybrid of `/api/query`, as `transport: rest`
+does, when the ctx server's MCP `query` tool takes `synthesize: false` (GottZ/ctx #183).
+Older servers keep the lexical `search` recall.
+
+### Changed
+- **Retrieval-only recall over MCP uses `query` without synthesis.**
+  `McpClient.query(synthesize=False)` (prefetch recall, `ctx_query` without synthesis)
+  called the lexical `search` tool, because the MCP `query` tool always ran the LLM
+  synthesis. It now calls `query` with `synthesize: false` and, when content is asked
+  for, `include_content: true`, passing `limit` and `types_exclude` as before. The tool's
+  JSON answer (`confidence`, `sources[]` with `id`, `title`, `category`, `score`,
+  `superseded_by`, `untrusted`, `content`) maps to the dictionary `CtxClient.query`
+  returns for `/api/query` (`success`, `answer: ""`, `confidence`, `sources`); the
+  provider and the agent tools read it unchanged. Rows that are not objects are dropped;
+  an empty or `null` list is `[]`.
+- **What MCP users see differently.** As on REST, the recalled rows carry no `type`:
+  the client-side `prefetch_types_exclude` check has nothing to match on this path (the
+  server applies `types_exclude`), and `ctx_query` without synthesis no longer lists a
+  `type` per source. Query errors (rate limit, quota, an answer that is not the sources
+  document) now reach `ctx_query` as errors, as on REST; the prefetch falls back to
+  `search` for that call, as it does on REST.
+- **Fallback for servers from before #183.** Their `query` tool refuses the two
+  arguments at schema validation (`unexpected additional properties ["synthesize"
+  "include_content"]`), which Hermes hands back as `{"error": …}`. The client serves
+  that call by `search` and keeps to `search` for later retrieval-only calls. Only one
+  call asks: retrieval-only calls made while it is in flight use `search` too, so an
+  older server sees one refused call per client, not one per overlapping prefetch,
+  warm-up or `ctx_query` (each refusal would count against Hermes' per-server error
+  breaker). Any other error leaves the question open for the next call. A new client
+  (the provider connecting again) asks once more. `query(synthesize=True)` is unchanged.
+
 ## [ctx_checkpoint 0.6.2] — 2026-11-01
 
 `transport: rest`: the ctx key no longer leaves the client in error texts, follows no
