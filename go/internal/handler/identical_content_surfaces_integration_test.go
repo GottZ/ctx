@@ -13,7 +13,7 @@
 //
 // Run with:
 //
-//	go test -tags=integration -p 1 ./internal/handler/ -run 'Test(MCPStore|Ingest)IdenticalContentWritesTagsMetadata' -count=1 -v
+//	go test -tags=integration -p 1 ./internal/handler/ -run 'Test(MCPStoreIdenticalContentWritesTagsMetadata|IngestIdenticalContent)' -count=1 -v
 package handler
 
 import (
@@ -357,6 +357,71 @@ func TestIngestIdenticalContentChunkMode(t *testing.T) {
 		}
 		if rows != 1 {
 			t.Errorf("live rows after second-source changed-fields ingest = %d, want 1", rows)
+		}
+	})
+
+	// #182: the slot check names InsertChunk's own slot by its arbiter. An
+	// upper-case spelling of the same source id is still this slot, so the
+	// changed fields are written instead of answering skipped.
+	t.Run("uppercase_source_id_writes_own_slot", func(t *testing.T) {
+		sourceID := seedSource(t, pool, "/i182/chunk-uppercase.md", "private")
+		const (
+			title   = "i182 chunk uppercase source id"
+			content = "i182 chunk content re-ingested under an upper-case source id"
+		)
+		seed := postIdenticalChunk(t, h, keyCtx, sourceID, title, content,
+			[]string{"chunk-seed"}, map[string]any{"run": "seed"})
+		if seed["status"] != "inserted" {
+			t.Fatalf("seed result = %v, want inserted", seed)
+		}
+		seededID, _ := seed["id"].(string)
+
+		upper := strings.ToUpper(sourceID)
+		if upper == sourceID {
+			t.Fatalf("source id %q has no letters to upper-case", sourceID)
+		}
+		wantMetadata := map[string]any{"run": "upper"}
+		again := postIdenticalChunk(t, h, keyCtx, upper, title, content, []string{"chunk-upper"}, wantMetadata)
+		if again["status"] != "inserted" || again["id"] != seededID {
+			t.Errorf("upper-case source id reingest = %v, want inserted id %s, not skipped", again, seededID)
+		}
+		got := readIdenticalChunkState(t, pool, seededID)
+		if !slices.Equal(got.tags, []string{"chunk-upper"}) {
+			t.Errorf("stored tags = %v, want [chunk-upper]", got.tags)
+		}
+		if !reflect.DeepEqual(got.metadata, wantMetadata) {
+			t.Errorf("stored metadata = %v, want %v", got.metadata, wantMetadata)
+		}
+	})
+
+	// #182: a row in this (source_id, chunk_index) slot whose lifecycle_state
+	// left 'chunk' is outside InsertChunk's arbiter; the insert could not land
+	// on it and would hit uq_context_category_title_scope, so it answers skipped.
+	t.Run("non_chunk_lifecycle_in_slot_skips_not_fails", func(t *testing.T) {
+		sourceID := seedSource(t, pool, "/i182/chunk-snapshot.md", "private")
+		const (
+			title   = "i182 chunk slot left the chunk lifecycle"
+			content = "i182 chunk content whose row became a snapshot"
+		)
+		seed := postIdenticalChunk(t, h, keyCtx, sourceID, title, content,
+			[]string{"chunk-seed"}, map[string]any{"run": "seed"})
+		if seed["status"] != "inserted" {
+			t.Fatalf("seed result = %v, want inserted", seed)
+		}
+		seededID, _ := seed["id"].(string)
+		if _, err := pool.Exec(context.Background(),
+			`UPDATE context_blocks SET lifecycle_state = 'snapshot' WHERE id = $1::uuid`, seededID); err != nil {
+			t.Fatalf("move the seeded chunk to snapshot: %v", err)
+		}
+		seeded := readIdenticalChunkState(t, pool, seededID)
+
+		again := postIdenticalChunk(t, h, keyCtx, sourceID, title, content,
+			[]string{"chunk-other"}, map[string]any{"run": "other"})
+		if again["status"] != "skipped" || again["id"] != seededID {
+			t.Errorf("reingest into a snapshot slot = %v, want skipped id %s, not failed", again, seededID)
+		}
+		if got := readIdenticalChunkState(t, pool, seededID); !reflect.DeepEqual(got, seeded) {
+			t.Errorf("reingest into a snapshot slot changed the row:\nseeded: %+v\n     got: %+v", seeded, got)
 		}
 	})
 
