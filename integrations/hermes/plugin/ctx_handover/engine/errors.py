@@ -6,8 +6,10 @@ travel in the error envelope ``{"error": {"code", "message", "retryable", "detai
 
 ``from_wire`` trusts only the *code* of a peer's envelope and only for wire codes: an unknown or client-only
 code becomes a plain ``internal`` error carrying ``details["peer_code"]``, so a peer can never make this
-process believe in a local condition such as ``in_doubt`` or ``lease_lost``. Message and details from a peer
-are capped.
+process believe in a local condition such as ``in_doubt`` or ``lease_lost``. The envelope's boolean
+``retryable`` is kept on the rebuilt error (contract V38: a participant that restarted answers with a known code
+such as ``invalid_state`` and ``retryable: true``, and the conductor repeats the step instead of aborting); without
+it the class's own flag applies. Message and details from a peer are capped.
 """
 
 from __future__ import annotations
@@ -85,8 +87,9 @@ class HandoverError(Exception):
     def from_wire(cls, status: int, body: dict) -> HandoverError:
         """Rebuild an error from a peer's envelope (or from a bare HTTP status when the body is not one).
 
-        Known wire codes map to their class with the class's own ``retryable``; anything else becomes an
-        ``internal`` error with ``details["peer_code"]`` and the peer's ``retryable`` flag when it is a bool.
+        Known wire codes map to their class; anything else becomes an ``internal`` error with
+        ``details["peer_code"]``. Either way the envelope's ``retryable`` is kept when it is a bool (contract V38),
+        otherwise the class's own flag applies.
         """
         env = body.get("error") if isinstance(body, dict) else None
         if not isinstance(env, dict) or not isinstance(env.get("code"), str):
@@ -106,9 +109,10 @@ class HandoverError(Exception):
             details = dict(raw_details) if size <= PEER_TEXT_CAP else {"truncated": True}
         klass = HandoverError._registry.get(code)
         if klass is not None and klass.wire:
-            return klass(message, details=details)
-        details["peer_code"] = code
-        err = HandoverError(message, details=details)
+            err = klass(message, details=details)
+        else:
+            details["peer_code"] = code
+            err = HandoverError(message, details=details)
         flag = env.get("retryable")
         if isinstance(flag, bool):
             err.retryable = flag

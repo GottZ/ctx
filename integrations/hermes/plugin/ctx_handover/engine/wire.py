@@ -60,6 +60,9 @@ RETRY_AFTER_CAP = 300
 BACKOFF_MIN, BACKOFF_MAX = 0.5, 60.0
 SLOW_S, FAST_S = 20.0, 5.0
 MAX_JSON_RESPONSE = 16 * MIB
+PROBE_SIZES_MIB = (1, 2, 4, 8)
+"""Request body sizes in MiB ``probe_gate(measure_limit=True)`` sends (``doctor --measure``, contract V27); the
+largest is the body limit a proxy in front of the peer should allow."""
 MAX_IDS = 4096
 
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
@@ -606,8 +609,8 @@ class WireClient:
     # -- diagnostics -------------------------------------------------------------------------------------------
     def probe_gate(self, *, measure_limit: bool = False) -> dict:
         """``doctor``: which layer answers (gate, plugin, proxy) and, with ``measure_limit``, the largest request
-        body (1, 2, 4, 8 MiB) that reaches the plugin — measured with signed requests to an unknown job, which the
-        plugin reads completely and answers ``not_found``.
+        body (``PROBE_SIZES_MIB``) that reaches the plugin — measured with signed requests to an unknown job, which
+        the plugin reads completely and answers ``not_found``.
 
         Keys: ``gate`` (``ok``/``rejected``/``unreachable``), ``plugin``, ``signed``, ``error`` (an error code),
         ``body_limit`` (bytes, with ``measure_limit``) and the summary ``ok`` (True, None = works with a warning,
@@ -630,7 +633,7 @@ class WireClient:
         report.update(gate="ok", plugin=True, signed=self._hello is not None)
         if measure_limit and self._hello is not None:
             passed = 0
-            for size in (1 * MIB, 2 * MIB, 4 * MIB, 8 * MIB):
+            for size in (int(mib) * MIB for mib in PROBE_SIZES_MIB):
                 try:
                     self._send(
                         "PUT",
@@ -669,15 +672,15 @@ class WireClient:
             remedy = f"pair again with {name} if its key changed (/handover pair)"
         else:
             ok, detail, remedy = True, "dashboard gate passed, ctx_handover answered with a valid signature", None
-            limit = report.get("body_limit")
-            if isinstance(limit, int) and limit < 8 * MIB:
+            limit, wanted = report.get("body_limit"), max(PROBE_SIZES_MIB)
+            if isinstance(limit, int) and limit < wanted * MIB:
                 ok = None
                 detail += (
                     f"; a proxy limits request bodies to {limit // MIB} MiB"
                     if limit
                     else "; a proxy limits request bodies below 1 MiB"
                 )
-                remedy = "raise the body limit of the proxy in front of it to 8 MiB (transfers stay smaller)"
+                remedy = f"raise the body limit of the proxy in front of it to {wanted} MiB (transfers stay smaller)"
         report.update(ok=ok, detail=detail, remedy=remedy)
         return report
 

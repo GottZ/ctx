@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from ctx_handover.engine import envfacts
+from ctx_handover.engine import envfacts, session_import
 from ctx_handover.engine.model import Options, ToolInfo
 from ctx_handover.tests.fakes.planning_fake import env_facts, host_facts
 
@@ -102,8 +102,9 @@ def test_envfacts_host_facts_as_parameters(tmp_path, monkeypatch, user_home):
     for name in ("hermes_constants", "hermes_cli", "hermes_cli.config", "agent", "agent.secret_scope", "hermes_state"):
         monkeypatch.setitem(sys.modules, name, None)
     host = _host(tmp_path, is_wsl=True, model="qwen3", provider="llamacpp")
+    config = {"model": {"default": "qwen3", "provider": "llamacpp"}}  # HostFacts.provider comes from this section
     facts = envfacts.probe(
-        instance_name="laptop", options=Options(), host=host, config={}, capabilities=frozenset({"x"})
+        instance_name="laptop", options=Options(), host=host, config=config, capabilities=frozenset({"x"})
     )
     assert facts.host is host
     assert facts.capabilities == frozenset({"x"})
@@ -204,30 +205,70 @@ def test_envfacts_platforms_without_shell(tmp_path):
     assert facts.os_name == "Arch Linux (container)" and facts.os_version == "6.12.1"
 
 
-@pytest.mark.parametrize(
-    ("provider", "base_url", "expected"),
-    [
-        ("llamacpp", None, True),
-        ("llama.cpp", "", True),
-        ("ollama", None, True),
-        ("lmstudio", "", True),
-        ("openrouter", None, False),
-        ("custom", "http://127.0.0.1:8080/v1", True),
-        ("custom", "http://localhost:1234", True),
-        ("custom", "http://[::1]:8000/v1", True),
-        ("custom", "http://192.168.1.5:11434", True),
-        ("custom", "http://10.0.0.2", True),
-        ("custom", "http://172.16.0.1", True),
-        ("custom", "http://172.32.0.1", False),
-        ("custom", "http://100.64.1.2", False),
-        ("ollama", "https://ollama.com/v1", False),
-        ("custom", "https://api.example.com/v1", False),
-        ("custom", "not a url", False),
-        (None, None, False),
-    ],
-)
-def test_envfacts_offline_route(provider, base_url, expected):
-    assert envfacts.is_offline_route(provider, base_url) is expected
+def _route(provider=None, base_url=None, **extra) -> dict:
+    model = {k: v for k, v in (("default", "m"), ("provider", provider), ("base_url", base_url)) if v is not None}
+    return {"model": model, **extra}
+
+
+OFFLINE_CASES: dict[str, tuple[dict, bool]] = {
+    "llamacpp": (_route("llamacpp"), True),
+    "llama.cpp": (_route("llama.cpp", ""), True),
+    "llama-cpp": (_route("llama-cpp"), True),
+    "ollama-spelled-loosely": (_route(" Ollama "), True),
+    "lmstudio": (_route("lmstudio", ""), True),
+    "local-kind-with-a-remote-url": (_route("ollama", "https://ollama.com/v1"), True),
+    "public-provider": (_route("openrouter"), False),
+    "loopback": (_route("custom", "http://127.0.0.1:8080/v1"), True),
+    "localhost": (_route("custom", "http://localhost:1234"), True),
+    "dot-localhost": (_route("custom", "http://gpu.localhost:8080/v1"), True),
+    "ipv6-loopback": (_route("custom", "http://[::1]:8000/v1"), True),
+    "rfc1918-192": (_route("custom", "http://192.168.1.5:11434"), True),
+    "rfc1918-10": (_route("custom", "http://10.0.0.2"), True),
+    "rfc1918-172": (_route("custom", "http://172.16.0.1"), True),
+    "not-rfc1918-172": (_route("custom", "http://172.32.0.1"), False),
+    "tailnet": (_route("custom", "http://100.64.1.2"), False),
+    "ipv6-ula": (_route("custom", "http://[fd00::5]:8000"), True),
+    "link-local": (_route("custom", "http://169.254.10.1"), True),
+    "public-url": (_route("custom", "https://api.example.com/v1"), False),
+    "not-a-url": (_route("custom", "not a url"), False),
+    "named-on-the-lan": (_route("lan", providers={"lan": {"base_url": "http://192.168.1.5:8000/v1"}}), True),
+    "named-api-base": (_route("lan", providers={"lan": {"api_base": "http://localhost:9000"}}), True),
+    "named-entry-decides": (
+        _route("lan", "http://127.0.0.1:1", providers={"lan": {"base_url": "https://api.example.com"}}),
+        False,
+    ),
+    "named-entry-without-url": (_route("lan", "http://127.0.0.1:1", providers={"lan": {}}), False),
+    "providers-not-a-table": (_route("custom", "http://127.0.0.1:1", providers=["custom"]), True),
+    "no-provider-local-url": (_route(None, "http://127.0.0.1:8080/v1"), False),
+    "provider-not-a-string": (_route(7, "http://127.0.0.1:8080/v1"), False),
+    "model-as-a-string": ({"model": "qwen3:32b"}, False),
+    "no-model": ({}, False),
+}
+
+
+@pytest.mark.parametrize("name", sorted(OFFLINE_CASES))
+def test_envfacts_offline_rule_is_session_imports(name, tmp_path, monkeypatch, user_home):
+    """★ V08 (contract X04): the offline capability a host reports for its main route is B's one rule,
+    ``session_import.offline_capable({}, config)``, on every case — the expected column pins both, so the mirror in
+    ``envfacts`` (same layer L4, no import possible) cannot drift from it. The host's own ``HostFacts.provider``
+    (``ollama`` here) never stands in for a missing ``model.provider``.
+
+    Mutants (red proof, ``lab/L2-redproof/g-d``): ``HostFacts.provider`` as fallback for a missing provider (the old
+    second rule) ⇒ ``no-provider-local-url``/``model-as-a-string``/``no-model`` report True; ``api_base`` of a named
+    provider ignored ⇒ ``named-api-base`` reports False."""
+    config, expected = OFFLINE_CASES[name]
+    empty = tmp_path / "no-tools"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))  # nothing to probe; only the route matters
+    host = _host(tmp_path, provider="ollama", model="m")
+    facts = envfacts.probe(instance_name="x", options=Options(), host=host, config=config, scratch_dir=tmp_path)
+    assert session_import.offline_capable({}, config) is expected
+    assert facts.offline_capable is expected
+
+
+def test_envfacts_local_providers_are_session_imports():
+    assert envfacts.LOCAL_PROVIDERS == session_import.LOCAL_PROVIDERS
+    assert not hasattr(envfacts, "is_offline_route")  # V08: the second rule is gone
 
 
 def test_envfacts_offline_from_config(tmp_path, user_home):

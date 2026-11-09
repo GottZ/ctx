@@ -15,11 +15,11 @@ the signed path, SEC 1.4) and the body as an async chunk stream. Processing orde
 
 Handlers delegate to the participant registry (cluster A, ``participant.ParticipantRegistry``), which owns every
 job rule — binding to the peer, role ↔ right, epoch fencing, the concurrent-job caps and routes #8–#10 (contract
-X18); the server itself owns no job state and no job logic. It calls: ``open``, ``get``, ``context``,
-``status``, ``heartbeat``, ``cancel``, ``list_sessions``, ``offers``, ``claim``, ``abort_jobs``. Ledger methods
-used: ``meta_get`` (identity rotation), ``peers``, ``pairing_pending``, ``inbound_peer``, ``nonce_seen``,
-``touch_peer``, ``revoke_peer``, ``tx``, ``job_object``, ``job_objects`` and the pairing methods through
-``pairing``. Pulled objects are exactly ``ledger.job_objects(job_id)`` and their blocks (R18, contract X13).
+X18); the server itself owns no job state and no job logic. It calls: ``open``, ``bind`` (once per job route,
+contract V17), ``status``, ``heartbeat``, ``cancel``, ``list_sessions``, ``offers``, ``claim``, ``abort_jobs``.
+Ledger methods used: ``meta_get`` (identity rotation), ``peers``, ``pairing_pending``, ``inbound_peer``,
+``nonce_seen``, ``touch_peer``, ``revoke_peer``, ``tx``, ``job_object``, ``job_objects`` and the pairing methods
+through ``pairing``. Pulled objects are exactly ``ledger.job_objects(job_id)`` and their blocks (R18, contract X13).
 
 The identity is re-read when another process of the profile rotated it (``identity rotate`` writes a new
 ``identity_pubkey``): the next request signs with the new key, or — when it cannot be loaded — the listener
@@ -28,11 +28,12 @@ answers like a missing plugin; it never signs with a retired key.
 ``settings`` keys (all optional): ``inbound`` (auto|on|off), ``name``, ``max_request_mb`` (8),
 ``max_json_bytes`` (4 MiB), ``operator_api`` (False), ``hosted`` (False), ``capabilities`` (restricting
 iterable), ``plugin_version``, ``hermes_version``, ``rate_per_s`` (20), ``rate_burst`` (60),
-``pair_failures_per_hour`` (30). The composition root passes the plugin settings as loaded from ``config.yaml``
-plus ``hosted``/``plugin_version``/``hermes_version``, so values are normalised here: a bare YAML ``off``/``on``
-arrives as a boolean and means ``off``/``on``, an unknown ``inbound`` value keeps inbound closed, a YAML boolean
-word for ``operator_api``/``hosted`` counts like the boolean, and a missing, non-numeric or non-positive number
-falls back to its default.
+``pair_failures_per_hour`` (30). Schema keys (``inbound``, ``max_request_mb``) and the flags ``operator_api``/
+``hosted`` are read through the one settings reader ``settings`` (contract V22): a bare YAML ``off``/``on`` arrives
+as a boolean and means ``off``/``on``, a YAML boolean word for ``operator_api``/``hosted`` counts like the boolean,
+a rejected ``max_request_mb`` is its schema default. An ``inbound`` value the reader does not recognise keeps
+inbound closed here (the reader's default ``auto`` would answer paired peers). The listener's own knobs outside the
+schema fall back to their default when missing, non-numeric or not positive.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
 from . import CAPABILITIES_V1, PROTOCOL, WIRE_MAJOR, WIRE_MINOR
+from . import settings as settings_mod
 from .blocks import BLOCK_SIZE, MEDIA_BLOCKS, ZSTD_AVAILABLE, decode_frames, encode_frame, verify_manifest
 from .crypto import H_RESP_SIG, META_PUBKEY, Identity, request_string, response_string, verify
 from .errors import (
@@ -423,28 +425,23 @@ def _text(value: object) -> str:
     return "" if value is None else str(value)
 
 
-_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
-
-
 def _flag(value: object) -> bool:
-    """A boolean setting: YAML booleans as they are, and the YAML 1.1 words (``yes``/``on``/``true``/``1``) when a
-    loader or the CLI hands them over as text; everything else — ``off``, ``no``, ``"false"``, None — is False."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in _TRUE_WORDS
-    return False
+    """A boolean outside the schema (``operator_api``, ``hosted``) by the one settings reader (contract V22): YAML
+    booleans, the words of ``settings.BOOL_WORDS`` and 0/1; anything else — ``None`` included — is False."""
+    return settings_mod.flag(value, False)
 
 
 def inbound_mode(value: object) -> str:
-    """``inbound`` as ``auto``|``on``|``off`` (DESIGN §12.4). ``hermes_yaml`` reads a bare ``off``/``on`` as
-    False/True; any other unknown value keeps inbound closed (``off``)."""
+    """``inbound`` as ``auto``|``on``|``off`` (DESIGN §12.4) by the one settings reader (contract V22):
+    ``hermes_yaml`` reads a bare ``off``/``on`` as False/True, None is the default ``auto``. A value the reader does
+    not recognise as one of the words keeps inbound closed (``off``) — its schema default ``auto`` would answer
+    paired peers."""
     if value is None:
         return "auto"
-    if isinstance(value, bool):
-        return "on" if value else "off"
-    mode = str(value).strip().lower()
-    return mode if mode in {"auto", "on", "off"} else "off"
+    mode = settings_mod.coerce("inbound", value)
+    if isinstance(value, bool) or (isinstance(value, str) and value.strip().lower() == mode):
+        return mode
+    return "off"
 
 
 class Server:
@@ -475,9 +472,10 @@ class Server:
         self.name = _text(s.get("name"))
         raw_inbound = s.get("inbound")
         self.inbound = inbound_mode(raw_inbound)
-        if isinstance(raw_inbound, str) and raw_inbound.strip().lower() not in {"auto", "on", "off"}:
-            log.warning("ctx_handover: unknown inbound setting %r; inbound stays closed", raw_inbound[:40])
-        self.max_request_bytes = int(_positive(s.get("max_request_mb"), 8) * MIB)
+        word = None if raw_inbound is None or isinstance(raw_inbound, bool) else str(raw_inbound).strip().lower()
+        if word is not None and word not in settings_mod.SCHEMA["inbound"]["choices"]:
+            log.warning("ctx_handover: unknown inbound setting %r; inbound stays closed", str(raw_inbound)[:40])
+        self.max_request_bytes = int(settings_mod.coerce("max_request_mb", s.get("max_request_mb")) * MIB)
         self.max_json_bytes = min(int(_positive(s.get("max_json_bytes"), DEFAULT_MAX_JSON)), self.max_request_bytes)
         self._rate = _Buckets(_positive(s.get("rate_per_s"), 20), _positive(s.get("rate_burst"), 60), clock)
         self._pair_failures = _Window(int(_positive(s.get("pair_failures_per_hour"), 30)), 3600, clock)
@@ -761,10 +759,9 @@ class Server:
 
     # job plumbing
     def _participant(self, auth: AuthContext, job_id: str, role: Role) -> tuple[object, JobContext]:
-        """The job's participant API and ``JobContext`` from the registry (binding, right, epoch: contract X18)."""
-        api = self._registry.get(auth, job_id, role)
-        job = self._registry.context(auth, job_id, role)
-        return api, job
+        """The job's participant API and ``JobContext`` from the registry (binding, right, epoch: contract X18) —
+        one ``bind`` per request, so one epoch fence and one ``touch_job`` (contract V17)."""
+        return self._registry.bind(auth, job_id, role)
 
     @staticmethod
     def _decode(cls, body: dict, field: str):
@@ -786,7 +783,8 @@ class Server:
         return to_wire(self._registry.status(auth, params["id"], body))
 
     def _h_job_heartbeat(self, auth, params, body, req) -> dict:
-        """Route #9 — the registry's (contract X18)."""
+        """Route #9 — the registry's (contract X18), including ``{state}`` of a source that gave up its leases
+        (contract V17, ``source_reclaimed``)."""
         return self._registry.heartbeat(auth, params["id"], body)
 
     def _h_job_cancel(self, auth, params, body, req) -> dict:

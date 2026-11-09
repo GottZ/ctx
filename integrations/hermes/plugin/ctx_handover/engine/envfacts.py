@@ -70,7 +70,7 @@ VERSION_ARGS: dict[str, tuple[str, ...]] = {
 """Tools whose version flag is not ``--version``."""
 
 LOCAL_PROVIDERS = frozenset({"llamacpp", "llama.cpp", "llama-cpp", "ollama", "lmstudio"})
-"""Providers that run on this machine when no ``base_url`` says otherwise (DESIGN §6.7 step 4)."""
+"""Providers that run on this machine (DESIGN §6.7 step 4); the set of ``session_import.LOCAL_PROVIDERS``."""
 
 SHELL_WORDS = frozenset(
     {
@@ -352,46 +352,46 @@ def case_insensitive_at(path: str, sys_ops: SystemOps, *, default: bool) -> bool
     return default
 
 
-def _host_url(base_url: str) -> str | None:
+def _local_url(url: object) -> bool:
+    if not isinstance(url, str) or not url:
+        return False
     try:
-        parsed = urllib.parse.urlsplit(base_url.strip())
+        host = urllib.parse.urlsplit(url).hostname
     except ValueError:
-        return None
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        return None
-    return parsed.hostname
+        return False
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private or ip.is_link_local
 
 
-def is_offline_route(provider: str | None, base_url: str | None) -> bool:
-    """Is the model route local (DESIGN §6.7 step 4, BX P7)? A ``base_url`` decides when present: loopback or a
-    private (RFC 1918 / ULA / link-local) address, or ``localhost``. Without one, the provider name decides
-    (``llamacpp``, ``ollama``, ``lmstudio``). Tailnet (100.64/10) and public addresses are not offline."""
-    if isinstance(base_url, str) and base_url.strip():
-        host = _host_url(base_url)
-        if host is None:
-            return False
-        if host.lower() == "localhost":
-            return True
-        try:
-            addr = ipaddress.ip_address(host)
-        except ValueError:
-            return False
-        if addr.is_loopback or addr.is_link_local:
-            return True
-        if isinstance(addr, ipaddress.IPv4Address):
-            return any(addr in ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
-        return addr in ipaddress.ip_network("fc00::/7")
-    return isinstance(provider, str) and provider.strip().lower() in LOCAL_PROVIDERS
+def _offline_capable(config: dict) -> bool:
+    """``EnvFacts.offline_capable``: does this host's main model route stay on this host or its LAN? The one
+    offline rule (contracts X04, V08) is B's ``session_import.offline_capable``; this is its value for the main route
+    (``offline_capable({}, config)``). ``envfacts`` and ``session_import`` share layer L4 (no import between them),
+    so the rule is mirrored here statement by statement — ``test_envfacts_offline_rule_is_session_imports`` pins
+    both to the same answer on every case — and becomes a call once ``envfacts`` sits above ``session_import``.
 
-
-def main_route(config: dict) -> tuple[str | None, str | None]:
-    """``(provider, base_url)`` of the main model in a Hermes config dict (``model.provider``/``model.base_url``)."""
-    model = config.get("model") if isinstance(config, dict) else None
-    if not isinstance(model, dict):
-        return None, None
-    provider = model.get("provider") if isinstance(model.get("provider"), str) else None
-    base_url = model.get("base_url") if isinstance(model.get("base_url"), str) else None
-    return provider, base_url
+    The provider is ``model.provider``; a local provider kind is offline; a named ``providers.<name>`` entry decides
+    by its ``base_url``/``api_base``, else ``model.base_url``: ``localhost``, ``*.localhost``, loopback, private
+    and link-local addresses are local; anything else, or no provider, is not."""
+    model = config.get("model") if isinstance(config, Mapping) else None
+    provider = model.get("provider") if isinstance(model, Mapping) else None
+    provider = provider.strip() if isinstance(provider, str) and provider.strip() else None
+    if provider is None:
+        return False
+    if provider.lower() in LOCAL_PROVIDERS:
+        return True
+    named = config.get("providers")
+    entry = named.get(provider) if isinstance(named, Mapping) else None
+    if isinstance(entry, Mapping):
+        return _local_url(entry.get("base_url") or entry.get("api_base"))
+    return _local_url(model.get("base_url"))
 
 
 def _tool_names(names: Iterable[object]) -> list[str]:
@@ -478,7 +478,6 @@ def probe(
             disk[p] = free
     default_ci = family in {"darwin", "windows"}
     case = {p: case_insensitive_at(p, s, default=default_ci) for p in dict.fromkeys((workspace_root, *allow_roots))}
-    provider, base_url = main_route(config)
     git_info = tools.get("git")
     git_version = None
     if git_info and git_info.version:
@@ -508,7 +507,7 @@ def probe(
         allow_roots=allow_roots,
         disk_free=disk,
         case_insensitive=case,
-        offline_capable=is_offline_route(provider or host.provider, base_url),
+        offline_capable=_offline_capable(config),
         locale=_one_line(s.locale(), 64),
         timezone=_one_line(s.timezone(), 64),
         git_version=git_version,

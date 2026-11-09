@@ -20,6 +20,8 @@ from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
+from . import settings as settings_rules
+
 logger = logging.getLogger(__name__)
 
 PROVIDER = "ctx_checkpoint"
@@ -62,12 +64,11 @@ def allowed(config: dict, server: str) -> bool:
 
 
 def persist_off(settings: Mapping[str, Any] | None) -> bool:
-    """``ctx_persist`` says off — also as the raw YAML value: an unquoted ``off``/``no``/``false`` in
-    ``config.yaml`` arrives as ``False`` (YAML 1.1), a quoted one as text."""
-    value = (settings or {}).get("ctx_persist", "auto")
-    if isinstance(value, bool):
-        return value is False
-    return str(value).strip().lower() in {"off", "no", "false"}
+    """``ctx_persist`` says off, read by K0's one rule (``settings.coerce``, V22) — also as the raw YAML value: an
+    unquoted ``off`` in ``config.yaml`` arrives as ``False`` (YAML 1.1) and means off; ``None`` or an unknown word is
+    the default ``auto``."""
+    value = settings.get("ctx_persist") if isinstance(settings, Mapping) else None
+    return settings_rules.coerce("ctx_persist", value) == "off"
 
 
 def server_for(config: dict, settings: Mapping[str, Any]) -> str | None:

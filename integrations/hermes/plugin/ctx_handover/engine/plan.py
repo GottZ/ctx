@@ -118,6 +118,8 @@ WHY_HOME = "home directory is not transferred as a whole"
 WHY_CONTAINS_WORKSPACE = "contains the workspace"
 WHY_DENIED_SUGGESTION = "suggested but denied by policy"
 WHY_PEER_SECRET = "include_secret from peer ignored"  # noqa: S105 - reason text, not a secret
+NON_CANONICAL_PATH = "non_canonical_path"
+"""``PolicyDenied`` reason of a remote addition whose path is not its realpath (a link on the way; V29)."""
 _WHY_BY_REASON = {
     "secret": WHY_SECRET,
     "hermes": "hermes",
@@ -1020,6 +1022,11 @@ def _refusal(refused: Sequence[tuple[str, PolicyDenied]]) -> PolicyDenied:
 
 
 def _remote_addition(item: PlanItem, cfg: PolicyConfig, export: list[Path], redact) -> PlanItem:
+    """A remote conductor's addition (R18, contract V29). Released only when the requested path is canonical — its
+    realpath equals the normalised path, so no link on the way (``NON_CANONICAL_PATH`` otherwise) —, an extra file
+    or directory of that kind under ``export_roots``, and allowed by the policy (no suspected secret; a file needs the
+    redactor). A released item comes back unchanged except ``include`` (``yes`` stays, anything else ``no``): the
+    restricted plan keeps the conductor's ``plan_id``, against which the target verifies the pack."""
     path = item.source_path
     deny = PolicyDenied(f"{path!r} is not released by this source", reason="not_allowed_root", path=str(path)[:300])
     if not export or not isinstance(path, str) or not os.path.isabs(path) or "\x00" in path:
@@ -1027,9 +1034,15 @@ def _remote_addition(item: PlanItem, cfg: PolicyConfig, export: list[Path], reda
     if item.kind not in {ItemKind.EXTRA_FILE, ItemKind.EXTRA_DIR}:
         raise deny
     real = _real(path)
+    if real != _norm(path):
+        raise PolicyDenied(
+            f"{path!r} is not released: not a canonical path (a link on the way)",
+            reason=NON_CANONICAL_PATH,
+            path=str(path)[:300],
+        )
     if not under_any(Path(real), export, case_insensitive=cfg.case_insensitive):
         raise deny
-    p = Path(path)
+    p = Path(real)
     if item.kind is ItemKind.EXTRA_DIR:
         verdict = check_source_file(p, cfg, explicit=False)
         if not os.path.isdir(real):
@@ -1042,21 +1055,7 @@ def _remote_addition(item: PlanItem, cfg: PolicyConfig, export: list[Path], reda
         raise PolicyDenied(
             f"{path!r} is not released: {_why(verdict)}", reason=str(verdict.reason), path=str(path)[:300]
         )
-    size = 0
-    try:
-        size = os.lstat(real).st_size if item.kind is ItemKind.EXTRA_FILE else 0
-    except OSError:
-        size = 0
-    return PlanItem(
-        item_id=item.item_id,
-        kind=item.kind,
-        source_path=real,
-        role=ItemRole.EXTRA,
-        origin=Origin.USER,
-        include=Include.YES if item.include is Include.YES else Include.NO,
-        reasons=("requested by the peer (export_roots)",),
-        size_estimate=size,
-    )
+    return replace(item, include=Include.YES if item.include is Include.YES else Include.NO)
 
 
 # ---------------------------------------------------------------------------------------------------------

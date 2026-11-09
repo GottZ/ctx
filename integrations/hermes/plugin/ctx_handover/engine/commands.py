@@ -43,17 +43,16 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from . import ctxrecords, hostcompat, surfaces
+from . import settings as settings_rules
 from .continuation import Spawner
 from .errors import (
     BadRequest,
     CapabilityMissing,
     ConflictError,
     Forbidden,
-    GateRejected,
     HandoverError,
     InDoubt,
     InvalidState,
-    ListenerMissing,
     NotFound,
     error_class,
 )
@@ -691,13 +690,18 @@ class Plugin:
         short = surfaces.short_job(job_id)
         if state == "in_doubt":
             return surfaces.render_error(InDoubt("commit outcome unknown", job=job_id), peer)
+        if state == "aborting":
+            # parked before the commit point while undoing (V31): the janitor finishes the abort — never a success text
+            lines = [_job_error_text(job_id, err, peer)] if (err or {}).get("code") else []
+            lines.append(
+                f"Handover {short} stopped before the commit and is being undone in the background; nothing was "
+                f"handed over. /handover status {short} shows when it has finished."
+            )
+            return "\n".join(lines)
         if state in {"aborted", "suspended"}:
             # a cancel by the user ends ``aborted`` with last_error.code == "cancelled" (rendered as such)
-            code = (err or {}).get("code")
-            if code:
-                klass = error_class(str(code)) or HandoverError
-                details = {"job": job_id, **dict((err or {}).get("details") or {})}
-                text = surfaces.render_error(klass(str((err or {}).get("message") or ""), details=details), peer)
+            if (err or {}).get("code"):
+                text = _job_error_text(job_id, err, peer)
             else:
                 text = f"Handover {short} ended: {state}. /handover status {short}."
             if state == "suspended" and "/handover resume" not in text:
@@ -738,6 +742,7 @@ class Plugin:
             conflicts=job.get("conflicts") or (),
             instruction_files=job.get("instruction_files") or (),
             warnings=job.get("warnings") or (),
+            withheld=[str(p) for p in job.get("withheld") or ()],  # V29: summary["withheld"], a list of paths
             continue_error=cont_error,
             bundle_path=bundle.get("path"),
             bundle_bytes=bundle.get("size"),
@@ -1242,6 +1247,16 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
         )
     settings = backend.settings()
     config = backend.config()
+    rejected = settings_rules.problems(settings_rules.raw_settings(config))
+    if rejected:  # values the one normaliser replaced by their default (V22): Hermes only warns at load
+        checks.append(
+            {
+                "name": "settings",
+                "ok": None,
+                "detail": " ".join(rejected),
+                "remedy": "correct the values named above; until then their defaults apply",
+            }
+        )
     peer_names = ", ".join(p.name for p in backend.peers() if p.direction == "dial") or "the other gateway"
     warnings_of = _gate_warnings()
     for key, env in surfaces.SECRET_ENVS.items():
@@ -1314,6 +1329,14 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
     return checks
 
 
+def _job_error_text(job_id: str, err: Mapping | None, peer: str | None) -> str:
+    """The person's text for a job's ``last_error`` (``{code, message, details}``) through its error class."""
+    err = err or {}
+    klass = error_class(str(err.get("code"))) or HandoverError
+    details = {"job": job_id, **dict(err.get("details") or {})}
+    return surfaces.render_error(klass(str(err.get("message") or ""), details=details), peer)
+
+
 def _set_or_explain(backend: Backend, key: str, value: str) -> str:
     """Write one setting through ``ctx.set_config``; when this host cannot, name the command that does."""
     try:
@@ -1335,11 +1358,21 @@ def _gate_warnings() -> Callable[..., list[str]] | None:
 
 SKEW_WARN_S = 60
 """Clock difference to a peer above which ``doctor`` warns (signed requests fail beyond 300 s, ``server.SKEW_S``)."""
-MEASURE_SIZES = (1, 2, 4, 8)
-"""MiB per test body of ``doctor --measure`` (cluster C ``WireClient.probe_gate(measure_limit=True)``)."""
-MEASURE_TEXT = f"{sum(MEASURE_SIZES)} MiB of test data per paired gateway"
 BODY_LIMIT_KEY = "doctor.body_limit."
 """Ledger ``meta`` key prefix (+ peer id) of the last ``doctor --measure`` result: ``{"bytes", "at"}``."""
+
+
+def probe_sizes() -> tuple[int, ...]:
+    """MiB per test body of ``doctor --measure``: cluster C's constant ``wire.PROBE_SIZES_MIB`` (V27) — F keeps no
+    copy. ``wire`` is imported lazily, as everywhere in this module (a runtime without ``httpx`` still loads)."""
+    from .wire import PROBE_SIZES_MIB
+
+    return PROBE_SIZES_MIB
+
+
+def measure_text() -> str:
+    """What ``doctor --measure`` uploads to each paired gateway, for the texts that announce it."""
+    return f"{sum(probe_sizes())} MiB of test data per paired gateway"
 
 
 def _is_count(value: object) -> bool:
@@ -1347,79 +1380,51 @@ def _is_count(value: object) -> bool:
 
 
 def peer_check(peer: Peer, probe: Mapping, clock_skew: float | None = None) -> dict:
-    """One ``doctor`` line per dialled peer from cluster C's ``WireClient.probe_gate`` report (W066, X24):
-    ``gate`` (``ok``/``rejected``/``unreachable``), ``plugin``, ``signed``, ``error`` and ``body_limit`` — which
-    layer answered (dashboard 401 vs plugin vs 404 vs network, DESIGN §14.1 doctor), the proxy body limit and the
-    clock skew. ``body_limit`` is present only after ``doctor --measure``; otherwise ``body_limit_last``
-    (``{"bytes", "at"}`` of the last measurement, or None) is shown with its date."""
+    """One ``doctor`` line per dialled peer: cluster C's ``WireClient.probe_gate`` summary as it is — ``ok``,
+    ``detail`` and ``remedy`` say which layer answered and what the measured body limit is (W121, V27, X24); F does
+    not classify the report a second time. F adds only what C cannot know: the clock skew of the signed hello and,
+    for a plain ``doctor`` (``body_limit_last`` in ``probe``), the last stored ``doctor --measure`` result with its
+    date, or how to measure."""
     name = f"peer {peer.name}"
-    gate = probe.get("gate")
-    error = str(probe.get("error") or "")
-    if gate == "unreachable":
+    if not isinstance(probe.get("detail"), str):  # not a probe_gate summary (W121): nothing to show as its own
         return {
             "name": name,
             "ok": False,
-            "detail": f"{peer.url or peer.name} did not answer ({error or 'peer_unreachable'})",
-            "remedy": f"check the address, TLS and the network or VPN, and that the dashboard of {peer.name} runs",
+            "detail": f"the probe of {peer.name} returned no summary",
+            "remedy": "run /handover doctor again",
         }
-    if gate == "rejected":
-        mode = peer.gate.mode.value if peer.gate is not None else "session_token"
-        return {
-            "name": name,
-            "ok": False,
-            "detail": f"the dashboard gate of {peer.name} refused the stored credential ({mode}, {error})",
-            "remedy": surfaces.render_error(GateRejected("refused", mode=mode), peer.name),
-        }
-    if gate != "ok":
-        return {
-            "name": name,
-            "ok": False,
-            "detail": f"no usable answer from {peer.name} ({error or gate or 'unknown'})",
-            "remedy": "check the address (listen_url on the other gateway) and run /handover doctor again",
-        }
-    if not probe.get("plugin"):
-        return {
-            "name": name,
-            "ok": False,
-            "detail": f"the dashboard of {peer.name} answered, ctx_handover did not ({error or 'listener_missing'})",
-            "remedy": surfaces.render_error(ListenerMissing("missing"), peer.name),
-        }
-    if error or not probe.get("signed"):
-        klass = error_class(error) if error else None
-        return {
-            "name": name,
-            "ok": False,
-            "detail": f"ctx_handover on {peer.name} answered, but without a valid signed hello ({error or 'unsigned'})",
-            "remedy": surfaces.render_error((klass or HandoverError)(error or "unsigned hello"), peer.name),
-        }
-    parts = ["dashboard gate passed, ctx_handover answered with a valid signature"]
-    ok: bool | None = True
-    remedies: list[str] = []
+    ok = probe.get("ok", False)
+    if not (ok is True or ok is False or ok is None):
+        ok = False
+    parts = [probe["detail"]]
+    remedies = [str(probe["remedy"])] if probe.get("remedy") else []
     limit = probe.get("body_limit")
-    measured = ""
-    last = probe.get("body_limit_last")
-    if not _is_count(limit) and isinstance(last, Mapping) and _is_count(last.get("bytes")):
-        limit = last["bytes"]
-        measured = f" (measured {surfaces.when(last.get('at'))}; doctor --measure measures again)"
-    if _is_count(limit):
-        if limit >= 8 * surfaces.MiB:
-            parts.append("request bodies of 8 MiB pass" + measured)
-        else:
-            ok = None
-            parts.append(
-                (
-                    f"a proxy limits request bodies to {surfaces.human_bytes(limit)}"
-                    if limit
-                    else "a proxy limits request bodies below 1 MiB"
+    if ok is True and _is_count(limit):  # measured now and no proxy limit found: say how much passed
+        parts.append(f"request bodies of {surfaces.human_bytes(limit)} pass")
+    if ok is not False and "body_limit_last" in probe:
+        last = probe.get("body_limit_last")
+        if isinstance(last, Mapping) and _is_count(last.get("bytes")):
+            stored, largest = int(last["bytes"]), max(probe_sizes()) * surfaces.MiB
+            again = f"measured {surfaces.when(last.get('at'))}; doctor --measure measures again"
+            if stored >= largest:
+                parts.append(f"request bodies of {surfaces.human_bytes(stored)} pass ({again})")
+            else:
+                ok = None if ok is True else ok
+                limited = f"to {surfaces.human_bytes(stored)}" if stored else "below 1 MiB"
+                parts.append(f"a proxy limits request bodies {limited} ({again})")
+                remedies.append(
+                    f"raise the body limit of the proxy in front of it to {max(probe_sizes())} MiB "
+                    "(transfers stay smaller)"
                 )
-                + measured
-            )
-            remedies.append("raise the body limit of the proxy in front of it to 8 MiB (transfers stay smaller)")
-    elif "body_limit_last" in probe:
-        parts.append(f"request body limit not measured yet (doctor --measure sends up to {MEASURE_TEXT})")
-    if clock_skew is not None and abs(float(clock_skew)) > SKEW_WARN_S:
-        ok = None
-        parts.append(f"clock differs by {float(clock_skew):+.0f} s (signatures fail beyond 300 s)")
+        else:
+            parts.append(f"request body limit not measured yet (doctor --measure sends up to {measure_text()})")
+    try:
+        skew = float(clock_skew) if clock_skew is not None else None
+    except (TypeError, ValueError):
+        skew = None
+    if skew is not None and abs(skew) > SKEW_WARN_S:
+        ok = None if ok is True else ok
+        parts.append(f"clock differs by {skew:+.0f} s (signatures fail beyond 300 s)")
         remedies.append("synchronise the clocks (NTP) on both machines")
     return {"name": name, "ok": ok, "detail": "; ".join(parts), "remedy": "; ".join(remedies) or None}
 
@@ -1778,19 +1783,15 @@ class EngineBackend:
     def rotate_identity(self) -> dict:
         from .crypto import Identity
 
-        rt = self._started()
+        # The new key goes to the profile .env and the ledger, nothing else: the profile runtime drops its cached
+        # identity itself when the ledger names another key (``jobs._identity``, any process of the profile).
         ident = Identity.create(
-            rt.ledger,
+            self._ledger(),
             env_writable=hostcompat.env_writable,
             save_env=hostcompat.save_env,
             read_env_fresh=hostcompat.read_env_fresh,
             rotate=True,
         )
-        # the profile caches its identity for the runner and the pull client; the old key must not sign again
-        with getattr(rt, "lock", None) or contextlib.nullcontext():
-            if hasattr(rt, "identity"):
-                rt.identity = ident
-                rt.identity_error = None
         return {"instance_id": ident.instance_id, "fingerprint": ident.fingerprint()}
 
     def start_job(
@@ -1980,8 +1981,8 @@ class EngineBackend:
 
     def doctor_checks(self, *, measure: bool = False) -> list[dict]:
         """Engine checks of ``doctor``: git, data folder, identity, inbound, one probe per dialled peer. The proxy
-        body limit is measured (test bodies of ``MEASURE_SIZES`` MiB) only with ``measure``; its result is kept in the
-        ledger and shown with its date by later runs."""
+        body limit is measured (test bodies of ``wire.PROBE_SIZES_MIB`` MiB) only with ``measure``; its result is kept
+        in the ledger and shown with its date by later runs."""
         checks: list[dict] = []
         try:
             from . import gitops

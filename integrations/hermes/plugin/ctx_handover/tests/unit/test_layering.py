@@ -29,7 +29,7 @@ from ctx_handover.tests.conftest import PLUGIN_ROOT, require_upstream, upstream_
 
 LAYERS: dict[str, int] = {
     **dict.fromkeys(("model", "errors"), 0),
-    **dict.fromkeys(("contracts", "jsonutil", "ids", "paths", "ignore"), 1),
+    **dict.fromkeys(("contracts", "jsonutil", "ids", "paths", "ignore", "settings"), 1),
     **dict.fromkeys(("policy", "session_hash", "blocks", "ledger", "crypto", "hostcompat"), 2),
     **dict.fromkeys(("gitops", "hermes_files", "ops", "continuation", "ctxrecords"), 3),
     **dict.fromkeys(
@@ -444,9 +444,11 @@ def test_checker_plugin_root_may_import_any_engine_module(tmp_path):
 
 
 def test_layer_table_covers_interfaces_modules():
-    """The table holds exactly the 45 engine modules of INTERFACES §1, by cluster (guards typos)."""
+    """The table holds exactly the 45 engine modules of INTERFACES §1 plus ``settings`` (contract V22), by cluster
+    (guards typos)."""
     by_cluster = {
-        "K0": {"model", "errors", "contracts", "jsonutil", "ids", "paths", "ignore", "policy", "hostcompat"},
+        "K0": {"model", "errors", "contracts", "jsonutil", "ids", "paths", "ignore", "policy", "hostcompat"}
+        | {"settings"},
         "B": {"session_hash", "session_export", "session_import", "lock", "hermes_files"},
         "D": {"collector", "refine", "plan", "pathmap", "envfacts", "note"},
         "E": {"gitops", "gitpack", "gitapply", "filetree", "materialize"},
@@ -456,4 +458,4 @@ def test_layer_table_covers_interfaces_modules():
     }
     expected = set().union(*by_cluster.values())
     assert set(LAYERS) == expected
-    assert len(expected) == 45
+    assert len(expected) == 46

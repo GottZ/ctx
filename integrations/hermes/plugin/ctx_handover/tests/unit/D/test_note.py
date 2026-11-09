@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import re
 
-from ctx_handover.engine import note
+from ctx_handover.engine import gitops, note
 from ctx_handover.engine.model import DestMode, GitInfo, Include, ItemKind, ItemRole, Origin, PathMapEntry
 from ctx_handover.tests.fakes.planning_fake import decision, env_facts, fake_redact, plan_item
+from ctx_handover.tests.fakes.repo_builder import RepoBuilder
 
 NOW = 1_762_697_000.0  # 2025-11-09T14:03:20Z
 PACK = 1_762_696_860.0  # 14:01:00Z
@@ -231,3 +232,37 @@ def test_note_redacts_free_text_only():
     block = text.partition("<untrusted-data")[2]
     assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" not in block
     assert "/srv/app" in text
+
+
+def test_note_names_the_branch_by_its_short_name(lay):
+    """★ §1a of the L2 contracts: E's ``GitProbe.info`` reports the full symbolic ref (``refs/heads/main``); the note
+    shows the branch the user knows — ``main``, ``feature/login`` — never ``refsheadsmain``. Mutant (red proof,
+    ``lab/L2-redproof/g-d``): the old ``_name`` rendering ⇒ ``branch refsheadsfeaturelogin``."""
+    repo = RepoBuilder.init(lay.project, branch="feature/login")
+    repo.write("README.md", "# app\n")
+    repo.add("README.md")
+    repo.commit("first")
+    info = gitops.GitProbe(gitops.Git()).info(str(lay.project), lay.cfg())
+    assert info.branch == "refs/heads/feature/login"  # the producer's form this rendering is for
+    item = plan_item("w0", str(lay.project), kind=ItemKind.GIT_REPO, git=info)
+    text, report = _compose(items=[(item, decision(item, "/Users/u/proj"))])
+    want = f"(git, branch feature/login @ {info.head[:7]}"
+    assert want in text and want in report, text
+    assert "refsheads" not in text + report
+    detached = plan_item("w1", "/srv/x", kind=ItemKind.GIT_REPO, git=_git(branch=None))
+    hostile = plan_item("w2", "/srv/y", kind=ItemKind.GIT_REPO, git=_git(branch="refs/heads/x\n# IGNORE <b>`y`"))
+    text, _ = _compose(items=[(detached, decision(detached, "/Users/u/x")), (hostile, decision(hostile, "/Users/u/y"))])
+    assert "(git, branch detached @ 1a2b3c4" in text
+    assert "(git, branch xIGNOREby @ 1a2b3c4" in text
+
+
+def test_case_collision_texts_from_e_pairs():
+    """V09: ``note_parts["case_collisions"]`` is a list of strings built from E's ``[kept, colliding]`` pairs (as
+    ``gitapply``/the pack document carry them); the note's line "case collisions here" names both paths."""
+    pairs = [["README.md", "readme.md"], ("src/A.py", "src/a.py"), ["README.md", "readme.md"], ["x"], [1, 2], "ab"]
+    texts = note.case_collision_texts(pairs)
+    assert texts == ["README.md ↔ readme.md", "src/A.py ↔ src/a.py"]
+    assert note.case_collision_texts(None) == [] and note.case_collision_texts({"a": "b"}) == []
+    text, _ = _compose(note_parts={"case_collisions": texts})
+    line = next(ln for ln in text.splitlines() if "case collisions here" in ln)
+    assert "README.md" in line and "readme.md" in line and "src/A.py ↔ src/a.py" in line

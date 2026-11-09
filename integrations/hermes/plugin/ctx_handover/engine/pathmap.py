@@ -35,7 +35,7 @@ from pathlib import Path
 from .errors import PolicyDenied
 from .ids import short
 from .model import EnvFacts, ItemKind, ItemRole, MapRow, Options, PlanItem
-from .paths import check_rel, home_relative, reject_windows_device_prefix, rules_for
+from .paths import check_rel, expand_root, home_relative, reject_windows_device_prefix, rules_for
 from .policy import PolicyConfig, check_target_dest
 
 USER = "user"
@@ -278,22 +278,58 @@ def choose_all(
     return result
 
 
-def fallback_dest(dest: str, *, now: datetime, workspace_root: str, allow_roots: Sequence[str]) -> str:
-    """Where an item goes when its first choice conflicts (DESIGN §9.7): ``<dest>-handover-<YYYYmmdd-HHMMSS>`` when
-    the parent lies under ``allow_roots``, else the same name under ``workspace_root``."""
+def _expanded_root(spec: object, home: str, mod) -> str | None:
+    """A configured root (``~``, ``~/x``, absolute, or relative = under ``home``; ``paths.expand_root``) as an
+    absolute, normalised path of the destination's OS; None for a form ``expand_root`` refuses (``~user``, device
+    prefixes, empty)."""
+    text = spec.strip() if isinstance(spec, str) else ""
+    if not text:
+        return None
+    try:
+        reject_windows_device_prefix(text)
+        if _spelled_windows(text) if mod is ntpath else text.startswith("/"):
+            return mod.normpath(text)
+        return mod.normpath(str(expand_root(text, Path(home))))
+    except PolicyDenied:
+        return None
+
+
+def fallback_dest(
+    dest: str,
+    *,
+    now: datetime,
+    workspace_root: str,
+    allow_roots: Sequence[str],
+    home: str | None = None,
+    cfg: PolicyConfig | None = None,
+) -> str:
+    """Where an item goes when its first choice conflicts (DESIGN §9.7, contract V35): ``<dest>-handover-
+    <YYYYmmdd-HHMMSS>`` when the parent lies under ``allow_roots`` (and, with ``cfg``, that sibling passes
+    ``check_target_dest``), else the same name under ``workspace_root``.
+
+    ``workspace_root`` and ``allow_roots`` may be the configured forms (``Options`` defaults are
+    ``~/hermes-handover``); they are expanded against ``home`` — default ``cfg.home``, else this process's home,
+    the home of the target's policy (``jobs._policy``) — so the result is always an absolute path that
+    ``check_target_dest`` can accept (R19)."""
     mod = ntpath if _spelled_windows(dest) else posixpath
-    ci = mod is ntpath
+    ci = mod is ntpath or bool(cfg is not None and cfg.case_insensitive)
+    base = str(home if home is not None else cfg.home if cfg is not None else Path.home())
     stamp = now.strftime("%Y%m%d-%H%M%S")
-    norm = mod.normpath(dest)
+    norm = _expanded_root(dest, base, mod) or mod.normpath(dest)
     parent = mod.dirname(norm)
+    roots = [r for r in (_expanded_root(r, base, mod) for r in allow_roots) if r]
 
     def parts(p: str) -> list[str]:
         out = [c for c in mod.normpath(p).replace("\\", "/").split("/") if c]
         return [c.casefold() for c in out] if ci else out
 
-    if any(parts(parent)[: len(parts(r))] == parts(r) for r in allow_roots if r):
-        return f"{norm}-handover-{stamp}"
-    return mod.join(mod.normpath(workspace_root), f"{mod.basename(norm) or 'workspace'}-handover-{stamp}")
+    sibling = f"{norm}-handover-{stamp}"
+    if any(parts(parent)[: len(parts(r))] == parts(r) for r in roots) and (
+        cfg is None or check_target_dest(Path(sibling), cfg, recorded=False, local_choice=False).allowed
+    ):
+        return sibling
+    root = _expanded_root(workspace_root, base, mod) or (roots[0] if roots else parent)
+    return mod.join(root, f"{mod.basename(norm) or 'workspace'}-handover-{stamp}")
 
 
 def map_cwd(source_cwd: str, item: PlanItem, dest: str) -> str:

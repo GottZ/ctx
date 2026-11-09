@@ -8,9 +8,11 @@ Rules 3–5 — and every destination the counterpart proposes — only under ``
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 from ctx_handover.engine import pathmap
 from ctx_handover.engine.model import ItemKind, ItemRole, MapRow, Options, Origin
+from ctx_handover.engine.policy import check_target_dest
 from ctx_handover.tests.fakes.planning_fake import env_facts, plan_item
 
 SRC = env_facts("server", home="/home/u")
@@ -181,3 +183,45 @@ def test_map_cwd_relative_position():
     hostile = plan_item(source_path="/srv/app", rel_cwd="../../.ssh")
     assert pathmap.map_cwd("/srv/app", hostile, "/home/v/app") == "/home/v/app"
     assert pathmap.map_cwd("/srv/app/x", plain, "C:\\Users\\u\\app") == "C:\\Users\\u\\app\\x"
+
+
+def test_pathmap_fallback_dest_expands_the_configured_roots(lay):
+    """★ V35, R19: ``Options`` carries the configured roots (``~/hermes-handover``) and ``local_target`` passes them
+    as they are. The fresh directory is an expanded absolute path under the handover root that the target's real
+    policy accepts (``check_target_dest`` without ``recorded``/``local_choice``, exactly as ``materialize`` checks a
+    conflict's fallback) — for a first choice under the root (sibling) and outside it (under ``workspace_root``);
+    the home defaults to this process's home, the home of the target's policy. With ``cfg`` a sibling the target
+    denylist refuses moves under ``workspace_root``.
+
+    Mutants (red proof, ``lab/L2-redproof/g-d``): roots used unexpanded (the Schicht-R state) ⇒ ``'~/hermes-
+    handover/proj-handover-…'``; the ``cfg`` check of the sibling dropped ⇒ the fallback lies in ``~/.ssh``."""
+    now = datetime(2026, 11, 9, 14, 3, 7, tzinfo=timezone.utc)
+    cfg = lay.cfg()
+    handover = lay.home / "hermes-handover"
+    raw = {"workspace_root": Options().workspace_root, "allow_roots": Options().allow_roots}
+    assert raw == {"workspace_root": "~/hermes-handover", "allow_roots": ("~/hermes-handover",)}
+
+    inside = pathmap.fallback_dest(str(handover / "proj"), now=now, **raw)
+    assert inside == str(handover / "proj-handover-20261109-140307")
+    outside = pathmap.fallback_dest(str(lay.home / "proj"), now=now, **raw)
+    assert outside == str(handover / "proj-handover-20261109-140307")
+    assert pathmap.fallback_dest(str(handover / "proj"), now=now, **raw, cfg=cfg) == inside
+    for got in (inside, outside):
+        assert check_target_dest(Path(got), cfg, recorded=False, local_choice=False).allowed, got
+    assert pathmap.fallback_dest("/x/home/proj", now=now, **raw, home="/x/home") == (
+        "/x/home/hermes-handover/proj-handover-20261109-140307"
+    )
+    assert pathmap.fallback_dest("/x/home/w/proj", now=now, workspace_root="w", allow_roots=("w",), home="/x/home") == (
+        "/x/home/w/proj-handover-20261109-140307"
+    )
+
+    # the whole home allowed: the sibling of a first choice in ~/.ssh is refused by the denylist (R19)
+    wide = lay.cfg(options=Options(allow_roots=("~",)))
+    ssh = str(lay.home / ".ssh" / "proj")
+    got = pathmap.fallback_dest(ssh, now=now, workspace_root="~/hermes-handover", allow_roots=("~",), cfg=wide)
+    assert got == str(handover / "proj-handover-20261109-140307")
+    assert check_target_dest(Path(got), wide, recorded=False, local_choice=False).allowed
+    # forms paths.expand_root refuses are no root at all (``~other/x`` is not ``<home>/~other/x``)
+    odd = str(lay.home / "~other" / "x" / "proj")
+    got = pathmap.fallback_dest(odd, now=now, workspace_root=str(handover), allow_roots=("~other/x", "", "//srv/s"))
+    assert got == str(handover / "proj-handover-20261109-140307")

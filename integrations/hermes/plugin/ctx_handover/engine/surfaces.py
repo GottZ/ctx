@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import plan as planning
+from . import settings as settings_rules
 from .errors import HandoverError
 from .model import (
     CommitAck,
@@ -43,140 +44,20 @@ PAIR_PREFIX = "ctxh-pair:"
 PAIR_TTL_MAX_S = 3600
 
 # ---------------------------------------------------------------------------------------------------------
-# Settings (DESIGN §14.4; plugin.yaml config_schema mirrors this table, a unit test keeps both identical)
+# Settings (DESIGN §14.4) — one normaliser for every reader: K0's ``engine/settings.py`` (contract V22)
 # ---------------------------------------------------------------------------------------------------------
 
-
-def _s(typ: str, default: Any = None, choices: Sequence[str] = (), env: str | None = None) -> dict:
-    spec: dict[str, Any] = {"type": typ}
-    if typ == "secret":
-        spec["env"] = env
-    else:
-        spec["default"] = default
-    if choices:
-        spec["choices"] = tuple(choices)
-    return spec
-
-
-SETTINGS_SCHEMA: dict[str, dict] = {
-    "inbound": _s("str", "auto", ("auto", "on", "off")),
-    "listen_url": _s("str", ""),
-    "peer_gate": _s("str", "session_token", ("session_token", "bearer", "basic_login")),
-    "peer_token": _s("secret", env="CTX_HANDOVER_PEER_TOKEN"),
-    "peer_username": _s("str", ""),
-    "peer_password": _s("secret", env="CTX_HANDOVER_PEER_PASSWORD"),
-    "peer_extra_headers": _s("dict", {}),
-    "workspace_root": _s("str", "~/hermes-handover"),
-    "allow_roots": _s("list", ["~/hermes-handover"]),
-    "export_roots": _s("list", []),
-    "max_session_mb": _s("int", 512),
-    "max_file_mb": _s("int", 100),
-    "max_extra_dir_mb": _s("int", 256),
-    "max_hermes_file_mb": _s("int", 64),
-    "max_files": _s("int", 200000),
-    "max_untracked_files": _s("int", 200000),
-    "max_total_gb": _s("float", 10),
-    "confirm_above_mb": _s("int", 500),
-    "max_request_mb": _s("int", 8),
-    "block_cache_gb": _s("float", 5),
-    "block_cache_days": _s("int", 3),
-    "staging_ttl_hours": _s("int", 24),
-    "lease_ttl_s": _s("int", 120),
-    "participant_idle_timeout_min": _s("int", 15),
-    "stall_timeout_min": _s("int", 30),
-    "wait_timeout_min": _s("int", 30),
-    "refine": _s("str", "auto", ("auto", "side_question", "llm", "off")),
-    "refine_timeout_s": _s("int", 45),
-    "refine_history_chars": _s("int", 60000),
-    "refine_side_question_max_tokens": _s("int", 200000),
-    "refine_auto_include": _s("bool", False),
-    "extra_paths": _s("str", "ask", ("ask", "auto", "off")),
-    "include_hermes_files": _s("bool", True),
-    "model_mapping": _s("str", "auto", ("auto", "target_default")),
-    "allow_remote_continue": _s("bool", False),
-    "allow_agent_start": _s("bool", False),
-    "accept_offers": _s("str", "ask", ("ask", "off")),
-    "extra_ignore": _s("list", []),
-    "tool_probe": _s("list", []),
-    "ctx_persist": _s("str", "auto", ("auto", "off")),
-    "ctx_category": _s("str", "handover"),
-}
-
-SECRET_ENVS = {k: v["env"] for k, v in SETTINGS_SCHEMA.items() if v["type"] == "secret"}
-_HEADER_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
-_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
-
-
-BOOL_WORDS: dict[str, bool] = {
-    **dict.fromkeys(("true", "yes", "on", "1"), True),
-    **dict.fromkeys(("false", "no", "off", "0", ""), False),
-}
-"""Words a boolean setting may hold as text (or 0/1) — the words ``hermes config set`` turns into booleans
-(``hermes_cli/config.py`` ``_SCALAR_WORDS``) and the same table as ``jobs.plugin_settings``; a quoted ``"off"`` in
-``config.yaml`` means off, not the default."""
-
-
-def _coerce(key: str, spec: dict, value: Any) -> Any:
-    typ = spec["type"]
-    default = spec.get("default")
-    if typ == "str":
-        if isinstance(value, bool) and spec.get("choices"):  # YAML 1.1 turns `on`/`off` into booleans
-            value = "on" if value else "off"
-        if not isinstance(value, str):
-            return default
-        if spec.get("choices") and value not in spec["choices"]:
-            return default
-        return value
-    if typ == "int":
-        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else default
-    if typ == "float":
-        ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
-        return float(value) if ok else default
-    if typ == "bool":
-        if isinstance(value, (str, int)) and not isinstance(value, bool):
-            value = BOOL_WORDS.get(str(value).strip().lower(), value)
-        return value if isinstance(value, bool) else default
-    if typ == "list":
-        if not isinstance(value, list):
-            return list(default)
-        return [v for v in value if isinstance(v, str) and v.strip()]
-    if typ == "dict":
-        if not isinstance(value, Mapping):
-            return dict(default)
-        return {
-            k: v
-            for k, v in value.items()
-            if isinstance(k, str) and isinstance(v, str) and _HEADER_RE.fullmatch(k) and _ENV_RE.fullmatch(v)
-        }
-    return default
+SETTINGS_SCHEMA: Mapping[str, Mapping[str, Any]] = settings_rules.SCHEMA
+"""The settings table (type, default or ``env``, choices) — K0's mirror of ``plugin.yaml`` ``config_schema``."""
+SECRET_ENVS: Mapping[str, str] = settings_rules.SECRET_ENVS
+"""Secret settings → the ``.env`` variable that holds their value (never ``config.yaml``)."""
 
 
 def settings_from_config(config: Mapping | None) -> dict:
-    """``plugins.entries.ctx_handover.settings`` merged over the defaults; a value of the wrong type or outside
-    its choices falls back to the default (Hermes only warns at load, so the plugin must not trust it). Secret
-    keys are not part of the result: their values live in ``.env`` under ``SECRET_ENVS``."""
-    raw: Any = {}
-    if isinstance(config, Mapping):
-        entry = (
-            ((config.get("plugins") or {}).get("entries") or {}).get("ctx_handover")
-            if isinstance(config.get("plugins"), Mapping)
-            and isinstance((config.get("plugins") or {}).get("entries"), Mapping)
-            else None
-        )
-        if isinstance(entry, Mapping) and isinstance(entry.get("settings"), Mapping):
-            raw = entry["settings"]
-    out: dict[str, Any] = {}
-    for key, spec in SETTINGS_SCHEMA.items():
-        if spec["type"] == "secret":
-            continue
-        default = spec.get("default")
-        if key in raw:
-            out[key] = _coerce(key, spec, raw[key])
-        else:
-            out[key] = (
-                list(default) if isinstance(default, list) else dict(default) if isinstance(default, dict) else default
-            )
-    return out
+    """``plugins.entries.ctx_handover.settings`` normalised by K0's ``settings.from_config`` (V22): every key, a
+    value of the wrong type, outside its choices or ``None`` read as the schema default; secret keys are not part of
+    the result (their values live in ``.env`` under ``SECRET_ENVS``). F keeps no reading rule of its own."""
+    return settings_rules.from_config(config)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -745,29 +626,6 @@ def _enum_text(value: Any) -> str:
     return str(getattr(value, "value", value) or "")
 
 
-def model_text(model_change: Any, side: str = "to") -> str | None:
-    """One side (``to``/``from``) of a ``FinalPlan.model_change`` as ``model (provider)`` — contract X04:
-    ``None`` or ``{"from": {"model", "provider"}, "to": {"model", "provider", "context_length"}, "reason",
-    "offline_capable"}``; any other form reads as unknown."""
-    if not isinstance(model_change, Mapping):
-        return None
-    end = model_change.get(side)
-    if not isinstance(end, Mapping):
-        return None
-    name, provider = end.get("model"), end.get("provider")
-    if name and provider:
-        return f"{name} ({provider})"
-    return str(name or provider) if (name or provider) else None
-
-
-def _offline(model_change: Any) -> bool | None:
-    """``offline_capable`` of a contract-form ``model_change`` (X04), else unknown."""
-    if not isinstance(model_change, Mapping):
-        return None
-    value = model_change.get("offline_capable")
-    return value if isinstance(value, bool) else None
-
-
 def _instruction_lines(entries: Sequence[Any]) -> list[str]:
     out = []
     for e in entries or ():
@@ -778,11 +636,22 @@ def _instruction_lines(entries: Sequence[Any]) -> list[str]:
     return out
 
 
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _texts(values: Any) -> list[str]:
+    return [str(v) for v in values] if isinstance(values, (list, tuple)) else []
+
+
 def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_files: Sequence[Any] = ()) -> dict:
-    """What ``confirm_question``, ``render_plan`` and ``render_presend`` show (W125): the totals and lists of
-    cluster D's ``plan.presend_summary`` (``presend`` when the conductor passed it, else computed from ``final``)
-    and the per-item rows, proposals, conflicts and need of D's ``plan.summarize``; F adds nothing of its own
-    except the model text and the suspected-secret list (R25)."""
+    """What ``confirm_question``, ``render_plan`` and ``render_presend`` show (W125, V10): the W125 keys of cluster
+    D's ``plan.presend_summary`` (``plan.PRESEND_KEYS``) exactly as the conductor handed them over (``presend``;
+    computed from ``final`` only when there is none) — ``items_count``, ``total_bytes``, ``excluded_secrets``,
+    ``denied_tracked``, ``withheld_stash``, ``outside_workspace``, ``instruction_files``, ``model``, ``offline`` —
+    plus the per-item rows, proposals, conflicts and need of D's ``plan.summarize`` when ``final`` is known. F adds
+    nothing of its own except the suspected-secret list (R25). ``instruction_files`` (the target's result, with
+    ``status``) replaces the summary's list when given."""
     pre: dict = dict(presend) if isinstance(presend, Mapping) else {}
     full: dict = {}
     if final is not None:
@@ -790,8 +659,7 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
             pre = planning.presend_summary(final)
         full = planning.summarize(final)
     item_list = list(pre.get("item_list") or ())
-    count = pre.get("items")
-    change = full.get("model_change") if full else None
+    offline = pre.get("offline")
     rows = [
         {
             "item_id": r.get("item_id"),
@@ -806,22 +674,22 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
         for r in full.get("items") or ()
     ]
     return {
-        "items_count": int(count) if isinstance(count, int) else len(item_list),
-        "total_bytes": int(pre.get("total_bytes") or 0),
-        "excluded_secrets": int(pre.get("excluded_secrets") or 0),
-        "denied_tracked": [str(p) for p in pre.get("denied_tracked") or ()],
-        "withheld_stash": [str(p) for p in pre.get("withheld_stash") or ()],
-        "outside_workspace": [str(p) for p in pre.get("extras_outside_workspace") or ()],
+        "items_count": _count(pre.get("items_count")),
+        "total_bytes": _count(pre.get("total_bytes")),
+        "excluded_secrets": _count(pre.get("excluded_secrets")),
+        "denied_tracked": _texts(pre.get("denied_tracked")),
+        "withheld_stash": _texts(pre.get("withheld_stash")),
+        "outside_workspace": _texts(pre.get("outside_workspace")),
         "item_list": item_list,
         "proposed": int(full.get("proposed") or 0),
         "conflicts": int(full.get("conflicts") or 0),
         "need_bytes": int(full.get("need_bytes") or 0),
-        "model": model_text(change),
-        "offline": _offline(change),
+        "model": str(pre["model"]) if pre.get("model") else None,
+        "offline": offline if isinstance(offline, bool) else None,
         "items": rows,
         "not_transferred": [f"{n.get('path')} ({n.get('why')})" for n in full.get("not_transferred") or ()],
         "suspected_secrets": suspected_secrets({"final_plan": final}),
-        "instruction_files": _instruction_lines(instruction_files),
+        "instruction_files": _instruction_lines(instruction_files or pre.get("instruction_files") or ()),
     }
 
 
@@ -1173,6 +1041,7 @@ def _note_block(note: str | None, origin: str | None, lists: dict[str, Sequence[
         lines.append(f"Origin: {origin}.")
     titles = {
         "excluded_secrets": "Secrets left out:",
+        "withheld": "Withheld by source policy (the other side does not release them):",
         "withheld_stash": "Stash entries withheld:",
         "conflicts": "Conflicts (a fresh folder was used):",
         "instruction_files": "Instruction files new or changed here:",
@@ -1187,11 +1056,12 @@ def _note_block(note: str | None, origin: str | None, lists: dict[str, Sequence[
 
 
 def render_job_details(job: Mapping) -> str:
-    """For ``/handover status <job>`` on the receiving side (SEC 4.6): origin, excluded secrets, withheld stash
-    entries, conflicts, instruction files, warnings and the full note text."""
+    """For ``/handover status <job>`` on the receiving side (SEC 4.6): origin, excluded secrets, paths the source
+    withheld by its policy (``withheld``, V29), withheld stash entries, conflicts, instruction files, warnings and
+    the full note text."""
     lists = {
         key: job.get(key) or ()
-        for key in ("excluded_secrets", "withheld_stash", "conflicts", "instruction_files", "warnings")
+        for key in ("excluded_secrets", "withheld", "withheld_stash", "conflicts", "instruction_files", "warnings")
     }
     return "\n".join(_note_block(job.get("note"), job.get("origin"), lists))
 
@@ -1211,6 +1081,7 @@ def render_final(
     conflicts: Sequence[str] = (),
     instruction_files: Sequence[str] = (),
     warnings: Sequence[str] = (),
+    withheld: Sequence[str] = (),
     continue_error: HandoverError | None = None,
     bundle_path: str | None = None,
     bundle_bytes: int | None = None,
@@ -1220,13 +1091,15 @@ def render_final(
     """Success text naming target session, folder, model, offline capability and the next step (R14, BX P6).
 
     ``state`` is the conductor's final state; for a pull, anything before ``retired``/``done`` means the remote
-    source is released on the next contact (SK L8).
+    source is released on the next contact (SK L8). ``withheld`` are the paths a pull asked for (``--include``) that
+    the source does not release (V29, R18: local hints only narrow); the message lists them.
     """
     mode = Mode(mode)
     peer_name = peer or "the other gateway"
     t = (ack.title if ack is not None and ack.title else None) or title or "this session"
     lists = {
         "excluded_secrets": excluded_secrets,
+        "withheld": withheld,
         "withheld_stash": withheld_stash,
         "conflicts": conflicts,
         "instruction_files": instruction_files,

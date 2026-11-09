@@ -46,6 +46,7 @@ INTRO = (
 _MARKER_RE = re.compile(r"<\s*/?\s*(?:ctx-handover-note|untrusted-data)", re.IGNORECASE)
 _BLANK_RUNS = re.compile(r"\n[ \t]*\n(?:[ \t]*\n)+")
 _NAME_KEEP = re.compile(r"[^A-Za-z0-9._-]")
+_BRANCH_KEEP = re.compile(r"[^A-Za-z0-9._/-]")
 _TOOL_RE = re.compile(r"^[A-Za-z0-9._+-]{1,64}$")
 _ENV_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 
@@ -116,6 +117,23 @@ def unknown_note_parts(parts: object) -> tuple[str, ...]:
     return tuple(sorted({str(k)[:64] for k in parts if k not in NOTE_PART_KEYS}))
 
 
+def case_collision_texts(pairs: object) -> list[str]:
+    """``note_parts["case_collisions"]`` from E's ``[kept, colliding]`` pairs (``GitApplyState.case_collisions``,
+    the pack documents' ``case_collisions``; contract V09): one ``"<kept> ↔ <colliding>"`` per pair, in order,
+    without repeats; an entry that is not a pair of non-empty strings is skipped. The note lists these strings on
+    its line "case collisions here" (``compose`` reads strings only)."""
+    out: list[str] = []
+    for pair in pairs if isinstance(pairs, (list, tuple)) else ():
+        if (
+            isinstance(pair, (list, tuple))
+            and len(pair) == 2
+            and all(isinstance(p, str) and p for p in pair)
+            and (text := f"{pair[0]} ↔ {pair[1]}") not in out
+        ):
+            out.append(text)
+    return out
+
+
 # ---------------------------------------------------------------------------------------------------------
 # Sanitising
 # ---------------------------------------------------------------------------------------------------------
@@ -153,6 +171,14 @@ def _attr(text: object, cap: int = 64) -> str:
 
 def _name(text: object, cap: int = 64) -> str:
     return _NAME_KEEP.sub("", str(text or ""))[:cap] or "unknown"
+
+
+def _branch(ref: object, cap: int = 64) -> str:
+    """A branch for a fact line: the short name (``gitops.head_info`` reports the full symbolic ref,
+    ``refs/heads/main`` ⇒ ``main``), restricted like ``_name`` but keeping ``/`` (``feature/x``)."""
+    text = str(ref or "")
+    text = text[len("refs/heads/") :] if text.startswith("refs/heads/") else text
+    return _BRANCH_KEEP.sub("", text).strip("/")[:cap] or "unknown"
 
 
 def _cmd(text: object, cap: int = NAME_CAP) -> str:
@@ -242,7 +268,7 @@ def _item_details(item: PlanItem, decision: TargetDecision) -> str:
     git = item.git
     if item.kind is ItemKind.GIT_REPO and git is not None:
         if git.branch or git.head:
-            branch = _name(git.branch, 64) if git.branch else "detached"
+            branch = _branch(git.branch) if git.branch else "detached"
             head = _name(git.head, 64)[:7] if git.head else ""
             parts.append(f"branch {branch} @ {head}" if head else f"branch {branch}")
         if git.dirty:

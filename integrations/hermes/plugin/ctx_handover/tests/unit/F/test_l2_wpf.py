@@ -5,12 +5,14 @@ contract form of ``model_change`` in ctx records and summaries (X04/X22), the MC
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import types
 
 import pytest
 
 from ctx_handover.engine import commands, ctxrecords, surfaces
+from ctx_handover.engine import wire as real_wire
 from ctx_handover.engine.commands import EngineBackend, Plugin
 from ctx_handover.engine.continuation import Spawner
 from ctx_handover.engine.errors import ContinueRefused
@@ -18,7 +20,7 @@ from ctx_handover.tests.fakes.hostcompat_fake import FakeCtx
 from ctx_handover.tests.fakes.surfaces_fake import make_peer, sample_final_plan
 
 from .test_commands import SID, _plugin, _slash
-from .test_engine_backend import _stub_module
+from .test_engine_backend import _stub_module, c_report
 
 MIB = 1024**2
 ROTATED = "20261109_160000_bbbbbb"
@@ -109,9 +111,9 @@ def doctor_plugin(fake_host, monkeypatch, tmp_path):
             probes.append(measure_limit)
             report = {"gate": "ok", "plugin": True, "signed": True}
             if measure_limit:
-                sent.extend(size * MIB for size in commands.MEASURE_SIZES)  # what C's probe would upload
+                sent.extend(size * MIB for size in real_wire.PROBE_SIZES_MIB)  # what C's probe would upload
                 report["body_limit"] = 2 * MIB
-            return report
+            return c_report(self.peer, report)
 
         def close(self):
             pass
@@ -121,7 +123,13 @@ def doctor_plugin(fake_host, monkeypatch, tmp_path):
         def load(cls, ledger, *, read_secret, read_env_fresh):
             return types.SimpleNamespace(fingerprint=lambda: "0123456789abcdef", instance_id="01I")
 
-    _stub_module(monkeypatch, "wire", WireClient=Client, gate_warnings=lambda gate, *, env_mode: [])
+    _stub_module(
+        monkeypatch,
+        "wire",
+        WireClient=Client,
+        gate_warnings=lambda gate, *, env_mode: [],
+        PROBE_SIZES_MIB=real_wire.PROBE_SIZES_MIB,
+    )
     _stub_module(monkeypatch, "crypto", Identity=Identity)
     _stub_module(monkeypatch, "gitops", Git=lambda: object(), check_version=lambda git: (True, None))
     holder: dict = {}
@@ -144,13 +152,13 @@ def test_doctor_measures_body_limit_only_on_request(doctor_plugin):
     plugin, led, probes, sent = doctor_plugin
     out = _slash(plugin, "doctor")
     assert probes == [False] and sent == []
-    assert f"request body limit not measured yet (doctor --measure sends up to {commands.MEASURE_TEXT})" in out
-    assert commands.MEASURE_TEXT.startswith("15 MiB")
+    assert f"request body limit not measured yet (doctor --measure sends up to {commands.measure_text()})" in out
+    assert commands.measure_text().startswith("15 MiB")
     assert led.meta_get(commands.BODY_LIMIT_KEY + make_peer("server").peer_id) is None
 
     out = _slash(plugin, "doctor --measure")
     assert probes == [False, True] and sum(sent) == 15 * MIB
-    assert "a proxy limits request bodies to 2.0 MiB" in out and "(measured" not in out
+    assert "a proxy limits request bodies to 2 MiB" in out and "(measured" not in out  # C's summary (V27)
     stored = json.loads(led.meta_get(commands.BODY_LIMIT_KEY + make_peer("server").peer_id))
     assert stored["bytes"] == 2 * MIB
 
@@ -212,10 +220,11 @@ def test_model_change_contract_form_in_records_and_summary():
     assert "- Model:" not in no_change["content"]
 
     final = sample_final_plan()
-    summary = surfaces.plan_summary(final)
+    summary = surfaces.plan_summary(final)  # model and offline come from D's presend_summary (V10)
     assert summary["model"] == "qwen3 (local)" and summary["offline"] is True
-    assert surfaces.model_text(CONTRACT_CHANGE, "from") == "gpt-x (cloud)"
-    assert surfaces.model_text(flat) is None and surfaces._offline(flat) is None
+    flat_final = dataclasses.replace(final, model_change=flat)
+    flat_summary = surfaces.plan_summary(flat_final)
+    assert flat_summary["model"] is None and flat_summary["offline"] is None
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -337,11 +346,13 @@ def test_readme_discloses_the_body_limit_measurement():
 
     from .test_readme import FLAT
 
-    sizes = ", ".join(str(s) for s in commands.MEASURE_SIZES[:-1]) + f" and {commands.MEASURE_SIZES[-1]} MiB"
+    probe_sizes = real_wire.PROBE_SIZES_MIB  # cluster C's constant (V27)
+    sizes = ", ".join(str(s) for s in probe_sizes[:-1]) + f" and {probe_sizes[-1]} MiB"
     network = FLAT.split("**Network:**", 1)[1].split("**Inbound:**", 1)[0]
     assert "`doctor` sends one signed hello per paired gateway" in network
     assert f"only `doctor --measure` (local CLI, TUI or Desktop) uploads zero-filled test bodies of {sizes}" in network
-    assert re.search(rf"up to {sum(commands.MEASURE_SIZES)} MiB per paired gateway", network)
+    assert re.search(rf"up to {sum(probe_sizes)} MiB per paired gateway", network)
+    assert f"test bodies of {sizes} to each paired gateway" in surfaces.USAGE["doctor"]  # the help text too
 
 
 def test_fingerprint_is_cluster_c_rule_only():

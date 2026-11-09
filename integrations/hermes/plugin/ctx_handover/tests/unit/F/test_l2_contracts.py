@@ -23,7 +23,7 @@ from ctx_handover.tests.fakes.hostcompat_fake import FakeCtx
 from ctx_handover.tests.fakes.surfaces_fake import FakeBackend, make_peer, sample_final_plan
 
 from .test_commands import SID, _plugin, _slash
-from .test_engine_backend import _stub_module
+from .test_engine_backend import _stub_module, c_report
 
 MIB = 1024**2
 ACK = {
@@ -395,15 +395,15 @@ def test_dry_run_shows_the_plan_the_job_ended_with(fake_host, tmp_path):
         ({"gate": "unreachable", "plugin": False, "signed": False, "error": "peer_unreachable"}, None, False,
          "did not answer (peer_unreachable)", "network or VPN"),
         ({"gate": "rejected", "plugin": False, "signed": False, "error": "gate_rejected"}, None, False,
-         "refused the stored credential (session_token", "rejected the access credential"),
+         "refused the stored credential (", "store the current dashboard credential"),
         ({"gate": "ok", "plugin": False, "signed": False, "error": "listener_missing"}, None, False,
-         "ctx_handover did not (listener_missing)", "has no ctx_handover routes"),
+         "ctx_handover did not (listener_missing)", "install and enable ctx_handover"),
         ({"gate": "ok", "plugin": True, "signed": False, "error": "unauthorized"}, None, False,
-         "without a valid signed hello (unauthorized)", "did not accept this device's key"),
+         "without a valid signed hello (unauthorized)", "pair again"),
         ({"gate": "ok", "plugin": True, "signed": True, "body_limit": 8 * MIB}, 2.0, True,
-         "valid signature; request bodies of 8 MiB pass", None),
+         "valid signature; request bodies of 8.0 MiB pass", None),
         ({"gate": "ok", "plugin": True, "signed": True, "body_limit": 2 * MIB}, None, None,
-         "limits request bodies to 2.0 MiB", "raise the body limit"),
+         "limits request bodies to 2 MiB", "raise the body limit"),
         ({"gate": "ok", "plugin": True, "signed": True, "body_limit": 0}, None, None,
          "below 1 MiB", "raise the body limit"),
         ({"gate": "ok", "plugin": True, "signed": True, "body_limit": 8 * MIB}, -420.0, None,
@@ -411,20 +411,48 @@ def test_dry_run_shows_the_plan_the_job_ended_with(fake_host, tmp_path):
     ],
 )  # fmt: skip
 def test_doctor_peer_check_from_probe_report(probe, skew, ok, detail, remedy):
-    """W066/X24, DESIGN §14.1 doctor: ``WireClient.probe_gate`` reports ``gate``/``plugin``/``signed``/
-    ``error``/``body_limit`` (cluster C); the doctor line says which layer answered and what to do.
+    """V27/W066/X24, DESIGN §14.1 doctor: the line of a dialled peer is cluster C's ``probe_gate`` summary as it is
+    — its ``ok``, ``detail`` and ``remedy`` say which layer answered and what the body limit is — and F adds only the
+    clock skew, which C does not judge (a skew turns an ``ok`` line into a warning).
 
-    Red proof: mutant = ``peer_check`` reads ``probe["ok"]`` like layer 1 (``ok = bool(probe.get("ok"))`` for a
-    signed answer) → ``AssertionError: {'name': 'peer server', 'ok': False, 'detail': 'dashboard gate passed, …;
-    request bodies of 8 MiB pass', 'remedy': None}``.
+    Red proof: mutant = skew check removed ⇒ ``AssertionError: {'name': 'peer server', 'ok': True, 'detail':
+    'dashboard gate passed, …; request bodies of 8.0 MiB pass', 'remedy': None}`` (the -420 s case); an own
+    classification beside C's summary is the R test ``test_l2r_doctor_peer_line_is_the_probe_summary_of_wire``.
     """
-    check = commands.peer_check(make_peer("server"), probe, skew)
+    peer = make_peer("server")
+    report = c_report(peer, probe)
+    check = commands.peer_check(peer, report, skew)
     assert check["name"] == "peer server" and check["ok"] is ok, check
+    assert check["detail"].startswith(report["detail"]), (check, report)
     assert detail in check["detail"], check
+    if report["remedy"]:
+        assert report["remedy"] in check["remedy"], (check, report)
     if remedy is None:
         assert not check.get("remedy")
     else:
         assert remedy in (check.get("remedy") or ""), check
+
+
+def test_doctor_peer_check_shows_the_stored_measurement_with_its_date():
+    """``doctor`` without ``--measure`` (``body_limit_last`` in the probe): the last stored measurement with its date
+    — below the largest test body of ``wire.PROBE_SIZES_MIB`` a warning with C's remedy wording — or how to measure;
+    a failing line gets no measurement text."""
+    from ctx_handover.engine import wire
+
+    peer = make_peer("server")
+    good = c_report(peer, {"gate": "ok", "plugin": True, "signed": True})
+    low = commands.peer_check(peer, {**good, "body_limit_last": {"bytes": 2 * MIB, "at": 0}})
+    assert low["ok"] is None and "a proxy limits request bodies to 2.0 MiB (measured 1970-01-01" in low["detail"]
+    assert f"to {max(wire.PROBE_SIZES_MIB)} MiB" in low["remedy"]
+    full = commands.peer_check(peer, {**good, "body_limit_last": {"bytes": 8 * MIB, "at": 0}})
+    assert full["ok"] is True and "request bodies of 8.0 MiB pass (measured" in full["detail"]
+    never = commands.peer_check(peer, {**good, "body_limit_last": None})
+    hint = f"not measured yet (doctor --measure sends up to {commands.measure_text()})"
+    assert never["ok"] is True and hint in never["detail"]
+    bad = c_report(peer, {"gate": "rejected", "plugin": False, "signed": False, "error": "gate_rejected"})
+    refused = commands.peer_check(peer, {**bad, "body_limit_last": None})
+    assert refused["ok"] is False and "measure" not in refused["detail"]
+    assert commands.peer_check(peer, {"gate": "ok"})["ok"] is False  # no C summary: nothing to show as fine
 
 
 def test_doctor_uses_c_gate_warnings(fake_host, monkeypatch):
@@ -452,8 +480,8 @@ def test_doctor_uses_c_gate_warnings(fake_host, monkeypatch):
 
 def test_identity_rotate_creates_a_new_key(fake_host, tmp_path):
     """W065/W119: ``/handover identity rotate`` calls ``crypto.Identity.create(…, rotate=True)``: a new key in the
-    profile ``.env`` and the ledger, and the profile's cached identity is the new one (the runner and the pull
-    client sign with it from now on).
+    profile ``.env`` and the ledger; F leaves the runtime's cached identity alone (L2-contracts §2 F) and the
+    runtime's own reload (``jobs._identity``) picks the new key, so the runner and the pull client sign with it.
 
     Red proof: mutant = ``rotate=False`` → ``assert '6f917c8554002e29' != '6f917c8554002e29'`` (the old key stays;
     the fingerprint differs per run).
@@ -478,7 +506,12 @@ def test_identity_rotate_creates_a_new_key(fake_host, tmp_path):
         out = _slash(plugin, "identity rotate")
         new_fp = ledger.meta_get(crypto.META_FP)
         assert old.fingerprint() != new_fp
-        assert f"New key {new_fp}" in out and runtime.identity.fingerprint() == new_fp
+        # §2 F: F does not touch the runtime's cache; the runtime reloads when the ledger names another key
+        assert f"New key {new_fp}" in out and runtime.identity is old
+        from ctx_handover.engine import jobs
+
+        runtime.identity_fp = old.fingerprint()
+        assert jobs._identity(runtime).fingerprint() == new_fp
         assert fake_host.env_file[crypto.IDENTITY_ENV]
         loaded = crypto.Identity.load(
             ledger, read_secret=hostcompat.read_secret, read_env_fresh=hostcompat.read_env_fresh

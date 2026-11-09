@@ -18,7 +18,7 @@ from collections.abc import Iterable, Iterator, Sequence
 
 from .blocks import encode_frame, verify_manifest
 from .contracts import JobContext
-from .errors import BadRequest, LeaseLost, NotFound
+from .errors import BadRequest, HandoverError, LeaseLost, NotFound
 from .jsonutil import from_wire, to_wire
 from .model import (
     CapsuleInfo,
@@ -60,6 +60,18 @@ def remote_options(options: Options) -> dict:
 
 def _op(data: dict) -> OpStatus:
     return from_wire(OpStatus, data)
+
+
+def _lost_state(exc: HandoverError) -> str | None:
+    """The source state a refused keepalive names when the source gave up its leases (route #9): a
+    ``source_reclaimed`` code, or a non-retryable refusal whose ``details.state`` is a lost state (not a stale
+    epoch of this conductor); None for every other error."""
+    if exc.code == "source_reclaimed" or exc.details.get("peer_code") == "source_reclaimed":
+        return "reclaimed"
+    state = exc.details.get("state")
+    if not exc.retryable and exc.details.get("reason") != "stale_epoch" and state in LOST_STATES:
+        return str(state)
+    return None
 
 
 class _Remote:
@@ -140,8 +152,15 @@ class RemoteSource(_Remote):
         return from_wire(SessionInfo, self._call(job, "source/lock", body))
 
     def heartbeat(self, job: JobContext) -> None:
+        """Route #9; a source that gave up its leases ⇒ ``LeaseLost`` naming its state (``reclaimed`` …), whether the
+        listener answers ``{state}`` (DESIGN §4.7) or refuses with that state (contract V17)."""
         self._open(job, Role.SOURCE)
-        state = self._call(job, "heartbeat", {"conductor_state": ""}).get("state")
+        try:
+            state = self._call(job, "heartbeat", {"conductor_state": ""}).get("state")
+        except HandoverError as exc:
+            state = _lost_state(exc)
+            if state is None:
+                raise
         if state in LOST_STATES:
             raise LeaseLost(f"the source gave up its leases (state {state})", state=state)
 
