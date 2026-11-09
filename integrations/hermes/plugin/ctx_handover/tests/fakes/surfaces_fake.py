@@ -312,6 +312,8 @@ class FakeBackend:
         self.granted: list[str] = []
         self.foreground_code = 0
         self.outbox: dict = {}
+        self.reclaim_result: dict = {"state": "reclaimed", "warnings": ["the copy on laptop stays active"]}
+        self.presend_by_job: dict[str, dict] = {}  # the conductor's journaled presend document per job (R32)
         self._n = 0
 
     def _rec(self, _call: str, **kw) -> None:
@@ -461,6 +463,12 @@ class FakeBackend:
         pulled = [{"peer": r.get("peer_id"), "at": r.get("at"), "items": r.get("items")} for r in self.pull_log]
         return {"jobs": list(self.jobs), "pull_log": list(self.pull_log), "outbox_pending": 0, "pulled_by": pulled}
 
+    def job_ids(self) -> list[str]:
+        """Every job id known here (``statuses`` and ``jobs``, plus the ids ``start_job`` handed out)."""
+        ids = [*self.statuses, *(str(j.get("job_id")) for j in self.jobs if j.get("job_id"))]
+        ids += [kw["job_id"] for name, kw in self.calls if name == "start_job"]
+        return list(dict.fromkeys(ids))
+
     def create_offer(self, peer, session_ref, options, *, side_question, include_secret=()) -> dict:
         refinement = side_question("which resources?") if side_question else None
         self._rec(
@@ -479,7 +487,7 @@ class FakeBackend:
 
     def reclaim(self, session_id: str, *, force: bool) -> dict:
         self._rec("reclaim", session_id=session_id, force=force)
-        return {"state": "reclaimed", "warnings": ["the copy on laptop stays active"]}
+        return dict(self.reclaim_result)
 
     def gc(self, *, job_id, all_jobs: bool) -> dict:
         self._rec("gc", job_id=job_id, all_jobs=all_jobs)
@@ -499,7 +507,10 @@ class FakeBackend:
     def suggestion_put(self, session_id: str, data: dict) -> None:
         self.suggestions.append((session_id, data))
 
-    def presend_summary(self, final) -> dict:
+    def presend_summary(self, final, *, job_id=None) -> dict:
+        self._rec("presend_summary", job_id=job_id)
+        if job_id in self.presend_by_job:
+            return _surfaces.plan_summary(final, self.presend_by_job[job_id])
         if not self.summary_extra:
             return _surfaces.plan_summary(final)
         return _surfaces.plan_summary(final, {**_plan.presend_summary(final), **self.summary_extra})

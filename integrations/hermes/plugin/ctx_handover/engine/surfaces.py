@@ -18,7 +18,7 @@ from typing import Any
 
 from . import plan as planning
 from . import settings as settings_rules
-from .errors import HandoverError
+from .errors import BadRequest, HandoverError
 from .model import (
     CommitAck,
     ContinueResult,
@@ -524,6 +524,42 @@ def short_job(job_id: object) -> str:
     return text[-6:] if text else "?"
 
 
+MIN_JOB_TOKEN = 4
+"""Fewest characters of a job id that ``match_job`` resolves (the printed short form has 6)."""
+FULL_JOB_LEN = 26
+_JOB_TOKEN = re.compile(r"\A[0-9A-Za-z]+\Z")
+
+
+def match_job(token: object, job_ids: Sequence[object], *, listed: bool = True) -> str:
+    """The job a typed id names (L3-F15): the printed short form (``short_job``, the id's last six characters) or
+    any other unique end or start of a job id resolves to the full id of ``job_ids`` (this gateway's jobs, every
+    role), case-insensitively; an exact id wins. Several matches ⇒ ``BadRequest`` naming them (``listed=False``
+    — a caller on a messaging platform — names only their count). Anything else is returned unchanged — a full
+    id, a token shorter than ``MIN_JOB_TOKEN``, or one no job ends or starts with — so the engine answers "not
+    found" for it exactly as before."""
+    text = str(token or "").strip()
+    known = [str(j) for j in job_ids or () if j]
+    upper = text.upper()
+    exact = [j for j in known if j.upper() == upper]
+    if exact:
+        return exact[0]
+    if len(text) < MIN_JOB_TOKEN or len(text) >= FULL_JOB_LEN or not _JOB_TOKEN.match(text):
+        return text
+    found = list(dict.fromkeys(j for j in known if j.upper().endswith(upper) or j.upper().startswith(upper)))
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        return text
+    if not listed:
+        raise BadRequest(
+            f"{text} matches {len(found)} handovers; give more characters of the job id (/handover status lists "
+            "yours).",
+            field="job",
+        )
+    names = ", ".join(found[:5]) + (f" and {len(found) - 5} more" if len(found) > 5 else "")
+    raise BadRequest(f"{text} matches several handovers: {names}. Give more characters or the full id.", field="job")
+
+
 def when(ts: object) -> str:
     try:
         return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")  # type: ignore[arg-type]
@@ -573,20 +609,26 @@ CONFIRM_WORKSPACE_EXCLUDED: str = planning.CONFIRM_WORKSPACE_EXCLUDED
 """Reason (h) of cluster D (``reports/L2/gp-d-api.md`` §2a, R30): the policy left the session's working folder out
 (for example it lies inside the Hermes home), so its project does not come along."""
 
+CONFIRM_CONTEXT: str = planning.CONFIRM_CONTEXT
+"""Reason (i) of cluster D (``reports/L2/g3-df-api.md`` §1, R32): the session is larger than the context window of
+the model on the target, so the target compacts it on its first turn."""
+
 YES_EXEMPT: frozenset[str] = planning.YES_EXEMPT
-"""Reasons a blanket yes (``--yes``) never confirms: D's ``plan.YES_EXEMPT`` (R30; suspected secrets, R25, are an
-item marker and handled apart)."""
+"""Reasons a blanket yes (``--yes``) never confirms: D's ``plan.YES_EXEMPT`` (R30, R32; suspected secrets, R25, are
+an item marker and handled apart)."""
 
 REASON_TEXT = {
     planning.CONFIRM_PROPOSED: "some items are only proposed (found by the model, the agent or outside the project)",
     planning.CONFIRM_CONFLICT: "a destination has local changes, so a fresh folder is used",
     planning.CONFIRM_LARGE: "the handover is larger than confirm_above_mb",
     planning.CONFIRM_SECRET: "--include-secret sends a file from the secrets list",
-    planning.CONFIRM_MODEL: "the model there does not work offline, or the session is larger than its context window",
+    planning.CONFIRM_MODEL: "the model there does not work offline (this session's model did)",
     planning.CONFIRM_OUTSIDE: "items outside the project folder (or tracked secret files) are included",
     planning.CONFIRM_INSTRUCTIONS: "instruction files (AGENTS.md, .hermes.md …) arrive from an unverified source",
     CONFIRM_WORKSPACE_EXCLUDED: "the session's working folder stays here because the policy leaves it out, so its "
     "project does not come along (--yes does not confirm this; --no-workspace does)",
+    CONFIRM_CONTEXT: "the session is larger than the context window of the model there, so it is compacted on its "
+    "first turn there (/compress here first keeps that in your hands; --yes does not confirm this)",
 }
 
 SUSPECTED_SECRET: str = planning.SUSPECTED_SECRET
@@ -676,6 +718,29 @@ def workspace_excluded_text(entry: Mapping) -> str:
     return f"the working folder {entry.get('path')} stays here ({_workspace_why(entry)})"
 
 
+def context_over_entry(value: Any) -> dict | None:
+    """D's ``presend_summary["context_over"]`` (R32) when it has its form — positive integer ``tokens`` and
+    ``context_length`` with ``tokens > context_length`` (``model`` optional) — else None: the surface invents no
+    window."""
+    if not isinstance(value, Mapping):
+        return None
+    tokens, window = value.get("tokens"), value.get("context_length")
+    if not (_count(tokens) and _count(window) and tokens > window):
+        return None
+    model = value.get("model")
+    return {"tokens": tokens, "context_length": window, "model": model if isinstance(model, str) and model else None}
+
+
+def context_over_text(entry: Mapping) -> str:
+    """``the session (about <n> tokens) is larger than the context window of <model> there (<w> tokens); it is
+    compacted on its first turn there`` (R32, L3-F17)."""
+    model = entry.get("model") or "the model"
+    return (
+        f"the session (about {entry.get('tokens'):,} tokens) is larger than the context window of {model} there "
+        f"({entry.get('context_length'):,} tokens); it is compacted on its first turn there"
+    )
+
+
 def suspected_secrets(info: Mapping | None) -> list[str]:
     """Proposals the policy flagged as suspected secrets (R25): plan items with ``include == proposed`` whose
     ``reasons`` contain the exact element ``SUSPECTED_SECRET`` (X05, W126), plus the conductor's
@@ -729,7 +794,8 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
     computed from ``final`` only when there is none) — ``items_count``, ``total_bytes``, ``excluded_secrets``,
     ``denied_tracked``, ``withheld_stash``, ``outside_workspace``, ``instruction_files``, ``model``, ``offline`` —
     plus the per-item rows, proposals, conflicts and need of D's ``plan.summarize`` when ``final`` is known, and
-    ``workspace_excluded`` (the working folder the policy left out, R30; None unless it has D's form). F adds
+    ``workspace_excluded`` (the working folder the policy left out, R30; None unless it has D's form) and
+    ``context_over`` (the session is larger than the target model's window, R32; same rule). F adds
     nothing of its own except the suspected-secret list (R25). ``instruction_files`` (the target's result, with
     ``status``) replaces the summary's list when given."""
     pre: dict = dict(presend) if isinstance(presend, Mapping) else {}
@@ -761,6 +827,7 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
         "withheld_stash": _texts(pre.get("withheld_stash")),
         "outside_workspace": _texts(pre.get("outside_workspace")),
         "workspace_excluded": _workspace_excluded(pre.get("workspace_excluded")),
+        "context_over": context_over_entry(pre.get("context_over")),
         "item_list": item_list,
         "proposed": int(full.get("proposed") or 0),
         "conflicts": int(full.get("conflicts") or 0),
@@ -776,9 +843,12 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
 
 def confirm_question(summary: Mapping, peer: str | None) -> str:
     """``Hand over to <peer>: <n> items, <size>, <k> proposed, <c> conflicts, model <m> (offline: yes/no).
-    [The working folder <path> stays here (<why>).] Continue?``"""
+    [The working folder <path> stays here (<why>).] [The session (about <n> tokens) is larger than …] Continue?``"""
     excluded = _workspace_excluded(summary.get("workspace_excluded"))
     folder = f"The {workspace_excluded_text(excluded).removeprefix('the ')}. " if excluded else ""
+    over = context_over_entry(summary.get("context_over"))
+    if over:
+        folder += f"The {context_over_text(over).removeprefix('the ')}. "
     return (
         f"Hand over to {peer or 'the bundle'}: {summary.get('items_count', 0)} items, "
         f"{human_bytes(summary.get('total_bytes', 0))}, {summary.get('proposed', 0)} proposed, "
@@ -814,6 +884,9 @@ def render_plan(summary: dict) -> str:
             f"Working folder left out: {excluded['path']} ({_workspace_why(excluded)}); the session continues there "
             "without its project."
         )
+    over = context_over_entry(s.get("context_over"))
+    if over:
+        lines.append(f"Context: {context_over_text(over)} (/compress here first to keep that in your hands).")
     for row in s.get("items") or ():
         dest = f" → {row.get('dest')}" if row.get("dest") else ""
         conflict = f" (conflict: {row['conflict']})" if row.get("conflict") else ""
@@ -858,6 +931,9 @@ def render_presend(summary: dict, peer: str | None, mode: Mode | str) -> str:
     excluded = _workspace_excluded(s.get("workspace_excluded"))
     if excluded:
         extras.append(workspace_excluded_text(excluded))
+    over = context_over_entry(s.get("context_over"))
+    if over:
+        extras.append(context_over_text(over))
     return head + ("; " + "; ".join(extras) if extras else "") + "."
 
 
@@ -911,6 +987,14 @@ def _job_line(job: Mapping) -> list[str]:
         title = job.get("title")
         named = f" ({title})" if isinstance(title, str) and title else ""
         lines.append(f"    session here: {session}{named}")
+    arrived = _target_session(job.get("target_session"), None) if side is None else None
+    if arrived is not None and str(job.get("mode")) in {"pull", "import", "push", "offer"}:
+        # L17: the session this job created on the target — here after a pull/import, on the peer after a push
+        where_session = "here" if str(job.get("mode")) in {"pull", "import"} else f"on {job.get('peer') or 'the peer'}"
+        named = f" ({arrived['title']})" if arrived.get("title") else ""
+        lines.append(
+            f"    session {where_session}: {arrived['id']}{named} (open it with `hermes --resume {arrived['id']}`)"
+        )
     for w in job.get("warnings") or ():
         lines.append(f"    warning: {w}")
     err = job.get("last_error")
@@ -1033,7 +1117,8 @@ def render_error(err: HandoverError, peer: str | None) -> str:
     if code == "listener_missing":
         return (
             f"{p} has no ctx_handover routes. If you just installed or enabled it there, restart `hermes serve` "
-            f"and the gateway on {p}."
+            f"and the gateway on {p}. Under plugins.isolation: host a gateway cannot receive or provide handovers "
+            f"over HTTP (R33): set plugins.isolation: in_process on {p}, or use a bundle (/handover export)."
         )
     if code == "https_required":
         return (
@@ -1087,6 +1172,12 @@ def render_error(err: HandoverError, peer: str | None) -> str:
         return (
             f"{count} items are not allowed on {p}: {', '.join(items) or err.message}. Adjust allow_roots there or "
             "use --dest."
+        )
+    if code == "conflict" and _d(err, "kind") == "partial_exists":
+        where = str(_d(err, "path") or "") or "a folder"
+        return (
+            f"{where} is in the way on the receiving gateway and was not left there by this handover; nothing there "
+            "was changed. Move or remove it there, then hand over again."
         )
     if code == "restart_limit":
         return "The session kept changing during the handover (3 restarts). Pause work on it and try again."
@@ -1199,6 +1290,30 @@ def render_job_details(job: Mapping) -> str:
     return "\n".join(_note_block(job.get("note"), job.get("origin"), lists))
 
 
+def _target_session(entry: Mapping | None, ack: CommitAck | None) -> dict | None:
+    """``{"id", "title"}`` of the session the handover created on the target: the job's ``target_session`` (A, L17)
+    when its id is a non-empty string, else the ack's ``session_id``/``title``; None when neither names one."""
+    if isinstance(entry, Mapping) and isinstance(entry.get("id"), str) and entry["id"]:
+        title = entry.get("title")
+        return {"id": entry["id"], "title": title if isinstance(title, str) and title else None}
+    if ack is not None and isinstance(ack.session_id, str) and ack.session_id:
+        return {"id": ack.session_id, "title": ack.title or None}
+    return None
+
+
+def open_text(session_id: str, title: str | None = None) -> str:
+    """How to open a received session (L17; upstream read by g3-b): it is stored, not open — the Desktop sidebar and
+    ``hermes sessions list`` show it, ``hermes --resume <id>`` opens it; a gateway's list of open sessions (TUI
+    switcher, ``session.list`` without ``scope: stored``) shows it only after it was opened once."""
+    named = f'"{title}" ({session_id})' if title else session_id
+    return (
+        f"The session {named} is stored but not open yet: it is listed in the Desktop sidebar and in "
+        f"`hermes sessions list`. Open it with `hermes --resume {session_id}` (or pick it in the Desktop sidebar) "
+        "and send a message; the first turn gets a note about what changed. A gateway's list of open sessions "
+        "shows it only after it was opened once."
+    )
+
+
 def render_final(
     mode: Mode,
     ack: CommitAck | None,
@@ -1221,6 +1336,7 @@ def render_final(
     keep: bool = False,
     remote_gateway: bool = False,
     job: str | None = None,
+    target_session: Mapping | None = None,
 ) -> str:
     """Success text naming target session, folder, model, offline capability and the next step (R14, BX P6).
 
@@ -1229,10 +1345,20 @@ def render_final(
     the source does not release (V29, R18: local hints only narrow); the message lists them. Without ``ack`` (the
     target's acknowledgement is not recorded yet) the text names no session, model or offline capability — it points
     to ``/handover status <job>`` instead (L3-F03: never "session ?, model default").
+
+    ``target_session`` (additive, L17) is the job's ``{"id", "title"}`` of the session the handover created on the
+    target (cluster A, ``JobRunner.status``); with it (or the ack) the text names title and id and says exactly how to
+    open that session (``open_text``) — a received session is stored, not open, until someone opens it.
     """
     mode = Mode(mode)
     peer_name = peer or "the other gateway"
-    t = (ack.title if ack is not None and ack.title else None) or title or "this session"
+    arrived = _target_session(target_session, ack)
+    t = (
+        (ack.title if ack is not None and ack.title else None)
+        or (arrived or {}).get("title")
+        or title
+        or "this session"
+    )
     lists = {
         "excluded_secrets": excluded_secrets,
         "withheld": withheld,
@@ -1270,8 +1396,11 @@ def render_final(
         ]
         if continue_result is not None and continue_result.started:
             lines.append(f"The agent is continuing on {peer_name}.")
-        elif continue_error is not None:
-            lines.append(render_error(continue_error, peer))
+        else:
+            if continue_error is not None:
+                lines.append(render_error(continue_error, peer))
+            if arrived is not None:
+                lines.append(f"On {peer_name}: {open_text(arrived['id'], t)}")
         lines += _note_block(None, None, {"excluded_secrets": excluded_secrets, "warnings": lists["warnings"]})
         return "\n".join(lines)
     # pull, import: the session is here now
@@ -1285,6 +1414,12 @@ def render_final(
     else:
         if continue_error is not None:
             lines.append(render_error(continue_error, None))
-        lines.append("Open it from the session list and send a message; the first turn gets a note about what changed.")
+        if arrived is not None:
+            lines.append(open_text(arrived["id"], t))
+        else:
+            lines.append(
+                "Open it from the Desktop sidebar or `hermes sessions list` and send a message; the first turn gets "
+                "a note about what changed."
+            )
     lines += _note_block(note, origin, lists)
     return "\n".join(lines)

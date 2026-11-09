@@ -22,6 +22,14 @@ is ``no`` and named in ``not_transferred`` — e.g. it lies in the Hermes home),
 (``workspace_excluded``) and ``confirmation_reasons`` raises ``workspace_excluded`` (letter h), which a blanket yes
 never confirms (``YES_EXEMPT``/``yes_exempt``); the user's own ``--no-workspace`` is the explicit answer.
 
+Session larger than the target's context window (R32, L3-F17): ``context_over`` compares the estimated size of the
+session's active context (``ResourcePlan.context_tokens`` when the source estimated it with
+``active_context_tokens``, else the lineage total ``approx_tokens`` as an upper bound) with the target model's window
+(``target_window``: ``model_change.to.context_length`` on a model change, the target's own window when the model
+stays). Larger ⇒ ``presend_summary`` says so (``context_over``), ``confirmation_reasons`` raises ``context_over``
+(letter i, in ``YES_EXEMPT``) and the note on the target says that the first turn compacts (note part
+``context_tokens``). Nothing is refused.
+
 Suspected secrets (R25): an extra file the policy suspects (or could not check, no redactor) carries the exact reason
 element ``SUSPECTED_SECRET``; ``apply_choice(final, "yes")`` never confirms it and ``restrict_to_releasable`` never
 lets a counterpart confirm it. Only a local ``include_secret`` (``yes`` already in the plan) releases it.
@@ -35,12 +43,13 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import json
 import os
 import re
 import shutil
 import stat
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field, replace
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
 from . import collector, note, refine
@@ -90,6 +99,7 @@ CONFIRM_MODEL = "model"
 CONFIRM_OUTSIDE = "outside_workspace"
 CONFIRM_INSTRUCTIONS = "instruction_files"
 CONFIRM_WORKSPACE_EXCLUDED = "workspace_excluded"
+CONFIRM_CONTEXT = "context_over"
 CONFIRM_LETTERS: dict[str, str] = {
     CONFIRM_PROPOSED: "a",
     CONFIRM_CONFLICT: "b",
@@ -99,12 +109,15 @@ CONFIRM_LETTERS: dict[str, str] = {
     CONFIRM_OUTSIDE: "f",
     CONFIRM_INSTRUCTIONS: "g",
     CONFIRM_WORKSPACE_EXCLUDED: "h",
+    CONFIRM_CONTEXT: "i",
 }
-"""Confirmation reasons of DESIGN §14.1 (a)–(g) plus (h) ``workspace_excluded`` (R30) and their letters. ``None``
-(no answer) cancels the job for every reason except ``proposed`` alone, which only excludes the proposals (BX L5)."""
-YES_EXEMPT: frozenset[str] = frozenset({CONFIRM_WORKSPACE_EXCLUDED})
-"""Reasons a blanket yes (``--yes``, ``Options.yes``) never confirms (R30, like suspected secrets under R25): the
-conductor asks for them even with ``--yes``; without an answer the job ends with nothing locked."""
+"""Confirmation reasons of DESIGN §14.1 (a)–(g) plus (h) ``workspace_excluded`` (R30) and (i) ``context_over``
+(R32: the session is larger than the target model's context window; before G‴ part of (e)) and their letters.
+``None`` (no answer) cancels the job for every reason except ``proposed`` alone, which only excludes the proposals
+(BX L5)."""
+YES_EXEMPT: frozenset[str] = frozenset({CONFIRM_WORKSPACE_EXCLUDED, CONFIRM_CONTEXT})
+"""Reasons a blanket yes (``--yes``, ``Options.yes``) never confirms (R30, R32, like suspected secrets under R25):
+the conductor asks for them even with ``--yes``; without an answer the job ends with nothing locked."""
 
 CHOICES = ("yes", "no_proposed")
 
@@ -116,7 +129,7 @@ UNVERIFIED = "unverified"
 or revoked key, or the remote source of a pull (DESIGN §8.7 reason (g), SEC 4.3; a continuation refuses such an
 origin with this reason, R22). Surfaces import it with the reason codes (X03)."""
 REASON_CODES: tuple[str, ...] = tuple(CONFIRM_LETTERS)
-"""Every confirmation reason code, in letter order (a)–(h) (X03)."""
+"""Every confirmation reason code, in letter order (a)–(i) (X03)."""
 MAX_REFUSED_IDS = 256
 MAX_WARNINGS = 32
 
@@ -718,9 +731,14 @@ def build_plan(
     redact: Callable[[str], str] | None = None,
     remote_driven: bool = False,
     suggest_dest: Callable[[str], str | None] | None = None,
+    context_tokens: int | None = None,
 ) -> ResourcePlan:
     """The source's plan document (DESIGN §8.5) from the collector's candidates, the validated refinement, the
     agent tool's suggestions (merged here in every mode, BX H4) and the user's hints.
+
+    ``context_tokens`` (additive, R32) is the source's estimate of the session's active context
+    (``active_context_tokens``); it becomes ``ResourcePlan.context_tokens`` once that field exists (K0, added after the
+    v1 wire form) — until then the plan carries ``approx_tokens`` only and ``context_tokens_of`` falls back to it.
 
     ``redact`` (additive) is ``redact_sensitive_text(force=True)`` for the suspected-secret rule; without it every
     extra file is at most a proposal. ``remote_driven`` (additive): the hints come from the counterpart, so their
@@ -773,7 +791,7 @@ def build_plan(
     kept = [d for d in b.drafts if not d.denied or d.role is ItemRole.PRIMARY]
     _assign_ids(kept)
     items = tuple(_to_item(d, suggest_dest) for d in kept)
-    return ResourcePlan(
+    out = ResourcePlan(
         job_id=job_id,
         revision=tuple(revision),
         items=items,
@@ -788,6 +806,14 @@ def build_plan(
         approx_tokens=int(approx_tokens),
         warnings=_warning_list(getattr(busy, "warnings", ()), redact),
     )
+    return _with_context_tokens(out, context_tokens)
+
+
+def _with_context_tokens(rp: ResourcePlan, tokens: object) -> ResourcePlan:
+    """``rp`` with ``context_tokens`` set when the model has that field and ``tokens`` is a positive integer."""
+    if not _positive_int(tokens) or "context_tokens" not in {f.name for f in fields(ResourcePlan)}:
+        return rp
+    return replace(rp, context_tokens=int(tokens))  # type: ignore[call-arg]
 
 
 def replan(
@@ -1174,13 +1200,19 @@ PRESEND_KEYS = (
     "model",
     "offline",
     "workspace_excluded",
+    "context_over",
 )
-"""The keys of ``presend_summary`` the surfaces read (W125, R30 ``workspace_excluded``); ``item_list``, ``items`` and
-``extras_outside_workspace`` come on top."""
+"""The keys of ``presend_summary`` the surfaces read (W125, R30 ``workspace_excluded``, R32 ``context_over``);
+``item_list``, ``items`` and ``extras_outside_workspace`` come on top."""
 
 
 def presend_summary(
-    final: FinalPlan, *, withheld_stash: Sequence[str] = (), instructions: Sequence[dict] | None = None
+    final: FinalPlan,
+    *,
+    withheld_stash: Sequence[str] = (),
+    instructions: Sequence[dict] | None = None,
+    target_facts: EnvFacts | None = None,
+    source_facts: EnvFacts | None = None,
 ) -> dict:
     """The summary every first progress message carries (DESIGN §8.7, SEC 5.8, W125), keyed as the surfaces read
     it (``PRESEND_KEYS``):
@@ -1195,7 +1227,10 @@ def presend_summary(
     * ``model`` (``model_text``) and ``offline`` (``offline_capable``) of the target model — both None when the
       model stays (X04);
     * ``workspace_excluded``: the session's working directory the policy leaves behind (``workspace_excluded``,
-      R30) as ``{"path", "reason", "why"}``, else None.
+      R30) as ``{"path", "reason", "why"}``, else None;
+    * ``context_over``: ``{"tokens", "context_length", "model"}`` when the session is larger than the target model's
+      window (``context_over``, R32; ``target_facts``/``source_facts`` additive as in ``confirmation_reasons``), else
+      None.
 
     ``items`` and ``extras_outside_workspace`` are the layer-1 names of ``items_count`` and ``outside_workspace``,
     kept with the same values for readers that have not moved yet."""
@@ -1218,6 +1253,7 @@ def presend_summary(
         "model": model_text(final.model_change),
         "offline": _model_offline(final.model_change),
         "workspace_excluded": workspace_excluded(final),
+        "context_over": context_over(final, target_facts=target_facts, source_facts=source_facts),
         "item_list": [
             {"item_id": i.item_id, "kind": i.kind.value, "path": i.source_path, "size": i.size_estimate}
             for i in included
@@ -1258,13 +1294,69 @@ def _model_offline(model_change: dict | None) -> bool | None:
     return flag if isinstance(flag, bool) else None
 
 
-def _model_context(model_change: dict | None) -> int | None:
-    """``model_change["to"]["context_length"]`` when it is a positive integer (X04), else None."""
-    to = _model_to(model_change)
-    value = to.get("context_length") if to is not None else None
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return value
-    return None
+def _positive_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def active_context_tokens(rows: Iterable[object], tip_id: str | None = None) -> int:
+    """Estimated tokens of the session's active context (R32): what the target's model loads on the first turn —
+    the rows of the tip segment (``row["session_id"] == tip_id``; every row without ``tip_id`` or without a session
+    id) that a compaction or a rewind did not deactivate (an explicit falsy ``active``; a row without the flag
+    counts), content plus tool-call arguments, four characters a token. ``approx_tokens`` (the whole lineage with its
+    inactive rows) is an upper bound of this."""
+    chars = 0
+    for row in rows or ():
+        if not isinstance(row, Mapping):
+            continue
+        sid = row.get("session_id")
+        if tip_id and isinstance(sid, str) and sid and sid != tip_id:
+            continue
+        if "active" in row and not row.get("active"):
+            continue
+        chars += len(str(row.get("content") or ""))
+        calls = row.get("tool_calls")
+        if isinstance(calls, str):
+            chars += len(calls)
+        elif calls:
+            chars += len(json.dumps(calls, ensure_ascii=False, default=str))
+    return chars // 4
+
+
+def context_tokens_of(final_or_plan: FinalPlan | ResourcePlan) -> int:
+    """The size the window check uses: ``ResourcePlan.context_tokens`` (the source's active-context estimate) when
+    the plan carries one, else ``approx_tokens`` (lineage total, an upper bound); never negative."""
+    rp = final_or_plan.plan if isinstance(final_or_plan, FinalPlan) else final_or_plan
+    estimate = _positive_int(getattr(rp, "context_tokens", None))
+    if estimate is not None:
+        return estimate
+    approx = rp.approx_tokens
+    return approx if isinstance(approx, int) and not isinstance(approx, bool) and approx > 0 else 0
+
+
+def target_window(
+    model_change: dict | None, *, target_facts: EnvFacts | None = None, source_facts: EnvFacts | None = None
+) -> int | None:
+    """The target model's context window in tokens, or None when unknown (R32) — ``note.context_window``, the one
+    rule for the plan and the note: a model change (X04) reads ``to.context_length``; a model that stays is the
+    target's main model when the source's main model and provider are the same (or the source facts are absent), so
+    its window is ``target_facts.host.context_length``."""
+    return note.context_window(model_change, target=target_facts, source=source_facts)
+
+
+def context_over(
+    final: FinalPlan, *, target_facts: EnvFacts | None = None, source_facts: EnvFacts | None = None
+) -> dict | None:
+    """``{"tokens", "context_length", "model"}`` when the session's active context (``context_tokens_of``) is larger
+    than the target model's window (``target_window``), else None (R32, L3-F17). ``model`` names the target model
+    (``model_change.to.model``, or the target's own model when it stays; None when unknown)."""
+    window = target_window(final.model_change, target_facts=target_facts, source_facts=source_facts)
+    tokens = context_tokens_of(final)
+    if window is None or tokens <= window:
+        return None
+    to = _model_to(final.model_change)
+    host = getattr(target_facts, "host", None)
+    name = to.get("model") if to is not None else getattr(host, "model", None)
+    return {"tokens": tokens, "context_length": window, "model": _clean(name, 128) if isinstance(name, str) else None}
 
 
 def confirmation_reasons(
@@ -1274,6 +1366,8 @@ def confirmation_reasons(
     *,
     instructions: Sequence[dict] = (),
     cfg: PolicyConfig | None = None,
+    target_facts: EnvFacts | None = None,
+    source_facts: EnvFacts | None = None,
 ) -> list[str]:
     """Why the user must confirm before anything is locked (DESIGN §14.1 (a)–(g)), in that order.
 
@@ -1284,9 +1378,12 @@ def confirmation_reasons(
     ``PolicyConfig`` — the conductor passes it when the source is local (push, export); its ``include_secret`` holds
     exactly the paths given by a local ``--include-secret``. ``options.hints.include_secret`` is never read: hints may
     come from the counterpart and never release a secret (R18). Reason (e) reads ``final.model_change`` only in the
-    form of contract X04. Reason (h) ``workspace_excluded`` (R30): the policy leaves the session's working directory
-    behind (``workspace_excluded``) and the user did not say ``--no-workspace`` (``options.hints.no_workspace``); a
-    blanket yes never confirms it (``YES_EXEMPT``)."""
+    form of contract X04: a local source handed to a model that is not offline-capable. Reason (h)
+    ``workspace_excluded`` (R30): the policy leaves the session's working directory behind (``workspace_excluded``)
+    and the user did not say ``--no-workspace`` (``options.hints.no_workspace``). Reason (i) ``context_over`` (R32):
+    the session's active context is larger than the target model's window (``context_over``; ``target_facts`` and
+    ``source_facts`` are additive — the conductor's facts after FACTS; without them only a model change's
+    ``to.context_length`` is known). A blanket yes never confirms (h) or (i) (``YES_EXEMPT``)."""
     reasons = []
     if any(i.include is Include.PROPOSED for i in final.plan.items):
         reasons.append(CONFIRM_PROPOSED)
@@ -1298,11 +1395,8 @@ def confirmation_reasons(
         reasons.append(CONFIRM_SECRET)
     changed = isinstance(final.model_change, dict)
     offline = _model_offline(final.model_change)
-    context = _model_context(final.model_change)
     # a changed model without a boolean offline flag counts as not offline-capable: (e) asks rather than stays silent
-    if (source_offline and changed and offline is not True) or (
-        context is not None and final.plan.approx_tokens > context
-    ):
+    if source_offline and changed and offline is not True:
         reasons.append(CONFIRM_MODEL)
     if _outside_workspace(final) or _denied_tracked(final):
         reasons.append(CONFIRM_OUTSIDE)
@@ -1310,6 +1404,8 @@ def confirmation_reasons(
         reasons.append(CONFIRM_INSTRUCTIONS)
     if workspace_excluded(final) is not None and options.hints.no_workspace is not True:
         reasons.append(CONFIRM_WORKSPACE_EXCLUDED)
+    if context_over(final, target_facts=target_facts, source_facts=source_facts) is not None:
+        reasons.append(CONFIRM_CONTEXT)
     return reasons
 
 
@@ -1367,7 +1463,9 @@ def note_parts_from(
     ``note.compose`` renders (``note.NOTE_PART_KEYS``): ``source_kept`` says the session stays active on the source
     (an export with ``--keep`` or the import of such a copy; O3, W070); ``warnings`` are the plan's warnings
     (``ResourcePlan.warnings``) followed by ``warnings``; ``pack_time`` (seconds since the epoch) and ``title``
-    (the session title, shown only inside the note's data block) appear when given.
+    (the session title, shown only inside the note's data block) appear when given; ``context_tokens`` is the size
+    of the session's active context (``context_tokens_of``) — the target compares it with its own window and says in
+    the note that the first turn compacts (R32).
 
     ``extra`` adds or extends keys of the same set: a list extends the list already there (without duplicates),
     any other value fills a key that is missing or empty. A key ``note.compose`` does not render raises
@@ -1391,6 +1489,7 @@ def note_parts_from(
         "source_kept": bool(source_kept),
         "instruction_files": [dict(i) for i in instruction],
         "warnings": list(dict.fromkeys([*resource.warnings, *(str(w) for w in warnings)]))[:MAX_WARNINGS],
+        "context_tokens": context_tokens_of(resource),
     }
     if isinstance(pack_time, (int, float)) and not isinstance(pack_time, bool) and pack_time > 0:
         parts["pack_time"] = float(pack_time)

@@ -560,7 +560,7 @@ def test_confirmation_reasons(lay):
         replace(base.plan, approx_tokens=900_000),
         model_change=model_change(to_model="q", to_provider="llamacpp", context_length=65536, offline_capable=True),
     )
-    assert plan.confirmation_reasons(window, Options(), False) == [plan.CONFIRM_MODEL]
+    assert plan.confirmation_reasons(window, Options(), False) == [plan.CONFIRM_CONTEXT]  # G‴ R32: (i), not (e)
     outside = with_items(plan.user_item("x0", str(lay.notes / "todo.md"), ItemKind.EXTRA_FILE))
     assert plan.confirmation_reasons(outside, Options(), False) == [plan.CONFIRM_OUTSIDE]
     tracked = final_plan(
@@ -582,6 +582,7 @@ def test_confirmation_reasons(lay):
         plan.CONFIRM_OUTSIDE: "f",
         plan.CONFIRM_INSTRUCTIONS: "g",
         plan.CONFIRM_WORKSPACE_EXCLUDED: "h",
+        plan.CONFIRM_CONTEXT: "i",
     }
 
 

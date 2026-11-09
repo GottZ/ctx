@@ -287,7 +287,7 @@ def test_gp_cwd_in_hermes_home_is_named_and_needs_an_answer(lay):
     reasons = plan.confirmation_reasons(final, Options(), False)
     assert reasons == [plan.CONFIRM_WORKSPACE_EXCLUDED] == ["workspace_excluded"]
     assert plan.CONFIRM_LETTERS["workspace_excluded"] == "h"
-    assert plan.REASON_CODES[-1] == "workspace_excluded"
+    assert plan.REASON_CODES[-2] == "workspace_excluded"  # G‴: (i) context_over follows (R32)
     assert plan.yes_exempt(reasons) == ["workspace_excluded"]
     assert plan.yes_exempt(["proposed", "large", "model", "include_secret"]) == []
     confirmed = plan.apply_choice(final, "yes")  # the excluded workspace never becomes "yes"

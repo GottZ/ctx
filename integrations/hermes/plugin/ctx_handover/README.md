@@ -38,9 +38,11 @@ session-relay (fresh session on the same gateway).
   30 minutes for the session (then Hermes reports it as not processed) and otherwise meets the lock. When the chat
   stored the message on submit (TUI and Desktop do), it travels along as the session's last message, and the note
   on the other side says it is waiting there.
-- Under `plugins.isolation: host` there is no `hermes handover` CLI (use the slash form), no progress notice
-  (`/handover status` shows progress), and Hermes buffers request bodies before this plugin's size limit applies —
-  prefer `in_process` or a proxy body limit on a receiving gateway.
+- Under `plugins.isolation: host` a gateway cannot receive or provide handovers over HTTP: its ctx_handover
+  routes need `in_process` (the default). Such a gateway still hands sessions over by dialing a paired gateway
+  (`take`, `to`) and with bundles (`export`, `import`); `/handover doctor` says so (FAIL when paired devices dial
+  it). It also has no `hermes handover` CLI (use the slash form) and no progress notice (`/handover status` shows
+  progress), and Hermes buffers request bodies before this plugin's size limit applies.
 - **Sessions from older Hermes builds.** Messages written before Hermes stamped message and tool-call identities
   get stable identities derived from the original rows during the transfer; the source session is not modified.
   If Hermes backfills those identities on the source while a handover is running, the target refuses the late
@@ -109,32 +111,38 @@ back here; the copy on the other gateway stays active.
 
 Before anything is locked the plugin shows what would move. It asks for a confirmation when items are only
 proposed, a destination has local changes (a fresh folder is used), the handover is larger than
-`confirm_above_mb`, a secret is included with `--include-secret`, the model there does not work offline or the
-session is larger than its context window, items outside the project are included, instruction files arrive
-from an unverified source, or the session's working folder is left out by the policy (for example because it lies
-inside the Hermes home; the summary names the folder, and the project does not come along). The choices are *yes*,
-*yes without the proposed items*, *show the plan and stop*, *cancel*; `--yes` skips the question. `--yes` does not
-confirm a left-out working folder: a person answers that question (without an answer nothing is locked), or
-`--no-workspace` hands the session over without its folder on purpose. Files that look like secrets are never sent
-by a blanket yes (neither `--yes` nor the *yes* choice takes them along); name each one with
-`--include-secret <path>`. An unanswered question (no reply within Hermes' question timeout
+`confirm_above_mb`, a secret is included with `--include-secret`, the model there does not work offline (this
+session's model did), items outside the project are included, instruction files arrive from an unverified source,
+the session's working folder is left out by the policy (for example because it lies inside the Hermes home; the
+summary names the folder, and the project does not come along), or the session is larger than the context window
+of the model there (the summary and the note name both sizes; the other side compacts the conversation on its first
+turn). The choices are *yes*, *yes without the proposed items*, *show the plan and stop*, *cancel*; `--yes` skips
+the question. `--yes` does not confirm a left-out working folder: a person answers that question (without an answer
+nothing is locked), or `--no-workspace` hands the session over without its folder on purpose. Nor does it confirm a
+session larger than the context window there: a person answers, or `/compress` in the session first makes it
+fit. Files that look like secrets are never sent by a blanket yes (neither `--yes` nor the *yes* choice takes them
+along); name each one with `--include-secret <path>`. An unanswered question (no reply within Hermes' question timeout
 `agent.clarify_timeout`, 90 s by default) continues without the proposed items when those are the only reason and
 cancels otherwise — nothing is locked in either case.
 
-The final message names the session on the other side, its folder, the model and whether it works offline, and
-what to do next; after a pull it also lists paths you asked for with `--include` that the other side does not
-release (withheld by source policy — a pull's own hints only narrow what the source offers). On the receiving side
-`/handover status <job>` shows the note the agent gets with your first message there; the note is not shown in
-the transcript view. `/handover status` also shows the jobs another gateway runs with this one — a push that
-arrived here, a pull that took a session from here — listed with this gateway's role (`target, from <peer>` or
-`source, to <peer>`) and, for an arrival, the session it became here.
+The final message names the session on the other side (title and session id), its folder, the model and whether it
+works offline, and what to do next. A received session is stored, not open: it is listed in the Desktop sidebar and in
+`hermes sessions list`, and `hermes --resume <session-id>` opens it (a gateway's list of open sessions, such as the
+TUI switcher, shows it only after it was opened once). After a pull the final message also lists paths you asked for
+with `--include` that the other side does not release (withheld by source policy — a pull's own hints only narrow what
+the source offers). On the receiving side `/handover status <job>` shows the note the agent gets with your first
+message there; the note is not shown in the transcript view. `/handover status` also shows the jobs another gateway
+runs with this one — a push that arrived here, a pull that took a session from here — listed with this gateway's role
+(`target, from <peer>` or `source, to <peer>`) and, for an arrival, the session it became here.
 
 All commands: `/handover to | take | export | import | status | peers | pair | reclaim | cancel | resume | setup |
 doctor | identity | gc | logs | help` — `/handover help <command>` shows the options. `hermes handover <same>` runs
-them in a terminal (`--json` for scripts, `--session <id>` names the session; exit codes 0 ok, 1 failed, 2 usage,
-3 busy/conflict, 4 auth/gate, 5 in-doubt/suspended). Administrative and data-moving commands (`pair`, `setup`,
-`peers`, `identity`, `take`, `to`, `export`, `import`, `reclaim`, `resume`, `gc`, `cancel`) answer only in the
-local CLI, TUI or Desktop; on messaging platforms they are refused.
+them in a terminal (`--json` for scripts, `--session <id>` names the session; exit codes 0 ok, 1 failed, 2 usage, 3
+busy/conflict, 4 auth/gate, 5 in-doubt/suspended; a refusal carries `ok: false` and `error.code` in `--json` — a
+`reclaim` refused while a handover is being committed exits 3). `status`, `cancel`, `resume`, `logs` and `gc --job`
+take the six-character job id the messages print (or any other unique start or end of the id). Administrative and
+data-moving commands (`pair`, `setup`, `peers`, `identity`, `take`, `to`, `export`, `import`, `reclaim`, `resume`,
+`gc`, `cancel`) answer only in the local CLI, TUI or Desktop; on messaging platforms they are refused.
 
 The agent has a `handover` tool: it can show the plan, name resources the file scan cannot see (paths, tools and
 the names — never values — of environment variables; anything outside the project is only proposed) and ask for a
@@ -215,7 +223,8 @@ workspace unencrypted (0600).
 **Model use (on by default, `refine: off` disables it):** once per handover the plugin asks for resources the file
 scan missed — as a side question to the session's own model (with the `llm.side_question` grant; this sends the
 whole session context once, so it is skipped above 200 000 tokens) or as up to 60,000 characters of redacted
-recent transcript to your main model. Inference costs are yours.
+recent transcript to your main model. Inference costs are yours. `refine: off` stops these calls; an offer made
+in a gateway (`/handover to <peer>`) keeps the answer it already got and passes it on.
 
 **ctx (optional):** with ctx_checkpoint as memory provider and your consent in `/handover setup`, one redacted
 record per side of each handover through Hermes' MCP dispatch; a side finished without ctx (e.g. offline) is

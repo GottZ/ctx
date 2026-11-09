@@ -176,6 +176,7 @@ class Backend(Protocol):
     def cancel(self, job_id: str) -> str: ...
     def resume(self, job_id: str) -> None: ...
     def job_status(self, job_id: str | None) -> dict: ...
+    def job_ids(self) -> list[str]: ...
     def create_offer(
         self,
         peer: Peer,
@@ -192,7 +193,7 @@ class Backend(Protocol):
     def session_state(self, session_id: str) -> dict: ...
     def session_source(self, session_id: str) -> str | None: ...
     def suggestion_put(self, session_id: str, data: dict) -> None: ...
-    def presend_summary(self, final: FinalPlan) -> dict: ...
+    def presend_summary(self, final: FinalPlan, *, job_id: str | None = None) -> dict: ...
     def doctor_checks(self, *, measure: bool = False) -> list[dict]: ...
     def flush_outbox(self, call_mcp: Callable[..., dict] | None) -> dict: ...
     def grant_ctx(self, server: str) -> None: ...
@@ -543,6 +544,14 @@ class Plugin:
             )
         return str(sid)
 
+    def _resolve_job(self, token: object, call: Call) -> str:
+        """The full id of a job named by its printed short form or another unique start or end of its id (L3-F15,
+        ``surfaces.match_job``); a caller on a messaging platform is not shown other jobs' ids."""
+        text = str(token or "").strip()
+        if not text:
+            return text
+        return surfaces.match_job(text, self.backend.job_ids(), listed=call.local)
+
     def _peer(self, name: str | None, *, want: str | None = None) -> Peer:
         if not name:
             raise BadRequest("Name the device: /handover peers lists the paired ones.", field="peer")
@@ -659,11 +668,14 @@ class Plugin:
                     call.say(_yes_refused_text(summary, state.yes_refused))
                 call.say("No answer to the confirmation, so the handover was cancelled. Nothing was locked.")
                 call.exit_code = EXIT_FAILED
+                call.data["error"] = _not_confirmed(state, "no answer to the confirmation; nothing was locked")
             else:
                 call.say("Cancelled. Nothing was locked.")
                 call.exit_code = EXIT_FAILED if not options.dry_run else EXIT_OK
+                if not options.dry_run:
+                    call.data["error"] = _not_confirmed(state, "cancelled at the confirmation; nothing was locked")
             return
-        summary = backend.presend_summary(final)
+        summary = backend.presend_summary(final, job_id=job_id)
         presend = surfaces.render_presend(summary, peer_name, mode)
         if call.cli:
             call.say(presend) if call.json_mode else reporter.info(presend)
@@ -679,8 +691,10 @@ class Plugin:
                     )
                     call.exit_code = EXIT_DOUBT
                     return
-            call.say(self._final_text(job_id, mode, peer_name, options))
+            status = self._status_or_error(job_id)
+            call.say(self._final_text(job_id, mode, peer_name, options, status=status))
             call.exit_code = int(code)
+            self._job_outcome(status, call)
             return
         reporter.start(presend)
         backend.continue_async(job_id)
@@ -690,13 +704,55 @@ class Plugin:
             "/handover cancel stops it before the commit."
         )
 
-    def _final_text(self, job_id: str | None, mode: Mode, peer: str | None, options: Options) -> str:
+    def _status_or_error(self, job_id: str) -> dict | HandoverError:
+        try:
+            return self.backend.job_status(job_id)
+        except HandoverError as err:
+            return err
+
+    def _job_outcome(self, status: dict | HandoverError, call: Call) -> None:
+        """L3-F14: a job the runner ended without success carries its ``last_error`` into ``--json`` (``error.code``,
+        e.g. ``session_busy``), as a refusal by the command itself does; the state is reported as well. Success only
+        on the explicitly positive exit code 0 of a job in a finished state — anything else keeps its code."""
+        if isinstance(status, HandoverError):  # the runner's exit code stands; its record could not be read
+            if call.exit_code != EXIT_OK:
+                call.data.setdefault("error", {"code": status.code, "message": status.message})
+            return
+        job = status.get("job") if isinstance(status.get("job"), Mapping) else status
+        state = str(job.get("state") or "")
+        call.data["state"] = state or None
+        if isinstance(job.get("target_session"), Mapping):
+            call.data["target_session"] = dict(job["target_session"])
+        if call.exit_code == EXIT_OK and state in FINISHED_STATES:
+            return
+        err = job.get("last_error") if isinstance(job.get("last_error"), Mapping) else None
+        if err and err.get("code"):
+            call.data.setdefault(
+                "error",
+                {
+                    "code": str(err.get("code")),
+                    "message": str(err.get("message") or ""),
+                    **({"details": dict(err["details"])} if isinstance(err.get("details"), Mapping) else {}),
+                },
+            )
+        if call.exit_code == EXIT_OK:  # a zero exit code for a job that has not finished is not a success
+            call.exit_code = EXIT_FAILED if state not in {"suspended", "in_doubt"} else EXIT_DOUBT
+
+    def _final_text(
+        self,
+        job_id: str | None,
+        mode: Mode,
+        peer: str | None,
+        options: Options,
+        *,
+        status: dict | HandoverError | None = None,
+    ) -> str:
         if not job_id:
             return "Handover finished. /handover status shows the result."
-        try:
-            status = self.backend.job_status(job_id)
-        except HandoverError as err:
-            return surfaces.render_error(err, peer)
+        if status is None:  # additive: the CLI path passes the status it reads once for text and --json
+            status = self._status_or_error(job_id)
+        if isinstance(status, HandoverError):
+            return surfaces.render_error(status, peer)
         job = status.get("job") if isinstance(status.get("job"), Mapping) else status
         state = str(job.get("state") or "")
         err = job.get("last_error") if isinstance(job.get("last_error"), Mapping) else None
@@ -769,6 +825,7 @@ class Plugin:
             keep=job.get("source_kept") is True if "source_kept" in job else options.keep_source,
             remote_gateway=bool(bundle.get("remote")),
             job=job_id,
+            target_session=job.get("target_session") if isinstance(job.get("target_session"), Mapping) else None,
         )
         if state == "retiring" and job.get("next_action") and mode not in (Mode.PULL, Mode.IMPORT):
             text += f"\nNext: {job['next_action']}"
@@ -923,7 +980,7 @@ class Plugin:
     def _verb_status(self, parsed: surfaces.Parsed, call: Call) -> None:
         backend = self.backend
         flush = backend.flush_outbox(getattr(self.ctx, "call_mcp", None))
-        job = parsed.args.get("job")
+        job = self._resolve_job(parsed.args.get("job"), call) or None
         status = dict(backend.job_status(job))
         if job and not call.local:
             owner = (status.get("job") or status).get("calling_session")
@@ -1066,12 +1123,23 @@ class Plugin:
         sid = self._need_session(parsed, call)
         result = self.backend.reclaim(sid, force=bool(parsed.args.get("force")))
         call.data["reclaim"] = result
+        # L3-F14: success only when cluster A says so (``ok is True``); a result without ``ok`` counts only for a
+        # session that is active here again. A refusal or "nothing to reclaim" is an error with a code and an exit
+        # code of DESIGN §14.2 (``invalid_state`` ⇒ 3, ``not_found`` ⇒ 2), never ``ok: true``.
+        ok = result.get("ok") is True if "ok" in result else result.get("state") in ("reclaimed", "released")
         message = result.get("message") or (
-            "Reclaimed: this session is active here again."
-            if result.get("state") == "reclaimed"
-            else "Nothing to reclaim."
+            "Reclaimed: this session is active here again." if ok else "Nothing to reclaim."
         )
         call.say(str(message))
+        if not ok:
+            err = result.get("error") if isinstance(result.get("error"), Mapping) else {}
+            code = str(err.get("code") or "not_reclaimed")
+            call.data["error"] = {
+                "code": code,
+                "message": str(err.get("message") or message),
+                **({"details": dict(err["details"])} if isinstance(err.get("details"), Mapping) else {}),
+            }
+            call.exit_code = _EXIT_BY_CODE.get(code, EXIT_FAILED)
         if result.get("target_notified") is True:
             call.say("The other gateway was told that this session is active here again.")
         for warning in result.get("warnings") or ():
@@ -1080,7 +1148,7 @@ class Plugin:
     def _job_for(self, parsed: surfaces.Parsed, call: Call) -> str:
         job = parsed.args.get("job")
         if job:
-            return str(job)
+            return self._resolve_job(job, call)
         status = self.backend.job_status(None)
         active = [j for j in status.get("jobs") or () if j.get("active")]
         mine = [j for j in active if call.session_id and j.get("calling_session") == call.session_id]
@@ -1097,7 +1165,7 @@ class Plugin:
         call.say(str(result) or f"Cancel requested for {surfaces.short_job(job)}.")
 
     def _verb_resume(self, parsed: surfaces.Parsed, call: Call) -> None:
-        job = parsed.args.get("job")
+        job = self._resolve_job(parsed.args.get("job"), call) or None
         if not job:
             status = self.backend.job_status(None)
             suspended = [j for j in status.get("jobs") or () if j.get("state") == "suspended"]
@@ -1119,7 +1187,8 @@ class Plugin:
         call.say(f"This device: instance {ident.get('instance_id')}, key {ident.get('fingerprint')}.")
 
     def _verb_gc(self, parsed: surfaces.Parsed, call: Call) -> None:
-        result = self.backend.gc(job_id=parsed.args.get("job"), all_jobs=bool(parsed.args.get("all")))
+        job = self._resolve_job(parsed.args.get("job"), call) or None
+        result = self.backend.gc(job_id=job, all_jobs=bool(parsed.args.get("all")))
         call.data["gc"] = result
         text = f"Freed {surfaces.human_bytes(result.get('freed_bytes', 0))}"
         if parsed.args.get("job") or parsed.args.get("all"):
@@ -1129,7 +1198,7 @@ class Plugin:
         call.say(text + ".")
 
     def _verb_logs(self, parsed: surfaces.Parsed, call: Call) -> None:
-        job = str(parsed.args["job"])
+        job = self._resolve_job(parsed.args["job"], call)
         if not call.local:
             owner = (self.backend.job_status(job).get("job") or {}).get("calling_session")
             if not call.session_id or owner != call.session_id:
@@ -1249,16 +1318,8 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
                 f"ask_choice {'yes' if feats.ask_choice else 'no'}",
             }
         )
-        if feats.host_isolated:
-            checks.append(
-                {
-                    "name": "plugin isolation",
-                    "ok": None,
-                    "detail": "plugins.isolation: host — no `hermes handover` CLI (use the slash form), no "
-                    "progress notices, and the core buffers request bodies before this plugin's limit",
-                    "remedy": "plugins.isolation: in_process, or a proxy body limit in front of the dashboard",
-                }
-            )
+        if feats.host_isolated or _isolation_of(backend) == "host":
+            checks.append(_host_isolation_check(backend))
     except Exception as exc:
         checks.append({"name": "Hermes", "ok": False, "detail": f"capability probe failed ({type(exc).__name__})"})
     for module in ("cryptography", "httpx", "compression.zstd"):
@@ -1356,6 +1417,53 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
     return checks
 
 
+HOST_ISOLATION_DETAIL = (
+    "plugins.isolation: host — this gateway cannot receive or provide handovers over HTTP (its ctx_handover routes "
+    "need in_process, R33); it can still hand over by dialing paired gateways (take, to) and with bundles "
+    "(export, import). Also: no `hermes handover` CLI (use the slash form), no progress notices, and the core "
+    "buffers request bodies before this plugin's limit"
+)
+HOST_ISOLATION_REMEDY = (
+    "set plugins.isolation: in_process (the default) on this gateway to receive or provide handovers over HTTP; "
+    "otherwise pair it only as the dialing side and use bundles"
+)
+
+
+def _isolation_of(backend: Backend) -> str | None:
+    """``plugins.isolation`` of this profile's config (``in_process`` when absent), or None when unreadable."""
+    try:
+        plugins = (backend.config() or {}).get("plugins")
+    except Exception:
+        return None
+    value = plugins.get("isolation") if isinstance(plugins, Mapping) else None
+    return str(value).strip().lower() if isinstance(value, str) and value.strip() else "in_process"
+
+
+def _host_isolation_check(backend: Backend) -> dict:
+    """The doctor line for ``plugins.isolation: host`` (R33, lab L15): FAIL when this gateway is expected to answer
+    paired devices — ``inbound: on``, or a paired device that dials in (``inbound`` not ``off``) — since no route
+    reaches it; otherwise a warning that names what works (dialing out, bundles)."""
+    try:
+        inbound = str(backend.settings().get("inbound") or "auto").lower()
+    except Exception:
+        inbound = "auto"
+    try:
+        dialers = [p.name for p in backend.peers() if p.direction == "inbound" and not p.revoked_at]
+    except Exception:
+        dialers = []
+    expected = inbound == "on" or (inbound != "off" and bool(dialers))
+    detail = HOST_ISOLATION_DETAIL
+    if expected:
+        who = ", ".join(dialers) if dialers else "paired devices"
+        detail += f". {who} cannot reach this gateway (inbound: {inbound})"
+    return {
+        "name": "plugin isolation",
+        "ok": False if expected else None,
+        "detail": detail,
+        "remedy": HOST_ISOLATION_REMEDY,
+    }
+
+
 def _job_error_text(job_id: str, err: Mapping | None, peer: str | None) -> str:
     """The person's text for a job's ``last_error`` (``{code, message, details}``) through its error class."""
     err = err or {}
@@ -1384,24 +1492,45 @@ def _root_shown(spec: object) -> str:
         return text
 
 
+def _not_confirmed(state: _ConfirmState, message: str) -> dict:
+    """``--json`` error of a handover that ended at the confirmation (L3-F14): code ``cancelled`` with the reasons
+    asked and those ``--yes`` does not confirm (R30, R32)."""
+    return {
+        "code": "cancelled",
+        "message": message,
+        "details": {"ended_by": state.answer, "reasons": list(state.reasons), "yes_refused": list(state.yes_refused)},
+    }
+
+
 def _yes_refused_text(summary: Mapping | None, refused: Sequence[str] = ()) -> str:
-    """Why ``--yes`` did not go ahead (R30): it does not confirm that the working folder stays here — or another
-    reason the conductor marked ``yes_exempt`` (named by its text)."""
-    others = [r for r in refused if r != surfaces.CONFIRM_WORKSPACE_EXCLUDED]
-    if others and surfaces.CONFIRM_WORKSPACE_EXCLUDED not in refused:
+    """Why ``--yes`` did not go ahead (R30, R32): it does not confirm that the working folder stays here, nor that
+    the session is larger than the target model's window — or another reason the conductor marked ``yes_exempt``
+    (named by its text). One sentence per kind, in that order."""
+    lines: list[str] = []
+    if surfaces.CONFIRM_WORKSPACE_EXCLUDED in refused:
+        excluded = (summary or {}).get("workspace_excluded")
+        what = (
+            surfaces.workspace_excluded_text(excluded)
+            if isinstance(excluded, Mapping)
+            else "the session's working folder stays here"
+        )
+        lines.append(
+            f"--yes does not confirm that {what}. Answer the question in an interactive session, or add "
+            "--no-workspace to hand over without it."
+        )
+    if surfaces.CONFIRM_CONTEXT in refused:
+        over = surfaces.context_over_entry((summary or {}).get("context_over"))
+        what = surfaces.context_over_text(over) if over else "the session is larger than the model's window there"
+        lines.append(
+            f"--yes does not confirm that {what}. Answer the question in an interactive session, or run /compress "
+            "in the session first."
+        )
+    others = [r for r in refused if r not in {surfaces.CONFIRM_WORKSPACE_EXCLUDED, surfaces.CONFIRM_CONTEXT}]
+    if others or not lines:
         why = "; ".join(surfaces.REASON_TEXT.get(r, r) for r in others if r != surfaces.UNNAMED_EXEMPT)
         detail = f" ({why})" if why else ""
-        return f"--yes does not confirm this handover{detail}. Answer the question in an interactive session."
-    excluded = (summary or {}).get("workspace_excluded")
-    what = (
-        surfaces.workspace_excluded_text(excluded)
-        if isinstance(excluded, Mapping)
-        else ("the session's working folder stays here")
-    )
-    return (
-        f"--yes does not confirm that {what}. Answer the question in an interactive "
-        "session, or add --no-workspace to hand over without it."
-    )
+        lines.append(f"--yes does not confirm this handover{detail}. Answer the question in an interactive session.")
+    return "\n".join(lines)
 
 
 def _set_or_explain(backend: Backend, key: str, value: str) -> str:
@@ -2065,8 +2194,30 @@ class EngineBackend:
     def suggestion_put(self, session_id: str, data: dict) -> None:
         self._ledger().suggestion_put(session_id, data)
 
-    def presend_summary(self, final: FinalPlan) -> dict:
-        return surfaces.plan_summary(final)  # cluster D's presend_summary/summarize, keyed for rendering (W125)
+    def presend_summary(self, final: FinalPlan, *, job_id: str | None = None) -> dict:
+        """Cluster D's summary keyed for rendering (W125): the ``presend`` document the conductor journaled for
+        ``job_id`` (computed with both sides' facts, so it knows the target model's window, R32) when there is one,
+        else D's ``presend_summary`` of ``final`` alone."""
+        return surfaces.plan_summary(final, self._journaled_presend(job_id) if job_id else None)
+
+    def _journaled_presend(self, job_id: str) -> dict | None:
+        from .model import Role
+
+        found: dict | None = None
+        try:
+            for ev in self._ledger().events(job_id, Role.CONDUCTOR) or ():
+                data = ev.get("data")
+                ctx = data.get("ctx") if isinstance(data, Mapping) else None
+                if isinstance(ctx, Mapping) and isinstance(ctx.get("presend"), Mapping):
+                    found = dict(ctx["presend"])
+        except (HandoverError, TypeError, ValueError):
+            return None
+        return found
+
+    def job_ids(self) -> list[str]:
+        """Every job id this gateway knows, in any role, newest first (for ``surfaces.match_job``, L3-F15)."""
+        rows = self._ledger().jobs(role=None, limit=1_000_000)
+        return list(dict.fromkeys(str(r.get("job_id")) for r in rows if r.get("job_id")))
 
     def doctor_checks(self, *, measure: bool = False) -> list[dict]:
         """Engine checks of ``doctor``: git, data folder, identity, inbound, one probe per dialled peer. The proxy

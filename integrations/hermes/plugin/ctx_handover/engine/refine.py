@@ -466,17 +466,20 @@ def refine(
     token ≤ 60 s old); ``llm(instructions, blocks, schema, timeout_s)`` is ``ctx.llm.complete_structured`` or the
     ``PluginLlm`` adapter (``hostcompat.plugin_llm``); ``stored`` is the refinement of a claimed offer. ``rows`` and
     ``redact`` (additive keywords) feed the llm step; without ``redact`` that step is skipped — the excerpt never
-    leaves unredacted. Returns the validated refinement (or None) and which step answered."""
+    leaves unredacted. Returns the validated refinement (or None) and which step answered.
+
+    ``off`` stops new model calls only (integrator decision, G‴): a stored offer refinement — asked in the source's
+    own gateway when the offer was made (R9) — is still taken, re-validated; it calls no model."""
     mode = options.refine if options.refine in MODES else "off"
     errors: list[str] = [] if options.refine in MODES else [f"unknown refine mode {str(options.refine)[:32]!r}"]
-    if mode == "off":
-        return None, RefineReport(used="off", error="; ".join(errors) or None)
     if stored is not None:
         try:
             ref = validate(to_doc(stored))
             return ref, _report("offer", ref, errors)
         except BadRequest as exc:
             errors.append(_describe("offer", exc, redact))
+    if mode == "off":
+        return None, RefineReport(used="off", error="; ".join(errors) or None)
     timeout = max(1, int(options.refine_timeout_s))
     small = approx_tokens < options.refine_side_question_max_tokens
     if mode in {"auto", "side_question"} and side_question is not None and small:

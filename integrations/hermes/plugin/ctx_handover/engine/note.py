@@ -21,6 +21,9 @@ value) holds everything.
 not shown", and ``compose(..., strict=True)`` (tests) refuses it with ``ValueError``. ``model_change`` is read only
 in the form of contract X04 (``{"from": {model, provider}, "to": {model, provider, context_length}, "reason",
 "offline_capable"}`` or None).
+
+A conversation larger than the context window of the model here (R32, L3-F17) gets the line ``CONTEXT_LINE``: the
+size is the source's estimate (note part ``context_tokens``), the window this host's own (``context_window``).
 """
 
 from __future__ import annotations
@@ -103,13 +106,21 @@ NOTE_PART_KEYS = frozenset(
         "rewind_rows",
         "lfs_missing",
         "bundle_import",
+        "context_tokens",
     }
 )
 """Every ``note_parts`` key ``compose`` renders (X16, DESIGN §11.3): the lists of "Not transferred", tools and
 env-var names, ``source_kept`` (the copy sentence, O3), ``instruction_files`` (new or changed here), ``warnings``,
 ``pack_time`` (the snapshot sentence; the ``pack_time`` argument wins when set), ``title`` (inside the data block
 only), the target's own ``case_collisions``/``ntfs_invalid``/``rewind_rows``/``lfs_missing`` and ``bundle_import``
-(True on a bundle import: the sentence of DESIGN §5.4 that the bundle may have been imported elsewhere too)."""
+(True on a bundle import: the sentence of DESIGN §5.4 that the bundle may have been imported elsewhere too) and
+``context_tokens`` (the session's active context in tokens: ``CONTEXT_LINE`` when it exceeds the window here)."""
+CONTEXT_LINE = (
+    "Context: this conversation (about {tokens:,} tokens) is larger than the context window of {model} here "
+    "({window:,} tokens); Hermes compacts it on the first turn."
+)
+MAX_CONTEXT_TOKENS = 10**12
+"""Upper bound of a plausible ``context_tokens`` from the peer; anything else is ignored."""
 BUNDLE_IMPORT_SENTENCE = "This handover came from a bundle file; this bundle may have been imported elsewhere too."
 
 
@@ -244,6 +255,52 @@ def _model_side(side: object) -> tuple[str, str, int | None]:
 
 def _ctx_text(ctx: int | None) -> str:
     return f", {ctx // 1024}k context" if ctx else ""
+
+
+def _window(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def context_window(
+    model_change: dict | None, *, target: EnvFacts | None = None, source: EnvFacts | None = None
+) -> int | None:
+    """The context window (tokens) of the model the session uses on the target, or None when unknown (R32).
+
+    A model change (X04 dict) reads only ``to.context_length``. A model that stays (``None``) runs on the target's
+    main model only when the source's main model and provider are the same — ``session_import.context_length`` reads
+    ``model.context_length`` only for the main model — or when the source facts are absent; then the window is
+    ``target.host.context_length``. Any other value (another spelling, a kept model under another name or provider,
+    0, a boolean) is unknown."""
+    if isinstance(model_change, dict):
+        to = model_change.get("to")
+        return _window(to.get("context_length")) if isinstance(to, dict) else None
+    if model_change is not None or target is None:
+        return None
+    host = getattr(target, "host", None)
+    window = _window(getattr(host, "context_length", None))
+    if window is None:
+        return None
+    if source is not None:
+        mine = (getattr(host, "model", None), getattr(host, "provider", None))
+        theirs = (getattr(source.host, "model", None), getattr(source.host, "provider", None))
+        if mine != theirs:
+            return None
+    return window
+
+
+def _context_line(parts: dict, model_change: dict | None, target: EnvFacts, source: EnvFacts) -> str | None:
+    """``CONTEXT_LINE`` when the peer's ``context_tokens`` (a plain positive integer) exceed the window here."""
+    tokens = parts.get("context_tokens")
+    if not (isinstance(tokens, int) and not isinstance(tokens, bool) and 0 < tokens <= MAX_CONTEXT_TOKENS):
+        return None
+    window = context_window(model_change, target=target, source=source)
+    if window is None or tokens <= window:
+        return None
+    if isinstance(model_change, dict):
+        model, _p, _c = _model_side(model_change.get("to"))
+    else:
+        model = one_line(target.host.model or "the model", NAME_CAP)
+    return CONTEXT_LINE.format(tokens=tokens, model=model, window=window)
 
 
 def _model_line(model_change: dict | None, target: EnvFacts) -> str:
@@ -411,6 +468,9 @@ def _render(
     lines = [f'<ctx-handover-note job="{_attr(job_id)}" from="{src}" at="{_iso(now)}">', INTRO, ""]
     lines.append(f"Moved from: {src} ({_os(source)}) → this machine: {tgt} ({_os(target)})")
     lines.append(_model_line(model_change, target))
+    context = _context_line(parts, model_change, target, source)
+    if context:
+        lines.append(context)
     if origin:
         lines.append(f"Origin: {one_line(origin, NAME_CAP)}")
     paths = _path_lines(items, path_map, path_limit)
@@ -569,6 +629,11 @@ def _report(c: dict) -> str:
         f"- At: {_iso(c['now'])}",
         f"- {_model_line(c['model_change'], c['target'])}",
         f"- Origin: {one_line(c['origin'], NAME_CAP)}",
+    ]
+    context = _context_line(c["parts"], c["model_change"], c["target"], c["source"])
+    if context:
+        out.insert(-1, f"- {context}")
+    out += [
         "",
         "## Items",
     ]
