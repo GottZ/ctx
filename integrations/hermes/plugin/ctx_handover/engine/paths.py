@@ -75,12 +75,18 @@ def strip_hfs_ignorable(rel: str) -> str:
     return "".join(ch for ch in rel if ch not in HFS_IGNORABLE)
 
 
-def _is_dotgit(component: str) -> bool:
-    """True when a component would be ``.git`` on some filesystem (case, HFS, NTFS 8.3/stream/trailing forms)."""
+def is_dotgit(component: str) -> bool:
+    """True when one path component would be ``.git`` on some filesystem: any case, with HFS-ignorable code points
+    (``strip_hfs_ignorable``), as the NTFS short name ``git~1``, with trailing dots or spaces, or with an NTFS stream
+    suffix (``.git::$DATA``). The one ``.git`` rule of the plugin: ``check_rel`` applies it to every component of a
+    received path, ``policy.check_tree_entry`` to every component of a received link target."""
     name = strip_hfs_ignorable(component)
     name = name.split(":", 1)[0].rstrip(". ")
     folded = unicodedata.normalize("NFC", name).casefold()
     return folded in {".git", "git~1"}
+
+
+_is_dotgit = is_dotgit
 
 
 def _has_control(text: str) -> bool:
@@ -134,7 +140,7 @@ def check_rel(rel: str, rules: PlatformRules, *, allow_control: bool = False) ->
             raise _deny(rel, "dot_or_empty_component")
         if len(part.encode("utf-8", errors)) > MAX_COMPONENT_BYTES:
             raise _deny(rel, "component_too_long")
-        if _is_dotgit(part):
+        if is_dotgit(part):
             raise _deny(rel, "dotgit")
         if rules.windows:
             if any(ch in WINDOWS_FORBIDDEN_CHARS for ch in part):
