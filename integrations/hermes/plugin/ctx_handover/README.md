@@ -42,11 +42,16 @@ session-relay (fresh session on the same gateway).
   30 minutes for the session (then Hermes reports it as not processed) and otherwise meets the lock. When the chat
   stored the message on submit (TUI and Desktop do), it travels along as the session's last message, and the note
   on the other side says it is waiting there.
-- Under `plugins.isolation: host` a gateway cannot receive or provide handovers over HTTP: its ctx_handover
-  routes need `in_process` (the default). Such a gateway still hands sessions over by dialing a paired gateway
-  (`take`, `to`) and with bundles (`export`, `import`); `/handover doctor` says so (FAIL when paired devices dial
-  it). It also has no `hermes handover` CLI (use the slash form) and no progress notice (`/handover status` shows
-  progress), and Hermes buffers request bodies before this plugin's size limit applies.
+- Under `plugins.isolation: host` Hermes runs this plugin in its plugin host, and `hermes serve` forwards the
+  ctx_handover routes there (each request and answer buffered; in the Hermes source this was built against, a
+  forwarded request gets 504 after 60 s). Run end to end under `host`: a paired device pulling a session from such a
+  gateway through its `hermes serve` address (four of five lab runs; the fifth, right after `hermes serve` had
+  restarted, was refused as `listener_missing`, cause not established), and `take` started on such a gateway. **Not
+  verified** under `host`: the gateway's own listener as the address other devices use, pushes and offers to such a
+  gateway, `--continue` there, and `to`, `export` or `import` started there — `in_process` (the default isolation)
+  is the verified setup for these. `/handover doctor` lists the same. Such a gateway also has no
+  `hermes handover` CLI (use the slash form) and no progress notice (`/handover status` shows progress), and Hermes
+  buffers request bodies before this plugin's size limit applies.
 - **Sessions from older Hermes builds.** Messages written before Hermes stamped message and tool-call identities
   get stable identities derived from the original rows during the transfer; the source session is not modified.
   If Hermes backfills those identities on the source while a handover is running, the target refuses the late
@@ -131,11 +136,12 @@ conversation on its first turn). The choices are *yes*, *yes without the propose
 *cancel*; `--yes` skips the question. `--yes` does not confirm a left-out working folder: a person answers that
 question (without an answer nothing is locked), or `--no-workspace` hands the session over without its folder on
 purpose. Nor does it confirm a session larger than the context window there: a person answers, or `/compress` in the
-session first makes it fit. `--yes` does not confirm a workspace larger than the working folder either: a person
-answers. Files that look like secrets are never sent by a blanket yes (neither `--yes` nor the *yes* choice takes them
-along); name each one with `--include-secret <path>`. An unanswered question (no reply within Hermes' question timeout
-`agent.clarify_timeout`, 90 s by default) continues without the proposed items when those are the only reason and
-cancels otherwise — nothing is locked in either case.
+session first makes it fit. `--yes` does not confirm a workspace larger than the working folder either: a person answers
+(at the export; `import` does not ask it again, the bundle holds what was confirmed). Files that look like secrets are
+never sent by a blanket yes (neither `--yes` nor the *yes* choice takes them along); name each one with
+`--include-secret <path>`. An unanswered question (no reply within Hermes' question timeout `agent.clarify_timeout`,
+90 s by default) continues without the proposed items when those are the only reason and cancels otherwise — nothing is
+locked in either case.
 
 The final message names the session on the other side (title and session id), its folder, the model and whether it
 works offline, and what to do next. A received session is stored, not open: it is listed in the Desktop sidebar and in
@@ -151,10 +157,12 @@ All commands: `/handover to | take | export | import | status | peers | pair | r
 doctor | identity | gc | logs | help` — `/handover help <command>` shows the options. `hermes handover <same>` runs
 them in a terminal (`--json` for scripts, `--session <id>` names the session; exit codes 0 ok, 1 failed, 2 usage, 3
 busy/conflict, 4 auth/gate, 5 in-doubt/suspended; a refusal carries `ok: false` and `error.code` in `--json` — a
-`reclaim` refused while a handover is being committed exits 3). `status`, `cancel`, `resume`, `logs` and `gc --job`
-take the six-character job id the messages print (or any other unique start or end of the id). Administrative and
-data-moving commands (`pair`, `setup`, `peers`, `identity`, `take`, `to`, `export`, `import`, `reclaim`, `resume`,
-`gc`, `cancel`) answer only in the local CLI, TUI or Desktop; on messaging platforms they are refused.
+`reclaim` refused while a handover is being committed exits 3, and so does a `cancel` that cancels nothing because
+the handover is done, aborted or past its commit point; the answer names which). `status`, `cancel`, `resume`, `logs`
+and `gc --job` take the six-character job id the messages print (or any other unique start or end of the id).
+Administrative and data-moving commands (`pair`, `setup`, `peers`, `identity`, `take`, `to`, `export`, `import`,
+`reclaim`, `resume`, `gc`, `cancel`) answer only in the local CLI, TUI or Desktop; on messaging platforms they are
+refused.
 
 The agent has a `handover` tool: it can show the plan, name resources the file scan cannot see (paths, tools and
 the names — never values — of environment variables; anything outside the project is only proposed) and ask for a

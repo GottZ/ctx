@@ -637,6 +637,19 @@ def _start_maintenance(prof: _Profile) -> None:
 # ---------------------------------------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class CancelAnswer:
+    """What ``/handover cancel`` did (L3-F22). ``requested`` is True only when a cancel was recorded or carried out;
+    otherwise ``reason`` says why not — ``finished`` (the job is done or aborted) or ``committing`` (the conductor
+    journaled ``intent: commit``, DESIGN §3.8) — and the surfaces answer with a refusal. ``state`` is the conductor's
+    state when it answered; ``text`` names it."""
+
+    requested: bool
+    state: str
+    text: str
+    reason: str | None = None
+
+
 class _NullReporter:
     def progress(self, p: Progress) -> None:
         pass
@@ -1096,21 +1109,48 @@ class JobRunner:
             thread.join(timeout)
 
     def cancel(self, job_id: str) -> str:
-        """Request cancellation; the answer says it was requested only when the ledger holds the request (a job
-        that already ended keeps no request — ``set_cancel`` returns without writing). A SUSPENDED job has no runner
-        that would see the request (L3-F07): the cancel drives its abort itself (``_abort_suspended``)."""
-        try:
-            self.ledger.set_cancel(job_id)
-        except InvalidState as exc:
-            return exc.message
-        if self.ledger.cancel_requested(job_id) is True:
-            row = self.ledger.job(job_id, Role.CONDUCTOR)
-            if row is not None and row["state"] == str(ConductorState.SUSPENDED):
-                return self._abort_suspended(job_id)
-            return f"Cancel requested for job {short(job_id)}."
+        """The text of ``cancel_answer`` (for callers that only show it)."""
+        return self.cancel_answer(job_id).text
+
+    def cancel_answer(self, job_id: str) -> CancelAnswer:
+        """Request cancellation. The job's state is read first (L3-F22): a finished job (done, aborted) is named as
+        such — ``ledger.set_cancel`` would call every job with a journaled ``intent: commit`` "committing", and every
+        finished job journaled it; a job past its commit point is refused with its state; only a request the ledger
+        holds is ``requested``. A SUSPENDED job has no runner that would see the request (L3-F07): the cancel drives
+        its abort itself (``_abort_suspended``). An unknown job raises ``NotFound``."""
+        sid = short(job_id)
         row = self.ledger.job(job_id, Role.CONDUCTOR)
-        state = row["state"] if row is not None else "gone"
-        return f"Job {short(job_id)} is already {state}; nothing to cancel."
+        refused = False
+        if row is None or row["state"] not in TERMINAL[Role.CONDUCTOR]:
+            try:
+                self.ledger.set_cancel(job_id)  # NotFound for an unknown job
+            except InvalidState:
+                refused = True
+            row = self.ledger.job(job_id, Role.CONDUCTOR)
+        state = str(row["state"]) if row is not None else "gone"
+        if state in TERMINAL[Role.CONDUCTOR] or row is None:
+            text = f"Handover {sid} is already {state}; nothing to cancel."
+            if state == str(ConductorState.DONE):
+                text = (
+                    f"Too late to cancel: handover {sid} is already done; nothing was cancelled. /handover reclaim on "
+                    "the source takes the session back."
+                )
+            return CancelAnswer(False, state, text, "finished")
+        if refused:
+            return CancelAnswer(
+                False,
+                state,
+                f"Too late to cancel handover {sid}: it is past its commit point ({state}). Use /handover reclaim on "
+                "the source to take the session back.",
+                "committing",
+            )
+        if self.ledger.cancel_requested(job_id) is not True:  # set_cancel wrote nothing: no request is claimed
+            return CancelAnswer(False, state, f"Handover {sid} is {state}; nothing was cancelled.", "not_recorded")
+        if state == str(ConductorState.SUSPENDED):
+            text = self._abort_suspended(job_id)
+            after = self.ledger.job(job_id, Role.CONDUCTOR) or {}
+            return CancelAnswer(True, str(after.get("state") or state), text)
+        return CancelAnswer(True, state, f"Cancel requested for job {sid}.")
 
     def _abort_suspended(self, job_id: str) -> str:
         """``/handover cancel`` of a SUSPENDED job (L3-F07): the abort runs now — ``target.abort``, then

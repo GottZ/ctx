@@ -325,6 +325,7 @@ def acquire(
     """
     holder = holder_string(job_id)
     ledger.source_lock(job_id, info, holder, None)
+    turn_held = False
     try:
         deadline = clock() + max(0, int(wait_s))
         while True:
@@ -335,6 +336,7 @@ def acquire(
             except sqlite3.OperationalError:
                 got = False
             if got:
+                turn_held = True
                 break
             if wait_s <= 0:
                 raise SessionBusy(BUSY_MESSAGE, reason="turn", session_id=info.tip_id)
@@ -345,13 +347,20 @@ def acquire(
                 )
             sleep(min(poll_s, remaining))
         if not db.try_acquire_compression_lock(info.tip_id, holder, ttl_seconds=ttl_s):
-            db.release_session_turn_lease(info.tip_id, holder)
             raise SessionBusy(COMPACTION_BUSY_MESSAGE, reason="compression", session_id=info.tip_id)
+        ledger.source_set(job_id, SourceState.LOCKED, holder=holder)
     except BaseException:
+        # whatever failed after the turn lease was taken (a refusal, a store error, the ledger): give both leases
+        # back at once — both releases are idempotent and only delete rows this holder owns — instead of leaving
+        # the session's turns waiting until the lease TTL runs out
+        if turn_held:
+            with contextlib.suppress(Exception):
+                db.release_compression_lock(info.tip_id, holder)
+            with contextlib.suppress(Exception):
+                db.release_session_turn_lease(info.tip_id, holder)
         with contextlib.suppress(Exception):
             ledger.source_set(job_id, SourceState.RELEASED)
         raise
-    ledger.source_set(job_id, SourceState.LOCKED, holder=holder)
     return holder
 
 
@@ -430,6 +439,12 @@ def prepare(db, ledger, info: SessionInfo, job_id: str, peer_name: str, now: dat
     p1 ``preparing`` + veto rows for every lineage id · p2 goal/heartbeat/loop paused (backed up) · p3 titles
     marked (backed up) · p4 ``end_session(…, "handed_over")`` on every segment · p5 archived lineage-wide
     (``notify=False``) · p6 hidden lineage-wide · p7 ``prepared``.
+
+    Write-ahead backups: every sub-step that changes Hermes state first commits the original values in a ledger
+    transaction of its own (write-once), then writes to Hermes, then sets its step marker. Each Hermes write
+    commits on its own in ``state.db``; a failure in the middle of a sub-step — or the process dying between a
+    Hermes commit and the ledger commit — therefore never loses the backup of a value already changed: ``release``
+    restores it, and a retried ``prepare`` marks from the backed-up original, never from a marked value (R14).
     """
     tip = info.tip_id
     lineage = tuple(info.lineage_ids) or (tip,)
@@ -458,9 +473,12 @@ def prepare(db, ledger, info: SessionInfo, job_id: str, peer_name: str, now: dat
             _require(_state(ledger, job_id), allowed, "prepare", job_id)
             existing = _backups(ledger, job_id)
             for key in DRIVER_KEYS:
+                _backup_once(ledger, job_id, f"meta:{key}", db.get_meta(f"{key}:{tip}"), existing)
+        with _tx(ledger):
+            _require(_state(ledger, job_id), allowed, "prepare", job_id)
+            for key in DRIVER_KEYS:
                 meta_key = f"{key}:{tip}"
                 raw = db.get_meta(meta_key)
-                _backup_once(ledger, job_id, f"meta:{key}", raw, existing)
                 if raw:
                     paused = _pause_driver(raw)
                     if paused is not None:
@@ -473,14 +491,18 @@ def prepare(db, ledger, info: SessionInfo, job_id: str, peer_name: str, now: dat
             for seg in lineage:
                 key = f"title:{seg}"
                 if existing.get(key):
-                    original = json.loads(existing[key]).get("title")
-                else:
-                    original = db.get_session_title(seg)
-                    if not original:
-                        continue
+                    continue
+                original = db.get_session_title(seg)
+                if original:
                     ledger.backup_put(
                         job_id, key, json.dumps({"title": original, "source": db.get_session_title_source(seg)})
                     )
+        with _tx(ledger):
+            _require(_state(ledger, job_id), allowed, "prepare", job_id)
+            existing = _backups(ledger, job_id)
+            for seg in lineage:
+                raw = existing.get(f"title:{seg}")
+                original = json.loads(raw).get("title") if raw else None
                 if not original:
                     continue
                 for suffix in ("", f", job {short(job_id)}"):
@@ -488,39 +510,45 @@ def prepare(db, ledger, info: SessionInfo, job_id: str, peer_name: str, now: dat
                     if db.get_session_title(seg) == marked:
                         break
                     try:
-                        db.set_session_title(seg, marked)
-                        break
+                        # ``False`` = Hermes' compare-and-swap lost against another write: not marked, try on
+                        if db.set_session_title(seg, marked) or db.get_session_title(seg) == marked:
+                            break
                     except ValueError:
                         continue
             _mark(ledger, job_id, "p3")
     if "p4" not in done:
         with _tx(ledger):
             _require(_state(ledger, job_id), allowed, "prepare", job_id)
-            existing = _backups(ledger, job_id)
             row = db.get_session(tip) or {}
             _backup_once(
                 ledger,
                 job_id,
                 f"end:{tip}",
                 json.dumps({"ended_at": row.get("ended_at"), "end_reason": row.get("end_reason")}),
-                existing,
+                _backups(ledger, job_id),
             )
+        with _tx(ledger):
+            _require(_state(ledger, job_id), allowed, "prepare", job_id)
             for seg in lineage:
                 db.end_session(seg, HANDED_OVER)
             _mark(ledger, job_id, "p4")
     if "p5" not in done:
         with _tx(ledger):
             _require(_state(ledger, job_id), allowed, "prepare", job_id)
-            existing = _backups(ledger, job_id)
             row = db.get_session(tip) or {}
             _backup_once(
                 ledger,
                 job_id,
                 f"flags:{tip}",
                 json.dumps({"archived": int(row.get("archived") or 0), "hidden": int(row.get("hidden") or 0)}),
-                existing,
+                _backups(ledger, job_id),
             )
-            db.set_session_archived(tip, True, notify=False)
+        with _tx(ledger):
+            _require(_state(ledger, job_id), allowed, "prepare", job_id)
+            # a lineage that is archived already keeps its archive as it is: re-archiving would turn the idle
+            # sweep's archive (``auto_archived``, undone by Hermes on the next resume) into a deliberate one
+            if not all(int((db.get_session(seg) or {}).get("archived") or 0) for seg in lineage):
+                db.set_session_archived(tip, True, notify=False)
             _mark(ledger, job_id, "p5")
     if "p6" not in done:
         with _tx(ledger):
@@ -534,12 +562,20 @@ def prepare(db, ledger, info: SessionInfo, job_id: str, peer_name: str, now: dat
 
 
 def _restore_marks(db, ledger, job_id: str, tip: str, lineage: Sequence[str], warnings: list[str]) -> None:
-    """Inverse of p6…p2 from the backups (each restore sets the backed-up value; idempotent)."""
+    """Inverse of p6…p2 from the backups (each restore sets the backed-up value; idempotent).
+
+    The archive flag is only written when it differs from the backup, so an archive the session had before (the
+    idle sweep's included) keeps its provenance. A canonical Bot Chat whose name a new Bot Chat took meanwhile
+    (archiving retired the name, Bot Mode then minted a new chat) comes back visible under a free title instead
+    of hidden and untitled, where nothing but its id would reach it.
+    """
     backups = _backups(ledger, job_id)
     flags = json.loads(backups[f"flags:{tip}"]) if backups.get(f"flags:{tip}") else None
     if flags is not None:
         db.set_session_hidden(tip, bool(flags.get("hidden")))
-        db.set_session_archived(tip, bool(flags.get("archived")), notify=False)
+        archived = bool(flags.get("archived"))
+        if bool(int((db.get_session(tip) or {}).get("archived") or 0)) != archived:
+            db.set_session_archived(tip, archived, notify=False)
     end = json.loads(backups[f"end:{tip}"]) if backups.get(f"end:{tip}") else None
     if end is not None and end.get("ended_at") is None:
         row = db.get_session(tip) or {}
@@ -557,7 +593,11 @@ def _restore_marks(db, ledger, job_id: str, tip: str, lineage: Sequence[str], wa
             try:
                 db.set_session_title(seg, title)
             except ValueError as exc:
-                warnings.append(f"title {title!r} could not be restored: {exc}")
+                if not _bot_chat_elsewhere(db, job_id, seg, tip, title, flags, warnings):
+                    warnings.append(f"title {title!r} could not be restored: {exc}")
+                continue
+            if db.get_session_title(seg) != title:
+                warnings.append(f"title {title!r} could not be restored: another write changed the title meanwhile")
                 continue
         if source:
             with contextlib.suppress(ValueError):
@@ -566,6 +606,33 @@ def _restore_marks(db, ledger, job_id: str, tip: str, lineage: Sequence[str], wa
         backup_key = f"meta:{key}"
         if backups.get(backup_key):
             db.set_meta(f"{key}:{tip}", backups[backup_key])
+
+
+def _bot_chat_elsewhere(
+    db, job_id: str, seg: str, tip: str, title: str, flags: Mapping | None, warnings: list[str]
+) -> bool:
+    """The canonical Bot Chat (hidden, named ``CANONICAL_BOT_CHAT_TITLE``) could not get its name back: a new Bot
+    Chat holds it. Make this conversation visible under a free title so the session list reaches it; ``False`` when
+    ``title`` is not the canonical Bot Chat's."""
+    canonical = str(getattr(db, "CANONICAL_BOT_CHAT_TITLE", "Bot Chat"))
+    if title != canonical or not (flags and flags.get("hidden")):
+        return False
+    db.set_session_hidden(tip, False)
+    for free in (f"{canonical} (before handover)", f"{canonical} (before handover, job {short(job_id)})"):
+        if db.get_session_title(seg) == free:
+            break
+        try:
+            db.set_session_title(seg, free)
+            break
+        except ValueError:
+            continue
+    else:
+        free = ""
+    named = f' as "{free}"' if free else " without a title"
+    warnings.append(
+        f"a new Bot Chat took the name {canonical!r} meanwhile; this conversation is back in the session list{named}"
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------------------------------------

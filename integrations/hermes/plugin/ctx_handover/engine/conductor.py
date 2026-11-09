@@ -111,7 +111,7 @@ from .model import (
     SessionRef,
 )
 from .ops import object_closure, read_object
-from .plan import CONFIRM_PROPOSED, SUSPECTED_SECRET, yes_exempt
+from .plan import CONFIRM_PROPOSED, CONFIRM_WORKSPACE_DIFFERS, SUSPECTED_SECRET, yes_exempt
 
 S = ConductorState
 log = logging.getLogger("ctx_handover.conductor")
@@ -153,6 +153,12 @@ BUSY_ELSEWHERE = "busy_elsewhere"
 REQUIRED_CAPS = ("session.v1", "blocks.v1")
 ANSWERS = frozenset({"yes", "no_proposed", "show_plan", "cancel"})
 """The answers ``confirm(info)`` may give (DESIGN §14.1, W112); anything else ends the job like ``cancel``."""
+IMPORT_CONFIRMED = frozenset({CONFIRM_PROPOSED, CONFIRM_WORKSPACE_DIFFERS})
+"""Reasons a bundle import does not ask again (integrator decision on R36a): the export settled them and the bundle
+holds the result — the proposed items it packed (X02) and the workspace it sent (reason (j): ``--yes`` never answers it
+at the export, so this plugin writes such a bundle only after a person answered; the files are in the bundle either way
+and leave no other machine at the import). Every other reason — an unverified bundle's instruction files, a session over
+the target window, … — is asked at the import as anywhere."""
 
 
 @dataclass(frozen=True)
@@ -1171,8 +1177,8 @@ class Conductor:
             )
         )
         importing = self.job.mode is Mode.IMPORT
-        if importing:  # the pack holds what the export confirmed; nothing is left to choose here (X02)
-            reasons = [r for r in reasons if r != CONFIRM_PROPOSED]
+        if importing:  # the pack holds what the export confirmed; nothing is left to choose here (X02, R36a)
+            reasons = [r for r in reasons if r not in IMPORT_CONFIRMED]
         choice: str | None = "yes"
         exempt = yes_exempt(reasons)
         if reasons and (not self.job.options.yes or exempt):

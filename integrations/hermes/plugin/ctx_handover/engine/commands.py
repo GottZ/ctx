@@ -173,7 +173,11 @@ class Backend(Protocol):
     ) -> tuple[str, FinalPlan | None]: ...
     def continue_async(self, job_id: str) -> None: ...
     def run_foreground(self, job_id: str) -> int: ...
-    def cancel(self, job_id: str) -> str: ...
+    def cancel(self, job_id: str) -> str:
+        """The answer of a requested cancel; a cancel that cancels nothing (finished, aborted, past the commit point)
+        raises ``InvalidState`` with the text naming the job's state (L3-F22)."""
+        ...
+
     def resume(self, job_id: str) -> None: ...
     def job_status(self, job_id: str | None) -> dict: ...
     def job_ids(self) -> list[str]: ...
@@ -682,7 +686,11 @@ class Plugin:
             try:
                 code = backend.run_foreground(job_id)
             except KeyboardInterrupt:
-                backend.cancel(job_id)
+                try:
+                    backend.cancel(job_id)
+                except HandoverError as err:  # past the commit point or already ended: the run goes on to its end
+                    refused = surfaces.render_error(err, peer_name)
+                    call.say(refused) if call.json_mode else reporter.info(refused)
                 try:
                     code = backend.run_foreground(job_id)
                 except KeyboardInterrupt:
@@ -698,11 +706,17 @@ class Plugin:
             return
         reporter.start(presend)
         backend.continue_async(job_id)
-        call.say(
-            f"Handover {surfaces.short_job(job_id)} is running; progress shows in the notice above. "
-            f"/handover status {surfaces.short_job(job_id)} has the details, "
-            "/handover cancel stops it before the commit."
-        )
+        sid = surfaces.short_job(job_id)
+        if self._can_post():
+            call.say(
+                f"Handover {sid} is running; progress shows in the notice above. /handover status {sid} has the "
+                "details, /handover cancel stops it before the commit."
+            )
+        else:  # no progress notice here (plugins.isolation: host, L3-F21): no promise of one
+            call.say(
+                f"Handover {sid} is running. /handover status {sid} shows its progress and details, /handover cancel "
+                "stops it before the commit."
+            )
 
     def _status_or_error(self, job_id: str) -> dict | HandoverError:
         try:
@@ -1432,14 +1446,21 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
 
 
 HOST_ISOLATION_DETAIL = (
-    "plugins.isolation: host — this gateway cannot receive or provide handovers over HTTP (its ctx_handover routes "
-    "need in_process, R33); it can still hand over by dialing paired gateways (take, to) and with bundles "
-    "(export, import). Also: no `hermes handover` CLI (use the slash form), no progress notices, and the core "
-    "buffers request bodies before this plugin's limit"
+    "plugins.isolation: host — Hermes runs ctx_handover in its plugin host, and `hermes serve` forwards this gateway's "
+    "ctx_handover routes there (each request and answer buffered). Verified end to end under host: a paired device "
+    "pulling a session from here through `hermes serve`, and `take` started here. Not verified under host: this "
+    "gateway's own listener as the address other devices use, pushes and offers to this gateway, `--continue` here, "
+    "and `to`, `export` or `import` started here. Also: no `hermes handover` CLI (use the slash form), no progress "
+    "notices, and the core buffers request bodies before this plugin's limit"
 )
+"""L3-F21 (R33 as corrected by the lab): upstream forwards a user plugin's dashboard routes to the profile's plugin
+host under ``host`` (``hermes_cli/web_server_dashboard.py`` ``_mount_one_plugin_api`` → ``_mount_hosted_plugin_api``),
+and the lab pulled through such a ``hermes serve`` (L15, four of five runs ``done``; the fifth was refused
+``listener_missing`` right after a restart, cause not established). The rest was not run under ``host``: the text names
+it as not verified instead of promising or refusing it."""
 HOST_ISOLATION_REMEDY = (
-    "set plugins.isolation: in_process (the default) on this gateway to receive or provide handovers over HTTP; "
-    "otherwise pair it only as the dialing side and use bundles"
+    "plugins.isolation: in_process (the default) is the verified setup for everything listed as not verified; under "
+    "host, let devices that dial this gateway use its `hermes serve` address"
 )
 
 
@@ -1454,9 +1475,9 @@ def _isolation_of(backend: Backend) -> str | None:
 
 
 def _host_isolation_check(backend: Backend) -> dict:
-    """The doctor line for ``plugins.isolation: host`` (R33, lab L15): FAIL when this gateway is expected to answer
-    paired devices — ``inbound: on``, or a paired device that dials in (``inbound`` not ``off``) — since no route
-    reaches it; otherwise a warning that names what works (dialing out, bundles)."""
+    """The doctor line for ``plugins.isolation: host`` (R33, lab L15, L3-F21): a warning that says what ran end to end
+    under host and what did not — never a FAIL, since a pull through ``hermes serve`` works there. Paired devices that
+    dial this gateway (``inbound: on``, or ``auto`` with a paired dialer) are named with the verified address."""
     try:
         inbound = str(backend.settings().get("inbound") or "auto").lower()
     except Exception:
@@ -1465,17 +1486,16 @@ def _host_isolation_check(backend: Backend) -> dict:
         dialers = [p.name for p in backend.peers() if p.direction == "inbound" and not p.revoked_at]
     except Exception:
         dialers = []
-    expected = inbound == "on" or (inbound != "off" and bool(dialers))
     detail = HOST_ISOLATION_DETAIL
-    if expected:
+    if inbound == "off":
+        detail += ". inbound: off — no paired device reaches this gateway's routes in any isolation mode"
+    elif inbound == "on" or dialers:
         who = ", ".join(dialers) if dialers else "paired devices"
-        detail += f". {who} cannot reach this gateway (inbound: {inbound})"
-    return {
-        "name": "plugin isolation",
-        "ok": False if expected else None,
-        "detail": detail,
-        "remedy": HOST_ISOLATION_REMEDY,
-    }
+        detail += (
+            f". Paired devices that dial this gateway: {who} (inbound: {inbound}) — the verified way for them is the "
+            "`hermes serve` address of this machine"
+        )
+    return {"name": "plugin isolation", "ok": None, "detail": detail, "remedy": HOST_ISOLATION_REMEDY}
 
 
 def _job_error_text(job_id: str, err: Mapping | None, peer: str | None) -> str:
@@ -2080,7 +2100,12 @@ class EngineBackend:
         return int(self._runner().run_foreground(job_id))
 
     def cancel(self, job_id: str) -> str:
-        return str(self._runner().cancel(job_id))
+        """``jobs.JobRunner.cancel_answer``; only a recorded or carried-out cancel is an answer, anything else is a
+        refusal (``InvalidState``, exit 3 in the CLI) whose text names the job's state (L3-F22, DESIGN §14.2)."""
+        answer = self._runner().cancel_answer(job_id)
+        if answer.requested is not True:
+            raise InvalidState(answer.text, reason=answer.reason or "not_cancelled", state=answer.state, job=job_id)
+        return str(answer.text)
 
     def resume(self, job_id: str) -> None:
         self._runner().resume(job_id)

@@ -8,8 +8,9 @@
   job the runner ended (``session_busy``) carries its code into ``--json``;
 * L17 — the final message names title, session id and the exact way to open the received session (g3-b: it is
   stored, not open — Desktop sidebar, ``hermes sessions list``, ``hermes --resume <id>``);
-* L15 / R33 — under ``plugins.isolation: host`` a gateway cannot receive or provide handovers over HTTP: ``doctor``
-  says so (FAIL when paired devices dial it), and so does the ``listener_missing`` text.
+* L15 / R33 — under ``plugins.isolation: host`` ``doctor`` names the isolation (since g5, L3-F21: a warning that
+  says what ran end to end there and what did not — ``tests/unit/F/test_g5_host_isolation.py``), and the
+  ``listener_missing`` text names host isolation and the bundle path.
 
 Every test reproduces its finding without Hermes through the real surfaces (``Plugin.slash``/``Plugin.cli``) and
 ``FakeBackend``; the engine-backed parts run against a real ``Ledger``.
@@ -366,26 +367,29 @@ def test_status_names_the_session_the_job_created():
 
 
 @pytest.mark.parametrize(
-    ("settings", "peers", "ok"),
+    ("settings", "peers"),
     [
-        ({"inbound": "auto"}, [make_peer("laptop", direction="inbound")], False),  # a device dials in: unreachable
-        ({"inbound": "on"}, [], False),
-        ({"inbound": "auto"}, [make_peer("server")], None),  # only dials out: works, warn
-        ({"inbound": "off"}, [make_peer("laptop", direction="inbound")], None),
+        ({"inbound": "auto"}, [make_peer("laptop", direction="inbound")]),  # a device dials in (lab L15)
+        ({"inbound": "on"}, []),
+        ({"inbound": "auto"}, [make_peer("server")]),  # only dials out
+        ({"inbound": "off"}, [make_peer("laptop", direction="inbound")]),
     ],
 )
-def test_doctor_names_the_host_isolation_limit(settings, peers, ok):
-    """★ L15 / R33: under ``plugins.isolation: host`` (config, or this process is the plugin host) ``doctor`` says
-    that this gateway cannot receive or provide handovers over HTTP (``in_process`` needed) and that dialing out and
-    bundles work; FAIL when paired devices are expected to reach it. Before G‴ the line said only "no CLI, no
-    progress notices" — and only inside the plugin host."""
+def test_doctor_names_the_host_isolation_limit(settings, peers):
+    """★ L15 / R33: under ``plugins.isolation: host`` (config, or this process is the plugin host) ``doctor`` names
+    the isolation with ``in_process`` as the verified setup. Before G‴ the line said only "no CLI, no progress
+    notices" — and only inside the plugin host.
+
+    Adapted in g5 (L3-F21, R33 corrected): the line was a FAIL "cannot receive or provide handovers over HTTP" when
+    paired devices dial in, but the lab pulled through exactly such a gateway's ``hermes serve``; it is a warning in
+    every case now (details in ``test_g5_host_isolation.py``)."""
     config = {"plugins": {"isolation": "host", "entries": {"ctx_handover": {"settings": dict(settings)}}}}
     plugin, _backend, _ = _plugin(FakeBackend(peers=peers, config=config))
     out = _slash(plugin, "doctor")
     line = next((x for x in out.splitlines() if "plugin isolation" in x), "")
-    assert "cannot receive or provide handovers over HTTP" in line and "in_process" in line, out
-    assert "bundles" in line and "dialing" in line
-    assert line.startswith("[FAIL]" if ok is False else "[warn]"), line
+    assert "cannot receive or provide handovers over HTTP" not in line and "in_process" in line, out
+    assert "`hermes serve`" in line and "Not verified under host" in line, line
+    assert line.startswith("[warn]"), line
     quiet = FakeBackend(peers=peers, config={"plugins": {"isolation": "in_process"}})
     plugin, _b, _ = _plugin(quiet)
     assert "plugin isolation" not in _slash(plugin, "doctor")
@@ -411,7 +415,8 @@ def test_partial_in_the_way_names_the_path():
 
 def test_readme_names_the_g3_limits_and_answers():
     """The README says what the surfaces say: the window question ``--yes`` does not answer (R32), how to open a
-    received session (L17), host isolation (R33), short job ids (L3-F15) and the reclaim exit code (L3-F14)."""
+    received session (L17), host isolation (R33; since g5 what ran under ``host`` and what is not verified, L3-F21),
+    short job ids (L3-F15) and the reclaim exit code (L3-F14)."""
     text = " ".join((PLUGIN_ROOT / "README.md").read_text(encoding="utf-8").split())
     for needle in (
         "larger than the context window",
@@ -419,7 +424,8 @@ def test_readme_names_the_g3_limits_and_answers():
         "`hermes --resume <session-id>`",
         "Desktop sidebar",
         "`hermes sessions list`",
-        "receive or provide handovers over HTTP",
+        "`hermes serve` forwards the ctx_handover routes there",  # R33 as corrected in g5 (L3-F21)
+        "**Not verified** under `host`",
         "`in_process`",
         "bundles",
         "six-character job id",

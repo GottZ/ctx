@@ -1164,10 +1164,16 @@ def render_error(err: HandoverError, peer: str | None) -> str:
             "Basic login)."
         )
     if code == "listener_missing":
+        # an unsigned 404: the plugin is missing, disabled or not started there, or its inbound setting is off (the
+        # listener answers those like a missing plugin, SEC 1.10). Under plugins.isolation: host the routes are served
+        # through the plugin host; pulls through `hermes serve` ran end to end (lab L15), the rest did not (L3-F21)
         return (
-            f"{p} has no ctx_handover routes. If you just installed or enabled it there, restart `hermes serve` "
-            f"and the gateway on {p}. Under plugins.isolation: host a gateway cannot receive or provide handovers "
-            f"over HTTP (R33): set plugins.isolation: in_process on {p}, or use a bundle (/handover export)."
+            f"{p} has no ctx_handover routes (not installed, not enabled, inbound: off, or the plugin could not start "
+            f"there). If you just installed or enabled it there, or changed plugins.isolation there, restart "
+            f"`hermes serve` and the gateway on {p}; /handover doctor on {p} shows its setup. Under "
+            f"plugins.isolation: host on {p}, pulls through its `hermes serve` address are verified; for anything else "
+            f"plugins.isolation: in_process (the default) is the verified setup. Without a connection, use a bundle "
+            f"(/handover export)."
         )
     if code == "https_required":
         return (
@@ -1281,6 +1287,8 @@ def render_error(err: HandoverError, peer: str | None) -> str:
         )
     if code == "lease_lost":
         return "The session could not stay paused (lease lost). Nothing was handed over; try again."
+    if code == "invalid_state" and _d(err, "reason") in ("finished", "committing", "not_recorded") and err.message:
+        return err.message  # a cancel that cancelled nothing: the text names the job's state (L3-F22)
     if code == "not_found":
         return err.message or "Not found."
     if code == "bad_request":
