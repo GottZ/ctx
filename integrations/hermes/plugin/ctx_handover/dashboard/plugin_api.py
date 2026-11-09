@@ -14,7 +14,11 @@ the dashboard gate and the profile scope. It therefore
   signs the route-relative path and cuts oversized bodies while reading (SEC 1.4, I7).
 
 When no server can be built (engine incomplete, no identity, unreadable ledger) every route answers exactly like
-a missing plugin: ``404 {"detail": "Plugin not found"}`` (fail closed, SEC 1.10).
+a missing plugin: ``404 {"detail": "Plugin not found"}`` (fail closed, SEC 1.10). One exception (R33a): when the
+build fails only because the ledger is busy — another process of this profile (a gateway starting beside a fresh
+``hermes serve``) holds its write lock past the busy timeout — the route answers an unsigned
+``503 {"detail": "temporarily unavailable"}`` with ``Retry-After: 2``. The dialer retries 503 (``wire``: 502–504)
+instead of reporting the listener as missing, and the next request builds the server again.
 """
 
 from __future__ import annotations
@@ -37,6 +41,19 @@ router = APIRouter()
 _ENGINE_DIR = Path(__file__).resolve().parent.parent / "engine"
 _PRELOAD = ("errors", "model", "contracts", "jsonutil", "ids", "paths", "hostcompat", "blocks", "crypto", "server")
 _NOT_FOUND = b'{"detail":"Plugin not found"}'
+_UNAVAILABLE = b'{"detail":"temporarily unavailable"}'
+
+
+class _LedgerBusy(Exception):
+    """Building the server failed because the ledger was locked by another process (transient, R33a)."""
+
+
+def _busy(exc: BaseException) -> bool:
+    """``sqlite3.OperationalError`` "database is locked"/"busy" — the only build failure that passes by itself."""
+    kind = type(exc)
+    text = str(exc).lower()
+    return (kind.__module__, kind.__name__) == ("sqlite3", "OperationalError") and ("locked" in text or "busy" in text)
+
 
 _lock = threading.RLock()
 _engine_module = None
@@ -119,6 +136,8 @@ def _server():
             server = _factory(eng)
         except Exception as exc:
             log.warning("ctx_handover listener unavailable: %s", type(exc).__name__)
+            if _busy(exc):
+                raise _LedgerBusy from exc
             return None
         if server is not None:
             _servers[key] = server
@@ -140,6 +159,8 @@ def _headers(request: Request) -> dict[str, str]:
 async def dispatch(path: str, request: Request) -> Response:
     try:
         server = await asyncio.to_thread(_server)
+    except _LedgerBusy:
+        return Response(_UNAVAILABLE, status_code=503, media_type="application/json", headers={"Retry-After": "2"})
     except Exception as exc:
         log.warning("ctx_handover engine failed to load: %s", type(exc).__name__)
         server = None

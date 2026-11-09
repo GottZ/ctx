@@ -116,14 +116,19 @@ class Identity:
     ) -> Identity | None:
         """The stored identity, or None when this profile has none (nothing paired yet). Never creates one.
 
-        The seed comes from ``get_secret`` and, when that is missing or stale, from a fresh ``.env`` read (a
-        process started before the key existed). Raises ``IdentityLost`` (``details.reason`` ``missing`` |
-        ``malformed`` | ``mismatch``) when the ledger has a public key the ``.env`` does not reproduce.
+        The seed comes from ``get_secret``; only when that is missing or does not reproduce the ledger's key is
+        the ``.env`` read afresh (a process started before the key existed or was rotated) — never on every load
+        (M34, catalog rules 11 and 13). Raises ``IdentityLost`` (``details.reason`` ``missing`` | ``malformed`` |
+        ``mismatch``) when the ledger has a public key the ``.env`` does not reproduce.
         """
         expected = ledger.meta_get(META_PUBKEY)
         if not expected:
             return None
-        values = [read_secret(IDENTITY_ENV)]
+        first = read_secret(IDENTITY_ENV)
+        key = cls._from_seed(first) if first else None
+        if key is not None and hmac.compare_digest(b64e(_public_raw(key)), expected):
+            return cls(ledger.instance_id(), key)
+        values = [first]
         fresh = read_env_fresh(IDENTITY_ENV)
         if fresh not in values:
             values.append(fresh)

@@ -393,6 +393,7 @@ class BundleTarget:
             raise ConflictError(f"{self.out} already exists; choose another path", path=str(self.out))
         with self._lock:
             doc = self._read_state()
+            ours = doc is not None  # a staging of this plugin: private to this user, with its progress document
             if doc is not None and doc.get("job_id") == job.job_id:
                 try:
                     self._apply(doc)
@@ -406,6 +407,17 @@ class BundleTarget:
                 )
             if self._partial.is_symlink():
                 raise ConflictError(f"{self._partial} is a symbolic link; choose another path", path=str(self.out))
+            if not ours and os.path.lexists(self._partial):
+                # not a staging of this plugin (no progress document of ours): never delete it (L8) — only an
+                # empty directory, which holds nothing, is taken over
+                try:
+                    os.rmdir(self._partial)
+                except OSError:
+                    raise ConflictError(
+                        f"{self._partial} exists and is not an export staging of ctx_handover; remove it or choose "
+                        "another path",
+                        path=str(self.out),
+                    ) from None
             shutil.rmtree(self._partial, ignore_errors=True)
             self._reset()
             self._job_id = job.job_id

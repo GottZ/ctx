@@ -6,7 +6,10 @@ DESIGN §4.1–§4.6. One ``WireClient`` talks to one paired peer's dashboard or
 * **Gate (D6a, R7)**: every request carries the peer's dashboard-gate credential — session token, bearer, or the
   access token of a Basic-provider login (kept in memory only; one re-login after an unsigned 401) — plus
   optional proxy headers. Values come from ``read_secret`` (``agent.secret_scope.get_secret``, catalog rule 11)
-  and are never logged.
+  and are never logged. Exception (H1): the first ``hello`` of a peer whose key is not pinned yet (pairing) goes
+  out without them; the credential follows only when something in front of the plugin refuses that request, and
+  every hello of such a peer must be signed over this request's nonce by the key it presents (proof of
+  possession, checked against the paste string's fingerprint by ``pairing``).
 * **Signatures (D6b)**: requests are signed with the identity (``crypto.sign_request``) over the route-relative
   path; every response must carry ``X-Ctxh-Resp-Sig`` by the pinned listener key. Unsigned responses are only
   status signals — 413, 429 (``Retry-After`` ≤ 300 s), 502–504; their bodies are never parsed (SEC 1.5).
@@ -325,10 +328,14 @@ class WireClient:
         signed: bool,
         epoch: int | None,
         accept_unsigned_ok: bool,
+        gate: bool = True,
+        attempts: int | None = None,
     ) -> httpx.Response:
         """One logical request with retries; returns a verified 2xx response or raises. Every ``GateRejected``
         (gate secret missing, Basic login refused, unsigned 401) carries ``details.mode`` — this peer's gate mode,
-        ``none`` without a gate — and ``details.peer`` — the peer's name — for the remedy text (W122)."""
+        ``none`` without a gate — and ``details.peer`` — the peer's name — for the remedy text (W122).
+        ``gate=False`` sends no gate header and no Basic login (the first pairing hello, H1); ``attempts`` caps the
+        tries of this one request (a request that must not be repeated: ``pair/redeem``, the ``doctor`` probes)."""
         try:
             return self._exchange(
                 method,
@@ -338,6 +345,8 @@ class WireClient:
                 signed=signed,
                 epoch=epoch,
                 accept_unsigned_ok=accept_unsigned_ok,
+                gate=gate,
+                attempts=self._attempts if attempts is None else max(1, int(attempts)),
             )
         except GateRejected as exc:
             gate = self.peer.gate
@@ -355,15 +364,18 @@ class WireClient:
         signed: bool,
         epoch: int | None,
         accept_unsigned_ok: bool,
+        gate: bool,
+        attempts: int,
     ) -> httpx.Response:
         last: HandoverError | None = None
         relogged = False
         attempt = 0
-        while attempt < self._attempts:
+        while attempt < attempts:
             attempt += 1
             nonce = random_b64(16)
             headers = {"X-Ctxh-Nonce": nonce, "Accept": "application/json, " + MEDIA_BLOCKS}
-            headers.update(self._gate())
+            if gate:
+                headers.update(self._gate())
             if content_type:
                 headers["Content-Type"] = content_type
             if signed:
@@ -394,13 +406,13 @@ class WireClient:
                     resp = self._http.request(method, self._url(route), content=body, headers=headers, params=params)
             except httpx.HTTPError as exc:
                 last = PeerUnreachable(f"{self.peer.name} is not reachable ({type(exc).__name__})")
-                self._backoff(attempt, None)
+                self._backoff(attempt, None, attempts)
                 continue
             elapsed = time.monotonic() - started
             try:
                 self._interpret(resp, nonce, accept_unsigned_ok=accept_unsigned_ok)
             except GateRejected:
-                if self.peer.gate is not None and self.peer.gate.mode == GateMode.BASIC_LOGIN and not relogged:
+                if gate and self.peer.gate is not None and self.peer.gate.mode == GateMode.BASIC_LOGIN and not relogged:
                     relogged = True
                     self._access = None
                     attempt -= 1  # the re-login is not a retry of the request
@@ -408,15 +420,15 @@ class WireClient:
                 raise
             except (PeerUnreachable, RateLimited) as exc:
                 last = exc
-                self._backoff(attempt, exc.details.get("retry_after"))
+                self._backoff(attempt, exc.details.get("retry_after"), attempts)
                 continue
             if route.endswith("/blocks") or route.endswith("/blocks/get"):
                 self._adaptive.observe(elapsed)
             return resp
         raise last if last is not None else PeerUnreachable(f"{self.peer.name} is not reachable")
 
-    def _backoff(self, attempt: int, retry_after: object) -> None:
-        if attempt >= self._attempts:
+    def _backoff(self, attempt: int, retry_after: object, attempts: int) -> None:
+        if attempt >= attempts:
             return
         if isinstance(retry_after, int) and retry_after > 0:
             delay = float(min(retry_after, RETRY_AFTER_CAP))
@@ -455,7 +467,7 @@ class WireClient:
             raise PeerUnreachable(f"{self.peer.name} answered HTTP {status} through a proxy", status=status)
         if accept_unsigned_ok and not pubkey and 200 <= status < 300:
             return
-        raise BadResponseSignature(f"unsigned response (HTTP {status}) from {self.peer.name}")
+        raise BadResponseSignature(f"unsigned response (HTTP {status}) from {self.peer.name}", status=status)
 
     def _json(self, resp: httpx.Response) -> dict:
         data = loads_bounded(resp.content, max_bytes=MAX_JSON_RESPONSE)
@@ -475,7 +487,10 @@ class WireClient:
         self.listener_id = instance
 
     def hello(self, *, signed: bool = True) -> Hello:
-        """``GET /v1/hello``; the signed form also sets limits, capabilities, hosted mode and clock skew."""
+        """``GET /v1/hello``; the signed form also sets limits, capabilities, hosted mode and clock skew. The
+        unsigned form of a peer whose key is not pinned yet is ``_first_hello`` (pairing, H1)."""
+        if not signed and not self.peer.pubkey:
+            return self._first_hello()
         if not signed:
             resp = self._send("GET", "hello", b"", content_type=None, signed=False, epoch=None, accept_unsigned_ok=True)
             hello = from_wire(Hello, self._json(resp))
@@ -493,8 +508,53 @@ class WireClient:
             self.clock_skew = float(hello.server_time) - self._clock()
         return hello
 
+    def _first_hello(self) -> Hello:
+        """Unsigned hello of a peer whose key is not pinned yet (pairing, H1): nothing secret leaves before the
+        listener has shown its key.
+
+        The first request carries no gate header (and no Basic login). A signed 2xx answer is the plugin's; any
+        other answer — a dashboard-gate 401, a proxy's 403/302/404, a login page without the plugin's signature —
+        means something in front wants the credential, and only then is the hello repeated with it (``pairing``
+        has checked that the credential is not stored for another address). Either way the hello must be signed
+        over this request's nonce by the key it presents (``_prove``); the caller compares that key with the
+        paste string's fingerprint."""
+        resp: httpx.Response | None = None
+        try:
+            resp = self._send(
+                "GET", "hello", b"", content_type=None, signed=False, epoch=None, accept_unsigned_ok=True, gate=False
+            )
+        except (GateRejected, ListenerMissing, BadResponseSignature):
+            if self.peer.gate is None:
+                raise
+        if resp is not None and not resp.headers.get(H_RESP_SIG):
+            resp = None  # a 2xx that is not the plugin's (a login page, a proxy): the credential is needed
+        if resp is None:
+            resp = self._send("GET", "hello", b"", content_type=None, signed=False, epoch=None, accept_unsigned_ok=True)
+        hello = from_wire(Hello, self._json(resp))
+        self._prove(resp, hello.listener_pubkey)
+        if not self.listener_id:
+            self.listener_id = hello.instance_id
+        return hello
+
+    def _prove(self, resp: httpx.Response, pubkey: str) -> None:
+        """The answer is signed over this request's nonce by ``pubkey`` — the responder holds the key it presents
+        (a relay that copies a listener's hello cannot sign a fresh nonce)."""
+        try:
+            nonce = resp.request.headers.get("X-Ctxh-Nonce", "")
+        except RuntimeError:  # pragma: no cover - httpx always sets the request of a sent response
+            nonce = ""
+        sig = resp.headers.get(H_RESP_SIG) or ""
+        msg = response_string(resp.status_code, nonce, hashlib.sha256(resp.content).hexdigest())
+        if not (nonce and sig and pubkey and verify(pubkey, msg, sig)):
+            raise BadResponseSignature(
+                f"{self.peer.name} did not prove that it holds the key it presents (hello not signed over this "
+                "request); not paired"
+            )
+
     def redeem(self, body: dict) -> dict:
-        """Unsigned ``POST /v1/pair/redeem`` (the pairing proofs bind it, DESIGN §12.3)."""
+        """Unsigned ``POST /v1/pair/redeem`` (the pairing proofs bind it, DESIGN §12.3) — one attempt only: the
+        listener burns the code with the first redeem it processes, so a repeat after a lost answer could only
+        fail and hide that the listener has paired this device (M14)."""
         import json
 
         data = json.dumps(body, separators=(",", ":")).encode("utf-8")
@@ -506,6 +566,7 @@ class WireClient:
             signed=False,
             epoch=None,
             accept_unsigned_ok=True,
+            attempts=1,
         )
         return self._json(resp)
 
@@ -654,6 +715,7 @@ class WireClient:
                         signed=True,
                         epoch=0,
                         accept_unsigned_ok=False,
+                        attempts=1,  # each size once: the probe sends at most sum(PROBE_SIZES_MIB) MiB (M32)
                     )
                 except PayloadTooLarge:
                     break
@@ -675,6 +737,10 @@ class WireClient:
         elif report["gate"] == "rejected":
             ok, detail = False, f"the dashboard gate of {name} refused the stored credential ({mode})"
             remedy = f"store the current dashboard credential of {name} for this peer (gate mode {mode})"
+            gate = self.peer.gate
+            if gate is not None:
+                var = gate.password_env if gate.mode == GateMode.BASIC_LOGIN else gate.token_env
+                remedy += f" in {var} (this profile's .env, also on the Keys page of the dashboard), or pair again"
         elif not report["plugin"]:
             ok, detail = False, f"the dashboard of {name} answered, ctx_handover did not ({error})"
             remedy = f"install and enable ctx_handover on {name}; its inbound must be open (pair again)"

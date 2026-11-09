@@ -59,6 +59,7 @@ from .errors import (
     BadRequest,
     Forbidden,
     HandoverError,
+    JobConflict,
     NotFound,
     PayloadTooLarge,
     RateLimited,
@@ -452,8 +453,13 @@ class Server:
         redact: Callable[[str], str] | None = None,
         clock: Callable[[], float] = time.time,
         load_identity: Callable[[], Identity | None] | None = None,
+        inbound_setting: Callable[[], object] | None = None,
     ) -> None:
+        """``inbound_setting``, when given, returns the current raw ``inbound`` setting and is asked on every
+        request, so ``inbound: off`` closes the routes without a restart (M15); a failing read counts as ``off``.
+        Without it ``settings["inbound"]`` holds for the life of this server."""
         self._ledger = ledger
+        self._inbound_setting = inbound_setting
         self._identity = identity
         self._load_identity = load_identity or self._load_profile_identity
         self._identity_lock = threading.Lock()
@@ -601,9 +607,15 @@ class Server:
     def _inbound_active(self) -> bool:
         if self.current_identity() is None:
             return False
-        if self.inbound == "off":
+        mode = self.inbound
+        if self._inbound_setting is not None:
+            try:
+                mode = inbound_mode(self._inbound_setting())
+            except Exception:
+                mode = "off"  # fail closed: an unreadable setting never answers peers
+        if mode == "off":
             return False
-        if self.inbound == "on":
+        if mode == "on":
             return True
         if self._ledger.pairing_pending(self._clock()):
             return True
@@ -744,10 +756,19 @@ class Server:
 
     def _h_jobs_open(self, auth, params, body, req) -> dict:
         """Route #7: the wire format is checked here; role ↔ right, the job caps (``max_jobs_per_peer``,
-        ``max_jobs_total``) and idempotent re-opens are the registry's (contract X18)."""
+        ``max_jobs_total``) and idempotent re-opens are the registry's (contract X18).
+
+        A job id that a job of another peer — or a job of this host without a peer (export, import) — uses in any
+        role is not available (M17): the objects a job may serve (``job_objects``) are keyed by the job id alone,
+        so a pull peer opening a source job under the id of someone else's push would read that push's objects."""
         job_id = body.get("job_id")
         if not isinstance(job_id, str) or not ULID_RE.match(job_id):
             raise BadRequest("job_id must be a ULID", field="job_id")
+        mine = auth.peer.peer_id if auth.peer is not None else None
+        for role in Role:
+            row = self._ledger.job(job_id, role)
+            if row is not None and (mine is None or row["peer_id"] != mine):
+                raise JobConflict("job id not available")
         return self._registry.open(auth, body)
 
     # job plumbing

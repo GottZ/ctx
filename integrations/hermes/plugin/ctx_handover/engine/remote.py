@@ -248,25 +248,32 @@ class RemoteBlocks:
 
     # BlockSource
     def manifests(self, object_ids: Sequence[str]) -> list[ObjectManifest]:
-        """Manifests in request order; each one's id is recomputed and must be the one requested (§4.6 chain)."""
+        """Manifests in request order; each one's id is recomputed and must be the one requested (§4.6 chain).
+        A page that names a further ``cursor`` must have brought at least one manifest not received before — a
+        listener that repeats a cursor or answers empty pages ends the job instead of looping (L7)."""
         out: dict[str, ObjectManifest] = {}
         ids = list(object_ids)
         for start in range(0, len(ids), MAX_OBJECT_IDS):
             chunk = ids[start : start + MAX_OBJECT_IDS]
             cursor: str | None = None
+            received: set[str] = set()
             while True:
                 body: dict = {"object_ids": chunk}
                 if cursor:
                     body["cursor"] = cursor
                 data = self._call("objects/list", body)
+                before = len(received)
                 for raw in data.get("manifests", []):
                     m = verify_manifest(from_wire(ObjectManifest, raw))
                     if m.object_id not in chunk:
                         raise BadRequest("peer returned a manifest that was not requested", field="manifests")
                     out[m.object_id] = m
+                    received.add(m.object_id)
                 cursor = data.get("cursor")
                 if not cursor:
                     break
+                if len(received) == before:
+                    raise BadRequest("peer returned a manifest page without progress", field="cursor")
         missing = [i for i in ids if i not in out]
         if missing:
             raise NotFound("peer did not return every requested manifest", object_id=missing[0])
