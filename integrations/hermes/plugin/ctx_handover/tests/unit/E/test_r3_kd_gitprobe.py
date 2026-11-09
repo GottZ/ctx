@@ -112,8 +112,19 @@ def test_collector_with_the_production_probe(tmp_path, monkeypatch):
     inner = [c.path for c in whole if collector.INNER_REPO_REASON in c.reasons]
     assert inner == [os.path.realpath(repo.root / "vendor" / "x")]
     rp = plan.build_plan(
-        "01JCJOB", (1,), whole, None, RefineReport(used="off"), PlanHints(), cfg,
-        lambda root: probe.info(root, cfg), Busy(), (), Options(), 10, redact=fake_redact,
+        "01JCJOB",
+        (1,),
+        whole,
+        None,
+        RefineReport(used="off"),
+        PlanHints(),
+        cfg,
+        lambda root: probe.info(root, cfg),
+        Busy(),
+        (),
+        Options(),
+        10,
+        redact=fake_redact,
     )
     final = final_plan(rp)
     assert plan.repos_left(final) == [{"path": inner[0], "kind": "nested"}]

@@ -87,6 +87,9 @@ from .ops import OpRunner, error_dict
 from .paths import expand_handover_root
 from .policy import HERMES_FILE_KINDS, PolicyConfig, check_target_dest
 
+HOOK_KIND = "hook_outputs"
+"""``hermes_files.HOOK_OUTPUTS`` (that module is a port, loaded lazily): the session-file kind whose old folders the
+path map names (M10)."""
 MAX_DOC_BYTES = 64 * 1024 * 1024
 DISK_MARGIN = 1.1
 QUOTA_MARGIN = 1.1
@@ -773,6 +776,7 @@ class LocalTarget:
         path_map.append(
             PathMapEntry(source=req.source_facts.host.hermes_home, target=self.hermes.home, kind="hermes_home")
         )
+        path_map.extend(self._hook_folders(placed, items))  # M10: the note names the exact folder
         note_text, report_path = self._compose_note(job, req, final, prepared, path_map, delta_message=False)
         self._remember(
             job,
@@ -825,6 +829,26 @@ class LocalTarget:
                 continue
             placed.append({"pack_item": {**pack_item, "hermes_kind": kind}, "target": str(dest)})
         return placed, skipped
+
+    def _hook_folders(self, placed: list[dict], items: dict) -> list[PathMapEntry]:
+        """M10 (R30 form): one path-map entry of kind ``hermes_file`` per folder of the previous machine whose hook
+        outputs were placed here, in placement order — the old folder (cut at the last ``/`` or ``\\``, as ``note``
+        cuts it) → the folder ``_hermes_placement`` placed its first file in (``hermes_files.target_path``: the arrived
+        session's ``hook_outputs_dir``; step c3 writes exactly there). The conversation names the old folders; the
+        note's hook line names this one (without the entry only ``hook_outputs/<this session's id>``). A file that was
+        not placed gets no entry."""
+        out: list[PathMapEntry] = []
+        for entry in placed:
+            pack_item = entry["pack_item"]
+            item = items.get(pack_item.get("item_id"))
+            if item is None or pack_item.get("hermes_kind") != HOOK_KIND:
+                continue
+            source = str(item.source_path)
+            cut = max(source.rfind("/"), source.rfind("\\"))
+            old = source[:cut] if cut > 0 else ""
+            if old and not any(e.source == old for e in out):
+                out.append(PathMapEntry(source=old, target=str(Path(entry["target"]).parent), kind="hermes_file"))
+        return out
 
     def _paused(self, capsule_doc: dict) -> list[str]:
         """The drivers (goal, heartbeat, loop) the commit writes for the arrived session — always paused (R22,

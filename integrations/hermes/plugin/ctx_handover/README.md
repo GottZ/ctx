@@ -148,13 +148,19 @@ back here; the copy on the other gateway stays active.
 | Take it back here | the source session | `/handover reclaim` (`--force` while a handover is being committed); in a terminal `hermes handover reclaim --session <id>` (or `reclaim <id>`) |
 
 The session's workspace is the git repository around its working folder, unless git ignores the working folder
-there (a scratch or build folder inside a checkout): then only the working folder travels, as a file tree, and the
-repository around it stays here. Git LFS files travel as their objects and are checked out on the other side with
-`git lfs checkout`, never from a network; without git-lfs there they stay pointers and the final message says so.
+there (a scratch or build folder inside a checkout) or carries nothing from it but placeholder files such as `.gitkeep`
+while other files lie there (`tmp/*` with `!tmp/.gitkeep`): then only the working folder travels, as a file tree, and
+the repository around it stays here. Files git ignores do not travel with a repository (build outputs, caches), also
+when the conversation names them. A file the conversation names in a folder git ignores in another repository is an
+item of its own outside the project, never the repository around it; a file git ignores only by its name, in a folder
+it does not ignore (`*.log` in `src/`), still points the plan to that repository, which does not carry the file.
+Git LFS files travel as their objects and are checked out on the other side with `git lfs checkout`, never from a
+network; without git-lfs there they stay pointers and the final message says so.
 
 Before anything is locked the plugin shows what would move: the workspace and its size, every item outside the project
-with its size (the 10 largest, then how many more), the repositories inside the workspace that stay here, the paths you
-named with `--include` that this machine's policy leaves out (with the reason, also with `--yes`), and whether
+with its size (the 10 largest, then how many more), the repositories inside the workspace that stay here (each
+initialised submodule and each clone git does not ignore, also one the session never touched), the paths you named
+with `--include` that this machine's policy leaves out (with the reason, also with `--yes`), and whether
 the context window of the model there is unknown. It asks for a confirmation when items are only proposed, a destination
 has local changes (a fresh folder is used), the handover is larger than `confirm_above_mb`, a secret is included with
 `--include-secret`, the model there does not work offline (this session's model did), items outside the project are
@@ -183,9 +189,12 @@ TUI switcher, shows it only after it was opened once). After a pull the final me
 with `--include` that the other side does not release (withheld by source policy — a pull's own hints only narrow what
 the source offers); after a handover from here it names the `--include` paths this machine left out. On the receiving
 side `/handover status <job>` shows the note the agent gets with your first
-message there; the note is not shown in the transcript view. `/handover status` also shows the jobs another gateway
-runs with this one — a push that arrived here, a pull that took a session from here — listed with this gateway's role
-(`target, from <peer>` or `source, to <peer>`) and, for an arrival, the session it became here.
+message there; the note is not shown in the transcript view. Hook-output files arrive in the received session's own
+folder (`hook_outputs/<session id>/` in the Hermes home there, same file names); the conversation still names the old
+folders, so the note lists, for each old folder, the folder its files are in now. `/handover status` also shows
+the jobs another gateway runs with this one — a push that arrived here, a pull that took a session from here —
+listed with this gateway's role (`target, from <peer>` or `source, to <peer>`) and, for an arrival, the session it
+became here.
 
 All commands: `/handover to | take | export | import | status | peers | pair | reclaim | cancel | resume | setup |
 doctor | identity | gc | logs | help` — `/handover help <command>` shows the options. `hermes handover <same>` runs
@@ -256,9 +265,13 @@ key or one that does not match the public key in the ledger (a process started b
 rotated); whether the provider of the session's model has a key here (its key variables through `get_secret`, else
 from the profile `.env` — only whether one is set; the value is neither used nor sent); the file mode of the profile
 `.env` (`doctor`); the home folders of this host's accounts from the password database (`pwd`), once per process,
-for the destination denylist under **Rights**; `/etc/os-release` (OS name and version for the environment facts); on Linux the boot id and the own
-PID-namespace link under `/proc` (owner stamps for the turn lease and for handover jobs, so a dead process on this
-host is recognised at once) and `/proc/self/status` (the process umask for the modes of received files); before a
+for the destination denylist under **Rights**, and for the same list the home of the owner of each folder on the way
+to a destination from the name service (`getpwuid`); when a file to send has more than one link, the names and file
+identities — not the contents — of the entries in the credential places of the hard-link check under **Unredacted**
+(at most 4096 per scan); `/etc/os-release` (OS name and version for the environment facts); on Linux the boot id
+and the own PID-namespace link under `/proc` (owner stamps for the turn lease and for handover jobs, so a dead
+process on this host is recognised at once) and `/proc/self/status` (the process umask for the modes of received
+files); before a
 continuation starts and in `doctor`, the identity of this profile's running gateway through Hermes' own
 `gateway.status` (`gateway.pid`, `gateway_state.json`, the gateway's command line and start time) — to see a `--yolo`
 on its command line, never its environment.
@@ -346,11 +359,16 @@ dashboard token is then your step).
 `~/hermes-handover`), a returning repository in the folder this machine handed it away from and a folder it
 delivered into here before, never in Hermes,
 credential, shell-startup, autostart, git or ssh configuration locations. No destination — not even one typed here —
-lies in those locations of any account's home (yours, the homes of the password database, `/home/*`, `/Users/*`,
-`/var/home/*`, `/root`), in a home itself or above one, or in the system places (`/etc`, `/usr`, `/bin`, `/var/spool`,
-`/Library`, `/System`, `/opt/homebrew` and more; on Windows `Windows`, `Program Files`, `Program Files (x86)`,
-`ProgramData`); on Windows also not in the PowerShell profile folders (in `Documents` and under OneDrive) or
-`WindowsApps`, and `~/Documents` itself is no destination there. A bundle that no paired, non-revoked key signed is
+lies in those locations of any account's home (yours, the homes of the password database and of the owners of the
+folders on the way, `/home/*`, `/Users/*`, `/var/home/*`, `/root`, and the Windows homes behind WSL's drive mounts,
+`/mnt/<drive>/Users/*` and `/<drive>/Users/*`), in a home itself or above one, or in the system places (`/etc`, `/usr`,
+`/bin`, `/var/spool`, `/Library`, `/System`, `/opt/homebrew` and more; on Windows `Windows`, `Program Files`,
+`Program Files (x86)`, `ProgramData`, and the same folders of each WSL drive); on Windows and on those WSL drives also
+not in the PowerShell profile folders (in `Documents` and in OneDrive's documents folder, also under its localised
+name such as `OneDrive/Dokumente`) or `WindowsApps`, and `~/Documents` itself is no destination there. A home whose
+owner the name service does not know, a WSL drive mounted elsewhere than `/mnt/<drive>` or `/<drive>`, and a OneDrive
+documents folder named in a language outside the plugin's list (`policy.ONEDRIVE_DOCUMENTS_NAMES`) are not
+recognised. A bundle that no paired, non-revoked key signed is
 refused by `import` unless you add `import --trust-unsigned`; such a session arrives marked as from an unverified
 bundle, never starts a continuation and binds no return trip to its exporter. Its instruction files ask for a
 confirmation.
@@ -359,7 +377,12 @@ confirmation.
 they are; committed history travels
 with a repository, including tracked secret files (the plan warns); workspace `.env` files only with
 `--include-secret` per path on the source; Hermes' own credentials never. The content sniff reads the first 8 KiB
-of each candidate file. The block cache keeps copies up to 3 days / 5 GiB (`/handover gc --all`).
+of each candidate file. A hard link to a credential file the plugin knows (in your home's secrets folders such as
+`~/.ssh`, `~/.aws` and the browser profiles, a file with a secret name at the top of your home or in `~/.config` or one
+folder below it, Hermes' credential stores) is left out as that file would be: `--include-secret` on its path releases
+one of your home, nothing releases Hermes'. A hard link to a credential file elsewhere (another account's home, any
+other place, or beyond the first 4096 entries the check reads, e.g. deep in a large browser profile) is caught only by
+the name and content checks. The block cache keeps copies up to 3 days / 5 GiB (`/handover gc --all`).
 With `allow_remote_continue` or `allow_agent_start`, a turn runs without a person present (single-query approval
 policy; refused when approvals are off as far as the starting process can tell). Under `plugins.isolation: host` the core buffers request bodies before
 the plugin's size limit applies. The plugin never updates itself and never writes into Hermes plugin, skill,
