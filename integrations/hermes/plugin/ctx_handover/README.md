@@ -194,8 +194,10 @@ copies here, and — only if you enable `allow_remote_continue` — start one co
 **Reads:** the handed-over session through Hermes' session store, plus read-only SQL on `session_admissions` and
 `async_delegations` to detect pending work; the session's working directory including uncommitted git state;
 files under your home that the transcript references (asked before inclusion unless `extra_paths: auto`);
-`cache/spillover`, `hook_outputs`, `native-inputs` files of that session; `processes.json` and `cron/jobs.json`
-(named in the note, never moved); the file mode of the profile `.env` (`doctor`).
+`cache/spillover`, `hook_outputs`, `native-inputs` and `cache/terminal-output` files of that session;
+`processes.json` and `cron/jobs.json` (named in the note, never moved); the file mode of the profile `.env`
+(`doctor`); on Linux the boot id and the own PID-namespace link under `/proc` (owner stamps for the turn lease and
+for handover jobs, so a dead process on this host is recognised at once).
 
 **Writes:** on the target — a new session, workspace copies under `allow_roots` (default: `~/hermes-handover`),
 never over uncommitted local work except an unchanged copy this plugin handed away earlier, and the session's

@@ -20,6 +20,12 @@ JUSTIFIED = {
         "read-only readlink of the own PID namespace for the turn-lease holder stamp, the core's own format "
         "(DESIGN §7.2): a dead holder is freed at once instead of after the TTL [LAB L6]",
     ),
+    ("proc_access", "ledger.py"): (
+        "/proc/self/ns/pid",
+        "read-only reads of the boot id and the own PID-namespace inode for the ledger's job-owner stamp "
+        "(G-prime, gp-a): a row whose owner process is dead on this host is taken over at once instead of after "
+        "the stale window; nothing is written under /proc",
+    ),
     ("setuid_setgid", "test_filetree.py"): (
         "setuid",
         "unit test of cluster E proving that tree entries with setuid/setgid/sticky modes from a peer are skipped "
