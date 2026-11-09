@@ -401,6 +401,8 @@ class Lab:
             port = PORTS.get(comp)
             if port and not wait_for(lambda port=port: port_free(port), 90, poll=0.5):
                 raise LabError(f"port {port} of {comp} is still in use after 90 s")
+            if comp.startswith("gw-"):
+                self._end_foreign_gateway(comp[3:])
             for attempt in range(3):
                 extra: dict[str, str] = {}
                 if comp.startswith("gw-"):
@@ -439,6 +441,38 @@ class Lab:
         for comp in components:
             if self.pid(comp):
                 raise LabError(f"{comp} still runs after labctl stop")
+            if comp.startswith("gw-"):
+                self._end_foreign_gateway(comp[3:])
+
+    def _end_foreign_gateway(self, inst: str) -> None:
+        """End a gateway of ``inst``'s profile that ``labctl.py`` did not start, by PID.
+
+        A ``hermes chat`` client (the plugin's continuation ``hermes -p default chat --resume … --query=…``, R10)
+        that finds no gateway for its profile starts an unmanaged one itself (upstream
+        ``hermes_cli.gateway_runtime.ensure_gateway_runtime(..., idle_exit=True)``; L26's variant with ``gw-a``
+        stopped). That daemon answers on ``<home>/gateway.sock`` and owns the profile's host-gateway record, so a later
+        ``labctl.py start gw-<x>`` only prints "The host gateway already serves profile 'default' — nothing to start"
+        and every check of the stand talks to a gateway with another token and environment (final run on
+        ``ccc74192``: E18's gateway token was rejected by it). Ended here only when it carries this home's
+        ``LAB_TAG`` (``hlab-<x>``); anything else is a ``LabError``, never killed."""
+        desc = self.ctl.identify(inst) or {}
+        pid = desc.get("pid")
+        own = self.pid(f"gw-{inst}")
+        if not pid or not pid_alive(int(pid)) or int(pid) == own:
+            return
+        try:
+            env = Path(f"/proc/{int(pid)}/environ").read_bytes().split(b"\0")
+        except OSError:
+            env = []
+        if f"LAB_TAG=hlab-{inst}".encode() not in env:
+            raise LabError(f"scaffold: a gateway not started by labctl (pid {pid}) serves {inst} and is no lab process")
+        kill_pid(int(pid), grace=20.0)
+        gone = wait_for(lambda: not (self.ctl.identify(inst) or {}).get("pid"), 60, poll=0.5)
+        if self.ev is not None:
+            record = {"pid": pid, "labctl_pid": own, "desc": desc, "ended": bool(gone)}
+            self.ev.write(f"foreign-gateway-{inst}.json", record)
+        if not gone:
+            raise LabError(f"scaffold: the unmanaged gateway {pid} of {inst} still answers after SIGTERM/SIGKILL")
 
     def restart(self, *components: str) -> None:
         self.stop(*components)
