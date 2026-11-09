@@ -1021,11 +1021,11 @@ def worktree_state(git: Git, root: str, exclude_pathspecs: Sequence[str], tmp: P
 class GitProbe:
     """Read-only git questions for collector, assessment and update-mode checks (INTERFACES §4.3).
 
-    Discovery questions (``toplevel``, ``common_dir``, ``is_shallow``, ``is_partial``) take any path inside a
-    work tree and climb to its repository as git does — up to, never into, ``ceiling`` (``GIT_CEILING_DIRECTORIES``;
-    W088: tests below a basetemp that itself lies in a checkout). Questions about a known work-tree root
-    (``status_clean``, ``root_commits``, ``ref_tips``, ``info`` …) never leave that root (ceiling = its parent),
-    so a root that is no repository is never answered by an enclosing one.
+    Discovery questions (``toplevel``, ``common_dir``, ``is_shallow``, ``is_partial``, ``is_ignored``) take any path
+    inside a work tree and climb to its repository as git does — up to, never into, ``ceiling``
+    (``GIT_CEILING_DIRECTORIES``; W088: tests below a basetemp that itself lies in a checkout). Questions about a
+    known work-tree root (``status_clean``, ``root_commits``, ``ref_tips``, ``info`` …) never leave that root
+    (ceiling = its parent), so a root that is no repository is never answered by an enclosing one.
     """
 
     def __init__(self, git: Git, *, profile: str = "source", ceiling: str | os.PathLike | None = None):
@@ -1093,6 +1093,16 @@ class GitProbe:
             return True
         ext = self._discover(path, ["config", "--get", "extensions.partialclone"])
         return ext is not None and ext.returncode == 0 and bool(ext.stdout.strip())
+
+    def is_ignored(self, path: str) -> bool:
+        """True unless git confirms that the directory ``path`` is not ignored in the work tree around it (R36,
+        L3-F19): ``git check-ignore -q --end-of-options .`` run in ``path`` — exit 1 (not ignored: no ``.gitignore``,
+        ``.git/info/exclude`` or ``core.excludesFile`` pattern excludes it or a parent, or it holds a tracked file)
+        is the only False. Exit 0 (ignored), any other status (git refused or died), a path that is no directory or
+        lies outside every work tree all read True — fail closed: the collector then keeps the workspace to the
+        directory itself instead of growing it to a repository the directory may not be part of."""
+        proc = self._discover(path, ["check-ignore", "-q", "--end-of-options", "."])
+        return proc is None or proc.returncode != 1
 
     def in_progress(self, root: str) -> str | None:
         try:

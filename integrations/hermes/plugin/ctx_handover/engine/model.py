@@ -528,6 +528,10 @@ class PlanItem:
     the file by kind and basename only (hardening #7). None for every other item."""
     instruction_files: tuple[tuple[str, str], ...] = added_field(())
     """``(rel, sha256)`` of the agent instruction files inside the item (DESIGN §8.7, SEC 4.3, W073)."""
+    cwd_bytes: int | None = added_field(None)
+    """Bytes of the session's working folder when the item's root is not that folder (``rel_cwd`` set: the repository
+    around it; R36, L3-F19). The source measures them, so the summary before sending names the workspace against the
+    folder also on the conductor of a pull, which has only this plan. None otherwise, or from a source before R36."""
 
 
 @dataclass(frozen=True)

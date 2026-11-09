@@ -8,7 +8,10 @@ candidate list.
    be bundled with full history), otherwise the directory itself
    (``FILE_TREE``). A primary root that is ``$HOME``, an ancestor of it or a filesystem root is still reported
    (the plan refuses it as a workspace) but never "covers" evidence — otherwise every file under the home would
-   silently ride along.
+   silently ride along. A ``cwd`` that git ignores in the work tree around it (``GitProbe.is_ignored``: a scratch or
+   build folder of somebody's checkout) is no part of that repository: the ``cwd`` itself is the item root
+   (``FILE_TREE``, reason ``IGNORED_REASON``), and evidence in that repository never brings it back as a secondary
+   item (R36, L3-F19).
 2. **Evidence** from the transcript, walked in storage order with a running directory (start: ``cwd``; a terminal
    result's ``cwd`` field moves it, ``tools/terminal_tool_result.py:247-263``): ``write_file``/``patch`` arguments
    and results (``resolved_path``, ``files_modified``) weigh *write*; ``read_file``/``search_files`` arguments weigh
@@ -60,6 +63,8 @@ CWD_REL_PREFIX = "cwd: "
 """Reason prefix with the session cwd relative to the primary root (``plan`` reads it into ``rel_cwd``)."""
 
 SHALLOW_REASON = "shallow clone: packed as a file tree"
+IGNORED_REASON = "ignored in the git repository around it: packed as a file tree"
+"""Reason of a primary whose ``cwd`` git ignores in the enclosing work tree (R36, L3-F19): the ``cwd`` alone travels."""
 PARTIAL_REASON = "partial clone: packed as a file tree"
 REJECTED_PREFIX = "rejected: "
 """Reason prefix of a session file the discovery refused (``"rejected: <why>"``, ``why`` one of
@@ -441,6 +446,15 @@ class _Classifier:
         self._toplevel[directory] = result
         return result
 
+    def ignored(self, directory: str) -> bool:
+        """``directory`` is ignored in the work tree around it (R36). Only an explicit ``False`` of the probe reads as
+        not ignored; an exception or any other answer counts as ignored — the workspace then stays the directory and
+        never grows to a repository it may not be part of."""
+        try:
+            return self.git.is_ignored(directory) is not False
+        except Exception:  # an unclear answer: fail closed (the directory alone travels)
+            return True
+
     def shallow(self, root: str) -> bool:
         try:
             return bool(self.git.is_shallow(root))
@@ -492,6 +506,7 @@ def collect(
 
     primary: _Item | None = None
     covering: str | None = None
+    enclosing: str | None = None  # R36: the repository around a cwd it ignores (never an item)
     cwd_raw = session_row.get("cwd") if isinstance(session_row, dict) else None
     cwd: str | None = None
     if isinstance(cwd_raw, str) and cwd_raw.strip():
@@ -504,6 +519,9 @@ def collect(
         if top is not None and cls.home_like(top):
             top = None
         head = [CWD_REASON]
+        if top is not None and flav.parts(top) != flav.parts(real_cwd) and cls.ignored(real_cwd):
+            enclosing, top = top, None
+            head.append(IGNORED_REASON)
         if top is not None:
             root = top
             flat = cls.flat_reason(root)
@@ -557,6 +575,8 @@ def collect(
         if owner is None and exportable:
             probe_dir = real if cls.is_dir(real) else flav.parent(real)
             top = cls.toplevel(probe_dir)
+            if top is not None and enclosing is not None and covering is not None and flav.under(covering, top):
+                top = None  # R36: a repository around a cwd it ignores never comes back; its files are single extras
             if top is not None and not cls.home_like(top) and not (covering and flav.under(top, covering)):
                 owner = top
                 repo_roots.append(top)

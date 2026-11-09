@@ -115,18 +115,24 @@ back here; the copy on the other gateway stays active.
 | No connection | source / target | `/handover export` writes one `.ctxh.tar`; `/handover import <file>` on the other machine (`export --keep` leaves this session active and marks the bundle as a copy; status and the final message say so) |
 | Take it back here | the source session | `/handover reclaim` (`--force` while a handover is being committed); in a terminal `hermes handover reclaim --session <id>` (or `reclaim <id>`) |
 
+The session's workspace is the git repository around its working folder, unless git ignores the working folder
+there (a scratch or build folder inside a checkout): then only the working folder travels, as a file tree, and the
+repository around it stays here.
+
 Before anything is locked the plugin shows what would move. It asks for a confirmation when items are only
 proposed, a destination has local changes (a fresh folder is used), the handover is larger than
 `confirm_above_mb`, a secret is included with `--include-secret`, the model there does not work offline (this
 session's model did), items outside the project are included, instruction files arrive from an unverified source,
 the session's working folder is left out by the policy (for example because it lies inside the Hermes home; the
-summary names the folder, and the project does not come along), or the session is larger than the context window
-of the model there (the summary and the note name both sizes; the other side compacts the conversation on its first
-turn). The choices are *yes*, *yes without the proposed items*, *show the plan and stop*, *cancel*; `--yes` skips
-the question. `--yes` does not confirm a left-out working folder: a person answers that question (without an answer
-nothing is locked), or `--no-workspace` hands the session over without its folder on purpose. Nor does it confirm a
-session larger than the context window there: a person answers, or `/compress` in the session first makes it
-fit. Files that look like secrets are never sent by a blanket yes (neither `--yes` nor the *yes* choice takes them
+summary names the folder, and the project does not come along), the workspace is the whole repository around the
+working folder (the summary names the workspace and its size next to the working folder's), or the session is larger
+than the context window of the model there (the summary and the note name both sizes; the other side compacts the
+conversation on its first turn). The choices are *yes*, *yes without the proposed items*, *show the plan and stop*,
+*cancel*; `--yes` skips the question. `--yes` does not confirm a left-out working folder: a person answers that
+question (without an answer nothing is locked), or `--no-workspace` hands the session over without its folder on
+purpose. Nor does it confirm a session larger than the context window there: a person answers, or `/compress` in the
+session first makes it fit. `--yes` does not confirm a workspace larger than the working folder either: a person
+answers. Files that look like secrets are never sent by a blanket yes (neither `--yes` nor the *yes* choice takes them
 along); name each one with `--include-secret <path>`. An unanswered question (no reply within Hermes' question timeout
 `agent.clarify_timeout`, 90 s by default) continues without the proposed items when those are the only reason and
 cancels otherwise — nothing is locked in either case.

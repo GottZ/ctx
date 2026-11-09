@@ -108,6 +108,7 @@ class FakeGitProbe:
     common_dirs: dict[str, str] = field(default_factory=dict)
     shallow: set[str] = field(default_factory=set)
     partial: set[str] = field(default_factory=set)
+    ignored: set[str] = field(default_factory=set)
     infos: dict[str, GitInfo] = field(default_factory=dict)
     clean: dict[str, tuple[bool, str]] = field(default_factory=dict)
     roots: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -136,6 +137,12 @@ class FakeGitProbe:
         """Like ``gitops.GitProbe.is_partial`` (V30): True for a scripted partial-clone root and any path in it."""
         self._rec("is_partial", path)
         return any(path == root or path.startswith(root.rstrip("/") + "/") for root in self.partial)
+
+    def is_ignored(self, path: str) -> bool:
+        """Like ``gitops.GitProbe.is_ignored`` (R36): True for a scripted ignored directory and any path below it,
+        never for a sibling with a common prefix; everything else is not ignored."""
+        self._rec("is_ignored", path)
+        return any(path == d or path.startswith(d.rstrip("/") + "/") for d in self.ignored)
 
     def info(self, root: str, cfg) -> GitInfo:
         self._rec("info", root)

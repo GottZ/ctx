@@ -41,7 +41,7 @@ RESOURCE_PLAN_ID_BEFORE_K3 = "2b73fd3063dd5b329f2efe0fbdc439760c61501a086fbbab5d
 ENV_FACTS_ID_BEFORE_K3 = "4bff44ad83d661b681b2deb83af53a7396acb9ac398b34b2d7bd6fc5157fb494"
 
 ADDED = {
-    PlanItem: {"hermes_kind": None, "instruction_files": ()},
+    PlanItem: {"hermes_kind": None, "instruction_files": (), "cwd_bytes": None},
     ResourcePlan: {"warnings": (), "context_tokens": 0},
     EnvFacts: {"python_version": "", "workspace_root_ok": None, "workspace_root_problem": ""},
 }

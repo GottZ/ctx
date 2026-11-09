@@ -1517,9 +1517,9 @@ def _not_confirmed(state: _ConfirmState, message: str) -> dict:
 
 
 def _yes_refused_text(summary: Mapping | None, refused: Sequence[str] = ()) -> str:
-    """Why ``--yes`` did not go ahead (R30, R32): it does not confirm that the working folder stays here, nor that
-    the session is larger than the target model's window — or another reason the conductor marked ``yes_exempt``
-    (named by its text). One sentence per kind, in that order."""
+    """Why ``--yes`` did not go ahead (R30, R32, R36): it does not confirm that the working folder stays here, nor that
+    the session is larger than the target model's window, nor a workspace that holds more than the session's folder —
+    or another reason the conductor marked ``yes_exempt`` (named by its text). One sentence per kind, in that order."""
     lines: list[str] = []
     if surfaces.CONFIRM_WORKSPACE_EXCLUDED in refused:
         excluded = (summary or {}).get("workspace_excluded")
@@ -1539,7 +1539,12 @@ def _yes_refused_text(summary: Mapping | None, refused: Sequence[str] = ()) -> s
             f"--yes does not confirm that {what}. Answer the question in an interactive session, or run /compress "
             "in the session first."
         )
-    others = [r for r in refused if r not in {surfaces.CONFIRM_WORKSPACE_EXCLUDED, surfaces.CONFIRM_CONTEXT}]
+    if surfaces.CONFIRM_WORKSPACE_DIFFERS in refused:
+        ws = surfaces.workspace_entry((summary or {}).get("workspace"))
+        what = f"the {surfaces.workspace_text(ws)}" if ws else "a workspace that holds more than the session's folder"
+        lines.append(f"--yes does not confirm {what}. Answer the question in an interactive session.")
+    exempt_named = {surfaces.CONFIRM_WORKSPACE_EXCLUDED, surfaces.CONFIRM_CONTEXT, surfaces.CONFIRM_WORKSPACE_DIFFERS}
+    others = [r for r in refused if r not in exempt_named]
     if others or not lines:
         why = "; ".join(surfaces.REASON_TEXT.get(r, r) for r in others if r != surfaces.UNNAMED_EXEMPT)
         detail = f" ({why})" if why else ""

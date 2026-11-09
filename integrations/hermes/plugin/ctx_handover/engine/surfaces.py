@@ -613,9 +613,13 @@ CONFIRM_CONTEXT: str = planning.CONFIRM_CONTEXT
 """Reason (i) of cluster D (``reports/L2/g3-df-api.md`` §1, R32): the session is larger than the context window of
 the model on the target, so the target compacts it on its first turn."""
 
+CONFIRM_WORKSPACE_DIFFERS: str = planning.CONFIRM_WORKSPACE_DIFFERS
+"""Reason (j) of cluster D (R36, L3-F19): the workspace holds more than the session's working folder — the repository
+around it — and travels as a whole."""
+
 YES_EXEMPT: frozenset[str] = planning.YES_EXEMPT
-"""Reasons a blanket yes (``--yes``) never confirms: D's ``plan.YES_EXEMPT`` (R30, R32; suspected secrets, R25, are
-an item marker and handled apart)."""
+"""Reasons a blanket yes (``--yes``) never confirms: D's ``plan.YES_EXEMPT`` (R30, R32, R36; suspected secrets, R25,
+are an item marker and handled apart)."""
 
 REASON_TEXT = {
     planning.CONFIRM_PROPOSED: "some items are only proposed (found by the model, the agent or outside the project)",
@@ -629,6 +633,8 @@ REASON_TEXT = {
     "project does not come along (--yes does not confirm this; --no-workspace does)",
     CONFIRM_CONTEXT: "the session is larger than the context window of the model there, so it is compacted on its "
     "first turn there (/compress here first keeps that in your hands; --yes does not confirm this)",
+    CONFIRM_WORKSPACE_DIFFERS: "the workspace is the whole repository around the session's working folder, not only "
+    "that folder (--yes does not confirm this)",
 }
 
 SUSPECTED_SECRET: str = planning.SUSPECTED_SECRET
@@ -718,6 +724,37 @@ def workspace_excluded_text(entry: Mapping) -> str:
     return f"the working folder {entry.get('path')} stays here ({_workspace_why(entry)})"
 
 
+def workspace_entry(value: Any) -> dict | None:
+    """D's ``presend_summary["workspace"]`` (R36) when it has its form — a mapping with a non-empty string ``path`` —
+    else None: the surface invents no folder. ``cwd`` defaults to ``path``; ``bytes`` and ``cwd_bytes`` keep only
+    non-negative integers (a missing ``cwd_bytes`` of a differing workspace stays None: size unknown); ``differs`` is
+    True when D says so or the two paths differ (rather say too much than hide a larger workspace)."""
+    if not isinstance(value, Mapping):
+        return None
+    path = value.get("path")
+    if not isinstance(path, str) or not path:
+        return None
+    cwd = value.get("cwd") if isinstance(value.get("cwd"), str) and value.get("cwd") else path
+    differs = value.get("differs") is True or cwd != path
+    size = _count(value.get("bytes"))
+    raw = value.get("cwd_bytes")
+    cwd_bytes = raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0 else None
+    if not differs and cwd_bytes is None:
+        cwd_bytes = size
+    return {"path": path, "bytes": size, "cwd": cwd, "cwd_bytes": cwd_bytes, "differs": differs}
+
+
+def workspace_text(entry: Mapping) -> str:
+    """``workspace <path> (<size>)``, and for a workspace that holds more than the session's folder
+    ``…, more than the session's folder <cwd> (<size>)`` (R36)."""
+    text = f"workspace {entry.get('path')} ({human_bytes(entry.get('bytes', 0))})"
+    if entry.get("differs"):
+        size = entry.get("cwd_bytes")
+        shown = human_bytes(size) if isinstance(size, int) else "size unknown"
+        text += f", more than the session's folder {entry.get('cwd')} ({shown})"
+    return text
+
+
 def context_over_entry(value: Any) -> dict | None:
     """D's ``presend_summary["context_over"]`` (R32) when it has its form — positive integer ``tokens`` and
     ``context_length`` with ``tokens > context_length`` (``model`` optional) — else None: the surface invents no
@@ -794,8 +831,9 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
     computed from ``final`` only when there is none) — ``items_count``, ``total_bytes``, ``excluded_secrets``,
     ``denied_tracked``, ``withheld_stash``, ``outside_workspace``, ``instruction_files``, ``model``, ``offline`` —
     plus the per-item rows, proposals, conflicts and need of D's ``plan.summarize`` when ``final`` is known, and
-    ``workspace_excluded`` (the working folder the policy left out, R30; None unless it has D's form) and
-    ``context_over`` (the session is larger than the target model's window, R32; same rule). F adds
+    ``workspace_excluded`` (the working folder the policy left out, R30; None unless it has D's form),
+    ``context_over`` (the session is larger than the target model's window, R32; same rule) and ``workspace`` (the
+    workspace against the session's working folder, R36; ``workspace_entry``). F adds
     nothing of its own except the suspected-secret list (R25). ``instruction_files`` (the target's result, with
     ``status``) replaces the summary's list when given."""
     pre: dict = dict(presend) if isinstance(presend, Mapping) else {}
@@ -828,6 +866,7 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
         "outside_workspace": _texts(pre.get("outside_workspace")),
         "workspace_excluded": _workspace_excluded(pre.get("workspace_excluded")),
         "context_over": context_over_entry(pre.get("context_over")),
+        "workspace": workspace_entry(pre.get("workspace")),
         "item_list": item_list,
         "proposed": int(full.get("proposed") or 0),
         "conflicts": int(full.get("conflicts") or 0),
@@ -843,9 +882,13 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
 
 def confirm_question(summary: Mapping, peer: str | None) -> str:
     """``Hand over to <peer>: <n> items, <size>, <k> proposed, <c> conflicts, model <m> (offline: yes/no).
-    [The working folder <path> stays here (<why>).] [The session (about <n> tokens) is larger than …] Continue?``"""
+    [The workspace is <path> (<size>)[, more than the session's folder <cwd> (<size>)].] [The working folder <path>
+    stays here (<why>).] [The session (about <n> tokens) is larger than …] Continue?``"""
+    ws = workspace_entry(summary.get("workspace"))
+    folder = f"The workspace is {workspace_text(ws).removeprefix('workspace ')}. " if ws else ""
     excluded = _workspace_excluded(summary.get("workspace_excluded"))
-    folder = f"The {workspace_excluded_text(excluded).removeprefix('the ')}. " if excluded else ""
+    if excluded:
+        folder += f"The {workspace_excluded_text(excluded).removeprefix('the ')}. "
     over = context_over_entry(summary.get("context_over"))
     if over:
         folder += f"The {context_over_text(over).removeprefix('the ')}. "
@@ -878,6 +921,9 @@ def render_plan(summary: dict) -> str:
     ]
     if s.get("need_bytes"):
         lines.append(f"Space needed on the receiving side: {human_bytes(s['need_bytes'])}.")
+    ws = workspace_entry(s.get("workspace"))
+    if ws:
+        lines.append(f"Workspace: {workspace_text(ws).removeprefix('workspace ')}.")
     excluded = _workspace_excluded(s.get("workspace_excluded"))
     if excluded:
         lines.append(
@@ -912,14 +958,17 @@ def render_plan(summary: dict) -> str:
 
 def render_presend(summary: dict, peer: str | None, mode: Mode | str) -> str:
     """First progress message (SEC 5.8): what leaves, how much, what stays behind — cluster D's
-    ``presend_summary`` numbers through ``plan_summary`` (W125), and the working folder the policy left out (R30)."""
+    ``presend_summary`` numbers through ``plan_summary`` (W125), the workspace against the session's folder (R36) and
+    the working folder the policy left out (R30)."""
     s = summary or {}
     arrow = "←" if str(mode) in {"pull", "import"} else "→"
     secrets = s.get("excluded_secrets") or 0
+    ws = workspace_entry(s.get("workspace"))
     head = (
         f"Handover {arrow} {peer or 'bundle'}: {s.get('items_count', 0)} items, "
         f"{human_bytes(s.get('total_bytes', 0))}; "
-        f"{secrets if isinstance(secrets, int) else len(secrets)} secrets left out"
+        + (f"{workspace_text(ws)}; " if ws else "")
+        + f"{secrets if isinstance(secrets, int) else len(secrets)} secrets left out"
     )
     extras = []
     if s.get("denied_tracked"):

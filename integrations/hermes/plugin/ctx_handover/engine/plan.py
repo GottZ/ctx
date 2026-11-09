@@ -22,6 +22,12 @@ is ``no`` and named in ``not_transferred`` — e.g. it lies in the Hermes home),
 (``workspace_excluded``) and ``confirmation_reasons`` raises ``workspace_excluded`` (letter h), which a blanket yes
 never confirms (``YES_EXEMPT``/``yes_exempt``); the user's own ``--no-workspace`` is the explicit answer.
 
+Workspace against the working folder (R36, L3-F19): the session's workspace is the primary item — the repository
+around its working folder, or the folder itself when git ignores it there (the collector decides). ``presend_summary``
+always names it (``workspace``: path and size against the folder and the folder's size, which the source measures into
+``PlanItem.cwd_bytes``); when the workspace holds more than the folder (``rel_cwd`` set), ``confirmation_reasons``
+raises ``workspace_differs`` (letter j, in ``YES_EXEMPT``).
+
 Session larger than the target's context window (R32, L3-F17): ``context_over`` compares the estimated size of the
 session's active context (``ResourcePlan.context_tokens`` when the source estimated it with
 ``active_context_tokens``, else the lineage total ``approx_tokens`` as an upper bound) with the target model's window
@@ -100,6 +106,7 @@ CONFIRM_OUTSIDE = "outside_workspace"
 CONFIRM_INSTRUCTIONS = "instruction_files"
 CONFIRM_WORKSPACE_EXCLUDED = "workspace_excluded"
 CONFIRM_CONTEXT = "context_over"
+CONFIRM_WORKSPACE_DIFFERS = "workspace_differs"
 CONFIRM_LETTERS: dict[str, str] = {
     CONFIRM_PROPOSED: "a",
     CONFIRM_CONFLICT: "b",
@@ -110,13 +117,15 @@ CONFIRM_LETTERS: dict[str, str] = {
     CONFIRM_INSTRUCTIONS: "g",
     CONFIRM_WORKSPACE_EXCLUDED: "h",
     CONFIRM_CONTEXT: "i",
+    CONFIRM_WORKSPACE_DIFFERS: "j",
 }
-"""Confirmation reasons of DESIGN §14.1 (a)–(g) plus (h) ``workspace_excluded`` (R30) and (i) ``context_over``
-(R32: the session is larger than the target model's context window; before G‴ part of (e)) and their letters.
+"""Confirmation reasons of DESIGN §14.1 (a)–(g) plus (h) ``workspace_excluded`` (R30), (i) ``context_over``
+(R32: the session is larger than the target model's context window; before G‴ part of (e)) and (j)
+``workspace_differs`` (R36: the workspace holds more than the session's working folder) and their letters.
 ``None`` (no answer) cancels the job for every reason except ``proposed`` alone, which only excludes the proposals
 (BX L5)."""
-YES_EXEMPT: frozenset[str] = frozenset({CONFIRM_WORKSPACE_EXCLUDED, CONFIRM_CONTEXT})
-"""Reasons a blanket yes (``--yes``, ``Options.yes``) never confirms (R30, R32, like suspected secrets under R25):
+YES_EXEMPT: frozenset[str] = frozenset({CONFIRM_WORKSPACE_EXCLUDED, CONFIRM_CONTEXT, CONFIRM_WORKSPACE_DIFFERS})
+"""Reasons a blanket yes (``--yes``, ``Options.yes``) never confirms (R30, R32, R36, like suspected secrets under R25):
 the conductor asks for them even with ``--yes``; without an answer the job ends with nothing locked."""
 
 CHOICES = ("yes", "no_proposed")
@@ -129,7 +138,7 @@ UNVERIFIED = "unverified"
 or revoked key, or the remote source of a pull (DESIGN §8.7 reason (g), SEC 4.3; a continuation refuses such an
 origin with this reason, R22). Surfaces import it with the reason codes (X03)."""
 REASON_CODES: tuple[str, ...] = tuple(CONFIRM_LETTERS)
-"""Every confirmation reason code, in letter order (a)–(i) (X03)."""
+"""Every confirmation reason code, in letter order (a)–(j) (X03)."""
 MAX_REFUSED_IDS = 256
 MAX_WARNINGS = 32
 
@@ -197,6 +206,7 @@ class _Draft:
     candidate: int | None = None
     denied: bool = False
     hermes_kind: str | None = None
+    cwd_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -501,6 +511,19 @@ class _Builder:
                 d.size = 0
         if d.kind in {ItemKind.GIT_REPO, ItemKind.FILE_TREE} and d.include is not Include.NO:
             d.instructions = _scan_instructions(d.path, d.rel_cwd)
+        if d.role is ItemRole.PRIMARY and d.rel_cwd:
+            d.cwd_bytes = self.folder_size(Path(d.path) / d.rel_cwd)
+
+    def folder_size(self, folder: Path) -> int:
+        """Bytes of the regular files below ``folder`` as a file tree would count them (ignore rules found below it,
+        ``extra_ignore``, built-ins; capped like a workspace) — the session's working folder inside a larger
+        workspace (R36: ``PlanItem.cwd_bytes``)."""
+        try:
+            matcher = IgnoreMatcher.for_tree(folder, self.options.extra_ignore)
+        except Exception:  # unreadable ignore rules: count everything
+            matcher = None
+        size, _complete = _tree_size(folder, matcher, self.cfg.max_total_bytes, self.cfg.max_files)
+        return size
 
 
 def _tree_size(root: Path, matcher: IgnoreMatcher | None, cap_bytes: int, max_entries: int) -> tuple[int, bool]:
@@ -630,6 +653,7 @@ def _to_item(d: _Draft, suggest_dest: Callable[[str], str | None] | None) -> Pla
         rel_cwd=d.rel_cwd,
         hermes_kind=d.hermes_kind if d.kind is ItemKind.HERMES_FILE else None,
         instruction_files=tuple(d.instructions),
+        cwd_bytes=d.cwd_bytes if d.role is ItemRole.PRIMARY and d.rel_cwd else None,
     )
 
 
@@ -1132,8 +1156,41 @@ def workspace_excluded(final_or_plan: FinalPlan | ResourcePlan) -> dict | None:
     return {"path": primary.source_path, "reason": _EXCLUDED_REASON.get(entry.why, "other"), "why": entry.why}
 
 
+def _join_rel(root: str, rel: str) -> str:
+    """``root`` joined with the ``/``-separated ``rel`` in the separator of ``root`` (a Windows source keeps ``\\``)."""
+    sep = "\\" if re.match(r"^(?:[A-Za-z]:[\\/]|\\\\)", root) else "/"
+    return root.rstrip("/\\") + sep + rel.replace("/", sep)
+
+
+def workspace(final_or_plan: FinalPlan | ResourcePlan) -> dict | None:
+    """The session's workspace against its working folder (R36, L3-F19), or None when there is no working-folder item
+    or it does not travel (include ``no``: R30's ``workspace_excluded``, ``--no-workspace``).
+
+    ``{"path", "bytes", "cwd", "cwd_bytes", "differs"}`` of the primary item (role ``primary``, origin ``cwd``):
+    ``path``/``bytes`` are its root and size estimate; ``cwd`` is the session's folder (the root joined with
+    ``rel_cwd``); ``cwd_bytes`` the folder's size — ``bytes`` when the folder is the root, else what the source
+    measured (``PlanItem.cwd_bytes``; None from a source before R36); ``differs`` is True when the workspace holds more
+    than the folder (the repository around it, ``rel_cwd`` set)."""
+    rp = final_or_plan.plan if isinstance(final_or_plan, FinalPlan) else final_or_plan
+    primary = next((i for i in rp.items if i.role is ItemRole.PRIMARY and i.origin is Origin.CWD), None)
+    if primary is None or primary.include is Include.NO:
+        return None
+    rel = primary.rel_cwd if isinstance(primary.rel_cwd, str) else ""
+    measured = primary.cwd_bytes
+    if not (isinstance(measured, int) and not isinstance(measured, bool) and measured >= 0):
+        measured = None
+    return {
+        "path": primary.source_path,
+        "bytes": int(primary.size_estimate),
+        "cwd": _join_rel(primary.source_path, rel) if rel else primary.source_path,
+        "cwd_bytes": measured if rel else int(primary.size_estimate),
+        "differs": bool(rel),
+    }
+
+
 def yes_exempt(reasons: Iterable[str]) -> list[str]:
-    """The reasons among ``reasons`` that a blanket yes does not confirm (``YES_EXEMPT``, R30), in their order."""
+    """The reasons among ``reasons`` that a blanket yes does not confirm (``YES_EXEMPT``, R30, R32, R36), in their
+    order."""
     return [r for r in reasons if r in YES_EXEMPT]
 
 
@@ -1201,8 +1258,10 @@ PRESEND_KEYS = (
     "offline",
     "workspace_excluded",
     "context_over",
+    "workspace",
 )
-"""The keys of ``presend_summary`` the surfaces read (W125, R30 ``workspace_excluded``, R32 ``context_over``);
+"""The keys of ``presend_summary`` the surfaces read (W125, R30 ``workspace_excluded``, R32 ``context_over``, R36
+``workspace``);
 ``item_list``, ``items`` and ``extras_outside_workspace`` come on top."""
 
 
@@ -1230,7 +1289,9 @@ def presend_summary(
       R30) as ``{"path", "reason", "why"}``, else None;
     * ``context_over``: ``{"tokens", "context_length", "model"}`` when the session is larger than the target model's
       window (``context_over``, R32; ``target_facts``/``source_facts`` additive as in ``confirmation_reasons``), else
-      None.
+      None;
+    * ``workspace``: the session's workspace against its working folder (``workspace``, R36) as ``{"path", "bytes",
+      "cwd", "cwd_bytes", "differs"}``, None when the folder does not travel.
 
     ``items`` and ``extras_outside_workspace`` are the layer-1 names of ``items_count`` and ``outside_workspace``,
     kept with the same values for readers that have not moved yet."""
@@ -1254,6 +1315,7 @@ def presend_summary(
         "offline": _model_offline(final.model_change),
         "workspace_excluded": workspace_excluded(final),
         "context_over": context_over(final, target_facts=target_facts, source_facts=source_facts),
+        "workspace": workspace(final),
         "item_list": [
             {"item_id": i.item_id, "kind": i.kind.value, "path": i.source_path, "size": i.size_estimate}
             for i in included
@@ -1383,7 +1445,9 @@ def confirmation_reasons(
     and the user did not say ``--no-workspace`` (``options.hints.no_workspace``). Reason (i) ``context_over`` (R32):
     the session's active context is larger than the target model's window (``context_over``; ``target_facts`` and
     ``source_facts`` are additive — the conductor's facts after FACTS; without them only a model change's
-    ``to.context_length`` is known). A blanket yes never confirms (h) or (i) (``YES_EXEMPT``)."""
+    ``to.context_length`` is known). Reason (j) ``workspace_differs`` (R36): the workspace holds more than the session's
+    working folder (``workspace(final)["differs"]``: the repository around it). A blanket yes never confirms (h), (i)
+    or (j) (``YES_EXEMPT``)."""
     reasons = []
     if any(i.include is Include.PROPOSED for i in final.plan.items):
         reasons.append(CONFIRM_PROPOSED)
@@ -1406,6 +1470,9 @@ def confirmation_reasons(
         reasons.append(CONFIRM_WORKSPACE_EXCLUDED)
     if context_over(final, target_facts=target_facts, source_facts=source_facts) is not None:
         reasons.append(CONFIRM_CONTEXT)
+    ws = workspace(final)
+    if ws is not None and ws["differs"]:
+        reasons.append(CONFIRM_WORKSPACE_DIFFERS)
     return reasons
 
 

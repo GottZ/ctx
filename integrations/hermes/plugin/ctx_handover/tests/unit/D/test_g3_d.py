@@ -58,7 +58,7 @@ def test_g3_context_over_window_when_the_model_stays_needs_an_answer():
     reasons = plan.confirmation_reasons(final, Options(), False, target_facts=target, source_facts=source)
     assert reasons == [plan.CONFIRM_CONTEXT] == ["context_over"]
     assert plan.yes_exempt(reasons) == ["context_over"]
-    assert plan.CONFIRM_LETTERS["context_over"] == "i" and plan.REASON_CODES[-1] == "context_over"
+    assert plan.CONFIRM_LETTERS["context_over"] == "i" and plan.REASON_CODES[8] == "context_over"
     summary = plan.presend_summary(final, target_facts=target, source_facts=source)
     assert summary["context_over"] == {"tokens": L24_TOKENS, "context_length": 4000, "model": "fake-model"}
     assert "context_over" in plan.PRESEND_KEYS
