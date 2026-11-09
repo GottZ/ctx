@@ -33,7 +33,8 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def lab(lab):
-    """The shared stand of ``tests/e2e/conftest.py`` in the shape these tests use (``ctl``, ``GW``, ``token``)."""
+    """The shared stand of ``tests/e2e/conftest.py`` in the shape these tests use (``ctl``, ``GW``, ``token``,
+    ``ws``)."""
     labctl, token = lab.ctl, lab.tokens["a"]
     for inst in ("a", "b"):
         if labctl.identify(inst) is None:
@@ -43,19 +44,19 @@ def lab(lab):
     env_b = (labctl.home("b") / ".env").read_text(encoding="utf-8") if (labctl.home("b") / ".env").exists() else ""
     if f"CTX_HANDOVER_PEER_TOKEN={token}" not in env_b:
         pytest.fail("lab/b/.env needs CTX_HANDOVER_PEER_TOKEN equal to the token of serve-a (BUILD-ORDER §5 step 1)")
-    return type("Lab", (), {"ctl": labctl, "GW": lab.GW, "token": token})
+    return type("Lab", (), {"ctl": labctl, "GW": lab.GW, "token": token, "ws": lab.ws})
 
 
 def _hermes(lab, inst: str, *args: str, timeout: float = 120) -> Any:
     return lab.ctl.run_hermes(inst, list(args), timeout=timeout)
 
 
-def _session(lab, inst: str) -> str:
+def _session(lab, inst: str, cwd: str | None = None) -> str:
     gw = lab.GW(inst)
     try:
         reply = gw.rpc(
             "session.create",
-            {"request_id": f"e2e-{time.time()}", "source": "cli", "cwd": str(lab.ctl.home(inst) / "work")},
+            {"request_id": f"e2e-{time.time()}", "source": "cli", "cwd": cwd or str(lab.ctl.home(inst) / "work")},
         )
     finally:
         gw.close()
@@ -136,8 +137,11 @@ def test_e2e_setup_without_terminal_and_pair_by_paste_string(lab):
 def test_e2e_take_progress_notice_and_final_message(lab):
     """R14, BX P6, L2: a pull started with ``/handover take`` returns at once, shows one sticky progress notice
     that ends as the final message (target session, folder, model, offline yes/no, next step), and the arrival
-    note is visible through ``/handover status <job>`` on the target."""
-    sid_a = _session(lab, "a")
+    note is visible through ``/handover status <job>`` on the target.
+
+    A's session works in ``lab/ws-e2e/a`` (outside the Hermes home): a cwd inside it is left out and, since R30, needs
+    a person's confirmation that ``--yes`` does not give (``test_l3_findings.py`` covers that path)."""
+    sid_a = _session(lab, "a", cwd=str(lab.ws("a")))
     gw = lab.GW("a")
     try:
         gw.rpc("session.resume", {"session_id": sid_a})

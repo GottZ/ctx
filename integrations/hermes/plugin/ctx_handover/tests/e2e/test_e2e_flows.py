@@ -67,16 +67,31 @@ def test_e14_host_isolation(lab, ev):
     assert cli.returncode != 0 or "ctx_handover moves" not in cli.stdout, cli.stdout[-800:]
 
 
+_UNAWARE = re.compile(
+    r"(?:not|never) (?:be )?(?:told|notified|informed)|(?:does not|doesn't|will not|won't) (?:learn|know|hear)"
+    r"|(?:is|stays) (?:not|un)aware|(?:learns|knows|hears) nothing"
+)
+
+
+def _assert_reclaim_notice(text: str, peer: str) -> None:
+    """R35: after a finished handover, ``reclaim`` says explicitly that the copy on ``peer`` stays active and does not
+    learn of the reclaim (pull, or the target is not reachable)."""
+    lines = [line.lower() for line in text.splitlines() if peer.lower() in line.lower()]
+    assert any("stays active" in line or "remains active" in line for line in lines), (
+        f"R35: reclaim does not say that the copy on {peer} stays active: {text!r}"
+    )
+    assert _UNAWARE.search(text.lower()), f"R35: reclaim does not say that the copy on {peer} learns nothing: {text!r}"
+
+
 @pytest.mark.e2e_timeout(600)
 def test_e15_reclaim(lab, ev):
-    """E15 (§7.7): after a pull, a vetoed attempt on A leaves a placeholder pair; ``reclaim`` makes A's session active
-    again (marks undone, original title), rewinds the placeholder rows (model history as before the handover), and
-    leaves B's copy untouched; after B's next contact with A, B's status says the source was reclaimed.
-
-    "Next contact" is ``hermes handover doctor`` on B (one signed hello to each paired gateway, DESIGN §14.1)."""
+    """E15 (§7.7, R35): after a pull, a vetoed attempt on A leaves a placeholder pair; ``reclaim`` makes A's session
+    active again (marks undone, original title), rewinds the placeholder rows (model history as before the
+    handover), and leaves B's copy untouched. Last check (R35, replaces the notification of the target, L3-F13): the
+    ``reclaim`` output (``--json`` text) says explicitly that the copy on B stays active and does not learn of it."""
     src = lab.make_source("a", "e15proj", repo=False, turns=("reclaim me", "and again"))
     before = lab.hashes("a", src.sid)
-    jid, sid_b = _pull(lab, ev, src.sid)
+    _jid, sid_b = _pull(lab, ev, src.sid)
     copy_b = lab.hashes("b", sid_b)
     probe = f"E15-VETO-{_lab.uid()}"
     # Desktop path (WebSocket): ``hermes chat --resume -q`` would end the session as ``cli_close`` on exit
@@ -105,12 +120,33 @@ def test_e15_reclaim(lab, ev):
     assert placeholders and all(not rows.get(p.get("id"), {}).get("active") for p in placeholders), placeholders
     assert lab.hashes("b", sid_b) == copy_b
     assert lab.marks("b", sid_b)["ended"] is False
-    doctor = lab.handover("b", "doctor", timeout=300)
-    ev.cli("doctor-b", doctor)
-    status = lab.job_status("b", jid)
-    ev.write("status-b.json", status)
-    arrival = lab.arrival("b", sid_b) or {}
-    assert arrival.get("source_reclaimed_at") or "reclaimed" in status["text"].lower(), (arrival, status["text"])
+    _assert_reclaim_notice(rec.text, _lab.LAPTOP)
+
+
+@pytest.mark.e2e_timeout(600)
+def test_e15_reclaim_while_the_target_is_unreachable_says_so(lab, ev):
+    """E15 (§7.7, R35), second case: after a finished push A→B, B's listener (``serve-b``) is stopped, then
+    ``hermes handover reclaim <sid>`` runs on A in plain CLI form (no ``--json``). The output says explicitly that the
+    copy on B stays active and does not learn of it; ``serve-b`` is started again in ``finally``."""
+    src = lab.make_source("a", "e15uproj", repo=False, turns=("reclaim while the laptop is away",))
+    pushed = lab.handover("a", "to", _lab.LAPTOP_GW, "--session", src.sid, "--yes", timeout=600)
+    ev.cli("push", pushed)
+    assert pushed.rc == 0 and pushed.job_id, pushed.brief()
+    assert (lab.job_row("a", pushed.job_id) or {}).get("state") == "done", lab.job_row("a", pushed.job_id)
+    try:
+        lab.stop("serve-b")
+        t0 = time.monotonic()
+        res = lab.hermes("a", "handover", "reclaim", src.sid, timeout=300)
+        elapsed = time.monotonic() - t0
+    finally:
+        if not lab.running("serve-b"):
+            lab.start("serve-b")
+    text = res.stdout + res.stderr
+    ev.write("reclaim-cli.json", {"rc": res.returncode, "elapsed_s": round(elapsed, 2), "output": text})
+    assert res.returncode == 0, text
+    assert "active here again" in text.lower() or "reclaimed" in text.lower(), text
+    assert lab.marks("a", src.sid)["ended"] is False
+    _assert_reclaim_notice(text, _lab.LAPTOP_GW)
 
 
 @pytest.mark.e2e_timeout(420)

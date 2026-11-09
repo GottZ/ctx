@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,18 @@ def _asks(gw) -> list:
     """Server-to-client requests and question-like events a WebSocket client saw (``ask_choice`` reaching it)."""
     words = ("clarify", "choice", "question", "ask")
     return list(gw.requests) + [e for e in gw.events if any(w in str(e.get("type")) for w in words)]
+
+
+def _sidebar(lab, inst: str) -> list[str]:
+    """Session ids of the Desktop sidebar listing of ``inst`` (REST of its ``hermes serve``, fixed lab token)."""
+    query = "limit=100&offset=0&min_messages=0&archived=exclude&order=recent"
+    req = urllib.request.Request(  # noqa: S310 - fixed loopback URL of the lab's serve
+        f"{_lab.SERVE_URL[inst]}/api/sessions?{query}", headers={"X-Hermes-Session-Token": _lab.TOKENS[inst]}
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 - fixed loopback URL of the lab's serve
+        body = json.loads(resp.read().decode("utf-8"))
+    items = [item for item in body.get("sessions") or [] if isinstance(item, dict)]
+    return [str(item.get("id") or item.get("session_id")) for item in items]
 
 
 def _listed(reply: dict) -> list[str]:
@@ -206,7 +219,10 @@ def test_lab_L15_host_isolation_on_the_listener(lab, ev):
     with lab.preserved("a", restart=("gw-a", "serve-a")):
         lab.config_set("a", "plugins.isolation", "host")
         lab.restart("gw-a", "serve-a")
-        src = lab.make_source("a", "l15", repo=False, turns=("hosted plugin",))
+        # own repository: under host isolation the plugin sees HOME=/root, so a cwd without a repository inside the
+        # lab (which lies in the git work tree /compose/n8n) would take the whole ctx checkout (L3-F19/F20); the
+        # engine strips GIT_* from its git environment (engine/gitops.py:309-310, 354), a ceiling cannot stop it
+        src = lab.make_source("a", "l15", turns=("hosted plugin",))
         t0 = time.monotonic()
         res = lab.handover("b", "take", _lab.SERVER, src.sid, "--yes", timeout=900)
         took = time.monotonic() - t0
@@ -240,7 +256,8 @@ def test_lab_L15_host_isolation_on_the_listener(lab, ev):
         ev.write("ask-choice.json", {"requests": gw.requests[-5:], "events": [e.get("type") for e in gw.events]})
     assert res.rc == 0, res.brief()
     assert took < 600, took
-    assert "status" in status_out.lower() or "handover" in status_out.lower(), status_out
+    # the slash form answers through the plugin host with the job list (no "status"/"handover" word in it)
+    assert res.job_id and res.job_id[-6:] in status_out, status_out
     assert not reached and "handed over" in veto.text, veto.brief()
     assert asked, "no ask_choice request reached the WebSocket client"
 
@@ -261,14 +278,24 @@ def test_lab_L16_opening_the_archived_source_from_desktop_runs_into_the_veto(lab
 
 @pytest.mark.e2e_timeout(420)
 def test_lab_L17_sidebar_lists_the_activated_session(lab, ev):
-    """L17: the Desktop sidebar listing (gateway ``session.list``) on B shows the activated session; on A the
-    handed-over source is no longer listed among the active sessions (archived + hidden). Fallback: title/hidden."""
+    """L17: the Desktop sidebar on B shows the activated session; on A the handed-over source is no longer listed
+    (archived + hidden). Fallback: title/hidden.
+
+    The Desktop sidebar reads REST ``GET /api/sessions?limit&offset&min_messages&archived=exclude&order=recent`` of
+    the dashboard (``apps/desktop/src/api/sessions.ts:104-122``, recon C "Sichtbarkeit in Desktop"), not the
+    gateway's ``session.list`` (its default lists open sessions only; the plugin's final message says so, L17
+    fallback). Both gateway listings are recorded for the report, not asserted."""
     src, _jid, sid_b = _pulled(lab, ev, "l17")
+    sidebar_b = _sidebar(lab, "b")
+    sidebar_a = _sidebar(lab, "a")
     listed_b = lab.gw_rpc("b", "session.list", {"limit": 100})
-    listed_a = lab.gw_rpc("a", "session.list", {"limit": 100})
-    ev.write("lists.json", {"b": listed_b, "a": listed_a})
-    assert sid_b in _listed(listed_b), _listed(listed_b)[:20]
-    assert src.sid not in _listed(listed_a), "the handed-over source is still listed on A"
+    stored_b = lab.gw_rpc("b", "session.list", {"limit": 100, "scope": "stored"})
+    ev.write(
+        "lists.json",
+        {"sidebar_b": sidebar_b, "sidebar_a": sidebar_a, "gateway_b": _listed(listed_b), "stored_b": _listed(stored_b)},
+    )
+    assert sid_b in sidebar_b, sidebar_b[:20]
+    assert src.sid not in sidebar_a, "the handed-over source is still in A's Desktop sidebar"
 
 
 @pytest.mark.e2e_timeout(420)
