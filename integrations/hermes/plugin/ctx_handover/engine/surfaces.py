@@ -9,6 +9,7 @@ problem as a sentence that says what to type instead. Every error text names the
 from __future__ import annotations
 
 import math
+import os
 import re
 import shlex
 from collections.abc import Callable, Mapping, Sequence
@@ -807,6 +808,56 @@ def repos_left_entries(value: Any) -> list[dict]:
     return out
 
 
+def include_refused_entries(value: Any) -> list[dict]:
+    """D's ``presend_summary["include_refused"]`` (L3-F24) as ``{"path", "why"}`` entries: only mappings with a
+    non-empty string ``path``; ``why`` as a string ("" when missing)."""
+    out: list[dict] = []
+    for e in value if isinstance(value, (list, tuple)) else ():
+        if isinstance(e, Mapping) and isinstance(e.get("path"), str) and e["path"]:
+            why = e.get("why")
+            out.append({"path": e["path"], "why": why if isinstance(why, str) else ""})
+    return out
+
+
+def _refused(entry: Mapping) -> str:
+    return f"{entry.get('path')} ({entry.get('why')})" if entry.get("why") else str(entry.get("path"))
+
+
+def include_refused_text(entries: Sequence[Mapping], more: int) -> str:
+    """``named with --include but left out: <path> (<why>), … [and N more]`` (L3-F24)."""
+    return _more("named with --include but left out: " + ", ".join(_refused(e) for e in entries), more)
+
+
+def with_include_refused(summary: dict, final: Any, include: Sequence[str]) -> dict:
+    """``summary`` with D's ``include_refused`` filled in from ``final`` and the local ``--include`` paths
+    (``plan.include_refused``) when the summary the conductor journaled does not carry it (L3-F24)."""
+    if summary.get("include_refused") or final is None or not include:
+        return summary
+    try:
+        refused, more = planning.include_refused(final, include)
+    except Exception:
+        return summary
+    return {**summary, "include_refused": include_refused_entries(refused), "include_refused_more": _count(more)}
+
+
+def refused_includes(exclusions: Any, include: Sequence[str]) -> list[str]:
+    """``<path> (<why>)`` for each of the job's ``exclusions`` (``{"path", "why"}``) that is one of the ``--include``
+    paths — as typed, normalised or resolved (L3-F24: the final message names them)."""
+    wanted: set[str] = set()
+    for raw in include or ():
+        if isinstance(raw, str) and raw and "\x00" not in raw:
+            wanted.add(raw)
+            if os.path.isabs(raw):
+                wanted.update({os.path.normpath(raw), os.path.realpath(raw)})
+    out: list[str] = []
+    for e in exclusions if isinstance(exclusions, (list, tuple)) else ():
+        if isinstance(e, Mapping) and isinstance(e.get("path"), str) and e["path"] in wanted:
+            text = _refused(e)
+            if text not in out:
+                out.append(text)
+    return out
+
+
 def context_unknown_entry(value: Any) -> dict | None:
     """D's ``presend_summary["context_unknown"]`` (M12) when it has its form — a positive integer ``tokens``
     (``model`` optional) — else None."""
@@ -939,6 +990,8 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
         "repos_left": repos_left_entries(pre.get("repos_left")),
         "repos_left_more": _count(pre.get("repos_left_more")),
         "context_unknown": context_unknown_entry(pre.get("context_unknown")),
+        "include_refused": include_refused_entries(pre.get("include_refused")),
+        "include_refused_more": _count(pre.get("include_refused_more")),
         "item_list": item_list,
         "proposed": int(full.get("proposed") or 0),
         "conflicts": int(full.get("conflicts") or 0),
@@ -980,6 +1033,10 @@ def confirm_question(summary: Mapping, peer: str | None) -> str:
     if unknown:
         window = context_unknown_text(unknown).removesuffix(" unknown")
         folder += f"The {window} is unknown, so a session larger than it is not asked about. "
+    refused = include_refused_entries(summary.get("include_refused"))
+    if refused:
+        listed = _more(", ".join(_refused(e) for e in refused), _count(summary.get("include_refused_more")))
+        folder += f"Named with --include but left out: {listed}. "
     return (
         f"Hand over to {peer or 'the bundle'}: {summary.get('items_count', 0)} items, "
         f"{human_bytes(summary.get('total_bytes', 0))}, {summary.get('proposed', 0)} proposed, "
@@ -1054,6 +1111,11 @@ def render_plan(summary: dict) -> str:
         )
         if _count(s.get("repos_left_more")):
             lines.append(f"  - … and {s['repos_left_more']} more")
+    refused = include_refused_entries(s.get("include_refused"))
+    if refused:
+        lines += _bullets("Named with --include but left out:", [_refused(e) for e in refused], limit=len(refused))
+        if _count(s.get("include_refused_more")):
+            lines.append(f"  - … and {s['include_refused_more']} more")
     lines += _bullets(
         "Proposed files that look like secrets (they stay here unless named with --include-secret <path>):",
         s.get("suspected_secrets") or (),
@@ -1100,6 +1162,9 @@ def render_presend(summary: dict, peer: str | None, mode: Mode | str) -> str:
     unknown = context_unknown_entry(s.get("context_unknown"))
     if unknown:
         extras.append(context_unknown_text(unknown))
+    refused = include_refused_entries(s.get("include_refused"))
+    if refused:
+        extras.append(include_refused_text(refused, _count(s.get("include_refused_more"))))
     return head + ("; " + "; ".join(extras) if extras else "") + "."
 
 
@@ -1370,6 +1435,11 @@ def render_error(err: HandoverError, peer: str | None, *, here: bool = False) ->
             f"/handover resume {short_job(_d(err, 'job'))} continues."
         )
     if code == "continue_refused" and here:
+        if _d(err, "reason") == "source_given_back":
+            return (
+                "No turn was started here: the source took the session back during the handover, so the two copies "
+                "are independent. Open the session and send a message to continue here."
+            )
         if _d(err, "reason") == "approvals_off":
             return (
                 "Handed over, but approvals are switched off here, so no turn starts without a person. Open the "
@@ -1380,11 +1450,18 @@ def render_error(err: HandoverError, peer: str | None, *, here: bool = False) ->
                 "Handed over, but its source is not verified here (an unsigned bundle, a key this gateway does not "
                 "know, or a pulled session), so no turn starts automatically. Open the session and send a message."
             )
+        if _d(err, "reason") not in (None, "", "not_allowed"):
+            return f"Handed over, but no turn started here ({_d(err, 'reason')}). Open the session and send a message."
         return (
             "Handed over, but continuation is not allowed here (allow_remote_continue). Open the session and send a "
             "message."
         )
     if code == "continue_refused":
+        if _d(err, "reason") == "source_given_back":
+            return (
+                f"No turn was started on {p}: this session was taken back here during the handover, so the two "
+                "copies are independent."
+            )
         if _d(err, "reason") == "approvals_off":
             return (
                 f"Handed over, but approvals are switched off on {p}, so no turn starts there without a person. "
@@ -1394,6 +1471,11 @@ def render_error(err: HandoverError, peer: str | None, *, here: bool = False) ->
             return (
                 "Handed over, but the bundle is not verified, so no turn starts automatically. Open the session "
                 "and send a message."
+            )
+        if _d(err, "reason") not in (None, "", "not_allowed"):
+            return (
+                f"Handed over, but no turn started on {p} ({_d(err, 'reason')}). Open the session there and send a "
+                "message."
             )
         return (
             f"Handed over, but {p} does not allow remote continuation (allow_remote_continue). Open the session "
@@ -1458,6 +1540,7 @@ def _note_block(note: str | None, origin: str | None, lists: dict[str, Sequence[
         lines.append(f"Origin: {origin}.")
     titles = {
         "excluded_secrets": "Secrets left out:",
+        "include_refused": "Named with --include but left out:",
         "withheld": "Withheld by source policy (the other side does not release them):",
         "withheld_stash": "Stash entries withheld:",
         "conflicts": "Conflicts (a fresh folder was used):",
@@ -1523,6 +1606,7 @@ def render_final(
     instruction_files: Sequence[str] = (),
     warnings: Sequence[str] = (),
     withheld: Sequence[str] = (),
+    include_refused: Sequence[str] = (),
     continue_error: HandoverError | None = None,
     bundle_path: str | None = None,
     bundle_bytes: int | None = None,
@@ -1554,6 +1638,7 @@ def render_final(
     )
     lists = {
         "excluded_secrets": excluded_secrets,
+        "include_refused": include_refused,
         "withheld": withheld,
         "withheld_stash": withheld_stash,
         "conflicts": conflicts,
@@ -1571,7 +1656,9 @@ def render_final(
             lines.append("Download it in Desktop through the file view of this gateway, then /handover import it.")
         else:
             lines.append("Copy the file to the other machine and run /handover import <file> there.")
-        lines += _note_block(None, None, {"excluded_secrets": excluded_secrets, "warnings": warnings})
+        lines += _note_block(
+            None, None, {"excluded_secrets": excluded_secrets, "include_refused": include_refused, "warnings": warnings}
+        )
         return "\n".join(lines)
     if ack is not None:
         where = ", ".join(
@@ -1583,10 +1670,14 @@ def render_final(
             f"; /handover status {short_job(job)} shows them" if job else ""
         )
     if mode in (Mode.PUSH, Mode.OFFER):
-        lines = [
-            f'Handed over to {peer_name}: "{t}" continues there ({details}). This session is now '
-            "read-only here; /handover reclaim takes it back."
-        ]
+        if continue_error is not None and _d(continue_error, "reason") == "source_given_back":
+            # the source (this gateway) took the session back during the retire (review M27, R2-L4): not read-only here
+            lines = [f'Handed over to {peer_name}: "{t}" arrived there ({details}).']
+        else:
+            lines = [
+                f'Handed over to {peer_name}: "{t}" continues there ({details}). This session is now '
+                "read-only here; /handover reclaim takes it back."
+            ]
         if continue_result is not None and continue_result.started:
             lines.append(f"The agent is continuing on {peer_name}.")
         else:
@@ -1594,7 +1685,11 @@ def render_final(
                 lines.append(render_error(continue_error, peer))
             if arrived is not None:
                 lines.append(f"On {peer_name}: {open_text(arrived['id'], t)}")
-        lines += _note_block(None, None, {"excluded_secrets": excluded_secrets, "warnings": lists["warnings"]})
+        lines += _note_block(
+            None,
+            None,
+            {"excluded_secrets": excluded_secrets, "include_refused": include_refused, "warnings": lists["warnings"]},
+        )
         return "\n".join(lines)
     # pull, import: the session is here now
     retired = str(state).lower() in {"retired", "continuing", "done"}

@@ -321,6 +321,8 @@ def test_presend_summary_has_the_keys_the_surfaces_read(lay):
         "repos_left",
         "repos_left_more",
         "context_unknown",
+        "include_refused",
+        "include_refused_more",
     }
     assert set(plan.PRESEND_KEYS) <= set(summary)
     included = [i for i in rp.items if i.include is Include.YES]

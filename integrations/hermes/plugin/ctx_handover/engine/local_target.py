@@ -35,7 +35,7 @@ import dataclasses
 import os
 import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -57,6 +57,7 @@ from .ledger import JOURNAL_KEEP_S, STALE_OWNER_S, TERMINAL, Fenced, Ledger, pri
 from .model import (
     CapsuleInfo,
     CommitAck,
+    Conflict,
     ContinueResult,
     DeltaInfo,
     DestMode,
@@ -545,11 +546,14 @@ class LocalTarget:
             raise InvalidState("negotiate first", reason="no_plan")
         return from_wire(FinalPlan, raw)
 
-    def _cwd_for(self, final: FinalPlan, workspace_root: str) -> Callable[[str | None], str]:
+    def _cwd_for(
+        self, final: FinalPlan, workspace_root: str, actual: Mapping[str, str] | None = None
+    ) -> Callable[[str | None], str]:
         """Session cwd on this side: the source cwd mapped into the primary item's destination, else the
-        handover root (R11: always derived from the session row, never from ``ctx.session_cwd()``)."""
+        handover root (R11: always derived from the session row, never from ``ctx.session_cwd()``). ``actual`` =
+        where PREPARE put each item (``WorkspaceTxn.dests``: a conflict found there ⇒ the fallback, L3-F23)."""
         primary: PlanItem | None = next((i for i in final.plan.items if i.role is ItemRole.PRIMARY), None)
-        dests = {d.item_id: d.dest for d in final.decisions}
+        dests = {d.item_id: d.dest for d in final.decisions} | dict(actual or {})
 
         def cwd_for(source_cwd: str | None) -> str:
             if primary is not None and primary.item_id in dests and source_cwd:
@@ -578,11 +582,11 @@ class LocalTarget:
         except HandoverError:  # a form ``expand_root`` refuses (``~user``): the commit's cwd check reports it
             return os.path.expanduser(spec)
 
-    def _import_plan(self, job: JobContext, capsule_doc: dict, final: FinalPlan):
+    def _import_plan(self, job: JobContext, capsule_doc: dict, final: FinalPlan, actual=None):
         return self.ports.session_import.plan_import(
             self.db_factory(),
             capsule_doc,
-            cwd_for=self._cwd_for(final, job.options.workspace_root),
+            cwd_for=self._cwd_for(final, job.options.workspace_root, actual),
             model_policy=job.options.model_mapping,
             model_override=job.options.model,
             target_config=self.config,
@@ -639,7 +643,13 @@ class LocalTarget:
         ws = self.ports.materialize.WorkspaceTxn
         staging = self._staging(job.job_id)
         journal = self._journal_fn(job)
-        kw = {"cfg": self.policy, "rules": self.policy.platform_rules(), "now": self._clock, "cancelled": job.cancelled}
+        kw = {
+            "cfg": self.policy,
+            "rules": self.policy.platform_rules(),
+            "now": self._clock,
+            "cancelled": job.cancelled,
+            "workspace_root": job.options.workspace_root,  # L3-F23: the root of every fallback outside allow_roots
+        }
         snap = self._latest_snapshot(job.job_id) if restore else None
         if snap is not None:
             return ws.restore(snap, staging, self.git, self.store, journal, **kw)
@@ -705,10 +715,17 @@ class LocalTarget:
         if prepared_raw is not None and ctx.get("prepared_capsule") == req.capsule.capsule_id:
             prepared = from_wire(PreparedInfo, prepared_raw)
         else:
-            import_plan = self._import_plan(job, capsule_doc, final)
+            # an earlier attempt that did not finish (the process died inside the import, the prepare operation runs
+            # again and mints new ids) left what it wrote: it goes first; what could not be removed stays journaled
+            # next to the new ids, so an abort tries it again (review M8, restart)
+            earlier = [str(i) for i in ctx.get("planned_ids") or () if isinstance(i, str) and i]
+            if earlier:
+                self._discard_planned(ctx)
+                earlier = [i for i in earlier if db.get_session(i) is not None]
+            import_plan = self._import_plan(job, capsule_doc, final, {d[0]: d[1] for d in dests})
             # every write of the import commits on its own: the ids it is going to create — those free now — are
             # journaled first, so an abort after a process died inside the import removes what was written (M8)
-            planned = [s.new_id for s in import_plan.segments if db.get_session(s.new_id) is None]
+            planned = earlier + [s.new_id for s in import_plan.segments if db.get_session(s.new_id) is None]
             self._remember(job, planned_ids=planned)
             prepared = p.session_import.import_hidden(
                 db,
@@ -832,6 +849,8 @@ class LocalTarget:
         ctx = self._ctx(job.job_id)
         sf, tf = req.source_facts, self._facts(job)[1]
         items = [(i, d) for i in final.plan.items for d in final.decisions if d.item_id == i.item_id]
+        actual = {str(i): str(d) for i, d, _m in prepared.dests or ()}
+        items = [(i, _as_landed(d, actual.get(d.item_id))) for i, d in items]  # L3-F23: where PREPARE put it
         reports = private_dir(self.data_dir / "reports")
         report_path = reports / f"{job.job_id}.md"
         kind = "bundle" if job.mode is Mode.IMPORT else "peer"
@@ -1340,3 +1359,12 @@ class LocalTarget:
     def blocks_for(self, job: JobContext) -> QuotaSink:
         """The quota-enforcing sink of one job (server route #25 and a local conductor's block mover)."""
         return QuotaSink(self.store, self.ledger, job.job_id)
+
+
+def _as_landed(decision: TargetDecision, landed: str | None) -> TargetDecision:
+    """``decision`` as the note shows it when PREPARE put the item elsewhere (a conflict found while preparing an
+    update or return ⇒ the fresh fallback, L3-F23): that path, fresh mode, the conflict named."""
+    if not landed or landed == decision.dest:
+        return decision
+    conflict = decision.conflict or Conflict("changed_at_prepare", "found while preparing", landed)
+    return dataclasses.replace(decision, dest=landed, mode=DestMode.FRESH, conflict=conflict)

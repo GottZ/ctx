@@ -3,8 +3,8 @@
 Every Hermes import is lazy (inside a function) and names only modules of the published plugin API
 (``hermes_cli/data/plugin_api.json`` of main): ``hermes_state``, ``hermes_constants``, ``hermes_cli.config``,
 ``agent.secret_scope``, ``agent.plugin_llm``, ``agent.redact`` (``redact_sensitive_text``),
-``plugins.plugin_storage``, ``gateway.platforms.base``, ``providers``. A missing module or name degrades to
-``CapabilityMissing`` (code ``capability_missing``) instead of ``ImportError``.
+``plugins.plugin_storage``, ``gateway.platforms.base``, ``gateway.status``, ``providers``. A missing module or name
+degrades to ``CapabilityMissing`` (code ``capability_missing``) instead of ``ImportError``.
 
 Only composition roots (``jobs``, ``commands``, ``dashboard/plugin_api.py``) call this module; they reach the
 functions as ``hostcompat.<name>`` (module attribute) so tests can swap them with
@@ -22,6 +22,7 @@ import importlib.metadata
 import json
 import os
 import re
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
@@ -510,20 +511,131 @@ def _yolo_process() -> bool:
     return isinstance(value, str) and value.strip().lower() in _TRUTHY
 
 
-def approvals_off(config: dict) -> bool:
-    """True when this host runs tools without asking: the gateway process runs with ``--yolo`` /
-    ``HERMES_YOLO_MODE`` (review H2: the continued turn runs in the gateway, ``hermes_cli/gateway_agent.py:1-6``, so
-    the variable bypasses its approvals whatever the child's environment says), ``approvals.mode`` is off (YAML
-    ``off`` arrives as False) or ``approvals.single_query_mode`` approves (``approve``/``off``/``allow``/``yes``),
-    mirroring ``tools/approval_context.py:266-364`` and ``tools/approval.py:539-545``. The continuation never starts
-    then (R22). Only the process this runs in is seen: a route served by a separate ``hermes serve``/dashboard
-    process cannot read the environment of the gateway that runs the turn."""
-    if _yolo_process():
-        return True
-    approvals = config.get("approvals") if isinstance(config, dict) else None
-    if not isinstance(approvals, dict):
+YOLO_FLAG = "--yolo"
+"""The command-line form of ``HERMES_YOLO_MODE`` (``hermes_cli/_parser.py``: an inherited top-level option, so it can
+stand before or after ``gateway run``). argparse also takes an unambiguous prefix (``--yo``, ``--yol``)."""
+
+PLUGIN_HOST_ENV = "HERMES_PLUGIN_HOST_PROCESS"
+"""Set to ``1`` in the plugin host Hermes starts under ``plugins.isolation: host`` (``hermes_cli/plugin_isolation.py``,
+``HOST_PROCESS_ENV``)."""
+
+APPROVAL_WHY = {
+    "config_mode": True,
+    "config_single_query": True,
+    "process_env": True,
+    "gateway_env": True,
+    "gateway_flag": True,
+    "gateway_process": False,
+    "no_gateway": False,
+    "gateway_elsewhere": None,
+    "gateway_unverified": None,
+    "gateway_unknown": None,
+}
+"""``ApprovalCheck.why`` → ``ApprovalCheck.off`` (review H2, R22, R33a)."""
+
+
+@dataclass(frozen=True)
+class ApprovalCheck:
+    """What this process can tell about approvals for an unattended continuation turn (review H2, R22, R33a).
+
+    ``off``: True — approvals are off (the continuation must not start); False — they apply, checked; None — not
+    checkable from this process (a gateway runs elsewhere and its environment is not visible here).
+    ``why`` (``APPROVAL_WHY``): ``config_mode`` / ``config_single_query`` (``approvals.*`` of this profile),
+    ``process_env`` (``HERMES_YOLO_MODE`` in this process, which is not the gateway), ``gateway_env`` (this process
+    is the gateway or its plugin host and runs with ``HERMES_YOLO_MODE``), ``gateway_flag`` (the profile's running
+    gateway, another process, was started with ``--yolo``), ``gateway_process`` (this process is the gateway or its
+    plugin host, without the variable), ``no_gateway`` (no gateway of this profile runs: the continuation's
+    ``hermes chat`` starts one from its own, cleaned environment), ``gateway_elsewhere`` (a gateway runs in another
+    process without ``--yolo`` on its command line — whether its environment holds ``HERMES_YOLO_MODE`` is not
+    visible here), ``gateway_unverified`` (a fresh runtime record names a running gateway this process cannot
+    identify — another PID namespace, another user), ``gateway_unknown`` (Hermes' gateway status could not be read).
+    ``pid`` is the gateway's process id where one was identified; ``flag`` whether ``--yolo`` is on the gateway's
+    recorded command line (other processes of the profile see that, not the environment)."""
+
+    off: bool | None
+    why: str
+    pid: int | None = None
+    flag: bool = False
+
+
+def _yolo_flag(argv: object) -> bool:
+    """``--yolo`` (or an unambiguous argparse prefix of it) among ``argv``."""
+    if not isinstance(argv, list | tuple):
         return False
-    if _approval_mode(approvals.get("mode", "manual")) == "off":
-        return True
-    single = str(approvals.get("single_query_mode", "deny")).lower().strip()
-    return single in {"approve", "off", "allow", "yes"}
+    return any(isinstance(a, str) and len(a) >= 4 and YOLO_FLAG.startswith(a) for a in argv)
+
+
+def _gateway_view() -> tuple[str, int | None, bool]:
+    """``(relation, pid, flag)`` of the gateway that runs this profile's turns, through Hermes' own identity check
+    (``gateway.status.live_gateway_pid_for_home``: pid file and runtime record, start-time guard, live command line;
+    it never writes) for this profile's home, then the Hermes root (one host gateway may serve every profile).
+
+    ``relation``: ``self`` (this process is that gateway, or the plugin host it started — its environment is this
+    process's), ``elsewhere``, ``none`` (no record, or a stopped or stale one), ``unverified`` (a fresh record of a
+    running gateway whose process cannot be identified here), ``unknown`` (``gateway.status`` failed). ``flag``:
+    ``--yolo`` on the recorded command line of an identified gateway."""
+    try:
+        from gateway.status import live_gateway_pid_for_home, read_runtime_status, runtime_status_is_stale
+    except ImportError:
+        return "unknown", None, False
+    try:
+        homes: list[Path] = []
+        for home in (Path(hermes_paths().home), hermes_root()):
+            if all(os.path.realpath(home) != os.path.realpath(h) for h in homes):
+                homes.append(home)
+        fresh_record = False
+        for home in homes:
+            pid = live_gateway_pid_for_home(home)
+            record = read_runtime_status(home / "gateway_state.json")
+            if pid is not None:
+                own = pid == os.getpid() or (pid == os.getppid() and os.environ.get(PLUGIN_HOST_ENV) == "1")
+                argv = record.get("argv") if isinstance(record, dict) and record.get("pid") == pid else None
+                return ("self" if own else "elsewhere"), pid, _yolo_flag(argv)
+            if (
+                isinstance(record, dict)
+                and record.get("gateway_state") not in (None, "stopped", "startup_failed")
+                and not runtime_status_is_stale(record)
+            ):
+                fresh_record = True
+        return ("unverified" if fresh_record else "none"), None, False
+    except Exception:
+        return "unknown", None, False
+
+
+def approval_check(config: dict) -> ApprovalCheck:
+    """``ApprovalCheck`` for a continuation started from this process (review H2, R22, R33a; see the class).
+
+    Config first (``approvals.mode`` off — YAML ``off`` arrives as False — or an approving
+    ``approvals.single_query_mode``: ``approve``/``off``/``allow``/``yes``, mirroring
+    ``tools/approval_context.py:266-364``), then ``HERMES_YOLO_MODE`` of this process (Hermes' truth rule), then the
+    gateway that runs the turn: ``hermes chat --resume … -q`` is a gateway client (``hermes_cli/gateway_agent.py:1-6``,
+    ``hermes_cli/main.py`` ``_chat_runs_at_gateway``), so that gateway's ``--yolo`` bypasses approvals whatever the
+    child's environment says. Another process — a separate ``hermes serve``/``hermes dashboard`` serving the routes,
+    or ``hermes handover take|import --continue`` in a terminal — sees the gateway's recorded command line (its
+    ``--yolo``) but not its environment."""
+    approvals = config.get("approvals") if isinstance(config, dict) else None
+    if isinstance(approvals, dict):
+        if _approval_mode(approvals.get("mode", "manual")) == "off":
+            return ApprovalCheck(True, "config_mode")
+        single = str(approvals.get("single_query_mode", "deny")).lower().strip()
+        if single in {"approve", "off", "allow", "yes"}:
+            return ApprovalCheck(True, "config_single_query")
+    relation, pid, flag = _gateway_view()
+    if relation == "self":
+        flag = flag or _yolo_flag(list(sys.argv))
+    if _yolo_process():
+        return ApprovalCheck(True, "gateway_env" if relation == "self" else "process_env", pid, flag)
+    if relation == "self":
+        return ApprovalCheck(False, "gateway_process", pid, flag)
+    if relation == "elsewhere":
+        return ApprovalCheck(True, "gateway_flag", pid, True) if flag else ApprovalCheck(None, "gateway_elsewhere", pid)
+    if relation == "none":
+        return ApprovalCheck(False, "no_gateway")
+    return ApprovalCheck(None, "gateway_unverified" if relation == "unverified" else "gateway_unknown")
+
+
+def approvals_off(config: dict) -> bool:
+    """True when this host runs tools without asking, as far as this process can tell (``approval_check``): the
+    continuation never starts then (R22). Not checkable (``off`` None) is not "off": R33a — the README names the
+    limit and ``doctor`` says "not checked"."""
+    return approval_check(config).off is True

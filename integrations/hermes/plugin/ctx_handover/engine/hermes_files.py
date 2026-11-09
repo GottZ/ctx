@@ -249,6 +249,13 @@ def _session_segment(session_id: str) -> str:
     return segment
 
 
+def hook_outputs_dir(target: HermesPaths, new_session_id: str) -> Path:
+    """The folder received hook outputs of a session go to on this host: ``<home>/hook_outputs/<new session id>``
+    (``target_path``). The conversation names them under the previous machine's segment folders; the note says where
+    they are here (M10, note part ``hook_outputs_dir``)."""
+    return area_root(HOOK_OUTPUTS, target) / _session_segment(new_session_id)
+
+
 def target_path(kind: str, basename: str, content_sha256: str, target: HermesPaths, new_session_id: str) -> Path:
     """Where a received session file goes on this host — from ``kind`` and the checked ``basename`` only.
 
@@ -263,7 +270,7 @@ def target_path(kind: str, basename: str, content_sha256: str, target: HermesPat
     if kind in (SPILLOVER, TERMINAL_OUTPUT):
         return root / name
     if kind == HOOK_OUTPUTS:
-        return root / _session_segment(new_session_id) / name
+        return hook_outputs_dir(target, new_session_id) / name
     if not isinstance(content_sha256, str) or not _SHA256_RE.match(content_sha256):
         raise PolicyDenied("native input needs the sha256 of the received bytes", reason="hermes")
     return root / content_sha256 / name

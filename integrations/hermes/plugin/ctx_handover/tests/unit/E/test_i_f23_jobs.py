@@ -122,6 +122,9 @@ def test_i_f23_return_conflict_at_an_origin_outside_the_roots_lands_under_worksp
     ack = status["ack"] or {}
     assert [d[1] for d in ack.get("dests") or ()] == [str(fresh)], ack
     assert any(str(fresh) in w and str(origin) in w for w in ack.get("warnings") or ()), ack.get("warnings")
+    note = str((arrival(server, back.job_id) or {}).get("note") or "")
+    assert str(fresh) in note and "returned to its original place" not in note, note
+    assert (server.db().get_session(ack["session_id"]) or {}).get("cwd") == str(fresh)
     final = _final_message(Mode.PUSH, status, "server")
     assert f"(session {ack['session_id']}, {fresh}, " in final and "materialised fresh at" in final, final
 
@@ -167,6 +170,9 @@ def test_i_f23_update_conflict_at_a_recorded_dest_outside_the_roots_lands_under_
     ack = status["ack"] or {}
     assert [d[1] for d in ack.get("dests") or ()] == [str(fresh)], ack
     assert any(str(fresh) in w and str(dest) in w for w in ack.get("warnings") or ()), ack.get("warnings")
+    note = str((arrival(laptop, second.job_id) or {}).get("note") or "")
+    assert str(fresh) in note and "updated in place" not in note, note
+    assert (laptop.db().get_session(ack["session_id"]) or {}).get("cwd") == str(fresh)
     final = _final_message(Mode.PULL, status, "server")
     assert f"(session {ack['session_id']}, {fresh}, " in final and "materialised fresh at" in final, final
     assert status["state"] == "done" and status["exit_code"] == 0

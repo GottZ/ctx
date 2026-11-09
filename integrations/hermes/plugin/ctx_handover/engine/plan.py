@@ -168,6 +168,8 @@ WHY_HOME = "home directory is not transferred as a whole"
 WHY_CONTAINS_WORKSPACE = "contains the workspace"
 WHY_DENIED_SUGGESTION = "suggested but denied by policy"
 WHY_PEER_SECRET = "include_secret from peer ignored"  # noqa: S105 - reason text, not a secret
+WHY_NOT_ABSOLUTE = "not an absolute path"
+"""Why a path the user named (``--include``) was not taken: it is relative (L3-F24: named, never skipped silently)."""
 WHY_NOT_DIRECTORY = "not a directory"
 """Why the session's cwd stays here when it exists but is no directory (a file; H14). A link whose target is gone is
 ``missing``."""
@@ -476,7 +478,11 @@ class _Builder:
     def suggested_path(self, raw: object, origin: Origin, reason: str, *, explicit: bool = False) -> _Draft | None:
         """Model, agent or user path: absolute, existing, covered or policy-checked. Returns the new draft or None."""
         label = {Origin.MODEL: "model", Origin.AGENT: "agent", Origin.USER: "user"}[origin]
-        if not isinstance(raw, str) or not raw or "\x00" in raw or not os.path.isabs(raw):
+        if not isinstance(raw, str) or not raw or "\x00" in raw:
+            return None
+        if not os.path.isabs(raw):
+            if origin is Origin.USER:
+                self.refuse(raw, WHY_NOT_ABSOLUTE)  # L3-F24: a path the user named is never dropped without a word
             return None
         given = _norm(raw)
         try:
@@ -1535,10 +1541,33 @@ PRESEND_KEYS = (
     "repos_left",
     "repos_left_more",
     "context_unknown",
+    "include_refused",
+    "include_refused_more",
 )
 """The keys of ``presend_summary`` the surfaces read (W125, R30 ``workspace_excluded``, R32 ``context_over``, R36
 ``workspace``, M37 ``outside_items``/``outside_more``, H15 ``repos_left``/``repos_left_more``, M12
-``context_unknown``); ``item_list``, ``items`` and ``extras_outside_workspace`` come on top."""
+``context_unknown``, L3-F24 ``include_refused``/``include_refused_more``); ``item_list``, ``items`` and
+``extras_outside_workspace`` come on top."""
+
+
+def include_refused(final: FinalPlan, include: Iterable[str], limit: int = PRESEND_PATHS_MAX) -> tuple[list[dict], int]:
+    """L3-F24: the paths the user named (``--include``/``--include-secret``, ``include``) that the plan refused —
+    ``({"path", "why"}, …)`` from ``not_transferred`` (matched as given, normalised and resolved; a relative path is
+    refused as ``WHY_NOT_ABSOLUTE``), in plan order, at most ``limit`` — and how many more. An include the plan took
+    (an item, or covered by a workspace) is no refusal."""
+    wanted: set[str] = set()
+    for raw in include:
+        if not isinstance(raw, str) or not raw or "\x00" in raw:
+            continue
+        wanted.add(raw)
+        if os.path.isabs(raw):
+            wanted.update({_norm(raw), _real(raw)})
+    rows: list[dict] = []
+    for n in final.plan.not_transferred:
+        if n.path in wanted and not any(r["path"] == n.path for r in rows):
+            rows.append({"path": n.path, "why": n.why})
+    cap = max(0, limit)
+    return rows[:cap], max(0, len(rows) - cap)
 
 
 def presend_summary(
@@ -1548,9 +1577,10 @@ def presend_summary(
     instructions: Sequence[dict] | None = None,
     target_facts: EnvFacts | None = None,
     source_facts: EnvFacts | None = None,
+    include: Iterable[str] = (),
 ) -> dict:
     """The summary every first progress message carries (DESIGN §8.7, SEC 5.8, W125), keyed as the surfaces read
-    it (``PRESEND_KEYS``):
+    it (``PRESEND_KEYS``; ``include`` additive — the job's local ``--include`` and ``--include-secret`` paths):
 
     * ``items_count`` and ``total_bytes`` of the included items; ``item_list`` names each of them;
     * ``excluded_secrets``: how many secrets stay behind (refusals for a secret, an ignored peer ``include_secret``);
@@ -1574,7 +1604,9 @@ def presend_summary(
       (``repos_left``: ``{"path", "kind"}``, at most ``PRESEND_PATHS_MAX``) and how many more;
     * ``context_unknown`` (M12): ``{"tokens", "model"}`` when the facts at hand name a target model whose context
       window is unknown (no ``context_length`` there), so R32 cannot be checked; None when the window is known or
-      no target is known yet.
+      no target is known yet;
+    * ``include_refused``/``include_refused_more`` (L3-F24): the paths of ``include`` the plan refused, ``{"path",
+      "why"}`` (``include_refused``: at most ``PRESEND_PATHS_MAX``), and how many more — empty without ``include``.
 
     ``items`` and ``extras_outside_workspace`` are the layer-1 names of ``items_count`` and ``outside_workspace``,
     kept with the same values for readers that have not moved yet."""
@@ -1582,6 +1614,7 @@ def presend_summary(
     outside = _outside_workspace(final)
     shown, more = outside_items(final)
     left = repos_left(final)
+    refused, refused_more = include_refused(final, include)
     if instructions is None:
         listed = [
             {"item_id": i.item_id, "rel": rel, "sha256": sha} for i in included for rel, sha in i.instruction_files
@@ -1606,6 +1639,8 @@ def presend_summary(
         "repos_left": left[:PRESEND_PATHS_MAX],
         "repos_left_more": max(0, len(left) - PRESEND_PATHS_MAX),
         "context_unknown": context_unknown(final, target_facts=target_facts, source_facts=source_facts),
+        "include_refused": refused,
+        "include_refused_more": refused_more,
         "item_list": [
             {"item_id": i.item_id, "kind": i.kind.value, "path": i.source_path, "size": i.size_estimate}
             for i in included

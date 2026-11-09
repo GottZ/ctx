@@ -1711,6 +1711,26 @@ class Ledger:
                     out["backups"] += c.execute("DELETE FROM backups WHERE job_id=?", (r[0],)).rowcount
         return out
 
+    def purge_delivered(self, keep_s: float = JOURNAL_KEEP_S) -> dict[str, int]:
+        """Janitor (review H4, ledger rest): an arrival older than ``keep_s`` whose note was delivered — the same text
+        as the report ``local_target.purge_reports`` removes after ``keep_s`` — and the ``pull_log`` rows (the paths a
+        peer pulled) older than ``keep_s``; both only for a job that is over on this host. A note not delivered yet
+        stays: it is the arrived session's handover context for its first turn. Returns the deleted rows."""
+        cutoff = self.now() - float(keep_s)
+        out = {"arrivals": 0, "pull_log": 0}
+        with self._w() as c:
+            for r in c.execute(
+                "SELECT session_id, job_id FROM arrivals WHERE note_state='delivered' AND at<?", (cutoff,)
+            ).fetchall():
+                if not self._job_active(c, r["job_id"]):
+                    out["arrivals"] += c.execute("DELETE FROM arrivals WHERE session_id=?", (r["session_id"],)).rowcount
+            for r in c.execute("SELECT DISTINCT job_id FROM pull_log WHERE at<?", (cutoff,)).fetchall():
+                if not self._job_active(c, r[0]):
+                    out["pull_log"] += c.execute(
+                        "DELETE FROM pull_log WHERE job_id=? AND at<?", (r[0], cutoff)
+                    ).rowcount
+        return out
+
     @staticmethod
     def _job_active(c: sqlite3.Connection, job_id: str) -> bool:
         """True when some role of ``job_id`` is not terminal on this host (a suspended conductor may resume)."""

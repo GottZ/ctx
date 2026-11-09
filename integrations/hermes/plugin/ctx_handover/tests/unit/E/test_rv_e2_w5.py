@@ -216,10 +216,11 @@ def test_rv_e2_w5_pinned_home_must_be_absolute():
 @pytest.mark.parametrize("xdg", ["set", "unset"])
 def test_rv_e2_w5_received_ignores_global_ignore_file(user_home, tmp_path, monkeypatch, xdg):
     """★ W5: the XDG default ignore file (``$XDG_CONFIG_HOME/git/ignore``, else ``~/.config/git/ignore``) follows
-    HOME like ``~/.gitconfig`` and is read even with the global config nulled. The received profile reads neither:
-    a target's update precondition (``status_clean``) must not depend on where — or whether — the user keeps a
-    global ignore file; it treats ``core.excludesFile`` in ``~/.gitconfig`` the same way (mutant: received profile
-    without ``core.excludesFile=/dev/null``)."""
+    HOME like ``~/.gitconfig`` and is read even with the global config nulled. A received-profile call reads neither
+    (mutant: received profile without ``core.excludesFile=/dev/null``). The update precondition (``status_clean``)
+    must not depend on where the user keeps a global ignore file: since review round 3 (R2-M4) it reads that file
+    in both places alike, as the user's own ``git status`` does — the protection of what lies in the way is
+    ``gitapply.obstructions`` (B2), not the clean status."""
     if xdg == "unset":
         monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     ignore = user_home / ".config" / "git" / "ignore"
@@ -231,15 +232,25 @@ def test_rv_e2_w5_received_ignores_global_ignore_file(user_home, tmp_path, monke
     r.write("a.txt", "a\n")
     r.commit_all("c1")
     probe = gitops.GitProbe(git, profile="received")
+    received = gitops.GitEnvSpec(profile="received", ceiling=r.root.parent)
+
+    def untracked() -> list[str]:
+        return git.out(["ls-files", "--others", "--exclude-standard"], cwd=r.root, spec=received).split("\n")
+
     assert probe.status_clean(str(r.root)) == (True, "")
     r.write("x.junk", "j\n")
+    assert "x.junk" in untracked()
+    assert probe.status_clean(str(r.root)) == (True, "")
+    r.write("plain.txt", "p\n")
     clean, why = probe.status_clean(str(r.root))
-    assert clean is False and "x.junk" in why
+    assert clean is False and "plain.txt" in why
+    r.remove("plain.txt")
     r.remove("x.junk")
     (user_home / ".gitconfig").write_text(f"[core]\n\texcludesFile = {user_home / 'explicit-ignore'}\n")
     gitops.reset_process_caches()
     r.write("y.other", "o\n")
-    assert probe.status_clean(str(r.root))[0] is False
+    assert "y.other" in untracked()
+    assert probe.status_clean(str(r.root)) == (True, "")
     source = gitops.GitProbe(git)
     assert source.is_ignored(str(r.root)) is False
     assert git.out(["check-ignore", "y.other"], cwd=r.root, spec=gitops.GitEnvSpec(profile="source")) == "y.other"

@@ -54,7 +54,7 @@ from pathlib import Path
 
 from . import filetree, gitapply, gitpack, pathmap
 from .contracts import BlockSink
-from .errors import BadRequest, ConflictError, PolicyDenied
+from .errors import BadRequest, ConflictError, InsufficientStorage, PayloadTooLarge, PolicyDenied
 from .gitops import (
     Git,
     GitProbe,
@@ -314,6 +314,63 @@ def assess(
 # Workspace transaction
 # ---------------------------------------------------------------------------------------------------------
 
+_DISK_MARGIN = 1.1
+
+
+class _JobRoom:
+    """The room one job's workspace items take at the target (H11, R28; DESIGN §10.2: ``max_total_gb`` per job).
+    ``max_bytes`` (``cfg.max_total_bytes``) caps the declared bytes of all items together — each item's own check
+    (``filetree.check_room``, ``gitapply._precheck``) compares the same quantity per item — and the bytes they write
+    × 1.1 must fit the free space each file system had when the job first measured it: measured once, so items that
+    each fit the space the ones before them left cannot fill the disk together.
+
+    ``check`` is handed to the item functions, which call it right before an item writes its first byte; it only
+    checks. ``settle`` counts the item once it is prepared, so an update that fell back to a fresh directory (checked
+    twice) counts once; ``reset`` drops what an item that failed had checked."""
+
+    def __init__(self, max_bytes: int):
+        self.max_bytes = int(max_bytes)
+        self.declared = 0
+        self._free: dict[int, int] = {}  # st_dev -> free bytes when the job first measured it
+        self._writes: dict[int, int] = {}  # st_dev -> bytes the job's prepared items write there
+        self._pending: tuple[int, int, int] | None = None
+
+    def check(self, declared: int, where: Path, write: int, what: str) -> None:
+        total = self.declared + int(declared)
+        if total > self.max_bytes:
+            raise PayloadTooLarge(
+                f"the handover's workspace items together are larger than allowed (refused at a {what})",
+                bytes=total,
+                max_bytes=self.max_bytes,
+                item_bytes=int(declared),
+            )
+        probe = Path(where)
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        dev = os.stat(probe).st_dev
+        free = self._free.get(dev)
+        if free is None:
+            free = self._free[dev] = shutil.disk_usage(probe).free
+        need = int((self._writes.get(dev, 0) + int(write)) * _DISK_MARGIN)
+        if need > free:
+            raise InsufficientStorage(
+                f"not enough free space for the handover's workspace items (refused at a {what})",
+                need_bytes=need,
+                free_bytes=free,
+                path=str(probe),
+            )
+        self._pending = (int(declared), dev, int(write))
+
+    def settle(self) -> None:
+        if self._pending is not None:
+            declared, dev, write = self._pending
+            self.declared += declared
+            self._writes[dev] = self._writes.get(dev, 0) + write
+        self._pending = None
+
+    def reset(self) -> None:
+        self._pending = None
+
 
 @dataclass
 class _Prepared:
@@ -469,6 +526,7 @@ class WorkspaceTxn:
         self._hermes_placed: list[Path] = []
         self._hermes_dirs: list[Path] = []
         self._steps = _StepLog(self.staging)
+        self._room = _JobRoom(cfg.max_total_bytes if cfg is not None else filetree.DEFAULT_MAX_BYTES)
 
     # -- helpers ------------------------------------------------------------------------------------------
 
@@ -557,6 +615,7 @@ class WorkspaceTxn:
                 qdir=self.staging / "quarantine" / item_id,
                 alternates=alternates,
                 claimed=True,
+                room=self._room.check,
             )
         except BaseException:
             self._unclaim(partial, created)
@@ -579,6 +638,7 @@ class WorkspaceTxn:
                 fallback=fb,
                 claimed=True,
                 max_bytes=cfg.max_total_bytes,
+                room=self._room.check,
             )
         except BaseException:
             self._unclaim(partial, created)
@@ -686,7 +746,9 @@ class WorkspaceTxn:
         """PREPARE one item according to ``decision`` (DESIGN §3.4 step 1). Update/return attempts that turn out
         to conflict (dirty, diverged, changed since the handover, case collision) fall back to a fresh directory at
         the conflict's fallback. ``out_row`` is the map row whose state applies: the ``out`` row (return mode) or
-        the ``in`` row with the tree fingerprint (tree update mode)."""
+        the ``in`` row with the tree fingerprint (tree update mode). The target's byte cap and free space hold for
+        all items of the job together (``_JobRoom``, H11)."""
+        self._room.reset()
         if decision.mode is DestMode.SKIP:
             self.journal("info", f"prepare:{item.item_id}", {"mode": "skip"})
             return
@@ -700,6 +762,7 @@ class WorkspaceTxn:
             prepared = self._prepare_extra_file(item, decision, pack_item)
         else:
             raise PolicyDenied(f"unknown pack item kind {kind!r}", reason="special")
+        self._room.settle()
         self.items.append(prepared)
         warnings = list(getattr(prepared.state, "warnings", ()) or ())
         self.warnings.extend(warnings)
@@ -729,6 +792,7 @@ class WorkspaceTxn:
                         cancelled=self.cancelled,
                         qdir=self.staging / "quarantine" / item.item_id,
                         rules=self.rules,
+                        room=self._room.check,
                     )
                 else:
                     state = gitapply.prepare_update(
@@ -740,6 +804,7 @@ class WorkspaceTxn:
                         cancelled=self.cancelled,
                         qdir=self.staging / "quarantine" / item.item_id,
                         rules=self.rules,
+                        room=self._room.check,
                     )
                 return _Prepared(item.item_id, "git", state.mode, dest, pack_item, state)
             except ConflictError as exc:
@@ -777,6 +842,7 @@ class WorkspaceTxn:
                     tag=self.job6,
                     max_files=cfg.max_files,
                     max_bytes=cfg.max_total_bytes,
+                    room=self._room.check,
                 )
                 self.skipped.extend(state.skipped)
                 return _Prepared(item.item_id, "tree", decision.mode, dest, pack_item, state)
@@ -802,7 +868,9 @@ class WorkspaceTxn:
         size = pack_item.get("size")
         if isinstance(size, bool) or not isinstance(size, int) or size < 0:
             raise BadRequest("extra file size must be a whole non-negative number", field="size")
-        filetree.check_room(size, dest.parent, max_bytes=self._require_cfg().max_total_bytes, what="file")  # H11
+        filetree.check_room(  # H11: the item, then the job (``_JobRoom``)
+            size, dest.parent, max_bytes=self._require_cfg().max_total_bytes, what="file", room=self._room.check
+        )
         temp = dest.parent / f".{dest.name}.ctxh-{self.job6}"
         created = self._claim(temp, dest, item.item_id, "file")
         entry = {
@@ -1192,6 +1260,12 @@ class PackedItem:
     warnings: tuple[str, ...] = ()
 
 
+_LEFT_BEHIND = frozenset({"secret", "symlink"})
+"""Reasons a tree entry goes into the pack item's ``excluded`` list — the one the conductor reports as left behind
+(report, note, status): secrets, and links the policy keeps out of the tree with the links through them (L3-F27).
+Everything else the scan leaves out (ignored, special, unreadable …) is listed as ``skipped``."""
+
+
 def _listed(entries: Sequence[NotTransferred], what: str, warnings: list[str]) -> list[dict]:
     if len(entries) > DOC_LIST_CAP:
         warnings.append(f"{len(entries) - DOC_LIST_CAP} more {what} paths not listed in the pack document")
@@ -1234,8 +1308,9 @@ def pack_plan_item(
       ``basis_candidates`` (the target's ``git_have``), item from ``gitpack.pack_item``: ``lfs_objects``,
       ``case_collisions``, ``ntfs_invalid``; ``state`` = the outgoing git state (R4).
     * ``file_tree`` and ``extra_dir`` — ``filetree.scan`` (ignore rules incl. ``extra_ignore``, the policy) and
-      ``pack_tree``; one ``file_tree`` item with ``manifest``, ``entries``, ``bytes``, ``excluded``, ``skipped``,
-      ``case_collisions``, ``ntfs_invalid``; ``state`` = ``{"tree": fingerprint}``.
+      ``pack_tree``; one ``file_tree`` item with ``manifest``, ``entries``, ``bytes``, ``excluded`` (secrets, links
+      left out: ``_LEFT_BEHIND``), ``skipped``, ``case_collisions``, ``ntfs_invalid``; ``state`` =
+      ``{"tree": fingerprint}``.
     * ``extra_file`` — the policy again (``check_source_file``, explicit, no link following), then
       ``filetree.pack_file`` (modes ``100644``/``100755``).
     * ``hermes_file`` — kind from ``PlanItem.hermes_kind``, the session-file checks of planning again (known kind,
@@ -1270,8 +1345,8 @@ def pack_plan_item(
             entries = [e for e in entries if not (e.type == "file" and e.path in gone)]
             left = [*left, *dropped]
         pairs, invalid, warnings = name_report(os.fsdecode(filetree.entry_rel_bytes(e)) for e in entries)
-        excluded = tuple(n for n in left if n.why == "secret")
-        skipped = tuple(n for n in left if n.why != "secret")
+        excluded = tuple(n for n in left if n.why in _LEFT_BEHIND)
+        skipped = tuple(n for n in left if n.why not in _LEFT_BEHIND)
         doc = {
             "item_id": item.item_id,
             "kind": "file_tree",

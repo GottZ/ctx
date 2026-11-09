@@ -105,6 +105,10 @@ class GitApplyState:
     case_collisions: tuple[tuple[str, str], ...] = ()
     tmp: Path | None = None
     case_insensitive: bool = False
+    new_dirs: tuple[str, ...] | None = None
+    """Update/return mode: the parent directories of ``added_paths`` that were no directory at PREPARE — the ones
+    the forward step creates and the inverse may remove (R2-L3). None: unknown (a snapshot of an older version);
+    the inverse then removes every empty parent of an added path, as before."""
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -639,7 +643,14 @@ def _tree_budget(git: Git, qdir: Path, tree: str, *, max_entries: int, max_bytes
     return total
 
 
-def _precheck(git: Git, qdir: Path, item: _Item, dest_for_disk: Path, cfg: PolicyConfig) -> None:
+RoomCheck = Callable[[int, Path, int, str], None]
+"""``(declared bytes, where, bytes written there, what)``: the job-wide byte cap and free-space check of the workspace
+transaction (``materialize``, H11); raises ``PayloadTooLarge`` | ``InsufficientStorage``."""
+
+
+def _precheck(
+    git: Git, qdir: Path, item: _Item, dest_for_disk: Path, cfg: PolicyConfig, room: RoomCheck | None = None
+) -> None:
     total = _tree_budget(
         git, qdir, item.worktree_tree, max_entries=cfg.max_files, max_bytes=cfg.max_total_bytes, what="work tree"
     )
@@ -656,6 +667,8 @@ def _precheck(git: Git, qdir: Path, item: _Item, dest_for_disk: Path, cfg: Polic
             free_bytes=free,
             path=str(probe),
         )
+    if room is not None:
+        room(total, probe, total, "work tree")
 
 
 def _paths_of(git: Git, qdir: Path, tree: str) -> list[str]:
@@ -804,6 +817,31 @@ def obstructions(
     return found[:limit]
 
 
+def _new_dirs(repo: Path, added: Sequence[str]) -> tuple[str, ...]:
+    """The parent directories of ``added`` (relative, as git names them) that are no directory at ``repo`` now —
+    what the forward step will create (R2-L3). A missing directory's descendants are missing too (not probed)."""
+    root = os.fsencode(repo)
+    kind: dict[bytes, bool] = {}  # prefix -> is a directory now
+    out: list[bytes] = []
+    for rel in added:
+        parts = os.fsencode(rel).split(b"/")
+        missing = False
+        for i in range(1, len(parts)):
+            pre = b"/".join(parts[:i])
+            if pre not in kind:
+                if missing:
+                    kind[pre] = False
+                else:
+                    try:
+                        kind[pre] = stat.S_ISDIR(os.lstat(os.path.join(root, pre)).st_mode)
+                    except (FileNotFoundError, NotADirectoryError):
+                        kind[pre] = False
+                if not kind[pre]:
+                    out.append(pre)
+            missing = missing or not kind[pre]
+    return tuple(os.fsdecode(p) for p in out)
+
+
 def _refuse_obstructions(
     git: Git, repo: Path, base: str, added: Sequence[str], *, case_insensitive: bool, env: dict | None = None
 ) -> None:
@@ -838,6 +876,7 @@ def prepare_fresh(
     qdir: Path | None = None,
     alternates: Path | None = None,
     claimed: bool = False,
+    room: RoomCheck | None = None,
 ) -> GitApplyState:
     """Fresh mode PREPARE (DESIGN §9.5): ``partial`` (must not exist; its parent must) is created 0700, gets a new
     repository, the verified objects, refs from the pack document, remote config, HEAD, the checkout
@@ -846,7 +885,10 @@ def prepare_fresh(
     appeared meanwhile. ``alternates`` (late fallback from update/return mode, whose pack is thin against that
     repository): its objects complete the new repository, which is repacked self-contained before PREPARE ends.
     ``claimed``: the caller created ``partial`` (empty, recorded — ``materialize``). Something already at the path
-    is never used or removed: ``ConflictError(kind=partial_exists)`` (L3-F08). A failure removes the partial."""
+    is never used or removed: ``ConflictError(kind=partial_exists)`` (L3-F08). A failure removes the partial.
+    ``room`` (the workspace transaction's job-wide check, H11): called with the work tree's
+    declared bytes before anything of it is written; it raises when the job's items together pass the cap or the
+    free space."""
     git.ensure_supported()
     item = parse_item(item_pack)
     partial = Path(partial)
@@ -858,7 +900,7 @@ def prepare_fresh(
         git.run(["init", "-q", "--template=", f"--object-format={item.fmt}", str(partial)], cwd=None, spec=RECEIVED)
         q = Path(qdir) if qdir is not None else partial / ".git" / "ctxh-quarantine"
         quarantine_and_verify(git, store, item_pack, q, alternates=alternates, cancelled=cancelled)
-        _precheck(git, q, item, partial, cfg)
+        _precheck(git, q, item, partial, cfg, room)
         paths = _paths_of(git, q, item.worktree_tree)
         issues = path_issues(paths, rules)
         found = collisions(paths, rules) if rules.case_insensitive else []
@@ -992,9 +1034,15 @@ def _open_existing(git: Git, dest: Path) -> tuple[Path, Path]:
 
 
 def _common_checks(
-    git: Git, q: Path, item: _Item, dest: Path, cfg: PolicyConfig, rules: PlatformRules | None
+    git: Git,
+    q: Path,
+    item: _Item,
+    dest: Path,
+    cfg: PolicyConfig,
+    rules: PlatformRules | None,
+    room: RoomCheck | None = None,
 ) -> tuple[list[str], list[tuple[str, str]]]:
-    _precheck(git, q, item, dest, cfg)
+    _precheck(git, q, item, dest, cfg, room)
     rules = rules or cfg.platform_rules()
     paths = _paths_of(git, q, item.worktree_tree)
     issues = path_issues(paths, rules)
@@ -1041,12 +1089,13 @@ def prepare_update(
     cancelled: Callable[[], bool] = _never,
     qdir: Path | None = None,
     rules: PlatformRules | None = None,
+    room: RoomCheck | None = None,
 ) -> GitApplyState:
     """Update mode PREPARE (DESIGN §9.5): the destination must be a clean repository (status empty incl.
     untracked, no in-progress operation, no ``index.lock``) whose HEAD is an ancestor of the source HEAD; only
     objects are transferred now. Raises ``ConflictError`` (``dirty`` | ``diverged`` | ``case_collision`` |
     ``unsafe_paths`` | ``not_ours``) — the caller then materialises fresh at the fallback. ``dirty`` also when an
-    ignored file or directory lies where the update writes (``obstructions``, B2)."""
+    ignored file or directory lies where the update writes (``obstructions``, B2). ``room``: as in ``prepare_fresh``."""
     git.ensure_supported()
     item = parse_item(item_pack)
     dest = Path(dest)
@@ -1073,10 +1122,11 @@ def prepare_update(
         target_branch = item.head_ref
         if target_branch is not None and target_branch in skipped:
             raise ConflictError("the HEAD branch diverged at the destination", kind="diverged", ref=target_branch)
-        _, found = _common_checks(git, q, item, dest, cfg, rules)
+        _, found = _common_checks(git, q, item, dest, cfg, rules, room)
         ci = (rules or cfg.platform_rules()).case_insensitive
         added = _added(git, q, h0, item.worktree_tree)
         _refuse_obstructions(git, dest, h0, added, case_insensitive=ci)
+        new_dirs = _new_dirs(dest, added)
         lfs_warnings = place_lfs(git, dest, store, item.lfs, checkout=False) if item.lfs else []
         transfer_pack(q, common)
     finally:
@@ -1098,6 +1148,7 @@ def prepare_update(
         warnings=tuple(warnings),
         case_collisions=tuple(found),
         case_insensitive=ci,
+        new_dirs=new_dirs,
     )
 
 
@@ -1137,11 +1188,13 @@ def prepare_return(
     cancelled: Callable[[], bool] = _never,
     qdir: Path | None = None,
     rules: PlatformRules | None = None,
+    room: RoomCheck | None = None,
 ) -> GitApplyState:
     """Return mode PREPARE (R4, DESIGN §9.5): the destination's current ``(HEAD, index tree, work-tree tree)``,
     recomputed with the **recorded** exclusions, must equal ``out_state`` — "unchanged since the handover", dirty
     work included, not "clean". Otherwise ``ConflictError(kind=changed_since_handover)`` names what changed;
-    ``ConflictError(kind=dirty)`` when an ignored file or directory lies where the return writes (B2)."""
+    ``ConflictError(kind=dirty)`` when an ignored file or directory lies where the return writes (B2). ``room``: as
+    in ``prepare_fresh``."""
     git.ensure_supported()
     item = parse_item(item_pack)
     dest = Path(dest)
@@ -1173,11 +1226,12 @@ def prepare_return(
         planned, skipped, old = _plan_refs(
             git, q, item, current, head_ref=head_ref, head_old_allowed=out_state.head or None
         )
-        _, found = _common_checks(git, q, item, dest, cfg, rules)
+        _, found = _common_checks(git, q, item, dest, cfg, rules, room)
         ci = (rules or cfg.platform_rules()).case_insensitive
         alt = {"GIT_ALTERNATE_OBJECT_DIRECTORIES": str(_out_objects(Path(tmp)))}
         added = _added(git, q, out_state.worktree_tree, item.worktree_tree, env=alt)
         _refuse_obstructions(git, dest, out_state.worktree_tree, added, case_insensitive=ci, env=alt)
+        new_dirs = _new_dirs(dest, added)
         lfs_warnings = place_lfs(git, dest, store, item.lfs, checkout=False) if item.lfs else []
         transfer_pack(q, common)
     finally:
@@ -1200,6 +1254,7 @@ def prepare_return(
         case_collisions=tuple(found),
         tmp=Path(tmp),
         case_insensitive=ci,
+        new_dirs=new_dirs,
     )
 
 
@@ -1464,6 +1519,57 @@ def _keep_changed(git: Git, repo: Path, added: Sequence[str], spec: GitEnvSpec, 
     return set(keep)
 
 
+def _release_added(
+    git: Git,
+    repo: Path,
+    state: GitApplyState,
+    kept: set[bytes],
+    spec: GitEnvSpec,
+    alt: dict | None,
+    *,
+    base: str | None = None,
+) -> bool:
+    """The inverse removes what the forward step added itself (R2-L3, B2): every added path leaves the index — with
+    ``base`` also every other index entry ``base`` lacks — so the reset or merge that follows only writes and never
+    deletes (git would also remove the parent directories a deletion empties, an empty directory the user had among
+    them); the added paths not in ``kept`` (they hold what the forward step wrote, or nothing) are unlinked; then
+    the directories the forward step created (``state.new_dirs``) go when empty. Returns whether the index
+    changed."""
+    names = {os.fsencode(p) for p in state.added_paths} - kept
+    if base is not None:
+        proc = git.run(
+            ["diff", "--cached", "-z", "--name-only", "--no-renames", "--diff-filter=A", "--end-of-options", base],
+            cwd=repo,
+            spec=spec,
+            env_extra=alt,
+        )
+        names |= {p for p in proc.stdout.split(b"\x00") if p}
+    if names:
+        git.run(
+            ["update-index", "-z", "--force-remove", "--stdin"],
+            cwd=repo,
+            spec=spec,
+            env_extra=alt,
+            input=b"".join(p + b"\x00" for p in sorted(names)),
+        )
+    root = os.fsencode(repo)
+    for rel in state.added_paths:
+        raw = os.fsencode(rel)
+        if raw in kept:
+            continue
+        path = os.path.join(root, raw)
+        with contextlib.suppress(FileNotFoundError, IsADirectoryError, NotADirectoryError):
+            if not stat.S_ISDIR(os.lstat(path).st_mode):
+                os.unlink(path)
+    if state.new_dirs is None:
+        _remove_empty_parents(repo, state.added_paths)
+    else:
+        for rel in sorted(state.new_dirs, key=lambda d: -d.count("/")):
+            with contextlib.suppress(OSError):
+                os.rmdir(os.path.join(root, os.fsencode(rel)))
+    return bool(names)
+
+
 def rollback(git: Git, state: GitApplyState, item_pack: dict | None = None, *, partial: bool = False) -> None:
     """Inverse of ``commit`` (DESIGN §3.4 c1 inverse); idempotent. For fresh mode ``state.dest`` must be the path
     ``commit`` returned. ``partial=True``: the forward step may have stopped anywhere (an exception or a crash in
@@ -1471,7 +1577,8 @@ def rollback(git: Git, state: GitApplyState, item_pack: dict | None = None, *, p
     the received tree (``read-tree -u --reset``) instead of the two-way merge, which refuses half-updated files.
     Update mode always resets (``read-tree -u --reset H0``) and removes the paths the forward step added. With
     ``item_pack``, an added path that holds something other than the received content stays where it is, as an
-    untracked file (``_keep_changed``, B2)."""
+    untracked file (``_keep_changed``, B2). The added paths are removed by the inverse itself, before git resets or
+    merges, and of their parent directories only those the forward step created (``_release_added``, R2-L3)."""
     if state.mode in (DestMode.FRESH, DestMode.NO_CHECKOUT):
         if state.partial is not None and not state.partial.exists() and state.dest.is_dir():
             os.rename(state.dest, state.partial)
@@ -1487,7 +1594,8 @@ def rollback(git: Git, state: GitApplyState, item_pack: dict | None = None, *, p
         assert out is not None  # noqa: S101 - return states carry it
         git.run(["read-tree", "--end-of-options", item.worktree_tree], cwd=repo, spec=spec, env_extra=alt)
         git.run(["update-index", "-q", "--refresh"], cwd=repo, spec=spec, env_extra=alt, check=False)
-        _keep_changed(git, repo, state.added_paths, spec, alt)
+        kept = _keep_changed(git, repo, state.added_paths, spec, alt)
+        _release_added(git, repo, state, kept, spec, alt)
         git.run(
             ["read-tree", "-u", "--reset", "--end-of-options", out.worktree_tree], cwd=repo, spec=spec, env_extra=alt
         )
@@ -1499,15 +1607,8 @@ def rollback(git: Git, state: GitApplyState, item_pack: dict | None = None, *, p
             git.run(["read-tree", "--end-of-options", item.worktree_tree], cwd=repo, spec=spec, env_extra=alt)
             git.run(["update-index", "-q", "--refresh"], cwd=repo, spec=spec, env_extra=alt, check=False)
             kept = _keep_changed(git, repo, state.added_paths, spec, alt)
+        _release_added(git, repo, state, kept, spec, alt, base=state.h0)
         git.run(["read-tree", "-u", "--reset", "--end-of-options", state.h0], cwd=repo, spec=spec, env_extra=alt)
-        for rel in state.added_paths:
-            if os.fsencode(rel) in kept:
-                continue
-            path = Path(os.fsdecode(os.path.join(os.fsencode(repo), os.fsencode(rel))))
-            with contextlib.suppress(FileNotFoundError, IsADirectoryError, NotADirectoryError):
-                if not stat.S_ISDIR(os.lstat(path).st_mode):
-                    os.unlink(path)
-        _remove_empty_parents(repo, state.added_paths)
     else:
         out = state.out_state
         assert out is not None  # noqa: S101 - return states carry it
@@ -1515,9 +1616,10 @@ def rollback(git: Git, state: GitApplyState, item_pack: dict | None = None, *, p
         if w_in is not None:
             git.run(["read-tree", "--end-of-options", w_in], cwd=repo, spec=spec, env_extra=alt)
             git.run(["update-index", "-q", "--refresh"], cwd=repo, spec=spec, env_extra=alt, check=False)
-            if _keep_changed(git, repo, state.added_paths, spec, alt):
-                # the two-way merge would refuse a kept file as "untracked, would be removed": merge from the index
-                # as it now is (the received tree without the kept paths), which leaves them alone
+            kept = _keep_changed(git, repo, state.added_paths, spec, alt)
+            if _release_added(git, repo, state, kept, spec, alt) or kept:
+                # merge from the index as it now is (the received tree without the added paths): the two-way merge
+                # would refuse a kept file as "untracked, would be removed", and it deletes nothing (R2-L3)
                 w_in = git.out(["write-tree"], cwd=repo, spec=spec, env_extra=alt)
             git.run(
                 ["read-tree", "-u", "-m", "--end-of-options", w_in, out.worktree_tree],
@@ -1629,6 +1731,7 @@ def state_to_dict(s: GitApplyState) -> dict:
         "case_collisions": [list(p) for p in s.case_collisions],
         "tmp": _p(s.tmp),
         "case_insensitive": s.case_insensitive,
+        "new_dirs": [enc_path(p) for p in s.new_dirs] if s.new_dirs is not None else None,
     }
 
 
@@ -1657,4 +1760,5 @@ def state_from_dict(d: dict) -> GitApplyState:
         case_collisions=tuple(tuple(p) for p in d.get("case_collisions") or ()),
         tmp=_P(d.get("tmp")),
         case_insensitive=d.get("case_insensitive") is True,
+        new_dirs=tuple(dec_path(p) for p in d["new_dirs"]) if d.get("new_dirs") is not None else None,
     )

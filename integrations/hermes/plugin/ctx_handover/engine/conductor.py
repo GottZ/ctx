@@ -485,6 +485,8 @@ class Conductor:
             raise NotFound(f"conductor job {job.job_id} not found")
         params = row["params"] or {}
         self._session_ref = from_wire(SessionRef, params.get("session_ref") or {})
+        # ``start_job(include_secret=…)`` keeps these in the row, never in ``Options`` (X07)
+        self._include_secret = tuple(str(p) for p in params.get("include_secret") or () if isinstance(p, str))
         if self.continue_prompt is None:
             self.continue_prompt = params.get("continue_prompt")
         self._handlers: dict[S, Callable[[], None]] = {
@@ -1196,7 +1198,9 @@ class Conductor:
         if reasons and (not self.job.options.yes or exempt):
             choice = None
             if interactive and self.confirm is not None:
-                summary = planner.presend_summary(final, instructions=instructions, target_facts=tf, source_facts=sf)
+                summary = planner.presend_summary(
+                    final, instructions=instructions, target_facts=tf, source_facts=sf, include=self._includes()
+                )
                 choice = self.confirm(
                     {
                         "reasons": reasons,
@@ -1262,8 +1266,14 @@ class Conductor:
             instructions=self._ctx.get("instructions") or (),
             target_facts=self._get("target_facts", EnvFacts),
             source_facts=self._get("source_facts", EnvFacts),
+            include=self._includes(),
         )
         self._go(S.LOCKING, presend=dict(presend))
+
+    def _includes(self) -> tuple[str, ...]:
+        """The paths this job's user named to be included here: ``--include`` and ``--include-secret`` (L3-F24). Both
+        pre-send summaries name those the plan refused (``plan.include_refused``)."""
+        return (*(str(p) for p in self.job.options.hints.include), *self._include_secret)
 
     def _locking(self) -> None:
         self._check_cancel()
@@ -1750,7 +1760,9 @@ class Conductor:
         A side the job never reached holds nothing for it (review M2, L3-F11 at the root): without a journaled
         ``target.open_job`` intent the target never saw the job, without ``source.lock`` the source was never
         locked. Their abort/release is still tried once (it tidies a local participant row), but its failure — an
-        unreachable peer, a gateway without the routes — is no reason to keep the job ``aborting`` for ever."""
+        unreachable peer, a gateway without the routes — is no reason to keep the job ``aborting`` for ever. A pull
+        source that opened the job at FACTS keeps its participant row then; that side's registry stops counting it
+        after ``participant_idle_timeout`` and ends it after ``staging_ttl`` (review R2-M1)."""
         reason = str(self._ctx.get("abort_reason") or "aborted")
         target_seen = self._intended("target.open_job")
         try:
