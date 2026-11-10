@@ -715,6 +715,55 @@ func TestQueryBackfillCallerScope(t *testing.T) {
 		}
 	})
 
+	// The two probes below pin which classes the old end picks from. It is
+	// not bound to the caller's scopes, so its classes are those of every
+	// scope: with the floor of each scope, and with the embed backends a scope
+	// has of its own. With the classes of the caller's scopes, or without the
+	// floor, the old end would return a block whose chain is empty; the loop
+	// ends on such a block, it gets no memo, and it stays the oldest, so every
+	// request with the arm off would stop on it.
+
+	// Arm off, the other tenant's scope floored at credentials on a
+	// no-credentials backend: its block is the oldest pending one and no
+	// backend may receive it. The one pick takes the caller's block behind it.
+	t.Run("arm_off_old_end_applies_the_floor_of_a_foreign_scope", func(t *testing.T) {
+		f := bfsSetup(t)
+		f.embedTrust, f.querySens = backends.TrustNoCredentials, string(backends.SensInternal)
+		f.floor = config.ScopeFloor{bfsForeignScope: backends.SensCredentials}
+		f.write(t, f.foreignCtx, bfsForeignTitle)
+		f.write(t, f.callerCtx, bfsCallerTitle)
+
+		f.query(t, 1, 0)
+
+		if !f.embedded(t, bfsCallerTitle) {
+			t.Error("arm off: the caller's block is still pending behind the oldest block, which is in a scope floored above every embed backend")
+		}
+		if f.embedded(t, bfsForeignTitle) {
+			t.Error("a block of a scope floored at credentials was embedded on a no-credentials backend")
+		}
+		if f.memoized(t, bfsForeignTitle) {
+			t.Error("the block of the floored scope carries a failure memo; an unservable block gets none")
+		}
+	})
+
+	// Arm off, `private` has a full-trust embed backend of its own next to
+	// the shared no-credentials one: its credentials block is servable, and
+	// the old end must pick it. The backend is a tenant row, whose dial
+	// ssrfguard refuses on the loopback test server (see class_is_per_scope),
+	// so the pick shows as the failure memo of that dial and not as a vector.
+	t.Run("arm_off_old_end_knows_the_backend_of_a_scope", func(t *testing.T) {
+		f := bfsSetup(t)
+		f.embedTrust, f.querySens = backends.TrustNoCredentials, string(backends.SensInternal)
+		f.privateEmbed = backends.TrustFull
+		f.writeAs(t, f.callerCtx, bfsCallerSecret, "", string(backends.SensCredentials))
+
+		f.query(t, 1, 0)
+
+		if !f.memoized(t, bfsCallerSecret) {
+			t.Error("arm off: the credentials block in `private` was not picked although that scope has a full-trust embed backend (no failure memo from the refused loopback dial)")
+		}
+	})
+
 	// Arm off, nothing pending in the caller's scopes, one pick: it takes the
 	// other tenant's oldest block, not its newest.
 	t.Run("arm_off_old_end_takes_the_oldest", func(t *testing.T) {

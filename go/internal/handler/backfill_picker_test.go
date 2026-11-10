@@ -3,12 +3,17 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/config"
 )
 
 // fakeBackfillQueue stands in for the database under backfillPicker: the
@@ -17,11 +22,14 @@ import (
 // pick by what its statement says: the order, the scope conjunct, and whether
 // it reads the blocks that overran. It checks the rule that chooses the
 // picks, not the SQL: the class conjunct is not evaluated here, and no
-// statement is parsed by Postgres.
+// statement is parsed by Postgres. The class arguments are checked for which
+// set they are: wantCaller on a statement bound to the caller's scopes,
+// wantAny on every other.
 type fakeBackfillQueue struct {
-	pending []fakePendingBlock
-	scoped  int // statements bound to the caller's scopes
-	stmts   int
+	pending             []fakePendingBlock
+	wantCaller, wantAny embedClasses
+	scoped              int // statements bound to the caller's scopes
+	stmts               int
 }
 
 type fakePendingBlock struct {
@@ -61,9 +69,14 @@ func (q *fakeBackfillQueue) QueryRow(_ context.Context, sql string, args ...any)
 	}
 	var scopes []string
 	scoped := strings.Contains(sql, backfillInScopes)
+	want := q.wantAny
 	if scoped {
 		q.scoped++
 		scopes = args[4].([]string)
+		want = q.wantCaller
+	}
+	if got := (embedClasses{args[0].([]string), args[1].([]string), args[2].([]string), args[3].([]string)}); !reflect.DeepEqual(got, want) {
+		return fakeBackfillRow{err: fmt.Errorf("pick (bound to the caller's scopes: %v) with the classes %+v, want %+v", scoped, got, want)}
 	}
 	var found *fakePendingBlock
 	for i := range q.pending {
@@ -82,14 +95,33 @@ func (q *fakeBackfillQueue) QueryRow(_ context.Context, sql string, args ...any)
 	return fakeBackfillRow{block: found}
 }
 
+// The pool, the floor and the caller of the picker tests: a shared embed
+// backend that takes no credentials, `own` with a full-trust backend of its
+// own and no floor, and `lifted`, floored above the shared ceiling. The
+// caller reads none of the two, so the classes of its scopes and the classes
+// of every scope differ in both, and each differs from what it would be
+// without the floor.
+func pickerFixture() (backends.TrustCeilings, config.ScopeFloor, []string) {
+	p := backends.NewPool(nil, nil)
+	p.SeedSnapshotForTest([]backends.Backend{
+		{ID: "g", Name: "shared-nocred", Scope: backends.GlobalScope, Roles: []string{backends.RoleEmbed}, Enabled: true, Trust: backends.TrustNoCredentials},
+		{ID: "o", Name: "own-full", Scope: "own", Roles: []string{backends.RoleEmbed}, Enabled: true, Trust: backends.TrustFull},
+	})
+	return p.TrustCeilings(backends.RoleEmbed), config.ScopeFloor{"lifted": backends.SensCredentials}, []string{"private", "shared"}
+}
+
 // drain runs the loop of backfillPending over the queue: one next per pick
 // until the cap or the first error, every picked block embedded (removed).
-func (q *fakeBackfillQueue) drain(t *testing.T, armRuns bool, syncCap int, readScopes []string) []string {
+// The picker is the one backfillPending builds.
+func (q *fakeBackfillQueue) drain(t *testing.T, armRuns bool, syncCap int) []string {
 	t.Helper()
-	p := &backfillPicker{
-		db: q, armRuns: armRuns, readScopes: readScopes,
-		anyClasses: func() embedClasses { return embedClasses{} },
+	ceilings, floor, readScopes := pickerFixture()
+	q.wantCaller = embedServableClasses(ceilings, floor, readScopes)
+	q.wantAny = embedServableClasses(ceilings, floor, nil)
+	if reflect.DeepEqual(q.wantCaller, q.wantAny) || reflect.DeepEqual(q.wantAny, embedServableClasses(ceilings, nil, nil)) {
+		t.Fatalf("fixture: the classes of the caller's scopes %+v, of every scope %+v and of every scope without the floor must differ", q.wantCaller, q.wantAny)
 	}
+	p := newBackfillPicker(q, armRuns, ceilings, floor, readScopes)
 	var got []string
 	for attempt := 0; syncCap <= 0 || attempt < syncCap; attempt++ {
 		row, err := p.next(context.Background(), attempt)
@@ -112,7 +144,6 @@ func (q *fakeBackfillQueue) drain(t *testing.T, armRuns bool, syncCap int, readS
 // it stands where it was cut, so "c1 c2! c3" says c2 was cut after c1 was
 // stored and before c3 was. A trailing ~ marks one still inside its backoff.
 func TestBackfillPickerOrder(t *testing.T) {
-	caller := []string{"private", "shared"}
 	for _, tc := range []struct {
 		name    string
 		queue   string
@@ -180,7 +211,7 @@ func TestBackfillPickerOrder(t *testing.T) {
 					overran: strings.HasSuffix(id, "!") || strings.HasSuffix(id, "~"), backoff: strings.HasSuffix(id, "~"),
 				})
 			}
-			got := strings.Join(q.drain(t, tc.armRuns, tc.syncCap, caller), " ")
+			got := strings.Join(q.drain(t, tc.armRuns, tc.syncCap), " ")
 			if got != tc.want {
 				t.Errorf("queue %q, arm on %v, sync_cap %d: picked %q, want %q", tc.queue, tc.armRuns, tc.syncCap, got, tc.want)
 			}

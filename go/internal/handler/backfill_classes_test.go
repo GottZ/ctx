@@ -25,15 +25,17 @@ func (cl embedClasses) admits(scope, sens string) bool {
 // pick against the chain the loop resolves per block: for every scope and
 // sensitivity of the fixture the conjunct admits the pair exactly when
 // Chain(RoleEmbed, floor.Apply(sensitivity, scope), scope) returns a backend.
-// The fixture has a shared no-credentials backend, a scope with a full-trust
-// backend of its own, one with a lower one, and floors above, at and below
-// the shared ceiling; within runs unbound, narrowed, with a duplicate, and
-// empty.
+// The fixture has a shared no-credentials backend, two scopes with a
+// full-trust backend of their own (one of them floored as well, one not, so
+// that the backend alone is what makes the scope differ), one with a lower
+// one, and floors above, at and below the shared ceiling; within runs
+// unbound, narrowed, with a duplicate, and empty.
 func TestEmbedServableClassesMatchChain(t *testing.T) {
 	p := backends.NewPool(nil, nil)
 	p.SeedSnapshotForTest([]backends.Backend{
 		{ID: "g", Name: "shared-nocred", Scope: backends.GlobalScope, Roles: []string{backends.RoleEmbed}, Enabled: true, Trust: backends.TrustNoCredentials},
 		{ID: "a", Name: "alpha-full", Scope: "alpha", Roles: []string{backends.RoleEmbed}, Enabled: true, Trust: backends.TrustFull},
+		{ID: "b", Name: "beta-full", Scope: "beta", Roles: []string{backends.RoleEmbed}, Enabled: true, Trust: backends.TrustFull},
 		{ID: "c", Name: "gamma-public", Scope: "gamma", Roles: []string{backends.RoleEmbed}, Enabled: true, Trust: backends.TrustPublic},
 	})
 	floor := config.ScopeFloor{
@@ -42,9 +44,9 @@ func TestEmbedServableClassesMatchChain(t *testing.T) {
 		"mild":    backends.SensInternal,    // lifted below the ceiling
 		"_global": backends.SensPersonal,
 	}
-	scopes := []string{"private", "shared", "alpha", "gamma", "lifted", "mild", "_global", "nobody"}
+	scopes := []string{"private", "shared", "alpha", "beta", "gamma", "lifted", "mild", "_global", "nobody"}
 	c := p.TrustCeilings(backends.RoleEmbed)
-	for _, within := range [][]string{nil, {"private", "lifted"}, {"alpha", "alpha", "mild"}, {}} {
+	for _, within := range [][]string{nil, {"private", "lifted"}, {"alpha", "alpha", "mild"}, {"beta", "private"}, {}} {
 		cl := embedServableClasses(c, floor, within)
 		if cl.except == nil || cl.levels == nil || cl.pairScopes == nil || cl.pairLevels == nil {
 			t.Fatalf("within %v: a nil slice in %+v", within, cl)
