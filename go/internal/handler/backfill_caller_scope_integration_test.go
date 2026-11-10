@@ -106,7 +106,9 @@ type bfsFixture struct {
 	// floor is the query handler's pool.scope_sensitivity_floor (nil = none).
 	floor config.ScopeFloor
 	// privateEmbed, when set, adds a second embed backend of that trust that
-	// only the scope `private` can use.
+	// only the scope `private` can use, behind the shared one in the chain.
+	// It is a tenant row, so its dial goes through ssrfguard and never
+	// reaches the loopback test server: it can be resolved, not served.
 	privateEmbed backends.Trust
 	// queryPool, when set by countPicks, is the pool the query handler gets
 	// in place of pool: the same database behind a statement counter.
@@ -222,7 +224,7 @@ func (f *bfsFixture) query(t *testing.T, syncCap int, interval time.Duration) {
 	if f.privateEmbed != "" {
 		rows = append(rows, backends.Backend{ID: "p", Name: "bfs-embed-private", Scope: "private",
 			Host: f.backend.srv.URL, Protocol: backends.ProtocolOllama,
-			Model: "test-embed", Trust: f.privateEmbed, Enabled: true, Priority: 1,
+			Model: "test-embed", Trust: f.privateEmbed, Enabled: true, Priority: 0,
 			Roles: []string{backends.RoleEmbed}})
 	}
 	bpool := backends.NewPool(nil, nil)
@@ -245,6 +247,20 @@ func (f *bfsFixture) query(t *testing.T, syncCap int, interval time.Duration) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("query: status %d, body %s", rec.Code, rec.Body.String())
 	}
+}
+
+// memoized reports whether the block with this title carries an embed
+// failure memo of the regular backfill.
+func (f *bfsFixture) memoized(t *testing.T, title string) bool {
+	t.Helper()
+	var present bool
+	if err := f.pool.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM context_embed_failures m
+		                JOIN context_blocks cb ON cb.id = m.block_id
+		                WHERE cb.title = $1 AND m.migration_id IS NULL)`, title).Scan(&present); err != nil {
+		t.Fatalf("read failure memo of %q: %v", title, err)
+	}
+	return present
 }
 
 // countPicks puts the query handler on a second pool of the same database
@@ -522,23 +538,45 @@ func TestQueryBackfillCallerScope(t *testing.T) {
 
 	// Whether a block is servable depends on its scope as well as on its
 	// sensitivity: `private` has an embed backend of its own that takes
-	// credentials, `shared` has the no-credentials one only. The newest
-	// block is a credentials block in `shared`; the single pick goes to the
-	// older credentials block in `private`.
+	// credentials, `shared` has the no-credentials one only. Three pending
+	// blocks, oldest first: a credentials block in `private`, an internal
+	// block in `private`, a credentials block in `shared`. The newest is
+	// unservable and must cost nothing; the internal block is embedded by the
+	// first query, through the shared backend.
+	//
+	// The second query picks the credentials block in `private`, and only
+	// the private backend may receive it. That backend is a tenant row, and a
+	// tenant row dials through ssrfguard, which refuses the loopback address
+	// of the test server (backends.Backend.EgressGuarded). So the block
+	// cannot get a vector here; what shows that it was picked and that its
+	// chain resolved is the failure memo the refused dial leaves. A block
+	// whose chain does not resolve gets none, and neither does the
+	// credentials block in `shared`, which is never picked.
 	t.Run("class_is_per_scope", func(t *testing.T) {
 		f := bfsSetup(t)
 		f.embedTrust, f.querySens = backends.TrustNoCredentials, string(backends.SensInternal)
 		f.privateEmbed = backends.TrustFull
-		f.writeAs(t, f.callerCtx, bfsCallerTitle, "", string(backends.SensCredentials))
+		f.writeAs(t, f.callerCtx, bfsCallerSecret, "", string(backends.SensCredentials))
+		f.writeAs(t, f.callerCtx, bfsCallerTitle, "", string(backends.SensInternal))
 		f.writeAs(t, f.callerCtx, bfsCallerShared, "shared", string(backends.SensCredentials))
 
 		f.query(t, 1, armOn)
 
 		if !f.embedded(t, bfsCallerTitle) {
-			t.Error("the credentials block in the scope with a full-trust embed backend is still pending behind an unservable one in another scope")
+			t.Error("the internal block in `private` is still pending behind an unservable credentials block in `shared`")
 		}
-		if f.embedded(t, bfsCallerShared) {
-			t.Error("a credentials block in `shared` was embedded although only the no-credentials backend serves that scope")
+		if f.memoized(t, bfsCallerSecret) {
+			t.Error("the single pick of the first query also reached the older credentials block in `private`")
+		}
+
+		f.query(t, 1, armOn)
+
+		if !f.memoized(t, bfsCallerSecret) {
+			t.Error("the credentials block in `private` was not picked although that scope has a full-trust embed backend (no failure memo from the refused loopback dial)")
+		}
+		if f.embedded(t, bfsCallerShared) || f.memoized(t, bfsCallerShared) {
+			t.Errorf("the credentials block in `shared` was picked although only the no-credentials backend serves that scope (embedded=%v, memo=%v)",
+				f.embedded(t, bfsCallerShared), f.memoized(t, bfsCallerShared))
 		}
 	})
 
