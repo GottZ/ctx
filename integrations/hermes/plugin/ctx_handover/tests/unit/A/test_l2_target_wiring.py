@@ -48,10 +48,11 @@ def server(tmp_path):
     jobs._reset_for_tests()
 
 
-def real_target(home: Home, *, peer: str | None = "PEER1"):
-    """``LocalTarget`` exactly as the composition root builds it, with the job's source peer bound."""
+def real_target(home: Home, *, peer: str | None = "PEER1", remote: bool = False):
+    """``LocalTarget`` exactly as the composition root builds it, with the job's source peer bound. ``remote``: the
+    instance the participant registry's factory builds for a paired device's push (``remote_driven``, R6-A)."""
     with home.active():
-        _source, target = jobs.make_local_apis(None, calling_session=None, session_key=None)
+        _source, target = jobs.make_local_apis(None, calling_session=None, session_key=None, remote_driven=remote)
     target.source_peer_id = peer
     target.peer_name = "laptop" if peer else None
     return target
@@ -160,7 +161,7 @@ def test_return_trip_finds_the_out_row(server):
     ``ledger.map_lookup`` of layer 1 (``peer_id`` ← path, ``remote_path`` ← direction) — the row is never found."""
     remote = "/laptop/home/hermes-handover/app"
     origin, root = _handed_out_repo(server, "PEER1", remote)
-    target = real_target(server)
+    target = real_target(server, remote=True)
     final = negotiate(server, target, job_of(Mode.PUSH), _git_item(remote, root))
     (d,) = final.decisions
     assert (d.dest, d.reason, d.mode, d.conflict) == (str(origin), "return-mapping", DestMode.RETURN, None)
@@ -170,7 +171,7 @@ def test_return_lookup_is_bound_to_the_source_peer(server):
     """The out row of another peer never maps this job's paths (X10 binding)."""
     remote = "/laptop/home/hermes-handover/app"
     origin, root = _handed_out_repo(server, "PEER2", remote)
-    target = real_target(server, peer="PEER1")
+    target = real_target(server, peer="PEER1", remote=True)
     final = negotiate(server, target, job_of(Mode.PUSH), _git_item(remote, root))
     (d,) = final.decisions
     assert d.reason != "return-mapping" and d.dest != str(origin)
@@ -183,7 +184,7 @@ def test_counterpart_destination_stays_inside_allow_roots(server):
     this host (pull) is. Mutant (red proof): ``local_choice`` always True — the push lands outside."""
     outside = str(server.root / "elsewhere" / "proj")
     tree = item("w0", ItemKind.FILE_TREE, "/laptop/home/proj")
-    remote = negotiate(server, real_target(server), job_of(Mode.PUSH, Options(dest=outside)), tree)
+    remote = negotiate(server, real_target(server, remote=True), job_of(Mode.PUSH, Options(dest=outside)), tree)
     (d,) = remote.decisions
     assert d.dest != outside and d.reason != "user"
     assert Path(d.dest).is_relative_to(server.home / "hermes-handover")
@@ -196,7 +197,7 @@ def test_counterpart_destination_never_in_the_denylist(server):
     """R19: a counterpart's destination in the target denylist (``~/.ssh``) is refused even inside the home."""
     denied = str(server.home / ".ssh" / "proj")
     tree = item("w0", ItemKind.FILE_TREE, "/laptop/home/proj")
-    (d,) = negotiate(server, real_target(server), job_of(Mode.PUSH, Options(dest=denied)), tree).decisions
+    (d,) = negotiate(server, real_target(server, remote=True), job_of(Mode.PUSH, Options(dest=denied)), tree).decisions
     assert not Path(d.dest).is_relative_to(server.home / ".ssh")
     if d.conflict is not None:
         assert not Path(d.conflict.fallback_dest).is_relative_to(server.home / ".ssh")
@@ -209,7 +210,7 @@ def test_counterpart_extra_lands_under_the_job_directory(server):
     (red proof): the generic ``fallback_dest`` (``…-handover-<time>``)."""
     job = job_of(Mode.PUSH)
     extra = item("x0", ItemKind.EXTRA_FILE, "/laptop/home/notes/todo.txt")
-    target = real_target(server)
+    target = real_target(server, remote=True)
     (d,) = negotiate(server, target, job, extra).decisions
     root = target._facts(job)[1].workspace_root  # this host's workspace root as its facts spell it
     want = str(Path(root) / "_handover" / short(job.job_id) / "notes" / "todo.txt")
@@ -223,7 +224,9 @@ def test_final_plan_model_change_is_b_map_model(server):
     host does not serve ⇒ the target default). Mutant (red proof): the layer-1 dict built in ``LocalTarget``."""
     server.write_settings({"refine": "off"}, model={"default": "local-model", "provider": "ollama"})
     job = job_of(Mode.PUSH)
-    final = negotiate(server, real_target(server), job, item("w0", ItemKind.FILE_TREE, "/laptop/home/proj"))
+    final = negotiate(
+        server, real_target(server, remote=True), job, item("w0", ItemKind.FILE_TREE, "/laptop/home/proj")
+    )
     with server.active():
         _fields, want = session_import.map_model(
             {"model": "m-laptop", "model_config": {"provider": "p-laptop"}},

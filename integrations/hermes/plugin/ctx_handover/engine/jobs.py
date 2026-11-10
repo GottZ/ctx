@@ -524,6 +524,7 @@ def make_local_apis(
         data_dir=prof.data_dir,
         settings=settings,
         peer_name=peer.name if peer is not None else None,
+        remote_driven=remote_driven,  # R6-A: the wire instance, not the mode a device sends
     )
     return source, target
 

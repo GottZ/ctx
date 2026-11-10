@@ -4,7 +4,8 @@ The ``ParticipantRegistry`` sits between the HTTP server (cluster C) and the loc
 (``LocalSource``/``LocalTarget``). It owns the binding rules of DESIGN §4.5 [SEC 1.7]:
 
 * ``POST /jobs`` with ``role = source`` needs the peer right ``pull``, ``role = target`` needs ``push``; every
-  later call re-checks the job's role against the caller's rights.
+  later call re-checks the job's role against the caller's rights. The mode is the role's one wire mode
+  (``WIRE_MODE``: source ⇒ ``pull``, target ⇒ ``push``); any other pair is refused (R6-A).
 * Jobs are keyed by ``(peer_id, job_id)``: another peer gets ``not_found`` and cannot reuse the id.
 * Every job request carries the conductor's epoch; a lower epoch than the highest seen ⇒
   ``invalid_state(stale_epoch)`` (DESIGN §3.1).
@@ -53,6 +54,11 @@ _REMOTE_FIELDS = ("dest", "maps", "model", "force", "wait", "continue_prompt", "
 
 _REMOTE_HINTS = ("exclude", "dest_overrides", "no_workspace")
 """Hints a remote conductor may give: they narrow the plan or name destinations (R18, R19); never additions."""
+
+WIRE_MODE = {Role.SOURCE: Mode.PULL, Role.TARGET: Mode.PUSH}
+"""The one mode each role has when a paired device opens it here (DESIGN §2.2): the device pulls from a source here
+or pushes to a target here. Export, import and offer never cross the wire; a target opened as ``pull`` would pass
+for this host's own job (review R6-A)."""
 
 _RELEASABLE_SOURCE = frozenset({"locking", "locked", "preparing", "suspended"})
 _LOST_SOURCE = frozenset({"suspended", "releasing", "released", "reclaiming", "reclaimed"})
@@ -182,10 +188,22 @@ class ParticipantRegistry:
             raise NotFound(f"job {job_id} not found")
         return row
 
+    @staticmethod
+    def _check_mode(role: Role, mode: Mode) -> None:
+        if mode is not WIRE_MODE[role]:
+            raise BadRequest(f"a paired device can open a {role} job here only as a {WIRE_MODE[role]}", field="mode")
+
     def bind(self, auth: AuthContext, job_id: str, role: Role) -> tuple[SourceAPI | TargetAPI, JobContext]:
-        """Job bound to the calling peer, role right re-checked, epoch fenced; returns ``(api, job context)``."""
+        """Job bound to the calling peer, role right re-checked, epoch fenced; returns ``(api, job context)``. Only rows
+        route #7 opened are served: a row of this host's own job is ``not_found``, and a row route #7 wrote before it
+        checked the mode (R6-A) that carries another one is refused."""
         row = self._row(auth, job_id, role)
+        if (row.get("params") or {}).get("local") is True:
+            # a row of this host's own job that carries the device's id — the planning row of an offer, whose id the
+            # device learns from route #5 (Fremd-Review R6): never a job the device drives
+            raise NotFound(f"job {job_id} not found")
         self._require(auth, self._right_for(role))
+        self._check_mode(role, Mode(row["mode"]))
         epoch = row["max_peer_epoch"]
         if auth.epoch is not None:
             epoch = self.ledger.peer_epoch(job_id, role, int(auth.epoch))
@@ -214,6 +232,7 @@ class ParticipantRegistry:
         except (TypeError, ValueError):
             raise BadRequest("role, mode and epoch are required", field="role") from None
         self._require(auth, self._right_for(role))
+        self._check_mode(role, mode)
         existing = self.ledger.job(job_id, role)
         if existing is not None and existing["peer_id"] != peer.peer_id:
             raise JobConflict("job id not available")

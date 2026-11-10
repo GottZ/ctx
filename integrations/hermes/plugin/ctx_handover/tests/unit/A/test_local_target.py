@@ -444,6 +444,7 @@ def test_continue_rules(tmp_path, clock, session_db, make_session, user_home, he
     """Remote continuation (contract X21): the real ``Spawner`` decides — off without ``allow_remote_continue``,
     refused for an unverified peer — and the child runs in the cwd of the arrived session row (R10, R11, R22)."""
     e = Env(tmp_path, clock, session_db, make_session, user_home, hermes_home, mode=Mode.PUSH)
+    e.target.remote_driven = True  # the wire instance the registry's factory builds (R6-A: not the mode)
     allow = {"on": False}
     launches = Launches()
     e.target.continuation = continuation.Spawner(

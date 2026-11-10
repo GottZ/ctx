@@ -262,6 +262,7 @@ class LocalTarget:
         instance_name: str = "",
         settings: dict | None = None,
         peer_name: str | None = None,
+        remote_driven: bool = False,
     ) -> None:
         self.ledger = ledger
         self.store = store
@@ -284,6 +285,7 @@ class LocalTarget:
         self.instance_name = instance_name or host.profile
         self.settings = dict(settings or {})
         self.peer_name = peer_name
+        self.remote_driven = bool(remote_driven)
 
     # -- plumbing ------------------------------------------------------------------------------------------------
     @property
@@ -346,7 +348,14 @@ class LocalTarget:
         return doc
 
     def _remote_driven(self, job: JobContext) -> bool:
-        return job.mode is Mode.PUSH and self.source_peer_id is not None
+        """Whether a paired device drives this job: this instance serves wire requests (the participant registry's
+        factory builds it with ``remote_driven``), or the job's row was opened over the wire — route #7 never records
+        ``params.local``, also not in a row written before it checked the mode. Never derived from the mode or
+        another field the device sends (review R6-A: a push-only device opened a target as ``pull``)."""
+        if self.remote_driven:
+            return True
+        row = self.ledger.job(job.job_id, Role.TARGET)
+        return row is None or (row.get("params") or {}).get("local") is not True
 
     # -- TargetAPI -----------------------------------------------------------------------------------------------
     def hello(self) -> Hello:
