@@ -311,4 +311,4 @@ def test_readme_names_reclaim_session_and_the_role_in_status():
     gateway runs in ``/handover status``."""
     text = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
     assert "hermes handover reclaim --session <id>" in text
-    assert "listed with this gateway's role" in text
+    assert "listed with this machine's role" in text

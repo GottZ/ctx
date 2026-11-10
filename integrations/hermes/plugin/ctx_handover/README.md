@@ -572,8 +572,8 @@ message there; the note is not shown in the transcript view. Hook-output files a
 folder (`hook_outputs/<session id>/` in the Hermes home there, same file names); the conversation still names the old
 folders, so the note lists, for each old folder, the folder its files are in now. `/handover status` also shows
 the jobs another gateway runs with this one — a push that arrived here, a pull that took a session from here —
-listed with this gateway's role (`target, from <peer>` or `source, to <peer>`) and, for an arrival, the session it
-became here.
+listed with this machine's role ("arriving here from <peer>" or "leaving here for <peer>") and, for an arrival,
+the session it became here.
 
 All commands: `/handover to | take | export | import | status | peers | pair | reclaim | cancel | resume | setup |
 doctor | identity | gc | logs | help` — `/handover help <command>` shows the options. `hermes handover <same>` runs
@@ -766,8 +766,8 @@ name such as `OneDrive/Dokumente`) or `WindowsApps`, and `~/Documents` itself is
 owner the name service does not know, a WSL drive mounted elsewhere than `/mnt/<drive>` or `/<drive>`, and a OneDrive
 documents folder named in a language outside the plugin's list (`policy.ONEDRIVE_DOCUMENTS_NAMES`) are not
 recognised. A bundle that no paired, non-revoked key signed is
-refused by `import` unless you add `import --trust-unsigned`; such a session arrives marked as from an unverified
-bundle, never starts a continuation and binds no return trip to its exporter. Its instruction files ask for a
+refused by `import` unless you add `import --trust-unsigned`; such a session arrives marked as from an "unverified
+handover file", never starts a continuation and binds no return trip to its exporter. Its instruction files ask for a
 confirmation.
 
 **Unredacted:** transcripts, spillover, hook-output and terminal-output files and attached images go to the peer as

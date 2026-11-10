@@ -242,7 +242,7 @@ def test_rv_f_l28_bindings_to_constants_and_parser():
 
 def test_rv_f_trust_unsigned_is_disclosed():
     """★ §6-T: ``import --trust-unsigned`` (an option of the grammar) is in the README with what such an import does
-    not get: no continuation, no return trip to the exporter, origin "unverified bundle".
+    not get: no continuation, no return trip to the exporter, origin "unverified handover file" (``jobs.py``).
 
     Red before the fix: no ``--trust-unsigned`` in the README."""
     assert "--trust-unsigned" in surfaces.USAGE["import"]
@@ -250,7 +250,7 @@ def test_rv_f_trust_unsigned_is_disclosed():
     sentence = rights.split("`import --trust-unsigned`", 1)[1].split(". ", 2)
     text = " ".join(sentence[:2])
     assert "never starts a continuation" in text and "no return trip" in text, text
-    assert "unverified bundle" in text, text
+    assert "unverified handover file" in text, text
 
 
 def test_rv_f_m12_context_window_limit():
