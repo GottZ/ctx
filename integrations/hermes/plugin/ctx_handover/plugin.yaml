@@ -157,7 +157,7 @@ config_schema:
     choices: [ask, auto, "off"]
     default: ask
     label: Files outside the project folder that the conversation used
-    description: "ask = propose them (you confirm); auto = include the ones the conversation read or wrote and propose the others; off = leave them out."
+    description: "ask = propose them (you confirm); auto = take along the files the conversation read or wrote and propose the others; off = leave them out."
   include_hermes_files:
     type: bool
     default: true
