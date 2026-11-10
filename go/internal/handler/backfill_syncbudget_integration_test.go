@@ -500,6 +500,18 @@ func (f *armOffFixture) overran(t *testing.T, id string) {
 	}
 }
 
+// cut moves the cut of the block's caller_timeout memo to ago before now (an
+// interval, as Postgres reads it) and sets the attempts the memo counts.
+func (f *armOffFixture) cut(t *testing.T, id, ago string, attempts int) {
+	t.Helper()
+	tag, err := f.pool.Exec(context.Background(),
+		`UPDATE context_embed_failures SET next_attempt_at = now() - $2::interval, attempts = $3
+		 WHERE block_id = $1 AND migration_id IS NULL`, id, ago, attempts)
+	if err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("move the cut of %s: %v (%d rows)", id, err, tag.RowsAffected())
+	}
+}
+
 func (f *armOffFixture) embedded(t *testing.T, id string) bool {
 	t.Helper()
 	var present bool
@@ -613,6 +625,65 @@ func TestBackfillPending_ArmOff_Integration(t *testing.T) {
 		}
 		if class, attempts := f.memo(t, huge); class != string(store.EmbedFailureCallerTimeout) || attempts != 2 {
 			t.Errorf("memo of the block that cannot fit: class %q, attempts %d, want %q and 2", class, attempts, store.EmbedFailureCallerTimeout)
+		}
+	})
+
+	// Where a block that overran the budget stands once its backoff has
+	// passed: where it was cut. One block was pending at that moment and one
+	// was stored after it; three requests of one pick each take the block
+	// that waited at the cut, then the overrun block, then the later one. In
+	// its created_at place the overrun block would come first, and with as
+	// many blocks that cannot fit the budget as there are requests in a
+	// backoff period it would come first every time; after everything else it
+	// comes last, and under steady writes never.
+	t.Run("an_overran_block_queues_where_it_was_cut", func(t *testing.T) {
+		f := armOffSetup(t, instant)
+		early := f.seed(t, "armoff block that overran, stored first", 60)
+		waiting := f.seed(t, "armoff block that waited at the cut", 30)
+		later := f.seed(t, "armoff block stored after the cut", 5)
+		f.overran(t, early)
+		f.cut(t, early, "10 minutes", 1)
+
+		names := map[string]string{early: "the overrun block", waiting: "the block that waited at the cut", later: "the block stored after the cut"}
+		for request, want := range []string{waiting, early, later} {
+			if got := f.run(1, 10*time.Second); got != 1 {
+				t.Fatalf("request %d backfilled %d, want 1", request+1, got)
+			}
+			if !f.embedded(t, want) {
+				var took []string
+				for _, id := range []string{early, waiting, later} {
+					if f.embedded(t, id) {
+						took = append(took, names[id])
+					}
+				}
+				t.Fatalf("arm off, request %d of one pick each: %s is still pending, want it embedded now (embedded so far: %s)",
+					request+1, names[want], strings.Join(took, ", "))
+			}
+		}
+	})
+
+	// The backoff grows with the attempts of the memo and stops at
+	// backoff_cap, for any number of attempts: a block that has been cut two
+	// thousand times, the last time two hours ago, is past the cap of one
+	// hour and is picked. 2^1999 does not fit a float8; a pick that computed
+	// it would fail, and with it every request.
+	t.Run("backoff_is_capped_for_any_number_of_attempts", func(t *testing.T) {
+		f := armOffSetup(t, instant)
+		old := f.seed(t, "armoff block cut two thousand times", 60)
+		f.overran(t, old)
+		f.cut(t, old, "2 hours", 2000)
+
+		if got := f.run(1, 10*time.Second); got != 1 {
+			t.Errorf("arm off: the request backfilled %d, want 1 (the block's backoff is the cap of one hour, and its last cut is two hours back)", got)
+		}
+
+		// Thirty minutes after a cut with as many attempts the cap has not
+		// passed: no pick, no wire call.
+		young := f.seed(t, "armoff block cut two thousand times, half an hour ago", 60)
+		f.overran(t, young)
+		f.cut(t, young, "30 minutes", 2000)
+		if got := f.run(1, 10*time.Second); got != 0 {
+			t.Errorf("arm off: the request backfilled %d, want 0 (the block is inside a backoff of one hour, cut thirty minutes ago)", got)
 		}
 	})
 
