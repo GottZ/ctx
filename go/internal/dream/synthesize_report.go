@@ -11,6 +11,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/pgxdb"
@@ -579,7 +580,9 @@ func fetchDailyStructuralLinks(ctx context.Context, pool *pgxpool.Pool, scope st
 
 // fetchDailyGuardReview reads the open guard review-queue STAND for the report
 // scope (guard W2): flagged counts per state + queue-head age in whole days,
-// measured against the window end. Single-scope (GD3 line — deliberately NOT
+// measured against the window end. The age counts from the time the guard
+// flagged the block (guard.FlaggedAtSQL), not from the block's last write: a
+// guard pass does not move updated_at. Single-scope (GD3 line — deliberately NOT
 // store.GetGuardStats, whose ReadScopes-array semantics belong to the manage
 // pull path). Returns nil when the queue is empty, so an empty queue keeps the
 // prompt bytes identical (omission semantics).
@@ -591,7 +594,7 @@ func fetchDailyGuardReview(ctx context.Context, pool *pgxpool.Pool, scope string
 			(count(*) FILTER (WHERE guard_status = 'needs_review'))::int,
 			(count(*) FILTER (WHERE guard_status = 'near_duplicate'))::int,
 			(count(*) FILTER (WHERE guard_status = 'possible_duplicate'))::int,
-			min(updated_at)
+			min(`+guard.FlaggedAtSQL+`)
 		 FROM context_blocks
 		 WHERE scope = $1 AND NOT is_archived
 		   AND guard_status IN ('needs_review', 'near_duplicate', 'possible_duplicate')`,

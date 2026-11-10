@@ -340,6 +340,38 @@ func checkBlock(ctx context.Context, tx pgx.Tx, blockID string, thresholdDuplica
 	}, nil
 }
 
+// FlaggedAtSQL is the SQL expression for the time the guard recorded its
+// decision on a context_blocks row: metadata.guard_checked_at, which
+// applyDecision writes as RFC 3339. It is what a reader of the review queue
+// ages a flagged block by, since recording the decision does not move
+// updated_at.
+//
+// The value is metadata, and an update that leaves the content alone stores
+// the caller's metadata document as sent, so the expression takes the key only
+// when it can be a flag time of this row and falls back to updated_at
+// otherwise:
+//
+//   - absent or not a timestamp (a row older than the key, a repair
+//     migration, a hand edit). pg_input_is_valid, not a bare cast: one
+//     unreadable value would otherwise fail the whole aggregate it sits in;
+//   - 'infinity' and '-infinity', which are valid input but do not scan into
+//     a time.Time, so one such row would fail the read for every scope;
+//   - a time before the row existed or after now(): the minimum over all
+//     scopes must not be something one row can set to an arbitrary date.
+//     created_at is cut to the second because guard_checked_at has second
+//     precision.
+//
+// Nested CASE, because only CASE guarantees that the cast is not evaluated
+// before the validity test. Unqualified column names, so it is used in
+// queries that read context_blocks without an alias.
+const FlaggedAtSQL = `CASE WHEN pg_input_is_valid(metadata->>'guard_checked_at', 'timestamptz')
+		THEN CASE WHEN isfinite((metadata->>'guard_checked_at')::timestamptz)
+				AND (metadata->>'guard_checked_at')::timestamptz >= date_trunc('second', created_at)
+				AND (metadata->>'guard_checked_at')::timestamptz <= now()
+			THEN (metadata->>'guard_checked_at')::timestamptz
+			ELSE updated_at END
+		ELSE updated_at END`
+
 // applyDecision updates the block based on the guard decision and the per-type
 // persist mode (design/02 §4.7). mode == GuardModeArchive is the bestand: a
 // near_duplicate is auto-archived. mode == GuardModeFlag (issues) NEVER
@@ -361,6 +393,8 @@ func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 		// outside DecodePolicy) never silently degrades to flag-only.
 		// Explicit casts inside jsonb_build_object: VARIADIC "any" can't infer
 		// types under pgx extended protocol on PG18 → 42P08 at PREPARE time.
+		// updated_at moves here, unlike in the branch below: the block leaves
+		// every default read, which is a change a reader can see.
 		_, err := tx.Exec(ctx,
 			`UPDATE context_blocks SET
 				is_archived = true,
@@ -388,6 +422,13 @@ func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 		// (varchar from column vs text from jsonb_build_object cast).
 		// The persisted thresholds are the RESOLVED per-type policy values
 		// (T7) — the metadata documents what the decision was made under.
+		// updated_at is NOT assigned here: recording the decision is the
+		// guard's bookkeeping, not a write to the block. The column is the
+		// last write as readers see it (browse order and its keyset cursor,
+		// age_days, the drift pin of a staged update), and one batch would
+		// otherwise stamp every block it checks with the same instant. The
+		// time of the decision is metadata.guard_checked_at; the readers of
+		// the review queue age a block by it (FlaggedAtSQL).
 		statusVal := result.Decision
 		if result.Decision == "near_duplicate" {
 			statusVal = "possible_duplicate" // flag mode (archive took the branch above)
@@ -403,8 +444,7 @@ func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 					'guard_is_cross_scope', $6::bool,
 					'guard_threshold_duplicate', $7::float8,
 					'guard_threshold_review', $8::float8
-				),
-				updated_at = now()
+				)
 			WHERE id = $1`,
 			blockID, statusVal, checkedAt, result.Similarity, matchedIDVal, result.IsCrossScope,
 			result.ThresholdDuplicate, result.ThresholdReview,
