@@ -17,6 +17,7 @@ ctx is reached only through Hermes' MCP dispatch (``ctx.call_mcp``), which needs
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -46,7 +47,22 @@ CLAIM_S = 120.0
 bounds): no other flusher sends it meanwhile. The claimer ends the claim itself (delivered, backed off, or handed
 back untried); one that dies leaves the row due again after this."""
 HEAD_TITLE = "Compaction checkpoint head {root}"
-"""ctx_checkpoint's stable head title per root session (its README "Recall of a checkpoint")."""
+"""ctx_checkpoint's stable head title per root session (its README "Recall of a checkpoint"); ``{root}`` is the
+root's title token (``head_token``)."""
+ROOT_TOKEN_MAX = 48
+
+
+def head_token(root: str) -> str:
+    """The token ctx_checkpoint (0.6.1 and later, ``checkpoint._short_root``) puts into a root's head title: the id
+    itself when it is made of ``[A-Za-z0-9_.-]`` and at most 48 characters long, else the sanitized id cut to fit and
+    ``-`` plus the first 8 hex digits of the full id's SHA-256 — Hermes' 70-character ``local-<sha256>`` ids too
+    (review R6-B: the raw id found no head for those)."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", root)
+    if safe == root and len(safe) <= ROOT_TOKEN_MAX:
+        return safe
+    suffix = hashlib.sha256(root.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+    return f"{safe[: ROOT_TOKEN_MAX - len(suffix) - 1]}-{suffix}"
+
 
 _SERVER_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _TAG_RE = re.compile(r"[^A-Za-z0-9_.@:-]")
@@ -227,7 +243,7 @@ def _rows_of(result: Any) -> list[dict]:
 def _checkpoint_head(call_mcp: Callable[..., dict], server: str, root: str, timeout: float) -> str | None:
     if not root:
         return None
-    title = HEAD_TITLE.format(root=root)
+    title = HEAD_TITLE.format(root=head_token(root))
     try:
         envelope = call_mcp(server, "search", {"query": title, "limit": 5}, timeout)
     except Exception:
