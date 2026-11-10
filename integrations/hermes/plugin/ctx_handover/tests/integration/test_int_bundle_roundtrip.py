@@ -146,7 +146,7 @@ def _import_and_check(laptop, src, bundle_path: Path, monkeypatch) -> None:
     assert tree_digest(dest) == src["digest"]
     assert RepoBuilder(dest).head() == src["repo"].head()
     origin = [e["data"] for e in laptop.ledger().events(job_i, Role.CONDUCTOR) if e["kind"] == "origin"]
-    assert origin and origin[0]["origin"].startswith("verified bundle"), origin
+    assert origin and origin[0]["origin"].startswith("verified handover file"), origin
 
 
 def test_int_export_import_roundtrip_two_homes(online, monkeypatch):

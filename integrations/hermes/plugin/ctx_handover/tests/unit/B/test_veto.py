@@ -140,8 +140,7 @@ def test_veto_message_texts():
     )
     exported = lock.veto_texts({**base, "state": "exported"})
     assert exported == (
-        "This session was exported to a handover bundle on 2025-11-09 00:00 UTC. "
-        "Run /handover reclaim to continue here."
+        "This session was exported to a handover file on 2025-11-09 00:00 UTC. Run /handover reclaim to continue here."
     )
     assert "another machine" in lock.veto_texts({**base, "peer": None, "state": "prepared"})
     assert "an unknown time" in lock.veto_texts({**base, "prepared_at": None, "state": "exported"})

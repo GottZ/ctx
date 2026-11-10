@@ -336,8 +336,9 @@ class Ledger:
     def _w(self) -> Iterator[sqlite3.Connection]:
         if self.readonly:
             raise InvalidState(
-                f"ledger schema {self.schema_version} is newer than this plugin ({SCHEMA_VERSION}); downgrade "
-                "detected — the ledger is read-only",
+                f"the handover records here were written by a newer version of ctx_handover (schema "
+                f"{self.schema_version}, this version knows {SCHEMA_VERSION}), so they stay read-only; update the "
+                "plugin again to change them",
                 reason="newer_schema",
                 schema_version=self.schema_version,
             )
@@ -489,7 +490,9 @@ class Ledger:
         with self._w() as c:
             clash = c.execute("SELECT peer_id FROM peers WHERE name=? AND peer_id<>?", (peer.name, peer.peer_id))
             if clash.fetchone():
-                raise ConflictError(f"a peer named {peer.name!r} already exists", field="name")
+                raise ConflictError(
+                    f"a paired device named {peer.name!r} already exists; choose another name", field="name"
+                )
             self._insert_peer(c, peer, upsert=True)
 
     def revoke_peer(self, name_or_id: str) -> list[str]:
@@ -504,7 +507,7 @@ class Ledger:
                 "SELECT peer_id, pubkey FROM peers WHERE peer_id=? OR name=?", (name_or_id, name_or_id)
             ).fetchone()
             if row is None:
-                raise NotFound(f"no peer {name_or_id!r}")
+                raise NotFound(f"no paired device named {name_or_id!r}; /handover peers lists them")
             same_key = [
                 r[0]
                 for r in c.execute(
@@ -584,7 +587,7 @@ class Ledger:
     def rename_peer(self, old: str, new: str) -> bool:
         with self._w() as c:
             if c.execute("SELECT 1 FROM peers WHERE name=?", (new,)).fetchone():
-                raise ConflictError(f"a peer named {new!r} already exists", field="name")
+                raise ConflictError(f"a paired device named {new!r} already exists; choose another name", field="name")
             cur = c.execute("UPDATE peers SET name=? WHERE name=? OR peer_id=?", (new, old, old))
             return cur.rowcount > 0
 
@@ -743,7 +746,7 @@ class Ledger:
                 (job_id, str(role)),
             ).fetchone()
             if row is None:
-                raise NotFound(f"job {job_id} ({role}) not found")
+                raise NotFound(f"handover job {job_id} ({role}) not found")
             now = self.now()
             if row["owner"] == owner:
                 c.execute("UPDATE jobs SET owner_heartbeat_at=? WHERE job_id=? AND role=?", (now, job_id, str(role)))
@@ -791,10 +794,10 @@ class Ledger:
     def _check_epoch(self, c: sqlite3.Connection, job_id: str, role: Role, epoch: int) -> sqlite3.Row:
         row = c.execute("SELECT * FROM jobs WHERE job_id=? AND role=?", (job_id, str(role))).fetchone()
         if row is None:
-            raise NotFound(f"job {job_id} ({role}) not found")
+            raise NotFound(f"handover job {job_id} ({role}) not found")
         if int(row["owner_epoch"]) != int(epoch):
             raise Fenced(
-                "the job was adopted by another process",
+                "another process on this machine took over this handover",
                 reason="stale_epoch",
                 epoch=int(epoch),
                 current=int(row["owner_epoch"]),
@@ -905,7 +908,7 @@ class Ledger:
                 (*values, job_id, str(role)),
             )
             if cur.rowcount != 1:
-                raise NotFound(f"job {job_id} ({role}) not found")
+                raise NotFound(f"handover job {job_id} ({role}) not found")
 
     def touch_job(self, job_id: str, role: Role) -> None:
         """Record activity (participant request) without a transition: ``updated_at = now``."""
@@ -931,11 +934,14 @@ class Ledger:
         with self._w() as c:
             row = c.execute("SELECT max_peer_epoch FROM jobs WHERE job_id=? AND role=?", (job_id, str(role))).fetchone()
             if row is None:
-                raise NotFound(f"job {job_id} not found")
+                raise NotFound(f"handover job {job_id} not found")
             current = int(row[0])
             if int(epoch) < current:
                 raise InvalidState(
-                    "request from an older conductor epoch", reason="stale_epoch", epoch=int(epoch), current=current
+                    "the request came from a process that no longer runs this handover",
+                    reason="stale_epoch",
+                    epoch=int(epoch),
+                    current=current,
                 )
             if int(epoch) > current:
                 c.execute("UPDATE jobs SET max_peer_epoch=? WHERE job_id=? AND role=?", (int(epoch), job_id, str(role)))
@@ -955,11 +961,11 @@ class Ledger:
         with self._w() as c:
             row = c.execute("SELECT state FROM jobs WHERE job_id=? AND role='conductor'", (job_id,)).fetchone()
             if row is None:
-                raise NotFound(f"job {job_id} not found")
+                raise NotFound(f"no handover with the id {job_id}; /handover status lists them")
             if self._commit_intended(c, job_id):
                 raise InvalidState(
-                    "Too late to cancel: the target is committing. Use /handover reclaim on the source to take the "
-                    "session back.",
+                    "Too late to cancel: the machine you hand over to is already finishing the handover. Use /handover "
+                    "reclaim on the machine you hand over from to take the session back.",
                     reason="committing",
                     state=row[0],
                 )
@@ -1146,7 +1152,9 @@ class Ledger:
             row = c.execute("SELECT state FROM source_handovers WHERE job_id=?", (job_id,)).fetchone()
             if row is not None:
                 if row[0] not in ("locking", "locked", "suspended", "released"):
-                    raise InvalidState(f"source of job {job_id} is {row[0]}", reason="state", state=row[0])
+                    raise InvalidState(
+                        f"the session of handover {job_id} is not free here ({row[0]})", reason="state", state=row[0]
+                    )
                 c.execute(
                     "UPDATE source_handovers SET holder=?, tip_id=?, lineage_ids=?, peer=COALESCE(?, peer),"
                     " state=CASE WHEN state IN ('suspended','released') THEN 'locking' ELSE state END, updated_at=?"
@@ -1205,7 +1213,7 @@ class Ledger:
         with self._w() as c:
             row = c.execute("SELECT root_id FROM source_handovers WHERE job_id=?", (job_id,)).fetchone()
             if row is None:
-                raise NotFound(f"no source handover for job {job_id}")
+                raise NotFound(f"this machine has no session locked for handover {job_id}")
             if str(state) in ACTIVE_SOURCE_STATES:
                 other = self._conflicting(c, row[0], job_id)
                 if other is not None:
@@ -1572,7 +1580,10 @@ class Ledger:
                 raise NotFound(f"offer {offer_id} not found")
             if row["claimed_job"] is None:
                 if row["expires_at"] <= self.now():
-                    raise NotFound(f"offer {offer_id} expired")
+                    raise NotFound(
+                        f"offer {offer_id} has expired; create a new one on the machine that made it (/handover to "
+                        "<this device>)"
+                    )
                 c.execute("UPDATE offers SET claimed_job=? WHERE offer_id=?", (job_id, offer_id))
             row = c.execute("SELECT * FROM offers WHERE offer_id=?", (offer_id,)).fetchone()
             return self._offer(row)
@@ -1744,6 +1755,10 @@ class Ledger:
         with self._w() as c:
             for r in c.execute("SELECT role, state FROM jobs WHERE job_id=?", (job_id,)).fetchall():
                 if r["state"] not in TERMINAL[Role(r["role"])]:
-                    raise InvalidState(f"job {job_id} is still {r['state']}", reason="active", state=r["state"])
+                    raise InvalidState(
+                        f"handover {job_id} is still running ({r['state']}); cancel it or wait until it has ended",
+                        reason="active",
+                        state=r["state"],
+                    )
             for table in ("job_events", "ops", "job_objects", "pull_log", "job_quota", "jobs"):
                 c.execute(f"DELETE FROM {table} WHERE job_id=?", (job_id,))  # noqa: S608

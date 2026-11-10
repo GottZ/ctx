@@ -512,7 +512,7 @@ def test_mark_exported(session_db, make_session, ledger):
     entry = ledger.source_state(JOB)
     assert entry["state"] == "exported" and entry["bundle_path"] == "/b/handover.ctxh"
     assert session_db.try_acquire_session_turn_lease(tip, OTHER, ttl_seconds=30, patience_s=0.5)
-    assert lock.veto_texts({**entry, "job_id": JOB}).startswith("This session was exported to a handover bundle on")
+    assert lock.veto_texts({**entry, "job_id": JOB}).startswith("This session was exported to a handover file on")
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -600,7 +600,10 @@ def test_reclaim_table(session_db, make_session, ledger):
     tip = build(make_session, title="Locked")
     locked(session_db, ledger, tip, "01JLOCKEDJOB")
     out = lock.reclaim(session_db, ledger, tip, force=False)
-    assert out["state"] is None and out["message"] == "Handover in progress; use /handover cancel 01JLOCKEDJOB."
+    assert out["state"] is None and out["message"] == (
+        "A handover of this session is running. Cancel it with /handover cancel 01JLOCKEDJOB, or take the session "
+        "back with /handover reclaim --force."
+    )
     out = lock.reclaim(session_db, ledger, tip, force=True)
     assert out["state"] == "released" and ledger.cancel_requested("01JLOCKEDJOB")
     assert lock.reclaim(session_db, ledger, tip, force=True)["message"] == "Nothing to reclaim."
@@ -608,7 +611,10 @@ def test_reclaim_table(session_db, make_session, ledger):
     tip2 = build(make_session, title="Prepared")
     prepared(session_db, ledger, tip2, "01JPREPAREDJOB")
     out = lock.reclaim(session_db, ledger, tip2, force=False)
-    assert out["state"] is None and out["message"] == "A handover is being committed. Wait, or use --force."
+    assert out["state"] is None and out["message"] == (
+        "A handover of this session is finishing right now. Wait for it, or run /handover reclaim --force to take the "
+        "session back anyway; the other machine may then keep an active copy too."
+    )
     out = lock.reclaim(session_db, ledger, tip2, force=True)
     assert out["state"] == "reclaimed" and any("may already be active" in w for w in out["warnings"])
     assert session_db.get_session_title(tip2) == "Prepared"

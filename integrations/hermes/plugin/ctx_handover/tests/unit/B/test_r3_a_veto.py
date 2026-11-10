@@ -163,8 +163,8 @@ def test_r3_a_l1_an_exported_session_is_vetoed_with_the_bundle_text(session_db, 
     assert entry is not None and entry["state"] == "retired"
     message = entry["message"]
     assert message == (
-        "This session was exported to a handover bundle on 2025-11-09 14:53 UTC (job "
-        f"{JOB[-6:]}); it continues where the bundle is imported. Your message was not sent. To continue here "
+        "This session was exported to a handover file on 2025-11-09 14:53 UTC (job "
+        f"{JOB[-6:]}); it continues where the file is imported. Your message was not sent. To continue here "
         "instead, run /handover reclaim."
     ), message
     assert "another machine" not in message and "continues there" not in message
@@ -177,7 +177,7 @@ def test_r3_a_l1_an_export_in_progress_names_the_bundle(session_db, make_session
     index = lock.VetoIndex(ledger.path, ledger_factory=LedgerStub)
     index.refresh_now(force=True)
     message = index.lookup(tip)["message"]
-    assert message.startswith(f"An export of this session to a handover bundle is being completed (job {JOB[-6:]})")
+    assert message.startswith(f"An export of this session to a handover file is being completed (job {JOB[-6:]})")
     assert "another machine" not in message
     assert message in lock._job_texts(ledger, JOB, ledger.source_state(JOB))
 

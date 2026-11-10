@@ -231,7 +231,7 @@ def test_reclaim_of_an_export_in_doubt_settles_the_job_and_removes_the_partial(h
     assert not marks["archived"] and not marks["hidden"], marks
     text = " ".join(result.get("warnings") or ())
     assert "other machine" not in text and "may already be active" not in text, result
-    assert "bundle" in text, result
+    assert "handover file" in text, result
 
 
 def test_reclaim_after_a_finished_export_names_the_bundle_not_a_machine(homes):

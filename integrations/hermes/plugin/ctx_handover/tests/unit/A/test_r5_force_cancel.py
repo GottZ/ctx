@@ -243,9 +243,11 @@ def test_r5_force_on_a_finished_or_running_job_is_the_plain_answer(tmp_path, clo
             assert e.ledger.intent_commit(ids[state], 0)
         e.ledger.transition(ids[state], Role.CONDUCTOR, "*", state, {}, epoch=0)
     done = e.runner.cancel_answer(ids["done"], force=True)
-    assert (done.requested, done.reason) == (False, "finished") and "already done" in done.text, done
+    assert (done.requested, done.reason) == (False, "finished") and "already finished" in done.text, done
     aborted = e.runner.cancel_answer(ids["aborted"], force=True)
-    assert (aborted.requested, aborted.reason) == (False, "finished") and "already aborted" in aborted.text, aborted
+    assert (aborted.requested, aborted.reason) == (False, "finished") and "already ended (aborted)" in aborted.text, (
+        aborted
+    )
     running = e.runner.cancel_answer(ids["packing"], force=True)
     assert running.requested is True and running.text.startswith("Cancel requested"), running
     assert e.ledger.cancel_requested(ids["packing"]) is True

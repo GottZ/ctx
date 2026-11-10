@@ -274,7 +274,11 @@ class LocalSource:
         self._ensure_job(job)
         epoch = self.ledger.claim_owner(job.job_id, Role.SOURCE, process_owner(), STALE_OWNER_S)
         if epoch is None:
-            raise InvalidState("another process is working on this job", reason="busy_elsewhere", retryable=True)
+            raise InvalidState(
+                "another process on this machine is already working on this handover",
+                reason="busy_elsewhere",
+                retryable=True,
+            )
         return epoch
 
     def _ctx(self, job_id: str) -> dict:
@@ -299,7 +303,7 @@ class LocalSource:
     def _info(self, job: JobContext) -> SessionInfo:
         raw = self._ctx(job.job_id).get("info")
         if raw is None:
-            raise InvalidState("the source of this job is not locked", reason="not_locked")
+            raise InvalidState("the session for this handover is not locked yet", reason="not_locked")
         return from_wire(SessionInfo, raw)
 
     def _start(
@@ -511,8 +515,8 @@ class LocalSource:
         row = self.ledger.job(job.job_id, Role.SOURCE)
         if row is not None and row["state"] in TERMINAL[Role.SOURCE] and self.ledger.source_state(job.job_id) is None:
             raise InvalidState(
-                f"the source side of this handover already ended ({row['state']}) before it locked the session; "
-                "start the handover again",
+                f"the machine you hand over from had already ended this handover ({row['state']}) before it locked the "
+                "session; start the handover again",
                 reason="state",
                 state=row["state"],
             )
@@ -552,14 +556,16 @@ class LocalSource:
                 # the state travels in the details: route #9 answers it as ``{state}`` (``source_reclaimed`` for a
                 # reclaim, contract V17) instead of an anonymous lost lease; a release or reclaim under way has given
                 # the leases up as well (``participant._LOST_SOURCE``: the same states as the route)
-                raise LeaseLost(f"the source is {src['state']}", state=src["state"])
+                raise LeaseLost(
+                    f"the session is no longer locked for this handover ({src['state']})", state=src["state"]
+                )
             return
         self._beat_owner(job)
         info = from_wire(SessionInfo, ctx["info"])
         ttl, _refresh = self.ports.lock.lease_timing(job.options)
         refreshed = self.ports.lock.refresh(self.db_factory(), info, ctx.get("holder"), ttl_s=ttl)
         if not refreshed and src["state"] in ("locking", "locked", "preparing"):
-            raise LeaseLost("the session's turn lease was lost")
+            raise LeaseLost("the session could not stay locked for the handover")
 
     def _beat_owner(self, job: JobContext) -> None:
         """Keep this process's claim on the job's source row fresh while the leases are refreshed (review H6).
@@ -648,7 +654,7 @@ class LocalSource:
         own_raw = self._ctx(job.job_id).get("plan")
         if self.remote_driven:
             if own_raw is None:
-                raise InvalidState("plan before pack", reason="no_plan")
+                raise InvalidState("the files cannot be packed before the handover plan exists", reason="no_plan")
             final_plan = p.plan.restrict_to_releasable(
                 final_plan,
                 from_wire(ResourcePlan, own_raw),
@@ -744,7 +750,7 @@ class LocalSource:
             return PrepareResult(outcome=PrepareOutcome.OK)
         if src is None or src["state"] not in ("locked", "preparing"):
             raise InvalidState(
-                f"the source is {src['state'] if src else 'not locked'}",
+                f"the session is not locked for this step of the handover ({src['state'] if src else 'not locked'})",
                 reason="state",
                 state=src["state"] if src else None,
             )
@@ -773,7 +779,9 @@ class LocalSource:
         if final is None or not self._worktrees_unchanged(job, final, ctx.get("pack_states") or {}):
             return PrepareResult(outcome=PrepareOutcome.STALE_WORKTREE, detail="work tree changed since packing")
         if (prepared.h_all, prepared.h_rows) != (exported.h_all, exported.h_rows):
-            raise VerifyFailed("the target's import does not match the source transcript", which="h_all")
+            raise VerifyFailed(
+                "the conversation imported on the machine you hand over to does not match the one here", which="h_all"
+            )
         # an export has no receiving peer yet (``--for`` only picks the facts): "" makes the title say "exported to
         # bundle" instead of "handed over to <peer>" (N55)
         peer = "" if job.mode is Mode.EXPORT else self.peer_name or (job.peer.name if job.peer is not None else "")
@@ -808,9 +816,13 @@ class LocalSource:
         def fn(report) -> dict:
             src = self.ledger.source_state(job.job_id)
             if src is None:
-                raise NotFound("no source handover for this job")
+                raise NotFound("this machine has no session locked for this handover")
             if src["state"] in ("released", "reclaimed"):
-                raise InvalidState(f"the source is {src['state']}", reason="state", state=src["state"])
+                raise InvalidState(
+                    f"the session is active again where it was handed over from ({src['state']})",
+                    reason="state",
+                    state=src["state"],
+                )
             info = self._info(job)
             holder = self._ctx(job.job_id).get("holder")
             self.ports.lock.retire(
@@ -842,7 +854,11 @@ class LocalSource:
                 self._sync_state(job)
                 return {"state": src["state"]}
             if src["state"] in ("retired", "exported"):
-                raise InvalidState(f"the source is {src['state']}", reason="state", state=src["state"])
+                raise InvalidState(
+                    f"the session is active again where it was handed over from ({src['state']})",
+                    reason="state",
+                    state=src["state"],
+                )
             report = None
             if src["state"] not in ("released", "reclaimed"):
                 info = self._info(job)
@@ -926,9 +942,16 @@ class LocalSource:
         src = self.ledger.source_state(job.job_id)
         state = src["state"] if src is not None else None
         if op == "retire" and state in _GIVEN_BACK:
-            err = InvalidState(f"the source is {state}", reason="state", state=state)
+            err = InvalidState(
+                f"the session is active again where it was handed over from ({state})", reason="state", state=state
+            )
         elif op == "release" and state is not None and state not in _GIVEN_BACK:
-            err = InvalidState(f"the source is {state} again", reason="superseded", state=state, retryable=True)
+            err = InvalidState(
+                f"the session was locked again for a handover after it was released ({state})",
+                reason="superseded",
+                state=state,
+                retryable=True,
+            )
         else:
             return st
         return OpStatus(op_id=st.op_id, state=OpState.FAILED, result=None, error=err.to_wire()["error"], progress=None)

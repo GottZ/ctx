@@ -182,7 +182,10 @@ def test_import_is_verified_only_by_the_bundle_signature(runtime_env, monkeypatc
     monkeypatch.setattr(jobs, "_default_transport", lambda: transport)
     rt = jobs.ensure_started(None)
     runner = rt.runner
-    for name, verified, origin in (("signed", True, "verified bundle (server)"), ("plain", False, "unverified bundle")):
+    for name, verified, origin in (
+        ("signed", True, "verified handover file (server)"),
+        ("plain", False, "unverified handover file"),
+    ):
         job_id = ulid()
         params = {"options": to_wire(Options(trust_unsigned=True)), "bundle_path": str(tmp_path / name)}
         rt.ledger.create_job(job_id, Role.CONDUCTOR, Mode.IMPORT, None, params)

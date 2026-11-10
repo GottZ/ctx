@@ -62,7 +62,9 @@ HANDED_OVER = "handed_over"
 PAUSED_REASON = "handed over"
 
 BUSY_MESSAGE = "A turn is running in this session. Wait for it, or use --wait to hand over as soon as it finishes."
-COMPACTION_BUSY_MESSAGE = "A compaction of this session is running. Try again when it has finished."
+COMPACTION_BUSY_MESSAGE = (
+    "Hermes is compacting this session right now (it shortens long conversations). Try again when it has finished."
+)
 
 PREPARE_STEPS = ("p1", "p2", "p3", "p4", "p5", "p6", "p7")
 RETIRE_STEPS = ("r1", "r2", "r3", "r4", "r5")
@@ -147,7 +149,7 @@ def probe_busy(db, state_db: Path, info: SessionInfo, hermes_home: Path, session
     try:
         conn = _ro_connect(state_db)
     except sqlite3.Error as exc:
-        warnings.append(f"busy probe: state.db not readable ({exc})")
+        warnings.append(f"could not fully check whether the session is in use: state.db is not readable ({exc})")
         conn = None
     if conn is not None:
         try:
@@ -160,7 +162,9 @@ def probe_busy(db, state_db: Path, info: SessionInfo, hermes_home: Path, session
                 if row and int(row[0]) > 0:
                     reasons.append(f"{int(row[0])} queued prompt(s) waiting for this session")
             except sqlite3.Error as exc:
-                warnings.append(f"busy probe: session_admissions not readable ({exc})")
+                warnings.append(
+                    f"could not fully check whether the session is in use: its queued prompts are not readable ({exc})"
+                )
             try:
                 rows = conn.execute(
                     "SELECT * FROM async_delegations WHERE state IN ('running','finalizing')"
@@ -173,9 +177,11 @@ def probe_busy(db, state_db: Path, info: SessionInfo, hermes_home: Path, session
                             {k: d.get(k) for k in ("delegation_id", "state", "dispatched_at", "parent_session_id")}
                         )
                 if delegations:
-                    reasons.append(f"{len(delegations)} delegation(s) still running")
+                    reasons.append(f"{len(delegations)} delegated task(s) still running")
             except sqlite3.Error as exc:
-                warnings.append(f"busy probe: async_delegations not readable ({exc})")
+                warnings.append(
+                    f"could not fully check whether the session is in use: its delegated tasks are not readable ({exc})"
+                )
         finally:
             conn.close()
     processes = _processes(Path(hermes_home), lineage, session_key, warnings)
@@ -197,7 +203,9 @@ def _read_json_file(path: Path, warnings: list[str], label: str) -> object:
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as exc:
-        warnings.append(f"busy probe: {label} not readable ({exc.__class__.__name__})")
+        warnings.append(
+            f"could not fully check whether the session is in use: {label} is not readable ({exc.__class__.__name__})"
+        )
         return None
 
 
@@ -207,7 +215,7 @@ def _processes(home: Path, lineage: Sequence[str], session_key: str | None, warn
     if entries is None:
         return []
     if not isinstance(entries, list):
-        warnings.append("busy probe: processes.json has an unknown shape")
+        warnings.append("could not fully check whether the session is in use: processes.json has an unknown format")
         return []
     out = []
     for entry in entries:
@@ -225,7 +233,7 @@ def _cron(home: Path, lineage: Sequence[str], warnings: list[str]) -> list[dict]
     if jobs is None:
         return []
     if not isinstance(jobs, list):
-        warnings.append("busy probe: cron/jobs.json has an unknown shape")
+        warnings.append("could not fully check whether the session is in use: cron/jobs.json has an unknown format")
         return []
     out = []
     for job in jobs:
@@ -258,7 +266,7 @@ def _tx(ledger):
 def _entry(ledger, job_id: str) -> dict:
     entry = ledger.source_state(job_id)
     if entry is None:
-        raise NotFound("no source handover for this job", job_id=job_id)
+        raise NotFound("this machine has no session locked for this handover", job_id=job_id)
     return entry
 
 
@@ -285,7 +293,12 @@ def _backup_once(ledger, job_id: str, key: str, value: str | None, existing: Map
 
 def _require(state: str, allowed: Sequence[str], action: str, job_id: str) -> None:
     if state not in allowed:
-        raise InvalidState(f"cannot {action} in state {state}", state=state, job_id=job_id, reason=action)
+        raise InvalidState(
+            f"the session here is not ready for this step of the handover ({action} while {state})",
+            state=state,
+            job_id=job_id,
+            reason=action,
+        )
 
 
 def _now_ts(now: datetime | float | None) -> float:
@@ -346,7 +359,9 @@ def acquire(
             remaining = deadline - clock()
             if remaining <= 0:
                 raise WaitTimeout(
-                    "The session stayed busy; gave up waiting.", waited_s=int(wait_s), session_id=info.tip_id
+                    "The session stayed busy, so the handover stopped waiting. Nothing was changed.",
+                    waited_s=int(wait_s),
+                    session_id=info.tip_id,
                 )
             sleep(min(poll_s, remaining))
         if not db.try_acquire_compression_lock(info.tip_id, holder, ttl_seconds=ttl_s):
@@ -458,7 +473,7 @@ def prepare(db, ledger, info: SessionInfo, job_id: str, peer_name: str, now: dat
     if "undone" in done:
         # the journaled p-steps and backups belong to the restored attempt; replaying them would skip every mark
         raise InvalidState(
-            "this handover was released or reclaimed; start a new one",
+            "this handover was cancelled or the session was taken back; start a new handover",
             state=_state(ledger, job_id),
             job_id=job_id,
             reason="undone",
@@ -597,10 +612,12 @@ def _restore_marks(db, ledger, job_id: str, tip: str, lineage: Sequence[str], wa
                 db.set_session_title(seg, title)
             except ValueError as exc:
                 if not _bot_chat_elsewhere(db, job_id, seg, tip, title, flags, warnings):
-                    warnings.append(f"title {title!r} could not be restored: {exc}")
+                    warnings.append(f"the session's old title {title!r} could not be restored: {exc}")
                 continue
             if db.get_session_title(seg) != title:
-                warnings.append(f"title {title!r} could not be restored: another write changed the title meanwhile")
+                warnings.append(
+                    f"the session's old title {title!r} could not be restored: the title was changed in the meantime"
+                )
                 continue
         if source:
             with contextlib.suppress(ValueError):
@@ -757,8 +774,8 @@ def veto_texts(entry: Mapping) -> str:
         when = _fmt_time(ack.get("committed_at") or entry.get("prepared_at"))
         if bundle:
             return (
-                f"This session was exported to a handover bundle on {when} (job {job_short}); it continues where the "
-                "bundle is imported. Your message was not sent. To continue here instead, run /handover reclaim."
+                f"This session was exported to a handover file on {when} (job {job_short}); it continues where the "
+                "file is imported. Your message was not sent. To continue here instead, run /handover reclaim."
             )
         title = ack.get("title")
         where = f' and continues there as "{title}"' if title else " and continues there"
@@ -768,10 +785,10 @@ def veto_texts(entry: Mapping) -> str:
         )
     if state == SourceState.EXPORTED.value:
         return (
-            f"This session was exported to a handover bundle on {_fmt_time(entry.get('prepared_at'))}. "
+            f"This session was exported to a handover file on {_fmt_time(entry.get('prepared_at'))}. "
             "Run /handover reclaim to continue here."
         )
-    what = "An export of this session to a handover bundle" if bundle else f"A handover of this session to {peer}"
+    what = "An export of this session to a handover file" if bundle else f"A handover of this session to {peer}"
     return (
         f"{what} is being completed (job {job_short}). Your message was not sent. "
         "/handover status shows progress; /handover reclaim --force takes the session back if it is stuck."
@@ -896,11 +913,14 @@ def _rewind_placeholders(
                 rewound = int(db.rewind_to_message(tip, target).get("rewound_count") or 0)
                 break
             except ValueError as exc:
-                warnings.append(f"placeholder rows not rewound: {exc}")
+                warnings.append(f"the blocked messages could not be removed from the session history: {exc}")
                 break
             except Exception as exc:
                 if attempt + 1 == _REWIND_ATTEMPTS:
-                    warnings.append(f"placeholder rows not rewound: {exc.__class__.__name__}: {exc}")
+                    warnings.append(
+                        "the blocked messages could not be removed from the session history: "
+                        f"{exc.__class__.__name__}: {exc}"
+                    )
                     break
                 sleep(_REWIND_PAUSE_S)
     gone = {_copy_key(r) for r in run} if rewound else set()
@@ -917,8 +937,8 @@ def _rewind_placeholders(
             kept += 1
     if kept:
         warnings.append(
-            f"{kept} vetoed message(s) stay in this session's history: a compaction after the handover moved them "
-            "where Hermes allows no changes; their typed text is listed as withheld"
+            f"{kept} blocked message(s) stay in this session's history: Hermes compacted the session after the "
+            "handover, and that part of the history can no longer be changed; their typed text is listed as withheld"
         )
     return rewound, withheld, kept
 
@@ -1057,12 +1077,18 @@ def reclaim(db, ledger, session_id: str, *, force: bool, sleep: Callable[[float]
         from_states: tuple[str, ...] = (SourceState.RETIRED.value, SourceState.EXPORTED.value)
     elif state in (SourceState.PREPARED.value, SourceState.RETIRING.value):
         if not force:
-            return refused("A handover is being committed. Wait, or use --force.")
-        warnings.append(f"the target on {peer} may already be active; the two copies are now independent")
+            return refused(
+                "A handover of this session is finishing right now. Wait for it, or run /handover reclaim --force to "
+                "take the session back anyway; the other machine may then keep an active copy too."
+            )
+        warnings.append(f"the copy on {peer} may already be active; the two copies are now independent")
         from_states = (SourceState.PREPARED.value, SourceState.RETIRING.value, SourceState.RETIRED.value)
     elif state in (SourceState.LOCKING.value, SourceState.LOCKED.value, SourceState.PREPARING.value):
         if not force:
-            return refused(f"Handover in progress; use /handover cancel {job_id}.")
+            return refused(
+                f"A handover of this session is running. Cancel it with /handover cancel {job_id}, or take the "
+                "session back with /handover reclaim --force."
+            )
         with contextlib.suppress(NotFound):  # pull: the conductor is the peer; it sees ``released`` on contact
             ledger.set_cancel(job_id)
         # "cancelled" only for the state read here (R3-H1 sweep): a source that reached ``prepared`` meanwhile is
@@ -1080,7 +1106,7 @@ def reclaim(db, ledger, session_id: str, *, force: bool, sleep: Callable[[float]
         return {
             "state": SourceState.RELEASED.value,
             "job_id": job_id,
-            "message": "Released.",
+            "message": "The session is yours again.",
             "warnings": [],
             "withheld": [],
         }

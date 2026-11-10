@@ -110,7 +110,7 @@ def test_rv_f_m30_reclaim_after_an_export_names_the_bundle_not_a_peer(online):
     result = call.data.get("reclaim") or {}
     assert result.get("state") == "reclaimed" and result.get("export") is True, result
     text = "\n".join(call.out)
-    assert "bundle" in text, text
+    assert "handover file" in text, text
     assert "not told that you took the session back" not in text and "was told" not in text, text
 
 

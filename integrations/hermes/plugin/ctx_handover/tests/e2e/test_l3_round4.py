@@ -710,9 +710,9 @@ def _assert_r4_h1(r: dict) -> None:
     assert r["cancel"] is None, f"the late lock was accepted: the job reached {seen} and had to be cancelled"
     assert out.get("state") == "aborted" and out.get("exit_code") != 0, out
     assert (out.get("error") or {}).get("code") == "invalid_state", out
-    assert "already ended (released) before it locked the session; start the handover again" in str(out.get("text")), (
+    assert "had already ended this handover (released) before it locked the session; start the handover again" in str(
         out.get("text")
-    )
+    ), out.get("text")
 
 
 @pytest.mark.e2e_timeout(1800)
@@ -759,7 +759,8 @@ def test_r4_h1_pull_abort_after_a_long_confirmation_reports_released_only_when_i
       veto text (``/handover reclaim``);
     * the late lock itself is refused (``engine/local_source.py:504-518``): B's conductor never gets past
       ``locking`` (no cancel was needed), its ``--json`` reports state ``aborted`` with ``error.code`` ``invalid_state``
-      and the text names "already ended (released) before it locked the session; start the handover again"
+      and the text names "had already ended this handover (released) before it locked the session; start the
+      handover again"
       (``engine/commands.py:848-853`` → ``engine/surfaces.py:1550-1551``).
 
     Expected red on ``88068475`` (read, not run): ``LocalSource.lock`` has no ended-check and ``source_lock`` inserts a

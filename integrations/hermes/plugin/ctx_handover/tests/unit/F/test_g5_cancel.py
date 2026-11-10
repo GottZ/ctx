@@ -63,10 +63,10 @@ def _payload(capsys) -> dict:
 @pytest.mark.parametrize(
     ("state", "commit", "says"),
     [
-        ("done", True, "is already done"),  # the lab's case: every finished job journaled ``intent: commit``
-        ("aborted", False, "is already aborted"),
-        ("committing", True, "past its commit point (committing)"),
-        ("retiring", True, "past its commit point (retiring)"),
+        ("done", True, "has already finished"),  # the lab's case: every finished job journaled ``intent: commit``
+        ("aborted", False, "has already ended (aborted)"),
+        ("committing", True, "can no longer be undone (committing)"),
+        ("retiring", True, "can no longer be undone (retiring)"),
     ],
 )
 def test_g5_cancel_that_cancels_nothing_exits_non_zero_and_names_the_state(

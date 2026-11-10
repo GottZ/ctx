@@ -44,7 +44,7 @@ def test_g5_cancel_of_a_done_job_names_it_done_not_committing(led):
     runner = jobs.JobRunner(led, None, keepalive=False)
     job_id = _job(led, "done", commit=True)
     text = runner.cancel(job_id)
-    assert "already done" in text and "committing" not in text, text
+    assert "already finished" in text and "committing" not in text, text
     assert "Too late to cancel" in text and "/handover reclaim" in text, text
     answer = runner.cancel_answer(job_id)
     assert (answer.requested, answer.state, answer.reason) == (False, "done", "finished"), answer
@@ -54,10 +54,10 @@ def test_g5_cancel_of_a_done_job_names_it_done_not_committing(led):
 @pytest.mark.parametrize(
     ("state", "commit", "requested", "reason", "says"),
     [
-        ("aborted", False, False, "finished", "is already aborted"),
-        ("committing", True, False, "committing", "past its commit point (committing)"),
-        ("in_doubt", True, False, "committing", "past its commit point (in_doubt)"),
-        ("retiring", True, False, "committing", "past its commit point (retiring)"),
+        ("aborted", False, False, "finished", "has already ended (aborted)"),
+        ("committing", True, False, "committing", "can no longer be undone (committing)"),
+        ("in_doubt", True, False, "committing", "can no longer be undone (in_doubt)"),
+        ("retiring", True, False, "committing", "can no longer be undone (retiring)"),
         ("packing", False, True, None, "Cancel requested"),
     ],
 )

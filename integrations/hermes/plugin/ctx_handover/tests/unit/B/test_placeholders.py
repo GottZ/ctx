@@ -83,7 +83,7 @@ def test_reclaim_after_compaction_keeps_summary_and_returns_every_text(
     assert out["rewound"] == 4
     assert out["withheld"] == ["typed 0", "typed 1", "typed 2", "typed 3"]
     assert out["kept"] == 2
-    assert any("2 vetoed message(s) stay" in w for w in out["warnings"])
+    assert any("2 blocked message(s) stay" in w for w in out["warnings"])
     after = _model(session_db, current)
     assert after and after[0].get("_compressed_summary") and after[0]["content"] == before[0]["content"]
     assert not any(m.get("content") == PLACEHOLDER for m in after)

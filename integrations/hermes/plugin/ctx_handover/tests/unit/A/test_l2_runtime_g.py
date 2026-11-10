@@ -454,7 +454,7 @@ def test_cancel_of_a_finished_job_says_that_nothing_was_requested(led):
     led.transition(done, Role.CONDUCTOR, "*", "done", {}, epoch=0)
     assert runner.cancel(active).startswith("Cancel requested") and led.cancel_requested(active) is True
     answer = runner.cancel(done)
-    assert "already done" in answer and "requested" not in answer
+    assert "already finished" in answer and "requested" not in answer
     assert led.cancel_requested(done) is False
 
 

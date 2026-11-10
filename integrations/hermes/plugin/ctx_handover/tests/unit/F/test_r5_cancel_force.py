@@ -75,7 +75,8 @@ def test_r5_the_grammar_takes_force_for_cancel_only_as_a_flag():
 def test_r5_cli_cancel_force_ends_a_stuck_job_and_exits_0(capsys, fake_host, tmp_path, clock):
     """★ R4-M1 through ``hermes handover``: a plain ``cancel --json`` of the stuck pull exits 3 (``invalid_state``,
     nothing new requested) and names ``--force``; ``cancel <job> --force --json`` exits 0, ``ok: true``, the job is
-    ``aborted`` and the text names what may remain on the peer; a second ``--force`` exits 3 ("already aborted").
+    ``aborted`` and the text names what may remain on the peer; a second ``--force`` exits 3 ("has already ended
+    (aborted)").
 
     Mutant ``R5-cli-no-flag`` (``_verb_cancel`` ignores ``force``): the forced call exits 3 with the plain answer."""
     e, job_id = _stuck_pull(tmp_path, clock)
@@ -95,7 +96,7 @@ def test_r5_cli_cancel_force_ends_a_stuck_job_and_exits_0(capsys, fake_host, tmp
 
     assert _cli(plugin, "cancel", sid, "--force", "--json") == commands.EXIT_BUSY
     again = _payload(capsys)
-    assert "already aborted" in again["text"], again
+    assert "has already ended (aborted)" in again["text"], again
 
 
 @pytest.mark.parametrize("state", ["committed", "retired"])
@@ -113,7 +114,7 @@ def test_r5_cancel_force_of_a_committed_job_is_a_clear_refusal(capsys, fake_host
     payload = _payload(capsys)
     assert payload["ok"] is False and payload["error"]["code"] == "invalid_state", payload
     text = payload["text"]
-    assert f"past its commit point ({state})" in text and "also with --force" in text, text
+    assert f"can no longer be undone ({state})" in text and "also with --force" in text, text
     assert "/handover reclaim" in text and "(invalid_state)" not in text, text
     assert _slash(plugin, f"cancel {job_id[-6:]} --force") == text
     assert e.ledger.job(job_id, Role.CONDUCTOR)["state"] == state

@@ -552,22 +552,30 @@ def apis_for(
     t = transport or _default_transport()
     if mode in (Mode.PUSH, Mode.PULL):
         if peer is None or peer.direction != "dial" or not peer.url:
-            raise BadRequest("this mode needs a paired peer this device dials", field="peer")
+            raise BadRequest(
+                "this needs a paired device that this machine connects to; run /handover pair on the other machine "
+                "and paste its pairing line here with /handover pair <line>",
+                field="peer",
+            )
         if peer.revoked_at is not None:
-            raise Forbidden(f"{peer.name} was revoked")
+            raise Forbidden(f"the pairing with {peer.name} was revoked; pair again to hand over with it")
         if identity is None:
-            raise Unauthorized("this profile has no identity yet; pair first")
+            raise Unauthorized("this Hermes profile has no handover key yet; pair with the other machine first")
         client = t.wire.WireClient(peer, identity, read_secret=hostcompat.read_secret)
         if mode is Mode.PUSH:
             if local_source is None:
-                raise BadRequest("push needs the local source", field="source")
+                raise BadRequest(
+                    "this process cannot reach the session on this machine, so it cannot hand it over", field="source"
+                )
             return local_source, t.remote.RemoteTarget(client)
         if local_target is None:
-            raise BadRequest("pull needs the local target", field="target")
+            raise BadRequest("this process cannot receive a session on this machine", field="target")
         return t.remote.RemoteSource(client), local_target
     if mode is Mode.EXPORT:
         if local_source is None or bundle_path is None:
-            raise BadRequest("export needs the local source and a bundle path", field="bundle")
+            raise BadRequest(
+                "an export needs the session on this machine and a path for the handover file", field="bundle"
+            )
         host = getattr(local_source, "host", None)
         return local_source, t.bundle.BundleTarget(
             Path(bundle_path),
@@ -583,7 +591,9 @@ def apis_for(
         )
     if mode is Mode.IMPORT:
         if local_target is None or bundle_path is None:
-            raise BadRequest("import needs the local target and a bundle path", field="bundle")
+            raise BadRequest(
+                "an import needs a handover file and a session store on this machine to receive it", field="bundle"
+            )
         trusted = {p.pubkey for p in ledger.peers() if p.revoked_at is None and p.pubkey}
         own = ledger.meta_get("identity_pubkey")
         if own:
@@ -598,7 +608,7 @@ def apis_for(
             ),
             local_target,
         )
-    raise BadRequest(f"mode {mode} has no conductor", field="mode")
+    raise BadRequest(f"a {mode} cannot be run as a handover from this machine", field="mode")
 
 
 def known_facts(ledger: Ledger, peer: Peer | None) -> EnvFacts | None:
@@ -854,9 +864,15 @@ def _next_action(row: dict, outcome: str) -> str | None:
     if state in ("in_doubt", "committing"):
         return "/handover status shows progress; /handover reclaim --force takes the session back here"
     if outcome == "active_source_pending" or state == "retiring":
-        return "the other side is released on the next contact (the janitor retries)"
+        return (
+            "the other machine is told on the next contact; the plugin tries again each time it starts or begins a "
+            "new handover"
+        )
     if state == "aborting" and row.get("last_error"):
-        return f"the cancel is tried again on every start; /handover cancel {s} --force ends it here"
+        return (
+            "the cancel is tried again each time the plugin starts or begins a new handover; /handover cancel "
+            f"{s} --force ends it here"
+        )
     return None
 
 
@@ -960,7 +976,7 @@ class JobRunner:
             return
         signer = getattr(bundle_source, "signer", None)
         verified = getattr(bundle_source, "verified", False) is True
-        origin = f"verified bundle ({signer})" if verified else "unverified bundle"
+        origin = f"verified handover file ({signer})" if verified else "unverified handover file"
         with contextlib.suppress(HandoverError):
             self.ledger.event(job_id, Role.CONDUCTOR, "origin", {"origin": origin}, epoch=mine[1])
 
@@ -974,7 +990,11 @@ class JobRunner:
         owner = f"{process_owner()}/{secrets.token_hex(3)}"
         epoch = self.ledger.claim_owner(job_id, Role.CONDUCTOR, owner, STALE_OWNER_S)
         if epoch is None:
-            raise InvalidState("another runner is working on this job", reason="busy_elsewhere", job=short(job_id))
+            raise InvalidState(
+                "another process on this machine is already running this handover",
+                reason="busy_elsewhere",
+                job=short(job_id),
+            )
         with self._lock:
             self._owners[job_id] = (owner, epoch)
         return owner, epoch
@@ -1019,7 +1039,7 @@ class JobRunner:
     def _conductor(self, job_id: str, *, confirm=None) -> Conductor:
         row = self.ledger.job(job_id, Role.CONDUCTOR)
         if row is None:
-            raise NotFound(f"job {short(job_id)} not found")
+            raise NotFound(f"no handover with the id {short(job_id)}; /handover status lists them")
         owner, epoch = self._claim(job_id)
         params = row["params"] or {}
         options = from_wire(Options, params.get("options") or {})
@@ -1229,28 +1249,33 @@ class JobRunner:
             row = self.ledger.job(job_id, Role.CONDUCTOR)
         state = str(row["state"]) if row is not None else "gone"
         if state in TERMINAL[Role.CONDUCTOR] or row is None:
-            text = f"Handover {sid} is already {state}; nothing to cancel."
+            text = f"Handover {sid} has already ended ({state}); nothing to cancel."
             if state == str(ConductorState.DONE):
                 text = (
-                    f"Too late to cancel: handover {sid} is already done; nothing was cancelled. /handover reclaim on "
-                    "the source takes the session back."
+                    f"Too late to cancel: handover {sid} has already finished; nothing was cancelled. /handover "
+                    "reclaim on the machine you handed over from takes the session back."
                 )
             return CancelAnswer(False, state, text, "finished")
         if refused:
             return CancelAnswer(
                 False,
                 state,
-                f"Too late to cancel handover {sid}: it is past its commit point ({state}). Use /handover reclaim on "
-                "the source to take the session back.",
+                f"Too late to cancel handover {sid}: it has passed the point where it can no longer be undone "
+                f"({state}). Use /handover reclaim on the machine you hand over from to take the session back.",
                 "committing",
             )
         if self.ledger.cancel_requested(job_id) is not True:  # set_cancel wrote nothing: no request is claimed
-            return CancelAnswer(False, state, f"Handover {sid} is {state}; nothing was cancelled.", "not_recorded")
+            return CancelAnswer(
+                False,
+                state,
+                f"Handover {sid} did not take the cancel request at this step; nothing was cancelled.",
+                "not_recorded",
+            )
         if state == str(ConductorState.SUSPENDED):
             text = self._abort_suspended(job_id)
             after = self.ledger.job(job_id, Role.CONDUCTOR) or {}
             return CancelAnswer(True, str(after.get("state") or state), text)
-        return CancelAnswer(True, state, f"Cancel requested for job {sid}.")
+        return CancelAnswer(True, state, f"Cancel requested for handover {sid}.")
 
     def _already_aborting(self, row: dict) -> CancelAnswer:
         """``cancel`` of an ABORTING job: nothing new is requested (the abort runs or waits for the janitor)."""
@@ -1261,9 +1286,9 @@ class JobRunner:
         return CancelAnswer(
             False,
             "aborting",
-            f"Handover {sid} is already being cancelled, but the other side has not confirmed it ({err['message']}); "
-            f"it is tried again on every start. /handover cancel {sid} --force ends it here without that "
-            "confirmation.",
+            f"Handover {sid} is already being cancelled, but the other machine has not confirmed it yet "
+            f"({err['message']}); it is tried again each time the plugin starts or begins a new handover. /handover "
+            f"cancel {sid} --force ends it here without that confirmation.",
             "aborting",
         )
 
@@ -1276,15 +1301,15 @@ class JobRunner:
         sid = short(job_id)
         row = self.ledger.job(job_id, Role.CONDUCTOR)
         if row is None:
-            raise NotFound(f"job {sid} not found")
+            raise NotFound(f"no handover with the id {sid}; /handover status lists them")
         state = str(row["state"])
         if state in _PAST_COMMIT:
             return CancelAnswer(
                 False,
                 state,
-                f"Too late to cancel handover {sid}, also with --force: it is past its commit point ({state}) and the "
-                "target may already hold the active session. Use /handover reclaim on the source to take the session "
-                "back.",
+                f"Too late to cancel handover {sid}, also with --force: it has passed the point where it can no longer "
+                f"be undone ({state}), and the machine you hand over to may already have the active session. Use "
+                "/handover reclaim on the machine you hand over from to take the session back.",
                 "committing",
             )
         if state != str(ConductorState.ABORTING):
@@ -1297,7 +1322,8 @@ class JobRunner:
                 return CancelAnswer(
                     False,
                     state,
-                    f"Handover {sid} is being cancelled right now; try --force again if it stays aborting.",
+                    f"Handover {sid} is being cancelled right now. If it is still not cancelled later, run /handover "
+                    f"cancel {sid} --force again.",
                     "not_forced",
                 )
         try:
@@ -1315,8 +1341,8 @@ class JobRunner:
             return CancelAnswer(
                 False,
                 now,
-                f"Ending handover {sid} here; the other side is slow to answer. /handover status {sid} shows when it "
-                "has ended.",
+                f"Ending handover {sid} here; the other machine is slow to answer. /handover status {sid} shows when "
+                "it has ended.",
                 "not_forced",
             )
         if now == str(ConductorState.ABORTED):
@@ -1329,9 +1355,9 @@ class JobRunner:
             return CancelAnswer(
                 False,
                 now,
-                f"Not cancelled: the target of handover {sid} reports that it is committing, so it may hold the active "
-                f"session. /handover status {sid} shows how it resolves; /handover reclaim --force on the source takes "
-                "the session back.",
+                f"Not cancelled: the machine you hand over to reports that it is already finishing handover {sid}, so "
+                f"it may have the active session. /handover status {sid} shows how it ends; /handover reclaim --force "
+                "on the machine you hand over from takes the session back.",
                 "committing",
             )
         err = after.get("last_error") or {}
@@ -1339,7 +1365,7 @@ class JobRunner:
         return CancelAnswer(
             False,
             now,
-            f"Handover {sid} could not be ended here ({why}); it stays {now}. /handover status {sid} shows it.",
+            f"Handover {sid} could not be ended here ({why}); it is still running. /handover status {sid} shows it.",
             "not_forced",
         )
 
@@ -1358,10 +1384,10 @@ class JobRunner:
             err = row.get("last_error") or {}
             why = f" ({err.get('message')})" if isinstance(err, dict) and err.get("message") else ""
             return (
-                f"Cancelling handover {sid}: the other side has not confirmed yet{why}. It finishes on the next "
+                f"Cancelling handover {sid}: the other machine has not confirmed yet{why}. It finishes on the next "
                 f"contact; /handover status {sid} shows it."
             )
-        return f"Cancel requested for job {sid}."
+        return f"Cancel requested for handover {sid}."
 
     def status(self, job_id: str | None) -> dict:
         """Machine-readable status for the surfaces (cluster F renders it, X20): ``{"jobs": [...], …}`` without a
@@ -1391,7 +1417,7 @@ class JobRunner:
         else:
             row = next((r for r in (self.ledger.job(job_id, ro) for ro in _PARTICIPANT_ROLES) if r is not None), None)
             if row is None:
-                raise NotFound(f"job {short(job_id)} not found")
+                raise NotFound(f"no handover with the id {short(job_id)}; /handover status lists them")
             role, out = Role(row["role"]), self._participant_summary(row)
         out["events"] = [
             {"kind": e["kind"], "state": e["state"], "step": e["step"], "at": e["ts"]}
@@ -1430,7 +1456,7 @@ class JobRunner:
                 arrival = next((a for a in self.ledger.arrival_rows() if a.get("job_id") == job_id), None)
             if arrival is not None:
                 note, session = arrival.get("note"), arrival.get("session_id")
-                origin = f"verified peer ({peer.name})" if _peer_verified(peer) else "peer"
+                origin = f"verified paired device ({peer.name})" if _peer_verified(peer) else "paired device"
             session = session or (ack or {}).get("session_id")
             title = (ack or {}).get("title")
         else:
@@ -1535,10 +1561,10 @@ class JobRunner:
         """Where a session that arrived here comes from (SEC 4.6): a pull from a paired peer (its responses are
         signed), or the bundle an import read (journaled by ``_record_origin``)."""
         if row["mode"] == str(Mode.PULL):
-            return "verified peer"
+            return "verified paired device"
         if row["mode"] == str(Mode.IMPORT):
             found = [e for e in self.ledger.events(row["job_id"], Role.CONDUCTOR) if e["kind"] == "origin"]
-            return str((found[-1]["data"] or {}).get("origin")) if found else "bundle"
+            return str((found[-1]["data"] or {}).get("origin")) if found else "handover file"
         return None
 
     def create_offer(
@@ -1557,7 +1583,10 @@ class JobRunner:
         session's own model now (DESIGN §2.2 ``offer``, §8.3); the peer claims it with ``/handover take``. Offers
         are never auto-claimed (O6). ``include_secret`` is the local ``--include-secret`` (X07, R18)."""
         if peer.direction != "inbound" or peer.revoked_at is not None:
-            raise BadRequest("offers are for paired devices that connect to this gateway", field="peer")
+            raise BadRequest(
+                "an offer is only for a paired device that connects to this machine and whose pairing is not revoked",
+                field="peer",
+            )
         source = (
             local_source
             or make_local_apis(
@@ -1753,12 +1782,20 @@ def gc_job(ledger: Ledger, job_id: str, *, data_dir: Path, store=None) -> None:
             "committed",
             "expired",
         ):
-            raise InvalidState(f"job {short(job_id)} is still {row['state']}", reason="active", state=row["state"])
+            raise InvalidState(
+                f"handover {short(job_id)} is still running ({row['state']}); cancel it or wait until it has ended",
+                reason="active",
+                state=row["state"],
+            )
     src = ledger.source_state(job_id)
     if src is not None and src["state"] not in ("released", "reclaimed", "retired", "exported"):
         # the job's rows say "over" only while its hold agrees (R3-H1 sweep): a source handover that still holds the
         # session (a lock whose job row an earlier release had ended) is no finished job
-        raise InvalidState(f"job {short(job_id)} is still {src['state']}", reason="active", state=src["state"])
+        raise InvalidState(
+            f"handover {short(job_id)} still holds the session here ({src['state']}); wait until it has ended",
+            reason="active",
+            state=src["state"],
+        )
     if store is not None and callable(getattr(store, "release_job", None)):
         store.release_job(job_id, keep=False)
     shutil.rmtree(Path(data_dir) / "staging" / job_id, ignore_errors=True)
@@ -1930,19 +1967,19 @@ def _settle_export(prof: _Profile, row: dict, out: dict) -> None:
                 runner.recover(job_id, background=False)
         row = prof.ledger.job(job_id, Role.CONDUCTOR) or row
     path = (row.get("params") or {}).get("bundle_path")
-    shown = path or "the bundle"
-    warnings = [w for w in out.get("warnings") or () if not str(w).startswith(("the copy on ", "the target on "))]
+    shown = path or "the handover file"
+    warnings = [w for w in out.get("warnings") or () if not str(w).startswith("the copy on ")]
     if row["state"] == "aborted":
-        warnings.append(f"the unfinished bundle {shown} was removed; nothing was exported")
+        warnings.append(f"the unfinished handover file {shown} was removed; nothing was exported")
     elif row["state"] == "done":
         if path and Path(path).exists():
             warnings.append(
-                f"the bundle {path} stays a valid copy; importing it elsewhere makes a second, independent copy"
+                f"the handover file {path} stays a valid copy; importing it elsewhere makes a second, independent copy"
             )
     else:
         warnings.append(
-            f"the export (job {short(job_id)}) has not ended yet ({row['state']}); /handover status "
-            f"{short(job_id)} shows what becomes of {shown}"
+            f"the export (handover {short(job_id)}) has not finished yet; /handover status {short(job_id)} shows what "
+            f"becomes of {shown}"
         )
     out["warnings"] = warnings
 
