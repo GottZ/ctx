@@ -219,7 +219,8 @@ Moves to the other machine:
   included. Files that git ignores (build outputs, caches) stay here. Without git: the session's working folder, as
   it is.
 - Large files stored with Git LFS, when git-lfs is installed on the other machine. Otherwise they arrive as small
-  placeholder files, and the final message says so.
+  placeholder files, and the final message says so. The same happens when a link is in their way there and git-lfs
+  is older than 3.7.1; the final message then names the link.
 - Files outside the project that the conversation used — the plugin asks you first (setting `extra_paths`).
 - A note for the agent on the other machine: what changed, what did not move, and where the files are now.
 
@@ -245,7 +246,9 @@ a fresh folder, and the final message names it.
   when you switch on `allow_remote_continue`, and only while approvals are on.
 - **What travels as it is.** The conversation, tool outputs, attached images and files go to the other machine
   unredacted: nothing is blacked out. Whatever the agent saw, the other machine gets. Committed git history travels
-  with a project, including secret files that were committed. A handover file is not encrypted.
+  with a project, including secret files that were committed. A handover file is not encrypted. If your project
+  encrypts files with a git filter that needs environment variables (for example sops), such a file can travel
+  unencrypted — see [Limits](#limits).
 - **What stays here.** `.env` files, keys and credential folders stay here unless you name each one with
   `--include-secret <path>`; a general *yes* never sends them. Hermes' own credentials never leave.
 - **The stored sign-in opens the whole dashboard.** The dashboard token (or user name and password) that the laptop
@@ -399,6 +402,12 @@ uncommitted work, and the continuing agent gets a note about what changed.
   prepared the step. A `git stash` you make there in that window is dropped with them; it stays recoverable until
   git's garbage collection (`git gc`) prunes it — `git fsck --unreachable` lists it, as git's stash manual
   describes.
+- **Your own git filters run without your environment.** git runs with a small fixed set of environment variables
+  (see **Commands** under Disclosure). A clean filter from your own git configuration that takes its keys from
+  environment variables (for example an encryption filter for sops) runs without them while the plugin packs a
+  handover. If that filter is marked `required`, the handover fails; otherwise the file goes into the handover copy
+  unfiltered, as it lies in the working folder. Filters that read only files under your home or in the repository
+  (git-lfs, git-crypt) are not affected.
 - **The size check needs the context window there.** Whether the session fits the model on the other side is
   checked against that model's context window, and Hermes gives a plugin only a `context_length` set in that
   gateway's `config.yaml` (`model.context_length`, or `context_length` of the provider entry or of its
@@ -472,12 +481,14 @@ when the conversation names them. A file the conversation names in a folder git 
 item of its own outside the project, never the repository around it; a file git ignores only by its name, in a folder
 it does not ignore (`*.log` in `src/`), still points the plan to that repository, which does not carry the file.
 Git LFS files travel as their objects and are checked out on the other side with `git lfs checkout`, never from a
-network; without git-lfs there they stay pointers and the final message says so. The size limit (`max_total_gb`, per
-handover) and the free-space check at the destination count that content before anything is written: each shipped
-object once and, when git-lfs is installed there, once more for every file that points to it. When a path that
-`git lfs checkout` would write there is a symbolic link or lies behind one (git-lfs before 3.7.1 writes through
-such links, CVE-2025-26625), the plugin does not run it: the files stay pointers and the final message names the
-link.
+network (for that one call the plugin gives git the standard Git LFS filter, which every other git call on received
+data runs without); without git-lfs there they stay pointers and the final message says so. The size limit
+(`max_total_gb`, per handover) and the free-space check at the destination count that content before anything is
+written: each shipped object once and, when git-lfs is installed there, once more for every file that points to it.
+When a path that `git lfs checkout` would write there is a symbolic link or lies behind one, and git-lfs there is
+older than 3.7.1 or its version cannot be read, the plugin does not run it (git-lfs before 3.7.1 writes through such
+links, CVE-2025-26625): the files stay pointers, and the final message names the link and recommends git-lfs 3.7.1 or
+newer. With git-lfs 3.7.1 or newer the checkout runs in that case too.
 
 Before anything is locked the plugin shows what would move: the workspace and its size, every item outside the project
 with its size (the 10 largest, then how many more), the repositories inside the workspace that stay here (each
@@ -624,10 +635,13 @@ there; on a package-managed install it prints the `hermes config set` command in
 `<HERMES_HOME>/plugin-data/ctx_handover/` holds the ledger, staging, the block cache, reports and logs.
 
 **Commands:** `git` without a shell, with hooks, credential helpers, fsmonitor, submodule recursion and LFS smudge
-disabled for received data; git, and what git starts (git-lfs, helpers), gets an environment built from an
-allowlist — the search path, the home folder, `XDG_CONFIG_HOME`, the temp folder, the time zone and on Windows the
-system variables git needs to start — and no other variable of the Hermes process, so provider keys and tokens never
-reach it (no git call talks to a remote, so no SSH agent socket, proxy or CA setting either); `<tool> --version` for
+disabled for received data (only the one `git lfs checkout` call gets the standard Git LFS filter, see **Use in
+detail**); git, and what git starts (git-lfs, helpers), gets an environment built from an
+allowlist — the search path, the home folder, `XDG_CONFIG_HOME`, the temp folder, the time zone, `SUDO_UID` (git
+needs it when Hermes runs as root through sudo on another user's repository) and on Windows the system variables git
+needs to start — and no other variable of the Hermes process, so provider keys and tokens never reach it (no git
+call talks to a remote, so no SSH agent socket, proxy or CA setting either; for a filter of your own git
+configuration that needs more, see Limits); `<tool> --version` for
 a fixed list of 30 developer tools plus those you name in the `tool_probe` setting, each run with only the search
 path (and the Windows system variables) of this process and a home and temp folder of its own in a scratch folder in
 the system temp directory (`ctxh-probe-*`, removed afterwards); with `--continue`,
