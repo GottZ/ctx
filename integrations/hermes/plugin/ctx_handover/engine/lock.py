@@ -806,12 +806,26 @@ def veto_entry(row: Mapping) -> dict:
     return entry
 
 
+_LEGACY_VETO_WORDS: tuple[tuple[str, str], ...] = (
+    ("where the file is imported", "where the bundle is imported"),
+    ("to a handover file", "to a handover bundle"),
+)
+"""Plugin 0.1.0 said "handover bundle" in its veto replies; a session locked by 0.1.0 and taken back after an update
+still has those replies, and reclaim finds them only by exact text."""
+
+
 def _all_texts(entry: Mapping) -> set[str]:
     base = {k: v for k, v in veto_entry(entry).items() if k != "message"}
-    return {
+    texts = {
         veto_texts({**base, "state": s})
         for s in (SourceState.PREPARED.value, SourceState.RETIRED.value, SourceState.EXPORTED.value)
     }
+    legacy = set()
+    for text in texts:
+        for new, old in _LEGACY_VETO_WORDS:
+            text = text.replace(new, old)
+        legacy.add(text)
+    return texts | legacy
 
 
 def _job_texts(ledger, job_id: str, entry: Mapping) -> set[str]:
