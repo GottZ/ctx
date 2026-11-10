@@ -185,11 +185,12 @@ class Authenticator(Protocol):
         ...
 
     def precheck(self, req: Request) -> AuthContext:
-        """Everything that does not need the body; raises ``Unauthorized``."""
+        """Everything that does not need the body — for signed requests the signature over the declared body hash;
+        raises ``Unauthorized``."""
         ...
 
     def finish(self, ctx: AuthContext, req: Request) -> AuthContext:
-        """Body-dependent checks (body hash, signature, nonce); raises ``Unauthorized``."""
+        """Body-dependent checks (the body against its declared hash, then the nonce); raises ``Unauthorized``."""
         ...
 
     def authenticate(self, req: Request) -> AuthContext:
@@ -256,24 +257,29 @@ class PeerSignatureAuth:
         peer = self._ledger.inbound_peer(h["x-ctxh-peer"])
         if peer is None or peer.direction != "inbound" or peer.revoked_at is not None:
             raise _unauthorized()
-        return AuthContext(scheme=self.scheme, peer=peer, rights=frozenset(peer.rights), epoch=epoch)
-
-    def finish(self, ctx: AuthContext, req: Request) -> AuthContext:
-        h = req.headers
-        body_sha = hashlib.sha256(req.body).hexdigest()
-        if body_sha != h["x-ctxh-body-sha256"]:
-            raise _unauthorized()
+        # the signature covers the body through its declared hash, so it is checked here, before the route's right
+        # is compared and before a byte of the body is read (review R6-B: a request naming a peer's id learned that
+        # peer's rights from 403 vs 401, and a forged upload was read in full)
         msg = request_string(
             req.method,
             route_path(req.path),
             int(h["x-ctxh-time"]),
             h["x-ctxh-nonce"],
-            body_sha,
-            ctx.peer.peer_id,
+            h["x-ctxh-body-sha256"],
+            peer.peer_id,
             self._identity.instance_id,
             h.get("x-ctxh-epoch", ""),
         )
+        ctx = AuthContext(scheme=self.scheme, peer=peer, rights=frozenset(peer.rights), epoch=epoch)
         if not verify(ctx.peer.pubkey, msg, h["x-ctxh-sig"]):
+            raise _unauthorized()
+        return ctx
+
+    def finish(self, ctx: AuthContext, req: Request) -> AuthContext:
+        """The body is the one the signature declared (``precheck`` verified the signature over its hash); the
+        nonce is spent last, so a request with another body never uses up the nonce of the real one."""
+        h = req.headers
+        if hashlib.sha256(req.body).hexdigest() != h["x-ctxh-body-sha256"]:
             raise _unauthorized()
         if self._ledger.nonce_seen(ctx.peer.peer_id, h["x-ctxh-nonce"], int(h["x-ctxh-time"]), self._ttl):
             raise _unauthorized()
