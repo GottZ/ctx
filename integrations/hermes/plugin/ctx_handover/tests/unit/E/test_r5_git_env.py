@@ -182,3 +182,11 @@ def test_r5_git_operations_work_with_the_minimal_environment(git, user_home, tmp
     )
     assert gitops.is_sha(commit)
     assert git.out(["ls-files"], cwd=repo, spec=gitops.RECEIVED) == "f.txt"
+
+
+def test_r5_sudo_uid_reaches_git(git, tmp_path, secrets_set, monkeypatch):
+    """``SUDO_UID`` passes (git's ownership check accepts the invoking user's repository when Hermes runs as root
+    through sudo)."""
+    monkeypatch.setenv("SUDO_UID", "4242")
+    proc = git.run(["-c", "alias.e=!env -0", "e"], cwd=tmp_path, spec=gitops.RECEIVED)
+    assert _parse(proc.stdout)["SUDO_UID"] == "4242"

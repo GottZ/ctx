@@ -165,7 +165,7 @@ CHILD_ENV_WINDOWS: tuple[str, ...] = ("PATH", "SYSTEMROOT", "PATHEXT", "WINDIR")
 the system root (the C runtime, Winsock and the crypto API look it up), the executable extensions and the Windows
 directory. One source for git (``Git._base_env``) and the tool probes (``envfacts``)."""
 
-GIT_ENV_POSIX: tuple[str, ...] = ("HOME", "XDG_CONFIG_HOME", "TMPDIR", "TZ")
+GIT_ENV_POSIX: tuple[str, ...] = ("HOME", "XDG_CONFIG_HOME", "TMPDIR", "TZ", "SUDO_UID")
 GIT_ENV_WINDOWS: tuple[str, ...] = (
     "HOME",
     "XDG_CONFIG_HOME",
@@ -181,12 +181,16 @@ GIT_ENV_WINDOWS: tuple[str, ...] = (
 """What git takes from the parent beyond ``CHILD_ENV_*`` — and nothing else, never the inherited environment
 (catalog review 2026-11-10): ``HOME`` (replaced by the pinned home when there is one) and ``XDG_CONFIG_HOME``
 locate the user's global configuration the source profile reads like the user's own git (W5); ``TMPDIR`` (Windows:
-``TEMP``/``TMP``) is where git and git-lfs put temporary files; ``TZ`` keeps reflog times in the user's zone.
+``TEMP``/``TMP``) is where git and git-lfs put temporary files; ``TZ`` keeps reflog times in the user's zone;
+``SUDO_UID`` lets git's ownership check accept the invoking user's repository when Hermes runs as root
+through sudo (``safe.directory``).
 Windows only: git derives ``HOME`` from ``HOMEDRIVE``/``HOMEPATH``/``USERPROFILE`` when it is unset, and Git for
 Windows reads ``%PROGRAMDATA%/Git/config`` as part of its system configuration. Not passed, on purpose: provider
 keys, tokens and every other variable; ``SSH_AUTH_SOCK``, proxy and CA variables (no git call of the plugin talks
 to a remote — ``protocol.allow=never`` on every call); ``LANG``/``LC_*`` (``LC_ALL=C`` is set); loader variables
-(``LD_*``/``DYLD_*``)."""
+(``LD_*``/``DYLD_*``). The price, named in the README: a clean filter of the user's own configuration (source
+profile) that needs another variable runs without it — a required one stops the handover, any other leaves the
+file unfiltered in the synthetic work-tree commit."""
 
 SET_ENV: dict[str, str] = {
     "GIT_TERMINAL_PROMPT": "0",
