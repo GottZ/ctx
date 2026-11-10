@@ -59,8 +59,15 @@ type ollamaEmbedRequest struct {
 	// Input is the bare string of the internal path's one input (the body
 	// stays byte-identical to the single-string wire, W02-09 G2) or the list
 	// of a gateway sub-block (wireInput.value).
-	Input   any         `json:"input"`
-	Options *ollamaOpts `json:"options,omitempty"`
+	Input any `json:"input"`
+	// Truncate false asks Ollama to refuse an input past the model's window
+	// (400 "the input length exceeds the context length") instead of its
+	// default: cut the input to the window and answer 200 with the vector of
+	// the cut text. Sent on a gateway body only (FOLGE-EMBLIMIT: the backend
+	// judges an input's length, the route passes its refusal on); the
+	// internal path's body stays the single-string wire, without the key.
+	Truncate *bool      `json:"truncate,omitempty"`
+	Options  *ollamaOpts `json:"options,omitempty"`
 }
 
 type ollamaOpts struct {
@@ -108,7 +115,8 @@ type floatElem interface{ ~float32 | ~float64 }
 // one text of the internal path goes out as a bare string. Only Embed sets
 // bare — its body is byte-identical to the single-string wire every
 // deployed backend has seen (design/02 §4.8 "Wire"); a gateway sub-block is
-// always a list, also with one input.
+// always a list, also with one input, and on the ollama wire carries
+// truncate:false (embedOllama).
 type wireInput struct {
 	texts []string
 	bare  bool
@@ -140,17 +148,18 @@ func (in wireInput) marshal(v any) ([]byte, error) {
 		return json.Marshal(v)
 	}
 	var model string
+	var truncate *bool
 	var opts *ollamaOpts
 	switch r := v.(type) {
 	case ollamaEmbedRequest:
-		model, opts = r.Model, r.Options
+		model, truncate, opts = r.Model, r.Truncate, r.Options
 	case openAIEmbedRequest:
 		model = r.Model
 	default:
 		return nil, fmt.Errorf("embed: no gateway body for %T", v)
 	}
-	n := wireBodyLen(model, in.texts, opts)
-	body := appendWireBody(make([]byte, 0, n), model, in.texts, opts)
+	n := wireBodyLen(model, in.texts, truncate, opts)
+	body := appendWireBody(make([]byte, 0, n), model, in.texts, truncate, opts)
 	if len(body) != n || cap(body) != n {
 		return nil, fmt.Errorf("embed: gateway body of %d bytes, sized %d", len(body), n)
 	}
@@ -266,6 +275,9 @@ func rawQuality(vecs [][]float32, dims int) error {
 
 func embedOllama[T floatElem](ctx context.Context, client *http.Client, hop fedhop.Target, host, apiKey, model string, in wireInput, numCtx int, limit int64, ra rawAnswer) ([][]T, int, error) {
 	reqBody := ollamaEmbedRequest{Model: model, Input: in.value()}
+	if !in.bare {
+		reqBody.Truncate = new(bool) // a gateway body: refuse an overlong input, never cut it
+	}
 	if numCtx > 0 {
 		reqBody.Options = &ollamaOpts{NumCtx: numCtx}
 	}

@@ -50,12 +50,18 @@ func wireForms() []string {
 // wireCases are the request values of embedOllama and embedOpenAI for model
 // and texts: the openai wire, the ollama wire without options, with an empty
 // options object (unreachable from embedOllama, the encoder's form all the
-// same) and with num_ctx at 1, 4096, the largest and the smallest int.
+// same) and with num_ctx at 1, 4096, the largest and the smallest int — each
+// ollama form without truncate, with the gateway's truncate:false
+// (FOLGE-EMBLIMIT) and with truncate:true (unreachable, the encoder's form).
 func wireCases(model string, texts []string) []any {
 	in := wireInput{texts: texts}
-	cases := []any{openAIEmbedRequest{Model: model, Input: in.value()}, ollamaEmbedRequest{Model: model, Input: in.value()}}
-	for _, n := range []int{0, 1, 4096, math.MaxInt, math.MinInt} {
-		cases = append(cases, ollamaEmbedRequest{Model: model, Input: in.value(), Options: &ollamaOpts{NumCtx: n}})
+	off, on := false, true
+	cases := []any{openAIEmbedRequest{Model: model, Input: in.value()}}
+	for _, tr := range []*bool{nil, &off, &on} {
+		cases = append(cases, ollamaEmbedRequest{Model: model, Input: in.value(), Truncate: tr})
+		for _, n := range []int{0, 1, 4096, math.MaxInt, math.MinInt} {
+			cases = append(cases, ollamaEmbedRequest{Model: model, Input: in.value(), Truncate: tr, Options: &ollamaOpts{NumCtx: n}})
+		}
 	}
 	return cases
 }
@@ -72,14 +78,15 @@ func checkWireBody(t testing.TB, texts []string, v any) {
 		t.Fatalf("%#v:\nmarshal %q\nencoder %q", v, got, want)
 	}
 	var model string
+	var truncate *bool
 	var opts *ollamaOpts
 	switch r := v.(type) {
 	case ollamaEmbedRequest:
-		model, opts = r.Model, r.Options
+		model, truncate, opts = r.Model, r.Truncate, r.Options
 	case openAIEmbedRequest:
 		model = r.Model
 	}
-	if n := wireBodyLen(model, texts, opts); n != len(got) {
+	if n := wireBodyLen(model, texts, truncate, opts); n != len(got) {
 		t.Fatalf("%#v: wireBodyLen %d, the body has %d bytes", v, n, len(got))
 	}
 }
@@ -127,7 +134,9 @@ func FuzzWireBodyIsTheEncoders(f *testing.F) {
 // on the ollama row without and with num_ctx, the body the engine receives
 // is the encoder's and WireBodyLen(row, …) its length — the protocol choice
 // of WireBodyLen is embedWire's — and within the frame bound WireFrameMax
-// names.
+// names. The ollama body carries truncate:false (FOLGE-EMBLIMIT G7: Ollama
+// cuts an overlong input and answers 200 unless told not to), the openai
+// body no truncate key.
 func TestEmbedRawBodyLenIsWireBodyLen(t *testing.T) {
 	texts := []string{"a", "<b>&\"c\"", "\u2028\x01\n\t", "ä😀", "\ufffd\x7f", strings.Repeat("x", 3000)}
 	model := "RAW\u2029MODEL"
@@ -142,7 +151,8 @@ func TestEmbedRawBodyLenIsWireBodyLen(t *testing.T) {
 		}
 		var v any = openAIEmbedRequest{Model: model, Input: texts}
 		if row.p == backends.ProtocolOllama {
-			r := ollamaEmbedRequest{Model: model, Input: texts}
+			off := false
+			r := ollamaEmbedRequest{Model: model, Input: texts, Truncate: &off}
 			if row.numCtx > 0 {
 				r.Options = &ollamaOpts{NumCtx: row.numCtx}
 			}
@@ -151,6 +161,9 @@ func TestEmbedRawBodyLenIsWireBodyLen(t *testing.T) {
 		body := e.lastBody()
 		if want := string(encoderBody(t, v)); body != want {
 			t.Errorf("%s/%d: the engine received %q, the encoder writes %q", row.p, row.numCtx, body, want)
+		}
+		if got, want := strings.Contains(body, `"truncate":false`), row.p == backends.ProtocolOllama; got != want || strings.Count(body, `"truncate"`) > 1 {
+			t.Errorf("%s/%d: truncate:false in the body %t, want %t (once, on the ollama wire only)", row.p, row.numCtx, got, want)
 		}
 		if n := WireBodyLen(b, model, texts); n != len(body) {
 			t.Errorf("%s/%d: WireBodyLen %d, the body has %d bytes", row.p, row.numCtx, n, len(body))
@@ -204,7 +217,7 @@ func TestWireBodyIsOneAllocation(t *testing.T) {
 						break
 					}
 				}
-				if n := wireBodyLen("m", texts, nil); n != len(body) {
+				if n := wireBodyLen("m", texts, nil, nil); n != len(body) {
 					t.Errorf("%s %d B ×%d: wireBodyLen %d, the body has %d bytes", name, size, k, n, len(body))
 				}
 				if mallocs != 1 || alloc > uint64(len(body))+WireBodySlack {

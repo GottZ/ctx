@@ -23,12 +23,12 @@ import (
 
 // WireFrameMax is the longest frame of a gateway body around its model and
 // its texts: the openai wire's {"model":,"input":[]} and the ollama wire's
-// options with the longest num_ctx a row can carry (written only when
-// positive: math.MaxInt64). A body has no trailing newline. With the model
-// and every text as WireStringLen counts it and a separator between two
-// texts, it bounds WireBodyLen on every row — exactly on an ollama row of
-// that num_ctx.
-const WireFrameMax = len(`{"model":,"input":[],"options":{"num_ctx":}}`) + len("9223372036854775807")
+// truncate:false and options with the longest num_ctx a row can carry
+// (written only when positive: math.MaxInt64). A body has no trailing
+// newline. With the model and every text as WireStringLen counts it and a
+// separator between two texts, it bounds WireBodyLen on every row — exactly
+// on an ollama row of that num_ctx.
+const WireFrameMax = len(`{"model":,"input":[],"truncate":false,"options":{"num_ctx":}}`) + len("9223372036854775807")
 
 // WireBodySlack is what the one allocation of a gateway body takes beyond
 // its length: the runtime rounds it up to a size class — at most 4 KiB
@@ -87,17 +87,23 @@ func WireStringLen(s string) int {
 // WireBodyLen is the exact length of the body EmbedRaw sends row b for
 // model and texts: on the openai wire {"model":…,"input":[…]}, on every
 // other protocol (the ollama wire, embedWire's choice) the same with
-// options.num_ctx when b.NumCtx is set (embedOllama's rule).
+// truncate:false and options.num_ctx when b.NumCtx is set (embedOllama's
+// rule for a gateway body).
 func WireBodyLen(b backends.Backend, model string, texts []string) int {
-	if b.Protocol != backends.ProtocolOpenAI && b.NumCtx > 0 {
-		return wireBodyLen(model, texts, &ollamaOpts{NumCtx: b.NumCtx})
+	if b.Protocol == backends.ProtocolOpenAI {
+		return wireBodyLen(model, texts, nil, nil)
 	}
-	return wireBodyLen(model, texts, nil)
+	var opts *ollamaOpts
+	if b.NumCtx > 0 {
+		opts = &ollamaOpts{NumCtx: b.NumCtx}
+	}
+	return wireBodyLen(model, texts, new(bool), opts)
 }
 
-// wireBodyLen is the exact length appendWireBody writes for model, texts
-// and the ollama options opts (nil: none).
-func wireBodyLen(model string, texts []string, opts *ollamaOpts) int {
+// wireBodyLen is the exact length appendWireBody writes for model, texts,
+// the ollama truncate flag (nil: none) and the ollama options opts (nil:
+// none).
+func wireBodyLen(model string, texts []string, truncate *bool, opts *ollamaOpts) int {
 	n := len(`{"model":,"input":}`) + WireStringLen(model)
 	if texts == nil {
 		n += len("null")
@@ -106,6 +112,9 @@ func wireBodyLen(model string, texts []string, opts *ollamaOpts) int {
 		for _, s := range texts {
 			n += WireStringLen(s)
 		}
+	}
+	if truncate != nil {
+		n += len(`,"truncate":`) + len(strconv.FormatBool(*truncate))
 	}
 	if opts != nil {
 		n += len(`,"options":{}`)
@@ -117,11 +126,12 @@ func wireBodyLen(model string, texts []string, opts *ollamaOpts) int {
 	return n
 }
 
-// appendWireBody appends the gateway body of model, texts and opts to dst:
-// the fields in the order and the form the encoder wrote them for
-// ollamaEmbedRequest and openAIEmbedRequest — a nil list as null, the
-// options only when set, num_ctx only when not zero (omitempty).
-func appendWireBody(dst []byte, model string, texts []string, opts *ollamaOpts) []byte {
+// appendWireBody appends the gateway body of model, texts, truncate and
+// opts to dst: the fields in the order and the form the encoder wrote them
+// for ollamaEmbedRequest and openAIEmbedRequest — a nil list as null,
+// truncate and the options only when set, num_ctx only when not zero
+// (omitempty).
+func appendWireBody(dst []byte, model string, texts []string, truncate *bool, opts *ollamaOpts) []byte {
 	dst = append(dst, `{"model":`...)
 	dst = appendWireString(dst, model)
 	dst = append(dst, `,"input":`...)
@@ -136,6 +146,10 @@ func appendWireBody(dst []byte, model string, texts []string, opts *ollamaOpts) 
 			dst = appendWireString(dst, s)
 		}
 		dst = append(dst, ']')
+	}
+	if truncate != nil {
+		dst = append(dst, `,"truncate":`...)
+		dst = strconv.AppendBool(dst, *truncate)
 	}
 	if opts != nil {
 		dst = append(dst, `,"options":{`...)
