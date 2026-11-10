@@ -288,7 +288,7 @@ def test_r5_unlistable_trees_stop_the_checkout(git, tmp_path, vulnerable_lfs):
     _add_lfs(repo, "asset.bin")
     repo.commit_all("lfs")
     warnings = gitapply.lfs_checkout(git, repo.root, ("0" * 40,))
-    assert any("could not be checked" in w for w in warnings), warnings
+    assert any("could not check" in w for w in warnings), warnings
     assert not _ran_checkout(vulnerable_lfs)
 
 
@@ -347,4 +347,6 @@ def test_r5_git_lfs_from_3_7_1_runs_despite_a_link(git, user_home, tmp_path, mon
         assert warnings == [] and (repo.root / "asset.bin").read_bytes() == DATA
     else:
         assert (repo.root / "asset.bin").read_bytes() == pointer
-        assert any(("3.7.0 here is older" in w) if version else ("could not be read" in w) for w in warnings)
+        assert any(
+            ("version 3.7.0, older than 3.7.1" in w) if version else ("could not be read" in w) for w in warnings
+        )

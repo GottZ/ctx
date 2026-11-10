@@ -653,19 +653,19 @@ def lfs_version(git: Git, cwd: Path | None) -> tuple[int, int, int] | None:
 def _lfs_link_warning(path: str, version: tuple[int, int, int] | None) -> str:
     """``path``: the link in the way; ``""`` when the paths could not be checked at all."""
     what = (
-        f"{path!r} in the repository is a symbolic link"
+        f"{path!r} in the repository is a symbolic link (a shortcut to another place)"
         if path
-        else "the paths git lfs checkout would write could not be checked for symbolic links"
+        else "the plugin could not check the paths git lfs checkout would write for symbolic links"
     )
     which = (
-        f"git-lfs {'.'.join(map(str, version))} here is older than 3.7.1"
+        f"git-lfs here is version {'.'.join(map(str, version))}, older than 3.7.1"
         if version is not None
         else "the version of git-lfs here could not be read"
     )
     return (
-        f"LFS files stay pointers: {what}, and {which}. Older git-lfs releases can write through such a link to a "
-        "place outside the repository. Update git-lfs to 3.7.1 or newer, check the link, then run git lfs checkout "
-        "in the repository."
+        f"Large files stored with Git LFS stay placeholder files: {what}, and {which}. Older git-lfs versions can "
+        "follow such a link and write outside the repository. Update git-lfs to 3.7.1 or newer, check the link, then "
+        "run git lfs checkout in the repository."
     )
 
 
@@ -767,7 +767,12 @@ def lfs_checkout(git: Git, repo: Path, trees: Sequence[str] = ()) -> list[str]:
         return stops
     declared = [arg for key, value in LFS_FILTER for arg in ("-c", f"{key}={value}")]
     proc = git.run([*declared, "lfs", "checkout"], cwd=repo, spec=spec, check=False)
-    return [] if proc.returncode == 0 else ["git lfs checkout failed; run it in the repository"]
+    if proc.returncode == 0:
+        return []
+    return [
+        "git lfs checkout failed, so large files stored with Git LFS may still be placeholder files. Run git lfs "
+        "checkout in the repository."
+    ]
 
 
 def _lfs_tool_warnings(
