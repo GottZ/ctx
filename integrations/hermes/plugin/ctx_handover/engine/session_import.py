@@ -209,7 +209,7 @@ def map_model(
         else:
             reason = "provider_unusable"
     elif policy not in ("auto", "target_default"):
-        raise BadRequest(f"unknown model_mapping {policy!r}", field="model_mapping")
+        raise BadRequest(f"unknown model_mapping value {policy!r} in the ctx_handover settings", field="model_mapping")
     model_config = dict(allowed)
     if route is not None:
         model_config["gateway_runtime"] = route
@@ -322,7 +322,7 @@ def mint_free_id(db, taken: set[str], now: datetime | None = None) -> str:
         if candidate not in taken and not _id_taken(db, candidate):
             taken.add(candidate)
             return candidate
-    raise ImportFailed("could not mint a free session id")
+    raise ImportFailed("could not find a free session id for the imported session")
 
 
 def _title_candidates(db, title: str, job_short: str) -> Iterator[str]:
@@ -370,7 +370,9 @@ def plan_import(
     stats = capsule.get("stats") or {}
     total_bytes = int(stats.get("bytes") or 0) or sum(int(s.get("bytes") or 0) for s in segments)
     if total_bytes > max_session_bytes:
-        raise PayloadTooLarge("session exceeds max_session_bytes", size=total_bytes, limit=max_session_bytes)
+        raise PayloadTooLarge(
+            "the session is larger than max_session_mb allows here", size=total_bytes, limit=max_session_bytes
+        )
     job_short = short(str(capsule.get("job_id") or "")) or "import"
     taken: set[str] = set()
     tip_row = segments[-1]["row_object"]
@@ -510,11 +512,11 @@ def _import_a(db, payload: list[dict], plan: ImportPlan) -> tuple[list[dict], se
             result = db.import_sessions(payload)
         except sqlite3.IntegrityError as exc:
             if "title" not in str(exc):
-                raise ImportFailed("import_sessions failed", error=str(exc)[:300]) from exc
+                raise ImportFailed("Hermes refused to import the session", error=str(exc)[:300]) from exc
             payload = _retitle(db, payload, plan)
             continue
         if not isinstance(result, Mapping):
-            raise ImportFailed("import_sessions gave no result")
+            raise ImportFailed("Hermes did not report a result for the import")
         if result.get("ok") is True:
             listed = result.get("imported_ids")
             if isinstance(listed, list):
@@ -530,8 +532,8 @@ def _import_a(db, payload: list[dict], plan: ImportPlan) -> tuple[list[dict], se
         errors = [str(e) for e in (result.get("errors") or [])]
         if any("was deleted here" in e for e in errors):
             raise _TombstoneHit(errors)
-        raise ImportFailed("import_sessions refused the lineage", errors=errors[:8])
-    raise ImportFailed("could not find a free title")
+        raise ImportFailed("Hermes refused to import the session history", errors=errors[:8])
+    raise ImportFailed("could not find a free title for the imported session")
 
 
 class _TombstoneHit(Exception):
@@ -597,7 +599,10 @@ def _import_b_prime(
             live.append(msg)
             continue
         if seen_live:
-            raise ImportFailed("an archived row follows a live row; path B' cannot reproduce it", segment=seg.old_id)
+            raise ImportFailed(
+                "the session history has a shape this import cannot rebuild (an archived message after a live one)",
+                segment=seg.old_id,
+            )
         msg["active"] = 1
         msg.pop("compacted", None)
         archived_chunk.append(msg)
@@ -612,7 +617,8 @@ def _import_b_prime(
         db.archive_and_compact(seg.new_id, live)
     elif db.get_messages(seg.new_id, limit=1):
         raise ImportFailed(
-            "segment has archived rows but no live rows; path B' cannot reproduce it", segment=seg.old_id
+            "the session history has a shape this import cannot rebuild (a part with only archived messages)",
+            segment=seg.old_id,
         )
     title = _set_title(db, seg.new_id, seg.title, plan)
     if not seg.is_tip:
@@ -665,7 +671,7 @@ def import_hidden(
     capsule = read_capsule_doc(store, capsule_id, max_json_bytes=max_json_bytes, max_session_bytes=max_session_bytes)
     segments = capsule["segments"]
     if len(segments) != len(plan.segments):
-        raise BadRequest("import plan does not match the capsule", field="plan.segments")
+        raise BadRequest("the import plan does not match the transferred conversation", field="plan.segments")
     for attempt in range(3):
         txn = _Txn(db)
         try:
@@ -681,7 +687,9 @@ def import_hidden(
                 parent = new_id
             plan = replace(plan, segments=tuple(renewed))
             if attempt == 2:
-                raise ImportFailed("planned ids collide with deleted sessions on this host") from None
+                raise ImportFailed(
+                    "the planned session ids are already used by deleted sessions on this machine"
+                ) from None
         except BaseException:
             txn.discard()
             raise
@@ -726,7 +734,7 @@ def _import_once(
             raise Cancelled("import cancelled")
         row = segment["row_object"]
         if str(row.get("id")) != seg.old_id:
-            raise BadRequest("import plan does not match the capsule", field="plan.segments")
+            raise BadRequest("the import plan does not match the transferred conversation", field="plan.segments")
         path = seg.path
         session = rewrite_session(row, seg, plan) if path == PATH_A else None
         if session is not None:
@@ -758,7 +766,8 @@ def _import_once(
             titles[seg.new_id] = title
             rewind_total += rewind
             warnings.append(
-                f"segment {seg.new_id} used path B' (over the import limit): token/cost counters start at 0"
+                f"the session part {seg.new_id} was over Hermes' import limit and was imported another way; its token "
+                "and cost counters start at 0"
             )
         paths_used.append(path)
     flush()
@@ -766,26 +775,35 @@ def _import_once(
     tip = new_ids[-1]
     lineage = list(db.get_compression_lineage(tip))
     if lineage != new_ids:
-        raise VerifyFailed("imported lineage shape differs", expected=new_ids, got=lineage)
+        raise VerifyFailed(
+            "the imported session history has another shape than the original", expected=new_ids, got=lineage
+        )
     hashes = capsule["hashes"]
     got_all, got_rows, got_model = _verify(db, new_ids)
     if got_all != hashes.get("h_all") or got_rows != hashes.get("h_rows"):
         raise VerifyFailed(
-            "imported session differs from the capsule",
+            "the imported session differs from the transferred conversation",
             h_all_ok=got_all == hashes.get("h_all"),
             h_rows_ok=got_rows == hashes.get("h_rows"),
         )
     source_version = str((capsule.get("source") or {}).get("hermes_version") or "")
     if got_model != hashes.get("h_model"):
         if local_hermes_version and source_version and local_hermes_version == source_version:
-            raise VerifyFailed("imported model history differs from the capsule", h_model_ok=False)
-        warnings.append("model history hash differs (different Hermes versions repair alternation differently)")
+            raise VerifyFailed(
+                "the history the model sees differs from the original after the import", h_model_ok=False
+            )
+        warnings.append(
+            "the history the model sees differs from the original (different Hermes versions repair the order of user "
+            "and assistant messages differently)"
+        )
     try:
         db.assert_resume_safe(tip)
     except Exception as exc:
-        warnings.append(f"resume guard: {str(exc)[:200]}")
+        warnings.append(f"Hermes' resume check reports a problem with the imported session: {str(exc)[:200]}")
     if rewind_total:
-        warnings.append(f"{rewind_total} rewound row(s) were not transferred (outside every history)")
+        warnings.append(
+            f"{rewind_total} rewound message(s) were not transferred (they are no longer part of the conversation)"
+        )
     path_label = "+".join(dict.fromkeys(paths_used))
     return PreparedInfo(
         tip_id=tip,
@@ -808,11 +826,11 @@ def apply_delta(db, store, delta: DeltaInfo, prepared: PreparedInfo) -> Prepared
     """
     doc = read_json(store, delta.delta_id, max_bytes=MAX_OBJECT_BYTES)
     if not isinstance(doc, dict) or doc.get("kind") != "ctxh.delta" or not isinstance(doc.get("rows"), list):
-        raise BadRequest("not a ctxh.delta document", field="delta")
+        raise BadRequest("the new messages have an unknown format", field="delta")
     rows = []
     for src in doc["rows"]:
         if not isinstance(src, dict) or not isinstance(src.get("role"), str) or not src.get("active", 1):
-            raise BadRequest("delta row is malformed or not live", field="delta.rows")
+            raise BadRequest("a new message is malformed or not live", field="delta.rows")
         msg = rewrite_message(src, prepared.tip_id)
         msg.pop("compacted", None)
         rows.append(msg)
@@ -822,13 +840,13 @@ def apply_delta(db, store, delta: DeltaInfo, prepared: PreparedInfo) -> Prepared
     got_all, got_rows, got_model = _verify(db, lineage)
     if got_all != delta.h_all or got_rows != delta.h_rows:
         raise VerifyFailed(
-            "session differs from the source after the delta",
+            "after adding the new messages, the session differs from the original",
             h_all_ok=got_all == delta.h_all,
             h_rows_ok=got_rows == delta.h_rows,
         )
     warnings = list(prepared.warnings)
     if got_model != delta.h_model:
-        warnings.append("model history hash differs after the delta")
+        warnings.append("after adding the new messages, the history the model sees differs from the original")
     return replace(
         prepared,
         h_all=got_all,
@@ -848,7 +866,7 @@ def unhide(db, prepared: PreparedInfo) -> None:
     row = db.get_session(prepared.tip_id) or {}
     cwd = row.get("cwd")
     if not cwd or not os.path.isdir(cwd):
-        raise ImportFailed("the session's working directory does not exist on this host", cwd=cwd)
+        raise ImportFailed("the session's project folder does not exist on this machine", cwd=cwd)
     db.set_session_hidden(prepared.tip_id, False)
 
 

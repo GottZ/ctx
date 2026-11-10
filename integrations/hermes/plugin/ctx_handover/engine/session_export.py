@@ -87,7 +87,7 @@ def provider_of(row: Mapping) -> str | None:
 def _latest_session_id(db) -> str:
     rows = db.list_sessions_rich(limit=1, min_message_count=1, order_by_last_active=True, include_archived=False)
     if not rows:
-        raise NotFound("no session with messages in this profile")
+        raise NotFound("this Hermes profile has no session with messages to hand over")
     return str(rows[0]["id"])
 
 
@@ -96,7 +96,7 @@ def _offered_session(ref: SessionRef, offer_session: Callable[[str], str | None]
     may claim the offer for the job inside it; its errors pass through)."""
     offer_id = str(ref.offer_id)
     if offer_session is None:
-        raise BadRequest(f"offer {offer_id} cannot be resolved here", field="session_ref.offer_id")
+        raise BadRequest(f"offer {offer_id} cannot be found here", field="session_ref.offer_id")
     sid = offer_session(offer_id)
     if not isinstance(sid, str) or not sid:
         raise NotFound(f"offer {offer_id} not found", offer_id=offer_id)
@@ -139,7 +139,7 @@ def describe(
     elif calling_session:
         sid = calling_session
     else:
-        raise BadRequest("no session given", field="session_ref")
+        raise BadRequest("no session was named", field="session_ref")
     tip = _tip_of(db, sid)
     lineage = tuple(db.get_compression_lineage(tip)) or (tip,)
     row = db.get_session(tip)
@@ -351,7 +351,7 @@ def export_capsule(
     rev_before = _freeze(db.conversation_revision(tip, include_ancestors=True))
     lineage = tuple(db.get_compression_lineage(tip)) or (tip,)
     if lineage != tuple(info.lineage_ids):
-        raise StaleSession("the session's compression lineage changed since it was locked", reason="lineage")
+        raise StaleSession("the session was compacted after it was locked", reason="lineage")
     h_all_stream = HashStream(ALL_ALGO)
     h_rows_stream = HashStream(ROWS_ALGO)
     segments: list[dict] = []
@@ -366,7 +366,9 @@ def export_capsule(
             raise Cancelled("export cancelled")
         seg_row = db.get_session(seg_id)
         if seg_row is None:
-            raise StaleSession("a lineage segment disappeared during export", reason="lineage", session_id=seg_id)
+            raise StaleSession(
+                "a part of the session history disappeared during the export", reason="lineage", session_id=seg_id
+            )
         obj = row_object(seg_row)
         pager = _Pager(store, page_rows, page_bytes)
         counts = {"rows": 0, "active": 0, "archived": 0, "rewind": 0}
@@ -408,7 +410,7 @@ def export_capsule(
     rev_after = _freeze(db.conversation_revision(tip, include_ancestors=True))
     lineage_after = tuple(db.get_compression_lineage(tip)) or (tip,)
     if rev_after != rev_before or lineage_after != lineage:
-        raise StaleSession("the transcript changed during export", reason="revision")
+        raise StaleSession("the conversation changed during the export", reason="revision")
     hashes = {
         "h_all": h_all_stream.hexdigest(),
         "h_rows": h_rows_stream.hexdigest(),
@@ -531,12 +533,12 @@ def export_delta(db, info: SessionInfo, exported: CapsuleInfo, new_rows: list[di
     base = _freeze(exported.revision)
     rows = _appended_rows(db, tip, base, rev_before) if _lineage(db, tip) == tuple(info.lineage_ids) else None
     if rows is None or [int(r["id"]) for r in rows] != [int(r["id"]) for r in new_rows]:
-        raise StaleSession("the transcript changed beyond an append", reason="revision")
+        raise StaleSession("the conversation changed in more than new messages", reason="revision")
     lineage = tuple(db.get_compression_lineage(tip)) or (tip,)
     h_all_now, h_rows_now, h_model_now = _hashes_now(db, tip, lineage)
     rev_after = _freeze(db.conversation_revision(tip, include_ancestors=True))
     if rev_after != rev_before:
-        raise StaleSession("the transcript changed while the delta was read", reason="revision")
+        raise StaleSession("the conversation changed while its new messages were read", reason="revision")
     doc = {
         "kind": "ctxh.delta",
         "v": 1,

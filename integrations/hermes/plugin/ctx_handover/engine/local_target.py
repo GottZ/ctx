@@ -183,9 +183,11 @@ class QuotaSink:
         ok, used, quota = self._ledger.quota_charge(self._job_id, Role.TARGET, nbytes)
         if not ok:
             if quota < 0:
-                raise InvalidState("no confirmed plan for this job on the target", reason="no_quota")
+                raise InvalidState(
+                    "the machine you hand over to has no confirmed plan for this handover", reason="no_quota"
+                )
             raise InsufficientStorage(
-                "The peer sent more data than the confirmed plan allows.",
+                "The machine you hand over from sent more data than the confirmed plan allows.",
                 reason="job_quota",
                 quota_bytes=quota,
                 used_bytes=used,
@@ -301,13 +303,17 @@ class LocalTarget:
         self._ensure_job(job)
         epoch = self.ledger.claim_owner(job.job_id, Role.TARGET, process_owner(), STALE_OWNER_S)
         if epoch is None:
-            raise InvalidState("another process is working on this job", reason="busy_elsewhere", retryable=True)
+            raise InvalidState(
+                "another process on this machine is already working on this handover",
+                reason="busy_elsewhere",
+                retryable=True,
+            )
         return epoch
 
     def _row(self, job: JobContext) -> dict:
         row = self.ledger.job(job.job_id, Role.TARGET)
         if row is None:
-            raise NotFound(f"job {job.job_id} not found")
+            raise NotFound(f"handover job {job.job_id} not found")
         return row
 
     def _ctx(self, job_id: str) -> dict:
@@ -546,7 +552,7 @@ class LocalTarget:
     def _final(self, job: JobContext) -> FinalPlan:
         raw = self._ctx(job.job_id).get("final_plan")
         if raw is None:
-            raise InvalidState("negotiate first", reason="no_plan")
+            raise InvalidState("the plan must be agreed before this step", reason="no_plan")
         return from_wire(FinalPlan, raw)
 
     def _cwd_for(
@@ -601,7 +607,7 @@ class LocalTarget:
         def fn(report) -> dict:
             if capsule.size > job.options.max_session_bytes:
                 raise PayloadTooLarge(
-                    "the session is larger than max_session_mb here",
+                    "the session is larger than max_session_mb allows on the machine you hand over to",
                     size=capsule.size,
                     limit=job.options.max_session_bytes,
                 )
@@ -670,7 +676,11 @@ class LocalTarget:
         p = self.ports
         row = self._row(job)
         if row["state"] in ("committing", "committed", "aborting", "aborted", "expired"):
-            raise InvalidState(f"the target is {row['state']}", reason="state", state=row["state"])
+            raise InvalidState(
+                f"the machine you hand over to cannot do this step now ({row['state']})",
+                reason="state",
+                state=row["state"],
+            )
         ctx = self._ctx(job.job_id)
         self._go(job, row["state"], "preparing")
         final = self._final(job)
@@ -678,7 +688,7 @@ class LocalTarget:
         capsule_doc = p.session_export.read_capsule(self.store, req.capsule.capsule_id, max_json_bytes=MAX_DOC_BYTES)
         pack_doc = self._read_doc(req.pack.pack_id)
         if pack_doc.get("kind") != "ctxh.pack" or pack_doc.get("final_plan_id") != req.final_plan_id:
-            raise VerifyFailed("the pack does not belong to the confirmed final plan", which="final_plan_id")
+            raise VerifyFailed("the project files sent do not belong to the confirmed plan", which="final_plan_id")
         self._remember(job, case_pairs=self._case_pairs(pack_doc), paused=self._paused(capsule_doc))
         items = {i.item_id: i for i in final.plan.items}
         decisions = {d.item_id: d for d in final.decisions}
@@ -695,7 +705,9 @@ class LocalTarget:
                 item = items.get(pack_item.get("item_id"))
                 decision = decisions.get(pack_item.get("item_id"))
                 if item is None or decision is None:
-                    raise VerifyFailed("pack item not in the final plan", item=pack_item.get("item_id"))
+                    raise VerifyFailed(
+                        "a part of the project files is not in the confirmed plan", item=pack_item.get("item_id")
+                    )
                 if decision.mode is DestMode.SKIP or (
                     not pack_item.get("object") and item.kind in (ItemKind.EXTRA_FILE, ItemKind.HERMES_FILE)
                 ):
@@ -743,7 +755,7 @@ class LocalTarget:
             # different ones — loaders repair the alternation differently); here the transcript decides (review M7)
             if (prepared.h_all, prepared.h_rows) != (req.capsule.h_all, req.capsule.h_rows):
                 p.session_import.discard(db, prepared)
-                raise VerifyFailed("The imported transcript did not match. Nothing was activated.", which="hashes")
+                raise VerifyFailed("The imported conversation did not match. Nothing was activated.", which="hashes")
             tip = import_plan.segments[-1] if import_plan.segments else None
             session = capsule_doc.get("session") if isinstance(capsule_doc.get("session"), dict) else {}
             self._remember(
@@ -819,13 +831,15 @@ class LocalTarget:
             kind = plan_kind or pack_kind
             name = str(pack_item.get("rel") or "").replace("\\", "/").rsplit("/", 1)[-1]
             if kind not in HERMES_FILE_KINDS or (plan_kind and pack_kind and plan_kind != pack_kind):
-                skipped.append(f"session file {name or '?'} not placed: unknown kind")
+                skipped.append(f"the session file {name or '?'} was not placed: its kind is unknown")
                 continue
             try:
                 (m,) = self.store.manifests([pack_item["object"]])
                 dest = self.ports.hermes_files.target_path(kind, name, m.sha256, self.hermes, tip_id)
             except (HandoverError, KeyError, ValueError):
-                skipped.append(f"session file {name or '?'} not placed: refused name or missing object")
+                skipped.append(
+                    f"the session file {name or '?'} was not placed: its name was refused or its data is missing"
+                )
                 continue
             placed.append({"pack_item": {**pack_item, "hermes_kind": kind}, "target": str(dest)})
         return placed, skipped
@@ -877,11 +891,11 @@ class LocalTarget:
         items = [(i, _as_landed(d, actual.get(d.item_id))) for i, d in items]  # L3-F23: where PREPARE put it
         reports = private_dir(self.data_dir / "reports")
         report_path = reports / f"{job.job_id}.md"
-        kind = "bundle" if job.mode is Mode.IMPORT else "peer"
+        kind = "handover file" if job.mode is Mode.IMPORT else "paired device"
         origin = f"{'verified' if self.peer_verified else 'unverified'} {kind}"
         if job.mode is Mode.IMPORT and not self.source_peer_id:
             # V13: no paired peer is bound to this import, so nothing that arrived can find its way back
-            origin += "; no return path to the origin"
+            origin += "; no paired device is linked to it, so nothing can be returned to where it came from"
         note_parts = dict(req.note_parts or {})
         if job.mode is Mode.IMPORT:
             # DESIGN §5.4 (re-import guard): every bundle import note says so — ``note`` renders the sentence
@@ -925,7 +939,11 @@ class LocalTarget:
         def fn(report) -> dict:
             row = self._row(job)
             if row["state"] != "prepared":
-                raise InvalidState(f"the target is {row['state']}", reason="state", state=row["state"])
+                raise InvalidState(
+                    f"the machine you hand over to cannot do this step now ({row['state']})",
+                    reason="state",
+                    state=row["state"],
+                )
             ctx = self._ctx(job.job_id)
             prepared = from_wire(PreparedInfo, ctx["prepared"])
             self._go(job, "prepared", "delta_applying")
@@ -948,7 +966,11 @@ class LocalTarget:
         def fn(report) -> dict:
             row = self._row(job)
             if row["state"] in ("committing", "committed", "aborted", "expired"):
-                raise InvalidState(f"the target is {row['state']}", reason="state", state=row["state"])
+                raise InvalidState(
+                    f"the machine you hand over to cannot do this step now ({row['state']})",
+                    reason="state",
+                    state=row["state"],
+                )
             ctx = self._ctx(job.job_id)
             self._go(job, row["state"], "resetting")
             if ctx.get("prepared") is not None:
@@ -965,7 +987,11 @@ class LocalTarget:
         if row["state"] == "prepared":
             self._go(job, "prepared", "committing")
         elif row["state"] not in ("committing", "committed"):
-            raise InvalidState(f"the target is {row['state']}", reason="state", state=row["state"])
+            raise InvalidState(
+                f"the machine you hand over to cannot do this step now ({row['state']})",
+                reason="state",
+                state=row["state"],
+            )
         return self._start(job, "commit", "commit", lambda report: self._commit_body(job, report), exclusive=True)
 
     def recover(self, job: JobContext) -> OpStatus | None:
@@ -1089,7 +1115,11 @@ class LocalTarget:
         if row["state"] == "committed" and ctx.get("ack"):
             return dict(ctx["ack"])
         if row["state"] != "committing":
-            raise InvalidState(f"the target is {row['state']}", reason="state", state=row["state"])
+            raise InvalidState(
+                f"the machine you hand over to cannot do this step now ({row['state']})",
+                reason="state",
+                state=row["state"],
+            )
         steps = self._steps(job)
         direction, done_fwd, done_inv, results = self._journal_state(job.job_id)
         failure: dict | None = None
@@ -1169,7 +1199,7 @@ class LocalTarget:
             self._step_event(job, "done", name, "rollback", undo_result if isinstance(undo_result, dict) else None)
         if not attention:
             self._cleanup(job, discard_session=True)
-        last_error = dict(failure or {"code": "import_failed", "message": "commit failed"})
+        last_error = dict(failure or {"code": "import_failed", "message": "finishing the handover failed"})
         if attention:
             last_error["needs_attention"] = attention
         self.ledger.job_update(job.job_id, Role.TARGET, last_error=last_error)
@@ -1301,7 +1331,9 @@ class LocalTarget:
         row = self._row(job)
         ctx = self._ctx(job.job_id)
         if row["state"] != "committed" or not ctx.get("ack"):
-            raise InvalidState("continue after the commit only", reason="state", state=row["state"])
+            raise InvalidState(
+                "a turn can only start after the handover has finished", reason="state", state=row["state"]
+            )
         if ctx.get("continue") is not None:
             return from_wire(ContinueResult, ctx["continue"])
         ack = from_wire(CommitAck, ctx["ack"])
@@ -1333,13 +1365,19 @@ class LocalTarget:
             return
         state = row["state"]
         if state in ("committing", "committed"):
-            raise InvalidState(f"the target is {state}", reason="state", state=state)
+            raise InvalidState(
+                f"the machine you hand over to cannot do this step now ({state})", reason="state", state=state
+            )
         if state in ("aborted", "expired"):
             return
         final_state = "expired" if reason == "expired" else "aborted"
         lock = self.ops.job_lock(job.job_id)
         if lock is not None and not lock.acquire():
-            raise InvalidState("another process still works on this job", reason="busy_elsewhere", retryable=True)
+            raise InvalidState(
+                "another process on this machine is still working on this handover",
+                reason="busy_elsewhere",
+                retryable=True,
+            )
         try:
             self._abort_locked(job, state, reason, final_state)
         finally:

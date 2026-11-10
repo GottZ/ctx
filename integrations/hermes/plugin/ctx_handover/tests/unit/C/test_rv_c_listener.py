@@ -249,7 +249,7 @@ def test_export_keeps_a_partial_directory_it_did_not_create(tmp_path):
     target = BundleTarget(out, exp.identity, as_dir=False, declared_facts=None, ledger=exp.ledger)
     with pytest.raises(ConflictError) as info:
         target.open_job(job_ctx())
-    assert "not an export staging" in info.value.message
+    assert "was not left there by an export" in info.value.message
     assert (partial / "notes.txt").read_text(encoding="utf-8") == "the user's own file"
 
     (partial / "notes.txt").unlink()  # an empty directory holds nothing: taken over

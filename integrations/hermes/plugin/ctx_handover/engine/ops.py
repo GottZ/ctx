@@ -75,7 +75,7 @@ LOCK_RETRY_S = 0.025
 
 _INTERRUPTED = {
     "code": "internal",
-    "message": "operation interrupted (process restart); start it again",
+    "message": "this step was interrupted because the process restarted; it has to be started again",
     "retryable": True,
     "details": {"reason": "interrupted"},
 }
@@ -403,10 +403,10 @@ def read_object(src: BlockSource, object_id: str, *, max_bytes: int, cache: dict
             if sha256_hex(raw) == bid:
                 got[bid] = raw
     if any(b not in got for b in want):
-        raise BlockCorrupt("source is missing blocks of a document", object_id=object_id)
+        raise BlockCorrupt("the machine you hand over from is missing parts of the data", object_id=object_id)
     data = b"".join(got[b] for b in m.blocks)
     if sha256_hex(data) != m.sha256 or len(data) != m.size:
-        raise BlockCorrupt("document object hash mismatch", object_id=object_id)
+        raise BlockCorrupt("transferred data is damaged (it does not match its checksum)", object_id=object_id)
     if cache is not None:
         cache.update(got)
     return data

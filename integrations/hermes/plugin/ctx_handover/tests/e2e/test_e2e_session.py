@@ -62,10 +62,11 @@ def test_e06_session_over_the_import_limits(lab, ev):
     ev.write("source-hashes.json", hashes_a)
     assert hashes_a["rows"] > 10_000, hashes_a
     res, job, sid_b = _pull(lab, ev, sid)
-    # the target reports the import path as a job warning ("segment … used path B' (over the import limit)")
+    # the target reports the import path B′ as a job warning ("… was over Hermes' import limit and was imported another
+    # way …")
     said = " ".join(str(w) for w in job.get("warnings") or []) + "\n" + res.text
     ev.write("import-path.txt", said)
-    assert "path B'" in said, said[-1500:]
+    assert "over Hermes' import limit and was imported another way" in said, said[-1500:]
     hashes_b = lab.hashes("b", sid_b)
     ev.write("target-hashes.json", hashes_b)
     for key in ("h_all", "h_rows", "h_model", "model_norm", "display_norm", "rows"):

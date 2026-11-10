@@ -279,7 +279,9 @@ def put_object(store, data: bytes, media: str = MEDIA_JSON):
     doc, blocks = jsonutil.object_manifest(data, media)
     accepted, rejected = store.write_blocks(blocks)
     if rejected:
-        raise BlockCorrupt("block store refused session blocks", rejected=[list(r) for r in rejected][:8])
+        raise BlockCorrupt(
+            "the storage refused parts of the conversation data", rejected=[list(r) for r in rejected][:8]
+        )
     del accepted
     manifest = ObjectManifest(
         doc["sha256"], doc["size"], doc["block_size"], tuple(doc["blocks"]), media, jsonutil.object_id(doc)
@@ -297,7 +299,7 @@ def object_manifest(store, object_id: str):
     """The manifest of ``object_id`` from a ``BlockSource`` (``NotFound`` when unknown)."""
     found = store.manifests([object_id])
     if not found:
-        raise NotFound("session object not found", object_id=object_id)
+        raise NotFound("the conversation data was not found", object_id=object_id)
     return found[0]
 
 
@@ -314,7 +316,10 @@ def read_object(store, object_id: str, *, max_bytes: int):
     jsonutil.check_object_manifest(_manifest_doc(manifest), object_id)
     if manifest.size > max_bytes:
         raise PayloadTooLarge(
-            "session object exceeds the receiver limit", object_id=object_id, size=manifest.size, limit=max_bytes
+            "the conversation data is larger than the receiving side allows",
+            object_id=object_id,
+            size=manifest.size,
+            limit=max_bytes,
         )
     read_object_bytes = getattr(store, "read_object_bytes", None)
     if callable(read_object_bytes):
@@ -322,7 +327,7 @@ def read_object(store, object_id: str, *, max_bytes: int):
     else:
         data = _read_blocks(store, manifest)
     if len(data) != manifest.size or sha256_hex(data) != manifest.sha256:
-        raise BlockCorrupt("session object does not match its manifest", object_id=object_id)
+        raise BlockCorrupt("the conversation data does not match its checksum", object_id=object_id)
     return data
 
 
@@ -333,11 +338,11 @@ def _read_blocks(store, manifest: ObjectManifest) -> bytes:
         if block_id in got or block_id not in wanted:
             continue
         if raw is None or sha256_hex(raw) != block_id:
-            raise BlockCorrupt("session block does not match its id", block_id=block_id)
+            raise BlockCorrupt("a piece of the conversation data does not match its checksum", block_id=block_id)
         got[block_id] = raw
     missing = [b for b in wanted if b not in got]
     if missing:
-        raise BlockCorrupt("session blocks missing", missing=missing[:8], count=len(missing))
+        raise BlockCorrupt("parts of the conversation data are missing", missing=missing[:8], count=len(missing))
     return b"".join(got[b] for b in manifest.blocks)
 
 
@@ -364,33 +369,35 @@ def read_capsule_doc(
     """
     doc = read_json(store, capsule_id, max_bytes=max_json_bytes)
     if not isinstance(doc, dict) or doc.get("kind") != "ctxh.capsule" or doc.get("v") != 1:
-        raise BadRequest("not a ctxh.capsule v1 document", field="capsule")
+        raise BadRequest("the conversation data has an unknown format", field="capsule")
     segments = doc.get("segments")
     if not isinstance(segments, list) or not segments:
-        raise BadRequest("capsule has no segments", field="capsule.segments")
+        raise BadRequest("the conversation data is empty", field="capsule.segments")
     if len(segments) > max_segments:
-        raise PayloadTooLarge("capsule has too many segments", count=len(segments), limit=max_segments)
+        raise PayloadTooLarge(
+            "the session has too many compacted parts to transfer", count=len(segments), limit=max_segments
+        )
     page_ids: list[str] = []
     for index, segment in enumerate(segments):
         if not isinstance(segment, dict) or not isinstance(segment.get("row_object"), dict):
-            raise BadRequest("capsule segment is malformed", field=f"capsule.segments[{index}]")
+            raise BadRequest("the conversation data is malformed", field=f"capsule.segments[{index}]")
         pages = segment.get("pages")
         if not isinstance(pages, list) or any(not isinstance(p, str) for p in pages):
-            raise BadRequest("capsule segment pages are malformed", field=f"capsule.segments[{index}].pages")
+            raise BadRequest("the conversation data is malformed", field=f"capsule.segments[{index}].pages")
         page_ids.extend(pages)
         if len(page_ids) > max_pages:
-            raise PayloadTooLarge("capsule has too many pages", limit=max_pages)
+            raise PayloadTooLarge("the conversation is too long to transfer", limit=max_pages)
     for key in ("session", "hashes"):
         if not isinstance(doc.get(key), dict):
-            raise BadRequest(f"capsule {key} is malformed", field=f"capsule.{key}")
+            raise BadRequest(f"the conversation data is malformed ({key})", field=f"capsule.{key}")
     total = 0
     for start in range(0, len(page_ids), 4096):
         for manifest in store.manifests(page_ids[start : start + 4096]):
             if manifest.size > max_object_bytes:
                 raise PayloadTooLarge(
-                    "capsule page exceeds the object limit", size=manifest.size, limit=max_object_bytes
+                    "a part of the conversation data is larger than allowed", size=manifest.size, limit=max_object_bytes
                 )
             total += manifest.size
             if total > max_session_bytes:
-                raise PayloadTooLarge("capsule exceeds max_session_bytes", limit=max_session_bytes)
+                raise PayloadTooLarge("the conversation is larger than max_session_mb allows", limit=max_session_bytes)
     return doc

@@ -121,7 +121,7 @@ _NO_SPACE = frozenset(e for e in (errno.ENOSPC, getattr(errno, "EDQUOT", None)) 
 
 
 def _bad(message: str, **details) -> BadRequest:
-    return BadRequest(f"bundle rejected: {message}", field="bundle", **details)
+    return BadRequest(f"this handover file cannot be imported: {message}", field="bundle", **details)
 
 
 def write_error(exc: OSError, out: Path, need: int = 0) -> HandoverError:
@@ -137,7 +137,7 @@ def write_error(exc: OSError, out: Path, need: int = 0) -> HandoverError:
         except OSError:
             free = 0
         return InsufficientStorage(
-            f"not enough space to write the bundle {out}",
+            f"not enough space to write the handover file {out}",
             need_bytes=max(0, int(need)),
             free_bytes=int(free),
             path=str(folder),
@@ -146,7 +146,7 @@ def write_error(exc: OSError, out: Path, need: int = 0) -> HandoverError:
         )
     reason = exc.strerror or type(exc).__name__
     return HandoverError(
-        f"the bundle {out} could not be written ({reason})",
+        f"the handover file {out} could not be written ({reason})",
         retryable=False,
         path=str(exc.filename or out),
         errno=exc.errno,
@@ -256,16 +256,18 @@ class _DirSink:
         try:
             return [known[i] for i in object_ids]
         except KeyError as exc:
-            raise NotFound("object not in the bundle", object_id=str(exc)) from None
+            raise NotFound("the handover file is incomplete: a part of it is missing", object_id=str(exc)) from None
 
     def read_blocks(self, ids: Sequence[str]) -> Iterator[tuple[str, bytes]]:
         for block_id in ids:
             try:
                 raw = self._bpath(block_id).read_bytes()
             except FileNotFoundError:
-                raise NotFound("block not in the bundle", block_id=block_id) from None
+                raise NotFound("the handover file is incomplete: a piece of it is missing", block_id=block_id) from None
             if hashlib.sha256(raw).hexdigest() != block_id:
-                raise BlockCorrupt("bundle block does not match its id", block_id=block_id)
+                raise BlockCorrupt(
+                    "the handover file is damaged: a piece of it does not match its checksum", block_id=block_id
+                )
             yield block_id, raw
 
 
@@ -403,7 +405,7 @@ class BundleTarget:
             other = doc.get("job_id") if doc is not None else None
             if isinstance(other, str) and self._job_running(other):
                 raise ConflictError(
-                    f"another export (job {other}) writes to {self.out}; choose another path", path=str(self.out)
+                    f"another export (job {other}) is writing to {self.out}; choose another path", path=str(self.out)
                 )
             if self._partial.is_symlink():
                 raise ConflictError(f"{self._partial} is a symbolic link; choose another path", path=str(self.out))
@@ -414,8 +416,8 @@ class BundleTarget:
                     os.rmdir(self._partial)
                 except OSError:
                     raise ConflictError(
-                        f"{self._partial} exists and is not an export staging of ctx_handover; remove it or choose "
-                        "another path",
+                        f"{self._partial} exists and was not left there by an export of ctx_handover; remove it or "
+                        "choose another path",
                         path=str(self.out),
                     ) from None
             shutil.rmtree(self._partial, ignore_errors=True)
@@ -475,7 +477,7 @@ class BundleTarget:
             )
             if need > free:
                 raise InsufficientStorage(
-                    "not enough space for the bundle",
+                    "not enough space for the handover file",
                     need_bytes=need,
                     free_bytes=free,
                     path=str(self.out.parent),
@@ -507,7 +509,9 @@ class BundleTarget:
             self._sync(job)
             op_id = f"bundle-stage-{job.job_id}"
             if not self._sink.complete(capsule.capsule_id):
-                return self._record(_failed(op_id, NotFound("capsule object incomplete in the bundle")))
+                return self._record(
+                    _failed(op_id, NotFound("the handover file is incomplete: the conversation is missing"))
+                )
             self._capsule = capsule
             self._state = "context_staged"
             return self._record(
@@ -545,7 +549,12 @@ class BundleTarget:
             self._sync(job)
             op_id = f"bundle-prepare-{job.job_id}"
             if self._capsule is None or not self._sink.complete(req.pack.pack_id):
-                return self._record(_failed(op_id, NotFound("capsule or pack incomplete in the bundle")))
+                return self._record(
+                    _failed(
+                        op_id,
+                        NotFound("the handover file is incomplete: the conversation or the project files are missing"),
+                    )
+                )
             self._pack = req.pack
             self._request = req
             self._state = "prepared"
@@ -557,7 +566,9 @@ class BundleTarget:
             self._sync(job)
             op_id = f"bundle-delta-{job.job_id}"
             if self._request is None or not self._sink.complete(delta.delta_id):
-                return self._record(_failed(op_id, NotFound("delta object incomplete in the bundle")))
+                return self._record(
+                    _failed(op_id, NotFound("the handover file is incomplete: the latest messages are missing"))
+                )
             self._delta = delta
             return self._record(_done(op_id, to_wire(self._prepared())))
 
@@ -801,7 +812,7 @@ class BundleTarget:
         }
         manifest_bytes = canonical_bytes(manifest)
         if len(manifest_bytes) > MAX_MANIFEST_BYTES:
-            raise HandoverError("bundle manifest too large", size=len(manifest_bytes))
+            raise HandoverError("the contents list of the handover file is too large", size=len(manifest_bytes))
         sig = self._identity.sign(manifest_bytes).encode("ascii")
         tmp_dir = self._partial / ".tmp"
         write_private(self._partial / "CTXH-BUNDLE", MAGIC, tmp_dir)
@@ -813,7 +824,10 @@ class BundleTarget:
                 if path.parent.name + path.name not in referenced:
                     path.unlink()
             if self.out.exists():
-                raise ConflictError(f"{self.out} appeared during the export", path=str(self.out))
+                raise ConflictError(
+                    f"{self.out} was created by something else during the export; choose another path",
+                    path=str(self.out),
+                )
             self._state_path.unlink(missing_ok=True)  # not a bundle member; from here on the bundle is the record
             os.rename(self._partial, self.out)
         else:
@@ -855,7 +869,10 @@ class BundleTarget:
                 fh.flush()
                 os.fsync(fh.fileno())
             if self.out.exists():
-                raise ConflictError(f"{self.out} appeared during the export", path=str(self.out))
+                raise ConflictError(
+                    f"{self.out} was created by something else during the export; choose another path",
+                    path=str(self.out),
+                )
             os.replace(tmp, self.out)
         except BaseException:
             try:
@@ -880,13 +897,13 @@ class _Reader:
         self.sizes: dict[str, int] = {}
         self._members: dict[str, tarfile.TarInfo] = {}
         if self.path.is_symlink():
-            raise _bad("the bundle path is a symlink")
+            raise _bad("the path is a symbolic link; give the path of the file itself")
         if self.path.is_dir():
             self._index_dir()
         elif self.path.is_file():
             self._index_tar()
         else:
-            raise NotFound("bundle not found", path=str(self.path))
+            raise NotFound("the handover file was not found", path=str(self.path))
 
     @staticmethod
     def _check_name(name: str) -> None:
@@ -913,16 +930,18 @@ class _Reader:
         try:
             tf = tarfile.open(self.path, mode="r:")  # noqa: SIM115 - kept open for streaming reads, closed in close()
         except (tarfile.TarError, OSError) as exc:
-            raise _bad(f"not an uncompressed tar ({type(exc).__name__})") from None
+            raise _bad(
+                f"it is not an uncompressed tar file ({type(exc).__name__}); do not compress or repack a handover file"
+            ) from None
         try:
             for info in tf:
                 if info.type not in (tarfile.REGTYPE, tarfile.AREGTYPE):
-                    raise _bad("only regular files are allowed", member=info.name[:200])
+                    raise _bad("it contains entries that are not regular files", member=info.name[:200])
                 self._add(info.name, info.size)
                 self._members[info.name] = info
         except tarfile.TarError as exc:
             tf.close()
-            raise _bad(f"corrupt tar ({type(exc).__name__})") from None
+            raise _bad(f"the file is damaged ({type(exc).__name__})") from None
         except BaseException:
             tf.close()
             raise
@@ -933,7 +952,7 @@ class _Reader:
         for entry in os.scandir(root):
             rel = entry.name
             if entry.is_symlink():
-                raise _bad("symlink in a directory bundle", member=rel)
+                raise _bad("the handover folder contains a symbolic link", member=rel)
             if entry.is_dir(follow_symlinks=False):
                 if rel not in {"blocks", "manifests"}:
                     raise _bad("unexpected directory", member=rel)
@@ -943,12 +962,12 @@ class _Reader:
                     for leaf in os.scandir(sub.path):
                         name = f"{rel}/{sub.name}/{leaf.name}"
                         if leaf.is_symlink() or not leaf.is_file(follow_symlinks=False):
-                            raise _bad("only regular files are allowed", member=name)
+                            raise _bad("it contains entries that are not regular files", member=name)
                         self._add(name, leaf.stat(follow_symlinks=False).st_size)
             elif entry.is_file(follow_symlinks=False):
                 self._add(rel, entry.stat(follow_symlinks=False).st_size)
             else:
-                raise _bad("only regular files are allowed", member=rel)
+                raise _bad("it contains entries that are not regular files", member=rel)
 
     def read(self, name: str, cap: int) -> bytes:
         size = self.sizes.get(name)
@@ -965,7 +984,7 @@ class _Reader:
                 with os.fdopen(fd, "rb") as fh:
                     data = fh.read(cap + 1)
         if len(data) != size:
-            raise _bad("member size changed while reading", member=name)
+            raise _bad("the file changed while it was read; do not change it during the import", member=name)
         return data
 
     def close(self) -> None:
@@ -987,12 +1006,12 @@ def _validate(reader: _Reader) -> tuple[dict, bytes, bytes, dict[str, ObjectMani
         if name not in reader.sizes:
             raise _bad(f"missing {name}")
     if reader.read("CTXH-BUNDLE", 64) != MAGIC:
-        raise _bad("not a ctxh bundle (magic)")
+        raise _bad("it is not a handover file (.ctxh.tar)")
     manifest_bytes = reader.read("manifest.json", MAX_MANIFEST_BYTES)
     sig = reader.read("manifest.sig", MAX_SIG_BYTES).strip()
     manifest = loads_bounded(manifest_bytes, max_bytes=MAX_MANIFEST_BYTES, max_depth=64)
     if not isinstance(manifest, dict) or manifest.get("kind") != "ctxh.bundle" or manifest.get("v") != 1:
-        raise _bad("unsupported bundle manifest")
+        raise _bad("its format is not supported (made by another plugin version?)")
     job_id = manifest.get("job_id")
     if not isinstance(job_id, str) or not ULID_RE.match(job_id):
         raise _bad("invalid job id")
@@ -1094,13 +1113,15 @@ class _BundleBlocks:
         try:
             return [self._objects[i] for i in object_ids]
         except KeyError as exc:
-            raise NotFound("object not in the bundle", object_id=str(exc)) from None
+            raise NotFound("the handover file is incomplete: a part of it is missing", object_id=str(exc)) from None
 
     def read_blocks(self, ids: Sequence[str]) -> Iterator[tuple[str, bytes]]:
         for block_id in ids:
             raw = self._reader.read(_block_name(block_id), BLOCK_SIZE)
             if hashlib.sha256(raw).hexdigest() != block_id:
-                raise BlockCorrupt("bundle block does not match its id", block_id=block_id)
+                raise BlockCorrupt(
+                    "the handover file is damaged: a piece of it does not match its checksum", block_id=block_id
+                )
             yield block_id, raw
 
     def object_bytes(self, object_id: str) -> bytes:
@@ -1109,7 +1130,9 @@ class _BundleBlocks:
             raise _bad("document object too large", object_id=object_id, reason="too_large")
         data = b"".join(raw for _i, raw in self.read_blocks(list(m.blocks)))
         if hashlib.sha256(data).hexdigest() != m.sha256:
-            raise BlockCorrupt("bundle object does not match its manifest", object_id=object_id)
+            raise BlockCorrupt(
+                "the handover file is damaged: a part of it does not match its checksum", object_id=object_id
+            )
         return data
 
 
@@ -1141,14 +1164,15 @@ class BundleSource:
             self.verified = self.signer is not None
             if not self.verified and not trust_unsigned:
                 raise Unauthorized(
-                    "the bundle is not signed by a paired, non-revoked peer; import it with --trust-unsigned only "
-                    "if you know where it comes from",
+                    "the handover file is not signed by a paired device (or that pairing was revoked); import it with "
+                    "--trust-unsigned only if you know where it comes from",
                     exporter=str(self.manifest["exporter"].get("name", ""))[:64],
                 )
             seen = ledger.bundle_import_seen(self.manifest["job_id"])
             if seen and not again:
                 raise ConflictError(
-                    f"this bundle was already imported here as session {seen}; use --again to import it once more",
+                    f"this handover file was already imported here as session {seen}; use --again to import it once "
+                    "more",
                     session_id=seen,
                 )
         except BaseException:

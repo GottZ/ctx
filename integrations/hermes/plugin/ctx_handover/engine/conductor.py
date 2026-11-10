@@ -153,6 +153,11 @@ PEER_SIDE = {Mode.PUSH: "target", Mode.PULL: "source"}
 """The side of a job that runs on the peer (push: the target, pull: the source); an export and an import have both
 sides on this host. Only this side may stay unconfirmed when ``cancel --force`` ends a job (``force_abort``)."""
 
+_SIDE_WORD = {"source": "from", "target": "to"}
+"""The word after "the machine you hand over" for a side in a user text."""
+_CONFIRM_WORD = {"retired": "handed over", "released": "free again"}
+"""The plain words for the source state a conductor waits for (``_unconfirmed``)."""
+
 REQUIRED_CAPS = ("session.v1", "blocks.v1")
 ANSWERS = frozenset({"yes", "no_proposed", "show_plan", "cancel"})
 """The answers ``confirm(info)`` may give (DESIGN §14.1, W112); anything else ends the job like ``cancel``."""
@@ -267,7 +272,9 @@ class VerifiedBlocks:
         ids = list(object_ids)
         got = list(self._src.manifests(ids))
         if len(got) != len(ids):
-            raise BlockCorrupt("the source returned another number of manifests", asked=len(ids), got=len(got))
+            raise BlockCorrupt(
+                "the machine you hand over from did not describe all requested data", asked=len(ids), got=len(got)
+            )
         out: list[ObjectManifest] = []
         for oid, m in zip(ids, got, strict=True):
             check_object_manifest(object_manifest_doc(m.sha256, m.size, m.block_size, m.blocks, m.media), oid)
@@ -417,7 +424,7 @@ def move_object(
     for start in range(0, len(order), max_ids):
         still.extend(dst.missing(order[start : start + max_ids]))
     if still:
-        raise BlockCorrupt(f"{len(still)} blocks could not be transferred", missing=len(still))
+        raise BlockCorrupt(f"{len(still)} pieces of the data could not be transferred", missing=len(still))
     state["done"] = total
     report()
 
@@ -487,7 +494,7 @@ class Conductor:
         self._refresh_s = max(5.0, float(job.options.lease_ttl_s) / 4.0)
         row = ledger.job(job.job_id, Role.CONDUCTOR)
         if row is None:
-            raise NotFound(f"conductor job {job.job_id} not found")
+            raise NotFound(f"handover {job.job_id} not found on this machine")
         params = row["params"] or {}
         self._session_ref = from_wire(SessionRef, params.get("session_ref") or {})
         # ``start_job(include_secret=…)`` keeps these in the row, never in ``Options`` (X07)
@@ -654,7 +661,7 @@ class Conductor:
     def _load(self) -> None:
         row = self.ledger.job(self.job.job_id, Role.CONDUCTOR)
         if row is None:
-            raise NotFound(f"conductor job {self.job.job_id} not found")
+            raise NotFound(f"handover {self.job.job_id} not found on this machine")
         ctx: dict = {}
         for ev in self.ledger.events(self.job.job_id, Role.CONDUCTOR):
             data = ev["data"] or {}
@@ -841,7 +848,7 @@ class Conductor:
             self._go(S.IN_DOUBT, commit_failed=not is_transient(err))
             return True
         if st in (S.RETIRED, S.CONTINUING):
-            self._warn(f"continuation: {err}")
+            self._warn(f"the session was handed over, but no turn was started there: {err}")
             self._go(S.DONE)
             return True
         if st in FORWARD_STATES:
@@ -916,7 +923,9 @@ class Conductor:
 
     def _check_fenced(self) -> None:
         if self._fenced:
-            raise Fenced("the job was adopted by another process", reason="stale_epoch", epoch=self.job.epoch)
+            raise Fenced(
+                "another process on this machine took over this handover", reason="stale_epoch", epoch=self.job.epoch
+            )
 
     def _check_cancel(self) -> None:
         if self._state in CANCELLABLE and (self.ledger.cancel_requested(self.job.job_id) or self.job.cancelled()):
@@ -935,7 +944,7 @@ class Conductor:
                 self._lease_beat(now)
         self._check_fenced()
         if self._lease_lost and self._state in SUSPENDABLE | PREPARE_PHASE - {S.SOURCE_PREPARED}:
-            raise LeaseLost("the source session's turn lease was lost before the handover was prepared")
+            raise LeaseLost("the session could not stay locked for the handover, so nothing was handed over")
 
     def _owner_beat(self, now: float) -> None:
         self._last_owner_hb = now
@@ -1059,12 +1068,23 @@ class Conductor:
         ht = self.target.hello()
         for side, h in (("source", hs), ("target", ht)):
             if WIRE_MAJOR not in tuple(h.majors):
-                raise VersionUnsupported(f"{side} speaks wire {list(h.majors)}, this side {WIRE_MAJOR}")
+                raise VersionUnsupported(
+                    f"the machine you hand over {_SIDE_WORD[side]} uses an incompatible version of ctx_handover "
+                    f"(protocol {list(h.majors)}, this machine {WIRE_MAJOR}); update the plugin on both machines"
+                )
             for cap in REQUIRED_CAPS:
                 if cap not in h.capabilities:
-                    raise CapabilityMissing(f"{side} cannot {cap}", capability=cap, side=side)
+                    raise CapabilityMissing(
+                        f"the machine you hand over {_SIDE_WORD[side]} lacks the {cap} feature; update ctx_handover",
+                        capability=cap,
+                        side=side,
+                    )
         if self.continue_prompt and "continue.v1" not in ht.capabilities:
-            raise CapabilityMissing("target cannot continue sessions", capability="continue.v1", side="target")
+            raise CapabilityMissing(
+                "the machine you hand over to cannot start a turn on its own; update the plugin there",
+                capability="continue.v1",
+                side="target",
+            )
         self._side_effect("target.open_job", lambda: self.target.open_job(self.job))
         self._go(S.FACTS, hello_source=hs, hello_target=ht)
 
@@ -1087,8 +1107,8 @@ class Conductor:
             return
         problem = str(getattr(facts, "workspace_root_problem", "") or "check_failed")
         message = envfacts.workspace_root_message(facts) or (
-            f"the workspace root {facts.workspace_root} on {facts.instance_name} cannot be used ({problem}); "
-            "set workspace_root in the ctx_handover settings there"
+            f"the folder where {facts.instance_name} places handed-over projects ({facts.workspace_root}) cannot be "
+            f"used ({problem}); set workspace_root in the ctx_handover settings there"
         )
         raise PolicyDenied(
             message,
@@ -1117,7 +1137,7 @@ class Conductor:
             bundle = self._bundle_final()
             final = self.target.negotiate(self.job, bundle.plan)
             if to_wire(final.plan) != to_wire(bundle.plan):
-                raise VerifyFailed("the target changed the bundle's plan", which="plan")
+                raise VerifyFailed("the import here changed the plan stored in the handover file", which="plan")
             self._go(S.NEGOTIATED, plan=bundle.plan, final_plan=final, bundle_plan_id=bundle.plan_id, confirmed=False)
             return
         users: list[str] = []
@@ -1176,7 +1196,10 @@ class Conductor:
         if to_wire(again.plan) != to_wire(reduced) or {d.item_id for d in again.decisions} - {
             d.item_id for d in decisions
         }:
-            raise VerifyFailed("the target changed the plan the source releases", which="plan")
+            raise VerifyFailed(
+                "the machine you hand over to changed the plan again after some items were withheld",
+                which="plan",
+            )
         withheld = [*[str(p) for p in self._ctx.get("withheld") or ()], *paths]
         self._info("withheld_by_source", items=refused, reason=(err.details or {}).get("reason"))
         self._note(final_plan=again, withheld=withheld, user_items=sorted(users - gone))
@@ -1194,7 +1217,9 @@ class Conductor:
         doc.pop("plan_id", None)
         computed = self._planner().plan_id(doc)
         if computed != final.plan_id or computed != manifest.get("plan_id"):
-            raise VerifyFailed("the bundle's final plan does not match its manifest", which="final_plan_id")
+            raise VerifyFailed(
+                "the handover file is inconsistent: its plan does not match its contents list", which="final_plan_id"
+            )
         return final
 
     def _confirm(self, *, interactive: bool) -> FinalPlan:
@@ -1257,7 +1282,9 @@ class Conductor:
         if choice in ("show_plan", "cancel", "dry_run"):
             self._info("planning_ended", ended_by=choice, reasons=reasons)
             self._note(ended_by=choice)
-            err = Cancelled("ended after planning; nothing was locked", ended_by=choice)
+            err = Cancelled(
+                "stopped after the plan was shown; the session was not locked and nothing was sent", ended_by=choice
+            )
             self._fail(err)
             self._drain_abort()
             raise err
@@ -1277,7 +1304,7 @@ class Conductor:
             return final
         again = self.target.negotiate(self.job, final.plan)
         if to_wire(again.plan) != to_wire(final.plan):
-            raise VerifyFailed("the target changed the confirmed plan", which="plan")
+            raise VerifyFailed("the machine you hand over to changed the plan you confirmed", which="plan")
         return again
 
     def _instruction_files(self, final: FinalPlan) -> list[dict]:
@@ -1560,10 +1587,14 @@ class Conductor:
             self._go(S.SOURCE_PREPARED)
         elif res.outcome is PrepareOutcome.DELTA:
             if res.delta is None:
-                raise BadRequest("delta outcome without delta", field="delta")
+                raise BadRequest(
+                    "the machine you hand over from reported new messages but did not send them", field="delta"
+                )
             deltas = int(self._ctx.get("deltas") or 0) + 1
             if deltas > self.poll.max_deltas:
-                raise RestartLimit("The session kept growing during the handover.", deltas=deltas - 1)
+                raise RestartLimit(
+                    "The session kept growing during the handover. Pause work on it and try again.", deltas=deltas - 1
+                )
             self._go(S.DELTA_APPLYING, delta=res.delta, deltas=deltas)
         elif res.outcome is PrepareOutcome.STALE_SESSION:
             self._restart("stale_session")
@@ -1572,7 +1603,9 @@ class Conductor:
             self._restart("stale_worktree")
             self._go(S.PACKING, pack=None, pack_moved=False)
         else:  # pragma: no cover - PrepareOutcome has no other member; never read an unknown answer as success
-            raise BadRequest(f"unknown prepare outcome {res.outcome!r}", field="outcome")
+            raise BadRequest(
+                f"the machine you hand over from gave an unknown answer ({res.outcome!r})", field="outcome"
+            )
 
     def _delta_applying(self) -> None:
         self._check_cancel()
@@ -1620,7 +1653,8 @@ class Conductor:
             if self._clock() - started > float(self.job.options.stall_timeout_s):
                 self._record_error(
                     InDoubt(
-                        "The target may already have the session; the source stays read-only until resolved.",
+                        "It is unclear whether the machine you hand over to already took over the session; the "
+                        "session stays locked where it came from until that is clear.",
                         waited_s=int(self._clock() - started),
                     )
                 )
@@ -1702,7 +1736,10 @@ class Conductor:
             state = source_state_of(err)
             if state not in SOURCE_GIVEN_BACK or err.details.get("reason") == "stale_epoch":
                 self._park_retire(err)
-            self._warn(f"the source was not retired ({state}); the copies are independent now")
+            self._warn(
+                f"the session became active again where it came from ({state}) before the handover finished; the "
+                "two copies are independent now"
+            )
             self._go(S.RETIRED, retire={"state": state})
             return
         state = source_state_of(raw)
@@ -1710,7 +1747,10 @@ class Conductor:
             self._go(S.RETIRED, retire=raw)
             return
         if state in SOURCE_GIVEN_BACK:
-            self._warn(f"the source was not retired ({state}); the copies are independent now")
+            self._warn(
+                f"the session became active again where it came from ({state}) before the handover finished; the "
+                "two copies are independent now"
+            )
             self._go(S.RETIRED, retire=raw)
             return
         self._park_retire(self._unconfirmed("retired", raw))
@@ -1744,7 +1784,8 @@ class Conductor:
     def _unconfirmed(self, expected: str, raw: object) -> InvalidState:
         state = source_state_of(raw)
         return InvalidState(
-            f"the source did not confirm that it is {expected} (it reports {state or 'no state'})",
+            f"the machine you hand over from did not confirm that the session is "
+            f"{_CONFIRM_WORD.get(expected, expected)} there (it reports {state or 'no state'})",
             reason="not_confirmed",
             state=state,
             expected=expected,
@@ -1768,8 +1809,11 @@ class Conductor:
         if state in RETIRE_CONFIRMED:
             self._go(S.CONTINUING)
             return
-        message = f"the source took the session back ({state or 'not retired'}), so no turn starts on the target"
-        self._warn(f"continuation not started: {message}")
+        message = (
+            f"the session was taken back where it came from ({state or 'not handed over'}), so no turn starts on the "
+            "machine it was handed over to"
+        )
+        self._warn(f"no turn was started: {message}")
         error = {"code": "continue_refused", "message": message, "details": {"reason": "source_given_back"}}
         self._note(**{"continue": to_wire(ContinueResult(started=False)) | {"error": error}})
         self._go(S.DONE)
@@ -1782,7 +1826,7 @@ class Conductor:
             except Fenced:
                 raise
             except HandoverError as err:
-                self._warn(f"continuation not started: {err.code}")
+                self._warn(f"the session was handed over, but no turn was started there ({err.code})")
                 error = {"code": err.code, "message": err.message, "details": dict(err.details)}
                 self._note(**{"continue": to_wire(ContinueResult(started=False)) | {"error": error}})
         self._go(S.DONE)
@@ -1868,7 +1912,7 @@ class Conductor:
             else:
                 self._info("release_unconfirmed_never_locked", state=source_state_of(raw))
         for warning in (raw.get("warnings") if isinstance(raw, dict) else None) or ():
-            self._warn(f"source: {str(warning)[:300]}")
+            self._warn(f"on the machine you hand over from: {str(warning)[:300]}")
         self._go(S.ABORTED)
 
     def _leave_on_peer(self, side: str, err: HandoverError) -> None:
@@ -1882,16 +1926,17 @@ class Conductor:
             raise err
         if side == "target" and self._commit_intended():
             raise err
-        peer = self.job.peer.name if self.job.peer is not None else "the other gateway"
+        peer = self.job.peer.name if self.job.peer is not None else "the other machine"
         if side == "target":
             text = (
-                f"{peer} did not confirm the cancel ({err.code}): what it received for this handover may remain there, "
-                f"hidden, until its staging time runs out; /handover status on {peer} shows it."
+                f"{peer} did not confirm the cancel ({err.code}): what it already received for this handover may stay "
+                f"there, hidden, until its time limit for unfinished handovers runs out; /handover status on {peer} "
+                "shows it."
             )
         else:
             text = (
                 f"{peer} did not confirm that it gave the session back ({err.code}): if the session is still locked "
-                f"there, /handover reclaim on {peer} takes it back (with --force when it is prepared)."
+                f"there, /handover reclaim on {peer} takes it back (add --force if it says a handover is finishing)."
             )
         entry = {"side": side, "code": err.code, "message": err.message[:300], "note": text}
         left = [*list(self._ctx.get("forced") or []), entry]

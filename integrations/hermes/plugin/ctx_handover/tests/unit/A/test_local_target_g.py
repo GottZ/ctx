@@ -60,13 +60,14 @@ def test_import_without_a_bound_peer_says_there_is_no_return_path(env):
     env.target.source_peer_id = None
     env.target.peer_verified = False
     seen = _prepare(env)
-    assert seen["origin"].startswith("unverified bundle") and "no return path" in seen["origin"], seen["origin"]
+    origin = seen["origin"]
+    assert origin.startswith("unverified handover file") and "nothing can be returned" in origin, origin
 
 
 def test_import_from_a_bound_peer_has_a_return_path(env):
     env.job = dataclasses.replace(env.job, mode=Mode.IMPORT)
     seen = _prepare(env)
-    assert seen["origin"].startswith("verified bundle") and "return path" not in seen["origin"], seen["origin"]
+    assert seen["origin"].startswith("verified handover file") and "returned" not in seen["origin"], seen["origin"]
 
 
 def test_every_bundle_import_note_says_it_may_have_been_imported_elsewhere(env):
@@ -81,7 +82,7 @@ def test_every_bundle_import_note_says_it_may_have_been_imported_elsewhere(env):
 
 def test_a_pull_note_says_nothing_about_bundles(env):
     seen = _prepare(env)
-    assert seen["origin"] == "verified peer"
+    assert seen["origin"] == "verified paired device"
     assert "bundle_import" not in seen["note_parts"]
 
 

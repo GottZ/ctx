@@ -101,7 +101,9 @@ def test_m10_one_entry_per_old_folder_of_placed_hook_outputs(server):  # noqa: F
     tip = "20261109_000000_abcdef"
     with server.active():
         placed, skipped = target._hermes_placement(pack, items, tip)
-        assert len(placed) == 4 and skipped == ["session file x.txt not placed: unknown kind"]  # h5: kinds differ
+        assert len(placed) == 4 and skipped == [
+            "the session file x.txt was not placed: its kind is unknown"
+        ]  # h5: kinds differ
         entries = target._hook_folders(placed, items)  # the unit under test
     here = str(hermes_files.hook_outputs_dir(target.hermes, tip))
     assert entries == [

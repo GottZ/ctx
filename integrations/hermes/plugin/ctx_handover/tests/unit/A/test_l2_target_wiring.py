@@ -306,7 +306,7 @@ def test_note_lists_instruction_files_read_on_this_host(env):
     assert kw["note_parts"]["instruction_files"] == [
         {"item_id": "w0", "rel": "AGENTS.md", "status": "new", "sha256": sha}
     ]
-    assert kw["origin"] == "verified peer"
+    assert kw["origin"] == "verified paired device"
 
 
 def test_note_ignores_instruction_files_of_the_counterpart(env, monkeypatch):

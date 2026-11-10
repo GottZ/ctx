@@ -36,7 +36,7 @@ def test_rv_a_m27_reclaimed_source_never_continues_on_the_target(tmp_path, clock
     cont = row["result"].get("continue") or {}
     assert cont.get("started") is False
     assert cont["error"]["details"]["reason"] == "source_given_back"
-    assert any("continuation not started" in w for w in row["result"].get("warnings") or [])
+    assert any("no turn was started" in w for w in row["result"].get("warnings") or [])
 
 
 def test_rv_a_m27_confirmed_retire_still_continues(tmp_path, clock):

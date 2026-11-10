@@ -358,7 +358,7 @@ class _ObjectReader(io.RawIOBase):
         self._done = True
         if self._seen != self._m.size or self._hash.hexdigest() != self._m.sha256:
             raise VerifyFailed(
-                "object content does not match its manifest", object_id=self._m.object_id, reason="object_sha256"
+                "transferred data does not match its checksum", object_id=self._m.object_id, reason="object_sha256"
             )
 
     def readinto(self, b) -> int:
@@ -428,7 +428,9 @@ class BlockStore:
         except FileNotFoundError:
             raise NotFound("block not found", block_id=block_id) from None
         if hashlib.sha256(raw).hexdigest() != block_id:
-            raise BlockCorrupt("stored block does not match its id", block_id=block_id)
+            raise BlockCorrupt(
+                "a stored piece of the transfer is damaged (it does not match its checksum)", block_id=block_id
+            )
         return raw
 
     @staticmethod
@@ -517,7 +519,7 @@ class BlockStore:
             content.update(chunk)
             size += len(chunk)
             if size > MAX_OBJECT_BYTES:
-                raise BadRequest("object too large", field="object", max_bytes=MAX_OBJECT_BYTES)
+                raise BadRequest("a file is too large to transfer", field="object", max_bytes=MAX_OBJECT_BYTES)
             ids.append(self.put(chunk))
             if len(chunk) < BLOCK_SIZE:
                 break

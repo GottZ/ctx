@@ -400,7 +400,7 @@ def test_assert_resume_safe_reported(make_session, session_db, target_db, store,
     (hermes_home / "config.yaml").write_text("sessions:\n  max_resume_messages: 5\n")
     tip = rich_lineage(make_session)
     *_, prepared = roundtrip(session_db, target_db, store, tip, source_paths, target_cwd)
-    assert any(w.startswith("resume guard:") for w in prepared.warnings)
+    assert any(w.startswith("Hermes' resume check reports a problem") for w in prepared.warnings)
 
 
 def test_apply_delta_appends_and_reverifies(make_session, session_db, target_db, store, source_paths, target_cwd):
