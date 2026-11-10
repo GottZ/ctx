@@ -1821,13 +1821,25 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 		).Scan(&blockID, &title, &content, &sens, &scope)
 		return blockID, title, content, sens, scope, err
 	}
+	// callerDrained remembers that the scoped pick came back empty, so the
+	// arm-off fallback below does not walk the other scopes' pending rows
+	// once more per block it embeds. A caller block stored while this loop
+	// runs waits for the caller's next query.
+	callerDrained := false
 	for attempts := 0; syncCap <= 0 || attempts < syncCap; attempts++ {
 		if !budgetDeadline.IsZero() && !time.Now().Before(budgetDeadline) {
 			slog.Info("query backfill: sync budget spent, rest left to the background arm",
 				"budget", cfg.EmbedBackfill.SyncBudget, "backfilled", count)
 			break
 		}
-		blockID, title, content, sens, scope, err := pick("\n\t\t\t  AND scope = ANY($2::text[])", readScopes)
+		var blockID, title, content, sens, scope string
+		var err error
+		if callerDrained {
+			err = pgx.ErrNoRows
+		} else {
+			blockID, title, content, sens, scope, err = pick("\n\t\t\t  AND scope = ANY($2::text[])", readScopes)
+			callerDrained = errors.Is(err, pgx.ErrNoRows)
+		}
 		if errors.Is(err, pgx.ErrNoRows) && !armRuns {
 			// Nothing pending the caller can read, and no arm to leave the
 			// rest to: embed any pending block.
