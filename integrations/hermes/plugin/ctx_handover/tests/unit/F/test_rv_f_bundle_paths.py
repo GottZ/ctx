@@ -97,7 +97,7 @@ def test_rv_f_w4_a_relative_path_without_a_session_folder_is_refused(host_like):
     plugin = _plugin(backend)
     out = _slash(plugin, "export out.ctxh.tar --yes")
     assert "start_job" not in backend.names(), out
-    assert "absolute path" in out, out
+    assert "as a full path, or as one that starts with ~/" in out and "no project folder" in out, out
 
 
 def test_rv_f_w4_terminal_uses_its_own_working_folder(host_like, tmp_path, monkeypatch, capsys):

@@ -376,7 +376,7 @@ def test_doctor_reports_approvals_off_with_remote_continue(fake_host):
     backend = FakeBackend(config=fake_host.config)
     plugin, _backend, _ = _plugin(backend)
     out = _slash(plugin, "doctor")
-    assert "approvals are off on this gateway, so no remote continuation ever starts" in out
+    assert "approvals are off on this gateway, so a --continue from a paired device never starts the agent here" in out
 
 
 def test_handler_never_raises():
@@ -479,4 +479,4 @@ def test_yes_never_confirms_suspected_secrets():
     ctx.choice_answers = ["no_proposed"]
     _slash(plugin, "to server")
     question = ctx.choices_asked[-1][0]
-    assert "Suspected secrets: /home/u/token0.txt" in question and "--include-secret" in question
+    assert "Files that look like secrets: /home/u/token0.txt" in question and "--include-secret" in question

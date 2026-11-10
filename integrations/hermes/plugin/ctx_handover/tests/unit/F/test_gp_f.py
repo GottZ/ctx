@@ -406,9 +406,9 @@ def test_reclaim_says_the_target_was_told_only_when_true(notified):
     """
     plugin, backend, _ctx = _plugin()
     backend.reclaim = lambda sid, force: {"state": "reclaimed", "target_notified": notified}
-    assert "The other gateway was told" not in _slash(plugin, "reclaim")
+    assert "The other machine was told" not in _slash(plugin, "reclaim")
     backend.reclaim = lambda sid, force: {"state": "reclaimed", "target_notified": True}
-    assert "The other gateway was told" in _slash(plugin, "reclaim")
+    assert "The other machine was told" in _slash(plugin, "reclaim")
 
 
 def _inbound(name: str) -> Peer:
@@ -508,11 +508,12 @@ def test_setup_names_the_reserved_root_when_home_is_the_hermes_home(fake_host, h
     """
     plugin, _backend, _ctx = _plugin()
     out = _slash(plugin, "setup")
-    assert f"Received workspaces go to {user_home}/hermes-handover " in out, out
+    assert f"Project folders handed to this machine go to {user_home}/hermes-handover " in out, out
     monkeypatch.setenv("HOME", str(hermes_home))
     out = _slash(plugin, "setup")
     reserved = f"{hermes_home}/handover-workspaces"
-    assert f"Received workspaces go to {reserved} " in out and f"writes only under {reserved})" in out, out
+    assert f"Project folders handed to this machine go to {reserved} " in out, out
+    assert f"writes files only under {reserved} (setting allow_roots)" in out, out
 
 
 def test_readme_names_the_reserved_default_root():

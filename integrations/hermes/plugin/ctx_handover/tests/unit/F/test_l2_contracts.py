@@ -115,7 +115,7 @@ def test_timeout_with_suspected_secret_drops_all_proposals():
     _slash(plugin, "to server")
     assert backend.confirm_answers == ["no_proposed"]
     question = ctx.choices_asked[0][0]
-    assert surfaces.SUSPECTED_TEXT in question and "Suspected secrets: /home/u/token0.txt" in question
+    assert surfaces.SUSPECTED_TEXT in question and "Files that look like secrets: /home/u/token0.txt" in question
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -572,7 +572,7 @@ def test_revoke_and_reclaim_go_through_jobs(fake_host, monkeypatch):
     assert revoked == ["laptop"] and "2 unfinished handovers" in out
     out = _slash(plugin, "reclaim --force")
     assert reclaimed == [(SID, True)]
-    assert "Reclaimed." in out and "The other gateway was told" in out
+    assert "Reclaimed." in out and "The other machine was told" in out
 
 
 # ---------------------------------------------------------------------------------------------------------

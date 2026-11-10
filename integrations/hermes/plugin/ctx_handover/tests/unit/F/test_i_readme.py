@@ -93,13 +93,13 @@ def test_pair_code_lifetime_is_the_pairing_default(fake_host, monkeypatch):
     plugin, backend, _ = _plugin(_listener("https://s.example/"))
     out = _slash(plugin, "pair --name laptop")
     assert backend.last("create_pair_code")["ttl_s"] == pairing.DEFAULT_TTL_S == 600
-    assert f"valid {pairing.DEFAULT_TTL_S // 60} min, single use" in out, out
+    assert f"valid {pairing.DEFAULT_TTL_S // 60} min, works once" in out, out
 
     with monkeypatch.context() as m:
         m.setattr(pairing, "DEFAULT_TTL_S", 900)
         out = _slash(plugin, "pair --name laptop")
     assert backend.last("create_pair_code")["ttl_s"] == 900
-    assert "valid 15 min, single use" in out, out
+    assert "valid 15 min, works once" in out, out
 
     minutes = pairing.DEFAULT_TTL_S // 60
     assert f"a one-time code ({minutes} minutes, single use)" in FLAT

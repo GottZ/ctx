@@ -542,7 +542,7 @@ def test_doctor_checks_wiring(backend, monkeypatch, fake_host):
     assert checks["git"]["ok"] is None and "patched line" in checks["git"]["detail"]
     assert checks["data folder"]["ok"] is True
     assert checks["identity"]["ok"] is True and "0123456789abcdef" in checks["identity"]["detail"]
-    assert "1 paired device(s) may dial in" in checks["inbound"]["detail"]
+    assert "1 paired device(s) may connect to this machine" in checks["inbound"]["detail"]
     assert probes == [False]  # the body-limit measurement runs only with doctor --measure
     assert checks["peer server"]["ok"] is False and "refused the stored credential" in checks["peer server"]["detail"]
     assert "store the current dashboard credential of server" in checks["peer server"]["remedy"]  # C's remedy (V27)

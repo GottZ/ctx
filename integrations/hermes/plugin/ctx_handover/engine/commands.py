@@ -81,7 +81,7 @@ LOCAL_ONLY_VERBS: frozenset[str] = frozenset(
 
 LOCAL_PLATFORMS = surfaces.LOCAL_PLATFORMS
 
-REFUSAL = "This command only runs in the Hermes CLI, TUI or Desktop on this machine."
+REFUSAL = "This command works only in Hermes on this machine: in the CLI, the TUI or Desktop. Run it there."
 SIDE_QUESTION_TTL_S = 60.0
 NOTE_MAX_OFFERS = 3
 SIDE_QUESTION_CAPABILITY = "llm.side_question"
@@ -333,7 +333,10 @@ class HookSet:
         try:
             text = rt.veto_text(entry)
         except Exception:
-            text = "This session was handed over to another gateway. Run /handover reclaim to continue here."
+            text = (
+                "This session was handed over to another machine, so it is locked here. To work on it here again, "
+                "run /handover reclaim to take the session back."
+            )
         return {"action": "block", "message": text}
 
     def pre_llm_call(self, session_id: str = "", parent_session_id: str = "", turn_id: str = "", **_kw: Any):
@@ -592,8 +595,8 @@ class Plugin:
         except Exception as exc:  # the handler never raises into Hermes
             logger.exception("ctx_handover: /handover %s failed", parsed.verb)
             call.say(
-                f"ctx_handover failed unexpectedly ({type(exc).__name__}). Details are in the Hermes log; "
-                "/handover doctor checks the setup."
+                f"ctx_handover failed unexpectedly ({type(exc).__name__}). The Hermes log has the details. "
+                "Run /handover doctor to check the setup."
             )
             call.exit_code = EXIT_FAILED
 
@@ -602,7 +605,8 @@ class Plugin:
         sid = parsed.args.get("session") or call.session_id
         if not sid:
             raise BadRequest(
-                "No session here to work on. In the CLI name it: --session <id> (hermes sessions list shows ids).",
+                "This command needs a session, and there is none here. In the CLI, name it with --session <id> "
+                "(hermes sessions list shows the ids).",
                 field="session",
             )
         return str(sid)
@@ -617,12 +621,13 @@ class Plugin:
 
     def _peer(self, name: str | None, *, want: str | None = None) -> Peer:
         if not name:
-            raise BadRequest("Name the device: /handover peers lists the paired ones.", field="peer")
+            raise BadRequest("Name the paired device to use. /handover peers lists them.", field="peer")
         peer = self.backend.peer(name)
         if peer is None or peer.revoked_at:
             names = ", ".join(p.name for p in self.backend.peers()) or "none"
             raise NotFound(
-                f"No paired device named {name!r} (paired: {names}). /handover pair connects a new one.", peer=name
+                f"No paired device is called {name!r} (paired: {names}). Run /handover pair to pair a new one.",
+                peer=name,
             )
         return peer
 
@@ -656,7 +661,7 @@ class Plugin:
             if why:
                 question = f"{question}\n({'; '.join(why)})"
             if suspected:
-                question += "\nSuspected secrets: " + ", ".join(suspected[:5])
+                question += "\nFiles that look like secrets: " + ", ".join(suspected[:5])
             answer = None
             if call.asker is not None:
                 try:
@@ -721,7 +726,7 @@ class Plugin:
             summary = state.summary or (surfaces.plan_summary(final) if final is not None else None)
             if options.dry_run and summary is not None:
                 call.say(surfaces.render_plan(summary))
-                call.say("Dry run: nothing was locked or sent.")
+                call.say("Dry run (--dry-run): nothing was locked or sent.")
             elif state.answer == "show_plan" and summary is not None:
                 call.say(surfaces.render_plan(summary))
                 call.say("Nothing was locked. Run the command again to hand over.")
@@ -730,14 +735,14 @@ class Plugin:
                     call.say(surfaces.render_plan(summary))
                 if state.yes_refused:
                     call.say(_yes_refused_text(summary, state.yes_refused))
-                call.say("No answer to the confirmation, so the handover was cancelled. Nothing was locked.")
+                call.say("Nobody answered the question, so the handover was cancelled. Nothing was locked.")
                 call.exit_code = EXIT_FAILED
-                call.data["error"] = _not_confirmed(state, "no answer to the confirmation; nothing was locked")
+                call.data["error"] = _not_confirmed(state, "nobody answered the question; nothing was locked")
             else:
                 call.say("Cancelled. Nothing was locked.")
                 call.exit_code = EXIT_FAILED if not options.dry_run else EXIT_OK
                 if not options.dry_run:
-                    call.data["error"] = _not_confirmed(state, "cancelled at the confirmation; nothing was locked")
+                    call.data["error"] = _not_confirmed(state, "cancelled at the question; nothing was locked")
             return
         summary = backend.presend_summary(final, job_id=job_id)
         # L3-F24: an --include this machine's plan refused is named in the first message
@@ -757,7 +762,8 @@ class Plugin:
                     code = backend.run_foreground(job_id)
                 except KeyboardInterrupt:
                     call.say(
-                        f"Detached. The job is suspended; /handover resume {surfaces.short_job(job_id)} continues it."
+                        "Stopped waiting. The handover is paused (suspended); run /handover resume "
+                        f"{surfaces.short_job(job_id)} to continue it."
                     )
                     call.exit_code = EXIT_DOUBT
                     return
@@ -774,12 +780,12 @@ class Plugin:
         if self._can_post():
             call.say(
                 f"Handover {sid} is running; progress shows in the notice above. /handover status {sid} has the "
-                "details, /handover cancel stops it before the commit."
+                "details. /handover cancel stops it, as long as the move can still be undone."
             )
         else:  # no progress notice here (plugins.isolation: host, L3-F21): no promise of one
             call.say(
-                f"Handover {sid} is running. /handover status {sid} shows its progress and details, /handover cancel "
-                "stops it before the commit."
+                f"Handover {sid} is running. /handover status {sid} shows its progress and details. /handover cancel "
+                "stops it, as long as the move can still be undone."
             )
 
     def _status_or_error(self, job_id: str) -> dict | HandoverError:
@@ -842,8 +848,8 @@ class Plugin:
             # parked before the commit point while undoing (V31): the janitor finishes the abort — never a success text
             lines = [_job_error_text(job_id, err, peer)] if (err or {}).get("code") else []
             lines.append(
-                f"Handover {short} stopped before the commit and is being undone in the background; nothing was "
-                f"handed over. /handover status {short} shows when it has finished."
+                f"Handover {short} stopped before the move became final and is being undone in the background; "
+                f"nothing was handed over. /handover status {short} shows when the undo has finished."
             )
             return "\n".join(lines)
         if state in {"aborted", "suspended"}:
@@ -851,13 +857,14 @@ class Plugin:
             if (err or {}).get("code"):
                 text = _job_error_text(job_id, err, peer)
             else:
-                text = f"Handover {short} ended: {state}. /handover status {short}."
+                ended = "was stopped (aborted)" if state == "aborted" else "is paused (suspended)"
+                text = f"Handover {short} {ended}. /handover status {short} shows the details."
             if state == "suspended" and "/handover resume" not in text:
-                text += f" /handover resume {short} continues it."
+                text += f" Run /handover resume {short} to continue it."
             return text
         if state not in FINISHED_STATES:  # success only after the commit point, never by default
             return (
-                f"Handover {short} has not finished ({state or 'state not recorded'}). /handover status {short} "
+                f"Handover {short} has not finished (step: {state or 'not recorded'}). /handover status {short} "
                 "shows where it is."
             )
         from .jsonutil import from_wire
@@ -922,7 +929,8 @@ class Plugin:
         if peer.direction == "inbound":
             if Right.PULL not in peer.rights:
                 raise Forbidden(
-                    f"{peer.name} may not take sessions from here.",
+                    f"{peer.name} is not allowed to take sessions from this machine (it was paired without that "
+                    "right).",
                     right="pull",
                     peer=peer.name,
                     details={"right": "pull"},
@@ -939,12 +947,16 @@ class Plugin:
             call.say(surfaces.render_offer(offer, peer.name, self.backend.local_name(), now=time.time()))
             if parsed.args.get("continue"):
                 call.say(
-                    f"--continue applies on {peer.name}: use /handover take "
-                    f"{self.backend.local_name()} --continue there."
+                    f"--continue belongs to the machine that takes the session: on {peer.name}, run /handover take "
+                    f"{self.backend.local_name()} --continue."
                 )
             return
         if Right.PUSH not in peer.rights:
-            raise Forbidden("push not granted", right="push", peer=peer.name)
+            raise Forbidden(
+                f"{peer.name} does not let this machine send sessions there (push was not granted at pairing).",
+                right="push",
+                peer=peer.name,
+            )
         self._start(call, Mode.PUSH, peer, parsed, session_ref=SessionRef(id=sid), bundle_path=None)
 
     def _resolve_take(self, parsed: surfaces.Parsed, call: Call) -> tuple[Peer, str | None]:
@@ -958,18 +970,20 @@ class Plugin:
                 return named, None
             if len(dial) == 1:
                 return dial[0], pos[0]
-            raise NotFound(f"No paired device named {pos[0]!r}. /handover peers lists them.", peer=pos[0])
+            raise NotFound(f"No paired device is called {pos[0]!r}. /handover peers lists them.", peer=pos[0])
         if len(dial) == 1:
             return dial[0], None
         if not dial:
-            raise NotFound("No paired device to take a session from. Run /handover pair first.")
+            raise NotFound("There is no paired device to take a session from. Run /handover pair first.")
         if call.asker is not None:
             picked = call.asker("Take a session from which device?", [p.name for p in dial])
             for p in dial:
                 if picked == p.name:
                     return p, None
         raise BadRequest(
-            f"Name the device: /handover take <peer> (paired: {', '.join(p.name for p in dial)}).", field="peer"
+            "Name the device to take a session from: /handover take <peer> (paired: "
+            f"{', '.join(p.name for p in dial)}).",
+            field="peer",
         )
 
     def _pick_remote(self, peer: Peer, call: Call) -> SessionRef | None:
@@ -982,7 +996,8 @@ class Plugin:
                     {
                         "value": "offer:" + str(o.get("offer_id")),
                         "label": f"Offer: {title or o.get('session') or o.get('offer_id')}",
-                        "description": f"left for you, expires {surfaces.when(o.get('expires_at'))}",
+                        "description": "set aside for this machine to take, expires "
+                        + surfaces.when(o.get("expires_at")),
                     }
                 )
         now = time.time()
@@ -1000,10 +1015,13 @@ class Plugin:
         if not options:
             raise NotFound(f"{peer.name} has no session to take.", peer=peer.name)
         if call.asker is None:
-            lines = [f"Name the session: /handover take {peer.name} <session-id> (or --latest, --offer <id>)."]
+            lines = [
+                f"Name the session to take: /handover take {peer.name} <session-id> (or add --latest for the most "
+                "recent one, or --offer <id> for one set aside for this machine)."
+            ]
             lines += [f"  {o['value'].split(':', 1)[1]} — {o['label']}" for o in options]
             raise BadRequest("\n".join(lines), field="session")
-        picked = call.asker(f"Which session from {peer.name}?", options)
+        picked = call.asker(f"Which session do you want to take from {peer.name}?", options)
         if not picked:
             return None
         kind, _, ident = str(picked).partition(":")
@@ -1013,12 +1031,17 @@ class Plugin:
         peer, sid = self._resolve_take(parsed, call)
         if peer.direction != "dial":
             raise BadRequest(
-                f"{peer.name} dials in to this gateway; take works from the device that dials. On {peer.name} run "
-                f"/handover to {self.backend.local_name()}.",
+                f"This machine cannot reach {peer.name}: {peer.name} connects to this machine, not the other way "
+                f"round, so take does not work here. To bring a session from {peer.name} to this machine, run "
+                f"/handover to {self.backend.local_name()} on {peer.name}.",
                 peer=peer.name,
             )
         if Right.PULL not in peer.rights:
-            raise Forbidden("pull not granted", right="pull", peer=peer.name)
+            raise Forbidden(
+                f"{peer.name} does not let this machine take sessions from there (pull was not granted at pairing).",
+                right="pull",
+                peer=peer.name,
+            )
         if parsed.args.get("latest"):
             ref = SessionRef(latest=True)
         elif parsed.args.get("offer"):
@@ -1028,7 +1051,7 @@ class Plugin:
         else:
             picked = self._pick_remote(peer, call)
             if picked is None:
-                call.say("Nothing chosen. Nothing was locked.")
+                call.say("No session was chosen. Nothing was locked.")
                 return
             ref = picked
         self._start(call, Mode.PULL, peer, parsed, session_ref=ref, bundle_path=None)
@@ -1050,7 +1073,10 @@ class Plugin:
         sid = parsed.args.get("session") or call.session_id
         bundle = self._typed_path(str(parsed.args["bundle"]), call, str(sid) if sid else None)
         if not os.path.exists(bundle):
-            raise NotFound(f"No bundle at {bundle}. Give the path of the .ctxh.tar file (or the bundle folder).")
+            raise NotFound(
+                f"No handover file at {bundle}. Give the path of the .ctxh.tar file (or of the folder it was unpacked "
+                "into)."
+            )
         self._start(call, Mode.IMPORT, None, parsed, session_ref=SessionRef(), bundle_path=bundle)
 
     def _typed_path(self, raw: str, call: Call, session_id: str | None) -> str:
@@ -1079,7 +1105,8 @@ class Plugin:
         if isinstance(base, str) and os.path.isabs(base) and os.path.isdir(base):
             return os.path.normpath(os.path.join(base, text))
         raise BadRequest(
-            f"Give the bundle as an absolute path or ~/…: this chat has no working folder to start {text} from."
+            "Give the handover file as a full path, or as one that starts with ~/: this chat has no project folder "
+            f"that {text} could be found in."
         )
 
     def _own_jobs(self, status: dict, call: Call) -> dict:
@@ -1126,33 +1153,37 @@ class Plugin:
             peer = self._peer(names[0])
             if peer.direction != "inbound":
                 raise BadRequest(
-                    f"{peer.name} is a gateway this device dials. Use /handover peers remove {peer.name} here; "
-                    f"revoke this device on {peer.name} itself.",
+                    f"{peer.name} is a machine this one connects to, so revoke does not apply here. Run /handover "
+                    f"peers remove {peer.name} to forget it on this machine; to take this machine's access away, "
+                    f"revoke this machine on {peer.name} itself.",
                     peer=peer.name,
                 )
             aborted = backend.revoke_peer(peer.name)
             call.say(
-                f"Revoked {peer.name}: its key no longer works here; {len(aborted)} unfinished handovers with it were "
-                "stopped. If the device is lost, also change this gateway's dashboard token "
-                "(HERMES_DASHBOARD_SESSION_TOKEN) — the device may have stored it."
+                f"Revoked {peer.name}: its key is no longer accepted here, and {len(aborted)} unfinished handovers "
+                "with it were stopped. If the device is lost, also change the dashboard token of Hermes on this "
+                "machine (HERMES_DASHBOARD_SESSION_TOKEN) — the device may have it stored."
             )
             return
         if sub == "remove":
             peer = self._peer(names[0])
             if peer.direction != "dial":  # the ledger removes dial entries only (Ledger.remove_peer)
                 raise BadRequest(
-                    f"{peer.name} dials in to this gateway; remove is for gateways this device dials. "
-                    f"/handover peers revoke {peer.name} takes its key away here.",
+                    f"{peer.name} connects to this machine, and remove is only for machines this one connects to. "
+                    f"Run /handover peers revoke {peer.name} to stop accepting its key here.",
                     peer=peer.name,
                 )
             if backend.remove_peer(peer.name) is not True:
                 raise NotFound(f"{peer.name} was not removed; /handover peers lists what is paired.", peer=peer.name)
-            call.say(f"Removed {peer.name} from this device. Pair again to use it.")
+            call.say(f"Removed {peer.name} from this machine. Pair again to use it.")
             return
         if sub == "rename":
             old, new = names
             if not backend.rename_peer(old, new):
-                raise ConflictError(f"Could not rename {old!r} to {new!r} (unknown name or {new!r} exists).")
+                raise ConflictError(
+                    f"Could not rename {old!r} to {new!r}: no paired device is called {old!r}, or the name {new!r} "
+                    "is already taken."
+                )
             call.say(f"Renamed {old} to {new}.")
 
     def _listen_url(self) -> str | None:
@@ -1185,15 +1216,17 @@ class Plugin:
             )
             rights = ",".join(sorted(str(r) for r in peer.rights))
             call.say(
-                f"Paired with {peer.name} (rights {rights}, key {surfaces.fingerprint_of(peer.pubkey)}). "
-                f"/handover take {peer.name} brings a session here; /handover to {peer.name} sends this one there."
+                f"Paired with {peer.name} (rights {rights}: push sends sessions there, pull takes them from there; "
+                f"its key {surfaces.fingerprint_of(peer.pubkey)}). Run /handover take {peer.name} to bring a session "
+                f"from there to this machine, or /handover to {peer.name} to send this one there."
             )
             return
         url = self._listen_url()
         if not url:
             raise BadRequest(
-                "Set 'Address other devices use to reach this gateway' (listen_url) in Settings → Plugins → "
-                "ctx_handover — the URL the other device uses for this gateway — then run /handover pair again.",
+                "Pairing needs the web address of this machine first. In Settings → Plugins → ctx_handover, fill in "
+                "'Address other devices use to reach this gateway' (listen_url) — the URL the other machine uses to "
+                "reach Hermes here — then run /handover pair again.",
                 field="listen_url",
             )
         from . import pairing  # lazy like every engine import of this verb path (create_pair_code imports it too)
@@ -1206,13 +1239,15 @@ class Plugin:
         call.say(
             "\n".join(
                 [
-                    f"Pairing code (valid {minutes} min, single use, rights "
-                    f"{','.join(sorted(str(r) for r in rights))}).",
-                    "On the other device run:",
+                    f"Pairing line (valid {minutes} min, works once, rights "
+                    f"{','.join(sorted(str(r) for r in rights))}: push lets the other machine send sessions here, "
+                    "pull lets it take sessions from here).",
+                    "On the other machine, run:",
                     f"/handover pair {code['pair_string']}",
-                    "Its ctx_handover settings need this gateway's dashboard token (or Basic login) under "
-                    "'Dashboard token of the other gateway' — the pairing string never contains it.",
-                    f"This gateway's key: {code.get('fingerprint', '?')}",
+                    "Before that, enter the dashboard token of Hermes on this machine (or its dashboard user name and "
+                    "password) in the ctx_handover settings on the other machine, under 'Dashboard token of the other "
+                    "gateway'. The pairing line never contains it.",
+                    f"This machine's key: {code.get('fingerprint', '?')} (the other machine checks it when it pairs)",
                 ]
             )
         )
@@ -1222,13 +1257,15 @@ class Plugin:
         if gate.mode in (GateMode.SESSION_TOKEN, GateMode.BEARER):
             if not hostcompat.read_secret(gate.token_env):
                 return (
-                    f"Fill in 'Dashboard token of the other gateway' in {where} (stored as {gate.token_env} in this "
-                    "profile's .env), then paste the pairing string again."
+                    "Pairing needs the dashboard token of Hermes on the other machine, and none is stored here yet. "
+                    f"Fill in 'Dashboard token of the other gateway' in {where} (it is saved as {gate.token_env} in "
+                    "this profile's .env file), then run the /handover pair line again."
                 )
         elif gate.mode is GateMode.BASIC_LOGIN and (not gate.username or not hostcompat.read_secret(gate.password_env)):
             return (
-                f"Fill in 'Dashboard user name' and 'Dashboard password' in {where} (basic_login), then paste "
-                "the pairing string again."
+                "Pairing needs the user name and password of the dashboard on the other machine (peer_gate "
+                f"basic_login). Fill in 'Dashboard user name' and 'Dashboard password' in {where}, then run the "
+                "/handover pair line again."
             )
         return None
 
@@ -1241,7 +1278,7 @@ class Plugin:
         # code of DESIGN §14.2 (``invalid_state`` ⇒ 3, ``not_found`` ⇒ 2), never ``ok: true``.
         ok = result.get("ok") is True if "ok" in result else result.get("state") in ("reclaimed", "released")
         message = result.get("message") or (
-            "Reclaimed: this session is active here again." if ok else "Nothing to reclaim."
+            "Reclaimed: you took the session back, and it is active here again." if ok else "Nothing to reclaim."
         )
         call.say(str(message))
         if not ok:
@@ -1254,10 +1291,10 @@ class Plugin:
             }
             call.exit_code = _EXIT_BY_CODE.get(code, EXIT_FAILED)
         if result.get("target_notified") is True:
-            call.say("The other gateway was told that this session is active here again.")
+            call.say("The other machine was told that this session is active here again.")
         warnings = [str(w) for w in result.get("warnings") or ()]
         for warning in warnings:
-            call.say(f"warning: {warning}")
+            call.say(f"Warning: {warning}")
         if (
             ok
             and result.get("state") == "reclaimed"
@@ -1270,8 +1307,9 @@ class Plugin:
             # ``export`` (``EngineBackend.reclaim``: an export's other copy is the bundle, which its own warning names)
             # — never on a warning's wording (review M30). Unknown counts as "not told".
             call.say(
-                "That copy is not told about this reclaim (it pulled this session, or it could not be reached); "
-                "it stays active there until someone ends it."
+                "The copy on the other machine is not told that you took the session back (that machine took the "
+                "session from here itself, or it could not be reached). That copy stays active there until someone "
+                "ends it."
             )
 
     def _job_for(self, parsed: surfaces.Parsed, call: Call) -> str:
@@ -1285,13 +1323,15 @@ class Plugin:
         if len(pick) == 1:
             return str(pick[0]["job_id"])
         if not pick:
-            raise NotFound("No running handover.")
-        raise BadRequest("Several handovers run; name one: " + ", ".join(surfaces.short_job(j["job_id"]) for j in pick))
+            raise NotFound("No handover is running.")
+        raise BadRequest(
+            "Several handovers are running; name one: " + ", ".join(surfaces.short_job(j["job_id"]) for j in pick)
+        )
 
     def _verb_cancel(self, parsed: surfaces.Parsed, call: Call) -> None:
         job = self._job_for(parsed, call)
         result = self.backend.cancel(job, force=True) if parsed.args.get("force") else self.backend.cancel(job)
-        call.say(str(result) or f"Cancel requested for {surfaces.short_job(job)}.")
+        call.say(str(result) or f"Cancel requested for handover {surfaces.short_job(job)}.")
 
     def _verb_resume(self, parsed: surfaces.Parsed, call: Call) -> None:
         job = self._resolve_job(parsed.args.get("job"), call) or None
@@ -1299,31 +1339,42 @@ class Plugin:
             status = self.backend.job_status(None)
             suspended = [j for j in status.get("jobs") or () if j.get("state") == "suspended"]
             if len(suspended) != 1:
-                raise BadRequest("Name the suspended handover: /handover resume <job> (/handover status lists them).")
+                raise BadRequest(
+                    "Name the paused (suspended) handover to continue: /handover resume <job> (/handover status "
+                    "lists them)."
+                )
             job = suspended[0]["job_id"]
         self.backend.resume(str(job))
-        call.say(f"Resumed {surfaces.short_job(job)}; /handover status {surfaces.short_job(job)} shows progress.")
+        call.say(
+            f"Handover {surfaces.short_job(job)} continues; /handover status {surfaces.short_job(job)} shows progress."
+        )
 
     def _verb_identity(self, parsed: surfaces.Parsed, call: Call) -> None:
         if parsed.args.get("sub") == "rotate":
             ident = self.backend.rotate_identity()
-            call.say(f"New key {ident.get('fingerprint')}. Every paired device must pair again with this one.")
+            call.say(
+                f"New key {ident.get('fingerprint')}. Paired devices no longer recognise this machine: pair each of "
+                "them again."
+            )
             return
         ident = self.backend.identity(create=False)
         if not ident:
-            call.say("No handover key yet. It is created when you pair (/handover pair).")
+            call.say(
+                "This machine has no handover key yet (the key paired devices use to recognise it). Pairing creates "
+                "it (/handover pair)."
+            )
             return
-        call.say(f"This device: instance {ident.get('instance_id')}, key {ident.get('fingerprint')}.")
+        call.say(f"This machine: instance {ident.get('instance_id')}, handover key {ident.get('fingerprint')}.")
 
     def _verb_gc(self, parsed: surfaces.Parsed, call: Call) -> None:
         job = self._resolve_job(parsed.args.get("job"), call) or None
         result = self.backend.gc(job_id=job, all_jobs=bool(parsed.args.get("all")))
         call.data["gc"] = result
-        text = f"Freed {surfaces.human_bytes(result.get('freed_bytes', 0))}"
+        text = f"Freed {surfaces.human_bytes(result.get('freed_bytes', 0))} of handover data"
         if parsed.args.get("job") or parsed.args.get("all"):
-            text += f"; removed everything of {result.get('jobs', 0)} jobs"
+            text += f"; removed everything of {result.get('jobs', 0)} handovers"
         if result.get("skipped"):
-            text += f"; {result['skipped']} unfinished jobs kept (/handover status lists them)"
+            text += f"; kept {result['skipped']} unfinished handovers (/handover status lists them)"
         call.say(text + ".")
 
     def _verb_logs(self, parsed: surfaces.Parsed, call: Call) -> None:
@@ -1336,7 +1387,7 @@ class Plugin:
                 return
         events = self.backend.logs(job)
         if not events:
-            call.say(f"No journal entries for {surfaces.short_job(job)}.")
+            call.say(f"No log entries for handover {surfaces.short_job(job)}.")
             return
         for ev in events[-50:]:
             call.say(
@@ -1351,27 +1402,31 @@ class Plugin:
         if call.asker is not None:
             current = settings.get("inbound", "auto")
             choice = call.asker(
-                f"Accept handovers from paired devices? (now: {current})",
+                f"Should this machine accept handovers from paired devices? (now: {current})",
                 [
-                    {"value": "auto", "label": "auto — only while a device is paired"},
-                    {"value": "on", "label": "on — always answer"},
-                    {"value": "off", "label": "off — never"},
+                    {
+                        "value": "auto",
+                        "label": "auto — only while a device that connects to this machine is paired, or a pairing "
+                        "line is waiting",
+                    },
+                    {"value": "on", "label": "on — always"},
+                    {"value": "off", "label": "off — never; other machines see this plugin as not installed"},
                 ],
             )
             if choice in {"auto", "on", "off"} and choice != current:
                 lines.append(_set_or_explain(backend, "inbound", choice))
         roots = ", ".join(_root_shown(r) for r in settings.get("allow_roots") or [])
         lines.append(
-            f"Received workspaces go to {_root_shown(settings.get('workspace_root'))} (setting workspace_root; "
-            f"writes only under {roots})."
+            f"Project folders handed to this machine go to {_root_shown(settings.get('workspace_root'))} (setting "
+            f"workspace_root). The plugin writes files only under {roots} (setting allow_roots)."
         )
         server = ctxrecords.detect(backend.config())
         if server is None:
-            lines.append("ctx: not in use (ctx_checkpoint is not the memory provider) — handovers work without it.")
+            lines.append("ctx: not used (ctx_checkpoint is not your memory provider). Handovers work without it.")
         elif call.asker is not None:
             answer = call.asker(
-                "ctx_checkpoint is your memory provider. Record one redacted note per handover in ctx "
-                f"(server {server})?",
+                "ctx_checkpoint is your memory provider. Should each handover leave one note in ctx, with secrets "
+                f"masked (MCP server {server})?",
                 [{"value": "yes", "label": "Yes, record handovers in ctx"}, {"value": "no", "label": "No"}],
             )
             if answer == "yes":
@@ -1381,17 +1436,17 @@ class Plugin:
                 except CapabilityMissing as err:
                     command = (err.details or {}).get("command")
                     lines.append(
-                        f"ctx: the MCP allowlist was not written ({(err.details or {}).get('reason') or err.message})."
-                        + (f" Run: {command}" if command else "")
+                        f"ctx: the MCP allowlist was not written ({(err.details or {}).get('reason') or err.message}), "
+                        f"so the plugin may not use {server} yet." + (f" Run: {command}" if command else "")
                     )
                 lines.append(_set_or_explain(backend, "ctx_persist", "auto"))
             elif answer == "no":
                 lines.append(_set_or_explain(backend, "ctx_persist", "off"))
-                lines.append("ctx: off.")
+                lines.append("ctx: off. Handovers are not recorded in ctx.")
         else:
             lines.append(
-                "ctx: answer this question in an interactive session (/handover setup) to record handovers in "
-                f"{server}."
+                f"ctx: to record handovers in {server}, run /handover setup where it can ask you (the CLI in a "
+                "terminal, the TUI or Desktop) and answer the question there."
             )
         url = self._listen_url()
         lines += _gate_advice(url)
@@ -1407,7 +1462,13 @@ class Plugin:
         try:
             checks += self.backend.doctor_checks(measure=measure)
         except HandoverError as err:
-            checks.append({"name": "engine", "ok": False, "detail": surfaces.render_error(err, None)})
+            checks.append(
+                {
+                    "name": "engine",
+                    "ok": False,
+                    "detail": "the handover checks could not run: " + surfaces.render_error(err, None),
+                }
+            )
         call.data["checks"] = checks
         for c in checks:
             mark = "ok" if c.get("ok") is True else "FAIL" if c.get("ok") is False else "warn"
@@ -1433,9 +1494,9 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
             {
                 "name": "Hermes session store",
                 "ok": feats.session_db_ok,
-                "detail": "all required SessionDB methods present"
+                "detail": "Hermes offers everything the plugin needs to read and write sessions (SessionDB)"
                 if feats.session_db_ok
-                else "missing: " + ", ".join(feats.missing),
+                else "this Hermes version lacks parts the plugin needs; missing: " + ", ".join(feats.missing),
                 "remedy": "update Hermes to 0.22.6 or newer",
             }
         )
@@ -1443,14 +1504,20 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
             {
                 "name": "progress and questions",
                 "ok": True if feats.post_message else None,
-                "detail": f"post_message {'yes' if feats.post_message else 'no'}, "
-                f"ask_choice {'yes' if feats.ask_choice else 'no'}",
+                "detail": f"progress notices in the chat: {'yes' if feats.post_message else 'no'} (post_message); "
+                f"questions with choices: {'yes' if feats.ask_choice else 'no'} (ask_choice)",
             }
         )
         if feats.host_isolated or _isolation_of(backend) == "host":
             checks.append(_host_isolation_check(backend))
     except Exception as exc:
-        checks.append({"name": "Hermes", "ok": False, "detail": f"capability probe failed ({type(exc).__name__})"})
+        checks.append(
+            {
+                "name": "Hermes",
+                "ok": False,
+                "detail": f"could not check what this Hermes version offers ({type(exc).__name__})",
+            }
+        )
     for module in ("cryptography", "httpx", "compression.zstd"):
         try:
             found = importlib.util.find_spec(module) is not None
@@ -1460,8 +1527,8 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
             {
                 "name": f"import {module}",
                 "ok": found,
-                "detail": "available" if found else "missing",
-                "remedy": "this Hermes runtime lacks a core dependency; reinstall Hermes",
+                "detail": "Python module available" if found else "Python module missing",
+                "remedy": "this Hermes installation lacks a module it should include; reinstall Hermes",
             }
         )
     settings = backend.settings()
@@ -1473,10 +1540,10 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
                 "name": "settings",
                 "ok": None,
                 "detail": " ".join(rejected),
-                "remedy": "correct the values named above; until then their defaults apply",
+                "remedy": "correct these values in Settings → Plugins → ctx_handover; until then their defaults apply",
             }
         )
-    peer_names = ", ".join(p.name for p in backend.peers() if p.direction == "dial") or "the other gateway"
+    peer_names = ", ".join(p.name for p in backend.peers() if p.direction == "dial") or "the other machine"
     warnings_of = _gate_warnings()
     for key, env in surfaces.SECRET_ENVS.items():
         try:
@@ -1492,9 +1559,10 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
                     "name": f"stored {what}",
                     "ok": None,
                     "detail": f"{env} (for {peer_names}): "
-                    + ("; ".join(lines) or "it opens the whole dashboard there, not only ctx_handover"),
-                    "remedy": "put a reverse proxy in front of the other gateway that passes only "
-                    "/api/plugins/ctx_handover/ and checks its own header (peer_extra_headers)",
+                    + ("; ".join(lines) or "it opens the whole Hermes dashboard there, not only ctx_handover"),
+                    "remedy": "on the other machine, put a reverse proxy (a web server in front of Hermes) that passes "
+                    "only /api/plugins/ctx_handover/ and checks a header of its own; enter that header here under "
+                    "peer_extra_headers",
                 }
             )
     try:
@@ -1509,15 +1577,21 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
                 {
                     "name": "profile .env permissions",
                     "ok": None,
-                    "detail": f"{env_path}: {'; '.join(lines)} — it holds this device's handover key and any stored "
+                    "detail": f"{env_path}: {'; '.join(lines)} — it holds this machine's handover key and any stored "
                     "dashboard token",
-                    "remedy": f"chmod 600 {env_path}",
+                    "remedy": f"chmod 600 {env_path} (then only your account can read it)",
                 }
             )
         else:
-            checks.append({"name": "profile .env permissions", "ok": True, "detail": f"mode {mode:o}"})
+            checks.append(
+                {
+                    "name": "profile .env permissions",
+                    "ok": True,
+                    "detail": f"only its owner can read it (mode {mode:o})",
+                }
+            )
     except FileNotFoundError:
-        checks.append({"name": "profile .env permissions", "ok": True, "detail": "no .env yet"})
+        checks.append({"name": "profile .env permissions", "ok": True, "detail": "no .env file yet"})
     except Exception as exc:
         checks.append({"name": "profile .env permissions", "ok": None, "detail": f"not checked ({type(exc).__name__})"})
     if settings.get("allow_remote_continue"):
@@ -1530,7 +1604,8 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
             {
                 "name": "ctx records",
                 "ok": True if granted else None,
-                "detail": f"MCP server {server} {'allowed' if granted else 'not in mcp_allowlist'}",
+                "detail": f"MCP server {server} "
+                + ("allowed" if granted else "not in mcp_allowlist yet, so no handover notes are sent to ctx"),
                 "remedy": "run /handover setup and allow ctx recording, or set ctx_persist: off",
             }
         )
@@ -1638,29 +1713,36 @@ def _yes_refused_text(summary: Mapping | None, refused: Sequence[str] = ()) -> s
         what = (
             surfaces.workspace_excluded_text(excluded)
             if isinstance(excluded, Mapping)
-            else "the session's working folder stays here"
+            else "the session's project folder stays here"
         )
         lines.append(
-            f"--yes does not confirm that {what}. Answer the question in an interactive session, or add "
-            "--no-workspace to hand over without it."
+            f"--yes does not confirm that {what}. Run the command where Hermes can ask you, and answer the question "
+            "there, or add --no-workspace to hand over without it."
         )
     if surfaces.CONFIRM_CONTEXT in refused:
         over = surfaces.context_over_entry((summary or {}).get("context_over"))
         what = surfaces.context_over_text(over) if over else "the session is larger than the model's window there"
         lines.append(
-            f"--yes does not confirm that {what}. Answer the question in an interactive session, or run /compress "
-            "in the session first."
+            f"--yes does not confirm that {what}. Run the command where Hermes can ask you, and answer the question "
+            "there, or run /compress in the session first."
         )
     if surfaces.CONFIRM_WORKSPACE_DIFFERS in refused:
         ws = surfaces.workspace_entry((summary or {}).get("workspace"))
-        what = f"the {surfaces.workspace_text(ws)}" if ws else "a workspace that holds more than the session's folder"
-        lines.append(f"--yes does not confirm {what}. Answer the question in an interactive session.")
+        what = (
+            f"the {surfaces.workspace_text(ws)}" if ws else "a project folder that holds more than the session's folder"
+        )
+        lines.append(
+            f"--yes does not confirm {what}. Run the command where Hermes can ask you, and answer the question there."
+        )
     exempt_named = {surfaces.CONFIRM_WORKSPACE_EXCLUDED, surfaces.CONFIRM_CONTEXT, surfaces.CONFIRM_WORKSPACE_DIFFERS}
     others = [r for r in refused if r not in exempt_named]
     if others or not lines:
         why = "; ".join(surfaces.REASON_TEXT.get(r, r) for r in others if r != surfaces.UNNAMED_EXEMPT)
         detail = f" ({why})" if why else ""
-        lines.append(f"--yes does not confirm this handover{detail}. Answer the question in an interactive session.")
+        lines.append(
+            f"--yes does not confirm this handover{detail}. Run the command where Hermes can ask you, and answer the "
+            "question there."
+        )
     return "\n".join(lines)
 
 
@@ -1670,13 +1752,13 @@ def _set_or_explain(backend: Backend, key: str, value: str) -> str:
         backend.set_setting(key, value)
     except CapabilityMissing:
         return f"{key}: not saved from here; run: hermes config set plugins.entries.ctx_handover.settings.{key} {value}"
-    return f"{key}: {value}"
+    return f"{key}: {value} (saved)"
 
 
 _ELSEWHERE = (
-    "a continuation started by a separate `hermes serve`/`hermes dashboard` or by `hermes handover take|import "
-    "--continue` in a terminal sees only a --yolo on the command line of a gateway it can identify, not "
-    "HERMES_YOLO_MODE in its environment"
+    "an agent start from a separate `hermes serve`/`hermes dashboard`, or from `hermes handover take|import "
+    "--continue` in a terminal, sees only a --yolo on the command line of a gateway it can identify, not "
+    "HERMES_YOLO_MODE in that gateway's environment"
 )
 
 
@@ -1693,63 +1775,77 @@ def _continue_check(config: dict) -> tuple[bool | None, str]:
         check = None
     why = getattr(check, "why", "")
     pid = getattr(check, "pid", None)
-    gw = f"the gateway of this profile (pid {pid})" if pid else "the gateway of this profile"
+    gw = (
+        f"the gateway of this profile (the Hermes service that runs your chats, pid {pid})"
+        if pid
+        else "the gateway of this profile (the Hermes service that runs your chats)"
+    )
     if why in hostcompat.UNIDENTIFIED_WHY:
         return None, (
-            f"on; not checked whether approvals apply here: {hostcompat.unchecked_text(why)} — so a continuation "
-            "started from this process is refused; start the turn there by hand (`hermes chat --resume <id>`, or open "
-            "the session and send a message)"
+            f"on, but not checked whether approvals apply here: {hostcompat.unchecked_text(why)}. So a --continue "
+            "from a paired device is refused in this process and the agent does not start by itself; start it by "
+            "hand instead (`hermes chat --resume <id>`, or open the session and send a message)"
         )
     if why == "gateway_elsewhere":
         return None, (
-            f"on; not checked whether approvals apply for a continuation started here: {gw} is another process; "
-            f"whether it runs with HERMES_YOLO_MODE is not visible here — {_ELSEWHERE}; leave allow_remote_continue "
-            "off on a gateway given HERMES_YOLO_MODE"
+            "on, but not checked whether approvals apply when a --continue starts the agent here: "
+            f"{gw} is another process, and whether it runs with HERMES_YOLO_MODE is not visible here — {_ELSEWHERE}; "
+            "leave allow_remote_continue off on a gateway given HERMES_YOLO_MODE"
         )
     try:
         off = hostcompat.approvals_off(config)
     except ContinueRefused:
         return None, (
-            "on; not checked whether approvals apply here, so a continuation started from this process is refused"
+            "on, but not checked whether approvals apply here, so a --continue from a paired device is refused in "
+            "this process"
         )
     except Exception:
-        return None, "on; not checked whether approvals apply here (the approval setting could not be read)"
+        return None, "on, but not checked whether approvals apply here (the approval setting could not be read)"
     if off is True:
         if why == "config_single_query":
             return None, (
-                "on, but approvals.single_query_mode approves every command, so no remote continuation ever starts"
+                "on, but approvals.single_query_mode approves every command, so a --continue from a paired device "
+                "never starts the agent here"
             )
         if why == "gateway_flag":
-            return None, f"on, but {gw} was started with --yolo (approvals off), so no remote continuation starts"
+            return None, (
+                f"on, but {gw} was started with --yolo (approvals off), so a --continue from a paired device does "
+                "not start the agent here"
+            )
         if why == "process_env":
             return None, (
-                "on, but this process runs with HERMES_YOLO_MODE (approvals off), so no continuation starts from "
-                "this process"
+                "on, but this process runs with HERMES_YOLO_MODE (approvals off), so no --continue starts the agent "
+                "from this process"
             )
         if why == "gateway_env":
             if getattr(check, "flag", False):
                 return None, (
-                    "on, but this gateway runs with --yolo (approvals off), so no remote continuation starts; other "
-                    "processes of this profile see the flag on its command line and refuse too"
+                    "on, but this gateway runs with --yolo (approvals off), so a --continue from a paired device does "
+                    "not start the agent here; other processes of this profile see the flag on its command line and "
+                    "refuse too"
                 )
             return None, (
-                "on, but this gateway runs with HERMES_YOLO_MODE (approvals off): a continuation started in this "
-                "gateway is refused, but one started by a separate `hermes serve`/`hermes dashboard` or by "
+                "on, but this gateway runs with HERMES_YOLO_MODE (approvals off): an agent start for a --continue in "
+                "this gateway is refused, but one from a separate `hermes serve`/`hermes dashboard` or from "
                 "`hermes handover take|import --continue` in a terminal is not (the variable is not visible there) "
                 "— turn allow_remote_continue off"
             )
-        return None, "on, but approvals are off on this gateway, so no remote continuation ever starts"
+        return None, (
+            "on, but approvals are off on this gateway, so a --continue from a paired device never starts the agent "
+            "here"
+        )
     if off is False and getattr(check, "off", None) is False:
         if why == "no_gateway":
             return True, (
-                "on: a paired device with --continue may start one turn here (approvals apply; no gateway of this "
-                "profile runs now, so the continuation starts one without auto-approve variables)"
+                "on: a paired device that hands over with --continue may start the agent here for one turn (approvals "
+                "apply; no gateway of this profile runs now, so the agent starts in a process of its own without "
+                "auto-approve variables)"
             )
         return True, (
-            "on: a paired device with --continue may start one turn here (approvals apply; checked in this gateway's "
-            "process)"
+            "on: a paired device that hands over with --continue may start the agent here for one turn (approvals "
+            "apply; checked in this gateway's process)"
         )
-    return None, "on; not checked whether approvals apply for a continuation started here"
+    return None, "on, but not checked whether approvals apply when a --continue starts the agent here"
 
 
 def _includes(options: Options, parsed: surfaces.Parsed) -> tuple[str, ...]:
@@ -1804,7 +1900,7 @@ def probe_sizes() -> tuple[int, ...]:
 
 def measure_text() -> str:
     """What ``doctor --measure`` uploads to each paired gateway, for the texts that announce it."""
-    return f"{sum(probe_sizes())} MiB of test data per paired gateway"
+    return f"{sum(probe_sizes())} MiB of test data to each paired machine"
 
 
 def _is_count(value: object) -> bool:
@@ -1822,7 +1918,7 @@ def peer_check(peer: Peer, probe: Mapping, clock_skew: float | None = None) -> d
         return {
             "name": name,
             "ok": False,
-            "detail": f"the probe of {peer.name} returned no summary",
+            "detail": f"the check of {peer.name} returned no result",
             "remedy": "run /handover doctor again",
         }
     ok = probe.get("ok", False)
@@ -1856,8 +1952,8 @@ def peer_check(peer: Peer, probe: Mapping, clock_skew: float | None = None) -> d
         skew = None
     if skew is not None and abs(skew) > SKEW_WARN_S:
         ok = None if ok is True else ok
-        parts.append(f"clock differs by {skew:+.0f} s (signatures fail beyond 300 s)")
-        remedies.append("synchronise the clocks (NTP) on both machines")
+        parts.append(f"clock differs by {skew:+.0f} s (signed requests are refused beyond 300 s)")
+        remedies.append("synchronise the clocks of both machines (automatic time, NTP)")
     return {"name": name, "ok": ok, "detail": "; ".join(parts), "remedy": "; ".join(remedies) or None}
 
 
@@ -1865,12 +1961,13 @@ def _gate_advice(url: str | None) -> list[str]:
     """What the dialing device must fill in for this gateway's dashboard gate (setup, BX H1)."""
     if not url:
         return [
-            "Address: not set. Fill 'Address other devices use to reach this gateway' (listen_url) in Settings → "
-            "Plugins → ctx_handover before pairing."
+            "Address: not set yet. Before pairing, fill in 'Address other devices use to reach this gateway' "
+            "(listen_url) in Settings → Plugins → ctx_handover: the web address the other machine uses to reach "
+            "Hermes on this machine."
         ]
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return [f"Address {url!r} is not an http(s) URL; fix listen_url."]
+        return [f"Address {url!r} is not a web address (http:// or https://); correct listen_url."]
     lines = [f"Address for pairing: {url}"]
     try:
         with urllib.request.urlopen(url + "/api/auth/providers", timeout=5) as resp:  # noqa: S310 - http(s) checked above
@@ -1879,25 +1976,27 @@ def _gate_advice(url: str | None) -> list[str]:
     except urllib.error.HTTPError as exc:
         providers = None
         if exc.code == 404:
-            lines.append("The address does not look like a Hermes dashboard (no /api/auth/providers).")
+            lines.append(
+                "The address does not look like a Hermes dashboard (no /api/auth/providers). Check listen_url."
+            )
     except (OSError, ValueError):
         providers = None
-        lines.append("The address did not answer from here; check it from the other device.")
+        lines.append("The address did not answer from this machine; check that the other machine can open it.")
     if providers is not None:
         if any(p.get("supports_password") for p in providers):
             lines.append(
-                "Its dashboard uses a Basic login: on the other device choose peer_gate basic_login and "
-                "fill in the dashboard user name and password."
+                "Its dashboard uses a Basic login: on the other device choose peer_gate basic_login in the "
+                "ctx_handover settings and fill in the user name and password of the dashboard on this machine."
             )
         else:
             lines.append(
-                "Its dashboard signs in with a fixed token: set HERMES_DASHBOARD_SESSION_TOKEN on this "
-                "gateway (then restart `hermes serve` and the gateway) and enter the same token on the other "
-                "device as 'Dashboard token of the other gateway'."
+                "Its dashboard signs in with a fixed token: set HERMES_DASHBOARD_SESSION_TOKEN on this machine, "
+                "then restart `hermes serve` and the gateway (the Hermes service that runs your chats), and enter "
+                "the same token on the other machine as 'Dashboard token of the other gateway'."
             )
     lines.append(
-        "That credential opens this whole dashboard; a reverse proxy that passes only "
-        "/api/plugins/ctx_handover/ limits it."
+        "That token or password opens the whole Hermes dashboard on this machine, not only ctx_handover. A reverse "
+        "proxy (a web server in front of Hermes) that passes only /api/plugins/ctx_handover/ limits what it opens."
     )
     return lines
 
@@ -1961,12 +2060,14 @@ def slash_handler(ctx: Any) -> Callable[..., str]:
 def cli_setup(subparser: argparse.ArgumentParser) -> None:
     """``hermes handover <verb> [args …]`` — one grammar with the slash form (``surfaces.parse``)."""
     subparser.description = (
-        "Move a Hermes session and its working files to another gateway you paired (pull, push or bundle). "
-        "Verbs: " + ", ".join(surfaces.VERBS) + ". Add --json for scripts. Exit codes: 0 ok, 1 failed, 2 usage, "
-        "3 busy/conflict, 4 auth/gate, 5 in-doubt/suspended."
+        "Hand over a Hermes session and its project folder to another machine you paired: send it there (to), "
+        "take it from there (take), or use a handover file (export, import). Commands: "
+        + ", ".join(surfaces.VERBS)
+        + ". Add --json for scripts. Exit codes: 0 ok, 1 failed, 2 wrong usage, 3 busy or in conflict, "
+        "4 sign-in, key or pairing problem, 5 unclear whether the other machine finished, or paused (suspended)."
     )
-    subparser.add_argument("verb", nargs="?", default="help", help="to, take, export, import, status, …")
-    subparser.add_argument("rest", nargs=argparse.REMAINDER, help="arguments of the verb (see /handover help)")
+    subparser.add_argument("verb", nargs="?", default="help", help="the command: to, take, export, import, status, …")
+    subparser.add_argument("rest", nargs=argparse.REMAINDER, help="arguments of the command (see /handover help)")
 
 
 def cli_handler(ctx: Any) -> Callable[[argparse.Namespace], int]:
@@ -2160,7 +2261,9 @@ class EngineBackend:
 
         ident = self._identity(create=False)
         if ident is None:
-            raise BadRequest("This device has no handover key. Pair with the other gateway first (/handover pair).")
+            raise BadRequest(
+                "This machine has no handover key yet. Pair it with the other machine first (/handover pair)."
+            )
         return WireClient(peer, ident, read_secret=hostcompat.read_secret)
 
     # -- Backend ---------------------------------------------------------------------------------------
@@ -2213,9 +2316,9 @@ class EngineBackend:
         if left:
             lines = "those lines" if len(left) > 1 else "that line"
             raise EnvNotWritable(
-                f"{peer.name} was not removed: its credential in this profile's .env could not be blanked "
-                f"({', '.join(left)}; the .env is managed or the write was refused). Delete {lines} from the .env, "
-                f"then run /handover peers remove {peer.name} again.",
+                f"{peer.name} was not removed: its stored dashboard sign-in in this profile's .env file could not be "
+                f"cleared ({', '.join(left)}; the .env is managed or the write was refused). Delete {lines} from the "
+                f".env file, then run /handover peers remove {peer.name} again.",
                 variable=left[0],
                 variables=left,
                 peer=peer.name,
@@ -2441,11 +2544,13 @@ class EngineBackend:
         before = _gc_usage(data)
         if job_id:
             if not ULID_RE.match(str(job_id)):
-                raise BadRequest(f"{job_id!r} is not a job id (/handover status lists them).", field="job")
+                raise BadRequest(
+                    f"{job_id!r} is not a handover id (/handover status lists the handovers).", field="job"
+                )
             if not _job_known(rt.ledger, data, str(job_id)):  # "removed" only for a job that left something here
                 raise NotFound(
-                    f"no such job {surfaces.short_job(job_id)} on this gateway; nothing was removed "
-                    "(/handover status lists the jobs).",
+                    f"no such job {surfaces.short_job(job_id)} on this machine: no handover with that id left "
+                    "anything here, so nothing was removed (/handover status lists the handovers).",
                     job=str(job_id),
                 )
             ids = [str(job_id)]
@@ -2555,7 +2660,8 @@ class EngineBackend:
                     "name": "git",
                     "ok": True if ok and not warning else (None if ok else False),
                     "detail": warning or "version is supported",
-                    "remedy": "install git 2.38 or newer (and git-lfs for LFS repositories)",
+                    "remedy": "install git 2.38 or newer (and git-lfs for repositories that keep large files in Git "
+                    "LFS)",
                 }
             )
         except Exception as exc:
@@ -2563,7 +2669,7 @@ class EngineBackend:
                 {
                     "name": "git",
                     "ok": False,
-                    "detail": f"not usable ({type(exc).__name__})",
+                    "detail": f"git could not be run ({type(exc).__name__})",
                     "remedy": "install git 2.38 or newer",
                 }
             )
@@ -2574,19 +2680,27 @@ class EngineBackend:
                 {
                     "name": "data folder",
                     "ok": (mode & 0o077) == 0,
-                    "detail": f"{data} mode {mode:o}",
-                    "remedy": f"chmod 700 {data}",
+                    "detail": f"handover data in {data} (access mode {mode:o})",
+                    "remedy": f"chmod 700 {data} (then only your account can open it)",
                 }
             )
         except Exception as exc:
-            checks.append({"name": "data folder", "ok": False, "detail": f"not usable ({type(exc).__name__})"})
+            checks.append(
+                {
+                    "name": "data folder",
+                    "ok": False,
+                    "detail": f"the handover data folder is not usable ({type(exc).__name__})",
+                }
+            )
         try:
             ident = self._identity(create=False)
             checks.append(
                 {
                     "name": "identity",
                     "ok": True if ident is not None else None,
-                    "detail": f"key {ident.fingerprint()}" if ident is not None else "no key yet (created by pairing)",
+                    "detail": f"handover key {ident.fingerprint()}"
+                    if ident is not None
+                    else "no handover key yet (pairing creates it)",
                 }
             )
         except HandoverError as err:
@@ -2602,8 +2716,13 @@ class EngineBackend:
                 {
                     "name": "inbound",
                     "ok": True,
-                    "detail": f"{mode}: {'answering' if answering else 'hidden (answers like an uninstalled plugin)'}; "
-                    f"{len(inbound)} paired device(s) may dial in",
+                    "detail": f"{mode}: "
+                    + (
+                        "accepts handovers from paired devices"
+                        if answering
+                        else "hidden (other machines see this plugin as not installed)"
+                    )
+                    + f"; {len(inbound)} paired device(s) may connect to this machine",
                 }
             )
             for peer in (p for p in ledger.peers() if p.direction == "dial"):
@@ -2642,7 +2761,9 @@ class EngineBackend:
         result: dict[str, Any] = {"server": server}
         category = str(settings.get("ctx_category") or "handover")
         if not ctxrecords.allowed(config, server):
-            result["error"] = f"recording in {server} is not allowed yet; run /handover setup (or set ctx_persist: off)"
+            result["error"] = (
+                f"recording in {server} is not allowed yet; run /handover setup to allow it (or set ctx_persist: off)"
+            )
         elif callable(call_mcp) and not wait:
             # the profile's one background flusher (``Runtime.flush_in_background``, thread ``ctxh-outbox``, one at a
             # time, M29); each row is claimed in the ledger before it is sent, so no other flush sends it again
@@ -2660,7 +2781,7 @@ class EngineBackend:
         grant = getattr(hostcompat, "grant_mcp_server", None)
         if not callable(grant):
             raise CapabilityMissing(
-                "This build cannot write the MCP allowlist itself.",
+                "This Hermes version cannot write the plugin's mcp_allowlist itself.",
                 capability="write mcp_allowlist",
                 reason="unavailable",
                 command=f"hermes config set plugins.entries.ctx_handover.mcp_allowlist '[\"{server}\"]'",

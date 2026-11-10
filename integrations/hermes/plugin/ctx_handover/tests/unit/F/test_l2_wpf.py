@@ -262,7 +262,7 @@ def test_setup_writes_mcp_allowlist_through_hostcompat(fake_host):
     fake_host.mcp_grant_refusal = "managed"
     ctx.choice_answers = ["auto", "yes"]
     out = _slash(plugin, "setup")
-    assert "ctx: the MCP allowlist was not written (managed)." in out
+    assert "ctx: the MCP allowlist was not written (managed), so the plugin may not use ctx yet." in out
     assert "Run: hermes config set plugins.entries.ctx_handover.mcp_allowlist" in out
     assert "mcp_allowlist" not in fake_host.config["plugins"]["entries"]["ctx_handover"]
 

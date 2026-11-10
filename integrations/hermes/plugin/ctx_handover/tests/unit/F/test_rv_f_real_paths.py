@@ -91,7 +91,7 @@ def test_rv_f_m30_reclaim_after_a_pull_says_the_copy_is_not_told(online, monkeyp
     result = call.data.get("reclaim") or {}
     assert result.get("state") == "reclaimed" and result.get("target_notified") is not True, result
     text = "\n".join(call.out)
-    assert "not told about this reclaim" in text, text
+    assert "not told that you took the session back" in text, text
     assert "was told" not in text, text
 
 
@@ -111,7 +111,7 @@ def test_rv_f_m30_reclaim_after_an_export_names_the_bundle_not_a_peer(online):
     assert result.get("state") == "reclaimed" and result.get("export") is True, result
     text = "\n".join(call.out)
     assert "bundle" in text, text
-    assert "not told about this reclaim" not in text and "was told" not in text, text
+    assert "not told that you took the session back" not in text and "was told" not in text, text
 
 
 @pytest.fixture

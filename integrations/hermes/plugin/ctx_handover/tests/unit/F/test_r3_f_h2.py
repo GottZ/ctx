@@ -274,9 +274,13 @@ def _doctor_line(fake_host, monkeypatch, check) -> dict:
         ("gateway_elsewhere", None, ["not checked", "hermes serve", "--continue", "HERMES_YOLO_MODE"]),
         ("gateway_unverified", None, ["not checked", "cannot identify"]),
         ("gateway_unknown", None, ["not checked"]),
-        ("gateway_flag", None, ["--yolo", "no remote continuation starts"]),
-        ("config_mode", None, ["approvals are off on this gateway, so no remote continuation ever starts"]),
-        ("config_single_query", None, ["single_query_mode", "no remote continuation ever starts"]),
+        ("gateway_flag", None, ["--yolo", "a --continue from a paired device does not start the agent here"]),
+        (
+            "config_mode",
+            None,
+            ["approvals are off on this gateway, so a --continue from a paired device never starts the agent here"],
+        ),
+        ("config_single_query", None, ["single_query_mode", "never starts the agent here"]),
         ("process_env", None, ["HERMES_YOLO_MODE", "this process"]),
     ],
 )
