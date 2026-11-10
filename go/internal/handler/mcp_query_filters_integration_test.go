@@ -53,6 +53,9 @@ type mqfRetrievalOnly struct {
 	next http.HandlerFunc
 }
 
+// ServeHTTP rewrites the delegated body with `synthesize:false` and hands the
+// request to the real query handler; a body it cannot read or decode fails
+// the test.
 func (d mqfRetrievalOnly) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -79,6 +82,9 @@ type mqfFixture struct {
 	ctx context.Context
 }
 
+// mqfSetup boots a database, stores the three fixture blocks through the
+// store handler under one private key, and returns the tool config wired to
+// the real query handler together with that key's context.
 func mqfSetup(t *testing.T) *mqfFixture {
 	t.Helper()
 	pool := testdb.SetupTestDB(t)
@@ -159,6 +165,9 @@ func (f *mqfFixture) titles(t *testing.T, raw string) []string {
 	return got
 }
 
+// TestMCPQueryFiltersNarrowThePipeline_Integration: each filter, given to the
+// MCP tool, decides which of the three stored blocks the real pipeline names.
+// The unfiltered probe runs first and must name all three.
 func TestMCPQueryFiltersNarrowThePipeline_Integration(t *testing.T) {
 	f := mqfSetup(t)
 
