@@ -389,11 +389,11 @@ below something that is not a directory (``not_directory``), cannot be written (
 itself failed (``check_failed``; fail-closed)."""
 
 _PROBLEM_TEXT = {
-    "invalid": "is not a usable path",
-    "denied": "may not be written (it lies in a protected location such as the Hermes home)",
-    "not_allowed_root": "is not inside allow_roots",
-    "not_directory": "is not a directory",
-    "not_writable": "cannot be written",
+    "invalid": "is not a full (absolute) path",
+    "denied": "lies in a protected place (such as the Hermes home) where the plugin never writes",
+    "not_allowed_root": "is not inside the folders the allow_roots setting allows",
+    "not_directory": "is not a folder (or a part of its path is not a folder)",
+    "not_writable": "cannot be written to",
     "check_failed": "could not be checked",
 }
 
@@ -439,11 +439,11 @@ def workspace_root_message(facts: EnvFacts) -> str | None:
         return None
     problem = getattr(facts, "workspace_root_problem", "") or "check_failed"
     text = _PROBLEM_TEXT.get(problem, _PROBLEM_TEXT["check_failed"])
-    host = _one_line(facts.instance_name, 64) or "the other side"
+    host = _one_line(facts.instance_name, 64) or "the other machine"
     root = _one_line(facts.workspace_root, 512) or "?"
     return (
-        f"the workspace root {root} on {host} {text}; set workspace_root (and allow_roots) in the ctx_handover "
-        f"settings there"
+        f"the folder {root} on {host}, where handed-over project folders go (setting workspace_root), {text}; "
+        f"choose another folder with workspace_root (and allow_roots) in the ctx_handover settings on {host}"
     )
 
 

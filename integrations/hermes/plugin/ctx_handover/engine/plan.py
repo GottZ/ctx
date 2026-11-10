@@ -1224,7 +1224,9 @@ def restrict_to_releasable(
     every refused item id (plan order, each once, at most ``MAX_REFUSED_IDS``; W017), the other details are the first
     refusal's. The result carries a recomputed ``plan_id``."""
     if remote_final.plan.job_id != own_plan.job_id:
-        raise PolicyDenied("the remote plan belongs to another job", reason="not_allowed_root")
+        raise PolicyDenied(
+            "the plan sent by the machine you hand over to belongs to a different handover", reason="not_allowed_root"
+        )
     own = {i.item_id: i for i in own_plan.items}
     export = [Path(_real(str(r))) for r in cfg.export_roots]
     out: list[PlanItem] = []
@@ -1235,7 +1237,11 @@ def restrict_to_releasable(
             refused.append(
                 (
                     item.item_id,
-                    PolicyDenied(f"duplicate item {item.item_id}", reason="not_allowed_root", item=item.item_id),
+                    PolicyDenied(
+                        f"item {item.item_id} appears twice in the plan sent by the machine you hand over to",
+                        reason="not_allowed_root",
+                        item=item.item_id,
+                    ),
                 )
             )
             continue
@@ -1273,15 +1279,20 @@ def _own_item_refusal(item: PlanItem, mine: PlanItem) -> PolicyDenied | None:
     """Why the counterpart's version of an own item is refused (None: it only narrows)."""
     if item.source_path != mine.source_path or item.kind is not mine.kind:
         return PolicyDenied(
-            f"item {item.item_id} differs from the source's plan", reason="not_allowed_root", item=item.item_id
+            f"item {item.item_id} differs from the plan of the machine you hand over from",
+            reason="not_allowed_root",
+            item=item.item_id,
         )
     if mine.include is Include.NO and item.include is not Include.NO:
         return PolicyDenied(
-            f"item {item.item_id} is not released by the source", reason="not_allowed_root", item=item.item_id
+            f"item {item.item_id} is not released by the machine you hand over from",
+            reason="not_allowed_root",
+            item=item.item_id,
         )
     if mine.include is Include.PROPOSED and item.include is Include.YES and SUSPECTED_SECRET in mine.reasons:
         return PolicyDenied(
-            f"item {item.item_id} is a suspected secret; only a local --include-secret releases it",
+            f"item {item.item_id} may hold a secret; only --include-secret on the machine you hand over from "
+            "releases it",
             reason=SUSPECTED_SECRET,
             item=item.item_id,
         )
@@ -1307,7 +1318,11 @@ def _remote_addition(item: PlanItem, cfg: PolicyConfig, export: list[Path], reda
     redactor). A released item comes back unchanged except ``include`` (``yes`` stays, anything else ``no``): the
     restricted plan keeps the conductor's ``plan_id``, against which the target verifies the pack."""
     path = item.source_path
-    deny = PolicyDenied(f"{path!r} is not released by this source", reason="not_allowed_root", path=str(path)[:300])
+    deny = PolicyDenied(
+        f"{path!r} is not released by the machine you hand over from",
+        reason="not_allowed_root",
+        path=str(path)[:300],
+    )
     if not export or not isinstance(path, str) or not os.path.isabs(path) or "\x00" in path:
         raise deny
     if item.kind not in {ItemKind.EXTRA_FILE, ItemKind.EXTRA_DIR}:
@@ -1315,7 +1330,7 @@ def _remote_addition(item: PlanItem, cfg: PolicyConfig, export: list[Path], reda
     real = _real(path)
     if real != _norm(path):
         raise PolicyDenied(
-            f"{path!r} is not released: not a canonical path (a link on the way)",
+            f"{path!r} is not released: a symbolic link lies on its path",
             reason=NON_CANONICAL_PATH,
             path=str(path)[:300],
         )
@@ -1980,8 +1995,9 @@ def bundle_negotiate(
         free[where] = available
         if need > available:
             raise InsufficientStorage(
-                f"The bundle needs {need / 1024**3:.1f} GiB free in {where}, has {available / 1024**3:.1f} GiB. "
-                "Nothing was written.",
+                f"The handover file needs {need / 1024**3:.1f} GiB free in {where}, but only "
+                f"{available / 1024**3:.1f} GiB are free there. Nothing was written. Free up space there, or give "
+                "`/handover export` another path.",
                 need_bytes=need,
                 free_bytes=available,
                 path=where,

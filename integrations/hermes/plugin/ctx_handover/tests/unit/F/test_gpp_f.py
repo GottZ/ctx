@@ -96,8 +96,9 @@ def _root_denied(message: str) -> PolicyDenied:
 @pytest.mark.parametrize(
     "message",
     [
-        f"the workspace root {ROOT} on gottz may not be written (it lies in a protected location such as the Hermes "
-        "home); set workspace_root (and allow_roots) in the ctx_handover settings there",
+        f"the folder {ROOT} on gottz, where handed-over project folders go (setting workspace_root), lies in a "
+        "protected place (such as the Hermes home) where the plugin never writes; choose another folder with "
+        "workspace_root (and allow_roots) in the ctx_handover settings on gottz",
         "",
         "refused",
     ],
