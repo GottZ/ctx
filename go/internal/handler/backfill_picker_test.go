@@ -77,7 +77,7 @@ func (q *fakeBackfillQueue) QueryRow(_ context.Context, sql string, args ...any)
 func (q *fakeBackfillQueue) drain(t *testing.T, armRuns bool, syncCap int, readScopes []string) []string {
 	t.Helper()
 	p := &backfillPicker{
-		db: q, armRuns: armRuns, syncCap: syncCap, readScopes: readScopes,
+		db: q, armRuns: armRuns, readScopes: readScopes,
 		anyClasses: func() embedClasses { return embedClasses{} },
 	}
 	var got []string
@@ -123,16 +123,17 @@ func TestBackfillPickerOrder(t *testing.T) {
 		// Arm off, one pick: the oldest of any scope.
 		{"arm_off_cap_1_oldest", "f1 c1 f2 c2", false, 1, "f1", 0, 1},
 		{"arm_off_cap_1_oldest_is_the_callers", "c1 f1 c2", false, 1, "c1", 0, 1},
-		// Arm off, two picks: the caller's newest, then the oldest.
-		{"arm_off_cap_2_both_ends", "c1 c2 c3", false, 2, "c3 c1", 1, 2},
-		{"arm_off_cap_2_old_end_is_unscoped", "f1 c1 c2", false, 2, "c2 f1", 1, 2},
-		{"arm_off_cap_2_caller_first", "f1 c1 f2", false, 2, "c1 f1", 1, 2},
+		// Arm off, two picks: the oldest, then the caller's newest. The old
+		// end has the first pick, which is the one with the whole budget.
+		{"arm_off_cap_2_both_ends", "c1 c2 c3", false, 2, "c1 c3", 1, 2},
+		{"arm_off_cap_2_old_end_is_unscoped", "f1 c1 c2", false, 2, "f1 c2", 1, 2},
+		{"arm_off_cap_2_old_end_first", "f1 c1 f2", false, 2, "f1 c1", 1, 2},
 		// Arm off, no cap: the ends alternate until the queue is empty.
-		{"arm_off_uncapped_alternates", "f1 c1 c2 c3 f2", false, 0, "c3 f1 c2 c1 f2", -1, 0},
+		{"arm_off_uncapped_alternates", "f1 c1 c2 c3 f2", false, 0, "f1 c3 c1 c2 f2", -1, 0},
 		// Arm off, nothing for the caller: the scoped pick runs once.
 		{"arm_off_caller_drained_scoped_once", "f1 f2 f3", false, 0, "f1 f2 f3", 1, 6},
-		{"arm_off_nothing_pending", "", false, 0, "", 1, 3},
-		{"arm_off_cap_4_caller_drained_midway", "f1 f2 f3 c1", false, 4, "c1 f1 f2 f3", 2, 0},
+		{"arm_off_nothing_pending", "", false, 0, "", 0, 2},
+		{"arm_off_cap_4_caller_drained_midway", "f1 f2 f3 c1", false, 4, "f1 c1 f2 f3", 2, 0},
 
 		// Arm off: a block that overran the budget goes last, wherever it
 		// stands in the order.
@@ -140,7 +141,7 @@ func TestBackfillPickerOrder(t *testing.T) {
 		{"arm_off_overran_oldest_goes_last", "c1! c2 f1", false, 0, "c2 f1 c1!", -1, 0},
 		{"arm_off_cap_1_overran_oldest_waits", "c1! c2", false, 1, "c2", 0, 1},
 		{"arm_off_cap_1_only_overran", "c1!", false, 1, "c1!", 0, 2},
-		{"arm_off_cap_2_overran_waits_for_both_ends", "c1! f1 c2", false, 2, "c2 f1", 1, 2},
+		{"arm_off_cap_2_overran_waits_for_both_ends", "c1! f1 c2", false, 2, "f1 c2", 1, 2},
 		{"arm_off_several_overran_oldest_first", "f1! c1! c2", false, 0, "c2 f1! c1!", -1, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

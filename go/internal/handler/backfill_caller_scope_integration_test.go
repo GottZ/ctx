@@ -369,13 +369,17 @@ func TestQueryBackfillCallerScope(t *testing.T) {
 		}
 	})
 
-	// Arm off: the path is the only embedder. The first pick is still the
-	// caller's block, ahead of the other tenant's older and newer one alike;
-	// the second pick is the old end, the other tenant's older block.
+	// Arm off: the path is the only embedder. One pick is the old end, the
+	// other tenant's older block, and one is the caller's block, ahead of the
+	// other tenant's newer one. The old end has the first of the two (it is
+	// the pick with the whole sync_budget, see old_end_gets_the_whole_budget
+	// in backfill_syncbudget_integration_test.go); with instant embeds the
+	// order of the two does not show here.
 	// (Until the review of #214 this ran with sync_cap 1 and wanted the
 	// caller's block alone. With one pick and no arm that pick now goes to
 	// the oldest pending block, see arm_off_steady_writes_reach_the_old_block,
-	// so "the caller first" is a statement about a cap of two or more.)
+	// so "the caller's block is embedded" is a statement about a cap of two
+	// or more.)
 	t.Run("arm_off_caller_first", func(t *testing.T) {
 		f := bfsSetup(t)
 		f.write(t, f.foreignCtx, bfsForeignTitle)
@@ -388,7 +392,7 @@ func TestQueryBackfillCallerScope(t *testing.T) {
 			t.Error("arm off: the caller's own fresh block is still pending after its query")
 		}
 		if !f.embedded(t, bfsForeignTitle) {
-			t.Error("arm off: the second pick did not take the oldest pending block")
+			t.Error("arm off: no pick took the oldest pending block")
 		}
 		if f.embedded(t, bfsForeignNewer) {
 			t.Error("arm off: a pick went to the other tenant's newest block ahead of the caller's or the oldest")
@@ -671,8 +675,8 @@ func TestQueryBackfillCallerScope(t *testing.T) {
 	})
 
 	// Arm off, sync_cap 2, three pending blocks of the caller: one pick for
-	// the newest (the caller's fresh write) and one for the oldest (nothing
-	// else works the old end). The one in the middle waits.
+	// the oldest (nothing else works the old end) and one for the newest (the
+	// caller's fresh write). The one in the middle waits.
 	t.Run("arm_off_takes_both_ends", func(t *testing.T) {
 		f := bfsSetup(t)
 		f.write(t, f.callerCtx, bfsCallerOldest)
