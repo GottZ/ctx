@@ -85,7 +85,8 @@ def test_identity_readback_mismatch_aborts(ledger, host, make_identity):
 
 
 def test_identity_mismatch_refuses_to_sign(ledger, host, make_identity):
-    """★ ``.env`` key ≠ ledger pubkey ⇒ no identity object, so nothing is signed; doctor text "identity mismatch".
+    """★ ``.env`` key ≠ ledger pubkey ⇒ no identity object, so nothing is signed; the text says the key does not match
+    and that this process signs nothing.
 
     Red proof: mutant = pubkey comparison in ``Identity.load`` removed → a foreign key is loaded and signs;
     ``pytest.raises(IdentityLost)`` fails.
@@ -94,7 +95,7 @@ def test_identity_mismatch_refuses_to_sign(ledger, host, make_identity):
     host.env_file[IDENTITY_ENV] = b64e(os.urandom(32))
     with pytest.raises(IdentityLost) as info:
         Identity.load(ledger, read_secret=host.read_secret, read_env_fresh=host.read_env_fresh)
-    assert "identity mismatch" in info.value.message
+    assert "handover key does not match" in info.value.message and "signs nothing" in info.value.message
     assert info.value.details["reason"] == "mismatch"
 
 

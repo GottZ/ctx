@@ -114,7 +114,7 @@ class _Remote:
         for op in status.ops.values():
             if op.op_id == op_id:
                 return op
-        raise NotFound("operation not known to the peer", op_id=op_id)
+        raise NotFound("the other machine does not know this step of the handover", op_id=op_id)
 
     def blocks_for(self, job: JobContext) -> RemoteBlocks:
         """The job's blocks on the peer (a fresh conductor instance has not called a job method yet)."""
@@ -163,9 +163,13 @@ class RemoteSource(_Remote):
             if state is None:
                 raise
         if not isinstance(state, str) or not state:  # no state named is no keepalive (success sweep)
-            raise BadResponseSignature("keepalive answer without the source state", route="heartbeat")
+            raise BadResponseSignature(
+                "the other machine answered a keep-alive check without the state of the session", route="heartbeat"
+            )
         if state in LOST_STATES:
-            raise LeaseLost(f"the source gave up its leases (state {state})", state=state)
+            raise LeaseLost(
+                f"the other machine no longer keeps the session locked for this handover ({state})", state=state
+            )
 
     def start_export(self, job: JobContext) -> OpStatus:
         return _op(self._call(job, "source/export"))
@@ -226,7 +230,7 @@ class RemoteTarget(_Remote):
         if state in ABORTED_STATES:
             return
         raise InvalidState(
-            f"the target did not confirm the abort (state {state!r})",
+            f"the machine you hand over to did not confirm the cancel (it reports {state!r})",
             reason="state",
             state=state if isinstance(state, str) else None,
         )
@@ -266,17 +270,19 @@ class RemoteBlocks:
                 for raw in data.get("manifests", []):
                     m = verify_manifest(from_wire(ObjectManifest, raw))
                     if m.object_id not in chunk:
-                        raise BadRequest("peer returned a manifest that was not requested", field="manifests")
+                        raise BadRequest("the other machine described data that was not asked for", field="manifests")
                     out[m.object_id] = m
                     received.add(m.object_id)
                 cursor = data.get("cursor")
                 if not cursor:
                     break
                 if len(received) == before:
-                    raise BadRequest("peer returned a manifest page without progress", field="cursor")
+                    raise BadRequest(
+                        "the other machine sent the same part of the data description again", field="cursor"
+                    )
         missing = [i for i in ids if i not in out]
         if missing:
-            raise NotFound("peer did not return every requested manifest", object_id=missing[0])
+            raise NotFound("the other machine did not describe all requested data", object_id=missing[0])
         return [out[i] for i in ids]
 
     def read_blocks(self, ids: Sequence[str]) -> Iterator[tuple[str, bytes]]:
@@ -307,7 +313,9 @@ class RemoteBlocks:
         for start in range(0, len(ids), MAX_IDS):
             got = self._call("blocks/need", {"ids": ids[start : start + MAX_IDS]}).get("missing")
             if not isinstance(got, list) or not all(isinstance(i, str) for i in got):
-                raise BadResponseSignature("blocks/need answer without the list of missing ids", route="blocks/need")
+                raise BadResponseSignature(
+                    "the other machine answered without the list of missing data", route="blocks/need"
+                )
             out.extend(got)
         return out
 

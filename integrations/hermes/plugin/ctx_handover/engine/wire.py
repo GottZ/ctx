@@ -92,9 +92,13 @@ def is_loopback(host: str | None) -> bool:
 def _secret(read_secret: Callable[[str], str | None], env_name: str, what: str) -> str:
     value = read_secret(env_name)
     if not value:
-        raise GateRejected(f"{what}: {env_name} is not set in this profile (plugin settings)", variable=env_name)
+        raise GateRejected(
+            f"{what}: {env_name} is not set in this Hermes profile; set it on the Keys page of the dashboard or in "
+            "the profile's .env, or pair again",
+            variable=env_name,
+        )
     if any(c in value for c in "\r\n\0"):
-        raise GateRejected(f"{what}: {env_name} contains a line break", variable=env_name)
+        raise GateRejected(f"{what}: {env_name} contains a line break; enter it again without one", variable=env_name)
     return value
 
 
@@ -103,7 +107,7 @@ def gate_headers(
 ) -> dict[str, str]:
     """Headers that pass the peer's dashboard gate (R7). Secrets only through ``read_secret`` (SEC 7.3)."""
     if gate is None:
-        raise GateRejected("no dashboard gate is configured for this peer")
+        raise GateRejected("no dashboard sign-in is stored for this paired machine; pair again")
     headers: dict[str, str] = {}
     if gate.mode == GateMode.SESSION_TOKEN:
         headers["X-Hermes-Session-Token"] = _secret(read_secret, gate.token_env, "session token")
@@ -114,7 +118,7 @@ def gate_headers(
             raise GateRejected("basic_login needs a login callable")
         token = login()
         if not token or any(c in token for c in "\r\n\0"):
-            raise GateRejected("basic login returned no usable access token")
+            raise GateRejected("the dashboard login (user name and password) returned no usable access token")
         headers["Authorization"] = "Bearer " + token
     else:  # pragma: no cover - enum is closed
         raise GateRejected(f"unknown gate mode {gate.mode}")
@@ -124,7 +128,9 @@ def gate_headers(
             or name.lower() in _RESERVED_HEADERS
             or name.lower().startswith("x-ctxh-")
         ):
-            raise GateRejected(f"invalid extra header name {name!r}")
+            raise GateRejected(
+                f"invalid header name {name!r} in peer_extra_headers; fix it in the ctx_handover settings"
+            )
         headers[name] = _secret(read_secret, env_name, f"header {name}")
     return headers
 
@@ -147,15 +153,15 @@ def basic_login(
         ) as client:
             resp = client.post(url, json={"provider": "basic", "username": username, "password": password})
     except httpx.HTTPError as exc:
-        raise PeerUnreachable(f"basic login failed: {type(exc).__name__}") from None
+        raise PeerUnreachable(f"the dashboard login failed: {type(exc).__name__}") from None
     if resp.status_code == 429:
-        raise RateLimited("basic login rate limited", retry_after=60)
+        raise RateLimited("the dashboard login was refused after too many attempts; try again later", retry_after=60)
     if resp.status_code != 200:
-        raise GateRejected(f"basic login refused (HTTP {resp.status_code})")
+        raise GateRejected(f"the dashboard refused the user name and password (HTTP {resp.status_code})")
     for name, value in resp.cookies.items():
         if name.endswith("hermes_session_at") and value:
             return value
-    raise GateRejected("basic login answered without an access token cookie")
+    raise GateRejected("the dashboard login answered without an access token; check the user name and password")
 
 
 def gate_warnings(gate: GateAuth | None, *, env_mode: int | None) -> list[str]:
@@ -164,13 +170,13 @@ def gate_warnings(gate: GateAuth | None, *, env_mode: int | None) -> list[str]:
     if gate is not None:
         if gate.mode in (GateMode.SESSION_TOKEN, GateMode.BEARER):
             out.append(
-                "the stored dashboard token opens the whole dashboard of this peer (configuration, secrets, "
+                "the stored dashboard token opens the whole dashboard of this paired machine (configuration, secrets, "
                 "terminal), not only ctx_handover; prefer a reverse proxy that passes only "
                 "/api/plugins/ctx_handover/ and checks its own header (peer_extra_headers)"
             )
         elif gate.mode == GateMode.BASIC_LOGIN:
             out.append(
-                "a dashboard password is stored for this peer; it opens the whole dashboard, not only "
+                "a dashboard password is stored for this paired machine; it opens the whole dashboard, not only "
                 "ctx_handover; prefer a reverse proxy with its own header (peer_extra_headers)"
             )
     if env_mode is not None and env_mode & 0o077:
@@ -197,7 +203,7 @@ class Adaptive:
     def too_large(self, failed_bytes: int | None = None) -> None:
         if self.size <= self.floor:
             raise PayloadTooLarge(
-                "a proxy in front of the peer limits request bodies below one block (≈ 513 KiB); raise its limit",
+                "a proxy in front of the other machine limits uploads to less than 513 KiB; raise its body size limit",
                 limit=self.size,
             )
         if failed_bytes is not None:
@@ -243,9 +249,12 @@ class WireClient:
     ) -> None:
         parts = urlsplit(peer.url or "")
         if parts.scheme not in {"http", "https"} or not parts.hostname:
-            raise HttpsRequired(f"peer {peer.name} has no usable http(s) URL")
+            raise HttpsRequired(f"{peer.name} has no usable http(s) address; pair again")
         if parts.scheme == "http" and not is_loopback(parts.hostname) and not peer.allow_insecure:
-            raise HttpsRequired(f"peer {peer.name} uses plain HTTP; pair with --allow-insecure for VPN-only addresses")
+            raise HttpsRequired(
+                f"{peer.name} uses plain HTTP; if its address is only reachable through your VPN, pair again with "
+                "--allow-insecure, otherwise use HTTPS"
+            )
         self.peer = peer
         self.identity = identity
         self._read_secret = read_secret
@@ -443,7 +452,7 @@ class WireClient:
         if sig and pubkey:
             msg = response_string(status, nonce, hashlib.sha256(resp.content).hexdigest())
             if not verify(pubkey, msg, sig):
-                raise BadResponseSignature(f"response of {self.peer.name} has an invalid signature")
+                raise BadResponseSignature(f"the answer from {self.peer.name} is not signed by its paired key")
             if 200 <= status < 300:
                 return
             try:
@@ -456,23 +465,29 @@ class WireClient:
             raise err
         # unsigned: a status signal at most (SEC 1.5); bodies are not parsed
         if status == 401:
-            raise GateRejected(f"the dashboard of {self.peer.name} rejected the access credential")
+            raise GateRejected(f"the dashboard of {self.peer.name} rejected the stored sign-in")
         if status == 404:
-            raise ListenerMissing(f"{self.peer.name} has no ctx_handover routes (not installed, not enabled or closed)")
+            raise ListenerMissing(
+                f"ctx_handover does not answer on {self.peer.name} (not installed, not enabled, or not accepting "
+                "handovers)"
+            )
         if status == 413:
-            raise PayloadTooLarge("request body refused by a proxy in front of the peer", proxy=True)
+            raise PayloadTooLarge("a proxy in front of the other machine refused the upload size", proxy=True)
         if status == 429:
-            raise RateLimited("rate limited by a proxy in front of the peer", retry_after=_retry_after(resp))
+            raise RateLimited(
+                "a proxy in front of the other machine refused too many requests; try again later",
+                retry_after=_retry_after(resp),
+            )
         if status in (502, 503, 504):
-            raise PeerUnreachable(f"{self.peer.name} answered HTTP {status} through a proxy", status=status)
+            raise PeerUnreachable(f"the proxy in front of {self.peer.name} answered HTTP {status}", status=status)
         if accept_unsigned_ok and not pubkey and 200 <= status < 300:
             return
-        raise BadResponseSignature(f"unsigned response (HTTP {status}) from {self.peer.name}", status=status)
+        raise BadResponseSignature(f"{self.peer.name} answered without a signature (HTTP {status})", status=status)
 
     def _json(self, resp: httpx.Response) -> dict:
         data = loads_bounded(resp.content, max_bytes=MAX_JSON_RESPONSE)
         if not isinstance(data, dict):
-            raise BadResponseSignature("response is not a JSON object")
+            raise BadResponseSignature("the other machine sent an unreadable answer")
         return data
 
     # -- hello and pairing ------------------------------------------------------------------------------------
@@ -483,7 +498,7 @@ class WireClient:
             raise BadResponseSignature(f"the key of {self.peer.name} changed; pair again")
         instance = data.get("instance_id")
         if not isinstance(instance, str) or not instance:
-            raise BadResponseSignature("hello without instance id")
+            raise BadResponseSignature("the first answer of the other machine is incomplete (no instance id)")
         self.listener_id = instance
 
     def hello(self, *, signed: bool = True) -> Hello:
@@ -500,7 +515,9 @@ class WireClient:
         resp = self._send("GET", "hello", b"", content_type=None, signed=True, epoch=None, accept_unsigned_ok=False)
         hello = from_wire(Hello, self._json(resp))
         if hello.listener_pubkey != self.peer.pubkey or hello.instance_id != self.listener_id:
-            raise BadResponseSignature(f"hello of {self.peer.name} does not match the paired listener")
+            raise BadResponseSignature(
+                f"{self.peer.name} answers with another key or instance than the paired one; pair again"
+            )
         self._hello = hello
         self._hosted = bool(hello.limits.hosted)
         self._adaptive = Adaptive(hello.limits.max_request_bytes)
@@ -547,8 +564,7 @@ class WireClient:
         msg = response_string(resp.status_code, nonce, hashlib.sha256(resp.content).hexdigest())
         if not (nonce and sig and pubkey and verify(pubkey, msg, sig)):
             raise BadResponseSignature(
-                f"{self.peer.name} did not prove that it holds the key it presents (hello not signed over this "
-                "request); not paired"
+                f"{self.peer.name} did not prove that it holds the key it presents; nothing was paired"
             )
 
     def redeem(self, body: dict) -> dict:
@@ -641,7 +657,7 @@ class WireClient:
                     for r in refused
                 )
             ):
-                raise BadResponseSignature(f"malformed block upload answer from {self.peer.name}")
+                raise BadResponseSignature(f"{self.peer.name} sent an unreadable answer to an upload")
             stored += count
             rejected.extend((r["id"], r["reason"]) for r in refused)
 
@@ -669,12 +685,12 @@ class WireClient:
             for block_id, raw, reason in decode_frames(resp.content, block_size=BLOCK_SIZE):
                 if raw is None or block_id not in wanted:
                     raise BlockCorrupt(
-                        f"block {block_id[:12]} from {self.peer.name} rejected ({reason})", block_id=block_id
+                        f"a piece of data from {self.peer.name} was damaged ({reason})", block_id=block_id
                     )
                 got.append(block_id)
                 yield block_id, raw
             if not got:
-                raise NotFound("the listener returned no blocks")
+                raise NotFound("the other machine sent none of the requested data")
             done = set(got)
             remaining = [i for i in remaining if i not in done]
 
@@ -733,22 +749,32 @@ class WireClient:
         error = report.get("error") or ""
         if report["gate"] == "unreachable":
             ok, detail = False, f"{self.peer.url or name} did not answer ({error})"
-            remedy = f"check the address, TLS and the network or VPN, and that the dashboard of {name} runs"
+            remedy = (
+                f"check the address, the HTTPS certificate, the network or VPN, and that the dashboard of {name} is "
+                "running"
+            )
         elif report["gate"] == "rejected":
-            ok, detail = False, f"the dashboard gate of {name} refused the stored credential ({mode})"
-            remedy = f"store the current dashboard credential of {name} for this peer (gate mode {mode})"
+            ok, detail = False, f"the dashboard of {name} refused the stored sign-in ({mode})"
+            remedy = f"store the current dashboard sign-in of {name} ({mode})"
             gate = self.peer.gate
             if gate is not None:
                 var = gate.password_env if gate.mode == GateMode.BASIC_LOGIN else gate.token_env
                 remedy += f" in {var} (this profile's .env, also on the Keys page of the dashboard), or pair again"
         elif not report["plugin"]:
             ok, detail = False, f"the dashboard of {name} answered, ctx_handover did not ({error})"
-            remedy = f"install and enable ctx_handover on {name}; its inbound must be open (pair again)"
+            remedy = (
+                f"install and enable ctx_handover on {name} and let it accept handovers there (setting inbound; with "
+                "auto, pair again)"
+            )
         elif error or not report["signed"]:
-            ok, detail = False, f"ctx_handover on {name} answered without a valid signed hello ({error or 'unsigned'})"
+            ok, detail = False, f"ctx_handover on {name} answered without a valid signature ({error or 'unsigned'})"
             remedy = f"pair again with {name} if its key changed (/handover pair)"
         else:
-            ok, detail, remedy = True, "dashboard gate passed, ctx_handover answered with a valid signature", None
+            ok, detail, remedy = (
+                True,
+                "the dashboard let the request through, ctx_handover answered with a valid signature",
+                None,
+            )
             limit, wanted = report.get("body_limit"), max(PROBE_SIZES_MIB)
             if isinstance(limit, int) and limit < wanted * MIB:
                 ok = None

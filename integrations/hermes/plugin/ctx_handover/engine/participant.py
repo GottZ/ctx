@@ -139,7 +139,7 @@ class ParticipantRegistry:
     @staticmethod
     def _peer(auth: AuthContext) -> Peer:
         if auth.peer is None:
-            raise Forbidden("this route needs a paired peer")
+            raise Forbidden("only a paired device may do this")
         return auth.peer
 
     @staticmethod
@@ -179,7 +179,7 @@ class ParticipantRegistry:
         peer = self._peer(auth)
         row = self.ledger.job(job_id, role)
         if row is None or row["peer_id"] != peer.peer_id:
-            raise NotFound(f"job {job_id} not found")
+            raise NotFound(f"handover job {job_id} not found")
         return row
 
     def bind(self, auth: AuthContext, job_id: str, role: Role) -> tuple[SourceAPI | TargetAPI, JobContext]:
@@ -198,7 +198,7 @@ class ParticipantRegistry:
             row = self.ledger.job(job_id, role)
             if row is not None and row["peer_id"] == peer.peer_id:
                 return role
-        raise NotFound(f"job {job_id} not found")
+        raise NotFound(f"handover job {job_id} not found")
 
     # -- routes ------------------------------------------------------------------------------------------------------
     def open(self, auth: AuthContext, body: dict) -> dict:
@@ -268,9 +268,15 @@ class ParticipantRegistry:
             and not self._unlocked_idle(j, now, idle_s)
         ]
         if sum(1 for j in active if j["peer_id"] == peer_id) >= self._max_per_peer:
-            raise RateLimited("too many concurrent handovers for this device", reason="concurrent_jobs")
+            raise RateLimited(
+                "too many handovers with this device are running at once there; wait until one has finished",
+                reason="concurrent_jobs",
+            )
         if len(active) >= self._max_jobs:
-            raise RateLimited("too many concurrent handovers on this gateway", reason="concurrent_jobs")
+            raise RateLimited(
+                "too many handovers are running at once on the other machine; wait until one has finished",
+                reason="concurrent_jobs",
+            )
 
     def get(self, auth: AuthContext, job_id: str, role: Role) -> SourceAPI | TargetAPI:
         """The participant API of a job (bound to the calling peer, role right re-checked, epoch fenced)."""
@@ -373,7 +379,9 @@ class ParticipantRegistry:
             src = self.ledger.source_state(job_id)
             state = src["state"] if src else "open"
             if state not in _RELEASABLE_SOURCE and state != "open":
-                raise InvalidState(f"the source is {state}", reason="state", state=state)
+                raise InvalidState(
+                    f"the session cannot be given back at this step ({state})", reason="state", state=state
+                )
             api.start_release(job, reason)
         else:
             api.abort(job, reason)

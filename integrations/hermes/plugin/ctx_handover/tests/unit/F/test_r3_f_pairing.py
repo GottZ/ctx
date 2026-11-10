@@ -83,7 +83,7 @@ def test_r3_f_f25_second_pairing_with_a_paired_gateway_is_refused_and_the_first_
     call, _ = surface(laptop, f"pair {text} --allow-insecure{extra}")
     out = "\n".join(call.out)
     assert call.exit_code == 3, out
-    assert "already paired with that gateway as server" in out, out
+    assert "already paired with that machine as server" in out, out
     assert "/handover peers remove server" in out and "the pairing code was not used" in out, out
     assert [p.name for p in laptop.ledger().peers() if p.direction == "dial"] == ["server"]
     assert _live_inbound(server) == ["laptop"]

@@ -135,19 +135,25 @@ class Identity:
         values = [v for v in values if v]
         if not values:
             raise IdentityLost(
-                "identity lost: the ledger has a public key but CTX_HANDOVER_IDENTITY_KEY is missing from this "
-                "profile's .env; run /handover identity rotate and pair again",
+                "this machine's handover key is lost: CTX_HANDOVER_IDENTITY_KEY is missing from this profile's .env, "
+                "although the plugin already used a key here; run /handover identity rotate, then pair again with "
+                "every device",
                 reason="missing",
             )
         keys = [cls._from_seed(v) for v in values]
         if all(k is None for k in keys):
-            raise IdentityLost("identity lost: CTX_HANDOVER_IDENTITY_KEY is malformed", reason="malformed")
+            raise IdentityLost(
+                "this machine's handover key is damaged: CTX_HANDOVER_IDENTITY_KEY in this profile's .env is "
+                "malformed; run /handover identity rotate, then pair again with every device",
+                reason="malformed",
+            )
         for key in keys:
             if key is not None and hmac.compare_digest(b64e(_public_raw(key)), expected):
                 return cls(ledger.instance_id(), key)
         raise IdentityLost(
-            "identity mismatch: CTX_HANDOVER_IDENTITY_KEY does not match the public key in the ledger; this "
-            "process will not sign. Run /handover identity rotate and pair again",
+            "this machine's handover key does not match: CTX_HANDOVER_IDENTITY_KEY is not the key the plugin used "
+            "here before, so this process signs nothing. Run /handover identity rotate, then pair again with every "
+            "device",
             reason="mismatch",
         )
 

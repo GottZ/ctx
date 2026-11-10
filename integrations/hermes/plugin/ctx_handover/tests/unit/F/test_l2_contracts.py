@@ -402,11 +402,11 @@ def test_dry_run_shows_the_plan_the_job_ended_with(fake_host, tmp_path):
         ({"gate": "unreachable", "plugin": False, "signed": False, "error": "peer_unreachable"}, None, False,
          "did not answer (peer_unreachable)", "network or VPN"),
         ({"gate": "rejected", "plugin": False, "signed": False, "error": "gate_rejected"}, None, False,
-         "refused the stored credential (", "store the current dashboard credential"),
+         "refused the stored sign-in (", "store the current dashboard sign-in"),
         ({"gate": "ok", "plugin": False, "signed": False, "error": "listener_missing"}, None, False,
          "ctx_handover did not (listener_missing)", "install and enable ctx_handover"),
         ({"gate": "ok", "plugin": True, "signed": False, "error": "unauthorized"}, None, False,
-         "without a valid signed hello (unauthorized)", "pair again"),
+         "without a valid signature (unauthorized)", "pair again"),
         ({"gate": "ok", "plugin": True, "signed": True, "body_limit": 8 * MIB}, 2.0, True,
          "valid signature; request bodies of 8.0 MiB pass", None),
         ({"gate": "ok", "plugin": True, "signed": True, "body_limit": 2 * MIB}, None, None,
@@ -423,7 +423,8 @@ def test_doctor_peer_check_from_probe_report(probe, skew, ok, detail, remedy):
     clock skew, which C does not judge (a skew turns an ``ok`` line into a warning).
 
     Red proof: mutant = skew check removed ⇒ ``AssertionError: {'name': 'peer server', 'ok': True, 'detail':
-    'dashboard gate passed, …; request bodies of 8.0 MiB pass', 'remedy': None}`` (the -420 s case); an own
+    'the dashboard let the request through, …; request bodies of 8.0 MiB pass', 'remedy': None}`` (the -420 s case);
+    an own
     classification beside C's summary is the R test ``test_l2r_doctor_peer_line_is_the_probe_summary_of_wire``.
     """
     peer = make_peer("server")

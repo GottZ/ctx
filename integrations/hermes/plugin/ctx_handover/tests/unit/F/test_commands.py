@@ -346,7 +346,7 @@ def test_doctor_warns_deployment_token_and_readable_env(fake_host, hermes_home):
 
     Red proof: mutant = ``_gate_warnings`` returns None (F's own fallback text) →
     ``assert '[warn] stored dashboard token: CTX_HANDOVER_PEER_TOKEN (for server): the stored dashboard token opens
-    the whole dashboard of this peer' in '…'``.
+    the whole dashboard of this paired machine' in '…'``.
     """
     env = hermes_home / ".env"
     env.write_text("CTX_HANDOVER_IDENTITY_KEY=x\n", encoding="utf-8")
@@ -357,7 +357,7 @@ def test_doctor_warns_deployment_token_and_readable_env(fake_host, hermes_home):
     out = _slash(plugin, "doctor")
     assert (
         "[warn] stored dashboard token: CTX_HANDOVER_PEER_TOKEN (for server): the stored dashboard token opens the "
-        "whole dashboard of this peer" in out
+        "whole dashboard of this paired machine" in out
     )
     assert "[warn] stored dashboard password: CTX_HANDOVER_PEER_PASSWORD (for server): a dashboard password" in out
     assert "[warn] profile .env permissions" in out and "group- or world-readable (mode 644)" in out

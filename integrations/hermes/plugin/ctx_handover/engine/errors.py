@@ -93,7 +93,9 @@ class HandoverError(Exception):
         """
         env = body.get("error") if isinstance(body, dict) else None
         if not isinstance(env, dict) or not isinstance(env.get("code"), str):
-            err = HandoverError(f"HTTP {status} without an error envelope", status=int(status))
+            err = HandoverError(
+                f"the other machine answered HTTP {status} without an error description", status=int(status)
+            )
             err.retryable = int(status) >= 500
             return err
         code = env["code"][:_CODE_MAX]

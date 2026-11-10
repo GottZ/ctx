@@ -432,7 +432,7 @@ def test_probe_gate_reports_layers(tmp_path, spawn_listener, token, host):
     host.secrets["CTX_HANDOVER_PEER_TOKEN"] = "wrong"
     rejected = d.client(peer).probe_gate()
     assert rejected["gate"] == "rejected" and rejected["ok"] is False
-    assert "refused the stored credential (session_token)" in rejected["detail"] and rejected["remedy"]
+    assert "refused the stored sign-in (session_token)" in rejected["detail"] and rejected["remedy"]
     lst.stop()
     gone = d.client(peer, max_attempts=1).probe_gate()
     assert (gone["gate"], gone["ok"]) == ("unreachable", False) and "did not answer" in gone["detail"]

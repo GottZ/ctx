@@ -465,7 +465,12 @@ def test_server_error_details_redacted_and_capped(tmp_path):
     lst.registry.raise_on["start_commit"] = RuntimeError("internal sk-SECRET traceback")
     resp = lst.handle(d.req("POST", f"jobs/{job}/target/commit", {"epoch": 1}, epoch=1))
     assert resp.status == 500
-    assert body_of(resp)["error"] == {"code": "internal", "message": "internal error", "retryable": True, "details": {}}
+    assert body_of(resp)["error"] == {
+        "code": "internal",
+        "message": "unexpected error in ctx_handover; the Hermes log of the machine that answered has the details",
+        "retryable": True,
+        "details": {},
+    }
 
 
 def test_operator_session_disabled_by_default(tmp_path):

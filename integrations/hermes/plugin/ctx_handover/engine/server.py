@@ -550,7 +550,10 @@ class Server:
             if ctx.peer is not None:
                 wait = self._rate.take(ctx.peer.peer_id)
                 if wait:
-                    raise RateLimited("too many requests", retry_after=min(RETRY_AFTER_CAP, math.ceil(wait)))
+                    raise RateLimited(
+                        "too many requests from this device; try again later",
+                        retry_after=min(RETRY_AFTER_CAP, math.ceil(wait)),
+                    )
                 await asyncio.to_thread(self._ledger.touch_peer, ctx.peer.peer_id, client_ip)
             result = await asyncio.to_thread(self._dispatch, handler, ctx, params, req)
             if isinstance(result, Response):
@@ -562,7 +565,15 @@ class Server:
             log.error("ctx_handover route %s failed: %s", path[:200], self._redact(f"{type(exc).__name__}: {exc}"))
             return self._respond(
                 500,
-                {"error": {"code": "internal", "message": "internal error", "retryable": True, "details": {}}},
+                {
+                    "error": {
+                        "code": "internal",
+                        "message": "unexpected error in ctx_handover; the Hermes log of the machine that answered has "
+                        "the details",
+                        "retryable": True,
+                        "details": {},
+                    }
+                },
                 nonce,
             )
 
@@ -957,7 +968,10 @@ class Server:
         plain store (review M5): the request is refused (``capability_missing``) and nothing is stored."""
         blocks_for = getattr(api, "blocks_for", None)
         if not callable(blocks_for):
-            raise CapabilityMissing("the target offers no quota-bound block store", capability="blocks_for")
+            raise CapabilityMissing(
+                "the machine you hand over to has no size-limited storage for the transfer; update the plugin there",
+                capability="blocks_for",
+            )
         return blocks_for(job)
 
     def _h_blocks_need(self, auth, params, body, req) -> dict:
@@ -1007,7 +1021,7 @@ class Server:
         api, job = self._tgt(auth, params)
         prompt = body.get("prompt", "")
         if not isinstance(prompt, str) or len(prompt) > MAX_PROMPT:
-            raise BadRequest(f"prompt must be a string of at most {MAX_PROMPT} characters", field="prompt")
+            raise BadRequest(f"the --continue prompt is too long (at most {MAX_PROMPT} characters)", field="prompt")
         result = api.continue_session(job, prompt)
         out = {"started": bool(result.started)}
         if result.pid is not None:

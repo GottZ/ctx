@@ -76,7 +76,9 @@ _DIST_NAMES = ("hermes-agent", "hermes_agent")
 
 
 def _missing(what: str) -> CapabilityMissing:
-    return CapabilityMissing(f"Hermes {what} is not available", capability=what)
+    return CapabilityMissing(
+        f"this Hermes installation does not offer {what}, which ctx_handover needs; update Hermes", capability=what
+    )
 
 
 @dataclass(frozen=True)
@@ -326,7 +328,7 @@ def grant_mcp_server(server: str) -> None:
     write raises, or the read-back does not list the server (an administrator-managed key is stripped on save).
     """
     if not isinstance(server, str) or not MCP_SERVER_RE.fullmatch(server):
-        raise BadRequest("invalid MCP server name", field="server")
+        raise BadRequest("invalid MCP server name; use the name of an entry under mcp_servers", field="server")
     key = f"plugins.entries.{PLUGIN_ID}.mcp_allowlist"
 
     def refused(reason: str, message: str, **details) -> CapabilityMissing:
@@ -341,21 +343,35 @@ def grant_mcp_server(server: str) -> None:
     try:
         from hermes_cli.config import is_managed, save_config
     except ImportError as exc:
-        raise refused("unavailable", "Hermes hermes_cli.config.save_config is not available") from exc
+        raise refused(
+            "unavailable",
+            "this Hermes version cannot save plugin settings, so the MCP allowlist was not written; set it yourself "
+            "with hermes config set",
+        ) from exc
     current = _mcp_allowlist_of(load_config())
     if server in current:
         return
     if is_managed():
-        raise refused("managed", "this Hermes installation is package-managed; the MCP allowlist was not written")
+        raise refused(
+            "managed",
+            "this Hermes installation is package-managed, so the MCP allowlist was not written; set it yourself with "
+            "hermes config set",
+        )
     partial = {"plugins": {"entries": {PLUGIN_ID: {"mcp_allowlist": [*current, server]}}}}
     try:
         save_config(partial, preserve_keys={("plugins", "entries", PLUGIN_ID, "mcp_allowlist")}, merge_existing=True)
     except Exception as exc:
         raise refused(
-            "write_failed", f"the MCP allowlist could not be written: {type(exc).__name__}", error=str(exc)[:300]
+            "write_failed",
+            f"the MCP allowlist could not be written ({type(exc).__name__}); set it yourself with hermes config set",
+            error=str(exc)[:300],
         ) from exc
     if server not in _mcp_allowlist_of(load_config()):
-        raise refused("not_written", f"{key} does not list {server!r} after the write (managed key or refused save)")
+        raise refused(
+            "not_written",
+            f"{key} does not list {server!r} after the write (the setting is managed elsewhere or the save was "
+            "refused); set it yourself with hermes config set",
+        )
 
 
 def read_secret(name: str) -> str | None:
@@ -370,7 +386,9 @@ def read_secret(name: str) -> str | None:
     except HandoverError:
         raise
     except Exception as exc:
-        raise HandoverError(f"secret {name} is not readable here: {type(exc).__name__}", secret=name) from exc
+        raise HandoverError(
+            f"the secret {name} cannot be read in this process ({type(exc).__name__})", secret=name
+        ) from exc
     return value if isinstance(value, str) and value != "" else None
 
 
@@ -656,10 +674,14 @@ def unchecked_text(why: str) -> str:
     (``UNIDENTIFIED_WHY``; the ``ContinueRefused`` message and the ``doctor`` reason, review R3-H2)."""
     if why == "gateway_unverified":
         return (
-            "a gateway of this profile runs, but this process cannot identify it (another container or PID namespace, "
-            "or another user), so it cannot see whether approvals are switched off there"
+            "the Hermes gateway of this profile (the service that runs your chats) is running, but this process "
+            "cannot identify it (it runs in another container or PID namespace, or as another user), so it cannot see "
+            "whether approvals are switched off there"
         )
-    return "Hermes' gateway status could not be read here, so this process cannot tell whether approvals apply"
+    return (
+        "the status of the Hermes gateway (the service that runs your chats) could not be read here, so this process "
+        "cannot tell whether approvals apply"
+    )
 
 
 def approvals_off(config: dict) -> bool:

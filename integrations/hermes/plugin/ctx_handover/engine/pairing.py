@@ -145,13 +145,18 @@ def store_credentials(store: SecretStore, gate: GateAuth, peer_id: str) -> GateA
         for (what, old), (_what, new) in zip(gate_secrets(gate), gate_secrets(fresh), strict=True):
             value = store.read(old)
             if not value:
-                raise GateRejected(f"the {what} ({old}) is not set in this profile", variable=old)
+                raise GateRejected(
+                    f"the {what} ({old}) is not set in this Hermes profile; enter it in Settings → Plugins → "
+                    "ctx_handover",
+                    variable=old,
+                )
             store.writable(new)
             store.save(new, value)
             written.append(new)
             if store.read_fresh(new) != value:
                 raise EnvNotWritable(
-                    f"{new} could not be stored in this profile's .env (the write was refused or overridden)",
+                    f"{new} could not be stored in this profile's .env (the write was refused or overridden); unlock "
+                    f"the .env or set {new} through your secret manager",
                     variable=new,
                 )
     except Exception:
@@ -282,7 +287,7 @@ def create_code(
     """Store a new code (TTL clamped to 60 s … 60 min) and return it. The caller has created the identity."""
     rights = frozenset(Right(r) for r in rights)
     if not rights:
-        raise BadRequest("a pairing code needs at least one right", field="rights")
+        raise BadRequest("a pairing code needs at least one right for the other machine", field="rights")
     ttl = max(MIN_TTL_S, min(int(ttl_s), MAX_TTL_S))
     code = PairCode(
         code_id=_random_crockford(6),
@@ -298,14 +303,30 @@ def create_code(
 def _clean_url(url: object) -> str:
     """A listener base URL fit for a paste string: http(s), a host, no userinfo, query or fragment (R17)."""
     if not isinstance(url, str) or len(url) > 1024:
-        raise BadRequest("listener URL missing or too long", field="url")
+        raise BadRequest(
+            "the address for the pairing line is missing or too long; check listen_url in the ctx_handover settings "
+            "of the machine that made the pairing line",
+            field="url",
+        )
     parts = urlsplit(url.strip())
     if parts.scheme not in {"http", "https"} or not parts.hostname:
-        raise BadRequest("listener URL must be http(s)://host[:port][/prefix]", field="url")
+        raise BadRequest(
+            "the address for the pairing line must look like https://host[:port][/path]; check listen_url in the "
+            "ctx_handover settings of the machine that made the pairing line",
+            field="url",
+        )
     if parts.username is not None or parts.password is not None or "@" in parts.netloc:
-        raise BadRequest("listener URL must not contain credentials", field="url")
+        raise BadRequest(
+            "the address for the pairing line must not contain a user name or password; check listen_url in the "
+            "ctx_handover settings of the machine that made the pairing line",
+            field="url",
+        )
     if parts.query or parts.fragment or url.strip().endswith(("?", "#")):
-        raise BadRequest("listener URL must not contain a query or fragment", field="url")
+        raise BadRequest(
+            "the address for the pairing line must not contain ? or #; check listen_url in the ctx_handover settings "
+            "of the machine that made the pairing line",
+            field="url",
+        )
     return url.strip().rstrip("/")
 
 
@@ -329,26 +350,31 @@ def pair_string(code: PairCode, *, url: str, fingerprint: str, name: str, profil
 def parse_pair_string(text: str) -> dict:
     """Strictly parse a paste string; ``BadRequest`` for anything unexpected."""
     if not isinstance(text, str):
-        raise BadRequest("not a pairing string", field="pair")
+        raise BadRequest("this is not a pairing line; copy the whole line that /handover pair printed", field="pair")
     text = text.strip()
     if not text.startswith(PREFIX) or len(text) > MAX_PASTE_CHARS:
-        raise BadRequest("not a ctxh-pair string", field="pair")
+        raise BadRequest(
+            "this is not a pairing line (it starts with ctxh-pair:); copy the whole line that /handover pair printed",
+            field="pair",
+        )
     try:
         raw = b64d(text[len(PREFIX) :])
     except ValueError:
-        raise BadRequest("pairing string is not base64url", field="pair") from None
+        raise BadRequest("the pairing line is damaged; copy the whole line again", field="pair") from None
     doc = loads_bounded(raw, max_bytes=MAX_PASTE_CHARS, max_depth=4)
     if not isinstance(doc, dict) or set(doc) != {"v", "url", "code", "fp", "name", "profile"} or doc["v"] != 1:
-        raise BadRequest("unsupported pairing string", field="pair")
+        raise BadRequest(
+            "the pairing line has an unknown format (damaged, or made by another plugin version)", field="pair"
+        )
     if not isinstance(doc["code"], str) or not _CODE_RE.fullmatch(doc["code"]):
-        raise BadRequest("invalid pairing code", field="pair.code")
+        raise BadRequest("the pairing line is damaged (its pairing code is invalid)", field="pair.code")
     if not isinstance(doc["fp"], str) or not _FP_RE.fullmatch(doc["fp"]):
-        raise BadRequest("invalid fingerprint", field="pair.fp")
+        raise BadRequest("the pairing line is damaged (its key fingerprint is invalid)", field="pair.fp")
     if not isinstance(doc["name"], str) or not doc["name"] or len(doc["name"]) > MAX_NAME:
-        raise BadRequest("invalid listener name", field="pair.name")
+        raise BadRequest("the pairing line is damaged (its machine name is invalid)", field="pair.name")
     profile = doc["profile"]
     if profile is not None and (not isinstance(profile, str) or not _PROFILE_RE.fullmatch(profile)):
-        raise BadRequest("invalid profile", field="pair.profile")
+        raise BadRequest("the pairing line is damaged (its profile name is invalid)", field="pair.profile")
     return {**doc, "url": _clean_url(doc["url"]), "name": clean_name(doc["name"], "listener")}
 
 
@@ -390,7 +416,7 @@ def redeem_body(
     """The dialer's ``POST /v1/pair/redeem`` body including its proof (DESIGN §12.3 step 4)."""
     match = _CODE_RE.fullmatch(pair["code"])
     if not match:
-        raise BadRequest("invalid pairing code", field="pair.code")
+        raise BadRequest("the pairing line is damaged (its pairing code is invalid)", field="pair.code")
     code_id, secret = match.groups()
     body = {
         "code_id": code_id,
@@ -463,12 +489,12 @@ def redeem_listener(
     now = clock()
     found = ledger.pair_code(body["code_id"], now)
     if found is None:
-        raise PairInvalid("pairing code unknown, expired or used")
+        raise PairInvalid("the pairing code is unknown, expired or already used")
     secret, rights, name_hint = found
     expected = pair_proof(secret, _proof_message(body, identity.instance_id))
     if not consteq(expected, body["proof"]):
         ledger.fail_pair_code(body["code_id"])
-        raise PairInvalid("pairing proof does not match")
+        raise PairInvalid("the pairing code is wrong")
     dialer = body["dialer"]
     peer = Peer(
         name=_free_name(ledger, clean_name(name_hint or dialer["name"], "dialer")),
@@ -482,7 +508,7 @@ def redeem_listener(
         last_ip=client_ip,
     )
     if not ledger.redeem_pair_code(body["code_id"], now, peer):
-        raise PairInvalid("pairing code unknown, expired or used")
+        raise PairInvalid("the pairing code is unknown, expired or already used")
     rights_text = canonical_rights(peer.rights)
     return {
         "peer_id": peer.peer_id,
@@ -538,15 +564,16 @@ def redeem_dialer(
     """
     match = _CODE_RE.fullmatch(pair["code"])
     if not match:
-        raise BadRequest("invalid pairing code", field="pair.code")
+        raise BadRequest("the pairing line is damaged (its pairing code is invalid)", field="pair.code")
     secret = match.group(2)
     wanted = clean_name(name or pair["name"], "listener")
     if not name:
         wanted = _free_name(ledger, wanted)
     elif _name_taken(ledger, wanted):
         raise ConflictError(
-            f"a peer named {wanted!r} already exists on this device; the pairing code was not used. Pair again with "
-            f"--name <another name>, or rename the existing entry first (/handover peers rename {wanted} <new>).",
+            f"a paired device named {wanted!r} already exists on this machine; the pairing code was not used. Pair "
+            f"again with --name <another name>, or rename the existing entry first (/handover peers rename {wanted} "
+            "<new>).",
             field="name",
             name=wanted,
             code_used=False,
@@ -556,10 +583,10 @@ def redeem_dialer(
         # L3-F25: the listener keeps one live row per device key (review M13), so a second entry for the same
         # gateway — another address or another name — would end this one on its side without a word here
         raise ConflictError(
-            f"this device is already paired with that gateway as {same.name} ({same.url}); it keeps one pairing per "
+            f"this machine is already paired with that machine as {same.name} ({same.url}); it keeps one pairing per "
             f"device, so a second one would end {same.name}. Nothing was sent to {pair['url']} and the pairing code "
-            f"was not used. To pair with it at {pair['url']} — or again after it revoked this device — run "
-            f"/handover peers remove {same.name} first, then paste the pairing string again.",
+            f"was not used. To pair with it at {pair['url']} — or again after it revoked this machine — run "
+            f"/handover peers remove {same.name} first, then paste the pairing line again.",
             field="pair",
             peer=same.name,
             code_used=False,
@@ -568,9 +595,9 @@ def redeem_dialer(
     if owner is not None:
         other, what, env = owner
         raise ConflictError(
-            f"the {what} in {env} is the one stored for {other.name} ({other.url}); a credential only ever goes to the "
+            f"the {what} in {env} is the one stored for {other.name} ({other.url}); a sign-in is only ever sent to the "
             f"address it was stored for, so nothing was sent to {pair['url']} and the pairing code was not used. Enter "
-            f"the {what} of {pair['url']} in Settings → Plugins → ctx_handover, then paste the pairing string again. "
+            f"the {what} of {pair['url']} in Settings → Plugins → ctx_handover, then paste the pairing line again. "
             f"If that address takes the same {what} (one dashboard under two addresses), pair through the address of "
             f"{other.name} instead, where entries may share it, or remove {other.name} first "
             f"(/handover peers remove {other.name}).",
@@ -598,8 +625,9 @@ def redeem_dialer(
         fp = ""
     if not consteq(fp, pair["fp"]):
         raise BadResponseSignature(
-            "the listener's key fingerprint does not match the pairing string; not paired (wrong URL or a "
-            "machine in the middle)"
+            "the key of the other machine does not match the key fingerprint in the pairing line, so nothing was "
+            "paired: the address is wrong, or something between the two machines changed the answer. Check the "
+            "address and pair again with a new code."
         )
     from . import PLUGIN_VERSION  # lazy: reading ../VERSION is I/O
 
@@ -630,7 +658,9 @@ def redeem_dialer(
         if not isinstance(peer_id, str) or not ULID_RE.match(peer_id) or not rights:
             raise ValueError
     except (KeyError, TypeError, ValueError):
-        raise BadResponseSignature("malformed pairing response") from None
+        raise BadResponseSignature(
+            "the other machine sent an unreadable answer to the pairing; nothing was paired"
+        ) from None
     expected = pair_proof(
         secret, _server_message(peer_id, hello.listener_pubkey, body["client_nonce"], canonical_rights(rights))
     )
@@ -639,7 +669,9 @@ def redeem_dialer(
         or listener.get("pubkey") != hello.listener_pubkey
         or listener.get("instance_id") != hello.instance_id
     ):
-        raise BadResponseSignature("the listener's pairing proof is invalid; not paired")
+        raise BadResponseSignature(
+            "the other machine could not prove that it knows the pairing code; nothing was paired"
+        )
     now = clock()
     peer = Peer(
         name=provisional.name,
@@ -657,7 +689,10 @@ def redeem_dialer(
     try:
         if any(p.peer_id == peer_id for p in ledger.peers(include_revoked=True)):
             # ``upsert_peer`` keys on the peer id: the entry of another peer would be replaced by this listener
-            raise BadResponseSignature(f"{pair['name']} answered with a peer id this device already uses; not paired")
+            raise BadResponseSignature(
+                f"{pair['name']} answered with an id this machine already uses for another paired device; nothing was "
+                "paired"
+            )
         if secret_store is not None:
             peer = replace(peer, gate=store_credentials(secret_store, gate, peer_id))
         ledger.upsert_peer(peer)
