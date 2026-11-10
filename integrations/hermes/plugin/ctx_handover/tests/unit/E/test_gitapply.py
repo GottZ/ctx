@@ -419,7 +419,7 @@ def test_apply_return_mode_refuses_changed_state(git, user_home, staging, cfg, s
             git, store, item, server.root, out_state, tmp=tmp_path / "rt", cfg=cfg, qdir=staging / "q"
         )
     assert exc.value.details["kind"] == "changed_since_handover"
-    assert "work tree changed" in exc.value.message
+    assert "the files changed" in exc.value.message
     assert dir_fingerprint(server.root) == before
 
 
@@ -539,7 +539,7 @@ def test_apply_lfs_objects_oid_verified_no_network(
 
     manifest = gitops.put_bytes(store, canonical_bytes(doc), "application/json").object_id
     warnings = gitapply.place_lfs(git, dest, store, manifest)
-    assert any("refused" in w for w in warnings)
+    assert any("was not placed" in w and "does not match its checksum" in w for w in warnings)
     assert not (dest / ".git" / "lfs" / "objects" / other_oid[:2] / other_oid[2:4] / other_oid).exists()
     with pytest.raises(socket.timeout):
         listener.accept()
@@ -557,7 +557,7 @@ def test_apply_case_collision_reported(git, user_home, staging, cfg, store, hand
     dest = handover_root / "app"
     state = gitapply.prepare_fresh(git, store, item, handover_root / ".ctxh-c", rules=ci, cfg=cfg, dest=dest)
     assert state.case_collisions == (("README", "Readme"),)
-    assert any("case-colliding" in w for w in state.warnings)
+    assert any("differ only in upper/lower case" in w for w in state.warnings)
     gitapply.commit(git, state, item)
     tgt = RepoBuilder(dest)
     src.write("other.txt", "x\n")

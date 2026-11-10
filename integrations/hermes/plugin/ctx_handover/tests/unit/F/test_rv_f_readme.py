@@ -285,7 +285,7 @@ def test_rv_f_lfs_line():
     Red before the fix: no such line."""
     use = _section("## Use", "## Settings")
     assert "`git lfs checkout`" in use and "never from a network" in use and "stay pointers" in use
-    assert "stay pointers" in gitapply._NO_LFS
+    assert "stay placeholder files" in gitapply._NO_LFS
 
 
 def test_rv_f_h1_per_peer_credentials_disclosed():

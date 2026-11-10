@@ -334,7 +334,9 @@ def stream_pack(
                 proc.stderr.seek(0)
                 err = proc.stderr.read()[-1024:]
         raise VerifyFailed(
-            "received pack rejected by index-pack", stage="index-pack", stderr=err.decode(errors="replace")
+            "the received git data is damaged: git refused it (git index-pack)",
+            stage="index-pack",
+            stderr=err.decode(errors="replace"),
         )
 
 
@@ -360,7 +362,7 @@ def _fsck(git: Git, qdir: Path) -> None:
             alternates.write_bytes(saved)
     if proc.returncode != 0:
         raise VerifyFailed(
-            "received objects failed the integrity check",
+            "the received git data failed git's integrity check (git fsck)",
             stage="fsck",
             stderr=proc.stderr[-1024:].decode(errors="replace"),
         )
@@ -372,25 +374,38 @@ def _verify_refs(git: Git, qdir: Path, item: _Item) -> None:
         validate_ref(git, name)
         rev = sha if name.startswith("refs/tags/") else sha + "^{commit}"
         if not _exists(git, gd, None, RECEIVED, rev):
-            raise VerifyFailed("a ref names a missing object", stage="refs", ref=name)
+            raise VerifyFailed(
+                "a received git reference (a branch, tag or similar) points to git data that was not sent",
+                stage="refs",
+                ref=name,
+            )
     if item.head_ref is not None:
         validate_ref(git, item.head_ref)
     for sha in (item.index_commit, item.worktree_commit, *(c for c, _ in item.stash)):
         if not _exists(git, gd, None, RECEIVED, sha + "^{commit}"):
-            raise VerifyFailed("a state commit is missing", stage="refs", commit=sha)
+            raise VerifyFailed(
+                "the saved state of the repository (staged or uncommitted changes, or a stash entry) is missing from "
+                "the received git data",
+                stage="refs",
+                commit=sha,
+            )
     if item.head_commit is not None and not _exists(git, gd, None, RECEIVED, item.head_commit + "^{commit}"):
-        raise VerifyFailed("HEAD commit is missing", stage="refs")
+        raise VerifyFailed("the checked-out commit (HEAD) is missing from the received git data", stage="refs")
     if item.head_ref is not None and item.head_ref in item.refs and item.refs[item.head_ref] != item.head_commit:
-        raise VerifyFailed("HEAD does not match its branch", stage="refs")
+        raise VerifyFailed("the received checked-out commit (HEAD) does not match its branch", stage="refs")
     if _rev(git, gd, None, RECEIVED, item.index_commit + "^{tree}") != item.index_tree:
-        raise VerifyFailed("index commit does not carry the announced tree", stage="refs")
+        raise VerifyFailed(
+            "the received staged changes (git index) do not match what was announced for them", stage="refs"
+        )
     if _rev(git, gd, None, RECEIVED, item.worktree_commit + "^{tree}") != item.worktree_tree:
-        raise VerifyFailed("work-tree commit does not carry the announced tree", stage="refs")
+        raise VerifyFailed("the received uncommitted changes do not match what was announced for them", stage="refs")
     i_parent = _rev(git, gd, None, RECEIVED, item.index_commit + "^1")
     if i_parent != item.head_commit:
-        raise VerifyFailed("index commit is not based on HEAD", stage="refs")
+        raise VerifyFailed(
+            "the received staged changes (git index) are not based on the checked-out commit (HEAD)", stage="refs"
+        )
     if _rev(git, gd, None, RECEIVED, item.worktree_commit + "^1") != item.index_commit:
-        raise VerifyFailed("work-tree commit is not based on the index commit", stage="refs")
+        raise VerifyFailed("the received uncommitted changes are not based on the staged changes", stage="refs")
 
 
 def quarantine_and_verify(
@@ -486,7 +501,9 @@ def write_remote_config(git: Git, repo: Path, remotes: Sequence[dict], upstreams
         try:
             name, url = validate_remote(remote.get("name"), remote.get("fetch_url"))  # type: ignore[arg-type]
         except PolicyDenied as exc:
-            warnings.append(f"remote {str(remote.get('name'))[:64]!r} not configured: {exc.message}")
+            warnings.append(
+                f"git remote {str(remote.get('name'))[:64]!r} was not set up in the received copy: {exc.message}"
+            )
             continue
         if has(f"remote.{name}.url"):
             written.add(name)
@@ -497,7 +514,9 @@ def write_remote_config(git: Git, repo: Path, remotes: Sequence[dict], upstreams
             try:
                 push_url = validate_remote(name, push)[1]
             except PolicyDenied as exc:
-                warnings.append(f"push url of remote {name} not configured: {exc.message}")
+                warnings.append(
+                    f"the push address of git remote {name!r} was not set up in the received copy: {exc.message}"
+                )
         put(f"remote.{name}.url", url)
         if push_url:
             put(f"remote.{name}.pushurl", push_url)
@@ -509,10 +528,16 @@ def write_remote_config(git: Git, repo: Path, remotes: Sequence[dict], upstreams
             validate_ref(git, "refs/heads/" + branch)
             validate_ref(git, merge)  # type: ignore[arg-type]
         except PolicyDenied:
-            warnings.append(f"upstream of branch {branch[:64]!r} not configured")
+            warnings.append(
+                f"the upstream of branch {branch[:64]!r} (the remote branch it pulls from) was not set up in the "
+                "received copy; set it there with `git branch --set-upstream-to` if you need it"
+            )
             continue
         if remote not in written or not str(merge).startswith("refs/heads/"):
-            warnings.append(f"upstream of branch {branch[:64]!r} not configured")
+            warnings.append(
+                f"the upstream of branch {branch[:64]!r} (the remote branch it pulls from) was not set up in the "
+                "received copy; set it there with `git branch --set-upstream-to` if you need it"
+            )
             continue
         if has(f"branch.{branch}.remote"):
             continue
@@ -544,7 +569,9 @@ def place_lfs(git: Git, repo: Path, store, lfs_manifest: str | None, *, checkout
         size = entry.get("size") if isinstance(entry, dict) else None
         obj = entry.get("object") if isinstance(entry, dict) else None
         if not isinstance(oid, str) or not _OID_RE.fullmatch(oid) or not isinstance(size, int) or not is_sha(obj):
-            warnings.append("invalid LFS entry refused")
+            warnings.append(
+                "a large file stored with Git LFS was not placed: its entry in the received data is not valid"
+            )
             continue
         final = base / oid[:2] / oid[2:4] / oid
         if final.exists():
@@ -565,7 +592,10 @@ def place_lfs(git: Git, repo: Path, store, lfs_manifest: str | None, *, checkout
             raise
         if h.hexdigest() != oid or n != size:
             tmp.unlink()
-            warnings.append(f"LFS object {oid[:12]} refused: content does not match its oid or size")
+            warnings.append(
+                f"a large file stored with Git LFS (object {oid[:12]}) was not placed: its content does not match its "
+                "checksum or size"
+            )
             continue
         final.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(tmp, 0o644 & ~_umask())
@@ -576,7 +606,11 @@ def place_lfs(git: Git, repo: Path, store, lfs_manifest: str | None, *, checkout
     return warnings
 
 
-_NO_LFS = "git-lfs is not installed here: LFS files stay pointers (install git-lfs, then git lfs checkout)"
+_NO_LFS = (
+    "git-lfs is not installed on the receiving machine, so large files stored with Git LFS stay placeholder files "
+    "(small text files that only name the real content). Install git-lfs there, then run `git lfs checkout` in the "
+    "repository"
+)
 
 _LINK_MODE = b"120000"
 _REPARSE_LINKS = frozenset(
@@ -821,7 +855,7 @@ def _tree_budget(
             entries += 1
             if entries > max_entries:
                 raise PayloadTooLarge(
-                    f"the {what} has more entries than allowed",
+                    f"the {what} has more files than the max_files setting on the receiving machine allows",
                     entries=entries,
                     max_files=max_entries,
                     field="max_files",
@@ -831,7 +865,11 @@ def _tree_budget(
                 size = int(meta[3])
                 total += size
                 if max_bytes is not None and total > max_bytes:
-                    raise PayloadTooLarge(f"the {what} is larger than allowed", bytes=total, max_bytes=max_bytes)
+                    raise PayloadTooLarge(
+                        f"the {what} is larger than the max_total_gb setting on the receiving machine allows",
+                        bytes=total,
+                        max_bytes=max_bytes,
+                    )
                 if pointers is not None and LFS_MIN_POINTER <= size <= LFS_MAX_POINTER:
                     pointers[meta[2].decode("ascii")] += 1
     finally:
@@ -918,17 +956,22 @@ def _precheck(
         item.worktree_tree,
         max_entries=cfg.max_files,
         max_bytes=cfg.max_total_bytes,
-        what="work tree",
+        what="repository",
         pointers=pointers,
     )
     if item.index_tree != item.worktree_tree:  # I becomes the index file: its entries are capped like W's (M23)
-        _tree_budget(git, qdir, item.index_tree, max_entries=cfg.max_files, max_bytes=None, what="index")
+        _tree_budget(
+            git, qdir, item.index_tree, max_entries=cfg.max_files, max_bytes=None, what="staging area (git index)"
+        )
     if pointers is not None:
         assert store is not None  # noqa: S101 - pointers are counted only with a store
         total += _lfs_bytes(git, qdir, item, store, pointers, local_lfs)
         if total > cfg.max_total_bytes:
             raise PayloadTooLarge(
-                "the work tree with its LFS content is larger than allowed", bytes=total, max_bytes=cfg.max_total_bytes
+                "the repository's files together with its large files stored with Git LFS are larger than the "
+                "max_total_gb setting on the receiving machine allows",
+                bytes=total,
+                max_bytes=cfg.max_total_bytes,
             )
     probe = dest_for_disk
     while not probe.exists() and probe != probe.parent:
@@ -936,13 +979,13 @@ def _precheck(
     free = shutil.disk_usage(probe).free
     if total * _DISK_MARGIN > free:
         raise InsufficientStorage(
-            "not enough free space for the work tree",
+            "not enough free space for the repository",
             need_bytes=int(total * _DISK_MARGIN),
             free_bytes=free,
             path=str(probe),
         )
     if room is not None:
-        room(total, probe, total, "work tree")
+        room(total, probe, total, "repository")
 
 
 def _paths_of(git: Git, qdir: Path, tree: str) -> list[str]:
@@ -1123,8 +1166,8 @@ def _refuse_obstructions(
     if found:
         shown = ", ".join(repr(p[:200]) for p in found)
         raise ConflictError(
-            f"files git does not track at the destination lie where the handover writes ({shown}); they are never "
-            "overwritten",
+            "files that git does not track (or ignores) lie in the repository at the destination where the handover "
+            f"would write ({shown}); the plugin never overwrites them",
             kind="dirty",
             paths=found,
             path=str(repo),
@@ -1200,14 +1243,21 @@ def prepare_fresh(
         if issues:
             mode = DestMode.NO_CHECKOUT
             shown = ", ".join(f"{p!r} ({why})" for p, why in issues[:5])
-            warnings.append(f"not checked out: {len(issues)} path(s) are invalid on this system: {shown}")
+            warnings.append(
+                f"the repository arrived, but its files were not checked out: {len(issues)} path(s) are not valid on "
+                f"the receiving machine: {shown}"
+            )
         else:
             _checkout(git, partial, item, filters, cancelled)
             if item.lfs:  # after checkout-index, which writes every file as its blob (the pointer text) (H8)
                 warnings += lfs_checkout(git, partial, (item.worktree_tree, item.index_tree))
             if found:
                 shown = ", ".join(f"{a!r}/{b!r}" for a, b in found[:5])
-                warnings.append(f"case-colliding paths on this filesystem (git shows one as modified): {shown}")
+                warnings.append(
+                    "some paths differ only in upper/lower case, and the file system of the receiving machine cannot "
+                    "keep them apart: only one file of each pair exists in the copy, and git shows the other as "
+                    f"modified: {shown}"
+                )
         _store_stash(git, partial, item.stash)
         if alternates is not None:
             git.run(["repack", "-a", "-d", "-q"], cwd=partial, spec=_wt_spec(partial), cancelled=cancelled)
@@ -1297,13 +1347,21 @@ def _open_existing(git: Git, dest: Path) -> tuple[Path, Path]:
     probe = GitProbe(git, profile="received")
     top = probe.toplevel(str(dest))
     if top is None or os.path.realpath(top) != os.path.realpath(dest):
-        raise ConflictError("destination is not the root of a git work tree", kind="not_ours", path=str(dest))
+        raise ConflictError(
+            "the folder at the destination is not the top folder of a git repository", kind="not_ours", path=str(dest)
+        )
     gitdir, common = git_dirs(git, dest)
     op = in_progress_op(gitdir)
     if op:
-        raise ConflictError(f"a {op} is in progress at the destination", kind="dirty", path=str(dest))
+        raise ConflictError(
+            f"a git {op} is in progress in the repository at the destination", kind="dirty", path=str(dest)
+        )
     if (gitdir / "index.lock").exists():
-        raise ConflictError("index.lock present at the destination", kind="dirty", path=str(dest))
+        raise ConflictError(
+            "the repository at the destination holds a git lock file (index.lock): a git command may be running in it",
+            kind="dirty",
+            path=str(dest),
+        )
     return gitdir, common
 
 
@@ -1326,11 +1384,14 @@ def _common_checks(
     paths = _paths_of(git, q, item.worktree_tree)
     issues = path_issues(paths, rules)
     if issues:
-        raise ConflictError("received paths are invalid on this system", kind="unsafe_paths", count=len(issues))
+        raise ConflictError(
+            "some received file names are not valid on the receiving machine", kind="unsafe_paths", count=len(issues)
+        )
     found = collisions(paths, rules) if rules.case_insensitive else []
     if found:
         raise ConflictError(
-            "received paths collide on this case-insensitive filesystem",
+            "some received file names differ only in upper/lower case, and the file system of the receiving machine "
+            "cannot keep them apart",
             kind="case_collision",
             pairs=[list(p) for p in found[:20]],
         )
@@ -1381,10 +1442,16 @@ def prepare_update(
     _, common = _open_existing(git, dest)
     clean, why = GitProbe(git, profile="received").status_clean(str(dest))
     if not clean:
-        raise ConflictError("destination has uncommitted changes", kind="dirty", detail=why, path=str(dest))
+        raise ConflictError(
+            "the repository at the destination has uncommitted changes", kind="dirty", detail=why, path=str(dest)
+        )
     h0, head_ref = head_info(git, dest)
     if h0 is None or item.head_commit is None:
-        raise ConflictError("destination or source has no commit", kind="diverged", path=str(dest))
+        raise ConflictError(
+            "the repository at the destination or the one handed over has no commit yet",
+            kind="diverged",
+            path=str(dest),
+        )
     q = Path(qdir) if qdir is not None else common / "ctxh-quarantine"
     quarantine_and_verify(git, store, item_pack, q, alternates=common / "objects", cancelled=cancelled)
     try:
@@ -1395,12 +1462,20 @@ def prepare_update(
             check=False,
         )
         if anc.returncode != 0:
-            raise ConflictError("destination HEAD is not an ancestor of the source HEAD", kind="diverged")
+            raise ConflictError(
+                "the repository at the destination has commits that the handed-over repository does not contain",
+                kind="diverged",
+            )
         current = _current_refs(git, dest)
         planned, skipped, old = _plan_refs(git, q, item, current, head_ref=None, head_old_allowed=None)
         target_branch = item.head_ref
         if target_branch is not None and target_branch in skipped:
-            raise ConflictError("the HEAD branch diverged at the destination", kind="diverged", ref=target_branch)
+            raise ConflictError(
+                "the checked-out branch at the destination has commits that the handed-over repository does not "
+                "contain",
+                kind="diverged",
+                ref=target_branch,
+            )
         _, found = _common_checks(git, q, item, dest, cfg, rules, room, store=store, common=common)
         ci = (rules or cfg.platform_rules()).case_insensitive
         added = _added(git, q, h0, item.worktree_tree)
@@ -1411,7 +1486,10 @@ def prepare_update(
         transfer_pack(q, common)
     finally:
         shutil.rmtree(q, ignore_errors=True)
-    warnings = [f"ref {name} diverged at the destination and was not moved" for name in skipped] + lfs_warnings
+    warnings = [
+        f"{name} was not updated at the destination: it has commits there that the handed-over version does not contain"
+        for name in skipped
+    ] + lfs_warnings
     return GitApplyState(
         dest=dest,
         mode=DestMode.UPDATE,
@@ -1447,11 +1525,11 @@ def _alt_env(state: GitApplyState) -> dict | None:
 def _state_diff(a: GitState, b: GitState) -> list[str]:
     parts = []
     if a.head != b.head:
-        parts.append("HEAD moved")
+        parts.append("the checked-out commit (HEAD) changed")
     if a.index_tree != b.index_tree:
-        parts.append("index changed")
+        parts.append("the staged changes changed")
     if a.worktree_tree != b.worktree_tree:
-        parts.append("work tree changed")
+        parts.append("the files changed")
     return parts
 
 
@@ -1492,7 +1570,7 @@ def prepare_return(
     diff = _state_diff(now, out_state)
     if diff:
         raise ConflictError(
-            "the destination changed since the handover: " + ", ".join(diff),
+            "the repository at the destination changed since it was handed over: " + ", ".join(diff),
             kind="changed_since_handover",
             detail=diff,
             path=str(dest),
@@ -1516,7 +1594,10 @@ def prepare_return(
         transfer_pack(q, common)
     finally:
         shutil.rmtree(q, ignore_errors=True)
-    warnings = [f"ref {name} diverged at the destination and was not moved" for name in skipped] + lfs_warnings
+    warnings = [
+        f"{name} was not updated at the destination: it has commits there that the handed-over version does not contain"
+        for name in skipped
+    ] + lfs_warnings
     return GitApplyState(
         dest=dest,
         mode=DestMode.RETURN,
@@ -1579,14 +1660,16 @@ def commit_fresh(state: GitApplyState) -> Path:
         if exc.errno not in _APPEARED or state.fallback is None:
             os.chmod(state.partial, 0o700)
             raise ConflictError(
-                "the destination appeared during commit", kind="dest_appeared", path=str(state.dest)
+                "the destination folder appeared while the handover was putting the copy in place",
+                kind="dest_appeared",
+                path=str(state.dest),
             ) from exc
     try:
         _rename_dir(state.partial, state.fallback)
     except OSError as exc:
         os.chmod(state.partial, 0o700)
         raise ConflictError(
-            "the fallback destination exists too", kind="dest_appeared", path=str(state.fallback)
+            "the alternative folder for the copy exists too", kind="dest_appeared", path=str(state.fallback)
         ) from exc
     _fsync_dir(state.fallback.parent)
     return state.fallback
@@ -1723,21 +1806,31 @@ def commit(
     if state.mode is DestMode.UPDATE:
         clean, why = GitProbe(git, profile="received").status_clean(str(repo))
         if not clean or h_now != state.h0 or ref_now != state.head_ref_before:
-            raise ConflictError("the destination changed since prepare", kind="dirty", detail=why, path=str(repo))
+            raise ConflictError(
+                "the repository at the destination changed while the handover was in progress",
+                kind="dirty",
+                detail=why,
+                path=str(repo),
+            )
     else:
         assert state.out_state is not None and state.tmp is not None  # noqa: S101 - return states carry both
         now = worktree_state(git, str(repo), state.out_state.exclude_pathspecs, state.tmp, filter_names=peer)
         diff = _state_diff(now, state.out_state)
         if diff or ref_now != state.head_ref_before:
             raise ConflictError(
-                "the destination changed since prepare: " + ", ".join(diff or ["HEAD branch"]),
+                "the repository at the destination changed while the handover was in progress: "
+                + ", ".join(diff or ["the checked-out branch changed"]),
                 kind="changed_since_handover",
                 path=str(repo),
             )
     current = _current_refs(git, repo)
     for name, old in state.old_refs.items():
         if current.get(name) != old:
-            raise ConflictError("a ref moved since prepare", kind="dirty", ref=name)
+            raise ConflictError(
+                "a branch or tag in the repository at the destination changed while the handover was in progress",
+                kind="dirty",
+                ref=name,
+            )
     alt = _alt_env(state)
     base = state.h0 if state.mode is DestMode.UPDATE else state.out_state.worktree_tree  # type: ignore[union-attr]
     assert base is not None  # noqa: S101 - update states carry H0, return states their out-state
