@@ -181,7 +181,10 @@ it does not ignore (`*.log` in `src/`), still points the plan to that repository
 Git LFS files travel as their objects and are checked out on the other side with `git lfs checkout`, never from a
 network; without git-lfs there they stay pointers and the final message says so. The size limit (`max_total_gb`, per
 handover) and the free-space check at the destination count that content before anything is written: each shipped
-object once and, when git-lfs is installed there, once more for every file that points to it.
+object once and, when git-lfs is installed there, once more for every file that points to it. When a path that
+`git lfs checkout` would write there is a symbolic link or lies behind one (git-lfs before 3.7.1 writes through
+such links, CVE-2025-26625), the plugin does not run it: the files stay pointers and the final message names the
+link.
 
 Before anything is locked the plugin shows what would move: the workspace and its size, every item outside the project
 with its size (the 10 largest, then how many more), the repositories inside the workspace that stay here (each

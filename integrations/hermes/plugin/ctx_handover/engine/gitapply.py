@@ -61,6 +61,7 @@ from .gitops import (
     attribute_filter_names,
     compute_state,
     dec_path,
+    display_path,
     enc_path,
     git_dirs,
     head_info,
@@ -577,21 +578,145 @@ def place_lfs(git: Git, repo: Path, store, lfs_manifest: str | None, *, checkout
 
 _NO_LFS = "git-lfs is not installed here: LFS files stay pointers (install git-lfs, then git lfs checkout)"
 
+_LINK_MODE = b"120000"
+_REPARSE_LINKS = frozenset(
+    tag
+    for tag in (getattr(stat, "IO_REPARSE_TAG_SYMLINK", None), getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None))
+    if tag is not None
+)
+"""Windows reparse tags that redirect a path like a link does (symbolic link, junction)."""
 
-def lfs_checkout(git: Git, repo: Path) -> list[str]:
+
+def _lfs_link_warning(path: str) -> str:
+    return (
+        f"LFS files stay pointers: {path!r} in the repository is a symbolic link, and git lfs checkout could write "
+        "through it to a place outside the repository. Check the link, then run git lfs checkout there yourself "
+        "(git-lfs 3.7.1 or newer refuses to write through links)"
+    )
+
+
+def _link_on_disk(root: Path, raw: bytes, checked: set[bytes], ignore: frozenset[bytes]) -> bytes | None:
+    """The part of the repo-relative path ``raw`` — the path itself or a directory on the way to it — that is a
+    symbolic link (or a Windows junction) under ``root`` now; None when there is none. ``checked``: directories
+    already found to be real ones. ``ignore``: links git's own update replaces before the LFS checkout runs (tracked
+    links of the tree the work tree matches now). A component that cannot be inspected counts as a link
+    (fail-closed)."""
+    parts = raw.split(b"/")
+    for i in range(1, len(parts) + 1):
+        prefix = b"/".join(parts[:i])
+        if prefix in checked:
+            continue
+        if prefix in ignore:
+            return None
+        try:
+            st = os.lstat(os.path.join(root, os.fsdecode(prefix)))
+        except (FileNotFoundError, NotADirectoryError):
+            return None  # nothing there yet: git-lfs creates it as a plain file or directory
+        except (OSError, ValueError):
+            return prefix
+        if stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0) in _REPARSE_LINKS:
+            return prefix
+        if i < len(parts):
+            if not stat.S_ISDIR(st.st_mode):
+                return None
+            checked.add(prefix)
+    return None
+
+
+def lfs_link(
+    git: Git,
+    root: Path,
+    listings: Sequence[Sequence[str]],
+    *,
+    cwd: Path | None,
+    spec: GitEnvSpec,
+    env_extra: dict | None = None,
+    ignore: frozenset[bytes] = frozenset(),
+) -> str | None:
+    """The first path through which ``git lfs checkout`` could write via a link (catalog review 2026-11-10; git-lfs
+    before 3.7.1 follows links when it writes a file, CVE-2025-26625 / GHSA-6pvw-g552-53c5): a link entry (mode
+    120000) in one of the ``listings`` (``ls-tree -r -z`` / ``ls-files -s -z`` argv lists; records
+    ``<mode> …<TAB><path>``), or the link a listed path is or passes through in the work tree ``root`` now
+    (``_link_on_disk``). None when there is none."""
+    checked: set[bytes] = set()
+    for args in listings:
+        records = git.iter_z(list(args), cwd=cwd, spec=spec, env_extra=env_extra)
+        try:
+            for rec in records:
+                meta, sep, path = rec.partition(b"\t")
+                if not sep or not path:
+                    continue
+                if meta.split(b" ", 1)[0] == _LINK_MODE:
+                    return display_path(path)
+                link = _link_on_disk(root, path, checked, ignore)
+                if link is not None:
+                    return display_path(link)
+        finally:
+            records.close()
+    return None
+
+
+def _ls_tree(gitdir_args: Sequence[str], tree: str) -> list[str]:
+    return [*gitdir_args, "ls-tree", "-r", "-z", "--full-tree", "--end-of-options", tree]
+
+
+def lfs_checkout(git: Git, repo: Path, trees: Sequence[str] = ()) -> list[str]:
     """``git lfs checkout`` (local only, received profile) when ``git-lfs`` exists; else a warning that the
     pointers stay. It runs after the plugin's own checkout, which writes every file from its blob (the pointer
     text): fresh mode at the end of PREPARE (still in the 0700 partial, H8), update/return mode in commit step c1
-    after the work tree moved."""
-    if shutil.which("git-lfs"):
-        proc = git.run(["lfs", "checkout"], cwd=Path(repo), spec=_wt_spec(Path(repo)), check=False)
-        return [] if proc.returncode == 0 else ["git lfs checkout failed; run it in the repository"]
-    return [_NO_LFS]
+    after the work tree moved. It is skipped with a warning (the pointers stay) when a path git-lfs may write —
+    of HEAD, of the index or of ``trees`` (the received work-tree and index trees) — is a link or passes through
+    one (``lfs_link``)."""
+    if not shutil.which("git-lfs"):
+        return [_NO_LFS]
+    repo = Path(repo)
+    spec = _wt_spec(repo)
+    head = _rev(git, [], repo, spec, "HEAD^{tree}")
+    listings = [["ls-files", "-s", "-z"], *(_ls_tree([], t) for t in dict.fromkeys((*trees, head)) if t)]
+    try:
+        link = lfs_link(git, repo, listings, cwd=repo, spec=spec)
+    except GitCommandError:
+        link = "?"  # the paths could not be listed: no checkout (fail-closed)
+    if link is not None:
+        return [_lfs_link_warning(link)]
+    proc = git.run(["lfs", "checkout"], cwd=repo, spec=spec, check=False)
+    return [] if proc.returncode == 0 else ["git lfs checkout failed; run it in the repository"]
 
 
-def _lfs_tool_warnings(item: _Item) -> list[str]:
-    """Update/return PREPARE: the c1 tail cannot report, so a missing git-lfs is named here (H8)."""
-    return [_NO_LFS] if item.lfs and not shutil.which("git-lfs") else []
+def _lfs_tool_warnings(
+    git: Git, q: Path, item: _Item, dest: Path, base: str | None, env_extra: dict | None = None
+) -> list[str]:
+    """Update/return PREPARE: the c1 tail cannot report, so a missing git-lfs is named here (H8), and so is a link
+    that will stop the tail's LFS checkout (``lfs_link`` over the received trees and the destination as it is now;
+    tracked links of ``base`` — the tree the work tree matches now — are replaced by git's own update first)."""
+    if not item.lfs:
+        return []
+    if not shutil.which("git-lfs"):
+        return [_NO_LFS]
+    ignore: set[bytes] = set()
+    trees = dict.fromkeys(t for t in (item.worktree_tree, item.index_tree, item.head_commit) if t)
+    try:
+        if base is not None:
+            records = git.iter_z(_ls_tree(_bare(q), base), cwd=None, spec=RECEIVED, env_extra=env_extra)
+            try:
+                for rec in records:
+                    meta, sep, path = rec.partition(b"\t")
+                    if sep and meta.split(b" ", 1)[0] == _LINK_MODE:
+                        ignore.add(path)
+            finally:
+                records.close()
+        link = lfs_link(
+            git,
+            dest,
+            [_ls_tree(_bare(q), t) for t in trees],
+            cwd=None,
+            spec=RECEIVED,
+            env_extra=env_extra,
+            ignore=frozenset(ignore),
+        )
+    except GitCommandError:
+        link = "?"  # as the tail decides: paths it cannot list stop the LFS checkout
+    return [_lfs_link_warning(link)] if link is not None else []
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -1025,7 +1150,7 @@ def prepare_fresh(
         else:
             _checkout(git, partial, item, filters, cancelled)
             if item.lfs:  # after checkout-index, which writes every file as its blob (the pointer text) (H8)
-                warnings += lfs_checkout(git, partial)
+                warnings += lfs_checkout(git, partial, (item.worktree_tree, item.index_tree))
             if found:
                 shown = ", ".join(f"{a!r}/{b!r}" for a, b in found[:5])
                 warnings.append(f"case-colliding paths on this filesystem (git shows one as modified): {shown}")
@@ -1228,11 +1353,11 @@ def prepare_update(
         _refuse_obstructions(git, dest, h0, added, case_insensitive=ci)
         new_dirs = _new_dirs(dest, added)
         lfs_warnings = place_lfs(git, dest, store, item.lfs, checkout=False) if item.lfs else []
+        lfs_warnings += _lfs_tool_warnings(git, q, item, dest, h0)
         transfer_pack(q, common)
     finally:
         shutil.rmtree(q, ignore_errors=True)
     warnings = [f"ref {name} diverged at the destination and was not moved" for name in skipped] + lfs_warnings
-    warnings += _lfs_tool_warnings(item)
     return GitApplyState(
         dest=dest,
         mode=DestMode.UPDATE,
@@ -1333,11 +1458,11 @@ def prepare_return(
         _refuse_obstructions(git, dest, out_state.worktree_tree, added, case_insensitive=ci, env=alt)
         new_dirs = _new_dirs(dest, added)
         lfs_warnings = place_lfs(git, dest, store, item.lfs, checkout=False) if item.lfs else []
+        lfs_warnings += _lfs_tool_warnings(git, q, item, dest, out_state.worktree_tree, env_extra=alt)
         transfer_pack(q, common)
     finally:
         shutil.rmtree(q, ignore_errors=True)
     warnings = [f"ref {name} diverged at the destination and was not moved" for name in skipped] + lfs_warnings
-    warnings += _lfs_tool_warnings(item)
     return GitApplyState(
         dest=dest,
         mode=DestMode.RETURN,
@@ -1608,7 +1733,7 @@ def _tail(git: Git, repo: Path, item: _Item) -> None:
     """The idempotent end of the update/return forward step: missing stash entries, LFS checkout."""
     _store_stash(git, repo, item.stash, skip=_stash_commits(git, repo))
     if item.lfs:
-        lfs_checkout(git, repo)
+        lfs_checkout(git, repo, (item.worktree_tree, item.index_tree))
 
 
 def _bare_of(git: Git, repo: Path) -> Path:
