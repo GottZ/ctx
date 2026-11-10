@@ -203,8 +203,8 @@ def test_r5_real_git_lfs_fills_the_files(git, user_home, staging, cfg, store, ha
 def test_r5_real_git_lfs_link_stops_the_checkout(
     git, user_home, tmp_path, staging, cfg, store, handover_root, real_lfs
 ):
-    """Opt-in, real git-lfs (also a release before 3.7.1): a link in the received work tree stops the checkout and
-    nothing lands outside."""
+    """Opt-in, real git-lfs: nothing lands outside through a link in the received work tree. Before 3.7.1 the plugin
+    stops the checkout and says so; from 3.7.1 on git-lfs runs and leaves the path behind the link alone itself."""
     outside = tmp_path / "outside"
     outside.mkdir()
     src = RepoBuilder.init(user_home / "src")
@@ -216,7 +216,11 @@ def test_r5_real_git_lfs_link_stops_the_checkout(
     partial = handover_root / ".ctxh-app"
     state = gitapply.prepare_fresh(git, store, item, partial, rules=LINUX, cfg=cfg, dest=handover_root / "app")
     assert not (outside / "x.bin").exists()
-    assert any("symbolic link" in w for w in state.warnings), state.warnings
+    version = gitapply.lfs_version(git, None)
+    if version is not None and version >= gitapply.LFS_SAFE_VERSION:
+        assert not any("symbolic link" in w for w in state.warnings), state.warnings
+    else:
+        assert any("symbolic link" in w for w in state.warnings), state.warnings
     gitapply.discard(git, state)
 
 
