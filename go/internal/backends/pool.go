@@ -585,6 +585,61 @@ func (p *Pool) RoleConfiguredFor(role, tenant string) bool {
 	return false
 }
 
+// TrustCeilings is, for one role and one snapshot of the pool, the highest
+// sensitivity rank each tenant's view of the pool can route: Shared for a
+// view that sees the shared rows only, Private[scope] for a scope with a
+// routable tenant-private row of its own (the shared rows count in). -1
+// means nothing routes.
+type TrustCeilings struct {
+	Shared  int
+	Private map[string]int
+}
+
+// For returns the ceiling of tenant's view.
+func (c TrustCeilings) For(tenant string) int {
+	if r, ok := c.Private[tenant]; ok {
+		return r
+	}
+	return c.Shared
+}
+
+// TrustCeilings answers for every sensitivity and every tenant at once what
+// Chain answers for one pair: Chain(role, s, tenant) is non-empty iff
+// s.Rank() <= TrustCeilings(role).For(tenant). It applies Chain's gates
+// (VisibleTo, role, enabled, active disable-profile) and takes the best
+// trust where Chain compares it, from one snapshot and without a log line:
+// Chain logs a WARN for every empty chain, which rules it out as a probe for
+// a caller that needs the answer for many (scope, sensitivity) pairs before
+// it picks anything (the query path's backfill, which leaves the pairs no
+// backend takes out of its pick). A gate added to Chain belongs here too;
+// TestTrustCeilingsMatchChain holds the two against each other.
+func (p *Pool) TrustCeilings(role string) TrustCeilings {
+	snap := p.snap.Load()
+	c := TrustCeilings{Shared: -1}
+	for i := range snap.backends {
+		b := &snap.backends[i]
+		if !b.HasRole(role) || !b.Enabled || snap.disabledBy[b.ID] != "" {
+			continue
+		}
+		r := b.Trust.Rank()
+		switch {
+		case VisibleTo(b.Scope, ""): // shared row
+			c.Shared = max(c.Shared, r)
+		case VisibleTo(b.Scope, b.Scope): // tenant-private, reachable by its tenant
+			if c.Private == nil {
+				c.Private = map[string]int{}
+			}
+			if cur, ok := c.Private[b.Scope]; !ok || r > cur {
+				c.Private[b.Scope] = r
+			}
+		}
+	}
+	for s, r := range c.Private {
+		c.Private[s] = max(r, c.Shared)
+	}
+	return c
+}
+
 // PrimaryModel names the model of the highest-priority serving-eligible
 // backend for a role — "the model that WOULD answer". Used for the response
 // model field when the LLM step is skipped (score filter); empty when none

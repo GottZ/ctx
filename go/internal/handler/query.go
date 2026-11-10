@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1744,12 +1745,15 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 //     both directions; scope is a filter on top of it, so a caller with
 //     nothing pending walks the pending rows of the other scopes before the
 //     pick comes back empty.
-//   - Head of line: a block with no eligible embed chain (its floor-adjusted
-//     sensitivity is above every backend it may use) gets no memo, so it
-//     would stay the newest pending block and every request would stop on
-//     it. It is left out of the further picks of this request instead, and
-//     the loop goes on to the next block; the skip uses up one sync_cap
-//     slot, which bounds the picks a request makes.
+//   - Head of line: a block no embed backend may receive (its floor-adjusted
+//     sensitivity is above the trust of every embed backend its scope can
+//     use) gets no memo, the arm's rule, so it would stay the newest pending
+//     block and every request would stop on it. Such blocks are left out of
+//     the pick itself: the request reads the pool once (TrustCeilings),
+//     works out per scope which sensitivities an embed backend takes
+//     (embedServableClasses, with the floor the chain below applies), and
+//     the pick returns servable blocks only. An unservable block therefore
+//     costs neither a pick nor a sync_cap slot, however many are pending.
 //
 // With the background arm off (embed_backfill.interval=0) this loop can be
 // the only embedder there is. The caller's scopes still go first, and when
@@ -1801,23 +1805,34 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 	if armRuns {
 		pendingExcluded = store.EmbedFailureQueryPathExcludedPredicate
 	}
-	// unservable holds the blocks this request found without an eligible
-	// embed chain. Non-nil from the start: a nil slice binds as NULL, and
-	// id <> ALL(NULL) matches no row.
-	unservable := []string{}
-	// pick takes the newest pending block this request has not set aside,
-	// inside scopeConjunct when one is given. The predicates carry no
-	// placeholders: $1 is the skip list, $2 the conjunct's. The id breaks
-	// the tie between blocks of one created_at (one transaction).
-	pick := func(scopeConjunct string, args ...any) (blockID, title, content, sens, scope string, err error) {
+	// The classes of block an embed backend takes, worked out once per
+	// request from one pool snapshot and with the floor the chain below
+	// applies, so the pick admits exactly the blocks that chain resolves
+	// for. callerClasses covers the caller's read scopes; anyClasses covers
+	// every scope and is built on first use, which only the arm-off
+	// fallback has.
+	ceilings := h.backendPool.TrustCeilings(backends.RoleEmbed)
+	callerClasses := embedServableClasses(ceilings, floor, readScopes)
+	anyClasses := sync.OnceValue(func() embedClasses {
+		return embedServableClasses(ceilings, floor, nil)
+	})
+	// pick takes the newest pending block of the classes cl, inside
+	// scopeConjunct when one is given. The spliced predicates carry no
+	// placeholders: $1 to $4 are the class conjunct's (embedClasses), $5 the
+	// scope conjunct's. The scope conjunct stays a conjunct of its own next
+	// to the class one, so the planner can still take the scope index for
+	// it. The id breaks the tie between blocks of one created_at (one
+	// transaction).
+	pick := func(cl embedClasses, scopeConjunct string, args ...any) (blockID, title, content, sens, scope string, err error) {
 		err = h.pool.QueryRow(ctx,
 			`SELECT id, title, content, sensitivity, scope FROM context_blocks
 			WHERE embedding IS NULL AND NOT is_archived`+
 				pendingExcluded+store.RetrievalExcludedTypePredicate+`
-			  AND id <> ALL($1::uuid[])`+scopeConjunct+`
+			  AND ((scope <> ALL($1::text[]) AND sensitivity = ANY($2::text[]))
+			    OR (scope, sensitivity) IN (SELECT * FROM unnest($3::text[], $4::text[])))`+scopeConjunct+`
 			ORDER BY created_at DESC, id DESC
 			LIMIT 1`,
-			append([]any{unservable}, args...)...,
+			append([]any{cl.except, cl.levels, cl.pairScopes, cl.pairLevels}, args...)...,
 		).Scan(&blockID, &title, &content, &sens, &scope)
 		return blockID, title, content, sens, scope, err
 	}
@@ -1837,13 +1852,13 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 		if callerDrained {
 			err = pgx.ErrNoRows
 		} else {
-			blockID, title, content, sens, scope, err = pick("\n\t\t\t  AND scope = ANY($2::text[])", readScopes)
+			blockID, title, content, sens, scope, err = pick(callerClasses, "\n\t\t\t  AND scope = ANY($5::text[])", readScopes)
 			callerDrained = errors.Is(err, pgx.ErrNoRows)
 		}
 		if errors.Is(err, pgx.ErrNoRows) && !armRuns {
 			// Nothing pending the caller can read, and no arm to leave the
 			// rest to: embed any pending block.
-			blockID, title, content, sens, scope, err = pick("")
+			blockID, title, content, sens, scope, err = pick(anyClasses(), "")
 		}
 		if err != nil {
 			break // No more pending blocks (or error).
@@ -1853,13 +1868,15 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 		chain, cerr := h.backendPool.Chain(backends.RoleEmbed, required, scope)
 		if cerr != nil {
 			// Trust/profile-empty chain: the block stays unembedded (visible
-			// via FTS only) — never escalate across the trust border. No
-			// memo (eligibility is recomputed from the live chain, same rule
-			// as the background arm): the block is set aside for the rest of
-			// this request and the next pick takes the one behind it.
+			// via FTS only) — never escalate across the trust border. The
+			// pick admits only classes the pool snapshot above serves, so
+			// this is a pool reload between that snapshot and this chain
+			// (Chain loads its own). No memo (eligibility is recomputed from
+			// the live chain, same rule as the background arm), and no
+			// second look at a pool that just changed: the loop ends, and
+			// the next request works its classes out anew.
 			slog.Warn("query backfill: no eligible embed backend", "block_id", blockID, "error", cerr)
-			unservable = append(unservable, blockID)
-			continue
+			break
 		}
 
 		embedText := title + "\n\n" + content
@@ -1969,6 +1986,72 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 		count++
 	}
 	return count
+}
+
+// embedClasses is the argument set of the backfill pick's class conjunct:
+//
+//	AND ((scope <> ALL(except) AND sensitivity = ANY(levels))
+//	  OR (scope, sensitivity) IN (pairs))
+//
+// levels are the sensitivities the shared embed backends take. except lists
+// the scopes whose answer differs (a sensitivity floor, or an embed backend
+// of their own), and the pairs (pairScopes[i], pairLevels[i]) name what is
+// servable in each of them. All four slices are non-nil: a nil slice binds
+// as NULL, and scope <> ALL(NULL) matches no row.
+type embedClasses struct {
+	except, levels, pairScopes, pairLevels []string
+}
+
+// embedServableClasses builds the class conjunct's arguments from the pool's
+// embed ceilings and the sensitivity floor: a block is servable iff the rank
+// of floor.Apply(sensitivity, scope) is at most the ceiling of its scope,
+// which is what Chain(RoleEmbed, floor.Apply(sensitivity, scope), scope)
+// decides for one block (TestEmbedServableClassesMatchChain). within narrows
+// the exceptions to the scopes a scoped pick can return; nil means every
+// scope, and the exceptions are then the floor's scopes and the scopes with
+// an embed backend of their own, which is the size of the configuration and
+// not of the backlog.
+func embedServableClasses(c backends.TrustCeilings, floor config.ScopeFloor, within []string) embedClasses {
+	cl := embedClasses{except: []string{}, levels: []string{}, pairScopes: []string{}, pairLevels: []string{}}
+	for _, l := range backends.SensitivityLevels {
+		if l.Rank() <= c.Shared {
+			cl.levels = append(cl.levels, string(l))
+		}
+	}
+	differs := func(scope string) bool {
+		_, lifted := floor[scope]
+		_, private := c.Private[scope]
+		return lifted || private
+	}
+	var scopes []string
+	if within == nil {
+		for s := range floor {
+			scopes = append(scopes, s)
+		}
+		for s := range c.Private {
+			if _, lifted := floor[s]; !lifted {
+				scopes = append(scopes, s)
+			}
+		}
+	} else {
+		for _, s := range within {
+			if differs(s) && !slices.Contains(scopes, s) {
+				scopes = append(scopes, s)
+			}
+		}
+	}
+	slices.Sort(scopes)
+	for _, s := range scopes {
+		cl.except = append(cl.except, s)
+		ceiling := c.For(s)
+		for _, l := range backends.SensitivityLevels {
+			if floor.Apply(l, s).Rank() <= ceiling {
+				cl.pairScopes = append(cl.pairScopes, s)
+				cl.pairLevels = append(cl.pairLevels, string(l))
+			}
+		}
+	}
+	return cl
 }
 
 // GrantFloorDefault is the conservative egress lower bound applied to EVERY
