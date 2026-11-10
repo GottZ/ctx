@@ -138,7 +138,8 @@ class Spawner:
                 exe = os.path.abspath(argv0) if not self._windows else argv0
         if not exe:
             raise CapabilityMissing(
-                "The hermes command was not found on PATH, so the continuation cannot start.", capability="hermes_cli"
+                "The hermes command was not found on PATH, so the agent cannot carry on here by itself (--continue).",
+                capability="hermes_cli",
             )
         argv = [str(exe)]
         if self._profile:
@@ -207,12 +208,13 @@ class Spawner:
             raise HandoverError("invalid job id for the continuation", field="job_id")
         if not verified:
             raise ContinueRefused(
-                "The handover came from an unverified source, so no turn is started automatically.",
+                "The handover came from a source this machine cannot verify, so the agent does not start by itself "
+                "here.",
                 reason="unverified",
             )
         if requested_by and self._allow_remote() is not True:  # only a real boolean True opens it (no "false" text)
             raise ContinueRefused(
-                "This gateway does not allow a paired device to start a turn (allow_remote_continue is off).",
+                "This machine does not let a paired device start the agent here (allow_remote_continue is off).",
                 reason="not_allowed",
             )
         way_out = {"session_id": session_id, "profile": self._profile or None}
@@ -222,7 +224,8 @@ class Spawner:
             raise ContinueRefused(exc.message, details={**exc.details, **way_out}) from None
         if off:
             raise ContinueRefused(
-                "Approvals are switched off on this gateway, so no turn is started without a person present.",
+                "Approvals are switched off on this machine, so the agent does not start here without a person "
+                "present.",
                 reason="approvals_off",
                 **way_out,
             )
@@ -257,7 +260,7 @@ class Spawner:
                 try:
                     proc = self._popen(argv, **kwargs)
                 except OSError as exc:
-                    raise HandoverError(f"could not start the continuation: {type(exc).__name__}") from exc
+                    raise HandoverError(f"could not start the agent for --continue: {type(exc).__name__}") from exc
             finally:
                 os.close(fd)
             pid = int(getattr(proc, "pid", 0) or 0)

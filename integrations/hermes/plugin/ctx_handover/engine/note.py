@@ -489,7 +489,7 @@ def _not_transferred(parts: dict, src: str, per_list: int, limit: int) -> list[s
         out.append(f"{n} background {verb} running on {src} ({', '.join(cmds)}{', …' if n > 3 else ''})")
     delegations = _dicts(parts, "delegations")
     if delegations:
-        out.append(f"{len(delegations)} delegated task(s) stay on {src}")
+        out.append(f"{len(delegations)} delegated task(s) (subagents) stay on {src}")
     secrets = _strings(parts, "secrets_excluded")
     if secrets:
         out.append(f"secrets excluded: {_listed(secrets, per_list)}")
@@ -515,7 +515,7 @@ def _not_transferred(parts: dict, src: str, per_list: int, limit: int) -> list[s
             out.append(f"{label}: {_listed(values, per_list)}")
     for key, label in (
         ("rewind_rows", "rewound messages not transferred"),
-        ("lfs_missing", "LFS objects missing (run `git lfs pull`)"),
+        ("lfs_missing", "large files stored with Git LFS are missing here (run `git lfs pull`)"),
     ):
         value = parts.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:

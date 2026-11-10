@@ -136,7 +136,12 @@ def test_agent_tool_request_respects_allow_agent_start():
     handle, backend, _ = _tool()
     backend.sources[SID] = "local"
     reply = _call(handle, {"action": "request", "peer": "server"})
-    assert reply == {"ok": True, "started": False, "message": "Recorded. Ask the user to run /handover to server."}
+    assert reply == {
+        "ok": True,
+        "started": False,
+        "message": "Recorded. The handover does not start by itself (allow_agent_start is off). Ask the user to run "
+        "/handover to server.",
+    }
     assert "start_job" not in backend.names()
 
     backend.sources["tg"] = "telegram"

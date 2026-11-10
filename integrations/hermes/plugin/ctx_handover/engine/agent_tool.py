@@ -141,7 +141,7 @@ def handler(ctx, provider: Callable[[], Any] | None = None) -> Callable[..., str
 
     def handle(args: dict, session_id: str = "", **_kw: Any) -> str:
         if provider is None:
-            return _reply(ok=False, error="The handover tool is not wired in this process.")
+            return _reply(ok=False, error="The handover tool is not available in this Hermes process.")
         try:
             a = validate(args)
         except ToolArgError as exc:
@@ -199,7 +199,7 @@ def _plan(backend: Any, session_id: str, peer_name: str | None) -> str:
 
     peer = backend.peer(peer_name) if peer_name else None
     if peer_name and peer is None:
-        return _reply(ok=False, error=f"No paired device named {peer_name}.")
+        return _reply(ok=False, error=f"No paired device is called {peer_name}.")
     mode = Mode.PUSH if peer is not None and peer.direction == "dial" else Mode.EXPORT
     options = Options(dry_run=True, yes=True, refine="off")
     _job, final = backend.start_job(
@@ -238,18 +238,25 @@ def _request(plugin: Any, backend: Any, session_id: str, peer_name: str | None, 
         )
     peer = backend.peer(peer_name)
     if peer is None or peer.revoked_at:
-        return _reply(ok=False, error=f"No paired device named {peer_name}.")
+        return _reply(ok=False, error=f"No paired device is called {peer_name}.")
     settings = settings_from_config(backend.config())
     if not settings.get("allow_agent_start"):
         backend.suggestion_put(session_id, {"request": peer.name})
-        return _reply(ok=True, started=False, message=f"Recorded. Ask the user to run /handover to {peer.name}.")
+        return _reply(
+            ok=True,
+            started=False,
+            message=(
+                "Recorded. The handover does not start by itself (allow_agent_start is off). Ask the user to run "
+                f"/handover to {peer.name}."
+            ),
+        )
     job = plugin.agent_request(session_id, session_key, peer.name)
     return _reply(
         ok=True,
         started=True,
         message=(
-            f"The handover to {peer.name} starts when this turn ends (proposed items left out; it stops if anything "
-            "needs a confirmation). /handover status shows it."
+            f"The handover to {peer.name} starts when this turn ends. Items that were only proposed stay here, and "
+            "the handover stops if anything needs a person to confirm it. /handover status shows it."
         ),
         job=job,
     )
