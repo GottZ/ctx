@@ -93,8 +93,19 @@ Hybrid semantic + fulltext search with LLM synthesis. Read-only.
 |---|---|---|---|
 | `question` | string | required | the question to answer |
 | `limit` | integer | | maximum sources (default 5) |
+| `category` | string | | retrieve only blocks of this category (exact match); empty is no filter |
+| `tags` | string[] | | retrieve only blocks that carry at least one of these tags |
+| `categories_exclude` | string[] | | do not retrieve blocks of these categories |
 | `types` | string[] | | restrict retrieval to these block types; each must be a retrieval-visible type, an unknown or non-visible name is an error |
 | `types_exclude` | string[] | | exclude these block types |
+
+`category`, `tags` and `categories_exclude` are passed to `POST /api/query` under
+the same names and narrow the candidates of the rank-fusion step; given together,
+a candidate must pass all of them. The post-fusion stages (cluster boost, graph
+expansion, aggregate fold) do not take them: where one of those is enabled, a
+block linked to a hit can enter the source list from outside the filter. Unlike
+`types` they are not checked against anything: a name that matches no block
+gives an empty result, not an error.
 
 Runs the full `POST /api/query` pipeline (temporal parsing, rank fusion, temporal
 gravity, rerank, synthesis). **Answer:** the synthesized answer, then a source list:
