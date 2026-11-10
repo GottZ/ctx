@@ -291,4 +291,75 @@ func TestBackfillPending_SyncBudget_Integration(t *testing.T) {
 			t.Errorf("wire hits = %d, want 1", hits.Load())
 		}
 	})
+
+	// Review of #214: with the arm off the query path is the only embedder
+	// of a caller_timeout block, but a block that overran the budget must not
+	// be what every request picks first, or one block too slow for the budget
+	// holds everything behind it for good (its memo is due at once and the
+	// loop ends on the failure). It goes last: a request takes it only when
+	// nothing else is pending. Two rows, the overrun block on either side of
+	// a plain pending one, so the order of the pick cannot decide the result.
+	t.Run("arm_off_a_block_that_overran_the_budget_goes_last", func(t *testing.T) {
+		const overran, plain = "syncbudget-overran-block", "syncbudget-plain-block"
+		for _, tc := range []struct {
+			name                    string
+			overranAgeMin, plainAge int
+		}{
+			{"overran_block_is_the_newer", 1, 2},
+			{"overran_block_is_the_older", 2, 1},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				for title, ageMin := range map[string]int{overran: tc.overranAgeMin, plain: tc.plainAge} {
+					if _, err := pool.Exec(ctx,
+						`INSERT INTO context_blocks (category, title, content, scope, created_at, updated_at)
+						 VALUES ('learnings', $1, 'body of the sync-budget fixture block ' || $1, 'private',
+						         now() - $2::int * interval '1 minute', now())`, title, ageMin); err != nil {
+						t.Fatalf("seed block %q: %v", title, err)
+					}
+				}
+				t.Cleanup(func() {
+					_, _ = pool.Exec(ctx, `DELETE FROM context_embed_failures WHERE block_id IN (SELECT id FROM context_blocks WHERE title = ANY($1))`, []string{overran, plain})
+					_, _ = pool.Exec(ctx, `DELETE FROM context_blocks WHERE title = ANY($1)`, []string{overran, plain})
+				})
+				var blockID string
+				if err := pool.QueryRow(ctx, `SELECT id FROM context_blocks WHERE title = $1`, overran).Scan(&blockID); err != nil {
+					t.Fatalf("read block id: %v", err)
+				}
+				if err := store.RecordEmbedFailure(ctx, pool, blockID, store.EmbedFailureCallerTimeout,
+					store.NormalizeEmbedError(store.EmbedFailureCallerTimeout, "context deadline exceeded"),
+					time.Minute, time.Hour); err != nil {
+					t.Fatalf("record caller_timeout memo: %v", err)
+				}
+				embedded := func(title string) bool {
+					t.Helper()
+					var present bool
+					if err := pool.QueryRow(ctx, `SELECT embedding IS NOT NULL FROM context_blocks WHERE title = $1`, title).Scan(&present); err != nil {
+						t.Fatalf("read embedding state of %q: %v", title, err)
+					}
+					return present
+				}
+
+				h, _, _ := newHandler(t, 0)
+				cfg := &config.Config{EmbedBackfill: config.EmbedBackfillConfig{
+					SyncCap: 1, SyncBudget: 10 * time.Second, Interval: 0,
+					MaxTokens: 1_000_000, BackoffBase: time.Minute, BackoffCap: time.Hour,
+				}}
+				if got := h.backfillPending(ctx, nil, []string{"private"}, h.embedAdmission(), cfg); got != 1 {
+					t.Fatalf("first request backfilled %d, want 1", got)
+				}
+				if !embedded(plain) || embedded(overran) {
+					t.Fatalf("first request: plain block embedded=%v, overrun block embedded=%v, want the plain one only (the overrun block goes last)",
+						embedded(plain), embedded(overran))
+				}
+				// Nothing else is pending now: the arm is off, so this path
+				// is what embeds the overrun block.
+				if got := h.backfillPending(ctx, nil, []string{"private"}, h.embedAdmission(), cfg); got != 1 {
+					t.Fatalf("second request backfilled %d, want 1 (arm off: the query path must not leave the block to nobody)", got)
+				}
+				if !embedded(overran) {
+					t.Error("second request: the overrun block is still pending with nothing else in the queue")
+				}
+			})
+		}
+	})
 }
