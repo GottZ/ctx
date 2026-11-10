@@ -425,6 +425,33 @@ func TestIngestIdenticalContentChunkMode(t *testing.T) {
 		}
 	})
 
+	// A source_id that is not a UUID names no slot: the slot check's
+	// $2::uuid cast raises 22P02, which processChunk reads as "not this slot"
+	// and answers skipped with the matched id, not "chunk slot check failed".
+	t.Run("malformed_source_id_skips_not_fails", func(t *testing.T) {
+		sourceID := seedSource(t, pool, "/i182/chunk-malformed.md", "private")
+		const (
+			title   = "i182 chunk malformed source id"
+			content = "i182 chunk content re-ingested under a malformed source id"
+		)
+		seed := postIdenticalChunk(t, h, keyCtx, sourceID, title, content,
+			[]string{"chunk-seed"}, map[string]any{"run": "seed"})
+		if seed["status"] != "inserted" {
+			t.Fatalf("seed result = %v, want inserted", seed)
+		}
+		seededID, _ := seed["id"].(string)
+		seeded := readIdenticalChunkState(t, pool, seededID)
+
+		again := postIdenticalChunk(t, h, keyCtx, "not-a-uuid", title, content,
+			[]string{"chunk-other"}, map[string]any{"run": "other"})
+		if again["status"] != "skipped" || again["id"] != seededID {
+			t.Errorf("malformed source id reingest = %v, want skipped id %s, not failed", again, seededID)
+		}
+		if got := readIdenticalChunkState(t, pool, seededID); !reflect.DeepEqual(got, seeded) {
+			t.Errorf("malformed source id reingest changed the row:\nseeded: %+v\n     got: %+v", seeded, got)
+		}
+	})
+
 	t.Run("block_mode_row_different_tags_skips", func(t *testing.T) {
 		sourceID := seedSource(t, pool, "/i139/chunk-onto-block.md", "private")
 		const (
