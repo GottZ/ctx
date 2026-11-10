@@ -66,7 +66,7 @@ type ollamaEmbedRequest struct {
 	// the cut text. Sent on a gateway body only (FOLGE-EMBLIMIT: the backend
 	// judges an input's length, the route passes its refusal on); the
 	// internal path's body stays the single-string wire, without the key.
-	Truncate *bool      `json:"truncate,omitempty"`
+	Truncate *bool       `json:"truncate,omitempty"`
 	Options  *ollamaOpts `json:"options,omitempty"`
 }
 

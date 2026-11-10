@@ -132,7 +132,8 @@ func TestEmbedWireLenIsTheEncoders(t *testing.T) {
 
 // embedWireReplica is the upstream body of a block of texts to model as
 // embed's wireInput.marshal writes it for a gateway block — the openai
-// request, or the ollama one with options.num_ctx when numCtx > 0 — through
+// request, or the ollama one with truncate:false (FOLGE-EMBLIMIT) and
+// options.num_ctx when numCtx > 0 — through
 // the same encoder (no HTML escaping, the trailing newline cut). It is
 // pinned byte for byte against the bodies the route sends
 // (TestEmbedWireReplicaIsTheWire, embed_ledger_share_test.go), so its sizes
@@ -143,10 +144,14 @@ func embedWireReplica(model string, texts []string, ollama bool, numCtx int) []b
 		NumCtx int `json:"num_ctx,omitempty"`
 	}
 	v := struct {
-		Model   string `json:"model"`
-		Input   any    `json:"input"`
-		Options *opts  `json:"options,omitempty"`
+		Model    string `json:"model"`
+		Input    any    `json:"input"`
+		Truncate *bool  `json:"truncate,omitempty"`
+		Options  *opts  `json:"options,omitempty"`
 	}{Model: model, Input: texts}
+	if ollama {
+		v.Truncate = new(bool)
+	}
 	if ollama && numCtx > 0 {
 		v.Options = &opts{NumCtx: numCtx}
 	}

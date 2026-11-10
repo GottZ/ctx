@@ -677,8 +677,9 @@ type embedState struct {
 	// failedBlock is the block whose wire call ended the latest attempt
 	// (-1: none); ≥ 1 is the sticky stop, unless the backend refused the
 	// block's inputs (outcome). failedLo and failedHi are its inputs.
-	failedBlock        int
-	failedLo, failedHi int
+	failedBlock int
+	failedLo    int
+	failedHi    int
 	abort       string // the dispatcher abort of that block's lease, if any
 	failed      []failedAttempt
 	last        failedAttempt
