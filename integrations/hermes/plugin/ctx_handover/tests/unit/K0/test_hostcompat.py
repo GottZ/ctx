@@ -85,7 +85,7 @@ def test_host_facts_from_the_profile_config(hermes_home):
     facts = hostcompat.host_facts()
     assert (facts.model, facts.provider, facts.context_length) == ("m-1", "openrouter", 64000)
     assert facts.terminal_backend == "local" and facts.profile == "default" and facts.multiplex is False
-    assert facts.hermes_home == str(hermes_home) and facts.plugin_version == "0.1.0"
+    assert facts.hermes_home == str(hermes_home) and facts.plugin_version == "0.1.1"
     assert isinstance(facts.hermes_version, str)
 
 
