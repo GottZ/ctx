@@ -587,12 +587,63 @@ _REPARSE_LINKS = frozenset(
 """Windows reparse tags that redirect a path like a link does (symbolic link, junction)."""
 
 
-def _lfs_link_warning(path: str) -> str:
-    return (
-        f"LFS files stay pointers: {path!r} in the repository is a symbolic link, and git lfs checkout could write "
-        "through it to a place outside the repository. Check the link, then run git lfs checkout there yourself "
-        "(git-lfs 3.7.1 or newer refuses to write through links)"
+LFS_FILTER: tuple[tuple[str, str], ...] = (
+    ("filter.lfs.clean", "git-lfs clean -- %f"),
+    ("filter.lfs.smudge", "git-lfs smudge -- %f"),
+    ("filter.lfs.process", "git-lfs filter-process"),
+    ("filter.lfs.required", "true"),
+)
+"""The filter ``git lfs install`` writes, declared on the command line of the plugin's one ``git lfs checkout`` call
+(``-c`` wins over the profile's emptied drivers). The received profile nulls the global and system configuration
+and empties every filter driver; without a declared filter git-lfs answers "Git LFS is not installed" with exit
+code 0 and fills nothing."""
+
+
+LFS_SAFE_VERSION = (3, 7, 1)
+"""git-lfs checks for symbolic links before it writes a file from this release on and removes the file it replaces
+(CVE-2025-26625, GHSA-6pvw-g552-53c5); older releases write through a link."""
+
+_LFS_VERSION_RE = re.compile(rb"git-lfs/(\d+)\.(\d+)\.(\d+)")
+
+
+def lfs_version(git: Git, cwd: Path | None) -> tuple[int, int, int] | None:
+    """``(major, minor, patch)`` of the git-lfs git starts (``git lfs version``), None when it cannot be read."""
+    try:
+        proc = git.run(["lfs", "version"], cwd=cwd, spec=RECEIVED, check=False, timeout=30)
+    except (OSError, GitCommandError):
+        return None
+    match = _LFS_VERSION_RE.search(proc.stdout or b"") if proc.returncode == 0 else None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3))) if match else None
+
+
+def _lfs_link_warning(path: str, version: tuple[int, int, int] | None) -> str:
+    """``path``: the link in the way; ``""`` when the paths could not be checked at all."""
+    what = (
+        f"{path!r} in the repository is a symbolic link"
+        if path
+        else "the paths git lfs checkout would write could not be checked for symbolic links"
     )
+    which = (
+        f"git-lfs {'.'.join(map(str, version))} here is older than 3.7.1"
+        if version is not None
+        else "the version of git-lfs here could not be read"
+    )
+    return (
+        f"LFS files stay pointers: {what}, and {which}. Older git-lfs releases can write through such a link to a "
+        "place outside the repository. Update git-lfs to 3.7.1 or newer, check the link, then run git lfs checkout "
+        "in the repository."
+    )
+
+
+def _lfs_link_stops(git: Git, link: str | None, cwd: Path | None) -> list[str]:
+    """The warning when a link (``link``; ``""`` = not checkable) stops the LFS checkout: only while git-lfs is
+    older than ``LFS_SAFE_VERSION`` or its version cannot be read. Empty when the checkout may run."""
+    if link is None:
+        return []
+    version = lfs_version(git, cwd)
+    if version is not None and version >= LFS_SAFE_VERSION:
+        return []
+    return [_lfs_link_warning(link, version)]
 
 
 def _link_on_disk(root: Path, raw: bytes, checked: set[bytes], ignore: frozenset[bytes]) -> bytes | None:
@@ -666,7 +717,7 @@ def lfs_checkout(git: Git, repo: Path, trees: Sequence[str] = ()) -> list[str]:
     text): fresh mode at the end of PREPARE (still in the 0700 partial, H8), update/return mode in commit step c1
     after the work tree moved. It is skipped with a warning (the pointers stay) when a path git-lfs may write —
     of HEAD, of the index or of ``trees`` (the received work-tree and index trees) — is a link or passes through
-    one (``lfs_link``)."""
+    one (``lfs_link``) and git-lfs is older than ``LFS_SAFE_VERSION`` or its version cannot be read."""
     if not shutil.which("git-lfs"):
         return [_NO_LFS]
     repo = Path(repo)
@@ -676,10 +727,12 @@ def lfs_checkout(git: Git, repo: Path, trees: Sequence[str] = ()) -> list[str]:
     try:
         link = lfs_link(git, repo, listings, cwd=repo, spec=spec)
     except GitCommandError:
-        link = "?"  # the paths could not be listed: no checkout (fail-closed)
-    if link is not None:
-        return [_lfs_link_warning(link)]
-    proc = git.run(["lfs", "checkout"], cwd=repo, spec=spec, check=False)
+        link = ""  # the paths could not be listed: as a link in the way (fail-closed)
+    stops = _lfs_link_stops(git, link, repo)
+    if stops:
+        return stops
+    declared = [arg for key, value in LFS_FILTER for arg in ("-c", f"{key}={value}")]
+    proc = git.run([*declared, "lfs", "checkout"], cwd=repo, spec=spec, check=False)
     return [] if proc.returncode == 0 else ["git lfs checkout failed; run it in the repository"]
 
 
@@ -688,7 +741,8 @@ def _lfs_tool_warnings(
 ) -> list[str]:
     """Update/return PREPARE: the c1 tail cannot report, so a missing git-lfs is named here (H8), and so is a link
     that will stop the tail's LFS checkout (``lfs_link`` over the received trees and the destination as it is now;
-    tracked links of ``base`` — the tree the work tree matches now — are replaced by git's own update first)."""
+    tracked links of ``base`` — the tree the work tree matches now — are replaced by git's own update first; a
+    git-lfs from ``LFS_SAFE_VERSION`` on runs anyway)."""
     if not item.lfs:
         return []
     if not shutil.which("git-lfs"):
@@ -715,8 +769,8 @@ def _lfs_tool_warnings(
             ignore=frozenset(ignore),
         )
     except GitCommandError:
-        link = "?"  # as the tail decides: paths it cannot list stop the LFS checkout
-    return [_lfs_link_warning(link)] if link is not None else []
+        link = ""  # as the tail decides: paths it cannot list stop the LFS checkout
+    return _lfs_link_stops(git, link, dest)
 
 
 # ---------------------------------------------------------------------------------------------------------

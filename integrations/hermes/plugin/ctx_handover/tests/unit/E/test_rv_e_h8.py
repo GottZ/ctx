@@ -1,7 +1,8 @@
 """First review round, finding H8 (and the condition M26 asks for): with git-lfs present, a fresh destination gets
 the LFS content of the shipped objects, not the pointer text; without git-lfs every mode says the pointers stay
 (DESIGN §9.4, SEC 3.5). ``git-lfs`` here is a stand-in script that does what ``git lfs checkout`` does locally:
-it replaces each pointer file whose object lies in ``.git/lfs/objects`` by that object (no network)."""
+it replaces each pointer file whose object lies in ``.git/lfs/objects`` by that object (no network), and like
+git-lfs it fills nothing (exit code 0) when no LFS filter is configured for the call."""
 
 from __future__ import annotations
 
@@ -20,6 +21,9 @@ DATA = b"REAL LFS CONTENT\n" * 64
 STAND_IN = """#!/bin/sh
 echo "$*" >> "{log}"
 [ "$1" = checkout ] || exit 0
+if [ -z "$(git config --get filter.lfs.process)$(git config --get filter.lfs.clean)" ]; then
+  echo "Cannot checkout LFS objects, Git LFS is not installed."; exit 0
+fi
 git ls-files | while IFS= read -r f; do
   oid=$(sed -n 's/^oid sha256://p' "$f" 2>/dev/null)
   [ -n "$oid" ] || continue
