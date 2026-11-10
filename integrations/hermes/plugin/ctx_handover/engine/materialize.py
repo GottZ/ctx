@@ -339,7 +339,8 @@ class _JobRoom:
         total = self.declared + int(declared)
         if total > self.max_bytes:
             raise PayloadTooLarge(
-                f"the handover's workspace items together are larger than allowed (refused at a {what})",
+                "the handed-over folders and files together are larger than the max_total_gb setting on the "
+                f"receiving machine allows (stopped before writing a {what})",
                 bytes=total,
                 max_bytes=self.max_bytes,
                 item_bytes=int(declared),
@@ -354,7 +355,7 @@ class _JobRoom:
         need = int((self._writes.get(dev, 0) + int(write)) * _DISK_MARGIN)
         if need > free:
             raise InsufficientStorage(
-                f"not enough free space for the handover's workspace items (refused at a {what})",
+                f"not enough free space for the handed-over folders and files (stopped before writing a {what})",
                 need_bytes=need,
                 free_bytes=free,
                 path=str(probe),
@@ -585,14 +586,20 @@ class WorkspaceTxn:
         recorded = decision.reason in {"return-mapping", "user"} and decision.conflict is None
         verdict = check_target_dest(dest, cfg, recorded=recorded, local_choice=recorded)
         if not verdict.allowed:
-            raise PolicyDenied(f"destination not allowed ({verdict.reason})", reason="target_denied", path=str(dest))
+            raise PolicyDenied(
+                f"the destination {dest} is not allowed on the receiving machine ({verdict.reason})",
+                reason="target_denied",
+                path=str(dest),
+            )
         return dest, self._c1_fallback(dest)
 
     def _check_fresh(self, dest: Path) -> None:
         verdict = check_target_dest(dest, self._require_cfg(), recorded=False, local_choice=False)
         if not verdict.allowed:
             raise PolicyDenied(
-                f"fallback destination not allowed ({verdict.reason})", reason="target_denied", path=str(dest)
+                f"the alternative folder {dest} is not allowed on the receiving machine ({verdict.reason})",
+                reason="target_denied",
+                path=str(dest),
             )
 
     def _prepare_git_fresh(
@@ -780,7 +787,11 @@ class WorkspaceTxn:
                 if decision.mode is DestMode.RETURN:
                     out_state = git_state_of(out_row.state if out_row else None)
                     if out_state is None:
-                        raise ConflictError("no recorded out-state for the return trip", kind="changed_since_handover")
+                        raise ConflictError(
+                            "the receiving machine has no record of the repository as it was handed over, so it "
+                            "cannot be updated in place",
+                            kind="changed_since_handover",
+                        )
                     state = gitapply.prepare_return(
                         self.git,
                         self.store,
@@ -809,7 +820,7 @@ class WorkspaceTxn:
                 return _Prepared(item.item_id, "git", state.mode, dest, pack_item, state)
             except ConflictError as exc:
                 fb = self._fallback(dest)
-                self.warnings.append(f"{dest}: {exc.message}; materialised fresh at {fb}")
+                self.warnings.append(f"{dest}: {exc.message}; the copy went to a new folder instead: {fb}")
                 self.journal("info", f"prepare:{item.item_id}", {"fallback": str(fb), "why": exc.details.get("kind")})
                 self._check_fresh(fb)
                 alt = None
@@ -828,7 +839,10 @@ class WorkspaceTxn:
             fp = tree_fingerprint_of(out_row.state) if out_row is not None else None
             try:
                 if fp is None:
-                    raise ConflictError("no recorded fingerprint for the destination", kind="foreign")
+                    raise ConflictError(
+                        "the receiving machine has no record of what the plugin last wrote to that folder",
+                        kind="foreign",
+                    )
                 staged = "staged:" + enc_path(str(dest))
                 self._steps.put(staged, {"dest": enc_path(str(dest)), "tag": self.job6, "item": item.item_id})
                 state = filetree.prepare_update(
@@ -849,7 +863,7 @@ class WorkspaceTxn:
             except ConflictError as exc:
                 self._steps.drop("staged:" + enc_path(str(dest)))  # prepare_update removed what it staged
                 fb = self._fallback(dest)
-                self.warnings.append(f"{dest}: {exc.message}; materialised fresh at {fb}")
+                self.warnings.append(f"{dest}: {exc.message}; the copy went to a new folder instead: {fb}")
                 self.journal("info", f"prepare:{item.item_id}", {"fallback": str(fb), "why": exc.details.get("kind")})
                 self._check_fresh(fb)
                 return self._prepare_tree_fresh(item.item_id, fb, self._c1_fallback(fb, later=1), pack_item)
@@ -864,7 +878,9 @@ class WorkspaceTxn:
             st = os.lstat(dest)
             if stat.S_ISREG(st.st_mode) and sha256_file(dest) == content_sha:
                 return _Prepared(item.item_id, "extra", DestMode.SKIP, dest, pack_item, None)
-            raise ConflictError("a different file exists at the destination", kind="exists_file", path=str(dest))
+            raise ConflictError(
+                "a different file already exists at the destination", kind="exists_file", path=str(dest)
+            )
         size = pack_item.get("size")
         if isinstance(size, bool) or not isinstance(size, int) or size < 0:
             raise BadRequest("extra file size must be a whole non-negative number", field="size")
@@ -918,7 +934,9 @@ class WorkspaceTxn:
                 if p.ident is not None and partial is not None and not os.path.lexists(partial):
                     final = self._fresh_landed(p)  # resumed: the rename happened in a process that died
                     if final is None:
-                        raise ConflictError("the prepared directory is gone", kind="partial_missing", path=str(partial))
+                        raise ConflictError(
+                            "the copy the handover had prepared is gone", kind="partial_missing", path=str(partial)
+                        )
             if final is None and p.kind == "git":
                 marker = f"c1:{p.item_id}:forward"
                 final = Path(
@@ -956,13 +974,15 @@ class WorkspaceTxn:
         if not os.path.lexists(temp):
             if _same(p.dest, p.ident) or (p.ident is None and self._ours_by_content(p, p.dest)):
                 return p.dest  # linked and the temp name removed by a process that died
-            raise ConflictError("the prepared file is gone", kind="partial_missing", path=str(temp))
+            raise ConflictError("the file the handover had prepared is gone", kind="partial_missing", path=str(temp))
         try:
             os.link(temp, p.dest)
         except FileExistsError:
             if not os.path.samefile(temp, p.dest):
                 raise ConflictError(
-                    "a file appeared at the destination", kind="dest_appeared", path=str(p.dest)
+                    "a file appeared at the destination while the handover was in progress",
+                    kind="dest_appeared",
+                    path=str(p.dest),
                 ) from None
         os.unlink(temp)
         return p.dest
@@ -1270,7 +1290,7 @@ through them (L3-F27). Everything else the scan leaves out (ignored, special, un
 
 def _listed(entries: Sequence[NotTransferred], what: str, warnings: list[str]) -> list[dict]:
     if len(entries) > DOC_LIST_CAP:
-        warnings.append(f"{len(entries) - DOC_LIST_CAP} more {what} paths not listed in the pack document")
+        warnings.append(f"{len(entries) - DOC_LIST_CAP} more {what} paths are not listed in the handover data")
     return [{"path": n.path, "why": n.why} for n in entries[:DOC_LIST_CAP]]
 
 

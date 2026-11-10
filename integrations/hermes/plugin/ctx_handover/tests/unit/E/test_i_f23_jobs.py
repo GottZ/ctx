@@ -126,7 +126,9 @@ def test_i_f23_return_conflict_at_an_origin_outside_the_roots_lands_under_worksp
     assert str(fresh) in note and "returned to its original place" not in note, note
     assert (server.db().get_session(ack["session_id"]) or {}).get("cwd") == str(fresh)
     final = _final_message(Mode.PUSH, status, "server")
-    assert f"(session {ack['session_id']}, {fresh}, " in final and "materialised fresh at" in final, final
+    assert f"(session {ack['session_id']}, {fresh}, " in final and "the copy went to a new folder instead: " in final, (
+        final
+    )
 
 
 def test_i_f23_update_conflict_at_a_recorded_dest_outside_the_roots_lands_under_workspace_root(online):
@@ -174,7 +176,9 @@ def test_i_f23_update_conflict_at_a_recorded_dest_outside_the_roots_lands_under_
     assert str(fresh) in note and "updated in place" not in note, note
     assert (laptop.db().get_session(ack["session_id"]) or {}).get("cwd") == str(fresh)
     final = _final_message(Mode.PULL, status, "server")
-    assert f"(session {ack['session_id']}, {fresh}, " in final and "materialised fresh at" in final, final
+    assert f"(session {ack['session_id']}, {fresh}, " in final and "the copy went to a new folder instead: " in final, (
+        final
+    )
     assert status["state"] == "done" and status["exit_code"] == 0
     with laptop.active():
         rows = jobs.runner_for(None).ledger.events(second.job_id, Role.CONDUCTOR)

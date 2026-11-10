@@ -312,7 +312,10 @@ def scan(
                 left.append(NotTransferred(shown, "special"))
             if len(entries) > cfg.max_files:
                 raise PolicyDenied(
-                    f"more than {cfg.max_files} entries", reason="max_files", max_files=cfg.max_files, path=str(root)
+                    f"the folder holds more than {cfg.max_files} files and folders (max_files setting)",
+                    reason="max_files",
+                    max_files=cfg.max_files,
+                    path=str(root),
                 )
         stack.extend(reversed(subdirs))
     if gone_links:
@@ -445,7 +448,10 @@ def load_manifest(store: BlockSource, manifest_id: str, *, max_files: int) -> li
         raise BadRequest("tree manifest without entries", field="entries")
     if len(entries) > max_files:
         raise PayloadTooLarge(
-            "tree manifest has more entries than allowed", entries=len(entries), max_files=max_files, field="max_files"
+            "the handed-over folder has more files than the max_files setting on the receiving machine allows",
+            entries=len(entries),
+            max_files=max_files,
+            field="max_files",
         )
     if not all(isinstance(e, dict) for e in entries):
         raise BadRequest("tree manifest entry is not an object", field="entries")
@@ -468,7 +474,11 @@ def check_room(
     transaction's job-wide check of the same numbers (``(nbytes, where, write_bytes, what)``; the cap holds per job,
     not per item — ``materialize``), called last."""
     if nbytes > max_bytes:
-        raise PayloadTooLarge(f"the {what} is larger than allowed", bytes=nbytes, max_bytes=max_bytes)
+        raise PayloadTooLarge(
+            f"the {what} is larger than the max_total_gb setting on the receiving machine allows",
+            bytes=nbytes,
+            max_bytes=max_bytes,
+        )
     write = nbytes if write_bytes is None else write_bytes
     need = int(write * _DISK_MARGIN)
     probe = Path(where)
@@ -594,7 +604,7 @@ def prepare_fresh(
     fp: dict[str, list] = {}
     dirs: list[_Checked] = []
     try:
-        check_room(_file_bytes(checked), partial.parent, max_bytes=max_bytes, what="file tree", room=room)
+        check_room(_file_bytes(checked), partial.parent, max_bytes=max_bytes, what="folder", room=room)
         for c in sorted((c for c in checked if c.entry["type"] == "dir"), key=lambda c: c.rel.count(b"/")):
             path = _join(partial, c.rel)
             _parents_real(partial, c.rel)
@@ -740,7 +750,9 @@ def prepare_update(
     leftover: list[bytes] = []
     same, why = matches_fingerprint(dest, recorded, own_tag=tag, own=leftover)
     if not same:
-        raise ConflictError("the destination changed since the plugin wrote it", kind="foreign", detail=why)
+        raise ConflictError(
+            "the folder at the destination changed since the plugin last wrote it", kind="foreign", detail=why
+        )
     entries = load_manifest(store, manifest_id, max_files=max_files)
     checked, skipped = _check_entries(entries, rules)
     new_fp: dict[str, list] = {}
@@ -758,9 +770,7 @@ def prepare_update(
             new_fp[c.key] = rec
             continue
         todo.append(c)
-    check_room(
-        _file_bytes(checked), dest, max_bytes=max_bytes, write_bytes=_file_bytes(todo), what="file tree", room=room
-    )
+    check_room(_file_bytes(checked), dest, max_bytes=max_bytes, write_bytes=_file_bytes(todo), what="folder", room=room)
     staging = Path(staging)
     staging.mkdir(parents=True, exist_ok=True, mode=0o700)
     staged: list[tuple[Path, Path]] = []
@@ -778,7 +788,7 @@ def prepare_update(
                 os.mkdir(path, 0o777)
                 created.append(path)
             elif not stat.S_ISDIR(os.lstat(path).st_mode):
-                raise ConflictError("a directory of the tree is a file at the destination", kind="foreign")
+                raise ConflictError("a file at the destination is where the handover needs a folder", kind="foreign")
         n = 0
         for c in todo:
             final = _join(dest, c.rel)
@@ -887,7 +897,9 @@ def _same_file(a: Path, b: Path) -> bool:
 
 
 def _appeared(final: Path) -> ConflictError:
-    return ConflictError("a file appeared at the destination since prepare", kind="foreign", path=str(final)[:300])
+    return ConflictError(
+        "a file appeared at the destination while the handover was in progress", kind="foreign", path=str(final)[:300]
+    )
 
 
 def _swap_in(temp: Path, final: Path) -> None:
@@ -955,13 +967,18 @@ def commit(state: TreeApplyState) -> dict:
         except OSError as exc:
             if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST, errno.ENOTDIR, errno.EISDIR) or state.fallback is None:
                 os.chmod(state.partial, 0o700)
-                raise ConflictError("the destination appeared during commit", kind="dest_appeared") from exc
+                raise ConflictError(
+                    "the destination folder appeared while the handover was putting the copy in place",
+                    kind="dest_appeared",
+                ) from exc
             try:
                 os.rename(state.partial, state.fallback)
             except OSError as exc2:
                 os.chmod(state.partial, 0o700)
                 raise ConflictError(
-                    "the fallback destination exists too", kind="dest_appeared", path=str(state.fallback)[:300]
+                    "the alternative folder for the copy exists too",
+                    kind="dest_appeared",
+                    path=str(state.fallback)[:300],
                 ) from exc2
             final = state.fallback
         return {"dest": str(final), "fingerprint": state.fingerprint}
@@ -972,10 +989,16 @@ def commit(state: TreeApplyState) -> dict:
             st = os.lstat(final)
         except FileNotFoundError:
             raise ConflictError(
-                "a destination file vanished since prepare", kind="foreign", path=str(final)[:300]
+                "a file at the destination was removed while the handover was in progress",
+                kind="foreign",
+                path=str(final)[:300],
             ) from None
         if (st.st_size, st.st_mtime_ns, st.st_ino) != expected.get(final):
-            raise ConflictError("a destination file changed since prepare", kind="foreign", path=str(final)[:300])
+            raise ConflictError(
+                "a file at the destination changed while the handover was in progress",
+                kind="foreign",
+                path=str(final)[:300],
+            )
     backed = dict(state.backups)
     for temp, final in state.staged:  # free at PREPARE: still free (or the staged file itself), before any change
         if final not in backed and os.path.lexists(temp) and os.path.lexists(final) and not _same_file(temp, final):

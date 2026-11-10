@@ -52,14 +52,17 @@ def test_rv_a_workspace_warnings_reach_the_commit_ack(env):  # noqa: F811
     class WarningTxn(WorkspaceTxn):
         def prepare_item(self, item, decision, pack_item, *, out_row) -> None:
             super().prepare_item(item, decision, pack_item, out_row=out_row)
-            self.warnings = [*getattr(self, "warnings", []), f"{decision.dest}: conflict; materialised fresh at /x"]
+            self.warnings = [
+                *getattr(self, "warnings", []),
+                f"{decision.dest}: conflict; the copy went to a new folder instead: /x",
+            ]
 
     env.target.ports.materialize.WorkspaceTxn = WarningTxn
     prepared = env.prepared()
-    assert any("materialised fresh" in w for w in prepared.warnings)
+    assert any("went to a new folder" in w for w in prepared.warnings)
     st = env.wait(env.target.start_commit(env.job))
     assert st.state is OpState.DONE, st.error
-    assert any("materialised fresh" in w for w in st.result["warnings"])
+    assert any("went to a new folder" in w for w in st.result["warnings"])
 
 
 def test_rv_a_m8_sessions_of_an_interrupted_import_are_discarded_on_abort(env):  # noqa: F811
