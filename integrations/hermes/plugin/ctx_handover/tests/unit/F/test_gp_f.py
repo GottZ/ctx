@@ -307,7 +307,7 @@ def test_readme_troubleshooting_names_the_version_skip(monkeypatch):
     assert logged == f"Plugin 'ctx_handover' skipped: requires hermes {manifest['requires_hermes']}, running 0.21.5"
 
     section = re.sub(r"\s+", " ", (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8"))
-    section = section.split("## Troubleshooting", 1)[1].split(" ## ", 1)[0]
+    section = section.split("### Troubleshooting", 1)[1].split(" ### ", 1)[0]
     assert logged.split(", running", 1)[0] in section, section
     version_info = (root / "hermes_cli" / "version_info.py").read_text(encoding="utf-8")
     assert '"tag", "--merged", "HEAD"' in version_info and "`git tag --merged HEAD`" in section

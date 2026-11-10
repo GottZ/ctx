@@ -329,5 +329,5 @@ def test_setup_reads_auth_providers_once_and_names_the_gate(fake_host, monkeypat
 def test_readme_names_the_pull_reclaim_limit():
     """(L3-F13, named limit): after a finished pull the target is not told about a reclaim on the source; the README
     says so in its limits section."""
-    limits = README.split("## Limits", 1)[1].split("\n## ", 1)[0]
+    limits = README.split("### Limits\n", 1)[1].split("\n### ", 1)[0]
     assert "learns of a reclaim on the source only while the job runs" in limits

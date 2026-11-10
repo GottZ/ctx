@@ -48,7 +48,7 @@ FLAT = " ".join((PLUGIN_ROOT / "README.md").read_text(encoding="utf-8").split())
 
 
 def _bullet(start: str) -> str:
-    limits = FLAT.split("## Limits — read this first", 1)[1].split("## What the lock", 1)[0]
+    limits = FLAT.split("### Limits ", 1)[1].split("## What the lock", 1)[0]
     return next(p for p in limits.split(" - ") if p.startswith(start))
 
 

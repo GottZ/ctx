@@ -343,7 +343,7 @@ def test_r3_f_h2_readme_states_where_the_refusal_holds():
     Red before the change: ``README.md:272`` "never when approvals are off there." and ``:336`` "refused when
     approvals are off)" stood without the limit; the ``--yolo`` sentence sat in the host paragraph."""
     text = _readme()
-    limits = text.split("## Limits — read this first", 1)[1].split("## What the lock", 1)[0]
+    limits = text.split("### Limits ", 1)[1].split("## What the lock", 1)[0]
     host = next(p for p in limits.split(" - ") if p.startswith("Under `plugins.isolation: host`"))
     assert "--yolo" not in host and "HERMES_YOLO_MODE" not in host, host
     bullet = next(p for p in limits.split(" - ") if p.startswith("**Continuation and approvals.**"))

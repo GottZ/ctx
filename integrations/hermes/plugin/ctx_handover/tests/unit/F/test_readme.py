@@ -70,9 +70,23 @@ def test_readme_disclosure_contains_required_lines():
 
 
 def test_readme_limits_first_and_lock_guarantee():
-    """DESIGN §1.2: limits are the first section; §1.4: what the lock guarantees and what not, in plain words."""
+    """DESIGN §1.2: the limits come before any use — the first section ("Before you start") names the main ones
+    (bundle path only for SSH tunnel / OAuth / Hermes Cloud, the laptop dials, what is not moved, no merge) and points
+    to the full list, which opens the reference; §1.4: what the lock guarantees and what not, in plain words."""
     sections = re.findall(r"^## (.+)$", README, flags=re.MULTILINE)
-    assert sections[0].startswith("Limits")
+    assert sections[0] == "Before you start", sections
+    first = README.split("## Before you start", 1)[1].split("\n## ", 1)[0]
+    for needle in (
+        "only through an SSH tunnel, a Nous/OAuth sign-in or Hermes Cloud",
+        "only the handover file works",
+        "The laptop always connects to the server, never the other way round.",
+        "Running programs, subagents and scheduled (cron) jobs do not move.",
+        "they are never merged",
+        "[Limits](#limits)",
+    ):
+        assert needle in re.sub(r"\s+", " ", first), needle
+    reference = re.findall(r"^### (.+)$", README.split("\n## Reference\n", 1)[1], flags=re.MULTILINE)
+    assert reference[:2] == ["Words used below", "Limits"], reference
     for needle in (
         "(1) ended with reason `handed_over`, (2) archived, (3) hidden and (4) renamed",
         "hold even when the plugin is disabled, not loaded (safe mode) or broken",

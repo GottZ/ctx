@@ -349,7 +349,7 @@ def test_r4_f_h2_doctor_real_check_behind_a_gateway_in_another_namespace(tmp_pat
 
 
 def _limits_bullet() -> str:
-    limits = _readme().split("## Limits — read this first", 1)[1].split("## What the lock", 1)[0]
+    limits = _readme().split("### Limits ", 1)[1].split("## What the lock", 1)[0]
     return next(p for p in limits.split(" - ") if p.startswith("**Continuation and approvals.**"))
 
 

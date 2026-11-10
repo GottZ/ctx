@@ -1,15 +1,300 @@
-# ctx_handover — move a live Hermes session to another gateway
+# ctx_handover — take a running Hermes session to another machine
 
-Works without ctx. `ctx_handover` moves a live [Hermes](https://github.com/NousResearch/hermes-agent) session and
-the working files it needs to another Hermes gateway you own — laptop ↔ server by pull, push or an offline bundle
-— and can continue it there: the transcript is transferred row by row and verified by hashes over every message
-field, git repositories keep branches, stash and uncommitted work, and the continuing agent gets a note about what
-changed.
+Close your laptop after work and let the session go on on your server. `ctx_handover` moves a running
+[Hermes](https://github.com/NousResearch/hermes-agent) session — the conversation and the project folder it works in
+— from one of your machines to another, and back again. On the other machine you open the session and carry on, or
+you give the agent one more task that it works on there while your laptop stays closed.
 
-Not the core `/handoff` (session → a messaging app), not hermes-handoff (summary handoff within one profile), not
-session-relay (fresh session on the same gateway).
+It works between two machines that run Hermes and that you own; this README calls them *your laptop* and *your
+server*. Works without ctx. Not the core `/handoff` (Hermes' own command that sends a session to a messaging app),
+not hermes-handoff (a summary handed on within one profile), not session-relay (a fresh session on the same machine).
 
-## Limits — read this first
+## Before you start
+
+You need:
+
+- Hermes 0.22.6 or newer on both machines, and `git` 2.38 or newer when your project uses git.
+- A way for your laptop to reach your server over the network: an address such as `https://server.example.net`, or
+  a plain `http://` address that only your VPN reaches (for example Tailscale).
+- The sign-in of your server's dashboard: a fixed dashboard token, or a user name and password. `/handover setup` on
+  the server tells you which one.
+
+What does not work, or only partly:
+
+- If Hermes Desktop reaches your server only through an SSH tunnel, a Nous/OAuth sign-in or Hermes Cloud, the
+  plugin has no sign-in it can use. Then only the handover file works (step 4 below).
+- The laptop always connects to the server, never the other way round. A machine that nobody can reach (a home
+  computer behind a router while the laptop sleeps) can only get a handover file.
+- Running programs, subagents and scheduled (cron) jobs do not move. The agent on the other machine gets a note that
+  names them.
+- If both copies of a session go on, they are never merged.
+
+Every limit, with the details, is listed under [Limits](#limits).
+
+## 1. Pair your laptop and your server (once)
+
+Pair the two machines once so they trust each other. You type the `/handover` commands below into a Hermes chat on
+the machine named — in the terminal (`hermes`), the TUI or Hermes Desktop. Chats in messaging apps cannot run them.
+
+**On both machines**
+
+1. Install and enable the plugin: in Hermes Desktop under Capabilities → Plugins, or in a terminal:
+
+   ```
+   hermes plugins install ctx_handover
+   hermes plugins enable ctx_handover
+   ```
+
+**On your server**
+
+2. Tell the plugin the address your laptop uses to reach the server. In Settings → Plugins → ctx_handover, fill
+   *Address other devices use to reach this gateway* (`listen_url`), or run in a terminal:
+
+   ```
+   hermes config set plugins.entries.ctx_handover.settings.listen_url https://server.example.net
+   ```
+
+3. Restart Hermes on the server, so that it answers the laptop: restart the gateway — the Hermes service that runs
+   your chats on that machine — with `hermes gateway restart`, and restart `hermes serve` too if you run it. Without
+   the restart, the laptop later reports that the server "has no ctx_handover routes".
+4. In a chat on the server, run:
+
+   ```
+   /handover setup
+   ```
+
+   It checks the address and tells you how the server's dashboard signs people in:
+   - *with a fixed token*: set `HERMES_DASHBOARD_SESSION_TOKEN` on the server (then restart `hermes serve` and the
+     gateway). Your laptop needs this same token in step 5.
+   - *with a Basic login*: your laptop needs the dashboard's user name and password in step 5.
+
+**On your laptop**
+
+5. In Settings → Plugins → ctx_handover, enter the server's sign-in: *Dashboard token of the other gateway*
+   (`peer_token`). For a Basic login, set *How to pass the other gateway's dashboard sign-in* (`peer_gate`) to
+   `basic_login` and fill in *Dashboard user name* and *Dashboard password*. Hermes keeps the token and the password
+   in this profile's `.env` file, never in `config.yaml`.
+
+**On your server**
+
+6. Create a pairing line:
+
+   ```
+   /handover pair --name laptop
+   ```
+
+   The answer shows one line that starts with `/handover pair ctxh-pair:`. That line holds the server's address, a
+   one-time code (valid for 10 minutes, usable once) and a fingerprint of the server's key, which the laptop checks.
+   It never holds your dashboard sign-in. Treat it like a password until it is used.
+
+**On your laptop**
+
+7. Copy that whole line into a chat on the laptop and send it:
+
+   ```
+   /handover pair ctxh-pair:…
+   ```
+
+   For a plain `http://` address that only your VPN reaches, add `--allow-insecure` at the end. The answer starts
+   with "Paired with" and the name the laptop gave the server — in this README, `server`. Use that name in the
+   commands below; `/handover peers` lists the names.
+8. Run `/handover doctor` in a chat on each machine. It checks the setup and says what to fix.
+
+By default, pairing lets the laptop do both: take sessions from the server and send sessions to it. To allow only
+one, add `--rights pull` (take) or `--rights push` (send) in step 6.
+
+## 2. After work: send the session to your server
+
+In the laptop session you want to move, run:
+
+```
+/handover to server
+```
+
+Before anything happens, the plugin shows what it would move: the project folder and its size, other files the
+conversation used, and what it leaves out. When it asks, answer *yes*. Then it copies the conversation and the files
+to the server. **Wait for the final message before you close the laptop** — the laptop does the copying. The final
+message names the session on the server and its folder.
+
+If the agent is still working on an answer, add `--wait`: the handover starts as soon as the answer is done.
+
+Afterwards the session is locked on the laptop: Hermes marks it as ended, archives and hides it, and adds "(handed
+over to server …)" to its title, so it cannot go on here by accident. On the server, the session is listed in the
+Desktop sidebar and in `hermes sessions list`; `hermes --resume <session-id>` opens it.
+
+**Let the agent keep working while the laptop is closed**
+
+1. Once, on the server, allow a paired device to start a turn there:
+
+   ```
+   hermes config set plugins.entries.ctx_handover.settings.allow_remote_continue true
+   ```
+
+   (or switch on *Let a paired device start one continuation turn here* in Settings → Plugins → ctx_handover).
+2. On the laptop, hand over with a task for the agent:
+
+   ```
+   /handover to server --continue "run the tests and fix what fails"
+   ```
+
+The server then runs one turn with that task: the agent works on it until it has answered, then the session waits
+for you. Nobody is there to approve anything in that turn, so every command that would ask for your approval is
+refused — Hermes' rule for such unattended turns (`approvals.single_query_mode`, `deny` by default). The turn never
+starts when approvals are switched off on the server (for example a gateway started with `--yolo`), nor when the
+plugin cannot find out which Hermes service on the server would run it; then the final message names the command
+that starts the turn there by hand. One case the plugin cannot see is described under [Limits](#limits)
+(*Continuation and approvals*). `--continue` without a task sends "Continue where we left off."
+
+## 3. On the road: bring the session to your laptop
+
+On the laptop, in any chat:
+
+```
+/handover take
+```
+
+It lists the sessions on the server — sessions left for you first, then the 20 most recent ones — and asks which one
+to take. To take the most recently used session on the server without a question:
+
+```
+/handover take server --latest
+```
+
+The session and its project folder are copied to the laptop. The final message names the session and its folder;
+open it from the Desktop sidebar or with `hermes --resume <session-id>`. On the server, the session is now locked,
+as described in step 2.
+
+A project that came from this laptop goes back into its old folder when nothing changed there meanwhile. Otherwise
+it lands in a fresh folder, and the final message names it. Other projects arrive under `~/hermes-handover`
+(setting `workspace_root`).
+
+You can also start on the server, for example from its dashboard before you leave: `/handover to laptop` in the
+server session leaves the session there for the laptop for 2 hours, and `/handover take` on the laptop shows it.
+
+## 4. Without a connection: use a handover file
+
+When the two machines cannot reach each other, move the session as a single file.
+
+1. In the session on the first machine, run:
+
+   ```
+   /handover export
+   ```
+
+   This writes one handover file, `<title>-<date>-<time>.ctxh.tar`, into `~/hermes-handover` (setting
+   `workspace_root`); the final message names it. The session is locked here, as in step 2. With
+   `/handover export --keep` it stays active here instead, and the file is marked as a copy.
+2. Copy the file to the other machine (USB stick, file share, …). It holds the conversation and the project files
+   unencrypted, so keep it as safe as the project itself.
+3. On the other machine, in any chat:
+
+   ```
+   /handover import ~/Downloads/my-session-20261110-180000.ctxh.tar
+   ```
+
+   Give the path from your home folder (`~/…`) or the full path. When the two machines are paired, the import
+   checks that the file was signed by the paired machine. When they are not paired, add `--trust-unsigned`; the
+   session is then marked as coming from an unverified file, and the plugin never starts a turn for it on its own.
+
+## 5. Take a session back
+
+Changed your mind, or the other machine is gone? In the locked session on this machine, run:
+
+```
+/handover reclaim
+```
+
+In a terminal: `hermes handover reclaim --session <session-id>`. The session is active here again. The copy on the
+other machine stays active too: you now have two independent copies, and they are never merged. The answer says
+whether the other machine was told.
+
+## What moves and what stays here
+
+Moves to the other machine:
+
+- The whole conversation, with every tool call and tool output, and the session's side files (long tool outputs,
+  hook outputs, terminal outputs). Attached images show again only where the same file path exists on the other
+  machine.
+- The project folder. In a git project: all branches, the stash, and changes you have not committed yet, new files
+  included. Files that git ignores (build outputs, caches) stay here. Without git: the session's working folder, as
+  it is.
+- Large files stored with Git LFS, when git-lfs is installed on the other machine. Otherwise they arrive as small
+  placeholder files, and the final message says so.
+- Files outside the project that the conversation used — the plugin asks you first (setting `extra_paths`).
+- A note for the agent on the other machine: what changed, what did not move, and where the files are now.
+
+Stays here:
+
+- Running programs, subagents and scheduled (cron) jobs. The note names them, with the command to pause a cron job
+  that still belongs to the old session.
+- Secret files: `.env` files, keys and credential folders such as `~/.ssh` or `~/.aws` — unless you name one with
+  `--include-secret <path>`. Hermes' own credentials never move.
+- Other git repositories inside the project (submodules, other checkouts). The plugin asks you first; a submodule
+  travels only as the commit your project records.
+- The session itself, locked (see step 2). `/handover reclaim` unlocks it.
+
+Nothing on the other machine is overwritten: when a project folder there has changes of its own, the copy goes into
+a fresh folder, and the final message names it.
+
+## Safety in plain words
+
+- **What a paired device may do.** With the *pull* right (to take) it can take any session of this Hermes profile,
+  with its files. With the *push* right (to send) it can create sessions here and write project copies into the
+  allowed folders (`allow_roots`, by default `~/hermes-handover`) — never into Hermes' configuration, nor into
+  places that hold credentials, shell or autostart settings, or git and ssh configuration. It can start a turn here only
+  when you switch on `allow_remote_continue`, and only while approvals are on.
+- **What travels as it is.** The conversation, tool outputs, attached images and files go to the other machine
+  unredacted: nothing is blacked out. Whatever the agent saw, the other machine gets. Committed git history travels
+  with a project, including secret files that were committed. A handover file is not encrypted.
+- **What stays here.** `.env` files, keys and credential folders stay here unless you name each one with
+  `--include-secret <path>`; a general *yes* never sends them. Hermes' own credentials never leave.
+- **The stored sign-in opens the whole dashboard.** The dashboard token (or user name and password) that the laptop
+  stores for the server opens the server's whole dashboard — its settings, its secrets and its terminal — not only
+  this plugin. Whoever gets the laptop's `.env` file gets that access. A reverse proxy in front of the server that
+  passes only `/api/plugins/ctx_handover/` limits it. If you lose the laptop, run `/handover peers revoke laptop` on
+  the server and change the server's dashboard token.
+- **A pairing line is a password for 10 minutes** (by default). Keep it to yourself until it is used or has
+  expired.
+- **Network.** The plugin talks only to the machines you pair, and only while you pair, check (`doctor`), look at
+  the status or hand over. Each handover tells the other machine facts about this one (system, host and user name,
+  folders, versions, free disk space — never the values of environment variables). No other services, no telemetry,
+  no update checks.
+
+The exact list of what the plugin reads, writes, runs and sends is under [Disclosure](#disclosure).
+
+## Reference
+
+In short, how it works: `ctx_handover` moves a live session and the working files it needs to another Hermes
+gateway you own — laptop ↔ server by pull, push or an offline bundle — and can continue it there: the transcript is
+transferred row by row and verified by hashes over every message field, git repositories keep branches, stash and
+uncommitted work, and the continuing agent gets a note about what changed.
+
+### Words used below
+
+- **gateway** — the Hermes service that runs your chats on a machine.
+- **routes** — the web addresses under `/api/plugins/ctx_handover/` that the other machine calls.
+- **source / target** — the machine you hand over from / to.
+- **peer** — a paired device: another machine you paired with this one.
+- **dialer** — the machine that opens the connection (usually the laptop); the other one only answers.
+- **pull / push** — the dialer takes a session from the other machine / sends one to it.
+- **transcript** — the conversation, with tool calls and tool outputs.
+- **workspace** — the project folder that travels with the session.
+- **bundle** — the handover file (`.ctxh.tar`) that `/handover export` writes and `/handover import` reads.
+- **offer** — a session left on one machine for the dialer to take (`/handover to <device>` on the machine that
+  does not dial).
+- **gate** — the sign-in in front of the other gateway's dashboard: a dashboard token, or a user name and password.
+- **job** — one handover; messages name it by a six-character job id.
+- **commit point** — the point where a handover can no longer be undone.
+- **in doubt** — it is unclear whether the other machine finished its part.
+- **`needs_attention`** — the state `/handover status` shows when a handover stopped and needs you.
+- **ledger** — the plugin's own small database in its data folder; it records pairings and handovers.
+- **turn veto** — the lock on a handed-over session: while the plugin is loaded, it refuses new messages there.
+- **compaction** — Hermes shortens a long conversation by summarising its older part.
+- **LFS pointers** — the small placeholder files that stand for large files stored with Git LFS.
+- **secrets list / denylist** — the file names and places the plugin treats as secret (secrets list) or never
+  writes into (protected places).
+
+### Limits
 
 - **Which connections work online.** The device that starts a handover (the *dialer*, usually the laptop) talks
   to the other gateway's dashboard over HTTP(S) with a credential this plugin can hold:
@@ -114,7 +399,7 @@ session-relay (fresh session on the same gateway).
 - **No relay through ctx.** A handover goes directly between the two gateways or through a bundle file you copy;
   ctx (optional) only keeps a record of it. Relaying a handover through ctx blobs is not built.
 
-## What the lock on the source guarantees
+### What the lock on the source guarantees
 
 After a handover the source session is (1) ended with reason `handed_over`, (2) archived, (3) hidden and (4)
 renamed to `<title> (handed over to <peer> <date>)` across its whole compression lineage — all with Hermes' own
@@ -134,7 +419,7 @@ What is **not** guaranteed: someone who opens the archived session from the arch
 disabled can continue it; the two copies are then independent (no merge). `/handover reclaim` takes a session
 back here; the copy on the other gateway stays active.
 
-## Set up — no terminal needed
+### Set up in detail
 
 1. **Install and enable** the plugin on both machines (Hermes Desktop → Capabilities → Plugins, once for the
    server's gateway and once for *This device*). On the gateway that should receive handovers, restart
@@ -159,7 +444,7 @@ back here; the copy on the other gateway stays active.
 5. `/handover doctor` on both sides checks the setup and says what to fix. `/handover doctor --measure` also finds
    the request-body limit of a proxy in front of each paired gateway (test uploads, see Disclosure).
 
-## Use
+### Use in detail
 
 | Situation | Where | Command |
 |---|---|---|
@@ -244,7 +529,7 @@ the names — never values — of environment variables; anything outside the pr
 handover. It starts one itself only with `allow_agent_start`, then without proposed items and stopping at any
 other confirmation.
 
-## Settings
+### Settings
 
 Settings → Plugins → ctx_handover (or `plugins.entries.ctx_handover.settings` in `config.yaml`). Every key has a
 working default; the most relevant:
@@ -268,7 +553,7 @@ The full list with all limits and timeouts is the `config_schema` in `plugin.yam
 outside its choices counts as that key's default — for `inbound` as `off`, so an unreadable value never opens it (a
 bare YAML `off` means `off`); `/handover doctor` names each such value.
 
-## Disclosure
+### Disclosure
 
 **Network:** HTTPS to the gateways you pair, only during pairing, `doctor`, status and handovers you start or
 claim (plain HTTP only on loopback or for a peer you mark `--allow-insecure`); a Basic-login peer gets a password
@@ -438,7 +723,7 @@ OAuth/Nous or Hermes-Cloud connections need the bundle path in this version; ima
 replay only when the absolute path is identical; disabling the plugin lifts the turn veto on handed-over sessions
 (they stay ended, archived, hidden and renamed).
 
-## Troubleshooting
+### Troubleshooting
 
 - **`hermes handover` or `/handover` is unknown on a Hermes installed from a source checkout.** Such an
   installation reads its own version with `git tag --merged HEAD` under a 3-second limit; on a busy machine the
@@ -447,7 +732,7 @@ replay only when the absolute path is identical; disabling the plugin lifts the 
   `hermes plugins enable ctx_handover` can be refused the same way. Run the command again, or restart the gateway,
   once the machine is less busy. Packaged installations (Docker, Nix) carry a version stamp and are not affected.
 
-## Tests
+### Tests
 
 ```bash
 # unit suites (fakes, a real SessionDB and real git in temp dirs; the host contract comes from a Hermes checkout)
@@ -462,7 +747,7 @@ hermes plugins validate integrations/hermes/plugin/ctx_handover
 `tests/e2e/` drives two real gateways in a lab (two `HERMES_HOME`s, a fake model); it needs that lab running and is
 not part of the unit run.
 
-## Layout
+### Layout
 
 ```
 __init__.py          register(): /handover, hermes handover, four hooks, the handover tool — no I/O
