@@ -112,13 +112,14 @@ func updateDataFromCanonical(cw store.CanonicalWrite) store.UpdateBlockData {
 // deliberately match-only: a block whose new title stops matching keeps its
 // current type, the hook promotes and never demotes), temporal re-extraction
 // on content change (PopulateTemporal always runs: createdAt is the
-// meta-anchor even without content times), embedding reset when content or
-// title changed so the scheduler backfill regenerates it. All non-fatal;
-// reqID stamps every line with the request it belongs to.
+// meta-anchor even without content times). All non-fatal; reqID stamps every
+// line with the request it belongs to. The embedding reset on a changed title
+// or content is not afterwork: store.UpdateBlock clears the vector in the
+// update's own transaction.
 // Surface-neutral since D-W6c (pool+registry, not MCPConfig): the REST manage
 // path (context_manage.go handleUpdate), the MCP direct path AND the shared
 // confirm core (confirm_core.go) call it.
-func finishBlockUpdate(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, data store.UpdateBlockData, block *store.Block, needsReEmbed bool, reqID string) {
+func finishBlockUpdate(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, data store.UpdateBlockData, block *store.Block, reqID string) {
 	if blocktypes != nil && (data.Title != nil || data.Metadata != nil) {
 		set := blocktypes.SnapshotForRequest(ctx)
 		if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, block.ID, block.Title, block.Metadata); err != nil {
@@ -132,11 +133,6 @@ func finishBlockUpdate(ctx context.Context, pool *pgxpool.Pool, blocktypes *bloc
 		}
 		if err := store.PopulateTemporal(ctx, pool, block.ID, times, block.CreatedAt); err != nil {
 			slog.Error("update afterwork: temporal populate failed", "error", err, "block_id", block.ID, "request_id", reqID)
-		}
-	}
-	if needsReEmbed {
-		if err := store.ClearEmbedding(ctx, pool, block.ID); err != nil {
-			slog.Error("update afterwork: clear embedding failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		}
 	}
 }
@@ -194,7 +190,7 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 		if miss != "" {
 			return errResult(miss), nil, nil
 		}
-		block, needsReEmbed, err := store.UpdateBlock(ctx, cfg.Pool, resolvedID, data, writableBlockScopes(ar))
+		block, _, err := store.UpdateBlock(ctx, cfg.Pool, resolvedID, data, writableBlockScopes(ar))
 		if err != nil {
 			// I7/S3: the target is a derivative — 403 class, not a 500.
 			if rej := provenanceRejectOr(err, nil); rej != nil {
@@ -206,7 +202,7 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 		if block == nil {
 			return errResult("Block not found (or not in a writable scope of this key)"), nil, nil
 		}
-		finishBlockUpdate(ctx, cfg.Pool, cfg.Blocktypes, data, block, needsReEmbed, RequestIDFromContext(ctx))
+		finishBlockUpdate(ctx, cfg.Pool, cfg.Blocktypes, data, block, RequestIDFromContext(ctx))
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{textContent(fmt.Sprintf("Updated: %s (id: %s, category: %s)", block.Title, block.ID, block.Category))},
 		}, nil, nil
