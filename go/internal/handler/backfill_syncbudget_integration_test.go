@@ -26,12 +26,19 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
@@ -265,8 +272,10 @@ func TestBackfillPending_SyncBudget_Integration(t *testing.T) {
 	// Review finding M1 (b): the query path leaves a caller_timeout block to
 	// the background arm only while that arm runs. With
 	// embed_backfill.interval=0 (arm off) and Dream off nothing else would
-	// ever embed it, so the query path picks it up again (the memo is due at
-	// once), with the plain predicate, once nothing else is pending.
+	// ever embed it, so the query path picks it up again. Second review of
+	// #214: it does so on the backoff curve, counted from the cut, and not
+	// with the very next query, or a block that cannot fit the budget costs
+	// every query its whole budget.
 	t.Run("arm_off_query_path_repicks_a_caller_timeout_block", func(t *testing.T) {
 		seed(t)
 		var blockID string
@@ -284,8 +293,20 @@ func TestBackfillPending_SyncBudget_Integration(t *testing.T) {
 			SyncCap: 4, SyncBudget: 10 * time.Second, Interval: 0,
 			MaxTokens: 1_000_000, BackoffBase: time.Minute, BackoffCap: time.Hour,
 		}}
+		// Cut a moment ago, one attempt: backoff_base (1 min) has not passed.
+		if got := h.backfillPending(ctx, nil, []string{"private"}, h.embedAdmission(), cfg); got != 0 {
+			t.Fatalf("backfilled = %d right after the cut, want 0 (arm off: an overrun block waits out its backoff)", got)
+		}
+		if hits.Load() != 0 {
+			t.Errorf("wire hits = %d right after the cut, want 0", hits.Load())
+		}
+		// The cut is two minutes back: the backoff of one attempt has passed.
+		if _, err := pool.Exec(ctx,
+			`UPDATE context_embed_failures SET next_attempt_at = now() - interval '2 minutes' WHERE block_id = $1`, blockID); err != nil {
+			t.Fatalf("age the memo: %v", err)
+		}
 		if got := h.backfillPending(ctx, nil, []string{"private"}, h.embedAdmission(), cfg); got != 1 {
-			t.Fatalf("backfilled = %d, want 1 (arm off: the query path must not leave the block to nobody)", got)
+			t.Fatalf("backfilled = %d after the backoff, want 1 (arm off: the query path must not leave the block to nobody)", got)
 		}
 		if hits.Load() != 1 {
 			t.Errorf("wire hits = %d, want 1", hits.Load())
@@ -295,21 +316,25 @@ func TestBackfillPending_SyncBudget_Integration(t *testing.T) {
 	// Review of #214: with the arm off the query path is the only embedder
 	// of a caller_timeout block, but a block that overran the budget must not
 	// be what every request picks first, or one block too slow for the budget
-	// holds everything behind it for good (its memo is due at once and the
-	// loop ends on the failure). It goes last: a request takes it only when
-	// nothing else is pending. Two rows, the overrun block on either side of
-	// a plain pending one, so the order of the pick cannot decide the result.
-	t.Run("arm_off_a_block_that_overran_the_budget_goes_last", func(t *testing.T) {
-		const overran, plain = "syncbudget-overran-block", "syncbudget-plain-block"
+	// holds everything behind it for good (a failed embed ends the loop).
+	// Second review: "after everything else" is no answer either, because
+	// under steady writes there is always something else. The block sits out
+	// a backoff counted from its cut (backoff_base * 2^(attempts-1), capped)
+	// and then stands in its place in the order again. Two rows, the overrun
+	// block on either side of a plain pending one, so the order of the pick
+	// cannot decide the result of the first two requests.
+	t.Run("arm_off_a_block_that_overran_the_budget_waits_out_its_backoff", func(t *testing.T) {
+		const overran, plain, late = "syncbudget-overran-block", "syncbudget-plain-block", "syncbudget-late-block"
 		for _, tc := range []struct {
 			name                    string
 			overranAgeMin, plainAge int
 		}{
-			{"overran_block_is_the_newer", 1, 2},
-			{"overran_block_is_the_older", 2, 1},
+			{"overran_block_is_the_newer", 2, 3},
+			{"overran_block_is_the_older", 3, 2},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				for title, ageMin := range map[string]int{overran: tc.overranAgeMin, plain: tc.plainAge} {
+				insert := func(title string, ageMin int) {
+					t.Helper()
 					if _, err := pool.Exec(ctx,
 						`INSERT INTO context_blocks (category, title, content, scope, created_at, updated_at)
 						 VALUES ('learnings', $1, 'body of the sync-budget fixture block ' || $1, 'private',
@@ -317,9 +342,11 @@ func TestBackfillPending_SyncBudget_Integration(t *testing.T) {
 						t.Fatalf("seed block %q: %v", title, err)
 					}
 				}
+				insert(overran, tc.overranAgeMin)
+				insert(plain, tc.plainAge)
 				t.Cleanup(func() {
-					_, _ = pool.Exec(ctx, `DELETE FROM context_embed_failures WHERE block_id IN (SELECT id FROM context_blocks WHERE title = ANY($1))`, []string{overran, plain})
-					_, _ = pool.Exec(ctx, `DELETE FROM context_blocks WHERE title = ANY($1)`, []string{overran, plain})
+					_, _ = pool.Exec(ctx, `DELETE FROM context_embed_failures WHERE block_id IN (SELECT id FROM context_blocks WHERE title = ANY($1))`, []string{overran, plain, late})
+					_, _ = pool.Exec(ctx, `DELETE FROM context_blocks WHERE title = ANY($1)`, []string{overran, plain, late})
 				})
 				var blockID string
 				if err := pool.QueryRow(ctx, `SELECT id FROM context_blocks WHERE title = $1`, overran).Scan(&blockID); err != nil {
@@ -339,7 +366,7 @@ func TestBackfillPending_SyncBudget_Integration(t *testing.T) {
 					return present
 				}
 
-				h, _, _ := newHandler(t, 0)
+				h, hits, _ := newHandler(t, 0)
 				cfg := &config.Config{EmbedBackfill: config.EmbedBackfillConfig{
 					SyncCap: 1, SyncBudget: 10 * time.Second, Interval: 0,
 					MaxTokens: 1_000_000, BackoffBase: time.Minute, BackoffCap: time.Hour,
@@ -348,18 +375,270 @@ func TestBackfillPending_SyncBudget_Integration(t *testing.T) {
 					t.Fatalf("first request backfilled %d, want 1", got)
 				}
 				if !embedded(plain) || embedded(overran) {
-					t.Fatalf("first request: plain block embedded=%v, overrun block embedded=%v, want the plain one only (the overrun block goes last)",
+					t.Fatalf("first request: plain block embedded=%v, overrun block embedded=%v, want the plain one only (the overrun block is inside its backoff)",
 						embedded(plain), embedded(overran))
 				}
-				// Nothing else is pending now: the arm is off, so this path
-				// is what embeds the overrun block.
-				if got := h.backfillPending(ctx, nil, []string{"private"}, h.embedAdmission(), cfg); got != 1 {
-					t.Fatalf("second request backfilled %d, want 1 (arm off: the query path must not leave the block to nobody)", got)
+				// Nothing else is pending, and the backoff has not passed: the
+				// request leaves the block alone and makes no wire call.
+				if got := h.backfillPending(ctx, nil, []string{"private"}, h.embedAdmission(), cfg); got != 0 {
+					t.Fatalf("second request backfilled %d, want 0 (the overrun block is inside its backoff; retrying it with every query costs each one its budget)", got)
 				}
-				if !embedded(overran) {
-					t.Error("second request: the overrun block is still pending with nothing else in the queue")
+				if hits.Load() != 1 {
+					t.Errorf("wire hits = %d after two requests, want 1 (the plain block only)", hits.Load())
+				}
+				// The backoff has passed and a newer block is pending: the one
+				// pick takes the overrun block, which is the older of the two.
+				if _, err := pool.Exec(ctx,
+					`UPDATE context_embed_failures SET next_attempt_at = now() - interval '2 minutes' WHERE block_id = $1`, blockID); err != nil {
+					t.Fatalf("age the memo: %v", err)
+				}
+				insert(late, 0)
+				if got := h.backfillPending(ctx, nil, []string{"private"}, h.embedAdmission(), cfg); got != 1 {
+					t.Fatalf("third request backfilled %d, want 1", got)
+				}
+				if !embedded(overran) || embedded(late) {
+					t.Errorf("third request: overrun block embedded=%v, newer block embedded=%v, want the overrun one (after its backoff it stands in its place, ahead of a newer block)",
+						embedded(overran), embedded(late))
 				}
 			})
+		}
+	})
+}
+
+// pacedEmbedServer answers like slowEmbedServer, with a delay per request that
+// pace works out from the request body (the embed text is in it), and counts
+// the requests whose body contains a given marker.
+func pacedEmbedServer(t *testing.T, pace func(body string) time.Duration) (*httptest.Server, func(marker string) int) {
+	t.Helper()
+	var (
+		mu     sync.Mutex
+		bodies []string
+	)
+	vec := make([]float64, 1024)
+	for i := range vec {
+		vec[i] = float64((i % 2) * 2)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Reading the whole body is also what lets net/http report a client
+		// that goes away (see slowEmbedServer).
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(raw))
+		mu.Unlock()
+		select {
+		case <-time.After(pace(string(raw))):
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"embeddings": [][]float64{vec}})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func(marker string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, b := range bodies {
+			if strings.Contains(b, marker) {
+				n++
+			}
+		}
+		return n
+	}
+}
+
+// armOffFixture is one database of its own (with the arm off the old end of
+// the pick is not bound to a scope, so the probes must not share pending
+// rows) and a query handler in front of a paced embed backend.
+type armOffFixture struct {
+	pool *pgxpool.Pool
+	h    *QueryHandler
+	hits func(marker string) int
+}
+
+func armOffSetup(t *testing.T, pace func(body string) time.Duration) *armOffFixture {
+	t.Helper()
+	pool := testdb.SetupTestDB(t)
+	srv, hits := pacedEmbedServer(t, pace)
+	st := &countingStore{}
+	st.cfg.Store(snapshotTestConfig())
+	return &armOffFixture{
+		pool: pool,
+		h:    NewQueryHandler(pool, st, embedPool(srv.URL), nil, blocktype.NewRegistry(), snapshotTestAdmitter(t)),
+		hits: hits,
+	}
+}
+
+// seed inserts one pending block in `private`, created ageMin minutes ago, and
+// returns its id.
+func (f *armOffFixture) seed(t *testing.T, title string, ageMin int) string {
+	t.Helper()
+	var id string
+	if err := f.pool.QueryRow(context.Background(),
+		`INSERT INTO context_blocks (category, title, content, scope, created_at, updated_at)
+		 VALUES ('learnings', $1, 'body of the arm-off fixture block ' || $1, 'private',
+		         now() - $2::int * interval '1 minute', now()) RETURNING id::text`, title, ageMin).Scan(&id); err != nil {
+		t.Fatalf("seed block %q: %v", title, err)
+	}
+	return id
+}
+
+// overran gives the block a caller_timeout memo through the production
+// writer, with the cut an hour back: one attempt, so its backoff (backoff_base
+// of the probes is a minute) has long passed.
+func (f *armOffFixture) overran(t *testing.T, id string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := store.RecordEmbedFailure(ctx, f.pool, id, store.EmbedFailureCallerTimeout,
+		store.NormalizeEmbedError(store.EmbedFailureCallerTimeout, "context deadline exceeded"),
+		time.Minute, time.Hour); err != nil {
+		t.Fatalf("record caller_timeout memo: %v", err)
+	}
+	if _, err := f.pool.Exec(ctx,
+		`UPDATE context_embed_failures SET next_attempt_at = now() - interval '1 hour' WHERE block_id = $1`, id); err != nil {
+		t.Fatalf("age the memo: %v", err)
+	}
+}
+
+func (f *armOffFixture) embedded(t *testing.T, id string) bool {
+	t.Helper()
+	var present bool
+	if err := f.pool.QueryRow(context.Background(),
+		`SELECT embedding IS NOT NULL FROM context_blocks WHERE id = $1`, id).Scan(&present); err != nil {
+		t.Fatalf("read embedding state of %s: %v", id, err)
+	}
+	return present
+}
+
+// memo returns the class and the attempts of the block's failure memo ("" and
+// 0 when it has none).
+func (f *armOffFixture) memo(t *testing.T, id string) (class string, attempts int) {
+	t.Helper()
+	err := f.pool.QueryRow(context.Background(),
+		`SELECT last_class, attempts FROM context_embed_failures WHERE block_id = $1 AND migration_id IS NULL`, id).
+		Scan(&class, &attempts)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("read memo of %s: %v", id, err)
+	}
+	return class, attempts
+}
+
+// run is one backfillPending call with the arm off, as a caller that reads
+// `private`.
+func (f *armOffFixture) run(syncCap int, budget time.Duration) int {
+	cfg := &config.Config{EmbedBackfill: config.EmbedBackfillConfig{
+		SyncCap: syncCap, SyncBudget: budget, Interval: 0,
+		MaxTokens: 1_000_000, BackoffBase: time.Minute, BackoffCap: time.Hour,
+	}}
+	return f.h.backfillPending(context.Background(), nil, []string{"private"}, f.h.embedAdmission(), cfg)
+}
+
+// TestBackfillPending_ArmOff_Integration holds the probes of the second review
+// of #214. With the background arm off (embed_backfill.interval=0) the inline
+// loop is the only embedder, and three things kept blocks from ever being
+// embedded although each fits the budget, or let one block that does not fit
+// hold others. A block that once overran the budget was picked only when a
+// request found nothing else pending anywhere, which under steady writes is
+// never. Among such blocks the oldest was picked first by every request, so
+// one that never fits held the others behind it. And the old end had the
+// second pick, and with it only what the caller's fresh block had left of the
+// budget, so with embeds that take more than half the budget every old block
+// was cut, and marked as overrun.
+//
+// Run: `go test -tags=integration ./internal/handler/ -run TestBackfillPending_ArmOff -count=1 -v`.
+func TestBackfillPending_ArmOff_Integration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	instant := func(string) time.Duration { return 0 }
+
+	// A block whose backoff has passed, and as many fresh writes per query as
+	// sync_cap allows picks: the block is the oldest pending one and the
+	// first pick of the first request takes it.
+	t.Run("overran_block_returns_under_steady_writes", func(t *testing.T) {
+		for _, syncCap := range []int{1, 2, 4} {
+			t.Run(fmt.Sprintf("cap_%d", syncCap), func(t *testing.T) {
+				f := armOffSetup(t, instant)
+				old := f.seed(t, "armoff overrun block", 60)
+				f.overran(t, old)
+
+				reached := 0
+				for round := 1; round <= 3; round++ {
+					for i := 1; i <= syncCap; i++ {
+						f.seed(t, fmt.Sprintf("armoff fresh block, round %d number %d", round, i), 0)
+					}
+					f.run(syncCap, 10*time.Second)
+					if reached == 0 && f.embedded(t, old) {
+						reached = round
+					}
+				}
+				if reached != 1 {
+					t.Errorf("arm off, sync_cap %d, %d writes per query: the block that once overran the budget got its vector in round %d, want round 1 (0 = in none of three rounds)",
+						syncCap, syncCap, reached)
+				}
+			})
+		}
+	})
+
+	// Two blocks whose backoff has passed: the older one never fits the
+	// budget, the newer one does. The first request spends its budget on the
+	// older one; that puts it back inside a backoff, and the second request
+	// embeds the newer one. A third request finds nothing it may pick and
+	// makes no wire call: the block that never fits costs one budget per
+	// backoff period, not one per request.
+	t.Run("a_block_that_never_fits_does_not_hold_the_others", func(t *testing.T) {
+		f := armOffSetup(t, func(body string) time.Duration {
+			if strings.Contains(body, "armoff huge block") {
+				return 5 * time.Second
+			}
+			return 0
+		})
+		huge := f.seed(t, "armoff huge block", 2)
+		small := f.seed(t, "armoff small block", 1)
+		f.overran(t, huge)
+		f.overran(t, small)
+
+		for request := 1; request <= 3; request++ {
+			f.run(4, 300*time.Millisecond)
+		}
+
+		if !f.embedded(t, small) {
+			t.Error("arm off: the block that fits the budget is still pending after three requests, behind the one that does not")
+		}
+		if f.embedded(t, huge) {
+			t.Error("the block that cannot fit the budget has a vector; the probe's premise is gone")
+		}
+		if got := f.hits("armoff huge block"); got != 1 {
+			t.Errorf("three requests made %d wire calls for the block that cannot fit the budget, want 1 (it is inside its backoff after the first)", got)
+		}
+		if class, attempts := f.memo(t, huge); class != string(store.EmbedFailureCallerTimeout) || attempts != 2 {
+			t.Errorf("memo of the block that cannot fit: class %q, attempts %d, want %q and 2", class, attempts, store.EmbedFailureCallerTimeout)
+		}
+	})
+
+	// Every embed takes more than half the budget, sync_cap is the default 4,
+	// one write and one query per round. The old end has the first pick and
+	// with it the whole budget, so each round embeds one old block; the fresh
+	// block gets what is left, is cut, and keeps its place without a memo,
+	// because the rest of a budget says nothing about the block.
+	t.Run("old_end_gets_the_whole_budget", func(t *testing.T) {
+		f := armOffSetup(t, func(string) time.Duration { return 1200 * time.Millisecond })
+		olds := []string{f.seed(t, "armoff old block, first", 3), f.seed(t, "armoff old block, second", 2)}
+
+		var fresh []string
+		for round := 1; round <= len(olds); round++ {
+			fresh = append(fresh, f.seed(t, fmt.Sprintf("armoff fresh block, round %d", round), 0))
+			f.run(4, 2*time.Second)
+			if !f.embedded(t, olds[round-1]) {
+				class, attempts := f.memo(t, olds[round-1])
+				t.Errorf("arm off, round %d: old block %d is still pending (memo class %q, attempts %d); an embed of 1.2 s fits the budget of 2 s when it has the whole of it",
+					round, round, class, attempts)
+			}
+		}
+		for i, id := range fresh {
+			if class, attempts := f.memo(t, id); class != "" {
+				t.Errorf("fresh block of round %d carries a memo (class %q, attempts %d) although it only ever had the rest of a budget", i+1, class, attempts)
+			}
 		}
 	})
 }
