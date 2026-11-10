@@ -228,7 +228,7 @@ def _list(value: object, dropped: list[str]) -> list[str]:
 
 def _headers(value: object, dropped: list[str]) -> dict[str, str]:
     if not isinstance(value, Mapping):
-        raise _Rejected("not a mapping of header name to .env variable name")
+        raise _Rejected("not a list of header name: .env variable name pairs")
     out: dict[str, str] = {}
     for name, env in value.items():
         if isinstance(name, str) and isinstance(env, str) and _HEADER_RE.fullmatch(name) and _ENV_RE.fullmatch(env):
@@ -270,7 +270,10 @@ def _check(key: str, value: object) -> tuple[Any, list[str]]:
     except _Rejected as exc:
         shown = "" if typ == "dict" else f" {_quote(value)}"
         if key in FAIL_CLOSED_KEYS:
-            text = f"{key}{shown} ignored: {exc.reason}; using off (fail-closed) ({_fix(key)})"
+            text = (
+                f"{key}{shown} ignored: {exc.reason}; using off, the safe choice: no handovers are accepted "
+                f"({_fix(key)})"
+            )
             return "off", [text]
         text = f"{key}{shown} ignored: {exc.reason}; using the default {_quote(default)} ({_fix(key)})"
         return _copy(default), [text]
@@ -294,13 +297,18 @@ def _scan(raw: Mapping | None) -> tuple[dict[str, Any], list[str]]:
     if raw is None:
         return out, found
     if not isinstance(raw, Mapping):
-        return out, [f"plugins.entries.{PLUGIN_ID}.settings is not a mapping; every setting uses its default"]
+        return out, [
+            f"plugins.entries.{PLUGIN_ID}.settings is not a list of key: value pairs; every setting uses its default"
+        ]
     for key, spec in SCHEMA.items():
         if key not in raw:
             continue
         if spec["type"] == "secret":
             if not _unset(raw[key]):
-                found.append(f"{key} is a secret: set {spec['env']} in .env, not in settings (the value is ignored)")
+                found.append(
+                    f"{key} is a secret: put it into .env as {spec['env']} (the settings form does that), not into "
+                    "config.yaml; the value there is ignored"
+                )
             continue
         out[key], rejected = _check(key, raw[key])
         found.extend(rejected)

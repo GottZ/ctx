@@ -1,6 +1,6 @@
 name: ctx_handover
 version: 0.1.1
-description: "Works without ctx. Moves a live Hermes session and the working files it needs to another Hermes gateway you own (pull, push or an offline bundle) and continues it there: transcript row by row and hash-verified, git repos with branches, stash and uncommitted work, a note about what changed. Not the core /handoff, not hermes-handoff, not session-relay."
+description: "Close the laptop and carry on elsewhere: hands a running Hermes session and the project files it needs over to another machine of yours (your server, or back to the laptop), and the session continues there; with --continue the agent there keeps working on its own if that machine allows it. Over the network or with a handover file you copy. The conversation is copied row by row (message by message) and checked against the original with hashes; git repositories keep branches, stash and uncommitted changes; the agent gets a note about what changed. Works without ctx. Not the core /handoff, not hermes-handoff, not session-relay."
 kind: standalone
 requires_hermes: ">=0.22.6"
 manifest_version: 2
@@ -21,23 +21,23 @@ config_schema:
     choices: [auto, "on", "off"]
     default: auto
     label: Accept handovers from paired devices
-    description: "auto = only while a device is paired or a pairing code is pending; on = always; off = never (the routes answer like an uninstalled plugin)."
+    description: "auto = only while a device is paired or a pairing line made here is still valid and unused; on = always; off = never (to other machines this one then looks as if the plugin were not installed)."
   listen_url:
     type: str
     default: ""
     label: Address other devices use to reach this gateway
-    description: "Base URL put into pairing strings, e.g. https://server.example.net. Empty = webapp.public_url or dashboard.public_url."
+    description: "The address of this machine that goes into the pairing line, e.g. https://server.example.net. Empty = webapp.public_url or dashboard.public_url from config.yaml."
   peer_gate:
     type: str
     choices: [session_token, bearer, basic_login]
     default: session_token
-    label: How to pass the other gateway's dashboard sign-in
-    description: "session_token = the dashboard token of the other gateway (HERMES_DASHBOARD_SESSION_TOKEN there); bearer = the same token as Authorization header; basic_login = user name and password of a Basic-login dashboard (hermes serve)."
+    label: How this machine signs in to the other machine's dashboard
+    description: "session_token = the dashboard token of the other machine (HERMES_DASHBOARD_SESSION_TOKEN there); bearer = the same token, sent in the Authorization header; basic_login = the user name and password of a dashboard with a Basic login (hermes serve)."
   peer_token:
     type: secret
     env: CTX_HANDOVER_PEER_TOKEN
     label: Dashboard token of the other gateway
-    description: "Used for session_token and bearer by the next pairing, which copies it into CTX_HANDOVER_PEER_TOKEN_<peer id> for that gateway alone; it is sent only to the address it was stored for. It opens that gateway's whole dashboard, not only this plugin; prefer a reverse proxy that passes only /api/plugins/ctx_handover/."
+    description: "For session_token and bearer. The next pairing copies it into CTX_HANDOVER_PEER_TOKEN_<peer id>, for that machine alone, and it is only ever sent to the address it was stored for; this field is then free for the next machine. The token opens that machine's whole dashboard, not only this plugin; where you can, put a reverse proxy in front that passes only /api/plugins/ctx_handover/."
   peer_username:
     type: str
     default: ""
@@ -46,26 +46,26 @@ config_schema:
     type: secret
     env: CTX_HANDOVER_PEER_PASSWORD
     label: Dashboard password (basic_login)
-    description: "Used by the next pairing, which copies it into CTX_HANDOVER_PEER_PASSWORD_<peer id> for that gateway alone; sent only to the address it was stored for. Opens that gateway's whole dashboard, not only this plugin."
+    description: "For basic_login. The next pairing copies it into CTX_HANDOVER_PEER_PASSWORD_<peer id>, for that machine alone, and it is only ever sent to the address it was stored for. It opens that machine's whole dashboard, not only this plugin."
   peer_extra_headers:
     type: dict
     default: {}
     label: Extra request headers for a proxy
-    description: "{header name: name of an .env variable holding its value}, e.g. {CF-Access-Client-Secret: CF_ACCESS_SECRET}. Pairing copies each value into CTX_HANDOVER_PEER_HEADER<n>_<peer id> for that gateway alone."
+    description: "Headers a proxy in front of the other machine needs: {header name: name of the .env variable that holds its value}, e.g. {CF-Access-Client-Secret: CF_ACCESS_SECRET}. Pairing copies each value into CTX_HANDOVER_PEER_HEADER<n>_<peer id>, for that machine alone."
   workspace_root:
     type: str
     default: "~/hermes-handover"
-    label: Folder for received workspaces and bundles
+    label: Folder for received project folders and handover files
   allow_roots:
     type: list
     default: ["~/hermes-handover"]
     label: Folders a handover may write into
-    description: "Received workspaces land only here, or in the folder a repository came from when it returns (recorded by this machine), or at a --dest/--map typed here. Hermes, credential, shell-startup, autostart, git and ssh configuration locations of every home, and system folders, are refused even inside these folders."
+    description: "Received project folders land only here, in the folder a repository came from when it comes back (this machine recorded that folder), or at a --dest/--map typed on this machine. Protected places are refused even inside these folders: the Hermes, credential, shell-startup, autostart, git and ssh configuration locations of every home, and system folders."
   export_roots:
     type: list
     default: []
-    label: Extra folders a paired device may pull
-    description: "Paths a device with the pull right may add beyond what this machine planned itself. Empty = nothing beyond the plan."
+    label: Extra folders a paired device may take from here
+    description: "Paths that a device with the pull right (it may take sessions from here) may ask for beyond what this machine planned itself. Empty = nothing beyond the plan."
   max_session_mb:
     type: int
     default: 512
@@ -77,19 +77,19 @@ config_schema:
   max_extra_dir_mb:
     type: int
     default: 256
-    label: Largest extra folder outside the project (MiB)
+    label: Largest extra folder outside the project folder (MiB)
   max_hermes_file_mb:
     type: int
     default: 64
-    label: Largest Hermes session file (MiB)
+    label: Largest Hermes file of the session, such as a tool output (MiB)
   max_files:
     type: int
     default: 200000
-    label: Most files per folder tree
+    label: Most files per handed-over folder or repository (with all subfolders)
   max_untracked_files:
     type: int
     default: 200000
-    label: Most untracked files per git repository
+    label: Most files git does not track, per git repository
   max_total_gb:
     type: float
     default: 10
@@ -101,7 +101,7 @@ config_schema:
   max_request_mb:
     type: int
     default: 8
-    label: Largest request this gateway accepts (MiB)
+    label: Largest request this machine accepts from another one (MiB)
   block_cache_gb:
     type: float
     default: 5
@@ -117,33 +117,33 @@ config_schema:
   lease_ttl_s:
     type: int
     default: 120
-    label: Session pause lease (seconds)
+    label: How long the session lock lasts before it must be renewed (seconds)
   participant_idle_timeout_min:
     type: int
     default: 15
-    label: Release a paused session after this many idle minutes
+    label: Unlock a session another machine is taking after this many minutes without contact
   stall_timeout_min:
     type: int
     default: 30
-    label: Suspend a stalled handover after (minutes)
+    label: Suspend (pause) a handover that makes no progress after (minutes)
   wait_timeout_min:
     type: int
     default: 30
-    label: Longest wait for a running turn with --wait (minutes)
+    label: Longest wait for the agent's reply with --wait (minutes)
   refine:
     type: str
     choices: [auto, side_question, llm, "off"]
     default: auto
-    label: Ask a model which resources the work needs
-    description: "auto = side question to the session's own model when granted, else your main model with up to 60,000 characters of redacted transcript; off = file scan only. Inference costs are yours."
+    label: Ask a model what else the work needs (files, tools)
+    description: "auto = one side question to the session's own model when you allowed that, else your main model with up to 60,000 characters of the conversation, secrets blanked out; side_question or llm = only that way; off = a scan of the files only. You pay for the model calls."
   refine_timeout_s:
     type: int
     default: 45
-    label: Model question timeout (seconds)
+    label: Longest wait for the model's answer (seconds)
   refine_history_chars:
     type: int
     default: 60000
-    label: Transcript characters sent with the model question
+    label: Characters of the conversation sent with the model question
   refine_side_question_max_tokens:
     type: int
     default: 200000
@@ -156,7 +156,8 @@ config_schema:
     type: str
     choices: [ask, auto, "off"]
     default: ask
-    label: Files outside the project that the conversation used
+    label: Files outside the project folder that the conversation used
+    description: "ask = propose them (you confirm); auto = include the ones the conversation read or wrote and propose the others; off = leave them out."
   include_hermes_files:
     type: bool
     default: true
@@ -170,8 +171,8 @@ config_schema:
   allow_remote_continue:
     type: bool
     default: false
-    label: Let a paired device start one continuation turn here
-    description: "Only with --continue from a signed device. Not when approvals are off on this gateway, as far as the process that starts the turn can tell, and not when that process cannot identify the gateway (a separate container or PID namespace, as in Hermes' docker-compose: then nothing starts). A gateway given HERMES_YOLO_MODE only in its environment is not seen by a separate hermes serve or a terminal: leave this off there (README, Limits). Commands that need approval are refused."
+    label: Let a paired device start the agent here after a handover (one turn)
+    description: "Only for a handover sent with --continue by a signed paired device. The agent does not start while approvals are off on this gateway (the Hermes service that runs your chats), as far as the process that starts the turn can tell, and not when that process cannot identify the gateway (a separate container or PID namespace, as in Hermes' docker-compose: then nothing starts). A gateway given HERMES_YOLO_MODE only in its environment is not seen by a separate hermes serve or a terminal: leave this off there (README, Limits). In that turn, commands that need an approval are refused."
   allow_agent_start:
     type: bool
     default: false
@@ -181,15 +182,15 @@ config_schema:
     choices: [ask, "off"]
     default: ask
     label: Offers from other devices
-    description: "Offers are never claimed automatically."
+    description: "ask = /handover take lists them to choose from; off = it does not list them. Offers are never taken automatically."
   extra_ignore:
     type: list
     default: []
-    label: Extra ignore patterns for folder trees
+    label: Extra ignore patterns for folders sent without git (like .gitignore lines)
   tool_probe:
     type: list
     default: []
-    label: Extra tools to report in the environment comparison
+    label: Extra programs to compare between the two machines (for example docker)
   ctx_persist:
     type: str
     choices: [auto, "off"]

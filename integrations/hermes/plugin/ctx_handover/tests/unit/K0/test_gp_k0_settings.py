@@ -80,7 +80,7 @@ def test_unknown_inbound_is_off_fail_closed_with_a_problem():
         assert settings.coerce("inbound", raw) == "off", raw
         found = settings.problems({"inbound": raw})
         assert len(found) == 1 and found[0].startswith("inbound "), (raw, found)
-        assert "off" in found[0] and "fail-closed" in found[0], found
+        assert "using off, the safe choice: no handovers are accepted" in found[0], found
     assert settings.coerce("inbound", None) == "auto"
     assert settings.normalize({"inbound": "auto"})["inbound"] == "auto"
 
