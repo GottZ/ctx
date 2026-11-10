@@ -540,9 +540,10 @@ class LocalTarget:
         )
         if declared > limit:
             raise PayloadTooLarge(
-                f"This handover is {declared / 1024**3:.1f} GiB; {self.instance_name} takes at most "
-                f"{job.options.max_total_bytes / 1024**3:.1f} GiB of files (setting max_total_gb) and "
-                f"{job.options.max_session_bytes / 1024**2:.0f} MiB of session per handover. Nothing was transferred.",
+                f"This handover is {declared / 1024**3:.1f} GiB, but {self.instance_name} accepts at most "
+                f"{job.options.max_total_bytes / 1024**3:.1f} GiB of files (its setting max_total_gb) and "
+                f"{job.options.max_session_bytes / 1024**2:.0f} MiB of conversation per handover. Nothing was sent. "
+                f"Raise max_total_gb on {self.instance_name}, or hand over less (--exclude, --no-workspace).",
                 bytes=declared,
                 max_bytes=limit,
                 setting="max_total_gb",

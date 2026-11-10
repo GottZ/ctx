@@ -457,7 +457,9 @@ class WireClient:
         the cap is refused before the body is read, a longer body while it streams in — a peer's answer never makes
         this process hold more than the protocol needs (review R6-B). The returned response holds the body read."""
         resp = self._http.send(request, stream=True)
-        too_large = BadResponseSignature(f"the answer of {self.peer.name} is larger than allowed", max_bytes=cap)
+        too_large = BadResponseSignature(
+            f"the answer from {self.peer.name} is larger than this machine accepts", max_bytes=cap
+        )
         try:
             if resp.is_stream_consumed:
                 # a transport that read the answer itself (in-process test and fault transports) hands it over in
@@ -468,7 +470,9 @@ class WireClient:
             else:
                 buf = self._read_bounded(resp, cap, too_large)
         except zlib.error:
-            raise BadResponseSignature(f"the answer of {self.peer.name} is not valid gzip") from None
+            raise BadResponseSignature(
+                f"the answer from {self.peer.name} is damaged (its compression is broken)"
+            ) from None
         finally:
             resp.close()
         headers = [
@@ -488,7 +492,9 @@ class WireClient:
         elif encoding in ("gzip", "x-gzip"):
             inflate = zlib.decompressobj(16 + zlib.MAX_WBITS)
         else:
-            raise BadResponseSignature(f"the answer of {self.peer.name} uses an unsupported encoding ({encoding[:20]})")
+            raise BadResponseSignature(
+                f"the answer from {self.peer.name} uses a format this machine does not read ({encoding[:20]})"
+            )
         declared = resp.headers.get("content-length", "")
         if inflate is None and declared.isdigit() and int(declared) > cap:
             raise too_large

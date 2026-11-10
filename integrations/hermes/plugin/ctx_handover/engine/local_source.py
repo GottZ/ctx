@@ -527,14 +527,16 @@ class LocalSource:
         plans = [o for o in self.ledger.ops_for_job(job.job_id) if o["op"] == "plan"]
         if len(plans) >= MAX_REMOTE_PLANS:
             raise InvalidState(
-                "This handover asked for a new plan too often. Start the handover again.", reason="plan_limit"
+                "The other machine asked for a new plan of this handover too often, so the handover stopped. Start it "
+                "again.",
+                reason="plan_limit",
             )
         peer_id = job.peer.peer_id if job.peer is not None else None
         if peer_id and (
             self.ledger.running_ops_of_peer(peer_id, Role.SOURCE, "plan", STALE_OWNER_S) >= self.remote_plan_slots
         ):
             raise RateLimited(
-                "This gateway is still working on another plan for your device; the request is repeated shortly.",
+                "This machine is still preparing another plan for your device; the request is tried again in a moment.",
                 retry_after=5,
             )
 

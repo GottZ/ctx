@@ -191,7 +191,9 @@ class ParticipantRegistry:
     @staticmethod
     def _check_mode(role: Role, mode: Mode) -> None:
         if mode is not WIRE_MODE[role]:
-            raise BadRequest(f"a paired device can open a {role} job here only as a {WIRE_MODE[role]}", field="mode")
+            raise BadRequest(
+                f"A paired device can open this kind of handover here only as a {WIRE_MODE[role]}.", field="mode"
+            )
 
     def bind(self, auth: AuthContext, job_id: str, role: Role) -> tuple[SourceAPI | TargetAPI, JobContext]:
         """Job bound to the calling peer, role right re-checked, epoch fenced; returns ``(api, job context)``. Only rows

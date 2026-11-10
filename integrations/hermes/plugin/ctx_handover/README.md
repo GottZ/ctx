@@ -458,6 +458,21 @@ uncommitted work, and the continuing agent gets a note about what changed.
   unknown — and the other side compacts an oversized session on its first turn as usual.
 - **No relay through ctx.** A handover goes directly between the two gateways or through a bundle file you copy;
   ctx (optional) only keeps a record of it. Relaying a handover through ctx blobs is not built.
+- **A repository larger than the other machine allows is refused up front.** The receiving gateway compares the
+  planned size with its `max_total_gb` (plus `max_session_mb` for the conversation) when both sides agree on the
+  plan, before anything moves; the answer names both numbers. A repository the other machine already has a copy of
+  travels as its new commits only and does not count toward that check; one it has never seen counts with its whole
+  history — also when that history is larger than the working files, so a project that fits on the disk there can
+  still be refused (in 0.1.0 such a handover went through when the disk had room). Then raise `max_total_gb` on the
+  receiving machine, or hand over less (`--exclude`, `--no-workspace`).
+- **The signature on an answer does not name its request yet.** Every request to a paired gateway is signed over its
+  method, path and a one-time value (nonce); the answer is signed over its status, that nonce and its body, not over
+  method and path. Someone who can sit between the two machines (a proxy that ends TLS, a peer marked
+  `--allow-insecure` over a VPN, a broken dashboard sign-in) could answer a signed request with a genuinely signed
+  answer that the gateway gave to another request carrying the same nonce. As far as the code was read, that yields
+  at most an error or a hello answer where another answer was expected, never a forged success of a step that
+  changes something; it was not run. Planned: 0.2 signs the answer also over method, route path and the gateway's
+  identity and pins that per paired device once seen; 1.0 drops the old answer signature.
 
 ### What the lock on the source guarantees
 
@@ -582,11 +597,11 @@ busy/conflict, 4 auth/gate, 5 in-doubt/suspended; a refusal carries `ok: false` 
 `reclaim` refused while a handover is being committed exits 3, and so does a `cancel` that cancels nothing because
 the handover is done, aborted or past its commit point; the answer names which). `status`, `cancel`, `resume`, `logs`
 and `gc --job` take the six-character job id the messages print (or any other unique start or end of the id). A
-handover stuck cancelling because the other gateway does not confirm (unreachable, or it no longer knows the job)
-ends here with `/handover cancel <job> --force`: this machine's side is released or discarded the normal way, the
-answer says what may remain on the other gateway, and a handover past its commit point is refused (exit 3). A
-handover with a gateway you removed here with `/handover peers remove` cannot be ended with `--force`: the answer
-says that it could not be ended here.
+handover stuck cancelling because the other gateway does not confirm (it is unreachable, it removed or revoked this
+machine on its side, or it no longer knows the job) ends here with `/handover cancel <job> --force`: this machine's
+side is released or discarded the normal way, the answer says what may remain on the other gateway, and a handover
+past its commit point is refused (exit 3). A handover with a gateway you removed or revoked here (`/handover peers
+remove`, `/handover peers revoke`) cannot be ended with `--force`: the answer says that it could not be ended here.
 Administrative and data-moving commands (`pair`, `setup`, `peers`, `identity`, `take`, `to`, `export`, `import`,
 `reclaim`, `resume`, `gc`, `cancel`) answer only in the local CLI, TUI or Desktop; on messaging platforms they are
 refused.
@@ -727,10 +742,10 @@ in a gateway (`/handover to <peer>`) keeps the answer it already got and passes 
 
 **ctx (optional):** with ctx_checkpoint as memory provider and your consent in `/handover setup`, one redacted
 record per side of each handover through Hermes' MCP dispatch, with a `search` for the checkpoint head before each
-`store` (to link the record to it); a side finished without ctx (e.g. offline) is recorded later. The link works for
-a root session id that ctx_checkpoint uses unchanged in its titles — Hermes' timestamp ids and UUIDs; a longer id or
-one with other characters (such as Hermes' 70-character `local-<sha256>` ids), which ctx_checkpoint shortens and
-marks with a hash, is not found that way, and its record is stored without the link. ctx is never
+`store` (to link the record to it); a side finished without ctx (e.g. offline) is recorded later. A long session id,
+or one with other characters (such as Hermes' 70-character `local-<sha256>` ids), is shortened for that search the way
+ctx_checkpoint shortens it in its titles (cut, with a hash of the full id), so the record finds the head for every
+id. ctx is never
 needed for a handover, a ctx failure never stops one, and a job start waits at most 2 seconds for ctx (the records
 go out on a thread of their own).
 

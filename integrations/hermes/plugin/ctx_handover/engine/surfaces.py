@@ -1686,6 +1686,8 @@ def render_error(err: HandoverError, peer: str | None, *, here: bool = False) ->
         )
     if code == "payload_too_large":
         what = " ".join(str(err.message or "").split()).rstrip(".") or "a request"
+        if _d(err, "setting") and err.message:
+            return " ".join(str(err.message).split())  # names the machine, its setting and what to do
         return (
             f"Too large ({what}). If a proxy in front of {p} refused it, raise the request size limit of that proxy: "
             "it must let at least one transfer block (about 513 KiB) through, and /handover doctor --measure finds "
@@ -1819,6 +1821,12 @@ def render_error(err: HandoverError, peer: str | None, *, here: bool = False) ->
             f"check its setup with /handover doctor on {p}."
         )
     if code == "bad_response_signature":
+        said = " ".join(str(err.message or "").split()).rstrip(".")
+        if said.startswith("the answer from "):  # refused while reading: too large, broken compression, format
+            return (
+                f"{said[0].upper()}{said[1:]}, so this machine did not read it. Try again; if it keeps happening, "
+                f"check whether a proxy in front of {p} changes or enlarges its answers."
+            )
         return (
             f"The answer from {p} was not signed with the key this machine paired with. Pair again; if that does not "
             f"help, check whether a proxy in front of {p} changes its answers."
