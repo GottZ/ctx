@@ -9,9 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/modelalias"
-	"github.com/GottZ/ctx/internal/promptguard"
 )
 
 // The request parse of POST /v1/embeddings (design/02 §4.8; wave W02-09).
@@ -332,7 +330,7 @@ type embedLimits struct {
 	subBatch      int
 	nativeDims    int // 0 = unknown (learned from the first block's answer)
 	matryoshkaMin int // 0 = no cut allowed
-	maxInputRunes int // 0 = the chain's window decides (embedRuneLimit)
+	maxInputRunes int // 0 = no rune limit: the backend judges an input's length
 }
 
 func embedLimitsOf(a modelalias.Alias, s Settings) embedLimits {
@@ -375,7 +373,12 @@ func checkEmbedPolicy(req *embedRequest, l embedLimits) *paramError {
 }
 
 // checkInputRunes refuses an input above limit runes (param input[i]; a
-// single string is input[0] as well — the wire sends it as one).
+// single string is input[0] as well — the wire sends it as one). limit is
+// the alias's embedding.max_input_runes; without it the route checks no
+// length (FOLGE-EMBLIMIT): the backend judges the input, and its refusal is
+// the client's 400 at every sub-block (embedCall.outcome). No estimate of
+// the route — a rune budget of a row's window — stands in for the backend's
+// judgment; the body cap and the in-flight budget bound what reaches it.
 func checkInputRunes(req *embedRequest, limit int) *paramError {
 	for i, n := range req.runes {
 		if n > limit {
@@ -383,45 +386,6 @@ func checkInputRunes(req *embedRequest, limit int) *paramError {
 		}
 	}
 	return nil
-}
-
-// embedFallbackWindow is the token window the rune limit of an input
-// assumes when neither the alias (embedding.max_input_runes) nor a row of
-// the chain names one (design/02 §3.2: "ohne bekanntes Fenster 3686" =
-// promptguard.RuneBudget of 2048 tokens, the live embedding window). Data of
-// the design, like modelalias.Default*: an operator sets the alias key.
-const embedFallbackWindow = 2048
-
-// embedEarlyRuneLimit is the part of the rune limit that needs no chain:
-// the alias's embedding.max_input_runes, else the code ceiling
-// (CeilingEmbeddingMaxInputRunes) every chain-derived limit stays under.
-func embedEarlyRuneLimit(l embedLimits) int {
-	if l.maxInputRunes > 0 {
-		return l.maxInputRunes
-	}
-	return modelalias.CeilingEmbeddingMaxInputRunes
-}
-
-// embedRuneLimit is the per-input rune limit (design/02 §3.2
-// embedding.max_input_runes): the alias's value, else the 9/5 rune budget
-// (promptguard.RuneBudget, the measured densest tokenization) of the
-// smallest known window of the chain, else of embedFallbackWindow — capped
-// by the code ceiling. The guard heuristic of the promptguard census reads
-// per file: this file builds no prompt, it only borrows the ratio.
-func embedRuneLimit(l embedLimits, chain []backends.Backend) int {
-	if l.maxInputRunes > 0 {
-		return l.maxInputRunes
-	}
-	window := 0
-	for i := range chain {
-		if n := chain[i].NumCtx; n > 0 && (window == 0 || n < window) {
-			window = n
-		}
-	}
-	if window == 0 {
-		window = embedFallbackWindow
-	}
-	return min(promptguard.RuneBudget(window), modelalias.CeilingEmbeddingMaxInputRunes)
 }
 
 // embedDecodeChunk is the stack buffer the size run and the decode of an

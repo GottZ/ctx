@@ -43,7 +43,7 @@ import (
 //	encoding_format, dimensions) → Resolve → kind embedding → policy
 //	(inputs, dimensions) → answer reserve → RequiredSensitivity + scan →
 //	chain build (gateway wire embedding: openai, ollama) → GateTenant →
-//	input runes → limiter (op embed) → planner (Units n, SubBatch) → k = 1
+//	limiter (op embed) → planner (Units n, SubBatch) → k = 1
 //	rule → watcher → WalkChain(attempt = the sub-blocks of subblock.go:
 //	block one under First/Next, blocks 2…k under Continue on the request
 //	context, sticky) → check before the write → streamed answer → one llmlog
@@ -335,13 +335,15 @@ func (c *embedCall) serve() {
 		c.refuseParam(perr)
 		return
 	}
-	// The rune limit that holds without a chain — the alias's
-	// max_input_runes, else the code ceiling — before the reserve, the scan
+	// The alias's max_input_runes, when set, before the reserve, the scan
 	// and the chain build (hardening H-7): an input over it is the client's
-	// 400, never a 503 of the budget. The chain's window narrows it below.
-	if perr := checkInputRunes(req, embedEarlyRuneLimit(c.lim)); perr != nil {
-		c.refuseParam(perr)
-		return
+	// 400, never a 503 of the budget. Unset, the backend judges the length
+	// (checkInputRunes).
+	if c.lim.maxInputRunes > 0 {
+		if perr := checkInputRunes(req, c.lim.maxInputRunes); perr != nil {
+			c.refuseParam(perr)
+			return
+		}
 	}
 	c.req = req
 	if len(req.ignored) > 0 {
@@ -361,10 +363,6 @@ func (c *embedCall) serve() {
 	c.required = c.d.Federation.Scan(required, body)
 	chain, ok := c.chain()
 	if !ok {
-		return
-	}
-	if perr := checkInputRunes(req, embedRuneLimit(c.lim, chain)); perr != nil {
-		c.refuseParam(perr)
 		return
 	}
 	if !c.reserveUpstreamTexts() {
