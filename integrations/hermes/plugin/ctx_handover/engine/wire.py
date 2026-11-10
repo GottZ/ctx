@@ -31,6 +31,7 @@ import random
 import re
 import threading
 import time
+import zlib
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from urllib.parse import urlsplit
@@ -63,6 +64,9 @@ RETRY_AFTER_CAP = 300
 BACKOFF_MIN, BACKOFF_MAX = 0.5, 60.0
 SLOW_S, FAST_S = 20.0, 5.0
 MAX_JSON_RESPONSE = 16 * MIB
+MAX_REQUEST_CEILING = 64 * MIB
+"""Largest request size this dialer uses, whatever ``limits.max_request_bytes`` a peer announces (review R6-B): the
+size also bounds the block page it accepts and the upload batch it holds in memory."""
 PROBE_SIZES_MIB = (1, 2, 4, 8)
 """Request body sizes in MiB ``probe_gate(measure_limit=True)`` sends (``doctor --measure``, contract V27); the
 largest is the body limit a proxy in front of the peer should allow."""
@@ -148,10 +152,14 @@ def basic_login(
     from the ``hermes_session_at`` cookie (DESIGN §4.1, R7)."""
     url = base_url.rstrip("/") + "/auth/password-login"
     try:
-        with httpx.Client(
-            timeout=timeout, verify=verify_tls, trust_env=True, follow_redirects=False, transport=transport
-        ) as client:
-            resp = client.post(url, json={"provider": "basic", "username": username, "password": password})
+        with (
+            httpx.Client(
+                timeout=timeout, verify=verify_tls, trust_env=True, follow_redirects=False, transport=transport
+            ) as client,
+            # only the status and the cookie are needed: the page is never read (review R6-B)
+            client.stream("POST", url, json={"provider": "basic", "username": username, "password": password}) as resp,
+        ):
+            pass
     except httpx.HTTPError as exc:
         raise PeerUnreachable(f"the dashboard login failed: {type(exc).__name__}") from None
     if resp.status_code == 429:
@@ -195,7 +203,7 @@ class Adaptive:
 
     def __init__(self, peer_max: int) -> None:
         self.floor = BLOCK_SIZE + FRAME_HEADER + FRAME_SLACK
-        self.peer_max = max(self.floor, int(peer_max))
+        self.peer_max = max(self.floor, min(int(peer_max), MAX_REQUEST_CEILING))
         self.ceiling = self.peer_max
         self.size = min(START_REQUEST, self.peer_max)
         self._fast = 0
@@ -339,8 +347,10 @@ class WireClient:
         accept_unsigned_ok: bool,
         gate: bool = True,
         attempts: int | None = None,
+        max_response: int = MAX_JSON_RESPONSE,
     ) -> httpx.Response:
-        """One logical request with retries; returns a verified 2xx response or raises. Every ``GateRejected``
+        """One logical request with retries; returns a verified 2xx response or raises. ``max_response`` bounds the
+        body read from the peer (``_bounded``). Every ``GateRejected``
         (gate secret missing, Basic login refused, unsigned 401) carries ``details.mode`` — this peer's gate mode,
         ``none`` without a gate — and ``details.peer`` — the peer's name — for the remedy text (W122).
         ``gate=False`` sends no gate header and no Basic login (the first pairing hello, H1); ``attempts`` caps the
@@ -356,6 +366,7 @@ class WireClient:
                 accept_unsigned_ok=accept_unsigned_ok,
                 gate=gate,
                 attempts=self._attempts if attempts is None else max(1, int(attempts)),
+                max_response=max_response,
             )
         except GateRejected as exc:
             gate = self.peer.gate
@@ -375,6 +386,7 @@ class WireClient:
         accept_unsigned_ok: bool,
         gate: bool,
         attempts: int,
+        max_response: int,
     ) -> httpx.Response:
         last: HandoverError | None = None
         relogged = False
@@ -382,7 +394,12 @@ class WireClient:
         while attempt < attempts:
             attempt += 1
             nonce = random_b64(16)
-            headers = {"X-Ctxh-Nonce": nonce, "Accept": "application/json, " + MEDIA_BLOCKS}
+            # identity: an answer is bounded while it streams (``_bounded``); a compressed one could expand past it
+            headers = {
+                "X-Ctxh-Nonce": nonce,
+                "Accept": "application/json, " + MEDIA_BLOCKS,
+                "Accept-Encoding": "identity",
+            }
             if gate:
                 headers.update(self._gate())
             if content_type:
@@ -405,14 +422,13 @@ class WireClient:
                 )
             params = {"profile": self.peer.profile} if self.peer.profile else None
             started = time.monotonic()
+            request = self._http.build_request(method, self._url(route), content=body, headers=headers, params=params)
             try:
                 if self._hosted:
                     with self._lock:
-                        resp = self._http.request(
-                            method, self._url(route), content=body, headers=headers, params=params
-                        )
+                        resp = self._bounded(request, max_response)
                 else:
-                    resp = self._http.request(method, self._url(route), content=body, headers=headers, params=params)
+                    resp = self._bounded(request, max_response)
             except httpx.HTTPError as exc:
                 last = PeerUnreachable(f"{self.peer.name} is not reachable ({type(exc).__name__})")
                 self._backoff(attempt, None, attempts)
@@ -435,6 +451,67 @@ class WireClient:
                 self._adaptive.observe(elapsed)
             return resp
         raise last if last is not None else PeerUnreachable(f"{self.peer.name} is not reachable")
+
+    def _bounded(self, request: httpx.Request, cap: int) -> httpx.Response:
+        """Send ``request`` and read its answer up to ``cap`` bytes (after content decoding): a declared length over
+        the cap is refused before the body is read, a longer body while it streams in — a peer's answer never makes
+        this process hold more than the protocol needs (review R6-B). The returned response holds the body read."""
+        resp = self._http.send(request, stream=True)
+        too_large = BadResponseSignature(f"the answer of {self.peer.name} is larger than allowed", max_bytes=cap)
+        try:
+            if resp.is_stream_consumed:
+                # a transport that read the answer itself (in-process test and fault transports) hands it over in
+                # memory and decoded: only its size is checked
+                buf = bytearray(resp.content)
+                if len(buf) > cap:
+                    raise too_large
+            else:
+                buf = self._read_bounded(resp, cap, too_large)
+        except zlib.error:
+            raise BadResponseSignature(f"the answer of {self.peer.name} is not valid gzip") from None
+        finally:
+            resp.close()
+        headers = [
+            (k, v)
+            for k, v in resp.headers.multi_items()
+            if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")
+        ]
+        return httpx.Response(resp.status_code, headers=headers, content=bytes(buf), request=resp.request)
+
+    def _read_bounded(self, resp: httpx.Response, cap: int, too_large: HandoverError) -> bytearray:
+        """The streamed body of ``resp``, at most ``cap`` bytes: identity as it comes, gzip inflated in bounded steps
+        (never a whole chunk at once: a gzip bomb), any other encoding refused (``Accept-Encoding: identity`` was
+        asked for; br and zstd cannot be inflated under a bound here)."""
+        encoding = resp.headers.get("content-encoding", "").strip().lower()
+        if encoding in ("", "identity"):
+            inflate = None
+        elif encoding in ("gzip", "x-gzip"):
+            inflate = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        else:
+            raise BadResponseSignature(f"the answer of {self.peer.name} uses an unsupported encoding ({encoding[:20]})")
+        declared = resp.headers.get("content-length", "")
+        if inflate is None and declared.isdigit() and int(declared) > cap:
+            raise too_large
+        buf = bytearray()
+        for chunk in resp.iter_raw():
+            if inflate is None:
+                buf += chunk
+            else:
+                while chunk:
+                    out = inflate.decompress(chunk, cap + 1 - len(buf))
+                    buf += out
+                    if len(buf) > cap:
+                        raise too_large
+                    if not out and inflate.unconsumed_tail == chunk:
+                        break  # no progress (defensive; zlib buffers input it cannot use yet)
+                    chunk = inflate.unconsumed_tail
+            if len(buf) > cap:
+                raise too_large
+        if inflate is not None:
+            buf += inflate.flush()
+            if len(buf) > cap:
+                raise too_large
+        return buf
 
     def _backoff(self, attempt: int, retry_after: object, attempts: int) -> None:
         if attempt >= attempts:
@@ -676,6 +753,8 @@ class WireClient:
                     signed=True,
                     epoch=epoch,
                     accept_unsigned_ok=False,
+                    # the listener fills a page up to the size asked for, its first frame always (one block)
+                    max_response=max(MAX_JSON_RESPONSE, self.request_bytes + 2 * self._adaptive.floor),
                 )
             except PayloadTooLarge:
                 self._adaptive.too_large()

@@ -1120,6 +1120,16 @@ class Ledger:
     def ops_for_job(self, job_id: str) -> list[dict]:
         return [self._op(r) for r in self._q("SELECT * FROM ops WHERE job_id=? ORDER BY updated_at", (job_id,))]
 
+    def running_ops_of_peer(self, peer_id: str, role: Role, op: str, fresh_s: float) -> int:
+        """How many ``op`` operations of ``peer_id``'s ``role`` jobs are running with a heartbeat younger than
+        ``fresh_s`` (a row of a process that died stops counting when it goes stale; review R6-B)."""
+        row = self._q1(
+            "SELECT COUNT(*) FROM ops o JOIN jobs j ON j.job_id = o.job_id AND j.role = ?"
+            " WHERE j.peer_id = ? AND o.op = ? AND o.state = ? AND o.updated_at > ?",
+            (str(role), peer_id, op, str(OpState.RUNNING), self.now() - float(fresh_s)),
+        )
+        return int(row[0]) if row is not None else 0
+
     # -- source handovers, veto, backups ---------------------------------------------------------------------
     @staticmethod
     def _source(row: sqlite3.Row) -> dict:

@@ -93,7 +93,8 @@ path map names (M10)."""
 MAX_DOC_BYTES = 64 * 1024 * 1024
 DISK_MARGIN = 1.1
 QUOTA_MARGIN = 1.1
-"""Staging quota per job on the receiving side: ``need_bytes`` + 10 % (DESIGN §4.7, R28)."""
+"""Staging quota per job on the receiving side: ``need_bytes`` + 10 % (DESIGN §4.7, R28), the need capped at this
+host's ``max_total_bytes`` + ``max_session_bytes`` (R6-B)."""
 STATE_DB_FACTOR = 3.5
 """A capsule needs its blocks plus ≈ 3.5 × its size in ``state.db`` (DESIGN §8.6, [RB §B8])."""
 
@@ -264,6 +265,7 @@ class LocalTarget:
         instance_name: str = "",
         settings: dict | None = None,
         peer_name: str | None = None,
+        remote_driven: bool = False,
     ) -> None:
         self.ledger = ledger
         self.store = store
@@ -286,6 +288,7 @@ class LocalTarget:
         self.instance_name = instance_name or host.profile
         self.settings = dict(settings or {})
         self.peer_name = peer_name
+        self.remote_driven = bool(remote_driven)
 
     # -- plumbing ------------------------------------------------------------------------------------------------
     @property
@@ -352,7 +355,14 @@ class LocalTarget:
         return doc
 
     def _remote_driven(self, job: JobContext) -> bool:
-        return job.mode is Mode.PUSH and self.source_peer_id is not None
+        """Whether a paired device drives this job: this instance serves wire requests (the participant registry's
+        factory builds it with ``remote_driven``), or the job's row was opened over the wire — route #7 never records
+        ``params.local``, also not in a row written before it checked the mode. Never derived from the mode or
+        another field the device sends (review R6-A: a push-only device opened a target as ``pull``)."""
+        if self.remote_driven:
+            return True
+        row = self.ledger.job(job.job_id, Role.TARGET)
+        return row is None or (row.get("params") or {}).get("local") is not True
 
     # -- TargetAPI -----------------------------------------------------------------------------------------------
     def hello(self) -> Hello:
@@ -486,6 +496,7 @@ class LocalTarget:
                     warnings=tuple(a.warnings),
                 )
             )
+        self._check_total(job, plan, decisions)
         need, free, short = self._disk_check(decisions, plan)
         if short is not None:
             path, need_b, free_b = short
@@ -506,11 +517,36 @@ class LocalTarget:
         )
         final = dataclasses.replace(final, plan_id=p.plan.plan_id(p.plan.final_doc(final)))
         self._remember(job, final_plan=final)
-        self.ledger.quota_set(job.job_id, Role.TARGET, int(need * QUOTA_MARGIN))
+        # the sizes behind ``need`` are the counterpart's declaration (``size_estimate``, ``approx_tokens``): staging
+        # stays within what this host accepts for one handover, its own ``max_total_gb`` + ``max_session_mb`` (R6-B)
+        limit = int(job.options.max_total_bytes) + int(job.options.max_session_bytes)
+        self.ledger.quota_set(job.job_id, Role.TARGET, int(min(need, limit) * QUOTA_MARGIN))
         row = self._row(job)
         if row["state"] in ("open", "negotiated"):
             self._go(job, ("open", "negotiated"), "negotiated")
         return final
+
+    def _check_total(self, job: JobContext, plan: ResourcePlan, decisions) -> None:
+        """``max_total_gb`` per handover, checked at negotiation (DESIGN §9.4, §10.2; review R6-B), together with
+        ``max_session_mb`` for the session: the declared size of every confirmed item that travels plus the capsule
+        estimate. Proposals count once they are confirmed (the conductor negotiates the confirmed plan again); a git
+        item this host already has commits of (``git_have``) travels as an incremental pack of unknown size and is
+        bounded by the staging quota only. A larger handover is refused before a byte moves instead of failing at
+        the quota in the middle of the transfer."""
+        limit = int(job.options.max_total_bytes) + int(job.options.max_session_bytes)
+        sizes = {i.item_id: max(0, int(i.size_estimate)) for i in plan.items if i.include is Include.YES}
+        declared = capsule_estimate(plan.approx_tokens) + sum(
+            sizes.get(d.item_id, 0) for d in decisions if d.mode is not DestMode.SKIP and not d.git_have
+        )
+        if declared > limit:
+            raise PayloadTooLarge(
+                f"This handover is {declared / 1024**3:.1f} GiB; {self.instance_name} takes at most "
+                f"{job.options.max_total_bytes / 1024**3:.1f} GiB of files (setting max_total_gb) and "
+                f"{job.options.max_session_bytes / 1024**2:.0f} MiB of session per handover. Nothing was transferred.",
+                bytes=declared,
+                max_bytes=limit,
+                setting="max_total_gb",
+            )
 
     def _disk_check(self, decisions, plan: ResourcePlan) -> tuple[int, dict[str, int], tuple | None]:
         """Need per filesystem: items at their destination, the capsule (blocks + state.db) in the data dir."""

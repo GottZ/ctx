@@ -305,7 +305,7 @@ def test_server_auth_order_and_generic_errors(tmp_path):
     """★ Unknown peer, wrong key, missing signature and a body that differs from the signed hash all end in the
     same signed 401 ``unauthorized`` without details (DESIGN §4.2).
 
-    Red proof: mutant = signature verification in ``PeerSignatureAuth.finish`` skipped → the request with the right
+    Red proof: mutant = signature verification in ``PeerSignatureAuth.precheck`` skipped → the request with the right
     peer id but a foreign key is answered 200.
     """
     lst = Listener(tmp_path)
