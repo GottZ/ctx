@@ -1777,8 +1777,19 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 // fresh block that waits behind the backlog is embedded in the end, where
 // an old block that waits behind every fresh one is not. There is no state
 // between requests; the alternation starts anew with each one.
-// backfillPicker.next holds the rule; the same switch decides its
-// last-resort pick.
+// backfillPicker.next holds the rule.
+//
+// The old end is a queue, and a block that overran the sync budget stands in
+// it too (backfillPicker.oldEnd). A block is cut by the budget and memoized
+// caller_timeout only when it had the whole budget (recordBackfillFailure).
+// It then sits out a backoff counted from the cut, backoff_base *
+// 2^(attempts-1) up to backoff_cap, so a block that cannot fit the budget
+// costs one request its budget per backoff period and not every request.
+// After the backoff it queues where it was cut, behind what was pending at
+// that moment and ahead of what was stored later. Every block of the old end
+// therefore has finitely many ahead of it, however fast callers write and
+// however many blocks do not fit: one that is cut goes behind every block
+// that was waiting, and comes up again once those have had their turn.
 //
 // Since F3-P3 the chain resolves PER BLOCK with that block's floor-adjusted
 // sensitivity (gate table embed-backfill row) and each wire call leaves a
@@ -1815,17 +1826,17 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 	// ExcludedPredicate) — such a block is the arm's job. The hand-off only
 	// holds while there IS an arm: with embed_backfill.interval=0 (arm off)
 	// and Dream off nothing else would ever embed a caller_timeout block,
-	// so the query path picks it up again (review finding M1 of #46). It
-	// does so LAST, with the plain predicate, once the other picks have
-	// come back empty (backfillPicker.next): the memo of such a block is
-	// due at once and a failed
-	// embed ends the loop, so a block that cannot fit the budget, taken in
-	// its place in the order, would be what every request picks and stops
-	// on, and nothing behind it would ever be embedded (review of #214).
+	// so the query path picks it up again (review finding M1 of #46), from
+	// the old end and after a backoff (backfillPicker.oldEnd): the memo of
+	// such a block is due at once and a failed embed ends the loop, so a
+	// block that cannot fit the budget, taken at once and in its place in
+	// the order, would be what every request picks and stops on, and
+	// nothing behind it would ever be embedded (review of #214).
 	// interval is global-only, so this per-request snapshot reads the value
 	// the arm runs on.
 	armRuns := cfg.EmbedBackfill.Interval > 0
 	picker := newBackfillPicker(h.pool, armRuns, h.backendPool.TrustCeilings(backends.RoleEmbed), floor, readScopes)
+	picker.backoffBase, picker.backoffCap = cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap
 	for attempts := 0; syncCap <= 0 || attempts < syncCap; attempts++ {
 		if !budgetDeadline.IsZero() && !time.Now().Before(budgetDeadline) {
 			slog.Info("query backfill: sync budget spent, rest left to the background arm",
@@ -1939,7 +1950,7 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 // callerCut: under an active budget, a budget or request deadline is a
 // statement about THIS caller, not about the backend: class caller_timeout,
 // which the query path leaves to the background arm while it runs (with the
-// arm off: takes last) and the arm picks at once. Everything else — and
+// arm off: retries after a backoff) and the arm picks at once. Everything else — and
 // every failure with sync_budget=0 — keeps the wire/oversize classification.
 //
 // wholeBudget: a caller_timeout memo says the block did not fit the budget.
@@ -1985,6 +1996,9 @@ func (h *QueryHandler) recordBackfillFailure(ctx context.Context, cfg *config.Co
 // backfillRow is one pending block as the backfill pick returns it.
 type backfillRow struct {
 	id, title, content, sens, scope string
+	// queued is where the block stands in the old end: its created_at, or
+	// for a block that overran the sync budget the time of that cut.
+	queued time.Time
 }
 
 // backfillDB is the database pool as the backfill pick uses it; the one
@@ -2004,16 +2018,22 @@ type backfillPicker struct {
 	readScopes    []string
 	callerClasses embedClasses
 	anyClasses    func() embedClasses
+	// backoffBase and backoffCap are embed_backfill.backoff_base and
+	// backoff_cap: the curve a block that overran the sync budget sits out
+	// before the old end takes it again (arm off only).
+	backoffBase, backoffCap time.Duration
 	// callerDrained (arm off only) remembers that the scoped pick came back
 	// empty, so it is not run again in this request. A caller block stored
 	// while the loop runs is reached by the old end like any other pending
 	// block.
 	callerDrained bool
-	// lastResort (arm off only) remembers that the old end came back empty
-	// as well, and with it the caller's scopes, which hold a subset of what
-	// the old end picks from: what is left, if anything, are the blocks that
-	// once overran the sync budget, and the rest of the request picks those.
-	lastResort bool
+	// overran (arm off only) is the head of the blocks that overran the sync
+	// budget of an earlier request and have sat out their backoff, read once
+	// (overranRead) and kept until the old end has taken it; nil when there
+	// is none. No block joins them while the request runs: a cut in this
+	// request ends its loop, and the cut block is inside its backoff.
+	overran     *backfillRow
+	overranRead bool
 }
 
 // newBackfillPicker works out, once per request, the classes of block an
@@ -2032,32 +2052,67 @@ func newBackfillPicker(db backfillDB, armRuns bool, ceilings backends.TrustCeili
 	}
 }
 
-// The two orders of the backfill pick and its scope conjunct. The id breaks
-// the tie between blocks of one created_at (one transaction).
+// The two orders of the backfill pick, its scope conjunct and its class
+// conjunct ($1 to $4, embedClasses). The id breaks the tie between blocks of
+// one created_at (one transaction).
 const (
-	backfillNewestFirst = "created_at DESC, id DESC"
-	backfillOldestFirst = "created_at ASC, id ASC"
-	backfillInScopes    = "\n\t\t\t  AND scope = ANY($5::text[])"
+	backfillNewestFirst   = "created_at DESC, id DESC"
+	backfillOldestFirst   = "created_at ASC, id ASC"
+	backfillInScopes      = "\n\t\t\t  AND scope = ANY($5::text[])"
+	backfillClassConjunct = `
+			  AND ((scope <> ALL($1::text[]) AND sensitivity = ANY($2::text[]))
+			    OR (scope, sensitivity) IN (SELECT * FROM unnest($3::text[], $4::text[])))`
 )
 
 // pick takes the first pending block in the given order, of the classes cl,
-// that the failure-memo predicate excluded lets through, inside scopeConjunct
-// when one is given. The spliced predicates carry no placeholders: $1 to $4
-// are the class conjunct's (embedClasses), $5 the scope conjunct's. The scope
-// conjunct stays a conjunct of its own next to the class one, so the planner
-// can still take the scope index for it. No row is pgx.ErrNoRows.
-func (p *backfillPicker) pick(ctx context.Context, excluded string, cl embedClasses, order, scopeConjunct string, args ...any) (backfillRow, error) {
+// that the query path's failure-memo predicate lets through (no backoff that
+// still runs, and no caller_timeout memo), inside scopeConjunct when one is
+// given. The spliced predicates carry no placeholders: $1 to $4 are the class
+// conjunct's, $5 the scope conjunct's. The scope conjunct stays a conjunct of
+// its own next to the class one, so the planner can still take the scope
+// index for it. No row is pgx.ErrNoRows.
+func (p *backfillPicker) pick(ctx context.Context, cl embedClasses, order, scopeConjunct string, args ...any) (backfillRow, error) {
 	var row backfillRow
 	err := p.db.QueryRow(ctx,
-		`SELECT id, title, content, sensitivity, scope FROM context_blocks
+		`SELECT id, title, content, sensitivity, scope, created_at FROM context_blocks
 			WHERE embedding IS NULL AND NOT is_archived`+
-			excluded+store.RetrievalExcludedTypePredicate+`
-			  AND ((scope <> ALL($1::text[]) AND sensitivity = ANY($2::text[]))
-			    OR (scope, sensitivity) IN (SELECT * FROM unnest($3::text[], $4::text[])))`+scopeConjunct+`
+			store.EmbedFailureQueryPathExcludedPredicate+store.RetrievalExcludedTypePredicate+
+			backfillClassConjunct+scopeConjunct+`
 			ORDER BY `+order+`
 			LIMIT 1`,
 		append([]any{cl.except, cl.levels, cl.pairScopes, cl.pairLevels}, args...)...,
-	).Scan(&row.id, &row.title, &row.content, &row.sens, &row.scope)
+	).Scan(&row.id, &row.title, &row.content, &row.sens, &row.scope, &row.queued)
+	return row, err
+}
+
+// pickOverran takes, among the pending blocks of the classes cl that carry a
+// caller_timeout memo, the one that was cut first and has sat out its backoff
+// since: backoff_base * 2^(attempts-1), at most backoff_cap, the curve
+// store.RecordEmbedFailure puts a wire failure on, here counted from the cut
+// (the memo's next_attempt_at, which stays the time of the cut so that an arm
+// that is switched on takes the block at once). The exponent is capped so a
+// block that has been cut for years cannot overflow the float. The statement
+// is driven by the memo table, which holds the blocks that failed and not the
+// backlog; the type predicate keeps its contract, the bare context_blocks as
+// the outer FROM. $1 to $4 are the class conjunct's, $5 the class of the
+// memo, $6 and $7 the backoff base and cap in seconds. No row is
+// pgx.ErrNoRows.
+func (p *backfillPicker) pickOverran(ctx context.Context, cl embedClasses) (backfillRow, error) {
+	var row backfillRow
+	err := p.db.QueryRow(ctx,
+		`SELECT id, title, content, sensitivity, scope, f.next_attempt_at
+			FROM context_blocks
+			JOIN context_embed_failures f ON f.block_id = context_blocks.id AND f.migration_id IS NULL
+			WHERE embedding IS NULL AND NOT is_archived
+			  AND f.last_class = $5
+			  AND f.next_attempt_at + make_interval(secs =>
+			        least($6::float8 * power(2, least(f.attempts, 31) - 1), $7::float8)) <= now()`+
+			store.RetrievalExcludedTypePredicate+backfillClassConjunct+`
+			ORDER BY f.next_attempt_at ASC, `+backfillOldestFirst+`
+			LIMIT 1`,
+		cl.except, cl.levels, cl.pairScopes, cl.pairLevels,
+		string(store.EmbedFailureCallerTimeout), p.backoffBase.Seconds(), p.backoffCap.Seconds(),
+	).Scan(&row.id, &row.title, &row.content, &row.sens, &row.scope, &row.queued)
 	return row, err
 }
 
@@ -2065,39 +2120,59 @@ func (p *backfillPicker) pick(ctx context.Context, excluded string, cl embedClas
 // pgx.ErrNoRows when the request has nothing left to pick.
 //
 // Arm on: the caller's end only, newest first; what the caller cannot read
-// is the arm's. Arm off: the old end (any scope, oldest first) on the even
-// picks, so on the first, and the caller's end on the odd ones; the old end
-// alone once the caller's scopes are drained; and when the old end is empty
-// too, the blocks that overran the sync budget of an earlier request, oldest
-// first, for the rest of the request. The picks of the two ends use the query
-// path's failure-memo predicate, which keeps caller_timeout blocks out; the
-// last uses the plain one.
+// is the arm's, and so is a block that overran the sync budget. Arm off: the
+// old end (oldEnd) on the even picks, so on the first, and the caller's end
+// on the odd ones; the old end alone once the caller's scopes are drained.
 func (p *backfillPicker) next(ctx context.Context, attempt int) (backfillRow, error) {
 	if p.armRuns {
-		return p.pick(ctx, store.EmbedFailureQueryPathExcludedPredicate,
-			p.callerClasses, backfillNewestFirst, backfillInScopes, p.readScopes)
+		return p.pick(ctx, p.callerClasses, backfillNewestFirst, backfillInScopes, p.readScopes)
 	}
-	if !p.lastResort {
-		if attempt%2 == 1 && !p.callerDrained {
-			row, err := p.pick(ctx, store.EmbedFailureQueryPathExcludedPredicate,
-				p.callerClasses, backfillNewestFirst, backfillInScopes, p.readScopes)
-			if !errors.Is(err, pgx.ErrNoRows) {
-				return row, err
-			}
-			// Nothing pending the caller can read: this pick and the rest
-			// of the request go to the old end.
-			p.callerDrained = true
-		}
-		row, err := p.pick(ctx, store.EmbedFailureQueryPathExcludedPredicate,
-			p.anyClasses(), backfillOldestFirst, "")
+	if attempt%2 == 1 && !p.callerDrained {
+		row, err := p.pick(ctx, p.callerClasses, backfillNewestFirst, backfillInScopes, p.readScopes)
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return row, err
 		}
-		p.lastResort = true
+		// Nothing pending the caller can read: this pick and the rest of
+		// the request go to the old end.
+		p.callerDrained = true
 	}
-	// Nothing else is pending anywhere and there is no arm: retry a block
-	// that overran the budget of an earlier request.
-	return p.pick(ctx, store.EmbedFailureExcludedPredicate, p.anyClasses(), backfillOldestFirst, "")
+	return p.oldEnd(ctx)
+}
+
+// oldEnd is the pick of the old end with the arm off: the block of any scope
+// that has waited longest. Two kinds of block wait there. One that has not
+// overrun the sync budget waits since its created_at (pick, oldest first).
+// One that has, and has sat out its backoff, waits since that cut
+// (pickOverran): it queues again where it was cut, behind every block that
+// was pending then. In its created_at place it would come back ahead of
+// them after every backoff, and with as many blocks that cannot fit the
+// budget as there are requests in a backoff period nothing behind them
+// would be embedded; after everything else, as before the second review of
+// #214, it is never reached while callers keep writing. The older of the two
+// heads is the pick.
+func (p *backfillPicker) oldEnd(ctx context.Context) (backfillRow, error) {
+	if !p.overranRead {
+		row, err := p.pickOverran(ctx, p.anyClasses())
+		switch {
+		case err == nil:
+			p.overran = &row
+		case !errors.Is(err, pgx.ErrNoRows):
+			return backfillRow{}, err
+		}
+		p.overranRead = true
+	}
+	row, err := p.pick(ctx, p.anyClasses(), backfillOldestFirst, "")
+	none := errors.Is(err, pgx.ErrNoRows)
+	if (err != nil && !none) || p.overran == nil {
+		return row, err
+	}
+	if !none && !p.overran.queued.Before(row.queued) {
+		return row, nil
+	}
+	row = *p.overran
+	// Taken: the next pick of the old end reads the head anew.
+	p.overran, p.overranRead = nil, false
+	return row, nil
 }
 
 // embedClasses is the argument set of the backfill pick's class conjunct:

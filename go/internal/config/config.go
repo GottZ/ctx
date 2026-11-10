@@ -1727,7 +1727,7 @@ type EmbedBackfillConfig struct {
 	// answered 500 instead of degrading). A block that overruns the budget
 	// is memoized as caller_timeout (store.EmbedFailureCallerTimeout) and
 	// left to the background arm while that arm runs (Interval > 0; with
-	// the arm off the query path retries it within its budget); the
+	// the arm off the query path retries it itself after a backoff); the
 	// question embed keeps the rest of the deadline. Default 30 s (a quarter
 	// of the CLI deadline). 0 = unbounded, the pre-budget behavior (explicit
 	// opt-out, SyncCap convention): no deadline on the wire call, and a
@@ -1744,7 +1744,9 @@ type EmbedBackfillConfig struct {
 	// re-read the key, so a hot change applies within one slice. 0 = arm
 	// off (polled every 15 s for a hot re-enable, contract.recheck_interval
 	// convention); the query path then retries caller_timeout blocks
-	// itself, after everything else pending, instead of handing them off.
+	// itself instead of handing them off: after a backoff counted from the
+	// cut (BackoffBase/BackoffCap), and in the place of the cut in the
+	// order, oldest first.
 	Interval time.Duration `key:"embed_backfill.interval" env:"CTX_EMBED_BACKFILL_INTERVAL" default:"15" mut:"hot" tenancy:"global-only"`
 	// MaxTokens is the pre-wire Oversize-Gate estimate threshold
 	// (design/04 §4.4): len(embedText)/4 above this skips the block WITHOUT
@@ -1760,7 +1762,9 @@ type EmbedBackfillConfig struct {
 	MaxTokens int `key:"embed_backfill.max_tokens" env:"CTX_EMBED_BACKFILL_MAX_TOKENS" default:"24000" mut:"hot" tenancy:"global-only"`
 	// BackoffBase/BackoffCap shape the exponential retry backoff
 	// (base * 2^(attempts-1), capped) a non-oversize embed failure (backend
-	// down, transient wire error) gets memoized with — the SAME curve
+	// down, transient wire error) gets memoized with, and that the query
+	// path, with the arm off, lets a caller_timeout block sit out before it
+	// retries it — the SAME curve
 	// class as dream.backoff_* but scoped to embed failures, computed
 	// server-side in the upsert (store.RecordEmbedFailure) to avoid a
 	// read-then-write race across concurrent pickers. Bare seconds, like
