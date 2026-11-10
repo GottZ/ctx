@@ -158,7 +158,8 @@ def _scan_untracked(
     if count > cfg.max_untracked_files:
         top = [name for name, _ in per_dir.most_common(5)]
         raise PolicyDenied(
-            f"{count} untracked files exceed max_untracked_files ({cfg.max_untracked_files})",
+            f"the repository has {count} untracked files, more than the max_untracked_files setting allows "
+            f"({cfg.max_untracked_files})",
             reason="untracked_count",
             count=count,
             top_dirs=top,
@@ -205,7 +206,10 @@ def _scan_tracked(git: Git, root: Path, cfg: PolicyConfig, out: _Scan, cancelled
         out.excluded.append(NotTransferred(display_path(rec), "secret"))
         out.pathspecs.add(encode_pathspec(rec))
         if in_head:
-            out.warnings.append(f"denied_tracked: {display_path(rec)} keeps its committed content")
+            out.warnings.append(
+                f"{display_path(rec)} looks like a secret file, but git tracks it: the version in the last commit "
+                "travels with the git history, its uncommitted changes do not travel"
+            )
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -428,17 +432,24 @@ def _ship_lfs(
             st = os.lstat(path)
         except OSError:
             warnings.append(
-                f"lfs object {oid[:12]} not present locally; the pointer stays (git lfs pull on the target)"
+                f"a large file stored with Git LFS (object {oid[:12]}) is missing from the repository being handed "
+                "over, so it stays a placeholder file in the copy; run `git lfs pull` in the copy to download it"
             )
             continue
         if not stat.S_ISREG(st.st_mode) or st.st_size != size:
-            warnings.append(f"lfs object {oid[:12]} has the wrong size; not shipped")
+            warnings.append(
+                f"a large file stored with Git LFS (object {oid[:12]}) has the wrong size in the repository being "
+                "handed over and was not sent"
+            )
             continue
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(fd, "rb") as fh:
             m = put_stream(store, fh, media="application/octet-stream", cancelled=cancelled)
         if m.sha256 != oid:
-            warnings.append(f"lfs object {oid[:12]} does not match its oid; not shipped")
+            warnings.append(
+                f"a large file stored with Git LFS (object {oid[:12]}) does not match its checksum in the repository "
+                "being handed over and was not sent"
+            )
             continue
         entries.append(
             {"path": oid, "type": "file", "mode": "100644", "size": size, "mtime_ns": 0, "object": m.object_id}
@@ -598,13 +609,16 @@ def pack_repo(
     probe = GitProbe(git)
     top = probe.toplevel(str(r))
     if top is None or os.path.realpath(top) != os.path.realpath(r):
-        raise PolicyDenied("not the root of a git work tree", reason="special", path=str(r))
+        raise PolicyDenied("the folder is not the top folder of a git repository", reason="special", path=str(r))
     if probe.is_shallow(str(r)) or probe.is_partial(str(r)):
-        raise CapabilityMissing("shallow or partial clones travel as file trees", capability="git.full_history")
+        raise CapabilityMissing(
+            "a shallow or partial clone (one without its full history) travels as plain files, not as a git repository",
+            capability="git.full_history",
+        )
     gitdir, common = git_dirs(git, r)
     op = in_progress_op(gitdir)
     if op and not force:
-        raise ConflictError(f"a {op} is in progress", kind="in_progress", operation=op)
+        raise ConflictError(f"a git {op} is in progress in the repository", kind="in_progress", operation=op)
     fmt = object_format(git, r)
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -635,9 +649,12 @@ def pack_repo(
     skipped = tuple(scan.skipped)
     warnings = list(scan.warnings)
     if sw.unmerged:
-        warnings.append("unmerged paths were packed with their work-tree content; the merge state stays behind")
+        warnings.append(
+            "files with unresolved merge conflicts were sent as they are in the folder; the merge itself does not "
+            "travel, so it is not in progress in the copy"
+        )
     if op:
-        warnings.append(f"a {op} was in progress; its state stays behind")
+        warnings.append(f"a git {op} was in progress; it does not travel, so it is not in progress in the copy")
 
     cached = _load_cache(workdir, key, store)
     if cached is not None:

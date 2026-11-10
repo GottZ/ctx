@@ -77,7 +77,7 @@ def test_rv_e2_m24_iter_z_has_the_runner_deadline(tmp_path, how):
         for rec in git.iter_z(["ls-files", "-z"], cwd=tmp_path, spec=gitops.SOURCE, **kw):
             got.append(rec)
     assert time.monotonic() - t0 < 4
-    assert "timed out" in str(exc.value) and exc.value.details["rc"] == -1
+    assert "did not finish within 0.5 s" in str(exc.value) and exc.value.details["rc"] == -1
     assert b"b" not in got and got in ([], [b"a"])  # reads are buffered: a stalled chunk may hold "a" too
 
 

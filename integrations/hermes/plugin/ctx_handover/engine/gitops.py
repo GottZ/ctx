@@ -252,7 +252,8 @@ def undo_failed(cause: BaseException, undo: BaseException, *, path: str | os.Pat
     is copied from an orphaned-lock refusal."""
     extra = getattr(undo, "details", None) or {}
     return ConflictError(
-        f"{_said(cause)}; undoing the partial change at {os.fspath(path)} failed: {_said(undo)}",
+        f"{_said(cause)}; undoing the partial change at {os.fspath(path)} failed too ({_said(undo)}): check that "
+        "place by hand",
         kind="undo_failed",
         needs_attention=True,
         path=os.fspath(path),
@@ -266,10 +267,10 @@ def partial_exists(path: str | os.PathLike, dest: str | os.PathLike | None = Non
     """The refusal of a fresh PREPARE whose partial path (``<dest parent>/.ctxh-<job6>``, a staged extra file) is
     taken by something this handover did not leave there (L3-F08): it is neither written into nor removed.
     ``ConflictError(kind=partial_exists, path[, dest])`` — not retryable, the message says what to do."""
-    where = f" (this handover prepares {os.fspath(dest)} under that name)" if dest is not None else ""
+    where = f" (the handover uses that name while it prepares {os.fspath(dest)})" if dest is not None else ""
     return ConflictError(
-        f"{os.fspath(path)} is in the way{where} and was not left there by this handover; the plugin neither writes "
-        "into it nor removes it: move or remove it, then hand over again",
+        f"{os.fspath(path)} is in the way{where}. This handover did not create it, so the plugin neither writes into "
+        "it nor removes it: move or remove it, then hand over again",
         kind="partial_exists",
         path=os.fspath(path),
         **({"dest": os.fspath(dest)} if dest is not None else {}),
@@ -428,7 +429,10 @@ class Git:
         if ver is None or ver[:2] < MIN_GIT:
             shown = ".".join(map(str, ver)) if ver else "none"
             raise CapabilityMissing(
-                f"git {shown} is below the minimum {MIN_GIT[0]}.{MIN_GIT[1]}", capability="git.bundle.v1", git=shown
+                f"handing over a git repository needs git {MIN_GIT[0]}.{MIN_GIT[1]} or newer (found: {shown}); "
+                "install or update git",
+                capability="git.bundle.v1",
+                git=shown,
             )
         return ver
 
@@ -578,7 +582,9 @@ class Git:
                 if time.monotonic() >= deadline:
                     proc.kill()
                     proc.communicate()
-                    raise GitCommandError(f"git timed out after {limit:.0f}s", rc=-1, subcommand=str(args[0])) from None
+                    raise GitCommandError(
+                        f"git did not finish within {limit:g} s and was stopped", rc=-1, subcommand=str(args[0])
+                    ) from None
         result = subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
         if check and proc.returncode != 0:
             raise self._error(args, proc.returncode, err)
@@ -696,7 +702,9 @@ class Git:
                 proc.stdout.close()
                 rc = proc.wait()
             if expired.is_set():
-                raise GitCommandError(f"git timed out after {limit:.0f}s", rc=-1, subcommand=str(args[0]))
+                raise GitCommandError(
+                    f"git did not finish within {limit:g} s and was stopped", rc=-1, subcommand=str(args[0])
+                )
             if rc != 0:
                 errf.seek(0)
                 raise self._error(args, rc, errf.read()[-_STDERR_CAP:])
@@ -896,10 +904,12 @@ def check_version(git: Git) -> tuple[bool, str | None]:
     version is below it (DESIGN §9.2, SEC 3.6); ``doctor`` fails on False and shows the warning."""
     ver = git.version()
     if ver is None:
-        return False, "git is not available"
+        return False, f"git was not found on this machine; install git {MIN_GIT[0]}.{MIN_GIT[1]} or newer"
     shown = ".".join(map(str, ver))
     if ver[:2] < MIN_GIT:
-        return False, f"git {shown} is below the minimum {MIN_GIT[0]}.{MIN_GIT[1]}"
+        return False, (
+            f"git {shown} is older than {MIN_GIT[0]}.{MIN_GIT[1]}, the oldest version the plugin supports; update git"
+        )
     latest = max(PATCHED_LINES)
     if ver[:2] > latest[:2]:
         return True, None
@@ -908,8 +918,8 @@ def check_version(git: Git) -> tuple[bool, str | None]:
         return True, None
     want = ".".join(map(str, line or latest))
     return True, (
-        f"git {shown} predates the security fixes of {want} (2024 checkout/clone CVEs, CVE-2025-48384); "
-        "distributions may have backported them"
+        f"git {shown} is older than {want}, which fixes known security holes in git checkout and clone (2024, "
+        "CVE-2025-48384); your distribution may have added these fixes to its own git package; if not, update git"
     )
 
 
@@ -923,15 +933,19 @@ def validate_ref(git: Git, name: str, *, allow_ctxh: bool = False) -> str:
     ``refs/ctxh/{head,index,worktree,stash/<n>}`` only with ``allow_ctxh``), no control characters, and
     ``git check-ref-format`` (DESIGN §9.5 step 3). Raises ``PolicyDenied``."""
     if not isinstance(name, str) or not name or len(name) > 1024:
-        raise PolicyDenied("invalid ref name", reason="special", ref=str(name)[:200])
+        raise PolicyDenied("a received git reference name is not valid", reason="special", ref=str(name)[:200])
     if any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
-        raise PolicyDenied("ref name with control characters", reason="special", ref=repr(name)[:200])
+        raise PolicyDenied(
+            "a received git reference name contains control characters", reason="special", ref=repr(name)[:200]
+        )
     allowed = name.startswith(REF_NAMESPACES) or (allow_ctxh and _CTXH_REF_RE.fullmatch(name) is not None)
     if not allowed or name.rstrip("/") in {ns.rstrip("/") for ns in REF_NAMESPACES}:
-        raise PolicyDenied("ref outside the allowed namespaces", reason="special", ref=name[:200])
+        raise PolicyDenied(
+            "a received git reference is not a branch, tag, remote branch or note", reason="special", ref=name[:200]
+        )
     proc = git.run(["check-ref-format", name], cwd=None, spec=RECEIVED, check=False)
     if proc.returncode != 0:
-        raise PolicyDenied("malformed ref name", reason="special", ref=name[:200])
+        raise PolicyDenied("a received git reference name is malformed", reason="special", ref=name[:200])
     return name
 
 
@@ -945,27 +959,36 @@ def validate_remote(name: str, url: str) -> tuple[str, str]:
     no ``<helper>::``, ``ext::``, ``fd::``, ``file:``, local paths, no leading ``-``, no CR/LF/NUL/control
     characters; userinfo stripped (an ssh user name is kept). Returns ``(name, url)`` or raises ``PolicyDenied``."""
     if not isinstance(name, str) or not _REMOTE_NAME_RE.fullmatch(name) or name[0] in "-." or ".." in name:
-        raise PolicyDenied("invalid remote name", reason="special", remote=str(name)[:80])
+        raise PolicyDenied("its name is not allowed", reason="special", remote=str(name)[:80])
     if not isinstance(url, str) or not url or len(url) > 2048 or _has_control(url):
-        raise PolicyDenied("invalid remote url", reason="special", remote=name)
+        raise PolicyDenied("its address is not valid", reason="special", remote=name)
     if url.startswith("-") or "::" in url or url.lower().startswith("file:"):
-        raise PolicyDenied("remote url transport not allowed", reason="special", remote=name)
+        raise PolicyDenied(
+            "its address uses a form the plugin refuses (file:, a git helper such as ext::, or a leading dash)",
+            reason="special",
+            remote=name,
+        )
     scheme_match = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*)://", url)
     if scheme_match:
         scheme = scheme_match.group(1).lower()
         if scheme not in _URL_SCHEMES:
-            raise PolicyDenied("remote url scheme not allowed", reason="special", remote=name, scheme=scheme)
+            raise PolicyDenied(
+                "its address type is not allowed (only https, http, ssh and git)",
+                reason="special",
+                remote=name,
+                scheme=scheme,
+            )
         rest = url[scheme_match.end() :]
         host = rest.split("/", 1)[0].rsplit("@", 1)[-1]
         if not host or host.startswith("-"):
-            raise PolicyDenied("remote url without host", reason="special", remote=name)
+            raise PolicyDenied("its address names no server", reason="special", remote=name)
         return name, strip_url_userinfo(url)
     scp = _SCP_RE.match(url)
     if scp is None or "/" in url.split(":", 1)[0]:
-        raise PolicyDenied("remote url is a local path", reason="special", remote=name)
+        raise PolicyDenied("its address is a local path", reason="special", remote=name)
     host = scp.group("host")
     if len(host) == 1 or host.startswith("-") or scp.group("path").startswith("-"):
-        raise PolicyDenied("remote url host not allowed", reason="special", remote=name)
+        raise PolicyDenied("its server name is not allowed", reason="special", remote=name)
     return name, url
 
 
@@ -1151,7 +1174,9 @@ def compute_state(
     if unmerged:
         if not force:
             raise ConflictError(
-                "the repository has unmerged paths", kind="in_progress", paths=[display_path(p) for p in unmerged[:20]]
+                "the repository has unresolved merge conflicts",
+                kind="in_progress",
+                paths=[display_path(p) for p in unmerged[:20]],
             )
         ps_u = _write_pathspec_file(scratch / "unmerged.ps", (b":(literal)" + p for p in unmerged))
         git.run(
@@ -1906,7 +1931,7 @@ def name_report(rels: Iterable[str], *, cap: int = NAME_REPORT_CAP) -> tuple[lis
                 invalid.append(enc_path(rel))
     warnings: list[str] = []
     if len(pairs) > cap:
-        warnings.append(f"{len(pairs) - cap} more case-colliding paths not listed")
+        warnings.append(f"{len(pairs) - cap} more paths that differ only in upper/lower case are not listed")
     if n_invalid > cap:
-        warnings.append(f"{n_invalid - cap} more paths invalid on Windows not listed")
+        warnings.append(f"{n_invalid - cap} more paths that are not valid on Windows are not listed")
     return [[enc_path(a), enc_path(b)] for a, b in pairs[:cap]], invalid, warnings
