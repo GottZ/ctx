@@ -531,7 +531,10 @@ written: each shipped object once and, when git-lfs is installed there, once mor
 When a path that `git lfs checkout` would write there is a symbolic link or lies behind one, and git-lfs there is
 older than 3.7.1 or its version cannot be read, the plugin does not run it (git-lfs before 3.7.1 writes through such
 links, CVE-2025-26625): the files stay pointers, and the final message names the link and recommends git-lfs 3.7.1 or
-newer. With git-lfs 3.7.1 or newer the checkout runs in that case too.
+newer. With git-lfs 3.7.1 or newer the checkout runs in that case too; git-lfs itself then leaves a file behind such a
+link as a placeholder, and the plugin does not report it. While it fills the files, git-lfs can also copy files that
+the received `.gitattributes` marks for Git LFS but that arrived as ordinary files into the repository's LFS store; the
+size check above does not count those copies (at most the size of those files once more).
 
 Before anything is locked the plugin shows what would move: the workspace and its size, every item outside the project
 with its size (the 10 largest, then how many more), the repositories inside the workspace that stay here (each
