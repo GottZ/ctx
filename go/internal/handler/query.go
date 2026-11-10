@@ -813,8 +813,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// Temporal relevance handled by FTS expansion, Dimension Table, and Gravity Boost.
 	embedQuery := searchQuery
 
-	// Step 3d: Backfill any blocks with missing embeddings before searching.
-	// Ensures freshly stored blocks are immediately searchable. Per block the
+	// Step 3d: Backfill pending embeddings in the caller's read scopes before
+	// searching, newest first (issue #199; see backfillPending for the arm-off
+	// fallback). Ensures freshly stored blocks are immediately searchable. Per block the
 	// chain resolves with THAT block's floor-adjusted sensitivity (F3 §2.3
 	// gate table, embed-backfill row).
 	//
@@ -834,7 +835,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// scheduler's own backfill and in the next ordinary query.
 	floor := cfg.Pool.ScopeSensitivityFloor
 	if len(req.ShadowTypes) == 0 {
-		if backfilled := h.backfillPending(ctx, floor, ar.HomeScope, h.embedAdmission(), cfg); backfilled > 0 {
+		if backfilled := h.backfillPending(ctx, floor, ar.ReadScopes, h.embedAdmission(), cfg); backfilled > 0 {
 			slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
 		}
 	}
@@ -1722,9 +1723,40 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 	}
 }
 
-// backfillPending generates embeddings for any blocks that don't have one yet.
+// backfillPending generates embeddings for pending blocks the caller can read.
 // Called before search to ensure freshly stored blocks are immediately findable.
 // Returns the number of blocks backfilled (0 in the common case).
+//
+// The pick (issue #199) is bound to readScopes, the scopes this request's
+// search reads, and takes the newest pending block first:
+//
+//   - Scope: a vector in a scope the caller cannot read cannot change this
+//     request's result, and embedding it spends the caller's inline allowance
+//     and interactive slot on another tenant's backlog. A block that reaches
+//     the caller only through a block grant sits in its owner's scope and is
+//     left to the owner's queries and the background arm.
+//   - Order: created_at DESC. The background arm (events.backfillStep) works
+//     the same queue created_at ASC, so the two meet in the middle and the
+//     arm's order is what keeps an old block from starving. Taking the
+//     newest here is what lets a block stored a moment ago reach the vector
+//     arm on the caller's next query, with a backlog ahead of it or not. The
+//     partial index idx_embedding_pending (created_at) serves the order in
+//     both directions; scope is a filter on top of it, so a caller with
+//     nothing pending walks the pending rows of the other scopes before the
+//     pick comes back empty.
+//   - Head of line: a block with no eligible embed chain (its floor-adjusted
+//     sensitivity is above every backend it may use) gets no memo, so it
+//     would stay the newest pending block and every request would stop on
+//     it. It is left out of the further picks of this request instead, and
+//     the loop goes on to the next block; the skip uses up one sync_cap
+//     slot, which bounds the picks a request makes.
+//
+// With the background arm off (embed_backfill.interval=0) this loop can be
+// the only embedder there is. The caller's scopes still go first, and when
+// they hold nothing pending the pick falls back to any pending block, newest
+// first, so no block is left to nobody. That is the same switch that already
+// selects the predicate below.
+//
 // Since F3-P3 the chain resolves PER BLOCK with that block's floor-adjusted
 // sensitivity (gate table embed-backfill row) and each wire call leaves a
 // slim llmlog row with the block id.
@@ -1738,7 +1770,7 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 // position — a younger interactive query embed overtakes the waiting
 // backfill rest between two blocks. (Dispatch attribution is separate from
 // the T35b llmlog attribution below, which stays NULL/background in nature.)
-func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFloor, scope string, adm embedcache.Admission, cfg *config.Config) int {
+func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFloor, readScopes []string, adm embedcache.Admission, cfg *config.Config) int {
 	count := 0
 	syncCap := cfg.EmbedBackfill.SyncCap
 	// Time budget next to the count cap (embed_backfill.sync_budget, issue
@@ -1764,9 +1796,30 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 	// predicate and picks it up again (its memo is due at once). Review
 	// finding M1; interval is global-only, so this per-request snapshot
 	// reads the value the arm runs on.
+	armRuns := cfg.EmbedBackfill.Interval > 0
 	pendingExcluded := store.EmbedFailureExcludedPredicate
-	if cfg.EmbedBackfill.Interval > 0 {
+	if armRuns {
 		pendingExcluded = store.EmbedFailureQueryPathExcludedPredicate
+	}
+	// unservable holds the blocks this request found without an eligible
+	// embed chain. Non-nil from the start: a nil slice binds as NULL, and
+	// id <> ALL(NULL) matches no row.
+	unservable := []string{}
+	// pick takes the newest pending block this request has not set aside,
+	// inside scopeConjunct when one is given. The predicates carry no
+	// placeholders: $1 is the skip list, $2 the conjunct's. The id breaks
+	// the tie between blocks of one created_at (one transaction).
+	pick := func(scopeConjunct string, args ...any) (blockID, title, content, sens, scope string, err error) {
+		err = h.pool.QueryRow(ctx,
+			`SELECT id, title, content, sensitivity, scope FROM context_blocks
+			WHERE embedding IS NULL AND NOT is_archived`+
+				pendingExcluded+store.RetrievalExcludedTypePredicate+`
+			  AND id <> ALL($1::uuid[])`+scopeConjunct+`
+			ORDER BY created_at DESC, id DESC
+			LIMIT 1`,
+			append([]any{unservable}, args...)...,
+		).Scan(&blockID, &title, &content, &sens, &scope)
+		return blockID, title, content, sens, scope, err
 	}
 	for attempts := 0; syncCap <= 0 || attempts < syncCap; attempts++ {
 		if !budgetDeadline.IsZero() && !time.Now().Before(budgetDeadline) {
@@ -1774,12 +1827,12 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 				"budget", cfg.EmbedBackfill.SyncBudget, "backfilled", count)
 			break
 		}
-		var blockID, title, content, sens, scope string
-		err := h.pool.QueryRow(ctx,
-			`SELECT id, title, content, sensitivity, scope FROM context_blocks
-			WHERE embedding IS NULL AND NOT is_archived`+
-				pendingExcluded+store.RetrievalExcludedTypePredicate+`
-			LIMIT 1`).Scan(&blockID, &title, &content, &sens, &scope)
+		blockID, title, content, sens, scope, err := pick("\n\t\t\t  AND scope = ANY($2::text[])", readScopes)
+		if errors.Is(err, pgx.ErrNoRows) && !armRuns {
+			// Nothing pending the caller can read, and no arm to leave the
+			// rest to: embed any pending block.
+			blockID, title, content, sens, scope, err = pick("")
+		}
 		if err != nil {
 			break // No more pending blocks (or error).
 		}
@@ -1788,9 +1841,13 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 		chain, cerr := h.backendPool.Chain(backends.RoleEmbed, required, scope)
 		if cerr != nil {
 			// Trust/profile-empty chain: the block stays unembedded (visible
-			// via FTS only) — never escalate across the trust border.
+			// via FTS only) — never escalate across the trust border. No
+			// memo (eligibility is recomputed from the live chain, same rule
+			// as the background arm): the block is set aside for the rest of
+			// this request and the next pick takes the one behind it.
 			slog.Warn("query backfill: no eligible embed backend", "block_id", blockID, "error", cerr)
-			break
+			unservable = append(unservable, blockID)
+			continue
 		}
 
 		embedText := title + "\n\n" + content
@@ -1840,12 +1897,13 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 		if wired {
 			// TENANT-DECISION(backfill-attribution): "" → NULL. backfillPending is
 			// query-triggered but maintenance in nature — it embeds whatever blocks
-			// in this scope still lack a vector, not the caller's own request.
+			// in the caller's read scopes still lack a vector (any scope with the
+			// background arm off), not the caller's own request.
 			// Charging the random foreground key that happens to trigger it would
 			// skew per-key cost/call accounting (one query could absorb hundreds of
 			// embed calls). Treated as background, same as the scheduler backfill.
 			// Reversible if backfill cost should follow the triggering caller (then
-			// backfillPending gains an apiKeyID param alongside its T34 scope param).
+			// backfillPending gains an apiKeyID param alongside its readScopes param).
 			h.logEmbedWire(ctx, "embed-backfill", required, served, wireAttempts, []string{blockID}, err, "")
 		}
 		if err != nil {

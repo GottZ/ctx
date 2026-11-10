@@ -118,7 +118,7 @@ func TestBackfillPending_SyncBudget_Integration(t *testing.T) {
 		}}
 
 		started := time.Now()
-		got := h.backfillPending(ctx, nil, "private", h.embedAdmission(), cfg)
+		got := h.backfillPending(ctx, nil, []string{"private"}, h.embedAdmission(), cfg)
 		elapsed := time.Since(started)
 		if got != 1 {
 			t.Fatalf("RED premise: backfilled = %d, want 1 (unbudgeted loop embeds the slow block)", got)
@@ -149,7 +149,7 @@ func TestBackfillPending_SyncBudget_Integration(t *testing.T) {
 		defer cancelReq()
 
 		started := time.Now()
-		got := h.backfillPending(reqCtx, nil, "private", h.embedAdmission(), cfg)
+		got := h.backfillPending(reqCtx, nil, []string{"private"}, h.embedAdmission(), cfg)
 		elapsed := time.Since(started)
 		if got != 0 {
 			t.Fatalf("backfilled = %d, want 0 (the slow block must not count)", got)
@@ -187,7 +187,7 @@ func TestBackfillPending_SyncBudget_Integration(t *testing.T) {
 		// Pfad A never picks it again, however much budget it has.
 		cfg.EmbedBackfill.SyncBudget = 10 * time.Second
 		h2, hits2, _ := newHandler(t, 0)
-		if again := h2.backfillPending(ctx, nil, "private", h2.embedAdmission(), cfg); again != 0 {
+		if again := h2.backfillPending(ctx, nil, []string{"private"}, h2.embedAdmission(), cfg); again != 0 {
 			t.Fatalf("second backfillPending embedded %d, want 0 (caller_timeout blocks belong to the background arm)", again)
 		}
 		if hits2.Load() != 0 {
@@ -220,7 +220,7 @@ func TestBackfillPending_SyncBudget_Integration(t *testing.T) {
 			time.Sleep(200 * time.Millisecond)
 			cancelReq()
 		}()
-		if got := h.backfillPending(reqCtx, nil, "private", h.embedAdmission(), cfg); got != 0 {
+		if got := h.backfillPending(reqCtx, nil, []string{"private"}, h.embedAdmission(), cfg); got != 0 {
 			t.Fatalf("backfilled = %d, want 0", got)
 		}
 		class, dueNow, _ := readMemo(t)
@@ -250,7 +250,7 @@ func TestBackfillPending_SyncBudget_Integration(t *testing.T) {
 			time.Sleep(200 * time.Millisecond)
 			cancelReq()
 		}()
-		if got := h.backfillPending(reqCtx, nil, "private", h.embedAdmission(), cfg); got != 0 {
+		if got := h.backfillPending(reqCtx, nil, []string{"private"}, h.embedAdmission(), cfg); got != 0 {
 			t.Fatalf("backfilled = %d, want 0", got)
 		}
 		class, dueNow, _ := readMemo(t)
@@ -284,7 +284,7 @@ func TestBackfillPending_SyncBudget_Integration(t *testing.T) {
 			SyncCap: 4, SyncBudget: 10 * time.Second, Interval: 0,
 			MaxTokens: 1_000_000, BackoffBase: time.Minute, BackoffCap: time.Hour,
 		}}
-		if got := h.backfillPending(ctx, nil, "private", h.embedAdmission(), cfg); got != 1 {
+		if got := h.backfillPending(ctx, nil, []string{"private"}, h.embedAdmission(), cfg); got != 1 {
 			t.Fatalf("backfilled = %d, want 1 (arm off: the query path must not leave the block to nobody)", got)
 		}
 		if hits.Load() != 1 {
