@@ -1736,7 +1736,8 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 //     request's result, and embedding it spends the caller's inline allowance
 //     and interactive slot on another tenant's backlog. A block that reaches
 //     the caller only through a block grant sits in its owner's scope and is
-//     left to the owner's queries and the background arm.
+//     left to the owner's queries and the background arm (without an arm,
+//     to the old end below, which is not bound to the caller).
 //   - Order: created_at DESC. The background arm (events.backfillStep) works
 //     the same queue created_at ASC, so the two meet in the middle and the
 //     arm's order is what keeps an old block from starving; without an arm
@@ -1755,7 +1756,10 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 //     works out per scope which sensitivities an embed backend takes
 //     (embedServableClasses, with the floor the chain below applies), and
 //     the pick returns servable blocks only. An unservable block therefore
-//     costs neither a pick nor a sync_cap slot, however many are pending.
+//     costs neither a pick statement nor a sync_cap slot, however many are
+//     pending. It stays pending, though, and the class is a filter on the
+//     index walk: every pick walks past the unservable rows ahead of the one
+//     it returns, in the caller's scopes too.
 //
 // With the background arm off (embed_backfill.interval=0) this loop can be
 // the only embedder there is, so it works both ends of the queue itself.
