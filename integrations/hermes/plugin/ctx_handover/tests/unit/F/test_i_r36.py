@@ -1,4 +1,4 @@
-"""R36 / L3-F19 (package i-r36), cluster F part: the summary before sending names the workspace against the session's
+"""R36 / L3-F19, cluster F part: the summary before sending names the workspace against the session's
 folder, and a workspace that holds more than that folder needs a confirmation ``--yes`` does not give (reason (j)
 ``workspace_differs``); the README says how the workspace is chosen.
 

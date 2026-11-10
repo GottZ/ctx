@@ -4,7 +4,7 @@
 ``EnvFacts.python_version`` are declared with ``model.added_field``: the wire form omits them at their default,
 so documents and ids that do not use them keep the bytes they had before the fields existed. The pinned ids
 below were computed with the model of commit ``c32a862d`` (before K-3) by
-``lab/L2-redproof/wp-k0/pin_ids.py`` (output ``pinned-before.txt``) from exactly these documents.
+a red-proof script (output ``pinned-before.txt``) from exactly these documents.
 """
 
 from __future__ import annotations

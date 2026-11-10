@@ -1,14 +1,14 @@
 """Review round 3: README disclosure (catalog rule 13) bound to the code.
 
-- R2-L5 (``REVIEW-2.md`` §3, g7 round 2 §2): reading the password database (``pwd.getpwall()``, target denylist for
+- R2-L5 (the second review §3): reading the password database (``pwd.getpwall()``, target denylist for
   every account's home) was missing under **Reads**; the thread ``ctxh-hook-runtime`` was missing under **Background
   work**, which otherwise names threads. The test below collects every thread name the runtime code starts
   (``threading.Thread(name=…)``, ``thread_name_prefix=``) and every ``threading.Timer`` and requires each in that
   paragraph — the next thread cannot be added silently.
-- M33 rest (``REVIEW-2.md`` §5, g7): **Writes** said "workspace copies under ``allow_roots``" without the exceptions;
+- M33 rest (the second review §5, g7): **Writes** said "workspace copies under ``allow_roots``" without the exceptions;
   the third ``recorded`` case of ``local_target.negotiate`` (a destination this peer delivered into here before, the
   ledger's ``in`` row) was named nowhere.
-- M34 rest (``REVIEW-2.md`` §5, g7 probe ``test_g7_identity_env.py``): ``Identity.load`` reads the ``.env`` also when
+- M34 rest (the second review §5): ``Identity.load`` reads the ``.env`` also when
   ``get_secret`` returns a key that does not reproduce the ledger's public key; the README said "only when
   ``get_secret`` does not return it"."""
 

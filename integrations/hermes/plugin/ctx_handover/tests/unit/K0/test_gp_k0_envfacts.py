@@ -1,4 +1,4 @@
-"""K0 round G′, V40 / R29 (integrator point (1), wish of gp-d): ``EnvFacts`` carries the target's own check of
+"""K0 round G′, V40 / R29 (integrator point (1), wish): ``EnvFacts`` carries the target's own check of
 its workspace root — ``workspace_root_ok`` (``None`` = not checked) and ``workspace_root_problem`` — as fields added
 after the v1 wire form (contract K-3): facts that do not set them keep their id, set fields survive the wire."""
 

@@ -1,4 +1,4 @@
-"""Review round 3, R2-L4 (``REVIEW-2.md`` §3; g6 round 2 L-N1, probe ``p8_given_back_text.py``): the M27 fix refuses
+"""Review round 3, R2-L4 (the second review §3): the M27 fix refuses
 the continuation with ``continue_refused`` / ``reason: source_given_back`` when the source took the session back during
 the retire; the surfaces knew only ``approvals_off`` and ``unverified`` and explained every other refusal with
 ``allow_remote_continue`` — whoever followed that line switched a setting that changes nothing. After a push the first

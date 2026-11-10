@@ -1,4 +1,4 @@
-"""Layer R (red first) — open contract points of cluster F (``reports/L2-contracts.md`` V02, V10, V27, V31 and the
+"""Layer R (red first) — open contract points of cluster F (the layer-2 contract V02, V10, V27, V31 and the
 F clean-up of §2), checked against the real neighbour modules (D ``plan``, C ``wire``, A ``Ledger``)."""
 
 from __future__ import annotations
@@ -119,7 +119,7 @@ def _rejecting_client(peer):
 
 
 def test_l2r_doctor_peer_line_is_the_probe_summary_of_wire(fake_host, tmp_path):
-    """V27 (X24, wp-c W-5): the doctor line of a paired gateway is cluster C's ``probe_gate`` summary — its
+    """V27 (X24, W-5): the doctor line of a paired gateway is cluster C's ``probe_gate`` summary — its
     ``ok``, ``detail`` and ``remedy`` — and F adds only the clock skew; no second classification of the report
     beside it (``commands.peer_check`` derives its own texts today)."""
     backend, runtime = backend_with_runtime(fake_host, tmp_path)
@@ -176,7 +176,7 @@ def test_l2r_parked_run_gets_its_closing_text(step):
 
 
 def test_l2r_rotate_identity_does_not_set_the_runtime_identity(fake_host, tmp_path):
-    """L2-contracts §2 F: ``EngineBackend.rotate_identity`` writes the new key (``Identity.create(…,
+    """Layer-2 contract §2 F: ``EngineBackend.rotate_identity`` writes the new key (``Identity.create(…,
     rotate=True)``) and nothing else — the profile runtime reloads its identity itself when the ledger names
     another key (``jobs._identity``), so F does not set ``rt.identity``/``rt.identity_error``."""
     backend, runtime = backend_with_runtime(fake_host, tmp_path)

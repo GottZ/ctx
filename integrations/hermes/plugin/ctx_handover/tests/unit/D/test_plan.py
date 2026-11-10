@@ -418,7 +418,7 @@ def test_pull_released_addition_keeps_the_conductors_plan_id(lay):
     plan has the conductor's ``plan_id`` — the target verifies the pack against exactly that id; an addition the
     conductor did not confirm narrows to ``no``.
 
-    Mutant (red proof, ``lab/L2-redproof/g-d``): the Schicht-R rebuild of the item (realpath, own ``reasons``,
+    Mutant (red proof): the layer-R rebuild of the item (realpath, own ``reasons``,
     ``lstat`` size) ⇒ another ``plan_id`` (the pull ended ``VerifyFailed`` at the target)."""
     other = write(lay.notes / "other.md")
     sub = lay.notes / "sub"
@@ -445,7 +445,7 @@ def test_pull_addition_through_a_link_is_withheld(lay):
     ``export_roots``; the canonical path of the same file is released. A link to a secret outside the roots fails
     the same way, before any content check.
 
-    Mutant (red proof, ``lab/L2-redproof/g-d``): the canonical-path check removed ⇒ the link file is released
+    Mutant (red proof): the canonical-path check removed ⇒ the link file is released
     (``DID NOT RAISE``)."""
     target = write(lay.notes / "real.md")
     write(lay.notes / "sub" / "a.txt")

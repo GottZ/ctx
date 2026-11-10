@@ -1,6 +1,6 @@
 """K0/L2: cost bounds of the source policy at scale — counted filesystem calls instead of wall-clock time.
 
-E measured about 1 ms per file in ``check_source_file`` (reports/E.md §7): every call resolved the Hermes bases,
+E measured about 1 ms per file in ``check_source_file``: every call resolved the Hermes bases,
 ``$HOME`` and the item root again (13 ``realpath`` calls per file). These tests pin the fix by counting calls,
 which stays deterministic under any host load: without a cache a check resolves at most five paths; with one
 ``SourceCheckCache`` per scan the ``realpath`` work is per directory, not per file, while every entry still gets

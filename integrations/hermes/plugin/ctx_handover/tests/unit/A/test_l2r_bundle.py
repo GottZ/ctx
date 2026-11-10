@@ -1,4 +1,4 @@
-"""Layer R (red) for the bundle points of ``reports/L2-contracts.md`` (cluster A side), with the real modules:
+"""Layer R (red) for the bundle points of the layer-2 contract (cluster A side), with the real modules:
 
 * V24 — a CLI export (``plan_sync`` + ``run_foreground``, the real ``bundle.BundleTarget`` factory, no memo) ends
   DONE, not ``in_doubt`` ("bundle commit before prepare").

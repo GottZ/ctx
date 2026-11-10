@@ -1,4 +1,4 @@
-"""Round G‴ of cluster F (``reports/L2/pkg/G3.md`` package g3-df, lab findings of the E2E suite):
+"""Round G‴ of cluster F (lab findings of the E2E suite):
 
 * L3-F17 / R32 — a session larger than the target model's context window: the surfaces show it (pre-send line,
   question, plan) and ``--yes`` does not confirm it; without a person nothing is locked;
@@ -6,9 +6,9 @@
   too; several matches ⇒ a clear message;
 * L3-F14 — refusals are machine-readable: a refused ``reclaim`` exits ≠ 0 with ``ok: false`` and ``error.code``; a
   job the runner ended (``session_busy``) carries its code into ``--json``;
-* L17 — the final message names title, session id and the exact way to open the received session (g3-b: it is
+* L17 — the final message names title, session id and the exact way to open the received session (it is
   stored, not open — Desktop sidebar, ``hermes sessions list``, ``hermes --resume <id>``);
-* L15 / R33 — under ``plugins.isolation: host`` ``doctor`` names the isolation (since g5, L3-F21: a warning that
+* L15 / R33 — under ``plugins.isolation: host`` ``doctor`` names the isolation (L3-F21: a warning that
   says what ran end to end there and what did not — ``tests/unit/F/test_g5_host_isolation.py``), and the
   ``listener_missing`` text names host isolation and the bundle path.
 
@@ -290,7 +290,7 @@ def test_a_job_the_runner_ended_carries_its_error_code(capsys):
 
 def test_final_message_names_title_id_and_how_to_open_it(capsys):
     """★ L17: a received session is stored, not open — a gateway's list of open sessions (``session.list``
-    without ``scope: stored``) misses it until the first open (g3-b, upstream ``gateway/session_controls.py:584``).
+    without ``scope: stored``) misses it until the first open (upstream ``gateway/session_controls.py:584``).
     The final message names title and session id and says exactly how to open it: Desktop sidebar,
     ``hermes sessions list``, ``hermes --resume <id>``. A push says it for the other gateway. Before G‴: "Open it
     from the session list and send a message"."""
@@ -322,7 +322,7 @@ def test_final_message_names_title_id_and_how_to_open_it(capsys):
 
 
 def test_status_names_the_session_the_job_created():
-    """★ L17 (g3-a's ``target_session`` in every status entry): ``/handover status`` names the session a pull made
+    """★ L17 (the ``target_session`` in every status entry): ``/handover status`` names the session a pull made
     here, or a push made on the other gateway, and how to open it; an entry without a usable id names nothing.
     Before G‴ the status line of a conductor job named no session."""
     plugin, backend, _ = _plugin()
@@ -380,7 +380,7 @@ def test_doctor_names_the_host_isolation_limit(settings, peers):
     the isolation with ``in_process`` as the verified setup. Before G‴ the line said only "no CLI, no progress
     notices" — and only inside the plugin host.
 
-    Adapted in g5 (L3-F21, R33 corrected): the line was a FAIL "cannot receive or provide handovers over HTTP" when
+    Adapted for L3-F21 (R33 corrected): the line was a FAIL "cannot receive or provide handovers over HTTP" when
     paired devices dial in, but the lab pulled through exactly such a gateway's ``hermes serve``; it is a warning in
     every case now (details in ``test_g5_host_isolation.py``)."""
     config = {"plugins": {"isolation": "host", "entries": {"ctx_handover": {"settings": dict(settings)}}}}
@@ -402,7 +402,7 @@ def test_missing_routes_text_names_host_isolation():
 
 
 def test_partial_in_the_way_names_the_path():
-    """Integrator wish (g3-e's ``ConflictError(kind="partial_exists")``, L3-F08): the text names the path."""
+    """Integrator wish (the ``ConflictError(kind="partial_exists")``, L3-F08): the text names the path."""
     err = ConflictError("x", kind="partial_exists", path="/home/u/hermes-handover/.ctxh-abc123")
     text = surfaces.render_error(err, "laptop")
     assert "/home/u/hermes-handover/.ctxh-abc123" in text and "Move or remove it" in text
@@ -415,7 +415,7 @@ def test_partial_in_the_way_names_the_path():
 
 def test_readme_names_the_g3_limits_and_answers():
     """The README says what the surfaces say: the window question ``--yes`` does not answer (R32), how to open a
-    received session (L17), host isolation (R33; since g5 what ran under ``host`` and what is not verified, L3-F21),
+    received session (L17), host isolation (R33; what ran under ``host`` and what is not verified, L3-F21),
     short job ids (L3-F15) and the reclaim exit code (L3-F14)."""
     text = " ".join((PLUGIN_ROOT / "README.md").read_text(encoding="utf-8").split())
     for needle in (
@@ -424,7 +424,7 @@ def test_readme_names_the_g3_limits_and_answers():
         "`hermes --resume <session-id>`",
         "Desktop sidebar",
         "`hermes sessions list`",
-        "`hermes serve` forwards the ctx_handover routes there",  # R33 as corrected in g5 (L3-F21)
+        "`hermes serve` forwards the ctx_handover routes there",  # R33 as corrected for L3-F21
         "**Not verified** under `host`",
         "`in_process`",
         "bundles",

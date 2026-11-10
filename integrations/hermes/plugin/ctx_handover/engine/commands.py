@@ -184,9 +184,10 @@ class Backend(Protocol):
     ) -> tuple[str, FinalPlan | None]: ...
     def continue_async(self, job_id: str) -> None: ...
     def run_foreground(self, job_id: str) -> int: ...
-    def cancel(self, job_id: str) -> str:
+    def cancel(self, job_id: str, *, force: bool = False) -> str:
         """The answer of a requested cancel; a cancel that cancels nothing (finished, aborted, past the commit point)
-        raises ``InvalidState`` with the text naming the job's state (L3-F22)."""
+        raises ``InvalidState`` with the text naming the job's state (L3-F22). ``force`` (``cancel --force``) ends a
+        job stuck in ABORTING here; the surfaces pass it only when the flag is given."""
         ...
 
     def resume(self, job_id: str) -> None: ...
@@ -638,7 +639,7 @@ class Plugin:
             suspected = surfaces.suspected_secrets(info)
             summary["suspected_secrets"] = suspected
             # R30: what --yes does not confirm — the conductor's info["yes_exempt"] (it calls back despite --yes for
-            # exactly these, gp-a) together with D's table; a code only the conductor names is a reason here too
+            # exactly these) together with D's table; a code only the conductor names is a reason here too
             exempt = surfaces.yes_exempt_of(info, reasons)
             reasons += [r for r in exempt if r != surfaces.UNNAMED_EXEMPT and r not in reasons]
             state.summary = summary
@@ -1289,7 +1290,7 @@ class Plugin:
 
     def _verb_cancel(self, parsed: surfaces.Parsed, call: Call) -> None:
         job = self._job_for(parsed, call)
-        result = self.backend.cancel(job)
+        result = self.backend.cancel(job, force=True) if parsed.args.get("force") else self.backend.cancel(job)
         call.say(str(result) or f"Cancel requested for {surfaces.short_job(job)}.")
 
     def _verb_resume(self, parsed: surfaces.Parsed, call: Call) -> None:
@@ -1973,7 +1974,7 @@ def cli_handler(ctx: Any) -> Callable[[argparse.Namespace], int]:
 
 
 # ---------------------------------------------------------------------------------------------------------
-# The engine behind the surfaces (layer-2 integration; written against INTERFACES §4, see reports/F.md)
+# The engine behind the surfaces (written against INTERFACES §4)
 # ---------------------------------------------------------------------------------------------------------
 
 
@@ -2188,7 +2189,7 @@ class EngineBackend:
 
     def remove_peer(self, name: str) -> bool:
         """Dialer side: drop a dial peer's entry (``Ledger.remove_peer``) after blanking the ``.env`` variables the
-        pairing wrote for that peer alone (rv-final; ``pairing.own_secret_names``) through the same path — Hermes'
+        pairing wrote for that peer alone (``pairing.own_secret_names``) through the same path — Hermes'
         writer, then the read-back (R16). A variable not proven blank keeps the entry: ``EnvNotWritable`` names it
         (a secret no entry names would otherwise stay in ``.env`` for good).
 
@@ -2254,7 +2255,7 @@ class EngineBackend:
             gate=gate,
             allow_insecure=allow_insecure,
             ledger=self._ledger(),
-            # H1 (rv-c): the profile .env through Hermes' own readers and writer — the pairing compares credential
+            # H1: the profile .env through Hermes' own readers and writer — the pairing compares credential
             # values with the other peers' and copies the form's credential into this peer's own variables
             secret_store=self._secret_store(),
         )
@@ -2345,10 +2346,12 @@ class EngineBackend:
     def run_foreground(self, job_id: str) -> int:
         return int(self._runner().run_foreground(job_id))
 
-    def cancel(self, job_id: str) -> str:
+    def cancel(self, job_id: str, *, force: bool = False) -> str:
         """``jobs.JobRunner.cancel_answer``; only a recorded or carried-out cancel is an answer, anything else is a
-        refusal (``InvalidState``, exit 3 in the CLI) whose text names the job's state (L3-F22, DESIGN §14.2)."""
-        answer = self._runner().cancel_answer(job_id)
+        refusal (``InvalidState``, exit 3 in the CLI) whose text names the job's state (L3-F22, DESIGN §14.2). With
+        ``force`` a job stuck in ABORTING ends here (exit 0, the text names what may remain on the peer); a job past
+        its commit point, or one that could not be ended, is a refusal as well."""
+        answer = self._runner().cancel_answer(job_id, force=force)
         if answer.requested is not True:
             raise InvalidState(answer.text, reason=answer.reason or "not_cancelled", state=answer.state, job=job_id)
         return str(answer.text)
@@ -2463,7 +2466,7 @@ class EngineBackend:
             done += 1
         staging = 0
         if not job_id:
-            # DESIGN §14 "staging GC now" (rv-a, H4): the source staging every finished hold left behind — the
+            # DESIGN §14 "staging GC now" (H4): the source staging every finished hold left behind — the
             # janitor's step, under each job's lock; a hold that is not over keeps its directories
             from .local_source import purge_source_staging
 

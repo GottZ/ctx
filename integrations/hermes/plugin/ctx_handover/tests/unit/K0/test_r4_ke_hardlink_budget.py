@@ -1,4 +1,4 @@
-"""r4-ke, review finding R3-M2 (``review-code/REVIEW-3.md`` §3, L9 rest): the walk that learns the identities of the
+"""Review finding R3-M2 (the third review §3, L9 rest): the walk that learns the identities of the
 credential files has a bound (``policy.LINKED_SCAN_MAX`` entries). In the reviewed version the large stores came first
 and a bound that ran out let every hard link it had not reached go along: with a ``~/.kube/cache`` of 5000 entries
 (kubectl's discovery cache, common on an active machine) hard links to ``~/.netrc``, Hermes' ``auth.json`` and the

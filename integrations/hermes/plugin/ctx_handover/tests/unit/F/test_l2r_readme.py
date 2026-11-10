@@ -1,6 +1,6 @@
-"""Layer R (red first) — README statements required by ``reports/L2-contracts.md`` §2 F and §3 (named limits):
+"""Layer R (red first) — README statements required by the layer-2 contract §2 F and §3 (named limits):
 the MCP allowlist write of ``/handover setup``, the block-cache limit while a handover runs, the session limits
-of ``reports/L2/wp-b.md`` §8 (older Hermes builds, typed messages, display after an undone message, a quiet pull
+(older Hermes builds, typed messages, display after an undone message, a quiet pull
 source) and the orphaned ``index.lock`` that ends in ``needs_attention``. Text present = test green."""
 
 from __future__ import annotations
@@ -13,14 +13,14 @@ from ctx_handover.tests.unit.F._l2r_helpers import FLAT, near
 
 
 def test_l2r_readme_names_the_mcp_allowlist_write():
-    """§2 F (wp-k0 K-5): the disclosure says that ``/handover setup`` writes
+    """§2 F (K-5): the disclosure says that ``/handover setup`` writes
     ``plugins.entries.ctx_handover.mcp_allowlist`` in ``config.yaml`` (``hostcompat.grant_mcp_server``)."""
     assert "plugins.entries.ctx_handover.mcp_allowlist" in FLAT
     assert near(FLAT, "plugins.entries.ctx_handover.mcp_allowlist", "/handover setup")
 
 
 def test_l2r_readme_names_the_cache_limit_during_a_handover():
-    """§2 F (wp-c W-3): while a handover runs, the block cache may grow beyond ``block_cache_gb`` — by at most the
+    """§2 F (W-3): while a handover runs, the block cache may grow beyond ``block_cache_gb`` — by at most the
     blocks of the last 24 h — and the next GC after the job ends clears it."""
     assert "block_cache_gb" in FLAT
     sentences = re.split(r"(?<=[.;])\s+", FLAT)
@@ -50,7 +50,7 @@ SESSION_LIMITS = {
     ),
     "quiet-pull-source": (
         "**Pulling from a machine that goes quiet.**",
-        # Spec correction by the integrator (layer I, i-readme decision 2, readme-check #20): the setting is
+        # Spec correction by the integrator (layer I, decision 2): the setting is
         # `participant_idle_timeout_min` (settings.SCHEMA, plugin.yaml config_schema); `participant_idle_timeout`
         # names no key.
         "`participant_idle_timeout_min` (15 minutes by default), the source releases its locks",
@@ -60,7 +60,7 @@ SESSION_LIMITS = {
 
 @pytest.mark.parametrize("key", sorted(SESSION_LIMITS))
 def test_l2r_readme_carries_the_session_limits_of_wp_b(key):
-    """§2 F / §3: the README limits carry the text of ``reports/L2/wp-b.md`` §8 (each paragraph with its lead-in
+    """§2 F / §3: the README limits carry the agreed text (each paragraph with its lead-in
     and its decisive clause)."""
     lead, clause = SESSION_LIMITS[key]
     assert lead in FLAT, lead

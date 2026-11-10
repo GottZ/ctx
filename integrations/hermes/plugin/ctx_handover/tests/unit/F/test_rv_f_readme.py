@@ -1,5 +1,5 @@
-"""Review round rv-f — README statements against the code (``review-code/REVIEW.md`` §2 M33, L22–L28, §6-T, M12,
-M6; hand-overs of rv-b (Bot Chat), rv-k0 (target denylist), rv-e (LFS), i-r36 (reason j), R33a (host isolation)).
+"""First review round — README statements against the code (the first external review §2 M33, L22–L28, §6-T, M12,
+M6; hand-overs on Bot Chat, the target denylist, LFS, reason (j) and R33a (host isolation)).
 
 Every test reads the README sentence it guards and the constant or signature behind it, so a change on either side
 turns it red (L28: no free-standing substrings)."""
@@ -73,7 +73,7 @@ def test_rv_f_r33a_host_isolation_named_exactly():
     assert "reachable only through `hermes serve`" in host, host
     assert "the gateway's own listener does not serve them" in host, host
     assert "`hermes serve` forwards the ctx_handover routes there" in host
-    # r3-f (H2 rest, REVIEW-2 §1/§2): the ``--yolo`` limit holds under every isolation, so it is its own Limits point
+    # H2 rest (REVIEW-2 §1/§2): the ``--yolo`` limit holds under every isolation, so it is its own Limits point
     # now ("Continuation and approvals", ``test_r3_f_h2.py``) instead of a sentence inside this paragraph
     yolo = _bullet(_limits(), "**Continuation and approvals.**")
     assert "--yolo" not in host and "`--yolo`" in yolo, (host, yolo)
@@ -95,12 +95,12 @@ def test_rv_f_m6_lock_guarantee_5_names_its_start_and_retry():
 
 
 def test_rv_f_bot_chat_exception_of_mark_4():
-    """★ rv-b hand-over (M9 rest): Hermes forbids renaming the canonical Bot Chat, so mark (4) does not apply to it;
+    """★ Hand-over (M9 rest): Hermes forbids renaming the canonical Bot Chat, so mark (4) does not apply to it;
     a Bot Chat replaced meanwhile comes back as ``Bot Chat (before handover)`` (the name ``lock`` uses).
 
     Red before the fix: no Bot Chat sentence."""
     lock_section = _section("## What the lock on the source guarantees", "## Set up")
-    # r3-f (M9, REVIEW-2 §4): "keeps its title" was wrong — archiving releases the name (real SessionDB, title None
+    # M9 (REVIEW-2 §4): "keeps its title" was wrong — archiving releases the name (real SessionDB, title None
     # while handed over; ``test_r3_f_m9.py``); the sentence now says so
     assert "*Bot Chat*" in lock_section and "loses its title while it is handed over" in lock_section, lock_section
     assert "`Bot Chat (before handover)`" in lock_section
@@ -121,13 +121,13 @@ def test_rv_f_m33_writes_name_return_trip_and_local_choice():
     assert "the folder it came from (return trip" in row and "`--dest`/`--map` typed here" in row, row
     assert "the denylist under **Rights** applies to every destination" in row, row
     rights = _section("**Rights:**", "**Unredacted:**")
-    # r3-f (M33 rest, REVIEW-2 §5): Rights also names the third ``recorded`` case (an earlier delivery of the same
+    # M33 rest (REVIEW-2 §5): Rights also names the third ``recorded`` case (an earlier delivery of the same
     # peer), so the list is no longer "… and a returning repository"; ``test_r3_f_disclosure.py`` binds all three
     assert "a returning repository in the folder this machine handed it away from" in rights, rights
 
 
 def test_rv_f_k0_target_denylist_named_from_policy():
-    """★ rv-k0 hand-over (H5): the README lists where no destination may lie — every account home (the
+    """★ Hand-over (H5): the README lists where no destination may lie — every account home (the
     ``HOME_PARENTS`` folders, ``/root``, the password database), the system places (a subset of
     ``TARGET_SYSTEM_DENY``; Windows: ``TARGET_SYSTEM_DENY_WINDOWS``), PowerShell profiles (also under OneDrive) and
     ``WindowsApps`` (``TARGET_DENY_WINDOWS``), and that ``~/Documents`` itself is no destination on Windows.
@@ -265,7 +265,7 @@ def test_rv_f_m12_context_window_limit():
 
 
 def test_rv_f_reasons_j_and_k_in_the_readme():
-    """★ i-r36 hand-over (R36a) and reason (k) of D: the confirmation reasons name a working folder that holds none of
+    """★ Hand-over (R36a) and reason (k) of D: the confirmation reasons name a working folder that holds none of
     the repository's tracked files and a repository inside the workspace that stays here; ``--yes`` confirms
     neither.
 
@@ -279,7 +279,7 @@ def test_rv_f_reasons_j_and_k_in_the_readme():
 
 
 def test_rv_f_lfs_line():
-    """★ rv-e hand-over (H8): LFS files are checked out from the shipped objects (``git lfs checkout``, no network);
+    """★ Hand-over (H8): LFS files are checked out from the shipped objects (``git lfs checkout``, no network);
     without git-lfs there they stay pointers and the final message warns (``gitapply._NO_LFS``).
 
     Red before the fix: no such line."""
@@ -289,7 +289,7 @@ def test_rv_f_lfs_line():
 
 
 def test_rv_f_h1_per_peer_credentials_disclosed():
-    """★ H1, F part (rv-c §5): README and manifest name the per-peer variables a pairing writes (``pairing``'s
+    """★ H1, F part: README and manifest name the per-peer variables a pairing writes (``pairing``'s
     prefixes), the address binding, the credential-free first request and the limit behind a dashboard sign-in.
 
     Red before the fix: no ``CTX_HANDOVER_PEER_TOKEN_<peer id>`` anywhere."""
@@ -315,7 +315,7 @@ def test_rv_f_h1_per_peer_credentials_disclosed():
 
 
 def test_rv_f_m34_env_reads_disclosed():
-    """★ M34 (F part, after rv-c/rv-k0): the Reads disclosure names the identity key read through ``get_secret`` with
+    """★ M34 (F part, after H1 and H5): the Reads disclosure names the identity key read through ``get_secret`` with
     the ``.env`` file as the fallback (``crypto.Identity.load``) and the provider-key presence check
     (``hostcompat.provider_usable``: ``read_secret`` or ``read_env_fresh``).
 
@@ -324,8 +324,8 @@ def test_rv_f_m34_env_reads_disclosed():
 
     reads = _section("**Reads:**", "**Writes:**")
     assert f"`{crypto.IDENTITY_ENV}` through `get_secret`" in reads, reads
-    # r3-f (M34 rest, REVIEW-2 §5): the ``.env`` is also read when ``get_secret`` returns a stale key (g7 probe
-    # ``test_g7_identity_env.py``); the old wording "only when `get_secret` does not return it" was wrong
+    # M34 rest (REVIEW-2 §5): the ``.env`` is also read when ``get_secret`` returns a stale key (a review
+    # probe); the old wording "only when `get_secret` does not return it" was wrong
     assert "the profile `.env` file itself only when `get_secret` returns no key or one that does not match" in reads
     assert "whether the provider of the session's model has a key here" in reads
     usable = inspect.getsource(hostcompat.provider_usable)
@@ -354,7 +354,7 @@ def test_rv_f_m37_readme_says_what_the_summary_names():
 
 
 def test_rv_f_retention_and_background_threads():
-    """★ rv-a hand-over (H4, M6, M29): the Background-work disclosure names the ``ctxh-janitor`` and ``ctxh-outbox``
+    """★ Hand-over (H4, M6, M29): the Background-work disclosure names the ``ctxh-janitor`` and ``ctxh-outbox``
     threads (names from ``jobs``) and what the retention removes when (``ledger.JOURNAL_KEEP_S`` = 30 days).
 
     Red before the fix: neither thread nor a retention sentence."""

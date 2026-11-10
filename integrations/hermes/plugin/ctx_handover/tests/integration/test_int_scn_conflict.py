@@ -21,7 +21,7 @@ def test_int_scn_conflict_goes_to_fresh_directory(online):
     """★ Scenario 9: first push puts the repository at ``~/hermes-handover/proj`` on the server; the server's user
     edits it there; a second session on the same laptop repository is pushed ⇒ fresh directory, nothing overwritten.
 
-    Red at ``a8fec516`` (``reports/L2/red-r-int3.md``): the fallback destination is built from the unexpanded
+    Red at ``a8fec516``: the fallback destination is built from the unexpanded
     ``~/hermes-handover`` and refused as ``not_allowed_root``."""
     server, laptop, _listener, peer = online
     repo = wip_repo(laptop.home / "proj", stash=False)

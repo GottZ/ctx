@@ -1,4 +1,4 @@
-"""Helpers of the layer-2 mandatory scenarios (wp-int3, ``test_int_scn_*``): real modules, real ``SessionDB``, real
+"""Helpers of the layer-2 mandatory scenarios (``test_int_scn_*``): real modules, real ``SessionDB``, real
 git (repositories only through ``tests/fakes/repo_builder.py``), real block stores and the real listener process of
 ``harness.py``. Only the observation side lives here: what a user would look at after a handover (session history,
 work-tree bytes, index, stash, source marks, the surfaces' answers).

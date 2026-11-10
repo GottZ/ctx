@@ -1,7 +1,7 @@
-"""r3-kd: no silent omission (R30 form) for two more cases — hook outputs on the target (M10) and a refused
+"""No silent omission (R30 form) for two more cases — hook outputs on the target (M10) and a refused
 ``--include`` on the sender (L3-F24).
 
-* **M10** (``review-code/REVIEW-2.md`` §4, round 1 g2 M5): hook outputs travel, but the target places them under the
+* **M10** (the second review §4): hook outputs travel, but the target places them under the
   *new* session's folder (``hook_outputs/<new id>/<name>``, contract X17: kind and basename only) while the
   conversation names ``hook_outputs/<old segment id>/<name>``; the path map only says ``HERMES_HOME → HERMES_HOME``. The
   agent on the target followed a path into nothing, and nothing said so. The note now names, for every old folder,

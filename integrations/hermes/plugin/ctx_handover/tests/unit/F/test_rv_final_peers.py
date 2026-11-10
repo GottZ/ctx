@@ -1,4 +1,4 @@
-"""Review round rv-final, point 2 (rv-c §5 "optional", rv-f §7): ``/handover peers remove`` dropped a dial peer's entry
+"""First review round, point 2: ``/handover peers remove`` dropped a dial peer's entry
 and left the credential the pairing had copied for that peer alone in the profile ``.env``
 (``CTX_HANDOVER_PEER_TOKEN_<peer id>``, ``…_PASSWORD_<peer id>``, ``…_HEADER<n>_<peer id>``) — a secret no entry
 named any more and nothing would ever clean up.

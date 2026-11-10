@@ -1,4 +1,4 @@
-"""Package g5, integrator decision on R36a: the bundle import does not ask reason (j) ``workspace_differs`` again.
+"""Integrator decision on R36a: the bundle import does not ask reason (j) ``workspace_differs`` again.
 
 R36a (DECISIONS): "Beim Bündel-Import wird Grund j nicht erneut gefragt, wenn der Export ihn bestätigt hat." The
 export asks (j) — ``--yes`` does not answer it (``plan.YES_EXEMPT``) — so a bundle exists only after a person (or an
@@ -97,7 +97,7 @@ def _export_with_a_confirmed_workspace(laptop, *, agents: bool = False) -> tuple
 
 
 def test_g5_import_does_not_ask_the_workspace_the_export_confirmed(two_homes):
-    """★ R36a (integrator decision, g5): ``import --yes`` without a person imports a bundle whose export confirmed
+    """★ R36a (integrator decision): ``import --yes`` without a person imports a bundle whose export confirmed
     reason (j); the draft from the session's folder arrives.
 
     Red on ``08cfe0f0``: the import ended at the confirmation — ``plan_sync`` returned no plan, the job ``aborted``

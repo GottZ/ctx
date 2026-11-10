@@ -16,7 +16,7 @@ Other clusters use these to drive planning without a real host:
 ``CeilingGitProbe``                         ``contracts.GitProbe`` over real ``git rev-parse``/``ls-files`` with a
                                             ceiling dir, so a probe below the test's tmp dir never finds an enclosing
                                             repo; read-only, no identity, no config writes; also ``carried_files`` and
-                                            ``nested_repos`` (r3-kd, the wish for ``gitops.GitProbe``)
+                                            ``nested_repos`` (the wish for ``gitops.GitProbe``)
 ``HermesFileStub`` / ``static_discover``    stand-ins for ``hermes_files.HermesFile``/``discover`` (cluster B),
                                             including its ``rejected=`` list
 ``ScriptedModel``                           a side question or ``llm`` callable with scripted replies; records

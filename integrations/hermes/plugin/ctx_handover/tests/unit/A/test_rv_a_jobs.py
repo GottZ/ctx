@@ -1,7 +1,7 @@
-"""Review round rv-a, composition-root findings in ``engine/jobs.py``: M28 (the continuation child of the default
+"""First review round, composition-root findings in ``engine/jobs.py``: M28 (the continuation child of the default
 profile followed the sticky ``active_profile``), L13 (an LLM answer with its JSON inside prose was dropped), L21 (the
 janitor's outbox flush ran without the ``mcp_allowlist`` grant) and the target OS of this host's own policy under
-MSYS/Cygwin (rv-k0: ``os.name`` is ``posix`` there, the Windows naming rules did not apply)."""
+MSYS/Cygwin (``os.name`` is ``posix`` there, the Windows naming rules did not apply)."""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def test_rv_a_l21_janitor_flush_waits_for_the_mcp_grant(fake_host, fake_ctx, tmp
     ledger.close()
 
 
-# -- rv-k0: the target OS of this host's policy ---------------------------------------------------------------------
+# -- the target OS of this host's policy -----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -104,7 +104,7 @@ def test_rv_a_policy_target_os_follows_the_facts_rule(monkeypatch, tmp_path, pla
     assert policy.case_insensitive is (want in ("windows", "macos"))
 
 
-# -- M6 / M29 (A parts of rv-f's findings): no janitor or ctx flush on the caller's critical path -------------------
+# -- M6 / M29 (A parts of the findings): no janitor or ctx flush on the caller's critical path -------------------
 
 
 @pytest.fixture

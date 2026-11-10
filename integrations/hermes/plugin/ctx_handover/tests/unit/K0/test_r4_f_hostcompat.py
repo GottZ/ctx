@@ -1,4 +1,4 @@
-"""Review round 4 (``REVIEW-3.md`` R3-H2): ``hostcompat.approvals_off`` — the continuation spawner's gate — refuses
+"""Review round 4 (the third review R3-H2): ``hostcompat.approvals_off`` — the continuation spawner's gate — refuses
 where this process cannot identify the gateway that runs the turn, instead of answering "not off".
 
 The gate's contract: True (approvals off), False (may start), or ``ContinueRefused`` with reason

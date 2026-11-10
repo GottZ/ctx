@@ -140,7 +140,7 @@ _VERB_OPTIONS: dict[str, set[str]] = {
     "peers": set(),
     "pair": {"--name", "--rights", "--ttl", "--gate", "--allow-insecure"},
     "reclaim": {"--force", "--session"},
-    "cancel": set(),
+    "cancel": {"--force"},
     "resume": set(),
     "setup": set(),
     "doctor": {"--measure"},
@@ -181,7 +181,8 @@ USAGE: dict[str, str] = {
     "/handover pair <ctxh-pair:…> [--name N] [--gate session_token|bearer|basic_login] [--allow-insecure]"
     "   (on the device that dials)",
     "reclaim": "/handover reclaim [<session-id> | --session ID] [--force]",
-    "cancel": "/handover cancel [<job>]",
+    "cancel": "/handover cancel [<job>] [--force]   (--force ends a handover stuck cancelling here, without the "
+    "other side's confirmation)",
     "resume": "/handover resume [<job>]",
     "setup": "/handover setup",
     "doctor": "/handover doctor [--measure]   (--measure sends test bodies of 1, 2, 4 and 8 MiB to each paired "
@@ -607,11 +608,11 @@ REASONS: dict[str, str] = {letter: code for code, letter in planning.CONFIRM_LET
 """Confirmation reasons (a)–(g) of DESIGN §14.1: letter → cluster D's reason code (``plan.CONFIRM_*``, X03)."""
 
 CONFIRM_WORKSPACE_EXCLUDED: str = planning.CONFIRM_WORKSPACE_EXCLUDED
-"""Reason (h) of cluster D (``reports/L2/gp-d-api.md`` §2a, R30): the policy left the session's working folder out
+"""Reason (h) of cluster D (R30): the policy left the session's working folder out
 (for example it lies inside the Hermes home), so its project does not come along."""
 
 CONFIRM_CONTEXT: str = planning.CONFIRM_CONTEXT
-"""Reason (i) of cluster D (``reports/L2/g3-df-api.md`` §1, R32): the session is larger than the context window of
+"""Reason (i) of cluster D (R32): the session is larger than the context window of
 the model on the target, so the target compacts it on its first turn."""
 
 CONFIRM_WORKSPACE_DIFFERS: str = planning.CONFIRM_WORKSPACE_DIFFERS
@@ -708,7 +709,7 @@ _WORKSPACE_WHY = {
     "missing": "it does not exist",
     "unreadable": "it cannot be read",
 }
-"""Sentences for the ``reason`` codes of ``plan.workspace_excluded`` (gp-d-api §2b); any other code (``other``)
+"""Sentences for the ``reason`` codes of ``plan.workspace_excluded``; any other code (``other``)
 shows D's ``why`` text."""
 
 
@@ -1541,7 +1542,11 @@ def render_error(err: HandoverError, peer: str | None, *, here: bool = False) ->
         )
     if code == "lease_lost":
         return "The session could not stay paused (lease lost). Nothing was handed over; try again."
-    if code == "invalid_state" and _d(err, "reason") in ("finished", "committing", "not_recorded") and err.message:
+    if (
+        code == "invalid_state"
+        and _d(err, "reason") in ("finished", "committing", "not_recorded", "aborting", "not_forced")
+        and err.message
+    ):
         return err.message  # a cancel that cancelled nothing: the text names the job's state (L3-F22)
     if code == "not_found":
         return err.message or "Not found."
@@ -1614,7 +1619,7 @@ def _target_session(entry: Mapping | None, ack: CommitAck | None) -> dict | None
 
 
 def open_text(session_id: str, title: str | None = None) -> str:
-    """How to open a received session (L17; upstream read by g3-b): it is stored, not open — the Desktop sidebar and
+    """How to open a received session (L17; read in upstream Hermes): it is stored, not open — the Desktop sidebar and
     ``hermes sessions list`` show it, ``hermes --resume <id>`` opens it; a gateway's list of open sessions (TUI
     switcher, ``session.list`` without ``scope: stored``) shows it only after it was opened once."""
     named = f'"{title}" ({session_id})' if title else session_id

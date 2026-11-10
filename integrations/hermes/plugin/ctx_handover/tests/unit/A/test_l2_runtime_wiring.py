@@ -65,7 +65,7 @@ def test_runtime_is_one_per_profile_and_process(runtime_env, fake_ctx, monkeypat
 
 
 def test_runner_started_without_a_factory_takes_the_surfaces_one(runtime_env, fake_ctx):
-    """★ (finding L2-F) A route, the CLI or the janitor may create the profile's runner before the surfaces: the
+    """★ (layer-2 finding) A route, the CLI or the janitor may create the profile's runner before the surfaces: the
     surfaces' reporter factory is bound afterwards (the first real factory stays), so their progress arrives.
 
     Mutant: ``runner_for`` ignores the factory when the runner exists (the layer-1 code) → the runner keeps the

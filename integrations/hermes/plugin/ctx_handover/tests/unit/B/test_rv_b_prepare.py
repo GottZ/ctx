@@ -1,4 +1,4 @@
-"""Review round, package rv-b: H3 — a partial failure inside ``prepare`` must never lose the backup.
+"""First review round: H3 — a partial failure inside ``prepare`` must never lose the backup.
 
 Before, every sub-step p2…p5 wrote its backups in the same ledger transaction as the Hermes writes (each of which
 commits on its own in ``state.db``). An exception in the middle of the loop — or the process dying between the

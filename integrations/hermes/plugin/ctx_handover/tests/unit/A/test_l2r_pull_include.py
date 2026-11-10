@@ -1,4 +1,4 @@
-"""Layer R (red) for V29 (A part) of ``reports/L2-contracts.md``: a local ``--include`` of a pull (R18) selects only
+"""Layer R (red) for V29 (A part) of the layer-2 contract: a local ``--include`` of a pull (R18) selects only
 within what the source releases — a path under the source's ``export_roots`` arrives, a path the source does not
 release is not transferred and named "withheld by source policy"; the pull itself completes (no ``policy_denied``
 for the whole plan). The job result names the withheld paths for the final message: ``summary["withheld"]`` of

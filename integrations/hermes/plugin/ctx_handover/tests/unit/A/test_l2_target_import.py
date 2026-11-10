@@ -1,5 +1,5 @@
 """Export → import through the real ``BundleTarget``/``BundleSource``, the real conductor and the real ``LocalTarget``
-(contract X02; finding of package L2-C on ``local_target``): the import keeps the bundle's FinalPlan as the plan of
+(contract X02; layer-2 finding on ``local_target``): the import keeps the bundle's FinalPlan as the plan of
 record (id recomputed by the conductor, sent as ``PrepareRequest.final_plan_id``); the target decides destinations
 for it on this host — those decisions have their own id and never change the one the pack must belong to.
 """
@@ -33,7 +33,7 @@ def bundle_final(source) -> FinalPlan:
 class OneBundleTarget:
     """``jobs.runner_for`` of the active home with the participant pair memoised per job. ``plan_sync`` and
     ``run_foreground`` each build a new pair, and ``BundleTarget`` holds its FinalPlan in memory only, so a CLI
-    export ends ``bundle commit before prepare`` (reported to wp-c/wp-a3; the import side needs no seam)."""
+    export ends ``bundle commit before prepare`` (the import side needs no seam)."""
 
     runner: jobs.JobRunner
     pairs: dict = dataclasses.field(default_factory=dict)
@@ -135,7 +135,7 @@ def _target_ctx(home: Home, job_id: str) -> dict:
 
 
 def test_export_then_import_runner(two_homes):
-    """★ X02 (L2-C finding). The runner path end to end: the pack belongs to the bundle's FinalPlan, the target's own
+    """★ X02 (layer-2 finding). The runner path end to end: the pack belongs to the bundle's FinalPlan, the target's own
     destinations (under this host's handover root) are kept and the transcript arrives intact. Mutant (red proof):
     the conductor sends the id negotiated here as ``PrepareRequest.final_plan_id`` (the c32a862d behaviour) — the
     target refuses the pack (``verify_failed``, ``which=final_plan_id``)."""

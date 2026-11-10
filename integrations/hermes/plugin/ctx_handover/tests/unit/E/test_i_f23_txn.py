@@ -1,4 +1,4 @@
-"""Package i-f23 (lab finding L3-F23; BRIEF D10, R4, R19, R29, DESIGN §9.7): every fallback the workspace
+"""Lab finding L3-F23 (BRIEF D10, R4, R19, R29, DESIGN §9.7): every fallback the workspace
 transaction builds — a conflict found while PREPARE updates or returns an item, a fresh destination that is taken
 when c1 renames — comes from one rule, ``pathmap.fallback_dest`` with the target's policy: the sibling
 ``<dest>-handover-<stamp>`` only while it lies under ``allow_roots`` and passes the target check, else
@@ -6,7 +6,7 @@ when c1 renames — comes from one rule, ``pathmap.fallback_dest`` with the targ
 it lies in the Hermes home, R29). A destination outside ``allow_roots`` (a return-trip origin, a recorded or typed
 path) never gets a fallback beside it.
 
-Red before i-f23: ``PolicyDenied: fallback destination not allowed (not_allowed_root)`` from PREPARE, and at c1 a
+Red before the fix: ``PolicyDenied: fallback destination not allowed (not_allowed_root)`` from PREPARE, and at c1 a
 fallback beside the destination that the target policy refuses."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Review round, package rv-c — Medium/Low findings of REVIEW.md §2 in cluster C files (listener, remote blocks,
+"""First review round — Medium/Low findings of the first review §2 in cluster C files (listener, remote blocks,
 bundle staging, identity load): M15, M16, M17, M34, L7, L8.
 """
 

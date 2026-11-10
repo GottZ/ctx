@@ -5,7 +5,7 @@ the path map, the denylist and the collector — and the facts agree under ``plu
 Before: ``envfacts.probe`` reported and resolved ``~/hermes-handover`` with the process home (``SystemOps.home`` =
 ``Path.home()``) even when the caller passed its policy (``cfg``) with another home; under ``host`` the process
 home is the one Hermes rewrote for the plugin host (``tests/unit/K0/test_i_f20_home_source.py``). The composition
-root builds the policy home from ``hostcompat.effective_home`` (wish W1 of package i-f20 for ``jobs._policy``);
+root builds the policy home from ``hostcompat.effective_home`` (wish W1 for ``jobs._policy``);
 the end-to-end test here composes the policy the same way.
 """
 

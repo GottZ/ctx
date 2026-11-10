@@ -1,4 +1,4 @@
-"""Helpers of the layer-R tests of cluster C (package r-opb): an in-process listener reached through the real
+"""Helpers of the layer-R tests of cluster C: an in-process listener reached through the real
 ``wire.WireClient`` (an ``httpx`` transport hands each request to ``Server.handle``), a real ``LocalSource`` for
 the listener's source role, a recording target, and the export flow of a ``BundleTarget``.
 

@@ -1,4 +1,4 @@
-"""Review round rv-a, finding H4 (``review-code/REVIEW.md`` §2; g1 H3, g2 M7): retention (BUILD-ORDER §6 Nr. 21,
+"""First review round, finding H4 (the first external review §2): retention (BUILD-ORDER §6 Nr. 21,
 "reports/events 30 days") covered only pairing codes and the journal.
 
 * The source's pack work directory ``staging/<job>/git`` (temp repository with the changed and untracked work tree as

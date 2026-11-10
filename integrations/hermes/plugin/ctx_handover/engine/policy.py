@@ -748,7 +748,7 @@ def _homes_of(path: Path, cfg: PolicyConfig, windows: bool) -> tuple[Path, ...]:
 
 
 def homes_of(path: Path, cfg: PolicyConfig, *, windows: bool) -> tuple[Path, ...]:
-    """The homes ``path`` is judged against (``_homes_of``; additive, rv-d M35): the process's ``$HOME`` (as given and
+    """The homes ``path`` is judged against (``_homes_of``; additive, M35): the process's ``$HOME`` (as given and
     resolved), every account home of the password database, the superuser homes (POSIX, ``windows`` False) and
     ``<parent>/<x>`` when ``path`` lies below a ``HOME_PARENTS`` directory (in the path's own spelling). The target
     denylist and the source's home rule (``collector.HomeRule``: no home and no ancestor of one is a workspace or an

@@ -1,5 +1,5 @@
-"""Layer I (package i-readme): README statements bound to the behaviour or to the constants behind them
-(``reports/L2/readme-check.md`` §4, integrator decisions 1, 4, 5 and 7 of the i-readme brief).
+"""Layer I: README statements bound to the behaviour or to the constants behind them
+(integrator decisions 1, 4, 5 and 7).
 
 Each test reads the README sentence it guards and the code path or constant the sentence describes, so a change on
 either side turns it red: the limit for sessions of older Hermes builds (a late ``verify_failed`` ends the handover,
@@ -49,9 +49,9 @@ def test_late_backfill_verify_failed_ends_the_handover_and_leaves_the_source_fre
     target never commits, and the source releases its lock and leases — usable, unlocked. The README says exactly
     that: start the handover again and it begins with a fresh export.
 
-    Red (README before i-readme): ``…and the handover starts over from a fresh export — nothing is accepted
+    Red (before the fix): ``…and the handover starts over from a fresh export — nothing is accepted
     silently.`` (no "when you start it again", no word on the source). Mutant (conductor restarts on a delta
-    ``VerifyFailed``) and mutant (abort without releasing the source): see ``reports/L2/i-readme.md``.
+    ``VerifyFailed``) and mutant (abort without releasing the source) were red.
     """
     h = Harness(tmp_path, FakeClock())
     h.world.inject("source", "start_prepare", "action", action=lambda w: w.source.append_rows("late"))
@@ -87,7 +87,7 @@ def test_pair_code_lifetime_is_the_pairing_default(fake_host, monkeypatch):
     the README's "one-time code (10 minutes, single use)" and "≤ 10 min by default, at most 60" are that default and
     ``pairing.MAX_TTL_S``.
 
-    Red (before i-readme): with ``pairing.DEFAULT_TTL_S`` set to 900 the verb still asked for 600 —
+    Red (before the fix): with ``pairing.DEFAULT_TTL_S`` set to 900 the verb still asked for 600 —
     ``commands.py`` carried its own literal ``or 600``.
     """
     plugin, backend, _ = _plugin(_listener("https://s.example/"))
@@ -160,7 +160,7 @@ def test_readme_numbers_follow_the_code(key):
     (the number the README was written for).
 
     Mutants: ``settings.SCHEMA["refine_history_chars"]`` 50000, ``policy.SNIFF_BYTES`` 4 KiB, ``jobs.OFFER_TTL_S``
-    3 h, README "5 GiB, 3 days" → "5 GiB, 4 days" — each red (``reports/L2/i-readme.md``)."""
+    3 h, README "5 GiB, 3 days" → "5 GiB, 4 days" — each red."""
     phrase, values = _readme_numbers()[key]
     assert phrase in FLAT, phrase
     assert len(set(values)) == 1, values
@@ -226,7 +226,7 @@ def test_readme_settings_table_defaults_equal_the_schema():
     default is that value or a list of it). Both schemas agree on each checked default.
 
     Mutants: README ``confirm_above_mb`` default 500 → 400; ``settings.SCHEMA["inbound"]`` default ``on`` — each
-    red (``reports/L2/i-readme.md``)."""
+    red."""
     manifest = _manifest_schema()
     rows = _settings_rows()
     assert len(rows) >= 12, rows
@@ -294,8 +294,7 @@ def test_setup_reads_auth_providers_once_and_names_the_gate(fake_host, monkeypat
     (``peer_gate basic_login``) or the fixed dashboard token; an address without that route is named as no Hermes
     dashboard. A local HTTP server stands in for the dashboard (no Hermes process).
 
-    Mutants: ``_gate_advice`` asks twice; the ``supports_password`` branch inverted — each red
-    (``reports/L2/i-readme.md``)."""
+    Mutants: ``_gate_advice`` asks twice; the ``supports_password`` branch inverted — each red."""
     for name in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("no_proxy", "127.0.0.1")

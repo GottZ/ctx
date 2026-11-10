@@ -1,4 +1,4 @@
-"""Layer R for §2 "Bereinigung" (D) of ``reports/L2-contracts.md``: the key ``changed`` is gone from
+"""Layer R for §2 "Bereinigung" (D) of the layer-2 contract: the key ``changed`` is gone from
 ``tests/fakes/planning_fake.py`` and ``tests/unit/D/test_plan_r25.py`` — the fake ``model_change`` has exactly the
 keys of the one producer, B's ``session_import.map_model`` (contract X04), and no D test builds a ``model_change``
 with a ``changed`` key."""

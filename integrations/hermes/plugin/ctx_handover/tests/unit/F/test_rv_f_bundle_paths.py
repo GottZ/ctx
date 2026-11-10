@@ -1,4 +1,4 @@
-"""Review round rv-f — hand-over W4 of i-f20 (L3-F20): bundle paths typed for ``export``/``import`` were resolved by
+"""First review round — hand-over W4 (L3-F20): bundle paths typed for ``export``/``import`` were resolved by
 the process (``os.path.expanduser`` + the process's working folder). Under ``plugins.isolation: host`` the plugin
 host runs with ``cwd = HERMES_HOME`` and its own ``HOME``, and in a gateway the process folder is wherever the gateway
 started — so ``/handover export out.ctxh.tar`` wrote into the Hermes home.

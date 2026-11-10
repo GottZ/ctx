@@ -222,7 +222,7 @@ def test_g3_note_parts_carry_the_estimate():
 
 
 # --------------------------------------------------------------------------------------------------------
-# Integrator decision G‴ (question of g3-a §6): ``refine: off`` stops only NEW model calls
+# Integrator decision G‴ (question of cluster A): ``refine: off`` stops only NEW model calls
 # --------------------------------------------------------------------------------------------------------
 
 

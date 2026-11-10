@@ -1,4 +1,4 @@
-"""Round G′, cluster C — Erfolgs-Sweep (``reports/L2/pkg/Gp-common.md``): an answer of a peer counts as success
+"""Round G′, cluster C — Erfolgs-Sweep: an answer of a peer counts as success
 only with an explicitly positive value. A missing key, a wrong type or an unsigned status signal is no success.
 
 Covered here (each red on ``c31da4c3``): ``RemoteBlocks.missing`` (``blocks/need`` without ``missing`` read as "the

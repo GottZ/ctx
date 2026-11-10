@@ -228,7 +228,10 @@ them in a terminal (`--json` for scripts, `--session <id>` names the session; ex
 busy/conflict, 4 auth/gate, 5 in-doubt/suspended; a refusal carries `ok: false` and `error.code` in `--json` — a
 `reclaim` refused while a handover is being committed exits 3, and so does a `cancel` that cancels nothing because
 the handover is done, aborted or past its commit point; the answer names which). `status`, `cancel`, `resume`, `logs`
-and `gc --job` take the six-character job id the messages print (or any other unique start or end of the id).
+and `gc --job` take the six-character job id the messages print (or any other unique start or end of the id). A
+handover stuck cancelling because the other gateway does not confirm (unreachable, removed, or it no longer knows the
+job) ends here with `/handover cancel <job> --force`: this machine's side is released or discarded the normal way,
+the answer says what may remain on the other gateway, and a handover past its commit point is refused (exit 3).
 Administrative and data-moving commands (`pair`, `setup`, `peers`, `identity`, `take`, `to`, `export`, `import`,
 `reclaim`, `resume`, `gc`, `cancel`) answer only in the local CLI, TUI or Desktop; on messaging platforms they are
 refused.

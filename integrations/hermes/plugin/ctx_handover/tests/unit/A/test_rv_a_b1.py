@@ -1,4 +1,4 @@
-"""Review round rv-a, finding B1 (``review-code/REVIEW.md`` §2): a release that ran for an earlier hold of the source
+"""First review round, finding B1 (the first external review §2): a release that ran for an earlier hold of the source
 is no answer for a later hold of the same job.
 
 The janitor releases the local source of a job whose owner went quiet (``ParticipantRegistry.recover`` →
@@ -93,7 +93,7 @@ def test_rv_a_b1_release_is_still_one_operation_per_hold(mk, clock):  # noqa: F8
 
 
 def test_rv_a_release_warnings_travel_with_the_release(mk, monkeypatch):  # noqa: F811
-    """rv-b's hand-over: what ``lock.release`` could not undo (placeholder rows not rewound, a mark not restored) is
+    """The hand-over: what ``lock.release`` could not undo (placeholder rows not rewound, a mark not restored) is
     named in the release operation's result once ``lock.release`` returns its ``_undo`` report (today ``None``: then
     there is nothing to name)."""
     from ctx_handover.engine import lock

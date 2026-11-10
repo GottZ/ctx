@@ -162,7 +162,7 @@ class RemoteSource(_Remote):
             state = _lost_state(exc)
             if state is None:
                 raise
-        if not isinstance(state, str) or not state:  # no state named is no keepalive (Gp-common, success sweep)
+        if not isinstance(state, str) or not state:  # no state named is no keepalive (success sweep)
             raise BadResponseSignature("keepalive answer without the source state", route="heartbeat")
         if state in LOST_STATES:
             raise LeaseLost(f"the source gave up its leases (state {state})", state=state)

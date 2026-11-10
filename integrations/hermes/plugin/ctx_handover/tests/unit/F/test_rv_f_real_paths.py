@@ -1,7 +1,7 @@
-"""Review round rv-f — surface texts checked on the real engine path (two homes, a real listener process; the same
+"""First review round — surface texts checked on the real engine path (two homes, a real listener process; the same
 harness as ``tests/integration``):
 
-* M31 (``review-code/REVIEW.md`` §2, g6 M5, hardening no. 14): the final message of an ``import`` names the note the
+* M31 (the first external review §2, hardening no. 14): the final message of an ``import`` names the note the
   agent gets and the origin — taken from the job, not from a renderer fed by hand.
 * M30 (rest, R35): after a finished pull, ``reclaim`` on the source says that the copy on the other side is not told;
   the sentence follows the result's structured fields (``state``, ``target_notified``), not the wording of a warning.
@@ -37,7 +37,7 @@ def test_rv_f_m31_import_final_message_names_note_and_origin(online):
     """★ M31: ``hermes handover export`` on the laptop, ``hermes handover import <file>`` on the server ⇒ the import's
     final message carries the origin line and the note text the agent gets, both as the job recorded them.
 
-    Red proof (private tree copy, ``lab/L2-redproof/rv-f``): ``JobRunner`` status summary without ``note``/``origin``
+    Red proof (private tree copy): ``JobRunner`` status summary without ``note``/``origin``
     (``jobs.py`` summary ``"note": None, "origin": None``) ⇒ ``AssertionError: no origin line``."""
     server, laptop, _listener, _peer = online
     bounded(laptop)
@@ -129,7 +129,7 @@ def unpaired(tmp_path):
 
 
 def test_rv_f_h1_pairing_through_the_surface_stores_the_credential_per_peer(unpaired):
-    """★ H1, F part (rv-c §5): ``hermes handover pair <string>`` on the laptop (``EngineBackend.redeem_pair``) hands
+    """★ H1, F part: ``hermes handover pair <string>`` on the laptop (``EngineBackend.redeem_pair``) hands
     cluster C the profile ``.env`` as ``pairing.SecretStore`` ⇒ the stored peer sends the variable of this peer alone
     (``CTX_HANDOVER_PEER_TOKEN_<peer id>``), and the profile ``.env`` holds the form's token there.
 

@@ -1,11 +1,11 @@
-"""K0 round G′: word settings read the YAML boolean words of every spelling (integrator decision in
-``reports/L2/pkg/Gp-K0.md`` §1, correcting the layer-R test for ``inbound``).
+"""K0 round G′: word settings read the YAML boolean words of every spelling (integrator decision,
+correcting the layer-R test for ``inbound``).
 
 Rules under test, for a word setting (``str`` with ``choices``) whose choices contain ``off``:
 ``no``/``false``/``off``/``0`` — any case, quoted or not, the YAML boolean ``False``, the integer 0 — are ``off``;
 ``yes``/``true``/``on``/``1`` are ``on`` when the choices hold ``on``, else the schema default (no problem entry);
 anything else is the schema default plus a ``settings.problems`` entry — except ``inbound``, where an unknown value
-is ``off`` (fail-closed, the L2-C security fix). ``None`` stays the schema default everywhere.
+is ``off`` (fail-closed, the layer-2 security fix). ``None`` stays the schema default everywhere.
 """
 
 from __future__ import annotations

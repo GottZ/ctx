@@ -1,4 +1,4 @@
-"""Review round rv-final, point 1 (rv-f §6, M29 follow-up): two ctx outbox flushes running at once stored the same
+"""First review round, point 1 (M29 follow-up): two ctx outbox flushes running at once stored the same
 rows twice. ``Runtime.janitor`` still flushed by itself on the first run of a process (``flush_outbox=_flush(ctx)``)
 while the profile's ``ctxh-outbox`` thread flushed the same due rows; two processes of one profile (gateway and CLI)
 did the same with one ledger file. Each flush read the due rows and sent all of them; the row was marked done only
@@ -95,7 +95,7 @@ def runtime_env(fake_host):
 
 
 def test_rv_final_janitor_flush_beside_the_outbox_thread_sends_each_row_once(runtime_env, fake_ctx):
-    """★ rv-f's scenario: the profile's ``ctxh-outbox`` thread is inside ``call_mcp`` for the first row when
+    """★ The scenario: the profile's ``ctxh-outbox`` thread is inside ``call_mcp`` for the first row when
     ``Runtime.janitor`` (first run of a process, its own ``flush_outbox``) flushes ⇒ still each row once.
 
     Red before the fix: the janitor sent the row the outbox thread was sending, and the outbox thread then sent the

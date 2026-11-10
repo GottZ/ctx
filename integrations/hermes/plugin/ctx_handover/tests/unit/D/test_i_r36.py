@@ -1,7 +1,7 @@
-"""R36 / L3-F19 (package i-r36): a session whose working folder lies in a git-ignored folder of an enclosing
+"""R36 / L3-F19: a session whose working folder lies in a git-ignored folder of an enclosing
 repository.
 
-The lab case (``reports/L3-findings.md`` L3-F19): the session's cwd sat in a folder the enclosing checkout ignores; the
+The lab case (lab finding L3-F19): the session's cwd sat in a folder the enclosing checkout ignores; the
 collector took that checkout as the workspace (102 MiB of somebody else's work tree, untracked files included) and the
 cwd's own files never arrived (git does not pack ignored files); ``--yes`` went through without a question. R36: the
 enclosing repository is the workspace only when git does not ignore the cwd there; otherwise the cwd itself travels as a
@@ -326,7 +326,7 @@ def test_r36a_an_untracked_subfolder_of_a_repository_needs_an_answer(transcript,
         assert plan.CONFIRM_WORKSPACE_DIFFERS in reasons, reasons
         assert plan.yes_exempt(reasons) == [plan.CONFIRM_WORKSPACE_DIFFERS]
     assert plan.CONFIRM_LETTERS[plan.CONFIRM_WORKSPACE_DIFFERS] == "j"
-    assert plan.REASON_CODES[9] == plan.CONFIRM_WORKSPACE_DIFFERS  # rv-d: (k) repos_left follows (H15)
+    assert plan.REASON_CODES[9] == plan.CONFIRM_WORKSPACE_DIFFERS  # (k) repos_left follows (H15)
     assert plan.CONFIRM_WORKSPACE_DIFFERS in plan.YES_EXEMPT
 
 

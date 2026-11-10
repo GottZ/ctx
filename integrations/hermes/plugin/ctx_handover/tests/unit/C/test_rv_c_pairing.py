@@ -1,4 +1,4 @@
-"""Review round, package rv-c — pairing and the dashboard-gate credential (REVIEW.md §2 H1; M14, M32).
+"""First review round — pairing and the dashboard-gate credential (the first review §2 H1; M14, M32).
 
 H1: pairing sent the stored dashboard credential with the first request to the URL of any paste string, before the
 fingerprint was compared, and every peer shared one credential slot. Now a credential only ever goes to the address

@@ -1,5 +1,5 @@
 # ruff: noqa: F811  (pytest fixtures imported from test_lock_support are redefined as parameters)
-"""Layer-2 contract points of cluster B against the real modules of its neighbours (reports/L2/contract.md).
+"""Layer-2 contract points of cluster B against the real modules of its neighbours.
 
 * X08/W006 — veto texts and the placeholder rewind of reclaim come from the same ledger rows; release/reclaim
   delete the job's veto rows (``ledger.veto_remove``). Run on the real ``ledger.Ledger`` (cluster A) and on the

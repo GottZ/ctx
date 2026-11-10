@@ -310,7 +310,7 @@ class FakeBackend:
         self.confirm_reasons: list[str] = []
         self.confirm_answers: list[str] = []
         self.confirm_even_with_yes = False
-        # info["yes_exempt"] as the conductor passes it (conductor._confirm, gp-a); None = D's table over the reasons
+        # info["yes_exempt"] as the conductor passes it (conductor._confirm); None = D's table over the reasons
         self.yes_exempt: list[str] | None = None
         self.summary_extra: dict = {}  # keys merged into D's presend_summary (e.g. workspace_excluded, R30)
         self.instruction_files: list[dict] = []

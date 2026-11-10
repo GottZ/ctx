@@ -1,4 +1,4 @@
-"""Review round 3, package r3-a — R2-M1 (REVIEW-2 §3, g1 round 2): a pull source that a conductor opened at FACTS and
+"""Review round 3 — R2-M1 (REVIEW-2 §3): a pull source that a conductor opened at FACTS and
 never locked must not hold one of the peer's two slots for ever.
 
 Scenario of the reviewer: ``take <peer>``; the source answers HELLO/FACTS, goes offline during PLANNING; the conductor's
@@ -12,7 +12,7 @@ request for ``participant_idle_timeout`` no longer counts against the caps (it h
 confirmation of a living conductor still finds its job), and ``sweep`` ends it after ``staging_ttl`` like the target
 staging of the same job (DESIGN §3.5).
 
-Red before r3-a: ``RateLimited: too many concurrent handovers for this device`` and no ``release`` in the sweep."""
+Red before the fix: ``RateLimited: too many concurrent handovers for this device`` and no ``release`` in the sweep."""
 
 from __future__ import annotations
 

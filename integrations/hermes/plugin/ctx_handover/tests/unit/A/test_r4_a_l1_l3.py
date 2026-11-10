@@ -1,4 +1,4 @@
-"""Review round 4, package r4-a — R3-L1 and R3-L3 (REVIEW-3 §3).
+"""Review round 4 — R3-L1 and R3-L3 (REVIEW-3 §3).
 
 * **R3-L1** (g2): the first synchronous read of the veto index fails (ledger in DELETE mode, a foreign lock for longer
   than 5 s): turns pass without a veto until the thread's retry succeeds (≈ 8.5 s), and nothing said so. Decision:
@@ -6,11 +6,11 @@
   (DECISIONS R1): the handover's session marks (ended ``handed_over``, archived, hidden) hold without it — the same
   guarantee as with the plugin not loaded (README). Without a read ledger the index cannot tell which session is
   handed over, so "fail-closed for the affected session" would block every session of the profile.
-* **R3-L3** (g8 N3): reason (k) ``repos_left`` came for a clone inside a merely *proposed* secondary repository too;
+* **R3-L3**: reason (k) ``repos_left`` came for a clone inside a merely *proposed* secondary repository too;
   without an answer (agent start, timeout) the job ended, although "without proposals" takes nothing of it along.
   Reason (k) now asks only for repositories that travel (an included item, or a proposed one under ``--yes``).
 
-Red before r4-a: no log record; reasons ``['proposed', 'repos_left']`` ⇒ ``cancel``."""
+Red before the fix: no log record; reasons ``['proposed', 'repos_left']`` ⇒ ``cancel``."""
 
 from __future__ import annotations
 
@@ -125,7 +125,7 @@ def test_r4_a_l3_a_clone_in_a_proposed_repository_does_not_stop_an_unanswered_ha
     unanswered confirmation (agent start, timeout) continues without proposals — and then nothing of ``b`` travels.
     The summary still names the clone (``repos_left``) for a person who answers the question about proposals.
 
-    Red before r4-a: ``['proposed', 'repos_left']`` and ``cancel``. Mutant ``L3-proposed-roots`` (reason (k) over
+    Red before the fix: ``['proposed', 'repos_left']`` and ``cancel``. Mutant ``L3-proposed-roots`` (reason (k) over
     every root that is not ``no``) ⇒ the same."""
     final = _final(Include.PROPOSED)
     reasons = plan.confirmation_reasons(final, Options(), False)

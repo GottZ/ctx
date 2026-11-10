@@ -1,4 +1,4 @@
-"""A · L3-F20, wish W1 of package i-f20 (its acceptance test, built in by rv-a for ``engine/jobs.py``): the composition
+"""A · L3-F20, wish W1 (its acceptance test, built in for ``engine/jobs.py``): the composition
 root builds the policy home — and with it the facts, the path map, the denylist and the collector — from
 ``hostcompat.effective_home``, so it is the same under ``plugins.isolation: in_process`` and ``host`` (red while
 ``jobs._policy`` reads ``Path.home()``)."""

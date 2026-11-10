@@ -1,4 +1,4 @@
-"""Review round rv-e, finding B2: update and return mode never overwrite or delete what lies at the destination
+"""First review round, finding B2: update and return mode never overwrite or delete what lies at the destination
 outside the repository's tracked content (ignored files, ignored directories), and their inverse never deletes a
 file someone changed after the forward step (BRIEF D10, I5, DESIGN §9.5)."""
 

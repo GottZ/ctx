@@ -1,4 +1,4 @@
-"""Review round 3 (``REVIEW-2.md`` §2 H2, R2-M5; g6 round 2): the refusal to start a continuation while approvals are
+"""Review round 3 (the second review §2 H2, R2-M5): the refusal to start a continuation while approvals are
 off held only where the plugin runs inside the gateway that runs the turn. ``hermes chat --resume … -q`` is a gateway
 client, so the gateway's ``--yolo`` decides; a separate ``hermes serve``/``hermes dashboard`` serving the routes and
 ``hermes handover take|import --continue`` in a terminal read only their own environment, and ``doctor`` said

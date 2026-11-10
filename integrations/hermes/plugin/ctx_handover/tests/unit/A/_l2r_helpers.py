@@ -1,4 +1,4 @@
-"""Helpers of the layer-R tests of package r-opa for cluster A (``test_l2r_*.py`` in this directory).
+"""Helpers of the layer-R tests for cluster A (``test_l2r_*.py`` in this directory).
 
 Homes, listener and pairing come from ``tests/integration/harness.py`` (real ``SessionDB``, git, block store,
 listener process); journals are read the way the conductor and ``LocalTarget`` write them (``ctx`` events)."""

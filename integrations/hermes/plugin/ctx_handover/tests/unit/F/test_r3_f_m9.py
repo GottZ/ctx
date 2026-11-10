@@ -1,4 +1,4 @@
-"""Review round 3, M9 (``REVIEW-2.md`` §4; g7 round 2, ``test_g7_botchat_title.py``): ``README.md:92-93`` said the
+"""Review round 3, M9 (the second review §4): ``README.md:92-93`` said the
 canonical *Bot Chat* of Bot Mode "keeps its title" while it is handed over. With Hermes' real ``SessionDB`` the
 archive mark (2) releases the Bot Chat name (``title = NULL``) and the plugin hides the session again: during the
 handover it has no title. A reclaim or a cancelled handover gives the name back, or — when Bot Mode made a new Bot

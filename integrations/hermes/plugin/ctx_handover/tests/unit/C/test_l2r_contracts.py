@@ -1,4 +1,4 @@
-"""Layer R (red first) — open contract points of cluster C (``reports/L2-contracts.md`` V17, V25, V27).
+"""Layer R (red first) — open contract points of cluster C (the layer-2 contract V17, V25, V27).
 
 Real modules: cluster A's ``Ledger``, ``ParticipantRegistry`` and ``LocalSource``, cluster C's ``Server``,
 ``WireClient``, ``RemoteSource``/``RemoteTarget`` and ``BlockStore``. The dialer reaches the listener through the
@@ -215,7 +215,7 @@ def test_l2r_gc_time_protection_only_for_running_jobs(tmp_path, role):
 
 
 def test_l2r_probe_sizes_are_a_wire_constant(tmp_path, monkeypatch):
-    """V27 (wp-f §7 wish 5, wp-c W-5): the sizes of ``probe_gate(measure_limit=True)`` are one constant in
+    """V27 (W-5): the sizes of ``probe_gate(measure_limit=True)`` are one constant in
     ``wire`` — ``wire.PROBE_SIZES_MIB == (1, 2, 4, 8)`` — and the probe sends exactly those bodies (checked by
     narrowing the constant: the probe follows it, no literal sizes beside it)."""
     assert wire.PROBE_SIZES_MIB == (1, 2, 4, 8)

@@ -1,4 +1,4 @@
-"""r3-kd, review finding L9 (``review-code/REVIEW-2.md`` §4, hardening checklist BUILD-ORDER §6 no. 17): a hard link
+"""Review finding L9 (the second review §4, hardening checklist BUILD-ORDER §6 no. 17): a hard link
 to a credential file goes along silently.
 
 A hard link is a second name of the same file: no symlink to resolve, no denied name, and a credential file without a
@@ -175,8 +175,8 @@ def test_l9_scan_cache_gives_the_same_verdicts(lay):
 
 def test_l9_identity_walk_is_bounded(lay, monkeypatch):
     """The walk over the credential places stops after ``policy.LINKED_SCAN_MAX`` directory entries: a huge browser
-    profile never makes a scan slow. The small credential stores come first, so ``.aws`` is still known. (r4-ke,
-    R3-M2: beyond the bound the walk is incomplete and refuses — ``secret`` — instead of allowing; the bound is set
+    profile never makes a scan slow. The small credential stores come first, so ``.aws`` is still known. (R3-M2:
+    beyond the bound the walk is incomplete and refuses — ``secret`` — instead of allowing; the bound is set
     above the fixed places, which are looked at first.)"""
     creds = _write(lay.home / ".aws" / "credentials", AWS)
     big = lay.home / ".mozilla" / "firefox" / "x.default"

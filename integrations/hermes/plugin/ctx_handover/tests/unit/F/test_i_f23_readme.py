@@ -1,4 +1,4 @@
-"""Package i-f23 (L3-F23): the README sentence on the return trip's fresh folder, bound to the rule behind it.
+"""L3-F23: the README sentence on the return trip's fresh folder, bound to the rule behind it.
 
 The row "Back to the server after landing" says where a returning repository lands when its original folder cannot
 take it: ``<folder>-handover-<time>`` beside it under ``allow_roots``, else ``<workspace_root>/<name>-handover-<time>``.

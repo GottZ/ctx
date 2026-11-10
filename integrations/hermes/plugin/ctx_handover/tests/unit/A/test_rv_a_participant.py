@@ -1,4 +1,4 @@
-"""Review round rv-a, participant findings (``review-code/REVIEW.md`` §2): M17 (a pull peer opened a source job under
+"""First review round, participant findings (the first external review §2): M17 (a pull peer opened a source job under
 another peer's job id and read that job's objects) and L4 (the janitor keeps an interrupted ``reclaiming`` row; a
 repeated ``/handover reclaim`` finishes it — the docstring said otherwise)."""
 

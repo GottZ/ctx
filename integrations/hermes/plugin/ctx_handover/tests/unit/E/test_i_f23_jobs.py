@@ -1,4 +1,4 @@
-"""Package i-f23 (lab finding L3-F23, BRIEF D10, R4, R19, R29): a conflict found while the target PREPAREs an item in
+"""Lab finding L3-F23 (BRIEF D10, R4, R19, R29): a conflict found while the target PREPAREs an item in
 update or return mode sends the item to a fresh directory under ``workspace_root`` — never beside a destination
 that lies outside ``allow_roots``, which the target policy refuses (``not_allowed_root``) and which ended the job
 ``aborted``.
@@ -7,7 +7,7 @@ Both tests run whole jobs through the real engine path (two homes, a real listen
 ``tests/integration``), without Hermes. The obstacle is the one of finding B2: a file the destination's repository
 ignores (``.git/info/exclude``) at a path the arriving state adds; it keeps its bytes.
 
-Red before i-f23: ``('aborted', … 'fallback destination not allowed (not_allowed_root)' …)``."""
+Red before the fix: ``('aborted', … 'fallback destination not allowed (not_allowed_root)' …)``."""
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def test_i_f23_return_conflict_at_an_origin_outside_the_roots_lands_under_worksp
     lies in ``<workspace_root>/proj-handover-<stamp>`` (nothing beside the origin), and the acknowledgement and
     the final message rendered from it (folder, warning) name that folder.
 
-    Red before i-f23: ``materialize`` built ``~/proj-handover-<stamp>`` beside the origin, the target policy refused
+    Red before the fix: ``materialize`` built ``~/proj-handover-<stamp>`` beside the origin, the target policy refused
     it (``not_allowed_root``), the job ended ``aborted``."""
     server, laptop, _listener, peer = online
     origin = server.home / "proj"
@@ -136,7 +136,7 @@ def test_i_f23_update_conflict_at_a_recorded_dest_outside_the_roots_lands_under_
     PREPARE finds the ignored file in the way ⇒ DONE, ``~/work/proj`` byte-identical, the state in
     ``<workspace_root>/proj-handover-<stamp>``, named in the acknowledgement and the final message (folder, warning).
 
-    Red before i-f23: ``~/work/proj-handover-<stamp>`` refused (``not_allowed_root``), the job ``aborted``."""
+    Red before the fix: ``~/work/proj-handover-<stamp>`` refused (``not_allowed_root``), the job ``aborted``."""
     server, laptop, _listener, peer = online
     origin = server.home / "proj"
     repo = _repo(origin)

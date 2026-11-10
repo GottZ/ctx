@@ -1,4 +1,4 @@
-"""r3-last — the README texts r3-kd proposed (``reports/L2/r3-kd.md`` §5), each bound to the code behind it.
+"""The README texts proposed in review round 3, each bound to the code behind it.
 
 * **R2-M3 / L3-F26** (Use, workspace paragraph): a working folder git carries nothing from but placeholders is a
   scratch folder; files git ignores never travel with a repository; a file named in a folder another repository ignores
@@ -13,7 +13,7 @@
   places, the scan bound ``policy.LINKED_SCAN_MAX``); Reads names the owner lookup and the identity walk.
 
 Each test reads the README sentence and the constant, signature or behaviour behind it (L28: no free-standing
-substrings). Red before r3-last: none of these sentences was in the README.
+substrings). Red before the fix: none of these sentences was in the README.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def test_workspace_paragraph_names_the_placeholder_rule(tmp_path):
 
 
 def test_workspace_paragraph_says_ignored_files_stay_with_the_repository():
-    """★ L3-F26 (r3-kd §2, observation): what git ignores inside a repository that travels stays here, also when the
+    """★ L3-F26 (observation): what git ignores inside a repository that travels stays here, also when the
     conversation names it — the pack lists untracked files with ``--exclude-standard`` and never asks for ignored
     ones."""
     use = _use()
@@ -255,7 +255,7 @@ def test_unredacted_names_the_hard_link_check(k0_lay):  # noqa: F811
         "below it, Hermes' credential stores) is left out as that file would be: `--include-secret` on its path "
         "releases one of your home, nothing releases Hermes'." in unredacted
     )
-    # r4-f (R3-M2, r4-ke): beyond the bound a linked file is no longer allowed — the sentence moved to
+    # R3-M2: beyond the bound a linked file is no longer allowed — the sentence moved to
     # ``test_r4_f_readme.py::test_unredacted_names_the_bound_of_the_hard_link_check``
     assert (
         "A hard link to a credential file elsewhere (another account's home, any other place) is caught only by the "

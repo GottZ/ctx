@@ -1,5 +1,5 @@
 """Round G′, cluster C — ``inbound`` is read by the one settings reader only (contract V22, integrator note of
-round G′ after gp-k0): ``server.inbound_mode`` is ``settings.coerce("inbound", …)`` — the K0 normaliser reads YAML
+round G′): ``server.inbound_mode`` is ``settings.coerce("inbound", …)`` — the K0 normaliser reads YAML
 booleans and the boolean words as ``on``/``off`` and an unrecognised value as ``off`` (fail-closed); the server keeps
 no second rule, and its log line is the normaliser's own sentence.
 """

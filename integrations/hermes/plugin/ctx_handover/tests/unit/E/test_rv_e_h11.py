@@ -1,4 +1,4 @@
-"""Review round rv-e, finding H11: a file tree (and a single extra file) at the target is checked against the byte
+"""First review round, finding H11: a file tree (and a single extra file) at the target is checked against the byte
 cap and the free space before the first byte is written — block de-duplication must not let a peer write more than
 the target allows (R28, BUILD-ORDER §6 Nr. 8)."""
 

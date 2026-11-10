@@ -1,4 +1,4 @@
-"""Review round 3, package r3-a — R2-H1 (REVIEW-2 §3): the first turn of a freshly started process must meet a loaded
+"""Review round 3 — R2-H1 (REVIEW-2 §3): the first turn of a freshly started process must meet a loaded
 veto index.
 
 Since the M6 fix the janitor of a process's first use runs in the background, and ``ensure_started`` returned as soon
@@ -6,7 +6,7 @@ as the ``VetoIndex`` refresher thread was started — before it had read the led
 read an empty index and let a turn through on a session that was handed over (reviewer harness: 15 and 18 of 20).
 DECISIONS R1 (the veto is the fallback layer of the source lock) and README guarantee (5).
 
-Red before r3-a: ``first turn passed the lock in N of 20 fresh processes`` (N > 0) and ``lookup … is None``."""
+Red before the fix: ``first turn passed the lock in N of 20 fresh processes`` (N > 0) and ``lookup … is None``."""
 
 from __future__ import annotations
 
@@ -96,7 +96,7 @@ def test_r3_a_h1_first_turn_of_fresh_processes_is_vetoed(runtime_env, fake_ctx):
     """★ 20 fresh processes over a ledger whose source session is retired: the first ``pre_llm_call`` and the first
     ``pre_tool_call`` of each are blocked — none passes the lock (README guarantee (5), R1).
 
-    Mutant (r3-a, ``lock.VetoIndex.start``): drop the synchronous first ``refresh_now(force=True)``."""
+    Mutant (``lock.VetoIndex.start``): drop the synchronous first ``refresh_now(force=True)``."""
     rt = jobs.ensure_started(fake_ctx)
     _seed(rt.ledger)
     jobs._reset_for_tests()  # the parent's runtime is closed; every child builds its own from the file

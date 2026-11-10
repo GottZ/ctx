@@ -1,10 +1,10 @@
-"""rv-k0, review finding H9 (``review-code/REVIEW.md`` §2, g5 H2) and L11 (g4 L-3): link targets of a peer's tree.
+"""Review finding H9 (the first external review §2) and L11: link targets of a peer's tree.
 
 DESIGN §10.3: symlinks of a received tree are created "only relative and inside the root". ``check_tree_entry``
 judged each target on its own, lexically: ``a/b/c/u -> ../../..`` and ``l -> a/b/c/u/../../../..`` both stay inside
 on paper, but the kernel resolves ``u`` first, so ``l`` ends four levels above the root and ``k -> l/etc/passwd``
-reaches any absolute file (reviewer probe ``g5-git/probes/test_zz_g5_probe.py::test_probe_tree_symlink_chain_
-escapes_root``). The plugin never writes through links; the damage is done by whoever later writes into the tree.
+reaches any absolute file (a reviewer probe). The plugin never writes through links; the damage is done by whoever
+later writes into the tree.
 
 Rule now: ``..`` may only lead a target. Every directory of a received tree is a real directory (``filetree``
 refuses a link as a parent), so leading ``..`` climb real directories exactly as counted, and the components after

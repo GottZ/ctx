@@ -1597,7 +1597,7 @@ class Ledger:
         return out
 
     def outbox_claim(self, row_id: int, now: float, until: float) -> bool:
-        """Claim a due outbox row for one sender before its first MCP call (rv-final, M29 follow-up): ``next_try_at``
+        """Claim a due outbox row for one sender before its first MCP call (M29 follow-up): ``next_try_at``
         moves to ``until`` only while the row is still due at ``now`` and not done — one write transaction, so of
         two flushers (threads or processes of the profile) exactly one gets True. The claimer ends the claim with
         ``outbox_done`` (delivered or backed off) or ``outbox_release`` (untried); a claimer that dies leaves the row

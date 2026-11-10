@@ -1,5 +1,5 @@
-"""Review round rv-a, Medium findings of the conductor (``review-code/REVIEW.md`` §2, triage
-``reports/L2/review-ml-triage.md``): M1, M2, M3, M18, M27 — each reproduced with the A harness (real ledger,
+"""First review round, Medium findings of the conductor (the first external review §2 and its
+triage): M1, M2, M3, M18, M27 — each reproduced with the A harness (real ledger,
 World of fake participants) before the fix."""
 
 from __future__ import annotations
@@ -235,14 +235,14 @@ def test_rv_a_m3_a_slow_confirmation_keeps_the_job(tmp_path, clock):
     assert final.plan.items and h.state() != "aborted"
 
 
-# -- rv-d: reason (k) ``repos_left`` is settled by the export -------------------------------------------------------
+# -- H15: reason (k) ``repos_left`` is settled by the export -------------------------------------------------------
 
 
 def test_rv_a_import_does_not_ask_repos_left_again(tmp_path, clock, monkeypatch):
-    """rv-d added reason (k) ``repos_left`` (repositories inside a transferred git workspace that do not travel, H15);
-    ``--yes`` does not answer it (``plan.YES_EXEMPT``), so the export asked a person. The bundle holds that answer:
-    the import does not ask (k) again (like ``proposed`` and ``workspace_differs``, R36a). The bundle's plan of record
-    is the World's plan here (``_bundle_final`` stands in for reading it from a real bundle)."""
+    """The first review round added reason (k) ``repos_left`` (repositories inside a transferred git workspace that do
+    not travel, H15); ``--yes`` does not answer it (``plan.YES_EXEMPT``), so the export asked a person. The bundle holds
+    that answer: the import does not ask (k) again (like ``proposed`` and ``workspace_differs``, R36a). The bundle's
+    plan of record is the World's plan here (``_bundle_final`` stands in for reading it from a real bundle)."""
     from ctx_handover.engine import conductor as conductor_mod
     from ctx_handover.engine.jsonutil import from_wire
     from ctx_handover.engine.model import EnvFacts, Options, ResourcePlan

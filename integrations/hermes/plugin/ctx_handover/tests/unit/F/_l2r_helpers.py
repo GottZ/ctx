@@ -1,4 +1,4 @@
-"""Helpers of the layer-R tests of cluster F (package r-opb): an ``EngineBackend`` over a real cluster-A ``Ledger``
+"""Helpers of the layer-R tests of cluster F: an ``EngineBackend`` over a real cluster-A ``Ledger``
 in a runtime object of the ``jobs.Runtime`` shape, and README text access."""
 
 from __future__ import annotations

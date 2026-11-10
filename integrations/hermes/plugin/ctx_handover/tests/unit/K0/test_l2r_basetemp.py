@@ -1,5 +1,5 @@
-"""Layer R (red) for V32 of ``reports/L2-contracts.md``: the root ``tests/conftest.py`` locks a ``--basetemp``
-against two concurrent runs and stops the second one with a clear message (flake cause found by wp-c: a second run
+"""Layer R (red) for V32 of the layer-2 contract: the root ``tests/conftest.py`` locks a ``--basetemp``
+against two concurrent runs and stops the second one with a clear message (flake cause: a second run
 on the same base temp directory removes the first run's files while it is still running).
 
 Two real pytest processes on the same ``--basetemp``: the first holds its ``tmp_path`` (``_l2r_helpers.py``), the

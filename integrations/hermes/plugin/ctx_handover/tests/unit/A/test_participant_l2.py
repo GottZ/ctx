@@ -1,7 +1,7 @@
 """ParticipantRegistry and ``participant_options``, layer 2 (contract X07, X18, X25/K-2; W047).
 
-Real ``Ledger``; participant APIs recorded. The server delegates routes #8–#10 and the job context to the registry
-(wp-c); the registry is the one owner of the job caps (values from its constructor, filled from settings).
+Real ``Ledger``; participant APIs recorded. The server delegates routes #8–#10 and the job context to the registry;
+the registry is the one owner of the job caps (values from its constructor, filled from settings).
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ def test_l2_source_reclaimed_reaches_both_sides(led, clock, tmp_path, fake_host)
     """W047 (DESIGN §7.7): the source reports ``source_reclaimed`` in its status ``notes`` (a target that dialed
     learns it on its next contact); a source that dialed sends ``{"note": "source_reclaimed"}`` with route #8 and
     the target's registry marks the arrival. The sender is ``jobs.reclaim``; the server's route #8 must hand the
-    body to ``ParticipantRegistry.status`` (wp-c, X18)."""
+    body to ``ParticipantRegistry.status`` (X18)."""
     job_id = ulid()
     led.create_job(job_id, Role.SOURCE, Mode.PUSH, None, {"role": "source"})
     info = SessionInfo("tip", "root", ("root", "tip"), "T", None, None, None, None, None, 1, (1,))

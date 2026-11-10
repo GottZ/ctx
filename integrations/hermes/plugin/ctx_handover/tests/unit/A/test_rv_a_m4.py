@@ -1,4 +1,4 @@
-"""Review round rv-a, M4 (``review-code/REVIEW.md`` §2): the janitor tests and the fault matrix ran the janitor
+"""First review round, M4 (the first external review §2): the janitor tests and the fault matrix ran the janitor
 without its participant half, and the fake source keyed its release like the production code did before B1 — so no
 A test could reach B1. This drives the janitor with the participant half (what ``ParticipantRegistry.recover`` does
 for this host's stale source row) and runs B1 as a matrix row: crash in the transfer phase ⇒ janitor ⇒ resume ⇒ the

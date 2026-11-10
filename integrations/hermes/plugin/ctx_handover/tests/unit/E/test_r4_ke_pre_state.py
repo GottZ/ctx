@@ -1,4 +1,4 @@
-"""r4-ke, review finding R3-M1 (``review-code/REVIEW-3.md`` §3; ``round3/g5-git-r3.md`` N3): the check "has the forward
+"""Review finding R3-M1 (the third review §3; its round-3 report N3): the check "has the forward
 step c1 touched the repository yet?" (``gitapply._pre_state``) decides whether a failed or resumed step is rolled back.
 Since R2-M4 it asked ``status_clean`` in the received profile, which reads the user's global ignore file: a received
 untracked file that file hides (``debug.log`` under ``*.log``) was invisible, the repository read as untouched, and a

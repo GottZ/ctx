@@ -1,4 +1,4 @@
-"""Review round rv-e2, finding M25 (gitapply part, wish to the integrator): a Windows target checks git paths with
+"""First review round, finding M25 (gitapply part, wish to the integrator): a Windows target checks git paths with
 long-path support — git runs there with ``core.longpaths=true`` (DESIGN §9.2, §9.4) — so a path over 260 characters
 no longer sends the item to ``NO_CHECKOUT``/the fallback; names NTFS cannot hold still do."""
 

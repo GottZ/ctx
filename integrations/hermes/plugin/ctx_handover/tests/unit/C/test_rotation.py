@@ -1,4 +1,4 @@
-"""Identity rotation across processes (Befund L2-F, DESIGN §12.2): ``identity rotate`` runs in a CLI process
+"""Identity rotation across processes (layer-2 finding, DESIGN §12.2): ``identity rotate`` runs in a CLI process
 while the listener process of the same profile keeps running.
 
 The listener is the integration harness's ``listener_app.py`` — the plugin router loaded by path and the server
@@ -50,7 +50,7 @@ def _rotate_in_cli_process(home: Home) -> str:
 
 
 def test_listener_process_follows_identity_rotate_of_the_cli(homes):
-    """★ Befund L2-F: the running listener process loads the identity another process rotated, on the next
+    """★ Layer-2 finding: the running listener process loads the identity another process rotated, on the next
     request: the unsigned ``hello`` names the new key, a dialer that pinned the old key rejects the responses
     (``bad_response_signature``), one that pins the new key is served, and a new pairing with the new fingerprint
     succeeds — no restart, and nothing is signed with the retired key any more.

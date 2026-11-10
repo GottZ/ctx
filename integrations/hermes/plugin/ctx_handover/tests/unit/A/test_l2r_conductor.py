@@ -1,4 +1,4 @@
-"""Layer R (red) for the conductor points of ``reports/L2-contracts.md``:
+"""Layer R (red) for the conductor points of the layer-2 contract:
 
 * V23 — an integrity failure (``block_corrupt``: a manifest that does not hash to the requested id) is fetched once
   more; the second mismatch of the same object ends the job ABORTED with the integrity error and the source free —

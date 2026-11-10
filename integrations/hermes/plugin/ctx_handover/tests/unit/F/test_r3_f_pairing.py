@@ -1,4 +1,4 @@
-"""Lab finding L3-F25 (``reports/L3-findings.md``; integrator decision for r3-f): a second pairing of this device with a
+"""Lab finding L3-F25 (integrator decision): a second pairing of this device with a
 gateway it is already paired with — the same listener key, reached under a second address or a second name.
 
 (a) Another address with the same dashboard token was refused by the H1 address binding with the remedy "enter the

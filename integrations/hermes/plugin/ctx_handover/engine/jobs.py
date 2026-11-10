@@ -105,6 +105,9 @@ RECLAIM_SETTLE_S = 15.0
 """How long ``reclaim`` waits for this process's runner of an export to settle it (V39)."""
 CANCEL_SETTLE_S = 15.0
 """How long ``cancel`` of a SUSPENDED job waits for its abort before it answers (L3-F07)."""
+_PAST_COMMIT = frozenset({"committing", "in_doubt", "committed", "retiring", "retired", "continuing"})
+"""Conductor states from the commit intent on: the target may hold the active session, so no cancel — also not
+``--force`` — ends such a job."""
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -355,7 +358,7 @@ _TARGET_OS = {"windows": "windows", "darwin": "macos"}
 def _os_family() -> str:
     """This host's OS family by the rule its facts report (``envfacts._family`` over ``platform.system()``): MSYS,
     Cygwin and MinGW are Windows — ``os.name`` is ``posix`` there, so the Windows naming rules and denylist of this
-    host's own policy did not apply (rv-k0)."""
+    host's own policy did not apply."""
     from .envfacts import _family
 
     return _family(platform.system())
@@ -852,6 +855,8 @@ def _next_action(row: dict, outcome: str) -> str | None:
         return "/handover status shows progress; /handover reclaim --force takes the session back here"
     if outcome == "active_source_pending" or state == "retiring":
         return "the other side is released on the next contact (the janitor retries)"
+    if state == "aborting" and row.get("last_error"):
+        return f"the cancel is tried again on every start; /handover cancel {s} --force ends it here"
     return None
 
 
@@ -1196,18 +1201,25 @@ class JobRunner:
         for thread in list(self._threads.values()):
             thread.join(timeout)
 
-    def cancel(self, job_id: str) -> str:
+    def cancel(self, job_id: str, *, force: bool = False) -> str:
         """The text of ``cancel_answer`` (for callers that only show it)."""
-        return self.cancel_answer(job_id).text
+        return self.cancel_answer(job_id, force=force).text
 
-    def cancel_answer(self, job_id: str) -> CancelAnswer:
+    def cancel_answer(self, job_id: str, *, force: bool = False) -> CancelAnswer:
         """Request cancellation. The job's state is read first (L3-F22): a finished job (done, aborted) is named as
         such — ``ledger.set_cancel`` would call every job with a journaled ``intent: commit`` "committing", and every
         finished job journaled it; a job past its commit point is refused with its state; only a request the ledger
         holds is ``requested``. A SUSPENDED job has no runner that would see the request (L3-F07): the cancel drives
-        its abort itself (``_abort_suspended``). An unknown job raises ``NotFound``."""
+        its abort itself (``_abort_suspended``). An unknown job raises ``NotFound``.
+
+        A job that is ABORTING already gets no new request: the answer says so and, once its abort failed, names
+        ``--force``; ``force=True`` ends such a job here (``_cancel_forced``)."""
+        if force:
+            return self._cancel_forced(job_id)
         sid = short(job_id)
         row = self.ledger.job(job_id, Role.CONDUCTOR)
+        if row is not None and row["state"] == str(ConductorState.ABORTING):
+            return self._already_aborting(row)
         refused = False
         if row is None or row["state"] not in TERMINAL[Role.CONDUCTOR]:
             try:
@@ -1239,6 +1251,97 @@ class JobRunner:
             after = self.ledger.job(job_id, Role.CONDUCTOR) or {}
             return CancelAnswer(True, str(after.get("state") or state), text)
         return CancelAnswer(True, state, f"Cancel requested for job {sid}.")
+
+    def _already_aborting(self, row: dict) -> CancelAnswer:
+        """``cancel`` of an ABORTING job: nothing new is requested (the abort runs or waits for the janitor)."""
+        sid = short(row["job_id"])
+        err = row.get("last_error") or {}
+        if not (isinstance(err, dict) and err.get("message")):
+            return CancelAnswer(False, "aborting", f"Handover {sid} is already being cancelled.", "aborting")
+        return CancelAnswer(
+            False,
+            "aborting",
+            f"Handover {sid} is already being cancelled, but the other side has not confirmed it ({err['message']}); "
+            f"it is tried again on every start. /handover cancel {sid} --force ends it here without that "
+            "confirmation.",
+            "aborting",
+        )
+
+    def _cancel_forced(self, job_id: str) -> CancelAnswer:
+        """``/handover cancel --force``: end a job stuck in ABORTING here (``Conductor.force_abort``). The side on this
+        host is aborted or released the normal way (the local source: leases, marks, veto); the side on the peer may
+        stay unconfirmed and the answer names what may remain there. A job from the commit intent on is refused (the
+        target may hold the active session; never two active copies); a finished job is named as such; a job before
+        ABORTING gets a normal cancel request. ``requested`` is True only for a job that ended ABORTED."""
+        sid = short(job_id)
+        row = self.ledger.job(job_id, Role.CONDUCTOR)
+        if row is None:
+            raise NotFound(f"job {sid} not found")
+        state = str(row["state"])
+        if state in _PAST_COMMIT:
+            return CancelAnswer(
+                False,
+                state,
+                f"Too late to cancel handover {sid}, also with --force: it is past its commit point ({state}) and the "
+                "target may already hold the active session. Use /handover reclaim on the source to take the session "
+                "back.",
+                "committing",
+            )
+        if state != str(ConductorState.ABORTING):
+            return self.cancel_answer(job_id)  # finished, or not cancelling yet: the plain answer
+        with self._lock:
+            running = self._threads.get(job_id)
+        if running is not None and running.is_alive():
+            running.join(CANCEL_SETTLE_S)
+            if running.is_alive():
+                return CancelAnswer(
+                    False,
+                    state,
+                    f"Handover {sid} is being cancelled right now; try --force again if it stays aborting.",
+                    "not_forced",
+                )
+        try:
+            self._conductor(job_id)  # claims the job here: one driven by another process is named, not raced
+        except HandoverError as err:
+            self._forget(job_id)
+            return CancelAnswer(
+                False, state, f"Handover {sid} could not be ended here: {err.message or err.code}.", "not_forced"
+            )
+        thread = self._spawn(job_id, "force_abort")
+        thread.join(CANCEL_SETTLE_S)
+        after = self.ledger.job(job_id, Role.CONDUCTOR) or {}
+        now = str(after.get("state") or "gone")
+        if now == str(ConductorState.ABORTING) and thread.is_alive():
+            return CancelAnswer(
+                False,
+                now,
+                f"Ending handover {sid} here; the other side is slow to answer. /handover status {sid} shows when it "
+                "has ended.",
+                "not_forced",
+            )
+        if now == str(ConductorState.ABORTED):
+            result = after.get("result") if isinstance(after.get("result"), dict) else {}
+            notes = [str(e["note"]) for e in result.get("forced") or () if isinstance(e, dict) and e.get("note")]
+            source_here = row["mode"] in (str(Mode.PUSH), str(Mode.EXPORT))
+            here = "the session is yours again" if source_here else "nothing of it is kept here"
+            return CancelAnswer(True, now, " ".join([f"Handover {sid} cancelled with --force; {here}.", *notes]))
+        if now == str(ConductorState.IN_DOUBT):
+            return CancelAnswer(
+                False,
+                now,
+                f"Not cancelled: the target of handover {sid} reports that it is committing, so it may hold the active "
+                f"session. /handover status {sid} shows how it resolves; /handover reclaim --force on the source takes "
+                "the session back.",
+                "committing",
+            )
+        err = after.get("last_error") or {}
+        why = err.get("message") if isinstance(err, dict) and err.get("message") else now
+        return CancelAnswer(
+            False,
+            now,
+            f"Handover {sid} could not be ended here ({why}); it stays {now}. /handover status {sid} shows it.",
+            "not_forced",
+        )
 
     def _abort_suspended(self, job_id: str) -> str:
         """``/handover cancel`` of a SUSPENDED job (L3-F07): the abort runs now — ``target.abort``, then

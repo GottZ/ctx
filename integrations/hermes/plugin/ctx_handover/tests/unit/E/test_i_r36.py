@@ -1,4 +1,4 @@
-"""R36 / L3-F19 (package i-r36), cluster E part: ``gitops.GitProbe.is_ignored`` — is a directory inside a work tree
+"""R36 / L3-F19, cluster E part: ``gitops.GitProbe.is_ignored`` — is a directory inside a work tree
 ignored there (``git check-ignore``)? The collector asks it before it takes an enclosing repository as the session's
 workspace: a cwd git ignores in that repository travels as a file tree of its own.
 

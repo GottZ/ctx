@@ -1,4 +1,4 @@
-"""Layer R (red) for V08 (D part) of ``reports/L2-contracts.md``: offline capability has exactly one rule,
+"""Layer R (red) for V08 (D part) of the layer-2 contract: offline capability has exactly one rule,
 ``session_import.offline_capable`` (contract X04); ``envfacts.is_offline_route`` delegates to it or is gone. So the
 ``EnvFacts.offline_capable`` a host reports for its own main route equals that rule for every configuration —
 including the cases where the second rule decided differently (a local provider with a remote ``base_url``, a

@@ -1,4 +1,4 @@
-"""Review round rv-d (``review-code/REVIEW.md`` @ ``1539274c``): what the collector found but the plan left behind
+"""First review round (the first external review): what the collector found but the plan left behind
 without a word.
 
 * H14 — a session cwd that is itself a symlink (Desktop/TUI store the cwd lexically) was "no cwd": no workspace, no
@@ -274,7 +274,7 @@ def _other_account(tmp_path) -> Path:
 
 
 def test_m35_another_accounts_home_or_the_homes_folder_is_no_workspace(transcript, lay, tmp_path, monkeypatch):
-    """★ M35 (g8 M1): Hermes runs as one account (``cfg.home``), the session's cwd is another account's home or the
+    """★ M35: Hermes runs as one account (``cfg.home``), the session's cwd is another account's home or the
     folder holding the homes (``/home``). Neither becomes a workspace: the primary stays here as ``home`` and reason
     (h) asks even with ``--yes``; nothing of that home — its Hermes ``state.db`` least of all — is an item.
 
@@ -322,7 +322,7 @@ def test_m35_another_accounts_hermes_home_is_never_an_item(transcript, lay, tmp_
 
 
 def test_m36_mentioned_folder_around_a_secondary_repository_is_no_extra(transcript, lay):
-    """★ M36 (g8 M2): ``ls ~/projects`` and ``read_file ~/projects/b/f`` — ``b`` is a repository, ``c`` an unrelated
+    """★ M36: ``ls ~/projects`` and ``read_file ~/projects/b/f`` — ``b`` is a repository, ``c`` an unrelated
     neighbour. The plan proposes the repository ``b``; ``~/projects`` is no extra directory (it contains a workspace of
     the plan) and is named as such; nothing of ``c`` travels.
 
@@ -350,7 +350,7 @@ def test_m36_mentioned_folder_around_a_secondary_repository_is_no_extra(transcri
 
 
 def test_m20_hermes_home_evidence_without_a_session_file_is_named(transcript, lay):
-    """★ M20 (g4 M-3, D part): the session read a page ``web_extract`` saved in the Hermes home
+    """★ M20 (D part): the session read a page ``web_extract`` saved in the Hermes home
     (``cache/web/x.md``) and Hermes' ``config.yaml``; the session-file discovery delivers neither. Both are named
     under "not transferred" (``hermes``) instead of disappearing; a session file the discovery delivers is an item
     and is not named again; a folder of the Hermes home is no entry.

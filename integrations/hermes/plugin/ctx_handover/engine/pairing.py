@@ -173,7 +173,7 @@ def own_secret_names(gate: GateAuth | None, peer_id: str) -> list[str]:
 
 
 def forget_credentials(store: SecretStore, names: list[str]) -> list[str]:
-    """Blank each of ``names`` the way the pairing wrote it (rv-final, ``peers remove``): ``store.writable``,
+    """Blank each of ``names`` the way the pairing wrote it (``peers remove``): ``store.writable``,
     ``store.save(name, "")``, then the read-back ``store.read_fresh`` (R16). Returns the names that are not proven
     blank — the write lock refused, the write raised, or the read-back still shows a value."""
     left: list[str] = []

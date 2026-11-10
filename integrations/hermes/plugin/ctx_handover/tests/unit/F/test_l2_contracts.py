@@ -484,7 +484,7 @@ def test_doctor_uses_c_gate_warnings(fake_host, monkeypatch):
 
 def test_identity_rotate_creates_a_new_key(fake_host, tmp_path):
     """W065/W119: ``/handover identity rotate`` calls ``crypto.Identity.create(…, rotate=True)``: a new key in the
-    profile ``.env`` and the ledger; F leaves the runtime's cached identity alone (L2-contracts §2 F) and the
+    profile ``.env`` and the ledger; F leaves the runtime's cached identity alone (layer-2 contract §2 F) and the
     runtime's own reload (``jobs._identity``) picks the new key, so the runner and the pull client sign with it.
 
     Red proof: mutant = ``rotate=False`` → ``assert '6f917c8554002e29' != '6f917c8554002e29'`` (the old key stays;

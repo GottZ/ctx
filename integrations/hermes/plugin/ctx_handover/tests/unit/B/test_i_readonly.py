@@ -1,4 +1,4 @@
-"""Layer I (package i-readme, integrator decision 6): the README's "read-only SQL on ``session_admissions`` and
+"""Layer I (integrator decision 6): the README's "read-only SQL on ``session_admissions`` and
 ``async_delegations``" (§Disclosure, Reads) holds for the busy probe — every connection it opens on ``state.db``
 refuses a write (``lock._ro_connect``, ``?mode=ro``)."""
 
@@ -15,7 +15,7 @@ def test_probe_busy_opens_state_db_read_only(session_db, make_session, hermes_ho
     is tried with a write (``CREATE TABLE``) before the probe uses it: the write must fail as a read-only
     database, the probe still answers (not busy, no warning), and ``state.db`` carries no trace of the attempt.
 
-    Mutant (``?mode=ro`` removed from ``lock._ro_connect``): the write succeeds — see ``reports/L2/i-readme.md``.
+    Mutant (``?mode=ro`` removed from ``lock._ro_connect``): the write succeeds.
     """
     tip = build(make_session, drivers=False)
     state_db = hermes_home / "state.db"

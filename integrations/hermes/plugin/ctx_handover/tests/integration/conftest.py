@@ -1,6 +1,6 @@
 """Fixtures of the integration suite: two homes, a listener process for home A, pairing (see harness.py).
 
-``fault_world`` (wp-int1): home A behind a supervised listener with listener-side fault rules, home B paired with
+``fault_world``: home A behind a supervised listener with listener-side fault rules, home B paired with
 it — ``harness.FaultWorld``. Selection of the fault matrix (``test_int_fault_matrix_*.py``):
 
 * marker ``slow`` — the full cross matrix; deselected unless ``CTXH_RUN_SLOW=1`` or a ``-m`` expression is given;
@@ -26,7 +26,7 @@ _MATRIX_PREFIX = "test_int_fault_matrix"
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "slow: full fault cross matrix (wp-int1); deselected unless CTXH_RUN_SLOW=1")
+    config.addinivalue_line("markers", "slow: full fault cross matrix; deselected unless CTXH_RUN_SLOW=1")
 
 
 def pytest_collection_modifyitems(config, items):

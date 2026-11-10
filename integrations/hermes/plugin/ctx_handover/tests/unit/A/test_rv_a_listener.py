@@ -1,4 +1,4 @@
-"""Review round rv-a, A parts of rv-c's findings: M15 (``inbound`` changed in the settings took effect only after a
+"""First review round, A parts of the findings: M15 (``inbound`` changed in the settings took effect only after a
 restart — the composition root now hands the listener the live setting) and M13 (a revocation hit one ledger row,
 not the key: after a second pairing the same key stayed valid through another inbound row)."""
 

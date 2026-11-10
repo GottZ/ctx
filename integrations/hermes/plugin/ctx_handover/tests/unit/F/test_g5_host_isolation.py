@@ -1,7 +1,7 @@
-"""Package g5, L3-F21 (R33 corrected): what ``doctor`` and the ``listener_missing`` text say under
+"""L3-F21 (R33 corrected): what ``doctor`` and the ``listener_missing`` text say under
 ``plugins.isolation: host``.
 
-The lab (``reports/L3.md``, L15; ``reports/L3-findings.md`` L3-F21) pulled a session from a gateway running under
+The lab (L15; lab finding L3-F21) pulled a session from a gateway running under
 ``plugins.isolation: host`` through its ``hermes serve`` four times out of five (``done``); ``doctor`` on that gateway
 said FAIL "cannot receive or provide handovers over HTTP". Upstream forwards a user plugin's dashboard routes to the
 profile's plugin host under ``host`` (``hermes_cli/web_server_dashboard.py`` ``_mount_one_plugin_api`` →

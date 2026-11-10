@@ -1,4 +1,4 @@
-"""Helpers of the TESTPLAN §3 integration tests (package r-int2; ``harness.py`` stays the two-home base).
+"""Helpers of the TESTPLAN §3 integration tests (``harness.py`` stays the two-home base).
 
 * ``conductor_ctx`` / ``target_ctx`` / ``job_errors`` — the journal of a job read back the way the conductor and
   the target rebuild their working data (merged ``ctx`` entries of the events).

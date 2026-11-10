@@ -1,4 +1,4 @@
-"""R36 / L3-F19 (package i-r36), the conductor's way: a workspace that holds more than the session's folder (D's
+"""R36 / L3-F19, the conductor's way: a workspace that holds more than the session's folder (D's
 reason (j) ``workspace_differs``, in ``plan.YES_EXEMPT``) is asked about even with ``--yes``; without an answer the job
 ends before the lock. A needs no change for it — ``conductor._confirm`` asks for every ``plan.yes_exempt`` reason —
 and these tests pin that over the real ``Conductor`` and ``Ledger`` (unit ``Harness``, World fakes).

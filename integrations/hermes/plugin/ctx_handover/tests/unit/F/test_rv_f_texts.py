@@ -1,8 +1,8 @@
-"""Review round rv-f — surface texts:
+"""First review round — surface texts:
 
-* L18 (g6 L1): after a pull or an import the continuation runs on this gateway, but its refusal named "the other
+* L18: after a pull or an import the continuation runs on this gateway, but its refusal named "the other
   gateway" (``render_error(continue_error, None)`` fell back to that peer text).
-* Reason (j) ``workspace_differs`` after R36a (i-r36 hand-over): only a working folder that holds none of the
+* Reason (j) ``workspace_differs`` after R36a (hand-over): only a working folder that holds none of the
   repository's tracked files asks; the text says so.
 * Reason (k) ``repos_left`` (cluster D, H15 in R30's form): every reason code of D has a text and a letter here (X03).
 """

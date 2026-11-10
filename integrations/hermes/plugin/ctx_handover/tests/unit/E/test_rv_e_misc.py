@@ -1,4 +1,4 @@
-"""Review round rv-e, Medium/Low findings in cluster E files: M23 (the index tree I is capped like W, before
+"""First review round, Medium/Low findings in cluster E files: M23 (the index tree I is capped like W, before
 anything is checked out) and L16 (a fresh file-tree commit whose destination and fallback both exist raises a
 ``ConflictError`` and leaves the partial 0700)."""
 

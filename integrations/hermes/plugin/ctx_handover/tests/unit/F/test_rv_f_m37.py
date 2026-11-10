@@ -1,4 +1,4 @@
-"""Review round rv-f — M37 (``review-code/REVIEW.md`` §2, High per orchestrator), H15 and M12 display: the summary
+"""First review round — M37 (the first external review §2, High per orchestrator), H15 and M12 display: the summary
 before sending named items outside the project only as a count ("N items outside the project") and said nothing of
 repositories that stay here or of an unknown context window there. Cluster D's ``plan.presend_summary`` now carries
 ``outside_items``/``outside_more``, ``repos_left``/``repos_left_more`` and ``context_unknown``; ``plan_summary``

@@ -1,9 +1,9 @@
-"""rv-k0, review finding M21 (``review-code/REVIEW.md`` §2, g4 M-4): the NFC part of hardening #16 had no test.
+"""Review finding M21 (the first external review §2): the NFC part of hardening #16 had no test.
 
 On a case-insensitive host (macOS, Windows) a path may arrive in NFD while the configured home, Hermes home and
 denylists are NFC. Every comparison normalises each component to NFC (``paths._norm_parts``, ``policy._fold``,
 ``policy._key``). The reviewer's mutant without any NFC normalisation left K0 + D + E green (1290 passed); these
-tests are red under it (red proof in the rv-k0 report).
+tests are red under it.
 """
 
 from __future__ import annotations

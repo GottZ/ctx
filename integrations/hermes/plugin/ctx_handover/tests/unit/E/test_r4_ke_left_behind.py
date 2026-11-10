@@ -1,4 +1,4 @@
-"""r4-ke, review finding R3-L2 (``review-code/REVIEW-3.md`` §3; ``round3/g4-policy-r3.md`` „Neue Lücken“ 2): a file
+"""Review finding R3-L2 (the third review §3; its round-3 report „Neue Lücken“ 2): a file
 of a tree item that the policy refuses as ``hermes`` (a hard link to a Hermes credential store, L9) went into the pack
 item's ``skipped`` list. The conductor reports only ``excluded`` as left behind (``conductor._left_behind``: final
 message, note, status) — so the user never learnt that a workspace file is missing. ``hermes`` now counts among the

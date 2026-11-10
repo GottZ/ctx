@@ -754,7 +754,7 @@ def _signed_with(pubkey: str, req: Request, resp) -> bool:
 
 
 def test_server_follows_identity_rotation(tmp_path):
-    """Befund L2-F: after ``identity rotate`` in another process of the profile the running listener answers the
+    """Layer-2 finding: after ``identity rotate`` in another process of the profile the running listener answers the
     next request with the new key — ``hello`` names it, the response verifies with it and no longer with the old
     one. A rotated key this process cannot load closes the listener (plain 404) instead of signing with the
     retired key."""

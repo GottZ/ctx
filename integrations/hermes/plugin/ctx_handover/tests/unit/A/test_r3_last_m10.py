@@ -1,4 +1,4 @@
-"""r3-last, M10 on the target (``reports/L2/r3-kd.md`` §4.2): the note names the exact folder the hook outputs of each
+"""M10 on the target: the note names the exact folder the hook outputs of each
 old folder are in here.
 
 Hook outputs travel, but ``LocalTarget`` places them by kind and basename only (contract X17) in the arrived session's
@@ -39,7 +39,7 @@ def _folder(path: str) -> str:
 def test_m10_import_note_names_the_folder_the_hook_outputs_are_in(two_homes):  # noqa: F811
     """★ Export → import through the real ``LocalTarget``: the path map holds ``<old folder> → <HERMES_HOME here>/
     hook_outputs/<arrived session id>`` (kind ``hermes_file``), the note's hook line names that folder — and the file
-    is there under its old name. Mutant (red proof): no ``hermes_file`` entry (the state before r3-last) — the note
+    is there under its old name. Mutant (red proof): no ``hermes_file`` entry (the state before the fix) — the note
     names ``hook_outputs/<this session's id>``."""
     laptop, server_home = two_homes
     _sid, _root, bundle, _digest = make_bundle(laptop, hook_output=HOOK)

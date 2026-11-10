@@ -1,8 +1,8 @@
-"""Round G‴, package g3-b: lab findings L3-F12 (offer claim, B side) and L3-F10 (terminal-output files).
+"""Round G‴: lab findings L3-F12 (offer claim, B side) and L3-F10 (terminal-output files).
 
 F12 — ``take --offer <id>`` sent a ``SessionRef`` with only ``offer_id``; ``session_export.describe`` knew ids,
 ``latest`` and the calling session and answered ``bad_request: no session given``. ``describe`` now takes an
-``offer_session`` lookup (A's ledger) and resolves an offer to the session it names (``reports/L2/g3-b-api.md``).
+``offer_session`` lookup (A's ledger) and resolves an offer to the session it names.
 
 F10 — the terminal tool keeps a head/tail window of a long output and writes the whole output to
 ``<HERMES_HOME>/cache/terminal-output/out-*.log``; the tool result names it as ``"full_output_path"``
@@ -46,7 +46,7 @@ def offer_ledger(tmp_path, clock):
 
 
 def _claiming(ledger: Ledger, job_id: str):
-    """The lookup A wires (``g3-b-api.md``): claim the offer for this job and peer, answer its session id."""
+    """The lookup A wires: claim the offer for this job and peer, answer its session id."""
     return lambda offer_id: ledger.offer_claim(offer_id, PEER, job_id)["session_id"]
 
 
@@ -246,7 +246,7 @@ def test_g3b_f10_terminal_output_references_stay_in_their_area(hermes_home, tmp_
 
 def test_g3b_f10_kinds_agree_with_k0():
     """★ F10 (contract): the session-file kinds cluster B recognises are exactly K0's ``HERMES_FILE_KINDS`` —
-    red until the integrator adds ``terminal_output`` to K0 (``reports/L2/g3-b-k0.diff``)."""
+    red until the integrator adds ``terminal_output`` to K0."""
     assert tuple(hf.SESSION_FILE_KINDS) == tuple(HERMES_FILE_KINDS)
     assert hf.TERMINAL_OUTPUT in HERMES_FILE_KINDS
 
@@ -254,7 +254,7 @@ def test_g3b_f10_kinds_agree_with_k0():
 def test_g3b_f10_terminal_output_is_discovered_and_placed(terminal_session, hermes_home, user_home, tmp_path):
     """★ F10 end of cluster B: discovery carries the spill file (regular, in its area, within the size cap); on the
     target it goes to ``<home>/cache/terminal-output/<name>`` — from kind + checked basename only — and the target
-    policy allows that destination. Needs K0's kind (``g3-b-k0.diff``)."""
+    policy allows that destination. Needs K0's kind."""
     found = hf.discover(
         terminal_session["rows"], [terminal_session["sid"]], _paths(hermes_home), _cfg(user_home, hermes_home)
     )
@@ -301,7 +301,7 @@ def test_g3b_f10_terminal_output_without_k0_kind_is_named_not_dropped(
 
 
 # ---------------------------------------------------------------------------------------------------------
-# Success sweep (Gp-common): ``import_sessions`` answers ``ok: True`` for a payload whose ids already exist —
+# Success sweep: ``import_sessions`` answers ``ok: True`` for a payload whose ids already exist —
 # it skips them (``hermes_state_portability.py:822-838``) — and ``create_session`` is an upsert
 # (``hermes_state_sessions.py:418-421``). A planned id taken between planning and writing must neither count as
 # imported nor be deleted by the import's cleanup.
@@ -339,7 +339,7 @@ def test_g3b_sweep_import_never_takes_over_a_session_holding_a_planned_id(
 
 
 # ---------------------------------------------------------------------------------------------------------
-# L17 — where a never-opened import is listed (characterisation; no plugin defect, see reports/L2/g3-b.md)
+# L17 — where a never-opened import is listed (characterisation; no plugin defect)
 # ---------------------------------------------------------------------------------------------------------
 
 

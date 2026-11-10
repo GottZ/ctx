@@ -1,4 +1,4 @@
-"""Review round 4, package r4-a — R3-H1 (REVIEW-3 §3, g1 round 3): a release that finished for one hold of the
+"""Review round 4 — R3-H1 (REVIEW-3 §3): a release that finished for one hold of the
 source — or for no hold at all — is no answer for a later hold of the same job (the B1 class, contract V37).
 
 Scenario of the reviewer: a pull opens the source at FACTS (route #7) and never locks it; the conductor stays quiet for
@@ -14,8 +14,8 @@ Fixes (``engine/local_source.py``): the release belongs to "no hold yet" or to h
 release never answers a hold that is active now (``start_release`` checks the ledger after the start); a source job
 that ended before it ever locked refuses a late ``lock`` (the conductor then aborts with a source that holds nothing).
 
-Red before r4-a: ``assert 'prepared' == 'released'`` (reviewer scenario and the race), no ``InvalidState`` on the late
-lock, a cached ``done`` while the ledger says ``locked``."""
+Red before the fix: ``assert 'prepared' == 'released'`` (reviewer scenario and the race), no ``InvalidState`` on the
+late lock, a cached ``done`` while the ledger says ``locked``."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def test_r4_a_h1_reviewer_scenario_ends_with_the_source_released(mk, clock, sess
     Whatever the late lock does, the abort's answer agrees with the ledger: the source holds nothing (no hold, or the
     hold ``released``) and the session is usable — never ``released`` over a ``prepared`` source.
 
-    Mutant ``R3H1-all`` (the three layers removed: the release keyed by ``source_generation`` alone as before r4-a,
+    Mutant ``R3H1-all`` (the three layers removed: the release keyed by ``source_generation`` alone as before the fix,
     no check of a stored release against the ledger, no refusal of the late lock) ⇒ the source stays ``prepared``.
     Each layer alone keeps this test green."""
     env = mk(remote_driven=True)
@@ -183,7 +183,7 @@ def test_r4_a_h1_a_lock_inside_the_release_of_no_hold_is_released_too(mk, clock,
     transition: the job row follows the hold again, its answer names the hold's state, and ``start_release`` releases
     that hold (the sweep's job is over) — the session is usable and nothing says "released" before it is.
 
-    Red before r4-a: the source stays ``locked`` under a ``released`` job row. Mutant ``R3H1-no-recheck`` (the
+    Red before the fix: the source stays ``locked`` under a ``released`` job row. Mutant ``R3H1-no-recheck`` (the
     no-hold branch returns "released" without the re-read) ⇒ the job row stays ``released`` next to ``locked``."""
     env = mk(remote_driven=True)
     env.ledger.upsert_peer(env.peer)

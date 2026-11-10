@@ -1,5 +1,5 @@
-"""Layer R (red) for V30 of ``reports/L2-contracts.md``: ``GitProbe.is_partial`` is part of the protocol
-``contracts.GitProbe`` (additive, K0; wishes of wp-d and wp-e). E's ``gitops.GitProbe`` implements it, D's collector
+"""Layer R (red) for V30 of the layer-2 contract: ``GitProbe.is_partial`` is part of the protocol
+``contracts.GitProbe`` (additive, K0; wishes). E's ``gitops.GitProbe`` implements it, D's collector
 asks it (W107: a partial clone travels as a file tree)."""
 
 from __future__ import annotations

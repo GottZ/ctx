@@ -1,4 +1,4 @@
-"""Layer R (red) for V22 (A part) of ``reports/L2-contracts.md``: the composition root ``jobs`` reads every plugin
+"""Layer R (red) for V22 (A part) of the layer-2 contract: the composition root ``jobs`` reads every plugin
 setting through the one K0 normaliser ``settings.normalize`` — ``None`` is the schema default, a number that is not
 finite or negative is the schema default (``plugin.yaml``), a quoted word is no truthy string."""
 

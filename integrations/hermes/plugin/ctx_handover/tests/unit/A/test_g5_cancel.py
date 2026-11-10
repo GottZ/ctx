@@ -1,8 +1,8 @@
-"""Package g5, L3-F22 on the runner: ``JobRunner.cancel_answer``/``cancel`` say what happened to a cancel.
+"""L3-F22 on the runner: ``JobRunner.cancel_answer``/``cancel`` say what happened to a cancel.
 
 ``ledger.set_cancel`` refuses a job whose conductor journaled ``intent: commit`` ("Too late to cancel: the target is
 committing") before it looks at the state; every finished job journaled that intent, so the lab's ``cancel`` of a
-``done`` pull answered "the target is committing" (``reports/L3-findings.md`` L3-F22). The runner reads the state
+``done`` pull answered "the target is committing" (lab finding L3-F22). The runner reads the state
 first and answers with it; ``requested`` is True only when a cancel was recorded or carried out."""
 
 from __future__ import annotations

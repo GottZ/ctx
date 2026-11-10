@@ -1,7 +1,7 @@
-"""Review round rv-a, target findings in ``engine/local_target.py``: M7 (the model-history hash was always a gate at
+"""First review round, target findings in ``engine/local_target.py``: M7 (the model-history hash was always a gate at
 the target and overruled the version rule of the import), M8-A (a process that died inside the hidden import left the
 sessions already written behind — the planned ids are journaled before the first write now and discarded on abort)
-and rv-e's hand-over (the workspace transaction's warnings — conflict fallbacks, git-lfs — never reached the
+and the hand-over (the workspace transaction's warnings — conflict fallbacks, git-lfs — never reached the
 ``CommitAck`` and so the final message)."""
 
 from __future__ import annotations

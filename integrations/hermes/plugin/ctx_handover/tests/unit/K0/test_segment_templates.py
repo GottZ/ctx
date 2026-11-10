@@ -18,7 +18,7 @@ from ctx_handover.tests.fakes.sessiondb import SessionBuilder, large_segment
 SHAPE = {"live": 30, "archived": 41, "size": 16, "generations": 2, "cwd": "/srv/src-work"}
 RANDOM_SESSION_COLUMNS = {"id", "started_at"}
 """What two direct builds of the same shape already differ in (minted id, the core's wall-clock start); measured
-with ``lab/L2-redproof/wp-k0/diffcols.py``. Rows differ only in ``session_id`` and the random uids below."""
+with a red-proof script. Rows differ only in ``session_id`` and the random uids below."""
 RANDOM_UID_COLUMNS = ("message_uid", "tool_call_uid", "tool_call_uids")
 
 

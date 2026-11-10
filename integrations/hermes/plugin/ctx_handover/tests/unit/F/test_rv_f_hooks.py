@@ -1,4 +1,4 @@
-"""Review round rv-f, M6 (``review-code/REVIEW.md`` §2, g2 M1): the first hook call of a process built the whole
+"""First review round, M6 (the first external review §2): the first hook call of a process built the whole
 runtime inside ``pre_llm_call`` (janitor, GC, outbox flush) and a failure there switched the turn veto off for the
 life of the process (``HookSet._rt`` latched ``_loaded = True`` in its ``except``).
 
@@ -142,7 +142,7 @@ def test_rv_f_m6_the_build_runs_off_the_hook_thread():
 
 
 def test_rv_f_m6_the_hook_path_runs_the_first_janitor_in_the_background(monkeypatch, fake_host):
-    """★ M6 (A part wired, rv-a ``ensure_started(..., janitor_background=True)``): when a hook builds the profile
+    """★ M6 (A part wired, ``ensure_started(..., janitor_background=True)``): when a hook builds the profile
     runtime, the process's first janitor run (recovery, retention, GC, outbox flush) goes to a thread of its own; a
     command keeps the synchronous janitor.
 

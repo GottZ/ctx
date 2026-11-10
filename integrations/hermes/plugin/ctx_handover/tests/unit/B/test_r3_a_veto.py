@@ -1,11 +1,11 @@
 # ruff: noqa: F811  (pytest fixtures imported from test_lock_support are redefined as parameters)
-"""Review round 3, package r3-a — the B side of R2-H1 and L1 (REVIEW-2 §3, §4).
+"""Review round 3 — the B side of R2-H1 and L1 (REVIEW-2 §3, §4).
 
 R2-H1: ``VetoIndex.start`` returns only after the index read the ledger once (a concurrent caller waits for that
-read); a failed first read does not stop the refresher. Red before r3-a: ``lookup`` None right after ``start``.
+read); a failed first read does not stop the refresher. Red before the fix: ``lookup`` None right after ``start``.
 
 L1: a session exported to a bundle (peer ``""`` at prepare, N55) is vetoed with a text about the bundle — not
-"handed over to another machine … continues there as …". Red before r3-a: the message names "another machine"."""
+"handed over to another machine … continues there as …". Red before the fix: the message names "another machine"."""
 
 from __future__ import annotations
 

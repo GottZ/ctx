@@ -149,6 +149,9 @@ TARGET_PRE_COMMIT = frozenset(
 """Target states before ``committing`` (DESIGN §3.3): the target has not entered its commit."""
 BUSY_ELSEWHERE = "busy_elsewhere"
 """``InvalidState.details.reason`` of a participant whose job row another process owns (``_epoch``)."""
+PEER_SIDE = {Mode.PUSH: "target", Mode.PULL: "source"}
+"""The side of a job that runs on the peer (push: the target, pull: the source); an export and an import have both
+sides on this host. Only this side may stay unconfirmed when ``cancel --force`` ends a job (``force_abort``)."""
 
 REQUIRED_CAPS = ("session.v1", "blocks.v1")
 ANSWERS = frozenset({"yes", "no_proposed", "show_plan", "cancel"})
@@ -157,7 +160,7 @@ IMPORT_CONFIRMED = frozenset({CONFIRM_PROPOSED, CONFIRM_WORKSPACE_DIFFERS, CONFI
 """Reasons a bundle import does not ask again (integrator decision on R36a): the export settled them and the bundle
 holds the result — the proposed items it packed (X02), the workspace it sent (reason (j): ``--yes`` never answers it
 at the export, so this plugin writes such a bundle only after a person answered; the files are in the bundle either way
-and leave no other machine at the import) and the repositories it left behind (reason (k) ``repos_left``, rv-d: also
+and leave no other machine at the import) and the repositories it left behind (reason (k) ``repos_left``: also
 exempt from ``--yes``, answered at the export; nothing at the import changes what the bundle holds). Every other reason
 — an unverified bundle's instruction files, a session over the target window, … — is asked at the import as
 anywhere."""
@@ -473,6 +476,8 @@ class Conductor:
         self._lease_lost = False
         self._busy_since: float | None = None
         self._in_doubt_since: float | None = None
+        self._forced = False
+        """``force_abort`` runs: the peer's side of the abort may stay unconfirmed (``_leave_on_peer``)."""
         """First IN_DOUBT entry of this run: ``stall_timeout_s`` counts from here, commit retries do not restart it
         (contract V39, L3-F06); a new run (janitor, resume, adoption) starts a new resolution round."""
         self._beat_lock = threading.Lock()
@@ -607,6 +612,25 @@ class Conductor:
             self._go(S.ABORTING, abort_reason="owner_died")
         return self.run()
 
+    def force_abort(self) -> CommitAck | None:
+        """``/handover cancel --force`` of a job stuck in ABORTING (the peer does not confirm its abort or release:
+        unreachable, removed, or it no longer knows the job after a new pairing). One more abort round in which the
+        side on this host takes its normal path — the local source's release (leases, marks, veto) or the local
+        target's abort, a failure there stays an error — and the side on the peer may stay unconfirmed: the job ends
+        ABORTED with a warning that names what may remain there (``_leave_on_peer``). A target that may have
+        committed is never left (never two active copies): without the target's confirmation the job stays as it is.
+        Any other state is left alone."""
+        self._load()
+        if self._state is not S.ABORTING:
+            return self._ack()
+        self._forced = True
+        self._info("abort_forced")
+        with self._keepalive_thread():
+            self._drain_abort()
+        if self._state not in STOP_STATES:
+            self._report(Progress(step=str(self._state)))
+        return self._ack()
+
     def resolve_in_doubt(self) -> str:
         """Poll the target until the commit outcome is terminal; returns the state the job is in then: ``"committed"``,
         ``"aborting"`` (the target aborted; ``run`` gives the source back — ``"aborted"`` only once both confirmed,
@@ -737,7 +761,17 @@ class Conductor:
         else:
             outcome = str(extra.pop("outcome", st))
         result = {"outcome": outcome, "mode": str(self.job.mode)}
-        keys = ("ack", "final_plan", "continue", "warnings", "ended_by", "left_behind", "source_kept", "withheld")
+        keys = (
+            "ack",
+            "final_plan",
+            "continue",
+            "warnings",
+            "ended_by",
+            "left_behind",
+            "source_kept",
+            "withheld",
+            "forced",
+        )
         for key in keys:
             if ctx.get(key) is not None:
                 result["plan" if key == "final_plan" else key] = ctx[key]
@@ -1765,7 +1799,10 @@ class Conductor:
         locked. Their abort/release is still tried once (it tidies a local participant row), but its failure — an
         unreachable peer, a gateway without the routes — is no reason to keep the job ``aborting`` for ever. A pull
         source that opened the job at FACTS keeps its participant row then; that side's registry stops counting it
-        after ``participant_idle_timeout`` and ends it after ``staging_ttl`` (review R2-M1)."""
+        after ``participant_idle_timeout`` and ends it after ``staging_ttl`` (review R2-M1).
+
+        ``cancel --force`` (``force_abort``) lets the side on the peer stay unconfirmed (``_leave_on_peer``); the side
+        on this host never does."""
         reason = str(self._ctx.get("abort_reason") or "aborted")
         target_seen = self._intended("target.open_job")
         try:
@@ -1778,36 +1815,40 @@ class Conductor:
                 self._go(S.IN_DOUBT)
                 return
             if target_seen:
-                raise
-            self._done("target.abort", target="never_opened", error=err.code)
+                self._leave_on_peer("target", err)
+            else:
+                self._done("target.abort", target="never_opened", error=err.code)
         except NotFound:
             pass
         except HandoverError as err:
             if target_seen:
-                raise
-            self._done("target.abort", target="never_opened", error=err.code)
+                self._leave_on_peer("target", err)
+            else:
+                self._done("target.abort", target="never_opened", error=err.code)
         locked = self._intended("source.lock")
         self._intent("source.release")
-        raw: object
+        raw: object = None
         try:
             started = self.source.start_release(self.job, reason)
         except Fenced:
             raise
-        except NotFound:
+        except NotFound as err:
             # L3-F11: the source does not know the job — it never opened it (it refused at FACTS, e.g.
             # ``rate_limited``), so it holds nothing for it, which is what a release confirms. Only the refusal of
             # the release request counts; a lost operation while polling it stays an error. The job's error stays
             # the cause, not "not found". A job that asked the source to lock was opened there: "not found" then
             # says nothing about its session (a new pairing of the device, a lost ledger) — no confirmation (V37).
             if locked:
-                raise
-            self._done("source.release", source="not_found")
-            raw = {"state": "released"}
+                self._leave_on_peer("source", err)
+            else:
+                self._done("source.release", source="not_found")
+                raw = {"state": "released"}
         except HandoverError as err:
             if locked:
-                raise
-            self._done("source.release", source="never_locked", error=err.code)
-            raw = {"state": "released"}
+                self._leave_on_peer("source", err)
+            else:
+                self._done("source.release", source="never_locked", error=err.code)
+                raw = {"state": "released"}
         else:
             try:
                 raw = self._await(self.source, started, cancellable=False)
@@ -1815,15 +1856,45 @@ class Conductor:
                 raise
             except HandoverError as err:
                 if locked:
-                    raise
-                self._done("source.release", source="never_locked", error=err.code)
-                raw = {"state": "released"}
+                    self._leave_on_peer("source", err)
+                else:
+                    self._done("source.release", source="never_locked", error=err.code)
+                    raw = {"state": "released"}
             else:
                 self._done("source.release")
-        if source_state_of(raw) not in SOURCE_GIVEN_BACK:
+        if raw is not None and source_state_of(raw) not in SOURCE_GIVEN_BACK:
             if locked:
-                raise self._unconfirmed("released", raw)
-            self._info("release_unconfirmed_never_locked", state=source_state_of(raw))
+                self._leave_on_peer("source", self._unconfirmed("released", raw))
+            else:
+                self._info("release_unconfirmed_never_locked", state=source_state_of(raw))
         for warning in (raw.get("warnings") if isinstance(raw, dict) else None) or ():
             self._warn(f"source: {str(warning)[:300]}")
         self._go(S.ABORTED)
+
+    def _leave_on_peer(self, side: str, err: HandoverError) -> None:
+        """The abort (``side="target"``) or release (``"source"``) of a side the job reached did not confirm: raise
+        ``err`` (retried, then parked for the janitor) — unless ``cancel --force`` runs (``force_abort``) and ``side``
+        is the one on the peer (``PEER_SIDE``). A side on this host never stays unconfirmed, and a target only while it
+        cannot hold an active copy: no ``intent: commit`` was journaled (never two active copies). Then the job goes on
+        to ABORTED and the warning names what may remain on the peer; ``result.forced`` lists the sides left
+        unconfirmed."""
+        if not self._forced or PEER_SIDE.get(self.job.mode) != side:
+            raise err
+        if side == "target" and self._commit_intended():
+            raise err
+        peer = self.job.peer.name if self.job.peer is not None else "the other gateway"
+        if side == "target":
+            text = (
+                f"{peer} did not confirm the cancel ({err.code}): what it received for this handover may remain there, "
+                f"hidden, until its staging time runs out; /handover status on {peer} shows it."
+            )
+        else:
+            text = (
+                f"{peer} did not confirm that it gave the session back ({err.code}): if the session is still locked "
+                f"there, /handover reclaim on {peer} takes it back (with --force when it is prepared)."
+            )
+        entry = {"side": side, "code": err.code, "message": err.message[:300], "note": text}
+        left = [*list(self._ctx.get("forced") or []), entry]
+        self._info("abort_left_on_peer", side=side, error=err.code)
+        self._note(forced=left)
+        self._warn(text)

@@ -139,7 +139,7 @@ def basic_login(
     transport: httpx.BaseTransport | None = None,
 ) -> str:
     """Sign in at the Basic dashboard provider (``POST <base>/auth/password-login``) and return the access token
-    from the ``hermes_session_at`` cookie (DESIGN §4.1, R7; ``spike/r7/basic_login.py``)."""
+    from the ``hermes_session_at`` cookie (DESIGN §4.1, R7)."""
     url = base_url.rstrip("/") + "/auth/password-login"
     try:
         with httpx.Client(

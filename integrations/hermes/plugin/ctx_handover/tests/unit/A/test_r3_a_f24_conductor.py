@@ -1,9 +1,9 @@
-"""Review round 3, package r3-a — L3-F24, the conductor's part (integrator's request; D form ``plan.include_refused`` /
-``presend_summary(…, include=…)`` from r3-kd, the texts from r3-f): the conductor hands the job's local ``--include``
+"""Review round 3 — L3-F24, the conductor's part (integrator's request; D form ``plan.include_refused`` /
+``presend_summary(…, include=…)`` from cluster D, the texts from F): the conductor hands the job's local ``--include``
 and ``--include-secret`` paths to both pre-send summaries — the one the confirmation shows (``_confirm``) and the one
 it journals as ctx ``presend`` (``_negotiated``) — so a path the plan refused is named before anything is sent.
 
-Red before r3-a: ``include_refused == []`` in both summaries (the conductor passed no ``include``)."""
+Red before the fix: ``include_refused == []`` in both summaries (the conductor passed no ``include``)."""
 
 from __future__ import annotations
 

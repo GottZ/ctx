@@ -1,5 +1,5 @@
-"""Lab finding L3-F24 (``reports/L3-findings.md``; F part, the D form ``plan.include_refused`` /
-``presend_summary["include_refused"]`` comes from r3-kd): a folder named with ``--include`` that this machine's
+"""Lab finding L3-F24 (F part, the D form ``plan.include_refused`` /
+``presend_summary["include_refused"]`` comes from cluster D): a folder named with ``--include`` that this machine's
 policy refuses (outside the home and ``export_roots``) left ``to … --yes`` without a word in the sender's output — the
 first message ("Handover → …: 1 items …") and the final message did not name it; only ``status <job>``
 (``exclusions``) and the note on the other side did.

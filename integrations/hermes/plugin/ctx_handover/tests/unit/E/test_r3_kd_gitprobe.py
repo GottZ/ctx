@@ -1,4 +1,4 @@
-"""r3-kd wish for cluster E: two read-only questions of ``gitops.GitProbe`` the collector asks (optional members — a
+"""Wish for cluster E: two read-only questions of ``gitops.GitProbe`` the collector asks (optional members — a
 probe without them keeps the old rules).
 
 * ``carried_files(path, limit)`` — what git carries from a folder (tracked, or untracked and not ignored): the

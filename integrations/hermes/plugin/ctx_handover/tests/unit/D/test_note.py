@@ -237,7 +237,7 @@ def test_note_redacts_free_text_only():
 def test_note_names_the_branch_by_its_short_name(lay):
     """★ §1a of the L2 contracts: E's ``GitProbe.info`` reports the full symbolic ref (``refs/heads/main``); the note
     shows the branch the user knows — ``main``, ``feature/login`` — never ``refsheadsmain``. Mutant (red proof,
-    ``lab/L2-redproof/g-d``): the old ``_name`` rendering ⇒ ``branch refsheadsfeaturelogin``."""
+    a red-proof script): the old ``_name`` rendering ⇒ ``branch refsheadsfeaturelogin``."""
     repo = RepoBuilder.init(lay.project, branch="feature/login")
     repo.write("README.md", "# app\n")
     repo.add("README.md")

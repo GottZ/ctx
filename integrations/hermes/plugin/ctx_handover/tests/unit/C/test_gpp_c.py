@@ -1,4 +1,4 @@
-"""Round G″ of cluster C (``reports/L2/pkg/Gpp-CF.md``, hand-overs of ``reports/L2/gp-a.md`` §8) and the
+"""Round G″ of cluster C and the
 integration harness (N52):
 
 5a. ``bundle._generic_facts`` — the declared facts of an unknown importer claim no checked workspace root
@@ -148,7 +148,7 @@ def _partial(out: Path) -> Path:
 
 @pytest.mark.parametrize(("ok", "problem"), [(False, "denied"), (True, ""), (False, "check_failed")])
 def test_generic_bundle_facts_claim_no_checked_workspace_root(tmp_path, ok, problem):
-    """★ (gp-a §8 C1, R29): the facts a bundle declares for its unknown importer say "not checked"
+    """★ (R29): the facts a bundle declares for its unknown importer say "not checked"
     (``workspace_root_ok is None``, ``workspace_root_problem == ""``) — the exporter's own check (usable or not) is
     not the importer's, and the bundle stores no claim about a root nobody probed.
 
@@ -165,7 +165,7 @@ def test_generic_bundle_facts_claim_no_checked_workspace_root(tmp_path, ok, prob
 
 
 def test_generic_bundle_facts_claim_no_context_window(tmp_path):
-    """★ (g4 §8, R32): the facts a bundle declares for its unknown importer claim no context window — the
+    """★ (R32): the facts a bundle declares for its unknown importer claim no context window — the
     exporter's own ``host.context_length`` says nothing about the importer's model, and copying it made an export
     without ``--for`` ask (and end ``cancel`` under ``--yes`` without a terminal) against the exporter's window. The
     importer checks the window against its real facts when it imports.
@@ -192,7 +192,7 @@ def _enospc(*_a, **_kw):
 
 
 def test_disk_full_in_the_commit_is_a_failed_operation(tmp_path, monkeypatch):
-    """★ (gp-a §8 C2): ``ENOSPC`` while the tar is written — ``start_commit`` returns a FAILED operation
+    """★ ``ENOSPC`` while the tar is written — ``start_commit`` returns a FAILED operation
     (``insufficient_storage``, not repeatable, naming the folder) instead of raising; the target stays before its
     commit (the conductor's ``commit_failed`` path aborts it) and ``abort`` leaves neither ``.partial`` nor bundle.
 
@@ -211,7 +211,7 @@ def test_disk_full_in_the_commit_is_a_failed_operation(tmp_path, monkeypatch):
 
 
 def test_permission_error_in_the_commit_while_the_state_cannot_be_saved_either(tmp_path, monkeypatch):
-    """★ (gp-a §8 C2): ``EACCES`` on the rename of a directory bundle, and the staging's progress file cannot be
+    """★ ``EACCES`` on the rename of a directory bundle, and the staging's progress file cannot be
     written either (the same broken disk) — still a FAILED operation (``internal``, not repeatable, naming the
     bundle), never an exception; a second ``start_commit`` answers the same way.
 
@@ -243,7 +243,7 @@ def test_permission_error_in_the_commit_while_the_state_cannot_be_saved_either(t
 
 
 def test_disk_full_while_blocks_are_staged_is_a_handover_error(tmp_path, monkeypatch):
-    """★ (gp-a §8 C2, same disk): the export's block sink (``_DirSink``) raises ``insufficient_storage`` (a
+    """★ (same disk): the export's block sink (``_DirSink``) raises ``insufficient_storage`` (a
     ``HandoverError`` the conductor handles) for ``ENOSPC``, not a bare ``OSError``.
 
     Red (on 16698398): ``OSError: [Errno 28]`` from ``write_blocks``.
@@ -282,7 +282,7 @@ def _export(laptop: Home, sid: str, out: Path) -> tuple[str, int]:
 
 @pytest.mark.parametrize("where", ["commit-tar", "commit-manifest", "staging-blocks"])
 def test_export_whose_bundle_cannot_be_written_ends_aborted_and_frees_the_source(homes, monkeypatch, where):
-    """★ (gp-a §8 C2) on the real stack (``plan_sync`` + ``run_foreground``, the CLI path): the disk fills while the
+    """★ On the real stack (``plan_sync`` + ``run_foreground``, the CLI path): the disk fills while the
     tar is written, the manifest cannot be written (``EACCES``), or the disk fills while the blocks are staged. The
     run returns (no exception leaves the conductor), the job ends ABORTED with the error recorded, the commit is not
     repeated, no ``.partial``/bundle stays, the source session is released and usable.
@@ -335,7 +335,7 @@ def test_export_whose_bundle_cannot_be_written_ends_aborted_and_frees_the_source
 
 
 def test_harness_arrived_session_names_the_tip_of_a_multi_segment_lineage(homes):
-    """N52 (r-int2 §9): a two-segment lineage (rotated session) exported on the server and imported on the laptop
+    """N52: a two-segment lineage (rotated session) exported on the server and imported on the laptop
     arrives as two arrival rows (one per segment, both naming the root). ``arrived_session`` gives ``(root, tip)``
     exactly as the conductor's commit ack does.
 

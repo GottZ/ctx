@@ -3,8 +3,8 @@
 Every row, flag and lineage edge is written by a public ``SessionDB`` method on the call path the
 Hermes core itself uses — no SQL, no import flags, no private ``SessionDB`` methods — so a test sees
 exactly the state a real Hermes install would hold [SK §4.2]. Line references point into the upstream
-tree NousResearch/hermes-agent ``main`` ``0f0e96fc8e`` (read-only copy at
-``/compose/n8n/.gotmp/handover/upstream``).
+tree NousResearch/hermes-agent ``main`` ``0f0e96fc8e`` (a read-only checkout of that commit on
+``PYTHONPATH``).
 
 Row kinds the builder produces (DESIGN §6.8, §6.9):
 

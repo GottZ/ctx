@@ -1,4 +1,4 @@
-"""Review round rv-e2, gitops parts of M24 (the size listing stops at the limit; streamed git output has the
+"""First review round, gitops parts of M24 (the size listing stops at the limit; streamed git output has the
 runner's deadline), M25 (``core.longpaths=true`` on Windows hosts) and L15 (packing never writes a shared index
 into the source's ``.git``) — DESIGN §9.2, §9.3, §9.4, SEC 2.5."""
 

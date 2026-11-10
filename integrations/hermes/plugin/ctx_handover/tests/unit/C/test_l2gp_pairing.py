@@ -1,4 +1,4 @@
-"""Round G′, cluster C — V44 (``reports/L3-findings.md`` F05): pairing is two-sided or nothing (DESIGN §12.3).
+"""Round G′, cluster C — V44 (lab finding F05): pairing is two-sided or nothing (DESIGN §12.3).
 
 A dialer whose chosen name for the listener is already taken must not leave the listener with a paired inbound peer
 the dialer does not know: the name is checked before the code is redeemed, and a clash that appears while the
@@ -198,7 +198,7 @@ class _RevokeFails(httpx.BaseTransport):
 
 @pytest.mark.parametrize("how", ["unreachable", "unconfirmed"])
 def test_a_withdrawal_the_listener_does_not_confirm_is_reported(two, how):
-    """★ Erfolgs-Sweep (Gp-common): the withdrawal counts only when the listener answers ``{"revoked": true}``. An
+    """★ Erfolgs-Sweep: the withdrawal counts only when the listener answers ``{"revoked": true}``. An
     unreachable listener or an answer without it ⇒ the error names the entry left on the listener and how to revoke
     it there (``listener_entry: kept``) — never a silent "nothing is paired".
 

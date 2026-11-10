@@ -1,15 +1,15 @@
-"""r3-kd: the collector's workspace and repository rules after review round 2 and the lab run (package r3-kd).
+"""The collector's workspace and repository rules after review round 2 and the lab run.
 
-* **R2-M3** (``review-code/REVIEW-2.md`` §3, g8 N2; second form of L3-F19): ``.gitignore`` ``tmp/*`` +
+* **R2-M3** (the second review §3; second form of L3-F19): ``.gitignore`` ``tmp/*`` +
   ``!tmp/.gitkeep``, session cwd ``tmp``. git does not ignore ``tmp`` itself and ``.gitkeep`` is tracked, so R36/R36a
   took the whole repository as the workspace without a question — and the files the agent wrote into ``tmp/`` never
   travelled (git does not pack ignored files). R36 now judges the cwd by its content: when git carries nothing from it
   but placeholders (``.gitkeep``, ``.keep``, ``.gitignore`` …) while it holds other entries, the cwd is a scratch
   folder of that repository — the cwd itself travels as a file tree, exactly like an ignored cwd.
-* **R2-M2** (g8 N1, H15 reason (k)): an untracked clone inside the workspace that the transcript never touches was
+* **R2-M2** (H15 reason (k)): an untracked clone inside the workspace that the transcript never touches was
   neither named nor asked about; the pack step left it out silently. Every such clone (git's own list, the one the
   pack step uses) is now a candidate with ``INNER_REPO_REASON``: the plan names it and asks (k).
-* **L3-F26** (lab, ``reports/L3-findings.md``): a file the transcript mentions in a git-ignored folder of another
+* **L3-F26** (lab): a file the transcript mentions in a git-ignored folder of another
   repository made that whole repository a candidate (F19 for mentions). R36 holds there too: an ignored path is the
   file itself, never the repository around it.
 * **H5 rest on the source side**: the home rule (``collector.HomeRule``) knows the Windows homes behind WSL's drive
@@ -17,7 +17,7 @@
 
 Repositories come from ``tests/fakes/repo_builder.py`` (technical identity, no git config written). The probe is
 ``planning_fake.CeilingGitProbe`` — real ``git`` with a ceiling at the test's tmp directory; its ``carried_files`` and
-``nested_repos`` are the same git commands the wish for ``gitops.GitProbe`` names (report r3-kd §Übergaben).
+``nested_repos`` are the same git commands the wish for ``gitops.GitProbe`` names.
 """
 
 from __future__ import annotations

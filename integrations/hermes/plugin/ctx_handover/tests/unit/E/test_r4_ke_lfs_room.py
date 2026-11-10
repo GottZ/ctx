@@ -1,4 +1,4 @@
-"""r4-ke, review finding R3-M3 (``review-code/REVIEW-3.md`` §3; ``round3/g5-git-r3.md`` „Nicht geprüft“): the byte cap
+"""Review finding R3-M3 (the third review §3; its round-3 report „Nicht geprüft“): the byte cap
 (``max_total_bytes``, per job) and the free-space check at the target counted a git item's work tree by its blobs —
 for Git LFS files that is the pointer text. PREPARE then places the shipped LFS objects and ``git lfs checkout`` writes
 every pointer file's object into the work tree: many pointers to one object (as in H11) write a multiple of what was

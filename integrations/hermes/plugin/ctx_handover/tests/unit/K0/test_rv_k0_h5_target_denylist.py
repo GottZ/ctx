@@ -1,9 +1,9 @@
-"""rv-k0, review finding H5 (``review-code/REVIEW.md`` §2, g4 H-3): the target denylist of R19 holds beyond the
+"""Review finding H5 (the first external review §2): the target denylist of R19 holds beyond the
 process's own ``$HOME``.
 
 R19: the denylist (Hermes root, autostart locations, SSH directory, shell and git configuration) applies always,
-"also when the operator widens ``allow_roots``". The reviewer's probes (``g4-policy/probes/p1_target.py``,
-``p7_chain.py``) showed three gaps, all at ``policy.check_target_dest`` — the gate behind a peer's
+"also when the operator widens ``allow_roots``". The reviewer's probes
+showed three gaps, all at ``policy.check_target_dest`` — the gate behind a peer's
 ``suggested_dest`` (``pathmap.choose_dest``), ``materialize.assess`` and the workspace-root check of ``envfacts``:
 
 1. Windows, ``allow_roots: ["~"]``: ``Documents\\WindowsPowerShell`` (the PowerShell profile folder, run at every
@@ -170,7 +170,7 @@ def test_account_homes_come_from_the_password_database():
 
 
 def test_peer_suggestion_into_another_users_ssh_is_not_chosen():
-    """★ The reviewer's chain (``p7_chain.py``): ``pathmap.choose_dest`` took the peer's ``suggested_dest``
+    """★ The reviewer's chain: ``pathmap.choose_dest`` took the peer's ``suggested_dest``
     ``/home/alice/.ssh`` (reason ``suggested``) because it lay under ``allow_roots``. Now the gate refuses it."""
     o = replace(Options(), allow_roots=("/home",))
     cfg = _cfg(Path("/root"), ("/home",))

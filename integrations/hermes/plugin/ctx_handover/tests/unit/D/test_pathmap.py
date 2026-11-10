@@ -193,7 +193,7 @@ def test_pathmap_fallback_dest_expands_the_configured_roots(lay):
     the home defaults to this process's home, the home of the target's policy. With ``cfg`` a sibling the target
     denylist refuses moves under ``workspace_root``.
 
-    Mutants (red proof, ``lab/L2-redproof/g-d``): roots used unexpanded (the Schicht-R state) ⇒ ``'~/hermes-
+    Mutants (red proof): roots used unexpanded (the layer-R state) ⇒ ``'~/hermes-
     handover/proj-handover-…'``; the ``cfg`` check of the sibling dropped ⇒ the fallback lies in ``~/.ssh``."""
     now = datetime(2026, 11, 9, 14, 3, 7, tzinfo=timezone.utc)
     cfg = lay.cfg()

@@ -1,4 +1,4 @@
-"""Layer R (red first) — V24 of ``reports/L2-contracts.md``, cluster C's side: ``BundleTarget`` keeps its state
+"""Layer R (red first) — V24 of the layer-2 contract, cluster C's side: ``BundleTarget`` keeps its state
 (FinalPlan, progress) in the job's staging, not only in memory, so a new instance — or a new process — continues the
 export. The CLI path ``plan_sync`` (open, facts, negotiate) + ``run_foreground`` (objects, stage, prepare, commit)
 builds a new ``BundleTarget`` per call through ``jobs.apis_for``; the conductor never repeats the journaled
@@ -46,7 +46,7 @@ def test_l2r_bundle_target_new_instance_continues_after_negotiation(tmp_path):
     """V24: instance 1 does what ``plan_sync`` does (``open_job``, ``facts``, ``negotiate``); a new instance for
     the same bundle path — what ``run_foreground`` gets — receives the objects, stages, prepares and commits: the
     commit succeeds and the bundle carries the FinalPlan instance 1 negotiated (today: ``bundle commit before
-    prepare`` ⇒ the CLI export ends ``in_doubt``, wp-a2)."""
+    prepare`` ⇒ the CLI export ends ``in_doubt``)."""
     ledger, identity, _env = _exporter(tmp_path)
     out = tmp_path / "exports" / "work.ctxh.tar"
     job = job_context(mode=Mode.EXPORT)

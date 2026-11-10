@@ -377,7 +377,7 @@ class LocalTarget:
             config=self.config,
             tools_seen=seen,
             capabilities=self.hello().capabilities,
-            cfg=self.policy,  # R29: the write-root check runs with this host's own policy (gp-d-api §1c)
+            cfg=self.policy,  # R29: the write-root check runs with this host's own policy
         )
         self._remember(job, source_facts=source_facts, target_facts=tf)
         return tf

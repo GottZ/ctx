@@ -1,10 +1,10 @@
-"""K0: ``ResourcePlan.context_tokens`` (R32, L3-F17; ``reports/L2/g3-df-api.md`` §1c).
+"""K0: ``ResourcePlan.context_tokens`` (R32, L3-F17).
 
 The source's estimate of the session's active context (``plan.active_context_tokens``) travels in the plan document
 so the conductor can compare it with the target model's window. The field is additive (contract K-3): declared with
 ``model.added_field(0)``, left out of the wire form while it is 0, so every plan written before it — with or without
 the K-3 fields — keeps its bytes and its plan id. The ids pinned here were computed with the model of commit
-``7c746df5`` (before this field) by ``lab/L2-redproof/g4/pin_ids.py`` (output ``pinned-before.txt``).
+``7c746df5`` (before this field) by a red-proof script (output ``pinned-before.txt``).
 """
 
 from __future__ import annotations

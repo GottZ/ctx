@@ -1,4 +1,4 @@
-"""Layer R — V26 of ``reports/L2-contracts.md``: an identity rotation in another process of the profile counts for
+"""Layer R — V26 of the layer-2 contract: an identity rotation in another process of the profile counts for
 the next request of a running listener, also through the dashboard path ``dashboard/plugin_api.py`` whose
 ``_server()`` caches the server object per profile and process.
 

@@ -42,7 +42,7 @@ Suspected secrets (R25): an extra file the policy suspects (or could not check, 
 element ``SUSPECTED_SECRET``; ``apply_choice(final, "yes")`` never confirms it and ``restrict_to_releasable`` never
 lets a counterpart confirm it. Only a local ``include_secret`` (``yes`` already in the plan) releases it.
 
-Left behind, named (review rv-d): a file tree beyond ``max_files`` or its byte cap is left out at planning and named
+Left behind, named: a file tree beyond ``max_files`` or its byte cap is left out at planning and named
 with the limit (H12; the pack would refuse it after the lock); a git item's size counts the object store a fresh pack
 reads — behind a gitfile and through alternates (``git_object_bytes``, H13) — and an unmeasurable one carries
 ``SIZE_UNKNOWN`` (reason (c)); repositories inside a transferred git workspace (initialised submodules, clones in the

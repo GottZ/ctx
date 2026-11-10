@@ -1,5 +1,5 @@
-"""Mandatory scenario 12 (layer 2): the tests the cluster reports left for layer 2 (``reports/L2-wishes-draft.md``
-§3, rows with layer "2"), as far as wp-int1/wp-int2 do not cover them.
+"""Mandatory scenario 12 (layer 2): the tests the cluster reports left for layer 2 (the layer-2 wish list
+§3, rows with layer "2"), as far as the other integration tests do not cover them.
 
 * D §10 — the collector with the real ``hermes_files.discover`` (``discover=None``) and the real ``gitops.GitProbe``
   on real repositories and real session files of a Hermes home.

@@ -1,4 +1,4 @@
-"""Review round rv-e, finding H10: a file-tree update never overwrites a path that appeared between PREPARE and
+"""First review round, finding H10: a file-tree update never overwrites a path that appeared between PREPARE and
 c1, and its inverse removes only the files the forward step put in (BRIEF D10, I5, BUILD-ORDER §6 Nr. 9)."""
 
 from __future__ import annotations

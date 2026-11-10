@@ -1,4 +1,4 @@
-"""Layer R (red) for V22 of ``reports/L2-contracts.md``: one settings normaliser in the new K0 module
+"""Layer R (red) for V22 of the layer-2 contract: one settings normaliser in the new K0 module
 ``engine/settings.py`` for every plugin setting.
 
 Expected API (fixed here, contract V22): ``settings.DEFAULTS`` — the schema defaults of ``plugin.yaml``
@@ -59,8 +59,8 @@ def test_word_settings_off_false_quoted_and_none(key):
     assert s.normalize({key: False})[key] == "off"
     assert s.normalize({key: "off"})[key] == "off"
     assert s.normalize({key: None})[key] == s.DEFAULTS[key]
-    # Specification correction by the integrator (reports/L2/pkg/Gp-K0.md §1, round G′): an unknown ``inbound``
-    # word is ``off`` (fail-closed, the L2-C security fix stays in force), not the default ``auto``.
+    # Specification correction by the integrator (round G′): an unknown ``inbound``
+    # word is ``off`` (fail-closed, the layer-2 security fix stays in force), not the default ``auto``.
     unknown = "off" if key == "inbound" else s.DEFAULTS[key]
     assert s.normalize({key: "nonsense"})[key] == unknown
 

@@ -461,7 +461,7 @@ def test_pairing_wiring_creates_identity_only_in_operator_verbs(backend, monkeyp
         pair_string=pair_string,
         parse_pair_string=parse_pair_string,
         redeem_dialer=redeem_dialer,
-        SecretStore=types.SimpleNamespace,  # H1 (rv-c): the profile .env handed to the pairing
+        SecretStore=types.SimpleNamespace,  # H1: the profile .env handed to the pairing
     )
     _stub_module(monkeypatch, "wire", WireClient=lambda peer, ident, *, read_secret: ("client", peer.name))
     fake_host.secrets["CTX_HANDOVER_PEER_TOKEN"] = "dashboard-secret"

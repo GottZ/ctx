@@ -1,4 +1,4 @@
-"""Review round rv-a, finding H7 (``review-code/REVIEW.md`` §2): the listener's maintenance sweep suspended the local
+"""First review round, finding H7 (the first external review §2): the listener's maintenance sweep suspended the local
 source of a running push/export after ``participant_idle_timeout`` (15 min) — ``updated_at`` of that row moves only
 with transitions, never between lock and prepare, so a transfer or target prepare of more than 15 min broke off.
 

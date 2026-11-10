@@ -104,7 +104,7 @@ def _named(text: str, name: str) -> bool:
 def test_int_scn_denylist_stay_behind_and_are_listed(online):
     """★ Scenario 8a: ``--yes`` (blanket confirmation) — every secret stays behind and is named.
 
-    Red at ``a8fec516`` (``reports/L2/red-r-int3.md``): nothing leaks, but the pack's exclusions (untracked secrets,
+    Red at ``a8fec516``: nothing leaks, but the pack's exclusions (untracked secrets,
     withheld stash entry) and the dropped suspected secret are named neither in the note nor in the job status."""
     server, laptop, _listener, peer = online
     sid, repo, s, _extras = _setup(laptop, "a")

@@ -1,4 +1,4 @@
-"""Round G‴ of cluster A — the E2E findings of ``reports/L3-findings.md`` (phase 2) reproduced without Hermes:
+"""Round G‴ of cluster A — the E2E findings of the lab (phase 2) reproduced without Hermes:
 
 * L3-F09 (R34) — the refinement of ``ctx.llm.complete_structured`` is taken: the host returns
   ``PluginLlmStructuredResult`` (upstream ``agent/plugin_llm.py``), its ``parsed`` holds the answer; an offer created
@@ -278,7 +278,7 @@ def test_an_offer_leaves_no_open_source_job(homes):
 
 
 def test_an_offer_from_the_calling_session_names_that_session(homes):
-    """g3-b (F12): an offer made in the session itself (no ``--session``) stores the session the plan resolved,
+    """L3-F12: an offer made in the session itself (no ``--session``) stores the session the plan resolved,
     not an empty id (else the offer could never be redeemed)."""
     server, _laptop = homes
     repo = dirty_repo(server.home / "proj")
@@ -567,7 +567,7 @@ def test_refused_reclaim_says_it_failed(homes, monkeypatch):
 
 
 # ---------------------------------------------------------------------------------------------------------
-# Hand-over of the integrator (gp-d): the bundle-import sentence is a note part
+# Hand-over of the integrator: the bundle-import sentence is a note part
 # ---------------------------------------------------------------------------------------------------------
 
 
@@ -594,7 +594,7 @@ def test_a_bundle_import_sets_the_note_part_and_the_note_says_it(homes):
 
 
 # ---------------------------------------------------------------------------------------------------------
-# Hand-over gpp-cf (integrator): failures outside the error model never leave the job hanging
+# Hand-over (integrator): failures outside the error model never leave the job hanging
 # ---------------------------------------------------------------------------------------------------------
 
 

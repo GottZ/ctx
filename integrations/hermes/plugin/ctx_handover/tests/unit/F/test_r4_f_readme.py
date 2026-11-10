@@ -1,15 +1,15 @@
-"""r4-f — README limits the orchestrator asked for in review round 4 (``REVIEW-3.md`` §4), each sentence bound to the
+"""README limits the orchestrator asked for in review round 4 (the third review §4), each sentence bound to the
 code behind it (L28: no free-standing substrings).
 
-* **M19 / L14** (g4 round 3: "Grenze nicht ehrlich"): the secrets list counts wherever a name lies — a folder named
-  like a secret file (``credentials/``) and credential folder names (``.docker``, ``.kube``) inside a project. What it
-  means for a user: without git the folder stays here and is named only afterwards; in a git workspace the secret
-  file name does not apply to the folder, the tracked files below a credential folder name are listed beforehand;
+* **M19 / L14** (review round 3: limit not stated honestly): the secrets list counts wherever a name lies — a folder
+  named like a secret file (``credentials/``) and credential folder names (``.docker``, ``.kube``) inside a project.
+  What it means for a user: without git the folder stays here and is named only afterwards; in a git workspace the
+  secret file name does not apply to the folder, the tracked files below a credential folder name are listed beforehand;
   ``--include-secret`` sends it.
-* **R2-L2** (g3: not in the README): redeeming a pairing code proves no possession of the private key — a valid code
+* **R2-L2** (review: not in the README): redeeming a pairing code proves no possession of the private key — a valid code
   pairs a foreign public key; that pairing gets no access, but it unpairs the key's owner here and aborts its jobs.
 
-Red before r4-f: none of these sentences was in the README (``test_*_bullet`` fail on the first ``in`` assertion).
+Red before the fix: none of these sentences was in the README (``test_*_bullet`` fail on the first ``in`` assertion).
 """
 
 from __future__ import annotations
@@ -238,17 +238,17 @@ def test_pairing_bullet_a_code_pairs_a_foreign_key(tmp_path, listener, clock):
 
 
 # ---------------------------------------------------------------------------------------------------------
-# R3-L1 (text from r4-a through the integrator): a first ledger read that fails
+# R3-L1 (text through the integrator): a first ledger read that fails
 # ---------------------------------------------------------------------------------------------------------
 
 
 def test_lock_paragraph_names_the_unread_window():
     """★ The lock paragraph names the window of R3-L1: the ledger's lock wait (``busy_timeout`` 5000 ms), turns not
-    checked until a read succeeds (the refresher keeps trying, ``VetoIndex.poll_s``), and the two log lines r4-a added
+    checked until a read succeeds (the refresher keeps trying, ``VetoIndex.poll_s``), and the two log lines added for it
     (``VetoIndex.start`` for the failed first read, ``refresh_now`` for its end). The behaviour of those lines is
-    r4-a's test (``tests/unit/A/test_r4_a_l1_l3.py``).
+    the test (``tests/unit/A/test_r4_a_l1_l3.py``).
 
-    Red before r4-f: the sentence was not in the README."""
+    Red before the fix: the sentence was not in the README."""
     from ctx_handover.engine import ledger, lock
 
     lock_part = FLAT.split("## What the lock on the source guarantees", 1)[1].split("What is **not** guaranteed", 1)[0]
@@ -265,7 +265,7 @@ def test_lock_paragraph_names_the_unread_window():
 
 
 # ---------------------------------------------------------------------------------------------------------
-# R3-M3 and R3-M2 (r4-ke's fixes; texts from r4-ke's report §7 through the integrator)
+# R3-M3 and R3-M2 (texts through the integrator)
 # ---------------------------------------------------------------------------------------------------------
 
 
@@ -276,10 +276,10 @@ def _test_names(rel: str) -> set[str]:
 
 def test_lfs_sentence_names_what_the_checks_count():
     """★ R3-M3: the LFS content counts against the size limit and the free-space check before anything is written —
-    the objects once, once more per pointer file when git-lfs is there (``gitapply._lfs_bytes``; behaviour in r4-ke's
+    the objects once, once more per pointer file when git-lfs is there (``gitapply._lfs_bytes``; behaviour in the
     ``tests/unit/E/test_r4_ke_lfs_room.py``).
 
-    Red before r4-f: the README said nothing about LFS content and the checks (REVIEW-3 §4 "nicht im README")."""
+    Red before the fix: the README said nothing about LFS content and the checks (REVIEW-3 §4 "nicht im README")."""
     from ctx_handover.engine import gitapply
 
     use = FLAT.split("## Use", 1)[1].split("## Settings", 1)[0]
@@ -303,9 +303,9 @@ def test_lfs_sentence_names_what_the_checks_count():
 def test_unredacted_names_the_bound_of_the_hard_link_check():
     """★ R3-M2: the bound of the hard-link check (``policy.LINKED_SCAN_MAX``), its order (fixed files first, browser
     profiles last) and what happens beyond it (a linked file it could not compare is left out — ``secret`` once
-    Hermes' places were read, ``hermes`` otherwise); behaviour in r4-ke's ``test_r4_ke_hardlink_budget.py``.
+    Hermes' places were read, ``hermes`` otherwise); behaviour in the ``test_r4_ke_hardlink_budget.py``.
 
-    Red before r4-f: "or beyond the first 4096 entries the check reads … is caught only by the name and content
+    Red before the fix: "or beyond the first 4096 entries the check reads … is caught only by the name and content
     checks" — wrong after R3-M2."""
     unredacted = FLAT.split("**Unredacted:**", 1)[1].split("**Not moved:**", 1)[0]
     assert "beyond the first" not in unredacted, unredacted

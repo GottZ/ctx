@@ -1,4 +1,4 @@
-"""Review round 4, package r4-a — the success sweep after R3-H1 (orchestrator): every place that sets or reports
+"""Review round 4 — the success sweep after R3-H1 (orchestrator): every place that sets or reports
 ``released``, ``done``, ``aborted``, ``retired`` or ``reclaimed`` is held against one rule — success only from a
 fresh, explicitly positive answer about the hold that exists now (B1, V37). The deviations found, one test each:
 
@@ -14,7 +14,7 @@ fresh, explicitly positive answer about the hold that exists now (B1, V37). The 
 * ``Conductor.resolve_in_doubt``: returned ``"aborted"`` for a job that was only ``aborting``.
 * ``jobs.gc_job``: a finished-looking job whose source handover still holds the session was purged.
 
-Red before r4-a: see each test's docstring."""
+Red before the fix: see each test's docstring."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ def test_r4_a_a_stored_retire_is_no_answer_after_a_reclaim(mk, session_db):  # n
     retire gives now (``reclaimed``): the conductor ends with "the copies are independent" and starts no turn on the
     target (R10, M27), never "retired".
 
-    Red before r4-a: ``DONE {'state': 'retired'}`` from all three (start, ``op_status``, the status route's
+    Red before the fix: ``DONE {'state': 'retired'}`` from all three (start, ``op_status``, the status route's
     ``ops``). Mutant ``SWEEP-retire-cached`` (``_fresh`` passes a retire through) ⇒ the same; mutant
     ``SWEEP-status-ops-raw`` (route #8 without the check) ⇒ the route's answer."""
     env = mk(remote_driven=False)
@@ -105,7 +105,7 @@ def test_r4_a_a_polled_release_is_no_answer_for_an_active_hold(mk):  # noqa: F81
     set back to ``locked``) answers a retryable refusal naming the state, so the caller starts the release again
     (which releases the current hold), never "released".
 
-    Red before r4-a: ``DONE {'state': 'released'}``. Mutant ``SWEEP-release-poll-cached`` ⇒ the same."""
+    Red before the fix: ``DONE {'state': 'released'}``. Mutant ``SWEEP-release-poll-cached`` ⇒ the same."""
     env = mk(remote_driven=False)
     job = env.job()
     plan = env.plan(job)
@@ -126,7 +126,7 @@ def test_r4_a_a_prepare_of_an_earlier_hold_is_no_answer(mk):  # noqa: F811
     new hold): the same prepare request (an unchanged session re-exports to the same ids) is no "ok" — the primary
     lock of the first hold was undone, the source is only ``locked``.
 
-    Red before r4-a: ``DONE {'outcome': 'ok'}`` with the ledger ``locked``. Mutant ``SWEEP-prepare-no-hold`` (digest
+    Red before the fix: ``DONE {'outcome': 'ok'}`` with the ledger ``locked``. Mutant ``SWEEP-prepare-no-hold`` (digest
     without the hold) ⇒ the same."""
     env = mk(remote_driven=False)
     job, plan, prepared, first = _to_prepared(env)
@@ -147,7 +147,7 @@ def test_r4_a_a_heartbeat_names_a_release_under_way(mk, state):  # noqa: F811
     """★ A release or reclaim under way has given the leases up: ``heartbeat`` says so (``LeaseLost(state=…)``, the
     states route #9 names too) instead of returning as if the lease were held.
 
-    Red before r4-a: no exception. Mutant ``SWEEP-heartbeat-silent`` ⇒ ``DID NOT RAISE``."""
+    Red before the fix: no exception. Mutant ``SWEEP-heartbeat-silent`` ⇒ ``DID NOT RAISE``."""
     env = mk(remote_driven=False)
     job = env.job()
     plan = env.plan(job)
@@ -166,7 +166,7 @@ def test_r4_a_a_forced_cancel_does_not_release_a_source_that_became_prepared(mk,
     yours again"), the prepare finished before the release: the source is ``prepared`` and its target may commit. The
     reclaim refuses (the next reclaim takes the ``prepared`` branch with its warning) instead of releasing it.
 
-    Red before r4-a: ``state released`` (no error). Mutant ``SWEEP-reclaim-any-state`` ⇒ the same."""
+    Red before the fix: ``state released`` (no error). Mutant ``SWEEP-reclaim-any-state`` ⇒ the same."""
     env = mk(remote_driven=False)
     job, *_ = _to_prepared(env)
     real = env.ledger.source_by_session
@@ -203,7 +203,7 @@ def test_r4_a_a_not_found_after_the_lock_is_no_release(tmp_path, clock):
     confirmation that the session there is usable: the job stays ``aborting`` (V37), unlike L3-F11's source that
     never opened the job (``test_g3_a.py::test_abort_ends_when_the_source_never_opened_the_job``).
 
-    Red before r4-a: ``'aborted'``. Mutant ``SWEEP-notfound-released`` ⇒ the same."""
+    Red before the fix: ``'aborted'``. Mutant ``SWEEP-notfound-released`` ⇒ the same."""
     h = Harness(tmp_path, clock, mode=Mode.PULL)
     h.world.inject("target", "start_prepare", "error", error=ImportFailed("no", retryable=False))
     h.world.inject("source", "start_release", "error", error=NotFound(f"job {h.job_id} not found"), times=10_000)
@@ -218,7 +218,7 @@ def test_r4_a_a_resolve_in_doubt_names_the_state_it_reached(tmp_path, clock):
     """★ ``resolve_in_doubt`` of a job whose target aborted: the job is ``aborting`` (target abort and source release
     still to come), and that is what it returns — not ``"aborted"``.
 
-    Red before r4-a: ``'aborted'`` while the ledger says ``aborting``."""
+    Red before the fix: ``'aborted'`` while the ledger says ``aborting``."""
     h = Harness(tmp_path, clock)
     h.world.target.commit_fail = ImportFailed("disk full", hermes_error="OSError")
 
@@ -246,7 +246,7 @@ def test_r4_a_a_gc_keeps_a_job_whose_source_still_holds_the_session(tmp_path, cl
     """★ A source job row ended ``released`` (the sweep, before any lock) while a lock inserted its handover row
     (the race R3-H1 names; the process died before the row followed): ``gc --job`` sees the hold and refuses.
 
-    Red before r4-a: no error (journal and ops of a held source purged)."""
+    Red before the fix: no error (journal and ops of a held source purged)."""
     led = Ledger(tmp_path / "l.sqlite3", clock=clock)
     job_id = ulid()
     led.create_job(job_id, Role.SOURCE, Mode.PULL, "P1", {"role": "source"})

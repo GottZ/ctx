@@ -126,7 +126,7 @@ def _bad(message: str, **details) -> BadRequest:
 
 def write_error(exc: OSError, out: Path, need: int = 0) -> HandoverError:
     """An ``OSError`` of this host's file system while it writes the bundle ``out`` (its staging or the commit) as a
-    ``HandoverError`` the conductor handles — it never leaves the conductor's thread (gp-a §8). Repeating the same
+    ``HandoverError`` the conductor handles — it never leaves the conductor's thread. Repeating the same
     write does not help, so neither is repeatable: a full disk or quota is ``insufficient_storage`` for the bundle's
     folder (free space measured now), anything else (no permission, I/O error) an ``internal`` error naming the
     bundle and the reason. The export then ends and frees its source."""
@@ -299,7 +299,7 @@ def _generic_facts(src: EnvFacts) -> EnvFacts:
 
 def _host_io(method):
     """``TargetAPI`` methods of ``BundleTarget`` touch this host's file system: an ``OSError`` there is raised as the
-    ``HandoverError`` of ``write_error`` (the conductor handles only those; gp-a §8)."""
+    ``HandoverError`` of ``write_error`` (the conductor handles only those)."""
 
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
@@ -579,7 +579,7 @@ class BundleTarget:
                     self._commit()
                 except HandoverError as exc:
                     return self._record(_failed(op_id, exc))
-                except OSError as exc:  # full disk, no permission: the commit fails for good, the job ends (gp-a §8)
+                except OSError as exc:  # full disk, no permission: the commit fails for good, the job ends
                     return self._record(_failed(op_id, self._write_error(exc)))
             op = _done(op_id, to_wire(self._ack))
             self._ops[op_id] = op  # the staging (and its state file) is gone: the bundle at ``out`` is the record

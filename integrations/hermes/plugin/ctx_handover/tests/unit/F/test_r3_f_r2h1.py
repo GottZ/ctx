@@ -1,4 +1,4 @@
-"""Review round 3, R2-H1, F part (integrator, r3-a probe ``lab/L2-redproof/r3-a/probe/f_part_lock.py``): the first
+"""Review round 3, R2-H1, F part (integrator, from a review probe): the first
 use of a process by a slash/CLI verb builds the profile runtime under ``EngineBackend._part``'s lock, with the
 janitor in the foreground. The hooks' build thread (``hook_runtime`` → ``_started(janitor_background=True)`` →
 ``_part``) waited on that lock; after ``HOOK_BUILD_WAIT_S`` the hook answered ``None`` and the first turn on a

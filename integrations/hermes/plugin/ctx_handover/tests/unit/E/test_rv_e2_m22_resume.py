@@ -1,4 +1,4 @@
-"""Review round rv-e2, finding M22 (gitapply part, wish to the integrator): a resumed c1 (the process died after the
+"""First review round, finding M22 (gitapply part, wish to the integrator): a resumed c1 (the process died after the
 step, before the journal) recomputes the destination while it holds the received files; the filter driver a
 received ``.gitattributes`` names — and the destination's own trees did not — never runs (DESIGN §9.2 received,
 SEC 3.1). Source and target are separate homes: the peer packs with ``Git(home=<peer home>)``."""

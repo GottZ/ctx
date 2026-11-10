@@ -1,4 +1,4 @@
-"""Review round 4 (``REVIEW-3.md`` R3-H2, R3-L4; g6 round 3 N1, N2): a continuation started by a process that cannot
+"""Review round 4 (the third review R3-H2, R3-L4): a continuation started by a process that cannot
 identify the gateway that runs the turn started even when that gateway ran with ``--yolo``. That is Hermes' own
 ``docker-compose.yml``: ``gateway`` and ``dashboard`` are separate containers (separate PID namespaces), and the
 dashboard serves the plugin routes. ``approval_check`` dropped the recorded command line of such a gateway
@@ -168,7 +168,7 @@ def test_r4_f_h2_yolo_on_the_record_of_a_gateway_in_another_pid_namespace_counts
 
 @pytest.mark.parametrize("flags, reason", [((), "approvals_unchecked"), (("--yolo",), "approvals_off")])
 def test_r4_f_h2_reviewer_probe_fresh_record_of_a_pid_not_alive_here(tmp_path, flags, reason):
-    """★ The reviewer's probe (``round3/g6-surfaces/probes/test_probe_g6_r3_unverified.py``): a fresh runtime record
+    """★ The reviewer's probe: a fresh runtime record
     whose PID is not alive here stands for the other namespace. Refused either way.
 
     Red @ 88068475: "UNVERIFIED+YOLO spawn: STARTED (popen reached)"."""

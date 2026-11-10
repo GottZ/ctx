@@ -1,6 +1,6 @@
-"""★ cases of the fault matrix against the real modules (wp-int1): the conductor killed between prepare and
-commit, the lost answer of the commit, an abort during retire. Every test names the mutant of its red proof
-(``reports/L2/r-int1.md``); setup and promises as in ``test_int_fault_matrix_std.py``.
+"""★ cases of the fault matrix against the real modules: the conductor killed between prepare and
+commit, the lost answer of the commit, an abort during retire. Every test names the mutant of its red proof;
+setup and promises as in ``test_int_fault_matrix_std.py``.
 """
 
 from __future__ import annotations

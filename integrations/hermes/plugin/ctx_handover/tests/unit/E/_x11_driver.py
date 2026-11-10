@@ -20,7 +20,7 @@ journaled one — is discarded.
 ``needs_attention`` (DESIGN §3.4): an inverse that raises, and a forward step whose error carries
 ``details.needs_attention`` (it could not undo its own partial change, e.g. an orphaned ``index.lock``), are journaled
 as ``needs_attention`` events; the commit then ends ``needs_attention`` and keeps its staging. ``local_target`` books
-the inverse case so today; the forward case is the G′ wish to A (``reports/L2/gp-e.md``).
+the inverse case so today; the forward case is a wish to cluster A.
 """
 
 from __future__ import annotations

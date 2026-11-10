@@ -1,7 +1,7 @@
-"""Review round, package rv-c — R33a (DECISIONS.md): an unsigned 404 on the first ``hello`` right after ``hermes serve``
-started (lab ``acc2/test_l3_r33_host_isolation_doctor_matches_what_works``).
+"""First review round — R33a (DECISIONS.md): an unsigned 404 on the first ``hello`` right after ``hermes serve``
+started (lab run).
 
-Reproduced at the source (``lab/rvc-r33a/repro.py``, real ``hermes serve`` under ``plugins.isolation: host``): the
+Reproduced at the source (real ``hermes serve`` under ``plugins.isolation: host``): the
 routes are mounted before the port accepts and the first answer is a signed 200 (13 of 13 cold starts); an unsigned
 404 ``{"detail":"Plugin not found"}`` comes when another process of the profile holds the ledger's write lock past the
 busy timeout while the listener is built — ``dashboard/plugin_api.py`` logged "ctx_handover listener unavailable:

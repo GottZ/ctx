@@ -11,7 +11,7 @@ store, real HTTP listener process on loopback.
 Only one home is active in this process at a time; the other side of an online handover always runs in the
 listener process. Settings (``config.yaml`` of each home) switch refinement off so no model is contacted.
 
-Fault-matrix helpers (wp-int1; additive — the helpers above keep their behaviour, every integration test may use
+Fault-matrix helpers (additive — the helpers above keep their behaviour, every integration test may use
 these):
 
 * ``Listener(home, faults=True, supervise=True)`` — ``arm(rules)``/``disarm()`` write the listener-side fault rules

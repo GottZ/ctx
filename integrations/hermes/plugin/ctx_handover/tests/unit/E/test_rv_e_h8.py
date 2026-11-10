@@ -1,4 +1,4 @@
-"""Review round rv-e, finding H8 (and the condition M26 asks for): with git-lfs present, a fresh destination gets
+"""First review round, finding H8 (and the condition M26 asks for): with git-lfs present, a fresh destination gets
 the LFS content of the shipped objects, not the pointer text; without git-lfs every mode says the pointers stay
 (DESIGN §9.4, SEC 3.5). ``git-lfs`` here is a stand-in script that does what ``git lfs checkout`` does locally:
 it replaces each pointer file whose object lies in ``.git/lfs/objects`` by that object (no network)."""

@@ -1,4 +1,4 @@
-"""A · wish W5 of package i-f20 (acceptance test, built by rv-e2 for ``engine/jobs.py``): the composition root pins
+"""A · wish W5 (acceptance test, built in for ``engine/jobs.py``): the composition root pins
 the git runner to ``hostcompat.effective_home`` — every git process of the plugin gets the ``HOME`` the agent's
 terminal gets, so the source profile reads the same ``~/.gitconfig`` under ``plugins.isolation: in_process`` and
 ``host`` (red while ``jobs._git`` builds ``gitops.Git()`` on the process home)."""

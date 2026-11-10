@@ -1,4 +1,4 @@
-"""Review round rv-e2, finding M22 (gitops part): the temp-index state computation takes the profile and the filter
+"""First review round, finding M22 (gitops part): the temp-index state computation takes the profile and the filter
 names of its caller. A target that recomputes a destination holding received files (resume, the failure path of
 c1) must not let a received ``.gitattributes`` pick the user's filter drivers (DESIGN §9.2 received, SEC 3.1)."""
 

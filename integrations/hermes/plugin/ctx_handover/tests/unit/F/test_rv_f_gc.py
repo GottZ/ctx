@@ -1,4 +1,4 @@
-"""Review round rv-f — hand-over of rv-a (H4, DESIGN §14 "staging GC now"): ``/handover gc`` without ``--job`` also
+"""First review round — hand-over (H4, DESIGN §14 "staging GC now"): ``/handover gc`` without ``--job`` also
 removes the source staging a finished hold left behind (``local_source.purge_source_staging``, the janitor's step),
 not only the block cache; a hold that is not over keeps its directories."""
 
@@ -12,7 +12,7 @@ from ctx_handover.tests.fakes.hostcompat_fake import FakeCtx
 
 
 def test_rv_f_gc_without_job_purges_finished_source_staging(fake_host):
-    """★ rv-a hand-over: an orphan ``staging/<job>/git`` (no row left, e.g. after a reclaim and a crash) goes with a
+    """★ Hand-over: an orphan ``staging/<job>/git`` (no row left, e.g. after a reclaim and a crash) goes with a
     plain ``gc``; the staging of a source job that still holds is kept; the target's quarantine is never touched.
 
     Red before the fix: the orphan's ``git`` folder was still there after ``gc``."""

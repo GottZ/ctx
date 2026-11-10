@@ -1,4 +1,4 @@
-"""Review round rv-a, M11 (``review-code/REVIEW.md`` §2): the ledger set ``PRAGMA journal_mode=WAL`` raw. On a
+"""First review round, M11 (the first external review §2): the ledger set ``PRAGMA journal_mode=WAL`` raw. On a
 ``HERMES_HOME`` on NFS/SMB/WSL1 (``locking protocol``), some FUSE mounts (``not authorized``) or ZFS under bursts
 (``disk I/O error``) that pragma fails and the plugin was unusable; Hermes' own rule (``hermes_state_wal``,
 ``plugins.plugin_storage.plugin_db``) falls back to ``DELETE``. The ledger follows that rule, and the composition

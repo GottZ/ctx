@@ -1,5 +1,5 @@
 """D, round G′: the target's workspace root (V40, R29), the excluded working directory (V41, R30), the planning
-fake's ``is_partial``, README claims #11/#53, the note wishes of g-a-core and the layer move of ``envfacts``.
+fake's ``is_partial``, README claims #11/#53, the note wishes and the layer move of ``envfacts``.
 
 Lab findings covered without Hermes: L3-F01 (``workspace_root`` inside the Hermes home when HOME = HERMES_HOME, as
 in the official Docker image) and L3-F02 (the session's working directory left out silently, ``--yes`` going on).
@@ -351,7 +351,7 @@ def test_gp_reserved_directory_is_a_source(lay):
     paths = {c.path: c for c in cands}
     assert paths[os.path.realpath(proj)].origin is Origin.CWD
     assert os.path.realpath(notes) in paths
-    for left in (other, cache):  # rv-d M20: named as left behind (``rejected: hermes``), never a source
+    for left in (other, cache):  # M20: named as left behind (``rejected: hermes``), never a source
         found = paths.get(os.path.realpath(left))
         assert found is None or collector.rejected_reason(found.reasons) == "hermes", found
     final = _build(lay.cfg(), proj)
@@ -360,7 +360,7 @@ def test_gp_reserved_directory_is_a_source(lay):
 
 
 # ---------------------------------------------------------------------------------------------------------
-# Planning fake and README claims (wishes of g-f)
+# Planning fake and README claims (wishes)
 # ---------------------------------------------------------------------------------------------------------
 
 
@@ -450,7 +450,7 @@ def test_gp_remote_backend_workspace_is_not_a_source(lay, tmp_path, monkeypatch)
 
 
 # ---------------------------------------------------------------------------------------------------------
-# Note wishes (g-a-core §6)
+# Note wishes
 # ---------------------------------------------------------------------------------------------------------
 
 
@@ -465,7 +465,7 @@ def test_gp_note_names_withheld_by_source_policy():
 
 
 def test_gp_note_caps_each_entry_not_the_line():
-    """★ g-a-core: five long absolute paths in one list line — the last name stays visible (each entry is capped,
+    """★ Five long absolute paths in one list line — the last name stays visible (each entry is capped,
     not the joined line).
 
     Red before G′: ``one_line(line, 600)`` cut "secrets excluded: …/docs/sett…"."""

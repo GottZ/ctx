@@ -2,7 +2,7 @@
 DESIGN §3.4), ``FakeGitProbe.is_partial`` (contract V30) and the success sweep — a git or block-store answer counts
 as success only when it is explicitly positive (a failed, killed or short answer never reads as "nothing there").
 
-Every test here was red on the code before G′ (reasons in ``reports/L2/gp-e.md``). Failures are injected with
+Every test here was red on the code before G′. Failures are injected with
 ``FailingGit`` (a real git whose named subcommand dies) — the situations behind them are real: a git process
 killed by the OOM killer or a cancel, a peer that stores fewer blocks than it was sent."""
 

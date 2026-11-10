@@ -332,7 +332,7 @@ class LocalSource:
 
     def _describe(self, db, job: JobContext, ref: SessionRef) -> SessionInfo:
         """``session_export.describe`` of the job's session; a claimed offer (``take --offer``, L3-F12) resolves
-        through ``_offer_session`` (B's offer branch, ``reports/L2/g3-b-api.md``)."""
+        through ``_offer_session`` (B's offer branch)."""
         if not ref.offer_id:
             return self.ports.session_export.describe(db, ref, calling_session=self.calling_session)
         return self.ports.session_export.describe(
@@ -425,7 +425,7 @@ class LocalSource:
             config=self.config,
             tools_seen=sorted(self._tools_seen(job)),
             capabilities=self.hello().capabilities,
-            cfg=self.policy,  # the facts' write-root check with this host's policy (gp-d-api §1c)
+            cfg=self.policy,  # the facts' write-root check with this host's policy
         )
 
     def _stored_refinement(self, ref: SessionRef) -> Refinement | None:
@@ -850,7 +850,7 @@ class LocalSource:
             self._sync_state(job)
             discard_source_staging(self.data_dir, job.job_id)  # the hold is over (review H4)
             out: dict = {"state": self.ledger.source_state(job.job_id)["state"]}
-            # what the undo could not restore (placeholder rows, a mark) travels with the release (rv-b): named in the
+            # what the undo could not restore (placeholder rows, a mark) travels with the release: named in the
             # job's final message instead of only in a log
             warnings = report.get("warnings") if isinstance(report, dict) else None
             if isinstance(warnings, list) and warnings:

@@ -1,7 +1,7 @@
-"""Layer R (red) for §2 "Bereinigung" (A) of ``reports/L2-contracts.md``:
+"""Layer R (red) for §2 "Bereinigung" (A) of the layer-2 contract:
 
 * ``tests/unit/A/standins.py`` follows E's step names (``c1:<item_id>``, X11/W021) and the real B/D functions the
-  production code calls (wp-a2: ``map_model``, ``offline_capable``, ``plan.final_doc``, ``plan.instruction_files``,
+  production code calls (``map_model``, ``offline_capable``, ``plan.final_doc``, ``plan.instruction_files``,
   segments with ``model``/``model_config``) — every port attribute ``LocalTarget``/``LocalSource`` read exists on the
   stand-in ports;
 * the dead ``suspend`` fallback is gone (``LocalSource.suspend`` goes through B's ``lock.suspend`` only);
@@ -52,7 +52,7 @@ def test_standin_ports_offer_every_port_the_production_code_reads(module, ports)
 
 
 def test_standin_target_ports_use_the_real_b_and_d_functions():
-    """The pure B/D functions are not re-implemented in the stand-ins (wp-a2): ``map_model``/``offline_capable``
+    """The pure B/D functions are not re-implemented in the stand-ins: ``map_model``/``offline_capable``
     are B's, ``final_doc``/``instruction_files`` D's; the stand-in segments carry ``model``/``model_config``."""
     p = standins.target_ports()
     assert getattr(p.session_import, "map_model", None) is session_import.map_model

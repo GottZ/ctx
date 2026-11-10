@@ -1,5 +1,5 @@
 """K0: ``engine/settings.py`` beyond the layer-R spec (``test_l2r_settings.py``) — contract V22 and its addendum
-(non-finite and broken numbers ⇒ schema default + warning), the API fixed in ``reports/L2/g-k0-settings-api.md``."""
+(non-finite and broken numbers ⇒ schema default + warning), the API fixed in layer 2."""
 
 from __future__ import annotations
 

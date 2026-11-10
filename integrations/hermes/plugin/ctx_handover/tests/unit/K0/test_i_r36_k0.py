@@ -1,4 +1,4 @@
-"""R36 / L3-F19 (package i-r36), K0 part: two additive contract members.
+"""R36 / L3-F19, K0 part: two additive contract members.
 
 * ``model.PlanItem.cwd_bytes`` (``added_field(None)``): the size of the session's working folder when the plan item's
   root is not that folder (``rel_cwd`` set, e.g. the repository around it). The source measures it; the summary before

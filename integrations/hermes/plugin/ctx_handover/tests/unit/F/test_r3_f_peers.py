@@ -1,6 +1,5 @@
-"""Review round 3, R2-L1 (``REVIEW-2.md`` §3; g3 round 2 probe
-``test_r2_h1_removed_server_slot_value_reaches_other_origin``): after ``/handover peers remove <server>`` the settings
-form's token slot (``CTX_HANDOVER_PEER_TOKEN``) still held the server's token. No entry bound that value to the
+"""Review round 3, R2-L1 (the second review §3, a reviewer probe): after ``/handover peers remove <server>`` the
+settings form's token slot (``CTX_HANDOVER_PEER_TOKEN``) still held the server's token. No entry bound that value to the
 server's address any more (``pairing.credential_owner`` compares only with stored entries), so the next pairing with
 another address carried it there behind that address's gate.
 

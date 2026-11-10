@@ -1,6 +1,6 @@
-"""Package g5, L3-F22: ``cancel`` of a job that cannot be cancelled any more.
+"""L3-F22: ``cancel`` of a job that cannot be cancelled any more.
 
-Lab (``reports/L3-findings.md`` L3-F22, ``acc2/test_l3_f15_…/06-cancel-short.json``): ``hermes handover cancel 5FT9KS
+Lab (lab finding L3-F22): ``hermes handover cancel 5FT9KS
 --json`` on a pull that had ended ``done`` answered exit 0, ``ok: true``, "Too late to cancel: the target is
 committing …" — the job was finished, not committing, and nothing was cancelled. DESIGN §14.2: a refusal exits ≠ 0
 and carries ``error.code`` in ``--json`` (README §Use, L3-F14).

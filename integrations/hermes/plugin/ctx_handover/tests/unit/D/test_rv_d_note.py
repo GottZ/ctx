@@ -1,4 +1,4 @@
-"""Review round rv-d, L12 (g4 L-4, R22): the counterpart's free text on the note's fact lines and marker look-alikes
+"""First review round, L12 (R22): the counterpart's free text on the note's fact lines and marker look-alikes
 inside the data block."""
 
 from __future__ import annotations

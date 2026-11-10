@@ -9,7 +9,8 @@ Not part of the unit run. Preconditions (BUILD-ORDER §5 steps 1–2), checked b
 * ``lab/b/.env`` holds ``CTX_HANDOVER_PEER_TOKEN=<t>`` — the value the Desktop settings form would store for the
   secret field *Dashboard token of the other gateway* (``SERVE_TOKEN`` in this test's environment must equal it).
 
-Run with ``CTXH_E2E=1`` (otherwise the module is skipped), ``--basetemp=…/lab/pytest-e2e``, then ``labctl.py stop``
+Run with ``CTXH_E2E=1`` and ``CTXH_LAB=<lab directory>`` (otherwise the module is skipped),
+``--basetemp=<lab directory>/pytest-e2e``, then ``labctl.py stop``
 and ``labctl.py status`` (0 lab processes). R24 on a messaging adapter has no lab platform; it is covered by
 ``tests/unit/F/test_commands.py::test_admin_verbs_refused_on_messaging_platform``.
 """
@@ -26,17 +27,19 @@ from typing import Any
 
 import pytest
 
-LAB = Path(os.environ.get("CTXH_LAB", "/compose/n8n/.gotmp/handover/lab"))
+LAB = Path(os.environ["CTXH_LAB"]) if os.environ.get("CTXH_LAB") else None
 SERVE_A = "http://127.0.0.1:47111"
 PAIR_RE = re.compile(r"(ctxh-pair:[A-Za-z0-9_=-]+)")
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("CTXH_E2E") != "1", reason="layer-3 lab test (BUILD-ORDER §5): set CTXH_E2E=1 with the lab running"
+    os.environ.get("CTXH_E2E") != "1" or LAB is None,
+    reason="layer-3 lab test: set CTXH_E2E=1 and CTXH_LAB=<lab directory> with the lab running",
 )
 
 
 @pytest.fixture(scope="module")
 def lab():
+    assert LAB is not None  # the module is skipped without CTXH_LAB
     bin_dir = LAB / "bin"
     if str(bin_dir) not in sys.path:
         sys.path.insert(0, str(bin_dir))

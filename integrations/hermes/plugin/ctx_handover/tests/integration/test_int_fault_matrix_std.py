@@ -1,4 +1,4 @@
-"""Fault matrix against the real modules — standard selection (wp-int1; layer-2 counterpart of the fake matrix
+"""Fault matrix against the real modules — standard selection (layer-2 counterpart of the fake matrix
 ``tests/unit/A/test_fault_matrix.py``).
 
 Real ``SessionDB`` in two homes, real git, real block stores, the listener as a real HTTP process on loopback with

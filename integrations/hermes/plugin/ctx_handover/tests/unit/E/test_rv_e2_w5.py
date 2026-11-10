@@ -1,4 +1,4 @@
-"""Review round rv-e2, wish W5 (i-f20): the user's global git configuration follows ``HOME`` — the process home, or
+"""First review round, wish W5: the user's global git configuration follows ``HOME`` — the process home, or
 the home a ``Git`` is pinned to (``Git(home=…)``, the home Hermes gives the agent's terminal). Whichever home it
 is, its dangerous values (``core.fsmonitor``, ``core.hooksPath``, ``credential.helper``, filter drivers) act on no
 git call of the plugin (DESIGN §9.2, SEC 3.1/3.3), and the received profile reads nothing from that home but the

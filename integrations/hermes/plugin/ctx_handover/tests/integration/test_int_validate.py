@@ -23,7 +23,7 @@ JUSTIFIED = {
     ("proc_access", "ledger.py"): (
         "/proc/self/ns/pid",
         "read-only reads of the boot id and the own PID-namespace inode for the ledger's job-owner stamp "
-        "(G-prime, gp-a): a row whose owner process is dead on this host is taken over at once instead of after "
+        "(G-prime): a row whose owner process is dead on this host is taken over at once instead of after "
         "the stale window; nothing is written under /proc",
     ),
     ("setuid_setgid", "test_filetree.py"): (

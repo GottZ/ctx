@@ -1,4 +1,4 @@
-"""K0 · review H2 (``review-code/REVIEW.md`` §2): a gateway launched with ``--yolo`` / ``HERMES_YOLO_MODE=1`` runs
+"""K0 · review H2 (the first external review §2): a gateway launched with ``--yolo`` / ``HERMES_YOLO_MODE=1`` runs
 tools without asking, so ``hostcompat.approvals_off`` must say so and the continuation must not start (R22,
 catalog rule 12).
 

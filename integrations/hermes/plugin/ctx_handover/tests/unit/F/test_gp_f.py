@@ -1,6 +1,6 @@
-"""Round G′ of cluster F (``reports/L2/pkg/Gp-F.md``): the excluded working folder before sending and in the
+"""Round G′ of cluster F: the excluded working folder before sending and in the
 confirmation (V41, DECISIONS R30, L3-F02), the copy of ``export --keep`` in status and closing text (O3, V36), the
-troubleshooting note of a source-checkout Hermes (V45, R31) and the success sweep over the F files (Gp-common)."""
+troubleshooting note of a source-checkout Hermes (V45, R31) and the success sweep over the F files."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ EXCLUDED = {
     "reason": "hermes",
     "why": "hermes",
 }
-"""``presend_summary["workspace_excluded"]`` in the form of ``reports/L2/gp-d-api.md`` §2b: the session's working
+"""``presend_summary["workspace_excluded"]`` in the form cluster D defines: the session's working
 folder (role ``primary``, origin ``cwd``) the policy left out because it lies inside the Hermes home (L3-F02)."""
 
 
@@ -88,7 +88,7 @@ def test_presend_ignores_a_malformed_workspace_excluded(value):
     ],
 )
 def test_excluded_folder_reason_text(reason, why, needle):
-    """The reason codes of ``gp-d-api.md`` §2b get a sentence; an unknown code shows D's ``why`` text, else a
+    """The reason codes of ``plan.workspace_excluded`` get a sentence; an unknown code shows D's ``why`` text, else a
     neutral one."""
     text = surfaces.workspace_excluded_text({"path": "/p", "reason": reason, "why": why})
     assert needle in text, text
@@ -185,7 +185,7 @@ def test_yes_without_a_person_cancels_and_says_how_to_go_on():
     """
     plugin, backend, ctx = _plugin()
     backend.confirm_reasons = ["workspace_excluded"]
-    backend.confirm_even_with_yes = True  # the conductor asks despite --yes (plan.yes_exempt, gp-d-api §2a)
+    backend.confirm_even_with_yes = True  # the conductor asks despite --yes (plan.yes_exempt)
     backend.summary_extra = {"workspace_excluded": EXCLUDED}
     ctx.ask_choice = None  # no person on this surface
     out = _slash(plugin, "to server --yes")
@@ -320,7 +320,7 @@ def test_readme_troubleshooting_names_the_version_skip(monkeypatch):
 
 
 # ---------------------------------------------------------------------------------------------------------
-# Success sweep (Gp-common): success only on an explicitly positive value
+# Success sweep: success only on an explicitly positive value
 # ---------------------------------------------------------------------------------------------------------
 
 PUSH_JOB = "01JCAAAAAAAAAAAAAAAAPUSH01"
@@ -503,7 +503,7 @@ def test_setup_names_the_reserved_root_when_home_is_the_hermes_home(fake_host, h
     ``~/hermes-handover`` is ``<HERMES_HOME>/handover-workspaces`` (``paths.expand_handover_root``); ``/handover
     setup`` names that folder, not the raw setting. With a separate home it stays ``~/hermes-handover`` expanded.
 
-    Red (before gp-f): ``Received workspaces go to ~/hermes-handover (setting workspace_root; writes only under
+    Red (before the fix): ``Received workspaces go to ~/hermes-handover (setting workspace_root; writes only under
     ~/hermes-handover).``
     """
     plugin, _backend, _ctx = _plugin()
@@ -547,7 +547,7 @@ def test_gc_of_an_unknown_job_says_no_such_job(fake_host):
     report or continuation file, no object reference) answers "no such job" and fails — it does not report "removed
     everything of 1 jobs". Against the real profile runtime.
 
-    Red (before gp-f): ``backend.gc`` returned ``{'freed_bytes': 0, 'jobs': 1, 'skipped': 0}`` (no ``NotFound``).
+    Red (before the fix): ``backend.gc`` returned ``{'freed_bytes': 0, 'jobs': 1, 'skipped': 0}`` (no ``NotFound``).
     """
     from ctx_handover.engine.errors import NotFound
 
@@ -598,7 +598,7 @@ def test_instruction_file_without_a_status_is_not_new(entry, shown):
     """★ N28: an instruction-file entry without ``status`` is shown as "status unknown", not as "new" — "new" is
     D's positive statement (``plan.instruction_files``), never a default.
 
-    Red (before gp-f): ``assert ['AGENTS.md (new)'] == ['AGENTS.md (status unknown)']``.
+    Red (before the fix): ``assert ['AGENTS.md (new)'] == ['AGENTS.md (status unknown)']``.
     """
     summary = surfaces.plan_summary(None, _presend(), instruction_files=[entry])
     assert summary["instruction_files"] == [shown]
@@ -650,18 +650,18 @@ def dialing_backend(fake_host, tmp_path, monkeypatch):
         return real(peer, ident, read_secret=lambda n: "gate-token", transport=listener.transport, max_attempts=1)
 
     monkeypatch.setattr(wire, "WireClient", client)
-    # H1 (rv-c): the pairing copies the form's credential into the peer's own variable, so the form slot holds one
+    # H1: the pairing copies the form's credential into the peer's own variable, so the form slot holds one
     fake_host.secrets["CTX_HANDOVER_PEER_TOKEN"] = "gate-token"
     return backend, runtime, listener
 
 
 def test_pair_without_a_name_takes_a_free_one_when_the_listener_name_is_taken(dialing_backend):
-    """★ V44 (F side, gp-c §Übergaben): ``/handover pair <code>`` without ``--name`` passes no name to
+    """★ V44 (F side): ``/handover pair <code>`` without ``--name`` passes no name to
     ``pairing.redeem_dialer`` — C then names the listener after its paste string or, when that name is taken here
     (the usual two-sided pairing: the listener already dials in as ``server``), the next free one (``server-2``).
     Both sides end paired.
 
-    Red (before gp-f): F passed the paste-string name as an explicit ``name="server"`` ⇒ ``ConflictError: a peer
+    Red (before the fix): F passed the paste-string name as an explicit ``name="server"`` ⇒ ``ConflictError: a peer
     named 'server' already exists on this device; the pairing code was not used. …``
     """
     from ctx_handover.engine.model import GateAuth, GateMode

@@ -1,4 +1,4 @@
-"""Review round, package rv-b: findings of REVIEW.md Medium/Low in ``engine/lock.py`` that touch the promise
+"""First review round: findings of the first review Medium/Low in ``engine/lock.py`` that touch the promise
 "an abort leaves the source usable and without a lock".
 
 * L3 — an exception from ``try_acquire_compression_lock`` left the turn lease standing until its TTL (120 s).

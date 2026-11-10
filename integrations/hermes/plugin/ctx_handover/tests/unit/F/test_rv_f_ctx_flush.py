@@ -1,4 +1,4 @@
-"""Review round rv-f, M29 (``review-code/REVIEW.md`` §2, g6 M3): ctx was in the critical path — ``EngineBackend``
+"""First review round, M29 (the first external review §2): ctx was in the critical path — ``EngineBackend``
 flushed the ctx outbox synchronously before every job start and on ``/handover status``, each due row with a
 ``search`` and a ``store`` of up to 10 s (D12, DESIGN §13: "ctx never in the critical path").
 

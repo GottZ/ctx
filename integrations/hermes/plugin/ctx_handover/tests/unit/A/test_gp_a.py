@@ -1,4 +1,4 @@
-"""Round G′ of cluster A — the lab findings of ``reports/L3-findings.md`` reproduced without Hermes:
+"""Round G′ of cluster A — the lab findings reproduced without Hermes:
 
 * V39 (L3-F06) — a bundle export completes from every surface: the gateway slash path (``plan_sync`` +
   ``continue_async`` in one process) and a run continued by another runner (``plan_sync`` here, the run in a new
@@ -436,8 +436,8 @@ def test_push_arrival_is_visible_on_the_receiving_side(homes):
 
 def _unusable(name: str = "laptop") -> EnvFacts:
     facts = make_facts(name)
-    if not hasattr(facts, "workspace_root_ok"):  # pragma: no cover - K0's EnvFacts field (gp-k0) not there yet
-        pytest.fail("EnvFacts.workspace_root_ok missing (contract gp-d-api §1a, K0)")
+    if not hasattr(facts, "workspace_root_ok"):  # pragma: no cover - K0's EnvFacts field not there yet
+        pytest.fail("EnvFacts.workspace_root_ok missing (K0 contract)")
     return dataclasses.replace(facts, workspace_root_ok=False, workspace_root_problem="denied")
 
 
@@ -555,7 +555,7 @@ def test_default_bundle_path_uses_the_same_root_rule(tmp_path):
 
 
 def test_source_settings_go_through_the_one_normalizer():
-    """Hand-over g-k0/V22: ``local_source`` reads its settings through ``settings.from_config`` — every schema key,
+    """Hand-over V22: ``local_source`` reads its settings through ``settings.from_config`` — every schema key,
     YAML words by the one rule (``None`` ⇒ default), unknown keys dropped — not the raw mapping."""
     from ctx_handover.engine import settings
     from ctx_handover.engine.local_source import _settings_of
@@ -568,7 +568,7 @@ def test_source_settings_go_through_the_one_normalizer():
 
 
 def test_fallback_destination_resolves_with_this_hosts_policy(tmp_path):
-    """Hand-over g-d (V35/R29): ``LocalTarget``'s generic fallback goes through ``pathmap.fallback_dest`` with this
+    """Hand-over (V35/R29): ``LocalTarget``'s generic fallback goes through ``pathmap.fallback_dest`` with this
     host's policy (``cfg``) — the result lies under the root the policy allows (Docker:
     ``<HERMES_HOME>/handover-workspaces``), not under the home of the process that runs the code."""
     from types import SimpleNamespace
@@ -598,7 +598,7 @@ def test_fallback_destination_resolves_with_this_hosts_policy(tmp_path):
 
 
 def test_facts_are_probed_with_this_hosts_policy(env):
-    """gp-d-api §1c: ``LocalTarget.facts`` hands its own policy to ``envfacts.probe`` (``cfg``), so the write-root
+    """R29: ``LocalTarget.facts`` hands its own policy to ``envfacts.probe`` (``cfg``), so the write-root
     check sees the Hermes root and denylist this host enforces at commit time."""
     seen: dict = {}
     real = env.target.ports.envfacts.probe
@@ -614,7 +614,7 @@ def test_facts_are_probed_with_this_hosts_policy(env):
 
 
 def test_source_facts_are_probed_with_this_hosts_policy(mk):
-    """gp-d-api §1c, source side: ``LocalSource.facts`` passes its policy to ``envfacts.probe`` as well."""
+    """R29, source side: ``LocalSource.facts`` passes its policy to ``envfacts.probe`` as well."""
     e = mk()
     seen: dict = {}
     real = e.source.ports.envfacts.probe
@@ -629,7 +629,7 @@ def test_source_facts_are_probed_with_this_hosts_policy(mk):
 
 
 def test_yes_does_not_confirm_a_left_out_working_directory(tmp_path, clock):
-    """R30/V41 (hand-over gp-f): with ``--yes`` the user is still asked for a reason ``plan.yes_exempt`` names
+    """R30/V41 (hand-over): with ``--yes`` the user is still asked for a reason ``plan.yes_exempt`` names
     (``workspace_excluded``); without an answer the job ends ABORTED before the lock, the source untouched; an
     explicit ``yes`` goes ahead."""
     from ctx_handover.engine import plan as planning
@@ -658,7 +658,7 @@ def test_yes_does_not_confirm_a_left_out_working_directory(tmp_path, clock):
 
 
 def test_a_forward_commit_step_that_needs_attention_keeps_the_staging(env):
-    """Hand-over gp-e (DESIGN §3.4): a forward commit step fails with ``details.needs_attention`` (E: it could not
+    """Hand-over (DESIGN §3.4): a forward commit step fails with ``details.needs_attention`` (E: it could not
     undo its own partial change, e.g. an orphaned ``index.lock``). It is booked like a failing inverse — a
     ``needs_attention`` event, listed in ``last_error.needs_attention`` — and the rollback keeps the staging and the
     hidden session for a person instead of cleaning up as if everything were rolled back."""
@@ -738,7 +738,7 @@ def test_an_active_goal_arrives_paused_and_the_note_says_so(homes):
 
 
 # ---------------------------------------------------------------------------------------------------------
-# V38 speed-up (wish g-a-core) — the row of a dead process on this host is taken over at once
+# V38 speed-up (wish) — the row of a dead process on this host is taken over at once
 # ---------------------------------------------------------------------------------------------------------
 
 
@@ -749,7 +749,7 @@ def _dead_pid() -> int:
 
 
 def test_a_row_of_a_dead_process_on_this_host_is_taken_over_at_once(led):
-    """V38 (wish g-a-core, DESIGN §7.2 step 2): owners carry this host's boot id and PID namespace; a restarted
+    """V38 (wish, DESIGN §7.2 step 2): owners carry this host's boot id and PID namespace; a restarted
     participant (or janitor) takes over the row of a predecessor whose pid is gone at once instead of after the
     60-s stale window. A live owner, an unstamped owner and one of another namespace still hold it."""
     from ctx_handover.engine import ledger as ledger_mod
@@ -780,5 +780,5 @@ def test_a_row_of_a_dead_process_on_this_host_is_taken_over_at_once(led):
 
 
 def test_offers_are_valid_for_two_hours():
-    """DESIGN §12.6 / README: an offer stays valid for two hours (g-f wish)."""
+    """DESIGN §12.6 / README: an offer stays valid for two hours (wish)."""
     assert jobs.OFFER_TTL_S == 2 * 3600

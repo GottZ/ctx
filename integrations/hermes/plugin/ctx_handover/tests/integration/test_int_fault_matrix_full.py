@@ -1,4 +1,4 @@
-"""Fault matrix against the real modules — full cross matrix (wp-int1, marker ``slow``; selection rules in
+"""Fault matrix against the real modules — full cross matrix (marker ``slow``; selection rules in
 ``conftest.py``): every call of both participants (``harness.CASES`` = the 32 call points of the fake matrix) × every
 fault kind, push and pull, wherever the kind exists for that participant (link faults and participant restarts only
 for the remote one — a local participant shares the conductor's process). Same driver and promises as

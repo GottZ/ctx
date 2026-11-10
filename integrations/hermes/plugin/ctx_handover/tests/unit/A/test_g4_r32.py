@@ -1,4 +1,4 @@
-"""R32 / L3-F17, cluster A wiring (package g4; forms in ``reports/L2/g3-df-api.md`` §1c).
+"""R32 / L3-F17, cluster A wiring.
 
 A session larger than the context window of the target model is not handed over silently: the conductor gives
 ``plan.confirmation_reasons`` and ``plan.presend_summary`` its facts of both sides (``target_facts``,
@@ -211,7 +211,7 @@ def test_g4_pull_of_a_session_larger_than_the_target_window_asks_despite_yes(hom
     * a short session, and a long lineage whose tip (after a compression rotation) is short ⇒ no question, done, no
       context line in the note.
 
-    Red before g4 (``reports/L2/g4.md``): the conductor did not pass its facts, so reason (i) never fired for a
+    Red before the fix: the conductor did not pass its facts, so reason (i) never fired for a
     model that stays — the first job ended ``done`` (rc 0) like in the lab."""
     server, laptop = homes
     _b, big = _session(server, "Long session", pairs=6, size=2000)

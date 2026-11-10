@@ -1,4 +1,4 @@
-"""Layer G — ``BundleTarget`` keeps its progress in the job's staging (``reports/L2-contracts.md`` V24): what a
+"""Layer G — ``BundleTarget`` keeps its progress in the job's staging (the layer-2 contract V24): what a
 resumed export relies on beyond the layer-R tests (``test_l2r_bundle_resume.py``) — a commit whose answer was lost,
 a commit without a prepared staging, two exports to one path, and a progress file other users could write.
 """
@@ -85,9 +85,9 @@ def test_a_new_instance_reports_a_bundle_already_committed(tmp_path, as_dir):
 
 
 def test_commit_without_a_prepared_staging_is_not_retryable(tmp_path):
-    """★ V24 addition (L2-contracts §1a): a commit with no prepared staging fails ``invalid_state`` and is not
+    """★ V24 addition (layer-2 contract §1a): a commit with no prepared staging fails ``invalid_state`` and is not
     retryable — the conductor ends the job with that message at once instead of waiting ``stall_timeout`` in
-    IN_DOUBT (wp-a2: 30 min). Nothing appears at ``out``.
+    IN_DOUBT (30 min). Nothing appears at ``out``.
 
     Red proof: mutant = ``_commit`` raises the plain ``HandoverError`` again → ``retryable`` True, code ``internal``.
     """

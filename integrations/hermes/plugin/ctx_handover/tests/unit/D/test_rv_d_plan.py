@@ -1,4 +1,4 @@
-"""Review round rv-d (``review-code/REVIEW.md`` @ ``1539274c``): sizes, limits and the summary before sending.
+"""First review round (the first external review): sizes, limits and the summary before sending.
 
 * H12 — a file tree beyond ``max_files`` or the byte cap was planned as included with the count where counting
   stopped; the pack refused it after the lock.
@@ -47,7 +47,7 @@ def _primary_item(rp):
 
 
 def test_h12_workspace_tree_over_max_files_is_left_out_and_asked(lay):
-    """★ H12 (g4 H-1): the session's folder (no git) holds more entries than ``max_files``. The pack would refuse it
+    """★ H12: the session's folder (no git) holds more entries than ``max_files``. The pack would refuse it
     after the lock (``filetree.scan`` → ``PolicyDenied(max_files)``); the plan now leaves it out, names it as ``too
     large`` with the limit in its reasons, and R30's reason (h) asks even with ``--yes``.
 
@@ -119,7 +119,7 @@ def _plan_git(lay, root: Path):
 
 
 def test_h13_git_size_behind_gitfiles_and_alternates(lay, tmp_path):
-    """★ H13 (g4 H-2): the size estimate of a git workspace counts the objects a fresh pack reads — for a linked
+    """★ H13: the size estimate of a git workspace counts the objects a fresh pack reads — for a linked
     worktree (Hermes kanban's ``<repo>/.worktrees/<task>``) the main repository's store, for a submodule its store in
     ``.git/modules``, for ``--separate-git-dir`` the separate git dir, for a ``clone --shared`` the alternates too.
 
@@ -193,7 +193,7 @@ TOKEN_TEXT = "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n"
 
 
 def test_l10_include_keeps_a_suspected_secret_a_proposal(lay):
-    """★ L10 (g4 L-2) / R25: ``--include`` on a file with a token — given only by the user, and also when the
+    """★ L10 / R25: ``--include`` on a file with a token — given only by the user, and also when the
     transcript already proposed it — leaves it a proposal with ``SUSPECTED_SECRET`` that ``yes`` does not take;
     ``--include-secret`` on the same file releases it as ``yes`` without the suspicion label.
 
@@ -227,7 +227,7 @@ def test_l10_include_keeps_a_suspected_secret_a_proposal(lay):
 
 
 def test_m37_presend_names_paths_outside_the_workspace_bounded(lay):
-    """★ M37 (g8 M3): ``presend_summary`` lists every included item outside the workspace with path and size —
+    """★ M37: ``presend_summary`` lists every included item outside the workspace with path and size —
     largest first, at most ``PRESEND_PATHS_MAX`` — and counts the rest (``outside_more``); the workspace itself and
     proposals that were not confirmed are not in it.
 

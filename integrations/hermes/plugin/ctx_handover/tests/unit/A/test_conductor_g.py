@@ -1,4 +1,4 @@
-"""Layer G for the conductor points of ``reports/L2-contracts.md`` (cluster A core) against the fake participants:
+"""Layer G for the conductor points of the layer-2 contract (cluster A core) against the fake participants:
 
 * V37 — a job ends DONE only on an explicit confirmation of the source's retirement; a row another process holds
   (``busy_elsewhere``), an error or an answer without a confirming state parks it RETIRING (never DONE, never

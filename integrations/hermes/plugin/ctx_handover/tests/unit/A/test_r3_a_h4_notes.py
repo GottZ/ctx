@@ -1,4 +1,4 @@
-"""Review round 3, package r3-a — the ledger rest of H4 (REVIEW-2 §2, g2 round 2): the handover note of an arrival
+"""Review round 3 — the ledger rest of H4 (REVIEW-2 §2): the handover note of an arrival
 stayed in ``arrivals.note`` for ever although its report (the same text) goes after 30 days, and ``pull_log`` (the
 paths a peer pulled) had no limit at all (only ``gc --job``).
 
@@ -6,7 +6,7 @@ Now ``Ledger.purge_delivered`` (run by the janitor's retention step) removes arr
 ``pull_log`` rows, both older than ``JOURNAL_KEEP_S`` and only for jobs that are over on this host. A note not
 delivered yet stays: it is the arrived session's handover context for its first turn.
 
-Red before r3-a: ``AttributeError: 'Ledger' object has no attribute 'purge_delivered'`` and, through the janitor,
+Red before the fix: ``AttributeError: 'Ledger' object has no attribute 'purge_delivered'`` and, through the janitor,
 ``ARRIVAL NOTE STILL STORED`` (the reviewer's probe ``test_zz_g2_retention.py``)."""
 
 from __future__ import annotations

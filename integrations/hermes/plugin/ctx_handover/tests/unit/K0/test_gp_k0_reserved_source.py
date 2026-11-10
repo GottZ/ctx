@@ -1,4 +1,4 @@
-"""K0 round G′, integrator decision on gp-k0's open point (return trip R4 in Docker, HOME = HERMES_HOME): the reserved
+"""K0 round G′, integrator decision on the open point (return trip R4 in Docker, HOME = HERMES_HOME): the reserved
 directory ``<HERMES_HOME>/handover-workspaces`` (exactly it and below) is also a permitted SOURCE — same rule as on the
 target side: no neighbour path, no symlink escape; the plugin data dir, every other Hermes path and the Hermes
 credential stores stay protected. Real files in tmp; every check also with one shared ``SourceCheckCache``."""

@@ -1,4 +1,4 @@
-"""Layer G — route #9 of a pull source (``reports/L2-contracts.md`` V17, ``source_reclaimed``): what reaches the
+"""Layer G — route #9 of a pull source (the layer-2 contract V17, ``source_reclaimed``): what reaches the
 dialer's ``RemoteSource.heartbeat`` when the listener's source gave up its leases, and what stays an error.
 
 The listener side runs through the real ``Server`` and A's ``ParticipantRegistry`` (``_l2r_helpers.Pair``; route

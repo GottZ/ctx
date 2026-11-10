@@ -1,4 +1,4 @@
-"""Review round rv-final, point 4 (rv-a §5 Nr. 3, rv-c §5/§6, review M5):
+"""First review round, point 4 (review M5):
 
 * the C ledger stub's ``quota_set`` still kept ``MAX(quota, new)`` while the real ledger sets ``MAX(used, new)`` (M5:
   a smaller re-negotiated plan lowers the quota) — a layer-1 run (``CTXH_C_LEDGER=stub``) tested other rules than
@@ -66,7 +66,7 @@ def test_rv_final_a_target_without_a_quota_sink_stores_nothing(tmp_path):
     d = lst.pair(tmp_path)
     lst.registry.target = NoQuotaSinkTarget(lst.registry, "target")
     src = MemoryBlockStore()
-    m = src.put_bytes(b"rv-final " * 200, "application/octet-stream")
+    m = src.put_bytes(b"payload  " * 200, "application/octet-stream")
     job = _open(lst, d)
     frames = b"".join(encode_frame(b, src.get(b), peer_caps=frozenset({"enc.zlib"})) for b in m.blocks)
     resp = lst.handle(d.req("PUT", f"jobs/{job}/blocks", raw=frames, ctype=MEDIA_BLOCKS, epoch=1))

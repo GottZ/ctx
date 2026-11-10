@@ -1,4 +1,4 @@
-"""K0 round G′ success sweep (``reports/L2/pkg/Gp-common.md``): a check passes only on an explicitly positive value.
+"""K0 round G′ success sweep: a check passes only on an explicitly positive value.
 
 ``policy.check_tree_entry`` read a missing ``size`` of a peer's file entry as ``0`` and let the entry through; the
 target then failed with a bare ``KeyError`` in ``filetree._write_file`` (``int(entry["size"])``) instead of skipping

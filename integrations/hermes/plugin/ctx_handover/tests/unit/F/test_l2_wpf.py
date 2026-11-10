@@ -1,4 +1,4 @@
-"""Cluster F, layer 2 (package wp-f) — one runtime per process from the hooks' view (X19), ``doctor`` without a
+"""Cluster F, layer 2 — one runtime per process from the hooks' view (X19), ``doctor`` without a
 body-limit measurement unless asked (``--measure``), ``--include-secret`` as an explicit parameter (X07), the
 contract form of ``model_change`` in ctx records and summaries (X04/X22), the MCP allowlist written by
 ``/handover setup`` (W108) and YAML 1.1 word values in the settings (``off`` arrives as ``False``)."""
@@ -393,7 +393,7 @@ def test_settings_words_agree_with_the_engine_reader():
     """The surfaces (``surfaces.settings_from_config``) and the engine (``jobs.plugin_settings``, cluster A) read
     every boolean and every on/off word setting the same way, so a listener and a dialer never disagree about
     ``refine: off`` or ``allow_remote_continue: "no"``. (``None`` is left out: the engine reads it as off for flags,
-    the surfaces as the default — named in the wp-f report.)"""
+    the surfaces as the default.)"""
     from ctx_handover.engine import jobs
 
     values = [True, False, "on", "off", "yes", "no", "true", "false", "1", "0", "", 1, 0, "maybe", " Off "]

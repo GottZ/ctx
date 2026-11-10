@@ -1,4 +1,4 @@
-"""Conductor, layer 2 (contract X02, X06, X16, K-1; W089, W111, W112 and the pre-send summary finding of L2-F).
+"""Conductor, layer 2 (contract X02, X06, X16, K-1; W089, W111, W112 and the pre-send summary layer-2 finding).
 
 Fault-injection world of ``apis_fake`` with ``FakePlanning`` delegating to the real ``plan`` module (``apply_choice``,
 ``plan_id``, ``presend_summary``, ``note_parts_from``, ``instruction_files``); export → import through the real
@@ -87,7 +87,7 @@ def test_l2_conductor_timeout_with_only_proposals_excludes_them(tmp_path, clock)
 
 
 def test_l2_conductor_presend_summary_is_structured_not_a_text_line(tmp_path, clock):
-    """Finding L2-F: the pre-send summary is journaled as ``plan.presend_summary``'s document (ctx ``presend``);
+    """Layer-2 finding: the pre-send summary is journaled as ``plan.presend_summary``'s document (ctx ``presend``);
     the conductor sends no ``k=v`` text through the reporter (F's notice shows D's summary only)."""
     h = Harness(tmp_path, clock, options=Options(yes=True))
     _proposals(h)
@@ -154,7 +154,7 @@ def test_l2_conductor_last_progress_names_the_stop_state(tmp_path, clock, case):
     assert h.state() == case
     last = h.reporter.progress_events[-1].step
     assert last == case
-    if case != "aborting":  # parked ABORTING: wish to wp-f (PARKING_STEPS)
+    if case != "aborting":  # parked ABORTING: wish (PARKING_STEPS)
         assert last in TERMINAL_STEPS
 
 
@@ -235,7 +235,7 @@ def two_homes(tmp_path):
 
 def _run_pinned(home, mode: Mode, sid: str, options: Options, bundle: Path) -> tuple[str, int]:
     """``plan_sync`` + ``run_foreground`` with ONE participant pair per job (``BundleTarget`` keeps its plan in
-    memory; reported by wp-a2 to wp-c/wp-a3)."""
+    memory)."""
     with home.active():
         runner = jobs.runner_for(None)
         make, pairs = runner._apis_factory, {}

@@ -1,13 +1,13 @@
-"""Review round 3, package r3-a — M8 rest (REVIEW-2 §5, g2 round 2): the process dies inside the hidden import, the
-prepare operation starts again (the janitor's default for ``preparing``) and mints new ids. Before r3-a the restart
+"""Review round 3 — M8 rest (REVIEW-2 §5): the process dies inside the hidden import, the
+prepare operation starts again (the janitor's default for ``preparing``) and mints new ids. Before the fix the restart
 replaced ``planned_ids``: the session the first attempt wrote fell out of every list and stayed in ``state.db`` —
 after the successful restart and after an abort alike.
 
 Now ``LocalTarget._prepare`` discards what an earlier, unfinished attempt wrote before it plans the new import, and
 whatever could not be removed stays journaled next to the new ids.
 
-Red before r3-a: ``first attempt's session still there after the restart``. The reviewer's probe
-``review-code/round2/g2-session/probes/test_zz_g2_m8restart.py`` is the scenario."""
+Red before the fix: ``first attempt's session still there after the restart``. The reviewer's probe
+is the scenario."""
 
 from __future__ import annotations
 

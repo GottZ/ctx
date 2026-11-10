@@ -1,9 +1,9 @@
-"""Review round rv-f — the continuation child (``engine/continuation.py``):
+"""First review round — the continuation child (``engine/continuation.py``):
 
-* L20 (g6 L3): the exit code came from the last trailer line of the child's log, which the child writes itself — a
+* L20: the exit code came from the last trailer line of the child's log, which the child writes itself — a
   child that prints "[ctx_handover] continuation exited with code 0" and runs on was reported as finished. The trailer
   now counts only for a process that is gone; the sidecar (``meta.exit_code``, written by the reaper) always wins.
-* M28, F part (g6 M2): the default profile was left out of the argv (``hermes`` without ``-p``), so the child followed
+* M28, F part: the default profile was left out of the argv (``hermes`` without ``-p``), so the child followed
   Hermes' sticky ``active_profile`` and could run in another profile than the one whose approval check passed. A named
   profile — ``default`` included — is now always passed; ``None`` (unknown) still adds nothing."""
 

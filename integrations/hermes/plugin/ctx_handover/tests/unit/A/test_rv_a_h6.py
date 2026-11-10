@@ -1,4 +1,4 @@
-"""Review round rv-a, finding H6 (``review-code/REVIEW.md`` §2): the janitor of any process released the local source
+"""First review round, finding H6 (the first external review §2): the janitor of any process released the local source
 of a running push/export as soon as its participant row had seen no ``LocalSource._epoch`` call for 60 s — between
 pack and prepare (a large work tree on the target) that is the normal case, and the handover broke off.
 

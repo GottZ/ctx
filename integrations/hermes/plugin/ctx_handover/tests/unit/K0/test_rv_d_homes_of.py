@@ -1,4 +1,4 @@
-"""``policy.homes_of`` (rv-d, M35): the public form of the target denylist's home list, read by the source's home rule
+"""``policy.homes_of`` (M35): the public form of the target denylist's home list, read by the source's home rule
 (``collector.HomeRule``) so both sides know the same homes."""
 
 from __future__ import annotations

@@ -368,7 +368,7 @@ def runtime_env(fake_host):
 
 def test_listener_settings_take_schema_keys_normalised_and_keep_their_own_knobs(runtime_env):
     """★ V22: ``server_settings`` = the one normaliser for every schema key (an unknown ``inbound`` word is ``off``,
-    fail-closed — integrator decision, gp-k0) plus the listener's own knobs outside the schema as given (``name``,
+    fail-closed — integrator decision) plus the listener's own knobs outside the schema as given (``name``,
     ``operator_api``, rate limits — the server checks them); job caps outside the schema are positive integers or the
     default. An empty ``allow_roots`` stays empty in ``Options`` (fail-closed, as the surfaces show it).
 

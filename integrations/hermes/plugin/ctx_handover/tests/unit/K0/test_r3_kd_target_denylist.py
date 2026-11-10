@@ -1,7 +1,7 @@
-"""r3-kd, rest of review finding H5 (``review-code/REVIEW-2.md`` §2, R2-M6): the target denylist of R19 beyond the
+"""Rest of review finding H5 (the second review §2, R2-M6): the target denylist of R19 beyond the
 homes the policy already knew.
 
-Three gaps the second review left open (g4, read by the lead):
+Three gaps the second review left open (read by the lead):
 
 1. **WSL**: a Linux target (WSL) with ``allow_roots: ["/mnt/c/Users/u"]`` — the Windows rules applied only to Windows
    targets, so the Startup folder, ``Documents/WindowsPowerShell`` and ``.ssh`` of that Windows home were writable;

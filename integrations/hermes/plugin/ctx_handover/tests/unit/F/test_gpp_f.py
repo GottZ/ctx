@@ -1,4 +1,4 @@
-"""Round G″ of cluster F (``reports/L2/pkg/Gpp-CF.md``, hand-overs of ``reports/L2/gp-a.md`` §8):
+"""Round G″ of cluster F:
 
 1. ``reclaim --session <id>`` is accepted by the one grammar (slash and ``hermes handover``) — the remedy the README
    names for a session the CLI cannot point at otherwise (L3-F06);
@@ -36,7 +36,7 @@ JOB = "01JC0000000000000000000JOB"
 
 
 def test_reclaim_accepts_the_session_as_an_option():
-    """★ (gp-a §8 F1, L3-F06): ``reclaim --session <id>`` parses like ``reclaim <id>``; ``--force`` still works with
+    """★ (L3-F06): ``reclaim --session <id>`` parses like ``reclaim <id>``; ``--force`` still works with
     it; the same id given both ways is fine, two different ids are a usage error.
 
     Red (on 16698398): ``assert ("--session is not an option of 'reclaim'. Usage: …",) == ()``.
@@ -52,7 +52,7 @@ def test_reclaim_accepts_the_session_as_an_option():
 
 
 def test_reclaim_session_option_reaches_the_backend_from_slash_and_cli(capsys):
-    """★ (gp-a §8 F1): the slash form and ``hermes handover reclaim --session <id>`` (argparse in front, as Hermes
+    """★ the slash form and ``hermes handover reclaim --session <id>`` (argparse in front, as Hermes
     builds it with ``commands.cli_setup``) reclaim exactly the named session; a clash reclaims nothing (exit 2).
 
     Red (on 16698398): the slash answered the usage text (no ``reclaim`` call) — ``assert 'reclaim' in [...]``.
@@ -104,7 +104,7 @@ def _root_denied(message: str) -> PolicyDenied:
     ids=["d-text", "empty", "bare"],
 )
 def test_workspace_root_denial_names_the_setting_and_the_folder(message):
-    """★ (gp-a §8 F2, R29/V40): the text names ``workspace_root``, the folder and the gateway, says that nothing was
+    """★ (R29/V40): the text names ``workspace_root``, the folder and the gateway, says that nothing was
     locked or sent, and does not send the user to ``--dest``/"items" (a root problem is not an item problem) — with
     D's sentence, without any message, and with a message that names neither.
 
@@ -182,7 +182,7 @@ def _info(reasons, yes_exempt) -> dict:
 
 
 def test_yes_does_not_answer_a_reason_the_conductor_marks_yes_exempt():
-    """★ (gp-a §8 F3): ``conductor._confirm`` calls the callback despite ``--yes`` exactly for the reasons in
+    """★ ``conductor._confirm`` calls the callback despite ``--yes`` exactly for the reasons in
     ``info["yes_exempt"]``; the surface asks the person for them even when its own table (``plan.YES_EXEMPT``) does
     not list the code — the conductor's list wins. Without a person: ``cancel`` (never ``yes``).
 
@@ -217,7 +217,7 @@ def test_yes_does_not_answer_a_reason_the_conductor_marks_yes_exempt():
     ids=["absent", "empty", "none", "bare-string", "letter", "true", "mapping"],
 )
 def test_yes_exempt_counts_only_an_explicitly_empty_value_as_none(yes_exempt, asks):
-    """★ Success sweep (Gp-common): ``--yes`` answers on its own only when the conductor's ``yes_exempt`` is absent,
+    """★ Success sweep: ``--yes`` answers on its own only when the conductor's ``yes_exempt`` is absent,
     ``None`` or an empty list (and the surface's own table names nothing); a bare string or a letter names a reason;
     any other value present counts as "ask" (fail-closed), never as "nothing exempt".
 
@@ -276,7 +276,7 @@ def _participant(role: str, mode: str, state: str = "done", **extra) -> dict:
 
 
 def test_status_line_names_this_gateways_role_and_the_other_side():
-    """★ (gp-a §8 F4, V43, L3-F04): a push that arrived here reads ``target`` and "from laptop" and names the session
+    """★ (V43, L3-F04): a push that arrived here reads ``target`` and "from laptop" and names the session
     it became; the source side of a pull reads ``source`` and "to laptop"; this gateway's own (conductor) jobs keep
     their line.
 
