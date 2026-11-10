@@ -496,6 +496,10 @@ def make_local_apis(
         ports=source_ports,
         data_dir=prof.data_dir,
         peer_name=peer.name if peer is not None else None,
+        # R6-B: as many running plans per device as it may have jobs here (``max_jobs_per_peer``, route #7's cap)
+        remote_plan_slots=settings_mod.positive_int(
+            settings_mod.raw_settings(config).get("max_jobs_per_peer"), MAX_JOBS_PER_PEER
+        ),
     )
     from . import continuation
 

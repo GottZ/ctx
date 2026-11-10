@@ -51,6 +51,7 @@ from .errors import (
     InvalidState,
     LeaseLost,
     NotFound,
+    RateLimited,
     SessionBusy,
     VerifyFailed,
     WaitTimeout,
@@ -93,6 +94,14 @@ from .policy import PolicyConfig
 LOCK_WAIT_S = 20
 """Longest a ``lock`` call waits for a running turn's lease (route ``source/lock`` stays below the request timeout,
 I7, W060); with ``--wait`` the conductor repeats it until its own deadline."""
+
+MAX_REMOTE_PLANS = 4
+"""Plan operations a paired device may start in one job here (review R6-B). Its conductor plans once and re-plans at
+most once when the session moved before the lock; a repeat of the same request is no new plan."""
+MAX_REMOTE_PLANS_RUNNING = 2
+"""Plans of one paired device that may run here at once, across its jobs (R6-B; a cancelled job's plan keeps running
+until it ends) when no ``remote_plan_slots`` are given: the default ``max_jobs_per_peer``. The composition root passes
+the configured ``max_jobs_per_peer``, so every job a device may have here can plan at the same time."""
 
 SOURCE_STAGING_DIRS = ("git", "recheck")
 """The source's own directories under ``staging/<job>``: the pack work directory (``_pack``: a temporary repository
@@ -234,6 +243,7 @@ class LocalSource:
         data_dir: Path | None = None,
         instance_name: str = "",
         peer_name: str | None = None,
+        remote_plan_slots: int = 0,
     ) -> None:
         self.ledger = ledger
         self.store = store
@@ -251,6 +261,7 @@ class LocalSource:
         self.redact = redact
         self.state_db = Path(state_db)
         self.remote_driven = remote_driven
+        self.remote_plan_slots = int(remote_plan_slots) if int(remote_plan_slots) > 0 else MAX_REMOTE_PLANS_RUNNING
         self.policy = policy
         self._ports = ports
         self._clock = clock or time.time
@@ -499,7 +510,29 @@ class LocalSource:
             return to_wire(plan)
 
         digest = _digest(job.job_id, session_ref, target_facts, job.options.refine, job.options.hints)
+        if self.remote_driven:
+            self._bound_remote_plan(job, digest)
         return self._start(job, "plan", digest, fn)
+
+    def _bound_remote_plan(self, job: JobContext, digest: str) -> None:
+        """A paired device's plan request starts bounded work only (review R6-B): the same request again is answered
+        by its operation; otherwise at most ``MAX_REMOTE_PLANS`` plans per job and ``remote_plan_slots``
+        running plans of the device here. The job caps of route #7 bound jobs, not the plans inside one."""
+        if self.ledger.op_get(job.job_id, "plan", _digest("plan", digest)) is not None:
+            return
+        plans = [o for o in self.ledger.ops_for_job(job.job_id) if o["op"] == "plan"]
+        if len(plans) >= MAX_REMOTE_PLANS:
+            raise InvalidState(
+                "This handover asked for a new plan too often. Start the handover again.", reason="plan_limit"
+            )
+        peer_id = job.peer.peer_id if job.peer is not None else None
+        if peer_id and (
+            self.ledger.running_ops_of_peer(peer_id, Role.SOURCE, "plan", STALE_OWNER_S) >= self.remote_plan_slots
+        ):
+            raise RateLimited(
+                "This gateway is still working on another plan for your device; the request is repeated shortly.",
+                retry_after=5,
+            )
 
     def lock(self, job: JobContext, session_ref: SessionRef, plan_revision: tuple) -> SessionInfo:
         """Busy probe, leases, revision check (DESIGN §7.2). Idempotent per job (re-acquires a lost lease).
