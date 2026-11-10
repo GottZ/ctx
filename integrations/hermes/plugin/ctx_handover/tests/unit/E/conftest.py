@@ -23,6 +23,19 @@ def _fresh_git_caches():
     gitops.reset_process_caches()
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "real_system_config: the source profile reads the host's system git config")
+
+
+@pytest.fixture(autouse=True)
+def _no_host_system_config(request, monkeypatch):
+    """Keep the host's system git configuration out of the source profile too (the received profile nulls it
+    anyway): a CI runner configures Git LFS system-wide, and its ``filter-process`` would meet the tests' git-lfs
+    stand-ins or a PATH without git-lfs. ``real_system_config``-marked tests see the production environment."""
+    if request.node.get_closest_marker("real_system_config") is None:
+        monkeypatch.setitem(gitops.SET_ENV, "GIT_CONFIG_NOSYSTEM", "1")
+
+
 @pytest.fixture
 def git() -> gitops.Git:
     g = gitops.Git()

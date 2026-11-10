@@ -357,7 +357,8 @@ def test_system_paths_never_releasable(parts, lay):
     path = Path("/", *parts)
     cfg = lay.cfg(home=Path("/"), include_secret=[str(path)])
     verdict = policy.check_source_file(path, cfg, explicit=True)
-    assert verdict in (Verdict(False, "secret"), Verdict(False, "missing"))
+    # refused whatever this host makes of the path: a secret, absent, or not readable by a non-root runner
+    assert verdict in (Verdict(False, "secret"), Verdict(False, "missing"), Verdict(False, "unreadable"))
     assert policy._system_denied(path)
 
 

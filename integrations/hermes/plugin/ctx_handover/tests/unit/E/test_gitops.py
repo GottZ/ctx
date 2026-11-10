@@ -73,6 +73,7 @@ def _effective(pairs: list[tuple[str, str]], key: str) -> str | None:
     return found
 
 
+@pytest.mark.real_system_config
 def test_git_env_source_and_received_profiles(git, user_home, tmp_path):
     """★ received nulls the user's global/system config and passes only the safelist back; source keeps the user's
     config (mutant: received profile without GIT_CONFIG_GLOBAL/SYSTEM nulling — the v1 behaviour) [R21, SEC 3.1]."""
