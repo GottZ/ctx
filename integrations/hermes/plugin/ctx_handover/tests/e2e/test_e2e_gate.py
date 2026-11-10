@@ -67,7 +67,7 @@ def test_e16_wrong_gate_token(lab, ev):
         res = lab.handover("b", "take", _lab.SERVER, src.sid, "--yes", timeout=300)
     ev.cli("take-wrong-token", res)
     assert res.rc == 4 and res.error_code == "gate_rejected", res.brief()
-    assert "rejected the access credential" in res.text, res.text
+    assert "refused the sign-in from the ctx_handover settings" in res.text, res.text
     assert "HERMES_DASHBOARD_SESSION_TOKEN" in res.text, res.text
     assert lab.marks("a", src.sid) == marks
 

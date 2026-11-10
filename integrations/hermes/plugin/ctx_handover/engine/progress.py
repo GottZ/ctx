@@ -31,10 +31,47 @@ logger = logging.getLogger(__name__)
 MiB = 1024**2
 
 
+STEP_TEXT: dict[str, str] = {
+    "created": "planning",
+    "hello": "planning",
+    "facts": "planning",
+    "planning": "planning",
+    "negotiated": "planned",
+    "locking": "locking the session",
+    "locked": "session locked",
+    "exporting": "copying the conversation",
+    "context_staged": "conversation copied",
+    "packing": "packing files",
+    "data_staged": "files copied",
+    "target_preparing": "unpacking on the receiving machine",
+    "target_prepared": "unpacked on the receiving machine",
+    "source_preparing": "preparing on the sending machine",
+    "delta_applying": "adding the messages written meanwhile",
+    "target_resetting": "the session changed meanwhile; starting over",
+    "source_prepared": "ready to finish",
+    "committing": "finishing",
+    "in_doubt": "unclear whether the other machine finished",
+    "committed": "arrived",
+    "retiring": "closing the session on the sending machine",
+    "retired": "session closed on the sending machine",
+    "continuing": "starting the agent",
+    "done": "done",
+    "aborting": "cancelling",
+    "aborted": "stopped, nothing handed over",
+    "suspended": "suspended (paused; /handover resume continues it)",
+    "transfer": "sending files",
+    "commit": "finishing",
+}
+"""``Progress.step`` values (the conductor's states and the steps ``transfer``, ``packing``, ``commit``) in words;
+the same words as ``surfaces.STATE_TEXT`` (a unit test keeps both equal). A step missing here is shown as it is.
+``--json`` events keep the step names."""
+
+
 def format_progress(p: Progress, peer: str | None, direction: str, *, eta_s: float | None = None) -> str:
-    """``Handover → laptop · packing workspace · 312/1024 MiB (30 %) · ~2 min left`` (DESIGN §14.1)."""
+    """``Handover → laptop · packing files · 312/1024 MiB (30 %) · ~2 min left`` (DESIGN §14.1)."""
     arrow = "→" if direction == "out" else "←"
-    parts = [f"Handover {arrow} {peer or 'bundle'}", p.step or "working"]
+    step = STEP_TEXT.get(p.step, p.step) if p.step else "working"
+    parts = [f"Handover {arrow} {peer or 'handover file'}", step]
     if p.bytes_total:
         pct = int(100 * p.bytes_done / p.bytes_total) if p.bytes_total else 0
         parts.append(f"{p.bytes_done // MiB}/{p.bytes_total // MiB} MiB ({pct} %)")

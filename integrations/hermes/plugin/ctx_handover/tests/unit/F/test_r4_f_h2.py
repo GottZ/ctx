@@ -264,7 +264,7 @@ def test_r4_f_h2_refusal_text_names_reason_and_way_out(here, why):
     err = ContinueRefused("x", reason="approvals_unchecked", why=why, session_id=SID, profile="work")
     text = surfaces.render_error(err, "server", here=here)
     assert f"`{_CMD}`" in text, text
-    assert "approvals" in text and "no turn" in text.lower(), text
+    assert "approvals" in text and "the agent did not start" in text, text
     if why == "gateway_unverified":
         assert "cannot identify the gateway" in text and "another container" in text, text
     else:

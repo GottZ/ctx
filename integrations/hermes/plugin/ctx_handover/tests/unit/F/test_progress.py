@@ -111,6 +111,27 @@ def test_tty_reporter_lines_and_json():
     assert events[1] == {"event": "info", "text": "hello"}
 
 
+def test_progress_shows_states_in_words_and_json_keeps_the_names():
+    """The progress line names the conductor's state in words (no ``in_doubt`` or ``target_preparing`` for a
+    person); ``--json`` events keep the state name; a step without words is shown as it is. The words are the ones
+    ``/handover status`` uses (``surfaces.STATE_TEXT``).
+
+    Mutant: ``format_progress`` shows ``p.step`` again ⇒ ``'unpacking on the receiving machine'`` missing."""
+    from ctx_handover.engine import surfaces
+    from ctx_handover.engine.progress import STEP_TEXT, format_progress
+
+    line = format_progress(Progress(step="target_preparing"), "laptop", "out")
+    assert line == "Handover → laptop · unpacking on the receiving machine", line
+    doubt = format_progress(Progress(step="in_doubt"), None, "out")
+    assert doubt == "Handover → handover file · unclear whether the other machine finished", doubt
+    assert "in_doubt" not in doubt
+    out = io.StringIO()
+    TtyReporter(stream=out, json_mode=True, clock=Clock(), peer="laptop").progress(Progress(step="in_doubt"))
+    assert json.loads(out.getvalue())["step"] == "in_doubt"
+    for step, words in STEP_TEXT.items():
+        assert surfaces.STATE_TEXT[step] == words, step
+
+
 def test_reporter_broker_binds_reporter_to_job():
     """The runner's ``reporter_factory(job_id)`` is called in the handler thread during ``plan_sync``; the broker
     hands it the reporter the handler bound, and the same one again for later calls (worker thread)."""

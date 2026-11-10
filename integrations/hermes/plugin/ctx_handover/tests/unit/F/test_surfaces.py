@@ -369,41 +369,55 @@ def test_error_texts_table():
     """BX M8, DESIGN §14.1: every code maps to its remedy text (what to do, not just what failed)."""
     p = "server"
     cases = [
-        (GateRejected("401"), ["dashboard of server rejected", "HERMES_DASHBOARD_SESSION_TOKEN on server"]),
-        (ListenerMissing("404"), ["server has no ctx_handover routes", "restart `hermes serve` and the gateway"]),
-        (HttpsRequired("x"), ["plain HTTP", "--allow-insecure", "HTTPS"]),
-        (PairInvalid("x"), ["wrong or expired (10 min, single use)", "/handover pair again on server"]),
-        (Unauthorized("x", skew_s=7), ["did not accept this device's key", "Pair again", "skew 7 s"]),
+        (GateRejected("401"), ["dashboard of server refused the sign-in", "HERMES_DASHBOARD_SESSION_TOKEN on server"]),
+        (ListenerMissing("404"), ["server does not answer for ctx_handover", "restart `hermes serve` and the gateway"]),
+        (HttpsRequired("x"), ["plain http:// address", "--allow-insecure", "https:// address"]),
+        (PairInvalid("x"), ["wrong, expired or already used (it works once", "/handover pair again on server"]),
+        (Unauthorized("x", skew_s=7), ["did not accept this machine's key", "Pair again", "differ by 7 s"]),
         (Forbidden("x", right="pull"), ["does not allow pull for this device", "Pair again with the needed rights"]),
-        (SessionBusy("x"), ["A turn is running in this session", "--wait"]),
-        (WaitTimeout("x", minutes=30), ["did not finish within 30 min", "Nothing was changed"]),
+        (SessionBusy("x"), ["The agent is still working on a reply in this session", "--wait"]),
+        (WaitTimeout("x", minutes=30), ["did not finish within 30 minutes", "Nothing was changed"]),
         (
             AlreadyHandingOver("x", job="01JCAAAAAAAAAAAAAAAAABCDEF"),
             ["already being handed over (job ABCDEF)", "/handover status"],
         ),
         (
             CapabilityMissing("x", capability="git.bundle.v1", plugin_version="0.1.0", hermes_version="0.22.6"),
-            ["server cannot git.bundle.v1", "Update the plugin there"],
+            [
+                "server lacks something this handover needs (git.bundle.v1",
+                "Update the ctx_handover plugin there",
+                "git 2.38 or newer",
+            ],
         ),
-        (PayloadTooLarge("x"), ["limits request bodies below one block", "Raise its body limit"]),
+        (
+            PayloadTooLarge("request body refused by a proxy in front of the peer", proxy=True),
+            ["request body refused by a proxy", "raise the request size limit of that proxy", "513 KiB"],
+        ),
+        (
+            PayloadTooLarge("the session is larger than max_session_mb here"),
+            ["max_session_mb here", "raise that setting"],
+        ),
         (
             InsufficientStorage("x", side="laptop", need_bytes=3 * 1024**3, free_bytes=1024**3, path="/home/u"),
-            ["laptop needs 3.0 GiB free in /home/u, has 1.0 GiB", "Nothing was transferred"],
+            ["laptop needs 3.0 GiB of free disk space in /home/u and has 1.0 GiB", "Nothing was transferred"],
         ),
         (
             PolicyDenied("x", count=2, items=["/etc/x", "/root/y"]),
-            ["2 items are not allowed on server", "/etc/x", "allow_roots", "--dest"],
+            ["2 items may not be written on server", "/etc/x", "allow_roots", "--dest"],
         ),
-        (RestartLimit("x"), ["kept changing", "3 restarts", "try again"]),
-        (VerifyFailed("x"), ["did not match", "Nothing was activated", "source is unchanged"]),
-        (InDoubt("x"), ["may already have the session", "/handover reclaim --force"]),
+        (RestartLimit("x"), ["kept changing", "started over 3 times", "try again"]),
+        (VerifyFailed("x"), ["did not match", "nothing was activated", "original session is unchanged"]),
+        (InDoubt("x"), ["unclear whether the receiving machine finished", "/handover reclaim --force"]),
         (
             PeerUnreachable("x", reason="timeout", job="01JCAAAAAAAAAAAAAAAAABCDEF", release_at="14:05"),
-            ["server is not reachable (timeout)", "suspended", "14:05", "/handover resume ABCDEF"],
+            ["server cannot be reached (timeout)", "suspended", "14:05", "/handover resume ABCDEF"],
         ),
         (
             ContinueRefused("x", reason="not_allowed"),
-            ["does not allow remote continuation (allow_remote_continue)", "Open the session there and send a message"],
+            [
+                "does not let a paired device start the agent there (setting allow_remote_continue)",
+                "Open the session there and send a message",
+            ],
         ),
         (ContinueRefused("x", reason="approvals_off"), ["approvals are switched off", "Open the session"]),
     ]
@@ -454,7 +468,7 @@ def test_final_message_fields():
     online = surfaces.render_final(Mode.PULL, _ack(offline_capable=False, model="gpt-x"), "done", "server", None)
     assert "works offline: no" in online and "model gpt-x" in online
     early = surfaces.render_final(Mode.PULL, _ack(), "committed", "server", None)
-    assert "server will be released on the next contact" in early
+    assert "the session on server stays locked and is closed as handed over the next time" in early
     assert '"My Work" is active here' in early
 
     push = surfaces.render_final(Mode.PUSH, _ack(model="gpt-x", offline_capable=False), "done", "server", None)
@@ -493,7 +507,7 @@ def test_final_message_fields():
 
 def test_final_message_shows_note_and_origin():
     """SEC 4.6: take/import show the note text, the origin, excluded secrets, withheld stash entries, conflicts and
-    instruction files; the user is told the note is not shown in the transcript view."""
+    instruction files; the user is told the chat does not show the note."""
     text = surfaces.render_final(
         Mode.IMPORT,
         _ack(),
@@ -514,7 +528,7 @@ def test_final_message_shows_note_and_origin():
         "stash@{1}",
         "app-handover-20261109",
         "AGENTS.md (changed)",
-        "not shown in the transcript",
+        "the chat does not show it",
     ):
         assert needle in text, needle
     verified = surfaces.render_final(Mode.PULL, _ack(), "done", "server", None, origin="verified peer server", note="n")
@@ -544,7 +558,8 @@ def test_render_peers_status_plan_offer():
         ),
     ]
     text = surfaces.render_peers(peers)
-    assert "server" in text and "dial" in text and "https://s.example" in text and "pull,push" in text
+    assert "server · this machine connects to it" in text and "https://s.example" in text and "pull,push" in text
+    assert "old · it connects to this machine" in text and "no address" in text
     assert "as reported by the proxy" in text and "revoked" in text
     assert "No paired devices" in surfaces.render_peers([])
 
@@ -568,7 +583,15 @@ def test_render_peers_status_plan_offer():
             "pulled_by": [{"peer": "laptop", "at": 1.0, "items": ["/srv/app"]}],
         }
     )
-    for needle in ("ABCDEF", "pull", "packing workspace", "w1", "retired", "2 ctx records waiting", "pulled by laptop"):
+    for needle in (
+        "ABCDEF",
+        "handover from server",
+        "packing files · packing workspace",
+        "w1",
+        "handed over and read-only here",
+        "2 ctx records waiting",
+        "taken from here by laptop",
+    ):
         assert needle in status, needle
     assert "No handovers yet" in surfaces.render_status({"jobs": []})
 
@@ -584,7 +607,7 @@ def test_render_peers_status_plan_offer():
             "items": [{"item_id": "w0", "source_path": "/srv/app", "include": "yes", "size": 1024, "dest": "/x"}],
         }
     )
-    assert "3 items" in plan and "2.0 GiB" in plan and "offline: no" in plan and "/srv/app" in plan
+    assert "3 items" in plan and "2.0 GiB" in plan and "works offline: no" in plan and "/srv/app" in plan
 
     offer = surfaces.render_offer({"offer_id": "01OFFER", "expires_at": 7200.0}, "laptop", "server", now=0.0)
     assert "Offer created for laptop (valid 2 h)" in offer and "/handover take server" in offer
@@ -602,7 +625,9 @@ def test_confirm_question_and_choices():
         },
         "server",
     )
-    assert q.startswith("Hand over to server: 4 items, 600.0 MiB, 2 proposed, 1 conflicts, model qwen3 (offline: yes).")
+    assert q.startswith(
+        "Hand over to server: 4 items, 600.0 MiB, 2 proposed, 1 conflicts, model qwen3 (works offline: yes)."
+    )
     assert q.rstrip().endswith("Continue?")
     assert [c["value"] for c in surfaces.CONFIRM_CHOICES] == ["yes", "no_proposed", "show_plan", "cancel"]
 

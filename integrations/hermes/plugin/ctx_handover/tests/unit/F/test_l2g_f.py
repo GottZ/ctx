@@ -61,7 +61,7 @@ def test_take_include_sets_the_pull_hints():
 
 def test_pull_final_message_lists_withheld_paths():
     """★ V29: the closing message of a pull lists ``summary["withheld"]`` of the job result (paths asked for with
-    ``--include`` that the source does not release) under "Withheld by source policy"; ``/handover status <job>``
+    ``--include`` that the source does not release) under "Withheld by the other machine"; ``/handover status <job>``
     shows them too.
 
     Red proof: mutant = ``Plugin._final_text`` does not pass ``withheld`` to ``render_final`` ⇒
@@ -72,10 +72,10 @@ def test_pull_final_message_lists_withheld_paths():
     withheld = ["/srv/private/keep.txt", "/srv/private/notes.md"]
     backend.statuses[job_id] = {"state": "done", "ack": ACK, "withheld": withheld}
     text = plugin._final_text(job_id, Mode.PULL, "server", Options())
-    assert "Withheld by source policy" in text, text
+    assert "Withheld by the other machine" in text, text
     assert all(f"  - {p}" in text for p in withheld), text
     details = surfaces.render_job_details({"withheld": withheld})
-    assert "Withheld by source policy" in details and withheld[0] in details
+    assert "Withheld by the other machine" in details and withheld[0] in details
     backend.statuses[job_id] = {"state": "done", "ack": ACK}
     assert "Withheld" not in plugin._final_text(job_id, Mode.PULL, "server", Options())
 

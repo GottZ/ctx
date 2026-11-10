@@ -168,30 +168,124 @@ _POSITIONALS: dict[str, tuple[int, int]] = {
     "help": (0, 1),
 }
 USAGE: dict[str, str] = {
-    "to": "/handover to <peer> [--dest P] [--map SRC=DST] [--include P] [--include-secret P] [--exclude GLOB] "
-    '[--no-workspace] [--model M] [--wait] [--continue ["prompt"]] [--force] [--dry-run] [--yes] '
-    "[--session ID (CLI)]",
-    "take": "/handover take [<peer>] [<session-id> | --latest | --offer <id>] [same options as to]",
-    "export": "/handover export [<path>] [--keep] [--for <peer>] [--dir] [--include P] [--exclude GLOB] … "
-    "[--session ID (CLI)]",
-    "import": '/handover import <bundle> [--dest P] [--trust-unsigned] [--again] [--continue ["prompt"]]',
+    "to": "/handover to <device> [--dest FOLDER] [--map FROM=TO] [--include PATH] [--include-secret PATH] "
+    '[--exclude PATTERN] [--no-workspace] [--model MODEL] [--wait] [--continue ["prompt"]] [--force] [--dry-run] '
+    "[--yes] [--session ID (in a terminal)]",
+    "take": "/handover take [<device>] [<session-id> | --latest | --offer <id>] [the options of 'to']",
+    "export": "/handover export [<path>] [--keep] [--for <device>] [--dir] [--include PATH] [--exclude PATTERN] … "
+    "[--session ID (in a terminal)]",
+    "import": '/handover import <file> [--dest FOLDER] [--trust-unsigned] [--again] [--continue ["prompt"]]',
     "status": "/handover status [<job>]",
     "peers": "/handover peers [revoke <name> | remove <name> | rename <old> <new> | show <name>]",
-    "pair": "/handover pair [--name N] [--rights push,pull] [--ttl 10m]   (on the gateway that receives)\n"
-    "/handover pair <ctxh-pair:…> [--name N] [--gate session_token|bearer|basic_login] [--allow-insecure]"
-    "   (on the device that dials)",
+    "pair": "/handover pair [--name NAME] [--rights push,pull] [--ttl 10m]   (on the machine that receives "
+    "handovers: prints a pairing line)\n"
+    "/handover pair <ctxh-pair:…> [--name NAME] [--gate session_token|bearer|basic_login] [--allow-insecure]"
+    "   (on the machine that connects to it: paste that line)",
     "reclaim": "/handover reclaim [<session-id> | --session ID] [--force]",
-    "cancel": "/handover cancel [<job>] [--force]   (--force ends a handover stuck cancelling here, without the "
-    "other side's confirmation)",
+    "cancel": "/handover cancel [<job>] [--force]   (--force ends a handover here that is stuck cancelling because "
+    "the other machine does not confirm)",
     "resume": "/handover resume [<job>]",
     "setup": "/handover setup",
-    "doctor": "/handover doctor [--measure]   (--measure sends test bodies of 1, 2, 4 and 8 MiB to each paired "
-    "gateway)",
+    "doctor": "/handover doctor [--measure]   (--measure sends test uploads of 1, 2, 4 and 8 MiB to each paired "
+    "machine to find a size limit of a proxy in front of it)",
     "identity": "/handover identity [show | rotate]",
     "gc": "/handover gc [--job <id> | --all]",
     "logs": "/handover logs <job>",
     "help": "/handover help [<command>]",
 }
+
+_TO_OPTIONS = (
+    "  --dest FOLDER          where the project folder goes on the receiving machine",
+    "  --map FROM=TO          what lies in the folder FROM on the sending machine goes into the folder TO on the "
+    "receiving machine",
+    "  --include PATH         hand over this file or folder too",
+    "  --include-secret PATH  hand over a file from the secrets list (.env, keys, credential folders) anyway",
+    "  --exclude PATTERN      leave out files that match the pattern (for example '*.log')",
+    "  --no-workspace         hand over the session without its project folder",
+    "  --model MODEL          the model the session uses on the receiving machine",
+    "  --wait                 when the agent is still answering, hand over as soon as it is done",
+    '  --continue ["prompt"]  after the handover, let the agent keep working on its own, starting with this '
+    "message (never while approvals are off on the receiving machine; a session you send needs "
+    "allow_remote_continue there)",
+    "  --force                hand over even when queued messages, running subagents or an unfinished git "
+    "operation (merge, rebase …) would stop it",
+    "  --dry-run              only show what would be handed over",
+    "  --yes                  answer the confirmation question with yes (some points still need a person, and files "
+    "that look like secrets are never sent this way)",
+    "  --session ID           the session to hand over (in a terminal, where there is no current session)",
+)
+
+HELP: dict[str, tuple[str, ...]] = {
+    "to": (
+        "Hands this session and its project folder over to a paired device. The session is locked here; "
+        "/handover reclaim takes it back. To a device that connects to this machine (and not the other way "
+        "round) it leaves an offer instead, which that device takes with /handover take.",
+        *_TO_OPTIONS,
+    ),
+    "take": (
+        "Brings a session from a paired device here: an offer it left (--offer), the session you name, or its most "
+        "recent one (--latest). Without any of these it lists offers and recent sessions to choose from. The "
+        "session is locked on the other machine. The options of 'to' apply; --continue lets the agent keep "
+        "working here.",
+    ),
+    "export": (
+        "Writes this session and its project folder into a handover file (.ctxh.tar) that you copy to the other "
+        "machine yourself — for when the two machines cannot reach each other. The session is locked here.",
+        "  --keep          keep this session active here; the file is a copy (the import says so)",
+        "  --for <device>  plan the file for a paired device, with what this machine last learned about it",
+        "  --dir           write a folder instead of a single file",
+        "  --include, --exclude and --session work as for 'to'.",
+    ),
+    "import": (
+        "Opens a handover file here as a session.",
+        "  --dest FOLDER     where the project folder goes on this machine",
+        "  --trust-unsigned  import a file that no paired device signed (only when you know where it comes from)",
+        "  --again           import a file once more that was already imported here",
+        '  --continue ["prompt"]  let the agent keep working here on its own (only for a file signed by a paired '
+        "device or by this machine, and never while approvals are off here)",
+    ),
+    "status": (
+        "Shows running and recent handovers. With a job id it shows that handover in detail; on the receiving "
+        "machine also the note the agent gets.",
+    ),
+    "peers": (
+        "Lists the paired devices. revoke <name> takes away the key of a device that connects to this machine; "
+        "remove <name> deletes a machine that this one connects to; rename gives a device another name; show "
+        "<name> shows one.",
+    ),
+    "pair": (
+        "Pair the two machines once so they trust each other. On the machine that receives handovers, "
+        "/handover pair prints a pairing line (it starts with ctxh-pair:). Paste that whole line into /handover "
+        "pair on the other machine.",
+        "  --name NAME         the name under which this machine lists the other one",
+        "  --rights push,pull  what the other device may do here: push = send sessions here, pull = take "
+        "sessions from here (default: both)",
+        "  --ttl 10m           how long the pairing line works (at most 60 minutes)",
+        "  --gate MODE         how this machine signs in to the other machine's dashboard: session_token, bearer "
+        "or basic_login",
+        "  --allow-insecure    allow a plain http:// address (only for an address that only your VPN reaches)",
+    ),
+    "reclaim": (
+        "Takes a handed-over session back here; a copy that already arrived on the other machine stays active "
+        "there. --force takes it back even while the handover is being finished.",
+    ),
+    "cancel": ("Stops a running handover.",),
+    "resume": (
+        "Continues a suspended (paused) handover, for example one that stopped because the other machine could not "
+        "be reached.",
+    ),
+    "setup": ("Walks you through the setup of this machine and says what the other machine needs.",),
+    "doctor": ("Checks the setup of this machine and its connection to every paired device and says what to fix.",),
+    "identity": (
+        "Shows this machine's handover key. rotate makes a new key; every paired device then has to pair again.",
+    ),
+    "gc": (
+        "Frees disk space: the transfer cache and what finished handovers left behind. --job <id> removes "
+        "everything of one finished handover; --all everything no running handover needs.",
+    ),
+    "logs": ("Shows the last entries of a handover's log.",),
+}
+"""What ``/handover help <command>`` shows below the usage line (every option of ``USAGE`` that needs a word)."""
 
 
 @dataclass(frozen=True)
@@ -232,12 +326,16 @@ def parse(raw_args: str) -> Parsed:
     try:
         tokens = shlex.split(raw_args or "", posix=True)
     except ValueError as exc:
-        return Parsed("help", {}, (f"Could not read the command line ({exc}). Check the quotes.",))
+        return Parsed("help", {}, (f"Could not read the command ({exc}). Check that every quote is closed.",))
     if not tokens:
         return Parsed("help", {"topic": None})
     verb = tokens[0].lower()
     if verb not in VERBS:
-        return Parsed("help", {"topic": None}, (f"Unknown command {tokens[0]!r}. Commands: {', '.join(VERBS[:-1])}.",))
+        return Parsed(
+            "help",
+            {"topic": None},
+            (f"Unknown command {tokens[0]!r}. Commands: {', '.join(VERBS[:-1])}. /handover help explains each.",),
+        )
     allowed = _VERB_OPTIONS[verb] | {"--json"}
     args: dict[str, Any] = {"positionals": []}
     i = 1
@@ -289,7 +387,10 @@ def parse(raw_args: str) -> Parsed:
         elif kind == "map":
             src, sep, dst = value.partition("=")
             if not sep or not src.strip() or not dst.strip():
-                errors.append(f"--map needs SOURCE=DESTINATION, got {value!r}.")
+                errors.append(
+                    "--map needs FROM=TO (a folder on the sending machine = a folder on the receiving one), "
+                    f"got {value!r}."
+                )
             else:
                 args.setdefault(dest, []).append((src, dst))
         elif kind == "float":
@@ -311,7 +412,7 @@ def parse(raw_args: str) -> Parsed:
             if ttl is None or ttl <= 0:
                 errors.append(f"--ttl takes a duration such as 10m or 600s, got {value!r}.")
             elif ttl > PAIR_TTL_MAX_S:
-                errors.append("--ttl is at most 60 minutes (a pairing code is a short-lived secret).")
+                errors.append("--ttl is at most 60 minutes (a pairing line is a secret that should not live long).")
             else:
                 args[dest] = ttl
         elif kind == "gate":
@@ -325,8 +426,9 @@ def parse(raw_args: str) -> Parsed:
     if verb == "peers" and pos and pos[0].lower() == "add":
         errors.insert(
             0,
-            "There is no 'peers add': a device becomes a peer only by pairing. Run /handover pair on the gateway "
-            "that should accept handovers and paste the printed ctxh-pair:… string into /handover pair on this device.",
+            "There is no 'peers add': you add a device by pairing. Run /handover pair on the machine that should "
+            "receive handovers, then paste the pairing line it prints (it starts with ctxh-pair:) into /handover pair "
+            "on this machine.",
         )
     elif len(pos) < low or len(pos) > high:
         errors.append(f"Wrong number of arguments for '{verb}'. Usage: {USAGE[verb]}")
@@ -381,8 +483,8 @@ def _verb_args(verb: str, args: dict, errors: list[str]) -> None:
         args["pair_string"] = first
         if first is not None and not first.startswith(PAIR_PREFIX):
             errors.append(
-                f"{first!r} is not a pairing string. Paste the whole line that starts with {PAIR_PREFIX} "
-                "(printed by /handover pair on the other gateway)."
+                f"{first!r} is not a pairing line. Paste the whole line that starts with {PAIR_PREFIX} "
+                "(/handover pair prints it on the other machine)."
             )
     elif verb == "peers":
         sub = (first or "list").lower()
@@ -391,7 +493,7 @@ def _verb_args(verb: str, args: dict, errors: list[str]) -> None:
             if sub != "add":
                 errors.append(f"Unknown peers command {first!r}. Usage: {USAGE['peers']}")
         elif sub in {"revoke", "remove", "show"} and len(names) != 1:
-            errors.append(f"'peers {sub}' needs one peer name. Usage: {USAGE['peers']}")
+            errors.append(f"'peers {sub}' needs the name of one paired device. Usage: {USAGE['peers']}")
         elif sub == "rename" and len(names) != 2:
             errors.append(f"'peers rename' needs the old and the new name. Usage: {USAGE['peers']}")
         elif sub == "list" and names:
@@ -408,17 +510,26 @@ def _verb_args(verb: str, args: dict, errors: list[str]) -> None:
 
 
 def help_text(topic: str | None = None) -> str:
-    """Usage of one verb or the overview."""
+    """Usage of one verb (with what it does and what its options mean) or the overview."""
     if topic and topic.lower() in USAGE:
-        return USAGE[topic.lower()]
+        return "\n".join([USAGE[topic.lower()], *HELP.get(topic.lower(), ())])
     return "\n".join(
         [
-            "ctx_handover moves this session and its working files to another Hermes gateway you paired.",
-            "  /handover take [<peer>]        bring a session from the other gateway here",
-            "  /handover to <peer>            send this session there (or leave an offer the other side takes)",
-            "  /handover export / import      the same as a single file, without a connection",
-            "  /handover status | reclaim | cancel | resume | peers | pair | setup | doctor | identity | gc | logs",
-            "First time: /handover setup, then /handover pair on the gateway that receives.",
+            "ctx_handover hands this session and its project folder over to another machine you paired — for example "
+            "from your laptop to your server, so you can close the laptop and carry on there (with --continue the "
+            "agent there keeps working on its own, if that machine allows it).",
+            "  /handover to <device>          send this session to that machine; it is locked here (or leave an "
+            "offer the other machine takes)",
+            "  /handover take [<device>]      bring a session from that machine here",
+            "  /handover export / import      the same with a handover file you copy yourself, no connection needed",
+            "  /handover status               what is running and what happened",
+            "  /handover reclaim              take a handed-over session back here",
+            "  /handover cancel | resume      stop a handover, or continue a suspended one",
+            "  /handover pair | peers         pair two machines once / list paired devices",
+            "  /handover setup | doctor       set up this machine / check the setup",
+            "  /handover identity | gc | logs  this machine's key / free disk space / a handover's log",
+            "First time: /handover setup, then /handover pair on the machine that receives handovers.",
+            "/handover help <command> explains one command and its options.",
         ]
     )
 
@@ -629,21 +740,27 @@ YES_EXEMPT: frozenset[str] = planning.YES_EXEMPT
 R25, are an item marker and handled apart)."""
 
 REASON_TEXT = {
-    planning.CONFIRM_PROPOSED: "some items are only proposed (found by the model, the agent or outside the project)",
-    planning.CONFIRM_CONFLICT: "a destination has local changes, so a fresh folder is used",
-    planning.CONFIRM_LARGE: "the handover is larger than confirm_above_mb",
-    planning.CONFIRM_SECRET: "--include-secret sends a file from the secrets list",
-    planning.CONFIRM_MODEL: "the model there does not work offline (this session's model did)",
-    planning.CONFIRM_OUTSIDE: "items outside the project folder (or tracked secret files) are included",
-    planning.CONFIRM_INSTRUCTIONS: "instruction files (AGENTS.md, .hermes.md …) arrive from an unverified source",
-    CONFIRM_WORKSPACE_EXCLUDED: "the session's working folder stays here because the policy leaves it out, so its "
-    "project does not come along (--yes does not confirm this; --no-workspace does)",
-    CONFIRM_CONTEXT: "the session is larger than the context window of the model there, so it is compacted on its "
-    "first turn there (/compress here first keeps that in your hands; --yes does not confirm this)",
-    CONFIRM_WORKSPACE_DIFFERS: "the workspace is the whole repository around the session's working folder, which "
-    "holds none of its tracked files (typically somebody else's checkout; --yes does not confirm this)",
-    CONFIRM_REPOS_LEFT: "a repository inside the workspace (an initialised submodule or another clone) stays here with "
-    "its files and changes (--yes does not confirm this)",
+    planning.CONFIRM_PROPOSED: "some items are only proposed (suggested by the model or the agent, or found outside "
+    "the project folder)",
+    planning.CONFIRM_CONFLICT: "a folder at the destination has changes of its own, so a new folder is used instead",
+    planning.CONFIRM_LARGE: "the handover is larger than the confirm_above_mb setting (or the size of a git history "
+    "could not be measured)",
+    planning.CONFIRM_SECRET: "--include-secret hands over a file from the secrets list",
+    planning.CONFIRM_MODEL: "the model on the receiving machine does not work offline (this session's model did)",
+    planning.CONFIRM_OUTSIDE: "files or folders outside the project folder (or secret files that git tracks) are "
+    "included",
+    planning.CONFIRM_INSTRUCTIONS: "instruction files for the agent (AGENTS.md, .hermes.md …) come from a source "
+    "that is not verified",
+    CONFIRM_WORKSPACE_EXCLUDED: "the session's working folder cannot be handed over and stays here, so its project "
+    "does not come along (--yes does not confirm this; --no-workspace does)",
+    CONFIRM_CONTEXT: "the session is larger than the context window of the model on the receiving machine (the "
+    "amount of text that model reads at once), so Hermes compacts (shortens) it on its first turn there (run "
+    "/compress here first to do that yourself; --yes does not confirm this)",
+    CONFIRM_WORKSPACE_DIFFERS: "the project folder is the whole git repository around the session's working folder, "
+    "and the working folder holds none of the files git tracks there (often somebody else's checkout; --yes does "
+    "not confirm this)",
+    CONFIRM_REPOS_LEFT: "a git repository inside the project folder (an initialised submodule or another clone) "
+    "stays here with its files and changes (--yes does not confirm this)",
 }
 
 SUSPECTED_SECRET: str = planning.SUSPECTED_SECRET
@@ -702,7 +819,7 @@ def yes_exempt_of(info: Mapping | None, reasons: Sequence[str]) -> list[str]:
 
 
 _WORKSPACE_WHY = {
-    "hermes": "it lies inside the Hermes home, which is never sent",
+    "hermes": "it lies inside the Hermes home (Hermes' own folder), which is never sent",
     "home": "it is the home folder itself",
     "secret": "it is on the secrets list",
     "too_large": "it is larger than the size limits allow",
@@ -725,7 +842,11 @@ def _workspace_excluded(value: Any) -> dict | None:
 
 
 def _workspace_why(entry: Mapping) -> str:
-    return _WORKSPACE_WHY.get(str(entry.get("reason") or "")) or str(entry.get("why") or "") or "left out by the policy"
+    return (
+        _WORKSPACE_WHY.get(str(entry.get("reason") or ""))
+        or str(entry.get("why") or "")
+        or "the plugin's rules leave it out"
+    )
 
 
 def workspace_excluded_text(entry: Mapping) -> str:
@@ -753,14 +874,18 @@ def workspace_entry(value: Any) -> dict | None:
     return {"path": path, "bytes": size, "cwd": cwd, "cwd_bytes": cwd_bytes, "differs": differs}
 
 
+WORKSPACE_WORD = "project folder"
+"""What the texts call the workspace (the git repository around the session's working folder, or that folder)."""
+
+
 def workspace_text(entry: Mapping) -> str:
-    """``workspace <path> (<size>)``, and for a workspace that holds more than the session's folder
-    ``…, more than the session's folder <cwd> (<size>)`` (R36)."""
-    text = f"workspace {entry.get('path')} ({human_bytes(entry.get('bytes', 0))})"
+    """``project folder <path> (<size>)``, and for a workspace that holds more than the session's folder
+    ``…, more than the session's working folder <cwd> (<size>)`` (R36)."""
+    text = f"{WORKSPACE_WORD} {entry.get('path')} ({human_bytes(entry.get('bytes', 0))})"
     if entry.get("differs"):
         size = entry.get("cwd_bytes")
         shown = human_bytes(size) if isinstance(size, int) else "size unknown"
-        text += f", more than the session's folder {entry.get('cwd')} ({shown})"
+        text += f", more than the session's working folder {entry.get('cwd')} ({shown})"
     return text
 
 
@@ -778,12 +903,13 @@ def context_over_entry(value: Any) -> dict | None:
 
 
 def context_over_text(entry: Mapping) -> str:
-    """``the session (about <n> tokens) is larger than the context window of <model> there (<w> tokens); it is
-    compacted on its first turn there`` (R32, L3-F17)."""
+    """``the session (about <n> tokens) is larger than the context window of <model> there (<w> tokens) — the amount
+    of text that model reads at once; Hermes compacts (shortens) it on its first turn there`` (R32, L3-F17)."""
     model = entry.get("model") or "the model"
     return (
         f"the session (about {entry.get('tokens'):,} tokens) is larger than the context window of {model} there "
-        f"({entry.get('context_length'):,} tokens); it is compacted on its first turn there"
+        f"({entry.get('context_length'):,} tokens) — the amount of text that model reads at once; Hermes compacts "
+        "(shortens) the session on its first turn there"
     )
 
 
@@ -878,16 +1004,18 @@ def _more(text: str, more: int) -> str:
 
 
 def outside_text(entries: Sequence[Mapping], more: int) -> str:
-    """``<n> items outside the project: <path> (<size>), … [and N more]`` (M37; the count stays, V10)."""
-    return _more(f"{len(entries) + more} items outside the project: " + ", ".join(_sized(e) for e in entries), more)
+    """``<n> items outside the project folder: <path> (<size>), … [and N more]`` (M37; the count stays, V10)."""
+    return _more(
+        f"{len(entries) + more} items outside the project folder: " + ", ".join(_sized(e) for e in entries), more
+    )
 
 
 def _repo_name(entry: Mapping) -> str:
-    return f"{'submodule' if entry.get('kind') == 'submodule' else 'repository'} {entry.get('path')}"
+    return f"{'submodule' if entry.get('kind') == 'submodule' else 'git repository'} {entry.get('path')}"
 
 
 def repos_left_text(entries: Sequence[Mapping], more: int) -> str:
-    """``stays here: submodule <path>, repository <path> [and N more] (their files do not travel)`` (H15)."""
+    """``stays here: submodule <path>, git repository <path> [and N more] (their files do not travel)`` (H15)."""
     return _more("stays here: " + ", ".join(_repo_name(e) for e in entries), more) + " (their files do not travel)"
 
 
@@ -1007,12 +1135,13 @@ def plan_summary(final: Any, presend: Mapping | None = None, *, instruction_file
 
 
 def confirm_question(summary: Mapping, peer: str | None) -> str:
-    """``Hand over to <peer>: <n> items, <size>, <k> proposed, <c> conflicts, model <m> (offline: yes/no).
-    [The workspace is <path> (<size>)[, more than the session's folder <cwd> (<size>)].] [The working folder <path>
-    stays here (<why>).] [The session (about <n> tokens) is larger than …] [Outside the project: <path> (<size>), …]
-    [Stays here: submodule <path>, … — …] [The context window of <model> there is unknown, …] Continue?`` (M37)"""
+    """``Hand over to <peer>: <n> items, <size>, <k> proposed, <c> conflicts, model <m> (works offline: yes/no).
+    [The project folder is <path> (<size>)[, more than the session's working folder <cwd> (<size>)].] [The working
+    folder <path> stays here (<why>).] [The conversation (about <n> tokens) is longer than …] [Outside the project
+    folder: <path> (<size>), …] [Stays here: submodule <path>, … — …] [The context window of <model> there … is
+    unknown, …] Continue?`` (M37)"""
     ws = workspace_entry(summary.get("workspace"))
-    folder = f"The workspace is {workspace_text(ws).removeprefix('workspace ')}. " if ws else ""
+    folder = f"The project folder is {workspace_text(ws).removeprefix(WORKSPACE_WORD + ' ')}. " if ws else ""
     excluded = _workspace_excluded(summary.get("workspace_excluded"))
     if excluded:
         folder += f"The {workspace_excluded_text(excluded).removeprefix('the ')}. "
@@ -1022,27 +1151,30 @@ def confirm_question(summary: Mapping, peer: str | None) -> str:
     outside = outside_entries(summary.get("outside_items"))
     if outside:
         listed = _more(", ".join(_sized(e) for e in outside), _count(summary.get("outside_more")))
-        folder += f"Outside the project: {listed}. "
+        folder += f"Outside the project folder: {listed}. "
     left = repos_left_entries(summary.get("repos_left"))
     if left:
         stays = _more(", ".join(_repo_name(e) for e in left), _count(summary.get("repos_left_more")))
         folder += (
-            f"Stays here: {stays} — their files and changes do not travel (a submodule only as the commit the "
-            "project records). "
+            f"Stays here: {stays} — their files and changes do not travel (a submodule travels only as the commit "
+            "the project records). "
         )
     unknown = context_unknown_entry(summary.get("context_unknown"))
     if unknown:
         window = context_unknown_text(unknown).removesuffix(" unknown")
-        folder += f"The {window} is unknown, so a session larger than it is not asked about. "
+        folder += (
+            f"The {window} is unknown (that is the amount of text that model reads at once), so nothing checks "
+            "whether the session fits into it. "
+        )
     refused = include_refused_entries(summary.get("include_refused"))
     if refused:
         listed = _more(", ".join(_refused(e) for e in refused), _count(summary.get("include_refused_more")))
         folder += f"Named with --include but left out: {listed}. "
     return (
-        f"Hand over to {peer or 'the bundle'}: {summary.get('items_count', 0)} items, "
+        f"Hand over to {peer or 'a handover file'}: {summary.get('items_count', 0)} items, "
         f"{human_bytes(summary.get('total_bytes', 0))}, {summary.get('proposed', 0)} proposed, "
         f"{summary.get('conflicts', 0)} conflicts, model {summary.get('model') or 'unchanged'} "
-        f"(offline: {_yn(summary.get('offline'))}). {folder}Continue?"
+        f"(works offline: {_yn(summary.get('offline'))}). {folder}Continue?"
     )
 
 
@@ -1063,13 +1195,13 @@ def render_plan(summary: dict) -> str:
     lines = [
         f"Plan: {s.get('items_count', 0)} items, {human_bytes(s.get('total_bytes', 0))}, "
         f"{s.get('proposed', 0)} proposed, {s.get('conflicts', 0)} conflicts; model "
-        f"{s.get('model') or 'unchanged'} (offline: {_yn(s.get('offline'))})."
+        f"{s.get('model') or 'unchanged'} (works offline: {_yn(s.get('offline'))})."
     ]
     if s.get("need_bytes"):
-        lines.append(f"Space needed on the receiving side: {human_bytes(s['need_bytes'])}.")
+        lines.append(f"Free space needed on the receiving machine: {human_bytes(s['need_bytes'])}.")
     ws = workspace_entry(s.get("workspace"))
     if ws:
-        lines.append(f"Workspace: {workspace_text(ws).removeprefix('workspace ')}.")
+        lines.append(f"Project folder: {workspace_text(ws).removeprefix(WORKSPACE_WORD + ' ')}.")
     excluded = _workspace_excluded(s.get("workspace_excluded"))
     if excluded:
         lines.append(
@@ -1078,12 +1210,13 @@ def render_plan(summary: dict) -> str:
         )
     over = context_over_entry(s.get("context_over"))
     if over:
-        lines.append(f"Context: {context_over_text(over)} (/compress here first to keep that in your hands).")
+        lines.append(f"Context: {context_over_text(over)} (run /compress here first to do that yourself).")
     unknown = context_unknown_entry(s.get("context_unknown"))
     if unknown:
         lines.append(
-            f"Context: the {context_unknown_text(unknown).removesuffix(' unknown')} is unknown (no context_length "
-            "in its config.yaml), so the size of the session is not checked against it."
+            f"Context: the {context_unknown_text(unknown).removesuffix(' unknown')} is unknown (that is the amount of "
+            "text that model reads at once; its config.yaml there sets no context_length), so the size of the session "
+            "is not checked against it."
         )
     for row in s.get("items") or ():
         dest = f" → {row.get('dest')}" if row.get("dest") else ""
@@ -1095,12 +1228,13 @@ def render_plan(summary: dict) -> str:
     if s.get("excluded_secrets"):
         lines.append(f"Secrets left out: {s['excluded_secrets']} (listed under 'Not transferred').")
     lines += _bullets(
-        "Tracked files on the secrets list (they travel with the git history):", s.get("denied_tracked") or ()
+        "Tracked files on the secrets list (git tracks them, so they travel with the git history):",
+        s.get("denied_tracked") or (),
     )
-    lines += _bullets("Stash entries withheld:", s.get("withheld_stash") or ())
+    lines += _bullets("Stash entries withheld (git stash entries that are not sent):", s.get("withheld_stash") or ())
     outside = outside_entries(s.get("outside_items"))
     if outside:
-        lines += _bullets("Outside the project:", [_sized(e) for e in outside], limit=len(outside))
+        lines += _bullets("Outside the project folder:", [_sized(e) for e in outside], limit=len(outside))
         if _count(s.get("outside_more")):
             lines.append(f"  - … and {s['outside_more']} more")
     else:
@@ -1121,7 +1255,7 @@ def render_plan(summary: dict) -> str:
         "Proposed files that look like secrets (they stay here unless named with --include-secret <path>):",
         s.get("suspected_secrets") or (),
     )
-    lines += _bullets("Instruction files that will shape the agent there:", s.get("instruction_files") or ())
+    lines += _bullets("Instruction files the agent there will follow:", s.get("instruction_files") or ())
     lines += _bullets("Not transferred:", s.get("not_transferred") or ())
     return "\n".join(lines)
 
@@ -1136,21 +1270,21 @@ def render_presend(summary: dict, peer: str | None, mode: Mode | str) -> str:
     secrets = s.get("excluded_secrets") or 0
     ws = workspace_entry(s.get("workspace"))
     head = (
-        f"Handover {arrow} {peer or 'bundle'}: {s.get('items_count', 0)} items, "
+        f"Handover {arrow} {peer or 'handover file'}: {s.get('items_count', 0)} items, "
         f"{human_bytes(s.get('total_bytes', 0))}; "
         + (f"{workspace_text(ws)}; " if ws else "")
-        + f"{secrets if isinstance(secrets, int) else len(secrets)} secrets left out"
+        + f"{secrets if isinstance(secrets, int) else len(secrets)} secret files left out"
     )
     extras = []
     if s.get("denied_tracked"):
-        extras.append(f"{len(s['denied_tracked'])} tracked secret files in git history")
+        extras.append(f"{len(s['denied_tracked'])} secret files travel in the git history (git tracks them)")
     if s.get("withheld_stash"):
         extras.append(f"{len(s['withheld_stash'])} stash entries withheld")
     outside = outside_entries(s.get("outside_items"))
     if outside:
         extras.append(outside_text(outside, _count(s.get("outside_more"))))
     elif s.get("outside_workspace"):
-        extras.append(f"{len(s['outside_workspace'])} items outside the project")  # a summary without D's paths
+        extras.append(f"{len(s['outside_workspace'])} items outside the project folder")  # a summary without D's paths
     left = repos_left_entries(s.get("repos_left"))
     if left:
         extras.append(repos_left_text(left, _count(s.get("repos_left_more"))))
@@ -1175,9 +1309,12 @@ def render_presend(summary: dict, peer: str | None, mode: Mode | str) -> str:
 
 
 def render_peers(peers: Sequence[Peer], *, fingerprint: Callable[[str], str] = fingerprint_of) -> str:
-    """Name, direction, rights, URL, gate mode, last seen, key fingerprint per paired device."""
+    """Name, direction, rights, URL, sign-in (gate mode), last seen, key fingerprint per paired device."""
     if not peers:
-        return "No paired devices. Run /handover pair on the gateway that should receive handovers."
+        return (
+            "No paired devices yet. Run /handover pair on the machine that should receive handovers, then paste the "
+            "pairing line it prints into /handover pair on the other machine."
+        )
     lines = []
     for p in peers:
         rights = ",".join(sorted(str(r) for r in p.rights)) or "none"
@@ -1185,18 +1322,109 @@ def render_peers(peers: Sequence[Peer], *, fingerprint: Callable[[str], str] = f
         seen = when(p.last_seen_at) if p.last_seen_at else "never"
         ip = f" from {p.last_ip} (as reported by the proxy)" if p.last_ip else ""
         state = f" · revoked {when(p.revoked_at)}" if p.revoked_at else ""
-        where = p.url or "(dials in)"
+        where = p.url or "no address"
         profile = f" · profile {p.profile}" if p.profile else ""
         lines.append(
-            f"{p.name} · {p.direction} · rights {rights} · {where} · gate {gate}{profile} · last seen {seen}{ip} · "
-            f"key {fingerprint(p.pubkey)}{state}"
+            f"{p.name} · {_DIRECTION_TEXT.get(p.direction, p.direction)} · rights {rights} · {where} · sign-in "
+            f"{gate}{profile} · last seen {seen}{ip} · key {fingerprint(p.pubkey)}{state}"
         )
     return "\n".join(lines)
 
 
-_PARTICIPANT_SIDE = {"target": "from", "source": "to"}
-"""Role of this gateway in a job another gateway conducts (``JobRunner.status``, contract V43) → the word before the
+_DIRECTION_TEXT = {"dial": "this machine connects to it", "inbound": "it connects to this machine"}
+"""``Peer.direction`` in words: ``dial`` — this device dials that gateway; ``inbound`` — that device dials in."""
+
+STATE_TEXT: dict[str, str] = {
+    # the conductor (DESIGN §3.2)
+    "created": "planning",
+    "hello": "planning",
+    "facts": "planning",
+    "planning": "planning",
+    "negotiated": "planned",
+    "locking": "locking the session",
+    "locked": "session locked",
+    "exporting": "copying the conversation",
+    "context_staged": "conversation copied",
+    "packing": "packing files",
+    "data_staged": "files copied",
+    "target_preparing": "unpacking on the receiving machine",
+    "target_prepared": "unpacked on the receiving machine",
+    "source_preparing": "preparing on the sending machine",
+    "delta_applying": "adding the messages written meanwhile",
+    "target_resetting": "the session changed meanwhile; starting over",
+    "source_prepared": "ready to finish",
+    "committing": "finishing",
+    "in_doubt": "unclear whether the other machine finished",
+    "committed": "arrived",
+    "retiring": "closing the session on the sending machine",
+    "retired": "session closed on the sending machine",
+    "continuing": "starting the agent",
+    "done": "done",
+    "aborting": "cancelling",
+    "aborted": "stopped, nothing handed over",
+    "suspended": "suspended (paused; /handover resume continues it)",
+    # the source and the target of a job another gateway runs (DESIGN §3.3)
+    "preparing": "preparing",
+    "prepared": "ready to finish",
+    "releasing": "unlocking the session",
+    "released": "session unlocked",
+    "reclaiming": "taking the session back",
+    "reclaimed": "session taken back",
+    "exported": "exported",
+    "open": "receiving",
+    "resetting": "the session changed meanwhile; starting over",
+    "expired": "expired",
+    # progress steps that are no state
+    "transfer": "sending files",
+    "commit": "finishing",
+    "bundle": "handover file",
+}
+"""Job states and progress steps in words for ``/handover status`` (``--json`` keeps the state names). A state
+missing here is shown as it is."""
+
+
+def state_text(state: object) -> str:
+    """``STATE_TEXT`` of a state or step; anything else as it is."""
+    text = str(state or "")
+    return STATE_TEXT.get(text, text)
+
+
+SOURCE_STATE_TEXT: dict[str, str] = {
+    "locking": "being locked for a handover",
+    "locked": "locked for a handover",
+    "preparing": "locked; the handover is being finished",
+    "prepared": "locked; the handover is being finished",
+    "retiring": "handed over; being closed here",
+    "retired": "handed over and read-only here; /handover reclaim takes it back",
+    "releasing": "being unlocked",
+    "released": "unlocked again",
+    "reclaiming": "being taken back",
+    "reclaimed": "taken back",
+    "exported": "exported to a handover file and read-only here; /handover reclaim takes it back",
+    "suspended": "the handover is suspended (paused)",
+}
+"""The state of the session's own handover row (``SourceState``) in words, for "This session (…): …"."""
+
+
+_PARTICIPANT_SIDE = {"target": "arriving here from", "source": "leaving here for"}
+"""Role of this gateway in a job another gateway conducts (``JobRunner.status``, contract V43) → the words before the
 other side: a push that arrives here (``target``), a pull that takes a session from here (``source``)."""
+
+_MODE_TEXT = {
+    "push": "handover to",
+    "pull": "handover from",
+    "offer": "offer for",
+    "export": "export",
+    "import": "import",
+}
+"""``Mode`` of a job this gateway conducts → the words before the other side (``export``/``import``: the file)."""
+
+NOTE_TEXT = {
+    "pending": "the agent gets a note about what changed with your next message",
+    "offered": "the note about what changed went out with a message and is not confirmed yet",
+    "delivered": "the agent got the note about what changed",
+}
+"""``note_state`` of an arrival in words."""
 
 
 def _job_line(job: Mapping) -> list[str]:
@@ -1204,13 +1432,19 @@ def _job_line(job: Mapping) -> list[str]:
     step = prog.get("step") if isinstance(prog, Mapping) else None
     role = job.get("role")
     side = _PARTICIPANT_SIDE.get(role) if isinstance(role, str) else None
+    mode = str(job.get("mode", "?"))
     if side is not None:  # another gateway conducts this job; this gateway is its source or its target
-        where = f"{role}, {side} {job.get('peer') or 'another gateway'}"
+        where = f"{side} {job.get('peer') or 'another machine'}"
+    elif mode in {"export", "import"}:
+        peer = job.get("peer")
+        where = f"{_MODE_TEXT[mode]} {'to' if mode == 'export' else 'from'} a handover file" + (
+            f" ({peer})" if peer else ""
+        )
     else:
-        where = str(job.get("peer") or "bundle")
-    head = f"{short_job(job.get('job_id'))} · {job.get('mode', '?')} · {where} · {job.get('state', '?')}"
-    if step and step != job.get("state"):
-        head += f" · {step}"
+        where = f"{_MODE_TEXT.get(mode, mode)} {job.get('peer') or 'a handover file'}"
+    head = f"{short_job(job.get('job_id'))} · {where} · {state_text(job.get('state', '?'))}"
+    if step and step != job.get("state") and state_text(step) != state_text(job.get("state")):
+        head += f" · {state_text(step)}"
     if isinstance(prog, Mapping) and prog.get("bytes_total"):
         head += f" · {human_bytes(prog.get('bytes_done', 0))}/{human_bytes(prog['bytes_total'])}"
     lines = [head]
@@ -1233,7 +1467,7 @@ def _job_line(job: Mapping) -> list[str]:
     if isinstance(err, Mapping) and err:
         lines.append(f"    last error: {err.get('code', '?')}: {err.get('message', '')}")
     if job.get("source_kept") is True:  # export --keep (O3): the session was not locked or retired
-        lines.append("    copy (--keep): this session stays active here; the bundle is a copy")
+        lines.append("    copy (--keep): this session stays active here; the handover file is a copy")
     if job.get("next_action"):
         lines.append(f"    next: {job['next_action']}")
     cont = job.get("continuation")
@@ -1259,17 +1493,19 @@ def render_status(status: dict) -> str:
     source = session.get("source") if isinstance(session, Mapping) else None
     if isinstance(source, Mapping) and source:
         lines.append(
-            f"This session: {source.get('state')} (handover to {source.get('peer') or 'a bundle'}, "
-            f"job {short_job(source.get('job_id'))})."
+            f"This session (handover to {source.get('peer') or 'a handover file'}, job "
+            f"{short_job(source.get('job_id'))}): "
+            f"{SOURCE_STATE_TEXT.get(str(source.get('state')), state_text(source.get('state')))}."
         )
     arrival = session.get("arrival") if isinstance(session, Mapping) else None
     if isinstance(arrival, Mapping) and arrival:
+        note_state = str(arrival.get("note_state", "pending"))
         lines.append(
-            f"This session arrived from {arrival.get('peer') or 'a bundle'} (job {short_job(arrival.get('job_id'))}); "
-            f"note {arrival.get('note_state', 'pending')}."
+            f"This session arrived from {arrival.get('peer') or 'a handover file'} "
+            f"(job {short_job(arrival.get('job_id'))}); {NOTE_TEXT.get(note_state, 'note ' + note_state)}."
         )
         if arrival.get("source_reclaimed_at"):
-            lines.append("The source session was reclaimed on the other side; the two copies are independent now.")
+            lines.append("The session was taken back on the machine it came from; the two copies are independent now.")
     jobs = list(s.get("jobs") or ())
     if not jobs and not lines:
         lines.append("No handovers yet. /handover help shows how to start.")
@@ -1277,13 +1513,13 @@ def render_status(status: dict) -> str:
         lines += _job_line(job)
     for entry in s.get("pulled_by") or ():
         items = ", ".join(str(i) for i in (entry.get("items") or ())[:5])
-        lines.append(f"pulled by {entry.get('peer')} at {when(entry.get('at'))}: {items}")
+        lines.append(f"taken from here by {entry.get('peer')} at {when(entry.get('at'))}: {items}")
     disk = s.get("disk") or {}
     if disk:
         lines.append(
-            f"Transfer cache {human_bytes(disk.get('blocks_bytes', 0))}, "
-            f"staging {human_bytes(disk.get('staging_bytes', 0))}"
-            " (/handover gc frees it)."
+            f"Disk use: transfer cache {human_bytes(disk.get('blocks_bytes', 0))}, "
+            f"temporary handover files {human_bytes(disk.get('staging_bytes', 0))}"
+            " (/handover gc frees space)."
         )
     ctx = s.get("ctx") or {}
     if ctx.get("pending"):
@@ -1299,7 +1535,7 @@ def render_offer(offer: Mapping, peer: str, local_name: str, *, now: float) -> s
     validity = f"{hours:.0f} h" if hours >= 1 else f"{max(1, round(hours * 60))} min"
     return (
         f"Offer created for {peer} (valid {validity}). On {peer} run: /handover take {local_name}\n"
-        "This session stays usable here until the other side takes it."
+        f"This session stays usable here until {peer} takes it."
     )
 
 
@@ -1323,10 +1559,10 @@ def _workspace_root_text(err: HandoverError, peer: str) -> str:
     if message and (not path or path in message) and setting in message:
         text = message
     else:
-        why = message or str(_d(err, "problem") or "") or "check_failed"
+        why = message or str(_d(err, "problem") or "") or "the check failed"
         text = (
-            f"the workspace root {path or '?'} on {host} cannot be used ({why}); set {setting} (and allow_roots) in "
-            f"the ctx_handover settings on {host}"
+            f"the folder for received handovers {path or '?'} on {host} cannot be used ({why}); set {setting} (and "
+            f"allow_roots) in the ctx_handover settings on {host}"
         )
     return f"{text[:1].upper()}{text[1:]}. Nothing was locked or sent."
 
@@ -1352,33 +1588,38 @@ def _unchecked_text(err: HandoverError, p: str, here: bool) -> str:
     cmd = manual_command(_d(err, "session_id"), _d(err, "profile"))
     where, there = ("here", "") if here else (f"on {p}", " there")
     if _d(err, "why") == "gateway_unknown":
-        reason = f"Hermes' gateway status could not be read{there}, so approvals could not be checked"
+        reason = (
+            f"Hermes' gateway status could not be read{there} (the gateway is the Hermes service that runs your "
+            "chats), so the plugin could not check whether approvals are on"
+        )
     else:
         reason = (
-            f"the process{there} that would start it cannot identify the gateway that runs the turn (another container "
-            "or PID namespace — Hermes' docker-compose runs gateway and dashboard apart — or another user), so it "
-            "cannot see whether approvals are switched off"
+            f"the process{there} that would start the agent cannot identify the gateway that runs the turn (the "
+            "gateway is the Hermes service that runs your chats; it runs in another container or PID namespace — "
+            "Hermes' docker-compose runs gateway and dashboard apart — or as another user), so it cannot see whether "
+            "approvals are switched off"
         )
     return (
-        f"Handed over, but no turn started {where}: {reason}. Start it{there} yourself with `{cmd}`, or open the "
-        f"session{there} and send a message."
+        f"Handed over, but the agent did not start working on its own {where}: {reason}. Start it{there} yourself "
+        f"with `{cmd}`, or open the session{there} and send a message."
     )
 
 
 def render_error(err: HandoverError, peer: str | None, *, here: bool = False) -> str:
     """The remedy text for an error code; unknown codes fall back to the error's own message. ``here``: the error
     happened on this gateway (a continuation after a pull or an import, review L18), so no other gateway is named."""
-    p = peer or str(_d(err, "peer", "") or "") or "the other gateway"
+    p = peer or str(_d(err, "peer", "") or "") or "the other machine"
     code = getattr(err, "code", "internal")
     if code == "gate_rejected":
         if str(_d(err, "mode", "")) == "basic_login":
             return (
-                f"The dashboard of {p} rejected the Basic login from the ctx_handover settings. Use the user name "
-                f"and password you sign in to {p}'s dashboard with (peer_username / peer_password)."
+                f"The dashboard of {p} refused the user name and password (Basic login) from the ctx_handover "
+                f"settings. Use the user name and password you sign in to {p}'s dashboard with (peer_username / "
+                "peer_password)."
             )
         return (
-            f"The dashboard of {p} rejected the access credential from the ctx_handover settings. Use the token or "
-            f"user/password you use for that gateway in Desktop (HERMES_DASHBOARD_SESSION_TOKEN on {p}, or its "
+            f"The dashboard of {p} refused the sign-in from the ctx_handover settings. Use the dashboard token or the "
+            f"user name and password you use for {p} in Desktop (HERMES_DASHBOARD_SESSION_TOKEN on {p}, or its "
             "Basic login)."
         )
     if code == "listener_missing":
@@ -1386,35 +1627,51 @@ def render_error(err: HandoverError, peer: str | None, *, here: bool = False) ->
         # listener answers those like a missing plugin, SEC 1.10). Under plugins.isolation: host the routes are served
         # through the plugin host; pulls through `hermes serve` ran end to end (lab L15), the rest did not (L3-F21)
         return (
-            f"{p} has no ctx_handover routes (not installed, not enabled, inbound: off, or the plugin could not start "
-            f"there). If you just installed or enabled it there, or changed plugins.isolation there, restart "
-            f"`hermes serve` and the gateway on {p}; /handover doctor on {p} shows its setup. Under "
-            f"plugins.isolation: host on {p}, pulls through its `hermes serve` address are verified; for anything else "
-            f"plugins.isolation: in_process (the default) is the verified setup. Without a connection, use a bundle "
-            f"(/handover export)."
+            f"{p} does not answer for ctx_handover (it has no ctx_handover routes): the plugin is not installed or not "
+            f"enabled there, its inbound setting is off, or it could not start there. If you just installed or "
+            f"enabled it there, or changed plugins.isolation there, restart `hermes serve` and the gateway (the "
+            f"Hermes service that runs your chats) on {p}; /handover doctor on {p} shows its setup. Under "
+            f"plugins.isolation: host on {p}, only taking sessions from it through its `hermes serve` address is "
+            f"tested end to end; for anything else plugins.isolation: in_process (the default) is the tested setup. "
+            f"Without a connection, use a handover file (/handover export)."
         )
     if code == "https_required":
         return (
-            f"{p} uses plain HTTP. If the address is only reachable through your VPN (e.g. Tailscale), pair again "
-            "with --allow-insecure; otherwise use HTTPS."
+            f"{p} has a plain http:// address, which is not encrypted. If only your VPN (for example Tailscale) "
+            "reaches that address, pair again with --allow-insecure; otherwise give it an https:// address."
         )
     if code == "pair_invalid":
-        return f"The pairing code is wrong or expired (10 min, single use). Run /handover pair again on {p}."
+        return (
+            "The pairing line is wrong, expired or already used (it works once, for 10 minutes unless --ttl said "
+            f"otherwise). Run /handover pair again on {p} and paste the new line."
+        )
     if code == "unauthorized":
         skew = _d(err, "skew_s")
-        clock = f" (skew {skew} s)" if skew is not None else ""
-        return f"{p} did not accept this device's key. Pair again; if it keeps failing, check the clocks{clock}."
+        clock = f" (they differ by {skew} s)" if skew is not None else ""
+        return (
+            f"{p} did not accept this machine's key. Pair again; if it keeps failing, check that the clocks of both "
+            f"machines are right{clock}."
+        )
     if code == "forbidden":
         right = _d(err, "right") or "this"
-        return f"{p} does not allow {right} for this device. Pair again with the needed rights."
+        return (
+            f"{p} does not allow {right} for this device (push = send sessions, pull = take sessions). Pair again "
+            "with the needed rights (--rights on the machine that prints the pairing line)."
+        )
     if code == "session_busy":
-        return "A turn is running in this session. Wait for it, or use --wait to hand over as soon as it finishes."
+        return (
+            "The agent is still working on a reply in this session. Wait until it is done, or add --wait to hand "
+            "over as soon as it finishes."
+        )
     if code == "wait_timeout":
-        return f"The running turn did not finish within {_d(err, 'minutes', 30)} min. Nothing was changed."
+        return (
+            f"The agent's reply did not finish within {_d(err, 'minutes', 30)} minutes. Nothing was changed; try "
+            "again later."
+        )
     if code == "already_handing_over":
         return f"This session is already being handed over (job {short_job(_d(err, 'job'))}). See /handover status."
     if code == "capability_missing":
-        cap = _d(err, "capability") or "do this"
+        cap = _d(err, "capability") or "unknown"
         versions = []
         if _d(err, "plugin_version"):
             versions.append(f"plugin {_d(err, 'plugin_version')}")
@@ -1422,20 +1679,30 @@ def render_error(err: HandoverError, peer: str | None, *, here: bool = False) ->
             versions.append(f"Hermes {_d(err, 'hermes_version')}")
         suffix = f" ({', '.join(versions)})" if versions else ""
         if _d(err, "local"):
-            return f"This gateway cannot {cap}{suffix}: {err.message} Run /handover doctor."
-        return f"{p} cannot {cap}{suffix}. Update the plugin there."
+            return f"This machine cannot do this ({cap}{suffix}): {err.message} Run /handover doctor."
+        return (
+            f"{p} lacks something this handover needs ({cap}{suffix}). Update the ctx_handover plugin there; for git "
+            "repositories both machines also need git 2.38 or newer (/handover doctor checks it)."
+        )
     if code == "payload_too_large":
-        return f"A proxy in front of {p} limits request bodies below one block (≈ 513 KiB). Raise its body limit."
+        what = " ".join(str(err.message or "").split()).rstrip(".") or "a request"
+        return (
+            f"Too large ({what}). If a proxy in front of {p} refused it, raise the request size limit of that proxy: "
+            "it must let at least one transfer block (about 513 KiB) through, and /handover doctor --measure finds "
+            "the limit it has now. If a size setting of ctx_handover refused it (max_session_mb, max_total_gb, "
+            "max_file_mb, max_files …), raise that setting or hand over less (--exclude, --no-workspace)."
+        )
     if code == "insufficient_storage":
         side = _d(err, "side") or p
         if not _d(err, "need_bytes"):  # a write failed on a full disk; how much more it needs is not known
             return (
-                f"{side} ran out of space in {_d(err, 'path', '?')} ({human_bytes(_d(err, 'free_bytes', 0))} free). "
-                "Nothing was transferred."
+                f"{side} ran out of disk space in {_d(err, 'path', '?')} ({human_bytes(_d(err, 'free_bytes', 0))} "
+                "free). Nothing was transferred; free some space there and try again."
             )
         return (
-            f"{side} needs {human_bytes(_d(err, 'need_bytes', 0))} free in {_d(err, 'path', '?')}, has "
-            f"{human_bytes(_d(err, 'free_bytes', 0))}. Nothing was transferred."
+            f"{side} needs {human_bytes(_d(err, 'need_bytes', 0))} of free disk space in {_d(err, 'path', '?')} and "
+            f"has {human_bytes(_d(err, 'free_bytes', 0))}. Nothing was transferred; free some space there and try "
+            "again."
         )
     if code == "policy_denied" and _d(err, "reason") == "workspace_root":
         return _workspace_root_text(err, p)
@@ -1443,105 +1710,121 @@ def render_error(err: HandoverError, peer: str | None, *, here: bool = False) ->
         items = [str(i) for i in (_d(err, "items") or ())][:3]
         count = _d(err, "count") or len(items) or 1
         return (
-            f"{count} items are not allowed on {p}: {', '.join(items) or err.message}. Adjust allow_roots there or "
-            "use --dest."
+            f"{count} items may not be written on {p}: {', '.join(items) or err.message}. Allow their folders there "
+            "(allow_roots in the ctx_handover settings) or choose another folder with --dest."
         )
     if code == "conflict" and _d(err, "kind") == "partial_exists":
         where = str(_d(err, "path") or "") or "a folder"
         return (
-            f"{where} is in the way on the receiving gateway and was not left there by this handover; nothing there "
+            f"{where} is in the way on the receiving machine and was not left there by this handover; nothing there "
             "was changed. Move or remove it there, then hand over again."
         )
     if code == "restart_limit":
-        return "The session kept changing during the handover (3 restarts). Pause work on it and try again."
+        return (
+            "The session kept changing during the handover (it started over 3 times). Stop working in it for a "
+            "moment and try again."
+        )
     if code == "verify_failed":
-        return f"The imported transcript on {p} did not match. Nothing was activated; the source is unchanged."
+        return (
+            "The copy did not match the original (a check of the copied conversation, files or plan failed), so "
+            "nothing was activated on the receiving machine. The original session is unchanged; try the handover "
+            "again."
+        )
     if code == "in_doubt":
         return (
-            "The target may already have the session; the source stays read-only until resolved. /handover status "
-            "shows progress; /handover reclaim --force takes it back here."
+            "It is unclear whether the receiving machine finished taking over the session. Until that is clear, the "
+            "session stays read-only on the sending machine. /handover status shows how it goes; /handover reclaim "
+            "--force on the sending machine takes the session back there."
         )
     if code == "peer_unreachable":
         reason = _d(err, "reason") or err.message or "no answer"
         release = _d(err, "release_at")
-        free = f"by {release} (lease expiry)" if release else "when the lease expires"
+        free = f"by {release} (when its lock runs out)" if release else "when its lock runs out"
         return (
-            f"{p} is not reachable ({reason}). The job is suspended; the session here is usable again {free}; "
-            f"/handover resume {short_job(_d(err, 'job'))} continues."
+            f"{p} cannot be reached ({reason}). The handover is suspended (paused); the session here is usable again "
+            f"{free}. /handover resume {short_job(_d(err, 'job'))} continues the handover."
         )
     if code == "continue_refused" and _d(err, "reason") == "approvals_unchecked":
         return _unchecked_text(err, p, here)
     if code == "continue_refused" and here:
         if _d(err, "reason") == "source_given_back":
             return (
-                "No turn was started here: the source took the session back during the handover, so the two copies "
-                "are independent. Open the session and send a message to continue here."
+                "The agent was not started here: the machine the session came from took it back during the "
+                "handover, so the two copies are independent. Open the session and send a message to continue here."
             )
         if _d(err, "reason") == "approvals_off":
             return (
-                "Handed over, but approvals are switched off here, so no turn starts without a person. Open the "
-                "session and send a message."
+                "Handed over, but approvals are switched off here, so the agent does not start working without a "
+                "person. Open the session and send a message."
             )
         if _d(err, "reason") == "unverified":
             return (
-                "Handed over, but its source is not verified here (an unsigned bundle, a key this gateway does not "
-                "know, or a pulled session), so no turn starts automatically. Open the session and send a message."
+                "Handed over, but where it came from is not verified here (an unsigned handover file, a key this "
+                "machine does not know, or a pulled session), so the agent does not start on its own. Open the "
+                "session and send a message."
             )
         if _d(err, "reason") not in (None, "", "not_allowed"):
-            return f"Handed over, but no turn started here ({_d(err, 'reason')}). Open the session and send a message."
+            return (
+                f"Handed over, but the agent did not start here ({_d(err, 'reason')}). Open the session and send a "
+                "message."
+            )
         return (
-            "Handed over, but continuation is not allowed here (allow_remote_continue). Open the session and send a "
-            "message."
+            "Handed over, but the agent may not continue on its own here (the setting allow_remote_continue is "
+            "off). Open the session and send a message."
         )
     if code == "continue_refused":
         if _d(err, "reason") == "source_given_back":
             return (
-                f"No turn was started on {p}: this session was taken back here during the handover, so the two "
-                "copies are independent."
+                f"The agent was not started on {p}: this session was taken back here during the handover, so the "
+                "two copies are independent."
             )
         if _d(err, "reason") == "approvals_off":
             return (
-                f"Handed over, but approvals are switched off on {p}, so no turn starts there without a person. "
-                "Open the session there and send a message."
+                f"Handed over, but approvals are switched off on {p}, so the agent does not start working there "
+                "without a person. Open the session there and send a message."
             )
         if _d(err, "reason") == "unverified":
             return (
-                "Handed over, but the bundle is not verified, so no turn starts automatically. Open the session "
-                "and send a message."
+                "Handed over, but the handover file is not verified (no paired device signed it), so the agent does "
+                "not start on its own. Open the session and send a message."
             )
         if _d(err, "reason") not in (None, "", "not_allowed"):
             return (
-                f"Handed over, but no turn started on {p} ({_d(err, 'reason')}). Open the session there and send a "
-                "message."
+                f"Handed over, but the agent did not start on {p} ({_d(err, 'reason')}). Open the session there and "
+                "send a message."
             )
         return (
-            f"Handed over, but {p} does not allow remote continuation (allow_remote_continue). Open the session "
-            "there and send a message."
+            f"Handed over, but {p} does not let a paired device start the agent there (setting "
+            "allow_remote_continue). Open the session there and send a message."
         )
     if code == "cancelled":
         return "Cancelled. Nothing was changed."
     if code == "identity_lost":
         return (
-            "This device's handover key is missing from the profile .env. Run /handover identity rotate, then pair "
-            "again with every device."
+            "This machine's handover key is missing from the .env file of this Hermes profile. Run /handover "
+            "identity rotate, then pair again with every device."
         )
     if code == "env_not_writable":
         variable = str(_d(err, "variable", "") or "")
         if variable and variable != "CTX_HANDOVER_IDENTITY_KEY" and err.message:
             return err.message  # a peer credential (pairing copy, peers remove): the text names variable and step
         return (
-            "The .env of this profile is managed and not writable, so ctx_handover cannot store its key. Ask the "
-            "administrator to allow CTX_HANDOVER_IDENTITY_KEY, then run the command again."
+            "The .env file of this Hermes profile is managed elsewhere and cannot be written, so ctx_handover cannot "
+            "store its key there. Ask the administrator to allow CTX_HANDOVER_IDENTITY_KEY, then run the command "
+            "again."
         )
     if code == "inbound_disabled":
-        return f"{p} does not accept handovers (inbound is off or nothing is paired). Pair again or check its setup."
+        return (
+            f"{p} does not accept handovers (its inbound setting is off, or nothing is paired there). Pair again, or "
+            f"check its setup with /handover doctor on {p}."
+        )
     if code == "bad_response_signature":
         return (
-            f"The answer from {p} was not signed by the key paired with it. Pair again; check for a proxy that "
-            "rewrites responses."
+            f"The answer from {p} was not signed with the key this machine paired with. Pair again; if that does not "
+            f"help, check whether a proxy in front of {p} changes its answers."
         )
     if code == "lease_lost":
-        return "The session could not stay paused (lease lost). Nothing was handed over; try again."
+        return "The session could not stay locked during the handover. Nothing was handed over; try again."
     if (
         code == "invalid_state"
         and _d(err, "reason") in ("finished", "committing", "not_recorded", "aborting", "not_forced")
@@ -1582,16 +1865,16 @@ def _note_block(note: str | None, origin: str | None, lists: dict[str, Sequence[
     titles = {
         "excluded_secrets": "Secrets left out:",
         "include_refused": "Named with --include but left out:",
-        "withheld": "Withheld by source policy (the other side does not release them):",
+        "withheld": "Withheld by the other machine (its rules do not release them):",
         "withheld_stash": "Stash entries withheld:",
-        "conflicts": "Conflicts (a fresh folder was used):",
-        "instruction_files": "Instruction files new or changed here:",
+        "conflicts": "Conflicts (the folder there had changes of its own, so a new folder was used):",
+        "instruction_files": "Instruction files for the agent, new or changed here:",
         "warnings": "Warnings:",
     }
     for key, title in titles.items():
         lines += _bullets(title, lists.get(key) or ())
     if note:
-        lines.append("The agent gets this note with your first message (it is not shown in the transcript view):")
+        lines.append("The agent gets this note with your first message (the chat does not show it):")
         lines.append(note)
     return lines
 
@@ -1624,10 +1907,10 @@ def open_text(session_id: str, title: str | None = None) -> str:
     switcher, ``session.list`` without ``scope: stored``) shows it only after it was opened once."""
     named = f'"{title}" ({session_id})' if title else session_id
     return (
-        f"The session {named} is stored but not open yet: it is listed in the Desktop sidebar and in "
+        f"The session {named} is saved but not open yet: it is listed in the Desktop sidebar and in "
         f"`hermes sessions list`. Open it with `hermes --resume {session_id}` (or pick it in the Desktop sidebar) "
-        "and send a message; the first turn gets a note about what changed. A gateway's list of open sessions "
-        "shows it only after it was opened once."
+        "and send a message; with your first message the agent gets a note about what changed. Lists of open "
+        "sessions (such as the session switcher of the TUI) show it only after it was opened once."
     )
 
 
@@ -1669,7 +1952,7 @@ def render_final(
     open that session (``open_text``) — a received session is stored, not open, until someone opens it.
     """
     mode = Mode(mode)
-    peer_name = peer or "the other gateway"
+    peer_name = peer or "the other machine"
     arrived = _target_session(target_session, ack)
     t = (
         (ack.title if ack is not None and ack.title else None)
@@ -1688,13 +1971,18 @@ def render_final(
     }
     if mode is Mode.EXPORT:
         size = f" ({human_bytes(bundle_bytes)})" if bundle_bytes is not None else ""
-        lines = [f'Exported "{t}" to {bundle_path or "the bundle"}{size}.']
+        lines = [f'Exported "{t}" to {bundle_path or "the handover file"}{size}.']
         if keep:
-            lines.append("This session stays active here; the bundle is a copy (the import note says so).")
+            lines.append(
+                "This session stays active here; the handover file is a copy (the note after the import says so)."
+            )
         else:
             lines.append("This session is now read-only here; /handover reclaim takes it back.")
         if remote_gateway:
-            lines.append("Download it in Desktop through the file view of this gateway, then /handover import it.")
+            lines.append(
+                "Download it in Desktop through the file view of this gateway (the Hermes service that runs this "
+                "chat), then run /handover import <file> on the other machine."
+            )
         else:
             lines.append("Copy the file to the other machine and run /handover import <file> there.")
         lines += _note_block(
@@ -1735,7 +2023,10 @@ def render_final(
     # pull, import: the session is here now
     retired = str(state).lower() in {"retired", "continuing", "done"}
     if mode is Mode.PULL and not retired:
-        lines = [f'"{t}" is active here ({details}); {peer_name} will be released on the next contact.']
+        lines = [
+            f'"{t}" is active here ({details}); the session on {peer_name} stays locked and is closed as handed over '
+            "the next time this machine reaches it."
+        ]
     else:
         lines = [f'"{t}" is here now ({details}).']
     if continue_result is not None and continue_result.started:
@@ -1747,8 +2038,8 @@ def render_final(
             lines.append(open_text(arrived["id"], t))
         else:
             lines.append(
-                "Open it from the Desktop sidebar or `hermes sessions list` and send a message; the first turn gets "
-                "a note about what changed."
+                "Open it from the Desktop sidebar or `hermes sessions list` and send a message; with your first "
+                "message the agent gets a note about what changed."
             )
     lines += _note_block(note, origin, lists)
     return "\n".join(lines)

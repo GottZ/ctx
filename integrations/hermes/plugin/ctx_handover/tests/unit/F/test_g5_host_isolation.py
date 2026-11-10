@@ -121,10 +121,14 @@ def test_g5_missing_routes_text_does_not_claim_host_isolation_blocks_http():
     Mutant: the old text."""
     text = surfaces.render_error(ListenerMissing("no routes"), "server")
     assert "cannot receive or provide" not in text, text
-    assert "server has no ctx_handover routes" in text, text
-    assert "inbound: off" in text and "restart `hermes serve` and the gateway on server" in text, text
+    assert "server does not answer for ctx_handover (it has no ctx_handover routes)" in text, text
+    assert "its inbound setting is off" in text, text
+    assert "restart `hermes serve` and the gateway (the Hermes service that runs your chats) on server" in text
     assert "changed plugins.isolation" in text, text
-    assert "Under plugins.isolation: host on server, pulls through its `hermes serve` address are verified" in text
+    assert (
+        "Under plugins.isolation: host on server, only taking sessions from it through its `hermes serve` address "
+        "is tested end to end" in text
+    ), text
     assert "in_process" in text and "/handover export" in text, text
 
 

@@ -336,7 +336,7 @@ def test_e12_busy_source_and_wait(lab, ev):
     # exit code 3 and the session_busy text of DESIGN §14.1; the --json document carries no error code when the
     # runner (not the command) ends the job (recorded in the evidence, not asserted)
     assert busy.rc == 3, busy.brief()
-    assert "A turn is running in this session" in busy.text and "--wait" in busy.text, busy.text
+    assert "The agent is still working on a reply in this session" in busy.text and "--wait" in busy.text, busy.text
     assert waited.rc == 0, waited.brief()
     status = lab.job_status("b", waited.job_id)
     ev.write("job-b.json", status)

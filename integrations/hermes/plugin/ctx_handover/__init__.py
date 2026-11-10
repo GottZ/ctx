@@ -8,9 +8,9 @@ no file, socket, thread or subprocess — Hermes runs it in every CLI process, i
 
 from __future__ import annotations
 
-DESCRIPTION = "Move this session and its working files to another Hermes gateway you paired (or a bundle file)"
+DESCRIPTION = "Hand this session and its project files over to another machine you paired (or into a handover file)"
 ARGS_HINT = "to|take|export|import|status|peers|pair|reclaim|cancel|resume|setup|doctor|identity|gc|logs …"
-CLI_HELP = "Move a Hermes session and its working files to another gateway you paired"
+CLI_HELP = "Hand a Hermes session and its project files over to another machine you paired"
 
 
 def register(ctx) -> None:

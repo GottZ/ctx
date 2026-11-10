@@ -35,7 +35,7 @@ def test_r3_f_l4_push_given_back_names_the_reclaim():
     out = _final(Mode.PUSH, "source_given_back")
     assert "allow_remote_continue" not in out, out
     assert "read-only here" not in out, out
-    assert "No turn was started on server: this session was taken back here during the handover" in out, out
+    assert "The agent was not started on server: this session was taken back here during the handover" in out, out
     assert "the two copies are independent" in out, out
 
 
@@ -45,7 +45,9 @@ def test_r3_f_l4_pull_given_back_names_the_source():
     Red before the fix: "Handed over, but continuation is not allowed here (allow_remote_continue) …"."""
     out = _final(Mode.PULL, "source_given_back")
     assert "allow_remote_continue" not in out, out
-    assert "No turn was started here: the source took the session back during the handover" in out, out
+    assert (
+        "The agent was not started here: the machine the session came from took it back during the handover" in out
+    ), out
 
 
 @pytest.mark.parametrize("mode", [Mode.PUSH, Mode.PULL])

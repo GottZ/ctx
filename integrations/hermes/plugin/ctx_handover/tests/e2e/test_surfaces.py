@@ -93,9 +93,9 @@ def test_e2e_registration_slash_and_cli(lab):
     ``--json`` gives a parseable result with exit code 0."""
     sid = _session(lab, "a")
     out, _ = _slash(lab, "a", sid, "/handover help")
-    assert "ctx_handover moves this session" in out
+    assert "ctx_handover hands this session" in out
     res = _hermes(lab, "a", "handover", "help")
-    assert res.returncode == 0 and "ctx_handover moves" in res.stdout
+    assert res.returncode == 0 and "ctx_handover hands" in res.stdout
     res = _hermes(lab, "a", "handover", "status", "--json")
     assert res.returncode == 0, res.stderr
     payload = json.loads(res.stdout.strip().splitlines()[-1])
@@ -147,7 +147,8 @@ def test_e2e_setup_without_terminal_and_pair_by_paste_string(lab, ev):
         assert "Paired with server-f" in out_b, out_b
         peers_a, _ = _slash(lab, "a", sid_a, "/handover peers")
         peers_b, _ = _slash(lab, "b", sid_b, "/handover peers")
-        assert "laptop-f · inbound" in peers_a and "server-f · dial" in peers_b
+        assert "laptop-f · it connects to this machine" in peers_a
+        assert "server-f · this machine connects to it" in peers_b
         doctor, _ = _slash(lab, "b", sid_b, "/handover doctor")
     finally:
         ev.cli("remove-server-f", lab.handover("b", "peers", "remove", "server-f", timeout=120))
@@ -204,4 +205,4 @@ def test_e2e_take_progress_notice_and_final_message(lab):
         assert needle in text, needle
     status, _ = _slash(lab, "b", sid_b, f"/handover status {job}")
     assert job in status
-    assert "not shown in the transcript view" in status and "Origin: verified" in status
+    assert "the chat does not show it" in status and "Origin: verified" in status

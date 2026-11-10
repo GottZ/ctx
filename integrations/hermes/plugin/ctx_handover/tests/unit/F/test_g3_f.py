@@ -170,7 +170,7 @@ def test_the_printed_short_id_finds_the_job():
     short = surfaces.short_job(JOB_A)
     assert short == "HRMT9Z"
     out = _slash(plugin, f"status {short}")
-    assert backend.last("job_status") == {"job_id": JOB_A} and "HRMT9Z · pull · server · done" in out, out
+    assert backend.last("job_status") == {"job_id": JOB_A} and "HRMT9Z · handover from server · done" in out, out
     _slash(plugin, "status hrmt9z")
     assert backend.last("job_status") == {"job_id": JOB_A}
     _slash(plugin, f"cancel {short}")
@@ -315,7 +315,7 @@ def test_final_message_names_title_id_and_how_to_open_it(capsys):
     push = surfaces.render_final(
         Mode.PUSH, None, "done", "laptop", None, target_session={"id": "20261109_1_x", "title": "T"}
     )
-    assert 'On laptop: The session "T" (20261109_1_x) is stored but not open yet' in push
+    assert 'On laptop: The session "T" (20261109_1_x) is saved but not open yet' in push
     assert "`hermes --resume 20261109_1_x`" in push
     bare = surfaces.render_final(Mode.PULL, None, "done", "server", None, target_session={"id": "", "title": "T"})
     assert "--resume" not in bare and "session ?" not in bare

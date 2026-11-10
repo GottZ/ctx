@@ -352,7 +352,7 @@ def test_readme_discloses_the_body_limit_measurement():
     assert "`doctor` sends one signed hello per paired gateway" in network
     assert f"only `doctor --measure` (local CLI, TUI or Desktop) uploads zero-filled test bodies of {sizes}" in network
     assert re.search(rf"up to {sum(probe_sizes)} MiB per paired gateway", network)
-    assert f"test bodies of {sizes} to each paired gateway" in surfaces.USAGE["doctor"]  # the help text too
+    assert f"test uploads of {sizes} to each paired machine" in surfaces.USAGE["doctor"]  # the help text too
 
 
 def test_fingerprint_is_cluster_c_rule_only():

@@ -31,7 +31,7 @@ def test_rv_f_m37_presend_names_outside_paths_with_size():
     Red before the fix: "…; 1 items outside the project." (no path)."""
     final = _final(extras=1)
     text = surfaces.render_presend(_view(final), "server", Mode.PUSH)
-    assert f"1 items outside the project: /home/u/extra0.txt ({surfaces.human_bytes(2048)})" in text, text
+    assert f"1 items outside the project folder: /home/u/extra0.txt ({surfaces.human_bytes(2048)})" in text, text
 
 
 def test_rv_f_m37_presend_caps_the_list_and_counts_the_rest():
@@ -53,7 +53,7 @@ def test_rv_f_h15_presend_names_repositories_that_stay_here():
     view = _view(final)
     assert [e["kind"] for e in view["repos_left"]] == ["nested", "submodule"], view["repos_left"]
     text = surfaces.render_presend(view, "server", Mode.PUSH)
-    assert f"stays here: repository {NESTED}, submodule {SUB} (their files do not travel)" in text, text
+    assert f"stays here: git repository {NESTED}, submodule {SUB} (their files do not travel)" in text, text
     more = surfaces.render_presend({**view, "repos_left_more": 4}, "server", Mode.PUSH)
     assert "and 4 more (their files do not travel)" in more, more
 
@@ -80,7 +80,7 @@ def test_rv_f_m37_confirm_question_names_paths():
     final = _final(extras=2, repos=((SUB, plan.WHY_SUBMODULE),))
     view = _view(final, context_unknown={"tokens": 5000, "model": "qwen3"})
     q = surfaces.confirm_question(view, "server")
-    assert "Outside the project: /home/u/extra0.txt (" in q and "/home/u/extra1.txt (" in q, q
+    assert "Outside the project folder: /home/u/extra0.txt (" in q and "/home/u/extra1.txt (" in q, q
     assert f"Stays here: submodule {SUB}" in q and "do not travel" in q, q
     assert "The context window of qwen3 there is unknown" in q, q
     assert q.endswith("Continue?"), q
@@ -91,9 +91,9 @@ def test_rv_f_m37_render_plan_lists_sections():
     window."""
     final = _final(extras=2, repos=((SUB, plan.WHY_SUBMODULE), (NESTED, plan.WHY_NESTED_REPO)))
     text = surfaces.render_plan(_view(final, context_unknown={"tokens": 5000, "model": "qwen3"}))
-    assert "Outside the project:" in text and f"  - /home/u/extra0.txt ({surfaces.human_bytes(2048)})" in text
+    assert "Outside the project folder:" in text and f"  - /home/u/extra0.txt ({surfaces.human_bytes(2048)})" in text
     assert "Stays here (their files and changes do not travel):" in text, text
-    assert f"  - submodule {SUB}" in text and f"  - repository {NESTED}" in text, text
+    assert f"  - submodule {SUB}" in text and f"  - git repository {NESTED}" in text, text
     assert "Context: the context window of qwen3 there is unknown" in text, text
 
 

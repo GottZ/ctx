@@ -131,7 +131,7 @@ def test_workspace_root_denial_reads_the_same_from_the_jobs_record():
     text = commands._job_error_text(JOB, record, "gottz")
     assert "workspace_root" in text and ROOT in text and "--dest" not in text, text
     items = PolicyDenied("denied", items=["/etc/x"], count=1)
-    assert "items are not allowed on gottz: /etc/x" in surfaces.render_error(items, "gottz")
+    assert "items may not be written on gottz: /etc/x" in surfaces.render_error(items, "gottz")
 
 
 def test_workspace_root_denial_from_the_planning_step_reaches_the_slash():
@@ -152,9 +152,11 @@ def test_full_disk_of_this_machine_without_a_known_need_reads_as_such():
     """
     full = InsufficientStorage("x", need_bytes=0, free_bytes=0, path="/srv/out", side="This machine")
     text = surfaces.render_error(full, None)
-    assert "ran out of space in /srv/out" in text and "needs 0" not in text and text.startswith("This machine"), text
+    assert "ran out of disk space in /srv/out" in text and "needs 0" not in text and text.startswith("This machine"), (
+        text
+    )
     need = InsufficientStorage("x", need_bytes=2048, free_bytes=1024, path="/srv/out", side="This machine")
-    assert surfaces.render_error(need, None).startswith("This machine needs 2.0 KiB free in /srv/out")
+    assert surfaces.render_error(need, None).startswith("This machine needs 2.0 KiB of free disk space in /srv/out")
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -285,16 +287,16 @@ def test_status_line_names_this_gateways_role_and_the_other_side():
     """
     arrived = surfaces.render_status({"jobs": [_participant("target", "push")]})
     head = arrived.splitlines()[0]
-    assert "target" in head and "from laptop" in head and "done" in head, arrived
+    assert "arriving here from laptop" in head and "done" in head, arrived
     assert "session here: 20261109_120000_eeeeee (Flight work)" in arrived, arrived
 
     taken = surfaces.render_status({"jobs": [_participant("source", "pull", "handed_over")]})
     head = taken.splitlines()[0]
-    assert "source" in head and "to laptop" in head and "handed_over" in head, taken
+    assert "leaving here for laptop" in head and "handed_over" in head, taken
 
     own = surfaces.render_status({"jobs": [{**_participant("conductor", "push"), "calling_session": SID}]})
-    assert own.splitlines()[0].endswith("· push · laptop · done"), own
-    assert "session here" not in own and "target" not in own and "source" not in own, own
+    assert own.splitlines()[0].endswith("· handover to laptop · done"), own
+    assert "session here" not in own and "arriving here" not in own and "leaving here" not in own, own
 
 
 @pytest.mark.parametrize("role", ["", None, "bogus", 7])

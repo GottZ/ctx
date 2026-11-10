@@ -113,11 +113,11 @@ def test_status_allowed_on_messaging_platform():
     backend.statuses["01JCAAAAAAAAAAAAAAAAOTHER1"] = {"calling_session": "someone-else", "state": "packing"}
     plugin, backend, _ = _plugin(backend)
     out = _slash(plugin, "status", platform="telegram")
-    assert "MINE1" in out and "OTHER1" not in out and "retired" in out
+    assert "MINE1" in out and "OTHER1" not in out and "handed over and read-only here" in out
     assert _slash(plugin, "status 01JCAAAAAAAAAAAAAAAAOTHER1", platform="telegram") == commands.REFUSAL
     assert _slash(plugin, "logs 01JCAAAAAAAAAAAAAAAAOTHER1", platform="telegram") == commands.REFUSAL
     assert "[" in _slash(plugin, "doctor", platform="telegram")
-    assert "ctx_handover moves" in _slash(plugin, "help", platform="telegram")
+    assert "ctx_handover hands" in _slash(plugin, "help", platform="telegram")
     full = _slash(plugin, "status", platform="local")
     assert "MINE1" in full and "OTHER1" in full
 
@@ -251,7 +251,7 @@ def test_wait_flag_and_busy_texts():
     opts = backend.last("start_job")["options"]
     assert opts.wait is True and opts.wait_timeout_s == 420
     backend.start_error = SessionBusy("busy")
-    assert "use --wait" in _slash(plugin, "to server")
+    assert "add --wait" in _slash(plugin, "to server")
     backend.start_error = WaitTimeout("late", minutes=7)
     assert "did not finish within 7 min" in _slash(plugin, "to server --wait")
 
@@ -454,7 +454,7 @@ def test_status_of_job_shows_note_origin_and_exclusions():
         "/srv/app/.env",
         "AGENTS.md (new)",
         "Moved from: server",
-        "not shown in the transcript view",
+        "the chat does not show it",
     ):
         assert needle in out, needle
 

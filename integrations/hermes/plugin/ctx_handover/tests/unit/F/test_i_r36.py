@@ -54,13 +54,13 @@ def test_presend_question_and_plan_name_the_workspace_against_the_cwd():
     summary = surfaces.plan_summary(None, _presend(workspace=DIFFERS))
     assert summary["workspace"] == DIFFERS
     presend = surfaces.render_presend(summary, "laptop", Mode.PUSH)
-    assert "workspace /home/u/work/foreign (102.0 MiB)" in presend, presend
-    assert "session's folder /home/u/work/foreign/src (3.0 KiB)" in presend, presend
+    assert "project folder /home/u/work/foreign (102.0 MiB)" in presend, presend
+    assert "session's working folder /home/u/work/foreign/src (3.0 KiB)" in presend, presend
     question = surfaces.confirm_question(summary, "laptop")
     assert "/home/u/work/foreign (102.0 MiB)" in question and "/home/u/work/foreign/src (3.0 KiB)" in question
     assert question.endswith("Continue?"), question
     plan_text = surfaces.render_plan(summary)
-    assert "Workspace: /home/u/work/foreign (102.0 MiB)" in plan_text, plan_text
+    assert "Project folder: /home/u/work/foreign (102.0 MiB)" in plan_text, plan_text
     assert "/home/u/work/foreign/src (3.0 KiB)" in plan_text, plan_text
 
 
@@ -76,8 +76,8 @@ def test_a_workspace_that_is_the_cwd_is_named_without_a_second_folder():
         "differs": False,
     }
     presend = surfaces.render_presend(summary, "server", Mode.PUSH)
-    assert "workspace /srv/app (3.0 MiB)" in presend and "session's folder" not in presend, presend
-    assert "session's folder" not in surfaces.confirm_question(summary, "server")
+    assert "project folder /srv/app (3.0 MiB)" in presend and "session's working folder" not in presend, presend
+    assert "session's working folder" not in surfaces.confirm_question(summary, "server")
 
 
 @pytest.mark.parametrize(
@@ -141,7 +141,10 @@ def test_r36a_a_tracked_subfolder_is_named_but_not_asked_about(tracked, asked):
     summary = surfaces.plan_summary(final)
     assert summary["workspace"]["differs"] is True
     presend = surfaces.render_presend(summary, "server", Mode.PUSH)
-    assert "workspace /srv/app (3.0 MiB), more than the session's folder /srv/app/services/api (40.0 KiB)" in presend
+    assert (
+        "project folder /srv/app (3.0 MiB), more than the session's working folder /srv/app/services/api (40.0 KiB)"
+        in presend
+    )
     reasons = planning.confirmation_reasons(final, Options(yes=True), True)
     assert (surfaces.yes_exempt(reasons) == ["workspace_differs"]) is asked, reasons
 
@@ -194,7 +197,8 @@ def test_yes_without_a_person_cancels_and_names_both_folders():
     assert backend.confirm_answers == ["cancel"]
     assert "continue_async" not in backend.names()
     assert (
-        "--yes does not confirm the workspace /home/u/work/foreign (102.0 MiB), more than the session's folder "
+        "--yes does not confirm the project folder /home/u/work/foreign (102.0 MiB), more than the session's "
+        "working folder "
         "/home/u/work/foreign/src (3.0 KiB)." in out
     ), out
     assert "Nothing was locked" in out
@@ -202,7 +206,9 @@ def test_yes_without_a_person_cancels_and_names_both_folders():
 
 def test_yes_refused_text_for_workspace_differs():
     text = _yes_refused_text({"workspace": DIFFERS}, ["workspace_differs"])
-    assert text.startswith("--yes does not confirm the workspace /home/u/work/foreign (102.0 MiB), more than"), text
+    assert text.startswith("--yes does not confirm the project folder /home/u/work/foreign (102.0 MiB), more than"), (
+        text
+    )
     plain = _yes_refused_text({}, ["workspace_differs"])
     assert "--yes does not confirm" in plain and "session's folder" in plain, plain
 

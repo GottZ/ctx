@@ -72,7 +72,7 @@ def test_confirmation_explains_d_codes_in_words():
     ctx.choice_answers = ["cancel"]
     _slash(plugin, "to server --include-secret /srv/app/.env")
     question = ctx.choices_asked[0][0]
-    assert "--include-secret sends a file from the secrets list" in question
+    assert "--include-secret hands over a file from the secrets list" in question
     assert "include_secret" not in question.replace("--include-secret", "")
 
 
@@ -144,11 +144,11 @@ def test_summary_renders_cluster_d_presend():
     later = surfaces.plan_summary(final, {**pre, "withheld_stash": ["stash@{0}"]})
     assert later["withheld_stash"] == ["stash@{0}"]
     assert surfaces.render_presend(view, "server", Mode.PUSH) == (  # M37: paths and sizes; M12: unknown window
-        "Handover → server: 2 items, 3.0 MiB; workspace /srv/app (3.0 MiB); 2 secrets left out; 1 items outside "
-        "the project: /home/u/extra0.txt (2.0 KiB); context window of qwen3 there unknown."
+        "Handover → server: 2 items, 3.0 MiB; project folder /srv/app (3.0 MiB); 2 secret files left out; 1 items "
+        "outside the project folder: /home/u/extra0.txt (2.0 KiB); context window of qwen3 there unknown."
     )
     text = surfaces.render_plan(view)
-    assert "Plan: 2 items, 3.0 MiB, 1 proposed, 0 conflicts; model qwen3 (local) (offline: yes)." in text
+    assert "Plan: 2 items, 3.0 MiB, 1 proposed, 0 conflicts; model qwen3 (local) (works offline: yes)." in text
     assert "Secrets left out: 2" in text and "/srv/app/.env (secret)" in text
 
 
@@ -163,8 +163,8 @@ def test_engine_presend_summary_renders(fake_host):
     final = sample_final_plan(secrets=1)
     text = surfaces.render_presend(eb.presend_summary(final), "server", Mode.PUSH)
     assert text == (  # M12: the sample's target model has no context_length
-        "Handover → server: 1 items, 3.0 MiB; workspace /srv/app (3.0 MiB); 1 secrets left out; context window of "
-        "qwen3 there unknown."
+        "Handover → server: 1 items, 3.0 MiB; project folder /srv/app (3.0 MiB); 1 secret files left out; context "
+        "window of qwen3 there unknown."
     )
     assert "Plan: 1 items" in surfaces.render_plan(eb.presend_summary(final))
 
@@ -181,7 +181,7 @@ def test_confirmation_question_from_conductor_info():
     out = _slash(plugin, "take server --latest")
     question = ctx.choices_asked[0][0]
     assert question.startswith(
-        "Hand over to server: 2 items, 3.0 MiB, 2 proposed, 0 conflicts, model qwen3 (local) (offline: yes)."
+        "Hand over to server: 2 items, 3.0 MiB, 2 proposed, 0 conflicts, model qwen3 (local) (works offline: yes)."
     )
     assert surfaces.REASON_TEXT[plan.CONFIRM_INSTRUCTIONS] in question
     assert "AGENTS.md (changed)" in out and "Nothing was locked" in out
@@ -270,10 +270,10 @@ def test_status_reads_cluster_a_form(real_status):
     """
     plugin, _ledger = real_status
     local = _slash(plugin, "status")
-    assert MINE[-6:] in local and OTHER[-6:] in local and "pulled by laptop" in local and "/srv/app" in local
+    assert MINE[-6:] in local and OTHER[-6:] in local and "taken from here by laptop" in local and "/srv/app" in local
     remote = _slash(plugin, "status", platform="telegram")
     assert MINE[-6:] in remote and OTHER[-6:] not in remote
-    assert "pulled by laptop" not in remote
+    assert "taken from here by laptop" not in remote
     assert _slash(plugin, f"status {OTHER}", platform="telegram") == commands.REFUSAL
     assert MINE[-6:] in _slash(plugin, f"status {MINE}", platform="telegram")
     assert "Cancel requested" in _slash(plugin, "cancel")  # one active job of this session is found
@@ -306,7 +306,10 @@ def test_final_text_follows_end_states():
 
     for status, needle in (
         ({"state": "aborted", "last_error": {"code": "cancelled", "message": "x"}}, "Cancelled. Nothing was changed."),
-        ({"state": "in_doubt", "last_error": {"code": "peer_unreachable", "message": "x"}}, "may already have"),
+        (
+            {"state": "in_doubt", "last_error": {"code": "peer_unreachable", "message": "x"}},
+            "unclear whether the receiving machine finished",
+        ),
         (
             {"state": "suspended", "last_error": {"code": "peer_unreachable", "message": "timeout"}},
             "/handover resume ",

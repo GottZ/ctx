@@ -84,7 +84,7 @@ def test_presend_ignores_a_malformed_workspace_excluded(value):
         ("hermes", "hermes", "inside the Hermes home"),
         ("home", "home", "the home folder itself"),
         ("other", "denied by a rule", "denied by a rule"),
-        ("unheard-of", "", "left out by the policy"),
+        ("unheard-of", "", "the plugin's rules leave it out"),
     ],
 )
 def test_excluded_folder_reason_text(reason, why, needle):
@@ -246,7 +246,7 @@ def test_export_closing_text_follows_the_jobs_source_kept(kept, options_keep):
         "title": "My Work",
     }
     text = plugin._final_text(EXPORT_JOB, Mode.EXPORT, None, Options(keep_source=options_keep))
-    assert ("the bundle is a copy" in text) is kept, text
+    assert ("the handover file is a copy" in text) is kept, text
     assert ("read-only here" in text) is (not kept), text
 
 
@@ -255,7 +255,7 @@ def test_export_closing_text_without_the_key_keeps_the_command_option():
     ``--keep``; ``source_kept`` other than ``True`` is not a copy."""
     plugin, backend, _ctx = _plugin()
     backend.statuses[EXPORT_JOB] = {"state": "done", "bundle": {"path": "/b/x.ctxh.tar"}}
-    assert "the bundle is a copy" in plugin._final_text(EXPORT_JOB, Mode.EXPORT, None, Options(keep_source=True))
+    assert "the handover file is a copy" in plugin._final_text(EXPORT_JOB, Mode.EXPORT, None, Options(keep_source=True))
     backend.statuses[EXPORT_JOB] = {"state": "done", "source_kept": "yes", "bundle": {"path": "/b/x.ctxh.tar"}}
     assert "read-only here" in plugin._final_text(EXPORT_JOB, Mode.EXPORT, None, Options(keep_source=True))
 

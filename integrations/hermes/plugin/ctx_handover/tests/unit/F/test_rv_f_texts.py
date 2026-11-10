@@ -73,5 +73,5 @@ def test_rv_f_reason_texts_cover_every_code_of_d():
         assert surfaces.reason_names([letter]) == [code]
         if code in planning.YES_EXEMPT:
             assert "--yes does not confirm this" in surfaces.REASON_TEXT[code], code
-    assert "none of its tracked files" in surfaces.REASON_TEXT[planning.CONFIRM_WORKSPACE_DIFFERS]
+    assert "holds none of the files git tracks there" in surfaces.REASON_TEXT[planning.CONFIRM_WORKSPACE_DIFFERS]
     assert "stays here" in surfaces.REASON_TEXT[planning.CONFIRM_REPOS_LEFT]
