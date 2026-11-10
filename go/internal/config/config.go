@@ -1743,8 +1743,8 @@ type EmbedBackfillConfig struct {
 	// pick or a wire-class memo waits this long — in 15 s slices that
 	// re-read the key, so a hot change applies within one slice. 0 = arm
 	// off (polled every 15 s for a hot re-enable, contract.recheck_interval
-	// convention); the query path then keeps caller_timeout blocks in its
-	// own pick instead of handing them off.
+	// convention); the query path then retries caller_timeout blocks
+	// itself, after everything else pending, instead of handing them off.
 	Interval time.Duration `key:"embed_backfill.interval" env:"CTX_EMBED_BACKFILL_INTERVAL" default:"15" mut:"hot" tenancy:"global-only"`
 	// MaxTokens is the pre-wire Oversize-Gate estimate threshold
 	// (design/04 §4.4): len(embedText)/4 above this skips the block WITHOUT

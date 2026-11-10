@@ -265,8 +265,8 @@ func TestBackfillPending_SyncBudget_Integration(t *testing.T) {
 	// Review finding M1 (b): the query path leaves a caller_timeout block to
 	// the background arm only while that arm runs. With
 	// embed_backfill.interval=0 (arm off) and Dream off nothing else would
-	// ever embed it, so the query path keeps the plain predicate and picks it
-	// up again (the memo is due at once).
+	// ever embed it, so the query path picks it up again (the memo is due at
+	// once), with the plain predicate, once nothing else is pending.
 	t.Run("arm_off_query_path_repicks_a_caller_timeout_block", func(t *testing.T) {
 		seed(t)
 		var blockID string

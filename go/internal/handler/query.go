@@ -1793,18 +1793,18 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 	}
 	// Pfad A's predicate: the shared backoff exclusion, PLUS every block
 	// already memoized caller_timeout (store.EmbedFailureQueryPath
-	// ExcludedPredicate) while the background arm runs — such a block is
-	// the arm's job. The hand-off only holds while there IS an arm: with
-	// embed_backfill.interval=0 (arm off) and Dream off nothing else would
-	// ever embed a caller_timeout block, so the query path keeps the plain
-	// predicate and picks it up again (its memo is due at once). Review
-	// finding M1; interval is global-only, so this per-request snapshot
-	// reads the value the arm runs on.
+	// ExcludedPredicate) — such a block is the arm's job. The hand-off only
+	// holds while there IS an arm: with embed_backfill.interval=0 (arm off)
+	// and Dream off nothing else would ever embed a caller_timeout block,
+	// so the query path picks it up again (review finding M1 of #46). It
+	// does so LAST, with the plain predicate, once the picks below have
+	// come back empty: the memo of such a block is due at once and a failed
+	// embed ends the loop, so a block that cannot fit the budget, taken in
+	// its place in the order, would be what every request picks and stops
+	// on, and nothing behind it would ever be embedded (review of #214).
+	// interval is global-only, so this per-request snapshot reads the value
+	// the arm runs on.
 	armRuns := cfg.EmbedBackfill.Interval > 0
-	pendingExcluded := store.EmbedFailureExcludedPredicate
-	if armRuns {
-		pendingExcluded = store.EmbedFailureQueryPathExcludedPredicate
-	}
 	// The classes of block an embed backend takes, worked out once per
 	// request from one pool snapshot and with the floor the chain below
 	// applies, so the pick admits exactly the blocks that chain resolves
@@ -1816,18 +1816,19 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 	anyClasses := sync.OnceValue(func() embedClasses {
 		return embedServableClasses(ceilings, floor, nil)
 	})
-	// pick takes the newest pending block of the classes cl, inside
-	// scopeConjunct when one is given. The spliced predicates carry no
+	// pick takes the newest pending block of the classes cl that the
+	// failure-memo predicate excluded lets through, inside scopeConjunct
+	// when one is given. The spliced predicates carry no
 	// placeholders: $1 to $4 are the class conjunct's (embedClasses), $5 the
 	// scope conjunct's. The scope conjunct stays a conjunct of its own next
 	// to the class one, so the planner can still take the scope index for
 	// it. The id breaks the tie between blocks of one created_at (one
 	// transaction).
-	pick := func(cl embedClasses, scopeConjunct string, args ...any) (blockID, title, content, sens, scope string, err error) {
+	pick := func(excluded string, cl embedClasses, scopeConjunct string, args ...any) (blockID, title, content, sens, scope string, err error) {
 		err = h.pool.QueryRow(ctx,
 			`SELECT id, title, content, sensitivity, scope FROM context_blocks
 			WHERE embedding IS NULL AND NOT is_archived`+
-				pendingExcluded+store.RetrievalExcludedTypePredicate+`
+				excluded+store.RetrievalExcludedTypePredicate+`
 			  AND ((scope <> ALL($1::text[]) AND sensitivity = ANY($2::text[]))
 			    OR (scope, sensitivity) IN (SELECT * FROM unnest($3::text[], $4::text[])))`+scopeConjunct+`
 			ORDER BY created_at DESC, id DESC
@@ -1841,6 +1842,10 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 	// once more per block it embeds. A caller block stored while this loop
 	// runs waits for the caller's next query.
 	callerDrained := false
+	// lastResort (arm off only) remembers that the fallback came back empty
+	// as well: what is left, if anything, are the blocks that once overran
+	// the sync budget, and the rest of the request picks those.
+	lastResort := false
 	for attempts := 0; syncCap <= 0 || attempts < syncCap; attempts++ {
 		if !budgetDeadline.IsZero() && !time.Now().Before(budgetDeadline) {
 			slog.Info("query backfill: sync budget spent, rest left to the background arm",
@@ -1848,17 +1853,24 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 			break
 		}
 		var blockID, title, content, sens, scope string
-		var err error
-		if callerDrained {
-			err = pgx.ErrNoRows
-		} else {
-			blockID, title, content, sens, scope, err = pick(callerClasses, "\n\t\t\t  AND scope = ANY($5::text[])", readScopes)
-			callerDrained = errors.Is(err, pgx.ErrNoRows)
+		err := error(pgx.ErrNoRows)
+		if !lastResort {
+			if !callerDrained {
+				blockID, title, content, sens, scope, err = pick(store.EmbedFailureQueryPathExcludedPredicate,
+					callerClasses, "\n\t\t\t  AND scope = ANY($5::text[])", readScopes)
+				callerDrained = errors.Is(err, pgx.ErrNoRows)
+			}
+			if errors.Is(err, pgx.ErrNoRows) && !armRuns {
+				// Nothing pending the caller can read, and no arm to leave
+				// the rest to: embed any pending block.
+				blockID, title, content, sens, scope, err = pick(store.EmbedFailureQueryPathExcludedPredicate, anyClasses(), "")
+				lastResort = errors.Is(err, pgx.ErrNoRows)
+			}
 		}
-		if errors.Is(err, pgx.ErrNoRows) && !armRuns {
-			// Nothing pending the caller can read, and no arm to leave the
-			// rest to: embed any pending block.
-			blockID, title, content, sens, scope, err = pick(anyClasses(), "")
+		if lastResort {
+			// Nothing else is pending anywhere and there is no arm: retry
+			// a block that overran the budget of an earlier request.
+			blockID, title, content, sens, scope, err = pick(store.EmbedFailureExcludedPredicate, anyClasses(), "")
 		}
 		if err != nil {
 			break // No more pending blocks (or error).
@@ -1948,7 +1960,8 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 			// Under an active budget, a budget or request deadline is a
 			// statement about THIS caller, not about the backend: class
 			// caller_timeout, which the query path leaves to the background
-			// arm while it runs and the arm picks at once. Everything else
+			// arm while it runs (with the arm off: takes last) and the arm
+			// picks at once. Everything else
 			// — and every failure with sync_budget=0 — keeps the
 			// wire/oversize classification.
 			var (

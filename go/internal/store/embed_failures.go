@@ -55,8 +55,8 @@ const (
 	// the background arm runs (embed_backfill.interval > 0) the query path
 	// (EmbedFailureQueryPathExcludedPredicate) never picks a caller_timeout
 	// block again, the arm picks it at once (next_attempt_at = now()). With
-	// the arm off the query path keeps the plain predicate and retries it
-	// within its budget. Only written while a sync budget is active — with
+	// the arm off the query path retries it within its budget once nothing
+	// else is pending. Only written while a sync budget is active — with
 	// sync_budget=0 a request cancel stays wire (review finding M1). A later
 	// wire failure in the background arm reclassifies it as wire with the
 	// ordinary backoff.
@@ -312,10 +312,12 @@ const EmbedFailureExcludedPredicate = `
 // block the arm is about to embed anyway (and, while the arm holds its FOR
 // UPDATE row, embed it a second time in parallel). The background arm keeps
 // the plain predicate, so for it a caller_timeout memo (next_attempt_at =
-// now()) is immediately eligible. backfillPending uses this variant only
-// while the arm runs (embed_backfill.interval > 0); with the arm off it
-// falls back to the plain predicate, so the hand-off never leaves a block
-// to nobody (review finding M1). Same positional contract as its sibling:
+// now()) is immediately eligible. backfillPending uses this variant for
+// its picks with the arm on or off; with the arm off
+// (embed_backfill.interval = 0) it makes one more pick with the plain
+// predicate once those come back empty, so the hand-off never leaves a
+// block to nobody (review finding M1) and a block that cannot fit the
+// budget does not hold the others. Same positional contract as its sibling:
 // bare context_blocks as the outer FROM.
 const EmbedFailureQueryPathExcludedPredicate = `
 	AND NOT EXISTS (
