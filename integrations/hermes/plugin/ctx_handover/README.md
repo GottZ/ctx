@@ -326,11 +326,16 @@ there; on a package-managed install it prints the `hermes config set` command in
 `<HERMES_HOME>/plugin-data/ctx_handover/` holds the ledger, staging, the block cache, reports and logs.
 
 **Commands:** `git` without a shell, with hooks, credential helpers, fsmonitor, submodule recursion and LFS smudge
-disabled for received data; `<tool> --version` for a fixed list of 30 developer tools plus those you name in the
-`tool_probe` setting, each run with a home and temp folder of its own in a scratch folder in the system temp
-directory (`ctxh-probe-*`, removed afterwards); with `--continue`,
+disabled for received data; git, and what git starts (git-lfs, helpers), gets an environment built from an
+allowlist — the search path, the home folder, `XDG_CONFIG_HOME`, the temp folder, the time zone and on Windows the
+system variables git needs to start — and no other variable of the Hermes process, so provider keys and tokens never
+reach it (no git call talks to a remote, so no SSH agent socket, proxy or CA setting either); `<tool> --version` for
+a fixed list of 30 developer tools plus those you name in the `tool_probe` setting, each run with only the search
+path (and the Windows system variables) of this process and a home and temp folder of its own in a scratch folder in
+the system temp directory (`ctxh-probe-*`, removed afterwards); with `--continue`,
 one detached `hermes chat --resume <id>` single-query run on the target (Hermes' single-query approval policy
-applies, default deny), started with auto-approve variables removed from its environment and never when
+applies, default deny), started with this gateway's environment — the turn needs the model provider's keys — minus
+the auto-approve variables, and never when
 approvals are off there as far as the starting process can tell (see Limits), nor when that process cannot identify
 the gateway that runs the turn.
 

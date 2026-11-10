@@ -6,7 +6,10 @@ DESIGN §9.2 (runner, profiles, forced options, version), §9.3 step 4–5 (temp
 Every git call of the plugin goes through ``Git.run`` (or its streaming siblings): no shell, stdin closed unless
 the plugin feeds it, a timeout, an environment built by ``Git.env``. That environment
 
-* drops every inherited ``GIT_*`` variable and sets only the ones the plugin needs,
+* starts from an allowlist of the parent's variables (``CHILD_ENV_*``, ``GIT_ENV_*``: search path, home, global
+  config location, temp directory, time zone, the Windows system variables) — never from the inherited
+  environment, so no provider key or token of the Hermes process reaches git, git-lfs or a helper — and sets only
+  the ``GIT_*`` variables the plugin needs,
 * forces the options of ``FORCED_OPTIONS`` through ``GIT_CONFIG_COUNT``/``KEY_n``/``VALUE_n`` — per process, never
   written to any config file,
 * in the ``received`` profile additionally nulls the user's global and system configuration (only the
@@ -155,6 +158,35 @@ SAFELIST: tuple[str, ...] = (
     "safe.directory",
 )
 """User values passed back into the received profile (DESIGN §9.2)."""
+
+CHILD_ENV_POSIX: tuple[str, ...] = ("PATH",)
+CHILD_ENV_WINDOWS: tuple[str, ...] = ("PATH", "SYSTEMROOT", "PATHEXT", "WINDIR")
+"""What any child process of the plugin takes from the parent to start at all: the search path, and on Windows
+the system root (the C runtime, Winsock and the crypto API look it up), the executable extensions and the Windows
+directory. One source for git (``Git._base_env``) and the tool probes (``envfacts``)."""
+
+GIT_ENV_POSIX: tuple[str, ...] = ("HOME", "XDG_CONFIG_HOME", "TMPDIR", "TZ")
+GIT_ENV_WINDOWS: tuple[str, ...] = (
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "PROGRAMDATA",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "TZ",
+)
+"""What git takes from the parent beyond ``CHILD_ENV_*`` — and nothing else, never the inherited environment
+(catalog review 2026-11-10): ``HOME`` (replaced by the pinned home when there is one) and ``XDG_CONFIG_HOME``
+locate the user's global configuration the source profile reads like the user's own git (W5); ``TMPDIR`` (Windows:
+``TEMP``/``TMP``) is where git and git-lfs put temporary files; ``TZ`` keeps reflog times in the user's zone.
+Windows only: git derives ``HOME`` from ``HOMEDRIVE``/``HOMEPATH``/``USERPROFILE`` when it is unset, and Git for
+Windows reads ``%PROGRAMDATA%/Git/config`` as part of its system configuration. Not passed, on purpose: provider
+keys, tokens and every other variable; ``SSH_AUTH_SOCK``, proxy and CA variables (no git call of the plugin talks
+to a remote — ``protocol.allow=never`` on every call); ``LANG``/``LC_*`` (``LC_ALL=C`` is set); loader variables
+(``LD_*``/``DYLD_*``)."""
 
 SET_ENV: dict[str, str] = {
     "GIT_TERMINAL_PROMPT": "0",
@@ -342,10 +374,6 @@ _EXCLUDES_CACHE: dict[tuple[str, str | None, str | None], str | None] = {}
 _CACHE_LOCK = threading.Lock()
 
 
-def _strip_git_vars(env: dict[str, str]) -> dict[str, str]:
-    return {k: v for k, v in env.items() if not k.upper().startswith("GIT_")}
-
-
 def _add_pairs(env: dict[str, str], pairs: Sequence[tuple[str, str]]) -> None:
     """Append config pairs behind the ones ``Git.env`` set (a later pair wins)."""
     n = int(env.get("GIT_CONFIG_COUNT", "0"))
@@ -403,7 +431,10 @@ class Git:
     # -- environment --------------------------------------------------------------------------------------
 
     def _base_env(self) -> dict[str, str]:
-        env = _strip_git_vars(dict(os.environ))
+        """The allowlisted variables of the parent (``CHILD_ENV_*`` + ``GIT_ENV_*``), the pinned ``HOME`` and
+        ``SET_ENV`` — built up, never copied from ``os.environ`` (no ``GIT_*`` of the parent either)."""
+        names = (*CHILD_ENV_WINDOWS, *GIT_ENV_WINDOWS) if _WINDOWS else (*CHILD_ENV_POSIX, *GIT_ENV_POSIX)
+        env = {name: os.environ[name] for name in names if name in os.environ}
         if self.home is not None:
             env["HOME"] = str(self.home)
         env.update(SET_ENV)

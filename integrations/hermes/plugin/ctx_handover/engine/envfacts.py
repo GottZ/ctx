@@ -54,6 +54,7 @@ from pathlib import Path
 
 from . import session_import
 from .errors import BadRequest
+from .gitops import CHILD_ENV_POSIX, CHILD_ENV_WINDOWS
 from .jsonutil import loads_bounded
 from .model import EnvFacts, HostFacts, Options, ToolInfo
 from .pathmap import resolve_root
@@ -96,8 +97,8 @@ PREFIX_WORDS = frozenset({"sudo", "env", "time", "nohup", "nice", "command", "bu
 _TOOL_RE = re.compile(r"^[A-Za-z0-9._+-]{1,64}$")
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SEPARATORS = re.compile(r"&&|\|\||[;|&\n(){}`]|\$\(")
-_CHILD_ENV_POSIX = ("PATH",)
-_CHILD_ENV_WINDOWS = ("PATH", "SYSTEMROOT", "PATHEXT", "WINDIR")
+_CHILD_ENV_POSIX = CHILD_ENV_POSIX
+_CHILD_ENV_WINDOWS = CHILD_ENV_WINDOWS
 _XDG_DIRS = (
     ("XDG_CONFIG_HOME", (".config",)),
     ("XDG_CACHE_HOME", (".cache",)),
