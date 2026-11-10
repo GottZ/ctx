@@ -604,7 +604,7 @@ func TestEmbedMigrate_Integration(t *testing.T) {
 		}
 
 		// Content change → ClearEmbedding nulls BOTH pairs (W04-3).
-		if err := store.ClearEmbedding(ctx, pool, blockID); err != nil {
+		if err := store.ClearEmbeddingTx(ctx, pool, blockID); err != nil {
 			t.Fatalf("clear embedding: %v", err)
 		}
 		var liveNull, nextNull bool

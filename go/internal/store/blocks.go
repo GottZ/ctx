@@ -968,9 +968,9 @@ func StoreEmbeddingNext(ctx context.Context, q pgxdb.Execer, blockID, model stri
 // This is the pgxdb.Execer-parameterized primitive (same pattern as
 // StoreEmbedding): it does NOT own a transaction, so a caller that needs the
 // clear to be atomic with another write — UpsertBlock's content-change path,
-// W04-8, and UpdateBlock's, issue #198 — passes its own pgx.Tx. ClearEmbedding
-// (below) is the pool-owned convenience wrapper for callers that just need a
-// standalone clear. Kept as ONE implementation so future
+// W04-8, and UpdateBlock's, issue #198 — passes its own pgx.Tx. There is no
+// pool-owned wrapper any more: both production callers compose the clear into
+// a transaction of their own. Kept as ONE implementation so future
 // extensions of the clear semantics (e.g. a migration-scoped memo delete)
 // land in both call shapes automatically, never just one.
 func ClearEmbeddingTx(ctx context.Context, q pgxdb.Execer, blockID string) error {
@@ -990,17 +990,6 @@ func ClearEmbeddingTx(ctx context.Context, q pgxdb.Execer, blockID string) error
 		return fmt.Errorf("store: clear embedding: delete backfill memo: %w", err)
 	}
 	return nil
-}
-
-// ClearEmbedding is the pool-owned wrapper around ClearEmbeddingTx: it opens
-// its own transaction, runs the clear, and commits. Use this when the clear
-// does not need to compose with another write in the same transaction; use
-// ClearEmbeddingTx directly when it does (UpsertBlock's and UpdateBlock's
-// content-change paths).
-func ClearEmbedding(ctx context.Context, pool *pgxpool.Pool, blockID string) error {
-	return pgxdb.Write(ctx, pool, pgxdb.At("store: clear embedding"), func(tx pgx.Tx) error {
-		return ClearEmbeddingTx(ctx, tx, blockID)
-	})
 }
 
 // CheckRateLimit returns the number of write operations in the last 60 seconds
