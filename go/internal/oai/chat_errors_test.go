@@ -190,6 +190,7 @@ func TestContextLengthDetectorFixtures(t *testing.T) {
 		{"sglang", `{"object":"error","message":"The input (40000 tokens) is longer than the model's context length (32768 tokens).","type":"BadRequestError","param":null,"code":400}`, oai.CodeContextLengthExceeded},
 		{"llamacpp", `{"error":{"code":400,"message":"the request exceeds the available context size, try increasing it","type":"exceed_context_size_error"}}`, oai.CodeContextLengthExceeded},
 		{"openrouter", `{"error":{"message":"This endpoint's maximum context length is 32768 tokens. However, you requested about 40000 tokens (39000 of text input, 1000 in the output). Please reduce the length of either one.","code":400}}`, oai.CodeContextLengthExceeded},
+		{"ollama", `{"error":"the input length exceeds the context length"}`, oai.CodeContextLengthExceeded},
 		{"control", `{"error":{"message":"temperature must be between 0 and 2","code":400}}`, oai.CodeUpstreamRejected},
 	} {
 		t.Run(f.engine, func(t *testing.T) {

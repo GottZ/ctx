@@ -1,12 +1,18 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/httpx"
 )
 
@@ -79,6 +85,61 @@ func TestClassifyEmbedError_NonBadRequestWithMarker_Wire(t *testing.T) {
 	class, _ := ClassifyEmbedError(err)
 	if class != EmbedFailureWire {
 		t.Errorf("class = %q, want %q (oversize is a 400-only classification)", class, EmbedFailureWire)
+	}
+}
+
+// FOLGE-EMBLIMIT G6: a ctx instance that embeds through another one's
+// gateway (POST /v1/embeddings) gets the OpenAI code context_length_exceeded
+// for an input the backend refused — oversize, under the same 400-AND-marker
+// rule: a 500 that echoes the code stays wire, a 400 without a marker stays
+// wire, llama.cpp's own body stays oversize.
+func TestClassifyEmbedError_OpenAICodeContextLengthExceeded(t *testing.T) {
+	gateway := `{"error":{"message":"This model's maximum context length is 8192 tokens; reduce the length of the messages.","type":"invalid_request_error","param":"input[0]","code":"context_length_exceeded"}}`
+	cases := []struct {
+		name string
+		code int
+		body string
+		want EmbedFailureClass
+	}{
+		{"gateway 400", http.StatusBadRequest, gateway, EmbedFailureOversize},
+		{"openai 400", http.StatusBadRequest, `{"error":{"message":"too long","type":"invalid_request_error","param":null,"code":"context_length_exceeded"}}`, EmbedFailureOversize},
+		{"500 echoing the code", http.StatusInternalServerError, gateway, EmbedFailureWire},
+		{"400 without a marker", http.StatusBadRequest, `{"error":{"message":"bad","type":"invalid_request_error","param":"input","code":"upstream_rejected"}}`, EmbedFailureWire},
+		{"llama.cpp 400", http.StatusBadRequest, `{"error":{"code":400,"message":"request (33177 tokens) exceeds the available context size (32768 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":33177,"n_ctx":32768}}`, EmbedFailureOversize},
+	}
+	for _, tc := range cases {
+		class, msg := ClassifyEmbedError(fmt.Errorf("embed: %w", &httpx.StatusError{Code: tc.code, Body: tc.body}))
+		if class != tc.want || !strings.HasPrefix(msg, string(tc.want)+": ") {
+			t.Errorf("%s: class %q (%q), want %q", tc.name, class, msg, tc.want)
+		}
+	}
+}
+
+// FOLGE-EMBLIMIT G8: the body the gateway writes for a refused input
+// (internal/oai TestEmbedFirstBlockOversizeNamesTheInput pins the route's
+// bytes against this file) is read by the embed client this package
+// classifies — served as the 400 it is, through embed.Embed's wire and its
+// error body read — as oversize. One file, both ends: internal/oai may not
+// import this package (depguard oai-isolation), so the fixture is the join.
+func TestClassifyEmbedError_GatewayBodyThroughTheClient(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "oai", "testdata", "embed_context_length_exceeded.json"))
+	if err != nil {
+		t.Fatalf("the gateway's fixture: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("x-should-retry", "false")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+	row := backends.Backend{Name: "peer", Host: srv.URL, Protocol: backends.ProtocolOpenAI, Model: "peer-embed"}
+	_, _, err = embed.Embed(context.Background(), row, "a block too long for the peer's backend", embed.PrefixDocument)
+	if err == nil {
+		t.Fatal("embed.Embed answered a 400 without an error")
+	}
+	if class, msg := ClassifyEmbedError(err); class != EmbedFailureOversize {
+		t.Errorf("class %q (%q), want %q: the client retries a block the gateway refused as too long", class, msg, EmbedFailureOversize)
 	}
 }
 
