@@ -292,3 +292,22 @@ def test_reads_name_the_owner_lookup_and_the_identity_walk():
     assert "scandir" in walk and "stat(" in walk and not re.search(r"\bopen\(", walk)
     check = inspect.getsource(policy.check_source_file)
     assert check.index("st.st_nlink > 1") < check.index("_head(")  # the identity first, a read only after it
+
+
+def test_ctx_record_links_only_an_unchanged_root_id():
+    """README ctx (optional): the head search titles the raw root id (``ctxrecords.HEAD_TITLE``); ctx_checkpoint keeps
+    timestamp ids and UUIDs as they are and shortens a longer id or one with other characters with a hash suffix
+    (``checkpoint.head_title_for``), so the search misses such a head and the record is stored without the link."""
+    import pytest
+
+    from ctx_handover.engine import ctxrecords
+
+    checkpoint = pytest.importorskip("ctx_checkpoint.memory.checkpoint")
+    for root in ("20261031_120000_abcdef", "95b87f05-c9be-4364-bae0-04db0eae6cc7"):
+        assert checkpoint.head_title_for(root) == ctxrecords.HEAD_TITLE.format(root=root)
+    for root in ("local-" + "a" * 64, "team/alice:1"):
+        assert checkpoint.head_title_for(root) != ctxrecords.HEAD_TITLE.format(root=root)
+    ctx = _between("**ctx (optional):**", "**Core modules used:**")
+    assert "with a `search` for the checkpoint head before each `store` (to link the record to it)" in ctx
+    assert "Hermes' timestamp ids and UUIDs" in ctx
+    assert "70-character `local-<sha256>` ids" in ctx and "its record is stored without the link" in ctx

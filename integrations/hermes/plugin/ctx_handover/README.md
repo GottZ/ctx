@@ -387,10 +387,18 @@ uncommitted work, and the continuing agent gets a note about what changed.
 - **Pulling from a machine that goes quiet.** When a pull stops talking to the source for
   `participant_idle_timeout_min` (15 minutes by default), the source releases its locks and the session there is
   usable again; `/handover resume` locks it again and continues.
+- **`/handover resume` right after Hermes starts.** When a Hermes process starts, the plugin's background clean-up
+  looks at unfinished handovers. A `/handover resume` typed in that moment can lose against it: the handover then
+  ends, the session here stays unlocked and usable, and you start the handover again.
 - **A git command that died mid-way.** A git process killed in the middle of a command in a destination
   repository (power loss, killed process) can leave `.git/index.lock` behind. The plugin never removes it (it may
   belong to another git process): the step that resumes the handover refuses that repository and the handover
   ends marked `needs_attention`. Remove the lock once no git process runs there, then hand over again.
+- **A stash made while a handover writes.** When the first writing step into an existing destination repository
+  fails, the plugin rolls that repository back and drops every stash entry beyond the number it found when it
+  prepared the step. A `git stash` you make there in that window is dropped with them; it stays recoverable until
+  git's garbage collection (`git gc`) prunes it — `git fsck --unreachable` lists it, as git's stash manual
+  describes.
 - **The size check needs the context window there.** Whether the session fits the model on the other side is
   checked against that model's context window, and Hermes gives a plugin only a `context_length` set in that
   gateway's `config.yaml` (`model.context_length`, or `context_length` of the provider entry or of its
@@ -517,9 +525,11 @@ busy/conflict, 4 auth/gate, 5 in-doubt/suspended; a refusal carries `ok: false` 
 `reclaim` refused while a handover is being committed exits 3, and so does a `cancel` that cancels nothing because
 the handover is done, aborted or past its commit point; the answer names which). `status`, `cancel`, `resume`, `logs`
 and `gc --job` take the six-character job id the messages print (or any other unique start or end of the id). A
-handover stuck cancelling because the other gateway does not confirm (unreachable, removed, or it no longer knows the
-job) ends here with `/handover cancel <job> --force`: this machine's side is released or discarded the normal way,
-the answer says what may remain on the other gateway, and a handover past its commit point is refused (exit 3).
+handover stuck cancelling because the other gateway does not confirm (unreachable, or it no longer knows the job)
+ends here with `/handover cancel <job> --force`: this machine's side is released or discarded the normal way, the
+answer says what may remain on the other gateway, and a handover past its commit point is refused (exit 3). A
+handover with a gateway you removed here with `/handover peers remove` cannot be ended with `--force`: the answer
+says that it could not be ended here.
 Administrative and data-moving commands (`pair`, `setup`, `peers`, `identity`, `take`, `to`, `export`, `import`,
 `reclaim`, `resume`, `gc`, `cancel`) answer only in the local CLI, TUI or Desktop; on messaging platforms they are
 refused.
@@ -657,7 +667,10 @@ in a gateway (`/handover to <peer>`) keeps the answer it already got and passes 
 
 **ctx (optional):** with ctx_checkpoint as memory provider and your consent in `/handover setup`, one redacted
 record per side of each handover through Hermes' MCP dispatch, with a `search` for the checkpoint head before each
-`store` (to link the record to it); a side finished without ctx (e.g. offline) is recorded later. ctx is never
+`store` (to link the record to it); a side finished without ctx (e.g. offline) is recorded later. The link works for
+a root session id that ctx_checkpoint uses unchanged in its titles — Hermes' timestamp ids and UUIDs; a longer id or
+one with other characters (such as Hermes' 70-character `local-<sha256>` ids), which ctx_checkpoint shortens and
+marks with a hash, is not found that way, and its record is stored without the link. ctx is never
 needed for a handover, a ctx failure never stops one, and a job start waits at most 2 seconds for ctx (the records
 go out on a thread of their own).
 
