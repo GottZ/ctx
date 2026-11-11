@@ -38,7 +38,7 @@ that a handover is one command, and it runs in six steps:
 |---|---|
 | 1. Plan | The plugin shows what it would move: the project folder and its size, other files the conversation used, and what it leaves out. You say yes. |
 | 2. Pause | The session is paused on this machine, so nothing changes while it travels. |
-| 3. Copy and check | The conversation is copied message by message, and both machines compare hashes of every message. A git project travels as git data, other folders as files. |
+| 3. Copy and check | The conversation is copied row by row (message by message), and both machines compare hashes of every message. A git project travels as git data, other folders as files. |
 | 4. Land | The other machine stores the session and puts the project into a folder. A project that came from there goes back into its old folder when nothing changed there meanwhile. |
 | 5. Switch | Only when the other machine confirms that everything arrived is the session ended and archived here. If anything fails before that, the session here stays usable as before. |
 | 6. Carry on | You open the session on the other machine. With `--continue` the agent there starts on your task by itself. |
@@ -54,6 +54,26 @@ There are three ways to move a session:
 The laptop always opens the connection, so it works from behind a home router or a hotel Wi-Fi. The server only needs
 an address the laptop can reach: its Hermes dashboard, public or inside a private network such as Tailscale.
 
+## Before you start
+
+You need Hermes 0.22.6 or newer on both machines, and `git` 2.38 or newer if your project is a git repository. Tested
+on Linux; macOS and Windows have had no end-to-end runs yet.
+
+What does not work, or only partly:
+
+- If Hermes Desktop reaches your server only through an SSH tunnel, a Nous/OAuth sign-in or Hermes Cloud, the plugin
+  has no sign-in it can use. Then only the handover file works.
+- The laptop always connects to the server, never the other way round. A machine the other one cannot reach over the
+  network can only get a handover file.
+- Running programs, subagents and scheduled (cron) jobs do not move. The agent on the other machine gets a note that
+  names them.
+- If both copies of a session go on, they are never merged.
+- There is no Desktop page of its own yet. Everything runs through `/handover …` in a chat or `hermes handover …` in a
+  terminal.
+
+Not the core `/handoff`, which sends a session to a messaging app, and not the hermes-handoff or session-relay
+plugins. Every limit, with the details, is in [Limits](docs/limits.md).
+
 ## Install
 
 On both machines:
@@ -64,9 +84,6 @@ hermes plugins enable ctx_handover
 ```
 
 In Hermes Desktop: Capabilities → Plugins, once for the server's gateway and once for *This device*.
-
-You need Hermes 0.22.6 or newer on both machines, and `git` 2.38 or newer if your project is a git repository. Tested
-on Linux; macOS and Windows have had no end-to-end runs yet.
 
 ## Set up once: pair the two machines
 
@@ -80,9 +97,11 @@ on Linux; macOS and Windows have had no end-to-end runs yet.
 
 2. **Server, in a chat:** `/handover setup` checks the address and tells you which sign-in the laptop needs: a
    dashboard token, or a user name and password.
-3. **Laptop:** enter that sign-in under Settings → Plugins → ctx_handover.
+3. **Laptop:** enter that sign-in under Settings → Plugins → ctx_handover. For a user name and password, also set
+   *How this machine signs in to the other machine's dashboard* (`peer_gate`) to `basic_login`.
 4. **Server, in a chat:** `/handover pair --name laptop` prints one line that starts with `/handover pair ctxh-pair:`.
-   Paste that line into a chat on the laptop. It is valid for 10 minutes and works once.
+   Paste that line into a chat on the laptop. It is valid for 10 minutes and works once. The answer on the laptop
+   starts with "Paired with" and the name the laptop gave the server; use that name where this page writes `server`.
 5. **Both:** `/handover doctor` checks the setup and says what to fix.
 
 The full walk-through, with every option, is in [Set up](docs/setup.md).
@@ -103,8 +122,9 @@ Wait for the final message before you close the laptop: the laptop does the copy
 session on the other machine and its folder.
 
 `--continue` needs one switch on the server, `allow_remote_continue`. That turn runs with nobody there to approve
-anything, so every command that would ask for your approval is refused, and it never starts on a server where
-approvals are switched off.
+anything, so every command that would ask for your approval is refused, and the plugin does not start it when it sees
+that approvals are switched off on the server. One case it cannot see: a server gateway that gets `HERMES_YOLO_MODE`
+from its environment. Leave `allow_remote_continue` off there ([Limits](docs/limits.md), *Continuation and approvals*).
 
 All commands and options: `/handover help`, and [Use](docs/usage.md).
 
@@ -122,10 +142,12 @@ All commands and options: `/handover help`, and [Use](docs/usage.md).
 
 - **Nothing is blacked out.** The conversation, tool outputs and project files travel as they are. Whatever the agent
   saw, the other machine gets. A handover file is not encrypted.
-- **Secret files stay** unless you name each one. A general *yes* never sends them.
+- **Secret files stay** unless you name each one. A general *yes* never sends them. A secret file that was committed
+  to git travels with the project's history.
 - **A paired device can take sessions of this Hermes profile**, or write project copies into the folders you allow
-  (`~/hermes-handover` by default), depending on the right you gave it. It never writes into Hermes' configuration or
-  into places that hold credentials, shell or autostart settings.
+  (`~/hermes-handover` by default), depending on the right you gave it. Outside those folders it writes only where a
+  project returns to the folder it came from, or into a folder it delivered into before. It never writes into Hermes'
+  configuration or into places that hold credentials, shell or autostart settings.
 - **The stored sign-in opens the server's whole dashboard**, not only this plugin. A reverse proxy that passes only
   `/api/plugins/ctx_handover/` limits that. If you lose the laptop, run `/handover peers revoke laptop` on the server
   and change the dashboard token.
@@ -148,19 +170,6 @@ All commands and options: `/handover help`, and [Use](docs/usage.md).
   default).
 
 The complete list of what the plugin reads, writes, runs and sends is in [Safety and disclosure](docs/security.md).
-
-## Limits
-
-- Gateways that Hermes Desktop reaches only through an SSH tunnel, a Nous/OAuth sign-in or Hermes Cloud have no
-  sign-in the plugin can use. For them only the handover file works.
-- Running programs, subagents and cron jobs do not move.
-- Two copies that both went on are never merged.
-- There is no Desktop page of its own yet. Everything runs through `/handover …` in a chat or `hermes handover …` in a
-  terminal.
-- This is not the core `/handoff`, which sends a session to a messaging app. It is not the hermes-handoff or
-  session-relay plugins either.
-
-Every limit, with the details: [Limits](docs/limits.md).
 
 ## More
 

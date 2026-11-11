@@ -14,6 +14,7 @@ from dataclasses import replace
 from ctx_handover.engine import commands, plan, surfaces
 from ctx_handover.engine.model import Mode, NotTransferred
 from ctx_handover.tests.fakes.surfaces_fake import FakeBackend, make_peer, sample_final_plan
+from ctx_handover.tests.unit.F._docs import docs_text
 
 SID = "20261109_141003_a1b2c3"
 TREE = "/srv/lab/ws-e2e/a/rvh9tree"
@@ -99,9 +100,8 @@ def test_r3_f_f24_final_matches_the_include_as_typed_or_resolved(tmp_path):
 
 def test_r3_f_f24_readme_names_it():
     """README §Use says both places (first message, also with ``--yes``; final message)."""
-    from pathlib import Path
 
-    text = " ".join((Path(surfaces.__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8").split())
+    text = " ".join(docs_text().split())
     named = "the paths you named with `--include` that this machine's policy leaves out (with the reason, also with"
     assert f"{named} `--yes`)" in text
     assert "after a handover from here it names the `--include` paths this machine left out" in text

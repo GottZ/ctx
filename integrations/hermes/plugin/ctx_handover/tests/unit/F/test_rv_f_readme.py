@@ -22,10 +22,11 @@ from ctx_handover.engine import (
 )
 from ctx_handover.engine import plan as planning
 from ctx_handover.engine.model import EnvFacts, Options
+from ctx_handover.tests.unit.F._docs import docs_text
 
 from .test_surfaces import PLUGIN_ROOT
 
-README = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
+README = docs_text()
 FLAT = re.sub(r"\s+", " ", README)
 MANIFEST = (PLUGIN_ROOT / "plugin.yaml").read_text(encoding="utf-8")
 
@@ -35,7 +36,7 @@ def _section(start: str, end: str) -> str:
 
 
 def _limits() -> str:
-    return _section("## Limits", "## What the lock")
+    return _section("# Limits ", "# Safety and disclosure")
 
 
 def _bullet(text: str, lead: str) -> str:
@@ -86,7 +87,7 @@ def test_rv_f_m6_lock_guarantee_5_names_its_start_and_retry():
     cannot be opened is retried with growing pauses (bound to ``commands.HOOK_BUILD_WAIT_S``/``HOOK_RETRY_MAX_S``).
 
     Red before the fix: no such sentence (and no such constants)."""
-    lock_section = _section("## What the lock on the source guarantees", "## Set up")
+    lock_section = _section("## What the lock on the source guarantees", "## Disclosure")
     wait = f"{commands.HOOK_BUILD_WAIT_S:g} seconds"
     cap = "a minute" if commands.HOOK_RETRY_MAX_S == 60 else f"{commands.HOOK_RETRY_MAX_S:g} seconds"
     assert f"waits up to {wait}" in lock_section, lock_section
@@ -99,7 +100,7 @@ def test_rv_f_bot_chat_exception_of_mark_4():
     a Bot Chat replaced meanwhile comes back as ``Bot Chat (before handover)`` (the name ``lock`` uses).
 
     Red before the fix: no Bot Chat sentence."""
-    lock_section = _section("## What the lock on the source guarantees", "## Set up")
+    lock_section = _section("## What the lock on the source guarantees", "## Disclosure")
     # M9 (REVIEW-2 §4): "keeps its title" was wrong — archiving releases the name (real SessionDB, title None
     # while handed over; ``test_r3_f_m9.py``); the sentence now says so
     assert "*Bot Chat*" in lock_section and "loses its title while it is handed over" in lock_section, lock_section
@@ -116,7 +117,7 @@ def test_rv_f_m33_writes_name_return_trip_and_local_choice():
     params = inspect.signature(policy.check_target_dest).parameters
     assert {"recorded", "local_choice"} <= set(params)
     assert "writes land only under `allow_roots`" not in FLAT
-    table = _section("## Settings", "## Disclosure")
+    table = _section("## Settings", "## Troubleshooting")
     row = table.split("| `workspace_root`, `allow_roots` |", 1)[1].split(" | ", 2)[1]
     assert "the folder it came from (return trip" in row and "`--dest`/`--map` typed here" in row, row
     assert "the denylist under **Rights** applies to every destination" in row, row

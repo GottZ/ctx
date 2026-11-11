@@ -9,7 +9,7 @@
 PYTHONPATH=/path/to/hermes-agent:integrations/hermes/plugin python -m pytest \
     integrations/hermes/plugin/ctx_handover/tests/unit -q
 # lint + format + bandit rules (ruff.toml in this directory)
-cd integrations/hermes/plugin/ctx_handover && ruff check . && ruff format --check .
+(cd integrations/hermes/plugin/ctx_handover && ruff check . && ruff format --check .)
 # catalog checks
 hermes plugins validate integrations/hermes/plugin/ctx_handover
 ```

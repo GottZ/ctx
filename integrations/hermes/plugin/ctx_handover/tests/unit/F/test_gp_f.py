@@ -17,6 +17,7 @@ from ctx_handover.engine.model import Include, Mode, NotTransferred, Options, Pe
 from ctx_handover.tests.conftest import PLUGIN_ROOT, require_upstream
 from ctx_handover.tests.fakes.hostcompat_fake import FakeCtx
 from ctx_handover.tests.fakes.surfaces_fake import FakeBackend, make_peer, sample_final_plan
+from ctx_handover.tests.unit.F._docs import docs_text
 
 from ._l2r_helpers import FLAT, backend_with_runtime, near
 from .test_commands import _plugin, _slash
@@ -291,7 +292,7 @@ def test_readme_troubleshooting_names_the_version_skip(monkeypatch):
     (built from upstream's own ``requires_hermes_error`` and the loader's warning format), the floor version of
     ``plugin.yaml``, the version probe (``git tag --merged HEAD`` with upstream's timeout) and what to do.
 
-    Red (before G, README of abcbd8a7): ``IndexError`` — no "## Troubleshooting" section.
+    Red (before G, README of abcbd8a7): ``IndexError`` — no "## Troubleshooting" section (now in docs/reference.md).
     """
     import hermes_yaml
     from hermes_cli import plugins_manifest
@@ -306,8 +307,8 @@ def test_readme_troubleshooting_names_the_version_skip(monkeypatch):
     logged = fmt.group(1) % (manifest["name"], reason)
     assert logged == f"Plugin 'ctx_handover' skipped: requires hermes {manifest['requires_hermes']}, running 0.21.5"
 
-    section = re.sub(r"\s+", " ", (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8"))
-    section = section.split("### Troubleshooting", 1)[1].split(" ### ", 1)[0]
+    section = re.sub(r"\s+", " ", docs_text())
+    section = section.split("## Troubleshooting", 1)[1].split(" # ", 1)[0]
     assert logged.split(", running", 1)[0] in section, section
     version_info = (root / "hermes_cli" / "version_info.py").read_text(encoding="utf-8")
     assert '"tag", "--merged", "HEAD"' in version_info and "`git tag --merged HEAD`" in section
@@ -518,7 +519,7 @@ def test_setup_names_the_reserved_root_when_home_is_the_hermes_home(fake_host, h
 
 def test_readme_names_the_reserved_default_root():
     """R29: the settings table says where the default root goes when the home folder is the Hermes home."""
-    table = FLAT.split("## Settings", 1)[1].split("## Disclosure", 1)[0]
+    table = FLAT.split("## Settings", 1)[1].split("## Troubleshooting", 1)[0]
     assert "handover-workspaces" in table and near(table, "handover-workspaces", "Hermes home")
 
 

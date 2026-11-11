@@ -33,7 +33,7 @@ sidebar and in `hermes sessions list`; `hermes --resume <session-id>` opens it.
    hermes config set plugins.entries.ctx_handover.settings.allow_remote_continue true
    ```
 
-   (or switch on *Let a paired device start one continuation turn here* in Settings → Plugins → ctx_handover).
+   (or switch on *Let a paired device start the agent here after a handover (one turn)* in Settings → Plugins → ctx_handover).
 2. On the laptop, hand over with a task for the agent:
 
    ```
@@ -205,7 +205,7 @@ inside the workspace that stays here: a person answers (at the export; `import` 
 what was confirmed). Files that look like secrets are never sent by a blanket yes (neither `--yes` nor the *yes* choice
 takes them along); name each one with `--include-secret <path>`. An unanswered question (no reply within Hermes'
 question timeout `agent.clarify_timeout`, 90 s by default) continues without the proposed items when those are the only
-reason and cancels otherwise — nothing is locked in either case.
+reason and cancels otherwise — nothing was locked while the question was open.
 
 The final message names the session on the other side (title and session id), its folder, the model and whether it
 works offline, and what to do next. A received session is stored, not open: it is listed in the Desktop sidebar and in

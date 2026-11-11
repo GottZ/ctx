@@ -14,13 +14,14 @@ from pathlib import Path
 from ctx_handover.engine import lock
 from ctx_handover.engine.ledger import Ledger
 from ctx_handover.tests.unit.B.test_lock_support import JOB, PEER, describe, now
+from ctx_handover.tests.unit.F._docs import docs_text
 
 PLUGIN_ROOT = Path(lock.__file__).resolve().parents[1]
 
 
 def _lock_section() -> str:
-    text = " ".join((PLUGIN_ROOT / "README.md").read_text(encoding="utf-8").split())
-    return text.split("## What the lock on the source guarantees", 1)[1].split("## Set up", 1)[0]
+    text = " ".join(docs_text().split())
+    return text.split("## What the lock on the source guarantees", 1)[1].split("## Disclosure", 1)[0]
 
 
 def test_r3_f_m9_bot_chat_has_no_title_while_handed_over_and_gets_it_back(session_db, make_session, tmp_path):

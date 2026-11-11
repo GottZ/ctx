@@ -8,9 +8,11 @@ What a paired device may do, what leaves this machine, and the exact list of wha
 
 - **What a paired device may do.** With the *pull* right (to take) it can take any session of this Hermes profile, with
   its files. With the *push* right (to send) it can create sessions here and write project copies into the allowed
-  folders (`allow_roots`, by default `~/hermes-handover`) — never into Hermes' configuration, nor into places that hold
+  folders (`allow_roots`, by default `~/hermes-handover`), and outside them only where a project returns to the folder it came
+  from or into a folder the same device delivered into before — never into Hermes' configuration, nor into places that hold
   credentials, shell or autostart settings, or git and ssh configuration. It can start a turn here only when you switch
-  on `allow_remote_continue`, and only while approvals are on.
+  on `allow_remote_continue`, and only while approvals are on as far as the plugin can tell: a gateway that gets
+  `HERMES_YOLO_MODE` only from its environment is not always seen ([Limits](limits.md), *Continuation and approvals*).
 - **What travels as it is.** The conversation, tool outputs, attached images and files go to the other machine
   unredacted: nothing is blacked out. Whatever the agent saw, the other machine gets. Committed git history travels with
   a project, including secret files that were committed. A handover file is not encrypted. If your project encrypts
@@ -33,7 +35,7 @@ What a paired device may do, what leaves this machine, and the exact list of wha
   needs. Either it asks the session's own model, which then reads the whole conversation once, as the session does
   anyway; or it sends up to 60,000 characters of the recent conversation, with secrets blacked out, to your main model.
   You pay for that call like for any other model call. Setting `refine` to `off` (Settings → Plugins → ctx_handover,
-  *Ask a model which resources the work needs*) stops it.
+  *Ask a model what else the work needs (files, tools)*) stops it.
 
 The exact list of what the plugin reads, writes, runs and sends is under [Disclosure](#disclosure) below.
 

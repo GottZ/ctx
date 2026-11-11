@@ -76,8 +76,9 @@ Everything this version does not do, or does only partly. Words such as *dialer*
   the public key it registers: whoever has a valid, unused pairing code can pair a public key that is not theirs
   (public keys are no secret — every bundle names its exporter's). That pairing gets no access, because every later
   request must be signed with the private key of that key; but it replaces the earlier pairing of that key here: that
-  device is unpaired here (it pairs again) and its open handovers here are aborted. Treat a pairing code like a
-  password until it is used or expires (10 minutes by default).
+  device is unpaired here (it pairs again) and its open handovers here are aborted, unless a session is already
+  prepared to leave or an arrival is already being committed here; those go on. Treat a pairing code like a password
+  until it is used or expires (10 minutes by default).
 - **Sessions from older Hermes builds.** Messages written before Hermes stamped message and tool-call identities
   get stable identities derived from the original rows during the transfer; the source session is not modified.
   If Hermes backfills those identities on the source while a handover is running, the target refuses the late

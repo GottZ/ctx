@@ -14,7 +14,6 @@ the way a starting Hermes process does (``_fresh``)."""
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
 
@@ -24,6 +23,7 @@ from ctx_handover.engine.model import Peer, Right
 from ctx_handover.tests.conftest import require_upstream
 from ctx_handover.tests.integration._int3_helpers import surface
 from ctx_handover.tests.integration.harness import GATE_ENV, Home, Listener
+from ctx_handover.tests.unit.F._docs import docs_text
 from ctx_handover.tests.unit.F.test_rv_final_peers import _env_lines
 
 PASSWORD_SLOT = "CTX_HANDOVER_PEER_PASSWORD"
@@ -159,7 +159,7 @@ def test_r3_f_l1_readme_says_what_remove_blanks():
     are" is gone.
 
     Red before the change: the README said the form's fields stay."""
-    text = " ".join((Path(pairing.__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8").split())
+    text = " ".join(docs_text().split())
     assert "the settings form's own fields stay as they are" not in text
     assert (
         "and the form's token or password field when it still holds that peer's value and no other paired gateway "

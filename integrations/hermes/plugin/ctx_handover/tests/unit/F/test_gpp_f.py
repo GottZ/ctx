@@ -21,8 +21,8 @@ from ctx_handover.engine import commands, surfaces
 from ctx_handover.engine.commands import Call, _ConfirmState
 from ctx_handover.engine.errors import InsufficientStorage, PolicyDenied
 from ctx_handover.engine.model import Options
-from ctx_handover.tests.conftest import PLUGIN_ROOT
 from ctx_handover.tests.fakes.surfaces_fake import sample_final_plan
+from ctx_handover.tests.unit.F._docs import docs_text
 
 from .test_commands import SID, _plugin, _slash
 
@@ -309,6 +309,6 @@ def test_status_line_invents_no_role(role):
 def test_readme_names_reclaim_session_and_the_role_in_status():
     """README (G-F: README against the code): ``reclaim --session`` in a terminal and the role of jobs another
     gateway runs in ``/handover status``."""
-    text = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
+    text = docs_text()
     assert "hermes handover reclaim --session <id>" in text
     assert "listed with this machine's role" in text

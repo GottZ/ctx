@@ -12,7 +12,8 @@ You need:
   (`/handover doctor` checks the git version).
 - A web address under which your laptop reaches your server's Hermes dashboard (the web page of your server's Hermes) —
   the address you open the dashboard with in a browser, such as `https://server.example.net`. A plain `http://` address
-  works too if only your own devices can reach it, through a private network such as Tailscale.
+  works too if only your own devices can reach it, through a private network that encrypts the traffic itself, such as
+  Tailscale.
 - The sign-in of your server's dashboard: a fixed dashboard token (step 4 below says what to do), or a user name
   and password. `/handover setup` on the server tells you which one.
 
@@ -83,7 +84,7 @@ with the server's gateway chosen instead of *This device*. Chats in messaging ap
 **On your laptop**
 
 5. In Settings → Plugins → ctx_handover, enter the server's sign-in: *Dashboard token of the other gateway*
-   (`peer_token`). For a Basic login, set *How to pass the other gateway's dashboard sign-in* (`peer_gate`) to
+   (`peer_token`). For a Basic login, set *How this machine signs in to the other machine's dashboard* (`peer_gate`) to
    `basic_login` and fill in *Dashboard user name* and *Dashboard password*. Hermes keeps the token and the password in
    this profile's `.env` file, never in `config.yaml`.
 
