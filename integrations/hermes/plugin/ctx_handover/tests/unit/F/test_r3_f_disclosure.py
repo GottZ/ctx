@@ -19,12 +19,13 @@ import inspect
 from pathlib import Path
 
 from ctx_handover.engine import crypto, local_target, policy
+from ctx_handover.tests.unit.F._docs import docs_text
 
 PLUGIN_ROOT = Path(policy.__file__).resolve().parents[1]
 
 
 def _text() -> str:
-    return " ".join((PLUGIN_ROOT / "README.md").read_text(encoding="utf-8").split())
+    return " ".join(docs_text().split())
 
 
 def _between(start: str, end: str) -> str:

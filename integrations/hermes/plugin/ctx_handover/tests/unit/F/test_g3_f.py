@@ -30,9 +30,9 @@ from ctx_handover.engine.commands import EngineBackend, Plugin
 from ctx_handover.engine.errors import BadRequest, ConflictError, ListenerMissing
 from ctx_handover.engine.ledger import Ledger
 from ctx_handover.engine.model import Mode, Role
-from ctx_handover.tests.conftest import PLUGIN_ROOT
 from ctx_handover.tests.fakes.hostcompat_fake import FakeCtx
 from ctx_handover.tests.fakes.surfaces_fake import FakeBackend, make_peer
+from ctx_handover.tests.unit.F._docs import docs_text
 
 from .test_commands import SID, _plugin, _slash
 
@@ -417,7 +417,7 @@ def test_readme_names_the_g3_limits_and_answers():
     """The README says what the surfaces say: the window question ``--yes`` does not answer (R32), how to open a
     received session (L17), host isolation (R33; what ran under ``host`` and what is not verified, L3-F21),
     short job ids (L3-F15) and the reclaim exit code (L3-F14)."""
-    text = " ".join((PLUGIN_ROOT / "README.md").read_text(encoding="utf-8").split())
+    text = " ".join(docs_text().split())
     for needle in (
         "larger than the context window",
         "/compress",

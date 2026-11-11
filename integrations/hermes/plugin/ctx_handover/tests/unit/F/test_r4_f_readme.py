@@ -42,13 +42,14 @@ from ctx_handover.engine.model import Mode, Right, Role
 from ctx_handover.tests.fakes.repo_builder import RepoBuilder
 from ctx_handover.tests.unit.C.conftest import new_identity
 from ctx_handover.tests.unit.E._support import make_cfg
+from ctx_handover.tests.unit.F._docs import docs_text
 
 PLUGIN_ROOT = Path(policy.__file__).resolve().parents[1]
-FLAT = " ".join((PLUGIN_ROOT / "README.md").read_text(encoding="utf-8").split())
+FLAT = " ".join(docs_text().split())
 
 
 def _bullet(start: str) -> str:
-    limits = FLAT.split("### Limits ", 1)[1].split("## What the lock", 1)[0]
+    limits = FLAT.split("# Limits ", 1)[1].split("# Safety and disclosure", 1)[0]
     return next(p for p in limits.split(" - ") if p.startswith(start))
 
 
@@ -206,7 +207,8 @@ def test_pairing_bullet_a_code_pairs_a_foreign_key(tmp_path, listener, clock):
         "secret — every bundle names its exporter's).",
         "That pairing gets no access, because every later request must be signed with the private key of that key; "
         "but it replaces the earlier pairing of that key here: that device is unpaired here (it pairs again) and its "
-        "open handovers here are aborted.",
+        "open handovers here are aborted, unless a session is already prepared to leave or an arrival is already being "
+        "committed here; those go on.",
         "Treat a pairing code like a password until it is used or expires (10 minutes by default).",
     ):
         assert sentence in bullet, (sentence, bullet)

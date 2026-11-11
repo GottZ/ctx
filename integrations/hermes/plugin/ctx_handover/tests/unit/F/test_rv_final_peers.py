@@ -24,6 +24,7 @@ from ctx_handover.engine.model import GateAuth, GateMode, Peer, Right
 from ctx_handover.tests.conftest import require_upstream
 from ctx_handover.tests.integration._int3_helpers import surface
 from ctx_handover.tests.integration.harness import GATE_ENV, Home, Listener, pair
+from ctx_handover.tests.unit.F._docs import docs_text
 
 
 def _env_lines(home: Home) -> dict[str, str]:
@@ -186,8 +187,7 @@ def test_rv_final_readme_says_remove_blanks_the_peer_variables():
     and a value that stays keeps the entry.
 
     Red before the README change (README at ``b112d228``): the sentence is missing."""
-    from pathlib import Path
 
-    text = " ".join((Path(pairing.__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8").split())
+    text = " ".join(docs_text().split())
     assert "`/handover peers remove` blanks that peer's variables the same way before it drops the entry" in text
     assert "a value still there afterwards keeps the entry and the reply names the variable" in text

@@ -35,11 +35,12 @@ from ctx_handover.tests.unit.D.conftest import (
     transcript,  # noqa: F401  (fixture)
     write,
 )
+from ctx_handover.tests.unit.F._docs import docs_text
 from ctx_handover.tests.unit.K0.test_r3_kd_hardlinks import HERMES, OK, SECRET, _link, _write
 from ctx_handover.tests.unit.K0.test_r3_kd_hardlinks import lay as k0_lay  # noqa: F401  (fixture)
 
 PLUGIN_ROOT = Path(policy.__file__).resolve().parents[1]
-FLAT = " ".join((PLUGIN_ROOT / "README.md").read_text(encoding="utf-8").split())
+FLAT = " ".join(docs_text().split())
 
 
 def _between(start: str, end: str) -> str:

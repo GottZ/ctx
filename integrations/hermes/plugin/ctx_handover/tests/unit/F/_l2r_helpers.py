@@ -12,10 +12,10 @@ from pathlib import Path
 from ctx_handover.engine.commands import EngineBackend, Plugin
 from ctx_handover.engine.ids import ulid
 from ctx_handover.engine.model import GateAuth, GateMode, Peer, Right
-from ctx_handover.tests.conftest import PLUGIN_ROOT
 from ctx_handover.tests.fakes.hostcompat_fake import FakeCtx
+from ctx_handover.tests.unit.F._docs import docs_text
 
-README = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
+README = docs_text()
 FLAT = re.sub(r"\s+", " ", README)
 
 IDENTITY_SENTINEL = object()

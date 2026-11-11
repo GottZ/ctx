@@ -6,10 +6,12 @@ import ast
 import re
 
 from ctx_handover.engine import commands, surfaces
+from ctx_handover.tests.unit.F._docs import docs_text
 
+from ._docs import doc
 from .test_surfaces import PLUGIN_ROOT
 
-README = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
+README = docs_text()
 FLAT = re.sub(r"\s+", " ", README)
 
 SEC_7_5 = [
@@ -70,23 +72,25 @@ def test_readme_disclosure_contains_required_lines():
 
 
 def test_readme_limits_first_and_lock_guarantee():
-    """DESIGN §1.2: the limits come before any use — the first section ("Before you start") names the main ones
-    (bundle path only for SSH tunnel / OAuth / Hermes Cloud, the laptop dials, what is not moved, no merge) and points
-    to the full list, which opens the reference; §1.4: what the lock guarantees and what not, in plain words."""
-    sections = re.findall(r"^## (.+)$", README, flags=re.MULTILINE)
-    assert sections[0] == "Before you start", sections
-    first = README.split("## Before you start", 1)[1].split("\n## ", 1)[0]
+    """DESIGN §1.2: the limits come before any use — on the front page the section "Before you start" stands before
+    "Install" and every section about using the plugin, names the main limits (bundle path only for SSH tunnel /
+    OAuth / Hermes Cloud, the laptop dials, what is not moved, no merge) and points to the full list, a page of its
+    own; the set-up page opens with the same section; §1.4: what the lock guarantees and what not, in plain words."""
+    front = doc("README.md")
+    sections = re.findall(r"^## (.+)$", front, flags=re.MULTILINE)
+    assert sections.index("Before you start") < sections.index("Install") < sections.index("Everyday use"), sections
+    assert re.findall(r"^## (.+)$", doc("docs/setup.md"), flags=re.MULTILINE)[0] == "Before you start"
+    first = front.split("## Before you start", 1)[1].split("\n## ", 1)[0]
     for needle in (
         "only through an SSH tunnel, a Nous/OAuth sign-in or Hermes Cloud",
         "only the handover file works",
         "The laptop always connects to the server, never the other way round.",
         "Running programs, subagents and scheduled (cron) jobs do not move.",
         "they are never merged",
-        "[Limits](#limits)",
+        "[Limits](docs/limits.md)",
     ):
         assert needle in re.sub(r"\s+", " ", first), needle
-    reference = re.findall(r"^### (.+)$", README.split("\n## Reference\n", 1)[1], flags=re.MULTILINE)
-    assert reference[:2] == ["Words used below", "Limits"], reference
+    assert doc("docs/limits.md").startswith("# Limits\n")
     for needle in (
         "(1) ended with reason `handed_over`, (2) archived, (3) hidden and (4) renamed",
         "hold even when the plugin is disabled, not loaded (safe mode) or broken",
@@ -105,7 +109,7 @@ def test_readme_matches_code():
     assert {v.strip(" `") for v in listed.split(",")} == set(commands.LOCAL_ONLY_VERBS)
     for env in surfaces.SECRET_ENVS.values():
         assert env in README, env
-    table = README.split("## Settings", 1)[1].split("## Disclosure", 1)[0]
+    table = README.split("## Settings", 1)[1].split("## Troubleshooting", 1)[0]
     keys = set(re.findall(r"`([a-z_]+)`", table))
     unknown = {k for k in keys if "_" in k or k in {"inbound", "refine"}} - set(surfaces.SETTINGS_SCHEMA)
     assert unknown <= {"session_token", "side_question", "config_schema"}, unknown  # values, not keys
