@@ -23,7 +23,8 @@
 //     list, the history or any audit row after a create and two rotations.
 //   - TestUsageFlushNoLockWait: 200 parallel touches across a minute boundary
 //     ⇒ one UPDATE, no lock wait, no audit row — red against an UPDATE per
-//     touch; monotonic, retried after a failure, flushed on shutdown.
+//     touch; monotonic, retried after a failure, flushed on shutdown; the
+//     final flush returns at its window when no attempt can succeed (#124).
 //   - TestModelKeyWritersStamp: every writer's audit rows carry via='api', the
 //     actor, the request id and metadata.tenant_id — red with stampAudit as a
 //     no-op.
@@ -38,6 +39,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strings"
@@ -985,6 +987,84 @@ func TestUsageFlushNoLockWait(t *testing.T) {
 			t.Errorf("after shutdown: last_used_at %v, want %v", got, at)
 		}
 	})
+
+	// #124: the final flush retries until its window ends — and ends then,
+	// even when no attempt can succeed. The table lock makes the first
+	// statement wait until the flush context's deadline cuts it; every
+	// attempt after that runs on an expired context. Run must return within
+	// the window (plus slack for a loaded host), keep the stamp pending, log
+	// no WARN of its own for the cut attempt, and the stamp must still be
+	// writable once the lock is gone.
+	t.Run("run_returns_at_its_window_when_no_flush_can_succeed", func(t *testing.T) {
+		u := store.NewModelKeyUsage(e.pool)
+		at := time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)
+		store.SetModelKeyUsageClockForTest(u, func() time.Time { return at })
+		lock, err := e.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = lock.Rollback(ctx) }()
+		if _, err := lock.Exec(ctx, `LOCK TABLE context_model_keys IN ACCESS EXCLUSIVE MODE`); err != nil {
+			t.Fatalf("lock: %v", err)
+		}
+		logs := &mkLogBuf{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+		runCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() {
+			u.Run(runCtx)
+			close(done)
+		}()
+		u.Touch(k.ID)
+		begin := time.Now()
+		cancel()
+		bound := store.ModelKeyUsageFinalFlushTimeout + 2*time.Second
+		select {
+		case <-done:
+		case <-time.After(bound):
+			t.Fatalf("Run did not return within %s of its context ending (window %s) — the final flush outlives its deadline", bound, store.ModelKeyUsageFinalFlushTimeout)
+		}
+		took := time.Since(begin)
+		t.Logf("Run returned %s after its context ended (window %s, bound %s)", took.Round(time.Millisecond), store.ModelKeyUsageFinalFlushTimeout, bound)
+		if n := u.Pending(); n != 1 {
+			t.Errorf("Pending after Run: %d, want 1 (the stamp it could not write)", n)
+		}
+		// An attempt the window's deadline cut short is no failure to report:
+		// the gateway's stop step counts what is left (one WARN, not two).
+		if out := logs.String(); strings.Contains(out, "level=WARN") {
+			t.Errorf("Run logged a WARN for the attempt its deadline cut short: %s", out)
+		}
+		if err := lock.Rollback(ctx); err != nil {
+			t.Fatalf("release: %v", err)
+		}
+		if err := u.Flush(ctx); err != nil {
+			t.Fatalf("Flush after the lock: %v", err)
+		}
+		if got := lastUsed(); got == nil || !got.Equal(at) {
+			t.Errorf("after the lock: last_used_at %v, want the retained stamp %v", got, at)
+		}
+	})
+}
+
+// mkLogBuf is a log sink safe for the goroutine that writes it and the test
+// that reads it.
+type mkLogBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *mkLogBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *mkLogBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 // mkHookTracer calls onStart with every statement a traced pool begins.

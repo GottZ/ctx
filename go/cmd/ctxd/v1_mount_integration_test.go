@@ -47,11 +47,11 @@ import (
 )
 
 // v1Tracer counts the statements on the router's pool: all of them, the
-// knowledge-auth ones (v1door's filter), the door's ctx_model_auth and the
-// grant reads.
+// knowledge-auth ones (v1door's filter), the door's ctx_model_auth, the
+// grant reads and the attempts of the batched last_used_at flush.
 type v1Tracer struct {
-	knowledge                v1door.KnowledgeAuthTracer
-	all, modelAuth, grantSQL atomic.Int64
+	knowledge                            v1door.KnowledgeAuthTracer
+	all, modelAuth, grantSQL, usageFlush atomic.Int64
 }
 
 func (v *v1Tracer) TraceQueryStart(ctx context.Context, c *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
@@ -62,6 +62,9 @@ func (v *v1Tracer) TraceQueryStart(ctx context.Context, c *pgx.Conn, d pgx.Trace
 	}
 	if strings.Contains(d.SQL, "context_model_consumer_grants") {
 		v.grantSQL.Add(1)
+	}
+	if strings.Contains(d.SQL, "UPDATE context_model_keys k SET last_used_at") {
+		v.usageFlush.Add(1)
 	}
 	return ctx
 }
@@ -534,6 +537,145 @@ func TestV1ModelKeyUsageFlushedAtShutdown(t *testing.T) {
 	if at := lastUsed(); at == nil {
 		t.Error("last_used_at still NULL after the shutdown sequence — the final usage flush did not run")
 	}
+}
+
+// usageLeftWarn is the stop step's WARN for stamps the final usage flush
+// could not write (#124).
+const usageLeftWarn = "gateway: last_used_at stamps of model keys left unwritten at shutdown"
+
+// TestV1ModelKeyUsageFinalFlushWaitsForALockedKey is #124: the usage flush
+// skips a key row another transaction holds (FOR UPDATE SKIP LOCKED), so a
+// stamp whose row is locked when the gateway stops is retried by the final
+// flush until the lock is gone or the flush's own window
+// (store.ModelKeyUsageFinalFlushTimeout) ends; the gateway's stop step logs
+// the stamps still unwritten at WARN. The stamp comes from a request the door
+// accepted, the lock is a real row lock held over a second connection.
+func TestV1ModelKeyUsageFinalFlushWaitsForALockedKey(t *testing.T) {
+	// begin starts the gateway, sends one accepted request and locks the
+	// request's key row in a transaction of the seed pool.
+	begin := func(t *testing.T) (f *v1Fixture, stop func(), hold pgx.Tx, lastUsed func() *time.Time) {
+		t.Helper()
+		f = newV1Fixture(t, nil, nil)
+		f.setEnabled(t, true)
+		stop = startModelGateway(f.gateway)
+		if a := f.do(http.MethodGet, "/v1/models", withBearer(f.modelKey)); a.status != http.StatusOK {
+			t.Fatalf("accepted request: %d %s", a.status, a.body)
+		}
+		lastUsed = func() *time.Time {
+			var at *time.Time
+			if err := f.seed.QueryRow(context.Background(), `SELECT last_used_at FROM context_model_keys WHERE id = $1::uuid`, f.modelKeyID).Scan(&at); err != nil {
+				t.Fatalf("read last_used_at: %v", err)
+			}
+			return at
+		}
+		if at := lastUsed(); at != nil {
+			t.Fatalf("last_used_at already %v before the shutdown — nothing should have flushed yet", at)
+		}
+		var err error
+		if hold, err = f.seed.Begin(context.Background()); err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if _, err := hold.Exec(context.Background(), `SELECT 1 FROM context_model_keys WHERE id = $1::uuid FOR UPDATE`, f.modelKeyID); err != nil {
+			_ = hold.Rollback(context.Background())
+			t.Fatalf("hold the key row: %v", err)
+		}
+		return f, stop, hold, lastUsed
+	}
+	timed := func(stop func()) time.Duration {
+		b := time.Now()
+		stop()
+		return time.Since(b)
+	}
+
+	// attempts counts the flush statements stop sends.
+	attempts := func(f *v1Fixture, stop func()) (time.Duration, int64) {
+		before := f.tracer.usageFlush.Load()
+		took := timed(stop)
+		return took, f.tracer.usageFlush.Load() - before
+	}
+	// maxAttempts is the most attempts the window holds at the retry pause,
+	// plus the first one and one of slack.
+	maxAttempts := int64(store.ModelKeyUsageFinalFlushTimeout/store.ModelKeyUsageFinalFlushRetry) + 2
+
+	t.Run("lock_released_after_200ms", func(t *testing.T) {
+		f, stop, hold, lastUsed := begin(t)
+		logs := captureJSONLog(t)
+		released := make(chan struct{})
+		go func() {
+			defer close(released)
+			time.Sleep(200 * time.Millisecond)
+			_ = hold.Rollback(context.Background())
+		}()
+		took, n := attempts(f, stop)
+		<-released
+		t.Logf("gateway stop %s, %d flush attempt(s) (lock released after 200ms, stop budget %s)", took.Round(time.Millisecond), n, gatewayStopTimeout)
+		if at := lastUsed(); at == nil {
+			t.Error("last_used_at still NULL — the final flush skipped the locked key and did not retry it after the lock was gone")
+		}
+		// At least one attempt met the lock and one more wrote the stamp —
+		// otherwise the first attempt started after the release and the
+		// probe proved nothing about the retry.
+		if n < 2 {
+			t.Errorf("%d flush attempt(s), want >= 2 (a skip while locked, then the write)", n)
+		}
+		if w := logLevel(t, logs, "WARN"); len(w) != 0 {
+			t.Errorf("WARN lines at shutdown: %v, want none (the stamp was written)", w)
+		}
+	})
+
+	t.Run("lock_held_past_the_deadline", func(t *testing.T) {
+		f, stop, hold, lastUsed := begin(t)
+		logs := captureJSONLog(t)
+		took, n := attempts(f, stop)
+		_ = hold.Rollback(context.Background())
+		t.Logf("gateway stop %s, %d flush attempt(s) (flush window %s, stop budget %s)", took.Round(time.Millisecond), n, store.ModelKeyUsageFinalFlushTimeout, gatewayStopTimeout)
+		w := logLevel(t, logs, "WARN")
+		if len(w) != 1 || w[0]["msg"] != usageLeftWarn || w[0]["stamps"] != float64(1) {
+			t.Errorf("WARN lines at shutdown: %v, want exactly one %q with stamps=1", w, usageLeftWarn)
+		}
+		if at := lastUsed(); at != nil {
+			t.Errorf("last_used_at %v — written although its row stayed locked", at)
+		}
+		// The final flush kept retrying for its whole window, at its pause,
+		// and the stop step still had Run's answer before its own bound ran
+		// out.
+		if n < 2 || n > maxAttempts {
+			t.Errorf("%d flush attempts in the window, want 2..%d (one every %s)", n, maxAttempts, store.ModelKeyUsageFinalFlushRetry)
+		}
+		if took < store.ModelKeyUsageFinalFlushTimeout {
+			t.Errorf("gateway stop took %s, below the flush window %s — the final flush gave up on the locked key early", took.Round(time.Millisecond), store.ModelKeyUsageFinalFlushTimeout)
+		}
+		if took >= gatewayStopTimeout {
+			t.Errorf("gateway stop took %s, its whole budget %s — the final flush outlasted the stop step", took.Round(time.Millisecond), gatewayStopTimeout)
+		}
+	})
+}
+
+// captureJSONLog routes the default logger into a buffer as JSON lines until
+// the test ends.
+func captureJSONLog(t *testing.T) *logSink {
+	t.Helper()
+	sink := &logSink{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(sink, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return sink
+}
+
+// logLevel returns the captured lines of one level.
+func logLevel(t *testing.T, sink *logSink, level string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for line := range strings.Lines(sink.String()) {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if m["level"] == level {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 type noDrain struct{}
