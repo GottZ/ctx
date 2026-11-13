@@ -42,6 +42,7 @@
   // happens once on drop. null = not dragging (render the model's sort).
   let dragId = $state<string | null>(null)
   let dragIds = $state<string[] | null>(null)
+  let cardEl: HTMLElement | undefined
 
   // Click-to-edit priority cell. prioCancel guards the blur that may follow
   // an Escape (Escape must discard, not commit).
@@ -76,12 +77,32 @@
     // instead; touch-action:none on the handle keeps touch gestures dragging.
   }
 
+  // The row group whose SLOT (layout box) holds the point. Deliberately not
+  // elementFromPoint: that hit-tests the PAINTED rows, and the FLIP transform
+  // keeps painting a just-displaced row in its old slot until the animation
+  // ends — the next move found it under the pointer again and swapped it back,
+  // so the working order flip-flopped while the FLIP ran and a drop in the
+  // wrong phase committed nothing (#56). offset* geometry ignores transforms;
+  // every row group shares the <table> as offsetParent, whose client box
+  // anchors the slots in pointer coordinates.
+  function slotAt(x: number, y: number): string | undefined {
+    const groups = cardEl?.querySelectorAll<HTMLElement>('tbody[data-id]')
+    const table = groups?.[0]?.offsetParent
+    if (groups === undefined || !table) return undefined
+    const box = table.getBoundingClientRect()
+    const ox = box.left + table.clientLeft
+    const oy = box.top + table.clientTop
+    for (const g of groups) {
+      const left = ox + g.offsetLeft
+      const top = oy + g.offsetTop
+      if (x >= left && x < left + g.offsetWidth && y >= top && y < top + g.offsetHeight) return g.dataset.id
+    }
+    return undefined
+  }
+
   function dragMove(e: PointerEvent): void {
     if (dragId === null || dragIds === null) return
-    // Pointer capture keeps events on the handle; hit-testing finds the
-    // hovered row group by its data-id.
-    const over = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>('tbody[data-id]')
-    const overId = over?.dataset.id
+    const overId = slotAt(e.clientX, e.clientY)
     if (overId === undefined || overId === dragId) return
     const from = dragIds.indexOf(dragId)
     const to = dragIds.indexOf(overId)
@@ -198,7 +219,7 @@
   onpointercancel={dragId !== null ? dragCancel : undefined}
 />
 
-<section class="card" aria-label="backend pool editor">
+<section class="card" aria-label="backend pool editor" bind:this={cardEl}>
   <header>
     <h2>backend pool</h2>
     <span class="count">{pool.backends.length}</span>
