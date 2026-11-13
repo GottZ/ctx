@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -317,11 +318,11 @@ func TestResolveProjectUnfollowableGitFileKeepsWalking(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(notGit, ".git"), []byte("gitdir: ../../plain/.git\n"), 0o644); err != nil {
 		t.Fatalf("write not-git .git: %v", err)
 	}
-	// A .git file beyond gitMetaMaxBytes is not read, even when its first
-	// bytes name a valid git directory.
+	// A .git file beyond gitMetaMaxBytes is not read, even though it names a
+	// valid git directory once the trailing line ends are dropped.
 	huge := filepath.Join(host, "huge")
 	identityMkdir(t, huge)
-	padded := "gitdir: " + filepath.Join(main, ".git") + "\n" + strings.Repeat(" ", gitMetaMaxBytes)
+	padded := "gitdir: " + filepath.Join(main, ".git") + strings.Repeat("\n", gitMetaMaxBytes)
 	if err := os.WriteFile(filepath.Join(huge, ".git"), []byte(padded), 0o644); err != nil {
 		t.Fatalf("write oversized .git: %v", err)
 	}
@@ -330,6 +331,45 @@ func TestResolveProjectUnfollowableGitFileKeepsWalking(t *testing.T) {
 			t.Errorf("resolveProject(%s) = %s, want %s (pre-#146 resolver: %s)", d, got, host, legacy)
 		}
 	}
+}
+
+// TestResolveProjectReadsGitFilesLikeGit pins the line format of .git and
+// commondir files to what git 2.56.0 accepts: the prefix is exactly
+// "gitdir: " and only trailing CR/LF is dropped. A file git refuses is
+// skipped and the walk goes on; a file git follows is followed.
+func TestResolveProjectReadsGitFilesLikeGit(t *testing.T) {
+	base := identityBase(t)
+	main := filepath.Join(base, "main")
+	identityRepo(t, main)
+	host := filepath.Join(base, "host")
+	identityRepo(t, host)
+	mainGit := filepath.Join(main, ".git")
+
+	cases := []struct {
+		name, content, want string
+	}{
+		{"CRLF line end (git follows)", "gitdir: " + mainGit + "\r\n", main},
+		{"no blank after the colon (git: invalid gitfile format)", "gitdir:" + mainGit + "\n", host},
+		{"two blanks after the colon (git: not a valid repository)", "gitdir:  " + mainGit + "\n", host},
+		{"trailing blank after the path (git: not a valid repository)", "gitdir: " + mainGit + " \n", host},
+	}
+	for i, c := range cases {
+		dir := filepath.Join(host, "case"+strconv.Itoa(i))
+		identityMkdir(t, dir)
+		if err := os.WriteFile(filepath.Join(dir, ".git"), []byte(c.content), 0o644); err != nil {
+			t.Fatalf("write .git: %v", err)
+		}
+		if got := resolveProject(dir); got != c.want {
+			t.Errorf("%s: resolveProject = %s, want %s", c.name, got, c.want)
+		}
+	}
+
+	// commondir follows the same rule: git refuses "../.. " (trailing blank).
+	identityGit(t, main, "worktree", "add", "-q", "../host/wt", "-b", "wt")
+	if err := os.WriteFile(filepath.Join(mainGit, "worktrees", "wt", "commondir"), []byte("../.. \n"), 0o644); err != nil {
+		t.Fatalf("write commondir: %v", err)
+	}
+	expectIdentity(t, host, filepath.Join(host, "wt"))
 }
 
 // TestGitCoreWorktreeReadsGitConfigSyntax pins the config reader behind the
@@ -359,6 +399,14 @@ func TestGitCoreWorktreeReadsGitConfigSyntax(t *testing.T) {
 		{"extension = 0", "[core]\n\tworktree = ../old\n[extensions]\n\tworktreeConfig = 0\n", moved, "../old"},
 		{"no extension, stray config.worktree", "[core]\n\tworktree = ../old\n", moved, "../old"},
 		{"extension, config.worktree without the key", "[core]\n\tworktree = ../old\n[extensions]\n\tworktreeConfig = true\n", "[core]\n\tsparseCheckout = true\n", "../old"},
+		// Blanks: git keeps them inside quotes and drops only unquoted
+		// leading and trailing ones (`git config --get`, git 2.56.0).
+		{"quoted trailing blank", "[core]\n\tworktree = \"../../../sub \"\n", "", "../../../sub "},
+		{"quoted leading blanks", "[core]\n\tworktree = \"  lead\"   \n", "", "  lead"},
+		{"quoted blank before comment", "[core]\n\tworktree = \"a \" # c\n", "", "a "},
+		{"unquoted blanks around a comment", "[core]\n\tworktree = a  ; c\n", "", "a"},
+		{"inner unquoted blanks kept verbatim", "[core]\n\tworktree = a\t \tb\n", "", "a\t \tb"},
+		{"quote in the middle", "[core]\n\tworktree = a\" \"b\n", "", "a b"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

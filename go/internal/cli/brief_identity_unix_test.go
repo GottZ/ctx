@@ -115,3 +115,65 @@ func TestResolveProjectRelativeGitdirThroughSymlink(t *testing.T) {
 	}
 	expectIdentity(t, main, filepath.Join(base, "main-rel"), relLink)
 }
+
+// TestResolveProjectSeparateGitDirWithTrailingBlank: git writes and follows a
+// gitdir path that ends in a blank ("store "). The main checkout and its
+// linked worktree must share that directory as identity.
+func TestResolveProjectSeparateGitDirWithTrailingBlank(t *testing.T) {
+	base := identityBase(t)
+	storeDir := filepath.Join(base, "st", "store ")
+	identityMkdir(t, filepath.Join(base, "st"))
+	identityGit(t, base, "init", "-q", "--separate-git-dir", storeDir, "sep")
+	sep := filepath.Join(base, "sep")
+	identityGit(t, sep, "commit", "-q", "--allow-empty", "-m", "root")
+	identityGit(t, sep, "worktree", "add", "-q", "../sep-wt", "-b", "wt")
+	expectIdentity(t, storeDir, sep, filepath.Join(base, "sep-wt"))
+}
+
+// TestResolveProjectRelativePathsResolvePhysically: git appends a relative
+// gitdir, commondir or core.worktree to its base and lets the file system
+// resolve it, so a symlink before ".." goes where the link points, not where
+// a lexical clean would cut it. Each layout below is followed by git 2.56.0
+// to the main checkout (gitdir, commondir) or the submodule checkout
+// (core.worktree); lexically they all land elsewhere.
+func TestResolveProjectRelativePathsResolvePhysically(t *testing.T) {
+	base := identityBase(t)
+	main := filepath.Join(base, "main")
+	identityRepo(t, main)
+	mainGit := filepath.Join(main, ".git")
+
+	// gitdir: link/../worktrees/wt with link -> <main>/.git/objects.
+	identityGit(t, main, "worktree", "add", "-q", "../wt", "-b", "wt")
+	wt := filepath.Join(base, "wt")
+	if err := os.Symlink(filepath.Join(mainGit, "objects"), filepath.Join(wt, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: link/../worktrees/wt\n"), 0o644); err != nil {
+		t.Fatalf("write .git: %v", err)
+	}
+
+	// commondir: lnk/../.. with lnk -> <main>/.git/refs/heads.
+	identityGit(t, main, "worktree", "add", "-q", "../wt2", "-b", "wt2")
+	admin := filepath.Join(mainGit, "worktrees", "wt2")
+	if err := os.Symlink(filepath.Join(mainGit, "refs", "heads"), filepath.Join(admin, "lnk")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(admin, "commondir"), []byte("lnk/../..\n"), 0o644); err != nil {
+		t.Fatalf("write commondir: %v", err)
+	}
+	expectIdentity(t, main, wt, filepath.Join(base, "wt2"))
+
+	// core.worktree: lnk/../../../../../sub with lnk -> <modules/sub>/refs/heads.
+	subSrc := filepath.Join(base, "subsrc")
+	identityRepo(t, subSrc)
+	super := filepath.Join(base, "super")
+	identityRepo(t, super)
+	identityGit(t, super, "submodule", "-q", "add", subSrc, "sub")
+	modules := filepath.Join(super, ".git", "modules", "sub")
+	if err := os.Symlink(filepath.Join(modules, "refs", "heads"), filepath.Join(modules, "lnk")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	identityGit(t, base, "config", "-f", filepath.Join(modules, "config"), "core.worktree", "lnk/../../../../../sub")
+	sub := filepath.Join(super, "sub")
+	expectIdentity(t, sub, sub)
+}

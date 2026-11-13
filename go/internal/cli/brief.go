@@ -288,11 +288,9 @@ func projectFromGitFile(gitFile string) (string, bool) {
 	c, err := readGitMeta(filepath.Join(gitDir, "commondir"))
 	switch {
 	case err == nil:
-		common = strings.TrimSpace(string(c))
-		if !filepath.IsAbs(common) {
-			common = filepath.Join(gitDir, common)
+		if common, ok = resolveGitPath(gitDir, strings.TrimRight(string(c), "\r\n")); !ok {
+			return "", false
 		}
-		common = filepath.Clean(common)
 	case !errors.Is(err, fs.ErrNotExist):
 		return "", false
 	}
@@ -302,33 +300,44 @@ func projectFromGitFile(gitFile string) (string, bool) {
 	return projectFromCommonDir(common), true
 }
 
-// gitDirFromFile reads the "gitdir: <path>" line of a .git file. A relative
-// path is taken from the file's directory as the file system resolves it
-// (git does not clean the path lexically), so a worktree entered through a
-// symlink lands where git lands. The target must hold a HEAD file — part of
-// git's own check before it follows a .git file.
+// gitDirFromFile reads a .git file the way git does: the content must start
+// with exactly "gitdir: ", only trailing CR/LF is dropped (a path may end in
+// a blank), and the path is resolved by resolveGitPath from the file's
+// directory. The target must hold a HEAD file — part of git's own check
+// before it follows a .git file.
 func gitDirFromFile(gitFile string) (string, bool) {
 	b, err := readGitMeta(gitFile)
 	if err != nil {
 		return "", false
 	}
-	content := strings.TrimSpace(string(b))
-	if !strings.HasPrefix(content, "gitdir:") {
+	rel, ok := strings.CutPrefix(strings.TrimRight(string(b), "\r\n"), "gitdir: ")
+	if !ok || rel == "" {
 		return "", false
 	}
-	gitDir := strings.TrimSpace(strings.TrimPrefix(content, "gitdir:"))
-	if !filepath.IsAbs(gitDir) {
-		base := filepath.Dir(gitFile)
-		if physical, err := filepath.EvalSymlinks(base); err == nil {
-			base = physical
-		}
-		gitDir = filepath.Join(base, gitDir)
+	gitDir, ok := resolveGitPath(filepath.Dir(gitFile), rel)
+	if !ok {
+		return "", false
 	}
-	gitDir = filepath.Clean(gitDir)
 	if info, err := os.Stat(filepath.Join(gitDir, "HEAD")); err != nil || info.IsDir() { //nolint:gosec // G703: repository-local git metadata reached through the user's own .git file, only stat'ed
 		return "", false
 	}
 	return gitDir, true
+}
+
+// resolveGitPath resolves a path value from git metadata (gitdir, commondir,
+// core.worktree) the way git does: a relative value is appended to base
+// without a lexical clean, and the file system resolves the whole path, so a
+// symlink before ".." leads where the link points. The result is the physical
+// path; ok is false when the path does not exist.
+func resolveGitPath(base, p string) (string, bool) {
+	if !filepath.IsAbs(p) {
+		p = base + string(filepath.Separator) + p
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return "", false
+	}
+	return resolved, true
 }
 
 // walkedSpelling returns the directory on the walk from d upward that is the
@@ -358,8 +367,9 @@ func walkedSpelling(d, id string) string {
 //
 //  1. named .git: its parent, the main checkout of an ordinary repository and
 //     exactly what the .git-directory rule yields inside that checkout;
-//  2. core.worktree set: that checkout, relative to the git directory (a
-//     submodule records its checkout there);
+//  2. core.worktree set: that checkout, resolved from the git directory like
+//     git does (a submodule records its checkout there); a checkout that does
+//     not exist, where git itself would stop, keeps the lexical form;
 //  3. otherwise the git directory itself: a bare repository has no checkout,
 //     and a --separate-git-dir repository records none. Its parent is never
 //     used, because sibling repositories share it.
@@ -368,6 +378,9 @@ func projectFromCommonDir(common string) string {
 		return filepath.Dir(common)
 	}
 	if wt := gitCoreWorktree(common); wt != "" {
+		if resolved, ok := resolveGitPath(common, wt); ok {
+			return resolved
+		}
 		if !filepath.IsAbs(wt) {
 			wt = filepath.Join(common, wt)
 		}
@@ -428,36 +441,57 @@ func readGitConfig(path string) map[string]string {
 	return vals
 }
 
-// gitConfigValue decodes a config value the way git reads it: surrounding
-// blanks dropped, double quotes removed, backslash escapes decoded, and an
-// unquoted '#' or ';' starting a comment.
+// gitConfigValue decodes a config value the way git's config parser does:
+// unquoted blanks before the value and after its last other character are
+// dropped, blanks inside double quotes are kept, the quotes are removed,
+// backslash escapes are decoded, and an unquoted '#' or ';' starts a comment.
 func gitConfigValue(v string) string {
 	var sb strings.Builder
 	inQuote := false
-	v = strings.TrimSpace(v)
+	trimAt := -1 // value length before the current run of unquoted blanks
 	for i := 0; i < len(v); i++ {
-		switch c := v[i]; {
+		c := v[i]
+		if !inQuote && (c == ' ' || c == '\t' || c == '\r') {
+			if sb.Len() == 0 {
+				continue
+			}
+			if trimAt < 0 {
+				trimAt = sb.Len()
+			}
+			sb.WriteByte(c)
+			continue
+		}
+		if !inQuote && (c == '#' || c == ';') {
+			break
+		}
+		trimAt = -1
+		switch {
 		case c == '"':
 			inQuote = !inQuote
 		case c == '\\' && i+1 < len(v):
 			i++
-			switch v[i] {
-			case 'n':
-				sb.WriteByte('\n')
-			case 't':
-				sb.WriteByte('\t')
-			case 'b':
-				sb.WriteByte('\b')
-			default:
-				sb.WriteByte(v[i])
-			}
-		case !inQuote && (c == '#' || c == ';'):
-			return strings.TrimSpace(sb.String())
+			sb.WriteByte(gitConfigEscape(v[i]))
 		default:
 			sb.WriteByte(c)
 		}
 	}
-	return strings.TrimSpace(sb.String())
+	if trimAt >= 0 {
+		return sb.String()[:trimAt]
+	}
+	return sb.String()
+}
+
+// gitConfigEscape decodes the byte after a backslash in a config value.
+func gitConfigEscape(c byte) byte {
+	switch c {
+	case 'n':
+		return '\n'
+	case 't':
+		return '\t'
+	case 'b':
+		return '\b'
+	}
+	return c
 }
 
 // gitConfigBool reports a git boolean as true: true/yes/on or a non-zero integer.
