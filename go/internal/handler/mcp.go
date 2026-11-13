@@ -79,6 +79,17 @@ func newMCPSDKHandler(cfg MCPConfig) http.Handler {
 type queryInput struct {
 	Question string `json:"question" jsonschema:"the question to answer using hybrid search + LLM synthesis"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"max sources to return (default 5)"`
+	// Category, Tags and CategoriesExclude are /api/query's own three fields
+	// (queryRequest), forwarded under the same wire names and with its
+	// semantics. They carry no new reach: each is a restrictive predicate
+	// inside the scopes the key already reads, so unlike `types` below they
+	// need no visibility check. Absent or empty ⇒ no key in the delegated
+	// body; an empty category is "no filter", as on `search` and `recent`.
+	// Like every /api/query filter they bind the rank-fusion candidates only:
+	// cluster boost, graph expansion and aggregate fold do not take them.
+	Category          string   `json:"category,omitempty" jsonschema:"retrieve only blocks of this category"`
+	Tags              []string `json:"tags,omitempty" jsonschema:"retrieve only blocks that carry at least one of these tags"`
+	CategoriesExclude []string `json:"categories_exclude,omitempty" jsonschema:"do not retrieve blocks of these categories"`
 	// V-W6: the MCP-only type filters of the RETRIEVAL tools. `types` CUTS
 	// against the request's visible allowlist — it never assigns visibility;
 	// see resolveMCPVisibleTypes for the two rejections and for why
@@ -539,6 +550,16 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
 		// (temporal, embedding, RRF, gravity, rerank, supersedes, synthesis).
 		// The ctx already carries the AuthResult from MCP auth middleware.
 		payload := map[string]any{"query": input.Question, "limit": limit}
+		// /api/query's own filters, forwarded unchanged and only when given.
+		if input.Category != "" {
+			payload["category"] = input.Category
+		}
+		if len(input.Tags) > 0 {
+			payload["tags"] = input.Tags
+		}
+		if len(input.CategoriesExclude) > 0 {
+			payload["categories_exclude"] = input.CategoriesExclude
+		}
 		// The key is added ONLY when a filter was asked for, so a request
 		// without both fields marshals to the exact bytes it did before V-W6.
 		if excl := mcpQueryTypesExclude(typeSet, cut, input.TypesExclude); len(excl) > 0 {
