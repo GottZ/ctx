@@ -1077,11 +1077,17 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # The release stamp (FOLGE-X, go/Dockerfile ARG CTX_VERSION): the
-          # image's GET /health version and boot line name the commit it was
-          # built from instead of "dev"; the tag worktree build passes the
-          # release tag the same way.
+          # image's GET /health version and boot line name what it was built
+          # from instead of "dev" — the tag on a tag ref (a workflow_dispatch
+          # on refs/tags/vX.Y.Z; this job publishes only while that commit is
+          # the tip of root), git-<commit> otherwise. A push to root builds
+          # before the release tag exists, so its image says git-<commit>
+          # even when that commit is tagged later. The compose build takes
+          # the tag from CTX_VERSION in its environment (docker-compose.yml
+          # build.args, docs/operations.md). Pinned by internal/config
+          # TestCIImageStampsTagOnTagRefs.
           build-args: |
-            CTX_VERSION=git-${{ github.sha }}
+            CTX_VERSION=${{ github.ref_type == 'tag' && github.ref_name || format('git-{0}', github.sha) }}
           # Supply-Chain (Sweep 2026-09-19): das publizierte Image trug zwar die
           # BuildKit-Provenance im Default-Modus, aber KEINE SBOM
           # (`imagetools inspect --format '{{json .SBOM}}'` → {}). sbom: true hängt

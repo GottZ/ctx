@@ -191,8 +191,38 @@ func assertHealthBody(t *testing.T, body []byte, needles []string) {
 
 // healthVersionForm is the vocabulary of /health version: a semantic version
 // with an optional v, pre-release and build part (a release tag, a Go
-// pseudo-version), a VCS revision with an optional -dirty, or "dev".
-var healthVersionForm = regexp.MustCompile(`^(v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?|[0-9a-f]{7,64}(-dirty)?|dev)$`)
+// pseudo-version), git-<commit> (the stamp CI gives the ghcr image of a root
+// commit, .github/workflows/ci.yml), a VCS revision with an optional -dirty,
+// or "dev".
+var healthVersionForm = regexp.MustCompile(`^(v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?|git-[0-9a-f]{7,64}|[0-9a-f]{7,64}(-dirty)?|dev)$`)
+
+// TestHealthVersionFormAcceptsEveryStamp pins healthVersionForm against the
+// values the builds actually stamp (#187 point 2): the gate is the /health
+// version vocabulary, so a stamp a shipped artefact carries must pass it —
+// CI's ghcr image of a root commit says git-<commit> (ci.yml, docker job), and
+// a test binary built with that -ldflags stamp failed every health shape test.
+func TestHealthVersionFormAcceptsEveryStamp(t *testing.T) {
+	sha1 := strings.Repeat("0123456789abcdef", 3)[:40]
+	sha256 := strings.Repeat("0123456789abcdef", 4)
+	for _, v := range []string{
+		"v5.36.0",                            // release tag (CTX_VERSION on a tag build)
+		"git-" + sha1,                        // CI image of a root commit
+		"git-" + sha256,                      // the same in a SHA-256 repository
+		"v0.0.0-20261113120000-abcdef123456", // Go pseudo-version (module version of a go install)
+		sha1,                                 // VCS revision of a plain go build
+		sha1 + "-dirty",                      // ... of a modified tree
+		"dev",                                // unstamped
+	} {
+		if !healthVersionForm.MatchString(v) {
+			t.Errorf("healthVersionForm rejects the stamped version %q", v)
+		}
+	}
+	for _, v := range []string{"", "git-", "git-0123", "git-" + strings.ToUpper(sha1), "git-" + sha1 + "-dirty", "release", "dev-dirty"} {
+		if healthVersionForm.MatchString(v) {
+			t.Errorf("healthVersionForm accepts %q, which no build stamps", v)
+		}
+	}
+}
 
 // TestHealthCarriesBuildVersion is the FOLGE-X pin: GET /health names the
 // build it runs — the same value as provenance.BuildVersion (the release

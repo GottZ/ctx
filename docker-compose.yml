@@ -7,6 +7,15 @@ services:
     build:
       context: ./go
       dockerfile: Dockerfile
+      # The release stamp GET /health version and the boot line report
+      # (go/Dockerfile ARG CTX_VERSION). The build context holds no git
+      # metadata, so the tag comes from the build's environment; from a tag
+      # checkout: CTX_VERSION=$(git describe --tags --exact-match --match 'v*')
+      # docker compose build ctx (docs/operations.md, Deploy & migrations).
+      # Unset or empty = "dev". Pinned by internal/config
+      # TestComposeCtxBuildPassesVersionStamp.
+      args:
+        CTX_VERSION: ${CTX_VERSION:-dev}
     container_name: ctx
     restart: unless-stopped
     # Time between SIGTERM and SIGKILL. ctxd's shutdown spends up to 15 s on

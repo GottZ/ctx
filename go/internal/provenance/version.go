@@ -10,9 +10,10 @@ import (
 //
 //	go build -ldflags "-X github.com/GottZ/ctx/internal/provenance.version=v5.35.0" ./cmd/ctxd
 //
-// The ctxd image sets it from the build-arg CTX_VERSION (go/Dockerfile;
-// `docker compose build --build-arg CTX_VERSION=vX.Y.Z ctx`). Empty or "dev"
-// = not stamped.
+// The ctxd image sets it from the build-arg CTX_VERSION (go/Dockerfile): the
+// compose build passes CTX_VERSION from its environment (docker-compose.yml
+// build.args), CI the tag on a tag ref and git-<commit> otherwise
+// (.github/workflows/ci.yml). Empty or "dev" = not stamped.
 var version string
 
 // BuildVersion is the release this binary was built as (FOLGE-X, LOOP
