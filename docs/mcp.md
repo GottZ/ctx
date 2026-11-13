@@ -135,6 +135,12 @@ Sources:
 `[N]` is the citation number the answer uses; `[n/a]` marks a source that was
 retrieved but never entered the synthesis prompt.
 
+The call ends with its client: a client that closes the connection while the
+pipeline runs cancels it, as on `POST /api/query`, so no further backend call or
+quota is spent on an answer that can no longer be delivered. This holds on every
+protocol version. Only `query` is bound to the connection this way; the other
+tools are not.
+
 With `synthesize: false` the tool passes `synthesize` and `include_content` to
 `POST /api/query` under the same names and skips the synthesis step, as that route
 does. The answer is then a JSON document instead of prose: `confidence` and

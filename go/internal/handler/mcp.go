@@ -46,9 +46,11 @@ type MCPConfig struct {
 // extracting X-Context-Key (or Authorization: Bearer) from the request.
 //
 // The SDK handler is wrapped in the /mcp keepalive (mcp_keepalive.go), which
-// only the query tool arms: every other request passes through unchanged.
+// only the query tool arms: every other request passes through unchanged. The
+// outer wrapper hands the request context to the query tool, which ends its
+// delegation with it (mcp_cancel.go).
 func NewMCPHandler(cfg MCPConfig) http.Handler {
-	return withMCPKeepalive(newMCPSDKHandler(cfg))
+	return withMCPRequestContext(withMCPKeepalive(newMCPSDKHandler(cfg)))
 }
 
 // newMCPSDKHandler is the bare MCP SDK handler, without the keepalive.
@@ -525,6 +527,11 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
 		if input.Question == "" {
 			return errResult("question is required"), nil, nil
 		}
+		// A client that disconnects ends the call, and with it the delegated
+		// pipeline below (mcp_cancel.go): no backend call and no quota for an
+		// answer nobody receives.
+		ctx, release := mcpRequestBoundContext(ctx)
+		defer release()
 		// From here on the call can run for minutes (backfill, embedding,
 		// rerank, synthesis) while the SDK holds the whole answer back. Keep
 		// the /mcp response alive until this handler returns; stop runs
