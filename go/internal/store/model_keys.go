@@ -61,11 +61,24 @@ const MaxRotationGrace = 7 * 24 * time.Hour
 // most stamps a crash can lose.
 const ModelKeyUsageFlushInterval = 60 * time.Second
 
-// ModelKeyUsageFinalFlushTimeout bounds the flush Run performs after its
-// context ends, on a context of its own (the cancelled one cannot carry it).
-// It is a step of ctxd's shutdown budget (cmd/ctxd gatewayStopTimeout, the
-// compose stop_grace_period).
-const ModelKeyUsageFinalFlushTimeout = 5 * time.Second
+// ModelKeyUsageFinalFlushTimeout bounds the final flush Run performs after its
+// context ends — every attempt and the pauses between them — on a context of
+// its own (the cancelled one cannot carry it). It is a step of ctxd's
+// shutdown budget and stays below cmd/ctxd gatewayStopTimeout (5 s), so the
+// gateway's stop step sees Run return and can report the stamps the flush
+// left (#124); a test there pins the order. A mechanism constant like the
+// interval: it bounds the process's own write inside a budget the compose
+// stop_grace_period is pinned against, it is no policy.
+const ModelKeyUsageFinalFlushTimeout = 4 * time.Second
+
+// ModelKeyUsageFinalFlushRetry is the pause between two attempts of the final
+// flush while stamps stay pending — keys whose rows another transaction held
+// (the flush skips them) or a failed attempt. Short against the consumer
+// writers' row locks (a rotation, a deactivation, the prune's key step hold
+// them for one transaction); at most ModelKeyUsageFinalFlushTimeout /
+// ModelKeyUsageFinalFlushRetry (40) attempts, each one statement over the
+// stamps still pending. A mechanism constant (#124).
+const ModelKeyUsageFinalFlushRetry = 100 * time.Millisecond
 
 var (
 	// ErrModelConsumerNotFound: no consumer with this id in the caller's reach —
@@ -1057,26 +1070,63 @@ func (u *ModelKeyUsage) retain(batch map[uuid.UUID]time.Time, only []string) {
 	}
 }
 
-// Run flushes every ModelKeyUsageFlushInterval until ctx ends, then once more
-// on a context of its own bounded by ModelKeyUsageFinalFlushTimeout, so an
-// orderly shutdown loses no stamp. A failed flush is logged and retried on
-// the next tick.
+// Pending reports how many keys hold a stamp not yet written. Once Run has
+// returned it is what the final flush left (the gateway's stop step logs it);
+// while a flush runs, the keys of its batch are not counted. After a failed
+// attempt it is an upper bound: the whole batch went back, deleted keys and
+// stamps older than the stored one included.
+func (u *ModelKeyUsage) Pending() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return len(u.pending)
+}
+
+// Run flushes every ModelKeyUsageFlushInterval until ctx ends, then performs
+// the final flush (finalFlush), so an orderly shutdown loses no stamp. A
+// failed periodic flush is logged and retried on the next tick.
 func (u *ModelKeyUsage) Run(ctx context.Context) {
 	t := time.NewTicker(u.interval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ModelKeyUsageFinalFlushTimeout)
-			if err := u.Flush(fctx); err != nil {
-				slog.Warn("store: final model key usage flush failed", "err", err)
-			}
-			cancel()
+			u.finalFlush(ctx)
 			return
 		case <-t.C:
 			if err := u.Flush(ctx); err != nil {
 				slog.Warn("store: model key usage flush failed", "err", err)
 			}
+		}
+	}
+}
+
+// finalFlush flushes until no stamp is pending or ModelKeyUsageFinalFlushTimeout
+// has passed, pausing ModelKeyUsageFinalFlushRetry between attempts: a key
+// row another transaction holds at shutdown is skipped by Flush, and a later
+// attempt writes it once the lock is gone (#124). It runs on a context of its
+// own — the cancelled one cannot carry it — and returns at that context's
+// deadline even when every attempt fails. The error of the last attempt that
+// failed on its own is logged; one the deadline cut short is not (the window
+// ended — what is still pending then, Pending reports, and the gateway's stop
+// step counts it).
+func (u *ModelKeyUsage) finalFlush(ctx context.Context) {
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ModelKeyUsageFinalFlushTimeout)
+	defer cancel()
+	var err error
+	for {
+		if ferr := u.Flush(fctx); fctx.Err() == nil {
+			err = ferr
+		}
+		if u.Pending() == 0 {
+			return
+		}
+		select {
+		case <-fctx.Done():
+			if err != nil {
+				slog.Warn("store: final model key usage flush failed", "err", err)
+			}
+			return
+		case <-time.After(ModelKeyUsageFinalFlushRetry):
 		}
 	}
 }

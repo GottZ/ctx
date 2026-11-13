@@ -889,10 +889,12 @@ const (
 	// ones are refused.
 	shutdownHTTPTimeout = 15 * time.Second
 	// gatewayStopTimeout bounds the model gateway's stop (W02-05): the final
-	// last_used_at flush, itself bounded by the store's own timeout, and the
+	// last_used_at flush, itself bounded by the store's own window
+	// (store.ModelKeyUsageFinalFlushTimeout, 4 s) and kept shorter so the
+	// step sees it return and can count the stamps it left (#124), and the
 	// access log's last rejection lines. It runs alongside the first llmlog
 	// settle, so it adds nothing to the sum while it stays <= that settle.
-	gatewayStopTimeout = store.ModelKeyUsageFinalFlushTimeout
+	gatewayStopTimeout = 5 * time.Second
 	// llmlogSettleTimeout bounds EACH of the two llmlog.Settle calls: queued
 	// and running context_llm_log inserts land before the teardown moves on.
 	// Rows still pending after the second one are lost when the pool closes.
