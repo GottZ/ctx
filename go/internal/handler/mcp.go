@@ -208,6 +208,12 @@ func (input searchInput) coreArgs(facetEnabled bool) searchArgs {
 
 type getInput struct {
 	ID string `json:"id" jsonschema:"block UUID"`
+	// IncludeArchived (#201) is the opt-in read of an archived block, so a
+	// citation by id stays checkable after the cited block was archived. Full
+	// id only, the key's own scopes only (never through a block or scope grant),
+	// and the answer carries archived: true. Absent ⇒ the call is answered
+	// exactly as before the field existed.
+	IncludeArchived bool `json:"include_archived,omitempty" jsonschema:"also read an archived block: full block id only, within this key's own scopes (never through a grant); the answer then carries archived: true"`
 }
 
 type recentInput struct {
@@ -265,12 +271,19 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 		Description: "Update fields of an existing block (category, title, content, tags, metadata). Resolves the id within this key's writable scopes.",
 	}, mcpUpdateHandler(cfg))
 
+	// archive (#201): manage-delete parity — archives one block the key may
+	// write. Stages for confirm_writes keys (op 'archive', drift-pinned).
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "archive",
+		Description: "Archive a block: it leaves query, search, recent and get, and stays readable by full id with get include_archived. Resolves the id within this key's writable scopes. There is no unarchive tool.",
+	}, mcpArchiveHandler(cfg))
+
 	// confirm (F6-C6 D-W5/W6a): executes a staged write by payload hash. Only
 	// meaningful for confirm_writes keys — for everyone else every hash is a
 	// generic miss (the store/update tools never stage for them).
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "confirm",
-		Description: "Execute a staged write. A key with the confirm_writes capability gets store/update calls STAGED (response carries a payload_hash); calling confirm with that hash executes the exact server-held write.",
+		Description: "Execute a staged write. A key with the confirm_writes capability gets store/update/archive calls STAGED (response carries a payload_hash); calling confirm with that hash executes the exact server-held write.",
 	}, mcpConfirmHandler(cfg))
 
 	// W12: issue-content write tools (issue_create/issue_comment/issue_state,
@@ -846,6 +859,9 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 		if ar == nil { // T07/L7 fail-closed (design/01 §5.4): never fall back to the default tenant
 			return errResult("unauthorized: no resolved tenant identity"), nil, nil
 		}
+		if archivedReadRefused(input.ID, input.IncludeArchived) {
+			return errResult(archivedReadNeedsFullIDMsg), nil, nil
+		}
 		scopes := ar.ReadScopes
 
 		grants, err := resolveGrants(ctx, cfg.Pool, ar)
@@ -868,9 +884,15 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 			return errResult("block not found"), nil, nil
 		}
 
-		block, err := store.GetBlock(ctx, cfg.Pool, cfg.mcpTypeSnapshot(ctx), resolvedID, scopes, grants)
+		block, err := readBlockForGet(ctx, cfg.Pool, cfg.mcpTypeSnapshot(ctx), ar, resolvedID, grants, input.IncludeArchived)
 		if err != nil {
 			return errResult(fmt.Sprintf("get failed: %v", err)), nil, nil
+		}
+		// #201: a full id passes ResolveBlockID unchecked, so an unknown, a
+		// foreign and an archived id all arrive here as nil — and answer what
+		// the prefix miss above answers, not a JSON null.
+		if block == nil {
+			return errResult("block not found"), nil, nil
 		}
 
 		data, _ := json.MarshalIndent(block, "", "  ")

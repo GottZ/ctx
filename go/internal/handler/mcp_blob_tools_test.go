@@ -77,8 +77,8 @@ func TestMCPToolsListCarriesBlobTools(t *testing.T) {
 	// The count is pinned in test.sh T17 against the live server. Pinning it
 	// here too is what makes the two agree: a tool added without touching T17
 	// fails at go test time instead of on a deployed system.
-	if len(names) != 15 {
-		t.Errorf("tools/list exports %d tools, want 15 (test.sh T17 pins the same number) — tools = %v",
+	if len(names) != 16 {
+		t.Errorf("tools/list exports %d tools, want 16 (test.sh T17 pins the same number) — tools = %v",
 			len(names), names)
 	}
 }
