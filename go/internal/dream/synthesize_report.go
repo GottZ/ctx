@@ -358,8 +358,12 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 	// lifecycle_state is not handled by the Welle-44 hook (which only sets
 	// type_name). Set it explicitly so /api/query consumers can
 	// distinguish synthesis output from generic learnings blocks.
+	// A chunk row that already held the report's (category, title, scope) is
+	// where the upsert landed; it keeps 'chunk' — the lifecycle InsertChunk's
+	// arbiter finds its slot by (issue #191).
 	if _, err := pool.Exec(ctx,
-		`UPDATE context_blocks SET lifecycle_state = 'synthesis' WHERE id = $1::uuid`,
+		`UPDATE context_blocks SET lifecycle_state = 'synthesis'
+		 WHERE id = $1::uuid AND lifecycle_state <> 'chunk'`,
 		block.ID,
 	); err != nil {
 		return "", fmt.Errorf("dream: synthesize report: set lifecycle_state: %w", err)

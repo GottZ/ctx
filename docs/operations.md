@@ -1197,6 +1197,34 @@ The only writer is ctxd's rejection flusher: every 10 seconds and once at shutdo
 
 **Downgrading** below 168: an older binary neither reads nor writes the table — the limits rows stop applying and every consumer falls back to the settings. To remove it: `DROP TABLE context_gateway_limits; DROP FUNCTION audit_gateway_limits_write(), audit_state_gateway_limit(context_gateway_limits); DELETE FROM _migrations WHERE version = 168;`.
 
+### Migration 169: chunk rows that left the `chunk` lifecycle go back to their slot
+
+A chunk-mode ingest (`source_id` + `chunk_index`) writes into its slot only through a row whose `lifecycle_state` is `chunk`. Older binaries moved chunk rows out of that state: a dream `supersedes` link onto a chunk marked it `snapshot` (and removing the link handed it back as `knowledge`, as did migration 154; a dream promotion to `canonical` could follow), and the daily report stamped `synthesis` on a chunk that held its title. Such a slot no longer took a changed-content ingest — the chunk answered `failed` / `insert chunk failed` — and a re-ingest under a new title left the old row live next to the new one, so bringing the old title back failed the same way. The current binary keeps every chunk in its lifecycle (the `supersedes` link is still written and still read by the query path); migration 169 repairs the rows moved before, once:
+
+- **restore** — a live row with a slot (`source_id` and `chunk_index` set) outside `chunk`, alone in its slot: `lifecycle_state` → `chunk`, `superseded_by` → `NULL`.
+- **archive** — a slot with more than one such live row, or with a live `chunk` row next to it: the live `chunk` row stays as it is, otherwise the newest of the moved rows is restored; every other moved row of the slot is an older version the ingest would have overwritten in place and is archived (with `lifecycle_state` `chunk`), which frees its title.
+
+Rows whose source was deleted (`source_id` `NULL`) own no slot and are left alone, so are archived rows. A slot that holds a live row outside its source's scope — a manage or MCP update can move any block, a chunk included — is left exactly as it is: the ingest writes only in the source's scope, and the repair does not decide between scopes. `updated_at` is not bumped. A daily report that had landed on a chunk-held title stays in that row as its content until the next changed ingest of the slot replaces it; the repair does not move it out.
+
+**What it tells you.** When it changes something, two boot-log lines give the restored and archived counts and the recovery query; a third counts the rows left in slots with a scope-moved row. On a database without such rows it says nothing; a second application changes nothing. The pass collects the moved rows once — through `idx_source_id` while chunk rows are a minority of the table (measured: 30 000 chunk rows in 90 000, under 20 ms), with one table scan where they dominate — and writes only the moved ones. The rows left in place are listed by:
+
+```bash
+docker compose exec db psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" -c \
+  "SELECT id, scope, lifecycle_state, source_id FROM context_blocks
+    WHERE source_id IS NOT NULL AND chunk_index IS NOT NULL
+      AND NOT is_archived AND lifecycle_state <> 'chunk';"
+```
+
+**Recovering the previous state.** Every touched row carries it in its metadata (a restored chunk loses the key on its next changed ingest, which replaces a chunk's metadata):
+
+```bash
+docker compose exec db psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" -c \
+  "SELECT id, is_archived, metadata->'chunk_lifecycle_repair' FROM context_blocks
+    WHERE metadata ? 'chunk_lifecycle_repair';"
+```
+
+**Downgrading** below 169 is safe for the data: the repaired rows are ordinary chunks. An older binary can move chunks out of their lifecycle again, and the migration does not run a second time; the file is idempotent, so running `go/migrations/169_chunk_lifecycle_repair.sql` by hand (`psql -f`) after such a period repairs those rows too.
+
 ### `graph_overview.csr_loader`: the rebuild's input substrate
 
 `CTX_GRAPH_OVERVIEW_CSR_LOADER` (default `false`, hot) switches how the rebuild gets its graph into memory. It changes no result — the partition, the modularity and the intra-cluster degrees are byte-identical either way, and that identity is a gate, not a hope.
