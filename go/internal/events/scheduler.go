@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -314,6 +315,13 @@ type Scheduler struct {
 	// instead of waiting for the natural CycleTimeout.
 	dreamCycleMu     sync.Mutex
 	dreamCycleCancel context.CancelFunc
+
+	// emptyWindowNoted remembers, per tenant scope, the (read_scopes, owned)
+	// value the empty-dream-window notice was last logged for, so the notice
+	// fires once per tenant and value change instead of once per cycle and
+	// worker. Guarded by emptyWindowMu; nil until the first notice.
+	emptyWindowMu    sync.Mutex
+	emptyWindowNoted map[string]string
 
 	// Sensitivity audit (G41): run state + the LLM seam (dreamCycleFunc
 	// pattern — the decision-table test swaps classify without a backend).
@@ -1315,6 +1323,15 @@ func (s *Scheduler) renderRootMap(ctx context.Context, bt backgroundTenant) {
 // only the in-process FALLBACK still abandons a Modularize goroutine until
 // convergence (documented leak, overview.clusterWithCtx).
 func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant) {
+	// A bound tenant owning nothing has no partition. The overview package
+	// reads an EMPTY scope filter as the global run (global load, TRUNCATE
+	// teardown, global attempt stamp), so it must never get one: no rebuild,
+	// no stamp, no root map, no purge for this tick. backgroundTenantFor never
+	// yields such an owned set today; the gate keeps it that way here.
+	if boundEmpty(bt.owned) {
+		slog.Debug("scheduler: overview rebuild skipped — tenant owns no scope", "tenant_scope", bt.scope)
+		return
+	}
 	// W-A: the attempt clock starts BEFORE the first gate — every one of the
 	// five exits stamps against it, and the stamp's ON CONFLICT condition
 	// (computed_at < attemptStart) uses it to discard a stamp that a
@@ -1881,6 +1898,19 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 			continue // Loop immediately to backfill more before dream runs.
 		}
 
+		// Empty clamp, fail-closed: a bound tenant (owned != nil) whose
+		// read_scopes share no scope with what it owns gets NO dream work this
+		// cycle — no pick, no claim, no LLM call. Without this gate the empty
+		// window reached PickBlock, whose scope conjunct is optional, and the
+		// cycle dreamed a block of ANY tenant under this tenant's router and
+		// policy. The tenant takes the idle wait like a tenant with nothing
+		// pickable, so the round-robin keeps its cadence. (The backfill above
+		// stays: it is bounded by owned, not by the read window.)
+		if s.dreamWindowClosed(bt, cfg.Scheduler.ReadScopes, readWindow) {
+			waitDreamIdle(ctx, cfg) // a cancel ends the wait; the loop head returns
+			continue
+		}
+
 		linksCreated, err := s.runDreamCycle(cfg, router, readWindow)
 		if err != nil {
 			slog.Error("scheduler: dream cycle error", "error", err)
@@ -1910,6 +1940,58 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 
 		// Links created.
 		slog.Info("scheduler: dream cycle complete", "links_created", linksCreated)
+	}
+}
+
+// boundEmpty reports a bound but empty scope set: non-nil and zero-length.
+// For a tenant's owned set or its clamped read window that means "this tenant
+// may read nothing", the opposite of nil (the unbounded legacy pass). Every
+// background consumer whose scope conjunct is optional (added only for a
+// non-empty list) must treat it as "do nothing", never as "no filter".
+func boundEmpty(scopes []string) bool {
+	return scopes != nil && len(scopes) == 0
+}
+
+// dreamWindowClosed decides the dream loop's empty-clamp gate for the iterated
+// tenant: true when the tenant is bound (owned != nil) and its clamped read
+// window (read_scopes ∩ owned) is empty. The notice is logged at most once per
+// tenant and (read_scopes, owned) value — every worker and every cycle share
+// emptyWindowNoted — and re-armed when the window becomes non-empty again, so
+// a later regression is logged anew. An unbound tenant (owned == nil, the
+// legacy pass) is never gated: its window is the raw read_scopes, which config
+// loading keeps non-empty.
+func (s *Scheduler) dreamWindowClosed(bt backgroundTenant, readScopes, window []string) bool {
+	closed := bt.owned != nil && len(window) == 0
+	s.emptyWindowMu.Lock()
+	defer s.emptyWindowMu.Unlock()
+	if !closed {
+		delete(s.emptyWindowNoted, bt.scope)
+		return false
+	}
+	value := strings.Join(readScopes, ",") + "|" + strings.Join(bt.owned, ",")
+	if prev, seen := s.emptyWindowNoted[bt.scope]; seen && prev == value {
+		return true
+	}
+	if s.emptyWindowNoted == nil {
+		s.emptyWindowNoted = make(map[string]string)
+	}
+	s.emptyWindowNoted[bt.scope] = value
+	slog.Warn("scheduler: dream skipped for tenant — read window is empty (scheduler.read_scopes ∩ owned scopes); add the tenant's scopes to scheduler.read_scopes or set a tenant override",
+		"tenant_scope", bt.scope, "read_scopes", readScopes, "owned", bt.owned)
+	return true
+}
+
+// waitDreamIdle sleeps the iteration's dream idle wait (dream.idle_wait, else
+// the package default) or until ctx is cancelled — the pause a tenant gated by
+// dreamWindowClosed takes, the same one a tenant with nothing pickable takes.
+func waitDreamIdle(ctx context.Context, cfg *config.Config) {
+	idle := cfg.Dream.IdleWait
+	if idle <= 0 {
+		idle = dreamIdleWaitDefault
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(idle):
 	}
 }
 
@@ -2237,6 +2319,9 @@ func (s *Scheduler) runEmbedBackfillLoop(ctx context.Context) {
 // picked on this turn (cross-tenant egress, same conjunct as the dream loop).
 func (s *Scheduler) backfillArmOnce(ctx context.Context, cfg *config.Config, bt backgroundTenant) (backfillOutcome, error) {
 	defer guardPanic("embed backfill arm")
+	if boundEmpty(bt.owned) {
+		return backfillIdle, nil // see backfillOneEmbedding
+	}
 	return s.backfillStep(ctx, s.newRouter(cfg, bt.scope), cfg, bt.owned)
 }
 
@@ -2269,6 +2354,14 @@ const (
 // whether a block was embedded — the dream loop, which keeps its pre-m3
 // pacing (a memo falls through to the dream cycle), and the pick tests.
 func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Router, cfg *config.Config, owned []string) (bool, error) {
+	// A bound tenant owning nothing has nothing to embed. backfillStep adds
+	// its scope conjunct only for a non-empty owned set, so without this exit
+	// the pick would range over every tenant's blocks on this tenant's chain.
+	// backgroundTenantFor never yields such an owned set today; both callers
+	// of backfillStep (this one and backfillArmOnce) keep it that way.
+	if boundEmpty(owned) {
+		return false, nil
+	}
 	outcome, err := s.backfillStep(ctx, router, cfg, owned)
 	return outcome == backfillEmbedded, err
 }
