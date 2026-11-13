@@ -53,6 +53,21 @@ func NewMCPHandler(cfg MCPConfig) http.Handler {
 
 // newMCPSDKHandler is the bare MCP SDK handler, without the keepalive.
 func newMCPSDKHandler(cfg MCPConfig) http.Handler {
+	server := newMCPServer(cfg)
+	return mcp.NewStreamableHTTPHandler(
+		func(_ *http.Request) *mcp.Server { return server },
+		&mcp.StreamableHTTPOptions{
+			Stateless:    true, // No session state needed — each call is independent.
+			JSONResponse: true, // Prefer JSON over SSE for simple request/response tools.
+		},
+	)
+}
+
+// newMCPServer is the MCP server with every tool registered and the panic
+// guard (mcp_recover.go) around all of them. The guard is added LAST, so it
+// is the outermost receiving middleware: anything installed after it would
+// run outside the guard, on the same goroutine the SDK does not recover.
+func newMCPServer(cfg MCPConfig) *mcp.Server {
 	server := mcp.NewServer(
 		&mcp.Implementation{
 			Name:    "ctx",
@@ -62,16 +77,9 @@ func newMCPSDKHandler(cfg MCPConfig) http.Handler {
 			Instructions: "ctx is a persistent knowledge store with hybrid retrieval. Use 'query' for questions, 'store' to save knowledge, 'search' for lightweight lookups.",
 		},
 	)
-
 	registerTools(server, cfg)
-
-	return mcp.NewStreamableHTTPHandler(
-		func(_ *http.Request) *mcp.Server { return server },
-		&mcp.StreamableHTTPOptions{
-			Stateless:    true, // No session state needed — each call is independent.
-			JSONResponse: true, // Prefer JSON over SSE for simple request/response tools.
-		},
-	)
+	server.AddReceivingMiddleware(mcpRecover)
+	return server
 }
 
 // Tool definitions.
