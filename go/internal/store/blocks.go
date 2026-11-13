@@ -195,7 +195,11 @@ type BlockPreview struct {
 	Untrusted      bool      `json:"untrusted,omitempty"`
 	Score          float64   `json:"score,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
-	CreatedAt      time.Time `json:"created_at,omitempty"`
+	// CreatedAt is selected by every statement that fills this struct
+	// (SearchBlocks compact and full, RecentBlocks). `omitzero`, not
+	// `omitempty`: omitempty never drops a struct value, so a statement that
+	// left the column out would answer year 1 as if it were a date (#205).
+	CreatedAt      time.Time `json:"created_at,omitzero"`
 }
 
 // BlockMeta is a lightweight listing entry (no content, no metadata).
@@ -1680,7 +1684,7 @@ func searchBlocksSQL(p searchParams) (string, []any) {
 	var selectFields string
 	var orderBy string
 	if compact {
-		selectFields = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, LEFT(content, 200) AS content_preview, length(content) AS content_length, updated_at`
+		selectFields = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, LEFT(content, 200) AS content_preview, length(content) AS content_length, created_at, updated_at`
 		if hasQuery {
 			orderBy = fmt.Sprintf(
 				`GREATEST(ts_rank_cd(ts_de, plainto_tsquery('german', $%d)), ts_rank_cd(ts_en, plainto_tsquery('english', $%d))) DESC`,
@@ -1731,7 +1735,7 @@ func runSearchBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set
 	for rows.Next() {
 		bp := BlockPreview{}
 		if compact {
-			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.Sensitivity, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.ContentPreview, &bp.ContentLength, &bp.UpdatedAt); err != nil {
+			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.Sensitivity, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.ContentPreview, &bp.ContentLength, &bp.CreatedAt, &bp.UpdatedAt); err != nil {
 				return nil, fmt.Errorf("store: search blocks scan: %w", err)
 			}
 		} else {
@@ -1774,7 +1778,7 @@ func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, r
 	// $1=scopes, $2=grants (block-grant OR-arm, T40a). The mandatory
 	// parentheses keep NOT is_archived OUTSIDE the scope/grant OR (a granted
 	// archived block must not leak). category, if present, shifts to $3.
-	q := `SELECT id, category, tags, title, scope, type_name, lifecycle_state, type_source, LEFT(content, 200), char_length(content), updated_at
+	q := `SELECT id, category, tags, title, scope, type_name, lifecycle_state, type_source, LEFT(content, 200), char_length(content), created_at, updated_at
 	      FROM context_blocks
 	      WHERE NOT is_archived AND ( scope = ANY($1::text[]) OR id = ANY($2::uuid[]) )`
 	args := []any{readScopes, grantedBlockIDs}
@@ -1802,7 +1806,7 @@ func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, r
 	results := make([]BlockPreview, 0, limit)
 	for rows.Next() {
 		bp := BlockPreview{}
-		if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.ContentPreview, &bp.ContentLength, &bp.UpdatedAt); err != nil {
+		if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.ContentPreview, &bp.ContentLength, &bp.CreatedAt, &bp.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: recent blocks scan: %w", err)
 		}
 		bp.Untrusted = untrustedOf(set, bp.TypeName) // V-11
