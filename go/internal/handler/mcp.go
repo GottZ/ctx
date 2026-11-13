@@ -87,6 +87,15 @@ type queryInput struct {
 	// existed.
 	Types        []string `json:"types,omitempty" jsonschema:"restrict retrieval to these block types; each name must be a retrieval-visible type (unknown or non-visible name is an error)"`
 	TypesExclude []string `json:"types_exclude,omitempty" jsonschema:"exclude these block types from retrieval"`
+	// Synthesize and IncludeContent are /api/query's own two fields
+	// (queryRequest.Synthesize, .IncludeContent), forwarded under the same wire
+	// names. Neither carries authority REST does not give the same key: REST
+	// gates neither field, the retrieval-only path runs the same scope filter,
+	// rate limit and tenant quota, and the content snippet is a prefix of a
+	// block the key may already read in full with `get`. Absent ⇒ the delegated
+	// body is byte-identical to before the fields existed.
+	Synthesize     *bool `json:"synthesize,omitempty" jsonschema:"false = retrieval only: answer the ranked sources as JSON without the LLM synthesis (default true)"`
+	IncludeContent bool  `json:"include_content,omitempty" jsonschema:"with synthesize false: attach each source's content (up to 1500 characters); an error otherwise"`
 }
 
 type storeInput struct {
@@ -197,7 +206,7 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 	// query
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "query",
-		Description: "Hybrid semantic + fulltext search with LLM synthesis. Ask a question, get a sourced answer.",
+		Description: "Hybrid semantic + fulltext search with LLM synthesis. Ask a question, get a sourced answer. With synthesize false: the ranked sources only, as JSON, without the synthesis step.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, mcpQueryHandler(cfg))
 
@@ -415,9 +424,10 @@ const untrustedMarker = "[untrusted]"
 // so the answer cannot be citing them: they keep the response order behind the
 // cited ones and are marked instead of numbered.
 //
-// A response in which NO source carries an ordinal is a retrieval-only answer
-// (or a server from before V-W1). That list keeps position numbering and is
-// byte-identical to what this tool emitted before V-W1b.
+// A response in which NO source carries an ordinal comes from a server from
+// before V-W1 (a retrieval-only answer never reaches this function: the handler
+// renders it with renderMCPRetrievalOnly). That list keeps position numbering
+// and is byte-identical to what this tool emitted before V-W1b.
 func renderMCPQuerySources(sb *strings.Builder, sources []mcpQuerySource) {
 	if len(sources) == 0 {
 		return
@@ -452,6 +462,43 @@ func renderMCPQuerySources(sb *strings.Builder, sources []mcpQuerySource) {
 	}
 }
 
+// mcpRetrievalSource is one row of the query tool's retrieval-only answer: the
+// subset of /api/query's sourceResponse a caller needs to pick blocks for
+// `get`, under the same wire names. Untrusted (V-11) rides along because the
+// row now carries foreign text — the content snippet, and the title in any
+// case — and a JSON answer frames it the way `search` and `get` do.
+// citation_index is left out: no prompt was built, so there is none.
+type mcpRetrievalSource struct {
+	ID           string  `json:"id"`
+	Title        string  `json:"title"`
+	Category     string  `json:"category"`
+	Score        float64 `json:"score"`
+	SupersededBy *string `json:"superseded_by,omitempty"`
+	Untrusted    bool    `json:"untrusted,omitempty"`
+	Content      string  `json:"content,omitempty"`
+}
+
+// renderMCPRetrievalOnly answers a synthesize:false call: the ranked sources in
+// retrieval order as a JSON document, not the prose rendering. JSON because the
+// rows may carry content, and a snippet inside a JSON string cannot pass itself
+// off as another source line the way it could in the "Sources:" list.
+func renderMCPRetrievalOnly(body []byte) (*mcp.CallToolResult, any, error) {
+	var out struct {
+		Confidence string               `json:"confidence"`
+		Sources    []mcpRetrievalSource `json:"sources"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return errResult("failed to parse query response"), nil, err
+	}
+	if out.Sources == nil {
+		out.Sources = []mcpRetrievalSource{}
+	}
+	data, _ := json.MarshalIndent(out, "", "  ")
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{textContent(string(data))},
+	}, nil, nil
+}
+
 // Tool handlers.
 
 func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
@@ -468,6 +515,15 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
 		limit := input.Limit
 		if limit <= 0 {
 			limit = 5
+		}
+		// /api/query attaches content on the retrieval-only path alone (the
+		// synthesis path builds its sources with includeContent=false), so
+		// include_content next to synthesis would be a silent no-op. Refused
+		// before any delegation, as /api/query refuses arm_ranks without
+		// synthesize:false.
+		retrievalOnly := input.Synthesize != nil && !*input.Synthesize
+		if input.IncludeContent && !retrievalOnly {
+			return errResult("include_content requires synthesize:false"), nil, nil
 		}
 
 		// V-W6 type filter, resolved BEFORE the delegation so a rejected filter
@@ -487,6 +543,13 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
 		// without both fields marshals to the exact bytes it did before V-W6.
 		if excl := mcpQueryTypesExclude(typeSet, cut, input.TypesExclude); len(excl) > 0 {
 			payload["types_exclude"] = excl
+		}
+		// Same rule for the two retrieval-only fields: added only when given.
+		if input.Synthesize != nil {
+			payload["synthesize"] = *input.Synthesize
+		}
+		if input.IncludeContent {
+			payload["include_content"] = true
 		}
 		body, _ := json.Marshal(payload)
 		internalReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/api/query", io.NopCloser(strings.NewReader(string(body))))
@@ -520,6 +583,10 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
 		}
 		if rec.statusCode >= http.StatusBadRequest {
 			return errResult(fmt.Sprintf("query failed (HTTP %d)", rec.statusCode)), nil, nil
+		}
+
+		if retrievalOnly {
+			return renderMCPRetrievalOnly(rec.body)
 		}
 
 		var sb strings.Builder
