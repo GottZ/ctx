@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -77,6 +78,7 @@ type mcpPanicReport struct {
 	Tools                []string       `json:"tools,omitempty"`
 	PoolAcquired         int32          `json:"pool_acquired"`
 	PoolTotal            int32          `json:"pool_total"`
+	RawKeepaliveSpaces   int            `json:"raw_keepalive_spaces"`
 }
 
 // mcpPanicScenarios are the child bodies by name. The integration suite adds
@@ -112,9 +114,11 @@ func TestMCPPanicHelperProcess(t *testing.T) {
 }
 
 // panickingQueryDelegate stands in for /api/query: it panics on the question
-// "panic", panics after slow on "slow-panic" (by then the keepalive has
-// committed the response), and answers otherwise. It keeps every request
-// context so the probe can see they were all released.
+// "panic", starts the REST body heartbeat the synthesis path runs
+// (startHeartbeat, query.go) and then panics on "heartbeat-panic", panics after
+// slow on "slow-panic" (by then the keepalive has committed the response), and
+// answers otherwise. It keeps every request context so the probe can see they
+// were all released.
 type panickingQueryDelegate struct {
 	slow time.Duration
 	mu   sync.Mutex
@@ -132,6 +136,9 @@ func (d *panickingQueryDelegate) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	switch p.Query {
 	case "panic":
 		panic(mcpPanicNeedle + " in the query pipeline")
+	case "heartbeat-panic":
+		startHeartbeat(r.Context(), w, true)
+		panic(mcpPanicNeedle + " in the query pipeline after the body heartbeat started")
 	case "slow-panic":
 		time.Sleep(d.slow)
 		panic(mcpPanicNeedle + " after the keepalive committed the response")
@@ -176,10 +183,18 @@ func mcpPanicQueryScenario(t *testing.T) mcpPanicReport {
 	time.Sleep(50 * time.Millisecond)
 	rep.GoroutinesBaseline = runtime.NumGoroutine()
 
-	for range mcpPanicCalls {
-		rep.Calls = append(rep.Calls, mcpPanicCallTool(ctx, session, "query", map[string]any{"question": "panic"}))
+	for i := range mcpPanicCalls {
+		question := "panic"
+		if i%2 == 1 {
+			question = "heartbeat-panic"
+		}
+		rep.Calls = append(rep.Calls, mcpPanicCallTool(ctx, session, "query", map[string]any{"question": question}))
 	}
 	rep.Calls = append(rep.Calls, mcpPanicCallTool(ctx, session, "query", map[string]any{"question": "slow-panic"}))
+	// The same late panic on the raw wire, where the keepalive bytes in front
+	// of the answer are visible.
+	raw, spaces := mcpPanicRawCall(t, ctx, srv.URL, "slow-panic")
+	rep.Calls, rep.RawKeepaliveSpaces = append(rep.Calls, raw), spaces
 	// The same client session, after the panics.
 	rep.FollowUp = mcpPanicCallTool(ctx, session, "query", map[string]any{"question": "after"})
 
@@ -211,14 +226,25 @@ func mcpPanicQueryScenario(t *testing.T) mcpPanicReport {
 }
 
 // panickingWriter is a ResponseWriter whose connection-facing methods panic —
-// the one thing the keepalive ticker touches on its own goroutine.
-type panickingWriter struct{ hdr http.Header }
+// the one thing the keepalive ticker touches on its own goroutine. panicked is
+// closed right before the first panic.
+type panickingWriter struct {
+	hdr      http.Header
+	once     sync.Once
+	panicked chan struct{}
+}
+
+func newPanickingWriter() *panickingWriter {
+	return &panickingWriter{hdr: http.Header{}, panicked: make(chan struct{})}
+}
 
 func (p *panickingWriter) Header() http.Header { return p.hdr }
 func (p *panickingWriter) WriteHeader(int) {
+	p.once.Do(func() { close(p.panicked) })
 	panic(mcpPanicNeedle + " in the response writer")
 }
 func (p *panickingWriter) Write([]byte) (int, error) {
+	p.once.Do(func() { close(p.panicked) })
 	panic(mcpPanicNeedle + " in the response writer")
 }
 
@@ -227,16 +253,21 @@ func (p *panickingWriter) Write([]byte) (int, error) {
 // first tick, over a writer that panics on the tick's write.
 func mcpPanicKeepaliveScenario(t *testing.T) mcpPanicReport {
 	shrinkHeartbeat(t, 10*time.Millisecond, 500*time.Millisecond)
-	armed := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		stop := armMCPKeepalive(r.Context())
-		defer stop()
-		time.Sleep(60 * time.Millisecond) // several intervals: the ticker fires
-	})
 	var rep mcpPanicReport
 	rep.GoroutinesBaseline = runtime.NumGoroutine()
 	for range 5 {
-		withMCPKeepalive(armed).ServeHTTP(&panickingWriter{hdr: http.Header{}},
-			httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("{}")))
+		pw := newPanickingWriter()
+		// The call stays armed until the ticker has panicked, however late
+		// the first tick comes on a loaded host.
+		armed := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			stop := armMCPKeepalive(r.Context())
+			defer stop()
+			select {
+			case <-pw.panicked:
+			case <-time.After(20 * time.Second):
+			}
+		})
+		withMCPKeepalive(armed).ServeHTTP(pw, httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("{}")))
 	}
 	rep.GoroutinesAfter = settleGoroutines(rep.GoroutinesBaseline, 5*time.Second)
 	return rep
@@ -299,6 +330,41 @@ func mcpPanicConnect(t *testing.T, ctx context.Context, url string) *mcp.ClientS
 		t.Fatalf("connect: %v", err)
 	}
 	return session
+}
+
+// mcpPanicRawCall posts one tools/call query on the raw wire and returns the
+// answer as a client would decode it, plus the number of keepalive spaces in
+// front of the JSON-RPC body.
+func mcpPanicRawCall(t *testing.T, ctx context.Context, url, question string) (mcpPanicCall, int) {
+	t.Helper()
+	body := `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"query","arguments":{"question":"` + question + `"}}}`
+	resp := mcpPost(t, ctx, url, body, nil)
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	call := mcpPanicCall{Tool: "query (raw wire)"}
+	if err != nil {
+		call.Err = err.Error()
+		return call, 0
+	}
+	spaces := len(raw) - len(bytes.TrimLeft(raw, " "))
+	var rpc struct {
+		Result *struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			IsError           bool             `json:"isError"`
+			StructuredContent mcpErrorEnvelope `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &rpc); err != nil || rpc.Result == nil {
+		call.Err = fmt.Sprintf("HTTP %d, not a JSON-RPC result: %v (%q)", resp.StatusCode, err, raw)
+		return call, spaces
+	}
+	call.IsError, call.Code = rpc.Result.IsError, rpc.Result.StructuredContent.Code
+	for _, c := range rpc.Result.Content {
+		call.Text += c.Text
+	}
+	return call, spaces
 }
 
 func mcpPanicCallTool(ctx context.Context, session *mcp.ClientSession, tool string, args map[string]any) mcpPanicCall {
@@ -434,16 +500,23 @@ func slogToStderrJSON() {
 }
 
 // TestMCPToolPanicIsAToolErrorAndTheProcessLives is the #194 acceptance probe:
-// a query whose pipeline panics — twenty times in a row, once after the
-// keepalive has already committed the response — is answered as a tool error,
-// the stack lands in the server log, nothing the request held stays held, and
-// the same client session keeps working.
+// a query whose pipeline panics — twenty times in a row, half of them after
+// the REST body heartbeat started, then twice after the keepalive has already
+// committed the response (the second time on the raw wire) — is answered as a
+// tool error, the stack lands in the server log, nothing the request held
+// stays held (the heartbeat ticker included), and the same client session
+// keeps working.
 func TestMCPToolPanicIsAToolErrorAndTheProcessLives(t *testing.T) {
 	child := runMCPPanicChild(t, "query")
 	rep := child.report
 
-	if len(rep.Calls) != mcpPanicCalls+1 {
-		t.Fatalf("child made %d panicking calls, want %d", len(rep.Calls), mcpPanicCalls+1)
+	if len(rep.Calls) != mcpPanicCalls+2 {
+		t.Fatalf("child made %d panicking calls, want %d", len(rep.Calls), mcpPanicCalls+2)
+	}
+	// The last call panicked after the keepalive had put the status line and
+	// at least one space on the wire: the answer still follows as JSON.
+	if rep.RawKeepaliveSpaces == 0 {
+		t.Errorf("no keepalive byte before the late panic's answer — the post-commit case did not happen")
 	}
 	for i, c := range rep.Calls {
 		assertInternalToolError(t, i, c)
@@ -454,9 +527,9 @@ func TestMCPToolPanicIsAToolErrorAndTheProcessLives(t *testing.T) {
 
 	// Released: goroutines (the SDK's request goroutine, the keepalive
 	// ticker), the admission slot, the request context.
-	t.Logf("%d panicking calls: goroutines baseline %d after %d; slots arrived %d held %d; request contexts canceled %d/%d",
+	t.Logf("%d panicking calls: goroutines baseline %d after %d; slots arrived %d held %d; request contexts canceled %d/%d; keepalive spaces before the late answer %d",
 		len(rep.Calls), rep.GoroutinesBaseline, rep.GoroutinesAfter, rep.SlotsArrived, rep.SlotsActive,
-		rep.DelegateCtxsCanceled, rep.DelegateCtxs)
+		rep.DelegateCtxsCanceled, rep.DelegateCtxs, rep.RawKeepaliveSpaces)
 	if rep.GoroutinesAfter > rep.GoroutinesBaseline {
 		t.Errorf("goroutines after %d panics: %d, baseline %d — something the request started outlived it\n%s",
 			len(rep.Calls), rep.GoroutinesAfter, rep.GoroutinesBaseline, tail(rep.GoroutineDump, 8000))

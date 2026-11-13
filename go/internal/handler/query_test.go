@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -21,7 +22,7 @@ func TestQueryHeartbeat_WhitespaceThenValidJSON(t *testing.T) {
 	defer func() { heartbeatInterval = old }()
 
 	rec := httptest.NewRecorder()
-	hb := startHeartbeat(rec, true)
+	hb := startHeartbeat(context.Background(), rec, true)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("200 header not committed up front: code=%d", rec.Code)
 	}
@@ -47,7 +48,7 @@ func TestQueryHeartbeat_WhitespaceThenValidJSON(t *testing.T) {
 // Inactive (fast path) = plain writeJSON: honours the status code, no whitespace.
 func TestQueryHeartbeat_InactivePlainWriteJSON(t *testing.T) {
 	rec := httptest.NewRecorder()
-	hb := startHeartbeat(rec, false)
+	hb := startHeartbeat(context.Background(), rec, false)
 	hb.finish(http.StatusInternalServerError, map[string]any{"success": false, "error": "boom"})
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("inactive code = %d, want 500", rec.Code)
@@ -71,7 +72,7 @@ func TestQueryHeartbeat_StreamsThroughMiddlewareStack(t *testing.T) {
 
 	const handlerWork = 300 * time.Millisecond
 	h := SecurityHeaders(RequestID(Logger(Recovery(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hb := startHeartbeat(w, true)
+		hb := startHeartbeat(r.Context(), w, true)
 		time.Sleep(handlerWork) // stands in for the slow rerank stage
 		hb.finish(http.StatusOK, queryResponse{Success: true, Answer: "done", Confidence: "confident"})
 	})))))

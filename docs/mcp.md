@@ -63,8 +63,9 @@ its gate chain; `confirm` codes only the claim verdict; the issue tools code onl
 `reserved_metadata`; the read tools and the guard tools never code. Any tool can
 additionally answer `internal` for a server fault (below).
 
-**Server faults.** A panic inside a tool — in its handler or anywhere below it, the
-`query` pipeline included — ends that call, not the server: the call is answered
+**Server faults.** A panic while a tool call runs — in its handler or anywhere below it
+on the call's own path, the `query` pipeline included — ends that call, not the server:
+the call is answered
 `isError: true` with the text `Internal server error` and the code `internal`, and the
 details (panic value, stack, tool name, request id) go to the server log at level
 `ERROR` (`mcp: panic recovered`). A request that is not a tool call gets the JSON-RPC

@@ -57,8 +57,9 @@ func mcpPanicPoolScenario(t *testing.T) mcpPanicReport {
 	defer func() { _ = session.Close() }()
 
 	var rep mcpPanicReport
-	// More panics than the pool has connections (pgxpool default: at most
-	// max(4, NumCPU)): a connection kept by each would starve the later calls.
+	// Twenty panics, each with a connection held: one kept per panic would
+	// show in the acquired count below (and, past the pool's default bound of
+	// max(4, NumCPU) connections, starve the later calls).
 	for range mcpPanicCalls {
 		rep.Calls = append(rep.Calls, mcpPanicCallTool(ctx, session, "query", map[string]any{"question": "panic"}))
 	}

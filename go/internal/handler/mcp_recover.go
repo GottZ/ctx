@@ -25,7 +25,10 @@ const mcpInternalErrorMsg = "Internal server error"
 // middleware runs on exactly that goroutine and wraps every method the server
 // dispatches: each tool registered now or later, however it is registered,
 // and resource, prompt and notification handlers should any ever exist. One
-// guard on the server instead of one per handler.
+// guard on the server instead of one per handler. It guards that goroutine
+// only: a goroutine the pipeline detaches for itself (the fire-and-forget
+// access log of a query, the attribution write of blob_link) is outside it,
+// as it is outside Recovery on REST.
 //
 // After a panic:
 //
@@ -41,9 +44,11 @@ const mcpInternalErrorMsg = "Internal server error"
 //     (for a notification the SDK drops it: a notification has no reply).
 //   - the handler returns normally, so the SDK finishes the request the way it
 //     finishes a failed one: the response is written, the request context is
-//     canceled. What the request held through defers — the query tool's
-//     keepalive arm, the admission slot of WithScheduler, a pool connection —
-//     was released while the panic unwound.
+//     canceled, which ends the body heartbeat a delegated query may have
+//     started (startHeartbeat, query.go). What the request held through
+//     defers — the query tool's keepalive arm, the admission slot of
+//     WithScheduler, a pool connection — was released while the panic
+//     unwound.
 func mcpRecover(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (result mcp.Result, err error) {
 		defer func() {
