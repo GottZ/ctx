@@ -1,0 +1,34 @@
+manifest_version: 2
+name: ctx_discord_policy
+version: 3.0.0
+description: >-
+  Per-server Discord policy for Hermes: ambient conversation, operator-only tools, worklogs,
+  configured in Discord.
+author: Jan-Stefan Janetzky
+license: MPL-2.0
+homepage: https://github.com/GottZ/ctx
+requires_hermes: ">=0.22.4"          # oldest ref the contract tests are green against
+platforms: [linux, macos, windows]
+tags: [discord, policy, security, moderation]
+provides_hooks: [pre_llm_call, pre_tool_call, on_session_end, on_session_reset, on_session_finalize]
+config_schema:
+  operators:
+    type: list
+    default: []
+    description: "Discord user IDs with tool authority (never configurable from Discord)"
+  frame_prompt:
+    type: str
+    default: ""
+    description: "Operator frame placed before every server's guidance (empty = built-in neutral frame)"
+  operator_label:
+    type: str
+    default: "the operator"
+    description: "How public texts refer to the operator ({operator_label})"
+  guild_prompt_max_chars:
+    type: int
+    default: 6000
+    description: "Upper bound for a server's guidance text"
+  notify_operators:
+    type: bool
+    default: true
+    description: "Direct-message operators about activation requests, guidance changes and degraded protection"
