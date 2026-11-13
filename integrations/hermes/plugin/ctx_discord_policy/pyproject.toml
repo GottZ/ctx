@@ -12,7 +12,7 @@ dependencies = []
 test = ["pytest>=8", "pytest-asyncio>=0.23", "PyYAML>=6", "discord.py==2.7.1"]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = [".", "tests"]
 testpaths = ["tests"]
 addopts = "--import-mode=importlib -p no:cacheprovider"
 asyncio_mode = "auto"
