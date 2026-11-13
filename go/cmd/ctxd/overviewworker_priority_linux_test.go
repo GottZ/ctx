@@ -34,17 +34,17 @@ const priorityHelperEnv = "CTX_TEST_WORKER_PRIORITY_HELPER"
 
 // TestOverviewWorkerPriorityHelperProcess is not a test: it is the child body
 // of the E-B /proc probe. It routes through the REAL production entry —
-// dispatchOverviewWorkerMode keys on os.Args[1], deprioritizes, then blocks in
-// the worker's options decode while the parent holds stdin open (and os.Exits
-// on EOF). Running the entry itself, not deprioritizeSelf directly, is what
-// makes this a CALL-PATH probe: dropping the deprioritizeSelf call from the
-// entry turns the parent's /proc assert red, not just breaking the function.
+// dispatchArgs keys on the worker argument, the worker entry deprioritizes,
+// then blocks in the worker's options decode while the parent holds stdin open
+// (and os.Exits on EOF). Running the entry itself, not deprioritizeSelf
+// directly, is what makes this a CALL-PATH probe: dropping the
+// deprioritizeSelf call from the entry turns the parent's /proc assert red,
+// not just breaking the function.
 func TestOverviewWorkerPriorityHelperProcess(t *testing.T) {
 	if os.Getenv(priorityHelperEnv) == "" {
 		t.Skip("helper process body — only meaningful when spawned by the priority probe")
 	}
-	os.Args = []string{os.Args[0], overview.WorkerCommand}
-	dispatchOverviewWorkerMode()
+	dispatchArgs([]string{overview.WorkerCommand})
 	fmt.Println("dispatch returned") // unreachable on the worker path (os.Exit)
 	os.Exit(3)
 }

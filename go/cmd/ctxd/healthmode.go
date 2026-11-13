@@ -32,7 +32,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 )
 
 // healthBodyCap bounds the parsed health document. /health answers a handful
@@ -106,12 +105,4 @@ func runHealthCheck(url string, stderr io.Writer) int {
 		return 1
 	}
 	return 0
-}
-
-// dispatchHealthMode runs the -health mode and NEVER RETURNS when argv[1]
-// selects it (os.Exit — the -secret-decrypt precedent).
-func dispatchHealthMode() {
-	if len(os.Args) > 1 && os.Args[1] == "-health" {
-		os.Exit(runHealthCheck(healthCheckURL(os.Getenv), os.Stderr))
-	}
 }
