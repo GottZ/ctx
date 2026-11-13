@@ -23,11 +23,14 @@ COPY . .
 # build, go:embed resolves at compile time (web/web.go: //go:embed all:dist).
 COPY --from=frontend /web/dist ./web/dist
 # The release stamp (FOLGE-X): GET /health version and the boot line
-# "starting HTTP server" name it (internal/provenance.BuildVersion). The
-# release build passes the tag:
-#   docker compose -p n8n build --build-arg CTX_VERSION=vX.Y.Z ctx
-# Without it the image says "dev". Declared right before the build so a new
-# value only re-runs this layer.
+# "starting HTTP server" name it (internal/provenance.BuildVersion). This
+# context (./go) carries no git metadata, so the stamp has to come in from
+# outside: the compose build passes CTX_VERSION from its environment
+# (docker-compose.yml build.args), which a tag checkout fills from git:
+#   CTX_VERSION=$(git describe --tags --exact-match --match 'v*') docker compose -p n8n build ctx
+# CI stamps the ghcr image with the tag on a tag ref and git-<commit> on root
+# (.github/workflows/ci.yml). Without a value the image says "dev". Declared
+# right before the build so a new value only re-runs this layer.
 ARG CTX_VERSION=dev
 RUN CGO_ENABLED=0 go build -ldflags "-X github.com/GottZ/ctx/internal/provenance.version=${CTX_VERSION}" -o /ctx ./cmd/ctxd
 
