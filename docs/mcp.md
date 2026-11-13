@@ -230,6 +230,12 @@ Change fields of an existing block.
 Omitted fields stay unchanged. **Answer:**
 `Updated: <title> (id: <uuid>, category: <category>)`. Staged for `confirm_writes` keys.
 
+A changed `title` or `content` clears the block's embedding in the same
+transaction as the update; the backfill writes the new one, and until then the
+block is found by the lexical arms only. A `title` or `content` sent with the
+value the block already holds keeps the embedding. The REST `manage update`
+action behaves the same.
+
 ### confirm
 
 Execute a staged write.

@@ -682,7 +682,7 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 
-	block, needsReEmbed, err := store.UpdateBlock(ctx, h.pool, resolvedID, data, writableBlockScopes(ar))
+	block, _, err := store.UpdateBlock(ctx, h.pool, resolvedID, data, writableBlockScopes(ar))
 	if err != nil {
 		writeUpdateFailure(w, err, reqID)
 		return
@@ -694,7 +694,7 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 
-	finishBlockUpdate(ctx, h.pool, h.blocktypes, data, block, needsReEmbed, reqID)
+	finishBlockUpdate(ctx, h.pool, h.blocktypes, data, block, reqID)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"action":  "update",

@@ -204,7 +204,7 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 
 	if cw.Op == "update" {
 		data := updateDataFromCanonical(cw)
-		block, needsReEmbed, err := store.UpdateBlock(ctx, pool, cw.ID, data, writableBlockScopes(ar))
+		block, _, err := store.UpdateBlock(ctx, pool, cw.ID, data, writableBlockScopes(ar))
 		if err != nil {
 			slog.Error("confirm: confirmed update execute failed", "error", err, "pending_id", pw.ID)
 			return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
@@ -214,7 +214,7 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 			// consumed (rejected finding D1-m2 behaviour sentence).
 			return confirmOutcome{Kind: confirmExecGone, Op: cw.Op, BlockID: cw.ID}
 		}
-		finishBlockUpdate(ctx, pool, blocktypes, data, block, needsReEmbed, RequestIDFromContext(ctx))
+		finishBlockUpdate(ctx, pool, blocktypes, data, block, RequestIDFromContext(ctx))
 		return confirmOutcome{Kind: confirmOK, Op: cw.Op, Block: block}
 	}
 
