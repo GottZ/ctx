@@ -14,9 +14,18 @@ What the ctx MCP tools answer (``go/internal/handler/mcp.go``) and how it is map
   (``checkpoint``), while results of every type are returned when no filter is given — so
   ``types`` is dropped here on purpose and the chain writer's head lookup works by title.
 - ``query`` → prose answer followed by ``Sources:`` lines ``[N] title (category) id:uuid``.
-  The MCP query ALWAYS runs the LLM synthesis; a retrieval-only ``query(synthesize=False)``
-  is therefore served by ``search`` (lexical hybrid, no embedding). Operators who want the
-  semantic ``/api/query`` retrieval for recall choose ``transport: rest``.
+  A retrieval-only ``query(synthesize=False)`` calls the tool with ``synthesize: false`` (and
+  ``include_content: true`` when content is asked for): the semantic ``/api/query``
+  retrieval without the LLM step, as on ``transport: rest``. The tool then answers one JSON
+  document ``{"confidence", "sources": [{id, title, category, score, superseded_by?,
+  untrusted?, content?}]}`` (GottZ/ctx #183), mapped to ``{"success", "answer": "",
+  "confidence", "sources"}``. A server from before #183 refuses the two arguments at schema
+  validation (``unexpected additional properties ["synthesize" …]``); this client then
+  serves that call and every later one by ``search`` (lexical hybrid, no embedding). Only
+  one call asks: retrieval-only calls made while it is in flight use ``search`` as well, so
+  the server sees one refused call per client (a new client, bound when the provider
+  connects again, asks once more). Any other error, and an answer that is not the sources
+  document, is raised and leaves the question open for the next call.
 - ``store`` → ``Stored: <title> (id: <uuid>, category: <c>)`` or ``No change needed —
   identical content already exists (id: <uuid>)``. The block id is the ``(id: …)`` group
   (or a structured ``id``), never another UUID in the text: the title in front of it can
@@ -61,6 +70,19 @@ _SOURCE_LINE_RE = re.compile(r"^\[(\d+|n/a)\]\s+(.*?)\s+\(([^()]*)\)\s+id:([0-9a
 _SERVER_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 _RATE_LIMIT_MARKERS = ("rate limit", "rate_limit")
 _MAX_CONTENT_FETCH = 10  # query(include_content=True) over MCP: one get per source, capped
+# The go-sdk's schema validation refusal of an argument the tool does not declare.
+_UNKNOWN_ARGS_MARKER = "unexpected additional properties"
+_UNKNOWN, _PROBING, _YES, _NO = "unknown", "probing", "yes", "no"  # McpClient._query_retrieval_state
+_RETRIEVAL_ARGS_RE = re.compile(r"\b(?:synthesize|include_content)\b")
+
+
+def _refuses_retrieval_args(text: str) -> bool:
+    """True when a query tool error says the server does not know ``synthesize``/``include_content``.
+
+    The names are matched as words, not with their quotes: a transport that escapes the
+    go-sdk's ``["synthesize" "include_content"]`` once more must not defeat the fallback.
+    """
+    return _UNKNOWN_ARGS_MARKER in text.lower() and _RETRIEVAL_ARGS_RE.search(text) is not None
 
 
 def _find_value(value: Any, key: str) -> str | None:
@@ -166,6 +188,12 @@ class McpClient:
         # remaining budget) bounds a dispatch; otherwise the MCP transport owns its timeouts.
         self._timeout = timeout
         self._synthesis_timeout = synthesis_timeout
+        # Does the server's query tool take synthesize:false (GottZ/ctx #183)? "unknown" until
+        # the first retrieval-only call answers, "probing" while that one call is in flight
+        # (concurrent calls meanwhile use search, so a server from before #183 is refused
+        # once, not once per overlapping call), then "yes" or "no" ("no" = search from then on).
+        self._query_retrieval_state = _UNKNOWN
+        self._query_retrieval_lock = threading.Lock()
 
     @property
     def server_name(self) -> str:
@@ -276,8 +304,11 @@ class McpClient:
         limit: int | None = None,
     ) -> dict[str, Any]:
         if not synthesize:
-            # Retrieval-only recall: the MCP query tool always synthesizes, so the lexical
-            # hybrid search is the no-LLM path. Rows already carry content/type/untrusted.
+            data = self._retrieval_via_query(text, include_content, types_exclude, limit)
+            if data is not None:
+                return data
+            # A server from before #183 (or the first call on it still in flight): the lexical
+            # hybrid search is the no-LLM path. Its rows already carry content/type/untrusted.
             data = self.search(text, types_exclude=types_exclude, limit=limit)
             return {"success": True, "sources": data.get("results") or [], "answer": ""}
         args: dict[str, Any] = {"question": text}
@@ -298,6 +329,74 @@ class McpClient:
                     if key in block and key not in source:
                         source[key] = block[key]
         return {"success": True, "answer": answer, "sources": sources}
+
+    def _retrieval_via_query(
+        self,
+        text: str,
+        include_content: bool,
+        types_exclude: list[str] | None,
+        limit: int | None,
+    ) -> dict[str, Any] | None:
+        """Retrieval-only ``query``, or ``None`` when this call is to use ``search``.
+
+        ``None``: the server refused the arguments (now or earlier), or the first call is
+        still in flight. Any other error is raised, as the REST transport raises it, and
+        leaves the question open for the next call.
+        """
+        with self._query_retrieval_lock:
+            state = self._query_retrieval_state
+            if state in (_PROBING, _NO):
+                return None
+            if state == _UNKNOWN:
+                self._query_retrieval_state = _PROBING
+        try:
+            data = self._query_without_synthesis(text, include_content, types_exclude, limit)
+        except BaseException:
+            with self._query_retrieval_lock:
+                if self._query_retrieval_state == _PROBING:
+                    self._query_retrieval_state = _UNKNOWN
+            raise
+        with self._query_retrieval_lock:
+            self._query_retrieval_state = _YES if data is not None else _NO
+        return data
+
+    def _query_without_synthesis(
+        self,
+        text: str,
+        include_content: bool,
+        types_exclude: list[str] | None,
+        limit: int | None,
+    ) -> dict[str, Any] | None:
+        """``query`` with ``synthesize: false``; ``None`` when the server refuses the arguments."""
+        args: dict[str, Any] = {"question": text, "synthesize": False}
+        if include_content:
+            args["include_content"] = True
+        if limit:
+            args["limit"] = int(limit)
+        if types_exclude:
+            args["types_exclude"] = list(types_exclude)
+        try:
+            _payload, body = self._call("query", args)
+        except CtxApiError as exc:
+            if not _refuses_retrieval_args(str(exc)):
+                raise
+            logger.info(
+                "ctx MCP server %r predates query synthesize:false; retrieval-only recall uses search", self._server
+            )
+            return None
+        # ``body`` is the tool's text for a {"result": ...} wrapping and the JSON text of a
+        # bare answer (``_call``), so one parse covers every shape Hermes hands back.
+        answer = self._as_json(body)
+        rows = answer.get("sources") if isinstance(answer, dict) else None
+        if not isinstance(answer, dict) or "sources" not in answer or not (rows is None or isinstance(rows, list)):
+            # Not the retrieval-only document. Raised, not taken for a refusal: a server
+            # from before #183 refuses the arguments (its go-sdk schema has
+            # additionalProperties false), so one odd answer must not cost the semantic
+            # recall for the rest of the binding.
+            # The text is not echoed: it can carry block content.
+            raise CtxApiError(f"mcp query: the retrieval-only answer is not a sources document ({len(body)} chars)")
+        sources = [row for row in rows or [] if isinstance(row, dict)]
+        return {"success": True, "answer": "", "confidence": answer.get("confidence") or "", "sources": sources}
 
     def store(
         self,
