@@ -27,12 +27,14 @@ import (
 	"os/exec"
 	"runtime"
 	"runtime/pprof"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -72,6 +74,17 @@ type mcpPanicReport struct {
 	SlotsActive          int64          `json:"slots_active"`
 	DelegateCtxs         int            `json:"delegate_ctxs"`
 	DelegateCtxsCanceled int            `json:"delegate_ctxs_canceled"`
+	Tools                []string       `json:"tools,omitempty"`
+	PoolAcquired         int32          `json:"pool_acquired"`
+	PoolTotal            int32          `json:"pool_total"`
+}
+
+// mcpPanicScenarios are the child bodies by name. The integration suite adds
+// its own in an init of its file.
+var mcpPanicScenarios = map[string]func(*testing.T) mcpPanicReport{
+	"query":      mcpPanicQueryScenario,
+	"keepalive":  mcpPanicKeepaliveScenario,
+	"every-tool": mcpPanicEveryToolScenario,
 }
 
 // TestMCPPanicHelperProcess is not a test: it is the child body of the #194
@@ -83,16 +96,12 @@ func TestMCPPanicHelperProcess(t *testing.T) {
 	}
 	// The parent reads the server log from stderr, one JSON object per line.
 	slogToStderrJSON()
-	var rep mcpPanicReport
-	switch scenario {
-	case "query":
-		rep = mcpPanicQueryScenario(t)
-	case "keepalive":
-		rep = mcpPanicKeepaliveScenario(t)
-	default:
+	run, ok := mcpPanicScenarios[scenario]
+	if !ok {
 		fmt.Fprintf(os.Stderr, "unknown scenario %q\n", scenario)
 		os.Exit(9)
 	}
+	rep := run(t)
 	rep.Scenario = scenario
 	line, err := json.Marshal(rep)
 	if err != nil {
@@ -230,6 +239,51 @@ func mcpPanicKeepaliveScenario(t *testing.T) mcpPanicReport {
 			httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("{}")))
 	}
 	rep.GoroutinesAfter = settleGoroutines(rep.GoroutinesBaseline, 5*time.Second)
+	return rep
+}
+
+// mcpPanicEveryToolScenario holds the guard to the server, not to a handler:
+// on the production server (newMCPServer) every registered tool is replaced
+// by one that panics under the same name, and one tool the production code
+// never registered is added the way every tool is (mcp.AddTool). Each call
+// must come back as the internal tool error. A guard wired per handler, or
+// per tool name, fails here for the first tool it does not know.
+func mcpPanicEveryToolScenario(t *testing.T) mcpPanicReport {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	server := newMCPServer(MCPConfig{})
+	serverT, clientT := mcp.NewInMemoryTransports()
+	ss, err := server.Connect(ctx, serverT, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer func() { _ = ss.Close() }()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "i194-probe", Version: "0"}, nil).Connect(ctx, clientT, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+
+	var rep mcpPanicReport
+	for tool, err := range cs.Tools(ctx, nil) {
+		if err != nil {
+			t.Fatalf("tools/list: %v", err)
+		}
+		rep.Tools = append(rep.Tools, tool.Name)
+	}
+	for _, name := range rep.Tools {
+		server.AddTool(&mcp.Tool{Name: name, InputSchema: map[string]any{"type": "object"}},
+			func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				panic(mcpPanicNeedle + " in tool " + name)
+			})
+	}
+	const newTool = "i194_tool_registered_later"
+	mcp.AddTool(server, &mcp.Tool{Name: newTool}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+		panic(mcpPanicNeedle + " in tool " + newTool)
+	})
+	for _, name := range append(append([]string(nil), rep.Tools...), newTool) {
+		rep.Calls = append(rep.Calls, mcpPanicCallTool(ctx, cs, name, map[string]any{}))
+	}
 	return rep
 }
 
@@ -400,6 +454,9 @@ func TestMCPToolPanicIsAToolErrorAndTheProcessLives(t *testing.T) {
 
 	// Released: goroutines (the SDK's request goroutine, the keepalive
 	// ticker), the admission slot, the request context.
+	t.Logf("%d panicking calls: goroutines baseline %d after %d; slots arrived %d held %d; request contexts canceled %d/%d",
+		len(rep.Calls), rep.GoroutinesBaseline, rep.GoroutinesAfter, rep.SlotsArrived, rep.SlotsActive,
+		rep.DelegateCtxsCanceled, rep.DelegateCtxs)
 	if rep.GoroutinesAfter > rep.GoroutinesBaseline {
 		t.Errorf("goroutines after %d panics: %d, baseline %d — something the request started outlived it\n%s",
 			len(rep.Calls), rep.GoroutinesAfter, rep.GoroutinesBaseline, tail(rep.GoroutineDump, 8000))
@@ -452,5 +509,88 @@ func TestMCPKeepalivePanicDoesNotEndTheProcess(t *testing.T) {
 	}
 	if rep.GoroutinesAfter > rep.GoroutinesBaseline {
 		t.Errorf("goroutines after the keepalive panics: %d, baseline %d — a ticker outlived its request", rep.GoroutinesAfter, rep.GoroutinesBaseline)
+	}
+}
+
+// TestMCPEveryRegisteredToolIsBehindTheRecovery: the guard sits on the server,
+// so every tool the production server registers — and one registered later —
+// answers a panic as the internal tool error, with one log line naming it.
+func TestMCPEveryRegisteredToolIsBehindTheRecovery(t *testing.T) {
+	child := runMCPPanicChild(t, "every-tool")
+	rep := child.report
+	if !slices.Contains(rep.Tools, "query") || len(rep.Calls) != len(rep.Tools)+1 {
+		t.Fatalf("tools listed %v, calls %d — the probe did not walk the production tool set", rep.Tools, len(rep.Calls))
+	}
+	t.Logf("%d production tools + 1 registered later, each panicking: %v", len(rep.Tools), rep.Tools)
+	logged := map[string]int{}
+	for _, rec := range child.panicLogs("mcp: panic recovered") {
+		tool, _ := rec["tool"].(string)
+		logged[tool]++
+	}
+	for i, c := range rep.Calls {
+		assertInternalToolError(t, i, c)
+		if logged[c.Tool] != 1 {
+			t.Errorf("tool %s: %d \"mcp: panic recovered\" log lines, want 1", c.Tool, logged[c.Tool])
+		}
+	}
+}
+
+// TestMCPRecoverAnswersByMethodKind: the guard's answer follows the protocol of
+// the method it wraps — a tool result for tools/call, the JSON-RPC internal
+// error for every other request and notification — and a method that does not
+// panic passes through untouched.
+func TestMCPRecoverAnswersByMethodKind(t *testing.T) {
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, nil)))
+	defer slog.SetDefault(prev)
+
+	panicking := func(context.Context, string, mcp.Request) (mcp.Result, error) {
+		panic(mcpPanicNeedle)
+	}
+	// guarded runs the guard in a frame of its own, so a guard that lets the
+	// panic through fails this test instead of the test binary.
+	guarded := func(next mcp.MethodHandler, method string, req mcp.Request) (res mcp.Result, escaped any, err error) {
+		defer func() { escaped = recover() }()
+		res, err = mcpRecover(next)(context.Background(), method, req)
+		return res, nil, err
+	}
+
+	res, escaped, err := guarded(panicking, "tools/call", &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "probe"}})
+	if escaped != nil || err != nil {
+		t.Fatalf("tools/call: escaped=%v err=%v, want a tool result", escaped, err)
+	}
+	ctr, ok := res.(*mcp.CallToolResult)
+	if !ok || !ctr.IsError || mcpTextOf(ctr) != mcpInternalErrorMsg || ctr.StructuredContent != (mcpErrorEnvelope{Code: "internal"}) {
+		t.Errorf("tools/call answer = %#v, want isError with %q and code internal", res, mcpInternalErrorMsg)
+	}
+
+	for _, tc := range []struct {
+		method string
+		req    mcp.Request
+	}{
+		{"resources/read", &mcp.ReadResourceRequest{Params: &mcp.ReadResourceParams{URI: "ctx://probe"}}},
+		{"prompts/get", &mcp.GetPromptRequest{Params: &mcp.GetPromptParams{Name: "probe"}}},
+		{"notifications/initialized", &mcp.InitializedRequest{Params: &mcp.InitializedParams{}}},
+	} {
+		res, escaped, err := guarded(panicking, tc.method, tc.req)
+		var wire *jsonrpc.Error
+		if escaped != nil || res != nil || !errors.As(err, &wire) ||
+			wire.Code != jsonrpc.CodeInternalError || wire.Message != mcpInternalErrorMsg {
+			t.Errorf("%s: escaped=%v res=%#v err=%v, want the JSON-RPC internal error %q", tc.method, escaped, res, err, mcpInternalErrorMsg)
+		}
+	}
+
+	// Not a panic: result and error pass through as they are.
+	want := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "fine"}}}
+	wantErr := errors.New("handler error")
+	res, escaped, err = guarded(func(context.Context, string, mcp.Request) (mcp.Result, error) { return want, wantErr },
+		"tools/call", &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "probe"}})
+	if escaped != nil || res != mcp.Result(want) || err != wantErr { //nolint:errorlint // identity is the point
+		t.Errorf("pass-through: res=%#v err=%v escaped=%v, want the handler's own values", res, err, escaped)
+	}
+
+	if n := strings.Count(logBuf.String(), `"msg":"mcp: panic recovered"`); n != 4 {
+		t.Errorf("%d panic log lines, want 4 (one per panicking call)\n%s", n, logBuf.String())
 	}
 }

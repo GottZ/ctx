@@ -60,7 +60,16 @@ so a client must not rely on a code being present.
 Which errors carry a code is a property of each tool's write path: `store`,
 `blob_store` and `blob_link` code every rejection; `update` codes only the verdict of
 its gate chain; `confirm` codes only the claim verdict; the issue tools code only
-`reserved_metadata`; the read tools and the guard tools never code.
+`reserved_metadata`; the read tools and the guard tools never code. Any tool can
+additionally answer `internal` for a server fault (below).
+
+**Server faults.** A panic inside a tool — in its handler or anywhere below it, the
+`query` pipeline included — ends that call, not the server: the call is answered
+`isError: true` with the text `Internal server error` and the code `internal`, and the
+details (panic value, stack, tool name, request id) go to the server log at level
+`ERROR` (`mcp: panic recovered`). A request that is not a tool call gets the JSON-RPC
+error `-32603` with the same text instead. Other calls, before and after, are not
+affected.
 
 **Staged writes.** A key with the `confirm_writes` capability does not write directly:
 `store`, `update`, `blob_store` and `blob_link` stage the write and answer
