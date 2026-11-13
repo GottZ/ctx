@@ -32,6 +32,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -39,18 +40,22 @@ PATTERNS = Path(__file__).with_name("private_patterns.txt")
 REPO_NAME = "ctx"
 KINDS = ("word", "snowflake", "uuid", "path", "date")
 MIN_SUBSTRING_WORD = 4
+CANARY = "dsp-private-scan-key-check-v1"
 
 UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
-DIGIT_RUN_RE = re.compile(r"\d(?:[\d_,']*\d)?")
-DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+DIGIT_RUN_RE = re.compile(r"\d(?:(?:[_,'. ]?\d))*")
+DATE_RE = re.compile(r"(?<!\d)(\d{1,4})[-./](\d{1,2})[-./](\d{1,4})(?!\d)|(?<!\d)(\d{8})(?!\d)")
+SHORT_TOKEN_RE = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+")
 PATH_RE = re.compile(r"/+opt(?:/+[A-Za-z0-9_.-]+)*")
-LINE_RE = re.compile(r"^(word|snowflake|uuid|path|date) (\d{1,3}) ([0-9a-f]{64})$")
+LINE_RE = re.compile(r"^(word|snowflake|uuid|path|date|key-check) (\d{1,3}) ([0-9a-f]{64})$")
 
 GENERIC_RULES = (
     ("internal-path", re.compile(r"(?<![A-Za-z0-9_])/(?:compose|root)/[A-Za-z0-9_.-]+")),
     ("internal-path", re.compile(r"\.gotmp\b")),
     ("uuid", UUID_RE),
+    # Shortened ids as they get quoted in notes ("0123abcd-4567"): 8 hex, dash, 4 hex.
+    ("id-prefix", re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{8}-[0-9a-f]{4}(?![0-9A-Za-z])")),
 )
 # The scanner spells its own plain generic rules; keyed rules still apply to it.
 GENERIC_EXEMPT = {"ci/private_scan.py"}
@@ -61,13 +66,39 @@ class ScanError(RuntimeError):
     pass
 
 
+def _fold(value: str) -> str:
+    """Compatibility-fold stylised Unicode (fullwidth, math alphabets) and strip accents."""
+    decomposed = unicodedata.normalize("NFKD", value)
+    return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+
+def _date_forms(groups) -> set[str]:
+    """Normalised yyyymmdd candidates for one date-like match (ISO, dd.mm.yyyy, yyyymmdd, ddmmyyyy)."""
+    a, b, c, compact = groups
+    out = set()
+    if compact:
+        out.add(compact)
+        out.add(compact[4:] + compact[2:4] + compact[:2])
+        return out
+    if len(a) == 4:
+        out.add(f"{a}{int(b):02d}{int(c):02d}")
+    if len(c) == 4:
+        out.add(f"{c}{int(b):02d}{int(a):02d}")
+        out.add(f"{c}{int(a):02d}{int(b):02d}")
+    return out
+
+
 def normalise(kind: str, value: str) -> str:
     if kind == "word":
-        return re.sub(r"[^a-z0-9]", "", value.lower())
+        return re.sub(r"[^a-z0-9]", "", _fold(value).lower())
+    if kind == "date":
+        match = DATE_RE.fullmatch(value.strip())
+        forms = sorted(_date_forms(match.groups())) if match else []
+        return forms[0] if len(forms) == 1 else re.sub(r"\D", "", value)
     if kind == "snowflake":
         return re.sub(r"\D", "", value)
     if kind == "uuid":
-        return value.lower()
+        return re.sub(r"[^0-9a-f]", "", value.lower())
     if kind == "path":
         return re.sub(r"/+", "/", value).rstrip("/.")
     return value
@@ -86,8 +117,10 @@ class Patterns:
         self.count = count
 
 
-def load_patterns(path: Path = PATTERNS) -> Patterns:
+def load_patterns(path: Path | None = None, key: bytes | None = None) -> Patterns:
+    path = path or PATTERNS
     by_kind: dict[str, set[str]] = {k: set() for k in KINDS}
+    canary_seen = False
     word_lengths: set[int] = set()
     snowflake_lengths: set[int] = set()
     count = 0
@@ -98,17 +131,29 @@ def load_patterns(path: Path = PATTERNS) -> Patterns:
         if not match:
             raise ScanError(f"{path.name}:{number}: malformed pattern line")
         kind, length, value = match.group(1), int(match.group(2)), match.group(3)
+        if kind == "key-check":
+            if key is not None and not hmac.compare_digest(value, digest(key, "key-check", CANARY)):
+                raise ScanError("scan key does not match the pattern file (wrong DSP_PRIVATE_SCAN_KEY)")
+            canary_seen = True
+            continue
+        if length < 1:
+            raise ScanError(f"{path.name}:{number}: empty normalised value")
         by_kind[kind].add(value)
         if kind == "word":
             word_lengths.add(length)
         elif kind == "snowflake":
             snowflake_lengths.add(length)
         count += 1
+    if key is not None and not canary_seen:
+        raise ScanError(f"{path.name}: key-check line missing")
     return Patterns(by_kind, word_lengths, snowflake_lengths, count)
 
 
 def _owner_contexts(root: Path) -> tuple[re.Pattern[str], ...]:
-    """The repository owner may appear only inside this repository's own GitHub slug."""
+    """The repository owner may appear only inside this repository's own GitHub slug.
+
+    In CI the owner comes from ``GITHUB_REPOSITORY_OWNER``; a ``homepage`` naming anyone else unlocks
+    nothing there."""
     try:
         manifest = (root / "plugin.yaml").read_text(encoding="utf-8")
     except OSError:
@@ -116,9 +161,13 @@ def _owner_contexts(root: Path) -> tuple[re.Pattern[str], ...]:
     match = re.search(rf"^homepage:\s*https://github\.com/([A-Za-z0-9-]+)/{REPO_NAME}\s*$", manifest, re.M)
     if not match:
         return ()
+    ci_owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+    if ci_owner and ci_owner.lower() != match.group(1).lower():
+        return ()
     owner = re.escape(match.group(1))
-    return (re.compile(rf"(?<=github\.com/){owner}(?=/{REPO_NAME}\b)", re.IGNORECASE),
-            re.compile(rf"\b{owner}(?=/{REPO_NAME}\b)", re.IGNORECASE))
+    end = rf"(?=/{REPO_NAME}(?![\w.-]))"
+    return (re.compile(rf"(?<=github\.com/){owner}{end}", re.IGNORECASE),
+            re.compile(rf"\b{owner}{end}", re.IGNORECASE))
 
 
 def _mask(text: str, contexts) -> str:
@@ -144,12 +193,14 @@ def scan_text(label: str, text: str, key: bytes, patterns: Patterns, *, contexts
         # Per whitespace-separated chunk: separators inside a chunk (-, _, ., /, case changes, digits) do
         # not hide a word; a word split by whitespace is two words.
         for chunk in re.finditer(r"\S+", masked):
-            flat = re.sub(r"[^a-z0-9]", "", chunk.group(0).lower())
+            flat = re.sub(r"[^a-z0-9]", "", _fold(chunk.group(0)).lower())
             for length in lengths:
                 for start in range(0, len(flat) - length + 1):
                     if digest(key, "word", flat[start:start + length]) in words:
                         hit("word", chunk.start())
-        for match in TOKEN_RE.finditer(masked):
+    if words:
+        # Short words only as whole sub-tokens (CamelCase and letter/digit boundaries split: ZqBot, zq2).
+        for match in SHORT_TOKEN_RE.finditer(_fold(masked)):
             token = match.group(0).lower()
             if len(token) < MIN_SUBSTRING_WORD and digest(key, "word", token) in words:
                 hit("word", match.start())
@@ -161,11 +212,18 @@ def scan_text(label: str, text: str, key: bytes, patterns: Patterns, *, contexts
                 for start in range(0, len(digits) - length + 1):
                     if digest(key, "snowflake", digits[start:start + length]) in snowflakes:
                         hit("snowflake", match.start())
-    for kind, regex in (("uuid", UUID_RE), ("date", DATE_RE)):
-        if patterns.by_kind[kind]:
-            for match in regex.finditer(masked):
-                if digest(key, kind, match.group(0)) in patterns.by_kind[kind]:
-                    hit(kind, match.start())
+    if patterns.by_kind["uuid"]:
+        for match in UUID_RE.finditer(masked):
+            if digest(key, "uuid", match.group(0)) in patterns.by_kind["uuid"]:
+                hit("uuid", match.start())
+        for match in re.finditer(r"[0-9a-fA-F]{32}", masked):  # without dashes
+            if digest(key, "uuid", match.group(0)) in patterns.by_kind["uuid"]:
+                hit("uuid", match.start())
+    if patterns.by_kind["date"]:
+        for match in DATE_RE.finditer(masked):
+            for form in _date_forms(match.groups()):
+                if hmac.new(key, f"date:{form}".encode(), hashlib.sha256).hexdigest() in patterns.by_kind["date"]:
+                    hit("date", match.start())
     if patterns.by_kind["path"]:
         for match in PATH_RE.finditer(masked):
             value = normalise("path", match.group(0))
@@ -197,7 +255,26 @@ def commit_messages(root: Path) -> list[tuple[str, str]]:
                       capture_output=True).returncode != 0:
         return []  # no commits yet
     shas = _git(root, "rev-list", "HEAD").decode().split()
-    return [(sha[:12], _git(root, "log", "-1", "--format=%B", sha).decode("utf-8", "replace")) for sha in shas]
+    return [(sha[:12], _git(root, "log", "-1", "--format=%an%n%cn%n%B", sha).decode("utf-8", "replace"))
+            for sha in shas]
+
+
+def history_blobs(root: Path, current: set[str]) -> list[tuple[str, str]]:
+    """Every file version reachable from HEAD that is not in the current tree: (label, blob id)."""
+    if subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "-q", "HEAD"],
+                      capture_output=True).returncode != 0:
+        return []
+    seen: dict[str, str] = {}
+    for line in _git(root, "rev-list", "--objects", "HEAD").decode("utf-8", "replace").splitlines():
+        sha, _, name = line.partition(" ")
+        if name and sha not in current and sha not in seen:
+            seen[sha] = name
+    blobs = []
+    for sha, name in seen.items():
+        kind = _git(root, "cat-file", "-t", sha).decode().strip()
+        if kind == "blob":
+            blobs.append((f"{name}@{sha[:12]}", sha))
+    return blobs
 
 
 def _file_text(path: Path) -> str:
@@ -219,22 +296,43 @@ def _load_key(args: argparse.Namespace) -> bytes:
     return raw.encode("utf-8")
 
 
+def pattern_line(key: bytes, kind: str, value: str) -> str:
+    """The pattern line for one value, refused unless the scanner finds the value with it."""
+    if kind == "key-check":
+        return f"key-check 0 {digest(key, 'key-check', CANARY)}"
+    if kind not in KINDS:
+        raise ScanError(f"kind must be one of {', '.join(KINDS)}, or key-check")
+    normalised = normalise(kind, value)
+    if not normalised:
+        raise ScanError("value normalises to nothing")
+    line = f"{kind} {len(normalised)} {digest(key, kind, value)}"
+    probe = Patterns({k: set() for k in KINDS}, set(), set(), 1)
+    probe.by_kind[kind].add(line.split()[2])
+    if kind == "word":
+        probe.word_lengths.add(len(normalised))
+    if kind == "snowflake":
+        probe.snowflake_lengths.add(len(normalised))
+    if not scan_text("self-check", value, key, probe, generic=False):
+        raise ScanError(f"the scanner would never find this {kind} in this form; use a canonical form")
+    return line
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--key-file")
     parser.add_argument("--no-commits", action="store_true")
+    parser.add_argument("--no-history", action="store_true", help="skip file versions of earlier commits")
+    parser.add_argument("--text-env", action="append", default=[],
+                        help="also scan the text in this environment variable (e.g. a PR title and body)")
     parser.add_argument("--hash", nargs=2, metavar=("KIND", "VALUE"))
     args = parser.parse_args(argv)
     try:
         key = _load_key(args)
         if args.hash:
-            kind, value = args.hash
-            if kind not in KINDS:
-                raise ScanError(f"kind must be one of {', '.join(KINDS)}")
-            print(f"{kind} {len(normalise(kind, value))} {digest(key, kind, value)}")
+            print(pattern_line(key, *args.hash))
             return 0
-        patterns = load_patterns()
+        patterns = load_patterns(key=key)
         contexts = _owner_contexts(args.root)
         files = tracked_files(args.root)
         findings: list[str] = []
@@ -252,13 +350,22 @@ def main(argv: list[str] | None = None) -> int:
         messages = [] if args.no_commits else commit_messages(args.root)
         for sha, body in messages:
             findings += scan_text(f"commit {sha}", body, key, patterns, contexts=contexts)
+        current = {line.split()[1] for line in _git(args.root, "ls-files", "-s").decode().splitlines() if line}
+        history = [] if args.no_history else history_blobs(args.root, current)
+        for label, sha in history:
+            if label.startswith("ci/private_patterns.txt@") or label.startswith("ci/private_scan.py@"):
+                continue  # superseded pattern files carry digests by design; the scanner spells generic rules
+            text = _git(args.root, "cat-file", "-p", sha).decode("utf-8", "replace")
+            findings += scan_text(f"history {label}", text, key, patterns, contexts=contexts)
+        for name in args.text_env:
+            findings += scan_text(f"${name}", os.environ.get(name, ""), key, patterns, contexts=contexts)
     except (ScanError, OSError) as exc:
         print(f"private_scan: {exc}", file=sys.stderr)
         return 2
     for finding in findings:
         print(finding)
-    print(f"private_scan: {len(files)} files, {len(messages)} commit messages, {patterns.count} patterns, "
-          f"{len(findings)} findings")
+    print(f"private_scan: {len(files)} files, {len(history)} earlier file versions, {len(messages)} commit "
+          f"messages, {patterns.count} patterns, {len(findings)} findings")
     return 1 if findings else 0
 
 

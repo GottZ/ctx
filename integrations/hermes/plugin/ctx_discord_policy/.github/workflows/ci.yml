@@ -1,5 +1,6 @@
 # Unit/replay/docs tests on the supported Python range, the private-value scan, and contract tests against
-# real Hermes source (oldest supported release, latest release, upstream main). Needs no secrets.
+# real Hermes source (oldest supported release, latest release, upstream main). The private-value scan
+# needs the repository secret DSP_PRIVATE_SCAN_KEY; without it (forks) the docs job fails closed.
 name: ci
 
 on:
@@ -9,8 +10,9 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # Superseded pull-request runs are cancelled; every push to main gets a complete run.
+  # Pull requests share a group per ref (superseded runs are cancelled); every push to main gets its own
+  # group (keyed by commit), so no push run is ever cancelled or dropped from the queue.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -67,10 +69,12 @@ jobs:
           python-version: "3.14"
 
       # Keyed digests: without the secret the scanner exits 2 (never a silent pass).
-      - name: Private-value scan (tree and every commit message, keyed patterns)
+      # Tree, every earlier file version and commit message reachable from HEAD, and the PR title/body.
+      - name: Private-value scan (keyed patterns)
         env:
           DSP_PRIVATE_SCAN_KEY: ${{ secrets.DSP_PRIVATE_SCAN_KEY }}
-        run: python ci/private_scan.py
+          PR_TEXT: "${{ github.event.pull_request.title }}\n${{ github.event.pull_request.body }}"
+        run: python ci/private_scan.py --text-env PR_TEXT
 
   contract:
     name: contract hermes@${{ matrix.ref }}

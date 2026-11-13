@@ -78,17 +78,16 @@ def _scanner():
 
 
 KEY = b"synthetic-test-key-0123456789abcdef"
+# Assembled at run time: the scanner's generic rule flags any literal UUID in the tree.
+SYNTHETIC_UUID_PARTS = ("0123abcd", "4567", "89ab", "cdef", "0123456789ab")
 
 
-def _patterns(scan, *entries):
-    lines = [f"{kind} {len(scan.normalise(kind, value))} {scan.digest(KEY, kind, value)}" for kind, value in entries]
-    path = ROOT / "ci" / "private_patterns.txt"
-    original = path.read_text(encoding="utf-8")
-    try:
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return scan.load_patterns(path)
-    finally:
-        path.write_text(original, encoding="utf-8")
+def _patterns(scan, tmp_path, *entries, canary=True):
+    lines = [scan.pattern_line(KEY, "key-check", "-")] if canary else []
+    lines += [scan.pattern_line(KEY, kind, value) for kind, value in entries]
+    path = tmp_path / "patterns.txt"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return scan.load_patterns(path, key=KEY)
 
 
 def test_pattern_file_is_keyed_and_complete():
@@ -96,37 +95,98 @@ def test_pattern_file_is_keyed_and_complete():
     text = (ROOT / "ci" / "private_patterns.txt").read_text(encoding="utf-8")
     patterns = scan.load_patterns()  # validates every line
     assert patterns.count >= 23, "private patterns were removed (DESIGN 11.3 list)"
+    assert sum(1 for line in text.splitlines() if line.startswith("key-check ")) == 1
     for line in text.splitlines():
         if line and not line.startswith("#"):
             assert scan.LINE_RE.match(line), line
     assert not re.search(r"(?<![0-9a-f])\d{15,21}(?![0-9a-f])", text), "plain snowflake in pattern file"
 
 
-def test_scanner_finds_disguised_values():
+def test_wrong_key_is_refused(tmp_path):
     scan = _scanner()
-    pats = _patterns(scan, ("word", "zebraquokka"), ("word", "zq"), ("snowflake", "987654321098765432"),
-                     ("path", "/opt/zz-private"), ("date", "1999-12-31"))
+    path = tmp_path / "patterns.txt"
+    path.write_text(scan.pattern_line(KEY, "key-check", "-") + "\n", encoding="utf-8")
+    with pytest.raises(scan.ScanError):
+        scan.load_patterns(path, key=b"another-key-that-is-long-enough-000")
+    path.write_text(scan.pattern_line(KEY, "word", "zebraquokka") + "\n", encoding="utf-8")
+    with pytest.raises(scan.ScanError):  # no key-check line at all
+        scan.load_patterns(path, key=KEY)
+
+
+def test_scanner_finds_disguised_values(tmp_path):
+    scan = _scanner()
+    pats = _patterns(scan, tmp_path, ("word", "zebraquokka"), ("word", "zq"),
+                     ("snowflake", "987654321098765432"), ("path", "/opt/zz-private"), ("date", "1999-12-31"),
+                     ("uuid", "-".join(SYNTHETIC_UUID_PARTS)))
     hits = [
-        "ZebraQuokkaBot", "myzebraquokka2", "zebra-quokka", "hermes_zebraquokka_x", "zq here",
-        "id = 987_654_321_098_765_432", "x987654321098765432y", "/opt//zz-private/sub", "on 1999-12-31",
+        "ZebraQuokkaBot", "myzebraquokka2", "zebra-quokka", "hermes_zebraquokka_x", "ＺｅｂｒａＱｕｏｋｋａ",
+        "zq here", "ZqBot", "zq2", "id = 987_654_321_098_765_432", "x987654321098765432y",
+        "987.654.321.098.765.432", "/opt//zz-private/sub", "on 1999-12-31", "31.12.1999", "19991231",
+        "".join(SYNTHETIC_UUID_PARTS),
     ]
     for text in hits:
         assert scan.scan_text("t", text, KEY, pats, generic=False), text
-    for text in ("zebra quokka", "zqx", "98765432109876543", "/opt/zz-public", "1999-12-30"):
+    for text in ("zebra quokka", "zqx", "98765432109876543", "/opt/zz-public", "1999-12-30", "1.2.3"):
         assert not scan.scan_text("t", text, KEY, pats, generic=False), text
 
 
-def test_owner_is_allowed_only_inside_the_repository_slug(tmp_path):
+def test_hash_refuses_values_the_scanner_cannot_find():
     scan = _scanner()
+    for kind, value in (("word", "Zebra Quokka"), ("snowflake", "abc"), ("path", "opt/zz"), ("word", "!!")):
+        with pytest.raises(scan.ScanError):
+            scan.pattern_line(KEY, kind, value)
+
+
+def test_owner_is_allowed_only_inside_the_repository_slug(tmp_path, monkeypatch):
+    scan = _scanner()
+    monkeypatch.delenv("GITHUB_REPOSITORY_OWNER", raising=False)
     (tmp_path / "plugin.yaml").write_text(
         "homepage: https://github.com/OwnerName/ctx\n", encoding="utf-8")
     contexts = scan._owner_contexts(tmp_path)
-    pats = _patterns(scan, ("word", "ownername"), ("word", "secretword"))
+    pats = _patterns(scan, tmp_path, ("word", "ownername"), ("word", "secretword"))
     assert not scan.scan_text("t", "https://github.com/OwnerName/ctx", KEY, pats,
                               contexts=contexts, generic=False)
     for text in ("operator OwnerName", "OwnerName/hermes-other", "ghcr.io/OwnerName/hermes-secretword",
-                 "OwnerName/ctx-secretword"):
+                 "OwnerName/ctx-fork", "OwnerName/ctx.wiki"):
         assert scan.scan_text("t", text, KEY, pats, contexts=contexts, generic=False), text
+    monkeypatch.setenv("GITHUB_REPOSITORY_OWNER", "SomeoneElse")
+    assert scan._owner_contexts(tmp_path) == ()
+
+
+def test_history_and_extra_text_are_scanned(tmp_path, monkeypatch):
+    """A value added in one commit and removed in the next is still found (PR refs keep it)."""
+    scan = _scanner()
+    repo = tmp_path / "repo"
+    (repo / "ci").mkdir(parents=True)
+    key_file = tmp_path / "key"
+    key_file.write_text(KEY.decode(), encoding="utf-8")
+    (repo / "ci" / "private_patterns.txt").write_text(
+        scan.pattern_line(KEY, "key-check", "-") + "\n" + scan.pattern_line(KEY, "word", "zebraquokka") + "\n",
+        encoding="utf-8")
+    # Two commits built with fast-import (a throwaway repository; no identity configuration involved).
+    patterns_blob = (repo / "ci" / "private_patterns.txt").read_text(encoding="utf-8")
+
+    def commit(mark, text, parent=None):
+        body = [f"commit refs/heads/main", f"mark :{mark}", "committer Test <test@example.invalid> 0 +0000",
+                "data 4", "test"]
+        if parent:
+            body.append(f"from :{parent}")
+        for name, data in (("notes.txt", text), ("ci/private_patterns.txt", patterns_blob)):
+            raw = data.encode("utf-8")
+            body += [f"M 100644 inline {name}", f"data {len(raw)}", data]
+        return "\n".join(body) + "\n"
+
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    stream = commit(1, "the zebraquokka was here\n") + commit(2, "nothing to see\n", parent=1)
+    subprocess.run(["git", "-C", str(repo), "fast-import", "--quiet"], input=stream.encode("utf-8"), check=True,
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-f", "main"], check=True, capture_output=True)
+    monkeypatch.setattr(scan, "PATTERNS", repo / "ci" / "private_patterns.txt")
+    assert scan.main(["--root", str(repo), "--key-file", str(key_file)]) == 1
+    assert scan.main(["--root", str(repo), "--key-file", str(key_file), "--no-history"]) == 0
+    monkeypatch.setenv("PR_TEXT", "Title mentions ZebraQuokka")
+    assert scan.main(["--root", str(repo), "--key-file", str(key_file), "--no-history",
+                      "--text-env", "PR_TEXT"]) == 1
 
 
 def test_scanner_refuses_to_run_without_key(monkeypatch):
