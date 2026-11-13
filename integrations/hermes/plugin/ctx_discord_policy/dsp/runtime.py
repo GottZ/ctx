@@ -130,6 +130,8 @@ class Runtime:
         self.turn_routes: BoundedMap[tuple[str, str], Any] = BoundedMap()
         # Sessions that ever carried a public route: a turn there without an exact route gets no tools.
         self.public_sessions: BoundedMap[str, float] = BoundedMap()
+        # PluginContext used for config reads (``ctx.get_config`` under the bot owner's home).
+        self.config_ctx: Any = None
 
     def describe(self) -> dict[str, Any]:
         return {

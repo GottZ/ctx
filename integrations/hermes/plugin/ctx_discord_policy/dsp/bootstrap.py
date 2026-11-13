@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import hermes
+from . import cli, config, hermes
 from .adapt.status import SECURITY, Outcome, Result, compare_with_previous, write_json_atomic
 from .adapt.strategies import run_intervention
 from .policy import hooks
@@ -35,6 +35,16 @@ def _a8_register_hooks(ctx: Any) -> Result:
         handles.append(ctx.register_hook(name, callback))
     return Result("A8", SECURITY, Outcome.ARMED, f"{len(handles)} hooks registered",
                   "ctx.register_hook")
+
+
+def _install_config_reader(ctx: Any) -> None:
+    """Settings are read through the official ``ctx.get_config`` of the first armed instance, always under
+    the home that owns the bot (never the scope a hook happens to run in)."""
+    with RUNTIME.lock:
+        if getattr(RUNTIME, "config_ctx", None) is None:
+            RUNTIME.config_ctx = ctx
+            config.set_reader(lambda home, key, default: hermes.read_plugin_setting(RUNTIME.config_ctx, home,
+                                                                                    key, default))
 
 
 def write_status(home: Path) -> Path:
@@ -83,6 +93,11 @@ def register(ctx: Any, *, plugin_dir: Path) -> bool:
     on_unload = getattr(ctx, "on_unload", None)
     if callable(on_unload):
         on_unload(_disarm)
+    _install_config_reader(ctx)
+    try:
+        cli.register(ctx)
+    except Exception:  # the CLI is a convenience; it must not unarm the policy
+        logger.warning("ctx_discord_policy: CLI registration failed", exc_info=True)
     # The status file is written where a Discord bot binds (gateway process), never from register():
     # every ``hermes`` CLI invocation also loads plugins and must not overwrite the gateway's status.
     logger.info("ctx_discord_policy %s armed in profile %s", RUNTIME.version, profile)
