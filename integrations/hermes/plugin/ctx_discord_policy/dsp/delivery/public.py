@@ -1,17 +1,19 @@
-"""What a member's turn puts into Discord: no attachment directives, no host paths, no host files.
+"""What a member's turn puts into Discord: no attachment directives, no host paths, no pings, no host files.
 
 After a turn, Hermes turns parts of the reply text into uploads (``gateway/platforms/base.py``):
 ``MEDIA:<path>`` directives and bare local paths are attached when the file exists and is not on a short
 denylist (Hermes' strict mode, off by default, narrows that to its own caches). A member's turn has no tools,
 but its reply is model text: a member who gets the model to name a host path would have that file uploaded.
-Two layers keep that out of public turns:
+The same reply could ping any member by id (Hermes allows user mentions by default). Two layers keep that
+out of public turns:
 
 * :func:`reply` rewrites the text of a public route before Hermes extracts from it. The runner wrapper (A7)
   applies it to the turn's final answer, which every delivery path of Hermes extracts attachments from
   (the normal send, the durable queue, the rescan after a streamed answer); the delivery wrappers (K3) apply
   it to every send and edit that belongs to a public route (streamed text, interim messages). Attachment
   directives lose their colon, host paths their separators (look-alike characters that no Unicode
-  normalisation turns back into ``/``, ``\\`` or ``:``). The text is matched on a per-character fold (NFKC,
+  normalisation turns back into ``/``, ``\\`` or ``:``), and user, role and mass mentions are defused, except a
+  mention of the member who asked (a reply still pings the asker through Discord's reply). The text is matched on a per-character fold (NFKC,
   case folding, ignored format characters), so width, case and invisible-character variants of a directive
   or path are caught too. Code blocks are no exception (Hermes delivers a directive in inline code).
 * :func:`make_guard` wraps the adapter's file senders (intervention A11): while a public route is in play,
@@ -43,6 +45,7 @@ INTERVENTION = "A11"
 REFUSED_UPLOAD = "ctx_discord_policy: a non-operator turn may not upload files of the host"
 
 SLASH, BACKSLASH, COLON = "\u2215", "\u29f5", "\u2236"   # DIVISION SLASH, REVERSE SOLIDUS OPERATOR, RATIO
+_ZWSP = "\u200b"
 _IGNORED = "\x00"            # the fold's stand-in for a format character (zero-width, bidi, soft hyphen)
 
 # (method, the parameter that names a local file)
@@ -89,6 +92,7 @@ _ANCHOR = re.compile(
     r"|(?<![a-z0-9./\\])~[a-z0-9._\-]*[/\\]"
     r"|(?<![a-z0-9./\\:])/(?=[^\s/])"
     r"|(?<=:)/(?=[^\s/])(?<!://)")
+_MENTION = re.compile(r"<@(!?)(\d+)>|<@&(\d+)>|@(everyone|here)\b", re.IGNORECASE)
 _EXTENSION = re.compile(r"\.[a-z0-9]{1,10}(?![a-z0-9])")
 _TOKEN_END = re.compile(r"\s")
 
@@ -132,11 +136,26 @@ def neutralize_paths(text: str) -> str:
     return "".join(chars)
 
 
+def neutralize_mentions(text: str, asker: str = "") -> str:
+    """User, role and mass mentions defused (a zero-width space after the ``@``), except a mention of ``asker``."""
+    if not text:
+        return text
+
+    def defuse(m: re.Match) -> str:
+        if m.group(2) is not None:
+            return m.group(0) if asker and m.group(2) == asker else f"<@{_ZWSP}{m.group(1)}{m.group(2)}>"
+        if m.group(3) is not None:
+            return f"<@{_ZWSP}&{m.group(3)}>"
+        return f"@{_ZWSP}{m.group(4)}"
+
+    return _MENTION.sub(defuse, text)
+
+
 def reply(text: Any, route: Any) -> Any:
     """The text a public route may deliver (see the module doc). Non-text values pass unchanged."""
     if not isinstance(text, str) or not text:
         return text
-    return neutralize_paths(text)
+    return neutralize_mentions(neutralize_paths(text), str(getattr(route, "author_id", "") or ""))
 
 
 def reply_result(result: Any, route: Any) -> Any:
@@ -258,4 +277,4 @@ def make_guard(name: str, parameter: str) -> Callable[[Any], Any]:
 
 
 __all__ = ["BACKSLASH", "COLON", "INTERVENTION", "REFUSED_UPLOAD", "SENDERS", "SLASH", "make_guard",
-           "neutralize_paths", "owner", "public_owner", "reply", "reply_result", "trusted_file"]
+           "neutralize_mentions", "neutralize_paths", "owner", "public_owner", "reply", "reply_result", "trusted_file"]

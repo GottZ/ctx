@@ -57,7 +57,7 @@ you activated it:
 | 3. What the turn may do | An operator's turn runs as Hermes would run it. A member's turn gets only the member tools of that server. |
 | 4. What the model is told | Before the turn the plugin adds a short context: your frame, what this turn may use, how to behave in the conversation, the server's guidance and linked content, all of it as quoted text, never as instructions about tools. |
 | 5. Every tool call | is checked against the exact message it belongs to. A call outside what that turn may use, or from a turn the plugin cannot tie to its message, is refused ("BLOCKED by ctx_discord_policy"). |
-| 6. Delivery | An operator's tool work goes to the worklog thread when the server has one; progress lines follow the server's progress setting. |
+| 6. Delivery | An operator's tool work goes to the worklog thread when the server has one, approval and question cards of that turn included; progress lines follow the server's progress setting. A member's answer pings nobody but the member who asked. |
 
 When Hermes itself later gains something the plugin adds today (deleting progress messages, one progress line
 that keeps being replaced), the plugin notices and steps back: the status then reads `native` instead of
@@ -195,7 +195,8 @@ so, members get no answer until the model works again.
 - **No files of the host in members' answers.** Hermes turns `MEDIA:` lines and file paths in an answer into
   attachments. In a member's turn they reach Discord as plain text, with look-alike slashes in place of the
   real ones, and a member's turn can attach only files from the folders Hermes itself trusts for delivery (its
-  media caches and your `media_delivery_allow_dirs`). Your own turns attach files as Hermes does.
+  media caches and your `media_delivery_allow_dirs`). Your own turns attach files as Hermes does. Mentions of
+  other people, roles, `@everyone` and `@here` in a member's answer are shown as text and ping nobody.
 
 ### Disclosure
 

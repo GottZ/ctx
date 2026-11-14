@@ -6,7 +6,9 @@ missed-message recovery, so they must still run for ambient messages; only the r
 there (ambient conversation is something the bot may silently read along).
 
 Strategy: call the original with a copy of the event whose message hides the reaction methods; the
-original guards its reaction calls with ``hasattr(message, "add_reaction")``. A behaviour probe runs the
+original guards its reaction calls with ``hasattr(message, "add_reaction")``. A turn the runner wrapper
+dropped (A7) gets no new reaction either: Hermes counts its ``None`` as success and would mark it done; its
+in-progress reaction is still removed. A behaviour probe runs the
 real original against a recording double (once with a plain message as control, once with the hidden
 one) before the wrapper is installed. Fallback: reactions stay visible.
 """
@@ -17,6 +19,7 @@ import asyncio
 import copy
 import inspect
 import threading
+import time
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -44,6 +47,40 @@ class _Reactionless:
         if name in HIDDEN:
             raise AttributeError(name)
         return getattr(self._message, name)
+
+
+class _NoNewReactions:
+    """The event's message where adding a reaction does nothing; removing one still works (the in-progress
+    reaction of a turn the policy dropped is taken away, no "done" reaction follows)."""
+
+    def __init__(self, message: Any) -> None:
+        object.__setattr__(self, "_message", message)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._message, name)
+
+    async def add_reaction(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+def mark_dropped(event: Any) -> None:
+    """A7 dropped this event: Hermes still completes its processing (and counts ``None`` as success)."""
+    for key in event_keys(event):
+        RUNTIME.dropped.put(key, time.time())
+
+
+def was_dropped(event: Any) -> bool:
+    return any(key in RUNTIME.dropped for key in event_keys(event))
+
+
+def hide_new_reactions(event: Any) -> Any:
+    """A shallow copy of ``event`` whose ``raw_message`` takes no new reaction."""
+    raw = getattr(event, "raw_message", None)
+    if raw is None:
+        return event
+    clone = copy.copy(event)
+    clone.raw_message = _NoNewReactions(raw)
+    return clone
 
 
 def hide_reactions(event: Any) -> Any:
@@ -101,6 +138,8 @@ def _make(original: Any) -> Any:
         try:
             if is_ambient(event, _bot_of(self)):
                 event = hide_reactions(event)
+            elif was_dropped(event):
+                event = hide_new_reactions(event)
         except Exception:
             pass  # comfort only: on any doubt the stock hook runs unchanged
         return await original(self, event, *args, **kwargs)
@@ -245,4 +284,5 @@ def install(adapter_cls: Any) -> Result:
                   start.evidence)
 
 
-__all__ = ["FALLBACK_HINT", "event_keys", "event_route", "hide_reactions", "install", "is_ambient", "probe_behaviour"]
+__all__ = ["FALLBACK_HINT", "event_keys", "event_route", "hide_new_reactions", "hide_reactions", "install", "is_ambient",
+           "mark_dropped", "probe_behaviour", "was_dropped"]

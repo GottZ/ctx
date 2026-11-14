@@ -151,6 +151,8 @@ class Runtime:
         self.bots = BotRegistry()
         # (message id, author id) whose admission widened the allowlist: never handed on unrouted afterwards.
         self.widened: BoundedMap[tuple[str, str], float] = BoundedMap()
+        # (chat, message, session user) of events A7 dropped: their processing shows no "done" reaction (K4).
+        self.dropped: BoundedMap[tuple[str, str, str], float] = BoundedMap()
         # Hermes session key -> (lane, session user) of the routes that used it: a session never mixes the
         # operator lane with another author's public lane.
         self.session_lanes: BoundedMap[str, tuple[str, str]] = BoundedMap()

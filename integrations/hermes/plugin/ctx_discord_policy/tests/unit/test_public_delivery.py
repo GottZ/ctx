@@ -83,6 +83,16 @@ def test_paths_stay_readable(public):
     assert public.reply("MEDIA:/srv/x.txt", route()) == "MEDIA\u2236\u2215srv\u2215x.txt"
 
 
+def test_mentions_are_defused_except_the_askers(public):
+    text = f"<@{ASKER}> asked; <@{OTHER}> and <@!{OTHER}> and <@&900000000000000777>, @everyone, @here."
+    clean = public.reply(text, route())
+    assert f"<@{ASKER}>" in clean
+    assert f"<@{OTHER}>" not in clean and f"<@!{OTHER}>" not in clean
+    assert "<@&900000000000000777>" not in clean
+    assert "@everyone" not in clean and "@here" not in clean
+    assert public.reply(clean, route()) == clean
+
+
 def test_runner_results_keep_their_type(public):
     class Ephemeral(str):
         def __new__(cls, text, ttl_seconds=None):
@@ -156,6 +166,7 @@ async def test_k3_sends_of_a_public_route_carry_no_host_path(scene, anchor):
     msg = scene.world.post(scene.a.general, "question", "900000000000000500", "Member")
     r = scene.route(msg, lane="public")
     with scene.in_turn(r):
-        await scene.adapter.send(str(scene.a.general.id), "see MEDIA:/srv/x.txt")
+        await scene.adapter.send(str(scene.a.general.id), "see MEDIA:/srv/x.txt and <@900000000000000501>")
     sent = scene.world.sent_to(scene.a.general.id)
     assert any("\u2215srv\u2215x.txt" in t for t in sent) and not any("/srv/x.txt" in t for t in sent), sent
+    assert not any("<@900000000000000501>" in t for t in sent), sent

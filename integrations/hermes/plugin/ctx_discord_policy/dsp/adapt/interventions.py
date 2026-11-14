@@ -25,6 +25,7 @@ from typing import Any
 
 from .. import RUNTIME_API, config, hermes
 from ..delivery import public
+from ..delivery import reactions as delivery_reactions
 from ..ingress import admission, classify, hydrate
 from ..policy import authority, hooks
 from ..policy.routes import AMBIENT, OPERATOR, snowflake
@@ -289,6 +290,7 @@ def _make_runner_handle(original: Any) -> Any:
                 # A message the policy admitted must never run without its lane: revoke the route (no later
                 # authorization check can find it) and drop the event instead of handing it on unrouted.
                 authority.revoke(candidate)
+                delivery_reactions.mark_dropped(event)
                 logger.warning("ctx_discord_policy: dropped message %s in channel %s: %s",
                                candidate.message_id, candidate.channel_id, refusal)
                 return None
@@ -299,6 +301,7 @@ def _make_runner_handle(original: Any) -> Any:
             refusal = authority.unrouted_refusal(authority.bindings_for(self, getattr(event, "source", None)),
                                                  event)
             if refusal is not None:
+                delivery_reactions.mark_dropped(event)
                 source = getattr(event, "source", None)
                 logger.warning("ctx_discord_policy: dropped an unrouted event in channel %s: %s",
                                getattr(source, "chat_id", None), refusal)
