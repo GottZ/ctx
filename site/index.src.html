@@ -81,14 +81,14 @@
       <li><strong>Answer.</strong> The chat model is told to answer from the retrieved blocks only. It cites them, and ctx lists their ids.</li>
       <li><strong>Consolidate.</strong> With Dream Mode on, a background loop picks one block at a time, finds candidates and asks the chat model how they relate. It writes at most five links per round, including &#8220;this block replaces that one&#8221;.</li>
     </ol>
-    <p><code>search</code> takes a lighter path: full-text matching only, without embedding and without a model call. Dream Mode, shown in the picture, runs only when you switch it on.</p>
+    <p><code>search</code> takes a lighter path: full-text matching only, without embedding and without a model call.</p>
   </div>
   <figure class="diagram">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="how-ctx-works-dark.svg">
       <img src="how-ctx-works.svg" width="1200" height="2430" loading="lazy" alt="How ctx works: four ways in (MCP, CLI, HTTP, web UI) lead to one Go server on PostgreSQL. Storing a block records its dates, computes an embedding and checks for duplicates. A question is searched four ways, weighted by time and by links, and answered by the chat model. A topic map groups the blocks, and the optional Dream Mode links them in the background.">
     </picture>
-    <figcaption><a href="https://github.com/GottZ/ctx/blob/root/docs/how-ctx-works.svg">Open the diagram at full size</a> (on GitHub)</figcaption>
+    <figcaption>Dream Mode, in the lower part of the picture, runs only when you switch it on. <a href="https://github.com/GottZ/ctx/blob/root/docs/how-ctx-works.svg">Open the diagram at full size</a> (on GitHub).</figcaption>
   </figure>
 </section>
 
@@ -96,7 +96,7 @@
   <h2 id="workflow">Bring your own workflow</h2>
   <div class="intro">
     <p class="claim">ctx is a skeleton.</p>
-    <p>After the install it stores, finds and links what your agents give it, over MCP, the CLI and HTTP. It does not decide when your agent looks something up or writes something down, and it does not make a session start or end well on its own. Today ctx is deliberately neutral: it brings no working style of its own and no ready-made skills, because every team works differently. Below, in short, is a suggested way of working. Adapt it to your team and write it into your own skill, rule file, hook or prompt. Suggestions for ready-made skills will come later.</p>
+    <p>After the install it stores, finds and links what your agents give it, over MCP, the CLI and HTTP. It does not decide when your agent looks something up or writes something down, and it does not make a session start or end well on its own. Today ctx is deliberately neutral: it brings no working style of its own and no ready-made skills, because every team works differently. Below, in short, is a suggested way of working. Adapt it to your team and write it into your own skill, rule file, hook or prompt. Suggestions for ready-made skills will come later. The tool names are the MCP tools an agent uses; the CLI commands in parentheses do the same.</p>
   </div>
   <dl class="features phases">
     <dt>Session start</dt>
@@ -104,16 +104,16 @@
       <p>Before its first answer, your agent:</p>
       <ol>
         <li>loads the conventions it works under;</li>
-        <li>lists the open items the last close left (step 5 below): <code>ctx search tags:open limit:50</code>, or the MCP tool <code>search</code> with <code>tags: ["open"]</code>;</li>
+        <li>lists the open items the last close left (step 5 below): <code>search</code> with <code>tags: ["open"]</code> and a <code>limit</code> (<code>ctx search tags:open limit:50</code>);</li>
         <li>asks <code>query</code> whole questions about the task (&#8220;why did we pin pgvector?&#8221;, not &#8220;pgvector pin&#8221;), and reads a block in full with <code>get</code> only when it holds its id;</li>
         <li>says in two or three sentences what it loaded, then starts.</li>
       </ol>
     </dd>
     <dt>During the work</dt>
-    <dd><p>Your agent looks up before it decides, and checks live state before it acts on a block: a block says where to look, not what is true now. It saves each finding when it happens, with <code>store</code>, one concept per block, and changes an existing block with <code>update</code> instead of adding a second one.</p></dd>
+    <dd><p>Your agent looks up before it decides, and checks live state before it acts on a block: a block says where to look, not what is true now. It saves each finding when it happens, with <code>store</code>: one concept per block, a precise title, a category, tags, the source and the date. It searches first and changes an existing block with <code>update</code> instead of adding a second one (<code>ctx manage update &lt;block-id&gt; '&lt;json&gt;'</code>).</p></dd>
     <dt>Session close</dt>
     <dd>
-      <p>A session is closed when every &#8220;done&#8221; in its report rests on the output of a command, not on what the session remembers. If a step is red, your agent reports the red state instead of closing.</p>
+      <p>A session is closed when every &#8220;done&#8221; in its report rests on the output of a command, not on what the session remembers. Each step has a check, and what was not checked is reported as not checked. If a step is red, your agent reports the red state instead of closing.</p>
       <ol start="0">
         <li><strong>Who asks:</strong> a person, or an automation such as a timer, a loop or a hook? An automation continues the task; it does not end it.</li>
         <li><strong>Working tree:</strong> clean, or every change left is a decision you can name; nothing unpushed without a reason.</li>
@@ -123,7 +123,7 @@
         <li><strong>Open items:</strong> one block each, with the tag <code>open</code>: neutral, with its source and what it unblocks.</li>
         <li><strong>Report:</strong> to the person, in the session, not as a block: what was checked and with what result, what was not checked or stays open, and the ids of the open items.</li>
       </ol>
-      <p>This is not a handover note that retells the session: the findings should already be in the store, per topic, and the close checks that they are. The check for each step is in <a href="https://github.com/GottZ/ctx/blob/root/README.md#bring-your-own-workflow">Bring your own workflow in the README</a>.</p>
+      <p>This is not a handover note that retells the session. The findings should already be in the store, per topic; the close checks that they are, and leaves only the open items and the pointers to them. The check for each step is in <a href="https://github.com/GottZ/ctx/blob/root/README.md#bring-your-own-workflow">Bring your own workflow in the README</a>.</p>
     </dd>
   </dl>
   <p class="after-table">What there is to start from:</p>
@@ -166,7 +166,7 @@ curl -fsSL "https://github.com/GottZ/ctx/releases/latest/download/$f" -o "$tmp/$
   <p>On Windows, download <code>ctx-windows-amd64.exe</code> from the <a href="https://github.com/GottZ/ctx/releases/latest">latest release</a> and check it the same way. Each release also carries <code>SHA256SUMS</code> and <code>ctx.intoto.jsonl</code>, the signed provenance as a file: <code>gh attestation verify &lt;file&gt; --bundle ctx.intoto.jsonl -R GottZ/ctx</code> checks against it without signing in. To build the CLI from source instead, with Go 1.27, follow <a href="https://github.com/GottZ/ctx/blob/root/README.md#install">Install in the README</a>.</p>
 
   <h3>The server</h3>
-  <p>The server runs with Docker Compose from the root folder of a clone of the repository. You create <code>.env</code> from <code>.env.example</code>, readable by you only, with your passwords, the key <code>CTX_SECRETS_KEY</code> and a first admin key, and <code>docker compose up -d ctx</code> builds <code>ctxd</code> and the database and starts both. The <code>ctx</code> service publishes no port of its own; it carries labels for a reverse proxy. Without a proxy, copy the example file <code>docker-compose.override.yml.example</code> to <code>docker-compose.override.yml</code>; it publishes the port <code>127.0.0.1:8080</code>. The steps, command by command, are in <a href="https://github.com/GottZ/ctx/blob/root/README.md#install">Install in the README</a>.</p>
+  <p>The server runs with Docker Compose from the root folder of a clone of the repository. You create <code>.env</code> from <code>.env.example</code>, readable by you only before any secret goes in, with your passwords, the key <code>CTX_SECRETS_KEY</code> and a first admin key, and <code>docker compose up -d ctx</code> builds <code>ctxd</code> and the database and starts both. The <code>ctx</code> service publishes no port of its own; it carries labels for a reverse proxy. Without a proxy of your own, the example file <code>docker-compose.override.yml.example</code> gives ctx the port <code>127.0.0.1:8080</code>; the README shows how to use it without replacing an override file you already have. The steps, command by command, are in <a href="https://github.com/GottZ/ctx/blob/root/README.md#install">Install in the README</a>.</p>
   <p>Copy <code>CTX_SECRETS_KEY</code> from <code>.env</code> into your password manager. It seals the provider keys in the database, and backups do not contain it: without it, those keys are gone. Every setting and environment variable is in <a href="https://github.com/GottZ/ctx/blob/root/docs/operations.md#environment-variables">Operations</a>.</p>
 
   <h3>Upgrading from v4</h3>
