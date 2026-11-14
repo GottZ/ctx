@@ -1,11 +1,13 @@
-"""Whether the gateway process that wrote ``status.json`` still runs.
+"""Whether the status a reader shows is current: does the gateway process that wrote ``status.json`` still run,
+and does this profile's ``plugins.isolation`` let the plugin run at all.
 
 The status file outlives the gateway that wrote it. The writing process therefore holds a shared lock on
 ``status.lock`` next to it for as long as it lives; the kernel drops the lock when the process ends, however
 it ends. A reader that can take the lock exclusively knows that no such process is left, and the status file
 then shows a past run. No process id is compared, so neither a reused pid nor another PID namespace (the
-gateway in a container, the CLI outside it) can mislead the reader. Without ``flock`` (Windows) nothing is
-locked and readers report "unknown".
+gateway in a container, the CLI outside it) can mislead the reader. A lock is only seen by processes of the
+same kernel: the writer records the kernel's boot id, and a reader under another kernel (another machine, the
+Linux VM of Docker Desktop, or after a reboot) reports "unknown", as it does without ``flock`` (Windows).
 """
 
 from __future__ import annotations
@@ -17,9 +19,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import hermes
+
 logger = logging.getLogger("ctx_discord_policy")
 
 LOCK_NAME = "status.lock"
+BOOT_ID = Path("/proc/sys/kernel/random/boot_id")  # Linux: one random id per kernel boot, shared by containers
 RUNNING, STOPPED, UNKNOWN = "running", "stopped", "unknown"
 _ATTEMPTS = 5            # a reader holds the exclusive lock only for an instant
 _PAUSE = 0.02
@@ -69,10 +74,31 @@ def hold(directory: Path) -> bool:
         return False
 
 
+def isolation_report() -> dict[str, Any]:
+    """``plugins.isolation`` of the active profile as the status readers (CLI, settings page) report it. Anything
+    but ``in_process`` means the plugin's own check (A1) refuses: nothing of it runs for Discord."""
+    try:
+        mode, evidence = hermes.isolation_mode()
+    except Exception as exc:  # a configuration Hermes cannot read; the status itself still shows
+        mode, evidence = "unknown", f"plugins.isolation could not be read: {exc}"
+    return {"mode": mode, "evidence": evidence, "allows_plugin": mode == "in_process"}
+
+
+def kernel_id() -> Any:
+    """The running kernel's boot id, or None where there is none to read (not Linux)."""
+    try:
+        return BOOT_ID.read_text(encoding="ascii").strip() or None
+    except (OSError, ValueError):
+        return None
+
+
 def writer_state(directory: Path, status: dict) -> tuple[str, str]:
     """``(RUNNING | STOPPED | UNKNOWN, reason)`` for the process that wrote *status* in *directory*."""
     if status.get("writer_lock") is not True:
         return UNKNOWN, "it was written without a process lock (an older version, or no file locking there)"
+    if status.get("writer_kernel") != kernel_id():
+        return UNKNOWN, ("it was written under another kernel (another machine or VM, or before this machine "
+                         "restarted), where its lock cannot be seen")
     fcntl = _flock()
     if fcntl is None:
         return UNKNOWN, "files cannot be locked on this system"

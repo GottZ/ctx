@@ -106,7 +106,7 @@ def write_status(home: Path) -> Path:
     # Held until this process exits: readers can then tell a past run's status from a live one.
     held = status_lock.hold(path.parent)
     payload = {"status_schema": 1, "written_at": time.time(), "hermes_version": hermes.hermes_version(),
-               "writer_lock": held, **RUNTIME.describe()}
+               "writer_lock": held, "writer_kernel": status_lock.kernel_id(), **RUNTIME.describe()}
     now = payload.get("interventions") or {}
     for change in compare_with_previous(path, payload):
         name = change.split(": ", 1)[0]

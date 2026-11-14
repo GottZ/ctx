@@ -115,3 +115,58 @@ def test_a_status_without_the_writer_lock_is_unknown(anchor):
     text = _status(anchor, home)
     assert "whether that gateway still runs is unknown" in text and "armed profiles: default" in text, text
     assert json.loads(_status(anchor, home, "--json"))["gateway_status_writer"]["state"] == "unknown"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the writer's process lock needs flock")
+def test_a_status_written_under_another_kernel_is_unknown(anchor, monkeypatch):
+    """A lock is seen only by processes of one kernel: a CLI on the host of Docker Desktop, the gateway in its
+    Linux VM, would take the lock and call a running gateway stopped."""
+    home = anchor.tmp / "owner"
+    _gateway(home, wait=False).communicate(timeout=60)
+    path = home / "plugin-data" / "ctx_discord_policy" / "status.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["writer_lock"] is True and data["writer_kernel"] == anchor.mod("status_lock").kernel_id()
+    data["writer_kernel"] = "another-kernel"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    writer = json.loads(_status(anchor, home, "--json"))["gateway_status_writer"]
+    assert writer["state"] == "unknown" and "another kernel" in writer["reason"], writer
+
+
+# ── the settings page reads the same status (under host isolation it is the one surface left) ─────────
+
+
+def _page(anchor, home, path):
+    from fakes.dashboard import FakeBackend
+
+    routes = anchor.mod("web.routes")
+    backend = FakeBackend()
+    backend.hermes = anchor.mod("hermes")
+    req = routes.WebRequest(method="GET", path=path, query={}, body=None, home=home,
+                            plugin_dir=ROOT, process="dashboard", surface="dashboard", backend=backend)
+    resp = routes.handle(req)
+    assert resp.status == 200, resp.body
+    return resp.body
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the writer's process lock needs flock")
+def test_the_settings_page_marks_a_stopped_gateway_and_host_isolation(anchor, monkeypatch):
+    home = anchor.tmp / "owner"
+    gateway = _gateway(home, wait=True)
+    try:
+        assert _page(anchor, home, "/status")["writer"]["state"] == "running"
+        assert _page(anchor, home, "/overview")["protection"]["writer"]["state"] == "running"
+    finally:
+        gateway.communicate("\n", timeout=60)
+    status = _page(anchor, home, "/status")
+    assert status["writer"]["state"] == "stopped" and status["isolation"]["allows_plugin"] is True, status
+    assert _page(anchor, home, "/overview")["protection"]["writer"]["state"] == "stopped"
+    monkeypatch.setattr(anchor.mod("hermes"), "isolation_mode", lambda: ("host", "probe"))
+    assert _page(anchor, home, "/status")["isolation"] == {"mode": "host", "evidence": "probe",
+                                                             "allows_plugin": False}
+    assert _page(anchor, home, "/overview")["protection"]["isolation"]["allows_plugin"] is False
+
+
+def test_the_settings_page_without_a_status_names_no_writer(anchor):
+    home = anchor.tmp / "owner"
+    assert _page(anchor, home, "/status")["writer"] is None
+    assert _page(anchor, home, "/overview")["protection"]["writer"] is None

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import io
+from pathlib import Path
 
 
 def test_host_isolation_runs_plugins_in_the_host_and_skips_their_cli_commands(hermes, tmp_path):
@@ -53,3 +54,40 @@ def test_the_status_reads_the_isolation_mode_of_the_profile(hermes, anchor, tmp_
             reset_hermes_home_override(token)
     assert texts["host"].startswith("Not active in this profile: plugins.isolation is host"), texts["host"]
     assert "Not active" not in texts["in_process"]
+
+
+def test_the_settings_page_reads_the_isolation_mode_of_the_profile(hermes, anchor, tmp_path, monkeypatch):
+    """Under host isolation Hermes still mounts the page's backend (in the plugin host, where
+    HERMES_PLUGIN_HOST_PROCESS is set): the page is the one surface left, and it says the plugin is not active."""
+    from fakes.dashboard import FakeBackend
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    routes = anchor.mod("web.routes")
+    home = tmp_path / "page-home"
+    home.mkdir()
+
+    def page(path):
+        backend = FakeBackend()
+        backend.hermes = anchor.mod("hermes")
+        req = routes.WebRequest(method="GET", path=path, query={}, body=None, home=home,
+                                plugin_dir=Path(anchor.entry.__file__).parent,
+                                process="dashboard", surface="dashboard", backend=backend)
+        return routes.handle(req).body
+
+    seen = {}
+    for mode in ("in_process", "host"):
+        (home / "config.yaml").write_text(f"plugins:\n  isolation: {mode}\n", encoding="utf-8")
+        token = set_hermes_home_override(str(home))
+        try:
+            seen[mode] = (page("/status")["isolation"], page("/overview")["protection"]["isolation"])
+        finally:
+            reset_hermes_home_override(token)
+    assert all(i["allows_plugin"] is True for i in seen["in_process"]), seen
+    assert all(i["mode"] == "host" and i["allows_plugin"] is False for i in seen["host"]), seen
+    (home / "config.yaml").write_text("plugins:\n  isolation: in_process\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")      # inside the plugin host child
+    token = set_hermes_home_override(str(home))
+    try:
+        assert page("/status")["isolation"]["allows_plugin"] is False
+    finally:
+        reset_hermes_home_override(token)

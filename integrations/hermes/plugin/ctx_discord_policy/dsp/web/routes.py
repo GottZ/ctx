@@ -29,7 +29,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Optional
 
-from .. import RUNTIME_API, __version__, hermes
+from .. import RUNTIME_API, __version__, hermes, status_lock
 from ..adapt.status import write_json_atomic
 from ..policy import lanes as policy_lanes
 from .. import prompts
@@ -152,6 +152,14 @@ def _read_json(path: Path) -> Optional[dict]:
 
 def gateway_status(home: Path) -> Optional[dict]:
     return _read_json(hermes.plugin_data_dir(home) / "status.json")
+
+
+def gateway_writer(home: Path, status: Optional[dict]) -> Optional[dict]:
+    """Whether the gateway that wrote *status* still runs (``status_lock``); None without a status."""
+    if not isinstance(status, dict):
+        return None
+    state, reason = status_lock.writer_state(hermes.plugin_data_dir(home), status)
+    return {"state": state, "reason": reason}
 
 
 def who(by: Any, via: Any = None) -> dict[str, Any]:
@@ -405,10 +413,11 @@ def get_meta(req: WebRequest) -> WebResponse:
                             "rpc": req.process != "gateway" and hermes.rpc_available()}})
 
 
-def _protection(status: Optional[dict]) -> dict[str, Any]:
+def _protection(home: Path, status: Optional[dict]) -> dict[str, Any]:
+    current = {"writer": gateway_writer(home, status), "isolation": status_lock.isolation_report()}
     if not isinstance(status, dict):
         return {"status_at": None, "pid": None, "hermes_version": None, "armed_profiles": [],
-                "security_degraded": [], "comfort_fallbacks": 0}
+                "security_degraded": [], "comfort_fallbacks": 0, **current}
     interventions = status.get("interventions") if isinstance(status.get("interventions"), dict) else {}
     degraded, comfort = [], 0
     for name, result in sorted(interventions.items()):
@@ -422,7 +431,7 @@ def _protection(status: Optional[dict]) -> dict[str, Any]:
     return {"status_at": status.get("written_at"), "pid": status.get("pid"),
             "hermes_version": status.get("hermes_version"),
             "armed_profiles": sorted(str(v.get("profile")) for v in armed.values() if isinstance(v, dict)),
-            "security_degraded": degraded, "comfort_fallbacks": comfort}
+            "security_degraded": degraded, "comfort_fallbacks": comfort, **current}
 
 
 _STATE_ORDER = {"active": 0, "paused": 1, "unbound": 2}
@@ -464,7 +473,7 @@ def get_overview(req: WebRequest) -> WebResponse:
                "store": {"state": snap.state, "error": redact_paths(snap.error),
                          "problems": redact_paths(list(snap.problems))},
                "operators": {"count": count, "readable": readable}, "bots": bots,
-               "protection": _protection(gateway_status(req.home)),
+               "protection": _protection(req.home, gateway_status(req.home)),
                "other_profiles": _other_profiles(req, {b["id"] for b in bots}), "next_step": next_step})
 
 
@@ -555,7 +564,8 @@ def _status_for(home: Path, status: Any) -> Any:
 
 
 def get_status(req: WebRequest) -> WebResponse:
-    status = redact_paths(_status_for(req.home, gateway_status(req.home)))
+    raw = gateway_status(req.home)
+    status = redact_paths(_status_for(req.home, raw))
     page = redact_paths(_read_json(hermes.plugin_data_dir(req.home) / "page.json"))
     interventions = []
     if isinstance(status, dict) and isinstance(status.get("interventions"), dict):
@@ -564,9 +574,10 @@ def get_status(req: WebRequest) -> WebResponse:
                 interventions.append({"id": name, "klass": result.get("klass"), "outcome": result.get("outcome"),
                                       "reason": result.get("reason", ""), "probe": result.get("probe", ""),
                                       "at": result.get("at")})
-    protection = _protection(status)
+    protection = _protection(req.home, raw)
     return ok({"status": status, "page": page, "interventions": interventions,
                "armed_profiles": protection["armed_profiles"],
+               "writer": protection["writer"], "isolation": protection["isolation"],
                "at": status.get("written_at") if isinstance(status, dict) else None,
                "pid": status.get("pid") if isinstance(status, dict) else None,
                "plugin_version": status.get("plugin_version") if isinstance(status, dict) else None,

@@ -129,10 +129,13 @@ def test_install_is_named_for_every_profile():
 def test_readme_says_what_host_isolation_leaves():
     """Under host isolation Hermes skips plugin commands (tests/contract/test_status_contract.py): no status
     can say anything there, so the README names the command's absence and Hermes' own view instead."""
-    section = _readme_section("Before you start")
+    section = " ".join(_readme_section("Before you start").split())
     assert "says so in the status" not in section
     assert "there is no `hermes ctx-discord-policy` command" in section
     assert "`hermes plugins info ctx_discord_policy`" in section
+    # The settings page backend is mounted in the plugin host (hermes_cli/web_server_dashboard.py) and says so.
+    assert "the settings page still opens" in section and "not active" in section
+    assert "does not run at all" not in " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
 
 
 def test_readme_links_nothing_above_the_plugin_directory():

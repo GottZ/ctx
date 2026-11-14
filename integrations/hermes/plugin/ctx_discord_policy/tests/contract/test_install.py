@@ -158,6 +158,11 @@ def test_every_command_in_the_readme_parses(hermes, anchor):
     profile_flags = {flag for flag, _takes_value in PRE_ARGPARSE_INHERITED_FLAGS}
     commands = _readme_commands()
     assert len(commands) >= 10, commands
+    # Named in prose: the command and the option, as the README puts them to use.
+    prose = " ".join((REPO / "README.md").read_text(encoding="utf-8").split())
+    assert "`hermes plugins info ctx_discord_policy`" in prose and "`--ref <commit>`" in prose
+    commands += ["hermes plugins info ctx_discord_policy", "hermes -p <profile> plugins install "
+                 "GottZ/ctx/integrations/hermes/plugin/ctx_discord_policy --ref <commit> --enable"]
     failures = []
     for command in commands:
         for placeholder, value in PLACEHOLDERS.items():

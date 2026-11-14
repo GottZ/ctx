@@ -106,10 +106,8 @@ def _status(home: Path, store: PolicyStore, as_json: bool, out: TextIO) -> int:
     snapshot = store.read()
     status = _gateway_status(home)
     operator_count = len(config.operators(home))
-    try:
-        mode, evidence = hermes.isolation_mode()
-    except Exception as exc:  # a configuration Hermes cannot read; the status itself still prints
-        mode, evidence = "unknown", f"plugins.isolation could not be read: {exc}"
+    isolation = status_lock.isolation_report()
+    mode, evidence = isolation["mode"], isolation["evidence"]
     writer = None
     if status is not None:
         state, reason = status_lock.writer_state(hermes.plugin_data_dir(home), status)
@@ -122,7 +120,7 @@ def _status(home: Path, store: PolicyStore, as_json: bool, out: TextIO) -> int:
               "store_error": snapshot.error, "store_problems": list(snapshot.problems),
               "operators_configured": operator_count, "guilds": guilds, "gateway_status": status,
               "gateway_status_writer": writer,
-              "plugins_isolation": {"mode": mode, "evidence": evidence, "allows_plugin": mode == "in_process"}}
+              "plugins_isolation": isolation}
     if as_json:
         json.dump(report, out, indent=2, sort_keys=True, default=str)
         out.write("\n")

@@ -44,7 +44,7 @@ hermes ctx-discord-policy routing set <server id> <profile>   on the host: run a
   the status and the change history, next to Hermes' own form for the plugin settings.
 - **It checks itself against your Hermes.** When Hermes loads it and when the Discord bot connects, the plugin
   checks each place where it hooks into Hermes for the form it needs (name, parameters, sync or async). What
-  Hermes does behind those places is tested against every supported Hermes version in CI (see Compatibility).
+  Hermes does behind those places is tested in CI, against the Hermes versions listed under Compatibility.
   Works without ctx.
 
 ## How it works
@@ -64,16 +64,17 @@ you activated it:
 When Hermes itself later gains something the plugin adds today (deleting progress messages, one progress line
 that keeps being replaced), the plugin notices and steps back: the status then reads `native` instead of
 `injected` or `wrapped`. Safety checks that cannot be made close the server for members; comfort features fall
-back to Hermes' own behaviour. Under `plugins.isolation: host` none of this applies: the plugin does not run at
-all (see Before you start).
+back to Hermes' own behaviour. Under `plugins.isolation: host` none of this applies: nothing of the plugin runs
+for Discord (see Before you start).
 
 ## Before you start
 
 - Hermes 0.22.4 or newer with the Discord platform. The settings page needs Hermes Desktop 0.23.0 or newer.
 - Plugins running in the gateway process, Hermes' default. Under `plugins.isolation: host` Hermes loads the
-  plugin in a separate plugin host, where it stays inactive: it registers nothing, Hermes handles Discord
-  without it, and there is no `hermes ctx-discord-policy` command (Hermes adds no plugin commands from the
-  plugin host). `hermes plugins info ctx_discord_policy` then reads "Runs in: plugin host".
+  plugin in a separate plugin host, where it stays inactive for Discord: it registers nothing, and Hermes
+  handles Discord without it. Then there is no `hermes ctx-discord-policy` command (Hermes adds no plugin
+  commands from the plugin host); the settings page still opens, its backend runs in the plugin host, and says
+  that the plugin is not active. `hermes plugins info ctx_discord_policy` reads "Runs in: plugin host".
 - A Discord application with the **Message Content** intent (Hermes needs it as well).
 - One session per member: with `group_sessions_per_user: false` Hermes would put several members of a channel
   into one session, so the plugin keeps the server closed for members.
@@ -86,8 +87,9 @@ What does not work, or only partly:
   `/policy`.
 - **macOS and Windows** are listed as platforms of the plugin, but its test suites run on Linux only; they
   have had no run there yet.
-- **The status of a stopped gateway** stays on disk. `hermes ctx-discord-policy status` shows it and says
-  "is stale" once the gateway that wrote it has stopped; on Windows it cannot tell, and says so.
+- **The status of a stopped gateway** stays on disk. `hermes ctx-discord-policy status` and the settings page
+  show it and call it stale once the gateway that wrote it has stopped. On Windows, or when the gateway runs
+  on another machine or in a VM (Docker Desktop), they cannot tell and say so.
 - **Names on the settings page.** Channel, role and member names come from the running gateway: read directly
   when the page's backend runs in the gateway process, else from the server directory the gateway keeps, or
   over Hermes' plugin RPC (Hermes 0.23.1 or newer). Without either you enter IDs.
