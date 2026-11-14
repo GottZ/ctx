@@ -131,3 +131,26 @@ async def test_a_members_turn_whose_route_was_evicted_does_not_run_unrouted(worl
     restored.raw_message = None
     turn = await world.turn(restored)
     assert turn["result"] is None and not turn["ran"], turn
+
+
+def _plain_event(w, mid):
+    from gateway.platforms.base import MessageEvent, MessageType
+
+    source = w.adapter.build_source(chat_id=CHANNEL, chat_type="group", user_id=MEMBER, guild_id=GUILD,
+                                    message_id=str(mid))
+    return MessageEvent(text="hello", message_type=MessageType.TEXT, source=source, message_id=str(mid))
+
+
+async def test_another_bot_the_policy_does_not_run_keeps_hermes_rules(world):
+    from plugins.platforms.discord.adapter import DiscordAdapter
+
+    other = DiscordAdapter.__new__(DiscordAdapter)            # a second bot of the installation, not bound
+    world.runner._delivery_adapter_for = lambda source: other
+    turn = await world.turn(_plain_event(world, 7608))
+    assert turn["ran"] and turn["route"] is None, turn
+
+
+async def test_an_event_whose_bot_cannot_be_told_counts_for_every_bound_bot(world):
+    world.runner._delivery_adapter_for = lambda source: None
+    turn = await world.turn(_plain_event(world, 7609))
+    assert turn["result"] is None and not turn["ran"], turn

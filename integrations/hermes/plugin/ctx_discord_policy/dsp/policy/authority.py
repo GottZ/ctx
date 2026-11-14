@@ -36,8 +36,8 @@ def _source_message_id(source: Any, event: Any = None) -> str:
     return ""
 
 
-def bot_for_source(runner: Any, source: Any) -> Optional[str]:
-    """The bound bot that answers ``source`` (the adapter Hermes delivers through), ``None`` if unknown."""
+def adapter_for_source(runner: Any, source: Any) -> Any:
+    """The adapter Hermes answers ``source`` through, ``None`` if it cannot be told."""
     if runner is None or source is None:
         return None
     for name in ("_delivery_adapter_for", "_adapter_for_source"):
@@ -48,10 +48,15 @@ def bot_for_source(runner: Any, source: Any) -> Optional[str]:
             adapter = get(source)
         except Exception:
             adapter = None
-        binding = RUNTIME.bots.for_adapter(adapter) if adapter is not None else None
-        if binding is not None:
-            return binding.bot_id
+        if adapter is not None:
+            return adapter
     return None
+
+
+def bot_for_source(runner: Any, source: Any) -> Optional[str]:
+    """The bound bot that answers ``source`` (the adapter Hermes delivers through), ``None`` if unknown."""
+    binding = RUNTIME.bots.for_adapter(adapter_for_source(runner, source))
+    return binding.bot_id if binding is not None else None
 
 
 # Stands for "routes of several bots, and the bot cannot be told": a policy event whose route fails every check,
@@ -205,11 +210,14 @@ def event_refusal(adapter: Any, event: Any) -> Optional[str]:
 
 
 def bindings_for(runner: Any, source: Any) -> list:
-    """The bound bot that answers ``source``; every bound bot when that cannot be told (closed: a server any
-    of them knows counts)."""
-    bot = bot_for_source(runner, source)
-    binding = RUNTIME.bots.for_bot(bot) if bot else None
-    return [binding] if binding is not None else RUNTIME.bots.bindings()
+    """The bound bot that answers ``source``. A known adapter the policy does not run (another bot of the
+    installation): none, its servers keep Hermes' behaviour. No adapter at all: every bound bot (closed: a
+    server any of them knows counts)."""
+    adapter = adapter_for_source(runner, source)
+    if adapter is None:
+        return RUNTIME.bots.bindings()
+    binding = RUNTIME.bots.for_adapter(adapter)
+    return [binding] if binding is not None else []
 
 
 def unrouted_refusal(bindings: list, event: Any) -> Optional[str]:
