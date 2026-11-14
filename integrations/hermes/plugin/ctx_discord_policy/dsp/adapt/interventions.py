@@ -17,19 +17,22 @@ marked so a reconnect or a second profile instance never wraps twice.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import sys
 import time
 from typing import Any
 
-from .. import RUNTIME_API, hermes
+from .. import RUNTIME_API, config, hermes
+from ..delivery import public
+from ..delivery import reactions as delivery_reactions
 from ..ingress import admission, classify, hydrate
 from ..policy import authority, hooks
-from ..policy.routes import AMBIENT, snowflake
+from ..policy.routes import AMBIENT, OPERATOR, snowflake
 from ..runtime import RUNTIME
 from .probes import probe_callable
 from .status import SECURITY, Outcome, Result
-from .strategies import wrap_attr
+from .strategies import run_intervention, wrap_attr
 
 logger = logging.getLogger("ctx_discord_policy")
 
@@ -77,16 +80,19 @@ def _make_admission(original: Any) -> Any:
         if widened:
             # Stock reports role authorization for every admitted human once roles are configured; for an
             # author we let in, it must never travel on (it would authorize an unrouted turn by roles).
-            RUNTIME.widened.put(_widened_key(message), time.time())
+            RUNTIME.widened.put(_widened_key(self, message), time.time())
             return (result[0], False)
         return result
 
     return policy_admission
 
 
-def _widened_key(message: Any) -> tuple[str, str]:
-    """Per message AND author: a reaction wakeup reuses the reacted-to message's id with the reactor as author."""
-    return (str(getattr(message, "id", "") or ""), str(getattr(getattr(message, "author", None), "id", "") or ""))
+def _widened_key(adapter: Any, message: Any) -> tuple[str, str, str]:
+    """Per bot, message AND author: a reaction wakeup reuses the reacted-to message's id with the reactor as
+    author, and two bots of one gateway may both admit one message."""
+    binding = RUNTIME.bots.for_adapter(adapter)
+    return (binding.bot_id if binding is not None else "", str(getattr(message, "id", "") or ""),
+            str(getattr(getattr(message, "author", None), "id", "") or ""))
 
 
 def _hydrates(route: Any, decision: Any) -> bool:
@@ -116,7 +122,7 @@ async def _hydrated(adapter: Any, message: Any, route: Any, decision: Any) -> An
 def _make_handle(original: Any) -> Any:
     async def policy_handle(self: Any, message: Any, *args: Any, **kwargs: Any) -> Any:
         message_id = str(getattr(message, "id", "") or "")
-        widened_key = _widened_key(message)
+        widened_key = _widened_key(self, message)
         decision = admission.decide(self, message)
         if decision is not None and decision.excluded:
             return False
@@ -127,6 +133,10 @@ def _make_handle(original: Any) -> Any:
             decision.addressed = False
             if widened_key in RUNTIME.widened:
                 decision = None
+        if decision is not None and not message_id:
+            if decision.lane != OPERATOR:
+                return False            # nothing to key a member's route on: no turn, never an unrouted one
+            decision = None
         if decision is None or not message_id:
             if message_id and widened_key in RUNTIME.widened:
                 # Admitted only because the policy widened the allowlist: never hand it on unrouted.
@@ -135,6 +145,10 @@ def _make_handle(original: Any) -> Any:
             return await original(self, message, *args, **kwargs)
         RUNTIME.widened.pop(widened_key)
         route = decision.route(message_id)
+        history = route.is_operator or (route.lanes.channel_history and hydrate.history_readable(
+            self, message, route, decision.guild_config))
+        if not route.is_operator and not history and route.lanes.channel_history:
+            route.lanes = dataclasses.replace(route.lanes, channel_history=False)   # H1-H: frozen closed
         RUNTIME.message_routes.put(route.key, route)
         hydrated = await _hydrated(self, message, route, decision)
         self_user = getattr(getattr(self, "_client", None), "user", None)
@@ -144,19 +158,116 @@ def _make_handle(original: Any) -> Any:
             content=hydrated.apply(getattr(message, "content", "") or "") if hydrated is not None else None,
             attachments=(hydrated.merged_attachments(getattr(message, "attachments", None) or ())
                          if hydrated is not None and hydrated.attachments else None))
-        return await original(self, routed, *args, **kwargs)
+        # Hermes' own history backfill (recent channel messages prepended to the turn) follows the members'
+        # history lane: closed where the author or the channel's audience may not read the history (A13).
+        token = RUNTIME.backfill_closed.set(not history)
+        try:
+            return await original(self, routed, *args, **kwargs)
+        finally:
+            RUNTIME.backfill_closed.reset(token)
 
     return policy_handle
 
 
+def _in_guild(event: Any) -> bool:
+    return bool(getattr(getattr(event, "source", None), "guild_id", None))
+
+
+def _make_event_gate(original: Any) -> Any:
+    async def policy_event(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            refusal = authority.event_refusal(self, event)
+        except Exception:
+            logger.exception("ctx_discord_policy: event check failed")
+            refusal = "the policy check failed" if _in_guild(event) else None
+        if refusal is not None:
+            source = getattr(event, "source", None)
+            logger.warning("ctx_discord_policy: dropped an event of message %s in channel %s before Hermes saw "
+                           "it: %s", getattr(source, "message_id", None) or getattr(event, "message_id", None),
+                           getattr(source, "chat_id", None), refusal)
+            return None
+        return await original(self, event, *args, **kwargs)
+
+    return policy_event
+
+
+def install_event_gate(cls: Any) -> Result:
+    """A10: every event the adapter hands to Hermes' pipeline passes :func:`authority.event_refusal` first."""
+    probe = probe_callable(cls, "handle_message", is_async=True, positional=["event"])
+    where = f"{cls.__module__}.{cls.__qualname__}"
+    if not probe:
+        return Result("A10", SECURITY, Outcome.OFF, probe.reason, probe.evidence or where)
+    wrap_attr(cls, "handle_message", _make_event_gate, "A10", RUNTIME_API)
+    return Result("A10", SECURITY, Outcome.WRAPPED,
+                  "events of members' routes are checked before Hermes' pipeline (commands, busy sessions)",
+                  probe.evidence or where)
+
+
+def _make_backfill(original: Any) -> Any:
+    def policy_backfill(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if RUNTIME.backfill_closed.get():
+            return False
+        return original(self, *args, **kwargs)
+
+    return policy_backfill
+
+
+def install_backfill_gate(cls: Any) -> Result:
+    """A13: Hermes' history backfill (``_discord_history_backfill``) is off while it builds the event of a member's
+    message whose channel history the author or the channel's audience may not read. A Hermes without the
+    backfill needs no gate; one whose backfill does not match keeps members closed (off)."""
+    where = f"{cls.__module__}.{cls.__qualname__}"
+    if getattr(cls, "_discord_history_backfill", None) is None:
+        return Result("A13", SECURITY, Outcome.OK, "this Hermes has no Discord history backfill", where)
+    probe = probe_callable(cls, "_discord_history_backfill", is_async=False, positional=[])
+    if not probe:
+        return Result("A13", SECURITY, Outcome.OFF, probe.reason, probe.evidence or where)
+    wrap_attr(cls, "_discord_history_backfill", _make_backfill, "A13", RUNTIME_API)
+    return Result("A13", SECURITY, Outcome.WRAPPED,
+                  "Hermes' history backfill follows the members' history rule", probe.evidence or where)
+
+
+def install_upload_guard(cls: Any) -> Result:
+    """A11: every file sender of the adapter class refuses host files for public routes (dsp.delivery.public).
+    A sender this Hermes does not have needs no guard; one that exists but does not match is a reason to keep
+    members closed (off)."""
+    guarded, absent = [], []
+    for name, parameter in public.SENDERS:
+        if getattr(cls, name, None) is None:
+            absent.append(name)
+            continue
+        positional = ["chat_id", parameter]
+        probe = probe_callable(cls, name, is_async=True, positional=positional)
+        if not probe:
+            return Result(public.INTERVENTION, SECURITY, Outcome.OFF, f"{name}: {probe.reason}", probe.evidence)
+        wrap_attr(cls, name, public.make_guard(name, parameter), public.INTERVENTION, RUNTIME_API)
+        guarded.append(name)
+    if not guarded:
+        return Result(public.INTERVENTION, SECURITY, Outcome.OK, "the adapter class has no file sender",
+                      f"{cls.__module__}.{cls.__qualname__}")
+    for name in public.EVENT_DELIVERY:
+        # Hermes delivers a turn's extracted files here, after the runner returned: the event names the route.
+        probe = probe_callable(cls, name, is_async=True, positional=["event"])
+        if not probe:
+            return Result(public.INTERVENTION, SECURITY, Outcome.OFF, f"{name}: {probe.reason}", probe.evidence)
+        wrap_attr(cls, name, public.make_event_delivery, public.INTERVENTION, RUNTIME_API)
+    reason = "uploads of members' turns limited to Hermes' trusted media roots: " + ", ".join(guarded)
+    if absent:
+        reason += f" ({', '.join(absent)} absent)"
+    return Result(public.INTERVENTION, SECURITY, Outcome.WRAPPED, reason, f"{cls.__module__}.{cls.__qualname__}")
+
+
 def bind_adapter_class(cls: Any) -> bool:
-    """A3 + A5 + A6 for one adapter class. Returns True when both wrappers are in place."""
+    """A3 + A5 + A6 (+ A11) for one adapter class. Returns True when A5 and A6 are in place."""
     a5 = probe_callable(cls, "_discord_message_admission", is_async=False, positional=["message"],
                         keyword_only=["claim"])
     a6 = probe_callable(cls, "_handle_message", is_async=True, positional=["message", "role_authorized"],
                         keyword_only=["recovered"])
     where = f"{cls.__module__}.{cls.__qualname__}"
     RUNTIME.status.record(Result("A3", SECURITY, Outcome.OK, f"adapter class {where}", "platform handler factory"))
+    run_intervention(RUNTIME.status, public.INTERVENTION, SECURITY, lambda: install_upload_guard(cls))
+    run_intervention(RUNTIME.status, "A10", SECURITY, lambda: install_event_gate(cls))
+    run_intervention(RUNTIME.status, "A13", SECURITY, lambda: install_backfill_gate(cls))
     if not a5:
         RUNTIME.status.record(Result("A5", SECURITY, Outcome.OFF, a5.reason, a5.evidence))
     if not a6:
@@ -175,33 +286,51 @@ def bind_adapter_class(cls: Any) -> bool:
 
 def _make_runner_handle(original: Any) -> Any:
     async def policy_runner_handle(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
-        candidate = authority.candidate_for_event(event)
+        candidate = authority.candidate_for_event(event, self)
         route = None
         if candidate is not None:
-            route = authority.route_for_event(event)
+            route = authority.route_for_event(event, self)
             target = authority.event_target_key(self, event) if route is not None else None
             refusal = authority.refusal(self, event, route, target)
             if refusal is not None:
                 # A message the policy admitted must never run without its lane: revoke the route (no later
                 # authorization check can find it) and drop the event instead of handing it on unrouted.
                 authority.revoke(candidate)
+                delivery_reactions.mark_dropped(event)
                 logger.warning("ctx_discord_policy: dropped message %s in channel %s: %s",
                                candidate.message_id, candidate.channel_id, refusal)
+                return None
+        else:
+            # No route: Hermes' own rules would run it. In a server the policy knows that is for operators only
+            # (a route evicted under load, a native slash command, a queued turn Hermes does not authorize
+            # again): anyone else's event is dropped here.
+            refusal = authority.unrouted_refusal(authority.bindings_for(self, getattr(event, "source", None)),
+                                                 event)
+            if refusal is not None:
+                delivery_reactions.mark_dropped(event)
+                source = getattr(event, "source", None)
+                logger.warning("ctx_discord_policy: dropped an unrouted event in channel %s: %s",
+                               getattr(source, "chat_id", None), refusal)
                 return None
         # Always set (also to None): a drain task created inside another message's context must never
         # run this event under that message's route.
         token = RUNTIME.route.set(route)
         try:
-            return await original(self, event, *args, **kwargs)
+            result = await original(self, event, *args, **kwargs)
         finally:
             RUNTIME.route.reset(token)
+        if route is not None and not route.is_operator:
+            # The answer Hermes extracts attachments from after this returns (normal send, durable queue):
+            # a member's turn names no host file and pings nobody (H1-A, dsp.delivery.public).
+            result = public.reply_result(result, route)
+        return result
 
     return policy_runner_handle
 
 
 def _make_runner_authorized(original: Any) -> Any:
     def policy_runner_authorized(self: Any, source: Any, *args: Any, **kwargs: Any) -> Any:
-        if authority.authorizes(source):
+        if authority.authorizes(source, self):
             return True
         return original(self, source, *args, **kwargs)
 
@@ -245,6 +374,26 @@ def bot_id_of(native: Any, adapter: Any) -> str:
     return ""
 
 
+def note_allow_bots(adapter: Any, binding: Any) -> Result:
+    """A12: Hermes' own ``allow_bots`` for this bot, and what the policy makes of it in the servers it knows
+    (closed unless ``settings.bot_messages: member``). A check, never a degradation: the policy closes."""
+    try:
+        getter = getattr(adapter, "_get_allow_bots", None)
+        mode = str(getter()) if callable(getter) else ""
+    except Exception:
+        mode = ""
+    members = config.bot_messages_as_members(binding.owner_home)
+    if mode == "none":
+        reason = "Hermes lets no other bot wake this bot (allow_bots: none)"
+    else:
+        what = "are answered like members' messages, without tools (bot_messages: member)" if members \
+            else "get no turn (bot_messages: closed)"
+        known = f"Hermes' allow_bots is {mode}" if mode else "Hermes' allow_bots cannot be read"
+        reason = (f"{known}: in servers where the policy is active or paused, messages of other bots and "
+                  f"webhooks {what}")
+    return Result("A12", SECURITY, Outcome.OK, reason, "adapter._get_allow_bots")
+
+
 def discord_platform_handler(native: Any, adapter: Any) -> None:
     """Called by Hermes for a connected Discord adapter (after ``ready``), in its owner's profile scope."""
     from .. import bootstrap  # late: bootstrap imports this module
@@ -258,4 +407,5 @@ def discord_platform_handler(native: Any, adapter: Any) -> None:
         return
     binding = RUNTIME.bots.bind(adapter, bot_id, hermes.current_home())
     logger.info("ctx_discord_policy: bot %s bound; state in %s", bot_id, binding.store.path)
+    run_intervention(RUNTIME.status, "A12", SECURITY, lambda: note_allow_bots(adapter, binding))
     bootstrap.bind_bot(native, adapter, binding)  # the layers' bind steps, then the status file

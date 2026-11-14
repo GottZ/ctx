@@ -24,7 +24,10 @@ DEFAULTS: dict[str, Any] = {
     "operator_label": "the operator",
     "guild_prompt_max_chars": 6000,
     "notify_operators": True,
+    "bot_messages": "closed",
 }
+
+BOT_MESSAGES = ("closed", "member")
 
 _reader: Optional[Reader] = None
 _warned: set[tuple[str, str]] = set()
@@ -110,7 +113,16 @@ def setting(home: os.PathLike, key: str) -> Any:
         return default
     if key == "guild_prompt_max_chars":
         return max(0, min(value, HARD_PROMPT_LIMIT))
+    if key == "bot_messages" and value not in BOT_MESSAGES:
+        _warn_once(home, f"settings.bot_messages must be one of {', '.join(BOT_MESSAGES)}; using closed")
+        return default
     return value
+
+
+def bot_messages_as_members(home: os.PathLike) -> bool:
+    """``settings.bot_messages: member``: messages of other bots and webhooks that Hermes' own ``allow_bots``
+    lets in run as members' turns. Default and every reading problem: closed (they get no turn at all)."""
+    return setting(home, "bot_messages") == "member"
 
 
 # --- S12/S13 --- profiles the policy never opens to members (PROFILE-PER-GUILD §4.3) ------------------

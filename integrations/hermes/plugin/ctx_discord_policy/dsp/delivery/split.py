@@ -29,7 +29,7 @@ from ..adapt.probes import probe_callable
 from ..adapt.status import COMFORT, Outcome, Result, StatusRegister
 from ..adapt.strategies import is_own_wrapper, run_intervention, wrap_attr
 from ..runtime import RUNTIME
-from . import media, reactions, worklog
+from . import media, public, reactions, worklog
 
 logger = logging.getLogger("ctx_discord_policy")
 
@@ -43,6 +43,9 @@ CORE_TARGETS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     ("edit_message", ("chat_id", "message_id", "content"), ("finalize", "metadata")),
 )
 COMPLETION_TARGET = ("on_processing_complete", ("event", "outcome"), ())
+# Hermes' shared tail of every interactive card (exec approval, clarify, pickers, confirmations): the card goes
+# to ``metadata["thread_id"]`` when present (``_prompt_target_id``), else to ``chat_id``.
+PROMPT_TARGET = ("_send_prompt", ("chat_id", "metadata", "build"), ())
 
 
 async def _refuse_public(adapter: Any, routes: list, target: str, what: str) -> bool:
@@ -57,6 +60,19 @@ async def _refuse_public(adapter: Any, routes: list, target: str, what: str) -> 
         logger.warning("ctx_discord_policy: refused %s of a non-operator turn into the worklog area (%s)", what,
                        target)
     return hit
+
+
+def _public_text(call: Any, routes: list) -> bool:
+    """The delivery belongs to a public route (:func:`public.owner`): its text leaves without attachment
+    directives, host paths or pings (``dsp.delivery.public``). True when the content was set."""
+    asker = public.public_owner(routes)
+    if asker is None:
+        return False
+    content = call.get("content")
+    if not isinstance(content, str):
+        return False
+    call.set("content", public.reply(content, asker))
+    return True
 
 
 def copy_at_turn_end(adapter: Any) -> bool:
@@ -89,12 +105,14 @@ def make_send(original: Any) -> Any:
         metadata = call.get("metadata")
         target = worklog.delivery_target(chat_id, metadata)
         try:
-            routes = worklog.candidate_routes(target, reply_to, metadata)
+            routes = worklog.candidate_routes(target, reply_to, metadata, worklog.bot_of(self))
         except Exception:
             logger.exception("ctx_discord_policy: route lookup failed; stock delivery")
             routes = []
         if await _refuse_public(self, routes, target, "send"):
             return worklog.send_result(original, success=False, error=REFUSED)
+        if _public_text(call, routes):
+            return await call.invoke(original)      # a public route never has a worklog: stock delivery
         route = worklog.route_for_target(routes, target)
         try:
             state = (await worklog.worklog_for(self, route)
@@ -143,14 +161,15 @@ def make_edit(original: Any, original_send: Callable[[], Any]) -> Any:
         found = worklog.located(chat_id, message_id)
         target = found[0] if found is not None else chat_id
         try:
-            routes = worklog.candidate_routes(target, None, metadata)
+            routes = worklog.candidate_routes(target, None, metadata, worklog.bot_of(self))
         except Exception:
             logger.exception("ctx_discord_policy: route lookup failed; stock edit")
             routes = []
         if await _refuse_public(self, routes, target, "edit"):
             return worklog.send_result(original, success=False, error=REFUSED)
+        public_text = _public_text(call, routes)
         if found is None:
-            return await original(self, *args, **kwargs)
+            return await call.invoke(original) if public_text else await original(self, *args, **kwargs)
 
         thread_id, state = found
         call.set("chat_id", thread_id)
@@ -193,6 +212,41 @@ def make_complete(original_send: Callable[[], Any]) -> Callable[[Any], Any]:
     return factory
 
 
+def make_prompt(original: Any) -> Any:
+    """K3 on ``_send_prompt``: an operator turn's card (approval, clarify, picker) goes to the turn's worklog
+    thread when it has one, like the rest of its tool output; a card of a public route never lands in the
+    worklog area. Anything else: stock."""
+    signature = worklog.signature_of(original)
+
+    async def policy_prompt(self: Any, *args: Any, **kwargs: Any) -> Any:
+        call = worklog.CallArgs.bind(signature, (self, *args), kwargs)
+        if call is None:
+            return await original(self, *args, **kwargs)
+        metadata = call.get("metadata")
+        target = worklog.delivery_target(call.get("chat_id"), metadata)
+        try:
+            routes = worklog.candidate_routes(target, None, metadata, worklog.bot_of(self))
+        except Exception:
+            logger.exception("ctx_discord_policy: prompt route lookup failed; stock delivery")
+            routes = []
+        if await _refuse_public(self, routes, target, "prompt"):
+            return worklog.send_result(original, success=False, error=REFUSED)
+        route = worklog.route_for_target(routes, target)
+        try:
+            state = await worklog.worklog_for(self, route) if route is not None and route.is_operator else None
+        except Exception:
+            logger.exception("ctx_discord_policy: worklog lookup for a prompt failed; stock delivery")
+            state = None
+        if state is None:
+            return await original(self, *args, **kwargs)
+        redirected = dict(metadata or {})
+        redirected["thread_id"] = state.thread_id
+        call.set("metadata", redirected)
+        return await call.invoke(original)
+
+    return policy_prompt
+
+
 def _restore(owner: Any, name: str, had_own: bool, previous: Any) -> None:
     if had_own:
         setattr(owner, name, previous)
@@ -209,7 +263,7 @@ def _send_beneath(adapter_cls: Any) -> Any:
 
 
 def install_k3(adapter_cls: Any) -> Result:
-    targets = CORE_TARGETS + media.MEDIA_TARGETS + (COMPLETION_TARGET,)
+    targets = CORE_TARGETS + media.MEDIA_TARGETS + (COMPLETION_TARGET, PROMPT_TARGET)
     probes = {name: probe_callable(adapter_cls, name, is_async=True, positional=list(pos), keyword_only=list(kw))
               for name, pos, kw in targets}
     core_failed = [probes[name] for name, _, _ in CORE_TARGETS if not probes[name]]
@@ -251,6 +305,15 @@ def install_k3(adapter_cls: Any) -> Result:
             notes.append(f"final copy per final-marked delivery ({type(exc).__name__}: {exc})")
     else:
         notes.append(f"final copy per final-marked delivery ({completion.reason})")
+    prompt = probe_callable(adapter_cls, PROMPT_TARGET[0], is_async=True, positional=list(PROMPT_TARGET[1]))
+    if prompt:
+        try:
+            states.append(wrap_attr(adapter_cls, PROMPT_TARGET[0], make_prompt, INTERVENTION, RUNTIME_API))
+            notes.append("approval and other cards follow the worklog")
+        except Exception as exc:
+            notes.append(f"cards stay in the channel they were asked in ({type(exc).__name__}: {exc})")
+    else:
+        notes.append(f"cards stay in the channel they were asked in ({prompt.reason})")
     reference = probe_callable(adapter_cls, "_message_reference_from_ids", positional=["message_id", "channel"])
     if not reference:
         notes.append(f"media without origin reply reference ({reference.reason})")
@@ -274,5 +337,5 @@ def install(adapter_cls: Any, get_guild_config: Callable[[str, str], Any],
     return [k3, k4]
 
 
-__all__ = ["CORE_TARGETS", "FALLBACK_HINT", "INTERVENTION", "REFUSED", "copy_at_turn_end", "install", "install_k3",
-           "make_complete", "make_edit", "make_send"]
+__all__ = ["CORE_TARGETS", "FALLBACK_HINT", "INTERVENTION", "PROMPT_TARGET", "REFUSED", "copy_at_turn_end", "install",
+           "install_k3", "make_complete", "make_edit", "make_prompt", "make_send"]

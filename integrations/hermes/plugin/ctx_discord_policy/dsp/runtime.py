@@ -132,12 +132,18 @@ class Runtime:
         self.lock = threading.RLock()
         # The authority route of the turn running in this context (set per runner call, never inherited).
         self.route: ContextVar[Any] = ContextVar("ctx_discord_policy_route", default=None)
+        # The route of the event whose attachments Hermes is delivering (A11, set from the event itself: Hermes
+        # delivers a turn's files after the runner returned, outside ``route``).
+        self.delivery_route: ContextVar[Any] = ContextVar("ctx_discord_policy_delivery_route", default=None)
+        # True while Hermes builds the event of a member's message whose channel history is closed (A13).
+        self.backfill_closed: ContextVar[bool] = ContextVar("ctx_discord_policy_backfill_closed", default=False)
         self.armed = ArmedRegister()
         self.status = StatusRegister()
         self.instances: dict[str, Instance] = {}
-        # Exact per-message routes: (channel_id, message_id, session_user_id) -> Route (``Route.key``). Restored
-        # FIFO events find theirs here; two users' routes of one message (a reaction wakeup) never collide.
-        self.message_routes: BoundedMap[tuple[str, str, str], Any] = BoundedMap()
+        # Exact per-message routes: (bot_id, channel_id, message_id, session_user_id) -> Route (``Route.key``).
+        # Restored FIFO events find theirs here (:meth:`find_route`); two users' routes of one message (a
+        # reaction wakeup) and two bots' routes of one message never collide.
+        self.message_routes: BoundedMap[tuple[str, str, str, str], Any] = BoundedMap()
         # (session_id, turn_id) -> Route, bound in pre_llm_call for tool calls that lost the ContextVar.
         self.turn_routes: BoundedMap[tuple[str, str], Any] = BoundedMap()
         # Sessions that ever carried a public route: a turn there without an exact route gets no tools.
@@ -148,9 +154,26 @@ class Runtime:
         self.bots = BotRegistry()
         # (message id, author id) whose admission widened the allowlist: never handed on unrouted afterwards.
         self.widened: BoundedMap[tuple[str, str], float] = BoundedMap()
+        # (chat, message, session user) of events A7 dropped: their processing shows no "done" reaction (K4).
+        self.dropped: BoundedMap[tuple[str, str, str], float] = BoundedMap()
         # Hermes session key -> (lane, session user) of the routes that used it: a session never mixes the
         # operator lane with another author's public lane.
         self.session_lanes: BoundedMap[str, tuple[str, str]] = BoundedMap()
+
+    def routes_for(self, channel_id: Any, message_id: Any, user_id: Any, bot_id: Any = None) -> list:
+        """Registered routes of one message for one session user: exactly ``bot_id``'s, or every bot's."""
+        rest = (str(channel_id or ""), str(message_id or ""), str(user_id or ""))
+        if bot_id:
+            found = self.message_routes.get((str(bot_id), *rest))
+            return [found] if found is not None else []
+        return self.message_routes.values_where(lambda key: tuple(key[1:]) == rest)
+
+    def find_route(self, channel_id: Any, message_id: Any, user_id: Any, bot_id: Any = None) -> Any:
+        """The registered route of one message for one session user. With ``bot_id``: exactly that bot's.
+        Without it: the one route any bot holds for that message and user; when two bots hold one, the
+        lookup is ambiguous and finds nothing (closed: a turn never runs under another bot's route)."""
+        found = self.routes_for(channel_id, message_id, user_id, bot_id)
+        return found[0] if len(found) == 1 else None
 
     def describe(self) -> dict[str, Any]:
         return {

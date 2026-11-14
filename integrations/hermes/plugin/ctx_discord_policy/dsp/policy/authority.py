@@ -8,8 +8,11 @@ Routes are found in two ways, because Hermes may execute an admitted message lat
 FIFO, restoring the event from a serialized envelope without ``raw_message`` and inside a drain task
 whose context was copied from whichever message started the drain:
 1. ``event.raw_message._dsp_route`` (the routed message the adapter handed to the stock handler);
-2. the per-message registry, keyed by ``(chat_id, message_id, user_id)`` of the source (``Route.key``): a
-   reaction wakeup reuses the reacted-to message's id, so one message can carry routes of several users.
+2. the per-message registry, keyed by ``(bot_id, chat_id, message_id, user_id)`` (``Route.key``): a
+   reaction wakeup reuses the reacted-to message's id, so one message can carry routes of several users,
+   and two bots of one gateway can admit the same message. The bot is the adapter that answers the source
+   (``runner._delivery_adapter_for``); where it cannot be told, a lookup that finds routes of two bots finds
+   none (closed).
 The runner wrapper sets the route context variable explicitly for every event — to the event's own
 route or to ``None`` — so a route can never be inherited by another message's turn.
 """
@@ -22,7 +25,7 @@ from .. import config, hermes
 from ..routing import check as routing_check  # S12: A4-P
 from ..runtime import RUNTIME
 from . import hooks
-from .routes import Route, platform_is_discord
+from .routes import PUBLIC, Route, platform_is_discord
 
 
 def _source_message_id(source: Any, event: Any = None) -> str:
@@ -33,9 +36,41 @@ def _source_message_id(source: Any, event: Any = None) -> str:
     return ""
 
 
-def registry_key(source: Any, message_id: str) -> tuple[str, str, str]:
-    """The registry key of the route this source's message would carry (``Route.key``)."""
-    return (str(getattr(source, "chat_id", "") or ""), str(message_id or ""), str(getattr(source, "user_id", "") or ""))
+def adapter_for_source(runner: Any, source: Any) -> Any:
+    """The adapter Hermes answers ``source`` through, ``None`` if it cannot be told."""
+    if runner is None or source is None:
+        return None
+    for name in ("_delivery_adapter_for", "_adapter_for_source"):
+        get = getattr(runner, name, None)
+        if not callable(get):
+            continue
+        try:
+            adapter = get(source)
+        except Exception:
+            adapter = None
+        if adapter is not None:
+            return adapter
+    return None
+
+
+def bot_for_source(runner: Any, source: Any) -> Optional[str]:
+    """The bound bot that answers ``source`` (the adapter Hermes delivers through), ``None`` if unknown."""
+    binding = RUNTIME.bots.for_adapter(adapter_for_source(runner, source))
+    return binding.bot_id if binding is not None else None
+
+
+# Stands for "routes of several bots, and the bot cannot be told": a policy event whose route fails every check,
+# so A7 drops it instead of running it unrouted.
+AMBIGUOUS = Route(bot_id="", guild_id="", channel_id="", message_id="", author_id="", lane=PUBLIC)
+
+
+def registered_route(source: Any, message_id: str, bot_id: Optional[str]) -> Any:
+    """The registry's route for this source's message (``Route.key``), of ``bot_id`` when known;
+    :data:`AMBIGUOUS` when several bots hold one and the bot is not known."""
+    found = RUNTIME.routes_for(getattr(source, "chat_id", ""), message_id, getattr(source, "user_id", ""), bot_id)
+    if len(found) > 1:
+        return AMBIGUOUS
+    return found[0] if found else None
 
 
 def exact(route: Any, source: Any, message_id: str = "") -> bool:
@@ -59,21 +94,30 @@ def exact(route: Any, source: Any, message_id: str = "") -> bool:
     return True
 
 
-def candidate_for_event(event: Any) -> Optional[Route]:
-    """The route the policy attached to this event's message, valid or not (``None``: not a policy event)."""
+def candidate_for_event(event: Any, runner: Any = None, *, bot_id: Optional[str] = None) -> Optional[Route]:
+    """The route the policy attached to this event's message, valid or not (``None``: not a policy event).
+    ``bot_id`` (or the bot ``runner`` delivers the source through) picks that bot's route from the registry."""
     source = getattr(event, "source", None)
     message_id = _source_message_id(source, event)
     raw = getattr(event, "raw_message", None)
     candidate = getattr(raw, "_dsp_route", None) if raw is not None else None
     if not isinstance(candidate, Route) and message_id:
-        candidate = RUNTIME.message_routes.get(registry_key(source, message_id))
+        candidate = registered_route(source, message_id, bot_id or bot_for_source(runner, source))
     return candidate if isinstance(candidate, Route) else None
 
 
-def route_for_event(event: Any) -> Optional[Route]:
-    candidate = candidate_for_event(event)
+def _other_bot(route: Route, runner: Any, source: Any) -> bool:
+    """The source is answered by a known bot that is not the route's (another bot's route never applies)."""
+    bot = bot_for_source(runner, source)
+    return bool(bot) and bot != route.bot_id
+
+
+def route_for_event(event: Any, runner: Any = None) -> Optional[Route]:
+    candidate = candidate_for_event(event, runner)
     source = getattr(event, "source", None)
-    if candidate is not None and exact(candidate, source, _source_message_id(source, event) or candidate.message_id):
+    if candidate is None or _other_bot(candidate, runner, source):
+        return None
+    if exact(candidate, source, _source_message_id(source, event) or candidate.message_id):
         return candidate
     return None
 
@@ -121,6 +165,10 @@ def refusal(runner: Any, event: Any, route: Optional[Route], target: Optional[st
         return closed
     if not route.is_operator and is_command(event):
         return "gateway commands are reserved for the operator"
+    if not route.is_operator and getattr(event, "_fifo_only", False):
+        # A turn Hermes made from a command (a skill, /queue, /plan, ...) and queued as text: it passed no
+        # command check here, so it never runs for a member.
+        return "turns made from gateway commands are reserved for the operator"
     key_of = getattr(runner, "_session_key_for_source", None)
     if not callable(key_of):
         return "the session key cannot be determined (Hermes changed)"
@@ -141,16 +189,68 @@ def refusal(runner: Any, event: Any, route: Optional[Route], target: Optional[st
     return None
 
 
-def authorizes(source: Any) -> bool:
+def event_refusal(adapter: Any, event: Any) -> Optional[str]:
+    """Why an event Hermes built from a Discord message must not enter its pipeline at all (intervention A10,
+    before ``handle_message`` routes it to a running session, its busy handler or a new turn). ``None``: hand
+    it on; the runner wrapper (A7) still checks it. A member's gateway command never reaches Hermes: while
+    the member's session runs a turn, Hermes' busy handler would run it (a skill's text inlined) without
+    passing A7's command check."""
+    source = getattr(event, "source", None)
+    if source is None or not platform_is_discord(getattr(source, "platform", None)):
+        return None
+    binding = RUNTIME.bots.for_adapter(adapter)
+    if binding is None:
+        return None
+    candidate = candidate_for_event(event, bot_id=binding.bot_id)
+    if candidate is None:
+        return unrouted_refusal([binding], event)
+    if not candidate.is_operator and is_command(event):
+        return "gateway commands are reserved for the operator"
+    return None
+
+
+def bindings_for(runner: Any, source: Any) -> list:
+    """The bound bot that answers ``source``. A known adapter the policy does not run (another bot of the
+    installation): none, its servers keep Hermes' behaviour. No adapter at all: every bound bot (closed: a
+    server any of them knows counts)."""
+    adapter = adapter_for_source(runner, source)
+    if adapter is None:
+        return RUNTIME.bots.bindings()
+    binding = RUNTIME.bots.for_adapter(adapter)
+    return [binding] if binding is not None else []
+
+
+def unrouted_refusal(bindings: list, event: Any) -> Optional[str]:
+    """Why an event without a policy route must not run (``None``: Hermes' own rules decide). In a server
+    one of these bots knows (active or paused; every server while its policy file cannot be used), only an
+    operator's event runs without a route. That includes the gateway's internal events that carry a user
+    (Hermes resumes a turn interrupted by a restart as an internal event with the stored source, authorized
+    only by its own allowlist); internal events without a user and other platforms pass."""
+    source = getattr(event, "source", None)
+    if source is None or not platform_is_discord(getattr(source, "platform", None)):
+        return None
+    guild_id = str(getattr(source, "guild_id", "") or "").strip()
+    if not guild_id:
+        return None                                  # direct messages: Hermes decides
+    if getattr(event, "internal", False) and not str(getattr(source, "user_id", "") or ""):
+        return None                                  # the gateway's own notices, nobody's turn
+    knowing = [b for b in bindings if b is not None
+               and b.store.read().guild_state(b.bot_id, guild_id) in ("active", "paused")]
+    if not knowing:
+        return None
+    user = str(getattr(source, "user_id", "") or "")
+    if any(config.is_operator(b.owner_home, user) for b in knowing):
+        return None
+    return "in a server the policy knows, only an operator's message runs without the policy's route"
+
+
+def authorizes(source: Any, runner: Any = None) -> bool:
     """True only for the exact route of the message this source belongs to (never without a message id)."""
     message_id = _source_message_id(source)
     if not message_id:
         return False
+    bot = bot_for_source(runner, source)
     current = RUNTIME.route.get()
-    if exact(current, source, message_id):
+    if isinstance(current, Route) and (not bot or current.bot_id == bot) and exact(current, source, message_id):
         return True
-    if message_id:
-        stored = RUNTIME.message_routes.get(registry_key(source, message_id))
-        if exact(stored, source, message_id):
-            return True
-    return False
+    return exact(registered_route(source, message_id, bot), source, message_id)

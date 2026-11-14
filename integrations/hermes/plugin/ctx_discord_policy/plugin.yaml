@@ -38,6 +38,12 @@ config_schema:
     default: true
     label: Send operators direct messages
     description: "true = operators get a Discord direct message when a server asks for activation, when a server's guidance changes (with the difference attached) and when the protection status gets worse; false = no direct messages."
+  bot_messages:
+    type: str
+    default: closed
+    choices: [closed, member]
+    label: Messages of other bots and webhooks in your servers
+    description: "closed = in a server where the plugin is active or paused, messages of other bots and webhooks get no turn, whatever Hermes' own allow_bots says; member = where Hermes' allow_bots lets them in, they are answered like a member's message (no tools beyond the server's member tools). A bot or webhook is never an operator."
   locked_profiles:
     type: list
     default: []

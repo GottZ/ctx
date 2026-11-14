@@ -145,6 +145,20 @@ def spill_config() -> Any:
         return None
 
 
+def media_trusted_roots() -> Optional[list]:
+    """The roots Hermes delivers model-named files from even in strict mode: its media caches, kanban
+    attachments and the operator's ``media_delivery_allow_dirs`` (``_media_delivery_allowed_roots``).
+    ``None`` when this Hermes has no such list (callers trust nothing then)."""
+    try:
+        from gateway.platforms.base import _media_delivery_allowed_roots
+    except ImportError:
+        return None
+    try:
+        return list(_media_delivery_allowed_roots())
+    except Exception:
+        return None
+
+
 def hook_registered(home: os.PathLike | str, hook_name: str, callback: Any) -> Optional[bool]:
     """Whether ``callback`` is in the live hook registry of the plugin manager of ``home``.
 

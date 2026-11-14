@@ -241,8 +241,9 @@ async def test_restored_fifo_event_finds_its_own_route_and_never_inherits_one(wo
 
 
 async def test_internal_event_in_a_public_session_never_inherits_an_operator_route(world, anchor):
-    """A drain task created inside an operator's context executes an internal event (no user, no message
-    id, no authorization) for a public member's session: it must run without the operator's lane."""
+    """A drain task created inside an operator's context executes an internal event (no message id, no
+    authorization) for a public member's session: it never runs with the operator's lane. In a server the
+    policy knows it does not run at all (a member's event without the policy's route)."""
     runtime, routes = anchor.RUNTIME, anchor.routes
     turn = await world.deliver(message(user(MEMBER), mid=8101, mentions=mention()))
     assert turn["tools"][0]  # the session is a public one now
@@ -256,8 +257,7 @@ async def test_internal_event_in_a_public_session_never_inherits_an_operator_rou
         replay = await world.runner._handle_message(internal)
     finally:
         runtime.route.reset(token)
-    assert replay["session"] == turn["session"]
-    assert replay["tools"][0] and "BLOCKED" in replay["tools"][0]
+    assert replay is None, replay
 
 
 def test_authorization_needs_the_exact_route(world, anchor):
@@ -570,7 +570,7 @@ async def test_one_route_object_from_admission_to_the_tool_hook(world, anchor):
     hook updated through the ContextVar and the turn binding."""
     runtime = anchor.RUNTIME
     turn = await world.deliver(message(user(OPERATOR), mid=10901, mentions=mention()))
-    stored = runtime.message_routes.get((CHANNEL, "10901", OPERATOR))
+    stored = runtime.find_route(CHANNEL, "10901", OPERATOR)
     bound = runtime.turn_routes.get((turn["session"], turn["turn"]))
     assert stored is bound and stored is turn["event"].raw_message._dsp_route
     assert stored.tool_started is True  # set by pre_tool_call on the operator's allowed tool
@@ -628,7 +628,8 @@ async def test_an_operator_in_a_worklog_thread_runs_in_the_worklog_mode(world):
 async def test_webhooks_and_system_messages_never_get_a_route(world, kind):
     msg = message(user(MEMBER, system=kind == "system"), mid=12021, mentions=mention())
     msg.webhook_id = 900000000000000990 if kind == "webhook" else None
-    assert world.anchor.mod("ingress.admission").decide(world.adapter, msg) is None
+    decision = world.anchor.mod("ingress.admission").decide(world.adapter, msg)
+    assert decision is not None and decision.excluded       # closed in a known server, not left to Hermes
     assert await world.deliver(msg) is None and world.runner.turns == []
 
 

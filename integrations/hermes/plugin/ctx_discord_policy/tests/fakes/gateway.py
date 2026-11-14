@@ -36,9 +36,15 @@ def message(author: Any, *, mid: int = 1001, channel: str = CHANNEL, content: st
             mentions: Optional[list] = None, reference: Any = None, guild: Optional[str] = GUILD,
             channel_type: int = 0, parent_id: Optional[str] = None) -> SimpleNamespace:
     kind = FakeThread if channel_type in (10, 11, 12) else SimpleNamespace
-    chan = kind(id=int(channel), type=channel_type, parent_id=int(parent_id) if parent_id else None)
+    # An ordinary server: everyone (the @everyone role) sees the channel and may read its history, as
+    # discord.py's ``permissions_for`` reports it.
+    chan = kind(id=int(channel), type=channel_type, parent_id=int(parent_id) if parent_id else None, overwrites={},
+                permissions_for=lambda who: SimpleNamespace(view_channel=True, read_message_history=True))
+    everyone = SimpleNamespace(id=int(guild), name="@everyone") if guild else None
     return SimpleNamespace(id=mid, author=author, channel=chan, content=content, mentions=list(mentions or []),
-                           reference=reference, guild=SimpleNamespace(id=int(guild)) if guild else None,
+                           reference=reference,
+                           guild=SimpleNamespace(id=int(guild), roles=[everyone], default_role=everyone)
+                           if guild else None,
                            attachments=[], message_snapshots=[], created_at=None, type="default")
 
 
@@ -108,8 +114,13 @@ def make_classes(*, home_resolver: Callable[[Any], Any], bus: HookBus,
             event = SimpleNamespace(source=source, raw_message=msg, message_id=str(msg.id), text=msg.content,
                                     get_command=lambda: command, role_authorized=role_authorized,
                                     message_type="command" if text.startswith("/") else "text")
-            self.last_result = await self.gateway_runner._handle_message(event)
+            self.last_result = None
+            await self.handle_message(event)       # Hermes: the handler hands every event to handle_message
             return True
+
+        async def handle_message(self, event: Any) -> None:
+            # The base adapter's pipeline entry (busy routing elided): the runner runs the turn.
+            self.last_result = await self.gateway_runner._handle_message(event)
 
     class GatewayRunner:
         def __init__(self) -> None:

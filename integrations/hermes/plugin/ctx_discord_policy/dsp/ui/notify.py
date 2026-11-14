@@ -3,10 +3,11 @@
 * **Audit channel** (``audit_channel``, operator-only setting): one line per change made in ``/policy``
   — who, which settings, never the values (guidance: length and version id).
 * **Operators** (``settings.notify_operators``, default on, OPEN L17): direct messages for activation
-  requests (in :mod:`.commands`), every change of a server's guidance (with a diff attached) and a worse
-  protection status. Guidance messages are coalesced per server: at most one per
-  :data:`GUIDANCE_WINDOW`; a change inside the window is not dropped but sent, as one diff since the last
-  message, when the window ends. Status messages: at most one per intervention per day.
+  requests (in :mod:`.commands`), every change of a server's guidance (with a diff attached), a server
+  manager pausing or resuming the policy, a policy file that cannot be used, and a worse protection status.
+  Guidance and pause messages are coalesced per server: at most one per :data:`GUIDANCE_WINDOW`; a change
+  inside the window is not dropped but sent when the window ends. Status and policy-file messages: at most
+  one per day.
 
 Everything here runs in the background after the interaction was answered and never raises into it.
 """
@@ -187,9 +188,12 @@ class Notifier:
     async def _flush_later(self, key: str, guild_id: str, guild_name: str) -> None:
         self._pending.pop(key, None)                    # a change arriving while this sends arms a new timer
         try:
-            await self.flush_pending(key, guild_id, guild_name)
+            if key.startswith("state:"):
+                await self.flush_state(key, guild_id, guild_name)
+            else:
+                await self.flush_pending(key, guild_id, guild_name)
         except Exception:
-            logger.warning("ctx_discord_policy: sending a delayed guidance diff failed", exc_info=True)
+            logger.warning("ctx_discord_policy: sending a delayed operator message failed", exc_info=True)
 
     def cancel_timers(self) -> None:
         for handle in list(self._pending.values()):
@@ -220,14 +224,16 @@ class Notifier:
         return True
 
     async def flush_all_pending(self) -> None:
-        """After a (re)start: send held-back diffs whose window ended, arm timers for the others."""
-        prefix = f"guidance:{self.binding.bot_id}:"
+        """After a (re)start: send held-back messages whose window ended, arm timers for the others."""
+        prefixes = (f"guidance:{self.binding.bot_id}:", f"state:{self.binding.bot_id}:")
         for key, entry in list(self.state._read().items()):
-            if key.startswith(prefix) and isinstance(entry, dict) and entry.get("pending"):
+            prefix = next((p for p in prefixes if key.startswith(p)), None)
+            if prefix is not None and isinstance(entry, dict) and entry.get("pending"):
                 last = entry.get("at")
                 left = GUIDANCE_WINDOW - (time.time() - last) if isinstance(last, (int, float)) else 0.0
                 if left <= 0:
-                    await self.flush_pending(key, key[len(prefix):])
+                    flush = self.flush_state if prefix.startswith("state:") else self.flush_pending
+                    await flush(key, key[len(prefix):])
                 else:
                     self._arm_timer(key, key[len(prefix):], "this server", left)
 
@@ -264,6 +270,91 @@ class Notifier:
                 "Next step: /policy → Models in that server, or `hermes ctx-discord-policy status` on the host.")
         return await self.dm_operators(text)
 
+    # ── the policy file and the server's state ──
+
+    async def store_unreadable(self, reason: str) -> int:
+        """The policy file can't be used: members get no answer in any server of this bot. Once a day."""
+        if not self.enabled():
+            return 0
+        key = f"store:{self.binding.bot_id}"
+        now = time.time()
+
+        def claim(data: dict) -> bool:
+            last = data.get(key)
+            if isinstance(last, (int, float)) and now - last < STATUS_WINDOW:
+                return False
+            data[key] = now
+            return True
+
+        if not self.state.change(claim):
+            return 0
+        from .panels import clean
+
+        text = (f"The policy file of this bot can't be used, so members get no answer in any of its servers until "
+                f"it is repaired; your own turns run as Hermes runs them. {clean(reason, 400)} Next step: "
+                "`hermes ctx-discord-policy status` on the host.")
+        return await self.dm_operators(text)
+
+    def state_changed(self, ctx: Any, before: str, after: str) -> None:
+        """A server manager paused or resumed the policy: tell the operators, at most once per server and
+        :data:`GUIDANCE_WINDOW`; a change inside the window is sent (as the state then) when it ends."""
+        if not self.enabled() or before == after:
+            return
+        key = f"state:{self.binding.bot_id}:{ctx.guild_id}"
+        now = time.time()
+        author = str(ctx.actor.user_id)
+
+        def claim(data: dict) -> tuple:
+            entry = data.get(key) if isinstance(data.get(key), dict) else {}
+            last = entry.get("at")
+            if isinstance(last, (int, float)) and now - last < GUIDANCE_WINDOW:
+                authors = list(entry.get("by") or [])
+                if author not in authors:
+                    authors = (authors + [author])[-5:]
+                entry.update(pending=True, by=authors)
+                data[key] = entry
+                return False, float(last)
+            data[key] = {"at": now, "pending": False, "by": []}
+            return True, None
+
+        due, last = self.state.change(claim)
+        if due:
+            self.spawn(self._send_state(ctx.guild_id, ctx.guild_name, [author], after))
+        else:
+            self._arm_timer(key, ctx.guild_id, ctx.guild_name, max(0.0, GUIDANCE_WINDOW - (now - last)))
+
+    async def _send_state(self, guild_id: str, guild_name: str, authors: list, state: str) -> None:
+        from .panels import clean
+
+        who = ", ".join(f"<@{a}>" for a in authors if str(a).isdigit()) or "A server manager"
+        server = f"**{clean(guild_name, 80)}** (id {guild_id})"
+        if state == "paused":
+            text = (f"{who} paused the policy in {server}: members get no answer there until it is resumed; your "
+                    "own turns run as Hermes runs them.")
+        elif state == "active":
+            text = f"{who} resumed the policy in {server}: members are answered again under the server's settings."
+        else:
+            text = f"{who} changed the policy in {server}: it is now {clean(state, 20)}."
+        await self.dm_operators(text)
+
+    async def flush_state(self, key: str, guild_id: str, guild_name: str = "this server") -> bool:
+        """Send a held-back state change once its window has ended (also after a restart)."""
+        state = self.binding.store.read().guild_state(self.binding.bot_id, guild_id)
+        now = time.time()
+
+        def take(data: dict) -> Optional[list]:
+            entry = data.get(key) if isinstance(data.get(key), dict) else {}
+            if not entry.get("pending"):
+                return None
+            data[key] = {"at": now, "pending": False, "by": []}
+            return list(entry.get("by") or [])
+
+        authors = self.state.change(take)
+        if authors is None or not self.enabled():
+            return False
+        await self._send_state(guild_id, guild_name, authors, state)
+        return True
+
     # ── protection status ──
 
     async def check_status(self) -> int:
@@ -271,8 +362,8 @@ class Notifier:
         if not self.enabled():
             return 0
         rows = self.binding.runtime.status.snapshot().get("interventions") or {}
-        down = {name: r for name, r in rows.items()
-                if r.get("klass") == "S" and r.get("outcome") in ("fallback", "off")}
+        down = {name: r for name, r in rows.items()            # the policy file has its own message
+                if r.get("klass") == "S" and r.get("outcome") in ("fallback", "off") and not name.startswith("STORE[")}
         now = time.time()
 
         def claim(data: dict) -> list:

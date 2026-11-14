@@ -1,10 +1,16 @@
 """Discord ingress: which messages the policy admits, under which authority (interventions A5/A6).
 
-``decide()`` is the single gate. It returns ``None`` — stock Hermes behaviour, nothing granted — unless
-every condition holds: the adapter's bot is bound, the guild is ``active`` in a readable store, the channel
-is not excluded, the message addresses the bot (or the channel is ambient), the security interventions are
-in place, and the profile the message routes to is armed. The lane is decided here, once, from the
-operator list in the Hermes configuration.
+``decide()`` is the single gate. It routes a message (:class:`Decision`) only when every condition holds:
+the adapter's bot is bound, the guild is ``active`` in a readable store, the channel is not excluded, the
+message addresses the bot (or the channel is ambient), the security interventions are in place, and the
+profile the message routes to is armed. The lane is decided here, once, from the operator list in the
+Hermes configuration.
+
+Otherwise, in a server the policy knows (active or paused for this bot; every server while the policy file
+cannot be used), an operator's message keeps stock Hermes behaviour (``None``) and everybody else's is
+:class:`Closed`: no turn, also none through Hermes' own allowlist, roles, channels or pairing. Messages of
+other bots, webhooks and the system are closed there too (``settings.bot_messages: member`` answers bots and
+webhooks like members). Servers the policy never bound keep stock behaviour for everyone.
 
 Admission never opens ``DISCORD_ALLOWED_USERS``: the author is added to the adapter's allowlist only for
 the duration of the synchronous stock admission call, and the turn is later authorized only through the
@@ -30,7 +36,7 @@ from . import classify
 
 logger = logging.getLogger("ctx_discord_policy")
 
-REQUIRED_SECURITY = ("A5", "A6", "A7")
+REQUIRED_SECURITY = ("A5", "A6", "A7", "A10", "A11", "A13")
 _last_unarmed_note: dict[str, float] = {}
 _last_closed_note: dict[str, float] = {}
 
@@ -60,6 +66,17 @@ class Decision:
                      message_id=message_id, author_id=self.author_id, lane=self.lane, mode=self.mode,
                      target_home_key=self.target_home_key, lanes=self.lanes, server_name=self.server_name,
                      channel_name=self.channel_name, bot_display_name=self.bot_display_name)
+
+
+@dataclass(frozen=True)
+class Closed:
+    """A message the policy keeps from Hermes altogether: A5 refuses it, A6 drops it, so it gets no turn,
+    also none through Hermes' own rules (``excluded`` is what both wrappers test)."""
+
+    reason: str
+    excluded: bool = True
+    addressed: bool = False
+    reply_unverified: bool = False
 
 
 def _note_unarmed(target_key: str) -> None:
@@ -118,21 +135,80 @@ def target_home_key(adapter: Any, message: Any, *, guild_id: str, channel_id: st
     return hermes.home_key(resolver(source))
 
 
-def decide(adapter: Any, message: Any) -> Optional[Decision]:
+def decide(adapter: Any, message: Any) -> Any:
+    """:class:`Decision` (route it), :class:`Closed` (no turn at all) or ``None`` (Hermes' own behaviour)."""
     try:
         return _decide(adapter, message)
     except Exception:
-        logger.exception("ctx_discord_policy: admission decision failed; stock behaviour for this message")
+        logger.exception("ctx_discord_policy: admission decision failed; closed for this message unless the "
+                         "author is an operator or the server is not one the policy knows")
+        return _on_error(adapter, message)
+
+
+def _on_error(adapter: Any, message: Any) -> Any:
+    """A failed decision: Hermes' own behaviour only where that is certain to be right (no bound bot, no
+    guild, a server the policy never bound, an operator's message); closed otherwise."""
+    try:
+        binding = RUNTIME.bots.for_adapter(adapter)
+        guild_id = snowflake(getattr(getattr(message, "guild", None), "id", None))
+        if binding is None or not guild_id:
+            return None
+        if binding.store.read().guild_state(binding.bot_id, guild_id) not in ("active", "paused"):
+            return None
+        author_id = snowflake(getattr(getattr(message, "author", None), "id", None))
+        if classify.is_human(message) and author_id and config.is_operator(binding.owner_home, author_id):
+            return None
+    except Exception:
+        logger.exception("ctx_discord_policy: could not tell whether the failed message may go to Hermes")
+    return Closed("the policy decision failed")
+
+
+_store_noted: dict[str, str] = {}
+
+
+def note_store(binding: Any, snapshot: Any) -> None:
+    """A policy file that cannot be used faithfully (damaged, or written by a newer version) closes every
+    server of the bot for members: the status says so (``STORE[<bot>]``) and the operators get a direct
+    message (once a day, ``wiring.store_unreadable``). Reported again when it is readable."""
+    from ..store.file import CORRUPT, DOWNGRADE
+
+    key = f"STORE[{binding.bot_id}]"
+    bad = snapshot.state in (CORRUPT, DOWNGRADE)
+    if not bad:
+        if _store_noted.pop(binding.bot_id, None) is not None:
+            RUNTIME.status.record(Result(key, SECURITY, Outcome.OK, "the policy file is readable again",
+                                         "policy store"))
+        return
+    reason = (f"the policy file {binding.store.path} cannot be used ({snapshot.state}"
+              f"{': ' + str(snapshot.error)[:200] if snapshot.error else ''}): members get no answer in any server "
+              "of this bot until it is repaired; operators keep Hermes' own behaviour there")
+    if _store_noted.get(binding.bot_id) != reason:
+        _store_noted[binding.bot_id] = reason
+        RUNTIME.status.record(Result(key, SECURITY, Outcome.OFF, reason, "policy store"))
+    try:
+        from .. import wiring  # late: wiring imports the interface and the prompt engine
+
+        wiring.store_unreadable(binding.bot_id, reason)
+    except Exception:
+        logger.warning("ctx_discord_policy: could not tell the operators about the policy file", exc_info=True)
+
+
+def _bot_lane(binding: Any, author: Any, state: str) -> Optional[str]:
+    """Messages of other bots, webhooks and the system in a server the policy knows: ``None`` = closed (no
+    turn, also not through Hermes' ``allow_bots``), ``PUBLIC`` = answered like a member's message, only with
+    ``settings.bot_messages: member``, in an active server, and never for the system."""
+    if bool(getattr(author, "system", False)) or state != "active":
         return None
+    return PUBLIC if config.bot_messages_as_members(binding.owner_home) else None
 
 
-def _decide(adapter: Any, message: Any) -> Optional[Decision]:
+def _decide(adapter: Any, message: Any) -> Any:
     guild = getattr(message, "guild", None)
     author = getattr(message, "author", None)
-    if guild is None or author is None or bool(getattr(author, "bot", False)):
+    if guild is None or author is None:
         return None
     binding = RUNTIME.bots.for_adapter(adapter)
-    if binding is None or not RUNTIME.status.security_ok(*REQUIRED_SECURITY):
+    if binding is None:
         return None
     guild_id = snowflake(getattr(guild, "id", None))
     author_id = snowflake(getattr(author, "id", None))
@@ -144,22 +220,37 @@ def _decide(adapter: Any, message: Any) -> Optional[Decision]:
     if self_user is not None and str(getattr(self_user, "id", "")) == author_id:
         return None
     snapshot = binding.store.read()
-    if snapshot.guild_state(binding.bot_id, guild_id) != "active":
-        return None  # unbound, paused, or a corrupt store (every guild counts as paused)
+    state = snapshot.guild_state(binding.bot_id, guild_id)
+    if state not in ("active", "paused"):
+        return None  # a server the policy never bound (or unbound): Hermes' own rules decide
+    note_store(binding, snapshot)
+    human = classify.is_human(message)
+    if not human and _bot_lane(binding, author, state) is None:
+        return Closed("messages of bots, webhooks and the system get no turn here")
+    # A bot or webhook (only with ``bot_messages: member``) is never an operator, whatever the list says.
+    operator = human and config.is_operator(binding.owner_home, author_id)
+
+    def fallback(reason: str) -> Any:
+        """Where the policy cannot run this message in a server it knows: the operator keeps Hermes' own
+        behaviour; nobody else gets a turn through Hermes' rules (its allowlist, roles, channels, pairing)."""
+        return None if operator else Closed(reason)
+
+    if not RUNTIME.status.security_ok(*REQUIRED_SECURITY):
+        return fallback("a safety check is not in place")
+    if state != "active":
+        return fallback("the policy is paused in this server")  # also every server while the file is damaged
     guild_cfg = snapshot.guild(binding.bot_id, guild_id) or {}
     is_thread = classify.is_thread(channel)
     parent_id = snowflake(getattr(channel, "parent_id", None)) if is_thread else None
     # One classification (S5): mention, reply, reaction wakeup or one of the guild's wake names; ambient and
     # excluded channels including the threads beneath them; the worklog area; whether a person wrote it.
     signal = classify.classify(adapter, message, guild_cfg)
-    if not signal.human:
-        return None  # bots, webhooks and system messages never wake the bot
     # ``route_mode`` is always a route's conversation mode (worklog | direct | ambient). Not addressed and not
     # ambient: stock decides whether the bot reacts at all (bot threads, free channels, allowlisted users); if
     # it does, the turn still runs under this message's lane.
     mode, unverified, addressed = signal.route_mode, signal.reply_unverified, signal.addressed
     excluded = signal.excluded
-    lane = OPERATOR if config.is_operator(binding.owner_home, author_id) else PUBLIC
+    lane = OPERATOR if operator else PUBLIC
     if lane == PUBLIC and signal.worklog_area:
         excluded = True  # the worklog channel and its threads carry operator tool output: no public turns
     if excluded and lane == OPERATOR:
@@ -168,7 +259,7 @@ def _decide(adapter: Any, message: Any) -> Optional[Decision]:
         _note_closed(f"shared:{binding.bot_id}", "Hermes shares one session between members of a channel "
                      "(group_sessions_per_user: false): public admission stays closed, because batching and "
                      "busy-input handling would mix public text into operator turns")
-        return None
+        return fallback("Hermes shares one session between members of this channel")
     # Public messages in threads are handed to Hermes as plain channel messages (own per-user session,
     # never the thread session an operator may share): resolve the target as the runner will see it, and
     # refuse when that differs from where the thread itself routes (a route by parent channel or thread).
@@ -177,21 +268,21 @@ def _decide(adapter: Any, message: Any) -> Optional[Decision]:
                              thread_id=channel_id if thread_view else None,
                              parent_id=parent_id if thread_view else None)
     if target is None:
-        return None
+        return fallback("the profile this message routes to is unknown")
     if is_thread and lane == PUBLIC:
         threaded = target_home_key(adapter, message, guild_id=guild_id, channel_id=channel_id,
                                    author_id=author_id, thread_id=channel_id, parent_id=parent_id)
         if threaded != target:
             _note_closed(f"thread-route:{channel_id}", f"thread {channel_id} routes to another profile than a "
                          "plain message there would: public admission in this thread stays closed")
-            return None
+            return fallback("this thread routes to another profile")
     if not hooks.armed_live(target):
         _note_unarmed(target)
-        return None
+        return fallback("the profile this message routes to is not armed")
     if lane == PUBLIC and routing_check.admission_refusal(  # A4-P (S12): busy-session follow-ups use this route
             adapter, bot_id=binding.bot_id, guild_id=guild_id, channel_id=channel_id, author_id=author_id,
             message_id=str(getattr(message, "id", "") or ""), target=target) is not None:
-        return None
+        return fallback("the server's profile route is not in place")
     me = getattr(guild, "me", None)
     bot_name = (getattr(me, "display_name", None) or getattr(self_user, "display_name", None)
                 or getattr(self_user, "name", None) or "")

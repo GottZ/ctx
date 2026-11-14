@@ -25,8 +25,8 @@ hermes ctx-discord-policy routing set <server id> <profile>   on the host: run a
 - **Members can talk to the bot.** They mention it, reply to it, call it by one of its names ("Nova, …",
   "hey Nova"), or react to a message with the server's wake emoji; in a conversation channel the bot reads along
   and joins in when it has something to add. Their turns run without tools, except the member tools you allow
-  for that server: the current channel's history, linked messages, skills you name, entries of your knowledge
-  sources you name.
+  for that server: the current channel's recent messages, linked messages, skills you name, entries of your
+  knowledge sources you name.
 - **Links and channels in a message.** When a message links Discord messages or mentions channels, the bot sees
   that content as quoted data, read with the rights of the person who wrote the message. In members' turns only
   what everyone who sees the answer may read.
@@ -37,8 +37,9 @@ hermes ctx-discord-policy routing set <server id> <profile>   on the host: run a
 - **Your tool work out of the way.** With a worklog channel, the tool work of your turns goes into a thread of
   its own; the channel you wrote in gets a pointer and, if you want, a copy of the final answer.
 - **You hear about changes.** An audit channel gets one line per change made in `/policy` (who, what, never the
-  values). You get a direct message when a server asks for activation, when its guidance changes, when
-  protection gets worse and when a model chosen for a server cannot be used.
+  values). You get a direct message when a server asks for activation, when its guidance changes, when a
+  server manager pauses or resumes the plugin there, when protection gets worse, when the policy file cannot be
+  used and when a model chosen for a server cannot be used.
 - **A settings page in Hermes Desktop.** Settings → Plugins → ctx_discord_policy: your servers, the operators,
   the status and the change history, next to Hermes' own form for the plugin settings.
 - **It checks itself against your Hermes.** Every place where the plugin hooks into Hermes is tested when it
@@ -51,12 +52,12 @@ you activated it:
 
 | Step | What happens |
 |---|---|
-| 1. Who is it | The author is an operator (in your Hermes configuration) or a member (anyone else). Bots, webhooks and system messages never wake the bot. |
+| 1. Who is it | The author is an operator (in your Hermes configuration) or a member (anyone else). Messages of other bots, webhooks and the system get no turn, whatever Hermes' own `allow_bots` says, unless you set `bot_messages: member` (then they are answered like a member's message). |
 | 2. Does the bot answer | A message gets a turn when it mentions or replies to the bot, calls it by a wake name, or is in a conversation channel; a reaction with the wake emoji gets the reactor an answer to that message. Never in a channel you excluded. Everything is checked first: the server is active, the profile the message goes to has the plugin enabled and is the one you chose, every safety hook is in place. If anything is missing, members get no turn. |
 | 3. What the turn may do | An operator's turn runs as Hermes would run it. A member's turn gets only the member tools of that server. |
 | 4. What the model is told | Before the turn the plugin adds a short context: your frame, what this turn may use, how to behave in the conversation, the server's guidance and linked content, all of it as quoted text, never as instructions about tools. |
 | 5. Every tool call | is checked against the exact message it belongs to. A call outside what that turn may use, or from a turn the plugin cannot tie to its message, is refused ("BLOCKED by ctx_discord_policy"). |
-| 6. Delivery | An operator's tool work goes to the worklog thread when the server has one; progress lines follow the server's progress setting. |
+| 6. Delivery | An operator's tool work goes to the worklog thread when the server has one, approval and question cards of that turn included; progress lines follow the server's progress setting. A member's answer pings nobody but the member who asked. |
 
 When Hermes itself later gains something the plugin adds today (deleting progress messages, one progress line
 that keeps being replaced), the plugin notices and steps back: the status then reads `native` instead of
@@ -136,8 +137,8 @@ restart Hermes Desktop once so the page's backend is mounted.
 
 Further settings of the plugin (Hermes Desktop shows them as a form): `frame_prompt` (your text before every
 server's guidance), `operator_label`, `guild_prompt_max_chars` (the longest guidance text of a server),
-`notify_operators` (the direct messages), `locked_profiles` (profiles members never reach) and
-`member_search`.
+`notify_operators` (the direct messages), `bot_messages` (`closed`, the default, or `member`: how messages of
+other bots and webhooks are treated), `locked_profiles` (profiles members never reach) and `member_search`.
 
 ## Everyday use
 
@@ -147,7 +148,7 @@ server's guidance), `operator_label`, `guild_prompt_max_chars` (the longest guid
 | See what is protected and what fell back | in the server, or on the host | `/policy` → Status, `hermes ctx-discord-policy status` |
 | Run a server in another Hermes profile | in the server, or on the host | `/policy` → Profile, `hermes ctx-discord-policy routing set <server id> <profile>` |
 | See each server's profile | on the host | `hermes ctx-discord-policy routing list` |
-| Pause the plugin in a server (Hermes' own behaviour there) | on the host | `hermes ctx-discord-policy pause <server id>` |
+| Pause the plugin in a server (members get no answer there; your own turns run as in Hermes) | in the server, or on the host | `/policy` → Pause, `hermes ctx-discord-policy pause <server id>` |
 | Activate it again | on the host | `hermes ctx-discord-policy bind <server id>` |
 | Remove a server, with its settings | on the host | `hermes ctx-discord-policy unbind <server id> --purge` |
 | Keep a copy of a server's settings, or move them | on the host, or on the settings page | `hermes ctx-discord-policy export --guild <server id>`, `… import <file>` |
@@ -172,16 +173,30 @@ so, members get no answer until the model works again.
 
 - **Authority lives on the host.** Operators come from the Hermes configuration only; the plugin's own files
   hold server settings, never authority.
-- **Fail closed.** If the policy file is damaged, every server is paused. If a safety check cannot be made,
-  members get no turn. A tool call the plugin cannot tie to its message is refused.
+- **Fail closed.** If the policy file is damaged, members get no answer in any server of the bot until it is
+  repaired; the status says so and you get a direct message. If a safety check cannot be made, members get no
+  turn. A tool call the plugin cannot tie to its message is refused.
+- **Hermes' own allowlist never hands out tools here.** Anyone but you whom Hermes itself lets in (allowed
+  users, a Discord role, allowed channels, pairing) gets a member's turn in a server where the plugin is
+  active, and no turn where it is paused. The same holds for their Hermes slash commands and for a turn of
+  theirs that Hermes resumes after a restart. Servers you never activated keep Hermes' own behaviour.
+- **Commands are yours.** A command a member types in a message (`/<skill>`, `/queue`, any other Hermes
+  command) never reaches Hermes, also not while that member's conversation is still busy with a turn.
 - **Guidance and linked content are data.** A server's guidance text and the content of linked messages are
   quoted in the turn; they cannot open tools or change who is an operator.
 - **Reading follows the author's rights.** Linked messages and mentioned channels are read only from the same
   server and only where the author can read them. A member's turn reads only what everyone who sees the answer
   may read; your own turns read linked content only when you address the bot. Unaddressed messages are not
-  read further.
+  read further. A member's turn reads the current channel's recent messages (never paging further back) only
+  where the member and everyone who sees the answer may read that channel's history; Hermes' own history
+  backfill for members' turns follows the same rule.
 - **Member turns stay out of the worklog.** A member's turn never runs in the worklog channel or its threads
   and never delivers there. Who can read that channel is up to its Discord permissions.
+- **No files of the host in members' answers.** Hermes turns `MEDIA:` lines and file paths in an answer into
+  attachments. In a member's turn they reach Discord as plain text, with look-alike slashes in place of the
+  real ones, and a member's turn can attach only files from the folders Hermes itself trusts for delivery (its
+  media caches and your `media_delivery_allow_dirs`). Your own turns attach files as Hermes does. Mentions of
+  other people, roles, `@everyone` and `@here` in a member's answer are shown as text and ping nobody.
 
 ### Disclosure
 

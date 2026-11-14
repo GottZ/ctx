@@ -34,8 +34,8 @@ logger = logging.getLogger("ctx_discord_policy")
 
 # Route.mode a classifier may use for a message written inside an existing worklog thread.
 WORKLOG_MODE = "worklog"
-# Optional metadata stamp ("<channel_id>:<message_id>:<session_user_id>", ``Route.key``) a runner-side metadata
-# wrapper may add to mark a delivery as the turn's own output for exactly that route.
+# Optional metadata stamp ("<bot_id>:<channel_id>:<message_id>:<session_user_id>", ``Route.key``) a runner-side
+# metadata wrapper may add to mark a delivery as the turn's own output for exactly that route.
 ROUTE_METADATA_KEY = "ctx_discord_policy_route"
 # Marks the origin copy of a final answer, so a replay of that copy is never routed again.
 ORIGIN_COPY_KEY = "ctx_discord_policy_origin_copy"
@@ -239,41 +239,48 @@ def delivery_target(chat_id: Any, metadata: Any) -> str:
     return str(chat_id if chat_id is not None else "")
 
 
-def _registered(channel_id: str, message_id: str, user_id: str) -> Optional[Route]:
-    route = RUNTIME.message_routes.get((channel_id, message_id, user_id))
+def _registered(bot_id: str, channel_id: str, message_id: str, user_id: str) -> Optional[Route]:
+    route = RUNTIME.message_routes.get((bot_id, channel_id, message_id, user_id))
     return route if isinstance(route, Route) else None
 
 
-def _anchored(channel_id: str, message_id: str) -> list[Route]:
-    """Every registered route of one message (one per user; a reaction wakeup shares its message's id)."""
-    return [r for r in RUNTIME.message_routes.values_where(lambda key: key[0] == channel_id and key[1] == message_id)
-            if isinstance(r, Route)]
+def _anchored(channel_id: str, message_id: str, bot_id: Optional[str] = None) -> list[Route]:
+    """Every registered route of one message (one per user; a reaction wakeup shares its message's id), of
+    ``bot_id`` only when the delivering bot is known."""
+    return [r for r in RUNTIME.message_routes.values_where(
+        lambda key: key[1] == channel_id and key[2] == message_id and (not bot_id or key[0] == bot_id))
+        if isinstance(r, Route)]
 
 
 def stamp_of(route: Route) -> str:
     return ":".join(route.key)
 
 
-def candidate_routes(target: str, reply_to: Any, metadata: Any) -> list[Route]:
+def bot_of(adapter: Any) -> Optional[str]:
+    """The bound bot of a delivering adapter (``None`` while it is not bound)."""
+    binding = RUNTIME.bots.for_adapter(adapter)
+    return binding.bot_id if binding is not None else None
+
+
+def candidate_routes(target: str, reply_to: Any, metadata: Any, bot_id: Optional[str] = None) -> list[Route]:
     """Every route this delivery could belong to: explicit stamp, the turn's context, the reply anchor.
 
     :func:`route_for_target` takes the first entry whose origin is the target. A stamp and the turn's context
     name exactly one route each and come first. A reply anchor may name several (routes of different users of
     one message): nothing says whose output this is, so its public routes go first and a delivery is never
     redirected into an operator's worklog on a guess (every candidate still counts for the worklog-area
-    refusal)."""
+    refusal). ``bot_id``: the delivering bot; another bot's routes of the same message never count."""
     found: list[Route] = []
     marker = metadata.get(ROUTE_METADATA_KEY) if isinstance(metadata, dict) else None
-    if isinstance(marker, str) and marker.count(":") >= 2:
-        channel_id, message_id, user_id = marker.split(":", 2)
-        stamped = _registered(channel_id, message_id, user_id)
-        if stamped is not None:
+    if isinstance(marker, str) and marker.count(":") >= 3:
+        stamped = _registered(*marker.split(":", 3))
+        if stamped is not None and (not bot_id or stamped.bot_id == bot_id):
             found.append(stamped)
     current = RUNTIME.route.get()
     if isinstance(current, Route) and current not in found:
         found.append(current)
     if reply_to not in (None, "") and target:
-        anchored = [r for r in _anchored(target, str(reply_to)) if r not in found]
+        anchored = [r for r in _anchored(target, str(reply_to), bot_id) if r not in found]
         anchored.sort(key=lambda r: r.is_operator)              # stable: public routes first
         found.extend(anchored)
     return found
@@ -532,7 +539,7 @@ async def worklog_for(adapter: Any, route: Any) -> Optional[WorklogState]:
     """
     if not isinstance(route, Route) or not route.is_operator or not route.tool_started:
         return None
-    key = state_key(adapter, *route.key)
+    key = state_key(adapter, *route.message_key)
     state = DELIVERY.states.get(key)
     if state is None:
         settings = settings_for(route)
@@ -639,7 +646,7 @@ async def copy_final_to_origin(original_send: Any, adapter: Any, state: WorklogS
 
 __all__ = [
     "ACK_TEXT", "ARCHIVE_MINUTES", "DELIVERY", "ORIGIN_COPY_KEY", "ROUTE_METADATA_KEY", "WORKLOG_MODE",
-    "EXPLICIT_SEND_KEYS", "CallArgs", "Delivery", "beneath", "WorklogRefused", "WorklogSettings", "WorklogState", "candidate_routes",
+    "EXPLICIT_SEND_KEYS", "CallArgs", "Delivery", "beneath", "bot_of", "WorklogRefused", "WorklogSettings", "WorklogState", "candidate_routes",
     "channel_guild_id", "copy_final_to_origin", "create_worklog", "delivery_target", "is_turn_output",
     "is_worklog_thread", "kickoff_text", "located", "message_chat", "note_final", "parse_settings",
     "public_route_hits_worklog", "remember_delivery", "state_for_event", "state_key",

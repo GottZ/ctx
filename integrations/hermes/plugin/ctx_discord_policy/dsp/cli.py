@@ -67,7 +67,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
     status = sub.add_parser("status", help="Show protection status, bound bots and configured servers")
     status.add_argument("--json", action="store_true", help="Machine-readable output")
     for name, text in (("bind", "Activate the policy in a server (creates its configuration)"),
-                       ("pause", "Pause the policy in a server (stock Hermes behaviour there)"),
+                       ("pause", "Pause the policy in a server (members get no answer; operators keep Hermes' behaviour)"),
                        ("unbind", "Deactivate a server; --purge also deletes its configuration")):
         cmd = sub.add_parser(name, help=text)
         cmd.add_argument("guild", help="Discord server (guild) id")

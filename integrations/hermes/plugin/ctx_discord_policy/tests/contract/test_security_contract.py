@@ -169,7 +169,8 @@ def test_unarmed_routed_profile_closes_public_admission(real):
     msg = _message(discord, bot_user, MEMBER, 7101)
     for name in ("A5", "A6", "A7"):  # the closure below is the armed check, not a missing wrapper
         assert runtime.status.get(name).outcome.value == "wrapped", name
-    assert sys.modules[f"{ANCHOR}.ingress.admission"].decide(adapter, msg) is None
+    closed = sys.modules[f"{ANCHOR}.ingress.admission"].decide(adapter, msg)
+    assert closed is not None and closed.excluded      # no turn for the member, also none through stock rules
     assert adapter._discord_message_admission(msg, claim=True) == (False, False)  # stock: not allowlisted
     assert runtime.status.get("A4").outcome.value == "fallback"
 

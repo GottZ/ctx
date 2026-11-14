@@ -150,6 +150,7 @@ def test_shared_session_configuration_closes_public_admission_with_real_session_
     member, operator = setup.message(MEMBER, 7401, "hello"), setup.message(OPERATOR, 7402, "hello")
     assert admission.decide(setup.adapter, member).lane == "public"
     setup.runner.config.group_sessions_per_user = False
-    assert admission.decide(setup.adapter, member) is None
+    closed = admission.decide(setup.adapter, member)
+    assert closed is not None and closed.excluded      # no turn for the member, also none through stock rules
     assert admission.decide(setup.adapter, operator).lane == "operator"
     assert "group_sessions_per_user" in setup.runtime.status.get("A4").reason

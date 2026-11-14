@@ -473,7 +473,7 @@ async def test_wake_name_followed_by_a_command_is_conversation_not_a_command(anc
         assert turn["event"].get_command() is None, text  # ... as conversation, not as a gateway command
         assert turn["event"].text == text
         assert "BLOCKED" in turn["tools"][0]               # and it has no tool authority
-        route = anchor.RUNTIME.message_routes.get((str(turn["event"].source.chat_id), str(mid), WORLD_MEMBER))
+        route = anchor.RUNTIME.find_route(str(turn["event"].source.chat_id), str(mid), WORLD_MEMBER)
         assert route.lane == "public" and route.mode == "direct"
     # the name glued to a command is not addressed at all: stock, nothing runs
     assert await world.deliver(message(user(WORLD_MEMBER), content="Nova /restart", mid=7110)) is None
