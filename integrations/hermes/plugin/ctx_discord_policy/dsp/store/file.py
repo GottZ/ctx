@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from . import migrate
-from .schema import AUDIT_RING, SCHEMA_VERSION, SchemaError, empty_document, validate_document
+from .schema import AUDIT_RING, PURGED_KEY, SCHEMA_VERSION, SchemaError, empty_document, validate_document
 
 logger = logging.getLogger("ctx_discord_policy")
 
@@ -93,6 +93,17 @@ class Snapshot:
             return "paused"
         guild = self.guild(bot_id, guild_id)
         return guild["state"] if guild else "unbound"
+
+    def guild_rev(self, bot_id: str, guild_id: str) -> int:
+        """The revision a writer must name for this guild (optimistic check): its ``rev``, or for a guild that
+        was deleted the revision its purge left. Revisions of one guild never repeat, also across a purge."""
+        guild = self.guild(bot_id, guild_id)
+        if guild is not None:
+            return int(guild.get("rev", 0))
+        if self.state == CORRUPT:
+            return 0
+        bot = (self.data.get("bots") or {}).get(str(bot_id)) or {}
+        return int((bot.get(PURGED_KEY) or {}).get(str(guild_id), 0))
 
 
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
@@ -291,7 +302,7 @@ class PolicyStore:
             for change in changes:
                 key = (str(change["bot"]), str(change["guild"]))
                 expected = change.get("expected_rev")
-                base_rev = (current.guild(*key) or {}).get("rev", 0)
+                base_rev = current.guild_rev(*key)
                 if expected is not None and expected != base_rev:
                     raise ConflictError(f"guild {key[1]} changed (rev {base_rev}, you had {expected}); reload")
                 touched.setdefault(key, base_rev)
@@ -302,13 +313,26 @@ class PolicyStore:
                 if via is not None:
                     entry["via"] = via
                 document["audit"].append(entry)
+            # Epochs outlive every mutation: one that drops a bot's entry (its last guild purged) must not take
+            # the epochs of guilds purged before with it. A guild that exists again carries its own revision.
+            for bot_id, bot in (current.data.get("bots") or {}).items():
+                for guild_id, rev in (bot.get(PURGED_KEY) or {}).items():
+                    target = document["bots"].setdefault(bot_id, {"guilds": {}})
+                    if guild_id not in (target.get("guilds") or {}):
+                        target.setdefault(PURGED_KEY, {}).setdefault(guild_id, rev)
             for (bot_id, guild_id), base_rev in touched.items():
                 guild = document["bots"].get(bot_id, {}).get("guilds", {}).get(guild_id)
                 if guild is None:
-                    continue  # purged
+                    # Purged: keep its revision epoch, so a guild created again continues above it.
+                    bot = document["bots"].setdefault(bot_id, {"guilds": {}})
+                    bot.setdefault(PURGED_KEY, {})[guild_id] = base_rev + 1
+                    continue
                 guild["rev"] = base_rev + 1
                 guild["updated_by"] = by
                 guild["updated_at"] = now
+                bot = document["bots"][bot_id]
+                if bot.get(PURGED_KEY, {}).pop(guild_id, None) is not None and not bot[PURGED_KEY]:
+                    del bot[PURGED_KEY]
             document["audit"] = document["audit"][-AUDIT_RING:]
             data, problems = validate_document(document)
             if problems:

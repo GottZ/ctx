@@ -158,14 +158,8 @@ def from_interaction(interaction: Any, *, owner_home: Any, guild_config: Optiona
 
 
 def operator_list(owner_home: Any) -> tuple:
-    """``(operators, readable)``. ``readable`` is False when the Hermes configuration could not be read
-    (for example a broken config.yaml): then nobody is an operator, which the interface must say instead
-    of presenting it as "no operator configured"."""
-    try:
-        config._raw(owner_home, "operators")  # the reader raises when Hermes serves a fallback copy
-    except Exception:
-        return frozenset(), False
-    return config.operators(owner_home), True
+    """``(operators, readable)`` — see :func:`dsp.config.operator_list` (one read of the configuration)."""
+    return config.operator_list(owner_home)
 
 
 def may(actor: Actor, key: str) -> bool:

@@ -278,6 +278,23 @@ def validate_guild(value: Any, *, strict: bool = True, prompt_cap: int = HARD_PR
     return guild, problems
 
 
+# ── S-INT: revision epochs of deleted guilds ─────────────────────────────────────────────────────────
+# ``bots.<bot>.purged`` = {guild id: revision its purge left}. A guild created again continues from there,
+# so a revision a panel showed before the purge never matches again (no ABA through purge + reactivate).
+PURGED_KEY = "purged"
+
+
+def validate_purged(path: str, value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        raise SchemaError(f"{path}: expected a mapping of guild ids to revisions")
+    out = {}
+    for guild_id, rev in value.items():
+        if not is_snowflake(guild_id):
+            raise SchemaError(f"{path}.{guild_id}: not a Discord id")
+        out[guild_id] = _GUILD_FIELDS["rev"](f"{path}.{guild_id}", rev)
+    return out
+
+
 def validate_document(doc: Any, *, strict: bool = True) -> tuple[dict[str, Any], list[str]]:
     """Validate a whole v1 document.
 
@@ -304,11 +321,21 @@ def validate_document(doc: Any, *, strict: bool = True) -> tuple[dict[str, Any],
             clean, issues = validate_guild(guild, strict=strict)
             problems.extend(f"bots.{bot_id}.guilds.{guild_id}.{p}" for p in issues)
             guilds[guild_id] = clean
-        extra = set(bot) - {"guilds"}
+        extra = set(bot) - {"guilds", PURGED_KEY}
         if extra and strict:
             raise SchemaError(f"bots.{bot_id}: unknown setting {sorted(extra)[0]}")
         problems.extend(f"bots.{bot_id}.{k}: unknown setting dropped" for k in sorted(extra))
         out["bots"][bot_id] = {"guilds": guilds}
+        if PURGED_KEY in bot:
+            try:
+                purged = validate_purged(f"bots.{bot_id}.{PURGED_KEY}", bot[PURGED_KEY])
+            except SchemaError as exc:
+                if strict:
+                    raise
+                problems.append(f"{exc} (dropped)")
+                purged = {}
+            if purged:
+                out["bots"][bot_id][PURGED_KEY] = purged
     audit = doc.get("audit", [])
     out["audit"] = [a for a in audit if isinstance(a, dict)][-AUDIT_RING:] if isinstance(audit, list) else []
     extra = set(doc) - {"schema", "bots", "audit"}

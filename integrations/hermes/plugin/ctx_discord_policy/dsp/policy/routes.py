@@ -37,6 +37,10 @@ class Route:
     lanes: Any = None          # frozen public-lane parameters of the guild at admission time
     tool_started: bool = False
     created_at: float = field(default_factory=time.time)
+    # Display facts for the turn context (placeholders); untrusted text, sanitized by the prompt engine.
+    server_name: str = ""
+    channel_name: str = ""
+    bot_display_name: str = ""
 
     @property
     def session_user_id(self) -> str:

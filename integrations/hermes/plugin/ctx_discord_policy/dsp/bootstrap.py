@@ -14,11 +14,50 @@ from typing import Any
 from . import cli, config, hermes
 from .adapt.status import SECURITY, Outcome, Result, compare_with_previous, write_json_atomic
 from .adapt import interventions
+# Loaded with the anchor, never lazily: after an in-place update a lazy import would mix two versions in one
+# process (the entry point also imports every module of the package before the anchor counts as ready).
+from . import prompts, wiring  # noqa: F401
+from .delivery import delete, progress, split  # noqa: F401
+from .ui import commands as ui_commands  # noqa: F401
 from .adapt.strategies import run_intervention
 from .policy import hooks
 from .runtime import RUNTIME, Instance
 
 logger = logging.getLogger("ctx_discord_policy")
+
+
+# ── attachment points of the layers ──────────────────────────────────────────────────────────────────
+#
+# REGISTER_STEPS run in every profile instance at the end of ``register()``, once that profile is armed:
+# ``step(ctx, instance)``. Plugin-load time: never block, never import ``gateway.run``.
+#
+# BIND_STEPS run on every call of the Discord platform-handler factory (a connected bot, also after a
+# reconnect with a new client), in this order, after the bot is bound (``RUNTIME.bots.bind``) and before the
+# status file is written: ``step(bind: wiring.Bind)``. Every step records its own outcome in the status
+# register; an exception is logged and never breaks the bind or the steps after it. Order matters where it
+# is noted. A layer adds itself with one line.
+REGISTER_STEPS: tuple = (
+    # ("<id>", <module>.register),
+)
+
+BIND_STEPS: tuple = (
+    ("K1", wiring.install_delete),           # first: sees the adapter class as Hermes left it
+    ("K1b", wiring.install_delete_chat),     # after K1: wraps what K1 found or injected
+    ("K3/K4", wiring.install_delivery),
+    ("K2/K2b", wiring.install_progress),
+    ("K6", wiring.install_ui),               # the interface last: everything it shows is in place
+)
+
+
+def bind_bot(native: Any, adapter: Any, binding: Any) -> None:
+    """Run :data:`BIND_STEPS` for one bound bot, then write the status file in the bot owner's home."""
+    bind = wiring.Bind(native=native, adapter=adapter, binding=binding)
+    for name, step in BIND_STEPS:
+        try:
+            step(bind)
+        except Exception:  # steps record their own outcomes; one failing layer never stops the others
+            logger.exception("ctx_discord_policy: bind step %s failed", name)
+    safe_write_status(binding.owner_home)
 
 
 def _a1_isolation(profile: str) -> Result:
@@ -55,8 +94,15 @@ def write_status(home: Path) -> Path:
     path = hermes.plugin_data_dir(home) / "status.json"
     payload = {"status_schema": 1, "written_at": time.time(), "hermes_version": hermes.hermes_version(),
                **RUNTIME.describe()}
+    now = payload.get("interventions") or {}
     for change in compare_with_previous(path, payload):
-        logger.warning("ctx_discord_policy: changed since last start: %s", change)
+        name = change.split(": ", 1)[0]
+        if name not in now:  # runtime notices (per-turn entries) start empty in every process
+            logger.info("ctx_discord_policy: since the last start: %s", change)
+            continue
+        degraded = now[name].get("outcome") in (Outcome.FALLBACK.value, Outcome.OFF.value)
+        logger.warning("ctx_discord_policy: %s since the last start: %s",
+                       "degraded" if degraded else "adapted to this Hermes", change)
     write_json_atomic(path, payload)
     return path
 
@@ -115,6 +161,11 @@ def register(ctx: Any, *, plugin_dir: Path) -> bool:
         RUNTIME.status.record(Result("A3", SECURITY, Outcome.OFF, "ctx.register_platform_handler missing",
                                      "PluginContext"))
     interventions.install_runner()  # only if gateway.run is already imported; never imports it
+    for name, step in REGISTER_STEPS:
+        try:
+            step(ctx, instance)
+        except Exception:  # a layer's registration never disarms the profile
+            logger.exception("ctx_discord_policy: register step %s failed in profile %s", name, profile)
     # The status file is written where a Discord bot binds (gateway process), never from register():
     # every ``hermes`` CLI invocation also loads plugins and must not overwrite the gateway's status.
     logger.info("ctx_discord_policy %s armed in profile %s", RUNTIME.version, profile)

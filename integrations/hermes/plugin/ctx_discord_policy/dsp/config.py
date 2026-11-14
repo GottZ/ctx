@@ -49,14 +49,28 @@ def _warn_once(home: os.PathLike, message: str) -> None:
         logger.warning("ctx_discord_policy: %s", message)
 
 
-def operators(home: os.PathLike) -> frozenset[str]:
-    """Discord user ids with tool authority for the bot owned by ``home``. Fails closed: any reading
-    problem yields no operator (public lanes only)."""
+def operator_list(home: os.PathLike) -> tuple[frozenset[str], bool]:
+    """``(operators, readable)`` for the bot owned by ``home``.
+
+    ``readable`` is False when the Hermes configuration could not be read (the reader raises, for example
+    while Hermes serves a fallback copy of a broken ``config.yaml``): then nobody is an operator, and an
+    interface must say so instead of presenting it as "no operator configured". Fails closed either way.
+    """
     try:
         raw = _raw(home, "operators")
     except Exception:
         logger.exception("ctx_discord_policy: reading settings.operators failed; no operator this turn")
-        return frozenset()
+        return frozenset(), False
+    return _parse_operators(home, raw), True
+
+
+def operators(home: os.PathLike) -> frozenset[str]:
+    """Discord user ids with tool authority for the bot owned by ``home``. Fails closed: any reading
+    problem yields no operator (public lanes only)."""
+    return operator_list(home)[0]
+
+
+def _parse_operators(home: os.PathLike, raw: Any) -> frozenset[str]:
     if raw is None:
         return frozenset()
     if not isinstance(raw, (list, tuple)):

@@ -6,7 +6,8 @@ Order of events in a gateway process:
    never imports it (plugin discovery can run inside that module's import).
 2. The Discord adapter connects; after ``ready`` Hermes calls the factory in the scope of the profile that
    runs the bot: A3 binds ``type(adapter)`` (A5 admission, A6 handler), A7 is installed if still missing,
-   the bot is bound to its owner home, and the status file is written there.
+   the bot is bound to its owner home, the layers' bind steps run (``bootstrap.BIND_STEPS``: comfort
+   interventions, the interface), and the status file is written there.
 Until step 2 has completed for an adapter, every message of that adapter keeps stock behaviour.
 
 Every wrapper wraps the *current* attribute (MRO included), passes ``*args, **kwargs`` through, and is
@@ -222,4 +223,4 @@ def discord_platform_handler(native: Any, adapter: Any) -> None:
         return
     binding = RUNTIME.bots.bind(adapter, bot_id, hermes.current_home())
     logger.info("ctx_discord_policy: bot %s bound; state in %s", bot_id, binding.store.path)
-    bootstrap.safe_write_status(binding.owner_home)
+    bootstrap.bind_bot(native, adapter, binding)  # the layers' bind steps, then the status file

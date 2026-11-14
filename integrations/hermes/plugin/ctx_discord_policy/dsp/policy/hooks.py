@@ -6,12 +6,14 @@ Discord ingress set in the launch profile's code. Any failure inside a hook bloc
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from typing import Any, Optional
 
 from . import lanes
 from .routes import Route
+from ..adapt.status import SECURITY, Outcome, Result
 from ..runtime import RUNTIME
 
 logger = logging.getLogger("ctx_discord_policy")
@@ -51,7 +53,7 @@ def current_route(session_id: Any = "", turn_id: Any = "") -> Optional[Route]:
 
 
 def on_pre_llm_call(*, session_id: str = "", turn_id: str = "", **_: Any) -> Optional[dict[str, str]]:
-    """Bind the turn to its exact route and inject the capability lane."""
+    """Bind the turn to its exact route and inject the assembled turn context (``wiring.turn_context``)."""
     try:
         route = RUNTIME.route.get()
         key = _turn_key(session_id, turn_id)
@@ -64,7 +66,9 @@ def on_pre_llm_call(*, session_id: str = "", turn_id: str = "", **_: Any) -> Opt
                 RUNTIME.turn_routes.put(key, route)
             if not route.is_operator:
                 RUNTIME.public_sessions.put(key[0], time.time())
-        return {"context": lanes.capability_lane_text(route)}
+        from .. import wiring  # late: wiring imports the prompt engine and the store
+
+        return {"context": wiring.turn_context(route)}
     except Exception:
         logger.exception("ctx_discord_policy: pre_llm_call failed")
         # Ends the turn before inference where Hermes honours a pre_llm_call block (v0.23.0+); older
@@ -114,6 +118,23 @@ def on_session_gone(*, session_id: str = "", **_: Any) -> None:
         logger.exception("ctx_discord_policy: session cleanup failed")
 
 
+def homeless_key(instance: Any) -> str:
+    """Status key of an armed entry without a home path: one per home, never another profile's ``A8[…]``."""
+    digest = hashlib.sha256(str(instance.home_key).encode("utf-8")).hexdigest()[:8]
+    return f"A8[{instance.profile}#{digest}]"
+
+
+def _note_homeless(instance: Any) -> None:
+    key = homeless_key(instance)
+    current = RUNTIME.status.get(key)
+    if current is not None and current.outcome is Outcome.OFF:
+        return  # reported once (the status register logs the warning)
+    RUNTIME.status.record(Result(key, SECURITY, Outcome.OFF,
+                                 f"armed entry of profile {instance.profile} has no home path, so its live hook "
+                                 "registry cannot be checked: public admission into it stays closed",
+                                 "armed register"))
+
+
 def armed_live(home_key: str) -> bool:
     """Armed register AND the live hook registry of that profile agree (A8 behaviour check).
 
@@ -123,7 +144,9 @@ def armed_live(home_key: str) -> bool:
     if instance is None:
         return False
     if not instance.home:
-        return True  # registered without a home path (older instance record): register decides
+        # Every 3.0 registration records its home; an entry without one is an unknown state: closed.
+        _note_homeless(instance)
+        return False
     try:
         from .. import hermes
 

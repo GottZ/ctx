@@ -124,6 +124,27 @@ def read_plugin_setting(ctx: Any, home: os.PathLike | str, key: str, default: An
         return ctx.get_config(key, default)
 
 
+def turn_runner_class() -> Any:
+    """``gateway.run_turn_runner.TurnRunner`` (runs a turn's progress loop), ``None`` if unavailable."""
+    try:
+        from gateway.run_turn_runner import TurnRunner
+    except ImportError:
+        return None
+    return TurnRunner
+
+
+def spill_config() -> Any:
+    """Hermes' resolved hook-output spill configuration (``None`` when unavailable: default limit)."""
+    try:
+        from tools.hook_output_spill import get_spill_config
+    except ImportError:
+        return None
+    try:
+        return get_spill_config()
+    except Exception:
+        return None
+
+
 def hook_registered(home: os.PathLike | str, hook_name: str, callback: Any) -> Optional[bool]:
     """Whether ``callback`` is in the live hook registry of the plugin manager of ``home``.
 

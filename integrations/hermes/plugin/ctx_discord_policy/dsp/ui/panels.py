@@ -187,7 +187,7 @@ class Ctx:
 
     @property
     def rev(self) -> int:
-        return int((self.guild or {}).get("rev", 0))
+        return self.snapshot.guild_rev(self.bot_id, self.guild_id)  # never repeats across a purge
 
     @property
     def guild_name(self) -> str:
@@ -402,7 +402,9 @@ def protection_summary(ctx: Ctx) -> str:
     rows = _interventions(ctx)
     if not rows:
         return "Not reported yet."
-    security_down = sorted(n for n, r in rows.items() if r.get("klass") == "S" and r.get("outcome") in ("fallback", "off"))
+    # Per-context notices (A9[bot/guild/lane/mode]: guidance shortened) close nothing; the operator sees them in full.
+    security_down = sorted(n for n, r in rows.items() if r.get("klass") == "S" and r.get("outcome") in ("fallback", "off")
+                           and not n.startswith("A9["))
     comfort_down = sorted(n for n, r in rows.items() if r.get("klass") == "K" and r.get("outcome") in ("fallback", "off"))
     armed = ctx.binding.runtime.armed.snapshot()
     if security_down or not armed:

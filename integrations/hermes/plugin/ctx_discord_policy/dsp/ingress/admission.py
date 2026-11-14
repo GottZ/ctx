@@ -49,11 +49,15 @@ class Decision:
     addressed: bool = True     # mention/reply/ambient: admission may widen the allowlist for the author
     excluded: bool = False     # "never respond in" channel: nobody is admitted or routed
     in_thread: bool = False
+    server_name: str = ""
+    channel_name: str = ""
+    bot_display_name: str = ""
 
     def route(self, message_id: str) -> Route:
         return Route(bot_id=self.bot_id, guild_id=self.guild_id, channel_id=self.channel_id,
                      message_id=message_id, author_id=self.author_id, lane=self.lane, mode=self.mode,
-                     target_home_key=self.target_home_key, lanes=self.lanes)
+                     target_home_key=self.target_home_key, lanes=self.lanes, server_name=self.server_name,
+                     channel_name=self.channel_name, bot_display_name=self.bot_display_name)
 
 
 def _note_unarmed(target_key: str) -> None:
@@ -189,10 +193,15 @@ def _decide(adapter: Any, message: Any) -> Optional[Decision]:
     if not hooks.armed_live(target):
         _note_unarmed(target)
         return None
+    me = getattr(guild, "me", None)
+    bot_name = (getattr(me, "display_name", None) or getattr(self_user, "display_name", None)
+                or getattr(self_user, "name", None) or "")
     return Decision(bot_id=binding.bot_id, owner_home=binding.owner_home, guild_id=guild_id,
                     channel_id=channel_id, author_id=author_id, lane=lane, mode=mode,
                     lanes=PublicLanes.from_guild(guild_cfg), target_home_key=target, reply_unverified=unverified,
-                    addressed=addressed, excluded=excluded, in_thread=is_thread)
+                    addressed=addressed, excluded=excluded, in_thread=is_thread,
+                    server_name=str(getattr(guild, "name", "") or ""),
+                    channel_name=str(getattr(channel, "name", "") or ""), bot_display_name=str(bot_name))
 
 
 # ── message views ────────────────────────────────────────────────────────────────────────────────

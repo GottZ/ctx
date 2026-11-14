@@ -96,6 +96,11 @@ class FakeChannel:
                 channel.messages[int(message_id)].content = content
                 channel.edits.append((int(message_id), content))
 
+            async def delete(self) -> None:
+                if int(message_id) not in channel.messages:
+                    raise LookupError("Unknown Message")
+                channel.messages[int(message_id)].deleted = True
+
         return Partial()
 
 
