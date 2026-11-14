@@ -35,7 +35,7 @@ class Option:
 @dataclass
 class Field:
     key: str
-    kind: str                       # "text" | "paragraph" | "radio" | "checkbox"
+    kind: str                       # "text" | "paragraph" | "radio" | "checkbox" | "file"
     label: str
     description: str = ""
     value: Any = None               # prefilled text, preselected option value or checkbox state
@@ -58,7 +58,7 @@ class ModalSpec:
         if not 1 <= len(self.fields) <= FIELDS_MAX:
             raise ValueError(f"a modal holds 1..{FIELDS_MAX} fields")
         for f in self.fields:
-            if f.kind not in ("text", "paragraph", "radio", "checkbox"):
+            if f.kind not in ("text", "paragraph", "radio", "checkbox", "file"):
                 raise ValueError(f"unknown field kind {f.kind}")
             if not modern and f.kind not in ("text", "paragraph"):
                 raise ValueError(f"field {f.key}: {f.kind} needs the modern modal components")
@@ -85,6 +85,9 @@ def _component(discord: Any, f: Field, *, modern: bool) -> Any:
             group.add_option(label=opt.label, value=opt.value, description=opt.description or None,
                              default=opt.value == f.value)
         return group
+    if f.kind == "file":
+        return discord.ui.FileUpload(custom_id=f.key, min_values=1 if f.required else 0, max_values=1,
+                                     required=f.required)
     return discord.ui.Checkbox(custom_id=f.key, default=bool(f.value))
 
 
@@ -116,7 +119,13 @@ def modal_class(discord: Any) -> Any:
                     self.add_item(component)
 
         def values(self) -> dict:
-            return {key: getattr(component, "value", None) for key, component in self.inputs.items()}
+            out = {}
+            for key, component in self.inputs.items():
+                if isinstance(component, discord.ui.FileUpload):
+                    out[key] = list(component.values)
+                else:
+                    out[key] = getattr(component, "value", None)
+            return out
 
         async def interaction_check(self, interaction: Any, /) -> bool:
             return True  # checked in on_submit, so a refusal gets an answer

@@ -51,6 +51,7 @@ class UI:
         self.store = anchor.mod("cli").store_for(anchor.home)
         self.binding = None
         self.dms: list = []
+        self.files: list = []
 
     def install(self, client, **kwargs):
         kwargs.setdefault("schedule", False)
@@ -84,8 +85,9 @@ async def harness(ui: UI, **install) -> ReplayHarness:
                  roles=[(ADMIN_ROLE_ID, "Operator", ADMINISTRATOR)])
     ui.install(h.client, **install)
 
-    async def record(user_id, text):
+    async def record(user_id, text, file=None):
         ui.dms.append((user_id, text))
+        ui.files.append(file)
 
     if ui.binding is not None:
         ui.binding.notifier = record
@@ -266,9 +268,11 @@ async def test_policy_active_shows_locked_areas_only_to_the_operator(ui):
     try:
         op = (await command(h, user=OP_ID, perms=PLAIN))[0]
         manager = (await command(h, user=ADMIN_USER_ID, perms=MANAGE))[0]
-        assert labels(op) == ["Progress", "Status", "Pause", "Unbind…"]
-        assert labels(manager) == ["Progress", "Status", "Pause"]
-        assert {"🔒 Worklog", "🔒 Members may", "🔒 Managed by"} <= set(field_names(op))
+        common = ["Identity", "Channels", "Guidance", "Progress"]
+        locked = ["🔒 Worklog", "🔒 Member tools", "🔒 Operator turns", "🔒 Managers"]
+        assert labels(op) == common + locked + ["Status", "Pause", "Unbind…"]
+        assert labels(manager) == common + ["Status", "Pause"]
+        assert set(locked) <= set(field_names(op))
         assert not [n for n in field_names(manager) if n.startswith("🔒")]
         assert "Identity" in field_names(manager) and "Progress" in field_names(manager)
         assert embed(op)["description"].startswith("**Active**")
@@ -529,7 +533,7 @@ async def test_custom_id_of_another_server_changes_nothing(ui):
     (f"dsp:1:{GUILD}:pause:x:1:extra", "outdated panel"),
     (f"dsp:1:{GUILD}:Pause::1", "outdated panel"),
     ("dsp:1:../../etc:pause::1", "outdated panel"),
-    (f"dsp:1:{GUILD}:nav:worklog:0", "not known"),
+    (f"dsp:1:{GUILD}:nav:nopage:0", "not known"),
 ], ids=["unknown-action", "old-version", "extra-field", "bad-action", "bad-guild", "unknown-page"])
 async def test_malformed_or_unknown_custom_ids_are_answered_and_change_nothing(ui, cid, text):
     activate_directly(ui)

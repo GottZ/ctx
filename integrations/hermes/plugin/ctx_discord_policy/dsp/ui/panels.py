@@ -22,16 +22,18 @@ interaction; the server always comes from the interaction, never from the ``cust
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
+from .. import config
 from ..policy.routes import snowflake
 from ..store import ops
 from ..store.file import CORRUPT, DOWNGRADE, ConflictError, Snapshot, StoreError
-from ..store.schema import SchemaError
+from ..store.schema import HARD_PROMPT_LIMIT, SchemaError
 from . import items, modals, perms
 
 logger = logging.getLogger("ctx_discord_policy")
@@ -52,12 +54,18 @@ class Control:
     action: str
     label: str = ""
     arg: str = ""
-    kind: str = "button"           # "button" | "select"
+    kind: str = "button"           # "button" | "select" | "channel_select" | "role_select"
     style: str = "secondary"
-    emoji: Optional[str] = None
-    options: tuple = ()            # select: (label, value, description, default) tuples
+    emoji: Optional[Any] = None
+    options: tuple = ()            # select: (label, value, description, default[, emoji]) tuples
     placeholder: Optional[str] = None
     mutates: bool = False          # hidden while the store is read-only (damaged or newer schema)
+    min_values: int = 1
+    max_values: int = 1
+    defaults: tuple = ()           # channel/role select: preselected ids
+    channel_types: tuple = ("text", "news", "forum")
+    disabled: bool = False
+    row: Optional[int] = None      # 0-4; None = Discord's automatic layout
 
 
 @dataclass
@@ -168,6 +176,7 @@ class Ctx:
     item: Any = None
     origin_view: Any = None        # non-persistent strategy: the view this interaction came from
     deferred_update: bool = False  # a slow write deferred the in-place update
+    page_arg: str = ""             # page-local state for the next render (e.g. a list page number)
 
     @property
     def discord(self) -> Any:
@@ -198,6 +207,12 @@ class Ctx:
 
     def may(self, key: str) -> bool:
         return perms.may(self.actor, key)
+
+    def settings(self) -> dict:
+        """The operator's global settings (DESIGN §5.1) as the prompt engine reads them."""
+        home = self.binding.owner_home
+        return {key: config.setting(home, key) for key in ("frame_prompt", "operator_label",
+                                                           "guild_prompt_max_chars", "notify_operators")}
 
     def refresh(self) -> None:
         """Re-read the store and the caller's role (after a write or a conflict)."""
@@ -250,15 +265,32 @@ class Ctx:
         modal.origin_view = getattr(self.item, "view", None)
         await self.interaction.response.send_modal(modal)
 
+    async def acknowledge(self) -> None:
+        """Answer now, update later (slow work: store lock, downloads): edits in place where possible."""
+        if self.interaction.response.is_done():
+            return
+        if self._in_place():
+            await self.interaction.response.defer()
+            self.deferred_update = True
+        else:
+            await self.interaction.response.defer(ephemeral=True, thinking=True)
+
+    async def send_file(self, text: str, name: str, data: bytes) -> None:
+        """A new ephemeral message with one attached file (previews, downloads)."""
+        file = self.discord.File(io.BytesIO(data), filename=name)
+        if self.interaction.response.is_done():
+            await self.interaction.followup.send(text, file=file, ephemeral=True)
+        else:
+            await self.interaction.response.send_message(text, file=file, ephemeral=True)
+
     async def show_page(self, key: str, *, notice: str = "") -> None:
         await self.show(build_page(self, key), notice=notice)
 
     # ── writing ──
 
-    async def write(self, setting: str, changes: dict, *, expected_rev: int, page: str) -> bool:
-        """Write settings through the one guarded path; answers refusals and conflicts itself."""
+    async def _guard(self, setting: str, paths: Any) -> bool:
         try:
-            perms.check_write(self.actor, setting, changes)
+            perms.check_write(self.actor, setting, paths)
         except perms.Refused as exc:
             await self.refuse(str(exc))
             return False
@@ -266,10 +298,45 @@ class Ctx:
             await self.refuse("Nothing was saved: the policy is not active in this server, so its settings can't "
                               "be changed. Next step: ask the bot's operator to activate it.")
             return False
-        cap = self.binding.prompt_cap()
+        return True
+
+    async def write(self, setting: str, changes: dict, *, expected_rev: int, page: str) -> bool:
+        """Write settings through the one guarded path; answers refusals and conflicts itself."""
+        if not await self._guard(setting, changes):
+            return False
+        # The operator's guidance cap binds guidance writes; a guidance that predates a lowered cap must not
+        # block every other setting of the server (the runtime shortens it to the cap).
+        cap = self.binding.prompt_cap() if "prompts.guild" in changes else HARD_PROMPT_LIMIT
         return await self._commit(lambda: ops.update_fields(self.binding.store, self.bot_id, self.guild_id, changes,
                                                             by=self.actor.user_id, expected_rev=expected_rev,
-                                                            prompt_cap=cap), page)
+                                                            prompt_cap=cap),
+                                  page, setting=setting, paths=list(changes))
+
+    async def reset(self, setting: str, paths: list, *, expected_rev: int, page: str) -> bool:
+        """Put ``paths`` back to their defaults (``ops.reset_fields``), with the same guards as :meth:`write`."""
+        written = list(paths) + (["prompts.history"] if "prompts.guild" in paths else [])
+        if not await self._guard(setting, written):
+            return False
+        cap = self.binding.prompt_cap() if "prompts.guild" in paths else HARD_PROMPT_LIMIT
+        return await self._commit(lambda: ops.reset_fields(self.binding.store, self.bot_id, self.guild_id, paths,
+                                                           by=self.actor.user_id, via="discord",
+                                                           expected_rev=expected_rev, prompt_cap=cap),
+                                  page, setting=setting, paths=list(paths))
+
+    async def write_guidance(self, text: Optional[str], *, expected_rev: int, page: str,
+                             restore: Optional[str] = None) -> bool:
+        """Set (or, with ``restore`` = version id, restore) the server guidance through ``ops``."""
+        if not await self._guard("guidance", ["prompts.guild", "prompts.history"]):
+            return False
+        cap = self.binding.prompt_cap()
+        store, bot, guild, by = self.binding.store, self.bot_id, self.guild_id, self.actor.user_id
+        if restore is not None:
+            run = lambda: ops.restore_guidance(store, bot, guild, restore, by=by, via="discord",  # noqa: E731
+                                               expected_rev=expected_rev, prompt_cap=cap)
+        else:
+            run = lambda: ops.set_guidance(store, bot, guild, text, by=by, via="discord",  # noqa: E731
+                                           expected_rev=expected_rev, prompt_cap=cap)
+        return await self._commit(run, page, setting="guidance", paths=["prompts.guild"])
 
     async def transition(self, new_state: str, *, expected_rev: int, purge: bool = False) -> bool:
         """Change the server's state; the (old, new) pair decides which setting the caller needs."""
@@ -290,19 +357,16 @@ class Ctx:
             run = lambda: ops.activate(store, bot, guild, by=by, expected_rev=expected_rev)  # noqa: E731
         else:
             run = lambda: ops.set_state(store, bot, guild, new_state, by=by, expected_rev=expected_rev)  # noqa: E731
-        return await self._commit(run, "home")
+        return await self._commit(run, "home", setting=key, paths=["state"])
 
-    async def _commit(self, run: Callable[[], Snapshot], page: str) -> bool:
-        task = asyncio.ensure_future(asyncio.to_thread(run))
+    async def _commit(self, run: Callable[[], Snapshot], page: str, *, setting: str = "", paths: Any = ()) -> bool:
+        before = self.guild
+        task = asyncio.ensure_future(asyncio.to_thread(_from_discord, run))
         try:
             done, _ = await asyncio.wait({task}, timeout=DEFER_AFTER)
             if not done and not self.interaction.response.is_done():
                 # The store lock can wait longer than Discord's 3-second answer window: acknowledge first.
-                if self._in_place():
-                    await self.interaction.response.defer()
-                    self.deferred_update = True
-                else:
-                    await self.interaction.response.defer(ephemeral=True, thinking=True)
+                await self.acknowledge()
             await task
         except ConflictError:
             await self.conflict(page)
@@ -317,6 +381,10 @@ class Ctx:
                               "Next step: try again in a moment; if this keeps happening, tell the bot's operator.")
             return False
         self.refresh()
+        try:
+            self.binding.changed(self, setting, list(paths), before, self.guild)
+        except Exception:  # audit and operator messages must never undo or hide a saved change
+            logger.warning("ctx_discord_policy: change notification failed", exc_info=True)
         return True
 
     async def conflict(self, page: str) -> None:
@@ -327,6 +395,29 @@ class Ctx:
         await self.show(build_page(self, page), notice=(
             f"⚠️ Not saved: {by} changed this server's settings {stamp} after this panel was opened. "
             "The panel now shows the current settings; review them and try again."))
+
+
+def _from_discord(run: Callable[[], Snapshot]) -> Snapshot:
+    """Run one store write with the audit origin ``discord`` (lifecycle and settings writes alike)."""
+    with ops.origin("discord"):
+        return run()
+
+
+def describe_change(ctx: "Ctx", setting: str, paths: list, before: Optional[dict], after: Optional[dict]) -> str:
+    """One audit line: who changed which settings — names only, never values (guidance: size and version)."""
+    label = perms.SETTINGS[setting].label if setting in perms.SETTINGS else "settings"
+    names = sorted({p.split(".")[-1].replace("_", " ") for p in paths if p != "state"})
+    if "state" in paths:
+        state = (after or {}).get("state", "deleted") if after else "deleted"
+        return f"<@{ctx.actor.user_id}> set the server policy to **{_STATE_WORD.get(state, state)}** (/policy)."
+    text = f"<@{ctx.actor.user_id}> changed {label} in /policy"
+    if "prompts.guild" in paths:
+        guidance = ((after or {}).get("prompts") or {}).get("guild") or ""
+        text += f": {len(guidance)} characters" + (f", version {ops.guidance_digest(guidance)[:12]}" if guidance
+                                                     else " (now empty)")
+    elif names:
+        text += f": {', '.join(names)}"
+    return text + "."
 
 
 def _interaction_kind(interaction: Any) -> str:
@@ -352,14 +443,30 @@ def _item(ctx: Ctx, control: Control) -> Any:
     discord = ctx.discord
     custom_id = items.encode(ctx.guild_id, control.action, control.arg, ctx.rev)
     if control.kind == "select":
-        options = [discord.SelectOption(label=label[:100], value=value, description=(desc or None),
-                                        default=bool(default))
-                   for label, value, desc, default in control.options]
+        options = [discord.SelectOption(label=str(opt[0])[:100], value=str(opt[1]), description=(opt[2] or None),
+                                        default=bool(opt[3]), emoji=(opt[4] if len(opt) > 4 else None))
+                   for opt in control.options]
         item = discord.ui.Select(custom_id=custom_id, options=options, placeholder=control.placeholder,
-                                 min_values=1, max_values=1)
+                                 min_values=min(control.min_values, len(options)),
+                                 max_values=min(control.max_values, len(options)), disabled=control.disabled,
+                                 row=control.row)
+    elif control.kind == "channel_select":
+        types = [getattr(discord.ChannelType, t) for t in control.channel_types]
+        item = discord.ui.ChannelSelect(custom_id=custom_id, channel_types=types, placeholder=control.placeholder,
+                                        min_values=control.min_values, max_values=control.max_values,
+                                        default_values=[discord.Object(id=int(i), type=discord.abc.GuildChannel)
+                                                        for i in control.defaults],
+                                        disabled=control.disabled, row=control.row)
+    elif control.kind == "role_select":
+        item = discord.ui.RoleSelect(custom_id=custom_id, placeholder=control.placeholder,
+                                     min_values=control.min_values, max_values=control.max_values,
+                                     default_values=[discord.Object(id=int(i), type=discord.Role)
+                                                     for i in control.defaults],
+                                     disabled=control.disabled, row=control.row)
     else:
         style = getattr(discord.ButtonStyle, control.style if control.style in _STYLES else "secondary")
-        item = discord.ui.Button(custom_id=custom_id, label=control.label[:80], style=style, emoji=control.emoji)
+        item = discord.ui.Button(custom_id=custom_id, label=control.label[:80], style=style, emoji=control.emoji,
+                                 disabled=control.disabled, row=control.row)
     if ctx.binding.persistent:
         return items.component_class(discord)(item)
 
@@ -436,80 +543,9 @@ def protection_lines(ctx: Ctx, *, reasons: bool) -> str:
 # ── summaries on the start page (each row governed by one perms setting) ─────────────────────────────
 
 
-def _channels(ids: Any) -> str:
-    return ", ".join(f"<#{c}>" for c in ids or ()) or ""
-
-
-def _summary_identity(g: dict) -> str:
-    ident = g.get("identity") or {}
-    name = clean(ident.get("bot_name"), 32)
-    wakes = ", ".join(clean(w, 32) for w in ident.get("wake_names") or ()) or (name or "its name")
-    name = name or "its server nickname"
-    emoji = ident.get("reaction_emoji")
-    if isinstance(emoji, dict) and snowflake(emoji.get("id")):
-        emoji_text = f"<:{re.sub(r'[^A-Za-z0-9_]', '', str(emoji.get('name'))) or 'emoji'}:{emoji['id']}>"
-    else:
-        emoji_text = clean(emoji, 32) if emoji else "none"
-    return f"{name} · wakes on: {wakes} · reaction: {emoji_text}"
-
-
-def _summary_conversation(g: dict) -> str:
-    conv = g.get("conversation") or {}
-    ambient = _channels(conv.get("ambient_channels"))
-    text = f"reads along in {ambient}" if ambient else "only when addressed (mention, reply, reaction, name)"
-    excluded = _channels(conv.get("excluded_channels"))
-    return text + (f" · never in {excluded}" if excluded else "")
-
-
-def _summary_guidance(g: dict, cap: int) -> str:
-    prompts = g.get("prompts") or {}
-    used = len(prompts.get("guild") or "")
-    text = (f"{used:,} / {cap:,} characters" if used else f"none yet (up to {cap:,} characters)").replace(",", " ")
-    history = prompts.get("history") or []
-    if history:
-        last = history[-1]
-        text += f" · changed by {who(last.get('by'))} {when(last.get('at'))}"
-    return text
-
-
-def _summary_worklog(g: dict) -> str:
-    wl = g.get("worklog") or {}
-    if not wl.get("channel"):
-        return "off"
-    hours = int(wl.get("archive_minutes", 1440)) // 60
-    return (f"<#{wl['channel']}> · archive after {hours} h"
-            + (" · final copy to origin" if wl.get("final_to_origin") else ""))
-
-
-def _summary_public(g: dict) -> str:
-    lanes = g.get("lanes") or {}
-    history = lanes.get("channel_history") or {}
-    parts = [f"channel history ≤{history.get('max_limit', 100)}" if history.get("enabled") else "no channel history",
-             "permalinks" if lanes.get("permalink_hydration") else "no permalinks",
-             f"{len(lanes.get('skills') or [])} skills", f"{len(lanes.get('knowledge') or [])} knowledge refs"]
-    return " · ".join(parts)
-
-
-def _summary_managers(g: dict) -> str:
-    managers = g.get("managers") or {}
-    mode = managers.get("mode", "discord_admins")
-    if mode == "role":
-        roles = ", ".join(f"<@&{r}>" for r in managers.get("role_ids") or ()) or "no role chosen"
-        return f"Manage Server and one of: {roles}"
-    return {"discord_admins": "everyone with Manage Server", "operators_only": "operators only"}.get(mode, mode)
-
-
-# Start-page rows for settings that have no panel of their own yet: (order, setting, label, summary).
-# A registered panel brings its own row (Panel.summary); S9 moves these rows into its panels.
-SUMMARIES = (
-    (10, "identity", "Identity", lambda g, ctx: _summary_identity(g)),
-    (20, "channels", "Conversation", lambda g, ctx: _summary_conversation(g)),
-    (25, "identity", "Language", lambda g, ctx: clean((g.get("conversation") or {}).get("language"), 100)),
-    (30, "guidance", "Guidance", lambda g, ctx: _summary_guidance(g, ctx.binding.prompt_cap())),
-    (60, "worklog", "Worklog", lambda g, ctx: _summary_worklog(g)),
-    (70, "public_lanes", "Members may", lambda g, ctx: _summary_public(g)),
-    (80, "managers", "Managed by", lambda g, ctx: _summary_managers(g)),
-)
+# Start-page rows for settings without a panel of their own: (order, setting, label, summary(guild, ctx)).
+# Every setting group has its panel now (``pages``), and each panel brings its row (``Panel.summary``).
+SUMMARIES: tuple = ()
 
 
 def summary_rows(ctx: "Ctx") -> list:

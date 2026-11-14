@@ -267,3 +267,140 @@ def import_guild_checked(store: PolicyStore, bot_id: str, guild_id: str, payload
                             "expected_rev": expected_rev}]
 
     return store.update(mutate, by=by, via=via)
+
+
+# --- S9 --- server guidance with history, restore, reset (one write path for the Discord interface and the
+# Hermes settings page). Every function takes ``expected_rev`` and the audit origin ``via``
+# ("discord" | "dashboard" | "cli"; ``None``: the context's origin from :func:`origin`).
+
+GUIDANCE_PATH = "prompts.guild"
+_SHA_PREFIX_MIN = 12
+
+
+def guidance_digest(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _leaf(node: dict[str, Any], path: str) -> tuple[dict[str, Any], str]:
+    *parents, leaf = path.split(".")
+    for part in parents:
+        node = node[part]
+    return node, leaf
+
+
+def _set_guidance_in(guild: dict[str, Any], text: str, *, by: str) -> Optional[tuple[str, str]]:
+    """Set the guidance text of ``guild`` in place and record the version; ``None`` when unchanged."""
+    from .schema import PROMPT_HISTORY
+
+    prompts = guild["prompts"]
+    old = prompts.get("guild") or ""
+    if text == old:
+        return None
+    history = list(prompts.get("history") or [])
+    if not history and old:
+        # The text from before the first recorded change (import, migration) stays restorable.
+        # Its author is unknown (``updated_by`` names whoever changed any setting last).
+        history.append({"sha256": guidance_digest(old), "by": "unknown", "at": str(guild.get("updated_at") or
+                                                                                  utc_now())[:40], "text": old})
+    history.append({"sha256": guidance_digest(text), "by": str(by)[:64], "at": utc_now(), "text": text})
+    prompts["guild"] = text
+    prompts["history"] = history[-PROMPT_HISTORY:]
+    return old, text
+
+
+def _guild_mutation(bot_id: str, guild_id: str, *, by: str, expected_rev: Optional[int], prompt_cap: int,
+                    fields: Optional[dict[str, Any]] = None, guidance: Any = None) -> Any:
+    """One mutation: settings by path (``fields``) and/or the guidance (``guidance(guild) -> text``)."""
+
+    def mutate(document: dict[str, Any]) -> list[dict[str, Any]]:
+        guild = _guilds(document, bot_id).get(guild_id)
+        if guild is None:
+            raise SchemaError(f"guild {guild_id} is not configured for bot {bot_id}")
+        candidate = copy.deepcopy(guild)
+        records = []
+        for path, value in (fields or {}).items():
+            node, leaf = _leaf(candidate, path)
+            records.append((path, node.get(leaf)))
+            node[leaf] = copy.deepcopy(value)
+        changed_text = None
+        if guidance is not None:
+            changed_text = _set_guidance_in(candidate, guidance(candidate), by=by)
+        clean, _ = validate_guild(candidate, strict=True, prompt_cap=prompt_cap)
+        out = []
+        for path, old in records:
+            node, leaf = _leaf(clean, path)
+            if node[leaf] != old:
+                out.append({"bot": bot_id, "guild": guild_id, "field": path, "old": old, "new": node[leaf],
+                            "expected_rev": expected_rev})
+        if changed_text is not None:
+            out.append({"bot": bot_id, "guild": guild_id, "field": GUIDANCE_PATH, "old": changed_text[0],
+                        "new": changed_text[1], "expected_rev": expected_rev})
+        _guilds(document, bot_id)[guild_id] = clean
+        return out
+
+    return mutate
+
+
+def set_guidance(store: PolicyStore, bot_id: str, guild_id: str, text: str, *, by: str, via: Optional[str] = None,
+                 expected_rev: Optional[int] = None, prompt_cap: int = HARD_PROMPT_LIMIT) -> Snapshot:
+    """Replace the server guidance; the new version joins ``prompts.history`` (ring of ``PROMPT_HISTORY``).
+
+    The same text again changes nothing (no new version, no new revision). ``prompt_cap`` is the operator's
+    ``guild_prompt_max_chars``; a longer text is refused, never shortened.
+    """
+    bot_id, guild_id = _require_ids(bot_id, guild_id)
+    if not isinstance(text, str):
+        raise SchemaError("prompts.guild: expected text")
+    mutate = _guild_mutation(bot_id, guild_id, by=by, expected_rev=expected_rev, prompt_cap=prompt_cap,
+                             guidance=lambda guild: text)
+    return store.update(mutate, by=by, via=via)
+
+
+def find_guidance_version(guild: dict[str, Any], sha256: str) -> dict[str, Any]:
+    """The history entry whose digest starts with ``sha256`` (at least 12 hex characters, unambiguous)."""
+    prefix = str(sha256 or "").lower()
+    if len(prefix) < _SHA_PREFIX_MIN or any(c not in "0123456789abcdef" for c in prefix):
+        raise SchemaError("prompts.history: name a version by at least 12 characters of its sha256")
+    matches = [e for e in (guild.get("prompts") or {}).get("history") or [] if str(e.get("sha256", "")).startswith(prefix)]
+    if not matches:
+        raise SchemaError("prompts.history: this version is no longer in the history")
+    if len({m["sha256"] for m in matches}) > 1:
+        raise SchemaError("prompts.history: the version id is ambiguous")
+    return matches[-1]
+
+
+def restore_guidance(store: PolicyStore, bot_id: str, guild_id: str, sha256: str, *, by: str,
+                     via: Optional[str] = None, expected_rev: Optional[int] = None,
+                     prompt_cap: int = HARD_PROMPT_LIMIT) -> Snapshot:
+    """Make an earlier version from ``prompts.history`` the current guidance (as a new version)."""
+    bot_id, guild_id = _require_ids(bot_id, guild_id)
+    mutate = _guild_mutation(bot_id, guild_id, by=by, expected_rev=expected_rev, prompt_cap=prompt_cap,
+                             guidance=lambda guild: find_guidance_version(guild, sha256)["text"])
+    return store.update(mutate, by=by, via=via)
+
+
+def reset_fields(store: PolicyStore, bot_id: str, guild_id: str, paths: Any, *, by: str, via: Optional[str] = None,
+                 expected_rev: Optional[int] = None, prompt_cap: int = HARD_PROMPT_LIMIT) -> Snapshot:
+    """Set settings back to their defaults (``schema.guild_defaults()``); resetting ``prompts.guild``
+    records an empty version, so the text stays restorable from the history."""
+    bot_id, guild_id = _require_ids(bot_id, guild_id)
+    paths = list(paths or [])
+    if not paths:
+        raise SchemaError("reset: no settings given")
+    known = set(field_paths())
+    defaults = guild_defaults()
+    fields: dict[str, Any] = {}
+    guidance = None
+    for path in paths:
+        if path not in known or path in _NOT_SETTINGS or path == "prompts.history":
+            raise SchemaError(f"{path}: not a setting that can be reset")
+        if path == GUIDANCE_PATH:
+            guidance = lambda guild: ""  # noqa: E731
+            continue
+        node, leaf = _leaf(defaults, path)
+        fields[path] = node[leaf]
+    mutate = _guild_mutation(bot_id, guild_id, by=by, expected_rev=expected_rev, prompt_cap=prompt_cap,
+                             fields=fields, guidance=guidance)
+    return store.update(mutate, by=by, via=via)

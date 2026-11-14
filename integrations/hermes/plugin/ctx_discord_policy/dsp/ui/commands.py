@@ -24,6 +24,7 @@ import asyncio
 import hashlib
 import importlib
 import inspect
+import io
 import json
 import logging
 import time
@@ -42,6 +43,7 @@ logger = logging.getLogger("ctx_discord_policy")
 COMMAND_NAME = "policy"
 COMMAND_DESCRIPTION = "Set up how the bot behaves in this server"
 REQUEST_WINDOW = 24 * 3600
+MEMBER_PROBE_ID = "1"          # a user id no Discord account has (snowflakes are far larger)
 MODERN_PARTS = ("Label", "FileUpload", "RadioGroup", "Checkbox")
 
 
@@ -108,6 +110,41 @@ def _downgrade(caps: Caps, mode: Optional[str]) -> Caps:
     return caps
 
 
+# ── Hermes data through dsp.hermes (optional functions; absent ⇒ unknown, which fails closed) ──────────
+
+
+def _default_skills_provider(ctx: Any) -> Optional[list]:
+    """Skills installed in every profile members' turns of this server run in (a skill must exist wherever
+    it is released), or None when Hermes can't tell us."""
+    lister = getattr(hermes, "installed_skills", None)
+    homes = ctx.binding.target_homes(ctx)
+    if not callable(lister) or not homes:
+        return None
+    common: Optional[set] = None
+    for home in sorted(homes):
+        try:
+            names = set(lister(home))
+        except Exception:
+            logger.warning("ctx_discord_policy: listing the skills of %s failed", home, exc_info=True)
+            return None
+        common = names if common is None else common & names
+    return sorted(common or ())
+
+
+def _default_spill_provider() -> Any:
+    reader = getattr(hermes, "spill_config", None)
+    if not callable(reader):
+        return None
+    try:
+        return reader()
+    except Exception:
+        return None
+
+
+async def _read_attachment(attachment: Any) -> bytes:
+    return await attachment.read()
+
+
 # ── activation requests (throttled, persisted next to the store) ─────────────────────────────────────
 
 
@@ -166,10 +203,20 @@ class UiBinding:
         data_dir = hermes.plugin_data_dir(self.owner_home)
         self.sync_path = data_dir / "command-sync.json"
         self.requests = ActivationRequests(data_dir / "activation-requests.json")
-        self.notifier: Any = None        # async (user_id, text) -> None; default: a direct message
+        self.notifier: Any = None        # async (user_id, text, file=None) -> None; default: a direct message
+        self.channel_sink: Any = None    # async (channel_id, text) -> None; default: post in the channel
+        # Hermes data the interface needs but may not import itself (DESIGN: Hermes only via dsp.hermes):
+        # skills_provider(ctx) -> iterable of skill names installed in the profile this server's turns run in,
+        # or None when unknown; spill_provider() -> Hermes' spill config (prompt budget), or None.
+        self.skills_provider: Any = _default_skills_provider
+        self.spill_provider: Any = _default_spill_provider
+        self.read_attachment: Any = _read_attachment
         self.sync_results: dict = {}
         self._sync_lock = asyncio.Lock()
         self._tasks: set = set()
+        from .notify import Notifier
+
+        self.notify = Notifier(self)
 
     @property
     def modern(self) -> bool:
@@ -182,6 +229,34 @@ class UiBinding:
     def prompt_cap(self) -> int:
         return int(config.setting(self.owner_home, "guild_prompt_max_chars"))
 
+    def target_homes(self, ctx: Any) -> Optional[set]:
+        """Homes of the profiles a member's message in this server runs in (A4), for every text channel the
+        client knows; only profiles where the policy is armed (elsewhere public admission stays closed).
+        ``None`` when none is known — callers then fail closed."""
+        from ..ingress import admission
+        from ..policy import hooks
+        from ..runtime import RUNTIME
+
+        guild = getattr(ctx.interaction, "guild", None)
+        channels = [str(c.id) for c in (getattr(guild, "text_channels", None) or [])]
+        if not channels:
+            channels = [str(getattr(ctx.interaction, "channel_id", None) or ctx.guild_id)]
+        homes: set = set()
+        for channel in channels:
+            try:
+                # A neutral author: what a member gets, never a route that matches the caller's own user id.
+                key = admission.target_home_key(self.adapter, None, guild_id=ctx.guild_id, channel_id=channel,
+                                                author_id=MEMBER_PROBE_ID, thread_id=None, parent_id=None)
+            except Exception:
+                logger.warning("ctx_discord_policy: resolving the target profile failed", exc_info=True)
+                return None
+            if key is None or not hooks.armed_live(key):
+                continue
+            instance = RUNTIME.armed.instance(key)
+            if instance is not None and getattr(instance, "home", ""):
+                homes.add(Path(instance.home))
+        return homes or None
+
     # ── interface entry points ──
 
     async def on_command(self, interaction: Any, page: str) -> None:
@@ -193,6 +268,11 @@ class UiBinding:
     async def on_modal(self, interaction: Any, modal: Any) -> None:
         await panels.handle_modal(self, interaction, modal)
 
+    async def on_upload(self, interaction: Any, attachment: Any) -> None:
+        from .pages import guidance
+
+        await guidance.upload_from_command(self, interaction, attachment)
+
     # ── the command ──
 
     def build_command(self) -> Any:
@@ -200,14 +280,19 @@ class UiBinding:
         app_commands = discord.app_commands
         binding = self
 
-        async def policy(interaction, page=None):  # noqa: ANN001 - annotations set below (no string eval)
-            await binding.on_command(interaction, page or "home")
+        async def policy(interaction, page=None, guidance_file=None):  # noqa: ANN001 - annotations set below
+            if guidance_file is not None:
+                await binding.on_upload(interaction, guidance_file)
+            else:
+                await binding.on_command(interaction, page or "home")
 
-        policy.__annotations__ = {"interaction": discord.Interaction, "page": Optional[str], "return": None}
+        policy.__annotations__ = {"interaction": discord.Interaction, "page": Optional[str],
+                                  "guidance_file": Optional[discord.Attachment], "return": None}
         choices = [app_commands.Choice(name="Overview", value="home"),
                    app_commands.Choice(name="Status", value="status")]
         choices += [app_commands.Choice(name=p.title, value=p.key) for p in panels.registered_panels()]
-        fn: Any = app_commands.describe(page="Open one page directly")(policy)
+        fn: Any = app_commands.describe(page="Open one page directly",
+                                        guidance_file="Replace this server's guidance with a .md or .txt file")(policy)
         fn = app_commands.choices(page=choices[:25])(fn)
         command = app_commands.Command(name=COMMAND_NAME, description=COMMAND_DESCRIPTION, callback=fn)
         command = app_commands.default_permissions(manage_guild=True)(command)
@@ -269,7 +354,16 @@ class UiBinding:
             write_json_atomic(self.sync_path, state)
 
     async def _on_ready(self) -> None:
+        await self.startup()
+
+    async def startup(self) -> None:
+        """After connecting: sync the command, report a worse protection status, send coalesced messages."""
         await self.sync_all()
+        try:
+            await self.notify.check_status()
+            await self.notify.flush_all_pending()
+        except Exception:
+            logger.warning("ctx_discord_policy: operator notifications at startup failed", exc_info=True)
 
     async def _on_guild_join(self, guild: Any) -> None:
         await self.sync_guild(guild.id, force=True)
@@ -292,13 +386,14 @@ class UiBinding:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 return  # no loop (CLI, tests): the next on_ready syncs
-            task = loop.create_task(self.sync_all(), name="ctx_discord_policy-command-sync")
+            task = loop.create_task(self.startup(), name="ctx_discord_policy-command-sync")
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
     def detach(self) -> None:
-        """Undo a partial :meth:`attach` (best effort): no binding, no command, no listeners."""
+        """Undo a partial :meth:`attach` (best effort): no binding, no command, no listeners, no timers."""
         items.unbind_client(self.client)
+        self.notify.cancel_timers()
         for name, listener in (("on_ready", self._on_ready), ("on_guild_join", self._on_guild_join),
                                ("on_guild_remove", self._on_guild_remove)):
             try:
@@ -325,9 +420,39 @@ class UiBinding:
                 f"activate it on the host instead: `hermes ctx-discord-policy bind {ctx.guild_id} --bot {self.bot_id}`.\n"
                 "(You get at most one request per server per day.)")
 
-    async def _send_dm(self, user_id: str, text: str) -> None:
+    async def _send_dm(self, user_id: str, text: str, file: Optional[tuple] = None) -> None:
         user = self.client.get_user(int(user_id)) or await self.client.fetch_user(int(user_id))
-        await user.send(text, allowed_mentions=self.discord.AllowedMentions.none())
+        kwargs: dict = {"allowed_mentions": self.discord.AllowedMentions.none()}
+        if file is not None:
+            kwargs["file"] = self.discord.File(io.BytesIO(file[1]), filename=file[0])
+        await user.send(text[:2000], **kwargs)
+
+    async def send_dm(self, user_id: str, text: str, *, file: Optional[tuple] = None) -> None:
+        if self.notifier is not None:
+            await self.notifier(user_id, text, file=file)
+        else:
+            await self._send_dm(user_id, text, file)
+
+    async def send_channel(self, channel_id: str, text: str) -> None:
+        if self.channel_sink is not None:
+            await self.channel_sink(channel_id, text)
+            return
+        channel = self.client.get_channel(int(channel_id)) or await self.client.fetch_channel(int(channel_id))
+        await channel.send(text[:2000], allowed_mentions=self.discord.AllowedMentions.none())
+
+    def changed(self, ctx: Any, setting: str, paths: list, before: Optional[dict], after: Optional[dict]) -> None:
+        """After every saved change: one line in the audit channel, a diff to the operators for guidance."""
+        from .panels import describe_change
+
+        guild = after or before
+        self.notify.audit(guild, describe_change(ctx, setting, paths, before, after))
+        if after is None:
+            self.notify.forget_guild(ctx.guild_id)            # settings deleted: drop the held guidance copy
+        if "prompts.guild" in paths:
+            old = ((before or {}).get("prompts") or {}).get("guild") or ""
+            new = ((after or {}).get("prompts") or {}).get("guild") or ""
+            if old != new:
+                self.notify.guidance_changed(ctx, old, new)
 
     async def request_activation(self, ctx: Any) -> None:
         await ctx.interaction.response.defer(ephemeral=True, thinking=True)
@@ -351,11 +476,10 @@ class UiBinding:
                           f"server per day; you can ask again <t:{int(last + self.requests.window)}:R>.")
             return
         text = self.request_text(ctx)
-        send = self.notifier or self._send_dm
         delivered = 0
         for operator in operators:
             try:
-                await send(operator, text)
+                await self.send_dm(operator, text)
                 delivered += 1
             except Exception as exc:  # closed DMs, unknown user, outage
                 logger.warning("ctx_discord_policy: activation request to an operator failed: %s", exc)

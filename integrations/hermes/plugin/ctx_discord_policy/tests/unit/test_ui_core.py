@@ -187,7 +187,8 @@ def test_ui_package_imports_without_discord(anchor, monkeypatch):
     for name in ("ui.perms", "ui.items", "ui.modals", "ui.panels", "ui.pages", "ui.commands"):
         assert anchor.mod(name)
     panels = anchor.mod("ui.panels")
-    assert [p.key for p in panels.registered_panels()] == ["progress"]
+    assert [p.key for p in panels.registered_panels()] == ["identity", "channels", "guidance", "progress",
+                                                           "worklog", "lanes", "operator_lane", "managers"]
     assert {"prog_edit", "prog_set"} <= set(panels.ACTIONS) and "m_progress" in panels.MODAL_ACTIONS
     for act in panels.ACTIONS.values():          # every action names a known setting (or derives one)
         assert callable(act.setting) or act.setting in anchor.mod("ui.perms").SETTINGS
