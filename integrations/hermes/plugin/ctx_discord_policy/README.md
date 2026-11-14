@@ -176,10 +176,10 @@ so, members get no answer until the model works again.
 - **Fail closed.** If the policy file is damaged, members get no answer in any server of the bot until it is
   repaired; the status says so and you get a direct message. If a safety check cannot be made, members get no
   turn. A tool call the plugin cannot tie to its message is refused.
-- **Hermes' own allowlist never hands out tools here.** Whom Hermes itself lets in (allowed users, a Discord
-  role, allowed channels, pairing) gets a member's turn in a server where the plugin is active, and no turn
-  where it is paused. Hermes' native slash commands of anyone but you get no turn in those servers either.
-  Servers you never activated keep Hermes' own behaviour.
+- **Hermes' own allowlist never hands out tools here.** Anyone but you whom Hermes itself lets in (allowed
+  users, a Discord role, allowed channels, pairing) gets a member's turn in a server where the plugin is
+  active, and no turn where it is paused. The same holds for their Hermes slash commands and for a turn of
+  theirs that Hermes resumes after a restart. Servers you never activated keep Hermes' own behaviour.
 - **Commands are yours.** A command a member types in a message (`/<skill>`, `/queue`, any other Hermes
   command) never reaches Hermes, also not while that member's conversation is still busy with a turn.
 - **Guidance and linked content are data.** A server's guidance text and the content of linked messages are
