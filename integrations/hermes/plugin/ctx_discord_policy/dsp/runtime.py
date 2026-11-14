@@ -19,6 +19,7 @@ from typing import Any, Generic, Hashable, Optional, TypeVar
 
 from . import RUNTIME_API, __version__
 from .adapt.status import StatusRegister
+from .bots import BotRegistry
 
 ANCHOR_NAME = "ctx_discord_policy"
 ROUTE_CAP = 4096
@@ -137,6 +138,13 @@ class Runtime:
         self.public_sessions: BoundedMap[str, float] = BoundedMap()
         # PluginContext used for config reads (``ctx.get_config`` under the bot owner's home).
         self.config_ctx: Any = None
+        # Discord bots bound through the platform-handler factory (adapter -> application id -> owner home).
+        self.bots = BotRegistry()
+        # Message ids whose admission widened the allowlist: never handed on unrouted afterwards.
+        self.widened: BoundedMap[str, float] = BoundedMap()
+        # Hermes session key -> (lane, session user) of the routes that used it: a session never mixes the
+        # operator lane with another author's public lane.
+        self.session_lanes: BoundedMap[str, tuple[str, str]] = BoundedMap()
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -147,6 +155,7 @@ class Runtime:
             "armed": self.armed.snapshot(),
             "instances": {k: {"profile": v.profile, "plugin_dir": v.plugin_dir}
                           for k, v in self.instances.items()},
+            "bots": self.bots.snapshot(),
             **self.status.snapshot(),
         }
 

@@ -62,3 +62,41 @@ def hermes(tmp_path_factory) -> HermesCheckout:
     out = Path(os.environ.get("CONTRACT_OUT", "").strip() or REPO / "contract-out")
     sha = os.environ.get("HERMES_SHA", "").strip() or "unknown"
     return HermesCheckout(src, ref, out, sha)
+
+
+# Hermes classes the plugin wraps (class attributes, process-wide). Tests in this directory share one
+# process: a wrapper installed by one test's (later evicted) runtime must not leak into the next test.
+_WRAPPED_TARGETS = (
+    ("gateway.run", "GatewayRunner", ("_handle_message", "_is_user_authorized")),
+    ("plugins.platforms.discord.adapter", "DiscordAdapter",
+     ("_discord_message_admission", "_handle_message", "delete_message")),
+    ("gateway.run_turn_runner", "TurnRunner", ("_progress_absorb", "_progress_edit_state")),
+)
+
+
+def _strip_plugin_wrappers() -> None:
+    for module_name, class_name, names in _WRAPPED_TARGETS:
+        cls = getattr(sys.modules.get(module_name), class_name, None)
+        if cls is None:
+            continue
+        for name in names:
+            current = cls.__dict__.get(name)
+            if current is None or getattr(current, "__dsp_wrapper__", None) is None:
+                continue
+            original = current
+            while getattr(original, "__dsp_wrapper__", None) is not None:
+                original = getattr(original, "__wrapped__", None)
+            inherited = next((base.__dict__[name] for base in cls.__mro__[1:] if name in base.__dict__), None)
+            if original is None or original is inherited:
+                delattr(cls, name)
+            else:
+                setattr(cls, name, original)
+
+
+@pytest.fixture(autouse=True)
+def _pristine_hermes_classes():
+    if HERMES_SRC:
+        _strip_plugin_wrappers()
+    yield
+    if HERMES_SRC:
+        _strip_plugin_wrappers()

@@ -13,6 +13,7 @@ from typing import Any
 
 from . import cli, config, hermes
 from .adapt.status import SECURITY, Outcome, Result, compare_with_previous, write_json_atomic
+from .adapt import interventions
 from .adapt.strategies import run_intervention
 from .policy import hooks
 from .runtime import RUNTIME, Instance
@@ -106,6 +107,14 @@ def register(ctx: Any, *, plugin_dir: Path) -> bool:
     on_unload = getattr(ctx, "on_unload", None)
     if callable(on_unload):
         on_unload(_disarm)
+    # A3: the official way to the Discord adapter; binds the bot when it connects in this profile.
+    register_handler = getattr(ctx, "register_platform_handler", None)
+    if callable(register_handler):
+        register_handler("discord", interventions.discord_platform_handler)
+    else:
+        RUNTIME.status.record(Result("A3", SECURITY, Outcome.OFF, "ctx.register_platform_handler missing",
+                                     "PluginContext"))
+    interventions.install_runner()  # only if gateway.run is already imported; never imports it
     # The status file is written where a Discord bot binds (gateway process), never from register():
     # every ``hermes`` CLI invocation also loads plugins and must not overwrite the gateway's status.
     logger.info("ctx_discord_policy %s armed in profile %s", RUNTIME.version, profile)

@@ -270,3 +270,13 @@ def test_import_never_takes_bookkeeping_from_the_file(store_mod):
     exported["bound_by"] = "900000000000000077"
     snap = store_mod.ops.import_guild(store_mod.store, BOT, GUILD, exported, by="cli", prompt_cap=6000)
     assert snap.guild(BOT, GUILD)["bound_by"] == "cli"
+
+
+def test_corrupt_file_never_falls_back_to_a_cached_good_snapshot(store_mod):
+    """An old, cached good snapshot must not survive the file turning corrupt (closed, not stale)."""
+    store_mod.ops.bind(store_mod.store, BOT, GUILD, by="cli")
+    os.utime(store_mod.path, ns=(1_000_000_000, 1_000_000_000))  # old enough to be cached
+    assert store_mod.store.read() is store_mod.store.read()
+    assert store_mod.store.read().guild_state(BOT, GUILD) == "active"
+    store_mod.path.write_text("{ broken")
+    assert store_mod.store.read().guild_state(BOT, GUILD) == "paused"

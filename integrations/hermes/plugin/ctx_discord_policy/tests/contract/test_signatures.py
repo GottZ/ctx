@@ -78,9 +78,13 @@ def test_print_signatures(hermes, capsys):
             row.update(present=False, error=f"{type(exc).__name__}: {exc}")
         rows.append(row)
     adapter = _resolve("plugins.platforms.discord.adapter", "DiscordAdapter")
+    base = _resolve("gateway.platforms.base", "BasePlatformAdapter")
+    owner = next((cls for cls in adapter.__mro__ if "delete_message" in cls.__dict__), None)
     rows.append({
-        "id": "K1", "class": "K", "target": "DiscordAdapter.__dict__['delete_message']",
-        "present": "delete_message" in adapter.__dict__,
+        # Native delete support may come from the class itself or a mixin (upstream main: media mixin).
+        "id": "K1", "class": "K", "target": "DiscordAdapter.delete_message is not the base no-op",
+        "present": adapter.delete_message is not base.delete_message,
+        "kind": f"defined in {getattr(owner, '__module__', '?')}.{getattr(owner, '__qualname__', '?')}",
     })
     report = hermes.write_report("signatures", {"ref": hermes.ref, "targets": rows})
     with capsys.disabled():
