@@ -215,3 +215,55 @@ def export(snapshot: Snapshot, bot_id: Optional[str] = None, guild_id: Optional[
         selected = {b: {"guilds": {g: c for g, c in v["guilds"].items() if g == str(guild_id)}}
                     for b, v in selected.items()}
     return {"schema": snapshot.data.get("schema"), "bots": copy.deepcopy(selected)}
+
+
+# --- SP --- settings page (shared write path): audit origin and a revision-checked import ----------------
+
+import contextlib  # noqa: E402 - imports of this block stay in it (other blocks are appended independently)
+from typing import Iterator  # noqa: E402
+
+from .file import AUDIT_VIA, check_via  # noqa: E402
+
+
+@contextlib.contextmanager
+def origin(via: str) -> Iterator[None]:
+    """Record ``via`` (``cli`` | ``discord`` | ``dashboard``) on the audit entries of every write in this
+    block (context-local, so concurrent requests and interactions never see each other's origin)."""
+    token = AUDIT_VIA.set(check_via(via))
+    try:
+        yield
+    finally:
+        AUDIT_VIA.reset(token)
+
+
+def import_guild_checked(store: PolicyStore, bot_id: str, guild_id: str, payload: Any, *, by: str,
+                         prompt_cap: int, expected_rev: Optional[int] = None, via: Optional[str] = None) -> Snapshot:
+    """:func:`import_guild` with an optimistic ``rev`` check: an import never silently replaces settings
+    that changed after the importer looked at them. Like :func:`import_guild` it may change ``state``."""
+    bot_id, guild_id = _require_ids(bot_id, guild_id)
+    if not isinstance(payload, dict):
+        raise SchemaError("import: expected a guild mapping")
+    incoming = {k: v for k, v in payload.items()
+                if k not in ("rev", "updated_by", "updated_at", "bound_by", "bound_at")}
+    clean, _ = validate_guild(incoming, strict=True, prompt_cap=prompt_cap)
+
+    def mutate(document: dict[str, Any]) -> list[dict[str, Any]]:
+        guilds = _guilds(document, bot_id)
+        old = guilds.get(guild_id)
+        new = copy.deepcopy(clean)
+        new["rev"] = (old or {}).get("rev", 0)
+        new["bound_by"] = (old or {}).get("bound_by")
+        new["bound_at"] = (old or {}).get("bound_at")
+        changes = []
+        for section in new:
+            if section in ("rev", "updated_by", "updated_at"):
+                continue
+            before = (old or guild_defaults()).get(section)
+            if before != new[section]:
+                changes.append({"bot": bot_id, "guild": guild_id, "field": section, "old": before,
+                                "new": new[section], "expected_rev": expected_rev})
+        guilds[guild_id] = new
+        return changes or [{"bot": bot_id, "guild": guild_id, "field": "import", "old": None, "new": None,
+                            "expected_rev": expected_rev}]
+
+    return store.update(mutate, by=by, via=via)

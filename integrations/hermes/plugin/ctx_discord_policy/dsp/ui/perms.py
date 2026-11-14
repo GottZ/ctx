@@ -233,3 +233,32 @@ def visible(actor: Actor) -> list:
 def owners_of(path: str) -> list:
     """Settings that write ``path`` (exactly one for every non-bookkeeping schema field)."""
     return [s.key for s in TABLE if path in s.fields]
+
+
+# --- SP --- settings page: the host role (SETTINGS-PAGE §2.2, F7) -----------------------------------------
+#
+# **host** — the Hermes settings page. Every credential that reaches its routes already opens the whole Hermes
+# configuration (``PUT /api/config``), the operator list included, so the page acts with host authority: it
+# may use every setting of :data:`TABLE` — the ``operators`` row too, which no Discord role may — and still
+# writes only the schema paths of the setting it names (:func:`check_write`). The role is a rule over the
+# table rather than a column in it, so settings appended later are covered without editing their rows.
+#
+# Discord never reaches it: :func:`resolve` / :func:`from_interaction` return only :data:`ROLES`, and the
+# only place that builds a host actor is the settings page's request guard (``dsp/web/guard.py``).
+
+HOST = "host"
+
+_may_by_table = may
+_visible_by_table = visible
+
+
+def may(actor: Actor, key: str) -> bool:  # noqa: F811 - extends the table lookup above by the host role
+    if actor.role == HOST:
+        return key in SETTINGS
+    return _may_by_table(actor, key)
+
+
+def visible(actor: Actor) -> list:  # noqa: F811
+    if actor.role == HOST:
+        return [s.key for s in TABLE]
+    return _visible_by_table(actor)

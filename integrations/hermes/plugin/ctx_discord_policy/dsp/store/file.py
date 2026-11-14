@@ -24,6 +24,7 @@ import os
 import shutil
 import threading
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +47,18 @@ class StoreError(RuntimeError):
 
 class ConflictError(StoreError):
     """The guild changed since the caller read it (optimistic ``rev`` check)."""
+
+
+# Where a write came from, recorded as ``via`` on its audit entries next to ``by`` (who). An explicit
+# ``update(..., via=)`` wins; otherwise the context-local origin set with ``ops.origin(...)`` applies.
+VIA_ORIGINS = ("cli", "discord", "dashboard")
+AUDIT_VIA: ContextVar[Optional[str]] = ContextVar("ctx_discord_policy_audit_via", default=None)
+
+
+def check_via(via: Optional[str]) -> Optional[str]:
+    if via is not None and via not in VIA_ORIGINS:
+        raise ValueError(f"via: {via!r} is not one of {', '.join(VIA_ORIGINS)}")
+    return via
 
 
 def utc_now() -> str:
@@ -257,13 +270,16 @@ class PolicyStore:
 
     # ── writing ───────────────────────────────────────────────────────────────────────────────────
 
-    def update(self, mutate: Callable[[dict[str, Any]], list[dict[str, Any]]], *, by: str) -> Snapshot:
+    def update(self, mutate: Callable[[dict[str, Any]], list[dict[str, Any]]], *, by: str,
+               via: Optional[str] = None) -> Snapshot:
         """Apply ``mutate(document)`` under the lock.
 
         ``mutate`` edits the document in place and returns change records
         ``{"bot", "guild", "field", "old", "new", "expected_rev"?}``; each touched guild gets ``rev`` + 1,
-        ``updated_by``/``updated_at`` and one audit entry per field (hashes only, never values).
+        ``updated_by``/``updated_at`` and one audit entry per field (hashes only, never values). ``via``
+        (else the context's :data:`AUDIT_VIA`) names the interface the write came from.
         """
+        via = check_via(via if via is not None else AUDIT_VIA.get())
         with _file_lock(self.lock_path):
             current = self._load(self._signature())
             if not current.writable:
@@ -279,10 +295,13 @@ class PolicyStore:
                 if expected is not None and expected != base_rev:
                     raise ConflictError(f"guild {key[1]} changed (rev {base_rev}, you had {expected}); reload")
                 touched.setdefault(key, base_rev)
-                document["audit"].append({
+                entry = {
                     "at": now, "bot": key[0], "guild": key[1], "by": by, "field": change["field"],
                     "old_sha256": value_digest(change.get("old")), "new_sha256": value_digest(change.get("new")),
-                })
+                }
+                if via is not None:
+                    entry["via"] = via
+                document["audit"].append(entry)
             for (bot_id, guild_id), base_rev in touched.items():
                 guild = document["bots"].get(bot_id, {}).get("guilds", {}).get(guild_id)
                 if guild is None:
