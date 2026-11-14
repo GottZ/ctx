@@ -142,16 +142,17 @@ go -C go build -o ctx ./cmd/ctx && install -m 0755 go/ctx /usr/local/bin/ctx
 
 **The server.** Everything below runs in the root folder of a clone (`git clone https://github.com/GottZ/ctx &&
 cd ctx`, or the clone from the build above). First the `.env` file. It will hold secrets, so it is created
-readable by you only, and a `.env` you already have is kept and gets the same rights. The last line adds your
-first key, which ctx makes at its first start:
+readable by you only, and a `.env` you already have is kept and gets the same rights. Only then does the second
+command add your first key, which ctx makes at its first start:
 
 ```bash
 [ -e .env ] || (umask 077 && cp .env.example .env)
-chmod 600 .env
-grep -q '^CTX_BOOTSTRAP_ADMIN_KEY=' .env || { k=$(openssl rand -hex 32) && printf '\nCTX_BOOTSTRAP_ADMIN_KEY=%s\n' "$k" >> .env; }
+chmod 600 .env && { grep -q '^CTX_BOOTSTRAP_ADMIN_KEY=' .env \
+  || { k=$(openssl rand -hex 32) && printf '\nCTX_BOOTSTRAP_ADMIN_KEY=%s\n' "$k" >> .env; }; }
 ```
 
-Then set the passwords and `CTX_SECRETS_KEY` in `.env`, each a value from `openssl rand -hex 32`, and start
+If a command fails, stop there; `chmod` fails, for example, when `.env` belongs to another user. Put no secret
+into `.env` until `ls -l .env` shows `-rw-------` and you as its owner. Then set the passwords and `CTX_SECRETS_KEY` in `.env`, each a value from `openssl rand -hex 32`, and start
 ctx. Compose builds ctxd and the database image and starts both:
 
 ```bash
