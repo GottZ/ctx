@@ -72,15 +72,17 @@
 -- uq_source_chunk (an insert still open when (b) reaches the row makes (b)
 -- wait for it and then meet it the same way). The fresh row is the slot's
 -- current version, so (b) archives the moved row instead — per row, in a
--- subtransaction, so the boot never fails on a concurrent ingest. (a) cannot
+-- subtransaction, so a committed concurrent ingest never fails the boot. (a) cannot
 -- meet one: it only takes rows out of the live set. Not done instead: LOCK
 -- TABLE context_blocks IN SHARE ROW EXCLUSIVE MODE, which conflicts with every
 -- writer of every other process for the whole migration and, under the 3 s
 -- lock_timeout, fails the boot whenever any writer transaction (a guard batch
 -- of 100 blocks, a backfill around its embed call) holds its lock longer.
 -- The lock_timeout itself stays the house rule: a moved row that another
--- transaction holds locked for more than 3 s fails the boot, which the next
--- start retries.
+-- transaction holds locked for more than 3 s fails the boot, and so does an
+-- ingest into a moved row's slot that stays uncommitted for more than 3 s
+-- after (b) reaches the row — the wait on uq_source_chunk is a lock wait and
+-- ends with lock_not_available, not unique_violation. The next start retries.
 --
 -- Idempotent: after one pass the only moved rows left are those in slots
 -- with a row outside the source's scope, and those are skipped again. The
