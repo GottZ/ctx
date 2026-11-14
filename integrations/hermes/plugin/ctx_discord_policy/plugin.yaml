@@ -1,0 +1,51 @@
+manifest_version: 2
+name: ctx_discord_policy
+version: 3.0.0
+description: "Let your Hermes bot talk in your Discord servers while its tools stay yours: members can call the bot by name, mention it, reply to it or wake it with a reaction, and chat with it in channels you open for that, but only the operators you list in the Hermes configuration get tool calls, and no role, server admin or text in Discord can change that. Each server is set up from inside Discord with /policy: the channels where the bot joins in or keeps quiet, its name and reply language, a guidance text for the server, the Hermes profile and models it runs on, the progress display, and a thread where your own tool work goes. Every place where the plugin hooks into Hermes is checked at start; protection fails closed (members get no access) and comfort features fall back to Hermes' own behaviour, shown in /policy and in hermes ctx-discord-policy status. Needs the Discord platform and plugins running in the gateway process (not plugins.isolation: host). Works without ctx."
+author: Jan-Stefan Janetzky
+license: MPL-2.0
+homepage: https://github.com/GottZ/ctx
+requires_hermes: ">=0.22.4"          # oldest ref the contract tests are green against
+platforms: [linux, macos, windows]
+tags: [discord, policy, security, moderation]
+provides_hooks: [pre_llm_call, pre_tool_call, on_session_end, on_session_reset, on_session_finalize]
+# Plugin settings (plugins.entries.ctx_discord_policy.settings.<key>) of the profile that runs the bot. Hermes Desktop
+# renders this as the form under Settings -> Plugins -> ctx_discord_policy; the plugin's own pages hang under the
+# same entry.
+config_schema:
+  operators:
+    type: list
+    default: []
+    label: Discord users who may use the bot's tools (operators)
+    description: "Discord user IDs, e.g. [\"123456789012345678\"]. Only their turns get tools, and only they can activate a server from Discord. Nothing in Discord can add an operator: no role, no server admin, no guidance text. Read again for every message, so a change applies without a restart. Empty = nobody gets tools and no server can be activated from Discord."
+  frame_prompt:
+    type: str
+    default: ""
+    label: Your text before every server's guidance (operator frame)
+    description: "Placed first in the context the plugin adds to each Discord turn, before what the plugin allows in that turn and before the server's own guidance. Empty = a built-in neutral frame."
+  operator_label:
+    type: str
+    default: "the operator"
+    label: How the bot refers to you
+    description: "The value of the placeholder {operator_label}, which a server's guidance text and the prompt templates can use."
+  guild_prompt_max_chars:
+    type: int
+    default: 6000
+    label: Longest guidance text of a server (characters)
+    description: "A longer guidance text is refused when it is saved. From 0 to 20000; a larger value counts as 20000."
+  notify_operators:
+    type: bool
+    default: true
+    label: Send operators direct messages
+    description: "true = operators get a Discord direct message when a server asks for activation, when a server's guidance changes (with the difference attached) and when the protection status gets worse; false = no direct messages."
+  locked_profiles:
+    type: list
+    default: []
+    label: Hermes profiles that server members never reach
+    description: "Profile names. A locked profile is never offered in /policy and never runs a turn for a member of a server, whatever routes there. Read from the default profile; if the list cannot be read, every profile counts as locked."
+  member_search:
+    type: str
+    default: auto
+    choices: [auto, "off"]
+    label: Find server members by name on the settings page
+    description: "auto = when you add an operator on the settings page, it suggests members of the server by name (2 to 32 typed characters, at most 25 results; only the ID you pick is saved); off = user IDs only, no name lookups."

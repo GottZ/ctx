@@ -1,0 +1,191 @@
+# ctx_discord_policy (hermes-agent plugin) — its own suites.
+#
+# The plugin under integrations/hermes/plugin/ctx_discord_policy is Python plus a settings page for Hermes
+# Desktop; none of the Go/web jobs of ci.yml touch it. This workflow runs only when the plugin (or this file)
+# changes:
+#   - unit, replay and docs tests on Python 3.11 and 3.14 (a missing discord.py fails the job instead of
+#     skipping the replay tests);
+#   - the private-value scan: the plugin directory, every earlier version of a file in it and the messages of
+#     the commits that touch it (not the rest of the repository), plus the pull request's title and body. It
+#     needs the repository secret DSP_PRIVATE_SCAN_KEY; without it (forks) the job fails closed;
+#   - contract tests against real Hermes source: the oldest supported release, the latest release and
+#     upstream main (main is reported, it does not block);
+#   - the settings page: the committed desktop/plugin.js is what tools/assemble_ui.py builds from ui/, and
+#     the component tests (jsdom, React) pass. Node is a test dependency only; users install no Node.
+# The daily run against upstream is hermes-ctx-discord-policy-upstream.yml.
+#
+# Not a required check (the ruleset is unchanged); a red run here is information for the PR.
+
+name: ctx_discord_policy plugin
+
+on:
+  push:
+    branches: [root]
+    paths:
+      - "integrations/hermes/plugin/ctx_discord_policy/**"
+      - ".github/workflows/hermes-ctx-discord-policy.yml"
+  pull_request:
+    branches: [root]
+    paths:
+      - "integrations/hermes/plugin/ctx_discord_policy/**"
+      - ".github/workflows/hermes-ctx-discord-policy.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  # Pull requests share a group per ref (superseded runs are cancelled); every push to root gets its own
+  # group (keyed by commit), so no push run is ever cancelled or dropped from the queue.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+    working-directory: integrations/hermes/plugin/ctx_discord_policy
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  unit:
+    name: ctx_discord_policy · unit py${{ matrix.python }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install test dependencies
+        run: python -m pip install pytest==9.1.1 pytest-asyncio==1.4.0 PyYAML==6.0.3 discord.py==2.7.1
+
+      # Contract tests skip themselves here (no HERMES_SRC); they run in the contract job. Temporary files
+      # stay outside the work tree (a test copies the plugin directory).
+      - name: Unit, replay and docs tests
+        env:
+          DSP_REQUIRE_DISCORD: "1"
+        run: python -m pytest -q -rfEs --basetemp="$RUNNER_TEMP/pytest-unit"
+
+  scan:
+    name: ctx_discord_policy · private-value scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.14"
+
+      # Keyed digests: without the secret the scanner exits 2 (never a silent pass).
+      - name: Private-value scan (keyed patterns)
+        env:
+          DSP_PRIVATE_SCAN_KEY: ${{ secrets.DSP_PRIVATE_SCAN_KEY }}
+          PR_TEXT: "${{ github.event.pull_request.title }}\n${{ github.event.pull_request.body }}"
+        run: python ci/private_scan.py --text-env PR_TEXT
+
+  contract:
+    name: ctx_discord_policy · contract hermes@${{ matrix.ref }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    # Upstream main moves under us: its result is reported but does not block landing a change.
+    continue-on-error: ${{ matrix.ref == 'main' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [v0.22.4, v0.23.0, main]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out Hermes at ${{ matrix.ref }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ matrix.ref }}
+          path: hermes-agent
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: "0.13.5"
+
+      - name: Hermes environment (locked dependencies + discord extra)
+        working-directory: hermes-agent
+        run: |
+          uv sync --frozen --no-install-project --extra discord
+          uv pip install --python .venv/bin/python pytest==9.1.1 pytest-asyncio==1.4.0
+          echo "HERMES_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Contract tests
+        env:
+          HERMES_SRC: ${{ github.workspace }}/hermes-agent
+          HERMES_REF: ${{ matrix.ref }}
+          CONTRACT_OUT: ${{ github.workspace }}/contract-out
+          DSP_CONTRACT_REQUIRED: "1"
+        run: |
+          echo "Hermes ${HERMES_REF} @ ${HERMES_SHA}"
+          "$HERMES_SRC/.venv/bin/python" -m pytest -q -rfEs tests/contract --basetemp="$RUNNER_TEMP/pytest-contract"
+
+      - name: Upload contract reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: ctx_discord_policy-contract-${{ matrix.ref }}
+          path: contract-out/
+          retention-days: 14
+          if-no-files-found: warn
+
+  browser:
+    # A failing comparison in these tests must never format a rendered DOM node (tests/browser/harness.mjs
+    # explains why and guards it). That growth is not bounded by the V8 heap cap; the step and job timeouts
+    # are what end a runaway here.
+    name: ctx_discord_policy · settings page bundle and component tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.14"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Bundle is generated from ui/ (tools/assemble_ui.py)
+        run: python tools/assemble_ui.py --check
+
+      - name: Test dependencies (locked, no install scripts)
+        run: npm ci --prefix tests/browser --ignore-scripts --no-audit --no-fund
+
+      - name: Component tests (jsdom)
+        timeout-minutes: 5
+        env:
+          NODE_OPTIONS: --max-old-space-size=2048
+        run: node --test --test-concurrency=1 --test-timeout=60000 'tests/browser/*.test.mjs'

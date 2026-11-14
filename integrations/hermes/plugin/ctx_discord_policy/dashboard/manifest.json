@@ -1,0 +1,7 @@
+{
+  "name": "ctx_discord_policy",
+  "label": "ctx_discord_policy",
+  "description": "Backend of the plugin's settings page in Hermes Desktop (Settings → Plugins).",
+  "api": "plugin_api.py",
+  "tab": {"path": "/ctx_discord_policy", "hidden": true}
+}

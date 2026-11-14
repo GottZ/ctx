@@ -1,0 +1,23 @@
+[project]
+name = "ctx_discord_policy"
+version = "3.0.0"
+description = "Per-server Discord policy plugin for Hermes"
+requires-python = ">=3.11"
+license = "MPL-2.0"
+authors = [{ name = "Jan-Stefan Janetzky" }]
+# Runtime: nothing beyond what Hermes itself ships (discord.py comes with the Hermes discord platform).
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "PyYAML==6.0.3", "discord.py==2.7.1"]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "tests"]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib -p no:cacheprovider"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "contract: runs against a Hermes source checkout (HERMES_SRC); skipped without it",
+    "replay: replays Discord interactions through discord.py; skipped without discord.py",
+]
