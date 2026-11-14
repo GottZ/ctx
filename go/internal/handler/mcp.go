@@ -46,13 +46,30 @@ type MCPConfig struct {
 // extracting X-Context-Key (or Authorization: Bearer) from the request.
 //
 // The SDK handler is wrapped in the /mcp keepalive (mcp_keepalive.go), which
-// only the query tool arms: every other request passes through unchanged.
+// only the query tool arms: every other request passes through unchanged. The
+// outer wrapper hands the request context to the query tool, which ends its
+// delegation with it (mcp_cancel.go).
 func NewMCPHandler(cfg MCPConfig) http.Handler {
-	return withMCPKeepalive(newMCPSDKHandler(cfg))
+	return withMCPRequestContext(withMCPKeepalive(newMCPSDKHandler(cfg)))
 }
 
 // newMCPSDKHandler is the bare MCP SDK handler, without the keepalive.
 func newMCPSDKHandler(cfg MCPConfig) http.Handler {
+	server := newMCPServer(cfg)
+	return mcp.NewStreamableHTTPHandler(
+		func(_ *http.Request) *mcp.Server { return server },
+		&mcp.StreamableHTTPOptions{
+			Stateless:    true, // No session state needed — each call is independent.
+			JSONResponse: true, // Prefer JSON over SSE for simple request/response tools.
+		},
+	)
+}
+
+// newMCPServer is the MCP server with every tool registered and the panic
+// guard (mcp_recover.go) around all of them. The guard is added LAST, so it
+// is the outermost receiving middleware: anything installed after it would
+// run outside the guard, on the same goroutine the SDK does not recover.
+func newMCPServer(cfg MCPConfig) *mcp.Server {
 	server := mcp.NewServer(
 		&mcp.Implementation{
 			Name:    "ctx",
@@ -62,16 +79,9 @@ func newMCPSDKHandler(cfg MCPConfig) http.Handler {
 			Instructions: "ctx is a persistent knowledge store with hybrid retrieval. Use 'query' for questions, 'store' to save knowledge, 'search' for lightweight lookups.",
 		},
 	)
-
 	registerTools(server, cfg)
-
-	return mcp.NewStreamableHTTPHandler(
-		func(_ *http.Request) *mcp.Server { return server },
-		&mcp.StreamableHTTPOptions{
-			Stateless:    true, // No session state needed — each call is independent.
-			JSONResponse: true, // Prefer JSON over SSE for simple request/response tools.
-		},
-	)
+	server.AddReceivingMiddleware(mcpRecover)
+	return server
 }
 
 // Tool definitions.
@@ -198,6 +208,12 @@ func (input searchInput) coreArgs(facetEnabled bool) searchArgs {
 
 type getInput struct {
 	ID string `json:"id" jsonschema:"block UUID"`
+	// IncludeArchived (#201) is the opt-in read of an archived block, so a
+	// citation by id stays checkable after the cited block was archived. Full
+	// id only, the key's own scopes only (never through a block or scope grant),
+	// and the answer carries archived: true. Absent ⇒ the call is answered
+	// exactly as before the field existed.
+	IncludeArchived bool `json:"include_archived,omitempty" jsonschema:"also read an archived block: full block id only, within this key's own scopes (never through a grant); the answer then carries archived: true"`
 }
 
 type recentInput struct {
@@ -255,12 +271,19 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 		Description: "Update fields of an existing block (category, title, content, tags, metadata). Resolves the id within this key's writable scopes.",
 	}, mcpUpdateHandler(cfg))
 
+	// archive (#201): manage-delete parity — archives one block the key may
+	// write. Stages for confirm_writes keys (op 'archive', drift-pinned).
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "archive",
+		Description: "Archive a block: it leaves query, search, recent and get, and stays readable by full id with get include_archived. Resolves the id within this key's writable scopes. There is no unarchive tool.",
+	}, mcpArchiveHandler(cfg))
+
 	// confirm (F6-C6 D-W5/W6a): executes a staged write by payload hash. Only
 	// meaningful for confirm_writes keys — for everyone else every hash is a
 	// generic miss (the store/update tools never stage for them).
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "confirm",
-		Description: "Execute a staged write. A key with the confirm_writes capability gets store/update calls STAGED (response carries a payload_hash); calling confirm with that hash executes the exact server-held write.",
+		Description: "Execute a staged write. A key with the confirm_writes capability gets store/update/archive calls STAGED (response carries a payload_hash); calling confirm with that hash executes the exact server-held write.",
 	}, mcpConfirmHandler(cfg))
 
 	// W12: issue-content write tools (issue_create/issue_comment/issue_state,
@@ -517,6 +540,11 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
 		if input.Question == "" {
 			return errResult("question is required"), nil, nil
 		}
+		// A client that disconnects ends the call, and with it the delegated
+		// pipeline below (mcp_cancel.go): no backend call and no quota for an
+		// answer nobody receives.
+		ctx, release := mcpRequestBoundContext(ctx)
+		defer release()
 		// From here on the call can run for minutes (backfill, embedding,
 		// rerank, synthesis) while the SDK holds the whole answer back. Keep
 		// the /mcp response alive until this handler returns; stop runs
@@ -831,6 +859,9 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 		if ar == nil { // T07/L7 fail-closed (design/01 §5.4): never fall back to the default tenant
 			return errResult("unauthorized: no resolved tenant identity"), nil, nil
 		}
+		if archivedReadRefused(input.ID, input.IncludeArchived) {
+			return errResult(archivedReadNeedsFullIDMsg), nil, nil
+		}
 		scopes := ar.ReadScopes
 
 		grants, err := resolveGrants(ctx, cfg.Pool, ar)
@@ -853,9 +884,15 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 			return errResult("block not found"), nil, nil
 		}
 
-		block, err := store.GetBlock(ctx, cfg.Pool, cfg.mcpTypeSnapshot(ctx), resolvedID, scopes, grants)
+		block, err := readBlockForGet(ctx, cfg.Pool, cfg.mcpTypeSnapshot(ctx), ar, resolvedID, grants, input.IncludeArchived)
 		if err != nil {
 			return errResult(fmt.Sprintf("get failed: %v", err)), nil, nil
+		}
+		// #201: a full id passes ResolveBlockID unchecked, so an unknown, a
+		// foreign and an archived id all arrive here as nil — and answer what
+		// the prefix miss above answers, not a JSON null.
+		if block == nil {
+			return errResult("block not found"), nil, nil
 		}
 
 		data, _ := json.MarshalIndent(block, "", "  ")

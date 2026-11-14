@@ -21,7 +21,7 @@ import (
 )
 
 type confirmInput struct {
-	PayloadHash string `json:"payload_hash" jsonschema:"the payload_hash returned by a staged store or update call — confirming executes that exact server-held write"`
+	PayloadHash string `json:"payload_hash" jsonschema:"the payload_hash returned by a staged store, update or archive call — confirming executes that exact server-held write"`
 }
 
 // confirmNotFoundMsg is the ONE generic miss answer (D1-M4): unknown hash,
@@ -177,8 +177,11 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 				}, nil, nil
 			}
 			verb := "stored"
-			if out.Op == "update" {
+			switch out.Op {
+			case "update":
 				verb = "updated"
+			case store.OpArchive:
+				verb = "archived"
 			}
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{textContent(fmt.Sprintf("Confirmed and %s: %s (id: %s, category: %s)", verb, out.Block.Title, out.Block.ID, out.Block.Category))},
@@ -192,23 +195,25 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 			// (structuredContent.code), same prose. The card survives.
 			return errResultReject(out.Reject), nil, nil
 		case confirmTOCTOUGone:
-			return errResult(confirmTOCTOUGoneMsg), nil, nil
+			return errResult(confirmTOCTOUGoneMsg(out.Op)), nil, nil
 		case confirmTOCTOUDrift:
-			return errResult(confirmTOCTOUDriftMsg(out.BlockID)), nil, nil
+			return errResult(confirmTOCTOUDriftMsg(out.Op, out.BlockID)), nil, nil
 		case confirmBlockRefGone:
 			return errResult(confirmBlockRefGoneMsg), nil, nil
 		case confirmUnreadable:
 			return errResult("confirm failed: staged payload unreadable"), nil, nil
 		case confirmExecErr:
-			if out.Op == "update" {
-				return errResult(fmt.Sprintf("confirmed update failed to execute: %v — the stage token is consumed; re-stage the update", out.Err)), nil, nil
+			if out.Op == "update" || out.Op == store.OpArchive {
+				noun := confirmBlockOpNoun(out.Op)
+				return errResult(fmt.Sprintf("confirmed %s failed to execute: %v — the stage token is consumed; re-stage the %s", noun, out.Err, noun)), nil, nil
 			}
 			return errResult(fmt.Sprintf("confirmed write failed to execute: %v — the stage token is consumed; re-stage the write", out.Err)), nil, nil
 		case confirmExecGone:
 			if out.Op == store.OpBlobLink {
 				return errResult("confirmed blob_link failed to execute: blob no longer accessible — the stage token is consumed; re-stage the link"), nil, nil
 			}
-			return errResult("confirmed update failed to execute: block no longer accessible — the stage token is consumed; re-stage the update"), nil, nil
+			noun := confirmBlockOpNoun(out.Op)
+			return errResult(fmt.Sprintf("confirmed %s failed to execute: block no longer accessible — the stage token is consumed; re-stage the %s", noun, noun)), nil, nil
 		default: // confirmInfraErr
 			return errResult(fmt.Sprintf("confirm failed: %v", out.Err)), nil, nil
 		}

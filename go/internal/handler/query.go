@@ -459,15 +459,23 @@ var heartbeatWriteWindow = 90 * time.Second
 type queryHeartbeat struct {
 	w      http.ResponseWriter
 	rc     *http.ResponseController
+	ctx    context.Context // the request context: the ticker ends with it
 	mu     sync.Mutex
 	done   bool
 	active bool
 }
 
 // startHeartbeat commits the 200 header and (when active) starts the keepalive
-// goroutine. Call exactly one finish() afterwards.
-func startHeartbeat(w http.ResponseWriter, active bool) *queryHeartbeat {
-	hb := &queryHeartbeat{w: w, active: active}
+// goroutine. Call exactly one finish() afterwards. ctx is the request context:
+// a request that never reaches finish() — a panic below the handler, recovered
+// by Recovery on REST or by mcpRecover on an MCP delegation — still ends the
+// ticker, at the first tick after its context is canceled (net/http cancels it
+// when ServeHTTP returns, the MCP SDK when the call is answered). Without
+// that, the ticker of a recovered panic would tick forever: into the
+// in-memory recorder of an MCP delegation, whose writes never fail (#194),
+// and on REST into a response its handler has already finished.
+func startHeartbeat(ctx context.Context, w http.ResponseWriter, active bool) *queryHeartbeat {
+	hb := &queryHeartbeat{w: w, ctx: ctx, active: active}
 	if !active {
 		return hb
 	}
@@ -506,7 +514,7 @@ func (hb *queryHeartbeat) run() {
 	defer t.Stop()
 	for range t.C {
 		hb.mu.Lock()
-		if hb.done {
+		if hb.done || hb.ctx.Err() != nil {
 			hb.mu.Unlock()
 			return
 		}
@@ -1044,7 +1052,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// (errors after commit become success:false in a 200 body). Retrieval-only
 	// requests stay heartbeat-free (fast, no LLM in the path).
 	useHeartbeat := req.Synthesize == nil || *req.Synthesize
-	hb := startHeartbeat(w, useHeartbeat)
+	hb := startHeartbeat(r.Context(), w, useHeartbeat)
 
 	// Step 6a: Post-RRF temporal gravity boost (GottZ Cyclic Phase Model).
 	//

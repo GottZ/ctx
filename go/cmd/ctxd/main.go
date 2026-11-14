@@ -560,21 +560,12 @@ func daemonLogger(w io.Writer) *slog.Logger {
 }
 
 func main() {
-	// Health check mode: /ctx -health probes the local server with serving
-	// semantics (E9) and never returns in that case — see healthmode.go.
-	dispatchHealthMode()
-
-	// Break-glass decrypt mode: /ctx -secret-decrypt reads one
-	// nonce_b64:ct_b64:name:scope record from stdin and prints the plaintext.
-	// Env-only (CTX_SECRETS_KEY[_PREV]), no DB — see cmd/ctxd/sealbox.go and
-	// break-glass.sh at the repo root.
-	if len(os.Args) > 1 && os.Args[1] == "-secret-decrypt" {
-		os.Exit(runSecretDecrypt(os.Stdin, os.Stdout, os.Stderr))
-	}
-
-	// Hidden overview-rebuild worker mode (E-A, design/05 §4.7): never
-	// returns when argv[1] == overview.WorkerCommand (see overviewworker.go).
-	dispatchOverviewWorkerMode()
+	// The command line first (#246, args.go): ctxd boots on an EMPTY command
+	// line and on nothing else. Every argument selects a mode that ends the
+	// process (-health, -secret-decrypt, the hidden overview worker,
+	// --version, --help) or is a usage error that ends it — before the logger,
+	// the signal handler, the config or the pool below exist.
+	dispatchArgs(os.Args[1:])
 
 	slog.SetDefault(daemonLogger(os.Stderr))
 

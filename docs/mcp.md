@@ -1,7 +1,7 @@
 # MCP reference
 
 ctx serves a [Model Context Protocol](https://modelcontextprotocol.io) tool server at
-`/mcp`. This page is the reference for its fifteen tools: what each one takes and what
+`/mcp`. This page is the reference for its sixteen tools: what each one takes and what
 it answers. The tool definitions live in `go/internal/handler/mcp*.go`; the JSON
 schemas a client receives from `tools/list` are generated from the same Go structs,
 so the parameter descriptions below match what an agent sees.
@@ -37,7 +37,7 @@ A minimal client configuration (Claude Code):
 ## Results and errors
 
 Every tool answers with one text content item. Depending on the tool that text is
-prose (`query`, `store`, `update`, `recent`, `confirm`) or a JSON document
+prose (`query`, `store`, `update`, `archive`, `recent`, `confirm`) or a JSON document
 (`search`, `get`, the issue, guard and blob tools, and `query` with
 `synthesize: false`); each section names which.
 
@@ -59,15 +59,26 @@ so a client must not rely on a code being present.
 
 Which errors carry a code is a property of each tool's write path: `store`,
 `blob_store` and `blob_link` code every rejection; `update` codes only the verdict of
-its gate chain; `confirm` codes only the claim verdict; the issue tools code only
-`reserved_metadata`; the read tools and the guard tools never code.
+its gate chain; `archive` codes `provenance_protected` and, when it stages,
+`rate_limit`; `confirm` codes only the claim verdict; the issue tools code only
+`reserved_metadata`; the read tools and the guard tools never code. Any tool can
+additionally answer `internal` for a server fault (below).
+
+**Server faults.** A panic while a tool call runs — in its handler or anywhere below it
+on the call's own path, the `query` pipeline included — ends that call, not the server:
+the call is answered
+`isError: true` with the text `Internal server error` and the code `internal`, and the
+details (panic value, stack, tool name, request id) go to the server log at level
+`ERROR` (`mcp: panic recovered`). A request that is not a tool call gets the JSON-RPC
+error `-32603` with the same text instead. Other calls, before and after, are not
+affected.
 
 **Staged writes.** A key with the `confirm_writes` capability does not write directly:
-`store`, `update`, `blob_store` and `blob_link` stage the write and answer
+`store`, `update`, `archive`, `blob_store` and `blob_link` stage the write and answer
 `isError: true` **without** a code — the gates passed, the write is merely
 unconfirmed. On `store`, `blob_store` and `blob_link` an uncoded error therefore *is*
-a staged write; on `update` it may also be an uncoded refusal, so check for the
-`STAGED` text:
+a staged write; on `update` and `archive` it may also be an uncoded refusal, so check
+for the `STAGED` text:
 
 ```text
 STAGED — NOT saved yet. This key requires write confirmation (confirm_writes).
@@ -76,8 +87,9 @@ expires: <RFC 3339 time> (in <duration>)
 To execute this exact write, call the 'confirm' tool with this payload_hash. …
 ```
 
-(`update` says `NOT updated yet`.) Calling [`confirm`](#confirm) with that hash executes
-the write the server holds; the caller cannot alter it.
+(`update` says `NOT updated yet`, `archive` says `NOT archived yet`.) Calling
+[`confirm`](#confirm) with that hash executes the write the server holds; the caller
+cannot alter it.
 
 **Untrusted content.** Blocks whose type the registry marks as untrusted (built in:
 `tool-evidence`, `tool-overview`, `checkpoint`, `insight`) are flagged: `[untrusted]` after the line
@@ -125,6 +137,12 @@ Sources:
 `[N]` is the citation number the answer uses; `[n/a]` marks a source that was
 retrieved but never entered the synthesis prompt.
 
+The call ends with its client: a client that closes the connection while the
+pipeline runs cancels it, as on `POST /api/query`, so no further backend call or
+quota is spent on an answer that can no longer be delivered. This holds on every
+protocol version. Only `query` is bound to the connection this way; the other
+tools are not.
+
 With `synthesize: false` the tool passes `synthesize` and `include_content` to
 `POST /api/query` under the same names and skips the synthesis step, as that route
 does. The answer is then a JSON document instead of prose: `confidence` and
@@ -165,12 +183,25 @@ Fetch a full block. Read-only.
 | Parameter | Type | | Description |
 |---|---|---|---|
 | `id` | string | required | block UUID or an unambiguous prefix |
+| `include_archived` | boolean | | also read an archived block; full block UUID only |
 
 **Answer:** the block as JSON — `id`, `category`, `tags`, `title`, `content`,
 `metadata`, `scope`, `guard_status`, `sensitivity`, `sensitivity_source`, `type`,
-`lifecycle_state`, `type_source`, `workflow_status`, `untrusted`, `created_at`,
-`updated_at`. An ambiguous prefix is an error whose text is JSON with the candidate
-`matches`; an unknown or invisible id answers `block not found`.
+`lifecycle_state`, `type_source`, `workflow_status`, `untrusted`, `archived`,
+`created_at`, `updated_at`. An ambiguous prefix is an error whose text is JSON with
+the candidate `matches`; an unknown or invisible id answers `block not found`. An
+archived block is invisible: it answers `block not found` like an id that never
+existed.
+
+`include_archived: true` makes an archived block readable again, so a block that
+cites another by id stays checkable after the cited block was archived. It reads only
+blocks in the key's own scopes (its home and allowed scopes) — a grant, of one block or
+of a whole scope by another tenant, shares a live block and never an archived one — and
+the answer carries `"archived": true`. A live block answers the
+same with or without the field. With an id prefix the call is refused
+(`include_archived requires the full block id …`); a prefix never resolves to an
+archived block. The REST `manage get` action takes the same field, and the CLI sends
+it with `ctx get --include-archived <id>`.
 
 ### recent
 
@@ -236,6 +267,26 @@ block is found by the lexical arms only. A `title` or `content` sent with the
 value the block already holds keeps the embedding. The REST `manage update`
 action behaves the same.
 
+### archive
+
+Archive a block. It leaves `query`, `search`, `recent` and `get`; the row stays, and
+[`get`](#get) with `include_archived` still reads it by full id. There is no tool that
+unarchives.
+
+| Parameter | Type | | Description |
+|---|---|---|---|
+| `id` | string | required | block UUID or unambiguous prefix, in a scope the key may write |
+
+It behaves like the REST `manage delete` action, which also archives: the id resolves
+within the scopes the key may write (a block grant gives no write access), and a block
+that carries a derived `provenance` is refused with `provenance_protected` and stays
+live.
+**Answer:** `Archived: <title> (id: <uuid>, category: <category>)`. An unknown id, a
+block outside the key's writable scopes and an already archived block all answer
+`Block not found (or not in a writable scope of this key)`. Staged for
+`confirm_writes` keys: the card names the target block, and the confirm is rejected
+(the stage stays open until it expires) if the block changed after staging.
+
 ### confirm
 
 Execute a staged write.
@@ -246,7 +297,8 @@ Execute a staged write.
 
 Only meaningful for `confirm_writes` keys; for every other key each hash is unknown.
 A hash is bound to the key that staged it and expires. **Answer:**
-`Confirmed and stored: …` / `Confirmed and updated: <title> (id: <uuid>, category: <category>)`,
+`Confirmed and stored: …` / `Confirmed and updated: <title> (id: <uuid>, category: <category>)` /
+`Confirmed and archived: <title> (id: <uuid>, category: <category>)`,
 or for blobs `Confirmed and stored blob: <title> (id: <uuid>, category: <category>, <n> bytes)` /
 `Confirmed and linked blob: <title> (id: <uuid>, context_block_id: <uuid>)`.
 
@@ -322,7 +374,8 @@ matched partner block and the similarity score, most similar first.
 | `ids` | string[] | required | block ids, 1 to 500 |
 | `resolution` | string | required | `keep` (clear the flag) or `archive` (archive as duplicate) |
 
-`confirm_writes` keys can only `keep` here — archiving is not stageable. **Answer:**
+`confirm_writes` keys can only `keep` here — a batch archive is not stageable; the
+[`archive`](#archive) tool stages the archive of one block. **Answer:**
 `{"success": true, "resolution": …, "resolved_count": <n>, "skipped_count": <n>, "resolved": [ … ], "skipped": [ … ]}`;
 every id appears as resolved or skipped with a reason.
 

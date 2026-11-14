@@ -25,7 +25,7 @@ func TestHeartbeatOutlivesServerWriteTimeout(t *testing.T) {
 	}()
 
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hb := startHeartbeat(w, true)
+		hb := startHeartbeat(r.Context(), w, true)
 		// Simulated slow synthesis: 3x the server WriteTimeout. The request
 		// context must stay alive the whole time (it is canceled when the
 		// write deadline kills the connection).

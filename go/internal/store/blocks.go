@@ -66,6 +66,13 @@ type Block struct {
 	// positive claim "trusted". Write paths pass nil for exactly that reason —
 	// their answer keeps its pre-V-11 bytes.
 	Untrusted      bool   `json:"untrusted,omitempty"`
+	// Archived marks a block answered by GetArchivedBlock, the one read that
+	// returns an archived row (issue #201: the opt-in `include_archived` of MCP
+	// get and manage get). Every other path leaves it false — the read paths
+	// return live rows only, and DeleteBlock's RETURNING does not fill it —
+	// which omitempty turns into an ABSENT key: no existing response changes
+	// its bytes.
+	Archived    bool              `json:"archived,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
 }
@@ -489,6 +496,15 @@ func IdenticalContentMatch(ctx context.Context, pool *pgxpool.Pool, content, sco
 // with 403 rather than with the generic 500 of an unexpected store error —
 // errors.Is is what keeps that mapping out of string matching.
 var ErrProvenanceProtected = errors.New("store: block carries derived provenance — not client-writable")
+
+// notDerivedSQL is the S3 exclusion the by-id client writes carry in their
+// WHERE (UpdateBlock, DeleteBlock, GuardResolve archive): the row holds no
+// derived provenance. metadata is nullable (DEFAULT '{}'), and a NULL holds no
+// provenance key — so the test is COALESCEd to false. A plain
+// `NOT (metadata ? …)` is NULL for such a row, the statement matched nothing,
+// and a block that is no derivative answered "not found" to a key that may
+// write it (and a staged write was carded and then failed at confirm).
+const notDerivedSQL = `NOT COALESCE(metadata ? '` + derived.MetadataKey + `', false)`
 
 // ProvenanceClaimed reports whether the upsert identity (category, title, scope)
 // is claimed by a derivative — INCLUDING an archived one.
@@ -1143,20 +1159,56 @@ func GetBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, id st
 	if grantedBlockIDs == nil {
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
 	}
+	return readBlockByID(ctx, pool, set, "store: get block",
+		`WHERE id = $1 AND NOT is_archived AND (scope = ANY($2::text[]) OR id = ANY($3::uuid[]))`,
+		id, readScopes, grantedBlockIDs)
+}
+
+// GetArchivedBlock reads one ARCHIVED block by its full id (issue #201: the
+// opt-in `include_archived` of MCP get and manage get — a citing block names
+// the id, and a reader must be able to check what the cited block said).
+//
+// Deliberately narrower than GetBlock, so that "visible" keeps its one meaning
+// everywhere else: the scopes the caller passes only — the handler passes the
+// key's OWN scopes, without cross-tenant scope grants — NO block-grant arm (a
+// grant shares a live block; it never kept an archived one readable, see the
+// GetBlock comment), and only rows that ARE archived — a live id answers nil
+// here, the caller reads it through GetBlock. The answer carries
+// Archived = true. A miss is (nil, nil) for an unknown id, a foreign scope and
+// a live block alike.
+func GetArchivedBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, id string, readScopes []string) (*Block, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
+	b, err := readBlockByID(ctx, pool, set, "store: get archived block",
+		`WHERE id = $1 AND is_archived AND scope = ANY($2::text[])`,
+		id, readScopes)
+	if b != nil {
+		b.Archived = true
+	}
+	return b, err
+}
+
+// readBlockByID is the row read GetBlock and GetArchivedBlock share: one
+// column list and one scan, so the two answer the same block shape and differ
+// only in their WHERE. where binds the id as $1 and the caller's read scopes as
+// $2 — guardRedactedMetadataSQL reads the scopes from $2. Code-owned SQL at both
+// call sites, never user input.
+func readBlockByID(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, op, where string, args ...any) (*Block, error) {
 	b := &Block{}
 	err := pool.QueryRow(ctx,
 		`SELECT id, category, tags, title, content, `+guardRedactedMetadataSQL("$2")+`, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at
 		 FROM context_blocks
-		 WHERE id = $1 AND NOT is_archived AND (scope = ANY($2::text[]) OR id = ANY($3::uuid[]))
+		 `+where+`
 		 LIMIT 1`,
-		id, readScopes, grantedBlockIDs,
+		args...,
 	).Scan(&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
 		&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("store: get block: %w", err)
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	b.Untrusted = untrustedOf(set, b.TypeName) // V-11
 	return b, nil
@@ -1177,7 +1229,7 @@ func DeleteBlock(ctx context.Context, pool *pgxpool.Pool, id string, writeScopes
 	err := pool.QueryRow(ctx,
 		`UPDATE context_blocks SET is_archived = true, updated_at = now()
 		 WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
-		   AND NOT (metadata ? '`+derived.MetadataKey+`')
+		   AND `+notDerivedSQL+`
 		 RETURNING id, category, title, scope, created_at, updated_at`,
 		id, writeScopes,
 	).Scan(&b.ID, &b.Category, &b.Title, &b.Scope, &b.CreatedAt, &b.UpdatedAt)
@@ -1348,7 +1400,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	query := fmt.Sprintf(
 		`UPDATE context_blocks SET %s
 		 WHERE id = $%d AND scope = ANY($%d::text[]) AND NOT is_archived
-		   AND NOT (metadata ? '`+derived.MetadataKey+`')
+		   AND `+notDerivedSQL+`
 		 RETURNING id, category, tags, title, content, %s, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at,
 		           (old.title IS DISTINCT FROM new.title OR old.content IS DISTINCT FROM new.content)`,
 		strings.Join(setClauses, ", "), idIdx, scopeIdx, guardRedactedMetadataSQL(fmt.Sprintf("$%d", scopeIdx)),
@@ -2134,7 +2186,7 @@ func GuardResolve(ctx context.Context, pool *pgxpool.Pool, id, resolution string
 			),
 			updated_at = now()
 		WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
-		  AND NOT (metadata ? '` + derived.MetadataKey + `')
+		  AND ` + notDerivedSQL + `
 		RETURNING id, title, category, scope, guard_status, created_at, updated_at`
 	case "keep":
 		query = `UPDATE context_blocks SET
