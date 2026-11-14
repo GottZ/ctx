@@ -566,3 +566,113 @@ def launch_policy_applies(runner: Any, source: Any) -> bool:
 
 
 # --- end S12/S13 -------------------------------------------------------------------------------------
+
+
+# --- SP --- settings page: Hermes access of the dashboard backend (SETTINGS-PAGE §2, §4.4) ----------------
+#
+# The backend (``dashboard/plugin_api.py`` -> ``dsp/web``) runs in whatever process mounts the plugin API: the
+# gateway, a standalone ``hermes dashboard``/``hermes serve``, or a plugin-host child. Every Hermes call it makes
+# is here; a missing symbol answers ``None`` (the caller decides open vs. closed), never an AttributeError.
+
+PLUGIN_ID = "ctx_discord_policy"
+
+
+def admitted(request: Any) -> Optional[bool]:
+    """Hermes' own admission of sensitive routes (``_require_token``: native grant, hosted-plugin flag, gated
+    session, loopback session token). ``None`` when this Hermes has no such check (the caller fails closed)."""
+    try:
+        from hermes_cli.plugin_host_http_auth import admitted_for_sensitive_route
+    except ImportError:
+        return None
+    return bool(admitted_for_sensitive_route(request))
+
+
+def origin_allowed(request: Any) -> Optional[bool]:
+    """Hermes' own origin check for state-changing requests (v0.23.0+). ``None`` when absent (v0.22.4)."""
+    try:
+        from hermes_cli.dashboard_auth.request_utils import cookie_origin_is_allowed
+    except ImportError:
+        return None
+    return bool(cookie_origin_is_allowed(request))
+
+
+def public_url(app_state: Any = None) -> str:
+    """The operator-declared dashboard public URL, or ``""``."""
+    try:
+        from hermes_cli.dashboard_auth.prefix import resolve_public_url
+    except ImportError:
+        return ""
+    try:
+        return str(resolve_public_url(app_state) or "")
+    except TypeError:  # v0.22.4: resolve_public_url() takes no state
+        try:
+            return str(resolve_public_url() or "")
+        except Exception:
+            return ""
+    except Exception:
+        return ""
+
+
+def serving_process(app_state: Any) -> tuple[str, str]:
+    """``(process, surface)`` of the app serving this request: process ``gateway`` (the gateway's own listener,
+    the Discord client lives here), ``plugin_host`` (an isolated plugin-host child) or ``dashboard``."""
+    if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1":
+        return "plugin_host", "plugin_host"
+    runner = getattr(app_state, "gateway_runner", None)
+    try:
+        from hermes_cli.web_server_surface import surface as _surface
+        surface = str(_surface(app_state))
+    except Exception:  # v0.22.4 has no surface table
+        surface = "gateway" if runner is not None else "dashboard"
+    return ("gateway" if runner is not None else "dashboard"), surface
+
+
+def plugin_settings() -> dict:
+    """``plugins.entries.ctx_discord_policy.settings`` of the active profile scope, read like
+    ``ctx.get_config`` does. Raises :class:`ConfigUnreadable` while Hermes serves a fallback copy."""
+    from hermes_cli.config import load_config_readonly
+    from hermes_cli.plugins_state import _plugin_settings_entry
+
+    config = load_config_readonly()
+    try:
+        from hermes_cli.config_read_errors import FailedConfigRead
+    except ImportError:
+        FailedConfigRead = ()  # type: ignore[assignment]
+    if FailedConfigRead and isinstance(config, FailedConfigRead):
+        raise ConfigUnreadable("config.yaml could not be read")
+    entry = _plugin_settings_entry(config or {}, PLUGIN_ID) or {}
+    settings = entry.get("settings")
+    return dict(settings) if isinstance(settings, dict) else {}
+
+
+def save_plugin_settings(plugin_dir: os.PathLike | str, values: dict) -> list:
+    """Write global settings through the writer Hermes' own settings form uses (schema-checked, file-locked,
+    refuses managed installs with ``PermissionError`` and unknown keys with ``ValueError``)."""
+    from hermes_cli.plugins_settings import save_plugin_settings as _save
+
+    return list(_save(PLUGIN_ID, Path(plugin_dir), values))
+
+
+def settings_changed(written: list) -> None:
+    """Tell desktop windows of this process that the plugin's settings changed (as ``plugins.manage`` does)."""
+    try:
+        from hermes_cli.plugin_events import broadcast_plugin_event
+    except ImportError:
+        return
+    try:
+        broadcast_plugin_event(PLUGIN_ID, "settings.changed", {"written": list(written)})
+    except Exception:  # informational only
+        pass
+
+
+def spill_config() -> Optional[dict]:
+    """Hermes' resolved hook-output spill configuration (the context budget, DESIGN A9), or ``None``."""
+    try:
+        from tools.hook_output_spill import get_spill_config
+    except ImportError:
+        return None
+    try:
+        config = get_spill_config()
+    except Exception:
+        return None
+    return config if isinstance(config, dict) else None
