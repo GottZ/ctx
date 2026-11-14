@@ -51,7 +51,7 @@ you activated it:
 
 | Step | What happens |
 |---|---|
-| 1. Who is it | The author is an operator (in your Hermes configuration) or a member (anyone else). Bots, webhooks and system messages never wake the bot. |
+| 1. Who is it | The author is an operator (in your Hermes configuration) or a member (anyone else). Messages of other bots, webhooks and the system get no turn, whatever Hermes' own `allow_bots` says, unless you set `bot_messages: member` (then they are answered like a member's message). |
 | 2. Does the bot answer | A message gets a turn when it mentions or replies to the bot, calls it by a wake name, or is in a conversation channel; a reaction with the wake emoji gets the reactor an answer to that message. Never in a channel you excluded. Everything is checked first: the server is active, the profile the message goes to has the plugin enabled and is the one you chose, every safety hook is in place. If anything is missing, members get no turn. |
 | 3. What the turn may do | An operator's turn runs as Hermes would run it. A member's turn gets only the member tools of that server. |
 | 4. What the model is told | Before the turn the plugin adds a short context: your frame, what this turn may use, how to behave in the conversation, the server's guidance and linked content, all of it as quoted text, never as instructions about tools. |
@@ -136,8 +136,8 @@ restart Hermes Desktop once so the page's backend is mounted.
 
 Further settings of the plugin (Hermes Desktop shows them as a form): `frame_prompt` (your text before every
 server's guidance), `operator_label`, `guild_prompt_max_chars` (the longest guidance text of a server),
-`notify_operators` (the direct messages), `locked_profiles` (profiles members never reach) and
-`member_search`.
+`notify_operators` (the direct messages), `bot_messages` (`closed`, the default, or `member`: how messages of
+other bots and webhooks are treated), `locked_profiles` (profiles members never reach) and `member_search`.
 
 ## Everyday use
 

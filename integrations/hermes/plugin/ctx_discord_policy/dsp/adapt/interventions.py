@@ -22,7 +22,7 @@ import sys
 import time
 from typing import Any
 
-from .. import RUNTIME_API, hermes
+from .. import RUNTIME_API, config, hermes
 from ..delivery import public
 from ..ingress import admission, classify, hydrate
 from ..policy import authority, hooks
@@ -314,6 +314,26 @@ def bot_id_of(native: Any, adapter: Any) -> str:
     return ""
 
 
+def note_allow_bots(adapter: Any, binding: Any) -> Result:
+    """A12: Hermes' own ``allow_bots`` for this bot, and what the policy makes of it in the servers it knows
+    (closed unless ``settings.bot_messages: member``). A check, never a degradation: the policy closes."""
+    try:
+        getter = getattr(adapter, "_get_allow_bots", None)
+        mode = str(getter()) if callable(getter) else ""
+    except Exception:
+        mode = ""
+    members = config.bot_messages_as_members(binding.owner_home)
+    if mode == "none":
+        reason = "Hermes lets no other bot wake this bot (allow_bots: none)"
+    else:
+        what = "are answered like members' messages, without tools (bot_messages: member)" if members \
+            else "get no turn (bot_messages: closed)"
+        known = f"Hermes' allow_bots is {mode}" if mode else "Hermes' allow_bots cannot be read"
+        reason = (f"{known}: in servers where the policy is active or paused, messages of other bots and "
+                  f"webhooks {what}")
+    return Result("A12", SECURITY, Outcome.OK, reason, "adapter._get_allow_bots")
+
+
 def discord_platform_handler(native: Any, adapter: Any) -> None:
     """Called by Hermes for a connected Discord adapter (after ``ready``), in its owner's profile scope."""
     from .. import bootstrap  # late: bootstrap imports this module
@@ -327,4 +347,5 @@ def discord_platform_handler(native: Any, adapter: Any) -> None:
         return
     binding = RUNTIME.bots.bind(adapter, bot_id, hermes.current_home())
     logger.info("ctx_discord_policy: bot %s bound; state in %s", bot_id, binding.store.path)
+    run_intervention(RUNTIME.status, "A12", SECURITY, lambda: note_allow_bots(adapter, binding))
     bootstrap.bind_bot(native, adapter, binding)  # the layers' bind steps, then the status file

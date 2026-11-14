@@ -628,7 +628,8 @@ async def test_an_operator_in_a_worklog_thread_runs_in_the_worklog_mode(world):
 async def test_webhooks_and_system_messages_never_get_a_route(world, kind):
     msg = message(user(MEMBER, system=kind == "system"), mid=12021, mentions=mention())
     msg.webhook_id = 900000000000000990 if kind == "webhook" else None
-    assert world.anchor.mod("ingress.admission").decide(world.adapter, msg) is None
+    decision = world.anchor.mod("ingress.admission").decide(world.adapter, msg)
+    assert decision is not None and decision.excluded       # closed in a known server, not left to Hermes
     assert await world.deliver(msg) is None and world.runner.turns == []
 
 
