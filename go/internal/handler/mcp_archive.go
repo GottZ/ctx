@@ -109,9 +109,10 @@ func mcpStageArchive(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, in
 	if block == nil {
 		return errResult("Block not found (or not in a writable scope of this key)"), nil, nil
 	}
-	// The key DeleteBlock's WHERE tests (metadata ? 'provenance'); GetBlock
-	// strips only guard_matched_id from metadata, so presence here is the same
-	// predicate.
+	// The key DeleteBlock's WHERE tests (store.notDerivedSQL); GetBlock strips
+	// only guard_matched_id from metadata, so presence here is the same
+	// predicate — and a SQL NULL scans to a nil map, no key, as the WHERE reads
+	// it too.
 	if _, derivative := block.Metadata[derived.MetadataKey]; derivative {
 		return errResultReject(provenanceRejectOr(store.ErrProvenanceProtected, nil)), nil, nil
 	}

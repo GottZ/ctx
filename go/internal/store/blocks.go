@@ -497,6 +497,15 @@ func IdenticalContentMatch(ctx context.Context, pool *pgxpool.Pool, content, sco
 // errors.Is is what keeps that mapping out of string matching.
 var ErrProvenanceProtected = errors.New("store: block carries derived provenance — not client-writable")
 
+// notDerivedSQL is the S3 exclusion the by-id client writes carry in their
+// WHERE (UpdateBlock, DeleteBlock, GuardResolve archive): the row holds no
+// derived provenance. metadata is nullable (DEFAULT '{}'), and a NULL holds no
+// provenance key — so the test is COALESCEd to false. A plain
+// `NOT (metadata ? …)` is NULL for such a row, the statement matched nothing,
+// and a block that is no derivative answered "not found" to a key that may
+// write it (and a staged write was carded and then failed at confirm).
+const notDerivedSQL = `NOT COALESCE(metadata ? '` + derived.MetadataKey + `', false)`
+
 // ProvenanceClaimed reports whether the upsert identity (category, title, scope)
 // is claimed by a derivative — INCLUDING an archived one.
 //
@@ -1220,7 +1229,7 @@ func DeleteBlock(ctx context.Context, pool *pgxpool.Pool, id string, writeScopes
 	err := pool.QueryRow(ctx,
 		`UPDATE context_blocks SET is_archived = true, updated_at = now()
 		 WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
-		   AND NOT (metadata ? '`+derived.MetadataKey+`')
+		   AND `+notDerivedSQL+`
 		 RETURNING id, category, title, scope, created_at, updated_at`,
 		id, writeScopes,
 	).Scan(&b.ID, &b.Category, &b.Title, &b.Scope, &b.CreatedAt, &b.UpdatedAt)
@@ -1391,7 +1400,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	query := fmt.Sprintf(
 		`UPDATE context_blocks SET %s
 		 WHERE id = $%d AND scope = ANY($%d::text[]) AND NOT is_archived
-		   AND NOT (metadata ? '`+derived.MetadataKey+`')
+		   AND `+notDerivedSQL+`
 		 RETURNING id, category, tags, title, content, %s, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at,
 		           (old.title IS DISTINCT FROM new.title OR old.content IS DISTINCT FROM new.content)`,
 		strings.Join(setClauses, ", "), idIdx, scopeIdx, guardRedactedMetadataSQL(fmt.Sprintf("$%d", scopeIdx)),
@@ -2177,7 +2186,7 @@ func GuardResolve(ctx context.Context, pool *pgxpool.Pool, id, resolution string
 			),
 			updated_at = now()
 		WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
-		  AND NOT (metadata ? '` + derived.MetadataKey + `')
+		  AND ` + notDerivedSQL + `
 		RETURNING id, title, category, scope, guard_status, created_at, updated_at`
 	case "keep":
 		query = `UPDATE context_blocks SET
