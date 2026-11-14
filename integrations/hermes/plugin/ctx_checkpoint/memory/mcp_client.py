@@ -16,16 +16,16 @@ What the ctx MCP tools answer (``go/internal/handler/mcp.go``) and how it is map
 - ``query`` → prose answer followed by ``Sources:`` lines ``[N] title (category) id:uuid``.
   A retrieval-only ``query(synthesize=False)`` calls the tool with ``synthesize: false`` (and
   ``include_content: true`` when content is asked for): the semantic ``/api/query``
-  retrieval without the LLM step, as on ``transport: rest``. The tool then answers one JSON
-  document ``{"confidence", "sources": [{id, title, category, score, superseded_by?,
-  untrusted?, content?}]}`` (GottZ/ctx #183), mapped to ``{"success", "answer": "",
-  "confidence", "sources"}``. A server from before #183 refuses the two arguments at schema
-  validation (``unexpected additional properties ["synthesize" …]``); this client then
-  serves that call and every later one by ``search`` (lexical hybrid, no embedding). Only
-  one call asks: retrieval-only calls made while it is in flight use ``search`` as well, so
-  the server sees one refused call per client (a new client, bound when the provider
-  connects again, asks once more). Any other error, and an answer that is not the sources
-  document, is raised and leaves the question open for the next call.
+  retrieval without the synthesis step, as on ``transport: rest``. The tool then answers one
+  JSON document ``{"confidence", "sources": [{id, title, category, score, superseded_by?,
+  untrusted?, content?}]}`` (ctx v5.36.0 or newer, GottZ/ctx#183), mapped to ``{"success",
+  "answer": "", "confidence", "sources"}``. A server older than v5.36.0 refuses the two
+  arguments at schema validation (``unexpected additional properties ["synthesize" …]``);
+  this client then serves that call and every later one by ``search`` (lexical hybrid, no
+  embedding). Only one call asks: retrieval-only calls made while it is in flight use
+  ``search`` as well, so the server sees one refused call per client (a new client, bound
+  when the provider connects again, asks once more). Any other error, and an answer that is
+  not the sources document, is raised and leaves the question open for the next call.
 - ``store`` → ``Stored: <title> (id: <uuid>, category: <c>)`` or ``No change needed —
   identical content already exists (id: <uuid>)``. The block id is the ``(id: …)`` group
   (or a structured ``id``), never another UUID in the text: the title in front of it can
@@ -308,7 +308,8 @@ class McpClient:
             if data is not None:
                 return data
             # A server from before #183 (or the first call on it still in flight): the lexical
-            # hybrid search is the no-LLM path. Its rows already carry content/type/untrusted.
+            # hybrid search is the no-LLM path. Its compact rows carry type/untrusted and
+            # content_preview, not content, so the recall on this path shows titles only.
             data = self.search(text, types_exclude=types_exclude, limit=limit)
             return {"success": True, "sources": data.get("results") or [], "answer": ""}
         args: dict[str, Any] = {"question": text}

@@ -96,10 +96,11 @@ every context (labelled via `metadata.agent_context`).
 
 **Transport.** Over the default MCP dispatch, retrieval-only recall calls the ctx
 `query` tool with `synthesize: false, include_content: true` — the semantic hybrid
-without the LLM step, in one call, the same retrieval `transport: rest` gets from
-`/api/query`. A ctx server from before that flag (GottZ/ctx #183) refuses the two
-arguments; the plugin then recalls through the `search` tool (lexical hybrid:
-fulltext + trigram) after one refused call, until the provider connects again.
+without the synthesis step, in one call, the same retrieval `transport: rest` gets from
+`/api/query`. The tool takes these arguments from ctx v5.36.0 on (GottZ/ctx#183); an
+older server refuses them, and the plugin then recalls through the `search` tool
+(lexical hybrid: fulltext + trigram) after one refused call, until the provider
+connects again.
 `transport: rest` (plus `CTX_BASE_URL`/`CTX_KEY` in the profile's `.env`, or
 `rest_base_url` in the section) enables the CLI's read/write commands.
 
