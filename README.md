@@ -222,22 +222,48 @@ The full walk-through, with every option, is in [Operations](docs/operations.md#
 ## Bring your own workflow
 
 ctx is a skeleton. After the install it stores, finds and links what your agents give it, over MCP, the CLI and
-HTTP. It does not decide when your agent looks something up or writes something down. Today ctx is deliberately
-neutral: it brings no working style of its own and no ready-made skills for your sessions, because every team
-works differently. Suggestions for such skills will come later.
+HTTP. It does not decide when your agent looks something up or writes something down, and it does not make a
+session start or end well on its own. Today ctx is deliberately neutral: it brings no working style of its own and
+no ready-made skills, because every team works differently. Below is a way of working we suggest. Adapt it to your
+team and write it into your own skill, rule file, hook or prompt. Suggestions for ready-made skills will come
+later.
 
-What you bring yourself, as a skill, a rule file, a hook or a prompt:
+**Session start.** Before its first answer, your agent:
 
-| For | What it makes your agent do |
+1. loads the conventions it works under into its context;
+2. lists what the last session left open, with the blocks those items point to: `ctx search tags:open`, or the
+   MCP tool `search` with `tags: ["open"]` (`open` is a tag you agree on, see step 5 of the close);
+3. asks `query` whole questions about the task ("why did we pin pgvector?", not "pgvector pin"), and reads a
+   block in full with `get` only when it holds its id;
+4. says in two or three sentences what it loaded, then starts.
+
+**During the work.** Your agent looks up before it decides, and checks live state before it acts on a block: a
+block says where to look, not what is true now. It saves each finding when it happens: one concept per block, a
+precise title, a category, tags, the source and the date. It searches first and changes an existing block instead
+of adding a second one (`ctx manage update <block-id> '<json>'` or the MCP tool `update`); `ctx save` with the
+same category and title replaces the whole block.
+
+**Session close.** A session is closed when every "done" in its report rests on the output of a command, not on
+what the session remembers. Each step has a check, and what was not checked is reported as not checked. If a step
+is red, your agent reports the red state instead of closing.
+
+| Step | Check |
 |---|---|
-| Session start | load the conventions it works under, and `query` for what the task needs, as whole questions, before its first answer |
-| During the work | look up before it decides, and save each finding when it happens: one concept per block, a precise title, a category, tags, the source and the date |
-| Session close | check what is really done (tests, the working tree, what is deployed), make sure every new finding is in the store, and claim no more than it checked |
+| 0. Who asks | A person, or an automation such as a timer, a loop or a hook? An automation continues the task; it does not end it. |
+| 1. Working tree | `git status --porcelain` is empty, or every change left is a decision you can name. Nothing is unpushed without a reason (`git log @{upstream}..HEAD`). |
+| 2. Checks | The project's own tests and checks ran in this session. Green means "nothing known is broken", not "everything works". |
+| 3. Deployment | If something was deployed: the commit in the repository, the deployed commit, the running service and its health check agree. The deploy tool's success message is not that state. |
+| 4. Store | Every finding a later session needs is in ctx, one concept per block, an existing block updated rather than copied (`ctx search`, then `ctx manage update`). Each fact lives in one place: git holds the diff, ctx the essence. The test: would a later session find it without this chat? |
+| 5. Open items | Each one neutral, with its source (file and line, or a quote with its date) and what it unblocks, without an urgency nobody gave it; stored with the tag `open`, and archived with `ctx delete <block-id>` once it is done. |
+| 6. Report | Per step, what was checked and with what result; what was not checked or stays open; the ids of the blocks the next session starts from. |
+
+This is not a handover note that retells the session. The findings are already in the store, per topic; the close
+checks that, and leaves only the open items and the pointers to them.
 
 What there is to start from:
 
 - [ctx as agent memory](docs/ctx-as-agent-memory.md): the loop for a session and for a subagent, and what goes
-  wrong when an agent treats the store as a tool, including why it advises against handover notes.
+  wrong when an agent treats the store as a tool, including why a retelling handover note is one of those ways.
 - [Using ctx effectively](docs/using-ctx-effectively.md): rules to put into your agent's instructions, and how to
   keep stored memory from drifting.
 - `ctx init` installs, if you agree, two Claude Code hooks for **subagents**. `ctx brief --hook` hands each new
