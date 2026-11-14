@@ -211,6 +211,16 @@ func (f *bfsFixture) query(t *testing.T, syncCap int, interval time.Duration) {
 	cfg := bw2Config()
 	cfg.EmbedBackfill.SyncCap = syncCap
 	cfg.EmbedBackfill.Interval = interval
+	if code, body := f.queryAs(t, f.callerCtx, cfg); code != http.StatusOK {
+		t.Fatalf("query: status %d, body %s", code, body)
+	}
+}
+
+// queryAs runs one POST /api/query under reqCtx, which carries the key and
+// may be cancelled or carry a deadline, with the request-path config cfg, and
+// returns the status and the body of the answer.
+func (f *bfsFixture) queryAs(t *testing.T, reqCtx context.Context, cfg *config.Config) (int, string) {
+	t.Helper()
 	cfg.Pool.ScopeSensitivityFloor = f.floor
 	// bw2Pool with the embed backend's trust as a parameter.
 	rows := []backends.Backend{
@@ -240,13 +250,11 @@ func (f *bfsFixture) query(t *testing.T, syncCap int, interval time.Duration) {
 		body["sensitivity"] = f.querySens
 	}
 	raw, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(string(raw))).WithContext(f.callerCtx)
+	req := httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(string(raw))).WithContext(reqCtx)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.HandleQuery(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("query: status %d, body %s", rec.Code, rec.Body.String())
-	}
+	return rec.Code, rec.Body.String()
 }
 
 // memoized reports whether the block with this title carries an embed
