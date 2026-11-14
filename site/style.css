@@ -43,9 +43,10 @@ a { color: var(--lapis); text-underline-offset: 0.18em; text-decoration-thicknes
 a:hover { text-decoration-thickness: 2px; }
 :focus-visible { outline: 2px solid var(--lapis); outline-offset: 3px; border-radius: 2px; }
 
-h1, h2 { font-family: var(--serif); font-weight: 500; line-height: 1.15; letter-spacing: -0.01em; }
+h1, h2, h3 { font-family: var(--serif); font-weight: 500; line-height: 1.15; letter-spacing: -0.01em; }
 h1 { font-size: clamp(2.3rem, 5.4vw, 3.9rem); margin: 0 0 0.45em; max-width: 14ch; }
 h2 { font-size: clamp(1.55rem, 2.6vw, 1.95rem); margin: 0 0 0.6em; }
+h3 { font-size: 1.3rem; font-weight: 600; margin: 1.9rem 0 0.6rem; }
 
 code, pre { font-family: var(--mono); font-size: 0.875em; }
 code { background: var(--code-bg); padding: 0.08em 0.32em; border-radius: 3px; }
@@ -59,12 +60,17 @@ pre {
 }
 pre code { background: none; padding: 0; font-size: 1em; }
 
-/* Header */
+/* Skip link: off-screen until it has keyboard focus */
+.skip { position: absolute; left: -100vw; top: 0.6rem; padding: 0.4rem 0.8rem; background: var(--paper); border: 1px solid var(--lapis); border-radius: 4px; }
+.skip:focus { left: var(--gutter); }
+
+/* Header: the nav wraps under the mark on narrow screens */
 .top {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.4rem 1rem;
   padding: 1.1rem var(--gutter);
   max-width: 76rem;
   margin: 0 auto;
@@ -76,7 +82,7 @@ pre code { background: none; padding: 0; font-size: 1em; }
   color: var(--ink);
   text-decoration: none;
 }
-.top nav { display: flex; gap: 1.4rem; }
+.top nav { display: flex; flex-wrap: wrap; gap: 0.3rem 1.4rem; }
 .top nav a { color: var(--ink-2); text-decoration: none; }
 .top nav a:hover { color: var(--lapis); }
 
@@ -91,7 +97,8 @@ main { max-width: 76rem; margin: 0 auto; padding: 0 var(--gutter); }
   padding: clamp(2rem, 7vw, 5.5rem) 0 clamp(2.5rem, 6vw, 5rem);
   border-bottom: 1px solid var(--rule);
 }
-.lede { font-size: 1.2rem; color: var(--ink-2); max-width: 36rem; margin: 0 0 1.8rem; }
+.lede { font-size: 1.2rem; color: var(--ink-2); max-width: 36rem; margin: 0 0 1rem; }
+.lede-more { color: var(--ink-2); max-width: 36rem; margin: 0 0 1.8rem; }
 .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 0; }
 .button {
   display: inline-block;
@@ -139,6 +146,25 @@ section { padding: clamp(2.2rem, 5vw, 3.6rem) 0; border-bottom: 1px solid var(--
 .prose p { margin: 0 0 1em; }
 .prose > :last-child { margin-bottom: 0; }
 .wide .narrow { margin: 0 0 1.6rem; }
+.wide .narrow p { margin: 0 0 1em; }
+.wide .narrow > :last-child { margin-bottom: 0; }
+
+/* The sentence a section stands on; it shares one grid item (.intro) with its
+   paragraph, so a two-line heading beside it does not open a gap below it. */
+.claim { font-family: var(--serif); font-size: 1.45rem; line-height: 1.3; color: var(--ink); }
+
+/* Bullet and numbered lists inside a section */
+.list, .steps { margin: 0 0 1em; padding-left: 1.25em; }
+.list li, .steps li { margin: 0 0 0.6em; }
+.list li::marker, .steps li::marker { color: var(--ink-2); }
+.steps li > p { margin: 0 0 0.7em; }
+.steps li > pre { margin: 0 0 1.2em; }
+.prose .after-table { margin-top: 1.2em; }
+
+/* The suggested way of working: phases as a definition list, steps inside */
+.phases dd ol { margin: 0 0 1em; padding-left: 1.4em; }
+.phases dd li { margin: 0 0 0.35em; }
+.phases dd > :last-child { margin-bottom: 0; }
 
 /* The architecture diagram leaves the two-column grid: at 1200px native width
    its labels need the full section width (~1:1) to stay legible. */
@@ -169,6 +195,14 @@ td code { white-space: nowrap; }
 .doclist a { font-weight: 600; margin-right: 0.6rem; }
 .doclist span { color: var(--ink-2); }
 
+/* Plugin pictures: two side by side, stacked on phones; fixed width/height in the
+   markup reserve their space before they load. */
+.art { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.2rem; margin-top: 1.6rem; }
+.art figure { margin: 0; }
+.art a { display: block; }
+.art img { display: block; width: 100%; height: auto; border-radius: 4px; }
+.art figcaption { font-size: 0.92rem; color: var(--ink-2); margin-top: 0.45rem; }
+
 .foot {
   max-width: 76rem;
   margin: 0 auto;
@@ -187,11 +221,12 @@ td code { white-space: nowrap; }
   .hero { grid-template-columns: 1fr; }
   .hero-figure { max-width: 34rem; }
   .prose, .wide, .foot { display: block; }
+  td code { white-space: normal; overflow-wrap: anywhere; }
 }
 
 @media (max-width: 620px) {
   .features { grid-template-columns: 1fr; gap: 0.2rem; }
   .features dd { margin-bottom: 0.9rem; }
-  td code { white-space: normal; word-break: break-word; }
-  .top nav { gap: 1rem; }
+  .top nav { gap: 0.3rem 1rem; }
+  .art { grid-template-columns: 1fr; }
 }

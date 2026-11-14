@@ -3,31 +3,39 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ctx — persistent memory for LLM agents</title>
-<meta name="description" content="ctx is a self-hosted knowledge store that gives LLM agents a persistent, searchable memory: hybrid retrieval, cyclic temporal gravity, autonomous cross-referencing. MCP, CLI and HTTP. MPL-2.0.">
+<title>ctx — a knowledge store for LLM agents</title>
+<meta name="description" content="ctx is a knowledge store for LLM agents that you run yourself. Agents save what they learn as small blocks and get short answers back, with sources, found by meaning, by exact words and by time. MCP, CLI and HTTP. MPL-2.0.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 <link rel="canonical" href="https://ctx.gottz.de/">
 </head>
 <body>
+<!-- Served under a CSP that allows only same-origin styles and images: no scripts,
+     no style attributes, no web fonts, no images from another origin. Pictures are
+     copied in by publish.sh from their one source in the repository. -->
+
+<a class="skip" href="#main">Skip to content</a>
 
 <header class="top">
   <a class="mark" href="/">ctx</a>
   <nav aria-label="Primary">
     <a href="#install">Install</a>
+    <a href="#workflow">Workflow</a>
+    <a href="#plugins">Plugins</a>
     <a href="#docs">Docs</a>
     <a href="#involved">Contribute</a>
     <a href="https://github.com/GottZ/ctx">GitHub</a>
   </nav>
 </header>
 
-<main>
+<main id="main">
 
 <section class="hero">
   <div class="hero-text">
     <h1>The memory your LLM pretends to have.</h1>
-    <p class="lede">ctx is a self-hosted knowledge store for LLM agents. Your agent saves what it learns as small blocks; ctx finds them again by meaning, by wording and by time — and keeps cross-linking them in the background while nobody is asking.</p>
+    <p class="lede">ctx is a knowledge store for LLM agents that you run yourself. Your agents save what they learn as small blocks: a decision with its reason, a fix with the error it fixed. Weeks later a fresh session asks &#8220;why did we pin pgvector?&#8221; and gets a short answer written from those blocks, with their ids.</p>
+    <p class="lede-more">ctx finds a block by its meaning, by its exact words and by time. Claude Code, claude.ai, Hermes and any other MCP client can share one memory, and your scripts reach it through a CLI and plain HTTP. When your agents save and look up is up to the instructions you give them: <a href="#workflow">ctx is the store, not the habit</a>.</p>
     <p class="actions">
       <a class="button" href="#install">Install ctx</a>
       <a class="button button-quiet" href="https://github.com/GottZ/ctx">Read the source</a>
@@ -35,94 +43,240 @@
   </div>
   <figure class="hero-figure">
 @@RINGS@@
-    <figcaption>Time is not one axis. Each cycle — time of day, weekday, day of month, week, month, quarter, season — is scored as its own Gaussian field, so &#8220;every Tuesday&#8221; finds Tuesday notes from any year.</figcaption>
+    <figcaption>Time is not one axis. Each cycle — time of day, weekday, day of month, week, month, quarter, season — is scored as its own Gaussian field, so a question about &#8220;every Tuesday&#8221; ranks blocks dated to a Tuesday higher, in any year.</figcaption>
   </figure>
 </section>
 
 <section class="prose" aria-labelledby="what">
-  <h2 id="what">What it does</h2>
-  <p>Store a finding once, get it back when it matters. A query runs semantic search, English and German fulltext and trigram matching side by side and fuses the rankings. Then time weighs in: every block carries the dates it talks about and the date it was written, so &#8220;the meeting on Tuesday&#8221; is found by either.</p>
-  <p><strong>Dream Mode</strong> runs as a continuous background loop. It discovers relations between blocks, marks information that newer blocks supersede and promotes what holds up — the store organises itself instead of silting up.</p>
-  <p>Agents reach ctx over <strong>MCP</strong>, a <strong>CLI</strong> or plain <strong>HTTP</strong>. An embedded web UI covers settings, the knowledge graph, the corpus and chat. Multiple tenants are isolated down to the single block.</p>
+  <h2 id="what">What you get</h2>
+  <dl class="features" id="features">
+    <dt>Answers, not a list of hits</dt>
+    <dd><code>query</code> searches four ways at once: by meaning, by English and German full text, and by similar titles. It merges the rankings and lets your chat model write a short answer from the blocks it found, with their ids. <code>search</code> gives you the blocks without the model call.</dd>
+    <dt>Time counts</dt>
+    <dd>Every block keeps the day it was written and the full dates it names (2026-03-29, 29.03.2026, March 2026). A question that names a time, such as &#8220;every Tuesday&#8221;, &#8220;at Christmas&#8221; or &#8220;immer dienstags&#8221;, ranks the matching blocks higher.</dd>
+    <dt>Duplicates caught, links on request</dt>
+    <dd>Guard compares each new block with the closest ones and, depending on the block type, archives a duplicate or flags it for you. Dream Mode, once you switch it on, reads blocks in the background, links related ones and marks what a newer block replaces.</dd>
+    <dt>One store for every agent</dt>
+    <dd>16 MCP tools for Claude Code, claude.ai or any MCP client, a CLI for scripts, cron and hooks, and a plain HTTP API. In Claude Code, two hooks give each subagent the project&#8217;s briefing when it starts and save the findings it marks when it ends.</dd>
+    <dt>Several teams on one server</dt>
+    <dd>Tenants hold scopes, scopes hold blocks. A key reads only the scopes it was given, and another tenant&#8217;s data only through a grant you make, for one scope or one block. Quotas and key limits per tenant.</dd>
+    <dt>Your models, wherever they run</dt>
+    <dd>Ollama, any OpenAI-compatible server or hosted API; chat also on the Anthropic Messages API. Each role (answers, embeddings, reranking, Dream Mode and a few more) has its own list of backends in priority order, so a CPU backend can stand in for a GPU one.</dd>
+    <dt>Your models for other programs</dt>
+    <dd>If you want: an OpenAI-compatible API under <code>/v1</code> (chat, embeddings, rerank) lets other programs use those models, with keys, limits and quotas of their own. ctx&#8217;s own questions are served first. Off until you switch it on.</dd>
+    <dt>A web UI inside the server</dt>
+    <dd>Settings, model backends, the link graph, a block browser, live status, a chat that searches the store for you, project issues with a board. You sign in with an API key, or with a sign-in provider you set up.</dd>
+  </dl>
 </section>
 
 <section class="wide" aria-labelledby="how">
   <h2 id="how">How it works</h2>
-  <p class="narrow">Four ways in, one Go daemon, PostgreSQL 18 with pgvector underneath. The diagram follows a block from storing to retrieval, through the topic map and the Dream loop.</p>
+  <div class="narrow">
+    <p>One Go server (<code>ctxd</code>) on PostgreSQL 18 with pgvector and TimescaleDB; the models run wherever its backend pool points. Four ways in: MCP for agents in Claude Code, claude.ai, Hermes or any MCP client; the <code>ctx</code> CLI for the shell, scripts, cron and hooks; HTTP for your own programs; and the web UI. A block takes this path:</p>
+    <ol class="steps">
+      <li><strong>Store.</strong> A block arrives over MCP, the CLI or HTTP and is saved at once. A block with the same category and title in the same scope is replaced. ctx records the full dates the text names and the time it was written.</li>
+      <li><strong>Embed and check.</strong> In the background the embedding model turns the block into a vector. Guard compares it with the closest blocks and archives or flags a duplicate.</li>
+      <li><strong>Ask.</strong> ctx reads the question for time words, embeds it, and searches four ways: by meaning (pgvector), English full text, German full text and title similarity. It fuses the four rankings into one.</li>
+      <li><strong>Weigh.</strong> Blocks near the times the question names rank higher. Once Dream Mode has written links, blocks linked to the best hits join in, and blocks that a newer one replaced drop out. A reranker and a boost for the strongest topics can be switched on.</li>
+      <li><strong>Answer.</strong> The chat model is told to answer from the retrieved blocks only. It cites them, and ctx lists their ids.</li>
+      <li><strong>Consolidate.</strong> With Dream Mode on, a background loop picks one block at a time, finds candidates and asks the chat model how they relate. It writes at most five links per round, including &#8220;this block replaces that one&#8221;.</li>
+    </ol>
+    <p><code>search</code> takes a lighter path: full-text matching only, without embedding and without a model call. Dream Mode, shown in the picture, runs only when you switch it on.</p>
+  </div>
   <figure class="diagram">
-    <a href="how-ctx-works.svg">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="how-ctx-works-dark.svg">
-        <img src="how-ctx-works.svg" width="1200" height="2430" loading="lazy" alt="How ctx works: four access paths into one Go daemon; the store pipeline with time-anchor extraction, embedding and Guard dedup; the query pipeline with temporal parsing, 4-way RRF fusion, temporal gravity, cluster-topic boost, graph expansion and LLM synthesis; the topic-map layer; and the autonomous Dream Mode loop.">
-      </picture>
-    </a>
-    <figcaption><a href="how-ctx-works.svg">Open the diagram at full size</a></figcaption>
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="how-ctx-works-dark.svg">
+      <img src="how-ctx-works.svg" width="1200" height="2430" loading="lazy" alt="How ctx works: four ways in (MCP, CLI, HTTP, web UI) lead to one Go server on PostgreSQL. Storing a block records its dates, computes an embedding and checks for duplicates. A question is searched four ways, weighted by time and by links, and answered by the chat model. A topic map groups the blocks, and the optional Dream Mode links them in the background.">
+    </picture>
+    <figcaption><a href="https://github.com/GottZ/ctx/blob/root/docs/how-ctx-works.svg">Open the diagram at full size</a> (on GitHub)</figcaption>
   </figure>
 </section>
 
-<section class="prose" aria-labelledby="features">
-  <h2 id="features">What is inside</h2>
-  <dl class="features">
-    <dt>4-way rank fusion</dt>
-    <dd>Semantic, English fulltext, German fulltext and trigram rankings merged by reciprocal-rank fusion, weighted per block type.</dd>
-    <dt>Cyclic temporal gravity</dt>
-    <dd>Seven cycles, each with its own Gaussian decay. Queries like &#8220;every Tuesday&#8221; or &#8220;at Christmas&#8221; activate the cycle they name.</dd>
-    <dt>Dream Mode</dt>
-    <dd>Autonomous cross-referencing and supersede detection with parallel, race-safe workers.</dd>
-    <dt>Block types</dt>
-    <dd>A declarative registry decides per type how blocks are retrieved, deduplicated, dreamed over and digested — reloadable without a restart.</dd>
-    <dt>Multi-tenancy</dt>
-    <dd>Tenant, scope and block isolation with grants, quotas and self-service onboarding.</dd>
-    <dt>Issues and forge sync</dt>
-    <dd>A per-project issue corpus with a kanban board, validated status transitions and two-way GitHub sync.</dd>
-    <dt>Sealed secrets</dt>
-    <dd>Provider credentials encrypted with AES-256-GCM; outbound calls gated by trust and sensitivity.</dd>
-    <dt>Any model backend</dt>
-    <dd>OpenAI-compatible APIs, Ollama or the Anthropic Messages API. Runs on CPU; a GPU shortens chat latency.</dd>
+<section class="prose" aria-labelledby="workflow">
+  <h2 id="workflow">Bring your own workflow</h2>
+  <div class="intro">
+    <p class="claim">ctx is a skeleton.</p>
+    <p>After the install it stores, finds and links what your agents give it, over MCP, the CLI and HTTP. It does not decide when your agent looks something up or writes something down, and it does not make a session start or end well on its own. Today ctx is deliberately neutral: it brings no working style of its own and no ready-made skills, because every team works differently. Below, in short, is a suggested way of working. Adapt it to your team and write it into your own skill, rule file, hook or prompt. Suggestions for ready-made skills will come later.</p>
+  </div>
+  <dl class="features phases">
+    <dt>Session start</dt>
+    <dd>
+      <p>Before its first answer, your agent:</p>
+      <ol>
+        <li>loads the conventions it works under;</li>
+        <li>lists the open items the last close left (step 5 below): <code>ctx search tags:open limit:50</code>, or the MCP tool <code>search</code> with <code>tags: ["open"]</code>;</li>
+        <li>asks <code>query</code> whole questions about the task (&#8220;why did we pin pgvector?&#8221;, not &#8220;pgvector pin&#8221;), and reads a block in full with <code>get</code> only when it holds its id;</li>
+        <li>says in two or three sentences what it loaded, then starts.</li>
+      </ol>
+    </dd>
+    <dt>During the work</dt>
+    <dd><p>Your agent looks up before it decides, and checks live state before it acts on a block: a block says where to look, not what is true now. It saves each finding when it happens, with <code>store</code>, one concept per block, and changes an existing block with <code>update</code> instead of adding a second one.</p></dd>
+    <dt>Session close</dt>
+    <dd>
+      <p>A session is closed when every &#8220;done&#8221; in its report rests on the output of a command, not on what the session remembers. If a step is red, your agent reports the red state instead of closing.</p>
+      <ol start="0">
+        <li><strong>Who asks:</strong> a person, or an automation such as a timer, a loop or a hook? An automation continues the task; it does not end it.</li>
+        <li><strong>Working tree:</strong> clean, or every change left is a decision you can name; nothing unpushed without a reason.</li>
+        <li><strong>Checks:</strong> the project&#8217;s own tests and checks ran in this session.</li>
+        <li><strong>Deployment:</strong> if something was deployed, the commit in the repository, the deployed commit, the running service and its health check agree.</li>
+        <li><strong>Store:</strong> every finding a later session needs is in ctx, one concept per block, with source and date, an existing block updated rather than copied; not a summary of the session.</li>
+        <li><strong>Open items:</strong> one block each, with the tag <code>open</code>: neutral, with its source and what it unblocks.</li>
+        <li><strong>Report:</strong> to the person, in the session, not as a block: what was checked and with what result, what was not checked or stays open, and the ids of the open items.</li>
+      </ol>
+      <p>This is not a handover note that retells the session: the findings should already be in the store, per topic, and the close checks that they are. The check for each step is in <a href="https://github.com/GottZ/ctx/blob/root/README.md#bring-your-own-workflow">Bring your own workflow in the README</a>.</p>
+    </dd>
   </dl>
+  <p class="after-table">What there is to start from:</p>
+  <ul class="list">
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/ctx-as-agent-memory.md">ctx as agent memory</a>: the loop for a session and for a subagent, and what goes wrong when an agent treats the store as a tool, including why a retelling handover note is one of those ways.</li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/using-ctx-effectively.md">Using ctx effectively</a>: rules to put into your agent&#8217;s instructions, and how to keep stored memory from drifting.</li>
+    <li><code>ctx init</code> installs, if you agree, two Claude Code hooks for <strong>subagents</strong>. <code>ctx brief --hook</code> hands each new subagent the blocks of the category <code>agent-briefing</code> that are tagged with the project. <code>ctx persist --hook</code> stores each finding the subagent marks with a <code>[PERSIST:category:title]</code> line in its last message (<a href="https://github.com/GottZ/ctx/blob/root/docs/operations.md#claude-code-integration-optional">Claude Code integration</a>). Nothing covers the start or the end of your own session.</li>
+    <li>The Hermes plugin <a href="#plugins"><code>ctx_checkpoint</code></a> shows what a finished integration looks like: it archives the transcript in ctx before Hermes compacts a conversation, and with <code>memory: true</code> it adds recall before each turn and the skill <code>ctx-memory</code>, which tells Hermes how to query and store during the work.</li>
+  </ul>
+</section>
+
+<section class="prose" aria-labelledby="limits">
+  <h2 id="limits">What does not work, or only partly</h2>
+  <ul class="list">
+    <li><strong>ctx does not make an agent remember by itself.</strong> It brings no rules for when to look up or save. An agent that has ctx only as one more tool behaves as if it had no memory; see <a href="#workflow">Bring your own workflow</a>.</li>
+    <li><strong>Nothing answers before the models do, and CPU alone is slow.</strong> Until the backend pool has a chat and an embedding backend, <code>/health</code> answers <code>unhealthy</code> (HTTP 503) and questions fail at the embedding step. On CPU alone, the 27B reference model needs about 4.5 to 5.5 minutes per answer; on a GPU, up to a minute.</li>
+    <li><strong>Full text in German and English only.</strong> The full-text search knows the word forms of these two languages; content in other languages is found by meaning and by its title. A question with umlauts or common German words is translated to English before the search, and no setting turns that off.</li>
+    <li><strong>New text is found by meaning a little later.</strong> Embeddings are computed in the background. A block you just saved or changed is found by its words and its title at once, and by meaning once its new vector exists.</li>
+    <li><strong>No earlier versions.</strong> Saving under the same category and title replaces the whole block, tags and metadata included, and ctx keeps no revision of the old one. Deleting a block archives it; <code>ctx get --include-archived</code> still reads it by its full id.</li>
+    <li><strong>Changing the embedding model is a migration.</strong> Every stored vector has to be computed again in a supervised re-embedding run (<code>ctx admin embed-migration</code>); it is not a setting you flip.</li>
+  </ul>
 </section>
 
 <section class="prose" aria-labelledby="install">
   <h2 id="install">Install</h2>
-  <p>Download the binary for your platform, check that this repository&#8217;s release workflow built it, then install it:</p>
-<pre><code>f=ctx-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+  <p>What you need:</p>
+  <ul class="list">
+    <li><strong>A Linux host with Docker Compose</strong> for the server, and <code>openssl</code> for its keys. ctx runs as a Linux container image; that is the only supported runtime. The compose file builds it, and a database image with PostgreSQL 18, pgvector 0.8.7 and TimescaleDB 2.31.0.</li>
+    <li><strong>A chat model and an embedding model</strong> that ctx can reach over HTTP: Ollama, an OpenAI-compatible server or a hosted API. Chat also works through the Anthropic Messages API, which serves no embeddings. The embedding model must return at least 1024 dimensions. ctx keeps the first 1024, so pick a model whose first 1024 dimensions work on their own, such as the reference Qwen3-Embedding-8B. The tested reference for chat is qwen3.6:27b, with an optional bge-reranker-v2-m3 reranker. None of them is required.</li>
+    <li><strong>For the CLI:</strong> Linux or macOS on amd64 or arm64, or Windows on amd64. To check the download, the GitHub CLI (<code>gh</code>), signed in with <code>gh auth login</code>, or the provenance file of the release (below). Building from source needs Go 1.27.</li>
+  </ul>
+
+  <h3>The CLI</h3>
+  <p>On Linux and macOS. The download goes to a temporary folder, <code>gh attestation verify</code> checks that this repository&#8217;s release workflow built the file, and only then is it installed. Writing to <code>/usr/local/bin</code> needs root; any other folder on your <code>PATH</code> works too.</p>
+<pre tabindex="0"><code>f=ctx-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 tmp=$(mktemp -d)
 curl -fsSL "https://github.com/GottZ/ctx/releases/latest/download/$f" -o "$tmp/$f" \
   &amp;&amp; gh attestation verify "$tmp/$f" -R GottZ/ctx \
   &amp;&amp; install -m 0755 "$tmp/$f" /usr/local/bin/ctx</code></pre>
-  <p>Or build it with Go:</p>
-<pre><code>go install github.com/GottZ/ctx/cmd/ctx@latest</code></pre>
-  <p>Then point the CLI at your server. <code>ctx init</code> asks for the URL and an API key, checks both before saving anything, and sets up the Claude Code hooks:</p>
-<pre><code>ctx init</code></pre>
-  <p>The server itself — the Go daemon plus PostgreSQL 18 with pgvector — starts with <code>docker compose up -d ctx</code>. Every release ships signed build provenance; <a href="https://github.com/GottZ/ctx/releases/latest">see the latest release</a>.</p>
+  <p>On Windows, download <code>ctx-windows-amd64.exe</code> from the <a href="https://github.com/GottZ/ctx/releases/latest">latest release</a> and check it the same way. Each release also carries <code>SHA256SUMS</code> and <code>ctx.intoto.jsonl</code>, the signed provenance as a file: <code>gh attestation verify &lt;file&gt; --bundle ctx.intoto.jsonl -R GottZ/ctx</code> checks against it without signing in. To build the CLI from source instead, with Go 1.27, follow <a href="https://github.com/GottZ/ctx/blob/root/README.md#install">Install in the README</a>.</p>
+
+  <h3>The server</h3>
+  <p>The server runs with Docker Compose from the root folder of a clone of the repository. You create <code>.env</code> from <code>.env.example</code>, readable by you only, with your passwords, the key <code>CTX_SECRETS_KEY</code> and a first admin key, and <code>docker compose up -d ctx</code> builds <code>ctxd</code> and the database and starts both. The <code>ctx</code> service publishes no port of its own; it carries labels for a reverse proxy. Without a proxy, copy the example file <code>docker-compose.override.yml.example</code> to <code>docker-compose.override.yml</code>; it publishes the port <code>127.0.0.1:8080</code>. The steps, command by command, are in <a href="https://github.com/GottZ/ctx/blob/root/README.md#install">Install in the README</a>.</p>
+  <p>Copy <code>CTX_SECRETS_KEY</code> from <code>.env</code> into your password manager. It seals the provider keys in the database, and backups do not contain it: without it, those keys are gone. Every setting and environment variable is in <a href="https://github.com/GottZ/ctx/blob/root/docs/operations.md#environment-variables">Operations</a>.</p>
+
+  <h3>Upgrading from v4</h3>
+  <p>Reach v4.38.0 first. v5.0.0 no longer reads the backend connection variables such as <code>CTX_CHAT_HOST</code> or <code>CTX_EMBED_MODEL</code>; backends live in the pool (<code>ctx backends</code>) and nowhere else. One boot on v4.38.0 carries such a <code>.env</code> configuration into the pool and names every variable and settings row that is left. From v4.19.0 on, skipping that release is not fatal, but you enter your backends again with <code>ctx backends seed</code>. Below v4.19.0, v5 refuses the database. Path and rollback: <a href="https://github.com/GottZ/ctx/blob/root/docs/operations.md#migration-133-the-backend-tuple-rows-are-deleted--and-the-upgrade-hop-that-has-to-come-first">Operations</a>.</p>
+</section>
+
+<section class="prose" aria-labelledby="setup">
+  <h2 id="setup">Set up once</h2>
+  <ol class="steps">
+    <li>
+      <p><strong>Point the CLI at the server and give it models.</strong> Run <code>ctx init</code> with the server&#8217;s address (with the override file: <code>http://127.0.0.1:8080</code>) and the key from <code>CTX_BOOTSTRAP_ADMIN_KEY</code>. If the key is mistyped or the server rejects it, init says so and asks again; it never saves such a key. Then it asks for your model host, its protocol, a chat model and an embedding model, seeds the backend pool and tests what it wrote. Give the host as the ctx container reaches it: <code>localhost</code> there is the container itself. <code>ctx init</code> also offers two Claude Code hooks for subagents and the statusline; <code>ctx init --remove</code> takes them out again.</p>
+<pre tabindex="0"><code>ctx init
+ctx health</code></pre>
+      <p><code>ctx health</code> shows the database and the model backends. For scripts, the backend step alone runs without questions: <code>ctx backends seed --host http://gpu-host:11434 --model qwen3 --embed-model qwen3-embedding</code>.</p>
+    </li>
+    <li>
+      <p><strong>Make keys.</strong> The bootstrap key is a server-admin key. Keep it in your password manager, remove its line from <code>.env</code>, and give the CLI an everyday key in its config file afterwards. The first line below makes an everyday key that writes to the scope <code>private</code>; the second makes a tenant with its own scope and an owner key, shown once:</p>
+<pre tabindex="0"><code>ctx keys create laptop --home private
+ctx tenant create friend "Friend Corp"</code></pre>
+    </li>
+    <li>
+      <p><strong>Connect your agents.</strong> Claude Code and other MCP clients that send a header:</p>
+<pre tabindex="0"><code>{ "mcpServers": { "ctx": { "type": "http", "url": "https://your-ctx-host.example/mcp",
+                           "headers": { "X-Context-Key": "your-api-key-here" } } } }</code></pre>
+      <p>claude.ai and other remote clients sign in with OAuth 2.1: register one with <code>ctx mcp add "Claude AI"</code> and add <code>https://your-ctx-host.example/mcp</code> as a connector. For Hermes, see <a href="#plugins">Hermes plugins</a>.</p>
+    </li>
+    <li>
+      <p><strong>Optional.</strong> Dream Mode: set <code>CTX_DREAM_ENABLED=true</code> in <code>.env</code> and run <code>docker compose up -d ctx</code> again. It keeps calling your chat model in the background; <code>ctx dream throttle</code> adds a pause between its calls. The OpenAI-compatible API: <a href="https://github.com/GottZ/ctx/blob/root/docs/operations.md#upgrading-to-5330-enabling-the-openai-compatible-api">enabling it</a>.</p>
+    </li>
+  </ol>
+  <p>The full walk-through, with every option, is in <a href="https://github.com/GottZ/ctx/blob/root/docs/operations.md#first-run-ctx-init">Operations</a>.</p>
 </section>
 
 <section class="prose" aria-labelledby="use">
   <h2 id="use">How an agent uses it</h2>
-  <p>Five primitives. The same operations exist as MCP tools, so agents in Claude Code or claude.ai call them without shell quoting.</p>
+  <p>From a shell, a script or a hook:</p>
   <table>
-    <thead><tr><th scope="col">To</th><th scope="col">Run</th></tr></thead>
+    <thead><tr><th scope="col">You want to</th><th scope="col">Command</th></tr></thead>
     <tbody>
-      <tr><td>Answer from stored knowledge</td><td><code>ctx query "question"</code></td></tr>
+      <tr><td>Ask a question of your stored knowledge</td><td><code>ctx query "question"</code></td></tr>
       <tr><td>Save a finding</td><td><code>ctx save &lt;category&gt; &lt;title&gt; - &lt;content&gt;</code></td></tr>
       <tr><td>Replace a block</td><td><code>ctx save</code> with the same category and title</td></tr>
-      <tr><td>Browse without an LLM call</td><td><code>ctx search [category] [query:text]</code></td></tr>
-      <tr><td>Open one block</td><td><code>ctx get &lt;block-id&gt;</code></td></tr>
+      <tr><td>Change one field of a block</td><td><code>ctx manage update &lt;block-id&gt; '{"tags":["a","b"]}'</code>, or the MCP tool <code>update</code></td></tr>
+      <tr><td>Browse without a model call</td><td><code>ctx search [category] [query:text] [tags:a,b]</code></td></tr>
+      <tr><td>Read one block</td><td><code>ctx get &lt;block-id&gt;</code></td></tr>
+      <tr><td>Archive a block</td><td><code>ctx delete &lt;block-id&gt;</code></td></tr>
+      <tr><td>See the store and its health</td><td><code>ctx stats</code>, <code>ctx health</code></td></tr>
+      <tr><td>Review flagged duplicates</td><td><code>ctx guard list</code>, <code>ctx guard resolve &lt;id&gt; keep|archive</code></td></tr>
+      <tr><td>Import an Obsidian vault</td><td><code>ctx ingest &lt;path&gt; --dry-run</code>, then without <code>--dry-run</code></td></tr>
+      <tr><td>Call any HTTP route with your key</td><td><code>ctx api GET /api/whoami</code></td></tr>
     </tbody>
   </table>
+  <p class="after-table">Agents do the same over MCP: <code>query</code>, <code>store</code>, <code>search</code>, <code>get</code>, <code>recent</code> and eleven more tools for updates, archiving, confirmed writes, issues, duplicate review and binary blobs (<a href="https://github.com/GottZ/ctx/blob/root/docs/mcp.md">MCP reference</a>).</p>
+</section>
+
+<section class="prose" aria-labelledby="plugins">
+  <h2 id="plugins">Hermes plugins</h2>
+  <p>Three plugins for <a href="https://github.com/NousResearch/hermes-agent">Hermes</a> live in the ctx repository.</p>
+  <dl class="features">
+    <dt><code>ctx_checkpoint</code></dt>
+    <dd>The ctx memory provider: before Hermes shortens (compacts) a long conversation, it archives the direct transcript in ctx, and with <code>memory: true</code> it adds recall before each turn and the skill <code>ctx-memory</code>. Its memory engine was contributed by derLonius (W4-NERF) as <a href="https://github.com/W4-NERF/hermes-ctx-plugin">hermes-ctx-plugin</a>. Listed in the Hermes plugin catalog. <a href="https://github.com/GottZ/ctx/blob/root/integrations/hermes/README.md">README</a> · <a href="https://hermes-agent.nousresearch.com/docs/plugins/ctx_checkpoint">catalog page</a></dd>
+    <dt><code>ctx_handover</code></dt>
+    <dd>Moves a running Hermes session, with its conversation and project folder, from one of your machines to another and back. Works without ctx. Listed in the Hermes plugin catalog. <a href="https://github.com/GottZ/ctx/blob/root/integrations/hermes/plugin/ctx_handover/README.md">README</a> · <a href="https://gottz.de/close-the-lid.mp4">90-second explainer</a> (MP4, 52&#160;MB)</dd>
+    <dt><code>ctx_discord_policy</code></dt>
+    <dd>Lets a Hermes bot talk on your Discord servers while its tools stay with the operators in your Hermes configuration. Works without ctx. Not in the Hermes plugin catalog; you install it from the ctx repository. <a href="https://github.com/GottZ/ctx/blob/root/integrations/hermes/plugin/ctx_discord_policy/README.md">README</a></dd>
+  </dl>
+  <div class="art">
+    <figure>
+      <a href="https://gottz.de/close-the-lid.mp4"><img src="ctx_handover_video.jpg" width="1200" height="675" loading="lazy" decoding="async" alt="ctx_handover: watch the 90-second explainer &#8220;Close the lid&#8221; (MP4, 52 MB)"></a>
+      <figcaption><code>ctx_handover</code>: close the lid, the session goes on.</figcaption>
+    </figure>
+    <figure>
+      <a href="https://github.com/GottZ/ctx/blob/root/integrations/hermes/plugin/ctx_discord_policy/README.md"><img src="ctx_discord_policy.webp" width="1280" height="720" loading="lazy" decoding="async" alt="ctx discord policy: everyone may talk, only you hold the keys. Opens the plugin&#8217;s README."></a>
+      <figcaption><code>ctx_discord_policy</code>: everyone may talk, only you hold the keys.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="prose" aria-labelledby="safety">
+  <h2 id="safety">Safety in short</h2>
+  <dl class="features">
+    <dt>A key reads only what it was given</dt>
+    <dd>Every key writes to its own scope and reads the scopes it was allowed; keys of the default tenant get its <code>shared</code> scope by default. Another tenant&#8217;s data needs a grant. A key whose tenant cannot be resolved is refused.</dd>
+    <dt>Admin work needs an admin key</dt>
+    <dd>Keys, MCP clients, settings, secrets and the backend pool need a server-admin key, or a tenant-admin key for its own tenant.</dd>
+    <dt>Provider keys are sealed</dt>
+    <dd>API keys of model providers are stored encrypted (AES-256-GCM) under <code>CTX_SECRETS_KEY</code>, written through a write-only API that never returns them.</dd>
+    <dt>Sensitive blocks stay on trusted models</dt>
+    <dd>Every block has a sensitivity, and an unclassified block counts as <code>credentials</code>. Every backend has a trust level, and a block reaches only backends trusted for it. A scanner raises blocks that contain credentials.</dd>
+    <dt>Agent writes can wait for a yes</dt>
+    <dd>A key with <code>confirm_writes</code> gets its MCP writes staged; they run only when <code>confirm</code> is called with the exact hash.</dd>
+    <dt>Text from outside is marked</dt>
+    <dd>Blocks that hold tool output or transcripts carry an <code>untrusted</code> flag in results, so an agent reads them as data.</dd>
+  </dl>
+  <p class="after-table">What the server and the CLI send over the network, store and run in the background is listed under <a href="https://github.com/GottZ/ctx/blob/root/README.md#disclosure">Disclosure in the README</a>. The full picture is in <a href="https://github.com/GottZ/ctx/blob/root/docs/security.md">Security</a>; reporting a vulnerability is in <a href="https://github.com/GottZ/ctx/blob/root/SECURITY.md">SECURITY.md</a>.</p>
 </section>
 
 <section class="prose" aria-labelledby="docs">
   <h2 id="docs">Documentation</h2>
   <ul class="doclist">
-    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/architecture.md">Architecture</a> <span>retrieval pipeline, temporal model, Dream Mode, block types, backend pool</span></li>
-    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/operations.md">Operations</a> <span>setup, environment, backups, upgrades and migrations</span></li>
-    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/api.md">HTTP API</a> <span>endpoints, graph, settings, backends</span></li>
-    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/mcp.md">MCP reference</a> <span>every tool, its parameters and its answers</span></li>
-    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/cli.md">CLI reference</a> <span>every <code>ctx</code> subcommand</span></li>
-    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/multi-tenancy.md">Multi-tenancy</a> <span>tenants, scopes, grants, quotas</span></li>
-    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/security.md">Security</a> <span>admin tier, sealed secrets, egress gating</span></li>
-    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/using-ctx-effectively.md">Using ctx effectively</a> <span>memory drift and agent discipline</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/architecture.md">Architecture</a> <span>retrieval pipeline, cyclic time model, Dream Mode, Guard, block types, backend pool</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/operations.md">Operations</a> <span>setup, environment variables, backends, models and hardware, backups, deploy and migrations</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/api.md">HTTP API</a> <span>endpoints, manage actions, graph, settings, backend pool, web chat, the OpenAI-compatible API</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/mcp.md">MCP reference</a> <span>all 16 MCP tools with parameters, answers, error codes and staged writes</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/cli.md">CLI reference</a> <span>the <code>ctx</code> commands, exit codes, tenants, quotas, keys, block grants, model consumers</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/multi-tenancy.md">Multi-tenancy</a> <span>tenants, scopes and blocks, grants, admin tiers, per-tenant settings, secrets and quotas, onboarding</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/security.md">Security</a> <span>admin tier, sealed secrets and break-glass, trust and sensitivity, audit trail</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/development.md">Development</a> <span>building, platforms, the web UI, tests, gates, git hooks</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/ctx-as-agent-memory.md">ctx as agent memory</a> <span>how an agent should treat the store, and what goes wrong when it treats it as a tool</span></li>
+    <li><a href="https://github.com/GottZ/ctx/blob/root/docs/using-ctx-effectively.md">Using ctx effectively</a> <span>why stored memory drifts, agent discipline, calibration</span></li>
   </ul>
 </section>
 
@@ -136,13 +290,13 @@ curl -fsSL "https://github.com/GottZ/ctx/releases/latest/download/$f" -o "$tmp/$
     <dt>Report a vulnerability</dt>
     <dd>Privately, through a <a href="https://github.com/GottZ/ctx/security/advisories/new">GitHub security advisory</a> — never in a public issue. The <a href="https://github.com/GottZ/ctx/blob/root/SECURITY.md">security policy</a> says what to include and what happens next.</dd>
     <dt>Contribute code</dt>
-    <dd>The <a href="https://github.com/GottZ/ctx/blob/root/CONTRIBUTING.md">contributing guide</a> covers forking, the git hooks, tests, commit messages, the <a href="https://github.com/GottZ/ctx/blob/root/CONTRIBUTING.md#coding-standards">coding standards</a> CI enforces and how review works; build and test details are in <a href="https://github.com/GottZ/ctx/blob/root/docs/development.md">the development docs</a>. Issues labelled <a href="https://github.com/GottZ/ctx/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> are a place to start.</dd>
+    <dd>The <a href="https://github.com/GottZ/ctx/blob/root/CONTRIBUTING.md">contributing guide</a> covers forking, the git hooks, tests, commit messages, the <a href="https://github.com/GottZ/ctx/blob/root/CONTRIBUTING.md#coding-standards">coding standards</a> CI enforces and how review works; build and test details are in <a href="https://github.com/GottZ/ctx/blob/root/docs/development.md">the development docs</a>. How <code>root</code> changes and who decides is in <a href="https://github.com/GottZ/ctx/blob/root/GOVERNANCE.md">the governance document</a>. Issues labelled <a href="https://github.com/GottZ/ctx/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> are a place to start.</dd>
   </dl>
 </section>
 
 <section class="prose" aria-labelledby="method">
   <h2 id="method">Built with AI agents</h2>
-  <p>ctx is built by AI agents working against a published calibration: a map of 22 ways LLMs fail at long-running work — memory drift, unattributed certainty, median-user caution — each with real examples. <a href="https://gottz.de/warnings.md">Read the warnings</a>, or the long history of the project in <a href="https://gottz.de/ctx-en.html">the ctx compendium</a>.</p>
+  <p>ctx is built by AI agents working against a published calibration: a map of 22 ways LLMs fail at long-running work (memory drift, certainty without a source, caution tuned for an average user), each with real examples. It is the method behind this project. <a href="https://gottz.de/warnings.md">Read the warnings</a>, or the long history of the project in <a href="https://gottz.de/ctx-en.html">the ctx compendium</a>.</p>
 </section>
 
 </main>
@@ -150,7 +304,7 @@ curl -fsSL "https://github.com/GottZ/ctx/releases/latest/download/$f" -o "$tmp/$
 <footer class="foot">
   <p class="badges"><a href="https://www.bestpractices.dev/projects/15838"><img src="openssf-badge.svg" width="184" height="20" alt="OpenSSF Best Practices badge"></a></p>
   <p>ctx is open source under the <a href="https://github.com/GottZ/ctx/blob/root/LICENSE">Mozilla Public License 2.0</a>, by <a href="https://github.com/GottZ">GottZ</a>.</p>
-  <p>Report vulnerabilities privately through <a href="https://github.com/GottZ/ctx/security/advisories/new">GitHub security advisories</a>. Support the benchmarks: <a href="https://github.com/sponsors/GottZ">GitHub Sponsors</a>, <a href="https://ko-fi.com/gottz">Ko-fi</a>.</p>
+  <p>Report vulnerabilities privately through <a href="https://github.com/GottZ/ctx/security/advisories/new">GitHub security advisories</a>. Support the benchmarks: <a href="https://github.com/sponsors/GottZ">GitHub Sponsors</a>, <a href="https://ko-fi.com/gottz">Ko-fi</a>, ETH via ENS <a href="https://app.ens.domains/gottz.eth">gottz.eth</a>.</p>
 </footer>
 
 </body>
