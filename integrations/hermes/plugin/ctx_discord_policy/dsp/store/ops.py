@@ -10,7 +10,7 @@ import copy
 from typing import Any, Optional
 
 from .file import PolicyStore, Snapshot, utc_now
-from .schema import SchemaError, guild_defaults, is_snowflake, validate_guild
+from .schema import HARD_PROMPT_LIMIT, SchemaError, field_paths, guild_defaults, is_snowflake, validate_guild
 
 
 def _require_ids(bot_id: str, guild_id: str) -> tuple[str, str]:
@@ -114,6 +114,96 @@ def import_guild(store: PolicyStore, bot_id: str, guild_id: str, payload: Any, *
                                 "new": new[section]})
         guilds[guild_id] = new
         return changes or [{"bot": bot_id, "guild": guild_id, "field": "import", "old": None, "new": None}]
+
+    return store.update(mutate, by=by)
+
+
+_NOT_SETTINGS = ("state", "rev", "bound_by", "bound_at", "updated_by", "updated_at")
+
+
+def activate(store: PolicyStore, bot_id: str, guild_id: str, *, by: str,
+             expected_rev: Optional[int] = None) -> Snapshot:
+    """:func:`bind` with an optimistic ``rev`` check (the Discord interface passes the revision it showed)."""
+    bot_id, guild_id = _require_ids(bot_id, guild_id)
+
+    def mutate(document: dict[str, Any]) -> list[dict[str, Any]]:
+        guilds = _guilds(document, bot_id)
+        guild = guilds.get(guild_id)
+        changes = []
+        if guild is None:
+            guild = guilds[guild_id] = guild_defaults()
+            changes.append({"bot": bot_id, "guild": guild_id, "field": "created", "old": None, "new": True,
+                            "expected_rev": expected_rev})
+        if guild["state"] != "active":
+            changes.append({"bot": bot_id, "guild": guild_id, "field": "state", "old": guild["state"],
+                            "new": "active", "expected_rev": expected_rev})
+            guild["state"] = "active"
+            guild["bound_by"] = by
+            guild["bound_at"] = utc_now()
+        return changes
+
+    return store.update(mutate, by=by)
+
+
+def purge_checked(store: PolicyStore, bot_id: str, guild_id: str, *, by: str,
+                  expected_rev: Optional[int] = None) -> Snapshot:
+    """:func:`purge` with an optimistic ``rev`` check."""
+    bot_id, guild_id = _require_ids(bot_id, guild_id)
+
+    def mutate(document: dict[str, Any]) -> list[dict[str, Any]]:
+        guilds = _guilds(document, bot_id)
+        old = guilds.pop(guild_id, None)
+        if old is None:
+            return []
+        if not guilds:
+            document["bots"].pop(bot_id, None)
+        return [{"bot": bot_id, "guild": guild_id, "field": "purged", "old": old, "new": None,
+                 "expected_rev": expected_rev}]
+
+    return store.update(mutate, by=by)
+
+
+def update_fields(store: PolicyStore, bot_id: str, guild_id: str, changes: dict[str, Any], *, by: str,
+                  expected_rev: Optional[int] = None, prompt_cap: int = HARD_PROMPT_LIMIT) -> Snapshot:
+    """Set settings of a configured guild by dotted schema path (``{"progress.grouping": "rotate"}``).
+
+    Every path must be a settings leaf of schema v1 (never ``state``, ``rev`` or bookkeeping); the guild with
+    the changes applied is validated strictly before anything is written. One audit entry per changed path.
+    """
+    bot_id, guild_id = _require_ids(bot_id, guild_id)
+    if not isinstance(changes, dict) or not changes:
+        raise SchemaError("update: no settings given")
+    known = set(field_paths())
+    for path in changes:
+        if path not in known or path in _NOT_SETTINGS:
+            raise SchemaError(f"{path}: not a setting that can be changed here")
+
+    def mutate(document: dict[str, Any]) -> list[dict[str, Any]]:
+        guilds = _guilds(document, bot_id)
+        guild = guilds.get(guild_id)
+        if guild is None:
+            raise SchemaError(f"guild {guild_id} is not configured for bot {bot_id}")
+        candidate = copy.deepcopy(guild)
+        records = []
+        for path, value in changes.items():
+            node = candidate
+            *parents, leaf = path.split(".")
+            for part in parents:
+                node = node[part]
+            old = node.get(leaf)
+            node[leaf] = copy.deepcopy(value)
+            records.append((path, old))
+        clean, _ = validate_guild(candidate, strict=True, prompt_cap=prompt_cap)
+        out = []
+        for path, old in records:
+            node = clean
+            for part in path.split("."):
+                node = node[part]
+            if node != old:
+                out.append({"bot": bot_id, "guild": guild_id, "field": path, "old": old, "new": node,
+                            "expected_rev": expected_rev})
+        guilds[guild_id] = clean
+        return out
 
     return store.update(mutate, by=by)
 
