@@ -1796,7 +1796,9 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 // caller_timeout only when it had the whole budget (recordBackfillFailure).
 // It then sits out a backoff counted from the cut, backoff_base *
 // 2^(attempts-1) up to backoff_cap, so a block that cannot fit the budget
-// costs one request its budget per backoff period and not every request.
+// costs one request its budget per backoff period and not every request. A
+// request that ends mid-embed (the client went away) writes the same memo and
+// counts no attempt, so a cancel restarts the hold and does not raise it.
 // After the backoff it queues where it was cut, behind what was pending at
 // that moment and ahead of what was stored later. Every block of the old end
 // therefore has finitely many ahead of it, however fast callers write and
@@ -1825,10 +1827,12 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 	// caller's deadline used to consume the whole deadline — the question's
 	// own embed was then never admitted and the query answered 500. Every
 	// block's wire call now runs under what is left of the budget; a block
-	// that overruns it is memoized caller_timeout and left to the
-	// background arm (runEmbedBackfillLoop), and the loop ends so the
-	// question embed keeps the rest of the request. Zero = unbounded, the
-	// pre-budget shape (explicit opt-out, same convention as SyncCap).
+	// that overruns it is memoized caller_timeout, which while the arm runs
+	// leaves it to the background arm (runEmbedBackfillLoop) and with the
+	// arm off has this loop retry it after a backoff (below), and the loop
+	// ends so the question embed keeps the rest of the request. Zero =
+	// unbounded, the pre-budget shape (explicit opt-out, same convention as
+	// SyncCap).
 	var budgetDeadline time.Time
 	if budget := cfg.EmbedBackfill.SyncBudget; budget > 0 {
 		budgetDeadline = time.Now().Add(budget)
@@ -1911,6 +1915,10 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 		// client that goes away keeps the pre-budget classification below
 		// (wire, on the backoff curve) instead of a hand-off to the arm —
 		// caller_timeout is a statement about the budget (review finding M1).
+		// embedCtx ends with the budget and with the request; requestGone
+		// tells the two apart by the request's own context: the client went
+		// away, or the request's own deadline passed. Such a cut is no
+		// attempt at the block (recordBackfillFailure).
 		embedCtx, cancelEmbed := ctx, func() {}
 		if !budgetDeadline.IsZero() {
 			embedCtx, cancelEmbed = context.WithDeadline(ctx, budgetDeadline)
@@ -1919,6 +1927,7 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 			embedCtx, nil, chain, backends.RoleEmbed, embedText, embed.PrefixDocument,
 			embedcache.ReportFunc(llm.PoolReporter(h.backendPool)), adm)
 		callerCut := !budgetDeadline.IsZero() && err != nil && embedCtx.Err() != nil
+		requestGone := callerCut && ctx.Err() != nil
 		cancelEmbed()
 		if wired {
 			// TENANT-DECISION(backfill-attribution): "" → NULL. backfillPending is
@@ -1938,7 +1947,7 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 			// unavailable, and hammering it for the rest of the sync-cap
 			// budget within one request helps nobody. A block cut by the
 			// budget ends the loop as well: the budget is spent.
-			h.recordBackfillFailure(ctx, cfg, blockID, err, callerCut, armRuns || count == 0)
+			h.recordBackfillFailure(ctx, cfg, blockID, err, callerCut, requestGone, armRuns || count == 0)
 			break
 		}
 		// Model is the ACTUALLY SERVING backend's role model (served, not the
@@ -1974,7 +1983,21 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 // succeeded, so a request that leaves a block without a memo has still
 // moved the queue. While the arm runs every cut is memoized, as before: the
 // memo is the hand-off to the arm, which embeds without a budget.
-func (h *QueryHandler) recordBackfillFailure(ctx context.Context, cfg *config.Config, blockID string, err error, callerCut, wholeBudget bool) {
+//
+// requestGone: a cut where the request itself ended (the client went away,
+// or the request's own deadline passed) and not the budget. It says nothing
+// about the block either, and it is no attempt: the memo is the one of a cut
+// (caller_timeout, next_attempt_at = now()) with its attempts left where they
+// were (recordRequestGone). Counting it made every cancel double the hold of
+// the block at the old end with the arm off, for a block of any tenant and
+// for its owner's queries too (second review of #214). The memo itself stays:
+// it is the hand-off to the arm, and with the arm off its hold is what keeps
+// a client whose deadline is shorter than the embed from meeting the same
+// block on its next request and being answered 500 on every one. A due
+// memo of another class (a wire memo whose backoff has passed) becomes
+// caller_timeout at its attempts as well: the arm takes the block at once,
+// and with the arm off the hold is the one those attempts already gave.
+func (h *QueryHandler) recordBackfillFailure(ctx context.Context, cfg *config.Config, blockID string, err error, callerCut, requestGone, wholeBudget bool) {
 	var (
 		class      store.EmbedFailureClass
 		normalized string
@@ -1998,11 +2021,38 @@ func (h *QueryHandler) recordBackfillFailure(ctx context.Context, cfg *config.Co
 	// failing queries). Detached context with its own short deadline.
 	memoCtx, cancelMemo := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancelMemo()
-	if ferr := store.RecordEmbedFailure(memoCtx, h.pool, blockID, class, normalized,
-		cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap); ferr != nil {
+	var ferr error
+	if requestGone {
+		ferr = recordRequestGone(memoCtx, h.pool, blockID, normalized)
+	} else {
+		ferr = store.RecordEmbedFailure(memoCtx, h.pool, blockID, class, normalized,
+			cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap)
+	}
+	if ferr != nil {
 		slog.Warn("query backfill: failure memo write failed", "block_id", blockID, "error", ferr)
 	}
-	slog.Warn("query backfill: embed failed — memoized", "block_id", blockID, "class", class, "error", err)
+	slog.Warn("query backfill: embed failed — memoized", "block_id", blockID, "class", class,
+		"attempt_counted", !requestGone, "error", err)
+}
+
+// recordRequestGone writes the memo of a block whose embed ended with its
+// request (recordBackfillFailure, requestGone): the caller_timeout memo
+// store.RecordEmbedFailure writes for a cut, next_attempt_at = now() and one
+// attempt for a block without a memo, except that an existing memo keeps its
+// attempts.
+func recordRequestGone(ctx context.Context, db pgxdb.Execer, blockID, normalizedErr string) error {
+	if _, err := db.Exec(ctx,
+		`INSERT INTO context_embed_failures (block_id, migration_id, attempts, last_error, last_class, next_attempt_at)
+		 VALUES ($1, NULL, 1, $2, $3, now())
+		 ON CONFLICT (block_id) WHERE migration_id IS NULL
+		 DO UPDATE SET last_error      = EXCLUDED.last_error,
+		               last_class      = EXCLUDED.last_class,
+		               next_attempt_at = now()`,
+		blockID, normalizedErr, string(store.EmbedFailureCallerTimeout),
+	); err != nil {
+		return fmt.Errorf("query backfill: record caller_timeout memo of an ended request: %w", err)
+	}
+	return nil
 }
 
 // backfillRow is one pending block as the backfill pick returns it.
