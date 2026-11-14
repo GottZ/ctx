@@ -404,9 +404,13 @@ func TestHealthPingsSnapshotTargets(t *testing.T) {
 	bp := healthTestPool(srvA.URL, srvA.URL, srvA.URL)
 	h := NewHealthHandler(pool, st, bp, nil)
 
+	// embed, chat and dream share one base URL per generation, and a shared
+	// base URL is one probe per call (#265): one request per generation. A
+	// role reading a boot copy would still request generation A after the
+	// swap, which the last check catches.
 	h.Health(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
-	if got := hitsA.Load(); got != 3 {
-		t.Errorf("generation A: %d pings, want 3 (embed+chat+dream)", got)
+	if got := hitsA.Load(); got != 1 {
+		t.Errorf("generation A: %d pings, want 1 (embed+chat+dream share it)", got)
 	}
 	if got := hitsB.Load(); got != 0 {
 		t.Errorf("generation B pinged before the swap: %d", got)
@@ -415,10 +419,10 @@ func TestHealthPingsSnapshotTargets(t *testing.T) {
 	bp.SeedSnapshotForTest(healthTestPool(srvB.URL, srvB.URL, srvB.URL).Snapshot())
 
 	h.Health(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
-	if got := hitsB.Load(); got != 3 {
-		t.Errorf("generation B: %d pings after swap, want 3", got)
+	if got := hitsB.Load(); got != 1 {
+		t.Errorf("generation B: %d pings after swap, want 1", got)
 	}
-	if got := hitsA.Load(); got != 3 {
-		t.Errorf("generation A pinged after the swap: %d (boot copy?)", got-3)
+	if got := hitsA.Load(); got != 1 {
+		t.Errorf("generation A pinged after the swap: %d (boot copy?)", got-1)
 	}
 }
