@@ -77,7 +77,9 @@ func TestStatuslineCacheRejectsForeignFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	padded := strings.Replace(string(data), "{", "{"+strings.Repeat(" ", statuslineCacheMaxBytes), 1)
+	// Valid JSON followed by whitespace: only the size cap rejects it — a
+	// truncated read of it would still parse.
+	padded := string(data) + strings.Repeat(" ", statuslineCacheMaxBytes)
 	if err := os.WriteFile(path, []byte(padded), 0o600); err != nil {
 		t.Fatal(err)
 	}
