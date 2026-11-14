@@ -186,3 +186,24 @@ def test_the_settings_page_without_a_status_names_no_writer(anchor):
     home = anchor.tmp / "owner"
     assert _page(anchor, home, "/status")["writer"] is None
     assert _page(anchor, home, "/overview")["protection"]["writer"] is None
+
+
+def test_the_settings_page_shows_no_host_path_in_its_diagnostics(anchor, monkeypatch):
+    """The page leaves host paths out of every answer (routes.redact_paths); the isolation and writer fields
+    carry exception texts, which can name a file."""
+    home = anchor.tmp / "owner"
+    data = home / "plugin-data" / "ctx_discord_policy"
+    data.mkdir(parents=True)
+    (data / "status.json").write_text(json.dumps({"pid": 4242, "written_at": 0, "writer_lock": True,
+                                                  "writer_kernel": "boot-a"}), encoding="utf-8")
+
+    def unreadable():
+        raise ValueError("cannot parse /srv/private/hermes/profiles/x/config.yaml")
+
+    monkeypatch.setattr(anchor.mod("hermes"), "isolation_mode", unreadable)
+    monkeypatch.setattr(anchor.mod("status_lock"), "writer_state",
+                        lambda directory, status: ("unknown", f"its lock file {directory}/status.lock is gone"))
+    for answer in (_page(anchor, home, "/status"), _page(anchor, home, "/overview")["protection"]):
+        text = json.dumps([answer["isolation"], answer["writer"]])
+        assert "/srv/private" not in text and str(home) not in text, text
+        assert "config.yaml" in text and "status.lock" in text, text

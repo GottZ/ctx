@@ -414,7 +414,8 @@ def get_meta(req: WebRequest) -> WebResponse:
 
 
 def _protection(home: Path, status: Optional[dict]) -> dict[str, Any]:
-    current = {"writer": gateway_writer(home, status), "isolation": status_lock.isolation_report()}
+    # Both carry exception texts, which can name a host file: redacted like every other answer of the page.
+    current = redact_paths({"writer": gateway_writer(home, status), "isolation": status_lock.isolation_report()})
     if not isinstance(status, dict):
         return {"status_at": None, "pid": None, "hermes_version": None, "armed_profiles": [],
                 "security_degraded": [], "comfort_fallbacks": 0, **current}
