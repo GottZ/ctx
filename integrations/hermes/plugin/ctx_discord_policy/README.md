@@ -1,4 +1,4 @@
-<p align="center"><img src="../../assets/ctx_discord_policy.webp" alt="ctx discord policy: everyone may talk, only you hold the keys" width="100%"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/GottZ/ctx/root/integrations/hermes/assets/ctx_discord_policy.webp" alt="ctx discord policy: everyone may talk, only you hold the keys" width="100%"></p>
 
 # ctx_discord_policy
 
@@ -42,8 +42,10 @@ hermes ctx-discord-policy routing set <server id> <profile>   on the host: run a
   used and when a model chosen for a server cannot be used.
 - **A settings page in Hermes Desktop.** Settings → Plugins → ctx_discord_policy: your servers, the operators,
   the status and the change history, next to Hermes' own form for the plugin settings.
-- **It checks itself against your Hermes.** Every place where the plugin hooks into Hermes is tested when it
-  starts. Works without ctx.
+- **It checks itself against your Hermes.** When Hermes loads it and when the Discord bot connects, the plugin
+  checks each place where it hooks into Hermes for the form it needs (name, parameters, sync or async). What
+  Hermes does behind those places is tested in CI, against the Hermes versions listed under Compatibility.
+  Works without ctx.
 
 ## How it works
 
@@ -62,13 +64,17 @@ you activated it:
 When Hermes itself later gains something the plugin adds today (deleting progress messages, one progress line
 that keeps being replaced), the plugin notices and steps back: the status then reads `native` instead of
 `injected` or `wrapped`. Safety checks that cannot be made close the server for members; comfort features fall
-back to Hermes' own behaviour.
+back to Hermes' own behaviour. Under `plugins.isolation: host` none of this applies: nothing of the plugin runs
+for Discord (see Before you start).
 
 ## Before you start
 
 - Hermes 0.22.4 or newer with the Discord platform. The settings page needs Hermes Desktop 0.23.0 or newer.
-- Plugins running in the gateway process, Hermes' default. Under `plugins.isolation: host` the plugin stays
-  inactive and says so in the status.
+- Plugins running in the gateway process, Hermes' default. Under `plugins.isolation: host` Hermes loads the
+  plugin in a separate plugin host, where it stays inactive for Discord: it registers nothing, and Hermes
+  handles Discord without it. Then there is no `hermes ctx-discord-policy` command (Hermes adds no plugin
+  commands from the plugin host); the settings page still opens, its backend runs in the plugin host, and says
+  that the plugin is not active. `hermes plugins info ctx_discord_policy` reads "Runs in: plugin host".
 - A Discord application with the **Message Content** intent (Hermes needs it as well).
 - One session per member: with `group_sessions_per_user: false` Hermes would put several members of a channel
   into one session, so the plugin keeps the server closed for members.
@@ -79,6 +85,11 @@ What does not work, or only partly:
 
 - **The settings page** shows a server's Hermes profile and models but cannot change them; choose them in
   `/policy`.
+- **macOS and Windows** are listed as platforms of the plugin, but its test suites run on Linux only; they
+  have had no run there yet.
+- **The status of a stopped gateway** stays on disk. `hermes ctx-discord-policy status` and the settings page
+  show it and call it stale once the gateway that wrote it has stopped. Outside Linux, or when the gateway
+  runs on another machine or in a VM (Docker Desktop), they cannot tell and say so.
 - **Names on the settings page.** Channel, role and member names come from the running gateway: read directly
   when the page's backend runs in the gateway process, else from the server directory the gateway keeps, or
   over Hermes' plugin RPC (Hermes 0.23.1 or newer). Without either you enter IDs.
@@ -97,13 +108,17 @@ hermes plugins install GottZ/ctx/integrations/hermes/plugin/ctx_discord_policy -
 Restart the gateway afterwards. An update also needs a gateway restart: a newer copy that finds the older one
 still running in the process registers nothing and reports "restart required".
 
-The plugin protects a turn only in a profile where it is enabled. With `multiplex_profiles` and
-`profile_routes`, enable it in **every profile a Discord server routes to**, not only in the profile that runs
-the bot:
+The plugin protects a turn only in a profile where it is installed and enabled, and a Hermes profile finds
+plugins only in its own home. With `multiplex_profiles` and `profile_routes`, install it in **every profile a
+Discord server routes to**, not only in the profile that runs the bot, before that restart:
 
 ```bash
-hermes -p <profile> plugins enable ctx_discord_policy
+hermes -p <profile> plugins install GottZ/ctx/integrations/hermes/plugin/ctx_discord_policy --enable
 ```
+
+Every profile needs the same version: the gateway runs one copy of the plugin for all of them, and a profile
+whose copy has another version registers nothing ("restart required"). `--ref <commit>` (the full
+40-character commit) installs one exact commit everywhere.
 
 A server that routes to a profile without the plugin stays closed for members, and the status names that
 profile. Operators keep Hermes' normal behaviour there.
@@ -136,9 +151,10 @@ restart Hermes Desktop once so the page's backend is mounted.
    Server managers who are not operators can ask you from the same panel; you get a direct message.
 
 Further settings of the plugin (Hermes Desktop shows them as a form): `frame_prompt` (your text before every
-server's guidance), `operator_label`, `guild_prompt_max_chars` (the longest guidance text of a server),
-`notify_operators` (the direct messages), `bot_messages` (`closed`, the default, or `member`: how messages of
-other bots and webhooks are treated), `locked_profiles` (profiles members never reach) and `member_search`.
+server's guidance; a server's own `frame` template replaces it there), `operator_label`,
+`guild_prompt_max_chars` (the longest guidance text of a server), `notify_operators` (the direct messages),
+`bot_messages` (`closed`, the default, or `member`: how messages of other bots and webhooks are treated),
+`locked_profiles` (profiles members never reach) and `member_search`.
 
 ## Everyday use
 
@@ -218,7 +234,7 @@ so, members get no answer until the model works again.
 
 | Hermes | Tested | Notes |
 |---|---|---|
-| `main` | daily and on every change | drift is reported as an issue in [GottZ/ctx](https://github.com/GottZ/ctx/issues?q=label%3Actx_discord_policy) with the label `ctx_discord_policy` |
+| `main` | daily, and on every change (reported there, it does not block) | the daily run reports drift as an issue in [GottZ/ctx](https://github.com/GottZ/ctx/issues?q=label%3Actx_discord_policy) with the label `ctx_discord_policy` |
 | latest three releases | daily | security drift turns the run red |
 | v0.23.0 | on every change | `delete_message` and the per-server progress line are added by the plugin |
 | v0.22.4 | on every change | oldest supported version |

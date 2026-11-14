@@ -59,6 +59,16 @@ test('a changed file is imported and the page shows the new revision', async () 
   assert.equal($(container, '#dsp-field-identity-bot_name').value, 'Imported')
 })
 
+test('a byte order mark in front of the JSON is dropped', async () => {
+  // Decoding the file already drops one byte order mark; the page drops one more that some tools write.
+  const r = routes({ [`POST ${GUILD_PATH}/import`]: () => ({ guild: guildDetail(), warnings: [], changed: false }) })
+  const { container, api } = await mount('Servers', { routes: r, storage: picked() })
+  await choose(container, 'bom.json', '\uFEFF\uFEFF' + JSON.stringify(EXPORT))
+  const [sent] = api.find('POST', `${GUILD_PATH}/import`)
+  assert.ok(sent, 'the file was sent')
+  assert.deepEqual(sent.body.document, EXPORT)
+})
+
 test('a file that is not JSON is refused in the browser and nothing is sent', async () => {
   const { container, api } = await mount('Servers', { routes: routes(), storage: picked() })
   await choose(container, 'broken.json', '{not json')

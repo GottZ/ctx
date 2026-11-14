@@ -630,7 +630,7 @@ def _attachment_resolved(att):
 
 @pytest.mark.parametrize(("filename", "data", "replace", "outcome"), [
     ("rules.md", "New rules.\n".encode(), True, "New rules.\n"),
-    ("rules.txt", "﻿More.".encode("utf-8"), False, "Old text.\n\nMore."),
+    ("rules.txt", "\ufeffMore.".encode("utf-8"), False, "Old text.\n\nMore."),
     ("rules.exe", b"x", True, "only .md and .txt"),
     ("rules.md", b"\xff\xfe\x00", True, "not UTF-8"),
     ("big.md", b"x" * (64 * 1024 + 1), True, "at most 65 536"),

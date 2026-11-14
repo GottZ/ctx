@@ -20,7 +20,9 @@ Subcommands (used by ``.github/workflows/hermes-ctx-discord-policy-upstream.yml`
     One issue per category with a fixed title (``--title-prefix`` in front of it; ``--label`` on every issue
     the run opens and as a filter when it looks for the open one, for a repository shared with other work).
     A new finding set opens or comments the issue; the same set
-    as last time adds nothing; no findings close an open issue, but only after a complete run: while a ref
+    as last time adds nothing (the last set is read from markers in what the run itself wrote: the body of an
+    issue the workflow bot opened and the bot's own comments, never from anyone else's comment); no findings
+    close an open issue, but only after a complete run: while a ref
     went untested (infrastructure finding), the security and comfort issues stay open and a comment names the
     untested refs. Text that came out of a run against upstream code is neutralised before it reaches an issue
     (code spans, no mentions, bounded length).
@@ -59,6 +61,10 @@ TITLES = {
     "infrastructure": "Upstream compatibility run failed",
 }
 MARKER = re.compile(r"<!-- dsp-compat:(security|comfort|infrastructure):([0-9a-f]{16}|none) -->")
+# The account the workflow's GITHUB_TOKEN writes as (REST: user.login, user.type "Bot"). A user login can hold
+# neither "[" nor "]", so nobody else can carry this name.
+BOT_LOGIN = "github-actions[bot]"
+REPO_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+")
 TEXT_LIMIT = 300
 
 
@@ -189,7 +195,7 @@ def summarize(artifacts: Path, expect: list[str], refs_result: str = "success") 
 def neutral(text: Any, limit: int = TEXT_LIMIT) -> str:
     """Text from a run against upstream code, safe in an issue or summary: one line, bounded, as a code span,
     no mention or reference can trigger."""
-    value = re.sub(r"[\x00-\x1f\x7f  ]+", " ", str(text))
+    value = re.sub(r"[\x00-\x1f\x7f\u2028\u2029]+", " ", str(text))
     value = value.replace("`", "'").replace("@", "@\u200b").strip()
     if len(value) > limit:
         value = value[: limit - 1] + "…"
@@ -247,6 +253,35 @@ def last_marker(texts: Iterable[str], category: str) -> Optional[str]:
     return found
 
 
+def run_texts(issue: dict, comments: Iterable[dict], bot: str = BOT_LOGIN) -> list[str]:
+    """What the run itself wrote into an open issue, oldest first: the body of an issue the bot opened and the
+    bot's own comments. A marker in anyone else's text (a comment quoting or forging one, a hand-made issue)
+    never counts: it would let any commenter silence the next update."""
+    def own(entry: Any) -> bool:
+        user = entry.get("user") if isinstance(entry, dict) else None
+        return isinstance(user, dict) and user.get("login") == bot and user.get("type") == "Bot"
+
+    texts = [str(issue.get("body") or "")] if own(issue) else []
+    return texts + [str(c.get("body") or "") for c in comments if own(c)]
+
+
+def json_records(text: str) -> list[Any]:
+    """The values ``gh --jq`` printed, one JSON document per line. A string inside one may hold any character,
+    U+0085 and U+2028 included, which ``str.splitlines`` would cut at, so lines end at "\n" only (gh escapes
+    that one inside strings). A line that is no JSON is skipped: it can only be someone else's text, and the bot
+    then at worst comments once more; text anyone can write must never stop the run."""
+    records = []
+    for line in text.split("\n"):
+        line = line.strip(" \t\r")
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            continue
+    return records
+
+
 def untested(report: dict) -> list[str]:
     """Refs this run could not test (``-``: the ref selection itself failed)."""
     return sorted({f["ref"] for f in report["findings"] if f["category"] == "infrastructure"})
@@ -290,26 +325,32 @@ def _gh(*args: str) -> str:
     return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
 
 
-def _open_issue(repo: str, title: str, label: str = "") -> Optional[dict]:
+def _open_issue(repo: str, title: str, label: str = "", bot: str = BOT_LOGIN) -> Optional[dict]:
     found = json.loads(_gh("issue", "list", "--repo", repo, "--state", "open", "--search", f'"{title}" in:title',
                            *(["--label", label] if label else []),
-                           "--json", "number,title,body", "--limit", "20") or "[]")
+                           "--json", "number,title", "--limit", "20") or "[]")
     for issue in found:
         if issue.get("title") == title:
-            view = json.loads(_gh("issue", "view", str(issue["number"]), "--repo", repo, "--json", "comments"))
-            texts = [issue.get("body") or ""] + [c.get("body") or "" for c in view.get("comments") or []]
-            return {"number": issue["number"], "texts": texts}
+            number = int(issue["number"])
+            # REST, not `gh issue view`: it names the author's account type, so a bot is told from a user.
+            detail = json.loads(_gh("api", f"repos/{repo}/issues/{number}"))
+            lines = _gh("api", "--paginate", f"repos/{repo}/issues/{number}/comments?per_page=100",
+                        "--jq", ".[] | {user: {login: .user.login, type: .user.type}, body}")
+            return {"number": number, "texts": run_texts(detail, json_records(lines), bot)}
     return None
 
 
 def cmd_issues(args: argparse.Namespace) -> int:
     report = json.loads(args.report.read_text(encoding="utf-8"))
+    if not REPO_NAME.fullmatch(args.repo):
+        print(f"--repo {args.repo!r} is not OWNER/NAME", file=sys.stderr)
+        return 2
     gaps = untested(report)
     titles = {category: args.title_prefix + text for category, text in TITLES.items()}
     for category in CATEGORIES:
         findings = [f for f in report["findings"] if f["category"] == category]
         title = titles[category]
-        issue = None if args.dry_run else _open_issue(args.repo, title, args.label)
+        issue = None if args.dry_run else _open_issue(args.repo, title, args.label, args.bot_login)
         action = plan(category, findings, issue, complete=not gaps)
         body = render_issue(category, findings, report, args.run_url,
                             untested=() if category == "infrastructure" else gaps, titles=titles)
@@ -355,6 +396,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     iss.add_argument("--label", default="", help="label of every issue this run opens, and the search filter")
     iss.add_argument("--title-prefix", default="", help="text in front of every issue title")
     iss.add_argument("--dry-run", action="store_true")
+    iss.add_argument("--bot-login", default=BOT_LOGIN,
+                     help="the account the run writes as; only its texts carry markers (default: %(default)s)")
     ver = sub.add_parser("verdict")
     ver.add_argument("report", type=Path)
     args = parser.parse_args(argv)

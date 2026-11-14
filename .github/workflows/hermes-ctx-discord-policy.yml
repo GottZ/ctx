@@ -1,13 +1,15 @@
 # ctx_discord_policy (hermes-agent plugin) — its own suites.
 #
 # The plugin under integrations/hermes/plugin/ctx_discord_policy is Python plus a settings page for Hermes
-# Desktop; none of the Go/web jobs of ci.yml touch it. This workflow runs only when the plugin (or this file)
-# changes:
+# Desktop; none of the Go/web jobs of ci.yml touch it. This workflow runs only when a file of the plugin
+# changes: its directory, this file, the daily upstream workflow (a test of the plugin guards it) or its banner
+# in integrations/hermes/assets; and for a pull request also when its title or body is edited:
 #   - unit, replay and docs tests on Python 3.11 and 3.14 (a missing discord.py fails the job instead of
-#     skipping the replay tests);
-#   - the private-value scan: the plugin directory, every earlier version of a file in it and the messages of
-#     the commits that touch it (not the rest of the repository), plus the pull request's title and body. It
-#     needs the repository secret DSP_PRIVATE_SCAN_KEY; without it (forks) the job fails closed;
+#     skipping the replay tests); the test dependencies are pinned here, the plugin declares none to Hermes;
+#   - the private-value scan: the plugin directory and its files elsewhere (--also), every earlier version of
+#     each and the messages of the commits that touch them (not the rest of the repository), plus the pull
+#     request's title and body. It needs the repository secret DSP_PRIVATE_SCAN_KEY; without it (forks) the
+#     job fails closed;
 #   - contract tests against real Hermes source: the oldest supported release, the latest release and
 #     upstream main (main is reported, it does not block);
 #   - the settings page: the committed desktop/plugin.js is what tools/assemble_ui.py builds from ui/, and
@@ -24,11 +26,18 @@ on:
     paths:
       - "integrations/hermes/plugin/ctx_discord_policy/**"
       - ".github/workflows/hermes-ctx-discord-policy.yml"
+      - ".github/workflows/hermes-ctx-discord-policy-upstream.yml"
+      - "integrations/hermes/assets/ctx_discord_policy.webp"
   pull_request:
     branches: [root]
+    # edited: a title or body changed after the last run is scanned again (all jobs run, so no earlier result
+    # is replaced by a skipped one).
+    types: [opened, synchronize, reopened, edited]
     paths:
       - "integrations/hermes/plugin/ctx_discord_policy/**"
       - ".github/workflows/hermes-ctx-discord-policy.yml"
+      - ".github/workflows/hermes-ctx-discord-policy-upstream.yml"
+      - "integrations/hermes/assets/ctx_discord_policy.webp"
   workflow_dispatch:
 
 permissions: {}
@@ -99,7 +108,11 @@ jobs:
         env:
           DSP_PRIVATE_SCAN_KEY: ${{ secrets.DSP_PRIVATE_SCAN_KEY }}
           PR_TEXT: "${{ github.event.pull_request.title }}\n${{ github.event.pull_request.body }}"
-        run: python ci/private_scan.py --text-env PR_TEXT
+        run: >-
+          python ci/private_scan.py --text-env PR_TEXT
+          --also .github/workflows/hermes-ctx-discord-policy.yml
+          --also .github/workflows/hermes-ctx-discord-policy-upstream.yml
+          --also integrations/hermes/assets/ctx_discord_policy.webp
 
   contract:
     name: ctx_discord_policy · contract hermes@${{ matrix.ref }}

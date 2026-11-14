@@ -428,7 +428,7 @@ function createPolicyUI(deps) {
     return buffer.then(function (buf) {
       try {
         const text = new TextDecoder('utf-8', { fatal: true }).decode(buf)
-        return { text: text.replace(/^﻿/, '').replace(/\r\n?/g, '\n') }
+        return { text: text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n') }
       } catch (e) {
         return { error: 'The file is not UTF-8 text; nothing was loaded.' }
       }
@@ -448,7 +448,7 @@ function createPolicyUI(deps) {
     })
     return content.then(function (raw) {
       try {
-        return { data: JSON.parse(String(raw).replace(/^﻿/, '')) }
+        return { data: JSON.parse(String(raw).replace(/^\uFEFF/, '')) }
       } catch (e) {
         return { error: 'the file is not JSON.' }
       }
@@ -1167,15 +1167,28 @@ function createPolicyUI(deps) {
         'active profile to ' + b.owner_profile + ' to configure it.') : null)
   }
 
+  // Whether the status shown is current: the profile's plugins.isolation lets the plugin run, and the gateway that
+  // wrote the status still runs (the backend asks both; see dsp/status_lock.py).
+  function isolationNotice(isolation) {
+    return isolation && isolation.allows_plugin === false && isolation.mode !== 'unknown'
+      ? '⚠ Not active in this profile: plugins.isolation is ' + isolation.mode + ', and the plugin runs only inside ' +
+        'the gateway process. Hermes handles Discord here without it.'
+      : null
+  }
+  const stopped = (writer) => !!writer && writer.state === 'stopped'
+
   function Protection(props) {
     const p = props.protection || {}
     const armed = Array.isArray(p.armed_profiles) ? p.armed_profiles : []
     const degraded = Array.isArray(p.security_degraded) ? p.security_degraded : []
     const lines = []
+    const inactive = isolationNotice(p.isolation)
+    if (inactive) lines.push(inactive)
     if (p.status_at == null) {
       lines.push('ⓘ No protection status yet: the gateway writes it when it starts with this plugin enabled.')
     } else {
-      lines.push((armed.length ? '✓ armed in ' + plural(armed.length, 'profile', 'profiles') + ' (' + armed.join(', ') + ')'
+      lines.push((stopped(p.writer) ? '⚠ Stale: the gateway that wrote this status has stopped. At its last run: ' : '') +
+        (armed.length ? '✓ armed in ' + plural(armed.length, 'profile', 'profiles') + ' (' + armed.join(', ') + ')'
         : '⚠ not armed in any profile') + ' · comfort: ' + plural(p.comfort_fallbacks || 0, 'fallback', 'fallbacks'))
       if (degraded.length) {
         lines.push('⚠ ' + plural(degraded.length, 'security item', 'security items') + ' degraded: ' +
@@ -2889,14 +2902,20 @@ function createPolicyUI(deps) {
     if (d.pid != null) line.push('gateway pid ' + d.pid)
     if (d.at != null) line.push(relTime(d.at))
     parts.push(h('p', { key: 'line', style: S.secondary }, line.join(' · ') || 'No version information.'))
+    const inactive = isolationNotice(d.isolation)
+    if (inactive) parts.push(h('p', { key: 'isolation', role: 'alert', style: S.p }, inactive))
+    if (stopped(d.writer)) {
+      parts.push(h('p', { key: 'stale', role: 'alert', style: S.p }, '⚠ Stale: the gateway that wrote this status' +
+        (d.pid != null ? ' (pid ' + d.pid + ')' : '') + ' has stopped; this is its last state.'))
+    }
     if (!d.status && !(d.interventions || []).length) {
       parts.push(h('div', { key: 'empty', style: S.card }, h(K.EmptyState, { title: 'No status yet',
         description: 'The gateway writes the protection status when it starts with this plugin enabled. Start or restart ' +
           'the gateway, then come back.' })))
     } else {
       const armed = d.armed_profiles || []
-      parts.push(h('p', { key: 'armed', style: S.p }, armed.length ? '✓ Armed in ' + armed.join(', ') + '.'
-        : '⚠ Not armed in any profile.'))
+      parts.push(h('p', { key: 'armed', style: S.p }, (stopped(d.writer) ? 'At its last run: ' : '') +
+        (armed.length ? '✓ Armed in ' + armed.join(', ') + '.' : '⚠ Not armed in any profile.')))
       parts.push(h('div', { key: 'table', style: { overflowX: 'auto' } }, h('table', { style: S.table },
         h('caption', { style: Object.assign({}, S.small, { textAlign: 'left', paddingBottom: '4px' }) },
           'Interventions. Class S = security (fails closed), K = comfort (falls back to Hermes’ own behaviour).'),

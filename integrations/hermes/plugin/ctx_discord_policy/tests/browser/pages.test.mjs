@@ -42,6 +42,21 @@ test('overview lists the bot, protection, operators and servers with state words
   assert.equal(api.find('GET', '/v1/overview').length, 1)
 })
 
+test('overview says when the protection status is stale or the plugin cannot run here', async () => {
+  const stale = overview({ protection: { ...overview().protection, writer: { state: 'stopped', reason: 'no process holds its lock any more' },
+    isolation: { mode: 'in_process', evidence: 'x', allows_plugin: true } } })
+  let { container } = await mount('Overview', { routes: routes({ 'GET /v1/overview': stale }) })
+  assert.match(text(container), /⚠ Stale: the gateway that wrote this status has stopped\. At its last run: ✓ armed in 1 profile \(default\)/)
+  await cleanup()
+  const host = overview({ protection: { ...overview().protection, writer: { state: 'running', reason: 'x' },
+    isolation: { mode: 'host', evidence: 'x', allows_plugin: false } } })
+  ;({ container } = await mount('Overview', { routes: routes({ 'GET /v1/overview': host }) }))
+  assert.match(text(container), /⚠ Not active in this profile: plugins\.isolation is host, and the plugin runs only inside the gateway process\. Hermes handles Discord here without it\./)
+  await cleanup()
+  ;({ container } = await mount('Overview', { routes: routes() }))   // running, in process: as before
+  assert.doesNotMatch(text(container), /Stale|Not active/)
+})
+
 test('"Activate…" asks first and activates with the row revision', async () => {
   const r = routes({ [`POST /v1/guilds/${BOT}/${GUILD2}/state`]: { guild: { state: 'active', rev: 1 } } })
   const { container, api } = await mount('Overview', { routes: r })
@@ -186,6 +201,21 @@ test('operators: an unreadable configuration blocks saving and says why', async 
 })
 
 // ── status and activity ──────────────────────────────────────────────────────────────────────────────
+
+test('status marks a stopped gateway and host isolation', async () => {
+  const base = { status: { status_schema: 1, pid: 4242 }, page: null, armed_profiles: ['default'], at: secs(NOW - 120000),
+    pid: 4242, plugin_version: '3.0.0', hermes_version: '0.23.1', interventions: [] }
+  let { container } = await mount('Status', { routes: routes({ 'GET /v1/status': { ...base,
+    writer: { state: 'stopped', reason: 'no process holds its lock any more' },
+    isolation: { mode: 'in_process', evidence: 'x', allows_plugin: true } } }) })
+  assert.match(text(container), /⚠ Stale: the gateway that wrote this status \(pid 4242\) has stopped; this is its last state\./)
+  assert.match(text(container), /At its last run: ✓ Armed in default\./)
+  await cleanup()
+  ;({ container } = await mount('Status', { routes: routes({ 'GET /v1/status': { ...base,
+    writer: { state: 'running', reason: 'x' }, isolation: { mode: 'host', evidence: 'x', allows_plugin: false } } }) }))
+  assert.match(text(container), /⚠ Not active in this profile: plugins\.isolation is host/)
+  assert.doesNotMatch(text(container), /Stale/)
+})
 
 test('status lists the interventions by class and downloads status.json', async () => {
   const status = { status_schema: 1, pid: 4242 }

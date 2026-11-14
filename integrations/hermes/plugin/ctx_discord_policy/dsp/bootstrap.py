@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import cli, config, hermes, rpc, snapshot
+from . import cli, config, hermes, rpc, snapshot, status_lock
 from .adapt.status import SECURITY, Outcome, Result, compare_with_previous, write_json_atomic
 from .adapt import interventions
 # Loaded with the anchor, never lazily: after an in-place update a lazy import would mix two versions in one
@@ -103,8 +103,10 @@ def _install_config_reader(ctx: Any) -> None:
 
 def write_status(home: Path) -> Path:
     path = hermes.plugin_data_dir(home) / "status.json"
+    # Held until this process exits: readers can then tell a past run's status from a live one.
+    held = status_lock.hold(path.parent)
     payload = {"status_schema": 1, "written_at": time.time(), "hermes_version": hermes.hermes_version(),
-               **RUNTIME.describe()}
+               "writer_lock": held, "writer_kernel": status_lock.kernel_id(), **RUNTIME.describe()}
     now = payload.get("interventions") or {}
     for change in compare_with_previous(path, payload):
         name = change.split(": ", 1)[0]

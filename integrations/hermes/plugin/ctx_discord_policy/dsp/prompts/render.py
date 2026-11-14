@@ -57,7 +57,7 @@ _LEADING_MARKUP = re.compile(r"^[\s#>`~|=-]+")
 _SNOWFLAKE = re.compile(r"[0-9]{1,20}")
 # Zero-width (non-)joiners are format characters too, but they hold emoji sequences and several scripts
 # together; they cannot break a line or reorder text.
-_KEPT_FORMAT_CHARS = frozenset("‌‍")
+_KEPT_FORMAT_CHARS = frozenset("\u200c\u200d")
 _DROPPED_CATEGORIES = frozenset({"Cc", "Cf", "Cs"})
 # Invisible characters outside Cc/Cf: combining grapheme joiner, Hangul and Khmer fillers, braille blank,
 # and the variation selectors supplement (256 selectors can smuggle a byte payload past a human reader).
