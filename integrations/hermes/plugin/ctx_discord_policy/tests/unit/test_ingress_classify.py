@@ -461,28 +461,19 @@ def test_classification_never_rewrites_the_message(c, anchor):
 # ── end to end through the security core: a wake name cannot smuggle in a gateway command ─────────
 
 
-async def test_wake_name_followed_by_a_command_is_conversation_not_a_command(anchor, monkeypatch, world):
-    """The security-core world of S3 with admission consulting the guild's wake names: the one-line
-    integration of this layer (``classify.direct_signal(adapter, message, guild_cfg)``)."""
-    from fakes.gateway import APP_ID, GUILD, MEMBER as WORLD_MEMBER, message, user
+async def test_wake_name_followed_by_a_command_is_conversation_not_a_command(anchor, world):
+    """The security-core world of S3: admission classifies with the guild's configuration
+    (``classify.classify(adapter, message, guild_cfg)``), so the guild's wake names address the bot."""
+    from fakes.gateway import MEMBER as WORLD_MEMBER, message, user
 
-    c = anchor.mod("ingress.classify")
-    admission = anchor.mod("ingress.admission")
     world.configure(identity__wake_names=["Nova"])
-    original = c.direct_signal
-
-    def integrated(adapter, msg_, guild_config=None):
-        cfg = world.store.read().guild(APP_ID, GUILD)
-        return original(adapter, msg_, cfg)
-
-    monkeypatch.setattr(admission.classify, "direct_signal", integrated)
     for mid, text in enumerate(("Nova, /restart", "hey Nova /restart", "@Nova /restart", "Nova: /yolo"), 7101):
         turn = await world.deliver(message(user(WORLD_MEMBER), content=text, mid=mid))
         assert isinstance(turn, dict), text               # addressed by name: a public turn ran ...
         assert turn["event"].get_command() is None, text  # ... as conversation, not as a gateway command
         assert turn["event"].text == text
         assert "BLOCKED" in turn["tools"][0]               # and it has no tool authority
-        route = anchor.RUNTIME.message_routes.get((str(turn["event"].source.chat_id), str(mid)))
+        route = anchor.RUNTIME.message_routes.get((str(turn["event"].source.chat_id), str(mid), WORLD_MEMBER))
         assert route.lane == "public" and route.mode == "direct"
     # the name glued to a command is not addressed at all: stock, nothing runs
     assert await world.deliver(message(user(WORLD_MEMBER), content="Nova /restart", mid=7110)) is None

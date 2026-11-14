@@ -27,8 +27,12 @@ AUDIT_RING = 500
 _SNOWFLAKE = re.compile(r"[1-9][0-9]{5,19}")
 _SKILL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # Knowledge lookups are MCP read tools by name ("mcp__<server>__get…" etc.): a state field may fill the
-# catalog entry's parameter list, never name an effectful tool such as terminal.
-_TOOL = re.compile(r"mcp__[A-Za-z0-9_-]{1,64}__(?:get|read|fetch|lookup|view|show)[A-Za-z0-9_]{0,48}")
+# catalog entry's parameter list, never name an effectful tool such as terminal. Hermes names MCP tools
+# "mcp__<server>__<tool>" and both parts may contain "__", so the read verb must open the LAST part: in
+# "mcp__kb__delete__get_x" the tool can be "delete__get_x" of server "kb", and in "mcp__kb__get__wipe" the tool
+# "wipe" of server "kb__get". Neither part may contain "__" (one boundary only, so the verb is the tool's).
+_TOOL = re.compile(r"(?=.{1,120}\Z)mcp__[A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*"
+                   r"__(?:get|read|fetch|lookup|view|show)[A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_?", re.S)
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029]")
 _LINE_BREAK = re.compile(r"[\n\r\x0b\x0c\x1c-\x1e\x85\u2028\u2029]")
 

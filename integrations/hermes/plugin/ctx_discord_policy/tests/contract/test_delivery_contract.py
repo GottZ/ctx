@@ -48,9 +48,9 @@ def _adapter(real, world):
     return adapter
 
 
-def _source(real, channel, message, *, thread=False):
+def _source(real, channel, message, *, thread=False, user_id=OPERATOR):
     return real.SessionSource(platform=real.Platform.DISCORD, chat_id=str(channel.id),
-                              chat_type="thread" if thread else "group", user_id=OPERATOR,
+                              chat_type="thread" if thread else "group", user_id=user_id,
                               thread_id=str(channel.id) if thread else None,
                               parent_chat_id=str(channel.parent_id) if thread else None,
                               guild_id=str(channel.guild.id), message_id=str(message.id))
@@ -173,20 +173,21 @@ async def test_real_processing_hooks_hide_reactions_on_ambient_turns_only(real):
     adapter = _adapter(real, world)
     from gateway.platforms.event import ProcessingOutcome
 
-    async def run(message):
-        event = real.MessageEvent(text=str(message.content), source=_source(real, general, message),
-                                  raw_message=message, message_id=str(message.id))
+    async def run(message, route):
+        source = _source(real, general, message, user_id=route.session_user_id)   # as Hermes builds it
+        event = real.MessageEvent(text=str(message.content), source=source, raw_message=message,
+                                  message_id=str(message.id))
         await adapter.on_processing_start(event)
         await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
         return event
 
     ambient = world.post(general, "nice weather", MEMBER, "Mallory")
-    _route(real, ambient, lane="public", mode="ambient")
+    ambient_route = _route(real, ambient, lane="public", mode="ambient")
     direct = world.post(general, "hey bot", MEMBER, "Mallory")
-    _route(real, direct, lane="public", mode="direct")
-    event = await run(ambient)
+    direct_route = _route(real, direct, lane="public", mode="direct")
+    event = await run(ambient, ambient_route)
     assert event.raw_message is ambient                  # the caller's event is never modified
-    await run(direct)
+    await run(direct, direct_route)
     assert ambient.reactions == []
     assert direct.reactions and direct.reactions[0][0] == "add"
 

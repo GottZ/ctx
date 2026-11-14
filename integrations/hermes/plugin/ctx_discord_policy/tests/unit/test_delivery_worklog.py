@@ -137,7 +137,7 @@ async def test_worklog_channel_of_another_guild_is_refused(anchor):
     assert scene.world.sent_to(b.work.id) == [] and scene.threads_of(b.work) == []
     assert all(scene.world.guild_of(chat) == GUILD_A for chat, _, _ in scene.world.log)
     assert scene.world.sent_to(a.general.id) == ["tool output", "more output"]
-    state = scene.worklog.DELIVERY.states.get(scene.worklog.state_key(scene.adapter, route.channel_id, route.message_id))
+    state = scene.worklog.DELIVERY.states.get(scene.worklog.state_key(scene.adapter, *route.key))
     assert "not a channel of guild" in state.failed
 
 

@@ -296,9 +296,12 @@ def test_activate_pause_resume_and_purge(web):
     assert web.call("POST", url, {"expected_rev": 1, "state": "paused"}).body["guild"]["state"] == "paused"
     assert web.call("POST", url, {"expected_rev": 1, "state": "active"}).status == 409
     assert web.call("POST", url, {"expected_rev": 2, "state": "active"}).body["guild"]["state"] == "active"
+    held = web.data / "notify-state.json"                 # the operator messages keep the last guidance per server
+    held.write_text(json.dumps({f"guidance:{BOT}:{GUILD}": {"text": "held copy", "at": 1.0}}), encoding="utf-8")
     purged = web.call("POST", url, {"expected_rev": 3, "state": "unbound", "purge": True})
     assert purged.status == 200 and purged.body["purged"] is True
     assert web.store.read().guild(BOT, GUILD) is None
+    assert json.loads(held.read_text(encoding="utf-8")) == {}              # a deleted server leaves none behind
     assert web.call("POST", url, {"expected_rev": 0, "state": "sideways"}).status == 422
 
 

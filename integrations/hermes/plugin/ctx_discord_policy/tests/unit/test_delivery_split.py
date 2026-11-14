@@ -6,7 +6,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 
-from unit.delivery_fakes import (GUILD_A, GUILD_B, OPERATOR, ProcessingOutcome, Scene, SendResult, World,
+import pytest
+from unit.delivery_fakes import (BOT, GUILD_A, GUILD_B, OPERATOR, ProcessingOutcome, Scene, SendResult, World,
                                  make_adapter_class, runner_metadata)
 
 
@@ -247,3 +248,31 @@ async def test_install_rejects_a_missing_configuration_accessor(anchor):
         assert "get_guild_config" in str(exc)
     else:
         raise AssertionError("install accepted no configuration accessor")
+
+
+@pytest.mark.parametrize("first", ["member", "operator"])
+async def test_a_public_final_never_lands_in_the_worklog_of_another_users_route_of_its_message(anchor, first):
+    """S5 review finding 3, delivery side: one message carries a member's public route and an operator's route
+    (one of them woke the bot by reaction on the other's message, in either order); the operator's turn opened a
+    worklog. The member's final answer, sent by Hermes' base adapter after its turn (no route context, only the
+    reply anchor), goes to the origin, never into the operator's worklog thread."""
+    from unit.delivery_fakes import MEMBER
+
+    scene = Scene(anchor)
+    a = scene.guild(GUILD_A)
+    msg = scene.world.post(a.general, "what does the log say?", MEMBER if first == "member" else OPERATOR, "Mallory")
+    routes = {}
+    for who in (first, "operator" if first == "member" else "member"):
+        route = anchor.routes.Route(bot_id=BOT, guild_id=GUILD_A, channel_id=str(a.general.id),
+                                    message_id=str(msg.id), author_id=MEMBER if who == "member" else OPERATOR,
+                                    lane="public" if who == "member" else "operator")
+        anchor.RUNTIME.message_routes.put(route.key, route)          # registered in this order
+        routes[who] = route
+    routes["operator"].tool_started = True
+    origin = str(a.general.id)
+    with scene.in_turn(routes["operator"]):
+        await scene.adapter.send(origin, "tool: tail", reply_to=str(msg.id), metadata=runner_metadata(routes["operator"]))
+    [thread] = scene.threads_of(a.work)
+    assert scene.world.sent_to(thread.id) == ["tool: tail"]
+    await scene.adapter.send(origin, "member answer", reply_to=str(msg.id), metadata={"notify": True})
+    assert "member answer" in scene.world.sent_to(origin) and scene.world.sent_to(thread.id) == ["tool: tail"]

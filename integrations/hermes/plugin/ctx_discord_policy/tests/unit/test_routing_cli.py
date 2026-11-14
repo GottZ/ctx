@@ -116,3 +116,22 @@ def test_list_shows_choice_configuration_and_locks(world):
     rows = json.loads(out)["servers"]
     assert rows[0]["guild"] == GUILD and rows[0]["chosen"] == "beta" and rows[0]["configured"] == "beta"
     assert rows[0]["exceptions"] == [{"name": "ops", "profile": "gamma", "locked": True}]
+
+
+def test_routing_is_a_subcommand_of_hermes_discord_policy(world, anchor):
+    """``hermes ctx-discord-policy routing …`` through the plugin's own command (the CLI Hermes registers)."""
+    cli = anchor.mod("cli")
+    parser = argparse.ArgumentParser()
+    cli.setup(parser)
+
+    def run(*argv):
+        out, err = io.StringIO(), io.StringIO()
+        code = cli.run(parser.parse_args(list(argv)), home=anchor.home, out=out, err=err)
+        return code, out.getvalue(), err.getvalue()
+
+    code, out, err = run("routing", "set", GUILD, "beta")
+    assert (code, err) == (0, "") and chosen(world) == "beta" and "saved in Hermes' configuration" in out
+    code, out, _ = run("routing", "list", "--json")
+    assert code == 0 and json.loads(out)["servers"][0]["chosen"] == "beta"
+    code, _, err = run("routing", "set", GUILD, "gamma", "--bot", "../../etc")
+    assert code == 1 and "--bot" in err and chosen(world) == "beta"

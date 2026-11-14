@@ -243,9 +243,171 @@ async def test_end_to_end_comfort(e2e):
 
     assert lines(GUILD_A) == ["b"] and lines(GUILD_C) == ["a", "b"]
 
-    # Every comfort intervention reports a working outcome; /policy runs on the bot binding's own store.
+    # Every comfort intervention reports a working outcome (K5 reaction wakeup, K7 hydration, K8 server models,
+    # R1 profile per server and P2 the settings page's server directory among them); /policy runs on the bot
+    # binding's own store.
     status = e2e.runtime.status.snapshot()["interventions"]
-    for name in ("K1", "K1b", "K2", "K2b", "K3", "K4", "K6"):
+    for name in ("K1", "K1b", "K2", "K2b", "K3", "K4", "K5", "K6", "K7", "K8", "R1", "P2"):
         assert status.get(name, {}).get("outcome") in ("native", "injected", "wrapped", "ok"), (name, status.get(name))
     ui = sys.modules[f"{ANCHOR}.ui.items"].binding_for(e2e.native)
     assert ui is not None and ui.store is e2e.runtime.bots.for_bot(BOT).store
+
+
+# ── S-INT 2: a wake name, admission, hydration and the turn context on real discord.py objects ────────────
+
+
+@pytest.fixture
+async def e2e_real(hermes, tmp_path, monkeypatch, request):
+    """One home that runs the bot, Hermes' real Discord admission and handler on a real ``commands.Bot`` whose
+    cache holds real Guild/Role/Member/TextChannel objects (discord.py computes every permission), the A7 wrapper
+    on ``GatewayRunner`` with a stand-in turn beneath it that dispatches the hooks the way Hermes does."""
+    import asyncio
+
+    from fakes.discord_world import BOT as RBOT, MEMBER as RMEMBER, OPERATOR as ROPERATOR, DiscordWorld
+
+    _evict(ANCHOR)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "root"))
+    homes = Homes(tmp_path)
+    _config(homes.root, [ROPERATOR])
+    manager = load_in(homes.root)
+    import discord
+    from discord.ext import commands
+    from gateway.config import Platform
+    from gateway.platforms.helpers import MessageDeduplicator
+    from gateway.run import GatewayRunner
+    from hermes_cli import plugins
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from plugins.platforms.discord.adapter import DiscordAdapter
+
+    class PolicyAdapter(DiscordAdapter):
+        """A subclass keeps the class shared by this test process untouched."""
+
+    pending = {}
+
+    async def _handle_message(self, event):
+        home = self._resolve_profile_home_for_source(event.source)
+        seen = pending["seen"]
+        scope = set_hermes_home_override(str(home))
+        try:
+            ids = dict(session_id=f"s-{event.message_id}", turn_id=f"t-{event.message_id}")
+            seen["context"] = plugins.invoke_hook("pre_llm_call", platform="discord", **ids)
+            seen["route"] = runtime().route.get()
+        finally:
+            reset_hermes_home_override(scope)
+        return "ran"
+
+    monkeypatch.setattr(GatewayRunner, "_handle_message", _handle_message)
+    bot = commands.Bot(command_prefix="!", intents=discord.Intents.default(), application_id=int(RBOT))
+    await bot.__aenter__()                      # binds the running loop; no login, no gateway
+    model = DiscordWorld(bot)
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = SimpleNamespace(multiplex_profiles=False, profile_routes=[], group_sessions_per_user=True,
+                                    thread_sessions_per_user=False)
+    runner._resolve_profile_home_for_source = lambda source: homes.root
+    runner._profile_name_for_source = lambda source, adapter_profile=None: None
+    adapter = PolicyAdapter.__new__(PolicyAdapter)
+    adapter.platform, adapter.config, adapter._owner_profile = Platform.DISCORD, None, None
+    adapter.gateway_runner, adapter._dedup, adapter._client = runner, MessageDeduplicator(), bot
+    adapter._allowed_user_ids, adapter._allowed_role_ids = {"950000000000000999"}, set()
+    stubs = dict(
+        _is_pairing_approved_user=lambda _uid: False, _get_parent_channel_id=lambda _c: None,
+        _warn_if_fail_closed_default=lambda: None, _get_allowed_channels=lambda: set(),
+        _get_ignored_channels=lambda: set(), _discord_free_response_channels=lambda: set(),
+        _discord_require_mention=lambda: True, _voice_text_channels={}, _in_bot_thread=lambda m: False,
+        _get_no_thread_channels=lambda: set(), _extra_or_env_flag=lambda *a, **k: True,
+        _discord_free_response_auto_thread=lambda: False, _get_effective_topic=lambda ch, is_thread=False: None,
+        _discord_history_backfill=lambda: False, _resolve_channel_skills=lambda *a: None,
+        _resolve_channel_prompt=lambda *a: None, _text_batch_delay_seconds=0,
+        _threads=SimpleNamespace(mark_async=lambda _t: asyncio.sleep(0)))
+    for name, value in stubs.items():
+        setattr(adapter, name, value)
+
+    async def media(_attachments):
+        return [], [], [], None
+
+    adapter._collect_attachment_media = media
+    captured = []
+
+    async def capture(event):
+        captured.append(event)
+
+    adapter.handle_message = capture
+    manager.get_platform_handler_factories = lambda platform: (
+        [(sys.modules[f"{ANCHOR}.adapt.interventions"].discord_platform_handler, PLUGIN)] if platform == "discord"
+        else [])
+    token = set_hermes_home_override(str(homes.root))
+    try:
+        adapter._wire_plugin_handlers(bot)                 # Hermes' own wiring calls the policy's factory
+    finally:
+        reset_hermes_home_override(token)
+
+    def runtime():
+        return sys.modules[f"{ANCHOR}.runtime"].RUNTIME
+
+    ops = sys.modules[f"{ANCHOR}.store.ops"]
+    store = runtime().bots.for_bot(RBOT).store
+    ops.bind(store, RBOT, model.guild.id, by="cli")
+    guild = ops.export(store.read(), RBOT, str(model.guild.id))["bots"][RBOT]["guilds"][str(model.guild.id)]
+    guild["identity"]["wake_names"] = ["Nova"]
+    ops.import_guild(store, RBOT, str(model.guild.id), guild, by="cli", prompt_cap=6000)
+
+    async def turn(author, channel, content, mid):
+        msg = SimpleNamespace(id=mid, author=author, guild=model.guild, channel=channel, type=discord.MessageType.default,
+                              mentions=[], content=content, reference=None, attachments=[], message_snapshots=[],
+                              created_at=None, webhook_id=None)
+        admitted, role = adapter._discord_message_admission(msg, claim=True)
+        if not admitted:
+            return None
+        before = len(captured)
+        await adapter._handle_message(msg, role_authorized=role)
+        assert len(captured) == before + 1
+        event = captured[-1]
+        pending["seen"] = {}
+        result = await GatewayRunner._handle_message(runner, event)
+        return dict(pending["seen"], result=result, event=event)
+
+    try:
+        yield SimpleNamespace(model=model, bot=bot, turn=turn, runtime=runtime(), member=RMEMBER, hermes=hermes)
+    finally:
+        part = request.node.name.removeprefix("test_end_to_end_")
+        hermes.write_report(f"status-matrix-e2e-{part}", {"interventions": runtime().status.snapshot()["interventions"]})
+        sys.modules[f"{ANCHOR}.snapshot"].detach(RBOT)        # the P2 directory heartbeat of the bound bot
+        await bot.__aexit__(None, None, None)
+        _evict(ANCHOR)
+
+
+async def test_end_to_end_wake_name_admission_hydration_turn_context(e2e_real):
+    """A member addresses the bot by its wake name (no mention) and links a message: admitted on the public
+    lane, the linked message of a channel the whole audience can read is quoted into the turn, and the turn
+    runs under its route with the assembled context. The same message linking a moderators-only channel is
+    admitted as well, but nothing of that channel reaches the turn."""
+    from fakes.discord_world import _channel_payload
+
+    m = e2e_real.model
+    news = m.text_class(state=e2e_real.bot._connection, guild=m.guild,
+                        data=_channel_payload("950000000000000208", "announcements"))   # everyone reads it
+    m.guild._add_channel(news)
+    note = m.post(news, m.mod, "the meetup moved to friday", 950000000000009401)
+    secret = m.post(m.mods, m.mod, "mods only: ban list", 950000000000009402)
+    link = f"https://discord.com/channels/{m.guild.id}/{news.id}/{note.id}"
+    hidden = f"https://discord.com/channels/{m.guild.id}/{m.mods.id}/{secret.id}"
+
+    readable = await e2e_real.turn(m.member, m.general, f"Nova, what does this say? {link}", 950000000000009411)
+    assert readable is not None and readable["result"] == "ran"
+    route = readable["route"]
+    assert route.lane == "public" and route.mode == "direct" and route.author_id == e2e_real.member
+    text = readable["event"].text
+    assert text.startswith("Nova, what does this say?") and "Linked Discord message" in text
+    assert "> the meetup moved to friday" in text
+    context = _contexts(readable)
+    assert "[Capability lane: public]" in context and "[Conversation lane: direct]" in context
+
+    closed = await e2e_real.turn(m.member, m.general, f"Nova, and this? {hidden}", 950000000000009412)
+    assert closed is not None and closed["route"].lane == "public"
+    assert "ban list" not in closed["event"].text and "Linked Discord message" not in closed["event"].text
+    assert m.mods.fetched == []                                      # not even read
+
+    assert await e2e_real.turn(m.member, m.general, f"ask Nova about {link}", 950000000000009413) is None
+    status = e2e_real.runtime.status.snapshot()["interventions"]
+    for name in ("K5", "K7", "K8", "R1"):
+        assert status.get(name, {}).get("outcome") in ("native", "injected", "wrapped", "ok"), (name, status.get(name))

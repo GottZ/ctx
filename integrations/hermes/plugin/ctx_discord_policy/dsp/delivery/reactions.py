@@ -56,15 +56,18 @@ def hide_reactions(event: Any) -> Any:
     return clone
 
 
-def event_keys(event: Any) -> list[tuple[str, str]]:
+def event_keys(event: Any) -> list[tuple[str, str, str]]:
+    """Registry keys (``Route.key``) this event's route can have: its chat or the raw message's channel, its
+    message id, and the session user of its source (routes of other users of the same message never match)."""
     keys = []
     source = getattr(event, "source", None)
     raw = getattr(event, "raw_message", None)
     message_id = str(getattr(event, "message_id", None) or getattr(source, "message_id", None)
                      or getattr(raw, "id", None) or "")
+    user_id = str(getattr(source, "user_id", None) or "")
     for channel in (getattr(source, "chat_id", None), getattr(getattr(raw, "channel", None), "id", None)):
-        if channel is not None and message_id:
-            keys.append((str(channel), message_id))
+        if channel is not None and message_id and user_id:
+            keys.append((str(channel), message_id, user_id))
     return keys
 
 

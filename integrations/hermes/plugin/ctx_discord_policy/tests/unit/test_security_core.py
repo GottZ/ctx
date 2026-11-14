@@ -570,7 +570,7 @@ async def test_one_route_object_from_admission_to_the_tool_hook(world, anchor):
     hook updated through the ContextVar and the turn binding."""
     runtime = anchor.RUNTIME
     turn = await world.deliver(message(user(OPERATOR), mid=10901, mentions=mention()))
-    stored = runtime.message_routes.get((CHANNEL, "10901"))
+    stored = runtime.message_routes.get((CHANNEL, "10901", OPERATOR))
     bound = runtime.turn_routes.get((turn["session"], turn["turn"]))
     assert stored is bound and stored is turn["event"].raw_message._dsp_route
     assert stored.tool_started is True  # set by pre_tool_call on the operator's allowed tool
@@ -602,3 +602,145 @@ def test_routed_message_keeps_the_real_message_methods(anchor):
 
     asyncio.run(clone.add_reaction("👀"))
     assert calls == ["👀"]
+
+
+# ── S-INT 2: the conversation layer at the gate (S5 classify), hydration in the handler, per-user routes ──
+
+
+async def test_a_wake_name_addresses_the_bot_without_a_mention(world):
+    world.configure(identity__wake_names=["Nova"])
+    turn = await world.deliver(message(user(MEMBER), mid=12001, content="Nova, what is new?"))
+    assert isinstance(turn, dict), turn
+    route = turn["event"].raw_message._dsp_route
+    assert route.lane == "public" and route.mode == "direct" and "BLOCKED" in turn["tools"][0]
+    assert await world.deliver(message(user(MEMBER), mid=12002, content="ask Nova later")) is None  # about it
+
+
+async def test_an_operator_in_a_worklog_thread_runs_in_the_worklog_mode(world):
+    world.configure(worklog__channel=OTHER_CHANNEL)
+    thread = dict(channel="900000000000000778", channel_type=11, parent_id=OTHER_CHANNEL)
+    turn = await world.deliver(message(user(OPERATOR), mid=12011, mentions=mention(), **thread))
+    assert turn["event"].raw_message._dsp_route.mode == "worklog"
+    assert any("[Conversation lane: worklog]" in str(c.get("context", "")) for c in turn["context"])
+
+
+@pytest.mark.parametrize("kind", ["webhook", "system"])
+async def test_webhooks_and_system_messages_never_get_a_route(world, kind):
+    msg = message(user(MEMBER, system=kind == "system"), mid=12021, mentions=mention())
+    msg.webhook_id = 900000000000000990 if kind == "webhook" else None
+    assert world.anchor.mod("ingress.admission").decide(world.adapter, msg) is None
+    assert await world.deliver(msg) is None and world.runner.turns == []
+
+
+async def test_routes_carry_a_conversation_mode_never_an_unresolved_signal(world):
+    """``Signal.mode`` is no route mode (``none``, ``maybe_reply``): an unaddressed public turn that stock answers
+    and an unresolved reply that turns out to answer the bot both run as ``direct`` with an assembled context
+    (an unknown mode would block the public turn at ``pre_llm_call``)."""
+    world.rebuild(stock_allowed={MEMBER}, free_channels={CHANNEL})
+    unaddressed = await world.deliver(message(user(MEMBER), mid=12061, content="no mention here"))
+
+    async def fetch_own(mid):
+        return SimpleNamespace(author=SimpleNamespace(id=int(BOT_USER)))
+
+    reply = message(user(MEMBER), mid=12062, reference=SimpleNamespace(message_id=42, resolved=None))
+    reply.channel.fetch_message = fetch_own
+    replied = await world.deliver(reply)
+    for turn in (unaddressed, replied):
+        assert turn["event"].raw_message._dsp_route.mode == "direct"
+        assert any("[Conversation lane: direct]" in str(c.get("context", "")) for c in turn["context"]), turn["context"]
+
+
+async def test_public_members_are_never_admitted_in_a_worklog_thread_this_process_opened(world, anchor):
+    """The worklog channel moved after a thread was opened: the thread still carries operator tool output."""
+    worklog = anchor.mod("delivery.worklog")
+    worklog.DELIVERY.threads.put("900000000000000779", (APP_ID, GUILD))
+    msg = message(user(MEMBER), mid=12031, mentions=mention(), channel="900000000000000779", channel_type=11,
+                  parent_id=CHANNEL)
+    assert anchor.mod("ingress.admission").decide(world.adapter, msg).excluded
+    assert await world.deliver(msg) is None and world.runner.turns == []
+
+
+def _hydration(anchor, monkeypatch, text="> quoted", attachments=()):
+    hydrate, calls = anchor.mod("ingress.hydrate"), []
+
+    async def fake(adapter, msg, route, cfg, **_):
+        calls.append((msg, route, cfg))
+        return hydrate.HydrationResult(text=text, attachments=tuple(attachments))
+
+    monkeypatch.setattr(anchor.mod("adapt.interventions").hydrate, "hydrate", fake)
+    return calls
+
+
+async def test_an_admitted_message_reaches_the_turn_with_its_hydration(world, anchor, monkeypatch):
+    calls = _hydration(anchor, monkeypatch, attachments=[SimpleNamespace(id=7, url="u7")])
+    msg = message(user(MEMBER), mid=12041, mentions=mention(), content="see this link")
+    msg.attachments = [SimpleNamespace(id=6, url="u6")]
+    turn = await world.deliver(msg)
+    raw = turn["event"].raw_message
+    assert raw.content == "see this link\n\n> quoted" and [a.id for a in raw.attachments] == [6, 7]
+    [(original, route, cfg)] = calls
+    assert original is msg and route is raw._dsp_route and cfg["identity"] is not None  # the decision's snapshot
+
+
+async def test_hydration_only_for_addressed_turns_and_never_operator_chatter(world, anchor, monkeypatch):
+    """Unaddressed messages (stock may answer them in free channels) are not hydrated. Operator turns skip the
+    audience rule, so an operator's ambient chatter is not hydrated either (its answer would go to everyone in
+    the channel); an operator who addresses the bot gets it, also in an ambient channel."""
+    calls = _hydration(anchor, monkeypatch)
+    world.rebuild(stock_allowed={MEMBER, OPERATOR}, free_channels={CHANNEL})
+    member = await world.deliver(message(user(MEMBER), mid=12051, content="no mention here"))
+    operator = await world.deliver(message(user(OPERATOR), mid=12052, content="fyi <#900000000000000201>"))
+    assert member["event"].raw_message.content == "no mention here"
+    assert operator["event"].raw_message.content == "fyi <#900000000000000201>" and calls == []
+    world.configure(conversation__ambient_channels=[CHANNEL])
+    chatter = await world.deliver(message(user(OPERATOR), mid=12053, content="fyi mods, see <#900000000000000201>"))
+    assert chatter["event"].raw_message._dsp_route.mode == "ambient"
+    assert chatter["event"].raw_message.content.endswith("<#900000000000000201>") and calls == []
+    ambient_member = await world.deliver(message(user(MEMBER), mid=12054, content="look <#900000000000000201>"))
+    assert ambient_member["event"].raw_message.content.endswith("> quoted") and len(calls) == 1   # audience rule
+    asked = await world.deliver(message(user(OPERATOR), mid=12055, mentions=mention(), content="see <#900000000000000201>"))
+    assert asked["event"].raw_message.content.endswith("> quoted") and len(calls) == 2
+
+
+def _woken(anchor, original, reactor):
+    reactions, classify = anchor.mod("ingress.reactions"), anchor.mod("ingress.classify")
+    wakeup = classify.ReactionWakeup(bot_id=APP_ID, guild_id=GUILD, channel_id=CHANNEL, message_id=str(original.id),
+                                     reactor_id=reactor, emoji="unicode:\N{WAVING HAND SIGN}")
+    return reactions.WakeupMessage(original, author=user(reactor), channel=original.channel, guild=original.guild,
+                                   content=f"<@{BOT_USER}> [REACTION WAKEUP] Reply to the referenced message.",
+                                   bot_user=user(BOT_USER, bot=True), message_type="reply", wakeup=wakeup)
+
+
+async def test_a_reaction_wakeup_never_replaces_the_route_of_the_reacted_to_message(world, anchor):
+    """S5 review finding 3: the woken message reuses the reacted-to message's id (Hermes' reply anchor). Its
+    route must not replace the author's: a turn of that message still waiting in Hermes' queue (restored
+    without the raw message) runs under its own route, and the reactor's route survives it."""
+    reactor = "900000000000000501"
+    first = await world.deliver(message(user(MEMBER), mid=13001, mentions=mention()))
+    assert "BLOCKED" in first["tools"][0]
+    original = message(user(MEMBER), mid=13001, mentions=mention())
+    assert await anchor.mod("ingress.reactions").dispatch_through_gate(world.adapter, _woken(anchor, original, reactor))
+    woken = world.adapter.last_result
+    assert woken["event"].source.user_id == reactor and woken["event"].source.message_id == "13001"
+    queued = SimpleNamespace(source=first["event"].source, raw_message=None, message_id="13001")
+    replay = await world.runner._handle_message(queued)
+    assert isinstance(replay, dict) and "BLOCKED" in replay["tools"][0], replay
+    again = SimpleNamespace(source=woken["event"].source, raw_message=None, message_id="13001")
+    assert isinstance(await world.runner._handle_message(again), dict)
+    # The exact binding stays: one admission answers for one message of one user in one channel.
+    authority = anchor.mod("policy.authority")
+    stranger = SimpleNamespace(**{**vars(first["event"].source), "user_id": "900000000000000502"})
+    assert not authority.authorizes(stranger)
+
+
+async def test_a_wakeup_never_takes_the_widened_mark_of_the_reacted_to_message(world, anchor):
+    """The allowlist was widened for the member's message; before its handler runs, a reaction wakeup on the
+    same message is handled. The member's message, unroutable by then (server paused), is still refused."""
+    msg = message(user(MEMBER), mid=13101, mentions=mention())
+    assert world.adapter._discord_message_admission(msg, claim=True) == (True, False)
+    original = message(user(MEMBER), mid=13101, mentions=mention())
+    assert await anchor.mod("ingress.reactions").dispatch_through_gate(
+        world.adapter, _woken(anchor, original, "900000000000000501"))
+    anchor.mod("store.ops").set_state(world.store, APP_ID, GUILD, "paused", by="cli")
+    assert await world.adapter._handle_message(msg, False) is False
+    assert msg not in world.adapter.handled

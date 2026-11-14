@@ -67,7 +67,8 @@ def hermes(tmp_path_factory) -> HermesCheckout:
 # Hermes classes the plugin wraps (class attributes, process-wide). Tests in this directory share one
 # process: a wrapper installed by one test's (later evicted) runtime must not leak into the next test.
 _WRAPPED_TARGETS = (
-    ("gateway.run", "GatewayRunner", ("_handle_message", "_is_user_authorized")),
+    ("gateway.run", "GatewayRunner", ("_handle_message", "_is_user_authorized", "_resolve_session_agent_runtime",
+                                      "_fallback_baseline_model")),
     ("plugins.platforms.discord.adapter", "DiscordAdapter",
      ("_discord_message_admission", "_handle_message", "delete_message")),
     ("gateway.run_turn_runner", "TurnRunner", ("_progress_absorb", "_progress_edit_state")),

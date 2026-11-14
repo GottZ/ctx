@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from .. import config
+from .. import config, hermes
 from ..adapt.status import write_json_atomic
 from ..store.file import _file_lock  # the store's thread+process lock, reused
 from ..store.ops import guidance_digest
@@ -58,6 +58,15 @@ class NotifyState:
 
     def get(self, key: str) -> Any:
         return self._read().get(key)
+
+
+def forget_guidance(home: Any, bot_id: Any, guild_id: Any) -> None:
+    """A server purged on the host (CLI, settings page) leaves no held copy of its guidance in the operator
+    message state of its owner home (``/policy`` does the same through :meth:`Notifier.forget_guild`)."""
+    path = hermes.plugin_data_dir(Path(home)) / "notify-state.json"
+    if path.exists():
+        key = f"guidance:{bot_id}:{guild_id}"
+        NotifyState(path).change(lambda data: data.pop(key, None))
 
 
 def diff_text(old: str, new: str, *, name: str = "guidance") -> str:
@@ -221,6 +230,39 @@ class Notifier:
                     await self.flush_pending(key, key[len(prefix):])
                 else:
                     self._arm_timer(key, key[len(prefix):], "this server", left)
+
+    # ── server models ──
+
+    async def model_unavailable(self, guild_id: str, lane: str, model: str, reason: str) -> int:
+        """A server's chosen model can't be used: tell the operators, at most once per server, lane and day."""
+        if not self.enabled():
+            return 0
+        key = f"model:{self.binding.bot_id}:{guild_id}:{lane}"
+        now = time.time()
+
+        def claim(data: dict) -> bool:
+            last = data.get(key)
+            if isinstance(last, (int, float)) and now - last < STATUS_WINDOW:
+                return False
+            data[key] = now
+            return True
+
+        if not self.state.change(claim):
+            return 0
+        from .panels import clean
+
+        guild = self.binding.store.read().guild(self.binding.bot_id, str(guild_id)) or {}
+        get_guild = getattr(self.binding.client, "get_guild", None)
+        server = getattr(get_guild(int(guild_id)), "name", None) if callable(get_guild) and str(guild_id).isdigit() \
+            else None
+        closes = lane == "public" and (guild.get("models") or {}).get("on_unavailable") == "close"
+        whose = "members' turns" if lane == "public" else "operator turns"
+        meanwhile = ("Members' messages there are not answered until it works again (the server is set to close then)."
+                     if closes else "Those turns use the profile's model until it works again.")
+        text = (f"The model chosen for {whose} in **{clean(server or 'a server', 80)}** (id {guild_id}), "
+                f"{clean(model, 200)}, can't be used: {clean(reason, 300)}. {meanwhile} "
+                "Next step: /policy → Models in that server, or `hermes ctx-discord-policy status` on the host.")
+        return await self.dm_operators(text)
 
     # ── protection status ──
 

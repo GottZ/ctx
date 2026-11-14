@@ -59,6 +59,11 @@ class BoundedMap(Generic[K, V]):
         with self._lock:
             return len(self._data)
 
+    def values_where(self, predicate) -> list[V]:
+        """Values whose key matches ``predicate``, oldest first (a scan: for rare fallback lookups only)."""
+        with self._lock:
+            return [value for key, value in self._data.items() if predicate(key)]
+
     def drop_where(self, predicate) -> int:
         with self._lock:
             doomed = [k for k in self._data if predicate(k)]
@@ -130,8 +135,9 @@ class Runtime:
         self.armed = ArmedRegister()
         self.status = StatusRegister()
         self.instances: dict[str, Instance] = {}
-        # Exact per-message routes: (channel_id, message_id) -> Route. Restored FIFO events find theirs here.
-        self.message_routes: BoundedMap[tuple[str, str], Any] = BoundedMap()
+        # Exact per-message routes: (channel_id, message_id, session_user_id) -> Route (``Route.key``). Restored
+        # FIFO events find theirs here; two users' routes of one message (a reaction wakeup) never collide.
+        self.message_routes: BoundedMap[tuple[str, str, str], Any] = BoundedMap()
         # (session_id, turn_id) -> Route, bound in pre_llm_call for tool calls that lost the ContextVar.
         self.turn_routes: BoundedMap[tuple[str, str], Any] = BoundedMap()
         # Sessions that ever carried a public route: a turn there without an exact route gets no tools.
@@ -140,8 +146,8 @@ class Runtime:
         self.config_ctx: Any = None
         # Discord bots bound through the platform-handler factory (adapter -> application id -> owner home).
         self.bots = BotRegistry()
-        # Message ids whose admission widened the allowlist: never handed on unrouted afterwards.
-        self.widened: BoundedMap[str, float] = BoundedMap()
+        # (message id, author id) whose admission widened the allowlist: never handed on unrouted afterwards.
+        self.widened: BoundedMap[tuple[str, str], float] = BoundedMap()
         # Hermes session key -> (lane, session user) of the routes that used it: a session never mixes the
         # operator lane with another author's public lane.
         self.session_lanes: BoundedMap[str, tuple[str, str]] = BoundedMap()

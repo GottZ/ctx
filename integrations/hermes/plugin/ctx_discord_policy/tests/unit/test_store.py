@@ -228,7 +228,12 @@ def test_single_line_fields_reject_every_line_break(store_mod, text):
 
 @pytest.mark.parametrize("tool, ok", [("mcp__kb__get", True), ("mcp__notes__get_page", True),
                                       ("mcp__notes__read_note", True), ("terminal", False),
-                                      ("mcp__kb__delete", False), ("skill_view", False), ("mcp__kb__", False)])
+                                      ("mcp__kb__delete", False), ("skill_view", False), ("mcp__kb__", False),
+                                      ("mcp__my_notes__getNote", True),
+                                      # "__" ends the server part: the read verb must open the tool part, which
+                                      # is the last one ("delete__get_x" of kb, "wipe" of kb__get)
+                                      ("mcp__kb__delete__get_x", False), ("mcp__kb__get__wipe", False),
+                                      ("mcp__kb___get", False), ("mcp__" + "k" * 120 + "__get", False)])
 def test_knowledge_entries_name_only_mcp_read_tools(store_mod, tool, ok):
     entry = {"lanes": {"knowledge": [{"tool": tool, "id": "doc-1"}]}}
     if ok:

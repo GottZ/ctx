@@ -7,7 +7,8 @@ Order of events in a gateway process:
 2. The Discord adapter connects; after ``ready`` Hermes calls the factory in the scope of the profile that
    runs the bot: A3 binds ``type(adapter)`` (A5 admission, A6 handler), A7 is installed if still missing,
    the bot is bound to its owner home, the layers' bind steps run (``bootstrap.BIND_STEPS``: comfort
-   interventions, the interface), and the status file is written there.
+   interventions, profile and model per server, reaction wakeup, hydration probe, the interface), and the
+   status file is written there.
 Until step 2 has completed for an adapter, every message of that adapter keeps stock behaviour.
 
 Every wrapper wraps the *current* attribute (MRO included), passes ``*args, **kwargs`` through, and is
@@ -22,9 +23,9 @@ import time
 from typing import Any
 
 from .. import RUNTIME_API, hermes
-from ..ingress import admission, classify
+from ..ingress import admission, classify, hydrate
 from ..policy import authority, hooks
-from ..policy.routes import snowflake
+from ..policy.routes import AMBIENT, snowflake
 from ..runtime import RUNTIME
 from .probes import probe_callable
 from .status import SECURITY, Outcome, Result
@@ -76,16 +77,46 @@ def _make_admission(original: Any) -> Any:
         if widened:
             # Stock reports role authorization for every admitted human once roles are configured; for an
             # author we let in, it must never travel on (it would authorize an unrouted turn by roles).
-            RUNTIME.widened.put(str(getattr(message, "id", "") or ""), time.time())
+            RUNTIME.widened.put(_widened_key(message), time.time())
             return (result[0], False)
         return result
 
     return policy_admission
 
 
+def _widened_key(message: Any) -> tuple[str, str]:
+    """Per message AND author: a reaction wakeup reuses the reacted-to message's id with the reactor as author."""
+    return (str(getattr(message, "id", "") or ""), str(getattr(getattr(message, "author", None), "id", "") or ""))
+
+
+def _hydrates(route: Any, decision: Any) -> bool:
+    """Which turns get hydration. Members' turns when addressed or ambient: hydration then applies the audience
+    rule (only what everyone who sees the answer may read). Operator turns skip that rule (the operator's own
+    decision), so they are hydrated only when the operator addresses the bot, never from ambient chatter or an
+    unaddressed message that stock may answer in public. Unaddressed messages are not hydrated at all (no
+    reads for messages the bot may ignore)."""
+    if not decision.addressed:
+        return False
+    return not (route.is_operator and route.mode == AMBIENT)
+
+
+async def _hydrated(adapter: Any, message: Any, route: Any, decision: Any) -> Any:
+    """A6 hydration (K7): what the message points at, read with its author's rights (see :func:`_hydrates`).
+    Never raises; ``None`` = nothing to add."""
+    if not _hydrates(route, decision):
+        return None
+    try:
+        result = await hydrate.hydrate(adapter, message, route, decision.guild_config)
+    except Exception:  # hydrate() never raises; a broken seam must not cost the turn
+        logger.warning("ctx_discord_policy: hydration failed; the turn runs without it", exc_info=True)
+        return None
+    return result if (result.text or result.attachments) else None
+
+
 def _make_handle(original: Any) -> Any:
     async def policy_handle(self: Any, message: Any, *args: Any, **kwargs: Any) -> Any:
         message_id = str(getattr(message, "id", "") or "")
+        widened_key = _widened_key(message)
         decision = admission.decide(self, message)
         if decision is not None and decision.excluded:
             return False
@@ -94,21 +125,25 @@ def _make_handle(original: Any) -> Any:
             # Not a reply to the bot after all: unaddressed. Routed all the same (stock decides whether
             # the bot reacts, the lane still applies), unless only the widened allowlist let it in.
             decision.addressed = False
-            if message_id in RUNTIME.widened:
+            if widened_key in RUNTIME.widened:
                 decision = None
         if decision is None or not message_id:
-            if message_id and message_id in RUNTIME.widened:
+            if message_id and widened_key in RUNTIME.widened:
                 # Admitted only because the policy widened the allowlist: never hand it on unrouted.
-                RUNTIME.widened.pop(message_id)
+                RUNTIME.widened.pop(widened_key)
                 return False
             return await original(self, message, *args, **kwargs)
-        RUNTIME.widened.pop(message_id)
+        RUNTIME.widened.pop(widened_key)
         route = decision.route(message_id)
         RUNTIME.message_routes.put(route.key, route)
+        hydrated = await _hydrated(self, message, route, decision)
         self_user = getattr(getattr(self, "_client", None), "user", None)
-        routed = admission.routed_message(message, route, self_user=self_user, message_type=_reply_type(self),
-                                          addressed=decision.addressed,
-                                          isolate_thread=decision.in_thread and not route.is_operator)
+        routed = admission.routed_message(
+            message, route, self_user=self_user, message_type=_reply_type(self), addressed=decision.addressed,
+            isolate_thread=decision.in_thread and not route.is_operator,
+            content=hydrated.apply(getattr(message, "content", "") or "") if hydrated is not None else None,
+            attachments=(hydrated.merged_attachments(getattr(message, "attachments", None) or ())
+                         if hydrated is not None and hydrated.attachments else None))
         return await original(self, routed, *args, **kwargs)
 
     return policy_handle

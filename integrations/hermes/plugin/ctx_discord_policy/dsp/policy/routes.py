@@ -58,8 +58,11 @@ class Route:
         return self.lane == OPERATOR
 
     @property
-    def key(self) -> tuple[str, str]:
-        return (self.channel_id, self.message_id)
+    def key(self) -> tuple[str, str, str]:
+        """Registry key: chat, message and the session user Hermes sees. One Discord message can carry
+        several routes (a reaction wakeup reuses the reacted-to message's id as its reply anchor), one per
+        user; a route of one user never replaces or answers for another's."""
+        return (self.channel_id, self.message_id, self.session_user_id)
 
     def matches_source(self, source: Any, *, platform_is_discord: bool) -> bool:
         """Exactly this route's message source: same platform, same chat, same (session) user."""

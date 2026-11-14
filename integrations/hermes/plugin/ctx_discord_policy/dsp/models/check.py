@@ -130,4 +130,11 @@ def public_refusal(runner: Any, event: Any, route: Any, guild: dict, target: Opt
     if not callable(resolver) or source is None:
         return "the profile of this message can't be determined"
     ok, why = availability(resolver(source), choice["provider"], choice["model"])
-    return None if ok else f"the members' model {choice['model']} is unavailable ({why})"
+    from . import runtime  # late: runtime imports this module
+
+    key = (str(route.bot_id), str(route.guild_id), PUBLIC)
+    if ok:
+        runtime.note_available(key)
+        return None
+    runtime.note_unavailable(key, why, choice["model"])      # the status row and the operators learn of it
+    return f"the members' model {choice['model']} is unavailable ({why})"

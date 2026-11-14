@@ -212,6 +212,27 @@ async def test_members_model_unavailable_with_close(world):
     assert ran(await world.deliver(message(user(OPERATOR), mid=12003, mentions=mention())))
 
 
+async def test_a_server_closed_for_an_unavailable_model_tells_the_operators(world, monkeypatch):
+    """``on_unavailable: close`` with K8 in place and the members' model unavailable: members are refused at
+    admission (no K8 resolution ever runs for them), so the closing check itself reports it (every time; the
+    operator message throttles itself)."""
+    ops, status = world.anchor.mod("store.ops"), world.anchor.mod("adapt.status")
+    check, runtime = world.anchor.mod("models.check"), world.anchor.mod("models.runtime")
+    ops.set_models(world.store, APP_ID, GUILD, {"models.public": {"provider": "deepseek", "model": "deepseek-chat"},
+                                               "models.on_unavailable": "close"}, by=OPERATOR)
+    world.anchor.RUNTIME.status.record(status.Result("K8", "K", status.Outcome.WRAPPED, "server models", "test"))
+    available = {"ok": False}
+    monkeypatch.setattr(check, "availability", lambda home, provider, model, **_: (available["ok"], "no credential"))
+    heard = []
+    monkeypatch.setattr(runtime, "UNAVAILABLE_LISTENERS", [lambda *args: heard.append(args)])
+    for mid in (12101, 12102):
+        assert await world.deliver(message(user(MEMBER), mid=mid, mentions=mention())) is None
+    assert heard == [(APP_ID, GUILD, "public", "deepseek-chat", "no credential")] * 2
+    available["ok"] = True
+    assert ran(await world.deliver(message(user(MEMBER), mid=12103, mentions=mention())))
+    assert (APP_ID, GUILD, "public") not in runtime.UNAVAILABLE
+
+
 async def test_status_stays_closed_while_any_server_is_closed(world):
     """The A4-P status is per server: a member's turn passing in another server does not clear it."""
     other = "900000000000000110"

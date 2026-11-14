@@ -50,6 +50,9 @@ SESSION_ROUTES: BoundedMap = BoundedMap()
 APPLIED: BoundedMap = BoundedMap()
 # (bot, guild, lane) -> (since, reason) for chosen models that could not be applied.
 UNAVAILABLE: dict = {}
+# listener(bot_id, guild_id, lane, model, reason), called whenever a chosen model is found unavailable (the
+# wiring throttles and sends the operators a direct message). A failing listener never affects the turn.
+UNAVAILABLE_LISTENERS: list = []
 
 
 def _link(source: Any, session_key: str) -> Optional[tuple[str, str, str]]:
@@ -97,17 +100,22 @@ def _status_with_count() -> None:
                                  current.probe))
 
 
-def _note_unavailable(key: tuple, reason: str) -> None:
+def note_unavailable(key: tuple, reason: str, model: str = "") -> None:
+    """A server's chosen model for one lane can't be applied (K8 fell back, or ``on_unavailable: close``)."""
     new = key not in UNAVAILABLE
     if new:
-        logger.warning("ctx_discord_policy: K8: server %s %s model unavailable: %s; using the profile's model",
-                       key[1], key[2], reason)
+        logger.warning("ctx_discord_policy: K8: server %s %s model unavailable: %s", key[1], key[2], reason)
     UNAVAILABLE[key] = (UNAVAILABLE.get(key, (time.time(), ""))[0], reason)
     if new:
         _status_with_count()
+    for listener in list(UNAVAILABLE_LISTENERS):  # every time: a message that could not go out yet is retried
+        try:
+            listener(*key, model, reason)
+        except Exception:
+            logger.warning("ctx_discord_policy: K8 unavailable listener failed", exc_info=True)
 
 
-def _note_available(key: tuple) -> None:
+def note_available(key: tuple) -> None:
     if UNAVAILABLE.pop(key, None) is not None:
         _status_with_count()
 
@@ -141,10 +149,10 @@ def choose(runner: Any, source: Any, session_key: Optional[str]) -> Optional[tup
         return None
     ok, why, runtime = check.resolve_in_scope(choice["provider"], choice["model"])
     if not ok:
-        _note_unavailable((bot_id, guild_id, lane), why)
+        note_unavailable((bot_id, guild_id, lane), why, choice["model"])
         APPLIED.pop(str(skey))
         return None
-    _note_available((bot_id, guild_id, lane))
+    note_available((bot_id, guild_id, lane))
     APPLIED.put(str(skey), (choice["provider"], choice["model"]))
     return choice["model"], runtime
 

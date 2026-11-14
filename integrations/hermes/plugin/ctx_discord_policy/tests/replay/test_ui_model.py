@@ -262,3 +262,144 @@ async def test_switch_confirmation_names_every_model_choice_it_drops(ui):
         assert "a server manager's pick" in text_
     finally:
         await h.close()
+
+
+async def test_a_model_change_is_announced_in_the_audit_channel_without_the_model(ui):
+    ui.ops.update_fields(ui.store, BOT, GUILD, {"audit_channel": "900000000000000555"}, by="cli")
+    h = await harness(ui)
+    posts = []
+
+    async def post(channel_id, line):
+        posts.append((channel_id, line))
+
+    ui.binding.channel_sink = post
+    try:
+        page = await open_models(ui, h)
+        await choose(ui, h, page, "public", "deepseek", "deepseek-chat")
+        assert models(ui)["public"] == DS
+        [(channel, line)] = posts
+        assert channel == "900000000000000555" and line.startswith(f"<@{OP_ID}> changed the models")
+        assert line.endswith(": public.") and "deepseek" not in line
+    finally:
+        await h.close()
+
+
+async def test_operators_hear_once_a_day_when_a_chosen_model_cannot_be_used(ui):
+    import asyncio
+
+    ui.ops.set_models(ui.store, BOT, GUILD, {"models.public": DS}, by="cli")
+    h = await harness(ui)
+    dms = []
+
+    async def record(user_id, line, file=None):
+        dms.append((user_id, line))
+
+    ui.binding.notifier = record
+    wiring, runtime = ui.anchor.mod("wiring"), ui.anchor.mod("models.runtime")
+    wiring._UI[BOT] = ui.binding
+
+    async def unavailable(lane="public"):
+        runtime.note_unavailable((BOT, GUILD, lane), "no credential for deepseek in this profile", "deepseek-chat")
+        await asyncio.gather(*list(ui.binding._tasks))
+
+    try:
+        await unavailable()
+        [(to, line)] = dms
+        assert to == str(OP_ID) and "members' turns" in line and "deepseek" in line and "profile's model" in line
+        runtime.note_available((BOT, GUILD, "public"))
+        await unavailable()                                   # unavailable again the same day: no second message
+        assert len(dms) == 1
+        wiring._MODEL_NOTICES.clear()                         # a restart: the day is kept next to the store
+        runtime.note_available((BOT, GUILD, "public"))
+        await unavailable()
+        assert len(dms) == 1
+        ui.ops.set_models(ui.store, BOT, GUILD, {"models.on_unavailable": "close"}, by="cli")
+        await unavailable("operator")                          # another lane has its own day
+        assert len(dms) == 2 and "operator turns" in dms[-1][1] and "profile's model" in dms[-1][1]
+    finally:
+        await h.close()
+
+
+async def test_a_closed_server_tells_the_operators_why_members_get_no_answer(ui):
+    import asyncio
+
+    ui.ops.set_models(ui.store, BOT, GUILD, {"models.public": DS, "models.on_unavailable": "close"}, by="cli")
+    h = await harness(ui)
+    dms = []
+
+    async def record(user_id, line, file=None):
+        dms.append((user_id, line))
+
+    ui.binding.notifier = record
+    ui.anchor.mod("wiring")._UI[BOT] = ui.binding
+    try:
+        ui.anchor.mod("models.runtime").note_unavailable((BOT, GUILD, "public"), "no credential", "deepseek-chat")
+        await asyncio.gather(*list(ui.binding._tasks))
+        [(_, line)] = dms
+        assert "not answered" in line and "close" in line
+    finally:
+        await h.close()
+
+
+async def test_the_message_reaches_the_operators_when_k8_notices_on_another_thread(ui):
+    """Hermes resolves a session's model on worker threads too, some running a loop of their own: the message
+    is always handed to the bot client's loop (its HTTP session lives there)."""
+    import asyncio
+
+    ui.ops.set_models(ui.store, BOT, GUILD, {"models.public": DS, "models.operator": DS}, by="cli")
+    h = await harness(ui)
+    dms, loops = [], []
+
+    async def record(user_id, line, file=None):
+        dms.append((user_id, line))
+        loops.append(asyncio.get_running_loop())             # where the bot's HTTP session would be used
+
+    ui.binding.notifier = record
+    ui.anchor.mod("wiring")._UI[BOT] = ui.binding
+    runtime = ui.anchor.mod("models.runtime")
+
+    async def arrived(count):
+        for _ in range(100):
+            if len(dms) >= count:
+                return True
+            await asyncio.sleep(0.02)
+        return False
+
+    async def on_a_loop_of_its_own():
+        runtime.note_unavailable((BOT, GUILD, "operator"), "no credential", "deepseek-chat")
+
+    try:
+        await asyncio.to_thread(runtime.note_unavailable, (BOT, GUILD, "public"), "no credential", "deepseek-chat")
+        assert await arrived(1) and "members' turns" in dms[0][1]
+        await asyncio.to_thread(lambda: asyncio.run(on_a_loop_of_its_own()))
+        assert await arrived(2) and "operator turns" in dms[1][1]
+        assert loops == [asyncio.get_running_loop()] * 2 == [h.client.loop] * 2
+    finally:
+        await h.close()
+
+
+async def test_a_message_before_the_interface_is_bound_is_sent_by_the_next_occurrence(ui):
+    """K8 can notice an unavailable model before ``/policy`` is bound (or while it is off): nothing is lost,
+    the next occurrence sends it."""
+    import asyncio
+
+    ui.ops.set_models(ui.store, BOT, GUILD, {"models.public": DS}, by="cli")
+    h = await harness(ui)
+    dms = []
+
+    async def record(user_id, line, file=None):
+        dms.append((user_id, line))
+
+    ui.binding.notifier = record
+    wiring, runtime = ui.anchor.mod("wiring"), ui.anchor.mod("models.runtime")
+    try:
+        assert BOT not in wiring._UI
+        runtime.note_unavailable((BOT, GUILD, "public"), "no credential", "deepseek-chat")
+        await asyncio.sleep(0)
+        assert dms == []
+        wiring._UI[BOT] = ui.binding
+        runtime.note_unavailable((BOT, GUILD, "public"), "no credential", "deepseek-chat")
+        await asyncio.gather(*list(ui.binding._tasks))
+        assert len(dms) == 1
+    finally:
+        await h.close()

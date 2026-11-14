@@ -162,3 +162,33 @@ def test_cli_errors_are_messages_not_tracebacks(anchor, tmp_path):
     (data_dir / "policy.json").write_text("{ broken")
     code, out, err = _cli(anchor, home, "export")
     assert code == 1 and "corrupt" in err and out == ""
+
+
+def test_purge_on_the_host_drops_the_held_guidance_of_that_server(anchor):
+    """The operator-message state keeps the last guidance text per server (coalesced diffs): a purged server
+    leaves none behind; other servers keep theirs."""
+    home = anchor.tmp / "owner"
+    assert _cli(anchor, home, "bind", GUILD, "--bot", BOT)[0] == 0
+    state = home / "plugin-data" / "ctx_discord_policy" / "notify-state.json"
+    other = "900000000000000003"
+    state.write_text(json.dumps({f"guidance:{BOT}:{GUILD}": {"text": "held copy", "at": 1.0},
+                                 f"guidance:{BOT}:{other}": {"text": "other server", "at": 1.0}}))
+    assert _cli(anchor, home, "unbind", GUILD)[0] == 0
+    assert f"guidance:{BOT}:{GUILD}" in json.loads(state.read_text())        # unbinding keeps the settings
+    assert _cli(anchor, home, "unbind", GUILD, "--purge")[0] == 0
+    assert json.loads(state.read_text()) == {f"guidance:{BOT}:{other}": {"text": "other server", "at": 1.0}}
+
+
+def test_only_this_profiles_bots_are_known_on_the_host(anchor):
+    """The gateway writes its process-wide bot list into every profile's status file; a bot another profile
+    owns is not this profile's (no "several bots" refusal, no default to it)."""
+    home = anchor.tmp / "owner"
+    data_dir = home / "plugin-data" / "ctx_discord_policy"
+    data_dir.mkdir(parents=True)
+    other = anchor.tmp / "other-profile"
+    other_bot = "900000000000000004"
+    (data_dir / "status.json").write_text(json.dumps({"bots": {
+        BOT: {"owner_home": str(home)}, other_bot: {"owner_home": str(other)}, "900000000000000005": {}}}))
+    code, out, err = _cli(anchor, home, "bind", GUILD)
+    assert (code, err) == (0, "") and f"bot {BOT} guild {GUILD}: active" in out
+    assert anchor.mod("cli").store_for(home).read().guild(other_bot, GUILD) is None

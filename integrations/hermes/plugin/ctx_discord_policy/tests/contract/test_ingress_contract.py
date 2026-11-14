@@ -20,141 +20,10 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from fakes.discord_world import (BOT, CHANNEL, EMOJI, GUILD, LOUNGE_CHANNEL, LOUNGE_MODS_CHANNEL, MEMBER, MODS_CHANNEL,
+                                 MODS_ROLE, OPERATOR, ORIGINAL, OTHER_CHANNEL, OTHER_GUILD, PRIVATE_THREAD, DiscordWorld,
+                                 _channel_payload, _member_payload)
 from fakes.hermes_homes import ANCHOR, PLUGIN, Homes, _evict, load_in
-
-GUILD, CHANNEL, MODS_CHANNEL, PRIVATE_THREAD = ("950000000000000100", "950000000000000200",
-                                                "950000000000000201", "950000000000000202")
-OTHER_GUILD, OTHER_CHANNEL = "950000000000000110", "950000000000000210"
-CLUB_CHANNEL, CLUB_OPEN_CHANNEL, UNCACHED = "950000000000000203", "950000000000000204", "950000000000000777"
-LOUNGE_CHANNEL, LOUNGE_MODS_CHANNEL, RESTRICTED_ROLE, BOTH = ("950000000000000205", "950000000000000206",
-                                                             "950000000000000601", "950000000000000503")
-BOT, OPERATOR, MEMBER, MOD, MODS_ROLE, EMOJI = ("950000000000000300", "950000000000000400", "950000000000000500",
-                                               "950000000000000501", "950000000000000600", "950000000000000700")
-ORIGINAL = 950000000000009000
-
-READ = dict(view_channel=True, read_message_history=True, send_messages=True, send_messages_in_threads=True)
-
-
-def _perm(**flags):
-    import discord
-    return discord.Permissions(**flags).value
-
-
-def _channel_payload(cid, name, overwrites=()):
-    return {"id": cid, "type": 0, "guild_id": GUILD, "name": name, "position": 0, "parent_id": None,
-            "topic": None, "nsfw": False, "rate_limit_per_user": 0, "last_message_id": None, "flags": 0,
-            "permission_overwrites": [{"id": entry[0], "type": entry[3] if len(entry) > 3 else 0,
-                                       "allow": str(entry[1]), "deny": str(entry[2])} for entry in overwrites]}
-
-
-def _member_payload(uid, roles=()):
-    return {"user": {"id": uid, "username": f"user{uid[-3:]}", "global_name": None, "discriminator": "0",
-                     "avatar": None, "public_flags": 0},
-            "roles": list(roles), "joined_at": "2026-01-01T00:00:00+00:00", "premium_since": None, "nick": None,
-            "avatar": None, "banner": None, "pending": False, "flags": 0, "deaf": False, "mute": False,
-            "communication_disabled_until": None}
-
-
-class DiscordWorld:
-    """Real discord.py model objects in a real client's cache (no network)."""
-
-    def __init__(self, client):
-        import discord
-
-        self.discord = discord
-        state = client._connection
-        state.user = discord.ClientUser(state=state, data={"id": BOT, "username": "contract-bot", "bot": True,
-                                                           "global_name": None, "discriminator": "0",
-                                                           "avatar": None, "public_flags": 0})
-        state._users[state.user.id] = state.user
-        role = lambda rid, name, perms, pos: {  # noqa: E731
-            "id": rid, "name": name, "color": 0, "hoist": False, "icon": None, "unicode_emoji": None,
-            "position": pos, "permissions": str(perms), "managed": False, "mentionable": False, "flags": 0,
-            "colors": {"primary_color": 0, "secondary_color": None, "tertiary_color": None}}
-        self.guild = discord.Guild(data={
-            "id": GUILD, "name": "contract-guild", "owner_id": BOT, "emojis": [], "stickers": [], "features": [],
-            "channels": [], "member_count": 4, "preferred_locale": "en-US",
-            "roles": [role(GUILD, "@everyone", _perm(**READ), 0), role(MODS_ROLE, "Mods", _perm(), 1),
-                      role(RESTRICTED_ROLE, "Restricted", _perm(), 2)]},
-            state=state)
-        state._add_guild(self.guild)
-        world = self
-
-        class Text(discord.TextChannel):
-            """A real TextChannel whose message reads come from memory instead of the REST API."""
-
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.messages = {}
-                self.fetched = []
-
-            async def fetch_message(self, mid):
-                self.fetched.append(int(mid))
-                return self.messages[int(mid)]
-
-            def history(self, **kwargs):
-                items = list(self.messages.values())
-
-                async def gen():
-                    for item in reversed(items):
-                        yield item
-
-                return gen()
-
-        class Thread(discord.Thread):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.messages, self.fetched = {}, []
-
-            async def fetch_message(self, mid):
-                self.fetched.append(int(mid))
-                return self.messages[int(mid)]
-
-        hidden = discord.Permissions(view_channel=True).value
-        self.general = Text(state=state, guild=self.guild, data=_channel_payload(CHANNEL, "general"))
-        self.mods = Text(state=state, guild=self.guild, data=_channel_payload(
-            MODS_CHANNEL, "mods", [(GUILD, 0, hidden), (MODS_ROLE, hidden, 0)]))
-        # a mods channel that one uncached member may also read (discord.py lists them as a discord.Object)
-        self.club = Text(state=state, guild=self.guild, data=_channel_payload(
-            CLUB_CHANNEL, "club", [(GUILD, 0, hidden), (MODS_ROLE, hidden, 0)]))
-        self.club_open = Text(state=state, guild=self.guild, data=_channel_payload(
-            CLUB_OPEN_CHANNEL, "club-open", [(GUILD, 0, hidden), (MODS_ROLE, hidden, 0), (UNCACHED, hidden, 0, 1)]))
-        # a lounge the Restricted role is denied; the second one also allows the Mods role explicitly
-        self.lounge = Text(state=state, guild=self.guild, data=_channel_payload(
-            LOUNGE_CHANNEL, "lounge", [(RESTRICTED_ROLE, 0, hidden)]))
-        self.lounge_mods = Text(state=state, guild=self.guild, data=_channel_payload(
-            LOUNGE_MODS_CHANNEL, "lounge-mods", [(RESTRICTED_ROLE, 0, hidden), (MODS_ROLE, hidden, 0)]))
-        for channel in (self.general, self.mods, self.club, self.club_open, self.lounge, self.lounge_mods):
-            self.guild._add_channel(channel)
-        self.private_thread = Thread(guild=self.guild, state=state, data={
-            "id": PRIVATE_THREAD, "type": 12, "guild_id": GUILD, "parent_id": CHANNEL, "owner_id": MOD,
-            "name": "private", "last_message_id": None, "rate_limit_per_user": 0, "message_count": 0,
-            "member_count": 1, "flags": 0, "thread_metadata": {
-                "archived": False, "auto_archive_duration": 1440, "locked": False, "invitable": False,
-                "archive_timestamp": "2026-01-01T00:00:00+00:00"}})
-        self.guild._add_thread(self.private_thread)
-        self.member = discord.Member(data=_member_payload(MEMBER), guild=self.guild, state=state)
-        self.mod = discord.Member(data=_member_payload(MOD, [MODS_ROLE]), guild=self.guild, state=state)
-        self.operator = discord.Member(data=_member_payload(OPERATOR, [MODS_ROLE]), guild=self.guild, state=state)
-        self.both = discord.Member(data=_member_payload(BOTH, [MODS_ROLE, RESTRICTED_ROLE]), guild=self.guild,
-                                   state=state)
-        for m in (self.member, self.mod, self.operator, self.both):
-            self.guild._add_member(m)
-        world.text_class = Text
-        self.other_guild = discord.Guild(data={
-            "id": OTHER_GUILD, "name": "elsewhere", "owner_id": BOT, "emojis": [], "stickers": [], "features": [],
-            "channels": [], "member_count": 2, "preferred_locale": "en-US",
-            "roles": [role(OTHER_GUILD, "@everyone", _perm(**READ), 0)]}, state=state)
-        state._add_guild(self.other_guild)
-        self.elsewhere = Text(state=state, guild=self.other_guild, data={
-            **_channel_payload(OTHER_CHANNEL, "elsewhere"), "guild_id": OTHER_GUILD})
-        self.other_guild._add_channel(self.elsewhere)
-
-    def post(self, channel, author, content, mid):
-        message = SimpleNamespace(id=mid, channel=channel, author=author, content=content, clean_content=content,
-                                  attachments=[], created_at=None, guild=self.guild, jump_url="")
-        channel.messages[mid] = message
-        return message
 
 
 @pytest.fixture
@@ -217,6 +86,8 @@ async def setup(hermes, tmp_path, monkeypatch):
     adapter.handle_message = capture
     yield SimpleNamespace(adapter=adapter, runner=runner, bot=bot, model=model, captured=captured, homes=homes,
                           manager=manager, hermes=hermes, discord=discord)
+    if f"{ANCHOR}.snapshot" in sys.modules:
+        sys.modules[f"{ANCHOR}.snapshot"].detach(BOT)      # the P2 directory heartbeat of the bound bot
     await bot.__aexit__(None, None, None)
     for (cls, name), value in saved.items():
         if value is None:
@@ -231,12 +102,12 @@ def _mod(name):
     return sys.modules[f"{ANCHOR}.{name}"]
 
 
-def _wire(s, *, extra_factories=()):
+def _wire(s):
     """Hermes' own wiring: ``_wire_plugin_handlers(native)`` calls every factory with ``(native, adapter)``.
-    The policy's factory binds the bot; the K5 installer runs after it, as the integration will."""
+    The policy's factory binds the bot and runs its bind steps (K5 reaction listeners, K7 probe among them)."""
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
-    factories = [(_mod("adapt.interventions").discord_platform_handler, PLUGIN), *extra_factories]
+    factories = [(_mod("adapt.interventions").discord_platform_handler, PLUGIN)]
     s.manager.get_platform_handler_factories = lambda platform: list(factories) if platform == "discord" else []
     token = set_hermes_home_override(str(s.homes.root))
     try:
@@ -268,14 +139,10 @@ async def _settle(timeout=2.0):
 
 async def test_k5_reaction_wakeup_through_real_hermes(setup):
     s = setup
-    results = []
-
-    def k5_factory(native, adapter):
-        results.append(_mod("ingress.reactions").install_reaction_wakeup(native, adapter))
-
-    _wire(s, extra_factories=[(k5_factory, PLUGIN + "-k5")])
+    _wire(s)
     _configure(reaction_emoji={"id": EMOJI, "name": "nova"})
-    assert results and results[0].outcome.value == "injected", results
+    results = [_mod("runtime").RUNTIME.status.get("K5")]            # recorded by the policy's own bind step
+    assert results[0] is not None and results[0].outcome.value == "injected", results
     assert any(getattr(f, "__name__", "") == "on_raw_reaction_add" for f in s.bot.extra_events["on_raw_reaction_add"])
     original = s.model.post(s.model.general, s.model.operator, "operator wrote this", ORIGINAL)
     rows = []
@@ -312,7 +179,7 @@ async def test_k5_reaction_wakeup_through_real_hermes(setup):
 
 async def test_k5_bot_reactions_never_reach_hermes(setup):
     s = setup
-    _wire(s, extra_factories=[(lambda n, a: _mod("ingress.reactions").install_reaction_wakeup(n, a), PLUGIN + "-k5")])
+    _wire(s)
     _configure(reaction_emoji={"id": EMOJI, "name": "nova"})
     s.model.post(s.model.general, s.model.operator, "x", ORIGINAL)
     import discord
@@ -334,7 +201,7 @@ async def test_k5_operator_wakeup_never_becomes_a_gateway_command(setup):
     operator's wakeup through real Hermes stays text, without the managers' name (guidance is off for
     operator turns), even when the name or the bot's nickname would start a command."""
     s = setup
-    _wire(s, extra_factories=[(lambda n, a: _mod("ingress.reactions").install_reaction_wakeup(n, a), PLUGIN + "-k5")])
+    _wire(s)
     store = _configure(reaction_emoji={"id": EMOJI, "name": "nova"}, bot_name="/yolo")
     ops = _mod("store.ops")
     guild = ops.export(store.read(), BOT, GUILD)["bots"][BOT]["guilds"][GUILD]
@@ -365,16 +232,10 @@ async def test_k5_operator_wakeup_never_becomes_a_gateway_command(setup):
 # ── wake names through the real admission and handler ────────────────────────────────────────────
 
 
-async def test_wake_name_command_is_text_through_real_hermes(setup, monkeypatch):
+async def test_wake_name_command_is_text_through_real_hermes(setup):
     s = setup
     _wire(s)
-    store = _configure(wake_names=["Nova"])
-    classify = _mod("ingress.classify")
-    admission = _mod("ingress.admission")
-    original = classify.direct_signal
-    monkeypatch.setattr(admission.classify, "direct_signal",
-                        lambda adapter, message, guild_config=None: original(adapter, message,
-                                                                             store.read().guild(BOT, GUILD)))
+    _configure(wake_names=["Nova"])                  # admission classifies with the guild's wake names
     msg = SimpleNamespace(
         id=950000000000009101, author=s.model.member, guild=s.model.guild, channel=s.model.general,
         type=s.discord.MessageType.default, mentions=[], content="Nova, /restart", reference=None,

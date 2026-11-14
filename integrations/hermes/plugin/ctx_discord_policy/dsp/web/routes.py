@@ -37,7 +37,7 @@ from ..prompts.assemble import GUIDANCE_HEADER
 from ..store import checks, ops, schema
 from ..store.file import ConflictError, PolicyStore, Snapshot, StoreError
 from ..store.schema import SchemaError, is_snowflake
-from ..ui import perms
+from ..ui import notify, perms
 from . import catalog, directory, guard, settings_io, sources
 from .responses import WebResponse, error, ok
 
@@ -664,6 +664,7 @@ def post_state(req: WebRequest, bot: str, guild: str) -> WebResponse:
         if stored is None:
             raise refuse(404, "not_configured", "This server has no settings to delete.")
         _write(req, bot, guild, lambda: ops.purge_checked(store, bot, guild, by="dashboard", expected_rev=rev))
+        notify.forget_guidance(req.home, bot, guild)      # no held copy of a deleted server's guidance
         return ok({"guild": None, "purged": True})
     old = stored["state"] if stored else "unbound"
     if stored is None and state != "active":

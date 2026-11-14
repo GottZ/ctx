@@ -1,6 +1,7 @@
 """``hermes ctx-discord-policy …``: host-side administration of the policy store (operator with host access).
 
-Subcommands: ``status``, ``bind``, ``pause``, ``unbind``, ``export``, ``import``. The store edited is the
+Subcommands: ``status``, ``bind``, ``pause``, ``unbind``, ``export``, ``import``, ``routing`` (the Hermes
+profile per server, :mod:`.routing.cli`). The store edited is the
 one of the active Hermes profile (``hermes -p <profile> ctx-discord-policy …``), i.e. the profile that owns
 the Discord bot. Operators themselves are never set here; they live in the Hermes configuration
 (``hermes config set plugins.entries.ctx_discord_policy.settings.operators '["<id>"]'``).
@@ -15,9 +16,11 @@ from pathlib import Path
 from typing import Any, Optional, TextIO
 
 from . import config, hermes
+from .routing import cli as routing_cli
 from .store import ops
 from .store.file import PolicyStore, StoreError
 from .store.schema import SchemaError, is_snowflake
+from .ui.notify import forget_guidance
 
 
 def store_for(home: Path) -> PolicyStore:
@@ -25,10 +28,16 @@ def store_for(home: Path) -> PolicyStore:
 
 
 def _known_bots(home: Path, store: PolicyStore) -> list[str]:
+    """Bots of this profile: in its store, or in its gateway's status with this home as owner (the gateway
+    writes its process-wide bot list into every profile's status file)."""
     bots = set(store.read().data.get("bots", {}))
     status = _gateway_status(home)
-    if isinstance(status, dict) and isinstance(status.get("bots"), dict):
-        bots.update(str(b) for b in status["bots"])
+    entries = status.get("bots") if isinstance(status, dict) else None
+    key = hermes.home_key(home)
+    for bot, info in (entries.items() if isinstance(entries, dict) else ()):
+        owner = info.get("owner_home") if isinstance(info, dict) else None
+        if isinstance(owner, str) and owner and hermes.home_key(owner) == key:
+            bots.add(str(bot))
     return sorted(b for b in bots if is_snowflake(b))
 
 
@@ -72,6 +81,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
     imp.add_argument("file", help="JSON file as written by export (one bot, one server)")
     imp.add_argument("--guild", help="Server id inside the file (default: the only one)")
     imp.add_argument("--bot", help="Bot id inside the file (default: the only one)")
+    routing_cli.setup(sub)
 
 
 def _status(home: Path, store: PolicyStore, as_json: bool, out: TextIO) -> int:
@@ -79,7 +89,7 @@ def _status(home: Path, store: PolicyStore, as_json: bool, out: TextIO) -> int:
     status = _gateway_status(home)
     operator_count = len(config.operators(home))
     guilds = [
-        {"bot": bot, "guild": gid, "state": snapshot.guild_state(bot, gid), "rev": g.get("rev", 0)}
+        {"bot": bot, "guild": gid, "state": snapshot.guild_state(bot, gid), "rev": snapshot.guild_rev(bot, gid)}
         for bot, b in snapshot.data.get("bots", {}).items() for gid, g in b.get("guilds", {}).items()
     ]
     report = {"home": str(home), "store": str(store.path), "store_state": snapshot.state,
@@ -136,6 +146,8 @@ def run(args: argparse.Namespace, *, home: Optional[Path] = None, out: TextIO = 
         if command == "import":
             return _import(home, store, args, out)
         bot = _resolve_bot(home, store, getattr(args, "bot", None))
+        if command == routing_cli.COMMAND:
+            return routing_cli.run(args, home=home, store=store, bot=bot, out=out, err=err)
         if command == "bind":
             snapshot = ops.bind(store, bot, args.guild, by="cli")
         elif command == "pause":
@@ -143,6 +155,8 @@ def run(args: argparse.Namespace, *, home: Optional[Path] = None, out: TextIO = 
         elif command == "unbind":
             snapshot = (ops.purge if args.purge else
                         lambda s, b, g, by: ops.set_state(s, b, g, "unbound", by=by))(store, bot, args.guild, by="cli")
+            if args.purge:
+                forget_guidance(home, bot, str(args.guild))   # no held copy of a deleted server's guidance
         else:
             err.write(f"unknown command {command}\n")
             return 2
@@ -168,7 +182,7 @@ def _import(home: Path, store: PolicyStore, args: argparse.Namespace, out: TextI
     snapshot = ops.import_guild(store, bot, guild, guilds[guild], by="cli",
                                 prompt_cap=config.setting(home, "guild_prompt_max_chars"))
     out.write(f"imported bot {bot} guild {guild}: {snapshot.guild_state(bot, guild)} "
-              f"(rev {snapshot.guild(bot, guild)['rev']})\n")
+              f"(rev {snapshot.guild_rev(bot, guild)})\n")
     return 0
 
 

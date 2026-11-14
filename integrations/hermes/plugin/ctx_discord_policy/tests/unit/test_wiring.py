@@ -215,7 +215,8 @@ def test_operator_turn_survives_a_broken_context_path_public_turn_blocks(wired, 
 
 def test_bind_steps_run_in_order_after_the_bot_is_bound(wired, monkeypatch):
     bootstrap = wired.anchor.bootstrap
-    assert [name for name, _ in bootstrap.BIND_STEPS] == ["K1", "K1b", "K3/K4", "K2/K2b", "K6"]
+    order = ["K1", "K1b", "K3/K4", "K2/K2b", "R1", "K8", "K5", "K7", "P2", "K6"]
+    assert [name for name, _ in bootstrap.BIND_STEPS] == order
     seen = []
     steps = tuple((name, (lambda n: lambda bind: seen.append((n, bind.binding.bot_id)))(name))
                   for name, _ in bootstrap.BIND_STEPS)
@@ -223,7 +224,7 @@ def test_bind_steps_run_in_order_after_the_bot_is_bound(wired, monkeypatch):
     interventions = wired.anchor.mod("adapt.interventions")
     monkeypatch.setattr(interventions, "bind_adapter_class", lambda cls: True)
     interventions.discord_platform_handler(SimpleNamespace(application_id=int(BOT)), wired.adapter)
-    assert seen == [(n, BOT) for n in ("K1", "K1b", "K3/K4", "K2/K2b", "K6")]  # a failing step stops nothing
+    assert seen == [(n, BOT) for n in order]  # a failing step stops nothing
     assert (wired.owner / "plugin-data" / "ctx_discord_policy" / "status.json").exists()
     seen.clear()
 
@@ -232,6 +233,59 @@ def test_bind_steps_run_in_order_after_the_bot_is_bound(wired, monkeypatch):
 
     interventions.discord_platform_handler(SimpleNamespace(application_id=None), Unknown())
     assert seen == [] and _outcome(wired, "K6") is None  # no bot id: nothing is installed, not even the interface
+
+
+def test_every_new_bind_step_reports_its_outcome_and_none_stops_another(wired, monkeypatch):
+    """R1 (profile per server), K8 (model per server), K5 (reaction wakeup), K7 (hydration probe): each records
+    an outcome in the status register when the bot binds, also where it cannot do anything here."""
+    interventions = wired.anchor.mod("adapt.interventions")
+    monkeypatch.setattr(interventions, "bind_adapter_class", lambda cls: True)
+    monkeypatch.setattr(wired.wiring.routing_apply, "on_bind", lambda adapter, binding: 1 / 0)  # a broken seam
+    interventions.discord_platform_handler(SimpleNamespace(application_id=int(BOT)), wired.adapter)
+    rows = {name: _outcome(wired, name) for name in ("R1", "K8", "K5", "K7", "P2", "K6")}
+    assert rows["R1"] == "off" and "ZeroDivisionError" in wired.anchor.RUNTIME.status.get("R1").reason
+    assert rows["K8"] == "fallback" and rows["K5"] == "off" and rows["K7"] == "fallback", rows
+    assert rows["P2"] == "off"                     # no discord.py client here: the settings page offers ID entry
+    assert rows["K6"] is not None                  # the interface step still ran after them
+    status = json.loads((wired.owner / "plugin-data" / "ctx_discord_policy" / "status.json").read_text())
+    assert {"R1", "K8", "K5", "K7", "P2"} <= set(status["interventions"])
+
+
+def test_register_steps_offer_the_settings_page_its_read_only_rpc(anchor, monkeypatch):
+    """REGISTER_STEPS run in every armed profile: P3 registers the read-only plugin RPC methods where Hermes
+    serves plugin RPC, and reports ``off`` where it does not (the page then reads the directory files)."""
+    from fakes.ctx import FakeCtx
+
+    home = anchor.tmp / "rpc-home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    bootstrap = anchor.bootstrap
+    assert [name for name, _ in bootstrap.REGISTER_STEPS] == ["P3"]
+    ctx, served = FakeCtx("default"), {}
+    ctx.register_rpc = lambda name, handler: served.setdefault(name, handler)
+    anchor.entry.register(ctx)
+    assert sorted(served) == sorted(anchor.mod("rpc").READ_METHODS)
+    assert anchor.RUNTIME.status.get("P3").outcome.value == "ok"
+    del ctx.register_rpc
+    bootstrap.REGISTER_STEPS[0][1](ctx, None)
+    assert anchor.RUNTIME.status.get("P3").outcome.value == "off"
+
+
+def test_the_skills_list_of_the_panels_reads_hermes_installed_skills(wired, monkeypatch):
+    """``UiBinding.skills_provider`` looks ``hermes.installed_skills(home)`` up by name: a frozenset per home (the
+    skills every profile members reach has in common), and unknown when Hermes can't tell (raises)."""
+    commands, hermes = wired.anchor.mod("ui.commands"), wired.anchor.mod("hermes")
+    homes = {Path("/h/a"), Path("/h/b")}
+    ctx = SimpleNamespace(binding=SimpleNamespace(target_homes=lambda ctx: homes))
+    listing = {Path("/h/a"): frozenset({"faq", "rules"}), Path("/h/b"): frozenset({"faq"})}
+    monkeypatch.setattr(hermes, "installed_skills", lambda home: listing[Path(home)], raising=False)
+    assert commands._default_skills_provider(ctx) == ["faq"]
+
+    def unknown(home):
+        raise RuntimeError("Hermes could not list the skills of this profile")
+
+    monkeypatch.setattr(hermes, "installed_skills", unknown, raising=False)
+    assert commands._default_skills_provider(ctx) is None
 
 
 def test_status_file_names_adapted_degraded_and_passing_entries_against_the_last_start(wired, caplog):
@@ -306,8 +360,9 @@ def test_ui_is_installed_on_the_bot_bindings_own_store(wired):
     bind = wired.wiring.Bind(native=native, adapter=wired.adapter, binding=wired.binding)
     first = wired.wiring.install_ui(bind)
     assert first is not None and items.binding_for(native) is first and first.store is wired.binding.store
+    assert wired.wiring._UI[BOT] is first                   # operator messages from outside an interaction
     second = wired.wiring.install_ui(bind)  # the factory again for the same client: no doubled listeners
-    assert items.binding_for(native) is second
+    assert items.binding_for(native) is second and wired.wiring._UI[BOT] is second
     assert [l for l in native.extra_events.get("on_ready", []) if getattr(l, "__self__", None) is first] == []
     assert _outcome(wired, "K6") == "ok"
 

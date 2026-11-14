@@ -115,15 +115,14 @@ def _downgrade(caps: Caps, mode: Optional[str]) -> Caps:
 
 def _default_skills_provider(ctx: Any) -> Optional[list]:
     """Skills installed in every profile members' turns of this server run in (a skill must exist wherever
-    it is released), or None when Hermes can't tell us."""
-    lister = getattr(hermes, "installed_skills", None)
+    it is released; ``hermes.installed_skills``, enabled skills only), or None when Hermes can't tell us."""
     homes = ctx.binding.target_homes(ctx)
-    if not callable(lister) or not homes:
+    if not homes:
         return None
     common: Optional[set] = None
     for home in sorted(homes):
         try:
-            names = set(lister(home))
+            names = set(hermes.installed_skills(home))
         except Exception:
             logger.warning("ctx_discord_policy: listing the skills of %s failed", home, exc_info=True)
             return None

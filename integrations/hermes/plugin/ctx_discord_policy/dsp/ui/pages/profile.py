@@ -58,10 +58,26 @@ async def defer_in_place(ctx: Ctx) -> None:
         ctx.deferred_update = True
 
 
-async def run_change(ctx: Ctx, fn: Callable[[], Any], *, page: str) -> tuple[bool, Any]:
+AUDITED = {"routing": ("profile",), "models": ("public", "operator", "public_choices", "manager_pick",
+                                               "on_unavailable")}
+
+
+def changed_paths(before: Optional[dict], after: Optional[dict]) -> list[str]:
+    """The profile and model settings a write changed (names for the audit line, never values)."""
+    paths = []
+    for section, keys in AUDITED.items():
+        old, new = (before or {}).get(section) or {}, (after or {}).get(section) or {}
+        paths += [f"{section}.{key}" for key in keys if old.get(key) != new.get(key)]
+    return paths
+
+
+async def run_change(ctx: Ctx, fn: Callable[[], Any], *, page: str, audit: Optional[str] = None) -> tuple[bool, Any]:
     """Run a blocking change off the loop (deferring when it is slow) and answer every failure.
 
-    Returns ``(done, result)``; on ``False`` the caller has nothing more to say."""
+    These writes bypass ``Ctx.write``; with ``audit`` (the panel's setting) a change that went through gets
+    the same line in the server's audit channel. Returns ``(done, result)``; on ``False`` the caller has
+    nothing more to say."""
+    before = ctx.guild
     task = asyncio.ensure_future(asyncio.to_thread(fn))
     try:
         done, _ = await asyncio.wait({task}, timeout=DEFER_AFTER)
@@ -83,6 +99,12 @@ async def run_change(ctx: Ctx, fn: Callable[[], Any], *, page: str) -> tuple[boo
         await ctx.refuse(f"Nothing was changed: {exc}. Next step: open the panel again.")
         return False, None
     ctx.refresh()
+    paths = changed_paths(before, ctx.guild) if audit else []
+    if paths:
+        try:
+            ctx.binding.changed(ctx, audit, paths, before, ctx.guild)
+        except Exception:  # the audit line must never undo or hide a saved change
+            logger.warning("ctx_discord_policy: change notification failed", exc_info=True)
     return True, result
 
 
@@ -322,7 +344,8 @@ async def _switch(ctx: Ctx, name: Optional[str]) -> None:
         return
     done, result = await run_change(ctx, lambda: apply.set_profile(
         ctx.binding.store, ctx.bot_id, ctx.guild_id, name, owner_home=ctx.binding.owner_home, by=ctx.actor.user_id,
-        via="discord", expected_rev=ctx.ref.rev, adapter=getattr(ctx.binding, "adapter", None)), page=KEY)
+        via="discord", expected_rev=ctx.ref.rev, adapter=getattr(ctx.binding, "adapter", None)), page=KEY,
+        audit=SETTING)
     if done:
         await ctx.show_page(KEY, notice=_outcome_notice(result))
 
@@ -380,7 +403,8 @@ async def _adopt_ok(ctx: Ctx) -> None:
         return
     done, result = await run_change(ctx, lambda: apply.adopt(
         ctx.binding.store, ctx.bot_id, ctx.guild_id, core, owner_home=ctx.binding.owner_home, by=ctx.actor.user_id,
-        via="discord", expected_rev=ctx.ref.rev, adapter=getattr(ctx.binding, "adapter", None)), page=KEY)
+        via="discord", expected_rev=ctx.ref.rev, adapter=getattr(ctx.binding, "adapter", None)), page=KEY,
+        audit=SETTING)
     if done:
         await ctx.show_page(KEY, notice=_outcome_notice(result))
 
@@ -393,7 +417,8 @@ async def _apply(ctx: Ctx) -> None:
         return
     done, result = await run_change(ctx, lambda: apply.reapply(
         ctx.binding.store, ctx.bot_id, ctx.guild_id, owner_home=ctx.binding.owner_home,
-        adapter=getattr(ctx.binding, "adapter", None), by=ctx.actor.user_id, via="discord"), page=KEY)
+        adapter=getattr(ctx.binding, "adapter", None), by=ctx.actor.user_id, via="discord"), page=KEY,
+        audit=SETTING)
     if done:
         await ctx.show_page(KEY, notice=_outcome_notice(result))
 

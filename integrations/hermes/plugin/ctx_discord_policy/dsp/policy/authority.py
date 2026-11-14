@@ -8,7 +8,8 @@ Routes are found in two ways, because Hermes may execute an admitted message lat
 FIFO, restoring the event from a serialized envelope without ``raw_message`` and inside a drain task
 whose context was copied from whichever message started the drain:
 1. ``event.raw_message._dsp_route`` (the routed message the adapter handed to the stock handler);
-2. the per-message registry, keyed by ``(chat_id, message_id)``.
+2. the per-message registry, keyed by ``(chat_id, message_id, user_id)`` of the source (``Route.key``): a
+   reaction wakeup reuses the reacted-to message's id, so one message can carry routes of several users.
 The runner wrapper sets the route context variable explicitly for every event — to the event's own
 route or to ``None`` — so a route can never be inherited by another message's turn.
 """
@@ -30,6 +31,11 @@ def _source_message_id(source: Any, event: Any = None) -> str:
         if value not in (None, ""):
             return str(value)
     return ""
+
+
+def registry_key(source: Any, message_id: str) -> tuple[str, str, str]:
+    """The registry key of the route this source's message would carry (``Route.key``)."""
+    return (str(getattr(source, "chat_id", "") or ""), str(message_id or ""), str(getattr(source, "user_id", "") or ""))
 
 
 def exact(route: Any, source: Any, message_id: str = "") -> bool:
@@ -60,7 +66,7 @@ def candidate_for_event(event: Any) -> Optional[Route]:
     raw = getattr(event, "raw_message", None)
     candidate = getattr(raw, "_dsp_route", None) if raw is not None else None
     if not isinstance(candidate, Route) and message_id:
-        candidate = RUNTIME.message_routes.get((str(getattr(source, "chat_id", "") or ""), message_id))
+        candidate = RUNTIME.message_routes.get(registry_key(source, message_id))
     return candidate if isinstance(candidate, Route) else None
 
 
@@ -144,7 +150,7 @@ def authorizes(source: Any) -> bool:
     if exact(current, source, message_id):
         return True
     if message_id:
-        stored = RUNTIME.message_routes.get((str(getattr(source, "chat_id", "") or ""), message_id))
+        stored = RUNTIME.message_routes.get(registry_key(source, message_id))
         if exact(stored, source, message_id):
             return True
     return False

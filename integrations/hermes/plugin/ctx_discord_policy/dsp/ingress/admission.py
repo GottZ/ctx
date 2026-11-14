@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -23,7 +23,7 @@ from .. import config, hermes
 from ..adapt.status import SECURITY, Outcome, Result
 from ..policy import hooks
 from ..policy.lanes import PublicLanes
-from ..policy.routes import AMBIENT, DIRECT, OPERATOR, PUBLIC, Route, snowflake
+from ..policy.routes import OPERATOR, PUBLIC, Route, snowflake
 from ..routing import check as routing_check  # S12: A4-P
 from ..runtime import RUNTIME
 from . import classify
@@ -53,6 +53,7 @@ class Decision:
     server_name: str = ""
     channel_name: str = ""
     bot_display_name: str = ""
+    guild_config: Any = field(default=None, repr=False)   # the snapshot this decision read (A6 hydration)
 
     def route(self, message_id: str) -> Route:
         return Route(bot_id=self.bot_id, guild_id=self.guild_id, channel_id=self.channel_id,
@@ -146,27 +147,20 @@ def _decide(adapter: Any, message: Any) -> Optional[Decision]:
     if snapshot.guild_state(binding.bot_id, guild_id) != "active":
         return None  # unbound, paused, or a corrupt store (every guild counts as paused)
     guild_cfg = snapshot.guild(binding.bot_id, guild_id) or {}
-    conversation = guild_cfg.get("conversation") or {}
     is_thread = classify.is_thread(channel)
     parent_id = snowflake(getattr(channel, "parent_id", None)) if is_thread else None
-    scope = {channel_id} | ({parent_id} if parent_id else set())
-    excluded = bool(scope & set(conversation.get("excluded_channels") or ()))
-    signal = classify.direct_signal(adapter, message)
-    ambient_channel = bool(scope & set(conversation.get("ambient_channels") or ()))
-    addressed = True
-    if signal == classify.DIRECT:
-        mode, unverified = DIRECT, False
-    elif signal == classify.MAYBE_REPLY:
-        mode, unverified = (AMBIENT, False) if ambient_channel else (DIRECT, True)
-    elif ambient_channel:
-        mode, unverified = AMBIENT, False
-    else:
-        # Not addressed and not ambient: stock decides whether the bot reacts at all (bot threads, free
-        # channels, allowlisted users); if it does, the turn still runs under this message's lane.
-        mode, unverified, addressed = DIRECT, False, False
+    # One classification (S5): mention, reply, reaction wakeup or one of the guild's wake names; ambient and
+    # excluded channels including the threads beneath them; the worklog area; whether a person wrote it.
+    signal = classify.classify(adapter, message, guild_cfg)
+    if not signal.human:
+        return None  # bots, webhooks and system messages never wake the bot
+    # ``route_mode`` is always a route's conversation mode (worklog | direct | ambient). Not addressed and not
+    # ambient: stock decides whether the bot reacts at all (bot threads, free channels, allowlisted users); if
+    # it does, the turn still runs under this message's lane.
+    mode, unverified, addressed = signal.route_mode, signal.reply_unverified, signal.addressed
+    excluded = signal.excluded
     lane = OPERATOR if config.is_operator(binding.owner_home, author_id) else PUBLIC
-    worklog_channel = (guild_cfg.get("worklog") or {}).get("channel")
-    if lane == PUBLIC and worklog_channel and worklog_channel in scope:
+    if lane == PUBLIC and signal.worklog_area:
         excluded = True  # the worklog channel and its threads carry operator tool output: no public turns
     if excluded and lane == OPERATOR:
         return None  # "never respond in" binds public lanes; the operator keeps stock behaviour there
@@ -206,7 +200,8 @@ def _decide(adapter: Any, message: Any) -> Optional[Decision]:
                     lanes=PublicLanes.from_guild(guild_cfg), target_home_key=target, reply_unverified=unverified,
                     addressed=addressed, excluded=excluded, in_thread=is_thread,
                     server_name=str(getattr(guild, "name", "") or ""),
-                    channel_name=str(getattr(channel, "name", "") or ""), bot_display_name=str(bot_name))
+                    channel_name=str(getattr(channel, "name", "") or ""), bot_display_name=str(bot_name),
+                    guild_config=guild_cfg)
 
 
 # ── message views ────────────────────────────────────────────────────────────────────────────────
@@ -245,19 +240,22 @@ class PlainChannel(_Delegate):
 
 
 def routed_message(message: Any, route: Route, *, self_user: Any, message_type: Any, addressed: bool = True,
-                   isolate_thread: bool = False) -> Any:
+                   isolate_thread: bool = False, content: Optional[str] = None,
+                   attachments: Optional[list] = None) -> Any:
     """The message the stock handler sees, carrying its route.
 
     Addressed messages are marked as a reply that mentions the bot (no auto-thread, passes the mention
     gate); unaddressed ones keep their mentions and type, so stock alone decides whether the bot reacts.
     Ambient public messages speak as the channel's shared author; public messages in threads see the
-    thread as a plain channel (see :class:`PlainChannel`)."""
+    thread as a plain channel (see :class:`PlainChannel`). ``content`` and ``attachments`` replace the
+    message's own (A6 hydration: the text with the quoted context appended, own attachments plus hydrated
+    media); ``None`` keeps the message's."""
     mentions = list(getattr(message, "mentions", []) or [])
     if addressed and self_user is not None and all(str(getattr(m, "id", "")) != str(getattr(self_user, "id", ""))
                                                    for m in mentions):
         mentions.append(self_user)
     author = getattr(message, "author", None)
-    content = getattr(message, "content", "") or ""
+    content = (getattr(message, "content", "") or "") if content is None else content
     if route.session_user_id != route.author_id:
         name = str(getattr(author, "display_name", None) or getattr(author, "name", None) or "member")
         name = classify.clean_label(name)
@@ -267,6 +265,8 @@ def routed_message(message: Any, route: Route, *, self_user: Any, message_type: 
     overrides = dict(author=author, content=content, mentions=mentions, created_at=created, _dsp_route=route)
     if addressed:
         overrides["type"] = message_type
+    if attachments is not None:
+        overrides["attachments"] = list(attachments)
     if isolate_thread:
         overrides["channel"] = PlainChannel(getattr(message, "channel", None))
     return _Delegate(message, **overrides)

@@ -332,3 +332,28 @@ async def test_selection_unavailable_without_multiplexing(ui):
         assert labels(page) == ["Back"]
     finally:
         await h.close()
+
+
+async def test_a_profile_change_is_announced_in_the_audit_channel_without_the_profile_name(ui):
+    """Profile writes bypass ``Ctx.write``; they get the same audit line (names of settings, never values)."""
+    ui.profiles("community")
+    ui.ops.update_fields(ui.store, BOT, GUILD, {"audit_channel": "900000000000000555"}, by="cli")
+    h = await harness(ui)
+    posts = []
+
+    async def post(channel_id, line):
+        posts.append((channel_id, line))
+
+    ui.binding.channel_sink = post
+    try:
+        page = await open_profile(ui, h)
+        listing = last_panel(await click(h, panel(page), cid(ui, page, "prof_pick", "0"), user=OP_ID, perms=PLAIN))
+        confirm = last_panel(await click(h, panel(listing), select(listing)["custom_id"], user=OP_ID, perms=PLAIN,
+                                         values=["community"]))
+        await click(h, panel(confirm), cid(ui, confirm, "prof_ok"), user=OP_ID, perms=PLAIN)
+        assert ui.guild()["routing"]["profile"] == "community"
+        [(channel, line)] = posts
+        assert channel == "900000000000000555" and line.startswith(f"<@{OP_ID}> changed the Hermes profile")
+        assert "community" not in line                            # profile names are host internals
+    finally:
+        await h.close()

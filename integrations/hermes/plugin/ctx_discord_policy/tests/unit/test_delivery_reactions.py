@@ -8,7 +8,8 @@ from unit.delivery_fakes import GUILD_A, MEMBER, OPERATOR, ProcessingOutcome, Sc
 
 
 def _event(message, route=None):
-    source = SimpleNamespace(chat_id=str(message.channel.id), message_id=str(message.id))
+    user_id = route.session_user_id if route is not None else str(message.author.id)   # what Hermes' source says
+    source = SimpleNamespace(chat_id=str(message.channel.id), message_id=str(message.id), user_id=user_id)
     return SimpleNamespace(raw_message=message, message_id=str(message.id), source=source)
 
 
@@ -21,8 +22,8 @@ async def test_ambient_turn_has_no_reactions_but_keeps_its_durable_record(anchor
     scene = Scene(anchor)
     a = scene.guild(GUILD_A)
     msg = scene.world.post(a.general, "nice weather", MEMBER, "Mallory")
-    scene.route(msg, lane="public", mode="ambient")
-    await _process(scene.adapter, _event(msg))
+    route = scene.route(msg, lane="public", mode="ambient")
+    await _process(scene.adapter, _event(msg, route))
     assert msg.reactions == []
     records = [c for c in scene.adapter.calls if c[0].startswith("record")]
     assert records == [("record-start", str(msg.id), False), ("record-complete", str(msg.id), "success")]
@@ -34,12 +35,12 @@ async def test_direct_turns_and_unrouted_messages_keep_stock_reactions(anchor):
     direct = scene.world.post(a.general, "hey bot", MEMBER, "Mallory")
     scene.route(direct, lane="public", mode="direct")
     operator_ambient = scene.world.post(a.general, "chatting", OPERATOR, "Ada")
-    scene.route(operator_ambient, lane="operator", mode="ambient")
+    operator_route = scene.route(operator_ambient, lane="operator", mode="ambient")
     unrouted = scene.world.post(a.general, "stock", OPERATOR, "Ada")
     for message in (direct, unrouted):
         await _process(scene.adapter, _event(message))
         assert message.reactions == [("add", "eyes"), ("remove", "eyes"), ("add", "check")]
-    await _process(scene.adapter, _event(operator_ambient))
+    await _process(scene.adapter, _event(operator_ambient, operator_route))
     assert operator_ambient.reactions == []
 
 
@@ -49,7 +50,7 @@ async def test_route_found_through_the_turn_context(anchor):
     msg = scene.world.post(a.general, "ambient", MEMBER, "Mallory")
     route = scene.route(msg, lane="public", mode="ambient", register=False)
     with scene.in_turn(route):
-        await _process(scene.adapter, _event(msg))
+        await _process(scene.adapter, _event(msg, route))
     assert msg.reactions == []
 
 
@@ -87,8 +88,8 @@ async def test_hooks_that_resolve_their_target_through_another_helper_still_qual
     scene.cls, scene.adapter = cls, cls(scene.world)
     a = scene.guild(GUILD_A)
     msg = scene.world.post(a.general, "nice weather", MEMBER, "Mallory")
-    scene.route(msg, lane="public", mode="ambient")
-    await _process(scene.adapter, _event(msg))
+    route = scene.route(msg, lane="public", mode="ambient")
+    await _process(scene.adapter, _event(msg, route))
     assert msg.reactions == []
 
 

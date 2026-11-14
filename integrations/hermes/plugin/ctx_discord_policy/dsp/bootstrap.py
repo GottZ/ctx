@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import cli, config, hermes
+from . import cli, config, hermes, rpc, snapshot
 from .adapt.status import SECURITY, Outcome, Result, compare_with_previous, write_json_atomic
 from .adapt import interventions
 # Loaded with the anchor, never lazily: after an in-place update a lazy import would mix two versions in one
@@ -37,7 +37,7 @@ logger = logging.getLogger("ctx_discord_policy")
 # register; an exception is logged and never breaks the bind or the steps after it. Order matters where it
 # is noted. A layer adds itself with one line.
 REGISTER_STEPS: tuple = (
-    # ("<id>", <module>.register),
+    ("P3", rpc.register_step),               # read-only plugin RPC for a settings page in another process
 )
 
 BIND_STEPS: tuple = (
@@ -45,6 +45,11 @@ BIND_STEPS: tuple = (
     ("K1b", wiring.install_delete_chat),     # after K1: wraps what K1 found or injected
     ("K3/K4", wiring.install_delivery),
     ("K2/K2b", wiring.install_progress),
+    ("R1", wiring.apply_routing),            # chosen profiles back into the running table (managed config)
+    ("K8", wiring.install_models),           # server models; gateway.run is loaded once a bot binds
+    ("K5", wiring.install_reaction_wakeup),  # after R1: woken messages go through admission and A4-P
+    ("K7", wiring.probe_hydration),
+    ("P2", snapshot.bind_step),              # the bot's server directory for the settings page
     ("K6", wiring.install_ui),               # the interface last: everything it shows is in place
 )
 

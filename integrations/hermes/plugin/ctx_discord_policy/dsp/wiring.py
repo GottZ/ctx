@@ -7,7 +7,10 @@ for every bot and profile of the process; a guild without an active policy gets 
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+import weakref
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -15,8 +18,11 @@ from . import RUNTIME_API, config, hermes, prompts
 from .adapt.status import COMFORT, SECURITY, Outcome, Result
 from .adapt.strategies import run_intervention, wrap_attr
 from .delivery import delete, progress, split, worklog
+from .ingress import hydrate, reactions
+from .models import runtime as models_runtime
 from .policy import lanes
 from .prompts.assemble import SPILL_DEFAULT_MAX_CHARS, SPILL_MARGIN
+from .routing import apply as routing_apply
 from .runtime import RUNTIME
 from .ui import commands as ui_commands
 from .ui import items as ui_items
@@ -216,15 +222,107 @@ def install_progress(bind: Bind) -> list[Result]:
     return progress.install(hermes.turn_runner_class(), progress_grouping, RUNTIME.status)
 
 
+def apply_routing(bind: Bind) -> Result:
+    """R1 (security): chosen profiles go back into Hermes' running route table where the configuration is
+    managed, and the agreement of configuration and policy is reported. After the delivery and progress layers,
+    before anything that admits members (reaction wakeup, interface)."""
+    try:
+        routing_apply.on_bind(bind.adapter, bind.binding)
+    except Exception as exc:  # on_bind reports its own outcome; this only catches a broken seam
+        logger.exception("ctx_discord_policy: R1 at bind failed")
+        return RUNTIME.status.record(Result(routing_apply.INTERVENTION, SECURITY, Outcome.OFF,
+                                            f"off: {type(exc).__name__}: {exc}", "R1 bind"))
+    return RUNTIME.status.get(routing_apply.INTERVENTION)
+
+
+def install_models(bind: Bind) -> Result:
+    """K8: the per-server model inside Hermes' model resolution (``gateway.run`` is loaded once a bot binds)."""
+    return models_runtime.install()
+
+
+def install_reaction_wakeup(bind: Bind) -> Result:
+    """K5 on the bound bot's client (idempotent per client; a new client after a reconnect gets its own
+    listeners): the woken message goes through the same gate as every other message."""
+    return reactions.install_reaction_wakeup(bind.native, bind.adapter)
+
+
+def probe_hydration(bind: Bind) -> Result:
+    """K7: does the bot's client offer what hydration needs (A6 hydrates per message)?"""
+    return hydrate.probe(bind.adapter)
+
+
+# The interface binding per bot, for messages that start outside an interaction (model unavailable).
+_UI: "weakref.WeakValueDictionary[str, Any]" = weakref.WeakValueDictionary()
+
+
 def install_ui(bind: Bind) -> Any:
     """K6: ``/policy`` on the bound bot, on the bot binding's own store; a binding left on the same client
     (factory called again for it) is detached first, so listeners never double."""
     previous = ui_items.binding_for(bind.native)
     if previous is not None:
         previous.detach()
-    return ui_commands.install(bind.native, bind.adapter, bot_id=bind.binding.bot_id,
-                               owner_home=bind.binding.owner_home, store=bind.binding.store)
+    ui = ui_commands.install(bind.native, bind.adapter, bot_id=bind.binding.bot_id,
+                             owner_home=bind.binding.owner_home, store=bind.binding.store)
+    if ui is not None:
+        _UI[str(bind.binding.bot_id)] = ui
+    return ui
 
 
-__all__ = ["Bind", "CONTEXT", "DELETE_CHAT", "context_key", "guild_config", "install_delete", "install_delete_chat",
-           "install_delivery", "install_progress", "install_ui", "progress_grouping", "turn_context"]
+# ── operator messages from outside the interface ─────────────────────────────────────────────────────
+
+
+def _on_loop(ui: Any, coro: Any) -> bool:
+    """Run ``coro`` on the bot client's own event loop (its HTTP session lives there) from wherever this is
+    called: K8 runs on Hermes' threads too, some with a loop of their own."""
+    try:
+        loop = ui.client.loop
+    except Exception:
+        loop = None
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if loop is not None and running is loop:
+        ui.notify.spawn(coro)
+        return True
+    if loop is None or not isinstance(loop, asyncio.AbstractEventLoop) or not loop.is_running():
+        coro.close()
+        return False
+    loop.call_soon_threadsafe(lambda: ui.notify.spawn(coro))
+    return True
+
+
+# (bot, guild, lane) -> time a message about an unavailable model was handed to the bot's loop (in-process
+# throttle; ``Notifier.model_unavailable`` keeps the day across restarts).
+_MODEL_NOTICES: dict = {}
+MODEL_NOTICE_WINDOW = 24 * 3600.0
+
+
+def model_unavailable(bot_id: str, guild_id: str, lane: str, model: str, reason: str) -> bool:
+    """A server's chosen model can't be applied (K8 fell back, or ``on_unavailable: close`` keeps members
+    closed): tell the bot's operators, at most once per server, lane and day. Called on every occurrence; one
+    that finds no interface yet (K6 not bound, or off) is retried by the next."""
+    key = (str(bot_id), str(guild_id), str(lane))
+    last = _MODEL_NOTICES.get(key)
+    if last is not None and time.monotonic() - last < MODEL_NOTICE_WINDOW:
+        return False
+    ui = _UI.get(str(bot_id))
+    if ui is None:
+        return False
+    try:
+        sent = _on_loop(ui, ui.notify.model_unavailable(guild_id, lane, model, reason))
+    except Exception:
+        logger.warning("ctx_discord_policy: message about an unavailable model failed", exc_info=True)
+        return False
+    if sent:
+        _MODEL_NOTICES[key] = time.monotonic()
+    return sent
+
+
+models_runtime.UNAVAILABLE_LISTENERS.append(model_unavailable)
+
+
+__all__ = ["Bind", "CONTEXT", "DELETE_CHAT", "apply_routing", "context_key", "guild_config", "install_delete",
+           "install_delete_chat", "install_delivery", "install_models", "install_progress",
+           "install_reaction_wakeup", "install_ui", "model_unavailable", "probe_hydration", "progress_grouping",
+           "turn_context"]

@@ -267,7 +267,8 @@ async def _save(ctx: Ctx, lane: str, provider: str, model: str, *, warning: str 
             return
     done, _ = await run_change(ctx, lambda: ops.set_models(ctx.binding.store, ctx.bot_id, ctx.guild_id, changes,
                                                            by=ctx.actor.user_id, via="discord",
-                                                           expected_rev=ctx.ref.rev), page=KEY)
+                                                           expected_rev=ctx.ref.rev), page=KEY,
+                               audit=SETTING)
     if done:
         for text in (warning, verdict.reason if verdict is not None else ""):
             if text:
@@ -347,7 +348,8 @@ async def _clear(ctx: Ctx) -> None:
         return
     done, _ = await run_change(ctx, lambda: ops.set_models(ctx.binding.store, ctx.bot_id, ctx.guild_id,
                                                            {f"models.{lane}": None}, by=ctx.actor.user_id,
-                                                           via="discord", expected_rev=ctx.ref.rev), page=KEY)
+                                                           via="discord", expected_rev=ctx.ref.rev), page=KEY,
+                               audit=SETTING)
     if done:
         await ctx.show_page(KEY, notice=f"✅ {LANES[lane]}: the profile's model.")
 
@@ -365,7 +367,8 @@ async def _unavailable(ctx: Ctx) -> None:
         return
     done, _ = await run_change(ctx, lambda: ops.set_models(ctx.binding.store, ctx.bot_id, ctx.guild_id,
                                                            {"models.on_unavailable": value}, by=ctx.actor.user_id,
-                                                           via="discord", expected_rev=ctx.ref.rev), page=KEY)
+                                                           via="discord", expected_rev=ctx.ref.rev), page=KEY,
+                               audit=SETTING)
     if done:
         await ctx.show_page(KEY, notice=f"✅ If a model is unavailable: {UNAVAILABLE_CHOICES[value][0]}.")
 
@@ -404,7 +407,8 @@ async def _manager_set(ctx: Ctx) -> None:
         return
     done, _ = await run_change(ctx, lambda: ops.set_manager_pick(ctx.binding.store, ctx.bot_id, ctx.guild_id, pick,
                                                                  by=ctx.actor.user_id, via="discord",
-                                                                 expected_rev=ctx.ref.rev), page=KEY)
+                                                                 expected_rev=ctx.ref.rev), page=KEY,
+                               audit=PICK)
     if done:
         await ctx.show_page(KEY, notice=f"✅ Members' model: {_ref(check.effective(ctx.guild, check.PUBLIC))}.")
 

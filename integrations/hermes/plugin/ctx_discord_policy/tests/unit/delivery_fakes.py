@@ -345,7 +345,8 @@ class Scene:
                        adapter: Any = None) -> None:
         """Hermes ends the turn of ``message`` (base adapter ``on_processing_complete``)."""
         event = SimpleNamespace(raw_message=message, message_id=str(message.id),
-                                source=SimpleNamespace(chat_id=str(message.channel.id), message_id=str(message.id)))
+                                source=SimpleNamespace(chat_id=str(message.channel.id), message_id=str(message.id),
+                                                       user_id=str(message.author.id)))
         await (adapter or self.adapter).on_processing_complete(event, outcome)
 
     def threads_of(self, channel: FakeChannel) -> list[FakeChannel]:
