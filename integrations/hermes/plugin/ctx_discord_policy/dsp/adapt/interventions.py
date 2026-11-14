@@ -245,6 +245,12 @@ def install_upload_guard(cls: Any) -> Result:
     if not guarded:
         return Result(public.INTERVENTION, SECURITY, Outcome.OK, "the adapter class has no file sender",
                       f"{cls.__module__}.{cls.__qualname__}")
+    for name in public.EVENT_DELIVERY:
+        # Hermes delivers a turn's extracted files here, after the runner returned: the event names the route.
+        probe = probe_callable(cls, name, is_async=True, positional=["event"])
+        if not probe:
+            return Result(public.INTERVENTION, SECURITY, Outcome.OFF, f"{name}: {probe.reason}", probe.evidence)
+        wrap_attr(cls, name, public.make_event_delivery, public.INTERVENTION, RUNTIME_API)
     reason = "uploads of members' turns limited to Hermes' trusted media roots: " + ", ".join(guarded)
     if absent:
         reason += f" ({', '.join(absent)} absent)"

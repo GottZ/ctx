@@ -72,7 +72,8 @@ _WRAPPED_TARGETS = (
     ("plugins.platforms.discord.adapter", "DiscordAdapter",
      ("_discord_message_admission", "_handle_message", "delete_message", "handle_message", "send", "edit_message",
       "send_document", "send_video", "send_voice", "send_image_file", "send_multiple_images", "_send_prompt",
-      "on_processing_start", "on_processing_complete", "_discord_history_backfill")),
+      "on_processing_start", "on_processing_complete", "_discord_history_backfill", "_deliver_media_attachments",
+      "_send_image_batch")),
     ("gateway.run_turn_runner", "TurnRunner", ("_progress_absorb", "_progress_edit_state")),
 )
 

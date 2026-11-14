@@ -16,7 +16,9 @@ out of public turns:
   mention of the member who asked (a reply still pings the asker through Discord's reply). The text is matched on a per-character fold (NFKC,
   case folding, ignored format characters), so width, case and invisible-character variants of a directive
   or path are caught too. Code blocks are no exception (Hermes delivers a directive in inline code).
-* :func:`make_guard` wraps the adapter's file senders (intervention A11): while a public route is in play,
+* :func:`make_guard` wraps the adapter's file senders (intervention A11), and :func:`make_event_delivery` Hermes'
+  event-level attachment delivery, which runs after the runner returned and names the event, not the route:
+  while a public route is in play,
   only a regular file under a root Hermes itself trusts for delivery (its media caches and the operator's
   ``media_delivery_allow_dirs``; ``gateway.platforms.base._media_delivery_allowed_roots``) may be uploaded.
   Anything else, and any failure while deciding, refuses the upload.
@@ -82,7 +84,7 @@ _I = f"{_IGNORED}*"
 # that contains a separator or an extension (prose such as "social media: ..." stays as it is).
 _DIRECTIVE = re.compile(
     rf"m{_I}e{_I}d{_I}i{_I}a{_I}[ \t]*(?P<colon>:)"
-    r"(?=[ \t]*(?:[`\"'*_~/\\.]|[a-z]:|file:|[^\s`\"']*[/\\]|[^\s`\"']*\.[a-z0-9]{1,10}(?![a-z0-9])))")
+    r"(?=\s*(?:[`\"'*_~/\\.]|[a-z]:|file:|[^\s`\"']*[/\\]|[^\s`\"']*\.[a-z0-9]{1,10}(?![a-z0-9])))")
 # Where a host path starts (on the fold): ``file:`` URLs, UNC ``\\host``, drive ``x:\``/``x:/``, home ``~/`` or
 # ``~user/``, and a ``/`` that is not inside a word, a number, a relative path or a URL's ``://``.
 _ANCHOR = re.compile(
@@ -93,6 +95,10 @@ _ANCHOR = re.compile(
     r"|(?<![a-z0-9./\\:])/(?=[^\s/])"
     r"|(?<=:)/(?=[^\s/])(?<!://)")
 _MENTION = re.compile(r"<@(!?)(\d+)>|<@&(\d+)>|@(everyone|here)\b", re.IGNORECASE)
+# The same anchors on the raw text with Hermes' own predecessor class (``extract_local_files``:
+# ``(?<![/:\w.])``, Unicode-aware): a character that folds to a letter, digit, dot or separator but is none of
+# those for Hermes (a backslash, a full-width dot or slash, a circled letter) must not hide a path from us.
+_RAW_ANCHOR = re.compile(r"(?<![/:\w.])(?:~[\w.\-]*[/\\]|/(?=[^\s/])|[A-Za-z]:[/\\]|\\\\(?=[^\s\\/]))")
 _EXTENSION = re.compile(r"\.[a-z0-9]{1,10}(?![a-z0-9])")
 _TOKEN_END = re.compile(r"\s")
 
@@ -119,8 +125,11 @@ def neutralize_paths(text: str) -> str:
     for match in _DIRECTIVE.finditer(fold):
         chars[match.start("colon")] = COLON
     fold = _fold("".join(chars))
-    for match in _ANCHOR.finditer(fold):
-        start = match.start()
+    raw = "".join(chars)
+    starts = sorted({m.start() for m in _ANCHOR.finditer(fold)} | {m.start() for m in _RAW_ANCHOR.finditer(raw)})
+    for start in starts:
+        while start > 0 and fold[start - 1] in "/\\":
+            start -= 1          # a separator variant right before the anchor belongs to the path (idempotence)
         end = _token(fold, start)
         token = fold[start:end]
         if not _looks_like_path(token):
@@ -242,8 +251,41 @@ def _local_files(name: str, value: Any) -> Optional[list[str]]:
     return out
 
 
+# Stands for "the event's route could not be looked up": every upload under it counts as a member's.
+UNKNOWN = object()
+
+# Hermes' event-level attachment delivery (``gateway/platforms/base.py``): after the runner returned, the turn's
+# extracted files go out through these, with the event, but without the route context or any reply anchor.
+EVENT_DELIVERY: tuple[str, ...] = ("_deliver_media_attachments", "_send_image_batch")
+
+
+def make_event_delivery(original: Any) -> Any:
+    """Run Hermes' attachment delivery of one event with that event's route as the delivery context, so the
+    file senders below know whose files these are (a public route: trusted roots only)."""
+
+    async def policy_event_delivery(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            from ..policy import authority  # late: the policy layer imports the routing layer
+
+            route = authority.candidate_for_event(event, bot_id=worklog.bot_of(self))
+        except Exception:
+            logger.exception("ctx_discord_policy: route of an attachment delivery unknown; members' rules apply")
+            route = UNKNOWN
+        token = RUNTIME.delivery_route.set(route)
+        try:
+            return await original(self, event, *args, **kwargs)
+        finally:
+            RUNTIME.delivery_route.reset(token)
+
+    return policy_event_delivery
+
+
 def _in_play(adapter: Any, call: Any) -> bool:
-    """A public route is in play for this delivery: the turn's own route, or a route the delivery resolves to."""
+    """A public route is in play for this delivery: the delivered event's route, the turn's own route, or a
+    route the delivery resolves to."""
+    delivering = RUNTIME.delivery_route.get()
+    if delivering is UNKNOWN or (isinstance(delivering, Route) and not delivering.is_operator):
+        return True
     if call is None:
         current = RUNTIME.route.get()
         return isinstance(current, Route) and not current.is_operator
@@ -276,5 +318,6 @@ def make_guard(name: str, parameter: str) -> Callable[[Any], Any]:
     return factory
 
 
-__all__ = ["BACKSLASH", "COLON", "INTERVENTION", "REFUSED_UPLOAD", "SENDERS", "SLASH", "make_guard",
+__all__ = ["BACKSLASH", "COLON", "EVENT_DELIVERY", "INTERVENTION", "REFUSED_UPLOAD", "SENDERS", "SLASH", "UNKNOWN",
+           "make_event_delivery", "make_guard",
            "neutralize_mentions", "neutralize_paths", "owner", "public_owner", "reply", "reply_result", "trusted_file"]

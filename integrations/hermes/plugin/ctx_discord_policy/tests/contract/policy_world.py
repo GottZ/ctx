@@ -27,7 +27,8 @@ _SAVED = (("gateway.run", "GatewayRunner", ("_handle_message", "_is_user_authori
           ("plugins.platforms.discord.adapter", "DiscordAdapter",
            ("_discord_message_admission", "_handle_message", "handle_message", "send_document", "send_video",
             "send_voice", "send_image_file", "send_multiple_images", "send", "edit_message", "_send_prompt",
-            "on_processing_start", "on_processing_complete", "_discord_history_backfill")))
+            "on_processing_start", "on_processing_complete", "_discord_history_backfill",
+            "_deliver_media_attachments", "_send_image_batch")))
 
 
 def _config(operators: list[str], extra: str = "") -> str:

@@ -150,3 +150,45 @@ async def test_a_member_may_get_a_file_from_hermes_trusted_roots(world, tmp_path
     assert result is not None
     assert not refused.success and "host" in (refused.error or ""), refused
     assert "ctx_discord_policy" not in (trusted.error or ""), trusted      # not refused by the guard
+
+
+async def _dispatch(w, event, text):
+    """Hermes' delivery of a returned answer after the turn (normal send and the durable queue alike): its own
+    extraction (``_extract_response_content``), then its attachment delivery (``_deliver_media_attachments``) down
+    to the Discord file senders, outside the route context of the turn."""
+    channel = _Channel()
+    w.adapter._client = SimpleNamespace(user=w.adapter._client.user, application_id=w.adapter._client.application_id,
+                                        get_channel=lambda cid: channel if cid == channel.id else None)
+
+    async def no_history(session_key):
+        return set()
+
+    w.adapter._bounded_history_media_paths_for_session = no_history
+    assert w.runtime.route.get() is None
+    extracted = await w.adapter._extract_response_content(text, event, "s-dispatch", is_ephemeral_response=False)
+    results = []
+    await w.adapter._deliver_media_attachments(
+        event, extracted.media_files, extracted.local_files, force_document_attachments=False, human_delay=0.0,
+        metadata={}, record_delivery=results.append)
+    return extracted, [name for entry in channel.sent for name in entry["files"]]
+
+
+@pytest.mark.parametrize("pre", ["\\", "\uff0e", "\uff0f", "\uff3c", "\u24d0", "\u00a1", " "])
+async def test_a_members_answer_after_the_turn_attaches_nothing(world, pre):
+    event, out = await _member_turn(world, f"see {pre}{world.files.notes} now", mid=7110)
+    extracted, uploaded = await _dispatch(world, event, out["result"])
+    assert uploaded == [] and not extracted.local_files and not extracted.media_files, (out["result"], extracted)
+
+
+async def test_the_upload_guard_holds_after_the_turn_on_its_own(world):
+    """A11 without the text filter: Hermes extracts the file from the unfiltered answer, the senders refuse it."""
+    delivered = await world.deliver(world.message(MEMBER, 7111, "hi"))
+    extracted, uploaded = await _dispatch(world, delivered["event"], f"Done.\nMEDIA:{world.files.notes}\n")
+    assert extracted.media_files, extracted                     # Hermes would attach it
+    assert uploaded == [], uploaded
+
+
+async def test_an_operators_answer_after_the_turn_keeps_its_upload(world):
+    delivered = await world.deliver(world.message(OPERATOR, 7112, "hi"))
+    _, uploaded = await _dispatch(world, delivered["event"], f"Done.\nMEDIA:{world.files.notes}\n")
+    assert uploaded == ["notes.txt"], uploaded

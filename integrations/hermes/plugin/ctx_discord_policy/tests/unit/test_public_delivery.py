@@ -16,6 +16,11 @@ _DIRECTIVE_LEFT = re.compile(r"media\s*[:：﹕]", re.IGNORECASE)
 _PATH_LEFT = re.compile(r"(?<![\w./\\])(?:~[\w.-]*[/\\／＼]|[/／][\w.-]+[/\\／＼]|[A-Za-z][:：][/\\／＼]|\\\\\w|file[:：])")
 
 
+# Hermes' ``extract_local_files`` pattern (raw text, Unicode ``\w``), for the extensions used here.
+_HERMES_BARE = re.compile(r"(?<![/:\w.])(?:~/|/|[A-Za-z]:[/\\])(?:[\w.\-]+[/\\])*[\w.\-]+\.(?:txt|md|pdf|png)\b",
+                          re.IGNORECASE)
+
+
 @pytest.fixture
 def public(anchor):
     return anchor.mod("delivery.public")
@@ -58,11 +63,15 @@ def route(lane="public", author=ASKER):
     "[link](/srv/project/notes.txt)",
     "> quoted from a linked message: MEDIA:/srv/project/notes.txt\n> and /srv/x/y.md",
     "https://example.com/?p=/etc/passwd.txt",
+    "MEDIA:\n/srv/project/notes.txt",
+    *(f"see {pre}/srv/project/notes.txt" for pre in ("\\", "\uff0e", "\uff0f", "\uff3c", "\u24d0", "\u00a1", "\u20ac",
+                                                      "\u2215", "\u00b7", "\u3002", "\u200b", "\u00ad")),
 ])
 def test_no_directive_or_host_path_leaves_a_members_answer(public, text):
     clean = public.reply(text, route())
     assert not _DIRECTIVE_LEFT.search(clean), clean
     assert not _PATH_LEFT.search(clean), clean
+    assert not _HERMES_BARE.search(clean), clean              # Hermes' own bare-path pattern finds nothing
     assert public.reply(clean, route()) == clean                     # idempotent
 
 
@@ -115,6 +124,15 @@ def scene(anchor, tmp_path, monkeypatch):
 
     s = Scene(anchor)
     a = s.guild(GUILD_A)
+
+    async def deliver_media(self, event, media_files, local_files, **kwargs):   # Hermes' event-level seams
+        for path, _voice in media_files:
+            await self.send_document(str(event.source.chat_id), path)
+
+    async def image_batch(self, event, images, metadata, human_delay, record_delivery):
+        record_delivery(await self.send_multiple_images(str(event.source.chat_id), images, metadata))
+
+    s.cls._deliver_media_attachments, s.cls._send_image_batch = deliver_media, image_batch
     interventions = anchor.mod("adapt.interventions")
     result = interventions.install_upload_guard(s.cls)
     assert result.outcome.value == "wrapped", result
