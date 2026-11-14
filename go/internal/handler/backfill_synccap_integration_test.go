@@ -90,7 +90,7 @@ func TestBackfillPending_SyncCap_Integration(t *testing.T) {
 			SyncCap: 0, MaxTokens: 1_000_000, BackoffBase: time.Minute, BackoffCap: time.Hour,
 		}}
 
-		got := h.backfillPending(ctx, nil, "private", h.embedAdmission(), cfg)
+		got := h.backfillPending(ctx, nil, []string{"private"}, h.embedAdmission(), cfg)
 		if got != totalPending {
 			t.Fatalf("RED premise: backfilled = %d, want %d (SyncCap=0 must embed EVERY pending block)", got, totalPending)
 		}
@@ -113,7 +113,7 @@ func TestBackfillPending_SyncCap_Integration(t *testing.T) {
 			SyncCap: syncCap, MaxTokens: 1_000_000, BackoffBase: time.Minute, BackoffCap: time.Hour,
 		}}
 
-		got := h.backfillPending(ctx, nil, "private", h.embedAdmission(), cfg)
+		got := h.backfillPending(ctx, nil, []string{"private"}, h.embedAdmission(), cfg)
 		if got != syncCap {
 			t.Fatalf("backfilled = %d, want %d (SyncCap must bound the synchronous work)", got, syncCap)
 		}

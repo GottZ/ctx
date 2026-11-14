@@ -94,7 +94,7 @@ func TestBackfillPending_RetrievalExcludedType_Integration(t *testing.T) {
 		SyncCap: 0, MaxTokens: 1_000_000, BackoffBase: time.Minute, BackoffCap: time.Hour,
 	}}
 
-	got := h.backfillPending(ctx, nil, "private", h.embedAdmission(), cfg)
+	got := h.backfillPending(ctx, nil, []string{"private"}, h.embedAdmission(), cfg)
 
 	embedded := map[string]bool{}
 	rows, err := pool.Query(ctx,
@@ -159,7 +159,7 @@ func TestBackfillPending_RetrievalExcludedType_Integration(t *testing.T) {
 	}
 
 	before := hits.Load()
-	got2 := h.backfillPending(ctx, nil, "private", h.embedAdmission(), cfg)
+	got2 := h.backfillPending(ctx, nil, []string{"private"}, h.embedAdmission(), cfg)
 	if got2 != 1 {
 		t.Errorf("after tenant override: backfillPending = %d, want 1 (checkpoint is lifted, system-meta is not)", got2)
 	}
