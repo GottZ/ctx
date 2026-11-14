@@ -16,7 +16,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/derived"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -96,6 +100,34 @@ func TestScopePurgeManage(t *testing.T) {
 		code, _, raw := call(tenantAdmin, map[string]any{"scope": own, "tag": []string{"import"}})
 		if code != http.StatusBadRequest {
 			t.Fatalf("misspelt filter key: %d %s, want 400", code, raw)
+		}
+	})
+
+	// A derivative below a matched block answers 409 with the count that names it.
+	t.Run("derived_child_is_a_409", func(t *testing.T) {
+		const sc = "pm-a:derived"
+		if _, err := store.AssignTenantScope(ctx, pool, tA, sc, nil); err != nil {
+			t.Fatal(err)
+		}
+		drv, err := store.UpsertBlock(ctx, pool, "learnings", "pm-derived", "d", nil,
+			map[string]any{derived.MetadataKey: map[string]any{"v": derived.ContractVersion, "stratum": int(derived.StratumDerived), "arm": "pm"}},
+			sc, true, store.SensitivityWrite{Derived: true}, derived.TypeCatalog)
+		if err != nil {
+			t.Fatalf("derivative: %v", err)
+		}
+		if err := pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+			iss, err := store.InsertIssueBlock(ctx, tx, store.IssueFields{Scope: sc, Title: "i", Content: "x", Tags: []string{"import"}}, []string{sc})
+			if err != nil {
+				return err
+			}
+			return store.PutBlockParent(ctx, tx, drv.ID, iss.ID, []string{sc})
+		}); err != nil {
+			t.Fatalf("issue + parent: %v", err)
+		}
+		code, body, raw := call(tenantAdmin, map[string]any{"scope": sc, "tags": []string{"import"}, "confirm_blocks": 2})
+		counted, _ := body["counted"].(map[string]any)
+		if code != http.StatusConflict || counted["derived_children"] != float64(1) || blocksIn(sc) != 2 {
+			t.Fatalf("derived child: %d %s (blocks %d), want 409 with derived_children 1 and nothing deleted", code, raw, blocksIn(sc))
 		}
 	})
 

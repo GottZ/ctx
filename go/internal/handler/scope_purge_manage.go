@@ -88,6 +88,9 @@ func (h *ManageHandler) handlePurge(w http.ResponseWriter, r *http.Request, ar *
 	case errors.Is(err, store.ErrPurgeChildOutsideScope):
 		writePurgeRefusal(w, res, filter, "a block that would go has a child block in another scope (parent_id cascades) — nothing more was deleted")
 		return
+	case errors.Is(err, store.ErrPurgeDerivedChild):
+		writePurgeRefusal(w, res, filter, "a block that would go has a derivative below it (parent_id cascades, a derivative is never purged) — nothing more was deleted")
+		return
 	case err != nil:
 		body := map[string]any{"success": false, "error": "purge failed"}
 		var done *store.PurgeDeleted

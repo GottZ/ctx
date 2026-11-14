@@ -25,10 +25,12 @@ import (
 // and in one transaction per batch:
 //
 //  1. the batch's blocks are locked (FOR UPDATE), and so is every block that
-//     hangs below one of them through parent_id — that FK is ON DELETE CASCADE,
-//     so a child goes with its parent whether it matches the filter or not. A
-//     child in ANOTHER scope (a scope move keeps parent_id) refuses the run:
-//     a purge of one scope never removes a row of another;
+//     hangs below one of them through parent_id, level by level
+//     (lockPurgeClosure) — that FK is ON DELETE CASCADE, so a child goes with
+//     its parent whether it matches the filter or not. A child in ANOTHER
+//     scope (a scope move keeps parent_id) refuses the run: a purge of one
+//     scope never removes a row of another. So does a derivative below a
+//     matched block: skipping it is impossible, the cascade would take it;
 //  2. every context_dream_links row that references one of these blocks — the
 //     FK is NO ACTION (the ordering the tenant prune documents), and a link
 //     inserted by a concurrent dream cycle waits on the row lock of step 1
@@ -118,6 +120,9 @@ type PurgeCounts struct {
 	// ChildrenOutsideScope: children of matched blocks living in another
 	// scope. A run refuses while it is not 0.
 	ChildrenOutsideScope int64 `json:"children_outside_scope"`
+	// DerivedChildren: derivatives below matched blocks. The cascade would
+	// take them with their parent, so a run refuses while it is not 0.
+	DerivedChildren int64 `json:"derived_children"`
 }
 
 // PurgeDeleted is what a run removed.
@@ -149,6 +154,9 @@ var (
 	// ErrPurgeChildOutsideScope: a block that would go has a child in another
 	// scope; nothing (more) was deleted.
 	ErrPurgeChildOutsideScope = errors.New("store: purge: a matched block has a child in another scope")
+	// ErrPurgeDerivedChild: a block that would go has a derivative below it;
+	// nothing (more) was deleted.
+	ErrPurgeDerivedChild = errors.New("store: purge: a matched block has a derivative below it")
 )
 
 // purgeAuditEntity is the context_settings_audit entity_type of a purge.
@@ -206,25 +214,22 @@ const purgeCountSQL = `WITH RECURSIVE m AS (
   %s
 ), hit AS (SELECT id FROM m WHERE NOT derived),
 kids AS (
-  SELECT c.id, c.scope FROM context_blocks c JOIN hit ON c.parent_id = hit.id
+  SELECT c.id, c.scope, ` + purgeDerivedExpr + ` AS derived FROM context_blocks c JOIN hit ON c.parent_id = hit.id
   UNION
-  SELECT c.id, c.scope FROM context_blocks c JOIN kids k ON c.parent_id = k.id
+  SELECT c.id, c.scope, ` + purgeDerivedExpr + ` FROM context_blocks c JOIN kids k ON c.parent_id = k.id
 ), gone AS (SELECT id FROM hit UNION SELECT id FROM kids)
 SELECT (SELECT count(*) FROM gone),
        (SELECT count(*) FROM gone) - (SELECT count(*) FROM hit),
        (SELECT count(*) FROM context_dream_links l
          WHERE l.source_block_id IN (SELECT id FROM gone) OR l.target_block_id IN (SELECT id FROM gone)),
        (SELECT count(*) FROM m WHERE derived),
-       (SELECT count(*) FROM kids WHERE kids.scope <> $1)`
+       (SELECT count(*) FROM kids WHERE kids.scope <> $1),
+       (SELECT count(*) FROM kids WHERE kids.derived)`
 
-// purgeKidsSQL locks the parent_id closure below one batch and names each
-// row's scope and creation time.
-const purgeKidsSQL = `WITH RECURSIVE kids AS (
-  SELECT c.id FROM context_blocks c WHERE c.parent_id = ANY($1::uuid[])
-  UNION
-  SELECT c.id FROM context_blocks c JOIN kids k ON c.parent_id = k.id
-)
-SELECT c.id::text, c.scope, c.created_at FROM context_blocks c WHERE c.id IN (SELECT id FROM kids) FOR UPDATE`
+// purgeChildrenSQL locks the direct children of one level of the closure and
+// names each row's scope, creation time and whether it is a derivative.
+const purgeChildrenSQL = `SELECT c.id::text, c.scope, c.created_at, ` + purgeDerivedExpr + `
+  FROM context_blocks c WHERE c.parent_id = ANY($1::uuid[]) FOR UPDATE`
 
 // purgeBlobsSQL drains the scope's blobs created up to the as-of time.
 const purgeBlobsSQL = `DELETE FROM context_blobs WHERE ctid IN (
@@ -246,7 +251,7 @@ func PurgeScope(ctx context.Context, pool *pgxpool.Pool, q PurgeQuery) (*PurgeRe
 	match, args := purgeMatch(q.Scope, res.AsOf, q.Filter)
 	c := &res.Counted
 	if err := pool.QueryRow(ctx, fmt.Sprintf(purgeCountSQL, match), args...).
-		Scan(&c.Blocks, &c.CascadedChildren, &c.DreamLinks, &c.DerivedSkipped, &c.ChildrenOutsideScope); err != nil {
+		Scan(&c.Blocks, &c.CascadedChildren, &c.DreamLinks, &c.DerivedSkipped, &c.ChildrenOutsideScope, &c.DerivedChildren); err != nil {
 		return nil, fmt.Errorf("store: purge count: %w", err)
 	}
 	unfiltered := q.Filter.empty()
@@ -265,6 +270,9 @@ func PurgeScope(ctx context.Context, pool *pgxpool.Pool, q PurgeQuery) (*PurgeRe
 	}
 	if c.ChildrenOutsideScope > 0 {
 		return res, ErrPurgeChildOutsideScope
+	}
+	if c.DerivedChildren > 0 {
+		return res, ErrPurgeDerivedChild
 	}
 	if c.Blocks == 0 && c.Blobs == 0 {
 		res.Deleted = &PurgeDeleted{}
@@ -370,34 +378,9 @@ func purgeBlockBatch(ctx context.Context, pool *pgxpool.Pool, pb purgeBatch, del
 		if picked == 0 {
 			return nil
 		}
-		gone := make(map[string]struct{}, len(batch))
-		for _, id := range batch {
-			gone[id] = struct{}{}
-		}
-		rows, err := tx.Query(ctx, purgeKidsSQL, batch)
+		gone, err := lockPurgeClosure(ctx, tx, pb, batch)
 		if err != nil {
-			return fmt.Errorf("store: purge children: %w", err)
-		}
-		for rows.Next() {
-			var id, kidScope string
-			var kidCreated time.Time
-			if err := rows.Scan(&id, &kidScope, &kidCreated); err != nil {
-				rows.Close()
-				return fmt.Errorf("store: purge children scan: %w", err)
-			}
-			if kidScope != pb.scope {
-				rows.Close()
-				return ErrPurgeChildOutsideScope
-			}
-			if kidCreated.After(pb.asOf) {
-				rows.Close()
-				return ErrPurgeConfirmMismatch
-			}
-			gone[id] = struct{}{}
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("store: purge children: %w", err)
+			return err
 		}
 		if del.Blocks+int64(len(gone)) > pb.confirmed {
 			return ErrPurgeConfirmMismatch
@@ -444,6 +427,59 @@ func purgeBlockBatch(ctx context.Context, pool *pgxpool.Pool, pb purgeBatch, del
 		del.DreamLinks += links
 	}
 	return picked, err
+}
+
+// purgeChild is one row of purgeChildrenSQL.
+type purgeChild struct {
+	ID      string
+	Scope   string
+	Created time.Time
+	Derived bool
+}
+
+// lockPurgeClosure returns the batch plus every block below it through
+// parent_id, all of them locked FOR UPDATE, and refuses a closure the batch
+// may not delete. It reads one level per statement, each after the level
+// above is locked: a new child needs the FK's KEY SHARE on its parent, which
+// a held FOR UPDATE refuses until this transaction ends, and an insert that
+// held it first is committed by the time the lock is granted — so the next
+// statement, with a fresh snapshot, sees it. One recursive statement could
+// not do that: its snapshot predates the waits of its own FOR UPDATE, and a
+// child committed during such a wait would go with the cascade unseen. The
+// loop ends because every level adds only unseen ids (a parent_id cycle
+// included).
+func lockPurgeClosure(ctx context.Context, tx pgx.Tx, pb purgeBatch, batch []string) (map[string]struct{}, error) {
+	gone := make(map[string]struct{}, len(batch))
+	for _, id := range batch {
+		gone[id] = struct{}{}
+	}
+	for level := batch; len(level) > 0; {
+		rows, err := tx.Query(ctx, purgeChildrenSQL, level)
+		if err != nil {
+			return nil, fmt.Errorf("store: purge children: %w", err)
+		}
+		kids, err := pgx.CollectRows(rows, pgx.RowToStructByPos[purgeChild])
+		if err != nil {
+			return nil, fmt.Errorf("store: purge children: %w", err)
+		}
+		level = nil
+		for _, k := range kids {
+			if _, seen := gone[k.ID]; seen {
+				continue
+			}
+			switch {
+			case k.Scope != pb.scope:
+				return nil, ErrPurgeChildOutsideScope
+			case k.Derived:
+				return nil, ErrPurgeDerivedChild
+			case k.Created.After(pb.asOf):
+				return nil, ErrPurgeConfirmMismatch
+			}
+			gone[k.ID] = struct{}{}
+			level = append(level, k.ID)
+		}
+	}
+	return gone, nil
 }
 
 // collectStrings runs a one-column text query inside tx.
