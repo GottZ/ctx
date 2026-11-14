@@ -570,7 +570,7 @@ async def test_one_route_object_from_admission_to_the_tool_hook(world, anchor):
     hook updated through the ContextVar and the turn binding."""
     runtime = anchor.RUNTIME
     turn = await world.deliver(message(user(OPERATOR), mid=10901, mentions=mention()))
-    stored = runtime.message_routes.get((CHANNEL, "10901", OPERATOR))
+    stored = runtime.find_route(CHANNEL, "10901", OPERATOR)
     bound = runtime.turn_routes.get((turn["session"], turn["turn"]))
     assert stored is bound and stored is turn["event"].raw_message._dsp_route
     assert stored.tool_started is True  # set by pre_tool_call on the operator's allowed tool

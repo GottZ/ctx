@@ -89,7 +89,7 @@ def make_send(original: Any) -> Any:
         metadata = call.get("metadata")
         target = worklog.delivery_target(chat_id, metadata)
         try:
-            routes = worklog.candidate_routes(target, reply_to, metadata)
+            routes = worklog.candidate_routes(target, reply_to, metadata, worklog.bot_of(self))
         except Exception:
             logger.exception("ctx_discord_policy: route lookup failed; stock delivery")
             routes = []
@@ -143,7 +143,7 @@ def make_edit(original: Any, original_send: Callable[[], Any]) -> Any:
         found = worklog.located(chat_id, message_id)
         target = found[0] if found is not None else chat_id
         try:
-            routes = worklog.candidate_routes(target, None, metadata)
+            routes = worklog.candidate_routes(target, None, metadata, worklog.bot_of(self))
         except Exception:
             logger.exception("ctx_discord_policy: route lookup failed; stock edit")
             routes = []

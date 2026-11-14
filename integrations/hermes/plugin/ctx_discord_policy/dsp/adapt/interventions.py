@@ -77,16 +77,19 @@ def _make_admission(original: Any) -> Any:
         if widened:
             # Stock reports role authorization for every admitted human once roles are configured; for an
             # author we let in, it must never travel on (it would authorize an unrouted turn by roles).
-            RUNTIME.widened.put(_widened_key(message), time.time())
+            RUNTIME.widened.put(_widened_key(self, message), time.time())
             return (result[0], False)
         return result
 
     return policy_admission
 
 
-def _widened_key(message: Any) -> tuple[str, str]:
-    """Per message AND author: a reaction wakeup reuses the reacted-to message's id with the reactor as author."""
-    return (str(getattr(message, "id", "") or ""), str(getattr(getattr(message, "author", None), "id", "") or ""))
+def _widened_key(adapter: Any, message: Any) -> tuple[str, str, str]:
+    """Per bot, message AND author: a reaction wakeup reuses the reacted-to message's id with the reactor as
+    author, and two bots of one gateway may both admit one message."""
+    binding = RUNTIME.bots.for_adapter(adapter)
+    return (binding.bot_id if binding is not None else "", str(getattr(message, "id", "") or ""),
+            str(getattr(getattr(message, "author", None), "id", "") or ""))
 
 
 def _hydrates(route: Any, decision: Any) -> bool:
@@ -116,7 +119,7 @@ async def _hydrated(adapter: Any, message: Any, route: Any, decision: Any) -> An
 def _make_handle(original: Any) -> Any:
     async def policy_handle(self: Any, message: Any, *args: Any, **kwargs: Any) -> Any:
         message_id = str(getattr(message, "id", "") or "")
-        widened_key = _widened_key(message)
+        widened_key = _widened_key(self, message)
         decision = admission.decide(self, message)
         if decision is not None and decision.excluded:
             return False
@@ -175,10 +178,10 @@ def bind_adapter_class(cls: Any) -> bool:
 
 def _make_runner_handle(original: Any) -> Any:
     async def policy_runner_handle(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
-        candidate = authority.candidate_for_event(event)
+        candidate = authority.candidate_for_event(event, self)
         route = None
         if candidate is not None:
-            route = authority.route_for_event(event)
+            route = authority.route_for_event(event, self)
             target = authority.event_target_key(self, event) if route is not None else None
             refusal = authority.refusal(self, event, route, target)
             if refusal is not None:
@@ -201,7 +204,7 @@ def _make_runner_handle(original: Any) -> Any:
 
 def _make_runner_authorized(original: Any) -> Any:
     def policy_runner_authorized(self: Any, source: Any, *args: Any, **kwargs: Any) -> Any:
-        if authority.authorizes(source):
+        if authority.authorizes(source, self):
             return True
         return original(self, source, *args, **kwargs)
 

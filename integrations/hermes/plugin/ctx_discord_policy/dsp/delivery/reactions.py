@@ -57,8 +57,9 @@ def hide_reactions(event: Any) -> Any:
 
 
 def event_keys(event: Any) -> list[tuple[str, str, str]]:
-    """Registry keys (``Route.key``) this event's route can have: its chat or the raw message's channel, its
-    message id, and the session user of its source (routes of other users of the same message never match)."""
+    """Registry keys without the bot (``Route.message_key``) this event's route can have: its chat or the raw
+    message's channel, its message id, and the session user of its source (routes of other users of the same
+    message never match)."""
     keys = []
     source = getattr(event, "source", None)
     raw = getattr(event, "raw_message", None)
@@ -71,27 +72,34 @@ def event_keys(event: Any) -> list[tuple[str, str, str]]:
     return keys
 
 
-def event_route(event: Any) -> Optional[Route]:
-    """The policy route of the message this processing event belongs to (route registry, then context)."""
-    for key in event_keys(event):
-        route = RUNTIME.message_routes.get(key)
+def event_route(event: Any, bot_id: Optional[str] = None) -> Optional[Route]:
+    """The policy route of the message this processing event belongs to (route registry, then context), of
+    ``bot_id`` (the adapter's bot) when known."""
+    keys = event_keys(event)
+    for key in keys:
+        route = RUNTIME.find_route(*key, bot_id=bot_id)
         if isinstance(route, Route):
             return route
     current = RUNTIME.route.get()
-    if isinstance(current, Route) and current.key in event_keys(event):
+    if isinstance(current, Route) and current.message_key in keys and (not bot_id or current.bot_id == bot_id):
         return current
     return None
 
 
-def is_ambient(event: Any) -> bool:
-    route = event_route(event)
+def _bot_of(adapter: Any) -> Optional[str]:
+    binding = RUNTIME.bots.for_adapter(adapter)
+    return binding.bot_id if binding is not None else None
+
+
+def is_ambient(event: Any, bot_id: Optional[str] = None) -> bool:
+    route = event_route(event, bot_id)
     return route is not None and route.mode == AMBIENT
 
 
 def _make(original: Any) -> Any:
     async def policy_processing(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
         try:
-            if is_ambient(event):
+            if is_ambient(event, _bot_of(self)):
                 event = hide_reactions(event)
         except Exception:
             pass  # comfort only: on any doubt the stock hook runs unchanged

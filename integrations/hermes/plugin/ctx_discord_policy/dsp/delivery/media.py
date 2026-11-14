@@ -98,7 +98,7 @@ def make_media(name: str) -> Callable[[Any], Any]:
             reply_to = call.get("reply_to")
             target = worklog.delivery_target(call.get("chat_id"), metadata)
             try:
-                routes = worklog.candidate_routes(target, reply_to, metadata)
+                routes = worklog.candidate_routes(target, reply_to, metadata, worklog.bot_of(self))
             except Exception:
                 logger.exception("ctx_discord_policy: %s route lookup failed; stock delivery", name)
                 routes = []
