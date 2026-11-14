@@ -17,12 +17,15 @@ Generic, non-secret rules (internal host paths, any UUID) are plain regular expr
 
 Scope: the plugin directory (``--root``, default the directory above ``ci/``) inside whatever repository holds
 it. In the ctx repository that is ``integrations/hermes/plugin/ctx_discord_policy/``: the tracked files under
-it, every earlier version of a file under it, and the messages of the commits that touch it. The rest of the
-repository is not scanned. Run from a standalone checkout of the plugin, the scope is the whole repository.
+it, every earlier version of a file under it, and the messages of the commits that touch it. Files of the plugin
+that live elsewhere in the repository (its workflows, its banner) join the scope with ``--also PATH`` (from the
+repository top), the same three ways. The rest of the repository is not scanned. Run from a standalone checkout of
+the plugin, the scope is the whole repository.
 
 Usage:
     DSP_PRIVATE_SCAN_KEY=... python ci/private_scan.py            # plugin files, their history, commit messages
     python ci/private_scan.py --key-file KEY --no-commits
+    python ci/private_scan.py --key-file KEY --also .github/workflows/x.yml   # plus a file outside the plugin
     python ci/private_scan.py --key-file KEY --hash KIND VALUE     # pattern line for a new private value
 
 Exit status: 0 clean, 1 findings, 2 usage/environment error (missing key, git failure, bad pattern file).
@@ -65,6 +68,9 @@ GENERIC_RULES = (
 # The scanner spells its own plain generic rules; keyed rules still apply to it.
 GENERIC_EXEMPT = {"ci/private_scan.py"}
 BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".zip", ".gz", ".whl", ".pdf"}
+# Text inside a binary file (EXIF and XMP fields, archive member names) is printable ASCII; shorter runs are
+# almost always chance bytes of the compressed data, where short words would match at random.
+PRINTABLE_RUN = re.compile(rb"[\x20-\x7e]{6,}")
 
 
 class ScanError(RuntimeError):
@@ -255,41 +261,70 @@ def tracked_files(root: Path) -> list[str]:
     return [n for n in _git(root, "ls-files", "-z").decode("utf-8").split("\0") if n]
 
 
+def repo_top(root: Path) -> Path:
+    return Path(_git(root, "rev-parse", "--show-toplevel").decode("utf-8").strip())
+
+
+def also_files(root: Path, also: list[str]) -> list[str]:
+    """The tracked files (paths from the repository top) of every ``--also`` path; a path without one fails."""
+    top = repo_top(root)
+    files: list[str] = []
+    for path in also:
+        found = [n for n in _git(top, "ls-files", "-z", "--", f":(top,literal){path}").decode("utf-8").split("\0")
+                 if n]
+        if not found:
+            raise ScanError(f"--also {path}: no tracked file there")
+        files += [n for n in found if n not in files]
+    return files
+
+
+def _in_also(name: str, also: list[str]) -> bool:
+    return any(name == path.rstrip("/") or name.startswith(path.rstrip("/") + "/") for path in also)
+
+
 def repo_prefix(root: Path) -> str:
     """Path of ``root`` inside its repository, with a trailing slash ("" at the top level)."""
     return _git(root, "rev-parse", "--show-prefix").decode("utf-8").strip()
 
 
-def _scope(root: Path) -> list[str]:
-    """rev-list arguments limiting a walk to the commits that touch ``root``. ``--full-history`` keeps every
-    such commit, merges included (the default simplification would drop a merge that equals one parent
-    there, and with it the merge message). At the top level of a repository: no limit, every commit."""
-    return ["--full-history", "--", "."] if repo_prefix(root) else []
+def _scope(root: Path, also: list[str] = ()) -> list[str]:
+    """rev-list arguments limiting a walk to the commits that touch ``root`` (or an ``--also`` path).
+    ``--full-history`` keeps every such commit, merges included (the default simplification would drop a merge
+    that equals one parent there, and with it the merge message). At the top level of a repository: no limit,
+    every commit."""
+    if not repo_prefix(root):
+        return []
+    return ["--full-history", "--", ".", *(f":(top,literal){path}" for path in also)]
 
 
-def commit_messages(root: Path) -> list[tuple[str, str]]:
-    """Messages (with author and committer name) of every commit reachable from HEAD that touches ``root``."""
+def commit_messages(root: Path, also: list[str] = ()) -> list[tuple[str, str]]:
+    """Messages (with author and committer name) of every commit reachable from HEAD that touches ``root``
+    (or an ``--also`` path)."""
     if subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "-q", "HEAD"],
                       capture_output=True).returncode != 0:
         return []  # no commits yet
-    shas = _git(root, "rev-list", "HEAD", *_scope(root)).decode().split()
+    shas = _git(root, "rev-list", "HEAD", *_scope(root, also)).decode().split()
     return [(sha[:12], _git(root, "log", "-1", "--format=%an%n%cn%n%B", sha).decode("utf-8", "replace"))
             for sha in shas]
 
 
-def history_blobs(root: Path, current: set[str]) -> list[tuple[str, str]]:
-    """Every version of a file under ``root`` reachable from HEAD that is not in the current tree:
-    (label relative to ``root``, blob id)."""
+def history_blobs(root: Path, current: set[str], also: list[str] = ()) -> list[tuple[str, str]]:
+    """Every version of a file under ``root`` (or an ``--also`` path) reachable from HEAD that is not in the
+    current tree: (label relative to ``root``, or from the repository top for an ``--also`` path; blob id)."""
     if subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "-q", "HEAD"],
                       capture_output=True).returncode != 0:
         return []
     prefix = repo_prefix(root)
     seen: dict[str, str] = {}
-    for line in _git(root, "rev-list", "--objects", "HEAD", *_scope(root)).decode("utf-8", "replace").splitlines():
+    walk = _git(root, "rev-list", "--objects", "HEAD", *_scope(root, also)).decode("utf-8", "replace")
+    for line in walk.splitlines():
         sha, _, name = line.partition(" ")
-        if not name.startswith(prefix):
+        if _in_also(name, also):
+            pass  # a file of the plugin elsewhere in the repository: labelled from the top
+        elif not name.startswith(prefix):
             continue  # the trees above root, which the path-limited walk passes through
-        name = name[len(prefix):]
+        else:
+            name = name[len(prefix):]
         if name and sha not in current and sha not in seen:
             seen[sha] = name
     blobs = []
@@ -300,13 +335,16 @@ def history_blobs(root: Path, current: set[str]) -> list[tuple[str, str]]:
     return blobs
 
 
+def _blob_text(name: str, data: bytes) -> str:
+    if Path(name).suffix.lower() in BINARY_SUFFIXES:
+        return "\n".join(run.decode("ascii") for run in PRINTABLE_RUN.findall(data))
+    return data.decode("utf-8", "replace")
+
+
 def _file_text(path: Path) -> str:
     if path.is_symlink():
         return os.readlink(path)
-    data = path.read_bytes()
-    if path.suffix.lower() in BINARY_SUFFIXES:
-        return data.decode("latin-1")  # embedded metadata (EXIF, archive names) is ASCII
-    return data.decode("utf-8", "replace")
+    return _blob_text(path.name, path.read_bytes())
 
 
 def _load_key(args: argparse.Namespace) -> bytes:
@@ -348,6 +386,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-history", action="store_true", help="skip file versions of earlier commits")
     parser.add_argument("--text-env", action="append", default=[],
                         help="also scan the text in this environment variable (e.g. a PR title and body)")
+    parser.add_argument("--also", action="append", default=[], metavar="PATH",
+                        help="also scan this file or directory of the repository (path from its top): the tracked "
+                             "files, their earlier versions and the messages of commits that touch it")
     parser.add_argument("--hash", nargs=2, metavar=("KIND", "VALUE"))
     args = parser.parse_args(argv)
     try:
@@ -358,9 +399,10 @@ def main(argv: list[str] | None = None) -> int:
         patterns = load_patterns(key=key)
         contexts = _owner_contexts(args.root)
         files = tracked_files(args.root)
+        extra = also_files(args.root, args.also) if args.also else []
+        top = repo_top(args.root) if extra else args.root
         findings: list[str] = []
-        for name in files:
-            path = args.root / name
+        for name, path in [(n, args.root / n) for n in files] + [(n, top / n) for n in extra]:
             if not (path.is_file() or path.is_symlink()):
                 continue
             text = _file_text(path)
@@ -370,15 +412,18 @@ def main(argv: list[str] | None = None) -> int:
             findings += scan_text(name, text, key, patterns, contexts=contexts,
                                   generic=name not in GENERIC_EXEMPT)
             findings += scan_text(f"{name} (file name)", name, key, patterns, contexts=contexts)
-        messages = [] if args.no_commits else commit_messages(args.root)
+        messages = [] if args.no_commits else commit_messages(args.root, args.also)
         for sha, body in messages:
             findings += scan_text(f"commit {sha}", body, key, patterns, contexts=contexts)
         current = {line.split()[1] for line in _git(args.root, "ls-files", "-s").decode().splitlines() if line}
-        history = [] if args.no_history else history_blobs(args.root, current)
+        if extra:
+            listed = _git(top, "ls-files", "-s", "--", *(f":(top,literal){n}" for n in extra)).decode()
+            current |= {line.split()[1] for line in listed.splitlines() if line}
+        history = [] if args.no_history else history_blobs(args.root, current, args.also)
         for label, sha in history:
             if label.startswith("ci/private_patterns.txt@") or label.startswith("ci/private_scan.py@"):
                 continue  # superseded pattern files carry digests by design; the scanner spells generic rules
-            text = _git(args.root, "cat-file", "-p", sha).decode("utf-8", "replace")
+            text = _blob_text(label.rsplit("@", 1)[0], _git(args.root, "cat-file", "-p", sha))
             findings += scan_text(f"history {label}", text, key, patterns, contexts=contexts)
         for name in args.text_env:
             findings += scan_text(f"${name}", os.environ.get(name, ""), key, patterns, contexts=contexts)
@@ -387,8 +432,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     for finding in findings:
         print(finding)
-    print(f"private_scan: {len(files)} files, {len(history)} earlier file versions, {len(messages)} commit "
-          f"messages, {patterns.count} patterns, {len(findings)} findings")
+    print(f"private_scan: {len(files) + len(extra)} files, {len(history)} earlier file versions, {len(messages)} "
+          f"commit messages, {patterns.count} patterns, {len(findings)} findings")
     return 1 if findings else 0
 
 
