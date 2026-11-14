@@ -89,6 +89,28 @@ func BaseDir() string {
 	return filepath.Join(home, ".config", "ctx")
 }
 
+// CacheDir is the ctx cache DIRECTORY, BaseDir's counterpart for data that may
+// vanish at any time (the statusline's last fetch, #265): $XDG_CACHE_HOME/ctx,
+// %LOCALAPPDATA%\ctx on Windows, else ~/.cache/ctx. It is NOT under BaseDir on
+// purpose — a config directory is often kept in a dotfiles repository, and a
+// file rewritten every few seconds does not belong there. Unlike BaseDir it
+// has no relative fallback: a relative variable is ignored (the XDG rule), and
+// with no absolute home directory it returns "" and the caller keeps no cache, rather
+// than writing into the working directory.
+func CacheDir() string {
+	if xdg := os.Getenv("XDG_CACHE_HOME"); filepath.IsAbs(xdg) {
+		return filepath.Join(xdg, "ctx")
+	}
+	if local := os.Getenv("LOCALAPPDATA"); filepath.IsAbs(local) {
+		return filepath.Join(local, "ctx")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || !filepath.IsAbs(home) {
+		return ""
+	}
+	return filepath.Join(home, ".cache", "ctx")
+}
+
 // loadConfigFile reads a Key=Value file (bash source-compatible).
 func loadConfigFile(path string, cfg *Config) error {
 	f, err := os.Open(path)

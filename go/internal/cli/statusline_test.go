@@ -150,7 +150,7 @@ func TestRateColor(t *testing.T) {
 }
 
 func TestHealthIndicator(t *testing.T) {
-	// ok = no indicator (block count implies healthy)
+	// ok = no indicator (the block count stands alone)
 	ok := healthIndicator("ok")
 	if ok != "" {
 		t.Errorf("ok should be empty, got %q", ok)

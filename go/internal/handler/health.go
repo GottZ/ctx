@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -103,23 +104,45 @@ type healthResponse struct {
 //   - Dream down → "ok" (background process, not critical)
 //   - Blocktype registry on builtin-fallback → "degraded" (WF T3: reads work,
 //     but the visibility policy runs on compiled-in defaults)
+//
+// The database ping and the roles run concurrently (#265), so the answer takes
+// as long as the slowest role (its candidates in order), not the sum of all
+// roles; a base URL that several roles share is requested once per call
+// (hostProbes). Every probe
+// runs on ctx and HealthStatus returns only after all of them returned, so a
+// cancelled caller ends every probe and none outlives the call.
 func HealthStatus(ctx context.Context, pool *pgxpool.Pool, snap []backends.Backend, dreamEnabled bool, blocktypeRegistry string) healthResponse {
-	services := make(map[string]string)
+	// The service keys keep their historical names ("chat" = the
+	// synthesis-serving class).
+	roles := []struct{ service, role string }{
+		{"embed", backends.RoleEmbed},
+		{"chat", backends.RoleSynthesis},
+	}
+	if dreamEnabled {
+		roles = append(roles, struct{ service, role string }{"dream", backends.RoleDream})
+	}
 
-	// Database ping
-	if err := pool.Ping(ctx); err != nil {
+	var (
+		wg      sync.WaitGroup
+		dbErr   error
+		reached = make([]string, len(roles)) // one slot per goroutine, read after Wait
+		probes  = newHostProbes()
+	)
+	wg.Go(func() { dbErr = pool.Ping(ctx) })
+	for i, r := range roles {
+		wg.Go(func() { reached[i] = roleReachable(ctx, snap, r.role, probes) })
+	}
+	wg.Wait()
+
+	services := make(map[string]string, len(roles)+1)
+	if dbErr != nil {
 		services["database"] = "error"
-		slog.Error("health check: database ping failed", "error", err)
+		slog.Error("health check: database ping failed", "error", dbErr)
 	} else {
 		services["database"] = "ok"
 	}
-
-	// Per-role reachability from the given snapshot. The service keys keep
-	// their historical names ("chat" = the synthesis-serving class).
-	services["embed"] = roleReachable(ctx, snap, backends.RoleEmbed)
-	services["chat"] = roleReachable(ctx, snap, backends.RoleSynthesis)
-	if dreamEnabled {
-		services["dream"] = roleReachable(ctx, snap, backends.RoleDream)
+	for i, r := range roles {
+		services[r.service] = reached[i]
 	}
 
 	return healthResponse{
@@ -237,7 +260,13 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 // anonymous caller a request into wherever a tenant pointed it (GHSA
 // 2026-10-31 §3). Server health is the operator's pool; a tenant's rows answer
 // for themselves on its own chain calls.
-func roleReachable(ctx context.Context, snap []backends.Backend, role string) string {
+//
+// The candidates of one role stay in order and the role stops at the first
+// reachable one, as before: a role never requests more than its own ordered
+// walk, and the bound of a call stays the operator rows of the probed roles.
+// probes only removes repeats — a base URL another role of the same call
+// already probed is not requested again.
+func roleReachable(ctx context.Context, snap []backends.Backend, role string, probes *hostProbes) string {
 	candidates := 0
 	for i := range snap {
 		b := &snap[i]
@@ -245,7 +274,7 @@ func roleReachable(ctx context.Context, snap []backends.Backend, role string) st
 			continue
 		}
 		candidates++
-		if err := pingHost(ctx, b.Host); err != nil {
+		if err := probes.ping(ctx, b.Host); err != nil {
 			slog.Warn("health check: backend ping failed", "backend", b.Name, "role", role, "error", err)
 			continue
 		}
@@ -255,6 +284,49 @@ func roleReachable(ctx context.Context, snap []backends.Backend, role string) st
 		slog.Warn("health check: no enabled backend for role", "role", role)
 	}
 	return "error"
+}
+
+// hostProbes is the probe memo of ONE HealthStatus call (#265): the first role
+// that needs a base URL requests it, every other role of the same call that
+// needs it waits for that result. Keyed by the probe target pingHost requests
+// (the base URL without trailing slashes), so "http://h/" and "http://h" are
+// one probe. It lives exactly as long as the call — a later /health request
+// probes afresh, nothing is cached across calls.
+type hostProbes struct {
+	mu sync.Mutex
+	m  map[string]*hostProbe
+}
+
+// hostProbe is one in-flight or finished probe. err is written once, before
+// done is closed, and read only after done is closed.
+type hostProbe struct {
+	done chan struct{}
+	err  error
+}
+
+func newHostProbes() *hostProbes {
+	return &hostProbes{m: make(map[string]*hostProbe)}
+}
+
+// ping returns pingHost's result for host, requesting it at most once per memo.
+// A role that finds the probe already started waits for its result and
+// nothing else: the owner runs on the same ctx, so the wait ends when ctx
+// does, and the answer does not depend on which of the two finished first.
+func (p *hostProbes) ping(ctx context.Context, host string) error {
+	key := strings.TrimRight(host, "/")
+	p.mu.Lock()
+	if pr, ok := p.m[key]; ok {
+		p.mu.Unlock()
+		<-pr.done
+		return pr.err
+	}
+	pr := &hostProbe{done: make(chan struct{})}
+	p.m[key] = pr
+	p.mu.Unlock()
+
+	pr.err = pingHost(ctx, host)
+	close(pr.done)
+	return pr.err
 }
 
 // pingHost issues ONE credential-free GET against the backend's base URL and

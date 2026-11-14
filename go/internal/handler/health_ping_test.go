@@ -150,7 +150,7 @@ func TestRoleReachableProbeIsCredentialFree(t *testing.T) {
 		},
 	}}
 
-	if got := roleReachable(context.Background(), snap, backends.RoleEmbed); got != "ok" {
+	if got := roleReachable(context.Background(), snap, backends.RoleEmbed, newHostProbes()); got != "ok" {
 		t.Errorf("roleReachable on a 404-answering cloud root = %q, want ok (PR #9 false negative)", got)
 	}
 	if got := hits.Load(); got != 1 {
@@ -186,7 +186,7 @@ func TestRoleReachableFiveXXIsDown(t *testing.T) {
 		Trust: backends.TrustFull, Roles: []string{backends.RoleEmbed},
 	}}
 
-	if got := roleReachable(context.Background(), snap, backends.RoleEmbed); got != "error" {
+	if got := roleReachable(context.Background(), snap, backends.RoleEmbed, newHostProbes()); got != "error" {
 		t.Errorf("roleReachable on a 502 host = %q, want error", got)
 	}
 }
@@ -206,7 +206,7 @@ func TestRoleReachableSkipsTenantRows(t *testing.T) {
 		ID: "t", Name: "tenant-row", Host: srv.URL, Scope: "acme", Enabled: true,
 		Trust: backends.TrustFull, Roles: []string{backends.RoleEmbed},
 	}
-	if got := roleReachable(context.Background(), []backends.Backend{tenant}, backends.RoleEmbed); got != "error" {
+	if got := roleReachable(context.Background(), []backends.Backend{tenant}, backends.RoleEmbed, newHostProbes()); got != "error" {
 		t.Errorf("roleReachable over a tenant row only = %q, want error (no operator candidate)", got)
 	}
 	if n := hits.Load(); n != 0 {
@@ -215,7 +215,7 @@ func TestRoleReachableSkipsTenantRows(t *testing.T) {
 
 	global := tenant
 	global.Scope = backends.GlobalScope
-	if got := roleReachable(context.Background(), []backends.Backend{tenant, global}, backends.RoleEmbed); got != "ok" {
+	if got := roleReachable(context.Background(), []backends.Backend{tenant, global}, backends.RoleEmbed, newHostProbes()); got != "ok" {
 		t.Errorf("roleReachable with a _global row = %q, want ok", got)
 	}
 	if n := hits.Load(); n != 1 {
