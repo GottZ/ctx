@@ -42,8 +42,10 @@ hermes ctx-discord-policy routing set <server id> <profile>   on the host: run a
   used and when a model chosen for a server cannot be used.
 - **A settings page in Hermes Desktop.** Settings → Plugins → ctx_discord_policy: your servers, the operators,
   the status and the change history, next to Hermes' own form for the plugin settings.
-- **It checks itself against your Hermes.** Every place where the plugin hooks into Hermes is tested when it
-  starts. Works without ctx.
+- **It checks itself against your Hermes.** When Hermes loads it and when the Discord bot connects, the plugin
+  checks each place where it hooks into Hermes for the form it needs (name, parameters, sync or async). What
+  Hermes does behind those places is tested against every supported Hermes version in CI (see Compatibility).
+  Works without ctx.
 
 ## How it works
 
@@ -62,7 +64,8 @@ you activated it:
 When Hermes itself later gains something the plugin adds today (deleting progress messages, one progress line
 that keeps being replaced), the plugin notices and steps back: the status then reads `native` instead of
 `injected` or `wrapped`. Safety checks that cannot be made close the server for members; comfort features fall
-back to Hermes' own behaviour.
+back to Hermes' own behaviour. Under `plugins.isolation: host` none of this applies: the plugin does not run at
+all (see Before you start).
 
 ## Before you start
 
@@ -81,11 +84,13 @@ What does not work, or only partly:
 
 - **The settings page** shows a server's Hermes profile and models but cannot change them; choose them in
   `/policy`.
+- **macOS and Windows** are listed as platforms of the plugin, but its test suites run on Linux only; they
+  have had no run there yet.
+- **The status of a stopped gateway** stays on disk. `hermes ctx-discord-policy status` shows it and says
+  "is stale" once the gateway that wrote it has stopped; on Windows it cannot tell, and says so.
 - **Names on the settings page.** Channel, role and member names come from the running gateway: read directly
   when the page's backend runs in the gateway process, else from the server directory the gateway keeps, or
   over Hermes' plugin RPC (Hermes 0.23.1 or newer). Without either you enter IDs.
-- **The status of a stopped gateway** stays on disk. `hermes ctx-discord-policy status` shows it and says
-  "is stale" once the gateway that wrote it has stopped; on Windows it cannot tell, and says so.
 - **A profile chosen on the host** with `hermes ctx-discord-policy routing set` reaches the running gateway at
   its next start, or at once with **Apply again** in `/policy` → Profile. Until then members get no answer in
   that server.
@@ -144,9 +149,10 @@ restart Hermes Desktop once so the page's backend is mounted.
    Server managers who are not operators can ask you from the same panel; you get a direct message.
 
 Further settings of the plugin (Hermes Desktop shows them as a form): `frame_prompt` (your text before every
-server's guidance), `operator_label`, `guild_prompt_max_chars` (the longest guidance text of a server),
-`notify_operators` (the direct messages), `bot_messages` (`closed`, the default, or `member`: how messages of
-other bots and webhooks are treated), `locked_profiles` (profiles members never reach) and `member_search`.
+server's guidance; a server's own `frame` template replaces it there), `operator_label`,
+`guild_prompt_max_chars` (the longest guidance text of a server), `notify_operators` (the direct messages),
+`bot_messages` (`closed`, the default, or `member`: how messages of other bots and webhooks are treated),
+`locked_profiles` (profiles members never reach) and `member_search`.
 
 ## Everyday use
 
@@ -226,7 +232,7 @@ so, members get no answer until the model works again.
 
 | Hermes | Tested | Notes |
 |---|---|---|
-| `main` | daily and on every change | drift is reported as an issue in [GottZ/ctx](https://github.com/GottZ/ctx/issues?q=label%3Actx_discord_policy) with the label `ctx_discord_policy` |
+| `main` | daily, and on every change (reported there, it does not block) | the daily run reports drift as an issue in [GottZ/ctx](https://github.com/GottZ/ctx/issues?q=label%3Actx_discord_policy) with the label `ctx_discord_policy` |
 | latest three releases | daily | security drift turns the run red |
 | v0.23.0 | on every change | `delete_message` and the per-server progress line are added by the plugin |
 | v0.22.4 | on every change | oldest supported version |

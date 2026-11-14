@@ -1,12 +1,12 @@
 manifest_version: 2
 name: ctx_discord_policy
 version: 3.0.0
-description: "Let your Hermes bot talk in your Discord servers while its tools stay yours: members can call the bot by name, mention it, reply to it or wake it with a reaction, and chat with it in channels you open for that, but only the operators you list in the Hermes configuration get tool calls, and no role, server admin or text in Discord can change that. Each server is set up from inside Discord with /policy: the channels where the bot joins in or keeps quiet, its name and reply language, a guidance text for the server, the Hermes profile and models it runs on, the progress display, and a thread where your own tool work goes. Every place where the plugin hooks into Hermes is checked at start; protection fails closed (members get no access) and comfort features fall back to Hermes' own behaviour, shown in /policy and in hermes ctx-discord-policy status. Needs the Discord platform and plugins running in the gateway process (not plugins.isolation: host). Works without ctx."
+description: "Let your Hermes bot talk in your Discord servers while its tools stay yours: members can call the bot by name, mention it, reply to it or wake it with a reaction, and chat with it in channels you open for that, but only the operators you list in the Hermes configuration get tool calls, and no role, server admin or text in Discord can change that. Each server is set up from inside Discord with /policy: the channels where the bot joins in or keeps quiet, its name and reply language, a guidance text for the server, the Hermes profile and models it runs on, the progress display, and a thread where your own tool work goes. The form of every place where the plugin hooks into Hermes is checked when Hermes loads it and when the Discord bot connects; while it runs, protection fails closed (members get no access) and comfort features fall back to Hermes' own behaviour, shown in /policy and in hermes ctx-discord-policy status. Needs the Discord platform and plugins running in the gateway process (not plugins.isolation: host). Works without ctx."
 author: Jan-Stefan Janetzky
 license: MPL-2.0
 homepage: https://github.com/GottZ/ctx
 requires_hermes: ">=0.22.4"          # oldest ref the contract tests are green against
-platforms: [linux, macos, windows]
+platforms: [linux, macos, windows]   # the test suites run on Linux only (README: What does not work)
 tags: [discord, policy, security, moderation]
 provides_hooks: [pre_llm_call, pre_tool_call, on_session_end, on_session_reset, on_session_finalize]
 # Plugin settings (plugins.entries.ctx_discord_policy.settings.<key>) of the profile that runs the bot. Hermes Desktop
@@ -22,7 +22,7 @@ config_schema:
     type: str
     default: ""
     label: Your text before every server's guidance (operator frame)
-    description: "Placed first in the context the plugin adds to each Discord turn, before what the plugin allows in that turn and before the server's own guidance. Empty = a built-in neutral frame."
+    description: "Placed first in the context the plugin adds to each Discord turn, before what the plugin allows in that turn and before the server's own guidance. Empty = a built-in neutral frame. A server whose settings carry its own frame template (template overrides, operators only) uses that one instead."
   operator_label:
     type: str
     default: "the operator"
@@ -37,7 +37,7 @@ config_schema:
     type: bool
     default: true
     label: Send operators direct messages
-    description: "true = operators get a Discord direct message when a server asks for activation, when a server's guidance changes (with the difference attached) and when the protection status gets worse; false = no direct messages."
+    description: "true = operators get Discord direct messages about their servers: an activation request, a changed guidance text (with the difference attached), a pause or resume by a server manager, worse protection, a policy file that can't be used, a server model that cannot be used; false = none of these direct messages."
   bot_messages:
     type: str
     default: closed

@@ -1,8 +1,10 @@
-"""The plugin's own workflow runs for every file of the plugin and scans each of them for private values.
+"""The plugin's workflows, and what the README and the manifest say about what they test.
 
 Three files of the plugin live outside its directory: the two workflow files and the banner. The workflow has
 to run when any of them changes (a test of the plugin guards the upstream workflow file), the private-value
-scan has to cover each of them, and the scan has to run again when a pull request's text is edited.
+scan has to cover each of them, and the scan has to run again when a pull request's text is edited. Where the
+README or the manifest describes testing (main does not block, Linux only, when the self-check runs), it says
+what the code and the workflows do.
 """
 
 from __future__ import annotations
@@ -62,3 +64,50 @@ def test_the_scan_covers_every_file_of_the_plugin():
     also = {argv[i + 1] for i, arg in enumerate(argv) if arg == "--also"}
     assert also == OUTSIDE, also
     assert "--text-env" in argv and "PR_TEXT" in argv
+
+
+def _readme() -> str:
+    return (ROOT / "README.md").read_text(encoding="utf-8")
+
+
+def _manifest() -> dict:
+    return _load_yaml((ROOT / "plugin.yaml").read_text(encoding="utf-8"))
+
+
+def test_the_readme_says_main_does_not_block_where_the_workflow_lets_it_pass():
+    contract = _workflow()["jobs"]["contract"]
+    assert "matrix.ref == 'main'" in str(contract.get("continue-on-error"))
+    row = next(line for line in _readme().splitlines() if line.startswith("| `main` |"))
+    assert "does not block" in row and "daily run" in row, row
+
+
+def test_platforms_without_a_test_run_are_named_in_the_readme():
+    """The manifest lists macOS and Windows; every job of the plugin's workflows runs on Linux."""
+    repo = _repo()
+    runners = set()
+    for name in ("hermes-ctx-discord-policy.yml", "hermes-ctx-discord-policy-upstream.yml"):
+        jobs = _load_yaml((repo / ".github" / "workflows" / name).read_text(encoding="utf-8"))["jobs"]
+        runners |= {job["runs-on"] for job in jobs.values()}
+    assert runners == {"ubuntu-latest"}, runners
+    untested = {"macos": "macOS", "windows": "Windows"}
+    listed = [untested[p] for p in _manifest()["platforms"] if p in untested]
+    limits = _readme().split("What does not work, or only partly:", 1)[1].split("\n## ", 1)[0]
+    assert listed and all(name in limits for name in listed), listed
+
+
+def test_the_self_check_and_the_fail_closed_claims_say_when_they_hold():
+    """The form of each attachment point is probed when Hermes loads the plugin and when the bot connects (not
+    "at start"); nothing of the plugin runs under host isolation, so nothing fails closed there."""
+    manifest = _manifest()["description"]
+    for text in (" ".join(_readme().split()), manifest):     # README lines wrap anywhere
+        assert "when it starts" not in text and "checked at start" not in text
+        assert "when the Discord bot connects" in text
+    assert "while it runs, protection fails closed" in manifest
+    how = _readme().split("## How it works", 1)[1].split("\n## ", 1)[0]
+    assert "Under `plugins.isolation: host` none of this applies" in how
+
+
+def test_setting_descriptions_name_what_else_acts_on_them():
+    schema = _manifest()["config_schema"]
+    assert "template" in schema["frame_prompt"]["description"]          # a server's frame template replaces it
+    assert "model" in schema["notify_operators"]["description"]         # the model notice is a direct message too
