@@ -135,9 +135,10 @@ func TestBlockGrantsT40a_RequestPaths_Integration(t *testing.T) {
 			t.Fatalf("mcp get transport: %v", err)
 		}
 		// A full UUID passes ResolveBlockID's bypass; GetBlock then re-gates it
-		// with the scope/grant OR and returns nil → the handler marshals a JSON
-		// `null` body (not an errResult). The leak check is what matters: neither
-		// the block id nor its secret content/title may appear.
+		// with the scope/grant OR and returns nil → the handler answers the
+		// `block not found` error an unknown id gets (#201; before it, a JSON
+		// `null` body). The leak check is what matters: neither the block id nor
+		// its secret content/title may appear.
 		body := mcpResultText(res)
 		if strings.Contains(body, "t40h-shared-B") || strings.Contains(body, "secret content") {
 			t.Fatalf("mcp get pre-grant leaked B (body=%s)", body)

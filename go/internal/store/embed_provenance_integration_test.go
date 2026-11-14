@@ -70,7 +70,7 @@ func TestEmbedProvenance_Integration(t *testing.T) {
 			t.Fatalf("embed_model = %q, want %q (writer-attributed provenance)", gotModel, "served-model-x")
 		}
 
-		if err := store.ClearEmbedding(ctx, pool, id); err != nil {
+		if err := store.ClearEmbeddingTx(ctx, pool, id); err != nil {
 			t.Fatalf("ClearEmbedding: %v", err)
 		}
 		var embNull, modelNull bool

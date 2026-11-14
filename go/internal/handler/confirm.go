@@ -1,6 +1,7 @@
 // F6-C6 D-W6b: POST /api/confirm — the HTTP confirm surface the SPA
 // ConfirmCard calls. Executes ONE previously staged write (op 'store' or,
-// since D-W6c, op 'update'), selected by payload hash, strictly per-key.
+// since D-W6c, op 'update'; any other staged op of the same key as well — the
+// core is shared), selected by payload hash, strictly per-key.
 //
 // The sequence itself (lookup → validate → D1-M1/D1-M3 re-checks → atomic
 // consume → execute) lives in confirm_core.go, shared with the MCP confirm
@@ -96,9 +97,9 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 		writeJSONReject(w, out.Reject)
 	case confirmTOCTOUGone:
 		// 409: the stage is intact but the world moved — re-read and re-stage.
-		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": confirmTOCTOUGoneMsg})
+		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": confirmTOCTOUGoneMsg(out.Op)})
 	case confirmTOCTOUDrift:
-		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": confirmTOCTOUDriftMsg(out.BlockID)})
+		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": confirmTOCTOUDriftMsg(out.Op, out.BlockID)})
 	case confirmBlockRefGone:
 		// 409 like the TOCTOU rejects: the stage is intact, the world moved.
 		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": confirmBlockRefGoneMsg})
@@ -107,15 +108,17 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 	case confirmExecErr:
 		slog.Error("confirm: confirmed write execute failed", "error", out.Err, "op", out.Op, "request_id", reqID)
 		verb, noun := "write", "write"
-		if out.Op == "update" {
-			verb, noun = "update", "update"
+		if out.Op == "update" || out.Op == store.OpArchive {
+			verb = confirmBlockOpNoun(out.Op)
+			noun = verb
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false,
 			"error":   fmt.Sprintf("confirmed %s failed to execute — the stage token is consumed; re-stage the %s", verb, noun),
 		})
 	case confirmExecGone:
-		gone := "confirmed update failed to execute — block no longer accessible; the stage token is consumed; re-stage the update"
+		noun := confirmBlockOpNoun(out.Op)
+		gone := fmt.Sprintf("confirmed %s failed to execute — block no longer accessible; the stage token is consumed; re-stage the %s", noun, noun)
 		if out.Op == store.OpBlobLink {
 			gone = "confirmed blob_link failed to execute — blob no longer accessible; the stage token is consumed; re-stage the link"
 		}

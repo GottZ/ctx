@@ -1,0 +1,130 @@
+# ctx_handover (hermes-agent plugin) — its own suites.
+#
+# The plugin under integrations/hermes/plugin/ctx_handover is Python; none of the Go/web jobs of ci.yml touch it.
+# This workflow runs only when the plugin (or this file) changes: ruff, `hermes plugins validate`, the unit suites and
+# the integration suites (two Hermes homes, a real listener process on loopback). The e2e suite needs the two-gateway
+# lab, which is not in the tree; it skips itself without CTXH_E2E/CTXH_LAB.
+#
+# The suites import Hermes itself (SessionDB, plugin storage, the dashboard plugin router): hermes-agent is checked
+# out at a pinned commit (HERMES_AGENT_SHA, the reading tree the plugin was built and reviewed against) and
+# installed from its own uv.lock (`uv sync --locked`, dev group). Bump the pin deliberately, together with a local
+# run.
+#
+# Not a required check (the ruleset is unchanged); a red run here is information for the PR.
+
+name: ctx_handover plugin
+
+on:
+  push:
+    branches: [root]
+    paths:
+      - "integrations/hermes/plugin/ctx_handover/**"
+      - ".github/workflows/hermes-ctx-handover.yml"
+  pull_request:
+    branches: [root]
+    paths:
+      - "integrations/hermes/plugin/ctx_handover/**"
+      - ".github/workflows/hermes-ctx-handover.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PLUGIN_DIR: integrations/hermes/plugin/ctx_handover
+  HERMES_AGENT_REPO: NousResearch/hermes-agent
+  HERMES_AGENT_SHA: 0f0e96fc8e7fd35aba406e4a9fa341fb969d0b41
+  PYTHON_VERSION: "3.14"
+  UV_PIN: "uv==0.13.5"
+  RUFF_PIN: "ruff==0.15.22"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  lint:
+    name: ctx_handover · ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install ruff
+        run: python -m pip install --disable-pip-version-check ${{ env.RUFF_PIN }}
+      - name: ruff check
+        working-directory: ${{ env.PLUGIN_DIR }}
+        run: ruff check .
+      - name: ruff format --check
+        working-directory: ${{ env.PLUGIN_DIR }}
+        run: ruff format --check .
+
+  suites:
+    name: ctx_handover · ${{ matrix.suite }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: validate
+            timeout: 15
+          - suite: unit
+            timeout: 60
+          - suite: integration
+            timeout: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Checkout hermes-agent (pinned)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.HERMES_AGENT_REPO }}
+          ref: ${{ env.HERMES_AGENT_SHA }}
+          path: hermes-agent
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install hermes-agent from its lock file (dev group = pytest, pytest-asyncio)
+        # `pip install ./hermes-agent` does not resolve at this pin (browser-harness 0.1.13 now wants another
+        # pillow than hermes-agent pins); hermes-agent's own CI installs with `uv sync --locked` as well
+        working-directory: hermes-agent
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/venv
+        run: |
+          python -m pip install --disable-pip-version-check ${{ env.UV_PIN }}
+          uv sync --locked --python "$(command -v python)" --group dev
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+      - name: hermes plugins validate
+        if: matrix.suite == 'validate'
+        env:
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+        run: |
+          mkdir -p "$HERMES_HOME"
+          hermes plugins validate "$GITHUB_WORKSPACE/$PLUGIN_DIR"
+      - name: pytest tests/${{ matrix.suite }}
+        if: matrix.suite != 'validate'
+        working-directory: ${{ env.PLUGIN_DIR }}
+        env:
+          # Hermes from the pinned checkout, the plugin as package ctx_handover; temporary files outside the work
+          # tree (a test that creates git repositories must not find this checkout above them)
+          PYTHONPATH: ${{ github.workspace }}/hermes-agent:${{ github.workspace }}/integrations/hermes/plugin
+          TMPDIR: ${{ runner.temp }}/tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          python -m pytest "tests/${{ matrix.suite }}" -p no:cacheprovider -q -rfE \
+            --basetemp="$RUNNER_TEMP/pytest-${{ matrix.suite }}"

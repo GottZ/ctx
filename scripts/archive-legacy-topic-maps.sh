@@ -5,7 +5,8 @@
 # =============================================================================
 # Archiviert die beiden toten Zeilen-Maps `topic-map-work` und `topic-map-hth`
 # (design/02 §4.6/§7 "W-H", User-Entscheid E2-02 A). KEIN DELETE — die Blöcke
-# bleiben über `ctx get <id>` lesbar, und genau das ist der Rollback-Pfad.
+# bleiben über `ctx get --include-archived <id>` lesbar (ein schlichtes
+# `ctx get` antwortet "Block not found"), und genau das ist der Rollback-Pfad.
 #
 # DEFAULT IST DRY-RUN. Der Lauf passiert in einer Transaktion, die zurückgerollt
 # wird; die Ausgabe ist trotzdem die echte, gepinnte Vorher-Liste (ids,
@@ -68,5 +69,5 @@ cat <<'NOTE'
 -- Vorher-Zustand ist oben gepinnt (id · Länge · sha256).
 -- Rollback: die Spalte rollback_sql jeder Zeile ist der fertige Einzeiler, z. B.
 --   UPDATE context_blocks SET is_archived = false WHERE id = '<id>';
--- Der Block war nie weg: `ctx get <id>` liest ihn auch archiviert.
+-- Der Block war nie weg: `ctx get --include-archived <id>` liest ihn auch archiviert.
 NOTE

@@ -66,6 +66,13 @@ type Block struct {
 	// positive claim "trusted". Write paths pass nil for exactly that reason —
 	// their answer keeps its pre-V-11 bytes.
 	Untrusted      bool   `json:"untrusted,omitempty"`
+	// Archived marks a block answered by GetArchivedBlock, the one read that
+	// returns an archived row (issue #201: the opt-in `include_archived` of MCP
+	// get and manage get). Every other path leaves it false — the read paths
+	// return live rows only, and DeleteBlock's RETURNING does not fill it —
+	// which omitempty turns into an ABSENT key: no existing response changes
+	// its bytes.
+	Archived    bool              `json:"archived,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
 }
@@ -195,7 +202,11 @@ type BlockPreview struct {
 	Untrusted      bool      `json:"untrusted,omitempty"`
 	Score          float64   `json:"score,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
-	CreatedAt      time.Time `json:"created_at,omitempty"`
+	// CreatedAt is selected by every statement that fills this struct
+	// (SearchBlocks compact and full, RecentBlocks). `omitzero`, not
+	// `omitempty`: omitempty never drops a struct value, so a statement that
+	// left the column out would answer year 1 as if it were a date (#205).
+	CreatedAt      time.Time `json:"created_at,omitzero"`
 }
 
 // BlockMeta is a lightweight listing entry (no content, no metadata).
@@ -485,6 +496,15 @@ func IdenticalContentMatch(ctx context.Context, pool *pgxpool.Pool, content, sco
 // with 403 rather than with the generic 500 of an unexpected store error —
 // errors.Is is what keeps that mapping out of string matching.
 var ErrProvenanceProtected = errors.New("store: block carries derived provenance — not client-writable")
+
+// notDerivedSQL is the S3 exclusion the by-id client writes carry in their
+// WHERE (UpdateBlock, DeleteBlock, GuardResolve archive): the row holds no
+// derived provenance. metadata is nullable (DEFAULT '{}'), and a NULL holds no
+// provenance key — so the test is COALESCEd to false. A plain
+// `NOT (metadata ? …)` is NULL for such a row, the statement matched nothing,
+// and a block that is no derivative answered "not found" to a key that may
+// write it (and a staged write was carded and then failed at confirm).
+const notDerivedSQL = `NOT COALESCE(metadata ? '` + derived.MetadataKey + `', false)`
 
 // ProvenanceClaimed reports whether the upsert identity (category, title, scope)
 // is claimed by a derivative — INCLUDING an archived one.
@@ -875,8 +895,8 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 		// `ctx save` at the 1M-10M target scale (organic growth means repeat
 		// saves of unchanged titles are routine, not rare).
 		//
-		// Reuses ClearEmbeddingTx — the same primitive manage-update/MCP-update
-		// call via ClearEmbedding — rather than duplicating its SQL, so any
+		// Reuses ClearEmbeddingTx — the same primitive UpdateBlock runs in its
+		// transaction — rather than duplicating its SQL, so any
 		// future extension of that primitive (it already nulls BOTH vector pairs
 		// and deletes the backfill memo, W04-3) is inherited here automatically.
 		if hadRow && oldContent != content {
@@ -968,9 +988,9 @@ func StoreEmbeddingNext(ctx context.Context, q pgxdb.Execer, blockID, model stri
 // This is the pgxdb.Execer-parameterized primitive (same pattern as
 // StoreEmbedding): it does NOT own a transaction, so a caller that needs the
 // clear to be atomic with another write — UpsertBlock's content-change path,
-// W04-8 — passes its own pgx.Tx. ClearEmbedding (below) is the pool-owned
-// convenience wrapper for callers that just need a standalone clear
-// (manage-update, MCP update). Kept as ONE implementation so future
+// W04-8, and UpdateBlock's, issue #198 — passes its own pgx.Tx. There is no
+// pool-owned wrapper any more: both production callers compose the clear into
+// a transaction of their own. Kept as ONE implementation so future
 // extensions of the clear semantics (e.g. a migration-scoped memo delete)
 // land in both call shapes automatically, never just one.
 func ClearEmbeddingTx(ctx context.Context, q pgxdb.Execer, blockID string) error {
@@ -990,17 +1010,6 @@ func ClearEmbeddingTx(ctx context.Context, q pgxdb.Execer, blockID string) error
 		return fmt.Errorf("store: clear embedding: delete backfill memo: %w", err)
 	}
 	return nil
-}
-
-// ClearEmbedding is the pool-owned wrapper around ClearEmbeddingTx: it opens
-// its own transaction, runs the clear, and commits. Use this when the clear
-// does not need to compose with another write in the same transaction
-// (manage-update, MCP update); use ClearEmbeddingTx directly when it does
-// (UpsertBlock's content-change path).
-func ClearEmbedding(ctx context.Context, pool *pgxpool.Pool, blockID string) error {
-	return pgxdb.Write(ctx, pool, pgxdb.At("store: clear embedding"), func(tx pgx.Tx) error {
-		return ClearEmbeddingTx(ctx, tx, blockID)
-	})
 }
 
 // CheckRateLimit returns the number of write operations in the last 60 seconds
@@ -1150,20 +1159,56 @@ func GetBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, id st
 	if grantedBlockIDs == nil {
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
 	}
+	return readBlockByID(ctx, pool, set, "store: get block",
+		`WHERE id = $1 AND NOT is_archived AND (scope = ANY($2::text[]) OR id = ANY($3::uuid[]))`,
+		id, readScopes, grantedBlockIDs)
+}
+
+// GetArchivedBlock reads one ARCHIVED block by its full id (issue #201: the
+// opt-in `include_archived` of MCP get and manage get — a citing block names
+// the id, and a reader must be able to check what the cited block said).
+//
+// Deliberately narrower than GetBlock, so that "visible" keeps its one meaning
+// everywhere else: the scopes the caller passes only — the handler passes the
+// key's OWN scopes, without cross-tenant scope grants — NO block-grant arm (a
+// grant shares a live block; it never kept an archived one readable, see the
+// GetBlock comment), and only rows that ARE archived — a live id answers nil
+// here, the caller reads it through GetBlock. The answer carries
+// Archived = true. A miss is (nil, nil) for an unknown id, a foreign scope and
+// a live block alike.
+func GetArchivedBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, id string, readScopes []string) (*Block, error) {
+	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, err
+	}
+	b, err := readBlockByID(ctx, pool, set, "store: get archived block",
+		`WHERE id = $1 AND is_archived AND scope = ANY($2::text[])`,
+		id, readScopes)
+	if b != nil {
+		b.Archived = true
+	}
+	return b, err
+}
+
+// readBlockByID is the row read GetBlock and GetArchivedBlock share: one
+// column list and one scan, so the two answer the same block shape and differ
+// only in their WHERE. where binds the id as $1 and the caller's read scopes as
+// $2 — guardRedactedMetadataSQL reads the scopes from $2. Code-owned SQL at both
+// call sites, never user input.
+func readBlockByID(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, op, where string, args ...any) (*Block, error) {
 	b := &Block{}
 	err := pool.QueryRow(ctx,
 		`SELECT id, category, tags, title, content, `+guardRedactedMetadataSQL("$2")+`, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at
 		 FROM context_blocks
-		 WHERE id = $1 AND NOT is_archived AND (scope = ANY($2::text[]) OR id = ANY($3::uuid[]))
+		 `+where+`
 		 LIMIT 1`,
-		id, readScopes, grantedBlockIDs,
+		args...,
 	).Scan(&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
 		&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("store: get block: %w", err)
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	b.Untrusted = untrustedOf(set, b.TypeName) // V-11
 	return b, nil
@@ -1184,7 +1229,7 @@ func DeleteBlock(ctx context.Context, pool *pgxpool.Pool, id string, writeScopes
 	err := pool.QueryRow(ctx,
 		`UPDATE context_blocks SET is_archived = true, updated_at = now()
 		 WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
-		   AND NOT (metadata ? '`+derived.MetadataKey+`')
+		   AND `+notDerivedSQL+`
 		 RETURNING id, category, title, scope, created_at, updated_at`,
 		id, writeScopes,
 	).Scan(&b.ID, &b.Category, &b.Title, &b.Scope, &b.CreatedAt, &b.UpdatedAt)
@@ -1225,7 +1270,13 @@ type UpdateBlockData struct {
 
 // UpdateBlock updates specific fields of a block. The block must live in one of
 // the caller's write-eligible scopes (home_scope ∪ shared-if-allowed).
-// Returns the updated block and whether content or title changed (needs re-embed).
+// Returns the updated block and whether the title or the content now differs
+// from the stored row. When it does, the block's embedding has been cleared in
+// the same transaction, for the backfill to regenerate. A title or content
+// sent with the value the row already holds does not count: the embed input is
+// unchanged, and clearing the vector would take the block out of the semantic
+// arms and put it back into the backfill for nothing (issue #198, the parity
+// of UpsertBlock's `hadRow && oldContent != content`).
 func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data UpdateBlockData, writeScopes []string) (*Block, bool, error) {
 	// Build SET clause dynamically.
 	setClauses := []string{}
@@ -1242,8 +1293,12 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 		args = append(args, *data.Title)
 		argIdx++
 	}
-	contentChanged := data.Content != nil
-	if contentChanged {
+	// contentSent is presence, not difference: it keys the guard_checked_at
+	// strip below, which this statement has to decide before it has seen the
+	// old row. Whether the embed input changed is read off the row instead
+	// (see the RETURNING clause).
+	contentSent := data.Content != nil
+	if contentSent {
 		setClauses = append(setClauses, fmt.Sprintf("content = $%d", argIdx))
 		args = append(args, *data.Content)
 		argIdx++
@@ -1258,7 +1313,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	// into a single expression.
 	metaExpr := ""
 	if data.Metadata != nil {
-		if contentChanged {
+		if contentSent {
 			// Merge provided metadata AND strip guard_checked_at in one expression.
 			metaExpr = fmt.Sprintf("$%d::jsonb - 'guard_checked_at'", argIdx)
 		} else {
@@ -1266,7 +1321,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 		}
 		args = append(args, data.Metadata)
 		argIdx++
-	} else if contentChanged {
+	} else if contentSent {
 		// No explicit metadata update — strip guard_checked_at from existing metadata.
 		metaExpr = "metadata - 'guard_checked_at'"
 	}
@@ -1336,44 +1391,35 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	// caller can read but not write is dropped here too — the fail-closed
 	// direction; `get` still returns it. Binding the read scopes instead would
 	// widen the signature of all three callers for parity on one key of a
-	// write response. Both execution paths below (plain and scope move) run
-	// this one query string.
+	// write response. Plain updates and scope moves run this one query string.
+	//
+	// The last RETURNING column compares the row before and after the update
+	// (old/new in RETURNING, PostgreSQL 18): true only when the title or the
+	// content was actually replaced by a different value. No extra read to
+	// race against, and the content is not sent back twice.
 	query := fmt.Sprintf(
 		`UPDATE context_blocks SET %s
 		 WHERE id = $%d AND scope = ANY($%d::text[]) AND NOT is_archived
-		   AND NOT (metadata ? '`+derived.MetadataKey+`')
-		 RETURNING id, category, tags, title, content, %s, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at`,
+		   AND `+notDerivedSQL+`
+		 RETURNING id, category, tags, title, content, %s, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at,
+		           (old.title IS DISTINCT FROM new.title OR old.content IS DISTINCT FROM new.content)`,
 		strings.Join(setClauses, ", "), idIdx, scopeIdx, guardRedactedMetadataSQL(fmt.Sprintf("$%d", scopeIdx)),
 	)
 
+	// The statement, the clear of a stale vector and (on a scope move) the
+	// link sweep commit together. The clear in particular must not be a
+	// second step after the commit: needsReEmbed is a difference, so a clear
+	// that got lost between the two (request cancelled, pool fault) would not
+	// be repaired by sending the same update again, and the block would keep
+	// a vector for content it no longer holds, invisible to the backfill.
 	b := &Block{}
-	// Scope moves run the update + link sweep in ONE transaction (GD5/K8):
-	// the link tables' row-scope invariant (both endpoints + row in the same
-	// scope) would otherwise break post-hoc. Non-scope updates keep the plain
-	// single-query path.
-	if data.Scope == nil {
-		err := pool.QueryRow(ctx, query, args...).Scan(
-			&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
-			&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
-		)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, false, updateBlockMissReason(ctx, pool, id, writeScopes)
-		}
-		if err != nil {
-			return nil, false, fmt.Errorf("store: update block: %w", err)
-		}
-		needsReEmbed := contentChanged || data.Title != nil
-		return b, needsReEmbed, nil
-	}
-
-	ok, err := updateBlockScopeMove(ctx, pool, b, id, query, args)
+	found, needsReEmbed, err := runBlockUpdate(ctx, pool, b, id, query, args, data.Scope != nil)
 	if err != nil {
 		return nil, false, err
 	}
-	if !ok {
+	if !found {
 		return nil, false, updateBlockMissReason(ctx, pool, id, writeScopes)
 	}
-	needsReEmbed := contentChanged || data.Title != nil
 	return b, needsReEmbed, nil
 }
 
@@ -1385,8 +1431,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 // not found", which would be an oracle-free but also information-free answer
 // about a block the key can see.
 //
-// It runs only on the 0-row path, so the ordinary update keeps its single
-// statement. Returning nil (= "not found", the pre-wave contract) is the
+// It runs only on the 0-row path, so the ordinary update pays no extra read. Returning nil (= "not found", the pre-wave contract) is the
 // fail-open direction here on purpose: this function decides the MESSAGE, never
 // the outcome — the write itself was already refused by the WHERE.
 func updateBlockMissReason(ctx context.Context, pool *pgxpool.Pool, id string, writeScopes []string) error {
@@ -1407,38 +1452,52 @@ func updateBlockMissReason(ctx context.Context, pool *pgxpool.Pool, id string, w
 	return nil
 }
 
-// updateBlockScopeMove runs a scope-carrying block update as ONE transaction:
-// the UPDATE…RETURNING scan into b plus the GD5 link sweep. Returns ok=false
-// (no error) when the block was not found in the caller's write scopes —
-// mirroring the ErrNoRows contract of the plain path.
-func updateBlockScopeMove(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query string, args []any) (bool, error) {
+// runBlockUpdate runs a by-id block update as ONE transaction: the
+// UPDATE…RETURNING scan into b, on a scope move the GD5 link sweep (the link
+// tables' row-scope invariant, both endpoints + row in the same scope, would
+// otherwise break post-hoc; GD5/K8), and the embedding clear when the
+// statement reports that the title or the content changed (ClearEmbeddingTx,
+// the primitive UpsertBlock uses on its content-change path). Returns
+// found=false (no error) when the block was not found in the caller's write
+// scopes.
+func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query string, args []any, scopeMove bool) (found, needsReEmbed bool, err error) {
 	var swept int
 	if err := pgxdb.Write(ctx, pool, pgxdb.At("store: update block"), func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, query, args...).Scan(
 			&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
 			&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
+			&needsReEmbed,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
-			// The straight-line form returned (false, nil) here, before its
-			// commit — pgxdb.ErrRollback keeps that miss a rollback instead of a commit.
+			// A miss writes nothing: pgxdb.ErrRollback keeps it a rollback
+			// instead of a commit.
 			return pgxdb.ErrRollback
 		}
 		if err != nil {
 			return fmt.Errorf("store: update block: %w", err)
 		}
 
-		swept, err = sweepScopeMoveLinks(ctx, tx, id, b.Scope)
-		return err
+		if scopeMove {
+			if swept, err = sweepScopeMoveLinks(ctx, tx, id, b.Scope); err != nil {
+				return err
+			}
+		}
+		if needsReEmbed {
+			if err := ClearEmbeddingTx(ctx, tx, b.ID); err != nil {
+				return fmt.Errorf("store: update block: clear stale embedding: %w", err)
+			}
+		}
+		return nil
 	}); err != nil {
 		if errors.Is(err, pgxdb.ErrRollback) {
-			return false, nil
+			return false, false, nil
 		}
-		return false, err
+		return false, false, err
 	}
 	if swept > 0 {
 		slog.Info("store: scope move swept divergent links", "block_id", id, "new_scope", b.Scope, "links_deleted", swept)
 	}
-	return true, nil
+	return true, needsReEmbed, nil
 }
 
 // sweepScopeMoveLinks restores the link tables' row-scope invariant after a
@@ -1677,7 +1736,7 @@ func searchBlocksSQL(p searchParams) (string, []any) {
 	var selectFields string
 	var orderBy string
 	if compact {
-		selectFields = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, LEFT(content, 200) AS content_preview, length(content) AS content_length, updated_at`
+		selectFields = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, LEFT(content, 200) AS content_preview, length(content) AS content_length, created_at, updated_at`
 		if hasQuery {
 			orderBy = fmt.Sprintf(
 				`GREATEST(ts_rank_cd(ts_de, plainto_tsquery('german', $%d)), ts_rank_cd(ts_en, plainto_tsquery('english', $%d))) DESC`,
@@ -1728,7 +1787,7 @@ func runSearchBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set
 	for rows.Next() {
 		bp := BlockPreview{}
 		if compact {
-			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.Sensitivity, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.ContentPreview, &bp.ContentLength, &bp.UpdatedAt); err != nil {
+			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.Sensitivity, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.ContentPreview, &bp.ContentLength, &bp.CreatedAt, &bp.UpdatedAt); err != nil {
 				return nil, fmt.Errorf("store: search blocks scan: %w", err)
 			}
 		} else {
@@ -1771,7 +1830,7 @@ func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, r
 	// $1=scopes, $2=grants (block-grant OR-arm, T40a). The mandatory
 	// parentheses keep NOT is_archived OUTSIDE the scope/grant OR (a granted
 	// archived block must not leak). category, if present, shifts to $3.
-	q := `SELECT id, category, tags, title, scope, type_name, lifecycle_state, type_source, LEFT(content, 200), char_length(content), updated_at
+	q := `SELECT id, category, tags, title, scope, type_name, lifecycle_state, type_source, LEFT(content, 200), char_length(content), created_at, updated_at
 	      FROM context_blocks
 	      WHERE NOT is_archived AND ( scope = ANY($1::text[]) OR id = ANY($2::uuid[]) )`
 	args := []any{readScopes, grantedBlockIDs}
@@ -1799,7 +1858,7 @@ func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, r
 	results := make([]BlockPreview, 0, limit)
 	for rows.Next() {
 		bp := BlockPreview{}
-		if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.ContentPreview, &bp.ContentLength, &bp.UpdatedAt); err != nil {
+		if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.ContentPreview, &bp.ContentLength, &bp.CreatedAt, &bp.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: recent blocks scan: %w", err)
 		}
 		bp.Untrusted = untrustedOf(set, bp.TypeName) // V-11
@@ -2127,7 +2186,7 @@ func GuardResolve(ctx context.Context, pool *pgxpool.Pool, id, resolution string
 			),
 			updated_at = now()
 		WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
-		  AND NOT (metadata ? '` + derived.MetadataKey + `')
+		  AND ` + notDerivedSQL + `
 		RETURNING id, title, category, scope, guard_status, created_at, updated_at`
 	case "keep":
 		query = `UPDATE context_blocks SET

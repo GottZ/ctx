@@ -11,6 +11,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/llmlog"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -177,13 +178,14 @@ func TestShutdownSettlesHTTPRowsBeforeSchedulerWait(t *testing.T) {
 // the model gateway's stop runs alongside the first llmlog settle, so the
 // bounded part of the shutdown stays 15 s + max(5 s, 5 s) + 5 s = 25 s
 // (internal/config minCtxStopGrace) instead of adding a step. Both are made
-// to block for their full budget — one transaction holds context_model_keys
-// (the final usage flush of a real gateway waits on it) and context_llm_log
+// to block until their deadline — one transaction holds context_model_keys
+// (the final usage flush of a real gateway waits on it for its window,
+// store.ModelKeyUsageFinalFlushTimeout, 4 s since #124) and context_llm_log
 // (queued inserts wait) — and the scheduler stand-in releases the locks, so
 // the second settle drains at once. Twelve rows are three waves of llmlog's
 // four concurrent inserts, each wave held for its 5 s insert deadline: the
 // settle has pending work for 15 s, wherever it starts. Side by side the
-// sequence takes about 5 s, one after the other about 10 s.
+// sequence takes about 5 s, one after the other at least 9 s.
 func TestShutdownGatewayStopRunsAlongsideTheSettle(t *testing.T) {
 	ref, dsn := testdb.SetupTestDBWithDSN(t)
 	ctx := context.Background()
@@ -227,13 +229,15 @@ func TestShutdownGatewayStopRunsAlongsideTheSettle(t *testing.T) {
 	total := time.Since(begin)
 	t.Logf("shutdown sequence %s, gateway stop %s (budgets: gateway stop %s, settle %s)",
 		total.Round(time.Millisecond), stopTook.Round(time.Millisecond), gatewayStopTimeout, llmlogSettleTimeout)
-	// The probe is only a probe while the stop really blocked for its budget.
-	if stopTook < gatewayStopTimeout-time.Second {
+	// The probe is only a probe while the stop really blocked for the flush
+	// window.
+	if stopTook < store.ModelKeyUsageFinalFlushTimeout-time.Second {
 		t.Fatalf("gateway stop took %s — the lock did not hold the final flush, the probe proves nothing", stopTook)
 	}
-	// Side by side: about max(stop, settle) = 5 s; in sequence about 10 s.
-	// The threshold leaves 3 s for host load.
-	if limit := gatewayStopTimeout + llmlogSettleTimeout - 2*time.Second; total >= limit {
+	// Side by side: about max(stop, settle) = 5 s; in sequence at least
+	// 4 s + 5 s = 9 s (both wait for their deadline). The threshold, 8 s,
+	// leaves 3 s for host load.
+	if limit := store.ModelKeyUsageFinalFlushTimeout + llmlogSettleTimeout - time.Second; total >= limit {
 		t.Errorf("shutdown sequence %s >= %s — the gateway stop and the first settle ran one after the other", total.Round(time.Millisecond), limit)
 	}
 }

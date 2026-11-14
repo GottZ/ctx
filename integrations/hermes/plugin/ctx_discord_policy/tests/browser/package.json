@@ -1,0 +1,17 @@
+{
+  "name": "dsp-settings-page-browser-tests",
+  "private": true,
+  "description": "B1 component tests of the settings page core under jsdom (test-only; the plugin needs no Node).",
+  "type": "module",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "jsdom": "29.1.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  }
+}

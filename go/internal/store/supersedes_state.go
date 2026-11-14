@@ -137,6 +137,16 @@ func supersedesCandidates(ctx context.Context, tx pgx.Tx, targetID, scope string
 //     one — the target stays a snapshot;
 //   - leave: only when no supersedes link from a non-archived source of the
 //     target's scope remains does the target return to knowledge/NULL.
+//
+// A chunk target has no side-effect at all (issue #191). A chunk row is a
+// derived piece of its source and belongs to the ingest: InsertChunk finds
+// its (source_id, chunk_index) slot only through the arbiter `NOT is_archived
+// AND lifecycle_state = 'chunk'`, so a snapshot marking (and the 'knowledge'
+// the leave arm hands back) took the slot away from the ingest for good — a
+// changed-content re-ingest then failed on uq_context_category_title_scope.
+// The supersedes statement itself is the link row, which stays: the query
+// path reads the links (dream.SupersedesMap → filterSuperseded and the
+// superseded_by of the response), not the lifecycle or the pointer column.
 func reconcileSupersedesState(ctx context.Context, tx pgx.Tx, targetID, preferredSource string) (restored bool, err error) {
 	var lifecycle, scope string
 	var supersededBy sql.NullString
@@ -149,7 +159,7 @@ func reconcileSupersedesState(ctx context.Context, tx pgx.Tx, targetID, preferre
 	).Scan(&lifecycle, &supersededBy, &archived, &scope); err != nil {
 		return false, fmt.Errorf("store: reconcile supersedes target: %w", err)
 	}
-	if archived {
+	if archived || lifecycle == "chunk" {
 		return false, nil
 	}
 

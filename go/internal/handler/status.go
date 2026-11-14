@@ -326,10 +326,13 @@ type advisoryRow struct {
 }
 
 // guardReviewStatus is the /api/status guard_review block wire shape (guard
-// W2): per-flagged-state counts + the oldest updated_at over the flagged set.
+// W2): per-flagged-state counts + the oldest flag time over the flagged set.
 // oldest_updated_at is an AGING signal (how long has the queue head been
-// sitting), deliberately from the column — not from metadata guard_checked_at,
-// whose presence varies across historic repair migrations (M107).
+// sitting). It is the time the guard flagged the block (metadata
+// guard_checked_at); a guard pass does not move updated_at. The key's presence
+// varies across historic repair migrations (M107), so a row without a
+// readable one falls back to its updated_at (guard.FlaggedAtSQL). The wire
+// name predates this and stays.
 // built_at (RC-1 wave S1) is the generation's SUCCESS stamp: the section is
 // served from ONE per-tick generation shared by every reader, and this field
 // says when that generation was last built SUCCESSFULLY — so a consumer can see

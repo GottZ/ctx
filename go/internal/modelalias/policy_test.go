@@ -36,7 +36,7 @@ var designKeys = map[string]struct {
 	"embedding.matryoshka_min":  {"embedding", 0},
 	"embedding.max_inputs":      {"embedding", 256},
 	"embedding.sub_batch":       {"embedding", 256},
-	"embedding.max_input_runes": {"embedding", 32768},
+	"embedding.max_input_runes": {"embedding", 0},
 	"rerank.max_documents":      {"rerank", 1000},
 	"rerank.sub_batch":          {"rerank", 1000},
 }
@@ -196,6 +196,27 @@ func TestParsePolicyFailClosed(t *testing.T) {
 	}
 }
 
+// TestParsePolicyMaxInputRunesHasNoCodeCeiling (FOLGE-EMBLIMIT G3):
+// embedding.max_input_runes is an operator's limit below the backend's, with
+// no code ceiling of its own — a value past the former 32768 is accepted up
+// to the bound of every integer entry (policyIntMax); 0, a negative value and
+// one past that bound are refused as for every integer key.
+func TestParsePolicyMaxInputRunesHasNoCodeCeiling(t *testing.T) {
+	for _, v := range []int{32768, 32769, 131072, policyIntMax} {
+		p, err := ParsePolicy(KindEmbedding, []byte(fmt.Sprintf(`{"embedding.max_input_runes": %d}`, v)))
+		if err != nil || p.EmbeddingMaxInputRunes != (Opt[int]{v, true}) {
+			t.Errorf("max_input_runes %d: %+v %v, want accepted", v, p.EmbeddingMaxInputRunes, err)
+		}
+	}
+	for _, raw := range []string{`0`, `-1`, `2147483648`} {
+		p, err := ParsePolicy(KindEmbedding, []byte(`{"embedding.max_input_runes": `+raw+`}`))
+		var pe *PolicyError
+		if !errors.As(err, &pe) || pe.Key != "embedding.max_input_runes" || p != (Policy{}) {
+			t.Errorf("max_input_runes %s: %+v %v, want a *PolicyError at the key", raw, p, err)
+		}
+	}
+}
+
 // TestParsePolicyCeilingIsInclusive: a value exactly at its static ceiling is
 // valid; the invariant ⌈max/sub_batch⌉ ≤ 8 holds at its boundary.
 func TestParsePolicyCeilingIsInclusive(t *testing.T) {
@@ -217,8 +238,8 @@ func TestParsePolicyCeilingIsInclusive(t *testing.T) {
 		names = append(names, k.name)
 	}
 	sort.Strings(names)
-	if len(names) != 13 {
-		t.Errorf("%d keys with a static ceiling %v, want the 13 of design/02 §3.2", len(names), names)
+	if len(names) != 12 {
+		t.Errorf("%d keys with a static ceiling %v, want the 12 of design/02 §3.2 (embedding.max_input_runes has none since FOLGE-EMBLIMIT)", len(names), names)
 	}
 	for _, raw := range []string{
 		`{"embedding.max_inputs": 256}`,                           // default sub_batch 32 ⇒ 8 blocks

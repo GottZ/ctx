@@ -1,5 +1,5 @@
 // Dispatch table of POST /api/manage — the SINGLE source of routing and admin
-// tier for all 105 manage actions (T03-11, design/03 §4.11). It replaces a
+// tier for all 106 manage actions (T03-11, design/03 §4.11). It replaces a
 // three-level construct: an 18-arm switch in HandleManage, fifteen
 // dispatch*Action fan-out methods, and a 211-line parallel tier classifier.
 // In that construct every action existed two to four times (routing arm,
@@ -135,7 +135,7 @@ func gamingModeTier(req manageRequest) adminTier {
 	return tierOpen
 }
 
-// manageActions is the dispatch table: 105 actions (89 pre-table + the four model alias actions of W02-04 + the eight model consumer actions of W01-5 + the three gateway limits actions of W06-15 + model-alias-preview of W05-04), alphabetical, one row each.
+// manageActions is the dispatch table: 106 actions (89 pre-table + the four model alias actions of W02-04 + the eight model consumer actions of W01-5 + the three gateway limits actions of W06-15 + model-alias-preview of W05-04 + purge of #202), alphabetical, one row each.
 //
 // The tiers are the pre-table behaviour, action for action — this wave routes
 // differently, it does not re-cut permissions.
@@ -146,8 +146,8 @@ func gamingModeTier(req manageRequest) adminTier {
 // filter, T24 404-no-oracle delete), the backend CRUD (T37 scope predicate),
 // the disable-profile family, the own reads (tenant-quota-get,
 // tenant-usage-get), the own-namespace scope provisioning, the forge family
-// (ownsProject) and the model-alias family (store scope predicate + handler
-// field tiers, W02-04). Every other gated action stays server-admin, because its
+// (ownsProject), the model-alias family (store scope predicate + handler
+// field tiers, W02-04) and purge (the store's PurgeQuery reader rule, #202). Every other gated action stays server-admin, because its
 // handler carries no tenant filter — admitting a tenant-admin there would be
 // fail-OPEN. tenant-*/tenant-grant-*/block-grant-* are operator actions by
 // nature; the dream/gaming mutations are server-global by design (scheduler
@@ -264,6 +264,11 @@ var manageActions = map[string]manageAction{
 	"oauth-provider-list":      {tier: tierServerAdmin, handle: dropAuthReq((*ManageHandler).handleOAuthProviderList)},
 	"overview-rebuild-start":   {tier: tierServerAdmin, handle: onlyWriter((*ManageHandler).handleOverviewRebuildStart)},
 	"project-provision":        {tier: tierServerAdmin, handle: (*ManageHandler).handleProjectProvision},
+	// purge (#202): the hard delete of block data in ONE scope. tierTenantAdmin
+	// because the store's reader rule binds it to the caller's own tenant
+	// (store.PurgeQuery: a foreign and an unknown scope are one 404); a key
+	// without an admin role never reaches it, not even for its home scope.
+	"purge":                    {tier: tierTenantAdmin, handle: (*ManageHandler).handlePurge},
 	"scope-create":             {tier: tierTenantAdmin, handle: (*ManageHandler).handleScopeCreate},
 	"scope-list":               {tier: tierTenantAdmin, handle: (*ManageHandler).handleScopeList},
 	"scope-overview":           {tier: tierServerAdmin, handle: dropAuthReq((*ManageHandler).handleScopeOverview)},

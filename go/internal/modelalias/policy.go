@@ -72,7 +72,6 @@ const (
 	CeilingStopMaxEntries         = 16
 	CeilingEmbeddingMaxInputs     = 256
 	CeilingEmbeddingSubBatch      = 256
-	CeilingEmbeddingMaxInputRunes = 32768
 	CeilingRerankMaxDocuments     = 1000
 	CeilingRerankSubBatch         = 1000
 
@@ -185,7 +184,10 @@ var policyKeys = []policyKey{
 	{"embedding.matryoshka_min", forEmbedding, typeInt, 0, func(p *Policy) *Opt[int] { return &p.EmbeddingMatryoshkaMin }},
 	{"embedding.max_inputs", forEmbedding, typeInt, CeilingEmbeddingMaxInputs, func(p *Policy) *Opt[int] { return &p.EmbeddingMaxInputs }},
 	{"embedding.sub_batch", forEmbedding, typeInt, CeilingEmbeddingSubBatch, func(p *Policy) *Opt[int] { return &p.EmbeddingSubBatch }},
-	{"embedding.max_input_runes", forEmbedding, typeInt, CeilingEmbeddingMaxInputRunes, func(p *Policy) *Opt[int] { return &p.EmbeddingMaxInputRunes }},
+	// No code ceiling (FOLGE-EMBLIMIT): the backend judges an input's
+	// length; the key is an operator's limit below it, bounded as every
+	// integer entry is (policyIntMax).
+	{"embedding.max_input_runes", forEmbedding, typeInt, 0, func(p *Policy) *Opt[int] { return &p.EmbeddingMaxInputRunes }},
 	{"rerank.max_documents", forRerank, typeInt, CeilingRerankMaxDocuments, func(p *Policy) *Opt[int] { return &p.RerankMaxDocuments }},
 	{"rerank.sub_batch", forRerank, typeInt, CeilingRerankSubBatch, func(p *Policy) *Opt[int] { return &p.RerankSubBatch }},
 }

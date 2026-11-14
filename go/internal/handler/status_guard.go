@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/guard"
 )
 
 // RC-1 wave S1 — the guard_review GENERATION.
@@ -46,11 +48,16 @@ const guardGenSlowBuildMs = 250
 // The WHERE clause is byte-identical in meaning to the pre-S1 per-request query
 // (non-archived, the three flagged states), so the numbers a server-admin and a
 // tenant see do not change; only their lifetime does.
+//
+// The fourth aggregate is the queue's aging signal: the oldest FLAG time over
+// the set (guard.FlaggedAtSQL). A guard pass does not move updated_at, so the
+// time a block was flagged is read from metadata.guard_checked_at, with
+// updated_at as the fallback for a row that carries no readable one.
 const guardGenRollupSQL = `SELECT scope, GROUPING(scope) AS is_total,
 		(count(*) FILTER (WHERE guard_status = 'needs_review'))::int,
 		(count(*) FILTER (WHERE guard_status = 'near_duplicate'))::int,
 		(count(*) FILTER (WHERE guard_status = 'possible_duplicate'))::int,
-		min(updated_at)
+		min(` + guard.FlaggedAtSQL + `)
 	FROM context_blocks
 	WHERE NOT is_archived
 	  AND guard_status IN ('needs_review', 'near_duplicate', 'possible_duplicate')

@@ -61,6 +61,10 @@ type attemptAnswer struct {
 	class string
 	// status is the upstream status of the last attempt (0 = none).
 	status int
+	// rejected: the backend refused the request itself — a request-specific
+	// upstream 4xx, answered by rejectedAnswer. The embeddings route gives
+	// this answer at every sub-block and names the input (FOLGE-EMBLIMIT).
+	rejected bool
 }
 
 // answerContext is what the mapping reads besides the error: the alias (its
@@ -106,6 +110,7 @@ func mapAttemptFailure(last failedAttempt, failed []failedAttempt, lastClass str
 		a.code, a.message = CodeUpstreamError, upstreamErrorMessage
 	case class == backends.ClassBadRequest && se != nil && se.Code != http.StatusNotFound && se.Code >= 400:
 		a.code, a.message = rejectedAnswer(se, ac)
+		a.rejected = true
 	case class == backends.ClassBadRequest && se == nil:
 		// A request-specific provider error event without a status: the
 		// client's request, not the row (window rule, §4.11.1).
@@ -147,10 +152,13 @@ func rejectedAnswer(se *httpx.StatusError, ac answerContext) (string, string) {
 // (design/02 §4.10.1): the wordings of vLLM and OpenAI-shaped providers
 // ("maximum context length is N tokens"), SGLang ("longer than the model's
 // context length"), llama.cpp ("exceeds the available context size",
-// type exceed_context_size_error) and the OpenAI code itself. Pinned per
-// engine against fixtures (TestContextLengthDetectorFixtures). A text that
-// matches none is upstream_rejected — the detector never guesses.
-var contextLengthPatterns = regexp.MustCompile(`(?i)maximum context length|longer than the model'?s context length|exceeds? the available context size|exceed_context_size_error|context_length_exceeded`)
+// type exceed_context_size_error), Ollama's /api/embed with truncate:false
+// ("the input length exceeds the context length" — 400 of its server check,
+// 413 of its runner, with the token counts in its MLX runner; FOLGE-EMBLIMIT)
+// and the OpenAI code itself. Pinned per engine against fixtures
+// (TestContextLengthDetectorFixtures, TestEmbedOllamaRefusesInsteadOfCutting).
+// A text that matches none is upstream_rejected — the detector never guesses.
+var contextLengthPatterns = regexp.MustCompile(`(?i)maximum context length|longer than the model'?s context length|exceeds? the available context size|exceed_context_size_error|exceeds the context length|context_length_exceeded`)
 
 func contextLengthExceeded(body string) bool { return contextLengthPatterns.MatchString(body) }
 

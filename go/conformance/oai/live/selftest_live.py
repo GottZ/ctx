@@ -615,14 +615,28 @@ def test_measure_retry_after_separates_proxy_429(fake):
     """FOLGE-W: a 429 of the reverse proxy in front of ctx (openresty's HTML
     page: no JSON body, no x-should-retry, no Retry-After) counts as
     proxy_429, never as a ctx violation; ok, share_429 and retry_after judge
-    ctx's own 429 only (30 requests: 10 proxy, 10 ctx, 10 × 200). Every
-    answer says Server: openresty, as behind the live proxy."""
+    ctx's own 429 only (30 requests: 10 proxy, 10 ctx, 10 × 200). share_429
+    is ctx's 429 over the requests ctx answered — the proxy's 10 never reached
+    it, so 10 of 20, not 10 of 30 (#187). Every answer says Server:
+    openresty, as behind the live proxy."""
     rc, got, last, out = _retry(fake, 30)
     assert rc == 0 and got.get("ok") is True and got.get("violations") == [], f"proxy 429 judged as ctx: {rc} {last!r}\n{out}"
     assert (got.get("proxy_429"), got.get("ctx_429")) == (10, 10), f"proxy/ctx split: {got}"
     assert got.get("status", {}).get("429") == 20, f"status keeps every 429: {got}"
-    assert got.get("share_429") == pytest.approx(10 / 30), f"share_429 is the ctx share: {got}"
+    assert got.get("share_429") == pytest.approx(10 / 20), f"share_429 is ctx's 429 over ctx's answers: {got}"
     assert got.get("retry_after") == [5] and got.get("proxy_servers") == {"openresty": 10}, f"evidence: {got}"
+
+
+@pytest.mark.parametrize("fake", ["retry-proxy"], indirect=True)
+def test_measure_retry_after_share_excludes_proxy_answers(fake):
+    """#187: share_429 divides by the requests ctx answered (requests minus
+    proxy_429), not by all requests and not by requests minus ctx_429 — an
+    uneven split tells the three apart (31 requests: 10 proxy, 11 ctx,
+    10 × 200 ⇒ 11 / 21, where all requests give 11 / 31 and the ctx count
+    11 / 20)."""
+    rc, got, last, out = _retry(fake, 31)
+    assert rc == 0 and (got.get("proxy_429"), got.get("ctx_429")) == (10, 11), f"split: {rc} {last!r}\n{out}"
+    assert got.get("share_429") == pytest.approx(11 / 21), f"share_429 is ctx's 429 over ctx's answers: {got}"
 
 
 @pytest.mark.parametrize("fake", ["retry-proxy-only"], indirect=True)

@@ -34,7 +34,8 @@ Bevorzugter Ort: `.project/bench-session-<N>/` (submodule, root-only permissions
 ## Build & Run
 
 ```bash
-docker compose build ctx            # Go-Binary bauen (multi-stage)
+docker compose build ctx            # Go-Binary bauen (multi-stage); /health version = "dev"
+CTX_VERSION=$(git describe --tags --exact-match --match 'v*') docker compose build ctx   # aus einem Tag-Checkout: Tag stempeln (docs/operations.md)
 docker compose up -d ctx            # ctx + PostgreSQL starten
 docker compose logs -f ctx          # Logs
 ```

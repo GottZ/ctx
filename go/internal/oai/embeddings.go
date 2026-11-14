@@ -43,7 +43,7 @@ import (
 //	encoding_format, dimensions) → Resolve → kind embedding → policy
 //	(inputs, dimensions) → answer reserve → RequiredSensitivity + scan →
 //	chain build (gateway wire embedding: openai, ollama) → GateTenant →
-//	input runes → limiter (op embed) → planner (Units n, SubBatch) → k = 1
+//	limiter (op embed) → planner (Units n, SubBatch) → k = 1
 //	rule → watcher → WalkChain(attempt = the sub-blocks of subblock.go:
 //	block one under First/Next, blocks 2…k under Continue on the request
 //	context, sticky) → check before the write → streamed answer → one llmlog
@@ -335,13 +335,15 @@ func (c *embedCall) serve() {
 		c.refuseParam(perr)
 		return
 	}
-	// The rune limit that holds without a chain — the alias's
-	// max_input_runes, else the code ceiling — before the reserve, the scan
+	// The alias's max_input_runes, when set, before the reserve, the scan
 	// and the chain build (hardening H-7): an input over it is the client's
-	// 400, never a 503 of the budget. The chain's window narrows it below.
-	if perr := checkInputRunes(req, embedEarlyRuneLimit(c.lim)); perr != nil {
-		c.refuseParam(perr)
-		return
+	// 400, never a 503 of the budget. Unset, the backend judges the length
+	// (checkInputRunes).
+	if c.lim.maxInputRunes > 0 {
+		if perr := checkInputRunes(req, c.lim.maxInputRunes); perr != nil {
+			c.refuseParam(perr)
+			return
+		}
 	}
 	c.req = req
 	if len(req.ignored) > 0 {
@@ -361,10 +363,6 @@ func (c *embedCall) serve() {
 	c.required = c.d.Federation.Scan(required, body)
 	chain, ok := c.chain()
 	if !ok {
-		return
-	}
-	if perr := checkInputRunes(req, embedRuneLimit(c.lim, chain)); perr != nil {
-		c.refuseParam(perr)
 		return
 	}
 	if !c.reserveUpstreamTexts() {
@@ -677,8 +675,11 @@ type embedState struct {
 	dims     int            // the vectors' length (policy or learned)
 	usage    dispatch.Usage // Σ over every block with a result, saturated (usageTotal)
 	// failedBlock is the block whose wire call ended the latest attempt
-	// (-1: none); ≥ 1 is the sticky stop.
+	// (-1: none); ≥ 1 is the sticky stop, unless the backend refused the
+	// block's inputs (outcome). failedLo and failedHi are its inputs.
 	failedBlock int
+	failedLo    int
+	failedHi    int
 	abort       string // the dispatcher abort of that block's lease, if any
 	failed      []failedAttempt
 	last        failedAttempt
@@ -1036,7 +1037,7 @@ func (c *embedCall) wireBlock(st *embedState, b *backends.Backend, model string,
 	// R4-1).
 	c.syncLifecycle()
 	if rc.Err() != nil {
-		err := c.blockFailure(st, b, i, rc, fmt.Errorf("oai: the run ended before the wire call: %w", context.Cause(rc)))
+		err := c.blockFailure(st, b, i, lo, hi, rc, fmt.Errorf("oai: the run ended before the wire call: %w", context.Cause(rc)))
 		return dispatch.Usage{}, err
 	}
 	// st.wires counts the wire calls for the census; c.wired is the meter's
@@ -1069,7 +1070,7 @@ func (c *embedCall) wireBlock(st *embedState, b *backends.Backend, model string,
 		st.markPaid(lo, hi, len(c.req.inputs))
 	}
 	if err != nil {
-		return dispatch.Usage{}, c.blockFailure(st, b, i, rc, err)
+		return dispatch.Usage{}, c.blockFailure(st, b, i, lo, hi, rc, err)
 	}
 	if st.dims <= 0 {
 		st.dims = len(vecs[0])
@@ -1091,17 +1092,18 @@ func (c *embedCall) wireBlock(st *embedState, b *backends.Backend, model string,
 	return u, nil
 }
 
-// blockFailure records the failure of block i and returns the error the
-// attempt ends with. From block two on, a failure the request deadline
-// caused (the frame is spent, not the row) becomes errBlockDeadline — a
-// cancellation for the walker, no health report (Fremd-Review 1 F-3) — and
-// every failure of a block ≥ 2 is the sticky stop (failedBlock ≥ 1, unless
-// the run itself ended: verdict answers first).
-func (c *embedCall) blockFailure(st *embedState, b *backends.Backend, i int, rc context.Context, err error) error {
+// blockFailure records the failure of block i over the inputs [lo, hi) and
+// returns the error the attempt ends with. From block two on, a failure the
+// request deadline caused (the frame is spent, not the row) becomes
+// errBlockDeadline — a cancellation for the walker, no health report
+// (Fremd-Review 1 F-3) — and every failure of a block ≥ 2 is the sticky
+// stop (failedBlock ≥ 1, unless the run itself ended: verdict answers
+// first), except the backend's refusal of the block's inputs (outcome).
+func (c *embedCall) blockFailure(st *embedState, b *backends.Backend, i, lo, hi int, rc context.Context, err error) error {
 	if i > 0 && errors.Is(context.Cause(c.ctx), context.DeadlineExceeded) {
 		err = fmt.Errorf("block %d: %w", i, errBlockDeadline)
 	}
-	st.failedBlock, st.abort = i, llmlog.AbortClass(rc)
+	st.failedBlock, st.failedLo, st.failedHi, st.abort = i, lo, hi, llmlog.AbortClass(rc)
 	st.last = failedAttempt{b: b, err: err}
 	st.failed = append(st.failed, st.last)
 	return err
@@ -1207,8 +1209,9 @@ type embedOutcome struct {
 
 // outcome answers the walk: the run's own end first (watcher, shutdown,
 // client, the route's refusals), then success, the admission writer's
-// domain, the sticky stop of a block ≥ 2 and the attempt mapping of a
-// failed first block.
+// domain, and the attempt mapping — of a failed first block, and of a block
+// ≥ 2 whose inputs the backend refused — or the sticky stop of every other
+// failure of a block ≥ 2.
 func (c *embedCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, st *embedState) embedOutcome {
 	if ended, code := c.verdict(); ended {
 		if cause := context.Cause(c.ctx); errors.Is(cause, errAnswerOverloaded) || errors.Is(cause, errRouteRefused) {
@@ -1237,9 +1240,6 @@ func (c *embedCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, s
 	if st.last.err == nil {
 		st.last.err = err
 	}
-	if st.failedBlock >= 1 && st.abort == "" {
-		return c.stickyStop(st)
-	}
 	lastClass := attempts[len(attempts)-1].Class
 	if st.abort != "" {
 		lastClass = st.abort
@@ -1247,8 +1247,26 @@ func (c *embedCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, s
 	a := mapAttemptFailure(st.last, st.failed, lastClass, answerContext{
 		alias: c.alias, chain: plan.Chain, relay4xx: c.s.RelayUpstream4xxMessages, snapshot: c.d.Pool.Snapshot,
 	})
+	// A block ≥ 2 whose inputs the backend refused gets the answer it would
+	// get as the first block — the client's 400, which no retry can fix
+	// (FOLGE-EMBLIMIT: at E = 1 every input is its own block, and an
+	// overlong input at position ≥ 2 was a retryable 503). Every other
+	// failure of a block ≥ 2 is the sticky stop.
+	if st.failedBlock >= 1 && st.abort == "" && !a.rejected {
+		return c.stickyStop(st)
+	}
 	writeRetryAfter(c.w.Header(), a.retryAfter)
-	c.refuse(a.code, a.message, a.shouldRetry)
+	if a.rejected {
+		// The refusal names the refused block's inputs: input[i] for a block
+		// of one input, else input — the envelope's param as the parse names it.
+		param := "input"
+		if st.failedHi-st.failedLo == 1 {
+			param = fmt.Sprintf("input[%d]", st.failedLo)
+		}
+		c.refuseParam(&paramError{a.code, param, a.message})
+	} else {
+		c.refuse(a.code, a.message, a.shouldRetry)
+	}
 	return embedOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Class: a.class, Status: a.status, Code: a.code}}
 }
 
@@ -1257,7 +1275,8 @@ func (c *embedCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, s
 // second vector build in — 503 upstream_unavailable with Retry-After (the
 // smallest upstream Retry-After of the failed attempts, else the smallest
 // step of dispatch.external_retry_after_steps), whatever the block's own
-// error class was.
+// error class was — except the backend's refusal of the block's inputs,
+// which outcome answers as for the first block (FOLGE-EMBLIMIT).
 func (c *embedCall) stickyStop(st *embedState) embedOutcome {
 	ra := smallestRetryAfter(st.failed)
 	if ra <= 0 {

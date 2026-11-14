@@ -506,6 +506,25 @@ func SetTenantLimitsTx(ctx context.Context, tx pgx.Tx, tenantID string, maxScope
 // lower if lock contention is observed. Not load-bearing for correctness.
 const pruneBatchSize = 2000
 
+// drainBatched runs one bounded DELETE (its last argument is the batch limit)
+// until a round affects 0 rows and returns the rows deleted in total — the
+// batch loop of the tenant prune and of the scope purge's blob drain
+// (scope_purge.go). Each round is its own statement, so no lock or WAL burst
+// spans the whole drain.
+func drainBatched(ctx context.Context, pool *pgxpool.Pool, sql string, args ...any) (int64, error) {
+	var total int64
+	for {
+		tag, err := pool.Exec(ctx, sql, args...)
+		if err != nil {
+			return total, err
+		}
+		if tag.RowsAffected() == 0 {
+			return total, nil
+		}
+		total += tag.RowsAffected()
+	}
+}
+
 // pruneScopeDeletes lists the scope-carried data tables to drain, IN FK ORDER.
 // Each statement is fully static (no string interpolation → no gosec G201). $1 =
 // the tenant's scopes (text[]), $2 = the batch limit. The ctid sub-select is the
@@ -537,7 +556,9 @@ const pruneBatchSize = 2000
 // table on deploy and collide with the planned 062-068 numbering). Today's corpus
 // (~2k links) makes the prune trivial; this is a target-scale seam, not a
 // correctness blocker. (Secondary N11: write_log.matched_block_id is an unindexed
-// SET-NULL ref → a per-block seq scan only when actually set; rare.)
+// SET-NULL ref → the FK action scans context_write_log once per deleted block,
+// set or not: measured for the scope purge (#202) at 29 ms per block next to a
+// 300 000-row write log, 0.12 ms with a partial index on the column.)
 var pruneScopeDeletes = []struct{ table, sql string }{
 	{"context_dream_links", `DELETE FROM context_dream_links WHERE ctid IN (SELECT ctid FROM context_dream_links WHERE scope = ANY($1) LIMIT $2)`},
 	{"context_blocks", `DELETE FROM context_blocks WHERE ctid IN (SELECT ctid FROM context_blocks WHERE scope = ANY($1) LIMIT $2)`},
@@ -608,14 +629,8 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 	// scope — nothing scope-discriminated can belong to it then).
 	if len(scopes) > 0 {
 		for _, d := range pruneScopeDeletes {
-			for {
-				tag, err := pool.Exec(ctx, d.sql, scopes, pruneBatchSize)
-				if err != nil {
-					return fmt.Errorf("store: prune %s: %w", d.table, err)
-				}
-				if tag.RowsAffected() == 0 {
-					break
-				}
+			if _, err := drainBatched(ctx, pool, d.sql, scopes, pruneBatchSize); err != nil {
+				return fmt.Errorf("store: prune %s: %w", d.table, err)
 			}
 		}
 	}

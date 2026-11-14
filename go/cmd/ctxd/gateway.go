@@ -399,7 +399,10 @@ func (g *modelGateway) statusFeed(pool *pgxpool.Pool) *handler.GatewayFeed {
 // while the HTTP server still drains — the stamps and refusals of the
 // drained requests would miss the final flush (W01-3 F-7). The step cancels,
 // waits for the final flushes and gives up after gatewayStopTimeout (a WARN;
-// the loops then finish on their own, the budget stays bounded).
+// the loops then finish on their own, the budget stays bounded). When the
+// loops end within the bound, stamps the final usage flush could not write
+// in its window — their key rows stayed locked, or the database failed —
+// are counted at WARN (#124).
 func startModelGateway(g *modelGateway) func() {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -414,6 +417,11 @@ func startModelGateway(g *modelGateway) func() {
 		defer t.Stop()
 		select {
 		case <-done:
+			if n := g.usage.Pending(); n > 0 {
+				slog.Warn("gateway: last_used_at stamps of model keys left unwritten at shutdown",
+					"stamps", n, "window", store.ModelKeyUsageFinalFlushTimeout, "elapsed", time.Since(begin).Round(time.Millisecond))
+				return
+			}
 			slog.Info("gateway: usage stamps and rejection counts flushed at shutdown", "elapsed", time.Since(begin).Round(time.Millisecond))
 		case <-t.C:
 			slog.Warn("gateway: final flush incomplete at shutdown, pending last_used_at stamps may be lost", "timeout", gatewayStopTimeout)

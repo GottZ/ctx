@@ -83,7 +83,7 @@ func wireCallAllocPass(t *testing.T, row backends.Backend, texts []string) (perC
 		}
 	}
 	runtime.ReadMemStats(&m1)
-	return float64(m1.TotalAlloc-m0.TotalAlloc)/calls - float64(bodyAlloc), wireBodyLen("m", texts, nil)
+	return float64(m1.TotalAlloc-m0.TotalAlloc)/calls - float64(bodyAlloc), wireBodyLen("m", texts, nil, nil)
 }
 
 // TestWireCallCopiesThroughOneBuffer: a wire call of a body past 32 KiB

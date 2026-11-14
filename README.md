@@ -1,135 +1,388 @@
-# ctx — The memory your LLM pretends to have.
-
-> Knowledge store with weighted 4-way RRF retrieval, multi-tenant scope isolation, multi-dimensional cyclic temporal gravity, and autonomous cross-referencing. Built for AI workflows that need to remember.
-
 [![Release](https://img.shields.io/github/v/release/GottZ/ctx)](https://github.com/GottZ/ctx/releases)
 [![Go](https://img.shields.io/badge/Go-1.27-00ADD8)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MPL--2.0-blue)](LICENSE)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15838/badge)](https://www.bestpractices.dev/projects/15838)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791)](https://www.postgresql.org)
 
+# ctx
+
+**The memory your LLM pretends to have.**
+
+ctx is a knowledge store for LLM agents that you run yourself. Your agents save what they learn as small blocks: a
+decision with its reason, a fix with the error it fixed. Weeks later a fresh session asks "why did we pin
+pgvector?" and gets a short answer written from those blocks, with their ids. ctx finds a block by its meaning, by
+its exact words and by time. Claude Code, claude.ai, Hermes and any other MCP client can share one memory, and your
+scripts reach it through a CLI and plain HTTP. When your agents save and look up is up to the instructions you give
+them: ctx is the store, not the habit.
+
+```
+ctx query "why did we pin pgvector?"                    ask: a short answer from your blocks, with sources
+ctx save decisions "pgvector pin" - "0.8.7, because …"   remember: a new block, or replace the one with that title
+ctx search decisions query:pgvector                     look around: matching blocks, no model call
+ctx get <block-id>                                      read one block in full
+```
+
+## What you get
+
+- **Answers, not a list of hits.** `query` searches four ways at once: by meaning, by English and German full
+  text, and by similar titles. It merges the rankings and lets your chat model write a short answer from the
+  blocks it found, with their ids. `search` gives you the blocks without the model call.
+- **Time counts.** Every block keeps the day it was written and the full dates it names (2026-03-29, 29.03.2026,
+  March 2026). A question that names a time, such as "every Tuesday", "at Christmas" or "immer dienstags", ranks
+  the matching blocks higher.
+- **Duplicates caught, links on request.** Guard compares each new block with the closest ones and, depending on
+  the block type, archives a duplicate or flags it for you. Dream Mode, once you switch it on, reads blocks in the
+  background, links related ones and marks what a newer block replaces.
+- **One store for every agent.** 16 MCP tools for Claude Code, claude.ai or any MCP client, a CLI for scripts,
+  cron and hooks, and a plain HTTP API. In Claude Code, two hooks give each subagent the project's briefing when it
+  starts and save the findings it marks when it ends.
+- **Several teams on one server.** Tenants hold scopes, scopes hold blocks. A key reads only the scopes it was
+  given, and another tenant's data only through a grant you make, for one scope or one block. Quotas and key
+  limits per tenant.
+- **Your models, wherever they run.** Ollama, any OpenAI-compatible server or hosted API; chat also on the
+  Anthropic Messages API. Each role (answers, embeddings, reranking, Dream Mode and a few more) has its own list of
+  backends in priority order, so a CPU backend can stand in for a GPU one.
+- **Your models for other programs, if you want.** An OpenAI-compatible API under `/v1` (chat, embeddings,
+  rerank) lets other programs use those models, with keys, limits and quotas of their own. ctx's own questions are
+  served first. Off until you switch it on.
+- **A web UI inside the server.** Settings, model backends, the link graph, a block browser, live status, a chat
+  that searches the store for you, project issues with a board. You sign in with an API key, or with a sign-in
+  provider you set up.
+
+## How it works
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/how-ctx-works-dark.svg">
-    <img alt="How ctx works — four access paths into one Go daemon; the store pipeline with time-anchor extraction, embedding and Guard dedup; the query pipeline with temporal parsing, 4-way RRF fusion, temporal gravity, cluster-topic boost, graph expansion and LLM synthesis; the topic-map layer that folds the corpus into named, stable topics feeding a root map into the digest; and the autonomous Dream Mode loop that cross-links the corpus" src="docs/how-ctx-works.svg" width="100%">
+    <img alt="How ctx works: four ways in (MCP, CLI, HTTP, web UI) lead to one Go server on PostgreSQL. Storing a block records its dates, computes an embedding and checks for duplicates. A question is searched four ways, weighted by time and by links, and answered by the chat model. A topic map groups the blocks, and the optional Dream Mode links them in the background." src="docs/how-ctx-works.svg" width="100%">
   </picture>
 </p>
 
-## What it does
+One Go server (`ctxd`) on PostgreSQL 18 with pgvector and TimescaleDB. The models run wherever its backend pool
+points. Dream Mode, shown in the picture, runs only when you switch it on. A block takes this path:
 
-ctx gives your LLM a persistent, searchable memory. Store knowledge blocks, query them with hybrid retrieval (semantic + bilingual fulltext + trigram), then rerank with multi-dimensional cyclic gravity — each temporal cycle (weekday, month, quarter, week, monthday, seasonal, daily) scored as its own Gaussian field. Queries like "immer dienstags" or "Weihnachten" activate specific dimensions.
-
-Every block carries anchors from both its content (dates mentioned in text) AND its `created_at` timestamp, so a note about "Meeting am Dienstag" is findable by the day it discusses and the day it was written. **Dream Mode** runs as a continuous background loop — autonomously discovering relationships between blocks, marking outdated information, and promoting high-quality content. Your knowledge base grows, self-organizes, and stays current.
-
-It speaks **MCP, a CLI, and a plain HTTP API**, ships an embedded web UI, and isolates multiple tenants down to the individual block. Optionally it passes its models on as an **OpenAI-compatible API** (`/v1`) to other programs and other ctx instances, with keys, quotas and its own traffic first ([enabling it](docs/operations.md#upgrading-to-5330-enabling-the-openai-compatible-api)).
-
-## Features
-
-| Capability | What it is |
+| Step | What happens |
 |---|---|
-| **4-way RRF retrieval** | Reciprocal-rank fusion of semantic + EN/DE fulltext + trigram, type-policy-parameterised — [architecture](docs/architecture.md#4-way-rrf-retrieval) |
-| **Cyclic temporal gravity** | 7 cyclic dimensions with per-dimension Gaussian decay + forward telescoping — [architecture](docs/architecture.md#temporal-gravity--cyclic-phases) |
-| **Dream Mode** | Continuous autonomous cross-referencing, supersedes detection, parallel race-safe workers — [architecture](docs/architecture.md#dream-mode) |
-| **Block-type registry** | Declarative per-type behaviour (retrieval, guard, dream, digest), hot-reloadable — [architecture](docs/architecture.md#block-type-registry-migration-072) |
-| **Multi-tenancy** | Three-level tenant/scope/block isolation, grants, quotas, self-service onboarding — [multi-tenancy](docs/multi-tenancy.md) |
-| **Issues & forge sync** | Per-project issue/comment corpus (own scope = own repo), kanban board, policy-validated workflow-status transitions, and GitHub pull/push sync — [api](docs/api.md#project-issues-read-surface) · [cli](docs/cli.md#issues) |
-| **Sealed secrets** | AES-256-GCM provider credentials + trust×sensitivity egress gating — [security](docs/security.md) |
-| **Web UI** | Embedded Svelte 5 admin SPA: settings, graph, corpus, status, chat, issues, type-registry admin, model API consumers (create with a reveal-once key, revoke) — [development](docs/development.md#web-ui-svelte-5--typescript--vite-bun) |
-| **MCP / CLI / HTTP** | Three access paths to the same store, OAuth 2.1 for remote MCP — [api](docs/api.md) |
+| 1. Store | A block arrives over MCP, the CLI or HTTP and is saved at once. A block with the same category and title in the same scope is replaced. ctx records the full dates the text names and the time it was written. |
+| 2. Embed and check | In the background the embedding model turns the block into a vector. Guard compares it with the closest blocks and archives or flags a duplicate. |
+| 3. Ask | ctx reads the question for time words, embeds it, and searches four ways: by meaning (pgvector), English full text, German full text and title similarity. It fuses the four rankings into one. |
+| 4. Weigh | Blocks near the times the question names rank higher. Once Dream Mode has written links, blocks linked to the best hits join in, and blocks that a newer one replaced drop out. A reranker and a boost for the strongest topics can be switched on. |
+| 5. Answer | The chat model is told to answer from the retrieved blocks only. It cites them, and ctx lists their ids. |
+| 6. Consolidate | With Dream Mode on, a background loop picks one block at a time, finds candidates and asks the chat model how they relate. It writes at most five links per round, including "this block replaces that one". |
 
-## Quick install
+`search` takes a lighter path: full-text matching only, without embedding and without a model call.
+
+There are four ways in:
+
+| Way | Use it for |
+|---|---|
+| MCP (`/mcp`) | agents in Claude Code, claude.ai, Hermes or any MCP client; API key, or OAuth 2.1 for remote clients |
+| CLI (`ctx`) | the shell, scripts, cron, Claude Code hooks and the statusline; administration |
+| HTTP (`/api/…`) | your own programs |
+| Web UI (`/`) | settings, backends, graph, blocks, status, chat, issues |
+
+## Before you start
+
+- **A Linux host with Docker Compose** for the server, and `openssl` for its keys. ctx runs as a Linux container
+  image; that is the only supported runtime. The compose file builds it, and a database image with PostgreSQL 18,
+  pgvector 0.8.7 and TimescaleDB 2.31.0.
+- **A chat model and an embedding model** that ctx can reach over HTTP: Ollama, an OpenAI-compatible server or a
+  hosted API. Chat also works through the Anthropic Messages API, which serves no embeddings. The embedding model
+  must return at least 1024 dimensions. ctx keeps the first 1024, so pick a model whose first 1024 dimensions work
+  on their own, such as the reference Qwen3-Embedding-8B. The tested reference for chat is qwen3.6:27b, with an
+  optional bge-reranker-v2-m3 reranker. None of them is required.
+- **For the CLI:** Linux or macOS on amd64 or arm64, or Windows on amd64. To check the download, the GitHub CLI
+  (`gh`), signed in with `gh auth login`, or the provenance file of the release (below). Building from source
+  needs Go 1.27.
+
+What does not work, or only partly:
+
+- **ctx does not make an agent remember by itself.** It brings no rules for when to look up or save. An agent
+  that has ctx only as one more tool behaves as if it had no memory; see
+  [Bring your own workflow](#bring-your-own-workflow).
+- **Nothing answers before the models do, and CPU alone is slow.** Until the backend pool has a chat and an
+  embedding backend, `/health` answers `unhealthy` (HTTP 503) and questions fail at the embedding step. On CPU
+  alone, the 27B reference model needs about 4.5 to 5.5 minutes per answer; on a GPU, up to a minute.
+- **Full text in German and English only.** The full-text search knows the word forms of these two languages;
+  content in other languages is found by meaning and by its title. A question with umlauts or common German words
+  is translated to English before the search, and no setting turns that off.
+- **New text is found by meaning a little later.** Embeddings are computed in the background. A block you just
+  saved or changed is found by its words and its title at once, and by meaning once its new vector exists.
+- **No earlier versions.** Saving under the same category and title replaces the whole block, tags and metadata
+  included, and ctx keeps no revision of the old one. Deleting a block archives it; `ctx get --include-archived`
+  still reads it by its full id.
+- **Changing the embedding model is a migration.** Every stored vector has to be computed again in a supervised
+  re-embedding run (`ctx admin embed-migration`); it is not a setting you flip.
+
+## Install
+
+**The CLI** (Linux and macOS). The download goes to a temporary folder, `gh attestation verify` checks that this
+repository's release workflow built the file, and only then is it installed. Writing to `/usr/local/bin` needs
+root; any other folder on your `PATH` works too.
 
 ```bash
-# Binary (Linux/macOS/Windows): download to a temp dir, verify the signed build
-# provenance (GitHub CLI — fails unless this repo's release workflow built the
-# file), and only then install
 f=ctx-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 tmp=$(mktemp -d)
 curl -fsSL "https://github.com/GottZ/ctx/releases/latest/download/$f" -o "$tmp/$f" \
   && gh attestation verify "$tmp/$f" -R GottZ/ctx \
   && install -m 0755 "$tmp/$f" /usr/local/bin/ctx
-
-# Or with Go
-go install github.com/GottZ/ctx/cmd/ctx@latest
 ```
 
-Point the CLI at your ctx host:
+On Windows, download `ctx-windows-amd64.exe` from the [latest release](https://github.com/GottZ/ctx/releases/latest)
+and check it the same way. Each release also carries `SHA256SUMS` and `ctx.intoto.jsonl`, the signed provenance as
+a file: `gh attestation verify <file> --bundle ctx.intoto.jsonl -R GottZ/ctx` checks against it without signing in.
+
+To build the CLI yourself instead, clone the repository and build with `go -C go`, which builds in the `go`
+folder while your shell stays in the root folder. Then install the binary the same way:
 
 ```bash
-ctx init      # config, server + key check, backend pool, Claude Code hooks, statusline
+git clone https://github.com/GottZ/ctx && cd ctx
+go -C go build -o ctx ./cmd/ctx && install -m 0755 go/ctx /usr/local/bin/ctx
 ```
 
-`ctx init` asks for base URL and API key, writes `~/.config/ctx/config` — a mistyped key or one the server rejects is named and asked again, never saved — and checks the server. With a server-admin key it also seeds the **backend pool** — the chat and embedding backend ctx serves from — when no backend serves those roles yet, and probes the ones it finds; with any other key it skips that step and says so. Re-running it changes only what is missing.
-
-<details>
-<summary>Or configure it by hand</summary>
+**The server.** Everything below runs in the root folder of a clone (`git clone https://github.com/GottZ/ctx &&
+cd ctx`, or the clone from the build above). First the `.env` file. It will hold secrets, so it is created
+readable by you only, and a `.env` you already have is kept and gets the same rights. Only then does the second
+command add your first key, which ctx makes at its first start:
 
 ```bash
-mkdir -p ~/.config/ctx
-cat > ~/.config/ctx/config << 'EOF'
-CTX_BASE_URL=https://your-ctx-host.example
-CTX_KEY=your-api-key-here
-EOF
-ctx health                                  # DB + backend connectivity
-ctx backends seed --host http://gpu:11434 \
-  --model qwen3 --embed-model qwen3-embedding   # first backends, non-interactive
+[ -e .env ] || (umask 077 && cp .env.example .env)
+chmod 600 .env && { grep -q '^CTX_BOOTSTRAP_ADMIN_KEY=' .env \
+  || { k=$(openssl rand -hex 32) && printf '\nCTX_BOOTSTRAP_ADMIN_KEY=%s\n' "$k" >> .env; }; }
 ```
-</details>
 
-Running the server (Go daemon + PostgreSQL 18 + pgvector) is `docker compose up -d ctx`. Full setup, env vars and Claude Code integration are in [operations](docs/operations.md); building from source in [development](docs/development.md).
+If a command fails, stop there; `chmod` fails, for example, when `.env` belongs to another user. Put no secret
+into `.env` until `ls -l .env` shows `-rw-------` and you as its owner. Then set the passwords and `CTX_SECRETS_KEY` in `.env`, each a value from `openssl rand -hex 32`, and start
+ctx. Compose builds ctxd and the database image and starts both:
 
-> **Upgrading from v4? Reach v4.38.0 first.** v5.0.0 removes the `CTX_{CHAT,CHAT_FALLBACK,EMBED,DREAM,DREAM_EMBED,RERANK}_*` connection variables: backends are configured in the pool (`ctx backends`) and nowhere else. **v4.38.0 is the last release that still reads those variables**, and one boot on it carries a `.env`-only configuration into the pool for you, then names every variable and leftover settings row you still have. Going straight from an older v4 to v5 is not fatal down to v4.19.0 — the env bridge is gone by then and you re-enter your topology by hand with `ctx backends seed` — but **below v4.19.0 it is a hard stop**: v5 folds migrations 001–113 into a single baseline and refuses a database that never applied 113. Migration path and rollback notes: [operations](docs/operations.md#migration-133-the-backend-tuple-rows-are-deleted--and-the-upgrade-hop-that-has-to-come-first).
+```bash
+[ -e docker-compose.override.yml ] || cp docker-compose.override.yml.example docker-compose.override.yml
+docker compose up -d ctx
+```
 
-**Models:** the tested reference stack is qwen3.6:27b for chat/synthesis/dream/digest, Qwen3-Embedding-8B (1024-dim, CPU-sized) for embeddings, and a bge-reranker-v2-m3 cross-encoder sidecar for rerank — but ctx is engine-agnostic: any OpenAI-compatible or Ollama API works, and the chat-class roles can run on the native Anthropic Messages API (`protocol: "anthropic"`); models are per-backend configuration. CPU-only setups work; a GPU shortens chat latency. Details: [Models & hardware](docs/operations.md#models--hardware).
+The `ctx` service publishes no port of its own; it carries labels for a reverse proxy. The first line above is
+optional: it gives ctx the port `127.0.0.1:8080` and never replaces a `docker-compose.override.yml` you already
+have. In that case, add the `ports:` entry of the example under `services: ctx:` in your file yourself. With a
+proxy of your own in front, skip the line. Without a proxy, compose's warnings that `CTX_HOSTNAME` and
+`CTX_SSL_DOMAIN` are not set do no harm.
 
-## How LLMs use ctx
+Copy `CTX_SECRETS_KEY` from `.env` into your password manager. It seals the provider keys in the database, and
+backups do not contain it: without it, those keys are gone. Every setting and environment variable is in
+[Operations](docs/operations.md#environment-variables).
 
-ctx is not a tool an agent picks up beside its work — it is the agent's persistent memory. "LLM" here means every agent that works against the store: the interactive session, and each subagent or workflow agent it starts, alike. Each one retrieves before it works and persists its own findings after: **retrieve before, persist after**. Five primitives, composable:
+**Upgrading from v4? Reach v4.38.0 first.** v5.0.0 no longer reads the backend connection variables such as
+`CTX_CHAT_HOST` or `CTX_EMBED_MODEL`; backends live in the pool (`ctx backends`) and nowhere else. One boot on
+v4.38.0 carries such a `.env` configuration into the pool and names every variable and settings row that is left.
+From v4.19.0 on, skipping that release is not fatal, but you enter your backends again with `ctx backends seed`.
+Below v4.19.0, v5 refuses the database. Path and rollback:
+[Operations](docs/operations.md#migration-133-the-backend-tuple-rows-are-deleted--and-the-upgrade-hop-that-has-to-come-first).
 
-| Use case | Call | When |
-|----------|------|------|
-| **Retrieve** prior knowledge before answering | `ctx query "question"` | Whenever the answer might depend on past sessions, project state, or stored decisions |
-| **Persist** a new finding | `ctx save <category> <title> - <content>` | After non-obvious discoveries, architecture decisions, resolved bugs, config changes |
-| **Update** an existing block | `ctx save` with same `<category> <title>` | category+title is the upsert key — re-saving replaces |
-| **Browse** without LLM cost | `ctx search [category] [query:text]` | Listing, sanity-checking, lightweight lookups |
-| **Inspect** a specific block | `ctx get <block-id>` | Following an id from query sources or another block |
+## Set up once
 
-**Categories** (semantic, not enforced): `infrastructure`, `decisions`, `projects`, `reference`, `learnings`, `agent-briefing`, `index`. Pick by intent: one fact per block, precise title, tags for cross-cutting. ~1–1.5k chars max — split, don't grow.
+1. **Point the CLI at the server and give it models.** Run `ctx init` with the server's address (with the
+   override above: `http://127.0.0.1:8080`) and the key from `CTX_BOOTSTRAP_ADMIN_KEY`. If the key is mistyped or
+   the server rejects it, init says so and asks again; it never saves such a key. Then it asks for your model host,
+   its protocol, a chat model and an embedding model, seeds the backend pool and tests what it wrote. Give the
+   host as the ctx container reaches it: `localhost` there is the container itself. `ctx init` also offers two
+   Claude Code hooks for subagents and the statusline; `ctx init --remove` takes them out again.
 
-**Access paths** (in order of preference for LLM agents):
+   ```bash
+   ctx init
+   ctx health
+   ```
 
-1. **MCP** — `claude.ai ctx` server (Streamable HTTP transport). Tools: `query`, `store`, `search`, `get`, `recent`. JSON-schemas, no shell-quoting. Use this in Claude Code / claude.ai sessions.
-2. **CLI** — `/usr/local/bin/ctx` — shell pipelines, cron, scripts. Config in `~/.config/ctx/config`.
-3. **HTTP** — `POST /api/{query,store,search,manage}` direct — fallback when MCP/CLI unavailable.
+   `ctx health` shows the database and the model backends. For scripts, the backend step alone runs without
+   questions: `ctx backends seed --host http://gpu-host:11434 --model qwen3 --embed-model qwen3-embedding`.
 
-**Hooks are for agents without a conversation of their own.** A subagent starts with nothing but its prompt and ends with a single final message. `ctx brief --hook` (Claude Code `SubagentStart`) injects the project's most recently updated `agent-briefing` blocks (up to `--limit`, default 20) into its context — and, when the project-tagged lookup returns nothing or fails (a transport error, a malformed or unsuccessful response), the most recently updated `agent-briefing` blocks carrying the producer-set `briefing:global` marker (#58); `ctx persist --hook` (`SubagentStop`) sends each `[PERSIST:category:title]` marker line in its last message, with the non-empty content that follows it, to `store` — an upsert on category and title, so a title that already exists in the key's scope replaces that block. A write the store never receives or rejects is dropped silently and not counted as saved. They give such an agent the same loop a session runs by hand — they are not tools for the session. Setup in [operations](docs/operations.md#claude-code-integration-optional).
+2. **Make keys.** The bootstrap key is a server-admin key. Keep it in your password manager, remove its line from
+   `.env`, and give the CLI an everyday key in its config file afterwards. The first line below makes an everyday
+   key that writes to the scope `private`; the second makes a tenant with its own scope and an owner key, shown
+   once:
 
-How an agent should regard ctx, and what goes wrong when it treats the store as a tool: [ctx as agent memory](docs/ctx-as-agent-memory.md). Keeping that memory from drifting is a separate discipline: [using ctx effectively](docs/using-ctx-effectively.md).
+   ```bash
+   ctx keys create laptop --home private
+   ctx tenant create friend "Friend Corp"
+   ```
 
-## Documentation
+3. **Connect your agents.** Claude Code and other MCP clients that send a header:
 
-| Doc | Contents |
+   ```json
+   { "mcpServers": { "ctx": { "type": "http", "url": "https://your-ctx-host.example/mcp",
+                              "headers": { "X-Context-Key": "your-api-key-here" } } } }
+   ```
+
+   claude.ai and other remote clients sign in with OAuth 2.1: register one with `ctx mcp add "Claude AI"` and add
+   `https://your-ctx-host.example/mcp` as a connector. For Hermes, see [Hermes plugins](#hermes-plugins).
+
+4. **Optional.** Dream Mode: set `CTX_DREAM_ENABLED=true` in `.env` and run `docker compose up -d ctx` again. It
+   keeps calling your chat model in the background; `ctx dream throttle` adds a pause between its calls. The
+   OpenAI-compatible API: [enabling it](docs/operations.md#upgrading-to-5330-enabling-the-openai-compatible-api).
+
+The full walk-through, with every option, is in [Operations](docs/operations.md#first-run-ctx-init).
+
+## Bring your own workflow
+
+ctx is a skeleton. After the install it stores, finds and links what your agents give it, over MCP, the CLI and
+HTTP. It does not decide when your agent looks something up or writes something down, and it does not make a
+session start or end well on its own. Today ctx is deliberately neutral: it brings no working style of its own and
+no ready-made skills, because every team works differently. Below is a suggested way of working. Adapt it to your
+team and write it into your own skill, rule file, hook or prompt. Suggestions for ready-made skills will come
+later. The tool names are the MCP tools an agent uses; the CLI commands in parentheses do the same.
+
+**Session start.** Before its first answer, your agent:
+
+1. loads the conventions it works under into its context;
+2. lists the open items the last close left: `search` with `tags: ["open"]` and a `limit`
+   (`ctx search tags:open limit:50`). That returns every live block with the tag that the key can read, newest
+   first, as a short preview. Several tags widen the match, so keep projects apart by category instead
+   (`ctx search <category> tags:open`);
+3. asks `query` whole questions about the task ("why did we pin pgvector?", not "pgvector pin"), and reads a
+   block in full with `get` only when it holds its id, such as one an open item names;
+4. says in two or three sentences what it loaded, then starts.
+
+**During the work.** Your agent looks up before it decides, and checks live state before it acts on a block: a
+block says where to look, not what is true now. It saves each finding when it happens, with `store`: one concept
+per block, a precise title, a category, tags, the source and the date. It searches first and changes an existing
+block with `update` instead of adding a second one (`ctx manage update <block-id> '<json>'`); tags and metadata
+sent there replace the whole set. A `store` with the same category and title replaces the whole block (`ctx save`
+does the same).
+
+**Session close.** A session is closed when every "done" in its report rests on the output of a command, not on
+what the session remembers. Each step has a check, and what was not checked is reported as not checked. If a step
+is red, your agent reports the red state instead of closing.
+
+| Step | Check |
 |---|---|
-| [Architecture](docs/architecture.md) | Retrieval pipeline, cyclic temporal model, Dream Mode, Guard, block-type registry, backend pool |
-| [Multi-tenancy](docs/multi-tenancy.md) | Model C (tenant/scope/block), grants, admin tiers, per-tenant settings/secrets/quotas, self-service onboarding |
-| [HTTP API](docs/api.md) | Endpoints, manage actions, graph API, settings API, backend pool, web-chat sessions |
-| [MCP reference](docs/mcp.md) | All 15 MCP tools with parameters, answers, error codes and staged writes |
-| [CLI reference](docs/cli.md) | Every `ctx` subcommand, incl. tenant / quota / keys / block-grant |
-| [Security](docs/security.md) | Admin tier, sealed secrets & break-glass, trust×sensitivity gating, sensitivity classification |
-| [Operations](docs/operations.md) | Setup, environment variables, boot validation, backups, deploy & migrations |
-| [Development](docs/development.md) | Building, the Svelte web UI, tests, visual baseline governance, git hooks |
-| [ctx as agent memory](docs/ctx-as-agent-memory.md) | ctx is the agent's memory, not a tool beside it: the loop for sessions and subagents, and the failure modes of treating it as a tool |
-| [Using ctx effectively](docs/using-ctx-effectively.md) | Memory drift, agent discipline, RLHF calibration |
+| 0. Who asks | A person, or an automation such as a timer, a loop or a hook? An automation continues the task; it does not end it. |
+| 1. Working tree | `git status --porcelain` is empty, or every change left is a decision you can name. Nothing is unpushed without a reason: `git log --oneline HEAD --not --remotes` lists what no remote has, also on a branch that was never pushed. |
+| 2. Checks | The project's own tests and checks ran in this session. Green means "nothing known is broken", not "everything works". |
+| 3. Deployment | If something was deployed: the commit in the repository, the deployed commit, the running service and its health check agree. The deploy tool's success message is not that state. |
+| 4. Store | Every finding a later session needs is in ctx, one concept per block, an existing block updated rather than copied. Each fact lives in one place: git holds the diff, ctx each decision or finding as it happened, with source and date. A finding still missing goes in now in that form, not as a summary of the session. The check: `search` with words of the finding (`ctx search query:<words>`) returns its block. |
+| 5. Open items | One block each, with the tag `open`: neutral, with its source (file and line, or a quote with its date), what it unblocks and the ids of the blocks it rests on, without an urgency nobody gave it. A done item is archived with `archive` (`ctx delete <block-id>`). |
+| 6. Report | To the person, in the session, not as a block: per step what was checked and with what result, what was not checked or stays open, and the ids of the open items. |
+
+This is not a handover note that retells the session. The findings should already be in the store, per topic;
+the close checks that they are, and leaves only the open items and the pointers to them.
+
+What there is to start from:
+
+- [ctx as agent memory](docs/ctx-as-agent-memory.md): the loop for a session and for a subagent, and what goes
+  wrong when an agent treats the store as a tool, including why a retelling handover note is one of those ways.
+- [Using ctx effectively](docs/using-ctx-effectively.md): rules to put into your agent's instructions, and how to
+  keep stored memory from drifting.
+- `ctx init` installs, if you agree, two Claude Code hooks for **subagents**. `ctx brief --hook` hands each new
+  subagent the blocks of the category `agent-briefing` that are tagged with the project. `ctx persist --hook`
+  stores each finding the subagent marks with a `[PERSIST:category:title]` line in its last message
+  ([Claude Code integration](docs/operations.md#claude-code-integration-optional)). Nothing covers the start or
+  the end of your own session.
+- The Hermes plugin [`ctx_checkpoint`](integrations/hermes/README.md) shows what a finished integration looks
+  like: it archives the transcript in ctx before Hermes compacts a conversation, and with `memory: true` it adds
+  recall before each turn and the skill `ctx-memory`, which tells Hermes how to query and store during the work.
+
+## Everyday use
+
+| You want to | Command |
+|---|---|
+| Ask a question of your stored knowledge | `ctx query "question"` |
+| Save a finding | `ctx save <category> <title> - <content>` |
+| Replace a block | `ctx save` with the same category and title |
+| Change one field of a block | `ctx manage update <block-id> '{"tags":["a","b"]}'`, or the MCP tool `update` |
+| Browse without a model call | `ctx search [category] [query:text] [tags:a,b]` |
+| Read one block | `ctx get <block-id>` |
+| Archive a block | `ctx delete <block-id>` |
+| See the store and its health | `ctx stats`, `ctx health` |
+| Review flagged duplicates | `ctx guard list`, `ctx guard resolve <id> keep\|archive` |
+| Import an Obsidian vault | `ctx ingest <path> --dry-run`, then without `--dry-run` |
+| Call any HTTP route with your key | `ctx api GET /api/whoami` |
+
+Agents do the same over MCP: `query`, `store`, `search`, `get`, `recent` and eleven more tools for updates,
+archiving, confirmed writes, issues, duplicate review and binary blobs ([MCP reference](docs/mcp.md)).
+
+## Hermes plugins
+
+Three plugins for [Hermes](https://github.com/NousResearch/hermes-agent) live in this repository:
+
+| Plugin | What it does | Install |
+|---|---|---|
+| [`ctx_checkpoint`](integrations/hermes/README.md) | The ctx memory provider. Before Hermes shortens (compacts) a long conversation, it archives the direct transcript in ctx; on request, no compaction runs without that copy. With `memory: true` also recall before each turn, `ctx_*` agent tools, a mirror of Hermes' memory files, fact extraction, session digests and the skill `ctx-memory`. Talks to ctx through Hermes' own MCP connection. Its memory engine was contributed by derLonius (W4-NERF) as [hermes-ctx-plugin](https://github.com/W4-NERF/hermes-ctx-plugin). | `hermes plugins install ctx_checkpoint`, then `hermes memory setup ctx_checkpoint` or the memory form in Hermes Desktop |
+| [`ctx_handover`](integrations/hermes/plugin/ctx_handover/README.md) | Moves a running Hermes session, with its conversation and project folder, from one of your machines to another and back. Works without ctx. | `hermes plugins install ctx_handover` and `hermes plugins enable ctx_handover`, on both machines |
+| [`ctx_discord_policy`](integrations/hermes/plugin/ctx_discord_policy/README.md) | Lets a Hermes bot talk on your Discord servers while its tools stay with the operators in your Hermes configuration; each server is set up inside Discord with `/policy`. Works without ctx. | `hermes plugins install GottZ/ctx/integrations/hermes/plugin/ctx_discord_policy --enable`, then restart the gateway |
+
+`ctx_checkpoint` ([catalog page](https://hermes-agent.nousresearch.com/docs/plugins/ctx_checkpoint)) and
+`ctx_handover` are listed in the Hermes plugin catalog; `ctx_discord_policy` is installed from this repository.
+
+## Safety in short
+
+- **A key reads only what it was given.** Every key writes to its own scope and reads the scopes it was allowed;
+  keys of the default tenant get its `shared` scope by default. Another tenant's data needs a grant. A key whose
+  tenant cannot be resolved is refused.
+- **Admin work needs an admin key.** Keys, MCP clients, settings, secrets and the backend pool need a
+  server-admin key, or a tenant-admin key for its own tenant.
+- **Provider keys are sealed.** API keys of model providers are stored encrypted (AES-256-GCM) under
+  `CTX_SECRETS_KEY`, written through a write-only API that never returns them.
+- **Sensitive blocks stay on trusted models.** Every block has a sensitivity, and an unclassified block counts as
+  `credentials`. Every backend has a trust level, and a block reaches only backends trusted for it. A scanner
+  raises blocks that contain credentials.
+- **Agent writes can wait for a yes.** A key with `confirm_writes` gets its MCP writes staged; they run only when
+  `confirm` is called with the exact hash.
+- **Text from outside is marked.** Blocks that hold tool output or transcripts carry an `untrusted` flag in
+  results, so an agent reads them as data.
+
+### Disclosure
+
+- **Network, server:** the model backends in its pool. Only when you set them up:
+  - GitHub, for project issue sync;
+  - your sign-in providers;
+  - with the image proxy switched on, the images that chat answers show.
+- **Network, CLI:** your ctx server, plus one release check against `api.github.com` in `ctx init`
+  (`--no-update-check` or `CTX_NO_UPDATE_CHECK=1` skips it).
+- **Stored by the server:** your blocks and blobs. A log of ctx's own model calls with their prompts and answers,
+  except for content classed as credentials; the text is cleared after 90 days (`CTX_LLMLOG_RETENTION_DAYS`).
+  Calls through `/v1` keep no text unless you switch that on. Web chat sessions, kept until you set
+  `CTX_WEBCHAT_SESSION_RETENTION`. A log of block reads.
+- **Background work, server:** embeddings and duplicate checks for new blocks; on days with new activity, a daily
+  report at 03:00 per tenant, written by the chat model and saved as a block; Dream Mode, once you switch it on.
+- **Stored by the CLI:** a config file with the server address and your key, in `$XDG_CONFIG_HOME/ctx`,
+  `%APPDATA%\ctx` on Windows, else `~/.config/ctx`. With `ctx init`, the hooks and the statusline in Claude Code's
+  `settings.json`, with a backup copy before each change. With `ctx project init`, a repository key in
+  `projects/` of that folder and a `.ctx-project` file without secrets in the repository. `ctx persist --hook`
+  adds session id, host name, project and agent to the metadata of each block it saves.
+- **Commands, CLI:** `git`, read-only, when `ctx project` detects a repository.
+- **Inbound:** HTTP on port 8080 inside the container: `/api/…`, `/mcp`, the sign-in and OAuth routes, `/health`,
+  the web UI, `/v1` and `/v2` once the OpenAI-compatible API is on, and a signed webhook route for GitHub sync.
+
+The full picture is in [Security](docs/security.md); reporting a vulnerability is in [SECURITY.md](SECURITY.md).
+
+## More
+
+| Document | What is in it |
+|---|---|
+| [Architecture](docs/architecture.md) | Retrieval pipeline, cyclic time model, Dream Mode, Guard, block types, backend pool |
+| [Multi-tenancy](docs/multi-tenancy.md) | Tenants, scopes and blocks, grants, admin tiers, per-tenant settings, secrets and quotas, onboarding |
+| [HTTP API](docs/api.md) | Endpoints, manage actions, graph, settings, backend pool, web chat, the OpenAI-compatible API |
+| [MCP reference](docs/mcp.md) | All 16 MCP tools with parameters, answers, error codes and staged writes |
+| [CLI reference](docs/cli.md) | The `ctx` commands, exit codes, tenants, quotas, keys, block grants, model consumers |
+| [Security](docs/security.md) | Admin tier, sealed secrets and break-glass, trust and sensitivity, audit trail |
+| [Operations](docs/operations.md) | Setup, environment variables, backends, models and hardware, backups, deploy and migrations |
+| [Development](docs/development.md) | Building, platforms, the web UI, tests, gates, git hooks |
+| [ctx as agent memory](docs/ctx-as-agent-memory.md) | How an agent should treat the store, and what goes wrong when it treats it as a tool |
+| [Using ctx effectively](docs/using-ctx-effectively.md) | Why stored memory drifts, agent discipline, calibration |
 | [Contributing](CONTRIBUTING.md) · [Governance](GOVERNANCE.md) | Pull requests, coding standards, roles, how `root` changes, releases |
-| [Hermes integration](integrations/hermes/README.md) | `ctx_checkpoint`, the ctx memory provider for [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent): durable, fail-closed pre-compaction checkpoints over Hermes' MCP dispatch (no credentials of its own) and, with `memory: true`, recall, `ctx_*` agent tools, memory mirror, fact extraction, session digests and a bundled skill — the memory engine contributed by derLonius (W4-NERF) as [hermes-ctx-plugin](https://github.com/W4-NERF/hermes-ctx-plugin), folded in with 0.6.0; both sides are listed in the [Hermes plugin catalog](https://hermes-agent.nousresearch.com/docs/plugins/ctx_checkpoint) (`hermes plugins install ctx_checkpoint`, then the Desktop memory form or `hermes memory setup ctx_checkpoint` — no YAML editing); the checkpoint contract version is negotiated at runtime against the loading host and recorded in every block's metadata |
 
 ## Built with AI agents
 
-ctx is built by AI agents working against a published RLHF-warnings calibration — a 22-axis map of LLM failure modes (memory drift, unattributed certainty, median-user caution) with concrete exemplars. It is the methodology reference behind this project's way of working: **[gottz.de/warnings.md](https://gottz.de/warnings.md)**. Background in [using ctx effectively](docs/using-ctx-effectively.md).
+ctx is built by AI agents working against a published calibration: a map of 22 ways LLMs fail at long-running work
+(memory drift, certainty without a source, caution tuned for an average user), each with real examples. It is the
+method behind this project: **[gottz.de/warnings.md](https://gottz.de/warnings.md)**. Background in
+[Using ctx effectively](docs/using-ctx-effectively.md).
 
 ## Sponsoring
 
-ctx runs its retrieval decisions on measurements, not vendor benchmarks: the ANN engine question (pgvector vs. pgvectorscale, VectorChord, pgContext, or a sovereign Go binary-quantization path) sits behind a trigger framework that only escalates on evidence from the project's own corpus. The current engine is measured at 100k vectors; validating the alternatives honestly means fanning out wide benchmark runs at 1M–10M vectors — index builds in the tens-of-GB range, hours of exact ground-truth computation per lane, dedicated hardware. Empirical benchmarks of alternative engines are gated on funding, not on curiosity.
+ctx makes its retrieval decisions on measurements from its own corpus, not on vendor benchmarks. The question of
+the vector index engine (pgvector against pgvectorscale, VectorChord, pgContext, or a binary-quantization path of
+its own in Go) only moves on evidence. The current engine is measured at 100k vectors. Testing the alternatives
+takes benchmark runs at 1M to 10M vectors: index builds in the tens of gigabytes, hours of exact ground-truth
+computation per run, dedicated hardware. Those benchmarks depend on funding.
 
 If you want those numbers to exist: [GitHub Sponsors](https://github.com/sponsors/GottZ) · [Ko-fi](https://ko-fi.com/gottz) · ETH via ENS [gottz.eth](https://app.ens.domains/gottz.eth)
 
@@ -145,4 +398,4 @@ If you want those numbers to exist: [GitHub Sponsors](https://github.com/sponsor
 
 ## License
 
-[MPL-2.0](LICENSE) — By [GottZ](https://github.com/GottZ)
+[MPL-2.0](LICENSE). By [GottZ](https://github.com/GottZ).

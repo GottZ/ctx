@@ -139,7 +139,13 @@ func (k *mcpKeepalive) arm() (stop func()) {
 // run is the ticker goroutine. It ends at once when the handler has returned,
 // and otherwise on the first tick that gives up (see tick). A client that is
 // gone ends it at most one interval after the disconnect, and without a write.
+//
+// It is a goroutine of ctx's own, outside both the HTTP Recovery and the SDK
+// guard (mcpRecover), so it carries its own: a panic in a tick is logged and
+// ends the ticker, never the process. tick's defers have released the mutex
+// and cleared ticking by then, so a later arm() starts a fresh ticker.
 func (k *mcpKeepalive) run(interval, window time.Duration) {
+	defer recoverMCPKeepalive(k.ctx)
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
