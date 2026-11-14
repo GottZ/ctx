@@ -60,8 +60,15 @@ def home_override(path: os.PathLike | str) -> Iterator[None]:
         reset_hermes_home_override(token)
 
 
+class ConfigUnreadable(RuntimeError):
+    """Hermes could not read config.yaml and serves a fallback (last-known-good or defaults)."""
+
+
 def isolation_mode() -> tuple[str, str]:
     """``(mode, evidence)`` for ``plugins.isolation`` of the active profile."""
+    if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1":
+        # Inside the isolated plugin host child Hermes reports in_process; the gateway is elsewhere.
+        return "host", "HERMES_PLUGIN_HOST_PROCESS=1 (plugin host child process)"
     try:
         from hermes_cli.plugin_isolation import isolation_mode as _mode
     except ImportError:
@@ -99,6 +106,37 @@ def read_plugin_setting(ctx: Any, home: os.PathLike | str, key: str, default: An
 
     Uses the official ``ctx.get_config`` under a context-local home override, so Hermes' own config
     loader (signature-cached, picks up edits without a restart, honours managed overlays) decides.
+    Raises :class:`ConfigUnreadable` when Hermes serves a fallback because config.yaml is broken: an
+    operator removed in that broken edit must not keep authority from the last-known-good copy.
+    A home that does not exist yields ``default`` without creating anything.
     """
+    if not Path(home).is_dir():
+        return default
     with home_override(home):
+        try:
+            from hermes_cli.config import load_config_readonly
+            from hermes_cli.config_read_errors import FailedConfigRead
+        except ImportError:
+            pass
+        else:
+            if isinstance(load_config_readonly(), FailedConfigRead):
+                raise ConfigUnreadable(f"{Path(home) / 'config.yaml'} could not be read")
         return ctx.get_config(key, default)
+
+
+def hook_registered(home: os.PathLike | str, hook_name: str, callback: Any) -> Optional[bool]:
+    """Whether ``callback`` is in the live hook registry of the plugin manager of ``home``.
+
+    ``None`` when Hermes is not importable (unit tests). Behaviour-based arming check (A8): an instance
+    whose load timed out gets ``None`` from ``register_hook`` and has no callback in the registry.
+    """
+    try:
+        from hermes_cli import plugins
+    except ImportError:
+        return None
+    with home_override(home):
+        manager = plugins.get_plugin_manager()
+    registry = getattr(manager, "_hooks", None)
+    if not isinstance(registry, dict):
+        return False
+    return any(cb is callback for cb in registry.get(hook_name, ()))

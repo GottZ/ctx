@@ -16,9 +16,9 @@ import pytest
 from fakes.hermes_homes import ANCHOR, PLUGIN, Homes, _evict, dispatch_tool, install_plugin, load_in
 
 @pytest.fixture
-def homes(hermes, tmp_path):
+def homes(hermes, tmp_path, monkeypatch):
     _evict(ANCHOR)
-    os.environ["HERMES_HOME"] = str(tmp_path / "root")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "root"))
     built = Homes(tmp_path)
     yield built
     _evict(ANCHOR)
@@ -100,3 +100,23 @@ def test_second_plugin_version_in_process_registers_nothing(homes, tmp_path, cap
     assert "restart" in caplog.text.lower()
     assert runtime.status.snapshot()["refused"][-1]["version"] == "3.9.9"
     assert sys.modules[ANCHOR].__version__ == "3.0.0"
+
+
+def test_armed_means_the_hook_is_in_the_live_registry(homes):
+    """A8 behaviour check: armed only while Hermes' registry of that profile really holds our hook."""
+    from hermes_cli import plugins
+    from hermes_constants import hermes_home_key, reset_hermes_home_override, set_hermes_home_override
+
+    routed = homes.profile("routed")
+    load_in(homes.root)
+    load_in(routed)
+    hooks = sys.modules[f"{ANCHOR}.policy.hooks"]
+    assert hooks.armed_live(hermes_home_key(routed))
+    token = set_hermes_home_override(str(routed))
+    try:
+        registry = plugins.get_plugin_manager()._hooks["pre_tool_call"]
+    finally:
+        reset_hermes_home_override(token)
+    registry[:] = [cb for cb in registry if cb is not hooks.on_pre_tool_call]  # what a timed-out load leaves
+    assert not hooks.armed_live(hermes_home_key(routed))
+    assert hooks.armed_live(hermes_home_key(homes.root))

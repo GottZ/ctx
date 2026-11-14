@@ -32,7 +32,10 @@ def _a8_register_hooks(ctx: Any) -> Result:
     """Register every policy hook; any failure propagates so Hermes disposes the partial registration."""
     handles = []
     for name, callback in hooks.HOOKS:
-        handles.append(ctx.register_hook(name, callback))
+        handle = ctx.register_hook(name, callback)
+        if handle is None:  # Hermes ignores registrations after a timed-out (abandoned) load
+            raise RuntimeError(f"register_hook({name!r}) returned no handle; plugin load was abandoned")
+        handles.append(handle)
     return Result("A8", SECURITY, Outcome.ARMED, f"{len(handles)} hooks registered",
                   "ctx.register_hook")
 
@@ -49,7 +52,8 @@ def _install_config_reader(ctx: Any) -> None:
 
 def write_status(home: Path) -> Path:
     path = hermes.plugin_data_dir(home) / "status.json"
-    payload = {"written_at": time.time(), "hermes_version": hermes.hermes_version(), **RUNTIME.describe()}
+    payload = {"status_schema": 1, "written_at": time.time(), "hermes_version": hermes.hermes_version(),
+               **RUNTIME.describe()}
     for change in compare_with_previous(path, payload):
         logger.warning("ctx_discord_policy: changed since last start: %s", change)
     write_json_atomic(path, payload)
@@ -63,6 +67,12 @@ def register(ctx: Any, *, plugin_dir: Path) -> bool:
     profile = str(getattr(ctx, "profile_name", "") or hermes.profile_name_for_home(home) or "default")
     plugin_id = str(getattr(ctx, "plugin_id", "") or "ctx_discord_policy")
 
+    # The CLI first: ``hermes ctx-discord-policy status`` must work exactly when protection is not active.
+    try:
+        cli.register(ctx)
+    except Exception:
+        logger.warning("ctx_discord_policy: CLI registration failed", exc_info=True)
+    _install_config_reader(ctx)
     isolation = run_intervention(RUNTIME.status, f"A1[{profile}]", SECURITY, lambda: _a1_isolation(profile))
     run_intervention(RUNTIME.status, "A2", SECURITY, lambda: Result(
         "A2", SECURITY, Outcome.OK, f"anchor {RUNTIME.version} api {RUNTIME.runtime_api} pid {RUNTIME.pid}",
@@ -79,7 +89,8 @@ def register(ctx: Any, *, plugin_dir: Path) -> bool:
         RUNTIME.status.record(Result(f"A8[{profile}]", SECURITY, Outcome.OFF,
                                      f"hook registration failed in profile {profile}: {exc}", "ctx.register_hook"))
         raise
-    instance = Instance(home_key=home_key, profile=profile, plugin_id=plugin_id, plugin_dir=str(plugin_dir))
+    instance = Instance(home_key=home_key, profile=profile, plugin_id=plugin_id, plugin_dir=str(plugin_dir),
+                        home=str(home))
     with RUNTIME.lock:
         RUNTIME.instances[home_key] = instance
         RUNTIME.armed.arm(instance)
@@ -88,16 +99,13 @@ def register(ctx: Any, *, plugin_dir: Path) -> bool:
 
     def _disarm() -> None:
         RUNTIME.armed.disarm(home_key)
+        RUNTIME.status.record(Result(f"A8[{profile}]", SECURITY, Outcome.OFF, "plugin unloaded in this profile",
+                                     "on_unload"))
         logger.info("ctx_discord_policy: profile %s disarmed (plugin unloaded)", profile)
 
     on_unload = getattr(ctx, "on_unload", None)
     if callable(on_unload):
         on_unload(_disarm)
-    _install_config_reader(ctx)
-    try:
-        cli.register(ctx)
-    except Exception:  # the CLI is a convenience; it must not unarm the policy
-        logger.warning("ctx_discord_policy: CLI registration failed", exc_info=True)
     # The status file is written where a Discord bot binds (gateway process), never from register():
     # every ``hermes`` CLI invocation also loads plugins and must not overwrite the gateway's status.
     logger.info("ctx_discord_policy %s armed in profile %s", RUNTIME.version, profile)
@@ -107,5 +115,5 @@ def register(ctx: Any, *, plugin_dir: Path) -> bool:
 def safe_write_status(home: Path) -> None:
     try:
         write_status(home)
-    except OSError:
+    except Exception:  # the status file is informational; it must never break a bind or connect
         logger.warning("ctx_discord_policy: could not write status file", exc_info=True)

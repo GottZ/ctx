@@ -66,8 +66,9 @@ def probe_callable(
                                                   inspect.Parameter.POSITIONAL_OR_KEYWORD)]
     if plain[: len(wanted)] != wanted:
         return ProbeResult(False, f"{name} positional parameters {plain} do not start with {wanted}", _where(fn))
+    kinds = {p.name: p.kind for p in params}
     for kw in keyword_only:
-        if kw not in names and not has_var_kw:
+        if kinds.get(kw) is inspect.Parameter.POSITIONAL_ONLY or (kw not in kinds and not has_var_kw):
             return ProbeResult(False, f"{name} does not accept keyword {kw!r}", _where(fn))
     return ProbeResult(True, f"{name}{inspect.signature(target)}", _where(fn),
                        {"async": actual_async, "params": names})

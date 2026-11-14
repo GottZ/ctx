@@ -67,7 +67,8 @@ def on_pre_llm_call(*, session_id: str = "", turn_id: str = "", **_: Any) -> Opt
         return {"context": lanes.capability_lane_text(route)}
     except Exception:
         logger.exception("ctx_discord_policy: pre_llm_call failed")
-        # Ending the turn before inference is the closed answer when the lane cannot be established.
+        # Ends the turn before inference where Hermes honours a pre_llm_call block (v0.23.0+); older
+        # Hermes ignores it, and the tool gate in pre_tool_call still applies.
         return _block(BLOCK_INTERNAL)
 
 
@@ -92,22 +93,51 @@ def on_pre_tool_call(*, tool_name: str = "", session_id: str = "", turn_id: str 
         return _block(BLOCK_INTERNAL)
 
 
+def on_turn_end(*, session_id: str = "", turn_id: str = "", **_: Any) -> None:
+    """``on_session_end`` fires after every turn (with its ``turn_id``): forget only that turn's binding.
+    The session keeps its public marker; the next turn without a route must still get no tools."""
+    try:
+        if session_id and turn_id:
+            RUNTIME.turn_routes.pop((str(session_id), str(turn_id)))
+    except Exception:
+        logger.exception("ctx_discord_policy: turn cleanup failed")
+
+
 def on_session_gone(*, session_id: str = "", **_: Any) -> None:
-    """Forget per-session bookkeeping when Hermes ends, resets or finalizes a session."""
+    """``on_session_finalize``/``on_session_reset``: forget the session's turn bindings. The public marker
+    stays (bounded LRU): a reset session id that carried public turns keeps refusing route-less tools."""
     try:
         sid = str(session_id or "")
-        if not sid:
-            return
-        RUNTIME.turn_routes.drop_where(lambda key: key[0] == sid)
-        RUNTIME.public_sessions.pop(sid)
+        if sid:
+            RUNTIME.turn_routes.drop_where(lambda key: key[0] == sid)
     except Exception:
         logger.exception("ctx_discord_policy: session cleanup failed")
+
+
+def armed_live(home_key: str) -> bool:
+    """Armed register AND the live hook registry of that profile agree (A8 behaviour check).
+
+    A profile whose plugin load timed out may have passed ``register()`` without any hook landing in
+    Hermes' registry; only a registry that really holds our ``pre_tool_call`` counts."""
+    instance = RUNTIME.armed.instance(home_key)
+    if instance is None:
+        return False
+    if not instance.home:
+        return True  # registered without a home path (older instance record): register decides
+    try:
+        from .. import hermes
+
+        live = hermes.hook_registered(instance.home, "pre_tool_call", on_pre_tool_call)
+    except Exception:
+        logger.exception("ctx_discord_policy: live hook check failed; treating profile as not armed")
+        return False
+    return live is not False
 
 
 HOOKS = (
     ("pre_llm_call", on_pre_llm_call),
     ("pre_tool_call", on_pre_tool_call),
-    ("on_session_end", on_session_gone),
+    ("on_session_end", on_turn_end),
     ("on_session_reset", on_session_gone),
     ("on_session_finalize", on_session_gone),
 )

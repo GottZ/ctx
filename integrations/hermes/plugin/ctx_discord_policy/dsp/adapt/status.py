@@ -123,9 +123,15 @@ def compare_with_previous(path: Path, current: dict[str, Any]) -> list[str]:
     except (OSError, ValueError):
         return []
     changes = []
-    before = (previous.get("interventions") or {}) if isinstance(previous, dict) else {}
-    for name, result in (current.get("interventions") or {}).items():
-        old = (before.get(name) or {}).get("outcome")
+    before = previous.get("interventions") if isinstance(previous, dict) else None
+    before = before if isinstance(before, dict) else {}
+    now = current.get("interventions") or {}
+    for name, result in now.items():
+        entry = before.get(name)
+        old = entry.get("outcome") if isinstance(entry, dict) else None
         if old and old != result.get("outcome"):
             changes.append(f"{name}: {old} -> {result.get('outcome')} ({result.get('reason', '')})")
+    for name in before:
+        if name not in now:
+            changes.append(f"{name}: no longer reported")
     return changes

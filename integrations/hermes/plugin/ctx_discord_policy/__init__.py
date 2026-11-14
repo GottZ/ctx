@@ -14,7 +14,10 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import logging
+import pkgutil
 import sys
+import threading
+import types
 from pathlib import Path
 from typing import Any, Optional
 
@@ -30,27 +33,41 @@ def _evict(name: str) -> None:
         sys.modules.pop(key, None)
 
 
+def _process_lock() -> threading.Lock:
+    """One lock per process, shared by every profile's module object (each has its own globals)."""
+    holder = sys.modules.setdefault(f"{ANCHOR_NAME}__load_lock",
+                                    types.ModuleType(f"{ANCHOR_NAME}__load_lock"))
+    return holder.__dict__.setdefault("lock", threading.Lock())  # dict.setdefault: one winner
+
+
 def load_anchor(plugin_dir: Path) -> Any:
-    """Return the process-wide runtime package, loading it from ``plugin_dir/dsp`` on first use."""
-    existing = sys.modules.get(ANCHOR_NAME)
-    if existing is not None:
-        return existing
-    package_dir = plugin_dir / "dsp"
-    spec = importlib.util.spec_from_file_location(
-        ANCHOR_NAME, package_dir / "__init__.py", submodule_search_locations=[str(package_dir)])
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load {package_dir}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[ANCHOR_NAME] = module
-    try:
-        spec.loader.exec_module(module)
-        # Import the whole runtime now, from these files: a lazy import after an in-place update would
-        # otherwise mix code of two versions inside one anchor.
-        importlib.import_module(f"{ANCHOR_NAME}.bootstrap")
-    except BaseException:
-        _evict(ANCHOR_NAME)
-        raise
-    return module
+    """Return the process-wide runtime package, loading it from ``plugin_dir/dsp`` on first use.
+
+    Serialized across profile instances; a caller never sees a half-initialized anchor."""
+    with _process_lock():
+        existing = sys.modules.get(ANCHOR_NAME)
+        if existing is not None:
+            if not getattr(existing, "__dsp_ready__", False):
+                raise ImportError("ctx_discord_policy runtime is in an inconsistent state; restart required")
+            return existing
+        package_dir = plugin_dir / "dsp"
+        spec = importlib.util.spec_from_file_location(
+            ANCHOR_NAME, package_dir / "__init__.py", submodule_search_locations=[str(package_dir)])
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {package_dir}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[ANCHOR_NAME] = module
+        try:
+            spec.loader.exec_module(module)
+            # Import every module of the runtime now, from these files: a lazy import after an in-place
+            # update would otherwise mix code of two versions inside one anchor.
+            for info in pkgutil.walk_packages([str(package_dir)], prefix=f"{ANCHOR_NAME}."):
+                importlib.import_module(info.name)
+            module.__dsp_ready__ = True
+        except BaseException:
+            _evict(ANCHOR_NAME)
+            raise
+        return module
 
 
 def anchor_conflict(anchor: Any) -> Optional[str]:

@@ -117,3 +117,55 @@ def test_anchor_survives_profile_module_eviction(anchor, monkeypatch):
     sys.modules.pop("hermes_plugins_test.ctx_discord_policy", None)
     fresh = load_entry()
     assert fresh.load_anchor(ROOT) is anchor.package
+
+
+def test_abandoned_load_never_arms(anchor, monkeypatch):
+    """After a load timeout Hermes turns register_hook into a silent no-op returning None."""
+    with pytest.raises(RuntimeError):
+        _register_in(anchor, anchor.entry, anchor.tmp / "root", "default", monkeypatch, abandoned=True)
+    assert anchor.RUNTIME.armed.snapshot() == {}
+
+
+def test_cli_is_registered_even_when_protection_is_off(anchor, monkeypatch):
+    monkeypatch.setattr(anchor.mod("hermes"), "isolation_mode", lambda: ("host", "test"))
+    ctx = _register_in(anchor, anchor.entry, anchor.tmp / "root", "default", monkeypatch)
+    assert [c["name"] for c in ctx.cli] == ["ctx-discord-policy"] and ctx.hooks == []
+
+
+def test_plugin_host_child_process_is_not_in_process(anchor, monkeypatch):
+    monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
+    ctx = _register_in(anchor, anchor.entry, anchor.tmp / "root", "default", monkeypatch)
+    assert ctx.hooks == [] and anchor.RUNTIME.status.get("A1[default]").outcome.value == "off"
+
+
+def test_unload_records_the_profile_as_off(anchor, monkeypatch):
+    ctx = _register_in(anchor, anchor.entry, anchor.tmp / "root", "default", monkeypatch)
+    ctx.run_unload()
+    assert anchor.RUNTIME.status.get("A8[default]").outcome.value == "off"
+
+
+def test_anchor_loads_every_module_and_concurrent_loads_share_it(anchor):
+    import pkgutil
+    import threading
+
+    names = {info.name for info in pkgutil.walk_packages([str(ROOT / "dsp")], prefix=ANCHOR + ".")}
+    assert names and names <= set(sys.modules)
+    sys.modules.pop(ANCHOR, None)
+    for key in [k for k in sys.modules if k.startswith(ANCHOR + ".")]:
+        sys.modules.pop(key, None)
+    barrier, results, errors = threading.Barrier(8), [], []
+
+    def worker():
+        try:
+            barrier.wait()
+            results.append(load_entry(name=f"hermes_plugins_test.c{threading.get_ident()}").load_anchor(ROOT))
+        except BaseException as exc:  # pragma: no cover - reported
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors and len({id(r) for r in results}) == 1
+    assert getattr(results[0], "__dsp_ready__", False)

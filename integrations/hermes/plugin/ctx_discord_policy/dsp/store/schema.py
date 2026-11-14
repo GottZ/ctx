@@ -26,8 +26,11 @@ AUDIT_RING = 500
 
 _SNOWFLAKE = re.compile(r"[1-9][0-9]{5,19}")
 _SKILL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-_TOOL = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}")
-_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Knowledge lookups are MCP read tools by name ("mcp__<server>__get…" etc.): a state field may fill the
+# catalog entry's parameter list, never name an effectful tool such as terminal.
+_TOOL = re.compile(r"mcp__[A-Za-z0-9_-]{1,64}__(?:get|read|fetch|lookup|view|show)[A-Za-z0-9_]{0,48}")
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029]")
+_LINE_BREAK = re.compile(r"[\n\r\x0b\x0c\x1c-\x1e\x85\u2028\u2029]")
 
 
 class SchemaError(ValueError):
@@ -73,9 +76,9 @@ def _text(limit: int, *, single_line: bool = True, allow_empty: bool = True) -> 
     def check(path: str, value: Any) -> str:
         if not isinstance(value, str):
             raise SchemaError(f"{path}: expected text")
-        if single_line and ("\n" in value or "\r" in value):
+        if single_line and _LINE_BREAK.search(value):
             raise SchemaError(f"{path}: must be one line")
-        if _CONTROL.search(value):
+        if _CONTROL.search(value.replace("\n", "").replace("\r", "") if not single_line else value):
             raise SchemaError(f"{path}: control characters are not allowed")
         if len(value) > limit:
             raise SchemaError(f"{path}: longer than {limit} characters")
@@ -149,7 +152,7 @@ def _knowledge(path: str, value: Any) -> dict[str, str]:
         raise SchemaError(f"{path}: expected {{tool, id}}")
     tool, ident = value["tool"], value["id"]
     if not isinstance(tool, str) or not _TOOL.fullmatch(tool):
-        raise SchemaError(f"{path}.tool: not a tool name")
+        raise SchemaError(f"{path}.tool: not an MCP read tool (mcp__<server>__get…/read…/fetch…/lookup…/view…)")
     if not isinstance(ident, str) or not ident.strip() or len(ident) > 200 or _CONTROL.search(ident):
         raise SchemaError(f"{path}.id: expected a non-empty id of at most 200 characters")
     return {"tool": tool, "id": ident}
@@ -275,8 +278,13 @@ def validate_guild(value: Any, *, strict: bool = True, prompt_cap: int = HARD_PR
     return guild, problems
 
 
-def validate_document(doc: Any) -> tuple[dict[str, Any], list[str]]:
-    """Lenient read of a whole v1 document; raises SchemaError only for structural damage."""
+def validate_document(doc: Any, *, strict: bool = True) -> tuple[dict[str, Any], list[str]]:
+    """Validate a whole v1 document.
+
+    ``strict`` (default, every read of a v1 file): any invalid value or unknown key raises, so the store
+    treats the file as corrupt (all guilds paused, never rewritten) instead of silently replacing a
+    restrictive value with a wider default. ``strict=False`` only for reading a newer schema (downgrade),
+    whose snapshot is read-only and pauses every guild anyway."""
     if not isinstance(doc, dict):
         raise SchemaError("document: expected a mapping")
     if doc.get("schema") != SCHEMA_VERSION:
@@ -293,14 +301,18 @@ def validate_document(doc: Any) -> tuple[dict[str, Any], list[str]]:
         for guild_id, guild in bot.get("guilds", {}).items():
             if not is_snowflake(guild_id):
                 raise SchemaError(f"bots.{bot_id}.guilds.{guild_id}: not a Discord id")
-            clean, issues = validate_guild(guild, strict=False)
+            clean, issues = validate_guild(guild, strict=strict)
             problems.extend(f"bots.{bot_id}.guilds.{guild_id}.{p}" for p in issues)
             guilds[guild_id] = clean
         extra = set(bot) - {"guilds"}
+        if extra and strict:
+            raise SchemaError(f"bots.{bot_id}: unknown setting {sorted(extra)[0]}")
         problems.extend(f"bots.{bot_id}.{k}: unknown setting dropped" for k in sorted(extra))
         out["bots"][bot_id] = {"guilds": guilds}
     audit = doc.get("audit", [])
     out["audit"] = [a for a in audit if isinstance(a, dict)][-AUDIT_RING:] if isinstance(audit, list) else []
     extra = set(doc) - {"schema", "bots", "audit"}
+    if extra and strict:
+        raise SchemaError(f"document: unknown setting {sorted(extra)[0]}")
     problems.extend(f"{k}: unknown setting dropped" for k in sorted(extra))
     return out, problems

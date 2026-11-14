@@ -26,11 +26,9 @@ def store_for(home: Path) -> PolicyStore:
 
 def _known_bots(home: Path, store: PolicyStore) -> list[str]:
     bots = set(store.read().data.get("bots", {}))
-    try:
-        status = json.loads((hermes.plugin_data_dir(home) / "status.json").read_text(encoding="utf-8"))
-        bots.update(str(b) for b in (status.get("bots") or {}))
-    except (OSError, ValueError, AttributeError):
-        pass
+    status = _gateway_status(home)
+    if isinstance(status, dict) and isinstance(status.get("bots"), dict):
+        bots.update(str(b) for b in status["bots"])
     return sorted(b for b in bots if is_snowflake(b))
 
 
@@ -45,6 +43,14 @@ def _resolve_bot(home: Path, store: PolicyStore, explicit: Optional[str]) -> str
     if not bots:
         raise SchemaError("no Discord bot known yet: start the gateway once, or pass --bot <application id>")
     raise SchemaError(f"several bots are known ({', '.join(bots)}); pass --bot <application id>")
+
+
+def _gateway_status(home: Path) -> Any:
+    try:
+        status = json.loads((hermes.plugin_data_dir(home) / "status.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return status if isinstance(status, dict) else None
 
 
 def setup(parser: argparse.ArgumentParser) -> None:
@@ -70,10 +76,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
 
 def _status(home: Path, store: PolicyStore, as_json: bool, out: TextIO) -> int:
     snapshot = store.read()
-    try:
-        status = json.loads((hermes.plugin_data_dir(home) / "status.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        status = None
+    status = _gateway_status(home)
     operator_count = len(config.operators(home))
     guilds = [
         {"bot": bot, "guild": gid, "state": snapshot.guild_state(bot, gid), "rev": g.get("rev", 0)}
@@ -102,11 +105,15 @@ def _status(home: Path, store: PolicyStore, as_json: bool, out: TextIO) -> int:
         out.write("Gateway status: none yet (the gateway writes it when a Discord bot connects)\n")
     else:
         out.write(f"Gateway status (pid {status.get('pid')}, plugin {status.get('plugin_version')}):\n")
-        for name, result in sorted((status.get("interventions") or {}).items()):
+        interventions = status.get("interventions") if isinstance(status.get("interventions"), dict) else {}
+        for name, result in sorted(interventions.items()):
+            if not isinstance(result, dict):
+                continue
             out.write(f"  {result.get('klass', '?')} {name:<16} {result.get('outcome', '?'):<9} "
                       f"{result.get('reason', '')}\n")
-        armed = status.get("armed") or {}
-        out.write(f"  armed profiles: {', '.join(sorted(v.get('profile', '?') for v in armed.values())) or 'none'}\n")
+        armed = status.get("armed") if isinstance(status.get("armed"), dict) else {}
+        names = sorted(str(v.get("profile", "?")) for v in armed.values() if isinstance(v, dict))
+        out.write(f"  armed profiles: {', '.join(names) or 'none'}\n")
     return 0
 
 
@@ -119,7 +126,10 @@ def run(args: argparse.Namespace, *, home: Optional[Path] = None, out: TextIO = 
         if command in (None, "status"):
             return _status(home, store, bool(getattr(args, "json", False)), out)
         if command == "export":
-            json.dump(ops.export(store.read(), args.bot, args.guild), out, indent=2, sort_keys=True,
+            snapshot = store.read()
+            if snapshot.state == "corrupt":
+                raise StoreError(f"policy store is corrupt ({snapshot.error}); nothing to export")
+            json.dump(ops.export(snapshot, args.bot, args.guild), out, indent=2, sort_keys=True,
                       ensure_ascii=False)
             out.write("\n")
             return 0
@@ -138,7 +148,7 @@ def run(args: argparse.Namespace, *, home: Optional[Path] = None, out: TextIO = 
             return 2
         out.write(f"bot {bot} guild {args.guild}: {snapshot.guild_state(bot, args.guild)}\n")
         return 0
-    except (SchemaError, StoreError) as exc:
+    except (SchemaError, StoreError, OSError, ValueError) as exc:
         err.write(f"ctx-discord-policy: {exc}\n")
         return 1
 

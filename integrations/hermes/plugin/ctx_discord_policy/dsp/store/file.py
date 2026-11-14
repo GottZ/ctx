@@ -74,16 +74,34 @@ class Snapshot:
         return ((self.data.get("bots") or {}).get(str(bot_id)) or {}).get("guilds", {}).get(str(guild_id))
 
     def guild_state(self, bot_id: str, guild_id: str) -> str:
-        """Effective state: ``paused`` for every guild while the file is corrupt (fail closed)."""
-        if self.state == CORRUPT:
+        """Effective state: ``paused`` for every guild while the file is corrupt or written by a newer
+        plugin version (fail closed: neither can be applied faithfully)."""
+        if self.state in (CORRUPT, DOWNGRADE):
             return "paused"
         guild = self.guild(bot_id, guild_id)
         return guild["state"] if guild else "unbound"
 
 
+_THREAD_LOCKS: dict[str, threading.Lock] = {}
+_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+def _thread_lock(path: Path) -> threading.Lock:
+    with _THREAD_LOCKS_GUARD:
+        return _THREAD_LOCKS.setdefault(str(path), threading.Lock())
+
+
 @contextlib.contextmanager
 def _file_lock(path: Path, timeout: float = 10.0) -> Iterator[None]:
-    """Cross-process exclusive lock on ``path`` (fcntl on POSIX, msvcrt on Windows)."""
+    """Exclusive lock on ``path`` across threads (in-process lock, also where flock is emulated per
+    process, e.g. NFS) and processes (fcntl on POSIX, msvcrt on Windows)."""
+    with _thread_lock(path):
+        with _os_lock(path, timeout):
+            yield
+
+
+@contextlib.contextmanager
+def _os_lock(path: Path, timeout: float) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     deadline = time.monotonic() + timeout
@@ -129,13 +147,25 @@ def _write_atomic(path: Path, payload: dict[str, Any]) -> None:
         os.chmod(path.parent, 0o700)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     data = (json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, data)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("short write")
+                view = view[written:]
+            os.fsync(fd)
+            if os.fstat(fd).st_size != len(data):
+                raise OSError("written size does not match")
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
     if os.name != "nt":
         dir_fd = os.open(path.parent, os.O_RDONLY)
         try:
@@ -158,20 +188,25 @@ class PolicyStore:
             st = self.path.stat()
         except FileNotFoundError:
             return None
-        return (st.st_mtime_ns, st.st_size, st.st_ino)
+        return (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
 
     def read(self) -> Snapshot:
-        """Cached snapshot; re-parsed only when the file's (mtime, size, inode) changed."""
+        """Cached snapshot; re-parsed when the file's (mtime, ctime, size, inode) changed.
+
+        Never takes the write lock (hooks read on the hot path). A file changed within the last two
+        seconds is not cached (racy-clean guard: a second write inside one timestamp tick could otherwise
+        keep the same signature)."""
         signature = self._signature()
         with self._cache_lock:
             if self._cache is not None and self._cache.signature == signature:
                 return self._cache
-        snapshot = self._load(signature, locked=False)
-        with self._cache_lock:
-            self._cache = snapshot
+        snapshot = self._load(signature)
+        if signature is None or time.time_ns() - signature[0] > 2_000_000_000:
+            with self._cache_lock:
+                self._cache = snapshot
         return snapshot
 
-    def _load(self, signature: Any, *, locked: bool) -> Snapshot:
+    def _load(self, signature: Any) -> Snapshot:
         if signature is None:
             return Snapshot(MISSING, empty_document(), signature=None)
         try:
@@ -183,11 +218,11 @@ class PolicyStore:
         version = raw["schema"]
         if version > SCHEMA_VERSION:
             try:
-                data, problems = validate_document(dict(raw, schema=SCHEMA_VERSION))
+                data, problems = validate_document(dict(raw, schema=SCHEMA_VERSION), strict=False)
             except SchemaError as exc:
                 return self._corrupt(signature, f"newer schema {version} and unreadable as v1: {exc}")
             return Snapshot(DOWNGRADE, data, tuple(problems), f"schema {version} is newer than {SCHEMA_VERSION}; "
-                            "read-only until the newer plugin is restored", signature)
+                            "read-only and every guild paused until the newer plugin is restored", signature)
         if version < SCHEMA_VERSION:
             try:
                 raw = migrate.upgrade(raw, version, backup=self._backup)
@@ -197,12 +232,7 @@ class PolicyStore:
             data, problems = validate_document(raw)
         except SchemaError as exc:
             return self._corrupt(signature, str(exc))
-        if version < SCHEMA_VERSION:
-            # Persist the migrated document (under the lock; a concurrent writer re-reads after us).
-            with (contextlib.nullcontext() if locked else _file_lock(self.lock_path)):
-                if self._signature() == signature:
-                    _write_atomic(self.path, data)
-            signature = self._signature()
+        # A migrated document lives in memory; the next update() (under the lock) persists it.
         return Snapshot(OK, data, tuple(problems), signature=signature)
 
     def _backup(self, version: int) -> Path:
@@ -211,7 +241,11 @@ class PolicyStore:
         return target
 
     def _corrupt(self, signature: Any, reason: str) -> Snapshot:
-        copy_path = self.path.with_name(f"{self.path.name}.corrupt-{int(time.time())}")
+        try:
+            digest = hashlib.sha256(self.path.read_bytes()).hexdigest()[:12]
+        except OSError:
+            digest = str(int(time.time()))
+        copy_path = self.path.with_name(f"{self.path.name}.corrupt-{digest}")  # one copy per distinct content
         try:
             if not copy_path.exists():
                 shutil.copy2(self.path, copy_path)
@@ -231,7 +265,7 @@ class PolicyStore:
         ``updated_by``/``updated_at`` and one audit entry per field (hashes only, never values).
         """
         with _file_lock(self.lock_path):
-            current = self._load(self._signature(), locked=True)
+            current = self._load(self._signature())
             if not current.writable:
                 raise StoreError(f"policy store is {current.state}: {current.error}")
             document = copy.deepcopy(current.data)

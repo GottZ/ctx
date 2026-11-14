@@ -87,12 +87,14 @@ def import_guild(store: PolicyStore, bot_id: str, guild_id: str, payload: Any, *
                  prompt_cap: int) -> Snapshot:
     """Replace one guild's settings with ``payload`` (export format), strictly validated.
 
-    ``rev`` and bookkeeping fields in the payload are ignored; the store owns them.
+    ``rev`` and bookkeeping fields (``updated_*``, ``bound_*``) in the payload are ignored; the store owns
+    them. ``bound_by`` is informational only and never maps to authority.
     """
     bot_id, guild_id = _require_ids(bot_id, guild_id)
     if not isinstance(payload, dict):
         raise SchemaError("import: expected a guild mapping")
-    incoming = {k: v for k, v in payload.items() if k not in ("rev", "updated_by", "updated_at")}
+    incoming = {k: v for k, v in payload.items()
+                if k not in ("rev", "updated_by", "updated_at", "bound_by", "bound_at")}
     clean, _ = validate_guild(incoming, strict=True, prompt_cap=prompt_cap)
 
     def mutate(document: dict[str, Any]) -> list[dict[str, Any]]:
@@ -100,6 +102,8 @@ def import_guild(store: PolicyStore, bot_id: str, guild_id: str, payload: Any, *
         old = guilds.get(guild_id)
         new = copy.deepcopy(clean)
         new["rev"] = (old or {}).get("rev", 0)
+        new["bound_by"] = (old or {}).get("bound_by")
+        new["bound_at"] = (old or {}).get("bound_at")
         changes = []
         for section in new:
             if section in ("rev", "updated_by", "updated_at"):

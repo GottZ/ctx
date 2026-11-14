@@ -64,3 +64,73 @@ def test_run_intervention_degrades_security_to_off_and_comfort_to_fallback(ancho
     assert not register.security_ok("A5")
     register.record(status.Result("A5", "S", status.Outcome.WRAPPED, "ok"))
     assert register.security_ok("A5")
+
+
+def test_probe_rejects_positional_only_keyword(anchor):
+    probes = anchor.mod("adapt.probes")
+
+    class Target:
+        def admission(self, message, claim, /):
+            return message
+
+    assert not probes.probe_callable(Target, "admission", positional=["message"], keyword_only=["claim"])
+
+
+def test_stacked_and_foreign_wrappers_never_double_wrap(anchor):
+    import functools
+
+    strategies = anchor.mod("adapt.strategies")
+    layers = []
+
+    class Target:
+        def method(self):
+            return 0
+
+    def make(tag):
+        def factory(original):
+            def wrapper(self, *args, **kwargs):
+                layers.append(tag)
+                return original(self, *args, **kwargs)
+            return wrapper
+        return factory
+
+    for _ in range(3):  # reconnects
+        strategies.wrap_attr(Target, "method", make("A5"), "A5", 1)
+        strategies.wrap_attr(Target, "method", make("X9"), "X9", 1)
+    layers.clear()
+    Target().method()
+    assert layers == ["X9", "A5"]
+
+    inner = Target.method
+
+    @functools.wraps(inner)
+    def foreign(self, *args, **kwargs):  # another plugin's well-behaved wrapper on top
+        return inner(self, *args, **kwargs)
+
+    Target.method = foreign
+    assert strategies.wrap_attr(Target, "method", make("A5"), "A5", 1) == "already"
+
+
+def test_static_and_class_methods_are_refused(anchor):
+    strategies = anchor.mod("adapt.strategies")
+
+    class Target:
+        @staticmethod
+        def helper(x):
+            return x
+
+    import pytest
+
+    with pytest.raises(TypeError):
+        strategies.wrap_attr(Target, "helper", lambda original: original, "A5", 1)
+    assert Target.helper(3) == 3
+
+
+def test_status_comparison_survives_odd_files(anchor, tmp_path):
+    status = anchor.mod("adapt.status")
+    path = tmp_path / "status.json"
+    for text in ('{"interventions": []}', '{"interventions": {"A5": "armed"}}', "[]", "not json"):
+        path.write_text(text)
+        status.compare_with_previous(path, {"interventions": {"A5": {"outcome": "wrapped"}}})
+    path.write_text('{"interventions": {"K9": {"outcome": "wrapped"}}}')
+    assert any("K9" in c for c in status.compare_with_previous(path, {"interventions": {}}))

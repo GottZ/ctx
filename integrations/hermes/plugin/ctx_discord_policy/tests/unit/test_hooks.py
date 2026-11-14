@@ -55,9 +55,39 @@ def test_public_session_without_exact_route_gets_no_tools(anchor):
     assert hooks.on_pre_tool_call(tool_name="terminal", session_id="pub-session", turn_id="t2")["action"] == "block"
     # An unrelated session without any policy history keeps stock behaviour.
     assert hooks.on_pre_tool_call(tool_name="terminal", session_id="other", turn_id="t") is None
-    # Session cleanup forgets the marker.
+    # Hermes fires on_session_end after EVERY turn: the marker must survive it, and finalize/reset too.
+    hooks.on_turn_end(session_id="pub-session", turn_id="t1")
+    assert hooks.on_pre_tool_call(tool_name="terminal", session_id="pub-session", turn_id="t3")["action"] == "block"
     hooks.on_session_gone(session_id="pub-session")
-    assert hooks.on_pre_tool_call(tool_name="terminal", session_id="pub-session", turn_id="t3") is None
+    assert hooks.on_pre_tool_call(tool_name="terminal", session_id="pub-session", turn_id="t4")["action"] == "block"
+
+
+def test_turn_end_forgets_only_its_own_binding(anchor):
+    hooks, runtime = anchor.hooks, anchor.RUNTIME
+    for turn in ("t1", "t2"):
+        token = runtime.route.set(_route(anchor, "operator", message_id=turn))
+        try:
+            hooks.on_pre_llm_call(session_id="s", turn_id=turn)
+        finally:
+            runtime.route.reset(token)
+    hooks.on_turn_end(session_id="s", turn_id="t1")  # an interrupted turn ends after the next one started
+    assert hooks.current_route("s", "t1") is None
+    assert hooks.current_route("s", "t2") is not None
+    assert dict(hooks.HOOKS)["on_session_end"] is hooks.on_turn_end
+
+
+def test_armed_live_without_hermes_follows_the_armed_register(anchor, monkeypatch):
+    from fakes.ctx import FakeCtx
+
+    home = anchor.tmp / "live"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    key = anchor.mod("hermes").home_key(home)
+    assert not anchor.hooks.armed_live(key)
+    anchor.entry.register(FakeCtx("default"))
+    assert anchor.hooks.armed_live(key)  # no Hermes registry to consult in unit tests
+    monkeypatch.setattr(anchor.mod("hermes"), "hook_registered", lambda *a: False)
+    assert not anchor.hooks.armed_live(key)  # registry says the hook is not there: not armed
 
 
 def test_session_id_alone_never_recovers_a_route(anchor):

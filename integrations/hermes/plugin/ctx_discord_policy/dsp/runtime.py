@@ -79,6 +79,7 @@ class Instance:
     plugin_id: str
     plugin_dir: str
     registered_at: float = field(default_factory=time.time)
+    home: str = ""  # the home path itself (for live registry checks); additive
 
 
 class ArmedRegister:
@@ -105,6 +106,10 @@ class ArmedRegister:
             return False
         with self._lock:
             return home_key in self._armed
+
+    def instance(self, home_key: Optional[str]) -> Optional[Instance]:
+        with self._lock:
+            return self._armed.get(home_key) if home_key else None
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         with self._lock:

@@ -134,3 +134,31 @@ def test_bootstrap_registers_the_cli(anchor, monkeypatch):
     ctx = FakeCtx("default")
     anchor.entry.register(ctx)
     assert [c["name"] for c in ctx.cli] == ["ctx-discord-policy"]
+
+
+def test_reading_a_missing_home_creates_nothing(anchor, tmp_path):
+    hermes = anchor.mod("hermes")
+    ghost = tmp_path / "no-such-home"
+
+    class Ctx:
+        def get_config(self, key, default=None):
+            raise AssertionError("must not be consulted for a missing home")
+
+    assert hermes.read_plugin_setting(Ctx(), ghost, "operators", []) == []
+    assert not ghost.exists()
+
+
+def test_cli_errors_are_messages_not_tracebacks(anchor, tmp_path):
+    home = anchor.tmp / "owner"
+    code, _, err = _cli(anchor, home, "import", str(tmp_path / "missing.json"), "--bot", BOT)
+    assert code == 1 and "ctx-discord-policy:" in err
+    (tmp_path / "bad.json").write_text("{nope")
+    code, _, err = _cli(anchor, home, "import", str(tmp_path / "bad.json"))
+    assert code == 1
+    data_dir = home / "plugin-data" / "ctx_discord_policy"
+    data_dir.mkdir(parents=True)
+    (data_dir / "status.json").write_text('["not", "a", "dict"]')
+    assert _cli(anchor, home, "status")[0] == 0
+    (data_dir / "policy.json").write_text("{ broken")
+    code, out, err = _cli(anchor, home, "export")
+    assert code == 1 and "corrupt" in err and out == ""

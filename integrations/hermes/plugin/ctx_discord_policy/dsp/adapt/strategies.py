@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 from typing import Any, Callable
 
@@ -18,8 +19,16 @@ def wrapper_mark(fn: Any) -> Any:
 
 
 def is_own_wrapper(fn: Any, intervention_id: str) -> bool:
-    mark = wrapper_mark(fn)
-    return isinstance(mark, tuple) and len(mark) == 2 and mark[0] == intervention_id
+    """True when ``fn`` or anything it wraps (``__wrapped__`` chain) is our wrapper for this intervention:
+    another intervention or a foreign ``functools.wraps`` wrapper on top does not hide it."""
+    seen = 0
+    while fn is not None and seen < 32:
+        mark = wrapper_mark(fn)
+        if isinstance(mark, tuple) and len(mark) == 2 and mark[0] == intervention_id:
+            return True
+        fn = getattr(fn, "__wrapped__", None)
+        seen += 1
+    return False
 
 
 def wrap_attr(owner: Any, name: str, make_wrapper: Callable[[Any], Any], intervention_id: str,
@@ -33,6 +42,9 @@ def wrap_attr(owner: Any, name: str, make_wrapper: Callable[[Any], Any], interve
     current = getattr(owner, name)
     if is_own_wrapper(current, intervention_id):
         return "already"
+    raw = inspect.getattr_static(owner, name)
+    if isinstance(raw, (staticmethod, classmethod)):
+        raise TypeError(f"{name} is a {type(raw).__name__}; wrapping it as a plain method would break calls")
     wrapper = make_wrapper(current)
     functools.update_wrapper(wrapper, current)
     setattr(wrapper, WRAPPER_MARK, (intervention_id, runtime_api))

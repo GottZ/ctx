@@ -27,9 +27,9 @@ def _config(home, operators):
 
 
 @pytest.fixture
-def homes(hermes, tmp_path):
+def homes(hermes, tmp_path, monkeypatch):
     _evict(ANCHOR)
-    os.environ["HERMES_HOME"] = str(tmp_path / "root")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "root"))
     built = Homes(tmp_path)
     yield built
     _evict(ANCHOR)
@@ -59,10 +59,13 @@ def test_operator_edit_applies_without_restart_and_follows_the_owner_home(homes)
 
 
 def test_unreadable_config_yields_no_operator(homes):
-    _config(homes.root, [OP_A])
+    """Hermes serves its last-known-good copy for a broken config.yaml; an operator removed in that very
+    edit must not keep authority from it: a broken config means no operator at all."""
+    _config(homes.root, [OP_A, OP_B])
     load_in(homes.root)
     config = sys.modules[f"{ANCHOR}.config"]
-    assert config.operators(homes.root) == {OP_A}
-    (homes.root / "config.yaml").write_text("plugins: [unclosed\n", encoding="utf-8")
-    # Hermes falls back to its last-known-good copy or defaults; never to an invented operator.
-    assert config.operators(homes.root) in (frozenset(), {OP_A})
+    assert config.operators(homes.root) == {OP_A, OP_B}
+    path = homes.root / "config.yaml"
+    path.write_text(f"plugins:\n  enabled: [{PLUGIN}]\n  entries: [unclosed\n", encoding="utf-8")
+    os.utime(path, ns=(time.time_ns() + 2_000_000, time.time_ns() + 2_000_000))
+    assert config.operators(homes.root) == frozenset()

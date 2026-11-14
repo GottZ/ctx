@@ -7,7 +7,7 @@ from typing import Any, Callable, Optional
 
 class FakeCtx:
     def __init__(self, profile_name: str = "default", *, settings: Optional[dict] = None,
-                 fail_hook_at: Optional[int] = None) -> None:
+                 fail_hook_at: Optional[int] = None, abandoned: bool = False) -> None:
         self.profile_name = profile_name
         self.plugin_id = "ctx_discord_policy"
         self.hooks: list[tuple[str, Callable]] = []
@@ -16,10 +16,13 @@ class FakeCtx:
         self.platform_handlers: list[tuple[str, Callable]] = []
         self.settings = settings if settings is not None else {}
         self._fail_hook_at = fail_hook_at
+        self._abandoned = abandoned  # Hermes after a load timeout: registrars return None silently
 
     def register_hook(self, name: str, callback: Callable, **_: Any) -> object:
         if self._fail_hook_at is not None and len(self.hooks) + 1 == self._fail_hook_at:
             raise RuntimeError("synthetic hook registration failure")
+        if self._abandoned:
+            return None
         self.hooks.append((name, callback))
         return object()
 
