@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The daily Hermes compatibility run: which refs to test, what their contract runs say, and the issues.
 
-Subcommands (used by ``.github/workflows/upstream-compat.yml``):
+Subcommands (used by ``.github/workflows/hermes-ctx-discord-policy-upstream.yml`` of the ctx repository):
 
 ``refs RELEASES.jsonl [--count N] [--github-output FILE]``
     Upstream ``main`` plus the last N published releases. Input: one release per line as the GitHub
@@ -16,8 +16,10 @@ Subcommands (used by ``.github/workflows/upstream-compat.yml``):
     ``comfort`` (a failed comfort contract test, a comfort intervention that fell back), ``infrastructure``
     (no refs, a ref whose job produced no test results).
 
-``issues report.json --repo OWNER/NAME [--run-url URL] [--dry-run]``
-    One issue per category with a fixed title. A new finding set opens or comments the issue; the same set
+``issues report.json --repo OWNER/NAME [--run-url URL] [--label L] [--title-prefix T] [--dry-run]``
+    One issue per category with a fixed title (``--title-prefix`` in front of it; ``--label`` on every issue
+    the run opens and as a filter when it looks for the open one, for a repository shared with other work).
+    A new finding set opens or comments the issue; the same set
     as last time adds nothing; no findings close an open issue, but only after a complete run: while a ref
     went untested (infrastructure finding), the security and comfort issues stay open and a comment names the
     untested refs. Text that came out of a run against upstream code is neutralised before it reaches an issue
@@ -265,7 +267,7 @@ def plan(category: str, findings: list[dict], issue: Optional[dict], *, complete
 
 
 def render_issue(category: str, findings: list[dict], report: dict, run_url: str,
-                 untested: Iterable[str] = ()) -> str:
+                 untested: Iterable[str] = (), titles: Optional[dict] = None) -> str:
     fp = fingerprint(findings)
     lines = [f"<!-- dsp-compat:{category}:{fp} -->"]
     if findings:
@@ -274,7 +276,7 @@ def render_issue(category: str, findings: list[dict], report: dict, run_url: str
         lines.append(f"The {category} findings are gone in the latest run.")
     gaps = ["the ref selection" if ref == "-" else neutral(ref) for ref in untested]
     if gaps:
-        lines.append(f"Not tested in this run: {', '.join(gaps)} (see \"{TITLES['infrastructure']}\").")
+        lines.append(f"Not tested in this run: {', '.join(gaps)} (see \"{(titles or TITLES)['infrastructure']}\").")
     if run_url:
         lines.append(f"Run: {run_url}")
     lines.append("")
@@ -288,8 +290,9 @@ def _gh(*args: str) -> str:
     return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
 
 
-def _open_issue(repo: str, title: str) -> Optional[dict]:
+def _open_issue(repo: str, title: str, label: str = "") -> Optional[dict]:
     found = json.loads(_gh("issue", "list", "--repo", repo, "--state", "open", "--search", f'"{title}" in:title',
+                           *(["--label", label] if label else []),
                            "--json", "number,title,body", "--limit", "20") or "[]")
     for issue in found:
         if issue.get("title") == title:
@@ -302,18 +305,20 @@ def _open_issue(repo: str, title: str) -> Optional[dict]:
 def cmd_issues(args: argparse.Namespace) -> int:
     report = json.loads(args.report.read_text(encoding="utf-8"))
     gaps = untested(report)
+    titles = {category: args.title_prefix + text for category, text in TITLES.items()}
     for category in CATEGORIES:
         findings = [f for f in report["findings"] if f["category"] == category]
-        title = TITLES[category]
-        issue = None if args.dry_run else _open_issue(args.repo, title)
+        title = titles[category]
+        issue = None if args.dry_run else _open_issue(args.repo, title, args.label)
         action = plan(category, findings, issue, complete=not gaps)
         body = render_issue(category, findings, report, args.run_url,
-                            untested=() if category == "infrastructure" else gaps)
+                            untested=() if category == "infrastructure" else gaps, titles=titles)
         print(f"{category}: {action or 'nothing to do'}")
         if args.dry_run or action is None:
             continue
         if action == "create":
-            _gh("issue", "create", "--repo", args.repo, "--title", title, "--body", body)
+            _gh("issue", "create", "--repo", args.repo, "--title", title, "--body", body,
+                *(["--label", args.label] if args.label else []))
         elif action == "comment":
             _gh("issue", "comment", str(issue["number"]), "--repo", args.repo, "--body", body)
         elif action == "close":
@@ -347,6 +352,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     iss.add_argument("report", type=Path)
     iss.add_argument("--repo", required=True)
     iss.add_argument("--run-url", default="")
+    iss.add_argument("--label", default="", help="label of every issue this run opens, and the search filter")
+    iss.add_argument("--title-prefix", default="", help="text in front of every issue title")
     iss.add_argument("--dry-run", action="store_true")
     ver = sub.add_parser("verdict")
     ver.add_argument("report", type=Path)

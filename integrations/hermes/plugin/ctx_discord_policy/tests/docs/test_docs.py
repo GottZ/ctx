@@ -189,6 +189,51 @@ def test_history_and_extra_text_are_scanned(tmp_path, monkeypatch):
                       "--text-env", "PR_TEXT"]) == 1
 
 
+def test_scan_inside_a_larger_repository_covers_the_plugin_directory_only(tmp_path, monkeypatch):
+    """In the ctx repository the plugin lives in a subdirectory: its files, their history and the messages of
+    the commits that touch it are scanned; files elsewhere and commits that touch only other paths are not."""
+    scan = _scanner()
+    repo = tmp_path / "repo"
+    plugin = repo / "integrations" / "plug"
+    key_file = tmp_path / "key"
+    key_file.write_text(KEY.decode(), encoding="utf-8")
+    patterns = scan.pattern_line(KEY, "key-check", "-") + "\n" + scan.pattern_line(KEY, "word", "zebraquokka") + "\n"
+    steps = (  # (branch, message, {path: text}); each branch continues the one before it
+        ("a", "start", {"integrations/plug/ci/private_patterns.txt": patterns,
+                        "integrations/plug/notes.txt": "nothing to see\n", "elsewhere.txt": "a zebraquokka\n"}),
+        ("b", "the zebraquokka elsewhere", {"elsewhere.txt": "the zebraquokka again\n"}),
+        ("c", "notes", {"integrations/plug/notes.txt": "a zebraquokka inside\n"}),
+        ("d", "clean notes", {"integrations/plug/notes.txt": "nothing to see\n"}),
+        ("e", "mentions ZebraQuokka", {"integrations/plug/notes.txt": "still nothing\n"}),
+    )
+    stream = []
+    for mark, (branch, message, files) in enumerate(steps, 1):
+        body = [f"commit refs/heads/{branch}", f"mark :{mark}", "committer Test <test@example.invalid> 0 +0000",
+                f"data {len(message.encode())}", message]
+        if mark > 1:
+            body.append(f"from :{mark - 1}")
+        for name, data in files.items():
+            raw = data.encode("utf-8")
+            body += [f"M 100644 inline {name}", f"data {len(raw)}", data]
+        stream.append("\n".join(body) + "\n")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "fast-import", "--quiet"], input="".join(stream).encode("utf-8"),
+                   check=True, capture_output=True)
+    monkeypatch.setattr(scan, "PATTERNS", plugin / "ci" / "private_patterns.txt")
+
+    def run(branch, *extra):
+        subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-f", branch], check=True, capture_output=True)
+        return scan.main(["--root", str(plugin), "--key-file", str(key_file), *extra])
+
+    assert run("b") == 0                    # the word only outside the plugin, in a file and a commit message
+    assert scan.repo_prefix(plugin) == "integrations/plug/"
+    assert run("c", "--no-history") == 1    # now inside the plugin's tree
+    assert run("d", "--no-history") == 0
+    assert run("d") == 1                    # an earlier version of a plugin file still carries it
+    assert run("e", "--no-history") == 1    # message of a commit that touches the plugin
+    assert scan.repo_prefix(repo) == "" and scan._scope(repo) == []
+
+
 def test_scanner_refuses_to_run_without_key(monkeypatch):
     monkeypatch.delenv("DSP_PRIVATE_SCAN_KEY", raising=False)
     result = subprocess.run([sys.executable, str(ROOT / "ci" / "private_scan.py"), "--no-commits"],

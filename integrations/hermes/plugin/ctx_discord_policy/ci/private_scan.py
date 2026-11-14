@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scan the repository tree and commit messages for private values that must never be published.
+"""Scan the plugin's tree and commit messages for private values that must never be published.
 
 The private values are stored only as keyed HMAC-SHA256 digests (``ci/private_patterns.txt``); the key
 lives outside the repository (CI secret ``DSP_PRIVATE_SCAN_KEY``, locally ``--key-file``). Without the key
@@ -15,8 +15,13 @@ Matching works on normalised text, so separators and casing do not hide a value:
   is also covered by the word rule).
 Generic, non-secret rules (internal host paths, any UUID) are plain regular expressions.
 
+Scope: the plugin directory (``--root``, default the directory above ``ci/``) inside whatever repository holds
+it. In the ctx repository that is ``integrations/hermes/plugin/ctx_discord_policy/``: the tracked files under
+it, every earlier version of a file under it, and the messages of the commits that touch it. The rest of the
+repository is not scanned. Run from a standalone checkout of the plugin, the scope is the whole repository.
+
 Usage:
-    DSP_PRIVATE_SCAN_KEY=... python ci/private_scan.py            # tracked files + every commit message
+    DSP_PRIVATE_SCAN_KEY=... python ci/private_scan.py            # plugin files, their history, commit messages
     python ci/private_scan.py --key-file KEY --no-commits
     python ci/private_scan.py --key-file KEY --hash KIND VALUE     # pattern line for a new private value
 
@@ -250,23 +255,41 @@ def tracked_files(root: Path) -> list[str]:
     return [n for n in _git(root, "ls-files", "-z").decode("utf-8").split("\0") if n]
 
 
+def repo_prefix(root: Path) -> str:
+    """Path of ``root`` inside its repository, with a trailing slash ("" at the top level)."""
+    return _git(root, "rev-parse", "--show-prefix").decode("utf-8").strip()
+
+
+def _scope(root: Path) -> list[str]:
+    """rev-list arguments limiting a walk to the commits that touch ``root``. ``--full-history`` keeps every
+    such commit, merges included (the default simplification would drop a merge that equals one parent
+    there, and with it the merge message). At the top level of a repository: no limit, every commit."""
+    return ["--full-history", "--", "."] if repo_prefix(root) else []
+
+
 def commit_messages(root: Path) -> list[tuple[str, str]]:
+    """Messages (with author and committer name) of every commit reachable from HEAD that touches ``root``."""
     if subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "-q", "HEAD"],
                       capture_output=True).returncode != 0:
         return []  # no commits yet
-    shas = _git(root, "rev-list", "HEAD").decode().split()
+    shas = _git(root, "rev-list", "HEAD", *_scope(root)).decode().split()
     return [(sha[:12], _git(root, "log", "-1", "--format=%an%n%cn%n%B", sha).decode("utf-8", "replace"))
             for sha in shas]
 
 
 def history_blobs(root: Path, current: set[str]) -> list[tuple[str, str]]:
-    """Every file version reachable from HEAD that is not in the current tree: (label, blob id)."""
+    """Every version of a file under ``root`` reachable from HEAD that is not in the current tree:
+    (label relative to ``root``, blob id)."""
     if subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "-q", "HEAD"],
                       capture_output=True).returncode != 0:
         return []
+    prefix = repo_prefix(root)
     seen: dict[str, str] = {}
-    for line in _git(root, "rev-list", "--objects", "HEAD").decode("utf-8", "replace").splitlines():
+    for line in _git(root, "rev-list", "--objects", "HEAD", *_scope(root)).decode("utf-8", "replace").splitlines():
         sha, _, name = line.partition(" ")
+        if not name.startswith(prefix):
+            continue  # the trees above root, which the path-limited walk passes through
+        name = name[len(prefix):]
         if name and sha not in current and sha not in seen:
             seen[sha] = name
     blobs = []

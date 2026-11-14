@@ -21,6 +21,18 @@ def report():
     return module
 
 
+WORKFLOW = "hermes-ctx-discord-policy-upstream.yml"
+
+
+def _workflow() -> Path:
+    """The daily run's workflow: in the ctx repository's .github/workflows, above the plugin directory."""
+    for base in (ROOT, *ROOT.parents):
+        candidate = base / ".github" / "workflows" / WORKFLOW
+        if candidate.is_file():
+            return candidate
+    raise AssertionError(f".github/workflows/{WORKFLOW} not found above {ROOT}")
+
+
 def _release(tag, published, *, draft=False, prerelease=False):
     return {"tag_name": tag, "published_at": published, "draft": draft, "prerelease": prerelease}
 
@@ -181,8 +193,33 @@ def test_verdict_turns_the_run_red_for_security_and_infrastructure_only(report, 
     assert "::error::infrastructure" in capsys.readouterr().out
 
 
+def test_issues_carry_label_and_title_prefix_in_a_shared_repository(report, tmp_path, monkeypatch):
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({"refs": {}, "expect": ["main"], "findings": [
+        {"category": "security", "ref": "main", "key": "k", "text": "A5 off"}]}), encoding="utf-8")
+    calls = []
+
+    def gh(*args):
+        calls.append(args)
+        return "[]"
+
+    monkeypatch.setattr(report, "_gh", gh)
+    assert report.main(["issues", str(path), "--repo", "o/r", "--label", "plugin-x",
+                        "--title-prefix", "plugin-x: "]) == 0
+    listed = [c for c in calls if c[:2] == ("issue", "list")]
+    created = [c for c in calls if c[:2] == ("issue", "create")]
+    assert len(listed) == 3 and all(c[c.index("--label") + 1] == "plugin-x" for c in listed)
+    assert all('"plugin-x: ' in c[c.index("--search") + 1] for c in listed)
+    assert len(created) == 1 and created[0][created[0].index("--title") + 1] == "plugin-x: Upstream drift: security"
+    assert created[0][created[0].index("--label") + 1] == "plugin-x"
+    calls.clear()
+    assert report.main(["issues", str(path), "--repo", "o/r"]) == 0
+    assert not any("--label" in c for c in calls)
+    assert [c[c.index("--title") + 1] for c in calls if c[:2] == ("issue", "create")] == ["Upstream drift: security"]
+
+
 def test_workflow_wires_the_report(report):
-    text = (ROOT / ".github" / "workflows" / "upstream-compat.yml").read_text(encoding="utf-8")
+    text = _workflow().read_text(encoding="utf-8")
     assert "repos/NousResearch/hermes-agent/releases" in text and "git ls-remote" not in text
     assert 'CONTRACT_OUT: ${{ github.workspace }}/out/compat-${{ matrix.ref }}' in text
     assert '--junitxml="$CONTRACT_OUT/junit.xml"' in text and "continue-on-error" not in text
@@ -191,5 +228,6 @@ def test_workflow_wires_the_report(report):
     assert "path: out/" in text and "merge-multiple: true" in text
     assert "concurrency:" in text and "REFS_RESULT: ${{ needs.refs.result }}" in text
     assert text.count("issues: write") == 1
+    assert '--label ctx_discord_policy --title-prefix "ctx_discord_policy: "' in text
     for step in ("summarize", "issues", "verdict"):
         assert f"ci/compat_report.py {step}" in text
