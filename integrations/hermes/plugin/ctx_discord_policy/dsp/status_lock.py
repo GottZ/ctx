@@ -7,7 +7,8 @@ it ends. A reader that can take the lock exclusively knows that no such process 
 then shows a past run. No process id is compared, so neither a reused pid nor another PID namespace (the
 gateway in a container, the CLI outside it) can mislead the reader. A lock is only seen by processes of the
 same kernel: the writer records the kernel's boot id, and a reader under another kernel (another machine, the
-Linux VM of Docker Desktop, or after a reboot) reports "unknown", as it does without ``flock`` (Windows).
+Linux VM of Docker Desktop, or after a reboot) reports "unknown", as it does where either side has no boot id
+to compare (outside Linux) and without ``flock`` (Windows).
 """
 
 from __future__ import annotations
@@ -96,7 +97,10 @@ def writer_state(directory: Path, status: dict) -> tuple[str, str]:
     """``(RUNNING | STOPPED | UNKNOWN, reason)`` for the process that wrote *status* in *directory*."""
     if status.get("writer_lock") is not True:
         return UNKNOWN, "it was written without a process lock (an older version, or no file locking there)"
-    if status.get("writer_kernel") != kernel_id():
+    written, here = status.get("writer_kernel"), kernel_id()
+    if not written or not here:
+        return UNKNOWN, "there is no kernel boot id to compare (outside Linux), so its lock may be out of sight"
+    if written != here:
         return UNKNOWN, ("it was written under another kernel (another machine or VM, or before this machine "
                          "restarted), where its lock cannot be seen")
     fcntl = _flock()

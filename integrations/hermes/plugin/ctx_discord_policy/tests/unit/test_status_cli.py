@@ -132,6 +132,22 @@ def test_a_status_written_under_another_kernel_is_unknown(anchor, monkeypatch):
     assert writer["state"] == "unknown" and "another kernel" in writer["reason"], writer
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the writer's process lock needs flock")
+@pytest.mark.parametrize(("writer", "reader"), [(None, None), ("boot-a", None), (None, "boot-a")])
+def test_a_missing_kernel_id_on_either_side_is_unknown(anchor, monkeypatch, writer, reader):
+    """Two systems without a boot id (macOS, a container without /proc) are not the same kernel: a status
+    copied from one to the other must not read as stopped because the lock there is free."""
+    home = anchor.tmp / "owner"
+    data = home / "plugin-data" / "ctx_discord_policy"
+    data.mkdir(parents=True)
+    (data / "status.lock").touch()                               # free: no process of this kernel holds it
+    (data / "status.json").write_text(json.dumps({"pid": 4242, "written_at": 0, "writer_lock": True,
+                                                  "writer_kernel": writer}), encoding="utf-8")
+    monkeypatch.setattr(anchor.mod("status_lock"), "kernel_id", lambda: reader)
+    state = json.loads(_status(anchor, home, "--json"))["gateway_status_writer"]
+    assert state["state"] == "unknown" and "no kernel boot id" in state["reason"], state
+
+
 # ── the settings page reads the same status (under host isolation it is the one surface left) ─────────
 
 

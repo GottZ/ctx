@@ -88,8 +88,8 @@ What does not work, or only partly:
 - **macOS and Windows** are listed as platforms of the plugin, but its test suites run on Linux only; they
   have had no run there yet.
 - **The status of a stopped gateway** stays on disk. `hermes ctx-discord-policy status` and the settings page
-  show it and call it stale once the gateway that wrote it has stopped. On Windows, or when the gateway runs
-  on another machine or in a VM (Docker Desktop), they cannot tell and say so.
+  show it and call it stale once the gateway that wrote it has stopped. Outside Linux, or when the gateway
+  runs on another machine or in a VM (Docker Desktop), they cannot tell and say so.
 - **Names on the settings page.** Channel, role and member names come from the running gateway: read directly
   when the page's backend runs in the gateway process, else from the server directory the gateway keeps, or
   over Hermes' plugin RPC (Hermes 0.23.1 or newer). Without either you enter IDs.
