@@ -56,8 +56,11 @@ const (
 	// the background arm runs (embed_backfill.interval > 0) the query path
 	// (EmbedFailureQueryPathExcludedPredicate) never picks a caller_timeout
 	// block again, the arm picks it at once (next_attempt_at = now()). With
-	// the arm off the query path keeps the plain predicate and retries it
-	// within its budget. Only written while a sync budget is active — with
+	// the arm off the query path retries it itself: after a backoff counted
+	// from the cut, and in the place of that cut in its oldest-first order
+	// (handler.backfillPicker.oldEnd). Only written while a sync budget is
+	// active, and with the arm off only for a block that had the whole of
+	// it (the first embed of its request) — with
 	// sync_budget=0 a request cancel stays wire (review finding M1). A later
 	// wire failure in the background arm reclassifies it as wire with the
 	// ordinary backoff.
@@ -184,7 +187,9 @@ func RecordEmbedFailure(ctx context.Context, q pgxdb.Execer, blockID string, cla
 		// Eligible for the background arm at once: the backoff curve is
 		// for a backend that failed, this backend only took longer than
 		// the caller could wait. Pfad A's own exclusion of this class is
-		// in the predicate, not in the timestamp.
+		// in the predicate, not in the timestamp. The timestamp is the
+		// time of the cut, and with the arm off Pfad A counts the block's
+		// backoff, and its place in the order, from it.
 		_, err := q.Exec(ctx,
 			`INSERT INTO context_embed_failures (block_id, migration_id, attempts, last_error, last_class, next_attempt_at)
 			 VALUES ($1, NULL, 1, $2, $3, now())
@@ -322,11 +327,17 @@ const EmbedFailureExcludedPredicate = `
 // block the arm is about to embed anyway (and, while the arm holds its FOR
 // UPDATE row, embed it a second time in parallel). The background arm keeps
 // the plain predicate, so for it a caller_timeout memo (next_attempt_at =
-// now()) is immediately eligible. backfillPending uses this variant only
-// while the arm runs (embed_backfill.interval > 0); with the arm off it
-// falls back to the plain predicate, so the hand-off never leaves a block
-// to nobody (review finding M1). Same positional contract as its sibling:
-// bare context_blocks as the outer FROM.
+// now()) is immediately eligible. backfillPending uses this variant for
+// its picks with the arm on or off. With the arm off
+// (embed_backfill.interval = 0) nothing else would embed a caller_timeout
+// block, so the old end of its pick reads those blocks with a statement of
+// its own (handler.backfillPicker.pickOverran): the ones whose backoff,
+// counted from the cut, has passed, by the time of the cut. The hand-off so
+// never leaves a block to nobody (review finding M1), a block that cannot
+// fit the budget costs one request per backoff period, and it does not hold
+// the others, which were pending before its latest cut and so stand ahead
+// of it. Same positional contract as its sibling: bare context_blocks as
+// the outer FROM.
 const EmbedFailureQueryPathExcludedPredicate = `
 	AND NOT EXISTS (
 		SELECT 1 FROM context_embed_failures f

@@ -23,6 +23,11 @@ const (
 	SensPublic      Sensitivity = "public"      // rank 0
 )
 
+// SensitivityLevels lists the four sensitivity levels in ascending rank
+// (public 0 to credentials 3), for a caller that has to enumerate them (the
+// query path's backfill pick names the levels a backend takes).
+var SensitivityLevels = [...]Sensitivity{SensPublic, SensInternal, SensPersonal, SensCredentials}
+
 // sensRank maps a sensitivity to its numeric rank. Empty/unknown values are
 // NORMATIVELY rank 3 (credentials, fail-closed): a forgotten assignment at a
 // future call site (zero value) must never act as a silent public downgrade

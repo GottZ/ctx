@@ -66,7 +66,7 @@ func TestBackfillPending_MemoSurvivesRequestCancel(t *testing.T) {
 		SyncCap: 4, MaxTokens: 1_000_000, BackoffBase: time.Minute, BackoffCap: time.Hour,
 	}}
 
-	got := h.backfillPending(reqCtx, nil, "private", h.embedAdmission(), cfg)
+	got := h.backfillPending(reqCtx, nil, []string{"private"}, h.embedAdmission(), cfg)
 	if got != 0 {
 		t.Fatalf("backfilled = %d, want 0 (embed must fail in this fixture)", got)
 	}
