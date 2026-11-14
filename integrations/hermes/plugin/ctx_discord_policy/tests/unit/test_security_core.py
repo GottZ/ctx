@@ -241,8 +241,9 @@ async def test_restored_fifo_event_finds_its_own_route_and_never_inherits_one(wo
 
 
 async def test_internal_event_in_a_public_session_never_inherits_an_operator_route(world, anchor):
-    """A drain task created inside an operator's context executes an internal event (no user, no message
-    id, no authorization) for a public member's session: it must run without the operator's lane."""
+    """A drain task created inside an operator's context executes an internal event (no message id, no
+    authorization) for a public member's session: it never runs with the operator's lane. In a server the
+    policy knows it does not run at all (a member's event without the policy's route)."""
     runtime, routes = anchor.RUNTIME, anchor.routes
     turn = await world.deliver(message(user(MEMBER), mid=8101, mentions=mention()))
     assert turn["tools"][0]  # the session is a public one now
@@ -256,8 +257,7 @@ async def test_internal_event_in_a_public_session_never_inherits_an_operator_rou
         replay = await world.runner._handle_message(internal)
     finally:
         runtime.route.reset(token)
-    assert replay["session"] == turn["session"]
-    assert replay["tools"][0] and "BLOCKED" in replay["tools"][0]
+    assert replay is None, replay
 
 
 def test_authorization_needs_the_exact_route(world, anchor):
