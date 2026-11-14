@@ -63,12 +63,33 @@
 -- the table once instead. No statement_timeout: a pass that hit one would
 -- roll the boot back on every start.
 --
+-- Concurrent writers: the boot that runs this is not necessarily the only
+-- process on the database — another ctxd on it (a replica not upgraded yet,
+-- a rolling deploy) keeps ingesting. InsertChunk's arbiter only sees live
+-- 'chunk' rows, so an ingest into the slot of a moved row does not wait for
+-- this transaction: a changed title inserts a fresh live chunk. If that
+-- commits after the moved rows were collected, the restore in (b) meets it on
+-- uq_source_chunk (an insert still open when (b) reaches the row makes (b)
+-- wait for it and then meet it the same way). The fresh row is the slot's
+-- current version, so (b) archives the moved row instead — per row, in a
+-- subtransaction, so the boot never fails on a concurrent ingest. (a) cannot
+-- meet one: it only takes rows out of the live set. Not done instead: LOCK
+-- TABLE context_blocks IN SHARE ROW EXCLUSIVE MODE, which conflicts with every
+-- writer of every other process for the whole migration and, under the 3 s
+-- lock_timeout, fails the boot whenever any writer transaction (a guard batch
+-- of 100 blocks, a backfill around its embed call) holds its lock longer.
+-- The lock_timeout itself stays the house rule: a moved row that another
+-- transaction holds locked for more than 3 s fails the boot, which the next
+-- start retries.
+--
 -- Idempotent: after one pass the only moved rows left are those in slots
 -- with a row outside the source's scope, and those are skipped again. The
 -- file can be run again by hand after an older binary has run against the
--- database. Neither statement can hit a unique index: (a) only takes rows
--- out of the live set, and (b) runs on slots that (a) left with exactly one
--- live row, without changing title or scope.
+-- database — in ONE transaction, or SET LOCAL lock_timeout is ignored:
+--   psql -v ON_ERROR_STOP=1 --single-transaction -f 169_chunk_lifecycle_repair.sql
+-- Apart from the concurrent ingest above, no statement can hit a unique
+-- index: (a) only takes rows out of the live set, and (b) runs on slots that
+-- (a) left with exactly one live row, without changing title or scope.
 --
 -- Tx: the runner (store/migrations.go) wraps every migration in its own
 -- transaction, so SET LOCAL and the ON COMMIT DROP tables end with it.
@@ -80,8 +101,10 @@ SET LOCAL lock_timeout = '3s';
 DO $$
 DECLARE
     v_archived INT;
-    v_restored INT;
+    v_restored INT := 0;
     v_skipped  INT;
+    v_n        INT;
+    v_id       UUID;
 BEGIN
     -- The one pass: every moved row.
     CREATE TEMP TABLE m169_moved ON COMMIT DROP AS
@@ -133,21 +156,49 @@ BEGIN
     GET DIAGNOSTICS v_archived = ROW_COUNT;
 
     -- (b) restore the moved rows of those slots that are still live: each is
-    --     now alone in its slot.
-    UPDATE context_blocks b
-       SET lifecycle_state = 'chunk',
-           superseded_by   = NULL,
-           metadata        = COALESCE(b.metadata, '{}'::jsonb)
-                             || jsonb_build_object('chunk_lifecycle_repair',
-                                    jsonb_build_object('migration', 169,
-                                                       'lifecycle_before', b.lifecycle_state,
-                                                       'superseded_by_before', b.superseded_by::text,
-                                                       'archived', false))
-      FROM m169_moved m
-      JOIN m169_slots s ON s.source_id = m.source_id AND s.chunk_index = m.chunk_index
-     WHERE b.id = m.id
-       AND NOT b.is_archived;
-    GET DIAGNOSTICS v_restored = ROW_COUNT;
+    --     now alone in its slot — unless a concurrent ingest has put a fresh
+    --     live chunk into it since the moved rows were collected (see the
+    --     header): the restore then meets that row on uq_source_chunk, and the
+    --     moved row is archived instead. Row by row, so that one such slot
+    --     rolls back only its own restore.
+    FOR v_id IN
+        SELECT m.id
+          FROM m169_moved m
+          JOIN m169_slots s ON s.source_id = m.source_id AND s.chunk_index = m.chunk_index
+         ORDER BY m.id
+    LOOP
+        BEGIN
+            UPDATE context_blocks b
+               SET lifecycle_state = 'chunk',
+                   superseded_by   = NULL,
+                   metadata        = COALESCE(b.metadata, '{}'::jsonb)
+                                     || jsonb_build_object('chunk_lifecycle_repair',
+                                            jsonb_build_object('migration', 169,
+                                                               'lifecycle_before', b.lifecycle_state,
+                                                               'superseded_by_before', b.superseded_by::text,
+                                                               'archived', false))
+             WHERE b.id = v_id
+               AND NOT b.is_archived
+               AND b.lifecycle_state <> 'chunk';
+            GET DIAGNOSTICS v_n = ROW_COUNT;
+            v_restored := v_restored + v_n;
+        EXCEPTION WHEN unique_violation THEN
+            UPDATE context_blocks b
+               SET is_archived     = true,
+                   lifecycle_state = 'chunk',
+                   superseded_by   = NULL,
+                   metadata        = COALESCE(b.metadata, '{}'::jsonb)
+                                     || jsonb_build_object('chunk_lifecycle_repair',
+                                            jsonb_build_object('migration', 169,
+                                                               'lifecycle_before', b.lifecycle_state,
+                                                               'superseded_by_before', b.superseded_by::text,
+                                                               'archived', true))
+             WHERE b.id = v_id
+               AND NOT b.is_archived;
+            GET DIAGNOSTICS v_n = ROW_COUNT;
+            v_archived := v_archived + v_n;
+        END;
+    END LOOP;
 
     SELECT count(*) INTO v_skipped
       FROM m169_moved m

@@ -1202,7 +1202,7 @@ The only writer is ctxd's rejection flusher: every 10 seconds and once at shutdo
 A chunk-mode ingest (`source_id` + `chunk_index`) writes into its slot only through a row whose `lifecycle_state` is `chunk`. Older binaries moved chunk rows out of that state: a dream `supersedes` link onto a chunk marked it `snapshot` (and removing the link handed it back as `knowledge`, as did migration 154; a dream promotion to `canonical` could follow), and the daily report stamped `synthesis` on a chunk that held its title. Such a slot no longer took a changed-content ingest — the chunk answered `failed` / `insert chunk failed` — and a re-ingest under a new title left the old row live next to the new one, so bringing the old title back failed the same way. The current binary keeps every chunk in its lifecycle (the `supersedes` link is still written and still read by the query path); migration 169 repairs the rows moved before, once:
 
 - **restore** — a live row with a slot (`source_id` and `chunk_index` set) outside `chunk`, alone in its slot: `lifecycle_state` → `chunk`, `superseded_by` → `NULL`.
-- **archive** — a slot with more than one such live row, or with a live `chunk` row next to it: the live `chunk` row stays as it is, otherwise the newest of the moved rows is restored; every other moved row of the slot is an older version the ingest would have overwritten in place and is archived (with `lifecycle_state` `chunk`), which frees its title.
+- **archive** — a slot with more than one such live row, or with a live `chunk` row next to it: the live `chunk` row stays as it is, otherwise the newest of the moved rows is restored; every other moved row of the slot is an older version the ingest would have overwritten in place and is archived (with `lifecycle_state` `chunk`), which frees its title. The same happens when another ctxd on the same database (a replica not upgraded yet) ingests a fresh chunk into the slot of a moved row while the migration runs: that chunk is the slot's current version and the moved row is archived instead of restored — a concurrent ingest never fails the boot. The table is not locked; a moved row that another transaction keeps locked for more than 3 s fails the boot (`lock_timeout`), and the next start retries.
 
 Rows whose source was deleted (`source_id` `NULL`) own no slot and are left alone, so are archived rows. A slot that holds a live row outside its source's scope — a manage or MCP update can move any block, a chunk included — is left exactly as it is: the ingest writes only in the source's scope, and the repair does not decide between scopes. `updated_at` is not bumped. A daily report that had landed on a chunk-held title stays in that row as its content until the next changed ingest of the slot replaces it; the repair does not move it out.
 
@@ -1223,7 +1223,12 @@ docker compose exec db psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" -c \
     WHERE metadata ? 'chunk_lifecycle_repair';"
 ```
 
-**Downgrading** below 169 is safe for the data: the repaired rows are ordinary chunks. An older binary can move chunks out of their lifecycle again, and the migration does not run a second time; the file is idempotent, so running `go/migrations/169_chunk_lifecycle_repair.sql` by hand (`psql -f`) after such a period repairs those rows too.
+**Downgrading** below 169 is safe for the data: the repaired rows are ordinary chunks. An older binary can move chunks out of their lifecycle again, and the migration does not run a second time; the file is idempotent, so running it by hand after such a period repairs those rows too. Run it in one transaction — without `--single-transaction` psql answers `WARNING: SET LOCAL can only be used in transaction blocks` and the repair waits for row locks without the 3 s limit:
+
+```bash
+docker compose exec -T db psql -U "$CONTEXT_DB_USER" -d "$CONTEXT_DB" \
+  -v ON_ERROR_STOP=1 --single-transaction -f - < go/migrations/169_chunk_lifecycle_repair.sql
+```
 
 ### `graph_overview.csr_loader`: the rebuild's input substrate
 
