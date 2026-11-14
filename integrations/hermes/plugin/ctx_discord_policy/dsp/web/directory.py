@@ -89,14 +89,15 @@ class BotDirectory:
         return {str(g.get("id")): str(g.get("name") or "") for g in self.guilds if isinstance(g, dict)}
 
 
-# Providers ahead of the snapshot (live, rpc). Each: (home, bot, guild_or_None) -> GuildDirectory|BotDirectory|None.
-PROVIDERS: list[tuple[str, Callable[..., Any]]] = []
+# Sources tried before the snapshot, lowest priority first (live 10, rpc 20). Each provider:
+# (home, bot, guild_or_None) -> GuildDirectory | BotDirectory | None.
+PROVIDERS: list[tuple[int, str, Callable[..., Any]]] = []
 
 
-def register_provider(name: str, provider: Callable[..., Any]) -> None:
-    """Add (or replace) a source tried before the snapshot; called by the gateway-side modules."""
+def register_provider(name: str, provider: Callable[..., Any], *, priority: int) -> None:
+    """Add (or replace) a source tried before the snapshot (``dsp.snapshot`` live, ``dsp.web.remote`` rpc)."""
     global PROVIDERS
-    PROVIDERS = [(n, p) for n, p in PROVIDERS if n != name] + [(name, provider)]
+    PROVIDERS = sorted([e for e in PROVIDERS if e[1] != name] + [(priority, name, provider)], key=lambda e: e[0])
 
 
 def directory_root(home: Path) -> Path:
@@ -116,7 +117,7 @@ def _stale(at: Any) -> bool:
 
 
 def _from_providers(home: Path, bot: str, guild: Optional[str], *, allow_remote: bool) -> Any:
-    for name, provider in PROVIDERS:
+    for _priority, name, provider in PROVIDERS:
         if name == "rpc" and not allow_remote:
             continue
         try:

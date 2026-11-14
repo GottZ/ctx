@@ -28,7 +28,11 @@ KEYS: dict[str, dict[str, Any]] = {
                          "help": "About activation requests, guidance changes and degraded protection."},
     "frame_prompt": {"label": "Operator frame", "kind": "frame", "max_length": HARD_PROMPT_LIMIT,
                      "help": "Placed before every server's guidance. Empty: the built-in neutral frame."},
+    "member_search": {"label": "Member search", "kind": "choice",
+                      "choices": [{"value": "auto", "label": "On (prefix search)"}, {"value": "off", "label": "Off"}],
+                      "help": "Suggest server members by name when adding operators. Off: user IDs only."},
 }
+MEMBER_SEARCH = ("auto", "off")
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85  ]")
 _LINE_BREAK = re.compile(r"[\r\n\x0b\x0c\x85  ]")
@@ -59,7 +63,15 @@ def normalise(raw: Mapping[str, Any]) -> dict[str, Any]:
             out[key] = max(0, min(value, HARD_PROMPT_LIMIT)) if ok else default
         else:
             out[key] = value if isinstance(value, str) else default
+    out["member_search"] = member_search_of(raw)
     return out
+
+
+def member_search_of(raw: Any) -> str:
+    """``auto`` only when the setting says exactly that (or is absent); anything else is ``off``. YAML reads
+    an unquoted ``off`` as False, and a value nobody can interpret must not switch Discord lookups on."""
+    search = raw.get("member_search", "auto") if isinstance(raw, Mapping) else None
+    return "auto" if search == "auto" else "off"
 
 
 def digest(values: Mapping[str, Any]) -> str:
@@ -112,6 +124,10 @@ def validate(values: Any) -> dict[str, Any]:
                     or len(value) > 100 or not value.strip():
                 raise SettingsError(key, "The operator label must be one line of 1–100 characters.")
             clean[key] = value
+        elif key == "member_search":
+            if value not in MEMBER_SEARCH:
+                raise SettingsError(key, "Member search is auto or off.")
+            clean[key] = value
         elif key == "frame_prompt":
             if not isinstance(value, str) or _CONTROL.search(value) or len(value) > HARD_PROMPT_LIMIT:
                 raise SettingsError(key, f"The operator frame must be text of at most {HARD_PROMPT_LIMIT} characters "
@@ -133,6 +149,12 @@ def assemble_settings(backend: Any) -> dict[str, Any]:
 def operator_count(backend: Any) -> tuple[int, bool]:
     state = read(backend)
     return len(state["values"]["operators"]), bool(state["readable"])
+
+
+def member_search_mode(backend: Any) -> str:
+    """The operator's member_search setting; ``off`` while the configuration cannot be read."""
+    state = read(backend)
+    return str(state["values"]["member_search"]) if state["readable"] else "off"
 
 
 def keys() -> list[dict[str, Any]]:

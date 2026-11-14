@@ -36,3 +36,8 @@ config_schema:
     type: list
     default: []
     description: "Hermes profiles never opened to server members and never offered in /policy (read from the default profile)"
+  member_search:
+    type: str
+    default: auto
+    choices: [auto, "off"]
+    description: "Suggest server members by name on the settings page when adding operators (off: user IDs only)"

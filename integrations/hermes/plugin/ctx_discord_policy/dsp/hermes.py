@@ -676,3 +676,107 @@ def spill_config() -> Optional[dict]:
     except Exception:
         return None
     return config if isinstance(config, dict) else None
+
+
+def profiles() -> Optional[list]:
+    """``[{name, path, display_name, model, provider, is_default}]`` of every Hermes profile, or ``None``."""
+    try:
+        from hermes_cli.profiles import list_profiles
+    except ImportError:
+        return None
+    try:
+        rows = list_profiles(lazy_skill_count=True)
+    except Exception:
+        return None
+    out = []
+    for info in rows:
+        out.append({"name": str(getattr(info, "name", "")), "path": str(getattr(info, "path", "")),
+                    "display_name": str(getattr(info, "display_name", "") or ""),
+                    "model": getattr(info, "model", None), "provider": getattr(info, "provider", None),
+                    "is_default": bool(getattr(info, "is_default", False))})
+    return out
+
+
+def skills_of(home: os.PathLike | str) -> Optional[list]:
+    """Enabled skills installed in the profile ``home`` (``[{name, description, category}]``), or ``None``."""
+    try:
+        from tools.skills_tool import find_all_skills
+    except ImportError:
+        return None
+    try:
+        with home_override(home):
+            rows = find_all_skills()        # skip_disabled=True would include the disabled ones (config UI)
+    except Exception:
+        return None
+    out = []
+    for row in rows or []:
+        if isinstance(row, dict) and row.get("name"):
+            out.append({"name": str(row["name"]), "description": str(row.get("description") or "")[:300],
+                        "category": str(row.get("category") or "")})
+    return out
+
+
+def installed_skills(home: os.PathLike | str) -> frozenset:
+    """Names of the enabled skills installed in the profile ``home`` — what a turn there can load. One list for
+    the settings page and the Discord panels. Raises when Hermes cannot tell; callers treat that as unknown."""
+    rows = skills_of(home)
+    if rows is None:
+        raise RuntimeError("Hermes could not list the skills of this profile")
+    return frozenset(row["name"] for row in rows)
+
+
+def model_options(profile: Optional[str]) -> Optional[dict]:
+    """Hermes' model picker payload for ``profile`` (the same as ``GET /api/model/options``), or ``None``."""
+    try:
+        from hermes_cli.inventory import build_model_options_payload, load_picker_context
+        from hermes_cli.web_server_profiles import _config_profile_scope
+    except ImportError:
+        return None
+    try:
+        with _config_profile_scope(profile):
+            payload = build_model_options_payload(load_picker_context(), explicit_only=False,
+                                                  include_unconfigured=False, refresh=False)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def rpc_available() -> bool:
+    """Whether this Hermes serves plugin RPC methods (``ctx.register_rpc``, Hermes ≥ 04846730f3)."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("hermes_cli.plugin_rpc") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def gateway_rpc(home: os.PathLike | str, method: str, params: dict, timeout: float) -> Any:
+    """Call ``method`` on the running gateway that owns ``home`` (never starts one). Raises on any failure."""
+    import asyncio
+
+    from hermes_cli.gateway_client import connect_gateway
+    from hermes_cli.gateway_runtime import discover_gateway_endpoint
+
+    discovery = discover_gateway_endpoint(Path(home), timeout=min(timeout, 1.5))
+    endpoint = getattr(discovery, "endpoint", None)
+    if endpoint is None:
+        raise RuntimeError(f"gateway not reachable ({getattr(discovery, 'state', 'unknown')})")
+
+    async def run() -> Any:
+        async with connect_gateway(endpoint=endpoint) as client:
+            return await client.rpc(method, _timeout=timeout, **params)
+
+    return asyncio.run(asyncio.wait_for(run(), timeout))
+
+
+def discord_bot_token() -> str:
+    """The Discord bot token of the active profile scope (server side only; never returned to a client)."""
+    try:
+        from agent.secret_scope import get_secret
+    except ImportError:
+        return ""
+    try:
+        return str(get_secret("DISCORD_BOT_TOKEN", "") or "").strip()
+    except Exception:
+        return ""

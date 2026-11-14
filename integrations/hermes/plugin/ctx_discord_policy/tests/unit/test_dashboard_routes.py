@@ -14,49 +14,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fakes.dashboard import FakeBackend
 
 BOT = "900000000000000001"
 GUILD = "900000000000000002"
 GUILD2 = "900000000000000003"
 OP = "900000000000000011"
 CHANNEL = "900000000000000051"
-
-
-class FakeBackend:
-    """What the routes ask Hermes for, recorded and controllable per test."""
-
-    def __init__(self) -> None:
-        self.settings: dict = {"operators": [OP]}
-        self.unreadable = False
-        self.managed = False
-        self.writes: list[dict] = []
-        self.events: list = []
-        self.skills_by_profile: dict = {}
-        self.spill = {"enabled": True, "max_chars": 10000}
-
-    def read_settings(self) -> dict:
-        if self.unreadable:
-            raise self.hermes.ConfigUnreadable("config.yaml could not be read")
-        return dict(self.settings)
-
-    def write_settings(self, plugin_dir, values) -> list:
-        if self.managed:
-            raise PermissionError("managed install")
-        self.writes.append(dict(values))
-        self.settings.update(values)
-        return sorted(values)
-
-    def settings_changed(self, written) -> None:
-        self.events.append(list(written))
-
-    def spill_config(self):
-        return self.spill
-
-    def skills(self, home):
-        return self.skills_by_profile.get(str(home))
-
-    def profile_of(self, home) -> str:
-        return "default"
 
 
 @pytest.fixture

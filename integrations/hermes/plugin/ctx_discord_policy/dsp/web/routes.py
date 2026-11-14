@@ -38,7 +38,7 @@ from ..store import checks, ops, schema
 from ..store.file import ConflictError, PolicyStore, Snapshot, StoreError
 from ..store.schema import SchemaError, is_snowflake
 from ..ui import perms
-from . import catalog, directory, guard, settings_io
+from . import catalog, directory, guard, settings_io, sources
 from .responses import WebResponse, error, ok
 
 logger = logging.getLogger("ctx_discord_policy")
@@ -66,6 +66,8 @@ class WebRequest:
 class HermesBackend:
     """What the routes ask Hermes for (tests substitute a fake)."""
 
+    hermes = hermes
+
     def read_settings(self) -> dict:
         return hermes.plugin_settings()
 
@@ -78,14 +80,40 @@ class HermesBackend:
     def spill_config(self) -> Optional[dict]:
         return hermes.spill_config()
 
+    def skill_rows(self, home: Path) -> Optional[list]:
+        return hermes.skills_of(home)
+
     def skills(self, home: Path) -> Optional[frozenset]:
-        return None
+        try:
+            return hermes.installed_skills(home)
+        except Exception:
+            return None
 
     def profile_of(self, home: Path) -> str:
         return hermes.profile_name_for_home(home) or "default"
 
     def profile_home(self, name: str) -> Optional[Path]:
-        return None
+        """Home of an existing Hermes profile ``name`` (``hermes.profile_dir`` of the routing layer), or None."""
+        if not hermes.valid_profile_name(name):
+            return None
+        try:
+            path = Path(hermes.profile_dir(name))
+        except Exception:
+            return None
+        return path if path.is_dir() else None
+
+    _profiles_cache: tuple = (0.0, None)
+
+    def profiles(self) -> Optional[list]:
+        """Hermes' profile list, cached 30 s (listing many profiles takes a few hundred milliseconds)."""
+        at, rows = HermesBackend._profiles_cache
+        if rows is None or time.monotonic() - at > 30.0:
+            rows = hermes.profiles()
+            HermesBackend._profiles_cache = (time.monotonic(), rows)
+        return rows
+
+    def models(self, profile: Optional[str]) -> Optional[dict]:
+        return hermes.model_options(profile)
 
 
 DEFAULT_BACKEND = HermesBackend()
@@ -169,9 +197,11 @@ def status_bots(home: Path) -> dict[str, str]:
 def known_bots(req: WebRequest, snap: Snapshot) -> list[str]:
     """Bots this profile owns: in its store, its gateway's status (owner = this home), its directory, live."""
     key = hermes.home_key(req.home)
+    owners = status_bots(req.home)
     bots = set(snap.data.get("bots", {}))
-    bots.update(b for b, owner in status_bots(req.home).items() if hermes.home_key(owner) == key)
-    bots.update(directory.snapshot_bots(req.home))
+    bots.update(b for b, owner in owners.items() if hermes.home_key(owner) == key)
+    # A directory left behind by a bot that has moved to another profile does not make it this profile's.
+    bots.update(b for b in directory.snapshot_bots(req.home) if b not in owners or hermes.home_key(owners[b]) == key)
     bots.update(_live_bots(req.home))
     return sorted(b for b in bots if is_snowflake(b))
 
@@ -185,6 +215,14 @@ def _bot_or_404(req: WebRequest, bot: str, snap: Snapshot) -> None:
 def _ids_or_404(bot: str, guild: str) -> None:
     if not (is_snowflake(bot) and is_snowflake(guild)):
         raise refuse(404, "not_found", "Not a Discord id.")
+
+
+def guild_dir(req: WebRequest, bot: str, guild: str) -> directory.GuildDirectory:
+    return directory.guild_directory(req.home, bot, guild, allow_remote=req.process != "gateway")
+
+
+def bot_dir(req: WebRequest, bot: str) -> directory.BotDirectory:
+    return directory.bot_directory(req.home, bot, allow_remote=req.process != "gateway")
 
 
 def _mode(req: WebRequest, snap: Snapshot) -> str:
@@ -314,7 +352,7 @@ def _last_via(snap: Snapshot, bot: str, guild: str) -> Optional[str]:
 
 
 def guild_body(req: WebRequest, snap: Snapshot, bot: str, guild_id: str) -> dict[str, Any]:
-    found = directory.guild_directory(req.home, bot, guild_id)
+    found = guild_dir(req, bot, guild_id)
     stored = snap.guild(bot, guild_id)
     configured = stored is not None
     settings = copy.deepcopy(stored) if configured else schema.guild_defaults()
@@ -363,7 +401,8 @@ def get_meta(req: WebRequest) -> WebResponse:
                "hermes_version": hermes.hermes_version(), "mode": _mode(req, snap), "conflict": None,
                "features": {"guidance_ops": callable(getattr(ops, "set_guidance", None)),
                             "routing_ops": ROUTING_FROM_PAGE,
-                            "member_search": False, "rpc": False}})
+                            "member_search": settings_io.member_search_mode(req.backend) != "off",
+                            "rpc": req.process != "gateway" and hermes.rpc_available()}})
 
 
 def _protection(status: Optional[dict]) -> dict[str, Any]:
@@ -396,7 +435,7 @@ def get_overview(req: WebRequest) -> WebResponse:
     live = _live_bots(req.home)
     bots = []
     for bot in known_bots(req, snap):
-        found = directory.bot_directory(req.home, bot)
+        found = bot_dir(req, bot)
         names = found.names()
         configured = (snap.data.get("bots", {}).get(bot) or {}).get("guilds", {})
         rows = []
@@ -425,7 +464,23 @@ def get_overview(req: WebRequest) -> WebResponse:
                "store": {"state": snap.state, "error": redact_paths(snap.error),
                          "problems": redact_paths(list(snap.problems))},
                "operators": {"count": count, "readable": readable}, "bots": bots,
-               "protection": _protection(gateway_status(req.home)), "other_profiles": [], "next_step": next_step})
+               "protection": _protection(gateway_status(req.home)),
+               "other_profiles": _other_profiles(req, {b["id"] for b in bots}), "next_step": next_step})
+
+
+def _other_profiles(req: WebRequest, mine: set) -> list[dict[str, Any]]:
+    """Bots another Hermes profile owns (read only: that profile configures them). Ownership comes from the
+    gateway's status entries, which name each bot's owner home; owners that are no profile are left out."""
+    rows = [r for r in (req.backend.profiles() or []) if r.get("path") and r.get("name")]
+    names = {hermes.home_key(r["path"]): str(r["name"]) for r in rows}
+    current = hermes.home_key(req.home)
+    owned: dict[str, set] = {}
+    for home in [req.home] + [Path(r["path"]) for r in rows if hermes.home_key(r["path"]) != current]:
+        for bot, owner in status_bots(home).items():
+            key = hermes.home_key(owner)
+            if key != current and key in names and bot not in mine:
+                owned.setdefault(names[key], set()).add(bot)
+    return [{"profile": name, "bots": sorted(bots)} for name, bots in sorted(owned.items())]
 
 
 def get_schema(req: WebRequest) -> WebResponse:
@@ -441,7 +496,7 @@ def get_guild(req: WebRequest, bot: str, guild: str) -> WebResponse:
     _ids_or_404(bot, guild)
     snap = store_for(req.home).read()
     _bot_or_404(req, bot, snap)
-    if snap.guild(bot, guild) is None and guild not in directory.bot_directory(req.home, bot).names():
+    if snap.guild(bot, guild) is None and guild not in bot_dir(req, bot).names():
         raise refuse(404, "not_found", "This server is not known for this bot.")
     return ok(guild_body(req, snap, bot, guild))
 
@@ -579,7 +634,7 @@ def patch_guild(req: WebRequest, bot: str, guild: str) -> WebResponse:
     snap = store_for(req.home).read()
     _bot_or_404(req, bot, snap)
     stored = _guild_or_404(req, snap, bot, guild, configured=True)
-    found = directory.guild_directory(req.home, bot, guild)
+    found = guild_dir(req, bot, guild)
     findings = checks.environment(changes, environment_for(req, stored, found))
     if checks.has_errors(findings):
         errors = [f.as_dict() for f in findings if f.level == checks.ERROR]
@@ -792,7 +847,7 @@ def post_import(req: WebRequest, bot: str, guild: str) -> WebResponse:
     for path in checks.flatten({k: v for k, v in payload.items() if k not in perms.BOOKKEEPING}):
         for key in perms.owners_of(path):
             perms.require(host, key)
-    found = directory.guild_directory(req.home, bot, guild)
+    found = guild_dir(req, bot, guild)
     incoming = {k: v for k, v in payload.items() if k not in perms.BOOKKEEPING}
     try:
         clean, _ = schema.validate_guild(incoming, strict=True, prompt_cap=settings_io.prompt_cap(req.backend))
@@ -849,8 +904,8 @@ def post_preview(req: WebRequest) -> WebResponse:
     if draft is not None:
         guild["prompts"]["guild"] = draft
     settings = settings_io.assemble_settings(req.backend)
-    found = directory.guild_directory(req.home, bot, guild_id)
-    bot_found = directory.bot_directory(req.home, bot)
+    found = guild_dir(req, bot, guild_id)
+    bot_found = bot_dir(req, bot)
     channel = str(body.get("channel") or "")
     channel_name = next((c.get("name") for c in found.channels if str(c.get("id")) == channel), "") if channel else ""
     capabilities = {name: policy_lanes.capability_lane_text(SimpleNamespace(
@@ -919,12 +974,15 @@ ROUTES: list[tuple[str, re.Pattern, Callable[..., WebResponse]]] = [
     ("GET", re.compile(r"/status/history"), get_status_history),
     ("GET", re.compile(r"/audit"), get_audit),
 ]
-EXTRA_ROUTES: list[tuple[str, re.Pattern, Callable[..., WebResponse]]] = []   # later layers (directory, members)
+EXTRA_ROUTES: list[tuple[str, re.Pattern, Callable[..., WebResponse]]] = []
 
 
 def add_routes(routes: list) -> None:
     for method, pattern, handler in routes:
         EXTRA_ROUTES.append((method, re.compile(pattern) if isinstance(pattern, str) else pattern, handler))
+
+
+add_routes(sources.ROUTES)
 
 
 def _heartbeat(req: WebRequest, mode: str) -> None:
