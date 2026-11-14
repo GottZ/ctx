@@ -23,6 +23,7 @@ func TestCacheDir(t *testing.T) {
 		{"relative LOCALAPPDATA is ignored", "", "rel", home, filepath.Join(home, ".cache", "ctx")},
 		{"home fallback", "", "", home, filepath.Join(home, ".cache", "ctx")},
 		{"no home: no cache", "", "", "", ""},
+		{"relative home: no cache", "", "", ".", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

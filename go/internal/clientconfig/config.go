@@ -95,7 +95,7 @@ func BaseDir() string {
 // purpose — a config directory is often kept in a dotfiles repository, and a
 // file rewritten every few seconds does not belong there. Unlike BaseDir it
 // has no relative fallback: a relative variable is ignored (the XDG rule), and
-// with no home directory it returns "" and the caller keeps no cache, rather
+// with no absolute home directory it returns "" and the caller keeps no cache, rather
 // than writing into the working directory.
 func CacheDir() string {
 	if xdg := os.Getenv("XDG_CACHE_HOME"); filepath.IsAbs(xdg) {
@@ -105,7 +105,7 @@ func CacheDir() string {
 		return filepath.Join(local, "ctx")
 	}
 	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
+	if err != nil || !filepath.IsAbs(home) {
 		return ""
 	}
 	return filepath.Join(home, ".cache", "ctx")
