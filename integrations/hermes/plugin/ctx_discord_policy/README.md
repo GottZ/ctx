@@ -25,8 +25,8 @@ hermes ctx-discord-policy routing set <server id> <profile>   on the host: run a
 - **Members can talk to the bot.** They mention it, reply to it, call it by one of its names ("Nova, …",
   "hey Nova"), or react to a message with the server's wake emoji; in a conversation channel the bot reads along
   and joins in when it has something to add. Their turns run without tools, except the member tools you allow
-  for that server: the current channel's history, linked messages, skills you name, entries of your knowledge
-  sources you name.
+  for that server: the current channel's recent messages, linked messages, skills you name, entries of your
+  knowledge sources you name.
 - **Links and channels in a message.** When a message links Discord messages or mentions channels, the bot sees
   that content as quoted data, read with the rights of the person who wrote the message. In members' turns only
   what everyone who sees the answer may read.
@@ -187,7 +187,9 @@ so, members get no answer until the model works again.
 - **Reading follows the author's rights.** Linked messages and mentioned channels are read only from the same
   server and only where the author can read them. A member's turn reads only what everyone who sees the answer
   may read; your own turns read linked content only when you address the bot. Unaddressed messages are not
-  read further.
+  read further. A member's turn reads the current channel's recent messages (never paging further back) only
+  where the member and everyone who sees the answer may read that channel's history; Hermes' own history
+  backfill for members' turns follows the same rule.
 - **Member turns stay out of the worklog.** A member's turn never runs in the worklog channel or its threads
   and never delivers there. Who can read that channel is up to its Discord permissions.
 - **No files of the host in members' answers.** Hermes turns `MEDIA:` lines and file paths in an answer into

@@ -126,7 +126,11 @@ def e2e(hermes, tmp_path, monkeypatch, request):
     def message(author_id, channel, text):
         msg = world.post(channel, f"<@{BOT}> {text}", author_id, "member" if author_id == MEMBER else "op")
         msg.author.bot = False
-        msg.guild = SimpleNamespace(id=int(channel.guild.id), name=channel.guild.name, me=None)
+        everyone = SimpleNamespace(id=int(channel.guild.id), name="@everyone")   # an ordinary server: everyone
+        msg.guild = SimpleNamespace(id=int(channel.guild.id), name=channel.guild.name, me=None, roles=[everyone],
+                                    default_role=everyone)
+        channel.overwrites = {}                                                   # reads the history here
+        channel.permissions_for = lambda who: SimpleNamespace(view_channel=True, read_message_history=True)
         msg.type, msg.mentions, msg.reference = discord.MessageType.default, [world.user], None
         msg.attachments, msg.message_snapshots, msg.created_at = [], [], None
         return msg

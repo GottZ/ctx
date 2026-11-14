@@ -3,7 +3,8 @@
 The guild configuration can only switch catalog entries on or off and fill their parameter lists. Every
 entry has an argument validator; a tool that is not in the catalog, or a call whose arguments the
 validator does not accept, is blocked. The parameters are frozen into the route when the message is
-admitted, so a configuration change cannot widen a turn that is already running.
+admitted, so a configuration change cannot widen a turn that is already running. The channel's history is
+frozen closed for a route whose author or audience may not read that history (``ingress.hydrate``).
 """
 
 from __future__ import annotations
@@ -37,9 +38,16 @@ def _args(args: Any) -> dict:
     return args if isinstance(args, dict) else {}
 
 
+# The only arguments of a history call a member's turn may make: the most recent messages of this channel.
+# ``before``/``after``/``around`` would page through the whole channel with the bot's rights.
+HISTORY_ARGS = frozenset({"action", "channel_id", "limit"})
+
+
 def _channel_history(route: Any, lanes: PublicLanes, tool: str, args: dict) -> bool:
     if not lanes.channel_history or tool != "discord" or args.get("action") != "fetch_messages":
         return False
+    if set(args) - HISTORY_ARGS:
+        return False                     # refused, not stripped: the call the model made is not the one allowed
     if str(args.get("channel_id") or "") != route.channel_id:
         return False
     raw = args.get("limit", DEFAULT_FETCH_LIMIT)

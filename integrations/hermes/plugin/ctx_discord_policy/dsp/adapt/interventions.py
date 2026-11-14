@@ -17,6 +17,7 @@ marked so a reconnect or a second profile instance never wraps twice.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import sys
 import time
@@ -143,6 +144,10 @@ def _make_handle(original: Any) -> Any:
             return await original(self, message, *args, **kwargs)
         RUNTIME.widened.pop(widened_key)
         route = decision.route(message_id)
+        history = route.is_operator or (route.lanes.channel_history and hydrate.history_readable(
+            self, message, route, decision.guild_config))
+        if not route.is_operator and not history and route.lanes.channel_history:
+            route.lanes = dataclasses.replace(route.lanes, channel_history=False)   # H1-H: frozen closed
         RUNTIME.message_routes.put(route.key, route)
         hydrated = await _hydrated(self, message, route, decision)
         self_user = getattr(getattr(self, "_client", None), "user", None)
@@ -152,7 +157,13 @@ def _make_handle(original: Any) -> Any:
             content=hydrated.apply(getattr(message, "content", "") or "") if hydrated is not None else None,
             attachments=(hydrated.merged_attachments(getattr(message, "attachments", None) or ())
                          if hydrated is not None and hydrated.attachments else None))
-        return await original(self, routed, *args, **kwargs)
+        # Hermes' own history backfill (recent channel messages prepended to the turn) follows the members'
+        # history lane: closed where the author or the channel's audience may not read the history (A13).
+        token = RUNTIME.backfill_closed.set(not history)
+        try:
+            return await original(self, routed, *args, **kwargs)
+        finally:
+            RUNTIME.backfill_closed.reset(token)
 
     return policy_handle
 
@@ -191,6 +202,30 @@ def install_event_gate(cls: Any) -> Result:
                   probe.evidence or where)
 
 
+def _make_backfill(original: Any) -> Any:
+    def policy_backfill(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if RUNTIME.backfill_closed.get():
+            return False
+        return original(self, *args, **kwargs)
+
+    return policy_backfill
+
+
+def install_backfill_gate(cls: Any) -> Result:
+    """A13: Hermes' history backfill (``_discord_history_backfill``) is off while it builds the event of a member's
+    message whose channel history the author or the channel's audience may not read. A Hermes without the
+    backfill needs no gate; one whose backfill does not match keeps members closed (off)."""
+    where = f"{cls.__module__}.{cls.__qualname__}"
+    if getattr(cls, "_discord_history_backfill", None) is None:
+        return Result("A13", SECURITY, Outcome.OK, "this Hermes has no Discord history backfill", where)
+    probe = probe_callable(cls, "_discord_history_backfill", is_async=False, positional=[])
+    if not probe:
+        return Result("A13", SECURITY, Outcome.OFF, probe.reason, probe.evidence or where)
+    wrap_attr(cls, "_discord_history_backfill", _make_backfill, "A13", RUNTIME_API)
+    return Result("A13", SECURITY, Outcome.WRAPPED,
+                  "Hermes' history backfill follows the members' history rule", probe.evidence or where)
+
+
 def install_upload_guard(cls: Any) -> Result:
     """A11: every file sender of the adapter class refuses host files for public routes (dsp.delivery.public).
     A sender this Hermes does not have needs no guard; one that exists but does not match is a reason to keep
@@ -225,6 +260,7 @@ def bind_adapter_class(cls: Any) -> bool:
     RUNTIME.status.record(Result("A3", SECURITY, Outcome.OK, f"adapter class {where}", "platform handler factory"))
     run_intervention(RUNTIME.status, public.INTERVENTION, SECURITY, lambda: install_upload_guard(cls))
     run_intervention(RUNTIME.status, "A10", SECURITY, lambda: install_event_gate(cls))
+    run_intervention(RUNTIME.status, "A13", SECURITY, lambda: install_backfill_gate(cls))
     if not a5:
         RUNTIME.status.record(Result("A5", SECURITY, Outcome.OFF, a5.reason, a5.evidence))
     if not a6:

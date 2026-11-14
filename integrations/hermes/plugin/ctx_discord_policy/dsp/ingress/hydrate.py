@@ -409,6 +409,24 @@ class _Access:
         return channel, ""
 
 
+def history_readable(adapter: Any, message: Any, route: Any, guild_config: Any,
+                     register: Optional[StatusRegister] = None) -> bool:
+    """The message's own channel may be read back for this turn: its author can read the channel's history
+    (``view_channel`` and ``read_message_history``), and so can everyone who sees the answer there (the
+    audience rule of hydration, applied to the channel itself). Anything that cannot be evaluated: ``False``.
+    The members' history lane and Hermes' own history backfill of members' turns follow this."""
+    try:
+        cfg = guild_config if isinstance(guild_config, Mapping) else {}
+        access = _Access(adapter, message, route, cfg, register)
+        current = access.current
+        if current is None or access._author_reads(current)[0] is None:
+            return False
+        return access._audience_covered(current)
+    except Exception:
+        logger.warning("ctx_discord_policy: history access check failed; closed", exc_info=True)
+        return False
+
+
 # ── rendering ────────────────────────────────────────────────────────────────────────────────────
 
 

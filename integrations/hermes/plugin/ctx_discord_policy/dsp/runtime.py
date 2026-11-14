@@ -132,6 +132,8 @@ class Runtime:
         self.lock = threading.RLock()
         # The authority route of the turn running in this context (set per runner call, never inherited).
         self.route: ContextVar[Any] = ContextVar("ctx_discord_policy_route", default=None)
+        # True while Hermes builds the event of a member's message whose channel history is closed (A13).
+        self.backfill_closed: ContextVar[bool] = ContextVar("ctx_discord_policy_backfill_closed", default=False)
         self.armed = ArmedRegister()
         self.status = StatusRegister()
         self.instances: dict[str, Instance] = {}
