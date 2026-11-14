@@ -43,8 +43,8 @@ QUERY_SCHEMA = {
     "name": "ctx_query",
     "description": (
         "Query the CTX long-term knowledge store. Retrieval-only by default "
-        "(fast, no LLM); set synthesize=true for an LLM-synthesized answer over "
-        "the retrieved blocks (slower)."
+        "(fast, no synthesis step); set synthesize=true for an LLM-synthesized "
+        "answer over the retrieved blocks (slower)."
     ),
     "parameters": {
         "type": "object",
