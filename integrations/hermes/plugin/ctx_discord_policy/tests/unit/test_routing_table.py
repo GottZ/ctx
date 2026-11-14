@@ -168,8 +168,10 @@ def test_locked_profiles_reading(anchor):
         assert config.locked_profiles(anchor.home) == frozenset()
         values["locked_profiles"] = ["Default", " community ", "../x", 7]
         assert config.locked_profiles(anchor.home) == frozenset({"default", "community"})
-        values["locked_profiles"] = "default"
-        assert config.locked_profiles(anchor.home) is None      # not a list: everything counts as locked
+        values["locked_profiles"] = "Default, community"         # the text form of Hermes' settings form
+        assert config.locked_profiles(anchor.home) == frozenset({"default", "community"})
+        values["locked_profiles"] = {"default": True}
+        assert config.locked_profiles(anchor.home) is None      # neither list nor text: everything is locked
 
         def broken(home, key, default):
             raise RuntimeError("config.yaml could not be read")

@@ -11,18 +11,19 @@ tags: [discord, policy, security, moderation]
 provides_hooks: [pre_llm_call, pre_tool_call, on_session_end, on_session_reset, on_session_finalize]
 # Plugin settings (plugins.entries.ctx_discord_policy.settings.<key>) of the profile that runs the bot. Hermes Desktop
 # renders this as the form under Settings -> Plugins -> ctx_discord_policy; the plugin's own pages hang under the
-# same entry.
+# same entry. operators and locked_profiles declare no type on purpose: Hermes' form edits a `list` as JSON, a field
+# without a type is a one-line text field, and Hermes does not type-check its stored value, so a YAML list written
+# earlier stays valid. The plugin reads both forms (dsp/config.py list_entries). The form has no multi-line field.
 config_schema:
   operators:
-    type: list
-    default: []
+    default: ""
     label: Discord users who may use the bot's tools (operators)
-    description: "Discord user IDs, e.g. [\"123456789012345678\"]. Only their turns get tools, and only they can activate a server from Discord. Nothing in Discord can add an operator: no role, no server admin, no guidance text. Read again for every message, so a change applies without a restart. Empty = nobody gets tools and no server can be activated from Discord."
+    description: "Discord user IDs, separated by commas, e.g. 123456789012345678, 234567890123456789 (spaces around an ID don't matter; a list written in YAML or as [\"…\"] keeps working, an entry that is no user ID counts for nobody). Only their turns get tools, and only they can activate a server from Discord. Nothing in Discord can add an operator: no role, no server admin, no guidance text. Read again for every message, so a change applies without a restart. Empty = nobody gets tools and no server can be activated from Discord."
   frame_prompt:
     type: str
     default: ""
     label: Your text before every server's guidance (operator frame)
-    description: "Placed first in the context the plugin adds to each Discord turn, before what the plugin allows in that turn and before the server's own guidance. Empty = a built-in neutral frame. A server whose settings carry its own frame template (template overrides, operators only) uses that one instead."
+    description: "Placed first in the context the plugin adds to each Discord turn, before what the plugin allows in that turn and before the server's own guidance. Empty = a built-in neutral frame. A server whose settings carry its own frame template (template overrides, operators only) uses that one instead. This box holds one line and drops line breaks when you type in it: write a frame of several lines in the editor on the plugin's Operators page (Settings → Plugins → ctx_discord_policy → Operators, with the plugin's desktop half turned on) or in config.yaml."
   operator_label:
     type: str
     default: "the operator"
@@ -45,10 +46,9 @@ config_schema:
     label: Messages of other bots and webhooks in your servers
     description: "closed = in a server where the plugin is active or paused, messages of other bots and webhooks get no turn, whatever Hermes' own allow_bots says; member = where Hermes' allow_bots lets them in, they are answered like a member's message (no tools beyond the server's member tools). A bot or webhook is never an operator."
   locked_profiles:
-    type: list
-    default: []
+    default: ""
     label: Hermes profiles that server members never reach
-    description: "Profile names. A locked profile is never offered in /policy and never runs a turn for a member of a server, whatever routes there. Read from the default profile; if the list cannot be read, every profile counts as locked."
+    description: "Profile names, separated by commas, e.g. community, beta (a list written in YAML or as [\"…\"] keeps working). A locked profile is never offered in /policy and never runs a turn for a member of a server, whatever routes there. Read from the default profile; if the list cannot be read, or an entry typed here is no profile name, every profile counts as locked."
   member_search:
     type: str
     default: auto

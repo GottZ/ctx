@@ -43,7 +43,12 @@ def test_manifest_fields():
     assert manifest["requires_hermes"].startswith(">=")
     assert set(manifest["provides_hooks"]) >= {"pre_llm_call", "pre_tool_call"}
     schema = manifest["config_schema"]
-    assert schema["operators"]["type"] == "list" and schema["operators"]["default"] == []
+    # #268: Hermes' form edits a ``list`` field as JSON; without a type the two list settings are text fields
+    # (Hermes' default type) and Hermes does not type-check the stored value, so YAML lists stay valid.
+    for key in ("operators", "locked_profiles"):
+        assert "type" not in schema[key] and schema[key]["default"] == "", key
+    assert "123456789012345678, 234567890123456789" in schema["operators"]["description"]
+    assert "Operators page" in schema["frame_prompt"]["description"]      # where the multi-line editor is
 
 
 def test_versions_agree():

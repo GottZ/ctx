@@ -52,10 +52,7 @@ def normalise(raw: Mapping[str, Any]) -> dict[str, Any]:
             continue
         value = raw.get(key, default)
         if key == "operators":
-            items = value if isinstance(value, (list, tuple)) else []
-            out[key] = [str(v).strip() for v in items
-                        if (isinstance(v, str) or (isinstance(v, int) and not isinstance(v, bool)))
-                        and is_snowflake(str(v).strip())]
+            out[key] = config.operator_ids(None, value)     # the policy's own reading, every form
         elif isinstance(default, bool):
             out[key] = value if isinstance(value, bool) else default
         elif isinstance(default, int):
@@ -110,7 +107,9 @@ def validate(values: Any) -> dict[str, Any]:
                     raise SettingsError(key, f"{entry!r} is not a Discord user ID (17–20 digits).")
                 if text not in ids:
                     ids.append(text)
-            clean[key] = ids
+            # Stored as the text form Hermes' own settings form saves (its writer refuses a list for this
+            # text field); config.list_entries reads it back as these ids.
+            clean[key] = ", ".join(ids)
         elif key == "guild_prompt_max_chars":
             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= HARD_PROMPT_LIMIT:
                 raise SettingsError(key, f"The guidance limit must be a whole number from 0 to {HARD_PROMPT_LIMIT}.")
