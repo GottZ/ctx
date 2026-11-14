@@ -268,8 +268,8 @@ async def test_policy_active_shows_locked_areas_only_to_the_operator(ui):
     try:
         op = (await command(h, user=OP_ID, perms=PLAIN))[0]
         manager = (await command(h, user=ADMIN_USER_ID, perms=MANAGE))[0]
-        common = ["Identity", "Channels", "Guidance", "Progress"]
-        locked = ["🔒 Worklog", "🔒 Member tools", "🔒 Operator turns", "🔒 Managers"]
+        common = ["Identity", "Channels", "Guidance", "Progress", "Models"]  # S13 panel
+        locked = ["🔒 Worklog", "🔒 Member tools", "🔒 Operator turns", "🔒 Managers", "🔒 Profile"]  # S12 panel
         assert labels(op) == common + locked + ["Status", "Pause", "Unbind…"]
         assert labels(manager) == common + ["Status", "Pause"]
         assert set(locked) <= set(field_names(op))

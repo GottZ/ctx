@@ -66,6 +66,11 @@ def on_pre_llm_call(*, session_id: str = "", turn_id: str = "", **_: Any) -> Opt
                 RUNTIME.turn_routes.put(key, route)
             if not route.is_operator:
                 RUNTIME.public_sessions.put(key[0], time.time())
+        from ..routing import check as routing_check  # S12: A4-P at the turn start (late: routing imports policy)
+
+        closed = routing_check.turn_refusal(route)
+        if closed is not None:
+            return _block(closed)
         from .. import wiring  # late: wiring imports the prompt engine and the store
 
         return {"context": wiring.turn_context(route)}

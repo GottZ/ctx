@@ -111,3 +111,42 @@ def setting(home: os.PathLike, key: str) -> Any:
     if key == "guild_prompt_max_chars":
         return max(0, min(value, HARD_PROMPT_LIMIT))
     return value
+
+
+# --- S12/S13 --- profiles the policy never opens to members (PROFILE-PER-GUILD §4.3) ------------------
+
+import re  # noqa: E402  (kept inside this block)
+
+DEFAULTS["locked_profiles"] = []
+
+_PROFILE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+
+
+def locked_profiles(root: os.PathLike) -> Optional[frozenset[str]]:
+    """``settings.locked_profiles`` of the default root (the owner of ``profile_routes``).
+
+    A locked profile is never offered and never opened to public messages, whatever routes there.
+    ``None`` means the list could not be read: callers treat every profile as locked (closed)."""
+    try:
+        raw = _raw(root, "locked_profiles")
+    except Exception:
+        logger.exception("ctx_discord_policy: reading settings.locked_profiles failed; treating every "
+                         "profile as locked")
+        return None
+    if raw is None:
+        return frozenset()
+    if not isinstance(raw, (list, tuple)):
+        _warn_once(root, "settings.locked_profiles must be a list of profile names; treating every profile "
+                         "as locked until it is fixed")
+        return None
+    out = set()
+    for entry in raw:
+        name = entry.strip().lower() if isinstance(entry, str) else ""
+        if _PROFILE_ID.fullmatch(name):
+            out.add(name)
+        else:
+            _warn_once(root, f"settings.locked_profiles: ignoring {entry!r} (not a profile name)")
+    return frozenset(out)
+
+
+# --- end S12/S13 -------------------------------------------------------------------------------------

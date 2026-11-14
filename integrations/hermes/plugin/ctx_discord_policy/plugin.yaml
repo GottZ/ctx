@@ -32,3 +32,7 @@ config_schema:
     type: bool
     default: true
     description: "Direct-message operators about activation requests, guidance changes and degraded protection"
+  locked_profiles:
+    type: list
+    default: []
+    description: "Hermes profiles never opened to server members and never offered in /policy (read from the default profile)"

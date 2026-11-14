@@ -154,6 +154,9 @@ def test_schema_has_no_authority_field(store_mod):
         "operator_lane.channel_hydration",
         "managers.mode", "managers.role_ids",
         "audit_channel", "updated_by", "updated_at",
+        # S12/S13: the chosen Hermes profile and models (choices among what the Hermes configuration allows)
+        "routing.profile", "routing.set_by", "routing.set_at",
+        "models.public", "models.operator", "models.public_choices", "models.manager_pick", "models.on_unavailable",
     ]
 
 

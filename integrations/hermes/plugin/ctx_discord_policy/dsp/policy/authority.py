@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from .. import config, hermes
+from ..routing import check as routing_check  # S12: A4-P
 from ..runtime import RUNTIME
 from . import hooks
 from .routes import Route, platform_is_discord
@@ -109,6 +110,9 @@ def refusal(runner: Any, event: Any, route: Optional[Route], target: Optional[st
         return "its route is no longer valid (guild paused, operator removed, or source changed)"
     if target is None or target != route.target_home_key or not hooks.armed_live(target):
         return "the profile it routes to is not armed with ctx_discord_policy"
+    closed = routing_check.refusal(runner, event, route, target)  # A4-P (S12/S13): public routes only
+    if closed is not None:
+        return closed
     if not route.is_operator and is_command(event):
         return "gateway commands are reserved for the operator"
     key_of = getattr(runner, "_session_key_for_source", None)

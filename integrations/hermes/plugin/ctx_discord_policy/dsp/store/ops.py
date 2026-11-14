@@ -404,3 +404,144 @@ def reset_fields(store: PolicyStore, bot_id: str, guild_id: str, paths: Any, *, 
     mutate = _guild_mutation(bot_id, guild_id, by=by, expected_rev=expected_rev, prompt_cap=prompt_cap,
                              fields=fields, guidance=guidance)
     return store.update(mutate, by=by, via=via)
+
+
+# --- S12/S13 --- Hermes profile and models per server (PROFILE-PER-GUILD §3.2, §4.7, §B5) ------------
+#
+# The routing and model fields carry checks that depend on the host (is the profile served and armed,
+# does it have the provider's credential, is the context window large enough). Those checks live in
+# ``dsp.routing`` and ``dsp.models``; the operations below are the store half, and ``update_fields`` refuses
+# these fields, so no settings write skips the checks. An import (host access only, ``import_guild``) can
+# still carry them unchecked: a profile chosen that way is not routed until it is applied, so A4-P keeps the
+# server closed for members, and K8 checks a model's credential again on every turn.
+
+from typing import Callable  # noqa: E402  (imports of this block kept inside it: other layers extend this file)
+
+from . import schema  # noqa: E402
+from .file import ConflictError  # noqa: E402
+
+ROUTING_PATHS = ("routing.profile", "routing.set_by", "routing.set_at")
+MODEL_PATHS = ("models.public", "models.operator", "models.public_choices", "models.on_unavailable")
+MANAGER_PICK_PATH = "models.manager_pick"
+
+_NOT_SETTINGS = _NOT_SETTINGS + ROUTING_PATHS + MODEL_PATHS + (MANAGER_PICK_PATH,)
+
+# effects(guild_before, profile) runs under the store lock after the revision check and before the
+# write; raising aborts the operation with nothing written (used for the Hermes configuration write).
+Effects = Callable[[dict[str, Any], Optional[str]], Any]
+
+
+def _commit(store: PolicyStore, mutate: Callable[[dict[str, Any]], list[dict[str, Any]]], *, by: str,
+            via: Optional[str]) -> Snapshot:
+    """``store.update`` with the audit origin (``via``, else the context's ``origin(...)``)."""
+    return store.update(mutate, by=by, via=via)
+
+
+def _configured(document: dict[str, Any], bot_id: str, guild_id: str, expected_rev: Optional[int]) -> dict:
+    guild = _guilds(document, bot_id).get(guild_id)
+    if guild is None:
+        raise SchemaError(f"guild {guild_id} is not configured for bot {bot_id}")
+    base_rev = int(guild.get("rev", 0))   # the guild exists here, so this is ``Snapshot.guild_rev``
+    if expected_rev is not None and expected_rev != base_rev:
+        # Checked before any side effect: a stale panel must not change the Hermes configuration.
+        raise ConflictError(f"guild {guild_id} changed (rev {base_rev}, you had {expected_rev}); reload")
+    return guild
+
+
+def set_routing(store: PolicyStore, bot_id: str, guild_id: str, profile: Optional[str], *, by: str,
+                via: Optional[str] = None, expected_rev: Optional[int] = None, effects: Optional[Effects] = None,
+                reset_models: bool = True) -> Snapshot:
+    """Record the Hermes profile this server runs in (``None`` = the bot's own profile).
+
+    A changed profile resets ``models`` to their defaults (providers and credentials belong to the
+    profile, PROFILE-PER-GUILD §B5). ``effects`` (the Hermes configuration write) runs under the store
+    lock, after the revision check, also when the profile is unchanged (re-applying is idempotent)."""
+    bot_id, guild_id = _require_ids(bot_id, guild_id)
+    if profile is not None:
+        schema._profile_name("routing.profile", profile)
+
+    def mutate(document: dict[str, Any]) -> list[dict[str, Any]]:
+        guild = _configured(document, bot_id, guild_id, expected_rev)
+        before = copy.deepcopy(guild)
+        if effects is not None:
+            effects(before, profile)
+        old = (guild.get("routing") or schema.routing_defaults()).get("profile")
+        if old == profile:
+            return []
+        changes = [{"bot": bot_id, "guild": guild_id, "field": "routing.profile", "old": old, "new": profile,
+                    "expected_rev": expected_rev}]
+        guild["routing"] = {"profile": profile, "set_by": str(by)[:64], "set_at": utc_now()}
+        if reset_models and guild.get("models") != schema.models_defaults():
+            changes.append({"bot": bot_id, "guild": guild_id, "field": "models", "old": guild.get("models"),
+                            "new": schema.models_defaults(), "expected_rev": expected_rev})
+            guild["models"] = schema.models_defaults()
+        return changes
+
+    return _commit(store, mutate, by=by, via=via)
+
+
+def adopt_routing(store: PolicyStore, bot_id: str, guild_id: str, profile: str, *, by: str,
+                  via: Optional[str] = None, expected_rev: Optional[int] = None,
+                  effects: Optional[Effects] = None) -> Snapshot:
+    """Take over a hand-written Hermes route of this server (PROFILE-PER-GUILD §4.7): the server already
+    runs in ``profile``, so its models stay; only the ownership of the route changes."""
+    return set_routing(store, bot_id, guild_id, profile, by=by, via=via, expected_rev=expected_rev, effects=effects,
+                       reset_models=False)
+
+
+def set_models(store: PolicyStore, bot_id: str, guild_id: str, changes: dict[str, Any], *, by: str,
+               via: Optional[str] = None, expected_rev: Optional[int] = None) -> Snapshot:
+    """Set operator model settings by path (``{"models.public": {"provider": …, "model": …}}``).
+
+    A manager's pick that is no longer in ``models.public_choices`` is cleared in the same write."""
+    bot_id, guild_id = _require_ids(bot_id, guild_id)
+    if not isinstance(changes, dict) or not changes:
+        raise SchemaError("models: no settings given")
+    for path in changes:
+        if path not in MODEL_PATHS:
+            raise SchemaError(f"{path}: not a model setting of the operator")
+
+    def mutate(document: dict[str, Any]) -> list[dict[str, Any]]:
+        guild = _configured(document, bot_id, guild_id, expected_rev)
+        candidate = copy.deepcopy(guild)
+        for path, value in changes.items():
+            candidate["models"][path.split(".", 1)[1]] = copy.deepcopy(value)
+        models = candidate["models"]
+        if models.get("manager_pick") is not None and models["manager_pick"] not in (models.get("public_choices") or []):
+            models["manager_pick"] = None
+        clean, _ = validate_guild(candidate, strict=True)
+        records = []
+        for leaf in ("public", "operator", "public_choices", "on_unavailable", "manager_pick"):
+            old, new = guild["models"].get(leaf), clean["models"][leaf]
+            if old != new:
+                records.append({"bot": bot_id, "guild": guild_id, "field": f"models.{leaf}", "old": old, "new": new,
+                                "expected_rev": expected_rev})
+        guild["models"] = clean["models"]
+        return records
+
+    return _commit(store, mutate, by=by, via=via)
+
+
+def set_manager_pick(store: PolicyStore, bot_id: str, guild_id: str, pick: Optional[dict[str, str]], *, by: str,
+                     via: Optional[str] = None, expected_rev: Optional[int] = None) -> Snapshot:
+    """A server manager's choice of the members' model; only models the operator released count."""
+    bot_id, guild_id = _require_ids(bot_id, guild_id)
+    if pick is not None:
+        pick = schema._model_ref(MANAGER_PICK_PATH, pick)
+
+    def mutate(document: dict[str, Any]) -> list[dict[str, Any]]:
+        guild = _configured(document, bot_id, guild_id, expected_rev)
+        models = guild.get("models") or schema.models_defaults()
+        if pick is not None and pick not in (models.get("public_choices") or []):
+            raise SchemaError("models.manager_pick: the operator has not released this model for this server")
+        if models.get("manager_pick") == pick:
+            return []
+        old, models["manager_pick"] = models.get("manager_pick"), pick
+        guild["models"] = models
+        return [{"bot": bot_id, "guild": guild_id, "field": MANAGER_PICK_PATH, "old": old, "new": pick,
+                 "expected_rev": expected_rev}]
+
+    return _commit(store, mutate, by=by, via=via)
+
+
+# --- end S12/S13 -------------------------------------------------------------------------------------

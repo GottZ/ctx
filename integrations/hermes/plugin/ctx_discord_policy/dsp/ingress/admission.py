@@ -24,6 +24,7 @@ from ..adapt.status import SECURITY, Outcome, Result
 from ..policy import hooks
 from ..policy.lanes import PublicLanes
 from ..policy.routes import AMBIENT, DIRECT, OPERATOR, PUBLIC, Route, snowflake
+from ..routing import check as routing_check  # S12: A4-P
 from ..runtime import RUNTIME
 from . import classify
 
@@ -192,6 +193,10 @@ def _decide(adapter: Any, message: Any) -> Optional[Decision]:
             return None
     if not hooks.armed_live(target):
         _note_unarmed(target)
+        return None
+    if lane == PUBLIC and routing_check.admission_refusal(  # A4-P (S12): busy-session follow-ups use this route
+            adapter, bot_id=binding.bot_id, guild_id=guild_id, channel_id=channel_id, author_id=author_id,
+            message_id=str(getattr(message, "id", "") or ""), target=target) is not None:
         return None
     me = getattr(guild, "me", None)
     bot_name = (getattr(me, "display_name", None) or getattr(self_user, "display_name", None)

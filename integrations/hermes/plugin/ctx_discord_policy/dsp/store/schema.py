@@ -41,6 +41,50 @@ def is_snowflake(value: Any) -> bool:
     return isinstance(value, str) and bool(_SNOWFLAKE.fullmatch(value))
 
 
+# --- S12/S13 --- Hermes profile and models per server ---------------------------------------------
+# ``routing.profile`` only chooses among profiles the Hermes configuration lets the plugin route to
+# (served, armed, no Discord bot of their own, not in ``settings.locked_profiles``); ``models`` only
+# choose among providers the chosen profile has credentials for. Neither maps to authority.
+
+# Hermes' profile id rule (hermes_constants.PROFILE_ID_RE), mirrored so unit tests run without Hermes.
+PROFILE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+# Hermes provider ids, including ``custom:<name>`` (PROFILE-PER-GUILD §B5).
+PROVIDER_ID = re.compile(r"[a-z0-9][a-z0-9._:-]{0,63}")
+MODEL_ID_MAX = 200
+ON_UNAVAILABLE = ("profile", "close")
+MODEL_CHOICES_MAX = 25
+
+
+def routing_defaults() -> dict[str, Any]:
+    return {"profile": None, "set_by": None, "set_at": None}
+
+
+def models_defaults() -> dict[str, Any]:
+    return {"public": None, "operator": None, "public_choices": [], "manager_pick": None,
+            "on_unavailable": "profile"}
+
+
+def _profile_name(path: str, value: Any) -> str:
+    if not isinstance(value, str) or not PROFILE_ID.fullmatch(value):
+        raise SchemaError(f"{path}: not a Hermes profile name (lowercase letters, digits, '-' or '_')")
+    return value
+
+
+def _model_ref(path: str, value: Any) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != {"provider", "model"}:
+        raise SchemaError(f"{path}: expected {{provider, model}}")
+    provider, model = value["provider"], value["model"]
+    if not isinstance(provider, str) or not PROVIDER_ID.fullmatch(provider):
+        raise SchemaError(f"{path}.provider: not a Hermes provider id")
+    if not isinstance(model, str) or not model.strip() or model != model.strip():
+        raise SchemaError(f"{path}.model: expected a model id without surrounding spaces")
+    _text(MODEL_ID_MAX, allow_empty=False)(f"{path}.model", model)
+    return {"provider": provider, "model": model}
+
+
+# --- end S12/S13 ---------------------------------------------------------------------------------
+
+
 def guild_defaults() -> dict[str, Any]:
     """Defaults after activation (OPEN L8): direct address only, no ambient channel, public lane limited
     to reading the current channel's history, no worklog until the operator picks a channel."""
@@ -62,6 +106,10 @@ def guild_defaults() -> dict[str, Any]:
         "audit_channel": None,
         "updated_by": None,
         "updated_at": None,
+        # --- S12/S13 --- Hermes profile and models of this server (PROFILE-PER-GUILD §5.1, §B5)
+        "routing": routing_defaults(),
+        "models": models_defaults(),
+        # --- end S12/S13 ---
     }
 
 
@@ -227,6 +275,20 @@ _GUILD_FIELDS: dict[str, Any] = {
     "audit_channel": _optional(_snowflake),
     "updated_by": _optional(_text(64)),
     "updated_at": _optional(_text(40)),
+    # --- S12/S13 ---
+    "routing": {
+        "profile": _optional(_profile_name),
+        "set_by": _optional(_text(64)),
+        "set_at": _optional(_text(40)),
+    },
+    "models": {
+        "public": _optional(_model_ref),
+        "operator": _optional(_model_ref),
+        "public_choices": _list(_model_ref, MODEL_CHOICES_MAX),
+        "manager_pick": _optional(_model_ref),
+        "on_unavailable": _choice(ON_UNAVAILABLE),
+    },
+    # --- end S12/S13 ---
 }
 
 

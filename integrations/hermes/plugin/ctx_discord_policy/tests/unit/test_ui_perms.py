@@ -31,6 +31,10 @@ EXPECTED = {
     "operators": set(),
     "status.full": {O},
     "status.summary": {O, M},
+    # S12/S13 (PROFILE-PER-GUILD §4.1, §B6)
+    "profile": {O},
+    "model": {O},
+    "model.pick": {O, M},
 }
 
 
@@ -80,7 +84,7 @@ def test_every_schema_field_belongs_to_exactly_one_setting(perms, anchor):
 def test_operator_only_settings_are_exactly_the_locked_rows_of_the_design(perms):
     locked = {k for k, roles in EXPECTED.items() if roles == {O}}
     assert locked == {"guild.activate", "guild.unbind", "worklog", "public_lanes", "operator_lane", "managers",
-                      "templates", "status.full"}
+                      "templates", "status.full", "profile", "model"}
     for key in locked:
         assert not perms.may(actor(perms, "manager"), key)
 
@@ -88,7 +92,8 @@ def test_operator_only_settings_are_exactly_the_locked_rows_of_the_design(perms)
 def test_no_setting_writes_the_operator_list_or_authority(perms):
     written = {f for s in perms.TABLE for f in s.fields}
     assert not {f for f in written if "operator" in f and f not in ("operator_lane.channel_hydration",
-                                                                       "prompts.guild_in_operator_lane")}
+                                                                       "prompts.guild_in_operator_lane",
+                                                                       "models.operator")}  # model of operator turns
     assert perms.SETTINGS["operators"].roles == frozenset()
 
 

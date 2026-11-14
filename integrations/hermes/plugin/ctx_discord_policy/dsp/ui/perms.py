@@ -76,6 +76,16 @@ TABLE: tuple = (
     # Reading the adaptation layer's status.
     Setting("status.full", "the full protection status", _O),
     Setting("status.summary", "the protection summary", _OM),
+    # --- S12/S13 --- Hermes profile and models of the server (PROFILE-PER-GUILD §4.1, §B6)
+    Setting("profile", "the Hermes profile this server runs in", _O,
+            ("routing.profile", "routing.set_by", "routing.set_at"),
+            note="The profile decides the tools, credentials and memory every turn here can reach."),
+    Setting("model", "the models this server uses", _O,
+            ("models.public", "models.operator", "models.public_choices", "models.on_unavailable"),
+            note="Models run on the operator's credentials and cost."),
+    Setting("model.pick", "the members' model from the list the operator released", _OM,
+            ("models.manager_pick",)),
+    # --- end S12/S13 ---
 )
 
 SETTINGS: dict = {s.key: s for s in TABLE}
