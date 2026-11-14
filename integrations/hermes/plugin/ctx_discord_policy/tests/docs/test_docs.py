@@ -360,21 +360,25 @@ def test_files_of_the_plugin_outside_its_directory_are_scanned_with_also(tmp_pat
     assert run("e", "--also", "assets/missing.webp") == 2
 
 
-def test_binary_files_are_scanned_as_their_text_runs(tmp_path):
-    """An image is scanned for its text fields (printable runs of six characters or more), not as text: the
-    compressed data of a banner holds short letter pairs at random, which the short-word rule would report."""
+def test_binary_files_are_scanned_whole_and_short_words_only_in_their_text_fields(tmp_path):
+    """An image is read whole (latin-1) for every rule but the short words: its compressed data holds short letter
+    pairs at random, which the short-word rule would report. Short words are looked for in its text fields:
+    printable ASCII runs of six characters or more, and UTF-16 runs."""
     scan = _scanner()
-    pats = _patterns(scan, tmp_path, ("word", "zq"), ("word", "zebraquokka"))
+    pats = _patterns(scan, tmp_path, ("word", "zq"), ("word", "zebraquokka"), ("word", "quok"))
 
     def hits(name, data):
-        path = tmp_path / name
-        path.write_bytes(data)
-        return scan.scan_text(name, scan._file_text(path), KEY, pats, generic=False)
+        return [f for text, short in scan.blob_texts(name, data)
+                for f in scan.scan_text(name, text, KEY, pats, generic=False, short_words=short)]
 
     assert hits("notes.txt", b"\x00\x01zq\x02")                          # text: every token counts
     assert not hits("banner.webp", b"RIFF\x00\x01zq\x02\x9cZq\x00")       # chance bytes in image data
-    assert hits("banner.webp", b"RIFF\x00\x00XMP artist zq\x00")          # a text field of the image
+    assert hits("banner.webp", b"RIFF\x00\x00XMP artist zq\x00")          # an ASCII text field
+    assert hits("banner.webp", b"RIFF\x00XPAuthor\x00\x00" + "zq".encode("utf-16-le") + b"\x00\x00")  # EXIF XP*
+    assert hits("doc.pdf", b"/Author (\xfe\xff" + "zq".encode("utf-16-be") + b")")
+    assert hits("banner.webp", b"RIFF\x00\x00quok\x00")                   # four letters and more: anywhere
     assert hits("banner.webp", b"RIFF\x00EXIF\x00ZebraQuokka\x00")
+    assert hits("banner.webp", "z\x00e\x00b\x00r\x00a\x00q\x00u\x00o\x00k\x00k\x00a\x00".encode("latin-1"))
 
 
 def test_scanner_refuses_to_run_without_key(monkeypatch):

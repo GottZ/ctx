@@ -68,9 +68,13 @@ GENERIC_RULES = (
 # The scanner spells its own plain generic rules; keyed rules still apply to it.
 GENERIC_EXEMPT = {"ci/private_scan.py"}
 BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".zip", ".gz", ".whl", ".pdf"}
-# Text inside a binary file (EXIF and XMP fields, archive member names) is printable ASCII; shorter runs are
-# almost always chance bytes of the compressed data, where short words would match at random.
+# A binary file (image, archive) is no text. Read as latin-1, its compressed data holds letter pairs at random,
+# which the short-word rule reports (22 matches in the banner of 193 KB). Every other rule reads the whole file that
+# way; short words are looked for only where text fields live: printable ASCII runs of six characters or more (EXIF
+# and XMP values, archive member names) and UTF-16 runs (EXIF XP* fields, PDF strings). A short word standing alone
+# in a shorter ASCII field cannot be told from chance bytes there and is not found.
 PRINTABLE_RUN = re.compile(rb"[\x20-\x7e]{6,}")
+UTF16_RUNS = ((re.compile(rb"(?:[\x20-\x7e]\x00){2,}"), "utf-16-le"), (re.compile(rb"(?:\x00[\x20-\x7e]){2,}"), "utf-16-be"))
 
 
 class ScanError(RuntimeError):
@@ -191,7 +195,8 @@ def _line_of(text: str, offset: int) -> int:
     return text.count("\n", 0, max(offset, 0)) + 1
 
 
-def scan_text(label: str, text: str, key: bytes, patterns: Patterns, *, contexts=(), generic: bool = True) -> list[str]:
+def scan_text(label: str, text: str, key: bytes, patterns: Patterns, *, contexts=(), generic: bool = True,
+              short_words: bool = True) -> list[str]:
     findings: set[str] = set()
     masked = _mask(text, contexts)
 
@@ -209,7 +214,7 @@ def scan_text(label: str, text: str, key: bytes, patterns: Patterns, *, contexts
                 for start in range(0, len(flat) - length + 1):
                     if digest(key, "word", flat[start:start + length]) in words:
                         hit("word", chunk.start())
-    if words:
+    if words and short_words:
         # Short words only as whole sub-tokens (CamelCase and letter/digit boundaries split: ZqBot, zq2).
         for match in SHORT_TOKEN_RE.finditer(_fold(masked)):
             token = match.group(0).lower()
@@ -335,16 +340,20 @@ def history_blobs(root: Path, current: set[str], also: list[str] = ()) -> list[t
     return blobs
 
 
-def _blob_text(name: str, data: bytes) -> str:
-    if Path(name).suffix.lower() in BINARY_SUFFIXES:
-        return "\n".join(run.decode("ascii") for run in PRINTABLE_RUN.findall(data))
-    return data.decode("utf-8", "replace")
+def blob_texts(name: str, data: bytes) -> list[tuple[str, bool]]:
+    """What to scan of one file's content: ``(text, look for short words)`` pairs (see ``PRINTABLE_RUN``)."""
+    if Path(name).suffix.lower() not in BINARY_SUFFIXES:
+        return [(data.decode("utf-8", "replace"), True)]
+    fields = [run.decode("ascii") for run in PRINTABLE_RUN.findall(data)]
+    for rule, codec in UTF16_RUNS:
+        fields += [run.decode(codec) for run in rule.findall(data)]
+    return [(data.decode("latin-1"), False), ("\n".join(fields), True)]
 
 
-def _file_text(path: Path) -> str:
+def _file_texts(path: Path) -> list[tuple[str, bool]]:
     if path.is_symlink():
-        return os.readlink(path)
-    return _blob_text(path.name, path.read_bytes())
+        return [(os.readlink(path), True)]
+    return blob_texts(path.name, path.read_bytes())
 
 
 def _load_key(args: argparse.Namespace) -> bytes:
@@ -405,12 +414,12 @@ def main(argv: list[str] | None = None) -> int:
         for name, path in [(n, args.root / n) for n in files] + [(n, top / n) for n in extra]:
             if not (path.is_file() or path.is_symlink()):
                 continue
-            text = _file_text(path)
-            if name == "ci/private_patterns.txt":
-                # Only comments can carry prose; hash lines are validated by load_patterns().
-                text = "\n".join(line if line.startswith("#") else "" for line in text.splitlines())
-            findings += scan_text(name, text, key, patterns, contexts=contexts,
-                                  generic=name not in GENERIC_EXEMPT)
+            for text, short in _file_texts(path):
+                if name == "ci/private_patterns.txt":
+                    # Only comments can carry prose; hash lines are validated by load_patterns().
+                    text = "\n".join(line if line.startswith("#") else "" for line in text.splitlines())
+                findings += scan_text(name, text, key, patterns, contexts=contexts,
+                                      generic=name not in GENERIC_EXEMPT, short_words=short)
             findings += scan_text(f"{name} (file name)", name, key, patterns, contexts=contexts)
         messages = [] if args.no_commits else commit_messages(args.root, args.also)
         for sha, body in messages:
@@ -423,8 +432,8 @@ def main(argv: list[str] | None = None) -> int:
         for label, sha in history:
             if label.startswith("ci/private_patterns.txt@") or label.startswith("ci/private_scan.py@"):
                 continue  # superseded pattern files carry digests by design; the scanner spells generic rules
-            text = _blob_text(label.rsplit("@", 1)[0], _git(args.root, "cat-file", "-p", sha))
-            findings += scan_text(f"history {label}", text, key, patterns, contexts=contexts)
+            for text, short in blob_texts(label.rsplit("@", 1)[0], _git(args.root, "cat-file", "-p", sha)):
+                findings += scan_text(f"history {label}", text, key, patterns, contexts=contexts, short_words=short)
         for name in args.text_env:
             findings += scan_text(f"${name}", os.environ.get(name, ""), key, patterns, contexts=contexts)
     except (ScanError, OSError) as exc:
