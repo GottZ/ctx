@@ -713,6 +713,8 @@ func manageCmd(getClient func() (*Client, error)) *cobra.Command {
 			"a success:false envelope prints the JSON and exits 1 with the reason.",
 		Example: `  ctx manage update <id> '{"tags":["a","b"]}'
   ctx manage stats
+  ctx manage purge '' '{"scope":"acme:import","tags":["import-run-7"]}'                     # dry run: counts only
+  ctx manage purge '' '{"scope":"acme:import","tags":["import-run-7"],"confirm_blocks":1234}' # deletes for good
   ctx api POST /api/manage '{"action":"stats"}'   # the long form`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

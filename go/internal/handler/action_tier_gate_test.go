@@ -31,6 +31,8 @@ func TestActionTier_Classification(t *testing.T) {
 		// default → this row turns RED (the S9 probe).
 		{"backend-reorder", "", tierTenantAdmin},
 		{"tenant-quota-get", "", tierTenantAdmin}, // read own quota (transparency)
+		// purge (#202): own-tenant scopes only, by the store's reader rule.
+		{"purge", "", tierTenantAdmin},
 		// model-alias-* (W02-04): tenant-admin tier; the field tiers
 		// (_global/foreign scope 404-equivalent, lowering a sensitivity
 		// server-admin + confirm, tenant ceiling) live in the handler.
