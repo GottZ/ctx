@@ -227,6 +227,17 @@ def test_owner_is_allowed_only_inside_the_repository_slug(tmp_path, monkeypatch)
     assert scan._owner_contexts(tmp_path) == ()
 
 
+def _git_repo(repo: Path, stream: str) -> None:
+    """A throwaway repository from a fast-import stream (no identity configuration involved)."""
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "fast-import", "--quiet"], input=stream.encode("utf-8"), check=True,
+                   capture_output=True)
+
+
+def _checkout(repo: Path, branch: str) -> None:
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-f", branch], check=True, capture_output=True)
+
+
 def test_history_and_extra_text_are_scanned(tmp_path, monkeypatch):
     """A value added in one commit and removed in the next is still found (PR refs keep it)."""
     scan = _scanner()
@@ -250,11 +261,8 @@ def test_history_and_extra_text_are_scanned(tmp_path, monkeypatch):
             body += [f"M 100644 inline {name}", f"data {len(raw)}", data]
         return "\n".join(body) + "\n"
 
-    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
-    stream = commit(1, "the zebraquokka was here\n") + commit(2, "nothing to see\n", parent=1)
-    subprocess.run(["git", "-C", str(repo), "fast-import", "--quiet"], input=stream.encode("utf-8"), check=True,
-                   capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-f", "main"], check=True, capture_output=True)
+    _git_repo(repo, commit(1, "the zebraquokka was here\n") + commit(2, "nothing to see\n", parent=1))
+    _checkout(repo, "main")
     monkeypatch.setattr(scan, "PATTERNS", repo / "ci" / "private_patterns.txt")
     assert scan.main(["--root", str(repo), "--key-file", str(key_file)]) == 1
     assert scan.main(["--root", str(repo), "--key-file", str(key_file), "--no-history"]) == 0
@@ -290,13 +298,11 @@ def test_scan_inside_a_larger_repository_covers_the_plugin_directory_only(tmp_pa
             raw = data.encode("utf-8")
             body += [f"M 100644 inline {name}", f"data {len(raw)}", data]
         stream.append("\n".join(body) + "\n")
-    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "fast-import", "--quiet"], input="".join(stream).encode("utf-8"),
-                   check=True, capture_output=True)
+    _git_repo(repo, "".join(stream))
     monkeypatch.setattr(scan, "PATTERNS", plugin / "ci" / "private_patterns.txt")
 
     def run(branch, *extra):
-        subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-f", branch], check=True, capture_output=True)
+        _checkout(repo, branch)
         return scan.main(["--root", str(plugin), "--key-file", str(key_file), *extra])
 
     assert run("b") == 0                    # the word only outside the plugin, in a file and a commit message
@@ -338,13 +344,11 @@ def test_files_of_the_plugin_outside_its_directory_are_scanned_with_also(tmp_pat
             raw = data.encode("utf-8")
             body += [f"M 100644 inline {name}", f"data {len(raw)}", data]
         stream.append("\n".join(body) + "\n")
-    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "fast-import", "--quiet"], input="".join(stream).encode("utf-8"),
-                   check=True, capture_output=True)
+    _git_repo(repo, "".join(stream))
     monkeypatch.setattr(scan, "PATTERNS", plugin / "ci" / "private_patterns.txt")
 
     def run(branch, *extra):
-        subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-f", branch], check=True, capture_output=True)
+        _checkout(repo, branch)
         return scan.main(["--root", str(plugin), "--key-file", str(key_file), *extra])
 
     also = ("--also", workflow, "--also", banner)
