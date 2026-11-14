@@ -136,6 +136,7 @@ func TestStatuslineWithoutCacheDir(t *testing.T) {
 	isolateStatuslineDirs(t)
 	t.Setenv("XDG_CACHE_HOME", "")
 	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "") // os.UserHomeDir on Windows
 	cwd := t.TempDir()
 	t.Chdir(cwd)
 	if p := statuslineCachePath("x"); p != "" {

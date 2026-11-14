@@ -75,11 +75,12 @@ const statuslineCallBudget = 500 * time.Millisecond
 
 // The health states the statusline knows besides the server's own status
 // words. A call that ran out of statuslineCallBudget is no evidence that the
-// server is down (#265: a healthy /health answered in 350–580 ms), so it is its
-// own state — unknown — and not the offline one.
+// server is down (#265: a healthy /health answered in 350–580 ms), so "no
+// answer" is its own state and not the offline one. (A status word outside the
+// server's vocabulary, "unknown" included, still renders as offline.)
 const (
 	healthError   = "error"   // refused, unreachable, or an answer that is no health document
-	healthTimeout = "timeout" // no answer within statuslineCallBudget: state unknown
+	healthTimeout = "timeout" // no answer within statuslineCallBudget
 )
 
 // ── ANSI helpers ────────────────────────────────────────────────────.
@@ -214,7 +215,7 @@ func healthIndicator(status string) string {
 		return "" // healthy: no indicator
 	case "degraded":
 		return " " + ansiYellow + "\uEA6C " + ansiReset
-	case healthTimeout: // no answer within the budget: unknown, not offline
+	case healthTimeout: // no answer within the budget, not offline
 		return " " + ansiDim + "\uF252 " + ansiReset
 	default: // unhealthy, error, unknown
 		return " " + ansiRed + "\uF071 " + ansiReset
@@ -313,7 +314,7 @@ func fetchHealth(c *Client, baseURL string) string {
 
 // failedHealthState maps a failed health call to its state: out of the
 // budget (the client's timeout, while connecting or while reading the body)
-// is unknown; everything else — refused, unresolvable, reset — is offline.
+// is no answer; everything else — refused, unresolvable, reset — is offline.
 func failedHealthState(err error) string {
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
@@ -365,8 +366,8 @@ DISPLAY COMPONENTS:
   project 421●▕██▋17%          ▏ 5h:92% │ 7d:41% │ $8.14 │ Opus
   │       │  │└─ smooth progress bar (128 resolution steps, embedded %)
   │       │  └── health indicator (hidden when ok; U+EA6C degraded, U+F252 no
-  │       │      answer within the call budget = unknown, U+F071 unhealthy
-  │       │      or offline)
+  │       │      answer within the call budget, U+F071 unhealthy or
+  │       │      offline)
   │       └───── block count with document icon (nerdfont U+F09EE), shown
   │              whenever the stats call returned one
   └───────────── project directory name (from workspace.project_dir)

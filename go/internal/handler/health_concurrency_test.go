@@ -1,9 +1,10 @@
 // #265: /health probes its roles concurrently, so a healthy server answers in
-// the time of its slowest probe instead of the sum of all of them, and a base
+// the time of its slowest role instead of the sum of all of them, and a base
 // URL that several roles share is requested once per call. The egress bound of
 // the PR #9 doctrine (pingHost) stays: a role still stops at its first
-// reachable candidate, so the probe set never grows beyond what the sequential
-// form requested — sharing only shrinks it.
+// reachable candidate and never requests more than its own ordered walk, the
+// bound of a call stays the operator rows of the probed roles — sharing only
+// shrinks what is requested.
 //
 // Fixture hygiene follows health_test.go: loopback httptest servers and closed
 // loopback ports only.
@@ -139,6 +140,29 @@ func TestHealthProbesSharedHostOnce(t *testing.T) {
 			t.Errorf("requests first=%d second=%d, want 1 and 0 — /health must not request more than the first reachable candidate of a role", first.Load(), second.Load())
 		}
 	})
+}
+
+// TestHostProbesFinishedResultStands: a role that reaches a probe another role
+// already finished gets that result, also when the call's context has ended
+// in the meantime (a slow earlier candidate used the whole budget). The answer
+// must not depend on which of the two became ready first.
+func TestHostProbesFinishedResultStands(t *testing.T) {
+	var hits atomic.Int32
+	url := slowBackend(t, 0, &hits)
+	probes := newHostProbes()
+	if err := probes.ping(context.Background(), url); err != nil {
+		t.Fatalf("first probe: %v", err)
+	}
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := range 100 {
+		if err := probes.ping(ended, url); err != nil {
+			t.Fatalf("lookup %d of a finished reachable probe on an ended context = %v, want its result (nil)", i, err)
+		}
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("backend saw %d requests, want 1", n)
+	}
 }
 
 // TestHealthStatusEndsWithItsContext: every probe ends when the caller's

@@ -106,8 +106,9 @@ type healthResponse struct {
 //     but the visibility policy runs on compiled-in defaults)
 //
 // The database ping and the roles run concurrently (#265), so the answer takes
-// as long as the slowest probe, not the sum of all of them; a base URL that
-// several roles share is requested once per call (hostProbes). Every probe
+// as long as the slowest role (its candidates in order), not the sum of all
+// roles; a base URL that several roles share is requested once per call
+// (hostProbes). Every probe
 // runs on ctx and HealthStatus returns only after all of them returned, so a
 // cancelled caller ends every probe and none outlives the call.
 func HealthStatus(ctx context.Context, pool *pgxpool.Pool, snap []backends.Backend, dreamEnabled bool, blocktypeRegistry string) healthResponse {
@@ -261,9 +262,10 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 // for themselves on its own chain calls.
 //
 // The candidates of one role stay in order and the role stops at the first
-// reachable one, as before: the probe set of a call never grows beyond what
-// the sequential form requested. probes only removes repeats — a base URL
-// another role of the same call already probed is not requested again.
+// reachable one, as before: a role never requests more than its own ordered
+// walk, and the bound of a call stays the operator rows of the probed roles.
+// probes only removes repeats — a base URL another role of the same call
+// already probed is not requested again.
 func roleReachable(ctx context.Context, snap []backends.Backend, role string, probes *hostProbes) string {
 	candidates := 0
 	for i := range snap {
@@ -307,17 +309,16 @@ func newHostProbes() *hostProbes {
 }
 
 // ping returns pingHost's result for host, requesting it at most once per memo.
+// A role that finds the probe already started waits for its result and
+// nothing else: the owner runs on the same ctx, so the wait ends when ctx
+// does, and the answer does not depend on which of the two finished first.
 func (p *hostProbes) ping(ctx context.Context, host string) error {
 	key := strings.TrimRight(host, "/")
 	p.mu.Lock()
 	if pr, ok := p.m[key]; ok {
 		p.mu.Unlock()
-		select {
-		case <-pr.done:
-			return pr.err
-		case <-ctx.Done():
-			return fmt.Errorf("waiting for a shared probe: %w", ctx.Err())
-		}
+		<-pr.done
+		return pr.err
 	}
 	pr := &hostProbe{done: make(chan struct{})}
 	p.m[key] = pr

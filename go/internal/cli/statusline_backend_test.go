@@ -129,7 +129,7 @@ func TestStatuslineHealthTimeoutKeepsBlockCount(t *testing.T) {
 		t.Errorf("a health call that ran out of time is shown as offline: %q", plain)
 	}
 	if !strings.Contains(out, glyphTimeout) {
-		t.Errorf("a health call that ran out of time carries no unknown-state indicator: %q", plain)
+		t.Errorf("a health call that ran out of time carries no no-answer indicator: %q", plain)
 	}
 }
 
@@ -218,6 +218,15 @@ func TestStatuslineCachePerServerAndKey(t *testing.T) {
 	files := cacheFiles(t, root)
 	if len(files) != 3 {
 		t.Fatalf("cache files = %v, want 3 (server×key pairs)", files)
+	}
+	if runtime.GOOS != "windows" {
+		st, err := os.Stat(filepath.Dir(files[0]))
+		if err != nil {
+			t.Fatalf("stat cache dir: %v", err)
+		}
+		if mode := st.Mode().Perm(); mode != 0o700 {
+			t.Errorf("cache directory mode = %o, want 700", mode)
+		}
 	}
 	for _, p := range files {
 		data, err := os.ReadFile(p)
