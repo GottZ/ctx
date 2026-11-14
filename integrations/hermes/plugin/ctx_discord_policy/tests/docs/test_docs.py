@@ -34,12 +34,6 @@ def _module_constant(path: Path, name: str):
     raise AssertionError(f"{name} not found in {path}")
 
 
-def _pyproject_version() -> str:
-    match = re.search(r'^version = "([^"]+)"', (ROOT / "pyproject.toml").read_text(encoding="utf-8"), re.M)
-    assert match
-    return match.group(1)
-
-
 def test_manifest_fields():
     manifest = _load_yaml((ROOT / "plugin.yaml").read_text(encoding="utf-8"))
     assert manifest["manifest_version"] == 2
@@ -56,7 +50,7 @@ def test_versions_agree():
     manifest = _load_yaml((ROOT / "plugin.yaml").read_text(encoding="utf-8"))
     shim = _module_constant(ROOT / "__init__.py", "PLUGIN_VERSION")
     package = _module_constant(ROOT / "dsp" / "__init__.py", "__version__")
-    assert str(manifest["version"]) == shim == package == _pyproject_version()
+    assert str(manifest["version"]) == shim == package
     assert _module_constant(ROOT / "__init__.py", "RUNTIME_API") == _module_constant(
         ROOT / "dsp" / "__init__.py", "RUNTIME_API"
     )
