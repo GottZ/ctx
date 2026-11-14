@@ -23,6 +23,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
@@ -139,8 +140,9 @@ func TestArchiveLegacyTopicMaps(t *testing.T) {
 	}
 
 	// (2) AFTER: the two carry is_archived, and they are gone from the shape a
-	// search uses — while `ctx get <id>` still reads them. THAT is the rollback
-	// path, and it is why the step is not a DELETE.
+	// search uses — while `ctx get --include-archived <id>` still reads them
+	// (store.GetArchivedBlock, issue #201). THAT is the rollback path, and it is
+	// why the step is not a DELETE.
 	for _, title := range []string{"topic-map-work", "topic-map-hth"} {
 		archived, exists := archivedState(t, pool, title)
 		if !exists {
@@ -159,13 +161,12 @@ func TestArchiveLegacyTopicMaps(t *testing.T) {
 	if findable != 1 {
 		t.Errorf("%d findable topic maps, want 1 (only the active tenant's)", findable)
 	}
-	var content string
-	if err := pool.QueryRow(ctx,
-		`SELECT content FROM context_blocks WHERE id = $1::uuid`, byTitle["topic-map-hth"].id).Scan(&content); err != nil {
-		t.Fatalf("get-by-id on the archived block: %v — the rollback path is broken", err)
+	readBack, err := store.GetArchivedBlock(ctx, pool, nil, byTitle["topic-map-hth"].id, []string{"work"})
+	if err != nil || readBack == nil {
+		t.Fatalf("archived read of the block: %v %v — the rollback path is broken", readBack, err)
 	}
-	if len(content) != 1132 {
-		t.Errorf("archived content is %d chars, want the pinned 1132", len(content))
+	if len(readBack.Content) != 1132 || !readBack.Archived {
+		t.Errorf("archived read: %d chars, archived=%v; want the pinned 1132, true", len(readBack.Content), readBack.Archived)
 	}
 
 	// (3) UNTOUCHED: the active tenant's map. Two belts hold here — the title

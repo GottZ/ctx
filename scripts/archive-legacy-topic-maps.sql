@@ -15,7 +15,8 @@
 --                     obendrein einen FALSCHEN Bootstrap-Pfad anbietet)
 --
 -- KEIN DELETE, ausdrücklich. `is_archived = true` nimmt die Blöcke aus der
--- Trefferliste, lässt sie über `ctx get <id>` aber lesbar — genau das ist der
+-- Trefferliste, lässt sie über `ctx get --include-archived <id>` aber lesbar
+-- (ein schlichtes `ctx get` antwortet "Block not found") — genau das ist der
 -- Rollback-Pfad, und ein DELETE machte ihn unmöglich. Die letzte Spalte dieser
 -- Ausgabe ist der Rückweg als fertiger Einzeiler.
 --

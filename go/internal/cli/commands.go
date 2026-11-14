@@ -375,13 +375,23 @@ func categoriesCmd(getClient func() (*Client, error)) *cobra.Command {
 // ── get ──────────────────────────────────────────────────────────────.
 
 func getCmd(getClient func() (*Client, error)) *cobra.Command {
-	return simpleCmd("get <block-id>", []string{"g"}, "Fetch full block", "manage", cobra.ExactArgs(1),
+	var includeArchived bool
+	cmd := simpleCmd("get <block-id>", []string{"g"}, "Fetch full block", "manage", cobra.ExactArgs(1),
 		func(args []string) map[string]any {
-			return map[string]any{
+			body := map[string]any{
 				"action": "get",
 				"id":     args[0],
 			}
+			// #201: absent unless asked, so a plain `ctx get` posts the bytes it
+			// always posted.
+			if includeArchived {
+				body["include_archived"] = true
+			}
+			return body
 		}, getClient)
+	cmd.Flags().BoolVar(&includeArchived, "include-archived", false,
+		"also read an archived block (full block id only, your own scopes; the answer carries archived: true)")
+	return cmd
 }
 
 // ── delete ───────────────────────────────────────────────────────────.

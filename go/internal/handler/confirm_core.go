@@ -2,7 +2,7 @@
 // D-W5 built it for MCP (mcp_confirm.go), D-W6b copied it for HTTP
 // (confirm.go) with an explicit consolidation note — this file redeems that
 // note: lookup → payload validation → D1-M1 scope re-check → D1-M3 TOCTOU
-// pin re-check (updates) → atomic consume → execute, in exactly one place.
+// pin re-check (updates, archives) → atomic consume → execute, in exactly one place.
 // The surfaces keep their own MESSAGE formatting (MCP surfaces raw errors,
 // HTTP launders them to "internal error") — the core returns a typed outcome
 // and never a user-facing string for the cases whose wording differs.
@@ -36,8 +36,8 @@ const (
 	// confirmScopeRejected — D1-M1: the staged scope is no longer writable.
 	// Rejects on the UN-consumed row; Outcome.Scope carries the scope.
 	confirmScopeRejected
-	// confirmTOCTOUGone — D1-M3: the update target vanished from the writable
-	// scopes. Rejects on the un-consumed row.
+	// confirmTOCTOUGone — D1-M3: the update or archive target vanished from
+	// the writable scopes. Rejects on the un-consumed row.
 	confirmTOCTOUGone
 	// confirmTOCTOUDrift — D1-M3: the block changed since staging
 	// (lost-update protection). Rejects on the un-consumed row;
@@ -61,21 +61,21 @@ const (
 	confirmInfraErr
 	// confirmExecErr — the token IS consumed and the execute failed
 	// (rejected finding D1-m2: the client re-stages); Outcome.Err set,
-	// Outcome.Op says which wording ('store'/'update') applies.
+	// Outcome.Op says which wording ('store'/'update'/'archive') applies.
 	confirmExecErr
-	// confirmExecGone — token consumed, update target vanished between the
-	// TOCTOU read and the execute (same D1-m2 behaviour sentence).
+	// confirmExecGone — token consumed, update or archive target vanished
+	// between the TOCTOU read and the execute (same D1-m2 behaviour sentence).
 	confirmExecGone
 )
 
 // confirmOutcome is the typed result of executeConfirm.
 type confirmOutcome struct {
 	Kind    confirmKind
-	Op      string          // 'store' | 'update' | 'blob_store' | 'blob_link' (from the staged payload once known)
+	Op      string          // 'store' | 'update' | 'blob_store' | 'blob_link' | 'archive' (from the staged payload once known)
 	Block   *store.Block    // on confirmOK for a block op
 	Blob    *store.BlobMeta // on confirmOK for op 'blob_store' (W02-8)
 	Scope   string          // on confirmScopeRejected
-	BlockID string          // on confirmTOCTOUDrift (the update target) / confirmBlockRefGone (the referenced block)
+	BlockID string          // on confirmTOCTOUDrift (the update/archive target) / confirmBlockRefGone (the referenced block)
 	Err     error           // on confirmInfraErr / confirmExecErr
 	Reject  *writeReject    // on confirmClaimRejected
 }
@@ -103,12 +103,38 @@ func confirmClaimReject(ctx context.Context, blocktypes *blocktype.Registry, cw 
 	return claimReject(set, cw.Category, cw.Type, "", cw.Metadata)
 }
 
+// confirmDriftReject is the D1-M3 re-check of the by-id block ops ('update',
+// and 'archive' since #201): nil = the target is still in a writable scope, at
+// the updated_at the card bound. Any other op has no target block and passes.
+//
+// Split out of executeConfirm only to keep that function under the cyclop
+// budget, like confirmClaimReject; the placement (before the consume) and the
+// reasoning live at the call site.
+func confirmDriftReject(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthResult, cw store.CanonicalWrite) *confirmOutcome {
+	if cw.Op != "update" && cw.Op != store.OpArchive {
+		return nil
+	}
+	// nil type set (V-11): this read is a TOCTOU fingerprint, not a read
+	// ANSWER — the block never reaches a consumer, so it carries no framing.
+	base, err := store.GetBlock(ctx, pool, nil, cw.ID, writableBlockScopes(ar), nil)
+	if err != nil {
+		return &confirmOutcome{Kind: confirmInfraErr, Op: cw.Op, Err: err}
+	}
+	if base == nil {
+		return &confirmOutcome{Kind: confirmTOCTOUGone, Op: cw.Op, BlockID: cw.ID}
+	}
+	if base.UpdatedAt.UTC().Format(time.RFC3339Nano) != cw.BaseUpdatedAt {
+		return &confirmOutcome{Kind: confirmTOCTOUDrift, Op: cw.Op, BlockID: cw.ID}
+	}
+	return nil
+}
+
 // executeConfirm runs the complete confirm sequence for one payload hash,
 // strictly per-key (D1-M4: lookup and consume are bound to ar.ApiKeyID).
 // Every reject before the consume leaves the stage token intact (D1-M1/D1-M3
 // pattern); the consume is the atomic replay guard; the execute mirrors the
 // direct paths byte-for-byte (store: upsert + classify + temporal; update:
-// UpdateBlock + finishBlockUpdate).
+// UpdateBlock + finishBlockUpdate; archive: DeleteBlock).
 func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, ar *auth.AuthResult, payloadHash string) confirmOutcome {
 	pw, err := store.LookupPendingWrite(ctx, pool, ar.ApiKeyID, payloadHash)
 	if errors.Is(err, store.ErrPendingWriteNotFound) {
@@ -171,22 +197,12 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 		return confirmOutcome{Kind: confirmClaimRejected, Op: cw.Op, Reject: rej}
 	}
 
-	// D1-M3 TOCTOU guard for staged updates: the confirm executes only
-	// against the exact block state the card was rendered for. Also on the
-	// un-consumed row — drift rejects, the client re-reads and re-stages.
-	if cw.Op == "update" {
-		// nil type set (V-11): this read is a TOCTOU fingerprint, not a read
-		// ANSWER — the block never reaches a consumer, so it carries no framing.
-		base, err := store.GetBlock(ctx, pool, nil, cw.ID, writableBlockScopes(ar), nil)
-		if err != nil {
-			return confirmOutcome{Kind: confirmInfraErr, Op: cw.Op, Err: err}
-		}
-		if base == nil {
-			return confirmOutcome{Kind: confirmTOCTOUGone, Op: cw.Op, BlockID: cw.ID}
-		}
-		if base.UpdatedAt.UTC().Format(time.RFC3339Nano) != cw.BaseUpdatedAt {
-			return confirmOutcome{Kind: confirmTOCTOUDrift, Op: cw.Op, BlockID: cw.ID}
-		}
+	// D1-M3 TOCTOU guard for staged updates and archives (#201): the confirm
+	// executes only against the exact block state the card was rendered for.
+	// Also on the un-consumed row — drift rejects, the client re-reads and
+	// re-stages.
+	if out := confirmDriftReject(ctx, pool, ar, cw); out != nil {
+		return *out
 	}
 
 	// Atomic consume (exactly once) — a racing double-confirm loses here and
@@ -200,6 +216,9 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 
 	if cw.Op == store.OpBlobStore || cw.Op == store.OpBlobLink {
 		return executeConfirmedBlobOp(ctx, pool, ar, cw, pw.ID)
+	}
+	if cw.Op == store.OpArchive {
+		return executeConfirmedArchive(ctx, pool, ar, cw, pw.ID)
 	}
 
 	if cw.Op == "update" {
@@ -260,7 +279,7 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 // into the generic miss (no oracle).
 func confirmOpKnown(op string) bool {
 	switch op {
-	case "store", "update", store.OpBlobStore, store.OpBlobLink:
+	case "store", "update", store.OpBlobStore, store.OpBlobLink, store.OpArchive:
 		return true
 	default:
 		return false
@@ -302,6 +321,25 @@ func executeConfirmedBlobOp(ctx context.Context, pool *pgxpool.Pool, ar *auth.Au
 	return confirmOutcome{Kind: confirmOK, Op: cw.Op, Blob: blob}
 }
 
+// executeConfirmedArchive runs op 'archive' (#201) AFTER the consume, over the
+// statement the direct archive tool and REST manage delete run: DeleteBlock
+// within the key's CURRENT write scopes, the provenance exclusion in its WHERE.
+// The drift pin was re-checked before the consume; a block that left the
+// writable scopes in between answers nil and lands in confirmExecGone — the
+// token is spent, the client re-stages (rejected finding D1-m2). No booking:
+// the budget was charged at stage time, as for every staged op.
+func executeConfirmedArchive(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthResult, cw store.CanonicalWrite, pendingID string) confirmOutcome {
+	block, err := store.DeleteBlock(ctx, pool, cw.ID, writableBlockScopes(ar))
+	if err != nil {
+		slog.Error("confirm: confirmed archive execute failed", "error", err, "pending_id", pendingID)
+		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
+	}
+	if block == nil {
+		return confirmOutcome{Kind: confirmExecGone, Op: cw.Op, BlockID: cw.ID}
+	}
+	return confirmOutcome{Kind: confirmOK, Op: cw.Op, Block: block}
+}
+
 // confirmBlockRefGoneMsg is the W02-10 A1 reject wording, shared by both
 // confirm surfaces. It names neither the block nor whether it ever existed —
 // the same reason blobBlockRefNotFoundMsg does not.
@@ -313,12 +351,27 @@ func confirmScopeRejectMsg(scope string) string {
 	return fmt.Sprintf("confirm rejected: scope %q is no longer writable for this key — the staged write stays pending until it expires", scope)
 }
 
-// confirmTOCTOUGoneMsg / confirmTOCTOUDriftMsg are the D1-M3 reject wordings
-// (verbatim the D-W6a texts — both surfaces share them).
-const confirmTOCTOUGoneMsg = "confirm rejected: the target block no longer exists in a writable scope — the staged update stays pending until it expires"
+// confirmBlockOpNoun names the staged by-id block op in the wordings both
+// confirm surfaces share: an archive (#201) names itself, every other op keeps
+// the verbatim D-W6a "update" texts.
+func confirmBlockOpNoun(op string) string {
+	if op == store.OpArchive {
+		return "archive"
+	}
+	return "update"
+}
 
-func confirmTOCTOUDriftMsg(blockID string) string {
+// confirmTOCTOUGoneMsg / confirmTOCTOUDriftMsg are the D1-M3 reject wordings
+// (for op 'update' verbatim the D-W6a texts — both surfaces share them).
+func confirmTOCTOUGoneMsg(op string) string {
 	return fmt.Sprintf(
-		"confirm rejected: block %s changed since this update was staged (lost-update protection) — re-read the block and stage the update again; the stale stage expires on its own",
-		blockID)
+		"confirm rejected: the target block no longer exists in a writable scope — the staged %s stays pending until it expires",
+		confirmBlockOpNoun(op))
+}
+
+func confirmTOCTOUDriftMsg(op, blockID string) string {
+	noun := confirmBlockOpNoun(op)
+	return fmt.Sprintf(
+		"confirm rejected: block %s changed since this %s was staged (lost-update protection) — re-read the block and stage the %s again; the stale stage expires on its own",
+		blockID, noun, noun)
 }

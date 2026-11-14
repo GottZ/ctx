@@ -29,9 +29,9 @@ import (
 // from the JSONB column — JSONB normalizes key order and whitespace, so a
 // rehash of the stored column would not reproduce the staged hash.
 type CanonicalWrite struct {
-	Op string `json:"op"` // 'store' | 'update' | 'blob_store' | 'blob_link'
-	// ID names the row this op writes: for 'update' a block, for 'blob_link'
-	// (W02-10) a blob. One field for both, deliberately — a second id field
+	Op string `json:"op"` // 'store' | 'update' | 'blob_store' | 'blob_link' | 'archive'
+	// ID names the row this op writes: for 'update' and 'archive' a block, for
+	// 'blob_link' (W02-10) a blob. One field for both, deliberately — a second id field
 	// would have to be omitempty as well and would leave two ways to spell the
 	// same thing, which the canonicalization contract cannot afford.
 	ID       string `json:"id,omitempty"`
@@ -62,8 +62,8 @@ type CanonicalWrite struct {
 	// value presence.
 	UpdateFields []string `json:"update_fields,omitempty"`
 	// BaseUpdatedAt pins the block state the staged card was rendered against
-	// (TOCTOU guard, D1-M3): context_blocks.updated_at at stage time,
-	// UTC/RFC3339Nano. The confirm rejects — without consuming the token —
+	// (TOCTOU guard, D1-M3; op 'archive' binds it too): context_blocks.updated_at
+	// at stage time, UTC/RFC3339Nano. The confirm rejects — without consuming the token —
 	// when the block's updated_at no longer matches (lost-update protection).
 	BaseUpdatedAt string `json:"base_updated_at,omitempty"`
 
@@ -99,6 +99,14 @@ const OpBlobStore = "blob_store"
 // resolved at stage time) and ContextBlockID — no payload, because the payload
 // crossed the wire in phase 1 and a link must never move it again.
 const OpBlobLink = "blob_link"
+
+// OpArchive is the fifth staged op (issue #201): the MCP archive tool of a
+// confirm_writes key. It carries no new field — ID (the block), Scope (the
+// block's scope at stage time) and BaseUpdatedAt (the drift pin op 'update'
+// already binds) are the whole payload — so every hash of the other ops keeps
+// its bytes. The execute is store.DeleteBlock, the same statement the direct
+// tool and REST manage delete run.
+const OpArchive = "archive"
 
 // Canonical returns the canonical JSON bytes of the write: fixed field order,
 // sorted tags and update_fields (input slices untouched), metadata keys

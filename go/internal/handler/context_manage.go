@@ -164,6 +164,11 @@ type manageRequest struct {
 	Types             []string `json:"types"`
 	TypesExclude      []string `json:"types_exclude"`
 	BlockRolesExclude []string `json:"block_roles_exclude"`
+	// IncludeArchived (#201): the opt-in of `get` to read an archived block by
+	// full id within the key's own scopes — the read the CLI's
+	// `ctx get --include-archived` posts. Shared with the MCP get tool
+	// (get_archived.go). Absent ⇒ get answers exactly as before.
+	IncludeArchived bool `json:"include_archived"`
 }
 
 // handleOverviewRebuildStart kicks the cluster-overview rebuild ahead of its
@@ -399,6 +404,12 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 		})
 		return
 	}
+	if archivedReadRefused(req.ID, req.IncludeArchived) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false, "error": archivedReadNeedsFullIDMsg,
+		})
+		return
+	}
 
 	// Resolve the block-grant set for the caller's tenant (T40a, design/07 §4):
 	// a granted block becomes visible via the additive OR-arm. Fail-closed for
@@ -445,7 +456,7 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 	// One registry snapshot per request: GetBlock (untrusted framing) and
 	// graph_visible must answer from the same generation.
 	types := h.typeSnapshot(ctx)
-	block, err := store.GetBlock(ctx, h.pool, types, resolvedID, ar.ReadScopes, grants)
+	block, err := readBlockForGet(ctx, h.pool, types, ar, resolvedID, grants, req.IncludeArchived)
 	if err != nil {
 		slog.Error("manage: get error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -484,7 +495,9 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 		// honours block grants, the ego route does not yet (graph.go passes
 		// nil grants), so a block visible only through a grant still reads
 		// true here and 404s on ego.
-		"graph_visible": graphVisible(types, block.TypeName),
+		// An archived block (#201, include_archived) is never an ego focus:
+		// the graph reads live blocks only.
+		"graph_visible": graphVisible(types, block.TypeName) && !block.Archived,
 	})
 }
 

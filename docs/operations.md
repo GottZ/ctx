@@ -1411,7 +1411,7 @@ bash scripts/archive-legacy-topic-maps.sh          # dry run — rolls back, cha
 bash scripts/archive-legacy-topic-maps.sh --apply  # commits
 ```
 
-Both modes print the same pin — id, scope, content length, content SHA-256 — and a ready-to-paste rollback one-liner per row. The step sets `is_archived = true` and **never deletes**: an archived block is gone from the hit list but still readable via `ctx get <id>`, and that readability *is* the rollback path.
+Both modes print the same pin — id, scope, content length, content SHA-256 — and a ready-to-paste rollback one-liner per row. The step sets `is_archived = true` and **never deletes**: an archived block is gone from the hit list but still readable via `ctx get --include-archived <id>` (a plain `ctx get` answers `Block not found` for it; the flag needs a server that has it — an older one ignores it and answers the same `Block not found` — and a key whose home or allowed scopes contain the block's scope), and that readability *is* the rollback path.
 
 Two belts keep it off the wrong block: an explicit title allowlist (exactly those two), and a **producer guard** — a scope is skipped as long as an *active* API key calls it home, because then something still writes that map and archiving would be fighting a live producer. The active tenant's `topic-map-private` is in neither list. Re-running the script is a no-op (it only picks up blocks that are not yet archived).
 
