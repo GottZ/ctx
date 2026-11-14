@@ -31,6 +31,8 @@ type auditEntity struct {
 // instance by the 163 trigger (the instance identity: no tenant, and
 // server-admin-only whatever a row's metadata says), model_grant by the 164
 // trigger (tenant_id through the grant's consumer);
+// scope_purge by the scope purge (#202, scope_purge.go: one row per run,
+// metadata.tenant_id = the purged scope's owner);
 // gateway_limits (M-06-5) and consumer_usage (the gateway's Go writer) read
 // as empty lists until their writers land. setting, secret and
 // backend stay on their own surfaces (GET /api/settings/{key} and the
@@ -45,6 +47,7 @@ var auditEntities = map[string]auditEntity{
 	"model_key":      {},
 	"model_grant":    {},
 	"consumer_usage": {},
+	"scope_purge":    {},
 	"instance":       {serverAdminOnly: true},
 }
 

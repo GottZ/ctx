@@ -435,30 +435,30 @@ func TestEmbedTenantAliasCeilingClampsMaxInputs(t *testing.T) {
 	}
 }
 
-// TestEmbedRuneLimitIsTheSmallestWindow (H-5, P03): without
-// embedding.max_input_runes the limit is the 9/5 rune budget of the
-// smallest known window among the chain's rows (512 tokens ⇒ 921 runes),
-// not the largest (8192 ⇒ 14 745).
-func TestEmbedRuneLimitIsTheSmallestWindow(t *testing.T) {
+// TestEmbedRuneLimitIsNotTheWindow (H-5, P03 inverted by FOLGE-EMBLIMIT):
+// without embedding.max_input_runes no window of the chain's rows limits an
+// input — the pin was "the 9/5 rune budget of the smallest known window"
+// (512 tokens ⇒ 921 runes); now 922 and 20 000 runes reach the backend on
+// that row, which judges the length itself.
+func TestEmbedRuneLimitIsNotTheWindow(t *testing.T) {
 	small := newEmbedEngine(t, 8)
 	large := newEmbedEngine(t, 8)
 	rs, rl := small.row("small", backends.ProtocolOpenAI, 10), large.row("large", backends.ProtocolOpenAI, 20)
 	rs.NumCtx, rl.NumCtx = 512, 8192
 	rig := newEmbedRig(t, []backends.Backend{rs, rl}, 2, 1)
-	a := rig.postEmbed(t, embedBody("emb", []string{strings.Repeat("x", 922)}))
-	code, param, _ := a.envelope(t)
-	if a.status != http.StatusBadRequest || code != oai.CodeUnsupportedValue || param != "input[0]" || !bytes.Contains(a.body, []byte("at most 921")) {
-		t.Fatalf("%d %s, want 400 unsupported_value input[0] \"at most 921\"", a.status, a.body)
+	for _, n := range []int{922, 20_000} {
+		decodeEmbed(t, rig.postEmbed(t, embedBody("emb", []string{strings.Repeat("x", n)})))
 	}
-	decodeEmbed(t, rig.postEmbed(t, embedBody("emb", []string{strings.Repeat("x", 921)})))
+	if h := small.hits.Load() + large.hits.Load(); h != 2 {
+		t.Errorf("wire hits %d, want 2 (both inputs reached a backend)", h)
+	}
 }
 
 // TestEmbedAliasRuneLimitOverridesTheChain (H-5, P04 after H-7): an
-// alias's embedding.max_input_runes is the limit even above the 9/5 budget
-// of the chain's smallest window (row num_ctx 512 ⇒ 921 runes): 1 500 runes
-// are served, 2 001 are 400 at the alias's 2 000. Since the early check
-// (H-7) refuses over the alias's value before the chain is built, only this
-// case still sees whether embedRuneLimit honours the alias.
+// alias's embedding.max_input_runes is the limit whatever the chain's
+// windows (row num_ctx 512, whose 9/5 budget was 921 runes): 1 500 runes
+// are served, 2 001 are 400 at the alias's 2 000 — the early check (H-7),
+// the only rune check of the route (FOLGE-EMBLIMIT).
 func TestEmbedAliasRuneLimitOverridesTheChain(t *testing.T) {
 	e := newEmbedEngine(t, 8)
 	row := e.row("small", backends.ProtocolOpenAI, 10)
@@ -508,8 +508,7 @@ func TestEmbedOvercoveringPlanIsInternal(t *testing.T) {
 }
 
 // TestEmbedRuneLimitBeforeTheReserve (H-7, Fremd-Review 2 R2-3): an input
-// over the limit that holds without a chain — the alias's
-// embedding.max_input_runes, else the code ceiling — is a 400 with its param
+// over the alias's embedding.max_input_runes is a 400 with its param
 // before the answer reserve, the sensitivity scan and the chain build: a
 // budget too small for the answer does not turn it into 503
 // server_overloaded.

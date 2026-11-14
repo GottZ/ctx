@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/GottZ/ctx/internal/store"
 )
 
 // TestShutdownForceSettleRunsBeforeTheFlushAndTheSettle pins the order of
@@ -40,6 +42,18 @@ func TestShutdownBudgetSumsTheSteps(t *testing.T) {
 	sum := shutdownHTTPTimeout + forceSettleTimeout + rejectionFlushTimeout + max(gatewayStopTimeout, llmlogSettleTimeout) + llmlogSettleTimeout
 	if sum != 31*time.Second {
 		t.Errorf("bounded shutdown steps sum to %s, want 31s (minCtxStopGrace)", sum)
+	}
+}
+
+// TestGatewayStopOutlastsTheFinalUsageFlush (#124): the final usage flush
+// retries locked keys up to its own window, and the gateway's stop step
+// reports what it left only once the flush has returned — so the window ends
+// inside the step's budget. Red: the window equal to the budget (the two
+// timers race and the step gives up without the count).
+func TestGatewayStopOutlastsTheFinalUsageFlush(t *testing.T) {
+	if store.ModelKeyUsageFinalFlushTimeout >= gatewayStopTimeout {
+		t.Errorf("final usage flush window %s >= gateway stop budget %s — the stop step would give up before the flush can report its unwritten stamps",
+			store.ModelKeyUsageFinalFlushTimeout, gatewayStopTimeout)
 	}
 }
 

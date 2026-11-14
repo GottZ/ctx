@@ -257,6 +257,15 @@ func NoThrottle(_ context.Context) error { return nil }
 //
 //nolint:cyclop // pipeline function with linear step sequence
 func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.Options, backoff BackoffConfig, readScopes []string, throttle Throttle) (int, error) {
+	// Empty-window gate (before everything else, the backend probe included):
+	// a non-nil, empty readScopes is a bound tenant whose clamp
+	// (read_scopes ∩ owned) left nothing — no pick, no claim, no LLM call.
+	// nil stays the legacy unbounded pass. See windowClosed.
+	if windowClosed(readScopes) {
+		slog.Debug("dream: empty read window — cycle skipped before pick")
+		return 0, nil
+	}
+
 	// Step 0 (G28): cycle-skip BEFORE the block pick when no backend serves
 	// the dream role at all (gaming toggle, disabled rows, missing role).
 	// Returning (0, nil) sends the scheduler loop into its idle wait WITHOUT
@@ -560,6 +569,18 @@ func PromoteToCanonical(ctx context.Context, pool *pgxpool.Pool, blockID string)
 	return tag.RowsAffected() > 0, nil
 }
 
+// windowClosed reports whether a scope window is bound but empty: non-nil and
+// zero-length. That is what store.IntersectWindow returns for a tenant whose
+// owned set shares no scope with read_scopes, and it means "this tenant may
+// read nothing" — the opposite of nil, the documented unbounded legacy pass.
+// RunDreamCycle, PickBlock, Stats, QueueDepth, ComputeBackoffStats and
+// RestampBackoff check it first and return their zero result (no pick, zero
+// counts, zero restamped rows) without a query, so an empty window can never
+// fall through to an unfiltered statement.
+func windowClosed(scopes []string) bool {
+	return scopes != nil && len(scopes) == 0
+}
+
 // dreamEligibleWhere is THE single dream-eligibility predicate (WF T8,
 // design/01 §7-T8): PickBlock, Stats, QueueDepth and ComputeBackoffStats
 // consume this one fragment instead of the former five NOT-is_meta mirrors.
@@ -609,11 +630,16 @@ func dreamEligibleWhere(typesParam string) string {
 // tenant's DreamLinkableTypes allowlist is applied ONLY to that tenant's blocks.
 // Without it the just-iterated tenant's policy would decide FOREIGN tenants'
 // blocks (design/01 §7-T12/§9.6: A's dream.linkable=false for type X would
-// wrongly skip B's X-blocks in A's cycle). An empty scopes list adds NO
-// conjunct — the tenant-less single pass (backgroundTenants fail-safe
-// {_global, nil} → raw read_scopes... but a caller may pass nil) stays
-// byte-identical to the pre-T12 unrestricted pick.
+// wrongly skip B's X-blocks in A's cycle). nil scopes adds NO conjunct — the
+// tenant-less single pass (backgroundTenants fail-safe {_global, nil}, or a
+// caller passing nil) stays byte-identical to the pre-T12 unrestricted pick.
+// A non-nil EMPTY scopes is a bound tenant whose clamp intersected away every
+// scope: it picks nothing and touches no row (fail-closed, windowClosed) —
+// it must never widen to the unrestricted pick.
 func PickBlock(ctx context.Context, pool *pgxpool.Pool, linkable []string, scopes []string, claim time.Duration) (*BlockInfo, error) {
+	if windowClosed(scopes) {
+		return nil, nil
+	}
 	var block BlockInfo
 	scopeConjunct := ""
 	// Whole seconds, rounded UP: the claim must never come out shorter than
@@ -760,12 +786,17 @@ const maxBackoffLevels = 100
 // cooldown uses the exact count (not a bucket edge), so the growth is visible and
 // the final row shows the true maximum, not a floor. bc comes from the caller's
 // request snapshot (ManageHandler dream-stats), so the rendered policy is the
-// generation currently in effect, not a boot copy.
+// generation currently in effect, not a boot copy. A non-nil empty scopes
+// (windowClosed) reports the policy with no levels and runs no query; nil
+// keeps the unchanged query.
 func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes, linkable []string, bc BackoffConfig) (*BackoffStats, error) {
 	out := &BackoffStats{
 		Mode: bc.Mode, Factor: bc.Factor, Grace: bc.Grace, CapHours: bc.CapHours,
 		MinHours: bc.MinHours, InertOffset: bc.InertOffset,
 		Levels: make([]BackoffLevel, 0, 32),
+	}
+	if windowClosed(scopes) {
+		return out, nil
 	}
 	if err := pool.QueryRow(ctx,
 		`SELECT COALESCE(max(dream_eval_count), 0)::int FROM context_blocks
@@ -820,8 +851,13 @@ func ComputeBackoffStats(ctx context.Context, pool *pgxpool.Pool, scopes, linkab
 // curve's floor is 1h, SetDreamCooldownMinutes writes 5m — and left alone:
 // restamping a live claim would let a sibling worker pick the same block.
 // A new stamp landing in the past simply makes the block eligible now; the
-// scheduler pulls it on its normal cadence.
+// scheduler pulls it on its normal cadence. A non-nil empty scopes
+// (windowClosed) restamps nothing and runs no statement; nil keeps the
+// unchanged statement.
 func RestampBackoff(ctx context.Context, pool *pgxpool.Pool, scopes, linkable []string, bc BackoffConfig) (restamped, skippedTransient int64, err error) {
+	if windowClosed(scopes) {
+		return 0, 0, nil
+	}
 	off := bc.InertOffset
 	row := pool.QueryRow(ctx,
 		`WITH eligible AS (
@@ -1184,7 +1220,13 @@ func appendCandidates(candidates []BlockInfo, seen map[string]bool, results []rr
 //   - checked:        blocks that have been through at least one Dream cycle
 //   - linked:         total links in the graph (scope-filtered)
 //   - pendingRecheck: already-checked blocks whose cooldown has expired (ready for re-dream)
+//
+// A non-nil empty scopes (windowClosed) returns all zeros without a query;
+// nil keeps the unchanged query.
 func Stats(ctx context.Context, pool *pgxpool.Pool, scopes, linkable []string) (total, checked, linked, pendingRecheck int, err error) {
+	if windowClosed(scopes) {
+		return 0, 0, 0, 0, nil
+	}
 	eligible := dreamEligibleWhere("$2")
 	err = pool.QueryRow(ctx,
 		`SELECT
@@ -1217,8 +1259,13 @@ type QueueStats struct {
 // PickBlock, plus a forward-looking forecast: how many cooldowns expire in the
 // next hour / 6 hours and the exact timestamp of the next one. The forecast lets
 // operators anticipate GPU load instead of only seeing the current backlog.
+// A non-nil empty scopes (windowClosed) returns an all-zero QueueStats without
+// a query; nil keeps the unchanged query.
 func QueueDepth(ctx context.Context, pool *pgxpool.Pool, scopes, linkable []string) (*QueueStats, error) {
 	var q QueueStats
+	if windowClosed(scopes) {
+		return &q, nil
+	}
 	err := pool.QueryRow(ctx,
 		`WITH eligible AS (
 			SELECT dream_cooldown_until AS cd, dream_checked_at AS chk, embedding IS NULL AS no_embed

@@ -132,17 +132,22 @@ func TestInternalEmbedBodyByteIdentical(t *testing.T) {
 // TestEmbedRawSendsTheTextsAsAList (gate G10, wire half): EmbedRaw sends
 // the texts as sent — no instruct prefix — always as a list (also one), and
 // answers one vector per input at the row's native length (no 1024-d cut),
-// in input order whatever order the engine lists them in.
+// in input order whatever order the engine lists them in. On the ollama
+// wire the body asks not to cut an input (truncate:false, FOLGE-EMBLIMIT).
 func TestEmbedRawSendsTheTextsAsAList(t *testing.T) {
 	const dims = 4096
 	for _, proto := range []backends.Protocol{backends.ProtocolOpenAI, backends.ProtocolOllama} {
 		e := newRawEngine(t, dims)
+		tail := ""
+		if proto == backends.ProtocolOllama {
+			tail = `,"truncate":false`
+		}
 		inputs := []string{"alpha", "beta", "gamma"}
 		vecs, tokens, err := EmbedRaw(context.Background(), rawRow(e.srv.URL, proto, 0), "RAWMODEL", inputs, 0, 0)
 		if err != nil {
 			t.Fatalf("%s: EmbedRaw: %v", proto, err)
 		}
-		if want := `{"model":"RAWMODEL","input":["alpha","beta","gamma"]}`; e.lastBody() != want {
+		if want := `{"model":"RAWMODEL","input":["alpha","beta","gamma"]` + tail + `}`; e.lastBody() != want {
 			t.Errorf("%s: body %s, want %s", proto, e.lastBody(), want)
 		}
 		if strings.Contains(e.lastBody(), "Instruct") {
@@ -166,7 +171,7 @@ func TestEmbedRawSendsTheTextsAsAList(t *testing.T) {
 		if err != nil || len(one) != 1 {
 			t.Fatalf("%s: one input: %v (%d vectors)", proto, err, len(one))
 		}
-		if want := `{"model":"RAWMODEL","input":["solo"]}`; e.lastBody() != want {
+		if want := `{"model":"RAWMODEL","input":["solo"]` + tail + `}`; e.lastBody() != want {
 			t.Errorf("%s: one-input body %s, want the list form %s", proto, e.lastBody(), want)
 		}
 	}
@@ -237,9 +242,14 @@ func TestInternalEmbedNumbersUnchanged(t *testing.T) {
 }
 
 // rawBodyOverhead is the JSON frame of a gateway sub-block body beyond its
-// texts: {"model":"…","input":[…]} plus quotes and a comma per input.
-func rawBodyOverhead(model string, n int) int {
-	return len(`{"model":"","input":[]}`) + len(model) + 3*n
+// texts on the wire of proto: {"model":"…","input":[…]} plus quotes and a
+// comma per input, on the ollama wire also ,"truncate":false.
+func rawBodyOverhead(proto backends.Protocol, model string, n int) int {
+	n = len(`{"model":"","input":[]}`) + len(model) + 3*n
+	if proto == backends.ProtocolOllama {
+		n += len(`,"truncate":false`)
+	}
+	return n
 }
 
 // TestEmbedRawBodyIsNotHTMLEscaped (hardening H-2, Fremd-Review 2 R2-10):
@@ -261,7 +271,7 @@ func TestEmbedRawBodyIsNotHTMLEscaped(t *testing.T) {
 			t.Fatalf("%s: EmbedRaw: %v", proto, err)
 		}
 		body := e.lastBody()
-		if max := sum + rawBodyOverhead("m", len(texts)); len(body) > max {
+		if max := sum + rawBodyOverhead(proto, "m", len(texts)); len(body) > max {
 			t.Errorf("%s: upstream body %d B for %d B of texts, want ≤ %d (no HTML escaping on the gateway path)", proto, len(body), sum, max)
 		}
 		var sent struct {

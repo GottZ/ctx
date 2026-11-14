@@ -171,6 +171,65 @@ test.describe('backend reorder — table survival + drag commit', () => {
     expect(errors, errors.join('\n')).toEqual([])
   })
 
+  // #56: the fast-drop test above flaked because the order flip-flopped while
+  // the FLIP ran — the row just displaced is still PAINTED in its old slot, and
+  // a hit-test on painted rows found it under the pointer again on the next
+  // move and swapped it back. Whether the drop landed on the crossed or the
+  // undone order depended on how far the 150 ms animation had got between two
+  // moves. Here the animation clock stands still (DevTools animation playback
+  // rate), so "a move while the displaced row is painted under the pointer"
+  // happens on every run instead of only on a slow runner.
+  test('a move during the FLIP keeps the crossing (no swap-back), the drop commits it', async ({ page }) => {
+    const errors = trackPageErrors(page)
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    const pool = await installPool(page)
+    await gotoArea(page, '/settings/backends')
+
+    const card = page.locator('section.card[aria-label="backend pool editor"]')
+    await expect(card).toContainText('alpha-chat')
+    const domOrder = (): Promise<string[]> =>
+      card.locator('tbody[data-id]').evaluateAll((els) => els.map((el) => (el as HTMLElement).dataset.id ?? ''))
+    // Two frames: any deferred flush of the move has landed before the read.
+    const settle = (): Promise<void> =>
+      page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))))
+
+    const handle = card.getByRole('button', { name: 'drag to reorder: beta-rerank' })
+    const from = await handle.boundingBox()
+    const alpha = await card.locator('tbody[data-id="b-alpha"]').boundingBox()
+    if (!from || !alpha) throw new Error('drag geometry missing for beta-rerank→b-alpha')
+    const hx = from.x + from.width / 2
+    const ay = alpha.y + alpha.height / 2
+
+    const cdp = await page.context().newCDPSession(page)
+    await cdp.send('Animation.enable')
+    await cdp.send('Animation.setPlaybackRate', { playbackRate: 0 })
+
+    await page.mouse.move(hx, from.y + from.height / 2)
+    await page.mouse.down()
+    // The crossing: into alpha's slot — beta takes it, alpha FLIPs down but
+    // stays painted where it was (clock stopped).
+    await page.mouse.move(hx, ay)
+    await expect.poll(domOrder, { message: 'the crossing must reorder' }).toEqual(['b-beta', 'b-alpha', 'b-gamma'])
+    // Further moves inside the slot beta now owns, over the still-painted alpha.
+    for (const dy of [-2, -4, -6]) {
+      await page.mouse.move(hx, ay + dy)
+      await settle()
+      expect(await domOrder(), `move ${dy}px inside beta's new slot must not undo the crossing`).toEqual([
+        'b-beta',
+        'b-alpha',
+        'b-gamma',
+      ])
+    }
+
+    await cdp.send('Animation.setPlaybackRate', { playbackRate: 1 })
+    await page.mouse.up()
+    await expect
+      .poll(() => pool.order(), { message: 'drop must commit the reorder', timeout: 5000 })
+      .toEqual(['b-beta', 'b-alpha', 'b-gamma'])
+    await expect(card.locator('tbody[data-id]')).toHaveCount(3)
+    expect(errors, errors.join('\n')).toEqual([])
+  })
+
   for (const [label, opts] of [
     ['fast responses (LAN, inside the FLIP window)', { listDelayMs: 0, reorderDelayMs: 0 }],
     ['slow list (loading window visible)', { listDelayMs: 300, reorderDelayMs: 0 }],

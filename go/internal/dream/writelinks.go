@@ -302,7 +302,8 @@ func WriteLinks(ctx context.Context, pool interface {
 			// ApplySupersedes: "A supersedes B" (Welle 46 Convention-Switch,
 			// 2026-05-22) → A=source=newer authoritative, B=target=outdated: the
 			// TARGET is retired as snapshot with superseded_by pointing to the
-			// source, at high weighted confidence only. A pair re-classified
+			// source, at high weighted confidence only — a chunk target keeps
+			// its lifecycle (store.reconcileSupersedesState). A pair re-classified
 			// away from supersedes must have that side-effect reconciled too.
 			// Both are deferred to the end of the transaction (see above).
 			if link.Relationship == "supersedes" ||

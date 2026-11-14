@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -28,7 +29,7 @@ const (
 	// EmbedFailureOversize marks a block that cannot be embedded at the
 	// current slot window — either skipped BEFORE the wire call by the
 	// token-estimate gate, or classified AFTER an HTTP 400 whose body
-	// names exceed_context_size. Gets next_attempt_at = infinity: a longer
+	// names an oversize marker (oversizeBodyMarkers). Gets next_attempt_at = infinity: a longer
 	// backoff would just be "retry forever in slow motion" for a block that
 	// structurally cannot succeed without a content change (design/04 §4.4
 	// "infinity-Semantik gilt auch für Pfad A/B").
@@ -95,28 +96,37 @@ func NormalizeEmbedError(class EmbedFailureClass, raw string) string {
 	return string(runes)
 }
 
-// oversizeBodyMarker is the llama.cpp error-type substring a rejected
-// oversize embed carries in its response body. Live-vermessener Vertrag
-// (Lead-Messung 2026-07-24, W04-4): HTTP 400 with JSON body
-// {"error":{"code":400,"message":"request (N tokens) exceeds the available
-// context size (M tokens), …","type":"exceed_context_size_error",…}} — the
-// type string carries the _error SUFFIX. Substring match on the design-doc
-// stem catches both spellings and older server versions; the exact JSON
-// envelope is not itself load-bearing here, only the presence of this token.
-const oversizeBodyMarker = "exceed_context_size"
+// oversizeBodyMarkers are the substrings a rejected oversize embed carries in
+// its response body — the one list of the oversize detector:
+//
+//   - "exceed_context_size": llama.cpp's error type. Live-vermessener
+//     Vertrag (Lead-Messung 2026-07-24, W04-4): HTTP 400 with JSON body
+//     {"error":{"code":400,"message":"request (N tokens) exceeds the
+//     available context size (M tokens), …","type":"exceed_context_size_error",…}}
+//     — the type string carries the _error SUFFIX. Substring match on the
+//     design-doc stem catches both spellings and older server versions.
+//   - "context_length_exceeded": the OpenAI error code — what a ctx
+//     gateway's POST /v1/embeddings answers (400, its own text) when its
+//     backend refused an input as too long (FOLGE-EMBLIMIT), and OpenAI's
+//     own code for the same refusal. A ctx instance embedding through
+//     another one's gateway would otherwise retry such a block on the wire
+//     curve forever.
+//
+// The exact JSON envelope is not load-bearing, only the presence of a token.
+var oversizeBodyMarkers = []string{"exceed_context_size", "context_length_exceeded"}
 
 // ClassifyEmbedError inspects an embed-wire error and returns the memo class
 // plus a normalized (ready-to-store) last_error. An *httpx.StatusError with
-// HTTP 400 whose body names exceed_context_size classifies as
+// HTTP 400 whose body names one of oversizeBodyMarkers classifies as
 // EmbedFailureOversize (the Netz-Klassifikation behind the pre-wire token
 // estimate, design/04 §4.4); every other wire error — including other
 // 4xx/5xx — classifies as EmbedFailureWire. The 400-AND-substring rule is
-// the measured llama.cpp contract (see oversizeBodyMarker): a 5xx that
-// merely ECHOES the token in its body is a transient server condition and
+// the measured llama.cpp contract (see oversizeBodyMarkers): a 5xx that
+// merely ECHOES a marker in its body is a transient server condition and
 // must keep the retryable wire class, never the permanent infinity park.
 func ClassifyEmbedError(err error) (EmbedFailureClass, string) {
 	if se, ok := errors.AsType[*httpx.StatusError](err); ok {
-		if se.Code == http.StatusBadRequest && strings.Contains(se.Body, oversizeBodyMarker) {
+		if se.Code == http.StatusBadRequest && slices.ContainsFunc(oversizeBodyMarkers, func(m string) bool { return strings.Contains(se.Body, m) }) {
 			msg := fmt.Sprintf("HTTP %d: %s", se.Code, se.Body)
 			return EmbedFailureOversize, NormalizeEmbedError(EmbedFailureOversize, msg)
 		}

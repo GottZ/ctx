@@ -1,0 +1,152 @@
+# ctx_discord_policy (hermes-agent plugin) — daily compatibility run against Hermes upstream main and the
+# last three published releases: the whole contract suite per ref (JUnit results and the end-to-end status
+# matrices as artifacts), one summary, and an issue per finding category (security, comfort, infrastructure)
+# that is only updated when its findings change. The issues carry the label ctx_discord_policy and a title
+# prefix, so they stand apart from the rest of the ctx repository; the label has to exist (gh refuses to
+# create an issue with an unknown label, and the run then turns red at the issues step). Security or
+# infrastructure findings turn the run red. Only the report job may write (issues).
+#
+# Scheduled runs use the workflow file on root. Not a required check.
+
+name: ctx_discord_policy upstream compatibility
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: hermes-ctx-discord-policy-upstream
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+    working-directory: integrations/hermes/plugin/ctx_discord_policy
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  refs:
+    name: ctx_discord_policy · pick Hermes refs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+      expect: ${{ steps.pick.outputs.expect }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Published releases (not tags: Hermes also tags calendar versions), newest publication first.
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate 'repos/NousResearch/hermes-agent/releases?per_page=100' \
+            --jq '.[] | {tag_name, draft, prerelease, published_at}' > "$RUNNER_TEMP/releases.jsonl"
+          python3 ci/compat_report.py refs "$RUNNER_TEMP/releases.jsonl" --count 3 --github-output "$GITHUB_OUTPUT"
+
+  contract:
+    name: ctx_discord_policy · contract hermes@${{ matrix.ref }}
+    needs: refs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: ${{ fromJSON(needs.refs.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out Hermes at ${{ matrix.ref }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ matrix.ref }}
+          path: hermes-agent
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: "0.13.5"
+
+      - name: Hermes environment (locked dependencies + discord extra)
+        working-directory: hermes-agent
+        run: |
+          uv sync --frozen --no-install-project --extra discord
+          uv pip install --python .venv/bin/python pytest==9.1.1 pytest-asyncio==1.4.0
+          echo "HERMES_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      # Results land in out/compat-<ref>/ of the workspace, so every artifact carries its own directory (see
+      # the report job).
+      - name: Contract tests
+        env:
+          HERMES_SRC: ${{ github.workspace }}/hermes-agent
+          HERMES_REF: ${{ matrix.ref }}
+          CONTRACT_OUT: ${{ github.workspace }}/out/compat-${{ matrix.ref }}
+          DSP_CONTRACT_REQUIRED: "1"
+        run: |
+          mkdir -p "$CONTRACT_OUT"
+          "$HERMES_SRC/.venv/bin/python" -m pytest -q -rfEs tests/contract --junitxml="$CONTRACT_OUT/junit.xml" \
+            --basetemp="$RUNNER_TEMP/pytest-contract"
+
+      - name: Upload results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: compat-${{ matrix.ref }}
+          path: out/
+          retention-days: 30
+          if-no-files-found: warn
+
+  report:
+    name: ctx_discord_policy · report
+    needs: [refs, contract]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # merge-multiple: artifacts/compat-<ref>/ for any number of artifacts (a single one would else be
+      # unpacked flat into artifacts/ and every ref would read as untested).
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Compatibility matrix and findings
+        env:
+          EXPECT: ${{ needs.refs.outputs.expect }}
+          REFS_RESULT: ${{ needs.refs.result }}
+        run: |
+          python3 ci/compat_report.py summarize "$GITHUB_WORKSPACE/artifacts" --expect "$EXPECT" \
+            --refs-result "$REFS_RESULT" --out "$RUNNER_TEMP/report.json" --summary "$RUNNER_TEMP/summary.md"
+          cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Issues (opened, updated on change, closed when resolved)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 ci/compat_report.py issues "$RUNNER_TEMP/report.json" --repo "$GITHUB_REPOSITORY" \
+            --run-url "$RUN_URL" --label ctx_discord_policy --title-prefix "ctx_discord_policy: "
+
+      - name: Verdict (security or infrastructure findings fail the run)
+        run: python3 ci/compat_report.py verdict "$RUNNER_TEMP/report.json"

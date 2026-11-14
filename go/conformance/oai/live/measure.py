@@ -51,8 +51,9 @@ failed, 2 on usage:
     (45 s at the default jitter 0.5) and an x-should-retry header. A 429
     of a reverse proxy in front of ctx (its own page: neither a JSON body
     nor x-should-retry — openresty's limit_req answers HTML) counts as
-    ``proxy_429``, outside ``violations``, ``share_429`` (the ctx share)
-    and ``retry_after``; ``status`` counts every answer. The Server header
+    ``proxy_429``, outside ``violations``, ``share_429`` (ctx's 429 over
+    the requests ctx answered: ``ctx_429 / (requests − proxy_429)``) and
+    ``retry_after``; ``status`` counts every answer. The Server header
     tells nothing apart: behind the proxy ctx's own answers carry the
     proxy's Server too. A run whose 429 are all the proxy's never reached
     the door's limit — exit 1 with an ``error``, not a pass.
@@ -337,9 +338,11 @@ def retry_after(base_url: str, key: str, model: str, requests: int, concurrency:
         if not RETRY_AFTER_MIN <= n <= max_allowed:
             violations.append(f"429 with Retry-After {n} outside [{RETRY_AFTER_MIN}, {max_allowed}]")
     proxy_429 = sum(servers.values())
+    # The proxy's 429 never reached ctx: the share is over ctx's answers only.
+    answered = requests - proxy_429
     ok = ctx_429 > 0 and not violations
     res = {"requests": requests, "status": status, "ctx_429": ctx_429, "proxy_429": proxy_429, "proxy_servers": servers,
-           "share_429": ctx_429 / requests if requests else 0.0, "retry_after": sorted(set(values)),
+           "share_429": ctx_429 / answered if answered else 0.0, "retry_after": sorted(set(values)),
            "max_allowed": max_allowed, "violations": violations[:10], "ok": ok}
     if ctx_429 == 0:
         # Nothing of ctx's to judge: the flood never reached the door's limit

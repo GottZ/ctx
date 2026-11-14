@@ -35,6 +35,7 @@ Three deliberate exceptions, unchanged:
 | `ctx search [category] [query:text]` | Compact search (no LLM) |
 | `ctx search cluster:<handle>` | Restrict to ONE topic of the cluster map. The handle is the stable `topic` the graph surfaces emit (`GET /api/graph/overview`, ego annotation) — a scope-pure topic, so the answer is exactly that topic's blocks, never a neighbouring scope's half of the same cluster. Server-gated (`cluster.facet_enabled`, default off): while it is off the argument is ignored and you get an ordinary unfiltered search. A malformed handle is a `400` before any database roundtrip; an unknown, foreign or empty topic is an ordinary empty result — never a distinguishable "not found" |
 | `ctx get <id>` | Fetch full block |
+| `ctx get --include-archived <id>` | Also read an archived block — full block id only, from the key's own home and allowed scopes (never through a block or cross-tenant scope grant); the answer carries `"archived": true`. A server without this flag ignores it and answers `Block not found` |
 | `ctx delete <id>` | Soft-delete (archive) |
 | `ctx categories` | List all categories |
 | `ctx stats` | Database statistics + Dream backlog (`dream_queue`: pickable/cooldown/incoming-forecast) |

@@ -82,7 +82,7 @@ func TestClearEmbedding_NextExtension_Integration(t *testing.T) {
 		// stale vector (design §3.2b/§4.3). Simulating "a content update
 		// happened during an active migration" is exactly "ClearEmbedding
 		// ran while embedding_next was populated".
-		if err := store.ClearEmbedding(ctx, pool, id); err != nil {
+		if err := store.ClearEmbeddingTx(ctx, pool, id); err != nil {
 			t.Fatalf("ClearEmbedding: %v", err)
 		}
 
@@ -128,7 +128,7 @@ func TestClearEmbedding_NextExtension_Integration(t *testing.T) {
 			t.Fatalf("precondition: expected exactly 1 backfill memo, got %d", preCount)
 		}
 
-		if err := store.ClearEmbedding(ctx, pool, id); err != nil {
+		if err := store.ClearEmbeddingTx(ctx, pool, id); err != nil {
 			t.Fatalf("ClearEmbedding: %v", err)
 		}
 

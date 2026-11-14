@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -283,15 +284,21 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 		// InsertChunk can only write its own (source_id, chunk_index) slot.
 		// A matching row outside that slot holds the content identity, so the
 		// insert would hit uq_context_category_title_scope instead of landing.
+		// The predicate is InsertChunk's arbiter (NOT is_archived AND
+		// lifecycle_state = 'chunk'), and the source id is compared as a uuid
+		// as InsertChunk casts it, so a non-canonical spelling of the same id
+		// still names this slot (#182). A malformed id names no slot.
 		var sameSlot bool
-		if err := h.pool.QueryRow(ctx,
+		err := h.pool.QueryRow(ctx,
 			`SELECT EXISTS (
 			   SELECT 1 FROM context_blocks
-			    WHERE id = $1 AND source_id::text = $2 AND chunk_index = $3
-			 )`, match.ID, chunk.SourceID, chunk.ChunkIndex).Scan(&sameSlot); err != nil {
+			    WHERE id = $1 AND source_id = $2::uuid AND chunk_index = $3
+			      AND NOT is_archived AND lifecycle_state = 'chunk'
+			 )`, match.ID, chunk.SourceID, chunk.ChunkIndex).Scan(&sameSlot)
+		if err != nil && !pgxdb.MalformedUUID(err) {
 			slog.Error("ingest: chunk slot check error",
 				"error", err, "index", index, "request_id", reqID)
-			return IngestResult{Index: index, Status: "failed", Error: "hash check failed"}
+			return IngestResult{Index: index, Status: "failed", Error: "chunk slot check failed"}
 		}
 		if !sameSlot {
 			return IngestResult{Index: index, ID: match.ID, Status: "skipped"}
