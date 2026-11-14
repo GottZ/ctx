@@ -108,7 +108,12 @@ def test_the_skill_list_leaves_out_disabled_skills(hermes, anchor):
 def test_gateway_rpc_without_a_running_gateway_fails_fast_and_starts_none(hermes, anchor):
     hm = anchor.mod("hermes")
     if not hm.rpc_available():
-        pytest.skip("this Hermes has no plugin RPC")
+        # A Hermes without plugin RPC (before 04846730f3): the only caller, web.remote.call, checks
+        # rpc_available() first and never reaches gateway_rpc there. Nothing to probe on this ref, and a
+        # skip would be reported as a security finding on every release that predates plugin RPC.
+        source = inspect.getsource(anchor.mod("web.remote").call)
+        assert source.index("rpc_available()") < source.index("gateway_rpc(")
+        return
     from hermes_cli.gateway_runtime import discover_gateway_endpoint
 
     started = time.monotonic()
