@@ -273,6 +273,9 @@ var manageActions = map[string]manageAction{
 	"scope-list":               {tier: tierTenantAdmin, handle: (*ManageHandler).handleScopeList},
 	"scope-overview":           {tier: tierServerAdmin, handle: dropAuthReq((*ManageHandler).handleScopeOverview)},
 	"stats":                    {tier: tierOpen, handle: (*ManageHandler).handleStats},
+	// stats-reconcile (#266): the block-counter repair across every tenant's
+	// scopes — server-global maintenance, server-admin like overview-rebuild-start.
+	"stats-reconcile":          {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleStatsReconcile)},
 	"tenant-create":            {tier: tierServerAdmin, handle: (*ManageHandler).handleTenantCreate},
 	"tenant-delete":            {tier: tierServerAdmin, handle: (*ManageHandler).handleTenantDelete},
 	"tenant-get":               {tier: tierServerAdmin, handle: (*ManageHandler).handleTenantGet},

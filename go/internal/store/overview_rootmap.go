@@ -394,11 +394,13 @@ func cappedCountTx(ctx context.Context, pool *pgxpool.Pool, timeout time.Duratio
 // expensive statement of this axis at the target scale — it rode the request
 // path of POST /api/digest uncapped until this wave, next to a coverage count
 // that §6.3 caps to five seconds. Same degradation: (0, false) beats a number
-// bought with an unbounded scan.
+// bought with an unbounded scan. Since migration 170 it is the same number
+// GetStats reports as total_categories, read from context_block_counts
+// (activeCategoriesSQL) — a sum over the counter rows of the read scopes, so
+// the cap is a backstop now, not the expected exit.
 func ActiveCategoryCount(ctx context.Context, pool *pgxpool.Pool, readScopes []string, timeout time.Duration) (int, bool, error) {
 	return cappedCount(ctx, pool, "active category count", timeout,
-		`SELECT count(DISTINCT category)::int FROM context_blocks
-		  WHERE scope = ANY($1::text[]) AND NOT is_archived`, readScopes)
+		`SELECT count(*)::int FROM (`+activeCategoriesSQL+`) c`, readScopes)
 }
 
 // MapBlockLength is the size of a map block without transferring it. The topic
