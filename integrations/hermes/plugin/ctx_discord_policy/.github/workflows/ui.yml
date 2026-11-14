@@ -1,0 +1,52 @@
+# The settings page's desktop half: the committed bundle matches its sources, and the component tests (jsdom,
+# React) pass. Node is a test dependency only; users install no Node and run no build. A failing comparison in
+# these tests must never format a rendered DOM node (tests/browser/harness.mjs explains why and guards it).
+# That growth is not bounded by the V8 heap cap; the step and job timeouts are what end a runaway here.
+name: ui
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  browser:
+    name: settings page bundle and component tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.14"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Bundle is generated from ui/ (tools/assemble_ui.py)
+        run: python tools/assemble_ui.py --check
+
+      - name: Test dependencies (locked, no install scripts)
+        run: npm ci --prefix tests/browser --ignore-scripts --no-audit --no-fund
+
+      - name: Component tests (jsdom)
+        timeout-minutes: 5
+        env:
+          NODE_OPTIONS: --max-old-space-size=2048
+        run: node --test --test-concurrency=1 --test-timeout=60000 'tests/browser/*.test.mjs'
