@@ -131,23 +131,38 @@ curl -fsSL "https://github.com/GottZ/ctx/releases/latest/download/$f" -o "$tmp/$
 On Windows, download `ctx-windows-amd64.exe` from the [latest release](https://github.com/GottZ/ctx/releases/latest)
 and check it the same way. Each release also carries `SHA256SUMS` and `ctx.intoto.jsonl`, the signed provenance as
 a file: `gh attestation verify <file> --bundle ctx.intoto.jsonl -R GottZ/ctx` checks against it without signing in.
-To build the CLI yourself (the binary lands in `ctx/go/`):
+
+To build the CLI yourself instead, clone the repository and build in its `go` folder without leaving the root
+folder, then install the binary the same way:
 
 ```bash
-git clone https://github.com/GottZ/ctx && cd ctx/go && go build -o ctx ./cmd/ctx
+git clone https://github.com/GottZ/ctx && cd ctx
+go -C go build -o ctx ./cmd/ctx && install -m 0755 go/ctx /usr/local/bin/ctx
 ```
 
-**The server.** From a clone of this repository; each password and key is a value from `openssl rand -hex 32`:
+**The server.** Everything below runs in the root folder of a clone (`git clone https://github.com/GottZ/ctx &&
+cd ctx`, or the clone from the build above). First the `.env` file. It will hold secrets, so it is created
+readable by you only, and a `.env` you already have is kept and gets the same rights. The last line adds your
+first key, which ctx makes at its first start:
 
 ```bash
-cp .env.example .env                                                # then set the passwords and CTX_SECRETS_KEY
-echo "CTX_BOOTSTRAP_ADMIN_KEY=$(openssl rand -hex 32)" >> .env      # your first key, made at the first start
-cp docker-compose.override.yml.example docker-compose.override.yml  # optional: port 8080 on localhost
-docker compose up -d ctx                                            # builds ctxd and the database, starts both
+[ -e .env ] || (umask 077 && cp .env.example .env)
+chmod 600 .env
+grep -q '^CTX_BOOTSTRAP_ADMIN_KEY=' .env || echo "CTX_BOOTSTRAP_ADMIN_KEY=$(openssl rand -hex 32)" >> .env
 ```
 
-The `ctx` service publishes no port of its own; it carries labels for a reverse proxy. Put your proxy in front,
-or use the override above for `127.0.0.1:8080`. Without a proxy, compose's warnings that `CTX_HOSTNAME` and
+Then set the passwords and `CTX_SECRETS_KEY` in `.env`, each a value from `openssl rand -hex 32`, and start
+ctx. Compose builds ctxd and the database image and starts both:
+
+```bash
+[ -e docker-compose.override.yml ] || cp docker-compose.override.yml.example docker-compose.override.yml
+docker compose up -d ctx
+```
+
+The `ctx` service publishes no port of its own; it carries labels for a reverse proxy. The first line above is
+optional: it gives ctx the port `127.0.0.1:8080` and never replaces a `docker-compose.override.yml` you already
+have. In that case, add the `ports:` entry of the example under `services: ctx:` in your file yourself. With a
+proxy of your own in front, skip the line. Without a proxy, compose's warnings that `CTX_HOSTNAME` and
 `CTX_SSL_DOMAIN` are not set do no harm.
 
 Copy `CTX_SECRETS_KEY` from `.env` into your password manager. It seals the provider keys in the database, and
@@ -171,17 +186,21 @@ Below v4.19.0, v5 refuses the database. Path and rollback:
    Claude Code hooks for subagents and the statusline; `ctx init --remove` takes them out again.
 
    ```bash
-   ctx init                 # interactive
-   ctx backends seed --host http://gpu-host:11434 --model qwen3 --embed-model qwen3-embedding   # only the backend step, no questions
-   ctx health               # database and model backends
+   ctx init
+   ctx health
    ```
 
+   `ctx health` shows the database and the model backends. For scripts, the backend step alone runs without
+   questions: `ctx backends seed --host http://gpu-host:11434 --model qwen3 --embed-model qwen3-embedding`.
+
 2. **Make keys.** The bootstrap key is a server-admin key. Keep it in your password manager, remove its line from
-   `.env`, and give the CLI an everyday key in its config file afterwards. Everyday keys and further tenants:
+   `.env`, and give the CLI an everyday key in its config file afterwards. The first line below makes an everyday
+   key that writes to the scope `private`; the second makes a tenant with its own scope and an owner key, shown
+   once:
 
    ```bash
-   ctx keys create laptop --home private      # an everyday key that writes to the scope private
-   ctx tenant create friend "Friend Corp"     # a tenant with its own scope and owner key, shown once
+   ctx keys create laptop --home private
+   ctx tenant create friend "Friend Corp"
    ```
 
 3. **Connect your agents.** Claude Code and other MCP clients that send a header:
