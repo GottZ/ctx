@@ -68,6 +68,60 @@ def test_license_is_mpl_2_0():
     assert "Exhibit A - Source Code Form License Notice" in text
 
 
+# Directories a test run or a local checkout leaves next to the tracked files (used without git only).
+_UNTRACKED_DIRS = {"node_modules", "__pycache__", ".pytest_cache", "contract-out"}
+
+
+def _tree_files() -> list[str]:
+    """The plugin's files: what git tracks here (the private-value scan's list), or (no checkout) every file
+    outside the untracked dirs."""
+    scan = _scanner()
+    try:
+        names = scan.tracked_files(ROOT)
+    except scan.ScanError:
+        names = []
+    return names or [p.relative_to(ROOT).as_posix() for p in ROOT.rglob("*")
+                     if p.is_file() and not _UNTRACKED_DIRS & set(p.relative_to(ROOT).parts)]
+
+
+def _hidden(char: str) -> bool:
+    """Format characters (zero-width, joiners, byte order mark, bidirectional controls, tag characters) and
+    control characters other than tab, line feed and carriage return: none of them shows in an editor or a
+    diff."""
+    import unicodedata
+
+    category = unicodedata.category(char)
+    return category == "Cf" or (category == "Cc" and char not in "\t\n\r")
+
+
+def test_no_invisible_characters_in_the_tree():
+    """Every such character is written as an escape sequence. Hermes' install scanner rates a literal one as
+    text hiding (high), which turns ``hermes plugins install`` into a confirmation prompt, refused without a
+    terminal; and nobody reviewing the file can see it."""
+    import unicodedata
+
+    found = []
+    for name in _tree_files():
+        path = ROOT / name
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            text = path.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            continue  # binary (the banner, images): not source
+        for number, line in enumerate(text.split("\n"), 1):
+            for char in sorted({c for c in line if _hidden(c)}):
+                found.append(f"{name}:{number}: U+{ord(char):04X} {unicodedata.name(char, '')}")
+    assert not found, "write these as escape sequences:\n" + "\n".join(found)
+
+
+def test_readme_links_nothing_above_the_plugin_directory():
+    """An installed copy is the plugin directory alone: a relative path out of it (the banner) leads nowhere
+    there, and Hermes' install scanner reports it as a path traversal."""
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert not re.findall(r"""(?:\]\(|src=["']|href=["'])\.\./""", text)
+
+
 def _scanner():
     name = "dsp_private_scan"
     spec = importlib.util.spec_from_file_location(name, ROOT / "ci" / "private_scan.py")

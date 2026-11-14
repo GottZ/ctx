@@ -45,7 +45,7 @@ def _read(root: Path, rel: str) -> str:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise AssembleError(f"{rel}: not UTF-8 ({exc})") from exc
-    text = text.lstrip("﻿").replace("\r\n", "\n").replace("\r", "\n")
+    text = text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
     return text.strip("\n") + "\n"
 
 

@@ -337,7 +337,7 @@ function createPolicyUI(deps) {
     return buffer.then(function (buf) {
       try {
         const text = new TextDecoder('utf-8', { fatal: true }).decode(buf)
-        return { text: text.replace(/^﻿/, '').replace(/\r\n?/g, '\n') }
+        return { text: text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n') }
       } catch (e) {
         return { error: 'The file is not UTF-8 text; nothing was loaded.' }
       }
@@ -357,7 +357,7 @@ function createPolicyUI(deps) {
     })
     return content.then(function (raw) {
       try {
-        return { data: JSON.parse(String(raw).replace(/^﻿/, '')) }
+        return { data: JSON.parse(String(raw).replace(/^\uFEFF/, '')) }
       } catch (e) {
         return { error: 'the file is not JSON.' }
       }

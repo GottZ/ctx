@@ -1,4 +1,4 @@
-<p align="center"><img src="../../assets/ctx_discord_policy.webp" alt="ctx discord policy: everyone may talk, only you hold the keys" width="100%"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/GottZ/ctx/root/integrations/hermes/assets/ctx_discord_policy.webp" alt="ctx discord policy: everyone may talk, only you hold the keys" width="100%"></p>
 
 # ctx_discord_policy
 

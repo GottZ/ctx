@@ -189,7 +189,7 @@ def summarize(artifacts: Path, expect: list[str], refs_result: str = "success") 
 def neutral(text: Any, limit: int = TEXT_LIMIT) -> str:
     """Text from a run against upstream code, safe in an issue or summary: one line, bounded, as a code span,
     no mention or reference can trigger."""
-    value = re.sub(r"[\x00-\x1f\x7f  ]+", " ", str(text))
+    value = re.sub(r"[\x00-\x1f\x7f\u2028\u2029]+", " ", str(text))
     value = value.replace("`", "'").replace("@", "@\u200b").strip()
     if len(value) > limit:
         value = value[: limit - 1] + "…"
