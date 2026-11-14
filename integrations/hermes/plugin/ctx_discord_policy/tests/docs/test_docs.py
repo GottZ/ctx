@@ -109,6 +109,23 @@ def test_no_invisible_characters_in_the_tree():
     assert not found, "write these as escape sequences:\n" + "\n".join(found)
 
 
+def _readme_section(title: str) -> str:
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    match = re.search(rf"^## {re.escape(title)}\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    assert match, f"README has no section {title!r}"
+    return match.group(1)
+
+
+def test_install_is_named_for_every_profile():
+    """A Hermes profile finds plugins only in its own home (tests/contract/test_install.py), so enabling the
+    plugin in a profile it was never installed in fails ("No plugin named ..."): the README installs it there."""
+    section = _readme_section("Install")
+    main = re.search(r"^hermes plugins install (\S+) --enable$", section, re.M)
+    assert main, "the install command"
+    assert f"\nhermes -p <profile> plugins install {main.group(1)} --enable\n" in section
+    assert "plugins enable ctx_discord_policy" not in section
+
+
 def test_readme_links_nothing_above_the_plugin_directory():
     """An installed copy is the plugin directory alone: a relative path out of it (the banner) leads nowhere
     there, and Hermes' install scanner reports it as a path traversal."""

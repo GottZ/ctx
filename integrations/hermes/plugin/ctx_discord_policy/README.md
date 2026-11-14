@@ -97,13 +97,17 @@ hermes plugins install GottZ/ctx/integrations/hermes/plugin/ctx_discord_policy -
 Restart the gateway afterwards. An update also needs a gateway restart: a newer copy that finds the older one
 still running in the process registers nothing and reports "restart required".
 
-The plugin protects a turn only in a profile where it is enabled. With `multiplex_profiles` and
-`profile_routes`, enable it in **every profile a Discord server routes to**, not only in the profile that runs
-the bot:
+The plugin protects a turn only in a profile where it is installed and enabled, and a Hermes profile finds
+plugins only in its own home. With `multiplex_profiles` and `profile_routes`, install it in **every profile a
+Discord server routes to**, not only in the profile that runs the bot, before that restart:
 
 ```bash
-hermes -p <profile> plugins enable ctx_discord_policy
+hermes -p <profile> plugins install GottZ/ctx/integrations/hermes/plugin/ctx_discord_policy --enable
 ```
+
+Every profile needs the same version: the gateway runs one copy of the plugin for all of them, and a profile
+whose copy has another version registers nothing ("restart required"). `--ref <commit>` (the full
+40-character commit) installs one exact commit everywhere.
 
 A server that routes to a profile without the plugin stays closed for members, and the status names that
 profile. Operators keep Hermes' normal behaviour there.

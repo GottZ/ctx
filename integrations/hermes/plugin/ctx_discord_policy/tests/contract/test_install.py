@@ -88,3 +88,88 @@ def test_install_declares_no_python_dependencies(hermes, tmp_path, monkeypatch):
         monkeypatch.setattr("sys.stdout.isatty", lambda: terminal, raising=False)
         assert plugins_cmd_install._install_plugin_python_deps(manifest, tree, Console()) == (True, None)
     assert printed == [], printed
+
+
+def test_a_profile_finds_only_the_plugins_installed_in_its_own_home(hermes, tmp_path):
+    """Why the README installs the plugin in every profile: discovery and ``plugins install`` both use the
+    plugins directory of the active home, and ``hermes -p <profile>`` makes the profile's home active."""
+    from fakes.hermes_homes import install_plugin
+    from hermes_cli.plugins_cmd import _plugins_dir
+    from hermes_cli.plugins_discovery import collect_directory_manifests
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    root = tmp_path / "root"
+    install_plugin(root / "plugins" / "ctx_discord_policy")
+    (root / "config.yaml").write_text("plugins:\n  enabled: [ctx_discord_policy]\n", encoding="utf-8")
+    profile = root / "profiles" / "beta"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("plugins:\n  enabled: [ctx_discord_policy]\n", encoding="utf-8")
+
+    def seen(home: Path) -> tuple[list[str], Path]:
+        token = set_hermes_home_override(str(home))
+        try:
+            names = sorted(m.name for m in collect_directory_manifests() if m.source == "user")
+            return names, _plugins_dir()
+        finally:
+            reset_hermes_home_override(token)
+
+    assert seen(root) == (["ctx_discord_policy"], root / "plugins")
+    assert seen(profile) == ([], profile / "plugins")       # installed in the default home only
+    install_plugin(profile / "plugins" / "ctx_discord_policy")
+    assert seen(profile) == (["ctx_discord_policy"], profile / "plugins")
+
+
+PLACEHOLDERS = {
+    "<server id>": "123456789012345678", "<profile>": "beta", "<your Discord user id>": "234567890123456789",
+    "<file>": "server.json", "<application id>": "345678901234567890", "<commit>": "0" * 40,
+}
+
+
+def _readme_commands() -> list[str]:
+    """Every whole ``hermes …`` command of the README: the lines of its code blocks and the code spans of its
+    tables (prose mentions a command by name only and is not parsed)."""
+    import re
+
+    text = (REPO / "README.md").read_text(encoding="utf-8")
+    commands = []
+    for block in re.findall(r"^ *```[a-z]*\n(.*?)^ *```", text, re.M | re.S):  # list items indent
+        for line in block.splitlines():
+            line = re.split(r"\s{2,}", line.strip())[0]   # the overview block explains each command after it
+            if line.startswith("hermes "):
+                commands.append(line)
+    for row in (line for line in text.splitlines() if line.startswith("|")):
+        commands += [span for span in re.findall(r"`([^`]+)`", row) if span.startswith("hermes ")]
+    return commands
+
+
+def test_every_command_in_the_readme_parses(hermes, anchor):
+    """Subcommands, options and their order as this Hermes parses them; ``ctx-discord-policy`` is the plugin's
+    own command, attached the way Hermes attaches a plugin command."""
+    import contextlib
+    import io
+    import shlex
+
+    from hermes_cli import main as hermes_main
+    from hermes_cli._parser import PRE_ARGPARSE_INHERITED_FLAGS
+
+    parser, subparsers = hermes_main._build_cli_parser()
+    if "ctx-discord-policy" not in subparsers.choices:
+        anchor.mod("cli").setup(subparsers.add_parser("ctx-discord-policy"))
+    profile_flags = {flag for flag, _takes_value in PRE_ARGPARSE_INHERITED_FLAGS}
+    commands = _readme_commands()
+    assert len(commands) >= 10, commands
+    failures = []
+    for command in commands:
+        for placeholder, value in PLACEHOLDERS.items():
+            command = command.replace(placeholder, value)
+        assert "<" not in command, f"unknown placeholder in {command!r}"
+        argv = shlex.split(command)[1:]
+        if argv[0] in profile_flags:   # Hermes reads -p <profile> before argparse, ahead of the subcommand
+            argv = argv[2:]
+        stderr = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(stderr):
+                parser.parse_args(argv)
+        except SystemExit as exc:
+            failures.append(f"{command}: exit {exc.code}: {stderr.getvalue().strip()[-300:]}")
+    assert not failures, "\n".join(failures)
