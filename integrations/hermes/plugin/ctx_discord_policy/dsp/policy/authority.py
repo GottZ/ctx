@@ -223,15 +223,17 @@ def bindings_for(runner: Any, source: Any) -> list:
 def unrouted_refusal(bindings: list, event: Any) -> Optional[str]:
     """Why an event without a policy route must not run (``None``: Hermes' own rules decide). In a server
     one of these bots knows (active or paused; every server while its policy file cannot be used), only an
-    operator's event runs without a route. Internal events of the gateway and other platforms pass."""
+    operator's event runs without a route. That includes the gateway's internal events that carry a user
+    (Hermes resumes a turn interrupted by a restart as an internal event with the stored source, authorized
+    only by its own allowlist); internal events without a user and other platforms pass."""
     source = getattr(event, "source", None)
-    if source is None or getattr(event, "internal", False):
-        return None
-    if not platform_is_discord(getattr(source, "platform", None)):
+    if source is None or not platform_is_discord(getattr(source, "platform", None)):
         return None
     guild_id = str(getattr(source, "guild_id", "") or "").strip()
     if not guild_id:
         return None                                  # direct messages: Hermes decides
+    if getattr(event, "internal", False) and not str(getattr(source, "user_id", "") or ""):
+        return None                                  # the gateway's own notices, nobody's turn
     knowing = [b for b in bindings if b is not None
                and b.store.read().guild_state(b.bot_id, guild_id) in ("active", "paused")]
     if not knowing:

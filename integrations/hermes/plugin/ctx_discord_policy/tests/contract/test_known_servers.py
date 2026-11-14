@@ -154,3 +154,21 @@ async def test_an_event_whose_bot_cannot_be_told_counts_for_every_bound_bot(worl
     world.runner._delivery_adapter_for = lambda source: None
     turn = await world.turn(_plain_event(world, 7609))
     assert turn["result"] is None and not turn["ran"], turn
+
+
+def _internal(w, user):
+    """Hermes' resume of a turn a restart interrupted (``run_startup``): an internal event with the stored source."""
+    from gateway.platforms.base import MessageEvent, MessageType
+
+    source = w.adapter.build_source(chat_id=CHANNEL, chat_type="group", user_id=user, guild_id=GUILD)
+    return MessageEvent(text="", message_type=MessageType.TEXT, source=source, internal=True)
+
+
+async def test_a_members_turn_resumed_after_a_restart_does_not_run_unrouted(world):
+    turn = await world.turn(_internal(world, MEMBER))
+    assert turn["result"] is None and not turn["ran"], turn
+
+
+async def test_internal_events_of_operators_and_of_the_gateway_still_run(world):
+    assert (await world.turn(_internal(world, OPERATOR)))["ran"]
+    assert (await world.turn(_internal(world, None)))["ran"]
