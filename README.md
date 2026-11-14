@@ -83,9 +83,9 @@ There are four ways in:
 
 ## Before you start
 
-- **A Linux host with Docker Compose** for the server. ctx runs as a Linux container image; that is the only
-  supported runtime. The compose file builds it, and a database image with PostgreSQL 18, pgvector 0.8.7 and
-  TimescaleDB 2.31.0.
+- **A Linux host with Docker Compose** for the server, and `openssl` for its keys. ctx runs as a Linux container
+  image; that is the only supported runtime. The compose file builds it, and a database image with PostgreSQL 18,
+  pgvector 0.8.7 and TimescaleDB 2.31.0.
 - **A chat model and an embedding model** that ctx can reach over HTTP: Ollama, an OpenAI-compatible server or a
   hosted API. Chat also works through the Anthropic Messages API, which serves no embeddings. The embedding model
   must return at least 1024 dimensions. ctx keeps the first 1024, so pick a model whose first 1024 dimensions work
@@ -132,8 +132,8 @@ On Windows, download `ctx-windows-amd64.exe` from the [latest release](https://g
 and check it the same way. Each release also carries `SHA256SUMS` and `ctx.intoto.jsonl`, the signed provenance as
 a file: `gh attestation verify <file> --bundle ctx.intoto.jsonl -R GottZ/ctx` checks against it without signing in.
 
-To build the CLI yourself instead, clone the repository and build in its `go` folder without leaving the root
-folder, then install the binary the same way:
+To build the CLI yourself instead, clone the repository and build with `go -C go`, which builds in the `go`
+folder while your shell stays in the root folder. Then install the binary the same way:
 
 ```bash
 git clone https://github.com/GottZ/ctx && cd ctx
@@ -148,7 +148,7 @@ first key, which ctx makes at its first start:
 ```bash
 [ -e .env ] || (umask 077 && cp .env.example .env)
 chmod 600 .env
-grep -q '^CTX_BOOTSTRAP_ADMIN_KEY=' .env || echo "CTX_BOOTSTRAP_ADMIN_KEY=$(openssl rand -hex 32)" >> .env
+grep -q '^CTX_BOOTSTRAP_ADMIN_KEY=' .env || { k=$(openssl rand -hex 32) && printf '\nCTX_BOOTSTRAP_ADMIN_KEY=%s\n' "$k" >> .env; }
 ```
 
 Then set the passwords and `CTX_SECRETS_KEY` in `.env`, each a value from `openssl rand -hex 32`, and start
@@ -224,24 +224,27 @@ The full walk-through, with every option, is in [Operations](docs/operations.md#
 ctx is a skeleton. After the install it stores, finds and links what your agents give it, over MCP, the CLI and
 HTTP. It does not decide when your agent looks something up or writes something down, and it does not make a
 session start or end well on its own. Today ctx is deliberately neutral: it brings no working style of its own and
-no ready-made skills, because every team works differently. Below is a way of working we suggest. Adapt it to your
+no ready-made skills, because every team works differently. Below is a suggested way of working. Adapt it to your
 team and write it into your own skill, rule file, hook or prompt. Suggestions for ready-made skills will come
-later.
+later. The tool names are the MCP tools an agent uses; the CLI commands in parentheses do the same.
 
 **Session start.** Before its first answer, your agent:
 
 1. loads the conventions it works under into its context;
-2. lists what the last session left open, with the blocks those items point to: `ctx search tags:open`, or the
-   MCP tool `search` with `tags: ["open"]` (`open` is a tag you agree on, see step 5 of the close);
+2. lists the open items the last close left: `search` with `tags: ["open"]` and a `limit`
+   (`ctx search tags:open limit:50`). That returns every live block with the tag that the key can read, newest
+   first, as a short preview. Several tags widen the match, so keep projects apart by category instead
+   (`ctx search <category> tags:open`);
 3. asks `query` whole questions about the task ("why did we pin pgvector?", not "pgvector pin"), and reads a
-   block in full with `get` only when it holds its id;
+   block in full with `get` only when it holds its id, such as one an open item names;
 4. says in two or three sentences what it loaded, then starts.
 
 **During the work.** Your agent looks up before it decides, and checks live state before it acts on a block: a
-block says where to look, not what is true now. It saves each finding when it happens: one concept per block, a
-precise title, a category, tags, the source and the date. It searches first and changes an existing block instead
-of adding a second one (`ctx manage update <block-id> '<json>'` or the MCP tool `update`); `ctx save` with the
-same category and title replaces the whole block.
+block says where to look, not what is true now. It saves each finding when it happens, with `store`: one concept
+per block, a precise title, a category, tags, the source and the date. It searches first and changes an existing
+block with `update` instead of adding a second one (`ctx manage update <block-id> '<json>'`); tags and metadata
+sent there replace the whole set. A `store` with the same category and title replaces the whole block (`ctx save`
+does the same).
 
 **Session close.** A session is closed when every "done" in its report rests on the output of a command, not on
 what the session remembers. Each step has a check, and what was not checked is reported as not checked. If a step
@@ -250,15 +253,15 @@ is red, your agent reports the red state instead of closing.
 | Step | Check |
 |---|---|
 | 0. Who asks | A person, or an automation such as a timer, a loop or a hook? An automation continues the task; it does not end it. |
-| 1. Working tree | `git status --porcelain` is empty, or every change left is a decision you can name. Nothing is unpushed without a reason (`git log @{upstream}..HEAD`). |
+| 1. Working tree | `git status --porcelain` is empty, or every change left is a decision you can name. Nothing is unpushed without a reason: `git log --oneline HEAD --not --remotes` lists what no remote has, also on a branch that was never pushed. |
 | 2. Checks | The project's own tests and checks ran in this session. Green means "nothing known is broken", not "everything works". |
 | 3. Deployment | If something was deployed: the commit in the repository, the deployed commit, the running service and its health check agree. The deploy tool's success message is not that state. |
-| 4. Store | Every finding a later session needs is in ctx, one concept per block, an existing block updated rather than copied (`ctx search`, then `ctx manage update`). Each fact lives in one place: git holds the diff, ctx the essence. The test: would a later session find it without this chat? |
-| 5. Open items | Each one neutral, with its source (file and line, or a quote with its date) and what it unblocks, without an urgency nobody gave it; stored with the tag `open`, and archived with `ctx delete <block-id>` once it is done. |
-| 6. Report | Per step, what was checked and with what result; what was not checked or stays open; the ids of the blocks the next session starts from. |
+| 4. Store | Every finding a later session needs is in ctx, one concept per block, an existing block updated rather than copied. Each fact lives in one place: git holds the diff, ctx each decision or finding as it happened, with source and date. A finding still missing goes in now in that form, not as a summary of the session. The check: `search` with words of the finding (`ctx search query:<words>`) returns its block. |
+| 5. Open items | One block each, with the tag `open`: neutral, with its source (file and line, or a quote with its date), what it unblocks and the ids of the blocks it rests on, without an urgency nobody gave it. A done item is archived with `archive` (`ctx delete <block-id>`). |
+| 6. Report | To the person, in the session, not as a block: per step what was checked and with what result, what was not checked or stays open, and the ids of the open items. |
 
-This is not a handover note that retells the session. The findings are already in the store, per topic; the close
-checks that, and leaves only the open items and the pointers to them.
+This is not a handover note that retells the session. The findings should already be in the store, per topic;
+the close checks that they are, and leaves only the open items and the pointers to them.
 
 What there is to start from:
 
