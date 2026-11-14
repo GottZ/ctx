@@ -18,7 +18,9 @@ One plugin, one provider name, one settings section (``memory.ctx_checkpoint`` i
 Transport: by default every call goes through Hermes' own MCP dispatch to the ctx server
 configured in ``mcp_servers.<mcp_server>`` — the plugin holds no credentials. ``transport:
 rest`` switches to the engine's REST client (``CTX_BASE_URL`` / ``CTX_KEY`` in the
-profile's ``.env``), which adds semantic ``/api/query`` recall without the LLM step.
+profile's ``.env``), which enables the CLI's read/write commands. Recall is the semantic
+``/api/query`` retrieval without the synthesis step on both transports (over MCP with ctx
+v5.36.0 or newer; an older server gets the lexical ``search``).
 
 Setup runs through Hermes' own surfaces: the Dashboard/Desktop memory form reads
 ``get_config_schema()`` and writes through ``save_config()``; ``hermes memory setup
