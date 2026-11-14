@@ -7,9 +7,9 @@
 // `WHERE scope = ANY($1)` in every FROM, no unscoped row pick anywhere
 // (design/02 §5.1, BP-1).
 //
-// All three reads are O(cluster × scope) or O(scope) — except ActiveBlockCount,
-// which is the single new O(corpus) step of the axis and therefore the only one
-// carrying a hard cap.
+// All three reads are O(cluster × scope) or O(scope). ActiveBlockCount was the
+// single O(corpus) step of the axis and carries a hard cap; since migration 170
+// it reads the per-scope block counters and the cap is a backstop.
 
 package store
 
@@ -276,13 +276,12 @@ const activeCountGrace = 500 * time.Millisecond
 // persisted block would freeze the GLOBAL corpus size into one tenant's data
 // (BP-1). A missing denominator is honest; a foreign one is a side channel.
 //
-// The count itself rides the partial index idx_context_scope_active
-// (022_stats_indexes.sql, "at 1M+ scale") as an index-only scan — no new
-// migration, no lock.
+// Since migration 170 (issue #266) it is the same number GetStats reports as
+// total_blocks, read from context_block_counts (activeBlocksSQL): a sum over
+// the counter rows of the read scopes instead of an index scan over every live
+// block, so the cap is a backstop now, not the expected exit.
 func ActiveBlockCount(ctx context.Context, pool *pgxpool.Pool, readScopes []string, timeout time.Duration) (int, bool, error) {
-	return cappedCount(ctx, pool, "active block count", timeout,
-		`SELECT count(*)::int FROM context_blocks
-		  WHERE scope = ANY($1::text[]) AND NOT is_archived`, readScopes)
+	return cappedCount(ctx, pool, "active block count", timeout, activeBlocksSQL, readScopes)
 }
 
 // OperationalBlockCount counts the blocks of the OPERATIONAL types — the ones

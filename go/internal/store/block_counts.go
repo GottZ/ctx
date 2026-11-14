@@ -2,12 +2,10 @@ package store
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/pgxdb"
@@ -16,11 +14,12 @@ import (
 // context_block_counts (migration 170, issue #266) holds one row per
 // (scope, category, is_archived, guard_status) with the number of blocks
 // carrying that key. Statement-level triggers on context_blocks keep it in the
-// writer's transaction; GetStats, GetGuardStats, ListCategories and
-// ActiveCategoryCount sum it instead of counting context_blocks. The reconcile
-// below compares it with a real count per scope and corrects drift — the
-// repair for writes the triggers cannot see (TRUNCATE is covered; ALTER TABLE
-// … DISABLE TRIGGER and session_replication_role = replica are not).
+// writer's transaction; GetStats, GetGuardStats, ListCategories,
+// ActiveBlockCount and ActiveCategoryCount sum it instead of counting
+// context_blocks. The reconcile below compares it with a real count per scope
+// and corrects drift — the repair for writes the triggers cannot see
+// (TRUNCATE is covered; ALTER TABLE … DISABLE TRIGGER and
+// session_replication_role = replica are not).
 
 // BlockCountDrift is one counter row the reconcile corrected.
 type BlockCountDrift struct {
@@ -41,17 +40,6 @@ type BlockCountReconcile struct {
 	Pruned int `json:"pruned"`
 }
 
-// blockCountReconcileAttempts bounds the retries of one scope's reconcile
-// transaction after a serialization failure (a writer changed one of the
-// scope's counter rows after the reconcile's snapshot). A scope that still
-// conflicts after these attempts is skipped with a warning; the next pass
-// takes it again. A fixed constant: it bounds a retry loop, it is no policy.
-const blockCountReconcileAttempts = 3
-
-// errReconcileConflict marks a scope whose reconcile kept losing against
-// concurrent writers.
-var errReconcileConflict = errors.New("store: block count reconcile: scope kept conflicting with writers")
-
 // reconcileScopesSQL lists every scope that has blocks or counter rows. The
 // block side is a loose index scan over idx_context_scope (one probe per
 // distinct scope, not a pass over the table); the counter side catches scopes
@@ -68,8 +56,9 @@ const reconcileScopesSQL = `WITH RECURSIVE s AS (
 	ORDER BY 1`
 
 // reconcileDriftSQL compares the counter rows of scope $1 with a real count of
-// its blocks in ONE snapshot. A key whose sums differ is drift; a key with a
-// counter row but neither a count nor blocks is a zero row to prune.
+// its blocks in ONE statement, i.e. one snapshot. A key whose sums differ is
+// drift; a key with a counter row but neither a count nor blocks is a zero row
+// to prune.
 const reconcileDriftSQL = `SELECT category, is_archived, guard_status,
 	       sum(counted)::bigint, sum(actual)::bigint
 	  FROM (SELECT category, is_archived, guard_status, n AS counted, 0::bigint AS actual
@@ -86,17 +75,20 @@ const reconcileDriftSQL = `SELECT category, is_archived, guard_status,
 // context_blocks, scope by scope, and corrects every difference. scope ""
 // reconciles every scope; otherwise only the named one.
 //
-// Correct against concurrent writes without blocking them: each scope runs in
-// its own REPEATABLE READ transaction, which reads the counter rows and counts
-// the blocks in the same snapshot — a writer's block change and its counter
-// delta commit together, so the snapshot holds both or neither. A correction
-// is applied as a DELTA (actual - counted) onto the row, not as an absolute
-// value: a write that commits after the snapshot and before the correction
-// changes that row, and REPEATABLE READ refuses to update a row changed after
-// the snapshot (40001) — the scope's transaction is then retried with a fresh
-// snapshot. A write still in flight applies its own delta after the
-// correction, on top of the corrected value. Nothing is locked beyond the
-// counter rows being corrected; a scope without drift is a read.
+// Two steps per scope. The CHECK is one read-only statement: it reads the
+// counter rows and counts the blocks in one snapshot, and since a writer's
+// block change and its counter delta commit together, that snapshot holds both
+// or neither — a difference it reports is drift, not a write in flight. A
+// scope without drift ends there, having locked nothing. A scope with drift is
+// CORRECTED in a transaction that first takes the write-ordering row
+// (context_guard_state, FOR NO KEY UPDATE — the row every counter-writing
+// statement takes before its first counter row, migration 170) and then
+// repeats the check: while the reconcile holds that row no committed counter
+// can change, so the second snapshot is exact, and a writer whose block
+// change it does not see yet applies its own delta after the commit, onto the
+// corrected value. Writers wait for the correction — the length of one
+// recount of the scope, and only for scopes with drift. Two reconciles of the
+// same scope serialize on the row as well.
 //
 // Every correction is logged (scope, key, counted, actual) and returned.
 func ReconcileBlockCounts(ctx context.Context, pool *pgxpool.Pool, scope string) (*BlockCountReconcile, error) {
@@ -116,11 +108,6 @@ func ReconcileBlockCounts(ctx context.Context, pool *pgxpool.Pool, scope string)
 			return res, err
 		}
 		drift, pruned, err := reconcileScopeCounts(ctx, pool, s)
-		if errors.Is(err, errReconcileConflict) {
-			slog.Warn("stats: block count reconcile skipped a scope under write conflicts",
-				"scope", s, "attempts", blockCountReconcileAttempts)
-			continue
-		}
 		if err != nil {
 			return res, err
 		}
@@ -136,47 +123,54 @@ func ReconcileBlockCounts(ctx context.Context, pool *pgxpool.Pool, scope string)
 	return res, nil
 }
 
-// reconcileScopeCounts reconciles one scope, retrying its transaction after a
-// serialization failure.
-func reconcileScopeCounts(ctx context.Context, pool *pgxpool.Pool, scope string) ([]BlockCountDrift, int, error) {
-	for attempt := 1; ; attempt++ {
-		var (
-			drift  []BlockCountDrift
-			pruned int
-		)
-		err := pgxdb.WriteOpts(ctx, pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead},
-			pgxdb.At("store: block count reconcile"), func(tx pgx.Tx) error {
-				var err error
-				drift, pruned, err = reconcileScopeTx(ctx, tx, scope)
-				return err
-			})
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "40001" {
-			if attempt < blockCountReconcileAttempts {
-				continue
-			}
-			return nil, 0, errReconcileConflict
-		}
-		if err != nil {
-			return nil, 0, err
-		}
-		return drift, pruned, nil
-	}
-}
-
-// reconcileScopeTx is one scope's snapshot comparison and correction.
-func reconcileScopeTx(ctx context.Context, tx pgx.Tx, scope string) ([]BlockCountDrift, int, error) {
-	rows, err := tx.Query(ctx, reconcileDriftSQL, scope)
+// scopeDrift runs reconcileDriftSQL for one scope.
+func scopeDrift(ctx context.Context, q pgxdb.Querier, scope string) ([]BlockCountDrift, error) {
+	rows, err := q.Query(ctx, reconcileDriftSQL, scope)
 	if err != nil {
-		return nil, 0, fmt.Errorf("store: block count drift: %w", err)
+		return nil, fmt.Errorf("store: block count drift: %w", err)
 	}
 	found, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (BlockCountDrift, error) {
 		d := BlockCountDrift{Scope: scope}
 		return d, r.Scan(&d.Category, &d.IsArchived, &d.GuardStatus, &d.Counted, &d.Actual)
 	})
 	if err != nil {
-		return nil, 0, fmt.Errorf("store: block count drift: %w", err)
+		return nil, fmt.Errorf("store: block count drift: %w", err)
 	}
+	return found, nil
+}
+
+// reconcileScopeCounts checks one scope without a lock and corrects it under
+// the write-ordering row when the check found something.
+func reconcileScopeCounts(ctx context.Context, pool *pgxpool.Pool, scope string) ([]BlockCountDrift, int, error) {
+	found, err := scopeDrift(ctx, pool, scope)
+	if err != nil || len(found) == 0 {
+		return nil, 0, err
+	}
+	var (
+		drift  []BlockCountDrift
+		pruned int
+	)
+	err = pgxdb.Write(ctx, pool, pgxdb.At("store: block count reconcile"), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM context_guard_state WHERE id FOR NO KEY UPDATE`); err != nil {
+			return fmt.Errorf("store: block count reconcile order row: %w", err)
+		}
+		found, err := scopeDrift(ctx, tx, scope)
+		if err != nil {
+			return err
+		}
+		drift, pruned, err = correctScopeCounts(ctx, tx, scope, found)
+		return err
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	return drift, pruned, nil
+}
+
+// correctScopeCounts applies the differences of one scope's check. The
+// counters cannot move while the caller holds the write-ordering row, so the
+// delta (actual - counted) lands exactly on the value the check read.
+func correctScopeCounts(ctx context.Context, tx pgx.Tx, scope string, found []BlockCountDrift) ([]BlockCountDrift, int, error) {
 	drift := make([]BlockCountDrift, 0, len(found))
 	pruned := 0
 	for _, d := range found {

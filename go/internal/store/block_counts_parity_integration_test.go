@@ -165,6 +165,10 @@ func assertCountParity(t *testing.T, pool *pgxpool.Pool, step string, windows []
 		if err != nil || !ok || n != ref.TotalCategories {
 			t.Fatalf("%s %v: ActiveCategoryCount = (%d, %v, %v), want %d", step, w, n, ok, err, ref.TotalCategories)
 		}
+		n, ok, err = store.ActiveBlockCount(ctx, pool, w, 5*time.Second)
+		if err != nil || !ok || n != ref.TotalBlocks {
+			t.Fatalf("%s %v: ActiveBlockCount = (%d, %v, %v), want %d", step, w, n, ok, err, ref.TotalBlocks)
+		}
 	}
 }
 
@@ -317,7 +321,22 @@ func TestBlockCounts_ParityOverWritePaths(t *testing.T) {
 	exec(`UPDATE context_blocks SET scope = $2, category = 'bulk-moved'
 	       WHERE id IN (SELECT id FROM context_blocks WHERE scope = $1 AND category LIKE 'bulk-%' ORDER BY title LIMIT 100)`, sC, sA)
 	check("bulk-move")
+	// An update that changes no key writes no counter row (HAVING sum <> 0):
+	// every counter row keeps its row version.
+	versions := func() []string {
+		t.Helper()
+		var v []string
+		if err := pool.QueryRow(ctx, `SELECT COALESCE(array_agg(xmin::text || '/' || ctid::text ORDER BY scope, category, is_archived, guard_status), '{}')
+		                                FROM context_block_counts`).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	before := versions()
 	exec(`UPDATE context_blocks SET metadata = metadata || '{"cnt": 1}'::jsonb WHERE scope = $1`, sC)
+	if after := versions(); !reflect.DeepEqual(before, after) {
+		t.Fatalf("an update without a key change rewrote counter rows:\n before %v\n after  %v", before, after)
+	}
 	check("bulk-no-key-change")
 
 	// Parent cascade: deleting a parent removes its child through

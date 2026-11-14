@@ -1906,6 +1906,12 @@ func ListCategories(ctx context.Context, pool *pgxpool.Pool, readScopes []string
 	return results, nil
 }
 
+// activeBlocksSQL is the number of live blocks in the read scopes $1 — the
+// total_blocks of GetStats and the coverage denominator ActiveBlockCount —
+// from the counter table.
+const activeBlocksSQL = `SELECT COALESCE(sum(n), 0)::int FROM context_block_counts
+		  WHERE scope = ANY($1::text[]) AND NOT is_archived`
+
 // activeCategoriesSQL selects one row per category that has live blocks in
 // the read scopes $1 — the count(DISTINCT category) of GetStats and of the
 // digest envelope (ActiveCategoryCount), from the counter table.
@@ -1924,7 +1930,7 @@ const activeCategoriesSQL = `SELECT category FROM context_block_counts
 // rows all lie behind the rest (issue #266: a 10-block scope older than the
 // other 100 000 blocks read 16 951 buffers that way, 8 with LATERAL).
 const statsSQL = `SELECT
-			COALESCE((SELECT sum(n) FROM context_block_counts WHERE scope = ANY($1::text[]) AND NOT is_archived), 0)::int AS total_blocks,
+			(` + activeBlocksSQL + `) AS total_blocks,
 			(SELECT count(*) FROM (` + activeCategoriesSQL + `) c)::int AS total_categories,
 			(SELECT min(e.m) FROM unnest($1::text[]) AS s(scope)
 			   CROSS JOIN LATERAL (SELECT min(b.created_at) AS m FROM context_blocks b
