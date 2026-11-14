@@ -23,7 +23,7 @@ The parts behave like a memory, not like a filing cabinet:
 3. `get` only a block whose id it already holds — a source the answer cited, a block the conventions name.
 4. Check live state before acting on a memory. A block says where to look, not what is true now.
 5. Store as it goes: what happened, with source and date, verified statements kept apart from its own interpretation. Not a curated digest.
-6. End without a handover. The knowledge is already in the store; the next session finds it by query.
+6. End with a checked close, not a handover that retells the session. The knowledge should already be in the store; the close checks that it is, and the next session finds it by query. The close adds two things. It checks that every claim of "done" rests on an outside signal, such as a command's output. And it leaves the items still open, one block each with a tag the team agreed on: stated neutrally, with its source, what it unblocks and the ids of the blocks that carry its context, without an urgency nobody gave it. The next session lists those items by their tag before it queries for its task.
 
 **A subagent or workflow agent:**
 
@@ -37,7 +37,7 @@ Each of these is an agent treating its memory as a tool.
 
 ### Handovers and close-out notes
 
-A "handover for the next session" or a close-out note treats the store as a message board between people leaving the office. The next session reads it whole and inherits every half-formed worry in it, ahead of what a query would have weighted. The findings belong in the store as they happen, per topic; nothing has to be passed on at the end.
+A "handover for the next session" or a close-out note, when it retells the session, treats the store as a message board between people leaving the office. The next session reads it whole and inherits every half-formed worry in it, ahead of what a query would have weighted. The findings belong in the store as they happen, per topic; no knowledge has to be passed on at the end. What a session may leave is narrower: the items still open, each with its source and what it unblocks and without an urgency nobody gave it, and the ids of the blocks that hold the context. Those are pointers into the store, not a second copy of it.
 
 ### `get`, `recent` and backtracking instead of `query`
 
