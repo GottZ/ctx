@@ -12,10 +12,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional, TextIO
 
-from . import config, hermes
+from . import config, hermes, status_lock
 from .routing import cli as routing_cli
 from .store import ops
 from .store.file import PolicyStore, StoreError
@@ -84,21 +85,54 @@ def setup(parser: argparse.ArgumentParser) -> None:
     routing_cli.setup(sub)
 
 
+def _written(status: dict) -> str:
+    stamp = status.get("written_at")
+    if not isinstance(stamp, (int, float)) or isinstance(stamp, bool) or stamp <= 0:
+        return "written at an unknown time"
+    return "written " + time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(stamp))
+
+
+def _status_heading(status: dict, writer: dict) -> str:
+    """One line on whose status this is: a gateway that still runs, or the last state of one that stopped."""
+    head = f"Gateway status (pid {status.get('pid')}, plugin {status.get('plugin_version')}, {_written(status)}"
+    if writer["state"] == status_lock.RUNNING:
+        return head + "; that gateway is running):"
+    if writer["state"] == status_lock.STOPPED:
+        return head + ") is stale: the gateway that wrote it has stopped, this is its last state:"
+    return head + f"; whether that gateway still runs is unknown: {writer['reason']}):"
+
+
 def _status(home: Path, store: PolicyStore, as_json: bool, out: TextIO) -> int:
     snapshot = store.read()
     status = _gateway_status(home)
     operator_count = len(config.operators(home))
+    try:
+        mode, evidence = hermes.isolation_mode()
+    except Exception as exc:  # a configuration Hermes cannot read; the status itself still prints
+        mode, evidence = "unknown", f"plugins.isolation could not be read: {exc}"
+    writer = None
+    if status is not None:
+        state, reason = status_lock.writer_state(hermes.plugin_data_dir(home), status)
+        writer = {"state": state, "reason": reason}
     guilds = [
         {"bot": bot, "guild": gid, "state": snapshot.guild_state(bot, gid), "rev": snapshot.guild_rev(bot, gid)}
         for bot, b in snapshot.data.get("bots", {}).items() for gid, g in b.get("guilds", {}).items()
     ]
     report = {"home": str(home), "store": str(store.path), "store_state": snapshot.state,
               "store_error": snapshot.error, "store_problems": list(snapshot.problems),
-              "operators_configured": operator_count, "guilds": guilds, "gateway_status": status}
+              "operators_configured": operator_count, "guilds": guilds, "gateway_status": status,
+              "gateway_status_writer": writer,
+              "plugins_isolation": {"mode": mode, "evidence": evidence, "allows_plugin": mode == "in_process"}}
     if as_json:
         json.dump(report, out, indent=2, sort_keys=True, default=str)
         out.write("\n")
         return 0
+    if mode == "unknown":
+        out.write(f"Isolation mode unknown: {evidence}\n")
+    elif mode != "in_process":
+        # The plugin's own register() refuses in this mode (A1); nothing of it runs for this profile.
+        out.write(f"Not active in this profile: plugins.isolation is {mode}, and the plugin runs only inside the "
+                  "gateway process. Hermes handles Discord here without it.\n")
     out.write(f"Store: {store.path} [{snapshot.state}]\n")
     if snapshot.error:
         out.write(f"  ! {snapshot.error}\n")
@@ -114,7 +148,7 @@ def _status(home: Path, store: PolicyStore, as_json: bool, out: TextIO) -> int:
     if status is None:
         out.write("Gateway status: none yet (the gateway writes it when a Discord bot connects)\n")
     else:
-        out.write(f"Gateway status (pid {status.get('pid')}, plugin {status.get('plugin_version')}):\n")
+        out.write(_status_heading(status, writer) + "\n")
         interventions = status.get("interventions") if isinstance(status.get("interventions"), dict) else {}
         for name, result in sorted(interventions.items()):
             if not isinstance(result, dict):

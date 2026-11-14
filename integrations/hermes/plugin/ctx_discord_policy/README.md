@@ -67,8 +67,10 @@ back to Hermes' own behaviour.
 ## Before you start
 
 - Hermes 0.22.4 or newer with the Discord platform. The settings page needs Hermes Desktop 0.23.0 or newer.
-- Plugins running in the gateway process, Hermes' default. Under `plugins.isolation: host` the plugin stays
-  inactive and says so in the status.
+- Plugins running in the gateway process, Hermes' default. Under `plugins.isolation: host` Hermes loads the
+  plugin in a separate plugin host, where it stays inactive: it registers nothing, Hermes handles Discord
+  without it, and there is no `hermes ctx-discord-policy` command (Hermes adds no plugin commands from the
+  plugin host). `hermes plugins info ctx_discord_policy` then reads "Runs in: plugin host".
 - A Discord application with the **Message Content** intent (Hermes needs it as well).
 - One session per member: with `group_sessions_per_user: false` Hermes would put several members of a channel
   into one session, so the plugin keeps the server closed for members.
@@ -82,6 +84,8 @@ What does not work, or only partly:
 - **Names on the settings page.** Channel, role and member names come from the running gateway: read directly
   when the page's backend runs in the gateway process, else from the server directory the gateway keeps, or
   over Hermes' plugin RPC (Hermes 0.23.1 or newer). Without either you enter IDs.
+- **The status of a stopped gateway** stays on disk. `hermes ctx-discord-policy status` shows it and says
+  "is stale" once the gateway that wrote it has stopped; on Windows it cannot tell, and says so.
 - **A profile chosen on the host** with `hermes ctx-discord-policy routing set` reaches the running gateway at
   its next start, or at once with **Apply again** in `/policy` → Profile. Until then members get no answer in
   that server.

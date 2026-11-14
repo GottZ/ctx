@@ -126,6 +126,15 @@ def test_install_is_named_for_every_profile():
     assert "plugins enable ctx_discord_policy" not in section
 
 
+def test_readme_says_what_host_isolation_leaves():
+    """Under host isolation Hermes skips plugin commands (tests/contract/test_status_contract.py): no status
+    can say anything there, so the README names the command's absence and Hermes' own view instead."""
+    section = _readme_section("Before you start")
+    assert "says so in the status" not in section
+    assert "there is no `hermes ctx-discord-policy` command" in section
+    assert "`hermes plugins info ctx_discord_policy`" in section
+
+
 def test_readme_links_nothing_above_the_plugin_directory():
     """An installed copy is the plugin directory alone: a relative path out of it (the banner) leads nowhere
     there, and Hermes' install scanner reports it as a path traversal."""
