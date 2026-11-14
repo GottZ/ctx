@@ -321,7 +321,7 @@ def test_no_foreign_comment_can_make_the_issue_step_fail(report, tmp_path, monke
     path.write_text(json.dumps({"refs": {}, "expect": ["main"], "findings": new}), encoding="utf-8")
     title = "ctx_discord_policy: Upstream drift: security"
     own = report.render_issue("security", new, {"refs": {}}, "")
-    breaks = f"a\u0085b c d {forged}"
+    breaks = f"a\u0085b\u2028c\u2029d {forged}"
     hostile = [
         json.dumps({"user": MALLORY, "body": breaks}, ensure_ascii=False),
         "not json at all {",
