@@ -265,6 +265,23 @@ def run_texts(issue: dict, comments: Iterable[dict], bot: str = BOT_LOGIN) -> li
     return texts + [str(c.get("body") or "") for c in comments if own(c)]
 
 
+def json_records(text: str) -> list[Any]:
+    """The values ``gh --jq`` printed, one JSON document per line. A string inside one may hold any character,
+    U+0085 and U+2028 included, which ``str.splitlines`` would cut at, so lines end at "\n" only (gh escapes
+    that one inside strings). A line that is no JSON is skipped: it can only be someone else's text, and the bot
+    then at worst comments once more; text anyone can write must never stop the run."""
+    records = []
+    for line in text.split("\n"):
+        line = line.strip(" \t\r")
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            continue
+    return records
+
+
 def untested(report: dict) -> list[str]:
     """Refs this run could not test (``-``: the ref selection itself failed)."""
     return sorted({f["ref"] for f in report["findings"] if f["category"] == "infrastructure"})
@@ -319,8 +336,7 @@ def _open_issue(repo: str, title: str, label: str = "", bot: str = BOT_LOGIN) ->
             detail = json.loads(_gh("api", f"repos/{repo}/issues/{number}"))
             lines = _gh("api", "--paginate", f"repos/{repo}/issues/{number}/comments?per_page=100",
                         "--jq", ".[] | {user: {login: .user.login, type: .user.type}, body}")
-            comments = [json.loads(line) for line in lines.splitlines() if line.strip()]
-            return {"number": number, "texts": run_texts(detail, comments, bot)}
+            return {"number": number, "texts": run_texts(detail, json_records(lines), bot)}
     return None
 
 

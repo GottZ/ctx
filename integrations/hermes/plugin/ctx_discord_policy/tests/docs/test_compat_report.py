@@ -295,3 +295,50 @@ def test_a_forged_marker_in_a_comment_does_not_silence_the_issue(report, tmp_pat
                             "--title-prefix", "ctx_discord_policy: "]) == 0
         commented = [c for c in calls if c[:2] == ("issue", "comment")]
         assert len(commented) == expected, (comments, calls)
+
+
+def _hostile_gh(title, issue, records, calls):
+    """gh as the issues step calls it, with the comment records exactly as given: raw lines, so a record can hold
+    characters Python counts as line breaks (U+0085, U+2028, U+2029) inside its strings, or be no JSON at all."""
+    def gh(*args):
+        calls.append(args)
+        if args[:2] == ("issue", "list"):
+            return json.dumps([{"number": 5, "title": title}])
+        if args[0] == "api" and args[-1].endswith("/issues/5"):
+            return json.dumps(issue)
+        if args[0] == "api" and "/issues/5/comments" in " ".join(args):
+            return "".join(record + "\n" for record in records)
+        return "[]"
+    return gh
+
+
+def test_no_foreign_comment_can_make_the_issue_step_fail(report, tmp_path, monkeypatch):
+    """Anyone can comment on the drift issue; whatever they write, the run reads past it and still finds (or
+    misses) its own marker. Line breaks Python knows inside a JSON string, a record that is no JSON, a record
+    that is no object or lacks fields, and a very long text."""
+    new, body, forged = _forge_setup(report)
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({"refs": {}, "expect": ["main"], "findings": new}), encoding="utf-8")
+    title = "ctx_discord_policy: Upstream drift: security"
+    own = report.render_issue("security", new, {"refs": {}}, "")
+    breaks = f"a\u0085b c d {forged}"
+    hostile = [
+        json.dumps({"user": MALLORY, "body": breaks}, ensure_ascii=False),
+        "not json at all {",
+        json.dumps("a string, not an object"),
+        json.dumps({}),
+        json.dumps({"user": None, "body": None}),
+        json.dumps({"user": {"login": "github-actions[bot]"}, "body": forged}),
+        json.dumps({"user": MALLORY, "body": (forged + "x" * 1000) * 70}, ensure_ascii=False),
+    ]
+    # The run's own comment may carry such characters too (a reason text from upstream): it still counts.
+    own_record = json.dumps({"user": BOT, "body": own + "\u0085\u2028 reason"}, ensure_ascii=False)
+    for records, expected in ((hostile, 1), (hostile + [own_record], 0)):
+        calls = []
+        monkeypatch.setattr(report, "_gh", _hostile_gh(title, {"user": BOT, "body": body}, records, calls))
+        assert report.main(["issues", str(path), "--repo", "o/r", "--label", "ctx_discord_policy",
+                            "--title-prefix", "ctx_discord_policy: "]) == 0
+        assert len([c for c in calls if c[:2] == ("issue", "comment")]) == expected
+    monkeypatch.setattr(report, "_gh", _hostile_gh(title, ["an", "array"], hostile, []))
+    assert report.main(["issues", str(path), "--repo", "o/r", "--label", "ctx_discord_policy",
+                        "--title-prefix", "ctx_discord_policy: "]) == 0
