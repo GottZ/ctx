@@ -42,7 +42,8 @@ def test_operators_come_from_settings_and_changes_apply_without_restart(cfg, anc
     assert not config.is_operator(home, OP)
 
 
-@pytest.mark.parametrize("raw", ["900000000000000011", {"id": OP}, None, 42, [None, "abc", True, "0123"]])
+# A single ID as text ("900000000000000011") is the one-entry comma form since #268 (tests/unit/test_list_settings.py).
+@pytest.mark.parametrize("raw", [{"id": OP}, None, 42, [None, "abc", True, "0123"], "abc, 0123", True])
 def test_malformed_operator_settings_fail_closed(cfg, anchor, raw):
     config, files = cfg
     home = anchor.tmp / "owner"
