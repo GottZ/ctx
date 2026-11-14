@@ -153,6 +153,40 @@ def _make_handle(original: Any) -> Any:
     return policy_handle
 
 
+def _in_guild(event: Any) -> bool:
+    return bool(getattr(getattr(event, "source", None), "guild_id", None))
+
+
+def _make_event_gate(original: Any) -> Any:
+    async def policy_event(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            refusal = authority.event_refusal(self, event)
+        except Exception:
+            logger.exception("ctx_discord_policy: event check failed")
+            refusal = "the policy check failed" if _in_guild(event) else None
+        if refusal is not None:
+            source = getattr(event, "source", None)
+            logger.warning("ctx_discord_policy: dropped an event of message %s in channel %s before Hermes saw "
+                           "it: %s", getattr(source, "message_id", None) or getattr(event, "message_id", None),
+                           getattr(source, "chat_id", None), refusal)
+            return None
+        return await original(self, event, *args, **kwargs)
+
+    return policy_event
+
+
+def install_event_gate(cls: Any) -> Result:
+    """A10: every event the adapter hands to Hermes' pipeline passes :func:`authority.event_refusal` first."""
+    probe = probe_callable(cls, "handle_message", is_async=True, positional=["event"])
+    where = f"{cls.__module__}.{cls.__qualname__}"
+    if not probe:
+        return Result("A10", SECURITY, Outcome.OFF, probe.reason, probe.evidence or where)
+    wrap_attr(cls, "handle_message", _make_event_gate, "A10", RUNTIME_API)
+    return Result("A10", SECURITY, Outcome.WRAPPED,
+                  "events of members' routes are checked before Hermes' pipeline (commands, busy sessions)",
+                  probe.evidence or where)
+
+
 def install_upload_guard(cls: Any) -> Result:
     """A11: every file sender of the adapter class refuses host files for public routes (dsp.delivery.public).
     A sender this Hermes does not have needs no guard; one that exists but does not match is a reason to keep
@@ -186,6 +220,7 @@ def bind_adapter_class(cls: Any) -> bool:
     where = f"{cls.__module__}.{cls.__qualname__}"
     RUNTIME.status.record(Result("A3", SECURITY, Outcome.OK, f"adapter class {where}", "platform handler factory"))
     run_intervention(RUNTIME.status, public.INTERVENTION, SECURITY, lambda: install_upload_guard(cls))
+    run_intervention(RUNTIME.status, "A10", SECURITY, lambda: install_event_gate(cls))
     if not a5:
         RUNTIME.status.record(Result("A5", SECURITY, Outcome.OFF, a5.reason, a5.evidence))
     if not a6:

@@ -30,7 +30,7 @@ from . import classify
 
 logger = logging.getLogger("ctx_discord_policy")
 
-REQUIRED_SECURITY = ("A5", "A6", "A7", "A11")
+REQUIRED_SECURITY = ("A5", "A6", "A7", "A10", "A11")
 _last_unarmed_note: dict[str, float] = {}
 _last_closed_note: dict[str, float] = {}
 

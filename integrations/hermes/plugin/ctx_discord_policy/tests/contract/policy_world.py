@@ -62,7 +62,7 @@ class World:
         if not capture:
             recorded = self.pipeline
 
-            async def pipeline_entry(adapter, event):
+            async def pipeline_entry(self, event):
                 recorded.append(event)
 
             DiscordAdapter.handle_message = pipeline_entry   # beneath the plugin's wrapper (installed at bind)

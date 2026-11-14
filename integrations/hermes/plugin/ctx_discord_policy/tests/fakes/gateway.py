@@ -108,8 +108,13 @@ def make_classes(*, home_resolver: Callable[[Any], Any], bus: HookBus,
             event = SimpleNamespace(source=source, raw_message=msg, message_id=str(msg.id), text=msg.content,
                                     get_command=lambda: command, role_authorized=role_authorized,
                                     message_type="command" if text.startswith("/") else "text")
-            self.last_result = await self.gateway_runner._handle_message(event)
+            self.last_result = None
+            await self.handle_message(event)       # Hermes: the handler hands every event to handle_message
             return True
+
+        async def handle_message(self, event: Any) -> None:
+            # The base adapter's pipeline entry (busy routing elided): the runner runs the turn.
+            self.last_result = await self.gateway_runner._handle_message(event)
 
     class GatewayRunner:
         def __init__(self) -> None:

@@ -174,6 +174,8 @@ so, members get no answer until the model works again.
   hold server settings, never authority.
 - **Fail closed.** If the policy file is damaged, every server is paused. If a safety check cannot be made,
   members get no turn. A tool call the plugin cannot tie to its message is refused.
+- **Commands are yours.** A command a member types in a message (`/<skill>`, `/queue`, any other Hermes
+  command) never reaches Hermes, also not while that member's conversation is still busy with a turn.
 - **Guidance and linked content are data.** A server's guidance text and the content of linked messages are
   quoted in the turn; they cannot open tools or change who is an operator.
 - **Reading follows the author's rights.** Linked messages and mentioned channels are read only from the same

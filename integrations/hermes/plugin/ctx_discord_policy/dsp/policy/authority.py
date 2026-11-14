@@ -160,6 +160,10 @@ def refusal(runner: Any, event: Any, route: Optional[Route], target: Optional[st
         return closed
     if not route.is_operator and is_command(event):
         return "gateway commands are reserved for the operator"
+    if not route.is_operator and getattr(event, "_fifo_only", False):
+        # A turn Hermes made from a command (a skill, /queue, /plan, ...) and queued as text: it passed no
+        # command check here, so it never runs for a member.
+        return "turns made from gateway commands are reserved for the operator"
     key_of = getattr(runner, "_session_key_for_source", None)
     if not callable(key_of):
         return "the session key cannot be determined (Hermes changed)"
@@ -177,6 +181,26 @@ def refusal(runner: Any, event: Any, route: Optional[Route], target: Optional[st
                     "and public members never share a session (check group_sessions_per_user / "
                     "thread_sessions_per_user)")
     RUNTIME.session_lanes.put(session_key, (route.lane, route.session_user_id))
+    return None
+
+
+def event_refusal(adapter: Any, event: Any) -> Optional[str]:
+    """Why an event Hermes built from a Discord message must not enter its pipeline at all (intervention A10,
+    before ``handle_message`` routes it to a running session, its busy handler or a new turn). ``None``: hand
+    it on; the runner wrapper (A7) still checks it. A member's gateway command never reaches Hermes: while
+    the member's session runs a turn, Hermes' busy handler would run it (a skill's text inlined) without
+    passing A7's command check."""
+    source = getattr(event, "source", None)
+    if source is None or not platform_is_discord(getattr(source, "platform", None)):
+        return None
+    if getattr(event, "internal", False):
+        return None
+    binding = RUNTIME.bots.for_adapter(adapter)
+    if binding is None:
+        return None
+    candidate = candidate_for_event(event, bot_id=binding.bot_id)
+    if candidate is not None and not candidate.is_operator and is_command(event):
+        return "gateway commands are reserved for the operator"
     return None
 
 
