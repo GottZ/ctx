@@ -1918,9 +1918,11 @@ const activeCategoriesSQL = `SELECT category FROM context_block_counts
 // context_blocks, one per read scope: unnest + LATERAL turns each into a
 // min/max over idx_context_scope_active (scope, created_at DESC) WHERE NOT
 // is_archived, i.e. one index probe per scope. The plain
-// `min(created_at) WHERE scope = ANY($1)` form cannot take that path for more
-// than one scope (the index order is per scope, not global) and reads every
-// live entry of the read scopes instead (issue #266 measurements).
+// `min(created_at) WHERE scope = ANY($1)` form walks idx_context_created in
+// global created_at order and filters by scope: cheap while the read scopes
+// hold the newest and the oldest rows of the corpus, linear for a scope whose
+// rows all lie behind the rest (issue #266: a 10-block scope older than the
+// other 100 000 blocks read 16 951 buffers that way, 8 with LATERAL).
 const statsSQL = `SELECT
 			COALESCE((SELECT sum(n) FROM context_block_counts WHERE scope = ANY($1::text[]) AND NOT is_archived), 0)::int AS total_blocks,
 			(SELECT count(*) FROM (` + activeCategoriesSQL + `) c)::int AS total_categories,
