@@ -1,98 +1,100 @@
+<p align="center"><img src="../../assets/ctx_discord_policy.webp" alt="ctx discord policy: everyone may talk, only you hold the keys" width="100%"></p>
+
 # ctx_discord_policy
 
-Per-server Discord policy for [Hermes](https://github.com/NousResearch/hermes-agent): the bot takes part in
-server conversations while tools stay reserved for the operators configured on the host, and each server is
-configured from inside Discord with the `/policy` command.
+**Everyone may talk. Only you hold the keys.**
 
-- **Operators only get tools.** Who is an operator comes from the Hermes configuration on the host, never from
-  Discord: no role, server admin or server guidance text can grant tools. Members' turns get only the lanes the
-  operator enabled for that server (for example reading the current channel's history).
-- **Per-server settings in Discord.** Server managers set channels, the bot's name and wake words, reply
-  language, progress display and a server guidance text; operators additionally set worklog channels, what
-  members may let the bot do, the Hermes profile and the models a server uses. Everything is per bot and per
-  server.
-- **Adapts to Hermes updates.** Every place where the plugin hooks into Hermes is probed at startup. Safety
-  checks fail closed (members get no access) and comfort features fall back to Hermes' own behaviour; the result
-  is visible in `/policy` → Status and in `hermes ctx-discord-policy status`. A daily run tests the plugin against
-  Hermes `main` and the latest releases.
+`ctx_discord_policy` lets a [Hermes](https://github.com/NousResearch/hermes-agent) bot take part in the
+conversation on your Discord servers without handing its tools to everyone there. Members of a server can call
+the bot by name, ask it something, chat with it in a channel you open for that, and get an answer. When you
+write to it, it works for you as usual: it reads files, runs commands, uses your MCP servers. Nobody else gets
+that, not a server admin, not a role, not a clever message. Each server is set up from inside Discord with
+`/policy`, and the server's own managers can do the parts you leave to them.
 
-**Status:** version 3.0.0 is in development and not released yet. Everything described below is in `main`.
+```
+/policy                                                       in a server: activate it, its settings, its status
+hermes ctx-discord-policy status                              on the host: servers, operators, what is protected
+hermes ctx-discord-policy bind <server id>                    on the host: activate a server without Discord
+hermes ctx-discord-policy routing set <server id> <profile>   on the host: run a server in another profile
+```
 
-## In a server
+## What you get
 
-Once the policy is active in a server, the bot answers when it is addressed:
+- **Tools only for you.** Who may use tools (the operators) is a list of Discord user IDs in the Hermes
+  configuration on the host. Nothing in Discord can extend it: no role, no server admin, no guidance text.
+- **Members can talk to the bot.** They mention it, reply to it, call it by one of its names ("Nova, …",
+  "hey Nova"), or react to a message with the server's wake emoji; in a conversation channel the bot reads along
+  and joins in when it has something to add. Their turns run without tools, except the member tools you allow
+  for that server: the current channel's history, linked messages, skills you name, entries of your knowledge
+  sources you name.
+- **Links and channels in a message.** When a message links Discord messages or mentions channels, the bot sees
+  that content as quoted data, read with the rights of the person who wrote the message. In members' turns only
+  what everyone who sees the answer may read.
+- **Every server set up in Discord.** `/policy` opens panels for the bot's name, wake names and reply language,
+  the channels where it joins in or keeps quiet, a guidance text for the server, the progress display, the
+  worklog, what members may let it do, who of the server may change what, and the Hermes profile and models the
+  server runs on.
+- **Your tool work out of the way.** With a worklog channel, the tool work of your turns goes into a thread of
+  its own; the channel you wrote in gets a pointer and, if you want, a copy of the final answer.
+- **You hear about changes.** An audit channel gets one line per change made in `/policy` (who, what, never the
+  values). You get a direct message when a server asks for activation, when its guidance changes, when
+  protection gets worse and when a model chosen for a server cannot be used.
+- **A settings page in Hermes Desktop.** Settings → Plugins → ctx_discord_policy: your servers, the operators,
+  the status and the change history, next to Hermes' own form for the plugin settings.
+- **It checks itself against your Hermes.** Every place where the plugin hooks into Hermes is tested when it
+  starts. Works without ctx.
 
-- by a mention or a reply to one of its messages;
-- by one of the server's **wake names** spoken to it ("Nova, …", "hey Nova", "…, Nova?"); a name that is only
-  mentioned ("ask Nova later") does not wake it. Without wake names it answers to its configured name, else to
-  its display name in the server;
-- by a **reaction** with the server's wake emoji on any message: the reactor gets an answer to that message, in
-  their own lane (a member who reacts to an operator's message gets a member's turn);
-- in **ambient channels** (and the threads beneath them) the bot reads along and answers when it has something
-  to add. Channels marked "never respond in" stay silent for members.
+## How it works
 
-Bots, webhooks and system messages never wake it. With a worklog channel set, operator turns that use tools
-write their output into a worklog thread there and copy the final answer back to the origin; members are never
-answered in the worklog channel or its threads.
+The plugin runs inside the Hermes gateway, next to the Discord platform. For every message in a server where
+you activated it:
 
-**Links and channels in a message.** When a message the bot answers links Discord messages (up to three),
-mentions channels (up to two: their latest messages) or points at earlier media (`^`, `👆` on its own), that
-content is attached to the turn as quoted data. It is read with the rights of the member who wrote the message
-and only from this server. Members' turns (addressed or ambient) read only channels that everyone who sees the
-answer can read; operator turns read without that limit, so they are hydrated only when the operator addresses
-the bot, never from ambient chatter. Unaddressed messages are not hydrated. A private thread, the worklog channel and its threads are read only by a turn that
-runs inside them. Operators switch it per lane in Member tools and Operator turns.
+| Step | What happens |
+|---|---|
+| 1. Who is it | The author is an operator (in your Hermes configuration) or a member (anyone else). Bots, webhooks and system messages never wake the bot. |
+| 2. Does the bot answer | A message gets a turn when it mentions or replies to the bot, calls it by a wake name, or is in a conversation channel; a reaction with the wake emoji gets the reactor an answer to that message. Never in a channel you excluded. Everything is checked first: the server is active, the profile the message goes to has the plugin enabled and is the one you chose, every safety hook is in place. If anything is missing, members get no turn. |
+| 3. What the turn may do | An operator's turn runs as Hermes would run it. A member's turn gets only the member tools of that server. |
+| 4. What the model is told | Before the turn the plugin adds a short context: your frame, what this turn may use, how to behave in the conversation, the server's guidance and linked content, all of it as quoted text, never as instructions about tools. |
+| 5. Every tool call | is checked against the exact message it belongs to. A call outside what that turn may use, or from a turn the plugin cannot tie to its message, is refused ("BLOCKED by ctx_discord_policy"). |
+| 6. Delivery | An operator's tool work goes to the worklog thread when the server has one; progress lines follow the server's progress setting. |
 
-## /policy pages
+When Hermes itself later gains something the plugin adds today (deleting progress messages, one progress line
+that keeps being replaced), the plugin notices and steps back: the status then reads `native` instead of
+`injected` or `wrapped`. Safety checks that cannot be made close the server for members; comfort features fall
+back to Hermes' own behaviour.
 
-| Page | Who | What |
-|---|---|---|
-| Overview, Status | managers, operators | activate, pause, remove; activation requests; the protection status |
-| Identity | managers, operators | bot name, wake names, greetings, reply language, wake emoji |
-| Channels | managers, operators | ambient channels and "never respond in" channels |
-| Guidance | managers, operators | the server's guidance text: edit, upload, preview, history, reset |
-| Progress | managers, operators | how tool progress is shown (rotate or separate messages) |
-| Models | operators; managers pick from a released list | the models of members' turns and of operator turns |
-| Worklog | operators | worklog channel, archive time, copy of the final answer |
-| Member tools | operators | channel history, message links, skills, knowledge entries for members' turns |
-| Operator turns | operators | channel context, whether server guidance applies to operator turns |
-| Managers | operators | who manages the server's policy, the audit channel |
-| Profile | operators | the Hermes profile this server's turns run in |
+## Before you start
 
-Every change is written with its origin to the plugin's audit log; with an audit channel set, the server gets
-one line per change (which settings, never their values). Operators get a direct message with a diff for every
-change of a server's guidance, when the bot connects with a degraded safety check (at most once a day per
-check), and when a chosen model can't be used (at most once a day per server and lane); `notify_operators`
-switches all of them off.
+- Hermes 0.22.4 or newer with the Discord platform. The settings page needs Hermes Desktop 0.23.0 or newer.
+- Plugins running in the gateway process, Hermes' default. Under `plugins.isolation: host` the plugin stays
+  inactive and says so in the status.
+- A Discord application with the **Message Content** intent (Hermes needs it as well).
+- One session per member: with `group_sessions_per_user: false` Hermes would put several members of a channel
+  into one session, so the plugin keeps the server closed for members.
+- The test suites run on Linux, against Hermes 0.22.4, 0.23.0 and upstream `main`; the settings page is tested
+  in a browser emulation, not yet in Hermes Desktop itself.
 
-**Profile per server.** The operator can run a server in another Hermes profile (its tools, memory and
-credentials). The plugin writes a named entry into `profile_routes` of the default profile's `config.yaml`
-(managed configurations are applied live at every start instead) and applies it to the running gateway.
-Members' messages are admitted only while the running route table sends the server to the chosen profile, the
-plugin is enabled there and the profile is not in `locked_profiles`; a switch drops members' messages that were
-still waiting. Offered are profiles that Hermes serves with the plugin enabled and that run no Discord bot of
-their own.
+What does not work, or only partly:
 
-**Models per server.** Members' turns and operator turns can each use another model of the server's profile.
-The model is used only where that profile has a credential for the provider and the session has no `/model` or
-`channel_overrides` entry of its own; otherwise Hermes' choice stands, or, if the operator chose so, members'
-messages are not answered until the model works again.
+- **The settings page** shows a server's Hermes profile and models but cannot change them; choose them in
+  `/policy`.
+- **Names on the settings page.** Channel, role and member names come from the running gateway: read directly
+  when the page's backend runs in the gateway process, else from the server directory the gateway keeps, or
+  over Hermes' plugin RPC (Hermes 0.23.1 or newer). Without either you enter IDs.
+- **A profile chosen on the host** with `hermes ctx-discord-policy routing set` reaches the running gateway at
+  its next start, or at once with **Apply again** in `/policy` → Profile. Until then members get no answer in
+  that server.
+- **The Status page** shows the current status; its history stays empty, nothing writes it yet. Per-turn
+  notices reach `hermes ctx-discord-policy status` only after the bot connects again.
 
-## Requirements
-
-- Hermes 0.22.4 or newer with the Discord platform, plugins in the default in-process mode.
-- A Discord application with the **Message Content** intent enabled (Hermes needs it as well).
-
-## Installation
+## Install
 
 ```bash
 hermes plugins install GottZ/ctx/integrations/hermes/plugin/ctx_discord_policy --enable
 ```
 
-Restart the gateway afterwards. A plugin update also needs a gateway restart: an instance that finds an older
-version already running in the process registers nothing and reports "restart required".
-
-### Activation per profile
+Restart the gateway afterwards. An update also needs a gateway restart: a newer copy that finds the older one
+still running in the process registers nothing and reports "restart required".
 
 The plugin protects a turn only in a profile where it is enabled. With `multiplex_profiles` and
 `profile_routes`, enable it in **every profile a Discord server routes to**, not only in the profile that runs
@@ -102,92 +104,111 @@ the bot:
 hermes -p <profile> plugins enable ctx_discord_policy
 ```
 
-A server that routes to a profile without the plugin stays closed for members (they are not admitted), and the
-status names that profile's home directory. Operators keep Hermes' normal behaviour there.
+A server that routes to a profile without the plugin stays closed for members, and the status names that
+profile. Operators keep Hermes' normal behaviour there.
 
-## Operators
+For the settings page, turn on the plugin's desktop half in Hermes Desktop under Capabilities → Plugins, and
+restart Hermes Desktop once so the page's backend is mounted.
 
-Operators are Discord user IDs in the Hermes configuration of the profile that runs the bot:
+## Set up once
 
-```bash
-hermes config set plugins.entries.ctx_discord_policy.settings.operators '["<your Discord user id>"]'
-```
+1. **Operators.** Put your Discord user ID into the configuration of the profile that runs the bot:
 
-You can also set them in the Plugins hub of Hermes Desktop or the TUI. Changes apply to the next message without
-a restart. Without an operator, nobody can activate the policy from Discord (`hermes ctx-discord-policy bind` on the
-host still can), and nobody's turn gets tools.
+   ```bash
+   hermes config set plugins.entries.ctx_discord_policy.settings.operators '["<your Discord user id>"]'
+   ```
 
-Other settings in the same place: `frame_prompt` (the operator frame placed before every server's guidance),
-`operator_label`, `guild_prompt_max_chars` (upper bound for a server's guidance), `notify_operators` (direct
-messages to operators), `locked_profiles` (Hermes profiles never opened to server members and never offered
-in `/policy`) and `member_search` (`auto` or `off`: suggest server members by name on the settings page).
+   Or in Hermes Desktop under Settings → Plugins → ctx_discord_policy. A change applies to the next message,
+   without a restart. Without an operator nobody can activate a server from Discord, and nobody's turn gets
+   tools.
+2. **Invite the bot** with the `bot` and `applications.commands` scopes (`/policy` is a slash command per
+   server):
 
-## Settings page in Hermes Desktop
+   ```
+   https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot+applications.commands&permissions=309237763136
+   ```
 
-The plugin brings its own page: **Settings → Plugins → ctx_discord_policy** with the sub-pages **Servers**,
-**Operators**, **Status** and **Activity**, and Hermes' own form of the settings above as **Agent settings**.
-It edits the same server settings as `/policy` (one save per section, with a conflict notice when someone
-changed the server meanwhile), the server guidance with preview and history, the operator list, and a server's
-settings as a file to download or import. A server's Hermes profile and models are shown there but chosen in
-`/policy`.
+   The permissions are View Channels, Send Messages, Send Messages in Threads, Create Public Threads (worklog
+   threads), Read Message History, Embed Links, Attach Files and Add Reactions. A bot that is already in a
+   server without `applications.commands` can be invited again with this URL; nothing else changes.
+3. **Activate a server.** In the server, run `/policy` and choose **Activate in this server** (operators only).
+   Server managers who are not operators can ask you from the same panel; you get a direct message.
 
-The page needs Hermes Desktop 0.23.0 or newer (0.22.4 does not install a plugin's desktop half). Turn on the
-plugin's desktop half under **Capabilities → Plugins** after a rescan (Hermes keeps it off until you do), and
-restart Hermes Desktop once after enabling the plugin so its backend is mounted. The page asks
-Hermes' dashboard backend, behind Hermes' own sign-in and origin checks, never Discord directly. Channel, role
-and emoji names come from the running gateway: read live when the backend runs in the gateway process, else
-from the server directory the gateway keeps in the profile's plugin data (or over Hermes' plugin RPC, from
-Hermes 04846730f3 on). Without either, the page takes IDs.
+Further settings of the plugin (Hermes Desktop shows them as a form): `frame_prompt` (your text before every
+server's guidance), `operator_label`, `guild_prompt_max_chars` (the longest guidance text of a server),
+`notify_operators` (the direct messages), `locked_profiles` (profiles members never reach) and
+`member_search`.
 
-## Inviting the bot
+## Everyday use
 
-The bot needs the `bot` and `applications.commands` scopes (`/policy` is a per-server slash command):
+| You want to | Where | Command |
+|---|---|---|
+| Change a server's settings | in the server | `/policy`, then the panel |
+| See what is protected and what fell back | in the server, or on the host | `/policy` → Status, `hermes ctx-discord-policy status` |
+| Run a server in another Hermes profile | in the server, or on the host | `/policy` → Profile, `hermes ctx-discord-policy routing set <server id> <profile>` |
+| See each server's profile | on the host | `hermes ctx-discord-policy routing list` |
+| Pause the plugin in a server (Hermes' own behaviour there) | on the host | `hermes ctx-discord-policy pause <server id>` |
+| Activate it again | on the host | `hermes ctx-discord-policy bind <server id>` |
+| Remove a server, with its settings | on the host | `hermes ctx-discord-policy unbind <server id> --purge` |
+| Keep a copy of a server's settings, or move them | on the host, or on the settings page | `hermes ctx-discord-policy export --guild <server id>`, `… import <file>` |
 
-```
-https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot+applications.commands&permissions=309237763136
-```
+`--bot <application id>` picks the bot when the host runs more than one. `/policy` needs the Manage Server
+permission by default; server admins can open it to other members or roles under Server Settings →
+Integrations. Which setting someone may change is decided by the plugin on every click.
 
-The permissions are View Channels, Send Messages, Send Messages in Threads, Create Public Threads (worklog
-threads), Read Message History, Embed Links, Attach Files and Add Reactions. A bot that is already in a server
-without `applications.commands` can be invited again with this URL; nothing else changes.
+**Profile per server.** A server can run in another Hermes profile, with that profile's tools, memory and
+credentials. The plugin writes a named route into `profile_routes` of the default profile's `config.yaml` and
+applies it to the running gateway; where it may not write `config.yaml`, it applies the route again at every
+start. Members get an answer only while the running gateway sends the server to the chosen profile, the plugin
+is enabled there and the profile is not in `locked_profiles`. Offered are profiles that Hermes serves with the
+plugin enabled and that run no Discord bot of their own.
 
-## Activating a server
+**Models per server.** Members' turns and your own turns in a server can each use another model of the
+server's profile. It is used only where that profile has a credential for the provider and the conversation has
+no `/model` or `channel_overrides` entry of its own; otherwise Hermes' choice stands, or, if you set the server
+so, members get no answer until the model works again.
 
-In the server, run `/policy` and choose **Activate in this server** (operators only). Server managers who are
-not operators can ask the operator to activate it from the same panel. On the host the same works with:
+## Safety in short
 
-```bash
-hermes ctx-discord-policy bind <server id>          # activate
-hermes ctx-discord-policy pause <server id>         # stock Hermes behaviour in that server
-hermes ctx-discord-policy unbind <server id> [--purge]
-hermes ctx-discord-policy status                    # servers, operators, and the status of every intervention
-hermes ctx-discord-policy export [--guild <id>] > server.json
-hermes ctx-discord-policy import server.json        # replace one server's settings from an export file
-hermes ctx-discord-policy routing list              # each server's profile: chosen, configured, exceptions
-hermes ctx-discord-policy routing set <server id> <profile>
-hermes ctx-discord-policy routing clear <server id> # back to the bot's own profile
-hermes ctx-discord-policy routing adopt <server id> [--entry NAME]   # take over a hand-written guild route
-```
+- **Authority lives on the host.** Operators come from the Hermes configuration only; the plugin's own files
+  hold server settings, never authority.
+- **Fail closed.** If the policy file is damaged, every server is paused. If a safety check cannot be made,
+  members get no turn. A tool call the plugin cannot tie to its message is refused.
+- **Guidance and linked content are data.** A server's guidance text and the content of linked messages are
+  quoted in the turn; they cannot open tools or change who is an operator.
+- **Reading follows the author's rights.** Linked messages and mentioned channels are read only from the same
+  server and only where the author can read them. A member's turn reads only what everyone who sees the answer
+  may read; your own turns read linked content only when you address the bot. Unaddressed messages are not
+  read further.
+- **Member turns stay out of the worklog.** A member's turn never runs in the worklog channel or its threads
+  and never delivers there. Who can read that channel is up to its Discord permissions.
 
-`--bot <application id>` selects the bot when the host runs more than one. A `routing` change made on the host
-applies to the running gateway after a restart, or right away with **Apply again** in `/policy` → Profile;
-members' messages in that server stay closed until then.
+### Disclosure
 
-`/policy` needs the Manage Server permission by default; server admins can allow it for other members or roles
-under Server Settings → Integrations. Who may change which setting is decided by the plugin on every click.
+- **Network:** the plugin itself talks only to Discord: through the bot Hermes already runs, and with the
+  bot's token for the member search of the settings page (`member_search: auto`) when the gateway cannot
+  answer it. The *Models* panel lists models through Hermes' own model picker, which may ask your configured
+  providers for their model lists. No other services, no telemetry, no update checks.
+- **Stored:** the server settings in `plugin-data/ctx_discord_policy/` of the profile that runs the bot
+  (`policy.json`, readable by you alone, with a list of the last 500 changes that holds only hashes of the old
+  and new values), the server directory for the settings page (names of servers, channels, roles and emojis,
+  never members), and small state files next to it (status, activation requests, bookkeeping of notifications
+  and of the `/policy` command per server).
+- **Hermes configuration:** the plugin writes `plugins.entries.ctx_discord_policy.settings` only from the
+  settings page, and a server's route into `profile_routes` when you choose a profile for it.
+- **Inbound:** the settings page's routes under `/api/plugins/ctx_discord_policy/`, behind the dashboard
+  sign-in of Hermes, and read-only plugin RPC methods on the gateway's own session socket.
 
 ## Compatibility
 
 | Hermes | Tested | Notes |
 |---|---|---|
-| `main` | daily and on every change | drift is reported as an issue in this repository |
+| `main` | daily and on every change | drift is reported as an issue in [GottZ/ctx](https://github.com/GottZ/ctx/issues?q=label%3Actx_discord_policy) with the label `ctx_discord_policy` |
 | latest three releases | daily | security drift turns the run red |
-| v0.23.0 | on every change | `delete_message` and per-server `rotate` are added by the plugin |
+| v0.23.0 | on every change | `delete_message` and the per-server progress line are added by the plugin |
 | v0.22.4 | on every change | oldest supported version |
-
-Where Hermes later gains a feature itself (deleting progress messages, rotating progress lines), the plugin
-detects it and steps back; the status then shows `native` instead of `injected` or `wrapped`.
 
 ## License
 
-MPL-2.0, see [LICENSE](LICENSE).
+MPL-2.0, see [LICENSE](LICENSE). Part of [ctx](https://github.com/GottZ/ctx); ctx is a separate knowledge store,
+and this plugin works without it.
