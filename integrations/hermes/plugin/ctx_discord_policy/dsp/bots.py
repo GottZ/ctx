@@ -53,6 +53,10 @@ class BotRegistry:
             except TypeError:  # unhashable / not weak-referenceable test doubles
                 return None
 
+    def bindings(self) -> list:
+        with self._lock:
+            return list(self._by_bot.values())
+
     def for_bot(self, bot_id: str) -> Optional[BotBinding]:
         with self._lock:
             return self._by_bot.get(str(bot_id))

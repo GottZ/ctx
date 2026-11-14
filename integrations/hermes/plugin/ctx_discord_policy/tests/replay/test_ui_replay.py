@@ -701,7 +701,8 @@ async def test_controls_survive_a_restart(ui):
         assert await click(restarted, message, cid, user=ADMIN_USER_ID, perms=MANAGE) == []   # not installed yet
         ui.install(restarted.client)
         sent = await click(restarted, message, cid, user=ADMIN_USER_ID, perms=MANAGE)
-        assert [r.callback_type for r in sent] == [7]
+        # The interaction's answer; a manager's pause also sends the operators a direct message (no callback).
+        assert [r.callback_type for r in sent if r.callback_type is not None] == [7]
         assert ui.state() == "paused"
         assert restarted.task_errors == []
     finally:

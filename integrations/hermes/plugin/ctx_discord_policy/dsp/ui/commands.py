@@ -452,6 +452,9 @@ class UiBinding:
             new = ((after or {}).get("prompts") or {}).get("guild") or ""
             if old != new:
                 self.notify.guidance_changed(ctx, old, new)
+        if setting == "guild.pause" and not ctx.actor.is_operator:
+            # A manager closed the server for members (or opened it again): the operators hear about it.
+            self.notify.state_changed(ctx, str((before or {}).get("state") or ""), str((after or {}).get("state") or ""))
 
     async def request_activation(self, ctx: Any) -> None:
         await ctx.interaction.response.defer(ephemeral=True, thinking=True)

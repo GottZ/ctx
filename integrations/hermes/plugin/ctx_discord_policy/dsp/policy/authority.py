@@ -193,15 +193,45 @@ def event_refusal(adapter: Any, event: Any) -> Optional[str]:
     source = getattr(event, "source", None)
     if source is None or not platform_is_discord(getattr(source, "platform", None)):
         return None
-    if getattr(event, "internal", False):
-        return None
     binding = RUNTIME.bots.for_adapter(adapter)
     if binding is None:
         return None
     candidate = candidate_for_event(event, bot_id=binding.bot_id)
-    if candidate is not None and not candidate.is_operator and is_command(event):
+    if candidate is None:
+        return unrouted_refusal([binding], event)
+    if not candidate.is_operator and is_command(event):
         return "gateway commands are reserved for the operator"
     return None
+
+
+def bindings_for(runner: Any, source: Any) -> list:
+    """The bound bot that answers ``source``; every bound bot when that cannot be told (closed: a server any
+    of them knows counts)."""
+    bot = bot_for_source(runner, source)
+    binding = RUNTIME.bots.for_bot(bot) if bot else None
+    return [binding] if binding is not None else RUNTIME.bots.bindings()
+
+
+def unrouted_refusal(bindings: list, event: Any) -> Optional[str]:
+    """Why an event without a policy route must not run (``None``: Hermes' own rules decide). In a server
+    one of these bots knows (active or paused; every server while its policy file cannot be used), only an
+    operator's event runs without a route. Internal events of the gateway and other platforms pass."""
+    source = getattr(event, "source", None)
+    if source is None or getattr(event, "internal", False):
+        return None
+    if not platform_is_discord(getattr(source, "platform", None)):
+        return None
+    guild_id = str(getattr(source, "guild_id", "") or "").strip()
+    if not guild_id:
+        return None                                  # direct messages: Hermes decides
+    knowing = [b for b in bindings if b is not None
+               and b.store.read().guild_state(b.bot_id, guild_id) in ("active", "paused")]
+    if not knowing:
+        return None
+    user = str(getattr(source, "user_id", "") or "")
+    if any(config.is_operator(b.owner_home, user) for b in knowing):
+        return None
+    return "in a server the policy knows, only an operator's message runs without the policy's route"
 
 
 def authorizes(source: Any, runner: Any = None) -> bool:

@@ -322,7 +322,31 @@ def model_unavailable(bot_id: str, guild_id: str, lane: str, model: str, reason:
 models_runtime.UNAVAILABLE_LISTENERS.append(model_unavailable)
 
 
+_STORE_NOTICES: dict = {}
+
+
+def store_unreadable(bot_id: str, reason: str) -> bool:
+    """The bot's policy file cannot be used, so members are closed in all its servers: tell its operators,
+    at most once a day (in-process throttle here, ``Notifier.store_unreadable`` keeps the day across
+    restarts). A call that finds no interface yet is retried by the next message."""
+    key = str(bot_id)
+    last = _STORE_NOTICES.get(key)
+    if last is not None and time.monotonic() - last < MODEL_NOTICE_WINDOW:
+        return False
+    ui = _UI.get(key)
+    if ui is None:
+        return False
+    try:
+        sent = _on_loop(ui, ui.notify.store_unreadable(reason))
+    except Exception:
+        logger.warning("ctx_discord_policy: message about the policy file failed", exc_info=True)
+        return False
+    if sent:
+        _STORE_NOTICES[key] = time.monotonic()
+    return sent
+
+
 __all__ = ["Bind", "CONTEXT", "DELETE_CHAT", "apply_routing", "context_key", "guild_config", "install_delete",
            "install_delete_chat", "install_delivery", "install_models", "install_progress",
            "install_reaction_wakeup", "install_ui", "model_unavailable", "probe_hydration", "progress_grouping",
-           "turn_context"]
+           "store_unreadable", "turn_context"]

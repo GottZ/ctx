@@ -587,11 +587,12 @@ def home_page(ctx: Ctx) -> Page:
                   else protection_summary(ctx))
     status_button = Control("status.summary", "nav", "Status", arg="status")
     if snap.state == CORRUPT:
-        return Page(title, ("**The policy file on the host is damaged.** Every server stays paused and nothing "
-                            "can be changed here until the operator repairs it (`hermes ctx-discord-policy status` "
-                            "on the host shows the details)."), [protection], [status_button], tone="error")
+        return Page(title, ("**The policy file on the host is damaged.** Members get no answer in any server and "
+                            "nothing can be changed here until the operator repairs it (`hermes ctx-discord-policy "
+                            "status` on the host shows the details)."), [protection], [status_button], tone="error")
     if snap.state == DOWNGRADE:
-        return Page(title, ("**Paused in every server.** The policy file was written by a newer version of this "
+        return Page(title, ("**Paused in every server: members get no answer.** The policy file was written by a "
+                            "newer version of this "
                             "plugin, so this version only reads it and changes nothing. The operator can restore "
                             "the newer version or repair the file on the host."), [protection], [status_button],
                     tone="error")
@@ -611,8 +612,9 @@ def home_page(ctx: Ctx) -> Page:
             Control("guild.request", "request", "Ask the operator to activate", style="primary"),
             status_button,
         ], tone="inactive")
-    head = {"active": "**Active**", "paused": "**Paused.** The bot behaves here as if this plugin were not "
-                                              "installed until someone resumes it. Settings are kept."}[state]
+    head = {"active": "**Active**", "paused": "**Paused.** Members get no answer here until someone resumes it; "
+                                              "the operators' own turns run as Hermes runs them. Settings are "
+                                              "kept."}[state]
     changed = ""
     if guild and guild.get("updated_at"):
         changed = f"\nLast change by {who(guild.get('updated_by'))} {when(guild.get('updated_at'))}."
@@ -726,8 +728,8 @@ async def _activate_ok(ctx: Ctx) -> None:
 @action("pause", "guild.pause", mutates=True)
 async def _pause(ctx: Ctx) -> None:
     if await ctx.transition("paused", expected_rev=ctx.ref.rev):
-        await ctx.show_page("home", notice="⏸️ Paused. The bot behaves here as if this plugin were not installed "
-                                           "until someone resumes it.")
+        await ctx.show_page("home", notice="⏸️ Paused. Members get no answer here until someone resumes it; the "
+                                           "operators' own turns run as Hermes runs them.")
 
 
 @action("resume", "guild.pause", mutates=True)

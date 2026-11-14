@@ -37,8 +37,9 @@ hermes ctx-discord-policy routing set <server id> <profile>   on the host: run a
 - **Your tool work out of the way.** With a worklog channel, the tool work of your turns goes into a thread of
   its own; the channel you wrote in gets a pointer and, if you want, a copy of the final answer.
 - **You hear about changes.** An audit channel gets one line per change made in `/policy` (who, what, never the
-  values). You get a direct message when a server asks for activation, when its guidance changes, when
-  protection gets worse and when a model chosen for a server cannot be used.
+  values). You get a direct message when a server asks for activation, when its guidance changes, when a
+  server manager pauses or resumes the plugin there, when protection gets worse, when the policy file cannot be
+  used and when a model chosen for a server cannot be used.
 - **A settings page in Hermes Desktop.** Settings → Plugins → ctx_discord_policy: your servers, the operators,
   the status and the change history, next to Hermes' own form for the plugin settings.
 - **It checks itself against your Hermes.** Every place where the plugin hooks into Hermes is tested when it
@@ -147,7 +148,7 @@ other bots and webhooks are treated), `locked_profiles` (profiles members never 
 | See what is protected and what fell back | in the server, or on the host | `/policy` → Status, `hermes ctx-discord-policy status` |
 | Run a server in another Hermes profile | in the server, or on the host | `/policy` → Profile, `hermes ctx-discord-policy routing set <server id> <profile>` |
 | See each server's profile | on the host | `hermes ctx-discord-policy routing list` |
-| Pause the plugin in a server (Hermes' own behaviour there) | on the host | `hermes ctx-discord-policy pause <server id>` |
+| Pause the plugin in a server (members get no answer there; your own turns run as in Hermes) | in the server, or on the host | `/policy` → Pause, `hermes ctx-discord-policy pause <server id>` |
 | Activate it again | on the host | `hermes ctx-discord-policy bind <server id>` |
 | Remove a server, with its settings | on the host | `hermes ctx-discord-policy unbind <server id> --purge` |
 | Keep a copy of a server's settings, or move them | on the host, or on the settings page | `hermes ctx-discord-policy export --guild <server id>`, `… import <file>` |
@@ -172,8 +173,13 @@ so, members get no answer until the model works again.
 
 - **Authority lives on the host.** Operators come from the Hermes configuration only; the plugin's own files
   hold server settings, never authority.
-- **Fail closed.** If the policy file is damaged, every server is paused. If a safety check cannot be made,
-  members get no turn. A tool call the plugin cannot tie to its message is refused.
+- **Fail closed.** If the policy file is damaged, members get no answer in any server of the bot until it is
+  repaired; the status says so and you get a direct message. If a safety check cannot be made, members get no
+  turn. A tool call the plugin cannot tie to its message is refused.
+- **Hermes' own allowlist never hands out tools here.** Whom Hermes itself lets in (allowed users, a Discord
+  role, allowed channels, pairing) gets a member's turn in a server where the plugin is active, and no turn
+  where it is paused. Hermes' native slash commands of anyone but you get no turn in those servers either.
+  Servers you never activated keep Hermes' own behaviour.
 - **Commands are yours.** A command a member types in a message (`/<skill>`, `/queue`, any other Hermes
   command) never reaches Hermes, also not while that member's conversation is still busy with a turn.
 - **Guidance and linked content are data.** A server's guidance text and the content of linked messages are

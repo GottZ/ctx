@@ -44,8 +44,8 @@ async def test_bot_messages_in_a_server_the_policy_never_bound_stay_hermes_own(w
 
 
 async def test_bot_messages_as_members_when_the_operator_says_so(world):
-    (world.homes.root / "config.yaml").write_text(
-        _config([OPERATOR], "        bot_messages: member\n"), encoding="utf-8")
+    (world.homes.root / "config.yaml").write_text(                  # even a bot listed as operator: a member
+        _config([OPERATOR, OTHER_BOT], "        bot_messages: member\n"), encoding="utf-8")
     out = await world.deliver(_bot_message(world, "bot", 7503))
     assert out["admitted"] is True and out["event"] is not None, out
     turn = await world.turn(out["event"])

@@ -62,6 +62,12 @@ def bind_bot(native: Any, adapter: Any, binding: Any) -> None:
             step(bind)
         except Exception:  # steps record their own outcomes; one failing layer never stops the others
             logger.exception("ctx_discord_policy: bind step %s failed", name)
+    try:
+        from .ingress import admission
+
+        admission.note_store(binding, binding.store.read())  # a damaged policy file: status and operators know
+    except Exception:
+        logger.exception("ctx_discord_policy: policy file check at bind failed")
     safe_write_status(binding.owner_home)
 
 

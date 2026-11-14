@@ -26,7 +26,7 @@ from .. import RUNTIME_API, config, hermes
 from ..delivery import public
 from ..ingress import admission, classify, hydrate
 from ..policy import authority, hooks
-from ..policy.routes import AMBIENT, snowflake
+from ..policy.routes import AMBIENT, OPERATOR, snowflake
 from ..runtime import RUNTIME
 from .probes import probe_callable
 from .status import SECURITY, Outcome, Result
@@ -131,6 +131,10 @@ def _make_handle(original: Any) -> Any:
             decision.addressed = False
             if widened_key in RUNTIME.widened:
                 decision = None
+        if decision is not None and not message_id:
+            if decision.lane != OPERATOR:
+                return False            # nothing to key a member's route on: no turn, never an unrouted one
+            decision = None
         if decision is None or not message_id:
             if message_id and widened_key in RUNTIME.widened:
                 # Admitted only because the policy widened the allowlist: never hand it on unrouted.
@@ -251,6 +255,17 @@ def _make_runner_handle(original: Any) -> Any:
                 authority.revoke(candidate)
                 logger.warning("ctx_discord_policy: dropped message %s in channel %s: %s",
                                candidate.message_id, candidate.channel_id, refusal)
+                return None
+        else:
+            # No route: Hermes' own rules would run it. In a server the policy knows that is for operators only
+            # (a route evicted under load, a native slash command, a queued turn Hermes does not authorize
+            # again): anyone else's event is dropped here.
+            refusal = authority.unrouted_refusal(authority.bindings_for(self, getattr(event, "source", None)),
+                                                 event)
+            if refusal is not None:
+                source = getattr(event, "source", None)
+                logger.warning("ctx_discord_policy: dropped an unrouted event in channel %s: %s",
+                               getattr(source, "chat_id", None), refusal)
                 return None
         # Always set (also to None): a drain task created inside another message's context must never
         # run this event under that message's route.
