@@ -23,13 +23,14 @@ import time
 from typing import Any
 
 from .. import RUNTIME_API, hermes
+from ..delivery import public
 from ..ingress import admission, classify, hydrate
 from ..policy import authority, hooks
 from ..policy.routes import AMBIENT, snowflake
 from ..runtime import RUNTIME
 from .probes import probe_callable
 from .status import SECURITY, Outcome, Result
-from .strategies import wrap_attr
+from .strategies import run_intervention, wrap_attr
 
 logger = logging.getLogger("ctx_discord_policy")
 
@@ -152,14 +153,39 @@ def _make_handle(original: Any) -> Any:
     return policy_handle
 
 
+def install_upload_guard(cls: Any) -> Result:
+    """A11: every file sender of the adapter class refuses host files for public routes (dsp.delivery.public).
+    A sender this Hermes does not have needs no guard; one that exists but does not match is a reason to keep
+    members closed (off)."""
+    guarded, absent = [], []
+    for name, parameter in public.SENDERS:
+        if getattr(cls, name, None) is None:
+            absent.append(name)
+            continue
+        positional = ["chat_id", parameter]
+        probe = probe_callable(cls, name, is_async=True, positional=positional)
+        if not probe:
+            return Result(public.INTERVENTION, SECURITY, Outcome.OFF, f"{name}: {probe.reason}", probe.evidence)
+        wrap_attr(cls, name, public.make_guard(name, parameter), public.INTERVENTION, RUNTIME_API)
+        guarded.append(name)
+    if not guarded:
+        return Result(public.INTERVENTION, SECURITY, Outcome.OK, "the adapter class has no file sender",
+                      f"{cls.__module__}.{cls.__qualname__}")
+    reason = "uploads of members' turns limited to Hermes' trusted media roots: " + ", ".join(guarded)
+    if absent:
+        reason += f" ({', '.join(absent)} absent)"
+    return Result(public.INTERVENTION, SECURITY, Outcome.WRAPPED, reason, f"{cls.__module__}.{cls.__qualname__}")
+
+
 def bind_adapter_class(cls: Any) -> bool:
-    """A3 + A5 + A6 for one adapter class. Returns True when both wrappers are in place."""
+    """A3 + A5 + A6 (+ A11) for one adapter class. Returns True when A5 and A6 are in place."""
     a5 = probe_callable(cls, "_discord_message_admission", is_async=False, positional=["message"],
                         keyword_only=["claim"])
     a6 = probe_callable(cls, "_handle_message", is_async=True, positional=["message", "role_authorized"],
                         keyword_only=["recovered"])
     where = f"{cls.__module__}.{cls.__qualname__}"
     RUNTIME.status.record(Result("A3", SECURITY, Outcome.OK, f"adapter class {where}", "platform handler factory"))
+    run_intervention(RUNTIME.status, public.INTERVENTION, SECURITY, lambda: install_upload_guard(cls))
     if not a5:
         RUNTIME.status.record(Result("A5", SECURITY, Outcome.OFF, a5.reason, a5.evidence))
     if not a6:
@@ -195,9 +221,14 @@ def _make_runner_handle(original: Any) -> Any:
         # run this event under that message's route.
         token = RUNTIME.route.set(route)
         try:
-            return await original(self, event, *args, **kwargs)
+            result = await original(self, event, *args, **kwargs)
         finally:
             RUNTIME.route.reset(token)
+        if route is not None and not route.is_operator:
+            # The answer Hermes extracts attachments from after this returns (normal send, durable queue):
+            # a member's turn names no host file and pings nobody (H1-A, dsp.delivery.public).
+            result = public.reply_result(result, route)
+        return result
 
     return policy_runner_handle
 

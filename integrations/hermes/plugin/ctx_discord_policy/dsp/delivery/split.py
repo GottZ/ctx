@@ -29,7 +29,7 @@ from ..adapt.probes import probe_callable
 from ..adapt.status import COMFORT, Outcome, Result, StatusRegister
 from ..adapt.strategies import is_own_wrapper, run_intervention, wrap_attr
 from ..runtime import RUNTIME
-from . import media, reactions, worklog
+from . import media, public, reactions, worklog
 
 logger = logging.getLogger("ctx_discord_policy")
 
@@ -57,6 +57,19 @@ async def _refuse_public(adapter: Any, routes: list, target: str, what: str) -> 
         logger.warning("ctx_discord_policy: refused %s of a non-operator turn into the worklog area (%s)", what,
                        target)
     return hit
+
+
+def _public_text(call: Any, routes: list) -> bool:
+    """The delivery belongs to a public route (:func:`public.owner`): its text leaves without attachment
+    directives, host paths or pings (``dsp.delivery.public``). True when the content was set."""
+    asker = public.public_owner(routes)
+    if asker is None:
+        return False
+    content = call.get("content")
+    if not isinstance(content, str):
+        return False
+    call.set("content", public.reply(content, asker))
+    return True
 
 
 def copy_at_turn_end(adapter: Any) -> bool:
@@ -95,6 +108,8 @@ def make_send(original: Any) -> Any:
             routes = []
         if await _refuse_public(self, routes, target, "send"):
             return worklog.send_result(original, success=False, error=REFUSED)
+        if _public_text(call, routes):
+            return await call.invoke(original)      # a public route never has a worklog: stock delivery
         route = worklog.route_for_target(routes, target)
         try:
             state = (await worklog.worklog_for(self, route)
@@ -149,8 +164,9 @@ def make_edit(original: Any, original_send: Callable[[], Any]) -> Any:
             routes = []
         if await _refuse_public(self, routes, target, "edit"):
             return worklog.send_result(original, success=False, error=REFUSED)
+        public_text = _public_text(call, routes)
         if found is None:
-            return await original(self, *args, **kwargs)
+            return await call.invoke(original) if public_text else await original(self, *args, **kwargs)
 
         thread_id, state = found
         call.set("chat_id", thread_id)

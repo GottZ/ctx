@@ -182,6 +182,10 @@ so, members get no answer until the model works again.
   read further.
 - **Member turns stay out of the worklog.** A member's turn never runs in the worklog channel or its threads
   and never delivers there. Who can read that channel is up to its Discord permissions.
+- **No files of the host in members' answers.** Hermes turns `MEDIA:` lines and file paths in an answer into
+  attachments. In a member's turn they reach Discord as plain text, with look-alike slashes in place of the
+  real ones, and a member's turn can attach only files from the folders Hermes itself trusts for delivery (its
+  media caches and your `media_delivery_allow_dirs`). Your own turns attach files as Hermes does.
 
 ### Disclosure
 
