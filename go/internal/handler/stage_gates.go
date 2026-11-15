@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
@@ -401,4 +402,33 @@ func provenanceRejectOr(err error, fallback *writeReject) *writeReject {
 			"block carries derived provenance — a client write cannot replace its content or metadata")
 	}
 	return fallback
+}
+
+// blockIdentityTakenMsg is the one wording of the issue #227 refusal. REST
+// manage update, the MCP update tool and both confirm surfaces carry it
+// verbatim; a client may match on it as well as on the 409 / "constraint".
+const blockIdentityTakenMsg = "another active block in this scope already has this category and title"
+
+// identityTakenReject maps store.BlockIdentityTakenError onto the write
+// surfaces' verdict vocabulary: 409 of the constraint class, the class every
+// surface that answers a uniqueness collision already uses (blobConstraintError,
+// the model-alias name). nil = err is not that refusal. It is the single place
+// that binds the error to a status and a wording, so the update surfaces cannot
+// answer the same collision two ways.
+//
+// The holder's id is named when the store found it. That discloses nothing the
+// caller cannot read: the store reads the holder within the caller's write
+// scopes, every write scope is also a read scope of the same key
+// (writableBlockScopes), and GetBlock returns an active block of a read scope
+// to `get` whatever its type, sensitivity or provenance.
+func identityTakenReject(err error) *writeReject {
+	var taken *store.BlockIdentityTakenError
+	if !errors.As(err, &taken) {
+		return nil
+	}
+	msg := blockIdentityTakenMsg
+	if taken.ConflictID != "" {
+		msg += " (block " + taken.ConflictID + ")"
+	}
+	return classConstraint.rejectStatus(http.StatusConflict, msg+" — choose another category or title")
 }

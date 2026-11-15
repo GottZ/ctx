@@ -66,6 +66,16 @@ const (
 	// confirmExecGone — token consumed, update or archive target vanished
 	// between the TOCTOU read and the execute (same D1-m2 behaviour sentence).
 	confirmExecGone
+	// confirmExecRejected — the token IS consumed and the execute was refused
+	// for a cause in the payload, not for a server fault: a staged update that
+	// would give the block the identity of another active block (issue #227).
+	// Outcome.Reject carries the class — the 409 the direct update answers —
+	// with a prefix that says the token is spent. The unique index decides the
+	// collision atomically, and only the statement after the consume consults
+	// it; a probe before the consume would keep the token for most
+	// collisions but not for one that lands between probe and statement, and
+	// the remedy (another category or title) is a new payload either way.
+	confirmExecRejected
 )
 
 // confirmOutcome is the typed result of executeConfirm.
@@ -77,8 +87,12 @@ type confirmOutcome struct {
 	Scope   string          // on confirmScopeRejected
 	BlockID string          // on confirmTOCTOUDrift (the update/archive target) / confirmBlockRefGone (the referenced block)
 	Err     error           // on confirmInfraErr / confirmExecErr
-	Reject  *writeReject    // on confirmClaimRejected
+	Reject  *writeReject    // on confirmClaimRejected / confirmExecRejected
 }
+
+// confirmIdentityTakenPrefix opens the confirmExecRejected wording on both
+// confirm surfaces: the reason follows verbatim from identityTakenReject.
+const confirmIdentityTakenPrefix = "confirmed update not executed, the stage token is consumed: "
 
 // confirmClaimReject re-runs the I7 claim gates over a staged payload. nil =
 // admissible, and nil for the blob ops, which carry no block claim.
@@ -224,6 +238,10 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 	if cw.Op == "update" {
 		data := updateDataFromCanonical(cw)
 		block, _, err := store.UpdateBlock(ctx, pool, cw.ID, data, writableBlockScopes(ar))
+		if rej := identityTakenReject(err); rej != nil {
+			// The caller's input, not a fault: no ERROR line (#227).
+			return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmIdentityTakenPrefix)}
+		}
 		if err != nil {
 			slog.Error("confirm: confirmed update execute failed", "error", err, "pending_id", pw.ID)
 			return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}

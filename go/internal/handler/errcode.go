@@ -20,7 +20,9 @@
 // verdict of the /api/blob/manage dispatcher, which routes before any action
 // is chosen. Read handlers, the manage dispatchers' per-action handlers and
 // the `confirm`/`update` tools keep their uncoded envelopes; coding them is a
-// separate sweep, not this one.
+// separate sweep, not this one. Classes added to those surfaces later arrive
+// coded (provenance_protected; the issue #227 identity collision as
+// constraint).
 package handler
 
 import (
@@ -128,7 +130,9 @@ func (c rejectClass) reject(msg string) *writeReject {
 // prefixed returns the same rejection (status AND code unchanged) with a
 // prefix on the message. It exists for the batch surface: /api/ingest refuses
 // the whole request for one bad chunk and has to say WHICH chunk, without
-// inventing a second code for the class it is re-rendering.
+// inventing a second code for the class it is re-rendering. The confirm core
+// uses it the same way for the issue #227 refusal of a confirmed update, whose
+// message has to add that the stage token is spent.
 func (r *writeReject) prefixed(prefix string) *writeReject {
 	return &writeReject{Status: r.Status, Code: r.Code, Msg: prefix + r.Msg}
 }

@@ -91,9 +91,11 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": confirmNotFoundMsg})
 	case confirmScopeRejected:
 		writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": confirmScopeRejectMsg(out.Scope)})
-	case confirmClaimRejected:
-		// The class the stage gates would have answered — same status, same
-		// code. The stage row is intact; the client re-stages a legal payload.
+	case confirmClaimRejected, confirmExecRejected:
+		// The class the stage gates (claim) or the direct update (#227
+		// identity collision, 409 constraint) would have answered — same
+		// status, same code. After a claim rejection the stage row is intact;
+		// after an execute rejection it is consumed, which the message says.
 		writeJSONReject(w, out.Reject)
 	case confirmTOCTOUGone:
 		// 409: the stage is intact but the world moved — re-read and re-stage.
