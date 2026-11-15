@@ -636,7 +636,8 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 
-	// What this update may CLAIM: the type (WF T10, D4: REST only —
+	// What this update may CLAIM: the type (WF T10; the MCP update tool reaches
+	// the same verdict through claimReject since issue #203 —
 	// registry-validated, fail-closed, an unwired registry rejects instead of
 	// writing an unvalidated name; the store then sets type_source='manual',
 	// which permanently overrides the auto-classifier) and, since W01-2a, the
