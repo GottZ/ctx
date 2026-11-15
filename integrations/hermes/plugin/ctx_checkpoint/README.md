@@ -356,10 +356,32 @@ entry did not connect when Hermes started (wrong key, server down, URL wrong).
   with memory features on also the mirrored `MEMORY.md`/`USER.md` entries, the
   extracted facts, the digests and what the model stores explicitly. Tool
   results, system prompts and synthetic compaction envelopes are excluded.
-  Every automatic write is redacted twice before anything leaves the process:
-  Hermes' `redact_sensitive_text` plus a conservative key/value, auth-header and
-  bearer-token pass, with the bound ctx key (`transport: rest`) replaced first; a
-  failing redactor skips the write.
+  Every automatic write is redacted before anything leaves the process, in three
+  passes. First the ctx keys of this profile are replaced wherever they stand: the
+  key the `mcp_servers` entry signs in with (its `Authorization` or `X-Context-Key`
+  header, `${VAR}` resolved from `.env`), `CTX_API_KEY`, and on `transport: rest`
+  `CTX_KEY`. Then Hermes' `redact_sensitive_text` runs in its strict mode, the one
+  Hermes uses for its own compaction summary (signed URLs, OAuth codes and URL user
+  info as well). Last the plugin's rules mask the value behind a credential name —
+  also German `Passwort`/`Kennwort`, `passphrase`, `PIN`, seed phrases, recovery
+  codes, `creds` and `X-Context-Key`, also inside markdown emphasis (`**Password:** …`) —,
+  a value in prose that has a digit (`the password is …`, `mit Passwort …`), the token of
+  a Discord or Slack webhook URL and what is left of a Hermes mask (`8f3a9c...9c2e`). Code and prose behind those names stay as written
+  (`token = self.token`, `password: str`, `the token: it expires`).
+  **Not recognized:** a credential without a name (a bare hex or base64 value other
+  than this profile's key, so also the key of an entry that signs in with OAuth or
+  runs a command), a password that is a plain word (`the password is swordfish`),
+  card numbers and IBANs; a value of letters only that reads like words (0.10.0 masked
+  every value behind a credential name; now a run of 12+ letters is masked unless it has
+  the shape of words or an identifier — about one random letter run in ten has that shape),
+  and one in prose (`the token is …` needs a digit); also a value the name does not directly precede (`the password
+  for root is …`), a mixed-case `Pin`, a markdown table cell and a base64 value without a
+  digit. Where Hermes masks the first word of a spaced password value, the plugin masks the
+  rest of the line too (`password: 8 characters minimum` keeps only `password:`). Hermes'
+  own pass still rewrites some code lines
+  (`api_key: Optional[str] = None` → `api_key: *** = None`), and its strict mode
+  masks every URL parameter named `key`, `code`, `session` or `auth`. A failing
+  redactor skips the write.
 - **Reads:** its own settings in the Hermes config (`memory.ctx_checkpoint` and
   `plugins.entries.ctx_checkpoint.settings`), the named `mcp_servers` entry,
   `compression.threshold` (for the warning above) and

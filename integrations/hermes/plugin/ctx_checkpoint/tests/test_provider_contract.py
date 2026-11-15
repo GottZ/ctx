@@ -304,7 +304,10 @@ def test_authorization_header_credential_is_fully_redacted():
         out = redact(f"curl -H 'Authorization: {scheme} sk-live-ABCDEFGH123456'")
         assert "sk-live-ABCDEFGH123456" not in out, out
         assert "ABCDEFGH" not in out, out
-    assert redact("token: xyz") == "token: [REDACTED]"
+    # 0.11.0: a value is judged by its shape. A prose word stays (it cannot be told from one), a
+    # value with digits goes.
+    assert redact("token: xyz") == "token: xyz"
+    assert redact("token: xyz123") == "token: [REDACTED]"
     # A sentence that merely mentions the word stays readable.
     assert redact("the authorization flow is documented") == "the authorization flow is documented"
 

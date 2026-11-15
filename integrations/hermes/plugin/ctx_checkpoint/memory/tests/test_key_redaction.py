@@ -681,6 +681,52 @@ def test_pre_compress_chain_does_not_store_the_bound_key(hex_key_provider):
     assert all("bound-ctx-key" in call["metadata"]["ctx_plugin"]["redaction"] for call in client.chain_calls)
 
 
+KEY_HEX64_B = "b4ke" + "fedcba9876543210" * 3 + "fedcba987654"
+
+
+def test_write_scheduled_before_a_rebinding_still_masks_the_old_key(tmp_path, ctx_env, fake_client_cls, monkeypatch):
+    """A write captures its client when it is scheduled and redacts when its thread runs; a
+    re-initialization with another key in between must not leave the old key unknown."""
+    p = _init_with_key(tmp_path, ctx_env, KEY_HEX64)
+    old_client = p._client
+    queued = []
+    monkeypatch.setattr(p, "_spawn_write", queued.append)
+    p.on_memory_write("add", "memory", f"my ctx key is {KEY_HEX64}")
+    assert len(queued) == 1
+    ctx_env.setenv("CTX_KEY", KEY_HEX64_B)
+    p.initialize("sess-next", hermes_home=str(tmp_path / "profiles" / "beta"), agent_context="primary")
+    assert p._client is not old_client and p._api_key == KEY_HEX64_B
+    queued[0]()
+    assert old_client.calls
+    for call in old_client.calls:
+        assert KEY_HEX64 not in json.dumps(call, default=str)
+    # The chain writer built for the new binding knows the old key as well as the new one.
+    from ctx_plugin import checkpoint
+
+    writer_keys = checkpoint.bound_secret_values(p._chain().secret)
+    assert KEY_HEX64 in writer_keys and KEY_HEX64_B in writer_keys
+
+
+def test_remembered_keys_are_bounded(tmp_path, ctx_env, fake_client_cls):
+    from ctx_plugin import provider as provider_module
+
+    p = _init_with_key(tmp_path, ctx_env, KEY_HEX64)
+    keys = [f"{index:02d}" + "a1b2c3d4e5f60718" * 3 + "a1b2c3d4e5f607" for index in range(40)]
+    for key in keys:
+        ctx_env.setenv("CTX_KEY", key)
+        p.initialize("sess-next", hermes_home=str(tmp_path / "profiles" / "alpha"), agent_context="primary")
+    bound = p._bound_secrets()
+    assert len(bound) == provider_module.MAX_REMEMBERED_SECRETS + 1  # the remembered keys plus the current one
+    assert keys[-1] in bound and keys[0] not in bound and KEY_HEX64 not in bound
+
+
+def _init_with_key(tmp_path, ctx_env, key):
+    ctx_env.setenv("CTX_KEY", key)
+    p = _init(tmp_path)
+    assert p._active and p._api_key == key
+    return p
+
+
 def test_memory_mirror_does_not_store_the_bound_key(hex_key_provider):
     p = hex_key_provider
     p.on_memory_write("add", "memory", f"my ctx key is {KEY_HEX64}")

@@ -6,6 +6,81 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.11.0] — 2026-11-15
+
+The redaction removes the ctx key on the MCP transport and more secret forms, and keeps code
+and prose it used to overwrite (GottZ/ctx#288).
+
+- **The ctx key on MCP.** Without a REST key the bound secret was empty, so a ctx key written
+  bare, as `X-Context-Key: <key>` or as that header in JSON reached the checkpoint parts while
+  every part header said credentials were excluded (0.10.0 recorded it as a known limit). The
+  umbrella provider now resolves the key the `mcp_servers` entry signs in with on every
+  connect — its `Authorization` / `X-Context-Key` headers, `${VAR}` and `${env:VAR}` through
+  Hermes' `get_env_value` (`.env` included), the auth scheme dropped — plus `CTX_API_KEY`,
+  and replaces them (`_bound_secrets()`) in parts, mirror, facts, digests and the outcome
+  file's error text. A re-initialization of the same instance keeps the keys of its earlier
+  bindings (at most 16, `MAX_REMEMBERED_SECRETS`): a write scheduled through the old client
+  redacts when its thread runs, and a later text may still carry the old key. A transcript
+  that contains such an earlier key therefore redacts it in this process and not in a fresh
+  one (its digest differs there); for the same bound keys the output stays byte-identical.
+  An unresolvable reference is skipped; an `auth` (OAuth) or `command`
+  entry has no key to resolve. Bound values are applied longest first; values under 8
+  characters are not bound (a stray short header value would erase a common word).
+- **Host strict mode.** `redact_sensitive_text` runs with `redact_url_credentials=True`, as
+  Hermes does for its own compaction summary: signed URLs (S3, Azure SAS, GCS), OAuth
+  `?code=` and URL user info. The parameter is older than the floor
+  `requires_hermes >=0.23.1` (it is present from Hermes 0.22.0 on).
+- **Plugin rules judge the value.** The generic key/value rule replaced every value behind
+  `token`, `secret`, `password`, `api_key`, … and changed 15 of 15 harmless code and prose
+  lines of the audit. The value is now judged by its shape: attribute paths, calls,
+  subscripts, bit-width types, references (`${VAR}`), placeholders (`<…>`), comparisons and
+  prose words stay; a value with letters and a digit, a value behind an auth scheme, and the
+  remnants of a Hermes mask (`8f3a9c...9c2e`, `***&3`) go, digits alone from 4 digits behind a
+  password name or PIN and from 6 behind a token name (`PIN 4711`, a one-time code; not `the
+  password is 12 characters long`, not `token: 4096`). Password names (also `Passwort`,
+  `Kennwort`, upper-case `PIN`, `PIN-Code`) mask any value with a digit or a non-word
+  character after `:`, `=` or `:=`, and a value with a digit in prose (`the password is …`,
+  `mit Passwort …`); after a password word Hermes masked the rest of the line goes too
+  (`password: 8 characters minimum` keeps only `password:`); phrase names (`passphrase`, seed phrase,
+  mnemonic, recovery codes or key, backup codes) mask the rest of the line; token names add
+  `creds`, `credentials`, `client_secret` and `X-Context-Key`, and `_` / `-` separate words
+  (`MY_SERVICE_CRED=`). A label may sit in markdown emphasis (`**Password:** …`,
+  `**API key**: …`), and every name takes the verb form (`the token is …` with letters and a
+  digit, `Passwort lautet: …`). Calls, subscripts and lower-case attribute paths may carry
+  digits (`base64.b64encode(raw)`, `self.token2`), and typed integers (`Int64`, `Uint8Array`)
+  stay. The MCP key is also read from the entry as Hermes loads it (expanded, managed overlay),
+  and a reference may carry spaces (`${ VAR }`), as Hermes allows. Discord and Slack webhook URLs lose their path token; a
+  standalone `Bearer` value is masked only when it is shaped like a credential (`Bearer
+  authentication` stays). A value is judged on at most 1024 characters; a longer unbroken run
+  behind a name is masked whole, so the work per name stays bounded and the rules stay
+  linear in the text length. Measured on the corpora of `tests/test_redaction_coverage.py`:
+  0 of 20 audit secret forms leave a fragment (0.10.0: 18), 0 of 8 further forms (0.10.0: 7); of the
+  audit's 22 forms 2 pass unchanged (0.10.0: 19); the plugin rules change 0 of 66 harmless
+  lines (0.10.0: 38; Hermes' own pass changes 8). A 2-million-character transcript renders
+  about 8 % slower (1.78 s → 1.92 s).
+- **Letters-only values.** 0.10.0 masked every value behind `token`, `secret`, `password`,
+  `api_key`, `authorization`, …; Hermes masks a letters-only run only at the start of a line, or
+  from 20 characters or two letter cases on, so behind a name in mid-line such a value would
+  have passed. A value of at least 12 letters (`-_./` between them allowed) is masked unless it
+  has the shape of words or an identifier: camelCase humps of three or more letters, each part
+  with at least 15 % vowels and at most 4 consonants in a row. Measured on seeded samples:
+  about 10 % of random letter runs (12–64 letters) have that shape and pass, about 2 % of the
+  stdlib's long identifiers do not and are masked (`StrFormatStyle`). A value in prose (`the
+  token is …`) still needs a digit.
+- **Known limits, named in the READMEs.** A credential without a name (a bare hex or base64
+  value other than the bound keys), a plain-word password, a letters-only value with word shape, a value the name does not directly
+  precede, a mixed-case `Pin`, a table cell, card numbers and IBANs pass;
+  Hermes' own pass still rewrites some code lines and masks URL parameters named `key`,
+  `code`, `session` or `auth`.
+- **Consequence for chains.** The transcript digest is taken over the redacted transcript, so
+  a conversation checkpointed again after the update gets another digest, checkpoint id and
+  titles and starts a new chain next to the old one. Parts stored before keep their 0.10.0
+  redaction; nothing rewrites them.
+- The part header says what is masked ("credentials in a known shape, and this profile's ctx
+  key where its server entry names it, are masked") instead of "credentials are intentionally excluded"; `ctx_plugin.redaction`
+  names the passes (`host:redact_sensitive_text(force=True, redact_url_credentials=True)`,
+  `named-value`, `webhook-path`, `bearer`).
+
 ## [ctx_checkpoint 0.10.0] — 2026-11-15
 
 A long transcript no longer stops a required checkpoint for good, and a retry continues

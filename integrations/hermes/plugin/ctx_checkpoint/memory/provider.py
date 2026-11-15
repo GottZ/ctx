@@ -85,6 +85,10 @@ _CONTEXT_TAG = "<ctx-context>"
 # the frame is the model's only cue that what follows is data. Escape it (case-insensitive).
 _CONTEXT_TAG_RE = re.compile(r"</?\s*ctx-context\s*>", re.IGNORECASE)
 _PREFETCH_CACHE_TTL_S = 60.0
+# Key values an earlier binding of this provider used, kept for redaction after a re-initialization
+# (a write scheduled through the old client redacts when its thread runs; a later text may still
+# carry the old key). At most this many, the most recent first kept; the current keys come on top.
+MAX_REMEMBERED_SECRETS = 16
 _LOG_TITLE_MAX = 80
 
 # Pre-compress checkpoint API negotiation + transcript chain live in checkpoint.py
@@ -115,6 +119,7 @@ class CtxMemoryProvider(MemoryProvider):
         self._config: dict[str, Any] = {}
         self._base_url = ""
         self._api_key = ""
+        self._remembered_secrets: tuple[str, ...] = ()
         self._client: CtxClient | None = None
         self._session_id = ""
         self._hermes_home = ""
@@ -175,16 +180,33 @@ class CtxMemoryProvider(MemoryProvider):
         """Monotonic clock for budgets/deadlines (the umbrella routes it through its test seam)."""
         return time.monotonic()
 
+    def _current_secrets(self) -> tuple[str, ...]:
+        """The ctx key(s) of the current binding: the REST key (the umbrella adds the key its MCP
+        server entry signs in with)."""
+        return (self._api_key,)
+
+    def _bound_secrets(self) -> tuple[str, ...]:
+        """The ctx keys this provider removes from everything it stores: the current binding's and
+        those of earlier bindings of this instance (:data:`MAX_REMEMBERED_SECRETS`). Read when a
+        write redacts, so a write scheduled before a re-initialization still knows the old key."""
+        return _cp.bound_secret_values([*self._remembered_secrets, *self._current_secrets()])
+
+    def _remember_secrets(self) -> None:
+        """Before a (re)binding: keep the current keys among the remembered ones, newest last."""
+        current = list(_cp.bound_secret_values(self._current_secrets()))
+        kept = [value for value in self._remembered_secrets if value not in current] + current
+        self._remembered_secrets = tuple(kept[-MAX_REMEMBERED_SECRETS:])
+
     def _redacted(self, text: str) -> str | None:
-        """Host redaction (force) + the generic key/value and bearer rules, as for the chain,
-        plus the bound ctx key (which neither rule set knows).
+        """The checkpoint redaction (bound ctx keys, host strict mode, the plugin's rules), as for
+        the chain.
 
         Every automatic write — mirror, facts, digests — passes through here before it leaves
         the process; ``None`` means the redactor failed and the write is skipped (never store
         unredacted text).
         """
         try:
-            return _cp.redact_text(text or "", self._api_key)
+            return _cp.redact_text(text or "", self._bound_secrets())
         except Exception as exc:
             logger.warning("CTX redaction failed (%s); automatic write skipped", type(exc).__name__)
             return None
@@ -229,6 +251,7 @@ class CtxMemoryProvider(MemoryProvider):
         # A re-initialization of the same instance must not keep the previous client, key,
         # whoami identity or checkpoint writer — not even when it ends inactive below, or
         # when env_secret raises (unscoped read under multiplexing) before the new values land.
+        self._remember_secrets()
         self._active = False
         self._client = None
         self._chain_writer = None
@@ -968,7 +991,7 @@ class CtxMemoryProvider(MemoryProvider):
                 api_timeout=float(self._config.get("api_timeout") or 10.0),
                 tags_for=_tags,
                 profile=profile,
-                secret=self._api_key,
+                secret=self._bound_secrets(),
                 notify=self._checkpoint_notice,
                 **self._chain_writer_seams(),
             )

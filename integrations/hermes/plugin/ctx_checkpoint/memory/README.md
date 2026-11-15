@@ -260,9 +260,18 @@ the plugin and runs over either transport.
   part digest and the parent): the server classifies them as `checkpoint` (migrations
   M107/M120) and the distiller parses the part format. Category `compaction-checkpoints`, sensitivity `checkpoint_sensitivity`.
 - Only direct user/assistant text; tool rows, system prompts, `_compressed_summary`
-  carriers and synthetic hand-offs are dropped. Redaction runs twice — host
-  `redact_sensitive_text(force=True)` plus key/value, auth-header and bearer rules — after
-  the bound ctx key (`transport: rest`) is replaced, and a redactor failure writes nothing.
+  carriers and synthetic hand-offs are dropped. Redaction (`checkpoint.redact_text`, the same
+  for every automatic write) runs three passes: the bound ctx keys (`_bound_secrets()`: the REST
+  key, and in the umbrella provider the key of the `mcp_servers` entry and `CTX_API_KEY`, plus the
+  keys of earlier bindings of the same instance, at most 16) are
+  replaced wherever they stand; host `redact_sensitive_text(force=True,
+  redact_url_credentials=True)`; the plugin's rules — the value behind a credential name,
+  judged by its shape (code, types, references, placeholders and prose words stay; digits,
+  phrases, auth-scheme values and host-mask remnants go), passwords in prose with a digit,
+  webhook path tokens, bearer tokens. A redactor failure writes nothing. Not recognized:
+  unnamed values other than the bound keys, plain-word passwords, values the name does not
+  directly precede, mixed-case `Pin`, table cells, letters-only values with word shape (12+ letters
+  without it are masked), card numbers and IBANs (list in `../README.md`).
 - Chain linkage lives in **metadata** (`parent_manifest_id`, `source_block_ids`,
   `latest_manifest_id`), not in `parent_id` (that foreign key cascades on hard delete).
   Further metadata: upstream keys (`root_session_id`, `active_session_id`, `sha256`,
