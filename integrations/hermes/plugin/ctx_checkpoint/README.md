@@ -112,7 +112,8 @@ this order, each source over the one before: the engine defaults, the legacy
 `$HERMES_HOME/ctx.json`, `memory.ctx_checkpoint`, and for the six keys of the
 Settings → Plugins form `plugins.entries.ctx_checkpoint.settings` (other keys there
 are ignored). So a value saved in that form wins over the same key written by hand
-under `memory.ctx_checkpoint`; the form itself shows only its own values. Every
+under `memory.ctx_checkpoint`, also under its engine name (`checkpoint_budget_s`,
+`checkpoint_max_parts`); the form itself shows only its own values. Every
 value is clamped to its range, whatever the source. `budget_s` and `max_parts` are
 not asked during terminal setup (setup keeps them). `compression.checkpoint_required`
 is written only when you choose a mode in setup that differs from the current one;

@@ -843,8 +843,10 @@ def umbrella_section(config: dict[str, Any] | None) -> dict[str, Any]:
     ``memory.ctx_checkpoint``, with each key of :data:`PLUGINS_FORM_KEYS` taken from
     ``plugins.entries.ctx_checkpoint.settings`` when the Settings → Plugins form stored it
     there. Precedence, lowest first: engine defaults ← ``ctx.json`` ← ``memory.ctx_checkpoint``
-    ← ``plugins.entries.ctx_checkpoint.settings`` (its other keys are ignored). Clamping
-    happens later, the same for every source. Never raises.
+    ← ``plugins.entries.ctx_checkpoint.settings`` (its other keys are ignored). A form value
+    also replaces the engine name of its key (``checkpoint_budget_s`` for ``budget_s``) written
+    under ``memory.ctx_checkpoint``, which would otherwise map over it. Clamping happens later,
+    the same for every source. Never raises.
     """
     config = config if isinstance(config, dict) else {}
     memory = config.get("memory")
@@ -855,7 +857,12 @@ def umbrella_section(config: dict[str, Any] | None) -> dict[str, Any]:
     entry = entries.get(PLUGIN_ID) if isinstance(entries, dict) else None
     settings = entry.get("settings") if isinstance(entry, dict) else None
     if isinstance(settings, dict):
-        out.update({key: settings[key] for key in PLUGINS_FORM_KEYS if settings.get(key) is not None})
+        for key in PLUGINS_FORM_KEYS:
+            if settings.get(key) is None:
+                continue
+            if key in UMBRELLA_KEY_MAP:
+                out.pop(UMBRELLA_KEY_MAP[key], None)
+            out[key] = settings[key]
     return out
 
 

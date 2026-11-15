@@ -906,3 +906,28 @@ def test_a_skipped_best_effort_checkpoint_tells_the_user_why_once(hermes_home, c
     assert len(seen) == 1
     assert reason in seen[0]
     assert "without saving its wording to ctx" in seen[0]
+
+
+def test_a_plugins_form_value_wins_over_an_engine_name_alias(hermes_home, linked_plugin):
+    from hermes_cli.plugins_settings import save_plugin_settings
+
+    _write_config(
+        hermes_home,
+        {
+            "memory": {
+                "ctx_checkpoint": {
+                    "budget_s": 30,
+                    "checkpoint_budget_s": 45,
+                    "max_parts": 40,
+                    "checkpoint_max_parts": 50,
+                }
+            }
+        },
+    )
+    save_plugin_settings("ctx_checkpoint", linked_plugin, {"budget_s": 120, "max_parts": 70})
+
+    provider = Provider(dispatch=_ok_dispatch()[0])
+    provider.initialize("session-alias", platform="cli", hermes_home=str(hermes_home))
+
+    assert provider._config["checkpoint_budget_s"] == 120.0
+    assert provider._config["checkpoint_max_parts"] == 70

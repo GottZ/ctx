@@ -24,7 +24,8 @@ checkpoint, and a status that shows whether checkpoints work on the MCP transpor
   `auto_recall`, `auto_memory_mirror`, `auto_compress_extract` and `auto_session_digest`;
   Hermes stores them in `plugins.entries.ctx_checkpoint.settings`. `config.umbrella_section()`
   reads them over `memory.ctx_checkpoint` (precedence: engine defaults ← `ctx.json` ←
-  `memory.ctx_checkpoint` ← the Plugins form, for those six keys only), and the existing
+  `memory.ctx_checkpoint` ← the Plugins form, for those six keys only; a form value also
+  replaces the engine name of its key there, e.g. `checkpoint_budget_s`), and the existing
   clamps apply unchanged. The provider and `hermes ctx_checkpoint` share that function.
 - **Connection test.** `status.run_connection_test()` uses Hermes' own MCP probe
   (`hermes_cli.mcp_config._probe_single_server`, behind `hermes mcp test`) with a connect
