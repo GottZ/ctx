@@ -58,9 +58,11 @@ Other errors (an unknown id, an invalid type filter, a failed lookup) carry text
 so a client must not rely on a code being present.
 
 Which errors carry a code is a property of each tool's write path: `store`,
-`blob_store` and `blob_link` code every rejection; `update` codes only the verdict of
-its gate chain; `archive` codes `provenance_protected` and, when it stages,
-`rate_limit`; `confirm` codes only the claim verdict; the issue tools code only
+`blob_store` and `blob_link` code every rejection; `update` codes the verdict of
+its gate chain and the identity collision (`constraint`, see [`update`](#update));
+`archive` codes `provenance_protected` and, when it stages,
+`rate_limit`; `confirm` codes the claim verdict and the identity collision of a
+confirmed update; the issue tools code only
 `reserved_metadata`; the read tools and the guard tools never code. Any tool can
 additionally answer `internal` for a server fault (below).
 
@@ -266,6 +268,18 @@ transaction as the update; the backfill writes the new one, and until then the
 block is found by the lexical arms only. A `title` or `content` sent with the
 value the block already holds keeps the embedding. The REST `manage update`
 action behaves the same.
+
+An update that would give the block the `category` and `title` of another active
+block in its scope is refused, and nothing is written: `isError: true`, code
+`constraint`, text
+`another active block in this scope already has this category and title (block <uuid>) — choose another category or title`.
+Sending the same update again cannot succeed; pick another category or title, or
+archive or rename the block the text names first (it lies in a scope this key reads,
+so `get` returns it; the ` (block <uuid>)` part is missing when that block changed
+in the moment between the refusal and the lookup). A staged update that collides
+when it is confirmed answers the same code and text behind the prefix
+`confirmed update not executed, the stage token is consumed: ` — stage the corrected
+update anew. The REST `manage update` action answers the same collision with HTTP 409.
 
 ### archive
 
