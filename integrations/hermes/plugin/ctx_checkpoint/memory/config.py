@@ -877,13 +877,17 @@ def overlay_from_umbrella(section: dict[str, Any] | None) -> dict[str, Any]:
     """``memory.ctx_checkpoint`` → engine overlay for :func:`load_ctx_config`.
 
     With ``memory`` off (default) recall, capture and fact extraction are forced off, so the
-    plugin behaves exactly like the checkpoint-only versions before 0.6.0.
+    plugin behaves exactly like the checkpoint-only versions before 0.6.0. An engine name written
+    next to its plugin key (``checkpoint_sensitivity`` beside ``sensitivity``) wins, in either
+    order (#289: the later one in the file did, and setup writes the plugin key).
     """
     section = dict(section or {})
     overlay: dict[str, Any] = {}
     defaults = _default_config()
     for key, value in section.items():
         if key in UMBRELLA_OWN_KEYS or value is None:
+            continue
+        if key in UMBRELLA_KEY_MAP and section.get(UMBRELLA_KEY_MAP[key]) is not None:
             continue
         target = UMBRELLA_KEY_MAP.get(key, key)
         if target in defaults:

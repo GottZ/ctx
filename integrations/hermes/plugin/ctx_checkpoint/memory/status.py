@@ -273,6 +273,38 @@ def checkpoint_mode_warning(
     return text + " Remove checkpoint_mode or set it to best_effort to save checkpoints again."
 
 
+def checkpoint_chain_warning(
+    engine_config: dict[str, Any], section: dict[str, Any], hermes_home: str, required: bool
+) -> str:
+    """The warning for ``checkpoint_chain: false`` (no transcript chain is written), or ``""``."""
+    if engine_config.get("checkpoint_chain", True) is not False:
+        return ""
+    source = (
+        "memory.ctx_checkpoint in config.yaml" if "checkpoint_chain" in section else str(ctx_config_path(hermes_home))
+    )
+    text = (
+        f"ctx_checkpoint: checkpoint_chain: false (from {source}) writes no transcript chain: no compaction saves "
+        "the conversation's wording to ctx (facts of the memory features are not a transcript checkpoint)."
+    )
+    if required:
+        return text + (
+            " compression.checkpoint_required is on, so Hermes refuses every compaction; remove checkpoint_chain "
+            "or set it to true."
+        )
+    return text + " Remove checkpoint_chain or set it to true to save checkpoints again."
+
+
+def setting_warnings(
+    engine_config: dict[str, Any], section: dict[str, Any], hermes_home: str, required: bool
+) -> list[str]:
+    """The warnings for settings that switch the checkpoint off (session start and status)."""
+    texts = (
+        checkpoint_mode_warning(engine_config, section, hermes_home, required),
+        checkpoint_chain_warning(engine_config, section, hermes_home, required),
+    )
+    return [text for text in texts if text]
+
+
 # -- Outcome of the latest checkpoint ----------------------------------------------------
 
 
@@ -530,9 +562,7 @@ def mcp_status(
     warnings = []
     if url and insecure_http(url):
         warnings.append(http_warning(url))
-    mode_warning = checkpoint_mode_warning(engine_config, section, hermes_home, required)
-    if mode_warning:
-        warnings.append(mode_warning)
+    warnings.extend(setting_warnings(engine_config, section, hermes_home, required))
     for index, warning in enumerate(warnings):
         status["warning" if index == 0 else f"warning_{index + 1}"] = warning
     return status

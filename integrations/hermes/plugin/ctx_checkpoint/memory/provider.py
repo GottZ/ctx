@@ -94,6 +94,11 @@ _LOG_TITLE_MAX = 80
 # Pre-compress checkpoint API negotiation + transcript chain live in checkpoint.py
 # (port of GottZ/ctx ctx_checkpoint, MPL-2.0). Receipt budget: host caps at 6000 chars.
 _RECEIPT_MAX_CHARS = 5800
+# The cause a required checkpoint names when the transcript chain is switched off (#289).
+CHAIN_OFF_REQUIRED = (
+    "CTX pre-compress checkpoint unavailable: checkpoint_chain is false, so no word of the conversation "
+    "would be saved (facts are not a transcript checkpoint); remove checkpoint_chain or set it to true"
+)
 
 # P5: ctx_state pruning runs at most once per process (all profiles share the code, each
 # provider instance prunes its own $HERMES_HOME).
@@ -705,8 +710,11 @@ class CtxMemoryProvider(MemoryProvider):
         content: str,
         sensitivity: str | None,
         metadata: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> tuple:
-        """Like ``_auto_store`` but returns ``(ok, block_id)``. Never raises.
+        """Like ``_auto_store`` but returns ``(ok, block_id)``. Never raises. ``timeout`` bounds the
+        store (the required facts pass the time their deadline leaves); without it the client's own.
 
         Success → INFO (hook, profile, category/title, action, id); failure →
         WARNING. Only the (shortened) title is logged, never the content.
@@ -718,11 +726,13 @@ class CtxMemoryProvider(MemoryProvider):
             )
             return False, ""
         tags = merge_tags(None, self._profile, hook)
+        extra: dict[str, Any] = {}
+        if metadata:
+            extra["metadata"] = metadata
+        if timeout is not None:
+            extra["timeout"] = timeout
         try:
-            if metadata:
-                data = client.store(category, title, content, sensitivity=sensitivity, tags=tags, metadata=metadata)
-            else:
-                data = client.store(category, title, content, sensitivity=sensitivity, tags=tags)
+            data = client.store(category, title, content, sensitivity=sensitivity, tags=tags, **extra)
         except CtxApiError as exc:
             if exc.code:
                 logger.warning(
@@ -852,8 +862,13 @@ class CtxMemoryProvider(MemoryProvider):
         connected = bool(self._active and self._client)
         # The chain archives evidence in every agent context (labelled, never dropped);
         # facts stay behind the cron/flush/subagent write gate.
-        chain_on = connected and bool(self._config.get("checkpoint_chain", True)) and api_version >= 2
+        chain_set = bool(self._config.get("checkpoint_chain", True))
+        chain_on = connected and chain_set and api_version >= 2
         facts_on = connected and self._write_enabled and bool(self._config.get("auto_compress_extract", True))
+        if require_checkpoint and connected and not chain_set:
+            # Facts are not a transcript checkpoint (#289): without the chain no word of the
+            # conversation would be in ctx, so a required checkpoint must not pass on them.
+            raise CtxCheckpointError(CHAIN_OFF_REQUIRED)
         if not (chain_on or facts_on):
             if require_checkpoint:
                 reason = (
@@ -946,7 +961,7 @@ class CtxMemoryProvider(MemoryProvider):
             deadline = max(deadline, float(getattr(receipt, "deadline", 0.0) or 0.0))
         if require_checkpoint:
             facts_text = self._checkpoint_facts_sync(
-                client, facts, sensitivity, len(source), deadline=deadline, ledger=ledger
+                client, facts, sensitivity, len(source), deadline=deadline, ledger=ledger, chain_stored=bool(chain_text)
             )
             return self._join_receipt(chain_text, facts_text)
         if not facts:
@@ -1064,19 +1079,49 @@ class CtxMemoryProvider(MemoryProvider):
         *,
         deadline: float | None = None,
         ledger: FactLedger | None = None,
+        chain_stored: bool = False,
     ) -> str:
-        """Required path: store every fact now, fail closed, return a receipt with block IDs."""
+        """Required path: store every fact now within the deadline (each store bounded by the time
+        left), return a receipt with block IDs.
+
+        Without a stored transcript chain a fact that is not stored fails closed. After one
+        (``chain_stored``, #289) the facts are secondary: the chain holds their wording, so a
+        refused or late fact is logged, its claim released for a later compaction, and the
+        receipt names how many were stored — the checkpoint stands.
+        """
         budget = float(self._config.get("checkpoint_budget_s", 20.0))
         if deadline is None:
             deadline = self._now() + budget
+        api_timeout = float(self._config.get("api_timeout") or 10.0)
         ids: list[str] = []
 
         def _release(rest: list[str]) -> None:
             if ledger is not None:
                 ledger.discard(k for f in rest for k in fact_keys(f))
 
+        def _left(i: int, reason: str) -> str:
+            _release(facts[i:])
+            logger.warning(
+                "CTX pre_compress facts: %d of %d stored, the rest not stored (profile=%s): %s; "
+                "the transcript chain holds their wording",
+                i,
+                len(facts),
+                self._profile,
+                reason,
+            )
+            stored = self._facts_receipt(ids, facts[:i]) if i else ""
+            note = (
+                f"CTX pre-compress facts: {i} of {len(facts)} stored; the rest was not stored ({reason}). "
+                "The transcript chain above holds their wording."
+            )
+            return f"{stored}\n{note}" if stored else note
+
         for i, fact in enumerate(facts):
-            if self._now() > deadline:
+            remaining = deadline - self._now()
+            if remaining <= 0:
+                reason = f"budget {budget:.0f}s exceeded"
+                if chain_stored:
+                    return _left(i, reason)
                 logger.warning(
                     "CTX pre_compress checkpoint budget exceeded (profile=%s, %.0fs, %d/%d stored)",
                     self._profile,
@@ -1095,11 +1140,14 @@ class CtxMemoryProvider(MemoryProvider):
                     derive_title(safe, prefix="fact: "),
                     safe,
                     sensitivity,
+                    timeout=max(0.5, min(api_timeout, remaining)),
                 )
                 if safe is not None
                 else (False, "")
             )
             if not ok:
+                if chain_stored:
+                    return _left(i, f"fact {i + 1}/{len(facts)} not stored")
                 logger.warning(
                     "CTX pre_compress checkpoint failed (profile=%s): fact %d/%d not stored",
                     self._profile,
@@ -1117,6 +1165,10 @@ class CtxMemoryProvider(MemoryProvider):
                 f"CTX pre-compress receipt (checkpoint API v2): 0 salient facts in {n_messages} evidence messages; "
                 "nothing to store."
             )
+        return self._facts_receipt(ids, facts)
+
+    def _facts_receipt(self, ids: list[str], facts: list[str]) -> str:
+        """Receipt of the stored facts: block IDs and the (redacted, shortened) facts."""
         lines = "\n".join(
             f"- [{bid}] {shorten(self._redacted(f) or '', 300)}" for bid, f in zip(ids, facts, strict=True)
         )

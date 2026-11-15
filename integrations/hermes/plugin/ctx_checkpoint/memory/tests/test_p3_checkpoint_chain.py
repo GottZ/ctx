@@ -792,6 +792,97 @@ def test_required_facts_after_a_paced_chain_share_its_extended_deadline(factory)
     assert "ctx checkpoint head:" in frame and "fact block(s)" in frame
 
 
+_FACT = "Der Proxy auf INFRA-WWW terminiert TLS fuer alle Dienste mit Traefik."
+_FACT_2 = "Die Datenbank auf INFRA-DB laeuft mit PostgreSQL 18 und pgvector fuer alle Vektorindizes."
+
+
+def _fact_stores(calls):
+    return [a for a in _stores(calls) if a["category"] != CHAIN_CAT]
+
+
+def test_a_refused_fact_after_a_durable_chain_keeps_the_required_checkpoint(factory, caplog):
+    # #289: the chain is the checkpoint; a refused fact store after it is reported, it does not
+    # fail the compaction (each retry would meet the same refusal), and its claim is released.
+    p, c = factory("sess-fact-refused", config={"auto_compress_extract": True}, agent_context="primary")
+
+    def refuse_facts(args):
+        if args["category"] != CHAIN_CAT:
+            raise CtxApiError("HTTP 429 [rate_limit]: max 100 writes", status=429, code="rate_limit")
+
+    c.store_hook = refuse_facts
+    with caplog.at_level(logging.WARNING):
+        frame = p.on_pre_compress([{"role": "assistant", "content": _FACT}], require_checkpoint=True)
+    assert "ctx checkpoint head:" in frame
+    assert "0 of 1" in frame and "not stored" in frame
+    assert len(_fact_stores(c.calls)) == 1
+    assert p._fact_ledger().keys() == []
+    assert any("not stored" in r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+
+
+def test_required_fact_stores_carry_the_remaining_budget_as_their_timeout(factory):
+    p, c = factory("sess-fact-timeout", config={"auto_compress_extract": True}, agent_context="primary")
+    p._config["checkpoint_budget_s"] = 30.0
+    frame = p.on_pre_compress([{"role": "assistant", "content": _FACT}], require_checkpoint=True)
+    facts = _fact_stores(c.calls)
+    assert "fact block(s)" in frame and facts
+    assert all(0 < a["timeout"] <= p._config["api_timeout"] for a in facts)
+
+
+def test_required_facts_past_the_deadline_are_left_and_the_chain_receipt_stands(factory):
+    p, c = factory("sess-fact-deadline", config={"auto_compress_extract": True}, agent_context="primary")
+    p._config["checkpoint_budget_s"] = 30.0
+    clock = _on_fake_clock(p)
+
+    def slow_fact(args):
+        if args["category"] != CHAIN_CAT:
+            clock.now += 31.0
+
+    c.store_hook = slow_fact
+    frame = p.on_pre_compress(
+        [
+            {"role": "assistant", "content": _FACT},
+            {"role": "user", "content": "weiter bitte mit dem naechsten Punkt"},
+            {"role": "assistant", "content": _FACT_2},
+        ],
+        require_checkpoint=True,
+    )
+    assert "ctx checkpoint head:" in frame
+    assert "1 of 2" in frame and "not stored" in frame
+    assert len(_fact_stores(c.calls)) == 1
+    assert len(p._fact_ledger().keys()) == 2  # the stored fact keeps its two keys, the left one is released
+
+
+@pytest.mark.parametrize(
+    "bad_metadata", [{"source": "hand-edit"}, {"latest_manifest_id": "not-a-uuid"}], ids=["no-id", "not-a-uuid"]
+)
+@pytest.mark.parametrize("cached", [False, True], ids=["new-process", "same-process"])
+def test_a_tagged_head_without_a_valid_manifest_is_replaced_and_reported(factory, caplog, bad_metadata, cached):
+    # #289: a head that keeps the tag but lost latest_manifest_id (a metadata update replaces the
+    # whole object) blocked every later checkpoint of its root. The writer now treats it as no
+    # usable head, publishes the new head over it, and says so.
+    p, c = factory("sess-badhead", agent_context="primary")
+    c.stateful = True
+    p.on_pre_compress([{"role": "user", "content": "erste Kompaktierung"}], require_checkpoint=True)
+    first_manifest = p._last_chain_receipt.manifest_id
+    head_title = next(t for t in c.blocks if t.startswith("Compaction checkpoint head"))
+    head_id = c.blocks[head_title]["id"]
+    c.blocks[head_title]["metadata"] = dict(bad_metadata)
+    if not cached:
+        p._last_manifest_by_root.clear()
+    notices = []
+    p._chain().notify = notices.append
+    with caplog.at_level(logging.WARNING):
+        frame = p.on_pre_compress([{"role": "user", "content": "zweite Kompaktierung"}], require_checkpoint=True)
+    receipt = p._last_chain_receipt
+    assert "ctx checkpoint head:" in frame
+    assert receipt.head_id == head_id and receipt.lookup == "head-invalid"
+    assert c.blocks[head_title]["metadata"]["latest_manifest_id"] == receipt.manifest_id
+    assert receipt.parent_manifest_id == (first_manifest if cached else None)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(head_id in m and "latest_manifest_id" in m for m in warnings)
+    assert len(notices) == 1 and head_id in notices[0]
+
+
 def test_permanent_rejection_is_not_retried(factory):
     p, c = factory("sess-rej", agent_context="primary")
 

@@ -414,7 +414,9 @@ def test_failed_store_releases_claim_for_retry(make_provider):
 
 
 def test_required_checkpoint_records_and_dedupes(make_provider):
-    p, client = make_provider(config={"checkpoint_chain": False, "facts_from_user": False})
+    # The chain runs as well (a required checkpoint refuses a disabled chain, #289); its writes
+    # are counted apart (FakeClient.chain_calls).
+    p, client = make_provider(config={"facts_from_user": False})
     msgs = _compactions()[0]
     r1 = p.on_pre_compress(msgs, require_checkpoint=True)
     n1 = len(_fact_titles(client))

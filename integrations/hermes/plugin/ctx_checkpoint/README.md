@@ -114,7 +114,10 @@ engine's own for other engine keys), the legacy `$HERMES_HOME/ctx.json` (for exa
 Settings → Plugins form `plugins.entries.ctx_checkpoint.settings` (other keys there
 are ignored). So a value saved in that form wins over the same key written by hand
 under `memory.ctx_checkpoint`, also under its engine name (`checkpoint_budget_s`,
-`checkpoint_max_parts`); the form itself shows only its own values. Every
+`checkpoint_max_parts`); the form itself shows only its own values. Within
+`memory.ctx_checkpoint` an engine name (`checkpoint_sensitivity`) wins over the plugin
+key next to it (`sensitivity`), whichever comes first, and the memory form writes its
+value to both. Every
 value is clamped to its range, whatever the source. The memory form shows a value
 that only `ctx.json` sets, and saving the form writes it to `memory.ctx_checkpoint`
 unchanged. `budget_s` and `max_parts` are

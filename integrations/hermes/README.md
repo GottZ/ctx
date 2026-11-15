@@ -73,7 +73,7 @@ is about the checkpoint layer.
 The plugin is a plain Hermes **user plugin** — it lives in
 `$HERMES_HOME/plugins/ctx_checkpoint/`, whether the catalog or the installer
 put it there, and works in best-effort mode on a completely stock Hermes.
-Plugin 0.11.0 declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
+Plugin 0.12.0 declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
 `delegate_task` children inherit the provider under the fail-closed gate; the
 catalog pin (0.6.2) still declares ≥ 0.20.4 (since upstream v2026.8.18,
 provider text is forwarded into the compaction summary).
@@ -538,6 +538,14 @@ and manifest are deliberately small so routine recall stays cheap.
   prose behind a credential name (`token = self.token`, `password: str`) are no longer
   overwritten. A transcript checkpointed again after the update redacts differently, so
   its digest and titles change and it starts a new chain next to the old one.
+- 0.12.0 (GottZ/ctx#289): under `compression.checkpoint_required`, `checkpoint_chain:
+  false` refuses the compaction instead of passing on facts alone (facts are not a
+  transcript checkpoint); the session start and `hermes memory status` warn about it. Facts
+  after a stored chain are bounded by the time the deadline leaves and no longer fail the
+  checkpoint: a refused or late fact is logged and left for a later compaction. A head that
+  keeps its tag but lost `latest_manifest_id` no longer blocks its root: the new chain's
+  head replaces it and the user is told. An engine name such as `checkpoint_sensitivity`
+  written next to the plugin key `sensitivity` wins in either order.
 
 ## Licensing
 
