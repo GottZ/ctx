@@ -301,8 +301,9 @@ func WriteLinks(ctx context.Context, pool interface {
 			// already spares it (deleteStaleLinks). Re-writing it would let the
 			// next guess turn a declared supersedes into a topical link — the
 			// reconcile then restored its target — or drop its raw_confidence
-			// under the query-side 0.7 gate. Such a link is left as it is and
-			// does not count as written.
+			// under the query-side 0.7 gate. Such a link is left as it is, and
+			// still counts as written: the cycle found it, so the back-off, the
+			// quality update and the replace sweep behave as before.
 			tag, err := tx.Exec(ctx,
 				`INSERT INTO context_dream_links (source_block_id, target_block_id, relationship, confidence, raw_confidence, dream_version, scope, metadata)
 				VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb)
@@ -323,7 +324,6 @@ func WriteLinks(ctx context.Context, pool interface {
 			}
 			if tag.RowsAffected() == 0 {
 				slog.Debug("dream: pinned link kept", "src", sourceID, "tgt", link.TargetID)
-				continue
 			}
 			written++
 			keptTargets = append(keptTargets, link.TargetID)

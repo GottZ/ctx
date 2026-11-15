@@ -29,16 +29,27 @@ import (
 )
 
 // SupersedesChainDepth bounds every walk along supersedes links that a
-// declaration runs: the cycle check and the search for the head of a chain.
-// A chain longer than this is refused as a possible cycle (fail-closed) — a
-// block corrected sixty-four times in a row is not a shape the walk has to
-// prove acyclic.
+// declaration runs: the cycle check (upwards from the written block: the
+// blocks that supersede it) and the search for the head of a chain. A written
+// block with this many superseders stacked above it is refused as a possible
+// cycle (fail-closed); a new block, or the head of a chain, has none, so the
+// bound never limits how long a chain of corrections can grow.
 const SupersedesChainDepth = 64
 
 // DeclaredSupersedesOrigin is the value of metadata.origin on a declared
 // supersedes link — the machine-readable mark that tells it apart from a link
 // dream wrote (metadata '{}'), whether or not an operator pinned that one.
 const DeclaredSupersedesOrigin = "declared"
+
+// SettledSupersedesSQL is the predicate, over a context_dream_links row aliased
+// `dl`, of a supersedes link that SETTLES its target: pinned (a writer's
+// declaration, or a dream guess an operator confirmed) and at the confidence
+// the reconcile needs to make a target a snapshot (supersedesSnapshotConfidence;
+// a declaration carries 1). The caller adds relationship = 'supersedes' and the
+// source's liveness and scope. One definition for the three readers that need
+// it: the query's settled set (dream.SupersedesMap), the already-superseded
+// conflict and the head of a chain (below).
+const SettledSupersedesSQL = `dl.pinned AND dl.confidence >= 0.7::real`
 
 // declaredSupersedesRationale is the human-readable rationale of a declared
 // link, shown next to it in dream-review.
@@ -56,8 +67,8 @@ var ErrSupersedesTarget = errors.New("store: supersedes target is not a block of
 // scope only — the key may write, and so read, every block they name.
 const (
 	// SupersedesCycle — the target already supersedes the written block,
-	// directly or through a chain (or the chain is deeper than
-	// SupersedesChainDepth).
+	// directly or through a chain, pinned or guessed (or the written block has
+	// SupersedesChainDepth or more superseders above it).
 	SupersedesCycle = "cycle"
 	// SupersedesSuperseded — the target is already superseded through a
 	// pinned link by another live block of its scope; Head names the current
@@ -255,9 +266,10 @@ func supersedesTargetAllowed(tgt supersedesTarget, types *blocktype.Set) error {
 }
 
 // supersedesStateAllows is the state half of the gates: the target is not
-// already superseded by ANOTHER live block of its scope through a pinned link
-// (declared, or a dream guess an operator confirmed), and declaring would
-// close no cycle. sourceID "" (no row yet) skips the cycle walk.
+// already settled by ANOTHER live block of its scope (SettledSupersedesSQL:
+// a declaration, or a dream guess an operator confirmed), and declaring would
+// close no cycle. sourceID "" (no row yet) skips the cycle walk — nothing
+// supersedes a block that does not exist.
 //
 // A target that only a dream GUESS supersedes (unpinned) is not a conflict:
 // the writer's statement outranks the guess, and declareSupersedes moves the
@@ -270,7 +282,7 @@ func supersedesStateAllows(ctx context.Context, tx pgx.Tx, sourceID, targetID, s
 		   JOIN context_blocks s ON s.id = dl.source_block_id
 		  WHERE dl.target_block_id = $1::uuid
 		    AND dl.relationship = 'supersedes'
-		    AND dl.pinned
+		    AND `+SettledSupersedesSQL+`
 		    AND dl.source_block_id IS DISTINCT FROM $2::uuid
 		    AND NOT s.is_archived
 		    AND s.scope = $3
@@ -292,22 +304,29 @@ func supersedesStateAllows(ctx context.Context, tx pgx.Tx, sourceID, targetID, s
 	}
 
 	// Cycle: does the target (directly or through a chain) supersede the
-	// source already? Every supersedes link counts, pinned or not.
+	// source already? The walk goes UP from the source — the blocks that
+	// supersede it, and theirs — so its length is the number of blocks above
+	// the source, not the length of the target's history: a correction of a
+	// long chain is as cheap as the first one, and a block without a row before
+	// this write (nothing supersedes it yet) walks nothing. Every supersedes
+	// link counts, pinned or not: a dream guess that the target supersedes the
+	// source refuses the declaration as a cycle too — the remedy is to delete
+	// that guess (manage dream-link-resolve … delete) and declare again.
 	var cycle, tooDeep bool
 	if err := tx.QueryRow(ctx,
-		`WITH RECURSIVE walk(id, depth) AS (
-		     SELECT dl.target_block_id, 1
+		`WITH RECURSIVE up(id, depth) AS (
+		     SELECT dl.source_block_id, 1
 		       FROM context_dream_links dl
-		      WHERE dl.source_block_id = $1::uuid AND dl.relationship = 'supersedes'
+		      WHERE dl.target_block_id = $1::uuid AND dl.relationship = 'supersedes'
 		   UNION
-		     SELECT dl.target_block_id, w.depth + 1
-		       FROM walk w
+		     SELECT dl.source_block_id, u.depth + 1
+		       FROM up u
 		       JOIN context_dream_links dl
-		         ON dl.source_block_id = w.id AND dl.relationship = 'supersedes'
-		      WHERE w.depth < $3
+		         ON dl.target_block_id = u.id AND dl.relationship = 'supersedes'
+		      WHERE u.depth < $3
 		 )
-		 SELECT COALESCE(bool_or(id = $2::uuid), false), COALESCE(max(depth), 0) >= $3 FROM walk`,
-		targetID, sourceID, SupersedesChainDepth).Scan(&cycle, &tooDeep); err != nil {
+		 SELECT COALESCE(bool_or(id = $2::uuid), false), COALESCE(max(depth), 0) >= $3 FROM up`,
+		sourceID, targetID, SupersedesChainDepth).Scan(&cycle, &tooDeep); err != nil {
 		return fmt.Errorf("store: supersedes: cycle walk: %w", err)
 	}
 	if cycle || tooDeep {
@@ -316,8 +335,8 @@ func supersedesStateAllows(ctx context.Context, tx pgx.Tx, sourceID, targetID, s
 	return nil
 }
 
-// supersedesHead follows pinned supersedes links from blockID to the block no
-// live pinned link of the same scope supersedes — the current head of the
+// supersedesHead follows settling supersedes links from blockID to the block
+// no live settling link of the same scope supersedes — the current head of the
 // chain. The walk stays in scope, so the head is a block of the write scope,
 // which the key may read by construction (writableBlockScopes ⊆ read scopes).
 func supersedesHead(ctx context.Context, tx pgx.Tx, blockID, scope string) (string, error) {
@@ -334,7 +353,7 @@ func supersedesHead(ctx context.Context, tx pgx.Tx, blockID, scope string) (stri
 		           JOIN context_blocks s ON s.id = dl.source_block_id
 		          WHERE dl.target_block_id = c.id
 		            AND dl.relationship = 'supersedes'
-		            AND dl.pinned
+		            AND `+SettledSupersedesSQL+`
 		            AND NOT s.is_archived
 		            AND s.scope = $2
 		          ORDER BY dl.created_at, dl.source_block_id

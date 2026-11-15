@@ -1376,8 +1376,10 @@ func UpdateQualityScore(ctx context.Context, pool *pgxpool.Pool, blockID string)
 // Issue #197: a PINNED link (declared by a writer on store, or a guess an
 // operator confirmed) is in the map whatever its raw_confidence — a pin is a
 // statement, not a guess the gate has to filter — and its target is in
-// settled when the pinned source is live and in the target's scope (the rule
-// the reconcile applies to the snapshot state, store.supersedesCandidates).
+// settled when the link settles it (store.SettledSupersedesSQL: pinned, at
+// the reconcile's snapshot confidence) and its source is live and in the
+// target's scope — the conditions under which the reconcile makes the target
+// a snapshot (store.supersedesCandidates).
 // A settled block is superseded whether or not its successor is retrieved;
 // the query drops it from a dateless answer before the presence rule runs.
 //
@@ -1414,7 +1416,7 @@ func SupersedesMap(ctx context.Context, pool *pgxpool.Pool, blockIDs []string) (
 
 // supersedesMapSQL is SupersedesMap's statement ($1 = the block ids).
 const supersedesMapSQL = `SELECT dl.source_block_id::text, dl.target_block_id::text,
-	       dl.pinned AND NOT src.is_archived AND src.scope = tgt.scope
+	       ` + store.SettledSupersedesSQL + ` AND NOT src.is_archived AND src.scope = tgt.scope
 	  FROM context_dream_links dl
 	  JOIN context_blocks src ON src.id = dl.source_block_id
 	  JOIN context_blocks tgt ON tgt.id = dl.target_block_id

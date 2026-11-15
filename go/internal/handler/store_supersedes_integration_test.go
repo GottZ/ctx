@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -330,8 +331,10 @@ func TestStoreSupersedesDeclared(t *testing.T) {
 	})
 
 	t.Run("f_conflict_already_superseded", func(t *testing.T) {
+		// The head of the chain, not the direct superseder: old ← mid ← head.
 		target := f.put(t, "sd-f-old", "f old", nil)
-		head := f.put(t, "sd-f-head", "f head", map[string]any{"supersedes": target})
+		mid := f.put(t, "sd-f-mid", "f mid", map[string]any{"supersedes": target})
+		head := f.put(t, "sd-f-head", "f head", map[string]any{"supersedes": mid})
 		status, raw, _ := f.rest(t, map[string]any{
 			"category": "sd", "title": "sd-f-late", "content": "f late", "supersedes": target,
 		})
@@ -357,6 +360,41 @@ func TestStoreSupersedesDeclared(t *testing.T) {
 		}
 		if st := f.state(t, b); st.content != "g b" {
 			t.Errorf("cycle refusal left the upsert applied: content %q", st.content)
+		}
+	})
+
+	t.Run("g2_conflict_longer_cycle", func(t *testing.T) {
+		// a ← b ← c declared; c then declares to supersede... nothing new:
+		// storing a (existing) with supersedes c closes a ← b ← c ← a.
+		a := f.put(t, "sd-g2-a", "g2 a", nil)
+		b := f.put(t, "sd-g2-b", "g2 b", map[string]any{"supersedes": a})
+		c := f.put(t, "sd-g2-c", "g2 c", map[string]any{"supersedes": b})
+		status, raw, _ := f.rest(t, map[string]any{
+			"category": "sd", "title": "sd-g2-a", "content": "g2 a rewritten", "supersedes": c,
+		})
+		if status != http.StatusConflict || !strings.Contains(string(raw), `"code":"supersedes_conflict"`) {
+			t.Fatalf("status %d body %s, want 409 supersedes_conflict", status, raw)
+		}
+		if st := f.state(t, a); st.content != "g2 a" {
+			t.Errorf("cycle refusal left the upsert applied: content %q", st.content)
+		}
+	})
+
+	t.Run("g3_long_chain_of_corrections", func(t *testing.T) {
+		// Every new correction supersedes the current head; the chain grows
+		// past store.SupersedesChainDepth without any refusal — the bound is
+		// on blocks ABOVE the written one, and a new block has none.
+		head := f.put(t, "sd-g3-0", "g3 version 0", nil)
+		for i := 1; i <= store.SupersedesChainDepth+6; i++ {
+			title := "sd-g3-" + strconv.Itoa(i)
+			status, raw, m := f.rest(t, map[string]any{
+				"category": "sd", "title": title, "content": "g3 version " + strconv.Itoa(i), "supersedes": head,
+			})
+			if status != http.StatusOK {
+				t.Fatalf("correction %d refused: status %d body %s", i, status, raw)
+			}
+			blk, _ := m["block"].(map[string]any)
+			head, _ = blk["id"].(string)
 		}
 	})
 

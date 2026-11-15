@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/config"
@@ -172,6 +173,31 @@ func TestQueryDeclaredSupersedes(t *testing.T) {
 	})
 }
 
+// sdGuardUntilChecked runs guard batches until every id carries a guard
+// verdict. The pick is FOR UPDATE SKIP LOCKED, and HandleStore's detached
+// temporal enrichment updates the row it just wrote, so a batch right after a
+// store can skip the block while that update holds its lock.
+func (f *sdFixture) guardUntilChecked(t *testing.T, ids ...string) {
+	t.Helper()
+	ctx := context.Background()
+	for attempt := 0; attempt < 100; attempt++ {
+		if _, err := guard.RunGuardBatch(ctx, f.pool, f.reg.Snapshot(), 100); err != nil {
+			t.Fatalf("guard batch: %v", err)
+		}
+		var pending int
+		if err := f.pool.QueryRow(ctx,
+			`SELECT count(*)::int FROM context_blocks
+			  WHERE id = ANY($1::uuid[]) AND (metadata->>'guard_checked_at') IS NULL`, ids).Scan(&pending); err != nil {
+			t.Fatalf("pending: %v", err)
+		}
+		if pending == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("blocks %v never got a guard verdict", ids)
+}
+
 func TestGuardDeclaredSupersedes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -187,9 +213,7 @@ func TestGuardDeclaredSupersedes(t *testing.T) {
 	if err := store.StoreEmbedding(ctx, f.pool, old, "test-embed", vec); err != nil {
 		t.Fatalf("embed old: %v", err)
 	}
-	if _, err := guard.RunGuardBatch(ctx, f.pool, f.reg.Snapshot(), 100); err != nil {
-		t.Fatalf("guard batch 1: %v", err)
-	}
+	f.guardUntilChecked(t, old)
 	if st := f.state(t, old); st.guardStatus != "clean" {
 		t.Fatalf("premise: original checked %q, want clean", st.guardStatus)
 	}
@@ -206,9 +230,7 @@ func TestGuardDeclaredSupersedes(t *testing.T) {
 		old, correction).Scan(&sim); err != nil || sim < 0.98 {
 		t.Fatalf("premise: similarity %.4f (err %v), want >= 0.98", sim, err)
 	}
-	if _, err := guard.RunGuardBatch(ctx, f.pool, f.reg.Snapshot(), 100); err != nil {
-		t.Fatalf("guard batch 2: %v", err)
-	}
+	f.guardUntilChecked(t, correction)
 
 	c := f.state(t, correction)
 	if c.archived || c.guardStatus == "archived_dup" || c.guardStatus == "possible_duplicate" {
@@ -219,6 +241,46 @@ func TestGuardDeclaredSupersedes(t *testing.T) {
 	}
 	if o := f.state(t, old); o.archived || o.lifecycle != "snapshot" || o.supersededBy != correction {
 		t.Errorf("original = %+v, want active snapshot superseded by %s", o, correction)
+	}
+}
+
+// TestGuardPinnedPairBothDirections: the checked block may be either end of a
+// pinned supersedes link. Here the TARGET stays knowledge (an operator pinned a
+// dream guess below the snapshot confidence) and is checked first; it must not
+// be archived against its successor, nor the successor against it.
+func TestGuardPinnedPairBothDirections(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := sdSetup(t)
+	ctx := context.Background()
+
+	vec := w023Embedding(5)
+	near := append([]float32(nil), vec...)
+	near[700] = 0.13
+
+	older := f.put(t, "sdgb-note", "the backup window opens at two", nil)
+	newer := f.put(t, "sdgb-note-v2", "the backup window opens at three", nil)
+	if n, err := dream.WriteLinks(ctx, f.pool, f.reg.Snapshot(), newer, sdHome, 1.0,
+		[]dream.Link{{TargetID: older, Relationship: "supersedes", Confidence: 0.5}}); err != nil || n != 1 {
+		t.Fatalf("dream link: n=%d err=%v", n, err)
+	}
+	if res, err := store.DreamLinkResolve(ctx, f.pool, newer, older, "supersedes", "confirm", "", []string{sdHome}); err != nil || res == nil || !res.Pinned {
+		t.Fatalf("confirm: %+v %v", res, err)
+	}
+	if st := f.state(t, older); st.lifecycle != "knowledge" {
+		t.Fatalf("premise: target %+v, want knowledge (below the snapshot confidence)", st)
+	}
+	for id, v := range map[string][]float32{older: vec, newer: near} {
+		if err := store.StoreEmbedding(ctx, f.pool, id, "test-embed", v); err != nil {
+			t.Fatalf("embed: %v", err)
+		}
+	}
+	f.guardUntilChecked(t, older, newer)
+	for _, id := range []string{older, newer} {
+		if st := f.state(t, id); st.archived || st.guardStatus != "clean" {
+			t.Errorf("block %s after the guard = %+v, want active and clean", id, st)
+		}
 	}
 }
 
