@@ -88,8 +88,8 @@ memory:
     category: compaction-checkpoints # ctx category for checkpoint blocks
     chunk_chars: 36000               # source part size, clamped to 1k..40k; a part also stays under ctx's 50 KB byte cap
     sensitivity: internal            # public | internal | personal | credentials
-    budget_s: 60                     # wall-clock budget per checkpoint, 5..600 s
-    max_parts: 80                    # part cap per checkpoint, 1..95 (ctx writes 100/60 s per key)
+    budget_s: 60                     # wall-clock budget per checkpoint, 5..600 s (+61 s per extra rate window)
+    max_parts: 80                    # parts per 60 s rate window, 1..95 (ctx writes 100/60 s per key); more are paced
 
 compression:
   checkpoint_required: false         # Hermes' own key: true = no compaction without a confirmed checkpoint
@@ -194,9 +194,24 @@ needs a passing connection test.
 
 Fail-closed means accepting a session halt (`BLOCKED_MISSING_PREREQUISITE`) while
 ctx is unreachable, instead of an unarchived compaction. The halt also triggers
-when a checkpoint would need more than `max_parts` source parts or does not
-finish inside `budget_s` (a rate-limited store is retried after 2/4/8 s while the
-budget allows; since 0.6.1 every single call over MCP is bounded by the remaining
+when a checkpoint does not finish inside its budget. Since 0.10.0 a checkpoint
+with more than `max_parts` parts is no longer refused: it writes `max_parts` parts
+(plus manifest and head) per minute and waits for the next minute with the rest,
+its budget grows by 61 s per extra minute, and Hermes shows a notice before it
+waits (by the part sizes measured for 0.7.0, a 1M-token conversation of Latin
+prose needs 130 to 230 parts at the default sizes: one or two extra minutes).
+Hermes gives a compaction about 300 s without progress by default
+(`compression.context_timeout_seconds`, raised to the auxiliary compression
+timeout) and then retries it; with the default `max_parts` and `budget_s` a
+paced checkpoint stays below that up to three extra minutes (326 parts), a
+smaller `max_parts` multiplies the minutes. A store that ctx refuses for its write limit (other
+writers on the same key) waits for a free slot — the first refusal adds one
+minute to the budget — at the latest until just before the deadline, and stops
+at the second refusal in a row: the third would open Hermes' circuit breaker
+for the ctx server. Every title of a checkpoint derives from the root session
+and the transcript's SHA-256, so a retry of the same transcript (Hermes' retry of a
+stalled compaction, `/compress` without new messages) meets the parts an earlier one
+stored and ctx confirms them without a write (since 0.6.1 every single call over MCP is bounded by the remaining
 budget too, so a hanging ctx no longer holds the compaction for Hermes' 300 s MCP
 timeout). A ctx key with `confirm_writes` is refused with that reason: ctx stages
 its writes instead of storing them, and the plugin never confirms them on your

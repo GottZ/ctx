@@ -473,15 +473,17 @@ def _failure_hint(cause: str, server: str) -> str:
             f"The ctx MCP server '{server}' is not connected in this Hermes: check it with "
             f"`hermes mcp test {server}`; a new session connects again."
         )
-    if "max_parts" in cause:
-        return "The conversation needs more parts than max_parts allows (Settings → Plugins → ctx_checkpoint)."
     if "budget" in cause and "exceeded" in cause:
         return (
-            "ctx did not finish within budget_s (Settings → Plugins → ctx_checkpoint); "
-            "`hermes ctx_checkpoint status` tests the connection."
+            "ctx did not finish within budget_s (Settings → Plugins → ctx_checkpoint); a retry of the same "
+            "conversation reuses the parts already saved. `hermes ctx_checkpoint status` tests the connection."
         )
     if "rate-limited" in cause:
-        return "ctx limits writes per key (100 per minute); the next compaction tries again."
+        return (
+            "ctx limits writes per key (100 per minute by default) and other writers on the key kept that "
+            "window full; the next compaction tries again, and a retry of the same conversation reuses the "
+            "parts already saved."
+        )
     if "confirm_writes" in cause:
         return "The ctx key stages its writes for confirmation (confirm_writes); use a key without it."
     return "`hermes ctx_checkpoint status` tests the connection."

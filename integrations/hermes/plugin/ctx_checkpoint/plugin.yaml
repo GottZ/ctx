@@ -1,5 +1,5 @@
 name: ctx_checkpoint
-version: 0.9.0
+version: 0.10.0
 description: "ctx memory provider: durable pre-compaction transcript checkpoints (fail-closed on request), and with memory: true recall, ctx_* agent tools, MEMORY.md/USER.md mirror, fact extraction and session digests — over Hermes' own MCP dispatch, no credentials of its own."
 # The first Hermes whose delegate_task children inherit the provider under
 # compression.checkpoint_required (before, every sub-agent compaction failed closed).
@@ -14,12 +14,12 @@ config_schema:
     type: number
     default: 60
     label: Time limit for saving one checkpoint (seconds)
-    description: "How long saving the conversation before a compaction may take, 5 to 600 seconds (values outside are moved to the nearest limit). When Hermes waits for the checkpoint (Settings -> Memory), a save that runs out of time stops that compaction."
+    description: "How long saving the conversation before a compaction may take, 5 to 600 seconds (values outside are moved to the nearest limit). A long conversation saved over several minutes (see Parts per minute) gets one more minute per extra minute it needs. When Hermes waits for the checkpoint (Settings -> Memory), a save that runs out of time stops that compaction; a retry of the same conversation reuses the parts already saved. Hermes itself gives a compaction about 300 seconds without progress by default."
   max_parts:
     type: int
     default: 80
-    label: Most parts one checkpoint may write
-    description: "The saved conversation is split into parts (Part size in Settings -> Memory). A conversation that needs more parts than this is not saved at all. 1 to 95: ctx accepts 100 writes per minute and key, and each checkpoint writes two more blocks."
+    label: Parts per minute one checkpoint writes
+    description: "The saved conversation is split into parts (Part size in Settings -> Memory). A checkpoint writes at most this many parts (plus two blocks) per minute; a longer conversation is saved over several minutes and the compaction waits for it. 1 to 95: ctx accepts 100 writes per minute and key, the rest stays free for other writes of the same key."
   auto_recall:
     type: bool
     default: true

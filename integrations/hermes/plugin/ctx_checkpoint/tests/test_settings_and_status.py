@@ -672,11 +672,11 @@ def test_the_latest_failure_stays_visible_after_another_session_succeeds(hermes_
     "cause, hint",
     [
         (
-            "ctx checkpoint needs 91 parts > max_parts 80 (write rate limit 100/60s per key); nothing written",
-            "max_parts",
+            "ctx checkpoint budget 60s exceeded before source part 83/91 (paced at 82 writes per 60s)",
+            "reuses the parts already saved",
         ),
         ("ctx checkpoint budget 60s exceeded before part 3 store", "budget_s"),
-        ("ctx checkpoint rate-limited during part 2 store (budget 60s)", "100 per minute"),
+        ("ctx checkpoint rate-limited during part 2 store (budget 60s; refused twice in a row)", "100 per minute"),
         ("ctx checkpoint store rejected [confirm_writes]: staged", "confirm_writes"),
         ("ctx checkpoint head search failed: boom", "hermes ctx_checkpoint status"),
     ],
