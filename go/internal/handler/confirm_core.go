@@ -88,11 +88,22 @@ type confirmOutcome struct {
 	BlockID string          // on confirmTOCTOUDrift (the update/archive target) / confirmBlockRefGone (the referenced block)
 	Err     error           // on confirmInfraErr / confirmExecErr
 	Reject  *writeReject    // on confirmClaimRejected / confirmExecRejected
+	// Supersedes is the block a confirmed op 'store' declared to supersede
+	// (issue #197), "" otherwise.
+	Supersedes string
 }
 
 // confirmIdentityTakenPrefix opens the confirmExecRejected wording on both
 // confirm surfaces: the reason follows verbatim from identityTakenReject.
 const confirmIdentityTakenPrefix = "confirmed update not executed, the stage token is consumed: "
+
+// confirmSupersedesPrefix opens the confirmExecRejected wording of a staged
+// store whose supersedes declaration the execute refused (issue #197): the
+// target changed between stage and confirm. The reason follows verbatim from
+// supersedesReject. Like #227, the gate runs on the statement after the
+// consume — a probe before it would keep the token for most changes but not
+// for one that lands in between.
+const confirmSupersedesPrefix = "confirmed store not executed, the stage token is consumed: "
 
 // confirmClaimReject re-runs the I7 claim gates over a staged payload. nil =
 // admissible, and nil for the blob ops, which carry no block claim.
@@ -294,6 +305,14 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 		return confirmOutcome{Kind: confirmOK, Op: cw.Op, Block: block}
 	}
 
+	return executeConfirmedStore(ctx, pool, blocktypes, ar, cw, pw.ID)
+}
+
+// executeConfirmedStore runs op 'store' AFTER the consume. Split out of
+// executeConfirm to keep that function under the cyclop budget once the
+// supersedes refusal (issue #197) and the type-trust re-check (#203) sat in
+// it side by side; the order of the refusals is unchanged.
+func executeConfirmedStore(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, ar *auth.AuthResult, cw store.CanonicalWrite, pendingID string) confirmOutcome {
 	// op 'store': execute over the SAME path as the direct store tools
 	// (upsert + classify + temporal). cw.Scope is the scope the stage gates
 	// RESOLVED — the key's home scope, or, since E-M4, the explicit scope the
@@ -310,16 +329,20 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 		Manual:   cw.SensitivityManual,
 		Detector: cw.SensitivityDetect,
 	}
-	block, err := store.UpsertBlock(ctx, pool, cw.Category, cw.Title, cw.Content, cw.Tags, cw.Metadata, cw.Scope, false, sens, cw.Type)
-	if err != nil {
-		slog.Error("confirm: confirmed write execute failed", "error", err, "pending_id", pw.ID)
-		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
-	}
-
 	var classifySet *blocktype.Set
 	if blocktypes != nil {
 		classifySet = blocktypes.SnapshotForRequest(ctx)
 	}
+	block, err := upsertStoreBlock(ctx, pool, classifySet, ar.ApiKeyID, cw.Category, cw.Title, cw.Content, cw.Tags, cw.Metadata,
+		cw.Scope, false, sens, cw.Type, cw.Supersedes)
+	if rej := supersedesReject(err); rej != nil {
+		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmSupersedesPrefix)}
+	}
+	if err != nil {
+		slog.Error("confirm: confirmed write execute failed", "error", err, "pending_id", pendingID)
+		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
+	}
+
 	if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
 		slog.Warn("confirm: auto-classify failed", "error", err, "block_id", block.ID)
 	}
@@ -327,7 +350,7 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 	_ = store.UpdateContentTimes(ctx, pool, block.ID, times)
 	_ = store.PopulateTemporal(ctx, pool, block.ID, times, block.CreatedAt)
 
-	return confirmOutcome{Kind: confirmOK, Op: cw.Op, Block: block}
+	return confirmOutcome{Kind: confirmOK, Op: cw.Op, Block: block, Supersedes: cw.Supersedes}
 }
 
 // confirmOpKnown is the op whitelist of the staged-write surface. An op the

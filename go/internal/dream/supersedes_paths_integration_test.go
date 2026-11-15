@@ -24,8 +24,9 @@ import (
 )
 
 // (a) The production archive path (store.DeleteBlock) leaves the supersedes
-// link in place — CleanupDanglingLinks is the step that sweeps it, and the
-// reconcile it runs is what returns the target to knowledge.
+// link in place — CleanupDanglingLinks is the step that sweeps it. The target
+// returns to knowledge already at the archive (issue #197), and the sweep's
+// reconcile keeps it there.
 func TestSupersedesReconcile_CleanupAfterArchivedSuperseder_RestoresTarget(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -37,8 +38,10 @@ func TestSupersedesReconcile_CleanupAfterArchivedSuperseder_RestoresTarget(t *te
 	if _, err := store.DeleteBlock(ctx, pool, icSourceID, []string{"private"}); err != nil {
 		t.Fatalf("archive superseder: %v", err)
 	}
-	// Archiving alone does not touch the target; the sweep does.
-	assertSnapshotState(t, pool, icTargetID, icSourceID)
+	// Since issue #197 the archive reconciles the target in its own
+	// transaction: with no other live superseder it is knowledge at once, not
+	// at the next daily sweep. The link stays until the sweep removes it.
+	assertKnowledgeState(t, pool, icTargetID)
 
 	if removed, err := dream.CleanupDanglingLinks(ctx, pool); err != nil || removed != 1 {
 		t.Fatalf("cleanup: removed=%d err=%v", removed, err)

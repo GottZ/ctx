@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -73,6 +74,18 @@ type storeRequest struct {
 	// archived, foreign-scope, malformed and self-referencing ids answer ONE
 	// class (422 unknown_parent), so the field is no existence oracle.
 	ParentID string `json:"parent_id,omitempty"`
+	// Supersedes declares that the written block replaces another one (issue
+	// #197): a block id in the SAME scope this write resolves to. The
+	// declaration is applied in the write's own transaction
+	// (store.UpsertBlockSupersedes): a pinned supersedes dream link, and the
+	// target becomes a snapshot with superseded_by = the written block, which a
+	// query without a date then no longer returns. Unknown, archived,
+	// foreign-scope, malformed and self-referencing ids answer ONE class (422
+	// unknown_supersedes); state conflicts answer 409 supersedes_conflict,
+	// chunk rows and non-linkable types 422 supersedes_not_allowed. Absent ⇒
+	// the write is exactly what it was before the field existed, and the
+	// block's earlier declarations stay.
+	Supersedes string `json:"supersedes,omitempty"`
 }
 
 // parentNotLinkableMsg is the ONE answer to every parent_id this route cannot
@@ -161,8 +174,12 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	// parent would be told "nothing to do" while the parent it asked for was
 	// never written. The condition costs one upsert on a payload that is
 	// otherwise a no-op and is the only way the field can mean what it says.
+	//
+	// A write that NAMES a block it supersedes skips the shortcut for the same
+	// reason: the declaration is part of the write, and a repeat save that adds
+	// one must not be answered "nothing to do".
 	var changed []string
-	if req.ParentID == "" {
+	if req.ParentID == "" && req.Supersedes == "" {
 		match, err := store.IdenticalContentMatch(ctx, h.pool, req.Content, res.WriteScope, req.Category, req.Title,
 			req.Tags, res.Metadata, res.Sens, req.Type)
 		if err != nil {
@@ -192,7 +209,8 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	// internally and must never self-stage.
 
 	// Execute upsert.
-	block, err := store.UpsertBlock(ctx, h.pool, req.Category, req.Title, req.Content, req.Tags, res.Metadata, res.WriteScope, res.ScopeExplicit, res.Sens, req.Type)
+	block, err := upsertStoreBlock(ctx, h.pool, classifySet, authResult.ApiKeyID, req.Category, req.Title, req.Content,
+		req.Tags, res.Metadata, res.WriteScope, res.ScopeExplicit, res.Sens, req.Type, req.Supersedes)
 	if err != nil {
 		// I7/S3: the conflicting row is a derivative. The refusal is decided in
 		// the store (atomic with the row lock) and answered here as 403.
@@ -241,6 +259,11 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"success": true,
 		"block":   block,
+	}
+	if req.Supersedes != "" {
+		// The block this write superseded — only on a write that named one, so
+		// every other answer keeps its shape.
+		resp["supersedes"] = strings.ToLower(req.Supersedes)
 	}
 	if changed != nil {
 		// The content was identical when checked, and these are the parts
@@ -487,8 +510,9 @@ func (h *StoreHandler) classifySet(ctx context.Context) *blocktype.Set {
 }
 
 // upsertFailureReject renders a failed store.UpsertBlock: the I7/S3 sentinel
-// becomes 403 provenance_protected, every other fault stays the opaque 500 and
-// is logged. Split out of HandleStore so the refusal and the fault do not share
+// becomes 403 provenance_protected, a refused supersedes declaration its own
+// class (supersedesReject, issue #197), every other fault stays the opaque 500
+// and is logged. Split out of HandleStore so the refusal and the fault do not share
 // a branch at the call site — and so the MCP arm can answer the identical class
 // through provenanceRejectOr.
 //
@@ -497,6 +521,9 @@ func (h *StoreHandler) classifySet(ctx context.Context) *blocktype.Set {
 // corpus scale a rejected write must not be able to fill the error log.
 func upsertFailureReject(err error, reqID string) *writeReject {
 	if rej := provenanceRejectOr(err, nil); rej != nil {
+		return rej
+	}
+	if rej := supersedesReject(err); rej != nil {
 		return rej
 	}
 	slog.Error("store: upsert error", "error", err, "request_id", reqID)

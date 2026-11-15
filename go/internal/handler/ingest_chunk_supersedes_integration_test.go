@@ -89,7 +89,7 @@ func TestIngestChunkSlotSurvivesDreamSupersedes(t *testing.T) {
 		if lc, ptr := i191Lifecycle(t, h, chunkID); lc != "chunk" || ptr != "" {
 			t.Errorf("chunk after supersedes: lifecycle_state=%q superseded_by=%q, want chunk and NULL", lc, ptr)
 		}
-		m, err := dream.SupersedesMap(ctx, pool, []string{chunkID})
+		m, _, err := dream.SupersedesMap(ctx, pool, []string{chunkID})
 		if err != nil {
 			t.Fatalf("SupersedesMap: %v", err)
 		}

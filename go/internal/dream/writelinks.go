@@ -97,6 +97,18 @@ func replaceStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTarg
 	return supersedesTargets, nil
 }
 
+// carriesSupersedes reports whether a batch may write a supersedes link: a
+// link of that class in its input. The input is the superset — coercion inside
+// WriteLinks (coerceCategoryFactual) only ever turns factual into topical.
+func carriesSupersedes(links []Link) bool {
+	for _, l := range links {
+		if l.Relationship == "supersedes" {
+			return true
+		}
+	}
+	return false
+}
+
 // errUnregisteredSourceType leaves the link transaction WITHOUT committing
 // for the one exit that is not an error to the caller: an unregistered
 // source type rejects the whole batch fail-closed and returns (0, nil).
@@ -163,6 +175,34 @@ func WriteLinks(ctx context.Context, pool interface {
 		Begin:  "dream: begin tx",
 		Commit: "dream: commit links",
 	}, func(tx pgx.Tx) error {
+		// Issue #197: the scope's supersedes lock comes first, before any row
+		// lock of the batch, in SHARED mode (store.ShareSupersedesScope): a
+		// store declaring a supersedes holds it exclusively and so never
+		// interleaves with a batch. The cycle walk below then reads every
+		// declaration committed before this batch, and a declaration after it
+		// waits and sees this batch's links in its own walk. Taken for every
+		// batch, not only for one carrying a supersedes link: a batch that
+		// meets a declared row through ON CONFLICT locks that link row, and a
+		// declaration of the same pair waiting for it while holding the source
+		// would close a lock cycle with the batch's next insert (FOR KEY SHARE
+		// on the source).
+		if err := store.ShareSupersedesScope(ctx, tx, sourceScope); err != nil {
+			return err
+		}
+		// A batch that may write a supersedes guess also takes the scope's
+		// guess lock, exclusively and second: two such batches each walk
+		// committed links only, so side by side they could each miss the
+		// other's guess and close a cycle together. The input decides, before
+		// any row lock: the per-link coerce below never turns another class
+		// into supersedes, so a batch without a supersedes candidate cannot
+		// write one (it can still delete or re-classify one, which closes no
+		// cycle).
+		if carriesSupersedes(links) {
+			if err := store.LockSupersedesGuesses(ctx, tx, sourceScope); err != nil {
+				return err
+			}
+		}
+
 		// Fetch source block metadata for structural checks. updated_at is no
 		// longer consulted (Welle 46: supersedes uses created_at, causal uses
 		// created_at) — kept in the SELECT for column-stability but discarded.
@@ -254,9 +294,28 @@ func WriteLinks(ctx context.Context, pool interface {
 			// natural-language "A supersedes B" requires A to be the authoritative
 			// replacement (newer). Migration 043 swapped the persisted 15 inverted
 			// records; this filter prevents new ones.
+			//
+			// Issue #197: a guess that closes a cycle with links already there
+			// is dropped — the target superseding this source directly or
+			// through a chain, typically one a writer declared against
+			// created_at (declarations have no direction rule). The walk is
+			// store.SupersedesWouldCycle, the declaration's own, under the
+			// scope lock and the guess lock taken at the top of the
+			// transaction, so it sees every declaration and every guess of the
+			// scope committed before it; it runs only for supersedes
+			// candidates and climbs only the blocks above the source.
 			if link.Relationship == "supersedes" {
 				var sim float64
 				_ = tx.QueryRow(ctx, `SELECT similarity($1, $2)`, srcTitle, targetTitle).Scan(&sim)
+				cycle, err := store.SupersedesWouldCycle(ctx, tx, sourceID, link.TargetID)
+				if err != nil {
+					slog.Warn("dream: supersedes cycle walk failed", "src", sourceID, "tgt", link.TargetID, "error", err)
+					break // TX is in failed state after PG error — cannot continue.
+				}
+				if cycle {
+					slog.Debug("dream: supersedes rejected", "src", sourceID, "tgt", link.TargetID, "reason", "closes a supersedes cycle")
+					continue
+				}
 				if ok, reason := acceptSupersedes(srcCategory, targetCategory, srcCreatedAt, targetCreatedAt, sim); !ok {
 					slog.Debug("dream: supersedes rejected", "src", sourceID, "tgt", link.TargetID, "reason", reason, "similarity", sim)
 					continue
@@ -279,7 +338,15 @@ func WriteLinks(ctx context.Context, pool interface {
 				weightedConfidence = 0.5
 			}
 
-			_, err = tx.Exec(ctx,
+			// A PINNED row is not re-classified or re-scored (issue #197): it is
+			// a writer's declaration or an operator's verdict, and the sweep
+			// already spares it (deleteStaleLinks). Re-writing it would let the
+			// next guess turn a declared supersedes into a topical link — the
+			// reconcile then restored its target — or drop its raw_confidence
+			// under the query-side 0.7 gate. Such a link is left as it is, and
+			// still counts as written: the cycle found it, so the back-off, the
+			// quality update and the replace sweep behave as before.
+			tag, err := tx.Exec(ctx,
 				`INSERT INTO context_dream_links (source_block_id, target_block_id, relationship, confidence, raw_confidence, dream_version, scope, metadata)
 				VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb)
 				ON CONFLICT (source_block_id, target_block_id) DO UPDATE SET
@@ -288,13 +355,17 @@ func WriteLinks(ctx context.Context, pool interface {
 					raw_confidence = EXCLUDED.raw_confidence,
 					dream_version = EXCLUDED.dream_version,
 					metadata = EXCLUDED.metadata,
-					created_at = now()`,
+					created_at = now()
+				WHERE NOT context_dream_links.pinned`,
 				sourceID, link.TargetID, link.Relationship, weightedConfidence, link.Confidence, Version, sourceScope,
 				`{}`,
 			)
 			if err != nil {
 				slog.Warn("dream: write link failed", "source", sourceID, "target", link.TargetID, "error", err)
 				break // TX is in failed state after PG error — cannot continue.
+			}
+			if tag.RowsAffected() == 0 {
+				slog.Debug("dream: pinned link kept", "src", sourceID, "tgt", link.TargetID)
 			}
 			written++
 			keptTargets = append(keptTargets, link.TargetID)

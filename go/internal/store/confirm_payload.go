@@ -86,6 +86,12 @@ type CanonicalWrite struct {
 	// canonicalization written before this wave keeps its exact bytes and every
 	// payload_hash a client already holds stays confirmable.
 	ContextBlockID string `json:"context_block_id,omitempty"`
+
+	// Supersedes (op 'store', issue #197): the block the staged write
+	// declares to supersede, as the staging call named it. LAST field and
+	// omitempty, so every canonicalization written before it keeps its exact
+	// bytes and every payload_hash a client already holds stays confirmable.
+	Supersedes string `json:"supersedes,omitempty"`
 }
 
 // OpBlobStore is the third staged op (W02-8), beside 'store' and 'update'.
