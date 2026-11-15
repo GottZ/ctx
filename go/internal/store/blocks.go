@@ -1668,8 +1668,18 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 					reconcile = append(reconcile, t)
 				}
 			}
-			if _, err := ReconcileSupersedesTargets(ctx, tx, reconcile, ""); err != nil {
+			restored, err := ReconcileSupersedesTargets(ctx, tx, reconcile, "")
+			if err != nil {
 				return fmt.Errorf("store: update block: %w", err)
+			}
+			// The moved block may itself be a target the move took away from
+			// its last superseder: the reconcile changed its lifecycle after
+			// the update returned it, so the answer reads it again.
+			if slices.Contains(restored, b.ID) {
+				if err := tx.QueryRow(ctx,
+					`SELECT lifecycle_state FROM context_blocks WHERE id = $1::uuid`, b.ID).Scan(&b.LifecycleState); err != nil {
+					return fmt.Errorf("store: update block: re-read lifecycle: %w", err)
+				}
 			}
 		}
 		if needsReEmbed {

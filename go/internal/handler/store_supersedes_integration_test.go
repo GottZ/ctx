@@ -683,6 +683,41 @@ func TestSupersedesSuccessorLifecycle(t *testing.T) {
 			}
 		})
 
+		t.Run("scope_move_target_answer_"+kind, func(t *testing.T) {
+			// The TARGET moves away from its only superseder: the reconcile
+			// returns it to knowledge, and the update's answer says so.
+			target, _ := pair(t, "sd-lt-"+kind, declared)
+			_, plain, err := store.CreateApiKey(ctx, f.pool, "sd-lt-key-"+kind, sdHome, []string{sdHome, "sd-lt-dest"}, store.DefaultTenantID)
+			if err != nil {
+				t.Fatalf("create key: %v", err)
+			}
+			if _, err := f.pool.Exec(ctx, `UPDATE context_api_keys SET write_scopes = '{sd-lt-dest}' WHERE label = $1`, "sd-lt-key-"+kind); err != nil {
+				t.Fatalf("write scopes: %v", err)
+			}
+			ar, err := auth.Authenticate(ctx, f.pool, plain)
+			if err != nil || !ar.IsValid {
+				t.Fatalf("authenticate: %v", err)
+			}
+			raw, _ := json.Marshal(map[string]any{"action": "update", "id": target, "data": map[string]any{"scope": "sd-lt-dest"}})
+			req := httptest.NewRequest(http.MethodPost, "/api/manage", bytes.NewReader(raw)).
+				WithContext(context.WithValue(ctx, authResultKey, ar))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			NewManageHandler(f.pool, f.cfg, nil, nil, nil, nil, nil, f.reg).HandleManage(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("manage update: status %d body %s", rec.Code, rec.Body.String())
+			}
+			var resp map[string]any
+			_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+			blk, _ := resp["block"].(map[string]any)
+			if got, _ := blk["lifecycle_state"].(string); got != "knowledge" {
+				t.Errorf("update answer lifecycle_state = %q, want knowledge (body %s)", got, rec.Body.String())
+			}
+			if st := f.state(t, target); st.lifecycle != "knowledge" {
+				t.Errorf("moved target = %+v, want knowledge", st)
+			}
+		})
+
 		t.Run("scope_move_"+kind, func(t *testing.T) {
 			target, src := pair(t, "sd-lm-"+kind, declared)
 			dest := "sd-move-dest"
