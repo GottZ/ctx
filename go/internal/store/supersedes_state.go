@@ -265,8 +265,48 @@ func lockSupersedesSource(ctx context.Context, tx pgx.Tx, blockID string, writeS
 	if err != nil {
 		return nil, fmt.Errorf("store: lock supersedes source: %w", err)
 	}
-	return slices.DeleteFunc(locked, func(id string) bool { return id == blockID }), nil
+	if !slices.Contains(locked, blockID) {
+		return nil, nil // not a block the caller may write: nothing to reconcile
+	}
+	targets := slices.DeleteFunc(locked, func(id string) bool { return id == blockID })
+
+	// The target list above comes from that statement's snapshot, taken
+	// BEFORE it waited for the block's lock. A declaration holds its source
+	// from its first statement to its commit, so one that committed while we
+	// waited is invisible there. Now the block is held, no declaration from it
+	// can commit any more, and this statement's fresh snapshot sees every one
+	// that did; its targets are locked as well (in id order among themselves).
+	// The common case — nobody held the block — finds nothing new.
+	rows, err = tx.Query(ctx, supersedesTargetsOfSQL, blockID)
+	if err != nil {
+		return nil, fmt.Errorf("store: lock supersedes source: re-read: %w", err)
+	}
+	current, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("store: lock supersedes source: re-read: %w", err)
+	}
+	var late []string
+	for _, id := range current {
+		if !slices.Contains(targets, id) {
+			late = append(late, id)
+		}
+	}
+	if len(late) > 0 {
+		if _, err := tx.Exec(ctx,
+			`SELECT 1 FROM context_blocks WHERE id = ANY($1::uuid[]) ORDER BY id FOR NO KEY UPDATE`, late); err != nil {
+			return nil, fmt.Errorf("store: lock supersedes source: late targets: %w", err)
+		}
+		targets = append(targets, late...)
+	}
+	return targets, nil
 }
+
+// supersedesTargetsOfSQL reads the targets of a block's supersedes links
+// ($1 = the block), in id order; idx_dream_links_supersedes serves it.
+const supersedesTargetsOfSQL = `SELECT target_block_id::text
+	  FROM context_dream_links
+	 WHERE source_block_id = $1::uuid AND relationship = 'supersedes'
+	 ORDER BY target_block_id`
 
 // lockSupersedesSourceSQL is lockSupersedesSource's statement ($1 = the block,
 // $2 = the caller's write scopes). Only a block inside the write scopes

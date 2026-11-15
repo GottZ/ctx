@@ -53,10 +53,17 @@ func TestLockSupersedesSourceCostDoesNotGrowWithTheCorpus(t *testing.T) {
 				t.Fatalf("analyze: %v", err)
 			}
 		}
+		// The lock pass is two statements: the ordered lock, then the re-read
+		// of the targets under the held lock. Both are pinned, summed.
 		args := []any{src, []string{"private"}}
 		costs[i][0] = testdb.ExplainGeneric(t, pool, store.LockSupersedesSourceSQLForTest, args...)
 		costs[i][1] = testdb.ExplainCustom(t, pool, store.LockSupersedesSourceSQLForTest, args...)
-		t.Logf("n=%d generic=%d custom=%d buffers", n, costs[i][0].Buffers, costs[i][1].Buffers)
+		reGeneric := testdb.ExplainGeneric(t, pool, store.SupersedesTargetsOfSQLForTest, src)
+		reCustom := testdb.ExplainCustom(t, pool, store.SupersedesTargetsOfSQLForTest, src)
+		costs[i][0].Buffers += reGeneric.Buffers
+		costs[i][1].Buffers += reCustom.Buffers
+		t.Logf("n=%d generic=%d (re-read %d) custom=%d (re-read %d) buffers", n,
+			costs[i][0].Buffers, reGeneric.Buffers, costs[i][1].Buffers, reCustom.Buffers)
 	}
 	for p, name := range []string{"generic", "custom"} {
 		small, large := costs[0][p].Buffers, costs[1][p].Buffers

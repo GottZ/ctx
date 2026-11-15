@@ -4,3 +4,6 @@ package store
 // pin in package store_test (internal/testdb imports internal/store) plans the
 // statement itself. Production never reads it.
 const LockSupersedesSourceSQLForTest = lockSupersedesSourceSQL
+
+// SupersedesTargetsOfSQLForTest is the re-read that follows the lock pass.
+const SupersedesTargetsOfSQLForTest = supersedesTargetsOfSQL
