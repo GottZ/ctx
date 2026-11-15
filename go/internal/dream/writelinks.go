@@ -164,16 +164,18 @@ func WriteLinks(ctx context.Context, pool interface {
 		Commit: "dream: commit links",
 	}, func(tx pgx.Tx) error {
 		// Issue #197: the scope's supersedes lock comes first, before any row
-		// lock of the batch. A store declaring a supersedes takes it first as
-		// well, so the two never interleave: the reverse-pin probe below then
-		// reads every declaration committed before this batch, and a
-		// declaration after it waits and sees this batch's links in its own
-		// cycle check. Taken for every batch, not only for one carrying a
-		// supersedes link: a batch that meets a declared row through ON
-		// CONFLICT locks that link row, and a declaration of the same pair
-		// waiting for it while holding the source would otherwise close a
-		// lock cycle with the batch's next insert (FOR KEY SHARE on the source).
-		if err := store.LockSupersedesScope(ctx, tx, sourceScope); err != nil {
+		// lock of the batch, in SHARED mode (store.ShareSupersedesScope):
+		// dream batches do not wait for each other, while a store declaring a
+		// supersedes holds it exclusively and so never interleaves with a
+		// batch. The cycle walk below then reads every declaration committed
+		// before this batch, and a declaration after it waits and sees this
+		// batch's links in its own walk. Taken for every batch, not only for
+		// one carrying a supersedes link: a batch that meets a declared row
+		// through ON CONFLICT locks that link row, and a declaration of the
+		// same pair waiting for it while holding the source would close a
+		// lock cycle with the batch's next insert (FOR KEY SHARE on the
+		// source).
+		if err := store.ShareSupersedesScope(ctx, tx, sourceScope); err != nil {
 			return err
 		}
 
@@ -269,23 +271,24 @@ func WriteLinks(ctx context.Context, pool interface {
 			// replacement (newer). Migration 043 swapped the persisted 15 inverted
 			// records; this filter prevents new ones.
 			//
-			// Issue #197: a PINNED supersedes link in the other direction (the
-			// target supersedes this source — declared by a writer, or a guess an
-			// operator confirmed) settles the pair; the guess would close a
-			// two-block cycle and turn the authoritative block into a snapshot.
-			// The probe rides on the similarity statement: one round trip, as
-			// before.
+			// Issue #197: a guess that closes a cycle with links already there
+			// is dropped — the target superseding this source directly or
+			// through a chain, typically one a writer declared against
+			// created_at (declarations have no direction rule). The walk is
+			// store.SupersedesWouldCycle, the declaration's own, under the
+			// scope lock taken at the top of the transaction; it runs only for
+			// supersedes candidates and climbs only the blocks above the
+			// source.
 			if link.Relationship == "supersedes" {
 				var sim float64
-				var reversePinned bool
-				_ = tx.QueryRow(ctx,
-					`SELECT similarity($1, $2),
-					        EXISTS (SELECT 1 FROM context_dream_links
-					                 WHERE source_block_id = $3::uuid AND target_block_id = $4::uuid
-					                   AND relationship = 'supersedes' AND pinned)`,
-					srcTitle, targetTitle, link.TargetID, sourceID).Scan(&sim, &reversePinned)
-				if reversePinned {
-					slog.Debug("dream: supersedes rejected", "src", sourceID, "tgt", link.TargetID, "reason", "reverse of a pinned supersedes")
+				_ = tx.QueryRow(ctx, `SELECT similarity($1, $2)`, srcTitle, targetTitle).Scan(&sim)
+				cycle, err := store.SupersedesWouldCycle(ctx, tx, sourceID, link.TargetID)
+				if err != nil {
+					slog.Warn("dream: supersedes cycle walk failed", "src", sourceID, "tgt", link.TargetID, "error", err)
+					break // TX is in failed state after PG error — cannot continue.
+				}
+				if cycle {
+					slog.Debug("dream: supersedes rejected", "src", sourceID, "tgt", link.TargetID, "reason", "closes a supersedes cycle")
 					continue
 				}
 				if ok, reason := acceptSupersedes(srcCategory, targetCategory, srcCreatedAt, targetCreatedAt, sim); !ok {

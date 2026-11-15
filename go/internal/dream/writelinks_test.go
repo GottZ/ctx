@@ -62,7 +62,7 @@ func expectTargetFetch(mock pgxmock.PgxPoolIface, tid, scope string, archived bo
 }
 
 // expectScopeLock matches the per-scope supersedes lock WriteLinks takes
-// first in its transaction (store.LockSupersedesScope, issue #197).
+// first in its transaction (store.ShareSupersedesScope, issue #197).
 func expectScopeLock(mock pgxmock.PgxPoolIface) {
 	mock.ExpectExec(`pg_advisory_xact_lock`).
 		WithArgs(pgxmock.AnyArg()).

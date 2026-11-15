@@ -102,25 +102,35 @@ func (e *SupersedesConflictError) Error() string {
 	}
 }
 
-// LockSupersedesScope serialises, per scope, the transactions that can create
-// supersedes links: a store declaring one (UpsertBlockSupersedes,
-// CheckSupersedesDeclarable) and a dream link batch (dream.WriteLinks). Their
-// cycle checks read the links of OTHER blocks — the superseders above the
-// written block — which no row lock of theirs covers, so without this two of
-// them can each check before the other commits and together close a cycle.
-// It must be the FIRST lock its transaction takes: every holder then waits
-// for it holding nothing, and the row locks after it cannot form a cycle with
-// another holder's. Transaction-scoped; released at commit or rollback.
+// LockSupersedesScope and ShareSupersedesScope are the per-scope supersedes
+// lock, a transaction advisory lock in two modes. A store declaring a
+// supersedes (UpsertBlockSupersedes, CheckSupersedesDeclarable) takes it
+// EXCLUSIVE; a dream link batch (dream.WriteLinks) takes it SHARED. The cycle
+// checks of both read links of OTHER blocks — the superseders above the
+// written block — which no row lock of theirs covers, so without the lock a
+// declaration and a dream guess could each check before the other commits and
+// together close a cycle; and a declaration waiting for a link row a dream
+// batch holds, while holding that batch's source, would deadlock with the
+// batch's next insert. Exclusive against shared means a declaration never
+// interleaves with a dream batch or another declaration of its scope, while
+// dream batches keep running side by side (their own lock discipline,
+// ReconcileSupersedesTargets, is unchanged). The lock must be the FIRST its
+// transaction takes: every holder then waits for it holding nothing.
+// Transaction-scoped; released at commit or rollback.
 func LockSupersedesScope(ctx context.Context, tx pgx.Tx, scope string) error {
-	if _, err := tx.Exec(ctx, supersedesScopeLockSQL, scope); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('ctx:supersedes:' || $1::text))`, scope); err != nil {
 		return fmt.Errorf("store: supersedes scope lock: %w", err)
 	}
 	return nil
 }
 
-// supersedesScopeLockSQL is LockSupersedesScope's statement ($1 = the scope),
-// in the key form the other per-key advisory locks of this package use.
-const supersedesScopeLockSQL = `SELECT pg_advisory_xact_lock(hashtext('ctx:supersedes:' || $1::text))`
+// ShareSupersedesScope is LockSupersedesScope in shared mode (same key).
+func ShareSupersedesScope(ctx context.Context, tx pgx.Tx, scope string) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtext('ctx:supersedes:' || $1::text))`, scope); err != nil {
+		return fmt.Errorf("store: supersedes scope lock (shared): %w", err)
+	}
+	return nil
+}
 
 // SupersedesDeclaration is the `supersedes` of one store.
 type SupersedesDeclaration struct {
@@ -163,10 +173,11 @@ type supersedesTarget struct {
 // so taking the target first and then waiting for the source would close a
 // cycle with it. Every write on context_blocks fires mark_guard_dirty, which
 // holds the context_guard_state row until commit, so no row lock may be
-// waited for after the upsert (ReconcileSupersedesTargets). Declarations and
-// dream batches of one scope run one after the other (the scope lock), so a
-// declaration and a dream batch writing links from the same block, or two
-// stores declaring each other, wait instead of deadlocking.
+// waited for after the upsert (ReconcileSupersedesTargets). A declaration
+// holds the scope lock exclusively, so it runs alone against the dream
+// batches and the other declarations of its scope: a dream batch writing
+// links from the same block, or two stores declaring each other, wait instead
+// of deadlocking.
 func UpsertBlockSupersedes(ctx context.Context, pool *pgxpool.Pool, category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite, typeName string, decl SupersedesDeclaration) (*Block, error) {
 	u := prepareUpsert(category, title, content, tags, metadata, scope, scopeExplicit, sens, typeName)
 	var b *Block
@@ -335,17 +346,33 @@ func supersedesStateAllows(ctx context.Context, tx pgx.Tx, sourceID, targetID, s
 	}
 
 	// Cycle: does the target (directly or through a chain) supersede the
-	// source already? The walk goes UP from the source — the blocks that
-	// supersede it, and theirs — so its length is the number of blocks above
-	// the source, not the length of the target's history: a correction of a
-	// long chain is as cheap as the first one, and a block without a row before
-	// this write (nothing supersedes it yet) walks nothing. Every supersedes
-	// link counts, pinned or not: a dream guess that the target supersedes the
-	// source refuses the declaration as a cycle too — the remedy is to delete
-	// that guess (`ctx dream resolve <target> <source> supersedes delete`) and
-	// declare again.
+	// source already? Every supersedes link counts, pinned or not: a dream
+	// guess that the target supersedes the source refuses the declaration as
+	// a cycle too — the remedy is to delete that guess (`ctx dream resolve
+	// <target> <source> supersedes delete`) and declare again.
+	cycle, err := SupersedesWouldCycle(ctx, tx, sourceID, targetID)
+	if err != nil {
+		return err
+	}
+	if cycle {
+		return &SupersedesConflictError{Kind: SupersedesCycle, Target: targetID}
+	}
+	return nil
+}
+
+// SupersedesWouldCycle reports whether a supersedes link source → target
+// would close a cycle: whether the target already supersedes the source,
+// directly or through a chain of supersedes links of any kind. The walk goes
+// UP from the source — the blocks that supersede it, and theirs — so its
+// length is the number of blocks above the source: a new block, or the head
+// of a chain, walks nothing, and a correction of a long chain is as cheap as
+// the first. A source with SupersedesChainDepth or more superseders above it
+// is reported as a cycle (fail-closed). One walk for both writers of
+// supersedes links: a declaration (supersedesStateAllows) and a dream guess
+// (dream.WriteLinks); both run it under LockSupersedesScope.
+func SupersedesWouldCycle(ctx context.Context, q pgxdb.Rower, sourceID, targetID string) (bool, error) {
 	var cycle, tooDeep bool
-	if err := tx.QueryRow(ctx,
+	if err := q.QueryRow(ctx,
 		`WITH RECURSIVE up(id, depth) AS (
 		     SELECT dl.source_block_id, 1
 		       FROM context_dream_links dl
@@ -359,12 +386,9 @@ func supersedesStateAllows(ctx context.Context, tx pgx.Tx, sourceID, targetID, s
 		 )
 		 SELECT COALESCE(bool_or(id = $2::uuid), false), COALESCE(max(depth), 0) >= $3 FROM up`,
 		sourceID, targetID, SupersedesChainDepth).Scan(&cycle, &tooDeep); err != nil {
-		return fmt.Errorf("store: supersedes: cycle walk: %w", err)
+		return false, fmt.Errorf("store: supersedes: cycle walk: %w", err)
 	}
-	if cycle || tooDeep {
-		return &SupersedesConflictError{Kind: SupersedesCycle, Target: targetID}
-	}
-	return nil
+	return cycle || tooDeep, nil
 }
 
 // supersedesHead follows settling supersedes links from blockID to the block

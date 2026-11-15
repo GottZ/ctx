@@ -4,8 +4,9 @@
 // a cycle with writer-declared (pinned) supersedes links.
 //
 //   - TestDreamSupersedesWaitsForADeclaration: a declaration "B supersedes A"
-//     is in flight (a second transaction holds the scope's supersedes lock and
-//     B, as UpsertBlockSupersedes does, and has written its link) while dream
+//     is in flight (a second transaction holds the scope's supersedes lock
+//     exclusively and B, as UpsertBlockSupersedes does, and has written its
+//     link) while dream
 //     writes the guess "A supersedes B". The guess must see the declaration
 //     once it commits and be dropped; checked before it, the pair would end as
 //     a two-block cycle with B a snapshot of A.
