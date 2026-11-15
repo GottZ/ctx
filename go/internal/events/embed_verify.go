@@ -36,7 +36,7 @@ import (
 //     stage-4 table pass (Ein-Pass-Doktrin: embedding_next is unindexed
 //     fp32 TOAST, ~41 GB at 10M — one sequential pass total, never two).
 //  3. Index-Bau — CONCURRENTLY HNSW on embedding_next (canonical live
-//     parameters m=16/ef_construction=128, Mig 115) + the three sister
+//     parameters m=16/ef_construction=128, Mig 115) + the sister
 //     partial indexes of the Attnum class (§4.8). Executed LAST: a CIC over
 //     a bestand that stage 1/2 already proved defective would be hours of
 //     wasted I/O at 10M.
@@ -94,18 +94,28 @@ const (
 		WITH (m = 16, ef_construction = 128)`
 )
 
-// verifySisterIndexes are the _next twins of the three partial indexes
+// verifySisterIndexes are the _next twins of the five partial indexes
 // whose predicates bind to the physical embedding column (§4.7 Stufe 3 /
 // §4.8 Attnum class): after the cutover's column RENAME the old exemplars
 // follow embedding_old, so without these pre-built sisters the backfill
 // peek, the dream queue scan and the guard pending scan would all
 // seq-scan at 10M (and `cleanup` would silently drop the only carriers).
-// The swap tx (W04-6) renames them canonically.
+// The swap tx (W04-6) renames them canonically. The two pick indexes of
+// migration 171 joined the class (issue #239).
 var verifySisterIndexes = []struct{ name, ddl string }{
 	// Twin of idx_embedding_pending (migration 109): the regular backfill
 	// pending predicate on the post-cutover serving column.
 	{"idx_embedding_pending_next", `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_embedding_pending_next
 		ON context_blocks (created_at)
+		WHERE embedding_next IS NULL AND NOT is_archived`},
+	// Twins of idx_embedding_pending_scope_sens and idx_embedding_pending_sens
+	// (migration 171): the class ranges of the backfill pick on the
+	// post-cutover serving column.
+	{"idx_embedding_pending_scope_sens_next", `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_embedding_pending_scope_sens_next
+		ON context_blocks (scope, sensitivity, created_at, id)
+		WHERE embedding_next IS NULL AND NOT is_archived`},
+	{"idx_embedding_pending_sens_next", `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_embedding_pending_sens_next
+		ON context_blocks (sensitivity, created_at, id)
 		WHERE embedding_next IS NULL AND NOT is_archived`},
 	// Twin of idx_dream_pending (016_dream.sql:11-13), embedding →
 	// embedding_next.
@@ -725,7 +735,7 @@ func (s *Scheduler) guardThresholdBounds() (dup, review float64) {
 	return dup, review
 }
 
-// verifyEnsureIndexes is Stufe 3: HNSW + the three sister partial indexes,
+// verifyEnsureIndexes is Stufe 3: HNSW + the sister partial indexes,
 // all CONCURRENTLY with INVALID recovery (shared ensureConcurrentIndexValid
 // helper — the W04-4 CIC lifecycle doctrine). A VALID exemplar is reused
 // (Reused=true), which is what makes verify re-runs idempotent: a

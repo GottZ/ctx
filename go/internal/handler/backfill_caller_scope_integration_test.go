@@ -70,7 +70,10 @@ const (
 // bfsPickCounter is a pgx QueryTracer that counts the pick statements of the
 // inline backfill (the one statement of the query path that reads
 // "embedding IS NULL" with "LIMIT 1"), and among them the ones bound to the
-// caller's read scopes. Same seam as guardQueryCounter.
+// caller's read scopes: since issue #239 both ends run one statement text
+// (store.PendingPickSQL), and the pick bound to the caller's scopes is the one
+// without Shared branches ($1 empty; this fixture's pool has a shared embed
+// backend, so every unbound pick has them). Same seam as guardQueryCounter.
 type bfsPickCounter struct {
 	picks  atomic.Int64
 	scoped atomic.Int64
@@ -79,7 +82,7 @@ type bfsPickCounter struct {
 func (c *bfsPickCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	if strings.Contains(data.SQL, "embedding IS NULL") && strings.Contains(data.SQL, "LIMIT 1") {
 		c.picks.Add(1)
-		if strings.Contains(data.SQL, "AND scope = ANY(") {
+		if shared, ok := data.Args[0].([]string); ok && len(data.Args) == 5 && len(shared) == 0 {
 			c.scoped.Add(1)
 		}
 	}

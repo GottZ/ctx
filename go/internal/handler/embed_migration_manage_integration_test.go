@@ -99,7 +99,7 @@ func emcSeedBackend(t *testing.T, pool *pgxpool.Pool) {
 	}
 }
 
-// emcNextIndexes builds the four _next indexes (production DDL minus CONCURRENTLY
+// emcNextIndexes builds the _next indexes (production DDL minus CONCURRENTLY
 // — a test container has no concurrent writers; the names are what confirm's swap
 // renames). Confirm refuses (ErrConfirmNextIndexNotReady) without a valid HNSW.
 func emcNextIndexes(t *testing.T, pool *pgxpool.Pool) {
@@ -110,6 +110,10 @@ func emcNextIndexes(t *testing.T, pool *pgxpool.Pool) {
 		   WITH (m = 16, ef_construction = 128)`,
 		`CREATE INDEX IF NOT EXISTS idx_embedding_pending_next
 		   ON context_blocks (created_at) WHERE embedding_next IS NULL AND NOT is_archived`,
+		`CREATE INDEX IF NOT EXISTS idx_embedding_pending_scope_sens_next
+		   ON context_blocks (scope, sensitivity, created_at, id) WHERE embedding_next IS NULL AND NOT is_archived`,
+		`CREATE INDEX IF NOT EXISTS idx_embedding_pending_sens_next
+		   ON context_blocks (sensitivity, created_at, id) WHERE embedding_next IS NULL AND NOT is_archived`,
 		`CREATE INDEX IF NOT EXISTS idx_dream_pending_next
 		   ON context_blocks (dream_checked_at ASC NULLS FIRST, quality_score ASC)
 		   WHERE NOT is_archived AND embedding_next IS NOT NULL`,
