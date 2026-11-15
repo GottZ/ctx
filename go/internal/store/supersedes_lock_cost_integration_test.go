@@ -55,7 +55,7 @@ func TestLockSupersedesSourceCostDoesNotGrowWithTheCorpus(t *testing.T) {
 		}
 		// The lock pass is two statements: the ordered lock, then the re-read
 		// of the targets under the held lock. Both are pinned, summed.
-		args := []any{src, []string{"private"}}
+		args := []any{src, "private"}
 		costs[i][0] = testdb.ExplainGeneric(t, pool, store.LockSupersedesSourceSQLForTest, args...)
 		costs[i][1] = testdb.ExplainCustom(t, pool, store.LockSupersedesSourceSQLForTest, args...)
 		reGeneric := testdb.ExplainGeneric(t, pool, store.SupersedesTargetsOfSQLForTest, src)

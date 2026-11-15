@@ -22,9 +22,240 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
+
+// TestSupersedesArchiveOfABlockMovedDuringItsLockPass: the archive reads the
+// block's scope, takes that scope's supersedes locks and waits in its lock
+// pass for the block, which a second transaction is moving to another scope.
+// Once the move commits the block is no longer in the locked scope: the lock
+// pass does not lock it there, the archive runs again, takes the new scope's
+// locks, archives the block and reconciles its target.
+func TestSupersedesArchiveOfABlockMovedDuringItsLockPass(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+	reg := blocktype.NewRegistry()
+	reg.Boot(ctx, pool)
+	mk := func(title string) string {
+		b, err := store.UpsertBlock(ctx, pool, "race", title, title+" content", nil, nil, "private", true,
+			store.SensitivityWrite{}, "")
+		if err != nil {
+			t.Fatalf("seed %s: %v", title, err)
+		}
+		return b.ID
+	}
+	tgt := mk("moved-tgt")
+	src := mk("moved-src")
+	if _, err := store.UpsertBlockSupersedes(ctx, pool, "race", "moved-src", "moved-src content", nil, nil, "private", true,
+		store.SensitivityWrite{}, "", store.SupersedesDeclaration{TargetID: tgt, APIKeyID: "race", Types: reg.Snapshot()}); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+
+	mover, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = mover.Rollback(ctx) }()
+	if _, err := mover.Exec(ctx, `UPDATE context_blocks SET scope = 'moved-away' WHERE id = $1::uuid`, src); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse dsn: %v", err)
+	}
+	cfg.MaxConns = 1
+	cfg.ConnConfig.RuntimeParams["application_name"] = "moved-archive"
+	actor, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("actor pool: %v", err)
+	}
+	defer actor.Close()
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.DeleteBlock(ctx, actor, src, []string{"private", "moved-away"})
+		done <- err
+	}()
+	for deadline := time.Now().Add(15 * time.Second); ; {
+		var waiting int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*)::int FROM pg_stat_activity
+			  WHERE application_name = 'moved-archive' AND datname = current_database()
+			    AND wait_event_type = 'Lock' AND query LIKE '%FOR NO KEY UPDATE OF b%'`).Scan(&waiting); err != nil {
+			t.Fatalf("pg_stat_activity: %v", err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the archive never waited in its lock pass")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := mover.Commit(ctx); err != nil {
+		t.Fatalf("commit move: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("archive: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatalf("archive did not finish")
+	}
+
+	var archived bool
+	var scope string
+	if err := pool.QueryRow(ctx, `SELECT is_archived, scope FROM context_blocks WHERE id = $1::uuid`, src).Scan(&archived, &scope); err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	if !archived || scope != "moved-away" {
+		t.Errorf("source after the archive: archived=%v scope=%s, want archived in moved-away", archived, scope)
+	}
+	var lifecycle string
+	if err := pool.QueryRow(ctx, `SELECT lifecycle_state FROM context_blocks WHERE id = $1::uuid`, tgt).Scan(&lifecycle); err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if lifecycle != "knowledge" {
+		t.Errorf("target after the archive of its moved successor = %s, want knowledge", lifecycle)
+	}
+}
+
+// TestSupersedesRedeclareAndArchiveShareOneLockOrder: S already supersedes T
+// and T sorts before S. A repeat declaration from S takes the scope lock,
+// then S (the write's identity) and then T (the target); an archive or scope
+// move of S locks its block and targets in id order — T, then S. Without a
+// common first lock the declaration holds S while the archive holds T and
+// waits for S, and the declaration's lock on T closes the cycle (40P01,
+// PostgreSQL aborts one of them). With it, the archive waits for the scope
+// lock holding nothing, the declaration runs through, and the archive
+// follows and reconciles T.
+//
+// The declaration is driven by hand on its own connection with the
+// production scope lock and the statements of store.lockSupersedesPair: the
+// store function cannot be paused between its two row locks, which is the
+// interleaving under test.
+func TestSupersedesRedeclareAndArchiveShareOneLockOrder(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	for _, op := range []string{"archive", "scope_move"} {
+		t.Run(op, func(t *testing.T) {
+			pool, dsn := testdb.SetupTestDBWithDSN(t)
+			ctx := context.Background()
+			reg := blocktype.NewRegistry()
+			reg.Boot(ctx, pool)
+			mk := func(title string) string {
+				b, err := store.UpsertBlock(ctx, pool, "race", title, title+" content", nil, nil, "private", true,
+					store.SensitivityWrite{}, "")
+				if err != nil {
+					t.Fatalf("seed %s: %v", title, err)
+				}
+				return b.ID
+			}
+			// The target is the block with the smaller id.
+			tgt, src, srcTitle := mk("order-1"), mk("order-2"), "order-2"
+			if tgt > src {
+				tgt, src, srcTitle = src, tgt, "order-1"
+			}
+			if _, err := store.UpsertBlockSupersedes(ctx, pool, "race", srcTitle, srcTitle+" content", nil, nil, "private", true,
+				store.SensitivityWrite{}, "", store.SupersedesDeclaration{TargetID: tgt, APIKeyID: "race", Types: reg.Snapshot()}); err != nil {
+				t.Fatalf("declare: %v", err)
+			}
+
+			// The repeat declaration, up to and including its identity lock.
+			decl, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			defer func() { _ = decl.Rollback(ctx) }()
+			if err := store.LockSupersedesScope(ctx, decl, "private"); err != nil {
+				t.Fatalf("scope lock: %v", err)
+			}
+			if _, err := decl.Exec(ctx,
+				`SELECT id FROM context_blocks WHERE category = $1 AND title = $2 AND scope = $3 AND NOT is_archived FOR UPDATE`,
+				"race", srcTitle, "private"); err != nil {
+				t.Fatalf("identity lock: %v", err)
+			}
+
+			cfg, err := pgxpool.ParseConfig(dsn)
+			if err != nil {
+				t.Fatalf("parse dsn: %v", err)
+			}
+			cfg.MaxConns = 1
+			cfg.ConnConfig.RuntimeParams["application_name"] = "t3-" + op
+			actor, err := pgxpool.NewWithConfig(ctx, cfg)
+			if err != nil {
+				t.Fatalf("actor pool: %v", err)
+			}
+			defer actor.Close()
+			done := make(chan error, 1)
+			go func() {
+				var err error
+				if op == "archive" {
+					_, err = store.DeleteBlock(ctx, actor, src, []string{"private"})
+				} else {
+					dest := "order-dest"
+					_, _, err = store.UpdateBlock(ctx, actor, src, store.UpdateBlockData{Scope: &dest}, []string{"private", dest})
+				}
+				done <- err
+			}()
+			for deadline := time.Now().Add(15 * time.Second); ; {
+				var waiting int
+				if err := pool.QueryRow(ctx,
+					`SELECT count(*)::int FROM pg_stat_activity
+					  WHERE application_name = $1 AND datname = current_database() AND wait_event_type = 'Lock'`,
+					"t3-"+op).Scan(&waiting); err != nil {
+					t.Fatalf("pg_stat_activity: %v", err)
+				}
+				if waiting > 0 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("the %s never waited for the declaration", op)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+
+			// The declaration's target lock, then its commit.
+			if _, err := decl.Exec(ctx,
+				`SELECT 1 FROM context_blocks WHERE id = $1::uuid AND scope = $2 AND NOT is_archived FOR NO KEY UPDATE`,
+				tgt, "private"); err != nil {
+				t.Errorf("declaration target lock: %v", err)
+			}
+			if err := decl.Commit(ctx); err != nil {
+				t.Errorf("commit declaration: %v", err)
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("%s: %v", op, err)
+				}
+			case <-time.After(20 * time.Second):
+				t.Fatalf("%s did not finish", op)
+			}
+			if t.Failed() {
+				return
+			}
+			var lifecycle string
+			var by *string
+			if err := pool.QueryRow(ctx,
+				`SELECT lifecycle_state, superseded_by::text FROM context_blocks WHERE id = $1::uuid`, tgt).Scan(&lifecycle, &by); err != nil {
+				t.Fatalf("read target: %v", err)
+			}
+			if lifecycle != "knowledge" || by != nil {
+				t.Errorf("target after the %s = %s superseded_by %v, want knowledge without pointer", op, lifecycle, by)
+			}
+		})
+	}
+}
 
 func TestSupersedesSourceLockReadsTargetsAfterTheLock(t *testing.T) {
 	if testing.Short() {

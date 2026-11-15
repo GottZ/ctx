@@ -105,17 +105,20 @@ func (e *SupersedesConflictError) Error() string {
 // LockSupersedesScope and ShareSupersedesScope are the per-scope supersedes
 // lock, a transaction advisory lock in two modes. A store declaring a
 // supersedes (UpsertBlockSupersedes, CheckSupersedesDeclarable) takes it
-// EXCLUSIVE; a dream link batch (dream.WriteLinks) takes it SHARED. The cycle
-// checks of both read links of OTHER blocks — the superseders above the
-// written block — which no row lock of theirs covers, so without the lock a
-// declaration and a dream guess could each check before the other commits and
-// together close a cycle; and a declaration waiting for a link row a dream
-// batch holds, while holding that batch's source, would deadlock with the
-// batch's next insert. Exclusive against shared means a declaration never
-// interleaves with a dream batch or another declaration of its scope, while
-// dream batches keep running side by side (dream batches with a supersedes
-// guess are ordered among themselves by the second lock,
-// LockSupersedesGuesses; the row-lock discipline of
+// EXCLUSIVE; a dream link batch (dream.WriteLinks) and a write that can end
+// the supersedes of a block — an archive or a scope move (lockSupersedesSource)
+// — take it SHARED. The cycle checks of a declaration and of a dream guess read
+// links of OTHER blocks — the superseders above the written block — which no
+// row lock of theirs covers, so without the lock the two could each check
+// before the other commits and together close a cycle; and a declaration
+// waiting for a link row a dream batch holds, while holding that batch's
+// source, would deadlock with the batch's next insert. A declaration locks its
+// source and then its target, an archive or a scope move locks a block and its
+// targets in id order; on one pair the two orders disagree, and the lock keeps
+// them from ever interleaving. Exclusive against shared means a declaration
+// runs alone against all of them; the shared holders run side by side (dream
+// batches with a supersedes guess are ordered among themselves by the second
+// lock, LockSupersedesGuesses; the row-lock discipline of
 // ReconcileSupersedesTargets is unchanged).
 //
 // The lock is the FIRST its transaction takes, and the guess lock, where a
@@ -145,12 +148,22 @@ func ShareSupersedesScope(ctx context.Context, tx pgx.Tx, scope string) error {
 // The lock orders them: a batch's walk sees every guess an earlier batch of the
 // scope committed. A batch without a supersedes candidate does not take it —
 // it can only delete or re-classify supersedes links, which closes no cycle.
+// An archive or a scope move takes it SHARED (shareSupersedesGuesses), so no
+// guess adds a supersedes link from the block while it reads them.
 //
 // A key space apart from LockSupersedesScope's (the two-key form of the
 // advisory lock functions), so the two locks of one scope never share a key.
 func LockSupersedesGuesses(ctx context.Context, tx pgx.Tx, scope string) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('ctx:supersedes-guess'), hashtext($1::text))`, scope); err != nil {
 		return fmt.Errorf("store: supersedes guess lock: %w", err)
+	}
+	return nil
+}
+
+// shareSupersedesGuesses is LockSupersedesGuesses in shared mode (same key).
+func shareSupersedesGuesses(ctx context.Context, tx pgx.Tx, scope string) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtext('ctx:supersedes-guess'), hashtext($1::text))`, scope); err != nil {
+		return fmt.Errorf("store: supersedes guess lock (shared): %w", err)
 	}
 	return nil
 }
@@ -198,9 +211,10 @@ type supersedesTarget struct {
 // holds the context_guard_state row until commit, so no row lock may be
 // waited for after the upsert (ReconcileSupersedesTargets). A declaration
 // holds the scope lock exclusively, so it runs alone against the dream
-// batches and the other declarations of its scope: a dream batch writing
-// links from the same block, or two stores declaring each other, wait instead
-// of deadlocking.
+// batches, the archives and scope moves and the other declarations of its
+// scope: a dream batch writing links from the same block, an archive of the
+// source that locks the target first (id order), or two stores declaring each
+// other, wait instead of deadlocking.
 func UpsertBlockSupersedes(ctx context.Context, pool *pgxpool.Pool, category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite, typeName string, decl SupersedesDeclaration) (*Block, error) {
 	u := prepareUpsert(category, title, content, tags, metadata, scope, scopeExplicit, sens, typeName)
 	var b *Block

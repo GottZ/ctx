@@ -1264,7 +1264,7 @@ func readBlockByID(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, 
 // the daily link sweep (issue #197).
 func DeleteBlock(ctx context.Context, pool *pgxpool.Pool, id string, writeScopes []string) (*Block, error) {
 	b := &Block{}
-	err := pgxdb.Write(ctx, pool, pgxdb.At("store: delete block"), func(tx pgx.Tx) error {
+	err := writeSupersedesSource(ctx, pool, pgxdb.At("store: delete block"), func(tx pgx.Tx) error {
 		targets, err := lockSupersedesSource(ctx, tx, id, writeScopes)
 		if err != nil {
 			return err
@@ -1628,7 +1628,11 @@ func updateBlockMissReason(ctx context.Context, pool *pgxpool.Pool, id string, w
 func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query string, args []any, moveScopes []string) (found, needsReEmbed bool, err error) {
 	var swept int
 	scopeMove := moveScopes != nil
-	if err := pgxdb.Write(ctx, pool, pgxdb.At("store: update block"), func(tx pgx.Tx) error {
+	write := pgxdb.Write
+	if scopeMove {
+		write = writeSupersedesSource // lockSupersedesSource may ask for a re-run
+	}
+	if err := write(ctx, pool, pgxdb.At("store: update block"), func(tx pgx.Tx) error {
 		var supersedesTargets []string
 		if scopeMove {
 			var err error
