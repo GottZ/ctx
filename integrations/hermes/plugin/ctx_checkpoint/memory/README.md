@@ -17,7 +17,7 @@ this page documents the engine: every setting, the tools, the CLI and the intern
 | | |
 |---|---|
 | **Best for** | Self-hosted, agent-shared knowledge; semantic recall across sessions; multi-agent visibility (shared scope) |
-| **Requires** | A running CTX server (Go daemon + PostgreSQL) and an API key (`CTX_BASE_URL`, `CTX_KEY`) |
+| **Requires** | A running CTX server (Go daemon + PostgreSQL) and an API key — by default reached through Hermes' MCP server entry (`mcp_servers.ctx`, key in `.env` as `CTX_API_KEY`); with `transport: rest` through `CTX_BASE_URL` / `CTX_KEY` |
 | **Data storage** | Your own CTX server |
 | **Dependencies** | None beyond the Python standard library |
 | **License** | MPL-2.0 |
@@ -79,7 +79,8 @@ quality ("memory drift"). `sync_turn` only counts exchanges for the digest trigg
 `hermes plugins install ctx_checkpoint`, then the Desktop/Dashboard memory form or
 `hermes memory setup ctx_checkpoint`; answer `on` to "Memory features" to enable this
 engine. See the [plugin README](../README.md#install). Verify with `hermes memory status`
-and `hermes ctx_checkpoint status`.
+or `hermes ctx_checkpoint status`: on the default MCP transport both run a connection test and
+show the server entry, the operating mode and the last checkpoint.
 
 The catalog version includes this engine (since 0.6.2); the current catalog pin is
 listed under [Versions](https://github.com/GottZ/ctx/blob/root/integrations/hermes/README.md#versions).
@@ -91,8 +92,12 @@ For code newer than the catalog pin, install from a ctx checkout with
 All settings live under `memory.ctx_checkpoint` in Hermes' `config.yaml`, by the key names
 below (the plugin's own `category`/`sensitivity`/`chunk_chars`/`budget_s`/`max_parts` map
 onto `checkpoint_category`/`checkpoint_sensitivity`/`checkpoint_chunk_chars`/
-`checkpoint_budget_s`/`checkpoint_max_parts`). A legacy `$HERMES_HOME/ctx.json` is still
-read with lower priority. With `memory: false` recall, capture and fact extraction are
+`checkpoint_budget_s`/`checkpoint_max_parts`). The keys of the Settings → Plugins form
+(`budget_s`, `max_parts`, `auto_recall`, `auto_memory_mirror`, `auto_compress_extract`,
+`auto_session_digest`) are read from `plugins.entries.ctx_checkpoint.settings` when set there,
+over `memory.ctx_checkpoint`. A legacy `$HERMES_HOME/ctx.json` is still read with lower
+priority than both, in every mode (also with `memory: false`, so a `checkpoint_mode` or
+`checkpoint_*` key there applies to the checkpoint). With `memory: false` recall, capture and fact extraction are
 forced off. For `transport: rest`, `CTX_BASE_URL` / `CTX_KEY` from the environment (the
 profile's `.env`) or `rest_base_url` in the section name the server. Out-of-range values
 are clamped, unknown values fall back to the default.
@@ -165,7 +170,7 @@ code on failure). `status` always works; the other commands need `transport: res
 CLI process has no MCP dispatch — over MCP, use the ctx tools inside a session or the ctx CLI.
 
 ```bash
-hermes ctx_checkpoint status                                  # profile, connection, ctx.json settings
+hermes ctx_checkpoint status                                  # profile, connection test, mode, last checkpoint, ctx.json settings
 hermes ctx_checkpoint sync                                    # push MEMORY.md/USER.md entries to CTX
 hermes ctx_checkpoint query "what port does X use?"           # [--synthesize] [--all-types]
 hermes ctx_checkpoint store infrastructure "INFRA-GIT" "Host 192.0.2.10, user hermes" --sensitivity internal --tag git
@@ -336,8 +341,10 @@ serve several profiles without mixing their stores.
 
 ## Notes & pitfalls
 
-- **Startup validation:** `initialize` calls `/api/whoami`. If CTX is unreachable at that
-  moment the provider stays disabled for the session (restart Hermes once CTX is back).
+- **Startup validation (`transport: rest`):** `initialize` calls `/api/whoami`. If CTX is
+  unreachable at that moment the provider stays disabled for the session (restart Hermes once
+  CTX is back). Over MCP the provider makes no call at startup (Hermes connects the server
+  entry itself); setup and the status run a connection test instead.
   Every other failure degrades gracefully (log + no-op) — a down CTX never crashes the agent.
 - **Embedding backfill:** right after stores, `/api/query` may time out until embeddings
   are ready — `/api/search` and `/api/store` work immediately; recall falls back to
@@ -360,8 +367,9 @@ HERMES_REPO=/path/to/hermes-agent python -m pytest -p no:cacheprovider \
     integrations/hermes/plugin/ctx_checkpoint/memory/tests
 ```
 
-The ctx repository's CI does not run these tests (it has no Hermes checkout); run them
-locally before a change lands. Lint and format (configuration in `ruff.toml` inside the
+The ctx repository's CI runs these tests, the umbrella suite, ruff and `hermes plugins
+validate` in `.github/workflows/hermes-ctx-checkpoint.yml` against a pinned hermes-agent
+checkout; run them locally before a change lands. Lint and format (configuration in `ruff.toml` inside the
 plugin directory — deliberately no `pyproject.toml`, see CHANGELOG 1.7.1):
 
 ```bash

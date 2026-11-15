@@ -22,9 +22,15 @@ profile's ``.env``), which enables the CLI's read/write commands. Recall is the 
 ``/api/query`` retrieval without the synthesis step on both transports (over MCP with ctx
 v5.36.0 or newer; an older server gets the lexical ``search``).
 
-Setup runs through Hermes' own surfaces: the Dashboard/Desktop memory form reads
-``get_config_schema()`` and writes through ``save_config()``; ``hermes memory setup
-ctx_checkpoint`` hands over to ``post_setup()``. Compaction thresholds stay Hermes' own.
+Setup runs through Hermes' own surfaces, all built from the field table in
+``config_schema.py``: Hermes Desktop's memory form (Settings → Memory) reads that file's
+``CONFIG_SCHEMA`` and goes through ``read_config_fields()`` / ``write_config_fields()``; the web
+dashboard's memory form reads ``get_config_schema()`` and writes through ``save_config()``;
+``hermes memory setup ctx_checkpoint`` hands over to ``post_setup()``. The Settings → Plugins
+section (``config_schema`` in ``plugin.yaml``) holds the keys the memory form does not carry.
+Saving tests the connection (``memory/status.py``), every checkpoint leaves its outcome in
+``ctx_state/``, and ``hermes memory status`` reports both. Compaction thresholds stay Hermes'
+own; ``compression.checkpoint_required`` is written only on an explicit choice.
 """
 
 from __future__ import annotations
@@ -37,11 +43,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .config_schema import FIELDS as _FORM_FIELDS
 from .memory import checkpoint as _cp
+from .memory import status as _st
 from .memory.client import CtxApiError
 from .memory.config import (
+    UMBRELLA_KEY_MAP,
     overlay_from_umbrella,
     umbrella_memory_enabled,
+    umbrella_section,
     umbrella_transport,
 )
 from .memory.mcp_client import McpClient
@@ -119,6 +129,9 @@ _SETUP_STORED_KEYS = ("mcp_server", "category", "sensitivity", "chunk_chars", "m
 # compact first.
 _HOST_HYGIENE_THRESHOLD = 0.85
 _hygiene_warning_emitted = False
+# The checkpoint_mode warning is logged once per (profile home, text) and process: a gateway
+# builds a provider per message. The session notice (warning callback) is sent each time.
+_mode_warnings_logged: set[tuple[str, str]] = set()
 
 SKILL_NAME = "ctx-memory"
 _SKILL_PATH = Path(__file__).resolve().parent / "skills" / SKILL_NAME / "SKILL.md"
@@ -164,42 +177,70 @@ def _as_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def _clean_category(value: Any) -> str:
+    return str(value or _DEFAULT_CATEGORY).strip() or _DEFAULT_CATEGORY
+
+
+def _clean_sensitivity(value: Any) -> str:
+    sensitivity = str(value or _DEFAULT_SENSITIVITY).strip().lower()
+    return sensitivity if sensitivity in _SENSITIVITY_CHOICES else _DEFAULT_SENSITIVITY
+
+
+# The checkpoint settings of the section (``UMBRELLA_KEY_MAP``): their normalizer, and the
+# plugin's default, which sits UNDER ctx.json (``_config_base``) — it is never put into the
+# section, so a value only ctx.json sets is not overridden by a default.
+_CHECKPOINT_SETTINGS: dict[str, tuple[Callable[[Any], Any], Any]] = {
+    "category": (_clean_category, _DEFAULT_CATEGORY),
+    "sensitivity": (_clean_sensitivity, _DEFAULT_SENSITIVITY),
+    "chunk_chars": (_clamped_chunk_chars, _DEFAULT_CHUNK_CHARS),
+    "budget_s": (_clamped_budget_s, _DEFAULT_BUDGET_S),
+    "max_parts": (_clamped_max_parts, _DEFAULT_MAX_PARTS),
+}
+
+
 def _umbrella_settings(section: dict[str, Any] | None) -> dict[str, Any]:
-    """The ``memory.ctx_checkpoint`` section with the plugin's own keys defaulted and clamped.
+    """The ``memory.ctx_checkpoint`` section with the plugin's own keys defaulted and the
+    checkpoint settings it sets clamped; a checkpoint setting it does not set stays absent.
 
     Engine keys written there under their own names pass through untouched (they are
     validated by the engine's loader).
     """
     raw = dict(section or {})
-    sensitivity = str(raw.get("sensitivity") or _DEFAULT_SENSITIVITY).strip().lower()
     out = dict(raw)
     out.update(
         {
             "mcp_server": str(raw.get("mcp_server") or _DEFAULT_MCP_SERVER),
-            "category": str(raw.get("category") or _DEFAULT_CATEGORY).strip() or _DEFAULT_CATEGORY,
-            "sensitivity": sensitivity if sensitivity in _SENSITIVITY_CHOICES else _DEFAULT_SENSITIVITY,
-            "chunk_chars": _clamped_chunk_chars(raw.get("chunk_chars")),
-            "budget_s": _clamped_budget_s(raw.get("budget_s")),
-            "max_parts": _clamped_max_parts(raw.get("max_parts")),
             "memory": _as_bool(raw.get("memory"), False),
             "transport": umbrella_transport(raw),
         }
     )
+    for key, (normalize, _default) in _CHECKPOINT_SETTINGS.items():
+        if raw.get(key) is None:
+            out.pop(key, None)
+        else:
+            out[key] = normalize(raw[key])
     return out
 
 
 def _load_plugin_config() -> dict[str, Any]:
+    """``memory.ctx_checkpoint`` with the Settings → Plugins values over it (``umbrella_section``)."""
+    try:
+        from hermes_cli.config import load_config
+
+        return umbrella_section(load_config())
+    except Exception:
+        return {}
+
+
+def _effective_config() -> dict[str, Any]:
+    """Hermes' loaded config (defaults applied); ``{}`` when unreadable."""
     try:
         from hermes_cli.config import load_config
 
         config = load_config()
-        memory = config.get("memory", {})
-        if not isinstance(memory, dict):
-            return {}
-        provider = memory.get("ctx_checkpoint", {})
-        return dict(provider) if isinstance(provider, dict) else {}
     except Exception:
         return {}
+    return config if isinstance(config, dict) else {}
 
 
 def _warn_if_hygiene_preempts() -> None:
@@ -307,23 +348,46 @@ def _normalize_setup_values(values: dict[str, Any], current: dict[str, Any]) -> 
     }
 
 
+def _switch_value(values: dict[str, Any], key: str) -> bool | None:
+    """An on/off form value; ``None`` when not submitted (or blank)."""
+    if key not in values:
+        return None
+    raw = values[key]
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw if raw is not None else "").strip().lower()
+    if not text:
+        return None
+    if text in {"on", "true", "1", "yes"}:
+        return True
+    if text in {"off", "false", "0", "no"}:
+        return False
+    raise ValueError(f"{key} must be on or off, not {raw!r}")
+
+
+class ConfigReadOnlyError(RuntimeError, ValueError):
+    """config.yaml cannot be written. A ``ValueError`` as well, so Hermes' settings routes refuse
+    the save with its text (400) instead of an internal error."""
+
+
 def _require_writable_config() -> None:
     from hermes_cli.config import is_managed
 
     if is_managed():
-        raise RuntimeError("this Hermes install is package-managed; config.yaml is read-only")
+        raise ConfigReadOnlyError("this Hermes install is package-managed; config.yaml is read-only")
 
 
-def _write_setup_config(settings: dict[str, Any], *, activate: bool) -> None:
+def _write_setup_config(settings: dict[str, Any], *, activate: bool, checkpoint_required: bool | None = None) -> None:
     """Write the provider section and the ctx MCP server entry into config.yaml.
 
-    Only these two subtrees are written, merged over the file as it is on disk at
+    Only these subtrees are written, merged over the file as it is on disk at
     write time (``merge_existing``), so concurrent edits to other sections survive.
     An existing server entry is kept: a disabled one is re-enabled, a ``command``
     (stdio) entry is otherwise left alone, the ``url`` of an HTTP entry follows the
     setup input, and the Bearer header referencing ``CTX_API_KEY`` is added only when
-    the entry carries neither ``headers`` nor ``auth``. Compaction settings are never
-    touched.
+    the entry carries neither ``headers`` nor ``auth``. Of the compaction settings only
+    ``compression.checkpoint_required`` is written, and only when the caller passes the
+    user's explicit choice (``checkpoint_required`` not ``None``); thresholds never.
     """
     from hermes_cli.config import save_config
 
@@ -351,7 +415,61 @@ def _write_setup_config(settings: dict[str, Any], *, activate: bool) -> None:
     }
     if activate:
         memory["provider"] = "ctx_checkpoint"
-    save_config({"mcp_servers": {name: entry}, "memory": memory}, merge_existing=True)
+    changes: dict[str, Any] = {"mcp_servers": {name: entry}, "memory": memory}
+    if checkpoint_required is not None:
+        changes["compression"] = {"checkpoint_required": bool(checkpoint_required)}
+    save_config(changes, merge_existing=True)
+
+
+def _candidate_entry(entry: dict[str, Any], ctx_url: str, mode: str, api_key: str) -> dict[str, Any]:
+    """The server entry as setup would write it, for the connection test: the new URL, and a key
+    typed in this setup in place of the ``${CTX_API_KEY}`` reference (it is not in .env yet).
+    Never written anywhere."""
+    candidate = dict(entry)
+    candidate.pop("enabled", None)  # setup re-enables the entry; test it as enabled
+    if mode != "stdio" and ctx_url:
+        candidate["url"] = ctx_url
+    reference = "${" + SETUP_API_KEY_ENV + "}"
+    if mode == "new":
+        candidate["headers"] = {"Authorization": f"Bearer {api_key}"} if api_key else dict(_SETUP_AUTH_HEADERS)
+    elif mode == "managed" and api_key:
+        headers = candidate.get("headers")
+        if isinstance(headers, dict):
+            candidate["headers"] = {k: str(v).replace(reference, api_key) for k, v in headers.items()}
+    return candidate
+
+
+def _legacy_field(spec: dict[str, Any], current: Any) -> dict[str, Any]:
+    """One ``FIELDS`` entry in the shape of ``get_config_schema()`` (web dashboard, terminal)."""
+    field: dict[str, Any] = {"key": spec["key"], "label": spec["label"], "description": spec["description"]}
+    kind = spec["kind"]
+    if kind == "secret":
+        field.update({"secret": True, "required": True, "env_var": spec["env_key"], "url": spec["url"]})
+    elif kind == "select":
+        field.update({"choices": [value for value, _label in spec["options"]], "default": current})
+    elif kind == "bool":
+        field.update({"choices": list(_MEMORY_CHOICES), "default": "on" if current else "off"})
+    elif kind == "number":
+        field.update(
+            {
+                "type": "integer",
+                "minimum": spec["minimum"],
+                "maximum": spec["maximum"],
+                "step": spec["step"],
+                "default": current,
+            }
+        )
+    else:
+        if spec.get("placeholder"):
+            field["placeholder"] = spec["placeholder"]
+        if spec.get("required"):
+            field["required"] = True
+        field["default"] = current
+    return field
+
+
+_FIELD_DEFAULTS = {spec["key"]: spec.get("default") for spec in _FORM_FIELDS}
+_MODE_FIELD = next(spec for spec in _FORM_FIELDS if spec["key"] == "checkpoint_required")
 
 
 def _env_value(name: str) -> str:
@@ -435,6 +553,10 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         super().__init__()
         self._section = _umbrella_settings(config if config is not None else _load_plugin_config())
         self._dispatch = dispatch or _default_dispatch
+        # Hermes' user-visible warning sink (passed to initialize() on CLI-platform sessions)
+        # and the last notice sent through it, so a repeated failure is reported once.
+        self._warning_callback: Callable[[str], Any] | None = None
+        self._last_warning = ""
 
     # -- identity ------------------------------------------------------------------
 
@@ -472,6 +594,28 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
 
     def _config_overlay(self) -> dict[str, Any]:
         return overlay_from_umbrella(self._section)
+
+    def _config_base(self) -> dict[str, Any]:
+        return {UMBRELLA_KEY_MAP[key]: default for key, (_normalize, default) in _CHECKPOINT_SETTINGS.items()}
+
+    def _effective_settings(self) -> dict[str, Any]:
+        """The section with every checkpoint setting at the value the engine uses: set here,
+        else ctx.json, else the plugin default (clamped by the engine's loader). The forms show
+        it and fall back to it, so a save keeps a value that only ctx.json sets."""
+        out = dict(self._section)
+        try:
+            home = self._hermes_home
+            if not home:
+                from hermes_constants import get_hermes_home
+
+                home = str(get_hermes_home())
+            engine = self._load_config(home)
+        except Exception:
+            engine = {}
+        for key, (normalize, default) in _CHECKPOINT_SETTINGS.items():
+            value = engine.get(UMBRELLA_KEY_MAP[key])
+            out[key] = normalize(value) if value is not None else default
+        return out
 
     def _now(self) -> float:
         return _monotonic()
@@ -529,8 +673,108 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
     # -- lifecycle -----------------------------------------------------------------
 
     def initialize(self, session_id: str, **kwargs) -> None:
+        callback = kwargs.get("warning_callback")
+        self._warning_callback = callback if callable(callback) else None
+        self._last_warning = ""
         _warn_if_hygiene_preempts()
         super().initialize(session_id, **kwargs)
+        warning = _st.checkpoint_mode_warning(
+            self._config, self._section, self._hermes_home, _st.checkpoint_required(_effective_config())
+        )
+        if warning:
+            if (self._hermes_home, warning) not in _mode_warnings_logged:
+                _mode_warnings_logged.add((self._hermes_home, warning))
+                logger.warning("%s", warning)
+            self._notify_user(warning)
+
+    def _notify_user(self, message: str) -> None:
+        """Pass a notice to Hermes' warning callback, once per distinct message; never raises."""
+        if self._warning_callback is None or message == self._last_warning:
+            return
+        self._last_warning = message
+        try:
+            self._warning_callback(message)
+        except Exception:
+            logger.debug("ctx_checkpoint: warning callback failed", exc_info=True)
+
+    # -- checkpoint outcome --------------------------------------------------------
+
+    def on_pre_compress(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        require_checkpoint: bool = False,
+        tool_evidence: list[dict[str, Any]] | None = None,
+        **kwargs,
+    ) -> str:
+        """The engine's checkpoint, plus its outcome in ``ctx_state/`` and, on a failure or a
+        compaction without a checkpoint, the reason for the user (Hermes passes only a generic
+        text up)."""
+        try:
+            receipt_text = super().on_pre_compress(
+                messages, require_checkpoint=require_checkpoint, tool_evidence=tool_evidence, **kwargs
+            )
+        except Exception as exc:
+            self._record_outcome(bool(require_checkpoint), exc)
+            raise
+        self._record_outcome(bool(require_checkpoint), self._last_chain_error)
+        return receipt_text
+
+    def _record_outcome(self, required: bool, error: Exception | None) -> None:
+        """Outcome file + user notice. Never raises: it must not turn a checkpoint into a failure,
+        nor replace the exception a failed one raises."""
+        try:
+            receipt = self._last_chain_receipt
+            skipped = "" if (error is not None or receipt is not None) else self._skip_reason()
+            secrets = (self._api_key, _env_value(SETUP_API_KEY_ENV)) if error is not None else ()
+            outcome = _st.checkpoint_outcome(
+                required=required,
+                receipt=receipt,
+                error=error,
+                skipped=skipped,
+                secrets=secrets,
+                context=f"{self._platform or '?'}/{self._agent_context or '?'}",
+            )
+            _st.record_checkpoint(self._hermes_home, outcome)
+            if outcome["error"]:
+                self._notify_user(_st.failure_warning(outcome, self._server_name()))
+            elif outcome["skipped"]:
+                self._notify_user(_st.skip_warning(outcome))
+            else:
+                self._last_warning = ""
+        except Exception:
+            logger.debug("ctx_checkpoint: checkpoint outcome not recorded", exc_info=True)
+
+    def _skip_reason(self) -> str:
+        if not (self._active and self._client):
+            return "the provider is not connected"
+        if self.pre_compress_checkpoint_api_version < 2:
+            return "checkpoint_mode: off"
+        if not self._config.get("checkpoint_chain", True):
+            return "checkpoint_chain: false"
+        return "no transcript chain was written"
+
+    # -- status (hermes memory status) ---------------------------------------------
+
+    def get_status_config(self, provider_config: dict) -> dict:
+        """``hermes memory status``: on MCP the server entry, a connection test, the operating
+        mode and the latest checkpoint (the same report as ``hermes ctx_checkpoint status``).
+        Never raises."""
+        if self.transport == "rest":
+            status = super().get_status_config(provider_config)
+            base = status.get("base_url")
+            if base and _st.insecure_http(base):
+                status["warning"] = _st.http_warning(base)
+            return status
+        try:
+            home = self._hermes_home
+            if not home:
+                from hermes_constants import get_hermes_home
+
+                home = str(get_hermes_home())
+            return _st.mcp_report(home)
+        except Exception as exc:
+            return {"summary": f"✗ status unavailable: {_st.redact_error(exc)}", "ok": False}
 
     # -- memory-feature gates ------------------------------------------------------
 
@@ -545,94 +789,147 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         block = super().system_prompt_block()
         return f"{block}\nSkill: {self.name}:{SKILL_NAME} explains how to use the store well." if block else ""
 
-    # -- setup surfaces (Dashboard/Desktop form, `hermes memory setup`) ------------
+    # -- setup surfaces (Desktop and dashboard memory forms, `hermes memory setup`) ----
 
-    def get_config_schema(self) -> list[dict[str, Any]]:
-        """Setup fields for the Dashboard/Desktop memory form and ``post_setup()``.
-
-        The fields follow the existing ``mcp_servers`` entry named by ``mcp_server``
-        (default ``ctx``; set in config.yaml, not in setup): its URL prefills
-        ``ctx_url``, and the key is asked only when setup manages that entry's auth
-        (see ``_server_setup_mode``). A ``command`` (stdio) entry gets neither field.
-        """
+    def _form_values(self) -> dict[str, Any]:
+        """Current value of every memory-form field except the key (never read back)."""
         try:
             config = _read_user_config()
         except Exception:
             config = {}
         entry = _configured_server(config, self._server_name())
-        mode = _server_setup_mode(entry)
-        fields: list[dict[str, Any]] = []
-        if mode != "stdio":
-            url = entry.get("url")
-            fields.append(
-                {
-                    "key": "ctx_url",
-                    "label": "ctx server URL",
-                    "description": "MCP endpoint of your ctx server",
-                    "placeholder": "https://ctx.example.com/mcp",
-                    "required": True,
-                    "default": url if isinstance(url, str) else "",
-                }
-            )
-        if mode in ("new", "managed"):
-            fields.append(
-                {
-                    "key": "ctx_api_key",
-                    "label": "ctx API key",
-                    "description": f"API key for that ctx server, stored in Hermes' .env as {SETUP_API_KEY_ENV}",
-                    "secret": True,
-                    "required": True,
-                    "env_var": SETUP_API_KEY_ENV,
-                    "url": "https://github.com/GottZ/ctx#readme",
-                }
-            )
-        return [
-            *fields,
-            {
-                "key": "sensitivity",
-                "label": "Sensitivity",
-                "description": "ctx sensitivity stored on checkpoint blocks",
-                "choices": list(_SENSITIVITY_CHOICES),
-                "default": str(self._section.get("sensitivity") or _DEFAULT_SENSITIVITY),
-            },
-            {
-                "key": "category",
-                "label": "Category",
-                "description": "ctx category for checkpoint blocks",
-                "default": str(self._section.get("category") or _DEFAULT_CATEGORY),
-            },
-            {
-                "key": "chunk_chars",
-                "label": "Part size (characters)",
-                "description": "Size of one stored transcript part",
-                "type": "integer",
-                "minimum": _MIN_CHUNK_CHARS,
-                "maximum": _MAX_CHUNK_CHARS,
-                "step": 1_000,
-                "default": _clamped_chunk_chars(self._section.get("chunk_chars")),
-            },
-            {
-                "key": "memory",
-                "label": "Memory features",
-                "description": (
-                    "on: recall before each turn, ctx_* agent tools, MEMORY.md/USER.md mirror, fact "
-                    "extraction and session digests over the same ctx server; off: checkpoints only"
-                ),
-                "choices": list(_MEMORY_CHOICES),
-                "default": "on" if self.memory_enabled else "off",
-            },
-        ]
+        url = entry.get("url") if _server_setup_mode(entry) != "stdio" else None
+        current = self._effective_settings()
+        return {
+            "ctx_url": url if isinstance(url, str) else "",
+            "sensitivity": current["sensitivity"],
+            "category": current["category"],
+            "chunk_chars": current["chunk_chars"],
+            "memory": self.memory_enabled,
+            "checkpoint_required": _st.checkpoint_required(_effective_config()),
+        }
+
+    def get_config_schema(self) -> list[dict[str, Any]]:
+        """Setup fields for the web dashboard's memory form and ``post_setup()``.
+
+        Built from ``config_schema.FIELDS`` (the table Hermes Desktop's form is declared
+        from). The fields follow the existing ``mcp_servers`` entry named by ``mcp_server``
+        (default ``ctx``; set in config.yaml, not in setup): its URL prefills ``ctx_url``,
+        and the key is asked only when setup manages that entry's auth (see
+        ``_server_setup_mode``). A ``command`` (stdio) entry gets neither field.
+        """
+        try:
+            config = _read_user_config()
+        except Exception:
+            config = {}
+        mode = _server_setup_mode(_configured_server(config, self._server_name()))
+        current = self._form_values()
+        fields = []
+        for spec in _FORM_FIELDS:
+            if spec.get("desktop_only"):
+                continue
+            if spec["key"] == "ctx_url" and mode == "stdio":
+                continue
+            if spec["key"] == "ctx_api_key" and mode not in ("new", "managed"):
+                continue
+            fields.append(_legacy_field(spec, current.get(spec["key"])))
+        return fields
+
+    def read_config_fields(self, hermes_home: str) -> dict[str, Any]:
+        """Hermes Desktop's memory form (``config_schema.py``, ``storage=provider``): the stored values."""
+        self._section = _umbrella_settings(_load_plugin_config())
+        values = self._form_values()
+        try:
+            config = _read_user_config()
+        except Exception:
+            config = {}
+        mode = _server_setup_mode(_configured_server(config, self._server_name()))
+        placeholders: dict[str, str] = {}
+        if mode == "stdio":
+            values.pop("ctx_url")
+            placeholders["ctx_api_key"] = "not used by a stdio server entry"
+        elif not values["ctx_url"]:
+            values.pop("ctx_url")
+        if mode == "foreign":
+            placeholders["ctx_api_key"] = "not used: the server entry signs in on its own"
+        return {"values": values, "placeholders": placeholders}
+
+    def write_config_fields(self, values: dict[str, Any], hermes_home: str) -> None:
+        """Hermes Desktop's memory form: persist the submitted fields (one at a time from the
+        compact panel). Hermes saves a submitted key to ``.env`` after this returns; a
+        ``ValueError`` (invalid value, failed connection test) refuses the save."""
+        submitted = dict(values or {})
+        api_key = str(submitted.pop("ctx_api_key", None) or "").strip()
+        form: dict[str, Any] = {}
+        for key, value in submitted.items():
+            if value is None:  # a cleared field: back to its default (a cleared URL keeps the entry's)
+                if key != "ctx_url":
+                    form[key] = _FIELD_DEFAULTS.get(key)
+                continue
+            form[key] = value
+        self._apply_form(form, api_key=api_key, key_visible=True)
 
     def save_config(self, values: dict[str, Any], hermes_home: str) -> None:
-        """Persist non-secret setup values (the host writes the key to .env itself)."""
-        settings = _normalize_setup_values(values, self._section)
-        _write_setup_config(settings, activate=False)
+        """The web dashboard's memory form: persist non-secret setup values. No connection test:
+        the dashboard writes the key to .env only after this returns, so a test here could only
+        see the previous key. The operating mode is not part of this form (``desktop_only``): the
+        dashboard sends every field with the value it loaded, so it is ignored here."""
+        values = {key: value for key, value in (values or {}).items() if key != "checkpoint_required"}
+        self._apply_form(values, api_key="", key_visible=False)
+
+    def _apply_form(self, values: dict[str, Any], *, api_key: str, key_visible: bool) -> None:
+        """Validate, test the connection where it changed and the test can see every
+        credential, then write. Nothing is written when a check fails."""
+        _require_writable_config()
+        config = _read_user_config()
+        settings = _normalize_setup_values(values, self._effective_settings())
+        wanted = _switch_value(values, "checkpoint_required")
+        current_required = _st.checkpoint_required(_effective_config())
+        switch = None if wanted is None or wanted == current_required else wanted
+        name = settings["mcp_server"]
+        entry = _configured_server(config, name)
+        mode = _server_setup_mode(entry)
+        ctx_url = settings["ctx_url"]
+        if not entry and not ctx_url:
+            if key_visible and api_key and not values:
+                return  # only the key so far: Hermes keeps it in .env, the URL follows
+            raise ValueError(f"ctx server URL is required: there is no MCP server entry named {name!r} yet")
+        if mode == "stdio" and ctx_url:
+            raise ValueError(
+                f"mcp_servers.{name} runs a command (stdio) and has no URL; change that entry in config.yaml"
+            )
+        uses_key = mode in ("new", "managed")
+        changed = (
+            not entry
+            or entry.get("enabled") is False
+            or bool(ctx_url and ctx_url != entry.get("url"))
+            or bool(api_key and uses_key)
+        )
+        needs_test = switch is True or (key_visible and changed)
+        stored_key = _env_value(SETUP_API_KEY_ENV)
+        if needs_test and uses_key and not (api_key or stored_key):
+            if switch is True:
+                raise ValueError(
+                    "Save the ctx API key first: waiting for the checkpoint needs a working connection to ctx."
+                )
+            needs_test = False  # the key is not known yet; the save that brings it runs the test
+        if needs_test:
+            test = _st.run_connection_test(
+                name, _candidate_entry(entry, ctx_url, mode, api_key), secrets=(api_key, stored_key)
+            )
+            if test.ok is False:
+                raise ValueError(f"{test.detail[:1].upper()}{test.detail[1:]}. Nothing was saved.")
+        target = ctx_url or entry.get("url")
+        if _st.insecure_http(target):
+            logger.warning("ctx_checkpoint: %s", _st.http_warning(target))
+        _write_setup_config(settings, activate=False, checkpoint_required=switch)
         self._section.update(_umbrella_settings({**self._section, **{k: settings[k] for k in _SETUP_STORED_KEYS}}))
 
     def post_setup(self, hermes_home: str, config: dict[str, Any]) -> None:
-        """``hermes memory setup ctx_checkpoint``: prompt, write .env and config, activate.
+        """``hermes memory setup ctx_checkpoint``: prompt, test the connection, offer the
+        operating mode, then write .env and config and activate.
 
-        Everything is asked and validated before anything is written; the key goes
+        Everything is asked, validated and tested before anything is written; the key goes
         to .env before config.yaml starts referencing it.
         """
         print("\n  Configuring ctx_checkpoint:\n")
@@ -640,13 +937,32 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         try:
             _require_writable_config()
             values, api_key = _prompt_setup(self.get_config_schema())
-            settings = _normalize_setup_values(values, self._section)
+            settings = _normalize_setup_values(values, self._effective_settings())
+            name = settings["mcp_server"]
+            entry = _configured_server(_read_user_config(), name)
+            mode = _server_setup_mode(entry)
+            if not entry and not settings["ctx_url"]:
+                raise ValueError(f"ctx server URL is required: there is no MCP server entry named {name!r} yet")
+            target = settings["ctx_url"] or entry.get("url")
+            if _st.insecure_http(target):
+                print(f"\n  Warning: {_st.http_warning(target)}")
+            test = _st.run_connection_test(
+                name,
+                _candidate_entry(entry, settings["ctx_url"], mode, api_key),
+                secrets=(api_key, _env_value(SETUP_API_KEY_ENV)),
+            )
+            if test.ok is False:
+                print(f"\n  Connection test failed: {test.detail}")
+                print("  Nothing was changed; check the URL and the API key, then run the setup again.\n")
+                return
+            print(f"\n  Connection test passed: {test.detail}" if test.ok else f"\n  {test.detail}")
+            switch = self._prompt_mode(offer=bool(test.ok))
             if api_key:
                 from hermes_cli.config import save_env_value
 
                 save_env_value(SETUP_API_KEY_ENV, api_key)
                 key_saved = True
-            _write_setup_config(settings, activate=True)
+            _write_setup_config(settings, activate=True, checkpoint_required=switch)
         except (KeyboardInterrupt, EOFError):
             print("\n  Setup cancelled; nothing was changed.\n")
             return
@@ -660,14 +976,30 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
                 print("  Nothing was changed.\n")
             return
         self._section.update(_umbrella_settings({**self._section, **{k: settings[k] for k in _SETUP_STORED_KEYS}}))
-        name = settings["mcp_server"]
+        required = _st.checkpoint_required(_effective_config())
         print("\n  Memory provider: ctx_checkpoint")
         print(f"  ctx MCP server entry: mcp_servers.{name}")
         print(f"  Memory features: {'on' if settings['memory'] else 'off (checkpoints only)'}")
+        print(f"  Operating mode: {'required' if required else 'best effort'}")
         if api_key:
             print(f"  API key saved to .env as {SETUP_API_KEY_ENV}")
-        print(f"  Check the connection with `hermes mcp test {name}`;")
+        print(f"  `hermes ctx_checkpoint status` (or `hermes mcp test {name}`) checks the connection;")
         print("  new sessions use the provider.\n")
+
+    def _prompt_mode(self, *, offer: bool) -> bool | None:
+        """Explain both operating modes; after a passing connection test ask for one.
+        Returns the new value of ``compression.checkpoint_required``, ``None`` to keep it."""
+        current = _st.checkpoint_required(_effective_config())
+        print("\n  Operating mode (Hermes' compression.checkpoint_required):")
+        print(f"    off: {_st.mode_text(False)}")
+        print(f"    on:  {_st.mode_text(True)}")
+        if not offer:
+            print(f"  Kept at {'on' if current else 'off'}; set compression.checkpoint_required in config.yaml")
+            print("  once the connection test passes.")
+            return None
+        answers, _key = _prompt_setup([_legacy_field(_MODE_FIELD, current)])
+        wanted = _switch_value(answers, "checkpoint_required")
+        return None if wanted is None or wanted == current else wanted
 
 
 def register(ctx) -> None:

@@ -141,6 +141,9 @@ class CtxMemoryProvider(MemoryProvider):
         # Binding of the last successful connect; the manifest cache belongs to it.
         self._verified_binding: tuple[str, str, str, str] | None = None
         self._last_chain_receipt = None
+        # Why the latest chain write failed (None after a success or when no chain ran); the
+        # umbrella records it with the outcome of each checkpoint.
+        self._last_chain_error: Exception | None = None
         # P4 cross-compaction fact dedupe, one ledger per root session
         self._fact_ledgers: dict[str, FactLedger] = {}
         # P5 digests per segment (compaction / rolling / idle / end)
@@ -195,6 +198,13 @@ class CtxMemoryProvider(MemoryProvider):
     def _config_overlay(self) -> dict[str, Any]:
         """Settings layered over ctx.json (the umbrella passes its config.yaml section)."""
         return {}
+
+    def _config_base(self) -> dict[str, Any]:
+        """Defaults layered under ctx.json (the umbrella passes its own checkpoint defaults)."""
+        return {}
+
+    def _load_config(self, hermes_home: str) -> dict[str, Any]:
+        return load_ctx_config(hermes_home, overlay=self._config_overlay(), base=self._config_base())
 
     def _chain_writer_seams(self) -> dict[str, Any]:
         """Extra ChainWriter kwargs (the umbrella injects its clock/sleep test seams)."""
@@ -258,7 +268,7 @@ class CtxMemoryProvider(MemoryProvider):
 
             # Same sources as initialize(): ctx.json under the settings overlay (the umbrella's
             # memory.ctx_checkpoint section, whose rest_base_url becomes ctx_base_url).
-            cfg = load_ctx_config(str(get_hermes_home()), overlay=self._config_overlay())
+            cfg = self._load_config(str(get_hermes_home()))
             return bool(cfg.get("ctx_base_url", "").strip())
         except Exception:
             return False
@@ -297,7 +307,7 @@ class CtxMemoryProvider(MemoryProvider):
         try:
             from hermes_constants import get_hermes_home
 
-            cfg = load_ctx_config(str(get_hermes_home()), overlay=self._config_overlay())
+            cfg = self._load_config(str(get_hermes_home()))
             fallback = cfg.get("ctx_base_url") or (provider_config or {}).get("ctx_base_url") or ""
             base = status["base_url"] = resolve_base_url(str(fallback))
             api_key = env_secret("CTX_KEY")
@@ -343,7 +353,7 @@ class CtxMemoryProvider(MemoryProvider):
         self._platform = str(kwargs.get("platform") or "")
         # Host vocabulary: primary | subagent | cron | flush. Empty stays empty (upstream).
         self._agent_context = str(kwargs.get("agent_context") or "")
-        self._config = load_ctx_config(self._hermes_home, overlay=self._config_overlay())
+        self._config = self._load_config(self._hermes_home)
         # P5: a resumed/restarted session is a compression continuation → its chain, fact
         # ledger and digest segments belong to the lineage ROOT, not to the current id.
         lineage_root = _dg.resolve_lineage_root(self._hermes_home, self._root_session_id)
@@ -793,6 +803,9 @@ class CtxMemoryProvider(MemoryProvider):
         # P5: the host calls on_session_end right after a compaction (commit_memory_session,
         # conversation_compression.py:3733) → that digest is the compaction segment digest.
         self._compaction_pending = True
+        # Outcome of THIS call only: an early return below must not leave the previous receipt.
+        self._last_chain_receipt = None
+        self._last_chain_error = None
         evidence = kwargs.get("evidence_messages")
         source = evidence if evidence is not None else (messages or [])
         started = self._now()
@@ -837,11 +850,11 @@ class CtxMemoryProvider(MemoryProvider):
             new_keys = known_keys + [k for f in facts for k in fact_keys(f)]
 
         chain_text = ""
-        self._last_chain_receipt = None
         if chain_on:
             try:
                 chain_text = self._write_chain(source, tool_evidence, budget, deadline, fact_hashes=new_keys)
             except CtxCheckpointError as exc:
+                self._last_chain_error = exc
                 if require_checkpoint:
                     logger.warning("CTX checkpoint chain failed (profile=%s, required): %s", self._profile, exc)
                     raise
@@ -851,6 +864,7 @@ class CtxMemoryProvider(MemoryProvider):
                     exc,
                 )
             except Exception as exc:  # defensive: never let an unexpected bug escape best effort
+                self._last_chain_error = exc
                 if require_checkpoint:
                     raise CtxCheckpointError(f"ctx checkpoint failed: {type(exc).__name__}") from exc
                 logger.warning("CTX checkpoint chain crashed (profile=%s, best_effort): %s", self._profile, exc)

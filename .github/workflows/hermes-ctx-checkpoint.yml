@@ -1,0 +1,139 @@
+# ctx_checkpoint (hermes-agent memory provider plugin) — its own suites.
+#
+# The plugin under integrations/hermes/plugin/ctx_checkpoint is Python; none of the Go/web jobs of ci.yml touch it.
+# This workflow runs when the plugin, this file or the ctx MCP handlers change (the plugin parses the answers of the
+# MCP store/search/get/query tools): ruff, `hermes plugins validate`, the umbrella suite (tests/: checkpoint contract,
+# setup surfaces, status, MCP transport) and the engine suite (memory/tests/: recall, tools, mirror, facts, digests,
+# chain, CLI, security sweep). Both suites use fakes for ctx; no network.
+#
+# The suites import Hermes itself (agent.memory_provider, hermes_cli.config, the memory-provider dashboard routes,
+# the Plugins-hub settings writer): hermes-agent is checked out at a pinned commit (HERMES_AGENT_SHA, upstream main
+# that the Hermes build of the reference deployment is based on; it contains v0.23.1, the plugin's requires_hermes
+# floor) and installed from its own uv.lock (`uv sync --locked`, dev group). Bump the pin deliberately, together
+# with a local run.
+#
+# Not a required check (the ruleset is unchanged); a red run here is information for the PR.
+
+name: ctx_checkpoint plugin
+
+on:
+  push:
+    branches: [root]
+    paths:
+      - "integrations/hermes/plugin/ctx_checkpoint/**"
+      - ".github/workflows/hermes-ctx-checkpoint.yml"
+      - "go/internal/handler/mcp*.go"
+  pull_request:
+    branches: [root]
+    paths:
+      - "integrations/hermes/plugin/ctx_checkpoint/**"
+      - ".github/workflows/hermes-ctx-checkpoint.yml"
+      - "go/internal/handler/mcp*.go"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PLUGIN_DIR: integrations/hermes/plugin/ctx_checkpoint
+  HERMES_AGENT_REPO: NousResearch/hermes-agent
+  HERMES_AGENT_SHA: 26cd2e6d83494c22a8b5e961f20e293285c48d0a
+  PYTHON_VERSION: "3.14"
+  UV_PIN: "uv==0.13.5"
+  RUFF_PIN: "ruff==0.15.22"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  lint:
+    name: ctx_checkpoint · ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install ruff
+        run: python -m pip install --disable-pip-version-check ${{ env.RUFF_PIN }}
+      - name: ruff check
+        working-directory: ${{ env.PLUGIN_DIR }}
+        run: ruff check .
+      - name: ruff format --check
+        working-directory: ${{ env.PLUGIN_DIR }}
+        run: ruff format --check .
+
+  suites:
+    name: ctx_checkpoint · ${{ matrix.suite }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: validate
+            timeout: 15
+          - suite: umbrella
+            timeout: 30
+          - suite: engine
+            timeout: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Checkout hermes-agent (pinned)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.HERMES_AGENT_REPO }}
+          ref: ${{ env.HERMES_AGENT_SHA }}
+          path: hermes-agent
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install hermes-agent from its lock file (dev group = pytest)
+        working-directory: hermes-agent
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/venv
+        run: |
+          python -m pip install --disable-pip-version-check ${{ env.UV_PIN }}
+          uv sync --locked --python "$(command -v python)" --group dev
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+      - name: hermes plugins validate
+        if: matrix.suite == 'validate'
+        env:
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+        run: |
+          mkdir -p "$HERMES_HOME"
+          hermes plugins validate "$GITHUB_WORKSPACE/$PLUGIN_DIR"
+      - name: pytest (umbrella suite, tests/)
+        if: matrix.suite == 'umbrella'
+        env:
+          # Hermes from the pinned checkout, the plugin as package ctx_checkpoint; temporary files outside the work
+          # tree
+          PYTHONPATH: ${{ github.workspace }}/hermes-agent:${{ github.workspace }}/integrations/hermes/plugin
+          TMPDIR: ${{ runner.temp }}/tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          python -m pytest "$PLUGIN_DIR/tests" -p no:cacheprovider -q -rfE --basetemp="$RUNNER_TEMP/pytest-umbrella"
+      - name: pytest (engine suite, memory/tests/)
+        if: matrix.suite == 'engine'
+        env:
+          # memory/tests/conftest.py puts HERMES_REPO on sys.path and loads the engine as package ctx_plugin
+          HERMES_REPO: ${{ github.workspace }}/hermes-agent
+          TMPDIR: ${{ runner.temp }}/tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          python -m pytest "$PLUGIN_DIR/memory/tests" -p no:cacheprovider -q -rfE --basetemp="$RUNNER_TEMP/pytest-engine"

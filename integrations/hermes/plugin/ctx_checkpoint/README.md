@@ -8,7 +8,8 @@ path — and hands the block IDs to Hermes for the summary. With `memory: true` 
 same plugin is also Hermes' long-term memory over ctx: recall before each turn,
 explicit `ctx_*` tools, a mirror of the built-in `MEMORY.md`/`USER.md`, fact
 extraction from compacted turns and per-segment session digests. One plugin, one
-provider name, one settings section.
+provider name; in Hermes Desktop its settings are under Settings → Memory and
+Settings → Plugins.
 
 ```
 Compaction checkpoint head <root-session>     ← stable title, upserted per session
@@ -29,16 +30,43 @@ hermes plugins install ctx_checkpoint
 Answer **y** when the installer asks to use it as the memory provider. Then set it
 up — no YAML editing needed:
 
-- **Hermes Desktop / Dashboard:** open the memory settings, pick
-  `ctx_checkpoint` and fill in the form.
+- **Hermes Desktop:** *Settings → Memory*, pick `ctx_checkpoint` and fill in
+  the form below it: ctx server URL, API key, memory features on or off, and
+  whether Hermes waits for the checkpoint before compacting (see
+  [Two operating modes](#two-operating-modes)); *Full config…* holds the storage
+  settings (sensitivity, category, part size). *Settings → Plugins →
+  ctx_checkpoint* holds the rest: the time limit and the part limit of one
+  checkpoint, and the single memory features (recall, `MEMORY.md`/`USER.md` copy,
+  facts, session summaries).
+- **Web dashboard:** the memory settings show the memory form (the same fields
+  except the operating mode).
 - **Terminal:** `hermes memory setup ctx_checkpoint`
 
 Setup asks for your ctx server URL and API key, and whether to turn the memory
 features on. Everything else has a working default. The key goes into Hermes'
-`.env` as `CTX_API_KEY`; `config.yaml` only references it. Setting up a ctx server
-is covered in the [ctx README](https://github.com/GottZ/ctx#readme). From a ctx
-checkout the directory can also be installed with
-`integrations/hermes/scripts/install.sh` — for code newer than the catalog pin
+`.env` as `CTX_API_KEY`; `config.yaml` only references it.
+
+**Connection test.** Setup checks that the server answers before it keeps your
+settings: it connects the way Hermes does (`hermes mcp test` runs the same test),
+lists the server's tools and needs the ctx tools `search`, `get` and `store`. A
+failed test saves nothing and says why (wrong key, server not reachable, not a ctx
+server). In Hermes Desktop the test runs when a save changes the URL or the key —
+as soon as both are known, so the compact form can save the URL first and test with
+the key — and before waiting for the checkpoint is turned on. In the terminal it
+runs before anything is written; after a passing test setup explains both
+operating modes and asks for one. The web dashboard's form neither tests nor
+carries the operating mode: it saves the key only after the plugin's settings (a
+test there would see the previous key), and it sends every field with the value it
+loaded (a mode switched elsewhere in the meantime would be switched back) — check
+with `hermes memory status`. A URL
+with `http://` to a host outside this computer and your local network gets a
+warning (key and conversations travel unencrypted); setup does not refuse it, the
+status repeats it.
+
+Setting up a ctx server is covered in the
+[ctx README](https://github.com/GottZ/ctx#readme). From a ctx checkout the
+directory can also be installed with `integrations/hermes/scripts/install.sh` — for
+code newer than the catalog pin
 (see [Versions](https://github.com/GottZ/ctx/blob/root/integrations/hermes/README.md#versions)).
 
 The plugin talks to ctx through Hermes' own MCP dispatch and holds no
@@ -62,11 +90,37 @@ memory:
     sensitivity: internal            # public | internal | personal | credentials
     budget_s: 60                     # wall-clock budget per checkpoint, 5..600 s
     max_parts: 80                    # part cap per checkpoint, 1..95 (ctx writes 100/60 s per key)
+
+compression:
+  checkpoint_required: false         # Hermes' own key: true = no compaction without a confirmed checkpoint
+
+plugins:
+  entries:
+    ctx_checkpoint:
+      settings:                      # written by Settings → Plugins → ctx_checkpoint
+        budget_s: 60
+        max_parts: 80
+        auto_recall: true            # these four act only with memory: true
+        auto_memory_mirror: true
+        auto_compress_extract: true
+        auto_session_digest: true
 ```
 
-Every key under `memory.ctx_checkpoint` is optional; the values shown are the
-defaults. `budget_s` and `max_parts` are not asked during setup; set them in
-`config.yaml` when needed (setup keeps them). An existing `mcp_servers.ctx` entry is
+Every key under `memory.ctx_checkpoint` and `plugins.entries.ctx_checkpoint.settings`
+is optional; the values shown are the defaults. The plugin reads its settings in
+this order, each source over the one before: the defaults (those shown here; the
+engine's own for other engine keys), the legacy `$HERMES_HOME/ctx.json` (for example
+`checkpoint_budget_s` or `checkpoint_category`), `memory.ctx_checkpoint`, and for the six keys of the
+Settings → Plugins form `plugins.entries.ctx_checkpoint.settings` (other keys there
+are ignored). So a value saved in that form wins over the same key written by hand
+under `memory.ctx_checkpoint`, also under its engine name (`checkpoint_budget_s`,
+`checkpoint_max_parts`); the form itself shows only its own values. Every
+value is clamped to its range, whatever the source. The memory form shows a value
+that only `ctx.json` sets, and saving the form writes it to `memory.ctx_checkpoint`
+unchanged. `budget_s` and `max_parts` are
+not asked during terminal setup (setup keeps them). `compression.checkpoint_required`
+is written only when you choose a mode in setup that differs from the current one;
+the compaction thresholds are never written. An existing `mcp_servers.ctx` entry is
 kept: setup updates its URL and re-enables it, but asks for a key only when it
 manages that entry's authentication itself (no auth yet, or `Bearer ${CTX_API_KEY}`
 from an earlier setup). An entry with its own `headers` or `auth`, or a stdio
@@ -87,8 +141,11 @@ differently.
 | Skill | `ctx_checkpoint:ctx-memory` tells the model how to use the store well (query as a question, verify before acting, one durable fact per block) | registered with the provider |
 | CLI | `hermes ctx_checkpoint status\|sync\|query\|store\|search\|get` | needs `transport: rest` for everything but `status` |
 
-All of these keys go under `memory.ctx_checkpoint` by their engine names; the full
-table with defaults and ranges is in the [engine README](memory/README.md). With
+All of these keys go under `memory.ctx_checkpoint` by their engine names; the four
+switches `auto_recall`, `auto_memory_mirror`, `auto_compress_extract` and
+`auto_session_digest` are also in Settings → Plugins → ctx_checkpoint (mirror and
+digests additionally need `auto_capture`, on unless `config.yaml` turns it off). The
+full table with defaults and ranges is in the [engine README](memory/README.md). With
 `memory: false` (the default) none of this runs and the plugin behaves exactly like
 the checkpoint-only versions before 0.6.0. Mirror, facts and digests are skipped in
 `cron`, `flush` and `subagent` agent contexts; the checkpoint chain is written in
@@ -126,8 +183,14 @@ the compressor does. The plugin logs a warning when the threshold is that high.
 
 | Mode | Host | Guarantee |
 |------|------|-----------|
-| **best-effort** (default) | any Hermes ≥ 0.20.4 | checkpoint is attempted before compaction; a failure is logged (WARNING) and compaction proceeds |
-| **fail-closed** | Hermes ≥ 0.21.1 (carries the checkpoint contract, upstream PR #94639) | with `compression.checkpoint_required: true`, compaction is **blocked** unless the checkpoint is confirmed durable; the uncompressed transcript is preserved |
+| **best-effort** (Hermes' default, `compression.checkpoint_required: false`) | Hermes ≥ 0.23.1 | the compaction of the agent you are talking to attempts a checkpoint first; a failure is logged, recorded for the status and passed to Hermes' warning channel where Hermes offers one (sessions on the CLI platform), and compaction proceeds. Four Hermes paths build their compacting agent without a memory provider and compact **without** a checkpoint: gateway session hygiene, `/compress` in a gateway channel, `delegate_task` sub-agents and the curator |
+| **fail-closed** (`compression.checkpoint_required: true`) | Hermes ≥ 0.23.1 (the first whose `delegate_task` children inherit the provider; 0.21.1 to 0.23.0 carry the checkpoint contract, upstream PR #94639, but every sub-agent compaction fails closed there) | compaction is **blocked** unless the checkpoint is confirmed durable — on all four paths above too; the uncompressed transcript is preserved |
+
+Switch the mode in Hermes Desktop (*Settings → Memory → ctx_checkpoint → Wait for
+the checkpoint before compacting*), in `hermes memory setup ctx_checkpoint` (asked
+after the connection test) or with `compression.checkpoint_required` in
+`config.yaml`; `hermes memory status` shows which one is active. Turning it on
+needs a passing connection test.
 
 Fail-closed means accepting a session halt (`BLOCKED_MISSING_PREREQUISITE`) while
 ctx is unreachable, instead of an unarchived compaction. The halt also triggers
@@ -143,6 +206,41 @@ returns an empty receipt and the compaction proceeds. The plugin negotiates the
 contract version with the loading host at runtime; details, host probes and the
 operator warnings are in the [full integration guide](../../README.md).
 
+## Status and the last checkpoint
+
+`hermes memory status` and `hermes ctx_checkpoint status` print the same report:
+
+```
+summary: ✓ connected: mcp_servers.ctx (https://ctx.example.com/mcp) answered with 16 tools
+ok: True
+transport: mcp
+mcp_server: mcp_servers.ctx
+url: https://ctx.example.com/mcp
+mode: required — Hermes compacts only after ctx confirmed the checkpoint; …
+last_checkpoint: 2026-11-15 14:03 UTC · required · saved · head 019f… · 3 parts
+```
+
+The connection test runs each time (connect timeout 15 seconds, or the server
+entry's own `connect_timeout` when that is longer; Hermes allows 10 seconds more
+for listing the tools); `ok` is its result (`None` on a Hermes without the test) and
+`hermes ctx_checkpoint status` exits with 1 when it fails. A missing or disabled
+server entry is named with the command that fixes it. `last_checkpoint` comes from
+`$HERMES_HOME/ctx_state/checkpoint-status.state`, which every checkpoint replaces:
+time, mode, head id and part count, or the error text (redacted, at most 300
+characters), or why no chain was written (for example `checkpoint_mode: off`), with
+the kind of session it came from (`<platform>/<agent context>`). The latest failure
+is kept as `last_failure` even when another session succeeds afterwards. The file is
+kept when `state_retention_days` prunes the other state files. Warnings
+follow as `warning:` lines: plain `http://` to a remote host, and
+`checkpoint_mode: off` (see [Troubleshooting](#troubleshooting)).
+
+When a checkpoint fails, the provider also tells the session why — the part
+limit, the time limit, a ctx MCP server that is not connected (with
+`hermes mcp test <name>`), a rate limit or a key that stages its writes — through
+Hermes' warning channel, once per distinct cause. Hermes hands that channel to the
+provider only on sessions of the CLI platform; elsewhere (gateway chats) the
+reason is in the log and in the status.
+
 ## Recall of a checkpoint
 
 ```
@@ -151,14 +249,51 @@ ctx get <head-id>        # → latest_manifest_id
 ctx get <manifest-id>    # → source part IDs, parent manifest chain
 ```
 
+## Troubleshooting
+
+**Hermes says the provider "is not installed" although you installed it.** The
+log shows, in this order:
+
+```
+Skipping unreadable plugin directory ctx_checkpoint: [Errno 13] Permission denied: …
+Memory provider 'ctx_checkpoint' is not installed, so external memory is off for this session. …
+compression.checkpoint_required is enabled but the active memory provider (no active provider) does not implement checkpoint API v2. Compress will fail closed. …
+```
+
+The plugin folder (`$HERMES_HOME/plugins/ctx_checkpoint/`) is not readable for the
+account Hermes runs as, so Hermes never loads the plugin, and with
+`compression.checkpoint_required: true` every compaction is refused. On Windows this
+happens when the plugin was installed or updated from a shell with administrator
+rights: the folder then belongs to the administrators and carries an ACL the
+Desktop account cannot read. Fix the folder, not the protection: give it the same
+owner and permissions as a plugin folder that works (on Windows, owner = the
+account Hermes Desktop runs as, with inherited permissions; on Linux, readable by
+the Hermes user), or install again from a normal shell of that account after
+removing the folder. Running `hermes plugins install ctx_checkpoint` again does not
+help while the folder exists, and turning `compression.checkpoint_required` off
+only hides the cause.
+
+**Every compaction is refused and the log names `checkpoint_mode: off`.**
+`checkpoint_mode: off` — in `memory.ctx_checkpoint` or in `$HERMES_HOME/ctx.json`,
+which is read in every mode, also with memory features off — switches the
+checkpoint off: the provider reports checkpoint API v1, and with
+`compression.checkpoint_required: true` Hermes refuses every compaction. The
+provider warns about it when a session starts, naming the file; remove the key or
+set it to `best_effort`.
+
+**A compaction fails with `Unknown tool: mcp__ctx__search`.** The ctx MCP server
+entry did not connect when Hermes started (wrong key, server down, URL wrong).
+`hermes mcp test ctx` shows why; a new session connects again.
+
 ## What it does on your machine
 
 - **Network:** only the MCP calls Hermes makes to the ctx server you configured
   (`search`/`get` to find the session's checkpoint head, `query` for recall and
   `ctx_query`, `search` for recall on a server without `synthesize: false`, `store`
-  for the blocks). With `transport: rest`, HTTPS calls of the
-  plugin's own stdlib client to `CTX_BASE_URL` instead. No third-party services,
-  no telemetry.
+  for the blocks), and the connection test (connect and list the tools of that
+  server entry) when you save the settings or ask for the status. With
+  `transport: rest`, HTTPS calls of the plugin's own stdlib client to
+  `CTX_BASE_URL` instead. No third-party services, no telemetry.
 - **Data sent:** direct user/assistant text of the turns about to be compacted;
   with memory features on also the mirrored `MEMORY.md`/`USER.md` entries, the
   extracted facts, the digests and what the model stores explicitly. Tool
@@ -167,55 +302,69 @@ ctx get <manifest-id>    # → source part IDs, parent manifest chain
   Hermes' `redact_sensitive_text` plus a conservative key/value, auth-header and
   bearer-token pass, with the bound ctx key (`transport: rest`) replaced first; a
   failing redactor skips the write.
-- **Reads:** its own section of the Hermes config (`memory.ctx_checkpoint`), the
-  named `mcp_servers` entry, `compression.threshold` (for the warning above), the
-  transcript Hermes passes to `on_pre_compress`, and with memory features on the
-  profile's `state.db` (read-only, to find a resumed session's root) and
-  `$HERMES_HOME/ctx.json` (legacy engine settings, lower priority than the
-  section). Nothing outside that.
-- **Writes, only when you run setup:** `memory.ctx_checkpoint`, the named
+- **Reads:** its own settings in the Hermes config (`memory.ctx_checkpoint` and
+  `plugins.entries.ctx_checkpoint.settings`), the named `mcp_servers` entry,
+  `compression.threshold` (for the warning above) and
+  `compression.checkpoint_required` (for the status), the transcript Hermes passes
+  to `on_pre_compress`, `$HERMES_HOME/ctx.json` (legacy engine settings, lower
+  priority than the config; read in every mode), and with memory features on the
+  profile's `state.db` (read-only, to find a resumed session's root). Nothing
+  outside that.
+- **Writes, when you save the settings:** `memory.ctx_checkpoint`, the named
   `mcp_servers` entry and — in terminal setup — `memory.provider` in
   `config.yaml`, merged into the file so other sections stay as they are; the
-  API key goes to `.env` as `CTX_API_KEY`. It never writes compaction settings.
-  With memory features on, small state files under `$HERMES_HOME/ctx_state/`
-  (fact dedupe keys and digest segments per root session, mode 0600, pruned
-  after `state_retention_days`).
+  API key goes to `.env` as `CTX_API_KEY`; `compression.checkpoint_required` only
+  when you choose a different mode; never the compaction thresholds. The Settings →
+  Plugins form is written by Hermes itself. **At every checkpoint:**
+  `$HERMES_HOME/ctx_state/checkpoint-status.state` (its outcome, mode 0600) and the
+  empty lock file `checkpoint-status.lock` next to it, which serializes the writers. With
+  memory features on, also small state files under `$HERMES_HOME/ctx_state/`
+  (fact dedupe keys and digest segments per root session, mode 0600, pruned after
+  `state_retention_days`).
 - **No** shell commands, background network beyond the above, stored credentials
   or self-updating code.
 - **Core modules used:** `agent.memory_provider`, `agent.redact` (redaction),
   `agent.secret_scope` (profile-scoped `.env` reads, REST transport),
-  `tools.registry` (MCP dispatch and the tool error envelope) and
-  `hermes_cli.config` (provider config) — imported because the memory-provider
-  surface has no public seam for these yet.
+  `tools.registry` (MCP dispatch and the tool error envelope),
+  `hermes_cli.config` (provider config), `plugins.memory.config_schema` (the
+  Desktop memory form; the module Hermes asks `config_schema.py` to use) and
+  `hermes_cli.mcp_config._probe_single_server` (the connection test behind
+  `hermes mcp test`) — imported because the memory-provider surface has no public
+  seam for these yet; `hermes plugins validate` lists them as private imports.
 
 ## Tests
 
-Two suites, run separately (both use fakes, no live ctx; the host contract comes
-from a Hermes checkout):
+Two suites, run separately (both use fakes, no live ctx and no network; the host
+contract comes from a Hermes checkout):
 
 ```bash
-# umbrella: checkpoint contract, negotiation, setup surfaces, MCP transport (88)
+# umbrella: checkpoint contract, negotiation, setup surfaces, settings sections, status, MCP transport (145)
 PYTHONPATH=/path/to/hermes-agent:integrations/hermes/plugin python -m pytest \
     integrations/hermes/plugin/ctx_checkpoint/tests
-# engine: recall, tools, mirror, facts, digests, chain over REST, CLI, security sweep (292)
+# engine: recall, tools, mirror, facts, digests, chain over REST, CLI, security sweep (410)
 HERMES_REPO=/path/to/hermes-agent python -m pytest \
     integrations/hermes/plugin/ctx_checkpoint/memory/tests
 # lint + format + bandit rules (ruff.toml in this directory)
 cd integrations/hermes/plugin/ctx_checkpoint && ruff check . && ruff format --check .
 ```
 
-The ctx repository's CI does not run these suites (it has no Hermes checkout); run
-them locally before a change lands.
+The workflow `.github/workflows/hermes-ctx-checkpoint.yml` runs ruff,
+`hermes plugins validate` and both suites against a pinned hermes-agent checkout
+for every change of this directory or of the ctx MCP handlers
+(`go/internal/handler/mcp*.go`, whose answers the plugin parses).
 
 ## Layout
 
 ```
-__init__.py          umbrella provider: name, settings section, transport, setup surfaces
+__init__.py          umbrella provider: name, settings, transport, setup surfaces, status
+config_schema.py     field table of the memory form (Hermes Desktop loads it by path)
 cli.py               hermes ctx_checkpoint … (delegates to memory/cli.py)
-plugin.yaml, VERSION manifest and version (one for the whole plugin)
+plugin.yaml, VERSION manifest and version (one for the whole plugin); plugin.yaml also
+                     declares the Settings → Plugins form
 skills/ctx-memory/   the bundled skill (registered as ctx_checkpoint:ctx-memory)
 memory/              the engine: provider, tools, client (REST), mcp_client, config,
-                     checkpoint (chain writer), digest, cli — README + CHANGELOG inside
+                     checkpoint (chain writer), digest, status (connection test, outcome
+                     file, status report), cli — README + CHANGELOG inside
 tests/               umbrella suite
 memory/tests/        engine suite (loads the engine as package ctx_plugin)
 ```

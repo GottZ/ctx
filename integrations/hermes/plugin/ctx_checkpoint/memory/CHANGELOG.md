@@ -6,6 +6,90 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.8.0] — 2026-11-15
+
+Settings and status for Hermes Desktop (GottZ/ctx#285): a memory form under Settings →
+Memory, a section under Settings → Plugins, a connection test on save, the outcome of every
+checkpoint, and a status that shows whether checkpoints work on the MCP transport.
+
+### Added
+- **Desktop memory form.** `../config_schema.py` declares the memory form Hermes Desktop
+  requests with `?surface=declared` (`storage=provider`): URL, API key, memory features and
+  the operating mode inline, sensitivity, category and part size under *Full config…*. The
+  provider reads and writes it through `read_config_fields()` / `write_config_fields()`, over
+  the same validation and writer as `save_config()`. `get_config_schema()` (web dashboard,
+  terminal) is derived from the same field table; a unit test keeps labels, descriptions and
+  defaults equal to the plugin's `_DEFAULT_*` values.
+- **Settings → Plugins section.** `../plugin.yaml` declares `budget_s`, `max_parts`,
+  `auto_recall`, `auto_memory_mirror`, `auto_compress_extract` and `auto_session_digest`;
+  Hermes stores them in `plugins.entries.ctx_checkpoint.settings`. `config.umbrella_section()`
+  reads them over `memory.ctx_checkpoint` (precedence: defaults ← `ctx.json` ←
+  `memory.ctx_checkpoint` ← the Plugins form, for those six keys only; a form value also
+  replaces the engine name of its key there, e.g. `checkpoint_budget_s`), and the existing
+  clamps apply unchanged. The provider and `hermes ctx_checkpoint` share that function.
+- **Connection test.** `status.run_connection_test()` uses Hermes' own MCP probe
+  (`hermes_cli.mcp_config._probe_single_server`, behind `hermes mcp test`) with a connect
+  timeout of 15 s (or the entry's own longer `connect_timeout`), and needs the ctx tools
+  `search`, `get` and `store`. The Desktop form runs it when a save changes the URL or the
+  key (once both are known) and before turning the operating mode on; the terminal setup
+  before writing anything. A failure refuses the save with a readable, redacted reason. A
+  Hermes without the function, or with another signature, counts as "cannot test"
+  (`ok: None`) and blocks nothing. The web dashboard's form does not test: it saves the key
+  only after `save_config()` returns.
+- **Operating mode.** The Desktop memory form carries `compression.checkpoint_required`
+  as *Wait for the checkpoint before compacting*; the terminal setup explains both modes
+  after a passing test and asks for one; the status shows it. The plugin writes the key
+  only when the choice differs from the current value (merged into `compression`,
+  thresholds untouched). The web dashboard's form leaves it out (`desktop_only` in the
+  field table) and `save_config()` ignores it: that form sends every field with the value
+  it loaded, so it would switch back a mode changed elsewhere.
+- **Outcome of every checkpoint.** `on_pre_compress` records time, mode, head id, part count
+  and the redacted error (or why no chain was written) and the session kind
+  (`<platform>/<agent context>`) in `$HERMES_HOME/ctx_state/checkpoint-status.state`,
+  atomically, mode 0600, as `last_checkpoint`, and keeps the latest failure as
+  `last_failure`; the name is no `*.json`, so `prune_state_dir` keeps it. Writers of one
+  profile hold an exclusive `flock` on `checkpoint-status.lock` (at most 2 s, then they write
+  unserialized; on Windows a process-local lock) around reading `last_failure` and replacing
+  the file, so a success cannot put back an older failure. Recording never raises.
+- **Status on the MCP transport.** `get_status_config` (`hermes memory status`) and
+  `hermes ctx_checkpoint status` print the same report: server entry, connection test,
+  operating mode, last checkpoint, warnings. `hermes ctx_checkpoint status` exits with 1 when
+  the test fails. The server URL is shown without user info, query and fragment, also when
+  it starts with a `${VAR}` template.
+- **Reason for the user.** A failed checkpoint names its cause (part limit, time limit, MCP
+  server not connected, rate limit, `confirm_writes`) through the `warning_callback` Hermes
+  passes on CLI-platform sessions, once per distinct cause; a best-effort compaction that ran
+  without a checkpoint and without an error (provider not connected, `checkpoint_chain: false`,
+  `checkpoint_mode: off`) says so the same way.
+- **Warnings.** `checkpoint_mode: off` (from `memory.ctx_checkpoint` or `ctx.json`) is
+  logged at session start and shown in the status, with the source and — under
+  `compression.checkpoint_required` — that every compaction is refused (logged once per
+  process and profile). Plain `http://` to a host outside loopback and the private networks
+  is warned about in setup and status.
+- **CI.** `.github/workflows/hermes-ctx-checkpoint.yml` runs ruff, `hermes plugins validate`
+  and both suites against hermes-agent at a pinned commit.
+
+### Changed
+- `requires_hermes` is `>=0.23.1` (was `>=0.20.4`): from v0.23.1 on `delegate_task` children
+  inherit the provider under `compression.checkpoint_required`; on 0.21.1 to 0.23.0 every
+  sub-agent compaction failed closed. The catalog checks the floor at install time only.
+- The engine resets `_last_chain_receipt` at the start of every `on_pre_compress` (an early
+  return kept the previous receipt) and keeps the cause of a failed chain in
+  `_last_chain_error`.
+- A package-managed install refuses setup with `ConfigReadOnlyError`, a `RuntimeError` and a
+  `ValueError`, so the Desktop route answers 400 with the reason instead of 500.
+- The Desktop form refuses a URL for a stdio server entry (it has none) instead of dropping it.
+- **`ctx.json` checkpoint settings apply again.** Up to 0.7.0 the umbrella put its defaults
+  for `category`, `sensitivity`, `chunk_chars`, `budget_s` and `max_parts` into its section
+  whenever `memory.ctx_checkpoint` did not set them, and that overlay replaced
+  `checkpoint_category`, `checkpoint_sensitivity`, `checkpoint_chunk_chars`,
+  `checkpoint_budget_s` and `checkpoint_max_parts` from `ctx.json` (a `ctx.json` budget of
+  120 s ran with 60 s). The plugin's defaults now sit under `ctx.json` (`load_ctx_config(...,
+  base=...)`, the provider's `_config_base()` seam); the section carries only what is set
+  there. The memory forms show the value in effect and fall back to it, so a save keeps a
+  `ctx.json` value (copied into `memory.ctx_checkpoint`). A profile whose `ctx.json` sets one
+  of these keys now runs with that value.
+
 ## [ctx_checkpoint 0.7.0] — 2026-11-09
 
 `transport: mcp` recalls with the semantic hybrid of `/api/query`, as `transport: rest`

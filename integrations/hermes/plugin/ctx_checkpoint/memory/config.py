@@ -135,10 +135,16 @@ def ctx_config_path(hermes_home: str) -> Path:
     return Path(hermes_home) / "ctx.json"
 
 
-def load_ctx_config(hermes_home: str, overlay: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Defaults ← ``ctx.json`` ← ``overlay`` (the ``memory.ctx_checkpoint`` section of Hermes'
-    ``config.yaml``, mapped by :func:`overlay_from_umbrella`). Never raises (corrupt file → defaults)."""
+def load_ctx_config(
+    hermes_home: str, overlay: dict[str, Any] | None = None, base: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Defaults ← ``base`` ← ``ctx.json`` ← ``overlay``. ``base`` holds defaults of the plugin
+    that differ from the engine's (the umbrella's checkpoint settings), ``overlay`` the
+    ``memory.ctx_checkpoint`` section of Hermes' ``config.yaml`` as set there, mapped by
+    :func:`overlay_from_umbrella`. Never raises (corrupt file → defaults)."""
     config = _default_config()
+    if base:
+        config.update({k: v for k, v in base.items() if v is not None})
     path = ctx_config_path(hermes_home)
     if path.exists():
         try:
@@ -823,6 +829,48 @@ UMBRELLA_KEY_MAP = {
 # Keys of the umbrella section that are not engine settings.
 UMBRELLA_OWN_KEYS = ("mcp_server", "memory", "transport", "rest_base_url")
 TRANSPORTS = ("mcp", "rest")
+# 0.8.0: the Settings → Plugins form (``config_schema`` in ../plugin.yaml) writes these keys to
+# ``plugins.entries.ctx_checkpoint.settings``; a unit test keeps both lists equal. The memory
+# form (../config_schema.py) carries none of them.
+PLUGIN_ID = "ctx_checkpoint"
+PLUGINS_FORM_KEYS = (
+    "budget_s",
+    "max_parts",
+    "auto_recall",
+    "auto_memory_mirror",
+    "auto_compress_extract",
+    "auto_session_digest",
+)
+
+
+def umbrella_section(config: dict[str, Any] | None) -> dict[str, Any]:
+    """The plugin's settings section from Hermes' (loaded) config.yaml.
+
+    ``memory.ctx_checkpoint``, with each key of :data:`PLUGINS_FORM_KEYS` taken from
+    ``plugins.entries.ctx_checkpoint.settings`` when the Settings → Plugins form stored it
+    there. Precedence, lowest first: defaults (the plugin's own for the checkpoint settings,
+    passed as ``base`` to :func:`load_ctx_config`) ← ``ctx.json`` ← ``memory.ctx_checkpoint``
+    ← ``plugins.entries.ctx_checkpoint.settings`` (its other keys are ignored). A form value
+    also replaces the engine name of its key (``checkpoint_budget_s`` for ``budget_s``) written
+    under ``memory.ctx_checkpoint``, which would otherwise map over it. Clamping happens later,
+    the same for every source. Never raises.
+    """
+    config = config if isinstance(config, dict) else {}
+    memory = config.get("memory")
+    section = memory.get(PLUGIN_ID) if isinstance(memory, dict) else None
+    out = dict(section) if isinstance(section, dict) else {}
+    plugins = config.get("plugins")
+    entries = plugins.get("entries") if isinstance(plugins, dict) else None
+    entry = entries.get(PLUGIN_ID) if isinstance(entries, dict) else None
+    settings = entry.get("settings") if isinstance(entry, dict) else None
+    if isinstance(settings, dict):
+        for key in PLUGINS_FORM_KEYS:
+            if settings.get(key) is None:
+                continue
+            if key in UMBRELLA_KEY_MAP:
+                out.pop(UMBRELLA_KEY_MAP[key], None)
+            out[key] = settings[key]
+    return out
 
 
 def overlay_from_umbrella(section: dict[str, Any] | None) -> dict[str, Any]:
