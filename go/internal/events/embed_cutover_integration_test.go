@@ -750,7 +750,8 @@ func TestEmbedCutover_Integration(t *testing.T) {
 				t.Errorf("column %s still exists after cleanup", col)
 			}
 		}
-		for _, idx := range []string{"idx_embedding_hnsw_old", "idx_embedding_pending_old", "idx_dream_pending_old", "idx_guard_pending_old"} {
+		for _, idx := range []string{"idx_embedding_hnsw_old", "idx_embedding_pending_old",
+			"idx_embedding_pending_scope_sens_old", "idx_embedding_pending_sens_old", "idx_dream_pending_old", "idx_guard_pending_old"} {
 			if indexExistsT(t, pool, idx) {
 				t.Errorf("index %s still exists after cleanup", idx)
 			}

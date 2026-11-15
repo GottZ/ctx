@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"net/http"
 	"slices"
@@ -1751,11 +1752,9 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 //     arm's order is what keeps an old block from starving; without an arm
 //     this loop works that end too (below). Taking the newest here is what
 //     lets a block stored a moment ago reach the vector arm on the caller's
-//     next query, with a backlog ahead of it or not. The partial index
-//     idx_embedding_pending (created_at) serves the order in both
-//     directions; scope is a filter on top of it, so a caller with nothing
-//     pending walks the pending rows of the other scopes before the pick
-//     comes back empty.
+//     next query, with a backlog ahead of it or not. The pick reads one
+//     index range per read scope and sensitivity (store.PendingPickSQL,
+//     issue #239), so the pending rows of other scopes cost it nothing.
 //   - Head of line: a block no embed backend may receive (its floor-adjusted
 //     sensitivity is above the trust of every embed backend its scope can
 //     use) gets no memo, the arm's rule, so it would stay the newest pending
@@ -1765,9 +1764,8 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 //     (embedServableClasses, with the floor the chain below applies), and
 //     the pick returns servable blocks only. An unservable block therefore
 //     costs neither a pick statement nor a sync_cap slot, however many are
-//     pending. It stays pending, though, and the class is a filter on the
-//     index walk: every pick walks past the unservable rows ahead of the one
-//     it returns, in the caller's scopes too.
+//     pending, and since issue #239 no read either: the pick reads the index
+//     ranges of the servable classes only. It stays pending.
 //
 // With the background arm off (embed_backfill.interval=0) this loop can be
 // the only embedder there is, so it works both ends of the queue itself.
@@ -2078,8 +2076,8 @@ type backfillPicker struct {
 	db            backfillDB
 	armRuns       bool
 	readScopes    []string
-	callerClasses embedClasses
-	anyClasses    func() embedClasses
+	callerClasses store.PendingClasses
+	anyClasses    func() store.PendingClasses
 	// backoffBase and backoffCap are embed_backfill.backoff_base and
 	// backoff_cap: the curve a block that overran the sync budget sits out
 	// before the old end takes it again (arm off only).
@@ -2108,42 +2106,36 @@ func newBackfillPicker(db backfillDB, armRuns bool, ceilings backends.TrustCeili
 	return &backfillPicker{
 		db: db, armRuns: armRuns, readScopes: readScopes,
 		callerClasses: embedServableClasses(ceilings, floor, readScopes),
-		anyClasses: sync.OnceValue(func() embedClasses {
+		anyClasses: sync.OnceValue(func() store.PendingClasses {
 			return embedServableClasses(ceilings, floor, nil)
 		}),
 	}
 }
 
-// The two orders of the backfill pick, its scope conjunct and its class
-// conjunct ($1 to $4, embedClasses). The id breaks the tie between blocks of
-// one created_at (one transaction).
-const (
-	backfillNewestFirst   = "created_at DESC, id DESC"
-	backfillOldestFirst   = "created_at ASC, id ASC"
-	backfillInScopes      = "\n\t\t\t  AND scope = ANY($5::text[])"
-	backfillClassConjunct = `
-			  AND ((scope <> ALL($1::text[]) AND sensitivity = ANY($2::text[]))
+// backfillClassConjunct is pickOverran's filter by the classes $1 to $4
+// (store.PendingClasses), the set the branches of store.PendingPickSQL read.
+const backfillClassConjunct = `
+			  AND ((sensitivity = ANY($1::text[]) AND scope <> ALL($2::text[]))
 			    OR (scope, sensitivity) IN (SELECT * FROM unnest($3::text[], $4::text[])))`
+
+// The picks of the two ends (store.PendingPickSQL) under the query path's
+// failure-memo predicate: no backoff that still runs, and no caller_timeout
+// memo.
+var (
+	backfillPickNewest = store.PendingPickSQL(backfillPickCols, true, store.EmbedFailureQueryPathExcludedPredicate)
+	backfillPickOldest = store.PendingPickSQL(backfillPickCols, false, store.EmbedFailureQueryPathExcludedPredicate)
 )
 
-// pick takes the first pending block in the given order, of the classes cl,
-// that the query path's failure-memo predicate lets through (no backoff that
-// still runs, and no caller_timeout memo), inside scopeConjunct when one is
-// given. The spliced predicates carry no placeholders: $1 to $4 are the class
-// conjunct's, $5 the scope conjunct's. The scope conjunct stays a conjunct of
-// its own next to the class one, so the planner can still take the scope
-// index for it. No row is pgx.ErrNoRows.
-func (p *backfillPicker) pick(ctx context.Context, cl embedClasses, order, scopeConjunct string, args ...any) (backfillRow, error) {
+const backfillPickCols = "id, title, content, sensitivity, scope, created_at"
+
+// pick runs one of the two picks over the classes cl, which carry the
+// scopes: the caller's are pairs of its read scopes only
+// (embedServableClasses). The query path skips no id ($5). No row is
+// pgx.ErrNoRows.
+func (p *backfillPicker) pick(ctx context.Context, cl store.PendingClasses, sql string) (backfillRow, error) {
 	var row backfillRow
-	err := p.db.QueryRow(ctx,
-		`SELECT id, title, content, sensitivity, scope, created_at FROM context_blocks
-			WHERE embedding IS NULL AND NOT is_archived`+
-			store.EmbedFailureQueryPathExcludedPredicate+store.RetrievalExcludedTypePredicate+
-			backfillClassConjunct+scopeConjunct+`
-			ORDER BY `+order+`
-			LIMIT 1`,
-		append([]any{cl.except, cl.levels, cl.pairScopes, cl.pairLevels}, args...)...,
-	).Scan(&row.id, &row.title, &row.content, &row.sens, &row.scope, &row.queued)
+	err := p.db.QueryRow(ctx, sql, append(cl.Args(), []string{})...).
+		Scan(&row.id, &row.title, &row.content, &row.sens, &row.scope, &row.queued)
 	return row, err
 }
 
@@ -2159,7 +2151,7 @@ func (p *backfillPicker) pick(ctx context.Context, cl embedClasses, order, scope
 // the outer FROM. $1 to $4 are the class conjunct's, $5 the class of the
 // memo, $6 and $7 the backoff base and cap in seconds. No row is
 // pgx.ErrNoRows.
-func (p *backfillPicker) pickOverran(ctx context.Context, cl embedClasses) (backfillRow, error) {
+func (p *backfillPicker) pickOverran(ctx context.Context, cl store.PendingClasses) (backfillRow, error) {
 	var row backfillRow
 	err := p.db.QueryRow(ctx,
 		`SELECT id, title, content, sensitivity, scope, f.next_attempt_at
@@ -2170,9 +2162,9 @@ func (p *backfillPicker) pickOverran(ctx context.Context, cl embedClasses) (back
 			  AND f.next_attempt_at + make_interval(secs =>
 			        least($6::float8 * power(2, least(f.attempts, 31) - 1), $7::float8)) <= now()`+
 			store.RetrievalExcludedTypePredicate+backfillClassConjunct+`
-			ORDER BY f.next_attempt_at ASC, `+backfillOldestFirst+`
+			ORDER BY f.next_attempt_at ASC, `+store.PendingOldestFirst+`
 			LIMIT 1`,
-		cl.except, cl.levels, cl.pairScopes, cl.pairLevels,
+		cl.Shared, cl.Dead, cl.PairScopes, cl.PairLevels,
 		string(store.EmbedFailureCallerTimeout), p.backoffBase.Seconds(), p.backoffCap.Seconds(),
 	).Scan(&row.id, &row.title, &row.content, &row.sens, &row.scope, &row.queued)
 	return row, err
@@ -2187,10 +2179,10 @@ func (p *backfillPicker) pickOverran(ctx context.Context, cl embedClasses) (back
 // on the odd ones; the old end alone once the caller's scopes are drained.
 func (p *backfillPicker) next(ctx context.Context, attempt int) (backfillRow, error) {
 	if p.armRuns {
-		return p.pick(ctx, p.callerClasses, backfillNewestFirst, backfillInScopes, p.readScopes)
+		return p.pick(ctx, p.callerClasses, backfillPickNewest)
 	}
 	if attempt%2 == 1 && !p.callerDrained {
-		row, err := p.pick(ctx, p.callerClasses, backfillNewestFirst, backfillInScopes, p.readScopes)
+		row, err := p.pick(ctx, p.callerClasses, backfillPickNewest)
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return row, err
 		}
@@ -2223,7 +2215,7 @@ func (p *backfillPicker) oldEnd(ctx context.Context) (backfillRow, error) {
 		}
 		p.overranRead = true
 	}
-	row, err := p.pick(ctx, p.anyClasses(), backfillOldestFirst, "")
+	row, err := p.pick(ctx, p.anyClasses(), backfillPickOldest)
 	none := errors.Is(err, pgx.ErrNoRows)
 	if (err != nil && !none) || p.overran == nil {
 		return row, err
@@ -2237,68 +2229,66 @@ func (p *backfillPicker) oldEnd(ctx context.Context) (backfillRow, error) {
 	return row, nil
 }
 
-// embedClasses is the argument set of the backfill pick's class conjunct:
+// embedServableClasses builds the classes of the backfill pick
+// (store.PendingClasses) from the pool's embed ceilings and the sensitivity
+// floor: a block is servable iff the rank of floor.Apply(sensitivity, scope)
+// is at most the ceiling of its scope, which is what Chain(RoleEmbed,
+// floor.Apply(sensitivity, scope), scope) decides for one block
+// (TestEmbedServableClassesMatchChain). Since the floor only raises and a
+// scope's ceiling is never below the shared one, a scope takes either every
+// sensitivity up to its ceiling or, when its floor is above that ceiling,
+// none.
 //
-//	AND ((scope <> ALL(except) AND sensitivity = ANY(levels))
-//	  OR (scope, sensitivity) IN (pairs))
-//
-// levels are the sensitivities the shared embed backends take. except lists
-// the scopes whose answer differs (a sensitivity floor, or an embed backend
-// of their own), and the pairs (pairScopes[i], pairLevels[i]) name what is
-// servable in each of them. All four slices are non-nil: a nil slice binds
-// as NULL, and scope <> ALL(NULL) matches no row.
-type embedClasses struct {
-	except, levels, pairScopes, pairLevels []string
-}
-
-// embedServableClasses builds the class conjunct's arguments from the pool's
-// embed ceilings and the sensitivity floor: a block is servable iff the rank
-// of floor.Apply(sensitivity, scope) is at most the ceiling of its scope,
-// which is what Chain(RoleEmbed, floor.Apply(sensitivity, scope), scope)
-// decides for one block (TestEmbedServableClassesMatchChain). within narrows
-// the exceptions to the scopes a scoped pick can return; nil means every
-// scope, and the exceptions are then the floor's scopes and the scopes with
-// an embed backend of their own, which is the size of the configuration and
-// not of the backlog.
-func embedServableClasses(c backends.TrustCeilings, floor config.ScopeFloor, within []string) embedClasses {
-	cl := embedClasses{except: []string{}, levels: []string{}, pairScopes: []string{}, pairLevels: []string{}}
+// within binds the pick to scopes (the caller's read scopes): every class is
+// then a pair of one of them and one sensitivity it takes, so the pick reads
+// those scopes only. nil means every scope: the shared levels for every scope
+// but the floored-out ones (Dead), plus pairs for the levels a scope's own
+// embed backend takes above the shared ceiling. Both lists are the size of
+// the configuration, not of the backlog.
+func embedServableClasses(c backends.TrustCeilings, floor config.ScopeFloor, within []string) store.PendingClasses {
+	cl := store.NewPendingClasses()
+	// takes lists what one scope sends to an embed backend, lowest first.
+	takes := func(scope string, above int) []string {
+		ceiling := c.For(scope)
+		if floor.Apply(backends.SensPublic, scope).Rank() > ceiling {
+			return nil
+		}
+		var out []string
+		for _, l := range backends.SensitivityLevels {
+			if r := l.Rank(); r > above && r <= ceiling {
+				out = append(out, string(l))
+			}
+		}
+		return out
+	}
+	pair := func(scope string, levels []string) {
+		for _, l := range levels {
+			cl.PairScopes = append(cl.PairScopes, scope)
+			cl.PairLevels = append(cl.PairLevels, l)
+		}
+	}
+	if within != nil {
+		scopes := slices.Clone(within)
+		slices.Sort(scopes)
+		for _, s := range slices.Compact(scopes) {
+			pair(s, takes(s, -1))
+		}
+		return cl
+	}
 	for _, l := range backends.SensitivityLevels {
 		if l.Rank() <= c.Shared {
-			cl.levels = append(cl.levels, string(l))
+			cl.Shared = append(cl.Shared, string(l))
 		}
 	}
-	differs := func(scope string) bool {
-		_, lifted := floor[scope]
-		_, private := c.Private[scope]
-		return lifted || private
-	}
-	var scopes []string
-	if within == nil {
-		for s := range floor {
-			scopes = append(scopes, s)
-		}
-		for s := range c.Private {
-			if _, lifted := floor[s]; !lifted {
-				scopes = append(scopes, s)
-			}
-		}
-	} else {
-		for _, s := range within {
-			if differs(s) && !slices.Contains(scopes, s) {
-				scopes = append(scopes, s)
-			}
+	for s := range floor {
+		if floor.Apply(backends.SensPublic, s).Rank() > c.For(s) {
+			cl.Dead = append(cl.Dead, s)
 		}
 	}
-	slices.Sort(scopes)
-	for _, s := range scopes {
-		cl.except = append(cl.except, s)
-		ceiling := c.For(s)
-		for _, l := range backends.SensitivityLevels {
-			if floor.Apply(l, s).Rank() <= ceiling {
-				cl.pairScopes = append(cl.pairScopes, s)
-				cl.pairLevels = append(cl.pairLevels, string(l))
-			}
-		}
+	slices.Sort(cl.Dead)
+	private := slices.Sorted(maps.Keys(c.Private))
+	for _, s := range private {
+		pair(s, takes(s, c.Shared))
 	}
 	return cl
 }

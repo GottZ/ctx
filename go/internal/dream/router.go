@@ -232,12 +232,27 @@ func (r *Router) chatMode(ctx context.Context, role string, required backends.Se
 // chain resolved under so model resolution and llmlog rows use the same key.
 // Exported for the scheduler's embed-backfill.
 func (r *Router) EmbedChain(required backends.Sensitivity) ([]backends.Backend, string, error) {
-	role := backends.RoleEmbed
-	if r.Pool.RoleConfiguredFor(backends.RoleDreamEmbed, r.Tenant) {
-		role = backends.RoleDreamEmbed
-	}
+	role := r.embedRole()
 	chain, err := r.Pool.Chain(role, required, r.Tenant) // iterated tenant, see available()
 	return chain, role, err
+}
+
+// EmbedCeiling is the highest sensitivity rank EmbedChain resolves for, -1
+// when it resolves for none: the same role choice and tenant view, read from
+// one pool snapshot without the log line an empty chain writes
+// (backends.Pool.TrustCeilings, held against Chain by
+// TestTrustCeilingsMatchChain). The scheduler's embed backfill builds its
+// pick from it before it reads a block.
+func (r *Router) EmbedCeiling() int {
+	return r.Pool.TrustCeilings(r.embedRole()).For(r.Tenant)
+}
+
+// embedRole is the role of the background-embed chain (EmbedChain).
+func (r *Router) embedRole() string {
+	if r.Pool.RoleConfiguredFor(backends.RoleDreamEmbed, r.Tenant) {
+		return backends.RoleDreamEmbed
+	}
+	return backends.RoleEmbed
 }
 
 // EmbedAdmit is Admit under the embed sequence's name (MW5, design/01 §4.6

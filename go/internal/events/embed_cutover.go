@@ -131,8 +131,8 @@ var cutoverColumnRenames = [][2]string{
 	{"embed_model_next", "embed_model"},
 }
 
-// cutoverIndexRenames is §4.8 (3)+(3b): the HNSW pair plus the three
-// partial-index pairs of the Attnum class. Without (3b) the old exemplars'
+// cutoverIndexRenames is §4.8 (3)+(3b): the HNSW pair plus the five
+// partial-index pairs of the Attnum class (two of them since migration 171). Without (3b) the old exemplars'
 // predicates would silently follow embedding_old while the Go queries mean
 // the new column by NAME — backfill peek, dream queue scan and guard
 // pending scan would all seq-scan at 10M (the e2e gate pins the EXPLAINs).
@@ -141,6 +141,10 @@ var cutoverIndexRenames = [][2]string{
 	{verifyNextHNSWIndexName, "idx_embedding_hnsw"},
 	{"idx_embedding_pending", "idx_embedding_pending_old"},
 	{"idx_embedding_pending_next", "idx_embedding_pending"},
+	{"idx_embedding_pending_scope_sens", "idx_embedding_pending_scope_sens_old"},
+	{"idx_embedding_pending_scope_sens_next", "idx_embedding_pending_scope_sens"},
+	{"idx_embedding_pending_sens", "idx_embedding_pending_sens_old"},
+	{"idx_embedding_pending_sens_next", "idx_embedding_pending_sens"},
 	{"idx_dream_pending", "idx_dream_pending_old"},
 	{"idx_dream_pending_next", "idx_dream_pending"},
 	{"idx_guard_pending", "idx_guard_pending_old"},
@@ -151,7 +155,8 @@ var cutoverIndexRenames = [][2]string{
 // (§4.8 "Alt-Bestand") — the exact objects `cleanup` drops BY NAME and the
 // rollback preflight requires to exist (fail-closed).
 var (
-	cutoverOldIndexNames  = []string{"idx_embedding_hnsw_old", "idx_embedding_pending_old", "idx_dream_pending_old", "idx_guard_pending_old"}
+	cutoverOldIndexNames = []string{"idx_embedding_hnsw_old", "idx_embedding_pending_old",
+		"idx_embedding_pending_scope_sens_old", "idx_embedding_pending_sens_old", "idx_dream_pending_old", "idx_guard_pending_old"}
 	cutoverOldColumnNames = []string{"embedding_old", "embed_model_old"}
 )
 

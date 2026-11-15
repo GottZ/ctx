@@ -14,6 +14,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/store"
 )
 
 // fakeBackfillQueue stands in for the database under backfillPicker: the
@@ -21,13 +22,13 @@ import (
 // stored, one that overran the sync budget where it was cut), answering each
 // pick by what its statement says: the order, the scope conjunct, and whether
 // it reads the blocks that overran. It checks the rule that chooses the
-// picks, not the SQL: the class conjunct is not evaluated here, and no
-// statement is parsed by Postgres. The class arguments are checked for which
-// set they are: wantCaller on a statement bound to the caller's scopes,
-// wantAny on every other.
+// picks, not the SQL: the classes are not evaluated here beyond the scopes of
+// a bound pick, and no statement is parsed by Postgres. The class arguments
+// must be one of the two sets: wantCaller binds the pick to the caller's
+// scopes (its pair scopes), wantAny is every other.
 type fakeBackfillQueue struct {
 	pending             []fakePendingBlock
-	wantCaller, wantAny embedClasses
+	wantCaller, wantAny store.PendingClasses
 	scoped              int // statements bound to the caller's scopes
 	stmts               int
 }
@@ -58,8 +59,8 @@ func (q *fakeBackfillQueue) QueryRow(_ context.Context, sql string, args ...any)
 	q.stmts++
 	// The statement that reads the blocks that overran joins their memo.
 	overran := strings.Contains(sql, "JOIN context_embed_failures")
-	newest := strings.Contains(sql, "ORDER BY "+backfillNewestFirst)
-	if !newest && !strings.Contains(sql, backfillOldestFirst) {
+	newest := strings.Contains(sql, "created_at DESC")
+	if !newest && !strings.Contains(sql, "created_at ASC") {
 		return fakeBackfillRow{err: errors.New("pick without one of the two orders")}
 	}
 	// Every other pick carries the query path's predicate, which names the
@@ -67,16 +68,14 @@ func (q *fakeBackfillQueue) QueryRow(_ context.Context, sql string, args ...any)
 	if !overran && !strings.Contains(sql, "caller_timeout") {
 		return fakeBackfillRow{err: errors.New("pick of blocks without the query path's failure-memo predicate")}
 	}
-	var scopes []string
-	scoped := strings.Contains(sql, backfillInScopes)
-	want := q.wantAny
+	got := store.PendingClasses{Shared: args[0].([]string), Dead: args[1].([]string), PairScopes: args[2].([]string), PairLevels: args[3].([]string)}
+	scoped := reflect.DeepEqual(got, q.wantCaller)
+	if !scoped && !reflect.DeepEqual(got, q.wantAny) {
+		return fakeBackfillRow{err: fmt.Errorf("pick with the classes %+v, want %+v (caller) or %+v (any scope)", got, q.wantCaller, q.wantAny)}
+	}
+	scopes := got.PairScopes
 	if scoped {
 		q.scoped++
-		scopes = args[4].([]string)
-		want = q.wantCaller
-	}
-	if got := (embedClasses{args[0].([]string), args[1].([]string), args[2].([]string), args[3].([]string)}); !reflect.DeepEqual(got, want) {
-		return fakeBackfillRow{err: fmt.Errorf("pick (bound to the caller's scopes: %v) with the classes %+v, want %+v", scoped, got, want)}
 	}
 	var found *fakePendingBlock
 	for i := range q.pending {
