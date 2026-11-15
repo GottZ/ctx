@@ -145,9 +145,10 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 	if msg := blockSizeLimit(strOrEmpty(data.Category), strOrEmpty(data.Title), strOrEmpty(data.Content)); msg != "" {
 		return nil, msg, nil
 	}
-	// I7 claim gates, the same call the MCP update twin makes (W01-2a
-	// Nachbesserung, review finding #2 — blocker): this runner had none, so a
-	// chat-staged move into a reserved category was written by the confirm.
+	// I7 claim gates, the call the MCP update twin makes for an update without
+	// a type (W01-2a Nachbesserung, review finding #2 — blocker): this runner
+	// had none, so a chat-staged move into a reserved category was written by
+	// the confirm.
 	// The chat surface is a harness WITHOUT its own gating layer running the
 	// smallest model (file header), which makes a missing gate here worse than
 	// anywhere else, not better. The tool carries no `type` (chat/tools.go

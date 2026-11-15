@@ -302,9 +302,10 @@ func (s *Set) GuardSameScopeOnly(name string) bool {
 // the write CARRIES a parent. Exactly one surface can (REST /api/store's
 // parent_id, NZ-3 point 8); on both MCP store arms, on manage-update and on the
 // confirm of a staged card the refusal stays total, because their shapes have no
-// parent field. (The chat stage runner, /api/ingest and the MCP update tool
-// reach the same function but pass no type at all, so the gate is inert there —
-// a write without a `type` is untouched everywhere.) parent.mode=required
+// parent field; so on the MCP update tool, which carries a `type` since issue
+// #203 and no parent. (The chat stage runner and /api/ingest reach the same
+// function but pass no type at all, so the gate is inert there — a write
+// without a `type` is untouched everywhere.) parent.mode=required
 // therefore means what it says: a block of that type is never CREATED orphaned
 // through a generic write (orphan prevention, design/01 §9.1a). Until T02-11
 // this method had ZERO production callers and the promise was configuration

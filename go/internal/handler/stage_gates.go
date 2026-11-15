@@ -237,11 +237,12 @@ func validateTypeNameAgainstSet(set *blocktype.Set, name string) *writeReject {
 // storeRequest.parent_id on REST /api/store, which hands the id to
 // store.PutBlockParent after the upsert (context_store.go). There the gate is a
 // CONDITION; everywhere else it stays the total refusal T02-11 built, because
-// those shapes carry no parent field at all and pass "" for that reason. The
-// other three callers of claimReject — the chat stage runner, /api/ingest and
-// the MCP update tool — pass no type either, so the gate is inert on them by
-// construction rather than by omission, exactly as validateTypeNameAgainstSet
-// already is.
+// those shapes carry no parent field at all and pass "" for that reason. Two
+// other callers of claimReject — the chat stage runner and /api/ingest — pass
+// no type either, so the gate is inert on them by construction rather than by
+// omission, exactly as validateTypeNameAgainstSet already is. The MCP update
+// tool passes its `type` since issue #203 and no parent, so there the gate is
+// the total refusal it is on manage-update.
 //
 // The refusal names the type's own DOMAIN path, and that is not the same offer
 // as parent_id: for `comment` the domain path is store.InsertCommentBlock behind
@@ -263,11 +264,11 @@ func validateTypeNameAgainstSet(set *blocktype.Set, name string) *writeReject {
 // the confirm-time re-check (confirm_core.go): a card staged before the gate
 // existed is refused at confirm instead of executing under the old rules.
 //
-// KNOWN CONSEQUENCE, deliberate: manage-update cannot re-assert a
-// required-parent type on a block that already HAS a parent either — the gate
-// sees the claim, not the row. No legitimate write is lost by that, because no
-// manage-update payload can give a block the parent the type demands; the case
-// is a no-op re-assertion on an existing comment.
+// KNOWN CONSEQUENCE, deliberate: manage-update and the MCP update tool cannot
+// re-assert a required-parent type on a block that already HAS a parent either
+// — the gate sees the claim, not the row. No legitimate write is lost by that,
+// because no update payload can give a block the parent the type demands; the
+// case is a no-op re-assertion on an existing comment.
 //
 // It runs AFTER validateTypeNameAgainstSet, and that order is load-bearing:
 // ParentMode falls back to ParentModeNone for names it does not know, so a
