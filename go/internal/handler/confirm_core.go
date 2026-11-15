@@ -70,10 +70,11 @@ const (
 	// for a cause in the payload, not for a server fault: a staged update that
 	// would give the block the identity of another active block (issue #227).
 	// Outcome.Reject carries the class — the 409 the direct update answers —
-	// with a prefix that says the token is spent. The collision can only be
-	// seen by running the statement, so it cannot reject before the consume
-	// like confirmClaimRejected, and the remedy (another category or title) is
-	// a new payload anyway.
+	// with a prefix that says the token is spent. The unique index decides the
+	// collision atomically, and only the statement after the consume consults
+	// it; a probe before the consume would keep the token for most
+	// collisions but not for one that lands between probe and statement, and
+	// the remedy (another category or title) is a new payload either way.
 	confirmExecRejected
 )
 

@@ -366,7 +366,7 @@ func TestUpdateIdentityConflict(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DROP TRIGGER IF EXISTS trg_i227_other_unique ON context_blocks; DROP FUNCTION IF EXISTS i227_other_unique()`)
 	})
-	for _, s := range surfaces[:2] {
+	for _, s := range surfaces {
 		t.Run(s.name+"/other_unique_violation_stays_500", func(t *testing.T) {
 			mover := mkBlock(t, "i227-p", "i227 probe "+s.name, "private")
 			logs.take()
@@ -383,6 +383,15 @@ func TestUpdateIdentityConflict(t *testing.T) {
 			case "mcp_update":
 				if got.text != "update failed: internal error" || got.code != "" {
 					t.Errorf("answer = %+v, want the uncoded internal error", got)
+				}
+			case "mcp_confirm":
+				if !strings.HasPrefix(got.text, "confirmed update failed to execute: ") || got.code != "" {
+					t.Errorf("answer = %+v, want the uncoded execute error", got)
+				}
+			case "http_confirm":
+				if got.status != http.StatusInternalServerError || got.code != "" ||
+					got.text != "confirmed update failed to execute — the stage token is consumed; re-stage the update" {
+					t.Errorf("answer = %+v, want the uncoded 500 execute error", got)
 				}
 			}
 			if len(errLines) == 0 {

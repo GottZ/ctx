@@ -276,7 +276,7 @@ block in its scope is refused, and nothing is written: `isError: true`, code
 Sending the same update again cannot succeed; pick another category or title, or
 archive or rename the block the text names first (it lies in a scope this key reads,
 so `get` returns it; the ` (block <uuid>)` part is missing when that block changed
-in the moment between the refusal and the lookup). A staged update that collides
+in the moment between the refusal and the lookup, or the lookup failed). A staged update that collides
 when it is confirmed answers the same code and text behind the prefix
 `confirmed update not executed, the stage token is consumed: ` — stage the corrected
 update anew. The REST `manage update` action answers the same collision with HTTP 409.
@@ -315,6 +315,9 @@ A hash is bound to the key that staged it and expires. **Answer:**
 `Confirmed and archived: <title> (id: <uuid>, category: <category>)`,
 or for blobs `Confirmed and stored blob: <title> (id: <uuid>, category: <category>, <n> bytes)` /
 `Confirmed and linked blob: <title> (id: <uuid>, context_block_id: <uuid>)`.
+A confirmed update that would give the block another active block's category and
+title is refused after the hash was spent: code `constraint`, the [`update`](#update)
+text behind `confirmed update not executed, the stage token is consumed: `.
 
 ## Issues
 

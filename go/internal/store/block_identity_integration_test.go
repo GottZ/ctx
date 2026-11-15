@@ -40,6 +40,15 @@ func TestUpdateBlockIdentityTaken(t *testing.T) {
 	strptr := func(s string) *string { return &s }
 
 	t.Run("holder in a write scope is named", func(t *testing.T) {
+		// Two archived twins hold the same identity before the live holder
+		// does (the index is partial, so archiving frees it): the holder read
+		// has to name the active block, which is the only one `get` returns.
+		for range 2 {
+			twin := upsert(t, "i227-c", "same", "private")
+			if _, err := store.DeleteBlock(ctx, pool, twin.ID, []string{"private"}); err != nil {
+				t.Fatalf("archive twin: %v", err)
+			}
+		}
 		holder := upsert(t, "i227-c", "same", "private")
 		mover := upsert(t, "i227-b", "same", "private")
 		_, _, err := store.UpdateBlock(ctx, pool, mover.ID, store.UpdateBlockData{Category: strptr("i227-c")}, []string{"private"})
