@@ -163,6 +163,20 @@ func WriteLinks(ctx context.Context, pool interface {
 		Begin:  "dream: begin tx",
 		Commit: "dream: commit links",
 	}, func(tx pgx.Tx) error {
+		// Issue #197: the scope's supersedes lock comes first, before any row
+		// lock of the batch. A store declaring a supersedes takes it first as
+		// well, so the two never interleave: the reverse-pin probe below then
+		// reads every declaration committed before this batch, and a
+		// declaration after it waits and sees this batch's links in its own
+		// cycle check. Taken for every batch, not only for one carrying a
+		// supersedes link: a batch that meets a declared row through ON
+		// CONFLICT locks that link row, and a declaration of the same pair
+		// waiting for it while holding the source would otherwise close a
+		// lock cycle with the batch's next insert (FOR KEY SHARE on the source).
+		if err := store.LockSupersedesScope(ctx, tx, sourceScope); err != nil {
+			return err
+		}
+
 		// Fetch source block metadata for structural checks. updated_at is no
 		// longer consulted (Welle 46: supersedes uses created_at, causal uses
 		// created_at) — kept in the SELECT for column-stability but discarded.

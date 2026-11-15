@@ -102,6 +102,26 @@ func (e *SupersedesConflictError) Error() string {
 	}
 }
 
+// LockSupersedesScope serialises, per scope, the transactions that can create
+// supersedes links: a store declaring one (UpsertBlockSupersedes,
+// CheckSupersedesDeclarable) and a dream link batch (dream.WriteLinks). Their
+// cycle checks read the links of OTHER blocks — the superseders above the
+// written block — which no row lock of theirs covers, so without this two of
+// them can each check before the other commits and together close a cycle.
+// It must be the FIRST lock its transaction takes: every holder then waits
+// for it holding nothing, and the row locks after it cannot form a cycle with
+// another holder's. Transaction-scoped; released at commit or rollback.
+func LockSupersedesScope(ctx context.Context, tx pgx.Tx, scope string) error {
+	if _, err := tx.Exec(ctx, supersedesScopeLockSQL, scope); err != nil {
+		return fmt.Errorf("store: supersedes scope lock: %w", err)
+	}
+	return nil
+}
+
+// supersedesScopeLockSQL is LockSupersedesScope's statement ($1 = the scope),
+// in the key form the other per-key advisory locks of this package use.
+const supersedesScopeLockSQL = `SELECT pg_advisory_xact_lock(hashtext('ctx:supersedes:' || $1::text))`
+
 // SupersedesDeclaration is the `supersedes` of one store.
 type SupersedesDeclaration struct {
 	// TargetID is the block the write replaces, as the client sent it.
@@ -134,21 +154,26 @@ type supersedesTarget struct {
 //     is the delete-resolve of the link (`ctx dream resolve <source> <target>
 //     supersedes delete`, DreamLinkResolve), which reconciles the target.
 //
-// Lock order: the written block's row (the upsert identity, FOR UPDATE — the
-// lock UpsertBlock's pre-read takes anyway), then the target (FOR NO KEY
-// UPDATE), both BEFORE the first write of the transaction. Source before
+// Lock order: the scope's supersedes lock (LockSupersedesScope, first), the
+// written block's row (the upsert identity, FOR UPDATE — the lock
+// UpsertBlock's pre-read takes anyway), then the target (FOR NO KEY UPDATE),
+// all BEFORE the first write of the transaction. Source before
 // target, not id order: a dream batch that already inserted a link touching
 // the source holds FOR KEY SHARE on it and then locks its supersedes targets,
 // so taking the target first and then waiting for the source would close a
 // cycle with it. Every write on context_blocks fires mark_guard_dirty, which
 // holds the context_guard_state row until commit, so no row lock may be
-// waited for after the upsert (ReconcileSupersedesTargets). Two stores that
-// declare each other at the same instant can still deadlock; PostgreSQL
-// aborts one of them, and its retry is refused as a cycle.
+// waited for after the upsert (ReconcileSupersedesTargets). Declarations and
+// dream batches of one scope run one after the other (the scope lock), so a
+// declaration and a dream batch writing links from the same block, or two
+// stores declaring each other, wait instead of deadlocking.
 func UpsertBlockSupersedes(ctx context.Context, pool *pgxpool.Pool, category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite, typeName string, decl SupersedesDeclaration) (*Block, error) {
 	u := prepareUpsert(category, title, content, tags, metadata, scope, scopeExplicit, sens, typeName)
 	var b *Block
 	err := pgxdb.Write(ctx, pool, pgxdb.At("store: upsert block declaring supersedes"), func(tx pgx.Tx) error {
+		if err := LockSupersedesScope(ctx, tx, scope); err != nil {
+			return err
+		}
 		tgt, _, err := lockSupersedesPair(ctx, tx, category, title, scope, decl.TargetID)
 		if err != nil {
 			return err
@@ -184,6 +209,9 @@ func UpsertBlockSupersedes(ctx context.Context, pool *pgxpool.Pool, category, ti
 // close no cycle).
 func CheckSupersedesDeclarable(ctx context.Context, pool *pgxpool.Pool, category, title, scope string, decl SupersedesDeclaration) error {
 	err := pgxdb.Write(ctx, pool, pgxdb.At("store: check supersedes"), func(tx pgx.Tx) error {
+		if err := LockSupersedesScope(ctx, tx, scope); err != nil {
+			return err
+		}
 		tgt, sourceID, err := lockSupersedesPair(ctx, tx, category, title, scope, decl.TargetID)
 		if err != nil {
 			return err

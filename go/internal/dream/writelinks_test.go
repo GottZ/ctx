@@ -61,6 +61,14 @@ func expectTargetFetch(mock pgxmock.PgxPoolIface, tid, scope string, archived bo
 		WillReturnRows(rows)
 }
 
+// expectScopeLock matches the per-scope supersedes lock WriteLinks takes
+// first in its transaction (store.LockSupersedesScope, issue #197).
+func expectScopeLock(mock pgxmock.PgxPoolIface) {
+	mock.ExpectExec(`pg_advisory_xact_lock`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+}
+
 // anyArgs returns n AnyArg matchers for variable-arity WithArgs calls.
 func anyArgs(n int) []any {
 	out := make([]any, n)
@@ -128,6 +136,7 @@ func TestWriteLinks_CrossScope_Reject(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
+	expectScopeLock(mock)
 	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
 	expectTargetFetch(mock, targetID, "shared" /* != private */, false, 1.0, "decisions", tLate, tLate, "tgt")
 	mock.ExpectCommit()
@@ -151,6 +160,7 @@ func TestWriteLinks_TargetArchived_Reject(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
+	expectScopeLock(mock)
 	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
 	expectTargetFetch(mock, targetID, "private", true /* archived */, 1.0, "decisions", tLate, tLate, "tgt")
 	mock.ExpectCommit()
@@ -174,6 +184,7 @@ func TestWriteLinks_FactualSameCategory_CoercedToTopical(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
+	expectScopeLock(mock)
 	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
 	expectTargetFetch(mock, targetID, "private", false, 1.0, "decisions", tLate, tLate, "tgt")
 	// Coerced link must be inserted with relationship='topical'.
@@ -212,6 +223,7 @@ func TestWriteLinks_Causal_SrcNotOlder_Reject(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
+	expectScopeLock(mock)
 	expectSourceFetch(mock, sourceID, "decisions", tLate, tLate, "src")
 	expectTargetFetch(mock, targetID, "private", false, 1.0, "decisions", tEarly, tEarly, "tgt")
 	mock.ExpectCommit()
@@ -242,6 +254,7 @@ func TestWriteLinks_InsertError_LoopBreaksZeroWritten(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
+	expectScopeLock(mock)
 	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
 	expectTargetFetch(mock, targetID, "private", false, 1.0, "decisions", tLate, tLate, "tgt")
 	mock.ExpectExec(`INSERT INTO context_dream_links`).
@@ -278,6 +291,7 @@ func TestWriteLinks_ReplaceSemantics_NotTriggered_OnZeroWritten(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
+	expectScopeLock(mock)
 	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
 	// Single link, archived target → 0 writes, no DELETE call.
 	expectTargetFetch(mock, targetID, "private", true /* archived */, 1.0, "decisions", tLate, tLate, "tgt")
@@ -318,6 +332,7 @@ func TestWriteLinks_SupersedesRevert_WritesKnowledge_NotNull(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
+	expectScopeLock(mock)
 	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
 	expectTargetFetch(mock, targetID, "private", false, 1.0, "decisions", tLate, tLate, "tgt")
 	expectInsertLink(mock)
@@ -416,6 +431,7 @@ func TestWriteLinks_LinkClasses_CausalRejectedForTopicalOnlySource(t *testing.T)
 	})
 
 	mock.ExpectBegin()
+	expectScopeLock(mock)
 	expectSourceFetchTyped(mock, sourceID, "decisions", tEarly, tEarly, "src", "wf-topical-only")
 	// causal passes V9 (src older than tgt) — only the class gate rejects.
 	expectTargetFetch(mock, targetID, "private", false, 1.0, "projects", tLate, tLate, "tgt")
@@ -447,6 +463,7 @@ func TestWriteLinks_LinkClasses_TopicalAllowed(t *testing.T) {
 	})
 
 	mock.ExpectBegin()
+	expectScopeLock(mock)
 	expectSourceFetchTyped(mock, sourceID, "decisions", tEarly, tEarly, "src", "wf-topical-only")
 	expectTargetFetch(mock, targetID, "private", false, 1.0, "projects", tLate, tLate, "tgt")
 	expectInsertLink(mock)
@@ -492,6 +509,7 @@ func TestWriteLinks_UnknownSourceType_RejectsBatchFailClosed(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
+	expectScopeLock(mock)
 	expectSourceFetchTyped(mock, sourceID, "decisions", tEarly, tEarly, "src", "wf-unregistered")
 	// No further expectations: the batch stops at the source policy resolve.
 
