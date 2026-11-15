@@ -166,7 +166,8 @@ Lightweight search without an LLM call. Read-only.
 | `query` | string | | search text |
 | `category` | string | | filter by category |
 | `tags` | string[] | | filter by tags |
-| `limit` | integer | | maximum results (default 10; no upper cap on this tool) |
+| `limit` | integer | | maximum results (default 10, max 50) |
+| `after` | object | | page a listing with an empty `query`: `{}` for the first page, then the `next_after` of the previous answer |
 | `cluster` | string | | restrict to one topic by its stable handle (from the graph surfaces) |
 | `types` | string[] | | restrict to these block types; each must be retrieval-visible, otherwise an error |
 | `types_exclude` | string[] | | exclude these block types |
@@ -177,6 +178,32 @@ that retrieval policy keeps out cannot be named. **Answer:** a JSON array of com
 rows — `id`, `category`, `tags`, `title`, `content_preview`, `content_length`, `scope`,
 `sensitivity`, `type`, `lifecycle_state`, `type_source`, `untrusted`, `score`,
 `created_at`, `updated_at` (empty fields are omitted).
+
+**Limit.** One call answers at most 50 rows, as on `POST /api/search`. A `limit` above
+that is lowered to 50, and the answer says so (below).
+
+**Paging (`after`).** With an empty `query` the tool lists the blocks that match the
+filters, newest `updated_at` first. Send `after: {}` for the first page; each answer
+then carries `next_after` exactly when another row follows, and passing it back as
+`after` (with the same filters) answers the next page. The cursor is the
+`{after_updated, after_id}` position of the last row, the same cursor `POST /api/search`
+takes and answers: it carries no filter and no scope, and each page applies the
+filters and the read access of the call that sends it, so a cursor from another key
+or from other filters only names a position. A cursor without both fields is the
+first page; one whose `after_id` is not a block id is an error. Paging orders by
+`updated_at`: a block that is updated while a listing is paged moves ahead of the
+cursor, so a listing that has not reached it yet does not see it; blocks added
+meanwhile are newer than the cursor and are not listed, archived ones drop out. `after` next to a
+non-empty `query` is an error: the full-text path answers its top matches and has no
+next page.
+
+**The page object.** A call with `after` answers one JSON object instead of the
+array: `next_after` (absent on the last page), `limit` (the effective page size),
+`requested_limit` (the `limit` sent, only when it was lowered), and `results`, the
+rows. A call without `after` keeps the array byte for byte; when its
+`limit` was lowered or more rows follow, the same `next_after`, `limit` and
+`requested_limit` ride beside the array as the result's `structuredContent`, which a
+client that reads only the text never sees.
 
 ### get
 

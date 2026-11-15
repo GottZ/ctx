@@ -33,10 +33,14 @@ import (
 //   - FACET: the C6 cluster gate (flag, then form, never an existence check)
 //     stood twice, character for character.
 //
-// The fourth rule, the LIMIT, deliberately stays split (E03-2 = B / K28): REST
-// caps at 50, the MCP tool does not cap at all. Only the default (10) is shared,
-// as defaultSearchLimit below — a cap in here would silently narrow a surface
-// the decision says to leave unbounded.
+// The fourth rule, the LIMIT, was recorded as split (E03-2 = B / K28: REST caps
+// at 50, the MCP tool is uncapped). That split never had an effect: the
+// statement builder clamps every caller at store.SearchMaxLimit, so the tool
+// answered at most 50 rows all along, without saying so (#206). The default AND
+// the cap are therefore one rule here (searchLimit), and the tool now reports a
+// lowered limit instead of hiding it. The same holds for the CURSOR: the keyset
+// position, its form check and the next-page answer are one rule for both
+// transports (searchPage.NextAfter).
 //
 // What stays in the transports, by design: decoding, the read rate-limit
 // preamble (T03-6), the config snapshot (see FacetEnabled), the response
@@ -110,24 +114,58 @@ func (e *searchRejected) Error() string { return e.msg }
 // both transports emitted before this file existed.
 var errSearchClusterForm = &searchRejected{msg: "cluster must be a full UUID"}
 
-// defaultSearchLimit is the shared default of both surfaces: absent or
-// non-positive means 10. The REST CAP (50) is not here on purpose — K28 keeps
-// the handler side of the MCP tool uncapped (E03-2 = B), and a cap in the shared
-// core would be a silent narrowing of that decision.
-//
-// Measured caveat, so nobody reads more freedom into this than exists: the
-// STATEMENT builder clamps anyway — store.searchBlocksSQL runs
-// ClampLimit(limit, 10, 50) over every caller (store/blocks.go), and it did so
-// before this wave. The tool surface is therefore already bounded at 50 ROWS in
-// the store; what E03-2 = B keeps open is the handler layer only. The REST cap is
-// still needed here and not redundant: /api/search ECHOES its effective limit
-// and derives the next-page cursor from it, so the two would drift apart if the
-// route left the clamping to the store.
-func defaultSearchLimit(limit int) int {
-	if limit <= 0 {
+// errSearchCursorForm refuses an `after` whose id is not a full UUID. Without it
+// the value reached the uuid bind of the keyset comparison and came back as a
+// store error — a 500 on REST, the driver's text on MCP. The refusal depends on
+// the cursor's form alone, never on whether its position names a block.
+var errSearchCursorForm = &searchRejected{msg: "after must be the next_after of a previous answer (after_id is not a block id)"}
+
+// searchLimit is the effective page size of both surfaces: absent or
+// non-positive means 10, anything above store.SearchMaxLimit means that cap —
+// the clamp the statement builder applies to every caller, stated where the
+// transports can echo it (REST `filters.limit`) and report it (the MCP tool's
+// `requested_limit`). Until #206 only the default lived here and the cap was
+// documented as REST-only (E03-2 = B), which the store's clamp made untrue.
+func searchLimit(limit int) int {
+	switch {
+	case limit <= 0:
 		return 10
+	case limit > store.SearchMaxLimit:
+		return store.SearchMaxLimit
 	}
 	return limit
+}
+
+// searchCursorOf is the one reading of a caller's `after`. A cursor without a
+// position (no id or no timestamp, the `{}` of a first page) is page 1 — the
+// rule /api/search has had since W7. A position with an id that is not a full
+// UUID is refused. The cursor is only a position: it carries no filter and no
+// scope, and the statement applies the caller's own visibility to whatever
+// follows it, so a cursor taken by another key or under other filters reads
+// nothing that key could not read anyway.
+func searchCursorOf(after *store.SearchCursor) (*store.SearchCursor, error) {
+	if after == nil || after.ID == "" || after.UpdatedAt.IsZero() {
+		return nil, nil
+	}
+	if !fullUUIDRe.MatchString(after.ID) {
+		return nil, errSearchCursorForm
+	}
+	return after, nil
+}
+
+// searchCursorAfter is the cursor that resumes strictly after row.
+func searchCursorAfter(row store.BlockPreview) *store.SearchCursor {
+	return &store.SearchCursor{UpdatedAt: row.UpdatedAt, ID: row.ID}
+}
+
+// searchPage is one answer of the core.
+type searchPage struct {
+	Rows []store.BlockPreview
+	// Limit is the effective page size (searchLimit of the request).
+	Limit int
+	// NextAfter resumes after the last row when the browse listing goes on;
+	// nil on its last page and always on the full-text path ("top matches").
+	NextAfter *store.SearchCursor
 }
 
 // clusterFacetOf is the FIRST stage of the C6 gate: the flag decides whether the
@@ -156,10 +194,14 @@ func clusterFacetOf(enabled bool, cluster string) *string {
 //     Never an existence check: a well-formed handle is ALWAYS a 200 with a
 //     possibly empty list, because unknown, foreign and member-less have to be
 //     one answer or the handle space becomes enumerable (design/03 §5.7);
-//  3. the grant set, refused loudly when it is over the per-request bound
+//  3. the cursor FORM on the browse path (searchCursorOf), for the same reason
+//     as the facet: a malformed id must be a caller error, not a store error.
+//     The full-text path leaves the cursor inert, as it always did;
+//  4. the grant set, refused loudly when it is over the per-request bound
 //     (T04-20: degrading to scope-only would hide every granted block silently
 //     and for as long as the condition lasts);
-//  4. the statement.
+//  5. the statement, with one probe row on the browse path so the next-page
+//     cursor exists exactly when another row does.
 //
 // It takes *auth.AuthResult and does NOT check it: the validity wache stays a
 // transport concern (REST answers 401 with its envelope, MCP fails closed with
@@ -172,19 +214,27 @@ func clusterFacetOf(enabled bool, cluster string) *string {
 // (structural refusal, rendered with tooManyGrantsMsg), and the raw store error
 // (server error). The store error is returned UNWRAPPED so the MCP surface can
 // keep printing "search failed: %v" byte-for-byte.
-func executeSearch(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, ar *auth.AuthResult, a searchArgs) ([]store.BlockPreview, error) {
+func executeSearch(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, ar *auth.AuthResult, a searchArgs) (searchPage, error) {
 	types := a.Types
 	if a.VisibleTypesOnly {
 		cut, rejection := resolveMCPVisibleTypes(set, a.Types)
 		if rejection != "" {
-			return nil, &searchRejected{msg: rejection}
+			return searchPage{}, &searchRejected{msg: rejection}
 		}
 		types = cut
 	}
 
 	facet := clusterFacetOf(a.FacetEnabled, a.Cluster)
 	if facet != nil && !fullUUIDRe.MatchString(*facet) {
-		return nil, errSearchClusterForm
+		return searchPage{}, errSearchClusterForm
+	}
+
+	var after *store.SearchCursor
+	if a.Query == "" {
+		var err error
+		if after, err = searchCursorOf(a.After); err != nil {
+			return searchPage{}, err
+		}
 	}
 
 	// resolveGrants is fail-closed-and-quiet for a transient resolver failure
@@ -193,9 +243,18 @@ func executeSearch(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, 
 	// is safe: there is no second class for a caller to mistake for it.
 	grants, err := resolveGrants(ctx, pool, ar)
 	if err != nil {
-		return nil, err
+		return searchPage{}, err
 	}
 
-	return store.SearchBlocks(ctx, pool, set, a.Query, ar.ReadScopes, a.Category, a.Tags,
-		defaultSearchLimit(a.Limit), a.Compact, a.After, grants, types, a.effectiveTypesExclude(), facet)
+	limit := searchLimit(a.Limit)
+	rows, more, err := store.SearchBlocksPage(ctx, pool, set, a.Query, ar.ReadScopes, a.Category, a.Tags,
+		limit, a.Compact, after, grants, types, a.effectiveTypesExclude(), facet)
+	if err != nil {
+		return searchPage{}, err
+	}
+	page := searchPage{Rows: rows, Limit: limit}
+	if more && len(rows) > 0 {
+		page.NextAfter = searchCursorAfter(rows[len(rows)-1])
+	}
+	return page, nil
 }
