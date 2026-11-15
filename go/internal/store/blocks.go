@@ -21,6 +21,7 @@ import (
 	"github.com/GottZ/ctx/internal/redact"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvec "github.com/pgvector/pgvector-go"
 )
@@ -1268,6 +1269,71 @@ type UpdateBlockData struct {
 	SensitivityAudit map[string]any `json:"-"`
 }
 
+// blockIdentityIndex is the partial unique index that makes (category, title,
+// scope) the identity of an ACTIVE block (113_baseline.sql, the fold of
+// 005_scope_unique.sql: WHERE NOT is_archived).
+const blockIdentityIndex = "uq_context_category_title_scope"
+
+// BlockIdentityTakenError is the refusal of a by-id update that would give a
+// block the (category, title, scope) of another active block (issue #227). It
+// is a typed error and not a message for the reason ErrProvenanceProtected is
+// a sentinel: the write surfaces answer it as a 409 the caller resolves by
+// choosing another category or title, not as the generic 500 of an unexpected
+// store error.
+//
+// ConflictID names the active block that holds the identity, "" when the
+// follow-up read found none (the holder was renamed or archived between the
+// refused statement and the read) or failed. That read runs within the
+// caller's write scopes (blockIdentityHolder), so the id never names a block
+// outside them.
+type BlockIdentityTakenError struct {
+	ConflictID string
+}
+
+func (e *BlockIdentityTakenError) Error() string {
+	if e.ConflictID == "" {
+		return "store: update block: another active block in this scope already has this category and title"
+	}
+	return "store: update block: block " + e.ConflictID + " already has this category and title in this scope"
+}
+
+// blockIdentityViolation reports the 23505 of blockIdentityIndex and of no
+// other constraint: a unique violation elsewhere is not a collision this layer
+// can explain, and it stays the caller's server fault.
+func blockIdentityViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == blockIdentityIndex
+}
+
+// blockIdentityHolder reads the id of the active block that holds the identity
+// a refused update of id asked for: the value the update sent for each of
+// category, title and scope, the row's own value for each it did not send. It
+// runs on the refusal path only, after the update's transaction rolled back:
+// one primary-key read and one probe of blockIdentityIndex. The holder is read
+// within writeScopes, so the answer stays inside what the caller may read
+// (writableBlockScopes honours a write scope only where the key also reads it).
+// Like updateBlockMissReason it decides the message, never the outcome: a miss
+// or a read fault answers "".
+func blockIdentityHolder(ctx context.Context, pool *pgxpool.Pool, id string, data UpdateBlockData, writeScopes []string) string {
+	var holder string
+	if err := pool.QueryRow(ctx,
+		`SELECT o.id::text
+		   FROM context_blocks t
+		   JOIN context_blocks o
+		     ON o.category = COALESCE($2::text, t.category)
+		    AND o.title    = COALESCE($3::text, t.title)
+		    AND o.scope    = COALESCE($4::text, t.scope)
+		    AND NOT o.is_archived
+		    AND o.id <> t.id
+		  WHERE t.id = $1 AND o.scope = ANY($5::text[])
+		  LIMIT 1`,
+		id, data.Category, data.Title, data.Scope, writeScopes,
+	).Scan(&holder); err != nil {
+		return ""
+	}
+	return holder
+}
+
 // UpdateBlock updates specific fields of a block. The block must live in one of
 // the caller's write-eligible scopes (home_scope ∪ shared-if-allowed).
 // Returns the updated block and whether the title or the content now differs
@@ -1277,6 +1343,11 @@ type UpdateBlockData struct {
 // unchanged, and clearing the vector would take the block out of the semantic
 // arms and put it back into the backfill for nothing (issue #198, the parity
 // of UpsertBlock's `hadRow && oldContent != content`).
+//
+// An update that would give the block the (category, title, scope) of another
+// active block — a title rename, a category change or a scope move onto an
+// identity in use — writes nothing and returns *BlockIdentityTakenError
+// (issue #227).
 func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data UpdateBlockData, writeScopes []string) (*Block, bool, error) {
 	// Build SET clause dynamically.
 	setClauses := []string{}
@@ -1414,6 +1485,11 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	// a vector for content it no longer holds, invisible to the backfill.
 	b := &Block{}
 	found, needsReEmbed, err := runBlockUpdate(ctx, pool, b, id, query, args, data.Scope != nil)
+	var taken *BlockIdentityTakenError
+	if errors.As(err, &taken) {
+		taken.ConflictID = blockIdentityHolder(ctx, pool, id, data, writeScopes)
+		return nil, false, taken
+	}
 	if err != nil {
 		return nil, false, err
 	}
@@ -1472,6 +1548,9 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 			// A miss writes nothing: pgxdb.ErrRollback keeps it a rollback
 			// instead of a commit.
 			return pgxdb.ErrRollback
+		}
+		if blockIdentityViolation(err) {
+			return &BlockIdentityTakenError{}
 		}
 		if err != nil {
 			return fmt.Errorf("store: update block: %w", err)

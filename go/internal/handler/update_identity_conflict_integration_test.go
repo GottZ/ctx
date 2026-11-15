@@ -288,6 +288,12 @@ func TestUpdateIdentityConflict(t *testing.T) {
 		if len(errLines) != 0 {
 			t.Errorf("an input error wrote ERROR lines:\n%s", strings.Join(errLines, "\n"))
 		}
+		// A confirmed update runs the statement after the consume: the answer
+		// has to say the token is spent.
+		if strings.HasSuffix(s.name, "_confirm") && !strings.Contains(got.text, "the stage token is consumed") {
+			t.Errorf("confirm answer %q does not say the stage token is consumed", got.text)
+		}
+		t.Logf("answer: status=%d code=%q text=%q", got.status, got.code, got.text)
 	}
 
 	strptr := func(s string) *string { return &s }

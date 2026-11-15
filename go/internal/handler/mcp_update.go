@@ -193,7 +193,9 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 		block, _, err := store.UpdateBlock(ctx, cfg.Pool, resolvedID, data, writableBlockScopes(ar))
 		if err != nil {
 			// I7/S3: the target is a derivative — 403 class, not a 500.
-			if rej := provenanceRejectOr(err, nil); rej != nil {
+			// #227: the update would take another active block's identity —
+			// the 409 class, the same verdict REST manage update answers.
+			if rej := provenanceRejectOr(err, identityTakenReject(err)); rej != nil {
 				return errResultReject(rej), nil, nil
 			}
 			slog.Error("mcp: update error", "error", err, "block_id", resolvedID)
