@@ -42,6 +42,49 @@ const (
 	PendingOldestFirst = "created_at ASC, id ASC"
 )
 
+// EmbedPendingPredicate is the embed backfill's pending set as one condition
+// on the bare context_blocks: a live block without a vector, or with a vector
+// a title or content change has marked stale (issue #198, part B; the marker
+// is set by InvalidateEmbeddingTx and cleared by the vector write). Statements
+// that address one block or are driven by another table use it as it is; an
+// index-driven statement reads the two sets in index ranges of their own
+// (PendingPickSQL, and the /status backlog count).
+const EmbedPendingPredicate = `(embedding IS NULL OR embedding_stale) AND NOT is_archived`
+
+// The partial indexes the stale branches of PendingPickSQL read (migration
+// 173, WHERE embedding_stale AND NOT is_archived), one per branch shape like
+// idx_embedding_pending_scope_sens and idx_embedding_pending_sens.
+const (
+	StaleScopeSensIndex = "idx_embedding_stale_scope_sens"
+	StaleSensIndex      = "idx_embedding_stale_sens"
+)
+
+// staleIndexReady returns a condition that holds while the stale-pick index
+// name exists in the public schema, valid and ready, with exactly the
+// definition migration 173 builds and adopts (as PostgreSQL deparses it, the
+// comparison of the migration's DO block). A same-named index of another key
+// or predicate, which the migration leaves alone with a WARNING, does not
+// count: a stale branch on it would walk the table. The condition names no
+// column of the statement it stands in, so PostgreSQL evaluates it once per
+// execution as a gate (a one-time filter) and runs nothing beneath it while it
+// is false.
+func staleIndexReady(name, cols string) string {
+	return `EXISTS (SELECT 1 FROM pg_index
+		WHERE indexrelid = to_regclass('public.` + name + `') AND indisvalid AND indisready
+		  AND pg_get_indexdef(indexrelid) = 'CREATE INDEX ` + name + ` ON public.context_blocks USING btree (` + cols + `) WHERE (embedding_stale AND (NOT is_archived))')`
+}
+
+// The readiness conditions of the two stale-pick indexes (staleIndexReady),
+// and of both: a content change keeps the previous vector only while both
+// are ready (InvalidateEmbeddingTx), because the bound picks read the one and
+// the unbound picks the other; without them it nulls the vector as before
+// migration 173, and the unembedded branches take the block.
+var (
+	StaleScopeSensIndexReady = staleIndexReady(StaleScopeSensIndex, "scope, sensitivity, created_at, id")
+	StaleSensIndexReady      = staleIndexReady(StaleSensIndex, "sensitivity, created_at, id")
+	StaleIndexesReady        = "(" + StaleScopeSensIndexReady + " AND " + StaleSensIndexReady + ")"
+)
+
 // PendingPickSQL is the statement of an embed-backfill pick (issue #239): the
 // first pending block, newest or oldest first by (created_at, id), among the
 // classes $1 to $4 (PendingClasses), not one of the ids $5, that
@@ -80,28 +123,54 @@ const (
 // idx_blocks_sensitivity and an incremental sort on one generic plan: the
 // planner bounds a one-column index by the comparison's first column and
 // estimates that as a narrow range.)
+//
+// The pending set is two sets (EmbedPendingPredicate), and each class reads
+// both, in a branch each (issue #198, part B): the unembedded blocks
+// (embedding IS NULL) on the two indexes above, the stale ones
+// (embedding_stale) on their twins of migration 173,
+// idx_embedding_stale_scope_sens and idx_embedding_stale_sens, same keys,
+// same row comparison. A block in both sets (a stale marker left on a block
+// whose vector a cutover sweep nulled) is a head of both branches, and
+// LIMIT 1 takes it once. A stale branch runs only while its index is ready
+// (staleIndexReady as a gate): before the out-of-band build of a large corpus
+// (runbook in migration 173) the branch's plan would be a walk over the
+// table. Without the indexes a content change nulls the vector instead
+// (InvalidateEmbeddingTx), so only stale blocks left from before an index was
+// dropped wait for its rebuild.
 func PendingPickSQL(cols string, newestFirst bool, failurePredicate string) string {
 	dir := "ASC"
 	if newestFirst {
 		dir = "DESC"
 	}
-	branch := func(from, class, keyOrder string) string {
+	branch := func(from, pending, class, keyOrder, gate string) string {
 		return `
 		SELECT b.* FROM ` + from + ` CROSS JOIN LATERAL (
 			SELECT ` + cols + `, created_at AS pick_at, id AS pick_id FROM context_blocks
-			WHERE embedding IS NULL AND NOT is_archived` + class + `
+			WHERE ` + pending + ` AND NOT is_archived` + class + `
 			  AND id <> ALL($5::uuid[])` +
 			failurePredicate + RetrievalExcludedTypePredicate + `
 			ORDER BY ` + keyOrder + `created_at ` + dir + `, id ` + dir + `
-			LIMIT 1) b`
+			LIMIT 1) b` + gate
+	}
+	shared := func(pending, gate string) string {
+		return branch("unnest($1::text[]) AS k(sens)", pending, `
+			  AND sensitivity = k.sens AND scope <> ALL($2::text[])`, "", gate)
+	}
+	pair := func(pending, gate string) string {
+		return branch("unnest($3::text[], $4::text[]) AS k(scope, sens)", pending, `
+			  AND (scope, sensitivity) >= (k.scope, k.sens)
+			  AND (scope, sensitivity) <= (k.scope, k.sens)`, `scope `+dir+`, sensitivity `+dir+`, `, gate)
 	}
 	return `SELECT ` + cols + ` FROM (` +
-		branch("unnest($1::text[]) AS k(sens)", `
-			  AND sensitivity = k.sens AND scope <> ALL($2::text[])`, "") + `
+		shared("embedding IS NULL", "") + `
 		UNION ALL` +
-		branch("unnest($3::text[], $4::text[]) AS k(scope, sens)", `
-			  AND (scope, sensitivity) >= (k.scope, k.sens)
-			  AND (scope, sensitivity) <= (k.scope, k.sens)`, `scope `+dir+`, sensitivity `+dir+`, `) + `
+		pair("embedding IS NULL", "") + `
+		UNION ALL` +
+		shared("embedding_stale", `
+		WHERE `+StaleSensIndexReady) + `
+		UNION ALL` +
+		pair("embedding_stale", `
+		WHERE `+StaleScopeSensIndexReady) + `
 	) c
 	ORDER BY pick_at ` + dir + `, pick_id ` + dir + `
 	LIMIT 1`

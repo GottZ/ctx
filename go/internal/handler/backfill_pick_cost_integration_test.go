@@ -49,9 +49,11 @@ func (r *costRecorder) QueryRow(ctx context.Context, sql string, args ...any) pg
 }
 
 // pickBufferCap bounds the buffers of one pick statement of the fixture: it
-// has at most eight branches (the caller's two scopes times four
-// sensitivities), each an index descent plus a heap page or two; a pick
-// that walks rows it does not return reads hundreds at the smaller size.
+// has at most sixteen branches (the caller's two scopes times four
+// sensitivities, each for the unembedded and the stale set), each an index
+// descent plus a heap page or two, and the gates of the stale branches; a
+// pick that walks rows it does not return reads hundreds at the smaller
+// size.
 const pickBufferCap = 200
 
 const (
@@ -73,21 +75,30 @@ func seedPickCost(t *testing.T, pool *pgxpool.Pool, from, n int) {
 			t.Fatalf("seed S: %v", err)
 		}
 	}
+	// Every group comes twice: unembedded, and marked stale (issue #198,
+	// part B; without a vector, which puts the stale rows in the unembedded
+	// set as well), so the stale branches of every pick have the same rows
+	// they cannot return as the unembedded ones.
 	for _, g := range []struct {
 		scope, sens string
 		sign, share int // sign: older (-1) or younger (+1) than S; share: 2 = half of n
+		stale       bool
 	}{
-		{costCaller, "credentials", -1, 2},
-		{costCaller, "credentials", +1, 2},
-		{costLifted, "public", +1, 1},
-		{costForeign, "public", +1, 1},
+		{costCaller, "credentials", -1, 2, false},
+		{costCaller, "credentials", +1, 2, false},
+		{costLifted, "public", +1, 1, false},
+		{costForeign, "public", +1, 1, false},
+		{costCaller, "credentials", -1, 2, true},
+		{costCaller, "credentials", +1, 2, true},
+		{costLifted, "public", +1, 1, true},
+		{costForeign, "public", +1, 1, true},
 	} {
 		if _, err := pool.Exec(ctx,
-			`INSERT INTO context_blocks (category, title, content, scope, sensitivity, created_at, updated_at)
-			 SELECT 'learnings', 'bpc ' || $2 || ' ' || $3::int || ' ' || i, 'pending row ' || i, $1, $2,
+			`INSERT INTO context_blocks (category, title, content, scope, sensitivity, embedding_stale, created_at, updated_at)
+			 SELECT 'learnings', 'bpc ' || $2 || ' ' || $3::int || ' ' || $6::boolean || ' ' || i, 'pending row ' || i, $1, $2, $6,
 			        timestamptz '2026-01-01' + $3::int * make_interval(secs => i / 1000.0), now()
 			   FROM generate_series($4::int + 1, $5::int) i`,
-			g.scope, g.sens, g.sign, from/g.share, n/g.share); err != nil {
+			g.scope, g.sens, g.sign, from/g.share, n/g.share, g.stale); err != nil {
 			t.Fatalf("seed %s/%s: %v", g.scope, g.sens, err)
 		}
 	}

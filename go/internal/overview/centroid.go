@@ -101,12 +101,18 @@ var centroidWorkMemRe = regexp.MustCompile(`^[1-9][0-9]{0,6}(kB|MB|GB)$`)
 const centroidHNSWIndex = "idx_gcc_centroid_hnsw"
 
 // memberSetExpr is the diff carrier's input: the member ids of one partition in
-// a total order, each tagged with whether it currently HAS an embedding. Both
-// the work-list query and the recompute derive member_hash from this exact
-// expression — two spellings would drift and the arm would either recompute
-// forever or never.
+// a total order, each tagged with the state of its embedding: none ('-'), a
+// vector a title or content change has marked stale ('~'), or a fresh one
+// ('+'). Both the work-list query and the recompute derive member_hash from
+// this exact expression — two spellings would drift and the arm would either
+// recompute forever or never. The stale tag carries the vector replacement
+// into the hash (issue #198, part B): a change keeps the previous vector
+// instead of nulling it, so with two tags the partition would hash the same
+// before the change, in the window and after the backfill wrote the new
+// vector, and its centroid would keep the previous vector for good. A member
+// that was never stale hashes as before.
 const memberSetExpr = `sha256(convert_to(string_agg(
-        m.block_id::text || CASE WHEN b.embedding IS NULL THEN '-' ELSE '+' END,
+        m.block_id::text || CASE WHEN b.embedding IS NULL THEN '-' WHEN b.embedding_stale THEN '~' ELSE '+' END,
         ',' ORDER BY m.block_id), 'UTF8'))`
 
 // centroidJoin is the partition-to-blocks path, identical in both statements:

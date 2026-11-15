@@ -118,8 +118,10 @@ func PullCreateIssueBlock(ctx context.Context, tx pgx.Tx, scope string, c ForgeI
 // PullUpdateIssueBlock applies a forge-ahead update to an existing issue block
 // (§4.5.2 pull row): title (the "#<nr>" prefix re-derived from the stable
 // number), content, the metadata patch (JSONB-merged so forge/local_seq survive),
-// workflow_status, and embedding cleared for re-embedding. Tx-bound (commits with
-// the base_hash rewrite). A local_seq (from a former #L draft) is left untouched.
+// workflow_status, and the vector invalidated for re-embedding
+// (InvalidateEmbeddingTx: it stays searchable, marked stale, until the backfill
+// writes the new one). Tx-bound (commits with the base_hash rewrite). A
+// local_seq (from a former #L draft) is left untouched.
 func PullUpdateIssueBlock(ctx context.Context, tx pgx.Tx, blockID string, c ForgeIssueContent) (*Block, error) {
 	title := fmt.Sprintf("#%d %s", c.Number, c.Title)
 	var status any
@@ -129,7 +131,7 @@ func PullUpdateIssueBlock(ctx context.Context, tx pgx.Tx, blockID string, c Forg
 	row := tx.QueryRow(ctx, `
 		UPDATE context_blocks
 		   SET title = $2, content = $3, metadata = metadata || $4::jsonb,
-		       workflow_status = $5, embedding = NULL, updated_at = now()
+		       workflow_status = $5, updated_at = now()
 		 WHERE id = $1::uuid
 		RETURNING `+issueScanCols,
 		blockID, title, c.Body, forgeIssueMeta(c), status)
@@ -137,19 +139,26 @@ func PullUpdateIssueBlock(ctx context.Context, tx pgx.Tx, blockID string, c Forg
 	if err != nil {
 		return nil, fmt.Errorf("store: pull-update issue: %w", err)
 	}
+	if err := InvalidateEmbeddingTx(ctx, tx, blockID); err != nil {
+		return nil, fmt.Errorf("store: pull-update issue: %w", err)
+	}
 	return b, nil
 }
 
 // PullUpdateCommentBlock applies a forge-ahead body change to a comment block
-// (comment projection is {body} only, §3.6). Tx-bound; embedding cleared.
+// (comment projection is {body} only, §3.6). Tx-bound; the vector is
+// invalidated (InvalidateEmbeddingTx).
 func PullUpdateCommentBlock(ctx context.Context, tx pgx.Tx, blockID, body string) (*Block, error) {
 	row := tx.QueryRow(ctx, `
 		UPDATE context_blocks
-		   SET content = $2, embedding = NULL, updated_at = now()
+		   SET content = $2, updated_at = now()
 		 WHERE id = $1::uuid
 		RETURNING `+issueScanCols, blockID, body)
 	b, err := scanIssue(row)
 	if err != nil {
+		return nil, fmt.Errorf("store: pull-update comment: %w", err)
+	}
+	if err := InvalidateEmbeddingTx(ctx, tx, blockID); err != nil {
 		return nil, fmt.Errorf("store: pull-update comment: %w", err)
 	}
 	return b, nil

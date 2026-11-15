@@ -52,8 +52,8 @@ func TestMigration077_WorkflowStatus(t *testing.T) {
 	).Scan(&colCount); err != nil {
 		t.Fatalf("col count: %v", err)
 	}
-	if colCount != 42 {
-		t.Errorf("context_blocks column count = %d, want 42 (39 post-109 + M114 embedding_next/embed_model_next + M131 dream_last_inert)", colCount)
+	if colCount != 43 {
+		t.Errorf("context_blocks column count = %d, want 43 (39 post-109 + M114 embedding_next/embed_model_next + M131 dream_last_inert + M173 embedding_stale)", colCount)
 	}
 
 	// (3) Partial keyset board index exists with the design/02 §3.3 shape.

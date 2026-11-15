@@ -603,18 +603,19 @@ func TestEmbedMigrate_Integration(t *testing.T) {
 			t.Fatalf("precondition: block not migrated")
 		}
 
-		// Content change → ClearEmbedding nulls BOTH pairs (W04-3).
-		if err := store.ClearEmbeddingTx(ctx, pool, blockID); err != nil {
-			t.Fatalf("clear embedding: %v", err)
+		// Content change → InvalidateEmbeddingTx nulls the _next pair (W04-3)
+		// and keeps the live vector, marked stale (issue #198, part B).
+		if err := store.InvalidateEmbeddingTx(ctx, pool, blockID); err != nil {
+			t.Fatalf("invalidate embedding: %v", err)
 		}
-		var liveNull, nextNull bool
+		var liveNull, liveStale, nextNull bool
 		if err := pool.QueryRow(ctx,
-			`SELECT embedding IS NULL, embedding_next IS NULL FROM context_blocks WHERE id = $1`,
-			blockID).Scan(&liveNull, &nextNull); err != nil {
-			t.Fatalf("read cleared block: %v", err)
+			`SELECT embedding IS NULL, embedding_stale, embedding_next IS NULL FROM context_blocks WHERE id = $1`,
+			blockID).Scan(&liveNull, &liveStale, &nextNull); err != nil {
+			t.Fatalf("read invalidated block: %v", err)
 		}
-		if !liveNull || !nextNull {
-			t.Fatalf("after ClearEmbedding: live NULL=%v next NULL=%v, want both true", liveNull, nextNull)
+		if liveNull || !liveStale || !nextNull {
+			t.Fatalf("after InvalidateEmbeddingTx: live NULL=%v live stale=%v next NULL=%v, want false/true/true", liveNull, liveStale, nextNull)
 		}
 
 		// Regular backfill refills the OLD space (simulated via the same

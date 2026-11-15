@@ -863,14 +863,16 @@ func (u upsertStatement) exec(ctx context.Context, tx pgx.Tx) (*Block, error) {
 	// stale vector the same way manage-update/MCP-update always did — before
 	// this fix, ON CONFLICT only ever set content = EXCLUDED.content, never
 	// touched embedding/embed_model, so `ctx save` on an existing title with
-	// new content left the OLD vector attributed to the NEW content
-	// (context_store.go:184-236 → blocks.go). W04-4's re-embed migration
+	// new content left the OLD vector attributed to the NEW content, unmarked
+	// and out of the backfill's reach (context_store.go:184-236 → blocks.go).
+	// Since issue #198 part B the vector stays until the backfill replaces it,
+	// marked stale (InvalidateEmbeddingTx). W04-4's re-embed migration
 	// convergence invariant (design §4.3) has this as a hard precondition:
 	// without it, an in-flight migration's embedding_next could go stale the
 	// same way.
 	//
 	// Everything below runs in ONE tx: the pre-read, the upsert, and (on a
-	// real content change) the clear are atomic together — "der Upsert und
+	// real content change) the invalidation are atomic together — "der Upsert und
 	// das Clear gehören in EINE Tx" (design §7).
 	//
 	// Content-change detection mechanic: "vorheriges SELECT in der Upsert-Tx"
@@ -926,31 +928,41 @@ func (u upsertStatement) exec(ctx context.Context, tx pgx.Tx) (*Block, error) {
 	}
 
 	// Only a REAL content change on an existing row invalidates the vector.
-	// An idempotent upsert with identical content must NOT throw the
-	// embedding away — that would make the backfill re-embed on every no-op
+	// An idempotent upsert with identical content must NOT touch the
+	// embedding — that would make the backfill re-embed on every no-op
 	// `ctx save` at the 1M-10M target scale (organic growth means repeat
 	// saves of unchanged titles are routine, not rare).
 	//
-	// Reuses ClearEmbeddingTx — the same primitive UpdateBlock runs in its
-	// transaction — rather than duplicating its SQL, so any
-	// future extension of that primitive (it already nulls BOTH vector pairs
-	// and deletes the backfill memo, W04-3) is inherited here automatically.
+	// Reuses InvalidateEmbeddingTx — the same primitive UpdateBlock runs in
+	// its transaction — rather than duplicating its SQL, so any future
+	// extension of that primitive (it marks the serving vector stale, nulls
+	// the _next pair and deletes the backfill memo) is inherited here
+	// automatically.
 	if hadRow && oldContent != content {
-		if err := ClearEmbeddingTx(ctx, tx, b.ID); err != nil {
-			return nil, fmt.Errorf("store: upsert block: clear stale embedding: %w", err)
+		if err := InvalidateEmbeddingTx(ctx, tx, b.ID); err != nil {
+			return nil, fmt.Errorf("store: upsert block: invalidate embedding: %w", err)
 		}
 	}
 	return b, nil
 }
 
+// storeEmbeddingSet is the SET list of a backfill's vector write: the vector,
+// the model that produced it, and the end of a stale window (issue #198,
+// part B: the vector now stands for the block's current text).
+const storeEmbeddingSet = `embedding = $2, embed_model = $3, embedding_stale = false`
+
 // StoreEmbedding updates the embedding vector for a block, together with the
 // model that produced it (Achse 04 W04-1: embed_model is the provenance
 // trail the re-embed statemachine builds on — "NULL = no vector" only holds
-// if every write is attributed). It accepts any pgxdb.Execer, which BOTH
-// *pgxpool.Pool and pgx.Tx satisfy: the write runs standalone on the pool
-// (query.go re-embed path) or composes into a caller-owned transaction
-// (scheduler backfill, where it must be atomic with the FOR UPDATE SKIP
-// LOCKED pick so the row lock holds until commit).
+// if every write is attributed), and clears the stale marker. It accepts any
+// pgxdb.Execer, which BOTH *pgxpool.Pool and pgx.Tx satisfy.
+//
+// The write is unconditional, so the caller must hold the block's row lock
+// from the read of the embedded text to this write: the scheduler backfill
+// does (its FOR UPDATE SKIP LOCKED pick and this write share one
+// transaction), so a title or content change waits for the commit and then
+// marks this vector stale. A caller without the lock writes through
+// StoreEmbeddingIfUnchanged.
 //
 // Fail-closed on model=="": a vector without provenance is worse than no
 // vector at all (it would silently re-inherit the DDL default or a stale
@@ -960,13 +972,43 @@ func StoreEmbedding(ctx context.Context, q pgxdb.Execer, blockID, model string, 
 		return fmt.Errorf("store: store embedding: model is required (block %s)", blockID)
 	}
 	_, err := q.Exec(ctx,
-		`UPDATE context_blocks SET embedding = $2, embed_model = $3 WHERE id = $1`,
+		`UPDATE context_blocks SET `+storeEmbeddingSet+` WHERE id = $1`,
 		blockID, pgvec.NewVector(vec), model,
 	)
 	if err != nil {
 		return fmt.Errorf("store: store embedding: %w", err)
 	}
 	return nil
+}
+
+// StoreEmbeddingIfUnchanged is StoreEmbedding for a caller that read the
+// embedded title and content without holding the row lock (the query path's
+// inline backfill, which embeds over the wire inside the request): the
+// vector lands only while the block still holds that title and content, and
+// stored reports whether it did. A change that committed during the embed
+// call leaves the block as the change left it — pending, unembedded or
+// stale — so the backfill embeds the current text next (issue #198, part B).
+// Without the condition the vector of the earlier text landed, cleared the
+// marker, and the block left the queue holding a vector of text it no longer
+// has.
+//
+// The condition is evaluated on the row version the UPDATE locks: a change
+// that holds the row makes this write wait and then re-check the condition on
+// the changed row (READ COMMITTED re-evaluation), so it cannot overwrite it.
+// The comparison reads the block's content once, the cost of one row.
+func StoreEmbeddingIfUnchanged(ctx context.Context, q pgxdb.Execer, blockID, title, content, model string, vec []float32) (stored bool, err error) {
+	if model == "" {
+		return false, fmt.Errorf("store: store embedding: model is required (block %s)", blockID)
+	}
+	tag, err := q.Exec(ctx,
+		`UPDATE context_blocks SET `+storeEmbeddingSet+`
+		 WHERE id = $1 AND title = $4 AND content = $5`,
+		blockID, pgvec.NewVector(vec), model, title, content,
+	)
+	if err != nil {
+		return false, fmt.Errorf("store: store embedding: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // StoreEmbeddingNext is StoreEmbedding's dual-column sister (Achse 04 W04-4,
@@ -991,14 +1033,23 @@ func StoreEmbeddingNext(ctx context.Context, q pgxdb.Execer, blockID, model stri
 	return nil
 }
 
-// ClearEmbeddingTx sets BOTH vector pairs (embedding/embed_model AND, since
-// Achse 04 W04-3 / migration 114, embedding_next/embed_model_next) to NULL,
-// and deletes the block's regular-backfill memo row (context_embed_failures,
-// migration_id IS NULL), so a content change converges cleanly on every
-// axis that content invalidates:
+// InvalidateEmbeddingTx is what a real title or content change does to a
+// block's vectors: it marks the serving vector stale (embedding_stale, only
+// when there is one), sets the _next pair (embedding_next/embed_model_next,
+// Achse 04 W04-3 / migration 114) to NULL, and deletes the block's
+// regular-backfill memo row (context_embed_failures, migration_id IS NULL),
+// so a content change converges cleanly on every axis that content
+// invalidates:
 //
-//   - Live pair: unchanged W04-1 doctrine — the scheduler backfill
-//     regenerates it.
+//   - Serving pair: kept, and marked stale (issue #198, part B; migration
+//     173). Until the backfill writes the vector of the new text
+//     (StoreEmbedding clears the marker), the semantic arms keep ranking the
+//     block by its previous text instead of losing it; the backfill pick
+//     reads stale blocks next to unembedded ones (PendingPickSQL), and the
+//     duplicate guard neither checks nor matches a stale vector. A block
+//     without a vector stays unmarked: it is pending as unembedded. Before
+//     part B this pair was nulled, which took the block out of the semantic
+//     arms for the length of the queue.
 //   - _next pair: design/04 §3.2b/§4.3 "Konvergenz-Invariante" — this IS the
 //     content-change path a re-embed migration's dual-column cutover
 //     depends on. Without nulling embedding_next here, a content update
@@ -1019,27 +1070,39 @@ func StoreEmbeddingNext(ctx context.Context, q pgxdb.Execer, blockID, model stri
 //
 // This is the pgxdb.Execer-parameterized primitive (same pattern as
 // StoreEmbedding): it does NOT own a transaction, so a caller that needs the
-// clear to be atomic with another write — UpsertBlock's content-change path,
-// W04-8, and UpdateBlock's, issue #198 — passes its own pgx.Tx. There is no
-// pool-owned wrapper any more: both production callers compose the clear into
-// a transaction of their own. Kept as ONE implementation so future
-// extensions of the clear semantics (e.g. a migration-scoped memo delete)
-// land in both call shapes automatically, never just one.
-func ClearEmbeddingTx(ctx context.Context, q pgxdb.Execer, blockID string) error {
+// invalidation to be atomic with the write of the new text passes its own
+// pgx.Tx, which already holds the block's row: UpsertBlock's content-change
+// path (W04-8), UpdateBlock's (issue #198), the issue update and the two forge
+// pull updates. The block row comes before the memo row, the order the
+// backfill takes them in as well. Kept as ONE implementation so future
+// extensions of the invalidation (e.g. a migration-scoped memo delete) land in
+// every writer automatically, never just one.
+//
+// The serving pair is kept only while both stale-pick indexes of migration 173
+// are ready (StaleIndexesReady, read once per call): the pick reads stale
+// blocks on them alone, so on a corpus that has not built them yet (the
+// out-of-band runbook of a large corpus) a kept vector would never be
+// replaced. Without them the change nulls the pair as before 173, and the
+// block is pending as unembedded.
+func InvalidateEmbeddingTx(ctx context.Context, q pgxdb.Execer, blockID string) error {
 	if _, err := q.Exec(ctx,
-		`UPDATE context_blocks
-		 SET embedding = NULL, embed_model = NULL,
+		`WITH r AS (SELECT `+StaleIndexesReady+` AS keep)
+		 UPDATE context_blocks
+		 SET embedding_stale = (embedding IS NOT NULL AND r.keep),
+		     embedding = CASE WHEN r.keep THEN embedding END,
+		     embed_model = CASE WHEN r.keep THEN embed_model END,
 		     embedding_next = NULL, embed_model_next = NULL
+		 FROM r
 		 WHERE id = $1`,
 		blockID,
 	); err != nil {
-		return fmt.Errorf("store: clear embedding: %w", err)
+		return fmt.Errorf("store: invalidate embedding: %w", err)
 	}
 	if _, err := q.Exec(ctx,
 		`DELETE FROM context_embed_failures WHERE block_id = $1 AND migration_id IS NULL`,
 		blockID,
 	); err != nil {
-		return fmt.Errorf("store: clear embedding: delete backfill memo: %w", err)
+		return fmt.Errorf("store: invalidate embedding: delete backfill memo: %w", err)
 	}
 	return nil
 }
@@ -1417,12 +1480,13 @@ func blockIdentityHolder(ctx context.Context, pool *pgxpool.Pool, id string, dat
 // UpdateBlock updates specific fields of a block. The block must live in one of
 // the caller's write-eligible scopes (home_scope ∪ shared-if-allowed).
 // Returns the updated block and whether the title or the content now differs
-// from the stored row. When it does, the block's embedding has been cleared in
-// the same transaction, for the backfill to regenerate. A title or content
-// sent with the value the row already holds does not count: the embed input is
-// unchanged, and clearing the vector would take the block out of the semantic
-// arms and put it back into the backfill for nothing (issue #198, the parity
-// of UpsertBlock's `hadRow && oldContent != content`).
+// from the stored row. When it does, the block's vector has been invalidated
+// in the same transaction (InvalidateEmbeddingTx: the serving vector stays
+// searchable and is marked stale until the backfill writes the new one). A
+// title or content sent with the value the row already holds does not count:
+// the embed input is unchanged, and invalidating the vector would put the
+// block back into the backfill for nothing (issue #198, the parity of
+// UpsertBlock's `hadRow && oldContent != content`).
 //
 // An update that would give the block the (category, title, scope) of another
 // active block — a title rename, a category change or a scope move onto an
@@ -1557,12 +1621,13 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 		strings.Join(setClauses, ", "), idIdx, scopeIdx, guardRedactedMetadataSQL(fmt.Sprintf("$%d", scopeIdx)),
 	)
 
-	// The statement, the clear of a stale vector and (on a scope move) the
-	// link sweep commit together. The clear in particular must not be a
-	// second step after the commit: needsReEmbed is a difference, so a clear
-	// that got lost between the two (request cancelled, pool fault) would not
-	// be repaired by sending the same update again, and the block would keep
-	// a vector for content it no longer holds, invisible to the backfill.
+	// The statement, the invalidation of the vector and (on a scope move) the
+	// link sweep commit together. The invalidation in particular must not be
+	// a second step after the commit: needsReEmbed is a difference, so an
+	// invalidation that got lost between the two (request cancelled, pool
+	// fault) would not be repaired by sending the same update again, and the
+	// block would keep a vector for content it no longer holds, unmarked and
+	// invisible to the backfill.
 	b := &Block{}
 	var moveScopes []string
 	if data.Scope != nil {
@@ -1615,9 +1680,10 @@ func updateBlockMissReason(ctx context.Context, pool *pgxpool.Pool, id string, w
 // runBlockUpdate runs a by-id block update as ONE transaction: the
 // UPDATE…RETURNING scan into b, on a scope move the GD5 link sweep (the link
 // tables' row-scope invariant, both endpoints + row in the same scope, would
-// otherwise break post-hoc; GD5/K8), and the embedding clear when the
-// statement reports that the title or the content changed (ClearEmbeddingTx,
-// the primitive UpsertBlock uses on its content-change path). Returns
+// otherwise break post-hoc; GD5/K8), and the vector invalidation when the
+// statement reports that the title or the content changed
+// (InvalidateEmbeddingTx, the primitive UpsertBlock uses on its
+// content-change path). Returns
 // found=false (no error) when the block was not found in the caller's write
 // scopes.
 //
@@ -1687,8 +1753,8 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 			}
 		}
 		if needsReEmbed {
-			if err := ClearEmbeddingTx(ctx, tx, b.ID); err != nil {
-				return fmt.Errorf("store: update block: clear stale embedding: %w", err)
+			if err := InvalidateEmbeddingTx(ctx, tx, b.ID); err != nil {
+				return fmt.Errorf("store: update block: invalidate embedding: %w", err)
 			}
 		}
 		return nil

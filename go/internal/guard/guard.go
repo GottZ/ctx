@@ -60,16 +60,22 @@ type pendingBlock struct {
 // update consume this one fragment instead of carrying three copies.
 // typesParam binds the GuardCheckTypes allowlist (guard.check=true types).
 // The first three conjuncts mirror idx_guard_pending (M074) byte-for-byte —
-// only pending rows are IN that partial index; category != 'index'
-// (topic-map mechanism rest, §4.2: agent briefings share the system-meta
-// type but ARE checked — dropping the category rest would silently
-// guard-check the topic-map), the lifecycle gate and the type allowlist
-// filter on the index result. typesParam is a code-owned bind placeholder
-// at every call site — never user input.
+// only pending rows are IN that partial index; NOT embedding_stale (issue
+// #198, part B: a title or content change keeps the previous vector until the
+// backfill writes the new one, and the change also drops guard_checked_at, so
+// without it the batch would check the new text by the old text's vector and
+// write the verdict as final), category != 'index' (topic-map mechanism rest,
+// §4.2: agent briefings share the system-meta type but ARE checked — dropping
+// the category rest would silently guard-check the topic-map), the lifecycle
+// gate and the type allowlist filter on the index result. A stale block waits
+// in the index until its new vector lands, as a block without a vector waited
+// outside it before. typesParam is a code-owned bind placeholder at every call
+// site — never user input.
 func guardPendingWhere(typesParam string) string {
 	return `NOT is_archived
 		  AND (metadata->>'guard_checked_at') IS NULL
 		  AND embedding IS NOT NULL
+		  AND NOT embedding_stale
 		  AND category != 'index'
 		  AND lifecycle_state = 'knowledge'
 		  AND type_name = ANY(` + typesParam + `::text[])`

@@ -82,19 +82,21 @@ func TestClearEmbedding_NextExtension_Integration(t *testing.T) {
 		// stale vector (design §3.2b/§4.3). Simulating "a content update
 		// happened during an active migration" is exactly "ClearEmbedding
 		// ran while embedding_next was populated".
-		if err := store.ClearEmbeddingTx(ctx, pool, id); err != nil {
+		if err := store.InvalidateEmbeddingTx(ctx, pool, id); err != nil {
 			t.Fatalf("ClearEmbedding: %v", err)
 		}
 
-		var embNull, modelNull, embNextNull, modelNextNull bool
+		// Since issue #198 part B the live pair is kept and marked stale until
+		// the backfill replaces it; the _next pair is nulled as before.
+		var embNull, modelNull, stale, embNextNull, modelNextNull bool
 		if err := pool.QueryRow(ctx,
-			`SELECT embedding IS NULL, embed_model IS NULL, embedding_next IS NULL, embed_model_next IS NULL
+			`SELECT embedding IS NULL, embed_model IS NULL, embedding_stale, embedding_next IS NULL, embed_model_next IS NULL
 			 FROM context_blocks WHERE id = $1::uuid`, id).
-			Scan(&embNull, &modelNull, &embNextNull, &modelNextNull); err != nil {
+			Scan(&embNull, &modelNull, &stale, &embNextNull, &modelNextNull); err != nil {
 			t.Fatalf("read post-clear state: %v", err)
 		}
-		if !embNull || !modelNull {
-			t.Errorf("live pair not nulled: embedding_null=%v embed_model_null=%v, want both true", embNull, modelNull)
+		if embNull || modelNull || !stale {
+			t.Errorf("live pair: embedding_null=%v embed_model_null=%v stale=%v, want it kept and marked stale", embNull, modelNull, stale)
 		}
 		if !embNextNull || !modelNextNull {
 			t.Errorf("_next pair not nulled: embedding_next_null=%v embed_model_next_null=%v, want both true (§3.2b/§4.3 Konvergenz-Invariante)", embNextNull, modelNextNull)
@@ -128,7 +130,7 @@ func TestClearEmbedding_NextExtension_Integration(t *testing.T) {
 			t.Fatalf("precondition: expected exactly 1 backfill memo, got %d", preCount)
 		}
 
-		if err := store.ClearEmbeddingTx(ctx, pool, id); err != nil {
+		if err := store.InvalidateEmbeddingTx(ctx, pool, id); err != nil {
 			t.Fatalf("ClearEmbedding: %v", err)
 		}
 

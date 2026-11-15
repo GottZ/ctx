@@ -102,6 +102,14 @@ func m157Matched(t *testing.T, pool *pgxpool.Pool, id string) (status, matched s
 func TestRepair_M157_Corpus(t *testing.T) {
 	ctx := context.Background()
 	pool := testdb.SetupTestDBUpTo(t, 155)
+	// The guard batch reads the stale marker of migration 173 (issue #198,
+	// part B), and this corpus is written by the current RunGuardBatch on the
+	// pre-156 schema. The column is added ahead, the way the runbook of 173
+	// adds it out of band; every row reads false, the state before the marker
+	// existed.
+	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks ADD COLUMN embedding_stale boolean NOT NULL DEFAULT false`); err != nil {
+		t.Fatalf("add the stale marker ahead: %v", err)
+	}
 
 	// Tenant B owns s157b. private/work/shared belong to the default tenant
 	// (baseline); s157legacy and s157legacy2 are registered to no tenant.

@@ -10,6 +10,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/schemacontract"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvec "github.com/pgvector/pgvector-go"
@@ -470,15 +471,22 @@ func efSearchProbeSteps(ctx context.Context, tx pgx.Tx, fallback string) string 
 }
 
 // queryEmbedBacklog is the design/03 §4.7 Revision metric: the real
-// backfill predicate (embedding IS NULL AND NOT is_archived), guarded by an
-// Introspektions-Guard (Defense-in-Depth alongside migration-owned
-// idx_embedding_pending, Achse 04/K2) — it computes ONLY when a matching
-// partial index exists on context_blocks, else null (never 0, never an
-// unguarded scan; Gate G3). The LIMIT bounds RETURNED rows only — the
-// guard is what keeps the worst case (an empty backlog) index-only instead
-// of a full seq scan.
+// backfill predicate (store.EmbedPendingPredicate: unembedded, or with a
+// vector a title or content change marked stale, issue #198 part B), guarded
+// by an Introspektions-Guard (Defense-in-Depth alongside migration-owned
+// idx_embedding_pending, Achse 04/K2, and the stale indexes of migration
+// 173) — it computes ONLY when a matching partial index exists on
+// context_blocks, else null (never 0, never an unguarded scan; Gate G3).
+// Each set is counted in its own index range, and a stale block whose vector
+// a cutover sweep nulled is counted once, with the unembedded. The stale set
+// is counted while both stale-pick indexes are ready (store.StaleIndexesReady,
+// the condition under which a content change keeps a vector at all); without
+// them the count is the unembedded set, and stale blocks left from before an
+// index was dropped are not in it. The LIMITs bound RETURNED rows only — the
+// guard is what keeps the worst case (an empty backlog) index-only instead of
+// a full seq scan.
 func queryEmbedBacklog(ctx context.Context, pool *pgxpool.Pool) *int {
-	guarded, err := embedBacklogIndexExists(ctx, pool)
+	guarded, staleReady, err := embedBacklogIndexExists(ctx, pool)
 	if err != nil {
 		slog.Warn("status: db-section embed-backlog guard query failed", "error", err)
 		return nil
@@ -488,12 +496,20 @@ func queryEmbedBacklog(ctx context.Context, pool *pgxpool.Pool) *int {
 			"(embedding IS NULL AND NOT is_archived) — backlog metric disabled (null), never an unguarded scan")
 		return nil
 	}
+	stale := ""
+	if staleReady {
+		stale = `
+			UNION ALL
+			(SELECT 1 FROM context_blocks
+			  WHERE embedding_stale AND NOT is_archived AND embedding IS NOT NULL
+			  LIMIT $1)`
+	}
 	var n int
 	err = pool.QueryRow(ctx, `
 		SELECT count(*) FROM (
-			SELECT 1 FROM context_blocks
-			 WHERE embedding IS NULL AND NOT is_archived
-			 LIMIT $1
+			(SELECT 1 FROM context_blocks
+			  WHERE embedding IS NULL AND NOT is_archived
+			  LIMIT $1)`+stale+`
 		) t`, embedBacklogCap+1,
 	).Scan(&n)
 	if err != nil {
@@ -512,10 +528,11 @@ func queryEmbedBacklog(ctx context.Context, pool *pgxpool.Pool) *int {
 // survives Postgres's own deparse formatting rather than pinning it) — the
 // migration-owned idx_embedding_pending (109_embed_provenance.sql, Achse
 // 04/K2) is the index this finds on a fresh chain; the guard has no
-// dependency on that index's NAME, only its shape.
-func embedBacklogIndexExists(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
-	var exists bool
-	err := pool.QueryRow(ctx, `
+// dependency on that index's NAME, only its shape. staleReady is
+// store.StaleIndexesReady, the condition the backfill pick and the content
+// writers read for the stale set (migration 173).
+func embedBacklogIndexExists(ctx context.Context, pool *pgxpool.Pool) (exists, staleReady bool, err error) {
+	err = pool.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1
 			  FROM pg_index i
@@ -525,9 +542,9 @@ func embedBacklogIndexExists(ctx context.Context, pool *pgxpool.Pool) (bool, err
 			   AND i.indpred IS NOT NULL
 			   AND pg_get_expr(i.indpred, i.indrelid) ILIKE '%embedding%is null%'
 			   AND pg_get_expr(i.indpred, i.indrelid) ILIKE '%not%is_archived%'
-		)`,
-	).Scan(&exists)
-	return exists, err
+		), `+store.StaleIndexesReady,
+	).Scan(&exists, &staleReady)
+	return exists, staleReady, err
 }
 
 // channelProbeSemanticSQL/channelProbeFtsDeSQL/channelProbeFtsEnSQL/

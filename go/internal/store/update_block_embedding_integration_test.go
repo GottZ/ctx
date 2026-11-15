@@ -13,12 +13,13 @@ import (
 // Issue #198, part A, at the store boundary: UpdateBlock itself decides whether
 // the block's vector survives, and it does so inside the update's transaction.
 //
-//   - A title or content that differs from the stored row clears the live and
-//     the _next vector pair and the regular backfill memo by the time
-//     UpdateBlock returns. No caller afterwork is involved: a clear that ran as
-//     a second step could get lost after the update had committed, and since
-//     the decision is a difference, sending the same update again would not
-//     repair it.
+//   - A title or content that differs from the stored row invalidates the
+//     vector by the time UpdateBlock returns: the live pair stays and is
+//     marked stale (part B), the _next pair and the regular backfill memo are
+//     cleared. No caller afterwork is involved: an invalidation that ran as a
+//     second step could get lost after the update had committed, and since the
+//     decision is a difference, sending the same update again would not repair
+//     it.
 //   - A title or content equal to the stored row keeps all of them and reports
 //     false.
 //
@@ -49,7 +50,7 @@ func TestUpdateBlock_EmbeddingFollowsTitleAndContent(t *testing.T) {
 	strptr := func(s string) *string { return &s }
 
 	// mkBlock seeds a block in scopeX with both vector pairs and a regular
-	// backfill memo row, the three things ClearEmbeddingTx removes.
+	// backfill memo row, the three things InvalidateEmbeddingTx acts on.
 	mkBlock := func(t *testing.T, title string) string {
 		t.Helper()
 		var id string
@@ -75,6 +76,7 @@ func TestUpdateBlock_EmbeddingFollowsTitleAndContent(t *testing.T) {
 		hasEmbedding, hasNext bool
 		embedModel, nextModel string
 		memos                 int
+		stale                 bool
 	}
 	read := func(t *testing.T, id string) state {
 		t.Helper()
@@ -83,15 +85,16 @@ func TestUpdateBlock_EmbeddingFollowsTitleAndContent(t *testing.T) {
 			`SELECT embedding IS NOT NULL, COALESCE(embed_model, ''),
 			        embedding_next IS NOT NULL, COALESCE(embed_model_next, ''),
 			        (SELECT count(*) FROM context_embed_failures f
-			          WHERE f.block_id = b.id AND f.migration_id IS NULL)
+			          WHERE f.block_id = b.id AND f.migration_id IS NULL),
+			        embedding_stale
 			 FROM context_blocks b WHERE b.id = $1::uuid`, id).
-			Scan(&s.hasEmbedding, &s.embedModel, &s.hasNext, &s.nextModel, &s.memos); err != nil {
+			Scan(&s.hasEmbedding, &s.embedModel, &s.hasNext, &s.nextModel, &s.memos, &s.stale); err != nil {
 			t.Fatalf("read block: %v", err)
 		}
 		return s
 	}
 	kept := state{hasEmbedding: true, hasNext: true, embedModel: model, nextModel: next, memos: 1}
-	cleared := state{}
+	invalidated := state{hasEmbedding: true, embedModel: model, stale: true}
 
 	cases := []struct {
 		name string
@@ -144,7 +147,7 @@ func TestUpdateBlock_EmbeddingFollowsTitleAndContent(t *testing.T) {
 			// between: the state must already be final.
 			want := kept
 			if c.want {
-				want = cleared
+				want = invalidated
 			}
 			if got := read(t, id); got != want {
 				t.Errorf("after UpdateBlock: %+v, want %+v", got, want)

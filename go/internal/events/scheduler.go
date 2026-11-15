@@ -2232,12 +2232,16 @@ func backfillClasses(router *dream.Router, cfg *config.Config, owned []string, c
 // the candidate under the transaction. backfillLockSQL takes the candidate's
 // row lock, under the same predicates and on the scope and sensitivity the
 // candidate was picked by, so a block that moved, changed class or was
-// embedded since is not taken (EvalPlanQual re-reads it under the lock).
+// embedded since is not taken (EvalPlanQual re-reads it under the lock). The
+// title and content it returns are those of the locked row version, and the
+// lock holds to the vector write: a title or content change waits for the
+// commit and then marks the written vector stale (store.StoreEmbedding,
+// issue #198 part B).
 var backfillPickSQL = store.PendingPickSQL("id, sensitivity, scope", false, store.EmbedFailureExcludedPredicate)
 
 const backfillLockSQL = `SELECT id, title, content, sensitivity, scope FROM context_blocks
 			WHERE id = $1 AND scope = $2 AND sensitivity = $3
-			  AND embedding IS NULL AND NOT is_archived` +
+			  AND ` + store.EmbedPendingPredicate +
 	store.EmbedFailureExcludedPredicate + store.RetrievalExcludedTypePredicate + `
 			FOR UPDATE SKIP LOCKED`
 

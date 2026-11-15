@@ -15,12 +15,13 @@ import (
 )
 
 // pendingPickReference is the pick as one statement over context_blocks, in
-// the shape both backfill picks had before issue #239: the pending predicate,
+// the shape both backfill picks had before issue #239: the pending predicate
+// (since issue #198 part B unembedded or stale, store.EmbedPendingPredicate),
 // the failure-memo and type predicates, the classes as a filter, ORDER BY and
 // LIMIT 1. It is the reference store.PendingPickSQL is held against.
 func pendingPickReference(order, failurePredicate string) string {
 	return `SELECT id FROM context_blocks
-		WHERE embedding IS NULL AND NOT is_archived` +
+		WHERE ` + store.EmbedPendingPredicate +
 		failurePredicate + store.RetrievalExcludedTypePredicate + `
 		  AND ((sensitivity = ANY($1::text[]) AND scope <> ALL($2::text[]))
 		    OR (scope, sensitivity) IN (SELECT * FROM unnest($3::text[], $4::text[])))
@@ -39,7 +40,10 @@ func TestPendingPickParity(t *testing.T) {
 
 	// Six scopes, the four sensitivities, three blocks per pair; one in
 	// three of them shares its created_at with a neighbour (one transaction).
-	// On top: archived, embedded, excluded-type, and memoized rows.
+	// On top: archived, embedded, excluded-type, and memoized rows, and stale
+	// ones: embedded and stale (pending again), archived and stale (not
+	// pending), stale without a vector (in both sets, picked once), stale with
+	// a memo.
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO context_blocks (category, title, content, scope, sensitivity, created_at, updated_at)
 		SELECT 'learnings', 'pp ' || s || ' ' || l || ' ' || i, 'c', s, l,
@@ -61,6 +65,10 @@ func TestPendingPickParity(t *testing.T) {
 		        (ARRAY['wire','wire','caller_timeout','oversize'])[1 + (row_number() OVER (ORDER BY id))::int % 4],
 		        (ARRAY[now() + interval '1 hour', now() - interval '1 hour', now() - interval '1 hour', 'infinity'::timestamptz])[1 + (row_number() OVER (ORDER BY id))::int % 4]
 		   FROM context_blocks WHERE title LIKE 'pp % 3' AND scope IN ('pp-b', 'pp-own', 'pp-other')`,
+		`UPDATE context_blocks SET embedding_stale = true WHERE title LIKE 'pp % 2' AND scope = 'pp-mild'`,
+		`UPDATE context_blocks SET embedding_stale = true WHERE title LIKE 'pp % 1' AND scope = 'pp-own'`,
+		`UPDATE context_blocks SET embedding_stale = true WHERE title LIKE 'pp % 2' AND scope = 'pp-a'`,
+		`UPDATE context_blocks SET embedding_stale = true WHERE title LIKE 'pp % 3' AND scope = 'pp-b'`,
 	} {
 		if _, err := pool.Exec(ctx, st); err != nil {
 			t.Fatalf("%s: %v", st, err)

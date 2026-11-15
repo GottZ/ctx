@@ -70,32 +70,36 @@ func TestEmbedProvenance_Integration(t *testing.T) {
 			t.Fatalf("embed_model = %q, want %q (writer-attributed provenance)", gotModel, "served-model-x")
 		}
 
-		if err := store.ClearEmbeddingTx(ctx, pool, id); err != nil {
-			t.Fatalf("ClearEmbedding: %v", err)
+		// A content change keeps the attributed pair, marked stale (issue
+		// #198, part B): the provenance of the kept vector stays its writer's.
+		if err := store.InvalidateEmbeddingTx(ctx, pool, id); err != nil {
+			t.Fatalf("InvalidateEmbeddingTx: %v", err)
 		}
-		var embNull, modelNull bool
-		if err := pool.QueryRow(ctx,
-			`SELECT embedding IS NULL, embed_model IS NULL FROM context_blocks WHERE id = $1::uuid`, id).
-			Scan(&embNull, &modelNull); err != nil {
-			t.Fatalf("read post-clear: %v", err)
+		readState := func(stage string) (sameVec bool, model string, stale bool) {
+			t.Helper()
+			if err := pool.QueryRow(ctx,
+				`SELECT COALESCE(embedding = $2::vector, false), COALESCE(embed_model, ''), embedding_stale
+				   FROM context_blocks WHERE id = $1::uuid`, id, pgvecLiteral(vec(0.5))).
+				Scan(&sameVec, &model, &stale); err != nil {
+				t.Fatalf("read %s: %v", stage, err)
+			}
+			return sameVec, model, stale
 		}
-		if !embNull || !modelNull {
-			t.Fatalf("post-clear: embedding_null=%v embed_model_null=%v, want both true", embNull, modelNull)
+		if sameVec, model, stale := readState("post-invalidate"); !sameVec || model != "served-model-x" || !stale {
+			t.Fatalf("post-invalidate: same_vector=%v embed_model=%q stale=%v, want the attributed pair kept and marked stale", sameVec, model, stale)
 		}
 
 		// Fail-closed: model=="" is rejected before any DB round-trip. Prove
-		// "no round-trip" by asserting the row is untouched (still both NULL)
-		// rather than merely checking the error string.
+		// "no round-trip" by asserting the row is untouched (the kept pair,
+		// still stale) rather than merely checking the error string.
 		if err := store.StoreEmbedding(ctx, pool, id, "", vec(0.9)); err == nil {
 			t.Fatalf("StoreEmbedding with model=\"\" succeeded, want fail-closed error")
 		}
-		if err := pool.QueryRow(ctx,
-			`SELECT embedding IS NULL, embed_model IS NULL FROM context_blocks WHERE id = $1::uuid`, id).
-			Scan(&embNull, &modelNull); err != nil {
-			t.Fatalf("read post-failclosed: %v", err)
+		if _, err := store.StoreEmbeddingIfUnchanged(ctx, pool, id, "w04-1-provenance", "body", "", vec(0.9)); err == nil {
+			t.Fatalf("StoreEmbeddingIfUnchanged with model=\"\" succeeded, want fail-closed error")
 		}
-		if !embNull || !modelNull {
-			t.Fatalf("post-failclosed: row was written despite model=\"\" (embedding_null=%v embed_model_null=%v)", embNull, modelNull)
+		if sameVec, model, stale := readState("post-failclosed"); !sameVec || model != "served-model-x" || !stale {
+			t.Fatalf("post-failclosed: row was written despite model=\"\" (same_vector=%v embed_model=%q stale=%v)", sameVec, model, stale)
 		}
 	})
 

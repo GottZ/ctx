@@ -15,7 +15,8 @@
 // store.StoreEmbedding, the writer the backfill uses.
 //
 // The "changed" subtests are the control: a real change of the title or of the
-// content still clears the vector. They pass before and after the fix.
+// content still invalidates the vector. Since part B that keeps it and marks
+// it stale until the backfill writes the new one (it was cleared before).
 //
 // Run with:
 //
@@ -117,15 +118,15 @@ func TestUpdateUnchangedKeepsEmbedding(t *testing.T) {
 	type row struct {
 		title, content, embedModel string
 		tags                       []string
-		hasEmbedding               bool
+		hasEmbedding, stale        bool
 	}
 	read := func(t *testing.T, id string) row {
 		t.Helper()
 		var r row
 		if err := pool.QueryRow(ctx,
-			`SELECT title, content, tags, embedding IS NOT NULL, COALESCE(embed_model, '')
+			`SELECT title, content, tags, embedding IS NOT NULL, COALESCE(embed_model, ''), embedding_stale
 			 FROM context_blocks WHERE id = $1::uuid`, id).
-			Scan(&r.title, &r.content, &r.tags, &r.hasEmbedding, &r.embedModel); err != nil {
+			Scan(&r.title, &r.content, &r.tags, &r.hasEmbedding, &r.embedModel, &r.stale); err != nil {
 			t.Fatalf("read block: %v", err)
 		}
 		return r
@@ -226,14 +227,14 @@ func TestUpdateUnchangedKeepsEmbedding(t *testing.T) {
 				if in.Content != nil && got.content != *in.Content {
 					t.Errorf("content = %q, want %q", got.content, *in.Content)
 				}
-				if c.wantVector {
-					if !got.hasEmbedding || got.embedModel != model {
-						t.Errorf("an update with unchanged title/content cleared the vector: has_embedding=%v embed_model=%q, want kept (%s)",
-							got.hasEmbedding, got.embedModel, model)
-					}
-				} else if got.hasEmbedding || got.embedModel != "" {
-					t.Errorf("a changed title/content kept the old vector: has_embedding=%v embed_model=%q, want cleared",
-						got.hasEmbedding, got.embedModel)
+				if !got.hasEmbedding || got.embedModel != model {
+					t.Errorf("the update dropped the vector: has_embedding=%v embed_model=%q, want kept (%s)",
+						got.hasEmbedding, got.embedModel, model)
+				}
+				if c.wantVector && got.stale {
+					t.Errorf("an update with unchanged title/content marked the vector stale, want it fresh")
+				} else if !c.wantVector && !got.stale {
+					t.Errorf("a changed title/content left the vector unmarked, want it marked stale for the backfill")
 				}
 			})
 		}

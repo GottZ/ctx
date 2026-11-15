@@ -69,9 +69,10 @@ func (p *pickTracer) take() []pickStmt {
 }
 
 // pickBufferCap bounds the buffers of one pick statement of the fixture: it
-// has at most eight branches (two owned scopes times four sensitivities, or
-// four sensitivities unbound), each an index descent plus a heap page or
-// two; a pick that walks rows it does not return reads hundreds at the
+// has at most sixteen branches (two owned scopes times four sensitivities, or
+// four sensitivities unbound, each for the unembedded and the stale set),
+// each an index descent plus a heap page or two, and the gates of the stale
+// branches; a pick that walks rows it does not return reads hundreds at the
 // smaller size.
 const pickBufferCap = 200
 
@@ -95,17 +96,29 @@ func seedStepCost(t *testing.T, pool *pgxpool.Pool, from, n int) {
 			t.Fatalf("seed S: %v", err)
 		}
 	}
-	for g, grp := range []struct{ scope, sens string }{
-		{stepCostOwned, "credentials"},
-		{stepCostForeign, "public"},
-		{stepCostLifted, "public"},
+	// Groups 3 to 5 are the same classes marked stale (issue #198, part B),
+	// younger than groups 0 to 2, so the unbounded pass still picks the
+	// foreign group's oldest row: the stale branches of every pick have n
+	// rows per class they cannot return. They carry no vector (a vector per
+	// row would cost 4 kB each), which puts them in the unembedded set as
+	// well; the unembedded branches read no row of these classes either.
+	for g, grp := range []struct {
+		scope, sens string
+		stale       bool
+	}{
+		{stepCostOwned, "credentials", false},
+		{stepCostForeign, "public", false},
+		{stepCostLifted, "public", false},
+		{stepCostOwned, "credentials", true},
+		{stepCostForeign, "public", true},
+		{stepCostLifted, "public", true},
 	} {
 		if _, err := pool.Exec(ctx,
-			`INSERT INTO context_blocks (category, title, content, scope, sensitivity, created_at, updated_at)
-			 SELECT 'learnings', 'bsc ' || $1 || ' ' || i, 'pending row ' || i, $1, $2,
+			`INSERT INTO context_blocks (category, title, content, scope, sensitivity, embedding_stale, created_at, updated_at)
+			 SELECT 'learnings', 'bsc ' || $1 || ' ' || $6::text || i, 'pending row ' || i, $1, $2, $7,
 			        timestamptz '2026-01-01' + make_interval(days => $3::int, secs => i / 1000.0), now()
 			   FROM generate_series($4::int + 1, $5::int) i`,
-			grp.scope, grp.sens, g, from, n); err != nil {
+			grp.scope, grp.sens, g, from, n, map[bool]string{true: "stale ", false: ""}[grp.stale], grp.stale); err != nil {
 			t.Fatalf("seed %s: %v", grp.scope, err)
 		}
 	}
