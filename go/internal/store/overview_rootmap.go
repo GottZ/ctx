@@ -277,7 +277,7 @@ const activeCountGrace = 500 * time.Millisecond
 // (BP-1). A missing denominator is honest; a foreign one is a side channel.
 //
 // Since migration 170 (issue #266) it is the same number GetStats reports as
-// total_blocks, read from context_block_counts (activeBlocksSQL): a sum over
+// total_blocks, read from the block counters (activeBlocksSQL): a sum over
 // the counter rows of the read scopes instead of an index scan over every live
 // block, so the cap is a backstop now, not the expected exit.
 func ActiveBlockCount(ctx context.Context, pool *pgxpool.Pool, readScopes []string, timeout time.Duration) (int, bool, error) {
@@ -394,7 +394,7 @@ func cappedCountTx(ctx context.Context, pool *pgxpool.Pool, timeout time.Duratio
 // path of POST /api/digest uncapped until this wave, next to a coverage count
 // that §6.3 caps to five seconds. Same degradation: (0, false) beats a number
 // bought with an unbounded scan. Since migration 170 it is the same number
-// GetStats reports as total_categories, read from context_block_counts
+// GetStats reports as total_categories, read from the block counters
 // (activeCategoriesSQL) — a sum over the counter rows of the read scopes, so
 // the cap is a backstop now, not the expected exit.
 func ActiveCategoryCount(ctx context.Context, pool *pgxpool.Pool, readScopes []string, timeout time.Duration) (int, bool, error) {

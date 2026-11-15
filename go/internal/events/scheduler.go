@@ -876,6 +876,10 @@ func (s *Scheduler) Run(ctx context.Context) {
 	// target scale is a read of the whole table, and a ticker case would hold
 	// this select (guard, digest) for its length.
 	go s.runBlockCountReconcile(ctx)
+	// Its fold: the delta rows the block-count triggers append are folded
+	// into the counter rows every few seconds (a ticker of its own, not a
+	// case of this select, so a slow fold never holds guard or digest).
+	go s.runBlockCountFold(ctx)
 
 	for {
 		select {

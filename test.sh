@@ -323,8 +323,9 @@ T="T07 SCHEMA_INTEGRITY"
 # Spalten unverändert; 167 fügt context_llm_rejections_hourly hinzu → 65
 # Tabellen, Spalten unverändert; 168 fügt context_gateway_limits hinzu → 66
 # Tabellen, Spalten unverändert; 169 fügt keine Tabelle hinzu; 170 fügt
-# context_block_counts hinzu → 67 Tabellen, Spalten unverändert).
-T07_EXPECT_TABLES=67
+# context_block_counts und context_block_count_deltas hinzu → 68 Tabellen,
+# Spalten unverändert).
+T07_EXPECT_TABLES=68
 T07_EXPECT_COLUMNS=42
 
 t07_count_fallback() {

@@ -93,8 +93,11 @@ func refCategories(t *testing.T, pool *pgxpool.Pool, scopes []string) map[string
 // truth=false reads the counter table (zero rows are no information).
 func counterRows(t *testing.T, pool *pgxpool.Pool, truth bool) []string {
 	t.Helper()
-	q := `SELECT scope, category, is_archived, COALESCE(guard_status, '<null>'), n
-	        FROM context_block_counts WHERE n <> 0 ORDER BY 1, 2, 3, 4`
+	q := `SELECT scope, category, is_archived, COALESCE(guard_status, '<null>'), sum(n)::bigint
+	        FROM (SELECT scope, category, is_archived, guard_status, n FROM context_block_counts
+	              UNION ALL
+	              SELECT scope, category, is_archived, guard_status, n FROM context_block_count_deltas) k
+	       GROUP BY 1, 2, 3, 4 HAVING sum(n) <> 0 ORDER BY 1, 2, 3, 4`
 	if truth {
 		q = `SELECT scope::text, category::text, is_archived, COALESCE(guard_status::text, '<null>'), count(*)
 		       FROM context_blocks GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4`
@@ -191,7 +194,20 @@ func TestBlockCounts_ParityOverWritePaths(t *testing.T) {
 	sC := f.scope(t, "cnt-c")
 	all := []string{sA, sB, sC, spBystander}
 	windows := [][]string{{sA}, {sB}, {sA, sB}, all, {"cnt-nowhere"}, {sA, sA}}
-	check := func(step string) { t.Helper(); assertCountParity(t, pool, step, windows) }
+	// Every step is checked twice: with the delta rows of the step still
+	// pending, and after a fold moved them into the counter rows.
+	check := func(step string) {
+		t.Helper()
+		assertCountParity(t, pool, step, windows)
+		if _, err := store.FoldBlockCountDeltas(ctx, pool); err != nil {
+			t.Fatalf("%s: fold: %v", step, err)
+		}
+		var pending int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_block_count_deltas`).Scan(&pending); err != nil || pending != 0 {
+			t.Fatalf("%s: %d delta rows left after the fold (%v)", step, pending, err)
+		}
+		assertCountParity(t, pool, step+" (folded)", windows)
+	}
 	up := func(scope, cat, title, content string) string {
 		t.Helper()
 		b, err := store.UpsertBlock(ctx, pool, cat, title, content, nil, nil, scope, true, store.SensitivityWrite{}, "")
@@ -321,21 +337,17 @@ func TestBlockCounts_ParityOverWritePaths(t *testing.T) {
 	exec(`UPDATE context_blocks SET scope = $2, category = 'bulk-moved'
 	       WHERE id IN (SELECT id FROM context_blocks WHERE scope = $1 AND category LIKE 'bulk-%' ORDER BY title LIMIT 100)`, sC, sA)
 	check("bulk-move")
-	// An update that changes no key writes no counter row (HAVING sum <> 0):
-	// every counter row keeps its row version.
-	versions := func() []string {
-		t.Helper()
-		var v []string
-		if err := pool.QueryRow(ctx, `SELECT COALESCE(array_agg(xmin::text || '/' || ctid::text ORDER BY scope, category, is_archived, guard_status), '{}')
-		                                FROM context_block_counts`).Scan(&v); err != nil {
-			t.Fatal(err)
-		}
-		return v
+	// An update that changes no key writes no delta row (HAVING sum <> 0).
+	var pendingBefore, pendingAfter int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_block_count_deltas`).Scan(&pendingBefore); err != nil {
+		t.Fatal(err)
 	}
-	before := versions()
 	exec(`UPDATE context_blocks SET metadata = metadata || '{"cnt": 1}'::jsonb WHERE scope = $1`, sC)
-	if after := versions(); !reflect.DeepEqual(before, after) {
-		t.Fatalf("an update without a key change rewrote counter rows:\n before %v\n after  %v", before, after)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_block_count_deltas`).Scan(&pendingAfter); err != nil {
+		t.Fatal(err)
+	}
+	if pendingAfter != pendingBefore {
+		t.Fatalf("an update without a key change wrote %d delta rows", pendingAfter-pendingBefore)
 	}
 	check("bulk-no-key-change")
 
@@ -366,11 +378,12 @@ func TestBlockCounts_ParityOverWritePaths(t *testing.T) {
 	}
 	check("tenant-delete")
 
-	// TRUNCATE has its own trigger.
+	// TRUNCATE has its own trigger; it clears pending deltas too.
+	up(spBystander, "alpha", "pre-truncate", "pending delta")
 	exec(`TRUNCATE context_blocks CASCADE`)
 	check("truncate")
 	var rowsLeft int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_block_counts`).Scan(&rowsLeft); err != nil || rowsLeft != 0 {
-		t.Fatalf("counter rows after TRUNCATE = %d (%v), want 0", rowsLeft, err)
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM context_block_counts) + (SELECT count(*) FROM context_block_count_deltas)`).Scan(&rowsLeft); err != nil || rowsLeft != 0 {
+		t.Fatalf("counter and delta rows after TRUNCATE = %d (%v), want 0", rowsLeft, err)
 	}
 }

@@ -22,6 +22,14 @@ const blockCountReconcileIdlePoll = time.Minute
 // setting.
 const blockCountReconcileFirstDelay = time.Hour
 
+// blockCountFoldInterval is the cadence of the delta fold (migration 170): the
+// block-count delta rows written since the last fold are what every stats read
+// sums on top of the counter rows, so the fold bounds that tail to the writes
+// of a few seconds. A constant (pendingWriteEvictInterval precedent): one fold
+// is a single statement over a table that holds only those few seconds of
+// writes, and no operator decision depends on its cadence.
+const blockCountFoldInterval = 5 * time.Second
+
 // blockCountReconcileInterval reads the hot cadence of the reconcile pass.
 func (s *Scheduler) blockCountReconcileInterval() time.Duration {
 	return s.cfg.Snapshot().Scheduler.BlockCountReconcileInterval //nolint:forbidigo // issue #266 background: the block-counter reconcile is one process-wide pass over every tenant's scopes; its cadence is a server-global policy knob (global-only), like the overview-rebuild cadence.
@@ -33,9 +41,9 @@ func (s *Scheduler) blockCountReconcileInterval() time.Duration {
 // action stats-reconcile. The first pass runs blockCountReconcileFirstDelay
 // (or one interval, if shorter) after boot, not at boot: the triggers keep the
 // counters exact, so a restart is no reason to recount at once. A scope
-// without drift is one read; a scope with drift is corrected under the
-// write-ordering row, which also serializes the passes of several ctx
-// processes on one database. Every correction is logged by the store.
+// without drift is one read; a scope with drift is corrected under its
+// advisory lock, which also serializes the passes of several ctx processes on
+// one database. Every correction is logged by the store.
 func (s *Scheduler) runBlockCountReconcile(ctx context.Context) {
 	defer guardPanic("block count reconcile")
 	first := true
@@ -67,5 +75,24 @@ func (s *Scheduler) runBlockCountReconcile(ctx context.Context) {
 		slog.Info("scheduler: block count reconcile",
 			"scopes", res.Scopes, "corrections", len(res.Corrections), "pruned", res.Pruned,
 			"duration", time.Since(start))
+	}
+}
+
+// runBlockCountFold folds the block-count delta rows into the counter rows
+// every blockCountFoldInterval. Several ctx processes on one database each run
+// it; a fold that finds another fold at work skips its turn.
+func (s *Scheduler) runBlockCountFold(ctx context.Context) {
+	defer guardPanic("block count fold")
+	t := time.NewTicker(blockCountFoldInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if _, err := store.FoldBlockCountDeltas(ctx, s.pool); err != nil && ctx.Err() == nil {
+			slog.Warn("scheduler: block count fold failed", "error", err)
+		}
 	}
 }

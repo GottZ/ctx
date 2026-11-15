@@ -11,32 +11,92 @@ import (
 	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
-// context_block_counts (migration 170, issue #266) holds one row per
-// (scope, category, is_archived, guard_status) with the number of blocks
-// carrying that key. Statement-level triggers on context_blocks keep it in the
-// writer's transaction; GetStats, GetGuardStats, ListCategories,
-// ActiveBlockCount and ActiveCategoryCount sum it instead of counting
-// context_blocks. The reconcile below compares it with a real count per scope
-// and corrects drift — the repair for writes the triggers cannot see
-// (TRUNCATE is covered; ALTER TABLE … DISABLE TRIGGER and
+// The block counters (migration 170, issue #266): the number of blocks per
+// (scope, category, is_archived, guard_status) is the folded row in
+// context_block_counts plus the delta rows of the key in
+// context_block_count_deltas. Statement-level triggers on context_blocks
+// append one delta row per key and statement in the writer's transaction —
+// no shared row is updated or locked by a writer. The scheduler folds the
+// delta rows into the counter rows (FoldBlockCountDeltas); GetStats,
+// GetGuardStats, ListCategories, ActiveBlockCount and ActiveCategoryCount sum
+// both tables for their read scopes. The reconcile below compares the sum with
+// a real count per scope and corrects drift — the repair for writes the
+// triggers cannot see (TRUNCATE is covered; ALTER TABLE … DISABLE TRIGGER and
 // session_replication_role = replica are not).
 
-// BlockCountDrift is one counter row the reconcile corrected.
+// blockCountRowsSQL is the counter source of every reader: the folded rows and
+// the pending deltas, one row stream. A reader's WHERE on scope reaches both
+// branches (scope leads the unique key of the one and idx_block_count_deltas_scope
+// of the other).
+const blockCountRowsSQL = `(SELECT scope, category, is_archived, guard_status, n FROM context_block_counts
+		  UNION ALL
+		  SELECT scope, category, is_archived, guard_status, n FROM context_block_count_deltas)`
+
+// blockCountFoldSQL moves every delta row the statement's snapshot sees into
+// the counter rows, in one statement: the deleted rows and the added sums
+// commit together, so any reader's snapshot sees the same total before and
+// after. Delta rows of writers still in flight are not in the snapshot and
+// stay for the next fold. GROUP BY makes every key unique within the upsert
+// (ON CONFLICT may touch a row only once per statement); keys that net to zero
+// are deleted and not applied.
+const blockCountFoldSQL = `WITH d AS (
+	    DELETE FROM context_block_count_deltas
+	    RETURNING scope, category, is_archived, guard_status, n
+	), a AS (
+	    SELECT scope, category, is_archived, guard_status, sum(n)::bigint AS n
+	      FROM d GROUP BY 1, 2, 3, 4 HAVING sum(n) <> 0
+	), up AS (
+	    INSERT INTO context_block_counts AS c (scope, category, is_archived, guard_status, n)
+	    SELECT scope, category, is_archived, guard_status, n FROM a ORDER BY 1, 2, 3, 4
+	    ON CONFLICT (scope, category, is_archived, guard_status) DO UPDATE SET n = c.n + EXCLUDED.n
+	    RETURNING 1
+	)
+	SELECT (SELECT count(*) FROM d)::int`
+
+// blockCountFoldLockSQL keeps two folds (several ctx processes on one
+// database) from working on the same delta rows: the loser skips its turn.
+const blockCountFoldLockSQL = `SELECT pg_try_advisory_xact_lock(hashtext('ctx:block_count_fold'))`
+
+// blockCountReconcileLockSQL serializes the correction of one scope: two
+// reconciles that saw the same drift would otherwise both add the difference.
+const blockCountReconcileLockSQL = `SELECT pg_advisory_xact_lock(hashtext('ctx:block_count_reconcile:' || $1::text))`
+
+// FoldBlockCountDeltas folds the pending delta rows into the counter rows and
+// returns how many delta rows it folded (0 when another fold holds the turn).
+func FoldBlockCountDeltas(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	folded := 0
+	err := pgxdb.Write(ctx, pool, pgxdb.At("store: block count fold"), func(tx pgx.Tx) error {
+		var mine bool
+		if err := tx.QueryRow(ctx, blockCountFoldLockSQL).Scan(&mine); err != nil {
+			return fmt.Errorf("store: block count fold lock: %w", err)
+		}
+		if !mine {
+			return nil
+		}
+		if err := tx.QueryRow(ctx, blockCountFoldSQL).Scan(&folded); err != nil {
+			return fmt.Errorf("store: block count fold: %w", err)
+		}
+		return nil
+	})
+	return folded, err
+}
+
+// BlockCountDrift is one counter key the reconcile corrected.
 type BlockCountDrift struct {
 	Scope       string  `json:"scope"`
 	Category    string  `json:"category"`
 	IsArchived  bool    `json:"is_archived"`
 	GuardStatus *string `json:"guard_status"`
-	Counted     int64   `json:"counted"` // the counter before the correction
-	Actual      int64   `json:"actual"`  // the real count, the counter after it
+	Counted     int64   `json:"counted"` // the counters before the correction
+	Actual      int64   `json:"actual"`  // the real count, the counters after it
 }
 
 // BlockCountReconcile is the result of one reconcile pass.
 type BlockCountReconcile struct {
 	Scopes      int               `json:"scopes"`
 	Corrections []BlockCountDrift `json:"corrections"`
-	// Pruned counts counter rows that stood at 0 with no block behind them
-	// and were removed (no drift: the triggers leave zero rows standing).
+	// Pruned counts folded counter rows at 0 that were removed (no drift: a
+	// fold leaves zero rows standing).
 	Pruned int `json:"pruned"`
 }
 
@@ -53,16 +113,18 @@ const reconcileScopesSQL = `WITH RECURSIVE s AS (
 	SELECT scope::text FROM s WHERE scope IS NOT NULL
 	UNION
 	SELECT scope FROM context_block_counts
+	UNION
+	SELECT scope FROM context_block_count_deltas
 	ORDER BY 1`
 
-// reconcileDriftSQL compares the counter rows of scope $1 with a real count of
-// its blocks in ONE statement, i.e. one snapshot. A key whose sums differ is
-// drift; a key with a counter row but neither a count nor blocks is a zero row
-// to prune.
+// reconcileDriftSQL compares the counters of scope $1 (folded rows plus
+// deltas) with a real count of its blocks in ONE statement, i.e. one snapshot.
+// A key whose sums differ is drift; a key with counter rows but neither a
+// count nor blocks may hold a folded zero row to prune.
 const reconcileDriftSQL = `SELECT category, is_archived, guard_status,
 	       sum(counted)::bigint, sum(actual)::bigint
 	  FROM (SELECT category, is_archived, guard_status, n AS counted, 0::bigint AS actual
-	          FROM context_block_counts WHERE scope = $1
+	          FROM ` + blockCountRowsSQL + ` k WHERE scope = $1
 	        UNION ALL
 	        SELECT category::text, is_archived, guard_status::text, 0::bigint, count(*)
 	          FROM context_blocks WHERE scope = $1
@@ -71,24 +133,21 @@ const reconcileDriftSQL = `SELECT category, is_archived, guard_status,
 	HAVING sum(counted) <> sum(actual) OR sum(actual) = 0
 	 ORDER BY 1, 2, 3`
 
-// ReconcileBlockCounts compares context_block_counts with a real count of
+// ReconcileBlockCounts compares the block counters with a real count of
 // context_blocks, scope by scope, and corrects every difference. scope ""
 // reconciles every scope; otherwise only the named one.
 //
-// Two steps per scope. The CHECK is one read-only statement: it reads the
-// counter rows and counts the blocks in one snapshot, and since a writer's
-// block change and its counter delta commit together, that snapshot holds both
-// or neither — a difference it reports is drift, not a write in flight. A
-// scope without drift ends there, having locked nothing. A scope with drift is
-// CORRECTED in a transaction that first takes the write-ordering row
-// (context_guard_state, FOR NO KEY UPDATE — the row every counter-writing
-// statement takes before its first counter row, migration 170) and then
-// repeats the check: while the reconcile holds that row no committed counter
-// can change, so the second snapshot is exact, and a writer whose block
-// change it does not see yet applies its own delta after the commit, onto the
-// corrected value. Writers wait for the correction — the length of one
-// recount of the scope, and only for scopes with drift. Two reconciles of the
-// same scope serialize on the row as well.
+// Per scope the CHECK is one read-only statement: it reads the counters and
+// counts the blocks in one snapshot, and since a writer's block change and its
+// delta row commit together, that snapshot holds both or neither — a
+// difference it reports is drift, not a write in flight. A scope without drift
+// ends there, having locked nothing. A scope with drift is CORRECTED in a
+// transaction that takes the scope's advisory lock (so two reconciles do not
+// both add the difference), repeats the check in a fresh snapshot, and appends
+// the difference (actual - counted) as delta rows — the same append-only
+// write the triggers make. A writer whose block change that snapshot does not
+// see adds its own delta after the commit, on top; nothing a writer holds is
+// waited for, and no writer waits for the reconcile.
 //
 // Every correction is logged (scope, key, counted, actual) and returned.
 func ReconcileBlockCounts(ctx context.Context, pool *pgxpool.Pool, scope string) (*BlockCountReconcile, error) {
@@ -140,7 +199,7 @@ func scopeDrift(ctx context.Context, q pgxdb.Querier, scope string) ([]BlockCoun
 }
 
 // reconcileScopeCounts checks one scope without a lock and corrects it under
-// the write-ordering row when the check found something.
+// the scope's advisory lock when the check found something.
 func reconcileScopeCounts(ctx context.Context, pool *pgxpool.Pool, scope string) ([]BlockCountDrift, int, error) {
 	found, err := scopeDrift(ctx, pool, scope)
 	if err != nil || len(found) == 0 {
@@ -151,8 +210,8 @@ func reconcileScopeCounts(ctx context.Context, pool *pgxpool.Pool, scope string)
 		pruned int
 	)
 	err = pgxdb.Write(ctx, pool, pgxdb.At("store: block count reconcile"), func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `SELECT 1 FROM context_guard_state WHERE id FOR NO KEY UPDATE`); err != nil {
-			return fmt.Errorf("store: block count reconcile order row: %w", err)
+		if _, err := tx.Exec(ctx, blockCountReconcileLockSQL, scope); err != nil {
+			return fmt.Errorf("store: block count reconcile lock: %w", err)
 		}
 		found, err := scopeDrift(ctx, tx, scope)
 		if err != nil {
@@ -167,34 +226,28 @@ func reconcileScopeCounts(ctx context.Context, pool *pgxpool.Pool, scope string)
 	return drift, pruned, nil
 }
 
-// correctScopeCounts applies the differences of one scope's check. The
-// counters cannot move while the caller holds the write-ordering row, so the
-// delta (actual - counted) lands exactly on the value the check read.
+// correctScopeCounts appends the differences of one scope's check as delta
+// rows and removes the scope's folded zero rows.
 func correctScopeCounts(ctx context.Context, tx pgx.Tx, scope string, found []BlockCountDrift) ([]BlockCountDrift, int, error) {
 	drift := make([]BlockCountDrift, 0, len(found))
-	pruned := 0
 	for _, d := range found {
-		if d.Actual == 0 {
-			if _, err := tx.Exec(ctx,
-				`DELETE FROM context_block_counts
-				  WHERE scope = $1 AND category = $2 AND is_archived = $3
-				    AND guard_status IS NOT DISTINCT FROM $4::text`,
-				scope, d.Category, d.IsArchived, d.GuardStatus); err != nil {
-				return nil, 0, fmt.Errorf("store: block count prune: %w", err)
-			}
-		} else if _, err := tx.Exec(ctx,
-			`INSERT INTO context_block_counts AS c (scope, category, is_archived, guard_status, n)
-			 VALUES ($1, $2, $3, $4::text, $5)
-			 ON CONFLICT (scope, category, is_archived, guard_status)
-			 DO UPDATE SET n = c.n + EXCLUDED.n`,
+		if d.Counted == d.Actual {
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO context_block_count_deltas (scope, category, is_archived, guard_status, n)
+			 VALUES ($1, $2, $3, $4::text, $5)`,
 			scope, d.Category, d.IsArchived, d.GuardStatus, d.Actual-d.Counted); err != nil {
 			return nil, 0, fmt.Errorf("store: block count correct: %w", err)
 		}
-		if d.Counted == d.Actual {
-			pruned++
-			continue
-		}
 		drift = append(drift, d)
 	}
-	return drift, pruned, nil
+	// A folded row at 0 adds nothing to any sum, whatever deltas are pending
+	// for its key, so removing it is always exact; a fold that adds to the key
+	// later inserts the row again.
+	tag, err := tx.Exec(ctx, `DELETE FROM context_block_counts WHERE scope = $1 AND n = 0`, scope)
+	if err != nil {
+		return nil, 0, fmt.Errorf("store: block count prune: %w", err)
+	}
+	return drift, int(tag.RowsAffected()), nil
 }

@@ -17,3 +17,7 @@ var ListCategoriesSQLForTest = listCategoriesSQL
 // 170 ActiveBlockCount is a counter read that no 1 ms cap catches, so the cap
 // gate (TestRootMapActiveBlockCount) drives the helper with a scanning count.
 var CappedCountForTest = cappedCount
+
+// BlockCountReconcileLockSQLForTest is the per-scope advisory lock of the
+// reconcile's correction ($1 = scope), so the reconcile tests can hold it.
+var BlockCountReconcileLockSQLForTest = blockCountReconcileLockSQL

@@ -7,6 +7,7 @@ package store_test
 // (assertCountParity, counterRows) live in block_counts_parity_integration_test.go.
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sort"
@@ -15,11 +16,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/GottZ/ctx/internal/store"
 )
 
 // TestBlockCounts_ConcurrentWriters: parallel writers into ONE scope and ONE
-// category (the hot counter row) plus a reconcile running alongside. Every
+// category (one counter key) plus a reconcile and a fold running alongside. Every
 // write must succeed (no deadlock, no serialization failure on the writer
 // side), the counters must equal the real count at the end, and a final
 // reconcile must find nothing to correct — a reconcile that raced the writers
@@ -50,6 +53,10 @@ func TestBlockCounts_ConcurrentWriters(t *testing.T) {
 			}
 			if _, err := store.ReconcileBlockCounts(ctx, pool, s); err != nil {
 				errs <- fmt.Errorf("reconcile: %w", err)
+				return
+			}
+			if _, err := store.FoldBlockCountDeltas(ctx, pool); err != nil {
+				errs <- fmt.Errorf("fold: %w", err)
 				return
 			}
 			reconcileMu.Lock()
@@ -107,10 +114,28 @@ func TestBlockCounts_ConcurrentWriters(t *testing.T) {
 	}
 }
 
+// fold runs one delta fold or fails the test.
+func fold(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := store.FoldBlockCountDeltas(context.Background(), pool); err != nil {
+		t.Fatalf("fold: %v", err)
+	}
+}
+
+// execAll runs statements in order or fails the test.
+func execAll(t *testing.T, pool *pgxpool.Pool, sqls ...string) {
+	t.Helper()
+	for _, sql := range sqls {
+		if _, err := pool.Exec(context.Background(), sql); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+}
+
 // TestBlockCounts_ReconcileRepairsDrift: writes the triggers cannot see
 // (DISABLE TRIGGER, the pg_restore --disable-triggers shape) leave drift; the
-// reconcile finds it per key, reports counted/actual, corrects it, and prunes
-// zero rows.
+// reconcile finds it per key, reports counted/actual, corrects it with delta
+// rows, and prunes folded zero rows.
 func TestBlockCounts_ReconcileRepairsDrift(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -123,39 +148,25 @@ func TestBlockCounts_ReconcileRepairsDrift(t *testing.T) {
 		f.block(t, s, fmt.Sprintf("d%d", i), nil)
 	}
 	gone := f.block(t, s, "gone", nil)
-	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET category = 'solo' WHERE id = $1::uuid`, gone); err != nil {
-		t.Fatal(err)
-	}
+	execAll(t, pool, fmt.Sprintf(`UPDATE context_blocks SET category = 'solo' WHERE id = '%s'::uuid`, gone))
 	// Invisible writes: two more blocks, and the 'solo' block disappears.
-	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks DISABLE TRIGGER trg_block_counts_ins`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks DISABLE TRIGGER trg_block_counts_del`); err != nil {
-		t.Fatal(err)
-	}
+	execAll(t, pool, `ALTER TABLE context_blocks DISABLE TRIGGER trg_block_counts_ins`,
+		`ALTER TABLE context_blocks DISABLE TRIGGER trg_block_counts_del`)
 	f.block(t, s, "hidden-1", nil)
 	f.block(t, s, "hidden-2", nil)
-	if _, err := pool.Exec(ctx, `DELETE FROM context_blocks WHERE id = $1::uuid`, gone); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks ENABLE TRIGGER trg_block_counts_ins`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks ENABLE TRIGGER trg_block_counts_del`); err != nil {
-		t.Fatal(err)
-	}
+	execAll(t, pool, fmt.Sprintf(`DELETE FROM context_blocks WHERE id = '%s'::uuid`, gone),
+		`ALTER TABLE context_blocks ENABLE TRIGGER trg_block_counts_ins`,
+		`ALTER TABLE context_blocks ENABLE TRIGGER trg_block_counts_del`)
 	if got, want := counterRows(t, pool, false), counterRows(t, pool, true); reflect.DeepEqual(got, want) {
 		t.Fatalf("no drift injected: %v", got)
 	}
-	// A zero row to prune, keyed on guard_status NULL (the IS NOT DISTINCT
-	// FROM path of the prune): a block passes through the unchecked state.
+	// A folded zero row to prune, keyed on guard_status NULL: a block passes
+	// through the unchecked state with a fold on each side.
 	z := f.block(t, s, "zero", nil)
-	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET guard_status = NULL WHERE id = $1::uuid`, z); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET guard_status = 'active' WHERE id = $1::uuid`, z); err != nil {
-		t.Fatal(err)
-	}
+	execAll(t, pool, fmt.Sprintf(`UPDATE context_blocks SET guard_status = NULL WHERE id = '%s'::uuid`, z))
+	fold(t, pool)
+	execAll(t, pool, fmt.Sprintf(`UPDATE context_blocks SET guard_status = 'active' WHERE id = '%s'::uuid`, z))
+	fold(t, pool)
 
 	res, err := store.ReconcileBlockCounts(ctx, pool, s)
 	if err != nil {
@@ -170,25 +181,25 @@ func TestBlockCounts_ReconcileRepairsDrift(t *testing.T) {
 		t.Fatalf("reconcile = %+v (corrections %+v), want 1 scope, corrections %+v, 1 pruned", *res, res.Corrections, want)
 	}
 	assertCountParity(t, pool, "after reconcile", [][]string{{s}})
+	// The 'solo' correction is a pending delta; folded, its row is a zero row
+	// the next pass prunes.
+	fold(t, pool)
+	res, err = store.ReconcileBlockCounts(ctx, pool, s)
+	if err != nil || len(res.Corrections) != 0 || res.Pruned != 1 {
+		t.Fatalf("second pass = %+v, %v; want no correction and 1 pruned", res, err)
+	}
 	var rows int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_block_counts WHERE scope = $1`, s).Scan(&rows); err != nil || rows != 1 {
 		t.Fatalf("counter rows of %s = %d (%v), want 1 (the zero rows pruned)", s, rows, err)
 	}
 	// A scope whose only block went past the triggers: no block left, one
-	// counter row. Only the counter side of the scope enumeration finds it.
+	// folded counter row. Only the counter side of the scope enumeration finds it.
 	empty := f.scope(t, "cnt-empty")
 	e := f.block(t, empty, "lonely", nil)
-	for _, sql := range []string{
-		`ALTER TABLE context_blocks DISABLE TRIGGER trg_block_counts_del`,
+	fold(t, pool)
+	execAll(t, pool, `ALTER TABLE context_blocks DISABLE TRIGGER trg_block_counts_del`,
 		fmt.Sprintf(`DELETE FROM context_blocks WHERE id = '%s'::uuid`, e),
-		`ALTER TABLE context_blocks ENABLE TRIGGER trg_block_counts_del`,
-	} {
-		if _, err := pool.Exec(ctx, sql); err != nil {
-			t.Fatalf("%s: %v", sql, err)
-		}
-	}
-	// All scopes: s is clean now, the bystander was never off, the empty
-	// scope is found through its counter row and corrected.
+		`ALTER TABLE context_blocks ENABLE TRIGGER trg_block_counts_del`)
 	res, err = store.ReconcileBlockCounts(ctx, pool, "")
 	wantEmpty := []store.BlockCountDrift{{Scope: empty, Category: "learnings", GuardStatus: &active, Counted: 1, Actual: 0}}
 	if err != nil || res.Scopes != 3 || !reflect.DeepEqual(res.Corrections, wantEmpty) {
@@ -197,54 +208,52 @@ func TestBlockCounts_ReconcileRepairsDrift(t *testing.T) {
 	assertCountParity(t, pool, "after the all-scope reconcile", [][]string{{s}, {empty}, {spBystander}})
 }
 
-// TestBlockCounts_NoDeadlockWithGuardRow: the lock order of migration 170. A
-// transaction that changes a counter key through an update the guard trigger
-// skips (metadata-only, guard_status already in the metadata — the guard's
-// re-check of an edited block) and later needs the guard row (a first-time
-// check of another block), against a concurrent insert into the same key,
-// which takes the guard row first. If the counter rows were taken without the
-// guard row, the two would wait on each other and one would fail with 40P01;
-// with the guard row taken before the first counter row, the insert simply
-// waits for the commit.
-func TestBlockCounts_NoDeadlockWithGuardRow(t *testing.T) {
-	if testing.Short() {
-		t.Skip("integration test")
-	}
-	f := spSetup(t)
-	ctx, pool := f.ctx, f.pool
-	s := f.scope(t, "cnt-order")
-	rechecked := f.block(t, s, "rechecked", nil)
-	fresh := f.block(t, s, "fresh", nil)
-	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET metadata = metadata || '{"guard_status": "active"}'::jsonb WHERE id = $1::uuid`, rechecked); err != nil {
-		t.Fatal(err)
-	}
-
+// lockOrderCase runs the two-transaction shape of a lock-order cycle: T1 runs
+// first (and holds what it took), T2 runs its statement in its own transaction
+// and commits, T1 then runs second against the row T2 touched and commits.
+// If T2's statement had to wait for something T1 holds after T2 locked its
+// rows, T1's second statement would wait for T2 and PostgreSQL would break the
+// cycle with 40P01. Both sides must finish without error.
+func lockOrderCase(t *testing.T, pool *pgxpool.Pool, first, t2Stmt, second string, args ...any) {
+	t.Helper()
+	ctx := context.Background()
 	t1, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = t1.Rollback(ctx) }()
-	if _, err := t1.Exec(ctx, `SET LOCAL lock_timeout = '10s'`); err != nil {
-		t.Fatal(err)
-	}
-	// The skip path of mark_guard_dirty: guard_status in OLD and NEW metadata,
-	// content unchanged. The key moves active -> clean.
-	if _, err := t1.Exec(ctx, `UPDATE context_blocks SET guard_status = 'clean',
-	        metadata = metadata || '{"guard_status": "clean"}'::jsonb WHERE id = $1::uuid`, rechecked); err != nil {
-		t.Fatalf("re-check update: %v", err)
+	if _, err := t1.Exec(ctx, first, args...); err != nil {
+		t.Fatalf("t1 first: %v", err)
 	}
 	var t1PID int
 	if err := t1.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&t1PID); err != nil {
 		t.Fatal(err)
 	}
-
-	insertErr := make(chan error, 1)
+	t2Done := make(chan error, 1)
 	go func() {
-		_, err := store.UpsertBlock(ctx, pool, "learnings", "concurrent", "concurrent body", nil, nil, s, true, store.SensitivityWrite{}, "")
-		insertErr <- err
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t2Done <- err
+			return
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if _, err := tx.Exec(ctx, t2Stmt, args...); err != nil {
+			t2Done <- fmt.Errorf("t2 statement: %w", err)
+			return
+		}
+		t2Done <- tx.Commit(ctx)
 	}()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
+	// Let T2 either finish or block on T1, then run T1's second statement.
+	var t2Err error
+	finished := false
+	deadline := time.Now().Add(5 * time.Second)
+	for !finished && time.Now().Before(deadline) {
+		select {
+		case t2Err = <-t2Done:
+			finished = true
+			continue
+		default:
+		}
 		var waiting int
 		if err := pool.QueryRow(ctx,
 			`SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, t1PID).Scan(&waiting); err != nil {
@@ -253,21 +262,196 @@ func TestBlockCounts_NoDeadlockWithGuardRow(t *testing.T) {
 		if waiting > 0 {
 			break
 		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := t1.Exec(ctx, second, args...); err != nil {
+		t.Fatalf("t1 second statement: %v", err)
+	}
+	if err := t1.Commit(ctx); err != nil {
+		t.Fatalf("t1 commit: %v", err)
+	}
+	if !finished {
+		t2Err = <-t2Done
+	}
+	if t2Err != nil {
+		t.Fatalf("t2: %v", t2Err)
+	}
+}
+
+// TestBlockCounts_NoDeadlockOnDelete is the shape of PR #269 finding 1: T1
+// inserts a block (trg_guard_dirty gives it the context_guard_state row until
+// its commit), T2 deletes block A (row lock on A), T1 then deletes A too. The
+// counter maintenance of T2's delete must not wait for anything T1 holds —
+// with a counter row or the guard row taken at the end of T2's statement, T1's
+// delete would wait for T2 and the two would deadlock.
+func TestBlockCounts_NoDeadlockOnDelete(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := spSetup(t)
+	s := f.scope(t, "cnt-del-order")
+	a := f.block(t, s, "a", nil)
+	lockOrderCase(t, f.pool,
+		`INSERT INTO context_blocks (category, title, content, scope) VALUES ('learnings', 'b-'||$1::text, 'x', 'sp-a:cnt-del-order')`,
+		`DELETE FROM context_blocks WHERE id = $1::uuid`,
+		`DELETE FROM context_blocks WHERE id = $1::uuid`, a)
+	assertCountParity(t, f.pool, "after the delete pair", [][]string{{s}})
+}
+
+// TestBlockCounts_NoDeadlockOnGuardSkippedUpdate: the same shape with an
+// update that trg_guard_dirty skips (metadata-only, guard_status in OLD and NEW
+// metadata, content unchanged — the guard's re-check of an edited block) but
+// that changes a counter key. Such an update never took the guard row before
+// migration 170, so its counter maintenance must not take anything T1 holds.
+func TestBlockCounts_NoDeadlockOnGuardSkippedUpdate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := spSetup(t)
+	s := f.scope(t, "cnt-upd-order")
+	a := f.block(t, s, "rechecked", nil)
+	execAll(t, f.pool, fmt.Sprintf(`UPDATE context_blocks SET metadata = metadata || '{"guard_status": "active"}'::jsonb WHERE id = '%s'::uuid`, a))
+	lockOrderCase(t, f.pool,
+		`INSERT INTO context_blocks (category, title, content, scope) VALUES ('learnings', 'b-'||$1::text, 'x', 'sp-a:cnt-upd-order')`,
+		`UPDATE context_blocks SET guard_status = 'clean', metadata = metadata || '{"guard_status": "clean"}'::jsonb WHERE id = $1::uuid`,
+		`UPDATE context_blocks SET guard_status = 'needs_review', metadata = metadata || '{"guard_status": "needs_review"}'::jsonb WHERE id = $1::uuid`, a)
+	assertCountParity(t, f.pool, "after the update pair", [][]string{{s}})
+}
+
+// TestBlockCounts_TwoReconcilesCorrectOnce: two reconciles that both saw the
+// same drift in their lock-free check meet at the scope's advisory lock; the
+// second repeats the check after the first committed and corrects nothing.
+func TestBlockCounts_TwoReconcilesCorrectOnce(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := spSetup(t)
+	ctx, pool := f.ctx, f.pool
+	s := f.scope(t, "cnt-twice")
+	f.block(t, s, "seen", nil)
+	execAll(t, pool, `ALTER TABLE context_blocks DISABLE TRIGGER trg_block_counts_ins`)
+	f.block(t, s, "unseen-1", nil)
+	f.block(t, s, "unseen-2", nil)
+	execAll(t, pool, `ALTER TABLE context_blocks ENABLE TRIGGER trg_block_counts_ins`)
+
+	// Hold the scope's advisory lock so both reconciles pass their check and
+	// queue at the lock.
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, store.BlockCountReconcileLockSQLForTest, s); err != nil {
+		t.Fatal(err)
+	}
+	var holderPID int
+	if err := holder.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan *store.BlockCountReconcile, 2)
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			r, err := store.ReconcileBlockCounts(ctx, pool, s)
+			results <- r
+			errs <- err
+		}()
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, holderPID).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting == 2 {
+			break
+		}
 		if time.Now().After(deadline) {
-			t.Fatal("the insert never waited on the re-check transaction")
+			t.Fatalf("%d of 2 reconciles reached the scope lock", waiting)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	// A first-time check: mark_guard_dirty updates the guard row.
-	if _, err := t1.Exec(ctx, `UPDATE context_blocks SET guard_status = 'clean',
-	        metadata = metadata || '{"guard_status": "clean"}'::jsonb WHERE id = $1::uuid`, fresh); err != nil {
-		t.Fatalf("first-time check in the same transaction: %v", err)
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatal(err)
 	}
-	if err := t1.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
+	total := 0
+	for i := 0; i < 2; i++ {
+		r := <-results
+		if err := <-errs; err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		total += len(r.Corrections)
 	}
-	if err := <-insertErr; err != nil {
-		t.Fatalf("concurrent insert: %v", err)
+	if total != 1 {
+		t.Fatalf("the two reconciles made %d corrections, want exactly 1", total)
 	}
-	assertCountParity(t, pool, "after the re-check and the insert", [][]string{{s}})
+	assertCountParity(t, pool, "after two reconciles", [][]string{{s}})
+}
+
+// TestBlockCounts_ReconcileAgainstTruncateAndReload (PR #269 finding 2): a
+// transaction that truncates context_blocks and loads blocks again while a
+// reconcile corrects drift. The reconcile holds only its scope's advisory lock
+// and, for its statements, ACCESS SHARE on context_blocks; the reload's trigger
+// writes append-only delta rows. Neither waits for something the other holds
+// after taking its own lock, so both finish, and the counters match the
+// reloaded table.
+func TestBlockCounts_ReconcileAgainstTruncateAndReload(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := spSetup(t)
+	ctx, pool := f.ctx, f.pool
+	s := f.scope(t, "cnt-trunc")
+	f.block(t, s, "before", nil)
+	execAll(t, pool, `ALTER TABLE context_blocks DISABLE TRIGGER trg_block_counts_ins`)
+	f.block(t, s, "unseen", nil)
+	execAll(t, pool, `ALTER TABLE context_blocks ENABLE TRIGGER trg_block_counts_ins`)
+
+	// The reconcile's correction transaction holds the scope lock first …
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, store.BlockCountReconcileLockSQLForTest, s); err != nil {
+		t.Fatal(err)
+	}
+	reconciled := make(chan error, 1)
+	go func() {
+		_, err := store.ReconcileBlockCounts(ctx, pool, s)
+		reconciled <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	// … while another transaction truncates and reloads.
+	reload, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reload.Rollback(ctx) }()
+	if _, err := reload.Exec(ctx, `SET LOCAL lock_timeout = '10s'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reload.Exec(ctx, `TRUNCATE context_blocks CASCADE`); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	if _, err := reload.Exec(ctx, `INSERT INTO context_blocks (category, title, content, scope)
+		SELECT 'learnings', 'reloaded ' || g, 'x', $1 FROM generate_series(1, 5) g`, s); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := reload.Commit(ctx); err != nil {
+		t.Fatalf("reload commit: %v", err)
+	}
+	if err := <-reconciled; err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if res, err := store.ReconcileBlockCounts(ctx, pool, ""); err != nil {
+		t.Fatalf("follow-up reconcile: %v", err)
+	} else {
+		t.Logf("follow-up reconcile: %+v", *res)
+	}
+	assertCountParity(t, pool, "after truncate and reload", [][]string{{s}})
 }

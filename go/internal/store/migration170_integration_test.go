@@ -9,6 +9,7 @@ package store_test
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -48,12 +49,10 @@ func TestMigration170_BackfillCountsExistingBlocks(t *testing.T) {
 
 // TestBlockCounts_ReconcileAgainstInFlightWriter: a key with drift (counter
 // 1, no block) and a writer that adds a block to exactly that key while the
-// reconcile runs. The reconcile reads the counter and the count in one
-// snapshot that does not contain the writer, decides to remove the row, and
-// has to wait on the writer's row lock. When the writer commits, a reconcile
-// that went ahead with the delete would drop the writer's block from the
-// count; REPEATABLE READ refuses the delete (40001), the scope is retried with
-// a fresh snapshot, and the counter ends at the real count.
+// reconcile runs. The reconcile's snapshot holds neither the writer's block nor
+// its delta row; it corrects by -1 without waiting for the writer, the writer
+// commits its +1 afterwards, and the counters end at the real count — with the
+// deltas pending and after a fold.
 func TestBlockCounts_ReconcileAgainstInFlightWriter(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -71,7 +70,7 @@ func TestBlockCounts_ReconcileAgainstInFlightWriter(t *testing.T) {
 			t.Fatalf("%s: %v", sql, err)
 		}
 	}
-	// The writer: its block and its counter delta, not committed yet.
+	// The writer: its block and its delta row, not committed yet.
 	w, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -80,49 +79,32 @@ func TestBlockCounts_ReconcileAgainstInFlightWriter(t *testing.T) {
 	if _, err := w.Exec(ctx, `INSERT INTO context_blocks (category, title, content, scope) VALUES ('learnings', 'in-flight', 'x', $1)`, s); err != nil {
 		t.Fatalf("writer insert: %v", err)
 	}
-	var writerPID int
-	if err := w.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&writerPID); err != nil {
-		t.Fatal(err)
-	}
-
-	type result struct {
-		res *store.BlockCountReconcile
-		err error
-	}
-	done := make(chan result, 1)
+	done := make(chan error, 1)
+	var res *store.BlockCountReconcile
 	go func() {
-		r, err := store.ReconcileBlockCounts(ctx, pool, s)
-		done <- result{r, err}
+		var err error
+		res, err = store.ReconcileBlockCounts(ctx, pool, s)
+		done <- err
 	}()
-	// Wait until the reconcile blocks on the writer (a lock wait whose
-	// blocker is the writer's backend), then let the writer commit.
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		var waiting int
-		if err := pool.QueryRow(ctx,
-			`SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, writerPID).Scan(&waiting); err != nil {
-			t.Fatal(err)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("reconcile: %v", err)
 		}
-		if waiting > 0 {
-			break
-		}
-		select {
-		case r := <-done:
-			t.Fatalf("reconcile finished before it met the writer: %+v, %v", r.res, r.err)
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the reconcile never waited on the writer")
-		}
-		time.Sleep(10 * time.Millisecond)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reconcile waited for the in-flight writer")
+	}
+	active := "active"
+	want := []store.BlockCountDrift{{Scope: s, Category: "learnings", GuardStatus: &active, Counted: 1, Actual: 0}}
+	if !reflect.DeepEqual(res.Corrections, want) {
+		t.Fatalf("corrections = %+v, want %+v", res.Corrections, want)
 	}
 	if err := w.Commit(ctx); err != nil {
 		t.Fatalf("writer commit: %v", err)
 	}
-	r := <-done
-	if r.err != nil {
-		t.Fatalf("reconcile: %v", r.err)
-	}
-	t.Logf("reconcile against the in-flight writer: %+v", *r.res)
 	assertCountParity(t, pool, "after the in-flight writer", [][]string{{s}})
+	if _, err := store.FoldBlockCountDeltas(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	assertCountParity(t, pool, "after the in-flight writer, folded", [][]string{{s}})
 }
