@@ -301,9 +301,10 @@ jobs:
             echo ""
             echo "## Installation"
             echo ""
-            echo "**With Go:**"
+            echo "**With Go (build from a clone):**"
             echo '```bash'
-            echo "go install github.com/GottZ/ctx/cmd/ctx@${TAG}"
+            echo "git clone --branch ${TAG} --depth 1 https://github.com/GottZ/ctx && cd ctx"
+            echo "go -C go build -o ctx ./cmd/ctx && sudo install -m 0755 go/ctx /usr/local/bin/ctx"
             echo '```'
             echo ""
             echo "**Binary download:**"

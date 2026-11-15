@@ -3,7 +3,6 @@
 set -euo pipefail
 
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
-REPO="github.com/GottZ/ctx"
 
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -17,16 +16,22 @@ esac
 echo "Platform: ${OS}/${ARCH}"
 echo "Install dir: ${INSTALL_DIR}"
 
-# Method 1: go install (if Go is available)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Method 1: build from this clone (if Go is available). `go install
+# github.com/GottZ/ctx/cmd/ctx@latest` does not resolve: the Go module lives in go/, not at
+# the repository root (issue #258).
 if command -v go &>/dev/null; then
-  echo "Go found — building from source..."
-  GOBIN="$INSTALL_DIR" go install "${REPO}/cmd/ctx@latest"
-  echo "Installed: $(ctx version 2>/dev/null || echo 'ctx')"
+  echo "Go found — building from this clone..."
+  TMP_BIN="$(mktemp "${TMPDIR:-/tmp}/ctx-build.XXXXXX")"
+  trap 'rm -f "$TMP_BIN"' EXIT
+  go -C "$SCRIPT_DIR" build -o "$TMP_BIN" ./cmd/ctx
+  install -m 0755 "$TMP_BIN" "${INSTALL_DIR}/ctx"
+  echo "Installed: $("${INSTALL_DIR}/ctx" version 2>/dev/null || echo 'ctx')"
   exit 0
 fi
 
 # Method 2: pre-built binary from dist/
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BINARY="${SCRIPT_DIR}/dist/ctx-${OS}-${ARCH}"
 [[ "$OS" == "windows" ]] && BINARY="${BINARY}.exe"
 
