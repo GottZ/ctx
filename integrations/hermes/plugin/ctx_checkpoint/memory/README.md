@@ -269,7 +269,8 @@ the plugin and runs over either transport.
   phrases, auth-scheme values and host-mask remnants go), passwords in prose with a digit,
   webhook path tokens, bearer tokens. A redactor failure writes nothing. Not recognized:
   unnamed values other than the bound keys, plain-word passwords, values the name does not
-  directly precede, mixed-case `Pin`, table cells, card numbers and IBANs (list in `../README.md`).
+  directly precede, mixed-case `Pin`, table cells, letters-only values with word shape (12+ letters
+  without it are masked), card numbers and IBANs (list in `../README.md`).
 - Chain linkage lives in **metadata** (`parent_manifest_id`, `source_block_ids`,
   `latest_manifest_id`), not in `parent_id` (that foreign key cascades on hard delete).
   Further metadata: upstream keys (`root_session_id`, `active_session_id`, `sha256`,

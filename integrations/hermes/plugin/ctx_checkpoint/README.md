@@ -371,7 +371,10 @@ entry did not connect when Hermes started (wrong key, server down, URL wrong).
   **Not recognized:** a credential without a name (a bare hex or base64 value other
   than this profile's key, so also the key of an entry that signs in with OAuth or
   runs a command), a password that is a plain word (`the password is swordfish`),
-  card numbers and IBANs; also a value the name does not directly precede (`the password
+  card numbers and IBANs; a value of letters only that reads like words (0.10.0 masked
+  every value behind a credential name; now a run of 12+ letters is masked unless it has
+  the shape of words or an identifier — about one random letter run in ten has that shape),
+  and one in prose (`the token is …` needs a digit); also a value the name does not directly precede (`the password
   for root is …`), a mixed-case `Pin`, a markdown table cell and a base64 value without a
   digit. Where Hermes masks the first word of a spaced password value, the plugin masks the
   rest of the line too (`password: 8 characters minimum` keeps only `password:`). Hermes'

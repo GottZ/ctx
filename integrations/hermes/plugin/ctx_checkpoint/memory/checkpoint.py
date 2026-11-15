@@ -136,6 +136,21 @@ _AUTH_SCHEME_RE = re.compile(r"(?:bearer|basic|digest|token)[ \t]+", re.IGNORECA
 # code ``839201``, not ``token: 4096``).
 MIN_PASSWORD_DIGITS = 4
 MIN_TOKEN_DIGITS = 6
+# A value of letters only (``-_./`` between them allowed) is a credential from this many letters on,
+# unless it has the shape of words: 0.10.0 masked every value behind a credential name, and the host
+# masks such a run only at the start of a line, or from 20 characters or two letter cases on.
+MIN_OPAQUE_LETTERS = 12
+# Word shape of one part of such a value (split at the separators and the camelCase humps): at least
+# this share of vowels (aeiouy) and no more consonants in a row. Measured on the stdlib's identifiers
+# of 12+ letters and seeded random letter runs of 12 to 64 letters: about 2 % of the identifiers miss
+# the shape, about 10 % of the random runs have it (most of them short).
+MIN_WORD_VOWEL_SHARE = 0.15
+MAX_WORD_CONSONANT_RUN = 4
+_LETTERS_VALUE_RE = re.compile(r"[A-Za-z]+(?:[-_./][A-Za-z]+)*")
+_SEPARATORS_RE = re.compile(r"[-_./]+")
+_HUMP_RE = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])")
+_CONSONANT_RUN_RE = re.compile(rf"[b-df-hj-np-tv-xzB-DF-HJ-NP-TV-XZ]{{{MAX_WORD_CONSONANT_RUN + 1},}}")
+_VOWELS = frozenset("aeiouyAEIOUY")
 # Trailing characters that close the surrounding code or sentence, not the value.
 _VALUE_TRAILERS = ",;.)]}>\"'"
 # Code and placeholders behind a credential name: a call or subscript (get_token(), Optional[str],
@@ -268,8 +283,35 @@ def _flatten_content(content: Any) -> str:
     return str(content or "")
 
 
+def _word_part(part: str) -> bool:
+    """A part of a value that reads like a word or an acronym (``Token``, ``HTTP``, ``io``)."""
+    if len(part) <= 2 or (part.isupper() and len(part) <= 5):
+        return True
+    vowels = sum(c in _VOWELS for c in part)
+    return vowels >= MIN_WORD_VOWEL_SHARE * len(part) and not _CONSONANT_RUN_RE.search(part)
+
+
+def _opaque_letters(value: str) -> bool:
+    """A run of at least :data:`MIN_OPAQUE_LETTERS` letters without word shape: random case (more
+    than one one-letter camelCase hump, or most letters in humps of one or two), or a part that
+    does not read like a word."""
+    if not _LETTERS_VALUE_RE.fullmatch(value):
+        return False
+    letters = sum(c.isalpha() for c in value)
+    if letters < MIN_OPAQUE_LETTERS:
+        return False
+    humps = [hump for chunk in _SEPARATORS_RE.split(value) for hump in _HUMP_RE.findall(chunk)]
+    if sum(len(hump) == 1 for hump in humps) > 1:
+        return True
+    if 2 * sum(len(hump) for hump in humps if len(hump) <= 2) > letters:
+        return True
+    return not all(_word_part(hump) for hump in humps)
+
+
 def _secret_shaped(kind: str, value: str, *, prose: bool) -> bool:
     """Whether ``value`` behind a credential name of ``kind`` is a credential, by its shape."""
+    if not prose and _opaque_letters(value):
+        return True  # before the code check: a dotted run of random letters is no attribute path
     if not value or _CODE_VALUE_RE.fullmatch(value) or value.startswith(("[REDACTED", "«redacted")):
         return False
     if _HOST_REMNANT_RE.search(value):

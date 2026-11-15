@@ -24,6 +24,7 @@ import importlib
 import importlib.util
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -104,6 +105,37 @@ FURTHER_FORMS = {
     "one-time-code": ("token: 839201", ["839201"]),
     "go-assignment": ('password := "Sommer2026!"', ["Sommer2026"]),
 }
+# Values of letters only (0.10.0 masked every value behind a credential name; Hermes masks such a
+# run only at the start of a line, or from 20 characters or two letter cases on). Artificial,
+# random-looking, no word.
+LETTER_VALUES = {
+    "lower16": "xqzvbnmkjhgfdwrt",
+    "upper12": "QZXVBNMKJHGF",
+    "mixed24": "QzXvBnMkJhGfDwRtPlKsMnBv",
+    "one-letter-humps": "eumlJasBAbygiNTvQusfAiHK",
+    "dashes": "bxqz-kvwm-tzpr-hjnd",
+    "mixed-separators": "AbCd_EfGh.IjKl/MnOp",
+    "dotted": "Qzxv.Bnmk.Jhgf",
+    "base64url": "xQ-zV_bN-mK_jH-gF-dW_rT",
+}
+LETTER_FORMS = {
+    "token:": "token: {v}",
+    "secret=": "secret={v}",
+    "api_key:": "api_key: {v}",
+    "client_secret=": "client_secret={v}",
+    "password:": "password: {v}",
+    "Passwort:": "Passwort: {v}",
+    "Authorization:": "Authorization: {v}",
+    "json": '{{"api_key": "{v}"}}',
+    "SECRET_KEY=": "SECRET_KEY={v}",
+    "MY_SERVICE_TOKEN=": "MY_SERVICE_TOKEN={v}",
+    "mid token:": "set token: {v} in the file",
+    "mid secret=": "run it with secret={v} once",
+    "mid api_key:": "the config says api_key: {v} today",
+    "mid password:": "login with password: {v} please",
+    "mid Authorization:": "send Authorization: {v} along",
+    "mid json": 'payload {{"token": "{v}"}} sent',
+}
 # Unnamed numbers that only a checksum could tell apart from any other number.
 KNOWN_LIMITS = {
     "card-number": ("Karte 4111 1111 1111 1111 exp 12/29", "4111 1111 1111 1111"),
@@ -166,6 +198,19 @@ NEIGHBOUR_BENIGN = [
     "token = base64.b64encode(raw)",
     "secret = sha256(data).hexdigest()",
     "token := get_token()",
+    "token: Bearer",
+    "secret = config.sharedSecretName",
+    "password: required",
+    "api_key: string",
+    "set token: accessTokenProviderFactory in the file",
+    "use secret: environmentVariableName here",
+    "login with password: required please",
+    "the config says api_key: string today",
+    "pass token: TokenizerConfig on",
+    "see secret: kubernetes.io/service-account-token now",
+    "with api_key: OpenAIApiKey set",
+    "set token: refresh_token_handler there",
+    "the token is expired",
 ]
 BENIGN_LINES = ISSUE_BENIGN + NEIGHBOUR_BENIGN
 
@@ -200,6 +245,44 @@ def test_secret_form_leaves_no_fragment_in_the_part(name):
 def test_secret_form_count():
     leaked = [name for name, (text, frags) in SECRET_FORMS.items() if any(f in _part_text(text) for f in frags)]
     assert leaked == [], f"{len(leaked)} of {len(SECRET_FORMS)} secret forms leave a fragment: {leaked}"
+
+
+@pytest.mark.parametrize("form", sorted(LETTER_FORMS))
+@pytest.mark.parametrize("value_name", sorted(LETTER_VALUES))
+def test_a_letters_only_value_behind_a_name_is_masked(form, value_name):
+    """0.10.0 masked these; the plugin's shape rule keeps doing so where Hermes does not."""
+    value = LETTER_VALUES[value_name]
+    out = _part_text(LETTER_FORMS[form].format(v=value))
+    pieces = {value[i : i + 6] for i in range(len(value) - 5)}
+    assert not [piece for piece in pieces if piece in out], out
+
+
+def test_letter_runs_and_identifiers_are_told_apart_at_the_measured_rates():
+    """Both directions of the shape rule on samples: seeded random letter runs (12 to 64 letters,
+    three letter cases) behind a mid-line ``token:``, and the long identifiers of the stdlib."""
+    import random
+    import re
+    import string
+
+    rng = random.Random(288)  # noqa: S311 - a seeded test sample, not a secret
+    runs = [
+        "".join(rng.choice(alphabet) for _ in range(length))
+        for length in (12, 16, 20, 24, 32, 40, 64)
+        for alphabet in (string.ascii_lowercase, string.ascii_uppercase, string.ascii_letters)
+        for _ in range(40)
+    ]
+    kept = [run for run in runs if run[:6] in _part_text(f"set token: {run} in the file")]
+    assert len(kept) / len(runs) <= 0.15, f"{len(kept)} of {len(runs)} random runs kept"
+    names = sorted(
+        {
+            name
+            for module in (os, re, json, logging, string)
+            for name in dir(module)
+            if re.fullmatch(r"[A-Za-z_]{12,}", name)
+        }
+    )
+    masked = [name for name in names if cp._opaque_letters(name)]
+    assert len(names) >= 40 and len(masked) / len(names) <= 0.05, masked
 
 
 @pytest.mark.parametrize("name", sorted(KNOWN_LIMITS))

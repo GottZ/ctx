@@ -50,11 +50,20 @@ and prose it used to overwrite (GottZ/ctx#288).
   behind a name is masked whole, so the work per name stays bounded and the rules stay
   linear in the text length. Measured on the corpora of `tests/test_redaction_coverage.py`:
   0 of 20 audit secret forms leave a fragment (0.10.0: 18), 0 of 8 further forms (0.10.0: 7); of the
-  audit's 22 forms 2 pass unchanged (0.10.0: 19); the plugin rules change 0 of 53 harmless
-  lines (0.10.0: 26; Hermes' own pass changes 6). A 2-million-character transcript renders
-  about 6 % slower (1.84 s → 1.95 s).
+  audit's 22 forms 2 pass unchanged (0.10.0: 19); the plugin rules change 0 of 66 harmless
+  lines (0.10.0: 38; Hermes' own pass changes 8). A 2-million-character transcript renders
+  about 8 % slower (1.78 s → 1.92 s).
+- **Letters-only values.** 0.10.0 masked every value behind `token`, `secret`, `password`,
+  `api_key`, `authorization`, …; Hermes masks a letters-only run only at the start of a line, or
+  from 20 characters or two letter cases on, so behind a name in mid-line such a value would
+  have passed. A value of at least 12 letters (`-_./` between them allowed) is masked unless it
+  has the shape of words or an identifier: camelCase humps of three or more letters, each part
+  with at least 15 % vowels and at most 4 consonants in a row. Measured on seeded samples:
+  about 10 % of random letter runs (12–64 letters) have that shape and pass, about 2 % of the
+  stdlib's long identifiers do not and are masked (`StrFormatStyle`). A value in prose (`the
+  token is …`) still needs a digit.
 - **Known limits, named in the READMEs.** A credential without a name (a bare hex or base64
-  value other than the bound keys), a plain-word password, a value the name does not directly
+  value other than the bound keys), a plain-word password, a letters-only value with word shape, a value the name does not directly
   precede, a mixed-case `Pin`, a table cell, card numbers and IBANs pass;
   Hermes' own pass still rewrites some code lines and masks URL parameters named `key`,
   `code`, `session` or `auth`.
