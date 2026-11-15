@@ -262,7 +262,8 @@ the plugin and runs over either transport.
 - Only direct user/assistant text; tool rows, system prompts, `_compressed_summary`
   carriers and synthetic hand-offs are dropped. Redaction (`checkpoint.redact_text`, the same
   for every automatic write) runs three passes: the bound ctx keys (`_bound_secrets()`: the REST
-  key, and in the umbrella provider the key of the `mcp_servers` entry and `CTX_API_KEY`) are
+  key, and in the umbrella provider the key of the `mcp_servers` entry and `CTX_API_KEY`, plus the
+  keys of earlier bindings of the same instance, at most 16) are
   replaced wherever they stand; host `redact_sensitive_text(force=True,
   redact_url_credentials=True)`; the plugin's rules — the value behind a credential name,
   judged by its shape (code, types, references, placeholders and prose words stay; digits,

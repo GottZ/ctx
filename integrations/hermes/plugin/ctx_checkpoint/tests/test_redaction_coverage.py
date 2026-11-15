@@ -464,6 +464,20 @@ def test_failed_checkpoint_error_in_the_outcome_file_never_carries_the_key(herme
             assert CTX_KEY not in path.read_text(encoding="utf-8", errors="replace"), path
 
 
+def test_a_rebinding_keeps_the_previous_entry_key_for_redaction(hermes_home):
+    """A write scheduled before a re-initialization redacts when its thread runs: the key the
+    entry signed in with before is still known after the entry's key changed."""
+    entry = {"url": "https://ctx.example.test/mcp", "headers": {"Authorization": "Bearer ${K}"}}
+    other = "c0de" + "13579bdf02468ace" * 3 + "13579bdf0246"
+    _write(hermes_home, {"mcp_servers": {"ctx": entry}}, f"K={CTX_KEY}\n")
+    provider = Provider(dispatch=_recording_dispatch()[0])
+    provider.initialize("root-288", platform="cli", hermes_home=str(hermes_home))
+    _write(hermes_home, {"mcp_servers": {"ctx": entry}}, f"K={other}\n")
+    provider.initialize("root-288b", platform="cli", hermes_home=str(hermes_home))
+    assert set(provider._bound_secrets()) == {CTX_KEY, other}
+    assert CTX_KEY not in provider._redacted(f"the old key {CTX_KEY}")
+
+
 def test_only_key_headers_are_bound(hermes_home):
     """Other headers of the entry (``Accept``, a user agent) are not credentials: their values
     stay in the transcript."""

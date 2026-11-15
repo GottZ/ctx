@@ -681,10 +681,11 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
     def _chain_writer_seams(self) -> dict[str, Any]:
         return {"sleep": lambda seconds: _sleep(seconds), "monotonic": lambda: _monotonic()}
 
-    def _bound_secrets(self) -> tuple[str, ...]:
-        return _cp.bound_secret_values([self._api_key, *self._profile_keys])
+    def _current_secrets(self) -> tuple[str, ...]:
+        return (self._api_key, *self._profile_keys)
 
     def _connect(self) -> None:
+        self._remember_secrets()
         self._profile_keys = _profile_ctx_keys(self._server_name())
         if self.transport == "rest":
             super()._connect()

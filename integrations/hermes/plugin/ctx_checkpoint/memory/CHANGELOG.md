@@ -18,7 +18,12 @@ and prose it used to overwrite (GottZ/ctx#288).
   connect — its `Authorization` / `X-Context-Key` headers, `${VAR}` and `${env:VAR}` through
   Hermes' `get_env_value` (`.env` included), the auth scheme dropped — plus `CTX_API_KEY`,
   and replaces them (`_bound_secrets()`) in parts, mirror, facts, digests and the outcome
-  file's error text. An unresolvable reference is skipped; an `auth` (OAuth) or `command`
+  file's error text. A re-initialization of the same instance keeps the keys of its earlier
+  bindings (at most 16, `MAX_REMEMBERED_SECRETS`): a write scheduled through the old client
+  redacts when its thread runs, and a later text may still carry the old key. A transcript
+  that contains such an earlier key therefore redacts it in this process and not in a fresh
+  one (its digest differs there); for the same bound keys the output stays byte-identical.
+  An unresolvable reference is skipped; an `auth` (OAuth) or `command`
   entry has no key to resolve. Bound values are applied longest first; values under 8
   characters are not bound (a stray short header value would erase a common word).
 - **Host strict mode.** `redact_sensitive_text` runs with `redact_url_credentials=True`, as
