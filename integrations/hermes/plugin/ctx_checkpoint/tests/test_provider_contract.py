@@ -370,34 +370,42 @@ def test_redaction_failure_raises_instead_of_being_mistaken_for_empty_evidence(m
     assert calls == []
 
 
-def test_more_parts_than_max_parts_writes_nothing():
-    import pytest
-
+def test_more_parts_than_max_parts_are_paced_not_refused(monkeypatch):
+    """0.10.0: max_parts is the parts per rate window; above it the chain waits for the next
+    window (0.9.0 refused it before its first write)."""
     calls = []
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(_MODULE, "_monotonic", lambda: clock["now"])
+
+    def sleep(seconds):
+        clock["now"] += seconds
+
+    monkeypatch.setattr(_MODULE, "_sleep", sleep)
     provider = CtxCheckpointMemoryProvider(
         config={"chunk_chars": 1_000, "max_parts": 3}, dispatch=_counting_dispatch(calls)
     )
     provider.initialize("session-a", platform="cli")
-    with pytest.raises(_MODULE.CtxCheckpointError, match="max_parts 3"):
-        provider.on_pre_compress([{"role": "user", "content": "durable " + "x" * 12_000}], require_checkpoint=True)
-    assert calls == []
+    frame = provider.on_pre_compress([{"role": "user", "content": "durable " + "x" * 12_000}], require_checkpoint=True)
+    assert "ctx checkpoint head" in frame
+    assert provider._last_chain_receipt.windows == 3
+    assert clock["now"] > 1000.0 + 2 * 60
 
 
-def test_rate_limited_store_backs_off_and_retries_within_budget(monkeypatch):
+def test_rate_limited_store_waits_for_the_window_and_retries_within_budget(monkeypatch):
     calls = []
     slept = []
     clock = {"now": 1000.0}
     monkeypatch.setattr(_MODULE, "_sleep", lambda s: slept.append(s))
     monkeypatch.setattr(_MODULE, "_monotonic", lambda: clock["now"])
     rate_limited = json.dumps({"error": "Rate limit exceeded: max 100 writes per 60 seconds"})
-    provider = CtxCheckpointMemoryProvider(
-        dispatch=_counting_dispatch(calls, store_results=[rate_limited, rate_limited])
-    )
+    provider = CtxCheckpointMemoryProvider(dispatch=_counting_dispatch(calls, store_results=[rate_limited]))
     provider.initialize("session-a", platform="cli")
     frame = provider.on_pre_compress([{"role": "user", "content": "rate limited evidence"}])
     stores = [name for name, _ in calls if name == "mcp__ctx__store"]
-    assert len(stores) == 5  # part ×3 (two 429s), manifest, head
-    assert slept == [2.0, 4.0]
+    assert len(stores) == 4  # part ×2 (one 429), manifest, head
+    # No write of its own in the window: a free slot is a whole window away, and the first
+    # refusal adds that window to the 60 s budget.
+    assert slept == [61.0]
     assert "ctx checkpoint head" in frame
 
 
@@ -419,7 +427,8 @@ def test_rate_limit_beyond_budget_fails_closed(monkeypatch):
         clock["now"] += s
 
     monkeypatch.setattr(_MODULE, "_sleep", advancing_sleep)
-    with pytest.raises(_MODULE.CtxCheckpointError, match="budget 5s"):
+    # 5 s + the one window the first refusal grants = 66 s; the second refusal in a row ends it.
+    with pytest.raises(_MODULE.CtxCheckpointError, match=r"budget 66s; refused twice in a row"):
         provider.on_pre_compress([{"role": "user", "content": "rate limited evidence"}], require_checkpoint=True)
     assert "mcp__ctx__store" in [name for name, _ in calls]
 

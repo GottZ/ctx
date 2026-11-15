@@ -1,0 +1,403 @@
+"""Plugin 0.10.0 (GottZ/ctx#287): a chain longer than one rate window is paced instead of
+refused, a retry meets its own titles, and a refused write waits for the window.
+
+The double below stands for one ctx server behind Hermes' MCP dispatch, with the parts of
+both that the chain writer's timing depends on:
+
+- ctx: the write limit per key over a sliding 60 s window (``go/internal/handler/
+  stage_gates.go`` checks ``count >= query.rate_limit_write`` over ``context_access_log``,
+  ``go/internal/store/blocks.go`` ``CheckRateLimitByAction``); a store whose title, content,
+  metadata, tags, sensitivity and type equal the stored block's is answered "No change
+  needed" BEFORE that check and books no write (``go/internal/handler/mcp.go``,
+  ``IdenticalContentMatch``); upsert by (category, title).
+- Hermes: one lock per MCP server, held for the duration of one call
+  (``tools/mcp_tool_handlers.py`` ``async with server._rpc_lock``), and the per-server circuit
+  breaker that opens after three consecutive error answers (``tools/mcp_tool.py``
+  ``_CIRCUIT_BREAKER_THRESHOLD``; an error payload of the tool counts, ``_record_call_outcome``).
+
+Time is a fake clock: the plugin's sleep and monotonic seams move it, every call costs 50 ms.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+import threading
+from pathlib import Path
+
+import pytest
+
+_PROVIDER_PATH = Path(__file__).resolve().parents[1] / "__init__.py"
+_SPEC = importlib.util.spec_from_file_location(
+    "ctx_checkpoint_paced_chain", _PROVIDER_PATH, submodule_search_locations=[str(_PROVIDER_PATH.parent)]
+)
+assert _SPEC is not None and _SPEC.loader is not None
+_MODULE = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = _MODULE
+_SPEC.loader.exec_module(_MODULE)
+CtxCheckpointMemoryProvider = _MODULE.CtxCheckpointMemoryProvider
+CtxCheckpointError = _MODULE.CtxCheckpointError
+
+HOST_BREAKER_THRESHOLD = 3  # tools/mcp_tool.py _CIRCUIT_BREAKER_THRESHOLD
+CALL_LATENCY_S = 0.05
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 1_000.0
+        self.slept: list[float] = []
+
+
+class CtxServerDouble:
+    """One ctx MCP server as Hermes dispatches to it (see the module docstring)."""
+
+    def __init__(self, clock: Clock, *, write_limit: int = 100, window_s: float = 60.0) -> None:
+        self.clock = clock
+        self.write_limit = write_limit
+        self.window_s = window_s
+        self.rpc_lock = threading.Lock()  # Hermes: server._rpc_lock, one call at a time
+        self.blocks: dict[tuple[str, str], dict] = {}
+        self.booked: list[float] = []  # context_access_log 'write' rows of the key
+        self.counter = 0
+        self.refused = 0
+        self.noops = 0
+        self.consecutive_errors = 0
+        self.max_consecutive_errors = 0
+        self.calls: list[tuple[str, dict]] = []
+
+    # -- Hermes side ---------------------------------------------------------------------
+
+    def dispatch(self, name: str, args: dict, **_kwargs) -> str:
+        with self.rpc_lock:
+            self.clock.now += CALL_LATENCY_S
+            tool = name.rsplit("__", 1)[-1]
+            self.calls.append((tool, args))
+            answer = getattr(self, f"_{tool}")(args)
+        if "error" in answer:
+            self.consecutive_errors += 1
+            self.max_consecutive_errors = max(self.max_consecutive_errors, self.consecutive_errors)
+            return json.dumps({"error": answer["error"]})
+        self.consecutive_errors = 0
+        return json.dumps({"result": answer["result"]})
+
+    # -- ctx side ------------------------------------------------------------------------
+
+    def _store(self, args: dict) -> dict:
+        key = (args["category"], args["title"])
+        incoming = {
+            "content": args["content"],
+            "tags": list(args.get("tags") or []),
+            "sensitivity": args.get("sensitivity"),
+            "type": args.get("type"),
+        }
+        metadata = dict(args.get("metadata") or {})
+        stored = self.blocks.get(key)
+        if (
+            stored is not None
+            and all(stored[k] == v for k, v in incoming.items())
+            and all(stored["metadata"].get(k) == v for k, v in metadata.items())
+        ):
+            self.noops += 1
+            return {"result": f"No change needed — identical content already exists (id: {stored['id']})"}
+        self.booked = [t for t in self.booked if t > self.clock.now - self.window_s]
+        if len(self.booked) >= self.write_limit:
+            self.refused += 1
+            return {"error": f"Rate limit exceeded: max {self.write_limit} writes per 60 seconds"}
+        self.booked.append(self.clock.now)
+        if stored is None:
+            self.counter += 1
+            stored = {"id": f"019f7000-0000-7000-8000-{self.counter:012d}"}
+            self.blocks[key] = stored
+        stored.update(incoming, metadata=metadata, title=args["title"], category=args["category"])
+        return {"result": f"Stored: {args['title']} (id: {stored['id']}, category: {args['category']})"}
+
+    def _search(self, args: dict) -> dict:
+        tags = set(args.get("tags") or [])
+        rows = [
+            {"id": b["id"], "title": b["title"], "category": b["category"], "type": "checkpoint", "untrusted": True}
+            for b in self.blocks.values()
+            if args["query"] in b["title"] and tags <= set(b["tags"])
+        ]
+        return {"result": json.dumps(rows[: int(args.get("limit") or 10)])}
+
+    def _get(self, args: dict) -> dict:
+        for b in self.blocks.values():
+            if b["id"] == args["id"]:
+                return {"result": json.dumps({k: b[k] for k in ("id", "title", "category", "content", "metadata")})}
+        return {"error": f"block not found: {args['id']}"}
+
+    # -- what the tests read -------------------------------------------------------------
+
+    def titled(self, needle: str) -> list[dict]:
+        return [b for b in self.blocks.values() if needle in b["title"]]
+
+    def parts(self) -> list[dict]:
+        return [b for b in self.blocks.values() if " part " in b["title"]]
+
+    def manifests(self) -> list[dict]:
+        return [b for b in self.blocks.values() if " manifest" in b["title"]]
+
+    def head(self) -> dict:
+        (head,) = self.titled("Compaction checkpoint head")
+        return head
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(_MODULE, "_monotonic", lambda: clock.now)
+    return clock
+
+
+def _sleep_outside_the_lock(monkeypatch, clock: Clock, server: CtxServerDouble) -> None:
+    def sleep(seconds: float) -> None:
+        # A wait between two calls must leave the server's lock free for every other caller
+        # of the profile (recall, the agent's ctx tools, other sessions' checkpoints).
+        assert not server.rpc_lock.locked(), "the chain writer slept while holding the server's RPC lock"
+        clock.slept.append(seconds)
+        clock.now += seconds
+
+    monkeypatch.setattr(_MODULE, "_sleep", sleep)
+
+
+def _provider(server: CtxServerDouble, session: str = "session-paced", **config) -> tuple:
+    notices: list[str] = []
+    provider = CtxCheckpointMemoryProvider(config=dict(config), dispatch=server.dispatch)
+    provider.initialize(session, platform="cli", warning_callback=notices.append)
+    return provider, notices
+
+
+def _transcript(n_messages: int, size: int = 900, tag: str = "m") -> list[dict]:
+    return [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"{tag}{i:04d} " + "w" * size}
+        for i in range(n_messages)
+    ]
+
+
+def _manifest_of_head(server: CtxServerDouble) -> dict:
+    manifest_id = server.head()["metadata"]["latest_manifest_id"]
+    (manifest,) = [b for b in server.manifests() if b["id"] == manifest_id]
+    return manifest
+
+
+def test_chain_longer_than_one_rate_window_is_paced_and_completes(monkeypatch, clock):
+    """Above max_parts the chain used to be refused before its first write — under
+    compression.checkpoint_required every later compaction of the session failed the same way."""
+    server = CtxServerDouble(clock, write_limit=6)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, notices = _provider(server, chunk_chars=1_000, max_parts=3)  # 5 writes per window
+    frame = provider.on_pre_compress(_transcript(12), require_checkpoint=True)
+
+    assert "ctx checkpoint head:" in frame
+    manifest = _manifest_of_head(server)
+    assert len(manifest["metadata"]["source_block_ids"]) == 12 == len(server.parts())
+    # Paced: never more than max_parts + 2 writes inside one window, so ctx never refused one.
+    assert server.refused == 0
+    assert len(clock.slept) == 2 and all(60.0 < s <= 62.0 for s in clock.slept), clock.slept
+    # The user learns before the first wait that the compaction waits for a paced checkpoint.
+    assert notices and "14 writes" in notices[0] and "minute" in notices[0], notices
+
+
+def test_a_paced_chain_fits_the_budget_it_derives_from_its_part_count(monkeypatch, clock):
+    """budget_s covers one rate window; every further window the part count needs is added."""
+    server = CtxServerDouble(clock, write_limit=6)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server, chunk_chars=1_000, max_parts=3, budget_s=5)
+    provider.on_pre_compress(_transcript(12), require_checkpoint=True)
+    assert len(server.parts()) == 12 and clock.slept
+
+
+def test_a_retry_meets_its_own_titles_and_reuses_the_parts_ctx_confirms(monkeypatch, clock):
+    """A failed attempt used to leave its parts behind under titles no later attempt met (the
+    checkpoint id hashed the time): every retry wrote the whole transcript again."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server, chunk_chars=1_000)
+    messages = _transcript(10)
+    real_store = server._store
+
+    def store_failing_at_part_6(args):
+        if " part 006 of " in args["title"]:
+            return {"error": "store failed: connection reset by peer"}
+        return real_store(args)
+
+    server._store = store_failing_at_part_6
+    with pytest.raises(CtxCheckpointError):
+        provider.on_pre_compress(messages, require_checkpoint=True)
+    assert len(server.parts()) == 5 and not server.manifests()
+
+    server._store = real_store
+    booked_before = len(server.booked)
+    provider.on_pre_compress(messages, require_checkpoint=True)
+
+    # The five stored parts were confirmed by ctx (same title, identical content), not written again.
+    assert server.noops == 5
+    assert len(server.booked) - booked_before == 5 + 2  # parts 6-10, manifest, head
+    referenced = set(_manifest_of_head(server)["metadata"]["source_block_ids"])
+    assert {b["id"] for b in server.parts()} == referenced, "orphaned parts left behind"
+    assert provider._last_chain_receipt.reused == 5
+
+
+def test_a_repeated_identical_checkpoint_writes_no_part_and_never_points_at_itself(monkeypatch, clock):
+    """The host can compact the same transcript again after a checkpoint (the summary failed,
+    a required fact store failed): the manifest is re-written in place under its own parent."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server, chunk_chars=1_000)
+    provider.on_pre_compress(_transcript(4, tag="first"), require_checkpoint=True)
+    parent_id = server.head()["metadata"]["latest_manifest_id"]
+    messages = _transcript(6, tag="second")
+    provider.on_pre_compress(messages, require_checkpoint=True)
+    manifest_id = server.head()["metadata"]["latest_manifest_id"]
+    parts_before = {b["id"] for b in server.parts()}
+
+    provider.on_pre_compress(messages, require_checkpoint=True)
+
+    assert {b["id"] for b in server.parts()} == parts_before
+    assert server.head()["metadata"]["latest_manifest_id"] == manifest_id
+    manifest = _manifest_of_head(server)
+    assert manifest["metadata"]["parent_manifest_id"] == parent_id != manifest_id
+    assert len(server.manifests()) == 2
+
+
+def _published_wording(server: CtxServerDouble) -> dict[str, str]:
+    """Content of every part the head's manifest references, by block id."""
+    ids = _manifest_of_head(server)["metadata"]["source_block_ids"]
+    by_id = {b["id"]: b["content"] for b in server.parts()}
+    return {block_id: by_id[block_id] for block_id in ids}
+
+
+def _failing_at_part_2(server: CtxServerDouble):
+    real_store = server._store
+
+    def store(args):
+        if " part 002 of " in args["title"]:
+            return {"error": "store failed: connection reset by peer"}
+        return real_store(args)
+
+    return store
+
+
+def test_a_retry_with_another_split_never_rewrites_a_published_part(monkeypatch, clock):
+    """Same transcript, same part count, cut elsewhere (chunk_chars 1000 → 1100): a part's
+    title must name its exact content, or the retry overwrites a published part with another
+    cut and a failure after it leaves the published manifest on a mix of both splits."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server, chunk_chars=1_000)
+    messages = [{"role": "user", "content": "s" * 2_500}]
+    provider.on_pre_compress(messages, require_checkpoint=True)
+    published = _published_wording(server)
+    assert len(published) == 3
+
+    provider._chain().chunk_chars = 1_100  # still three parts
+    server._store = _failing_at_part_2(server)
+    with pytest.raises(CtxCheckpointError):
+        provider.on_pre_compress(messages, require_checkpoint=True)
+
+    assert _published_wording(server) == published
+
+
+def test_a_retry_after_a_session_switch_never_rewrites_a_published_part(monkeypatch, clock):
+    """Same root and transcript, another active session: the part header names the session,
+    so the content differs while the root, digest, index and count stay the same."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server, chunk_chars=1_000)
+    messages = _transcript(3)
+    provider.on_pre_compress(messages, require_checkpoint=True)
+    published = _published_wording(server)
+
+    provider.on_session_switch("session-paced-2", reason="compression")
+    assert provider._checkpoint_root() == "session-paced"
+    server._store = _failing_at_part_2(server)
+    with pytest.raises(CtxCheckpointError):
+        provider.on_pre_compress(messages, require_checkpoint=True)
+
+    assert _published_wording(server) == published
+
+
+def test_repeating_the_first_checkpoint_of_a_root_keeps_one_manifest(monkeypatch, clock):
+    """The head names this transcript and its manifest has no parent: the manifest is written
+    again in place, not doubled with the process's cached manifest id as parent."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server)
+    messages = _transcript(2, tag="only")
+    provider.on_pre_compress(messages, require_checkpoint=True)
+    manifest_id = server.head()["metadata"]["latest_manifest_id"]
+    provider.on_pre_compress(messages, require_checkpoint=True)
+    assert [b["id"] for b in server.manifests()] == [manifest_id]
+    assert server.manifests()[0]["metadata"]["parent_manifest_id"] is None
+
+
+def test_a_transcript_that_returns_after_another_checkpoint_never_closes_a_cycle(monkeypatch, clock):
+    """T1, T2, then T1 again (an undo after two failed compactions): T1's manifest keeps its
+    parent; the repeat gets a manifest of its own, so no walk along parent_manifest_id loops."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server)
+    t1 = _transcript(2, tag="one")
+    provider.on_pre_compress(t1, require_checkpoint=True)
+    m1 = server.head()["metadata"]["latest_manifest_id"]
+    provider.on_pre_compress(t1 + _transcript(2, tag="two"), require_checkpoint=True)
+    m2 = server.head()["metadata"]["latest_manifest_id"]
+    provider.on_pre_compress(t1, require_checkpoint=True)
+
+    by_id = {b["id"]: b for b in server.manifests()}
+    assert by_id[m1]["metadata"]["parent_manifest_id"] is None
+    assert by_id[m2]["metadata"]["parent_manifest_id"] == m1
+    m3 = server.head()["metadata"]["latest_manifest_id"]
+    assert m3 not in (m1, m2) and by_id[m3]["metadata"]["parent_manifest_id"] == m2
+    seen, cursor = set(), m3
+    while cursor:
+        assert cursor not in seen, "parent_manifest_id loops"
+        seen.add(cursor)
+        cursor = by_id[cursor]["metadata"].get("parent_manifest_id")
+
+
+def test_a_refused_write_waits_for_the_window_and_never_trips_the_host_breaker(monkeypatch, clock):
+    """Two sessions over one key: the second chain is refused once the window is full. The
+    backoff used to end after 2+4+8 s against a 60 s window, whatever the budget, after four
+    refusals in a row — one more than Hermes' circuit breaker allows before it pauses every
+    ctx call of the profile for a minute."""
+    server = CtxServerDouble(clock, write_limit=10)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    first, _ = _provider(server, "session-one", chunk_chars=1_000)
+    # Default budget (60 s): the slot frees a whole window after the other chain's writes, so
+    # the first refusal of a chain grants it that window on top.
+    second, _ = _provider(server, "session-two", chunk_chars=1_000)
+    first.on_pre_compress(_transcript(6, tag="one"), require_checkpoint=True)  # 8 writes
+    second.on_pre_compress(_transcript(6, tag="two"), require_checkpoint=True)  # refused at its 3rd
+
+    assert server.refused == 1
+    assert server.max_consecutive_errors < HOST_BREAKER_THRESHOLD
+    assert len(server.titled("Compaction checkpoint head")) == 2
+    assert all(len(_manifests_of(server, root)) == 1 for root in ("session-one", "session-two"))
+
+
+def _manifests_of(server: CtxServerDouble, root: str) -> list[dict]:
+    return [b for b in server.manifests() if b["metadata"]["root_session_id"] == root]
+
+
+def test_a_window_that_stays_full_fails_after_two_refusals(monkeypatch, clock):
+    """Other writers keep the key's window full: the chain gives up after the second refusal
+    in a row (the third would open the host's breaker), with the parts it stored kept for the
+    next attempt."""
+    server = CtxServerDouble(clock, write_limit=3)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, notices = _provider(server, chunk_chars=1_000, budget_s=600)
+    real_store = server._store
+
+    def busy_key(args):
+        server.booked = [clock.now] * server.write_limit  # foreign writes, always fresh
+        return real_store(args)
+
+    server._store = busy_key
+    with pytest.raises(CtxCheckpointError, match="rate-limited"):
+        provider.on_pre_compress(_transcript(6), require_checkpoint=True)
+    assert server.refused == 2
+    assert server.max_consecutive_errors == 2
+    assert clock.slept and all(s <= 62.0 for s in clock.slept)
+    assert any("rate-limited" in n or "write limit" in n for n in notices), notices

@@ -33,11 +33,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .client import CtxApiError, redact_secret, response_code, store_block_id
+from .client import CtxApiError, redact_secret, response_code, store_action, store_block_id
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.9.0"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
+PLUGIN_VERSION = "0.10.0"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
 UPSTREAM_REF = "GottZ/ctx integrations/hermes/plugin/ctx_checkpoint 0.4.3 @ 38fdb74 (MPL-2.0)"
 
 CATEGORY_CHECKPOINT = "compaction-checkpoints"
@@ -69,13 +69,24 @@ CTX_CONTENT_MAX_BYTES = 50 * 1024
 MIN_PART_TEXT_BYTES = 4 * 1024
 # Root session id as a title token: at most this many characters of [A-Za-z0-9_.-].
 ROOT_TOKEN_MAX = 48
-# Server write rate limit: 100 writes / 60 s per key (go/internal/config/config.go:860).
-# One checkpoint = parts + manifest + head; the cap keeps a single chain below the
-# window with headroom for facts/mirror writes of the same key.
+# Server write rate limit: 100 writes per key over a sliding 60 s window
+# (query.rate_limit_write, go/internal/config/config.go:870; counted over context_access_log,
+# go/internal/store/blocks.go CheckRateLimitByAction). A chain writes at most max_parts parts
+# plus its manifest and head inside one window — what 0.9.0 wrote in one burst — and paces the
+# rest into the next windows (0.10.0); the gap to 100 is headroom for facts, the memory mirror
+# and other sessions on the same key.
 DEFAULT_MAX_PARTS = 80
 MAX_PARTS_CEILING = 95
-# Backoff after a 429 that survived the client's own 1 s retry (seconds, bounded by the budget).
-RATE_LIMIT_BACKOFF_S = (2.0, 4.0, 8.0)
+RATE_WINDOW_S = 60.0
+# Slack on top of a window before a write that waits for it: ctx books a REST write after
+# answering it, a few milliseconds after the client saw the answer.
+RATE_WINDOW_MARGIN_S = 1.0
+# Refused calls in a row before the chain gives up. Hermes opens its per-server circuit breaker
+# after three consecutive error answers of an MCP server and then refuses every call to it for
+# 60 s (tools/mcp_tool.py _CIRCUIT_BREAKER_THRESHOLD, tools/mcp_tool_handlers.py
+# _record_call_outcome counts a tool's own error payload): a third refusal would cut recall, the
+# agent's ctx tools and other sessions' checkpoints of the profile off for a minute.
+MAX_RATE_REFUSALS = 2
 
 # The value may start with an auth scheme ("Authorization: Bearer <token>"): without the
 # optional scheme group only the scheme word would be masked and the credential would stay.
@@ -445,6 +456,12 @@ class ChainReceipt:
     lookup: str = ""  # server | cache | legacy | none
     # P4: cumulative fact dedupe keys read from the previous head (server side)
     previous_fact_hashes: list[str] = field(default_factory=list)
+    # 0.10.0: parts ctx confirmed as already stored (same title, identical content; no write),
+    # the rate windows the chain was planned over, and the deadline that plan gave it — the
+    # required facts after the chain share it.
+    reused: int = 0
+    windows: int = 1
+    deadline: float = 0.0
 
     def frame(self, read_path: str = "") -> str:
         """Upstream receipt text (< 1000 chars; part IDs deliberately omitted), plus ``read_path``
@@ -525,11 +542,58 @@ def pointer_block(tools: ReadTools, *, head_id: str, root_session_id: str, categ
     )
 
 
+def checkpoint_id_for(root_session_id: str, digest: str) -> str:
+    """Checkpoint id of a transcript: the same root and transcript digest give the same id, so
+    every title of the chain is the same on a retry (0.10.0; before, the time was hashed in)."""
+    return hashlib.sha256(f"{root_session_id}\0{digest}".encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def part_title_for(title_base: str, body: str, index: int, total: int) -> str:
+    """Part title: it names the SHA-256 of the part's exact content (header and text), so a
+    store under an existing part title can only meet identical content. A retry that cuts the
+    same transcript elsewhere (another ``chunk_chars`` or byte budget) or renders another header
+    (another active session of the root) writes new blocks and never rewrites a part a
+    published manifest references; an identical retry still meets "identical content"."""
+    body_digest = hashlib.sha256(body.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+    return f"{title_base} {body_digest} part {index:03d} of {total:03d}"
+
+
+def manifest_title_for(title_base: str, parent_manifest_id: str | None) -> str:
+    """Manifest title: the parent is part of it, so a manifest is never re-written under another
+    parent — a transcript that comes back after another checkpoint of its root gets a manifest of
+    its own instead of turning the first one's parent link into a loop."""
+    return f"{title_base} after {parent_manifest_id} manifest" if parent_manifest_id else f"{title_base} manifest"
+
+
+@dataclass
+class _ChainRun:
+    """Bookkeeping of one ``ChainWriter.write`` call."""
+
+    deadline: float
+    budget_s: float
+    window_writes: int
+    writes: int = 0
+    reused: int = 0
+    rate_limited: int = 0
+    # Monotonic times of this chain's writes ctx booked inside the current window.
+    recent: list[float] = field(default_factory=list)
+    # The first refusal grants the chain one more window (once per chain): a slot that
+    # other writers hold frees a whole window after their writes, which a budget of one
+    # window can never reach.
+    granted_refusal_window: bool = False
+
+
 @dataclass
 class ChainWriter:
     """Writes one checkpoint chain synchronously within a deadline. Fail-closed:
     every failure raises ``CtxCheckpointError``; the head is published LAST, so a
-    partial failure never moves the stable head."""
+    partial failure never moves the stable head.
+
+    Paced (0.10.0): at most ``max_parts + 2`` writes inside one rate window; a longer chain
+    waits for the next window, and its deadline grows by one window for each window it needs.
+    Idempotent: every title derives from the root and the transcript digest, so a retry meets
+    the parts an earlier attempt stored — ctx answers those "identical content" without
+    booking a write, which is the server's confirmation that title and content match."""
 
     client: Any
     category: str = CATEGORY_CHECKPOINT
@@ -541,22 +605,54 @@ class ChainWriter:
     profile: str = "default"
     sleep: Callable[[float], None] = time.sleep
     monotonic: Callable[[], float] = time.monotonic
+    # Told once per chain that needs more than one rate window (the umbrella passes it on to the
+    # user, the compaction waits that long); never raises into the writer.
+    notify: Callable[[str], None] = lambda message: None
     # The bound ctx key, redacted from the transcript parts; never part of the repr.
     secret: str = field(default="", repr=False)
     _tool_evidence_warned: bool = field(default=False, init=False)
 
-    # -- transport with budget + rate-limit backoff --
+    def _window_writes(self) -> int:
+        """Writes of one chain inside one rate window: ``max_parts`` parts plus manifest and head."""
+        return max(1, min(int(self.max_parts), MAX_PARTS_CEILING)) + 2
+
+    # -- transport with budget, pacing and rate-limit waits --
+
+    def _prune(self, run: _ChainRun, now: float) -> None:
+        while run.recent and run.recent[0] <= now - RATE_WINDOW_S:
+            run.recent.pop(0)
+
+    def _slot_free_at(self, run: _ChainRun, now: float) -> float:
+        """When a write slot of the key's window is free again: when this chain's oldest write in
+        the window ages out, or — none of its own in there — when the whole window has."""
+        self._prune(run, now)
+        oldest = run.recent[0] if run.recent else now
+        return oldest + RATE_WINDOW_S + RATE_WINDOW_MARGIN_S
+
+    def _pace(self, what: str, run: _ChainRun) -> None:
+        """Wait before a write while this chain already has ``window_writes`` writes in the window."""
+        now = self.monotonic()
+        self._prune(run, now)
+        if len(run.recent) < run.window_writes:
+            return
+        resume = self._slot_free_at(run, now)
+        if resume >= run.deadline:
+            raise CtxCheckpointError(
+                f"ctx checkpoint budget {run.budget_s:.0f}s exceeded before {what} (paced at "
+                f"{run.window_writes} writes per {RATE_WINDOW_S:.0f}s)"
+            )
+        logger.info("ctx checkpoint paces %s: %.1fs until the next rate window", what, resume - now)
+        self.sleep(resume - now)
 
     def _call(
         self,
         what: str,
-        deadline: float,
-        budget_s: float,
+        run: _ChainRun,
         fn: Callable[..., dict[str, Any]],
-        stats: dict[str, int],
         **kwargs,
     ) -> dict[str, Any]:
-        attempt = 0
+        deadline, budget_s = run.deadline, run.budget_s
+        refusals = 0
         while True:
             remaining = deadline - self.monotonic()
             if remaining <= 0:
@@ -565,21 +661,28 @@ class ChainWriter:
                 data = fn(timeout=max(0.5, min(self.api_timeout, remaining)), **kwargs)
             except CtxApiError as exc:
                 if exc.code == "rate_limit" or exc.status == 429:
-                    stats["rate_limited"] = stats.get("rate_limited", 0) + 1
-                    if attempt < len(RATE_LIMIT_BACKOFF_S):
-                        delay = RATE_LIMIT_BACKOFF_S[attempt]
-                        if self.monotonic() + delay < deadline:
-                            logger.info(
-                                "ctx checkpoint %s rate-limited; backing off %.0fs (attempt %d)",
-                                what,
-                                delay,
-                                attempt + 1,
-                            )
-                            self.sleep(delay)
-                            attempt += 1
-                            continue
+                    run.rate_limited += 1
+                    refusals += 1
+                    if not run.granted_refusal_window:
+                        run.granted_refusal_window = True
+                        run.deadline += RATE_WINDOW_S + RATE_WINDOW_MARGIN_S
+                        run.budget_s += RATE_WINDOW_S + RATE_WINDOW_MARGIN_S
+                        deadline, budget_s = run.deadline, run.budget_s
+                    now = self.monotonic()
+                    # Until a slot is free, at the latest until just before the deadline: one
+                    # more try there, never a third refusal in a row.
+                    resume = min(self._slot_free_at(run, now), deadline - RATE_WINDOW_MARGIN_S)
+                    if refusals < MAX_RATE_REFUSALS and resume > now:
+                        logger.info(
+                            "ctx checkpoint %s rate-limited (the key's write window is full); waiting %.1fs",
+                            what,
+                            resume - now,
+                        )
+                        self.sleep(resume - now)
+                        continue
                     raise CtxCheckpointError(
-                        f"ctx checkpoint rate-limited during {what} (budget {budget_s:.0f}s)"
+                        f"ctx checkpoint rate-limited during {what} (budget {budget_s:.0f}s; "
+                        f"{'refused twice in a row' if refusals >= MAX_RATE_REFUSALS else 'no time left to wait'})"
                     ) from exc
                 code = f" [{exc.code}]" if exc.code else ""
                 raise CtxCheckpointError(f"ctx checkpoint {what} failed{code}: {str(exc)[:200]}") from exc
@@ -598,21 +701,18 @@ class ChainWriter:
     def _store(
         self,
         what: str,
-        deadline: float,
-        budget_s: float,
-        stats: dict[str, int],
+        run: _ChainRun,
         *,
         title: str,
         content: str,
         metadata: dict[str, Any],
         tags: list[str],
     ) -> str:
+        self._pace(what, run)
         data = self._call(
             what,
-            deadline,
-            budget_s,
+            run,
             self.client.store,
-            stats,
             category=self.category,
             title=title,
             content=content,
@@ -621,25 +721,30 @@ class ChainWriter:
             type=CHECKPOINT_TYPE,
             metadata=metadata,
         )
-        stats["writes"] = stats.get("writes", 0) + 1
         block_id = store_block_id(data)
         if not block_id:
             raise CtxCheckpointError(f"ctx checkpoint {what}: store returned no block id")
+        if store_action(data) == "noop":
+            # ctx compared title, content (SHA-256), metadata, tags, sensitivity and type with
+            # the stored block and booked no write: the block is the one this write would make.
+            run.reused += 1
+        else:
+            run.writes += 1
+            run.recent.append(self.monotonic())
         return block_id
 
     def load_previous_head(
         self,
         head_title: str,
-        deadline: float,
-        budget_s: float,
-        stats: dict[str, int],
+        run: _ChainRun,
         *,
         root_session_id: str | None = None,
-    ) -> tuple[str | None, list[str]]:
-        """``(latest_manifest_id, fact_hashes)`` of the existing head (upstream
-        ``_load_previous_manifest_id`` plus the P4 dedupe keys from the same read).
+    ) -> tuple[str | None, list[str], str]:
+        """``(latest_manifest_id, fact_hashes, checkpoint_id)`` of the existing head (upstream
+        ``_load_previous_manifest_id`` plus the P4 dedupe keys and, 0.10.0, the checkpoint id the
+        head was published for, from the same read).
 
-        Searches the head by title and reads it. ``(None, [])`` = no head yet; a head
+        Searches the head by title and reads it. ``(None, [], "")`` = no head yet; a head
         without a valid ``latest_manifest_id`` raises ``CtxCheckpointError``.
 
         Narrowed to heads by their tag (every head carries ``checkpoint-head``). Parts and
@@ -654,10 +759,8 @@ class ChainWriter:
         """
         result = self._call(
             "head search",
-            deadline,
-            budget_s,
+            run,
             self.client.search,
-            stats,
             text=head_title,
             category=self.category,
             types=[CHECKPOINT_TYPE],
@@ -666,14 +769,32 @@ class ChainWriter:
         )
         head_id = _find_block_id_by_title(result, head_title)
         if not head_id:
-            return None, []
-        head = self._call("head read", deadline, budget_s, self.client.get_block, stats, block_id=head_id)
+            return None, [], ""
+        head = self._call("head read", run, self.client.get_block, block_id=head_id)
         if root_session_id is not None and _find_value(head, "root_session_id") != root_session_id:
-            return None, []
+            return None, [], ""
         manifest_id = _find_value(head, "latest_manifest_id")
         if not manifest_id or not _UUID_RE.fullmatch(manifest_id):
             raise CtxCheckpointError("ctx checkpoint head is missing a valid latest_manifest_id")
-        return manifest_id, _find_str_list(head, FACT_HASHES_KEY)
+        return manifest_id, _find_str_list(head, FACT_HASHES_KEY), _find_value(head, "checkpoint_id") or ""
+
+    def _parent_of_own_manifest(self, manifest_id: str, digest: str, run: _ChainRun) -> str | None:
+        """The head already names this transcript's checkpoint (an earlier attempt completed it and
+        the compaction after it did not land): its manifest is written again in place, so its
+        parent is the manifest's own parent — never the manifest itself. A manifest that does not
+        hold this transcript keeps the head's manifest as parent (a manifest title carries its
+        parent, so that cannot overwrite it)."""
+        try:
+            manifest = self._call("manifest read", run, self.client.get_block, block_id=manifest_id)
+        except CtxCheckpointError as exc:
+            # Only the parent depends on this read; the chain stays complete with the head's
+            # manifest as parent (a new manifest, its title names that parent).
+            logger.info("ctx checkpoint: manifest %s of the head not readable (%s)", manifest_id, exc)
+            return manifest_id
+        if _find_value(manifest, "sha256") != digest or not _find_str_list(manifest, "source_block_ids"):
+            return manifest_id
+        parent = _find_value(manifest, "parent_manifest_id")
+        return parent if parent and _UUID_RE.fullmatch(parent) else None
 
     def tool_index_status(self, tool_evidence: Any) -> str:
         if tool_evidence is None:
@@ -742,38 +863,62 @@ class ChainWriter:
                 f"{CTX_CONTENT_MAX_BYTES}-byte content cap; nothing written"
             )
         chunks = split_chunks(rendered, self.chunk_chars, byte_budget)
-        max_parts = max(1, min(int(self.max_parts), MAX_PARTS_CEILING))
-        if len(chunks) > max_parts:
-            raise CtxCheckpointError(
-                f"ctx checkpoint needs {len(chunks)} parts > max_parts {max_parts} "
-                "(write rate limit 100/60s per key); nothing written"
+        # Paced instead of refused (0.10.0): the budget covers one rate window, every further
+        # window this chain's writes need is added to it.
+        window_writes = self._window_writes()
+        writes_needed = len(chunks) + 2
+        windows = -(-writes_needed // window_writes)
+        paced_s = (windows - 1) * (RATE_WINDOW_S + RATE_WINDOW_MARGIN_S)
+        deadline += paced_s
+        if windows > 1:
+            minutes = max(1, round((windows - 1) * (RATE_WINDOW_S + RATE_WINDOW_MARGIN_S) / 60))
+            message = (
+                f"ctx checkpoint: this transcript needs up to {writes_needed} writes, more than the "
+                f"{window_writes} per minute the checkpoint uses of ctx's write limit. It is saved over "
+                f"about {minutes} minute{'s' if minutes != 1 else ''}; the compaction waits for it."
             )
+            logger.info("%s", message)
+            try:
+                self.notify(message)
+            except Exception:
+                logger.debug("ctx checkpoint: pacing notice failed", exc_info=True)
 
         now = datetime.now(timezone.utc).isoformat()
         short_root = _short_root(root)
         head_title = head_title_for(root)
-        stats: dict[str, int] = {"writes": 0, "rate_limited": 0}
-        previous_manifest_id, previous_fact_hashes = self.load_previous_head(head_title, deadline, budget_s, stats)
+        # budget_s here is the effective one (messages name what the chain really had).
+        run = _ChainRun(deadline=deadline, budget_s=float(budget_s) + paced_s, window_writes=window_writes)
+        checkpoint_id = checkpoint_id_for(root, digest)
+        previous_manifest_id, previous_fact_hashes, head_checkpoint_id = self.load_previous_head(head_title, run)
         lookup = "server" if previous_manifest_id else "none"
-        if not previous_manifest_id and cached_manifest_id and _UUID_RE.fullmatch(cached_manifest_id):
+        # The head already names this transcript's checkpoint: its manifest's own parent is the
+        # parent (possibly none) — neither the process cache nor the 0.6.0 title may replace it.
+        own_checkpoint = bool(previous_manifest_id) and head_checkpoint_id == checkpoint_id
+        if own_checkpoint:
+            previous_manifest_id = self._parent_of_own_manifest(previous_manifest_id, digest, run)
+        if (
+            not own_checkpoint
+            and not previous_manifest_id
+            and cached_manifest_id
+            and _UUID_RE.fullmatch(cached_manifest_id)
+        ):
             # search miss (ranking/backfill) but this process wrote the chain → keep it linked
             previous_manifest_id = cached_manifest_id
             lookup = "cache"
         legacy_title = legacy_head_title_for(root)
-        if not previous_manifest_id and legacy_title != head_title:
+        if not own_checkpoint and not previous_manifest_id and legacy_title != head_title:
             # 0.6.1 changed this root's head title (an id over 48 characters such as Hermes'
             # local-<sha256>, or one that sanitizing changes): continue the chain a 0.6.0
             # writer left under the old title. One more search, only while no head exists
             # under the new title; the new head is published under the new title and the
             # old head stays as it is.
-            previous_manifest_id, previous_fact_hashes = self.load_previous_head(
-                legacy_title, deadline, budget_s, stats, root_session_id=root
+            previous_manifest_id, previous_fact_hashes, _legacy_checkpoint_id = self.load_previous_head(
+                legacy_title, run, root_session_id=root
             )
             if previous_manifest_id:
                 lookup = "legacy"
         # P4: cumulative fact dedupe keys (previous head ∪ this run), newest kept, capped
         chain_fact_hashes = _merge_hashes(previous_fact_hashes, fact_hashes or [])
-        checkpoint_id = hashlib.sha256(f"{root}\0{now}\0{digest}".encode()).hexdigest()[:16]
         title_base = f"Compaction source {short_root} {digest[:16]} {checkpoint_id}"
         common_metadata: dict[str, Any] = {
             "evidence_date": now,
@@ -803,17 +948,17 @@ class ChainWriter:
         chunk_ids: list[str] = []
         for index, chunk in enumerate(chunks, start=1):
             body = part_header(root, session_id, digest, index, len(chunks)) + chunk
-            metadata = dict(common_metadata)
+            # A part carries no time of its own (0.10.0: evidence_date stays on manifest and head):
+            # a retry sends the identical write, which ctx confirms without booking it.
+            metadata = {key: value for key, value in common_metadata.items() if key != "evidence_date"}
             metadata.update(
                 {"part": index, "parts": len(chunks), "part_sha256": hashlib.sha256(chunk.encode("utf-8")).hexdigest()}
             )
             chunk_ids.append(
                 self._store(
                     f"source part {index}/{len(chunks)}",
-                    deadline,
-                    budget_s,
-                    stats,
-                    title=f"{title_base} part {index:03d} of {len(chunks):03d}",
+                    run,
+                    title=part_title_for(title_base, body, index, len(chunks)),
                     content=body,
                     metadata=metadata,
                     tags=PART_TAGS,
@@ -836,10 +981,8 @@ class ChainWriter:
         )
         manifest_id = self._store(
             "manifest",
-            deadline,
-            budget_s,
-            stats,
-            title=f"{title_base} manifest",
+            run,
+            title=manifest_title_for(title_base, previous_manifest_id),
             content=manifest,
             metadata={
                 **common_metadata,
@@ -864,9 +1007,7 @@ class ChainWriter:
         )
         head_id = self._store(
             "head publish",
-            deadline,
-            budget_s,
-            stats,
+            run,
             title=head_title,
             content=head,
             metadata={
@@ -884,9 +1025,12 @@ class ChainWriter:
             sha256=digest,
             parent_manifest_id=previous_manifest_id,
             checkpoint_id=checkpoint_id,
-            writes=stats.get("writes", 0),
+            writes=run.writes,
             duration_s=self.monotonic() - started,
-            rate_limited=stats.get("rate_limited", 0),
+            rate_limited=run.rate_limited,
             lookup=lookup,
             previous_fact_hashes=list(previous_fact_hashes),
+            reused=run.reused,
+            windows=windows,
+            deadline=run.deadline,
         )

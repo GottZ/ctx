@@ -70,7 +70,7 @@ is about the checkpoint layer.
 The plugin is a plain Hermes **user plugin** — it lives in
 `$HERMES_HOME/plugins/ctx_checkpoint/`, whether the catalog or the installer
 put it there, and works in best-effort mode on a completely stock Hermes.
-Plugin 0.9.0 declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
+Plugin 0.10.0 declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
 `delegate_task` children inherit the provider under the fail-closed gate; the
 catalog pin (0.6.2) still declares ≥ 0.20.4 (since upstream v2026.8.18,
 provider text is forwarded into the compaction summary).
@@ -211,8 +211,8 @@ Configuration reference (under `memory.ctx_checkpoint`; the keys marked
 | `category` | `compaction-checkpoints` | ctx category for checkpoint blocks |
 | `chunk_chars` | `36000` | source part size (clamped to 1k..40k); a part also stays under ctx's 50 KB content cap in UTF-8 bytes |
 | `sensitivity` | `internal` | ctx sensitivity for stored blocks (`public`, `internal`, `personal`, `credentials`) |
-| `budget_s` | `60` | *Plugins form* — wall-clock budget of one checkpoint, clamped to 5..600 s |
-| `max_parts` | `80` | *Plugins form* — part cap of one checkpoint, clamped to 1..95 |
+| `budget_s` | `60` | *Plugins form* — wall-clock budget of one checkpoint, clamped to 5..600 s; a paced checkpoint adds 61 s per extra rate window |
+| `max_parts` | `80` | *Plugins form* — parts one checkpoint writes per 60 s rate window, clamped to 1..95; a longer checkpoint is paced over several windows (until 0.9.0 it was refused) |
 | `auto_recall`, `auto_memory_mirror`, `auto_compress_extract`, `auto_session_digest` | `true` | *Plugins form* — the single memory features; they act only with `memory: true` |
 
 `hermes memory status` (and `hermes ctx_checkpoint status`) runs the connection
@@ -516,6 +516,15 @@ and manifest are deliberately small so routine recall stays cheap.
   bundled skill describes it per mode. The head is kept per root session in
   `ctx_state/checkpoint-status.state` (512 most recent), so every process of the
   profile names it.
+- 0.10.0 (GottZ/ctx#287): a checkpoint with more parts than `max_parts` is paced over
+  ctx's 60 s write windows instead of refused, so a session under
+  `compression.checkpoint_required` no longer stops compacting for good once its
+  transcript outgrows one window; `budget_s` grows by 61 s per extra window and Hermes
+  shows a notice before the wait. The checkpoint id derives from the root session and
+  the transcript's SHA-256, so a retry meets its own titles and ctx confirms the parts an
+  earlier attempt stored without writing them again. A write ctx refuses for its limit
+  waits for a free slot instead of a fixed 2/4/8 s and stops at the second refusal in a
+  row (Hermes' circuit breaker opens at the third).
 
 ## Licensing
 

@@ -6,6 +6,52 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.10.0] — 2026-11-15
+
+A long transcript no longer stops a required checkpoint for good, and a retry continues
+where the failed attempt stopped (GottZ/ctx#287).
+
+- **Paced instead of refused.** `checkpoint_max_parts` (plugin key `max_parts`) now means
+  parts per 60 s rate window: the chain writes at most that many parts plus manifest and
+  head inside one window (what 0.9.0 wrote in one burst) and waits for the next window
+  with the rest. Until 0.9.0 a transcript with more parts was refused before its first
+  write, and under `compression.checkpoint_required` every later compaction of the session
+  failed the same way, since the transcript only grows. The budget (`checkpoint_budget_s`)
+  covers one window; each further window the part count needs adds 61 s. Before the first
+  wait the user gets a notice through Hermes' warning callback (the compaction waits).
+  The waits run between calls, never inside one: Hermes' per-server RPC lock stays free.
+- **Idempotent retries.** The checkpoint id is `sha256(root \0 transcript digest)[:16]`
+  (it hashed the time before), so a retry of the same transcript writes the same titles.
+  Parts no longer carry `evidence_date` (manifest and head keep it): the retry sends the
+  identical write, and ctx answers "identical content" without booking a write — the
+  server's confirmation that title and content (SHA-256) match. A retry of the same
+  transcript (Hermes' retry of a stalled compaction, `/compress` without new messages)
+  reuses the parts a failed attempt stored (`reused` in the receipt and the log line); a
+  transcript that changed in between has another digest and other titles, and the parts of
+  the failed attempt stay unreferenced as before. A part title names the SHA-256 of the
+  part's exact content (`Compaction source <root> <sha16> <cpid> <part sha16> part NNN of
+  NNN`): a retry that cuts the same transcript elsewhere (another `chunk_chars` or byte
+  budget) or renders another header (another active session of the root) writes new blocks
+  instead of rewriting a part a published manifest references, which a later failure of
+  that retry would have left as a mix of two splits. A manifest title names its parent (`… after <parent id> manifest`), so an
+  existing manifest is never re-written under another parent; when the head already names
+  this transcript's checkpoint (the compaction after it did not land), the manifest is
+  re-written in place under its own parent instead of pointing at itself.
+- **Rate-limit waits sized to the window.** A refused write used to back off 2/4/8 s and
+  give up after 14 s, whatever the budget, after four refusals in a row. It now waits until
+  a slot is free — when the chain's own oldest write in the window ages out, else a whole
+  window — at the latest until just before the deadline, and tries once more; the second
+  refusal in a row ends the chain. The first refusal of a chain adds one window (61 s) to
+  its deadline: other writers' slots free a whole window after their writes, which a
+  budget of one window could never reach. Hermes opens its per-server circuit breaker after three
+  consecutive error answers and then refuses every call to the ctx server for 60 s.
+- Failure hints: the `max_parts` hint is gone (the cause no longer occurs); budget and
+  rate-limit hints say that the parts already saved are kept for the next compaction.
+- Readers: chains written by 0.9.0 and older are read as before (head title per root,
+  `latest_manifest_id`, `source_block_ids`, `parent_manifest_id`, `fact_hashes`); a head
+  of an older version never matches the new checkpoint id, so its chain is continued, not
+  re-written.
+
 ## [ctx_checkpoint 0.9.0] — 2026-11-15
 
 After a compaction the agent learns that the checkpoint exists and how to read it

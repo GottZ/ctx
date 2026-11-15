@@ -120,12 +120,12 @@ are clamped, unknown values fall back to the default.
 | `api_timeout` | `10` | Seconds for retrieval and write calls (1–30) |
 | `synthesis_timeout` | `90` | Seconds for `synthesize: true` queries (15–300) |
 | `checkpoint_mode` | `best_effort` | `off` = legacy v1 hook (raw transcript, no chain); `best_effort` / `required` = checkpoint API v2 (identical in the plugin — fail-closed is requested by the host, see below) |
-| `checkpoint_budget_s` | `60` | Time budget for the synchronous pre-compress writes, chain and required facts share it (5–600; plugin key `budget_s`) |
+| `checkpoint_budget_s` | `60` | Time budget for the synchronous pre-compress writes, chain and required facts share it (5–600; plugin key `budget_s`); a paced chain adds 61 s for every rate window after the first |
 | `checkpoint_chain` | `true` | Write the transcript chain (needs `checkpoint_mode` ≠ `off`); independent of `auto_compress_extract` |
 | `checkpoint_sensitivity` | `internal` | Sensitivity of chain blocks (plugin key `sensitivity`; the engine's own default is `personal`) |
 | `checkpoint_category` | `compaction-checkpoints` | ctx category of the chain blocks (plugin key `category`) |
 | `checkpoint_chunk_chars` | `36000` | Part size (1 000–40 000 chars; plugin key `chunk_chars`) |
-| `checkpoint_max_parts` | `80` | Max parts per checkpoint (1–95; server write limit 100/60 s per key; plugin key `max_parts`) — more ⇒ nothing written, error |
+| `checkpoint_max_parts` | `80` | Parts per rate window (1–95; server write limit 100/60 s per key; plugin key `max_parts`): a chain writes at most this many parts plus manifest and head inside 60 s and waits for the next window with the rest (until 0.9.0: more parts ⇒ nothing written, error) |
 | `digest_min_exchanges` | `4` | Min. new user/assistant text messages since the last digest of the root session (1–1000) |
 | `digest_every_exchanges` | `40` | Rolling digest after N new exchanges; `0` = off |
 | `digest_every_hours` | `6` | Rolling digest at a turn ≥ N h after the last digest (with ≥ `digest_min_exchanges`); `0` = off |
@@ -254,10 +254,11 @@ the plugin and runs over either transport.
   (upsert, `latest_manifest_id`). The head is published **last**: a failing part or
   manifest never moves it. If the server search misses the head, the manifest this
   process wrote last for the root links the chain.
-- Titles and bodies are bit-identical to upstream (`Compaction checkpoint head <root>`,
-  `Compaction source <root> <sha16> <cpid> part NNN of NNN` / `… manifest`): the server
-  classifies them as `checkpoint` (migrations M107/M120) and the distiller parses the
-  part format. Category `compaction-checkpoints`, sensitivity `checkpoint_sensitivity`.
+- Bodies are bit-identical to upstream; titles keep upstream's prefixes
+  (`Compaction checkpoint head <root>`, `Compaction source <root> <sha16> <cpid> <part sha16>
+  part NNN of NNN` / `… manifest` / `… after <parent id> manifest`; up to 0.9.0 without the
+  part digest and the parent): the server classifies them as `checkpoint` (migrations
+  M107/M120) and the distiller parses the part format. Category `compaction-checkpoints`, sensitivity `checkpoint_sensitivity`.
 - Only direct user/assistant text; tool rows, system prompts, `_compressed_summary`
   carriers and synthetic hand-offs are dropped. Redaction runs twice — host
   `redact_sensitive_text(force=True)` plus key/value, auth-header and bearer rules — after
@@ -268,9 +269,23 @@ the plugin and runs over either transport.
   `platform`, `agent_context`, `host_checkpoint_api`, `checkpoint_api_version`,
   `tool_index_status`, …), `part_sha256`, `fact_hashes` and `ctx_plugin` (writer,
   version, profile, port reference, redaction rules, checkpoint id).
-- Rate limit: after the client's own retry, backoff 2/4/8 s inside the budget; budget or
-  retries exhausted ⇒ `CtxCheckpointError`. More than `checkpoint_max_parts` parts ⇒
-  nothing is written.
+- Pacing (0.10.0): at most `checkpoint_max_parts` + 2 writes inside one 60 s window; a
+  longer chain waits for the next window (the user is told before), and its deadline
+  grows by 61 s per window after the first. A refused write (other writers on the key)
+  waits until a slot is free — when the chain's own oldest write in the window ages out,
+  else a whole window — at the latest until just before the deadline, and then tries once
+  more; the second refusal in a row ends the chain with `CtxCheckpointError` (Hermes opens
+  its per-server circuit breaker at the third error answer in a row).
+- Idempotent (0.10.0): the checkpoint id is `sha256(root \0 transcript digest)[:16]`, so a
+  retry of the same transcript writes the same titles; parts carry no time of their own
+  (`evidence_date` is on manifest and head only), so ctx answers a part that is already
+  stored "identical content" and books no write — the server's confirmation of title and
+  content (SHA-256). A part title names the SHA-256 of its exact content (header and text),
+  so a retry that renders a part differently (another `checkpoint_chunk_chars` or byte
+  budget, another active session in the header) writes new blocks and never rewrites a part
+  a published manifest references. A manifest title names its parent (`… after <parent id> manifest`), so
+  a manifest is never re-written under another parent; when the head already names this
+  transcript's checkpoint, the manifest is re-written in place under its own parent.
 - A batch without direct user/assistant text returns a no-op receipt
   (`ctx checkpoint: empty …`) instead of raising — fail-closed mode must not block a
   compaction that has nothing to archive (`ctx_checkpoint` 0.5.1 does the same).
@@ -357,7 +372,9 @@ serve several profiles without mixing their stores.
 - **Sensitivity is fail-closed** on the server (`credentials` by default). Automatic writes
   use `sensitivity_default`; downgrades require server-side confirmation.
 - **Rate limit:** the server allows 100 writes per 60 s per key; a large checkpoint plus
-  facts and mirror writes share that budget.
+  facts and mirror writes share that budget. The chain paces itself to `checkpoint_max_parts`
+  + 2 writes per window; required facts after it are not paced (a refused fact fails the
+  required checkpoint; the chain's parts stay for the next attempt).
 
 ## Development
 

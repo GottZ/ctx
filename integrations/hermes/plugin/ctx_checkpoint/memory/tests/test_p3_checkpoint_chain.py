@@ -693,46 +693,103 @@ def _rate_limited_store(fail_times):
     return hook
 
 
-def test_rate_limit_backs_off_and_completes(factory):
+class _FakeClock:
+    """The chain writer's monotonic and sleep seams on one fake clock."""
+
+    def __init__(self):
+        self.now = 5_000.0
+        self.slept = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def _on_fake_clock(p):
+    clock = _FakeClock()
+    p._chain().sleep = clock.sleep
+    p._chain().monotonic = clock.monotonic
+    p._now = clock.monotonic
+    return clock
+
+
+def test_rate_limit_waits_for_the_window_and_completes(factory):
     p, c = factory("sess-rl", agent_context="primary")
-    slept = []
-    p._chain().sleep = slept.append
-    c.store_hook = _rate_limited_store(2)
+    p._config["checkpoint_budget_s"] = 120.0
+    clock = _on_fake_clock(p)
+    c.store_hook = _rate_limited_store(1)
     frame = p.on_pre_compress([{"role": "user", "content": "rate limited write"}], require_checkpoint=True)
-    assert slept == [2.0, 4.0]
+    # Nothing of its own in the window: a slot is free once the whole window has passed.
+    assert clock.slept == [_MODULE.RATE_WINDOW_S + _MODULE.RATE_WINDOW_MARGIN_S]
     assert "ctx checkpoint head:" in frame
-    assert len([a for a in _stores(c.calls)]) == 3 + 2  # two refused attempts + 3 stored
+    assert len([a for a in _stores(c.calls)]) == 3 + 1  # one refused attempt + 3 stored
 
 
 def test_rate_limit_persistent_fails_without_head(factory, caplog):
     p, c = factory("sess-rl2", agent_context="primary")
-    slept = []
-    p._chain().sleep = slept.append
+    p._config["checkpoint_budget_s"] = 600.0
+    clock = _on_fake_clock(p)
     c.store_hook = _rate_limited_store(99)
-    with pytest.raises(CtxCheckpointError, match="rate-limited"):
+    with pytest.raises(CtxCheckpointError, match=r"rate-limited.*refused twice in a row"):
         p.on_pre_compress([{"role": "user", "content": "rate limited write"}], require_checkpoint=True)
-    assert slept == list(_MODULE.RATE_LIMIT_BACKOFF_S)
+    # One wait, then the second refusal in a row ends it (a third would open Hermes' breaker).
+    assert len(clock.slept) == 1
+    assert len(_stores(c.calls)) == _MODULE.MAX_RATE_REFUSALS
     assert not any(a["title"].startswith("Compaction checkpoint head") for a in _stores(c.calls))
 
 
-def test_rate_limit_backoff_never_sleeps_past_budget(factory):
-    p, c = factory("sess-rl3", agent_context="primary")
+def test_rate_limit_wait_never_sleeps_past_the_deadline(factory):
+    p, c = factory("sess-rl3", config={"checkpoint_chunk_chars": 1_000}, agent_context="primary")
     p._config["checkpoint_budget_s"] = 3.0
-    slept = []
-    p._chain().sleep = slept.append
-    c.store_hook = _rate_limited_store(99)
-    with pytest.raises(CtxCheckpointError):
-        p.on_pre_compress([{"role": "user", "content": "x"}], require_checkpoint=True)
-    assert slept == [2.0], "4 s backoff would overrun the 3 s budget"
+    clock = _on_fake_clock(p)
+    stores = {"n": 0}
+
+    def slow_then_refused(args):
+        clock.now += 2.5
+        stores["n"] += 1
+        if stores["n"] >= 2:
+            raise CtxApiError("HTTP 429 [rate_limit]: max 100 writes", status=429, code="rate_limit")
+
+    c.store_hook = slow_then_refused
+    with pytest.raises(CtxCheckpointError, match="rate-limited"):
+        p.on_pre_compress([{"role": "user", "content": "x" * 1_500}], require_checkpoint=True)
+    # Own first write at 5002.5 → its slot at 5063.5 lies past the deadline (3 s + the one window
+    # the first refusal grants = 5064 minus the margin): the wait ends there, at 5063.
+    assert clock.slept == [pytest.approx(5_063.0 - 5_005.0)]
 
 
-def test_part_cap_refuses_before_any_request(factory):
+def test_more_parts_than_max_parts_are_paced_over_rate_windows(factory):
     p, c = factory(
         "sess-cap", config={"checkpoint_chunk_chars": 1_000, "checkpoint_max_parts": 2}, agent_context="primary"
     )
-    with pytest.raises(CtxCheckpointError, match="max_parts"):
-        p.on_pre_compress([{"role": "user", "content": "q" * 5_000}], require_checkpoint=True)
-    assert c.calls == []
+    clock = _on_fake_clock(p)
+    frame = p.on_pre_compress([{"role": "user", "content": "q" * 5_000}], require_checkpoint=True)
+    assert "ctx checkpoint head:" in frame
+    stores = _stores(c.calls)
+    parts = [a for a in stores if " part " in a["title"]]
+    assert len(parts) > 2 and len(stores) == len(parts) + 2  # 4 writes per window (2 parts + manifest + head)
+    assert len(clock.slept) == 1 and clock.slept[0] == pytest.approx(61.0)
+    assert p._last_chain_receipt.windows == 2
+
+
+def test_required_facts_after_a_paced_chain_share_its_extended_deadline(factory):
+    p, _c = factory(
+        "sess-cap-facts",
+        config={"checkpoint_chunk_chars": 1_000, "checkpoint_max_parts": 2, "auto_compress_extract": True},
+        agent_context="primary",
+    )
+    clock = _on_fake_clock(p)
+    fact = "Der Proxy auf INFRA-WWW terminiert TLS fuer alle Dienste mit Traefik."
+    frame = p.on_pre_compress(
+        [{"role": "user", "content": "q" * 5_000}, {"role": "assistant", "content": fact}],
+        require_checkpoint=True,
+    )
+    # The chain took more than the 60 s budget (one paced window); the facts after it still ran.
+    assert clock.now - 5_000.0 > 60.0
+    assert "ctx checkpoint head:" in frame and "fact block(s)" in frame
 
 
 def test_permanent_rejection_is_not_retried(factory):

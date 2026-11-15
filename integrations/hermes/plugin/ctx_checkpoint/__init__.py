@@ -688,6 +688,10 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
                 logger.warning("%s", warning)
             self._notify_user(warning)
 
+    def _checkpoint_notice(self, message: str) -> None:
+        """A paced checkpoint takes minutes and the compaction waits for it: say so before."""
+        self._notify_user(message)
+
     def _notify_user(self, message: str) -> None:
         """Pass a notice to Hermes' warning callback, once per distinct message; never raises."""
         if self._warning_callback is None or message == self._last_warning:

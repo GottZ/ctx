@@ -917,6 +917,10 @@ class CtxMemoryProvider(MemoryProvider):
         )
         ledger.add(k for f in facts for k in fact_keys(f))  # claim now; failed stores are released
         sensitivity = self._config.get("sensitivity_default")
+        if receipt is not None:
+            # A paced chain was given one more rate window per window it needed (0.10.0); the
+            # required facts after it share that deadline, not the single-window budget.
+            deadline = max(deadline, float(getattr(receipt, "deadline", 0.0) or 0.0))
         if require_checkpoint:
             facts_text = self._checkpoint_facts_sync(
                 client, facts, sensitivity, len(source), deadline=deadline, ledger=ledger
@@ -965,9 +969,14 @@ class CtxMemoryProvider(MemoryProvider):
                 tags_for=_tags,
                 profile=profile,
                 secret=self._api_key,
+                notify=self._checkpoint_notice,
                 **self._chain_writer_seams(),
             )
         return self._chain_writer
+
+    def _checkpoint_notice(self, message: str) -> None:
+        """A notice of the chain writer while it runs (a paced chain: the compaction waits for
+        it). Logged by the writer; the umbrella passes it on to the user."""
 
     def _fact_ledger(self) -> FactLedger:
         root = self._root_session_id or self._session_id or "unknown"
@@ -1006,7 +1015,7 @@ class CtxMemoryProvider(MemoryProvider):
         self._last_chain_receipt = receipt
         logger.info(
             "CTX checkpoint chain stored (profile=%s, root=%s): head=%s manifest=%s parent=%s parts=%d writes=%d "
-            "sha=%s lookup=%s rate_limited=%d %.2fs",
+            "reused=%d windows=%d sha=%s lookup=%s rate_limited=%d %.2fs",
             self._profile,
             shorten(root, 60),
             receipt.head_id,
@@ -1014,6 +1023,8 @@ class CtxMemoryProvider(MemoryProvider):
             receipt.parent_manifest_id or "none",
             len(receipt.part_ids),
             receipt.writes,
+            receipt.reused,
+            receipt.windows,
             receipt.sha256[:16],
             receipt.lookup,
             receipt.rate_limited,
