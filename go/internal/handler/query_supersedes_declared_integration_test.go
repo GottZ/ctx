@@ -155,6 +155,21 @@ func TestQueryDeclaredSupersedes(t *testing.T) {
 			t.Errorf("superseded_by = %v, want %s", s.SupersededBy, declaredNew)
 		}
 	})
+
+	t.Run("archived_successor_releases_target", func(t *testing.T) {
+		// The pinned link of an archived successor stays until the daily
+		// sweep; it no longer settles the target, which is retrievable again.
+		if _, err := store.DeleteBlock(ctx, f.pool, declaredNew, []string{sdHome}); err != nil {
+			t.Fatalf("archive successor: %v", err)
+		}
+		if _, ok := f.link(t, declaredNew, declaredOld); !ok {
+			t.Fatalf("premise: the link of the archived successor is gone before the sweep")
+		}
+		src := f.query(t, "what is the "+sdQuestionMarker+" policy")
+		if _, ok := sdFind(src, declaredOld); !ok {
+			t.Errorf("the target of an archived successor stayed hidden: %v", src)
+		}
+	})
 }
 
 func TestGuardDeclaredSupersedes(t *testing.T) {
