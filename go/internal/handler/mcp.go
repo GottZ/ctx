@@ -270,9 +270,10 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 
 	// update (F6-C6 D-W6a): field-level block update, REST manage-update
 	// parity. Stages for confirm_writes keys (op 'update', TOCTOU-pinned).
+	// `type` since issue #203 (mcp_update.go).
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "update",
-		Description: "Update fields of an existing block (category, title, content, tags, metadata). Resolves the id within this key's writable scopes.",
+		Description: "Update fields of an existing block (category, title, content, tags, metadata, type). Resolves the id within this key's writable scopes. A new type is checked against the block-type registry like the store tool's and kept as a manual choice; a type that would drop the untrusted marking of the block's current type is refused.",
 	}, mcpUpdateHandler(cfg))
 
 	// archive (#201): manage-delete parity — archives one block the key may

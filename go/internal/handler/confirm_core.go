@@ -154,6 +154,42 @@ func confirmDriftReject(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthRe
 	return nil
 }
 
+// confirmTypeTrustReject re-runs the update tool's untrusted rule
+// (untrustedLiftReject, issue #203) over a staged re-type: nil = admissible,
+// and nil for every payload that names no type. The stage ran it against the
+// registry of that moment; a card outlives it, and the policy of either type
+// can change before the confirm (a type marked untrusted after staging), so
+// the rule is decided again here, against the block's type as it is now and
+// the registry as it is now. Like confirmClaimReject it refuses on the
+// un-consumed row and answers with the class the stage would have answered.
+//
+// Split out of executeConfirm for the cyclop budget, like its neighbours. Its
+// own snapshot and its own read run only on this path (op 'update' with a
+// type). Like the drift check before it, it decides over a read: a writer that
+// re-types the block between this read and the execute after the consume is
+// not seen — the window the drift pin has had since D1-M3.
+func confirmTypeTrustReject(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, ar *auth.AuthResult, cw store.CanonicalWrite) *confirmOutcome {
+	if cw.Op != "update" || cw.Type == "" {
+		return nil
+	}
+	var set *blocktype.Set
+	if blocktypes != nil {
+		set = blocktypes.SnapshotForRequest(ctx)
+	}
+	// nil type set (V-11): a gate input, not a read answer.
+	base, err := store.GetBlock(ctx, pool, nil, cw.ID, writableBlockScopes(ar), nil)
+	if err != nil {
+		return &confirmOutcome{Kind: confirmInfraErr, Op: cw.Op, Err: err}
+	}
+	if base == nil {
+		return &confirmOutcome{Kind: confirmTOCTOUGone, Op: cw.Op, BlockID: cw.ID}
+	}
+	if rej := untrustedLiftReject(set, base, cw.Type); rej != nil {
+		return &confirmOutcome{Kind: confirmClaimRejected, Op: cw.Op, Reject: rej}
+	}
+	return nil
+}
+
 // executeConfirm runs the complete confirm sequence for one payload hash,
 // strictly per-key (D1-M4: lookup and consume are bound to ar.ApiKeyID).
 // Every reject before the consume leaves the stage token intact (D1-M1/D1-M3
@@ -229,6 +265,9 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 	if out := confirmDriftReject(ctx, pool, ar, cw); out != nil {
 		return *out
 	}
+	if out := confirmTypeTrustReject(ctx, pool, blocktypes, ar, cw); out != nil {
+		return *out
+	}
 
 	// Atomic consume (exactly once) — a racing double-confirm loses here and
 	// gets the generic miss.
@@ -266,6 +305,14 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 		return confirmOutcome{Kind: confirmOK, Op: cw.Op, Block: block}
 	}
 
+	return executeConfirmedStore(ctx, pool, blocktypes, ar, cw, pw.ID)
+}
+
+// executeConfirmedStore runs op 'store' AFTER the consume. Split out of
+// executeConfirm to keep that function under the cyclop budget once the
+// supersedes refusal (issue #197) and the type-trust re-check (#203) sat in
+// it side by side; the order of the refusals is unchanged.
+func executeConfirmedStore(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, ar *auth.AuthResult, cw store.CanonicalWrite, pendingID string) confirmOutcome {
 	// op 'store': execute over the SAME path as the direct store tools
 	// (upsert + classify + temporal). cw.Scope is the scope the stage gates
 	// RESOLVED — the key's home scope, or, since E-M4, the explicit scope the
@@ -292,7 +339,7 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmSupersedesPrefix)}
 	}
 	if err != nil {
-		slog.Error("confirm: confirmed write execute failed", "error", err, "pending_id", pw.ID)
+		slog.Error("confirm: confirmed write execute failed", "error", err, "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
 

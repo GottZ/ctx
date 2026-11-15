@@ -274,9 +274,33 @@ Change fields of an existing block.
 | `content` | string | | new content, at most 50 KB |
 | `tags` | string[] | | replacement tag set; `[]` clears |
 | `metadata` | object | | replacement metadata object (no merge); `{}` clears |
+| `type` | string | | new block type from the registry (e.g. `reference`) |
 
 Omitted fields stay unchanged. **Answer:**
 `Updated: <title> (id: <uuid>, category: <category>)`. Staged for `confirm_writes` keys.
+
+A `type` is checked exactly as the REST `manage update` action checks it, with the
+same codes and texts: `unknown_type` for a name the key's registry view does not
+hold (a type another tenant owns answers the same), `reserved_type` for a type the
+server writes itself (`insight`, `catalog`, any `write.internal_only` type), and
+`parent_required` for a type that needs a parent (`comment`; this tool carries
+none). The block keeps the type as a manual choice (`type_source` `manual`): the
+title classifier no longer changes it. A re-type changes what reads the block from
+then on — its retrieval policy, whether the guard and dream pick it — and leaves
+its content, embedding and existing links as they are.
+
+One refusal is this tool's own: a block whose current type marks its content as
+untrusted (see **Untrusted content** above) cannot be re-typed to a type without that marking
+(`reserved_type`, the text names both types). Moving it to another untrusted type,
+or any block onto an untrusted type, is allowed. A block whose current type is not in
+the key's registry view is not re-typed either (`reserved_type`), because whether that
+type marks the content cannot be decided from it; a re-type of a block the server
+derived answers `provenance_protected`, as every write to it does. The rule belongs to
+this tool: [`store`](#store) onto an existing block's category and title, and the REST
+`manage update` action, take an explicit `type` as given. A staged re-type is checked at
+stage time and again when it is confirmed, against the registry of that moment: a
+type that left the registry, or a block type that became untrusted, in between
+refuses the confirm and keeps the stage token.
 
 A changed `title` or `content` clears the block's embedding in the same
 transaction as the update; the backfill writes the new one, and until then the
