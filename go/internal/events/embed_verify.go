@@ -36,7 +36,7 @@ import (
 //     stage-4 table pass (Ein-Pass-Doktrin: embedding_next is unindexed
 //     fp32 TOAST, ~41 GB at 10M — one sequential pass total, never two).
 //  3. Index-Bau — CONCURRENTLY HNSW on embedding_next (canonical live
-//     parameters m=16/ef_construction=128, Mig 115) + the three sister
+//     parameters m=16/ef_construction=128, Mig 115) + the sister
 //     partial indexes of the Attnum class (§4.8). Executed LAST: a CIC over
 //     a bestand that stage 1/2 already proved defective would be hours of
 //     wasted I/O at 10M.
@@ -735,7 +735,7 @@ func (s *Scheduler) guardThresholdBounds() (dup, review float64) {
 	return dup, review
 }
 
-// verifyEnsureIndexes is Stufe 3: HNSW + the three sister partial indexes,
+// verifyEnsureIndexes is Stufe 3: HNSW + the sister partial indexes,
 // all CONCURRENTLY with INVALID recovery (shared ensureConcurrentIndexValid
 // helper — the W04-4 CIC lifecycle doctrine). A VALID exemplar is reused
 // (Reused=true), which is what makes verify re-runs idempotent: a

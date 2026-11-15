@@ -15,9 +15,11 @@ package store
 // A pick bound to some scopes lists them as pairs only; an unbound pick takes
 // the Shared branches and adds the pairs a scope's own backend serves above
 // them. A branch reads the pending rows of its class only, newest or oldest
-// first, so no row of another class or scope is visited; the Dead filter of a
-// Shared branch is the one place where rows of a scope the pick does not
-// return can be visited, and only in an unbound pick. All four slices are
+// first, so no row of another class or scope is visited, with two
+// exceptions: the Dead filter of a Shared branch (rows of a floored-out scope,
+// unbound picks only), and the rows of the branch's own class that the
+// failure-memo and type predicates leave out (backoff, parked, excluded
+// type), which stay pending and are filtered as before. All four slices are
 // non-nil: a nil slice binds as NULL, and NULL matches nothing in ALL/ANY.
 type PendingClasses struct {
 	Shared, Dead, PairScopes, PairLevels []string
@@ -33,11 +35,6 @@ func (c PendingClasses) Args() []any {
 	return []any{c.Shared, c.Dead, c.PairScopes, c.PairLevels}
 }
 
-// Empty reports whether no branch is left, so a pick would return no row.
-func (c PendingClasses) Empty() bool {
-	return len(c.Shared) == 0 && len(c.PairScopes) == 0
-}
-
 // The two orders of a backfill pick. The id breaks the tie between blocks of
 // one created_at (one transaction).
 const (
@@ -51,9 +48,8 @@ const (
 // failurePredicate (EmbedFailureExcludedPredicate or
 // EmbedFailureQueryPathExcludedPredicate) and RetrievalExcludedTypePredicate
 // let through. It reads one LIMIT 1 branch per class and keeps the first of
-// their heads, so its cost is the number of branches, not the number of
-// pending rows: a block of a class the pick cannot return, or of a scope it is
-// not bound to, is never read. cols are the selected columns, out of id,
+// their heads, so a block of a class the pick cannot return, or of a scope it
+// is not bound to, is never read (PendingClasses names the two exceptions). cols are the selected columns, out of id,
 // title, content, sensitivity, scope, created_at.
 //
 // Each branch has to be its index range on every plan, the custom plans of a

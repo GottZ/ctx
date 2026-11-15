@@ -3,15 +3,21 @@
 // lockBackfillPick (issue #239) takes the candidate of the pick and then its
 // row lock. Two workers whose transactions overlap must end on two distinct
 // blocks, the oldest two, each holding exactly one row lock: the second sees
-// the first one's candidate held and picks again without it.
+// the first one's candidate held and picks again without it. The three blocks
+// are of two classes, so a pick that locked one row per branch would hold
+// more. The lock re-reads scope and sensitivity: a candidate moved to
+// another scope after it was picked is not locked.
 //
 //	go test -tags=integration ./internal/events/ -run TestLockBackfillPick -count=1 -v
 package events
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
@@ -21,11 +27,11 @@ func TestLockBackfillPick(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
 	ids := make([]string, 3)
-	for i := range ids {
-		ids[i] = seedSensitiveBlock(t, pool, "lock pick "+string(rune('a'+i)), "public", "lp-owned", time.Duration(3-i)*time.Hour)
+	for i, sens := range []string{"public", "internal", "public"} {
+		ids[i] = seedSensitiveBlock(t, pool, "lock pick "+string(rune('a'+i)), sens, "lp-owned", time.Duration(3-i)*time.Hour)
 	}
 	cl := store.NewPendingClasses()
-	cl.PairScopes, cl.PairLevels = []string{"lp-owned"}, []string{"public"}
+	cl.PairScopes, cl.PairLevels = []string{"lp-owned", "lp-owned"}, []string{"public", "internal"}
 
 	tx1, err := pool.Begin(ctx)
 	if err != nil {
@@ -60,5 +66,22 @@ func TestLockBackfillPick(t *testing.T) {
 	}
 	if locked != 2 {
 		t.Errorf("%d of the three blocks are held, want 2 (one row lock per worker)", locked)
+	}
+	_ = tx1.Rollback(ctx)
+	_ = tx2.Rollback(ctx)
+
+	// The candidate moved out of the scope it was picked in before its lock.
+	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET scope = 'lp-other' WHERE id = $1`, ids[0]); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	tx3, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin 3: %v", err)
+	}
+	defer func() { _ = tx3.Rollback(ctx) }()
+	var id, title, content, sens, scope string
+	err = tx3.QueryRow(ctx, backfillLockSQL, ids[0], "lp-owned", "public").Scan(&id, &title, &content, &sens, &scope)
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("lock of a candidate that left its scope: %q in %q, %v; want no row", id, scope, err)
 	}
 }

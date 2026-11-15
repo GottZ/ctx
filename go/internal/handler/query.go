@@ -1765,7 +1765,8 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 //     the pick returns servable blocks only. An unservable block therefore
 //     costs neither a pick statement nor a sync_cap slot, however many are
 //     pending, and since issue #239 no read either: the pick reads the index
-//     ranges of the servable classes only. It stays pending.
+//     ranges of the servable classes only (store.PendingClasses names what a
+//     branch still filters). It stays pending.
 //
 // With the background arm off (embed_backfill.interval=0) this loop can be
 // the only embedder there is, so it works both ends of the queue itself.
@@ -2103,6 +2104,11 @@ type backfillPicker struct {
 // anyClasses covers every scope and is built on first use, which only the
 // old end with the arm off has.
 func newBackfillPicker(db backfillDB, armRuns bool, ceilings backends.TrustCeilings, floor config.ScopeFloor, readScopes []string) *backfillPicker {
+	if readScopes == nil {
+		// No read scopes binds the caller's pick to nothing; nil would ask
+		// embedServableClasses for every scope.
+		readScopes = []string{}
+	}
 	return &backfillPicker{
 		db: db, armRuns: armRuns, readScopes: readScopes,
 		callerClasses: embedServableClasses(ceilings, floor, readScopes),

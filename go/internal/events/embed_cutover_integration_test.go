@@ -70,7 +70,7 @@ func resetCutoverFixture(t *testing.T, pool *pgxpool.Pool) {
 	}
 }
 
-// ensureNextIndexes builds the four _next indexes with the PRODUCTION DDL
+// ensureNextIndexes builds the _next indexes with the PRODUCTION DDL
 // minus CONCURRENTLY (a test container has no concurrent writers to
 // protect; the names — the part the swap tx renames — stay identical).
 func ensureNextIndexes(t *testing.T, pool *pgxpool.Pool) {
@@ -142,7 +142,7 @@ func stampGreenReport(t *testing.T, pool *pgxpool.Pool, migID string, visLoss in
 }
 
 // seedConfirmReady arranges the standard confirm-ready world: flippable
-// backend, all four _next indexes, a verifying migration row with a green
+// backend, all _next indexes, a verifying migration row with a green
 // report. Returns the migration id.
 func seedConfirmReady(t *testing.T, pool *pgxpool.Pool, visLoss int64) string {
 	t.Helper()

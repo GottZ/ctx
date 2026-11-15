@@ -2463,7 +2463,8 @@ func (s *Scheduler) backfillOneEmbedding(ctx context.Context, router *dream.Rout
 // VisibleTo), so the pick must stay inside that tenant's owned scopes —
 // otherwise a block of tenant U is embedded on a tenant-private backend of
 // tenant T whenever T's turn comes up (cross-tenant egress, PR #46 review
-// 2026-10-22, reproduced by probe). Same conjunct as dream.PickBlock.
+// 2026-10-22, reproduced by probe). The pick's classes are pairs of owned
+// scopes only (backfillClasses), and the lock re-reads the scope.
 // owned == nil is the legacy unbounded pass (default tenant before the
 // entitlement rows exist) and keeps the pre-MT selection; at one
 // tenant owned = {private,shared,work} covers every live block.
@@ -2498,7 +2499,9 @@ func (s *Scheduler) backfillStep(ctx context.Context, router *dream.Router, cfg 
 		if err != nil {
 			return backfillIdle, fmt.Errorf("backfill: peek: %w", err)
 		}
-		slog.Warn("scheduler: backfill has no eligible embed backend — block stays unembedded", "block_id", id)
+		_, _, cerr := router.EmbedChain(backends.SensPublic) // the reasons, as Pool.Chain logs them
+		slog.Warn("scheduler: backfill has no eligible embed backend — block stays unembedded",
+			"block_id", id, "error", cerr)
 		return backfillIdle, nil
 	}
 	classes := backfillClasses(router, cfg, owned, ceiling)

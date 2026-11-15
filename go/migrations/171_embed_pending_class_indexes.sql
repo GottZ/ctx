@@ -58,10 +58,16 @@
 --     dropped with DROP INDEX before the next try).
 --   * A name taken by anything else: WARNING, nothing built.
 --   * Below 500 000 rows (pg_class.reltuples) the migration builds inline.
---   * Above, WARNING, nothing built. The picks then run their branches on
---     idx_embedding_pending and the other indexes of context_blocks, which is
---     correct but not bounded; the schema-contract manifest stays red until
---     the out-of-band build (the deliberate trade of 115 and 140).
+--   * Above, WARNING, nothing built. Build both out of band BEFORE the
+--     binary of this change serves such a corpus: without them the picks
+--     run their branches on idx_embedding_pending and the other indexes of
+--     context_blocks, which is correct but costs more than the single
+--     statement before this change (each branch walks, once per branch;
+--     measured on the cost-pin fixture without the indexes: the unbound
+--     old-end pick 331 -> 50 959 buffers at 10 000 rows per group). The
+--     schema-contract manifest stays red until the build (the deliberate
+--     trade of 115 and 140). The re-embed cutover renames these two only
+--     when they exist (events.cutoverOptionalIndexes).
 --
 -- `SET LOCAL lock_timeout = '3s'` (house pattern 116/117/126/128/140/145):
 -- the 3 s bound acquiring the lock, not the build. A writer holding it longer
@@ -71,7 +77,7 @@
 -- REVERT (forward-only tree; to undo temporarily):
 --     DROP INDEX IF EXISTS idx_embedding_pending_scope_sens;
 --     DROP INDEX IF EXISTS idx_embedding_pending_sens;
--- The picks stay correct without them (previous paragraph).
+-- The picks stay correct without them, at the cost named above.
 --
 -- Index change only, no table or column: the test.sh T07 counts stay. The
 -- schema-contract manifest gains the two indexes and migration_max 170 → 171.

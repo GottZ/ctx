@@ -84,7 +84,21 @@ func TestEmbedServableClassesMatchChain(t *testing.T) {
 	empty := backends.NewPool(nil, nil)
 	empty.SeedSnapshotForTest(nil)
 	cl := embedServableClasses(empty.TrustCeilings(backends.RoleEmbed), nil, nil)
-	if !cl.Empty() || cl.Shared == nil || cl.Dead == nil || cl.PairScopes == nil || cl.PairLevels == nil {
+	if len(cl.Shared) != 0 || len(cl.PairScopes) != 0 || cl.Shared == nil || cl.Dead == nil || cl.PairScopes == nil || cl.PairLevels == nil {
 		t.Errorf("empty pool: %+v", cl)
+	}
+}
+
+// TestBackfillPickerNilReadScopes: a caller without read scopes is bound to
+// nothing. nil read scopes must not become the unbound classes of every
+// scope (fail-closed; before #239, scope = ANY(NULL) matched no row).
+func TestBackfillPickerNilReadScopes(t *testing.T) {
+	p := backends.NewPool(nil, nil)
+	p.SeedSnapshotForTest([]backends.Backend{
+		{ID: "g", Name: "shared-full", Scope: backends.GlobalScope, Roles: []string{backends.RoleEmbed}, Enabled: true, Trust: backends.TrustFull},
+	})
+	pk := newBackfillPicker(nil, true, p.TrustCeilings(backends.RoleEmbed), nil, nil)
+	if cl := pk.callerClasses; len(cl.Shared) != 0 || len(cl.PairScopes) != 0 {
+		t.Errorf("caller classes of a caller without read scopes: %+v, want none", cl)
 	}
 }

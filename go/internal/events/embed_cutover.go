@@ -154,6 +154,36 @@ var cutoverIndexRenames = [][2]string{
 // cutoverOldIndexNames / cutoverOldColumnNames are the rollback anchor
 // (§4.8 "Alt-Bestand") — the exact objects `cleanup` drops BY NAME and the
 // rollback preflight requires to exist (fail-closed).
+// cutoverOptionalIndexes are the canonical and _old names of the two
+// backfill pick indexes of migration 171 (issue #239). Migration 171 builds
+// them inline below 500 000 rows only, and a swap done before 171 left no
+// _old anchors of them, so their absence before the swap, at a rollback or
+// at a cleanup is not a missing rollback anchor: the swap renames such a
+// canonical index only when it exists, and the _next twin, which the
+// preflight requires, becomes the canonical one either way.
+var cutoverOptionalIndexes = map[string]bool{
+	"idx_embedding_pending_scope_sens": true, "idx_embedding_pending_scope_sens_old": true,
+	"idx_embedding_pending_sens": true, "idx_embedding_pending_sens_old": true,
+}
+
+// renameIndexIfPresent runs ALTER INDEX from RENAME TO to; an optional
+// index (cutoverOptionalIndexes) that does not exist is skipped.
+func renameIndexIfPresent(ctx context.Context, tx pgx.Tx, from, to string) error {
+	if cutoverOptionalIndexes[from] {
+		_, exists, err := indexValidity(ctx, tx, from)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return nil
+		}
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`ALTER INDEX %s RENAME TO %s`, from, to)); err != nil {
+		return fmt.Errorf("embed-cutover: rename index %s -> %s: %w", from, to, err)
+	}
+	return nil
+}
+
 var (
 	cutoverOldIndexNames = []string{"idx_embedding_hnsw_old", "idx_embedding_pending_old",
 		"idx_embedding_pending_scope_sens_old", "idx_embedding_pending_sens_old", "idx_dream_pending_old", "idx_guard_pending_old"}
@@ -342,7 +372,7 @@ func confirmPreflight(ctx context.Context, db *pgxpool.Pool, migrationID string)
 		return nil, nil, ErrConfirmNoFlipTarget
 	}
 
-	// All four _next indexes must exist VALID before their canonical
+	// Every _next index (the HNSW twin and the sister indexes) must exist VALID before its canonical
 	// rename — renaming an INVALID CIC leftover into the canonical name
 	// would be a silent planner hole behind a green-looking cutover.
 	for _, name := range append([]string{verifyNextHNSWIndexName}, sisterIndexNames()...) {
@@ -393,9 +423,8 @@ func runConfirmSwapTx(ctx context.Context, db *pgxpool.Pool, migrationID string,
 			}
 		}
 		for _, r := range cutoverIndexRenames {
-			if _, err := tx.Exec(ctx, fmt.Sprintf(
-				`ALTER INDEX %s RENAME TO %s`, r[0], r[1])); err != nil {
-				return fmt.Errorf("embed-cutover: rename index %s -> %s: %w", r[0], r[1], err)
+			if err := renameIndexIfPresent(ctx, tx, r[0], r[1]); err != nil {
+				return err
 			}
 		}
 		// Fresh dual pair (documented deviation, see function comment).
@@ -575,9 +604,8 @@ func runRollbackSwapTx(ctx context.Context, db *pgxpool.Pool, migrationID, reaso
 		}
 		for i := len(cutoverIndexRenames) - 1; i >= 0; i-- {
 			r := cutoverIndexRenames[i]
-			if _, err := tx.Exec(ctx, fmt.Sprintf(
-				`ALTER INDEX %s RENAME TO %s`, r[1], r[0])); err != nil {
-				return fmt.Errorf("embed-cutover: rename index %s -> %s: %w", r[1], r[0], err)
+			if err := renameIndexIfPresent(ctx, tx, r[1], r[0]); err != nil {
+				return err
 			}
 		}
 		if len(targets) > 0 {
@@ -595,7 +623,7 @@ func runRollbackSwapTx(ctx context.Context, db *pgxpool.Pool, migrationID, reaso
 }
 
 // CleanupEmbedMigration drops the rollback anchor (§4.8 Alt-Bestand): the
-// four _old indexes BY NAME, then the two _old columns. Operator-explicit,
+// _old indexes BY NAME (the two of migration 171 when present), then the two _old columns. Operator-explicit,
 // only from status done (E-04-2: cleanup destroys the instant-rollback
 // path — after this, RollbackEmbedMigration refuses via its _old preflight
 // and the only way back is a NEW migration in the opposite direction,
@@ -628,7 +656,11 @@ func CleanupEmbedMigration(ctx context.Context, db *pgxpool.Pool, migrationID st
 		// Named drops first (documented, never the silent DROP-COLUMN cascade
 		// — §4.8: "die _old-Exemplare fallen DOKUMENTIERT, nicht still").
 		for _, name := range cutoverOldIndexNames {
-			if _, err := tx.Exec(ctx, `DROP INDEX `+name); err != nil {
+			drop := `DROP INDEX `
+			if cutoverOptionalIndexes[name] {
+				drop = `DROP INDEX IF EXISTS `
+			}
+			if _, err := tx.Exec(ctx, drop+name); err != nil {
 				return fmt.Errorf("embed-cutover: drop index %s: %w", name, err)
 			}
 		}
@@ -788,6 +820,9 @@ func missingOldResources(ctx context.Context, q embedmigration.Querier) ([]strin
 		}
 	}
 	for _, idx := range cutoverOldIndexNames {
+		if cutoverOptionalIndexes[idx] {
+			continue
+		}
 		_, exists, err := indexValidity(ctx, q, idx)
 		if err != nil {
 			return nil, err
@@ -827,7 +862,7 @@ func indexValidity(ctx context.Context, q embedmigration.Querier, name string) (
 	return valid, true, nil
 }
 
-// sisterIndexNames lists the three sister partial indexes (W04-5 builds
+// sisterIndexNames lists the sister partial indexes (W04-5 builds
 // them, the swap tx renames them canonically).
 func sisterIndexNames() []string {
 	names := make([]string, 0, len(verifySisterIndexes))
