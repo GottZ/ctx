@@ -52,7 +52,8 @@ checkpoint, and a status that shows whether checkpoints work on the MCP transpor
 - **Status on the MCP transport.** `get_status_config` (`hermes memory status`) and
   `hermes ctx_checkpoint status` print the same report: server entry, connection test,
   operating mode, last checkpoint, warnings. `hermes ctx_checkpoint status` exits with 1 when
-  the test fails.
+  the test fails. The server URL is shown without user info, query and fragment, also when
+  it starts with a `${VAR}` template.
 - **Reason for the user.** A failed checkpoint names its cause (part limit, time limit, MCP
   server not connected, rate limit, `confirm_writes`) through the `warning_callback` Hermes
   passes on CLI-platform sessions, once per distinct cause; a best-effort compaction that ran

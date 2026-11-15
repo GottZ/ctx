@@ -131,9 +131,12 @@ def redact_error(error: Any, secrets: Iterable[str] = ()) -> str:
 
 
 def display_url(url: Any) -> str:
-    """The URL without user info, query and fragment (they can carry credentials)."""
+    """The URL without user info, query and fragment (they can carry credentials). A URL that
+    starts with a ``${VAR}`` template keeps the template and loses its query and fragment."""
     raw = str(url or "").strip()
-    if not raw or raw.startswith("${"):
+    if raw.startswith("${"):
+        return raw.split("?", 1)[0].split("#", 1)[0]
+    if not raw:
         return raw
     try:
         parts = urlsplit(raw)

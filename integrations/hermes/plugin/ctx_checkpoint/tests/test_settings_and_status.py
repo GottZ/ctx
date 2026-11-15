@@ -931,3 +931,26 @@ def test_a_plugins_form_value_wins_over_an_engine_name_alias(hermes_home, linked
 
     assert provider._config["checkpoint_budget_s"] == 120.0
     assert provider._config["checkpoint_max_parts"] == 70
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "${CTX_ENDPOINT}/mcp?api_key=private-value",
+        "${CTX_ENDPOINT}/mcp#api_key=private-value",
+        "https://${CTX_HOST}/mcp?api_key=private-value",
+    ],
+)
+def test_a_templated_url_is_shown_without_its_query(hermes_home, probe, url):
+    shown = _submodule("memory.status").display_url(url)
+    assert "private-value" not in shown and "?" not in shown and "#" not in shown
+    assert shown.endswith("/mcp")
+
+    _mcp_home(hermes_home, url=url)
+    probe.error = RuntimeError("connection refused")
+    failed = _status_text(Provider(config={}).get_status_config({}))
+    probe.error = None
+    passed = _status_text(Provider(config={}).get_status_config({}))
+
+    assert "private-value" not in failed and "private-value" not in passed
+    assert "/mcp" in passed
