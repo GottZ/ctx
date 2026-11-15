@@ -13,7 +13,7 @@
 // #207: the tool always answered compact rows (200-character preview), while
 // REST answers the full content with `compact:false` from the same statement.
 // The tool now takes `include_content`; a page with content is bounded by
-// mcpSearchContentBudget and ends early rather than cutting a block.
+// mcpSearchRowsBudget and ends early rather than cutting a block.
 //
 // Every probe goes through the real tool: over the wire (SDK schema
 // validation, decoding, the answer a client reads) for the new arguments, the
@@ -390,12 +390,12 @@ func i206LegacyBytes(t *testing.T, f *i206Fixture) {
 		if got, want := resultText(t, r), render(f.storeRows(t, "i206-fifty", 50)); got != want {
 			t.Errorf("text changed:\n got %.300s\nwant %.300s", got, want)
 		}
-		if r.StructuredContent != nil {
-			t.Errorf("structuredContent = %#v, want none when nothing was lowered and no row follows", r.StructuredContent)
+		if r.StructuredContent != nil || r.Meta != nil {
+			t.Errorf("structuredContent %#v, _meta %#v; want neither when nothing was lowered and no row follows", r.StructuredContent, r.Meta)
 		}
 		q := call(searchInput{Query: "enumeration", Category: "i206-enum", Limit: 5})
-		if q.StructuredContent != nil {
-			t.Errorf("full-text call: structuredContent = %#v, want none (top matches never page)", q.StructuredContent)
+		if q.StructuredContent != nil || q.Meta != nil {
+			t.Errorf("full-text call: structuredContent %#v, _meta %#v; want neither (top matches never page)", q.StructuredContent, q.Meta)
 		}
 	})
 
@@ -405,18 +405,21 @@ func i206LegacyBytes(t *testing.T, f *i206Fixture) {
 		if got, want := resultText(t, r), render(rows); got != want {
 			t.Errorf("text changed:\n got %.300s\nwant %.300s", got, want)
 		}
-		raw, err := json.Marshal(r.StructuredContent)
-		if err != nil || r.StructuredContent == nil {
-			t.Fatalf("structuredContent = %#v (err %v), want the paging signal", r.StructuredContent, err)
+		if r.StructuredContent != nil {
+			t.Errorf("structuredContent = %#v; the signal rides in _meta, never as the structured result", r.StructuredContent)
+		}
+		raw, err := json.Marshal(r.Meta[mcpSearchPageMetaKey])
+		if err != nil || r.Meta[mcpSearchPageMetaKey] == nil {
+			t.Fatalf("_meta = %#v (err %v), want the paging signal under %s", r.Meta, err, mcpSearchPageMetaKey)
 		}
 		var sig i206Page
 		if err := json.Unmarshal(raw, &sig); err != nil {
-			t.Fatalf("decode structuredContent %s: %v", raw, err)
+			t.Fatalf("decode _meta signal %s: %v", raw, err)
 		}
 		last := rows[len(rows)-1]
 		if sig.Limit != 50 || sig.RequestedLimit != 200 || sig.NextAfter == nil ||
 			sig.NextAfter.ID != last.ID || !sig.NextAfter.UpdatedAt.Equal(last.UpdatedAt) || sig.Results != nil {
-			t.Errorf("structuredContent = %s; want limit 50, requested_limit 200, next_after at the last row %s, no rows", raw, last.ID)
+			t.Errorf("_meta signal = %s; want limit 50, requested_limit 200, next_after at the last row %s, no rows", raw, last.ID)
 		}
 	})
 }
@@ -479,11 +482,26 @@ func i206CursorSafety(t *testing.T, f *i206Fixture) {
 		}
 	})
 
-	t.Run("a_cursor_without_a_position_is_the_first_page", func(t *testing.T) {
-		first := i206PageOf(t, f.keyCtx, f.cfg, `{"category":"i206-enum","limit":5,"after":{}}`)
-		partial := i206PageOf(t, f.keyCtx, f.cfg, `{"category":"i206-enum","limit":5,"after":{"after_id":"00000000-0000-4000-8000-000000000000"}}`)
-		if !reflect.DeepEqual(i206IDs(first.Results), i206IDs(partial.Results)) {
-			t.Errorf("a cursor without after_updated = %v, want page 1 %v (the REST rule)", i206IDs(partial.Results), i206IDs(first.Results))
+	// One field of the two: REST reads it as page 1 (unchanged), the tool
+	// refuses it, so a model that drops a field does not start over unnoticed.
+	t.Run("a_half_cursor_is_refused_by_the_tool_and_page_1_on_rest", func(t *testing.T) {
+		for _, half := range []string{`{"after_id":"00000000-0000-4000-8000-000000000000"}`, `{"after_updated":"2026-01-01T00:00:00Z"}`} {
+			a := i206Wire(t, f.keyCtx, f.cfg, `{"category":"i206-enum","limit":5,"after":`+half+`}`)
+			if !a.IsError || !strings.Contains(a.text(), "both after_updated and after_id") {
+				t.Errorf("half cursor %s: isError %t, text %q; want the refusal", half, a.IsError, a.text())
+			}
+		}
+		_, first := f.rest(t, f.keyCtx, `{"category":"i206-enum","limit":5}`)
+		code, half := f.rest(t, f.keyCtx, `{"category":"i206-enum","limit":5,"after":{"after_id":"00000000-0000-4000-8000-000000000000"}}`)
+		if code != http.StatusOK || string(half["results"]) != string(first["results"]) {
+			t.Errorf("REST half cursor: status %d, want 200 and page 1 (the W7 rule)", code)
+		}
+	})
+
+	t.Run("rest_leaves_a_malformed_cursor_inert_next_to_a_query", func(t *testing.T) {
+		code, env := f.rest(t, f.keyCtx, `{"query":"enumeration","after":{"after_updated":"2026-01-01T00:00:00Z","after_id":"not-a-uuid"}}`)
+		if code != http.StatusOK {
+			t.Errorf("REST query + malformed after: status %d (error %s), want 200 (the full-text path ignores after)", code, env["error"])
 		}
 	})
 }

@@ -33,12 +33,14 @@ import (
 //   - FACET: the C6 cluster gate (flag, then form, never an existence check)
 //     stood twice, character for character.
 //
-// The fourth rule, the LIMIT, was recorded as split (E03-2 = B / K28: REST caps
-// at 50, the MCP tool is uncapped). That split never had an effect: the
-// statement builder clamps every caller at store.SearchMaxLimit, so the tool
-// answered at most 50 rows all along, without saying so (#206). The default AND
-// the cap are therefore one rule here (searchLimit), and the tool now reports a
-// lowered limit instead of hiding it. The same holds for the CURSOR: the keyset
+// The fourth rule, the LIMIT. Decision E03-2 = B (K28) leaves the MCP tool
+// without a cap of its own and keeps REST's 50. It was taken on the reading that
+// the tool was uncapped; the statement builder clamps every caller at
+// store.SearchMaxLimit, so the tool has answered at most 50 rows all along,
+// without saying so (#206). This file states that effective cap (searchLimit) so
+// both transports can echo and report it; it neither lowers nor lifts it.
+// Lifting it for the MCP side would be a store change (#206 option B) and is
+// E03-2's to decide. The CURSOR is one rule as well: the keyset
 // position, its form check and the next-page answer are one rule for both
 // transports (searchPage.NextAfter).
 //
@@ -124,12 +126,12 @@ var errSearchCursorForm = &searchRejected{msg: "after must be the next_after of 
 // non-positive means 10, anything above store.SearchMaxLimit means that cap —
 // the clamp the statement builder applies to every caller, stated where the
 // transports can echo it (REST `filters.limit`) and report it (the MCP tool's
-// `requested_limit`). Until #206 only the default lived here and the cap was
-// documented as REST-only (E03-2 = B), which the store's clamp made untrue.
+// `requested_limit`). Until #206 only the default lived here; the cap was left
+// to REST and to the store's clamp (see the LIMIT note above).
 func searchLimit(limit int) int {
 	switch {
 	case limit <= 0:
-		return 10
+		return store.SearchDefaultLimit
 	case limit > store.SearchMaxLimit:
 		return store.SearchMaxLimit
 	}

@@ -10,10 +10,9 @@ import (
 	"github.com/GottZ/ctx/internal/store"
 )
 
-// TestFitSearchContentBudget: rows fit until the next would cross the budget;
-// the first row always fits, and a block is never split.
-func TestFitSearchContentBudget(t *testing.T) {
-	row := func(n int) store.BlockPreview { return store.BlockPreview{Content: strings.Repeat("x", n)} }
+// TestFitSearchBudget: rows fit until the next would cross the budget; the
+// first row always fits, and a block is never split.
+func TestFitSearchBudget(t *testing.T) {
 	for _, c := range []struct {
 		name  string
 		sizes []int
@@ -26,16 +25,18 @@ func TestFitSearchContentBudget(t *testing.T) {
 		{"oversized first row alone", []int{500, 1}, 1},
 		{"oversized later row ends the page", []int{10, 500, 1}, 1},
 	} {
-		rows := make([]store.BlockPreview, 0, len(c.sizes))
-		for _, n := range c.sizes {
-			rows = append(rows, row(n))
-		}
-		if got := fitSearchContentBudget(rows, 100); got != c.want {
+		if got := fitSearchBudget(c.sizes, 100); got != c.want {
 			t.Errorf("%s: fit = %d, want %d", c.name, got, c.want)
 		}
 	}
-	if mcpSearchContentBudget < 50*1024 {
-		t.Errorf("budget %d is below the write gate's block cap (50 KiB): a gated block would not fit a page alone", mcpSearchContentBudget)
+	if mcpSearchRowsBudget < 50*1024 {
+		t.Errorf("budget %d is below the write gate's content cap (50 KiB): a gated block would not fit a page alone", mcpSearchRowsBudget)
+	}
+	// The budget measures what the caller receives: content, metadata, escaping.
+	row := store.BlockPreview{ID: "a", Content: "<&>", Metadata: map[string]any{"k": strings.Repeat("m", 100)}}
+	want, _ := json.Marshal(row)
+	if got := serializedSizes([]store.BlockPreview{row}); got[0] != len(want) || got[0] < 100+3*6 {
+		t.Errorf("serialized size = %v, want the marshaled row (%d bytes)", got, len(want))
 	}
 }
 
@@ -51,8 +52,8 @@ func TestRenderMCPSearchForms(t *testing.T) {
 	t.Run("legacy_without_signals_is_the_array_alone", func(t *testing.T) {
 		res := renderMCPSearch(searchInput{Limit: 10}, searchPage{Rows: rows, Limit: 10})
 		want, _ := json.MarshalIndent(rows, "", "  ")
-		if len(res.Content) != 1 || mcpTextOf(res) != string(want) || res.StructuredContent != nil {
-			t.Errorf("legacy answer = %d blocks, structured %#v; want the array alone", len(res.Content), res.StructuredContent)
+		if len(res.Content) != 1 || mcpTextOf(res) != string(want) || res.StructuredContent != nil || res.Meta != nil {
+			t.Errorf("legacy answer = %d blocks, structured %#v, meta %#v; want the array alone", len(res.Content), res.StructuredContent, res.Meta)
 		}
 	})
 
@@ -62,9 +63,9 @@ func TestRenderMCPSearchForms(t *testing.T) {
 		if mcpTextOf(res) != string(want) {
 			t.Error("legacy text changed")
 		}
-		sig, ok := res.StructuredContent.(mcpSearchSignals)
-		if !ok || sig.Limit != 50 || sig.RequestedLimit != 200 || sig.NextAfter != next {
-			t.Errorf("structured = %#v; want limit 50, requested_limit 200 and the cursor", res.StructuredContent)
+		sig, ok := res.Meta[mcpSearchPageMetaKey].(mcpSearchSignals)
+		if !ok || sig.Limit != 50 || sig.RequestedLimit != 200 || sig.NextAfter != next || res.StructuredContent != nil {
+			t.Errorf("meta = %#v, structured %#v; want _meta with limit 50, requested_limit 200 and the cursor, no structuredContent", res.Meta, res.StructuredContent)
 		}
 	})
 
@@ -81,7 +82,7 @@ func TestRenderMCPSearchForms(t *testing.T) {
 		if len(got.Results) != 1 || !got.Truncated || got.NextAfter == nil || got.NextAfter.ID != "a" {
 			t.Errorf("page = %d rows, truncated %t, next_after %v; want 1, true, after row a", len(got.Results), got.Truncated, got.NextAfter)
 		}
-		if res.StructuredContent != nil {
+		if res.StructuredContent != nil || res.Meta != nil {
 			t.Error("the page object carries its signals in the text; no structuredContent")
 		}
 		if !strings.HasPrefix(mcpTextOf(res), "{\n  \"next_after\"") {

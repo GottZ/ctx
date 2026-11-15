@@ -1676,6 +1676,9 @@ type SearchCursor struct {
 // requested limit was lowered without restating the number.
 const SearchMaxLimit = 50
 
+// SearchDefaultLimit is the page size of a search without a positive limit.
+const SearchDefaultLimit = 10
+
 // SearchBlocks performs a lightweight search with optional FTS, category, and tag filters.
 // Uses precomputed ts_de tsvector for FTS ranking.
 //
@@ -1734,7 +1737,7 @@ func searchBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, p
 	if err != nil {
 		return nil, false, err
 	}
-	if page := ClampLimit(p.Limit, 10, SearchMaxLimit); len(rows) > page {
+	if page := ClampLimit(p.Limit, SearchDefaultLimit, SearchMaxLimit); len(rows) > page {
 		return rows[:page], true, nil
 	}
 	return rows, false, nil
@@ -1773,7 +1776,7 @@ func searchBlocksSQL(p searchParams) (string, []any) {
 	if grantedBlockIDs == nil {
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
 	}
-	limit := ClampLimit(p.Limit, 10, SearchMaxLimit)
+	limit := ClampLimit(p.Limit, SearchDefaultLimit, SearchMaxLimit)
 	if p.ProbeNext && p.Query == "" {
 		limit++ // the probe row; searchBlocks drops it again
 	}

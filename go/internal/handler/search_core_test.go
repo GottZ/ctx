@@ -125,9 +125,9 @@ func TestSearchTypeStrictnessStaysATransportProperty(t *testing.T) {
 
 // TestSearchLimitIsOneRuleWithTheStoreCap: default 10 and cap
 // store.SearchMaxLimit for both transports. Until #206 this test pinned the
-// tool's limit 999 as 999 (E03-2 = B, "the tool is uncapped") — a decision that
-// never took effect, because the statement builder clamps every caller at 50.
-// The cap is now stated where the transports can report it.
+// tool's handler-side limit 999 as 999 (E03-2 = B), while the statement builder
+// clamped the same call at 50. The effective cap is unchanged; it is now
+// stated where the transports can report it.
 func TestSearchLimitIsOneRuleWithTheStoreCap(t *testing.T) {
 	for _, c := range []struct{ in, want int }{
 		{0, 10}, {-1, 10}, {1, 1}, {50, 50}, {51, 50}, {999, 50},

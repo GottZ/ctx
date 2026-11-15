@@ -156,7 +156,7 @@ type searchInput struct {
 	// present switches the answer to the page object (mcp_search_page.go); a
 	// call with neither keeps the row array byte for byte.
 	After          *store.SearchCursor `json:"after,omitempty" jsonschema:"page through a listing with an empty query: {} for the first page, then the next_after of the previous answer; the answer is then an object with next_after (absent on the last page), limit and results"`
-	IncludeContent bool                `json:"include_content,omitempty" jsonschema:"answer each block's full content and metadata instead of a 200-character preview; the answer is then an object with results, and a page ends early once the contents reach 64 KiB (truncated true, next_after continues with an empty query)"`
+	IncludeContent bool                `json:"include_content,omitempty" jsonschema:"answer each block's full content and metadata instead of a 200-character preview; the answer is then an object with results, and a page ends early once its rows reach 64 KiB of JSON (truncated true, next_after continues with an empty query)"`
 	// Cluster is the C6 topic facet — a FIELD on the existing tool, not an
 	// eighth tool: a new tool raises the selection load of every MCP client,
 	// an optional argument on a known one does not (design/03 §4.8).
@@ -188,9 +188,9 @@ type searchInput struct {
 //
 // Limit rides in RAW: default and cap are the core's (searchLimit), and the
 // handler compares the effective value with this one to report a lowered
-// limit. The cap was always there — the store clamps every caller at 50 — and
-// the earlier note that this surface had none (E03-2 = B / K28) described a
-// state that never existed (#206).
+// limit. The cap is the store's clamp at 50, which this tool has always run
+// into; E03-2 = B / K28 records the surface as uncapped, and lifting the clamp
+// for it is open there (search_core.go, LIMIT note).
 func (input searchInput) coreArgs(facetEnabled bool) searchArgs {
 	return searchArgs{
 		Query:             input.Query,
@@ -833,6 +833,9 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 		// caller cannot take the repeated top matches for a second page (#206).
 		if input.After != nil && input.Query != "" {
 			return errResult(mcpSearchAfterNeedsBrowseMsg), nil, nil
+		}
+		if mcpSearchAfterIsHalf(input.After) {
+			return errResult(mcpSearchAfterHalfMsg), nil, nil
 		}
 
 		// One rule set for both search transports (T03-9, search_core.go): the
