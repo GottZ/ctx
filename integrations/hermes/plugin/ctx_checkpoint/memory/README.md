@@ -254,10 +254,11 @@ the plugin and runs over either transport.
   (upsert, `latest_manifest_id`). The head is published **last**: a failing part or
   manifest never moves it. If the server search misses the head, the manifest this
   process wrote last for the root links the chain.
-- Titles and bodies are bit-identical to upstream (`Compaction checkpoint head <root>`,
-  `Compaction source <root> <sha16> <cpid> part NNN of NNN` / `… manifest`): the server
-  classifies them as `checkpoint` (migrations M107/M120) and the distiller parses the
-  part format. Category `compaction-checkpoints`, sensitivity `checkpoint_sensitivity`.
+- Bodies are bit-identical to upstream; titles keep upstream's prefixes
+  (`Compaction checkpoint head <root>`, `Compaction source <root> <sha16> <cpid> <part sha16>
+  part NNN of NNN` / `… manifest` / `… after <parent id> manifest`; up to 0.9.0 without the
+  part digest and the parent): the server classifies them as `checkpoint` (migrations
+  M107/M120) and the distiller parses the part format. Category `compaction-checkpoints`, sensitivity `checkpoint_sensitivity`.
 - Only direct user/assistant text; tool rows, system prompts, `_compressed_summary`
   carriers and synthetic hand-offs are dropped. Redaction runs twice — host
   `redact_sensitive_text(force=True)` plus key/value, auth-header and bearer rules — after
@@ -279,7 +280,10 @@ the plugin and runs over either transport.
   retry of the same transcript writes the same titles; parts carry no time of their own
   (`evidence_date` is on manifest and head only), so ctx answers a part that is already
   stored "identical content" and books no write — the server's confirmation of title and
-  content (SHA-256). A manifest title names its parent (`… after <parent id> manifest`), so
+  content (SHA-256). A part title names the SHA-256 of its exact content (header and text),
+  so a retry that renders a part differently (another `checkpoint_chunk_chars` or byte
+  budget, another active session in the header) writes new blocks and never rewrites a part
+  a published manifest references. A manifest title names its parent (`… after <parent id> manifest`), so
   a manifest is never re-written under another parent; when the head already names this
   transcript's checkpoint, the manifest is re-written in place under its own parent.
 - A batch without direct user/assistant text returns a no-op receipt

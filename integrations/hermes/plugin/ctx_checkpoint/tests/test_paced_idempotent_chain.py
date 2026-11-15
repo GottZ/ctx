@@ -261,6 +261,63 @@ def test_a_repeated_identical_checkpoint_writes_no_part_and_never_points_at_itse
     assert len(server.manifests()) == 2
 
 
+def _published_wording(server: CtxServerDouble) -> dict[str, str]:
+    """Content of every part the head's manifest references, by block id."""
+    ids = _manifest_of_head(server)["metadata"]["source_block_ids"]
+    by_id = {b["id"]: b["content"] for b in server.parts()}
+    return {block_id: by_id[block_id] for block_id in ids}
+
+
+def _failing_at_part_2(server: CtxServerDouble):
+    real_store = server._store
+
+    def store(args):
+        if " part 002 of " in args["title"]:
+            return {"error": "store failed: connection reset by peer"}
+        return real_store(args)
+
+    return store
+
+
+def test_a_retry_with_another_split_never_rewrites_a_published_part(monkeypatch, clock):
+    """Same transcript, same part count, cut elsewhere (chunk_chars 1000 → 1100): a part's
+    title must name its exact content, or the retry overwrites a published part with another
+    cut and a failure after it leaves the published manifest on a mix of both splits."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server, chunk_chars=1_000)
+    messages = [{"role": "user", "content": "s" * 2_500}]
+    provider.on_pre_compress(messages, require_checkpoint=True)
+    published = _published_wording(server)
+    assert len(published) == 3
+
+    provider._chain().chunk_chars = 1_100  # still three parts
+    server._store = _failing_at_part_2(server)
+    with pytest.raises(CtxCheckpointError):
+        provider.on_pre_compress(messages, require_checkpoint=True)
+
+    assert _published_wording(server) == published
+
+
+def test_a_retry_after_a_session_switch_never_rewrites_a_published_part(monkeypatch, clock):
+    """Same root and transcript, another active session: the part header names the session,
+    so the content differs while the root, digest, index and count stay the same."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server, chunk_chars=1_000)
+    messages = _transcript(3)
+    provider.on_pre_compress(messages, require_checkpoint=True)
+    published = _published_wording(server)
+
+    provider.on_session_switch("session-paced-2", reason="compression")
+    assert provider._checkpoint_root() == "session-paced"
+    server._store = _failing_at_part_2(server)
+    with pytest.raises(CtxCheckpointError):
+        provider.on_pre_compress(messages, require_checkpoint=True)
+
+    assert _published_wording(server) == published
+
+
 def test_repeating_the_first_checkpoint_of_a_root_keeps_one_manifest(monkeypatch, clock):
     """The head names this transcript and its manifest has no parent: the manifest is written
     again in place, not doubled with the process's cached manifest id as parent."""

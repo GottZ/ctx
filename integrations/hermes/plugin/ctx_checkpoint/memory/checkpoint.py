@@ -548,6 +548,16 @@ def checkpoint_id_for(root_session_id: str, digest: str) -> str:
     return hashlib.sha256(f"{root_session_id}\0{digest}".encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 
+def part_title_for(title_base: str, body: str, index: int, total: int) -> str:
+    """Part title: it names the SHA-256 of the part's exact content (header and text), so a
+    store under an existing part title can only meet identical content. A retry that cuts the
+    same transcript elsewhere (another ``chunk_chars`` or byte budget) or renders another header
+    (another active session of the root) writes new blocks and never rewrites a part a
+    published manifest references; an identical retry still meets "identical content"."""
+    body_digest = hashlib.sha256(body.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+    return f"{title_base} {body_digest} part {index:03d} of {total:03d}"
+
+
 def manifest_title_for(title_base: str, parent_manifest_id: str | None) -> str:
     """Manifest title: the parent is part of it, so a manifest is never re-written under another
     parent — a transcript that comes back after another checkpoint of its root gets a manifest of
@@ -948,7 +958,7 @@ class ChainWriter:
                 self._store(
                     f"source part {index}/{len(chunks)}",
                     run,
-                    title=f"{title_base} part {index:03d} of {len(chunks):03d}",
+                    title=part_title_for(title_base, body, index, len(chunks)),
                     content=body,
                     metadata=metadata,
                     tags=PART_TAGS,

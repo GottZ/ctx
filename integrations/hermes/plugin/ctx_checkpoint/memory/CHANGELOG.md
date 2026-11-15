@@ -28,7 +28,12 @@ where the failed attempt stopped (GottZ/ctx#287).
   transcript (Hermes' retry of a stalled compaction, `/compress` without new messages)
   reuses the parts a failed attempt stored (`reused` in the receipt and the log line); a
   transcript that changed in between has another digest and other titles, and the parts of
-  the failed attempt stay unreferenced as before. A manifest title names its parent (`… after <parent id> manifest`), so an
+  the failed attempt stay unreferenced as before. A part title names the SHA-256 of the
+  part's exact content (`Compaction source <root> <sha16> <cpid> <part sha16> part NNN of
+  NNN`): a retry that cuts the same transcript elsewhere (another `chunk_chars` or byte
+  budget) or renders another header (another active session of the root) writes new blocks
+  instead of rewriting a part a published manifest references, which a later failure of
+  that retry would have left as a mix of two splits. A manifest title names its parent (`… after <parent id> manifest`), so an
   existing manifest is never re-written under another parent; when the head already names
   this transcript's checkpoint (the compaction after it did not land), the manifest is
   re-written in place under its own parent instead of pointing at itself.
