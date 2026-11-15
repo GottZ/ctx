@@ -235,7 +235,11 @@ CLI writes use `sensitivity_default` unless `--sensitivity` is given and are tag
   must succeed within the budget, otherwise `CtxCheckpointError` — the host keeps the
   uncompressed transcript. Success returns a non-empty receipt.
 - The receipt (< 6000 chars) lists the chain head/manifest IDs and the transcript
-  SHA-256, then the extracted facts (with block IDs in required mode).
+  SHA-256, then the extracted facts (with block IDs in required mode). Since 0.9.0 the
+  chain part ends with a read path (`_receipt_read_path`, empty in the bare engine): the
+  umbrella names the session's tools there and puts the same text, with the head id
+  recorded in `ctx_state/checkpoint-status.state`, into its system prompt block
+  (`checkpoint.read_path()` / `checkpoint.pointer_block()`).
 
 ### Transcript checkpoint chain
 

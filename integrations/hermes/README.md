@@ -70,7 +70,7 @@ is about the checkpoint layer.
 The plugin is a plain Hermes **user plugin** — it lives in
 `$HERMES_HOME/plugins/ctx_checkpoint/`, whether the catalog or the installer
 put it there, and works in best-effort mode on a completely stock Hermes.
-Plugin 0.8.0 declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
+Plugin 0.9.0 declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
 `delegate_task` children inherit the provider under the fail-closed gate; the
 catalog pin (0.6.2) still declares ≥ 0.20.4 (since upstream v2026.8.18,
 provider text is forwarded into the compaction summary).
@@ -375,8 +375,17 @@ anything in there.
 
 ## Recall path
 
-After a compaction, ask ctx for the session's checkpoint head (its title is
-stable per root session):
+The agent does not have to find the head itself: since 0.9.0 the provider's system
+prompt block names the session root's checkpoint head and the read path with the
+session's tool names (`mcp__<server>__get` / `mcp__<server>__search` with memory
+features off, `ctx_get` / `ctx_search` with them on) as soon as a checkpoint exists,
+and the compaction receipt carries the same line. Hermes rebuilds the prompt at each
+compaction, right after the checkpoint; gateway hygiene and `/compress` in a gateway
+channel keep the stored prompt, so the pointer arrives there with the next build.
+Details in the [plugin README](plugin/ctx_checkpoint/README.md#recall-of-a-checkpoint).
+
+By hand, ask ctx for the session's checkpoint head (its title is stable per root
+session):
 
 ```
 ctx search compaction-checkpoints query:"Compaction checkpoint head <root-session>"
@@ -499,6 +508,14 @@ and manifest are deliberately small so routine recall stays cheap.
   CTX_KEY"); a failed or skipped checkpoint names its cause through Hermes' warning channel.
   Warnings for `checkpoint_mode: off` and for plain `http://` to a remote host.
   `requires_hermes` is `>=0.23.1`. CI workflow `hermes-ctx-checkpoint.yml`.
+- 0.9.0 (GottZ/ctx#286): after a compaction the agent learns that the checkpoint
+  exists and how to read it. The system prompt block names the session root's
+  checkpoint head (id and title) and the read path with the session's tool names —
+  also with memory features off, where the block used to be empty; it stays empty
+  while no head is known. The compaction receipt ends with the same read path, and the
+  bundled skill describes it per mode. The head is kept per root session in
+  `ctx_state/checkpoint-status.state` (512 most recent), so every process of the
+  profile names it.
 
 ## Licensing
 

@@ -117,6 +117,14 @@ def _code_for_error(text: str) -> str:
     return ""
 
 
+def mcp_tool_name(server: str, tool: str) -> str:
+    """The name the client dispatches ``tool`` of the ctx MCP server entry ``server`` under —
+    also the name the plugin tells the model (system prompt block, receipt). Hermes registers
+    MCP tools with characters outside ``[A-Za-z0-9_]`` replaced by ``_`` and names over 64
+    characters shortened, so a server name with ``-`` does not resolve (known, not handled here)."""
+    return f"mcp__{server}__{tool}"
+
+
 def _interrupt_acting_for() -> Any:
     """Hermes' ``tools.interrupt.acting_for_tid`` ContextVar; ``None`` on a host without it."""
     try:
@@ -207,7 +215,7 @@ class McpClient:
         With ``timeout`` the dispatch is bounded (see the module docstring) and an
         abandoned call raises ``CtxApiError(code="timeout")``.
         """
-        name = f"mcp__{self._server}__{tool}"
+        name = mcp_tool_name(self._server, tool)
         try:
             if timeout is None:
                 raw = self._dispatch(name, args)

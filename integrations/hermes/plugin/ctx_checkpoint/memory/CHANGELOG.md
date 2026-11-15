@@ -6,6 +6,45 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.9.0] — 2026-11-15
+
+After a compaction the agent learns that the checkpoint exists and how to read it
+(GottZ/ctx#286).
+
+### Added
+- **Checkpoint pointer in the system prompt.** The provider's `system_prompt_block()` ends
+  with a block naming the session root's checkpoint head (id and title) and the read path
+  (head → `latest_manifest_id` → manifest → `source_block_ids`; a passage: search with the
+  root token in the query), as soon as a head is known for the root — with memory features
+  on and off. Tool names follow the session: `mcp__<mcp_server>__get` / `__search` with
+  memory features off, `ctx_get` / `ctx_search` (`types_exclude=[]`) with them on, the
+  plugin CLI on `transport: rest` without them. The block carries ids, the head title and
+  tool names only (a head that is not a block id is never put there), says that saved
+  turns are untrusted, and is byte-identical across compactions of one root (the head is
+  upserted under one title). Hermes rebuilds the prompt at the compaction commit boundary,
+  after the checkpoint.
+- **Read path in the receipt.** `ChainReceipt.frame()` takes the same read path as its last
+  line (`_receipt_read_path`, an engine seam the umbrella fills; empty in the bare engine).
+- **Known heads.** `status.record_checkpoint()` keeps `heads` (root session → head id and
+  the binding it was written through: transport, MCP entry name or REST base URL, category,
+  as a digest) in `ctx_state/checkpoint-status.state`, bounded to `KNOWN_HEADS_MAX` (512)
+  roots checkpointed last; `status.known_head()` reads it for the prompt block, so a new
+  provider of the profile (gateway message, restart, resume) names the head without a
+  network call, also after a later checkpoint failed. A head of another binding is not
+  named.
+
+### Changed
+- **System prompt block with memory features off** is no longer always empty: it carries
+  the pointer once a head is known (empty without one, as before).
+- **Receipt** is one line longer (about 300 characters); with required facts the room for
+  the fact list under the host's 6000-character cap shrinks by that much.
+- **Skill** `ctx-memory`: the checkpoint paragraph names the read path per mode, the MCP
+  tool names, the root-token search and the untrusted label; it used to name only
+  `ctx_search`, which is not registered with memory features off.
+- `mcp_client.mcp_tool_name()` is the one place that builds `mcp__<server>__<tool>` for the
+  dispatch and the text; `provider._checkpoint_category()` and `provider._checkpoint_root()`
+  the one place for the chain's category and root session (writer and read path).
+
 ## [ctx_checkpoint 0.8.0] — 2026-11-15
 
 Settings and status for Hermes Desktop (GottZ/ctx#285): a memory form under Settings →

@@ -1,9 +1,10 @@
 """Connection test, outcome of the latest checkpoint and the MCP status of ctx_checkpoint.
 
 Shared by the provider (``hermes memory status``, the setup forms, the outcome of every
-checkpoint) and the CLI (``hermes ctx_checkpoint status``), so both surfaces print the same
-report. Stdlib only at import time — ``cli.py`` imports it during argparse setup; Hermes'
-own modules are imported where they are used.
+checkpoint, the checkpoint head its system prompt block names) and the CLI (``hermes
+ctx_checkpoint status``), so both surfaces print the same report. Stdlib only at import
+time — ``cli.py`` imports it during argparse setup; Hermes' own modules are imported where
+they are used.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -52,6 +54,12 @@ STATUS_FILE = "checkpoint-status.state"
 STATE_LOCK_FILE = "checkpoint-status.lock"
 STATE_LOCK_WAIT_S = 2.0
 _PROCESS_STATE_LOCK = threading.Lock()
+# The outcome file also keeps the checkpoint head of each root session (``heads``), so the system
+# prompt block names it in every process of the profile (gateway messages, a restart, a resumed
+# session). Bounded to the roots checkpointed last: a session older than that shows the pointer
+# again after its next successful checkpoint.
+KNOWN_HEADS_MAX = 512
+_BLOCK_ID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")
 # Error texts in the outcome file, the status and the user warning are cut to this length
 # (after redaction): long enough for the ctx error text, short enough for one notice.
 ERROR_MAX_CHARS = 300
@@ -344,27 +352,67 @@ def _state_lock(directory: Path) -> Iterator[None]:
             os.close(fd)  # releases the lock
 
 
-def record_checkpoint(hermes_home: str, outcome: dict[str, Any]) -> None:
+def record_checkpoint(
+    hermes_home: str, outcome: dict[str, Any], *, root: str = "", head_id: str = "", binding: str = ""
+) -> None:
     """Replace the outcome file atomically (mode 0600): ``last_checkpoint`` is this outcome,
     ``last_failure`` the latest outcome with an error (kept when this one succeeded, so a session
-    that keeps failing stays visible next to others that succeed). Reading ``last_failure`` and
-    the replacement run under :func:`_state_lock`. Never raises: the checkpoint path must not
-    depend on a writable state directory."""
+    that keeps failing stays visible next to others that succeed), ``heads`` the checkpoint head
+    of each root session (``head_id`` of this attempt's chain under ``root``, when it wrote one,
+    with the ``binding`` it was written through).
+    Reading the previous state and the replacement run under :func:`_state_lock`. Never raises:
+    the checkpoint path must not depend on a writable state directory."""
     if not hermes_home:
         return
     path = status_path(hermes_home)
     try:
         with _state_lock(path.parent):
-            _replace_state(hermes_home, path, outcome)
+            _replace_state(hermes_home, path, outcome, root=root, head_id=head_id, binding=binding)
     except Exception:
         logger.debug("ctx_checkpoint: outcome file not written: %s", path, exc_info=True)
 
 
-def _replace_state(hermes_home: str, path: Path, outcome: dict[str, Any]) -> None:
+def _known_heads(state: dict[str, Any], root: str, head_id: str, binding: str) -> dict[str, Any]:
+    """``heads`` of the previous state with ``root`` → ``head_id`` (and ``binding``) set when given,
+    the :data:`KNOWN_HEADS_MAX` roots checkpointed last."""
+    raw = state.get("heads")
+    heads = {
+        key: value
+        for key, value in (raw.items() if isinstance(raw, dict) else ())
+        if isinstance(value, dict) and isinstance(value.get("at"), (int, float))
+    }
+    if root and head_id:
+        heads[root] = {"head_id": head_id, "binding": binding, "at": time.time()}
+    if len(heads) > KNOWN_HEADS_MAX:
+        keep = set(sorted(heads, key=lambda key: heads[key]["at"], reverse=True)[:KNOWN_HEADS_MAX])
+        heads = {key: value for key, value in heads.items() if key in keep}
+    return heads
+
+
+def known_head(hermes_home: str, root: str, *, binding: str = "") -> str:
+    """The checkpoint head id recorded for ``root`` through ``binding``; ``""`` when none, when it
+    was written through another binding, or when it is not a block id."""
+    if not (hermes_home and root):
+        return ""
+    heads = read_state(hermes_home).get("heads")
+    entry = heads.get(root) if isinstance(heads, dict) else None
+    if not isinstance(entry, dict) or str(entry.get("binding") or "") != binding:
+        return ""
+    head = str(entry.get("head_id") or "")
+    return head if _BLOCK_ID_RE.fullmatch(head) else ""
+
+
+def _replace_state(
+    hermes_home: str, path: Path, outcome: dict[str, Any], *, root: str = "", head_id: str = "", binding: str = ""
+) -> None:
+    previous = read_state(hermes_home)
     state: dict[str, Any] = {"last_checkpoint": outcome}
-    failure = outcome if outcome.get("error") else read_state(hermes_home).get("last_failure")
+    failure = outcome if outcome.get("error") else previous.get("last_failure")
     if isinstance(failure, dict):
         state["last_failure"] = failure
+    heads = _known_heads(previous, root, head_id, binding)
+    if heads:
+        state["heads"] = heads
     state["updated"] = time.time()
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".status-", dir=str(path.parent))
