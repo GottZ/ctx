@@ -956,6 +956,16 @@ type SchedulerConfig struct {
 	// over the one hypertable; per-tenant retention needs a scope-aware janitor
 	// (telemetry achse, own wave). The operator owns the egress-audit policy.
 	LLMLogRetentionDays int `key:"scheduler.llmlog_retention_days" env:"CTX_LLMLOG_RETENTION_DAYS" default:"90" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// BlockCountReconcileInterval is the cadence of the block-counter
+	// reconcile (issue #266, store.ReconcileBlockCounts): every interval the
+	// scheduler compares context_block_counts with a real count, scope by
+	// scope, and corrects drift (logged per key). The triggers keep the
+	// counters exact for every write they see; the pass exists for the writes
+	// they cannot see (DISABLE TRIGGER, session_replication_role = replica).
+	// One pass reads every block once, so the default is a daily pass; 0 = off
+	// (the manage action stats-reconcile still runs on demand). global-only:
+	// one process-wide pass over every tenant's scopes.
+	BlockCountReconcileInterval time.Duration `key:"scheduler.block_count_reconcile_interval" env:"CTX_BLOCK_COUNT_RECONCILE_INTERVAL" default:"86400" mut:"hot" tenancy:"global-only"`
 }
 
 // EventsConfig is the status-collector / SSE timing surface (design 04 §3.6).

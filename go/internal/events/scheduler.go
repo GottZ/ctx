@@ -871,6 +871,16 @@ func (s *Scheduler) Run(ctx context.Context) {
 	// watermark from the derivation.
 	go s.runDistiller(ctx)
 
+	// Issue #266: the block-counter reconcile. Own goroutine for the
+	// runTopicLabeling reason — one pass recounts every scope, which at the
+	// target scale is a read of the whole table, and a ticker case would hold
+	// this select (guard, digest) for its length.
+	go s.runBlockCountReconcile(ctx)
+	// Its fold: the delta rows the block-count triggers append are folded
+	// into the counter rows every few seconds (a ticker of its own, not a
+	// case of this select, so a slow fold never holds guard or digest).
+	go s.runBlockCountFold(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():

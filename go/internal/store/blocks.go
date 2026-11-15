@@ -1870,19 +1870,23 @@ func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, r
 	return results, nil
 }
 
-// ListCategories returns distinct categories with block counts.
+// listCategoriesSQL is ListCategories' statement.
+const listCategoriesSQL = `SELECT category, sum(n)::int AS count
+		 FROM ` + blockCountRowsSQL + ` k
+		 WHERE scope = ANY($1::text[]) AND NOT is_archived
+		 GROUP BY category
+		 HAVING sum(n) > 0
+		 ORDER BY count DESC`
+
+// ListCategories returns distinct categories with block counts. The counts
+// are sums over the block counters (migration 170, issue #266), not a count
+// over context_blocks: the cost is the number of counter rows of the read
+// scopes, whatever the corpus size.
 func ListCategories(ctx context.Context, pool *pgxpool.Pool, readScopes []string) ([]CategoryCount, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
-	rows, err := pool.Query(ctx,
-		`SELECT category, count(*)::int AS count
-		 FROM context_blocks
-		 WHERE scope = ANY($1::text[]) AND NOT is_archived
-		 GROUP BY category
-		 ORDER BY count DESC`,
-		readScopes,
-	)
+	rows, err := pool.Query(ctx, listCategoriesSQL, readScopes)
 	if err != nil {
 		return nil, fmt.Errorf("store: list categories: %w", err)
 	}
@@ -1902,21 +1906,48 @@ func ListCategories(ctx context.Context, pool *pgxpool.Pool, readScopes []string
 	return results, nil
 }
 
+// activeBlocksSQL is the number of live blocks in the read scopes $1 — the
+// total_blocks of GetStats and the coverage denominator ActiveBlockCount —
+// from the counter table.
+const activeBlocksSQL = `SELECT COALESCE(sum(n), 0)::int FROM ` + blockCountRowsSQL + ` k
+		  WHERE scope = ANY($1::text[]) AND NOT is_archived`
+
+// activeCategoriesSQL selects one row per category that has live blocks in
+// the read scopes $1 — the count(DISTINCT category) of GetStats and of the
+// digest envelope (ActiveCategoryCount), from the counter table.
+const activeCategoriesSQL = `SELECT category FROM ` + blockCountRowsSQL + ` k
+		  WHERE scope = ANY($1::text[]) AND NOT is_archived
+		  GROUP BY category HAVING sum(n) > 0`
+
+// statsSQL is GetStats' statement. The block and category numbers are sums
+// over the block counters (blockCountRowsSQL, migration 170). oldest/newest stay queries on
+// context_blocks, one per read scope: unnest + LATERAL turns each into a
+// min/max over idx_context_scope_active (scope, created_at DESC) WHERE NOT
+// is_archived, i.e. one index probe per scope. The plain
+// `min(created_at) WHERE scope = ANY($1)` form walks idx_context_created in
+// global created_at order and filters by scope: cheap while the read scopes
+// hold the newest and the oldest rows of the corpus, linear for a scope whose
+// rows all lie behind the rest (issue #266: a 10-block scope older than the
+// other 100 000 blocks read 16 951 buffers that way, 8 with LATERAL).
+const statsSQL = `SELECT
+			(` + activeBlocksSQL + `) AS total_blocks,
+			(SELECT count(*) FROM (` + activeCategoriesSQL + `) c)::int AS total_categories,
+			(SELECT min(e.m) FROM unnest($1::text[]) AS s(scope)
+			   CROSS JOIN LATERAL (SELECT min(b.created_at) AS m FROM context_blocks b
+			                        WHERE b.scope = s.scope AND NOT b.is_archived) e) AS oldest_entry,
+			(SELECT max(e.m) FROM unnest($1::text[]) AS s(scope)
+			   CROSS JOIN LATERAL (SELECT max(b.created_at) AS m FROM context_blocks b
+			                        WHERE b.scope = s.scope AND NOT b.is_archived) e) AS newest_entry,
+			(SELECT pg_size_pretty(pg_total_relation_size('context_blocks'))) AS db_size`
+
 // GetStats returns aggregate statistics for the context store.
 func GetStats(ctx context.Context, pool *pgxpool.Pool, readScopes []string) (*Stats, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
 	s := &Stats{}
-	err := pool.QueryRow(ctx,
-		`SELECT
-			(SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived) AS total_blocks,
-			(SELECT count(DISTINCT category)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived) AS total_categories,
-			(SELECT min(created_at) FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived) AS oldest_entry,
-			(SELECT max(created_at) FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived) AS newest_entry,
-			(SELECT pg_size_pretty(pg_total_relation_size('context_blocks'))) AS db_size`,
-		readScopes,
-	).Scan(&s.TotalBlocks, &s.TotalCategories, &s.OldestEntry, &s.NewestEntry, &s.DBSize)
+	err := pool.QueryRow(ctx, statsSQL, readScopes).
+		Scan(&s.TotalBlocks, &s.TotalCategories, &s.OldestEntry, &s.NewestEntry, &s.DBSize)
 	if err != nil {
 		return nil, fmt.Errorf("store: get stats: %w", err)
 	}
@@ -2133,27 +2164,33 @@ func GuardList(ctx context.Context, pool *pgxpool.Pool, readScopes []string, cat
 	return results, nil
 }
 
+// guardStatsSQL is GetGuardStats' statement. The block numbers are sums over
+// the block counters (blockCountRowsSQL, migration 170) with the predicates the per-call counts
+// had: every live number is NOT is_archived, archived_dups counts
+// guard_status = 'archived_dup' archived or not, unchecked is guard_status IS
+// NULL.
+const guardStatsSQL = `SELECT
+			COALESCE(sum(c.n) FILTER (WHERE NOT c.is_archived), 0)::int,
+			COALESCE(sum(c.n) FILTER (WHERE NOT c.is_archived AND c.guard_status = 'active'), 0)::int,
+			COALESCE(sum(c.n) FILTER (WHERE NOT c.is_archived AND c.guard_status = 'clean'), 0)::int,
+			COALESCE(sum(c.n) FILTER (WHERE NOT c.is_archived AND c.guard_status = 'needs_review'), 0)::int,
+			COALESCE(sum(c.n) FILTER (WHERE NOT c.is_archived AND c.guard_status = 'near_duplicate'), 0)::int,
+			COALESCE(sum(c.n) FILTER (WHERE NOT c.is_archived AND c.guard_status IS NULL), 0)::int,
+			COALESCE(sum(c.n) FILTER (WHERE c.guard_status = 'archived_dup'), 0)::int,
+			COALESCE((SELECT count(*)::int FROM context_write_log), 0),
+			(SELECT dirty_since FROM context_guard_state WHERE id = true),
+			(SELECT last_guard_at FROM context_guard_state WHERE id = true),
+			COALESCE((SELECT pending_count FROM context_guard_state WHERE id = true), 0)
+		 FROM ` + blockCountRowsSQL + ` c
+		 WHERE c.scope = ANY($1::text[])`
+
 // GetGuardStats returns guard state statistics.
 func GetGuardStats(ctx context.Context, pool *pgxpool.Pool, readScopes []string) (*GuardStats, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
 	gs := &GuardStats{}
-	err := pool.QueryRow(ctx,
-		`SELECT
-			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived), 0),
-			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived AND guard_status = 'active'), 0),
-			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived AND guard_status = 'clean'), 0),
-			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived AND guard_status = 'needs_review'), 0),
-			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived AND guard_status = 'near_duplicate'), 0),
-			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived AND guard_status IS NULL), 0),
-			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND guard_status = 'archived_dup'), 0),
-			COALESCE((SELECT count(*)::int FROM context_write_log), 0),
-			(SELECT dirty_since FROM context_guard_state WHERE id = true),
-			(SELECT last_guard_at FROM context_guard_state WHERE id = true),
-			COALESCE((SELECT pending_count FROM context_guard_state WHERE id = true), 0)`,
-		readScopes,
-	).Scan(
+	err := pool.QueryRow(ctx, guardStatsSQL, readScopes).Scan(
 		&gs.TotalBlocks, &gs.Active, &gs.Clean, &gs.NeedsReview, &gs.NearDuplicate,
 		&gs.Unchecked, &gs.ArchivedDups, &gs.WriteLogEntries,
 		&gs.DirtySince, &gs.LastGuardAt, &gs.PendingCount,

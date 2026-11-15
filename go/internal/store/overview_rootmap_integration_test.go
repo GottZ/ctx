@@ -239,8 +239,9 @@ func TestRootMapMetaEmptyPartitionAndCaps(t *testing.T) {
 	}
 }
 
-// TestRootMapActiveBlockCount is W-B gates 4 and 5 — the cap on the only NEW
-// O(corpus) step of the axis.
+// TestRootMapActiveBlockCount is W-B gates 4 and 5 — the cap on what was the
+// only NEW O(corpus) step of the axis (since migration 170 a counter read; the
+// cap stays as the backstop and is driven with a scanning count).
 //
 // RED PROBE (gate 4), and the reason the assertion is phrased over a FILLED
 // table: a version that sets the cap via `pool.Exec("SET LOCAL …")` in autocommit
@@ -280,8 +281,14 @@ func TestRootMapActiveBlockCount(t *testing.T) {
 		t.Errorf("ActiveBlockCount = %d, want %d (scope filter or is_archived filter missing)", n, want)
 	}
 
-	// The cap fires: 1ms of statement_timeout against 60k rows.
-	n, known, err = store.ActiveBlockCount(ctx, pool, []string{"private"}, time.Millisecond)
+	// The cap fires: 1ms of statement_timeout against 60k rows. Since migration
+	// 170 (issue #266) ActiveBlockCount reads the per-scope block counters and
+	// finishes inside any cap, so the gate drives its cap helper directly with
+	// the count it used to run — the mechanism the remaining capped counts
+	// (OperationalBlockCount, ActiveCategoryCount) still rely on.
+	const scanningCount = `SELECT count(*)::int FROM context_blocks
+		  WHERE scope = ANY($1::text[]) AND NOT is_archived`
+	n, known, err = store.CappedCountForTest(ctx, pool, "active block count", time.Millisecond, scanningCount, []string{"private"})
 	if err != nil {
 		t.Fatalf("capped ActiveBlockCount returned an error instead of degrading: %v", err)
 	}
@@ -295,7 +302,7 @@ func TestRootMapActiveBlockCount(t *testing.T) {
 	// The pool survives the cap: a capped call must not leave a
 	// statement_timeout behind on the pooled connection (that is what a `SET`
 	// without `LOCAL` would do, capping unrelated queries at random).
-	if _, known, err = store.ActiveBlockCount(ctx, pool, []string{"private"}, 30*time.Second); err != nil || !known {
+	if _, known, err = store.CappedCountForTest(ctx, pool, "active block count", 30*time.Second, scanningCount, []string{"private"}); err != nil || !known {
 		t.Errorf("after the capped call: known = %v, err = %v — timeout leaked onto a pooled connection", known, err)
 	}
 }

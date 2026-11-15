@@ -308,7 +308,7 @@ services:
       CTX_RATE_LIMIT_READ: ${CTX_RATE_LIMIT_READ:-}
       CTX_SEMANTIC_FLOOR: ${CTX_SEMANTIC_FLOOR:-}
 
-      # ── scheduler.* (2) ──
+      # ── scheduler.* (3) ──
       # Scheduler ReadScopes (comma-separated). Background guard/digest/dream
       # operate on these scopes. Default = v1.x backwards-compat. v2.0.0 M045
       # dropped chk_scope, so any scope name is valid (no schema validation).
@@ -319,6 +319,10 @@ services:
       # response bodies (telemetry row survives — Body-NULLing, not a chunk
       # drop; audit stays lossless). 0 = keep bodies forever (no retention).
       CTX_LLMLOG_RETENTION_DAYS: ${CTX_LLMLOG_RETENTION_DAYS:-}
+      # Seconds between block-counter reconcile passes (stats / guard-stats /
+      # list-categories numbers recounted per scope, drift corrected and
+      # logged). Default 24h; 0 = off (manage stats-reconcile still works).
+      CTX_BLOCK_COUNT_RECONCILE_INTERVAL: ${CTX_BLOCK_COUNT_RECONCILE_INTERVAL:-}
 
       # ── events.* (6) ──
       CTX_EVENTS_TICK_INTERVAL: ${CTX_EVENTS_TICK_INTERVAL:-}

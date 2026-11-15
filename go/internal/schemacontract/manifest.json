@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 169,
-    "migration_count": 57,
+    "migration_max": 170,
+    "migration_count": 58,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -523,6 +523,76 @@
           "name": "updated_at",
           "type": "timestamp with time zone",
           "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_block_count_deltas": {
+      "columns": [
+        {
+          "name": "scope",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "category",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "is_archived",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "guard_status",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "n",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_block_counts": {
+      "columns": [
+        {
+          "name": "scope",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "category",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "is_archived",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "guard_status",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "n",
+          "type": "bigint",
+          "not_null": true,
           "storage": "p"
         }
       ],
@@ -5049,6 +5119,9 @@
     "context_blobs_pkey": {
       "def_hash": "ad97ef3f7a1288a28f0335311c150b09aa39d37161e1b027b950db5fb8c20f33"
     },
+    "context_block_counts_key": {
+      "def_hash": "6b4aa01e1a1924be9a6ad770020354986d91e5aea4cab480d6500e4c9fd71fe0"
+    },
     "context_block_grants_pkey": {
       "def_hash": "34b1826f7c10fd7ca609ae18101a00e74a3b263715374d7c46ad129a6e1a74e0"
     },
@@ -5306,6 +5379,9 @@
     },
     "idx_blobs_tags": {
       "def_hash": "47035484d4f7bd37e8cb4f473a558c4052453149bdfeb7421cfa28643f2495f7"
+    },
+    "idx_block_count_deltas_scope": {
+      "def_hash": "cca36e050004a2bde6491f9249fbce4c7192b4841055bb8cd16091c014f64a59"
     },
     "idx_block_grants_grantee": {
       "def_hash": "60ed333ebc1e8e0cd0dbaf26eaee44f0497c0ef02de59f67dc4e07eeab75d0ac"
@@ -5886,6 +5962,18 @@
     "audit_tenant_quota_write()": {
       "src_hash": "591ae6dcc221eeee169dd67c36dc9176d39b4d3be0f0eb4c7acf07140ac73259"
     },
+    "context_block_counts_del()": {
+      "src_hash": "7686bec58d2e3f295ed0829be7bf3eb246776a831cea53a0ac344277ab5e8e95"
+    },
+    "context_block_counts_ins()": {
+      "src_hash": "82f36583059cd4d1570087e49cbe5f299d5cdd46d1164652d92a574ff249ed1d"
+    },
+    "context_block_counts_trunc()": {
+      "src_hash": "53d8a6881bb790d12072cb8e14412368a52f725c44faebcaa2b42c0e75a6f0c7"
+    },
+    "context_block_counts_upd()": {
+      "src_hash": "3178553d752b1bda3afbbc13a68ed1759979daba67871dff4d818d136f9edc6e"
+    },
     "ctx_auth(p_api_key text)": {
       "src_hash": "a5b51033a10c0016c1e560c15721d218bad483757fc31e49706ce5c660c01d58"
     },
@@ -5983,6 +6071,18 @@
     },
     "context_block_types.trg_block_types_notify": {
       "def_hash": "bcdb355eb429d68b7c32db9216e0cf4c4e8210aa82bc6cc550b13b0f9591da23"
+    },
+    "context_blocks.trg_block_counts_del": {
+      "def_hash": "73325d94effceb9bdc205988c074d0b424bda66ab64455134f7833a0c878b53e"
+    },
+    "context_blocks.trg_block_counts_ins": {
+      "def_hash": "46431aea30e52682e4dd767a3a11a07099048c5ba6888e4f2c85b734bac9619a"
+    },
+    "context_blocks.trg_block_counts_trunc": {
+      "def_hash": "a611ef7efd9a4a7b6ad761ed0f628508f48ce3e6fa616e3979dfe6082e4a7c32"
+    },
+    "context_blocks.trg_block_counts_upd": {
+      "def_hash": "a32b0d48259ce7cf0cf3b83942ba2ea4fea8c0e0e4941b252c91f8fe40ad6d03"
     },
     "context_blocks.trg_block_visattr_write": {
       "def_hash": "0ef673e7cc61c93db7f694cd51463169caf5ded2bf368a0b19069ff55be551b5"
