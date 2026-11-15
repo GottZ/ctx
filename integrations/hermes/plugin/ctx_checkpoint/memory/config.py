@@ -135,10 +135,16 @@ def ctx_config_path(hermes_home: str) -> Path:
     return Path(hermes_home) / "ctx.json"
 
 
-def load_ctx_config(hermes_home: str, overlay: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Defaults ← ``ctx.json`` ← ``overlay`` (the ``memory.ctx_checkpoint`` section of Hermes'
-    ``config.yaml``, mapped by :func:`overlay_from_umbrella`). Never raises (corrupt file → defaults)."""
+def load_ctx_config(
+    hermes_home: str, overlay: dict[str, Any] | None = None, base: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Defaults ← ``base`` ← ``ctx.json`` ← ``overlay``. ``base`` holds defaults of the plugin
+    that differ from the engine's (the umbrella's checkpoint settings), ``overlay`` the
+    ``memory.ctx_checkpoint`` section of Hermes' ``config.yaml`` as set there, mapped by
+    :func:`overlay_from_umbrella`. Never raises (corrupt file → defaults)."""
     config = _default_config()
+    if base:
+        config.update({k: v for k, v in base.items() if v is not None})
     path = ctx_config_path(hermes_home)
     if path.exists():
         try:
@@ -842,7 +848,8 @@ def umbrella_section(config: dict[str, Any] | None) -> dict[str, Any]:
 
     ``memory.ctx_checkpoint``, with each key of :data:`PLUGINS_FORM_KEYS` taken from
     ``plugins.entries.ctx_checkpoint.settings`` when the Settings → Plugins form stored it
-    there. Precedence, lowest first: engine defaults ← ``ctx.json`` ← ``memory.ctx_checkpoint``
+    there. Precedence, lowest first: defaults (the plugin's own for the checkpoint settings,
+    passed as ``base`` to :func:`load_ctx_config`) ← ``ctx.json`` ← ``memory.ctx_checkpoint``
     ← ``plugins.entries.ctx_checkpoint.settings`` (its other keys are ignored). A form value
     also replaces the engine name of its key (``checkpoint_budget_s`` for ``budget_s``) written
     under ``memory.ctx_checkpoint``, which would otherwise map over it. Clamping happens later,

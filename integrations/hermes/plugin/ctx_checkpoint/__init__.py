@@ -48,6 +48,7 @@ from .memory import checkpoint as _cp
 from .memory import status as _st
 from .memory.client import CtxApiError
 from .memory.config import (
+    UMBRELLA_KEY_MAP,
     overlay_from_umbrella,
     umbrella_memory_enabled,
     umbrella_section,
@@ -176,27 +177,48 @@ def _as_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def _clean_category(value: Any) -> str:
+    return str(value or _DEFAULT_CATEGORY).strip() or _DEFAULT_CATEGORY
+
+
+def _clean_sensitivity(value: Any) -> str:
+    sensitivity = str(value or _DEFAULT_SENSITIVITY).strip().lower()
+    return sensitivity if sensitivity in _SENSITIVITY_CHOICES else _DEFAULT_SENSITIVITY
+
+
+# The checkpoint settings of the section (``UMBRELLA_KEY_MAP``): their normalizer, and the
+# plugin's default, which sits UNDER ctx.json (``_config_base``) — it is never put into the
+# section, so a value only ctx.json sets is not overridden by a default.
+_CHECKPOINT_SETTINGS: dict[str, tuple[Callable[[Any], Any], Any]] = {
+    "category": (_clean_category, _DEFAULT_CATEGORY),
+    "sensitivity": (_clean_sensitivity, _DEFAULT_SENSITIVITY),
+    "chunk_chars": (_clamped_chunk_chars, _DEFAULT_CHUNK_CHARS),
+    "budget_s": (_clamped_budget_s, _DEFAULT_BUDGET_S),
+    "max_parts": (_clamped_max_parts, _DEFAULT_MAX_PARTS),
+}
+
+
 def _umbrella_settings(section: dict[str, Any] | None) -> dict[str, Any]:
-    """The ``memory.ctx_checkpoint`` section with the plugin's own keys defaulted and clamped.
+    """The ``memory.ctx_checkpoint`` section with the plugin's own keys defaulted and the
+    checkpoint settings it sets clamped; a checkpoint setting it does not set stays absent.
 
     Engine keys written there under their own names pass through untouched (they are
     validated by the engine's loader).
     """
     raw = dict(section or {})
-    sensitivity = str(raw.get("sensitivity") or _DEFAULT_SENSITIVITY).strip().lower()
     out = dict(raw)
     out.update(
         {
             "mcp_server": str(raw.get("mcp_server") or _DEFAULT_MCP_SERVER),
-            "category": str(raw.get("category") or _DEFAULT_CATEGORY).strip() or _DEFAULT_CATEGORY,
-            "sensitivity": sensitivity if sensitivity in _SENSITIVITY_CHOICES else _DEFAULT_SENSITIVITY,
-            "chunk_chars": _clamped_chunk_chars(raw.get("chunk_chars")),
-            "budget_s": _clamped_budget_s(raw.get("budget_s")),
-            "max_parts": _clamped_max_parts(raw.get("max_parts")),
             "memory": _as_bool(raw.get("memory"), False),
             "transport": umbrella_transport(raw),
         }
     )
+    for key, (normalize, _default) in _CHECKPOINT_SETTINGS.items():
+        if raw.get(key) is None:
+            out.pop(key, None)
+        else:
+            out[key] = normalize(raw[key])
     return out
 
 
@@ -573,6 +595,28 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
     def _config_overlay(self) -> dict[str, Any]:
         return overlay_from_umbrella(self._section)
 
+    def _config_base(self) -> dict[str, Any]:
+        return {UMBRELLA_KEY_MAP[key]: default for key, (_normalize, default) in _CHECKPOINT_SETTINGS.items()}
+
+    def _effective_settings(self) -> dict[str, Any]:
+        """The section with every checkpoint setting at the value the engine uses: set here,
+        else ctx.json, else the plugin default (clamped by the engine's loader). The forms show
+        it and fall back to it, so a save keeps a value that only ctx.json sets."""
+        out = dict(self._section)
+        try:
+            home = self._hermes_home
+            if not home:
+                from hermes_constants import get_hermes_home
+
+                home = str(get_hermes_home())
+            engine = self._load_config(home)
+        except Exception:
+            engine = {}
+        for key, (normalize, default) in _CHECKPOINT_SETTINGS.items():
+            value = engine.get(UMBRELLA_KEY_MAP[key])
+            out[key] = normalize(value) if value is not None else default
+        return out
+
     def _now(self) -> float:
         return _monotonic()
 
@@ -755,11 +799,12 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
             config = {}
         entry = _configured_server(config, self._server_name())
         url = entry.get("url") if _server_setup_mode(entry) != "stdio" else None
+        current = self._effective_settings()
         return {
             "ctx_url": url if isinstance(url, str) else "",
-            "sensitivity": str(self._section.get("sensitivity") or _DEFAULT_SENSITIVITY),
-            "category": str(self._section.get("category") or _DEFAULT_CATEGORY),
-            "chunk_chars": _clamped_chunk_chars(self._section.get("chunk_chars")),
+            "sensitivity": current["sensitivity"],
+            "category": current["category"],
+            "chunk_chars": current["chunk_chars"],
             "memory": self.memory_enabled,
             "checkpoint_required": _st.checkpoint_required(_effective_config()),
         }
@@ -837,7 +882,7 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         credential, then write. Nothing is written when a check fails."""
         _require_writable_config()
         config = _read_user_config()
-        settings = _normalize_setup_values(values, self._section)
+        settings = _normalize_setup_values(values, self._effective_settings())
         wanted = _switch_value(values, "checkpoint_required")
         current_required = _st.checkpoint_required(_effective_config())
         switch = None if wanted is None or wanted == current_required else wanted
@@ -892,7 +937,7 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         try:
             _require_writable_config()
             values, api_key = _prompt_setup(self.get_config_schema())
-            settings = _normalize_setup_values(values, self._section)
+            settings = _normalize_setup_values(values, self._effective_settings())
             name = settings["mcp_server"]
             entry = _configured_server(_read_user_config(), name)
             mode = _server_setup_mode(entry)

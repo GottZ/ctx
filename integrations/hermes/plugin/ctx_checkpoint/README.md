@@ -108,13 +108,16 @@ plugins:
 
 Every key under `memory.ctx_checkpoint` and `plugins.entries.ctx_checkpoint.settings`
 is optional; the values shown are the defaults. The plugin reads its settings in
-this order, each source over the one before: the engine defaults, the legacy
-`$HERMES_HOME/ctx.json`, `memory.ctx_checkpoint`, and for the six keys of the
+this order, each source over the one before: the defaults (those shown here; the
+engine's own for other engine keys), the legacy `$HERMES_HOME/ctx.json` (for example
+`checkpoint_budget_s` or `checkpoint_category`), `memory.ctx_checkpoint`, and for the six keys of the
 Settings → Plugins form `plugins.entries.ctx_checkpoint.settings` (other keys there
 are ignored). So a value saved in that form wins over the same key written by hand
 under `memory.ctx_checkpoint`, also under its engine name (`checkpoint_budget_s`,
 `checkpoint_max_parts`); the form itself shows only its own values. Every
-value is clamped to its range, whatever the source. `budget_s` and `max_parts` are
+value is clamped to its range, whatever the source. The memory form shows a value
+that only `ctx.json` sets, and saving the form writes it to `memory.ctx_checkpoint`
+unchanged. `budget_s` and `max_parts` are
 not asked during terminal setup (setup keeps them). `compression.checkpoint_required`
 is written only when you choose a mode in setup that differs from the current one;
 the compaction thresholds are never written. An existing `mcp_servers.ctx` entry is

@@ -199,6 +199,13 @@ class CtxMemoryProvider(MemoryProvider):
         """Settings layered over ctx.json (the umbrella passes its config.yaml section)."""
         return {}
 
+    def _config_base(self) -> dict[str, Any]:
+        """Defaults layered under ctx.json (the umbrella passes its own checkpoint defaults)."""
+        return {}
+
+    def _load_config(self, hermes_home: str) -> dict[str, Any]:
+        return load_ctx_config(hermes_home, overlay=self._config_overlay(), base=self._config_base())
+
     def _chain_writer_seams(self) -> dict[str, Any]:
         """Extra ChainWriter kwargs (the umbrella injects its clock/sleep test seams)."""
         return {}
@@ -261,7 +268,7 @@ class CtxMemoryProvider(MemoryProvider):
 
             # Same sources as initialize(): ctx.json under the settings overlay (the umbrella's
             # memory.ctx_checkpoint section, whose rest_base_url becomes ctx_base_url).
-            cfg = load_ctx_config(str(get_hermes_home()), overlay=self._config_overlay())
+            cfg = self._load_config(str(get_hermes_home()))
             return bool(cfg.get("ctx_base_url", "").strip())
         except Exception:
             return False
@@ -300,7 +307,7 @@ class CtxMemoryProvider(MemoryProvider):
         try:
             from hermes_constants import get_hermes_home
 
-            cfg = load_ctx_config(str(get_hermes_home()), overlay=self._config_overlay())
+            cfg = self._load_config(str(get_hermes_home()))
             fallback = cfg.get("ctx_base_url") or (provider_config or {}).get("ctx_base_url") or ""
             base = status["base_url"] = resolve_base_url(str(fallback))
             api_key = env_secret("CTX_KEY")
@@ -346,7 +353,7 @@ class CtxMemoryProvider(MemoryProvider):
         self._platform = str(kwargs.get("platform") or "")
         # Host vocabulary: primary | subagent | cron | flush. Empty stays empty (upstream).
         self._agent_context = str(kwargs.get("agent_context") or "")
-        self._config = load_ctx_config(self._hermes_home, overlay=self._config_overlay())
+        self._config = self._load_config(self._hermes_home)
         # P5: a resumed/restarted session is a compression continuation → its chain, fact
         # ledger and digest segments belong to the lineage ROOT, not to the current id.
         lineage_root = _dg.resolve_lineage_root(self._hermes_home, self._root_session_id)

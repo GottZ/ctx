@@ -987,3 +987,75 @@ def test_concurrent_outcome_writers_keep_the_newest_failure(hermes_home, monkeyp
 
     state = real_read(home)
     assert "newer failure" in state["last_failure"]["error"]
+
+
+_LEGACY_CTX_JSON = {
+    "checkpoint_budget_s": 120,
+    "checkpoint_max_parts": 50,
+    "checkpoint_chunk_chars": 20000,
+    "checkpoint_category": "legacy-checkpoints",
+    "checkpoint_sensitivity": "personal",
+}
+
+
+def test_ctx_json_values_apply_where_config_yaml_sets_none(hermes_home):
+    (hermes_home / "ctx.json").write_text(json.dumps(_LEGACY_CTX_JSON), encoding="utf-8")
+    provider = Provider(config={"max_parts": 60}, dispatch=_ok_dispatch()[0])
+    provider.initialize("session-legacy", platform="cli", hermes_home=str(hermes_home))
+
+    assert provider._config["checkpoint_budget_s"] == 120.0
+    assert provider._config["checkpoint_chunk_chars"] == 20000
+    assert provider._config["checkpoint_category"] == "legacy-checkpoints"
+    assert provider._config["checkpoint_sensitivity"] == "personal"
+    assert provider._config["checkpoint_max_parts"] == 60  # set in memory.ctx_checkpoint: over ctx.json
+
+
+def test_plugin_defaults_apply_without_ctx_json(hermes_home):
+    provider = Provider(config={}, dispatch=_ok_dispatch()[0])
+    provider.initialize("session-defaults", platform="cli", hermes_home=str(hermes_home))
+
+    assert provider._config["checkpoint_budget_s"] == _MODULE._DEFAULT_BUDGET_S
+    assert provider._config["checkpoint_sensitivity"] == _MODULE._DEFAULT_SENSITIVITY
+    assert provider._config["checkpoint_category"] == _MODULE._DEFAULT_CATEGORY
+    assert provider._config["checkpoint_chunk_chars"] == _MODULE._DEFAULT_CHUNK_CHARS
+    assert provider._config["checkpoint_max_parts"] == _MODULE._DEFAULT_MAX_PARTS
+
+
+def test_memory_form_shows_and_keeps_ctx_json_values(hermes_home, linked_plugin, probe, monkeypatch):
+    (hermes_home / "ctx.json").write_text(json.dumps(_LEGACY_CTX_JSON), encoding="utf-8")
+    _mcp_home(hermes_home)
+    provider = Provider()
+
+    shown = provider.read_config_fields(str(hermes_home))["values"]
+    assert shown["category"] == "legacy-checkpoints"
+    assert shown["sensitivity"] == "personal"
+    assert shown["chunk_chars"] == 20000
+
+    _desktop_save(monkeypatch, provider, {"ctx_url": "https://ctx2.example.test/mcp"})
+
+    reloaded = Provider(dispatch=_ok_dispatch()[0])
+    reloaded.initialize("session-after-save", platform="cli", hermes_home=str(hermes_home))
+    assert reloaded._config["checkpoint_category"] == "legacy-checkpoints"
+    assert reloaded._config["checkpoint_sensitivity"] == "personal"
+    assert reloaded._config["checkpoint_chunk_chars"] == 20000
+    assert reloaded._config["checkpoint_budget_s"] == 120.0
+
+
+def test_terminal_setup_offers_and_keeps_ctx_json_values(hermes_home, probe, monkeypatch):
+    (hermes_home / "ctx.json").write_text(json.dumps(_LEGACY_CTX_JSON), encoding="utf-8")
+    prompts = []
+
+    def answer(prompt=""):
+        prompts.append(prompt)
+        return "https://ctx.example.test/mcp" if prompt == "  ctx server URL: " else ""
+
+    monkeypatch.setattr("builtins.input", answer)
+    monkeypatch.setattr(_MODULE.getpass, "getpass", lambda prompt="": SECRET)
+
+    Provider().post_setup(str(hermes_home), {})
+
+    assert any("[legacy-checkpoints]" in prompt for prompt in prompts)
+    section = _read_config(hermes_home)["memory"]["ctx_checkpoint"]
+    assert section["category"] == "legacy-checkpoints"
+    assert section["sensitivity"] == "personal"
+    assert section["chunk_chars"] == 20000

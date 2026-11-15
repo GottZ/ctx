@@ -23,7 +23,7 @@ checkpoint, and a status that shows whether checkpoints work on the MCP transpor
 - **Settings → Plugins section.** `../plugin.yaml` declares `budget_s`, `max_parts`,
   `auto_recall`, `auto_memory_mirror`, `auto_compress_extract` and `auto_session_digest`;
   Hermes stores them in `plugins.entries.ctx_checkpoint.settings`. `config.umbrella_section()`
-  reads them over `memory.ctx_checkpoint` (precedence: engine defaults ← `ctx.json` ←
+  reads them over `memory.ctx_checkpoint` (precedence: defaults ← `ctx.json` ←
   `memory.ctx_checkpoint` ← the Plugins form, for those six keys only; a form value also
   replaces the engine name of its key there, e.g. `checkpoint_budget_s`), and the existing
   clamps apply unchanged. The provider and `hermes ctx_checkpoint` share that function.
@@ -79,6 +79,16 @@ checkpoint, and a status that shows whether checkpoints work on the MCP transpor
 - A package-managed install refuses setup with `ConfigReadOnlyError`, a `RuntimeError` and a
   `ValueError`, so the Desktop route answers 400 with the reason instead of 500.
 - The Desktop form refuses a URL for a stdio server entry (it has none) instead of dropping it.
+- **`ctx.json` checkpoint settings apply again.** Up to 0.7.0 the umbrella put its defaults
+  for `category`, `sensitivity`, `chunk_chars`, `budget_s` and `max_parts` into its section
+  whenever `memory.ctx_checkpoint` did not set them, and that overlay replaced
+  `checkpoint_category`, `checkpoint_sensitivity`, `checkpoint_chunk_chars`,
+  `checkpoint_budget_s` and `checkpoint_max_parts` from `ctx.json` (a `ctx.json` budget of
+  120 s ran with 60 s). The plugin's defaults now sit under `ctx.json` (`load_ctx_config(...,
+  base=...)`, the provider's `_config_base()` seam); the section carries only what is set
+  there. The memory forms show the value in effect and fall back to it, so a save keeps a
+  `ctx.json` value (copied into `memory.ctx_checkpoint`). A profile whose `ctx.json` sets one
+  of these keys now runs with that value.
 
 ## [ctx_checkpoint 0.7.0] — 2026-11-09
 
