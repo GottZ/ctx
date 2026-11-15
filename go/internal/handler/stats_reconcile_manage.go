@@ -20,7 +20,8 @@ type statsReconcileSpec struct {
 // real count, scope by scope, and corrects every difference. Server-admin
 // (tierServerAdmin): the pass reads and repairs every tenant's scopes, and the
 // answer names them. Each scope is its own transaction, so a request that ends
-// early leaves the scopes it finished corrected. The scheduler runs the same
+// early leaves the scopes it finished corrected; a scope that fails is named in
+// "failed" (status 500, success false) and the pass goes on with the others. The scheduler runs the same
 // pass on scheduler.block_count_reconcile_interval.
 func (h *ManageHandler) handleStatsReconcile(w http.ResponseWriter, r *http.Request, req manageRequest) {
 	ctx := r.Context()
@@ -37,18 +38,28 @@ func (h *ManageHandler) handleStatsReconcile(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	res, err := store.ReconcileBlockCounts(ctx, h.pool, spec.Scope)
-	if err != nil {
+	if err != nil && res == nil {
 		slog.Error("manage: stats-reconcile error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	// A pass in which some scopes failed still reports what it corrected and
+	// names the failed scopes; the database errors stay in the log.
+	body := map[string]any{
 		"action":      "stats-reconcile",
-		"success":     true,
+		"success":     err == nil,
 		"scopes":      res.Scopes,
 		"corrections": res.Corrections,
 		"pruned":      res.Pruned,
-	})
+		"failed":      res.Failed,
+	}
+	status := http.StatusOK
+	if err != nil {
+		slog.Error("manage: stats-reconcile incomplete", "error", err, "failed", len(res.Failed), "request_id", reqID)
+		body["error"] = "reconcile failed for some scopes"
+		status = http.StatusInternalServerError
+	}
+	writeJSON(w, status, body)
 }

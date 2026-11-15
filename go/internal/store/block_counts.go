@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -98,6 +99,9 @@ type BlockCountReconcile struct {
 	// Pruned counts folded counter rows at 0 that were removed (no drift: a
 	// fold leaves zero rows standing).
 	Pruned int `json:"pruned"`
+	// Failed names the scopes whose reconcile failed; the pass went on with
+	// the others. The errors are logged per scope and returned joined.
+	Failed []string `json:"failed"`
 }
 
 // reconcileScopesSQL lists every scope that has blocks or counter rows. The
@@ -149,7 +153,10 @@ const reconcileDriftSQL = `SELECT category, is_archived, guard_status,
 // see adds its own delta after the commit, on top; nothing a writer holds is
 // waited for, and no writer waits for the reconcile.
 //
-// Every correction is logged (scope, key, counted, actual) and returned.
+// A scope that fails (a statement timeout on a large scope, a lost connection)
+// is logged, named in Failed, and the pass goes on with the next scope while
+// ctx lives; the scope errors come back joined. Every correction is logged
+// (scope, key, counted, actual) and returned.
 func ReconcileBlockCounts(ctx context.Context, pool *pgxpool.Pool, scope string) (*BlockCountReconcile, error) {
 	scopes := []string{scope}
 	if scope == "" {
@@ -161,14 +168,19 @@ func ReconcileBlockCounts(ctx context.Context, pool *pgxpool.Pool, scope string)
 			return nil, fmt.Errorf("store: block count reconcile scopes: %w", err)
 		}
 	}
-	res := &BlockCountReconcile{Corrections: []BlockCountDrift{}}
+	res := &BlockCountReconcile{Corrections: []BlockCountDrift{}, Failed: []string{}}
+	var errs []error
 	for _, s := range scopes {
 		if err := ctx.Err(); err != nil {
-			return res, err
+			errs = append(errs, err)
+			break
 		}
 		drift, pruned, err := reconcileScopeCounts(ctx, pool, s)
 		if err != nil {
-			return res, err
+			slog.Warn("stats: block count reconcile failed for a scope", "scope", s, "error", err)
+			res.Failed = append(res.Failed, s)
+			errs = append(errs, fmt.Errorf("scope %q: %w", s, err))
+			continue
 		}
 		res.Scopes++
 		res.Pruned += pruned
@@ -179,7 +191,7 @@ func ReconcileBlockCounts(ctx context.Context, pool *pgxpool.Pool, scope string)
 		}
 		res.Corrections = append(res.Corrections, drift...)
 	}
-	return res, nil
+	return res, errors.Join(errs...)
 }
 
 // scopeDrift runs reconcileDriftSQL for one scope.

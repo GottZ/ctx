@@ -8,6 +8,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/store"
@@ -177,7 +179,7 @@ func TestBlockCounts_ReconcileRepairsDrift(t *testing.T) {
 		{Scope: s, Category: "learnings", IsArchived: false, GuardStatus: &active, Counted: 4, Actual: 6},
 		{Scope: s, Category: "solo", IsArchived: false, GuardStatus: &active, Counted: 1, Actual: 0},
 	}
-	if res.Scopes != 1 || !reflect.DeepEqual(res.Corrections, want) || res.Pruned != 1 {
+	if res.Scopes != 1 || !reflect.DeepEqual(res.Corrections, want) || res.Pruned != 1 || len(res.Failed) != 0 {
 		t.Fatalf("reconcile = %+v (corrections %+v), want 1 scope, corrections %+v, 1 pruned", *res, res.Corrections, want)
 	}
 	assertCountParity(t, pool, "after reconcile", [][]string{{s}})
@@ -387,6 +389,67 @@ func TestBlockCounts_TwoReconcilesCorrectOnce(t *testing.T) {
 		t.Fatalf("the two reconciles made %d corrections, want exactly 1", total)
 	}
 	assertCountParity(t, pool, "after two reconciles", [][]string{{s}})
+}
+
+// TestBlockCounts_ReconcileGoesOnAfterAFailedScope (PR #269 finding 3): a scope
+// whose reconcile fails (here: its advisory lock is held past the pool's
+// lock_timeout) is named in Failed and in the joined error, and the scopes
+// after it are still corrected.
+func TestBlockCounts_ReconcileGoesOnAfterAFailedScope(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := spSetup(t)
+	ctx, pool := f.ctx, f.pool
+	first := f.scope(t, "cnt-fail-a")
+	second := f.scope(t, "cnt-fail-b")
+	execAll(t, pool, `ALTER TABLE context_blocks DISABLE TRIGGER trg_block_counts_ins`)
+	f.block(t, first, "unseen-a", nil)
+	f.block(t, second, "unseen-b", nil)
+	execAll(t, pool, `ALTER TABLE context_blocks ENABLE TRIGGER trg_block_counts_ins`)
+
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, store.BlockCountReconcileLockSQLForTest, first); err != nil {
+		t.Fatal(err)
+	}
+	cfg := pool.Config().Copy()
+	cfg.ConnConfig.RuntimeParams["lock_timeout"] = "300ms"
+	short, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer short.Close()
+
+	res, err := store.ReconcileBlockCounts(ctx, short, "")
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "55P03" || !strings.Contains(err.Error(), first) {
+		t.Fatalf("reconcile error = %v, want the lock timeout (55P03) of %s", err, first)
+	}
+	if res == nil || !reflect.DeepEqual(res.Failed, []string{first}) {
+		t.Fatalf("failed = %+v, want [%s]", res, first)
+	}
+	if len(res.Corrections) != 1 || res.Corrections[0].Scope != second {
+		t.Fatalf("corrections = %+v, want the one of %s", res.Corrections, second)
+	}
+	got, err := store.GetStats(ctx, pool, []string{second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref := refStats(t, pool, []string{second}); got.TotalBlocks != ref.TotalBlocks {
+		t.Fatalf("%s after the pass: %d blocks counted, %d real", second, got.TotalBlocks, ref.TotalBlocks)
+	}
+	// With the lock released the next pass takes the failed scope too.
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := store.ReconcileBlockCounts(ctx, pool, ""); err != nil || len(res.Failed) != 0 {
+		t.Fatalf("next pass = %+v, %v", res, err)
+	}
+	assertCountParity(t, pool, "after the next pass", [][]string{{first}, {second}})
 }
 
 // TestBlockCounts_ReconcileAgainstTruncateAndReload (PR #269 finding 2): a
