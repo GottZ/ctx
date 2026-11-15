@@ -254,9 +254,14 @@ func markSupersededSnapshot(ctx context.Context, tx pgx.Tx, targetID, sourceID s
 // id IN (subquery)` form is planned as a filter with a hashed subplan over a
 // full primary-key scan (ORDER BY id) — every archive would read the corpus.
 func lockSupersedesSource(ctx context.Context, tx pgx.Tx, blockID string, writeScopes []string) ([]string, error) {
-	if _, err := uuid.Parse(blockID); err != nil {
+	parsed, err := uuid.Parse(blockID)
+	if err != nil {
 		return nil, nil //nolint:nilerr // deliberate: the caller's statement decides a malformed id
 	}
+	// The statements below return ids as id::text, the canonical lowercase
+	// form; a full id the caller typed in capitals (ResolveBlockID returns a
+	// full id unchanged) is the same block and must compare equal to them.
+	blockID = parsed.String()
 	rows, err := tx.Query(ctx, lockSupersedesSourceSQL, blockID, writeScopes)
 	if err != nil {
 		return nil, fmt.Errorf("store: lock supersedes source: %w", err)

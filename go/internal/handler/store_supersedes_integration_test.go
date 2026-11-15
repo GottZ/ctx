@@ -758,5 +758,76 @@ func TestSupersedesSuccessorLifecycle(t *testing.T) {
 				t.Errorf("target after the successor's move = %+v, want knowledge without pointer", st)
 			}
 		})
+
+		// A full id in capitals is the same block (the uuid cast) and reaches
+		// the store as typed: ResolveBlockID returns a full id unchanged. The
+		// archive and the move through POST /api/manage must reconcile the
+		// target all the same.
+		t.Run("archive_uppercase_id_"+kind, func(t *testing.T) {
+			target, src := pair(t, "sd-lu-"+kind, declared)
+			status, resp := sdManage(t, f, f.ar, map[string]any{"action": "delete", "id": strings.ToUpper(src)})
+			if status != http.StatusOK || resp["success"] != true {
+				t.Fatalf("manage delete %s: status %d body %v", strings.ToUpper(src), status, resp)
+			}
+			if st := f.state(t, src); !st.archived {
+				t.Fatalf("premise: successor not archived: %+v", st)
+			}
+			if st := f.state(t, target); st.lifecycle != "knowledge" || st.supersededBy != "" {
+				t.Errorf("target after the successor's archive by an uppercase id = %+v, want knowledge without pointer", st)
+			}
+		})
+
+		t.Run("scope_move_uppercase_id_"+kind, func(t *testing.T) {
+			target, src := pair(t, "sd-mu-"+kind, declared)
+			dest := "sd-mu-dest-" + kind
+			ar := sdWriterKey(t, f, "sd-mu-key-"+kind, dest)
+			status, resp := sdManage(t, f, ar, map[string]any{"action": "update", "id": strings.ToUpper(src),
+				"data": map[string]any{"scope": dest}})
+			if status != http.StatusOK || resp["success"] != true {
+				t.Fatalf("manage update %s: status %d body %v", strings.ToUpper(src), status, resp)
+			}
+			if _, ok := f.link(t, src, target); ok {
+				t.Errorf("cross-scope link survived the move")
+			}
+			if st := f.state(t, target); st.lifecycle != "knowledge" || st.supersededBy != "" {
+				t.Errorf("target after the successor's move by an uppercase id = %+v, want knowledge without pointer", st)
+			}
+		})
 	}
+}
+
+// sdWriterKey creates a key with home sd-home that may also write (and read)
+// extra.
+func sdWriterKey(t *testing.T, f *sdFixture, label, extra string) *auth.AuthResult {
+	t.Helper()
+	ctx := context.Background()
+	_, plain, err := store.CreateApiKey(ctx, f.pool, label, sdHome, []string{sdHome, extra}, store.DefaultTenantID)
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	if _, err := f.pool.Exec(ctx, `UPDATE context_api_keys SET write_scopes = $2 WHERE label = $1`, label, []string{extra}); err != nil {
+		t.Fatalf("write scopes: %v", err)
+	}
+	ar, err := auth.Authenticate(ctx, f.pool, plain)
+	if err != nil || !ar.IsValid {
+		t.Fatalf("authenticate: %v", err)
+	}
+	return ar
+}
+
+// sdManage posts one /api/manage body as ar and returns status and decoded map.
+func sdManage(t *testing.T, f *sdFixture, ar *auth.AuthResult, body map[string]any) (int, map[string]any) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/manage", bytes.NewReader(raw)).
+		WithContext(context.WithValue(context.Background(), authResultKey, ar))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	NewManageHandler(f.pool, f.cfg, nil, nil, nil, nil, nil, f.reg).HandleManage(rec, req)
+	var m map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &m)
+	return rec.Code, m
 }
