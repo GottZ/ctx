@@ -168,6 +168,7 @@ Lightweight search without an LLM call. Read-only.
 | `tags` | string[] | | filter by tags |
 | `limit` | integer | | maximum results (default 10, max 50) |
 | `after` | object | | page a listing with an empty `query`: `{}` for the first page, then the `next_after` of the previous answer |
+| `include_content` | boolean | | answer each block's full `content` and `metadata` instead of the preview |
 | `cluster` | string | | restrict to one topic by its stable handle (from the graph surfaces) |
 | `types` | string[] | | restrict to these block types; each must be retrieval-visible, otherwise an error |
 | `types_exclude` | string[] | | exclude these block types |
@@ -197,10 +198,22 @@ meanwhile are newer than the cursor and are not listed, archived ones drop out. 
 non-empty `query` is an error: the full-text path answers its top matches and has no
 next page.
 
-**The page object.** A call with `after` answers one JSON object instead of the
-array: `next_after` (absent on the last page), `limit` (the effective page size),
-`requested_limit` (the `limit` sent, only when it was lowered), and `results`, the
-rows. A call without `after` keeps the array byte for byte; when its
+**Content (`include_content`).** The rows are those of `POST /api/search` with
+`compact: false`: `content` and `metadata` (with the guard's `guard_matched_id` dropped
+when it names a block the key cannot read, as on `get`) instead of `content_preview`
+and `content_length`, through the same scope, grant and type rules, with `untrusted`
+on foreign-text rows. The contents of one answer are bounded at 64 KiB: the page ends
+before the first row that would cross it, and `truncated: true` says so. A block is
+never cut, and the first row of a page is always answered whole, even when it alone
+is larger. With an empty `query`, `next_after` continues at the first row left out;
+with a `query` there is no next page, so narrow the query or lower `limit` to read
+the rest.
+
+**The page object.** A call with `after` or `include_content` answers one JSON object
+instead of the array: `next_after` (absent on the last page and always with a
+`query`), `limit` (the effective page size), `requested_limit` (the `limit` sent, only
+when it was lowered), `truncated` (only when the content budget ended the page), and
+`results`, the rows. A call with neither keeps the array byte for byte; when its
 `limit` was lowered or more rows follow, the same `next_after`, `limit` and
 `requested_limit` ride beside the array as the result's `structuredContent`, which a
 client that reads only the text never sees.

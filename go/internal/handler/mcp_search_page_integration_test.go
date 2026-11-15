@@ -1,6 +1,6 @@
 //go:build integration
 
-// Issue #206 — the MCP `search` tool pages.
+// Issues #206 and #207 — the MCP `search` tool pages and reads content.
 //
 // #206: the tool could not list past 50 rows. The statement builder clamps
 // every caller at 50 (store.SearchMaxLimit), the tool took no cursor, and a
@@ -9,6 +9,11 @@
 // block-workbench W7; the tool now takes the same cursor through the same
 // shared core (search_core.go), and the answer says when the limit was lowered
 // and whether more rows exist.
+//
+// #207: the tool always answered compact rows (200-character preview), while
+// REST answers the full content with `compact:false` from the same statement.
+// The tool now takes `include_content`; a page with content is bounded by
+// mcpSearchContentBudget and ends early rather than cutting a block.
 //
 // Every probe goes through the real tool: over the wire (SDK schema
 // validation, decoding, the answer a client reads) for the new arguments, the
@@ -27,6 +32,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -55,11 +61,12 @@ func (a i206Answer) text() string {
 	return a.Texts[0]
 }
 
-// i206Page is the paged answer object (after given).
+// i206Page is the paged answer object (after / include_content given).
 type i206Page struct {
 	NextAfter      *store.SearchCursor `json:"next_after"`
 	Limit          int                 `json:"limit"`
 	RequestedLimit int                 `json:"requested_limit"`
+	Truncated      bool                `json:"truncated"`
 	Results        []map[string]any    `json:"results"`
 }
 
@@ -479,4 +486,180 @@ func i206CursorSafety(t *testing.T, f *i206Fixture) {
 			t.Errorf("a cursor without after_updated = %v, want page 1 %v (the REST rule)", i206IDs(partial.Results), i206IDs(first.Results))
 		}
 	})
+}
+
+// TestMCPSearchPageContent_Integration covers #207: include_content, the
+// content budget, and the parity with REST compact:false.
+func TestMCPSearchPageContent_Integration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := i206Setup(t)
+
+	// Five blocks of ~30 KB each: two fit the 64 KiB budget, three do not.
+	var big []string
+	for i := 0; i < 5; i++ {
+		body := fmt.Sprintf("i206budgetword part %d ", i) + strings.Repeat("lorem ", 5000)
+		big = append(big, f.storeTool(t, "i206-big", fmt.Sprintf("i206 big %d", i), body))
+	}
+
+	t.Run("default_stays_compact", func(t *testing.T) {
+		r, _, err := mcpSearchHandler(f.cfg)(f.keyCtx, nil, searchInput{Category: "i206-big", Limit: 10})
+		if err != nil || r.IsError {
+			t.Fatalf("search: %v %s", err, mcpTextOf(r))
+		}
+		if strings.Contains(resultText(t, r), `"content":`) || !strings.Contains(resultText(t, r), `"content_preview":`) {
+			t.Errorf("default answer is not compact: %.300s", resultText(t, r))
+		}
+	})
+
+	t.Run("budget_ends_the_page_and_the_next_page_continues", func(t *testing.T) {
+		seen := map[string]int{}
+		args := `{"category":"i206-big","limit":10,"include_content":true}`
+		var sizes []int
+		for pages := 0; ; pages++ {
+			if pages > 5 {
+				t.Fatal("still paging")
+			}
+			p := i206PageOf(t, f.keyCtx, f.cfg, args)
+			sizes = append(sizes, len(p.Results))
+			for _, r := range p.Results {
+				seen[r["id"].(string)]++
+				if c, _ := r["content"].(string); len(c) < 30000 {
+					t.Errorf("row %v content length %d, want the whole block", r["id"], len(c))
+				}
+			}
+			if p.NextAfter == nil {
+				if p.Truncated {
+					t.Error("last page carries truncated")
+				}
+				break
+			}
+			if !p.Truncated {
+				t.Errorf("page %d ended at %d rows with a cursor but without truncated", pages, len(p.Results))
+			}
+			args = `{"category":"i206-big","limit":10,"include_content":true,"after":` + i206Cursor(t, p.NextAfter) + `}`
+		}
+		if !reflect.DeepEqual(sizes, []int{2, 2, 1}) {
+			t.Errorf("page sizes = %v, want [2 2 1] under the 64 KiB budget", sizes)
+		}
+		for _, id := range big {
+			if seen[id] != 1 {
+				t.Errorf("block %s answered %d times, want once", id, seen[id])
+			}
+		}
+	})
+
+	t.Run("query_path_is_cut_by_the_budget_and_says_so", func(t *testing.T) {
+		p := i206PageOf(t, f.keyCtx, f.cfg, `{"query":"i206budgetword","limit":10,"include_content":true}`)
+		if len(p.Results) != 2 || !p.Truncated || p.NextAfter != nil {
+			t.Errorf("full-text with content: %d rows, truncated %t, next_after %v; want 2, true, none", len(p.Results), p.Truncated, p.NextAfter)
+		}
+	})
+
+	t.Run("a_block_larger_than_the_budget_is_answered_whole_and_alone", func(t *testing.T) {
+		f.storeTool(t, "i206-huge", "i206 huge small 1", "small one")
+		huge := f.upsert(t, "private", "i206-huge", "i206 huge block", strings.Repeat("h", 70000), "", nil)
+		f.storeTool(t, "i206-huge", "i206 huge small 2", "small two")
+		var sizes []int
+		args := `{"category":"i206-huge","include_content":true}`
+		for pages := 0; ; pages++ {
+			if pages > 5 {
+				t.Fatal("still paging")
+			}
+			p := i206PageOf(t, f.keyCtx, f.cfg, args)
+			sizes = append(sizes, len(p.Results))
+			for _, r := range p.Results {
+				if r["id"] == huge {
+					if c, _ := r["content"].(string); len(c) != 70000 {
+						t.Errorf("oversized block answered with %d bytes, want all 70000", len(c))
+					}
+				}
+			}
+			if p.NextAfter == nil {
+				break
+			}
+			args = `{"category":"i206-huge","include_content":true,"after":` + i206Cursor(t, p.NextAfter) + `}`
+		}
+		if !reflect.DeepEqual(sizes, []int{1, 1, 1}) {
+			t.Errorf("page sizes = %v, want [1 1 1]: the oversized block alone on its page", sizes)
+		}
+	})
+
+	t.Run("rows_match_rest_compact_false", func(t *testing.T) { i206RestParity(t, f) })
+}
+
+// i206RestParity holds the include_content rows against REST compact:false
+// over one fixture that exercises every read rule: an own block, an untrusted
+// type, guard metadata that names an unreadable and a readable block, a block
+// granted from another tenant, an ungranted foreign block and an archived
+// granted one.
+func i206RestParity(t *testing.T, f *i206Fixture) {
+	owner := bgTenant(t, f.pool, "i206-owner")
+	bgMapScope(t, f.pool, "i206-foreign", owner)
+	foreignTarget := f.upsert(t, "i206-foreign", "i206-target", "i206 foreign target", "target", "", nil)
+	own := f.storeTool(t, "i206-parity", "i206 parity own", "own body")
+	untrusted := f.upsert(t, "private", "i206-parity", "i206 parity checkpoint", "checkpoint body", "checkpoint", nil)
+	redacted := f.upsert(t, "private", "i206-parity", "i206 parity redacted", "redacted body", "",
+		map[string]any{"guard_matched_id": foreignTarget, "other": "kept"})
+	kept := f.upsert(t, "private", "i206-parity", "i206 parity kept", "kept body", "",
+		map[string]any{"guard_matched_id": own, "other": "kept"})
+	granted := f.upsert(t, "i206-foreign", "i206-parity", "i206 parity granted", "granted body", "", nil)
+	ungranted := f.upsert(t, "i206-foreign", "i206-parity", "i206 parity ungranted", "ungranted body", "", nil)
+	archived := f.upsert(t, "i206-foreign", "i206-parity", "i206 parity archived", "archived body", "", nil)
+	bgGrant(t, f.pool, granted, store.DefaultTenantID)
+	bgGrant(t, f.pool, archived, store.DefaultTenantID)
+	t039Archive(t, f.pool, archived)
+
+	code, env := f.rest(t, f.keyCtx, `{"category":"i206-parity","compact":false,"limit":50}`)
+	if code != http.StatusOK {
+		t.Fatalf("REST status %d", code)
+	}
+	var restRows []map[string]any
+	if err := json.Unmarshal(env["results"], &restRows); err != nil {
+		t.Fatalf("decode REST rows: %v", err)
+	}
+	p := i206PageOf(t, f.keyCtx, f.cfg, `{"category":"i206-parity","include_content":true,"limit":50}`)
+
+	if !reflect.DeepEqual(restRows, p.Results) {
+		t.Fatalf("MCP include_content rows differ from REST compact:false:\nREST %v\n MCP %v", restRows, p.Results)
+	}
+	byID := map[string]map[string]any{}
+	for _, r := range p.Results {
+		byID[r["id"].(string)] = r
+	}
+	got := i206IDs(p.Results)
+	sort.Strings(got)
+	want := []string{own, untrusted, redacted, kept, granted}
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("rows %v, want %v (ungranted %s and archived %s must stay out)", got, want, ungranted, archived)
+	}
+	if byID[untrusted]["untrusted"] != true {
+		t.Errorf("checkpoint row lacks untrusted: %v", byID[untrusted])
+	}
+	if md, _ := byID[redacted]["metadata"].(map[string]any); md == nil || md["guard_matched_id"] != nil || md["other"] != "kept" {
+		t.Errorf("metadata naming an unreadable block = %v, want guard_matched_id dropped and the rest kept", md)
+	}
+	if md, _ := byID[kept]["metadata"].(map[string]any); md == nil || md["guard_matched_id"] != own {
+		t.Errorf("metadata naming a readable block = %v, want guard_matched_id kept", md)
+	}
+	// The same key reads the same text and metadata through `get`.
+	for id, row := range byID {
+		r, _, err := mcpGetHandler(f.cfg)(f.keyCtx, nil, getInput{ID: id})
+		if err != nil || r.IsError {
+			t.Fatalf("get %s: %v %s", id, err, mcpTextOf(r))
+		}
+		var blk map[string]any
+		_ = json.Unmarshal([]byte(resultText(t, r)), &blk)
+		for _, k := range []string{"content", "metadata", "untrusted", "scope", "type"} {
+			// A row omits an empty metadata object (omitempty), get answers {}.
+			if md, ok := blk[k].(map[string]any); ok && len(md) == 0 && row[k] == nil {
+				continue
+			}
+			if !reflect.DeepEqual(blk[k], row[k]) {
+				t.Errorf("block %s field %s: get %v, search %v", id, k, blk[k], row[k])
+			}
+		}
+	}
 }

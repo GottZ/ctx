@@ -110,16 +110,16 @@ func TestSearchTypeStrictnessStaysATransportProperty(t *testing.T) {
 	if !(searchInput{}).coreArgs(false).VisibleTypesOnly {
 		t.Error("the MCP search tool MUST cut against the visible set (V-W6)")
 	}
-	// Without `after` the tool answers compact rows from page 1, as it always
-	// did; with it, the caller's cursor (#206).
+	// Without the #206/#207 arguments the tool answers compact rows from page 1,
+	// as it always did; with them it reads full rows and the caller's cursor.
 	toolArgs := (searchInput{}).coreArgs(false)
 	if !toolArgs.Compact || toolArgs.After != nil {
 		t.Errorf("tool args = compact %t, after %v; want compact true, after nil", toolArgs.Compact, toolArgs.After)
 	}
 	cur := &store.SearchCursor{ID: "x"}
-	toolArgs = (searchInput{After: cur}).coreArgs(false)
-	if !toolArgs.Compact || toolArgs.After != cur {
-		t.Errorf("tool args = compact %t, after %v; want compact true and the caller's cursor", toolArgs.Compact, toolArgs.After)
+	toolArgs = (searchInput{IncludeContent: true, After: cur}).coreArgs(false)
+	if toolArgs.Compact || toolArgs.After != cur {
+		t.Errorf("tool args = compact %t, after %v; want compact false and the caller's cursor", toolArgs.Compact, toolArgs.After)
 	}
 }
 

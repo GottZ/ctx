@@ -151,10 +151,12 @@ type searchInput struct {
 	Category string   `json:"category,omitempty" jsonschema:"filter by category"`
 	Tags     []string `json:"tags,omitempty" jsonschema:"filter by tags"`
 	Limit    int      `json:"limit,omitempty" jsonschema:"max results (default 10, max 50)"`
-	// After (#206) is POST /api/search's keyset cursor, through the same core.
-	// Present, it switches the answer to the page object (mcp_search_page.go);
-	// a call without it keeps the row array byte for byte.
-	After *store.SearchCursor `json:"after,omitempty" jsonschema:"page through a listing with an empty query: {} for the first page, then the next_after of the previous answer; the answer is then an object with next_after (absent on the last page), limit and results"`
+	// After and IncludeContent (#206, #207) are POST /api/search's keyset
+	// cursor and the inverse of its `compact`, through the same core. Either one
+	// present switches the answer to the page object (mcp_search_page.go); a
+	// call with neither keeps the row array byte for byte.
+	After          *store.SearchCursor `json:"after,omitempty" jsonschema:"page through a listing with an empty query: {} for the first page, then the next_after of the previous answer; the answer is then an object with next_after (absent on the last page), limit and results"`
+	IncludeContent bool                `json:"include_content,omitempty" jsonschema:"answer each block's full content and metadata instead of a 200-character preview; the answer is then an object with results, and a page ends early once the contents reach 64 KiB (truncated true, next_after continues with an empty query)"`
 	// Cluster is the C6 topic facet — a FIELD on the existing tool, not an
 	// eighth tool: a new tool raises the selection load of every MCP client,
 	// an optional argument on a known one does not (design/03 §4.8).
@@ -199,9 +201,9 @@ func (input searchInput) coreArgs(facetEnabled bool) searchArgs {
 		TypesExclude:      input.TypesExclude,
 		BlockRolesExclude: input.BlockRolesExclude,
 		Limit:             input.Limit,
-		// Compact rows as always; the cursor as given (#206), read by the core
-		// exactly as REST's.
-		Compact: true,
+		// Compact unless include_content (#207); the cursor as given (#206),
+		// read by the core exactly as REST's.
+		Compact: !input.IncludeContent,
 		After:   input.After,
 		// V-W6: `types` CUTS against the caller's retrieval-visible set here,
 		// and an unknown or non-visible name is a tool error. That strictness is
@@ -252,7 +254,7 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 	// search
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search",
-		Description: "Lightweight search without LLM synthesis. Returns matching blocks with preview, at most 50 per call. With an empty query it lists the blocks of the filters newest first; pass after to page through all of them.",
+		Description: "Lightweight search without LLM synthesis. Returns matching blocks with preview, at most 50 per call. With an empty query it lists the blocks of the filters newest first; pass after to page through all of them, and include_content to read their full text.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, mcpSearchHandler(cfg))
 
