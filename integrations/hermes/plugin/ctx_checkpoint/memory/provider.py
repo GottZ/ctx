@@ -141,6 +141,9 @@ class CtxMemoryProvider(MemoryProvider):
         # Binding of the last successful connect; the manifest cache belongs to it.
         self._verified_binding: tuple[str, str, str, str] | None = None
         self._last_chain_receipt = None
+        # Why the latest chain write failed (None after a success or when no chain ran); the
+        # umbrella records it with the outcome of each checkpoint.
+        self._last_chain_error: Exception | None = None
         # P4 cross-compaction fact dedupe, one ledger per root session
         self._fact_ledgers: dict[str, FactLedger] = {}
         # P5 digests per segment (compaction / rolling / idle / end)
@@ -793,6 +796,9 @@ class CtxMemoryProvider(MemoryProvider):
         # P5: the host calls on_session_end right after a compaction (commit_memory_session,
         # conversation_compression.py:3733) → that digest is the compaction segment digest.
         self._compaction_pending = True
+        # Outcome of THIS call only: an early return below must not leave the previous receipt.
+        self._last_chain_receipt = None
+        self._last_chain_error = None
         evidence = kwargs.get("evidence_messages")
         source = evidence if evidence is not None else (messages or [])
         started = self._now()
@@ -837,11 +843,11 @@ class CtxMemoryProvider(MemoryProvider):
             new_keys = known_keys + [k for f in facts for k in fact_keys(f)]
 
         chain_text = ""
-        self._last_chain_receipt = None
         if chain_on:
             try:
                 chain_text = self._write_chain(source, tool_evidence, budget, deadline, fact_hashes=new_keys)
             except CtxCheckpointError as exc:
+                self._last_chain_error = exc
                 if require_checkpoint:
                     logger.warning("CTX checkpoint chain failed (profile=%s, required): %s", self._profile, exc)
                     raise
@@ -851,6 +857,7 @@ class CtxMemoryProvider(MemoryProvider):
                     exc,
                 )
             except Exception as exc:  # defensive: never let an unexpected bug escape best effort
+                self._last_chain_error = exc
                 if require_checkpoint:
                     raise CtxCheckpointError(f"ctx checkpoint failed: {type(exc).__name__}") from exc
                 logger.warning("CTX checkpoint chain crashed (profile=%s, best_effort): %s", self._profile, exc)

@@ -1,4 +1,42 @@
 name: ctx_checkpoint
-version: 0.7.0
+version: 0.8.0
 description: "ctx memory provider: durable pre-compaction transcript checkpoints (fail-closed on request), and with memory: true recall, ctx_* agent tools, MEMORY.md/USER.md mirror, fact extraction and session digests — over Hermes' own MCP dispatch, no credentials of its own."
-requires_hermes: ">=0.20.4"
+# The first Hermes whose delegate_task children inherit the provider under
+# compression.checkpoint_required (before, every sub-agent compaction failed closed).
+requires_hermes: ">=0.23.1"
+# Settings -> Plugins -> ctx_checkpoint (plugins.entries.ctx_checkpoint.settings.<key>). Connection,
+# storage, memory on/off and the operating mode are in Settings -> Memory (config_schema.py); no key
+# is in both forms. The plugin reads these values over memory.ctx_checkpoint and clamps them the
+# same way. memory/config.py PLUGINS_FORM_KEYS lists the keys; a unit test keeps both lists and the
+# defaults equal to the plugin's own.
+config_schema:
+  budget_s:
+    type: number
+    default: 60
+    label: Time limit for saving one checkpoint (seconds)
+    description: "How long saving the conversation before a compaction may take, 5 to 600 seconds (values outside are moved to the nearest limit). When Hermes waits for the checkpoint (Settings -> Memory), a save that runs out of time stops that compaction."
+  max_parts:
+    type: int
+    default: 80
+    label: Most parts one checkpoint may write
+    description: "The saved conversation is split into parts (Part size in Settings -> Memory). A conversation that needs more parts than this is not saved at all. 1 to 95: ctx accepts 100 writes per minute and key, and each checkpoint writes two more blocks."
+  auto_recall:
+    type: bool
+    default: true
+    label: Recall memories before each reply
+    description: "Before each reply Hermes searches ctx and adds what it finds (marked as untrusted text). Needs Memory features on in Settings -> Memory."
+  auto_memory_mirror:
+    type: bool
+    default: true
+    label: Copy MEMORY.md and USER.md entries to ctx
+    description: "What Hermes writes into its built-in memory files is also stored in ctx. Needs Memory features on (and auto_capture, which is on unless config.yaml turns it off)."
+  auto_compress_extract:
+    type: bool
+    default: true
+    label: Save facts from compacted turns
+    description: "Up to five lasting statements from the turns being compacted are stored as separate ctx blocks, each fact only once. Needs Memory features on."
+  auto_session_digest:
+    type: bool
+    default: true
+    label: Write session summaries
+    description: "A short summary of each part of a session (after a compaction, after long stretches, after a pause, at the end) is stored in ctx. Needs Memory features on (and auto_capture, which is on unless config.yaml turns it off)."

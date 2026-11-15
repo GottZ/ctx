@@ -823,6 +823,40 @@ UMBRELLA_KEY_MAP = {
 # Keys of the umbrella section that are not engine settings.
 UMBRELLA_OWN_KEYS = ("mcp_server", "memory", "transport", "rest_base_url")
 TRANSPORTS = ("mcp", "rest")
+# 0.8.0: the Settings → Plugins form (``config_schema`` in ../plugin.yaml) writes these keys to
+# ``plugins.entries.ctx_checkpoint.settings``; a unit test keeps both lists equal. The memory
+# form (../config_schema.py) carries none of them.
+PLUGIN_ID = "ctx_checkpoint"
+PLUGINS_FORM_KEYS = (
+    "budget_s",
+    "max_parts",
+    "auto_recall",
+    "auto_memory_mirror",
+    "auto_compress_extract",
+    "auto_session_digest",
+)
+
+
+def umbrella_section(config: dict[str, Any] | None) -> dict[str, Any]:
+    """The plugin's settings section from Hermes' (loaded) config.yaml.
+
+    ``memory.ctx_checkpoint``, with each key of :data:`PLUGINS_FORM_KEYS` taken from
+    ``plugins.entries.ctx_checkpoint.settings`` when the Settings → Plugins form stored it
+    there. Precedence, lowest first: engine defaults ← ``ctx.json`` ← ``memory.ctx_checkpoint``
+    ← ``plugins.entries.ctx_checkpoint.settings`` (its other keys are ignored). Clamping
+    happens later, the same for every source. Never raises.
+    """
+    config = config if isinstance(config, dict) else {}
+    memory = config.get("memory")
+    section = memory.get(PLUGIN_ID) if isinstance(memory, dict) else None
+    out = dict(section) if isinstance(section, dict) else {}
+    plugins = config.get("plugins")
+    entries = plugins.get("entries") if isinstance(plugins, dict) else None
+    entry = entries.get(PLUGIN_ID) if isinstance(entries, dict) else None
+    settings = entry.get("settings") if isinstance(entry, dict) else None
+    if isinstance(settings, dict):
+        out.update({key: settings[key] for key in PLUGINS_FORM_KEYS if settings.get(key) is not None})
+    return out
 
 
 def overlay_from_umbrella(section: dict[str, Any] | None) -> dict[str, Any]:

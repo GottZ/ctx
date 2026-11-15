@@ -37,6 +37,14 @@ def hermes_home(tmp_path, monkeypatch):
     return home
 
 
+@pytest.fixture(autouse=True)
+def _connection_test_passes(monkeypatch):
+    """Setup tests the connection since 0.8.0; here it always passes and opens no connection
+    (test_settings_and_status.py covers the test itself)."""
+    status = sys.modules[f"{_SPEC.name}.memory.status"]
+    monkeypatch.setattr(status, "probe_server", lambda name, entry, timeout: ["search", "get", "store"])
+
+
 def _write_config(home, config):
     # JSON is valid YAML; the host parses it like any hand-written config.yaml.
     (home / "config.yaml").write_text(json.dumps(config), encoding="utf-8")
@@ -304,8 +312,11 @@ def test_save_config_clamps_part_size(hermes_home, raw, stored):
 
 
 def test_post_setup_prompts_writes_env_and_activates(hermes_home, monkeypatch, capsys):
-    # ctx_url, sensitivity (invalid, then valid), category, chunk_chars, memory features
-    _answers(monkeypatch, ["https://ctx.example.test/mcp", "secret", "personal", "", "", ""], secret="ctx-key-abcdef")
+    # ctx_url, sensitivity (invalid, then valid), category, chunk_chars, memory features, then the
+    # operating mode (asked after the connection test)
+    _answers(
+        monkeypatch, ["https://ctx.example.test/mcp", "secret", "personal", "", "", "", ""], secret="ctx-key-abcdef"
+    )
 
     CtxCheckpointMemoryProvider(config={}).post_setup(str(hermes_home), {})
 
@@ -357,7 +368,7 @@ def test_post_setup_keeps_a_current_key_on_blank_input(hermes_home, monkeypatch,
 def test_post_setup_reports_a_failed_key_write_without_touching_config(hermes_home, monkeypatch, capsys):
     import hermes_cli.config as host_config
 
-    _answers(monkeypatch, ["https://ctx.example.test/mcp", "", "", "", ""], secret="ctx-key-abcdef")
+    _answers(monkeypatch, ["https://ctx.example.test/mcp", "", "", "", "", ""], secret="ctx-key-abcdef")
 
     def refuse(key, value):
         raise PermissionError(".env is read-only")

@@ -33,8 +33,10 @@ from .config import (
     merge_tags,
     overlay_from_umbrella,
     resolve_base_url,
+    umbrella_section,
     umbrella_transport,
 )
+from .status import mcp_report, redact_error
 
 # Built-in memory files separate entries with a line holding only "§" (host ENTRY_DELIMITER
 # "\n§\n"); a "§" inside an entry ("gemäß § 22 UStG") must not split it.
@@ -68,13 +70,12 @@ def _ctx_json(home: Path) -> dict[str, Any]:
 
 
 def _plugin_section() -> dict[str, Any]:
-    """``memory.ctx_checkpoint`` from Hermes' config.yaml ({} when unreadable)."""
+    """The plugin's settings from Hermes' config.yaml, the provider's own precedence
+    (``memory.ctx_checkpoint`` under the Settings → Plugins values); {} when unreadable."""
     try:
         from hermes_cli.config import load_config
 
-        memory = load_config().get("memory", {})
-        section = memory.get("ctx_checkpoint", {}) if isinstance(memory, dict) else {}
-        return dict(section) if isinstance(section, dict) else {}
+        return umbrella_section(load_config())
     except Exception:
         return {}
 
@@ -134,13 +135,19 @@ def cmd_status(args, home: Path, config: dict[str, Any]) -> int:
     print(f"  profile:  {derive_profile_name(str(home))} ({home})")
     print(f"  transport: {config.get('_transport', 'rest')}")
     if config.get("_transport", "rest") != "rest":
-        print("  (REST credentials are not used over MCP; the connection check is `hermes mcp test <server>`)")
+        try:
+            report = mcp_report(str(home))
+        except Exception as exc:
+            print(f"  ✗ status unavailable: {redact_error(exc)}")
+            return 1
+        for name, value in report.items():
+            print(f"  {name}: {value}")
         settings = _ctx_json(home)
         if settings:
             print("  ctx.json settings:")
             for name, value in sorted(settings.items()):
                 print(f"    {name}: {value}")
-        return 0
+        return 0 if report.get("ok") is not False else 1
     print(f"  base URL: {base or '(not set)'}")
     print(f"  key:      {'set' if key else 'NOT set'}")
     if not (base and key):
