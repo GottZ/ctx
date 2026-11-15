@@ -69,7 +69,8 @@
 //	                                       comparison.
 //	d content_change_resets_the_guard    — new content ⇒ ordinary upsert answer,
 //	                                       guard_checked_at gone, embedding
-//	                                       cleared. GREEN before AND after: pins
+//	                                       marked stale (cleared before issue
+//	                                       #198 part B). GREEN before AND after: pins
 //	                                       that the merge and the carry-over are
 //	                                       bound to identical content.
 //
@@ -500,8 +501,15 @@ func TestStoreIdenticalContentTagsMetadata(t *testing.T) {
 		if _, ok := got.meta["guard_checked_at"]; ok {
 			t.Errorf("content change kept guard_checked_at — the verdict about the old vector survived a new content: %v", got.meta)
 		}
-		if got.hasEmbed {
-			t.Errorf("content change kept the stale embedding")
+		// Since issue #198 part B the previous vector stays until the
+		// backfill replaces it, marked stale; the guard waits for the new one.
+		var stale bool
+		if err := pool.QueryRow(context.Background(),
+			`SELECT embedding_stale FROM context_blocks WHERE id = $1::uuid`, id).Scan(&stale); err != nil {
+			t.Fatal(err)
+		}
+		if !got.hasEmbed || !stale {
+			t.Errorf("content change: has_embedding=%v stale=%v, want the previous vector kept and marked stale", got.hasEmbed, stale)
 		}
 	})
 }

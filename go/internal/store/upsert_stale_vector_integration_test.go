@@ -18,7 +18,7 @@
 // serving a content-foreign vector permanently after cutover (§7 W04-8 row,
 // §4.3 last paragraph).
 //
-// The fix reuses the ClearEmbeddingTx primitive (W04-3) inside UpsertBlock's
+// The fix reuses the InvalidateEmbeddingTx primitive (W04-3) inside UpsertBlock's
 // own transaction — not bespoke SQL — so future extensions of the primitive
 // (e.g. a W04-4 migration-scoped memo delete) are picked up here for free.
 //
@@ -31,6 +31,11 @@
 //
 // i.e. embedding IS NOT NULL and embed_model unchanged after a content
 // change — the Ist-Bug from the wave briefing, verbatim.
+//
+// Since issue #198 part B the content change keeps the live pair and marks it
+// stale (embedding_stale) instead of nulling it: the backfill replaces it, and
+// until then the semantic arms rank the block by its previous text. The _next
+// pair and the memo are cleared as before (InvalidateEmbeddingTx).
 //
 // Run: `go test -tags=integration ./internal/store/ -run TestUpsertBlock_StaleVector -count=1 -v`.
 package store_test
@@ -61,10 +66,12 @@ func TestUpsertBlock_StaleVector_Integration(t *testing.T) {
 	// Gate 1 (Rot→Grün): the Ist-Bug itself. A block with a live vector +
 	// embed_model gets re-upserted under the SAME (category,title,scope) key
 	// with DIFFERENT content. Pre-fix, embedding/embed_model survive
-	// untouched (Ist-Bug). Post-fix, ALL FOUR embedding columns null out and
-	// the backfill memo is deleted — the same contract ClearEmbedding gives
-	// manage-update, now also on the upsert-conflict path.
-	t.Run("conflict_with_changed_content_clears_embedding", func(t *testing.T) {
+	// untouched and unmarked (Ist-Bug). Post-fix, the live pair is marked
+	// stale (kept until the backfill replaces it, issue #198 part B), the
+	// _next pair nulls out and the backfill memo is deleted — the same
+	// contract InvalidateEmbeddingTx gives manage-update, also on the
+	// upsert-conflict path.
+	t.Run("conflict_with_changed_content_invalidates_embedding", func(t *testing.T) {
 		b, err := store.UpsertBlock(ctx, pool, "learnings", "w04-8-changed", "content v1", nil, nil, "w04-8", false, store.SensitivityWrite{}, "")
 		if err != nil {
 			t.Fatalf("initial upsert: %v", err)
@@ -93,26 +100,28 @@ func TestUpsertBlock_StaleVector_Integration(t *testing.T) {
 			t.Fatalf("conflicting upsert (changed content): %v", err)
 		}
 
-		var embNull, modelNull, embNextNull, modelNextNull bool
+		var embNull, modelNull, embNextNull, modelNextNull, stale bool
 		var model, content string
 		if err := pool.QueryRow(ctx,
 			`SELECT embedding IS NULL, embed_model IS NULL, embedding_next IS NULL, embed_model_next IS NULL,
-			        COALESCE(embed_model, ''), content
+			        COALESCE(embed_model, ''), content, embedding_stale
 			 FROM context_blocks WHERE id = $1::uuid`, b.ID).
-			Scan(&embNull, &modelNull, &embNextNull, &modelNextNull, &model, &content); err != nil {
+			Scan(&embNull, &modelNull, &embNextNull, &modelNextNull, &model, &content, &stale); err != nil {
 			t.Fatalf("read post-upsert state: %v", err)
 		}
 		if content != "content v2 — DIFFERENT" {
 			t.Fatalf("content = %q, want the new content (upsert itself must still apply)", content)
 		}
-		if !embNull || !modelNull {
-			// This is the literal Ist-Bug wording the wave briefing asked for
-			// (Gate 1 "Rot", captured verbatim in the file header once run
-			// against the pre-fix source).
-			t.Errorf("post-upsert (PRE-FIX BEHAVIOR PINNED, Inventur §3.4): embedding_is_null=%v embed_model=%q — old vector survived a content change (want embedding_is_null=true)", embNull, model)
+		if !stale {
+			// The Ist-Bug of W04-8: the old vector survived a content change
+			// unmarked, out of the backfill's reach.
+			t.Errorf("post-upsert (W04-8): embedding_stale=false embedding_is_null=%v embed_model=%q — the old vector survived a content change unmarked", embNull, model)
+		}
+		if embNull || model != "from-model" {
+			t.Errorf("post-upsert: embedding_is_null=%v embed_model=%q, want the previous vector kept until the backfill replaces it (issue #198, part B)", embNull, model)
 		}
 		if !embNextNull || !modelNextNull {
-			t.Errorf("post-upsert: embedding_next_is_null=%v embed_model_next_is_null=%v, want both true (ClearEmbeddingTx contract, W04-3)", embNextNull, modelNextNull)
+			t.Errorf("post-upsert: embedding_next_is_null=%v embed_model_next_is_null=%v, want both true (InvalidateEmbeddingTx contract, W04-3)", embNextNull, modelNextNull)
 		}
 
 		var postMemo int
@@ -122,7 +131,7 @@ func TestUpsertBlock_StaleVector_Integration(t *testing.T) {
 			t.Fatalf("read post-upsert memo count: %v", err)
 		}
 		if postMemo != 0 {
-			t.Errorf("backfill memo survived a content-changing upsert (count=%d), want deleted (ClearEmbeddingTx contract)", postMemo)
+			t.Errorf("backfill memo survived a content-changing upsert (count=%d), want deleted (InvalidateEmbeddingTx contract)", postMemo)
 		}
 	})
 
@@ -173,12 +182,13 @@ func TestUpsertBlock_StaleVector_Integration(t *testing.T) {
 
 	// Gate 3 (Konvergenz, W04-4-Vorbedingung): simulate mid-migration state
 	// (embedding_next already populated by a migration worker) plus a
-	// content-changing upsert — BOTH vector pairs must null out. This is the
+	// content-changing upsert — the _next pair must null out and the live
+	// pair be marked stale (issue #198, part B). This is the
 	// §4.3 Konvergenz-Invariante's hard precondition: without it, the
 	// migration's pending predicate (embedding_next IS NULL) would never
 	// re-pick this block, and Verify would count it complete while serving a
 	// content-foreign vector forever after cutover.
-	t.Run("conflict_during_simulated_migration_clears_both_pairs", func(t *testing.T) {
+	t.Run("conflict_during_simulated_migration_clears_next_pair", func(t *testing.T) {
 		b, err := store.UpsertBlock(ctx, pool, "learnings", "w04-8-migration", "pre-migration content", nil, nil, "w04-8", false, store.SensitivityWrite{}, "")
 		if err != nil {
 			t.Fatalf("initial upsert: %v", err)
@@ -210,15 +220,15 @@ func TestUpsertBlock_StaleVector_Integration(t *testing.T) {
 			t.Fatalf("conflicting upsert during simulated migration: %v", err)
 		}
 
-		var embNull, modelNull, embNextNull, modelNextNull bool
+		var embNull, modelNull, embNextNull, modelNextNull, stale bool
 		if err := pool.QueryRow(ctx,
-			`SELECT embedding IS NULL, embed_model IS NULL, embedding_next IS NULL, embed_model_next IS NULL
+			`SELECT embedding IS NULL, embed_model IS NULL, embedding_next IS NULL, embed_model_next IS NULL, embedding_stale
 			 FROM context_blocks WHERE id = $1::uuid`, b.ID).
-			Scan(&embNull, &modelNull, &embNextNull, &modelNextNull); err != nil {
+			Scan(&embNull, &modelNull, &embNextNull, &modelNextNull, &stale); err != nil {
 			t.Fatalf("read post-upsert state: %v", err)
 		}
-		if !embNull || !modelNull {
-			t.Errorf("live pair not nulled: embedding_is_null=%v embed_model_is_null=%v, want both true", embNull, modelNull)
+		if embNull || modelNull || !stale {
+			t.Errorf("live pair: embedding_is_null=%v embed_model_is_null=%v stale=%v, want it kept and marked stale (issue #198, part B)", embNull, modelNull, stale)
 		}
 		if !embNextNull || !modelNextNull {
 			t.Errorf("_next pair not nulled: embedding_next_is_null=%v embed_model_next_is_null=%v, want both true — this is the §4.3 Konvergenz-Invariante's hard precondition (W04-4)", embNextNull, modelNextNull)

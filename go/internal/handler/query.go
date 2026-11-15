@@ -1950,10 +1950,20 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 			break
 		}
 		// Model is the ACTUALLY SERVING backend's role model (served, not the
-		// configured/requested one — W04-1 provenance).
-		if err := store.StoreEmbedding(ctx, h.pool, blockID, served.ModelFor(backends.RoleEmbed).Model, vec); err != nil {
+		// configured/requested one — W04-1 provenance). The pick held no row
+		// lock over the embed call, so the vector lands only while the block
+		// still holds the title and content it was made from (issue #198,
+		// part B): a change that committed meanwhile leaves the block pending,
+		// and a later pick embeds its current text.
+		stored, err := store.StoreEmbeddingIfUnchanged(ctx, h.pool, blockID, title, content, served.ModelFor(backends.RoleEmbed).Model, vec)
+		if err != nil {
 			slog.Warn("query backfill: store failed", "block_id", blockID, "error", err)
 			break
+		}
+		if !stored {
+			slog.Info("query backfill: title or content changed during the embed, vector discarded, block stays pending",
+				"block_id", blockID)
+			continue
 		}
 		count++
 	}
@@ -2163,7 +2173,7 @@ func (p *backfillPicker) pickOverran(ctx context.Context, cl store.PendingClasse
 		`SELECT id, title, content, sensitivity, scope, f.next_attempt_at
 			FROM context_blocks
 			JOIN context_embed_failures f ON f.block_id = context_blocks.id AND f.migration_id IS NULL
-			WHERE embedding IS NULL AND NOT is_archived
+			WHERE `+store.EmbedPendingPredicate+`
 			  AND f.last_class = $5
 			  AND f.next_attempt_at + make_interval(secs =>
 			        least($6::float8 * power(2, least(f.attempts, 31) - 1), $7::float8)) <= now()`+

@@ -529,7 +529,8 @@ func TestDistillBlockWrite(t *testing.T) {
 			}
 
 			// A real content change DOES invalidate it, which is the other half
-			// of the same property.
+			// of the same property. Since issue #198 part B the invalidation
+			// keeps the vector and marks it stale for the backfill.
 			st.addBatch(distillExtractResult{insights: []distillKept{
 				{claim: "Der Retrieval-Pfad faltet vier Arme per Reciprocal Rank Fusion zusammen.",
 					quote: "harmloser Zitattext", blockID: a8Block2, chunk: 2},
@@ -537,14 +538,15 @@ func TestDistillBlockWrite(t *testing.T) {
 			if err := s.distillWriteBlock(ctx, opts, st); err != nil {
 				t.Fatalf("third write: %v", err)
 			}
+			var stale bool
 			if err := pool.QueryRow(ctx,
-				`SELECT COALESCE(embed_model,'') FROM context_blocks
+				`SELECT COALESCE(embed_model,''), embedding_stale FROM context_blocks
 				  WHERE category='session-insights' AND title=$1 AND scope=$2`,
-				distillBlockTitle(dfRoot, 0, 1), dfScope).Scan(&model); err != nil {
+				distillBlockTitle(dfRoot, 0, 1), dfScope).Scan(&model, &stale); err != nil {
 				t.Fatalf("read embed_model: %v", err)
 			}
-			if model != "" {
-				t.Errorf("embed_model = %q after a content change, want cleared", model)
+			if !stale {
+				t.Errorf("embedding_stale = false after a content change (embed_model %q), want the vector invalidated", model)
 			}
 		})
 	})

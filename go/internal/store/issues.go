@@ -416,7 +416,8 @@ func ListIssues(ctx context.Context, pool *pgxpool.Pool, q IssueListQuery) ([]Wo
 // error the handler maps to 422. The block must be writable (scope ∈
 // writableScopes) — a foreign/absent id ⇒ ErrIssueNotFound (no oracle). Title
 // keeps its "#L<seq>" prefix; metadata is JSONB-merged (local_seq survives);
-// a content/title change clears the embedding so the scheduler re-embeds.
+// a content/title change invalidates the vector (InvalidateEmbeddingTx: it
+// stays searchable, marked stale, until the scheduler re-embeds the block).
 func UpdateIssueBlock(ctx context.Context, tx pgx.Tx, id string, u IssueUpdate, set *blocktype.Set, writableScopes []string) (*Block, error) {
 	// I7/S3b, ahead of the lookup: this is the one client-supplied metadata map
 	// in the tree that is MERGED (`metadata = metadata || $n::jsonb`) rather
@@ -488,9 +489,6 @@ func UpdateIssueBlock(ctx context.Context, tx pgx.Tx, id string, u IssueUpdate, 
 	if len(set2.clauses) == 0 {
 		return nil, fmt.Errorf("store: update issue: no fields to update")
 	}
-	if u.Content != nil || u.Title != nil {
-		set2.addLiteral("embedding = NULL")
-	}
 	set2.addLiteral("updated_at = now()")
 
 	// The RETURNING redacts against writableScopes, the set the lookup above
@@ -503,6 +501,11 @@ func UpdateIssueBlock(ctx context.Context, tx pgx.Tx, id string, u IssueUpdate, 
 	b, err := scanIssue(tx.QueryRow(ctx, query, set2.args...))
 	if err != nil {
 		return nil, fmt.Errorf("store: update issue: %w", err)
+	}
+	if u.Content != nil || u.Title != nil {
+		if err := InvalidateEmbeddingTx(ctx, tx, id); err != nil {
+			return nil, fmt.Errorf("store: update issue: %w", err)
+		}
 	}
 	return b, nil
 }

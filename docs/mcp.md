@@ -287,11 +287,12 @@ stage time and again when it is confirmed, against the registry of that moment: 
 type that left the registry, or a block type that became untrusted, in between
 refuses the confirm and keeps the stage token.
 
-A changed `title` or `content` clears the block's embedding in the same
-transaction as the update; the backfill writes the new one, and until then the
-block is found by the lexical arms only. A `title` or `content` sent with the
-value the block already holds keeps the embedding. The REST `manage update`
-action behaves the same.
+A changed `title` or `content` marks the block's vector stale in the same
+transaction as the update, and the backfill writes the new one. Until then the
+block keeps its previous vector, so the semantic arms of a query still find it,
+ranked by the text it held before the change. A `title` or `content` sent with
+the value the block already holds leaves the vector as it is. The REST `manage
+update` action behaves the same ([api](api.md), "Embedding on update").
 
 An update that would give the block the `category` and `title` of another active
 block in its scope is refused, and nothing is written: `isError: true`, code

@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 172,
-    "migration_count": 60,
+    "migration_max": 173,
+    "migration_count": 61,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -975,6 +975,12 @@
         },
         {
           "name": "dream_last_inert",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "embedding_stale",
           "type": "boolean",
           "not_null": true,
           "storage": "p"
@@ -5528,6 +5534,12 @@
     "idx_embedding_pending_sens": {
       "def_hash": "e2fd83a68330773dd6d548e678b4b1bf01b9ef3b526e32888f7472423fa23f47"
     },
+    "idx_embedding_stale_scope_sens": {
+      "def_hash": "ed7145804a50d341900ad96e84ad908eeb9f8e1c3e9f0142f9ee80d2611afb2e"
+    },
+    "idx_embedding_stale_sens": {
+      "def_hash": "aafaffd927d6a68d1592a0bf88682abdab94363522b08033c88785f3299985b5"
+    },
     "idx_external_identities_principal": {
       "def_hash": "38010d6b84a4c18c2bb294974a3612326e8e3d9f908e4b6cdde085a633f2d766"
     },
@@ -5993,7 +6005,7 @@
       "src_hash": "4b5add16d06a48cb0783435e48748263c962ed6c33c9f7bb1e7fb270a4deff4e"
     },
     "ctx_guard_check(p_block_id uuid, p_threshold_duplicate real, p_threshold_review real, p_candidate_types text[], p_same_scope_only boolean)": {
-      "src_hash": "e78928167543f0533238951f7e66daba4e23d1ee3f1fa2a2698cdaedb04a3e76"
+      "src_hash": "ac5ce9d8a27d12c49a318edc0b64de8b52927698cdd6931605fee1cf68fc096e"
     },
     "ctx_model_auth(p_key_hash text, p_client_ip inet, p_secure boolean)": {
       "src_hash": "4a53d01644bbb648173d964f2ffb2670e3cde0c9b81a1e98b9391edde7a20b45"

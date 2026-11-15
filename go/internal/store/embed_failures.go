@@ -165,8 +165,22 @@ func OversizeEstimateMessage(estimatedTokens, maxTokens int) string {
 // short-circuits to next_attempt_at='infinity' regardless of attempts
 // (design/04 §4.4: a capped exponential backoff would still be "retry
 // forever in slow motion" for a block that cannot structurally succeed).
+//
+// Such a park also ends a stale window (issue #198, part B): a title or
+// content change keeps the previous vector until the backfill writes the new
+// one, and a parked block's new vector is never written, so the previous one
+// is dropped here, and the block is unembedded as it was before part B. The
+// block row is written before the memo row, the order every content writer
+// takes them in (InvalidateEmbeddingTx).
 func RecordEmbedFailure(ctx context.Context, q pgxdb.Execer, blockID string, class EmbedFailureClass, normalizedErr string, backoffBase, backoffCap time.Duration) error {
 	if isInfinityClass(class) {
+		if _, err := q.Exec(ctx,
+			`UPDATE context_blocks SET embedding = NULL, embed_model = NULL, embedding_stale = false
+			 WHERE id = $1 AND embedding_stale`,
+			blockID,
+		); err != nil {
+			return fmt.Errorf("store: record embed failure (%s): drop the stale vector: %w", class, err)
+		}
 		_, err := q.Exec(ctx,
 			`INSERT INTO context_embed_failures (block_id, migration_id, attempts, last_error, last_class, next_attempt_at)
 			 VALUES ($1, NULL, 1, $2, $3, 'infinity')
