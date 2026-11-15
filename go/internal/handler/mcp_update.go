@@ -24,7 +24,9 @@
 // the same function (claimReject, against the request's registry snapshot),
 // and the store writes it with type_source='manual'. One rule is this tool's
 // own (untrustedLiftReject): a re-type may not take the untrusted marking off
-// a block, at stage time, at confirm time and on the direct path.
+// a block, at stage time, at confirm time and on the direct path. It is not a
+// property of the block: the store tool's upsert branch and REST manage-update
+// still take an explicit type as given.
 package handler
 
 import (
@@ -37,6 +39,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/derived"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -137,16 +140,45 @@ func updateDataFromCanonical(cw store.CanonicalWrite) store.UpdateBlockData {
 // field for one, so it refuses: the class is reserved_type (the remedy is the
 // one that code names — drop the claim), the message says which marking and
 // why. A move between two untrusted types keeps the marking, a move onto an
-// untrusted type adds it; both pass.
+// untrusted type adds it; both pass. The rule is this tool's: the store tool's
+// upsert onto an existing (category, title, scope) takes its explicit type as
+// given, and so does REST manage update.
 //
-// current is the block's type as stored, next the claimed one; both resolve
-// against the caller's registry snapshot through Set.IsUntrusted, the
-// predicate recall itself frames with (store.untrustedOf), so a type the
-// caller's snapshot does not mark untrusted is not treated as marked here
-// either. A nil set is unreachable — claimReject refuses a named type on an
-// unwired registry first — and answers nil so the function is total.
-func untrustedLiftReject(set *blocktype.Set, current, next string) *writeReject {
-	if next == "" || set == nil || !set.IsUntrusted(current) || set.IsUntrusted(next) {
+// base is the block as the caller's write filter reads it, next the claimed
+// type; both types resolve against the caller's registry snapshot through
+// Set.IsUntrusted, the predicate recall frames with (store.untrustedOf). Two
+// cases are decided before that, in this order:
+//
+//   - A block carrying derived provenance answers provenance_protected, the
+//     refusal store.UpdateBlock's WHERE gives every client write to it (and
+//     REST manage update therefore gives this payload); without this arm the
+//     one untrusted derived type, insight, would answer reserved_type here
+//     and 403 there.
+//   - A current type the snapshot does not hold — a type owned under another
+//     home scope on a block in a scope this key may write, or an orphaned name
+//     — is refused: whether it marks the content cannot be decided from this
+//     key's view, and its owner's readers may frame it as untrusted. An empty
+//     name is no type at all and passes.
+//
+// A nil set is unreachable — claimReject refuses a named type on an unwired
+// registry first — and answers nil so the function is total.
+func untrustedLiftReject(set *blocktype.Set, base *store.Block, next string) *writeReject {
+	if next == "" || set == nil || base == nil {
+		return nil
+	}
+	if derived.HasProvenance(base.Metadata) {
+		return provenanceRejectOr(store.ErrProvenanceProtected, nil)
+	}
+	current := base.TypeName
+	if current == "" || set.IsUntrusted(next) {
+		return nil
+	}
+	if _, ok := set.Resolve(current); !ok {
+		return classReservedType.reject(fmt.Sprintf(
+			"type: the block's current type %q is not in this key's block-type registry, so whether it marks the content "+
+				"as untrusted (retrieval.untrusted) cannot be decided — the update tool does not re-type such a block", current))
+	}
+	if !set.IsUntrusted(current) {
 		return nil
 	}
 	return classReservedType.reject(fmt.Sprintf(
@@ -172,7 +204,7 @@ func mcpUpdateTrustGate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult,
 	if base == nil {
 		return errResult("Block not found (or not in a writable scope of this key)")
 	}
-	if rej := untrustedLiftReject(set, base.TypeName, next); rej != nil {
+	if rej := untrustedLiftReject(set, base, next); rej != nil {
 		return errResultReject(rej)
 	}
 	return nil
@@ -342,7 +374,7 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, set
 	// The untrusted rule over the type the pin just read: a card for a re-type
 	// the confirm would refuse is never issued (D1-M2). The confirm runs it
 	// again (confirmTypeTrustReject) against the registry of that moment.
-	if rej := untrustedLiftReject(set, block.TypeName, input.Type); rej != nil {
+	if rej := untrustedLiftReject(set, block, input.Type); rej != nil {
 		return errResultReject(rej), nil, nil
 	}
 

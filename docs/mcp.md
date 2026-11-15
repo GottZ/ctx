@@ -277,7 +277,12 @@ its content, embedding and existing links as they are.
 One refusal is this tool's own: a block whose current type marks its content as
 untrusted (see **Untrusted content** above) cannot be re-typed to a type without that marking
 (`reserved_type`, the text names both types). Moving it to another untrusted type,
-or any block onto an untrusted type, is allowed. A staged re-type is checked at
+or any block onto an untrusted type, is allowed. A block whose current type is not in
+the key's registry view is not re-typed either (`reserved_type`), because whether that
+type marks the content cannot be decided from it; a re-type of a block the server
+derived answers `provenance_protected`, as every write to it does. The rule belongs to
+this tool: [`store`](#store) onto an existing block's category and title, and the REST
+`manage update` action, take an explicit `type` as given. A staged re-type is checked at
 stage time and again when it is confirmed, against the registry of that moment: a
 type that left the registry, or a block type that became untrusted, in between
 refuses the confirm and keeps the stage token.

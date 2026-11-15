@@ -154,7 +154,9 @@ func confirmDriftReject(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthRe
 //
 // Split out of executeConfirm for the cyclop budget, like its neighbours. Its
 // own snapshot and its own read run only on this path (op 'update' with a
-// type); the drift check before it has already proved the block unchanged.
+// type). Like the drift check before it, it decides over a read: a writer that
+// re-types the block between this read and the execute after the consume is
+// not seen — the window the drift pin has had since D1-M3.
 func confirmTypeTrustReject(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, ar *auth.AuthResult, cw store.CanonicalWrite) *confirmOutcome {
 	if cw.Op != "update" || cw.Type == "" {
 		return nil
@@ -171,7 +173,7 @@ func confirmTypeTrustReject(ctx context.Context, pool *pgxpool.Pool, blocktypes 
 	if base == nil {
 		return &confirmOutcome{Kind: confirmTOCTOUGone, Op: cw.Op, BlockID: cw.ID}
 	}
-	if rej := untrustedLiftReject(set, base.TypeName, cw.Type); rej != nil {
+	if rej := untrustedLiftReject(set, base, cw.Type); rej != nil {
 		return &confirmOutcome{Kind: confirmClaimRejected, Op: cw.Op, Reject: rej}
 	}
 	return nil

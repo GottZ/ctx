@@ -37,6 +37,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/derived"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -296,6 +297,70 @@ func TestMCPUpdateType(t *testing.T) {
 		if name, _ := i203TypeOf(t, f.pool, id); name != "tool-overview" {
 			t.Errorf("type = %q, want tool-overview", name)
 		}
+
+		// A block of the key's own trusted tenant type re-types freely: the
+		// current type resolves against the request's snapshot, not the base.
+		own := i203StoreTyped(t, f, f.direct, "t203-own-source", "t203-own")
+		if a := f.call(t, f.direct, "update", map[string]any{"id": own, "type": "knowledge"}); a.RPCError != "" || a.IsError {
+			t.Errorf("t203-own → knowledge: %+v, want accepted", a)
+		}
+		if name, _ := i203TypeOf(t, f.pool, own); name != "knowledge" {
+			t.Errorf("type = %q, want knowledge", name)
+		}
+	})
+
+	t.Run("a current type outside the key's registry is not re-typed", func(t *testing.T) {
+		// No production write leaves a block on a name the caller's registry
+		// view lacks except a type owned under another home scope, so the
+		// orphan is planted by SQL: it stands for both.
+		id := i203StoreTyped(t, f, f.direct, "t203-orphan-source", "")
+		if _, err := f.pool.Exec(ctx, `UPDATE context_blocks SET type_name = 't203-orphan' WHERE id = $1`, id); err != nil {
+			t.Fatalf("plant orphaned type: %v", err)
+		}
+		for keyName, keyCtx := range map[string]context.Context{"direct": f.direct, "flagged": f.flagged} {
+			a := f.call(t, keyCtx, "update", map[string]any{"id": id, "type": "knowledge"})
+			if a.RPCError != "" || !a.IsError || a.Code != "reserved_type" || !strings.Contains(a.Text, `"t203-orphan"`) {
+				t.Errorf("%s key, orphan → knowledge: %+v, want a reserved_type refusal naming the type", keyName, a)
+			}
+		}
+		if n := i203OpenStages(t, f, ""); n != 0 {
+			t.Errorf("a refused re-type left %d stage rows, want 0", n)
+		}
+		if name, _ := i203TypeOf(t, f.pool, id); name != "t203-orphan" {
+			t.Errorf("type = %q, want unchanged t203-orphan", name)
+		}
+	})
+
+	t.Run("a re-type of a derived block answers provenance_protected on both surfaces", func(t *testing.T) {
+		// insight is the one type that is untrusted AND derived: the
+		// provenance refusal REST answers must win over the untrusted rule.
+		mkDerived := func(title string) string {
+			t.Helper()
+			b, err := store.UpsertBlock(ctx, f.pool, "learnings", title, "derived body", nil,
+				map[string]any{"provenance": map[string]any{
+					"v": derived.ContractVersion, "stratum": int(derived.StratumDerived),
+				}}, "private", false, store.SensitivityWrite{}, derived.TypeInsight)
+			if err != nil {
+				t.Fatalf("seed derived block %s: %v", title, err)
+			}
+			return b.ID
+		}
+		restID, mcpID := mkDerived("t203-derived-rest"), mkDerived("t203-derived-mcp")
+		status, code, msg, ok := i203RestUpdate(t, mh, directAR, restID, map[string]any{"type": "knowledge"})
+		if ok || status != http.StatusForbidden || code != "provenance_protected" {
+			t.Fatalf("REST = (status %d, code %q, success %v), want (403, provenance_protected, false)", status, code, ok)
+		}
+		for keyName, keyCtx := range map[string]context.Context{"direct": f.direct, "flagged": f.flagged} {
+			a := f.call(t, keyCtx, "update", map[string]any{"id": mcpID, "type": "knowledge"})
+			if a.RPCError != "" || !a.IsError || a.Code != "provenance_protected" || a.Text != msg {
+				t.Errorf("%s key: %+v, want provenance_protected with REST's text %q", keyName, a, msg)
+			}
+		}
+		for _, id := range []string{restID, mcpID} {
+			if name, _ := i203TypeOf(t, f.pool, id); name != derived.TypeInsight {
+				t.Errorf("derived block %s type = %q, want unchanged insight", id, name)
+			}
+		}
 	})
 
 	t.Run("block counters stay exact across re-types", func(t *testing.T) {
@@ -330,6 +395,8 @@ func TestMCPUpdateTypeStaged(t *testing.T) {
 
 	i203CreateType(t, f.pool, "t203-vanish", "_global", i203PlainConfig)
 	i203CreateType(t, f.pool, "t203-src", "_global", i203PlainConfig)
+	i203CreateType(t, f.pool, "t203-src-own", "private", i203PlainConfig)
+	i203CreateType(t, f.pool, "t203-src-own-flip", "private", i203PlainConfig)
 	if err := reg.Reload(ctx, f.pool); err != nil {
 		t.Fatalf("registry reload: %v", err)
 	}
@@ -442,6 +509,42 @@ func TestMCPUpdateTypeStaged(t *testing.T) {
 		}
 		if name, source := i203TypeOf(t, f.pool, id); name != "t203-src" || source != "manual" {
 			t.Errorf("type = (%q, %q), want unchanged (t203-src, manual)", name, source)
+		}
+	})
+
+	t.Run("the confirm decides over the key's own tenant types", func(t *testing.T) {
+		// A trusted tenant type confirms; a tenant type marked untrusted after
+		// staging refuses. Both resolve only in the request's snapshot.
+		keep := i203StoreTyped(t, f, f.direct, "t203-src-own-target", "t203-src-own")
+		flip := i203StoreTyped(t, f, f.direct, "t203-src-own-flip-target", "t203-src-own-flip")
+		hKeep := stage(t, map[string]any{"id": keep, "type": "knowledge"})
+		hFlip := stage(t, map[string]any{"id": flip, "type": "knowledge"})
+		row, err := store.GetBlockType(ctx, f.pool, "t203-src-own-flip", []string{"private"})
+		if err != nil || row == nil {
+			t.Fatalf("read tenant type row: %v", err)
+		}
+		if _, err := store.UpdateBlockType(ctx, f.pool, row.ID, []string{"private"},
+			store.BlockTypeUpdate{Config: json.RawMessage(i203UntrustedConfig)}, nil, ""); err != nil {
+			t.Fatalf("mark the tenant type untrusted: %v", err)
+		}
+		reload(t)
+		reg.InvalidateTenant("private")
+
+		if a := confirm(t, hKeep); a.IsError {
+			t.Errorf("confirm over a trusted tenant type: %+v, want executed", a)
+		}
+		if name, _ := i203TypeOf(t, f.pool, keep); name != "knowledge" {
+			t.Errorf("type = %q, want knowledge", name)
+		}
+		a := confirm(t, hFlip)
+		if !a.IsError || a.Code != "reserved_type" || !strings.Contains(a.Text, `"t203-src-own-flip"`) {
+			t.Errorf("confirm after the tenant type turned untrusted: %+v, want a reserved_type refusal naming it", a)
+		}
+		if n := i203OpenStages(t, f, hFlip); n != 1 {
+			t.Errorf("a refusal before the consume spent the token (open = %d, want 1)", n)
+		}
+		if name, _ := i203TypeOf(t, f.pool, flip); name != "t203-src-own-flip" {
+			t.Errorf("type = %q, want unchanged t203-src-own-flip", name)
 		}
 	})
 }
