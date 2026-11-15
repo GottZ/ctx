@@ -496,7 +496,9 @@ def test_uuid_shaped_session_id_never_becomes_a_block_id():
 
     _part, manifest, head = [args for name, args in calls if name == "mcp__ctx__store"]
     assert session in head["title"]  # the session id IS in every store answer text ...
-    assert session not in frame  # ... but never taken for a block id
+    head_line, manifest_line = frame.splitlines()[:2]
+    assert session not in head_line and session not in manifest_line  # ... but never taken for a block id
+    assert f'id="{session}"' not in frame  # (0.9.0: it is the search token of the read path)
     # The fake answers part 300, manifest 301, head 302.
     assert manifest["metadata"]["source_block_ids"] == ["019f6000-0000-7000-8000-000000000300"]
     assert "019f6000-0000-7000-8000-000000000301" in head["content"]

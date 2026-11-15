@@ -210,6 +210,20 @@ class CtxMemoryProvider(MemoryProvider):
         """Extra ChainWriter kwargs (the umbrella injects its clock/sleep test seams)."""
         return {}
 
+    def _receipt_read_path(self, head_id: str, root: str) -> str:
+        """Last line of the chain receipt: how to read the checkpoint (the umbrella names the
+        tools of the session). Default: none."""
+        return ""
+
+    def _checkpoint_category(self) -> str:
+        """Category of the checkpoint chain (the writer's and the read path's)."""
+        return str(self._config.get("checkpoint_category") or _cp.CATEGORY_CHECKPOINT)
+
+    def _checkpoint_root(self) -> str:
+        """Root session the chain is written under and the read path names (it stays across the
+        session switch of a compaction)."""
+        return self._root_session_id or self._session_id or "unknown"
+
     def _connect(self) -> None:
         """Bind credentials and the client; sets ``_active``/``_client``. Default: REST."""
         # A re-initialization of the same instance must not keep the previous client, key,
@@ -943,7 +957,7 @@ class CtxMemoryProvider(MemoryProvider):
 
             self._chain_writer = ChainWriter(
                 client=self._client,
-                category=str(self._config.get("checkpoint_category") or _cp.CATEGORY_CHECKPOINT),
+                category=self._checkpoint_category(),
                 sensitivity=str(self._config.get("checkpoint_sensitivity") or "personal"),
                 chunk_chars=int(self._config.get("checkpoint_chunk_chars") or _cp.DEFAULT_CHUNK_CHARS),
                 max_parts=int(self._config.get("checkpoint_max_parts") or _cp.DEFAULT_MAX_PARTS),
@@ -972,7 +986,7 @@ class CtxMemoryProvider(MemoryProvider):
         fact_hashes: list[str] | None = None,
     ) -> str:
         """Synchronous chain write; raises ``CtxCheckpointError``. Returns the upstream receipt frame."""
-        root = self._root_session_id or self._session_id or "unknown"
+        root = self._checkpoint_root()
         host_api = self._probe_host_api()
         receipt = self._chain().write(
             source,
@@ -1005,7 +1019,7 @@ class CtxMemoryProvider(MemoryProvider):
             receipt.rate_limited,
             receipt.duration_s,
         )
-        return receipt.frame()
+        return receipt.frame(self._receipt_read_path(receipt.head_id, root) if receipt.head_id else "")
 
     def _checkpoint_facts_sync(
         self,

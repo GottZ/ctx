@@ -36,6 +36,7 @@ own; ``compression.checkpoint_required`` is written only on an explicit choice.
 from __future__ import annotations
 
 import getpass
+import hashlib
 import logging
 import re
 import time
@@ -54,7 +55,7 @@ from .memory.config import (
     umbrella_section,
     umbrella_transport,
 )
-from .memory.mcp_client import McpClient
+from .memory.mcp_client import McpClient, mcp_tool_name
 from .memory.provider import CtxMemoryProvider
 
 logger = logging.getLogger(__name__)
@@ -735,7 +736,15 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
                 secrets=secrets,
                 context=f"{self._platform or '?'}/{self._agent_context or '?'}",
             )
-            _st.record_checkpoint(self._hermes_home, outcome)
+            # The chain's head is kept even when a later step of the same call failed (required
+            # facts): it is durable in ctx and the read entry of this root session.
+            _st.record_checkpoint(
+                self._hermes_home,
+                outcome,
+                root=self._checkpoint_root(),
+                head_id=str(receipt.head_id or "") if receipt is not None else "",
+                binding=self._pointer_binding(),
+            )
             if outcome["error"]:
                 self._notify_user(_st.failure_warning(outcome, self._server_name()))
             elif outcome["skipped"]:
@@ -784,10 +793,58 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         return super().get_tool_schemas()
 
     def system_prompt_block(self) -> str:
-        if not self.memory_enabled or not self._active:
+        """The memory text (memory features on), then the checkpoint pointer once a head is known
+        for the session root — in both modes. Without either it is empty, as before 0.9.0."""
+        if not self._active:
             return ""
-        block = super().system_prompt_block()
-        return f"{block}\nSkill: {self.name}:{SKILL_NAME} explains how to use the store well." if block else ""
+        blocks = []
+        if self.memory_enabled:
+            block = super().system_prompt_block()
+            if block:
+                blocks.append(f"{block}\nSkill: {self.name}:{SKILL_NAME} explains how to use the store well.")
+        pointer = self._checkpoint_pointer()
+        if pointer:
+            blocks.append(pointer)
+        return "\n\n".join(blocks)
+
+    # -- checkpoint read path (system prompt block, receipt) -----------------------
+
+    def _pointer_binding(self) -> str:
+        """What a recorded head belongs to: transport, ctx server (MCP entry name or REST base
+        URL) and chain category, as a digest. A head written through another binding is not
+        named — its id would not resolve there, or the search would run in another category."""
+        server = self._base_url if self.transport == "rest" else self._server_name()
+        raw = f"{self.transport}\0{server}\0{self._checkpoint_category()}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    def _read_tools(self) -> _cp.ReadTools:
+        """The read tools of this session, by the names the model sees: the plugin's own with
+        memory features on (the block is withheld with them when Hermes gates the memory
+        toolset off), the ctx MCP server's tools without, the plugin CLI on ``transport: rest``
+        without memory features (no agent tool reads ctx there)."""
+        if self.memory_enabled:
+            return _cp.PLUGIN_READ_TOOLS
+        if self.transport == "rest":
+            return _cp.CLI_READ_TOOLS
+        server = self._server_name()
+        return _cp.mcp_read_tools(mcp_tool_name(server, "get"), mcp_tool_name(server, "search"))
+
+    def _receipt_read_path(self, head_id: str, root: str) -> str:
+        return _cp.read_path(
+            self._read_tools(), head_id=head_id, root_session_id=root, category=self._checkpoint_category()
+        )
+
+    def _checkpoint_pointer(self) -> str:
+        """The pointer block for the session root, ``""`` while no head is known. The head comes
+        from the outcome file every checkpoint updates (``memory/status.py``), so every process
+        of the profile names it; no network call."""
+        root = self._checkpoint_root()
+        head = _st.known_head(self._hermes_home, root, binding=self._pointer_binding())
+        if not head:
+            return ""
+        return _cp.pointer_block(
+            self._read_tools(), head_id=head, root_session_id=root, category=self._checkpoint_category()
+        )
 
     # -- setup surfaces (Desktop and dashboard memory forms, `hermes memory setup`) ----
 
