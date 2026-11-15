@@ -97,6 +97,18 @@ func replaceStaleLinks(ctx context.Context, tx pgx.Tx, sourceID string, keptTarg
 	return supersedesTargets, nil
 }
 
+// carriesSupersedes reports whether a batch may write a supersedes link: a
+// link of that class in its input. The input is the superset — coercion inside
+// WriteLinks (coerceCategoryFactual) only ever turns factual into topical.
+func carriesSupersedes(links []Link) bool {
+	for _, l := range links {
+		if l.Relationship == "supersedes" {
+			return true
+		}
+	}
+	return false
+}
+
 // errUnregisteredSourceType leaves the link transaction WITHOUT committing
 // for the one exit that is not an error to the caller: an unregistered
 // source type rejects the whole batch fail-closed and returns (0, nil).
@@ -164,19 +176,31 @@ func WriteLinks(ctx context.Context, pool interface {
 		Commit: "dream: commit links",
 	}, func(tx pgx.Tx) error {
 		// Issue #197: the scope's supersedes lock comes first, before any row
-		// lock of the batch, in SHARED mode (store.ShareSupersedesScope):
-		// dream batches do not wait for each other, while a store declaring a
-		// supersedes holds it exclusively and so never interleaves with a
-		// batch. The cycle walk below then reads every declaration committed
-		// before this batch, and a declaration after it waits and sees this
-		// batch's links in its own walk. Taken for every batch, not only for
-		// one carrying a supersedes link: a batch that meets a declared row
-		// through ON CONFLICT locks that link row, and a declaration of the
-		// same pair waiting for it while holding the source would close a
-		// lock cycle with the batch's next insert (FOR KEY SHARE on the
-		// source).
+		// lock of the batch, in SHARED mode (store.ShareSupersedesScope): a
+		// store declaring a supersedes holds it exclusively and so never
+		// interleaves with a batch. The cycle walk below then reads every
+		// declaration committed before this batch, and a declaration after it
+		// waits and sees this batch's links in its own walk. Taken for every
+		// batch, not only for one carrying a supersedes link: a batch that
+		// meets a declared row through ON CONFLICT locks that link row, and a
+		// declaration of the same pair waiting for it while holding the source
+		// would close a lock cycle with the batch's next insert (FOR KEY SHARE
+		// on the source).
 		if err := store.ShareSupersedesScope(ctx, tx, sourceScope); err != nil {
 			return err
+		}
+		// A batch that may write a supersedes guess also takes the scope's
+		// guess lock, exclusively and second: two such batches each walk
+		// committed links only, so side by side they could each miss the
+		// other's guess and close a cycle together. The input decides, before
+		// any row lock: the per-link coerce below never turns another class
+		// into supersedes, so a batch without a supersedes candidate cannot
+		// write one (it can still delete or re-classify one, which closes no
+		// cycle).
+		if carriesSupersedes(links) {
+			if err := store.LockSupersedesGuesses(ctx, tx, sourceScope); err != nil {
+				return err
+			}
 		}
 
 		// Fetch source block metadata for structural checks. updated_at is no
@@ -276,9 +300,10 @@ func WriteLinks(ctx context.Context, pool interface {
 			// through a chain, typically one a writer declared against
 			// created_at (declarations have no direction rule). The walk is
 			// store.SupersedesWouldCycle, the declaration's own, under the
-			// scope lock taken at the top of the transaction; it runs only for
-			// supersedes candidates and climbs only the blocks above the
-			// source.
+			// scope lock and the guess lock taken at the top of the
+			// transaction, so it sees every declaration and every guess of the
+			// scope committed before it; it runs only for supersedes
+			// candidates and climbs only the blocks above the source.
 			if link.Relationship == "supersedes" {
 				var sim float64
 				_ = tx.QueryRow(ctx, `SELECT similarity($1, $2)`, srcTitle, targetTitle).Scan(&sim)

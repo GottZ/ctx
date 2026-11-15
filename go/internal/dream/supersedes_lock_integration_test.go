@@ -180,24 +180,31 @@ func TestWriteLinks_ReconcileLock_DoesNotBlockConcurrentLinkInsert(t *testing.T)
 }
 
 // TestWriteLinks_ReconcileLock_CrossOrderNoDeadlock is the F6 gate: two
-// writers supersede the same two targets, the model emits them in opposite
-// order (A: T,U — B: U,T). A gate pins B's pre-existing link row (B→T), so B
-// stalls in its link loop right after it has handled U. If the snapshot side
-// effect locked targets per link in model order, B would now hold U, A would
-// take T and wait for U, and B — once the gate opens — would wait for T:
-// 40P01, one batch lost. Collecting the targets and locking them at the end of
-// the transaction in ascending id order leaves B holding no target lock while
-// it waits, so A runs through and B follows.
+// writers change the supersedes state of the same two targets, the model emits
+// them in opposite order (A: T,U — B: U,T). B re-classifies its own supersedes
+// links onto both targets as topical (a batch without a supersedes guess, so
+// it does not take the scope's guess lock, store.LockSupersedesGuesses, and
+// runs beside A); A supersedes both. A gate pins B's link row B→T, so B stalls
+// in its link loop right after it has handled U. If the snapshot side effect
+// locked targets per link in model order, B would now hold U, A would take T
+// and wait for U, and B — once the gate opens — would wait for T: 40P01, one
+// batch lost. Collecting the targets and locking them at the end of the
+// transaction in ascending id order leaves B holding no target lock while it
+// waits, so A runs through and B follows. (Two batches that both carry a
+// supersedes guess no longer run side by side in one scope: the guess lock
+// orders them, issue #197.)
 func TestWriteLinks_ReconcileLock_CrossOrderNoDeadlock(t *testing.T) {
 	pool, dsn := testdb.SetupTestDBWithDSN(t)
 	ctx := context.Background()
 	seedLockFixture(t, pool)
 
-	// B's existing topical link onto T — the row the gate pins.
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO context_dream_links (source_block_id, target_block_id, relationship, confidence, raw_confidence, scope)
-		 VALUES ($1::uuid, $2::uuid, 'topical', 0.5, 0.5, 'private')`, lkSourceB, lkTargetT); err != nil {
-		t.Fatalf("seed B->T link: %v", err)
+	// B's existing supersedes links onto U and T — B re-classifies them below;
+	// B→T is the row the gate pins.
+	if n, err := dream.WriteLinks(ctx, pool, icBuiltinSet, lkSourceB, "private", 1.0, []dream.Link{
+		{TargetID: lkTargetU, Relationship: "supersedes", Confidence: 0.95},
+		{TargetID: lkTargetT, Relationship: "supersedes", Confidence: 0.95},
+	}); err != nil || n != 2 {
+		t.Fatalf("seed B's supersedes links: n=%d err=%v", n, err)
 	}
 	release := gateTx(t, pool,
 		`SELECT 1 FROM context_dream_links
@@ -206,8 +213,8 @@ func TestWriteLinks_ReconcileLock_CrossOrderNoDeadlock(t *testing.T) {
 
 	poolB := actorPool(t, dsn, "f6-writer-b", nil)
 	doneB := writeAsync(ctx, poolB, lkSourceB, []dream.Link{
-		{TargetID: lkTargetU, Relationship: "supersedes", Confidence: 0.95},
-		{TargetID: lkTargetT, Relationship: "supersedes", Confidence: 0.95},
+		{TargetID: lkTargetU, Relationship: "topical", Confidence: 0.95},
+		{TargetID: lkTargetT, Relationship: "topical", Confidence: 0.95},
 	})
 	waitForLockWait(t, pool, "f6-writer-b")
 
@@ -254,8 +261,9 @@ func TestWriteLinks_ReconcileLock_CrossOrderNoDeadlock(t *testing.T) {
 	if t.Failed() {
 		return
 	}
-	// A committed first and took both pointers; B's later reconcile keeps them
-	// (an existing valid pointer is never moved).
+	// A committed first (the pointers stayed on B, whose supersedes links were
+	// still there); B's re-classification then moved both to A, the superseder
+	// left.
 	assertSnapshotState(t, pool, lkTargetT, lkSourceA)
 	assertSnapshotState(t, pool, lkTargetU, lkSourceA)
 }
@@ -269,11 +277,19 @@ func TestWriteLinks_ReconcileLock_CrossOrderNoDeadlock(t *testing.T) {
 // and waits for the guard row: 40P01. The gate pins the guard row so both
 // writers park at their first UPDATE; A queues first. Locking ALL targets in
 // one ordered statement before the first UPDATE makes B wait on A's lock on U
-// instead of holding it.
+// instead of holding it. B re-classifies its own supersedes link onto U as
+// topical: a batch without a supersedes guess, so it does not wait for A's
+// guess lock (store.LockSupersedesGuesses, issue #197) and reaches its
+// reconcile beside A.
 func TestWriteLinks_ReconcileLock_LocksAllTargetsBeforeFirstUpdate(t *testing.T) {
 	pool, dsn := testdb.SetupTestDBWithDSN(t)
 	ctx := context.Background()
 	seedLockFixture(t, pool)
+	if n, err := dream.WriteLinks(ctx, pool, icBuiltinSet, lkSourceB, "private", 1.0, []dream.Link{
+		{TargetID: lkTargetU, Relationship: "supersedes", Confidence: 0.95},
+	}); err != nil || n != 1 {
+		t.Fatalf("seed B's supersedes link: n=%d err=%v", n, err)
+	}
 
 	release := gateTx(t, pool, `SELECT 1 FROM context_guard_state FOR NO KEY UPDATE`)
 
@@ -286,7 +302,7 @@ func TestWriteLinks_ReconcileLock_LocksAllTargetsBeforeFirstUpdate(t *testing.T)
 
 	poolB := actorPool(t, dsn, "f6b-writer-b", nil)
 	doneB := writeAsync(ctx, poolB, lkSourceB, []dream.Link{
-		{TargetID: lkTargetU, Relationship: "supersedes", Confidence: 0.95},
+		{TargetID: lkTargetU, Relationship: "topical", Confidence: 0.95},
 	})
 	waitForLockWait(t, pool, "f6b-writer-b")
 

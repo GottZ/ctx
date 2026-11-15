@@ -113,10 +113,14 @@ func (e *SupersedesConflictError) Error() string {
 // batch holds, while holding that batch's source, would deadlock with the
 // batch's next insert. Exclusive against shared means a declaration never
 // interleaves with a dream batch or another declaration of its scope, while
-// dream batches keep running side by side (their own lock discipline,
-// ReconcileSupersedesTargets, is unchanged). The lock must be the FIRST its
-// transaction takes: every holder then waits for it holding nothing.
-// Transaction-scoped; released at commit or rollback.
+// dream batches keep running side by side (dream batches with a supersedes
+// guess are ordered among themselves by the second lock,
+// LockSupersedesGuesses; the row-lock discipline of
+// ReconcileSupersedesTargets is unchanged).
+//
+// The lock is the FIRST its transaction takes, and the guess lock, where a
+// transaction takes one, the second: every holder then waits for either one
+// holding no row lock. Transaction-scoped; released at commit or rollback.
 func LockSupersedesScope(ctx context.Context, tx pgx.Tx, scope string) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('ctx:supersedes:' || $1::text))`, scope); err != nil {
 		return fmt.Errorf("store: supersedes scope lock: %w", err)
@@ -128,6 +132,25 @@ func LockSupersedesScope(ctx context.Context, tx pgx.Tx, scope string) error {
 func ShareSupersedesScope(ctx context.Context, tx pgx.Tx, scope string) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtext('ctx:supersedes:' || $1::text))`, scope); err != nil {
 		return fmt.Errorf("store: supersedes scope lock (shared): %w", err)
+	}
+	return nil
+}
+
+// LockSupersedesGuesses is the per-scope lock of dream supersedes guesses,
+// taken EXCLUSIVE by a dream link batch that carries a supersedes candidate
+// (dream.WriteLinks), after ShareSupersedesScope. Two such batches each run
+// the cycle walk over committed links only, so side by side each could miss
+// the other's uncommitted guess and together close a cycle through declared
+// links that run against created_at (A→B and C→D beside declared B→C and D→A).
+// The lock orders them: a batch's walk sees every guess an earlier batch of the
+// scope committed. A batch without a supersedes candidate does not take it —
+// it can only delete or re-classify supersedes links, which closes no cycle.
+//
+// A key space apart from LockSupersedesScope's (the two-key form of the
+// advisory lock functions), so the two locks of one scope never share a key.
+func LockSupersedesGuesses(ctx context.Context, tx pgx.Tx, scope string) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('ctx:supersedes-guess'), hashtext($1::text))`, scope); err != nil {
+		return fmt.Errorf("store: supersedes guess lock: %w", err)
 	}
 	return nil
 }

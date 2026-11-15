@@ -146,6 +146,95 @@ func TestDreamSupersedesWaitsForADeclaration(t *testing.T) {
 	}
 }
 
+// TestDreamSupersedesBatchesDoNotCloseACycleTogether: two dream batches of one
+// scope each guess a supersedes that is acyclic on its own but closes a cycle
+// with the other's. Declared (pinned) links B→C and D→A run against
+// created_at; batch 1 guesses A→B, batch 2 guesses C→D (both newer → older,
+// so the V8 filter passes them). Batch 1 has walked and inserted, and is held
+// before its commit (a third connection holds B, which its reconcile locks);
+// batch 2 then runs. Without a lock that orders the two, batch 2's walk from
+// C (B above C, nothing committed above B) misses the uncommitted A→B, both
+// commit, and A→B→C→D→A is a cycle. With it, batch 2 walks after batch 1's
+// commit, finds D above C through B and A, and drops its guess.
+func TestDreamSupersedesBatchesDoNotCloseACycleTogether(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+	reg := blocktype.NewRegistry()
+	reg.Boot(ctx, pool)
+	set := reg.Snapshot()
+
+	// created_at order B < A < D < C: A→B and C→D point to an older block.
+	b := raceBlock(t, pool, "cycle-note b")
+	a := raceBlock(t, pool, "cycle-note a")
+	d := raceBlock(t, pool, "cycle-note d")
+	c := raceBlock(t, pool, "cycle-note c")
+	declare := func(source, target string) {
+		t.Helper()
+		src, err := store.GetBlock(ctx, pool, nil, source, []string{"private"}, nil)
+		if err != nil || src == nil {
+			t.Fatalf("read %s: %v", source, err)
+		}
+		if _, err := store.UpsertBlockSupersedes(ctx, pool, src.Category, src.Title, src.Content, nil, nil, "private", true,
+			store.SensitivityWrite{}, "", store.SupersedesDeclaration{TargetID: target, APIKeyID: "race", Types: set}); err != nil {
+			t.Fatalf("declare %s supersedes %s: %v", source, target, err)
+		}
+	}
+	declare(b, c) // B supersedes C
+	declare(d, a) // D supersedes A
+
+	release := gateTx(t, pool, `SELECT 1 FROM context_blocks WHERE id = $1::uuid FOR NO KEY UPDATE`, b)
+
+	run := func(name, source, target string) <-chan writeResult {
+		p := actorPool(t, dsn, name, nil)
+		ch := make(chan writeResult, 1)
+		go func() {
+			n, err := dream.WriteLinks(ctx, p, set, source, "private", 1.0,
+				[]dream.Link{{TargetID: target, Relationship: "supersedes", Confidence: 0.95}})
+			ch <- writeResult{n, err}
+		}()
+		return ch
+	}
+	done1 := run("t1-batch-1", a, b)
+	waitForLockWait(t, pool, "t1-batch-1") // walked, inserted, waits for B in its reconcile
+
+	done2 := run("t1-batch-2", c, d)
+	var res2 writeResult
+	finished2 := false
+	for deadline := time.Now().Add(30 * time.Second); !finished2; {
+		select {
+		case res2 = <-done2:
+			finished2 = true
+		default:
+		}
+		if finished2 || lockWaiting(t, pool, "t1-batch-2") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("batch 2 neither finished nor waited on a lock within 30s")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	release()
+	res1 := awaitWrite(t, "batch 1", done1)
+	if !finished2 {
+		res2 = awaitWrite(t, "batch 2", done2)
+	}
+	if res1.err != nil || res2.err != nil {
+		t.Fatalf("batch 1 err=%v, batch 2 err=%v", res1.err, res2.err)
+	}
+
+	ab, cd := raceSupersedesRow(t, pool, a, b), raceSupersedesRow(t, pool, c, d)
+	if ab && cd {
+		t.Errorf("both guesses committed: %s→%s→%s→%s→%s is a supersedes cycle", a, b, c, d, a)
+	}
+	if !ab {
+		t.Errorf("batch 1's guess %s supersedes %s, acyclic when it ran, is missing", a, b)
+	}
+}
+
 func TestDreamSupersedesRejectsAPinnedChain(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
