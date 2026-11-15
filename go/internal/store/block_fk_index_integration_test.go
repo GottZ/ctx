@@ -36,7 +36,9 @@ import (
 // table, once per deleted block. A partial index serves it only when its
 // predicate follows from `col = $1`, which this query accepts in exactly one
 // form: `col IS NOT NULL` on the key's single column. Only valid btree and
-// hash indexes count (both serve `=`).
+// hash indexes count (both probe `=`); the leading columns are key columns
+// (indnkeyatts: an INCLUDE column is stored, not searched), and an expression
+// column (attnum 0 in indkey) never matches.
 //
 // hypertable is true for a key on a TimescaleDB hypertable or on one of its
 // chunks. TimescaleDB copies such a key onto every chunk, each copy with its
@@ -59,6 +61,7 @@ SELECT c.conname,
           WHERE i.indrelid = c.conrelid
             AND i.indisvalid
             AND am.amname IN ('btree', 'hash')
+            AND i.indnkeyatts >= cardinality(c.conkey)
             AND (i.indkey::int2[])[0:cardinality(c.conkey) - 1] @> c.conkey
             AND (i.indkey::int2[])[0:cardinality(c.conkey) - 1] <@ c.conkey
             AND (i.indpred IS NULL
@@ -175,8 +178,21 @@ func TestBlockForeignKeysHaveAServingIndex(t *testing.T) {
 			`CREATE INDEX gate_second_ab ON gate_second (a, b)`,
 			`CREATE TABLE gate_leading (b uuid REFERENCES context_blocks(id), a int)`,
 			`CREATE INDEX gate_leading_ba ON gate_leading (b, a)`,
-			`CREATE TABLE gate_gin (b uuid REFERENCES context_blocks(id))`,
-			`CREATE INDEX gate_gin_b ON gate_gin USING brin (b)`,
+			`CREATE TABLE gate_brin (b uuid REFERENCES context_blocks(id))`,
+			`CREATE INDEX gate_brin_b ON gate_brin USING brin (b)`,
+			`CREATE TABLE gate_hash (b uuid REFERENCES context_blocks(id))`,
+			`CREATE INDEX gate_hash_b ON gate_hash USING hash (b)`,
+			`CREATE TABLE gate_expr (b uuid REFERENCES context_blocks(id))`,
+			`CREATE INDEX gate_expr_b ON gate_expr ((b::text))`,
+			`CREATE TABLE gate_invalid (b uuid REFERENCES context_blocks(id))`,
+			`CREATE INDEX gate_invalid_b ON gate_invalid (b)`,
+			// A key of two columns needs a unique pair on context_blocks; the
+			// test database is this subtest's own.
+			`ALTER TABLE context_blocks ADD CONSTRAINT gate_id_scope UNIQUE (id, scope)`,
+			`CREATE TABLE gate_pair (b uuid, s varchar(50), FOREIGN KEY (b, s) REFERENCES context_blocks(id, scope))`,
+			`CREATE INDEX gate_pair_sb ON gate_pair (s, b)`,
+			`CREATE TABLE gate_pair_include (b uuid, s varchar(50), FOREIGN KEY (b, s) REFERENCES context_blocks(id, scope))`,
+			`CREATE INDEX gate_pair_include_b ON gate_pair_include (b) INCLUDE (s)`,
 			`CREATE TABLE gate_ht (ts timestamptz NOT NULL, b uuid REFERENCES context_blocks(id) ON DELETE SET NULL)`,
 			`SELECT create_hypertable('gate_ht', 'ts', chunk_time_interval => interval '1 day')`,
 			`CREATE INDEX gate_ht_b ON gate_ht (b) WHERE b IS NOT NULL`,
@@ -186,6 +202,13 @@ func TestBlockForeignKeysHaveAServingIndex(t *testing.T) {
 			if _, err := pool.Exec(ctx, st); err != nil {
 				t.Fatalf("%s: %v", st, err)
 			}
+		}
+		// An INVALID index is what an aborted CREATE INDEX CONCURRENTLY
+		// leaves behind; flagging one by hand needs a superuser.
+		invalid := true
+		if _, err := pool.Exec(ctx, `UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'gate_invalid_b'::regclass`); err != nil {
+			t.Logf("cannot flag gate_invalid_b INVALID on this cluster (%v): that case stays unproven here", err)
+			invalid = false
 		}
 		got := map[string]string{}
 		chunks := 0
@@ -207,14 +230,21 @@ func TestBlockForeignKeysHaveAServingIndex(t *testing.T) {
 			got[f.table] = verdict
 		}
 		want := map[string]string{
-			"gate_none":      "refused", // no index
-			"gate_full":      "served",  // btree (b)
-			"gate_notnull":   "served",  // btree (b) WHERE b IS NOT NULL
-			"gate_otherpred": "refused", // a predicate `b = $1` does not imply
-			"gate_second":    "refused", // b is not the leading column
-			"gate_leading":   "served",  // b leads, the rest is extra
-			"gate_gin":       "refused", // brin has no equality probe
-			"gate_ht":        "refused", // hypertable parent
+			"gate_none":         "refused", // no index
+			"gate_full":         "served",  // btree (b)
+			"gate_notnull":      "served",  // btree (b) WHERE b IS NOT NULL
+			"gate_otherpred":    "refused", // a predicate `b = $1` does not imply
+			"gate_second":       "refused", // b is not the leading column
+			"gate_leading":      "served",  // b leads, the rest is extra
+			"gate_brin":         "refused", // brin answers `=` by reading whole block ranges
+			"gate_hash":         "served",  // hash (b)
+			"gate_expr":         "refused", // an expression of b is not b
+			"gate_pair":         "served",  // both key columns lead, in any order
+			"gate_pair_include": "refused", // s is an INCLUDE column, not searched
+			"gate_ht":           "refused", // hypertable parent
+		}
+		if invalid {
+			want["gate_invalid"] = "refused" // INVALID index
 		}
 		for tbl, w := range want {
 			if got[tbl] != w {
@@ -319,9 +349,11 @@ func seedBlockDeleteCost(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 // deleteAndCount deletes the blocks whose title starts with prefix in one
 // transaction under the given plan_cache_mode and returns, per table that
 // has a foreign key on context_blocks, the rows the delete read per deleted
-// block. pg_stat_xact_user_tables holds what this backend has not reported
-// yet, earlier transactions included, so the count is the difference of two
-// reads inside the transaction.
+// block: heap rows of sequential scans, heap rows fetched by index scans and
+// index entries read (so a lookup that walks a whole index to filter in it
+// counts too). The pg_stat_xact counters hold what this backend has not
+// reported yet, earlier transactions included, so the count is the
+// difference of two reads inside the transaction.
 func deleteAndCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, prefix, mode string) map[string]float64 {
 	t.Helper()
 	tx, err := pool.Begin(ctx)
@@ -332,6 +364,8 @@ func deleteAndCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, prefi
 	reads := func() map[string]int64 {
 		rows, err := tx.Query(ctx, `
 			SELECT s.relname, s.seq_tup_read + COALESCE(s.idx_tup_fetch, 0)
+			       + COALESCE((SELECT sum(pg_stat_get_xact_tuples_returned(i.indexrelid))
+			                     FROM pg_index i WHERE i.indrelid = s.relid), 0)
 			  FROM pg_stat_xact_user_tables s
 			 WHERE s.relid IN (SELECT conrelid FROM pg_constraint
 			                    WHERE contype = 'f' AND confrelid = 'public.context_blocks'::regclass)`)

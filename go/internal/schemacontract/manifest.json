@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 171,
-    "migration_count": 59,
+    "migration_max": 172,
+    "migration_count": 60,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -5500,6 +5500,9 @@
     "idx_embed_failures_backfill": {
       "def_hash": "3d0d6b991371477bfbd6196b03c7a4ef855c6a1dd2bd6351deb1c70bc2fd2621"
     },
+    "idx_embed_failures_block": {
+      "def_hash": "b400f8db8e97476591d65d8de8edb8c12305aa8380cc59928bd4fc43a3e3a666"
+    },
     "idx_embed_failures_migration": {
       "def_hash": "7df95cca97401af3b9f21c5a36d2d60bc33313d2e058d1dc2759f5b820def4d8"
     },
@@ -5818,6 +5821,9 @@
     },
     "idx_write_log_decision": {
       "def_hash": "9e7c8136592042757db56aa1e7ad5581fb03651c45c80ce10be9886fdc4c6f6b"
+    },
+    "idx_write_log_matched_block": {
+      "def_hash": "92e078a410342cae709efcf3d2bbdc79676d8976535072b9bb8ccec47e4136ec"
     },
     "idx_write_log_scope": {
       "def_hash": "1804e1562c902dabe2e1807bd00cfd51dcd34b5aa83482d89aecd68dccb1f62b"

@@ -555,10 +555,11 @@ func drainBatched(ctx context.Context, pool *pgxpool.Pool, sql string, args ...a
 // deliberate index wave, NOT an ad-hoc add here (would ACCESS-EXCLUSIVE-lock a 2M
 // table on deploy and collide with the planned 062-068 numbering). Today's corpus
 // (~2k links) makes the prune trivial; this is a target-scale seam, not a
-// correctness blocker. (Secondary N11: write_log.matched_block_id is an unindexed
-// SET-NULL ref → the FK action scans context_write_log once per deleted block,
-// set or not: measured for the scope purge (#202) at 29 ms per block next to a
-// 300 000-row write log, 0.12 ms with a partial index on the column.)
+// correctness blocker. (Secondary N11, closed by migration 172: the FK actions of
+// write_log.matched_block_id and embed_failures.block_id scanned their table once
+// per deleted block — measured for the scope purge (#202) at 29 ms per block next
+// to a 300 000-row write log; since 172 every FK on context_blocks has a serving
+// index, pinned by TestBlockForeignKeysHaveAServingIndex.)
 var pruneScopeDeletes = []struct{ table, sql string }{
 	{"context_dream_links", `DELETE FROM context_dream_links WHERE ctid IN (SELECT ctid FROM context_dream_links WHERE scope = ANY($1) LIMIT $2)`},
 	{"context_blocks", `DELETE FROM context_blocks WHERE ctid IN (SELECT ctid FROM context_blocks WHERE scope = ANY($1) LIMIT $2)`},
