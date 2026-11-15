@@ -384,7 +384,9 @@ func TestStoreSupersedesDeclared(t *testing.T) {
 		// Every new correction supersedes the current head; the chain grows
 		// past store.SupersedesChainDepth without any refusal — the bound is
 		// on blocks ABOVE the written one, and a new block has none.
-		head := f.put(t, "sd-g3-0", "g3 version 0", nil)
+		root := f.put(t, "sd-g3-0", "g3 version 0", nil)
+		head := root
+		var chain []string
 		for i := 1; i <= store.SupersedesChainDepth+6; i++ {
 			title := "sd-g3-" + strconv.Itoa(i)
 			status, raw, m := f.rest(t, map[string]any{
@@ -395,6 +397,21 @@ func TestStoreSupersedesDeclared(t *testing.T) {
 			}
 			blk, _ := m["block"].(map[string]any)
 			head, _ = blk["id"].(string)
+			chain = append(chain, head)
+		}
+		// A late declaration against the root: the chain above it is longer
+		// than the walk bound, so the conflict names no head — never a block
+		// inside the chain, which would answer the same conflict again.
+		status, raw, _ := f.rest(t, map[string]any{
+			"category": "sd", "title": "sd-g3-late", "content": "g3 late", "supersedes": root,
+		})
+		if status != http.StatusConflict || !strings.Contains(string(raw), "no head is named") {
+			t.Fatalf("status %d body %s, want 409 without a head", status, raw)
+		}
+		for i, id := range chain {
+			if strings.Contains(string(raw), id) {
+				t.Errorf("the answer names chain block %d (%s) as head: %s", i+1, id, raw)
+			}
 		}
 	})
 

@@ -72,7 +72,9 @@ const (
 	SupersedesCycle = "cycle"
 	// SupersedesSuperseded — the target is already superseded through a
 	// pinned link by another live block of its scope; Head names the current
-	// head of that chain, the block a declaration should name instead.
+	// head of that chain, the block a declaration should name instead — or is
+	// "" when the chain above the target is SupersedesChainDepth links or
+	// longer and the walk could not reach its head.
 	SupersedesSuperseded = "superseded"
 	// SupersedesNotAllowed — the target is a chunk row (issue #191: a chunk
 	// belongs to its ingest and never leaves the 'chunk' lifecycle) or of a
@@ -343,6 +345,7 @@ func supersedesStateAllows(ctx context.Context, tx pgx.Tx, sourceID, targetID, s
 // which the key may read by construction (writableBlockScopes ⊆ read scopes).
 func supersedesHead(ctx context.Context, tx pgx.Tx, blockID, scope string) (string, error) {
 	var head string
+	var depth int
 	if err := tx.QueryRow(ctx,
 		`WITH RECURSIVE chain(id, depth) AS (
 		     SELECT $1::uuid, 0
@@ -363,9 +366,15 @@ func supersedesHead(ctx context.Context, tx pgx.Tx, blockID, scope string) (stri
 		       ) nxt
 		      WHERE c.depth < $3
 		 )
-		 SELECT id::text FROM chain ORDER BY depth DESC LIMIT 1`,
-		blockID, scope, SupersedesChainDepth).Scan(&head); err != nil {
+		 SELECT id::text, depth FROM chain ORDER BY depth DESC LIMIT 1`,
+		blockID, scope, SupersedesChainDepth).Scan(&head, &depth); err != nil {
 		return "", fmt.Errorf("store: supersedes: chain head: %w", err)
+	}
+	if depth >= SupersedesChainDepth {
+		// The walk stopped at the bound, so the block it reached need not be
+		// the head (or the chain loops): name none rather than send the caller
+		// to a block that answers the same conflict again.
+		return "", nil
 	}
 	return head, nil
 }

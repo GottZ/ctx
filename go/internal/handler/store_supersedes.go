@@ -33,6 +33,11 @@ func supersedesReject(err error) *writeReject {
 	}
 	switch c.Kind {
 	case store.SupersedesSuperseded:
+		if c.Head == "" {
+			return classSupersedesConflict.reject(fmt.Sprintf(
+				"supersedes: block %s is already superseded by another block; the chain above it is %d links or longer, so no head is named — follow superseded_by to the current head and supersede that block instead",
+				c.Target, store.SupersedesChainDepth))
+		}
 		return classSupersedesConflict.reject(fmt.Sprintf(
 			"supersedes: block %s is already superseded by another block; the current head of its chain is %s — supersede that block instead",
 			c.Target, c.Head))
