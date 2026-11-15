@@ -1306,16 +1306,27 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	for i, r := range results {
 		resultIDs[i] = r.ID
 	}
-	supersedesMap, err := dream.SupersedesMap(ctx, h.pool, resultIDs)
+	supersedesMap, settledSuperseded, err := dream.SupersedesMap(ctx, h.pool, resultIDs)
 	if err != nil {
 		slog.Warn("supersedes lookup failed, skipping", "error", err, "request_id", requestID)
-		supersedesMap = nil
+		supersedesMap, settledSuperseded = nil, nil
 	}
 
 	// Step 6d: Filter superseded blocks from results.
 	// Gate: only for non-temporal queries (temporal queries need historical blocks).
-	// Safety: a superseded block is only removed if its superseder is also in results.
+	// Two rules, in this order (issue #197):
+	//   - a block superseded through a PINNED link (declared by its writer, or
+	//     a guess an operator confirmed) is dropped whether or not its
+	//     successor is in the results — right after a declaration the
+	//     successor is the block most likely to have no vector yet, and the
+	//     declaration has to hold in exactly that window;
+	//   - safety rule for dream's guesses: a superseded block is only removed
+	//     if its superseder is in the results that are left.
+	// Both run after graph expansion and the fold, so a block those stages
+	// bring back is filtered too, and before the truncation to the user limit,
+	// so a dropped block costs no live block its place.
 	if supersedesMap != nil && (temporalResult == nil || len(temporalResult.Dates) == 0) {
+		results = dropSettledSuperseded(results, settledSuperseded)
 		results = filterSuperseded(results, supersedesMap)
 	}
 
@@ -2423,6 +2434,24 @@ func rerankRequired(querySens backends.Sensitivity, results []rrf.SearchResult, 
 // is deliberately separate from the T35b llmlog attribution).
 func (h *QueryHandler) logEmbedWire(_ context.Context, pipeline string, required backends.Sensitivity, served *backends.Backend, attempts []embedcache.WireAttempt, blockIDs []string, err error, apiKeyID string) {
 	llm.LogEmbedWire(h.pool, pipeline, backends.RoleEmbed, required, served, attempts, blockIDs, err, apiKeyID, h.embedAdmission().Class)
+}
+
+// dropSettledSuperseded removes the blocks a pinned supersedes link settles
+// (dream.SupersedesMap's settled set), regardless of whether their successor
+// is in results. Preserves the order of the rest.
+func dropSettledSuperseded(results []rrf.SearchResult, settled map[string]bool) []rrf.SearchResult {
+	if len(settled) == 0 {
+		return results
+	}
+	kept := make([]rrf.SearchResult, 0, len(results))
+	for _, r := range results {
+		if settled[r.ID] {
+			slog.Info("dropSettledSuperseded: removed", "block_id", r.ID)
+			continue
+		}
+		kept = append(kept, r)
+	}
+	return kept
 }
 
 // filterSuperseded removes blocks from results that are superseded by another block

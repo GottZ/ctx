@@ -74,6 +74,20 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 	if rej != nil {
 		return errResultReject(rej), nil, nil
 	}
+	// A declared supersedes is gated at stage time too (issue #197): a card
+	// must not promise a declaration the confirm would refuse. The confirm
+	// decides again (UpsertBlockSupersedes) — the target can change in between.
+	if input.Supersedes != "" {
+		err := store.CheckSupersedesDeclarable(ctx, cfg.Pool, input.Category, input.Title, res.WriteScope,
+			store.SupersedesDeclaration{TargetID: input.Supersedes, APIKeyID: ar.ApiKeyID, Types: set})
+		if rej := supersedesReject(err); rej != nil {
+			return errResultReject(rej), nil, nil
+		}
+		if err != nil {
+			slog.Error("mcp: stage supersedes check failed", "error", err, "request_id", reqID)
+			return classInternal.errResult("stage failed: cannot check supersedes"), nil, nil
+		}
+	}
 
 	cw := store.CanonicalWrite{
 		Op:                "store",
@@ -90,6 +104,8 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 		// bytes, so a hash a client already holds stays confirmable across
 		// the upgrade.
 		Type: input.Type,
+		// omitempty as well: a store without supersedes keeps its bytes.
+		Supersedes: input.Supersedes,
 	}
 	hash, canonical, err := cw.PayloadHash()
 	if err != nil {
@@ -184,7 +200,8 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 				verb = "archived"
 			}
 			return &mcp.CallToolResult{
-				Content: []mcp.Content{textContent(fmt.Sprintf("Confirmed and %s: %s (id: %s, category: %s)", verb, out.Block.Title, out.Block.ID, out.Block.Category))},
+				Content: []mcp.Content{textContent(fmt.Sprintf("Confirmed and %s: %s (id: %s, category: %s%s)", verb, out.Block.Title, out.Block.ID, out.Block.Category,
+					supersedesSuffix(out.Supersedes)))},
 			}, nil, nil
 		case confirmMiss:
 			return errResult(confirmNotFoundMsg), nil, nil

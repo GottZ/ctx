@@ -58,8 +58,8 @@ func expectPendingFetch(mock pgxmock.PgxPoolIface, ids ...string) {
 // expectGuardCheck mocks the ctx_guard_check call, returning a "clean"
 // decision (no matched block, similarity 0.1).
 func expectGuardCheck(mock pgxmock.PgxPoolIface, id string) {
-	rows := mock.NewRows([]string{"decision", "top_similarity", "matched_id", "matched_title", "matched_scope", "is_cross_scope"}).
-		AddRow("clean", 0.1, (*string)(nil), (*string)(nil), (*string)(nil), false)
+	rows := mock.NewRows([]string{"decision", "top_similarity", "matched_id", "matched_title", "matched_scope", "is_cross_scope", "supersedes_pair"}).
+		AddRow("clean", 0.1, (*string)(nil), (*string)(nil), (*string)(nil), false, false)
 	mock.ExpectQuery(`FROM ctx_guard_check`).
 		WithArgs(id, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(rows)
@@ -92,7 +92,7 @@ func expectAuditFetch(mock pgxmock.PgxPoolIface, id string) {
 // expectAuditInsert matches the audit-log INSERT.
 func expectAuditInsert(mock pgxmock.PgxPoolIface) *pgxmock.ExpectedExec {
 	return mock.ExpectExec(`INSERT INTO context_write_log`).
-		WithArgs(anyArgs(9)...).
+		WithArgs(anyArgs(10)...).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 }
 
@@ -303,7 +303,7 @@ func TestRunGuardBatch_AuditLogFails_RollsBack(t *testing.T) {
 	expectApplyDecisionClean(mock)
 	expectAuditFetch(mock, blockA)
 	mock.ExpectExec(`INSERT INTO context_write_log`).
-		WithArgs(anyArgs(9)...).
+		WithArgs(anyArgs(10)...).
 		WillReturnError(errors.New("audit log table full"))
 	expectRollback(mock, blockA)
 

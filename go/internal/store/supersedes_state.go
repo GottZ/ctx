@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"slices"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -234,3 +235,42 @@ func markSupersededSnapshot(ctx context.Context, tx pgx.Tx, targetID, sourceID s
 	}
 	return nil
 }
+
+// lockSupersedesSource prepares a write that can end the supersedes of a block
+// — archiving it, or moving it to another scope: it locks the block itself and
+// every target of its supersedes links, in ONE statement and id order, and
+// returns the targets. It runs BEFORE the caller's first write, because that
+// write fires mark_guard_dirty and holds the context_guard_state row until
+// commit, and the reconcile afterwards must not wait for a target lock (the
+// lock discipline of ReconcileSupersedesTargets). The caller passes the
+// targets to ReconcileSupersedesTargets after its write.
+//
+// The block is matched only inside writeScopes, and so are the links (by the
+// source's scope): a block the caller may not write locks nothing. A malformed
+// id locks nothing either; the caller's own statement answers it as before.
+func lockSupersedesSource(ctx context.Context, tx pgx.Tx, blockID string, writeScopes []string) ([]string, error) {
+	if _, err := uuid.Parse(blockID); err != nil {
+		return nil, nil //nolint:nilerr // deliberate: the caller's statement decides a malformed id
+	}
+	rows, err := tx.Query(ctx,
+		`SELECT b.id::text
+		   FROM context_blocks b
+		  WHERE (b.id = $1::uuid AND b.scope = ANY($2::text[]))
+		     OR b.id IN (SELECT dl.target_block_id
+		                   FROM context_dream_links dl
+		                   JOIN context_blocks s ON s.id = dl.source_block_id
+		                  WHERE dl.source_block_id = $1::uuid
+		                    AND dl.relationship = 'supersedes'
+		                    AND s.scope = ANY($2::text[]))
+		  ORDER BY b.id
+		  FOR NO KEY UPDATE OF b`, blockID, writeScopes)
+	if err != nil {
+		return nil, fmt.Errorf("store: lock supersedes source: %w", err)
+	}
+	locked, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("store: lock supersedes source: %w", err)
+	}
+	return slices.DeleteFunc(locked, func(id string) bool { return id == blockID }), nil
+}
+

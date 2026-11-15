@@ -144,6 +144,10 @@ type storeInput struct {
 	// absent/empty value resolves to ar.HomeScope byte-identically to the
 	// pre-E-M4 behaviour.
 	Scope string `json:"scope,omitempty" jsonschema:"optional target scope; default = the key's home scope; must be a scope the key may write"`
+	// Supersedes is /api/store's field of the same name (storeRequest.
+	// Supersedes, issue #197), gated and applied by the same store function;
+	// absent ⇒ the call is byte-identical to before the field existed.
+	Supersedes string `json:"supersedes,omitempty" jsonschema:"optional id of a block in the same scope that this block replaces (a correction or newer version); the old block is kept as history and leaves dateless retrieval"`
 }
 
 type searchInput struct {
@@ -240,7 +244,7 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 	// store
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "store",
-		Description: "Save or update a knowledge block. Upserts on (category, title, scope). Writes the key's home scope unless an explicit scope the key may write is given.",
+		Description: "Save or update a knowledge block. Upserts on (category, title, scope). Writes the key's home scope unless an explicit scope the key may write is given. With supersedes: the written block replaces that block of the same scope — the old block stays as history (a query with a date still finds it), a query without a date no longer returns it.",
 	}, mcpStoreHandler(cfg))
 
 	// search
@@ -420,6 +424,20 @@ type mcpQuerySource struct {
 	Title         string `json:"title"`
 	Category      string `json:"category"`
 	CitationIndex *int   `json:"citation_index"`
+	// SupersededBy (issue #197) is rendered on the source line, so an MCP
+	// client in synthesis mode can tell that a cited source was replaced —
+	// the retrieval-only JSON carries the field since #183.
+	SupersededBy *string `json:"superseded_by"`
+}
+
+// mcpSourceLineTail is what follows "id:<id>" on a source line: nothing, or
+// " superseded_by:<id>" for a source another block supersedes — so a line
+// without it keeps its exact text.
+func mcpSourceLineTail(s mcpQuerySource) string {
+	if s.SupersededBy == nil || *s.SupersededBy == "" {
+		return ""
+	}
+	return " superseded_by:" + *s.SupersededBy
 }
 
 // mcpNoCitationMarker replaces the number for a source that never entered the
@@ -479,7 +497,7 @@ func renderMCPQuerySources(sb *strings.Builder, sources []mcpQuerySource) {
 	sb.WriteString("\n\nSources:\n")
 	if len(cited) == 0 {
 		for i, s := range sources {
-			fmt.Fprintf(sb, "[%d] %s (%s) id:%s\n", i+1, s.Title, s.Category, s.ID)
+			fmt.Fprintf(sb, "[%d] %s (%s) id:%s%s\n", i+1, s.Title, s.Category, s.ID, mcpSourceLineTail(s))
 		}
 		return
 	}
@@ -489,10 +507,10 @@ func renderMCPQuerySources(sb *strings.Builder, sources []mcpQuerySource) {
 		return *cited[i].CitationIndex < *cited[j].CitationIndex
 	})
 	for _, s := range cited {
-		fmt.Fprintf(sb, "[%d] %s (%s) id:%s\n", *s.CitationIndex, s.Title, s.Category, s.ID)
+		fmt.Fprintf(sb, "[%d] %s (%s) id:%s%s\n", *s.CitationIndex, s.Title, s.Category, s.ID, mcpSourceLineTail(s))
 	}
 	for _, s := range uncited {
-		fmt.Fprintf(sb, "%s %s (%s) id:%s\n", mcpNoCitationMarker, s.Title, s.Category, s.ID)
+		fmt.Fprintf(sb, "%s %s (%s) id:%s%s\n", mcpNoCitationMarker, s.Title, s.Category, s.ID, mcpSourceLineTail(s))
 	}
 }
 
@@ -690,12 +708,15 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		// sensitivity are the write intent: IdenticalContentMatch applies the
 		// detector itself, and an omitted sensitivity leaves an existing row
 		// untouched just as the resolved settings default does in UpsertBlock.
+		//
+		// A write that names a block it supersedes is never a no-op: the
+		// declaration is part of the write (REST skips its shortcut likewise).
 		match, err := store.IdenticalContentMatch(ctx, cfg.Pool, input.Content, scope, input.Category, input.Title,
 			input.Tags, input.Metadata, store.SensitivityWrite{
 				Value:  backends.Sensitivity(input.Sensitivity),
 				Manual: input.Sensitivity != "",
 			}, input.Type)
-		if err == nil && match.Unchanged() {
+		if err == nil && match.Unchanged() && input.Supersedes == "" {
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{textContent(fmt.Sprintf("No change needed — identical content already exists (id: %s)", match.ID))},
 			}, nil, nil
@@ -765,10 +786,14 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		}
 
 		// Upsert.
-		block, err := store.UpsertBlock(ctx, cfg.Pool, input.Category, input.Title, input.Content, input.Tags, res.Metadata, res.WriteScope, res.ScopeExplicit, res.Sens, input.Type)
+		block, err := upsertStoreBlock(ctx, cfg.Pool, set, ar.ApiKeyID, input.Category, input.Title, input.Content,
+			input.Tags, res.Metadata, res.WriteScope, res.ScopeExplicit, res.Sens, input.Type, input.Supersedes)
 		if err != nil {
-			// I7/S3: same sentinel, same 403 class as REST — the store decided
-			// it, this arm only renders it.
+			// I7/S3 and a refused supersedes declaration: same class as REST —
+			// the store decided it, this arm only renders it.
+			if rej := supersedesReject(err); rej != nil {
+				return errResultReject(rej), nil, nil
+			}
 			return errResultReject(provenanceRejectOr(err,
 				classInternal.reject(fmt.Sprintf("store failed: %v", err)))), nil, nil
 		}
@@ -802,9 +827,20 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		_ = store.PopulateTemporal(ctx, cfg.Pool, block.ID, times, block.CreatedAt)
 
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{textContent(fmt.Sprintf("Stored: %s (id: %s, category: %s)", block.Title, block.ID, block.Category))},
+			Content: []mcp.Content{textContent(fmt.Sprintf("Stored: %s (id: %s, category: %s%s)", block.Title, block.ID, block.Category,
+				supersedesSuffix(input.Supersedes)))},
 		}, nil, nil
 	}
+}
+
+// supersedesSuffix is the ", supersedes: <id>" the store answers carry when the
+// write named a block it supersedes, and "" otherwise — so an answer without
+// the field keeps its exact text.
+func supersedesSuffix(supersedes string) string {
+	if supersedes == "" {
+		return ""
+	}
+	return ", supersedes: " + strings.ToLower(supersedes)
 }
 
 func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {

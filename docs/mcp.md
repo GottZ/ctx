@@ -137,7 +137,9 @@ Sources:
 ```
 
 `[N]` is the citation number the answer uses; `[n/a]` marks a source that was
-retrieved but never entered the synthesis prompt.
+retrieved but never entered the synthesis prompt. A source another block supersedes
+ends its line with ` superseded_by:<uuid>` (only a question with a date returns a block
+whose supersedes is declared or confirmed; see `store`).
 
 The call ends with its client: a client that closes the connection while the
 pipeline runs cancels it, as on `POST /api/query`, so no further backend call or
@@ -240,12 +242,25 @@ Save or replace a knowledge block. Upserts on (category, title, scope).
 | `sensitivity` | string | | `credentials`, `personal`, `internal` or `public`; default from settings, fail-closed |
 | `type` | string | | explicit block type from the registry (e.g. `reference`); omitted, the title classifier decides |
 | `scope` | string | | target scope; default the key's home scope; must be a scope the key may write |
+| `supersedes` | string | | id of a block in the same scope that this block replaces; see below |
 
 Runs the same gate chain as `POST /api/store` (scope, size, rate limit, credential
 detection, type validation). **Answer:**
 `Stored: <title> (id: <uuid>, category: <category>)`, or
 `No change needed — identical content already exists (id: <uuid>)` when the write would
 change nothing. Staged for `confirm_writes` keys.
+
+With `supersedes` the written block replaces the named one, in the same transaction:
+the old block stays as history (a `query` with a date still finds it, with
+`superseded_by`), a `query` without a date no longer returns it, and the guard does not
+archive the new block as a duplicate of the old one. The answer then ends with
+`, supersedes: <uuid>)`, and a write with identical content is not answered as a no-op.
+Refusals carry their class in `structuredContent.code`: `unknown_supersedes` (unknown,
+archived, other-scope, malformed or self id — one answer for all), `supersedes_conflict`
+(already superseded by another block — the message names the block to supersede instead
+— or a cycle), `supersedes_not_allowed` (a chunk row, or a type outside the dream loop).
+A staged store is checked at stage time and again at `confirm`. Details and the rules in
+[api.md](api.md#endpoints), *A writer-declared supersedes*.
 
 ### update
 

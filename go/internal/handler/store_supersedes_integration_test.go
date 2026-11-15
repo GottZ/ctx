@@ -367,7 +367,7 @@ func TestStoreSupersedesDeclared(t *testing.T) {
 			sdHome).Scan(&srcID); err != nil {
 			t.Fatalf("seed source: %v", err)
 		}
-		chunk, err := store.InsertChunk(ctx, f.pool, srcID, 0, "sd", "sd-h-chunk", "chunk text", nil, nil, sdHome)
+		chunk, err := store.InsertChunk(ctx, f.pool, srcID, 0, "sd", "sd-h-chunkrow", "chunk text", nil, nil, sdHome)
 		if err != nil {
 			t.Fatalf("insert chunk: %v", err)
 		}

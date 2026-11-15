@@ -1372,32 +1372,52 @@ func UpdateQualityScore(ctx context.Context, pool *pgxpool.Pool, blockID string)
 // Gates on raw_confidence >= 0.7 (LLM self-assessment). weighted is a ranking
 // signal, not a gate. Used by the query handler to enrich responses and for
 // filterSuperseded (which still treats map[id] = "ids that supersede id").
-func SupersedesMap(ctx context.Context, pool *pgxpool.Pool, blockIDs []string) (map[string][]string, error) {
+//
+// Issue #197: a PINNED link (declared by a writer on store, or a guess an
+// operator confirmed) is in the map whatever its raw_confidence — a pin is a
+// statement, not a guess the gate has to filter — and its target is in
+// settled when the pinned source is live and in the target's scope (the rule
+// the reconcile applies to the snapshot state, store.supersedesCandidates).
+// A settled block is superseded whether or not its successor is retrieved;
+// the query drops it from a dateless answer before the presence rule runs.
+//
+// Cost: one statement over the given ids (the candidate set of one query,
+// bounded by the internal limit, never by the corpus): idx_dream_links_target
+// per id, then the primary key of both linked blocks for the matching rows.
+func SupersedesMap(ctx context.Context, pool *pgxpool.Pool, blockIDs []string) (map[string][]string, map[string]bool, error) {
 	if len(blockIDs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
-	rows, err := pool.Query(ctx,
-		`SELECT source_block_id::text, target_block_id::text
-		FROM context_dream_links
-		WHERE relationship = 'supersedes'
-		  AND raw_confidence >= 0.7
-		  AND target_block_id = ANY($1::uuid[])`,
-		blockIDs,
-	)
+	rows, err := pool.Query(ctx, supersedesMapSQL, blockIDs)
 	if err != nil {
-		return nil, fmt.Errorf("dream: supersedes map: %w", err)
+		return nil, nil, fmt.Errorf("dream: supersedes map: %w", err)
 	}
 	defer rows.Close()
 
 	result := make(map[string][]string)
+	settled := make(map[string]bool)
 	for rows.Next() {
 		var sourceID, targetID string
-		if err := rows.Scan(&sourceID, &targetID); err != nil {
-			return nil, fmt.Errorf("dream: scan supersedes: %w", err)
+		var isSettled bool
+		if err := rows.Scan(&sourceID, &targetID, &isSettled); err != nil {
+			return nil, nil, fmt.Errorf("dream: scan supersedes: %w", err)
 		}
 		// Key = outdated target, value = newer source(s) that replace it.
 		result[targetID] = append(result[targetID], sourceID)
+		if isSettled {
+			settled[targetID] = true
+		}
 	}
-	return result, rows.Err()
+	return result, settled, rows.Err()
 }
+
+// supersedesMapSQL is SupersedesMap's statement ($1 = the block ids).
+const supersedesMapSQL = `SELECT dl.source_block_id::text, dl.target_block_id::text,
+	       dl.pinned AND NOT src.is_archived AND src.scope = tgt.scope
+	  FROM context_dream_links dl
+	  JOIN context_blocks src ON src.id = dl.source_block_id
+	  JOIN context_blocks tgt ON tgt.id = dl.target_block_id
+	 WHERE dl.relationship = 'supersedes'
+	   AND (dl.raw_confidence >= 0.7 OR dl.pinned)
+	   AND dl.target_block_id = ANY($1::uuid[])`

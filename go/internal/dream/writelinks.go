@@ -254,9 +254,26 @@ func WriteLinks(ctx context.Context, pool interface {
 			// natural-language "A supersedes B" requires A to be the authoritative
 			// replacement (newer). Migration 043 swapped the persisted 15 inverted
 			// records; this filter prevents new ones.
+			//
+			// Issue #197: a PINNED supersedes link in the other direction (the
+			// target supersedes this source — declared by a writer, or a guess an
+			// operator confirmed) settles the pair; the guess would close a
+			// two-block cycle and turn the authoritative block into a snapshot.
+			// The probe rides on the similarity statement: one round trip, as
+			// before.
 			if link.Relationship == "supersedes" {
 				var sim float64
-				_ = tx.QueryRow(ctx, `SELECT similarity($1, $2)`, srcTitle, targetTitle).Scan(&sim)
+				var reversePinned bool
+				_ = tx.QueryRow(ctx,
+					`SELECT similarity($1, $2),
+					        EXISTS (SELECT 1 FROM context_dream_links
+					                 WHERE source_block_id = $3::uuid AND target_block_id = $4::uuid
+					                   AND relationship = 'supersedes' AND pinned)`,
+					srcTitle, targetTitle, link.TargetID, sourceID).Scan(&sim, &reversePinned)
+				if reversePinned {
+					slog.Debug("dream: supersedes rejected", "src", sourceID, "tgt", link.TargetID, "reason", "reverse of a pinned supersedes")
+					continue
+				}
 				if ok, reason := acceptSupersedes(srcCategory, targetCategory, srcCreatedAt, targetCreatedAt, sim); !ok {
 					slog.Debug("dream: supersedes rejected", "src", sourceID, "tgt", link.TargetID, "reason", reason, "similarity", sim)
 					continue
@@ -279,7 +296,14 @@ func WriteLinks(ctx context.Context, pool interface {
 				weightedConfidence = 0.5
 			}
 
-			_, err = tx.Exec(ctx,
+			// A PINNED row is not re-classified or re-scored (issue #197): it is
+			// a writer's declaration or an operator's verdict, and the sweep
+			// already spares it (deleteStaleLinks). Re-writing it would let the
+			// next guess turn a declared supersedes into a topical link — the
+			// reconcile then restored its target — or drop its raw_confidence
+			// under the query-side 0.7 gate. Such a link is left as it is and
+			// does not count as written.
+			tag, err := tx.Exec(ctx,
 				`INSERT INTO context_dream_links (source_block_id, target_block_id, relationship, confidence, raw_confidence, dream_version, scope, metadata)
 				VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb)
 				ON CONFLICT (source_block_id, target_block_id) DO UPDATE SET
@@ -288,13 +312,18 @@ func WriteLinks(ctx context.Context, pool interface {
 					raw_confidence = EXCLUDED.raw_confidence,
 					dream_version = EXCLUDED.dream_version,
 					metadata = EXCLUDED.metadata,
-					created_at = now()`,
+					created_at = now()
+				WHERE NOT context_dream_links.pinned`,
 				sourceID, link.TargetID, link.Relationship, weightedConfidence, link.Confidence, Version, sourceScope,
 				`{}`,
 			)
 			if err != nil {
 				slog.Warn("dream: write link failed", "source", sourceID, "target", link.TargetID, "error", err)
 				break // TX is in failed state after PG error — cannot continue.
+			}
+			if tag.RowsAffected() == 0 {
+				slog.Debug("dream: pinned link kept", "src", sourceID, "tgt", link.TargetID)
+				continue
 			}
 			written++
 			keptTargets = append(keptTargets, link.TargetID)

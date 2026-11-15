@@ -42,6 +42,10 @@ type GuardResult struct {
 	IsCrossScope       bool
 	ThresholdDuplicate float64
 	ThresholdReview    float64
+	// SupersedesPair is true when the match is the other end of a PINNED
+	// supersedes link with the checked block (issue #197): the pair is
+	// already explained as a supersession, so checkBlock records it clean.
+	SupersedesPair bool
 }
 
 // pendingBlock is one pick-query row: the block plus its policy type (the
@@ -319,13 +323,32 @@ func checkBlock(ctx context.Context, tx pgx.Tx, blockID string, thresholdDuplica
 		isCrossScope  bool
 	)
 
+	// supersedesPair rides on the same statement (issue #197): a match that is
+	// the other end of a PINNED supersedes link with the checked block — a
+	// writer's declaration, or a dream guess an operator confirmed — is not a
+	// duplicate finding. A correction and its predecessor are near-identical
+	// by construction, and the guard alone cannot tell which of the two
+	// stands: it archived the NEWER statement against the older one. The link
+	// tells it. Both directions, two primary-key probes; a dream guess
+	// (unpinned) changes nothing here, as it changes nothing in the query
+	// filter. The check stays top-1: the pair is recorded clean, and a second,
+	// unrelated near-duplicate behind the predecessor is not looked for.
+	var supersedesPair bool
 	err := tx.QueryRow(ctx,
-		`SELECT decision, top_similarity, matched_id::text, matched_title, matched_scope, is_cross_scope
-		FROM ctx_guard_check($1::uuid, $2::real, $3::real, $4::text[], $5::boolean)`,
+		`SELECT g.decision, g.top_similarity, g.matched_id::text, g.matched_title, g.matched_scope, g.is_cross_scope,
+		        g.matched_id IS NOT NULL AND EXISTS (
+		          SELECT 1 FROM context_dream_links dl
+		           WHERE dl.relationship = 'supersedes' AND dl.pinned
+		             AND ((dl.source_block_id = $1::uuid AND dl.target_block_id = g.matched_id)
+		               OR (dl.source_block_id = g.matched_id AND dl.target_block_id = $1::uuid)))
+		FROM ctx_guard_check($1::uuid, $2::real, $3::real, $4::text[], $5::boolean) g`,
 		blockID, thresholdDuplicate, thresholdReview, candidateTypes, sameScopeOnly,
-	).Scan(&decision, &topSimilarity, &matchedID, &matchedTitle, &matchedScope, &isCrossScope)
+	).Scan(&decision, &topSimilarity, &matchedID, &matchedTitle, &matchedScope, &isCrossScope, &supersedesPair)
 	if err != nil {
 		return nil, fmt.Errorf("guard: ctx_guard_check: %w", err)
+	}
+	if supersedesPair {
+		decision = "clean"
 	}
 
 	return &GuardResult{
@@ -337,6 +360,7 @@ func checkBlock(ctx context.Context, tx pgx.Tx, blockID string, thresholdDuplica
 		IsCrossScope:       isCrossScope,
 		ThresholdDuplicate: thresholdDuplicate,
 		ThresholdReview:    thresholdReview,
+		SupersedesPair:     supersedesPair,
 	}, nil
 }
 
@@ -482,10 +506,10 @@ func writeAuditLog(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 			jsonb_build_object(
 				'threshold_duplicate', $8::float8,
 				'threshold_review', $9::float8
-			)
+			) || CASE WHEN $10::bool THEN '{"supersedes_pair": true}'::jsonb ELSE '{}'::jsonb END
 		)`,
 		blockID, matchedIDArg, result.Decision, result.Similarity, scope, title, category,
-		result.ThresholdDuplicate, result.ThresholdReview,
+		result.ThresholdDuplicate, result.ThresholdReview, result.SupersedesPair,
 	)
 	if err != nil {
 		return fmt.Errorf("write audit log: %w", err)
