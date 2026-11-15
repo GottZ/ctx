@@ -16,12 +16,15 @@ Compaction checkpoint head <root-session>     ← stable title, upserted per ses
 
 The provider returns the head/manifest IDs to Hermes, which carries them
 into the compaction summary — a later session (or a human) can walk
-head → manifest → parts to recover exact wording and provenance. Secrets are
-redacted twice (Hermes' own `redact_sensitive_text` plus a conservative
-key/value + bearer-token pass, which since 0.5.1 also masks the credential
-behind an `Authorization: Bearer|Basic|Digest` scheme word) before anything
-leaves the process; a failing redactor aborts the checkpoint instead of
-storing unredacted text.
+head → manifest → parts to recover exact wording and provenance. Before anything
+leaves the process the ctx keys of the profile are replaced wherever they stand (on
+the default MCP transport the key the `mcp_servers` entry signs in with, since
+0.11.0), Hermes' own `redact_sensitive_text` runs in its strict mode, and the
+plugin's rules mask values behind credential names, passwords in prose and webhook
+tokens while code and prose behind those names stay as written; the limits
+(unnamed values, dictionary-word passwords, card numbers, IBANs) are listed in the
+plugin README. A failing redactor aborts the checkpoint instead of storing
+unredacted text.
 
 **Listed in the Hermes plugin catalog** as
 [`ctx_checkpoint`](https://hermes-agent.nousresearch.com/docs/plugins/ctx_checkpoint)
@@ -70,7 +73,7 @@ is about the checkpoint layer.
 The plugin is a plain Hermes **user plugin** — it lives in
 `$HERMES_HOME/plugins/ctx_checkpoint/`, whether the catalog or the installer
 put it there, and works in best-effort mode on a completely stock Hermes.
-Plugin 0.10.0 declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
+Plugin 0.11.0 declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
 `delegate_task` children inherit the provider under the fail-closed gate; the
 catalog pin (0.6.2) still declares ≥ 0.20.4 (since upstream v2026.8.18,
 provider text is forwarded into the compaction summary).
@@ -525,6 +528,16 @@ and manifest are deliberately small so routine recall stays cheap.
   earlier attempt stored without writing them again. A write ctx refuses for its limit
   waits for a free slot instead of a fixed 2/4/8 s and stops at the second refusal in a
   row (Hermes' circuit breaker opens at the third).
+- 0.11.0 (GottZ/ctx#288): on the MCP transport the ctx key is removed from checkpoint
+  parts and every automatic write: the key the `mcp_servers` entry signs in with
+  (`Authorization` or `X-Context-Key` header, `${VAR}` resolved from `.env`) and
+  `CTX_API_KEY` are replaced wherever they stand. Hermes' redactor runs in its strict
+  mode (signed URLs, OAuth codes, URL user info), the plugin's rules add German labels,
+  passphrases, PINs, seed phrases, recovery codes, `creds`, `X-Context-Key`, passwords in
+  prose with a digit and webhook URL tokens, and they judge a value by its shape: code and
+  prose behind a credential name (`token = self.token`, `password: str`) are no longer
+  overwritten. A transcript checkpointed again after the update redacts differently, so
+  its digest and titles change and it starts a new chain next to the old one.
 
 ## Licensing
 

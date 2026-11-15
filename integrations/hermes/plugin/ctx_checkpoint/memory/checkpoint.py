@@ -28,16 +28,16 @@ import logging
 import re
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .client import CtxApiError, redact_secret, response_code, store_action, store_block_id
+from .client import REDACTED, CtxApiError, redact_secret, response_code, store_action, store_block_id
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.10.0"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
+PLUGIN_VERSION = "0.11.0"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
 UPSTREAM_REF = "GottZ/ctx integrations/hermes/plugin/ctx_checkpoint 0.4.3 @ 38fdb74 (MPL-2.0)"
 
 CATEGORY_CHECKPOINT = "compaction-checkpoints"
@@ -88,13 +88,87 @@ RATE_WINDOW_MARGIN_S = 1.0
 # agent's ctx tools and other sessions' checkpoints of the profile off for a minute.
 MAX_RATE_REFUSALS = 2
 
-# The value may start with an auth scheme ("Authorization: Bearer <token>"): without the
-# optional scheme group only the scheme word would be masked and the credential would stay.
-_GENERIC_SECRET_RE = re.compile(
-    r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|"
-    r"password|passwd|authorization)\b(\s*[:=]\s*)((?:(?:bearer|basic|digest)\s+)?[^\s,;]+)"
+# -- Redaction rules (0.11.0) -------------------------------------------------------------
+# Three passes (``redact_text``): every bound credential value is replaced exactly, Hermes'
+# redactor runs in its strict mode (what Hermes uses for its own compaction summary), then the
+# rules below take what the host leaves. They look at the value behind a credential name: code
+# (attribute paths, calls, types, references, placeholders) and prose words stay; values with
+# digits, named phrases, webhook path tokens and the remnants of a host mask go.
+
+# A bound value shorter than this is not replaced: a stray short value would erase a common word.
+MIN_BOUND_SECRET_CHARS = 8
+# "_" and "-" separate words, so MY_SERVICE_CRED and X-Context-Key match while max_tokens,
+# secretary and passwords do not.
+_EDGE_L = r"(?<![A-Za-z0-9])"
+_EDGE_R = r"(?![A-Za-z0-9])"
+_PHRASE_LABELS = r"pass[ _-]?phrase|seed[ _-]?phrase|mnemonic|recovery[ _-]?(?:codes?|phrase|key)|backup[ _-]?codes?"
+# Upper-case PIN only: "pin 3 of the header" is wiring, not a credential.
+_LOGIN_LABELS = r"pass(?:word|wort|wd)|kennwort|(?-i:PIN)(?:[ -]?(?:code|nummer))?"
+_KEY_LABELS = (
+    r"api[ _-]?key|(?:access|refresh|auth|id|session)[ _-]?token|client[ _-]?secret|token|secret|"
+    r"credentials?|creds?|authorization|x-context-key"
 )
-_BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]{8,}=*")
+_NAME_RE = re.compile(
+    rf"{_EDGE_L}(?:(?P<phrase>{_PHRASE_LABELS})|(?P<password>{_LOGIN_LABELS})|(?P<token>{_KEY_LABELS})){_EDGE_R}",
+    re.IGNORECASE,
+)
+# Markdown emphasis or code ticks around a label (``**Password:** …``, ``**API key**: …``).
+_EMPHASIS = r"(?:\*{1,2}|`)"
+# name: value / name=value / name := value / "name": "value" (not ==, which is a comparison).
+_KV_SEP_RE = re.compile(rf"{_EMPHASIS}?[\"']?[ \t]*(?::=|[:=](?!=))[ \t]*(?:{_EMPHASIS}(?=[ \t]))?[ \t]*")
+# "the password is …", "Passwort lautet: …" (every name), "mit Passwort …" (password names).
+_PROSE_VERB_SEP_RE = re.compile(
+    rf"{_EMPHASIS}?[ \t]+(?:is|ist|lautet|was|war)[ \t]*(?::[ \t]*)?(?:{_EMPHASIS}(?=[ \t]))?[ \t]+", re.IGNORECASE
+)
+_PROSE_SEP_RE = re.compile(rf"{_EMPHASIS}?[ \t]+")
+_QUOTED_RE = re.compile(r"\"[^\"\n]*\"|'[^'\n]*'")
+# A value is judged on at most this many characters. A longer run without a space behind a
+# credential name is masked whole: judging it would cost its length again for every name
+# inside it that is declined, quadratic over a long line.
+MAX_VALUE_CHARS = 1024
+_VALUE_RE = re.compile(rf"[^\s,;]{{1,{MAX_VALUE_CHARS}}}")
+_VALUE_RUN_RE = re.compile(r"[^\s,;]+")
+_LINE_REST_RE = re.compile(r"[^\n]*")
+_MORE_WORDS_RE = re.compile(r"[ \t]+\S")
+_AUTH_SCHEME_RE = re.compile(r"(?:bearer|basic|digest|token)[ \t]+", re.IGNORECASE)
+# A value of digits only is a credential from this many digits on: behind a password name or PIN
+# (``PIN 4711``, not ``the password is 12 characters long``) and behind a token name (a one-time
+# code ``839201``, not ``token: 4096``).
+MIN_PASSWORD_DIGITS = 4
+MIN_TOKEN_DIGITS = 6
+# Trailing characters that close the surrounding code or sentence, not the value.
+_VALUE_TRAILERS = ",;.)]}>\"'"
+# Code and placeholders behind a credential name: a call or subscript (get_token(), Optional[str],
+# base64.b64encode(raw)), an attribute path of letters (cfg.secret, os.environ) or of lower-case
+# identifiers (self.token2), a numeric type with a bit width (u64, Int64, Uint8Array), a reference
+# or template (${VAR}, $VAR, <your key>, {{ key }}, %s), a comparison or table cell.
+_CODE_VALUE_RE = re.compile(
+    r"(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*[\[(].*"
+    r"|(?:[A-Za-z_][A-Za-z_]*\.)+[A-Za-z_][A-Za-z_]*"
+    r"|(?:[a-z_][a-z0-9_]*\.)+[a-z_][a-z0-9_]*"
+    r"|(?i:[iu](?:8|16|32|64|128|size)|f(?:32|64)|u?int(?:8|16|32|64)|float(?:16|32|64)|big(?:u?int)?64)(?:Array)?"
+    r"|[=|<{$%].*"
+)
+_WORD_VALUE_RE = re.compile(r"[^\W\d_]+(?:[-'][^\W\d_]+)*")
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_]+")
+# What the host's mask leaves standing: head and tail (``8f3a9c...9c2e``) or a password's rest
+# after a character the host stops at (``***&3``). A bare ``***`` is complete and stays.
+_HOST_REMNANT_RE = re.compile(r"^[^\s.*]{2,8}\.\.\.[^\s.*]{2,6}$|\*\*\*(?=\S)|(?<=\S)\*\*\*")
+# The host masks the first word of a spaced password value and keeps the rest of the line.
+_HOST_MASKED_WORDS_RE = re.compile(r"\*\*\*(?:[ \t]+[^\W\d_]+)+[ \t]*(?=$|[\n.!?])")
+_BEARER_RE = re.compile(r"(?i)\b(bearer[ \t]+)([A-Za-z0-9._~+/*=-]{8,})")
+# The passes after the bound values, as the part metadata names them (``ctx_plugin.redaction``).
+REDACTION_PASSES = (
+    "host:redact_sensitive_text(force=True, redact_url_credentials=True)",
+    "named-value",
+    "webhook-path",
+    "bearer",
+)
+# Webhook URLs carry their credential in the last path segment, which no query rule sees.
+_WEBHOOK_PATH_RE = re.compile(
+    r"(?i)(https?://(?:[a-z0-9-]+\.)?(?:discord(?:app)?\.com/api(?:/v\d+)?/webhooks/\d+/"
+    r"|hooks\.slack\.com/(?:services|workflows|triggers)/(?:[A-Z0-9]+/){1,3}))([A-Za-z0-9_-]{8,})"
+)
 
 PART_TAGS = ["hermes", "compaction", "source-evidence", "transcript", "control"]
 MANIFEST_TAGS = ["hermes", "compaction", "checkpoint-manifest", "ctx", "control"]
@@ -194,26 +268,140 @@ def _flatten_content(content: Any) -> str:
     return str(content or "")
 
 
+def _secret_shaped(kind: str, value: str, *, prose: bool) -> bool:
+    """Whether ``value`` behind a credential name of ``kind`` is a credential, by its shape."""
+    if not value or _CODE_VALUE_RE.fullmatch(value) or value.startswith(("[REDACTED", "«redacted")):
+        return False
+    if _HOST_REMNANT_RE.search(value):
+        return True
+    if value == "***":
+        return False
+    digit = any(c.isdigit() for c in value)
+    alpha = any(c.isalpha() for c in value)
+    if value.isdigit():
+        return len(value) >= (MIN_PASSWORD_DIGITS if kind == "password" else MIN_TOKEN_DIGITS)
+    if prose:
+        return digit and alpha if kind != "password" else digit
+    if kind == "password":
+        return digit or not _WORD_VALUE_RE.fullmatch(value)
+    special = any(not (c.isalnum() or c in "_.-/'") for c in value)
+    return alpha and (digit or special)
+
+
+def _named_value_span(text: str, match: re.Match) -> tuple[int, int] | None:
+    """The span to mask behind one credential name, ``None`` when the value is code or prose."""
+    kind = match.lastgroup or "token"
+    end = match.end()
+    sep = _KV_SEP_RE.match(text, end)
+    prose = sep is None
+    if prose:
+        sep = _PROSE_VERB_SEP_RE.match(text, end)
+        if sep is None and kind == "password":
+            sep = _PROSE_SEP_RE.match(text, end)
+        if sep is None or kind == "phrase":
+            return None
+    start = sep.end()
+    quoted = _QUOTED_RE.match(text, start)
+    if quoted:
+        inner = quoted.group(0)[1:-1]
+        multiword = kind != "token" and " " in inner.strip()
+        if inner and (multiword or _secret_shaped(kind, inner, prose=prose)):
+            return start + 1, quoted.end() - 1
+        return None
+    if kind == "phrase":
+        # Judged on its first word; only an accepted phrase is scanned to the end of the line.
+        first = _VALUE_RE.match(text, start)
+        if first is None:
+            return None
+        head = first.group(0).rstrip(_VALUE_TRAILERS)
+        more = _MORE_WORDS_RE.match(text, first.end()) is not None
+        if _CODE_VALUE_RE.fullmatch(head) or (not more and _IDENTIFIER_RE.fullmatch(head)):
+            return None
+        rest = _LINE_REST_RE.match(text, start).group(0).rstrip()
+        return start, start + len(rest)
+    scheme = _AUTH_SCHEME_RE.match(text, start) if kind == "token" and not prose else None
+    if scheme:
+        start = scheme.end()
+    token = _VALUE_RE.match(text, start)
+    if token is None:
+        return None
+    if token.end() - start == MAX_VALUE_CHARS:
+        return start, _VALUE_RUN_RE.match(text, start).end()
+    value = token.group(0).rstrip(_VALUE_TRAILERS)
+    if scheme and value and not _CODE_VALUE_RE.fullmatch(value) and not value.startswith("[REDACTED"):
+        return start, start + len(value)  # behind an auth scheme every value is the credential
+    if kind == "password" and value == "***":
+        spaced = _HOST_MASKED_WORDS_RE.match(text, start)
+        if spaced and spaced.end() > start + 3:
+            return start, spaced.end()
+    if not _secret_shaped(kind, value, prose=prose):
+        return None
+    return start, start + len(value)
+
+
+def _redact_named_values(text: str) -> str:
+    out: list[str] = []
+    position = 0
+    for match in _NAME_RE.finditer(text):
+        if match.start() < position:
+            continue  # inside a value already masked
+        span = _named_value_span(text, match)
+        if span is None:
+            continue
+        out.append(text[position : span[0]])
+        out.append(REDACTED)
+        position = span[1]
+    if not out:
+        return text
+    out.append(text[position:])
+    return "".join(out)
+
+
+def _redact_bearer(match: re.Match) -> str:
+    value = match.group(2).rstrip(_VALUE_TRAILERS)
+    if not _secret_shaped("token", value, prose=False):
+        return match.group(0)
+    return f"{match.group(1)}{REDACTED}{match.group(2)[len(value) :]}"
+
+
 def _redact_checkpoint_secrets(text: str) -> str:
-    """Conservative key/value redaction beyond the host's provider-specific rules."""
-    text = _GENERIC_SECRET_RE.sub(r"\1\2[REDACTED]", text)
-    return _BEARER_RE.sub(r"\1[REDACTED]", text)
+    """The plugin's rules over the host's output: named values, webhook path tokens, bearer
+    tokens. Deterministic; the work per name is bounded (:data:`MAX_VALUE_CHARS`, a phrase is
+    judged on its first word), so the time grows linearly with ``text``."""
+    if "/" in text:
+        text = _WEBHOOK_PATH_RE.sub(lambda m: m.group(1) + REDACTED, text)
+    text = _redact_named_values(text)
+    return _BEARER_RE.sub(_redact_bearer, text)
 
 
 def _host_redact(text: str) -> str:
-    """Host ``agent.redact.redact_sensitive_text(force=True)``; import failure fails closed."""
+    """Host ``agent.redact.redact_sensitive_text`` in its strict mode (``force``, and
+    ``redact_url_credentials`` for signed URLs, OAuth codes and URL user info — the mode Hermes
+    uses for its own compaction summary; present since Hermes 0.22.0). Import failure fails
+    closed."""
     from agent.redact import redact_sensitive_text
 
-    return redact_sensitive_text(text, force=True)
+    return redact_sensitive_text(text, force=True, redact_url_credentials=True)
 
 
-def redact_text(text: str, secret: str = "") -> str:
-    """Double redaction (host force + upstream generic rules) — defense in depth.
+def bound_secret_values(secret: str | Iterable[str] | None) -> tuple[str, ...]:
+    """The bound credential values, longest first (a shorter one inside a longer one cannot
+    leave a piece of it), duplicates and values under :data:`MIN_BOUND_SECRET_CHARS` dropped."""
+    values = [secret] if isinstance(secret, str) else list(secret or ())
+    unique = {value for value in values if isinstance(value, str) and len(value) >= MIN_BOUND_SECRET_CHARS}
+    return tuple(sorted(unique, key=lambda value: (-len(value), value)))
 
-    ``secret`` (the bound ctx key; ``""`` without one, e.g. ``transport: mcp``) is replaced
-    first: neither rule set knows a bare 64-hex ctx key or the ``X-Context-Key`` header form.
+
+def redact_text(text: str, secret: str | Iterable[str] = ()) -> str:
+    """Redaction of one text before it is stored: bound values, host strict mode, plugin rules.
+
+    ``secret``: the ctx key(s) of this profile — the REST key and, on ``transport: mcp``, the key
+    the MCP server entry signs in with (resolved by the umbrella provider). Neither rule set knows
+    a bare 64-hex ctx key, so it is replaced first, wherever it stands.
     """
-    return _redact_checkpoint_secrets(_host_redact(redact_secret(text, secret)))
+    for value in bound_secret_values(secret):
+        text = redact_secret(text, value)
+    return _redact_checkpoint_secrets(_host_redact(text))
 
 
 def _is_synthetic_handoff(message: dict[str, Any], raw: str) -> bool:
@@ -227,14 +415,15 @@ def _is_synthetic_handoff(message: dict[str, Any], raw: str) -> bool:
     return any(stripped.startswith(prefix) for prefix in _SYNTHETIC_ASSISTANT_PREFIXES)
 
 
-def render_direct_evidence(messages: list[dict[str, Any]], secret: str = "") -> str:
+def render_direct_evidence(messages: list[dict[str, Any]], secret: str | Iterable[str] = ()) -> str:
     """Redacted ``### Message N — role`` transcript of direct user/assistant text only.
 
-    ``secret``: the bound ctx key, redacted as well (see :func:`redact_text`).
+    ``secret``: the bound ctx key(s), redacted as well (see :func:`redact_text`).
 
     Raises ``CtxCheckpointError`` when redaction fails (never stores unredacted text).
     """
     entries: list[str] = []
+    secret = bound_secret_values(secret)  # once: an iterator would be spent on the first message
     for ordinal, message in enumerate(messages or [], start=1):
         if not isinstance(message, dict):
             continue
@@ -312,8 +501,9 @@ def part_header(root: str, session_id: str, digest: str, index: int, total: int)
         "This is deterministic, redacted source evidence captured before "
         "Hermes replaced older turns with a lossy compaction summary. "
         "Role labels and message ordinals are preserved. Tool results, "
-        "system prompts, synthetic compaction handoffs, and credentials "
-        "are intentionally excluded.\n\n"
+        "system prompts and synthetic compaction handoffs are intentionally "
+        "excluded; credentials in a known shape, and this profile's ctx key "
+        "where its server entry names it, are masked as [REDACTED].\n\n"
         f"- Root session: `{root}`\n"
         f"- Active session: `{session_id}`\n"
         f"- Transcript SHA-256: `{digest}`\n"
@@ -608,8 +798,8 @@ class ChainWriter:
     # Told once per chain that needs more than one rate window (the umbrella passes it on to the
     # user, the compaction waits that long); never raises into the writer.
     notify: Callable[[str], None] = lambda message: None
-    # The bound ctx key, redacted from the transcript parts; never part of the repr.
-    secret: str = field(default="", repr=False)
+    # The bound ctx key(s), redacted from the transcript parts; never part of the repr.
+    secret: str | tuple[str, ...] = field(default="", repr=False)
     _tool_evidence_warned: bool = field(default=False, init=False)
 
     def _window_writes(self) -> int:
@@ -939,8 +1129,7 @@ class ChainWriter:
                 "version": PLUGIN_VERSION,
                 "profile": self.profile,
                 "port_of": UPSTREAM_REF,
-                "redaction": (["bound-ctx-key"] if self.secret else [])
-                + ["host:redact_sensitive_text(force=True)", "generic-key-value", "bearer"],
+                "redaction": (["bound-ctx-key"] if bound_secret_values(self.secret) else []) + list(REDACTION_PASSES),
                 "checkpoint_id": checkpoint_id,
             },
         }

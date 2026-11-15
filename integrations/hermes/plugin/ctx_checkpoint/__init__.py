@@ -483,6 +483,61 @@ def _env_value(name: str) -> str:
         return ""
 
 
+# The headers ctx reads a key from (docs/mcp.md), and the ``${VAR}`` / ``${env:VAR}`` references
+# Hermes expands in config.yaml values (``hermes_cli.config``); other sources stay unresolved.
+_KEY_HEADERS = ("authorization", "x-context-key")
+_ENV_REFERENCE_RE = re.compile(r"\$\{\s*(?:env:\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\}")
+_AUTH_SCHEME_PREFIX_RE = re.compile(r"^(?:bearer|basic|token)\s+", re.IGNORECASE)
+
+
+def _entry_keys(entry: dict[str, Any]) -> list[str]:
+    """The key values an MCP server entry signs in with: its ``Authorization`` / ``X-Context-Key``
+    headers, references resolved through the host's own lookup (``.env`` included), the auth
+    scheme dropped. A header with a reference that does not resolve is skipped; an entry that signs
+    in with ``auth`` (OAuth) or runs a command has no key here."""
+    headers = entry.get("headers") if isinstance(entry, dict) else None
+    keys: list[str] = []
+    for header, raw in headers.items() if isinstance(headers, dict) else ():
+        if str(header).strip().lower() not in _KEY_HEADERS or not isinstance(raw, str):
+            continue
+        value = _expand_references(raw)
+        if value is None:
+            continue
+        value = _AUTH_SCHEME_PREFIX_RE.sub("", value.strip()).strip()
+        if value:
+            keys.append(value)
+    return keys
+
+
+def _expand_references(raw: str) -> str | None:
+    """``raw`` with every ``${VAR}`` / ``${env:VAR}`` resolved; ``None`` when one does not resolve
+    or another source (``${vault:…}``) remains."""
+    missing: list[str] = []
+
+    def expand(match: re.Match) -> str:
+        value = _env_value(match.group(1))
+        if not value:
+            missing.append(match.group(1))
+        return value
+
+    value = _ENV_REFERENCE_RE.sub(expand, raw)
+    return None if missing or "${" in value else value
+
+
+def _profile_ctx_keys(name: str) -> tuple[str, ...]:
+    """The ctx keys of this profile, for redaction only: the keys of ``mcp_servers.<name>`` — as
+    written (references resolved here, ``.env`` included) and as Hermes loads it (expanded, with
+    a managed overlay) — and the ``CTX_API_KEY`` setup stores. Reads config.yaml and .env, never
+    the network; never raises."""
+    keys: list[str] = []
+    for read in (_read_user_config, _effective_config):
+        try:
+            keys.extend(_entry_keys(_configured_server(read(), name)))
+        except Exception:
+            logger.debug("ctx_checkpoint: the key of mcp_servers.%s was not resolved for redaction", name)
+    return _cp.bound_secret_values([*keys, _env_value(SETUP_API_KEY_ENV)])
+
+
 def _prompt_setup(schema: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
     """Ask for each schema field on the terminal; returns ``(values, api_key)``."""
     values: dict[str, Any] = {}
@@ -558,6 +613,8 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         # and the last notice sent through it, so a repeated failure is reported once.
         self._warning_callback: Callable[[str], Any] | None = None
         self._last_warning = ""
+        # The ctx keys of this profile (``_profile_ctx_keys``), resolved on every connect.
+        self._profile_keys: tuple[str, ...] = ()
 
     # -- identity ------------------------------------------------------------------
 
@@ -624,7 +681,11 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
     def _chain_writer_seams(self) -> dict[str, Any]:
         return {"sleep": lambda seconds: _sleep(seconds), "monotonic": lambda: _monotonic()}
 
+    def _bound_secrets(self) -> tuple[str, ...]:
+        return _cp.bound_secret_values([self._api_key, *self._profile_keys])
+
     def _connect(self) -> None:
+        self._profile_keys = _profile_ctx_keys(self._server_name())
         if self.transport == "rest":
             super()._connect()
             return
@@ -731,7 +792,7 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         try:
             receipt = self._last_chain_receipt
             skipped = "" if (error is not None or receipt is not None) else self._skip_reason()
-            secrets = (self._api_key, _env_value(SETUP_API_KEY_ENV)) if error is not None else ()
+            secrets = self._bound_secrets() if error is not None else ()
             outcome = _st.checkpoint_outcome(
                 required=required,
                 receipt=receipt,

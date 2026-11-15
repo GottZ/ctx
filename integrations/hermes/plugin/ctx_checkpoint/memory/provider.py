@@ -175,16 +175,21 @@ class CtxMemoryProvider(MemoryProvider):
         """Monotonic clock for budgets/deadlines (the umbrella routes it through its test seam)."""
         return time.monotonic()
 
+    def _bound_secrets(self) -> tuple[str, ...]:
+        """The ctx key(s) this provider removes from everything it stores: the REST key (the
+        umbrella adds the key its MCP server entry signs in with)."""
+        return _cp.bound_secret_values(self._api_key)
+
     def _redacted(self, text: str) -> str | None:
-        """Host redaction (force) + the generic key/value and bearer rules, as for the chain,
-        plus the bound ctx key (which neither rule set knows).
+        """The checkpoint redaction (bound ctx keys, host strict mode, the plugin's rules), as for
+        the chain.
 
         Every automatic write — mirror, facts, digests — passes through here before it leaves
         the process; ``None`` means the redactor failed and the write is skipped (never store
         unredacted text).
         """
         try:
-            return _cp.redact_text(text or "", self._api_key)
+            return _cp.redact_text(text or "", self._bound_secrets())
         except Exception as exc:
             logger.warning("CTX redaction failed (%s); automatic write skipped", type(exc).__name__)
             return None
@@ -968,7 +973,7 @@ class CtxMemoryProvider(MemoryProvider):
                 api_timeout=float(self._config.get("api_timeout") or 10.0),
                 tags_for=_tags,
                 profile=profile,
-                secret=self._api_key,
+                secret=self._bound_secrets(),
                 notify=self._checkpoint_notice,
                 **self._chain_writer_seams(),
             )
