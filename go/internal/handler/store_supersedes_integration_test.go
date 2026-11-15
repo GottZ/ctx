@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -25,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -173,7 +175,9 @@ type sdLink struct {
 	origin       string
 }
 
-// link reads the dream link source → target; ok=false when there is none.
+// link reads the dream link source → target; ok=false when there is none. Any
+// other read error fails the test: an assertion that a link is gone must not
+// pass because the lookup broke.
 func (f *sdFixture) link(t *testing.T, source, target string) (sdLink, bool) {
 	t.Helper()
 	var l sdLink
@@ -182,8 +186,11 @@ func (f *sdFixture) link(t *testing.T, source, target string) (sdLink, bool) {
 		`SELECT relationship, pinned, raw_confidence, metadata->>'origin'
 		   FROM context_dream_links WHERE source_block_id = $1::uuid AND target_block_id = $2::uuid`,
 		source, target).Scan(&l.relationship, &l.pinned, &l.raw, &origin)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return sdLink{}, false
+	}
+	if err != nil {
+		t.Fatalf("read link %s -> %s: %v", source, target, err)
 	}
 	if origin != nil {
 		l.origin = *origin
@@ -246,8 +253,10 @@ func TestStoreSupersedesDeclared(t *testing.T) {
 		}
 		blk, _ := m["block"].(map[string]any)
 		var n int
-		_ = f.pool.QueryRow(ctx, `SELECT count(*)::int FROM context_dream_links WHERE source_block_id = $1::uuid`,
-			blk["id"]).Scan(&n)
+		if err := f.pool.QueryRow(ctx, `SELECT count(*)::int FROM context_dream_links WHERE source_block_id = $1::uuid`,
+			blk["id"]).Scan(&n); err != nil {
+			t.Fatalf("count links: %v", err)
+		}
 		if n != 0 {
 			t.Errorf("%d links written without the field", n)
 		}
