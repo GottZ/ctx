@@ -510,7 +510,9 @@ func (h *StoreHandler) classifySet(ctx context.Context) *blocktype.Set {
 }
 
 // upsertFailureReject renders a failed store.UpsertBlock: the I7/S3 sentinel
-// becomes 403 provenance_protected, a refused supersedes declaration its own
+// becomes 403 provenance_protected, an explicit type on the conflict row of a
+// comment or an issue 409 constraint (retypeBoundReject,
+// issue #280), a refused supersedes declaration its own
 // class (supersedesReject, issue #197), every other fault stays the opaque 500
 // and is logged. Split out of HandleStore so the refusal and the fault do not share
 // a branch at the call site — and so the MCP arm can answer the identical class
@@ -520,7 +522,7 @@ func (h *StoreHandler) classifySet(ctx context.Context) *blocktype.Set {
 // level. It is a client being told no, not a server fault, and at the target
 // corpus scale a rejected write must not be able to fill the error log.
 func upsertFailureReject(err error, reqID string) *writeReject {
-	if rej := provenanceRejectOr(err, nil); rej != nil {
+	if rej := provenanceRejectOr(err, retypeBoundReject(err)); rej != nil {
 		return rej
 	}
 	if rej := supersedesReject(err); rej != nil {

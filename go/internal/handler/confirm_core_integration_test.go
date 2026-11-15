@@ -161,7 +161,7 @@ func TestUpdateConfirmCrossSurface(t *testing.T) {
 	t.Run("MCP-staged update confirms over HTTP (cross-surface)", func(t *testing.T) {
 		title := "w6c via mcp"
 		res, _, err := mcpStageUpdate(authedCtx(), MCPConfig{Pool: pool, Cfg: cfgStore},
-			AuthResultFromContext(authedCtx()), nil, updateInput{ID: seed.ID, Title: &title}, []string{"title"})
+			AuthResultFromContext(authedCtx()), updateInput{ID: seed.ID, Title: &title}, []string{"title"})
 		if err != nil || res == nil || !res.IsError {
 			t.Fatalf("mcp stage update: err=%v res=%+v (want IsError=true staged response)", err, res)
 		}

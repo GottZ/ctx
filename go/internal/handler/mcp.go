@@ -281,7 +281,7 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 	// `type` since issue #203 (mcp_update.go).
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "update",
-		Description: "Update fields of an existing block (category, title, content, tags, metadata, type). Resolves the id within this key's writable scopes. A new type is checked against the block-type registry like the store tool's and kept as a manual choice; a type that would drop the untrusted marking of the block's current type is refused.",
+		Description: "Update fields of an existing block (category, title, content, tags, metadata, type). Resolves the id within this key's writable scopes. A new type is checked against the block-type registry like the store tool's and kept as a manual choice; leaving a type marked untrusted records that type on the block as untrusted_origin, and a comment or an issue keeps its type.",
 	}, mcpUpdateHandler(cfg))
 
 	// archive (#201): manage-delete parity — archives one block the key may
@@ -437,6 +437,9 @@ type mcpQuerySource struct {
 	// client in synthesis mode can tell that a cited source was replaced —
 	// the retrieval-only JSON carries the field since #183.
 	SupersededBy *string `json:"superseded_by"`
+	// UntrustedOrigin (issue #280) is rendered on a line of its own under the
+	// source line (mcpSourceLine).
+	UntrustedOrigin string `json:"untrusted_origin"`
 }
 
 // mcpSourceLineTail is what follows "id:<id>" on a source line: nothing, or
@@ -447,6 +450,20 @@ func mcpSourceLineTail(s mcpQuerySource) string {
 		return ""
 	}
 	return " superseded_by:" + *s.SupersededBy
+}
+
+// mcpSourceLine writes one source line of the "Sources:" list: the label (the
+// citation ordinal, the position, or mcpNoCitationMarker), then title,
+// category, id and mcpSourceLineTail; a source with an untrusted_origin record
+// (issue #280) gets store.UntrustedOriginNote on an indented line below it.
+// The note sits on a line of its own rather than in the tail so that a parser
+// that reads a source line up to its id (the Hermes plugin's does) still reads
+// the source, and a source without a record keeps its exact bytes.
+func mcpSourceLine(sb *strings.Builder, label string, s mcpQuerySource) {
+	fmt.Fprintf(sb, "%s %s (%s) id:%s%s\n", label, s.Title, s.Category, s.ID, mcpSourceLineTail(s))
+	if note := store.UntrustedOriginNote(s.UntrustedOrigin); note != "" {
+		sb.WriteString("    " + note + "\n")
+	}
 }
 
 // mcpNoCitationMarker replaces the number for a source that never entered the
@@ -506,7 +523,7 @@ func renderMCPQuerySources(sb *strings.Builder, sources []mcpQuerySource) {
 	sb.WriteString("\n\nSources:\n")
 	if len(cited) == 0 {
 		for i, s := range sources {
-			fmt.Fprintf(sb, "[%d] %s (%s) id:%s%s\n", i+1, s.Title, s.Category, s.ID, mcpSourceLineTail(s))
+			mcpSourceLine(sb, fmt.Sprintf("[%d]", i+1), s)
 		}
 		return
 	}
@@ -516,10 +533,10 @@ func renderMCPQuerySources(sb *strings.Builder, sources []mcpQuerySource) {
 		return *cited[i].CitationIndex < *cited[j].CitationIndex
 	})
 	for _, s := range cited {
-		fmt.Fprintf(sb, "[%d] %s (%s) id:%s%s\n", *s.CitationIndex, s.Title, s.Category, s.ID, mcpSourceLineTail(s))
+		mcpSourceLine(sb, fmt.Sprintf("[%d]", *s.CitationIndex), s)
 	}
 	for _, s := range uncited {
-		fmt.Fprintf(sb, "%s %s (%s) id:%s%s\n", mcpNoCitationMarker, s.Title, s.Category, s.ID, mcpSourceLineTail(s))
+		mcpSourceLine(sb, mcpNoCitationMarker, s)
 	}
 }
 
@@ -536,6 +553,8 @@ type mcpRetrievalSource struct {
 	Score        float64 `json:"score"`
 	SupersededBy *string `json:"superseded_by,omitempty"`
 	Untrusted    bool    `json:"untrusted,omitempty"`
+	// UntrustedOrigin (issue #280): /api/query's field under the same name.
+	UntrustedOrigin string `json:"untrusted_origin,omitempty"`
 	Content      string  `json:"content,omitempty"`
 }
 
@@ -803,6 +822,9 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 			if rej := supersedesReject(err); rej != nil {
 				return errResultReject(rej), nil, nil
 			}
+			if rej := retypeBoundReject(err); rej != nil {
+				return errResultReject(rej), nil, nil
+			}
 			return errResultReject(provenanceRejectOr(err,
 				classInternal.reject(fmt.Sprintf("store failed: %v", err)))), nil, nil
 		}
@@ -964,8 +986,10 @@ func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, any] {
 		// block-grant OR-arm (T40a) all live in store.RecentBlocks now; the
 		// guard's error is mapped back to the byte-identical prose below.
 		// The type registry snapshot rides along for the V-11 untrusted framing
-		// only — the type name is never rendered (registry vocabulary is not the
-		// model's decision), just resolved to the trust class per row.
+		// only — the row's type name is never rendered (registry vocabulary is
+		// not the model's decision), just resolved to the trust class per row.
+		// The one type name a row may show is its untrusted_origin record (issue
+		// #280), whose value is the type the text came from.
 		grants, err := resolveGrants(ctx, cfg.Pool, ar)
 		if errors.Is(err, store.ErrTooManyBlockGrants) { // T04-20: refuse, never read scope-only
 			return errResult(tooManyGrantsMsg), nil, nil
@@ -993,7 +1017,12 @@ func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, any] {
 			if bp.Untrusted { // V-11
 				trust = " " + untrustedMarker
 			}
-			fmt.Fprintf(&sb, "[%d] %s (%s, %s) id:%s%s\n    %s\n", i+1, bp.Title, bp.Category, bp.UpdatedAt.Format("2006-01-02"), bp.ID, trust, bp.ContentPreview)
+			fmt.Fprintf(&sb, "[%d] %s (%s, %s) id:%s%s\n", i+1, bp.Title, bp.Category, bp.UpdatedAt.Format("2006-01-02"), bp.ID, trust)
+			// issue #280: the record on a line of its own, the query tool's form.
+			if note := store.UntrustedOriginNote(bp.UntrustedOrigin); note != "" {
+				sb.WriteString("    " + note + "\n")
+			}
+			fmt.Fprintf(&sb, "    %s\n", bp.ContentPreview)
 		}
 
 		return &mcp.CallToolResult{

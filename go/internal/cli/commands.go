@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/clientconfig"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -178,6 +179,10 @@ func queryCmd(getClient func() (*Client, error)) *cobra.Command {
 				fmt.Printf("\n  Sources (%s):\n", result.Confidence)
 				for i, s := range result.Sources {
 					fmt.Printf("  [%d] %s (%s, %dd ago) id:%s\n", i+1, s.Title, s.Category, s.AgeDays, s.ID)
+					// issue #280: the server's untrusted_origin record, on a line of its own.
+					if note := store.UntrustedOriginNote(s.UntrustedOrigin); note != "" {
+						fmt.Printf("      %s\n", note)
+					}
 				}
 			}
 			return nil
@@ -198,6 +203,8 @@ type queryResult struct {
 		Category string  `json:"category"`
 		Score    float64 `json:"score"`
 		AgeDays  int     `json:"age_days"`
+		// UntrustedOrigin is the source's untrusted_origin record (issue #280).
+		UntrustedOrigin string `json:"untrusted_origin"`
 	} `json:"sources"`
 }
 

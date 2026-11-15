@@ -155,6 +155,10 @@ func runStageWriteGates(
 	}, nil
 }
 
+// emptyTypeMsg is the refusal of a present, empty `type` on manage update
+// (issue #280, point 2; see updateClaimReject).
+const emptyTypeMsg = "type: an empty name is not a block type — omit the field to keep the block's type (see manage type-list)"
+
 // validateTypeNameAgainstSet checks an explicit `type` value a CLIENT asserted.
 // nil = admissible. It has exactly one caller — claimReject below — and every
 // write surface reaches it through that one function, so "may this caller claim
@@ -343,7 +347,36 @@ func claimReject(set *blocktype.Set, category, typeName, parentID string, metada
 	if rej := validateTypeNameAgainstSet(set, typeName); rej != nil {
 		return rej
 	}
+	if rej := issueTypeReject(typeName); rej != nil {
+		return rej
+	}
 	return parentRequiredReject(set, typeName, parentID)
+}
+
+// issueTypeReject is the claim gate for the issue domain's type (issue #280,
+// point 3): no generic write surface may claim `issue`. nil = admissible.
+//
+// A block is an issue only together with what the issue domain writes beside
+// the type: the workflow status (initial state at create, transitions through
+// the issue verbs), the "#L<seq>" title prefix and the local sequence
+// (store.InsertIssueBlock), the forge fields. /api/store, the MCP store tool,
+// manage update, the MCP update tool and the confirm of a card set the type
+// and nothing else — the block they leave has no workflow status, so the board
+// columns and the status-filtered issue listings miss it while the
+// type-filtered ones count it. The domain code is written for this one name
+// (store.IssueTypeName), not for a registry property: a custom type with
+// workflow.states has no domain path and stays claimable as before. The issue
+// verbs are the remedy, the same answer parentRequiredReject gives for
+// `comment`; the class is reserved_type because the remedy is that code's:
+// drop the claim. The way OUT of `issue` and `comment` is refused by the write
+// statement (store.ErrRetypeBound).
+func issueTypeReject(name string) *writeReject {
+	if name != store.IssueTypeName {
+		return nil
+	}
+	return classReservedType.reject(fmt.Sprintf(
+		"type: %q is the issue domain's type — an issue is created through the issue actions, which write its workflow status "+
+			"and number; this write surface sets only the type", name))
 }
 
 // reservedMetadataReject is the second half of I7/S3 (design D-01 §4.3.1 read
@@ -409,6 +442,35 @@ func provenanceRejectOr(err error, fallback *writeReject) *writeReject {
 // manage update, the MCP update tool and both confirm surfaces carry it
 // verbatim; a client may match on it as well as on the 409 / "constraint".
 const blockIdentityTakenMsg = "another active block in this scope already has this category and title"
+
+// retypeBoundMsg is the one wording of the issue #280 refusal of a re-type of an
+// issue or a comment (store.ErrRetypeBound).
+const retypeBoundMsg = "type: this block is an issue or a comment — the issue domain keeps its workflow status, number and " +
+	"comment list by that type, so its type stays; a block of another type is a new write"
+
+// retypeBoundReject maps store.ErrRetypeBound onto the write surfaces' verdict
+// vocabulary: 409 of the constraint class — the payload is well-formed, the
+// row's state refuses it, and the store decides it in the statement that would
+// write (trg_block_retype). nil = err is not that refusal. One place for the
+// status and the wording, shared by REST manage update, REST /api/store, the
+// MCP update and store tools and both confirm arms.
+func retypeBoundReject(err error) *writeReject {
+	if !errors.Is(err, store.ErrRetypeBound) {
+		return nil
+	}
+	return classConstraint.rejectStatus(http.StatusConflict, retypeBoundMsg)
+}
+
+// updateFailureReject is the refusal of a failed store.UpdateBlock on every
+// update surface (REST manage update, the MCP update tool, the confirm of a
+// staged update): the I7/S3 sentinel, an identity collision (#227) or a
+// re-type of a comment or an issue (#280). nil = an unexpected fault.
+func updateFailureReject(err error) *writeReject {
+	if rej := retypeBoundReject(err); rej != nil {
+		return rej
+	}
+	return provenanceRejectOr(err, identityTakenReject(err))
+}
 
 // identityTakenReject maps store.BlockIdentityTakenError onto the write
 // surfaces' verdict vocabulary: 409 of the constraint class, the class every

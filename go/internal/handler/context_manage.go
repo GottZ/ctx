@@ -574,7 +574,17 @@ func (h *ManageHandler) handleListMeta(w http.ResponseWriter, r *http.Request, a
 // has no parent field and cannot give a block one, so a required-parent type
 // stays unclaimable here — the deliberate consequence T02-11 recorded, unchanged
 // by the parent_id NZ-3 added to /api/store.
+//
+// `"type": ""` is refused before the delegation (issue #280, point 2). The
+// pointer is set, so the store would write type_name = '' with
+// type_source = 'manual': a block outside every type list of the registry that
+// the classifier never repairs, because it re-types only auto rows. The
+// empty-value convention above is claimReject's reading of an ABSENT field; a
+// present empty one is a claim of no type, and there is no such type.
 func (h *ManageHandler) updateClaimReject(ctx context.Context, data store.UpdateBlockData) *writeReject {
+	if data.Type != nil && *data.Type == "" {
+		return classUnknownType.reject(emptyTypeMsg)
+	}
 	var set *blocktype.Set
 	if h.blocktypes != nil {
 		set = h.blocktypes.SnapshotForRequest(ctx)
@@ -584,15 +594,16 @@ func (h *ManageHandler) updateClaimReject(ctx context.Context, data store.Update
 
 // writeUpdateFailure renders a failed by-id block write on the manage surface
 // (update, delete, guard-resolve): the I7/S3 sentinel as 403
-// provenance_protected, an update onto another active block's identity as 409
-// constraint (issue #227; coded envelopes, because both classes are new here),
+// provenance_protected, an update onto another active block's identity and a
+// re-type of a comment or an issue as 409 constraint
+// (issues #227 and #280; coded envelopes, because the classes are new here),
 // every other fault as the surface's historical uncoded 500 — recoding the
 // manage handlers' existing envelopes is explicitly out of scope (errcode.go's
 // SCOPE note). Neither refusal writes a log line of its own: each is the
 // caller's input, not a server fault, and the request log already carries its
 // status.
 func writeUpdateFailure(w http.ResponseWriter, err error, reqID string) {
-	if rej := provenanceRejectOr(err, identityTakenReject(err)); rej != nil {
+	if rej := updateFailureReject(err); rej != nil {
 		writeJSONReject(w, rej)
 		return
 	}

@@ -401,6 +401,30 @@ type sourceResponse struct {
 	// DTO, so fixing the tag over there alone would have left /api/query
 	// unchanged. omitempty keeps a first-party source byte-identical.
 	Untrusted bool `json:"untrusted,omitempty"`
+	// UntrustedOrigin is the source block's untrusted_origin record (issue
+	// #280): the type marked untrusted that a re-type took it out of, so a
+	// citation of a block that now sits in a trusted type still says its text
+	// came from an agent session. Absent for a block without a record.
+	UntrustedOrigin string `json:"untrusted_origin,omitempty"`
+}
+
+// sourceOrigins reads the untrusted_origin record (issue #280) of the results
+// the sources are built from: one primary-key read over at most the user limit
+// of ids, whatever arm a row came through (ctx_rrf, graph expansion, the
+// cluster injection, the aggregate fold). Fail-open like the supersedes map:
+// the record annotates a citation and gates nothing, so a failed read answers
+// the query without it and logs.
+func (h *QueryHandler) sourceOrigins(ctx context.Context, results []rrf.SearchResult, requestID string) map[string]string {
+	ids := make([]string, len(results))
+	for i, r := range results {
+		ids[i] = r.ID
+	}
+	origins, err := store.UntrustedOrigins(ctx, h.pool, ids)
+	if err != nil {
+		slog.Warn("query: untrusted origin lookup failed", "error", err, "request_id", requestID)
+		return nil
+	}
+	return origins
 }
 
 // buildSourceResponses maps retrieval sources to the API response shape,
@@ -419,6 +443,7 @@ func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]strin
 			RRFScoreOriginal: s.RRFScoreOriginal,
 			CitationIndex:    s.CitationIndex,
 			Untrusted:        s.Untrusted, // V-11
+			UntrustedOrigin:  s.UntrustedOrigin,
 		}
 		if includeContent && s.Content != "" {
 			if r := []rune(s.Content); len(r) > maxRetrievalSnippet {
@@ -1343,6 +1368,10 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// numbers only. Without shadow_types this is the same slice, unfiltered.
 	results = dropShadowResults(results, req.ShadowTypes)
 
+	// Step 6g (issue #280): the untrusted_origin record of each remaining
+	// result (sourceOrigins).
+	origins := h.sourceOrigins(ctx, results, requestID)
+
 	// Step 7: Convert RRF results to LLM source format.
 	now = time.Now()
 	sources := make([]llm.Source, len(results))
@@ -1365,7 +1394,8 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			// snapshot that produced the visibility allowlist this result came
 			// through — so the flag and the type's admission to retrieval can
 			// never come from two generations.
-			Untrusted: typeSet.IsUntrusted(r.TypeName),
+			Untrusted:       typeSet.IsUntrusted(r.TypeName),
+			UntrustedOrigin: origins[r.ID],
 		}
 	}
 
