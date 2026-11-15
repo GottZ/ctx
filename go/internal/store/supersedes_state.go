@@ -346,8 +346,11 @@ func lockSupersedesSource(ctx context.Context, tx pgx.Tx, blockID string, writeS
 	// nothing; it stays for a writer outside that discipline that held the
 	// block and committed while we waited. Now the block is held, and this
 	// statement's fresh snapshot sees every such link; its targets are locked
-	// as well (in id order among themselves).
-	rows, err = tx.Query(ctx, supersedesTargetsOfSQL, blockID)
+	// as well (in id order among themselves). Both statements keep to the
+	// locked scope like the lock pass: a target in another scope carries no
+	// state from this block (the reconcile counts only sources of the
+	// target's own scope), and its row may be held by a declaration there.
+	rows, err = tx.Query(ctx, supersedesTargetsOfSQL, blockID, scope)
 	if err != nil {
 		return nil, fmt.Errorf("store: lock supersedes source: re-read: %w", err)
 	}
@@ -362,21 +365,29 @@ func lockSupersedesSource(ctx context.Context, tx pgx.Tx, blockID string, writeS
 		}
 	}
 	if len(late) > 0 {
-		if _, err := tx.Exec(ctx,
-			`SELECT 1 FROM context_blocks WHERE id = ANY($1::uuid[]) ORDER BY id FOR NO KEY UPDATE`, late); err != nil {
+		rows, err := tx.Query(ctx,
+			`SELECT id::text FROM context_blocks WHERE id = ANY($1::uuid[]) AND scope = $2 ORDER BY id FOR NO KEY UPDATE`,
+			late, scope)
+		if err != nil {
 			return nil, fmt.Errorf("store: lock supersedes source: late targets: %w", err)
 		}
-		targets = append(targets, late...)
+		lateLocked, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, fmt.Errorf("store: lock supersedes source: late targets: %w", err)
+		}
+		targets = append(targets, lateLocked...)
 	}
 	return targets, nil
 }
 
-// supersedesTargetsOfSQL reads the targets of a block's supersedes links
-// ($1 = the block), in id order; idx_dream_links_supersedes serves it.
-const supersedesTargetsOfSQL = `SELECT target_block_id::text
-	  FROM context_dream_links
-	 WHERE source_block_id = $1::uuid AND relationship = 'supersedes'
-	 ORDER BY target_block_id`
+// supersedesTargetsOfSQL reads the targets of a block's supersedes links that
+// live in a scope ($1 = the block, $2 = the scope), in id order;
+// idx_dream_links_supersedes serves the links, the primary key the scope.
+const supersedesTargetsOfSQL = `SELECT dl.target_block_id::text
+	  FROM context_dream_links dl
+	  JOIN context_blocks t ON t.id = dl.target_block_id
+	 WHERE dl.source_block_id = $1::uuid AND dl.relationship = 'supersedes' AND t.scope = $2
+	 ORDER BY dl.target_block_id`
 
 // lockSupersedesSourceSQL is lockSupersedesSource's statement ($1 = the block,
 // $2 = the scope whose supersedes locks the transaction holds). Only a block

@@ -58,8 +58,8 @@ func TestLockSupersedesSourceCostDoesNotGrowWithTheCorpus(t *testing.T) {
 		args := []any{src, "private"}
 		costs[i][0] = testdb.ExplainGeneric(t, pool, store.LockSupersedesSourceSQLForTest, args...)
 		costs[i][1] = testdb.ExplainCustom(t, pool, store.LockSupersedesSourceSQLForTest, args...)
-		reGeneric := testdb.ExplainGeneric(t, pool, store.SupersedesTargetsOfSQLForTest, src)
-		reCustom := testdb.ExplainCustom(t, pool, store.SupersedesTargetsOfSQLForTest, src)
+		reGeneric := testdb.ExplainGeneric(t, pool, store.SupersedesTargetsOfSQLForTest, src, "private")
+		reCustom := testdb.ExplainCustom(t, pool, store.SupersedesTargetsOfSQLForTest, src, "private")
 		costs[i][0].Buffers += reGeneric.Buffers
 		costs[i][1].Buffers += reCustom.Buffers
 		t.Logf("n=%d generic=%d (re-read %d) custom=%d (re-read %d) buffers", n,

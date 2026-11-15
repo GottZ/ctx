@@ -63,7 +63,8 @@ func TestSupersedesArchiveOfABlockMovedDuringItsLockPass(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer func() { _ = mover.Rollback(ctx) }()
-	if _, err := mover.Exec(ctx, `UPDATE context_blocks SET scope = 'moved-away' WHERE id = $1::uuid`, src); err != nil {
+	// Source and target move together, so the link stays within one scope.
+	if _, err := mover.Exec(ctx, `UPDATE context_blocks SET scope = 'moved-away' WHERE id = ANY($1::uuid[])`, []string{src, tgt}); err != nil {
 		t.Fatalf("move: %v", err)
 	}
 
@@ -125,6 +126,92 @@ func TestSupersedesArchiveOfABlockMovedDuringItsLockPass(t *testing.T) {
 	}
 	if lifecycle != "knowledge" {
 		t.Errorf("target after the archive of its moved successor = %s, want knowledge", lifecycle)
+	}
+}
+
+// TestSupersedesArchiveLocksNoRowOfAnotherScope: the archive holds only its
+// own scope's supersedes locks, so it must lock rows of that scope only — a
+// row of another scope may be held by a declaration there, and a lock on it
+// taken after the block, outside the id order, could close a cycle. A
+// supersedes link from the block to a block of another scope (written before
+// links were kept within one scope, or by a batch whose source moved) carries
+// no state: the reconcile counts only sources of the target's own scope. The
+// archive must therefore finish while another transaction holds that block.
+func TestSupersedesArchiveLocksNoRowOfAnotherScope(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+	src, err := store.UpsertBlock(ctx, pool, "race", "foreign-src", "foreign-src content", nil, nil, "private", true,
+		store.SensitivityWrite{}, "")
+	if err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	foreign, err := store.UpsertBlock(ctx, pool, "race", "foreign-tgt", "foreign-tgt content", nil, nil, "elsewhere", true,
+		store.SensitivityWrite{}, "")
+	if err != nil {
+		t.Fatalf("seed foreign block: %v", err)
+	}
+	// No production path writes this link today; it is the legacy shape.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO context_dream_links (source_block_id, target_block_id, relationship, confidence, raw_confidence, scope)
+		 VALUES ($1::uuid, $2::uuid, 'supersedes', 0.9, 0.9, 'private')`, src.ID, foreign.ID); err != nil {
+		t.Fatalf("seed cross-scope link: %v", err)
+	}
+
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, `SELECT 1 FROM context_blocks WHERE id = $1::uuid FOR UPDATE`, foreign.ID); err != nil {
+		t.Fatalf("hold foreign block: %v", err)
+	}
+
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse dsn: %v", err)
+	}
+	cfg.MaxConns = 1
+	cfg.ConnConfig.RuntimeParams["application_name"] = "foreign-archive"
+	actor, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("actor pool: %v", err)
+	}
+	defer actor.Close()
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.DeleteBlock(ctx, actor, src.ID, []string{"private"})
+		done <- err
+	}()
+	for deadline := time.Now().Add(15 * time.Second); ; {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("archive: %v", err)
+			}
+			return
+		default:
+		}
+		var waiting int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*)::int FROM pg_stat_activity
+			  WHERE application_name = 'foreign-archive' AND datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting); err != nil {
+			t.Fatalf("pg_stat_activity: %v", err)
+		}
+		if waiting > 0 {
+			t.Errorf("the archive of a block in scope private waits for a row of scope elsewhere")
+			_ = holder.Rollback(ctx)
+			if err := <-done; err != nil {
+				t.Fatalf("archive: %v", err)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("archive neither finished nor waited within 15s")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
