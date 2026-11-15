@@ -496,7 +496,7 @@ and manifest are deliberately small so routine recall stays cheap.
   `ctx_state/checkpoint-status.state`; `hermes memory status` and
   `hermes ctx_checkpoint status` show the server entry, a connection test, the mode
   and the last checkpoint on the MCP transport (no more "set CTX_BASE_URL and
-  CTX_KEY"); a failed checkpoint names its cause through Hermes' warning channel.
+  CTX_KEY"); a failed or skipped checkpoint names its cause through Hermes' warning channel.
   Warnings for `checkpoint_mode: off` and for plain `http://` to a remote host.
   `requires_hermes` is `>=0.23.1`. CI workflow `hermes-ctx-checkpoint.yml`.
 

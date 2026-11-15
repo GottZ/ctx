@@ -353,6 +353,15 @@ def failure_warning(outcome: dict[str, Any], server: str) -> str:
     return f"{head} Cause: {cause}. {_failure_hint(cause, server)}"
 
 
+def skip_warning(outcome: dict[str, Any]) -> str:
+    """The notice a user gets when a compaction ran without a checkpoint and without an error."""
+    return (
+        f"ctx checkpoint not written ({outcome.get('skipped') or 'no reason recorded'}); Hermes compacted the "
+        "conversation without saving its wording to ctx. `hermes ctx_checkpoint status` shows the settings "
+        "and tests the connection."
+    )
+
+
 def _failure_hint(cause: str, server: str) -> str:
     if f"Unknown tool: mcp__{server}__" in cause:
         return (

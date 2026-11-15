@@ -54,7 +54,9 @@ checkpoint, and a status that shows whether checkpoints work on the MCP transpor
   the test fails.
 - **Reason for the user.** A failed checkpoint names its cause (part limit, time limit, MCP
   server not connected, rate limit, `confirm_writes`) through the `warning_callback` Hermes
-  passes on CLI-platform sessions, once per distinct cause.
+  passes on CLI-platform sessions, once per distinct cause; a best-effort compaction that ran
+  without a checkpoint and without an error (provider not connected, `checkpoint_chain: false`,
+  `checkpoint_mode: off`) says so the same way.
 - **Warnings.** `checkpoint_mode: off` (from `memory.ctx_checkpoint` or `ctx.json`) is
   logged at session start and shown in the status, with the source and — under
   `compression.checkpoint_required` — that every compaction is refused (logged once per

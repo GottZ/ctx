@@ -663,8 +663,9 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         tool_evidence: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> str:
-        """The engine's checkpoint, plus its outcome in ``ctx_state/`` and, on a failure, the
-        reason for the user (Hermes passes only a generic text up)."""
+        """The engine's checkpoint, plus its outcome in ``ctx_state/`` and, on a failure or a
+        compaction without a checkpoint, the reason for the user (Hermes passes only a generic
+        text up)."""
         try:
             receipt_text = super().on_pre_compress(
                 messages, require_checkpoint=require_checkpoint, tool_evidence=tool_evidence, **kwargs
@@ -693,6 +694,8 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
             _st.record_checkpoint(self._hermes_home, outcome)
             if outcome["error"]:
                 self._notify_user(_st.failure_warning(outcome, self._server_name()))
+            elif outcome["skipped"]:
+                self._notify_user(_st.skip_warning(outcome))
             else:
                 self._last_warning = ""
         except Exception:

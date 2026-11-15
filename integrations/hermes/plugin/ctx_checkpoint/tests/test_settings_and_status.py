@@ -881,3 +881,28 @@ def test_manifest_floor_is_the_first_hermes_whose_subagents_inherit_the_provider
     # v0.23.1 on (tools/delegate_tool.py: skip_memory=not child_checkpoint_required); before,
     # every sub-agent compaction failed closed.
     assert _manifest()["requires_hermes"] == ">=0.23.1"
+
+
+# -- G. Skipped checkpoints, alias keys, templated URLs, concurrent outcomes, ctx.json -------
+
+
+@pytest.mark.parametrize(
+    "config, prepare, reason",
+    [
+        ({}, lambda provider: setattr(provider, "_active", False), "the provider is not connected"),
+        ({"checkpoint_chain": False}, lambda provider: None, "checkpoint_chain: false"),
+    ],
+)
+def test_a_skipped_best_effort_checkpoint_tells_the_user_why_once(hermes_home, config, prepare, reason):
+    seen = []
+    provider = Provider(config=config, dispatch=_ok_dispatch()[0])
+    provider.initialize("session-skip", platform="cli", hermes_home=str(hermes_home), warning_callback=seen.append)
+    prepare(provider)
+
+    for _ in range(2):
+        assert provider.on_pre_compress(TRANSCRIPT) == ""
+
+    assert _outcome(hermes_home)["skipped"] == reason
+    assert len(seen) == 1
+    assert reason in seen[0]
+    assert "without saving its wording to ctx" in seen[0]
