@@ -2,8 +2,12 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"testing"
+	"time"
+
+	"github.com/GottZ/ctx/internal/store"
 )
 
 // The two search transports (REST /api/search, MCP `search`) now build ONE
@@ -106,32 +110,60 @@ func TestSearchTypeStrictnessStaysATransportProperty(t *testing.T) {
 	if !(searchInput{}).coreArgs(false).VisibleTypesOnly {
 		t.Error("the MCP search tool MUST cut against the visible set (V-W6)")
 	}
-	// The tool answers compact rows and never paginates; both are surface
-	// properties, not caller choices.
+	// Without the #206/#207 arguments the tool answers compact rows from page 1,
+	// as it always did; with them it reads full rows and the caller's cursor.
 	toolArgs := (searchInput{}).coreArgs(false)
 	if !toolArgs.Compact || toolArgs.After != nil {
 		t.Errorf("tool args = compact %t, after %v; want compact true, after nil", toolArgs.Compact, toolArgs.After)
 	}
+	cur := &store.SearchCursor{ID: "x"}
+	toolArgs = (searchInput{IncludeContent: true, After: cur}).coreArgs(false)
+	if toolArgs.Compact || toolArgs.After != cur {
+		t.Errorf("tool args = compact %t, after %v; want compact false and the caller's cursor", toolArgs.Compact, toolArgs.After)
+	}
 }
 
-// TestDefaultSearchLimitHasNoCap: the shared default is 10; the cap is NOT
-// shared. E03-2 = B (K28) leaves the tool surface unbounded, so a cap inside the
-// core would silently narrow it — the REST 50 lives in HandleSearch and only
-// there.
-func TestDefaultSearchLimitHasNoCap(t *testing.T) {
+// TestSearchLimitIsOneRuleWithTheStoreCap: default 10 and cap
+// store.SearchMaxLimit for both transports. Until #206 this test pinned the
+// tool's handler-side limit 999 as 999 (E03-2 = B), while the statement builder
+// clamped the same call at 50. The effective cap is unchanged; it is now
+// stated where the transports can report it.
+func TestSearchLimitIsOneRuleWithTheStoreCap(t *testing.T) {
 	for _, c := range []struct{ in, want int }{
-		{0, 10}, {-1, 10}, {1, 1}, {50, 50}, {51, 51}, {999, 999},
+		{0, 10}, {-1, 10}, {1, 1}, {50, 50}, {51, 50}, {999, 50},
 	} {
-		if got := defaultSearchLimit(c.in); got != c.want {
-			t.Errorf("defaultSearchLimit(%d) = %d, want %d", c.in, got, c.want)
+		if got := searchLimit(c.in); got != c.want {
+			t.Errorf("searchLimit(%d) = %d, want %d", c.in, got, c.want)
 		}
 	}
-	// The REST transport applies the cap on top of the same default.
-	if got := (searchRequest{Limit: 999}).coreArgs(50, true, nil, false).Limit; got != 50 {
-		t.Errorf("REST args carry limit %d, want the capped 50", got)
+	if store.SearchMaxLimit != 50 {
+		t.Errorf("store.SearchMaxLimit = %d; the documented cap is 50 (docs/mcp.md, docs/api.md)", store.SearchMaxLimit)
 	}
-	if got := (searchInput{Limit: 999}).coreArgs(false).Limit; got != 999 {
-		t.Errorf("tool args carry limit %d, want the uncapped 999 (E03-2 = B)", got)
+}
+
+// TestSearchCursorOfIsTheRESTRule: no position = page 1, a malformed id = the
+// cursor refusal, a well-formed position passes unchanged.
+func TestSearchCursorOfIsTheRESTRule(t *testing.T) {
+	when := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name string
+		in   *store.SearchCursor
+	}{
+		{"nil", nil},
+		{"empty", &store.SearchCursor{}},
+		{"no timestamp", &store.SearchCursor{ID: "00000000-0000-4000-8000-000000000000"}},
+		{"no id", &store.SearchCursor{UpdatedAt: when}},
+	} {
+		if got, err := searchCursorOf(c.in); got != nil || err != nil {
+			t.Errorf("%s: (%v, %v), want page 1 (nil, nil)", c.name, got, err)
+		}
+	}
+	if _, err := searchCursorOf(&store.SearchCursor{UpdatedAt: when, ID: "not-a-uuid"}); !errors.Is(err, errSearchCursorForm) {
+		t.Errorf("malformed id: err %v, want errSearchCursorForm", err)
+	}
+	ok := &store.SearchCursor{UpdatedAt: when, ID: "01a1def2-323d-75e1-bb32-5560edf7d690"}
+	if got, err := searchCursorOf(ok); got != ok || err != nil {
+		t.Errorf("well-formed: (%v, %v), want the cursor itself", got, err)
 	}
 }
 
