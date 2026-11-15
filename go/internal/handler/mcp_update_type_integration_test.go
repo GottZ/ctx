@@ -11,13 +11,15 @@
 //     builtin type, a tenant's own type, another tenant's type, an unknown and a
 //     malformed name the tool reaches the verdict REST manage update reaches
 //     (same code, same text); another tenant's type answers byte for byte like
-//     a name that never existed; the untrusted marking of a block cannot be
-//     lifted; the block counters stay exact; an update without `type` leaves the
-//     type alone.
+//     a name that never existed; a re-type out of a type marked untrusted is
+//     taken and records that type (issue #280, which reversed #203's refusal);
+//     the block counters stay exact; an update without `type` leaves the type
+//     alone.
 //   - TestMCPUpdateTypeStaged: the staged form for confirm_writes keys — `type`
-//     is an update field and hash-bound, and the claim gates and the untrusted
-//     rule run at stage AND at confirm (a type that left the registry, a source
-//     type whose policy changed in between).
+//     is an update field and hash-bound, the claim gates run at stage AND at
+//     confirm (a type that left the registry), and the untrusted_origin record
+//     is decided by the confirmed statement (a source type whose policy changed
+//     in between).
 //
 // Run with:
 //
@@ -174,7 +176,7 @@ func TestMCPUpdateType(t *testing.T) {
 		// builtin rows are pinned by name: a builtin added later fails here
 		// until somebody decides its row.
 		expect := map[string]string{
-			"knowledge": "", "reference": "", "audit-trail": "", "system-meta": "", "issue": "",
+			"knowledge": "", "reference": "", "audit-trail": "", "system-meta": "", "issue": "reserved_type",
 			"tool-evidence": "", "tool-overview": "", "checkpoint": "",
 			"comment": "parent_required",
 			"insight": "reserved_type", "catalog": "reserved_type",
@@ -269,27 +271,32 @@ func TestMCPUpdateType(t *testing.T) {
 		}
 	})
 
-	t.Run("the untrusted marking of a block cannot be lifted", func(t *testing.T) {
+	t.Run("a re-type out of a type marked untrusted is taken and recorded", func(t *testing.T) {
 		for _, src := range []string{"tool-evidence", "checkpoint", "t203-own-untrusted"} {
-			id := i203StoreTyped(t, f, f.direct, "t203-untrusted-"+src, src)
 			for keyName, keyCtx := range map[string]context.Context{"direct": f.direct, "flagged": f.flagged} {
+				id := i203StoreTyped(t, f, f.direct, "t203-untrusted-"+keyName+"-"+src, src)
 				a := f.call(t, keyCtx, "update", map[string]any{"id": id, "type": "knowledge"})
-				if a.RPCError != "" || !a.IsError || a.Code != "reserved_type" {
-					t.Errorf("%s key, %s → knowledge: %+v, want a reserved_type refusal", keyName, src, a)
+				if keyName == "flagged" {
+					m := hashRe.FindStringSubmatch(a.Text)
+					if m == nil {
+						t.Fatalf("flagged, %s → knowledge: %+v, want a STAGED card", src, a)
+					}
+					a = f.call(t, f.flagged, "confirm", map[string]any{"payload_hash": m[1]})
 				}
-				if !strings.Contains(a.Text, `"`+src+`"`) || !strings.Contains(a.Text, "untrusted") {
-					t.Errorf("%s key, %s → knowledge: text %q names neither the type nor the marking", keyName, src, a.Text)
+				if a.RPCError != "" || a.IsError {
+					t.Errorf("%s key, %s → knowledge: %+v, want accepted", keyName, src, a)
+				}
+				if name, source := i203TypeOf(t, f.pool, id); name != "knowledge" || source != "manual" {
+					t.Errorf("%s key, %s block type = (%q, %q), want (knowledge, manual)", keyName, src, name, source)
+				}
+				if got := roOrigin(t, f.pool, id); got != src {
+					t.Errorf("%s key, %s block untrusted_origin = %q, want %q", keyName, src, got, src)
 				}
 			}
-			if name, source := i203TypeOf(t, f.pool, id); name != src || source != "manual" {
-				t.Errorf("%s block type = (%q, %q), want unchanged (%q, manual)", src, name, source, src)
-			}
-		}
-		if n := i203OpenStages(t, f, ""); n != 0 {
-			t.Errorf("a refused re-type left %d stage rows, want 0 — the flagged key must get no card", n)
 		}
 
-		// A move between two untrusted types keeps the marking and is allowed.
+		// A move between two untrusted types keeps the marking; the type it
+		// left is recorded all the same.
 		id := i203StoreTyped(t, f, f.direct, "t203-untrusted-move", "tool-evidence")
 		if a := f.call(t, f.direct, "update", map[string]any{"id": id, "type": "tool-overview"}); a.RPCError != "" || a.IsError {
 			t.Errorf("tool-evidence → tool-overview: %+v, want accepted", a)
@@ -297,9 +304,11 @@ func TestMCPUpdateType(t *testing.T) {
 		if name, _ := i203TypeOf(t, f.pool, id); name != "tool-overview" {
 			t.Errorf("type = %q, want tool-overview", name)
 		}
+		if got := roOrigin(t, f.pool, id); got != "tool-evidence" {
+			t.Errorf("untrusted_origin = %q, want tool-evidence", got)
+		}
 
-		// A block of the key's own trusted tenant type re-types freely: the
-		// current type resolves against the request's snapshot, not the base.
+		// A block of the key's own trusted tenant type re-types without a record.
 		own := i203StoreTyped(t, f, f.direct, "t203-own-source", "t203-own")
 		if a := f.call(t, f.direct, "update", map[string]any{"id": own, "type": "knowledge"}); a.RPCError != "" || a.IsError {
 			t.Errorf("t203-own → knowledge: %+v, want accepted", a)
@@ -307,33 +316,33 @@ func TestMCPUpdateType(t *testing.T) {
 		if name, _ := i203TypeOf(t, f.pool, own); name != "knowledge" {
 			t.Errorf("type = %q, want knowledge", name)
 		}
+		if got := roOrigin(t, f.pool, own); got != "" {
+			t.Errorf("untrusted_origin = %q, want none", got)
+		}
 	})
 
-	t.Run("a current type outside the key's registry is not re-typed", func(t *testing.T) {
-		// No production write leaves a block on a name the caller's registry
-		// view lacks except a type owned under another home scope, so the
-		// orphan is planted by SQL: it stands for both.
+	t.Run("a current type outside every registry re-types without a record", func(t *testing.T) {
+		// No production write leaves a block on a name no registry row holds;
+		// the orphan is planted by SQL.
 		id := i203StoreTyped(t, f, f.direct, "t203-orphan-source", "")
 		if _, err := f.pool.Exec(ctx, `UPDATE context_blocks SET type_name = 't203-orphan' WHERE id = $1`, id); err != nil {
 			t.Fatalf("plant orphaned type: %v", err)
 		}
-		for keyName, keyCtx := range map[string]context.Context{"direct": f.direct, "flagged": f.flagged} {
-			a := f.call(t, keyCtx, "update", map[string]any{"id": id, "type": "knowledge"})
-			if a.RPCError != "" || !a.IsError || a.Code != "reserved_type" || !strings.Contains(a.Text, `"t203-orphan"`) {
-				t.Errorf("%s key, orphan → knowledge: %+v, want a reserved_type refusal naming the type", keyName, a)
-			}
+		if a := f.call(t, f.direct, "update", map[string]any{"id": id, "type": "knowledge"}); a.RPCError != "" || a.IsError {
+			t.Errorf("orphan → knowledge: %+v, want accepted", a)
 		}
-		if n := i203OpenStages(t, f, ""); n != 0 {
-			t.Errorf("a refused re-type left %d stage rows, want 0", n)
+		if name, _ := i203TypeOf(t, f.pool, id); name != "knowledge" {
+			t.Errorf("type = %q, want knowledge", name)
 		}
-		if name, _ := i203TypeOf(t, f.pool, id); name != "t203-orphan" {
-			t.Errorf("type = %q, want unchanged t203-orphan", name)
+		if got := roOrigin(t, f.pool, id); got != "" {
+			t.Errorf("untrusted_origin = %q, want none — no registry row marks the name", got)
 		}
 	})
 
 	t.Run("a re-type of a derived block answers provenance_protected on both surfaces", func(t *testing.T) {
 		// insight is the one type that is untrusted AND derived: the
-		// provenance refusal REST answers must win over the untrusted rule.
+		// statement's provenance refusal answers on every surface; the flagged
+		// key gets it from the confirmed write.
 		mkDerived := func(title string) string {
 			t.Helper()
 			b, err := store.UpsertBlock(ctx, f.pool, "learnings", title, "derived body", nil,
@@ -350,11 +359,16 @@ func TestMCPUpdateType(t *testing.T) {
 		if ok || status != http.StatusForbidden || code != "provenance_protected" {
 			t.Fatalf("REST = (status %d, code %q, success %v), want (403, provenance_protected, false)", status, code, ok)
 		}
-		for keyName, keyCtx := range map[string]context.Context{"direct": f.direct, "flagged": f.flagged} {
-			a := f.call(t, keyCtx, "update", map[string]any{"id": mcpID, "type": "knowledge"})
-			if a.RPCError != "" || !a.IsError || a.Code != "provenance_protected" || a.Text != msg {
-				t.Errorf("%s key: %+v, want provenance_protected with REST's text %q", keyName, a, msg)
-			}
+		if a := f.call(t, f.direct, "update", map[string]any{"id": mcpID, "type": "knowledge"}); a.RPCError != "" || !a.IsError || a.Code != "provenance_protected" || a.Text != msg {
+			t.Errorf("direct key: %+v, want provenance_protected with REST's text %q", a, msg)
+		}
+		a := f.call(t, f.flagged, "update", map[string]any{"id": mcpID, "type": "knowledge"})
+		m := hashRe.FindStringSubmatch(a.Text)
+		if m == nil {
+			t.Fatalf("flagged key: %+v, want a STAGED card", a)
+		}
+		if a = f.call(t, f.flagged, "confirm", map[string]any{"payload_hash": m[1]}); a.RPCError != "" || !a.IsError || a.Code != "provenance_protected" || !strings.HasSuffix(a.Text, msg) {
+			t.Errorf("flagged key, confirm: %+v, want provenance_protected ending in REST's text %q", a, msg)
 		}
 		for _, id := range []string{restID, mcpID} {
 			if name, _ := i203TypeOf(t, f.pool, id); name != derived.TypeInsight {
@@ -492,7 +506,7 @@ func TestMCPUpdateTypeStaged(t *testing.T) {
 		}
 	})
 
-	t.Run("a source type that turned untrusted after staging is refused at confirm", func(t *testing.T) {
+	t.Run("a source type that turned untrusted after staging is recorded at confirm", func(t *testing.T) {
 		id := i203StoreTyped(t, f, f.direct, "t203-src-target", "t203-src")
 		h := stage(t, map[string]any{"id": id, "type": "knowledge"})
 		if _, err := store.UpdateBlockType(ctx, f.pool, globalRow(t, "t203-src").ID, []string{"_global"},
@@ -500,21 +514,20 @@ func TestMCPUpdateTypeStaged(t *testing.T) {
 			t.Fatalf("mark the source type untrusted: %v", err)
 		}
 		reload(t)
-		a := confirm(t, h)
-		if !a.IsError || a.Code != "reserved_type" || !strings.Contains(a.Text, "untrusted") {
-			t.Errorf("confirm after the source type turned untrusted: %+v, want a reserved_type refusal naming the marking", a)
+		if a := confirm(t, h); a.IsError {
+			t.Errorf("confirm after the source type turned untrusted: %+v, want executed", a)
 		}
-		if n := i203OpenStages(t, f, h); n != 1 {
-			t.Errorf("a refusal before the consume spent the token (open = %d, want 1)", n)
+		if name, source := i203TypeOf(t, f.pool, id); name != "knowledge" || source != "manual" {
+			t.Errorf("type = (%q, %q), want (knowledge, manual)", name, source)
 		}
-		if name, source := i203TypeOf(t, f.pool, id); name != "t203-src" || source != "manual" {
-			t.Errorf("type = (%q, %q), want unchanged (t203-src, manual)", name, source)
+		if got := roOrigin(t, f.pool, id); got != "t203-src" {
+			t.Errorf("untrusted_origin = %q, want t203-src — the policy at the confirmed write decides", got)
 		}
 	})
 
 	t.Run("the confirm decides over the key's own tenant types", func(t *testing.T) {
-		// A trusted tenant type confirms; a tenant type marked untrusted after
-		// staging refuses. Both resolve only in the request's snapshot.
+		// Both confirm; the tenant type marked untrusted after staging is
+		// recorded, the trusted one is not.
 		keep := i203StoreTyped(t, f, f.direct, "t203-src-own-target", "t203-src-own")
 		flip := i203StoreTyped(t, f, f.direct, "t203-src-own-flip-target", "t203-src-own-flip")
 		hKeep := stage(t, map[string]any{"id": keep, "type": "knowledge"})
@@ -536,15 +549,17 @@ func TestMCPUpdateTypeStaged(t *testing.T) {
 		if name, _ := i203TypeOf(t, f.pool, keep); name != "knowledge" {
 			t.Errorf("type = %q, want knowledge", name)
 		}
-		a := confirm(t, hFlip)
-		if !a.IsError || a.Code != "reserved_type" || !strings.Contains(a.Text, `"t203-src-own-flip"`) {
-			t.Errorf("confirm after the tenant type turned untrusted: %+v, want a reserved_type refusal naming it", a)
+		if got := roOrigin(t, f.pool, keep); got != "" {
+			t.Errorf("trusted tenant type: untrusted_origin = %q, want none", got)
 		}
-		if n := i203OpenStages(t, f, hFlip); n != 1 {
-			t.Errorf("a refusal before the consume spent the token (open = %d, want 1)", n)
+		if a := confirm(t, hFlip); a.IsError {
+			t.Errorf("confirm after the tenant type turned untrusted: %+v, want executed", a)
 		}
-		if name, _ := i203TypeOf(t, f.pool, flip); name != "t203-src-own-flip" {
-			t.Errorf("type = %q, want unchanged t203-src-own-flip", name)
+		if name, _ := i203TypeOf(t, f.pool, flip); name != "knowledge" {
+			t.Errorf("type = %q, want knowledge", name)
+		}
+		if got := roOrigin(t, f.pool, flip); got != "t203-src-own-flip" {
+			t.Errorf("untrusted_origin = %q, want t203-src-own-flip", got)
 		}
 	})
 }

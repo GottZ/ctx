@@ -22,11 +22,17 @@
 // upsert branch, at the price of resending the whole block under an exactly
 // reproduced category and title. The field runs the gates REST runs, through
 // the same function (claimReject, against the request's registry snapshot),
-// and the store writes it with type_source='manual'. One rule is this tool's
-// own (untrustedLiftReject): a re-type may not take the untrusted marking off
-// a block, at stage time, at confirm time and on the direct path. It is not a
-// property of the block: the store tool's upsert branch and REST manage-update
-// still take an explicit type as given.
+// and the store writes it with type_source='manual'.
+//
+// Since issue #280 the three re-type paths behave alike, and the rules that
+// read the block's CURRENT type live in the statement that writes it
+// (trg_block_retype, migration 174) rather than in a read ahead of it: a
+// re-type out of a type marked untrusted is accepted and records that type on
+// the block (untrusted_origin), and a comment or an issue keeps its type
+// (store.ErrRetypeBound). #203 refused the first at stage,
+// confirm and direct path (reserved_type); the owner's decision on #280 is
+// that the corpus takes such a block up and the record keeps where its text
+// came from.
 package handler
 
 import (
@@ -39,7 +45,6 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/blocktype"
-	"github.com/GottZ/ctx/internal/derived"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -51,7 +56,7 @@ type updateInput struct {
 	Content  *string        `json:"content,omitempty" jsonschema:"new content, max 50KB (omit = unchanged)"`
 	Tags     []string       `json:"tags,omitempty" jsonschema:"replacement tag set ([] clears all tags, omit = unchanged)"`
 	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"replacement metadata object ({} clears, omit = unchanged)"`
-	Type     string         `json:"type,omitempty" jsonschema:"new block type name from the registry (e.g. reference); written as a manual choice the title classifier no longer overrides; a type that would drop the untrusted marking of the block's current type is refused (omit = unchanged)"`
+	Type     string         `json:"type,omitempty" jsonschema:"new block type name from the registry (e.g. reference); written as a manual choice the title classifier no longer overrides; leaving a type marked untrusted records that type on the block as untrusted_origin (omit = unchanged)"`
 }
 
 // updateFieldsOf extracts the authoritative field list + UpdateBlockData from
@@ -127,89 +132,6 @@ func updateDataFromCanonical(cw store.CanonicalWrite) store.UpdateBlockData {
 	return data
 }
 
-// untrustedLiftReject is the update tool's one type rule beyond the claim
-// gates (issue #203): a re-type may not take the untrusted marking off a
-// block. nil = admissible.
-//
-// retrieval.untrusted marks a type whose content a third party shapes (tool
-// output, transcripts); recall frames such a block as data, not as knowledge
-// or instruction. A re-type from such a type to one without the marking would
-// end that framing for text the block still holds — the same direction as a
-// sensitivity downgrade, which REST lets through only behind an explicit
-// confirm flag. This tool has no such flag and its confirm_writes payload no
-// field for one, so it refuses: the class is reserved_type (the remedy is the
-// one that code names — drop the claim), the message says which marking and
-// why. A move between two untrusted types keeps the marking, a move onto an
-// untrusted type adds it; both pass. The rule is this tool's: the store tool's
-// upsert onto an existing (category, title, scope) takes its explicit type as
-// given, and so does REST manage update.
-//
-// base is the block as the caller's write filter reads it, next the claimed
-// type; both types resolve against the caller's registry snapshot through
-// Set.IsUntrusted, the predicate recall frames with (store.untrustedOf). Two
-// cases are decided before that, in this order:
-//
-//   - A block carrying derived provenance answers provenance_protected, the
-//     refusal store.UpdateBlock's WHERE gives every client write to it (and
-//     REST manage update therefore gives this payload); without this arm the
-//     one untrusted derived type, insight, would answer reserved_type here
-//     and 403 there.
-//   - A current type the snapshot does not hold — a type owned under another
-//     home scope on a block in a scope this key may write, or an orphaned name
-//     — is refused: whether it marks the content cannot be decided from this
-//     key's view, and its owner's readers may frame it as untrusted. An empty
-//     name is no type at all and passes.
-//
-// A nil set is unreachable — claimReject refuses a named type on an unwired
-// registry first — and answers nil so the function is total.
-func untrustedLiftReject(set *blocktype.Set, base *store.Block, next string) *writeReject {
-	if next == "" || set == nil || base == nil {
-		return nil
-	}
-	if derived.HasProvenance(base.Metadata) {
-		return provenanceRejectOr(store.ErrProvenanceProtected, nil)
-	}
-	current := base.TypeName
-	if current == "" || set.IsUntrusted(next) {
-		return nil
-	}
-	if _, ok := set.Resolve(current); !ok {
-		return classReservedType.reject(fmt.Sprintf(
-			"type: the block's current type %q is not in this key's block-type registry, so whether it marks the content "+
-				"as untrusted (retrieval.untrusted) cannot be decided — the update tool does not re-type such a block", current))
-	}
-	if !set.IsUntrusted(current) {
-		return nil
-	}
-	return classReservedType.reject(fmt.Sprintf(
-		"type: the block's current type %q marks its content as untrusted (retrieval.untrusted) and %q does not — "+
-			"the update tool does not take that marking off a block", current, next))
-}
-
-// mcpUpdateTrustGate runs untrustedLiftReject on the direct path: it reads the
-// block's current type through the same write-eligible filter the update will
-// use. nil = proceed, otherwise the tool's answer. Called only for an update
-// that names a type, so an update without one does no extra read.
-//
-// The read and the update are two statements, the window REST's sensitivity
-// guard (applySensitivityGuard) has between its read and the same update: a
-// concurrent writer that re-types the block in between is not seen.
-func mcpUpdateTrustGate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, set *blocktype.Set, id, next string) *mcp.CallToolResult {
-	// nil type set (V-11): a gate input, not a read answer.
-	base, err := store.GetBlock(ctx, cfg.Pool, nil, id, writableBlockScopes(ar), nil)
-	if err != nil {
-		slog.Error("mcp: update type base read failed", "error", err, "block_id", id)
-		return errResult("update failed: internal error")
-	}
-	if base == nil {
-		return errResult("Block not found (or not in a writable scope of this key)")
-	}
-	if rej := untrustedLiftReject(set, base, next); rej != nil {
-		return errResultReject(rej)
-	}
-	return nil
-}
-
 // finishBlockUpdate runs the afterwork of a block update: re-classify on
 // title/metadata change (WF T4, design/01 §4.5 seam 5 — safe because
 // ClassifyBlockAfterUpsert only writes type_source='auto' blocks, and
@@ -277,9 +199,9 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 		if msg := blockSizeLimit(strOrEmpty(data.Category), strOrEmpty(data.Title), strOrEmpty(data.Content)); msg != "" {
 			return errResult(msg), nil, nil
 		}
-		// One registry snapshot per call, for the claim gates and the untrusted
-		// rule — resolved only when the call names a type, so an update without
-		// one resolves nothing it did not resolve before.
+		// One registry snapshot per call, for the claim gates — resolved only
+		// when the call names a type, so an update without one resolves nothing
+		// it did not resolve before.
 		var set *blocktype.Set
 		if input.Type != "" {
 			set = cfg.mcpTypeSnapshot(ctx)
@@ -298,24 +220,20 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 		}
 
 		if ar.ConfirmWrites {
-			return mcpStageUpdate(ctx, cfg, ar, set, input, fields)
+			return mcpStageUpdate(ctx, cfg, ar, input, fields)
 		}
 
 		resolvedID, miss := resolveUpdateTarget(ctx, cfg, ar, input.ID)
 		if miss != "" {
 			return errResult(miss), nil, nil
 		}
-		if input.Type != "" {
-			if r := mcpUpdateTrustGate(ctx, cfg, ar, set, resolvedID, input.Type); r != nil {
-				return r, nil, nil
-			}
-		}
 		block, _, err := store.UpdateBlock(ctx, cfg.Pool, resolvedID, data, writableBlockScopes(ar))
 		if err != nil {
 			// I7/S3: the target is a derivative — 403 class, not a 500.
 			// #227: the update would take another active block's identity —
 			// the 409 class, the same verdict REST manage update answers.
-			if rej := provenanceRejectOr(err, identityTakenReject(err)); rej != nil {
+			// #280: a re-type of a comment or an issue.
+			if rej := updateFailureReject(err); rej != nil {
 				return errResultReject(rej), nil, nil
 			}
 			slog.Error("mcp: update error", "error", err, "block_id", resolvedID)
@@ -337,7 +255,7 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 // the confirm will do (D1-M2 — gate parity between stage and execute). The
 // write rate limit counts staging as write intent (same reasoning as
 // runStageWriteGates).
-func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, set *blocktype.Set, input updateInput, fields []string) (*mcp.CallToolResult, any, error) {
+func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, input updateInput, fields []string) (*mcp.CallToolResult, any, error) {
 	var ttl time.Duration
 	rateLimit := 0
 	if cfg.Cfg != nil {
@@ -370,12 +288,6 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, set
 	}
 	if block == nil {
 		return errResult("Block not found (or not in a writable scope of this key)"), nil, nil
-	}
-	// The untrusted rule over the type the pin just read: a card for a re-type
-	// the confirm would refuse is never issued (D1-M2). The confirm runs it
-	// again (confirmTypeTrustReject) against the registry of that moment.
-	if rej := untrustedLiftReject(set, block, input.Type); rej != nil {
-		return errResultReject(rej), nil, nil
 	}
 
 	cw := store.CanonicalWrite{

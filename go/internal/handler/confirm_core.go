@@ -93,16 +93,20 @@ type confirmOutcome struct {
 	Supersedes string
 }
 
-// confirmIdentityTakenPrefix opens the confirmExecRejected wording on both
-// confirm surfaces: the reason follows verbatim from identityTakenReject.
+// confirmIdentityTakenPrefix opens the confirmExecRejected wording of a staged
+// update the write refused, on both confirm surfaces: the reason follows
+// verbatim from updateFailureReject — an identity collision (#227), a
+// derivative (I7/S3) or a re-type of a comment or an issue (#280). Each is decided by the statement on the row as it is then, so
+// the token is consumed.
 const confirmIdentityTakenPrefix = "confirmed update not executed, the stage token is consumed: "
 
 // confirmSupersedesPrefix opens the confirmExecRejected wording of a staged
 // store whose supersedes declaration the execute refused (issue #197): the
 // target changed between stage and confirm. The reason follows verbatim from
-// supersedesReject. Like #227, the gate runs on the statement after the
-// consume — a probe before it would keep the token for most changes but not
-// for one that lands in between.
+// supersedesReject (or retypeBoundReject: an explicit type on the conflict row
+// of a comment or an issue, #280). Like #227, the gate
+// runs on the statement after the consume — a probe before it would keep the
+// token for most changes but not for one that lands in between.
 const confirmSupersedesPrefix = "confirmed store not executed, the stage token is consumed: "
 
 // confirmClaimReject re-runs the I7 claim gates over a staged payload. nil =
@@ -150,42 +154,6 @@ func confirmDriftReject(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthRe
 	}
 	if base.UpdatedAt.UTC().Format(time.RFC3339Nano) != cw.BaseUpdatedAt {
 		return &confirmOutcome{Kind: confirmTOCTOUDrift, Op: cw.Op, BlockID: cw.ID}
-	}
-	return nil
-}
-
-// confirmTypeTrustReject re-runs the update tool's untrusted rule
-// (untrustedLiftReject, issue #203) over a staged re-type: nil = admissible,
-// and nil for every payload that names no type. The stage ran it against the
-// registry of that moment; a card outlives it, and the policy of either type
-// can change before the confirm (a type marked untrusted after staging), so
-// the rule is decided again here, against the block's type as it is now and
-// the registry as it is now. Like confirmClaimReject it refuses on the
-// un-consumed row and answers with the class the stage would have answered.
-//
-// Split out of executeConfirm for the cyclop budget, like its neighbours. Its
-// own snapshot and its own read run only on this path (op 'update' with a
-// type). Like the drift check before it, it decides over a read: a writer that
-// re-types the block between this read and the execute after the consume is
-// not seen — the window the drift pin has had since D1-M3.
-func confirmTypeTrustReject(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, ar *auth.AuthResult, cw store.CanonicalWrite) *confirmOutcome {
-	if cw.Op != "update" || cw.Type == "" {
-		return nil
-	}
-	var set *blocktype.Set
-	if blocktypes != nil {
-		set = blocktypes.SnapshotForRequest(ctx)
-	}
-	// nil type set (V-11): a gate input, not a read answer.
-	base, err := store.GetBlock(ctx, pool, nil, cw.ID, writableBlockScopes(ar), nil)
-	if err != nil {
-		return &confirmOutcome{Kind: confirmInfraErr, Op: cw.Op, Err: err}
-	}
-	if base == nil {
-		return &confirmOutcome{Kind: confirmTOCTOUGone, Op: cw.Op, BlockID: cw.ID}
-	}
-	if rej := untrustedLiftReject(set, base, cw.Type); rej != nil {
-		return &confirmOutcome{Kind: confirmClaimRejected, Op: cw.Op, Reject: rej}
 	}
 	return nil
 }
@@ -265,9 +233,6 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 	if out := confirmDriftReject(ctx, pool, ar, cw); out != nil {
 		return *out
 	}
-	if out := confirmTypeTrustReject(ctx, pool, blocktypes, ar, cw); out != nil {
-		return *out
-	}
 
 	// Atomic consume (exactly once) — a racing double-confirm loses here and
 	// gets the generic miss.
@@ -288,8 +253,8 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 	if cw.Op == "update" {
 		data := updateDataFromCanonical(cw)
 		block, _, err := store.UpdateBlock(ctx, pool, cw.ID, data, writableBlockScopes(ar))
-		if rej := identityTakenReject(err); rej != nil {
-			// The caller's input, not a fault: no ERROR line (#227).
+		if rej := updateFailureReject(err); rej != nil {
+			// The caller's input, not a fault: no ERROR line (#227, #280).
 			return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmIdentityTakenPrefix)}
 		}
 		if err != nil {
@@ -336,6 +301,9 @@ func executeConfirmedStore(ctx context.Context, pool *pgxpool.Pool, blocktypes *
 	block, err := upsertStoreBlock(ctx, pool, classifySet, ar.ApiKeyID, cw.Category, cw.Title, cw.Content, cw.Tags, cw.Metadata,
 		cw.Scope, false, sens, cw.Type, cw.Supersedes)
 	if rej := supersedesReject(err); rej != nil {
+		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmSupersedesPrefix)}
+	}
+	if rej := retypeBoundReject(err); rej != nil {
 		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmSupersedesPrefix)}
 	}
 	if err != nil {

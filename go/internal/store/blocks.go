@@ -67,6 +67,19 @@ type Block struct {
 	// positive claim "trusted". Write paths pass nil for exactly that reason —
 	// their answer keeps its pre-V-11 bytes.
 	Untrusted      bool   `json:"untrusted,omitempty"`
+	// UntrustedOrigin is the first type marked retrieval.untrusted that a
+	// re-type took this block out of (issue #280, migration 174): the text came
+	// from an agent session — tool output, a transcript, a distillate — and the
+	// block now sits in a type its readers no longer frame. Written only by the
+	// trigger trg_block_retype, never by a request, and kept through every later
+	// re-type and edit. "" (omitempty: an absent key) for a block that never
+	// left such a type. Filled by the reads that carry the block to a reader
+	// (GetBlock, GetArchivedBlock) and by UpdateBlock's answer, so a by-id
+	// re-type answers with the record it caused. UpsertBlock's answer leaves it
+	// out on purpose: its statement is the write every arm and the migration
+	// tests on an older schema run (Präambel 6), and the store surfaces answer
+	// a write, not a read.
+	UntrustedOrigin string `json:"untrusted_origin,omitempty"`
 	// Archived marks a block answered by GetArchivedBlock, the one read that
 	// returns an archived row (issue #201: the opt-in `include_archived` of MCP
 	// get and manage get). Every other path leaves it false — the read paths
@@ -170,6 +183,75 @@ func untrustedOf(set *blocktype.Set, typeName string) bool {
 	return set.IsUntrusted(typeName)
 }
 
+// untrustedOriginCol is the select expression of Block.UntrustedOrigin and
+// BlockPreview.UntrustedOrigin (issue #280): the nullable column as text, ""
+// for a block without a record, so the scan target stays a plain string and
+// omitempty keeps such a block's bytes.
+const untrustedOriginCol = `COALESCE(untrusted_origin, '')`
+
+// ErrRetypeBound is the refusal of a write that would change the type of a
+// block of the issue domain — an issue or a comment (issue #280):
+// trg_block_retype (migration 174) raises check_violation on
+// retypeBoundConstraint inside the statement, so the row the decision reads is
+// the row the statement locked. A sentinel for the reason
+// ErrProvenanceProtected is one: the write surfaces answer it as a refusal,
+// not as the 500 of an unexpected store error.
+var ErrRetypeBound = errors.New("store: block is an issue or a comment — its type stays")
+
+// retypeBoundConstraint is the constraint name trg_block_retype raises with.
+const retypeBoundConstraint = "ck_context_blocks_retype_bound"
+
+// retypeBound reports the trigger's refusal and no other check violation.
+func retypeBound(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23514" && pgErr.ConstraintName == retypeBoundConstraint
+}
+
+// UntrustedOriginNote is the one wording of Block.UntrustedOrigin on a TEXT
+// surface (issue #280): the MCP query tool's "Sources:" list, MCP recent and
+// the CLI's query output put it on a line of its own under the row it belongs
+// to, so a row without a record keeps its exact text and a parser that reads
+// a source line up to its id still reads this one. "" for "" — the caller
+// writes no line. ASCII, like the other markers of those surfaces, so it
+// survives a transport that drops non-ASCII runes. The JSON surfaces carry
+// the same value as the `untrusted_origin` field.
+func UntrustedOriginNote(origin string) string {
+	if origin == "" {
+		return ""
+	}
+	return "untrusted_origin:" + origin + " (agent-produced text: re-typed out of a type marked untrusted)"
+}
+
+// UntrustedOrigins reads the untrusted_origin record (issue #280) of the
+// given blocks: id → origin, for the ids that carry one. It serves the query
+// sources, whose retrieval rows come out of ctx_rrf, graph expansion, the
+// cluster injection and the aggregate fold — four shapes, one of which
+// (ctx_rrf) is a SQL function whose result type a new column would have to
+// re-declare. One primary-key read over the final source ids (the user limit,
+// not the candidate set) instead. The ids come out of the caller's
+// scope-filtered retrieval; the statement returns nothing else about them.
+func UntrustedOrigins(ctx context.Context, q pgxdb.Querier, ids []string) (map[string]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := q.Query(ctx,
+		`SELECT id::text, untrusted_origin FROM context_blocks
+		  WHERE id = ANY($1::uuid[]) AND untrusted_origin IS NOT NULL`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("store: untrusted origins: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]string)
+	for rows.Next() {
+		var id, origin string
+		if err := rows.Scan(&id, &origin); err != nil {
+			return nil, fmt.Errorf("store: untrusted origins scan: %w", err)
+		}
+		out[id] = origin
+	}
+	return out, rows.Err()
+}
+
 // sensRankSQL renders the sensitivity rank of a SQL expression — must mirror
 // backends.sensRank (credentials=3 … public=0).
 func sensRankSQL(expr string) string {
@@ -201,6 +283,9 @@ type BlockPreview struct {
 	// Untrusted is retrieval.untrusted of TypeName — see Block.Untrusted for
 	// what it means and why a nil registry set leaves the key absent.
 	Untrusted      bool      `json:"untrusted,omitempty"`
+	// UntrustedOrigin — see Block.UntrustedOrigin. Filled by SearchBlocks
+	// (compact and full) and RecentBlocks; "" stays absent.
+	UntrustedOrigin string   `json:"untrusted_origin,omitempty"`
 	Score          float64   `json:"score,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	// CreatedAt is selected by every statement that fills this struct
@@ -924,6 +1009,11 @@ func (u upsertStatement) exec(ctx context.Context, tx pgx.Tx) (*Block, error) {
 		&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
 		&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
 	); err != nil {
+		// An explicit type on the conflict row of a comment or an issue
+		// (trg_block_retype, issue #280).
+		if retypeBound(err) {
+			return nil, ErrRetypeBound
+		}
 		return nil, fmt.Errorf("store: upsert block: %w", err)
 	}
 
@@ -1292,13 +1382,15 @@ func GetArchivedBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Se
 func readBlockByID(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, op, where string, args ...any) (*Block, error) {
 	b := &Block{}
 	err := pool.QueryRow(ctx,
-		`SELECT id, category, tags, title, content, `+guardRedactedMetadataSQL("$2")+`, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at
+		`SELECT id, category, tags, title, content, `+guardRedactedMetadataSQL("$2")+`, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at,
+		        `+untrustedOriginCol+`
 		 FROM context_blocks
 		 `+where+`
 		 LIMIT 1`,
 		args...,
 	).Scan(&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
-		&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt)
+		&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
+		&b.UntrustedOrigin)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -1491,7 +1583,10 @@ func blockIdentityHolder(ctx context.Context, pool *pgxpool.Pool, id string, dat
 // An update that would give the block the (category, title, scope) of another
 // active block — a title rename, a category change or a scope move onto an
 // identity in use — writes nothing and returns *BlockIdentityTakenError
-// (issue #227).
+// (issue #227). A re-type of an issue or a comment writes nothing and returns
+// ErrRetypeBound; a re-type out of a type
+// marked untrusted records that type in untrusted_origin, which the answer
+// carries (both trg_block_retype, issue #280).
 func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data UpdateBlockData, writeScopes []string) (*Block, bool, error) {
 	// Build SET clause dynamically.
 	setClauses := []string{}
@@ -1617,6 +1712,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 		 WHERE id = $%d AND scope = ANY($%d::text[]) AND NOT is_archived
 		   AND `+notDerivedSQL+`
 		 RETURNING id, category, tags, title, content, %s, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at,
+		           `+untrustedOriginCol+`,
 		           (old.title IS DISTINCT FROM new.title OR old.content IS DISTINCT FROM new.content)`,
 		strings.Join(setClauses, ", "), idIdx, scopeIdx, guardRedactedMetadataSQL(fmt.Sprintf("$%d", scopeIdx)),
 	)
@@ -1709,7 +1805,7 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 		err := tx.QueryRow(ctx, query, args...).Scan(
 			&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
 			&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
-			&needsReEmbed,
+			&b.UntrustedOrigin, &needsReEmbed,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			// A miss writes nothing: pgxdb.ErrRollback keeps it a rollback
@@ -1718,6 +1814,9 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 		}
 		if refusedKey, ok := blockIdentityViolation(err); ok {
 			return &BlockIdentityTakenError{refusedKey: refusedKey}
+		}
+		if retypeBound(err) {
+			return ErrRetypeBound
 		}
 		if err != nil {
 			return fmt.Errorf("store: update block: %w", err)
@@ -2081,7 +2180,7 @@ func searchBlocksSQL(p searchParams) (string, []any) {
 	var selectFields string
 	var orderBy string
 	if compact {
-		selectFields = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, LEFT(content, 200) AS content_preview, length(content) AS content_length, created_at, updated_at`
+		selectFields = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, LEFT(content, 200) AS content_preview, length(content) AS content_length, created_at, updated_at, ` + untrustedOriginCol
 		if hasQuery {
 			orderBy = fmt.Sprintf(
 				`GREATEST(ts_rank_cd(ts_de, plainto_tsquery('german', $%d)), ts_rank_cd(ts_en, plainto_tsquery('english', $%d))) DESC`,
@@ -2095,7 +2194,7 @@ func searchBlocksSQL(p searchParams) (string, []any) {
 			orderBy = `updated_at DESC, id DESC`
 		}
 	} else {
-		selectFields = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, content, ` + guardRedactedMetadataSQL("$1") + `, created_at, updated_at`
+		selectFields = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, content, ` + guardRedactedMetadataSQL("$1") + `, created_at, updated_at, ` + untrustedOriginCol
 		if hasQuery {
 			orderBy = fmt.Sprintf(
 				`GREATEST(ts_rank_cd(ts_de, plainto_tsquery('german', $%d)), ts_rank_cd(ts_en, plainto_tsquery('english', $%d))) DESC`,
@@ -2132,11 +2231,11 @@ func runSearchBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set
 	for rows.Next() {
 		bp := BlockPreview{}
 		if compact {
-			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.Sensitivity, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.ContentPreview, &bp.ContentLength, &bp.CreatedAt, &bp.UpdatedAt); err != nil {
+			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.Sensitivity, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.ContentPreview, &bp.ContentLength, &bp.CreatedAt, &bp.UpdatedAt, &bp.UntrustedOrigin); err != nil {
 				return nil, fmt.Errorf("store: search blocks scan: %w", err)
 			}
 		} else {
-			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.Sensitivity, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.Content, &bp.Metadata, &bp.CreatedAt, &bp.UpdatedAt); err != nil {
+			if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.Sensitivity, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.Content, &bp.Metadata, &bp.CreatedAt, &bp.UpdatedAt, &bp.UntrustedOrigin); err != nil {
 				return nil, fmt.Errorf("store: search blocks scan: %w", err)
 			}
 		}
@@ -2175,7 +2274,7 @@ func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, r
 	// $1=scopes, $2=grants (block-grant OR-arm, T40a). The mandatory
 	// parentheses keep NOT is_archived OUTSIDE the scope/grant OR (a granted
 	// archived block must not leak). category, if present, shifts to $3.
-	q := `SELECT id, category, tags, title, scope, type_name, lifecycle_state, type_source, LEFT(content, 200), char_length(content), created_at, updated_at
+	q := `SELECT id, category, tags, title, scope, type_name, lifecycle_state, type_source, LEFT(content, 200), char_length(content), created_at, updated_at, ` + untrustedOriginCol + `
 	      FROM context_blocks
 	      WHERE NOT is_archived AND ( scope = ANY($1::text[]) OR id = ANY($2::uuid[]) )`
 	args := []any{readScopes, grantedBlockIDs}
@@ -2203,7 +2302,7 @@ func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, r
 	results := make([]BlockPreview, 0, limit)
 	for rows.Next() {
 		bp := BlockPreview{}
-		if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.ContentPreview, &bp.ContentLength, &bp.CreatedAt, &bp.UpdatedAt); err != nil {
+		if err := rows.Scan(&bp.ID, &bp.Category, &bp.Tags, &bp.Title, &bp.Scope, &bp.TypeName, &bp.LifecycleState, &bp.TypeSource, &bp.ContentPreview, &bp.ContentLength, &bp.CreatedAt, &bp.UpdatedAt, &bp.UntrustedOrigin); err != nil {
 			return nil, fmt.Errorf("store: recent blocks scan: %w", err)
 		}
 		bp.Untrusted = untrustedOf(set, bp.TypeName) // V-11

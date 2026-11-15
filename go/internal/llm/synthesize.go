@@ -305,6 +305,13 @@ type Source struct {
 	// downstream reader most needs to see. omitempty keeps a first-party
 	// source's bytes exactly as they were.
 	Untrusted bool `json:"untrusted,omitempty"`
+
+	// UntrustedOrigin is the block's untrusted_origin record (issue #280): the
+	// type marked untrusted that a re-type took the block out of. It rides
+	// through the synthesis so the source list of the ANSWER carries it; the
+	// prompt does not render it — the framing follows the block's current
+	// type, and a re-type out of a type marked untrusted ends it by decision.
+	UntrustedOrigin string `json:"untrusted_origin,omitempty"`
 }
 
 // SynthesisResult holds the outcome of the LLM synthesis step.
@@ -731,6 +738,7 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 			RerankScore:      s.RerankScore,
 			RRFScoreOriginal: s.RRFScoreOriginal,
 			AgeDays:          s.AgeDays,
+			UntrustedOrigin:  s.UntrustedOrigin, // issue #280: the answer's source list
 		}
 	}
 
