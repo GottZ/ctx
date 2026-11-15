@@ -61,6 +61,32 @@ func TestUpdateBlockIdentityTaken(t *testing.T) {
 		}
 	})
 
+	t.Run("source row moved after the refusal names no holder of another identity", func(t *testing.T) {
+		// The holder read runs after the rollback. Between the two, another
+		// writer moves the source row from alpha to beta; the read must not
+		// combine beta with the refused title and name beta's block, because
+		// the collision was in alpha.
+		alphaHolder := upsert(t, "i227-alpha", "taken", "private")
+		betaHolder := upsert(t, "i227-beta", "taken", "private")
+		src := upsert(t, "i227-alpha", "free", "private")
+		data := store.UpdateBlockData{Title: strptr("taken")}
+		_, _, err := store.UpdateBlock(ctx, pool, src.ID, data, []string{"private"})
+		var taken *store.BlockIdentityTakenError
+		if !errors.As(err, &taken) || taken.ConflictID != alphaHolder.ID {
+			t.Fatalf("refused rename: err = %v, want *BlockIdentityTakenError naming %s", err, alphaHolder.ID)
+		}
+		if _, _, err := store.UpdateBlock(ctx, pool, src.ID, store.UpdateBlockData{Category: strptr("i227-beta")}, []string{"private"}); err != nil {
+			t.Fatalf("concurrent move of the source row: %v", err)
+		}
+		got := store.BlockIdentityHolderForTest(ctx, pool, src.ID, data, []string{"private"}, store.RefusedKeyForTest(taken))
+		if got == betaHolder.ID {
+			t.Fatalf("holder read named %s, a block of the identity (i227-beta, taken) — the refused identity was (i227-alpha, taken)", got)
+		}
+		if got != "" && got != alphaHolder.ID {
+			t.Fatalf("holder read named %s, want empty or the alpha holder %s", got, alphaHolder.ID)
+		}
+	})
+
 	t.Run("holder outside the write scopes is not named", func(t *testing.T) {
 		// The store does not gate the target scope of a move (the surfaces
 		// do); the holder read must still not name a block of a scope the

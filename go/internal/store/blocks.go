@@ -1283,11 +1283,15 @@ const blockIdentityIndex = "uq_context_category_title_scope"
 //
 // ConflictID names the active block that holds the identity, "" when the
 // follow-up read found none (the holder was renamed or archived between the
-// refused statement and the read) or failed. That read runs within the
+// refused statement and the read), found a block of another identity (the
+// source row was changed in between), or failed. That read runs within the
 // caller's write scopes (blockIdentityHolder), so the id never names a block
 // outside them.
 type BlockIdentityTakenError struct {
 	ConflictID string
+	// refusedKey is the DETAIL of the 23505, PostgreSQL's own statement of the
+	// key it refused ("Key (category, title, scope)=(…) already exists.").
+	refusedKey string
 }
 
 func (e *BlockIdentityTakenError) Error() string {
@@ -1298,11 +1302,15 @@ func (e *BlockIdentityTakenError) Error() string {
 }
 
 // blockIdentityViolation reports the 23505 of blockIdentityIndex and of no
-// other constraint: a unique violation elsewhere is not a collision this layer
-// can explain, and it stays the caller's server fault.
-func blockIdentityViolation(err error) bool {
+// other constraint, with the error's DETAIL (the refused key): a unique
+// violation elsewhere is not a collision this layer can explain, and it stays
+// the caller's server fault.
+func blockIdentityViolation(err error) (refusedKey string, ok bool) {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == blockIdentityIndex
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == blockIdentityIndex {
+		return pgErr.Detail, true
+	}
+	return "", false
 }
 
 // blockIdentityHolder reads the id of the active block that holds the identity
@@ -1317,12 +1325,25 @@ func blockIdentityViolation(err error) bool {
 // when the planner chose not to parameterize the inner scan.) The holder is read within
 // writeScopes, so the answer stays inside what the caller may read
 // (writableBlockScopes honours a write scope only where the key also reads it).
-// Like updateBlockMissReason it decides the message, never the outcome: a miss
-// or a read fault answers "".
-func blockIdentityHolder(ctx context.Context, pool *pgxpool.Pool, id string, data UpdateBlockData, writeScopes []string) string {
-	var holder string
+//
+// The row's own values are read after the rollback, so a writer that changed
+// the row in between (a move from category alpha to beta while the refused
+// update sent only a title) would make the read probe an identity the update
+// never asked for. The found block is therefore named only when its identity
+// is the key PostgreSQL refused, as the 23505 stated it in refusedKey; any
+// other answer, an empty refusedKey, or a DETAIL in another wording leaves the
+// id out. Capturing the identity inside the transaction instead would cost
+// every update a read before its statement.
+//
+// Like updateBlockMissReason it decides the message, never the outcome: a miss,
+// a mismatch or a read fault answers "".
+func blockIdentityHolder(ctx context.Context, pool *pgxpool.Pool, id string, data UpdateBlockData, writeScopes []string, refusedKey string) string {
+	if refusedKey == "" {
+		return ""
+	}
+	var holder, category, title, scope string
 	if err := pool.QueryRow(ctx,
-		`SELECT id::text FROM context_blocks
+		`SELECT id::text, category, title, scope FROM context_blocks
 		  WHERE category = COALESCE($2::text, (SELECT category FROM context_blocks WHERE id = $1))
 		    AND title    = COALESCE($3::text, (SELECT title    FROM context_blocks WHERE id = $1))
 		    AND scope    = COALESCE($4::text, (SELECT scope    FROM context_blocks WHERE id = $1))
@@ -1331,7 +1352,10 @@ func blockIdentityHolder(ctx context.Context, pool *pgxpool.Pool, id string, dat
 		    AND scope = ANY($5::text[])
 		  LIMIT 1`,
 		id, data.Category, data.Title, data.Scope, writeScopes,
-	).Scan(&holder); err != nil {
+	).Scan(&holder, &category, &title, &scope); err != nil {
+		return ""
+	}
+	if !strings.Contains(refusedKey, "=("+category+", "+title+", "+scope+")") {
 		return ""
 	}
 	return holder
@@ -1490,7 +1514,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	found, needsReEmbed, err := runBlockUpdate(ctx, pool, b, id, query, args, data.Scope != nil)
 	var taken *BlockIdentityTakenError
 	if errors.As(err, &taken) {
-		taken.ConflictID = blockIdentityHolder(ctx, pool, id, data, writeScopes)
+		taken.ConflictID = blockIdentityHolder(ctx, pool, id, data, writeScopes, taken.refusedKey)
 		return nil, false, taken
 	}
 	if err != nil {
@@ -1552,8 +1576,8 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 			// instead of a commit.
 			return pgxdb.ErrRollback
 		}
-		if blockIdentityViolation(err) {
-			return &BlockIdentityTakenError{}
+		if refusedKey, ok := blockIdentityViolation(err); ok {
+			return &BlockIdentityTakenError{refusedKey: refusedKey}
 		}
 		if err != nil {
 			return fmt.Errorf("store: update block: %w", err)

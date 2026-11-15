@@ -275,8 +275,8 @@ block in its scope is refused, and nothing is written: `isError: true`, code
 `another active block in this scope already has this category and title (block <uuid>) — choose another category or title`.
 Sending the same update again cannot succeed; pick another category or title, or
 archive or rename the block the text names first (it lies in a scope this key reads,
-so `get` returns it; the ` (block <uuid>)` part is missing when that block changed
-in the moment between the refusal and the lookup, or the lookup failed). A staged update that collides
+so `get` returns it; the ` (block <uuid>)` part is missing when that block or the updated one
+changed in the moment between the refusal and the lookup, or the lookup failed). A staged update that collides
 when it is confirmed answers the same code and text behind the prefix
 `confirmed update not executed, the stage token is consumed: ` — stage the corrected
 update anew. The REST `manage update` action answers the same collision with HTTP 409.
