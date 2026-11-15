@@ -47,8 +47,10 @@ checkpoint, and a status that shows whether checkpoints work on the MCP transpor
   and the redacted error (or why no chain was written) and the session kind
   (`<platform>/<agent context>`) in `$HERMES_HOME/ctx_state/checkpoint-status.state`,
   atomically, mode 0600, as `last_checkpoint`, and keeps the latest failure as
-  `last_failure`; the name is no `*.json`, so `prune_state_dir` keeps it. Recording never
-  raises.
+  `last_failure`; the name is no `*.json`, so `prune_state_dir` keeps it. Writers of one
+  profile hold an exclusive `flock` on `checkpoint-status.lock` (at most 2 s, then they write
+  unserialized; on Windows a process-local lock) around reading `last_failure` and replacing
+  the file, so a success cannot put back an older failure. Recording never raises.
 - **Status on the MCP transport.** `get_status_config` (`hermes memory status`) and
   `hermes ctx_checkpoint status` print the same report: server entry, connection test,
   operating mode, last checkpoint, warnings. `hermes ctx_checkpoint status` exits with 1 when

@@ -954,3 +954,36 @@ def test_a_templated_url_is_shown_without_its_query(hermes_home, probe, url):
 
     assert "private-value" not in failed and "private-value" not in passed
     assert "/mcp" in passed
+
+
+def test_concurrent_outcome_writers_keep_the_newest_failure(hermes_home, monkeypatch):
+    import threading
+
+    status = _submodule("memory.status")
+    home = str(hermes_home)
+    status.record_checkpoint(home, status.checkpoint_outcome(required=False, error=RuntimeError("older failure")))
+    real_read = status.read_state
+    has_read, go = threading.Event(), threading.Event()
+
+    def slow_read(path):
+        state = real_read(path)
+        if threading.current_thread().name == "succeeding-session":
+            has_read.set()
+            go.wait(5)
+        return state
+
+    monkeypatch.setattr(status, "read_state", slow_read)
+    success = status.checkpoint_outcome(required=False, receipt=types.SimpleNamespace(head_id="h1", part_ids=["p1"]))
+    newer = status.checkpoint_outcome(required=False, error=RuntimeError("newer failure"))
+    succeeding = threading.Thread(target=status.record_checkpoint, args=(home, success), name="succeeding-session")
+    failing = threading.Thread(target=status.record_checkpoint, args=(home, newer), name="failing-session")
+    succeeding.start()
+    assert has_read.wait(5)
+    failing.start()
+    failing.join(0.5)  # with the lock it waits for the succeeding writer
+    go.set()
+    succeeding.join(5)
+    failing.join(5)
+
+    state = real_read(home)
+    assert "newer failure" in state["last_failure"]["error"]

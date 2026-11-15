@@ -313,7 +313,8 @@ entry did not connect when Hermes started (wrong key, server down, URL wrong).
   API key goes to `.env` as `CTX_API_KEY`; `compression.checkpoint_required` only
   when you choose a different mode; never the compaction thresholds. The Settings →
   Plugins form is written by Hermes itself. **At every checkpoint:**
-  `$HERMES_HOME/ctx_state/checkpoint-status.state` (its outcome, mode 0600). With
+  `$HERMES_HOME/ctx_state/checkpoint-status.state` (its outcome, mode 0600) and the
+  empty lock file `checkpoint-status.lock` next to it, which serializes the writers. With
   memory features on, also small state files under `$HERMES_HOME/ctx_state/`
   (fact dedupe keys and digest segments per root session, mode 0600, pruned after
   `state_retention_days`).

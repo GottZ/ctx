@@ -13,13 +13,20 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+try:
+    import fcntl
+except ImportError:  # Windows: writers are serialized within one process only
+    fcntl = None  # type: ignore[assignment]
 
 from .config import (
     FACT_STATE_DIR,
@@ -38,6 +45,13 @@ logger = logging.getLogger(__name__)
 # ``state_retention_days``, and the status must still name the last checkpoint of a profile
 # that compacted nothing for longer than that.
 STATUS_FILE = "checkpoint-status.state"
+# Writers of one profile (gateway sessions, a CLI session, threads of one process) take an
+# exclusive lock on this file around reading ``last_failure`` and replacing the outcome file,
+# so a success does not put back a failure older than one saved in between. A writer waits at
+# most STATE_LOCK_WAIT_S and then writes unserialized: the checkpoint must not hang on it.
+STATE_LOCK_FILE = "checkpoint-status.lock"
+STATE_LOCK_WAIT_S = 2.0
+_PROCESS_STATE_LOCK = threading.Lock()
 # Error texts in the outcome file, the status and the user warning are cut to this length
 # (after redaction): long enough for the ctx error text, short enough for one notice.
 ERROR_MAX_CHARS = 300
@@ -296,35 +310,75 @@ def checkpoint_outcome(
     return outcome
 
 
+@contextmanager
+def _state_lock(directory: Path) -> Iterator[None]:
+    """Exclusive lock of the outcome file's writers (see :data:`STATE_LOCK_FILE`); never raises."""
+    if fcntl is None:
+        held = _PROCESS_STATE_LOCK.acquire(timeout=STATE_LOCK_WAIT_S)
+        try:
+            yield
+        finally:
+            if held:
+                _PROCESS_STATE_LOCK.release()
+        return
+    fd = -1
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(directory / STATE_LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o600)
+        deadline = time.monotonic() + STATE_LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    logger.debug("ctx_checkpoint: outcome file lock busy; writing unserialized")
+                    break
+                time.sleep(0.01)
+    except OSError:
+        logger.debug("ctx_checkpoint: outcome file lock unavailable", exc_info=True)
+    try:
+        yield
+    finally:
+        if fd >= 0:
+            os.close(fd)  # releases the lock
+
+
 def record_checkpoint(hermes_home: str, outcome: dict[str, Any]) -> None:
     """Replace the outcome file atomically (mode 0600): ``last_checkpoint`` is this outcome,
     ``last_failure`` the latest outcome with an error (kept when this one succeeded, so a session
-    that keeps failing stays visible next to others that succeed). Never raises: the checkpoint
-    path must not depend on a writable state directory."""
+    that keeps failing stays visible next to others that succeed). Reading ``last_failure`` and
+    the replacement run under :func:`_state_lock`. Never raises: the checkpoint path must not
+    depend on a writable state directory."""
     if not hermes_home:
         return
     path = status_path(hermes_home)
+    try:
+        with _state_lock(path.parent):
+            _replace_state(hermes_home, path, outcome)
+    except Exception:
+        logger.debug("ctx_checkpoint: outcome file not written: %s", path, exc_info=True)
+
+
+def _replace_state(hermes_home: str, path: Path, outcome: dict[str, Any]) -> None:
     state: dict[str, Any] = {"last_checkpoint": outcome}
     failure = outcome if outcome.get("error") else read_state(hermes_home).get("last_failure")
     if isinstance(failure, dict):
         state["last_failure"] = failure
     state["updated"] = time.time()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".status-", dir=str(path.parent))
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=".status-", dir=str(path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(state, fh)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, path)
-        except Exception:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
     except Exception:
-        logger.debug("ctx_checkpoint: outcome file not written: %s", path, exc_info=True)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def outcome_line(outcome: Any) -> str:
