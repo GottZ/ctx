@@ -446,6 +446,34 @@ def redact_text(text: str, secret: str | Iterable[str] = ()) -> str:
     return _redact_checkpoint_secrets(_host_redact(text))
 
 
+# What an error text says when its redaction failed (it is withheld, never passed on raw).
+ERROR_WITHHELD = "(details withheld: redaction failed)"
+
+
+def _mask_cut_secret(text: str, value: str) -> str:
+    """``text`` with a leading piece of ``value`` at its very end masked: a client shortened an
+    answer inside the key (at least :data:`MIN_BOUND_SECRET_CHARS` of it are left there)."""
+    for size in range(len(value) - 1, MIN_BOUND_SECRET_CHARS - 1, -1):
+        if text.endswith(value[:size]):
+            return text[: len(text) - size] + REDACTED
+    return text
+
+
+def redact_error_text(text: Any, secret: str | Iterable[str] = ()) -> str:
+    """An error text that can carry foreign text (a server answer, a dispatch error), redacted
+    before it is raised or logged (#301): :func:`redact_text` with the bound keys, and a bound key
+    cut off at the end of the text masked as well. Cut it to length only after this. Never
+    raises; on a redaction failure the text is withheld (:data:`ERROR_WITHHELD`)."""
+    try:
+        text = "" if text is None else str(text)
+        values = bound_secret_values(secret)
+        for value in values:
+            text = _mask_cut_secret(text, value)
+        return redact_text(text, values)
+    except Exception:
+        return ERROR_WITHHELD
+
+
 def _is_synthetic_handoff(message: dict[str, Any], raw: str) -> bool:
     if message.get("_compressed_summary"):
         return True
@@ -921,12 +949,14 @@ class ChainWriter:
                         )
                         self.sleep(resume - now)
                         continue
+                    # ``from None``: the original carries the server's text unredacted (#301).
                     raise CtxCheckpointError(
                         f"ctx checkpoint rate-limited during {what} (budget {budget_s:.0f}s; "
                         f"{'refused twice in a row' if refusals >= MAX_RATE_REFUSALS else 'no time left to wait'})"
-                    ) from exc
+                    ) from None
                 code = f" [{exc.code}]" if exc.code else ""
-                raise CtxCheckpointError(f"ctx checkpoint {what} failed{code}: {str(exc)[:200]}") from exc
+                detail = redact_error_text(exc, self.secret)[:200]
+                raise CtxCheckpointError(f"ctx checkpoint {what} failed{code}: {detail}") from None
             except CtxCheckpointError:
                 raise
             except Exception as exc:
@@ -935,7 +965,7 @@ class ChainWriter:
                 raise CtxCheckpointError(f"ctx checkpoint {what} returned a non-object response")
             if data.get("success") is False:
                 code = response_code(data)
-                detail = str(data.get("error") or "unknown")[:200]
+                detail = redact_error_text(data.get("error") or "unknown", self.secret)[:200]
                 raise CtxCheckpointError(f"ctx checkpoint {what} rejected{f' [{code}]' if code else ''}: {detail}")
             return data
 

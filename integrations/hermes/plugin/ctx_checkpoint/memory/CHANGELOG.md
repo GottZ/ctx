@@ -42,6 +42,15 @@ Gate and setting edge cases with the memory features on (GottZ/ctx#289).
   writes counted only when it came later. An engine name now wins over its plugin key in either
   order, and the memory forms write their value to an engine name present next to the key, so
   a save takes effect.
+- **Error texts are redacted before they are raised or logged (GottZ/ctx#301).** A failed chain
+  write put the server's or the MCP dispatch's error text into the `CtxCheckpointError` it raised
+  (and into its `__cause__`) and into the WARNING line without redaction; the outcome file and the
+  user notice were already masked. `checkpoint.redact_error_text` (bound keys, a bound key cut off
+  at the end of a shortened answer, then the checkpoint redaction; withheld on a redaction
+  failure) is the one function for it: the chain writer builds its errors from it and raises them
+  `from None`, the provider logs chain, fact, mirror and digest store failures through it
+  (`_error_text`), and `status.redact_error` uses it as well. The cause hints of the user notice
+  read the redacted text and still apply.
 
 ## [ctx_checkpoint 0.11.0] — 2026-11-15
 

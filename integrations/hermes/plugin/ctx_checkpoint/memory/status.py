@@ -141,12 +141,13 @@ def redact_error(error: Any, secrets: Iterable[str] = ()) -> str:
     else:
         text = str(error or "")
     try:
+        secrets = tuple(secrets)
         for secret in secrets:
             if secret and len(secret) >= 4:
                 text = text.replace(secret, "***")
-        from .checkpoint import redact_text
+        from .checkpoint import redact_error_text
 
-        text = redact_text(text)
+        text = redact_error_text(text, secrets)
     except Exception:
         return "(details withheld: redaction failed)"
     return shorten(text, ERROR_MAX_CHARS)

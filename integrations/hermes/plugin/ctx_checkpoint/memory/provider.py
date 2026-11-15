@@ -33,7 +33,7 @@ from agent.memory_provider import MemoryProvider
 
 from . import checkpoint as _cp
 from . import digest as _dg
-from .checkpoint import ChainWriter, CtxCheckpointError
+from .checkpoint import ChainWriter, CtxCheckpointError, redact_error_text
 from .client import CtxApiError, CtxClient, redact_secret, response_code, store_action, store_block_id
 from .config import (
     CATEGORY_DIGEST,
@@ -201,6 +201,11 @@ class CtxMemoryProvider(MemoryProvider):
         current = list(_cp.bound_secret_values(self._current_secrets()))
         kept = [value for value in self._remembered_secrets if value not in current] + current
         self._remembered_secrets = tuple(kept[-MAX_REMEMBERED_SECRETS:])
+
+    def _error_text(self, error: Any) -> str:
+        """An error text as it may be logged: foreign text (server answers, dispatch errors)
+        redacted with the bound keys and the checkpoint rules (#301)."""
+        return redact_error_text(error, self._bound_secrets())
 
     def _redacted(self, text: str) -> str | None:
         """The checkpoint redaction (bound ctx keys, host strict mode, the plugin's rules), as for
@@ -744,7 +749,7 @@ class CtxMemoryProvider(MemoryProvider):
                     exc.code,
                     exc.status,
                     exc.permanent,
-                    shorten(str(exc), 200),
+                    shorten(self._error_text(exc), 200),
                 )
             else:
                 logger.warning(
@@ -753,7 +758,7 @@ class CtxMemoryProvider(MemoryProvider):
                     self._profile,
                     category,
                     log_title,
-                    shorten(str(exc), 200),
+                    shorten(self._error_text(exc), 200),
                 )
             return False, ""
         except Exception as exc:
@@ -763,7 +768,7 @@ class CtxMemoryProvider(MemoryProvider):
                 self._profile,
                 category,
                 log_title,
-                shorten(str(exc), 200),
+                shorten(self._error_text(exc), 200),
             )
             return False, ""
         if not isinstance(data, dict) or not data.get("success"):
@@ -776,7 +781,7 @@ class CtxMemoryProvider(MemoryProvider):
                 category,
                 log_title,
                 code or "-",
-                shorten(str(err or "unknown error"), 200),
+                shorten(self._error_text(err or "unknown error"), 200),
             )
             return False, ""
         block_id = store_block_id(data) or ""
@@ -908,18 +913,24 @@ class CtxMemoryProvider(MemoryProvider):
             except CtxCheckpointError as exc:
                 self._last_chain_error = exc
                 if require_checkpoint:
-                    logger.warning("CTX checkpoint chain failed (profile=%s, required): %s", self._profile, exc)
+                    logger.warning(
+                        "CTX checkpoint chain failed (profile=%s, required): %s", self._profile, self._error_text(exc)
+                    )
                     raise
                 logger.warning(
                     "CTX checkpoint chain failed (profile=%s, best_effort — compaction continues): %s",
                     self._profile,
-                    exc,
+                    self._error_text(exc),
                 )
             except Exception as exc:  # defensive: never let an unexpected bug escape best effort
                 self._last_chain_error = exc
+                mode = "required" if require_checkpoint else "best_effort"
+                logger.warning(
+                    "CTX checkpoint chain crashed (profile=%s, %s): %s", self._profile, mode, self._error_text(exc)
+                )
                 if require_checkpoint:
-                    raise CtxCheckpointError(f"ctx checkpoint failed: {type(exc).__name__}") from exc
-                logger.warning("CTX checkpoint chain crashed (profile=%s, best_effort): %s", self._profile, exc)
+                    # ``from None``: the original's text is not redacted (#301); its redacted text is logged.
+                    raise CtxCheckpointError(f"ctx checkpoint failed: {type(exc).__name__}") from None
 
         if not facts_on:
             logger.info(

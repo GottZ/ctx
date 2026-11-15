@@ -545,7 +545,9 @@ and manifest are deliberately small so routine recall stays cheap.
   checkpoint: a refused or late fact is logged and left for a later compaction. A head that
   keeps its tag but lost `latest_manifest_id` no longer blocks its root: the new chain's
   head replaces it and the user is told. An engine name such as `checkpoint_sensitivity`
-  written next to the plugin key `sensitivity` wins in either order.
+  written next to the plugin key `sensitivity` wins in either order. The error text of a
+  failed chain, fact, mirror or digest store is redacted with the bound keys before it is
+  raised or logged (GottZ/ctx#301).
 
 ## Licensing
 
