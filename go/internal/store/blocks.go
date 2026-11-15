@@ -1308,24 +1308,27 @@ func blockIdentityViolation(err error) bool {
 // blockIdentityHolder reads the id of the active block that holds the identity
 // a refused update of id asked for: the value the update sent for each of
 // category, title and scope, the row's own value for each it did not send. It
-// runs on the refusal path only, after the update's transaction rolled back:
-// one primary-key read and one probe of blockIdentityIndex. The holder is read
-// within writeScopes, so the answer stays inside what the caller may read
+// runs on the refusal path only, after the update's transaction rolled back.
+// The row's own values come from scalar subqueries on the primary key, which
+// run at most once each and only for a field the update did not send, so the
+// holder scan gets all three values as parameters and is an index equality
+// probe whatever the planner's statistics say. (The equivalent self-join was
+// planned with the title as a join filter over the category's active blocks
+// when the planner chose not to parameterize the inner scan.) The holder is read within
+// writeScopes, so the answer stays inside what the caller may read
 // (writableBlockScopes honours a write scope only where the key also reads it).
 // Like updateBlockMissReason it decides the message, never the outcome: a miss
 // or a read fault answers "".
 func blockIdentityHolder(ctx context.Context, pool *pgxpool.Pool, id string, data UpdateBlockData, writeScopes []string) string {
 	var holder string
 	if err := pool.QueryRow(ctx,
-		`SELECT o.id::text
-		   FROM context_blocks t
-		   JOIN context_blocks o
-		     ON o.category = COALESCE($2::text, t.category)
-		    AND o.title    = COALESCE($3::text, t.title)
-		    AND o.scope    = COALESCE($4::text, t.scope)
-		    AND NOT o.is_archived
-		    AND o.id <> t.id
-		  WHERE t.id = $1 AND o.scope = ANY($5::text[])
+		`SELECT id::text FROM context_blocks
+		  WHERE category = COALESCE($2::text, (SELECT category FROM context_blocks WHERE id = $1))
+		    AND title    = COALESCE($3::text, (SELECT title    FROM context_blocks WHERE id = $1))
+		    AND scope    = COALESCE($4::text, (SELECT scope    FROM context_blocks WHERE id = $1))
+		    AND NOT is_archived
+		    AND id <> $1
+		    AND scope = ANY($5::text[])
 		  LIMIT 1`,
 		id, data.Category, data.Title, data.Scope, writeScopes,
 	).Scan(&holder); err != nil {

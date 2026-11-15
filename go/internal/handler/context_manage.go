@@ -588,9 +588,9 @@ func (h *ManageHandler) updateClaimReject(ctx context.Context, data store.Update
 // constraint (issue #227; coded envelopes, because both classes are new here),
 // every other fault as the surface's historical uncoded 500 — recoding the
 // manage handlers' existing envelopes is explicitly out of scope (errcode.go's
-// SCOPE note). A refusal writes no log line of its own, like every other
-// refusal of this surface: it is the caller's input, not a server fault, and
-// the request log already carries its status.
+// SCOPE note). Neither refusal writes a log line of its own: each is the
+// caller's input, not a server fault, and the request log already carries its
+// status.
 func writeUpdateFailure(w http.ResponseWriter, err error, reqID string) {
 	if rej := provenanceRejectOr(err, identityTakenReject(err)); rej != nil {
 		writeJSONReject(w, rej)
