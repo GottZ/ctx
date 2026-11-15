@@ -8,11 +8,13 @@ import (
 	"github.com/GottZ/ctx/internal/store"
 )
 
-// blockCountReconcileIdlePoll is how often the reconcile loop re-reads
-// scheduler.block_count_reconcile_interval while it is 0 (off), so switching
-// it on applies without a restart. A fixed constant: it bounds the reaction
-// time to a settings change, it is no policy.
-const blockCountReconcileIdlePoll = time.Minute
+// blockCountReconcilePoll is how often the reconcile loop re-reads
+// scheduler.block_count_reconcile_interval: while it is 0 (off), and as the
+// longest slice of its wait, so a hot change of the interval applies within one
+// slice instead of after the wait that began under the old value (the
+// backfillArmPoll convention of runEmbedBackfillLoop). A var, not a const, for
+// the same reason as there: the wait test shortens it.
+var blockCountReconcilePoll = time.Minute
 
 // blockCountReconcileFirstDelay caps the wait before the first pass after a
 // boot. Without it a process restarted more often than the interval (several
@@ -35,6 +37,31 @@ func (s *Scheduler) blockCountReconcileInterval() time.Duration {
 	return s.cfg.Snapshot().Scheduler.BlockCountReconcileInterval //nolint:forbidigo // issue #266 background: the block-counter reconcile is one process-wide pass over every tenant's scopes; its cadence is a server-global policy knob (global-only), like the overview-rebuild cadence.
 }
 
+// waitHotInterval waits until interval() has passed since start, re-reading
+// interval() at least every slice, so a hot change applies within one slice.
+// maxWait (> 0) bounds the total wait. A non-positive interval ends the wait at
+// once. It reports false when ctx ended.
+func waitHotInterval(ctx context.Context, start time.Time, interval func() time.Duration, slice, maxWait time.Duration) bool {
+	for {
+		iv := interval()
+		if iv <= 0 {
+			return true
+		}
+		if maxWait > 0 && iv > maxWait {
+			iv = maxWait
+		}
+		left := time.Until(start.Add(iv))
+		if left <= 0 {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(min(left, slice)):
+		}
+	}
+}
+
 // runBlockCountReconcile is the slow repair arm of the block counters (issue
 // #266): every scheduler.block_count_reconcile_interval it runs
 // store.ReconcileBlockCounts over every scope — the same pass as the manage
@@ -43,38 +70,42 @@ func (s *Scheduler) blockCountReconcileInterval() time.Duration {
 // counters exact, so a restart is no reason to recount at once. A scope
 // without drift is one read; a scope with drift is corrected under its
 // advisory lock, which also serializes the passes of several ctx processes on
-// one database. Every correction is logged by the store.
+// one database. A failing scope is logged and the pass goes on.
 func (s *Scheduler) runBlockCountReconcile(ctx context.Context) {
 	defer guardPanic("block count reconcile")
 	first := true
 	for {
-		wait := s.blockCountReconcileInterval()
-		if wait <= 0 {
-			wait = blockCountReconcileIdlePoll
-		} else if first && wait > blockCountReconcileFirstDelay {
-			wait = blockCountReconcileFirstDelay
+		start := time.Now()
+		if s.blockCountReconcileInterval() <= 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(blockCountReconcilePoll):
+			}
+			continue
 		}
-		select {
-		case <-ctx.Done():
+		var firstCap time.Duration
+		if first {
+			firstCap = blockCountReconcileFirstDelay
+		}
+		if !waitHotInterval(ctx, start, s.blockCountReconcileInterval, blockCountReconcilePoll, firstCap) {
 			return
-		case <-time.After(wait):
 		}
 		if s.blockCountReconcileInterval() <= 0 {
 			continue
 		}
 		first = false
-		start := time.Now()
 		res, err := store.ReconcileBlockCounts(ctx, s.pool, "")
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
+		if ctx.Err() != nil {
+			return
+		}
+		if res == nil {
 			slog.Warn("scheduler: block count reconcile failed", "error", err)
 			continue
 		}
 		slog.Info("scheduler: block count reconcile",
 			"scopes", res.Scopes, "corrections", len(res.Corrections), "pruned", res.Pruned,
-			"duration", time.Since(start))
+			"failed", len(res.Failed), "duration", time.Since(start))
 	}
 }
 
