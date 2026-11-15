@@ -433,7 +433,9 @@ def test_settings_round_trip_through_the_hermes_writer_with_digest(web):
                                              "values": {"operators": [OP, "900000000000000012"],
                                                         "operator_label": "the host"}})
     assert response.status == 200, response.body
-    assert web.backend.writes == [{"operators": [OP, "900000000000000012"], "operator_label": "the host"}]
+    # #268: the text form Hermes' own settings form saves (its writer refuses a list for this text field)
+    assert web.backend.writes == [{"operators": f"{OP}, 900000000000000012", "operator_label": "the host"}]
+    assert response.body["values"]["operators"] == [OP, "900000000000000012"]
     assert web.backend.events == [["operator_label", "operators"]]
     assert response.body["digest"] != got["digest"]
     assert not (web.data / "policy.json").exists()      # M8: never the policy store

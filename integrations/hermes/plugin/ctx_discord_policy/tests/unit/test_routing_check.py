@@ -140,8 +140,31 @@ async def test_locked_profile_is_never_public(world):
 
 
 async def test_unreadable_lock_list_closes(world):
-    world.settings(locked_profiles="beta")                             # not a list
+    world.settings(locked_profiles={"beta": True})                     # neither a list nor text
     assert await world.deliver(message(user(MEMBER), mid=11301, mentions=mention())) is None
+    world.settings(locked_profiles="gamma; beta")                      # text with an entry that is no name
+    assert await world.deliver(message(user(MEMBER), mid=11302, mentions=mention())) is None
+
+
+async def test_locked_profiles_as_text_lock_exactly_the_named_profiles(world):
+    """#268: Hermes' settings form saves the list as comma-separated text; the admission path reads it."""
+    world.choose("beta")
+    world.settings(locked_profiles=" gamma , beta ")
+    assert await world.deliver(message(user(MEMBER), mid=11311, mentions=mention())) is None
+    world.settings(locked_profiles="gamma")
+    assert ran(await world.deliver(message(user(MEMBER), mid=11312, mentions=mention())))
+
+
+async def test_operators_as_text_decide_who_gets_tools(world):
+    """#268: the comma form of ``operators`` on the real turn path; a garbled list makes nobody an operator."""
+    world.settings(operators=f" {OPERATOR} , 234567890123456789,")
+    operator = await world.deliver(message(user(OPERATOR), mid=11321, mentions=mention()))
+    assert ran(operator) and operator["tools"][0] is None              # the operator's tool call ran
+    member = await world.deliver(message(user(MEMBER), mid=11322, mentions=mention()))
+    assert ran(member) and "BLOCKED" in member["tools"][0]
+    world.settings(operators=f"{OPERATOR}; {MEMBER}")                  # a wrong separator: no ID at all
+    turn = await world.deliver(message(user(OPERATOR), mid=11323, mentions=mention()))
+    assert ran(turn) and "BLOCKED" in turn["tools"][0]
 
 
 async def test_messages_routed_before_a_switch_are_dropped(world):

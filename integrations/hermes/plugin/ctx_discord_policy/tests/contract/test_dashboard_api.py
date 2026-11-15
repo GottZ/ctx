@@ -280,7 +280,9 @@ def test_global_settings_go_through_hermes_settings_writer(dash, bound):
     assert response.status_code == 200, response.text
     after = load_config()
     settings = after["plugins"]["entries"][PLUGIN]["settings"]
-    assert settings["operators"] == [OP] and settings["operator_label"] == "the host"
+    # #268: the text form Hermes' own form saves too (its writer refuses a list for a text field)
+    assert settings["operators"] == OP and settings["operator_label"] == "the host"
+    assert dash.client.get(f"{BASE}/settings").json()["values"]["operators"] == [OP]
     assert after["plugins"]["enabled"] == before["plugins"]["enabled"]   # other keys unchanged
     assert OP not in json.dumps(bound.read().data)                       # never the policy store
     stale = dash.client.put(f"{BASE}/settings", headers=JSON_CT, json={

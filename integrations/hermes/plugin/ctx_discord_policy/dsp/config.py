@@ -8,6 +8,7 @@ nothing in the plugin's own state can add an operator.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import Any, Callable, Optional
@@ -64,7 +65,7 @@ def operator_list(home: os.PathLike) -> tuple[frozenset[str], bool]:
     except Exception:
         logger.exception("ctx_discord_policy: reading settings.operators failed; no operator this turn")
         return frozenset(), False
-    return _parse_operators(home, raw), True
+    return frozenset(operator_ids(home, raw)), True
 
 
 def operators(home: os.PathLike) -> frozenset[str]:
@@ -73,20 +74,59 @@ def operators(home: os.PathLike) -> frozenset[str]:
     return operator_list(home)[0]
 
 
-def _parse_operators(home: os.PathLike, raw: Any) -> frozenset[str]:
+class UnreadableList(ValueError):
+    """A list setting whose value has none of the forms :func:`list_entries` reads."""
+
+
+def list_entries(raw: Any) -> tuple[list[Any], bool]:
+    """``(entries, as_text)`` of a list setting (``operators``, ``locked_profiles``), for every reader of them.
+
+    * a YAML list: its items (what ``hermes config set … '["<id>"]'`` and earlier versions write);
+    * text, the form Hermes' settings form saves: the parts between commas, whitespace around each removed,
+      empty parts dropped (``"a, b,"`` → ``a``, ``b``); text that starts with ``[`` is read as a JSON list
+      (``'["a", "b"]'``, what the earlier JSON editor of that form took);
+    * a whole number: one entry (``hermes config set`` reads a single ID as a number);
+    * absent or null: no entry.
+
+    ``as_text`` is True for text and a whole number. Raises :class:`UnreadableList` for anything else (a mapping,
+    a boolean, a float, text starting with ``[`` that is no JSON list or nests too deep to decode); each
+    setting reads that on its closed side. What counts as an entry is the setting's own rule.
+    """
     if raw is None:
-        return frozenset()
-    if not isinstance(raw, (list, tuple)):
-        _warn_once(home, "settings.operators must be a list of Discord user ids; ignoring it")
-        return frozenset()
-    out = set()
-    for entry in raw:
+        return [], False
+    if isinstance(raw, (list, tuple)):
+        return list(raw), False
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return [raw], True
+    if not isinstance(raw, str):
+        raise UnreadableList(f"a {type(raw).__name__} is neither a list nor text")
+    text = raw.strip()
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except (ValueError, RecursionError):    # json.loads raises RecursionError on very deep nesting
+            raise UnreadableList("text starting with [ is no JSON list") from None
+        return parsed, True    # JSON text starting with [ that parses is always a list
+    return [part.strip() for part in text.split(",") if part.strip()], True
+
+
+def operator_ids(home: Any, raw: Any) -> list[str]:
+    """The Discord user ids of a raw ``settings.operators`` value, in order, each once (fails closed: an
+    entry that is no user id counts for nobody, an unreadable value means no operator; both are logged)."""
+    try:
+        entries, _ = list_entries(raw)
+    except UnreadableList as exc:
+        _warn_once(home, f"settings.operators: {exc}; no operator until it is fixed (Discord user ids, "
+                         "separated by commas)")
+        return []
+    out: dict[str, None] = {}    # insertion-ordered set
+    for entry in entries:
         value = str(entry) if isinstance(entry, int) and not isinstance(entry, bool) else entry
         if isinstance(value, str) and is_snowflake(value.strip()):
-            out.add(value.strip())
+            out[value.strip()] = None
         else:
             _warn_once(home, f"settings.operators: ignoring {entry!r} (not a Discord user id)")
-    return frozenset(out)
+    return list(out)
 
 
 def is_operator(home: os.PathLike, user_id: Any) -> bool:
@@ -138,24 +178,33 @@ def locked_profiles(root: os.PathLike) -> Optional[frozenset[str]]:
     """``settings.locked_profiles`` of the default root (the owner of ``profile_routes``).
 
     A locked profile is never offered and never opened to public messages, whatever routes there.
-    ``None`` means the list could not be read: callers treat every profile as locked (closed)."""
+    ``None`` means the list could not be read: callers treat every profile as locked (closed).
+
+    Read with :func:`list_entries`. In the text forms an entry that is no profile name makes the whole value
+    unreadable: before the text form existed every text value locked every profile, and a mistyped list
+    (``a; b``) must not unlock one. A YAML list keeps ignoring such an entry (it can name no profile: Hermes
+    allows the same pattern)."""
     try:
         raw = _raw(root, "locked_profiles")
     except Exception:
         logger.exception("ctx_discord_policy: reading settings.locked_profiles failed; treating every "
                          "profile as locked")
         return None
-    if raw is None:
-        return frozenset()
-    if not isinstance(raw, (list, tuple)):
-        _warn_once(root, "settings.locked_profiles must be a list of profile names; treating every profile "
-                         "as locked until it is fixed")
+    try:
+        entries, as_text = list_entries(raw)
+    except UnreadableList as exc:
+        _warn_once(root, f"settings.locked_profiles: {exc}; treating every profile as locked until it is "
+                         "fixed (profile names, separated by commas)")
         return None
     out = set()
-    for entry in raw:
+    for entry in entries:
         name = entry.strip().lower() if isinstance(entry, str) else ""
         if _PROFILE_ID.fullmatch(name):
             out.add(name)
+        elif as_text:
+            _warn_once(root, f"settings.locked_profiles: {entry!r} is not a profile name; treating every "
+                             "profile as locked until it is fixed")
+            return None
         else:
             _warn_once(root, f"settings.locked_profiles: ignoring {entry!r} (not a profile name)")
     return frozenset(out)
