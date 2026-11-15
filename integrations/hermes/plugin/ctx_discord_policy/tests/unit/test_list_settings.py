@@ -92,6 +92,14 @@ def test_ignored_entries_are_logged(config, anchor, caplog):
     assert any("settings.operators" in r.getMessage() and "dict" in r.getMessage() for r in caplog.records)
 
 
+def test_deeply_nested_json_text_fails_closed(config, anchor):
+    """json.loads raises RecursionError (no ValueError) on very deep nesting; it must read as unreadable."""
+    deep = "[" * 100_000 + "]" * 100_000
+    _set(config, operators=deep, locked_profiles=deep)
+    assert config.operator_list(anchor.home) == (frozenset(), True)
+    assert config.locked_profiles(anchor.home) is None
+
+
 # ── locked_profiles ───────────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("raw", [

@@ -131,15 +131,14 @@ restart Hermes Desktop once so the page's backend is mounted.
 1. **Operators.** Put your Discord user ID into the configuration of the profile that runs the bot:
 
    ```bash
-   hermes config set plugins.entries.ctx_discord_policy.settings.operators '<your Discord user id>'
+   hermes config set plugins.entries.ctx_discord_policy.settings.operators '["<your Discord user id>"]'
    ```
 
-   Several IDs are separated by commas (`'<id>, <id>'`); spaces around an ID don't matter, and a list
-   (`'["<id>", "<id>"]'`, or a YAML list in `config.yaml`) works as well. An entry that is not a Discord user
-   ID counts for nobody. Or in Hermes Desktop under Settings → Plugins → ctx_discord_policy: on the
-   plugin's Operators page, or in Hermes' form for the plugin settings, as a comma-separated list. A change
-   applies to the next message, without a restart. Without an operator nobody can activate a server from
-   Discord, and nobody's turn gets tools.
+   Or in Hermes Desktop under Settings → Plugins → ctx_discord_policy: on the plugin's Operators page, or in
+   Hermes' form for the plugin settings as a comma-separated list (`<id>, <id>`; spaces around an ID don't
+   matter). The plugin reads both forms, a YAML list and that text; an entry that is not a Discord user ID
+   counts for nobody. A change applies to the next message, without a restart. Without an operator nobody can
+   activate a server from Discord, and nobody's turn gets tools.
 2. **Invite the bot** with the `bot` and `applications.commands` scopes (`/policy` is a slash command per
    server):
 
@@ -159,7 +158,7 @@ server's guidance; a server's own `frame` template replaces it there), `operator
 `bot_messages` (`closed`, the default, or `member`: how messages of other bots and webhooks are treated),
 `locked_profiles` (profiles members never reach, separated by commas like the operators; an entry of such a
 text that is not a profile name makes every profile count as locked) and `member_search`. Hermes' form has
-only one-line text fields and drops the line breaks of a text you edit there: write a `frame_prompt` of
+no multi-line text field and drops the line breaks of a text you edit there: write a `frame_prompt` of
 several lines in the editor on the plugin's Operators page (it needs the desktop half, see Install) or in
 `config.yaml`.
 

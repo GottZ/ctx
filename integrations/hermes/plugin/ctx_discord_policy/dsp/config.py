@@ -88,9 +88,9 @@ def list_entries(raw: Any) -> tuple[list[Any], bool]:
     * a whole number: one entry (``hermes config set`` reads a single ID as a number);
     * absent or null: no entry.
 
-    ``as_text`` is True for the last three forms. Raises :class:`UnreadableList` for anything else (a mapping,
-    a boolean, a float, text starting with ``[`` that is no JSON list); each setting reads that on its closed
-    side. What counts as an entry is the setting's own rule.
+    ``as_text`` is True for text and a whole number. Raises :class:`UnreadableList` for anything else (a mapping,
+    a boolean, a float, text starting with ``[`` that is no JSON list or nests too deep to decode); each
+    setting reads that on its closed side. What counts as an entry is the setting's own rule.
     """
     if raw is None:
         return [], False
@@ -104,7 +104,7 @@ def list_entries(raw: Any) -> tuple[list[Any], bool]:
     if text.startswith("["):
         try:
             parsed = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):    # json.loads raises RecursionError on very deep nesting
             raise UnreadableList("text starting with [ is no JSON list") from None
         return parsed, True    # JSON text starting with [ that parses is always a list
     return [part.strip() for part in text.split(",") if part.strip()], True
@@ -119,16 +119,14 @@ def operator_ids(home: Any, raw: Any) -> list[str]:
         _warn_once(home, f"settings.operators: {exc}; no operator until it is fixed (Discord user ids, "
                          "separated by commas)")
         return []
-    out: list[str] = []
+    out: dict[str, None] = {}    # insertion-ordered set
     for entry in entries:
         value = str(entry) if isinstance(entry, int) and not isinstance(entry, bool) else entry
         if isinstance(value, str) and is_snowflake(value.strip()):
-            if value.strip() not in out:
-                out.append(value.strip())
+            out[value.strip()] = None
         else:
             _warn_once(home, f"settings.operators: ignoring {entry!r} (not a Discord user id)")
-    return out
-
+    return list(out)
 
 
 def is_operator(home: os.PathLike, user_id: Any) -> bool:

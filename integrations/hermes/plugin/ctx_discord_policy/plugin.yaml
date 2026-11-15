@@ -13,7 +13,7 @@ provides_hooks: [pre_llm_call, pre_tool_call, on_session_end, on_session_reset, 
 # renders this as the form under Settings -> Plugins -> ctx_discord_policy; the plugin's own pages hang under the
 # same entry. operators and locked_profiles declare no type on purpose: Hermes' form edits a `list` as JSON, a field
 # without a type is a one-line text field, and Hermes does not type-check its stored value, so a YAML list written
-# earlier stays valid. The plugin reads both forms (dsp/config.py list_entries). The form has no multi-line field.
+# earlier stays valid. The plugin reads both forms (dsp/config.py list_entries). The form has no multi-line text field.
 config_schema:
   operators:
     default: ""
@@ -48,7 +48,7 @@ config_schema:
   locked_profiles:
     default: ""
     label: Hermes profiles that server members never reach
-    description: "Profile names, separated by commas, e.g. community, beta (a list written in YAML or as [\"…\"] keeps working). A locked profile is never offered in /policy and never runs a turn for a member of a server, whatever routes there. Read from the default profile; if the list cannot be read, or an entry typed here is no profile name, every profile counts as locked."
+    description: "Profile names, separated by commas, e.g. community, beta (a list written in YAML or as [\"…\"] keeps working). Empty = no profile is locked. A locked profile is never offered in /policy and never runs a turn for a member of a server, whatever routes there. Read from the default profile; if the list cannot be read, or an entry typed here is no profile name, every profile counts as locked."
   member_search:
     type: str
     default: auto
