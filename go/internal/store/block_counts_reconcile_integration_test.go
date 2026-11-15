@@ -518,3 +518,107 @@ func TestBlockCounts_ReconcileAgainstTruncateAndReload(t *testing.T) {
 	}
 	assertCountParity(t, pool, "after truncate and reload", [][]string{{s}})
 }
+
+// TestBlockCounts_PruneAgainstFold (PR #269, zero-row prune vs. fold): the
+// fold upserts its keys in key order (a, b, z); the reconcile's prune deletes
+// a scope's zero rows in scan order, which for a sequential scan is the order
+// the rows were last written (here z, b, a). With b held by a third
+// transaction, the prune takes z and queues at b, the fold takes a and queues
+// at b; when b is released the prune takes it and wants a, the fold wants b —
+// unless the two never run side by side. Sequential scans are forced on the
+// reconcile's connections: a small counter table is scanned that way anyway.
+func TestBlockCounts_PruneAgainstFold(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := spSetup(t)
+	ctx, pool := f.ctx, f.pool
+	s := f.scope(t, "cnt-prune")
+	ids := map[string]string{}
+	for _, c := range []string{"a", "b", "c", "z"} {
+		b, err := store.UpsertBlock(ctx, pool, c, "row "+c, "x", nil, nil, s, true, store.SensitivityWrite{}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[c] = b.ID
+	}
+	fold(t, pool)
+	// Zero rows, each brought to 0 by a fold of its own, in the order z, b, a, c.
+	for _, c := range []string{"z", "b", "a", "c"} {
+		execAll(t, pool, fmt.Sprintf(`DELETE FROM context_blocks WHERE id = '%s'::uuid`, ids[c]))
+		fold(t, pool)
+	}
+	// Pending deltas for a, b and z; c stays a bare zero row, so the check
+	// reports the scope and the correction prunes.
+	for _, c := range []string{"a", "b", "z"} {
+		if _, err := store.UpsertBlock(ctx, pool, c, "again "+c, "x", nil, nil, s, true, store.SensitivityWrite{}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, `SELECT 1 FROM context_block_counts WHERE scope = $1 AND category = 'b' FOR UPDATE`, s); err != nil {
+		t.Fatal(err)
+	}
+	var holderPID int
+	if err := holder.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil {
+		t.Fatal(err)
+	}
+	waitWaiters := func(n int) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			var waiting int
+			if err := pool.QueryRow(ctx,
+				`SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, holderPID).Scan(&waiting); err != nil {
+				t.Fatal(err)
+			}
+			if waiting >= n {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%d of %d transactions queued at the held row", waiting, n)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	cfg := pool.Config().Copy()
+	cfg.ConnConfig.RuntimeParams["enable_indexscan"] = "off"
+	cfg.ConnConfig.RuntimeParams["enable_bitmapscan"] = "off"
+	seq, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer seq.Close()
+	reconciled := make(chan error, 1)
+	go func() {
+		_, err := store.ReconcileBlockCounts(ctx, seq, s)
+		reconciled <- err
+	}()
+	waitWaiters(1)
+	folded := make(chan error, 1)
+	go func() {
+		_, err := store.FoldBlockCountDeltas(ctx, pool)
+		folded <- err
+	}()
+	// The fold either queues at b as well or finds the fold lock taken.
+	select {
+	case err := <-folded:
+		folded <- err
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-reconciled; err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if err := <-folded; err != nil {
+		t.Fatalf("fold: %v", err)
+	}
+	fold(t, pool)
+	assertCountParity(t, pool, "after prune and fold", [][]string{{s}})
+}

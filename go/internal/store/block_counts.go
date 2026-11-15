@@ -58,6 +58,15 @@ const blockCountFoldSQL = `WITH d AS (
 // database) from working on the same delta rows: the loser skips its turn.
 const blockCountFoldLockSQL = `SELECT pg_try_advisory_xact_lock(hashtext('ctx:block_count_fold'))`
 
+// blockCountPruneFoldLockSQL is the same lock in its waiting form, taken by
+// the reconcile's zero-row prune: the prune deletes in scan order, the fold
+// upserts in key order, and two such passes over the same rows can deadlock.
+// The prune waits for a running fold (one short statement) instead of
+// skipping, so a zero row never survives a pass for lack of the lock; a fold
+// that ticks meanwhile skips its turn and folds 5 s later. The fold never takes
+// a scope lock, so the reconcile's scope lock adds no cycle.
+const blockCountPruneFoldLockSQL = `SELECT pg_advisory_xact_lock(hashtext('ctx:block_count_fold'))`
+
 // blockCountReconcileLockSQL serializes the correction of one scope: two
 // reconciles that saw the same drift would otherwise both add the difference.
 const blockCountReconcileLockSQL = `SELECT pg_advisory_xact_lock(hashtext('ctx:block_count_reconcile:' || $1::text))`
@@ -257,6 +266,9 @@ func correctScopeCounts(ctx context.Context, tx pgx.Tx, scope string, found []Bl
 	// A folded row at 0 adds nothing to any sum, whatever deltas are pending
 	// for its key, so removing it is always exact; a fold that adds to the key
 	// later inserts the row again.
+	if _, err := tx.Exec(ctx, blockCountPruneFoldLockSQL); err != nil {
+		return nil, 0, fmt.Errorf("store: block count prune lock: %w", err)
+	}
 	tag, err := tx.Exec(ctx, `DELETE FROM context_block_counts WHERE scope = $1 AND n = 0`, scope)
 	if err != nil {
 		return nil, 0, fmt.Errorf("store: block count prune: %w", err)
