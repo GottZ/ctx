@@ -1722,12 +1722,28 @@ func sweepScopeMoveLinks(ctx context.Context, tx pgx.Tx, id, newScope string) (i
 // keyset, which is fragile and slow — that path stays LIMIT-only ("top matches;
 // refine the query for more"). SearchBlocks ignores a non-nil cursor when the
 // query is non-empty.
+//
+// The two fields are omitzero/omitempty for the MCP `search` tool (#206): the
+// SDK derives the tool's input schema from this type, and a field without the
+// option would be REQUIRED there, so the documented page-1 spelling `{}` (the
+// zero position, which every caller treats as "no cursor") could not be sent.
+// A cursor the server hands out is never zero, so its JSON is unchanged.
 type SearchCursor struct {
 	// UpdatedAt is the updated_at of the last row returned on the previous page.
-	UpdatedAt time.Time `json:"after_updated"`
+	UpdatedAt time.Time `json:"after_updated,omitzero"`
 	// ID is that row's id — the tiebreak that makes (updated_at, id) unique.
-	ID string `json:"after_id"`
+	ID string `json:"after_id,omitempty"`
 }
+
+// SearchMaxLimit is the most rows one search statement answers, for every
+// caller (REST /api/search, the MCP `search` tool, the chat ctx_search tool).
+// Every answer is bounded; a caller that needs more pages with the keyset
+// cursor (SearchBlocksPage). Exported so a surface can tell its caller that a
+// requested limit was lowered without restating the number.
+const SearchMaxLimit = 50
+
+// SearchDefaultLimit is the page size of a search without a positive limit.
+const SearchDefaultLimit = 10
 
 // SearchBlocks performs a lightweight search with optional FTS, category, and tag filters.
 // Uses precomputed ts_de tsvector for FTS ranking.
@@ -1753,15 +1769,44 @@ type SearchCursor struct {
 // set is the caller's block-type registry snapshot; it fills
 // BlockPreview.Untrusted per row (V-11). nil ⇒ the field stays absent.
 func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, query string, readScopes []string, category string, tags []string, limit int, compact bool, after *SearchCursor, grantedBlockIDs []string, types []string, typesExclude []string, cluster *string) ([]BlockPreview, error) {
-	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
-		return nil, err
-	}
-	sql, args := searchBlocksSQL(searchParams{
+	rows, _, err := searchBlocks(ctx, pool, set, searchParams{
 		Query: query, ReadScopes: readScopes, Category: category, Tags: tags,
 		Limit: limit, Compact: compact, After: after, GrantedBlockIDs: grantedBlockIDs,
 		Types: types, TypesExclude: typesExclude, Cluster: cluster,
 	})
-	return runSearchBlocks(ctx, pool, set, sql, args, compact)
+	return rows, err
+}
+
+// SearchBlocksPage is SearchBlocks for a caller that hands out a next-page
+// cursor (#206): same arguments, same rows, plus whether the browse listing
+// goes on after the last row. It reads ONE row more than the page on the
+// empty-query path and drops it, so `more` is an observed fact — the rule it
+// replaced ("a full page may have more") answered a cursor to an empty page
+// whenever the last page happened to be full. The full-text path is "top
+// matches" and never pages; there `more` is always false and no extra row is
+// read.
+func SearchBlocksPage(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, query string, readScopes []string, category string, tags []string, limit int, compact bool, after *SearchCursor, grantedBlockIDs []string, types []string, typesExclude []string, cluster *string) (rows []BlockPreview, more bool, err error) {
+	return searchBlocks(ctx, pool, set, searchParams{
+		Query: query, ReadScopes: readScopes, Category: category, Tags: tags,
+		Limit: limit, Compact: compact, After: after, GrantedBlockIDs: grantedBlockIDs,
+		Types: types, TypesExclude: typesExclude, Cluster: cluster, ProbeNext: true,
+	})
+}
+
+// searchBlocks runs one search statement; see SearchBlocksPage for `more`.
+func searchBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, p searchParams) ([]BlockPreview, bool, error) {
+	if err := RequireScopes(p.ReadScopes); err != nil { // T07 fail-closed (design/01 §5.4)
+		return nil, false, err
+	}
+	sql, args := searchBlocksSQL(p)
+	rows, err := runSearchBlocks(ctx, pool, set, sql, args, p.Compact)
+	if err != nil {
+		return nil, false, err
+	}
+	if page := ClampLimit(p.Limit, SearchDefaultLimit, SearchMaxLimit); len(rows) > page {
+		return rows[:page], true, nil
+	}
+	return rows, false, nil
 }
 
 // searchParams is the input of the statement builder. It exists so the §6.6
@@ -1780,6 +1825,9 @@ type searchParams struct {
 	Types           []string
 	TypesExclude    []string
 	Cluster         *string
+	// ProbeNext asks the browse path for one row past the page
+	// (SearchBlocksPage). Inert on the full-text path.
+	ProbeNext bool
 }
 
 // searchBlocksSQL composes the browse/FTS statement and its arguments. Pure —
@@ -1794,7 +1842,10 @@ func searchBlocksSQL(p searchParams) (string, []any) {
 	if grantedBlockIDs == nil {
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
 	}
-	limit := ClampLimit(p.Limit, 10, 50)
+	limit := ClampLimit(p.Limit, SearchDefaultLimit, SearchMaxLimit)
+	if p.ProbeNext && p.Query == "" {
+		limit++ // the probe row; searchBlocks drops it again
+	}
 
 	// $1 stays readScopes and $2 stays the FTS query arg (the FTS orderBy
 	// hardcodes $2 — never shift it). The scope/grant OR-clause is NOT the first
