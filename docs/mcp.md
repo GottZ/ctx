@@ -206,8 +206,8 @@ on foreign-text rows. The contents of one answer are bounded at 64 KiB: the page
 before the first row that would cross it, and `truncated: true` says so. A block is
 never cut, and the first row of a page is always answered whole, even when it alone
 is larger. With an empty `query`, `next_after` continues at the first row left out;
-with a `query` there is no next page, so narrow the query or lower `limit` to read
-the rest.
+with a `query` there is no next page: narrow the query, or list by filters with an
+empty `query` and page through them.
 
 **The page object.** A call with `after` or `include_content` answers one JSON object
 instead of the array: `next_after` (absent on the last page and always with a
