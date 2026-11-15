@@ -168,7 +168,9 @@ Lightweight search without an LLM call. Read-only.
 | `query` | string | | search text |
 | `category` | string | | filter by category |
 | `tags` | string[] | | filter by tags |
-| `limit` | integer | | maximum results (default 10; no upper cap on this tool) |
+| `limit` | integer | | maximum results (default 10, max 50) |
+| `after` | object | | page a listing with an empty `query`: `{}` for the first page, then the `next_after` of the previous answer |
+| `include_content` | boolean | | answer each block's full `content` and `metadata` instead of the preview |
 | `cluster` | string | | restrict to one topic by its stable handle (from the graph surfaces) |
 | `types` | string[] | | restrict to these block types; each must be retrieval-visible, otherwise an error |
 | `types_exclude` | string[] | | exclude these block types |
@@ -179,6 +181,47 @@ that retrieval policy keeps out cannot be named. **Answer:** a JSON array of com
 rows — `id`, `category`, `tags`, `title`, `content_preview`, `content_length`, `scope`,
 `sensitivity`, `type`, `lifecycle_state`, `type_source`, `untrusted`, `score`,
 `created_at`, `updated_at` (empty fields are omitted).
+
+**Limit.** One call answers at most 50 rows, as on `POST /api/search`. A `limit` above
+that is lowered to 50, and the answer says so (below).
+
+**Paging (`after`).** With an empty `query` the tool lists the blocks that match the
+filters, newest `updated_at` first. Send `after: {}` for the first page; each answer
+then carries `next_after` exactly when another row follows, and passing it back as
+`after` (with the same filters) answers the next page. The cursor is the
+`{after_updated, after_id}` position of the last row, the same cursor `POST /api/search`
+takes and answers: it carries no filter and no scope, and each page applies the
+filters and the read access of the call that sends it, so a cursor from another key
+or from other filters only names a position. `{}` is the first page; a cursor with
+only one of its two fields, or whose `after_id` is not a block id, is an error (the
+REST route reads a one-field cursor as the first page). Paging orders by
+`updated_at`: a block that is updated while a listing is paged moves ahead of the
+cursor, so a listing that has not reached it yet does not see it; blocks added
+meanwhile are newer than the cursor and are not listed, archived ones drop out. `after` next to a
+non-empty `query` is an error: the full-text path answers its top matches and has no
+next page.
+
+**Content (`include_content`).** The rows are those of `POST /api/search` with
+`compact: false`: `content` and `metadata` (with the guard's `guard_matched_id` dropped
+when the block it names lies outside the key's read scopes, as on `get`) instead of `content_preview`
+and `content_length`, through the same scope, grant and type rules, with `untrusted`
+on foreign-text rows. The rows of one answer are bounded at 64 KiB of JSON, content,
+metadata and escaping included: the page ends before the first row that would cross
+it, and `truncated: true` says so. A block is
+never cut, and the first row of a page is always answered whole, even when it alone
+is larger. With an empty `query`, `next_after` continues at the first row left out;
+with a `query` there is no next page: narrow the query, or list by filters with an
+empty `query` and page through them.
+
+**The page object.** A call with `after` or `include_content` answers one JSON object
+instead of the array: `next_after` (absent on the last page and always with a
+`query`), `limit` (the effective page size), `requested_limit` (the `limit` sent, only
+when it was lowered), `truncated` (only when the 64 KiB bound ended the page), and
+`results`, the rows. A call with neither keeps the array byte for byte; when its
+`limit` was lowered or more rows follow, the same `next_after`, `limit` and
+`requested_limit` ride beside the array in the result's `_meta`, under the key
+`ctx/search_page` — not in `structuredContent`, which a client may take for the result
+itself. A client that reads only the text never sees them.
 
 ### get
 

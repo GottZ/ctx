@@ -154,7 +154,13 @@ type searchInput struct {
 	Query    string   `json:"query,omitempty" jsonschema:"search text"`
 	Category string   `json:"category,omitempty" jsonschema:"filter by category"`
 	Tags     []string `json:"tags,omitempty" jsonschema:"filter by tags"`
-	Limit    int      `json:"limit,omitempty" jsonschema:"max results (default 10)"`
+	Limit    int      `json:"limit,omitempty" jsonschema:"max results (default 10, max 50)"`
+	// After and IncludeContent (#206, #207) are POST /api/search's keyset
+	// cursor and the inverse of its `compact`, through the same core. Either one
+	// present switches the answer to the page object (mcp_search_page.go); a
+	// call with neither keeps the row array byte for byte.
+	After          *store.SearchCursor `json:"after,omitempty" jsonschema:"page through a listing with an empty query: {} for the first page, then the next_after of the previous answer; the answer is then an object with next_after (absent on the last page), limit and results"`
+	IncludeContent bool                `json:"include_content,omitempty" jsonschema:"answer each block's full content and metadata instead of a 200-character preview; the answer is then an object with results, and a page ends early once its rows reach 64 KiB of JSON (truncated true, next_after continues with an empty query)"`
 	// Cluster is the C6 topic facet — a FIELD on the existing tool, not an
 	// eighth tool: a new tool raises the selection load of every MCP client,
 	// an optional argument on a known one does not (design/03 §4.8).
@@ -184,9 +190,11 @@ type searchInput struct {
 // transports share (search_core.go). Twin of searchRequest.coreArgs; the parity
 // test holds the two against each other without a database.
 //
-// Limit rides in RAW: the shared default (10) is applied by the core, and this
-// surface deliberately has no cap (E03-2 = B / K28) — a model may fill its own
-// context if it insists.
+// Limit rides in RAW: default and cap are the core's (searchLimit), and the
+// handler compares the effective value with this one to report a lowered
+// limit. The cap is the store's clamp at 50, which this tool has always run
+// into; E03-2 = B / K28 records the surface as uncapped, and lifting the clamp
+// for it is open there (search_core.go, LIMIT note).
 func (input searchInput) coreArgs(facetEnabled bool) searchArgs {
 	return searchArgs{
 		Query:             input.Query,
@@ -197,10 +205,10 @@ func (input searchInput) coreArgs(facetEnabled bool) searchArgs {
 		TypesExclude:      input.TypesExclude,
 		BlockRolesExclude: input.BlockRolesExclude,
 		Limit:             input.Limit,
-		// The tool always answers compact rows, never paginates (no cursor
-		// argument exists) — both unchanged.
-		Compact: true,
-		After:   nil,
+		// Compact unless include_content (#207); the cursor as given (#206),
+		// read by the core exactly as REST's.
+		Compact: !input.IncludeContent,
+		After:   input.After,
 		// V-W6: `types` CUTS against the caller's retrieval-visible set here,
 		// and an unknown or non-visible name is a tool error. That strictness is
 		// the documented difference to the REST browse route and stays a visible
@@ -250,7 +258,7 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 	// search
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search",
-		Description: "Lightweight search without LLM synthesis. Returns matching blocks with preview.",
+		Description: "Lightweight search without LLM synthesis. Returns matching blocks with preview, at most 50 per call. With an empty query it lists the blocks of the filters newest first; pass after to page through all of them, and include_content to read their full text.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, mcpSearchHandler(cfg))
 
@@ -857,20 +865,30 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 		// reads as off, the fail-closed direction for a dark feature.
 		facetEnabled := cfg.Cfg != nil && cfg.Cfg.SnapshotForRequest(ctx).ClusterOps.FacetEnabled
 
+		// REST leaves a cursor next to a query inert; here it is refused, so a
+		// caller cannot take the repeated top matches for a second page (#206).
+		if input.After != nil && input.Query != "" {
+			return errResult(mcpSearchAfterNeedsBrowseMsg), nil, nil
+		}
+		if mcpSearchAfterIsHalf(input.After) {
+			return errResult(mcpSearchAfterHalfMsg), nil, nil
+		}
+
 		// One rule set for both search transports (T03-9, search_core.go): the
 		// V-W6 type cut ahead of every pool touch, the C6 facet gate, the
 		// types_exclude ∪ block_roles_exclude union and the grant resolution.
 		// The registry snapshot handed in is the SAME one that frames the
 		// untrusted rows (V-11) — flag and admission to retrieval can never come
 		// from two registry generations.
-		results, err := executeSearch(ctx, cfg.Pool, cfg.mcpTypeSnapshot(ctx), ar, input.coreArgs(facetEnabled))
+		page, err := executeSearch(ctx, cfg.Pool, cfg.mcpTypeSnapshot(ctx), ar, input.coreArgs(facetEnabled))
 		if err != nil {
 			var rejected *searchRejected
 			switch {
 			case errors.As(err, &rejected):
 				// Caller error the core holds the prose for: the V-W6 type
 				// rejections and the malformed facet handle, each with the text
-				// this tool printed before the core existed.
+				// this tool printed before the core existed, and the malformed
+				// cursor.
 				return errResult(rejected.Error()), nil, nil
 			case errors.Is(err, store.ErrTooManyBlockGrants): // T04-20: refuse, never read scope-only
 				return errResult(tooManyGrantsMsg), nil, nil
@@ -879,10 +897,7 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 			}
 		}
 
-		data, _ := json.MarshalIndent(results, "", "  ")
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{textContent(string(data))},
-		}, nil, nil
+		return renderMCPSearch(input, page), nil, nil
 	}
 }
 

@@ -139,25 +139,15 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	if req.Compact != nil {
 		compact = *req.Compact
 	}
-	// The default (10) is the shared rule of both search surfaces
-	// (defaultSearchLimit); the CAP is not — it stays a REST rule, because the
-	// MCP tool's handler is deliberately left uncapped (E03-2 = B / K28; the
-	// statement builder clamps at 50 for every caller regardless, see
-	// defaultSearchLimit). Both are resolved HERE and not in the core: the
-	// effective limit is echoed in `filters` and decides whether a next-page
-	// cursor exists.
-	limit := defaultSearchLimit(req.Limit)
-	if limit > 50 {
-		limit = 50
-	}
+	// Default (10) and cap (store.SearchMaxLimit) are the shared rule of both
+	// search surfaces (searchLimit); the effective value is echoed in `filters`.
+	limit := searchLimit(req.Limit)
 
-	// Keyset cursor (W7). A cursor with a zero/empty position is treated as
-	// page 1 (defensive: a garbage cursor must not crash — it just resumes from
-	// the start). The FTS path ignores any cursor (LIMIT-only).
+	// Keyset cursor (W7), read by the core (searchCursorOf): a cursor with a
+	// zero/empty position is page 1, an after_id that is not a block id is a
+	// 400 (it used to reach the uuid bind and answer 500). The FTS path ignores
+	// any cursor (LIMIT-only).
 	after := req.After
-	if after != nil && (after.ID == "" || after.UpdatedAt.IsZero()) {
-		after = nil
-	}
 
 	// Search through the ONE rule set both transports share (T03-9,
 	// search_core.go): the C6 facet gate, the types_exclude ∪ block_roles_exclude
@@ -170,13 +160,13 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	// The C6 flag rides in as a VALUE out of the ONE snapshot taken above — the
 	// core must never take a second one (search_core.go, searchArgs.FacetEnabled).
 	a := req.coreArgs(limit, compact, after, cfgSnap.ClusterOps.FacetEnabled)
-	results, err := executeSearch(ctx, h.pool, h.typeSnapshot(ctx), authResult, a)
+	page, err := executeSearch(ctx, h.pool, h.typeSnapshot(ctx), authResult, a)
 	if err != nil {
 		var rejected *searchRejected
 		switch {
 		case errors.As(err, &rejected):
-			// Caller error with prose the core holds (today: the malformed facet
-			// handle) — same 400 body this route sent before the core existed.
+			// Caller error with prose the core holds (the malformed facet handle,
+			// the malformed cursor) — same 400 envelope as before the core existed.
 			writeJSON(w, http.StatusBadRequest, map[string]any{
 				"success": false, "error": rejected.Error(),
 			})
@@ -197,10 +187,10 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Next-page cursor (W7). Only the empty-query browse path paginates; the
-	// FTS path is "top matches" (no loadMore). nextSearchCursor returns the
-	// {after_updated, after_id} of the LAST result when the page came back full
-	// (so there may be more), else nil (last page / FTS / not paginating).
-	nextAfter := nextSearchCursor(req.Query, results, limit)
+	// FTS path is "top matches" (no loadMore). The core reads one probe row, so
+	// the cursor exists exactly when another row does — a full last page no
+	// longer answers a cursor to an empty page (#206).
+	results, nextAfter := page.Rows, page.NextAfter
 
 	// Format response.
 	var categoryFilter any = nil
@@ -256,25 +246,4 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 		// null when there is no next page (last page / FTS top-matches mode).
 		"next_after": nextAfter,
 	})
-}
-
-// nextSearchCursor derives the next-page keyset cursor for the empty-query
-// browse path (block-workbench W7). When the page came back FULL (len == limit)
-// there may be more rows, so it returns the {after_updated, after_id} of the
-// LAST result; a short/empty page is the last page (nil). The FTS path (query
-// != "") never paginates ("top matches") and always returns nil.
-//
-func nextSearchCursor(query string, results []store.BlockPreview, limit int) *store.SearchCursor {
-	// FTS "top matches" never paginates.
-	if query != "" {
-		return nil
-	}
-	// A short page (fewer than the requested limit) is the last page — no more
-	// rows, so no next cursor. A full page MAY have more behind it: hand back
-	// the last row's (updated_at, id) so the next request resumes after it.
-	if len(results) < limit || len(results) == 0 {
-		return nil
-	}
-	last := results[len(results)-1]
-	return &store.SearchCursor{UpdatedAt: last.UpdatedAt, ID: last.ID}
 }

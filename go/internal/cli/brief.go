@@ -146,7 +146,7 @@ func searchBriefBlocks(c *Client, limit int, tag string) ([]briefBlock, error) {
 // briefSearchLimit applies the same default and REST ceiling to both paths.
 func briefSearchLimit(limit int) int {
 	if limit <= 0 {
-		return 10 // the search API's own default (handler.defaultSearchLimit)
+		return 10 // the search API's own default (handler.searchLimit)
 	}
 	if limit > briefMaxLimit {
 		return briefMaxLimit
