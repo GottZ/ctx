@@ -129,7 +129,8 @@ type supersedesTarget struct {
 //   - Additive: a declaration never removes another. A block may supersede
 //     several (one store each); a repeat declaration is a no-op; a store
 //     without the field leaves the block's declarations alone. The way back
-//     is manage dream-link-resolve delete, which reconciles the target.
+//     is the delete-resolve of the link (`ctx dream resolve <source> <target>
+//     supersedes delete`, DreamLinkResolve), which reconciles the target.
 //
 // Lock order: the written block's row (the upsert identity, FOR UPDATE — the
 // lock UpsertBlock's pre-read takes anyway), then the target (FOR NO KEY
@@ -311,7 +312,8 @@ func supersedesStateAllows(ctx context.Context, tx pgx.Tx, sourceID, targetID, s
 	// this write (nothing supersedes it yet) walks nothing. Every supersedes
 	// link counts, pinned or not: a dream guess that the target supersedes the
 	// source refuses the declaration as a cycle too — the remedy is to delete
-	// that guess (manage dream-link-resolve … delete) and declare again.
+	// that guess (`ctx dream resolve <target> <source> supersedes delete`) and
+	// declare again.
 	var cycle, tooDeep bool
 	if err := tx.QueryRow(ctx,
 		`WITH RECURSIVE up(id, depth) AS (
