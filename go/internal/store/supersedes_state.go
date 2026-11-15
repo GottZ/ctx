@@ -8,11 +8,15 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 const supersedesSnapshotConfidence = 0.7
@@ -234,3 +238,174 @@ func markSupersededSnapshot(ctx context.Context, tx pgx.Tx, targetID, sourceID s
 	}
 	return nil
 }
+
+// errSupersedesSourceChanged: the block was in the scope whose supersedes locks
+// lockSupersedesSource took, and the lock pass did not find it there any more —
+// a scope move (or a purge) committed in between. Locking it in its new scope
+// without that scope's locks would reopen the lock-order cycle with a
+// declaration there, so the caller's transaction rolls back and runs again
+// (writeSupersedesSource), and the next scope read names the new scope.
+var errSupersedesSourceChanged = errors.New("store: lock supersedes source: the block changed scope during the lock pass")
+
+// supersedesSourceAttempts bounds those runs. A fixed bound, not a policy:
+// each repeat needs another commit that moves the same block within the few
+// statements between a scope read and the lock pass after it, so a third
+// failure is not contention but a fault, and surfaces as the error.
+const supersedesSourceAttempts = 3
+
+// writeSupersedesSource is pgxdb.Write for a transaction that starts with
+// lockSupersedesSource: it runs fn again while the lock pass reports
+// errSupersedesSourceChanged, at most supersedesSourceAttempts times.
+func writeSupersedesSource(ctx context.Context, db pgxdb.Beginner, s pgxdb.Stages, fn func(pgx.Tx) error) error {
+	for attempt := 1; ; attempt++ {
+		err := pgxdb.Write(ctx, db, s, fn)
+		if !errors.Is(err, errSupersedesSourceChanged) || attempt >= supersedesSourceAttempts {
+			return err
+		}
+	}
+}
+
+// lockSupersedesSource prepares a write that can end the supersedes of a block
+// — archiving it, or moving it to another scope: it takes the block's scope's
+// supersedes locks, then locks the block itself and every target of its
+// supersedes links, in ONE statement and id order, and returns the targets. It
+// runs BEFORE the caller's first write, because that write fires
+// mark_guard_dirty and holds the context_guard_state row until commit, and the
+// reconcile afterwards must not wait for a target lock (the lock discipline of
+// ReconcileSupersedesTargets). The caller passes the targets to
+// ReconcileSupersedesTargets after its write, and runs its transaction through
+// writeSupersedesSource.
+//
+// The scope's locks come first, both SHARED (ShareSupersedesScope, then
+// shareSupersedesGuesses), before any row lock: a declaration of the scope
+// holds the scope lock exclusively and locks its source before its target,
+// while the lock pass goes in id order — on a block that already supersedes a
+// target sorting before it the two orders disagree, and the lock keeps them
+// apart (without it, PostgreSQL ends one of them with 40P01). The guess lock
+// keeps dream batches with a supersedes guess out, so no new supersedes link
+// from the block commits while this transaction reads them. Archives, scope
+// moves and dream batches without a guess still run side by side. The scope is
+// read without a lock first; the lock pass then holds only rows of that scope
+// (its outer WHERE re-checks the scope on the row it locks), so a declaration
+// of another scope never holds one of its rows. A block that left the scope in
+// between answers errSupersedesSourceChanged.
+//
+// The block is matched only inside writeScopes, and so are the links (by the
+// source's scope): a block the caller may not write locks nothing. A malformed
+// or archived id locks nothing either; the caller's own statement answers it
+// as before.
+//
+// The candidate ids are built as ONE array (the block, then its targets) and
+// matched with = ANY: primary-key probes for a handful of ids. An `id = $1 OR
+// id IN (subquery)` form is planned as a filter with a hashed subplan over a
+// full primary-key scan (ORDER BY id) — every archive would read the corpus.
+func lockSupersedesSource(ctx context.Context, tx pgx.Tx, blockID string, writeScopes []string) ([]string, error) {
+	parsed, err := uuid.Parse(blockID)
+	if err != nil {
+		return nil, nil //nolint:nilerr // deliberate: the caller's statement decides a malformed id
+	}
+	// The statements below return ids as id::text, the canonical lowercase
+	// form; a full id the caller typed in capitals (ResolveBlockID returns a
+	// full id unchanged) is the same block and must compare equal to them.
+	blockID = parsed.String()
+
+	var scope string
+	err = tx.QueryRow(ctx,
+		`SELECT scope FROM context_blocks WHERE id = $1::uuid AND scope = ANY($2::text[]) AND NOT is_archived`,
+		blockID, writeScopes).Scan(&scope)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil // not a live block the caller may write: nothing to reconcile
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: lock supersedes source: scope: %w", err)
+	}
+	if err := ShareSupersedesScope(ctx, tx, scope); err != nil {
+		return nil, err
+	}
+	if err := shareSupersedesGuesses(ctx, tx, scope); err != nil {
+		return nil, err
+	}
+
+	rows, err := tx.Query(ctx, lockSupersedesSourceSQL, blockID, scope)
+	if err != nil {
+		return nil, fmt.Errorf("store: lock supersedes source: %w", err)
+	}
+	locked, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("store: lock supersedes source: %w", err)
+	}
+	if !slices.Contains(locked, blockID) {
+		return nil, errSupersedesSourceChanged
+	}
+	targets := slices.DeleteFunc(locked, func(id string) bool { return id == blockID })
+
+	// The target list above comes from that statement's snapshot, taken
+	// BEFORE it waited for the block's lock. Under the scope locks above no
+	// declaration and no dream guess of the scope adds a supersedes link from
+	// the block while this transaction runs, so the re-read normally finds
+	// nothing; it stays for a writer outside that discipline that held the
+	// block and committed while we waited. Now the block is held, and this
+	// statement's fresh snapshot sees every such link; its targets are locked
+	// as well (in id order among themselves). Both statements keep to the
+	// locked scope like the lock pass: a target in another scope carries no
+	// state from this block (the reconcile counts only sources of the
+	// target's own scope), and its row may be held by a declaration there.
+	rows, err = tx.Query(ctx, supersedesTargetsOfSQL, blockID, scope)
+	if err != nil {
+		return nil, fmt.Errorf("store: lock supersedes source: re-read: %w", err)
+	}
+	current, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("store: lock supersedes source: re-read: %w", err)
+	}
+	var late []string
+	for _, id := range current {
+		if !slices.Contains(targets, id) {
+			late = append(late, id)
+		}
+	}
+	if len(late) > 0 {
+		rows, err := tx.Query(ctx,
+			`SELECT id::text FROM context_blocks WHERE id = ANY($1::uuid[]) AND scope = $2 ORDER BY id FOR NO KEY UPDATE`,
+			late, scope)
+		if err != nil {
+			return nil, fmt.Errorf("store: lock supersedes source: late targets: %w", err)
+		}
+		lateLocked, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, fmt.Errorf("store: lock supersedes source: late targets: %w", err)
+		}
+		targets = append(targets, lateLocked...)
+	}
+	return targets, nil
+}
+
+// supersedesTargetsOfSQL reads the targets of a block's supersedes links that
+// live in a scope ($1 = the block, $2 = the scope), in id order;
+// idx_dream_links_supersedes serves the links, the primary key the scope.
+const supersedesTargetsOfSQL = `SELECT dl.target_block_id::text
+	  FROM context_dream_links dl
+	  JOIN context_blocks t ON t.id = dl.target_block_id
+	 WHERE dl.source_block_id = $1::uuid AND dl.relationship = 'supersedes' AND t.scope = $2
+	 ORDER BY dl.target_block_id`
+
+// lockSupersedesSourceSQL is lockSupersedesSource's statement ($1 = the block,
+// $2 = the scope whose supersedes locks the transaction holds). Only a block
+// in that scope contributes itself or its targets (the inner query joins on
+// its scope), and only rows in that scope are locked: the outer b.scope is
+// re-checked on the newest row version when the statement waited for it, so a
+// block that moved away meanwhile is not locked.
+const lockSupersedesSourceSQL = `SELECT b.id::text
+	   FROM context_blocks b
+	  WHERE b.id = ANY(
+	          ARRAY(SELECT x.id FROM context_blocks x
+	                 WHERE x.id = $1::uuid AND x.scope = $2)
+	          || ARRAY(SELECT dl.target_block_id
+	                     FROM context_dream_links dl
+	                     JOIN context_blocks s ON s.id = dl.source_block_id
+	                    WHERE dl.source_block_id = $1::uuid
+	                      AND dl.relationship = 'supersedes'
+	                      AND s.scope = $2))
+	    AND b.scope = $2
+	  ORDER BY b.id
+	  FOR NO KEY UPDATE OF b`

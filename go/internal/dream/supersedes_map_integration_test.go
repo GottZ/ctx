@@ -47,7 +47,7 @@ func TestSupersedesMap_KeyedByOutdatedTarget_Welle46Convention(t *testing.T) {
 	}
 
 	// Query with the OUTDATED block id — must return the newer replacement.
-	m, err := dream.SupersedesMap(ctx, pool, []string{smOlderID})
+	m, _, err := dream.SupersedesMap(ctx, pool, []string{smOlderID})
 	if err != nil {
 		t.Fatalf("SupersedesMap (outdated key): %v", err)
 	}
@@ -61,7 +61,7 @@ func TestSupersedesMap_KeyedByOutdatedTarget_Welle46Convention(t *testing.T) {
 
 	// Querying with the NEWER block id — must NOT return it (the newer block
 	// is not superseded by anything in this fixture).
-	m, err = dream.SupersedesMap(ctx, pool, []string{smNewerID})
+	m, _, err = dream.SupersedesMap(ctx, pool, []string{smNewerID})
 	if err != nil {
 		t.Fatalf("SupersedesMap (newer key): %v", err)
 	}
@@ -98,7 +98,7 @@ func TestSupersedesMap_MultipleSupersedersOneTarget(t *testing.T) {
 		t.Fatalf("seed links: %v", err)
 	}
 
-	m, err := dream.SupersedesMap(ctx, pool, []string{smOlderID})
+	m, _, err := dream.SupersedesMap(ctx, pool, []string{smOlderID})
 	if err != nil {
 		t.Fatalf("SupersedesMap: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestSupersedesMap_RawConfidenceGate(t *testing.T) {
 		t.Fatalf("seed link: %v", err)
 	}
 
-	m, err := dream.SupersedesMap(ctx, pool, []string{smOlderID})
+	m, _, err := dream.SupersedesMap(ctx, pool, []string{smOlderID})
 	if err != nil {
 		t.Fatalf("SupersedesMap: %v", err)
 	}

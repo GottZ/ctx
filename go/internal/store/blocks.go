@@ -729,6 +729,33 @@ func guardUnbadged(ctx context.Context, tx pgx.Tx, hadRow, hadProvenance bool, c
 // validates the name against the registry snapshot (422 on unknown) — this
 // layer trusts its caller like it does for sensitivity levels.
 func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite, typeName string) (*Block, error) {
+	u := prepareUpsert(category, title, content, tags, metadata, scope, scopeExplicit, sens, typeName)
+	var b *Block
+	if err := pgxdb.Write(ctx, pool, pgxdb.At("store: upsert block"), func(tx pgx.Tx) error {
+		var err error
+		b, err = u.exec(ctx, tx)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// upsertStatement is one prepared UpsertBlock write: the statement and its
+// arguments plus what the in-transaction half needs. prepareUpsert builds it
+// without touching the database; exec runs it inside a caller-owned
+// transaction — UpsertBlock's own, or UpsertBlockSupersedes', which composes
+// the supersedes declaration into the same transaction (issue #197).
+type upsertStatement struct {
+	query                           string
+	args                            []any
+	sens                            SensitivityWrite
+	metadata                        map[string]any
+	category, title, content, scope string
+}
+
+// prepareUpsert is the pure half of UpsertBlock (see there for the rules).
+func prepareUpsert(category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite, typeName string) upsertStatement {
 	if tags == nil {
 		tags = []string{}
 	}
@@ -820,6 +847,16 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 			%s
 		RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at`,
 		insertCols, insertVals, strings.Join(setClauses, ",\n\t\t\t"))
+	return upsertStatement{
+		query: query, args: args, sens: sens, metadata: metadata,
+		category: category, title: title, content: content, scope: scope,
+	}
+}
+
+// exec is the in-transaction half of UpsertBlock: pre-read, the S3 guard, the
+// upsert and the stale-vector clear, in the caller's transaction.
+func (u upsertStatement) exec(ctx context.Context, tx pgx.Tx) (*Block, error) {
+	category, title, content, scope := u.category, u.title, u.content, u.scope
 
 	// Achse 04 W04-8 (design/04-reembed-migration.md §3.4/§7, Inventur §3.4
 	// point 8): a conflicting upsert that CHANGES content must invalidate the
@@ -835,79 +872,73 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 	// Everything below runs in ONE tx: the pre-read, the upsert, and (on a
 	// real content change) the clear are atomic together — "der Upsert und
 	// das Clear gehören in EINE Tx" (design §7).
-	var b *Block
-	if err := pgxdb.Write(ctx, pool, pgxdb.At("store: upsert block"), func(tx pgx.Tx) error {
-
-		// Content-change detection mechanic: "vorheriges SELECT in der Upsert-Tx"
-		// (one of the three mechanics the design explicitly allows). Locks the
-		// conflicting row (if any) with FOR UPDATE BEFORE the upsert runs, using
-		// the exact (category, title, scope) WHERE NOT is_archived predicate the
-		// ON CONFLICT target itself uses — so hadRow is true iff this write will
-		// take the conflict-update branch, false iff it will INSERT a fresh row.
-		//
-		// Race-safety: a second, concurrent UpsertBlock on the SAME key blocks on
-		// this SELECT ... FOR UPDATE until this tx commits or rolls back, then
-		// re-reads the now-current row for ITS comparison — so two concurrent
-		// content-changing upserts on the same block serialize correctly instead
-		// of one silently missing the other's change. The only case where this
-		// SELECT sees no row (hadRow=false) for what turns out to be a
-		// conflicting write is two simultaneous FIRST-time creates racing each
-		// other — and a block that has never been through UpsertBlock before
-		// never carries an embedding yet (StoreEmbedding is always a separate,
-		// later call), so there is nothing stale to clear in that window.
-		var oldContent string
-		var hadProvenance bool
-		var existing provenanceIdentity
-		hadRow := true
-		// The identity columns ride along on the row this SELECT already locks — no
-		// extra query, and they are read as TEXT (see provenanceIdentity for why a
-		// ::int cast on the stratum would be an availability bug, not a check).
-		if err := tx.QueryRow(ctx,
-			`SELECT content,
-			        metadata ? '`+derived.MetadataKey+`',
-			        COALESCE(metadata->'`+derived.MetadataKey+`'->>'arm', ''),
-			        COALESCE(metadata->'`+derived.MetadataKey+`'->>'stratum', '')
-			   FROM context_blocks
-			 WHERE category = $1 AND title = $2 AND scope = $3 AND NOT is_archived
-			 FOR UPDATE`,
-			category, title, scope,
-		).Scan(&oldContent, &hadProvenance, &existing.arm, &existing.stratum); err != nil {
-			if !errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("store: upsert block: pre-read: %w", err)
-			}
-			hadRow = false
+	//
+	// Content-change detection mechanic: "vorheriges SELECT in der Upsert-Tx"
+	// (one of the three mechanics the design explicitly allows). Locks the
+	// conflicting row (if any) with FOR UPDATE BEFORE the upsert runs, using
+	// the exact (category, title, scope) WHERE NOT is_archived predicate the
+	// ON CONFLICT target itself uses — so hadRow is true iff this write will
+	// take the conflict-update branch, false iff it will INSERT a fresh row.
+	//
+	// Race-safety: a second, concurrent UpsertBlock on the SAME key blocks on
+	// this SELECT ... FOR UPDATE until this tx commits or rolls back, then
+	// re-reads the now-current row for ITS comparison — so two concurrent
+	// content-changing upserts on the same block serialize correctly instead
+	// of one silently missing the other's change. The only case where this
+	// SELECT sees no row (hadRow=false) for what turns out to be a
+	// conflicting write is two simultaneous FIRST-time creates racing each
+	// other — and a block that has never been through UpsertBlock before
+	// never carries an embedding yet (StoreEmbedding is always a separate,
+	// later call), so there is nothing stale to clear in that window.
+	var oldContent string
+	var hadProvenance bool
+	var existing provenanceIdentity
+	hadRow := true
+	// The identity columns ride along on the row this SELECT already locks — no
+	// extra query, and they are read as TEXT (see provenanceIdentity for why a
+	// ::int cast on the stratum would be an availability bug, not a check).
+	if err := tx.QueryRow(ctx,
+		`SELECT content,
+		        metadata ? '`+derived.MetadataKey+`',
+		        COALESCE(metadata->'`+derived.MetadataKey+`'->>'arm', ''),
+		        COALESCE(metadata->'`+derived.MetadataKey+`'->>'stratum', '')
+		   FROM context_blocks
+		 WHERE category = $1 AND title = $2 AND scope = $3 AND NOT is_archived
+		 FOR UPDATE`,
+		category, title, scope,
+	).Scan(&oldContent, &hadProvenance, &existing.arm, &existing.stratum); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("store: upsert block: pre-read: %w", err)
 		}
+		hadRow = false
+	}
 
-		if err := guardProvenanceClaim(ctx, tx, sens, metadata, hadRow, hadProvenance, existing, category, title, scope); err != nil {
-			return err
-		}
-
-		b = &Block{}
-		if err := tx.QueryRow(ctx, query, args...).Scan(
-			&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
-			&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
-		); err != nil {
-			return fmt.Errorf("store: upsert block: %w", err)
-		}
-
-		// Only a REAL content change on an existing row invalidates the vector.
-		// An idempotent upsert with identical content must NOT throw the
-		// embedding away — that would make the backfill re-embed on every no-op
-		// `ctx save` at the 1M-10M target scale (organic growth means repeat
-		// saves of unchanged titles are routine, not rare).
-		//
-		// Reuses ClearEmbeddingTx — the same primitive UpdateBlock runs in its
-		// transaction — rather than duplicating its SQL, so any
-		// future extension of that primitive (it already nulls BOTH vector pairs
-		// and deletes the backfill memo, W04-3) is inherited here automatically.
-		if hadRow && oldContent != content {
-			if err := ClearEmbeddingTx(ctx, tx, b.ID); err != nil {
-				return fmt.Errorf("store: upsert block: clear stale embedding: %w", err)
-			}
-		}
-		return nil
-	}); err != nil {
+	if err := guardProvenanceClaim(ctx, tx, u.sens, u.metadata, hadRow, hadProvenance, existing, category, title, scope); err != nil {
 		return nil, err
+	}
+
+	b := &Block{}
+	if err := tx.QueryRow(ctx, u.query, u.args...).Scan(
+		&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
+		&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
+	); err != nil {
+		return nil, fmt.Errorf("store: upsert block: %w", err)
+	}
+
+	// Only a REAL content change on an existing row invalidates the vector.
+	// An idempotent upsert with identical content must NOT throw the
+	// embedding away — that would make the backfill re-embed on every no-op
+	// `ctx save` at the 1M-10M target scale (organic growth means repeat
+	// saves of unchanged titles are routine, not rare).
+	//
+	// Reuses ClearEmbeddingTx — the same primitive UpdateBlock runs in its
+	// transaction — rather than duplicating its SQL, so any
+	// future extension of that primitive (it already nulls BOTH vector pairs
+	// and deletes the backfill memo, W04-3) is inherited here automatically.
+	if hadRow && oldContent != content {
+		if err := ClearEmbeddingTx(ctx, tx, b.ID); err != nil {
+			return nil, fmt.Errorf("store: upsert block: clear stale embedding: %w", err)
+		}
 	}
 	return b, nil
 }
@@ -1225,20 +1256,42 @@ func readBlockByID(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, 
 // (category, title, scope) identity for a fresh upsert. The exclusion rides in
 // the WHERE, atomic with the archive; the 0-row case is diagnosed afterwards to
 // tell "protected" apart from "not found".
+//
+// An archived block supersedes nothing (the reconcile reads only live sources),
+// so the targets of its supersedes links are reconciled in the same
+// transaction: a target no other live block supersedes returns to knowledge at
+// once instead of staying a snapshot that points at an archived block until
+// the daily link sweep (issue #197).
 func DeleteBlock(ctx context.Context, pool *pgxpool.Pool, id string, writeScopes []string) (*Block, error) {
 	b := &Block{}
-	err := pool.QueryRow(ctx,
-		`UPDATE context_blocks SET is_archived = true, updated_at = now()
-		 WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
-		   AND `+notDerivedSQL+`
-		 RETURNING id, category, title, scope, created_at, updated_at`,
-		id, writeScopes,
-	).Scan(&b.ID, &b.Category, &b.Title, &b.Scope, &b.CreatedAt, &b.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	err := writeSupersedesSource(ctx, pool, pgxdb.At("store: delete block"), func(tx pgx.Tx) error {
+		targets, err := lockSupersedesSource(ctx, tx, id, writeScopes)
+		if err != nil {
+			return err
+		}
+		err = tx.QueryRow(ctx,
+			`UPDATE context_blocks SET is_archived = true, updated_at = now()
+			 WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
+			   AND `+notDerivedSQL+`
+			 RETURNING id, category, title, scope, created_at, updated_at`,
+			id, writeScopes,
+		).Scan(&b.ID, &b.Category, &b.Title, &b.Scope, &b.CreatedAt, &b.UpdatedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return pgxdb.ErrRollback
+		}
+		if err != nil {
+			return fmt.Errorf("store: delete block: %w", err)
+		}
+		if _, err := ReconcileSupersedesTargets(ctx, tx, targets, ""); err != nil {
+			return fmt.Errorf("store: delete block: %w", err)
+		}
+		return nil
+	})
+	if errors.Is(err, pgxdb.ErrRollback) {
 		return nil, updateBlockMissReason(ctx, pool, id, writeScopes)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("store: delete block: %w", err)
+		return nil, err
 	}
 	return b, nil
 }
@@ -1511,7 +1564,11 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	// be repaired by sending the same update again, and the block would keep
 	// a vector for content it no longer holds, invisible to the backfill.
 	b := &Block{}
-	found, needsReEmbed, err := runBlockUpdate(ctx, pool, b, id, query, args, data.Scope != nil)
+	var moveScopes []string
+	if data.Scope != nil {
+		moveScopes = writeScopes
+	}
+	found, needsReEmbed, err := runBlockUpdate(ctx, pool, b, id, query, args, moveScopes)
 	var taken *BlockIdentityTakenError
 	if errors.As(err, &taken) {
 		taken.ConflictID = blockIdentityHolder(ctx, pool, id, data, writeScopes, taken.refusedKey)
@@ -1563,9 +1620,26 @@ func updateBlockMissReason(ctx context.Context, pool *pgxpool.Pool, id string, w
 // the primitive UpsertBlock uses on its content-change path). Returns
 // found=false (no error) when the block was not found in the caller's write
 // scopes.
-func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query string, args []any, scopeMove bool) (found, needsReEmbed bool, err error) {
+//
+// moveScopes is nil unless the update names a scope (a possible scope move);
+// then it carries the caller's write scopes, and the block and the targets of
+// its supersedes links are locked before the update (lockSupersedesSource), so
+// the supersedes state the sweep ends can be reconciled in this transaction.
+func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query string, args []any, moveScopes []string) (found, needsReEmbed bool, err error) {
 	var swept int
-	if err := pgxdb.Write(ctx, pool, pgxdb.At("store: update block"), func(tx pgx.Tx) error {
+	scopeMove := moveScopes != nil
+	write := pgxdb.Write
+	if scopeMove {
+		write = writeSupersedesSource // lockSupersedesSource may ask for a re-run
+	}
+	if err := write(ctx, pool, pgxdb.At("store: update block"), func(tx pgx.Tx) error {
+		var supersedesTargets []string
+		if scopeMove {
+			var err error
+			if supersedesTargets, err = lockSupersedesSource(ctx, tx, id, moveScopes); err != nil {
+				return err
+			}
+		}
 		err := tx.QueryRow(ctx, query, args...).Scan(
 			&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
 			&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
@@ -1584,8 +1658,32 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 		}
 
 		if scopeMove {
-			if swept, err = sweepScopeMoveLinks(ctx, tx, id, b.Scope); err != nil {
+			var ended []string
+			if swept, ended, err = sweepScopeMoveLinks(ctx, tx, id, b.Scope); err != nil {
 				return err
+			}
+			// Only targets locked above (plus the moved block itself, which the
+			// update locked) are reconciled: a supersedes link that ended here
+			// either left one of the block's own targets behind, or pointed at
+			// the block from a source that stayed behind.
+			var reconcile []string
+			for _, t := range ended {
+				if t == b.ID || slices.Contains(supersedesTargets, t) {
+					reconcile = append(reconcile, t)
+				}
+			}
+			restored, err := ReconcileSupersedesTargets(ctx, tx, reconcile, "")
+			if err != nil {
+				return fmt.Errorf("store: update block: %w", err)
+			}
+			// The moved block may itself be a target the move took away from
+			// its last superseder: the reconcile changed its lifecycle after
+			// the update returned it, so the answer reads it again.
+			if slices.Contains(restored, b.ID) {
+				if err := tx.QueryRow(ctx,
+					`SELECT lifecycle_state FROM context_blocks WHERE id = $1::uuid`, b.ID).Scan(&b.LifecycleState); err != nil {
+					return fmt.Errorf("store: update block: re-read lifecycle: %w", err)
+				}
 			}
 		}
 		if needsReEmbed {
@@ -1615,9 +1713,12 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 // cycle; a structural link with scope-divergent endpoints could never be
 // re-written under the write invariant, so keeping the row would be dead,
 // wrongly-scoped ballast the read paths must filter forever. Returns the
-// number of deleted rows.
-func sweepScopeMoveLinks(ctx context.Context, tx pgx.Tx, id, newScope string) (int, error) {
+// number of deleted rows and, for every deleted dream supersedes link, the
+// block whose supersedes state it ended (its target) — pinned links included,
+// because supersedes holds only within one scope.
+func sweepScopeMoveLinks(ctx context.Context, tx pgx.Tx, id, newScope string) (int, []string, error) {
 	swept := 0
+	var ended []string
 	for _, table := range []string{"context_dream_links", "context_structural_links"} {
 		if _, err := tx.Exec(ctx, `
 			UPDATE `+table+` l SET scope = $2
@@ -1625,20 +1726,41 @@ func sweepScopeMoveLinks(ctx context.Context, tx pgx.Tx, id, newScope string) (i
 			  AND (SELECT cb.scope FROM context_blocks cb
 			       WHERE cb.id = CASE WHEN l.source_block_id = $1 THEN l.target_block_id ELSE l.source_block_id END) = $2`,
 			id, newScope); err != nil {
-			return 0, fmt.Errorf("store: update block: move %s: %w", table, err)
+			return 0, nil, fmt.Errorf("store: update block: move %s: %w", table, err)
 		}
-		tag, err := tx.Exec(ctx, `
+		// The relationship column exists on both tables under different names;
+		// only the dream table carries supersedes, so the structural sweep
+		// reports a constant.
+		rel := "l.relationship"
+		if table == "context_structural_links" {
+			rel = "''"
+		}
+		rows, err := tx.Query(ctx, `
 			DELETE FROM `+table+` l
 			WHERE (l.source_block_id = $1 OR l.target_block_id = $1)
 			  AND (SELECT cb.scope FROM context_blocks cb
-			       WHERE cb.id = CASE WHEN l.source_block_id = $1 THEN l.target_block_id ELSE l.source_block_id END) IS DISTINCT FROM $2`,
-			id, newScope)
+			       WHERE cb.id = CASE WHEN l.source_block_id = $1 THEN l.target_block_id ELSE l.source_block_id END) IS DISTINCT FROM $2
+			RETURNING l.target_block_id::text, `+rel, id, newScope)
 		if err != nil {
-			return 0, fmt.Errorf("store: update block: sweep %s: %w", table, err)
+			return 0, nil, fmt.Errorf("store: update block: sweep %s: %w", table, err)
 		}
-		swept += int(tag.RowsAffected())
+		for rows.Next() {
+			var target, relationship string
+			if err := rows.Scan(&target, &relationship); err != nil {
+				rows.Close()
+				return 0, nil, fmt.Errorf("store: update block: sweep %s: %w", table, err)
+			}
+			swept++
+			if relationship == "supersedes" {
+				ended = append(ended, target)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return 0, nil, fmt.Errorf("store: update block: sweep %s: %w", table, err)
+		}
 	}
-	return swept, nil
+	return swept, ended, nil
 }
 
 // SearchCursor is the keyset-pagination position for the empty-query

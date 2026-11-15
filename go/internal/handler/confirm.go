@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -80,13 +81,19 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"success": true, "op": out.Op, "blob": blob})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		resp := map[string]any{
 			"success": true,
 			"op":      out.Op,
 			"block": map[string]any{
 				"id": out.Block.ID, "title": out.Block.Title, "category": out.Block.Category, "scope": out.Block.Scope,
 			},
-		})
+		}
+		if out.Supersedes != "" {
+			// Issue #197: the /api/store answer names the superseded block the
+			// same way; absent on every other confirm.
+			resp["supersedes"] = strings.ToLower(out.Supersedes)
+		}
+		writeJSON(w, http.StatusOK, resp)
 	case confirmMiss:
 		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": confirmNotFoundMsg})
 	case confirmScopeRejected:

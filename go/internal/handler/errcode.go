@@ -86,6 +86,22 @@ var (
 	// answers about the PAYLOAD it was handed — nothing about this route is
 	// "not found".
 	classUnknownParent = rejectClass{http.StatusUnprocessableEntity, "unknown_parent"}
+	// classUnknownSupersedes — the write NAMES a block it supersedes
+	// (`supersedes`, issue #197) that it cannot name: unknown id, archived
+	// block, a block outside the scope the write resolves to, a malformed uuid,
+	// or the written block itself. ONE class with ONE sentence for all of them,
+	// for the reason classUnknownParent gives.
+	classUnknownSupersedes = rejectClass{http.StatusUnprocessableEntity, "unknown_supersedes"}
+	// classSupersedesConflict — the named block lies in the write's scope but
+	// its state refuses the declaration: another live block already supersedes
+	// it through a pinned link (the answer names the current head of that
+	// chain), or it already supersedes the written block (a cycle). 409: the
+	// payload is well-formed, the state conflicts.
+	classSupersedesConflict = rejectClass{http.StatusConflict, "supersedes_conflict"}
+	// classSupersedesNotAllowed — the named block lies in the write's scope but
+	// cannot be superseded: a chunk row, or a type outside the dream loop
+	// (dream.linkable=false).
+	classSupersedesNotAllowed = rejectClass{http.StatusUnprocessableEntity, "supersedes_not_allowed"}
 	// classReservedCategory — the write targets a category reserved for the
 	// derived layer (I7/S2). 403, not 422: the payload is well-formed, the
 	// caller is simply not authorised for that namespace.
