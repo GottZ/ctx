@@ -122,6 +122,20 @@ from a `_test.go` shows up in neither tool — `deadcode` reports funcs, and
 `unused` counts a use from a test as a use and stays silent on exported
 identifiers. That class has no gate; measured, not assumed (T02-13).
 
+**Integration containers and the reaper.** `internal/testdb` starts one
+Postgres container per test binary and leaves its removal to the
+Testcontainers reaper (Ryuk). All test binaries of one `go test` invocation
+share one reaper session: when the last binary connected to it exits, the
+reaper waits its reconnection timeout (10 s by default), removes the
+session's containers and exits. A package whose first container start lands
+in that shutdown window finds the dying reaper, and testcontainers-go waits
+60 s for it before failing. `testdb` starts the container a second time on
+exactly that error (`wait for reaper …: context deadline exceeded`), logging
+`testdb: container start attempt 1 of 2 hit the reaper reuse timeout`
+(visible with `-v` or when the package fails), so such a package runs about
+60 s longer instead of failing; every other setup error fails at once as
+before, and a second failure names both attempts.
+
 ### Gates by impact (`go/gates.sh`)
 
 Most changes touch one package, yet the complete local list (build, vet, `-short`
