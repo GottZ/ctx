@@ -86,11 +86,20 @@
 -- pick indexes are, and their _next twins (events.verifySisterIndexes) carry
 -- the new conjunct.
 --
--- INDEX BUILD AND ITS RUNBOOK (the 171 pattern). CREATE INDEX without
--- CONCURRENTLY takes a SHARE lock on context_blocks for the build: readers go
--- on, writers wait, and a partial index still reads the whole table. The
--- runner runs each file in ONE transaction, where CONCURRENTLY is impossible.
--- Per index:
+-- INDEX BUILD AND ITS RUNBOOK (the 171 pattern). The runner runs each file
+-- in ONE transaction, where CONCURRENTLY is impossible, and every lock the
+-- file takes is held to its commit. ADD COLUMN (and the DROP INDEX of a pick
+-- index of 171's definition) take ACCESS EXCLUSIVE on context_blocks, so for
+-- the whole file — the three inline index builds included, each of which
+-- reads the whole heap — no other session reads or writes context_blocks:
+-- they wait, and one with a lock_timeout fails with 55P03. Measured on a
+-- testcontainer (PG18, warm cache, rows of about 450 bytes, no vectors), the
+-- whole migration call as an upper bound for the file: 0.23 s at 100 000
+-- rows (112 MB heap), 0.95 s at 400 000 rows (446 MB heap).
+-- It runs at boot, before the binary serves; what waits is another ctx
+-- process on the same database (a rolling deploy) and any other client. The
+-- 500 000-row bound keeps that wait around a second on a warm cache; a cold
+-- cache reads the heap from disk three times. Per index:
 --   * A usable index of this name with exactly the new definition: no-op.
 --   * Below 500 000 rows (pg_class.reltuples) the migration builds inline
 --     (a pick index of 171's definition is dropped first).
@@ -122,11 +131,13 @@
 --     embeddable walks idx_blocks_type_name. The schema-contract manifest
 --     stays red until the build.
 --
--- LOCKS. SET LOCAL lock_timeout = '3s' (house pattern 116/.../171/173/174):
--- ADD COLUMN with a constant default is a catalog change (ACCESS EXCLUSIVE
--- for the catalog write only, no rewrite); CREATE TRIGGER takes SHARE ROW
--- EXCLUSIVE; a transaction holding a table longer fails the migration with
--- 55P03, the file rolls back, the next boot tries again.
+-- LOCKS. SET LOCAL lock_timeout = '3s' (house pattern 116/.../171/173/174)
+-- bounds the wait for each lock, not the time it is held: ADD COLUMN with a
+-- constant default is a catalog change without a rewrite, but its ACCESS
+-- EXCLUSIVE is held to the commit of the file (above); CREATE TRIGGER takes
+-- SHARE ROW EXCLUSIVE on context_block_types. A transaction holding a table
+-- longer than 3 s fails the migration with 55P03, the file rolls back, the
+-- next boot tries again.
 -- At run time the two triggers order themselves on one transaction-level
 -- advisory lock per type name, hashtext('ctx:embed_excluded:' || name): a
 -- block write whose answer is true takes it shared until its commit and then
@@ -138,6 +149,19 @@
 -- lock on a registry row, so no lock-order cycle over a name's several rows
 -- and no MultiXact on a hot builtin row); a registry change never waits on a
 -- block row, and the reconcile holds no queue row while it updates blocks.
+-- Two limits of that order:
+--   * The block write takes the lock only when its answer is true. A block
+--     written in a transaction that stays open while its type BECOMES
+--     never-embedded and the reconcile passes keeps false: it stays in the
+--     pick indexes and is filtered by the type predicate, a cost, not a
+--     missed embedding. The other direction (a type that becomes embeddable)
+--     is the one the lock closes.
+--   * A transaction that changes the registry rows of two names takes their
+--     locks in the order of its rows; a transaction that writes blocks of
+--     both names in the other order, both answers true, closes a cycle, and
+--     PostgreSQL ends one of them with 40P01. The type API changes one name
+--     per transaction; a migration or psql session that changes several
+--     names while writers run changes one name per transaction.
 --
 -- REVERT (forward-only tree; to undo temporarily): the column cannot be
 -- dropped while a binary of this change runs. The triggers can:
