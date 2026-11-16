@@ -63,8 +63,21 @@ func NewIngestHandler(pool *pgxpool.Pool, cfg ConfigStore, blocktypes *blocktype
 
 // IngestRequest is the JSON body for POST /api/ingest.
 type IngestRequest struct {
-	Source string        `json:"source"`
-	Chunks []IngestChunk `json:"chunks"`
+	Source string `json:"source"`
+	// TargetScope is the scope every chunk of the request is written to
+	// (#322), resolved by resolveWriteScope, the gate of POST /api/store and
+	// the MCP store tool: absent or empty means the key's home scope, a scope
+	// outside the key's writable scopes refuses the whole request (403
+	// scope_denied) before a chunk is written.
+	//
+	// It is not called `scope` because that name is taken on the wire: every
+	// `ctx ingest` before #322 sends `scope`, "private" unless the user chose
+	// another, and this handler never read it. Honouring that field would
+	// refuse the runs of every such CLI whose key has another home scope, or
+	// move them into 'private' where the key may write it, so `scope` stays
+	// unread (docs/api.md).
+	TargetScope string        `json:"target_scope,omitempty"`
+	Chunks      []IngestChunk `json:"chunks"`
 }
 
 // IngestChunk represents a single chunk to ingest.
@@ -88,7 +101,12 @@ type IngestResult struct {
 
 // IngestResponse is the JSON response for POST /api/ingest.
 type IngestResponse struct {
-	Success  bool           `json:"success"`
+	Success bool `json:"success"`
+	// Scope is the scope the request wrote to (#322): the resolved
+	// target_scope, the key's home scope without one. A client reports this,
+	// not the scope it asked for; its absence marks a server that ignores
+	// target_scope.
+	Scope    string         `json:"scope"`
 	Total    int            `json:"total"`
 	Inserted int            `json:"inserted"`
 	Updated  int            `json:"updated"`
@@ -175,7 +193,16 @@ func (h *IngestHandler) HandleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeScope := authResult.HomeScope
+	// The write scope (#322), through the scope gate of POST /api/store. It
+	// runs before every step that reads the scope: the provenance probe below
+	// asks the resolved scope, and asked about a scope the key may not write
+	// it would tell whether a derived block exists there. It runs before the
+	// write budget too, so a refused scope costs none, as on /api/store.
+	writeScope, _, scopeRej := resolveWriteScope(authResult, req.TargetScope)
+	if scopeRej != nil {
+		writeJSONReject(w, scopeRej)
+		return
+	}
 
 	// The I7 gates for the batch (design D-01 §4.3.1). Ingest is the write
 	// surface with TWO write paths — store.UpsertBlock in block mode and
@@ -234,6 +261,7 @@ func (h *IngestHandler) HandleIngest(w http.ResponseWriter, r *http.Request) {
 
 	// Process each chunk.
 	resp := IngestResponse{
+		Scope:   writeScope,
 		Total:   len(req.Chunks),
 		Results: make([]IngestResult, 0, len(req.Chunks)),
 	}
