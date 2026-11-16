@@ -1,12 +1,11 @@
 //go:build integration
 
 // A tenant-admin's PUT on a global-only key is refused even when the operator
-// already holds a _global row of that key (found while gating mcp.instructions,
-// GottZ/ctx#315). The candidate build alone did not refuse it: the _global row
-// made the key read as "applied from the DB", so the PUT answered 200 and
-// wrote a tenant-scope row the overlay then ignores — and the two opt-in flags
-// are read directly at the tenant scope, where that row is the tenant's own
-// grant.
+// already holds a _global row of that key. The candidate build alone did not
+// refuse it: the _global row made the key read as "applied from the DB", so
+// the PUT answered 200 and wrote a tenant-scope row. The overlay ignores such
+// a row (graph_cache.enabled here), but the two opt-in flags are read directly
+// at the tenant scope, where that row decides for the tenant.
 //
 // Run with:
 //
@@ -34,17 +33,24 @@ func TestSettingsGlobalOnlyTenantWrite_Integration(t *testing.T) {
 		t.Setenv(v, "")
 	}
 	t.Setenv(settings.EnvDisable, "")
-	t.Setenv("CONTEXT_DB_PASSWORD", "test-password")
+	t.Setenv("CONTEXT_DB_PASSWORD", "test-password") // the env base requires one
 	t.Setenv(sealbox.EnvKey, freshMasterKey(t))
 	t.Setenv(sealbox.EnvKeyPrev, "")
 	api := newTenantAPI(t, pool)
 
-	for _, c := range []struct{ key, global, tenant string }{
-		{store.AllowSharedSecretsKey, `{"value":false}`, `{"value":true}`},
-		{store.AllowCrossTenantBlockGrantKey, `{"value":false}`, `{"value":true}`},
-		{"mcp.instructions", `{"value":"operator text"}`, `{"value":"tenant text"}`},
+	for _, c := range []struct{ key, global, tenant, globalRow string }{
+		// read directly at the tenant scope (store.TenantAllows*)
+		{store.AllowSharedSecretsKey, `{"value":false}`, `{"value":true}`, `false`},
+		{store.AllowCrossTenantBlockGrantKey, `{"value":false}`, `{"value":true}`, `false`},
+		// read only through the overlay, which drops a tenant row: a dead row
+		{"graph_cache.enabled", `{"value":false}`, `{"value":true}`, `false`},
+		// #315: the text every tenant's agents receive
+		{"mcp.instructions", `{"value":"operator text"}`, `{"value":"tenant text"}`, `"operator text"`},
 	} {
 		t.Run(c.key, func(t *testing.T) {
+			if !config.IsGlobalOnly(c.key) {
+				t.Fatalf("%s is not global-only; the case pins nothing", c.key)
+			}
 			if rec := api.as(operatorAR()).do(t, http.MethodPut, "/api/settings/"+c.key, c.global); rec.Code != http.StatusOK {
 				t.Fatalf("operator PUT = %d body=%s", rec.Code, rec.Body.String())
 			}
@@ -55,12 +61,24 @@ func TestSettingsGlobalOnlyTenantWrite_Integration(t *testing.T) {
 			if v, ok := scopeRowValue(t, pool, c.key, "tenantg"); ok {
 				t.Errorf("a tenant-scope row was written: %s", v)
 			}
+			if v, ok := scopeRowValue(t, pool, c.key, store.GlobalScope); !ok || v != c.globalRow {
+				t.Errorf("_global row = %q ok=%v, want %s unchanged", v, ok, c.globalRow)
+			}
 		})
 	}
 	if ok, err := store.TenantAllowsSharedSecrets(context.Background(), pool, "tenantg"); err != nil || ok {
-		t.Errorf("TenantAllowsSharedSecrets(tenantg) = %v, %v — want false: a tenant-admin must not grant itself the _global secret fallback", ok, err)
+		t.Errorf("TenantAllowsSharedSecrets(tenantg) = %v, %v — want false: the opt-in is the operator's", ok, err)
 	}
 	if ok, err := store.TenantAllowsCrossTenantBlockGrant(context.Background(), pool, "tenantg"); err != nil || ok {
-		t.Errorf("TenantAllowsCrossTenantBlockGrant(tenantg) = %v, %v — want false: a tenant-admin must not grant itself cross-tenant block grants", ok, err)
+		t.Errorf("TenantAllowsCrossTenantBlockGrant(tenantg) = %v, %v — want false: the opt-in is the operator's", ok, err)
+	}
+	// Without a _global row the candidate build already refused it; the guard
+	// keeps that answer.
+	if rec := api.as(tenantAdmin("tenanth")).do(t, http.MethodPut, "/api/settings/graph_cache.rebuild_interval", `{"value":60}`); rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("tenant-admin PUT on a global-only key without a _global row = %d body=%s, want 422", rec.Code, rec.Body.String())
+	}
+	// A tenant-overridable key stays tenant-writable.
+	if rec := api.as(tenantAdmin("tenantg")).do(t, http.MethodPut, "/api/settings/rerank.blend_weight", `{"value":0.4}`); rec.Code != http.StatusOK {
+		t.Errorf("tenant-admin PUT on a tenant-overridable key = %d body=%s, want 200", rec.Code, rec.Body.String())
 	}
 }

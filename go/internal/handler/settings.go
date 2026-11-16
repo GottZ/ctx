@@ -494,18 +494,6 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// globalOnlyTenantWrite refuses a write of a global-only key at a tenant scope
-// (MT3-W2), fail-closed and before the candidate build: that build reads a
-// _global row of the same key as "applied from the DB" and let the tenant row
-// through with a 200 — a dead row for mcp.instructions (#315), and for the two
-// opt-in flags, which are read directly at the tenant scope, a self-grant.
-func globalOnlyTenantWrite(key, writeScope string) (string, bool) {
-	if writeScope == store.GlobalScope || !config.IsGlobalOnly(key) {
-		return "", false
-	}
-	return fmt.Sprintf("validation: %s is global-only — only a server admin sets it, for every tenant", key), true
-}
-
 // shippedCopyWarning: a PUT of mcp.instructions whose text equals a shipped
 // wording stores no own text (#315) — said at the write, where the operator
 // would otherwise read back "their" value while the newest wording is sent.
@@ -760,6 +748,19 @@ func newWarnings(cand, base []config.Issue) []string {
 		}
 	}
 	return out
+}
+
+// globalOnlyTenantWrite refuses a write of a global-only key at a tenant scope
+// (MT3-W2), fail-closed and before the candidate build. The build alone is not
+// the gate: it reads a _global row of the same key as "applied from the DB",
+// so it let a tenant-scope row through with a 200 — a row the overlay ignores,
+// but one that tenant.allow_shared_secrets and
+// tenant.allow_cross_tenant_block_grant read directly at the tenant scope.
+func globalOnlyTenantWrite(key, writeScope string) (string, bool) {
+	if writeScope == store.GlobalScope || !config.IsGlobalOnly(key) {
+		return "", false
+	}
+	return fmt.Sprintf("validation: %s is global-only — only a server admin sets it, for every tenant", key), true
 }
 
 func (h *SettingsHandler) unknownKey(w http.ResponseWriter, key string) {
