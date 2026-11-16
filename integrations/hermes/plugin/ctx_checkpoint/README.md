@@ -408,9 +408,12 @@ entry did not connect when Hermes started (wrong key, server down, URL wrong).
   own pass still rewrites some code lines
   (`api_key: Optional[str] = None` → `api_key: *** = None`), and its strict mode
   masks every URL parameter named `key`, `code`, `session` or `auth`. A failing
-  redactor skips the write. The error text of a failed store (a server answer or an MCP
-  dispatch error can repeat what it was sent) goes through the same passes before the
-  plugin raises or logs it; a failing redactor withholds it.
+  redactor skips the write. The error text of a failed call (a server answer or an MCP
+  dispatch error can repeat what it was sent) goes through the same passes with the bound
+  keys where it enters the plugin and again before the plugin raises it, logs it or hands
+  it to the model as a tool result; a failing redactor withholds it. A raised error
+  carries no unredacted original as cause or context, and DEBUG lines carry a redacted
+  traceback instead of `exc_info` (0.13.0).
 - **Reads:** its own settings in the Hermes config (`memory.ctx_checkpoint` and
   `plugins.entries.ctx_checkpoint.settings`), the named `mcp_servers` entry,
   `compression.threshold` (for the warning above) and

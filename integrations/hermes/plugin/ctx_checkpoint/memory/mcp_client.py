@@ -58,7 +58,7 @@ import json
 import logging
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from .client import CtxApiError
@@ -231,11 +231,15 @@ class McpClient:
         *,
         timeout: float = 10.0,
         synthesis_timeout: float = 90.0,
+        secrets: Callable[[], Iterable[str]] | None = None,
     ):
         if not _SERVER_NAME_RE.fullmatch(server_name or ""):
             raise ValueError(f"MCP server name {server_name!r} may only contain letters, digits, '_' and '-'")
         self._dispatch = dispatch
         self._server = server_name
+        # The ctx keys the provider binds (read per error): foreign error texts are redacted with
+        # them where they enter the plugin (#304). The client itself holds no credential.
+        self._secrets = secrets
         # Informational defaults: only an explicit per-call ``timeout`` (the chain writer's
         # remaining budget) bounds a dispatch; otherwise the MCP transport owns its timeouts.
         self._timeout = timeout
@@ -253,6 +257,17 @@ class McpClient:
 
     # -- transport ----------------------------------------------------------------
 
+    def _redact(self, text: Any) -> str:
+        """A foreign error text (a server answer, a dispatch error) as it may leave this client:
+        ``checkpoint.redact_error_text`` with the bound keys. Never raises."""
+        from .checkpoint import redact_error_text
+
+        try:
+            secrets = tuple(self._secrets()) if self._secrets is not None else ()
+        except Exception:
+            secrets = ()
+        return redact_error_text(text, secrets)
+
     def _call(self, tool: str, args: dict[str, Any], timeout: float | None = None) -> tuple[Any, str]:
         """Dispatch one tool; returns ``(payload, text)``. Raises ``CtxApiError`` on an error envelope.
 
@@ -260,6 +275,7 @@ class McpClient:
         abandoned call raises ``CtxApiError(code="timeout")``.
         """
         name = mcp_tool_name(self._server, tool)
+        failure: CtxApiError | None = None
         try:
             if timeout is None:
                 raw = self._dispatch(name, args)
@@ -274,7 +290,11 @@ class McpClient:
         except CtxApiError:
             raise
         except Exception as exc:
-            raise CtxApiError(f"mcp dispatch failed: {type(exc).__name__}: {exc}") from exc
+            failure = CtxApiError(f"mcp dispatch failed: {type(exc).__name__}: {self._redact(exc)}")
+        if failure is not None:
+            # Raised after the handler and without the original: its text is unredacted, and raised
+            # in the handler it would stay the implicit ``__context__`` (#304).
+            raise failure
         payload: Any = raw
         if isinstance(raw, str):
             try:
@@ -297,7 +317,9 @@ class McpClient:
                         + f"use a key without confirm_writes for mcp_servers.{self._server}",
                         code=code,
                     )
-                raise CtxApiError(f"mcp {tool}: {text[:300]}", status=429 if code == "rate_limit" else None, code=code)
+                raise CtxApiError(
+                    f"mcp {tool}: {self._redact(text)[:300]}", status=429 if code == "rate_limit" else None, code=code
+                )
             if "result" in payload and isinstance(payload["result"], str):
                 return payload, payload["result"]
         return payload, raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
@@ -376,7 +398,7 @@ class McpClient:
                 try:
                     block = self.get_block(source["id"]).get("block") or {}
                 except CtxApiError as exc:
-                    logger.debug("mcp query: content fetch for %s failed: %s", source["id"], exc)
+                    logger.debug("mcp query: content fetch for %s failed: %s", source["id"], self._redact(exc))
                     continue
                 for key in ("content", "type", "untrusted", "score", "tags"):
                     if key in block and key not in source:
@@ -483,7 +505,7 @@ class McpClient:
         payload, body = self._call("store", args, timeout)
         block_id = _store_id(payload, body)
         if not block_id:
-            return {"success": False, "error": f"store returned no block id: {body[:200]}"}
+            return {"success": False, "error": f"store returned no block id: {self._redact(body)[:200]}"}
         if "No change needed" in body:
             return {"success": True, "action": "noop", "existing_id": block_id, "reason": "identical content"}
         return {"success": True, "block": {"id": block_id, "title": title, "category": category}}
@@ -494,7 +516,7 @@ class McpClient:
         if not isinstance(block, dict) and isinstance(payload, dict) and "result" not in payload:
             block = payload
         if not isinstance(block, dict):
-            return {"success": False, "error": f"get returned no block: {body[:200]}"}
+            return {"success": False, "error": f"get returned no block: {self._redact(body)[:200]}"}
         if isinstance(block.get("block"), dict):
             block = block["block"]
         return {"success": True, "block": block}

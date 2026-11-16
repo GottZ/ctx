@@ -709,6 +709,7 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
             name,
             timeout=float(self._config.get("api_timeout") or 10.0),
             synthesis_timeout=float(self._config.get("synthesis_timeout") or 90.0),
+            secrets=self._bound_secrets,
         )
         self._api_key = ""
         self._base_url = ""

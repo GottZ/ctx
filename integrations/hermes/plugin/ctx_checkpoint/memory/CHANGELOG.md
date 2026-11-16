@@ -33,6 +33,20 @@ Setup, MCP tool names and error texts (GottZ/ctx#294, #297, #304).
   connects. A passing test names the tools when the entry name is rewritten. The pointer
   binding stays on the entry name; for `ctx` and every name Hermes keeps, names and binding
   digest are byte-identical.
+- **The rest of the unredacted error texts (GottZ/ctx#304).** `raise … from None` inside an
+  `except` block leaves the original as the implicit `__context__` (only hidden from printing),
+  so the chain writer's error still held the raw `CtxApiError`, and the REST client's error the
+  raw `HTTPError`/`URLError`/`ValueError` (the last with the bytes repr of a rejected key).
+  These errors — the chain writer's `_call`, the REST client's `_request` (HTTP failures now in
+  `_http_failure`), the MCP client's dispatch failure, the crashed-chain error and the
+  redaction failure of `render_direct_evidence` — are now raised after the handler, without
+  cause or context. `McpClient` takes the provider's bound keys (`secrets`) and redacts the
+  dispatch error, the error envelope and the bodies of `store`/`get` answers without a block
+  where they enter the plugin. The agent tools (`ctx_store`, `ctx_search`, `ctx_get`,
+  `ctx_query`) put the redacted text and code into the tool result and the log; their DEBUG
+  lines, and those of the digest triggers, carry `checkpoint.redacted_traceback` instead of
+  `exc_info`. The prefetch, warm-up, content-fetch and `whoami` lines are redacted with the
+  bound keys.
 
 ## [ctx_checkpoint 0.12.0] — 2026-11-16
 

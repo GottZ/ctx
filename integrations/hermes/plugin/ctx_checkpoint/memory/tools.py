@@ -13,6 +13,7 @@ from typing import Any
 
 from tools.registry import tool_error
 
+from .checkpoint import redact_error_text, redacted_traceback
 from .client import (
     RESERVED_METADATA_KEYS,
     RETRYABLE_CODES,
@@ -146,8 +147,24 @@ def get_tool_schemas() -> list[dict[str, Any]]:
     return [QUERY_SCHEMA, STORE_SCHEMA, SEARCH_SCHEMA, GET_SCHEMA]
 
 
+def _bound_secrets(provider) -> tuple[str, ...]:
+    """The ctx keys the provider binds; ``()`` for a provider without them. Never raises."""
+    try:
+        return tuple(provider._bound_secrets())
+    except Exception:
+        return ()
+
+
+def _safe(provider, text: Any) -> str:
+    """A foreign error text (a server answer, a dispatch error) as the model or a log may see it:
+    redacted with the bound keys and the checkpoint rules (#304)."""
+    return redact_error_text(text, _bound_secrets(provider))
+
+
 def handle_tool_call(provider, tool_name: str, args: dict[str, Any], **kwargs) -> str:
-    """Dispatch a tool call on behalf of the provider instance."""
+    """Dispatch a tool call on behalf of the provider instance. Every error text in the result
+    and in the log is redacted (:func:`_safe`); a DEBUG line carries the redacted traceback
+    instead of ``exc_info``, whose rendering would chain the raw texts."""
     if not provider._active or not provider._client:
         return tool_error("CTX provider is not active (check CTX_BASE_URL/CTX_KEY and server reachability)")
     try:
@@ -160,21 +177,23 @@ def handle_tool_call(provider, tool_name: str, args: dict[str, Any], **kwargs) -
         if tool_name == "ctx_get":
             return _tool_get(provider, args)
     except CtxApiError as exc:
+        text = _safe(provider, exc)
         if exc.code:
+            code = _safe(provider, exc.code)
             logger.warning(
                 "CTX tool %s rejected (profile=%s): code=%s status=%s: %s",
                 tool_name,
                 getattr(provider, "_profile", "default"),
-                exc.code,
+                code,
                 exc.status,
-                shorten(str(exc), 200),
+                shorten(text, 200),
             )
-            return tool_error(f"CTX tool {tool_name} rejected: {exc}", code=exc.code, retryable=not exc.permanent)
-        logger.debug("CTX tool %s failed: %s", tool_name, exc, exc_info=True)
-        return tool_error(f"CTX tool {tool_name} failed: {exc}")
+            return tool_error(f"CTX tool {tool_name} rejected: {text}", code=code, retryable=not exc.permanent)
+        logger.debug("CTX tool %s failed: %s", tool_name, redacted_traceback(exc, _bound_secrets(provider)))
+        return tool_error(f"CTX tool {tool_name} failed: {text}")
     except Exception as exc:
-        logger.debug("CTX tool %s failed: %s", tool_name, exc, exc_info=True)
-        return tool_error(f"CTX tool {tool_name} failed: {exc}")
+        logger.debug("CTX tool %s failed: %s", tool_name, redacted_traceback(exc, _bound_secrets(provider)))
+        return tool_error(f"CTX tool {tool_name} failed: {_safe(provider, exc)}")
     return tool_error(f"Unknown CTX tool: {tool_name}")
 
 
@@ -217,7 +236,7 @@ def _tool_query(provider, args: dict[str, Any]) -> str:
         text, synthesize=synthesize, include_content=True, types_exclude=_types_exclude_arg(provider, args)
     )
     if not data.get("success"):
-        return tool_error(f"CTX query failed: {data.get('error') or 'unknown error'}")
+        return tool_error(f"CTX query failed: {_safe(provider, data.get('error') or 'unknown error')}")
     result: dict[str, Any] = {"synthesize": synthesize}
     if synthesize:
         result["answer"] = data.get("answer") or ""
@@ -278,16 +297,17 @@ def _tool_store(provider, args: dict[str, Any]) -> str:
         **extra,
     )
     if not data.get("success"):
-        code = response_code(data)
+        code = _safe(provider, response_code(data))
+        error = _safe(provider, data.get("error") or "unknown error")
         logger.warning(
             "CTX tool store rejected (profile=%s, %s/%s): code=%s: %s",
             profile,
             category,
             shorten(title, 80),
             code or "-",
-            shorten(str(data.get("error") or "unknown error"), 200),
+            shorten(error, 200),
         )
-        message = f"CTX store failed: {data.get('error') or 'unknown error'}"
+        message = f"CTX store failed: {error}"
         if code:
             return tool_error(message, code=code, retryable=code in RETRYABLE_CODES)
         return tool_error(message)
@@ -316,7 +336,7 @@ def _tool_search(provider, args: dict[str, Any]) -> str:
         query, category=category, tags=tags or None, types_exclude=_types_exclude_arg(provider, args)
     )
     if not data.get("success"):
-        return tool_error(f"CTX search failed: {data.get('error') or 'unknown error'}")
+        return tool_error(f"CTX search failed: {_safe(provider, data.get('error') or 'unknown error')}")
     results = []
     any_untrusted = False
     for item in data.get("results") or []:
@@ -341,7 +361,7 @@ def _tool_get(provider, args: dict[str, Any]) -> str:
         return tool_error("block_id is required")
     data = provider._client.get_block(block_id)
     if not data.get("success"):
-        return tool_error(f"CTX get failed: {data.get('error') or 'unknown error'}")
+        return tool_error(f"CTX get failed: {_safe(provider, data.get('error') or 'unknown error')}")
     block = data.get("block") if isinstance(data.get("block"), dict) else data
     if block.get("untrusted") is True or data.get("untrusted") is True:
         data = dict(data)

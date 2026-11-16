@@ -564,7 +564,10 @@ and manifest are deliberately small so routine recall stays cheap.
   Hermes registers them (`ctx-prod` → `mcp__ctx_prod__store`, names over 64 characters
   shortened), so an entry with `-` in its name no longer fails every checkpoint with
   `Unknown tool`; two entries that come out alike are refused, and the connection test
-  names the tools when the entry name is rewritten (GottZ/ctx#297).
+  names the tools when the entry name is rewritten (GottZ/ctx#297). Foreign error texts are
+  redacted with the bound keys in the rest of the places that raised, logged or returned
+  them raw: the implicit `__context__` of raised errors, the results and DEBUG lines of
+  the agent tools, and the prefetch, recall and digest debug lines (GottZ/ctx#304).
 
 ## Licensing
 

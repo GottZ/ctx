@@ -28,6 +28,7 @@ import logging
 import re
 import sys
 import time
+import traceback
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -485,6 +486,17 @@ def redact_error_text(text: Any, secret: str | Iterable[str] = ()) -> str:
         return ERROR_WITHHELD
 
 
+def redacted_traceback(error: BaseException, secret: str | Iterable[str] = ()) -> str:
+    """``error`` as a DEBUG line may carry it — type, text and traceback, chained exceptions
+    included — through :func:`redact_error_text` (#304). A record with ``exc_info`` would format
+    the texts of the error and of every exception chained to it unredacted."""
+    try:
+        text = "".join(traceback.format_exception(error)).rstrip()
+    except Exception:
+        text = type(error).__name__
+    return redact_error_text(text, secret)
+
+
 def _is_synthetic_handoff(message: dict[str, Any], raw: str) -> bool:
     if message.get("_compressed_summary"):
         return True
@@ -518,11 +530,16 @@ def render_direct_evidence(messages: list[dict[str, Any]], secret: str | Iterabl
             continue
         if not raw.lstrip():
             continue
+        failed = ""
         try:
             safe = redact_text(raw, secret).strip()
         except Exception as exc:
-            logger.warning("ctx checkpoint redaction failed for message %d (%s)", ordinal, type(exc).__name__)
-            raise CtxCheckpointError("ctx checkpoint redaction failed") from exc
+            failed = type(exc).__name__
+        if failed:
+            # Raised after the handler and without the original: the redactor's error can hold the
+            # message it failed on, unredacted (a UnicodeError keeps it whole) (#304).
+            logger.warning("ctx checkpoint redaction failed for message %d (%s)", ordinal, failed)
+            raise CtxCheckpointError("ctx checkpoint redaction failed")
         if safe:
             entries.append(f"### Message {ordinal} — {role}\n\n{safe}\n")
     return "\n".join(entries)
@@ -937,6 +954,7 @@ class ChainWriter:
             remaining = deadline - self.monotonic()
             if remaining <= 0:
                 raise CtxCheckpointError(f"ctx checkpoint budget {budget_s:.0f}s exceeded before {what}")
+            failure: CtxCheckpointError | None = None
             try:
                 data = fn(timeout=max(0.5, min(self.api_timeout, remaining)), **kwargs)
             except CtxApiError as exc:
@@ -960,20 +978,25 @@ class ChainWriter:
                         )
                         self.sleep(resume - now)
                         continue
-                    # ``from None``: the original carries the server's text unredacted (#301).
-                    raise CtxCheckpointError(
+                    failure = CtxCheckpointError(
                         f"ctx checkpoint rate-limited during {what} (budget {budget_s:.0f}s; "
                         f"{'refused twice in a row' if refusals >= MAX_RATE_REFUSALS else 'no time left to wait'})"
-                    ) from None
-                # The code is server text as well (a code outside the closed vocabulary keeps
-                # whatever the server put there): the same redaction as the detail.
-                code = f" [{redact_error_text(exc.code, self.secret)}]" if exc.code else ""
-                detail = redact_error_text(exc, self.secret)[:200]
-                raise CtxCheckpointError(f"ctx checkpoint {what} failed{code}: {detail}") from None
+                    )
+                else:
+                    # The code is server text as well (a code outside the closed vocabulary keeps
+                    # whatever the server put there): the same redaction as the detail.
+                    code = f" [{redact_error_text(exc.code, self.secret)}]" if exc.code else ""
+                    detail = redact_error_text(exc, self.secret)[:200]
+                    failure = CtxCheckpointError(f"ctx checkpoint {what} failed{code}: {detail}")
             except CtxCheckpointError:
                 raise
             except Exception as exc:
-                raise CtxCheckpointError(f"ctx checkpoint {what} failed: {type(exc).__name__}") from exc
+                failure = CtxCheckpointError(f"ctx checkpoint {what} failed: {type(exc).__name__}")
+            if failure is not None:
+                # Raised after the handler, not in it: there the error would keep the original (the
+                # server's or the client's text, unredacted) as its implicit ``__context__``, which
+                # ``from None`` only hides from printing (#301, #304).
+                raise failure
             if not isinstance(data, dict):
                 raise CtxCheckpointError(f"ctx checkpoint {what} returned a non-object response")
             if data.get("success") is False:
