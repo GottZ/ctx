@@ -55,7 +55,7 @@ from .memory.config import (
     umbrella_section,
     umbrella_transport,
 )
-from .memory.mcp_client import McpClient, mcp_tool_name
+from .memory.mcp_client import McpClient, colliding_servers, collision_text, mcp_tool_name
 from .memory.provider import CtxMemoryProvider
 
 logger = logging.getLogger(__name__)
@@ -730,10 +730,18 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         try:
             from hermes_cli.config import load_config
 
-            server = _configured_server(load_config(), self._server_name())
+            config = load_config()
+            server = _configured_server(config, self._server_name())
+            if self._colliding_servers(config):
+                return False
             return bool(server) and server.get("enabled", True) is not False
         except Exception:
             return False
+
+    def _colliding_servers(self, config: dict[str, Any]) -> list[str]:
+        """Other ``mcp_servers`` entries whose tools Hermes registers under this entry's tool names."""
+        servers = config.get("mcp_servers") if isinstance(config, dict) else None
+        return colliding_servers(self._server_name(), servers if isinstance(servers, dict) else {})
 
     def unavailable_reason(self) -> str:
         if self.transport == "rest":
@@ -741,6 +749,9 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
                 "transport rest: set CTX_KEY in .env and the server URL — rest_base_url in "
                 "memory.ctx_checkpoint, CTX_BASE_URL in .env or ctx_base_url in ctx.json"
             )
+        others = self._colliding_servers(_effective_config())
+        if others:
+            return collision_text(self._server_name(), others)
         return (
             f"configure the ctx MCP server entry mcp_servers.{self._server_name()} — "
             "`hermes memory setup ctx_checkpoint` does it"
@@ -1052,7 +1063,10 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
             needs_test = False  # the key is not known yet; the save that brings it runs the test
         if needs_test:
             test = _st.run_connection_test(
-                name, _candidate_entry(entry, ctx_url, mode, api_key), secrets=(api_key, stored_key)
+                name,
+                _candidate_entry(entry, ctx_url, mode, api_key),
+                secrets=(api_key, stored_key),
+                servers=config.get("mcp_servers"),
             )
             if test.ok is False:
                 raise ValueError(f"{test.detail[:1].upper()}{test.detail[1:]}. Nothing was saved.")
@@ -1083,7 +1097,8 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
             values, api_key = _prompt_setup(self.get_config_schema())
             settings = _normalize_setup_values(values, self._effective_settings())
             name = settings["mcp_server"]
-            entry = _configured_server(_read_user_config(), name)
+            config = _read_user_config()
+            entry = _configured_server(config, name)
             mode = _server_setup_mode(entry)
             if not entry and not settings["ctx_url"]:
                 raise ValueError(f"ctx server URL is required: there is no MCP server entry named {name!r} yet")
@@ -1094,6 +1109,7 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
                 name,
                 _candidate_entry(entry, settings["ctx_url"], mode, api_key),
                 secrets=(api_key, _env_value(SETUP_API_KEY_ENV)),
+                servers=config.get("mcp_servers"),
             )
             if test.ok is False:
                 print(f"\n  Connection test failed: {test.detail}")

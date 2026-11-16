@@ -3,8 +3,9 @@
 Same method surface as :class:`client.CtxClient` (``whoami``, ``query``, ``search``,
 ``store``, ``get_block``) and the same response dictionaries, so the provider, the chain
 writer and the agent tools run unchanged on either transport. The calls go through
-``tools.registry.registry.dispatch("mcp__<server>__<tool>", args)``: Hermes talks to the
-ctx MCP server configured in ``mcp_servers.<server>`` and the plugin never sees a key.
+``tools.registry.registry.dispatch("mcp__<server>__<tool>", args)`` under the name Hermes
+registers (:func:`mcp_tool_name`): Hermes talks to the ctx MCP server configured in
+``mcp_servers.<server>`` and the plugin never sees a key.
 
 What the ctx MCP tools answer (``go/internal/handler/mcp.go``) and how it is mapped:
 
@@ -52,6 +53,7 @@ MCP server, so an abandoned call still completes before the next call is sent.
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
 import logging
 import re
@@ -68,6 +70,11 @@ _ANSWER_ID_RE = re.compile(r"\(id:\s*(" + _UUID_RE.pattern + r")")
 _PAYLOAD_HASH_RE = re.compile(r"payload_hash:\s*([0-9a-fA-F]{16,128})")
 _SOURCE_LINE_RE = re.compile(r"^\[(\d+|n/a)\]\s+(.*?)\s+\(([^()]*)\)\s+id:([0-9a-fA-F-]{36})\s*$")
 _SERVER_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
+# Hermes' MCP tool names (``tools/mcp_tool_schema.py``): the characters a name part keeps, the
+# provider limit a generated name is shortened to and the hash digits that end a shortened name.
+_NAME_PART_RE = re.compile(r"[^A-Za-z0-9_]")
+MCP_TOOL_NAME_MAX_CHARS = 64
+MCP_TOOL_NAME_HASH_CHARS = 8
 _RATE_LIMIT_MARKERS = ("rate limit", "rate_limit")
 _MAX_CONTENT_FETCH = 10  # query(include_content=True) over MCP: one get per source, capped
 # The go-sdk's schema validation refusal of an argument the tool does not declare.
@@ -117,12 +124,49 @@ def _code_for_error(text: str) -> str:
     return ""
 
 
+def _tool_name_part(value: str) -> str:
+    return _NAME_PART_RE.sub("_", str(value or ""))
+
+
 def mcp_tool_name(server: str, tool: str) -> str:
-    """The name the client dispatches ``tool`` of the ctx MCP server entry ``server`` under —
-    also the name the plugin tells the model (system prompt block, receipt). Hermes registers
-    MCP tools with characters outside ``[A-Za-z0-9_]`` replaced by ``_`` and names over 64
-    characters shortened, so a server name with ``-`` does not resolve (known, not handled here)."""
-    return f"mcp__{server}__{tool}"
+    """The name Hermes registers ``tool`` of the MCP server entry ``server`` under, which the
+    client dispatches and the plugin tells the model (system prompt block, receipt).
+
+    Hermes' rule (``tools.mcp_tool_schema.mcp_prefixed_tool_name``, not a public plugin API, so
+    it is followed here and pinned against Hermes' function by the tests): every character
+    outside ``[A-Za-z0-9_]`` becomes ``_`` (``ctx-prod`` → ``mcp__ctx_prod__store``), and a name
+    over :data:`MCP_TOOL_NAME_MAX_CHARS` keeps its start and ends in ``_`` plus the first
+    :data:`MCP_TOOL_NAME_HASH_CHARS` hex digits of its SHA-256."""
+    full = f"mcp__{_tool_name_part(server)}__{_tool_name_part(tool)}"
+    if len(full) <= MCP_TOOL_NAME_MAX_CHARS:
+        return full
+    suffix = "_" + hashlib.sha256(full.encode("utf-8")).hexdigest()[:MCP_TOOL_NAME_HASH_CHARS]
+    return full[: MCP_TOOL_NAME_MAX_CHARS - len(suffix)] + suffix
+
+
+def colliding_servers(server: str, servers: Any) -> list[str]:
+    """The other entries of ``mcp_servers`` (a mapping, or the entry names) whose tools Hermes
+    registers under the same names as those of ``server``, disabled entries left out. Hermes keeps
+    the tools of the entry that connects first and skips the other's, so a call by name could
+    reach the other server: the plugin refuses such a binding."""
+    if isinstance(servers, dict):
+        names = [
+            name for name, entry in servers.items() if not (isinstance(entry, dict) and entry.get("enabled") is False)
+        ]
+    else:
+        names = list(servers or ())
+    own = _tool_name_part(server)
+    return sorted(str(name) for name in names if str(name) != server and _tool_name_part(str(name)) == own)
+
+
+def collision_text(server: str, others: list[str]) -> str:
+    """Why the entry ``server`` is not used while ``others`` collide with it."""
+    entries = ", ".join(f"mcp_servers.{name}" for name in others)
+    return (
+        f"mcp_servers.{server} and {entries} register their tools under the same names "
+        f"({mcp_tool_name(server, 'store')} …): Hermes keeps the tools of one of them, so a checkpoint "
+        "could reach the other server; rename one of the entries"
+    )
 
 
 def _interrupt_acting_for() -> Any:

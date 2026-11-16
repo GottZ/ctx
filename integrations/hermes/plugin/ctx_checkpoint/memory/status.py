@@ -39,6 +39,7 @@ from .config import (
     shorten,
     umbrella_section,
 )
+from .mcp_client import colliding_servers, collision_text, mcp_tool_name
 
 logger = logging.getLogger(__name__)
 
@@ -181,11 +182,17 @@ def _test_timeout(entry: dict[str, Any]) -> float:
     return max(CONNECTION_TEST_TIMEOUT_S, own)
 
 
-def run_connection_test(name: str, entry: dict[str, Any], *, secrets: Iterable[str] = ()) -> ConnectionTest:
-    """Test one ctx MCP server entry; never raises."""
+def run_connection_test(
+    name: str, entry: dict[str, Any], *, secrets: Iterable[str] = (), servers: Any = ()
+) -> ConnectionTest:
+    """Test one ctx MCP server entry; never raises. ``servers``: the ``mcp_servers`` entries of the
+    profile (a mapping or the names), for the check that no other entry gets the same tool names."""
     secrets = tuple(secrets)
     timeout = _test_timeout(entry)
     where = f"mcp_servers.{name}"
+    others = colliding_servers(name, servers)
+    if others:
+        return ConnectionTest(False, f"connection test of {where}: {collision_text(name, others)}")
     if entry.get("url"):
         where += f" ({display_url(entry.get('url'))})"
     try:
@@ -202,7 +209,11 @@ def run_connection_test(name: str, entry: dict[str, Any], *, secrets: Iterable[s
             "the URL must be the /mcp endpoint of a ctx server",
             len(tools),
         )
-    return ConnectionTest(True, f"{where} answered with {len(tools)} tools", len(tools))
+    detail = f"{where} answered with {len(tools)} tools"
+    names = [mcp_tool_name(name, tool) for tool in CHECKPOINT_TOOLS]
+    if names != [f"mcp__{name}__{tool}" for tool in CHECKPOINT_TOOLS]:
+        detail += f"; Hermes names them {', '.join(names)}"  # the entry name is rewritten (#297)
+    return ConnectionTest(True, detail, len(tools))
 
 
 def insecure_http(url: Any) -> bool:
@@ -501,7 +512,9 @@ def skip_warning(outcome: dict[str, Any]) -> str:
 
 
 def _failure_hint(cause: str, server: str) -> str:
-    if f"Unknown tool: mcp__{server}__" in cause:
+    # ``mcp_tool_name(server, "")`` is the prefix of every tool of the entry (a shortened name is
+    # matched whole).
+    if any(f"Unknown tool: {mcp_tool_name(server, tool)}" in cause for tool in ("", *CHECKPOINT_TOOLS)):
         return (
             f"The ctx MCP server '{server}' is not connected in this Hermes: check it with "
             f"`hermes mcp test {server}`; a new session connects again."
@@ -534,9 +547,11 @@ def mcp_status(
     section: dict[str, Any],
     hermes_home: str,
     secrets: Iterable[str] = (),
+    servers: Any = (),
 ) -> dict[str, Any]:
     """The report of ``hermes memory status`` and ``hermes ctx_checkpoint status`` (one line
-    per key). Runs the connection test; never raises."""
+    per key). Runs the connection test (``servers``: the profile's ``mcp_servers``, see
+    :func:`run_connection_test`); never raises."""
     status: dict[str, Any] = {"summary": "", "ok": False, "transport": "mcp", "mcp_server": f"mcp_servers.{name}"}
     url = entry.get("url") if entry else None
     if url:
@@ -549,7 +564,7 @@ def mcp_status(
     elif entry.get("enabled") is False:
         status["summary"] = f"✗ mcp_servers.{name} is disabled — `hermes memory setup ctx_checkpoint` turns it on again"
     else:
-        test = run_connection_test(name, entry, secrets=secrets)
+        test = run_connection_test(name, entry, secrets=secrets, servers=servers)
         status["ok"] = test.ok
         status["summary"] = (
             f"✓ connected: {test.detail}" if test.ok else f"{'?' if test.ok is None else '✗'} {test.detail}"
@@ -594,4 +609,5 @@ def mcp_report(hermes_home: str) -> dict[str, Any]:
         section=section,
         hermes_home=hermes_home,
         secrets=(key,),
+        servers=servers if isinstance(servers, dict) else {},
     )

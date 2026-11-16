@@ -129,7 +129,13 @@ manages that entry's authentication itself (no auth yet, or `Bearer ${CTX_API_KE
 from an earlier setup). An entry with its own `headers` or `auth`, or a stdio
 `command` entry, keeps them untouched. Setup always targets the entry named by
 `mcp_server`; change that name in `config.yaml` if your ctx entry is called
-differently.
+differently. Hermes registers the entry's tools with every character outside
+`A-Za-z0-9_` replaced by `_` (an entry `ctx-prod` gives `mcp__ctx_prod__store`,
+a name over 64 characters is shortened with a hash), and the plugin calls and
+names them the same way (0.13.0; before, an entry with `-` never resolved). Two
+enabled entries that come out alike (`ctx-prod` and `ctx_prod`) are refused:
+Hermes keeps only one entry's tools, so a checkpoint could reach the other
+server. The connection test names the tools when the entry name is rewritten.
 
 ## Memory features (`memory: true`)
 
@@ -283,7 +289,8 @@ Saved turns are a record of past messages (type checkpoint, untrusted): quote th
 ```
 
 The tool names are those of the session: with memory features off the ctx MCP server's
-tools under the name in `mcp_server` (`mcp__<server>__get`, `mcp__<server>__search`),
+tools under the name Hermes registers for the entry in `mcp_server`
+(`mcp__<server>__get`, `mcp__<server>__search`; `-` and other characters become `_`),
 with memory features on the plugin's `ctx_get` and `ctx_search` (`types_exclude=[]`),
 and on `transport: rest` without memory features the plugin CLI
 (`hermes ctx_checkpoint get|search`). The root token in the search text narrows the hits

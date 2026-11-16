@@ -18,6 +18,21 @@ Setup, MCP tool names and error texts (GottZ/ctx#294, #297, #304).
   `_apply_form` now refuses that save with the reason and how to set the mode once
   `hermes mcp test <entry>` passes; nothing is written. Saves without the mode, and turning it
   off, still need no test.
+- **MCP tool names as Hermes registers them (GottZ/ctx#297).** Hermes registers the tools of
+  an `mcp_servers` entry with every character outside `[A-Za-z0-9_]` replaced by `_` and a name
+  over 64 characters shortened with a hash suffix (`tools.mcp_tool_schema.
+  mcp_prefixed_tool_name`); the plugin built `mcp__<server>__<tool>` from the raw entry name,
+  so an entry such as `ctx-prod` answered `Unknown tool` to every call, and since 0.9.0 the
+  system prompt block and the receipt named tools that do not exist. `mcp_client.mcp_tool_name`
+  now follows Hermes' rule (that function is not a public plugin API, so the rule is rebuilt and
+  the tests pin it against Hermes' function); dispatch, prompt block, receipt and the failure
+  hint read it. Two enabled entries whose names come out alike are refused
+  (`mcp_client.colliding_servers`): Hermes keeps the tools of the entry that connects first, so
+  a call by name could reach the other server — the provider reports itself unavailable with
+  the reason, and the connection test (setup forms, `hermes memory status`) fails before it
+  connects. A passing test names the tools when the entry name is rewritten. The pointer
+  binding stays on the entry name; for `ctx` and every name Hermes keeps, names and binding
+  digest are byte-identical.
 
 ## [ctx_checkpoint 0.12.0] — 2026-11-16
 

@@ -560,7 +560,11 @@ and manifest are deliberately small so routine recall stays cheap.
   raised or logged (GottZ/ctx#301).
 - 0.13.0: the Desktop form no longer turns the required mode on when the connection test
   cannot run on the loading Hermes; it refuses with the reason, as the terminal setup
-  never offers the mode then (GottZ/ctx#294).
+  never offers the mode then (GottZ/ctx#294). The ctx MCP tools are called and named as
+  Hermes registers them (`ctx-prod` → `mcp__ctx_prod__store`, names over 64 characters
+  shortened), so an entry with `-` in its name no longer fails every checkpoint with
+  `Unknown tool`; two entries that come out alike are refused, and the connection test
+  names the tools when the entry name is rewritten (GottZ/ctx#297).
 
 ## Licensing
 
