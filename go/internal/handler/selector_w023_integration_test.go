@@ -117,6 +117,7 @@ func w023Config(enabled bool) *config.Config {
 		// (V38/V39); taken whole from the registry.
 		Gateway:    config.Defaults().Gateway,
 		Federation: config.Defaults().Federation, // F-W8: V43 range
+		MCP:        config.Defaults().MCP,        // #315: V60 refuses a blank instructions text
 		// FOLGE-Z: pool.capability_probe_interval carries a fatal floor (V59).
 		Pool: config.PoolConfig{CapabilityProbeInterval: config.Defaults().Pool.CapabilityProbeInterval},
 		// A03-W6: dispatch.external_retry_after_steps is fatal when empty (V46).

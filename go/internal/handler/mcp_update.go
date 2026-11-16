@@ -55,7 +55,7 @@ type updateInput struct {
 	Title    *string        `json:"title,omitempty" jsonschema:"new title (omit = unchanged)"`
 	Content  *string        `json:"content,omitempty" jsonschema:"new content, max 50KB (omit = unchanged)"`
 	Tags     []string       `json:"tags,omitempty" jsonschema:"replacement tag set ([] clears all tags, omit = unchanged)"`
-	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"replacement metadata object ({} clears, omit = unchanged)"`
+	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"replacement metadata object ({} clears, omit = unchanged); keep the source of the knowledge in metadata.source"`
 	Type     string         `json:"type,omitempty" jsonschema:"new block type name from the registry (e.g. reference); written as a manual choice the title classifier no longer overrides; leaving a type marked untrusted records that type on the block as untrusted_origin (omit = unchanged)"`
 }
 

@@ -97,7 +97,8 @@ There are four ways in:
 
 What does not work, or only partly:
 
-- **ctx does not make an agent remember by itself.** It brings no rules for when to look up or save. An agent
+- **ctx does not make an agent remember by itself.** Beyond a short default hint it sends every connecting agent
+  (when to look up, when to save; an operator setting), it brings no rules for when to look up or save. An agent
   that has ctx only as one more tool behaves as if it had no memory; see
   [Bring your own workflow](#bring-your-own-workflow).
 - **Nothing answers before the models do, and CPU alone is slow.** Until the backend pool has a chat and an
@@ -224,8 +225,10 @@ The full walk-through, with every option, is in [Operations](docs/operations.md#
 
 ctx is a skeleton. After the install it stores, finds and links what your agents give it, over MCP, the CLI and
 HTTP. It does not decide when your agent looks something up or writes something down, and it does not make a
-session start or end well on its own. Today ctx is deliberately neutral: it brings no working style of its own and
-no ready-made skills, because every team works differently. Below is a suggested way of working. Adapt it to your
+session start or end well on its own. By default ctx sends every agent that connects over MCP a short hint: ctx is
+its memory, look things up before answering or starting work, save what should last with its source. An operator
+can switch that hint off or replace it with the team's own text ([operations](docs/operations.md#mcp-instructions-mcpinstructions_enabled-and-mcpinstructions)).
+Beyond that ctx brings no working style of its own and no ready-made skills, because every team works differently. Below is a suggested way of working. Adapt it to your
 team and write it into your own skill, rule file, hook or prompt. Suggestions for ready-made skills will come
 later. The tool names are the MCP tools an agent uses; the CLI commands in parentheses do the same.
 

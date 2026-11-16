@@ -16,7 +16,7 @@ tool section says so.
 |---|---|
 | Endpoint | `POST\|GET\|DELETE /mcp` — Streamable HTTP, **stateless** (no session; every call stands alone), JSON responses instead of SSE |
 | Server name | `ctx` |
-| Instructions | sent with `initialize`, the one text every connecting agent gets before it has read any documentation: ctx is the agent's memory across sessions, it asks (`query`, `search`) before it answers from memory or starts work, and it saves what should outlast the session with `store`, naming the source. Clients decide whether they show it to the model |
+| Instructions | sent with `initialize` (and `server/discover`), the one text every connecting agent gets before it has read any documentation. By default the text ctx ships: ctx is the agent's memory across sessions; before it answers from memory or starts work it looks things up (`search` for a lightweight lookup, `query` for a synthesized answer); what should outlast the session it saves with `store`, its source in `metadata.source`. An operator can switch it off or replace it (`mcp.instructions_enabled`, `mcp.instructions`, see [operations](operations.md#mcp-instructions-mcpinstructions_enabled-and-mcpinstructions)); a change reaches the next connecting agent without a restart. Clients decide whether they show it to the model — Claude Code does (it cuts server instructions after 2,048 characters, 4,096 since 2.1.296), Hermes does not |
 | Authentication | the same API key as the HTTP API, as `X-Context-Key: <key>` or `Authorization: Bearer <key>`; remote clients such as claude.ai use OAuth 2.1 with PKCE — register one with `ctx mcp add <label>` ([architecture](architecture.md)); `/authorize` is a consent screen that names the client and the address the browser returns to, warns about self-registered (DCR) clients unless they return to a known connector callback (static allowlist or `CTX_OAUTH_REDIRECT_EXTRA`) and needs an explicit consent tick next to the key; a refresh token is issued only to clients registered with the `refresh_token` grant (DCR default: both grants; `ctx mcp add` clients always get it) |
 | Request size | the body is capped at 1 MB before the MCP layer reads it; `store`, `update` and the issue tools cap content at 50 KB |
 | Scope | every tool acts within the scopes the key may read or write ([multi-tenancy](multi-tenancy.md)); a key without a resolved tenant identity is refused |
@@ -302,7 +302,7 @@ Save or replace a knowledge block. Upserts on (category, title, scope).
 | `title` | string | required | block title |
 | `content` | string | required | block content, at most 50 KB |
 | `tags` | string[] | | tags |
-| `metadata` | object | | metadata object |
+| `metadata` | object | | metadata object; the source of the knowledge (URL, file, conversation, person) goes into `metadata.source` |
 | `sensitivity` | string | | `credentials`, `personal`, `internal` or `public`; default from settings, fail-closed |
 | `type` | string | | explicit block type from the registry (e.g. `reference`); omitted, the title classifier decides |
 | `scope` | string | | target scope; default the key's home scope; must be a scope the key may write |
@@ -337,7 +337,7 @@ Change fields of an existing block.
 | `title` | string | | new title |
 | `content` | string | | new content, at most 50 KB |
 | `tags` | string[] | | replacement tag set; `[]` clears |
-| `metadata` | object | | replacement metadata object (no merge); `{}` clears |
+| `metadata` | object | | replacement metadata object (no merge); `{}` clears; keep the source of the knowledge in `metadata.source` |
 | `type` | string | | new block type from the registry (e.g. `reference`) |
 
 Omitted fields stay unchanged. **Answer:**

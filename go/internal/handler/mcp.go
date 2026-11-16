@@ -18,6 +18,7 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -69,19 +70,61 @@ func newMCPSDKHandler(cfg MCPConfig) http.Handler {
 // guard (mcp_recover.go) around all of them. The guard is added LAST, so it
 // is the outermost receiving middleware: anything installed after it would
 // run outside the guard, on the same goroutine the SDK does not recover.
+//
+// The server is built once, so its ServerOptions carry no Instructions: the
+// text is a hot setting, and mcpInstructionsMiddleware writes it into every
+// initialize (and server/discover) answer from the snapshot of that request.
 func newMCPServer(cfg MCPConfig) *mcp.Server {
 	server := mcp.NewServer(
 		&mcp.Implementation{
 			Name:    "ctx",
 			Version: "0.25.3",
 		},
-		&mcp.ServerOptions{
-			Instructions: "ctx is your memory across sessions. Ask it before you answer from memory or start work: 'query' for a question, 'search' for a lightweight lookup. When you learn something that should outlast this session, save it with 'store' and name its source.",
-		},
+		&mcp.ServerOptions{},
 	)
 	registerTools(server, cfg)
-	server.AddReceivingMiddleware(mcpRecover)
+	server.AddReceivingMiddleware(mcpInstructionsMiddleware(cfg))
+	server.AddReceivingMiddleware(mcpRecover) // last = outermost: it guards the instructions middleware too
 	return server
+}
+
+// mcpInstructionsHistory is the shipped history the MCP server and the
+// settings API resolve mcp.instructions against — config.ShippedMCPInstructions
+// in production, a package var as a test seam (pattern: embedcache's
+// cacheProbe) so a test can stand in for a release that ships a newer wording.
+var mcpInstructionsHistory = config.ShippedMCPInstructions
+
+// mcpInstructionsFor is the text the next initialize answer carries: the
+// resolution of mcp.instructions_enabled and mcp.instructions (#315) in the
+// snapshot of this request. Without a config store (unit tests that wire no
+// settings) it is the registry default — the newest shipped wording.
+func mcpInstructionsFor(ctx context.Context, cfg MCPConfig) string {
+	history := mcpInstructionsHistory()
+	if cfg.Cfg == nil {
+		return config.ResolveMCPInstructions(true, history[len(history)-1].Text, history).Sent
+	}
+	snap := cfg.Cfg.SnapshotForRequest(ctx)
+	return config.ResolveMCPInstructions(snap.MCP.InstructionsEnabled, snap.MCP.Instructions, history).Sent
+}
+
+// mcpInstructionsMiddleware sets the instructions of every initialize and
+// server/discover answer — the two results the SDK fills from
+// ServerOptions.Instructions — from the current settings, so a settings write
+// reaches the next connecting agent without a restart. Off (or nothing to
+// send) leaves the field empty, which the wire omits.
+func mcpInstructionsMiddleware(cfg MCPConfig) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			res, err := next(ctx, method, req)
+			switch r := res.(type) {
+			case *mcp.InitializeResult:
+				r.Instructions = mcpInstructionsFor(ctx, cfg)
+			case *mcp.DiscoverResult:
+				r.Instructions = mcpInstructionsFor(ctx, cfg)
+			}
+			return res, err
+		}
+	}
 }
 
 // Tool definitions.
@@ -124,7 +167,7 @@ type storeInput struct {
 	Title       string         `json:"title" jsonschema:"block title (upserts on same category+title+scope)"`
 	Content     string         `json:"content" jsonschema:"block content (max 50KB)"`
 	Tags        []string       `json:"tags,omitempty" jsonschema:"optional tags for filtering"`
-	Metadata    map[string]any `json:"metadata,omitempty" jsonschema:"optional metadata object"`
+	Metadata    map[string]any `json:"metadata,omitempty" jsonschema:"optional metadata object; put the source of the knowledge (URL, file, conversation, person) into metadata.source"`
 	Sensitivity string         `json:"sensitivity,omitempty" jsonschema:"content sensitivity for trust gating: credentials|personal|internal|public (default from settings, fail-closed)"`
 	// N-26: the explicit block type. Omitted = the title classifier keeps
 	// guessing (type_source='auto'); named = the writer ASSERTS the type and

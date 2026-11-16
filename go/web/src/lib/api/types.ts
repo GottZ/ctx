@@ -89,6 +89,32 @@ export interface SettingView {
   sensitive?: boolean
   /** Registry description (config.keyDescriptions) — UI hint + search corpus. */
   description?: string
+  /** mcp.instructions only (#315): the comparison with the wording ctx ships. */
+  instructions?: McpInstructionsView
+}
+
+// Source: go/internal/config/mcpinstructions.go (ShippedInstructions).
+export interface ShippedInstructions {
+  id: number
+  since: string
+  text: string
+}
+
+// Source: go/internal/handler/settings.go (mcpInstructionsView).
+export interface McpInstructionsView {
+  /** What the next initialize answer carries. */
+  state: 'off' | 'shipped' | 'custom'
+  /** The configured text equals no shipped wording. */
+  custom: boolean
+  /** The shipped wording the configured text equals (absent = none). */
+  matches?: number
+  /** The wording this ctx release ships. */
+  current: ShippedInstructions
+  /** For a custom text written through the settings API: the shipped wording current at the write. */
+  base?: ShippedInstructions
+  changed_since_base: boolean
+  /** Every wording ctx has shipped, oldest first. */
+  history: ShippedInstructions[]
 }
 
 // Source: go/internal/handler/settings.go (HandleList).
@@ -105,6 +131,8 @@ export interface SettingPutResponse {
   source: SettingSource
   previous: { value: unknown; source: SettingSource }
   warnings: string[]
+  /** PUT of mcp.instructions or mcp.instructions_enabled: the comparison after the write. */
+  instructions?: McpInstructionsView
 }
 
 // Source: go/internal/handler/settings.go (HandleDelete).
@@ -113,6 +141,8 @@ export interface SettingDeleteResponse {
   key: string
   value: unknown
   source: SettingSource
+  /** DELETE of mcp.instructions or mcp.instructions_enabled: the comparison after the write. */
+  instructions?: McpInstructionsView
 }
 
 // Source: go/internal/handler/health.go (healthResponse) — the /api/status

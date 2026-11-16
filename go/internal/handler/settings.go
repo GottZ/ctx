@@ -109,6 +109,76 @@ type settingView struct {
 	Default    any    `json:"default"`
 	Sensitive  bool   `json:"sensitive,omitempty"`
 	Desc       string `json:"description,omitempty"`
+	// Instructions is set on mcp.instructions alone (#315): what the MCP
+	// server sends, the wording ctx ships, and — for a custom text — the
+	// shipped wording it was based on, so an operator sees after an update
+	// that ctx changed its own text.
+	Instructions *mcpInstructionsView `json:"instructions,omitempty"`
+}
+
+// mcpInstructionsKey is the settings key of the MCP instructions text.
+const mcpInstructionsKey = "mcp.instructions"
+
+// mcpInstructionsBaseField is the context_settings metadata field that records
+// which shipped wording was current when a custom text was written.
+const mcpInstructionsBaseField = "shipped_base"
+
+// mcpInstructionsView is the comparison of the configured MCP instructions
+// with the wording ctx ships (#315).
+type mcpInstructionsView struct {
+	// State is what the next initialize answer carries: off (nothing),
+	// shipped (the newest shipped wording) or custom (the operator's text).
+	State string `json:"state"`
+	// Custom is true when the configured text equals no shipped wording —
+	// sent unless off; a text equal to any shipped wording follows the newest.
+	Custom bool `json:"custom"`
+	// Matches is the shipped wording the configured text equals (0 = none).
+	Matches int `json:"matches,omitempty"`
+	// Current is the wording this ctx release ships.
+	Current config.ShippedInstructions `json:"current"`
+	// Base is the shipped wording that was current when the custom text was
+	// written; absent when the text is not custom or was not written through
+	// the settings API.
+	Base *config.ShippedInstructions `json:"base,omitempty"`
+	// ChangedSinceBase: ctx has shipped a newer wording since the custom text
+	// was written — compare base with current and decide.
+	ChangedSinceBase bool `json:"changed_since_base"`
+	// History is every wording ctx has shipped, oldest first.
+	History []config.ShippedInstructions `json:"history"`
+}
+
+// instructionsView builds the comparison for mcp.instructions from the
+// request's snapshot and the base recorded on the _global row. Every other
+// key gets nil. One resolution for the settings API and the MCP server:
+// config.ResolveMCPInstructions over the same mcpInstructionsHistory.
+func (h *SettingsHandler) instructionsView(r *http.Request, c *config.Config, key string) (*mcpInstructionsView, error) {
+	if key != mcpInstructionsKey {
+		return nil, nil
+	}
+	history := mcpInstructionsHistory()
+	st := config.ResolveMCPInstructions(c.MCP.InstructionsEnabled, c.MCP.Instructions, history)
+	v := &mcpInstructionsView{State: st.State, Custom: st.Matches == 0, Matches: st.Matches, Current: st.Current, History: history}
+	if !v.Custom || c.Source(key) != config.SourceSettings {
+		return v, nil
+	}
+	raw, err := store.SettingMetadata(r.Context(), h.pool, key, store.GlobalScope)
+	if err != nil || raw == nil {
+		return v, err
+	}
+	// A row written outside the settings API (psql) may carry no base, or
+	// metadata of another shape: the base is then unknown, never an error.
+	var meta struct {
+		Base int `json:"shipped_base"`
+	}
+	_ = json.Unmarshal(raw, &meta)
+	for i := range history {
+		if history[i].ID == meta.Base {
+			base := history[i]
+			v.Base = &base
+			v.ChangedSinceBase = base.ID != st.Current.ID
+		}
+	}
+	return v, nil
 }
 
 // apiSource maps the snapshot source vocabulary to the API one: the override
@@ -192,16 +262,22 @@ func (h *SettingsHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 	infos := config.Keys()
 	views := make([]settingView, 0, len(infos))
 	for _, info := range infos {
+		instr, err := h.instructionsView(r, c, info.Key)
+		if err != nil {
+			internalError(w, r.Context(), "settings: read instructions base failed", err)
+			return
+		}
 		views = append(views, settingView{
-			Key:        info.Key,
-			EnvVar:     info.EnvVar,
-			Type:       info.Type,
-			Mutability: info.Mutability,
-			Value:      renderEffective(c, info, overrides),
-			Source:     apiSource(c.Source(info.Key)),
-			Default:    info.Default,
-			Sensitive:  info.Sensitive,
-			Desc:       info.Desc,
+			Key:          info.Key,
+			EnvVar:       info.EnvVar,
+			Type:         info.Type,
+			Mutability:   info.Mutability,
+			Value:        renderEffective(c, info, overrides),
+			Source:       apiSource(c.Source(info.Key)),
+			Default:      info.Default,
+			Sensitive:    info.Sensitive,
+			Desc:         info.Desc,
+			Instructions: instr,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "settings": views})
@@ -229,18 +305,24 @@ func (h *SettingsHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := h.cfg.SnapshotForRequest(r.Context()) // effective tenant>global view (03-W5 §4.5)
+	instr, err := h.instructionsView(r, c, info.Key)
+	if err != nil {
+		internalError(w, r.Context(), "settings: read instructions base failed", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"setting": settingView{
-			Key:        info.Key,
-			EnvVar:     info.EnvVar,
-			Type:       info.Type,
-			Mutability: info.Mutability,
-			Value:      renderEffective(c, info, overrides),
-			Source:     apiSource(c.Source(info.Key)),
-			Default:    info.Default,
-			Sensitive:  info.Sensitive,
-			Desc:       info.Desc,
+			Key:          info.Key,
+			EnvVar:       info.EnvVar,
+			Type:         info.Type,
+			Mutability:   info.Mutability,
+			Value:        renderEffective(c, info, overrides),
+			Source:       apiSource(c.Source(info.Key)),
+			Default:      info.Default,
+			Sensitive:    info.Sensitive,
+			Desc:         info.Desc,
+			Instructions: instr,
 		},
 		"audit": audit,
 	})
@@ -302,6 +384,10 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	ar := AuthResultFromContext(r.Context())
 	ws := mutationScope(ar)
 	rs := readScopes(ar)
+	if msg, blocked := globalOnlyTenantWrite(key, ws); blocked {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": msg})
+		return
+	}
 	allowShared := false
 	if ws != store.GlobalScope {
 		var serr error
@@ -324,9 +410,9 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	// reload path. Applied == the override took effect from the DB layer — the
 	// operator's _global ("settings") OR a tenant's own scope ("tenant"); anything
 	// else means it would be ignored — reject with the build's reason. A
-	// tenant-scope row on a global-only key (a tenant self-granting
-	// allow_shared_secrets) is dropped by the toOverrides gate here → not applied
-	// → 422: the fail-closed self-grant block.
+	// tenant-scope row on a global-only key never gets here: the global-only
+	// check above refuses it first (the build alone read a _global row of the
+	// same key as "applied" and let it through).
 	baseRows, err := store.LoadSettingOverridesMulti(r.Context(), h.pool, rs)
 	if err != nil {
 		internalError(w, r.Context(), "settings: load overrides failed", err)
@@ -342,7 +428,7 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, baseIssues := settings.BuildFromRowsScoped(r.Context(), h.pool, baseRows, rs, ws, allowShared)
-	warnings := newWarnings(candIssues, baseIssues)
+	warnings := append(newWarnings(candIssues, baseIssues), shippedCopyWarning(key, raw)...)
 
 	// Previous effective value + source, masked, BEFORE the swap. The override
 	// map is precedence-aware so a tenant's own ref name shows, not _global's.
@@ -396,14 +482,65 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	if warnings == nil {
 		warnings = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"success":  true,
 		"key":      key,
 		"value":    renderEffective(now, info, nowOverrides),
 		"source":   apiSource(now.Source(key)),
 		"previous": previous,
 		"warnings": warnings,
-	})
+	}
+	h.addInstructionsAfterWrite(r, now, key, resp)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// globalOnlyTenantWrite refuses a write of a global-only key at a tenant scope
+// (MT3-W2), fail-closed and before the candidate build: that build reads a
+// _global row of the same key as "applied from the DB" and let the tenant row
+// through with a 200 — a dead row for mcp.instructions (#315), and for the two
+// opt-in flags, which are read directly at the tenant scope, a self-grant.
+func globalOnlyTenantWrite(key, writeScope string) (string, bool) {
+	if writeScope == store.GlobalScope || !config.IsGlobalOnly(key) {
+		return "", false
+	}
+	return fmt.Sprintf("validation: %s is global-only — only a server admin sets it, for every tenant", key), true
+}
+
+// shippedCopyWarning: a PUT of mcp.instructions whose text equals a shipped
+// wording stores no own text (#315) — said at the write, where the operator
+// would otherwise read back "their" value while the newest wording is sent.
+func shippedCopyWarning(key, raw string) []string {
+	if key != mcpInstructionsKey {
+		return nil
+	}
+	st := config.ResolveMCPInstructions(true, raw, mcpInstructionsHistory())
+	if st.Matches == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"%s: the text equals shipped wording #%d, so it is not an own text — the instance sends the newest shipped wording (#%d) and follows updates; unset the key to drop the copy",
+		key, st.Matches, st.Current.ID)}
+}
+
+// mcpInstructionsEnabledKey is the switch of the MCP instructions.
+const mcpInstructionsEnabledKey = "mcp.instructions_enabled"
+
+// addInstructionsAfterWrite puts the mcp.instructions comparison of the
+// post-write generation into a PUT/DELETE answer of either mcp.instructions
+// key (#315), so a client that renders it (the settings page) does not show
+// the state from before the write. A failed metadata read leaves the field
+// out — the write itself succeeded.
+func (h *SettingsHandler) addInstructionsAfterWrite(r *http.Request, c *config.Config, key string, resp map[string]any) {
+	if key != mcpInstructionsKey && key != mcpInstructionsEnabledKey {
+		return
+	}
+	instr, err := h.instructionsView(r, c, mcpInstructionsKey)
+	if err != nil {
+		slog.Warn("settings: instructions comparison after write unavailable", "error", err,
+			"request_id", RequestIDFromContext(r.Context()))
+		return
+	}
+	resp["instructions"] = instr
 }
 
 // HandleDelete implements DELETE /api/settings/{key} — remove the override,
@@ -448,12 +585,14 @@ func (h *SettingsHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c := h.cfg.SnapshotForRequest(r.Context()) // post-revert effective view (03-W5 §4.5)
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"success": true,
 		"key":     key,
 		"value":   renderEffective(c, info, nil), // post-revert: source is env/default
 		"source":  apiSource(c.Source(key)),
-	})
+	}
+	h.addInstructionsAfterWrite(r, c, key, resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // checkSecretRef gates sensitive-key values (§2.3): format first, then
@@ -489,8 +628,17 @@ func (h *SettingsHandler) checkSecretRef(r *http.Request, key, raw string, ar *a
 // writeSetting persists one override in an attributed transaction (the 051
 // triggers emit audit + NOTIFY atomically with the row). scope is mutationScope(ar)
 // — operator _global or the tenant's own scope, NEVER the request body.
+//
+// A write of mcp.instructions also records, in the row's metadata, which
+// shipped wording was current when the text was written (#315): the base the
+// settings view compares the newest shipped wording against after an update.
 func (h *SettingsHandler) writeSetting(r *http.Request, key string, value json.RawMessage, scope string) error {
 	_, err := attributedTx(r.Context(), h.pool, func(tx pgx.Tx) (struct{}, error) {
+		if key == mcpInstructionsKey {
+			history := mcpInstructionsHistory()
+			meta, _ := json.Marshal(map[string]int{mcpInstructionsBaseField: history[len(history)-1].ID})
+			return struct{}{}, store.UpsertSettingWithMetadata(r.Context(), tx, key, scope, value, meta, actorID(r))
+		}
 		return struct{}{}, store.UpsertSetting(r.Context(), tx, key, scope, value, actorID(r))
 	})
 	return err

@@ -4,6 +4,7 @@
   import Highlight from '../../lib/components/Highlight.svelte'
   import {
     formatValue,
+    instructionsNotes,
     isEditable,
     mutabilityNote,
     selectOptions,
@@ -34,6 +35,8 @@
   // The empty select option exists only as a current state (ScalarValue
   // rejects ""), so it renders disabled — reachable by reset, not by edit.
   const showEmptyOption = $derived(widget === 'select' && model.drafts[key] === '')
+  // mcp.instructions (#315): the comparison with the wording ctx ships.
+  const instructions = $derived(setting.instructions)
 </script>
 
 <div class="field" class:dirty>
@@ -90,6 +93,15 @@
       <span class="readonly-value" title="unknown registry type {setting.type} — read-only in this UI version">
         {formatValue(setting.value)}
       </span>
+    {:else if instructions !== undefined}
+      <!-- prose sent as is: multi-line, never trimmed (parseDraft) -->
+      <textarea
+        id={key}
+        rows="5"
+        spellcheck="false"
+        disabled={!editable || model.saving}
+        bind:value={model.drafts[key]}
+      ></textarea>
     {:else}
       <input
         id={key}
@@ -119,6 +131,22 @@
       </button>
     {/if}
   </div>
+
+  {#if instructions !== undefined}
+    {#each instructionsNotes(instructions) as n (n.text)}
+      <p class={n.kind === 'changed' ? 'problem warn' : 'hint'} role={n.kind === 'changed' ? 'status' : undefined}>{n.text}</p>
+    {/each}
+    {#if instructions.base !== undefined && instructions.base.id !== instructions.current.id}
+      <details class="shipped" open={instructions.changed_since_base}>
+        <summary>your base: shipped wording #{instructions.base.id} ({instructions.base.since})</summary>
+        <pre>{instructions.base.text}</pre>
+      </details>
+    {/if}
+    <details class="shipped" open={instructions.changed_since_base}>
+      <summary>shipped wording #{instructions.current.id} ({instructions.current.since})</summary>
+      <pre>{instructions.current.text}</pre>
+    </details>
+  {/if}
 
   {#if setting.sensitive && editable}
     <p class="hint">takes a secret <em>name</em> (create it via <code>ctx secrets set</code>), never the value</p>
@@ -217,6 +245,27 @@
     border-radius: var(--radius);
     padding: var(--space-1) var(--space-2);
   }
+  .row textarea {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    padding: var(--space-1) var(--space-2);
+    resize: vertical;
+  }
+  .shipped summary {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .shipped pre {
+    margin: var(--space-1) 0 0;
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    max-width: 72ch;
+  }
   .row input[type='checkbox'] {
     width: 1.1rem;
     height: 1.1rem;
@@ -224,6 +273,7 @@
     padding: 0;
   }
   .row input:disabled,
+  .row textarea:disabled,
   .row select:disabled {
     opacity: 0.55;
     cursor: not-allowed;

@@ -329,8 +329,42 @@ func SetTxRequestID(ctx context.Context, tx pgx.Tx, requestID string) error {
 // UpsertSetting creates or replaces one override row. Write paths ALWAYS run
 // in an explicit transaction: the 051 AFTER-ROW triggers emit the audit row
 // and NOTIFY atomically with the mutation. by is the acting api key id
-// (nullable — nil means an unattributed/system write).
+// (nullable — nil means an unattributed/system write). The row's metadata is
+// left as it is ('{}' on a new row).
 func UpsertSetting(ctx context.Context, tx pgx.Tx, key, scope string, value json.RawMessage, by *string) error {
+	return upsertSetting(ctx, tx, key, scope, value, nil, by)
+}
+
+// UpsertSettingWithMetadata is UpsertSetting that also writes the row's
+// metadata object — a fact about the value that is not part of it, such as
+// the shipped wording a custom mcp.instructions text was based on (#315).
+// The metadata describes the value it was written with: it is replaced when
+// the value changes or the row carries none yet, and kept when the same value
+// is written again (an idempotent re-apply is not a new decision).
+func UpsertSettingWithMetadata(ctx context.Context, tx pgx.Tx, key, scope string, value, metadata json.RawMessage, by *string) error {
+	if !json.Valid(metadata) || !strings.HasPrefix(strings.TrimSpace(string(metadata)), "{") {
+		return fmt.Errorf("settings: metadata must be a JSON object")
+	}
+	return upsertSetting(ctx, tx, key, scope, value, metadata, by)
+}
+
+// SettingMetadata returns the metadata object of one override row, nil when
+// the row does not exist.
+func SettingMetadata(ctx context.Context, pool *pgxpool.Pool, key, scope string) (json.RawMessage, error) {
+	var raw json.RawMessage
+	err := pool.QueryRow(ctx,
+		`SELECT metadata FROM context_settings WHERE key = $1 AND scope = $2`,
+		key, scope).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("settings: read metadata of %s: %w", key, err)
+	}
+	return raw, nil
+}
+
+func upsertSetting(ctx context.Context, tx pgx.Tx, key, scope string, value, metadata json.RawMessage, by *string) error {
 	if key == "" {
 		return fmt.Errorf("settings: key is required")
 	}
@@ -345,16 +379,34 @@ func UpsertSetting(ctx context.Context, tx pgx.Tx, key, scope string, value json
 		return err
 	}
 
-	_, err := tx.Exec(ctx,
-		`INSERT INTO context_settings (key, scope, value, updated_by, updated_by_principal)
-		 VALUES ($1, $2, $3::jsonb, $4::uuid,
-		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $4::uuid))
-		 ON CONFLICT (key, scope) DO UPDATE
-		 SET value = EXCLUDED.value,
-		     updated_at = now(),
-		     updated_by = EXCLUDED.updated_by,
-		     updated_by_principal = EXCLUDED.updated_by_principal`,
-		key, scope, string(value), by)
+	var err error
+	if metadata == nil {
+		_, err = tx.Exec(ctx,
+			`INSERT INTO context_settings (key, scope, value, updated_by, updated_by_principal)
+			 VALUES ($1, $2, $3::jsonb, $4::uuid,
+			         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $4::uuid))
+			 ON CONFLICT (key, scope) DO UPDATE
+			 SET value = EXCLUDED.value,
+			     updated_at = now(),
+			     updated_by = EXCLUDED.updated_by,
+			     updated_by_principal = EXCLUDED.updated_by_principal`,
+			key, scope, string(value), by)
+	} else {
+		_, err = tx.Exec(ctx,
+			`INSERT INTO context_settings (key, scope, value, metadata, updated_by, updated_by_principal)
+			 VALUES ($1, $2, $3::jsonb, $5::jsonb, $4::uuid,
+			         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $4::uuid))
+			 ON CONFLICT (key, scope) DO UPDATE
+			 SET value = EXCLUDED.value,
+			     metadata = CASE
+			         WHEN context_settings.value IS DISTINCT FROM EXCLUDED.value
+			           OR context_settings.metadata = '{}'::jsonb
+			         THEN EXCLUDED.metadata ELSE context_settings.metadata END,
+			     updated_at = now(),
+			     updated_by = EXCLUDED.updated_by,
+			     updated_by_principal = EXCLUDED.updated_by_principal`,
+			key, scope, string(value), by, string(metadata))
+	}
 	if err != nil {
 		return fmt.Errorf("settings: upsert %s: %w", key, err)
 	}
