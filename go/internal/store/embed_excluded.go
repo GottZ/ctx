@@ -24,7 +24,9 @@ const EmbedExcludedReconcileBatch = 1000
 //     id) in its order from the keyset cursor ($3, $4, $5) on, so a batch
 //     does not read again what the batches before it passed. A block with a
 //     vector or an archived one keeps false: it is in no pick index, and the
-//     trigger sets the marker when its vector is cleared or it is unarchived.
+//     trigger sets the marker when it is unarchived or re-typed (a cleared
+//     vector puts it back in the pick indexes unmarked, filtered by the type
+//     predicate as before migration 175).
 //   - clearEmbedExcludedSQL: the name became embeddable. Its marked live
 //     blocks, on idx_blocks_embed_excluded (type_name), which the cleared
 //     rows leave.

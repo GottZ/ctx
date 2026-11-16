@@ -33,12 +33,17 @@
 -- vector (the type allowlist of every reader leaves the name out).
 --
 -- WHO WRITES IT: only the trigger trg_block_embed_excluded, BEFORE INSERT OR
--- UPDATE OF type_name, embed_excluded, is_archived, embedding, FOR EACH ROW:
--- an insert, a re-type, an unarchive and a statement that clears the vector
--- set the marker from the registry; a statement that names the column gets
--- the registry's answer, not its own; every other update (a vector write
--- among them) returns at once. When the answer is true the trigger decides
--- again on a fresh snapshot after it holds the name's lock, see LOCKS.
+-- UPDATE OF type_name, embed_excluded, is_archived, FOR EACH ROW: an insert,
+-- a re-type and an unarchive set the marker from the registry; a statement
+-- that names the column gets the registry's answer, not its own; an archive
+-- returns at once. When the answer is true the trigger decides again on a
+-- fresh snapshot after it holds the name's lock, see LOCKS. The column list
+-- names no embedding column on purpose: a column trigger binds to the
+-- column's attnum, so after a re-embed cutover it would follow embedding_old
+-- and block the cleanup's DROP COLUMN (2BP01). A block of a type that became
+-- never-embedded while it held a vector keeps false until it is re-typed or
+-- unarchived; when its vector is cleared it is filtered by the type
+-- predicate as before this migration.
 --
 -- A REGISTRY CHANGE (any writer of context_block_types: the type API, a
 -- migration, psql) can turn the answer for a name. trg_block_types_embed_
@@ -171,8 +176,7 @@ BEGIN
     IF TG_OP = 'UPDATE'
        AND NEW.type_name IS NOT DISTINCT FROM OLD.type_name
        AND NEW.embed_excluded IS NOT DISTINCT FROM OLD.embed_excluded
-       AND (NEW.is_archived OR NOT OLD.is_archived)          -- not an unarchive
-       AND (NEW.embedding IS NOT NULL OR OLD.embedding IS NULL) THEN -- not a vector clear
+       AND (NEW.is_archived OR NOT OLD.is_archived) THEN     -- not an unarchive
         RETURN NEW;
     END IF;
     NEW.embed_excluded := ctx_block_type_never_embedded(NEW.type_name);
@@ -189,10 +193,10 @@ END;
 $$;
 
 COMMENT ON FUNCTION context_blocks_embed_excluded() IS
-    'trg_block_embed_excluded (migration 175): sets context_blocks.embed_excluded from the type registry on insert, re-type, unarchive and vector clear.';
+    'trg_block_embed_excluded (migration 175): sets context_blocks.embed_excluded from the type registry on insert, re-type and unarchive.';
 
 CREATE OR REPLACE TRIGGER trg_block_embed_excluded
-    BEFORE INSERT OR UPDATE OF type_name, embed_excluded, is_archived, embedding ON context_blocks
+    BEFORE INSERT OR UPDATE OF type_name, embed_excluded, is_archived ON context_blocks
     FOR EACH ROW EXECUTE FUNCTION context_blocks_embed_excluded();
 
 CREATE OR REPLACE FUNCTION context_block_types_embed_excluded() RETURNS trigger
