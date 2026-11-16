@@ -190,6 +190,11 @@ class CtxMemoryProvider(MemoryProvider):
         server entry signs in with)."""
         return (self._api_key,)
 
+    def _profile_secrets(self) -> tuple[str, ...]:
+        """The profile's ctx keys besides the REST key, read now (the umbrella resolves its MCP
+        server entry's, ``status.profile_ctx_keys``). Default: none."""
+        return ()
+
     def _bound_secrets(self) -> tuple[str, ...]:
         """The ctx keys this provider removes from everything it stores: the current binding's and
         those of earlier bindings of this instance (:data:`MAX_REMEMBERED_SECRETS`). Read when a
@@ -348,8 +353,10 @@ class CtxMemoryProvider(MemoryProvider):
         save_ctx_config(dict(values or {}), hermes_home)
 
     def get_status_config(self, provider_config: dict) -> dict:
-        """Feeds ``hermes memory status``. Must not raise."""
+        """Feeds ``hermes memory status``. Must not raise. Error texts are redacted with the keys
+        the provider binds (the REST key and :meth:`_profile_secrets`, #308)."""
         status: dict[str, Any] = {"summary": "✗ CTX not configured (set CTX_BASE_URL and CTX_KEY)", "ok": False}
+        api_key = ""
         try:
             from hermes_constants import get_hermes_home
 
@@ -358,10 +365,12 @@ class CtxMemoryProvider(MemoryProvider):
             base = status["base_url"] = resolve_base_url(str(fallback))
             api_key = env_secret("CTX_KEY")
         except Exception as exc:
-            status["summary"] = f"✗ CTX config unreadable: {shorten(str(exc), 140)}"
+            text = redact_error_text(exc, (api_key, *self._profile_secrets()))
+            status["summary"] = f"✗ CTX config unreadable: {shorten(text, 140)}"
             return status
         if not (api_key and base):
             return status
+        secrets = (api_key, *self._profile_secrets())
         try:
             client = CtxClient(base, api_key, timeout=8.0)
             info = client.whoami()
@@ -377,9 +386,10 @@ class CtxMemoryProvider(MemoryProvider):
                     }
                 )
             else:
-                status["summary"] = f"✗ whoami failed: {info.get('error') or 'unknown'} · {base}"
+                cause = redact_error_text(info.get("error") or "unknown", secrets)
+                status["summary"] = f"✗ whoami failed: {shorten(cause, 140)} · {base}"
         except Exception as exc:
-            status["summary"] = f"✗ {shorten(str(exc), 140)} · {base}"
+            status["summary"] = f"✗ {shorten(redact_error_text(exc, secrets), 140)} · {base}"
         return status
 
     # -- Lifecycle ------------------------------------------------------------
