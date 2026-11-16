@@ -477,6 +477,9 @@ func efSearchProbeSteps(ctx context.Context, tx pgx.Tx, fallback string) string 
 // idx_embedding_pending, Achse 04/K2, and the stale indexes of migration
 // 173) — it computes ONLY when a matching partial index exists on
 // context_blocks, else null (never 0, never an unguarded scan; Gate G3).
+// A block of a type that is never embedded (embed_excluded, issue #291) is
+// not backlog: the unembedded set is counted on the pick indexes, which leave
+// such blocks out.
 // Each set is counted in its own index range, and a stale block whose vector
 // a cutover sweep nulled is counted once, with the unembedded. The stale set
 // is counted while both stale-pick indexes are ready (store.StaleIndexesReady,
@@ -508,7 +511,7 @@ func queryEmbedBacklog(ctx context.Context, pool *pgxpool.Pool) *int {
 	err = pool.QueryRow(ctx, `
 		SELECT count(*) FROM (
 			(SELECT 1 FROM context_blocks
-			  WHERE embedding IS NULL AND NOT is_archived
+			  WHERE `+store.UnembeddedPendingPredicate+` AND NOT is_archived
 			  LIMIT $1)`+stale+`
 		) t`, embedBacklogCap+1,
 	).Scan(&n)

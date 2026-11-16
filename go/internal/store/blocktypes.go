@@ -79,27 +79,30 @@ func (e *BlockTypeInUseError) Error() string {
 // (type=system-meta, 73.7 kB ≈ ~32k real tokens) on EVERY boot → ClearEmbedding
 // → ~60 min of CPU embed for a dead vector, recurring.
 //
-// SEMANTICS, deliberately conservative in the fail-safe direction — skipping an
-// embedding is the destructive move (an unembedded block is FTS-only), so the
-// predicate skips a block only when NO reader in the system could ever rank it:
+// The rule is the SQL function ctx_block_type_never_embedded (migration 175,
+// issues #213 and #291), deliberately conservative in the fail-safe direction
+// — skipping an embedding is the destructive move (an unembedded block is
+// FTS-only), so a block is skipped only when NO reader in the system could
+// ever rank it: the name has at least one registry row and EVERY row of that
+// name, in any scope, carries policy 'excluded'. The backfill has no reader
+// identity (both picks are scope-free, they embed whatever is pending), so the
+// reader-aware search rule ("Overlay gewinnt", design/01 §5.4 / D6, pinned by
+// rrf T12) is mirrored as the union over all possible readers: one row of the
+// name with another policy (a tenant overlay lifting a _global exclusion, a
+// same-named type of another tenant) keeps the type embeddable. An absent
+// `retrieval.policy` decodes to full-pass (blocktype.DecodePolicy), and
+// 'damped'/'aggregate-to-parent' are visible types — all of them stay
+// embeddable. A block whose type has NO registry row at all stays embeddable:
+// the registry, not its absence, narrows visibility. A name whose rows are all
+// tenant rows, all excluded, is skipped (issue #213; before migration 175 only
+// a _global exclusion skipped).
 //
-//   - The '_global' row is the base every tenant inherits; only `= 'excluded'`
-//     skips. Absent `retrieval.policy` decodes to full-pass (blocktype.DecodePolicy),
-//     and 'damped'/'aggregate-to-parent' are visible types (Set.VisibleTypes) —
-//     all of them stay embeddable.
-//   - Tenant overlay: the retrieval exclusion in the search path IS reader-aware
-//     ("Overlay gewinnt", design/01 §5.4 / D6, pinned by rrf T12) — a tenant may
-//     lift a _global exclusion to full-pass, and then blocks of that type DO have
-//     a consumer. The backfill has no reader identity (both picks are scope-free,
-//     they embed whatever is pending), so the reader-aware rule is mirrored as the
-//     UNION over all possible readers: an inner NOT EXISTS keeps the type
-//     embeddable as soon as ANY non-_global scope overrides it to a non-excluded
-//     policy. Live 2026-07-25 there are exactly 7 rows, all scope='_global'
-//     (checkpoint + system-meta excluded), so the inner clause is empty in
-//     practice today — it exists so a later tenant override cannot silently
-//     starve that tenant's own retrieval.
-//   - A block whose type has NO registry row at all stays embeddable (NOT EXISTS
-//     over the _global row): the registry, not its absence, narrows visibility.
+// The same function sets context_blocks.embed_excluded (trigger
+// trg_block_embed_excluded, and the reconcile ReconcileEmbedExcluded after a
+// registry change), which keeps such blocks out of the pick indexes
+// altogether (PendingPickSQL). This predicate stays the authority over the
+// rows a pick reads: a block whose marker is not yet set (a registry change
+// the reconcile has not reached) is filtered here row by row.
 //
 // Defined ONCE (design/04 §3.3 "je einmal definiert in Go-Konstanten") and
 // interpolated into the call sites, exactly like its EmbedFailureExcludedPredicate
@@ -107,23 +110,10 @@ func (e *BlockTypeInUseError) Error() string {
 // so it composes into any query whose outer FROM is the bare (unaliased)
 // context_blocks table.
 //
-// NOT covered on purpose (own waves): the /status `embed_backlog` metric
-// (status_db.go) still counts these blocks, so a corpus with parked
-// excluded-type blocks shows a permanent backlog floor; and the re-embed
-// migration worker (embed_cutover.go) keeps its own predicate.
+// NOT covered on purpose (own waves): the re-embed migration worker
+// (embed_cutover.go) keeps its own predicate.
 const RetrievalExcludedTypePredicate = `
-	AND NOT EXISTS (
-		SELECT 1 FROM context_block_types g
-		WHERE g.scope = '_global'
-		  AND g.name = context_blocks.type_name
-		  AND g.config->'retrieval'->>'policy' = 'excluded'
-		  AND NOT EXISTS (
-			SELECT 1 FROM context_block_types o
-			WHERE o.name = g.name
-			  AND o.scope <> '_global'
-			  AND o.config->'retrieval'->>'policy' IS DISTINCT FROM 'excluded'
-		  )
-	)`
+	AND NOT ctx_block_type_never_embedded(context_blocks.type_name)`
 
 const blockTypeCols = `id, name, scope, display_name, description, builtin, is_default, config, created_at, updated_at, updated_by`
 

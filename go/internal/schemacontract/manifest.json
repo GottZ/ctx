@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 174,
-    "migration_count": 62,
+    "migration_max": 175,
+    "migration_count": 63,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -990,6 +990,12 @@
           "type": "text",
           "not_null": false,
           "storage": "x"
+        },
+        {
+          "name": "embed_excluded",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
         }
       ],
       "row_security": false
@@ -1388,6 +1394,23 @@
         },
         {
           "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_embed_excluded_reconcile": {
+      "columns": [
+        {
+          "name": "name",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "queued_at",
           "type": "timestamp with time zone",
           "not_null": true,
           "storage": "p"
@@ -5167,6 +5190,9 @@
     "context_embed_cache_pkey": {
       "def_hash": "4f1bd9c1ec05f655c3c25785f75ecc4fa840f92a7db43181be0f8e30d4121b6f"
     },
+    "context_embed_excluded_reconcile_pkey": {
+      "def_hash": "43c22edcb262f803a23cd4a9b41be9c1087a06e96c51b9001abf8a8ceff0f8b8"
+    },
     "context_embed_migrations_pkey": {
       "def_hash": "492240df3c0927d8466d6850e9dde7a62bc188026728dde698547bbc24ece6fd"
     },
@@ -5410,6 +5436,9 @@
     "idx_blocks_dream_temporal_pending": {
       "def_hash": "69a2610cbcf0ae402349859dfc9ce4b5c1fce0c4c725405aec07200fb6eb1eb4"
     },
+    "idx_blocks_embed_excluded": {
+      "def_hash": "4f79e1266a22f95d02218afbc3b3d4d86082ddc9757ce275a5931d9f64867dc5"
+    },
     "idx_blocks_sensitivity": {
       "def_hash": "2a00f9e1404aebddc150557068562c6472f426d2745376bf6af44664cbe25a80"
     },
@@ -5535,10 +5564,10 @@
       "def_hash": "d3387ab8aa9e7ee3dba5d7713da03c2ec9eeac082882d7fe41b535860455280a"
     },
     "idx_embedding_pending_scope_sens": {
-      "def_hash": "81277434d6d8b2c186a2234bb8f382170fc8de78adf0b830e6466daa218a62c8"
+      "def_hash": "955bee8901175bd0859b3d9fd0832645ad7fc64a83eaa705dc288986ad11867f"
     },
     "idx_embedding_pending_sens": {
-      "def_hash": "e2fd83a68330773dd6d548e678b4b1bf01b9ef3b526e32888f7472423fa23f47"
+      "def_hash": "83df2fb8d498a4bc7791d2eb4c875119da07bc4e9bfee5b9a319de8e1417e292"
     },
     "idx_embedding_stale_scope_sens": {
       "def_hash": "ed7145804a50d341900ad96e84ad908eeb9f8e1c3e9f0142f9ee80d2611afb2e"
@@ -6004,6 +6033,12 @@
     "context_block_counts_upd()": {
       "src_hash": "3178553d752b1bda3afbbc13a68ed1759979daba67871dff4d818d136f9edc6e"
     },
+    "context_block_types_embed_excluded()": {
+      "src_hash": "2b33b7238add6c01a733e84b4dad77ef531ed9122f9189702ad03f53c72a88b5"
+    },
+    "context_blocks_embed_excluded()": {
+      "src_hash": "ae128f8ec43e753ef19fa3b2bb45b60a8092bdfd0dc06afc3eeefc1111310883"
+    },
     "context_blocks_retype()": {
       "src_hash": "510b3cc776e86b2dbc44a6245b33ada942e5e9e306e98fbe0d3f3a568135022c"
     },
@@ -6012,6 +6047,9 @@
     },
     "ctx_auth_by_id(p_api_key_id uuid)": {
       "src_hash": "4b5add16d06a48cb0783435e48748263c962ed6c33c9f7bb1e7fb270a4deff4e"
+    },
+    "ctx_block_type_never_embedded(p_name text)": {
+      "src_hash": "7ba0a71d196a3389390b8584ad630bc81eca8a6ffa1f78c3c8a2dada55164a52"
     },
     "ctx_guard_check(p_block_id uuid, p_threshold_duplicate real, p_threshold_review real, p_candidate_types text[], p_same_scope_only boolean)": {
       "src_hash": "ac5ce9d8a27d12c49a318edc0b64de8b52927698cdd6931605fee1cf68fc096e"
@@ -6102,6 +6140,9 @@
     "context_block_types.trg_block_types_audit": {
       "def_hash": "5e7c5fe98f09746deb550496a2e7220eb6770203a6900584b59d12d354aea7e3"
     },
+    "context_block_types.trg_block_types_embed_excluded": {
+      "def_hash": "ea95f8a545ec431f4f7325fad0ff5a313dce74fbff2165050a5cd26328df38a1"
+    },
     "context_block_types.trg_block_types_notify": {
       "def_hash": "bcdb355eb429d68b7c32db9216e0cf4c4e8210aa82bc6cc550b13b0f9591da23"
     },
@@ -6116,6 +6157,9 @@
     },
     "context_blocks.trg_block_counts_upd": {
       "def_hash": "a32b0d48259ce7cf0cf3b83942ba2ea4fea8c0e0e4941b252c91f8fe40ad6d03"
+    },
+    "context_blocks.trg_block_embed_excluded": {
+      "def_hash": "27027aa8208a06538dcad522525c0389b7d08ad154d78169113389fca7f5ec47"
     },
     "context_blocks.trg_block_retype": {
       "def_hash": "0da2d78c0902ef152a6e9d813b17879bd8e39ab5e55b0da39119f9d0ef25eb09"

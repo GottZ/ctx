@@ -326,9 +326,11 @@ T="T07 SCHEMA_INTEGRITY"
 # context_block_counts und context_block_count_deltas hinzu → 68 Tabellen,
 # Spalten unverändert; 171 und 172 fügen keine Tabelle hinzu; 173 fügt
 # context_blocks.embedding_stale hinzu → 68 Tabellen, 43 Spalten; 174 fügt
-# context_blocks.untrusted_origin hinzu → 68 Tabellen, 44 Spalten).
-T07_EXPECT_TABLES=68
-T07_EXPECT_COLUMNS=44
+# context_blocks.untrusted_origin hinzu → 68 Tabellen, 44 Spalten; 175 fügt
+# context_blocks.embed_excluded und context_embed_excluded_reconcile hinzu →
+# 69 Tabellen, 45 Spalten).
+T07_EXPECT_TABLES=69
+T07_EXPECT_COLUMNS=45
 
 t07_count_fallback() {
   local reason="$1"
@@ -338,7 +340,7 @@ t07_count_fallback() {
   if [[ "$tc" == "$T07_EXPECT_TABLES" ]] && [[ "$col" == "$T07_EXPECT_COLUMNS" ]]; then
     pass "$T (contract-CLI nicht verfügbar — Zähl-Fallback (Prä-Deploy); tables=$tc, columns=$col; $reason)"
   else
-    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected $T07_EXPECT_TABLES tables + $T07_EXPECT_COLUMNS columns (Stand Mig 174), got tables=$tc columns=$col"
+    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected $T07_EXPECT_TABLES tables + $T07_EXPECT_COLUMNS columns (Stand Mig 175), got tables=$tc columns=$col"
   fi
 }
 
