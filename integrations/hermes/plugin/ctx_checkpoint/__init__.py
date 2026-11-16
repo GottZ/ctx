@@ -1015,7 +1015,8 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
 
     def _apply_form(self, values: dict[str, Any], *, api_key: str, key_visible: bool) -> None:
         """Validate, test the connection where it changed and the test can see every
-        credential, then write. Nothing is written when a check fails."""
+        credential, then write. Nothing is written when a check fails, nor when the required
+        mode is to be turned on and this Hermes cannot run the test."""
         _require_writable_config()
         config = _read_user_config()
         settings = _normalize_setup_values(values, self._effective_settings())
@@ -1055,6 +1056,13 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
             )
             if test.ok is False:
                 raise ValueError(f"{test.detail[:1].upper()}{test.detail[1:]}. Nothing was saved.")
+            if test.ok is None and switch is True:
+                # As the terminal setup: the mode is turned on only after a passing test (#294).
+                raise ValueError(
+                    f"{test.detail[:1].upper()}{test.detail[1:]}. The required mode needs a passing connection "
+                    f"test, so it stays off; set compression.checkpoint_required in config.yaml once "
+                    f"`hermes mcp test {name}` passes. Nothing was saved."
+                )
         target = ctx_url or entry.get("url")
         if _st.insecure_http(target):
             logger.warning("ctx_checkpoint: %s", _st.http_warning(target))

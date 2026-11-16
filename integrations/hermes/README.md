@@ -73,7 +73,7 @@ is about the checkpoint layer.
 The plugin is a plain Hermes **user plugin** — it lives in
 `$HERMES_HOME/plugins/ctx_checkpoint/`, whether the catalog or the installer
 put it there, and works in best-effort mode on a completely stock Hermes.
-Plugin 0.12.0 declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
+Plugin 0.13.0 declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
 `delegate_task` children inherit the provider under the fail-closed gate; the
 catalog pin (0.6.2) still declares ≥ 0.20.4 (since upstream v2026.8.18,
 provider text is forwarded into the compaction summary).
@@ -151,7 +151,8 @@ URL and the API key need an answer. Saving tests the connection with Hermes' own
 MCP probe (the one behind `hermes mcp test`) and refuses a failing test with its
 reason; the terminal setup then offers the operating mode
 (`compression.checkpoint_required`), and the Desktop form carries it as a switch
-that needs a passing test to turn on. The web dashboard's form neither tests nor
+that needs a passing test to turn on (a Hermes that cannot run the test keeps the
+mode as it is and says why, 0.13.0). The web dashboard's form neither tests nor
 carries the mode: it saves the key after the plugin's settings and sends every
 field with the value it loaded. The key lands in Hermes' `.env` as `CTX_API_KEY`, and
 the `mcp_servers` entry references it as `Authorization: Bearer
@@ -557,6 +558,9 @@ and manifest are deliberately small so routine recall stays cheap.
   written next to the plugin key `sensitivity` wins in either order. The error text of a
   failed chain, fact, mirror or digest store is redacted with the bound keys before it is
   raised or logged (GottZ/ctx#301).
+- 0.13.0: the Desktop form no longer turns the required mode on when the connection test
+  cannot run on the loading Hermes; it refuses with the reason, as the terminal setup
+  never offers the mode then (GottZ/ctx#294).
 
 ## Licensing
 

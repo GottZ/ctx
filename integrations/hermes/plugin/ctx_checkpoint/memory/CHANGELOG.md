@@ -6,6 +6,19 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.13.0] — 2026-11-16
+
+Setup, MCP tool names and error texts (GottZ/ctx#294, #297, #304).
+
+- **The required mode needs a passing test on every surface (GottZ/ctx#294).** The Desktop
+  form ran the connection test before it wrote `compression.checkpoint_required: true` but
+  refused the save only when the test failed; when the loading Hermes could not run it
+  (`ConnectionTest.ok is None`: `_probe_single_server` missing or without `connect_timeout`)
+  the mode was written anyway, while the terminal setup offers it only after a passing test.
+  `_apply_form` now refuses that save with the reason and how to set the mode once
+  `hermes mcp test <entry>` passes; nothing is written. Saves without the mode, and turning it
+  off, still need no test.
+
 ## [ctx_checkpoint 0.12.0] — 2026-11-16
 
 Gate and setting edge cases with the memory features on (GottZ/ctx#289).

@@ -201,7 +201,9 @@ Switch the mode in Hermes Desktop (*Settings → Memory → ctx_checkpoint → W
 the checkpoint before compacting*), in `hermes memory setup ctx_checkpoint` (asked
 after the connection test) or with `compression.checkpoint_required` in
 `config.yaml`; `hermes memory status` shows which one is active. Turning it on
-needs a passing connection test.
+needs a passing connection test: on a Hermes that cannot run the test, the
+Desktop switch refuses with the reason and the terminal setup does not offer the
+mode (0.13.0); set it in `config.yaml` once `hermes mcp test <entry>` passes.
 
 Fail-closed means accepting a session halt (`BLOCKED_MISSING_PREREQUISITE`) while
 ctx is unreachable, instead of an unarchived compaction. The halt also triggers

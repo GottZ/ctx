@@ -389,6 +389,49 @@ def test_a_hermes_without_the_probe_does_not_block_setup(hermes_home, linked_plu
     assert "compression" not in _read_config(hermes_home)
 
 
+@pytest.mark.parametrize(
+    "values",
+    [{"checkpoint_required": True}, {"checkpoint_required": True, "category": "mine"}],
+    ids=["mode-alone", "mode-with-another-field"],
+)
+def test_desktop_form_keeps_the_mode_when_the_connection_test_cannot_run(
+    hermes_home, linked_plugin, probe, monkeypatch, values
+):
+    """#294: turning the required mode on needs a passing test on every surface. Desktop's compact
+    panel saves one field at a time, so the mode toggle is refused on its own with the reason, as a
+    failed test refuses it; the terminal setup does not offer the mode in this case."""
+    (hermes_home / ".env").write_text(f"{KEY_ENV}={SECRET}\n", encoding="utf-8")
+    _write_config(
+        hermes_home,
+        {
+            "mcp_servers": {
+                "ctx": {"url": "https://ctx.example.test/mcp", "headers": {"Authorization": "Bearer ${CTX_API_KEY}"}}
+            },
+            "compression": {"threshold": 0.6},
+            "memory": {"provider": "ctx_checkpoint"},
+        },
+    )
+    probe.error = ImportError("no _probe_single_server")
+
+    with pytest.raises(ValueError) as refused:
+        _desktop_save(monkeypatch, Provider(config={}), values)
+
+    message = str(refused.value)
+    assert "no MCP connection test" in message
+    assert "needs a passing connection test" in message and "stays off" in message
+    assert "`hermes mcp test ctx`" in message and "Nothing was saved" in message
+    config = _read_config(hermes_home)
+    assert config["compression"] == {"threshold": 0.6}
+    assert "category" not in (config["memory"].get("ctx_checkpoint") or {})
+    assert len(probe.calls) == 1
+
+    # Turning it off, and saves without the mode, need no test and still work on such a Hermes.
+    _desktop_save(monkeypatch, Provider(config={}), {"category": "mine"})
+    assert _read_config(hermes_home)["memory"]["ctx_checkpoint"]["category"] == "mine"
+    _desktop_save(monkeypatch, Provider(config={}), {"checkpoint_required": False})
+    assert _read_config(hermes_home)["compression"] == {"threshold": 0.6}  # already off: nothing to write
+
+
 def test_a_changed_probe_signature_counts_as_no_test(monkeypatch):
     import hermes_cli.mcp_config as host_mcp
 
