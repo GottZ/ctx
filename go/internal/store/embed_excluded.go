@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -20,9 +21,14 @@ const EmbedExcludedReconcileBatch = 1000
 // blocks each, issue #291 (migration 175):
 //
 //   - markEmbedExcludedSQL: the name became never-embedded. Its unmarked
-//     pending blocks, on idx_embedding_pending_sens (sensitivity, created_at,
-//     id) in its order from the keyset cursor ($3, $4, $5) on, so a batch
-//     does not read again what the batches before it passed. A block with a
+//     pending blocks with a created_at, on idx_embedding_pending_sens
+//     (sensitivity, created_at, id) in its order from the keyset cursor ($3,
+//     $4, $5) on, so a batch does not read again what the batches before it
+//     passed. created_at is nullable, and a row comparison with a NULL in it
+//     is NULL: such a block would sort last and turn the cursor into a value
+//     no later row compares above, so the cursor pass leaves them out and
+//     markEmbedExcludedNullAtSQL takes them (no cursor: a marked block leaves
+//     the set it reads). A block with a
 //     vector or an archived one keeps false: it is in no pick index, and the
 //     trigger sets the marker when it is unarchived or re-typed (a cleared
 //     vector puts it back in the pick indexes unmarked, filtered by the type
@@ -45,6 +51,7 @@ const (
 		UPDATE context_blocks SET embed_excluded = true
 		 WHERE id IN (SELECT id FROM context_blocks
 		               WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded AND type_name = $1
+		                 AND created_at IS NOT NULL
 		                 AND (sensitivity, created_at, id) > ($3::text, $4::timestamptz, $5::uuid)
 		               ORDER BY sensitivity, created_at, id
 		               LIMIT $2)
@@ -55,6 +62,15 @@ const (
 		  FROM (SELECT 1) one
 		  LEFT JOIN LATERAL (SELECT sensitivity, created_at, id FROM u
 		                      ORDER BY sensitivity DESC, created_at DESC, id DESC LIMIT 1) l ON true`
+	markEmbedExcludedNullAtSQL = `WITH u AS (
+		UPDATE context_blocks SET embed_excluded = true
+		 WHERE id IN (SELECT id FROM context_blocks
+		               WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded AND type_name = $1
+		                 AND created_at IS NULL
+		               LIMIT $2)
+		   AND NOT embed_excluded
+		RETURNING embed_excluded)
+		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE embed_excluded = $3)`
 	clearEmbedExcludedSQL = `WITH u AS (
 		UPDATE context_blocks SET embed_excluded = false
 		 WHERE id IN (SELECT id FROM context_blocks
@@ -115,12 +131,20 @@ func ReconcileEmbedExcluded(ctx context.Context, pool *pgxpool.Pool) (EmbedExclu
 	if err != nil {
 		return res, fmt.Errorf("store: embed-excluded queue: %w", err)
 	}
+	// A name that fails stays queued and does not hold up the names behind
+	// it; the pass reports every failure at its end.
+	var errs []error
 	for _, e := range q {
+		if ctx.Err() != nil {
+			errs = append(errs, ctx.Err())
+			break
+		}
 		res.Names++
 		n, done, err := reconcileEmbedExcludedName(ctx, pool, e.name)
 		res.Updated += n
 		if err != nil {
-			return res, err
+			errs = append(errs, err)
+			continue
 		}
 		if !done {
 			continue // the answer kept moving: the queue row stays for the next pass
@@ -128,11 +152,12 @@ func ReconcileEmbedExcluded(ctx context.Context, pool *pgxpool.Pool) (EmbedExclu
 		tag, err := pool.Exec(ctx,
 			`DELETE FROM context_embed_excluded_reconcile WHERE name = $1 AND queued_at = $2`, e.name, e.at)
 		if err != nil {
-			return res, fmt.Errorf("store: embed-excluded dequeue %q: %w", e.name, err)
+			errs = append(errs, fmt.Errorf("store: embed-excluded dequeue %q: %w", e.name, err))
+			continue
 		}
 		res.Done += int(tag.RowsAffected())
 	}
-	return res, nil
+	return res, errors.Join(errs...)
 }
 
 // reconcileEmbedExcludedName runs the batches of one name until none is
@@ -156,7 +181,7 @@ func reconcileEmbedExcludedName(ctx context.Context, pool *pgxpool.Pool, name st
 				cursor.sens, cursor.at, cursor.id, true).Scan(&wrote, &reached, &sens, &at, &id); err != nil {
 				return updated, false, fmt.Errorf("store: embed-excluded mark %q: %w", name, err)
 			}
-			if sens != nil {
+			if sens != nil && at != nil && id != nil {
 				cursor = embedExcludedKey{sens: *sens, at: *at, id: *id}
 			}
 		} else if err := pool.QueryRow(ctx, clearEmbedExcludedSQL, name, EmbedExcludedReconcileBatch, false).
@@ -175,7 +200,15 @@ func reconcileEmbedExcludedName(ctx context.Context, pool *pgxpool.Pool, name st
 		case wrote > 0:
 			moved = 0
 		default:
-			// Nothing from the cursor on: look from the start once more.
+			// Nothing from the cursor on: the blocks without a created_at,
+			// then a look from the start once more.
+			if never {
+				n, err := markEmbedExcludedNullAt(ctx, pool, name)
+				updated += n
+				if err != nil {
+					return updated, false, err
+				}
+			}
 			var left bool
 			if err := pool.QueryRow(ctx, embedExcludedLeftSQL, name, never).Scan(&left); err != nil {
 				return updated, false, fmt.Errorf("store: embed-excluded left %q: %w", name, err)
@@ -189,6 +222,23 @@ func reconcileEmbedExcludedName(ctx context.Context, pool *pgxpool.Pool, name st
 				return updated, false, nil
 			}
 			cursor = embedExcludedKeyStart
+		}
+	}
+}
+
+// markEmbedExcludedNullAt marks the unmarked pending blocks of name without a
+// created_at, batch by batch, until none is left or the trigger sets a batch
+// back (the answer moved; the caller looks again).
+func markEmbedExcludedNullAt(ctx context.Context, pool *pgxpool.Pool, name string) (updated int, err error) {
+	for {
+		var wrote, reached int
+		if err := pool.QueryRow(ctx, markEmbedExcludedNullAtSQL, name, EmbedExcludedReconcileBatch, true).
+			Scan(&wrote, &reached); err != nil {
+			return updated, fmt.Errorf("store: embed-excluded mark without created_at %q: %w", name, err)
+		}
+		updated += reached
+		if wrote == 0 || reached == 0 {
+			return updated, nil
 		}
 	}
 }

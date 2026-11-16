@@ -339,3 +339,92 @@ func TestEmbedExcludedReconcileAnswerMoves(t *testing.T) {
 		t.Errorf("%d names still queued after a pass on a stable registry", queued)
 	}
 }
+
+// reconcileNoPanic runs one reconcile pass and turns a panic into a test
+// failure, so a crash of the pass is a red test and not a crashed binary.
+func reconcileNoPanic(t *testing.T, pool *pgxpool.Pool) (res store.EmbedExcludedReconcileResult, err error) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("reconcile panicked: %v", r)
+		}
+	}()
+	return store.ReconcileEmbedExcluded(context.Background(), pool)
+}
+
+// TestEmbedExcludedReconcileNullCreatedAt: context_blocks.created_at is
+// nullable. Blocks that exist before migration 175, one of them without a
+// created_at, are all marked by the reconcile, and the pass neither panics
+// nor leaves the name queued.
+func TestEmbedExcludedReconcileNullCreatedAt(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.SetupTestDBUpTo(t, 174)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO context_blocks (category, title, content, type_name, scope, sensitivity, created_at, updated_at)
+		 SELECT 'ee-cat', 'ee null ' || i, 'x', 'checkpoint', 'ee-a', 'public',
+		        CASE WHEN i = 5 THEN NULL ELSE now() - make_interval(secs => i) END, now()
+		   FROM generate_series(1, 10) i`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := store.RunMigrations(ctx, pool); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := reconcileNoPanic(t, pool); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	var unmarked, queued int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_blocks WHERE title LIKE 'ee null %' AND NOT embed_excluded`).Scan(&unmarked); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_excluded_reconcile WHERE name = 'checkpoint'`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if unmarked != 0 || queued != 0 {
+		t.Errorf("after the reconcile: %d checkpoint blocks unmarked, checkpoint queued %d times, want 0 and 0", unmarked, queued)
+	}
+}
+
+// TestEmbedExcludedReconcileFailingNameDoesNotBlock: the first queued name
+// fails on every batch; the name queued after it is reconciled all the same,
+// and the failing one stays queued.
+func TestEmbedExcludedReconcileFailingNameDoesNotBlock(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	reconcile(t, pool)
+	for _, st := range []string{
+		`INSERT INTO context_blocks (category, title, content, type_name, scope, sensitivity, updated_at)
+		 SELECT 'ee-cat', 'ee ' || n || ' ' || i, 'x', n, 'ee-a', 'public', now()
+		   FROM unnest(ARRAY['ee-fail', 'ee-next']) n, generate_series(1, 3) i`,
+		`CREATE FUNCTION ee_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+		 BEGIN
+		     IF NEW.type_name = 'ee-fail' AND NEW.embed_excluded IS DISTINCT FROM OLD.embed_excluded THEN
+		         RAISE EXCEPTION 'ee-fail refuses its marker';
+		     END IF;
+		     RETURN NEW;
+		 END $$`,
+		`CREATE TRIGGER zz_ee_fail BEFORE UPDATE ON context_blocks FOR EACH ROW EXECUTE FUNCTION ee_fail()`,
+	} {
+		if _, err := pool.Exec(ctx, st); err != nil {
+			t.Fatalf("%s: %v", st, err)
+		}
+	}
+	createType(t, pool, "ee-fail", "_global", "excluded")
+	createType(t, pool, "ee-next", "_global", "excluded")
+
+	if _, err := reconcileNoPanic(t, pool); err == nil {
+		t.Errorf("reconcile reported no error for the failing name")
+	}
+	var unmarked, failQueued int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_blocks WHERE type_name = 'ee-next' AND NOT embed_excluded`).Scan(&unmarked); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_excluded_reconcile WHERE name = 'ee-fail'`).Scan(&failQueued); err != nil {
+		t.Fatal(err)
+	}
+	if unmarked != 0 {
+		t.Errorf("%d blocks of the name queued after the failing one are unmarked: the failing name blocked the queue", unmarked)
+	}
+	if failQueued != 1 {
+		t.Errorf("the failing name is queued %d times, want 1 (kept for the next pass)", failQueued)
+	}
+}

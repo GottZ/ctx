@@ -11,10 +11,14 @@ import (
 // embedExcludedReconcileInterval is the cadence of the embed_excluded
 // reconcile (issue #291, migration 175): how soon after a registry change
 // the blocks of a type that became never-embedded leave the pick indexes,
-// and the blocks of a type that became embeddable return to them. A constant
-// (blockCountFoldInterval precedent): an empty queue costs one index-only
-// read of an empty table per tick, and a registry change is rare.
-const embedExcludedReconcileInterval = 30 * time.Second
+// and the blocks of a type that became embeddable return to them. Fixed
+// (blockCountFoldInterval precedent): an empty queue costs one read of an
+// empty table per tick, and a registry change is rare. A var, not a const,
+// for tests (blockCountReconcilePoll precedent).
+var embedExcludedReconcileInterval = 30 * time.Second
+
+// reconcileEmbedExcluded is the pass the arm runs; a var for tests.
+var reconcileEmbedExcluded = store.ReconcileEmbedExcluded
 
 // runEmbedExcludedReconcile drains the embed_excluded reconcile queue every
 // embedExcludedReconcileInterval (store.ReconcileEmbedExcluded). It runs
@@ -27,20 +31,31 @@ func (s *Scheduler) runEmbedExcludedReconcile(ctx context.Context) {
 	t := time.NewTicker(embedExcludedReconcileInterval)
 	defer t.Stop()
 	for {
-		res, err := store.ReconcileEmbedExcluded(ctx, s.pool)
+		s.embedExcludedReconcilePass(ctx)
 		if ctx.Err() != nil {
 			return
-		}
-		if err != nil {
-			slog.Warn("scheduler: embed excluded reconcile failed", "error", err)
-		} else if res.Names > 0 {
-			slog.Info("scheduler: embed excluded reconcile",
-				"names", res.Names, "done", res.Done, "updated", res.Updated)
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
+	}
+}
+
+// embedExcludedReconcilePass is one pass of the arm. A panic ends the pass,
+// not the arm (guardPanic inside the pass): the next tick runs again.
+func (s *Scheduler) embedExcludedReconcilePass(ctx context.Context) {
+	defer guardPanic("embed excluded reconcile pass")
+	res, err := reconcileEmbedExcluded(ctx, s.pool)
+	if ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		slog.Warn("scheduler: embed excluded reconcile failed", "error", err,
+			"names", res.Names, "done", res.Done, "updated", res.Updated)
+	} else if res.Names > 0 {
+		slog.Info("scheduler: embed excluded reconcile",
+			"names", res.Names, "done", res.Done, "updated", res.Updated)
 	}
 }
