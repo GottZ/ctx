@@ -34,6 +34,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
@@ -156,6 +157,12 @@ func TestBackfillPending_RetrievalExcludedType_Integration(t *testing.T) {
 		 VALUES ('checkpoint', 'exclx-tenant', false, false,
 		         '{"v":1,"retrieval":{"policy":"full-pass"}}'::jsonb)`); err != nil {
 		t.Fatalf("insert tenant override: %v", err)
+	}
+	// Since migration 175 the checkpoint block carries embed_excluded, which
+	// keeps it out of the pick indexes; the registry change queued the name,
+	// and the scheduler's reconcile clears the marker (issue #291).
+	if _, err := store.ReconcileEmbedExcluded(ctx, pool); err != nil {
+		t.Fatalf("reconcile after the tenant override: %v", err)
 	}
 
 	before := hits.Load()
