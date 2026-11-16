@@ -215,13 +215,40 @@ func TestIngestRequest_Validation_TitleTooLong(t *testing.T) {
 	}
 }
 
-// The ingest chunker keeps the titles it lengthens (#316) within
-// ingest.MaxTitleBytes so they cannot make this endpoint refuse a batch;
-// both must name the same limit.
-func TestIngestTitleLimitMatchesChunker(t *testing.T) {
-	if maxTitleLen != ingest.MaxTitleBytes {
-		t.Fatalf("handler maxTitleLen = %d, ingest.MaxTitleBytes = %d: the chunker would size titles against another limit",
-			maxTitleLen, ingest.MaxTitleBytes)
+// `ctx ingest` holds back a file with a chunk over one of these limits before
+// the upload (#318), and the chunker keeps the titles it lengthens (#316)
+// within ingest.MaxTitleBytes, so neither can make this endpoint refuse a
+// batch; both sides must name the same limits.
+func TestIngestLimitsMatchCLI(t *testing.T) {
+	for _, l := range []struct {
+		name          string
+		handler, ingt int
+	}{
+		{"title", maxTitleLen, ingest.MaxTitleBytes},
+		{"category", maxCategoryLen, ingest.MaxCategoryBytes},
+		{"content", maxContentSize, ingest.MaxContentBytes},
+	} {
+		if l.handler != l.ingt {
+			t.Errorf("%s limit: handler %d, internal/ingest %d: the CLI would check its chunks against another limit",
+				l.name, l.handler, l.ingt)
+		}
+	}
+}
+
+// The title and category limits are byte counts (len), and the refusal says
+// so: a 200-rune title of three-byte characters is refused although it is far
+// below 500 characters.
+func TestIngestRequest_Validation_LimitsAreNamedInBytes(t *testing.T) {
+	errs := validateIngestRequest(&IngestRequest{Chunks: []IngestChunk{{
+		Category: strings.Repeat("ä", 51),
+		Title:    strings.Repeat("—", 200),
+		Content:  "content",
+	}}})
+	joined := strings.Join(errs, "; ")
+	for _, want := range []string{"category exceeds 100 bytes", "title exceeds 500 bytes"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("errors %q lack %q", joined, want)
+		}
 	}
 }
 

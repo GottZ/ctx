@@ -22,10 +22,17 @@ const MaxChunkChars = 7200
 // MinChunkChars is the minimum content size — smaller sections get merged.
 const MinChunkChars = 200
 
-// MaxTitleBytes is the longest title POST /api/ingest accepts (maxTitleLen in
-// internal/handler/ingest.go, measured with len, so in bytes). A longer title
-// makes the server refuse the whole request, the other files' chunks in it too.
-const MaxTitleBytes = 500
+// MaxTitleBytes, MaxCategoryBytes and MaxContentBytes are the per-chunk limits
+// of POST /api/ingest (maxTitleLen, maxCategoryLen and maxContentSize in
+// internal/handler/ingest.go, measured with len, so in bytes; a handler test
+// pins that both sides name the same numbers). A chunk over one of them makes
+// the server refuse the whole request, the other files' chunks in it too, so
+// `ctx ingest` holds such a file back before the upload.
+const (
+	MaxTitleBytes    = 500
+	MaxCategoryBytes = 100
+	MaxContentBytes  = 50 * 1024
+)
 
 // headingRe matches H1/H2 at line start.
 var headingRe = regexp.MustCompile(`(?m)^(#{1,2})\s+(.+)$`)
@@ -399,8 +406,11 @@ func numberRepeated(filename string, paths []string, taken map[string]int) {
 // numbered returns path with the counter n as " (n)", within MaxTitleBytes:
 // path is cut at a rune boundary to make room for the counter, and a
 // filename that leaves less room than " (n)" takes the bare number as its
-// heading path. Only a filename that leaves less room than the number itself
-// stays over the limit; its plain title with a heading of that length did too.
+// heading path. A filename that leaves less room than the number itself gives
+// a title over the limit even where the plain title fit: with one byte of
+// room the heading "X" makes a 500-byte title and the tenth chunk's "10" a
+// 501-byte one. The counter has no title within the limit for that chunk;
+// `ctx ingest` holds such a file back before the upload and reports it.
 func numbered(filename, path string, n int) string {
 	suffix := " (" + itoa(n) + ")"
 	room := MaxTitleBytes - len(filename) - len(titleSep)

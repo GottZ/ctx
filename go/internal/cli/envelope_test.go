@@ -292,6 +292,12 @@ func envelopeInventory() map[string]inventoryEntry {
 		"models consumers deactivate": e1(-1, "models", "consumers", "deactivate", fixtureProject),
 		"models aliases list":         e1(-1, "models", "aliases", "list"),
 
+		// ── #318: ingest leaves the silent group, 0 → 1 ────────────────────
+		// It never ran in a hook. The vault is the one TestEnvelopeContractPerCommand
+		// writes into its working directory; the server's success:false fails the
+		// one batch, and the run reports it and exits 1.
+		"ingest": e1(0, "ingest", "vault"),
+
 		// ── outside the contract: exit 0 stays exit 0 ──────────────────────
 		"health":  e0("health"), // GET /health, no /api envelope at all
 		"brief":   e0("brief"),  // hook surface: degrades silently by design
@@ -302,7 +308,6 @@ func envelopeInventory() map[string]inventoryEntry {
 		"secrets rotate": skip("same stdin-only contract as `secrets set`"),
 		"backends seed":  skip("multi-step provisioning; seals a secret and writes pool rows"),
 		"project detect": skip("purely local (git/.ctx-project), never reaches a server"),
-		"ingest":         skip("walks a vault and streams batches on its own client (ingest.go:451)"),
 		"statusline":     skip("reads the Claude Code JSON from stdin and must never fail a prompt"),
 		"contract":       skip("own exit scale 0/1/2/3 (contract.go:119-131); pinned by contract_test.go"),
 		"init":           skip("first-run wizard: builds its own client and probes api.github.com"),
@@ -369,6 +374,14 @@ func TestEnvelopeContractPerCommand(t *testing.T) {
 	work := t.TempDir()
 	if err := os.WriteFile(work+"/.ctx-project", []byte("identity=manual:fixture\n"), 0o600); err != nil {
 		t.Fatalf("writing .ctx-project: %v", err)
+	}
+	// `ctx ingest vault` needs one note long enough to give a chunk.
+	if err := os.Mkdir(work+"/vault", 0o755); err != nil {
+		t.Fatalf("creating vault: %v", err)
+	}
+	note := "# Note\n\n" + strings.Repeat("Run the importer and compare the counts with the source. ", 6) + "\n"
+	if err := os.WriteFile(work+"/vault/note.md", []byte(note), 0o600); err != nil {
+		t.Fatalf("writing vault note: %v", err)
 	}
 	t.Chdir(work)
 

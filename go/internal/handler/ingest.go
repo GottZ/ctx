@@ -32,10 +32,10 @@ const (
 	// maxContentSize is the maximum content size per chunk (50 KB).
 	maxContentSize = 50 * 1024
 
-	// maxCategoryLen is the maximum category length (100 chars).
+	// maxCategoryLen is the maximum category length in bytes (len).
 	maxCategoryLen = 100
 
-	// maxTitleLen is the maximum title length (500 chars).
+	// maxTitleLen is the maximum title length in bytes (len).
 	maxTitleLen = 500
 )
 
@@ -118,13 +118,13 @@ func validateIngestRequest(req *IngestRequest) []string {
 		if strings.TrimSpace(c.Category) == "" {
 			errs = append(errs, fmt.Sprintf("%s: category is required", prefix))
 		} else if len(c.Category) > maxCategoryLen {
-			errs = append(errs, fmt.Sprintf("%s: category exceeds %d characters", prefix, maxCategoryLen))
+			errs = append(errs, fmt.Sprintf("%s: category exceeds %d bytes", prefix, maxCategoryLen))
 		}
 
 		if strings.TrimSpace(c.Title) == "" {
 			errs = append(errs, fmt.Sprintf("%s: title is required", prefix))
 		} else if len(c.Title) > maxTitleLen {
-			errs = append(errs, fmt.Sprintf("%s: title exceeds %d characters", prefix, maxTitleLen))
+			errs = append(errs, fmt.Sprintf("%s: title exceeds %d bytes", prefix, maxTitleLen))
 		}
 
 		if strings.TrimSpace(c.Content) == "" {

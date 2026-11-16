@@ -328,8 +328,9 @@ func TestChunk_RepeatedHeadingCounterAtTitleLimit(t *testing.T) {
 }
 
 // A filename that leaves less room than " (2)" before the limit: the counter
-// takes the bare number as heading path, so the title stays within
-// MaxTitleBytes whenever the plain one was.
+// takes the bare number as heading path, so with three repeats the title
+// stays within MaxTitleBytes whenever the plain one was. The tenth repeat with
+// one byte of room does not (TestChunk_TenthCounterPassesLimitWithOneByteOfRoom).
 func TestChunk_RepeatedHeadingNameAtTitleLimit(t *testing.T) {
 	for n := MaxTitleBytes - 12; n <= MaxTitleBytes-len(titleSep); n++ {
 		name := strings.Repeat("x", n)
@@ -341,6 +342,37 @@ func TestChunk_RepeatedHeadingNameAtTitleLimit(t *testing.T) {
 		if len(chunks) != 3 {
 			t.Fatalf("name of %d bytes: got %d chunks, want 3", n, len(chunks))
 		}
+	}
+}
+
+// The limit numbered cannot keep (#318): the filename leaves one byte after
+// " — ", so the heading "X" gives a 500-byte title, counters 2 to 9 fit as
+// the bare number, and the tenth chunk's "10" makes a 501-byte title; the
+// counter has no title within MaxTitleBytes for it, and `ctx ingest` holds
+// the file back (internal/cli TestIngestHoldsBackFileOverServerLimit). This
+// characterises numbered as it is and pins its doc comment: a numbered that
+// finds a title within the limit for this chunk changes both.
+func TestChunk_TenthCounterPassesLimitWithOneByteOfRoom(t *testing.T) {
+	name := strings.Repeat("p", MaxTitleBytes-len(titleSep)-1)
+	parts := make([]any, 0, 20)
+	for range 10 {
+		parts = append(parts, "## X", 800)
+	}
+	chunks := Chunk(name, doc(parts...), nil)
+	if len(chunks) != 10 {
+		t.Fatalf("got %d chunks, want 10: %q", len(chunks), chunkTitles(chunks))
+	}
+	for i, c := range chunks {
+		want := MaxTitleBytes
+		if i == 9 {
+			want = MaxTitleBytes + 1
+		}
+		if len(c.Title) != want {
+			t.Errorf("chunk %d: title is %d bytes, want %d (heading path %q)", i, len(c.Title), want, c.HeadingPath)
+		}
+	}
+	if got, want := chunks[9].HeadingPath, "10"; got != want {
+		t.Errorf("tenth chunk heading path = %q, want the bare counter %q", got, want)
 	}
 }
 
