@@ -846,10 +846,13 @@ jobs:
           # must name every explicitly-sharded path: a missing entry runs its
           # package TWICE (once in its own shard, once here), a stale entry
           # drops it from every shard and it goes silently untested.
+          # `go list` carries the same tag as the test run: a package that
+          # exists only under -tags=integration (internal/testdb) is invisible
+          # to an untagged `go list` and its own tests would run nowhere.
           if [ -n "${{ matrix.packages }}" ]; then
             PKGS="${{ matrix.packages }}"
           else
-            PKGS=$(go list ./... | grep -vE '/internal/(handler|store|overview|guard|events|rrf|dream|distillsource)(/|$)' | tr '\n' ' ')
+            PKGS=$(go list -tags=integration ./... | grep -vE '/internal/(handler|store|overview|guard|events|rrf|dream|distillsource)(/|$)' | tr '\n' ' ')
           fi
           echo "Shard '${{ matrix.shard }}' packages: ${PKGS}"
           echo "packages=${PKGS}" >> "$GITHUB_OUTPUT"

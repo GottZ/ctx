@@ -21,7 +21,9 @@ package testdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"strings"
@@ -235,38 +237,9 @@ func buildShared() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	container, err := tcpostgres.Run(ctx, image,
-		tcpostgres.WithDatabase("ctxtest"),
-		tcpostgres.WithUsername("ctxtest"),
-		tcpostgres.WithPassword("ctxtest"),
-		// Cap timescaledb-tune's sizing: the image tunes shared_buffers to
-		// 25% of HOST memory, which on a 7GB CI runner hands the SHARED
-		// container ~1.75GB before a single test runs. With the per-test
-		// containers that was survivable (each lived seconds); the shared
-		// cluster accumulates buffer-cache + per-DB timescale workers across
-		// the whole package and died mid-suite once on CI (2026-08-20, run
-		// 32363351979: EOF during the ANN seed, every later connection
-		// reset — OOM suspected, unproven; the post-mortem CI step now
-		// records the evidence). 2GB/2CPU is deterministic across CI and
-		// local runs — test workloads never need production sizing.
-		testcontainers.WithEnv(map[string]string{
-			"TS_TUNE_MEMORY":   "2GB",
-			"TS_TUNE_NUM_CPUS": "2",
-		}),
-		// No TimescaleDB background workers in the test cluster: no migration
-		// registers policies/jobs, so they are pure liability here — every
-		// per-test DROP DATABASE WITH (FORCE) tears down a per-DB scheduler
-		// worker, and that teardown races the launcher. The two CI postmaster
-		// deaths (runs 32363351979 + 32365157495, different tests, both
-		// mid-DROP/CREATE churn, never reproduced locally where the window is
-		// tiny) match that race, not OOM (oom_killed=false on inspection).
-		testcontainers.WithCmdArgs("-c", "timescaledb.max_background_workers=0"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).
-				WithStartupTimeout(3*time.Minute),
-		),
-	)
+	container, err := startContainer(ctx, func(ctx context.Context) (*tcpostgres.PostgresContainer, error) {
+		return runPostgres(ctx, image)
+	})
 	if err != nil {
 		shared.err = fmt.Errorf("start postgres container: %w", err)
 		return
@@ -306,6 +279,90 @@ func buildShared() {
 		return
 	}
 	tmplPool.Close()
+}
+
+// containerStartAttempts bounds startContainer: the first start plus one
+// retry after a reaper reuse timeout. Fixed on purpose — a second timeout in
+// a row is no longer the shutdown race below and must fail the package.
+const containerStartAttempts = 2
+
+// startContainer runs start and repeats it once when the first attempt fails
+// with the reaper reuse timeout; every other outcome returns unchanged.
+//
+// The race (CI runs 41953516545, 43774745584, 43781877304, Integration Tests
+// (rest)): all test binaries of one `go test` invocation share one
+// testcontainers session and therefore one reaper (Ryuk) container. When the
+// last binary connected to it exits, Ryuk waits its reconnection timeout
+// (10 s by default), removes the session's containers and exits; the
+// container is auto-removed. A package whose first container start lands in
+// that shutdown window finds the dying reaper, and testcontainers-go v0.44.0
+// waits for it to report ready with its fixed 60 s default — the container
+// is gone, so the wait can only run out. The repeated start finds no reaper
+// and creates a fresh one.
+func startContainer(ctx context.Context, start func(context.Context) (*tcpostgres.PostgresContainer, error)) (*tcpostgres.PostgresContainer, error) {
+	container, err := start(ctx)
+	if err == nil || !isReaperReuseTimeout(ctx, err) {
+		return container, err
+	}
+	first := err
+	// The postgres container is created before the reaper is consulted, so a
+	// failed attempt leaves one behind in state "created"; remove it before
+	// the next attempt creates its own.
+	if termErr := testcontainers.TerminateContainer(container); termErr != nil {
+		log.Printf("testdb: remove the container of attempt 1 of %d: %v", containerStartAttempts, termErr)
+	}
+	log.Printf("testdb: container start attempt 1 of %d hit the reaper reuse timeout, starting again: %v", containerStartAttempts, first)
+	container, err = start(ctx)
+	if err != nil {
+		return container, fmt.Errorf("attempt 1 of %d: %w; attempt 2 of %d: %w", containerStartAttempts, first, containerStartAttempts, err)
+	}
+	return container, nil
+}
+
+// isReaperReuseTimeout reports whether err is testcontainers-go's wait for a
+// reused reaper running out ("from container …: wait for reaper …: context
+// deadline exceeded", reaper.go fromContainer) while ctx still has budget —
+// an exhausted ctx is the caller's own deadline, not the race.
+func isReaperReuseTimeout(ctx context.Context, err error) bool {
+	return ctx.Err() == nil &&
+		errors.Is(err, context.DeadlineExceeded) &&
+		strings.Contains(err.Error(), "wait for reaper ")
+}
+
+// runPostgres starts the shared Postgres container from image.
+func runPostgres(ctx context.Context, image string) (*tcpostgres.PostgresContainer, error) {
+	return tcpostgres.Run(ctx, image,
+		tcpostgres.WithDatabase("ctxtest"),
+		tcpostgres.WithUsername("ctxtest"),
+		tcpostgres.WithPassword("ctxtest"),
+		// Cap timescaledb-tune's sizing: the image tunes shared_buffers to
+		// 25% of HOST memory, which on a 7GB CI runner hands the SHARED
+		// container ~1.75GB before a single test runs. With the per-test
+		// containers that was survivable (each lived seconds); the shared
+		// cluster accumulates buffer-cache + per-DB timescale workers across
+		// the whole package and died mid-suite once on CI (2026-08-20, run
+		// 32363351979: EOF during the ANN seed, every later connection
+		// reset — OOM suspected, unproven; the post-mortem CI step now
+		// records the evidence). 2GB/2CPU is deterministic across CI and
+		// local runs — test workloads never need production sizing.
+		testcontainers.WithEnv(map[string]string{
+			"TS_TUNE_MEMORY":   "2GB",
+			"TS_TUNE_NUM_CPUS": "2",
+		}),
+		// No TimescaleDB background workers in the test cluster: no migration
+		// registers policies/jobs, so they are pure liability here — every
+		// per-test DROP DATABASE WITH (FORCE) tears down a per-DB scheduler
+		// worker, and that teardown races the launcher. The two CI postmaster
+		// deaths (runs 32363351979 + 32365157495, different tests, both
+		// mid-DROP/CREATE churn, never reproduced locally where the window is
+		// tiny) match that race, not OOM (oom_killed=false on inspection).
+		testcontainers.WithCmdArgs("-c", "timescaledb.max_background_workers=0"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(3*time.Minute),
+		),
+	)
 }
 
 // prepareDatabase provisions extensions + migrations on a fresh database.
