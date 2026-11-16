@@ -733,16 +733,18 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
 
             config = load_config()
             server = _configured_server(config, self._server_name())
-            if self._colliding_servers(config):
+            if not server or server.get("enabled", True) is False:
                 return False
-            return bool(server) and server.get("enabled", True) is not False
+            return not self._colliding_servers(config)
         except Exception:
             return False
 
     def _colliding_servers(self, config: dict[str, Any]) -> list[str]:
-        """Other ``mcp_servers`` entries whose tools Hermes registers under this entry's tool names."""
-        servers = config.get("mcp_servers") if isinstance(config, dict) else None
-        return colliding_servers(self._server_name(), servers if isinstance(servers, dict) else {})
+        """Other ``mcp_servers`` entries whose tools Hermes registers under this entry's tool names;
+        none while this entry itself is not configured (then that is the reason to name)."""
+        if not _configured_server(config, self._server_name()):
+            return []
+        return colliding_servers(self._server_name(), config.get("mcp_servers"))
 
     def unavailable_reason(self) -> str:
         if self.transport == "rest":

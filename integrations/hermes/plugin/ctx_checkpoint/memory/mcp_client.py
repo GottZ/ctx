@@ -145,18 +145,19 @@ def mcp_tool_name(server: str, tool: str) -> str:
 
 
 def colliding_servers(server: str, servers: Any) -> list[str]:
-    """The other entries of ``mcp_servers`` (a mapping, or the entry names) whose tools Hermes
-    registers under the same names as those of ``server``, disabled entries left out. Hermes keeps
-    the tools of the entry that connects first and skips the other's, so a call by name could
-    reach the other server: the plugin refuses such a binding."""
-    if isinstance(servers, dict):
-        names = [
-            name for name, entry in servers.items() if not (isinstance(entry, dict) and entry.get("enabled") is False)
-        ]
-    else:
-        names = list(servers or ())
+    """The other entries of ``mcp_servers`` (the mapping) whose tools Hermes registers under the
+    same names as those of ``server``, entries with ``enabled: false`` left out. Hermes keeps the
+    tools of the entry that connects first and skips the other's, so a call by name could reach
+    the other server: the plugin refuses such a binding."""
+    entries = servers.items() if isinstance(servers, dict) else ()
     own = _tool_name_part(server)
-    return sorted(str(name) for name in names if str(name) != server and _tool_name_part(str(name)) == own)
+    return sorted(
+        str(name)
+        for name, entry in entries
+        if str(name) != server
+        and _tool_name_part(str(name)) == own
+        and not (isinstance(entry, dict) and entry.get("enabled") is False)
+    )
 
 
 def collision_text(server: str, others: list[str]) -> str:

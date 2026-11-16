@@ -188,6 +188,57 @@ def test_a_dispatch_exception_is_redacted_where_it_enters_the_plugin(home):
     _assert_clean(_texts(raised.value))
 
 
+def _mcp_client(dispatch):
+    mcp_client = importlib.import_module(f"{_SPEC.name}.memory.mcp_client")
+    return mcp_client.McpClient(dispatch, "ctx", secrets=lambda: (CTX_KEY,))
+
+
+@pytest.mark.parametrize("tool", ["store", "search", "get"])
+def test_the_mcp_client_redacts_an_error_envelope_where_it_enters(tool):
+    client = _mcp_client(_echo_dispatch({tool}))
+    calls = {
+        "store": lambda: client.store("c", "t", "x"),
+        "search": lambda: client.search("q"),
+        "get": lambda: client.get_block(BLOCK_ID),
+    }
+
+    with pytest.raises(CtxApiError) as raised:
+        calls[tool]()
+
+    assert f"mcp {tool}: refused for key" in str(raised.value)
+    _assert_clean(_texts(raised.value))
+
+
+@pytest.mark.parametrize(
+    ("tool", "answer"),
+    [("store", f"Stored nothing: key {CTX_KEY} is read-only"), ("get", f"no block for key {CTX_KEY}")],
+)
+def test_the_mcp_client_redacts_an_answer_without_a_block(tool, answer):
+    client = _mcp_client(lambda name, args, **kwargs: json.dumps({"result": answer}))
+
+    data = client.store("c", "t", "x") if tool == "store" else client.get_block(BLOCK_ID)
+
+    assert data["success"] is False
+    _assert_clean(data["error"])
+
+
+def test_the_content_fetch_line_redacts_what_get_block_raises(caplog, monkeypatch):
+    sources = f"The proxy.\n\nSources:\n[1] proxy (infrastructure) id:{BLOCK_ID}"
+    client = _mcp_client(lambda name, args, **kwargs: json.dumps({"result": sources}))
+
+    def raw(*args, **kwargs):
+        raise CtxApiError(f"get refused for key {CTX_KEY}")
+
+    monkeypatch.setattr(client, "get_block", raw)
+    with caplog.at_level(logging.DEBUG):
+        data = client.query("which proxy?", synthesize=True)
+
+    assert data["sources"][0]["id"] == BLOCK_ID
+    logged = _records(caplog)
+    assert "content fetch" in logged
+    _assert_clean(logged)
+
+
 # -- 2. The agent tools (memory features on) -------------------------------------------------
 
 TOOL_CALLS = {
@@ -242,25 +293,44 @@ def test_an_answer_without_a_block_hands_the_model_no_key(home, caplog, tool, an
     _assert_clean(_records(caplog))
 
 
+RAW_ERRORS = {
+    "rejected-with-code": lambda: CtxApiError(f"refused for key {CTX_KEY}", code=f"bad-{CTX_KEY}"),
+    "failed-without-code": lambda: CtxApiError(f"refused for key {CTX_KEY}"),
+    "unexpected": lambda: RuntimeError(f"transport closed for {CTX_KEY}"),
+}
+
+
 class _RawClient:
     """A client that hands out the server's error texts as they came (no redaction of its own):
     the tools and the provider must not rely on the client having redacted them."""
 
     transport = "mcp"
 
+    def __init__(self, error="rejected-with-code"):
+        self._error = RAW_ERRORS[error]
+
     def _fail(self, *args, **kwargs):
-        raise CtxApiError(f"refused for key {CTX_KEY}", code=f"bad-{CTX_KEY}")
+        raise self._error()
 
-    store = search = get_block = _fail
+    store = search = get_block = query = _fail
 
-    def query(self, *args, **kwargs):
-        return {"success": False, "error": f"query refused for key {CTX_KEY}"}
+
+class _RawEnvelopeClient:
+    """A client that answers ``success: false`` with the server's text as it came."""
+
+    transport = "mcp"
+
+    def _envelope(self, *args, **kwargs):
+        return {"success": False, "error": f"refused for key {CTX_KEY}", "code": f"bad-{CTX_KEY}"}
+
+    store = search = get_block = query = _envelope
 
 
 @pytest.mark.parametrize("tool", sorted(TOOL_CALLS))
-def test_the_tools_redact_what_a_client_hands_them(home, caplog, tool):
+@pytest.mark.parametrize("error", [*sorted(RAW_ERRORS), "envelope"])
+def test_the_tools_redact_what_a_client_hands_them(home, caplog, tool, error):
     provider = _provider(home, _echo_dispatch(set()), memory=True)
-    provider._client = _RawClient()
+    provider._client = _RawEnvelopeClient() if error == "envelope" else _RawClient(error)
 
     with caplog.at_level(logging.DEBUG):
         result = provider.handle_tool_call(tool, dict(TOOL_CALLS[tool][1]))

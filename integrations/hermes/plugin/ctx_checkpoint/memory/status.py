@@ -183,10 +183,10 @@ def _test_timeout(entry: dict[str, Any]) -> float:
 
 
 def run_connection_test(
-    name: str, entry: dict[str, Any], *, secrets: Iterable[str] = (), servers: Any = ()
+    name: str, entry: dict[str, Any], *, secrets: Iterable[str] = (), servers: dict[str, Any] | None = None
 ) -> ConnectionTest:
     """Test one ctx MCP server entry; never raises. ``servers``: the ``mcp_servers`` entries of the
-    profile (a mapping or the names), for the check that no other entry gets the same tool names."""
+    profile, for the check that no other entry gets the same tool names."""
     secrets = tuple(secrets)
     timeout = _test_timeout(entry)
     where = f"mcp_servers.{name}"
@@ -547,7 +547,7 @@ def mcp_status(
     section: dict[str, Any],
     hermes_home: str,
     secrets: Iterable[str] = (),
-    servers: Any = (),
+    servers: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The report of ``hermes memory status`` and ``hermes ctx_checkpoint status`` (one line
     per key). Runs the connection test (``servers``: the profile's ``mcp_servers``, see

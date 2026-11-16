@@ -150,12 +150,20 @@ def test_entries_whose_tools_hermes_names_alike_are_refused(_isolated_hermes_hom
     _write_config(_isolated_hermes_home, {"mcp_servers": servers})
     provider = Provider(config={"mcp_server": "ctx-prod"})
 
-    assert provider.is_available() is not colliding
+    assert provider.is_available() is (not colliding)
     if colliding:
         reason = provider.unavailable_reason()
         assert "mcp__ctx_prod__" in reason
         for other in colliding:
             assert f"mcp_servers.{other}" in reason
+
+
+def test_without_its_own_entry_the_reason_names_the_missing_entry(_isolated_hermes_home):
+    _write_config(_isolated_hermes_home, {"mcp_servers": {"ctx_prod": ENTRY}})
+    provider = Provider(config={"mcp_server": "ctx-prod"})
+
+    assert provider.is_available() is False
+    assert provider.unavailable_reason().startswith("configure the ctx MCP server entry mcp_servers.ctx-prod")
 
 
 @pytest.fixture
@@ -172,11 +180,11 @@ def probe(monkeypatch):
 
 def test_the_connection_test_names_the_registered_tools_and_refuses_a_collision(_isolated_hermes_home, probe):
     _write_config(_isolated_hermes_home, {"mcp_servers": {"ctx-prod": ENTRY}})
-    passed = status.run_connection_test("ctx-prod", ENTRY, servers=["ctx-prod"])
+    passed = status.run_connection_test("ctx-prod", ENTRY, servers={"ctx-prod": ENTRY})
     assert passed.ok is True
     assert "mcp__ctx_prod__search" in passed.detail and "mcp__ctx_prod__store" in passed.detail
 
-    plain = status.run_connection_test("ctx", ENTRY, servers=["ctx"])
+    plain = status.run_connection_test("ctx", ENTRY, servers={"ctx": ENTRY})
     assert plain.ok is True and "mcp__" not in plain.detail  # the name Hermes keeps: nothing to point out
 
     refused = status.run_connection_test("ctx-prod", ENTRY, servers={"ctx-prod": ENTRY, "ctx_prod": ENTRY})
