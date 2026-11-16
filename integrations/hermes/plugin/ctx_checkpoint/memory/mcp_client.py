@@ -64,7 +64,7 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from .client import CtxApiError
-from .config import ORIGIN_NOTE_PREFIX, UNTRUSTED_ORIGIN_FIELD
+from .config import ORIGIN_NOTE_PREFIX, UNTRUSTED_ORIGIN_FIELD, untrusted_origin, with_untrusted_origin_checked
 
 logger = logging.getLogger(__name__)
 
@@ -424,7 +424,7 @@ class McpClient:
         if include_content:
             for source in sources[: limit or _MAX_CONTENT_FETCH]:
                 try:
-                    block = self.get_block(source["id"]).get("block") or {}
+                    block = with_untrusted_origin_checked(self.get_block(source["id"]).get("block") or {})
                 except CtxApiError as exc:
                     logger.debug("mcp query: content fetch for %s failed: %s", source["id"], self._redact(exc))
                     continue
@@ -574,7 +574,8 @@ def _parse_query_text(body: str) -> tuple[str, list[dict[str, Any]]]:
     for line in tail.split("\n"):
         stripped = line.strip()
         if previous is not None and line[:1].isspace() and stripped.startswith(ORIGIN_NOTE_PREFIX):
-            previous[UNTRUSTED_ORIGIN_FIELD] = stripped[len(ORIGIN_NOTE_PREFIX) :].split(" ", 1)[0]
+            value = stripped[len(ORIGIN_NOTE_PREFIX) :].split(" ", 1)[0]
+            previous[UNTRUSTED_ORIGIN_FIELD] = untrusted_origin({UNTRUSTED_ORIGIN_FIELD: value})
             previous = None
             continue
         previous = None

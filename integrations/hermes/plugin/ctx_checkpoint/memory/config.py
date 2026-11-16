@@ -81,6 +81,24 @@ def untrusted_origin(item: Any) -> str:
     return value if _ORIGIN_TYPE_RE.fullmatch(value) else UNNAMED_ORIGIN
 
 
+def with_untrusted_origin_checked(record: Any) -> Any:
+    """``record`` (an answer passed on whole: a block, or an answer around one) with its
+    ``untrusted_origin`` — and its nested ``block``'s — replaced by :func:`untrusted_origin`'s value,
+    so a record that is no type name reaches no output as text. A copy where something changed,
+    ``record`` itself otherwise (a valid record and no record stay byte for byte)."""
+    if not isinstance(record, dict):
+        return record
+    out = record
+    origin = untrusted_origin(record)
+    if origin and record.get(UNTRUSTED_ORIGIN_FIELD) != origin:
+        out = {**record, UNTRUSTED_ORIGIN_FIELD: origin}
+    block = record.get("block")
+    checked = with_untrusted_origin_checked(block)
+    if checked is not block:
+        out = {**out, "block": checked}
+    return out
+
+
 def untrusted_origin_note(origin: str) -> str:
     """The note line of a record (the server's wording); ``""`` for none."""
     return f"{ORIGIN_NOTE_PREFIX}{origin}{_ORIGIN_NOTE_TAIL}" if origin else ""

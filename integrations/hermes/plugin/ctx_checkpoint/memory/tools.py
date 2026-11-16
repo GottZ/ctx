@@ -30,6 +30,7 @@ from .config import (
     merge_tags,
     shorten,
     untrusted_origin,
+    with_untrusted_origin_checked,
 )
 
 logger = logging.getLogger(__name__)
@@ -386,6 +387,8 @@ def _tool_get(provider, args: dict[str, Any]) -> str:
     data = provider._client.get_block(block_id)
     if not data.get("success"):
         return tool_error(f"CTX get failed: {_safe(provider, data.get('error') or 'unknown error')}")
+    # The block is passed on whole: its untrusted_origin goes in checked (#295).
+    data = with_untrusted_origin_checked(data)
     block = data.get("block") if isinstance(data.get("block"), dict) else data
     if block.get("untrusted") is True or data.get("untrusted") is True:
         data = dict(data)

@@ -38,6 +38,7 @@ from .config import (
     umbrella_transport,
     untrusted_origin,
     untrusted_origin_note,
+    with_untrusted_origin_checked,
 )
 from .status import REST_API_KEY_ENV, mcp_report, profile_ctx_keys, redact_error
 
@@ -301,7 +302,7 @@ def cmd_get(args, home: Path, config: dict[str, Any]) -> int:
     if not resp.get("success"):
         print(f"✗ {_error(config, resp.get('error') or 'get failed')}")
         return 1
-    print(json.dumps(resp, indent=2, ensure_ascii=False))
+    print(json.dumps(with_untrusted_origin_checked(resp), indent=2, ensure_ascii=False))
     return 0
 
 
