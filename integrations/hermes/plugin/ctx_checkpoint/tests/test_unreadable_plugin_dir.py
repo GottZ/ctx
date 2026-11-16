@@ -165,6 +165,8 @@ def test_install_sh_leaves_a_copy_every_account_can_read(_isolated_hermes_home, 
 
 
 def _run_install(home: Path, *, env_extra: dict[str, str] | None = None, path_prefix: str | None = None):
+    # A negative test accepts a non-zero exit: without the script that would be bash's own (#308).
+    assert INSTALL_SH.is_file(), f"{INSTALL_SH} is missing, so the installer cannot be tested"
     env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
     env.update(env_extra or {})
     if path_prefix:
