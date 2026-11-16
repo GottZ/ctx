@@ -76,7 +76,7 @@ func newMCPServer(cfg MCPConfig) *mcp.Server {
 			Version: "0.25.3",
 		},
 		&mcp.ServerOptions{
-			Instructions: "ctx is a persistent knowledge store with hybrid retrieval. Use 'query' for questions, 'store' to save knowledge, 'search' for lightweight lookups.",
+			Instructions: "ctx is your memory across sessions. Ask it before you answer from memory or start work: 'query' for a question, 'search' for a lightweight lookup. When you learn something that should outlast this session, save it with 'store' and name its source.",
 		},
 	)
 	registerTools(server, cfg)

@@ -16,6 +16,7 @@ tool section says so.
 |---|---|
 | Endpoint | `POST\|GET\|DELETE /mcp` — Streamable HTTP, **stateless** (no session; every call stands alone), JSON responses instead of SSE |
 | Server name | `ctx` |
+| Instructions | sent with `initialize`, the one text every connecting agent gets before it has read any documentation: ctx is the agent's memory across sessions, it asks (`query`, `search`) before it answers from memory or starts work, and it saves what should outlast the session with `store`, naming the source. Clients decide whether they show it to the model |
 | Authentication | the same API key as the HTTP API, as `X-Context-Key: <key>` or `Authorization: Bearer <key>`; remote clients such as claude.ai use OAuth 2.1 with PKCE — register one with `ctx mcp add <label>` ([architecture](architecture.md)); `/authorize` is a consent screen that names the client and the address the browser returns to, warns about self-registered (DCR) clients unless they return to a known connector callback (static allowlist or `CTX_OAUTH_REDIRECT_EXTRA`) and needs an explicit consent tick next to the key; a refresh token is issued only to clients registered with the `refresh_token` grant (DCR default: both grants; `ctx mcp add` clients always get it) |
 | Request size | the body is capped at 1 MB before the MCP layer reads it; `store`, `update` and the issue tools cap content at 50 KB |
 | Scope | every tool acts within the scopes the key may read or write ([multi-tenancy](multi-tenancy.md)); a key without a resolved tenant identity is refused |
