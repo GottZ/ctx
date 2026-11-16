@@ -24,12 +24,22 @@ from pathlib import Path
 import pytest
 
 PLUGIN_SRC = Path(__file__).resolve().parents[1]
-INSTALL_SH = PLUGIN_SRC.parents[1] / "scripts" / "install.sh"
 NAME = "ctx_checkpoint"
+
+
+def installer_paths(plugin_dir: Path) -> tuple[Path, bool]:
+    """``(install.sh, in a ctx checkout)`` for a plugin folder: the installer two levels up
+    (``integrations/hermes/scripts``), a checkout when ``go/go.mod`` lies four levels up. A folder that
+    lies higher (a flat copy such as ``/plugins/ctx_checkpoint``) has neither."""
+    parents = plugin_dir.parents
+    script = (parents[1] if len(parents) > 1 else plugin_dir) / "scripts" / "install.sh"
+    return script, len(parents) > 3 and (parents[3] / "go" / "go.mod").is_file()
+
+
 # The installer lies outside the plugin folder (GottZ/ctx#308): a catalog install copies the folder
 # alone, so there the installer tests are skipped, not failed (or passed on a missing script). In a
 # checkout of the ctx repository (go/go.mod next to integrations/) a missing installer fails them.
-IN_CTX_CHECKOUT = (PLUGIN_SRC.parents[3] / "go" / "go.mod").is_file()
+INSTALL_SH, IN_CTX_CHECKOUT = installer_paths(PLUGIN_SRC)
 needs_installer = pytest.mark.skipif(
     not INSTALL_SH.is_file() and not IN_CTX_CHECKOUT,
     reason=(
@@ -66,6 +76,19 @@ def installed(_isolated_hermes_home):
 def binding_permissions(tmp_path):
     if not _permissions_bind(tmp_path):
         pytest.skip("file permissions do not bind this process (root or CAP_DAC_OVERRIDE)")
+
+
+@pytest.mark.parametrize("depth", [0, 1, 2, 3])
+def test_a_plugin_folder_that_lies_high_is_no_checkout(tmp_path, depth):
+    """A flat copy (the plugin folder one to four levels below the root) is no checkout and names no
+    installer that exists; the deep layout of a checkout still finds both."""
+    flat = Path("/").joinpath(*["p"] * depth, NAME)
+    assert installer_paths(flat)[1] is False
+    repo = tmp_path / "repo"
+    plugin = repo / "integrations" / "hermes" / "plugin" / NAME
+    (repo / "go").mkdir(parents=True)
+    (repo / "go" / "go.mod").write_text("module x\n", encoding="utf-8")
+    assert installer_paths(plugin) == (repo / "integrations" / "hermes" / "scripts" / "install.sh", True)
 
 
 def test_hermes_finds_a_readable_install(installed):
