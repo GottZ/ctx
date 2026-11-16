@@ -217,6 +217,29 @@ class CtxClient:
         """Central key redaction for every text leaving this client as an error."""
         return redact_secret(text, self._key)
 
+    def _http_failure(self, exc: urllib.error.HTTPError) -> CtxApiError:
+        """The error an HTTP error answer is raised as: status, code and text redacted."""
+        if exc.code in REDIRECT_CODES:
+            # Not followed (``_RefuseRedirect``); the Location is not part of the message.
+            return CtxApiError(
+                f"HTTP {exc.code}: redirect not followed — the ctx API never redirects; check the base URL",
+                status=exc.code,
+            )
+        body = ""
+        try:
+            body = exc.read(16384).decode("utf-8", "replace")
+        except Exception as read_exc:
+            # No exc_info: the traceback would chain the unredacted HTTPError.
+            logger.debug("CTX error body unreadable (%s)", type(read_exc).__name__)
+        code, err_text = _parse_error_body(body)
+        # Redact the FULL texts first, truncate afterwards (no key prefix survives a cut).
+        # Codes from the closed vocabulary stay verbatim (machine-readable contract).
+        if code not in REJECT_CODES:
+            code = self._redact(code)
+        detail = self._redact(err_text) or self._redact(body)[:300] or self._redact(exc.reason)
+        message = f"HTTP {exc.code}{f' [{code}]' if code else ''}: {detail[:300]}"
+        return CtxApiError(message, status=exc.code, code=code)
+
     def _request(
         self, method: str, path: str, payload: dict[str, Any] | None = None, timeout: float | None = None
     ) -> dict[str, Any]:
@@ -235,6 +258,7 @@ class CtxClient:
         last_error: CtxApiError | None = None
 
         for attempt in (0, 1):  # one retry on 429 (per-key write rate limit)
+            failure: CtxApiError | None = None
             try:
                 with _urlopen(req, timeout=t) as resp:
                     raw = resp.read().decode("utf-8", "replace")
@@ -260,50 +284,38 @@ class CtxClient:
                     parsed["error"] = redact_deep(parsed["error"], self._key)
                 return parsed
             except urllib.error.HTTPError as exc:
-                if exc.code in REDIRECT_CODES:
-                    # Not followed (``_RefuseRedirect``); the Location is not part of the message.
-                    raise CtxApiError(
-                        f"HTTP {exc.code}: redirect not followed — the ctx API never redirects; check the base URL",
-                        status=exc.code,
-                    ) from None
-                body = ""
-                try:
-                    body = exc.read(16384).decode("utf-8", "replace")
-                except Exception as read_exc:
-                    # No exc_info: the traceback would chain the unredacted HTTPError.
-                    logger.debug("CTX error body unreadable (%s)", type(read_exc).__name__)
-                code, err_text = _parse_error_body(body)
-                # Redact the FULL texts first, truncate afterwards (no key prefix survives a cut).
-                # Codes from the closed vocabulary stay verbatim (machine-readable contract).
-                if code not in REJECT_CODES:
-                    code = self._redact(code)
-                detail = self._redact(err_text) or self._redact(body)[:300] or self._redact(exc.reason)
-                message = f"HTTP {exc.code}{f' [{code}]' if code else ''}: {detail[:300]}"
-                error = CtxApiError(message, status=exc.code, code=code)
+                failure = self._http_failure(exc)
                 # Retry once only on a transient 429 (per-key write rate limit);
                 # permanent rejection codes are never repeated.
-                if exc.code == 429 and not error.permanent and attempt == 0 and _monotonic() + RATE_RETRY_WAIT_S < end:
+                if (
+                    exc.code == 429
+                    and not failure.permanent
+                    and attempt == 0
+                    and _monotonic() + RATE_RETRY_WAIT_S < end
+                ):
                     _sleep(RATE_RETRY_WAIT_S)
                     t = end - _monotonic()
-                    last_error = error
+                    last_error = failure
                     continue
-                # ``from None``: the original HTTPError/URLError text is unredacted and would
-                # resurface in every ``exc_info=True`` traceback; its content is in the message.
-                raise error from None
             except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
                 # ``http.client.HTTPException`` (e.g. ``BadStatusLine`` from a proxy's non-HTTP
                 # status line, which can reflect a header value) is no OSError.
-                raise CtxApiError(f"connection error: {self._redact(exc)}") from None
+                failure = CtxApiError(f"connection error: {self._redact(exc)}")
             except ValueError:
                 # http.client rejects a header value with control characters (inner CR/LF) via
                 # ValueError carrying the bytes repr of the key, and non-latin-1 header or
                 # non-ASCII URL text via UnicodeEncodeError (a ValueError); socket rejects a
                 # negative timeout the same way. The repr escapes defeat exact-match
                 # redaction, so the message is fixed and names no value.
-                raise CtxApiError(
+                failure = CtxApiError(
                     "invalid request: key, URL or timeout rejected before any connection "
                     "(control or non-latin-1 characters in the key or URL, or a negative timeout)"
-                ) from None
+                )
+            # Raised after the handlers, not in them: there the error would keep the original
+            # HTTPError/URLError — its text and body unredacted — as its implicit ``__context__``,
+            # which ``from None`` only hides from printing (#304); its content is in the message.
+            if failure is not None:
+                raise failure from None
 
         raise last_error or CtxApiError("request failed")
 

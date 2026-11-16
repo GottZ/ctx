@@ -1,7 +1,7 @@
 ---
 name: ctx-memory
 description: "Use the ctx knowledge store as long-term memory and evidence layer: query as a question, search to browse, get by id, verify before acting, persist one durable fact per block."
-version: 0.12.0
+version: 0.13.0
 author: ctx (GottZ/ctx)
 license: MPL-2.0
 metadata:
@@ -107,7 +107,8 @@ explicit stores so provenance tags stay consistent (`source:hermes`, `profile:<n
   (`<root-token> <words>`): it narrows the hits to this conversation's blocks. With memory
   features off, the tools are the ctx MCP server's `mcp__<server>__get` (`id`) and
   `mcp__<server>__search` (`category`, `query`; no `types` filter — it refuses
-  `checkpoint`); server `ctx` gives `mcp__ctx__get`. With memory features on, use
+  `checkpoint`); server `ctx` gives `mcp__ctx__get`, server `ctx-prod` gives
+  `mcp__ctx_prod__get` (Hermes turns `-` into `_`). With memory features on, use
   `ctx_get` and `ctx_search` with `types_exclude: []` (the plugin's search leaves
   checkpoint blocks out by default). Parts are long (up to ~36k characters each): search
   first, then read the hits. A root session id outside `[A-Za-z0-9_.-]` or longer than 48

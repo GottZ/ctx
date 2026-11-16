@@ -3,8 +3,9 @@
 Same method surface as :class:`client.CtxClient` (``whoami``, ``query``, ``search``,
 ``store``, ``get_block``) and the same response dictionaries, so the provider, the chain
 writer and the agent tools run unchanged on either transport. The calls go through
-``tools.registry.registry.dispatch("mcp__<server>__<tool>", args)``: Hermes talks to the
-ctx MCP server configured in ``mcp_servers.<server>`` and the plugin never sees a key.
+``tools.registry.registry.dispatch("mcp__<server>__<tool>", args)`` under the name Hermes
+registers (:func:`mcp_tool_name`): Hermes talks to the ctx MCP server configured in
+``mcp_servers.<server>`` and the plugin never sees a key.
 
 What the ctx MCP tools answer (``go/internal/handler/mcp.go``) and how it is mapped:
 
@@ -52,11 +53,12 @@ MCP server, so an abandoned call still completes before the next call is sent.
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
 import logging
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from .client import CtxApiError
@@ -68,6 +70,11 @@ _ANSWER_ID_RE = re.compile(r"\(id:\s*(" + _UUID_RE.pattern + r")")
 _PAYLOAD_HASH_RE = re.compile(r"payload_hash:\s*([0-9a-fA-F]{16,128})")
 _SOURCE_LINE_RE = re.compile(r"^\[(\d+|n/a)\]\s+(.*?)\s+\(([^()]*)\)\s+id:([0-9a-fA-F-]{36})\s*$")
 _SERVER_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
+# Hermes' MCP tool names (``tools/mcp_tool_schema.py``): the characters a name part keeps, the
+# provider limit a generated name is shortened to and the hash digits that end a shortened name.
+_NAME_PART_RE = re.compile(r"[^A-Za-z0-9_]")
+MCP_TOOL_NAME_MAX_CHARS = 64
+MCP_TOOL_NAME_HASH_CHARS = 8
 _RATE_LIMIT_MARKERS = ("rate limit", "rate_limit")
 _MAX_CONTENT_FETCH = 10  # query(include_content=True) over MCP: one get per source, capped
 # The go-sdk's schema validation refusal of an argument the tool does not declare.
@@ -83,6 +90,12 @@ def _refuses_retrieval_args(text: str) -> bool:
     go-sdk's ``["synthesize" "include_content"]`` once more must not defeat the fallback.
     """
     return _UNKNOWN_ARGS_MARKER in text.lower() and _RETRIEVAL_ARGS_RE.search(text) is not None
+
+
+class _RetrievalArgsRefused(CtxApiError):
+    """The server refused ``synthesize``/``include_content`` (a server from before GottZ/ctx#183).
+    Told apart on the text as it arrived, before redaction: a failing redactor withholds the text
+    and must not cost the fallback to ``search``."""
 
 
 def _find_value(value: Any, key: str) -> str | None:
@@ -117,12 +130,60 @@ def _code_for_error(text: str) -> str:
     return ""
 
 
+def _tool_name_part(value: str) -> str:
+    return _NAME_PART_RE.sub("_", str(value or ""))
+
+
 def mcp_tool_name(server: str, tool: str) -> str:
-    """The name the client dispatches ``tool`` of the ctx MCP server entry ``server`` under —
-    also the name the plugin tells the model (system prompt block, receipt). Hermes registers
-    MCP tools with characters outside ``[A-Za-z0-9_]`` replaced by ``_`` and names over 64
-    characters shortened, so a server name with ``-`` does not resolve (known, not handled here)."""
-    return f"mcp__{server}__{tool}"
+    """The name Hermes registers ``tool`` of the MCP server entry ``server`` under, which the
+    client dispatches and the plugin tells the model (system prompt block, receipt).
+
+    Hermes' rule (``tools.mcp_tool_schema.mcp_prefixed_tool_name``, not a public plugin API, so
+    it is followed here and pinned against Hermes' function by the tests): every character
+    outside ``[A-Za-z0-9_]`` becomes ``_`` (``ctx-prod`` → ``mcp__ctx_prod__store``), and a name
+    over :data:`MCP_TOOL_NAME_MAX_CHARS` keeps its start and ends in ``_`` plus the first
+    :data:`MCP_TOOL_NAME_HASH_CHARS` hex digits of its SHA-256."""
+    full = f"mcp__{_tool_name_part(server)}__{_tool_name_part(tool)}"
+    if len(full) <= MCP_TOOL_NAME_MAX_CHARS:
+        return full
+    suffix = "_" + hashlib.sha256(full.encode("utf-8")).hexdigest()[:MCP_TOOL_NAME_HASH_CHARS]
+    return full[: MCP_TOOL_NAME_MAX_CHARS - len(suffix)] + suffix
+
+
+def colliding_servers(server: str, servers: Any) -> list[str]:
+    """The other entries of ``mcp_servers`` (the mapping) that can register a tool under the name
+    of one of ``server``'s checkpoint tools, entries with ``enabled: false`` left out. Hermes keeps
+    the first registration of a name and skips the other, so a call by name could reach the other
+    server: the plugin refuses such a binding.
+
+    Hermes joins the parts as ``mcp__<server>__<tool>`` and merges no underscores, and config.yaml
+    does not list another server's tools, so the rule takes every tool name as possible: an entry
+    ``other`` collides when ``mcp__<own>__<tool>`` starts with ``mcp__<other>__``. The checkpoint
+    tools (``search``, ``get``, ``store``, ``query``) hold no ``_``, so that is exactly when
+    ``<own>__`` starts with ``<other>__``: the same part, or the other's part followed by ``_``
+    (``c-`` next to ``c``: ``mcp__c___store`` is the name of a tool ``_store`` of ``c``) or by ``__``
+    (``ctx--prod`` next to ``ctx``: a tool ``prod__store`` of ``ctx``). A name with one separator
+    (``ctx-prod`` next to ``ctx``) never collides; the entry ``ctx`` next to ``ctx--prod`` neither."""
+    entries = servers.items() if isinstance(servers, dict) else ()
+    own = _tool_name_part(server) + "__"
+    return sorted(
+        str(name)
+        for name, entry in entries
+        if str(name) != server
+        and own.startswith(_tool_name_part(str(name)) + "__")
+        and not (isinstance(entry, dict) and entry.get("enabled") is False)
+    )
+
+
+def collision_text(server: str, others: list[str]) -> str:
+    """Why the entry ``server`` is not used while ``others`` collide with it."""
+    entries = ", ".join(f"mcp_servers.{name}" for name in others)
+    return (
+        f"mcp_servers.{server} and {entries} can register tools under the same names "
+        f"({mcp_tool_name(server, 'store')} …): Hermes keeps one registration of a name, so a checkpoint "
+        "could reach the other server; rename one of the entries so that, with every character outside "
+        "A-Za-z0-9_ turned into _, neither name equals the other or starts with it followed by _"
+    )
 
 
 def _interrupt_acting_for() -> Any:
@@ -187,11 +248,15 @@ class McpClient:
         *,
         timeout: float = 10.0,
         synthesis_timeout: float = 90.0,
+        secrets: Callable[[], Iterable[str]] | None = None,
     ):
         if not _SERVER_NAME_RE.fullmatch(server_name or ""):
             raise ValueError(f"MCP server name {server_name!r} may only contain letters, digits, '_' and '-'")
         self._dispatch = dispatch
         self._server = server_name
+        # The ctx keys the provider binds (read per error): foreign error texts are redacted with
+        # them where they enter the plugin (#304). The client itself holds no credential.
+        self._secrets = secrets
         # Informational defaults: only an explicit per-call ``timeout`` (the chain writer's
         # remaining budget) bounds a dispatch; otherwise the MCP transport owns its timeouts.
         self._timeout = timeout
@@ -209,6 +274,17 @@ class McpClient:
 
     # -- transport ----------------------------------------------------------------
 
+    def _redact(self, text: Any) -> str:
+        """A foreign error text (a server answer, a dispatch error) as it may leave this client:
+        ``checkpoint.redact_error_text`` with the bound keys. Never raises."""
+        from .checkpoint import redact_error_text
+
+        try:
+            secrets = tuple(self._secrets()) if self._secrets is not None else ()
+        except Exception:
+            secrets = ()
+        return redact_error_text(text, secrets)
+
     def _call(self, tool: str, args: dict[str, Any], timeout: float | None = None) -> tuple[Any, str]:
         """Dispatch one tool; returns ``(payload, text)``. Raises ``CtxApiError`` on an error envelope.
 
@@ -216,6 +292,7 @@ class McpClient:
         abandoned call raises ``CtxApiError(code="timeout")``.
         """
         name = mcp_tool_name(self._server, tool)
+        failure: CtxApiError | None = None
         try:
             if timeout is None:
                 raw = self._dispatch(name, args)
@@ -230,7 +307,12 @@ class McpClient:
         except CtxApiError:
             raise
         except Exception as exc:
-            raise CtxApiError(f"mcp dispatch failed: {type(exc).__name__}: {exc}") from exc
+            kind = _RetrievalArgsRefused if _refuses_retrieval_args(str(exc)) else CtxApiError
+            failure = kind(f"mcp dispatch failed: {type(exc).__name__}: {self._redact(exc)}")
+        if failure is not None:
+            # Raised after the handler and without the original: its text is unredacted, and raised
+            # in the handler it would stay the implicit ``__context__`` (#304).
+            raise failure
         payload: Any = raw
         if isinstance(raw, str):
             try:
@@ -253,7 +335,10 @@ class McpClient:
                         + f"use a key without confirm_writes for mcp_servers.{self._server}",
                         code=code,
                     )
-                raise CtxApiError(f"mcp {tool}: {text[:300]}", status=429 if code == "rate_limit" else None, code=code)
+                kind = _RetrievalArgsRefused if _refuses_retrieval_args(text) else CtxApiError
+                raise kind(
+                    f"mcp {tool}: {self._redact(text)[:300]}", status=429 if code == "rate_limit" else None, code=code
+                )
             if "result" in payload and isinstance(payload["result"], str):
                 return payload, payload["result"]
         return payload, raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
@@ -332,7 +417,7 @@ class McpClient:
                 try:
                     block = self.get_block(source["id"]).get("block") or {}
                 except CtxApiError as exc:
-                    logger.debug("mcp query: content fetch for %s failed: %s", source["id"], exc)
+                    logger.debug("mcp query: content fetch for %s failed: %s", source["id"], self._redact(exc))
                     continue
                 for key in ("content", "type", "untrusted", "score", "tags"):
                     if key in block and key not in source:
@@ -386,9 +471,7 @@ class McpClient:
             args["types_exclude"] = list(types_exclude)
         try:
             _payload, body = self._call("query", args)
-        except CtxApiError as exc:
-            if not _refuses_retrieval_args(str(exc)):
-                raise
+        except _RetrievalArgsRefused:
             logger.info(
                 "ctx MCP server %r predates query synthesize:false; retrieval-only recall uses search", self._server
             )
@@ -439,7 +522,7 @@ class McpClient:
         payload, body = self._call("store", args, timeout)
         block_id = _store_id(payload, body)
         if not block_id:
-            return {"success": False, "error": f"store returned no block id: {body[:200]}"}
+            return {"success": False, "error": f"store returned no block id: {self._redact(body)[:200]}"}
         if "No change needed" in body:
             return {"success": True, "action": "noop", "existing_id": block_id, "reason": "identical content"}
         return {"success": True, "block": {"id": block_id, "title": title, "category": category}}
@@ -450,7 +533,7 @@ class McpClient:
         if not isinstance(block, dict) and isinstance(payload, dict) and "result" not in payload:
             block = payload
         if not isinstance(block, dict):
-            return {"success": False, "error": f"get returned no block: {body[:200]}"}
+            return {"success": False, "error": f"get returned no block: {self._redact(body)[:200]}"}
         if isinstance(block.get("block"), dict):
             block = block["block"]
         return {"success": True, "block": block}
