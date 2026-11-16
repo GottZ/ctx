@@ -46,7 +46,12 @@ Setup, MCP tool names and error texts (GottZ/ctx#294, #297, #304).
   `ctx_query`) put the redacted text and code into the tool result and the log; their DEBUG
   lines, and those of the digest triggers, carry `checkpoint.redacted_traceback` instead of
   `exc_info`. The prefetch, warm-up, content-fetch and `whoami` lines are redacted with the
-  bound keys.
+  bound keys. Decisions read the raw values, never the redacted ones: a failing redactor
+  withholds every text, so `ctx_store` decides `retryable` on the raw code, rejection codes are
+  shown through `checkpoint.redact_code` (an empty code stays empty, ctx's closed vocabulary and
+  the clients' own `confirm_writes`/`timeout` stay verbatim, any other code is redacted), and the
+  MCP client tells a server from before `synthesize: false` by the refusal as it arrived
+  (`_RetrievalArgsRefused`), so the fallback to `search` survives a failing redactor.
 
 ## [ctx_checkpoint 0.12.0] — 2026-11-16
 

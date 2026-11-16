@@ -34,7 +34,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .client import REDACTED, CtxApiError, redact_secret, response_code, store_action, store_block_id
+from .client import (
+    REDACTED,
+    REJECT_CODES,
+    CtxApiError,
+    redact_secret,
+    response_code,
+    store_action,
+    store_block_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -447,6 +455,8 @@ def redact_text(text: str, secret: str | Iterable[str] = ()) -> str:
     return _redact_checkpoint_secrets(_host_redact(text))
 
 
+# Codes the plugin's clients set themselves (``mcp_client``: staged write, abandoned call).
+_CLIENT_CODES = frozenset({"confirm_writes", "timeout"})
 # What an error text says when its redaction failed (it is withheld, never passed on raw).
 ERROR_WITHHELD = "(details withheld: redaction failed)"
 
@@ -484,6 +494,18 @@ def redact_error_text(text: Any, secret: str | Iterable[str] = ()) -> str:
         return redact_text(text, values)
     except Exception:
         return ERROR_WITHHELD
+
+
+def redact_code(code: Any, secret: str | Iterable[str] = ()) -> str:
+    """A rejection code as it may be shown or logged — for display only, decisions read the raw
+    code. ``""`` stays ``""``; a code of the closed vocabulary (ctx's :data:`client.REJECT_CODES`
+    and the clients' own ``confirm_writes``/``timeout``) stays verbatim, since it never carries a key
+    and a failing redactor must not turn it into :data:`ERROR_WITHHELD`; any other code goes through
+    :func:`redact_error_text`."""
+    text = "" if code is None else str(code)
+    if not text or text in REJECT_CODES or text in _CLIENT_CODES:
+        return text
+    return redact_error_text(text, secret)
 
 
 def redacted_traceback(error: BaseException, secret: str | Iterable[str] = ()) -> str:
@@ -985,7 +1007,7 @@ class ChainWriter:
                 else:
                     # The code is server text as well (a code outside the closed vocabulary keeps
                     # whatever the server put there): the same redaction as the detail.
-                    code = f" [{redact_error_text(exc.code, self.secret)}]" if exc.code else ""
+                    code = f" [{redact_code(exc.code, self.secret)}]" if exc.code else ""
                     detail = redact_error_text(exc, self.secret)[:200]
                     failure = CtxCheckpointError(f"ctx checkpoint {what} failed{code}: {detail}")
             except CtxCheckpointError:
@@ -1000,7 +1022,7 @@ class ChainWriter:
             if not isinstance(data, dict):
                 raise CtxCheckpointError(f"ctx checkpoint {what} returned a non-object response")
             if data.get("success") is False:
-                code = redact_error_text(response_code(data), self.secret)
+                code = redact_code(response_code(data), self.secret)
                 detail = redact_error_text(data.get("error") or "unknown", self.secret)[:200]
                 raise CtxCheckpointError(f"ctx checkpoint {what} rejected{f' [{code}]' if code else ''}: {detail}")
             return data

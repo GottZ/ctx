@@ -13,7 +13,7 @@ from typing import Any
 
 from tools.registry import tool_error
 
-from .checkpoint import redact_error_text, redacted_traceback
+from .checkpoint import redact_code, redact_error_text, redacted_traceback
 from .client import (
     RESERVED_METADATA_KEYS,
     RETRYABLE_CODES,
@@ -179,7 +179,7 @@ def handle_tool_call(provider, tool_name: str, args: dict[str, Any], **kwargs) -
     except CtxApiError as exc:
         text = _safe(provider, exc)
         if exc.code:
-            code = _safe(provider, exc.code)
+            code = redact_code(exc.code, _bound_secrets(provider))
             logger.warning(
                 "CTX tool %s rejected (profile=%s): code=%s status=%s: %s",
                 tool_name,
@@ -297,7 +297,10 @@ def _tool_store(provider, args: dict[str, Any]) -> str:
         **extra,
     )
     if not data.get("success"):
-        code = _safe(provider, response_code(data))
+        # The raw code decides (retryable), a separately redacted one is shown: a failing redactor
+        # must neither drop the retry nor turn a missing code into one.
+        raw_code = response_code(data)
+        code = redact_code(raw_code, _bound_secrets(provider))
         error = _safe(provider, data.get("error") or "unknown error")
         logger.warning(
             "CTX tool store rejected (profile=%s, %s/%s): code=%s: %s",
@@ -308,8 +311,8 @@ def _tool_store(provider, args: dict[str, Any]) -> str:
             shorten(error, 200),
         )
         message = f"CTX store failed: {error}"
-        if code:
-            return tool_error(message, code=code, retryable=code in RETRYABLE_CODES)
+        if raw_code:
+            return tool_error(message, code=code, retryable=raw_code in RETRYABLE_CODES)
         return tool_error(message)
     block_id = store_block_id(data)
     logger.info(

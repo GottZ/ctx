@@ -745,7 +745,7 @@ class CtxMemoryProvider(MemoryProvider):
                     self._profile,
                     category,
                     log_title,
-                    self._error_text(exc.code),
+                    _cp.redact_code(exc.code, self._bound_secrets()),
                     exc.status,
                     exc.permanent,
                     shorten(self._error_text(exc), 200),
@@ -779,7 +779,7 @@ class CtxMemoryProvider(MemoryProvider):
                 self._profile,
                 category,
                 log_title,
-                self._error_text(code) if code else "-",
+                _cp.redact_code(code, self._bound_secrets()) if code else "-",
                 shorten(self._error_text(err or "unknown error"), 200),
             )
             return False, ""

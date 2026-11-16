@@ -92,6 +92,12 @@ def _refuses_retrieval_args(text: str) -> bool:
     return _UNKNOWN_ARGS_MARKER in text.lower() and _RETRIEVAL_ARGS_RE.search(text) is not None
 
 
+class _RetrievalArgsRefused(CtxApiError):
+    """The server refused ``synthesize``/``include_content`` (a server from before GottZ/ctx#183).
+    Told apart on the text as it arrived, before redaction: a failing redactor withholds the text
+    and must not cost the fallback to ``search``."""
+
+
 def _find_value(value: Any, key: str) -> str | None:
     """First non-empty string under ``key`` anywhere in a (possibly JSON-string) structure."""
     if isinstance(value, dict):
@@ -291,7 +297,8 @@ class McpClient:
         except CtxApiError:
             raise
         except Exception as exc:
-            failure = CtxApiError(f"mcp dispatch failed: {type(exc).__name__}: {self._redact(exc)}")
+            kind = _RetrievalArgsRefused if _refuses_retrieval_args(str(exc)) else CtxApiError
+            failure = kind(f"mcp dispatch failed: {type(exc).__name__}: {self._redact(exc)}")
         if failure is not None:
             # Raised after the handler and without the original: its text is unredacted, and raised
             # in the handler it would stay the implicit ``__context__`` (#304).
@@ -318,7 +325,8 @@ class McpClient:
                         + f"use a key without confirm_writes for mcp_servers.{self._server}",
                         code=code,
                     )
-                raise CtxApiError(
+                kind = _RetrievalArgsRefused if _refuses_retrieval_args(text) else CtxApiError
+                raise kind(
                     f"mcp {tool}: {self._redact(text)[:300]}", status=429 if code == "rate_limit" else None, code=code
                 )
             if "result" in payload and isinstance(payload["result"], str):
@@ -453,9 +461,7 @@ class McpClient:
             args["types_exclude"] = list(types_exclude)
         try:
             _payload, body = self._call("query", args)
-        except CtxApiError as exc:
-            if not _refuses_retrieval_args(str(exc)):
-                raise
+        except _RetrievalArgsRefused:
             logger.info(
                 "ctx MCP server %r predates query synthesize:false; retrieval-only recall uses search", self._server
             )

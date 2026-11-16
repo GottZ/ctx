@@ -13,6 +13,7 @@ import importlib.util
 import json
 import logging
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -404,3 +405,85 @@ def test_digest_debug_lines_carry_no_key(home, caplog, monkeypatch):
     logged = _records(caplog)
     assert "digest check failed" in logged and "idle digest failed" in logged
     _assert_clean(logged)
+
+
+# -- 4. Decisions read the raw code, never the redacted one (PR #306 review) ----------------
+
+
+@pytest.fixture
+def failing_redactor(monkeypatch):
+    """Hermes' redactor raises: every redacted text is withheld (``ERROR_WITHHELD``)."""
+    checkpoint = importlib.import_module(f"{_SPEC.name}.memory.checkpoint")
+
+    def fail(text):
+        raise RuntimeError("redactor unavailable")
+
+    monkeypatch.setattr(checkpoint, "_host_redact", fail)
+    return checkpoint
+
+
+class _EnvelopeClient:
+    transport = "mcp"
+
+    def __init__(self, code):
+        self._code = code
+
+    def store(self, *args, **kwargs):
+        return {"success": False, "error": "write window full", **({"code": self._code} if self._code else {})}
+
+
+@pytest.mark.parametrize(("code", "retryable"), [("rate_limit", True), ("scope_denied", False), ("", None)])
+def test_a_failing_redactor_changes_neither_the_code_nor_the_retry_decision(home, failing_redactor, code, retryable):
+    provider = _provider(home, _echo_dispatch(set()), memory=True)
+    provider._client = _EnvelopeClient(code)
+
+    result = json.loads(provider.handle_tool_call("ctx_store", dict(TOOL_CALLS["ctx_store"][1])))
+
+    assert result["error"].startswith("CTX store failed: ")
+    if code:
+        assert result["code"] == code and result["retryable"] is retryable
+    else:
+        assert "code" not in result and "retryable" not in result
+
+
+def test_a_failing_redactor_keeps_the_rejection_of_a_ctx_api_error_retryable(home, failing_redactor):
+    provider = _provider(home, _echo_dispatch(set()), memory=True)
+    provider._client = _RawClient("rejected-with-code")
+    provider._client._error = lambda: CtxApiError("rate limit exceeded", code="rate_limit", status=429)
+
+    result = json.loads(provider.handle_tool_call("ctx_store", dict(TOOL_CALLS["ctx_store"][1])))
+
+    assert result["code"] == "rate_limit" and result["retryable"] is True
+
+
+def test_an_old_server_is_recognized_on_the_raw_refusal_even_when_redaction_fails(failing_redactor):
+    """The fallback to ``search`` for a server from before ``synthesize:false`` reads the refusal
+    where it arrives, not the redacted text (withheld when the redactor fails)."""
+    calls = []
+    refusal = 'validating "arguments": unexpected additional properties ["synthesize" "include_content"]'
+
+    def dispatch(name, args, **kwargs):
+        calls.append(name)
+        if name.endswith("__query"):
+            return json.dumps({"error": refusal})
+        return json.dumps({"result": "[]"})
+
+    data = _mcp_client(dispatch).query("which proxy?")
+
+    assert data["success"] is True
+    assert calls == ["mcp__ctx__query", "mcp__ctx__search"]
+
+
+def test_a_failing_redactor_keeps_an_empty_code_out_of_the_chain_error(home, failing_redactor):
+    """The chain writer names a rejection code only when the answer carried one."""
+    checkpoint = failing_redactor
+    writer = checkpoint.ChainWriter.__new__(checkpoint.ChainWriter)
+    writer.secret = (CTX_KEY,)
+    writer.api_timeout = 5.0
+    writer.monotonic = lambda: 0.0
+    run = types.SimpleNamespace(deadline=60.0, budget_s=60.0)
+
+    with pytest.raises(checkpoint.CtxCheckpointError) as raised:
+        writer._call("head store", run, lambda **kwargs: {"success": False, "error": "refused"})
+
+    assert "[" not in str(raised.value)
