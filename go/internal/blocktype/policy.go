@@ -420,6 +420,11 @@ func DecodePolicy(name, scope string, builtin, isDefault bool, rawConfig []byte)
 	if err := dec.Decode(&env); err != nil {
 		return p, fmt.Errorf("blocktype %q: config: %w", name, err)
 	}
+	// The decoder matches keys without regard to case and merges a repeated
+	// key; the database's jsonb operators do neither (policy_keys.go).
+	if err := checkConfigKeys(rawConfig); err != nil {
+		return p, fmt.Errorf("blocktype %q: config: %w", name, err)
+	}
 	if env.V == nil || *env.V != 1 {
 		return p, fmt.Errorf("blocktype %q: config: unsupported or missing envelope version (want v=1)", name)
 	}
