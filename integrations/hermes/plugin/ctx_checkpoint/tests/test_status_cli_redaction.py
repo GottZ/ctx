@@ -207,13 +207,14 @@ class _Client:
     key masked the way ``CtxClient`` masks it — the other keys and the password pass."""
 
     raise_error = False
+    mask_own_key = True
     error = ""
 
     def __init__(self, base, key, **kwargs):
         self.key = key
 
     def _answer(self, *args, **kwargs):
-        error = _Client.error.replace(self.key, "[REDACTED]")
+        error = _Client.error.replace(self.key, "[REDACTED]") if _Client.mask_own_key else _Client.error
         if _Client.raise_error:
             raise CtxApiError(error)
         return {"success": False, "error": error}
@@ -228,7 +229,8 @@ def _rest_home(home, monkeypatch):
     cli = _submodule("memory.cli")
     monkeypatch.setattr(cli, "CtxClient", _Client)
     monkeypatch.setattr(_submodule("memory.provider"), "CtxClient", _Client)
-    _Client.raise_error, _Client.error = False, _foreign(REST_KEY, ENTRY_KEY, SETUP_KEY)
+    _Client.raise_error, _Client.mask_own_key = False, True
+    _Client.error = _foreign(REST_KEY, ENTRY_KEY, SETUP_KEY)
     return cli
 
 
@@ -292,3 +294,17 @@ def test_rest_memory_status_redacts_with_every_profile_key(home, monkeypatch, ra
 
     assert status["ok"] is False and "401" in status["summary"]
     _assert_clean(json.dumps(status, ensure_ascii=False), REST_KEY, ENTRY_KEY, SETUP_KEY)
+
+
+def test_rest_cli_and_status_mask_the_rest_key_a_client_left_in(home, monkeypatch, capsys):
+    """``CTX_KEY`` is bound as on the provider: a client that leaves its own key in an error text
+    (an injected or foreign one; ``CtxClient`` masks it itself) does not get it printed."""
+    cli = _rest_home(home, monkeypatch)
+    _Client.mask_own_key = False
+
+    rc = cli.cmd_search(_args(), home, cli._load(home))
+    summary = Provider(config=None).get_status_config({})["summary"]
+
+    out = capsys.readouterr().out
+    assert rc == 1 and "401" in out and "401" in summary
+    _assert_clean(out + summary, REST_KEY, ENTRY_KEY, SETUP_KEY)
