@@ -3,11 +3,13 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,9 +36,13 @@ type ingestChunkPayload struct {
 
 // ingestRequestPayload is the batch request to POST /api/ingest.
 type ingestRequestPayload struct {
-	Source string               `json:"source"`
-	Scope  string               `json:"scope,omitempty"`
-	Chunks []ingestChunkPayload `json:"chunks"`
+	Source string `json:"source"`
+	// TargetScope is --scope; empty leaves the field out, and the server
+	// writes to the key's home scope. The request no longer carries `scope`:
+	// no server read it, and none will, because every CLI before #322 sent
+	// "private" there whether the user chose it or not.
+	TargetScope string               `json:"target_scope,omitempty"`
+	Chunks      []ingestChunkPayload `json:"chunks"`
 }
 
 // ingestResultPayload is a per-chunk result from the server.
@@ -49,7 +55,10 @@ type ingestResultPayload struct {
 
 // ingestResponsePayload is the server response for a batch.
 type ingestResponsePayload struct {
-	Success  bool                  `json:"success"`
+	Success bool `json:"success"`
+	// Scope is the scope the server wrote the batch to; a server before #322
+	// leaves it out (and writes to the key's home scope).
+	Scope    string                `json:"scope,omitempty"`
 	Total    int                   `json:"total"`
 	Inserted int                   `json:"inserted"`
 	Updated  int                   `json:"updated"`
@@ -57,6 +66,7 @@ type ingestResponsePayload struct {
 	Failed   int                   `json:"failed"`
 	Results  []ingestResultPayload `json:"results"`
 	Error    string                `json:"error,omitempty"`
+	Code     string                `json:"code,omitempty"` // machine code of a refusal (docs/api.md)
 }
 
 // ingestStats collects pipeline statistics.
@@ -105,7 +115,14 @@ A file with a chunk the server refuses (title over 500 bytes, category over
 reserved for derived blocks) is held back and reported; the other files are
 uploaded. A directory that cannot be read is reported too. The command exits 1
 when a file or directory was not ingested or a chunk was not written, a dry
-run when the upload would leave one out.`,
+run when the upload would leave one out.
+
+The chunks go to the key's home scope, or to the scope --scope names. The key
+must be allowed to write that scope (a scope belongs to one tenant), or the
+server refuses the batch and the run sends no further one. The summary names
+the scope the server wrote to. A server that does not name it ignores --scope
+and writes to the key's home scope: unless --scope names that scope, the run
+stops after the first batch and exits 1.`,
 		Example: `  ctx ingest /path/to/vault/
   ctx ingest /path/to/vault/ --dry-run
   ctx ingest /path/to/vault/ --workers 4 --batch 100
@@ -274,6 +291,7 @@ run when the upload would leave one out.`,
 
 			// Phase 2: Dry run or upload
 			if dryRun {
+				Errorf("  Scope:      %s", dryRunScope(scope))
 				Errorf("\nDry run complete. Use 'ctx ingest %s' to upload.", args[0])
 				return ingestIncomplete(cmd, dryRun, errors, 0, nil)
 			}
@@ -297,7 +315,10 @@ run when the upload would leave one out.`,
 				updated    int64
 				skipped    int64
 				failed     int64
+				notSent    int64
+				stopped    atomic.Bool // set by the first answer that refused or did not confirm --scope
 				uploadErrs []ingestError
+				written    = writtenScope{requested: scope, home: sync.OnceValue(func() string { return keyHomeScope(c) })}
 				mu         sync.Mutex
 				startTime  = time.Now()
 			)
@@ -315,19 +336,28 @@ run when the upload would leave one out.`,
 					defer wg.Done()
 					for batchIdx := range batchCh {
 						batchChunks := batches[batchIdx]
+						batchSize := int64(len(batchChunks))
+						// Once an answer refused --scope or wrote elsewhere,
+						// every further batch would do the same.
+						if stopped.Load() {
+							atomic.AddInt64(&notSent, batchSize)
+							continue
+						}
 						req := ingestRequestPayload{
-							Source: "obsidian",
-							Scope:  scope,
-							Chunks: batchChunks,
+							Source:      "obsidian",
+							TargetScope: scope,
+							Chunks:      batchChunks,
 						}
 						// TODO: if extract, signal server to enable LLM extraction
 						// (handled via source field or separate flag in future)
 
 						resp, err := postIngest(c, apiBase+"/api/ingest", req)
-						batchSize := int64(len(batchChunks))
 
 						if err != nil {
 							atomic.AddInt64(&failed, batchSize)
+							if scopeDenied(err) {
+								stopped.Store(true)
+							}
 							mu.Lock()
 							uploadErrs = append(uploadErrs, ingestError{
 								File:  fmt.Sprintf("batch-%d", batchIdx),
@@ -339,11 +369,14 @@ run when the upload would leave one out.`,
 							atomic.AddInt64(&updated, int64(resp.Updated))
 							atomic.AddInt64(&skipped, int64(resp.Skipped))
 							atomic.AddInt64(&failed, int64(resp.Failed))
-							if resp.Failed > 0 {
-								mu.Lock()
-								uploadErrs = append(uploadErrs, chunkFailures(batchIdx, batchChunks, resp)...)
-								mu.Unlock()
+							mu.Lock()
+							if !written.add(resp.Scope) {
+								stopped.Store(true)
 							}
+							if resp.Failed > 0 {
+								uploadErrs = append(uploadErrs, chunkFailures(batchIdx, batchChunks, resp)...)
+							}
+							mu.Unlock()
 						}
 
 						newUploaded := atomic.AddInt64(&uploaded, batchSize)
@@ -376,8 +409,18 @@ run when the upload would leave one out.`,
 			Errorf("  Updated:  %d", atomic.LoadInt64(&updated))
 			Errorf("  Skipped:  %d (identical content)", atomic.LoadInt64(&skipped))
 			Errorf("  Failed:   %d", atomic.LoadInt64(&failed))
+			if n := atomic.LoadInt64(&notSent); n > 0 {
+				Errorf("  Not sent: %d (the run stopped: the server refused --scope or did not confirm it)", n)
+			}
+			if line := written.line(); line != "" {
+				Errorf("  Scope:    %s", line)
+			}
 
-			return ingestIncomplete(cmd, false, errors, atomic.LoadInt64(&failed), uploadErrs)
+			if err := written.unconfirmed(); err != nil {
+				cmd.SilenceUsage = true
+				return err
+			}
+			return ingestIncomplete(cmd, false, errors, atomic.LoadInt64(&failed)+atomic.LoadInt64(&notSent), uploadErrs)
 		},
 	}
 
@@ -386,7 +429,8 @@ run when the upload would leave one out.`,
 	cmd.Flags().IntVar(&batch, "batch", 50,
 		fmt.Sprintf("Chunks per batch, 1 to %d (the server's limit per request)", ingest.MaxChunksPerRequest))
 	cmd.Flags().StringVar(&category, "category", "", "Override category (default: from folder path)")
-	cmd.Flags().StringVar(&scope, "scope", "private", "Scope for uploaded chunks (a scope belongs to one tenant)")
+	cmd.Flags().StringVar(&scope, "scope", "",
+		"Scope to write the chunks to (default: the key's home scope); the key must be allowed to write it, a scope belongs to one tenant")
 	cmd.Flags().BoolVar(&extract, "extract", false, "Enable LLM extraction on server")
 
 	return cmd
@@ -568,6 +612,128 @@ func chunkFailures(batchIdx int, chunks []ingestChunkPayload, resp *ingestRespon
 	return out
 }
 
+// dryRunNotChecked is why a dry run names the scope without vouching for it:
+// it does not contact the server, and only the server knows which scopes the
+// key may write (GET /api/whoami lists the home and read scopes, not that
+// set).
+const dryRunNotChecked = "(not checked: a dry run does not contact the server)"
+
+// dryRunScope is the scope line of a dry run.
+func dryRunScope(requested string) string {
+	if requested == "" {
+		return "the key's home scope " + dryRunNotChecked
+	}
+	return requested + " " + dryRunNotChecked
+}
+
+// writtenScope collects the scope the server's answers name: the scope it
+// wrote each batch to, the key's home scope without --scope (#322). A server
+// before #322 names none and writes to the key's home scope whatever --scope
+// says. The summary reports these answers, never the flag.
+type writtenScope struct {
+	requested  string        // --scope; "" asks for the key's home scope
+	home       func() string // the key's home scope, asked at most once; "" when unknown
+	answers    int           // batches the server answered with counts
+	unreported int           // answers that named no scope
+	scopes     []string      // the scopes named, each once
+}
+
+// add records an answer and reports whether it wrote to the requested scope.
+func (s *writtenScope) add(scope string) bool {
+	s.answers++
+	if scope == "" {
+		s.unreported++
+	} else if !slices.Contains(s.scopes, scope) {
+		s.scopes = append(s.scopes, scope)
+	}
+	return s.confirms(scope)
+}
+
+// confirms reports whether an answer naming scope ("" for none) wrote to the
+// requested scope. An answer without a scope comes from a server that writes
+// to the key's home scope, so it confirms --scope only when --scope names
+// that scope; only then is the home scope asked for.
+func (s *writtenScope) confirms(scope string) bool {
+	switch {
+	case s.requested == "":
+		return true
+	case scope == "":
+		return s.home() == s.requested
+	default:
+		return scope == s.requested
+	}
+}
+
+// line is the summary's scope line, "" when no batch was answered.
+func (s *writtenScope) line() string {
+	switch {
+	case s.answers == 0:
+		return ""
+	case s.unreported > 0 && s.requested != "" && s.confirms(""):
+		return s.requested + " (the key's home scope; the server did not report it)"
+	case s.unreported > 0:
+		return "not reported by the server (a server that does not report it writes to the key's home scope and ignores --scope)"
+	default:
+		return strings.Join(s.scopes, ", ")
+	}
+}
+
+// unconfirmed is the run's error when --scope named a scope the answers do not
+// confirm; nil without --scope or without an answer (a refused batch is
+// counted and reported as such).
+func (s *writtenScope) unconfirmed() error {
+	if s.requested == "" || s.answers == 0 {
+		return nil
+	}
+	if s.unreported > 0 && !s.confirms("") {
+		return fmt.Errorf("--scope %q was not applied: the server did not report the scope it wrote to, "+
+			"so the chunks went to the key's home scope", s.requested)
+	}
+	for _, sc := range s.scopes {
+		if sc != s.requested {
+			return fmt.Errorf("--scope %q was not applied: the server wrote to %s", s.requested, strings.Join(s.scopes, ", "))
+		}
+	}
+	return nil
+}
+
+// keyHomeScope is the key's home scope as GET /api/whoami names it, "" when
+// the server does not answer. ctx ingest asks it only when --scope is set and
+// a server answered a batch without naming the scope it wrote to.
+func keyHomeScope(c *Client) string {
+	body, status, err := c.Do(http.MethodGet, "/api/whoami", nil)
+	if err != nil || status != http.StatusOK {
+		return ""
+	}
+	var who struct {
+		Success   bool   `json:"success"`
+		HomeScope string `json:"home_scope"`
+	}
+	if json.Unmarshal(body, &who) != nil || !who.Success {
+		return ""
+	}
+	return who.HomeScope
+}
+
+// scopeDeniedCode is the machine code of the server's refusal of a scope the
+// key may not write (classScopeDenied in internal/handler/errcode.go,
+// docs/api.md). Every further batch of the run would be refused the same way.
+const scopeDeniedCode = "scope_denied"
+
+// ingestRefusal is a batch the server refused whole: its message and the
+// machine code of the answer ("" when the answer carries none).
+type ingestRefusal struct {
+	code, msg string
+}
+
+func (r *ingestRefusal) Error() string { return "server: " + r.msg }
+
+// scopeDenied reports whether err is the server's refusal of the scope.
+func scopeDenied(err error) bool {
+	var r *ingestRefusal
+	return errors.As(err, &r) && r.code == scopeDeniedCode
+}
+
 // ingestIncomplete is the command's result once the summary is on stderr: nil
 // when every chunk was written, otherwise an error, which cmd/ctx/main.go turns
 // into exit status 1 like the failure of any other command (docs/cli.md, exit
@@ -644,7 +810,7 @@ func postIngest(c *Client, url string, req ingestRequestPayload) (*ingestRespons
 		if msg == "" {
 			msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
 		}
-		return nil, fmt.Errorf("server: %s", msg)
+		return nil, &ingestRefusal{code: result.Code, msg: msg}
 	}
 
 	if !result.Success && result.Failed == 0 {
