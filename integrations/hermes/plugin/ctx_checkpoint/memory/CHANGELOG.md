@@ -6,6 +6,106 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.14.0] — 2026-11-16
+
+Redaction keys of status and CLI, installer tests, untrusted_origin in the recall
+(GottZ/ctx#308, part of #295).
+
+- **Status, connection test, setup and CLI redact with the keys the provider binds
+  (GottZ/ctx#308).** `status.profile_ctx_keys(name)` is the one resolution of a profile's
+  ctx keys: the `Authorization`/`X-Context-Key` value of `mcp_servers.<name>` as written
+  (`${VAR}`/`${env:VAR}` resolved through Hermes' `get_env_value`, `.env` included) and as
+  Hermes loads it, and `CTX_API_KEY`. It moved from the umbrella into the engine module
+  that is stdlib-only at import time and uses the same three `hermes_cli.config` functions
+  it already called (`load_config`, `read_user_config_raw`, `get_env_value`), so the CLI
+  reads it without a provider and no Hermes import was added. The provider binds it on
+  connect (seam `_profile_secrets`); `hermes memory status` and `hermes ctx_checkpoint
+  status` on MCP (`mcp_report`) and on REST (`get_status_config`, `cmd_status`), the
+  connection test of the Desktop form and of the terminal setup, `Setup failed: …` (now with
+  a redacted DEBUG traceback instead of `exc_info`) and every error line of the CLI on
+  `transport: rest` (`search`, `get`, `query`, `store`, `sync`, `status`, a raised
+  `CtxApiError`) redact with it — plus `CTX_KEY` on REST, as the provider — through
+  `checkpoint.redact_error_text`. The connection test adds the keys of the entry it probes
+  (`status.entry_keys`) to whatever its caller passes. Before, status and test knew
+  `CTX_API_KEY` or the key just typed, the CLI `CTX_KEY` only: a key the entry referenced
+  through another variable, or a `password:` value, passed. A CLI error line is now one line of at most 300 characters after
+  redaction (`status.redact_error`), the `whoami failed` cause of the REST status at most 140.
+- **Installer tests outside a checkout.** The seven tests of
+  `integrations/hermes/scripts/install.sh` skip with a reason when the script is not next to
+  the plugin folder and the folder is not in a ctx checkout (`go/go.mod` four levels up), as in
+  a catalog install, a flat copy such as `/plugins/ctx_checkpoint` included (it failed
+  collection before); there five failed and two passed only because bash could not find the
+  script. In a checkout they fail when the script is missing: the tests that run it assert it
+  exists, so the staging and move tests no longer pass on bash's own non-zero exit.
+- **untrusted_origin in the recall (part of GottZ/ctx#295).** ctx v5.41.0 records on a block
+  re-typed out of a type marked untrusted the type it came from (`untrusted_origin`, #280).
+  `config.untrusted_origin` reads the record (a value that is no type name keeps the mark
+  as `?`), `config.untrusted_origin_note` words it as the server does, and
+  `config.with_untrusted_origin_checked` puts the checked value into an answer passed on whole
+  (`ctx_get`, `hermes ctx_checkpoint get`, the MCP client's note line and content reload).
+  The prefetch block puts the note line under the hit's label and one sentence into its intro; `ctx_query`,
+  `ctx_search` (`_trust_fields`) and `ctx_get` carry the field and an `origin_note`; the CLI
+  hit lines carry the note line. It is a note, not untrusted framing: the owner's decision
+  on #280 lets the corpus take such knowledge up, so `prefetch_untrusted: drop` keeps the hit.
+  The MCP query text parser dropped every source line with text after the id, so a source
+  with ` superseded_by:<uuid>` was lost; `key:value` tokens after the id are kept now,
+  `superseded_by` is read, the indented note line under a source is its record, and the
+  content reload copies `untrusted_origin` too. Without the record (a server before v5.41.0)
+  prefetch block, tool results and CLI lines are byte for byte as in 0.13.0. The shared answer
+  fixture (`tests/mcp_answers.json`) gains the section `origin`, which the ctx side renders
+  through its real MCP handlers.
+
+## [ctx_checkpoint 0.13.0] — 2026-11-16
+
+Setup, MCP tool names and error texts (GottZ/ctx#294, #297, #304).
+
+- **The required mode needs a passing test on every surface (GottZ/ctx#294).** The Desktop
+  form ran the connection test before it wrote `compression.checkpoint_required: true` but
+  refused the save only when the test failed; when the loading Hermes could not run it
+  (`ConnectionTest.ok is None`: `_probe_single_server` missing or without `connect_timeout`)
+  the mode was written anyway, while the terminal setup offers it only after a passing test.
+  `_apply_form` now refuses that save with the reason and how to set the mode once
+  `hermes mcp test <entry>` passes; nothing is written. Saves without the mode, and turning it
+  off, still need no test.
+- **MCP tool names as Hermes registers them (GottZ/ctx#297).** Hermes registers the tools of
+  an `mcp_servers` entry with every character outside `[A-Za-z0-9_]` replaced by `_` and a name
+  over 64 characters shortened with a hash suffix (`tools.mcp_tool_schema.
+  mcp_prefixed_tool_name`); the plugin built `mcp__<server>__<tool>` from the raw entry name,
+  so an entry such as `ctx-prod` answered `Unknown tool` to every call, and since 0.9.0 the
+  system prompt block and the receipt named tools that do not exist. `mcp_client.mcp_tool_name`
+  now follows Hermes' rule (that function is not a public plugin API, so the rule is rebuilt and
+  the tests pin it against Hermes' function); dispatch, prompt block, receipt and the failure
+  hint read it. An entry is refused when another enabled entry can register a tool under the
+  name of one of its checkpoint tools (`mcp_client.colliding_servers`): both names come out
+  alike, or `<own>__` starts with `<other>__` after the rewrite (`ctx--prod` next to `ctx`, whose
+  tool `prod__store` would be `mcp__ctx__prod__store`). Hermes keeps the first registration of a
+  name, so a call by name could reach the other server; config.yaml does not list the other
+  server's tools, so the rule takes every tool name as possible — a test checks it against
+  Hermes' function for every pair of 130 entry names — and the provider reports itself unavailable with
+  the reason, and the connection test (setup forms, `hermes memory status`) fails before it
+  connects. A passing test names the tools when the entry name is rewritten. The pointer
+  binding stays on the entry name; for `ctx` and every name Hermes keeps, names and binding
+  digest are byte-identical.
+- **The rest of the unredacted error texts (GottZ/ctx#304).** `raise … from None` inside an
+  `except` block leaves the original as the implicit `__context__` (only hidden from printing),
+  so the chain writer's error still held the raw `CtxApiError`, and the REST client's error the
+  raw `HTTPError`/`URLError`/`ValueError` (the last with the bytes repr of a rejected key).
+  These errors — the chain writer's `_call`, the REST client's `_request` (HTTP failures now in
+  `_http_failure`), the MCP client's dispatch failure, the crashed-chain error and the
+  redaction failure of `render_direct_evidence` — are now raised after the handler, without
+  cause or context. `McpClient` takes the provider's bound keys (`secrets`) and redacts the
+  dispatch error, the error envelope and the bodies of `store`/`get` answers without a block
+  where they enter the plugin. The agent tools (`ctx_store`, `ctx_search`, `ctx_get`,
+  `ctx_query`) put the redacted text and code into the tool result and the log; their DEBUG
+  lines, and those of the digest triggers, carry `checkpoint.redacted_traceback` instead of
+  `exc_info`. The prefetch, warm-up, content-fetch and `whoami` lines are redacted with the
+  bound keys. Decisions read the raw values, never the redacted ones: a failing redactor
+  withholds every text, so `ctx_store` decides `retryable` on the raw code, rejection codes are
+  shown through `checkpoint.redact_code` (an empty code stays empty, ctx's closed vocabulary and
+  the clients' own `confirm_writes`/`timeout` stay verbatim, any other code is redacted), and the
+  MCP client tells a server from before `synthesize: false` by the refusal as it arrived
+  (`_RetrievalArgsRefused`), so the fallback to `search` survives a failing redactor.
+
 ## [ctx_checkpoint 0.12.0] — 2026-11-16
 
 Gate and setting edge cases with the memory features on (GottZ/ctx#289).

@@ -8,7 +8,8 @@ at import time. Active-provider gating applies: the commands only appear when
 
 All commands go through the same ``CtxClient`` and helpers as the provider, so CLI writes
 carry the provenance tags (``hook:cli``) and the configured sensitivity, and reads honour
-``prefetch_types_exclude``.
+``prefetch_types_exclude``. Error texts are printed redacted with the keys the provider binds
+(``CTX_KEY`` on REST and ``status.profile_ctx_keys``) and the checkpoint rules (#308).
 """
 
 from __future__ import annotations
@@ -35,8 +36,11 @@ from .config import (
     resolve_base_url,
     umbrella_section,
     umbrella_transport,
+    untrusted_origin,
+    untrusted_origin_note,
+    with_untrusted_origin_checked,
 )
-from .status import mcp_report, redact_error
+from .status import REST_API_KEY_ENV, mcp_report, profile_ctx_keys, redact_error
 
 # Built-in memory files separate entries with a line holding only "§" (host ENTRY_DELIMITER
 # "\n§\n"); a "§" inside an entry ("gemäß § 22 UStG") must not split it.
@@ -85,7 +89,26 @@ def _load(home: Path) -> dict[str, Any]:
     section = _plugin_section()
     config = load_ctx_config(str(home), overlay=overlay_from_umbrella(section))
     config["_transport"] = umbrella_transport(section)
+    config["_mcp_server"] = str(section.get("mcp_server") or "ctx")
     return config
+
+
+def _secrets(config: dict[str, Any]) -> tuple[str, ...]:
+    """The ctx keys the provider binds for this profile and transport: the REST key on ``rest``,
+    and the profile's (:func:`status.profile_ctx_keys`). Never raises."""
+    keys = profile_ctx_keys(str(config.get("_mcp_server") or "ctx"))
+    if config.get("_transport", "rest") != "rest":
+        return keys
+    try:
+        return (env_secret(REST_API_KEY_ENV), *keys)
+    except Exception:
+        return keys
+
+
+def _error(config: dict[str, Any], text: Any) -> str:
+    """An error text (a server answer, a client error) as the terminal shows it: redacted with
+    :func:`_secrets` and the checkpoint rules, cut to one line (``status.redact_error``)."""
+    return redact_error(text, _secrets(config))
 
 
 def _client(config: dict[str, Any]) -> CtxClient | None:
@@ -121,7 +144,9 @@ def _parse_memory_file(path: Path) -> list[str]:
 def _hit_line(item: dict[str, Any]) -> str:
     marker = f"{UNTRUSTED_LABEL} " if item.get("untrusted") is True else ""
     btype = f" <{item['type']}>" if item.get("type") else ""
-    return f"- {marker}[{item.get('category')}] {item.get('title')}{btype}  (id: {item.get('id')})"
+    line = f"- {marker}[{item.get('category')}] {item.get('title')}{btype}  (id: {item.get('id')})"
+    note = untrusted_origin_note(untrusted_origin(item))
+    return f"{line}\n  {note}" if note else line
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +163,7 @@ def cmd_status(args, home: Path, config: dict[str, Any]) -> int:
         try:
             report = mcp_report(str(home))
         except Exception as exc:
-            print(f"  ✗ status unavailable: {redact_error(exc)}")
+            print(f"  ✗ status unavailable: {_error(config, exc)}")
             return 1
         for name, value in report.items():
             print(f"  {name}: {value}")
@@ -162,7 +187,7 @@ def cmd_status(args, home: Path, config: dict[str, Any]) -> int:
         scope, label, role = info.get("home_scope") or "?", info.get("label") or "?", info.get("role") or "?"
         print(f"  ✓ connected · scope: {scope} · label: {label} · role: {role}")
     else:
-        print(f"  ✗ {info.get('error') or 'whoami failed'}")
+        print(f"  ✗ {_error(config, info.get('error') or 'whoami failed')}")
         rc = 1
     settings = _ctx_json(home)
     if settings:
@@ -197,7 +222,7 @@ def cmd_sync(args, home: Path, config: dict[str, Any]) -> int:
                 actions[action] = actions.get(action, 0) + 1
             else:
                 failed += 1
-                print(f"  ✗ {label}: {title}: {resp.get('error') or 'unknown error'}")
+                print(f"  ✗ {label}: {title}: {_error(config, resp.get('error') or 'unknown error')}")
         stored = sum(actions.values())
         total += stored
         detail = ", ".join(f"{n} {a}" for a, n in sorted(actions.items()))
@@ -217,7 +242,7 @@ def cmd_query(args, home: Path, config: dict[str, Any]) -> int:
         types_exclude=_types_exclude(args, config),
     )
     if not resp.get("success"):
-        print(f"✗ {resp.get('error') or 'query failed'}")
+        print(f"✗ {_error(config, resp.get('error') or 'query failed')}")
         return 1
     if args.synthesize and resp.get("answer"):
         print(resp["answer"])
@@ -242,7 +267,7 @@ def cmd_store(args, home: Path, config: dict[str, Any]) -> int:
         tags=merge_tags(args.tag, derive_profile_name(str(home)), _HOOK),
     )
     if not resp.get("success"):
-        print(f"✗ {resp.get('error') or 'store failed'}")
+        print(f"✗ {_error(config, resp.get('error') or 'store failed')}")
         return 1
     block_id = store_block_id(resp)
     print(f"✓ {store_action(resp)}: [{args.category}] {args.title}" + (f" (id: {block_id})" if block_id else ""))
@@ -260,7 +285,7 @@ def cmd_search(args, home: Path, config: dict[str, Any]) -> int:
         types_exclude=_types_exclude(args, config) or None,
     )
     if not resp.get("success"):
-        print(f"✗ {resp.get('error') or 'search failed'}")
+        print(f"✗ {_error(config, resp.get('error') or 'search failed')}")
         return 1
     results = resp.get("results") or []
     print(f"{resp.get('count', len(results))} result(s):")
@@ -275,9 +300,9 @@ def cmd_get(args, home: Path, config: dict[str, Any]) -> int:
         return 1
     resp = client.get_block(args.block_id)
     if not resp.get("success"):
-        print(f"✗ {resp.get('error') or 'get failed'}")
+        print(f"✗ {_error(config, resp.get('error') or 'get failed')}")
         return 1
-    print(json.dumps(resp, indent=2, ensure_ascii=False))
+    print(json.dumps(with_untrusted_origin_checked(resp), indent=2, ensure_ascii=False))
     return 0
 
 
@@ -298,10 +323,11 @@ def ctx_command(args) -> None:
         print(f"Usage: hermes {PROVIDER_NAME} <{_SUBCOMMANDS}>")
         sys.exit(2)
     home = _hermes_home()
+    config = _load(home)
     try:
-        rc = command(args, home, _load(home))
+        rc = command(args, home, config)
     except CtxApiError as exc:
-        print(f"✗ {exc}")
+        print(f"✗ {_error(config, exc)}")
         rc = 1
     if rc:
         sys.exit(rc)

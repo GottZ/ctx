@@ -39,6 +39,7 @@ from .config import (
     shorten,
     umbrella_section,
 )
+from .mcp_client import colliding_servers, collision_text, mcp_tool_name
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,96 @@ _LOCAL_NETWORKS = tuple(
     )
 )
 _LOCAL_NAME_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa")
+# Setup stores the ctx key in Hermes' .env under this name and references it from the MCP server
+# entry; the REST transport signs in with the key under REST_API_KEY_ENV.
+SETUP_API_KEY_ENV = "CTX_API_KEY"
+REST_API_KEY_ENV = "CTX_KEY"
+# The headers ctx reads a key from (docs/mcp.md), and the ``${VAR}`` / ``${env:VAR}`` references
+# Hermes expands in config.yaml values (``hermes_cli.config``); other sources stay unresolved.
+_KEY_HEADERS = ("authorization", "x-context-key")
+_ENV_REFERENCE_RE = re.compile(r"\$\{\s*(?:env:\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\}")
+_AUTH_SCHEME_PREFIX_RE = re.compile(r"^(?:bearer|basic|token)\s+", re.IGNORECASE)
+
+
+# -- The ctx keys of a profile (redaction only) ------------------------------------------
+
+
+def env_value(name: str) -> str:
+    """Scope-aware environment or .env value (the host's own lookup), ``""`` if unset."""
+    try:
+        from hermes_cli.config import get_env_value
+
+        return get_env_value(name) or ""
+    except Exception:
+        return ""
+
+
+def _expand_references(raw: str) -> str | None:
+    """``raw`` with every ``${VAR}`` / ``${env:VAR}`` resolved; ``None`` when one does not resolve
+    or another source (``${vault:…}``) remains."""
+    missing: list[str] = []
+
+    def expand(match: re.Match) -> str:
+        value = env_value(match.group(1))
+        if not value:
+            missing.append(match.group(1))
+        return value
+
+    value = _ENV_REFERENCE_RE.sub(expand, raw)
+    return None if missing or "${" in value else value
+
+
+def entry_keys(entry: Any) -> list[str]:
+    """The key values an MCP server entry signs in with: its ``Authorization`` / ``X-Context-Key``
+    headers, references resolved through the host's own lookup (``.env`` included), the auth
+    scheme dropped. A header with a reference that does not resolve is skipped; an entry that signs
+    in with ``auth`` (OAuth) or runs a command has no key here."""
+    headers = entry.get("headers") if isinstance(entry, dict) else None
+    keys: list[str] = []
+    for header, raw in headers.items() if isinstance(headers, dict) else ():
+        if str(header).strip().lower() not in _KEY_HEADERS or not isinstance(raw, str):
+            continue
+        value = _expand_references(raw)
+        if value is None:
+            continue
+        value = _AUTH_SCHEME_PREFIX_RE.sub("", value.strip()).strip()
+        if value:
+            keys.append(value)
+    return keys
+
+
+def _server_entry(config: Any, name: str) -> Any:
+    servers = config.get("mcp_servers") if isinstance(config, dict) else None
+    return servers.get(name) if isinstance(servers, dict) else None
+
+
+def _user_config() -> Any:
+    from hermes_cli.config import read_user_config_raw
+
+    return read_user_config_raw()
+
+
+def _loaded_config() -> Any:
+    from hermes_cli.config import load_config
+
+    return load_config()
+
+
+def profile_ctx_keys(name: str) -> tuple[str, ...]:
+    """The ctx keys of this profile, for redaction only — the one resolution the provider binds and
+    status, connection test and CLI redact with (#308): the keys of ``mcp_servers.<name>`` — as
+    written (references resolved here, ``.env`` included) and as Hermes loads it (expanded, with a
+    managed overlay) — and the :data:`SETUP_API_KEY_ENV` setup stores. The REST transport adds its
+    own :data:`REST_API_KEY_ENV`. Reads config.yaml and .env, never the network; never raises."""
+    keys: list[str] = []
+    for read in (_user_config, _loaded_config):
+        try:
+            keys.extend(entry_keys(_server_entry(read(), name)))
+        except Exception:
+            logger.debug("ctx_checkpoint: the key of mcp_servers.%s was not resolved for redaction", name)
+    from .checkpoint import bound_secret_values
+
+    return bound_secret_values([*keys, env_value(SETUP_API_KEY_ENV)])
 
 
 # -- Connection test ---------------------------------------------------------------------
@@ -181,11 +272,19 @@ def _test_timeout(entry: dict[str, Any]) -> float:
     return max(CONNECTION_TEST_TIMEOUT_S, own)
 
 
-def run_connection_test(name: str, entry: dict[str, Any], *, secrets: Iterable[str] = ()) -> ConnectionTest:
-    """Test one ctx MCP server entry; never raises."""
-    secrets = tuple(secrets)
+def run_connection_test(
+    name: str, entry: dict[str, Any], *, secrets: Iterable[str] = (), servers: dict[str, Any] | None = None
+) -> ConnectionTest:
+    """Test one ctx MCP server entry; never raises. ``servers``: the ``mcp_servers`` entries of the
+    profile, for the check that no other entry gets the same tool names. A probe error is redacted
+    with ``secrets`` and the keys of ``entry`` itself (:func:`entry_keys`), so the key of the entry
+    under test is masked whatever the caller passed (#308)."""
+    secrets = (*secrets, *entry_keys(entry))
     timeout = _test_timeout(entry)
     where = f"mcp_servers.{name}"
+    others = colliding_servers(name, servers)
+    if others:
+        return ConnectionTest(False, f"connection test of {where}: {collision_text(name, others)}")
     if entry.get("url"):
         where += f" ({display_url(entry.get('url'))})"
     try:
@@ -202,7 +301,11 @@ def run_connection_test(name: str, entry: dict[str, Any], *, secrets: Iterable[s
             "the URL must be the /mcp endpoint of a ctx server",
             len(tools),
         )
-    return ConnectionTest(True, f"{where} answered with {len(tools)} tools", len(tools))
+    detail = f"{where} answered with {len(tools)} tools"
+    names = [mcp_tool_name(name, tool) for tool in CHECKPOINT_TOOLS]
+    if names != [f"mcp__{name}__{tool}" for tool in CHECKPOINT_TOOLS]:
+        detail += f"; Hermes names them {', '.join(names)}"  # the entry name is rewritten (#297)
+    return ConnectionTest(True, detail, len(tools))
 
 
 def insecure_http(url: Any) -> bool:
@@ -501,7 +604,9 @@ def skip_warning(outcome: dict[str, Any]) -> str:
 
 
 def _failure_hint(cause: str, server: str) -> str:
-    if f"Unknown tool: mcp__{server}__" in cause:
+    # ``mcp_tool_name(server, "")`` is the prefix of every tool of the entry (a shortened name is
+    # matched whole).
+    if any(f"Unknown tool: {mcp_tool_name(server, tool)}" in cause for tool in ("", *CHECKPOINT_TOOLS)):
         return (
             f"The ctx MCP server '{server}' is not connected in this Hermes: check it with "
             f"`hermes mcp test {server}`; a new session connects again."
@@ -534,9 +639,11 @@ def mcp_status(
     section: dict[str, Any],
     hermes_home: str,
     secrets: Iterable[str] = (),
+    servers: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The report of ``hermes memory status`` and ``hermes ctx_checkpoint status`` (one line
-    per key). Runs the connection test; never raises."""
+    per key). Runs the connection test (``servers``: the profile's ``mcp_servers``, see
+    :func:`run_connection_test`); never raises."""
     status: dict[str, Any] = {"summary": "", "ok": False, "transport": "mcp", "mcp_server": f"mcp_servers.{name}"}
     url = entry.get("url") if entry else None
     if url:
@@ -549,7 +656,7 @@ def mcp_status(
     elif entry.get("enabled") is False:
         status["summary"] = f"✗ mcp_servers.{name} is disabled — `hermes memory setup ctx_checkpoint` turns it on again"
     else:
-        test = run_connection_test(name, entry, secrets=secrets)
+        test = run_connection_test(name, entry, secrets=secrets, servers=servers)
         status["ok"] = test.ok
         status["summary"] = (
             f"✓ connected: {test.detail}" if test.ok else f"{'?' if test.ok is None else '✗'} {test.detail}"
@@ -571,21 +678,13 @@ def mcp_status(
 
 def mcp_report(hermes_home: str) -> dict[str, Any]:
     """:func:`mcp_status` for the profile Hermes has loaded: the plugin's settings, the named
-    ``mcp_servers`` entry as written (``${VAR}`` templates unexpanded), the operating mode and
-    ``CTX_API_KEY`` (only to keep it out of the report)."""
-    from hermes_cli.config import load_config, read_user_config_raw
-
-    config = load_config()
+    ``mcp_servers`` entry as written (``${VAR}`` templates unexpanded), the operating mode and the
+    profile's ctx keys (:func:`profile_ctx_keys`, only to keep them out of the report)."""
+    config = _loaded_config()
     section = umbrella_section(config)
     name = str(section.get("mcp_server") or "ctx")
-    servers = read_user_config_raw().get("mcp_servers")
+    servers = _user_config().get("mcp_servers")
     entry = servers.get(name) if isinstance(servers, dict) else None
-    try:
-        from hermes_cli.config import get_env_value
-
-        key = str(get_env_value("CTX_API_KEY") or "")
-    except Exception:
-        key = ""
     return mcp_status(
         name=name,
         entry=entry if isinstance(entry, dict) else {},
@@ -593,5 +692,6 @@ def mcp_report(hermes_home: str) -> dict[str, Any]:
         engine_config=load_ctx_config(hermes_home, overlay=overlay_from_umbrella(section)),
         section=section,
         hermes_home=hermes_home,
-        secrets=(key,),
+        secrets=profile_ctx_keys(name),
+        servers=servers if isinstance(servers, dict) else {},
     )

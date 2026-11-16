@@ -243,6 +243,42 @@ def test_original_exception_is_not_chained(monkeypatch, exc):
     assert info.value.__suppress_context__ is True
 
 
+def _chained(exc):
+    """``exc`` and every exception reachable through ``__cause__`` and ``__context__``, the
+    suppressed context included (Hermes has helpers that walk ``__cause__ or __context__``)."""
+    seen, todo = [], [exc]
+    while todo:
+        current = todo.pop()
+        if current is None or any(current is known for known in seen):
+            continue
+        seen.append(current)
+        todo += [current.__cause__, current.__context__]
+    return seen
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(_http_error(401, {"error": f"key {KEY_A}"}, reason=f"Unauthorized {KEY_A}"), id="HTTPError"),
+        pytest.param(_http_error(302, b"", reason=f"Found {KEY_A}"), id="redirect"),
+        pytest.param(urllib.error.URLError(f"proxy refused key {KEY_A}"), id="URLError"),
+        pytest.param(http.client.BadStatusLine(f"PROXY-ERR denied {KEY_A}"), id="BadStatusLine"),
+        pytest.param(ValueError(f"Invalid header value b'{KEY_A}\\r\\n'"), id="ValueError"),
+    ],
+)
+def test_the_raised_error_holds_no_raw_original_in_its_context(monkeypatch, exc):
+    """#304: raised inside the ``except`` block, the error kept the raw original as its implicit
+    ``__context__`` (only suppressed for printing); it is raised after the block now."""
+    from ctx_plugin.client import CtxApiError, CtxClient
+
+    monkeypatch.setattr("ctx_plugin.client._urlopen", _raise(exc))
+    with pytest.raises(CtxApiError) as info:
+        CtxClient(URL_A, KEY_A).whoami()
+    assert info.value.__context__ is None
+    for chained in _chained(info.value):
+        _assert_no_key(f"{chained} {chained.args!r}")
+
+
 # -- http.client exceptions and invalid header values (review of #53) -----------------------
 
 

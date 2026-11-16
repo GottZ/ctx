@@ -129,13 +129,24 @@ manages that entry's authentication itself (no auth yet, or `Bearer ${CTX_API_KE
 from an earlier setup). An entry with its own `headers` or `auth`, or a stdio
 `command` entry, keeps them untouched. Setup always targets the entry named by
 `mcp_server`; change that name in `config.yaml` if your ctx entry is called
-differently.
+differently. Hermes registers the entry's tools with every character outside
+`A-Za-z0-9_` replaced by `_` (an entry `ctx-prod` gives `mcp__ctx_prod__store`,
+a name over 64 characters is shortened with a hash), and the plugin calls and
+names them the same way (0.13.0; before, an entry with `-` never resolved).
+Hermes keeps one registration of a tool name, so the entry is refused when
+another enabled entry can register a tool under the name of a checkpoint tool:
+both come out alike (`ctx-prod` and `ctx_prod`), or the entry's name is the
+other's followed by two separators or a separator and `_` (`ctx--prod` next to
+`ctx`: a tool `prod__store` of `ctx` would be named `mcp__ctx__prod__store`).
+The other server's tools are not in `config.yaml`, so this is refused even when
+that server has no such tool; one separator (`ctx-prod` next to `ctx`) is fine.
+The connection test names the tools when the entry name is rewritten.
 
 ## Memory features (`memory: true`)
 
 | Feature | What it does | Switch |
 |---|---|---|
-| Recall | before each turn the most relevant blocks are injected as `<ctx-context>` (untrusted text labelled); the host's indicator shows `🧠 CTX — recalled N memories` | `auto_recall`, `max_prefetch_results`, `prefetch_types_exclude`, `prefetch_untrusted` |
+| Recall | before each turn the most relevant blocks are injected as `<ctx-context>` (untrusted text labelled, a block re-typed out of an untrusted type named with an `untrusted_origin:` line); the host's indicator shows `🧠 CTX — recalled N memories` | `auto_recall`, `max_prefetch_results`, `prefetch_types_exclude`, `prefetch_untrusted` |
 | Agent tools | `ctx_query(text, synthesize?, types_exclude?)`, `ctx_store(category, title, content, …)`, `ctx_search(query, category?, tags?, …)`, `ctx_get(block_id)` | — |
 | Memory mirror | Hermes' curated `MEMORY.md`/`USER.md` writes become `agent-briefing` / `reference` blocks | `auto_memory_mirror` |
 | Fact extraction | up to 5 salient closing statements of the compacted turns become `learnings` blocks, deduplicated across compactions | `auto_compress_extract`, `facts_from_user`, `facts_reject_cjk_codeswitch` |
@@ -201,7 +212,9 @@ Switch the mode in Hermes Desktop (*Settings → Memory → ctx_checkpoint → W
 the checkpoint before compacting*), in `hermes memory setup ctx_checkpoint` (asked
 after the connection test) or with `compression.checkpoint_required` in
 `config.yaml`; `hermes memory status` shows which one is active. Turning it on
-needs a passing connection test.
+needs a passing connection test: on a Hermes that cannot run the test, the
+Desktop switch refuses with the reason and the terminal setup does not offer the
+mode (0.13.0); set it in `config.yaml` once `hermes mcp test <entry>` passes.
 
 Fail-closed means accepting a session halt (`BLOCKED_MISSING_PREREQUISITE`) while
 ctx is unreachable, instead of an unarchived compaction. The halt also triggers
@@ -281,7 +294,8 @@ Saved turns are a record of past messages (type checkpoint, untrusted): quote th
 ```
 
 The tool names are those of the session: with memory features off the ctx MCP server's
-tools under the name in `mcp_server` (`mcp__<server>__get`, `mcp__<server>__search`),
+tools under the name Hermes registers for the entry in `mcp_server`
+(`mcp__<server>__get`, `mcp__<server>__search`; `-` and other characters become `_`),
 with memory features on the plugin's `ctx_get` and `ctx_search` (`types_exclude=[]`),
 and on `transport: rest` without memory features the plugin CLI
 (`hermes ctx_checkpoint get|search`). The root token in the search text narrows the hits
@@ -399,15 +413,24 @@ entry did not connect when Hermes started (wrong key, server down, URL wrong).
   own pass still rewrites some code lines
   (`api_key: Optional[str] = None` → `api_key: *** = None`), and its strict mode
   masks every URL parameter named `key`, `code`, `session` or `auth`. A failing
-  redactor skips the write. The error text of a failed store (a server answer or an MCP
-  dispatch error can repeat what it was sent) goes through the same passes before the
-  plugin raises or logs it; a failing redactor withholds it.
+  redactor skips the write. The error text of a failed call (a server answer or an MCP
+  dispatch error can repeat what it was sent) goes through the same passes with the bound
+  keys where it enters the plugin and again before the plugin raises it, logs it or hands
+  it to the model as a tool result; a failing redactor withholds it. A raised error
+  carries no unredacted original as cause or context, and DEBUG lines carry a redacted
+  traceback instead of `exc_info` (0.13.0). `hermes memory status`, `hermes ctx_checkpoint
+  status`, the connection test of the setup forms, `Setup failed: …` and the CLI's error
+  lines redact with the same keys, resolved the same way (`status.profile_ctx_keys`, 0.14.0).
 - **Reads:** its own settings in the Hermes config (`memory.ctx_checkpoint` and
   `plugins.entries.ctx_checkpoint.settings`), the named `mcp_servers` entry,
   `compression.threshold` (for the warning above) and
   `compression.checkpoint_required` (for the status), the transcript Hermes passes
   to `on_pre_compress`, `$HERMES_HOME/ctx.json` (legacy engine settings, lower
-  priority than the config; read in every mode), and with memory features on the
+  priority than the config; read in every mode), the ctx keys of the profile — the
+  `mcp_servers` entry's key through Hermes' config and `.env` lookup, `CTX_API_KEY`, and
+  `CTX_KEY` on `transport: rest` — only to redact them (when the provider connects, and
+  in `hermes memory status`, `hermes ctx_checkpoint …`, the connection test and setup;
+  0.14.0), and with memory features on the
   profile's `state.db` (read-only, to find a resumed session's root). Nothing
   outside that.
 - **Writes, when you save the settings:** `memory.ctx_checkpoint`, the named
