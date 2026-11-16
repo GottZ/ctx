@@ -199,6 +199,28 @@ def test_terminal_setup_failure_names_no_key(home, probe, monkeypatch, capsys, c
     _assert_clean(caplog.text, typed)
 
 
+def test_terminal_setup_failure_names_no_entry_key(home, probe, monkeypatch, capsys, caplog):
+    """The same for a key the server entry resolves through its own variable (no key typed: setup
+    keeps that entry's auth); here the config write fails with it."""
+    _write(home, headers=OWN_VARIABLE, env=ENV)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    monkeypatch.setattr(_MODULE.getpass, "getpass", lambda prompt="": "")
+    host_config = importlib.import_module("hermes_cli.config")
+
+    def refuse(*args, **kwargs):
+        raise OSError(f"config.yaml is read-only ({_foreign(ENTRY_KEY)})")
+
+    monkeypatch.setattr(host_config, "save_config", refuse)
+    caplog.set_level("DEBUG")
+
+    Provider(config={}).post_setup(str(home), {})
+
+    out = capsys.readouterr().out
+    assert "Setup failed" in out and "read-only" in out
+    _assert_clean(out, ENTRY_KEY)
+    _assert_clean(caplog.text, ENTRY_KEY)
+
+
 # -- the CLI and the status on transport: rest ----------------------------------------------
 
 

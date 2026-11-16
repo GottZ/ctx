@@ -73,7 +73,9 @@ _ANSWER_ID_RE = re.compile(r"\(id:\s*(" + _UUID_RE.pattern + r")")
 _PAYLOAD_HASH_RE = re.compile(r"payload_hash:\s*([0-9a-fA-F]{16,128})")
 # A source line of the query text: `[N] title (category) id:<uuid>`, then `key:value` tokens the
 # server adds (` superseded_by:<uuid>`, #197) — kept whatever they are, read where known (#295).
-_SOURCE_LINE_RE = re.compile(r"^\[(\d+|n/a)\]\s+(.*?)\s+\(([^()]*)\)\s+id:([0-9a-fA-F-]{36})((?:\s+[a-z_]+:\S+)*)\s*$")
+_SOURCE_LINE_RE = re.compile(
+    r"^\[(\d+|n/a)\]\s+(.*?)\s+\(([^()]*)\)\s+id:([0-9a-fA-F-]{36})((?:\s+[a-z0-9_]+:\S+)*)\s*$"
+)
 # The keys of a source line's tail the plugin reads into the source.
 _SOURCE_LINE_KEYS = ("superseded_by",)
 _SERVER_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
@@ -567,7 +569,9 @@ def _parse_query_text(body: str) -> tuple[str, list[dict[str, Any]]]:
     answer, _, tail = body.partition("\n\nSources:\n")
     sources: list[dict[str, Any]] = []
     previous: dict[str, Any] | None = None
-    for line in tail.splitlines():
+    # Split at "\n" only: the server ends a line with it, and splitlines() would also split a title
+    # at \r, \x1c-\x1e, \x85 or U+2028/U+2029 and let its second half pass for a source line.
+    for line in tail.split("\n"):
         stripped = line.strip()
         if previous is not None and line[:1].isspace() and stripped.startswith(ORIGIN_NOTE_PREFIX):
             previous[UNTRUSTED_ORIGIN_FIELD] = stripped[len(ORIGIN_NOTE_PREFIX) :].split(" ", 1)[0]

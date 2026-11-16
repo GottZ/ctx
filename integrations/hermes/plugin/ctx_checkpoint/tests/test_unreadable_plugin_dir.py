@@ -27,9 +27,11 @@ PLUGIN_SRC = Path(__file__).resolve().parents[1]
 INSTALL_SH = PLUGIN_SRC.parents[1] / "scripts" / "install.sh"
 NAME = "ctx_checkpoint"
 # The installer lies outside the plugin folder (GottZ/ctx#308): a catalog install copies the folder
-# alone, so there the installer tests are skipped, not failed (or passed on a missing script).
+# alone, so there the installer tests are skipped, not failed (or passed on a missing script). In a
+# checkout of the ctx repository (go/go.mod next to integrations/) a missing installer fails them.
+IN_CTX_CHECKOUT = (PLUGIN_SRC.parents[3] / "go" / "go.mod").is_file()
 needs_installer = pytest.mark.skipif(
-    not INSTALL_SH.is_file(),
+    not INSTALL_SH.is_file() and not IN_CTX_CHECKOUT,
     reason=(
         "integrations/hermes/scripts/install.sh is not next to this plugin folder (a catalog install "
         "copies the folder alone); the installer tests run in a checkout of the ctx repository"

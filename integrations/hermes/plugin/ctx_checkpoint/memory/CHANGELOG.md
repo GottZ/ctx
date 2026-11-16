@@ -27,7 +27,8 @@ Redaction keys of status and CLI, installer tests, untrusted_origin in the recal
   `CtxApiError`) redact with it — plus `CTX_KEY` on REST, as the provider — through
   `checkpoint.redact_error_text`. Before, status and test knew `CTX_API_KEY` or the key just
   typed, the CLI `CTX_KEY` only: a key the entry referenced through another variable, or a
-  `password:` value, passed.
+  `password:` value, passed. A CLI error line is now one line of at most 300 characters after
+  redaction (`status.redact_error`), the `whoami failed` cause of the REST status at most 140.
 - **Installer tests outside a checkout.** The seven tests of
   `integrations/hermes/scripts/install.sh` skip with a reason when the script is not next to
   the plugin folder, as in a catalog install; there five failed and two passed only because
