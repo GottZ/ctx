@@ -28,12 +28,13 @@ func migration171Def(name, cols string) string {
 // 171: on a fresh chain it builds both indexes, and the deparsed definition
 // is the one it compares against (otherwise an out-of-band build would never
 // be adopted); an index built out of band by the runbook's DDL is adopted as
-// it is; a same-named index of another definition is left alone.
+// it is; a same-named index of another definition is left alone. Each runs
+// the chain to 171: migration 175 redefines both indexes (TestMigration175).
 func TestMigration171(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("fresh_chain_builds_the_adopted_definition", func(t *testing.T) {
-		pool := testdb.SetupTestDB(t)
+		pool := testdb.SetupTestDBUpTo(t, 171)
 		for _, ix := range migration171Indexes {
 			var def string
 			if err := pool.QueryRow(ctx, `SELECT pg_get_indexdef($1::regclass)`, ix.name).Scan(&def); err != nil {
@@ -58,7 +59,7 @@ func TestMigration171(t *testing.T) {
 			WHERE relname IN ('idx_embedding_pending_scope_sens', 'idx_embedding_pending_sens')`).Scan(&before); err != nil {
 			t.Fatal(err)
 		}
-		if err := store.RunMigrations(ctx, pool); err != nil {
+		if err := store.RunMigrationsUpTo(ctx, pool, 171); err != nil {
 			t.Fatalf("run migrations: %v", err)
 		}
 		var after []uint32
@@ -76,7 +77,7 @@ func TestMigration171(t *testing.T) {
 		if _, err := pool.Exec(ctx, `CREATE INDEX idx_embedding_pending_sens ON context_blocks (sensitivity)`); err != nil {
 			t.Fatal(err)
 		}
-		if err := store.RunMigrations(ctx, pool); err != nil {
+		if err := store.RunMigrationsUpTo(ctx, pool, 171); err != nil {
 			t.Fatalf("run migrations: %v", err)
 		}
 		var def string

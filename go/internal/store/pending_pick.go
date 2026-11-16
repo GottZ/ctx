@@ -18,8 +18,11 @@ package store
 // first, so no row of another class or scope is visited, with two
 // exceptions: the Dead filter of a Shared branch (rows of a floored-out scope,
 // unbound picks only), and the rows of the branch's own class that the
-// failure-memo and type predicates leave out (backoff, parked, excluded
-// type), which stay pending and are filtered as before. All four slices are
+// failure-memo predicate leaves out (backoff, parked), which stay pending and
+// are filtered as before. A block of a type that is never embedded is out of
+// the unembedded branches' indexes (embed_excluded, issue #291); one whose
+// marker the reconcile has not set yet, and a stale one, is filtered by the
+// type predicate. All four slices are
 // non-nil: a nil slice binds as NULL, and NULL matches nothing in ALL/ANY.
 type PendingClasses struct {
 	Shared, Dead, PairScopes, PairLevels []string
@@ -50,6 +53,26 @@ const (
 // index-driven statement reads the two sets in index ranges of their own
 // (PendingPickSQL, and the /status backlog count).
 const EmbedPendingPredicate = `(embedding IS NULL OR embedding_stale) AND NOT is_archived`
+
+// UnembeddedPendingPredicate is the unembedded set of the pick as its two
+// indexes state it, idx_embedding_pending_scope_sens and
+// idx_embedding_pending_sens (with NOT is_archived): a block without a vector
+// whose type is not never-embedded (issue #291, migration 175; the marker is
+// set from the type registry by trg_block_embed_excluded and the reconcile
+// ReconcileEmbedExcluded). On a database where the two indexes still carry
+// migration 171's predicate the conjunct is a row filter, and the pick is
+// correct at its cost before 175.
+const UnembeddedPendingPredicate = `embedding IS NULL AND NOT embed_excluded`
+
+// UnembeddedSensIndexMarkedReady holds while idx_embedding_pending_sens has
+// the definition of migration 175 (valid, ready, the deparsed form the
+// migration adopts), the condition under which a count of the unembedded
+// set without the never-embedded blocks reads that index instead of walking
+// them (the /status backlog). Before the out-of-band build of a large corpus
+// the index still carries migration 171's predicate.
+const UnembeddedSensIndexMarkedReady = `EXISTS (SELECT 1 FROM pg_index
+		WHERE indexrelid = to_regclass('public.idx_embedding_pending_sens') AND indisvalid AND indisready
+		  AND pg_get_indexdef(indexrelid) = 'CREATE INDEX idx_embedding_pending_sens ON public.context_blocks USING btree (sensitivity, created_at, id) WHERE ((embedding IS NULL) AND (NOT is_archived) AND (NOT embed_excluded))')`
 
 // The partial indexes the stale branches of PendingPickSQL read (migration
 // 173, WHERE embedding_stale AND NOT is_archived), one per branch shape like
@@ -162,9 +185,9 @@ func PendingPickSQL(cols string, newestFirst bool, failurePredicate string) stri
 			  AND (scope, sensitivity) <= (k.scope, k.sens)`, `scope `+dir+`, sensitivity `+dir+`, `, gate)
 	}
 	return `SELECT ` + cols + ` FROM (` +
-		shared("embedding IS NULL", "") + `
+		shared(UnembeddedPendingPredicate, "") + `
 		UNION ALL` +
-		pair("embedding IS NULL", "") + `
+		pair(UnembeddedPendingPredicate, "") + `
 		UNION ALL` +
 		shared("embedding_stale", `
 		WHERE `+StaleSensIndexReady) + `

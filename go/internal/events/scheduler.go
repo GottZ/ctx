@@ -880,6 +880,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 	// into the counter rows every few seconds (a ticker of its own, not a
 	// case of this select, so a slow fold never holds guard or digest).
 	go s.runBlockCountFold(ctx)
+	// Issue #291: the embed_excluded markers follow a registry change of a
+	// type's retrieval policy (migration 175), arm on or off.
+	go s.runEmbedExcludedReconcile(ctx)
 
 	for {
 		select {

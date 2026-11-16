@@ -109,14 +109,14 @@ var verifySisterIndexes = []struct{ name, ddl string }{
 		ON context_blocks (created_at)
 		WHERE embedding_next IS NULL AND NOT is_archived`},
 	// Twins of idx_embedding_pending_scope_sens and idx_embedding_pending_sens
-	// (migration 171): the class ranges of the backfill pick on the
-	// post-cutover serving column.
+	// (migration 171, predicate since migration 175): the class ranges of the
+	// backfill pick on the post-cutover serving column.
 	{"idx_embedding_pending_scope_sens_next", `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_embedding_pending_scope_sens_next
 		ON context_blocks (scope, sensitivity, created_at, id)
-		WHERE embedding_next IS NULL AND NOT is_archived`},
+		WHERE embedding_next IS NULL AND NOT is_archived AND NOT embed_excluded`},
 	{"idx_embedding_pending_sens_next", `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_embedding_pending_sens_next
 		ON context_blocks (sensitivity, created_at, id)
-		WHERE embedding_next IS NULL AND NOT is_archived`},
+		WHERE embedding_next IS NULL AND NOT is_archived AND NOT embed_excluded`},
 	// Twin of idx_dream_pending (016_dream.sql:11-13), embedding →
 	// embedding_next.
 	{"idx_dream_pending_next", `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_dream_pending_next
