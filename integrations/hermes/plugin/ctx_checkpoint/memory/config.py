@@ -754,7 +754,12 @@ def _safe_root(root: str) -> str:
 class FactLedger:
     """Fact dedupe keys of one session chain (root), profile-local in
     ``$HERMES_HOME/ctx_state/<root>.json``. Atomic writes; never raises (a broken
-    ledger only means weaker dedupe)."""
+    ledger only means weaker dedupe).
+
+    ``pending``: keys of facts whose store failed after the chain head already named them
+    (``fact_hashes`` is written with the head, before the facts are stored). A later compaction
+    of this root does not count them as stored by the head, so the fact is stored then (#302).
+    """
 
     def __init__(self, hermes_home: str, root: str, max_keys: int = FACT_LEDGER_MAX):
         self.root = str(root or "unknown")
@@ -762,10 +767,13 @@ class FactLedger:
         self.max_keys = max_keys
         self._lock = threading.Lock()
         self._keys: list[str] = []
+        self._pending: list[str] = []
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
             if isinstance(raw, dict) and isinstance(raw.get("keys"), list):
                 self._keys = [k for k in raw["keys"] if isinstance(k, str)][-max_keys:]
+            if isinstance(raw, dict) and isinstance(raw.get("pending"), list):
+                self._pending = [k for k in raw["pending"] if isinstance(k, str)][-max_keys:]
         except FileNotFoundError:
             pass
         except Exception:
@@ -775,26 +783,38 @@ class FactLedger:
         with self._lock:
             return list(self._keys)
 
+    def pending(self) -> list[str]:
+        with self._lock:
+            return list(self._pending)
+
     def add(self, keys: Iterable[str]) -> None:
+        """Claim keys (a store follows); a claimed key is no longer pending."""
         with self._lock:
             known = set(self._keys)
+            claimed = set()
             for k in keys:
                 if isinstance(k, str) and k and k not in known:
                     self._keys.append(k)
                     known.add(k)
+                claimed.add(k)
             self._keys = self._keys[-self.max_keys :]
+            self._pending = [k for k in self._pending if k not in claimed]
             self._save()
 
-    def discard(self, keys: Iterable[str]) -> None:
-        drop = set(keys)
+    def release(self, keys: Iterable[str]) -> None:
+        """The store of these keys' fact failed: drop the claim and keep them as pending."""
+        drop = [k for k in keys if isinstance(k, str) and k]
         with self._lock:
-            self._keys = [k for k in self._keys if k not in drop]
+            dropped = set(drop)
+            self._keys = [k for k in self._keys if k not in dropped]
+            self._pending = [k for k in self._pending if k not in dropped] + list(dict.fromkeys(drop))
+            self._pending = self._pending[-self.max_keys :]
             self._save()
 
     def _save(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {"root": self.root, "keys": self._keys, "updated": time.time()}
+            payload = {"root": self.root, "keys": self._keys, "pending": self._pending, "updated": time.time()}
             fd, tmp = tempfile.mkstemp(prefix=".ledger-", dir=str(self.path.parent))
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:

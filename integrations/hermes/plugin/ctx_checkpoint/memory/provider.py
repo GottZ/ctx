@@ -941,9 +941,10 @@ class CtxMemoryProvider(MemoryProvider):
                 "ok" if chain_text else "none",
             )
             return chain_text
-        # P4: drop facts the server-side chain head already lists (ledger lost/other host)
+        # P4: drop facts the server-side chain head already lists (ledger lost/other host) — except
+        # those whose store failed after the head named them (pending in the ledger, #302).
         receipt = self._last_chain_receipt if chain_text else None
-        server_known = set(getattr(receipt, "previous_fact_hashes", None) or [])
+        server_known = set(getattr(receipt, "previous_fact_hashes", None) or []) - set(ledger.pending())
         dropped_server = 0
         if server_known:
             kept = [f for f in facts if not (set(fact_keys(f)) & server_known)]
@@ -1108,7 +1109,7 @@ class CtxMemoryProvider(MemoryProvider):
 
         def _release(rest: list[str]) -> None:
             if ledger is not None:
-                ledger.discard(k for f in rest for k in fact_keys(f))
+                ledger.release(k for f in rest for k in fact_keys(f))
 
         def _left(i: int, reason: str) -> str:
             _release(facts[i:])
@@ -1201,7 +1202,7 @@ class CtxMemoryProvider(MemoryProvider):
             else:
                 failed += 1
                 if ledger is not None:  # release the claim → a later compaction may retry it
-                    ledger.discard(fact_keys(fact))
+                    ledger.release(fact_keys(fact))
         logger.log(
             logging.WARNING if failed else logging.INFO,
             "CTX pre_compress facts done (profile=%s): stored=%d failed=%d of %d",

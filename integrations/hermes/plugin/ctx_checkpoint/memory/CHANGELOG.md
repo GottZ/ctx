@@ -43,6 +43,16 @@ Gate and setting edge cases with the memory features on (GottZ/ctx#289).
   writes counted only when it came later. An engine name now wins over its plugin key in either
   order, and the memory forms write their value to an engine name present next to the key, so
   a save takes effect.
+- **A fact that was not stored is stored by a later compaction.** The head names the dedupe keys
+  of the facts selected for it (`fact_hashes`) before they are stored, so after a failed store a
+  later compaction read those keys from the head and dropped the fact for good (in best effort
+  since P4). The fact ledger now keeps the keys of a failed store as `pending`
+  (`ctx_state/<root>.json`); the head does not count them as stored, and the next compaction of
+  that root on this profile stores the fact. Another host reading the head still skips it.
+- **On REST a call timeout bounds the 429 retry.** `CtxClient` retried a 429 once after 1 s with
+  the full timeout again, so a required fact store or a chain write could start its retry after
+  the checkpoint deadline. The timeout now bounds the whole request; the retry is made only while
+  the wait fits and gets the time that is left. A rejection code is redacted like the error text.
 - **Error texts are redacted before they are raised or logged (GottZ/ctx#301).** A failed chain
   write put the server's or the MCP dispatch's error text into the `CtxCheckpointError` it raised
   (and into its `__cause__`) and into the WARNING line without redaction; the outcome file and the

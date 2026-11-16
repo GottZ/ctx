@@ -1299,3 +1299,36 @@ def test_a_rejection_code_that_carries_a_bound_key_is_redacted(factory, caplog, 
             assert "not stored" in frame
     logged = "\n".join(r.getMessage() for r in caplog.records)
     assert "denied-for-" in logged and _BOUND_KEY not in logged
+
+
+@pytest.mark.parametrize("required", [True, False], ids=["required", "best-effort"])
+def test_a_fact_that_was_not_stored_is_stored_by_a_later_compaction(factory, required):
+    # The head names the dedupe keys of the facts selected for it before they are stored; a fact
+    # that then failed must not count as stored when a later compaction reads that head.
+    p, c = factory("sess-fact-retry", config={"auto_compress_extract": True}, agent_context="primary")
+    c.stateful = True
+    seen = {"facts": 0}
+
+    def refuse_first_fact(args):
+        if args["category"] != CHAIN_CAT:
+            seen["facts"] += 1
+            if seen["facts"] == 1:
+                raise CtxApiError("HTTP 403 [guard_rejected]: refused", status=403, code="guard_rejected")
+
+    c.store_hook = refuse_first_fact
+    messages = [{"role": "assistant", "content": _FACT}]
+    for _ in range(2):
+        p.on_pre_compress(list(messages), require_checkpoint=required)
+        if p._write_thread is not None:
+            p._write_thread.join(timeout=5.0)
+    p._last_manifest_by_root.clear()
+    facts = [a["content"] for a in _fact_stores(c.calls)]
+    assert facts == [_FACT, _FACT], "the fact refused at the first compaction is stored at the second"
+    assert set(fact_keys_of(_FACT)) <= set(p._fact_ledger().keys())
+    assert p._fact_ledger().pending() == []
+
+
+def fact_keys_of(text):
+    from ctx_plugin.config import fact_keys
+
+    return fact_keys(text)

@@ -237,8 +237,9 @@ CLI writes use `sensitivity_default` unless `--sensitivity` is given and are tag
   uncompressed transcript. Success returns a non-empty receipt. With `checkpoint_chain:
   false` every required checkpoint raises (facts are not a transcript checkpoint). Facts
   after a stored chain are stored within the same deadline (each store bounded by the time
-  left); one that is refused or late is a WARNING, its dedupe claim is released for a later
-  compaction and the receipt says how many were stored — the checkpoint stands (0.12.0;
+  left); one that is refused or late is a WARNING, its dedupe keys stay pending in the fact
+  ledger so a later compaction of the root on this profile stores it, and the receipt says how
+  many were stored — the checkpoint stands (0.12.0;
   before, it failed the compaction although the chain was durable).
 - The receipt (< 6000 chars) lists the chain head/manifest IDs and the transcript
   SHA-256, then the extracted facts (with block IDs in required mode). Since 0.9.0 the
