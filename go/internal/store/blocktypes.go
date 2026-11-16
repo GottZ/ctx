@@ -80,22 +80,26 @@ func (e *BlockTypeInUseError) Error() string {
 // → ~60 min of CPU embed for a dead vector, recurring.
 //
 // The rule is the SQL function ctx_block_type_never_embedded (migration 175,
-// issues #213 and #291), deliberately conservative in the fail-safe direction
-// — skipping an embedding is the destructive move (an unembedded block is
+// issue #291), deliberately conservative in the fail-safe direction —
+// skipping an embedding is the destructive move (an unembedded block is
 // FTS-only), so a block is skipped only when NO reader in the system could
-// ever rank it: the name has at least one registry row and EVERY row of that
-// name, in any scope, carries policy 'excluded'. The backfill has no reader
-// identity (both picks are scope-free, they embed whatever is pending), so the
-// reader-aware search rule ("Overlay gewinnt", design/01 §5.4 / D6, pinned by
-// rrf T12) is mirrored as the union over all possible readers: one row of the
-// name with another policy (a tenant overlay lifting a _global exclusion, a
-// same-named type of another tenant) keeps the type embeddable. An absent
-// `retrieval.policy` decodes to full-pass (blocktype.DecodePolicy), and
-// 'damped'/'aggregate-to-parent' are visible types — all of them stay
-// embeddable. A block whose type has NO registry row at all stays embeddable:
-// the registry, not its absence, narrows visibility. A name whose rows are all
-// tenant rows, all excluded, is skipped (issue #213; before migration 175 only
-// a _global exclusion skipped).
+// ever rank it:
+//
+//   - The '_global' row is the base every tenant inherits; only `= 'excluded'`
+//     skips. Absent `retrieval.policy` decodes to full-pass (blocktype.DecodePolicy),
+//     and 'damped'/'aggregate-to-parent' are visible types (Set.VisibleTypes) —
+//     all of them stay embeddable.
+//   - Tenant overlay: the retrieval exclusion in the search path IS reader-aware
+//     ("Overlay gewinnt", design/01 §5.4 / D6, pinned by rrf T12) — an overlay
+//     that lifts a _global exclusion gives blocks of that type a consumer. The
+//     backfill has no reader identity, so the reader-aware rule is mirrored as
+//     the UNION over all possible readers: one non-_global row of the name with
+//     a non-excluded policy keeps the type embeddable. The narrowing gate
+//     (blocktype.NarrowingViolation, N8) admits no such row through the write
+//     path, so only an operator (psql, migration) can write one.
+//   - A block whose type has NO _global row stays embeddable, also when its
+//     tenant rows are all excluded (issue #213, open): the answer must not
+//     depend on another tenant's rows (migration 175's header).
 //
 // The same function sets context_blocks.embed_excluded (trigger
 // trg_block_embed_excluded, and the reconcile ReconcileEmbedExcluded after a

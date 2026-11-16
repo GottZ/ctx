@@ -131,12 +131,14 @@ func TestEmbedExcludedPick(t *testing.T) {
 		t.Errorf("a statement cleared the marker of a checkpoint block")
 	}
 
-	// #213: a name whose only registry row is a tenant row, excluded.
+	// A name whose only registry row is a tenant row, excluded, is not
+	// marked: the answer never depends on tenant rows alone (issue #213
+	// stays open), so the block stays pickable as before migration 175.
 	createType(t, pool, "ee-tenant-excluded", "ee-b", "excluded")
 	reconcile(t, pool)
 	te := storeTyped(t, pool, "ee-b", "ee tenant excluded", "ee-tenant-excluded")
-	if got := eePick(t, pool, "ee-b", te.Sensitivity); got != "" {
-		t.Errorf("block of a tenant-own excluded type picked: %s (issue #213)", got)
+	if marker(t, pool, te.ID) {
+		t.Errorf("block of a type without a _global row is marked")
 	}
 
 	// A tenant overlay lifts the _global exclusion of checkpoint: the
@@ -286,7 +288,7 @@ func TestEmbedExcludedReconcileAnswerMoves(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
 	reconcile(t, pool)
-	bt := createType(t, pool, "ee-moving", "ee-m", "excluded")
+	bt := createType(t, pool, "ee-moving", "_global", "excluded")
 	reconcile(t, pool)
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO context_blocks (category, title, content, type_name, scope, sensitivity, updated_at)
@@ -295,7 +297,7 @@ func TestEmbedExcludedReconcileAnswerMoves(t *testing.T) {
 	}
 	full := json.RawMessage(`{"retrieval":{"policy":"full-pass"}}`)
 	excl := json.RawMessage(`{"retrieval":{"policy":"excluded"}}`)
-	if _, err := store.UpdateBlockType(ctx, pool, bt.ID, []string{"ee-m"}, store.BlockTypeUpdate{Config: full}, nil, "ee-test"); err != nil {
+	if _, err := store.UpdateBlockType(ctx, pool, bt.ID, []string{"_global"}, store.BlockTypeUpdate{Config: full}, nil, "ee-test"); err != nil {
 		t.Fatalf("lift: %v", err)
 	}
 	// Hold every block of the type, so the first clear batch waits.
@@ -314,7 +316,7 @@ func TestEmbedExcludedReconcileAnswerMoves(t *testing.T) {
 		done <- err
 	}()
 	time.Sleep(500 * time.Millisecond)
-	if _, err := store.UpdateBlockType(ctx, pool, bt.ID, []string{"ee-m"}, store.BlockTypeUpdate{Config: excl}, nil, "ee-test"); err != nil {
+	if _, err := store.UpdateBlockType(ctx, pool, bt.ID, []string{"_global"}, store.BlockTypeUpdate{Config: excl}, nil, "ee-test"); err != nil {
 		t.Fatalf("exclude again: %v", err)
 	}
 	if err := hold.Commit(ctx); err != nil {
@@ -426,5 +428,90 @@ func TestEmbedExcludedReconcileFailingNameDoesNotBlock(t *testing.T) {
 	}
 	if failQueued != 1 {
 		t.Errorf("the failing name is queued %d times, want 1 (kept for the next pass)", failQueued)
+	}
+}
+
+// TestEmbedExcludedTenantCannotWriteForeignBlocks: a tenant's change to its
+// own registry rows never makes the reconcile write blocks of another
+// tenant, and never queues a name. Tenant B holds a tenant-own type ee-shared
+// (excluded) with blocks; tenant A creates the same name embeddable, turns it
+// excluded and deletes it; then A overlays the _global-excluded checkpoint
+// with an excluded row (the only overlay the narrowing gate lets a tenant
+// write for it) and deletes that. B's blocks keep their row versions and
+// markers, and the queue stays empty.
+func TestEmbedExcludedTenantCannotWriteForeignBlocks(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	reconcile(t, pool)
+
+	createType(t, pool, "ee-shared", "ee-tenant-b", "excluded")
+	reconcile(t, pool)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO context_blocks (category, title, content, type_name, scope, sensitivity, updated_at)
+		 SELECT 'ee-cat', 'ee b ' || n || ' ' || i, 'x', n, 'ee-tenant-b', 'public', now()
+		   FROM unnest(ARRAY['ee-shared', 'checkpoint']) n, generate_series(1, 50) i`); err != nil {
+		t.Fatalf("seed B: %v", err)
+	}
+	state := func() string {
+		var s string
+		if err := pool.QueryRow(ctx,
+			`SELECT string_agg(id::text || ':' || xmin::text || ':' || embed_excluded::text, ',' ORDER BY id)
+			   FROM context_blocks WHERE scope = 'ee-tenant-b'`).Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	queued := func() int {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_excluded_reconcile`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	var sharedMarked int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_blocks WHERE type_name = 'ee-shared' AND embed_excluded`).Scan(&sharedMarked); err != nil {
+		t.Fatal(err)
+	}
+	if sharedMarked != 0 {
+		t.Errorf("%d blocks of a type without a _global row are marked: the answer depends on tenant rows", sharedMarked)
+	}
+	before := state()
+
+	full := json.RawMessage(`{"retrieval":{"policy":"full-pass"}}`)
+	excl := json.RawMessage(`{"retrieval":{"policy":"excluded"}}`)
+	a := createType(t, pool, "ee-shared", "ee-tenant-a", "full-pass")
+	steps := []func() error{
+		func() error {
+			_, err := store.UpdateBlockType(ctx, pool, a.ID, []string{"ee-tenant-a"}, store.BlockTypeUpdate{Config: excl}, nil, "ee-test")
+			return err
+		},
+		func() error {
+			_, err := store.UpdateBlockType(ctx, pool, a.ID, []string{"ee-tenant-a"}, store.BlockTypeUpdate{Config: full}, nil, "ee-test")
+			return err
+		},
+		func() error {
+			_, err := store.DeleteBlockType(ctx, pool, a.ID, []string{"ee-tenant-a"}, nil, "ee-test")
+			return err
+		},
+		func() error {
+			o := createType(t, pool, "checkpoint", "ee-tenant-a", "excluded")
+			_, err := store.DeleteBlockType(ctx, pool, o.ID, []string{"ee-tenant-a"}, nil, "ee-test")
+			return err
+		},
+	}
+	for i, step := range steps {
+		if q := queued(); q != 0 {
+			t.Errorf("before step %d: %d names queued by tenant A's own registry writes", i+1, q)
+		}
+		if err := step(); err != nil {
+			t.Fatalf("step %d: %v", i+1, err)
+		}
+		reconcile(t, pool)
+	}
+	if q := queued(); q != 0 {
+		t.Errorf("after the last step: %d names queued by tenant A's own registry writes", q)
+	}
+	if after := state(); after != before {
+		t.Errorf("tenant A's registry writes changed tenant B's blocks (row versions or markers)")
 	}
 }

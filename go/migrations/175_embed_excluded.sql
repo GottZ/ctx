@@ -1,7 +1,6 @@
 -- =============================================================================
 -- 175_embed_excluded.sql — a block of a type that is never embedded leaves
--- the embed-backfill pick indexes (issue #291, part 1; the tenant-own case of
--- issue #213)
+-- the embed-backfill pick indexes (issue #291, part 1)
 -- Part of ctx by GottZ (https://github.com/GottZ/ctx)
 -- =============================================================================
 -- A block of a type whose retrieval policy is `excluded` (checkpoint and
@@ -20,17 +19,25 @@
 --   context_blocks.embed_excluded  BOOLEAN NOT NULL DEFAULT false
 --
 -- true: the block's type is never embedded. The rule is one SQL function,
--- ctx_block_type_never_embedded(name): the name has at least one registry
--- row, and every row of that name carries retrieval.policy `excluded`
--- (issue #213's rule). The embed backfill has no reader identity, so the
--- rule is the union over all readers: one row of the name in any scope with
--- another policy (a tenant overlay that lifts a _global exclusion, a same-
--- named type of another tenant) keeps the type embeddable; a name without
--- any row stays embeddable. Against the rule before this migration
--- (store.RetrievalExcludedTypePredicate, which looked at the _global row
--- only) one case changes: a name whose rows are all tenant rows, all
--- excluded, is no longer embedded (issue #213) — no ranked path reads such a
--- vector (the type allowlist of every reader leaves the name out).
+-- ctx_block_type_never_embedded(name), the rule of the embed pick before this
+-- migration (store.RetrievalExcludedTypePredicate): the name's _global row
+-- carries retrieval.policy `excluded`, and no row of the name in any other
+-- scope carries another policy. The embed backfill has no reader identity,
+-- so the second half is the union over all readers: an overlay that lifts
+-- the exclusion keeps the type embeddable for everyone.
+--
+-- The answer depends on the _global row and on overlays that lift it, never
+-- on a tenant's own registry writes: the narrowing gate of the write path
+-- (blocktype.NarrowingViolation, axis N8 retrieval.policy, on create and
+-- update of a non-_global row through every transport) lets an overlay of a
+-- _global-excluded name carry `excluded` only, and a name without a _global
+-- row is never marked. So no tenant can make the reconcile write blocks of
+-- another tenant by changing its own types, and no tenant learns from its
+-- own blocks whether another tenant holds a row of the same name. A type
+-- that exists only in tenant scopes, excluded there, is filtered by the
+-- pick row by row as before this migration (issue #213 stays open: marking
+-- it would need the rule bound to the tenant that owns the block's scope,
+-- like trg_block_retype in migration 174, and a queue per name and tenant).
 --
 -- WHO WRITES IT: only the trigger trg_block_embed_excluded, BEFORE INSERT OR
 -- UPDATE OF type_name, embed_excluded, is_archived, FOR EACH ROW: an insert,
@@ -45,12 +52,15 @@
 -- unarchived; when its vector is cleared it is filtered by the type
 -- predicate as before this migration.
 --
--- A REGISTRY CHANGE (any writer of context_block_types: the type API, a
--- migration, psql) can turn the answer for a name. trg_block_types_embed_
--- excluded, AFTER INSERT OR UPDATE OF name, config OR DELETE, FOR EACH ROW,
--- queues the name in context_embed_excluded_reconcile when the answer may
--- have changed (the changed row is or was excluded, or an excluded row of
--- the name is left); the scheduler's reconcile
+-- A REGISTRY CHANGE can turn the answer for a name: a write of its _global
+-- row (a migration, an operator), or an overlay that lifts a _global
+-- exclusion (written past the gate: psql, or a row that predates its _global
+-- base). trg_block_types_embed_excluded, AFTER INSERT OR UPDATE OF name,
+-- scope, config OR DELETE, FOR EACH ROW, queues the name in
+-- context_embed_excluded_reconcile exactly then: the changed row is a _global
+-- row that is or was excluded, or a non-_global row that is or was not
+-- excluded while the name's _global row is excluded. A tenant overlay that
+-- carries `excluded` queues nothing. The scheduler's reconcile
 -- (events.runEmbedExcludedReconcile, store.ReconcileEmbedExcluded) sets the
 -- marker of the queued names' live blocks in batches, outside the registry
 -- write. A policy change of a type with millions of blocks
@@ -161,14 +171,16 @@ COMMENT ON TABLE context_embed_excluded_reconcile IS
 
 CREATE OR REPLACE FUNCTION ctx_block_type_never_embedded(p_name TEXT) RETURNS BOOLEAN
 LANGUAGE sql STABLE PARALLEL SAFE AS $$
-    SELECT EXISTS (SELECT 1 FROM context_block_types t WHERE t.name = p_name)
+    SELECT EXISTS (SELECT 1 FROM context_block_types t
+                    WHERE t.name = p_name AND t.scope = '_global'
+                      AND t.config->'retrieval'->>'policy' = 'excluded')
        AND NOT EXISTS (SELECT 1 FROM context_block_types t
                         WHERE t.name = p_name
                           AND t.config->'retrieval'->>'policy' IS DISTINCT FROM 'excluded')
 $$;
 
 COMMENT ON FUNCTION ctx_block_type_never_embedded(TEXT) IS
-    'true when the type name has a registry row and every row of the name carries retrieval.policy excluded: no reader ranks a vector of it, so the embed backfill skips it (migration 175, issues #213 and #291).';
+    'true when the _global row of the type name carries retrieval.policy excluded and no row of the name in another scope carries another policy: no reader ranks a vector of it, so the embed backfill skips it (migration 175, issue #291).';
 
 CREATE OR REPLACE FUNCTION context_blocks_embed_excluded() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -206,8 +218,9 @@ DECLARE
 BEGIN
     IF TG_OP = 'UPDATE'
        AND NEW.name IS NOT DISTINCT FROM OLD.name
+       AND NEW.scope IS NOT DISTINCT FROM OLD.scope
        AND (NEW.config->'retrieval'->>'policy') IS NOT DISTINCT FROM (OLD.config->'retrieval'->>'policy') THEN
-        RETURN NULL;            -- the answer depends on (name, policy) only
+        RETURN NULL;            -- the answer depends on (name, scope, policy) only
     END IF;
     FOR v_name IN
         SELECT DISTINCT n FROM unnest(ARRAY[
@@ -215,12 +228,22 @@ BEGIN
             CASE WHEN TG_OP <> 'DELETE' THEN NEW.name END]) AS n
          WHERE n IS NOT NULL
     LOOP
-        -- The answer for v_name can only have changed if this row is or was
-        -- excluded, or an excluded row of the name is left.
-        IF (TG_OP <> 'INSERT' AND OLD.name = v_name AND OLD.config->'retrieval'->>'policy' = 'excluded')
-           OR (TG_OP <> 'DELETE' AND NEW.name = v_name AND NEW.config->'retrieval'->>'policy' = 'excluded')
-           OR EXISTS (SELECT 1 FROM context_block_types t
-                       WHERE t.name = v_name AND t.config->'retrieval'->>'policy' = 'excluded') THEN
+        -- The answer for v_name can only have changed if this row is a
+        -- _global row that is or was excluded, or a row of another scope that
+        -- is or was not excluded while the _global row is excluded. A tenant
+        -- overlay carrying excluded (the only one the narrowing gate admits
+        -- for such a name) changes nothing and queues nothing.
+        IF (TG_OP <> 'INSERT' AND OLD.name = v_name AND OLD.scope = '_global'
+                AND OLD.config->'retrieval'->>'policy' = 'excluded')
+           OR (TG_OP <> 'DELETE' AND NEW.name = v_name AND NEW.scope = '_global'
+                AND NEW.config->'retrieval'->>'policy' = 'excluded')
+           OR (((TG_OP <> 'INSERT' AND OLD.name = v_name AND OLD.scope <> '_global'
+                    AND OLD.config->'retrieval'->>'policy' IS DISTINCT FROM 'excluded')
+                OR (TG_OP <> 'DELETE' AND NEW.name = v_name AND NEW.scope <> '_global'
+                    AND NEW.config->'retrieval'->>'policy' IS DISTINCT FROM 'excluded'))
+               AND EXISTS (SELECT 1 FROM context_block_types t
+                            WHERE t.name = v_name AND t.scope = '_global'
+                              AND t.config->'retrieval'->>'policy' = 'excluded')) THEN
             PERFORM pg_advisory_xact_lock(hashtext('ctx:embed_excluded:' || v_name));
             INSERT INTO context_embed_excluded_reconcile (name) VALUES (v_name)
                 ON CONFLICT (name) DO UPDATE SET queued_at = clock_timestamp();
@@ -234,7 +257,7 @@ COMMENT ON FUNCTION context_block_types_embed_excluded() IS
     'trg_block_types_embed_excluded (migration 175): queues a type name for the embed_excluded reconcile when a registry change may turn its never-embedded answer.';
 
 CREATE OR REPLACE TRIGGER trg_block_types_embed_excluded
-    AFTER INSERT OR UPDATE OF name, config OR DELETE ON context_block_types
+    AFTER INSERT OR UPDATE OF name, scope, config OR DELETE ON context_block_types
     FOR EACH ROW EXECUTE FUNCTION context_block_types_embed_excluded();
 
 -- The names that are never embedded today: the reconcile marks their blocks.
