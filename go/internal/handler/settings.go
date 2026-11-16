@@ -754,8 +754,8 @@ func newWarnings(cand, base []config.Issue) []string {
 // (MT3-W2), fail-closed and before the candidate build. The build alone is not
 // the gate: it reads a _global row of the same key as "applied from the DB",
 // so it let a tenant-scope row through with a 200 — a row the overlay ignores,
-// but one that tenant.allow_shared_secrets and
-// tenant.allow_cross_tenant_block_grant read directly at the tenant scope.
+// but one that store.TenantAllowsSharedSecrets reads directly at the tenant
+// scope.
 func globalOnlyTenantWrite(key, writeScope string) (string, bool) {
 	if writeScope == store.GlobalScope || !config.IsGlobalOnly(key) {
 		return "", false

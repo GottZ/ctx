@@ -4,8 +4,11 @@
 // already holds a _global row of that key. The candidate build alone did not
 // refuse it: the _global row made the key read as "applied from the DB", so
 // the PUT answered 200 and wrote a tenant-scope row. The overlay ignores such
-// a row (graph_cache.enabled here), but the two opt-in flags are read directly
-// at the tenant scope, where that row decides for the tenant.
+// a row, but tenant.allow_shared_secrets is read directly at the tenant scope
+// (store.TenantAllowsSharedSecrets), where that row decides for the tenant.
+// tenant.allow_cross_tenant_block_grant is read at the tenant id, not the
+// scope, and graph_cache.enabled only through the overlay: for both the row
+// was dead, and both must be refused all the same.
 //
 // Run with:
 //
@@ -39,8 +42,9 @@ func TestSettingsGlobalOnlyTenantWrite_Integration(t *testing.T) {
 	api := newTenantAPI(t, pool)
 
 	for _, c := range []struct{ key, global, tenant, globalRow string }{
-		// read directly at the tenant scope (store.TenantAllows*)
+		// read directly at the tenant scope (store.TenantAllowsSharedSecrets)
 		{store.AllowSharedSecretsKey, `{"value":false}`, `{"value":true}`, `false`},
+		// read directly, but at the tenant id: a row at the home scope is dead
 		{store.AllowCrossTenantBlockGrantKey, `{"value":false}`, `{"value":true}`, `false`},
 		// read only through the overlay, which drops a tenant row: a dead row
 		{"graph_cache.enabled", `{"value":false}`, `{"value":true}`, `false`},
@@ -68,9 +72,6 @@ func TestSettingsGlobalOnlyTenantWrite_Integration(t *testing.T) {
 	}
 	if ok, err := store.TenantAllowsSharedSecrets(context.Background(), pool, "tenantg"); err != nil || ok {
 		t.Errorf("TenantAllowsSharedSecrets(tenantg) = %v, %v — want false: the opt-in is the operator's", ok, err)
-	}
-	if ok, err := store.TenantAllowsCrossTenantBlockGrant(context.Background(), pool, "tenantg"); err != nil || ok {
-		t.Errorf("TenantAllowsCrossTenantBlockGrant(tenantg) = %v, %v — want false: the opt-in is the operator's", ok, err)
 	}
 	// Without a _global row the candidate build already refused it; the guard
 	// keeps that answer.
