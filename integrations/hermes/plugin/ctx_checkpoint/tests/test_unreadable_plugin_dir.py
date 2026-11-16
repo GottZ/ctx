@@ -127,3 +127,69 @@ def test_install_sh_leaves_a_copy_every_account_can_read(_isolated_hermes_home, 
         if not path.stat().st_mode & stat.S_IROTH or (path.is_dir() and not path.stat().st_mode & stat.S_IXOTH)
     ]
     assert unreadable == [], f"not readable for other accounts: {unreadable[:5]}"
+
+
+def _run_install(home: Path, *, env_extra: dict[str, str] | None = None, path_prefix: str | None = None):
+    env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
+    env.update(env_extra or {})
+    if path_prefix:
+        env["PATH"] = f"{path_prefix}{os.pathsep}{env.get('PATH', '')}"
+    bash = shutil.which("bash")
+    assert bash, "install.sh needs bash"
+    return subprocess.run(  # noqa: S603 - fixed argv: the repo's install.sh and a temporary home
+        [bash, str(INSTALL_SH), "--hermes-home", str(home)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+
+
+def _running_install(home: Path) -> Path:
+    """An installed plugin of an earlier version, as the next upgrade finds it."""
+    dest = home / "plugins" / NAME
+    dest.mkdir(parents=True)
+    (dest / "VERSION").write_text("0.0.1-running\n", encoding="utf-8")
+    (dest / "__init__.py").write_text("# the running install\n", encoding="utf-8")
+    return dest
+
+
+def _assert_running_install_kept(home: Path, dest: Path) -> None:
+    assert (dest / "VERSION").read_text(encoding="utf-8") == "0.0.1-running\n", "the running install is gone"
+    assert not list((home / "plugins").glob(f".{NAME}.bak-*")), "a backup stayed behind next to the install"
+
+
+def test_install_sh_keeps_the_running_install_when_staging_fails(_isolated_hermes_home, tmp_path):
+    """No staging directory (TMPDIR names a file: mktemp fails for root as well) — the upgrade
+    stops before it touches the running install."""
+    home = _isolated_hermes_home
+    dest = _running_install(home)
+    not_a_dir = tmp_path / "tmpdir-is-a-file"
+    not_a_dir.write_text("x", encoding="utf-8")
+    result = _run_install(home, env_extra={"TMPDIR": str(not_a_dir)})
+    assert result.returncode != 0, result.stdout
+    _assert_running_install_kept(home, dest)
+
+
+def test_install_sh_restores_the_running_install_when_the_move_fails(_isolated_hermes_home, tmp_path):
+    """The staged copy cannot be moved into place (a mv that refuses the staged tree) — the
+    running install is moved back, never left in the backup."""
+    home = _isolated_hermes_home
+    dest = _running_install(home)
+    stage_root = tmp_path / "stage-root"
+    stage_root.mkdir()
+    real_mv = shutil.which("mv")
+    assert real_mv
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "mv").write_text(
+        "#!/bin/sh\n"
+        f'for a in "$@"; do case "$a" in "{stage_root}"/*) echo "mv: refused by the test" >&2; exit 1;; esac; done\n'
+        f'exec "{real_mv}" "$@"\n',
+        encoding="utf-8",
+    )
+    (shim / "mv").chmod(stat.S_IRWXU)
+    result = _run_install(home, env_extra={"TMPDIR": str(stage_root)}, path_prefix=str(shim))
+    assert result.returncode != 0, result.stdout
+    _assert_running_install_kept(home, dest)

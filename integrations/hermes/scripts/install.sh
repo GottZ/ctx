@@ -76,27 +76,49 @@ done
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] would install plugin version $(cat "${PLUGIN_SRC}/VERSION")"
 else
-    if [ -d "$DEST" ]; then
-        BACKUP="${HOME_DIR}/plugins/.${PLUGIN_NAME}.bak-$(date -u +%Y%m%dT%H%M%SZ)"
-        echo "existing install found — backing up to ${BACKUP}"
-        mv "$DEST" "$BACKUP"
-    fi
+    PLUGINS_DIR="${HOME_DIR}/plugins"
+    BACKUP=""
+    STAGE=""
+    # On any exit: drop the staging directory, and put a running install moved to the backup
+    # back in place when the new copy did not get there — never leave the home without one.
+    finish() {
+        [ -n "$STAGE" ] && rm -rf "$STAGE"
+        if [ -n "$BACKUP" ] && [ -d "$BACKUP" ] && [ ! -e "$DEST" ] && [ ! -L "$DEST" ]; then
+            mv "$BACKUP" "$DEST" && echo "the new copy did not get into place — the running install is back at ${DEST}" >&2
+        fi
+    }
+    trap finish EXIT
     # Readable for the account Hermes runs as, whatever the installing shell's umask or the
     # checkout's modes (a sudo or elevated shell often has 077): Hermes skips a plugin folder
     # it cannot read, and with compression.checkpoint_required every compaction then fails.
     # Everything in the plugin source directory becomes readable for every account — keep
     # nothing private there; the ctx key belongs in Hermes' .env.
-    (umask 022 && mkdir -p "${HOME_DIR}/plugins")
-    # The copy is built and its modes are set in a private staging directory, then moved into
-    # place: plugins/ can be writable by the Hermes account, and chmod -R follows a symbolic
-    # link given as its operand, so no command here works on a path below plugins/ but the move.
+    # The copy is built and its modes are set in a private staging directory first, before the
+    # running install is touched; then it is moved into place. plugins/ can be writable by the
+    # Hermes account, and chmod -R follows a symbolic link given as its operand, so no command
+    # here changes a path below plugins/ but the two moves.
     STAGE="$(mktemp -d)"
-    trap 'rm -rf "$STAGE"' EXIT
     (umask 022 && cp -R "$PLUGIN_SRC" "${STAGE}/${PLUGIN_NAME}")
     find "${STAGE}/${PLUGIN_NAME}" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
     rm -rf "${STAGE}/${PLUGIN_NAME}/.ruff_cache"
     chmod -R u+rwX,go+rX "${STAGE}/${PLUGIN_NAME}"
-    mv "${STAGE}/${PLUGIN_NAME}" "$DEST"
+
+    (umask 022 && mkdir -p "$PLUGINS_DIR")
+
+    if [ -d "$DEST" ]; then
+        BACKUP="${PLUGINS_DIR}/.${PLUGIN_NAME}.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+        echo "existing install found — backing up to ${BACKUP}"
+        mv "$DEST" "$BACKUP"
+    fi
+    if [ -e "$DEST" ] || [ -L "$DEST" ]; then
+        echo "${DEST} exists and is not a directory (or appeared just now); not replacing it." >&2
+        exit 1
+    fi
+    if mv --version >/dev/null 2>&1; then
+        mv -T "${STAGE}/${PLUGIN_NAME}" "$DEST"   # GNU: never into a directory placed at $DEST
+    else
+        mv "${STAGE}/${PLUGIN_NAME}" "$DEST"
+    fi
     echo "installed plugin version $(cat "${DEST}/VERSION")"
 fi
 

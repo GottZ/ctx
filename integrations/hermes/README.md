@@ -192,7 +192,10 @@ The installer copies `plugin/ctx_checkpoint/` to
 `$HERMES_HOME/plugins/ctx_checkpoint/` (Hermes' user-plugin discovery path,
 which survives image updates), probes the host for the fail-closed contract
 and the context-engine binding, and prints the config steps. It never edits `config.yaml` and never restarts
-anything.
+anything. The copy is built and made readable for every account in a temporary
+directory first; only then is a running install moved aside and the new copy moved
+into its place. If that last step fails, the running install is moved back, so the
+home is never left without the plugin.
 
 Use one install path per Hermes home. `hermes plugins install` refuses an
 existing `plugins/ctx_checkpoint/` ("already exists"), and `install.sh` moves
