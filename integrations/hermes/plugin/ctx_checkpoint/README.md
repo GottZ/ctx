@@ -455,8 +455,14 @@ cd integrations/hermes/plugin/ctx_checkpoint && ruff check . && ruff format --ch
 
 The workflow `.github/workflows/hermes-ctx-checkpoint.yml` runs ruff,
 `hermes plugins validate` and both suites against a pinned hermes-agent checkout
-for every change of this directory or of the ctx MCP handlers
-(`go/internal/handler/mcp*.go`, whose answers the plugin parses).
+for every change of this directory, of `integrations/hermes/scripts/install.sh` or
+of the ctx MCP handlers (`go/internal/handler/mcp*.go`, whose answers the plugin
+parses). Its `e2e` job writes a checkpoint chain and its retry against the ctx MCP
+endpoint on a fresh database, through Hermes' own MCP client
+(`tests/e2e_real_ctx.py`, started by
+`go/internal/handler/mcp_checkpoint_e2e_integration_test.go`; locally: set
+`CTX_CHECKPOINT_E2E_PYTHON` to the Python of the Hermes environment and
+`HERMES_REPO`, then run that Go test with `-tags=integration`; it needs Docker).
 
 ## Layout
 

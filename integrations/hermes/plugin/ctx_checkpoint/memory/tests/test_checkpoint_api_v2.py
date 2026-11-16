@@ -245,8 +245,10 @@ def test_best_effort_chain_gives_up_at_its_deadline(provider_factory, monkeypatc
     """Best effort never waits without bound: every chain call gets the time left as its timeout,
     a refused write waits at most the one rate window the chain is granted, and the chain gives
     up at ``checkpoint_budget_s`` (+ that window). The compaction then goes on with the facts."""
-    p, client = provider_factory({"facts_from_user": False, "checkpoint_chunk_chars": 1_000})
+    # A budget that is no multiple of the call timeout: the last call gets only the time left.
+    p, client = provider_factory({"facts_from_user": False, "checkpoint_chunk_chars": 1_000, "checkpoint_budget_s": 15})
     budget = float(p._config["checkpoint_budget_s"])
+    assert budget % float(p._config["api_timeout"]) != 0
     clock = {"now": 1_000.0}
     monkeypatch.setattr(p, "_now", lambda: clock["now"])
 
@@ -279,6 +281,7 @@ def test_best_effort_chain_gives_up_at_its_deadline(provider_factory, monkeypatc
     assert timeouts and all(t is not None and t > 0 for t in timeouts)
     if server == "slow":
         assert elapsed <= budget + 0.5, f"the chain ran {elapsed:.1f}s past a {budget:.0f}s budget"
+        assert timeouts[-1] == pytest.approx(budget % float(p._config["api_timeout"])), timeouts
         assert not any(c["title"].startswith("Compaction checkpoint head") for c in client.chain_calls)
     else:
         bound = budget + RATE_WINDOW_S + RATE_WINDOW_MARGIN_S
