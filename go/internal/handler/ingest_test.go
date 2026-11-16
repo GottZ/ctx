@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/GottZ/ctx/internal/ingest"
 )
 
 // ===.
@@ -210,6 +212,16 @@ func TestIngestRequest_Validation_TitleTooLong(t *testing.T) {
 	errs := validateIngestRequest(&IngestRequest{Chunks: chunks})
 	if len(errs) == 0 {
 		t.Error("expected validation error for long title, got none")
+	}
+}
+
+// The ingest chunker keeps the titles it lengthens (#316) within
+// ingest.MaxTitleBytes so they cannot make this endpoint refuse a batch;
+// both must name the same limit.
+func TestIngestTitleLimitMatchesChunker(t *testing.T) {
+	if maxTitleLen != ingest.MaxTitleBytes {
+		t.Fatalf("handler maxTitleLen = %d, ingest.MaxTitleBytes = %d: the chunker would size titles against another limit",
+			maxTitleLen, ingest.MaxTitleBytes)
 	}
 }
 
