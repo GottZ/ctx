@@ -120,8 +120,8 @@
 --   * Below 500 000 rows (pg_class.reltuples) the migration builds inline
 --     (a pick index of 171's definition is dropped first).
 --   * Above, or a name taken by anything else: WARNING, nothing built or
---     dropped. Build out of band, on the running binary, BEFORE this binary
---     serves such a corpus (the column must exist first):
+--     dropped. Build out of band in two steps. First, on the running binary,
+--     BEFORE this binary serves such a corpus (the column must exist first):
 --
 --       SET lock_timeout = '3s';
 --       ALTER TABLE context_blocks
@@ -135,14 +135,23 @@
 --       CREATE INDEX CONCURRENTLY idx_blocks_embed_excluded
 --           ON context_blocks (type_name, id)
 --           WHERE embed_excluded AND NOT is_archived;
+--
+--     Then, once every ctx process on the database runs this binary:
+--
 --       DROP INDEX CONCURRENTLY idx_embedding_pending_scope_sens;
 --       ALTER INDEX idx_embedding_pending_scope_sens_291 RENAME TO idx_embedding_pending_scope_sens;
 --       DROP INDEX CONCURRENTLY idx_embedding_pending_sens;
 --       ALTER INDEX idx_embedding_pending_sens_291 RENAME TO idx_embedding_pending_sens;
 --
 --     (abortable; an aborted build leaves an INVALID index, which DROP INDEX
---     removes before the next try). Without the new pick indexes the picks
---     stay correct at the cost before this migration; without
+--     removes before the next try). The order matters: the pick of a binary
+--     before this migration does not state NOT embed_excluded, so it cannot
+--     use the new indexes; dropping 171's indexes while such a binary still
+--     runs leaves its sensitivity branches on idx_embedding_pending
+--     (created_at order, the cost before 171). This binary's pick states the
+--     conjunct and uses the new indexes under their temporary names. Without
+--     the new pick indexes the picks stay correct at the cost before this
+--     migration; without
 --     idx_blocks_embed_excluded the reconcile of a name that became
 --     embeddable walks idx_blocks_type_name. The schema-contract manifest
 --     stays red until the build.
