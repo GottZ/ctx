@@ -1267,3 +1267,35 @@ def test_ordinary_ids_keep_their_title_and_search_once(factory):
 
         assert _searches(c.calls) == [f"Compaction checkpoint head {root}"], root
         assert p._last_chain_receipt.lookup == "none"
+
+
+# -- bot review round 1 of #302 ---------------------------------------------------------------
+
+_BOUND_KEY = "test-key-not-real"  # CTX_KEY of the factory: the REST key this provider binds
+
+
+@pytest.mark.parametrize("form", ["raised", "envelope"])
+@pytest.mark.parametrize("target", ["chain", "facts"])
+def test_a_rejection_code_that_carries_a_bound_key_is_redacted(factory, caplog, target, form):
+    p, c = factory("sess-code", config={"auto_compress_extract": True}, agent_context="primary")
+    code = f"denied-for-{_BOUND_KEY}"
+    real_store = c.store
+
+    def store(category, title, content, sensitivity=None, tags=None, **k):
+        if (category == CHAIN_CAT) == (target == "chain"):
+            if form == "raised":
+                raise CtxApiError("HTTP 403: refused", status=403, code=code)
+            return {"success": False, "error": "refused", "code": code}
+        return real_store(category, title, content, sensitivity, tags, **k)
+
+    c.store = store
+    with caplog.at_level(logging.DEBUG):
+        if target == "chain":
+            with pytest.raises(CtxCheckpointError) as raised:
+                p.on_pre_compress([{"role": "assistant", "content": _FACT}], require_checkpoint=True)
+            assert "[denied-for-" in str(raised.value) and _BOUND_KEY not in str(raised.value)
+        else:
+            frame = p.on_pre_compress([{"role": "assistant", "content": _FACT}], require_checkpoint=True)
+            assert "not stored" in frame
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "denied-for-" in logged and _BOUND_KEY not in logged

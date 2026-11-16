@@ -965,7 +965,9 @@ class ChainWriter:
                         f"ctx checkpoint rate-limited during {what} (budget {budget_s:.0f}s; "
                         f"{'refused twice in a row' if refusals >= MAX_RATE_REFUSALS else 'no time left to wait'})"
                     ) from None
-                code = f" [{exc.code}]" if exc.code else ""
+                # The code is server text as well (a code outside the closed vocabulary keeps
+                # whatever the server put there): the same redaction as the detail.
+                code = f" [{redact_error_text(exc.code, self.secret)}]" if exc.code else ""
                 detail = redact_error_text(exc, self.secret)[:200]
                 raise CtxCheckpointError(f"ctx checkpoint {what} failed{code}: {detail}") from None
             except CtxCheckpointError:
@@ -975,7 +977,7 @@ class ChainWriter:
             if not isinstance(data, dict):
                 raise CtxCheckpointError(f"ctx checkpoint {what} returned a non-object response")
             if data.get("success") is False:
-                code = response_code(data)
+                code = redact_error_text(response_code(data), self.secret)
                 detail = redact_error_text(data.get("error") or "unknown", self.secret)[:200]
                 raise CtxCheckpointError(f"ctx checkpoint {what} rejected{f' [{code}]' if code else ''}: {detail}")
             return data
