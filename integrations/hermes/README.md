@@ -73,7 +73,7 @@ is about the checkpoint layer.
 The plugin is a plain Hermes **user plugin** — it lives in
 `$HERMES_HOME/plugins/ctx_checkpoint/`, whether the catalog or the installer
 put it there, and works in best-effort mode on a completely stock Hermes.
-Plugin 0.13.0 declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
+Plugin 0.14.0 declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
 `delegate_task` children inherit the provider under the fail-closed gate; the
 catalog pin (0.6.2) still declares ≥ 0.20.4 (since upstream v2026.8.18,
 provider text is forwarded into the compaction summary).
@@ -569,6 +569,17 @@ and manifest are deliberately small so routine recall stays cheap.
   redacted with the bound keys in the rest of the places that raised, logged or returned
   them raw: the implicit `__context__` of raised errors, the results and DEBUG lines of
   the agent tools, and the prefetch, recall and digest debug lines (GottZ/ctx#304).
+- 0.14.0: `hermes memory status`, `hermes ctx_checkpoint status`, the connection test of
+  both setup forms, `Setup failed: …` and every error line of the CLI on `transport: rest`
+  redact with the ctx keys the provider binds — the key the `mcp_servers` entry resolves
+  through any variable, `CTX_API_KEY`, and `CTX_KEY` on REST — and the checkpoint rules;
+  before, status and test knew `CTX_API_KEY` or the key just typed, the CLI `CTX_KEY` only
+  (GottZ/ctx#308). The installer tests skip with a reason in a copy of the plugin folder
+  alone. The recall names a block re-typed out of a type marked untrusted (ctx v5.41.0's
+  `untrusted_origin`): a note line in the prefetch block and the CLI, the field and an
+  `origin_note` in `ctx_query`, `ctx_search` and `ctx_get`; such a block stays in the recall
+  under `prefetch_untrusted: drop`. Source lines of the MCP query text with
+  `superseded_by:` after the id are no longer dropped (part of GottZ/ctx#295).
 
 ## Licensing
 

@@ -158,7 +158,9 @@ see [checkpoint API v2](#pre-compress-checkpoint-api-v2).
 | `ctx_get(block_id)` | Fetch a full block including content |
 
 Results carry `type` and `untrusted`; when foreign text is involved an `untrusted_note`
-tells the model to quote, never follow it. Rejections return
+tells the model to quote, never follow it. A row (or block) re-typed out of a type marked
+untrusted carries the server's `untrusted_origin` (ctx v5.41.0) and an `origin_note`: its
+text came from an agent, and a citation says so. Rejections return
 `{"error", "code", "retryable"}` with the server's rejection code.
 
 Category conventions: `infrastructure`, `decisions`, `projects`, `reference`,
@@ -180,7 +182,9 @@ hermes ctx_checkpoint get <block-id>
 ```
 
 CLI writes use `sensitivity_default` unless `--sensitivity` is given and are tagged
-`hook:cli`. `--all-types` disables `prefetch_types_exclude`, e.g. to browse checkpoints.
+`hook:cli`. Hit lines of `query` and `search` carry the `untrusted_origin:` note line of a
+block that has the record. Error lines are redacted with the keys the provider binds
+(`CTX_KEY` and `status.profile_ctx_keys`) and the checkpoint rules. `--all-types` disables `prefetch_types_exclude`, e.g. to browse checkpoints.
 
 ## How it works
 
@@ -193,6 +197,12 @@ CLI writes use `sensitivity_default` unless `--sensitivity` is given and are tag
 - Hits with `untrusted: true` (foreign text — server V-11: `checkpoint`, `tool-evidence`,
   `tool-overview`, `insight`) are labelled in the injected context (or dropped with
   `prefetch_untrusted: drop`), and the context tells the model to treat them as data.
+- A hit with the server's `untrusted_origin` record (a block re-typed out of a type marked
+  untrusted, ctx v5.41.0) gets the line `untrusted_origin:<type> (agent-produced text:
+  re-typed out of a type marked untrusted)` under its label — the wording of the server's
+  text surfaces — and the context asks the model to say an agent produced it when citing
+  it. It is kept under `prefetch_untrusted: drop`: the block was lifted into a trusted type
+  on purpose. A hit without the record renders byte for byte as before.
 - `queue_prefetch` pre-warms the next turn's recall in the background; a matching
   result younger than 60 s is consumed by the next prefetch.
 - The host's recall indicator (`🧠 CTX — recalled N memories`) reports the number of

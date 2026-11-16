@@ -6,6 +6,48 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.14.0] — 2026-11-16
+
+Redaction keys of status and CLI, installer tests, untrusted_origin in the recall
+(GottZ/ctx#308, part of #295).
+
+- **Status, connection test, setup and CLI redact with the keys the provider binds
+  (GottZ/ctx#308).** `status.profile_ctx_keys(name)` is the one resolution of a profile's
+  ctx keys: the `Authorization`/`X-Context-Key` value of `mcp_servers.<name>` as written
+  (`${VAR}`/`${env:VAR}` resolved through Hermes' `get_env_value`, `.env` included) and as
+  Hermes loads it, and `CTX_API_KEY`. It moved from the umbrella into the engine module
+  that is stdlib-only at import time and uses the same three `hermes_cli.config` functions
+  it already called (`load_config`, `read_user_config_raw`, `get_env_value`), so the CLI
+  reads it without a provider and no Hermes import was added. The provider binds it on
+  connect (seam `_profile_secrets`); `hermes memory status` and `hermes ctx_checkpoint
+  status` on MCP (`mcp_report`) and on REST (`get_status_config`, `cmd_status`), the
+  connection test of the Desktop form and of the terminal setup, `Setup failed: …` (now with
+  a redacted DEBUG traceback instead of `exc_info`) and every error line of the CLI on
+  `transport: rest` (`search`, `get`, `query`, `store`, `sync`, `status`, a raised
+  `CtxApiError`) redact with it — plus `CTX_KEY` on REST, as the provider — through
+  `checkpoint.redact_error_text`. Before, status and test knew `CTX_API_KEY` or the key just
+  typed, the CLI `CTX_KEY` only: a key the entry referenced through another variable, or a
+  `password:` value, passed.
+- **Installer tests outside a checkout.** The seven tests of
+  `integrations/hermes/scripts/install.sh` skip with a reason when the script is not next to
+  the plugin folder, as in a catalog install; there five failed and two passed only because
+  bash could not find the script.
+- **untrusted_origin in the recall (part of GottZ/ctx#295).** ctx v5.41.0 records on a block
+  re-typed out of a type marked untrusted the type it came from (`untrusted_origin`, #280).
+  `config.untrusted_origin` reads the record (a value that is no type name keeps the mark
+  as `?`), `config.untrusted_origin_note` words it as the server does. The prefetch block puts
+  the note line under the hit's label and one sentence into its intro; `ctx_query`,
+  `ctx_search` (`_trust_fields`) and `ctx_get` carry the field and an `origin_note`; the CLI
+  hit lines carry the note line. It is a note, not untrusted framing: the owner's decision
+  on #280 lets the corpus take such knowledge up, so `prefetch_untrusted: drop` keeps the hit.
+  The MCP query text parser dropped every source line with text after the id, so a source
+  with ` superseded_by:<uuid>` was lost; `key:value` tokens after the id are kept now,
+  `superseded_by` is read, the indented note line under a source is its record, and the
+  content reload copies `untrusted_origin` too. Without the record (a server before v5.41.0)
+  prefetch block, tool results and CLI lines are byte for byte as in 0.13.0. The shared answer
+  fixture (`tests/mcp_answers.json`) gains the section `origin`, which the ctx side renders
+  through its real MCP handlers.
+
 ## [ctx_checkpoint 0.13.0] — 2026-11-16
 
 Setup, MCP tool names and error texts (GottZ/ctx#294, #297, #304).
