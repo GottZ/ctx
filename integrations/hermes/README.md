@@ -192,7 +192,13 @@ The installer copies `plugin/ctx_checkpoint/` to
 `$HERMES_HOME/plugins/ctx_checkpoint/` (Hermes' user-plugin discovery path,
 which survives image updates), probes the host for the fail-closed contract
 and the context-engine binding, and prints the config steps. It never edits `config.yaml` and never restarts
-anything.
+anything. The copy is built and made readable for every account in a temporary
+directory first; only then is a running install moved aside and the new copy moved
+into its place. If that last step fails, the running install is moved back, so the
+home is never left without the plugin. A Hermes home or `plugins/` folder that its
+owner (taken as the account Hermes runs as) cannot enter by its mode bits stops the
+installer before anything changes, with the `chmod` line to run; the installer does
+not change a folder it did not create.
 
 Use one install path per Hermes home. `hermes plugins install` refuses an
 existing `plugins/ctx_checkpoint/` ("already exists"), and `install.sh` moves
@@ -360,12 +366,15 @@ compaction.
 
 Contract tests ship on both sides: host-side upstream in
 `tests/agent/test_pre_compress_checkpoint_contract.py` (26 tests on `v0.22.4`, 2026-10)
-and provider-side here in `plugin/ctx_checkpoint/tests/` (145 tests, mocked
-MCP dispatch — no live ctx needed): `test_provider_contract.py` (28) covers
-the checkpoint chain, `test_contract_negotiation.py` (23) the runtime
-negotiation against the real host on `PYTHONPATH` plus a monkeypatched v3
-host, `test_setup.py` (37) the setup surfaces, `test_settings_and_status.py`
-(57) the Desktop memory form through the host's declared-surface route, the
+and provider-side here in `plugin/ctx_checkpoint/tests/` (mocked MCP dispatch —
+no live ctx needed; its store answers come from
+`plugin/ctx_checkpoint/memory/tests/mcp_answers.json`, the fixture ctx's handler
+test pins the real answers against):
+`test_provider_contract.py` covers the checkpoint chain,
+`test_contract_negotiation.py` the runtime negotiation against the real host
+on `PYTHONPATH` plus a monkeypatched v3 host, `test_setup.py` the setup
+surfaces, `test_settings_and_status.py` the Desktop memory form through the
+host's declared-surface route, the
 Settings → Plugins section through the host's settings writer, the connection
 test, the checkpoint outcome and the status, each test against its own
 temporary `HERMES_HOME`, including a round trip through the host's Dashboard

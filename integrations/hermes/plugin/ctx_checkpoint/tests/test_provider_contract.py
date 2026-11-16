@@ -6,6 +6,10 @@ from pathlib import Path
 from agent.memory_manager import MemoryManager
 
 _PROVIDER_PATH = Path(__file__).resolve().parents[1] / "__init__.py"
+# The store answer as ctx words it: the fixture ctx's own handler test pins (GottZ/ctx#290).
+_STORED = json.loads((_PROVIDER_PATH.parent / "memory" / "tests" / "mcp_answers.json").read_text(encoding="utf-8"))[
+    "store"
+]["stored"]
 _SPEC = importlib.util.spec_from_file_location(
     "ctx_checkpoint_provider_contract", _PROVIDER_PATH, submodule_search_locations=[str(_PROVIDER_PATH.parent)]
 )
@@ -493,7 +497,7 @@ def _ctx_text_dispatch(calls, *, store=None):
             return store(name, args)
         block_id = f"019f6000-0000-7000-8000-{counter:012d}"
         counter += 1
-        return _hermes_ok(f"Stored: {args['title']} (id: {block_id}, category: {args['category']})")
+        return _hermes_ok(_STORED.format(title=args["title"], id=block_id, category=args["category"]))
 
     return dispatch
 
@@ -604,7 +608,7 @@ def test_a_hanging_store_is_abandoned_at_the_call_timeout():
         if name == "mcp__ctx__search":
             return _hermes_ok("[]")
         release.wait(30)  # far past the 1 s per-call timeout and Hermes' own 300 s default
-        return _hermes_ok("Stored: x (id: 019f6000-0000-7000-8000-000000000399, category: c)")
+        return _hermes_ok(_STORED.format(title="x", id="019f6000-0000-7000-8000-000000000399", category="c"))
 
     provider = CtxCheckpointMemoryProvider(config={"api_timeout": 1}, dispatch=dispatch)
     provider.initialize("session-a", platform="cli")

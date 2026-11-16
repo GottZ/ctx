@@ -1,10 +1,13 @@
 # ctx_checkpoint (hermes-agent memory provider plugin) — its own suites.
 #
 # The plugin under integrations/hermes/plugin/ctx_checkpoint is Python; none of the Go/web jobs of ci.yml touch it.
-# This workflow runs when the plugin, this file or the ctx MCP handlers change (the plugin parses the answers of the
-# MCP store/search/get/query tools): ruff, `hermes plugins validate`, the umbrella suite (tests/: checkpoint contract,
-# setup surfaces, status, MCP transport) and the engine suite (memory/tests/: recall, tools, mirror, facts, digests,
-# chain, CLI, security sweep). Both suites use fakes for ctx; no network.
+# This workflow runs when the plugin, its installer, this file or the ctx MCP handlers change (the plugin parses the
+# answers of the MCP store/search/get/query tools): ruff, `hermes plugins validate`, the umbrella suite (tests/:
+# checkpoint contract, setup surfaces, status, MCP transport, loader and installer) and the engine suite (memory/tests/:
+# recall, tools, mirror, facts, digests, chain, MCP answer contract, CLI, security sweep). Both suites use fakes for
+# ctx; no network. The store answers of the MCP doubles come from memory/tests/mcp_answers.json, which the Go test
+# go/internal/handler/mcp_checkpoint_answers_integration_test.go (ci.yml, handler shard) compares with the real
+# handlers' answers. The runner account is not root, so the unreadable-folder tests run here (a root run skips them).
 #
 # The suites import Hermes itself (agent.memory_provider, hermes_cli.config, the memory-provider dashboard routes,
 # the Plugins-hub settings writer): hermes-agent is checked out at a pinned commit (HERMES_AGENT_SHA, upstream main
@@ -21,12 +24,14 @@ on:
     branches: [root]
     paths:
       - "integrations/hermes/plugin/ctx_checkpoint/**"
+      - "integrations/hermes/scripts/install.sh"
       - ".github/workflows/hermes-ctx-checkpoint.yml"
       - "go/internal/handler/mcp*.go"
   pull_request:
     branches: [root]
     paths:
       - "integrations/hermes/plugin/ctx_checkpoint/**"
+      - "integrations/hermes/scripts/install.sh"
       - ".github/workflows/hermes-ctx-checkpoint.yml"
       - "go/internal/handler/mcp*.go"
   workflow_dispatch:
@@ -43,6 +48,7 @@ env:
   HERMES_AGENT_SHA: 26cd2e6d83494c22a8b5e961f20e293285c48d0a
   PYTHON_VERSION: "3.14"
   UV_PIN: "uv==0.13.5"
+  GO_VERSION: "1.27"
   RUFF_PIN: "ruff==0.15.22"
   PYTHONDONTWRITEBYTECODE: "1"
 
@@ -137,3 +143,56 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"
           python -m pytest "$PLUGIN_DIR/memory/tests" -p no:cacheprovider -q -rfE --basetemp="$RUNNER_TEMP/pytest-engine"
+
+  # The plugin's checkpoint chain against the ctx MCP endpoint as ctxd mounts it (Auth middleware, Streamable HTTP
+  # handler) on a fresh database (testcontainers, the image of ci.yml's integration shards), through Hermes' own MCP
+  # client: go/internal/handler/mcp_checkpoint_e2e_integration_test.go runs tests/e2e_real_ctx.py against it. No fake
+  # between the plugin's McpClient and ctx's handlers. The ci.yml shards skip this test (no Hermes there).
+  e2e:
+    name: ctx_checkpoint · against the ctx MCP endpoint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      TESTCONTAINERS_RYUK_DISABLED: "false"
+      TESTCONTAINERS_PULL_POLICY: "default"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Checkout hermes-agent (pinned)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.HERMES_AGENT_REPO }}
+          ref: ${{ env.HERMES_AGENT_SHA }}
+          path: hermes-agent
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install hermes-agent from its lock file
+        working-directory: hermes-agent
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/venv
+        run: |
+          python -m pip install --disable-pip-version-check ${{ env.UV_PIN }}
+          uv sync --locked --python "$(command -v python)" --group dev
+      - name: Set up Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go/go.sum
+      - name: Pull the testcontainers image
+        run: docker pull timescale/timescaledb-ha:pg18
+      - name: go test (the chain against the MCP endpoint)
+        working-directory: go
+        env:
+          CTX_CHECKPOINT_E2E_PYTHON: ${{ runner.temp }}/venv/bin/python
+          HERMES_REPO: ${{ github.workspace }}/hermes-agent
+        run: >-
+          go test -tags=integration -p 1 -count=1 -v -timeout 10m
+          -run '^TestCheckpointPluginChainAgainstMCPEndpoint$' ./internal/handler/

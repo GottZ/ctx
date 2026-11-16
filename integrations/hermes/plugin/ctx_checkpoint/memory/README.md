@@ -403,9 +403,11 @@ serve several profiles without mixing their stores.
 ## Development
 
 The tests use a fake client (no network) but import the host contract (`agent.*`,
-`tools.registry`, `hermes_constants`, `hermes_state`, `utils`) from a Hermes Agent
+`tools.*`, `hermes_cli.*`, `hermes_constants`, `hermes_state`, `utils`) from a Hermes Agent
 checkout — `HERMES_REPO` (default `~/.hermes/hermes-agent`). Run them with a Python
-environment that has pytest and the host's dependencies, from the ctx checkout:
+environment that has pytest and the host's dependencies, from the ctx checkout. The MCP
+answers they parse come from `tests/mcp_answers.json`, the fixture ctx's own handler test
+(`go/internal/handler/mcp_checkpoint_answers_integration_test.go`) pins its answers against:
 
 ```bash
 HERMES_REPO=/path/to/hermes-agent python -m pytest -p no:cacheprovider \

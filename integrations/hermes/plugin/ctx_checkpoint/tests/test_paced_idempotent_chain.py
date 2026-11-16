@@ -41,6 +41,11 @@ CtxCheckpointError = _MODULE.CtxCheckpointError
 
 HOST_BREAKER_THRESHOLD = 3  # tools/mcp_tool.py _CIRCUIT_BREAKER_THRESHOLD
 CALL_LATENCY_S = 0.05
+# The store answers as ctx words them: the fixture ctx's own test pins its handlers against
+# (go/internal/handler/mcp_checkpoint_answers_integration_test.go, GottZ/ctx#290).
+_STORE_ANSWERS = json.loads(
+    (Path(__file__).resolve().parents[1] / "memory" / "tests" / "mcp_answers.json").read_text(encoding="utf-8")
+)["store"]
 
 
 class Clock:
@@ -99,7 +104,7 @@ class CtxServerDouble:
             and all(stored["metadata"].get(k) == v for k, v in metadata.items())
         ):
             self.noops += 1
-            return {"result": f"No change needed — identical content already exists (id: {stored['id']})"}
+            return {"result": _STORE_ANSWERS["no_change"].format(title=args["title"], id=stored["id"], category=key[0])}
         self.booked = [t for t in self.booked if t > self.clock.now - self.window_s]
         if len(self.booked) >= self.write_limit:
             self.refused += 1
@@ -110,7 +115,9 @@ class CtxServerDouble:
             stored = {"id": f"019f7000-0000-7000-8000-{self.counter:012d}"}
             self.blocks[key] = stored
         stored.update(incoming, metadata=metadata, title=args["title"], category=args["category"])
-        return {"result": f"Stored: {args['title']} (id: {stored['id']}, category: {args['category']})"}
+        return {
+            "result": _STORE_ANSWERS["stored"].format(title=args["title"], id=stored["id"], category=args["category"])
+        }
 
     def _search(self, args: dict) -> dict:
         tags = set(args.get("tags") or [])

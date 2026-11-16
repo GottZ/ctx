@@ -324,7 +324,7 @@ commands need the REST transport (the CLI process has no MCP dispatch).
 log shows, in this order:
 
 ```
-Skipping unreadable plugin directory ctx_checkpoint: [Errno 13] Permission denied: …
+Skipping unreadable plugin directory …/plugins/ctx_checkpoint: [Errno 13] Permission denied: …
 Memory provider 'ctx_checkpoint' is not installed, so external memory is off for this session. …
 compression.checkpoint_required is enabled but the active memory provider (no active provider) does not implement checkpoint API v2. Compress will fail closed. …
 ```
@@ -340,7 +340,14 @@ account Hermes Desktop runs as, with inherited permissions; on Linux, readable b
 the Hermes user), or install again from a normal shell of that account after
 removing the folder. Running `hermes plugins install ctx_checkpoint` again does not
 help while the folder exists, and turning `compression.checkpoint_required` off
-only hides the cause.
+only hides the cause. Which permission is missing and the Python version change the
+first line: a folder Hermes cannot enter leaves it out on Python 3.14 (only the other
+two lines appear), a folder it can enter but not list gives `… loaded but no provider
+instance found` instead. `integrations/hermes/scripts/install.sh` leaves a copy every
+account can read, whatever the umask of the shell it runs in. It does not change a
+`plugins/` folder it did not create: when the owner of the Hermes home (taken as the
+account Hermes runs as) cannot enter it, the script stops before touching the running
+install and prints the `chmod` line to run.
 
 **Every compaction is refused and the log names `checkpoint_mode: off`.**
 `checkpoint_mode: off` — in `memory.ctx_checkpoint` or in `$HERMES_HOME/ctx.json`,
@@ -428,15 +435,21 @@ entry did not connect when Hermes started (wrong key, server down, URL wrong).
 
 ## Tests
 
-Two suites, run separately (both use fakes, no live ctx and no network; the host
-contract comes from a Hermes checkout):
+Two suites, run separately. Both use fakes for ctx, no live server and no network; the
+host contract comes from a hermes-agent checkout, run them with a Python environment that
+has that checkout's dependencies and pytest (CI: `uv sync --locked --group dev` in the
+checkout). The MCP answers the fakes give are the ones ctx's own test pins:
+`memory/tests/mcp_answers.json` is read by both suites and by
+`go/internal/handler/mcp_checkpoint_answers_integration_test.go`, which compares the real
+`store`, `get` and `search` answers with it.
 
 ```bash
 # umbrella: checkpoint contract, negotiation, setup surfaces, settings sections, status, MCP transport,
-# checkpoint pointer and read path on Hermes' compaction path (169)
+# paced chain, checkpoint pointer and read path on Hermes' compaction path
 PYTHONPATH=/path/to/hermes-agent:integrations/hermes/plugin python -m pytest \
     integrations/hermes/plugin/ctx_checkpoint/tests
-# engine: recall, tools, mirror, facts, digests, chain over REST, CLI, security sweep (410)
+# engine: recall, tools, mirror, facts, digests, chain, MCP client and its answer contract, CLI,
+# security sweep
 HERMES_REPO=/path/to/hermes-agent python -m pytest \
     integrations/hermes/plugin/ctx_checkpoint/memory/tests
 # lint + format + bandit rules (ruff.toml in this directory)
@@ -445,8 +458,14 @@ cd integrations/hermes/plugin/ctx_checkpoint && ruff check . && ruff format --ch
 
 The workflow `.github/workflows/hermes-ctx-checkpoint.yml` runs ruff,
 `hermes plugins validate` and both suites against a pinned hermes-agent checkout
-for every change of this directory or of the ctx MCP handlers
-(`go/internal/handler/mcp*.go`, whose answers the plugin parses).
+for every change of this directory, of `integrations/hermes/scripts/install.sh` or
+of the ctx MCP handlers (`go/internal/handler/mcp*.go`, whose answers the plugin
+parses). Its `e2e` job writes a checkpoint chain and its retry against the ctx MCP
+endpoint on a fresh database, through Hermes' own MCP client
+(`tests/e2e_real_ctx.py`, started by
+`go/internal/handler/mcp_checkpoint_e2e_integration_test.go`; locally: set
+`CTX_CHECKPOINT_E2E_PYTHON` to the Python of the Hermes environment and
+`HERMES_REPO`, then run that Go test with `-tags=integration`; it needs Docker).
 
 ## Layout
 

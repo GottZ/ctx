@@ -1,0 +1,38 @@
+{
+  "about": [
+    "The answers of the ctx MCP tools store, get and search that the ctx_checkpoint plugin parses (memory/mcp_client.py).",
+    "One source for both sides: go/internal/handler/mcp_checkpoint_answers_integration_test.go drives the real MCP handlers",
+    "with the write below and compares their answers with this file; memory/tests/test_mcp_answer_contract.py and",
+    "tests/test_paced_idempotent_chain.py feed exactly these answers to the plugin. A change on either side turns the other red.",
+    "Placeholders in the store templates: {title}, {id}, {category}. Hermes hands every MCP text result to the plugin as",
+    "{\"result\": \"<text>\"}."
+  ],
+  "write": {
+    "category": "compaction-checkpoints",
+    "title": "Compaction checkpoint head 019f6000-0000-7000-8000-00000000c0de",
+    "content": "# Compaction checkpoint head\n\nfirst version",
+    "changed_content": "# Compaction checkpoint head\n\nsecond version",
+    "sensitivity": "personal",
+    "type": "checkpoint",
+    "tags": ["checkpoint-head", "checkpoint"],
+    "metadata": {
+      "latest_manifest_id": "019f6000-0000-7000-8000-000000000201",
+      "root_session_id": "019f6000-0000-7000-8000-00000000c0de",
+      "checkpoint_id": "cp-contract",
+      "fact_hashes": ["f1"]
+    }
+  },
+  "store": {
+    "stored": "Stored: {title} (id: {id}, category: {category})",
+    "no_change": "No change needed — identical content already exists (id: {id})"
+  },
+  "get": {
+    "sample_id": "019f6000-0000-7000-8000-000000000101",
+    "keys": ["id", "title", "category", "content", "metadata", "type"]
+  },
+  "search": {
+    "query": "Compaction checkpoint head 019f6000-0000-7000-8000-00000000c0de",
+    "tags": ["checkpoint-head"],
+    "row_keys": ["id", "title", "category"]
+  }
+}
