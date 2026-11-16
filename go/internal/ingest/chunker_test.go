@@ -259,6 +259,21 @@ func TestChunk_TitleGeneration(t *testing.T) {
 	}
 }
 
+// buildTitle keeps a path-shaped document name intact; `ctx ingest` passes the
+// vault-relative path, and same-named files must stay distinct.
+func TestBuildTitle_PathShapedName(t *testing.T) {
+	for _, tc := range []struct{ name, heading, want string }{
+		{"README", "", "README"},
+		{"docs/README", "", "docs/README"},
+		{"docs/README", "Setup", "docs/README — Setup"},
+		{"docs/guide/README", "Setup", "docs/guide/README — Setup"},
+	} {
+		if got := buildTitle(tc.name, tc.heading); got != tc.want {
+			t.Errorf("buildTitle(%q, %q) = %q, want %q", tc.name, tc.heading, got, tc.want)
+		}
+	}
+}
+
 // --- Edge Cases ---.
 
 func TestChunk_NoHeadings_LongDoc(t *testing.T) {

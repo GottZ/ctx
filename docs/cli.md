@@ -59,7 +59,7 @@ Three deliberate exceptions, unchanged:
 |---------|-------------|
 | `ctx brief` | Project briefing from store |
 | `ctx persist` | Persist `[PERSIST:cat:title]` markers |
-| `ctx ingest <path>` | Ingest Obsidian vault |
+| `ctx ingest <path>` | Ingest a folder of Markdown files (an Obsidian vault, a repository). A block's title is the file's path relative to `<path>` without `.md` (`docs/guide/README`, plus ` — <heading>` when the file is split by heading), so files with the same name in different folders stay separate blocks. Files in subfolders ingested before this rule carry the bare file name as title; a re-ingest writes them under the new title and leaves the old blocks in place |
 | `ctx digest` | Rebuild the topic map, and — when `root_map.enabled` is on — the **root map** (`root-map-<scope>`, one line per topic cluster instead of one per block). Never starts a Louvain rebuild; it renders from the cluster state that exists. With `digest.mode=stub` the old block becomes a ~300 B pointer to the root map, so `ctx search index query:topic-map` still tells you where to look |
 | `ctx statusline` | Claude Code status bar |
 
