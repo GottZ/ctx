@@ -26,15 +26,27 @@
 -- so the second half is the union over all readers: an overlay that lifts
 -- the exclusion keeps the type embeddable for everyone.
 --
--- The answer depends on the _global row and on overlays that lift it, never
--- on a tenant's own registry writes: the narrowing gate of the write path
--- (blocktype.NarrowingViolation, axis N8 retrieval.policy, on create and
--- update of a non-_global row through every transport) lets an overlay of a
--- _global-excluded name carry `excluded` only, and a name without a _global
--- row is never marked. So no tenant can make the reconcile write blocks of
--- another tenant by changing its own types, and no tenant learns from its
--- own blocks whether another tenant holds a row of the same name. A type
--- that exists only in tenant scopes, excluded there, is filtered by the
+-- The answer depends on the _global row and on rows of other scopes that
+-- lift it. While the name has a _global row, a tenant cannot write such a
+-- row through the type API: the narrowing gate (blocktype.NarrowingViolation,
+-- axis N8 retrieval.policy, on create and update of a non-_global row
+-- through every transport) lets an overlay of a _global-excluded name carry
+-- `excluded` only, and blocktype.DecodePolicy, through which the gate reads
+-- the config, accepts a key only when it is spelled byte for byte like its
+-- field and does not repeat, so the gate reads the policy this function
+-- reads. A name without a _global row is never marked. So, while a name has
+-- a _global row, no tenant makes the reconcile write blocks of another
+-- tenant by changing its own row of the name. The limit is a tenant row
+-- that predates its _global base: created while no _global row of the name
+-- existed, it is admitted with any policy and not re-checked when the base
+-- appears (docs/api.md, "Overlays may only narrow"). While it carries
+-- another policy, the type stays embeddable for every tenant, and a tenant
+-- can tell from its own blocks that some tenant holds such a row; when its
+-- tenant narrows it to `excluded`, the reconcile marks the blocks of the
+-- name in every tenant: the right value, but a write across the tenant
+-- boundary, once per such row and in the narrowing direction only (the gate
+-- refuses the way back, and deleting an excluded overlay queues nothing). A
+-- type that exists only in tenant scopes, excluded there, is filtered by the
 -- pick row by row as before this migration (issue #213 stays open: marking
 -- it would need the rule bound to the tenant that owns the block's scope,
 -- like trg_block_retype in migration 174, and a queue per name and tenant).

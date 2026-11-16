@@ -94,9 +94,12 @@ func (e *BlockTypeInUseError) Error() string {
 //     that lifts a _global exclusion gives blocks of that type a consumer. The
 //     backfill has no reader identity, so the reader-aware rule is mirrored as
 //     the UNION over all possible readers: one non-_global row of the name with
-//     a non-excluded policy keeps the type embeddable. The narrowing gate
-//     (blocktype.NarrowingViolation, N8) admits no such row through the write
-//     path, so only an operator (psql, migration) can write one.
+//     a non-excluded policy keeps the type embeddable. While the name has a
+//     _global row, the narrowing gate (blocktype.NarrowingViolation, N8)
+//     admits no such row through the write path, and blocktype.DecodePolicy
+//     reads the config by the exact keys this rule reads. Such a row is an
+//     operator's (psql, migration) or a tenant row that predates its _global
+//     base; migration 175's header names what the second can do.
 //   - A block whose type has NO _global row stays embeddable, also when its
 //     tenant rows are all excluded (issue #213, open): the answer must not
 //     depend on another tenant's rows (migration 175's header).
