@@ -92,7 +92,8 @@ For code newer than the catalog pin, install from a ctx checkout with
 All settings live under `memory.ctx_checkpoint` in Hermes' `config.yaml`, by the key names
 below (the plugin's own `category`/`sensitivity`/`chunk_chars`/`budget_s`/`max_parts` map
 onto `checkpoint_category`/`checkpoint_sensitivity`/`checkpoint_chunk_chars`/
-`checkpoint_budget_s`/`checkpoint_max_parts`). The keys of the Settings → Plugins form
+`checkpoint_budget_s`/`checkpoint_max_parts`; an engine name written next to its plugin key
+wins over it, in either order, and the memory form gives both its value). The keys of the Settings → Plugins form
 (`budget_s`, `max_parts`, `auto_recall`, `auto_memory_mirror`, `auto_compress_extract`,
 `auto_session_digest`) are read from `plugins.entries.ctx_checkpoint.settings` when set there,
 over `memory.ctx_checkpoint`. A legacy `$HERMES_HOME/ctx.json` is still read with lower
@@ -121,7 +122,7 @@ are clamped, unknown values fall back to the default.
 | `synthesis_timeout` | `90` | Seconds for `synthesize: true` queries (15–300) |
 | `checkpoint_mode` | `best_effort` | `off` = legacy v1 hook (raw transcript, no chain); `best_effort` / `required` = checkpoint API v2 (identical in the plugin — fail-closed is requested by the host, see below) |
 | `checkpoint_budget_s` | `60` | Time budget for the synchronous pre-compress writes, chain and required facts share it (5–600; plugin key `budget_s`); a paced chain adds 61 s for every rate window after the first |
-| `checkpoint_chain` | `true` | Write the transcript chain (needs `checkpoint_mode` ≠ `off`); independent of `auto_compress_extract` |
+| `checkpoint_chain` | `true` | Write the transcript chain (needs `checkpoint_mode` ≠ `off`); independent of `auto_compress_extract`. `false` saves no wording: under `compression.checkpoint_required` every compaction is refused |
 | `checkpoint_sensitivity` | `internal` | Sensitivity of chain blocks (plugin key `sensitivity`; the engine's own default is `personal`) |
 | `checkpoint_category` | `compaction-checkpoints` | ctx category of the chain blocks (plugin key `category`) |
 | `checkpoint_chunk_chars` | `36000` | Part size (1 000–40 000 chars; plugin key `chunk_chars`) |
@@ -231,9 +232,15 @@ CLI writes use `sensitivity_default` unless `--sensitivity` is given and are tag
 - `require_checkpoint=False` (default): the chain is written synchronously within
   `checkpoint_budget_s`, a chain failure is a WARNING and compaction continues; facts are
   stored in the background. Never raises.
-- `require_checkpoint=True` (host `compression.checkpoint_required`): chain and facts
-  must succeed within the budget, otherwise `CtxCheckpointError` — the host keeps the
-  uncompressed transcript. Success returns a non-empty receipt.
+- `require_checkpoint=True` (host `compression.checkpoint_required`): the chain must
+  succeed within the budget, otherwise `CtxCheckpointError` — the host keeps the
+  uncompressed transcript. Success returns a non-empty receipt. With `checkpoint_chain:
+  false` every required checkpoint raises (facts are not a transcript checkpoint). Facts
+  after a stored chain are stored within the same deadline (each store bounded by the time
+  left); one that is refused or late is a WARNING, its dedupe keys stay pending in the fact
+  ledger so a later compaction of the root on this profile stores it, and the receipt says how
+  many were stored — the checkpoint stands (0.12.0;
+  before, it failed the compaction although the chain was durable).
 - The receipt (< 6000 chars) lists the chain head/manifest IDs and the transcript
   SHA-256, then the extracted facts (with block IDs in required mode). Since 0.9.0 the
   chain part ends with a read path (`_receipt_read_path`, empty in the bare engine): the
@@ -299,6 +306,14 @@ the plugin and runs over either transport.
   (`ctx checkpoint: empty …`) instead of raising — fail-closed mode must not block a
   compaction that has nothing to archive (`ctx_checkpoint` 0.5.1 does the same).
 - Switch off with `checkpoint_chain: false` (facts unaffected) or `checkpoint_mode: off`.
+  Under `compression.checkpoint_required` both make Hermes refuse every compaction; the
+  session start and `hermes memory status` say so.
+- A head that keeps the tag `checkpoint-head` but carries no valid `latest_manifest_id`
+  (its metadata was replaced outside the plugin; an update replaces the whole object) is
+  logged and reported to the user, and the new chain starts without a parent (or the
+  process' cached last manifest) with its head published over the broken one (`lookup=
+  head-invalid`); the earlier chain's blocks stay. Before 0.12.0 it blocked every later
+  checkpoint of that root.
 - Log: `CTX checkpoint chain stored (… head= manifest= parent= parts= writes= sha= lookup= …)`.
 
 ### Fact selection and dedupe
@@ -382,8 +397,8 @@ serve several profiles without mixing their stores.
   use `sensitivity_default`; downgrades require server-side confirmation.
 - **Rate limit:** the server allows 100 writes per 60 s per key; a large checkpoint plus
   facts and mirror writes share that budget. The chain paces itself to `checkpoint_max_parts`
-  + 2 writes per window; required facts after it are not paced (a refused fact fails the
-  required checkpoint; the chain's parts stay for the next attempt).
+  + 2 writes per window; required facts after it are not paced (a refused fact is reported
+  and left for a later compaction; the checkpoint stands).
 
 ## Development
 

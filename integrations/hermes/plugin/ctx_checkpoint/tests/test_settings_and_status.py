@@ -811,6 +811,34 @@ def test_checkpoint_mode_off_warns_at_initialize_and_in_status(hermes_home, prob
     assert "checkpoint_mode" in _status_text(Provider().get_status_config({}))
 
 
+def test_checkpoint_chain_off_warns_at_initialize_and_in_status(hermes_home, probe, caplog):
+    # #289: with the chain off a required checkpoint refuses every compaction (facts are not a
+    # transcript checkpoint); the user learns it at session start and in the status, not first
+    # from a blocked compaction.
+    _mcp_home(hermes_home, compression={"checkpoint_required": True})
+    seen = []
+    provider = Provider(config={"checkpoint_chain": False, "memory": True}, dispatch=_ok_dispatch()[0])
+
+    with caplog.at_level(logging.WARNING):
+        provider.initialize("session-chain", platform="cli", hermes_home=str(hermes_home), warning_callback=seen.append)
+
+    messages = [r.getMessage() for r in caplog.records if "checkpoint_chain" in r.getMessage()]
+    assert len(messages) == 1
+    assert "memory.ctx_checkpoint" in messages[0] and "every compaction" in messages[0]
+    assert seen == messages
+    with pytest.raises(_MODULE.CtxCheckpointError, match="checkpoint_chain is false"):
+        provider.on_pre_compress([{"role": "assistant", "content": "x" * 80}], require_checkpoint=True)
+
+    _write_config(
+        hermes_home,
+        {
+            **_read_config(hermes_home),
+            "memory": {"provider": "ctx_checkpoint", "ctx_checkpoint": {"checkpoint_chain": False}},
+        },
+    )
+    assert "checkpoint_chain" in _status_text(Provider().get_status_config({}))
+
+
 def test_checkpoint_mode_off_from_ctx_json_names_the_file(hermes_home, caplog):
     (hermes_home / "ctx.json").write_text(json.dumps({"checkpoint_mode": "off"}), encoding="utf-8")
 
@@ -903,9 +931,10 @@ def test_a_skipped_best_effort_checkpoint_tells_the_user_why_once(hermes_home, c
         assert provider.on_pre_compress(TRANSCRIPT) == ""
 
     assert _outcome(hermes_home)["skipped"] == reason
-    assert len(seen) == 1
-    assert reason in seen[0]
-    assert "without saving its wording to ctx" in seen[0]
+    # checkpoint_chain: false is also named at session start (#289); the skip notice comes once.
+    skips = [message for message in seen if "without saving its wording to ctx" in message]
+    assert len(skips) == 1
+    assert reason in skips[0]
 
 
 def test_a_plugins_form_value_wins_over_an_engine_name_alias(hermes_home, linked_plugin):
@@ -931,6 +960,41 @@ def test_a_plugins_form_value_wins_over_an_engine_name_alias(hermes_home, linked
 
     assert provider._config["checkpoint_budget_s"] == 120.0
     assert provider._config["checkpoint_max_parts"] == 70
+
+
+@pytest.mark.parametrize(
+    "section",
+    [
+        {"sensitivity": "internal", "checkpoint_sensitivity": "personal"},
+        {"checkpoint_sensitivity": "personal", "sensitivity": "internal"},
+    ],
+    ids=["plugin-key-first", "engine-name-first"],
+)
+def test_an_engine_name_next_to_its_plugin_key_wins_in_either_order(hermes_home, section):
+    # #289: setup writes `sensitivity` (default internal); a `checkpoint_sensitivity` written next
+    # to it raised the level only when it came later in the file.
+    provider = Provider(config=section, dispatch=_ok_dispatch()[0])
+    provider.initialize("session-order", platform="cli", hermes_home=str(hermes_home))
+    assert provider._config["checkpoint_sensitivity"] == "personal"
+
+
+def test_a_memory_form_save_also_sets_the_engine_name_written_next_to_its_key(
+    hermes_home, linked_plugin, probe, monkeypatch
+):
+    _write_config(
+        hermes_home,
+        {
+            "mcp_servers": {"ctx": {"url": "https://ctx.example.test/mcp", "auth": "oauth"}},
+            "memory": {"ctx_checkpoint": {"checkpoint_sensitivity": "personal"}},
+        },
+    )
+    Provider().write_config_fields({"sensitivity": "credentials"}, str(hermes_home))
+
+    section = _read_config(hermes_home)["memory"]["ctx_checkpoint"]
+    assert section["sensitivity"] == "credentials" and section["checkpoint_sensitivity"] == "credentials"
+    provider = Provider(dispatch=_ok_dispatch()[0])
+    provider.initialize("session-form", platform="cli", hermes_home=str(hermes_home))
+    assert provider._config["checkpoint_sensitivity"] == "credentials"
 
 
 @pytest.mark.parametrize(

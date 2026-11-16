@@ -306,8 +306,11 @@ def test_ledger_persists_atomically_and_tolerates_corruption(tmp_path):
     assert stat.S_IMODE(os.stat(led.path).st_mode) == 0o600
     again = FactLedger(str(tmp_path), "root/with:odd chars")
     assert again.keys() == ["c1", "t1"]
-    again.discard(["c1"])
-    assert FactLedger(str(tmp_path), "root/with:odd chars").keys() == ["t1"]
+    again.release(["c1"])  # its store failed: no longer claimed, kept as pending (#302)
+    reread = FactLedger(str(tmp_path), "root/with:odd chars")
+    assert reread.keys() == ["t1"] and reread.pending() == ["c1"]
+    reread.add(["c1"])  # claimed again by a later compaction
+    assert FactLedger(str(tmp_path), "root/with:odd chars").pending() == []
     assert FactLedger(str(tmp_path), "other-root").keys() == []
     led.path.write_text("{not json", encoding="utf-8")
     assert FactLedger(str(tmp_path), "root/with:odd chars").keys() == []
@@ -414,7 +417,9 @@ def test_failed_store_releases_claim_for_retry(make_provider):
 
 
 def test_required_checkpoint_records_and_dedupes(make_provider):
-    p, client = make_provider(config={"checkpoint_chain": False, "facts_from_user": False})
+    # The chain runs as well (a required checkpoint refuses a disabled chain, #289); its writes
+    # are counted apart (FakeClient.chain_calls).
+    p, client = make_provider(config={"facts_from_user": False})
     msgs = _compactions()[0]
     r1 = p.on_pre_compress(msgs, require_checkpoint=True)
     n1 = len(_fact_titles(client))

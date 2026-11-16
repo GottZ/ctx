@@ -37,7 +37,7 @@ from .client import REDACTED, CtxApiError, redact_secret, response_code, store_a
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.11.0"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
+PLUGIN_VERSION = "0.12.0"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
 UPSTREAM_REF = "GottZ/ctx integrations/hermes/plugin/ctx_checkpoint 0.4.3 @ 38fdb74 (MPL-2.0)"
 
 CATEGORY_CHECKPOINT = "compaction-checkpoints"
@@ -446,6 +446,45 @@ def redact_text(text: str, secret: str | Iterable[str] = ()) -> str:
     return _redact_checkpoint_secrets(_host_redact(text))
 
 
+# What an error text says when its redaction failed (it is withheld, never passed on raw).
+ERROR_WITHHELD = "(details withheld: redaction failed)"
+
+
+def _mask_cut_secret(text: str, value: str) -> str:
+    """``text`` with every leading piece of ``value`` of at least :data:`MIN_BOUND_SECRET_CHARS`
+    characters masked, wherever it stands: a client shortened an answer inside the key and may
+    have put text after the cut (Hermes closes a shortened HTTP body with ``)``)."""
+    head = value[:MIN_BOUND_SECRET_CHARS]
+    if len(head) < MIN_BOUND_SECRET_CHARS:
+        return text
+    pieces, start = [], 0
+    found = text.find(head)
+    while found != -1:
+        end = found + len(head)
+        while end < len(text) and end - found < len(value) and text[end] == value[end - found]:
+            end += 1
+        pieces += [text[start:found], REDACTED]
+        start = end
+        found = text.find(head, start)
+    pieces.append(text[start:])
+    return "".join(pieces)
+
+
+def redact_error_text(text: Any, secret: str | Iterable[str] = ()) -> str:
+    """An error text that can carry foreign text (a server answer, a dispatch error), redacted
+    before it is raised or logged (#301): :func:`redact_text` with the bound keys, and a piece of a
+    bound key that a client cut off masked as well. Cut it to length only after this. Never
+    raises; on a redaction failure the text is withheld (:data:`ERROR_WITHHELD`)."""
+    try:
+        text = "" if text is None else str(text)
+        values = bound_secret_values(secret)
+        for value in values:
+            text = _mask_cut_secret(text, value)
+        return redact_text(text, values)
+    except Exception:
+        return ERROR_WITHHELD
+
+
 def _is_synthetic_handoff(message: dict[str, Any], raw: str) -> bool:
     if message.get("_compressed_summary"):
         return True
@@ -685,7 +724,7 @@ class ChainReceipt:
     writes: int = 0
     duration_s: float = 0.0
     rate_limited: int = 0
-    lookup: str = ""  # server | cache | legacy | none
+    lookup: str = ""  # server | cache | legacy | head-invalid | none
     # P4: cumulative fact dedupe keys read from the previous head (server side)
     previous_fact_hashes: list[str] = field(default_factory=list)
     # 0.10.0: parts ctx confirmed as already stored (same title, identical content; no write),
@@ -813,6 +852,9 @@ class _ChainRun:
     # other writers hold frees a whole window after their writes, which a budget of one
     # window can never reach.
     granted_refusal_window: bool = False
+    # A head of the root that carries the head tag but no valid ``latest_manifest_id`` (#289):
+    # its id; the new head is published over it.
+    invalid_head: str = ""
 
 
 @dataclass
@@ -843,6 +885,12 @@ class ChainWriter:
     # The bound ctx key(s), redacted from the transcript parts; never part of the repr.
     secret: str | tuple[str, ...] = field(default="", repr=False)
     _tool_evidence_warned: bool = field(default=False, init=False)
+
+    def _notify(self, message: str) -> None:
+        try:
+            self.notify(message)
+        except Exception:
+            logger.debug("ctx checkpoint: notice failed", exc_info=True)
 
     def _window_writes(self) -> int:
         """Writes of one chain inside one rate window: ``max_parts`` parts plus manifest and head."""
@@ -912,12 +960,16 @@ class ChainWriter:
                         )
                         self.sleep(resume - now)
                         continue
+                    # ``from None``: the original carries the server's text unredacted (#301).
                     raise CtxCheckpointError(
                         f"ctx checkpoint rate-limited during {what} (budget {budget_s:.0f}s; "
                         f"{'refused twice in a row' if refusals >= MAX_RATE_REFUSALS else 'no time left to wait'})"
-                    ) from exc
-                code = f" [{exc.code}]" if exc.code else ""
-                raise CtxCheckpointError(f"ctx checkpoint {what} failed{code}: {str(exc)[:200]}") from exc
+                    ) from None
+                # The code is server text as well (a code outside the closed vocabulary keeps
+                # whatever the server put there): the same redaction as the detail.
+                code = f" [{redact_error_text(exc.code, self.secret)}]" if exc.code else ""
+                detail = redact_error_text(exc, self.secret)[:200]
+                raise CtxCheckpointError(f"ctx checkpoint {what} failed{code}: {detail}") from None
             except CtxCheckpointError:
                 raise
             except Exception as exc:
@@ -925,8 +977,8 @@ class ChainWriter:
             if not isinstance(data, dict):
                 raise CtxCheckpointError(f"ctx checkpoint {what} returned a non-object response")
             if data.get("success") is False:
-                code = response_code(data)
-                detail = str(data.get("error") or "unknown")[:200]
+                code = redact_error_text(response_code(data), self.secret)
+                detail = redact_error_text(data.get("error") or "unknown", self.secret)[:200]
                 raise CtxCheckpointError(f"ctx checkpoint {what} rejected{f' [{code}]' if code else ''}: {detail}")
             return data
 
@@ -971,13 +1023,18 @@ class ChainWriter:
         run: _ChainRun,
         *,
         root_session_id: str | None = None,
+        record_invalid: bool = True,
     ) -> tuple[str | None, list[str], str]:
         """``(latest_manifest_id, fact_hashes, checkpoint_id)`` of the existing head (upstream
         ``_load_previous_manifest_id`` plus the P4 dedupe keys and, 0.10.0, the checkpoint id the
         head was published for, from the same read).
 
-        Searches the head by title and reads it. ``(None, [], "")`` = no head yet; a head
-        without a valid ``latest_manifest_id`` raises ``CtxCheckpointError``.
+        Searches the head by title and reads it. ``(None, [], "")`` = no head yet. A head without a
+        valid ``latest_manifest_id`` (its metadata replaced outside the plugin: an update replaces
+        the whole object) is no usable head either (#289; it raised before and blocked every later
+        checkpoint of the root): it is logged, ``run.invalid_head`` names it, and the new head is
+        published over it. Its dedupe keys are not taken over; the blocks of the earlier chain stay.
+        ``record_invalid=False`` (the 0.6.0 title, whose head is not replaced): only logged.
 
         Narrowed to heads by their tag (every head carries ``checkpoint-head``). Parts and
         manifests share the ``checkpoint`` type, and the MCP transport drops ``types``
@@ -1007,7 +1064,16 @@ class ChainWriter:
             return None, [], ""
         manifest_id = _find_value(head, "latest_manifest_id")
         if not manifest_id or not _UUID_RE.fullmatch(manifest_id):
-            raise CtxCheckpointError("ctx checkpoint head is missing a valid latest_manifest_id")
+            logger.warning(
+                "ctx checkpoint head %s (%s) carries no valid latest_manifest_id; a new chain starts%s "
+                "(the blocks of the earlier chain stay in ctx)",
+                head_id,
+                head_title,
+                " and its head is published over it" if record_invalid else "",
+            )
+            if record_invalid:
+                run.invalid_head = head_id
+            return None, [], ""
         return manifest_id, _find_str_list(head, FACT_HASHES_KEY), _find_value(head, "checkpoint_id") or ""
 
     def _parent_of_own_manifest(self, manifest_id: str, digest: str, run: _ChainRun) -> str | None:
@@ -1110,10 +1176,7 @@ class ChainWriter:
                 f"about {minutes} minute{'s' if minutes != 1 else ''}; the compaction waits for it."
             )
             logger.info("%s", message)
-            try:
-                self.notify(message)
-            except Exception:
-                logger.debug("ctx checkpoint: pacing notice failed", exc_info=True)
+            self._notify(message)
 
         now = datetime.now(timezone.utc).isoformat()
         short_root = _short_root(root)
@@ -1122,7 +1185,7 @@ class ChainWriter:
         run = _ChainRun(deadline=deadline, budget_s=float(budget_s) + paced_s, window_writes=window_writes)
         checkpoint_id = checkpoint_id_for(root, digest)
         previous_manifest_id, previous_fact_hashes, head_checkpoint_id = self.load_previous_head(head_title, run)
-        lookup = "server" if previous_manifest_id else "none"
+        lookup = "server" if previous_manifest_id else ("head-invalid" if run.invalid_head else "none")
         # The head already names this transcript's checkpoint: its manifest's own parent is the
         # parent (possibly none) — neither the process cache nor the 0.6.0 title may replace it.
         own_checkpoint = bool(previous_manifest_id) and head_checkpoint_id == checkpoint_id
@@ -1136,16 +1199,16 @@ class ChainWriter:
         ):
             # search miss (ranking/backfill) but this process wrote the chain → keep it linked
             previous_manifest_id = cached_manifest_id
-            lookup = "cache"
+            lookup = "head-invalid" if run.invalid_head else "cache"
         legacy_title = legacy_head_title_for(root)
-        if not own_checkpoint and not previous_manifest_id and legacy_title != head_title:
+        if not own_checkpoint and not previous_manifest_id and not run.invalid_head and legacy_title != head_title:
             # 0.6.1 changed this root's head title (an id over 48 characters such as Hermes'
             # local-<sha256>, or one that sanitizing changes): continue the chain a 0.6.0
             # writer left under the old title. One more search, only while no head exists
             # under the new title; the new head is published under the new title and the
             # old head stays as it is.
             previous_manifest_id, previous_fact_hashes, _legacy_checkpoint_id = self.load_previous_head(
-                legacy_title, run, root_session_id=root
+                legacy_title, run, root_session_id=root, record_invalid=False
             )
             if previous_manifest_id:
                 lookup = "legacy"
@@ -1249,6 +1312,14 @@ class ChainWriter:
             },
             tags=HEAD_TAGS,
         )
+        if run.invalid_head:
+            linked = " linked to the last checkpoint of this process" if previous_manifest_id else ""
+            self._notify(
+                f"ctx checkpoint: the head {run.invalid_head} of this conversation carried no valid "
+                "latest_manifest_id (its metadata was changed outside ctx_checkpoint). The checkpoint was "
+                f"saved as a new chain{linked} and its head {head_id} replaces the broken one; the earlier "
+                "checkpoint blocks stay in ctx."
+            )
         return ChainReceipt(
             head_id=head_id,
             manifest_id=manifest_id,

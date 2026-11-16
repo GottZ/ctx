@@ -411,15 +411,28 @@ def _write_setup_config(settings: dict[str, Any], *, activate: bool, checkpoint_
     else:
         raise ValueError(f"ctx server URL is required: there is no MCP server entry named {name!r} yet")
 
-    memory: dict[str, Any] = {
-        "ctx_checkpoint": {key: settings[key] for key in _SETUP_STORED_KEYS},
-    }
+    memory_section = config.get("memory")
+    section = memory_section.get("ctx_checkpoint") if isinstance(memory_section, dict) else None
+    memory: dict[str, Any] = {"ctx_checkpoint": _stored_section(settings, section)}
     if activate:
         memory["provider"] = "ctx_checkpoint"
     changes: dict[str, Any] = {"mcp_servers": {name: entry}, "memory": memory}
     if checkpoint_required is not None:
         changes["compression"] = {"checkpoint_required": bool(checkpoint_required)}
     save_config(changes, merge_existing=True)
+
+
+def _stored_section(settings: dict[str, Any], section: Any) -> dict[str, Any]:
+    """The keys setup writes into ``memory.ctx_checkpoint``. An engine name written next to one of
+    them wins over it (``overlay_from_umbrella``), so it gets the form's value too and the save
+    takes effect (#289)."""
+    stored = {key: settings[key] for key in _SETUP_STORED_KEYS}
+    if isinstance(section, dict):
+        for key in _SETUP_STORED_KEYS:
+            alias = UMBRELLA_KEY_MAP.get(key)
+            if alias and section.get(alias) is not None:
+                stored[alias] = settings[key]
+    return stored
 
 
 def _candidate_entry(entry: dict[str, Any], ctx_url: str, mode: str, api_key: str) -> dict[str, Any]:
@@ -741,10 +754,10 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         self._last_warning = ""
         _warn_if_hygiene_preempts()
         super().initialize(session_id, **kwargs)
-        warning = _st.checkpoint_mode_warning(
+        warnings = _st.setting_warnings(
             self._config, self._section, self._hermes_home, _st.checkpoint_required(_effective_config())
         )
-        if warning:
+        for warning in warnings:
             if (self._hermes_home, warning) not in _mode_warnings_logged:
                 _mode_warnings_logged.add((self._hermes_home, warning))
                 logger.warning("%s", warning)
@@ -1046,7 +1059,7 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         if _st.insecure_http(target):
             logger.warning("ctx_checkpoint: %s", _st.http_warning(target))
         _write_setup_config(settings, activate=False, checkpoint_required=switch)
-        self._section.update(_umbrella_settings({**self._section, **{k: settings[k] for k in _SETUP_STORED_KEYS}}))
+        self._section.update(_umbrella_settings({**self._section, **_stored_section(settings, self._section)}))
 
     def post_setup(self, hermes_home: str, config: dict[str, Any]) -> None:
         """``hermes memory setup ctx_checkpoint``: prompt, test the connection, offer the
@@ -1098,7 +1111,7 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
             else:
                 print("  Nothing was changed.\n")
             return
-        self._section.update(_umbrella_settings({**self._section, **{k: settings[k] for k in _SETUP_STORED_KEYS}}))
+        self._section.update(_umbrella_settings({**self._section, **_stored_section(settings, self._section)}))
         required = _st.checkpoint_required(_effective_config())
         print("\n  Memory provider: ctx_checkpoint")
         print(f"  ctx MCP server entry: mcp_servers.{name}")

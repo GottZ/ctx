@@ -792,6 +792,129 @@ def test_required_facts_after_a_paced_chain_share_its_extended_deadline(factory)
     assert "ctx checkpoint head:" in frame and "fact block(s)" in frame
 
 
+_FACT = "Der Proxy auf INFRA-WWW terminiert TLS fuer alle Dienste mit Traefik."
+_FACT_2 = "Die Datenbank auf INFRA-DB laeuft mit PostgreSQL 18 und pgvector fuer alle Vektorindizes."
+
+
+def _fact_stores(calls):
+    return [a for a in _stores(calls) if a["category"] != CHAIN_CAT]
+
+
+def test_a_refused_fact_after_a_durable_chain_keeps_the_required_checkpoint(factory, caplog):
+    # #289: the chain is the checkpoint; a refused fact store after it is reported, it does not
+    # fail the compaction (each retry would meet the same refusal), and its claim is released.
+    p, c = factory("sess-fact-refused", config={"auto_compress_extract": True}, agent_context="primary")
+
+    def refuse_facts(args):
+        if args["category"] != CHAIN_CAT:
+            raise CtxApiError("HTTP 429 [rate_limit]: max 100 writes", status=429, code="rate_limit")
+
+    c.store_hook = refuse_facts
+    with caplog.at_level(logging.WARNING):
+        frame = p.on_pre_compress([{"role": "assistant", "content": _FACT}], require_checkpoint=True)
+    assert "ctx checkpoint head:" in frame
+    assert "0 of 1" in frame and "not stored" in frame
+    assert len(_fact_stores(c.calls)) == 1
+    assert p._fact_ledger().keys() == []
+    assert any("not stored" in r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+
+
+def test_required_fact_stores_carry_the_remaining_budget_as_their_timeout(factory):
+    p, c = factory("sess-fact-timeout", config={"auto_compress_extract": True}, agent_context="primary")
+    p._config["checkpoint_budget_s"] = 30.0
+    clock = _on_fake_clock(p)
+
+    def chain_takes_27s(args):
+        if args["category"] == CHAIN_CAT and args["title"].startswith("Compaction checkpoint head"):
+            clock.now += 27.0
+
+    c.store_hook = chain_takes_27s
+    frame = p.on_pre_compress([{"role": "assistant", "content": _FACT}], require_checkpoint=True)
+    facts = _fact_stores(c.calls)
+    assert "fact block(s)" in frame and len(facts) == 1
+    # 3 s of the 30 s budget are left, less than api_timeout (10 s): the store gets those 3 s.
+    assert facts[0]["timeout"] == pytest.approx(3.0)
+
+
+def test_a_refused_second_fact_keeps_the_first_and_releases_only_its_own_claim(factory):
+    p, c = factory("sess-fact-second", config={"auto_compress_extract": True}, agent_context="primary")
+    seen = {"facts": 0}
+
+    def refuse_second_fact(args):
+        if args["category"] != CHAIN_CAT:
+            seen["facts"] += 1
+            if seen["facts"] == 2:
+                raise CtxApiError("HTTP 403 [guard_rejected]: refused", status=403, code="guard_rejected")
+
+    c.store_hook = refuse_second_fact
+    frame = p.on_pre_compress(
+        [
+            {"role": "assistant", "content": _FACT},
+            {"role": "user", "content": "weiter bitte mit dem naechsten Punkt"},
+            {"role": "assistant", "content": _FACT_2},
+        ],
+        require_checkpoint=True,
+    )
+    assert "ctx checkpoint head:" in frame
+    assert "stored 1 fact block(s)" in frame and "1 of 2" in frame and "not stored" in frame
+    assert len(p._fact_ledger().keys()) == 2  # the stored fact keeps its two keys
+
+
+def test_required_facts_past_the_deadline_are_left_and_the_chain_receipt_stands(factory):
+    p, c = factory("sess-fact-deadline", config={"auto_compress_extract": True}, agent_context="primary")
+    p._config["checkpoint_budget_s"] = 30.0
+    clock = _on_fake_clock(p)
+
+    def slow_fact(args):
+        if args["category"] != CHAIN_CAT:
+            clock.now += 31.0
+
+    c.store_hook = slow_fact
+    frame = p.on_pre_compress(
+        [
+            {"role": "assistant", "content": _FACT},
+            {"role": "user", "content": "weiter bitte mit dem naechsten Punkt"},
+            {"role": "assistant", "content": _FACT_2},
+        ],
+        require_checkpoint=True,
+    )
+    assert "ctx checkpoint head:" in frame
+    assert "1 of 2" in frame and "not stored" in frame
+    assert len(_fact_stores(c.calls)) == 1
+    assert len(p._fact_ledger().keys()) == 2  # the stored fact keeps its two keys, the left one is released
+
+
+@pytest.mark.parametrize(
+    "bad_metadata", [{"source": "hand-edit"}, {"latest_manifest_id": "not-a-uuid"}], ids=["no-id", "not-a-uuid"]
+)
+@pytest.mark.parametrize("cached", [False, True], ids=["new-process", "same-process"])
+def test_a_tagged_head_without_a_valid_manifest_is_replaced_and_reported(factory, caplog, bad_metadata, cached):
+    # #289: a head that keeps the tag but lost latest_manifest_id (a metadata update replaces the
+    # whole object) blocked every later checkpoint of its root. The writer now treats it as no
+    # usable head, publishes the new head over it, and says so.
+    p, c = factory("sess-badhead", agent_context="primary")
+    c.stateful = True
+    p.on_pre_compress([{"role": "user", "content": "erste Kompaktierung"}], require_checkpoint=True)
+    first_manifest = p._last_chain_receipt.manifest_id
+    head_title = next(t for t in c.blocks if t.startswith("Compaction checkpoint head"))
+    head_id = c.blocks[head_title]["id"]
+    c.blocks[head_title]["metadata"] = dict(bad_metadata)
+    if not cached:
+        p._last_manifest_by_root.clear()
+    notices = []
+    p._chain().notify = notices.append
+    with caplog.at_level(logging.WARNING):
+        frame = p.on_pre_compress([{"role": "user", "content": "zweite Kompaktierung"}], require_checkpoint=True)
+    receipt = p._last_chain_receipt
+    assert "ctx checkpoint head:" in frame
+    assert receipt.head_id == head_id and receipt.lookup == "head-invalid"
+    assert c.blocks[head_title]["metadata"]["latest_manifest_id"] == receipt.manifest_id
+    assert receipt.parent_manifest_id == (first_manifest if cached else None)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(head_id in m and "latest_manifest_id" in m for m in warnings)
+    assert len(notices) == 1 and head_id in notices[0]
+
+
 def test_permanent_rejection_is_not_retried(factory):
     p, c = factory("sess-rej", agent_context="primary")
 
@@ -1093,6 +1216,24 @@ def test_head_written_before_0_6_1_continues_its_chain(factory):
     assert _stores(c.calls)[-2]["metadata"]["parent_manifest_id"] == receipt.manifest_id
 
 
+def test_an_invalid_legacy_head_starts_a_new_chain_and_stays_as_it_is(factory, caplog):
+    # #289: under the 0.6.0 title the new head is not published over the old one, so the
+    # invalid head is only logged — no notice that it was replaced.
+    p, c = factory(LOCAL_ROOT, agent_context="primary")
+    legacy_title = _seed_legacy_head(c, LOCAL_ROOT)
+    c.blocks[legacy_title]["metadata"]["latest_manifest_id"] = "not-a-uuid"
+    notices = []
+    p._chain().notify = notices.append
+    with caplog.at_level(logging.WARNING):
+        frame = p.on_pre_compress([{"role": "user", "content": "erste Kompaktierung nach dem Upgrade"}])
+    receipt = p._last_chain_receipt
+    assert "ctx checkpoint head:" in frame
+    assert receipt.lookup == "none" and receipt.parent_manifest_id is None
+    assert receipt.head_id != LEGACY_HEAD_ID and notices == []
+    assert c.blocks[legacy_title]["metadata"]["latest_manifest_id"] == "not-a-uuid"
+    assert any(LEGACY_HEAD_ID in r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+
+
 def test_legacy_head_of_another_root_is_not_continued(factory):
     """team/alice:1 and team:alice/1 shared the 0.6.0 head ``team_alice_1``; the fallback
     continues it only for the root its metadata names."""
@@ -1126,3 +1267,68 @@ def test_ordinary_ids_keep_their_title_and_search_once(factory):
 
         assert _searches(c.calls) == [f"Compaction checkpoint head {root}"], root
         assert p._last_chain_receipt.lookup == "none"
+
+
+# -- bot review round 1 of #302 ---------------------------------------------------------------
+
+_BOUND_KEY = "test-key-not-real"  # CTX_KEY of the factory: the REST key this provider binds
+
+
+@pytest.mark.parametrize("form", ["raised", "envelope"])
+@pytest.mark.parametrize("target", ["chain", "facts"])
+def test_a_rejection_code_that_carries_a_bound_key_is_redacted(factory, caplog, target, form):
+    p, c = factory("sess-code", config={"auto_compress_extract": True}, agent_context="primary")
+    code = f"denied-for-{_BOUND_KEY}"
+    real_store = c.store
+
+    def store(category, title, content, sensitivity=None, tags=None, **k):
+        if (category == CHAIN_CAT) == (target == "chain"):
+            if form == "raised":
+                raise CtxApiError("HTTP 403: refused", status=403, code=code)
+            return {"success": False, "error": "refused", "code": code}
+        return real_store(category, title, content, sensitivity, tags, **k)
+
+    c.store = store
+    with caplog.at_level(logging.DEBUG):
+        if target == "chain":
+            with pytest.raises(CtxCheckpointError) as raised:
+                p.on_pre_compress([{"role": "assistant", "content": _FACT}], require_checkpoint=True)
+            assert "[denied-for-" in str(raised.value) and _BOUND_KEY not in str(raised.value)
+        else:
+            frame = p.on_pre_compress([{"role": "assistant", "content": _FACT}], require_checkpoint=True)
+            assert "not stored" in frame
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "denied-for-" in logged and _BOUND_KEY not in logged
+
+
+@pytest.mark.parametrize("required", [True, False], ids=["required", "best-effort"])
+def test_a_fact_that_was_not_stored_is_stored_by_a_later_compaction(factory, required):
+    # The head names the dedupe keys of the facts selected for it before they are stored; a fact
+    # that then failed must not count as stored when a later compaction reads that head.
+    p, c = factory("sess-fact-retry", config={"auto_compress_extract": True}, agent_context="primary")
+    c.stateful = True
+    seen = {"facts": 0}
+
+    def refuse_first_fact(args):
+        if args["category"] != CHAIN_CAT:
+            seen["facts"] += 1
+            if seen["facts"] == 1:
+                raise CtxApiError("HTTP 403 [guard_rejected]: refused", status=403, code="guard_rejected")
+
+    c.store_hook = refuse_first_fact
+    messages = [{"role": "assistant", "content": _FACT}]
+    for _ in range(2):
+        p.on_pre_compress(list(messages), require_checkpoint=required)
+        if p._write_thread is not None:
+            p._write_thread.join(timeout=5.0)
+    p._last_manifest_by_root.clear()
+    facts = [a["content"] for a in _fact_stores(c.calls)]
+    assert facts == [_FACT, _FACT], "the fact refused at the first compaction is stored at the second"
+    assert set(fact_keys_of(_FACT)) <= set(p._fact_ledger().keys())
+    assert p._fact_ledger().pending() == []
+
+
+def fact_keys_of(text):
+    from ctx_plugin.config import fact_keys
+
+    return fact_keys(text)

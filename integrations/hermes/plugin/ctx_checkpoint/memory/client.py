@@ -84,6 +84,12 @@ class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_RefuseRedirect)
 
 
+# The wait before the one retry of a 429 (per-key write rate limit). Clock and sleep are seams.
+RATE_RETRY_WAIT_S = 1.0
+_monotonic = time.monotonic
+_sleep = time.sleep
+
+
 def _urlopen(req: urllib.request.Request, *, timeout: float) -> Any:
     """``urllib.request.urlopen`` without following redirects (see ``_RefuseRedirect``)."""
     return _OPENER.open(req, timeout=timeout)
@@ -223,6 +229,9 @@ class CtxClient:
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         req = urllib.request.Request(url, data=data, headers=headers, method=method)  # noqa: S310 — http(s) only, see __init__
         t = timeout if timeout is not None else self._timeout
+        # The timeout bounds the whole request: the one 429 retry and the wait before it included,
+        # so a caller's deadline (a checkpoint passes the time it leaves) also holds for the retry.
+        end = _monotonic() + t
         last_error: CtxApiError | None = None
 
         for attempt in (0, 1):  # one retry on 429 (per-key write rate limit)
@@ -273,8 +282,9 @@ class CtxClient:
                 error = CtxApiError(message, status=exc.code, code=code)
                 # Retry once only on a transient 429 (per-key write rate limit);
                 # permanent rejection codes are never repeated.
-                if exc.code == 429 and not error.permanent and attempt == 0:
-                    time.sleep(1.0)
+                if exc.code == 429 and not error.permanent and attempt == 0 and _monotonic() + RATE_RETRY_WAIT_S < end:
+                    _sleep(RATE_RETRY_WAIT_S)
+                    t = end - _monotonic()
                     last_error = error
                     continue
                 # ``from None``: the original HTTPError/URLError text is unredacted and would

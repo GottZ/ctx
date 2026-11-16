@@ -6,6 +6,63 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.12.0] — 2026-11-16
+
+Gate and setting edge cases with the memory features on (GottZ/ctx#289).
+
+- **`checkpoint_chain: false` under a required checkpoint.** The required path passed on facts
+  alone: with no fact a receipt without any write, with facts at most five `learnings` blocks,
+  and no word of the conversation in ctx. Facts are not a transcript checkpoint: with
+  `require_checkpoint` and the chain switched off, `on_pre_compress` raises
+  `CtxCheckpointError` (`CHAIN_OFF_REQUIRED`), so Hermes keeps the uncompressed transcript.
+  Best effort is unchanged (facts are stored, the skip notice names `checkpoint_chain: false`).
+  `status.checkpoint_chain_warning` (next to `checkpoint_mode_warning`, both through
+  `setting_warnings`) names the setting and its source at session start and in
+  `hermes memory status`.
+- **Facts after a stored chain.** A refused fact store failed the required checkpoint although
+  the chain was durable, so a deterministic refusal blocked every later compaction; the fact
+  stores ran without a timeout (over MCP Hermes' tool timeout, 300 s), the deadline was checked
+  only before each fact. Each required fact store now carries `max(0.5, min(api_timeout, time
+  left))`; after a stored chain a refused or late fact is a WARNING, the claims of the facts
+  not stored are released and the receipt says `k of n stored`. Without a stored chain a fact
+  failure still raises. Since 0.10.0 a retry meets the chain's own titles, so a repeated
+  attempt does not write the parts again; the required facts are still not paced (#299).
+- **A head without a valid `latest_manifest_id`.** A head that keeps the tag `checkpoint-head`
+  but whose metadata lost `latest_manifest_id` (an update replaces the whole object) raised
+  before any write and blocked every later checkpoint of its root until it was repaired by
+  hand. `load_previous_head` now logs it and records it on the run (`invalid_head`): the new
+  chain starts without a parent (or with the process' cached last manifest), the head is
+  published over the broken one, `lookup=head-invalid`, and the user gets a notice naming
+  both heads. Its dedupe keys are not taken over; the earlier chain's blocks stay. An invalid
+  head under the 0.6.0 title is only logged (the new head goes under the current title). A block
+  with the head title but without the tag is still not recognized as a head: the new head
+  replaces it and the chain starts without a parent (unchanged; the MCP store answer does not
+  say whether it replaced a block).
+- **Engine names next to plugin keys.** `overlay_from_umbrella` mapped the section in file
+  order, so `checkpoint_sensitivity: personal` next to the `sensitivity: internal` that setup
+  writes counted only when it came later. An engine name now wins over its plugin key in either
+  order, and the memory forms write their value to an engine name present next to the key, so
+  a save takes effect.
+- **A fact that was not stored is stored by a later compaction.** The head names the dedupe keys
+  of the facts selected for it (`fact_hashes`) before they are stored, so after a failed store a
+  later compaction read those keys from the head and dropped the fact for good (in best effort
+  since P4). The fact ledger now keeps the keys of a failed store as `pending`
+  (`ctx_state/<root>.json`); the head does not count them as stored, and the next compaction of
+  that root on this profile stores the fact. Another host reading the head still skips it.
+- **On REST a call timeout bounds the 429 retry.** `CtxClient` retried a 429 once after 1 s with
+  the full timeout again, so a required fact store or a chain write could start its retry after
+  the checkpoint deadline. The timeout now bounds the whole request; the retry is made only while
+  the wait fits and gets the time that is left. A rejection code is redacted like the error text.
+- **Error texts are redacted before they are raised or logged (GottZ/ctx#301).** A failed chain
+  write put the server's or the MCP dispatch's error text into the `CtxCheckpointError` it raised
+  (and into its `__cause__`) and into the WARNING line without redaction; the outcome file and the
+  user notice were already masked. `checkpoint.redact_error_text` (bound keys, a piece of a bound
+  key that a client cut off, then the checkpoint redaction; withheld on a redaction failure) is
+  the one function for it: the chain writer builds its errors from it and raises them
+  `from None`, the provider logs chain, fact, mirror and digest store failures through it
+  (`_error_text`), and `status.redact_error` uses it as well. The cause hints of the user notice
+  read the redacted text and still apply.
+
 ## [ctx_checkpoint 0.11.0] — 2026-11-15
 
 The redaction removes the ctx key on the MCP transport and more secret forms, and keeps code

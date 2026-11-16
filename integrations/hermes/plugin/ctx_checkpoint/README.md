@@ -114,7 +114,10 @@ engine's own for other engine keys), the legacy `$HERMES_HOME/ctx.json` (for exa
 Settings → Plugins form `plugins.entries.ctx_checkpoint.settings` (other keys there
 are ignored). So a value saved in that form wins over the same key written by hand
 under `memory.ctx_checkpoint`, also under its engine name (`checkpoint_budget_s`,
-`checkpoint_max_parts`); the form itself shows only its own values. Every
+`checkpoint_max_parts`); the form itself shows only its own values. Within
+`memory.ctx_checkpoint` an engine name (`checkpoint_sensitivity`) wins over the plugin
+key next to it (`sensitivity`), whichever comes first, and the memory form writes its
+value to both. Every
 value is clamped to its range, whatever the source. The memory form shows a value
 that only `ctx.json` sets, and saving the form writes it to `memory.ctx_checkpoint`
 unchanged. `budget_s` and `max_parts` are
@@ -165,6 +168,14 @@ connects again.
 tools next to the `mcp__ctx__*` tools of the same server entry. Nothing breaks;
 the plugin's tools add provenance tags and the untrusted labelling, so prefer them
 for explicit stores, or disable the MCP entry's tools if you want a single surface.
+With `memory: false` ("checkpoints only") the plugin adds no tools, but the server
+entry still gives the model every tool of the ctx server (`mcp__ctx__*`), with
+what the key may read and write; the checkpoint pointer names `get` and `search`
+of that entry as the way back to the saved turns. Setup writes the entry without
+a tool filter and never narrows an existing one. To narrow it, set
+`mcp_servers.<name>.tools.include` yourself: Hermes registers only the listed
+tools, for the model and for the plugin alike, so the list must keep `search`,
+`get` and `store` (the checkpoint) and, with the memory features, `query`.
 
 ## Long contexts (1M)
 
@@ -381,7 +392,9 @@ entry did not connect when Hermes started (wrong key, server down, URL wrong).
   own pass still rewrites some code lines
   (`api_key: Optional[str] = None` → `api_key: *** = None`), and its strict mode
   masks every URL parameter named `key`, `code`, `session` or `auth`. A failing
-  redactor skips the write.
+  redactor skips the write. The error text of a failed store (a server answer or an MCP
+  dispatch error can repeat what it was sent) goes through the same passes before the
+  plugin raises or logs it; a failing redactor withholds it.
 - **Reads:** its own settings in the Hermes config (`memory.ctx_checkpoint` and
   `plugins.entries.ctx_checkpoint.settings`), the named `mcp_servers` entry,
   `compression.threshold` (for the warning above) and

@@ -189,8 +189,20 @@ def test_required_checkpoint_in_subagent_writes_the_chain_and_gates_only_facts(p
 
 def test_required_checkpoint_raises_when_chain_disabled_and_writes_gated(provider_factory):
     p, _ = provider_factory({"checkpoint_chain": False}, agent_context="subagent")
-    with pytest.raises(CtxCheckpointError, match="write-gated"):
+    with pytest.raises(CtxCheckpointError, match="checkpoint_chain is false"):
         _manager(p).on_pre_compress(RAW, evidence_messages=EVIDENCE, require_checkpoint=True)
+
+
+@pytest.mark.parametrize(
+    "evidence", [EVIDENCE, [{"role": "user", "content": "ok"}]], ids=["with-a-fact", "without-facts"]
+)
+def test_required_checkpoint_refuses_a_disabled_chain_although_facts_are_on(provider_factory, evidence):
+    # Facts are not a transcript checkpoint: without the chain no word of the conversation is in
+    # ctx, so the required checkpoint must not pass on facts (or on nothing) alone (#289).
+    p, client = provider_factory({"checkpoint_chain": False, "facts_from_user": False})
+    with pytest.raises(CtxCheckpointError, match="checkpoint_chain is false"):
+        _manager(p).on_pre_compress(RAW, evidence_messages=evidence, require_checkpoint=True)
+    assert client.calls == [] and client.chain_calls == []
 
 
 # -- require_checkpoint=False stays async best effort ---------------------------------------

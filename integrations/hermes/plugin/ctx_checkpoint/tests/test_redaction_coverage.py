@@ -617,3 +617,96 @@ def test_rules_stay_linear_on_pathological_input(unit):
     small, large = timed(10_000), timed(40_000)
     # Four times the input: linear takes about 4x, quadratic 16x; 8 separates them with room for noise.
     assert large < max(small, 0.005) * 8, f"{unit!r}: {small:.4f}s -> {large:.4f}s"
+
+
+# -- error texts of the chain, the facts, the mirror and the digests (#301) ----------------
+
+
+def _texts_of(exc):
+    """The text of an exception and of every exception chained to it."""
+    seen = []
+    while exc is not None and exc not in seen:
+        seen.append(exc)
+        exc = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
+    return " | ".join(f"{type(e).__name__}: {e}" for e in seen)
+
+
+def _log_text(caplog):
+    return "\n".join(f"{r.getMessage()} {r.exc_text or ''}" for r in caplog.records)
+
+
+def _key_echo_home(home, *, memory=False):
+    entry = {"url": "https://ctx.example.test/mcp", "headers": {"Authorization": "Bearer ${K}"}}
+    _write(
+        home,
+        {
+            "mcp_servers": {"ctx": entry},
+            "memory": {"provider": "ctx_checkpoint", "ctx_checkpoint": {"memory": memory}},
+        },
+        f"K={CTX_KEY}\n",
+    )
+
+
+def _key_echo_dispatch(*, refuse, text):
+    """A ctx stand-in whose refused stores repeat the key they were called with (artificial)."""
+
+    def dispatch(name, args, **kwargs):
+        if name.endswith("__search"):
+            return json.dumps({"result": "[]"})
+        if name.endswith("__store") and refuse(args):
+            return json.dumps({"error": text})
+        return json.dumps({"id": "019f6000-0000-7000-8000-000000000301"})
+
+    return dispatch
+
+
+@pytest.mark.parametrize("required", [True, False], ids=["required", "best-effort"])
+def test_a_failed_chain_raises_and_logs_its_error_without_the_key(hermes_home, caplog, required):
+    _key_echo_home(hermes_home)
+    notices = []
+    dispatch = _key_echo_dispatch(
+        refuse=lambda args: True, text=f"Unknown tool: mcp__ctx__store (refused for key {CTX_KEY})"
+    )
+    provider = Provider(dispatch=dispatch)
+    provider.initialize("root-301", platform="cli", hermes_home=str(hermes_home), warning_callback=notices.append)
+    with caplog.at_level(logging.DEBUG):
+        if required:
+            with pytest.raises(_MODULE.CtxCheckpointError) as raised:
+                provider.on_pre_compress(list(KEY_TRANSCRIPT), require_checkpoint=True)
+            assert CTX_KEY not in _texts_of(raised.value)
+            assert "Unknown tool: mcp__ctx__store" in str(raised.value)
+        else:
+            assert provider.on_pre_compress(list(KEY_TRANSCRIPT)) == ""
+    logged = _log_text(caplog)
+    assert "chain failed" in logged
+    assert CTX_KEY not in logged
+    # The cause hints of the user notice still read the redacted text (#285).
+    assert notices and "is not connected in this Hermes" in notices[-1]
+
+
+def test_a_refused_fact_store_logs_its_error_without_the_key(hermes_home, caplog):
+    _key_echo_home(hermes_home, memory=True)
+    dispatch = _key_echo_dispatch(
+        refuse=lambda args: args.get("category") == "learnings", text=f"store refused for key {CTX_KEY}"
+    )
+    provider = Provider(dispatch=dispatch)
+    provider.initialize("root-301-facts", platform="cli", hermes_home=str(hermes_home))
+    fact = "Der Proxy auf INFRA-WWW terminiert TLS fuer alle Dienste mit Traefik."
+    with caplog.at_level(logging.DEBUG):
+        frame = provider.on_pre_compress([{"role": "assistant", "content": fact}], require_checkpoint=True)
+    assert "ctx checkpoint head:" in frame
+    logged = _log_text(caplog)
+    assert "refused for key [REDACTED]" in logged
+    assert CTX_KEY not in logged and CTX_KEY not in frame
+
+
+def test_a_key_cut_off_at_the_end_of_an_error_text_is_masked():
+    cut = f"mcp store: refused for key {CTX_KEY[:20]}"
+    out = cp.redact_error_text(cut, (CTX_KEY,))
+    assert CTX_KEY[:12] not in out and out.endswith("[REDACTED]")
+    # Hermes closes a shortened HTTP body with ")": the piece before it is masked as well.
+    closed = cp.redact_error_text(f"HTTP 401 (body: refused for key {CTX_KEY[:20]})", (CTX_KEY,))
+    assert CTX_KEY[:12] not in closed and closed.endswith("[REDACTED])")
+    assert cp.redact_error_text("ctx checkpoint budget 60s exceeded before manifest", (CTX_KEY,)) == (
+        "ctx checkpoint budget 60s exceeded before manifest"
+    )
