@@ -26,9 +26,13 @@ Setup, MCP tool names and error texts (GottZ/ctx#294, #297, #304).
   system prompt block and the receipt named tools that do not exist. `mcp_client.mcp_tool_name`
   now follows Hermes' rule (that function is not a public plugin API, so the rule is rebuilt and
   the tests pin it against Hermes' function); dispatch, prompt block, receipt and the failure
-  hint read it. Two enabled entries whose names come out alike are refused
-  (`mcp_client.colliding_servers`): Hermes keeps the tools of the entry that connects first, so
-  a call by name could reach the other server — the provider reports itself unavailable with
+  hint read it. An entry is refused when another enabled entry can register a tool under the
+  name of one of its checkpoint tools (`mcp_client.colliding_servers`): both names come out
+  alike, or `<own>__` starts with `<other>__` after the rewrite (`ctx--prod` next to `ctx`, whose
+  tool `prod__store` would be `mcp__ctx__prod__store`). Hermes keeps the first registration of a
+  name, so a call by name could reach the other server; config.yaml does not list the other
+  server's tools, so the rule takes every tool name as possible — a test checks it against
+  Hermes' function for every pair of 130 entry names — and the provider reports itself unavailable with
   the reason, and the connection test (setup forms, `hermes memory status`) fails before it
   connects. A passing test names the tools when the entry name is rewritten. The pointer
   binding stays on the entry name; for `ctx` and every name Hermes keeps, names and binding

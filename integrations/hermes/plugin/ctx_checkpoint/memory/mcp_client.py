@@ -151,17 +151,26 @@ def mcp_tool_name(server: str, tool: str) -> str:
 
 
 def colliding_servers(server: str, servers: Any) -> list[str]:
-    """The other entries of ``mcp_servers`` (the mapping) whose tools Hermes registers under the
-    same names as those of ``server``, entries with ``enabled: false`` left out. Hermes keeps the
-    tools of the entry that connects first and skips the other's, so a call by name could reach
-    the other server: the plugin refuses such a binding."""
+    """The other entries of ``mcp_servers`` (the mapping) that can register a tool under the name
+    of one of ``server``'s checkpoint tools, entries with ``enabled: false`` left out. Hermes keeps
+    the first registration of a name and skips the other, so a call by name could reach the other
+    server: the plugin refuses such a binding.
+
+    Hermes joins the parts as ``mcp__<server>__<tool>`` and merges no underscores, and config.yaml
+    does not list another server's tools, so the rule takes every tool name as possible: an entry
+    ``other`` collides when ``mcp__<own>__<tool>`` starts with ``mcp__<other>__``. The checkpoint
+    tools (``search``, ``get``, ``store``, ``query``) hold no ``_``, so that is exactly when
+    ``<own>__`` starts with ``<other>__``: the same part, or the other's part followed by ``_``
+    (``c-`` next to ``c``: ``mcp__c___store`` is the name of a tool ``_store`` of ``c``) or by ``__``
+    (``ctx--prod`` next to ``ctx``: a tool ``prod__store`` of ``ctx``). A name with one separator
+    (``ctx-prod`` next to ``ctx``) never collides; the entry ``ctx`` next to ``ctx--prod`` neither."""
     entries = servers.items() if isinstance(servers, dict) else ()
-    own = _tool_name_part(server)
+    own = _tool_name_part(server) + "__"
     return sorted(
         str(name)
         for name, entry in entries
         if str(name) != server
-        and _tool_name_part(str(name)) == own
+        and own.startswith(_tool_name_part(str(name)) + "__")
         and not (isinstance(entry, dict) and entry.get("enabled") is False)
     )
 
@@ -170,9 +179,10 @@ def collision_text(server: str, others: list[str]) -> str:
     """Why the entry ``server`` is not used while ``others`` collide with it."""
     entries = ", ".join(f"mcp_servers.{name}" for name in others)
     return (
-        f"mcp_servers.{server} and {entries} register their tools under the same names "
-        f"({mcp_tool_name(server, 'store')} …): Hermes keeps the tools of one of them, so a checkpoint "
-        "could reach the other server; rename one of the entries"
+        f"mcp_servers.{server} and {entries} can register tools under the same names "
+        f"({mcp_tool_name(server, 'store')} …): Hermes keeps one registration of a name, so a checkpoint "
+        "could reach the other server; rename one of the entries so that, with every character outside "
+        "A-Za-z0-9_ turned into _, neither name equals the other or starts with it followed by _"
     )
 
 

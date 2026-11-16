@@ -132,10 +132,15 @@ from an earlier setup). An entry with its own `headers` or `auth`, or a stdio
 differently. Hermes registers the entry's tools with every character outside
 `A-Za-z0-9_` replaced by `_` (an entry `ctx-prod` gives `mcp__ctx_prod__store`,
 a name over 64 characters is shortened with a hash), and the plugin calls and
-names them the same way (0.13.0; before, an entry with `-` never resolved). Two
-enabled entries that come out alike (`ctx-prod` and `ctx_prod`) are refused:
-Hermes keeps only one entry's tools, so a checkpoint could reach the other
-server. The connection test names the tools when the entry name is rewritten.
+names them the same way (0.13.0; before, an entry with `-` never resolved).
+Hermes keeps one registration of a tool name, so the entry is refused when
+another enabled entry can register a tool under the name of a checkpoint tool:
+both come out alike (`ctx-prod` and `ctx_prod`), or the entry's name is the
+other's followed by two separators or a separator and `_` (`ctx--prod` next to
+`ctx`: a tool `prod__store` of `ctx` would be named `mcp__ctx__prod__store`).
+The other server's tools are not in `config.yaml`, so this is refused even when
+that server has no such tool; one separator (`ctx-prod` next to `ctx`) is fine.
+The connection test names the tools when the entry name is rewritten.
 
 ## Memory features (`memory: true`)
 

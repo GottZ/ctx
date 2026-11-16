@@ -158,6 +158,61 @@ def test_entries_whose_tools_hermes_names_alike_are_refused(_isolated_hermes_hom
             assert f"mcp_servers.{other}" in reason
 
 
+def test_an_entry_named_like_another_plus_two_separators_is_refused(_isolated_hermes_home):
+    """PR #306 review: Hermes joins server and tool part with ``__`` and merges nothing, so the
+    ``store`` of ``ctx--prod`` and a tool ``prod__store`` of ``ctx`` get one name; Hermes keeps one
+    registration of it. The other server's tools are not in config.yaml, so the entry is refused."""
+    assert mcp_prefixed_tool_name("ctx--prod", "store") == mcp_prefixed_tool_name("ctx", "prod__store")
+    _write_config(_isolated_hermes_home, {"mcp_servers": {"ctx": ENTRY, "ctx--prod": ENTRY}})
+
+    refused = Provider(config={"mcp_server": "ctx--prod"})
+    assert refused.is_available() is False
+    assert "mcp_servers.ctx " in refused.unavailable_reason() + " "
+
+    # The other way round nothing can collide: the checkpoint tools have no "__" in their names.
+    assert Provider(config={"mcp_server": "ctx"}).is_available() is True
+
+
+@pytest.mark.parametrize("other", ["ctx-prod", "ctx_prod", "ctx.prod", "ctxprod", "ctx-prod-2"])
+def test_an_entry_named_like_another_plus_one_separator_is_kept(_isolated_hermes_home, other):
+    _write_config(_isolated_hermes_home, {"mcp_servers": {"ctx": ENTRY, other: ENTRY}})
+
+    assert Provider(config={"mcp_server": other}).is_available() is True
+    assert Provider(config={"mcp_server": "ctx"}).is_available() is True
+
+
+_NAMES = sorted(
+    {
+        f"{base}{sep}{rest}"
+        for base in ("ctx", "ctx_", "c", "kb")
+        for sep in ("", "-", "_", ".", "--", "__", "-_", "_-", "-.", "___")
+        for rest in ("", "prod", "_prod", "x" * 70)
+    }
+)
+
+
+def test_the_collision_rule_is_exactly_a_possible_shared_name_in_hermes():
+    """For every pair of entry names: refused exactly when some tool of the other entry gets the
+    name Hermes gives a checkpoint tool of this one — the witness tool is built and checked with
+    Hermes' own function (shortened names included)."""
+    mismatches = []
+    for server in _NAMES:
+        for other in _NAMES:
+            if other == server:
+                continue
+            possible = False
+            for tool in ("search", "get", "store", "query"):
+                full = f"mcp__{mcp_client._tool_name_part(server)}__{tool}"
+                prefix = f"mcp__{mcp_client._tool_name_part(other)}__"
+                if full.startswith(prefix) and len(full) > len(prefix):
+                    witness = full[len(prefix) :]
+                    possible |= mcp_prefixed_tool_name(other, witness) == mcp_prefixed_tool_name(server, tool)
+            refused = bool(mcp_client.colliding_servers(server, {server: ENTRY, other: ENTRY}))
+            if refused != possible:
+                mismatches.append((server, other, refused, possible))
+    assert not mismatches, mismatches[:10]
+
+
 def test_without_its_own_entry_the_reason_names_the_missing_entry(_isolated_hermes_home):
     _write_config(_isolated_hermes_home, {"mcp_servers": {"ctx_prod": ENTRY}})
     provider = Provider(config={"mcp_server": "ctx-prod"})

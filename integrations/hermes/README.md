@@ -563,7 +563,8 @@ and manifest are deliberately small so routine recall stays cheap.
   never offers the mode then (GottZ/ctx#294). The ctx MCP tools are called and named as
   Hermes registers them (`ctx-prod` → `mcp__ctx_prod__store`, names over 64 characters
   shortened), so an entry with `-` in its name no longer fails every checkpoint with
-  `Unknown tool`; two entries that come out alike are refused, and the connection test
+  `Unknown tool`; an entry that can share a tool name with another one (`ctx-prod` and
+  `ctx_prod`, or `ctx--prod` next to `ctx`) is refused, and the connection test
   names the tools when the entry name is rewritten (GottZ/ctx#297). Foreign error texts are
   redacted with the bound keys in the rest of the places that raised, logged or returned
   them raw: the implicit `__context__` of raised errors, the results and DEBUG lines of
