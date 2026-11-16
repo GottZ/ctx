@@ -33,7 +33,8 @@ Gate and setting edge cases with the memory features on (GottZ/ctx#289).
   hand. `load_previous_head` now logs it and records it on the run (`invalid_head`): the new
   chain starts without a parent (or with the process' cached last manifest), the head is
   published over the broken one, `lookup=head-invalid`, and the user gets a notice naming
-  both heads. Its dedupe keys are not taken over; the earlier chain's blocks stay. A block
+  both heads. Its dedupe keys are not taken over; the earlier chain's blocks stay. An invalid
+  head under the 0.6.0 title is only logged (the new head goes under the current title). A block
   with the head title but without the tag is still not recognized as a head: the new head
   replaces it and the chain starts without a parent (unchanged; the MCP store answer does not
   say whether it replaced a block).
@@ -45,9 +46,9 @@ Gate and setting edge cases with the memory features on (GottZ/ctx#289).
 - **Error texts are redacted before they are raised or logged (GottZ/ctx#301).** A failed chain
   write put the server's or the MCP dispatch's error text into the `CtxCheckpointError` it raised
   (and into its `__cause__`) and into the WARNING line without redaction; the outcome file and the
-  user notice were already masked. `checkpoint.redact_error_text` (bound keys, a bound key cut off
-  at the end of a shortened answer, then the checkpoint redaction; withheld on a redaction
-  failure) is the one function for it: the chain writer builds its errors from it and raises them
+  user notice were already masked. `checkpoint.redact_error_text` (bound keys, a piece of a bound
+  key that a client cut off, then the checkpoint redaction; withheld on a redaction failure) is
+  the one function for it: the chain writer builds its errors from it and raises them
   `from None`, the provider logs chain, fact, mirror and digest store failures through it
   (`_error_text`), and `status.redact_error` uses it as well. The cause hints of the user notice
   read the redacted text and still apply.

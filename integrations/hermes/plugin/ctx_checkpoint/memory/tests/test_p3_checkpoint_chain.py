@@ -822,10 +822,42 @@ def test_a_refused_fact_after_a_durable_chain_keeps_the_required_checkpoint(fact
 def test_required_fact_stores_carry_the_remaining_budget_as_their_timeout(factory):
     p, c = factory("sess-fact-timeout", config={"auto_compress_extract": True}, agent_context="primary")
     p._config["checkpoint_budget_s"] = 30.0
+    clock = _on_fake_clock(p)
+
+    def chain_takes_27s(args):
+        if args["category"] == CHAIN_CAT and args["title"].startswith("Compaction checkpoint head"):
+            clock.now += 27.0
+
+    c.store_hook = chain_takes_27s
     frame = p.on_pre_compress([{"role": "assistant", "content": _FACT}], require_checkpoint=True)
     facts = _fact_stores(c.calls)
-    assert "fact block(s)" in frame and facts
-    assert all(0 < a["timeout"] <= p._config["api_timeout"] for a in facts)
+    assert "fact block(s)" in frame and len(facts) == 1
+    # 3 s of the 30 s budget are left, less than api_timeout (10 s): the store gets those 3 s.
+    assert facts[0]["timeout"] == pytest.approx(3.0)
+
+
+def test_a_refused_second_fact_keeps_the_first_and_releases_only_its_own_claim(factory):
+    p, c = factory("sess-fact-second", config={"auto_compress_extract": True}, agent_context="primary")
+    seen = {"facts": 0}
+
+    def refuse_second_fact(args):
+        if args["category"] != CHAIN_CAT:
+            seen["facts"] += 1
+            if seen["facts"] == 2:
+                raise CtxApiError("HTTP 403 [guard_rejected]: refused", status=403, code="guard_rejected")
+
+    c.store_hook = refuse_second_fact
+    frame = p.on_pre_compress(
+        [
+            {"role": "assistant", "content": _FACT},
+            {"role": "user", "content": "weiter bitte mit dem naechsten Punkt"},
+            {"role": "assistant", "content": _FACT_2},
+        ],
+        require_checkpoint=True,
+    )
+    assert "ctx checkpoint head:" in frame
+    assert "stored 1 fact block(s)" in frame and "1 of 2" in frame and "not stored" in frame
+    assert len(p._fact_ledger().keys()) == 2  # the stored fact keeps its two keys
 
 
 def test_required_facts_past_the_deadline_are_left_and_the_chain_receipt_stands(factory):
@@ -1182,6 +1214,24 @@ def test_head_written_before_0_6_1_continues_its_chain(factory):
     assert _searches(c.calls) == [new_title]
     assert p._last_chain_receipt.lookup == "server"
     assert _stores(c.calls)[-2]["metadata"]["parent_manifest_id"] == receipt.manifest_id
+
+
+def test_an_invalid_legacy_head_starts_a_new_chain_and_stays_as_it_is(factory, caplog):
+    # #289: under the 0.6.0 title the new head is not published over the old one, so the
+    # invalid head is only logged — no notice that it was replaced.
+    p, c = factory(LOCAL_ROOT, agent_context="primary")
+    legacy_title = _seed_legacy_head(c, LOCAL_ROOT)
+    c.blocks[legacy_title]["metadata"]["latest_manifest_id"] = "not-a-uuid"
+    notices = []
+    p._chain().notify = notices.append
+    with caplog.at_level(logging.WARNING):
+        frame = p.on_pre_compress([{"role": "user", "content": "erste Kompaktierung nach dem Upgrade"}])
+    receipt = p._last_chain_receipt
+    assert "ctx checkpoint head:" in frame
+    assert receipt.lookup == "none" and receipt.parent_manifest_id is None
+    assert receipt.head_id != LEGACY_HEAD_ID and notices == []
+    assert c.blocks[legacy_title]["metadata"]["latest_manifest_id"] == "not-a-uuid"
+    assert any(LEGACY_HEAD_ID in r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
 
 
 def test_legacy_head_of_another_root_is_not_continued(factory):

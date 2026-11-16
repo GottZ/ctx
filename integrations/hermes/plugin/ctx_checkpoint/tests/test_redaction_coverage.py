@@ -704,6 +704,9 @@ def test_a_key_cut_off_at_the_end_of_an_error_text_is_masked():
     cut = f"mcp store: refused for key {CTX_KEY[:20]}"
     out = cp.redact_error_text(cut, (CTX_KEY,))
     assert CTX_KEY[:12] not in out and out.endswith("[REDACTED]")
+    # Hermes closes a shortened HTTP body with ")": the piece before it is masked as well.
+    closed = cp.redact_error_text(f"HTTP 401 (body: refused for key {CTX_KEY[:20]})", (CTX_KEY,))
+    assert CTX_KEY[:12] not in closed and closed.endswith("[REDACTED])")
     assert cp.redact_error_text("ctx checkpoint budget 60s exceeded before manifest", (CTX_KEY,)) == (
         "ctx checkpoint budget 60s exceeded before manifest"
     )

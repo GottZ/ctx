@@ -451,18 +451,29 @@ ERROR_WITHHELD = "(details withheld: redaction failed)"
 
 
 def _mask_cut_secret(text: str, value: str) -> str:
-    """``text`` with a leading piece of ``value`` at its very end masked: a client shortened an
-    answer inside the key (at least :data:`MIN_BOUND_SECRET_CHARS` of it are left there)."""
-    for size in range(len(value) - 1, MIN_BOUND_SECRET_CHARS - 1, -1):
-        if text.endswith(value[:size]):
-            return text[: len(text) - size] + REDACTED
-    return text
+    """``text`` with every leading piece of ``value`` of at least :data:`MIN_BOUND_SECRET_CHARS`
+    characters masked, wherever it stands: a client shortened an answer inside the key and may
+    have put text after the cut (Hermes closes a shortened HTTP body with ``)``)."""
+    head = value[:MIN_BOUND_SECRET_CHARS]
+    if len(head) < MIN_BOUND_SECRET_CHARS:
+        return text
+    pieces, start = [], 0
+    found = text.find(head)
+    while found != -1:
+        end = found + len(head)
+        while end < len(text) and end - found < len(value) and text[end] == value[end - found]:
+            end += 1
+        pieces += [text[start:found], REDACTED]
+        start = end
+        found = text.find(head, start)
+    pieces.append(text[start:])
+    return "".join(pieces)
 
 
 def redact_error_text(text: Any, secret: str | Iterable[str] = ()) -> str:
     """An error text that can carry foreign text (a server answer, a dispatch error), redacted
-    before it is raised or logged (#301): :func:`redact_text` with the bound keys, and a bound key
-    cut off at the end of the text masked as well. Cut it to length only after this. Never
+    before it is raised or logged (#301): :func:`redact_text` with the bound keys, and a piece of a
+    bound key that a client cut off masked as well. Cut it to length only after this. Never
     raises; on a redaction failure the text is withheld (:data:`ERROR_WITHHELD`)."""
     try:
         text = "" if text is None else str(text)
@@ -1010,6 +1021,7 @@ class ChainWriter:
         run: _ChainRun,
         *,
         root_session_id: str | None = None,
+        record_invalid: bool = True,
     ) -> tuple[str | None, list[str], str]:
         """``(latest_manifest_id, fact_hashes, checkpoint_id)`` of the existing head (upstream
         ``_load_previous_manifest_id`` plus the P4 dedupe keys and, 0.10.0, the checkpoint id the
@@ -1020,6 +1032,7 @@ class ChainWriter:
         the whole object) is no usable head either (#289; it raised before and blocked every later
         checkpoint of the root): it is logged, ``run.invalid_head`` names it, and the new head is
         published over it. Its dedupe keys are not taken over; the blocks of the earlier chain stay.
+        ``record_invalid=False`` (the 0.6.0 title, whose head is not replaced): only logged.
 
         Narrowed to heads by their tag (every head carries ``checkpoint-head``). Parts and
         manifests share the ``checkpoint`` type, and the MCP transport drops ``types``
@@ -1050,12 +1063,14 @@ class ChainWriter:
         manifest_id = _find_value(head, "latest_manifest_id")
         if not manifest_id or not _UUID_RE.fullmatch(manifest_id):
             logger.warning(
-                "ctx checkpoint head %s (%s) carries no valid latest_manifest_id; a new chain starts and its "
-                "head is published over it (the blocks of the earlier chain stay in ctx)",
+                "ctx checkpoint head %s (%s) carries no valid latest_manifest_id; a new chain starts%s "
+                "(the blocks of the earlier chain stay in ctx)",
                 head_id,
                 head_title,
+                " and its head is published over it" if record_invalid else "",
             )
-            run.invalid_head = head_id
+            if record_invalid:
+                run.invalid_head = head_id
             return None, [], ""
         return manifest_id, _find_str_list(head, FACT_HASHES_KEY), _find_value(head, "checkpoint_id") or ""
 
@@ -1191,7 +1206,7 @@ class ChainWriter:
             # under the new title; the new head is published under the new title and the
             # old head stays as it is.
             previous_manifest_id, previous_fact_hashes, _legacy_checkpoint_id = self.load_previous_head(
-                legacy_title, run, root_session_id=root
+                legacy_title, run, root_session_id=root, record_invalid=False
             )
             if previous_manifest_id:
                 lookup = "legacy"
