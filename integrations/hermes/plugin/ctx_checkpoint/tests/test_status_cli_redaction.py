@@ -150,6 +150,24 @@ def test_a_status_that_cannot_be_built_names_no_key(home, monkeypatch, capsys):
     _assert_clean(summary + out, ENTRY_KEY)
 
 
+@pytest.mark.parametrize(
+    "headers",
+    [{"Authorization": f"Bearer {ENTRY_KEY}"}, OWN_VARIABLE],
+    ids=["literal", "own-variable"],
+)
+def test_the_connection_test_redacts_the_key_of_the_entry_it_probes(home, probe, headers):
+    """Whatever keys a caller passes (none here: the config changed between its two reads, or a
+    caller forgot), the key of the very entry handed to the probe is masked in the result."""
+    (home / ".env").write_text(ENV, encoding="utf-8")
+    probe.error = RuntimeError(_foreign(ENTRY_KEY))
+    entry = {"url": "https://ctx.example.test/mcp", "headers": headers}
+
+    test = _submodule("memory.status").run_connection_test("ctx", entry, secrets=())
+
+    assert test.ok is False and "401" in test.detail
+    _assert_clean(test.detail, ENTRY_KEY)
+
+
 def test_desktop_save_redacts_a_failed_connection_test_with_the_entry_key(home, probe):
     """A save that changes the URL of an entry with its own key variable runs the test; its refusal
     must not repeat that key."""

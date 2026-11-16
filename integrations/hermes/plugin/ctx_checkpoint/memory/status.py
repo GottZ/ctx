@@ -276,8 +276,10 @@ def run_connection_test(
     name: str, entry: dict[str, Any], *, secrets: Iterable[str] = (), servers: dict[str, Any] | None = None
 ) -> ConnectionTest:
     """Test one ctx MCP server entry; never raises. ``servers``: the ``mcp_servers`` entries of the
-    profile, for the check that no other entry gets the same tool names."""
-    secrets = tuple(secrets)
+    profile, for the check that no other entry gets the same tool names. A probe error is redacted
+    with ``secrets`` and the keys of ``entry`` itself (:func:`entry_keys`), so the key of the entry
+    under test is masked whatever the caller passed (#308)."""
+    secrets = (*secrets, *entry_keys(entry))
     timeout = _test_timeout(entry)
     where = f"mcp_servers.{name}"
     others = colliding_servers(name, servers)
