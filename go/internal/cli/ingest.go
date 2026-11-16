@@ -166,7 +166,10 @@ Use --dry-run to preview what would be uploaded without sending anything.`,
 				}
 
 				// Chunk
-				chunks := ingest.Chunk(filename, parsed.Content, parsed.Tags)
+				// Titles carry the vault-relative path, not the basename:
+				// block-mode ingest upserts by (category, title, scope), so
+				// docs/README.md would overwrite README.md under a shared title.
+				chunks := ingest.Chunk(strings.TrimSuffix(relPath, ".md"), parsed.Content, parsed.Tags)
 				if len(chunks) == 0 {
 					continue // empty or negligible content
 				}

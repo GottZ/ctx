@@ -32,7 +32,9 @@ type section struct {
 }
 
 // Chunk splits a parsed document into chunks for embedding.
-// filename: basename without extension (for title generation)
+// filename: document name without extension (for title generation); the CLI
+// passes the vault-relative path so same-named files in different folders
+// get distinct titles
 // content: cleaned markdown text (after Parse())
 // tags: for context header
 func Chunk(filename, content string, tags []string) []ChunkResult {
