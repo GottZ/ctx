@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/ingest"
 	"github.com/spf13/cobra"
@@ -96,13 +97,23 @@ func IngestCmd(getClient func() (*Client, error)) *cobra.Command {
 		Long: `Scan an Obsidian vault directory, parse and chunk all Markdown files,
 and upload them in batches to the context store.
 
-Use --dry-run to preview what would be uploaded without sending anything.`,
+Use --dry-run to preview what would be uploaded without sending anything.
+
+A file with a chunk over a server limit (title 500 bytes, category 100 bytes,
+content 50 KB, or an empty title or category) is held back and reported; the
+other files are uploaded. The command exits 1 when a file was not ingested or
+a chunk was not written, a dry run when the upload would leave a file out.`,
 		Example: `  ctx ingest /path/to/vault/
   ctx ingest /path/to/vault/ --dry-run
   ctx ingest /path/to/vault/ --workers 4 --batch 100
   ctx ingest /path/to/vault/ --category reference --scope shared`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// No worker would upload nothing and report nothing failed.
+			if workers < 1 {
+				return fmt.Errorf("--workers must be at least 1, got %d", workers)
+			}
+
 			vaultPath, err := filepath.Abs(args[0])
 			if err != nil {
 				return fmt.Errorf("resolve path: %w", err)
@@ -186,36 +197,13 @@ Use --dry-run to preview what would be uploaded without sending anything.`,
 					cat = category
 				}
 
-				// Build payloads
-				for _, ch := range chunks {
-					tags := parsed.Tags
-					if tags == nil {
-						tags = []string{}
-					}
-
-					meta := map[string]any{
-						"source":     "obsidian",
-						"vault_path": relPath,
-					}
-					if len(parsed.Links) > 0 {
-						meta["links"] = parsed.Links
-					}
-					if len(parsed.Dates) > 0 {
-						meta["dates"] = parsed.Dates
-					}
-
-					allChunks = append(allChunks, ingestChunkPayload{
-						Category:   cat,
-						Title:      ch.Title,
-						Content:    ch.Header + "\n\n" + ch.Content,
-						Tags:       tags,
-						Metadata:   meta,
-						ChunkIndex: ch.Index,
-					})
-
-					stats.categories[cat]++
+				payloads := filePayloads(relPath, cat, parsed, chunks)
+				if breach := limitBreach(payloads); breach != "" {
+					errors = append(errors, ingestError{File: relPath, Error: "not uploaded: " + breach})
+					continue
 				}
-
+				allChunks = append(allChunks, payloads...)
+				stats.categories[cat] += len(payloads)
 				stats.totalChunks += len(chunks)
 
 				// Progress every 100 files
@@ -271,13 +259,13 @@ Use --dry-run to preview what would be uploaded without sending anything.`,
 
 			if stats.totalChunks == 0 {
 				Errorf("\nNo chunks to upload.")
-				return nil
+				return ingestIncomplete(cmd, dryRun, errors, 0, nil)
 			}
 
 			// Phase 2: Dry run or upload
 			if dryRun {
 				Errorf("\nDry run complete. Use 'ctx ingest %s' to upload.", args[0])
-				return nil
+				return ingestIncomplete(cmd, dryRun, errors, 0, nil)
 			}
 
 			c, err := getClient()
@@ -341,6 +329,11 @@ Use --dry-run to preview what would be uploaded without sending anything.`,
 							atomic.AddInt64(&updated, int64(resp.Updated))
 							atomic.AddInt64(&skipped, int64(resp.Skipped))
 							atomic.AddInt64(&failed, int64(resp.Failed))
+							if resp.Failed > 0 {
+								mu.Lock()
+								uploadErrs = append(uploadErrs, chunkFailures(batchIdx, batchChunks, resp)...)
+								mu.Unlock()
+							}
 						}
 
 						newUploaded := atomic.AddInt64(&uploaded, batchSize)
@@ -374,7 +367,7 @@ Use --dry-run to preview what would be uploaded without sending anything.`,
 			Errorf("  Skipped:  %d (identical content)", atomic.LoadInt64(&skipped))
 			Errorf("  Failed:   %d", atomic.LoadInt64(&failed))
 
-			return nil
+			return ingestIncomplete(cmd, false, errors, atomic.LoadInt64(&failed), uploadErrs)
 		},
 	}
 
@@ -414,6 +407,141 @@ func collectMarkdownFiles(root string) ([]string, error) {
 	return files, err
 }
 
+// filePayloads builds the upload payloads of one file's chunks.
+func filePayloads(relPath, cat string, parsed *ingest.ParseResult, chunks []ingest.ChunkResult) []ingestChunkPayload {
+	tags := parsed.Tags
+	if tags == nil {
+		tags = []string{}
+	}
+	payloads := make([]ingestChunkPayload, 0, len(chunks))
+	for _, ch := range chunks {
+		meta := map[string]any{
+			"source":     "obsidian",
+			"vault_path": relPath,
+		}
+		if len(parsed.Links) > 0 {
+			meta["links"] = parsed.Links
+		}
+		if len(parsed.Dates) > 0 {
+			meta["dates"] = parsed.Dates
+		}
+		payloads = append(payloads, ingestChunkPayload{
+			Category:   cat,
+			Title:      ch.Title,
+			Content:    ch.Header + "\n\n" + ch.Content,
+			Tags:       tags,
+			Metadata:   meta,
+			ChunkIndex: ch.Index,
+		})
+	}
+	return payloads
+}
+
+// limitBreach names the first per-chunk limit of POST /api/ingest that one of
+// a file's payloads breaks, "" when the server takes them all. The server
+// refuses a whole request over one such chunk (validateIngestRequest in
+// internal/handler/ingest.go), the chunks of every other file in it too, so
+// the CLI holds that file back and reports it instead of sending it. The whole
+// file stays out, not only the chunk: a document missing one section is
+// harder to notice in retrieval than a document that is missing and reported.
+// An empty content is not checked because it cannot occur: every payload
+// carries the chunk's context header. Sizes are counted as the server decodes
+// them (wireLen).
+func limitBreach(payloads []ingestChunkPayload) string {
+	for _, p := range payloads {
+		cat, title, content := wireLen(p.Category), wireLen(p.Title), wireLen(p.Content)
+		var breach string
+		switch {
+		case strings.TrimSpace(p.Category) == "":
+			breach = "the category is empty"
+		case cat > ingest.MaxCategoryBytes:
+			breach = fmt.Sprintf("the category is %d bytes, the server accepts at most %d", cat, ingest.MaxCategoryBytes)
+		case strings.TrimSpace(p.Title) == "":
+			breach = "the title is empty"
+		case title > ingest.MaxTitleBytes:
+			breach = fmt.Sprintf("the title is %d bytes, the server accepts at most %d", title, ingest.MaxTitleBytes)
+		case content > ingest.MaxContentBytes:
+			breach = fmt.Sprintf("the content is %d bytes, the server accepts at most %d", content, ingest.MaxContentBytes)
+		default:
+			continue
+		}
+		return fmt.Sprintf("chunk %d of %d: %s", p.ChunkIndex+1, len(payloads), breach)
+	}
+	return ""
+}
+
+// wireLen is the length in bytes of s as the server decodes it from the
+// request: json.Marshal sends every byte that is not valid UTF-8 as U+FFFD,
+// three bytes, so a Latin-1 file name, heading or paragraph is longer on the
+// server than on disk. Valid UTF-8, the common case, costs one scan.
+func wireLen(s string) int {
+	if utf8.ValidString(s) {
+		return len(s)
+	}
+	n := 0
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			n += utf8.RuneLen(utf8.RuneError)
+		} else {
+			n += size
+		}
+		i += size
+	}
+	return n
+}
+
+// chunkFailures names the chunks a partly successful batch did not write. The
+// server answers such a batch with 200, success:false, failed > 0 and a failed
+// result per unwritten chunk next to the written ones (docs/api.md, POST
+// /api/ingest); each becomes an error naming the chunk's file. A body without
+// such results still gets one error for the batch.
+func chunkFailures(batchIdx int, chunks []ingestChunkPayload, resp *ingestResponsePayload) []ingestError {
+	var out []ingestError
+	for _, r := range resp.Results {
+		if r.Status != "failed" || r.Index < 0 || r.Index >= len(chunks) {
+			continue
+		}
+		ch := chunks[r.Index]
+		file, _ := ch.Metadata["vault_path"].(string)
+		out = append(out, ingestError{File: file, Error: fmt.Sprintf("chunk %d: %s", ch.ChunkIndex+1, r.Error)})
+	}
+	if len(out) == 0 {
+		out = append(out, ingestError{
+			File:  fmt.Sprintf("batch-%d", batchIdx),
+			Error: fmt.Sprintf("server: %d chunk(s) failed", resp.Failed),
+		})
+	}
+	return out
+}
+
+// ingestIncomplete is the command's result once the summary is on stderr: nil
+// when every chunk was written, otherwise an error, which cmd/ctx/main.go turns
+// into exit status 1 like the failure of any other command (docs/cli.md, exit
+// codes). It counts the files the run did not ingest (unreadable, or held back
+// over a server limit) and the chunks the upload did not write, and names the
+// first reason; a dry run names the files the upload would not ingest.
+func ingestIncomplete(cmd *cobra.Command, dryRun bool, fileErrs []ingestError, failedChunks int64, uploadErrs []ingestError) error {
+	if len(fileErrs) == 0 && failedChunks == 0 {
+		return nil
+	}
+	// The command was called right: cobra's usage text after the summary would
+	// say otherwise and push the summary up and out of view.
+	cmd.SilenceUsage = true
+	reason := "see the errors above"
+	switch {
+	case len(fileErrs) > 0:
+		reason = fileErrs[0].File + ": " + fileErrs[0].Error
+	case len(uploadErrs) > 0:
+		reason = uploadErrs[0].File + ": " + uploadErrs[0].Error
+	}
+	if dryRun {
+		return fmt.Errorf("dry run: %d file(s) would not be ingested; first: %s", len(fileErrs), reason)
+	}
+	return fmt.Errorf("ingest incomplete: %d file(s) not ingested, %d chunk(s) not written; first: %s",
+		len(fileErrs), failedChunks, reason)
+}
+
 // splitIntoBatches divides chunks into batches of the given size.
 func splitIntoBatches(chunks []ingestChunkPayload, batchSize int) [][]ingestChunkPayload {
 	if batchSize <= 0 {
@@ -430,7 +558,9 @@ func splitIntoBatches(chunks []ingestChunkPayload, batchSize int) [][]ingestChun
 	return batches
 }
 
-// postIngest sends a batch to POST /api/ingest and parses the response.
+// postIngest sends a batch to POST /api/ingest and parses the response. A 200
+// with success:false and failed > 0 is the documented partial success, not a
+// refusal: it is returned, and the caller counts it chunk by chunk.
 func postIngest(c *Client, url string, req ingestRequestPayload) (*ingestResponsePayload, error) {
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -463,7 +593,7 @@ func postIngest(c *Client, url string, req ingestRequestPayload) (*ingestRespons
 		return nil, fmt.Errorf("server: %s", msg)
 	}
 
-	if !result.Success {
+	if !result.Success && result.Failed == 0 {
 		msg := result.Error
 		if msg == "" {
 			msg = "unknown error"
