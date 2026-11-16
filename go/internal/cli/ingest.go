@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GottZ/ctx/internal/derived"
 	"github.com/GottZ/ctx/internal/ingest"
 	"github.com/spf13/cobra"
 )
@@ -99,10 +100,12 @@ and upload them in batches to the context store.
 
 Use --dry-run to preview what would be uploaded without sending anything.
 
-A file with a chunk over a server limit (title 500 bytes, category 100 bytes,
-content 50 KB, or an empty title or category) is held back and reported; the
-other files are uploaded. The command exits 1 when a file was not ingested or
-a chunk was not written, a dry run when the upload would leave a file out.`,
+A file with a chunk the server refuses (title over 500 bytes, category over
+100 bytes, content over 50 KB, an empty title or category, a category
+reserved for derived blocks) is held back and reported; the other files are
+uploaded. A directory that cannot be read is reported too. The command exits 1
+when a file or directory was not ingested or a chunk was not written, a dry
+run when the upload would leave one out.`,
 		Example: `  ctx ingest /path/to/vault/
   ctx ingest /path/to/vault/ --dry-run
   ctx ingest /path/to/vault/ --workers 4 --batch 100
@@ -112,6 +115,11 @@ a chunk was not written, a dry run when the upload would leave a file out.`,
 			// No worker would upload nothing and report nothing failed.
 			if workers < 1 {
 				return fmt.Errorf("--workers must be at least 1, got %d", workers)
+			}
+			// The server refuses a request over MaxChunksPerRequest whole (413).
+			if batch < 1 || batch > ingest.MaxChunksPerRequest {
+				return fmt.Errorf("--batch must be between 1 and %d, the server's limit per request, got %d",
+					ingest.MaxChunksPerRequest, batch)
 			}
 
 			vaultPath, err := filepath.Abs(args[0])
@@ -127,25 +135,32 @@ a chunk was not written, a dry run when the upload would leave a file out.`,
 			if !info.IsDir() {
 				return fmt.Errorf("vault path is not a directory: %s", vaultPath)
 			}
+			// WalkDir reads the root with Lstat and does not follow a symlink,
+			// so a vault path that links to a directory would be walked as one
+			// entry and give no file.
+			vaultPath, err = filepath.EvalSymlinks(vaultPath)
+			if err != nil {
+				return fmt.Errorf("vault path: %w", err)
+			}
 
 			// Phase 1: Scan + Parse + Chunk
 			Errorf("ctx ingest: scanning %s", vaultPath)
 
-			files, err := collectMarkdownFiles(vaultPath)
+			files, errors, err := collectMarkdownFiles(vaultPath)
 			if err != nil {
 				return fmt.Errorf("scan vault: %w", err)
 			}
 
 			if len(files) == 0 {
 				Errorf("  No .md files found.")
-				return nil
+				printFileErrors(errors)
+				return ingestIncomplete(cmd, dryRun, errors, 0, nil)
 			}
 
 			stats := &ingestStats{
 				categories: make(map[string]int),
 			}
 			var allChunks []ingestChunkPayload
-			var errors []ingestError
 
 			for i, filePath := range files {
 				relPath, _ := filepath.Rel(vaultPath, filePath)
@@ -158,8 +173,9 @@ a chunk was not written, a dry run when the upload would leave a file out.`,
 				}
 
 				stats.totalFiles++
-				fileInfo, _ := os.Stat(filePath)
-				fileSize := fileInfo.Size()
+				// The size of what was read and is ingested; a second Stat
+				// would race a file that changes or disappears meanwhile.
+				fileSize := int64(len(content))
 
 				// Track largest file
 				if fileSize > stats.largestSize {
@@ -214,13 +230,7 @@ a chunk was not written, a dry run when the upload would leave a file out.`,
 
 			Errorf("  Parsed %d/%d files, %d chunks", stats.totalFiles, len(files), stats.totalChunks)
 
-			// Print errors if any
-			if len(errors) > 0 {
-				Errorf("\n  Errors (%d):", len(errors))
-				for _, e := range errors {
-					Errorf("    %s: %s", e.File, e.Error)
-				}
-			}
+			printFileErrors(errors)
 
 			// Print statistics
 			Errorf("")
@@ -373,7 +383,8 @@ a chunk was not written, a dry run when the upload would leave a file out.`,
 
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Parse and chunk only, don't upload")
 	cmd.Flags().IntVar(&workers, "workers", 1, "Parallel upload workers")
-	cmd.Flags().IntVar(&batch, "batch", 50, "Chunks per batch")
+	cmd.Flags().IntVar(&batch, "batch", 50,
+		fmt.Sprintf("Chunks per batch, 1 to %d (the server's limit per request)", ingest.MaxChunksPerRequest))
 	cmd.Flags().StringVar(&category, "category", "", "Override category (default: from folder path)")
 	cmd.Flags().StringVar(&scope, "scope", "private", "Scope for uploaded chunks (a scope belongs to one tenant)")
 	cmd.Flags().BoolVar(&extract, "extract", false, "Enable LLM extraction on server")
@@ -383,28 +394,66 @@ a chunk was not written, a dry run when the upload would leave a file out.`,
 
 // ── helpers ──────────────────────────────────────────────────────────.
 
-// collectMarkdownFiles walks a directory and returns all .md files,
-// skipping .obsidian/, dot-directories, and node_modules.
-func collectMarkdownFiles(root string) ([]string, error) {
-	var files []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil //nolint:nilerr // skip unreadable entries
+// collectMarkdownFiles walks a directory and returns all .md files, skipping
+// .obsidian/, dot-directories and node_modules, and the paths it could not
+// read, relative to root (markdownWalk.visit).
+func collectMarkdownFiles(root string) ([]string, []ingestError, error) {
+	w := &markdownWalk{root: root}
+	err := filepath.WalkDir(root, w.visit)
+	return w.files, w.unreadable, err
+}
+
+// markdownWalk is the state of one vault scan.
+type markdownWalk struct {
+	root       string
+	files      []string      // the .md files found, absolute
+	unreadable []ingestError // the paths the walk could not read
+}
+
+// visit is the fs.WalkDirFunc of collectMarkdownFiles. A directory inside the
+// vault whose name starts with "." (.obsidian, .git) and node_modules are
+// skipped on purpose, on the first call, before WalkDir reads them, so they
+// never report an error. A directory WalkDir could not read, wholly or in
+// part, comes back in a second call with the error: files under it are
+// missing from the run, so it is recorded like an unreadable file and the scan
+// goes on with the entries WalkDir did read.
+func (w *markdownWalk) visit(path string, d fs.DirEntry, err error) error {
+	if err != nil {
+		rel, relErr := filepath.Rel(w.root, path)
+		if relErr != nil {
+			rel = path
 		}
-		if d.IsDir() {
-			name := d.Name()
-			// Skip hidden directories and known noise
-			if strings.HasPrefix(name, ".") || name == "node_modules" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if strings.HasSuffix(d.Name(), ".md") {
-			files = append(files, path)
+		w.unreadable = append(w.unreadable, ingestError{
+			File:  filepath.ToSlash(rel),
+			Error: "could not be read, files under it may be missing: " + err.Error(),
+		})
+		return nil
+	}
+	if d.IsDir() {
+		name := d.Name()
+		// Skip hidden directories and known noise inside the vault; the vault
+		// itself is walked whatever it is called (~/.notes).
+		if path != w.root && (strings.HasPrefix(name, ".") || name == "node_modules") {
+			return filepath.SkipDir
 		}
 		return nil
-	})
-	return files, err
+	}
+	if strings.HasSuffix(d.Name(), ".md") {
+		w.files = append(w.files, path)
+	}
+	return nil
+}
+
+// printFileErrors lists the paths a run did not ingest: unreadable files and
+// directories, and files held back over a server limit.
+func printFileErrors(errs []ingestError) {
+	if len(errs) == 0 {
+		return
+	}
+	Errorf("\n  Errors (%d):", len(errs))
+	for _, e := range errs {
+		Errorf("    %s: %s", e.File, e.Error)
+	}
 }
 
 // filePayloads builds the upload payloads of one file's chunks.
@@ -446,7 +495,9 @@ func filePayloads(relPath, cat string, parsed *ingest.ParseResult, chunks []inge
 // harder to notice in retrieval than a document that is missing and reported.
 // An empty content is not checked because it cannot occur: every payload
 // carries the chunk's context header. Sizes are counted as the server decodes
-// them (wireLen).
+// them (wireLen). A category the derived layer reserves is refused whole by
+// the handler's claim gate (403) and is held back the same way; the check is
+// the handler's own predicate, derived.IsReservedCategory.
 func limitBreach(payloads []ingestChunkPayload) string {
 	for _, p := range payloads {
 		cat, title, content := wireLen(p.Category), wireLen(p.Title), wireLen(p.Content)
@@ -456,6 +507,8 @@ func limitBreach(payloads []ingestChunkPayload) string {
 			breach = "the category is empty"
 		case cat > ingest.MaxCategoryBytes:
 			breach = fmt.Sprintf("the category is %d bytes, the server accepts at most %d", cat, ingest.MaxCategoryBytes)
+		case derived.IsReservedCategory(p.Category):
+			breach = fmt.Sprintf("the category %q is reserved for derived blocks, the server refuses it", p.Category)
 		case strings.TrimSpace(p.Title) == "":
 			breach = "the title is empty"
 		case title > ingest.MaxTitleBytes:
@@ -518,9 +571,10 @@ func chunkFailures(batchIdx int, chunks []ingestChunkPayload, resp *ingestRespon
 // ingestIncomplete is the command's result once the summary is on stderr: nil
 // when every chunk was written, otherwise an error, which cmd/ctx/main.go turns
 // into exit status 1 like the failure of any other command (docs/cli.md, exit
-// codes). It counts the files the run did not ingest (unreadable, or held back
-// over a server limit) and the chunks the upload did not write, and names the
-// first reason; a dry run names the files the upload would not ingest.
+// codes). It counts the paths the run did not ingest (an unreadable file or
+// directory, a file held back over a server limit) and the chunks the upload
+// did not write, and names the first reason; a dry run names the paths the
+// upload would not ingest.
 func ingestIncomplete(cmd *cobra.Command, dryRun bool, fileErrs []ingestError, failedChunks int64, uploadErrs []ingestError) error {
 	if len(fileErrs) == 0 && failedChunks == 0 {
 		return nil
@@ -536,9 +590,9 @@ func ingestIncomplete(cmd *cobra.Command, dryRun bool, fileErrs []ingestError, f
 		reason = uploadErrs[0].File + ": " + uploadErrs[0].Error
 	}
 	if dryRun {
-		return fmt.Errorf("dry run: %d file(s) would not be ingested; first: %s", len(fileErrs), reason)
+		return fmt.Errorf("dry run: %d path(s) would not be ingested; first: %s", len(fileErrs), reason)
 	}
-	return fmt.Errorf("ingest incomplete: %d file(s) not ingested, %d chunk(s) not written; first: %s",
+	return fmt.Errorf("ingest incomplete: %d path(s) not ingested, %d chunk(s) not written; first: %s",
 		len(fileErrs), failedChunks, reason)
 }
 
