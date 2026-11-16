@@ -478,8 +478,8 @@ func efSearchProbeSteps(ctx context.Context, tx pgx.Tx, fallback string) string 
 // 173) — it computes ONLY when a matching partial index exists on
 // context_blocks, else null (never 0, never an unguarded scan; Gate G3).
 // A block of a type that is never embedded (embed_excluded, issue #291) is
-// not backlog: the unembedded set is counted on the pick indexes, which leave
-// such blocks out.
+// not backlog once idx_embedding_pending_sens leaves such blocks out
+// (embedBacklogSQL).
 // Each set is counted in its own index range, and a stale block whose vector
 // a cutover sweep nulled is counted once, with the unembedded. The stale set
 // is counted while both stale-pick indexes are ready (store.StaleIndexesReady,
@@ -489,7 +489,7 @@ func efSearchProbeSteps(ctx context.Context, tx pgx.Tx, fallback string) string 
 // guard is what keeps the worst case (an empty backlog) index-only instead of
 // a full seq scan.
 func queryEmbedBacklog(ctx context.Context, pool *pgxpool.Pool) *int {
-	guarded, staleReady, err := embedBacklogIndexExists(ctx, pool)
+	guarded, staleReady, markedReady, err := embedBacklogIndexExists(ctx, pool)
 	if err != nil {
 		slog.Warn("status: db-section embed-backlog guard query failed", "error", err)
 		return nil
@@ -499,22 +499,8 @@ func queryEmbedBacklog(ctx context.Context, pool *pgxpool.Pool) *int {
 			"(embedding IS NULL AND NOT is_archived) — backlog metric disabled (null), never an unguarded scan")
 		return nil
 	}
-	stale := ""
-	if staleReady {
-		stale = `
-			UNION ALL
-			(SELECT 1 FROM context_blocks
-			  WHERE embedding_stale AND NOT is_archived AND embedding IS NOT NULL
-			  LIMIT $1)`
-	}
 	var n int
-	err = pool.QueryRow(ctx, `
-		SELECT count(*) FROM (
-			(SELECT 1 FROM context_blocks
-			  WHERE `+store.UnembeddedPendingPredicate+` AND NOT is_archived
-			  LIMIT $1)`+stale+`
-		) t`, embedBacklogCap+1,
-	).Scan(&n)
+	err = pool.QueryRow(ctx, embedBacklogSQL(staleReady, markedReady), embedBacklogCap+1).Scan(&n)
 	if err != nil {
 		slog.Warn("status: db-section embed-backlog count query failed", "error", err)
 		return nil
@@ -523,6 +509,36 @@ func queryEmbedBacklog(ctx context.Context, pool *pgxpool.Pool) *int {
 		n = embedBacklogCap
 	}
 	return &n
+}
+
+// embedBacklogSQL is the backlog count of queryEmbedBacklog, $1 the cap plus
+// one. markedReady (store.UnembeddedSensIndexMarkedReady): the unembedded set
+// leaves out the blocks of a type that is never embedded (issue #291) and is
+// read in the order of idx_embedding_pending_sens, which holds none of them;
+// without it the count is the one before migration 175, which counts them.
+func embedBacklogSQL(staleReady, markedReady bool) string {
+	unembedded := `
+			(SELECT 1 FROM context_blocks
+			  WHERE embedding IS NULL AND NOT is_archived
+			  LIMIT $1)`
+	if markedReady {
+		unembedded = `
+			(SELECT 1 FROM context_blocks
+			  WHERE ` + store.UnembeddedPendingPredicate + ` AND NOT is_archived
+			  ORDER BY sensitivity, created_at, id
+			  LIMIT $1)`
+	}
+	stale := ""
+	if staleReady {
+		stale = `
+			UNION ALL
+			(SELECT 1 FROM context_blocks
+			  WHERE embedding_stale AND NOT is_archived AND embedding IS NOT NULL
+			  LIMIT $1)`
+	}
+	return `
+		SELECT count(*) FROM (` + unembedded + stale + `
+		) t`
 }
 
 // embedBacklogIndexExists looks for a partial index on context_blocks whose
@@ -534,7 +550,7 @@ func queryEmbedBacklog(ctx context.Context, pool *pgxpool.Pool) *int {
 // dependency on that index's NAME, only its shape. staleReady is
 // store.StaleIndexesReady, the condition the backfill pick and the content
 // writers read for the stale set (migration 173).
-func embedBacklogIndexExists(ctx context.Context, pool *pgxpool.Pool) (exists, staleReady bool, err error) {
+func embedBacklogIndexExists(ctx context.Context, pool *pgxpool.Pool) (exists, staleReady, markedReady bool, err error) {
 	err = pool.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1
@@ -545,9 +561,9 @@ func embedBacklogIndexExists(ctx context.Context, pool *pgxpool.Pool) (exists, s
 			   AND i.indpred IS NOT NULL
 			   AND pg_get_expr(i.indpred, i.indrelid) ILIKE '%embedding%is null%'
 			   AND pg_get_expr(i.indpred, i.indrelid) ILIKE '%not%is_archived%'
-		), `+store.StaleIndexesReady,
-	).Scan(&exists, &staleReady)
-	return exists, staleReady, err
+		), `+store.StaleIndexesReady+`, `+store.UnembeddedSensIndexMarkedReady,
+	).Scan(&exists, &staleReady, &markedReady)
+	return exists, staleReady, markedReady, err
 }
 
 // channelProbeSemanticSQL/channelProbeFtsDeSQL/channelProbeFtsEnSQL/

@@ -16,6 +16,7 @@ package handler
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -67,6 +68,7 @@ func TestBackfillPickExcludedTypeCost(t *testing.T) {
 	}
 	sizes := []int{10_000, 100_000}
 	got := make(map[string][][]testdb.PlanCost)
+	var backlog []testdb.PlanCost
 	from := 0
 	for _, n := range sizes {
 		seedExcludedPickCost(t, pool, from, n)
@@ -75,6 +77,22 @@ func TestBackfillPickExcludedTypeCost(t *testing.T) {
 			t.Logf("%s at %d checkpoint rows:", v.name, n)
 			got[v.name] = append(got[v.name], pickCostVariant(t, pool, v.armRuns, v.attempts))
 		}
+		// The /status backlog: S is the one block it counts, on a plan that
+		// does not walk the checkpoint rows.
+		if b := queryEmbedBacklog(context.Background(), pool); b == nil || *b != 1 {
+			got := "null"
+			if b != nil {
+				got = strconv.Itoa(*b)
+			}
+			t.Errorf("embed_backlog at %d checkpoint rows = %s, want 1 (S)", n, got)
+		}
+		c := testdb.ExplainCustom(t, pool, embedBacklogSQL(true, true), embedBacklogCap+1)
+		t.Logf("backlog count at %d checkpoint rows: %v", n, c)
+		backlog = append(backlog, c)
+	}
+	if backlog[0].Buffers > pickBufferCap || backlog[1].Buffers > backlog[0].Buffers+backlog[0].Buffers/2+8 {
+		t.Errorf("backlog count: %d buffers at %d checkpoint rows, %d at %d — it walks rows it does not count",
+			backlog[0].Buffers, sizes[0], backlog[1].Buffers, sizes[1])
 	}
 	for _, v := range variants {
 		small, large := got[v.name][0], got[v.name][1]

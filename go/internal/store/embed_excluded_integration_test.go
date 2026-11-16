@@ -95,6 +95,42 @@ func TestEmbedExcludedPick(t *testing.T) {
 		t.Fatalf("plain block not picked: %q", got)
 	}
 
+	// Archive keeps the marker, unarchive decides it again; a re-type into
+	// and out of a never-embedded type moves it.
+	for _, st := range []string{
+		`UPDATE context_blocks SET is_archived = true WHERE id = $1`,
+		`UPDATE context_blocks SET is_archived = false WHERE id = $1`,
+	} {
+		if _, err := pool.Exec(ctx, st, cp.ID); err != nil {
+			t.Fatalf("%s: %v", st, err)
+		}
+		if !marker(t, pool, cp.ID) {
+			t.Errorf("after %q the checkpoint block lost its marker", st)
+		}
+	}
+	retyped := storeTyped(t, pool, "ee-a", "ee retyped", "")
+	for _, c := range []struct {
+		typ  string
+		want bool
+	}{{"checkpoint", true}, {"knowledge", false}} {
+		if _, err := pool.Exec(ctx, `UPDATE context_blocks SET type_name = $2 WHERE id = $1`, retyped.ID, c.typ); err != nil {
+			t.Fatalf("re-type to %s: %v", c.typ, err)
+		}
+		if got := marker(t, pool, retyped.ID); got != c.want {
+			t.Errorf("re-type to %s: embed_excluded = %v, want %v", c.typ, got, c.want)
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET is_archived = true WHERE id = $1`, retyped.ID); err != nil {
+		t.Fatalf("archive retyped: %v", err)
+	}
+	// A statement that names the column gets the registry's answer.
+	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET embed_excluded = false WHERE id = $1`, cp.ID); err != nil {
+		t.Fatalf("set marker: %v", err)
+	}
+	if !marker(t, pool, cp.ID) {
+		t.Errorf("a statement cleared the marker of a checkpoint block")
+	}
+
 	// #213: a name whose only registry row is a tenant row, excluded.
 	createType(t, pool, "ee-tenant-excluded", "ee-b", "excluded")
 	reconcile(t, pool)
@@ -184,5 +220,122 @@ func TestEmbedExcludedLiftWaitsForOpenWrite(t *testing.T) {
 	reconcile(t, pool)
 	if marker(t, pool, id) {
 		t.Errorf("checkpoint block written during the lift keeps embed_excluded after the reconcile")
+	}
+}
+
+// TestEmbedExcludedBlockWaitsForOpenLift is the other order: a lifting
+// overlay is written in a transaction that stays open; a checkpoint block is
+// written meanwhile. The block write must wait for that commit and then
+// decide on the new registry state — before any reconcile runs.
+func TestEmbedExcludedBlockWaitsForOpenLift(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	reconcile(t, pool)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO context_block_types (name, scope, display_name, builtin, is_default, config)
+		 VALUES ('checkpoint', 'ee-c', 'checkpoint', false, false, '{"retrieval":{"policy":"full-pass"}}')`); err != nil {
+		t.Fatalf("open lift: %v", err)
+	}
+
+	type written struct {
+		id  string
+		err error
+	}
+	done := make(chan written, 1)
+	go func() {
+		var w written
+		w.err = pool.QueryRow(ctx,
+			`INSERT INTO context_blocks (category, title, content, type_name, scope, sensitivity, updated_at)
+			 VALUES ('ee-cat', 'ee during lift', 'x', 'checkpoint', 'ee-a', 'public', now()) RETURNING id`).Scan(&w.id)
+		done <- w
+	}()
+	select {
+	case w := <-done:
+		t.Errorf("the checkpoint write did not wait for the open lift (err %v)", w.err)
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if w.err == nil && marker(t, pool, w.id) {
+			t.Errorf("checkpoint block written during the lift is marked")
+		}
+	case <-time.After(2 * time.Second):
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		w := <-done
+		if w.err != nil {
+			t.Fatalf("checkpoint write: %v", w.err)
+		}
+		if marker(t, pool, w.id) {
+			t.Errorf("checkpoint block written during the lift is marked: it decided on the registry before the lift")
+		}
+	}
+}
+
+// TestEmbedExcludedReconcileAnswerMoves: the registry answer turns back
+// while a clear batch waits on a row lock, so the trigger sets every row of
+// the batch back. The reconcile must end (the name stays queued or is done),
+// not write the same rows again and again.
+func TestEmbedExcludedReconcileAnswerMoves(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	reconcile(t, pool)
+	bt := createType(t, pool, "ee-moving", "ee-m", "excluded")
+	reconcile(t, pool)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO context_blocks (category, title, content, type_name, scope, sensitivity, updated_at)
+		 SELECT 'ee-cat', 'ee moving ' || i, 'x', 'ee-moving', 'ee-m', 'public', now() FROM generate_series(1, 2500) i`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	full := json.RawMessage(`{"retrieval":{"policy":"full-pass"}}`)
+	excl := json.RawMessage(`{"retrieval":{"policy":"excluded"}}`)
+	if _, err := store.UpdateBlockType(ctx, pool, bt.ID, []string{"ee-m"}, store.BlockTypeUpdate{Config: full}, nil, "ee-test"); err != nil {
+		t.Fatalf("lift: %v", err)
+	}
+	// Hold every block of the type, so the first clear batch waits.
+	hold, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := hold.Exec(ctx, `SELECT 1 FROM context_blocks WHERE type_name = 'ee-moving' FOR UPDATE`); err != nil {
+		t.Fatalf("hold: %v", err)
+	}
+	rctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.ReconcileEmbedExcluded(rctx, pool)
+		done <- err
+	}()
+	time.Sleep(500 * time.Millisecond)
+	if _, err := store.UpdateBlockType(ctx, pool, bt.ID, []string{"ee-m"}, store.BlockTypeUpdate{Config: excl}, nil, "ee-test"); err != nil {
+		t.Fatalf("exclude again: %v", err)
+	}
+	if err := hold.Commit(ctx); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("reconcile while the answer moved: %v", err)
+	}
+	reconcile(t, pool)
+	var unmarked int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_blocks WHERE type_name = 'ee-moving' AND NOT embed_excluded`).Scan(&unmarked); err != nil {
+		t.Fatal(err)
+	}
+	if unmarked != 0 {
+		t.Errorf("%d blocks of the excluded type are unmarked after the reconcile", unmarked)
+	}
+	var queued int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_excluded_reconcile`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 0 {
+		t.Errorf("%d names still queued after a pass on a stable registry", queued)
 	}
 }

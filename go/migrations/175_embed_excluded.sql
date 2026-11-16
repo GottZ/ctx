@@ -33,20 +33,22 @@
 -- vector (the type allowlist of every reader leaves the name out).
 --
 -- WHO WRITES IT: only the trigger trg_block_embed_excluded, BEFORE INSERT OR
--- UPDATE OF type_name, embed_excluded, is_archived, FOR EACH ROW: an insert,
--- a re-type and an unarchive set the marker from the registry; a statement
--- that names the column gets the registry's answer, not its own. The trigger
--- decides on a fresh snapshot after it holds the registry rows that make
--- the answer true (FOR KEY SHARE), see LOCKS.
+-- UPDATE OF type_name, embed_excluded, is_archived, embedding, FOR EACH ROW:
+-- an insert, a re-type, an unarchive and a statement that clears the vector
+-- set the marker from the registry; a statement that names the column gets
+-- the registry's answer, not its own; every other update (a vector write
+-- among them) returns at once. When the answer is true the trigger decides
+-- again on a fresh snapshot after it holds the name's lock, see LOCKS.
 --
 -- A REGISTRY CHANGE (any writer of context_block_types: the type API, a
 -- migration, psql) can turn the answer for a name. trg_block_types_embed_
 -- excluded, AFTER INSERT OR UPDATE OF name, config OR DELETE, FOR EACH ROW,
 -- queues the name in context_embed_excluded_reconcile when the answer may
 -- have changed (the changed row is or was excluded, or an excluded row of
--- the name is left); the scheduler's reconcile (events.runEmbedExcludedLoop)
--- sets the marker of the queued names' live blocks in batches, outside the
--- registry write. A policy change of a type with millions of blocks
+-- the name is left); the scheduler's reconcile
+-- (events.runEmbedExcludedReconcile, store.ReconcileEmbedExcluded) sets the
+-- marker of the queued names' live blocks in batches, outside the registry
+-- write. A policy change of a type with millions of blocks
 -- therefore costs the type API one queue row, not millions of row updates
 -- in its request. Until the reconcile has passed:
 --   * a name that became never-embedded: its unmarked pending blocks stay in
@@ -110,15 +112,17 @@
 -- for the catalog write only, no rewrite); CREATE TRIGGER takes SHARE ROW
 -- EXCLUSIVE; a transaction holding a table longer fails the migration with
 -- 55P03, the file rolls back, the next boot tries again.
--- At run time the two triggers order themselves on the registry rows of a
--- name: a block write whose answer is true holds them FOR KEY SHARE until
--- its commit and then decides again on a fresh snapshot; a registry change
--- that queues the name takes them FOR UPDATE before it queues. So a block
--- written on the registry's old state commits before the registry change
--- does, and the reconcile, which starts after it, sees it; a block written
--- after waits and decides on the new state. A registry change never waits
--- on a block row and the reconcile never holds a queue or registry row while
--- it updates blocks, so the order has no cycle.
+-- At run time the two triggers order themselves on one transaction-level
+-- advisory lock per type name, hashtext('ctx:embed_excluded:' || name): a
+-- block write whose answer is true takes it shared until its commit and then
+-- decides again on a fresh snapshot; a registry change that queues the name
+-- takes it exclusive before it queues. So a block written on the registry's
+-- old state commits before the registry change does, and the reconcile,
+-- which starts after it, sees it; a block written after waits and decides on
+-- the new state. The lock is the only object both sides wait on (no tuple
+-- lock on a registry row, so no lock-order cycle over a name's several rows
+-- and no MultiXact on a hot builtin row); a registry change never waits on a
+-- block row, and the reconcile holds no queue row while it updates blocks.
 --
 -- REVERT (forward-only tree; to undo temporarily): the column cannot be
 -- dropped while a binary of this change runs. The triggers can:
@@ -167,16 +171,17 @@ BEGIN
     IF TG_OP = 'UPDATE'
        AND NEW.type_name IS NOT DISTINCT FROM OLD.type_name
        AND NEW.embed_excluded IS NOT DISTINCT FROM OLD.embed_excluded
-       AND (NEW.is_archived OR NOT OLD.is_archived) THEN
+       AND (NEW.is_archived OR NOT OLD.is_archived)          -- not an unarchive
+       AND (NEW.embedding IS NOT NULL OR OLD.embedding IS NULL) THEN -- not a vector clear
         RETURN NEW;
     END IF;
     NEW.embed_excluded := ctx_block_type_never_embedded(NEW.type_name);
     IF NEW.embed_excluded THEN
-        -- Hold the rows that make the answer true, then decide again on a
-        -- fresh snapshot: a registry change that lifts the exclusion either
-        -- waits for this commit (and its reconcile sees this row) or has
-        -- committed before this second look.
-        PERFORM 1 FROM context_block_types WHERE name = NEW.type_name FOR KEY SHARE;
+        -- Take the name's lock, then decide again on a fresh snapshot: a
+        -- registry change that lifts the exclusion either waits for this
+        -- commit (and its reconcile sees this row) or has committed before
+        -- this second look.
+        PERFORM pg_advisory_xact_lock_shared(hashtext('ctx:embed_excluded:' || NEW.type_name));
         NEW.embed_excluded := ctx_block_type_never_embedded(NEW.type_name);
     END IF;
     RETURN NEW;
@@ -184,10 +189,10 @@ END;
 $$;
 
 COMMENT ON FUNCTION context_blocks_embed_excluded() IS
-    'trg_block_embed_excluded (migration 175): sets context_blocks.embed_excluded from the type registry on insert, re-type and unarchive.';
+    'trg_block_embed_excluded (migration 175): sets context_blocks.embed_excluded from the type registry on insert, re-type, unarchive and vector clear.';
 
 CREATE OR REPLACE TRIGGER trg_block_embed_excluded
-    BEFORE INSERT OR UPDATE OF type_name, embed_excluded, is_archived ON context_blocks
+    BEFORE INSERT OR UPDATE OF type_name, embed_excluded, is_archived, embedding ON context_blocks
     FOR EACH ROW EXECUTE FUNCTION context_blocks_embed_excluded();
 
 CREATE OR REPLACE FUNCTION context_block_types_embed_excluded() RETURNS trigger
@@ -212,7 +217,7 @@ BEGIN
            OR (TG_OP <> 'DELETE' AND NEW.name = v_name AND NEW.config->'retrieval'->>'policy' = 'excluded')
            OR EXISTS (SELECT 1 FROM context_block_types t
                        WHERE t.name = v_name AND t.config->'retrieval'->>'policy' = 'excluded') THEN
-            PERFORM 1 FROM context_block_types WHERE name = v_name FOR UPDATE;
+            PERFORM pg_advisory_xact_lock(hashtext('ctx:embed_excluded:' || v_name));
             INSERT INTO context_embed_excluded_reconcile (name) VALUES (v_name)
                 ON CONFLICT (name) DO UPDATE SET queued_at = clock_timestamp();
         END IF;

@@ -64,6 +64,16 @@ const EmbedPendingPredicate = `(embedding IS NULL OR embedding_stale) AND NOT is
 // correct at its cost before 175.
 const UnembeddedPendingPredicate = `embedding IS NULL AND NOT embed_excluded`
 
+// UnembeddedSensIndexMarkedReady holds while idx_embedding_pending_sens has
+// the definition of migration 175 (valid, ready, the deparsed form the
+// migration adopts), the condition under which a count of the unembedded
+// set without the never-embedded blocks reads that index instead of walking
+// them (the /status backlog). Before the out-of-band build of a large corpus
+// the index still carries migration 171's predicate.
+const UnembeddedSensIndexMarkedReady = `EXISTS (SELECT 1 FROM pg_index
+		WHERE indexrelid = to_regclass('public.idx_embedding_pending_sens') AND indisvalid AND indisready
+		  AND pg_get_indexdef(indexrelid) = 'CREATE INDEX idx_embedding_pending_sens ON public.context_blocks USING btree (sensitivity, created_at, id) WHERE ((embedding IS NULL) AND (NOT is_archived) AND (NOT embed_excluded))')`
+
 // The partial indexes the stale branches of PendingPickSQL read (migration
 // 173, WHERE embedding_stale AND NOT is_archived), one per branch shape like
 // idx_embedding_pending_scope_sens and idx_embedding_pending_sens.

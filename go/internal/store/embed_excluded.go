@@ -16,53 +16,86 @@ import (
 // batch regardless.
 const EmbedExcludedReconcileBatch = 1000
 
-// The two statements of a reconcile batch for one type name ($1), at most $2
-// blocks each, issue #291 (migration 175). Each reads exactly the rows it
-// changes, in an index range the changed rows leave:
+// The statements of a reconcile batch for one type name ($1), at most $2
+// blocks each, issue #291 (migration 175):
 //
 //   - markEmbedExcludedSQL: the name became never-embedded. Its unmarked
 //     pending blocks, on idx_embedding_pending_sens (sensitivity, created_at,
-//     id) in its order, which holds no marked row; blocks with a vector or
-//     archived keep false (they are in no pick index, and an unarchive sets
-//     the marker through the trigger).
+//     id) in its order from the keyset cursor ($3, $4, $5) on, so a batch
+//     does not read again what the batches before it passed. A block with a
+//     vector or an archived one keeps false: it is in no pick index, and the
+//     trigger sets the marker when its vector is cleared or it is unarchived.
 //   - clearEmbedExcludedSQL: the name became embeddable. Its marked live
-//     blocks, on idx_blocks_embed_excluded (type_name).
+//     blocks, on idx_blocks_embed_excluded (type_name), which the cleared
+//     rows leave.
+//   - embedExcludedLeftSQL: whether a block of the name still needs the
+//     change, from the start of the range (a block another worker held, one
+//     whose sensitivity moved it behind the cursor).
 //
-// The outer condition repeats the change, so a row another statement changed
-// in the meantime is skipped when its lock is granted (EvalPlanQual re-reads
-// it). trg_block_embed_excluded decides the value from the registry again for
-// every row it writes.
+// The outer condition of an update repeats the change, so a row another
+// statement changed in the meantime is skipped when its lock is granted
+// (EvalPlanQual re-reads it). trg_block_embed_excluded decides the value
+// from the registry again for every row it writes; a batch reports how many
+// rows it wrote and how many of them reached $6, the answer the batch was
+// chosen by (fewer when the registry answer moved under it).
 const (
-	markEmbedExcludedSQL = `UPDATE context_blocks SET embed_excluded = true
-		WHERE id IN (SELECT id FROM context_blocks
-		              WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded AND type_name = $1
-		              ORDER BY sensitivity, created_at, id
-		              LIMIT $2)
-		  AND NOT embed_excluded`
-	clearEmbedExcludedSQL = `UPDATE context_blocks SET embed_excluded = false
-		WHERE id IN (SELECT id FROM context_blocks
-		              WHERE embed_excluded AND NOT is_archived AND type_name = $1
-		              LIMIT $2)
-		  AND embed_excluded`
+	markEmbedExcludedSQL = `WITH u AS (
+		UPDATE context_blocks SET embed_excluded = true
+		 WHERE id IN (SELECT id FROM context_blocks
+		               WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded AND type_name = $1
+		                 AND (sensitivity, created_at, id) > ($3::text, $4::timestamptz, $5::uuid)
+		               ORDER BY sensitivity, created_at, id
+		               LIMIT $2)
+		   AND NOT embed_excluded
+		RETURNING embed_excluded, sensitivity, created_at, id)
+		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE embed_excluded = $6),
+		       l.sensitivity, l.created_at, l.id
+		  FROM (SELECT 1) one
+		  LEFT JOIN LATERAL (SELECT sensitivity, created_at, id FROM u
+		                      ORDER BY sensitivity DESC, created_at DESC, id DESC LIMIT 1) l ON true`
+	clearEmbedExcludedSQL = `WITH u AS (
+		UPDATE context_blocks SET embed_excluded = false
+		 WHERE id IN (SELECT id FROM context_blocks
+		               WHERE embed_excluded AND NOT is_archived AND type_name = $1
+		               LIMIT $2)
+		   AND embed_excluded
+		RETURNING embed_excluded)
+		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE embed_excluded = $3)`
+	embedExcludedLeftSQL = `SELECT CASE WHEN $2::boolean
+		THEN EXISTS (SELECT 1 FROM context_blocks
+		              WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded AND type_name = $1)
+		ELSE EXISTS (SELECT 1 FROM context_blocks
+		              WHERE embed_excluded AND NOT is_archived AND type_name = $1) END`
 )
+
+// embedExcludedKeyStart is the keyset cursor before every block: no
+// sensitivity is the empty string.
+var embedExcludedKeyStart = embedExcludedKey{sens: "", at: time.Unix(0, 0).UTC().AddDate(-100, 0, 0), id: "00000000-0000-0000-0000-000000000000"}
+
+type embedExcludedKey struct {
+	sens string
+	at   time.Time
+	id   string
+}
 
 // EmbedExcludedReconcileResult is what one ReconcileEmbedExcluded call did.
 type EmbedExcludedReconcileResult struct {
 	Names   int // queue rows worked on
 	Done    int // queue rows removed (no later registry change re-queued them)
-	Updated int // blocks whose marker changed
+	Updated int // blocks whose marker reached the registry's answer
 }
 
 // ReconcileEmbedExcluded drains context_embed_excluded_reconcile (migration
 // 175): for every type name a registry change queued, it sets the
 // embed_excluded marker of the name's blocks to the registry's answer
 // (ctx_block_type_never_embedded), batch by batch, each batch its own
-// statement, and then removes the queue row unless a registry change queued
-// the name again in the meantime (queued_at moved). It holds no queue or
-// registry row while it updates blocks, so a registry change never waits on
-// it longer than one batch (the order in the header of 175_embed_excluded.sql).
-// Several ctx processes on one database may run it at the same time; a block
-// set twice is skipped by the second statement.
+// statement, until no block of the name needs the change, and then removes
+// the queue row unless a registry change queued the name again in the
+// meantime (queued_at moved). It holds no queue row while it updates blocks
+// (the order in the header of 175_embed_excluded.sql). Several ctx processes
+// on one database may run it at the same time; a block set twice is skipped
+// by the second statement, and each process removes the queue row only after
+// it has seen nothing left.
 func ReconcileEmbedExcluded(ctx context.Context, pool *pgxpool.Pool) (EmbedExcludedReconcileResult, error) {
 	var res EmbedExcludedReconcileResult
 	type queued struct {
@@ -82,23 +115,13 @@ func ReconcileEmbedExcluded(ctx context.Context, pool *pgxpool.Pool) (EmbedExclu
 	}
 	for _, e := range q {
 		res.Names++
-		var never bool
-		if err := pool.QueryRow(ctx, `SELECT ctx_block_type_never_embedded($1)`, e.name).Scan(&never); err != nil {
-			return res, fmt.Errorf("store: embed-excluded answer %q: %w", e.name, err)
+		n, done, err := reconcileEmbedExcludedName(ctx, pool, e.name)
+		res.Updated += n
+		if err != nil {
+			return res, err
 		}
-		stmt := clearEmbedExcludedSQL
-		if never {
-			stmt = markEmbedExcludedSQL
-		}
-		for {
-			tag, err := pool.Exec(ctx, stmt, e.name, EmbedExcludedReconcileBatch)
-			if err != nil {
-				return res, fmt.Errorf("store: embed-excluded reconcile %q: %w", e.name, err)
-			}
-			res.Updated += int(tag.RowsAffected())
-			if tag.RowsAffected() < EmbedExcludedReconcileBatch {
-				break
-			}
+		if !done {
+			continue // the answer kept moving: the queue row stays for the next pass
 		}
 		tag, err := pool.Exec(ctx,
 			`DELETE FROM context_embed_excluded_reconcile WHERE name = $1 AND queued_at = $2`, e.name, e.at)
@@ -108,4 +131,62 @@ func ReconcileEmbedExcluded(ctx context.Context, pool *pgxpool.Pool) (EmbedExclu
 		res.Done += int(tag.RowsAffected())
 	}
 	return res, nil
+}
+
+// reconcileEmbedExcludedName runs the batches of one name until none is
+// left. done=false: the registry's answer moved under two batches in a row
+// (each batch's rows were set back by the trigger), so the name is left for
+// the next pass, whose queue row the registry change renewed.
+func reconcileEmbedExcludedName(ctx context.Context, pool *pgxpool.Pool, name string) (updated int, done bool, err error) {
+	cursor := embedExcludedKeyStart
+	moved := 0
+	for {
+		var never bool
+		if err := pool.QueryRow(ctx, `SELECT ctx_block_type_never_embedded($1)`, name).Scan(&never); err != nil {
+			return updated, false, fmt.Errorf("store: embed-excluded answer %q: %w", name, err)
+		}
+		var wrote, reached int
+		if never {
+			var sens *string
+			var at *time.Time
+			var id *string
+			if err := pool.QueryRow(ctx, markEmbedExcludedSQL, name, EmbedExcludedReconcileBatch,
+				cursor.sens, cursor.at, cursor.id, true).Scan(&wrote, &reached, &sens, &at, &id); err != nil {
+				return updated, false, fmt.Errorf("store: embed-excluded mark %q: %w", name, err)
+			}
+			if sens != nil {
+				cursor = embedExcludedKey{sens: *sens, at: *at, id: *id}
+			}
+		} else if err := pool.QueryRow(ctx, clearEmbedExcludedSQL, name, EmbedExcludedReconcileBatch, false).
+			Scan(&wrote, &reached); err != nil {
+			return updated, false, fmt.Errorf("store: embed-excluded clear %q: %w", name, err)
+		}
+		updated += reached
+		switch {
+		case wrote > 0 && reached == 0:
+			// The trigger set every row back: the answer moved after it was
+			// read. Read it again; twice in a row leaves the name queued.
+			if moved++; moved == 2 {
+				return updated, false, nil
+			}
+			cursor = embedExcludedKeyStart
+		case wrote > 0:
+			moved = 0
+		default:
+			// Nothing from the cursor on: look from the start once more.
+			var left bool
+			if err := pool.QueryRow(ctx, embedExcludedLeftSQL, name, never).Scan(&left); err != nil {
+				return updated, false, fmt.Errorf("store: embed-excluded left %q: %w", name, err)
+			}
+			if !left {
+				return updated, true, nil
+			}
+			if cursor == embedExcludedKeyStart {
+				// Left over but not reachable by a batch from the start (held
+				// and then changed by another statement): the next pass.
+				return updated, false, nil
+			}
+			cursor = embedExcludedKeyStart
+		}
+	}
 }
