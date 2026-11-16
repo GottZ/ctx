@@ -61,8 +61,11 @@
 -- column's attnum, so after a re-embed cutover it would follow embedding_old
 -- and block the cleanup's DROP COLUMN (2BP01). A block of a type that became
 -- never-embedded while it held a vector keeps false until it is re-typed or
--- unarchived; when its vector is cleared it is filtered by the type
--- predicate as before this migration.
+-- unarchived (the reconcile marks blocks without a vector only, so the
+-- marker is no inventory of a type's blocks); when its vector is cleared it
+-- is filtered by the type predicate as before this migration, and when a
+-- content change marks it stale the stale picks filter it by the same
+-- predicate, which the /status backlog applies to the stale set as well.
 --
 -- A REGISTRY CHANGE can turn the answer for a name: a write of its _global
 -- row (a migration, an operator), or an overlay that lifts a _global
@@ -71,11 +74,12 @@
 -- scope, config OR DELETE, FOR EACH ROW, queues the name in
 -- context_embed_excluded_reconcile exactly then: the changed row is a _global
 -- row that is or was excluded, or a non-_global row that is or was not
--- excluded while the name's _global row is excluded. A tenant overlay that
--- carries `excluded` queues nothing. The scheduler's reconcile
+-- excluded while the name's _global row is excluded; for such a row it
+-- takes the name's lock before it reads the _global row (LOCKS). A tenant
+-- overlay that carries `excluded` queues nothing. The scheduler's reconcile
 -- (events.runEmbedExcludedReconcile, store.ReconcileEmbedExcluded) sets the
--- marker of the queued names' live blocks in batches, outside the registry
--- write. A policy change of a type with millions of blocks
+-- marker on the queued names' live blocks without a vector, or clears it on
+-- their marked live blocks, in batches, outside the registry write. A policy change of a type with millions of blocks
 -- therefore costs the type API one queue row, not millions of row updates
 -- in its request. Until the reconcile has passed:
 --   * a name that became never-embedded: its unmarked pending blocks stay in
@@ -153,11 +157,22 @@
 -- At run time the two triggers order themselves on one transaction-level
 -- advisory lock per type name, hashtext('ctx:embed_excluded:' || name): a
 -- block write whose answer is true takes it shared until its commit and then
--- decides again on a fresh snapshot; a registry change that queues the name
--- takes it exclusive before it queues. So a block written on the registry's
--- old state commits before the registry change does, and the reconcile,
--- which starts after it, sees it; a block written after waits and decides on
--- the new state. The lock is the only object both sides wait on (no tuple
+-- decides again on a fresh snapshot; a change of a _global row that is or
+-- was excluded takes it exclusive before it queues; a change of a row of
+-- another scope that is or was not excluded takes it exclusive before it
+-- reads the _global row, on the statement after the lock and so on a fresh
+-- snapshot, and queues when that row is excluded. So a block written on the
+-- registry's old state commits before the registry change does, and the
+-- reconcile, which starts after it, sees it; a block written after waits and
+-- decides on the new state. Of a lifting overlay and a change of its
+-- _global row to excluded, the later waits for the earlier: an overlay
+-- written first holds the lock until its commit, so the _global change and
+-- its reconcile see it; an overlay written after the _global change reads
+-- that row after its commit and queues the name, and a reconcile that runs
+-- before the overlay's commit waits for it on its first marking batch. (A
+-- REPEATABLE READ or SERIALIZABLE transaction reads on its first snapshot
+-- after the lock too; ctx writes the registry and the blocks in READ
+-- COMMITTED, a psql session that writes either should as well.) The lock is the only object both sides wait on (no tuple
 -- lock on a registry row, so no lock-order cycle over a name's several rows
 -- and no MultiXact on a hot builtin row); a registry change never waits on a
 -- block row, and the reconcile holds no queue row while it updates blocks.
@@ -170,10 +185,12 @@
 --     is the one the lock closes.
 --   * A transaction that changes the registry rows of two names takes their
 --     locks in the order of its rows; a transaction that writes blocks of
---     both names in the other order, both answers true, closes a cycle, and
---     PostgreSQL ends one of them with 40P01. The type API changes one name
---     per transaction; a migration or psql session that changes several
---     names while writers run changes one name per transaction.
+--     both names in the other order, both answers true, or another registry
+--     transaction that changes rows of both names in the other order closes
+--     a cycle, and PostgreSQL ends one of them with 40P01. The type API
+--     changes one row per transaction; a migration or psql session that
+--     changes several names while writers run changes one name per
+--     transaction.
 --
 -- REVERT (forward-only tree; to undo temporarily): the column cannot be
 -- dropped while a binary of this change runs. The triggers can:
@@ -272,17 +289,25 @@ BEGIN
         IF (TG_OP <> 'INSERT' AND OLD.name = v_name AND OLD.scope = '_global'
                 AND OLD.config->'retrieval'->>'policy' = 'excluded')
            OR (TG_OP <> 'DELETE' AND NEW.name = v_name AND NEW.scope = '_global'
-                AND NEW.config->'retrieval'->>'policy' = 'excluded')
-           OR (((TG_OP <> 'INSERT' AND OLD.name = v_name AND OLD.scope <> '_global'
-                    AND OLD.config->'retrieval'->>'policy' IS DISTINCT FROM 'excluded')
-                OR (TG_OP <> 'DELETE' AND NEW.name = v_name AND NEW.scope <> '_global'
-                    AND NEW.config->'retrieval'->>'policy' IS DISTINCT FROM 'excluded'))
-               AND EXISTS (SELECT 1 FROM context_block_types t
-                            WHERE t.name = v_name AND t.scope = '_global'
-                              AND t.config->'retrieval'->>'policy' = 'excluded')) THEN
+                AND NEW.config->'retrieval'->>'policy' = 'excluded') THEN
             PERFORM pg_advisory_xact_lock(hashtext('ctx:embed_excluded:' || v_name));
             INSERT INTO context_embed_excluded_reconcile (name) VALUES (v_name)
                 ON CONFLICT (name) DO UPDATE SET queued_at = clock_timestamp();
+        ELSIF (TG_OP <> 'INSERT' AND OLD.name = v_name AND OLD.scope <> '_global'
+                AND OLD.config->'retrieval'->>'policy' IS DISTINCT FROM 'excluded')
+           OR (TG_OP <> 'DELETE' AND NEW.name = v_name AND NEW.scope <> '_global'
+                AND NEW.config->'retrieval'->>'policy' IS DISTINCT FROM 'excluded') THEN
+            -- Take the name's lock first, then read the _global row on a
+            -- fresh snapshot: a change of the _global row to excluded either
+            -- waits for this commit (and its reconcile sees this row) or has
+            -- committed before this look, which then queues the name.
+            PERFORM pg_advisory_xact_lock(hashtext('ctx:embed_excluded:' || v_name));
+            IF EXISTS (SELECT 1 FROM context_block_types t
+                        WHERE t.name = v_name AND t.scope = '_global'
+                          AND t.config->'retrieval'->>'policy' = 'excluded') THEN
+                INSERT INTO context_embed_excluded_reconcile (name) VALUES (v_name)
+                    ON CONFLICT (name) DO UPDATE SET queued_at = clock_timestamp();
+            END IF;
         END IF;
     END LOOP;
     RETURN NULL;
