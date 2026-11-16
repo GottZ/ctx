@@ -5,7 +5,7 @@
 # answers of the MCP store/search/get/query tools): ruff, `hermes plugins validate`, the umbrella suite (tests/:
 # checkpoint contract, setup surfaces, status, MCP transport, loader and installer) and the engine suite (memory/tests/:
 # recall, tools, mirror, facts, digests, chain, MCP answer contract, CLI, security sweep). Both suites use fakes for
-# ctx; no network. The answers the fakes give come from memory/tests/mcp_answers.json, which the Go integration test
+# ctx; no network. The store answers of the MCP doubles come from memory/tests/mcp_answers.json, which the Go test
 # go/internal/handler/mcp_checkpoint_answers_integration_test.go (ci.yml, handler shard) compares with the real
 # handlers' answers. The runner account is not root, so the unreadable-folder tests run here (a root run skips them).
 #

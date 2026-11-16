@@ -340,11 +340,11 @@ account Hermes Desktop runs as, with inherited permissions; on Linux, readable b
 the Hermes user), or install again from a normal shell of that account after
 removing the folder. Running `hermes plugins install ctx_checkpoint` again does not
 help while the folder exists, and turning `compression.checkpoint_required` off
-only hides the cause. The first line is missing when the folder itself cannot be
-opened (on Linux: no read or execute permission on the folder): Hermes then takes
-the folder for one without a plugin and only the other two lines appear.
-`integrations/hermes/scripts/install.sh` leaves a copy every account can read,
-whatever the umask of the shell it runs in.
+only hides the cause. Which permission is missing and the Python version change the
+first line: a folder Hermes cannot enter leaves it out on Python 3.14 (only the other
+two lines appear), a folder it can enter but not list gives `… loaded but no provider
+instance found` instead. `integrations/hermes/scripts/install.sh` leaves a copy every
+account can read, whatever the umask of the shell it runs in.
 
 **Every compaction is refused and the log names `checkpoint_mode: off`.**
 `checkpoint_mode: off` — in `memory.ctx_checkpoint` or in `$HERMES_HOME/ctx.json`,

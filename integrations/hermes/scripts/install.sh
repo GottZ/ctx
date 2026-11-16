@@ -81,15 +81,22 @@ else
         echo "existing install found — backing up to ${BACKUP}"
         mv "$DEST" "$BACKUP"
     fi
-    mkdir -p "${HOME_DIR}/plugins"
     # Readable for the account Hermes runs as, whatever the installing shell's umask or the
     # checkout's modes (a sudo or elevated shell often has 077): Hermes skips a plugin folder
     # it cannot read, and with compression.checkpoint_required every compaction then fails.
-    # The plugin holds no secrets; the key stays in Hermes' .env.
-    (umask 022 && cp -R "$PLUGIN_SRC" "$DEST")
-    chmod -R u+rwX,go+rX "$DEST"
-    find "$DEST" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
-    rm -rf "${DEST}/.ruff_cache"
+    # Everything in the plugin source directory becomes readable for every account — keep
+    # nothing private there; the ctx key belongs in Hermes' .env.
+    (umask 022 && mkdir -p "${HOME_DIR}/plugins")
+    # The copy is built and its modes are set in a private staging directory, then moved into
+    # place: plugins/ can be writable by the Hermes account, and chmod -R follows a symbolic
+    # link given as its operand, so no command here works on a path below plugins/ but the move.
+    STAGE="$(mktemp -d)"
+    trap 'rm -rf "$STAGE"' EXIT
+    (umask 022 && cp -R "$PLUGIN_SRC" "${STAGE}/${PLUGIN_NAME}")
+    find "${STAGE}/${PLUGIN_NAME}" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+    rm -rf "${STAGE}/${PLUGIN_NAME}/.ruff_cache"
+    chmod -R u+rwX,go+rX "${STAGE}/${PLUGIN_NAME}"
+    mv "${STAGE}/${PLUGIN_NAME}" "$DEST"
     echo "installed plugin version $(cat "${DEST}/VERSION")"
 fi
 

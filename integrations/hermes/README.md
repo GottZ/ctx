@@ -361,8 +361,9 @@ compaction.
 Contract tests ship on both sides: host-side upstream in
 `tests/agent/test_pre_compress_checkpoint_contract.py` (26 tests on `v0.22.4`, 2026-10)
 and provider-side here in `plugin/ctx_checkpoint/tests/` (mocked MCP dispatch —
-no live ctx needed; the store, get and search answers it gives are the ones
-ctx's handler test pins in `plugin/ctx_checkpoint/memory/tests/mcp_answers.json`):
+no live ctx needed; its store answers come from
+`plugin/ctx_checkpoint/memory/tests/mcp_answers.json`, the fixture ctx's handler
+test pins the real answers against):
 `test_provider_contract.py` covers the checkpoint chain,
 `test_contract_negotiation.py` the runtime negotiation against the real host
 on `PYTHONPATH` plus a monkeypatched v3 host, `test_setup.py` the setup
