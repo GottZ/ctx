@@ -25,19 +25,25 @@ Redaction keys of status and CLI, installer tests, untrusted_origin in the recal
   a redacted DEBUG traceback instead of `exc_info`) and every error line of the CLI on
   `transport: rest` (`search`, `get`, `query`, `store`, `sync`, `status`, a raised
   `CtxApiError`) redact with it — plus `CTX_KEY` on REST, as the provider — through
-  `checkpoint.redact_error_text`. Before, status and test knew `CTX_API_KEY` or the key just
-  typed, the CLI `CTX_KEY` only: a key the entry referenced through another variable, or a
-  `password:` value, passed. A CLI error line is now one line of at most 300 characters after
+  `checkpoint.redact_error_text`. The connection test adds the keys of the entry it probes
+  (`status.entry_keys`) to whatever its caller passes. Before, status and test knew
+  `CTX_API_KEY` or the key just typed, the CLI `CTX_KEY` only: a key the entry referenced
+  through another variable, or a `password:` value, passed. A CLI error line is now one line of at most 300 characters after
   redaction (`status.redact_error`), the `whoami failed` cause of the REST status at most 140.
 - **Installer tests outside a checkout.** The seven tests of
   `integrations/hermes/scripts/install.sh` skip with a reason when the script is not next to
-  the plugin folder, as in a catalog install; there five failed and two passed only because
-  bash could not find the script.
+  the plugin folder and the folder is not in a ctx checkout (`go/go.mod` four levels up), as in
+  a catalog install, a flat copy such as `/plugins/ctx_checkpoint` included (it failed
+  collection before); there five failed and two passed only because bash could not find the
+  script. In a checkout they fail when the script is missing: the tests that run it assert it
+  exists, so the staging and move tests no longer pass on bash's own non-zero exit.
 - **untrusted_origin in the recall (part of GottZ/ctx#295).** ctx v5.41.0 records on a block
   re-typed out of a type marked untrusted the type it came from (`untrusted_origin`, #280).
   `config.untrusted_origin` reads the record (a value that is no type name keeps the mark
-  as `?`), `config.untrusted_origin_note` words it as the server does. The prefetch block puts
-  the note line under the hit's label and one sentence into its intro; `ctx_query`,
+  as `?`), `config.untrusted_origin_note` words it as the server does, and
+  `config.with_untrusted_origin_checked` puts the checked value into an answer passed on whole
+  (`ctx_get`, `hermes ctx_checkpoint get`, the MCP client's note line and content reload).
+  The prefetch block puts the note line under the hit's label and one sentence into its intro; `ctx_query`,
   `ctx_search` (`_trust_fields`) and `ctx_get` carry the field and an `origin_note`; the CLI
   hit lines carry the note line. It is a note, not untrusted framing: the owner's decision
   on #280 lets the corpus take such knowledge up, so `prefetch_untrusted: drop` keeps the hit.
