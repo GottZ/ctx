@@ -242,6 +242,48 @@ def test_an_answer_without_a_block_hands_the_model_no_key(home, caplog, tool, an
     _assert_clean(_records(caplog))
 
 
+class _RawClient:
+    """A client that hands out the server's error texts as they came (no redaction of its own):
+    the tools and the provider must not rely on the client having redacted them."""
+
+    transport = "mcp"
+
+    def _fail(self, *args, **kwargs):
+        raise CtxApiError(f"refused for key {CTX_KEY}", code=f"bad-{CTX_KEY}")
+
+    store = search = get_block = _fail
+
+    def query(self, *args, **kwargs):
+        return {"success": False, "error": f"query refused for key {CTX_KEY}"}
+
+
+@pytest.mark.parametrize("tool", sorted(TOOL_CALLS))
+def test_the_tools_redact_what_a_client_hands_them(home, caplog, tool):
+    provider = _provider(home, _echo_dispatch(set()), memory=True)
+    provider._client = _RawClient()
+
+    with caplog.at_level(logging.DEBUG):
+        result = provider.handle_tool_call(tool, dict(TOOL_CALLS[tool][1]))
+
+    assert "error" in json.loads(result)
+    _assert_clean(result)
+    _assert_clean(_records(caplog))
+
+
+def test_the_prefetch_lines_redact_what_a_client_hands_them(home, caplog):
+    provider = _provider(home, _echo_dispatch(set()), memory=True, prefetch_mode="search")
+    provider._client = _RawClient()
+
+    with caplog.at_level(logging.DEBUG):
+        assert provider.prefetch("which proxy?") == ""
+        provider.queue_prefetch("which proxy now?")
+        provider._queue_thread.join(timeout=10)
+
+    logged = _records(caplog)
+    assert "prefetch failed" in logged and "warm-up failed" in logged
+    _assert_clean(logged)
+
+
 # -- 3. Prefetch, recall and digest debug lines -------------------------------------------
 
 
