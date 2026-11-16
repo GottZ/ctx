@@ -87,12 +87,12 @@ def test_every_source_line_of_the_query_text_is_read_with_its_tail_and_note():
 
 def test_a_source_line_with_a_tail_the_plugin_does_not_know_is_kept():
     text = (
-        "a\n\nSources:\n[1] T (c) id:019f6000-0000-7000-8000-000000000b01 later_field:x\n"
+        "a\n\nSources:\n[1] T (c) id:019f6000-0000-7000-8000-000000000b01 later_field2:x\n"
         "[2] U (c) id:019f6000-0000-7000-8000-000000000b02\n"
     )
     _answer, sources = _parse_query_text(text)
     assert [s["id"][-3:] for s in sources] == ["b01", "b02"]
-    assert "later_field" not in sources[0]
+    assert "later_field2" not in sources[0]
 
 
 @pytest.mark.parametrize("separator", ["\r", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"])
