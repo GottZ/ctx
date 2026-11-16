@@ -477,8 +477,9 @@ func efSearchProbeSteps(ctx context.Context, tx pgx.Tx, fallback string) string 
 // idx_embedding_pending, Achse 04/K2, and the stale indexes of migration
 // 173) — it computes ONLY when a matching partial index exists on
 // context_blocks, else null (never 0, never an unguarded scan; Gate G3).
-// A block of a type that is never embedded (embed_excluded, issue #291) is
-// not backlog once idx_embedding_pending_sens leaves such blocks out
+// A block of a type that is never embedded (issue #291) is not backlog: the
+// unembedded set leaves it out once idx_embedding_pending_sens leaves the
+// marked blocks out, the stale set by the pick's type predicate
 // (embedBacklogSQL).
 // Each set is counted in its own index range, and a stale block whose vector
 // a cutover sweep nulled is counted once, with the unembedded. The stale set
@@ -528,12 +529,20 @@ func embedBacklogSQL(staleReady, markedReady bool) string {
 			  ORDER BY sensitivity, created_at, id
 			  LIMIT $1)`
 	}
+	// The stale set keeps the type predicate of the pick's stale branches
+	// (store.PendingPickSQL): a block that held a vector when its type became
+	// never-embedded carries no marker (the reconcile marks unembedded
+	// blocks only), and once a content change marks it stale the backfill
+	// never picks it, so it is no backlog (#291, review round 4). The count
+	// reads every stale row of such a type (one registry probe each; 10 000
+	// rows measured 40 478 buffers, 69 ms); the live database has none, and
+	// at most its blocks with a vector of such a type can become one.
 	stale := ""
 	if staleReady {
 		stale = `
 			UNION ALL
 			(SELECT 1 FROM context_blocks
-			  WHERE embedding_stale AND NOT is_archived AND embedding IS NOT NULL
+			  WHERE embedding_stale AND NOT is_archived AND embedding IS NOT NULL` + store.RetrievalExcludedTypePredicate + `
 			  LIMIT $1)`
 	}
 	return `

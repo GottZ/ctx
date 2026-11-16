@@ -109,8 +109,10 @@ type EmbedExcludedReconcileResult struct {
 
 // ReconcileEmbedExcluded drains context_embed_excluded_reconcile (migration
 // 175): for every type name a registry change queued, it sets the
-// embed_excluded marker of the name's blocks to the registry's answer
-// (ctx_block_type_never_embedded), batch by batch, each batch its own
+// embed_excluded marker of the name's live blocks to the registry's answer
+// (ctx_block_type_never_embedded) — marking takes the blocks without a
+// vector (the range of idx_embedding_pending_sens), clearing every marked
+// one, so a block that holds a vector keeps false — batch by batch, each batch its own
 // statement, until no block of the name needs the change, and then removes
 // the queue row unless a registry change queued the name again in the
 // meantime (queued_at moved). It holds no queue row while it updates blocks
