@@ -195,7 +195,10 @@ and the context-engine binding, and prints the config steps. It never edits `con
 anything. The copy is built and made readable for every account in a temporary
 directory first; only then is a running install moved aside and the new copy moved
 into its place. If that last step fails, the running install is moved back, so the
-home is never left without the plugin.
+home is never left without the plugin. A Hermes home or `plugins/` folder that its
+owner (taken as the account Hermes runs as) cannot enter by its mode bits stops the
+installer before anything changes, with the `chmod` line to run; the installer does
+not change a folder it did not create.
 
 Use one install path per Hermes home. `hermes plugins install` refuses an
 existing `plugins/ctx_checkpoint/` ("already exists"), and `install.sh` moves

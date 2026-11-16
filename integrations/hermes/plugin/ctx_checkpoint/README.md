@@ -344,7 +344,10 @@ only hides the cause. Which permission is missing and the Python version change 
 first line: a folder Hermes cannot enter leaves it out on Python 3.14 (only the other
 two lines appear), a folder it can enter but not list gives `… loaded but no provider
 instance found` instead. `integrations/hermes/scripts/install.sh` leaves a copy every
-account can read, whatever the umask of the shell it runs in.
+account can read, whatever the umask of the shell it runs in. It does not change a
+`plugins/` folder it did not create: when the owner of the Hermes home (taken as the
+account Hermes runs as) cannot enter it, the script stops before touching the running
+install and prints the `chmod` line to run.
 
 **Every compaction is refused and the log names `checkpoint_mode: off`.**
 `checkpoint_mode: off` — in `memory.ctx_checkpoint` or in `$HERMES_HOME/ctx.json`,

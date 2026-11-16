@@ -193,3 +193,40 @@ def test_install_sh_restores_the_running_install_when_the_move_fails(_isolated_h
     result = _run_install(home, env_extra={"TMPDIR": str(stage_root)}, path_prefix=str(shim))
     assert result.returncode != 0, result.stdout
     _assert_running_install_kept(home, dest)
+
+
+def test_install_sh_stops_on_a_plugins_dir_the_hermes_account_cannot_enter(_isolated_hermes_home):
+    """plugins/ left private by an earlier elevated install (owner root, mode 0700) while the
+    Hermes home belongs to another account: the script changes nothing and names the fix."""
+    if os.geteuid() != 0:
+        pytest.skip("needs root to give the Hermes home and plugins/ different owners")
+    home = _isolated_hermes_home
+    dest = _running_install(home)
+    plugins = home / "plugins"
+    plugins.chmod(stat.S_IRWXU)
+    os.chown(home, 65534, 65534)  # the Hermes account: nobody, root keeps plugins/
+    home.chmod(0o755)
+    result = _run_install(home)
+    assert result.returncode != 0, result.stdout
+    assert f"chmod go+rx '{plugins}'" in result.stderr, result.stderr
+    _assert_running_install_kept(home, dest)
+    assert stat.S_IMODE(plugins.stat().st_mode) == stat.S_IRWXU, "the script must not change plugins/ itself"
+
+
+@pytest.mark.parametrize(("gid", "mode"), [(65534, 0o750), (0, 0o705)], ids=["group", "others"])
+def test_install_sh_accepts_a_plugins_dir_the_hermes_account_can_enter(_isolated_hermes_home, gid, mode):
+    """plugins/ owned by root but open to the Hermes account through its group (0750) or to
+    every account (0705): reachable, no stop, plugins/ unchanged."""
+    if os.geteuid() != 0:
+        pytest.skip("needs root to give the Hermes home and plugins/ different owners")
+    home = _isolated_hermes_home
+    plugins = home / "plugins"
+    plugins.mkdir()
+    os.chown(plugins, 0, gid)
+    plugins.chmod(mode)
+    os.chown(home, 65534, 65534)
+    home.chmod(0o755)
+    result = _run_install(home)
+    assert result.returncode == 0, result.stderr
+    assert (plugins / NAME / "VERSION").is_file()
+    assert stat.S_IMODE(plugins.stat().st_mode) == mode

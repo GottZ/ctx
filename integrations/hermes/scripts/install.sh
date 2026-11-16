@@ -73,6 +73,24 @@ for legacy in "${HOME_DIR}/plugins/${PLUGIN_NAME}.bak-"*; do
     echo "      delete it or rename it to start with a dot." >&2
 done
 
+# "<uid> <gid> <octal mode>" of a path, through symbolic links (GNU stat, then BSD stat).
+owner_mode() {
+    stat -L -c '%u %g %a' "$1" 2>/dev/null || stat -L -f '%u %g %Lp' "$1"
+}
+
+# Can the account <uid> <gid> enter and list the directory <path>? Mode bits only: the owner,
+# then the group (primary group only), then the others; uid 0 passes.
+reachable_for() {
+    local path="$1" uid="$2" gid="$3" o_uid o_gid mode bits
+    [ "$uid" -eq 0 ] && return 0
+    read -r o_uid o_gid mode <<<"$(owner_mode "$path")"
+    mode=$((8#$mode))
+    if [ "$o_uid" -eq "$uid" ]; then bits=$(((mode >> 6) & 5))
+    elif [ "$o_gid" -eq "$gid" ]; then bits=$(((mode >> 3) & 5))
+    else bits=$((mode & 5)); fi
+    [ "$bits" -eq 5 ]
+}
+
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] would install plugin version $(cat "${PLUGIN_SRC}/VERSION")"
 else
@@ -103,7 +121,19 @@ else
     rm -rf "${STAGE}/${PLUGIN_NAME}/.ruff_cache"
     chmod -R u+rwX,go+rX "${STAGE}/${PLUGIN_NAME}"
 
+    # The account Hermes runs as is taken to be the owner of the Hermes home. A plugins/ this
+    # script did not create is not changed: an earlier elevated install can have left it
+    # private, and it may belong to another account — stop and name the fix instead.
     (umask 022 && mkdir -p "$PLUGINS_DIR")
+    read -r HERMES_UID HERMES_GID _ <<<"$(owner_mode "$HOME_DIR")"
+    for dir in "$HOME_DIR" "$PLUGINS_DIR"; do
+        if ! reachable_for "$dir" "$HERMES_UID" "$HERMES_GID"; then
+            echo "${dir} cannot be entered by uid ${HERMES_UID} (the owner of ${HOME_DIR}, taken as the" >&2
+            echo "account Hermes runs as), so Hermes could not load the plugin. Nothing was changed." >&2
+            echo "Fix it and run this script again:  chmod go+rx '${dir}'" >&2
+            exit 1
+        fi
+    done
 
     if [ -d "$DEST" ]; then
         BACKUP="${PLUGINS_DIR}/.${PLUGIN_NAME}.bak-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -119,7 +149,11 @@ else
     else
         mv "${STAGE}/${PLUGIN_NAME}" "$DEST"
     fi
-    echo "installed plugin version $(cat "${DEST}/VERSION")"
+    if [ ! -f "${DEST}/VERSION" ] || ! reachable_for "$DEST" "$HERMES_UID" "$HERMES_GID"; then
+        echo "${DEST} is not in place or cannot be entered by uid ${HERMES_UID}; check it before restarting Hermes." >&2
+        exit 1
+    fi
+    echo "installed plugin version $(cat "${DEST}/VERSION") (the path is open to uid ${HERMES_UID} by its mode bits)"
 fi
 
 # ---------------------------------------------------------------------------
