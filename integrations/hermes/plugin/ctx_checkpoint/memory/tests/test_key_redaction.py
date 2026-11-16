@@ -1091,3 +1091,60 @@ def test_mcp_reinitialize_rebinds_client_identity_and_chain_writer():
     assert provider._whoami_label == "mcp:ctx"
     writer = provider._chain()
     assert writer is not old_writer and writer.client is provider._client
+
+
+# -- a bounded call bounds its 429 retry as well (bot review round 1 of #302) ---------------------
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 1_000.0
+        self.slept = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def _bounded_store(monkeypatch, first_attempt_s):
+    from ctx_plugin.client import CtxApiError, CtxClient
+
+    clock = _Clock()
+    monkeypatch.setattr("ctx_plugin.client._monotonic", clock.monotonic, raising=False)
+    monkeypatch.setattr("ctx_plugin.client._sleep", clock.sleep, raising=False)
+    monkeypatch.setattr("ctx_plugin.client.time.sleep", clock.sleep)
+    attempts = []
+
+    def urlopen(req, *, timeout):
+        attempts.append((clock.now, timeout))
+        if len(attempts) == 1:
+            clock.now += first_attempt_s
+            raise _http_error(429, {"success": False, "error": "max 100 writes", "code": "rate_limit"})
+        return _Resp({"success": True, "block": {"id": "blk-1"}})
+
+    monkeypatch.setattr("ctx_plugin.client._urlopen", urlopen)
+    client = CtxClient(URL_A, KEY_A)
+    try:
+        result = client.store("learnings", "fact: x", "a fact", timeout=3.0)
+    except CtxApiError as exc:
+        result = exc
+    return clock, attempts, result
+
+
+def test_a_429_retry_that_would_start_after_the_time_given_is_not_made(monkeypatch):
+    # The fact store passes the time its deadline leaves (3 s). The 429 answer came after 2.5 s:
+    # waiting 1 s and trying again would start the retry after those 3 s.
+    clock, attempts, result = _bounded_store(monkeypatch, 2.5)
+    assert len(attempts) == 1, attempts
+    assert getattr(result, "status", None) == 429
+    assert clock.now - 1_000.0 <= 3.0
+
+
+def test_a_429_retry_gets_only_the_time_that_is_left(monkeypatch):
+    _clock, attempts, result = _bounded_store(monkeypatch, 0.5)
+    assert len(attempts) == 2 and isinstance(result, dict) and result.get("success")
+    started, timeout = attempts[1]
+    assert started + timeout <= 1_000.0 + 3.0 + 1e-9  # the retry ends with the time given
