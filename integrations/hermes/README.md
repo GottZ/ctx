@@ -360,12 +360,14 @@ compaction.
 
 Contract tests ship on both sides: host-side upstream in
 `tests/agent/test_pre_compress_checkpoint_contract.py` (26 tests on `v0.22.4`, 2026-10)
-and provider-side here in `plugin/ctx_checkpoint/tests/` (145 tests, mocked
-MCP dispatch — no live ctx needed): `test_provider_contract.py` (28) covers
-the checkpoint chain, `test_contract_negotiation.py` (23) the runtime
-negotiation against the real host on `PYTHONPATH` plus a monkeypatched v3
-host, `test_setup.py` (37) the setup surfaces, `test_settings_and_status.py`
-(57) the Desktop memory form through the host's declared-surface route, the
+and provider-side here in `plugin/ctx_checkpoint/tests/` (mocked MCP dispatch —
+no live ctx needed; the store, get and search answers it gives are the ones
+ctx's handler test pins in `plugin/ctx_checkpoint/memory/tests/mcp_answers.json`):
+`test_provider_contract.py` covers the checkpoint chain,
+`test_contract_negotiation.py` the runtime negotiation against the real host
+on `PYTHONPATH` plus a monkeypatched v3 host, `test_setup.py` the setup
+surfaces, `test_settings_and_status.py` the Desktop memory form through the
+host's declared-surface route, the
 Settings → Plugins section through the host's settings writer, the connection
 test, the checkpoint outcome and the status, each test against its own
 temporary `HERMES_HOME`, including a round trip through the host's Dashboard

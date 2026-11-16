@@ -1,10 +1,13 @@
 # ctx_checkpoint (hermes-agent memory provider plugin) — its own suites.
 #
 # The plugin under integrations/hermes/plugin/ctx_checkpoint is Python; none of the Go/web jobs of ci.yml touch it.
-# This workflow runs when the plugin, this file or the ctx MCP handlers change (the plugin parses the answers of the
-# MCP store/search/get/query tools): ruff, `hermes plugins validate`, the umbrella suite (tests/: checkpoint contract,
-# setup surfaces, status, MCP transport) and the engine suite (memory/tests/: recall, tools, mirror, facts, digests,
-# chain, CLI, security sweep). Both suites use fakes for ctx; no network.
+# This workflow runs when the plugin, its installer, this file or the ctx MCP handlers change (the plugin parses the
+# answers of the MCP store/search/get/query tools): ruff, `hermes plugins validate`, the umbrella suite (tests/:
+# checkpoint contract, setup surfaces, status, MCP transport, loader and installer) and the engine suite (memory/tests/:
+# recall, tools, mirror, facts, digests, chain, MCP answer contract, CLI, security sweep). Both suites use fakes for
+# ctx; no network. The answers the fakes give come from memory/tests/mcp_answers.json, which the Go integration test
+# go/internal/handler/mcp_checkpoint_answers_integration_test.go (ci.yml, handler shard) compares with the real
+# handlers' answers. The runner account is not root, so the unreadable-folder tests run here (a root run skips them).
 #
 # The suites import Hermes itself (agent.memory_provider, hermes_cli.config, the memory-provider dashboard routes,
 # the Plugins-hub settings writer): hermes-agent is checked out at a pinned commit (HERMES_AGENT_SHA, upstream main
@@ -21,12 +24,14 @@ on:
     branches: [root]
     paths:
       - "integrations/hermes/plugin/ctx_checkpoint/**"
+      - "integrations/hermes/scripts/install.sh"
       - ".github/workflows/hermes-ctx-checkpoint.yml"
       - "go/internal/handler/mcp*.go"
   pull_request:
     branches: [root]
     paths:
       - "integrations/hermes/plugin/ctx_checkpoint/**"
+      - "integrations/hermes/scripts/install.sh"
       - ".github/workflows/hermes-ctx-checkpoint.yml"
       - "go/internal/handler/mcp*.go"
   workflow_dispatch:

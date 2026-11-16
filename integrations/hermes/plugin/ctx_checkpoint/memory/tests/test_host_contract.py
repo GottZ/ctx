@@ -151,8 +151,16 @@ def test_plugin_yaml_version_matches_chain_metadata_version():
     assert re.search(r"^name:\s*ctx_checkpoint\s*$", text, re.M), "the plugin name is ctx_checkpoint"
 
 
-def test_plugin_dir_ships_no_tests():
-    assert not list(Path(PLUGIN_DIR).glob("test_*.py"))
+def test_no_test_module_sits_next_to_the_plugin_modules():
+    """Tests live in ``tests/`` and ``memory/tests/`` only. An install copies them along (the
+    plugin directory is copied whole); what must not happen is a ``test_*.py`` next to the
+    modules: Hermes can parse every top-level module of the plugin directory to find a memory
+    provider (``plugins/memory/__init__.py`` ``_defines_memory_provider``), and pytest would
+    import such a file with its directory on ``sys.path``, where ``tools`` resolves to the
+    engine's tools.py instead of Hermes' package."""
+    for directory in (Path(PLUGIN_DIR).parent, Path(PLUGIN_DIR)):
+        assert not list(directory.glob("test_*.py")), directory
+        assert not list(directory.glob("*_test.py")), directory
 
 
 def test_ctx_store_success_false_envelope_carries_retryable(make_provider):

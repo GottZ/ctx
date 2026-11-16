@@ -324,7 +324,7 @@ commands need the REST transport (the CLI process has no MCP dispatch).
 log shows, in this order:
 
 ```
-Skipping unreadable plugin directory ctx_checkpoint: [Errno 13] Permission denied: …
+Skipping unreadable plugin directory …/plugins/ctx_checkpoint: [Errno 13] Permission denied: …
 Memory provider 'ctx_checkpoint' is not installed, so external memory is off for this session. …
 compression.checkpoint_required is enabled but the active memory provider (no active provider) does not implement checkpoint API v2. Compress will fail closed. …
 ```
@@ -340,7 +340,11 @@ account Hermes Desktop runs as, with inherited permissions; on Linux, readable b
 the Hermes user), or install again from a normal shell of that account after
 removing the folder. Running `hermes plugins install ctx_checkpoint` again does not
 help while the folder exists, and turning `compression.checkpoint_required` off
-only hides the cause.
+only hides the cause. The first line is missing when the folder itself cannot be
+opened (on Linux: no read or execute permission on the folder): Hermes then takes
+the folder for one without a plugin and only the other two lines appear.
+`integrations/hermes/scripts/install.sh` leaves a copy every account can read,
+whatever the umask of the shell it runs in.
 
 **Every compaction is refused and the log names `checkpoint_mode: off`.**
 `checkpoint_mode: off` — in `memory.ctx_checkpoint` or in `$HERMES_HOME/ctx.json`,
@@ -428,15 +432,21 @@ entry did not connect when Hermes started (wrong key, server down, URL wrong).
 
 ## Tests
 
-Two suites, run separately (both use fakes, no live ctx and no network; the host
-contract comes from a Hermes checkout):
+Two suites, run separately. Both use fakes for ctx, no live server and no network; the
+host contract comes from a hermes-agent checkout, run them with a Python environment that
+has that checkout's dependencies and pytest (CI: `uv sync --locked --group dev` in the
+checkout). The MCP answers the fakes give are the ones ctx's own test pins:
+`memory/tests/mcp_answers.json` is read by both suites and by
+`go/internal/handler/mcp_checkpoint_answers_integration_test.go`, which compares the real
+`store`, `get` and `search` answers with it.
 
 ```bash
 # umbrella: checkpoint contract, negotiation, setup surfaces, settings sections, status, MCP transport,
-# checkpoint pointer and read path on Hermes' compaction path (169)
+# paced chain, checkpoint pointer and read path on Hermes' compaction path
 PYTHONPATH=/path/to/hermes-agent:integrations/hermes/plugin python -m pytest \
     integrations/hermes/plugin/ctx_checkpoint/tests
-# engine: recall, tools, mirror, facts, digests, chain over REST, CLI, security sweep (410)
+# engine: recall, tools, mirror, facts, digests, chain, MCP client and its answer contract, CLI,
+# security sweep
 HERMES_REPO=/path/to/hermes-agent python -m pytest \
     integrations/hermes/plugin/ctx_checkpoint/memory/tests
 # lint + format + bandit rules (ruff.toml in this directory)

@@ -82,7 +82,12 @@ else
         mv "$DEST" "$BACKUP"
     fi
     mkdir -p "${HOME_DIR}/plugins"
-    cp -R "$PLUGIN_SRC" "$DEST"
+    # Readable for the account Hermes runs as, whatever the installing shell's umask or the
+    # checkout's modes (a sudo or elevated shell often has 077): Hermes skips a plugin folder
+    # it cannot read, and with compression.checkpoint_required every compaction then fails.
+    # The plugin holds no secrets; the key stays in Hermes' .env.
+    (umask 022 && cp -R "$PLUGIN_SRC" "$DEST")
+    chmod -R u+rwX,go+rX "$DEST"
     find "$DEST" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
     rm -rf "${DEST}/.ruff_cache"
     echo "installed plugin version $(cat "${DEST}/VERSION")"
