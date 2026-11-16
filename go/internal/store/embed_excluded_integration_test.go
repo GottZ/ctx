@@ -200,10 +200,9 @@ func TestEmbedExcludedLiftWaitsForOpenWrite(t *testing.T) {
 		_, err := store.CreateBlockType(ctx, pool, store.BlockTypeWrite{Name: "checkpoint", Scope: "ee-c", DisplayName: "checkpoint", Config: cfg}, nil, "ee-test")
 		done <- err
 	}()
-	select {
-	case err := <-done:
+	if !lockWaitSeen(t, pool, func() bool { return len(done) == 0 }) {
 		// The create did not wait: the reconcile runs before the commit.
-		if err != nil {
+		if err := <-done; err != nil {
 			t.Fatalf("create overlay: %v", err)
 		}
 		t.Errorf("the lifting overlay's create did not wait for the open checkpoint write")
@@ -211,7 +210,7 @@ func TestEmbedExcludedLiftWaitsForOpenWrite(t *testing.T) {
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	} else {
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
@@ -257,8 +256,8 @@ func TestEmbedExcludedBlockWaitsForOpenLift(t *testing.T) {
 			 VALUES ('ee-cat', 'ee during lift', 'x', 'checkpoint', 'ee-a', 'public', now()) RETURNING id`).Scan(&w.id)
 		done <- w
 	}()
-	select {
-	case w := <-done:
+	if !lockWaitSeen(t, pool, func() bool { return len(done) == 0 }) {
+		w := <-done
 		t.Errorf("the checkpoint write did not wait for the open lift (err %v)", w.err)
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)
@@ -266,7 +265,7 @@ func TestEmbedExcludedBlockWaitsForOpenLift(t *testing.T) {
 		if w.err == nil && marker(t, pool, w.id) {
 			t.Errorf("checkpoint block written during the lift is marked")
 		}
-	case <-time.After(2 * time.Second):
+	} else {
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
@@ -315,7 +314,9 @@ func TestEmbedExcludedReconcileAnswerMoves(t *testing.T) {
 		_, err := store.ReconcileEmbedExcluded(rctx, pool)
 		done <- err
 	}()
-	time.Sleep(500 * time.Millisecond)
+	if !lockWaitSeen(t, pool, func() bool { return len(done) == 0 }) {
+		t.Fatalf("the reconcile did not wait on the held rows: %v", <-done)
+	}
 	if _, err := store.UpdateBlockType(ctx, pool, bt.ID, []string{"_global"}, store.BlockTypeUpdate{Config: excl}, nil, "ee-test"); err != nil {
 		t.Fatalf("exclude again: %v", err)
 	}
@@ -340,6 +341,33 @@ func TestEmbedExcludedReconcileAnswerMoves(t *testing.T) {
 	if queued != 0 {
 		t.Errorf("%d names still queued after a pass on a stable registry", queued)
 	}
+}
+
+// lockWaitSeen reports whether another backend of the database waits on a
+// heavyweight lock (pg_stat_activity wait_event_type 'Lock') while pending()
+// holds; false as soon as pending() no longer holds without such a wait. It
+// observes the wait itself, so a slow runner cannot pass an implementation
+// that does not wait.
+func lockWaitSeen(t *testing.T, pool *pgxpool.Pool, pending func() bool) bool {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		var waiting int
+		if err := pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM pg_stat_activity
+			  WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'`).Scan(&waiting); err != nil {
+			t.Fatalf("lock wait probe: %v", err)
+		}
+		if waiting > 0 {
+			return true
+		}
+		if !pending() {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("neither a lock wait nor the end of the statement within 30 s")
+	return false
 }
 
 // reconcileNoPanic runs one reconcile pass and turns a panic into a test
