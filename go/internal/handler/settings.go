@@ -302,6 +302,10 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	ar := AuthResultFromContext(r.Context())
 	ws := mutationScope(ar)
 	rs := readScopes(ar)
+	if msg, blocked := globalOnlyTenantWrite(key, ws); blocked {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": msg})
+		return
+	}
 	allowShared := false
 	if ws != store.GlobalScope {
 		var serr error
@@ -324,9 +328,9 @@ func (h *SettingsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	// reload path. Applied == the override took effect from the DB layer — the
 	// operator's _global ("settings") OR a tenant's own scope ("tenant"); anything
 	// else means it would be ignored — reject with the build's reason. A
-	// tenant-scope row on a global-only key (a tenant self-granting
-	// allow_shared_secrets) is dropped by the toOverrides gate here → not applied
-	// → 422: the fail-closed self-grant block.
+	// tenant-scope row on a global-only key never gets here: the global-only
+	// check above refuses it first (the build alone read a _global row of the
+	// same key as "applied" and let it through).
 	baseRows, err := store.LoadSettingOverridesMulti(r.Context(), h.pool, rs)
 	if err != nil {
 		internalError(w, r.Context(), "settings: load overrides failed", err)
@@ -612,6 +616,19 @@ func newWarnings(cand, base []config.Issue) []string {
 		}
 	}
 	return out
+}
+
+// globalOnlyTenantWrite refuses a write of a global-only key at a tenant scope
+// (MT3-W2), fail-closed and before the candidate build. The build alone is not
+// the gate: it reads a _global row of the same key as "applied from the DB",
+// so it let a tenant-scope row through with a 200 — a row the overlay ignores,
+// but one that tenant.allow_shared_secrets and
+// tenant.allow_cross_tenant_block_grant read directly at the tenant scope.
+func globalOnlyTenantWrite(key, writeScope string) (string, bool) {
+	if writeScope == store.GlobalScope || !config.IsGlobalOnly(key) {
+		return "", false
+	}
+	return fmt.Sprintf("validation: %s is global-only — only a server admin sets it, for every tenant", key), true
 }
 
 func (h *SettingsHandler) unknownKey(w http.ResponseWriter, key string) {
