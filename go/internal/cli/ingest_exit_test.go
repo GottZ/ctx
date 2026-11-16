@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GottZ/ctx/internal/derived"
 	"github.com/GottZ/ctx/internal/ingest"
 )
 
@@ -23,8 +24,9 @@ import (
 // integration test in internal/handler runs it against the real handler.
 
 // fakeIngest answers POST /api/ingest like the production handler validates:
-// a request with a chunk over a per-chunk limit is refused whole with 400,
-// any other request is accepted chunk for chunk.
+// a request over the chunk count is refused whole with 413, one with a chunk
+// in a reserved category with 403, one with a chunk over a per-chunk limit
+// with 400; any other request is accepted chunk for chunk.
 type fakeIngest struct {
 	mu       sync.Mutex
 	accepted []ingestChunkPayload
@@ -40,6 +42,12 @@ func (f *fakeIngest) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests++
+	if len(req.Chunks) > ingest.MaxChunksPerRequest {
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false,
+			"error": fmt.Sprintf("chunks exceeds maximum of %d", ingest.MaxChunksPerRequest)})
+		return
+	}
 	for i, c := range req.Chunks {
 		var reason string
 		switch {
@@ -57,6 +65,15 @@ func (f *fakeIngest) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		if reason != "" {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": fmt.Sprintf("chunk[%d]: %s", i, reason)})
+			return
+		}
+	}
+	// The I7 claim gate runs after the validation (handler/ingest.go).
+	for i, c := range req.Chunks {
+		if derived.IsReservedCategory(c.Category) {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false,
+				"error": fmt.Sprintf("chunk[%d]: category: %q is reserved for the derived layer and is not client-writable", i, c.Category)})
 			return
 		}
 	}

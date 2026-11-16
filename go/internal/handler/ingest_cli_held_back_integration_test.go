@@ -5,12 +5,13 @@
 // shared batches: one file with an over-long title failed the chunks of every
 // other file in its batch, and the run reported it and exited 0 (#318). The
 // CLI now holds such a file back before the upload, reports it, writes the
-// rest, and exits non-zero. Drives the FULL cobra tree against the production
-// HandleIngest on a real PG18 (CLI chunker -> POST /api/ingest ->
-// store.UpsertBlock).
+// rest, and exits non-zero. A chunk in a category the derived layer reserves
+// is refused whole the same way, by the claim gate with 403 (#320). Drives the
+// FULL cobra tree against the production HandleIngest on a real PG18 (CLI
+// chunker -> POST /api/ingest -> store.UpsertBlock).
 //
-// RED against the parent commit: the other file of each case has no block,
-// and the run returns nil.
+// RED against the commit before each fix: the other file of each case has no
+// block (and before #318 the run returned nil).
 //
 //	go test -tags=integration ./internal/handler/ -run TestIngestCLIHoldsBackFileOverLimit -count=1 -v
 package handler
@@ -84,6 +85,10 @@ func TestIngestCLIHoldsBackFileOverLimit(t *testing.T) {
 		{"category_over_limit", strings.Repeat("c", maxCategoryLen+1) + "/note.md", note("cat"), nil},
 		{"content_over_limit", "dump.md", "# Dump\n\n" + strings.Repeat("x", maxContentSize+10) + "\n", []string{"--category", "limits"}},
 		{"empty_title", ".md", note("nameless"), nil},
+		// A top-level folder named like a reserved category: the claim gate
+		// refuses the whole request with 403 (#320).
+		{"reserved_category", "Catalog/note.md", note("reserved"), nil},
+		{"reserved_category_other_case", "SESSION-INSIGHTS/note.md", note("reserved-2"), nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

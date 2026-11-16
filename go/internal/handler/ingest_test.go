@@ -218,7 +218,8 @@ func TestIngestRequest_Validation_TitleTooLong(t *testing.T) {
 // `ctx ingest` holds back a file with a chunk over one of these limits before
 // the upload (#318), and the chunker keeps the titles it lengthens (#316)
 // within ingest.MaxTitleBytes, so neither can make this endpoint refuse a
-// batch; both sides must name the same limits.
+// batch; and the CLI refuses a --batch above the chunks this endpoint takes in
+// one request (#320). Both sides must name the same limits.
 func TestIngestLimitsMatchCLI(t *testing.T) {
 	for _, l := range []struct {
 		name          string
@@ -227,6 +228,7 @@ func TestIngestLimitsMatchCLI(t *testing.T) {
 		{"title", maxTitleLen, ingest.MaxTitleBytes},
 		{"category", maxCategoryLen, ingest.MaxCategoryBytes},
 		{"content", maxContentSize, ingest.MaxContentBytes},
+		{"chunks per request", maxIngestChunks, ingest.MaxChunksPerRequest},
 	} {
 		if l.handler != l.ingt {
 			t.Errorf("%s limit: handler %d, internal/ingest %d: the CLI would check its chunks against another limit",

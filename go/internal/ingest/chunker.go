@@ -34,6 +34,12 @@ const (
 	MaxContentBytes  = 50 * 1024
 )
 
+// MaxChunksPerRequest is the most chunks POST /api/ingest takes in one
+// request (maxIngestChunks in internal/handler/ingest.go, pinned by the same
+// handler test); a larger request is refused whole with 413, so `ctx ingest`
+// refuses a --batch above it.
+const MaxChunksPerRequest = 200
+
 // headingRe matches H1/H2 at line start.
 var headingRe = regexp.MustCompile(`(?m)^(#{1,2})\s+(.+)$`)
 
