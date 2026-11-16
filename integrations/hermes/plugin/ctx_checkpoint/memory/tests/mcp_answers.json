@@ -34,5 +34,95 @@
     "query": "Compaction checkpoint head 019f6000-0000-7000-8000-00000000c0de",
     "tags": ["checkpoint-head"],
     "row_keys": ["id", "title", "category"]
+  },
+  "origin": {
+    "about": [
+      "The untrusted_origin record (GottZ/ctx#280, #295): a block re-typed out of a type marked untrusted names that type.",
+      "The ctx side writes the block below over MCP store, re-types it over MCP update and checks that get and search carry",
+      "the field; it renders query.answer and retrieval.answer (the /api/query answers) through the real MCP query tool and",
+      "compares the text with query.text and retrieval.text, and checks note against store.UntrustedOriginNote. The plugin",
+      "parses exactly these texts (memory/tests/test_untrusted_origin.py). Placeholder in note: {origin}."
+    ],
+    "note": "untrusted_origin:{origin} (agent-produced text: re-typed out of a type marked untrusted)",
+    "value": "checkpoint",
+    "write": {
+      "category": "i295-origin",
+      "title": "Agent finding filed as knowledge",
+      "content": "The proxy listens on 8080.",
+      "type": "checkpoint",
+      "retype": "knowledge"
+    },
+    "get_keys": [
+      "id",
+      "title",
+      "category",
+      "type",
+      "untrusted_origin"
+    ],
+    "search_row_keys": [
+      "id",
+      "title",
+      "category",
+      "untrusted_origin"
+    ],
+    "query": {
+      "answer": {
+        "answer": "Two agents agreed on the proxy port [1][3].",
+        "confidence": "confident",
+        "sources": [
+          {
+            "id": "019f6000-0000-7000-8000-000000000a01",
+            "title": "Proxy port (web host)",
+            "category": "infrastructure",
+            "citation_index": 1
+          },
+          {
+            "id": "019f6000-0000-7000-8000-000000000a02",
+            "title": "Old proxy note",
+            "category": "infrastructure",
+            "citation_index": 2,
+            "superseded_by": "019f6000-0000-7000-8000-000000000a01"
+          },
+          {
+            "id": "019f6000-0000-7000-8000-000000000a03",
+            "title": "Agent finding: proxy port",
+            "category": "decisions",
+            "citation_index": 3,
+            "untrusted_origin": "tool-evidence"
+          },
+          {
+            "id": "019f6000-0000-7000-8000-000000000a04",
+            "title": "Agent finding: old port",
+            "category": "decisions",
+            "superseded_by": "019f6000-0000-7000-8000-000000000a03",
+            "untrusted_origin": "insight"
+          }
+        ]
+      },
+      "text": "Two agents agreed on the proxy port [1][3].\n\nSources:\n[1] Proxy port (web host) (infrastructure) id:019f6000-0000-7000-8000-000000000a01\n[2] Old proxy note (infrastructure) id:019f6000-0000-7000-8000-000000000a02 superseded_by:019f6000-0000-7000-8000-000000000a01\n[3] Agent finding: proxy port (decisions) id:019f6000-0000-7000-8000-000000000a03\n    untrusted_origin:tool-evidence (agent-produced text: re-typed out of a type marked untrusted)\n[n/a] Agent finding: old port (decisions) id:019f6000-0000-7000-8000-000000000a04 superseded_by:019f6000-0000-7000-8000-000000000a03\n    untrusted_origin:insight (agent-produced text: re-typed out of a type marked untrusted)\n"
+    },
+    "retrieval": {
+      "answer": {
+        "success": true,
+        "confidence": "confident",
+        "sources": [
+          {
+            "id": "019f6000-0000-7000-8000-000000000a01",
+            "title": "Proxy port (web host)",
+            "category": "infrastructure",
+            "score": 0.91
+          },
+          {
+            "id": "019f6000-0000-7000-8000-000000000a03",
+            "title": "Agent finding: proxy port",
+            "category": "decisions",
+            "score": 0.8,
+            "untrusted_origin": "tool-evidence",
+            "content": "The proxy listens on 8080."
+          }
+        ]
+      },
+      "text": "{\n  \"confidence\": \"confident\",\n  \"sources\": [\n    {\n      \"id\": \"019f6000-0000-7000-8000-000000000a01\",\n      \"title\": \"Proxy port (web host)\",\n      \"category\": \"infrastructure\",\n      \"score\": 0.91\n    },\n    {\n      \"id\": \"019f6000-0000-7000-8000-000000000a03\",\n      \"title\": \"Agent finding: proxy port\",\n      \"category\": \"decisions\",\n      \"score\": 0.8,\n      \"untrusted_origin\": \"tool-evidence\",\n      \"content\": \"The proxy listens on 8080.\"\n    }\n  ]\n}"
+    }
   }
 }

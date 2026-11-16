@@ -219,3 +219,143 @@ func TestMCPAnswerFormsMatchCheckpointPluginFixture(t *testing.T) {
 		t.Errorf("search for the head title did not return the head %s: %v", id, rows)
 	}
 }
+
+// checkpointOriginAnswers is the fixture's "origin" section (GottZ/ctx#295):
+// the untrusted_origin record (#280) as the plugin's recall reads it.
+type checkpointOriginAnswers struct {
+	Origin struct {
+		Note  string `json:"note"`
+		Value string `json:"value"`
+		Write struct {
+			Category string `json:"category"`
+			Title    string `json:"title"`
+			Content  string `json:"content"`
+			Type     string `json:"type"`
+			Retype   string `json:"retype"`
+		} `json:"write"`
+		GetKeys       []string `json:"get_keys"`
+		SearchRowKeys []string `json:"search_row_keys"`
+		Query         struct {
+			Answer json.RawMessage `json:"answer"`
+			Text   string          `json:"text"`
+		} `json:"query"`
+		Retrieval struct {
+			Answer json.RawMessage `json:"answer"`
+			Text   string          `json:"text"`
+		} `json:"retrieval"`
+	} `json:"origin"`
+}
+
+// TestMCPAnswerFormsCarryTheUntrustedOriginForCheckpointPlugin pins the
+// fixture's origin section: the note wording, get and search over the real
+// write, re-type and read handlers, and the query tool's two renderings of an
+// /api/query answer (synthesis text with superseded_by tails and note lines,
+// retrieval-only JSON) — the texts the plugin's parser is fed.
+func TestMCPAnswerFormsCarryTheUntrustedOriginForCheckpointPlugin(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	raw, err := os.ReadFile(filepath.FromSlash(checkpointAnswersFixture))
+	if err != nil {
+		t.Fatalf("read the shared fixture: %v", err)
+	}
+	var fx checkpointOriginAnswers
+	if err := json.Unmarshal(raw, &fx); err != nil {
+		t.Fatalf("parse the shared fixture: %v", err)
+	}
+	o := fx.Origin
+	if o.Note == "" || o.Value == "" || o.Write.Title == "" || o.Write.Retype == "" || o.Query.Text == "" || o.Retrieval.Text == "" {
+		t.Fatalf("the fixture lacks the origin section: %+v", o)
+	}
+
+	if want := strings.ReplaceAll(o.Note, "{origin}", o.Value); store.UntrustedOriginNote(o.Value) != want {
+		t.Errorf("UntrustedOriginNote(%q) = %q, the fixture says %q", o.Value, store.UntrustedOriginNote(o.Value), want)
+	}
+
+	// The query tool's two renderings of a canned /api/query answer.
+	if text, isErr := runMCPQuery(t, &cannedQueryDelegate{body: string(o.Query.Answer)}, `{"question":"q"}`); isErr || text != o.Query.Text {
+		t.Errorf("query (synthesis) answered (error %v)\n%s\nthe fixture says\n%s", isErr, text, o.Query.Text)
+	}
+	retrievalArgs := `{"question":"q","synthesize":false,"include_content":true}`
+	if text, isErr := runMCPQuery(t, &cannedQueryDelegate{body: string(o.Retrieval.Answer)}, retrievalArgs); isErr || text != o.Retrieval.Text {
+		t.Errorf("query (retrieval-only) answered (error %v)\n%s\nthe fixture says\n%s", isErr, text, o.Retrieval.Text)
+	}
+
+	// get and search over the production write path: stored in an untrusted
+	// type, re-typed into a trusted one over MCP update.
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	reg := blocktype.NewRegistry()
+	reg.Boot(ctx, pool)
+	if reg.Health() != blocktype.HealthOK {
+		t.Fatalf("registry boot degraded: %s", reg.Health())
+	}
+	mcpCfg := MCPConfig{Pool: pool, Blocktypes: reg, Cfg: staticConfigStore{cfg: &config.Config{
+		Query:  config.QueryConfig{RateLimitWrite: 0},
+		Pool:   config.PoolConfig{DefaultBlockSensitivity: backends.SensPublic},
+		Writes: config.WritesConfig{ConfirmTTL: 10 * time.Minute},
+	}}}
+	_, plain, err := store.CreateApiKey(ctx, pool, "i295-origin-answers", "private", nil, store.DefaultTenantID)
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	keyCtx := mcpAuthCtx(t, ctx, pool, plain)
+	w := o.Write
+	r, _, err := mcpStoreHandler(mcpCfg)(keyCtx, nil, storeInput{Category: w.Category, Title: w.Title, Content: w.Content, Type: w.Type})
+	if err != nil || r.IsError {
+		t.Fatalf("mcp store: err=%v answer=%s", err, resultText(t, r))
+	}
+	var id string
+	if err := pool.QueryRow(ctx,
+		`SELECT id::text FROM context_blocks WHERE category = $1 AND title = $2 AND NOT is_archived`,
+		w.Category, w.Title).Scan(&id); err != nil {
+		t.Fatalf("read the stored block: %v", err)
+	}
+	r, _, err = mcpUpdateHandler(mcpCfg)(keyCtx, nil, updateInput{ID: id, Type: w.Retype})
+	if err != nil || r.IsError {
+		t.Fatalf("mcp update type %s: err=%v answer=%s", w.Retype, err, resultText(t, r))
+	}
+
+	r, _, err = mcpGetHandler(mcpCfg)(keyCtx, nil, getInput{ID: id})
+	if err != nil || r.IsError {
+		t.Fatalf("mcp get: err=%v answer=%s", err, resultText(t, r))
+	}
+	var block map[string]any
+	if err := json.Unmarshal([]byte(resultText(t, r)), &block); err != nil {
+		t.Fatalf("get answer is not one JSON object: %v", err)
+	}
+	for _, key := range o.GetKeys {
+		if _, ok := block[key]; !ok {
+			t.Errorf("get answer lacks %q (keys the plugin reads: %v)", key, o.GetKeys)
+		}
+	}
+	if block["untrusted_origin"] != o.Value || block["type"] != w.Retype {
+		t.Errorf("get answer type/untrusted_origin = %v/%v, want %s/%s", block["type"], block["untrusted_origin"], w.Retype, o.Value)
+	}
+
+	r, _, err = mcpSearchHandler(mcpCfg)(keyCtx, nil, searchInput{Query: w.Title, Category: w.Category, Limit: 10})
+	if err != nil || r.IsError {
+		t.Fatalf("mcp search: err=%v answer=%s", err, resultText(t, r))
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(resultText(t, r)), &rows); err != nil {
+		t.Fatalf("search answer is not a JSON array: %v", err)
+	}
+	var row map[string]any
+	for _, candidate := range rows {
+		if candidate["id"] == id {
+			row = candidate
+		}
+	}
+	if row == nil {
+		t.Fatalf("search did not return the re-typed block %s: %v", id, rows)
+	}
+	for _, key := range o.SearchRowKeys {
+		if _, ok := row[key]; !ok {
+			t.Errorf("search row lacks %q (keys the plugin reads: %v): %v", key, o.SearchRowKeys, row)
+		}
+	}
+	if row["untrusted_origin"] != o.Value {
+		t.Errorf("search row untrusted_origin = %v, want %s", row["untrusted_origin"], o.Value)
+	}
+}

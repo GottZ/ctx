@@ -36,6 +36,8 @@ from .config import (
     resolve_base_url,
     umbrella_section,
     umbrella_transport,
+    untrusted_origin,
+    untrusted_origin_note,
 )
 from .status import REST_API_KEY_ENV, mcp_report, profile_ctx_keys, redact_error
 
@@ -141,7 +143,9 @@ def _parse_memory_file(path: Path) -> list[str]:
 def _hit_line(item: dict[str, Any]) -> str:
     marker = f"{UNTRUSTED_LABEL} " if item.get("untrusted") is True else ""
     btype = f" <{item['type']}>" if item.get("type") else ""
-    return f"- {marker}[{item.get('category')}] {item.get('title')}{btype}  (id: {item.get('id')})"
+    line = f"- {marker}[{item.get('category')}] {item.get('title')}{btype}  (id: {item.get('id')})"
+    note = untrusted_origin_note(untrusted_origin(item))
+    return f"{line}\n  {note}" if note else line
 
 
 # ---------------------------------------------------------------------------
