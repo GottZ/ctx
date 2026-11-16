@@ -146,7 +146,7 @@ The connection test names the tools when the entry name is rewritten.
 
 | Feature | What it does | Switch |
 |---|---|---|
-| Recall | before each turn the most relevant blocks are injected as `<ctx-context>` (untrusted text labelled); the host's indicator shows `🧠 CTX — recalled N memories` | `auto_recall`, `max_prefetch_results`, `prefetch_types_exclude`, `prefetch_untrusted` |
+| Recall | before each turn the most relevant blocks are injected as `<ctx-context>` (untrusted text labelled, a block re-typed out of an untrusted type named with an `untrusted_origin:` line); the host's indicator shows `🧠 CTX — recalled N memories` | `auto_recall`, `max_prefetch_results`, `prefetch_types_exclude`, `prefetch_untrusted` |
 | Agent tools | `ctx_query(text, synthesize?, types_exclude?)`, `ctx_store(category, title, content, …)`, `ctx_search(query, category?, tags?, …)`, `ctx_get(block_id)` | — |
 | Memory mirror | Hermes' curated `MEMORY.md`/`USER.md` writes become `agent-briefing` / `reference` blocks | `auto_memory_mirror` |
 | Fact extraction | up to 5 salient closing statements of the compacted turns become `learnings` blocks, deduplicated across compactions | `auto_compress_extract`, `facts_from_user`, `facts_reject_cjk_codeswitch` |
@@ -418,13 +418,19 @@ entry did not connect when Hermes started (wrong key, server down, URL wrong).
   keys where it enters the plugin and again before the plugin raises it, logs it or hands
   it to the model as a tool result; a failing redactor withholds it. A raised error
   carries no unredacted original as cause or context, and DEBUG lines carry a redacted
-  traceback instead of `exc_info` (0.13.0).
+  traceback instead of `exc_info` (0.13.0). `hermes memory status`, `hermes ctx_checkpoint
+  status`, the connection test of the setup forms, `Setup failed: …` and the CLI's error
+  lines redact with the same keys, resolved the same way (`status.profile_ctx_keys`, 0.14.0).
 - **Reads:** its own settings in the Hermes config (`memory.ctx_checkpoint` and
   `plugins.entries.ctx_checkpoint.settings`), the named `mcp_servers` entry,
   `compression.threshold` (for the warning above) and
   `compression.checkpoint_required` (for the status), the transcript Hermes passes
   to `on_pre_compress`, `$HERMES_HOME/ctx.json` (legacy engine settings, lower
-  priority than the config; read in every mode), and with memory features on the
+  priority than the config; read in every mode), the ctx keys of the profile — the
+  `mcp_servers` entry's key through Hermes' config and `.env` lookup, `CTX_API_KEY`, and
+  `CTX_KEY` on `transport: rest` — only to redact them (when the provider connects, and
+  in `hermes memory status`, `hermes ctx_checkpoint …`, the connection test and setup;
+  0.14.0), and with memory features on the
   profile's `state.db` (read-only, to find a resumed session's root). Nothing
   outside that.
 - **Writes, when you save the settings:** `memory.ctx_checkpoint`, the named

@@ -120,7 +120,7 @@ _MEMORY_CHOICES = ("off", "on")
 _MCP_SERVER_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 # Setup stores the key in Hermes' .env and references it from the MCP server entry;
 # the key itself is never written into config.yaml.
-SETUP_API_KEY_ENV = "CTX_API_KEY"
+SETUP_API_KEY_ENV = _st.SETUP_API_KEY_ENV
 _SETUP_AUTH_HEADERS = {"Authorization": "Bearer ${" + SETUP_API_KEY_ENV + "}"}
 _SETUP_STORED_KEYS = ("mcp_server", "category", "sensitivity", "chunk_chars", "memory")
 # Gateway session hygiene compacts at this fixed share of the context window
@@ -486,69 +486,8 @@ _FIELD_DEFAULTS = {spec["key"]: spec.get("default") for spec in _FORM_FIELDS}
 _MODE_FIELD = next(spec for spec in _FORM_FIELDS if spec["key"] == "checkpoint_required")
 
 
-def _env_value(name: str) -> str:
-    """Scope-aware environment or .env value (the host's own lookup), ``""`` if unset."""
-    try:
-        from hermes_cli.config import get_env_value
-
-        return get_env_value(name) or ""
-    except Exception:
-        return ""
-
-
-# The headers ctx reads a key from (docs/mcp.md), and the ``${VAR}`` / ``${env:VAR}`` references
-# Hermes expands in config.yaml values (``hermes_cli.config``); other sources stay unresolved.
-_KEY_HEADERS = ("authorization", "x-context-key")
-_ENV_REFERENCE_RE = re.compile(r"\$\{\s*(?:env:\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\}")
-_AUTH_SCHEME_PREFIX_RE = re.compile(r"^(?:bearer|basic|token)\s+", re.IGNORECASE)
-
-
-def _entry_keys(entry: dict[str, Any]) -> list[str]:
-    """The key values an MCP server entry signs in with: its ``Authorization`` / ``X-Context-Key``
-    headers, references resolved through the host's own lookup (``.env`` included), the auth
-    scheme dropped. A header with a reference that does not resolve is skipped; an entry that signs
-    in with ``auth`` (OAuth) or runs a command has no key here."""
-    headers = entry.get("headers") if isinstance(entry, dict) else None
-    keys: list[str] = []
-    for header, raw in headers.items() if isinstance(headers, dict) else ():
-        if str(header).strip().lower() not in _KEY_HEADERS or not isinstance(raw, str):
-            continue
-        value = _expand_references(raw)
-        if value is None:
-            continue
-        value = _AUTH_SCHEME_PREFIX_RE.sub("", value.strip()).strip()
-        if value:
-            keys.append(value)
-    return keys
-
-
-def _expand_references(raw: str) -> str | None:
-    """``raw`` with every ``${VAR}`` / ``${env:VAR}`` resolved; ``None`` when one does not resolve
-    or another source (``${vault:…}``) remains."""
-    missing: list[str] = []
-
-    def expand(match: re.Match) -> str:
-        value = _env_value(match.group(1))
-        if not value:
-            missing.append(match.group(1))
-        return value
-
-    value = _ENV_REFERENCE_RE.sub(expand, raw)
-    return None if missing or "${" in value else value
-
-
-def _profile_ctx_keys(name: str) -> tuple[str, ...]:
-    """The ctx keys of this profile, for redaction only: the keys of ``mcp_servers.<name>`` — as
-    written (references resolved here, ``.env`` included) and as Hermes loads it (expanded, with
-    a managed overlay) — and the ``CTX_API_KEY`` setup stores. Reads config.yaml and .env, never
-    the network; never raises."""
-    keys: list[str] = []
-    for read in (_read_user_config, _effective_config):
-        try:
-            keys.extend(_entry_keys(_configured_server(read(), name)))
-        except Exception:
-            logger.debug("ctx_checkpoint: the key of mcp_servers.%s was not resolved for redaction", name)
-    return _cp.bound_secret_values([*keys, _env_value(SETUP_API_KEY_ENV)])
+# Scope-aware environment or .env value (the host's own lookup), ``""`` if unset.
+_env_value = _st.env_value
 
 
 def _prompt_setup(schema: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
@@ -626,7 +565,7 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         # and the last notice sent through it, so a repeated failure is reported once.
         self._warning_callback: Callable[[str], Any] | None = None
         self._last_warning = ""
-        # The ctx keys of this profile (``_profile_ctx_keys``), resolved on every connect.
+        # The ctx keys of this profile (``_profile_secrets``), resolved on every connect.
         self._profile_keys: tuple[str, ...] = ()
 
     # -- identity ------------------------------------------------------------------
@@ -697,9 +636,14 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
     def _current_secrets(self) -> tuple[str, ...]:
         return (self._api_key, *self._profile_keys)
 
+    def _profile_secrets(self) -> tuple[str, ...]:
+        """The ctx keys of this profile for the configured server entry (``status.profile_ctx_keys``):
+        what the provider binds on connect and what status and connection test redact with."""
+        return _st.profile_ctx_keys(self._server_name())
+
     def _connect(self) -> None:
         self._remember_secrets()
-        self._profile_keys = _profile_ctx_keys(self._server_name())
+        self._profile_keys = self._profile_secrets()
         if self.transport == "rest":
             super()._connect()
             return
@@ -876,7 +820,7 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
                 home = str(get_hermes_home())
             return _st.mcp_report(home)
         except Exception as exc:
-            return {"summary": f"✗ status unavailable: {_st.redact_error(exc)}", "ok": False}
+            return {"summary": f"✗ status unavailable: {_st.redact_error(exc, self._profile_secrets())}", "ok": False}
 
     # -- memory-feature gates ------------------------------------------------------
 
@@ -1068,7 +1012,7 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
             test = _st.run_connection_test(
                 name,
                 _candidate_entry(entry, ctx_url, mode, api_key),
-                secrets=(api_key, stored_key),
+                secrets=(api_key, *_st.profile_ctx_keys(name)),
                 servers=config.get("mcp_servers"),
             )
             if test.ok is False:
@@ -1095,6 +1039,7 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         """
         print("\n  Configuring ctx_checkpoint:\n")
         key_saved = False
+        name, api_key = self._server_name(), ""
         try:
             _require_writable_config()
             values, api_key = _prompt_setup(self.get_config_schema())
@@ -1111,7 +1056,7 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
             test = _st.run_connection_test(
                 name,
                 _candidate_entry(entry, settings["ctx_url"], mode, api_key),
-                secrets=(api_key, _env_value(SETUP_API_KEY_ENV)),
+                secrets=(api_key, *_st.profile_ctx_keys(name)),
                 servers=config.get("mcp_servers"),
             )
             if test.ok is False:
@@ -1130,8 +1075,9 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
             print("\n  Setup cancelled; nothing was changed.\n")
             return
         except Exception as exc:
-            logger.debug("ctx_checkpoint setup failed", exc_info=True)
-            print(f"\n  Setup failed: {exc}")
+            secrets = (api_key, *_st.profile_ctx_keys(name))
+            logger.debug("ctx_checkpoint setup failed: %s", _cp.redacted_traceback(exc, secrets))
+            print(f"\n  Setup failed: {_st.redact_error(exc, secrets)}")
             if key_saved:
                 print(f"  The API key was saved to .env as {SETUP_API_KEY_ENV};")
                 print("  config.yaml was not changed.\n")

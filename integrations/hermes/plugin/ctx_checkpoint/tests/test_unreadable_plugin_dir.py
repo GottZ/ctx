@@ -24,8 +24,29 @@ from pathlib import Path
 import pytest
 
 PLUGIN_SRC = Path(__file__).resolve().parents[1]
-INSTALL_SH = PLUGIN_SRC.parents[1] / "scripts" / "install.sh"
 NAME = "ctx_checkpoint"
+
+
+def installer_paths(plugin_dir: Path) -> tuple[Path, bool]:
+    """``(install.sh, in a ctx checkout)`` for a plugin folder: the installer two levels up
+    (``integrations/hermes/scripts``), a checkout when ``go/go.mod`` lies four levels up. A folder that
+    lies higher (a flat copy such as ``/plugins/ctx_checkpoint``) has neither."""
+    parents = plugin_dir.parents
+    script = (parents[1] if len(parents) > 1 else plugin_dir) / "scripts" / "install.sh"
+    return script, len(parents) > 3 and (parents[3] / "go" / "go.mod").is_file()
+
+
+# The installer lies outside the plugin folder (GottZ/ctx#308): a catalog install copies the folder
+# alone, so there the installer tests are skipped, not failed (or passed on a missing script). In a
+# checkout of the ctx repository (go/go.mod next to integrations/) a missing installer fails them.
+INSTALL_SH, IN_CTX_CHECKOUT = installer_paths(PLUGIN_SRC)
+needs_installer = pytest.mark.skipif(
+    not INSTALL_SH.is_file() and not IN_CTX_CHECKOUT,
+    reason=(
+        "integrations/hermes/scripts/install.sh is not next to this plugin folder (a catalog install "
+        "copies the folder alone); the installer tests run in a checkout of the ctx repository"
+    ),
+)
 
 
 def _permissions_bind(tmp_path: Path) -> bool:
@@ -55,6 +76,19 @@ def installed(_isolated_hermes_home):
 def binding_permissions(tmp_path):
     if not _permissions_bind(tmp_path):
         pytest.skip("file permissions do not bind this process (root or CAP_DAC_OVERRIDE)")
+
+
+@pytest.mark.parametrize("depth", [0, 1, 2, 3])
+def test_a_plugin_folder_that_lies_high_is_no_checkout(tmp_path, depth):
+    """A flat copy (the plugin folder one to four levels below the root) is no checkout and names no
+    installer that exists; the deep layout of a checkout still finds both."""
+    flat = Path("/").joinpath(*["p"] * depth, NAME)
+    assert installer_paths(flat)[1] is False
+    repo = tmp_path / "repo"
+    plugin = repo / "integrations" / "hermes" / "plugin" / NAME
+    (repo / "go").mkdir(parents=True)
+    (repo / "go" / "go.mod").write_text("module x\n", encoding="utf-8")
+    assert installer_paths(plugin) == (repo / "integrations" / "hermes" / "scripts" / "install.sh", True)
 
 
 def test_hermes_finds_a_readable_install(installed):
@@ -93,6 +127,7 @@ def test_an_untraversable_folder_skips_the_plugin(installed, binding_permissions
         assert any(str(installed) in m for m in warnings), warnings
 
 
+@needs_installer
 @pytest.mark.parametrize("source", ["checkout", "private_checkout"])
 def test_install_sh_leaves_a_copy_every_account_can_read(_isolated_hermes_home, tmp_path, source):
     """install.sh run with a restrictive umask (an elevated or sudo shell often has 077), from
@@ -130,6 +165,8 @@ def test_install_sh_leaves_a_copy_every_account_can_read(_isolated_hermes_home, 
 
 
 def _run_install(home: Path, *, env_extra: dict[str, str] | None = None, path_prefix: str | None = None):
+    # A negative test accepts a non-zero exit: without the script that would be bash's own (#308).
+    assert INSTALL_SH.is_file(), f"{INSTALL_SH} is missing, so the installer cannot be tested"
     env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
     env.update(env_extra or {})
     if path_prefix:
@@ -160,6 +197,7 @@ def _assert_running_install_kept(home: Path, dest: Path) -> None:
     assert not list((home / "plugins").glob(f".{NAME}.bak-*")), "a backup stayed behind next to the install"
 
 
+@needs_installer
 def test_install_sh_keeps_the_running_install_when_staging_fails(_isolated_hermes_home, tmp_path):
     """No staging directory (TMPDIR names a file: mktemp fails for root as well) — the upgrade
     stops before it touches the running install."""
@@ -172,6 +210,7 @@ def test_install_sh_keeps_the_running_install_when_staging_fails(_isolated_herme
     _assert_running_install_kept(home, dest)
 
 
+@needs_installer
 def test_install_sh_restores_the_running_install_when_the_move_fails(_isolated_hermes_home, tmp_path):
     """The staged copy cannot be moved into place (a mv that refuses the staged tree) — the
     running install is moved back, never left in the backup."""
@@ -195,6 +234,7 @@ def test_install_sh_restores_the_running_install_when_the_move_fails(_isolated_h
     _assert_running_install_kept(home, dest)
 
 
+@needs_installer
 def test_install_sh_stops_on_a_plugins_dir_the_hermes_account_cannot_enter(_isolated_hermes_home):
     """plugins/ left private by an earlier elevated install (owner root, mode 0700) while the
     Hermes home belongs to another account: the script changes nothing and names the fix."""
@@ -213,6 +253,7 @@ def test_install_sh_stops_on_a_plugins_dir_the_hermes_account_cannot_enter(_isol
     assert stat.S_IMODE(plugins.stat().st_mode) == stat.S_IRWXU, "the script must not change plugins/ itself"
 
 
+@needs_installer
 @pytest.mark.parametrize(("gid", "mode"), [(65534, 0o750), (0, 0o705)], ids=["group", "others"])
 def test_install_sh_accepts_a_plugins_dir_the_hermes_account_can_enter(_isolated_hermes_home, gid, mode):
     """plugins/ owned by root but open to the Hermes account through its group (0750) or to

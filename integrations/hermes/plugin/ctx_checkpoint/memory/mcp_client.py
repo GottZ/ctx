@@ -14,14 +14,16 @@ What the ctx MCP tools answer (``go/internal/handler/mcp.go``) and how it is map
   "count"}``. The MCP tool rejects a ``types`` filter that names a retrieval-excluded type
   (``checkpoint``), while results of every type are returned when no filter is given — so
   ``types`` is dropped here on purpose and the chain writer's head lookup works by title.
-- ``query`` → prose answer followed by ``Sources:`` lines ``[N] title (category) id:uuid``.
-  A retrieval-only ``query(synthesize=False)`` calls the tool with ``synthesize: false`` (and
-  ``include_content: true`` when content is asked for): the semantic ``/api/query``
-  retrieval without the synthesis step, as on ``transport: rest``. The tool then answers one
-  JSON document ``{"confidence", "sources": [{id, title, category, score, superseded_by?,
-  untrusted?, content?}]}`` (ctx v5.36.0 or newer, GottZ/ctx#183), mapped to ``{"success",
-  "answer": "", "confidence", "sources"}``. A server older than v5.36.0 refuses the two
-  arguments at schema validation (``unexpected additional properties ["synthesize" …]``);
+- ``query`` → prose answer followed by ``Sources:`` lines ``[N] title (category) id:uuid``,
+  ``key:value`` tokens after the id kept (`` superseded_by:<uuid>`` is read), and an indented
+  ``untrusted_origin:<type> (…)`` line under a source with that record (ctx v5.41.0, #280), read
+  into the source as ``untrusted_origin``. A retrieval-only ``query(synthesize=False)`` calls the
+  tool with ``synthesize: false`` (and ``include_content: true`` when content is asked for): the
+  semantic ``/api/query`` retrieval without the synthesis step, as on ``transport: rest``. The
+  tool then answers one JSON document ``{"confidence", "sources": [{id, title, category, score,
+  superseded_by?, untrusted?, untrusted_origin?, content?}]}`` (ctx v5.36.0 or newer,
+  GottZ/ctx#183), mapped to ``{"success", "answer": "", "confidence", "sources"}``. A server older
+  than v5.36.0 refuses the two arguments at schema validation (``unexpected additional properties ["synthesize" …]``);
   this client then serves that call and every later one by ``search`` (lexical hybrid, no
   embedding). Only one call asks: retrieval-only calls made while it is in flight use
   ``search`` as well, so the server sees one refused call per client (a new client, bound
@@ -62,13 +64,20 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from .client import CtxApiError
+from .config import ORIGIN_NOTE_PREFIX, UNTRUSTED_ORIGIN_FIELD, untrusted_origin, with_untrusted_origin_checked
 
 logger = logging.getLogger(__name__)
 
 _UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b")
 _ANSWER_ID_RE = re.compile(r"\(id:\s*(" + _UUID_RE.pattern + r")")
 _PAYLOAD_HASH_RE = re.compile(r"payload_hash:\s*([0-9a-fA-F]{16,128})")
-_SOURCE_LINE_RE = re.compile(r"^\[(\d+|n/a)\]\s+(.*?)\s+\(([^()]*)\)\s+id:([0-9a-fA-F-]{36})\s*$")
+# A source line of the query text: `[N] title (category) id:<uuid>`, then `key:value` tokens the
+# server adds (` superseded_by:<uuid>`, #197) — kept whatever they are, read where known (#295).
+_SOURCE_LINE_RE = re.compile(
+    r"^\[(\d+|n/a)\]\s+(.*?)\s+\(([^()]*)\)\s+id:([0-9a-fA-F-]{36})((?:\s+[a-z0-9_]+:\S+)*)\s*$"
+)
+# The keys of a source line's tail the plugin reads into the source.
+_SOURCE_LINE_KEYS = ("superseded_by",)
 _SERVER_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 # Hermes' MCP tool names (``tools/mcp_tool_schema.py``): the characters a name part keeps, the
 # provider limit a generated name is shortened to and the hash digits that end a shortened name.
@@ -415,11 +424,11 @@ class McpClient:
         if include_content:
             for source in sources[: limit or _MAX_CONTENT_FETCH]:
                 try:
-                    block = self.get_block(source["id"]).get("block") or {}
+                    block = with_untrusted_origin_checked(self.get_block(source["id"]).get("block") or {})
                 except CtxApiError as exc:
                     logger.debug("mcp query: content fetch for %s failed: %s", source["id"], self._redact(exc))
                     continue
-                for key in ("content", "type", "untrusted", "score", "tags"):
+                for key in ("content", "type", "untrusted", UNTRUSTED_ORIGIN_FIELD, "score", "tags"):
                     if key in block and key not in source:
                         source[key] = block[key]
         return {"success": True, "answer": answer, "sources": sources}
@@ -554,15 +563,32 @@ def _store_id(payload: Any, text: str) -> str | None:
 
 
 def _parse_query_text(body: str) -> tuple[str, list[dict[str, Any]]]:
-    """Split the MCP query text into ``(answer, sources)``."""
+    """Split the MCP query text into ``(answer, sources)``. A source line keeps whatever ``key:value``
+    tokens follow its id (``superseded_by`` is read); an indented ``untrusted_origin:<type> (…)`` line
+    right under it (``store.UntrustedOriginNote``, #280) is the source's record."""
     answer, _, tail = body.partition("\n\nSources:\n")
     sources: list[dict[str, Any]] = []
-    for line in tail.splitlines():
-        match = _SOURCE_LINE_RE.match(line.strip())
+    previous: dict[str, Any] | None = None
+    # Split at "\n" only: the server ends a line with it, and splitlines() would also split a title
+    # at \r, \x1c-\x1e, \x85 or U+2028/U+2029 and let its second half pass for a source line.
+    for line in tail.split("\n"):
+        stripped = line.strip()
+        if previous is not None and line[:1].isspace() and stripped.startswith(ORIGIN_NOTE_PREFIX):
+            value = stripped[len(ORIGIN_NOTE_PREFIX) :].split(" ", 1)[0]
+            previous[UNTRUSTED_ORIGIN_FIELD] = untrusted_origin({UNTRUSTED_ORIGIN_FIELD: value})
+            previous = None
+            continue
+        previous = None
+        match = _SOURCE_LINE_RE.match(stripped)
         if not match:
             continue
         entry: dict[str, Any] = {"id": match.group(4), "title": match.group(2), "category": match.group(3)}
         if match.group(1) != "n/a":
             entry["citation_index"] = int(match.group(1))
+        for token in match.group(5).split():
+            key, _, value = token.partition(":")
+            if key in _SOURCE_LINE_KEYS and value:
+                entry[key] = value
         sources.append(entry)
+        previous = entry
     return answer.strip(), sources
