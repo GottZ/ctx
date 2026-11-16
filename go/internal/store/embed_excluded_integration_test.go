@@ -304,6 +304,7 @@ func TestEmbedExcludedReconcileAnswerMoves(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
+	defer func() { _ = hold.Rollback(ctx) }()
 	if _, err := hold.Exec(ctx, `SELECT 1 FROM context_blocks WHERE type_name = 'ee-moving' FOR UPDATE`); err != nil {
 		t.Fatalf("hold: %v", err)
 	}

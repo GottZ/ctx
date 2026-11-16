@@ -34,8 +34,11 @@ const EmbedExcludedReconcileBatch = 1000
 //     vector puts it back in the pick indexes unmarked, filtered by the type
 //     predicate as before migration 175).
 //   - clearEmbedExcludedSQL: the name became embeddable. Its marked live
-//     blocks, on idx_blocks_embed_excluded (type_name), which the cleared
-//     rows leave.
+//     blocks, on idx_blocks_embed_excluded (type_name, id) from the keyset
+//     cursor $4 on: the cleared rows leave the index, but their entries stay
+//     in it until a vacuum may remove them, and a batch from the start would
+//     read every one of them again while an older snapshot holds them (a
+//     long transaction, a pg_dump).
 //   - embedExcludedLeftSQL: whether a block of the name still needs the
 //     change, from the start of the range (a block another worker held, one
 //     whose sensitivity moved it behind the cursor).
@@ -74,11 +77,12 @@ const (
 	clearEmbedExcludedSQL = `WITH u AS (
 		UPDATE context_blocks SET embed_excluded = false
 		 WHERE id IN (SELECT id FROM context_blocks
-		               WHERE embed_excluded AND NOT is_archived AND type_name = $1
+		               WHERE embed_excluded AND NOT is_archived AND type_name = $1 AND id > $4::uuid
+		               ORDER BY id
 		               LIMIT $2)
 		   AND embed_excluded
-		RETURNING embed_excluded)
-		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE embed_excluded = $3)`
+		RETURNING embed_excluded, id)
+		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE embed_excluded = $3), (SELECT id FROM u ORDER BY id DESC LIMIT 1)`
 	embedExcludedLeftSQL = `SELECT CASE WHEN $2::boolean
 		THEN EXISTS (SELECT 1 FROM context_blocks
 		              WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded AND type_name = $1)
@@ -166,6 +170,7 @@ func ReconcileEmbedExcluded(ctx context.Context, pool *pgxpool.Pool) (EmbedExclu
 // the next pass, whose queue row the registry change renewed.
 func reconcileEmbedExcludedName(ctx context.Context, pool *pgxpool.Pool, name string) (updated int, done bool, err error) {
 	cursor := embedExcludedKeyStart
+	clearFrom := embedExcludedKeyStart.id
 	moved := 0
 	for {
 		var never bool
@@ -184,9 +189,15 @@ func reconcileEmbedExcludedName(ctx context.Context, pool *pgxpool.Pool, name st
 			if sens != nil && at != nil && id != nil {
 				cursor = embedExcludedKey{sens: *sens, at: *at, id: *id}
 			}
-		} else if err := pool.QueryRow(ctx, clearEmbedExcludedSQL, name, EmbedExcludedReconcileBatch, false).
-			Scan(&wrote, &reached); err != nil {
-			return updated, false, fmt.Errorf("store: embed-excluded clear %q: %w", name, err)
+		} else {
+			var last *string
+			if err := pool.QueryRow(ctx, clearEmbedExcludedSQL, name, EmbedExcludedReconcileBatch, false, clearFrom).
+				Scan(&wrote, &reached, &last); err != nil {
+				return updated, false, fmt.Errorf("store: embed-excluded clear %q: %w", name, err)
+			}
+			if last != nil {
+				clearFrom = *last
+			}
 		}
 		updated += reached
 		switch {
@@ -196,7 +207,7 @@ func reconcileEmbedExcludedName(ctx context.Context, pool *pgxpool.Pool, name st
 			if moved++; moved == 2 {
 				return updated, false, nil
 			}
-			cursor = embedExcludedKeyStart
+			cursor, clearFrom = embedExcludedKeyStart, embedExcludedKeyStart.id
 		case wrote > 0:
 			moved = 0
 		default:
@@ -216,12 +227,12 @@ func reconcileEmbedExcludedName(ctx context.Context, pool *pgxpool.Pool, name st
 			if !left {
 				return updated, true, nil
 			}
-			if cursor == embedExcludedKeyStart {
+			if cursor == embedExcludedKeyStart && clearFrom == embedExcludedKeyStart.id {
 				// Left over but not reachable by a batch from the start (held
 				// and then changed by another statement): the next pass.
 				return updated, false, nil
 			}
-			cursor = embedExcludedKeyStart
+			cursor, clearFrom = embedExcludedKeyStart, embedExcludedKeyStart.id
 		}
 	}
 }

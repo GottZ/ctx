@@ -79,7 +79,7 @@
 -- INDEXES. The two pick indexes of migration 171 gain `AND NOT
 -- embed_excluded` (same names, same keys); the pick states the conjunct
 -- (store.PendingPickSQL), and with the old predicate it stays correct and
--- filters as before. idx_blocks_embed_excluded (type_name) WHERE
+-- filters as before. idx_blocks_embed_excluded (type_name, id) WHERE
 -- embed_excluded AND NOT is_archived is the reconcile's range for a name
 -- whose marked blocks have to be cleared. It does not name the embedding
 -- column, so it is not in the attnum class of the re-embed cutover; the
@@ -108,7 +108,7 @@
 --           ON context_blocks (sensitivity, created_at, id)
 --           WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded;
 --       CREATE INDEX CONCURRENTLY idx_blocks_embed_excluded
---           ON context_blocks (type_name)
+--           ON context_blocks (type_name, id)
 --           WHERE embed_excluded AND NOT is_archived;
 --       DROP INDEX CONCURRENTLY idx_embedding_pending_scope_sens;
 --       ALTER INDEX idx_embedding_pending_scope_sens_291 RENAME TO idx_embedding_pending_scope_sens;
@@ -292,7 +292,7 @@ BEGIN
              '((embedding IS NULL) AND (NOT is_archived) AND (NOT embed_excluded))',
              'embedding IS NULL AND NOT is_archived AND NOT embed_excluded',
              '((embedding IS NULL) AND (NOT is_archived))'),
-            ('idx_blocks_embed_excluded', 'type_name',
+            ('idx_blocks_embed_excluded', 'type_name, id',
              '(embed_excluded AND (NOT is_archived))',
              'embed_excluded AND NOT is_archived',
              NULL)

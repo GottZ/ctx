@@ -39,7 +39,7 @@ func TestMigration175(t *testing.T) {
 		if err := pool.QueryRow(ctx, `SELECT pg_get_indexdef('idx_blocks_embed_excluded'::regclass)`).Scan(&def); err != nil {
 			t.Fatalf("idx_blocks_embed_excluded: %v", err)
 		}
-		if want := "CREATE INDEX idx_blocks_embed_excluded ON public.context_blocks USING btree (type_name) WHERE (embed_excluded AND (NOT is_archived))"; def != want {
+		if want := "CREATE INDEX idx_blocks_embed_excluded ON public.context_blocks USING btree (type_name, id) WHERE (embed_excluded AND (NOT is_archived))"; def != want {
 			t.Errorf("idx_blocks_embed_excluded deparses as\n  %s\nwant\n  %s", def, want)
 		}
 	})
