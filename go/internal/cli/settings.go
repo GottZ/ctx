@@ -92,19 +92,30 @@ func instructionsText(s settingRow, which string) (string, error) {
 
 // instructionsCell is the table cell of mcp.instructions: its state, not the
 // text — a prose value of up to 2,048 characters (with line breaks) would set
-// the width of the whole VALUE column. `settings get` shows the text.
+// the width of the whole VALUE column. `settings get` shows the text. While
+// mcp.instructions_enabled is off the cell says so first: the text it names
+// is the one that would be sent, not one that is.
 func instructionsCell(s settingRow) string {
 	in := s.Instructions
+	var text string
 	switch {
 	case !in.Custom:
-		return fmt.Sprintf("(shipped #%d)", in.Current.ID)
+		text = fmt.Sprintf("shipped #%d", in.Current.ID)
 	case in.Base != nil && in.ChangedSinceBase:
-		return fmt.Sprintf("(own text, based on #%d; ctx ships #%d)", in.Base.ID, in.Current.ID)
+		text = fmt.Sprintf("own text, based on #%d; ctx ships #%d", in.Base.ID, in.Current.ID)
 	default:
 		v, _ := s.Value.(string)
-		return fmt.Sprintf("(own text, %d characters)", len([]rune(v)))
+		text = fmt.Sprintf("own text, %d characters", len([]rune(v)))
 	}
+	if in.State == instructionsOff {
+		return "(off, sends nothing; " + text + ")"
+	}
+	return "(" + text + ")"
 }
+
+// instructionsOff is the state the settings API reports while
+// mcp.instructions_enabled is false (config.MCPInstructionsOff on the server).
+const instructionsOff = "off"
 
 // printInstructions renders the comparison block of `settings get` (TTY).
 func printInstructions(in *instructionsRow) {

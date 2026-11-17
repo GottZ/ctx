@@ -116,4 +116,15 @@ func TestInstructionsTextAndCell(t *testing.T) {
 	if got := instructionsCell(shipped); got != "(shipped #2)" || strings.Contains(got, "\n") {
 		t.Errorf("cell of the shipped wording = %q", got)
 	}
+	// off: the server sends nothing, whatever text is configured (#327 review)
+	offShipped := shipped
+	offShipped.Instructions = &instructionsRow{State: "off", Matches: 2, Current: v2}
+	if got := instructionsCell(offShipped); got != "(off, sends nothing; shipped #2)" {
+		t.Errorf("cell of the shipped wording while off = %q", got)
+	}
+	offOwn := noBase
+	offOwn.Instructions = &instructionsRow{State: "off", Custom: true, Current: v2, History: []shippedRow{v1, v2}}
+	if got := instructionsCell(offOwn); got != "(off, sends nothing; own text, 8 characters)" {
+		t.Errorf("cell of a custom text while off = %q", got)
+	}
 }

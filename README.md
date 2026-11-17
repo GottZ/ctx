@@ -225,8 +225,9 @@ The full walk-through, with every option, is in [Operations](docs/operations.md#
 
 ctx is a skeleton. After the install it stores, finds and links what your agents give it, over MCP, the CLI and
 HTTP. It does not decide when your agent looks something up or writes something down, and it does not make a
-session start or end well on its own. By default ctx sends every agent that connects over MCP a short hint: ctx is
-its memory, look things up before answering or starting work, save what should last with its source. An operator
+session start or end well on its own. By default ctx sends every client that connects over MCP a short hint: ctx is
+the agent's memory, look things up before answering or starting work, save what should last with its source. Whether
+the agent reads it is the client's choice: Claude Code passes it on, Hermes does not. An operator
 can switch that hint off or replace it with the team's own text ([operations](docs/operations.md#mcp-instructions-mcpinstructions_enabled-and-mcpinstructions)).
 Beyond that ctx brings no working style of its own and no ready-made skills, because every team works differently. Below is a suggested way of working. Adapt it to your
 team and write it into your own skill, rule file, hook or prompt. Suggestions for ready-made skills will come
