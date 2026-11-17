@@ -123,6 +123,18 @@ comes first. A directory that cannot be read is reported too. The command
 exits 1 when a file or directory was not ingested or a chunk was not written,
 a dry run when the upload would leave one out.
 
+A symbolic link to a folder is followed, also out of the vault (listed under
+"Followed out of the vault"), and its notes keep the path through the link
+(title, category, vault_path), as a link to a note does. Each folder is
+ingested once: through no link if it can be, else through the fewest links,
+else through the link whose path sorts first. Every other way to a folder,
+and a link to the vault or a folder that holds it, is listed under "Not
+followed" and does not change the exit status. A link to a note is ingested
+under its own path, as before, also when the note is reachable another way.
+A link that leads nowhere counts like an unreadable file, unless its name has
+an extension other than .md: that is taken for a missing attachment, which
+ingest would not read, and only named under "Not followed".
+
 The chunks go to the key's home scope, or to the scope --scope names. The key
 must be allowed to write that scope (a scope belongs to one tenant), or the
 server refuses the batch and the run sends no further one. The summary names
@@ -169,13 +181,15 @@ stops after the first batch and exits 1.`,
 			// Phase 1: Scan + Parse + Chunk
 			Errorf("ctx ingest: scanning %s", vaultPath)
 
-			files, errors, err := collectMarkdownFiles(vaultPath)
+			scan, err := collectMarkdownFiles(vaultPath)
 			if err != nil {
 				return fmt.Errorf("scan vault: %w", err)
 			}
+			files, errors := scan.files, scan.unreadable
 
 			if len(files) == 0 {
 				Errorf("  No .md files found.")
+				scan.printLinks()
 				printFileErrors(errors)
 				return ingestIncomplete(cmd, dryRun, errors, 0, nil)
 			}
@@ -254,6 +268,7 @@ stops after the first batch and exits 1.`,
 
 			Errorf("  Parsed %d/%d files, %d chunks", stats.totalFiles, len(files), stats.totalChunks)
 
+			scan.printLinks()
 			printFileErrors(errors)
 
 			// Print statistics
@@ -442,64 +457,257 @@ stops after the first batch and exits 1.`,
 
 // ── helpers ──────────────────────────────────────────────────────────.
 
-// collectMarkdownFiles walks a directory and returns all .md files, skipping
-// .obsidian/, dot-directories and node_modules, and the paths it could not
-// read, relative to root (markdownWalk.visit).
-func collectMarkdownFiles(root string) ([]string, []ingestError, error) {
+// collectMarkdownFiles walks the vault at root, a resolved path, and returns
+// the scan: the .md files found, the paths it could not read or follow, the
+// links it followed out of the vault and the ways to a folder or note it did
+// not take (markdownWalk). A file is named by its path through the vault:
+// under a linked folder, the path through the link, which the caller reads and
+// derives the vault path, title and category from.
+//
+// A symbolic link to a folder is followed, also out of the vault. Every real
+// folder is walked once, so a cycle ends and two links to one folder do not
+// ingest it twice: the vault is walked first without following a link, then
+// the links found there, sorted by their path in the vault, then the links
+// found behind those, and so on. A folder reached without a link thus wins
+// over every link to it, a way through fewer links over one through more, and
+// among equal ones the link whose path sorts first (byte order), whatever
+// order the file system lists a folder in.
+func collectMarkdownFiles(root string) (*markdownWalk, error) {
 	w := &markdownWalk{root: root}
-	err := filepath.WalkDir(root, w.visit)
-	return w.files, w.unreadable, err
+	w.see(root, root)
+	if err := w.walk(root, root); err != nil {
+		return nil, err
+	}
+	for len(w.links) > 0 {
+		round := w.links
+		w.links = nil
+		slices.SortFunc(round, func(a, b folderLink) int { return strings.Compare(a.shown, b.shown) })
+		for _, l := range round {
+			if err := w.follow(l); err != nil {
+				return nil, err
+			}
+		}
+	}
+	w.noteDeadAttachments()
+	return w, nil
 }
 
 // markdownWalk is the state of one vault scan.
 type markdownWalk struct {
-	root       string
-	files      []string      // the .md files found, absolute
-	unreadable []ingestError // the paths the walk could not read
+	root        string            // the vault, resolved
+	base        string            // the folder being walked, resolved
+	shown       string            // base's path through the vault (base itself for the vault)
+	files       []string          // the .md files found, as paths through the vault
+	unreadable  []ingestError     // the paths the walk could not read or follow
+	followedOut []ingestError     // the links followed to a folder out of the vault
+	notFollowed []ingestError     // the ways not taken to a folder or note found otherwise
+	seen        map[string]string // every folder walked, resolved, to its path through the vault
+	links       []folderLink      // the links to a folder found and not yet followed
+	deadAttach  []string          // dead links named with an extension other than .md
 }
 
-// visit is the fs.WalkDirFunc of collectMarkdownFiles. A directory inside the
-// vault whose name starts with "." (.obsidian, .git) and node_modules are
-// skipped on purpose, on the first call, before WalkDir reads them, so they
-// never report an error. A directory WalkDir could not read, wholly or in
-// part, comes back in a second call with the error: files under it are
-// missing from the run, so it is recorded like an unreadable file and the scan
-// goes on with the entries WalkDir did read.
+// folderLink is a link to a folder: its path through the vault and the folder
+// it resolves to.
+type folderLink struct{ shown, target string }
+
+// walk walks the resolved folder base, which appears in the vault as shown.
+func (w *markdownWalk) walk(base, shown string) error {
+	w.base, w.shown = base, shown
+	return filepath.WalkDir(base, w.visit) //nolint:gosec // G703: the vault the user named and the folders its links lead to are what ingest reads
+}
+
+// visit is the fs.WalkDirFunc of markdownWalk.walk. A directory whose name
+// starts with "." (.obsidian, .git) and node_modules are skipped on purpose,
+// on the first call, before WalkDir reads them, so they never report an
+// error; the folder walked is walked whatever it is called (~/.notes). A
+// directory WalkDir could not read, wholly or in part, comes back in a second
+// call with the error: files under it are missing from the run, so it is
+// recorded like an unreadable file and the scan goes on with the entries
+// WalkDir did read. Only a symbolic link costs a system call more (link); a
+// directory costs a map entry.
 func (w *markdownWalk) visit(path string, d fs.DirEntry, err error) error {
+	shown := w.shownPath(path)
 	if err != nil {
-		rel, relErr := filepath.Rel(w.root, path)
-		if relErr != nil {
-			rel = path
-		}
 		w.unreadable = append(w.unreadable, ingestError{
-			File:  filepath.ToSlash(rel),
+			File:  w.rel(shown),
 			Error: "could not be read, files under it may be missing: " + err.Error(),
 		})
-		return nil
+		return nil //nolint:nilerr // recorded above; the scan goes on with what WalkDir did read
 	}
-	if d.IsDir() {
-		name := d.Name()
-		// Skip hidden directories and known noise inside the vault; the vault
-		// itself is walked whatever it is called (~/.notes).
-		if path != w.root && (strings.HasPrefix(name, ".") || name == "node_modules") {
+	switch {
+	case d.IsDir():
+		if path == w.base {
+			return nil
+		}
+		if skippedFolder(d.Name()) {
 			return filepath.SkipDir
 		}
-		return nil
-	}
-	if strings.HasSuffix(d.Name(), ".md") {
-		w.files = append(w.files, path)
+		// Under a link: a real folder walked before, through another way.
+		if prev, ok := w.seen[path]; ok {
+			w.skip(shown, path, prev)
+			return filepath.SkipDir
+		}
+		w.see(path, shown)
+	case d.Type()&fs.ModeSymlink != 0:
+		w.link(path, shown, d.Name())
+	case strings.HasSuffix(d.Name(), ".md"):
+		w.files = append(w.files, shown)
 	}
 	return nil
 }
 
-// printFileErrors lists the paths a run did not ingest: unreadable files and
-// directories, and files held back over a server limit.
-func printFileErrors(errs []ingestError) {
-	if len(errs) == 0 {
+// link sorts a symbolic link at path, named name, by what it leads to. A link
+// to a folder is followed later (collectMarkdownFiles) unless its name is one
+// a folder is skipped by; a link named .md to anything else is a note, read
+// through the link and named by the link's path as before, also when the note
+// is reachable another way (each way is its own block). A link that leads
+// nowhere, or that cannot be resolved, is listed as a note when it is named
+// .md (reading it reports why); otherwise it is recorded as unreadable when
+// it may have led to a folder of notes, that is when its name has no
+// extension. A dead link named with another extension (a missing image or
+// PDF) does not count: ingest would not have read what it led to. It is still
+// named in one summary line (noteDeadAttachments), as a dead link to a folder
+// called like v2.0 is one.
+func (w *markdownWalk) link(path, shown, name string) {
+	info, err := os.Stat(path)
+	if err == nil && !info.IsDir() {
+		if strings.HasSuffix(name, ".md") {
+			w.files = append(w.files, shown)
+		}
 		return
 	}
-	Errorf("\n  Errors (%d):", len(errs))
-	for _, e := range errs {
+	var target string
+	if err == nil {
+		if skippedFolder(name) {
+			return
+		}
+		if target, err = filepath.EvalSymlinks(path); err == nil {
+			w.links = append(w.links, folderLink{shown: shown, target: target})
+			return
+		}
+	}
+	switch {
+	case strings.HasSuffix(name, ".md"):
+		w.files = append(w.files, shown)
+	case skippedFolder(name):
+	case filepath.Ext(name) == "":
+		w.unreadable = append(w.unreadable, ingestError{
+			File:  w.rel(shown),
+			Error: "could not be followed, files under it may be missing: " + err.Error(),
+		})
+	default:
+		w.deadAttach = append(w.deadAttach, w.rel(shown))
+	}
+}
+
+// follow walks the folder a link leads to, unless it is the vault or a folder
+// that holds the vault (a way back, which would walk the vault again and what
+// lies around it) or a folder walked before.
+func (w *markdownWalk) follow(l folderLink) error {
+	if within(w.root, l.target) {
+		w.notFollowed = append(w.notFollowed, ingestError{
+			File:  w.rel(l.shown) + " -> " + l.target,
+			Error: "the vault or a folder that holds it",
+		})
+		return nil
+	}
+	if prev, ok := w.seen[l.target]; ok {
+		w.skip(l.shown, l.target, prev)
+		return nil
+	}
+	w.see(l.target, l.shown)
+	if !within(l.target, w.root) {
+		w.followedOut = append(w.followedOut, ingestError{File: w.rel(l.shown) + " -> " + l.target})
+	}
+	return w.walk(l.target, l.shown)
+}
+
+// noteDeadAttachments names the dead links taken for missing attachments in
+// one line of the ways not taken: they do not count, and a vault with many of
+// them would otherwise fill the summary on every run.
+func (w *markdownWalk) noteDeadAttachments() {
+	switch n := len(w.deadAttach); n {
+	case 0:
+	case 1:
+		w.notFollowed = append(w.notFollowed, ingestError{File: w.deadAttach[0],
+			Error: "leads nowhere, taken for a missing attachment (named with an extension other than .md)"})
+	default:
+		w.notFollowed = append(w.notFollowed, ingestError{File: fmt.Sprintf("%s and %d more", w.deadAttach[0], n-1),
+			Error: "lead nowhere, taken for missing attachments (named with an extension other than .md)"})
+	}
+}
+
+// printLinks prints the links followed out of the vault and the ways not
+// taken; neither changes the exit status.
+func (w *markdownWalk) printLinks() {
+	printPathList("Followed out of the vault", w.followedOut)
+	printPathList("Not followed", w.notFollowed)
+}
+
+// see records the resolved folder dir as walked, through the vault path shown.
+func (w *markdownWalk) see(dir, shown string) {
+	if w.seen == nil {
+		w.seen = make(map[string]string)
+	}
+	w.seen[dir] = shown
+}
+
+// skip records the way shown to target, which was found through prev before.
+func (w *markdownWalk) skip(shown, target, prev string) {
+	w.notFollowed = append(w.notFollowed, ingestError{
+		File:  w.rel(shown) + " -> " + target,
+		Error: "already ingested through " + w.rel(prev),
+	})
+}
+
+// shownPath is the path through the vault of path in the folder being walked.
+func (w *markdownWalk) shownPath(path string) string {
+	if w.base == w.shown {
+		return path
+	}
+	return filepath.Join(w.shown, strings.TrimPrefix(path, w.base))
+}
+
+// rel is the vault-relative form of a path through the vault, with forward
+// slashes, as the run reports it.
+func (w *markdownWalk) rel(shown string) string {
+	rel, err := filepath.Rel(w.root, shown)
+	if err != nil {
+		rel = shown
+	}
+	return filepath.ToSlash(rel)
+}
+
+// skippedFolder reports whether a folder of this name is skipped on purpose:
+// a hidden one (.obsidian, .git) or node_modules.
+func skippedFolder(name string) bool {
+	return strings.HasPrefix(name, ".") || name == "node_modules"
+}
+
+// within reports whether path is dir or lies under it; both are resolved.
+func within(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// printFileErrors lists the paths a run did not ingest: unreadable files and
+// directories, links that cannot be followed, and files held back over a
+// server limit.
+func printFileErrors(errs []ingestError) {
+	printPathList("Errors", errs)
+}
+
+// printPathList prints a summary section of paths and what became of them.
+func printPathList(heading string, list []ingestError) {
+	if len(list) == 0 {
+		return
+	}
+	Errorf("\n  %s (%d):", heading, len(list))
+	for _, e := range list {
+		if e.Error == "" {
+			Errorf("    %s", e.File)
+			continue
+		}
 		Errorf("    %s: %s", e.File, e.Error)
 	}
 }
