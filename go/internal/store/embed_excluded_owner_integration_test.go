@@ -513,22 +513,35 @@ func TestEmbedExcludedOwnerInterleavings(t *testing.T) {
 	}
 
 	// A lifting registry row written in a tenantless scope while the scope is
-	// assigned to a tenant whose own row excludes the name: one of the two
-	// queues the name for the tenant's group, so A's blocks are cleared.
-	for _, order := range []string{"row_first", "assignment_first"} {
-		t.Run("registry_row_vs_assignment/"+order, func(t *testing.T) {
+	// assigned to a tenant whose blocks of the name are marked — by its own
+	// excluded row (own_row), or by the _global row alone (global_only: the
+	// tenant holds no row of the name, so the assignment finds the name only
+	// through the new row): one of the two queues the name for the tenant's
+	// group, so A's blocks are cleared.
+	for _, c := range []struct{ kind, order string }{
+		{"own_row", "row_first"}, {"own_row", "assignment_first"},
+		{"global_only", "row_first"}, {"global_only", "assignment_first"},
+	} {
+		order := c.order
+		t.Run("registry_row_vs_assignment/"+c.kind+"/"+order, func(t *testing.T) {
 			pool := testdb.SetupTestDB(t)
 			reconcile(t, pool)
 			ta := ownerTenant(t, pool, "ra-a", "ra-a")
-			createType(t, pool, "ra-x", "ra-a", "excluded")
-			ids := ownerSeed(t, pool, "ra-a", "ra-x", 3)
+			name := "ra-x"
+			if c.kind == "global_only" {
+				name = "ra-g"
+				createType(t, pool, name, "_global", "excluded")
+			} else {
+				createType(t, pool, name, "ra-a", "excluded")
+			}
+			ids := ownerSeed(t, pool, "ra-a", name, 3)
 			reconcile(t, pool)
 			if !marker(t, pool, ids[0]) {
 				t.Fatalf("fixture: A's block not marked")
 			}
 			insertRow := func(tx pgx.Tx) error {
 				_, err := tx.Exec(ctx, `INSERT INTO context_block_types (name, scope, display_name, builtin, is_default, config)
-					VALUES ('ra-x', 'ra-free', 'ra-x', false, false, '{"retrieval":{"policy":"full-pass"}}')`)
+					VALUES ($1::text, 'ra-free', $1::text, false, false, '{"retrieval":{"policy":"full-pass"}}')`, name)
 				return err
 			}
 			assign := func(tx pgx.Tx) error {
