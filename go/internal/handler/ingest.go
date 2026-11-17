@@ -170,6 +170,15 @@ func (h *IngestHandler) HandleIngest(w http.ResponseWriter, r *http.Request) {
 	// Parse body.
 	var req IngestRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// A body over the route's cap (handler.MaxBodySize in server.go) is
+		// refused as too large, as decodeIssueBody refuses it, not as
+		// malformed: a client could not tell the two apart (#323).
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			slog.Warn("ingest: request body over the cap", "limit", tooLarge.Limit, "request_id", reqID)
+			writeHouseTooLarge(w, r, tooLarge.Limit)
+			return
+		}
 		slog.Warn("ingest: invalid request body", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false, "error": "Invalid request body",

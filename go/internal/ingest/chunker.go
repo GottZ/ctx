@@ -40,6 +40,13 @@ const (
 // refuses a --batch above it.
 const MaxChunksPerRequest = 200
 
+// MaxRequestBytes is the body limit of POST /api/ingest: ctxd mounts the route
+// behind it (IngestMaxBodySize in cmd/ctxd/server.go is this constant), and a
+// longer request is refused whole with 413. `ctx ingest` cuts its batches so
+// that no request is longer, and holds back a file with a chunk whose request
+// alone would be.
+const MaxRequestBytes = 10 << 20
+
 // headingRe matches H1/H2 at line start.
 var headingRe = regexp.MustCompile(`(?m)^(#{1,2})\s+(.+)$`)
 

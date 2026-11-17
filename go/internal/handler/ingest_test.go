@@ -1,10 +1,14 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/ingest"
 )
 
@@ -234,6 +238,38 @@ func TestIngestLimitsMatchCLI(t *testing.T) {
 			t.Errorf("%s limit: handler %d, internal/ingest %d: the CLI would check its chunks against another limit",
 				l.name, l.handler, l.ingt)
 		}
+	}
+}
+
+// A body over the route's cap (MaxBodySize, as server.go mounts the route) is
+// refused with 413 and the cap named, as decodeIssueBody refuses it, before
+// the handler reads the database; a malformed body within the cap stays 400.
+// Before #323 both answered 400 "Invalid request body", and `ctx ingest`
+// could not say why its batch was refused. The production mount is probed in
+// cmd/ctxd (TestIngestBodyCapBoundary_Integration).
+func TestHandleIngestBodyOverCap(t *testing.T) {
+	const capBytes = 64
+	h := MaxBodySize(capBytes)(http.HandlerFunc(NewIngestHandler(nil, nil, nil).HandleIngest))
+	cases := []struct {
+		name   string
+		body   string
+		status int
+		want   string
+	}{
+		{"over_cap", `{"source":"x","chunks":[{"category":"c","title":"t","content":"` + strings.Repeat("a", capBytes) + `"}]}`,
+			http.StatusRequestEntityTooLarge, "request body exceeds 64 bytes cap"},
+		{"malformed_within_cap", `{"source":`, http.StatusBadRequest, "Invalid request body"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/ingest", strings.NewReader(tc.body))
+			req = req.WithContext(context.WithValue(req.Context(), authResultKey, &auth.AuthResult{IsValid: true}))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.want) {
+				t.Errorf("status %d, body %s; want %d with %q", rec.Code, rec.Body.String(), tc.status, tc.want)
+			}
+		})
 	}
 }
 

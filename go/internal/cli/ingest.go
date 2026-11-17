@@ -32,6 +32,10 @@ type ingestChunkPayload struct {
 	Metadata   map[string]any `json:"metadata,omitempty"`
 	SourceID   string         `json:"source_id,omitempty"`
 	ChunkIndex int            `json:"chunk_index"`
+
+	// wireBytes is the chunk's length in the request body (encodedLen), set
+	// by filePayloads; it is not sent.
+	wireBytes int
 }
 
 // ingestRequestPayload is the batch request to POST /api/ingest.
@@ -112,10 +116,12 @@ Use --dry-run to preview what would be uploaded without sending anything.
 
 A file with a chunk the server refuses (title over 500 bytes, category over
 100 bytes, content over 50 KB, an empty title or category, a category
-reserved for derived blocks) is held back and reported; the other files are
-uploaded. A directory that cannot be read is reported too. The command exits 1
-when a file or directory was not ingested or a chunk was not written, a dry
-run when the upload would leave one out.
+reserved for derived blocks, a request over 10 MB for that chunk alone) is
+held back and reported; the other files are uploaded. A batch ends at --batch
+chunks or before its request would pass the server's 10 MB limit, whichever
+comes first. A directory that cannot be read is reported too. The command
+exits 1 when a file or directory was not ingested or a chunk was not written,
+a dry run when the upload would leave one out.
 
 The chunks go to the key's home scope, or to the scope --scope names. The key
 must be allowed to write that scope (a scope belongs to one tenant), or the
@@ -178,6 +184,7 @@ stops after the first batch and exits 1.`,
 				categories: make(map[string]int),
 			}
 			var allChunks []ingestChunkPayload
+			overhead := requestOverhead(scope)
 
 			for i, filePath := range files {
 				relPath, _ := filepath.Rel(vaultPath, filePath)
@@ -231,7 +238,7 @@ stops after the first batch and exits 1.`,
 				}
 
 				payloads := filePayloads(relPath, cat, parsed, chunks)
-				if breach := limitBreach(payloads); breach != "" {
+				if breach := limitBreach(payloads, overhead); breach != "" {
 					errors = append(errors, ingestError{File: relPath, Error: "not uploaded: " + breach})
 					continue
 				}
@@ -306,7 +313,7 @@ stops after the first batch and exits 1.`,
 			Errorf("\nctx ingest: uploading %d chunks to %s", len(allChunks), apiBase)
 
 			// Split into batches
-			batches := splitIntoBatches(allChunks, batch)
+			batches := splitIntoBatches(allChunks, batch, overhead, ingest.MaxRequestBytes)
 
 			// Upload with worker pool
 			var (
@@ -343,11 +350,7 @@ stops after the first batch and exits 1.`,
 							atomic.AddInt64(&notSent, batchSize)
 							continue
 						}
-						req := ingestRequestPayload{
-							Source:      "obsidian",
-							TargetScope: scope,
-							Chunks:      batchChunks,
-						}
+						req := ingestRequest(scope, batchChunks)
 						// TODO: if extract, signal server to enable LLM extraction
 						// (handled via source field or separate flag in future)
 
@@ -427,7 +430,8 @@ stops after the first batch and exits 1.`,
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Parse and chunk only, don't upload")
 	cmd.Flags().IntVar(&workers, "workers", 1, "Parallel upload workers")
 	cmd.Flags().IntVar(&batch, "batch", 50,
-		fmt.Sprintf("Chunks per batch, 1 to %d (the server's limit per request)", ingest.MaxChunksPerRequest))
+		fmt.Sprintf("Chunks per batch, 1 to %d (the server's limit per request); a batch ends earlier where its request would pass %d MB",
+			ingest.MaxChunksPerRequest, ingest.MaxRequestBytes>>20))
 	cmd.Flags().StringVar(&category, "category", "", "Override category (default: from folder path)")
 	cmd.Flags().StringVar(&scope, "scope", "",
 		"Scope to write the chunks to (default: the key's home scope); the key must be allowed to write it, a scope belongs to one tenant")
@@ -518,16 +522,57 @@ func filePayloads(relPath, cat string, parsed *ingest.ParseResult, chunks []inge
 		if len(parsed.Dates) > 0 {
 			meta["dates"] = parsed.Dates
 		}
-		payloads = append(payloads, ingestChunkPayload{
+		p := ingestChunkPayload{
 			Category:   cat,
 			Title:      ch.Title,
 			Content:    ch.Header + "\n\n" + ch.Content,
 			Tags:       tags,
 			Metadata:   meta,
 			ChunkIndex: ch.Index,
-		})
+		}
+		p.wireBytes = encodedLen(p)
+		payloads = append(payloads, p)
 	}
 	return payloads
+}
+
+// ingestRequest is the body of POST /api/ingest for one batch.
+func ingestRequest(scope string, chunks []ingestChunkPayload) ingestRequestPayload {
+	return ingestRequestPayload{Source: "obsidian", TargetScope: scope, Chunks: chunks}
+}
+
+// requestOverhead is the length of the request body without a chunk
+// (`{"source":"obsidian","chunks":[]}`, with target_scope when scope is set).
+// json.Marshal writes a slice element as it writes the value alone, so a
+// request of chunks c1…cn is requestOverhead + encodedLen(c1) + … +
+// encodedLen(cn) + n-1 commas, byte for byte the body postIngest sends.
+func requestOverhead(scope string) int {
+	b, _ := json.Marshal(ingestRequest(scope, []ingestChunkPayload{})) // two strings and an empty slice cannot fail
+	return len(b)
+}
+
+// byteCounter is an io.Writer that keeps only the count of what it is given.
+type byteCounter int
+
+func (c *byteCounter) Write(p []byte) (int, error) {
+	*c += byteCounter(len(p))
+	return len(p), nil
+}
+
+// encodedLen is the length of p as json.Marshal writes it into the request
+// body (requestOverhead). The encoder writes into a counter, not into a new
+// buffer, so measuring a chunk allocates no copy of it; it ends its output
+// with a newline, which Marshal does not write. It escapes as Marshal does:
+// `<`, `>` and `&` as six bytes, an invalid UTF-8 byte as `\ufffd`. A payload
+// holds strings, string slices and an int, which the encoder cannot fail on;
+// were it to, it would give 0, and postIngest's Marshal would fail the batch
+// as it did before batches were measured.
+func encodedLen(p ingestChunkPayload) int {
+	var n byteCounter
+	if err := json.NewEncoder(&n).Encode(p); err != nil {
+		return 0
+	}
+	return int(n) - 1
 }
 
 // limitBreach names the first per-chunk limit of POST /api/ingest that one of
@@ -541,8 +586,12 @@ func filePayloads(relPath, cat string, parsed *ingest.ParseResult, chunks []inge
 // carries the chunk's context header. Sizes are counted as the server decodes
 // them (wireLen). A category the derived layer reserves is refused whole by
 // the handler's claim gate (403) and is held back the same way; the check is
-// the handler's own predicate, derived.IsReservedCategory.
-func limitBreach(payloads []ingestChunkPayload) string {
+// the handler's own predicate, derived.IsReservedCategory. A chunk whose
+// request alone, overhead bytes plus the chunk (requestOverhead), passes the
+// server's body limit cannot be sent in any batch, and is held back too: every
+// chunk carries the file's links, dates and tags, so a file with very many
+// links can make one chunk of short content a request of several MB.
+func limitBreach(payloads []ingestChunkPayload, overhead int) string {
 	for _, p := range payloads {
 		cat, title, content := wireLen(p.Category), wireLen(p.Title), wireLen(p.Content)
 		var breach string
@@ -559,6 +608,9 @@ func limitBreach(payloads []ingestChunkPayload) string {
 			breach = fmt.Sprintf("the title is %d bytes, the server accepts at most %d", title, ingest.MaxTitleBytes)
 		case content > ingest.MaxContentBytes:
 			breach = fmt.Sprintf("the content is %d bytes, the server accepts at most %d", content, ingest.MaxContentBytes)
+		case overhead+p.wireBytes > ingest.MaxRequestBytes:
+			breach = fmt.Sprintf("the request for this chunk alone is %d bytes, the server accepts at most %d",
+				overhead+p.wireBytes, ingest.MaxRequestBytes)
 		default:
 			continue
 		}
@@ -762,25 +814,42 @@ func ingestIncomplete(cmd *cobra.Command, dryRun bool, fileErrs []ingestError, f
 		len(fileErrs), failedChunks, reason)
 }
 
-// splitIntoBatches divides chunks into batches of the given size.
-func splitIntoBatches(chunks []ingestChunkPayload, batchSize int) [][]ingestChunkPayload {
+// splitIntoBatches cuts chunks, in order, into the batches of the upload: a
+// batch ends before the chunk that would take it past batchSize chunks or its
+// request past maxBytes, the server's body limit. A request is overhead bytes
+// (requestOverhead) plus its chunks' wireBytes and a comma between two, so
+// the count is the body postIngest sends; a request of exactly maxBytes is
+// accepted. A chunk over maxBytes on its own still gets a batch of its own;
+// ctx ingest holds its file back before (limitBreach). The batches are
+// sub-slices of chunks; nothing is copied.
+func splitIntoBatches(chunks []ingestChunkPayload, batchSize, overhead, maxBytes int) [][]ingestChunkPayload {
 	if batchSize <= 0 {
 		batchSize = 50
 	}
 	var batches [][]ingestChunkPayload
-	for i := 0; i < len(chunks); i += batchSize {
-		end := i + batchSize
-		if end > len(chunks) {
-			end = len(chunks)
+	start, size := 0, overhead
+	for i := range chunks {
+		n := chunks[i].wireBytes
+		if i > start {
+			n++ // the comma before it
+			if i-start == batchSize || size+n > maxBytes {
+				batches = append(batches, chunks[start:i])
+				start, size, n = i, overhead, chunks[i].wireBytes
+			}
 		}
-		batches = append(batches, chunks[i:end])
+		size += n
+	}
+	if start < len(chunks) {
+		batches = append(batches, chunks[start:])
 	}
 	return batches
 }
 
 // postIngest sends a batch to POST /api/ingest and parses the response. A 200
 // with success:false and failed > 0 is the documented partial success, not a
-// refusal: it is returned, and the caller counts it chunk by chunk.
+// refusal: it is returned, and the caller counts it chunk by chunk. A 413
+// whose answer names no reason, as a proxy in front of the server sends it
+// (an HTML page), is reported as a request too large, with its size.
 func postIngest(c *Client, url string, req ingestRequestPayload) (*ingestResponsePayload, error) {
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -801,8 +870,13 @@ func postIngest(c *Client, url string, req ingestRequestPayload) (*ingestRespons
 	defer func() { _ = resp.Body.Close() }()
 
 	var result ingestResponsePayload
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode response (status %d): %w", resp.StatusCode, err)
+	decodeErr := json.NewDecoder(resp.Body).Decode(&result)
+	if resp.StatusCode == http.StatusRequestEntityTooLarge && (decodeErr != nil || result.Error == "") {
+		return nil, &ingestRefusal{msg: fmt.Sprintf(
+			"HTTP 413: the request of %d bytes is too large for the server or a proxy in front of it", len(data))}
+	}
+	if decodeErr != nil {
+		return nil, fmt.Errorf("decode response (status %d): %w", resp.StatusCode, decodeErr)
 	}
 
 	if resp.StatusCode != http.StatusOK {

@@ -14,6 +14,7 @@ import (
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/forge"
 	"github.com/GottZ/ctx/internal/handler"
+	"github.com/GottZ/ctx/internal/ingest"
 	"github.com/GottZ/ctx/internal/settings"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/web"
@@ -24,8 +25,9 @@ import (
 const (
 	// DefaultMaxBodySize is the default body size limit for all endpoints (1 MB).
 	DefaultMaxBodySize = 1 << 20 // 1 MB
-	// IngestMaxBodySize is the body size limit for /api/ingest (10 MB for bulk chunks).
-	IngestMaxBodySize = 10 << 20 // 10 MB
+	// IngestMaxBodySize is the body size limit for /api/ingest (10 MB for bulk
+	// chunks). It is the constant `ctx ingest` cuts its batches by.
+	IngestMaxBodySize = ingest.MaxRequestBytes // 10 MB
 	// BlobMaxBodySize is the body size limit for blob-store (75 MB: 50MB binary + base64 overhead).
 	BlobMaxBodySize = 75 << 20 // 75 MB
 )
