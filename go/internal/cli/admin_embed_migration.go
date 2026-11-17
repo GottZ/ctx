@@ -52,7 +52,7 @@ func embedMigrationCmd(getClient func() (*Client, error)) *cobra.Command {
 	cmd.AddCommand(embedMigrationCreateCmd(getClient))
 	cmd.AddCommand(embedMigrationStatusCmd(getClient))
 	cmd.AddCommand(embedMigrationTransitionCmd(getClient, "pause", "Pause the running migration (running→paused)"))
-	cmd.AddCommand(embedMigrationTransitionCmd(getClient, "resume", "Start/resume the migration (pending or paused → running)"))
+	cmd.AddCommand(embedMigrationTransitionCmd(getClient, "resume", "Start/resume the migration (pending, paused or verifying → running)"))
 	cmd.AddCommand(embedMigrationReasonCmd(getClient, "abort", "Abort the active migration (reason required)"))
 	cmd.AddCommand(embedMigrationTransitionCmd(getClient, "confirm", "Confirm the verified migration — run the cutover"))
 	cmd.AddCommand(embedMigrationReasonCmd(getClient, "rollback", "Roll back a done migration (reason required; needs the _old anchor)"))

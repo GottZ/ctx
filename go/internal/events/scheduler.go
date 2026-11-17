@@ -300,6 +300,13 @@ type Scheduler struct {
 	embedVerifyActive atomic.Bool
 	embedVerifySync   bool
 
+	// runtimeIndexDefOK maps a runtime index name of the re-embed migration
+	// to the live pg_get_indexdef this process has found equal to the
+	// definition its DDL builds (issue #312, runtimeIndexDefinitionSame), so
+	// the pending index ensured on every migration cycle is compared once,
+	// not on every tick. Written by the cycle and the verify goroutine.
+	runtimeIndexDefOK sync.Map
+
 	// Internal state.
 	mu            sync.Mutex
 	lastWriteAt   time.Time

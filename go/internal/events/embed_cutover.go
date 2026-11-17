@@ -58,7 +58,7 @@ var (
 	// model other than to_model — flipping it would relabel a foreign space
 	// as the serving space (§4.2 model-guard class, at confirm time).
 	ErrConfirmEmbedNextForeign  = errors.New("embed-cutover: confirm: a RoleEmbed backend's embed_next key resolves to a foreign model")
-	ErrConfirmNextIndexNotReady = errors.New("embed-cutover: confirm: a _next index is missing or INVALID — the verify gate builds them (§4.7 Stufe 3)")
+	ErrConfirmNextIndexNotReady = errors.New("embed-cutover: confirm: a _next index is missing, INVALID or of another definition than the verify gate builds — the verify gate builds them (§4.7 Stufe 3)")
 	// ErrConfirmIncomplete: the in-tx completeness re-check (IDENTICAL
 	// watermark+memo predicate as §4.7 Stufe 1 — §5 Bruchpfad 4) found
 	// pending blocks. The tx rolled back, the row stays verifying.
@@ -372,19 +372,39 @@ func confirmPreflight(ctx context.Context, db *pgxpool.Pool, migrationID string)
 		return nil, nil, ErrConfirmNoFlipTarget
 	}
 
-	// Every _next index (the HNSW twin and the sister indexes) must exist VALID before its canonical
-	// rename — renaming an INVALID CIC leftover into the canonical name
-	// would be a silent planner hole behind a green-looking cutover.
-	for _, name := range append([]string{verifyNextHNSWIndexName}, sisterIndexNames()...) {
-		valid, exists, err := indexValidity(ctx, db, name)
-		if err != nil {
-			return nil, nil, err
-		}
-		if !exists || !valid {
-			return nil, nil, fmt.Errorf("%w: %s (exists=%t, valid=%t)", ErrConfirmNextIndexNotReady, name, exists, valid)
-		}
+	if err := confirmNextIndexesReady(ctx, db); err != nil {
+		return nil, nil, err
 	}
 	return row, targets, nil
+}
+
+// confirmNextIndexesReady requires every _next index (the HNSW twin and the
+// sister indexes) to exist VALID, with the definition the verify gate
+// builds, before its canonical rename — renaming an INVALID CIC leftover
+// into the canonical name would be a silent planner hole behind a
+// green-looking cutover, and renaming an index of an older definition would
+// put that definition on the serving name (issue #312: a verify that went
+// green on an older release does not run again, so the confirm is the last
+// point before the rename). A comparison that cannot be made refuses too.
+func confirmNextIndexesReady(ctx context.Context, db *pgxpool.Pool) error {
+	for _, ix := range verifyNextIndexes() {
+		st, err := readRuntimeIndex(ctx, db, ix.name)
+		if err != nil {
+			return fmt.Errorf("embed-cutover: index probe (%s): %w", ix.name, err)
+		}
+		if !st.exists || !st.valid {
+			return fmt.Errorf("%w: %s (exists=%t, valid=%t)", ErrConfirmNextIndexNotReady, ix.name, st.exists, st.valid)
+		}
+		live, expected, same, err := runtimeIndexMatches(ctx, db, ix.name, ix.ddl, st.def)
+		if err != nil {
+			return fmt.Errorf("embed-cutover: confirm: %s: %w", ix.name, err)
+		}
+		if !same {
+			return fmt.Errorf("%w: %s has the definition %q, the verify gate builds %q — resume the migration (verifying → running): it re-enters verifying and the verify gate rebuilds it",
+				ErrConfirmNextIndexNotReady, ix.name, live, expected)
+		}
+	}
+	return nil
 }
 
 // runConfirmSwapTx is the ONE §4.8 transaction (steps 1-5 of the sketch).
@@ -860,14 +880,4 @@ func indexValidity(ctx context.Context, q embedmigration.Querier, name string) (
 		return false, false, fmt.Errorf("embed-cutover: index probe (%s): %w", name, err)
 	}
 	return valid, true, nil
-}
-
-// sisterIndexNames lists the sister partial indexes (W04-5 builds
-// them, the swap tx renames them canonically).
-func sisterIndexNames() []string {
-	names := make([]string, 0, len(verifySisterIndexes))
-	for _, s := range verifySisterIndexes {
-		names = append(names, s.name)
-	}
-	return names
 }
