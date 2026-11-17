@@ -80,19 +80,76 @@
 --     scope.
 --   A grant changes no answer and queues nothing.
 -- The scheduler's reconcile (store.ReconcileEmbedExcluded) reads the answer
--- of every scope of the entry once; it marks the pending and the stale
--- blocks of the name in the scopes that answer true (a stale one drops its
--- vector), scope by scope, and clears the marked blocks of the group whose
--- own answer is false only when a scope answers false; in batches, outside
--- the registry write; a group never reaches a block outside its scopes.
+-- of every scope of the entry once; scope by scope, it marks the pending and
+-- the stale blocks of the name in the scopes that answer true (a stale one
+-- drops its vector) and clears the marked blocks of the name in the scopes
+-- that answer false; in batches, outside the registry write; an entry never
+-- reads or writes a block outside its scopes.
 --
--- LOCKS. SET LOCAL lock_timeout = '3s' (house pattern). Every statement of
--- this file is a catalog change on its tables or reads context_block_types:
---   * context_blocks: CREATE OR REPLACE TRIGGER trg_block_embed_excluded
---     takes SHARE ROW EXCLUSIVE, which waits for and blocks writers of
---     context_blocks (readers go on), held to the commit of this file. No
---     statement reads or writes a row of context_blocks: no heap scan, no
---     index build, no row update.
+-- INDEX. idx_blocks_embed_excluded of 175, (type_name, id) WHERE
+-- embed_excluded AND NOT is_archived, becomes (type_name, scope, id) with the
+-- same predicate and the same name: the clear of a scope is one range of it.
+-- On the definition of 175 the clear of one tenant's group walked the name's
+-- marked blocks in every tenant and kept its own, so a tenant's registry
+-- write drew the other tenants' marked blocks of the name into its cost
+-- (measured on a testcontainer, one clear batch of a tenant's group: 10 054
+-- buffers / 14 ms at 10 000 marked blocks of the name in another tenant,
+-- 100 498 / 3.2 s at 100 000; on this definition 2-3 buffers). A '*' entry
+-- whose name has no excluded _global row reads the name's range of it once
+-- per round to find the scopes that hold a marked block. The index names no
+-- embedding column (its key and predicate read type_name, scope, id,
+-- embed_excluded, is_archived), so it is not in the attnum class of the
+-- re-embed cutover, and events.verifySisterIndexes has no twin of it.
+--
+-- INDEX BUILD AND ITS RUNBOOK (the 171/175 pattern). The runner runs each
+-- file in ONE transaction (store/migrations.go), where CONCURRENTLY is
+-- impossible, and every lock the file takes is held to its commit:
+--   * A usable index of this name with exactly the new definition: no-op.
+--   * The definition of 175 below 500 000 rows (pg_class.reltuples): the
+--     first statement of the file drops it and builds the new definition
+--     inline. DROP INDEX takes ACCESS EXCLUSIVE on context_blocks, so for the
+--     whole file, the build included (it reads the whole heap), no other
+--     session reads or writes context_blocks: they wait, and one with a
+--     lock_timeout fails with 55P03. Measured on a testcontainer (PG18, warm
+--     cache, rows of about 450 bytes, one in ten marked), the whole
+--     migration call as an upper bound for that wait: 34-47 ms at 100 000
+--     rows (175 MB heap), 139-168 ms at 400 000 rows (703 MB heap); a cold
+--     cache reads the heap from disk once. The DROP comes first so ACCESS
+--     EXCLUSIVE is the file's first lock on context_blocks: taken after the
+--     SHARE ROW EXCLUSIVE of the trigger swap, the upgrade would close a
+--     deadlock with a transaction that read context_blocks and waits to
+--     write it; asked for first, such a write goes ahead of the waiting DROP
+--     (TestMigration176).
+--   * Above, or a name taken by anything else: WARNING, nothing built or
+--     dropped, and no lock on context_blocks above SHARE ROW EXCLUSIVE.
+--     Build out of band, at any time, before or after this binary serves:
+--
+--       CREATE INDEX CONCURRENTLY idx_blocks_embed_excluded_213
+--           ON context_blocks (type_name, scope, id)
+--           WHERE embed_excluded AND NOT is_archived;
+--       DROP INDEX CONCURRENTLY idx_blocks_embed_excluded;
+--       ALTER INDEX idx_blocks_embed_excluded_213 RENAME TO idx_blocks_embed_excluded;
+--
+--     (abortable; an aborted build leaves an INVALID index, which DROP INDEX
+--     removes before the next try; the rename takes SHARE UPDATE EXCLUSIVE,
+--     readers and writers go on). Measured on the same testcontainer, the
+--     CONCURRENTLY build took 105 ms at 100 000 rows, 332 ms at 400 000 and
+--     779 ms at 1 000 000 (index 0.5 / 2.0 / 4.9 MB at 10 000 / 40 000 /
+--     100 000 marked blocks). Until the rename the clear runs its statement
+--     on the definition of 175 or under the temporary name: correct either
+--     way, on 175's definition at its cost before 176, and the schema-
+--     contract manifest stays red. A binary before 176 runs its clear only
+--     for entries of its old queue, which nothing fills after 176, and on
+--     either definition.
+--
+-- LOCKS. SET LOCAL lock_timeout = '3s' (house pattern). Apart from the index
+-- build, every statement of this file is a catalog change on its tables or
+-- reads context_block_types:
+--   * context_blocks: the index rebuild below 500 000 rows (above) takes
+--     ACCESS EXCLUSIVE first. Otherwise CREATE OR REPLACE TRIGGER
+--     trg_block_embed_excluded takes SHARE ROW EXCLUSIVE, which waits for and
+--     blocks writers of context_blocks (readers go on). Either is held to the
+--     commit of this file. No statement writes a row of context_blocks.
 --   * context_block_types: CREATE OR REPLACE TRIGGER, SHARE ROW EXCLUSIVE.
 --   * context_tenant_scopes: CREATE OR REPLACE TRIGGER, SHARE ROW EXCLUSIVE.
 --   * context_embed_excluded_queue: created; the rows of the old queue
@@ -168,12 +225,61 @@
 -- One table (context_embed_excluded_queue): the test.sh T07 counts move to
 -- 70 tables and stay at 45 context_blocks columns. The schema-contract
 -- manifest gains the table, the three functions, the trigger on
--- context_tenant_scopes, the changed functions and trigger column list, and
--- migration_max 175 -> 176.
+-- context_tenant_scopes, the changed functions and trigger column list, the
+-- new definition of idx_blocks_embed_excluded, and migration_max 175 -> 176.
 -- Idempotent, forward-only. Registration by the runner (store.RunMigrations).
 -- =============================================================================
 
 SET LOCAL lock_timeout = '3s';
+
+-- idx_blocks_embed_excluded gains scope in its key (INDEX and INDEX BUILD AND
+-- ITS RUNBOOK in the header). The first statement of the file, so the ACCESS
+-- EXCLUSIVE of a DROP is its first lock on context_blocks.
+DO $do$
+DECLARE
+    v_def   TEXT;
+    v_valid BOOLEAN;
+    v_rows  BIGINT;
+BEGIN
+    SELECT c.reltuples::BIGINT INTO v_rows
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relname = 'context_blocks';
+    IF v_rows IS NULL OR v_rows < 0 THEN
+        -- reltuples < 0: never analysed. A bounded count, never a full scan.
+        SELECT count(*) INTO v_rows FROM (SELECT 1 FROM context_blocks LIMIT 500000) t;
+    END IF;
+
+    SELECT pg_get_indexdef(c.oid), i.indisvalid INTO v_def, v_valid
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_index     i ON i.indexrelid = c.oid
+     WHERE n.nspname = 'public' AND c.relname = 'idx_blocks_embed_excluded';
+
+    IF FOUND THEN
+        IF v_valid AND v_def = 'CREATE INDEX idx_blocks_embed_excluded ON public.context_blocks USING btree (type_name, scope, id) WHERE (embed_excluded AND (NOT is_archived))' THEN
+            RETURN;                 -- usable, nothing to do
+        END IF;
+        IF v_rows < 500000
+           AND v_def = 'CREATE INDEX idx_blocks_embed_excluded ON public.context_blocks USING btree (type_name, id) WHERE (embed_excluded AND (NOT is_archived))' THEN
+            DROP INDEX idx_blocks_embed_excluded;
+        ELSE
+            RAISE WARNING 'idx_blocks_embed_excluded is not the index of migration 176 at % rows (valid=%): %. Build it out of band (CREATE INDEX CONCURRENTLY, runbook in the header of 176_embed_excluded_owner.sql). The reconcile''s clear stays correct at its cost before 176; the schema-contract manifest stays red until then.',
+                v_rows, v_valid, v_def;
+            RETURN;
+        END IF;
+    END IF;
+
+    IF v_rows < 500000 THEN
+        CREATE INDEX IF NOT EXISTS idx_blocks_embed_excluded
+            ON context_blocks (type_name, scope, id)
+            WHERE embed_excluded AND NOT is_archived;
+    ELSE
+        RAISE WARNING 'idx_blocks_embed_excluded is missing at % rows: build it out of band (CREATE INDEX CONCURRENTLY, runbook in the header of 176_embed_excluded_owner.sql). The reconcile''s clear stays correct at its cost before 175; the schema-contract manifest stays red until then.',
+            v_rows;
+    END IF;
+END
+$do$;
 
 CREATE TABLE IF NOT EXISTS context_embed_excluded_queue (
     name      TEXT        NOT NULL,

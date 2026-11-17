@@ -19,7 +19,9 @@ import (
 // leaves a block the new rule marked; the old reconcile finds its queue empty
 // and so cannot consume an entry of the new rule (which it would decide by
 // the one-argument answer and delete without marking); the new reconcile
-// takes the entries the old binary's registry writes queued.
+// takes the entries the old binary's registry writes queued. The old
+// statements that read idx_blocks_embed_excluded run on its definition of
+// 176 and cannot unmark a block the owner rule marks.
 func TestEmbedExcludedRollingOldBinary(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -95,5 +97,33 @@ func TestEmbedExcludedRollingOldBinary(t *testing.T) {
 	reconcile(t, pool)
 	if got := markedCount(t, pool, "rl-a", "rl-y"); got != 5 {
 		t.Errorf("%d/5 blocks of rl-y marked after the new reconcile", got)
+	}
+
+	// The old binary's statements that read idx_blocks_embed_excluded, its
+	// left check and its clear (for entries of its old queue, which nothing
+	// fills after 176), run on the definition of 176. The old clear decides
+	// by the one-argument answer (false for rl-y) and writes the rows; the
+	// trigger decides each by the owner rule and keeps it marked.
+	if def, _ := m176Index(t, pool); def != m176IndexDef {
+		t.Fatalf("idx_blocks_embed_excluded is %s, want the definition of 176", def)
+	}
+	var left bool
+	if err := pool.QueryRow(ctx, v175LeftSQL, "rl-y", false).Scan(&left); err != nil {
+		t.Fatalf("old left check on the index of 176: %v", err)
+	}
+	if !left {
+		t.Errorf("the old left check does not see rl-y's marked blocks")
+	}
+	var wrote, reached int
+	var last *string
+	if err := pool.QueryRow(ctx, v175ClearSQL, "rl-y", store.EmbedExcludedReconcileBatch, false, v175KeyStart.id).
+		Scan(&wrote, &reached, &last); err != nil {
+		t.Fatalf("old clear on the index of 176: %v", err)
+	}
+	if wrote != 5 || reached != 0 {
+		t.Errorf("old clear wrote %d rows, %d of them unmarked; want 5 written, 0 unmarked", wrote, reached)
+	}
+	if got := markedCount(t, pool, "rl-a", "rl-y"); got != 5 {
+		t.Errorf("%d/5 blocks of rl-y marked after the old clear", got)
 	}
 }

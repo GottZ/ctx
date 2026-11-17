@@ -44,26 +44,31 @@ const EmbedExcludedReconcileBatch = 1000
 //     drops the stale vector pair; when a lift committed meanwhile it keeps
 //     the vector and false (the batch counts the row as set back, and the
 //     pass stops).
-//   - clearEmbedExcludedSQL: a scope of the entry answers false (for '*':
-//     embedExcludedStarClearGroups). The marked live blocks of the name in the group whose own
-//     answer is false, on idx_blocks_embed_excluded (type_name, id) from the
-//     keyset cursor $3 on: the cleared rows leave the index, but their
-//     entries stay in it until a vacuum may remove them, and a batch from the
-//     start would read every one of them again while an older snapshot holds
-//     them (a long transaction, a pg_dump). Clearing takes no advisory lock
-//     in the trigger (the answer it writes is false), so one batch may span
-//     groups.
+//   - clearEmbedExcludedSQL: answer false (for '*': embedExcludedStarClearScopes).
+//     The scope's marked live blocks of the name, on idx_blocks_embed_excluded
+//     (type_name, scope, id) as a range of the scope from the keyset cursor
+//     $3 on, so a batch reads no block of another scope: the cleared rows
+//     leave the index, but their entries stay in it until a vacuum may
+//     remove them, and a batch from the start would read every one of them
+//     again while an older snapshot holds them (a long transaction, a
+//     pg_dump). The answer is the scope's, the same for every block of the
+//     name in it, so the statement states it once on its parameters: when it
+//     turned true since the reconcile read it, the statement reads nothing.
+//     Without the index of 176 (a large corpus before the out-of-band build)
+//     the statement is the same and walks the definition of 175, (type_name,
+//     id), filtering the scope: correct, at the cost before 176.
 //   - embedExcludedMarkLeftSQL, embedExcludedClearLeftSQL: whether a block of
-//     the scope, or of the group, still needs the change, from the start of
-//     the range (a block another worker held, one whose sensitivity moved it
-//     behind the cursor).
+//     the scope still needs the change, from the start of the range (a block
+//     another worker held, one whose sensitivity moved it behind the cursor).
 //
 // A block with a fresh vector or an archived one keeps false: it is in no
 // pick index, and the trigger sets the marker when it is unarchived,
-// re-typed or moved. A mark batch stays within one scope, so the shared
-// advisory locks its trigger takes per row are of one name and one group
-// (a batch spanning groups would take them in row order and could close a
-// cycle with a scope assignment, which takes its groups' locks sorted).
+// re-typed or moved. Every batch stays within one scope: the shared advisory
+// locks the trigger of a mark batch takes per row are of one name and one
+// group (a batch spanning groups would take them in row order and could
+// close a cycle with a scope assignment, which takes its groups' locks
+// sorted), and no statement of an entry reads a block outside the scopes it
+// works on.
 //
 // The outer condition of an update repeats the change, so a row another
 // statement changed in the meantime is skipped when its lock is granted
@@ -110,11 +115,11 @@ var (
 	clearEmbedExcludedSQL = `WITH u AS (
 		UPDATE context_blocks SET embed_excluded = false
 		 WHERE id IN (SELECT id FROM context_blocks
-		               WHERE embed_excluded AND NOT is_archived AND type_name = $1 AND id > $3::uuid` +
-		embedExcludedInGroup4 + `
-		                 AND NOT ctx_block_type_never_embedded(type_name, scope)
+		               WHERE embed_excluded AND NOT is_archived
+		                 AND type_name = $1 AND scope = $2 AND id > $3::uuid
+		                 AND NOT ctx_block_type_never_embedded($1::text, $2::text)
 		               ORDER BY id
-		               LIMIT $2)
+		               LIMIT $4)
 		   AND embed_excluded
 		RETURNING embed_excluded, id)
 		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE NOT embed_excluded), (SELECT id FROM u ORDER BY id DESC LIMIT 1)`
@@ -123,10 +128,25 @@ var (
 		                AND scope = $2 AND type_name = $1)
 		    OR EXISTS (SELECT 1 FROM context_blocks
 		              WHERE embedding_stale AND NOT is_archived AND scope = $2 AND type_name = $1)`
-	embedExcludedClearLeftSQL = `SELECT EXISTS (SELECT 1 FROM context_blocks
-		              WHERE embed_excluded AND NOT is_archived AND type_name = $1` +
-		embedExcludedInGroup2 + `
-		                AND NOT ctx_block_type_never_embedded(type_name, scope))`
+	// embedExcludedClearLeftSQL reads the first block in the order of the
+	// clear (ORDER BY id LIMIT 1), so it is planned on the scope's range of
+	// idx_blocks_embed_excluded like the clear: an unordered EXISTS was
+	// planned on idx_context_scope once the name's marked blocks in another
+	// tenant moved the statistics, and read the whole scope (976 buffers over
+	// 20 000 blocks of the scope at 100 000 marked blocks elsewhere).
+	embedExcludedClearLeftSQL = `SELECT EXISTS (SELECT 1 FROM (
+		              SELECT id FROM context_blocks
+		               WHERE embed_excluded AND NOT is_archived AND type_name = $1 AND scope = $2
+		                 AND NOT ctx_block_type_never_embedded($1::text, $2::text)
+		               ORDER BY id
+		               LIMIT 1) first)`
+	// embedExcludedMarkedScopesSQL: the scopes that hold a marked live block
+	// of the name, on idx_blocks_embed_excluded (the name's range, one
+	// index entry per marked block): the scopes a '*' entry may have to clear
+	// while the name has no excluded _global row.
+	embedExcludedMarkedScopesSQL = `SELECT DISTINCT scope::text FROM context_blocks
+		 WHERE embed_excluded AND NOT is_archived AND type_name = $1
+		 ORDER BY 1`
 	// embedExcludedStarScopesSQL: the scopes in which a '*' entry may have a
 	// block to mark — the scopes of the name's unmarked pending blocks and of
 	// its stale ones, on the two partial index pairs (no other block of the
@@ -137,26 +157,6 @@ var (
 		SELECT scope::text FROM context_blocks
 		 WHERE embedding_stale AND NOT is_archived AND type_name = $1
 		ORDER BY 1`
-)
-
-// embedExcludedInGroup is the scope condition of a queue entry's group
-// (ctx_embed_excluded_group, migration 176) on the bare context_blocks: '*'
-// every scope, 't:<tenant_id>' the scopes of that tenant at the statement's
-// snapshot, 's:<scope>' that one scope. A statement of an entry never
-// reaches a block outside it, so the registry change of one tenant never
-// writes a block of another.
-func embedExcludedInGroup(param string) string {
-	return `
-		                 AND (CASE WHEN ` + param + `::text = '*' THEN true
-		                           WHEN left(` + param + `::text, 2) = 't:' THEN scope IN (
-		                                SELECT ts.scope FROM context_tenant_scopes ts
-		                                 WHERE ts.tenant_id::text = substr(` + param + `::text, 3))
-		                           ELSE scope = substr(` + param + `::text, 3) END)`
-}
-
-var (
-	embedExcludedInGroup2 = embedExcludedInGroup("$2")
-	embedExcludedInGroup4 = embedExcludedInGroup("$4")
 )
 
 // embedExcludedKeyStart is the keyset cursor before every block: no
@@ -246,9 +246,9 @@ func ReconcileEmbedExcluded(ctx context.Context, pool *pgxpool.Pool) (EmbedExclu
 
 // reconcileEmbedExcludedEntry runs the rounds of one queue entry. Each round
 // reads the answer of every scope of the entry once, marks the scopes that
-// answer true (pending blocks, then stale ones) and, when a scope answers
-// false, clears the group's marked blocks whose own answer is false; a '*'
-// entry clears the groups embedExcludedStarClearGroups names. done=false: a block of the entry still needs a change after
+// answer true (pending blocks, then stale ones) and clears the scopes that
+// answer false; a '*' entry clears the scopes embedExcludedStarClearScopes
+// names. done=false: a block of the entry still needs a change after
 // embedExcludedRounds rounds, or a batch's rows were all set back by the
 // trigger (the answer moved after the batch chose them), so the entry is
 // left for the next pass.
@@ -259,15 +259,14 @@ func reconcileEmbedExcludedEntry(ctx context.Context, pool *pgxpool.Pool, name, 
 			return updated, false, err
 		}
 		settled := true
-		clear := false
-		var marking []string
+		var marking, clearing []string
 		for _, scope := range scopes {
-			var never bool
-			if err := pool.QueryRow(ctx, `SELECT ctx_block_type_never_embedded($1, $2)`, name, scope).Scan(&never); err != nil {
-				return updated, false, fmt.Errorf("store: embed-excluded answer %q %q: %w", name, scope, err)
+			never, err := embedExcludedAnswer(ctx, pool, name, scope)
+			if err != nil {
+				return updated, false, err
 			}
 			if !never {
-				clear = true
+				clearing = append(clearing, scope)
 				continue
 			}
 			marking = append(marking, scope)
@@ -278,16 +277,13 @@ func reconcileEmbedExcludedEntry(ctx context.Context, pool *pgxpool.Pool, name, 
 			}
 			settled = settled && ok
 		}
-		var clearing []string
 		if grp == "*" {
-			if clearing, err = embedExcludedStarClearGroups(ctx, pool, name); err != nil {
+			if clearing, err = embedExcludedStarClearScopes(ctx, pool, name); err != nil {
 				return updated, false, err
 			}
-		} else if clear {
-			clearing = []string{grp}
 		}
-		for _, g := range clearing {
-			n, ok, err := clearEmbedExcludedPass(ctx, pool, name, g)
+		for _, scope := range clearing {
+			n, ok, err := clearEmbedExcludedScope(ctx, pool, name, scope)
 			updated += n
 			if err != nil {
 				return updated, false, err
@@ -305,41 +301,78 @@ func reconcileEmbedExcludedEntry(ctx context.Context, pool *pgxpool.Pool, name, 
 	return updated, false, nil
 }
 
-// embedExcludedStarClearGroups returns the groups a '*' entry (a change of
-// the name's _global row, the seed of 176, a moved 175 entry) has to clear.
-// While the name's _global row is excluded, a group answers false only when
-// it holds a row of the name with another policy, so only those groups are
-// cleared; every other group answers true and has nothing to clear. Without
-// an excluded _global row (deleted, or another policy) every group without
-// an all-excluded row set answers false, and the clear runs over every scope
-// ('*').
-func embedExcludedStarClearGroups(ctx context.Context, pool *pgxpool.Pool, name string) ([]string, error) {
+// embedExcludedAnswer reads ctx_block_type_never_embedded(name, scope): the
+// same for every block of the name in the scope.
+func embedExcludedAnswer(ctx context.Context, pool *pgxpool.Pool, name, scope string) (bool, error) {
+	var never bool
+	if err := pool.QueryRow(ctx, `SELECT ctx_block_type_never_embedded($1, $2)`, name, scope).Scan(&never); err != nil {
+		return false, fmt.Errorf("store: embed-excluded answer %q %q: %w", name, scope, err)
+	}
+	return never, nil
+}
+
+// embedExcludedStarClearScopes returns the scopes a '*' entry (a change of
+// the name's _global row, the seed of 176, a moved 175 entry) has to clear:
+// the candidates whose answer is false. While the name's _global row is
+// excluded, a group answers false only when it holds a row of the name with
+// another policy, so the candidates are the scopes of those groups (read
+// from the registry); every other group answers true and has nothing to
+// clear. Without an excluded _global row (deleted, or another policy) any
+// scope may answer false, and the candidates are the scopes that hold a
+// marked block of the name (embedExcludedMarkedScopesSQL).
+func embedExcludedStarClearScopes(ctx context.Context, pool *pgxpool.Pool, name string) ([]string, error) {
 	var globalExcluded bool
 	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM context_block_types
 		 WHERE name = $1 AND scope = '_global' AND config->'retrieval'->>'policy' = 'excluded')`, name).Scan(&globalExcluded); err != nil {
 		return nil, fmt.Errorf("store: embed-excluded _global row %q: %w", name, err)
 	}
-	if !globalExcluded {
-		return []string{"*"}, nil
+	var candidates []string
+	if globalExcluded {
+		rows, err := pool.Query(ctx, `SELECT DISTINCT ctx_embed_excluded_group(scope) FROM context_block_types
+			 WHERE name = $1 AND scope <> '_global' AND config->'retrieval'->>'policy' IS DISTINCT FROM 'excluded'
+			 ORDER BY 1`, name)
+		if err != nil {
+			return nil, fmt.Errorf("store: embed-excluded lifting groups %q: %w", name, err)
+		}
+		groups, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, fmt.Errorf("store: embed-excluded lifting groups %q: %w", name, err)
+		}
+		for _, g := range groups {
+			scopes, err := embedExcludedEntryScopes(ctx, pool, name, g)
+			if err != nil {
+				return nil, err
+			}
+			candidates = append(candidates, scopes...)
+		}
+	} else {
+		rows, err := pool.Query(ctx, embedExcludedMarkedScopesSQL, name)
+		if err != nil {
+			return nil, fmt.Errorf("store: embed-excluded marked scopes %q: %w", name, err)
+		}
+		if candidates, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
+			return nil, fmt.Errorf("store: embed-excluded marked scopes %q: %w", name, err)
+		}
 	}
-	rows, err := pool.Query(ctx, `SELECT DISTINCT ctx_embed_excluded_group(scope) FROM context_block_types
-		 WHERE name = $1 AND scope <> '_global' AND config->'retrieval'->>'policy' IS DISTINCT FROM 'excluded'
-		 ORDER BY 1`, name)
-	if err != nil {
-		return nil, fmt.Errorf("store: embed-excluded lifting groups %q: %w", name, err)
+	var clearing []string
+	for _, scope := range candidates {
+		never, err := embedExcludedAnswer(ctx, pool, name, scope)
+		if err != nil {
+			return nil, err
+		}
+		if !never {
+			clearing = append(clearing, scope)
+		}
 	}
-	groups, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return nil, fmt.Errorf("store: embed-excluded lifting groups %q: %w", name, err)
-	}
-	return groups, nil
+	return clearing, nil
 }
 
 // embedExcludedEntryScopes returns the scopes of a queue entry's group: the
 // scopes of the tenant for 't:<tenant_id>' (at this read; an assignment
 // queues the tenant's group again), the one scope for 's:<scope>', and for
 // '*' the scopes in which a block of the name may need a marker
-// (embedExcludedStarScopesSQL; '*' clears over every scope).
+// (embedExcludedStarScopesSQL; what '*' clears, embedExcludedStarClearScopes
+// says).
 func embedExcludedEntryScopes(ctx context.Context, pool *pgxpool.Pool, name, grp string) ([]string, error) {
 	var rows pgx.Rows
 	var err error
@@ -365,8 +398,8 @@ func embedExcludedEntryScopes(ctx context.Context, pool *pgxpool.Pool, name, grp
 
 // embedExcludedLeft reports whether a block of the entry still needs a
 // change: an unmarked pending or a stale block of the name in a scope that
-// answered true, or a marked block of a group the round cleared whose own
-// answer is false.
+// answered true, or a marked block of the name in a scope the round cleared
+// that still answers false.
 func embedExcludedLeft(ctx context.Context, pool *pgxpool.Pool, name string, marking, clearing []string) (bool, error) {
 	for _, scope := range marking {
 		var left bool
@@ -377,10 +410,10 @@ func embedExcludedLeft(ctx context.Context, pool *pgxpool.Pool, name string, mar
 			return true, nil
 		}
 	}
-	for _, g := range clearing {
+	for _, scope := range clearing {
 		var left bool
-		if err := pool.QueryRow(ctx, embedExcludedClearLeftSQL, name, g).Scan(&left); err != nil {
-			return false, fmt.Errorf("store: embed-excluded left %q %q: %w", name, g, err)
+		if err := pool.QueryRow(ctx, embedExcludedClearLeftSQL, name, scope).Scan(&left); err != nil {
+			return false, fmt.Errorf("store: embed-excluded left %q %q: %w", name, scope, err)
 		}
 		if left {
 			return true, nil
@@ -443,17 +476,17 @@ func markEmbedExcludedScope(ctx context.Context, pool *pgxpool.Pool, name, scope
 	return updated, true, nil
 }
 
-// clearEmbedExcludedPass clears the group's marked blocks whose answer is
-// false, batch by batch from the cursor on id. settled=false as for
+// clearEmbedExcludedScope clears the name's marked blocks of one scope that
+// answered false, batch by batch from the cursor on id. settled=false as for
 // markEmbedExcludedScope.
-func clearEmbedExcludedPass(ctx context.Context, pool *pgxpool.Pool, name, grp string) (updated int, settled bool, err error) {
+func clearEmbedExcludedScope(ctx context.Context, pool *pgxpool.Pool, name, scope string) (updated int, settled bool, err error) {
 	from := embedExcludedKeyStart.id
 	for {
 		var wrote, reached int
 		var last *string
-		if err := pool.QueryRow(ctx, clearEmbedExcludedSQL, name, EmbedExcludedReconcileBatch, from, grp).
+		if err := pool.QueryRow(ctx, clearEmbedExcludedSQL, name, scope, from, EmbedExcludedReconcileBatch).
 			Scan(&wrote, &reached, &last); err != nil {
-			return updated, false, fmt.Errorf("store: embed-excluded clear %q %q: %w", name, grp, err)
+			return updated, false, fmt.Errorf("store: embed-excluded clear %q %q: %w", name, scope, err)
 		}
 		updated += reached
 		if wrote > 0 && reached == 0 {
