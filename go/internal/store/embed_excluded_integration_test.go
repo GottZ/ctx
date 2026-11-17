@@ -302,9 +302,10 @@ func TestEmbedExcludedBlockWaitsForOpenLift(t *testing.T) {
 // embeddable and its blocks stayed marked for good.
 //
 // RED before the trigger takes the lock first: no lock wait in either order,
-// and the blocks are marked after the overlay's commit. GREEN after: the
-// later of the two writes waits for the earlier one's commit, and the
-// blocks stay unmarked.
+// and the blocks are marked after the overlay's commit. Since migration 176
+// the overlay queues its own group whatever the _global row says, so the
+// two writes need not wait for each other; a reconcile that runs while the
+// overlay is open waits for it, and the blocks stay unmarked.
 func TestEmbedExcludedOverlayAndGlobalChange(t *testing.T) {
 	for _, order := range []string{"overlay_first", "global_first"} {
 		t.Run(order, func(t *testing.T) {
@@ -333,31 +334,17 @@ func TestEmbedExcludedOverlayAndGlobalChange(t *testing.T) {
 			}
 			defer func() { _ = overlay.Rollback(ctx) }()
 
+			// Since migration 176 the overlay (a row of a tenantless scope)
+			// takes its group's lock and the _global change the name's: the two
+			// writes do not wait for each other, each queues its own entry. A
+			// reconcile that runs while the overlay is still open waits for it
+			// on the group's lock when it marks, and the blocks end unmarked.
 			if order == "overlay_first" {
 				if err := insertOverlay(overlay); err != nil {
 					t.Fatalf("open overlay: %v", err)
 				}
-				done := make(chan error, 1)
-				go func() {
-					_, err := store.UpdateBlockType(ctx, pool, global.ID, []string{"_global"}, store.BlockTypeUpdate{Config: excl}, nil, "ee-test")
-					done <- err
-				}()
-				if lockWaitSeen(t, pool, func() bool { return len(done) == 0 }) {
-					if err := overlay.Commit(ctx); err != nil {
-						t.Fatalf("commit overlay: %v", err)
-					}
-					if err := <-done; err != nil {
-						t.Fatalf("exclude _global: %v", err)
-					}
-				} else {
-					t.Errorf("the _global change did not wait for the open overlay")
-					if err := <-done; err != nil {
-						t.Fatalf("exclude _global: %v", err)
-					}
-					reconcile(t, pool) // runs before the overlay's commit
-					if err := overlay.Commit(ctx); err != nil {
-						t.Fatalf("commit overlay: %v", err)
-					}
+				if _, err := store.UpdateBlockType(ctx, pool, global.ID, []string{"_global"}, store.BlockTypeUpdate{Config: excl}, nil, "ee-test"); err != nil {
+					t.Fatalf("exclude _global: %v", err)
 				}
 			} else {
 				glob, err := pool.Begin(ctx)
@@ -369,41 +356,26 @@ func TestEmbedExcludedOverlayAndGlobalChange(t *testing.T) {
 					`UPDATE context_block_types SET config = $2::jsonb WHERE id = $1::uuid`, global.ID, string(excl)); err != nil {
 					t.Fatalf("open _global change: %v", err)
 				}
-				done := make(chan error, 1)
-				go func() { done <- insertOverlay(overlay) }()
-				waited := lockWaitSeen(t, pool, func() bool { return len(done) == 0 })
-				if !waited {
-					t.Errorf("the overlay did not wait for the open _global change")
+				if err := insertOverlay(overlay); err != nil {
+					t.Fatalf("overlay: %v", err)
 				}
 				if err := glob.Commit(ctx); err != nil {
 					t.Fatalf("commit _global: %v", err)
 				}
-				if err := <-done; err != nil {
-					t.Fatalf("overlay: %v", err)
-				}
-				// The overlay is written and not committed: a reconcile now
-				// must not leave the blocks marked once it commits.
-				if waited {
-					rdone := make(chan error, 1)
-					go func() {
-						_, err := store.ReconcileEmbedExcluded(ctx, pool)
-						rdone <- err
-					}()
-					if !lockWaitSeen(t, pool, func() bool { return len(rdone) == 0 }) {
-						t.Errorf("the reconcile did not wait for the open overlay")
-					}
-					if err := overlay.Commit(ctx); err != nil {
-						t.Fatalf("commit overlay: %v", err)
-					}
-					if err := <-rdone; err != nil {
-						t.Fatalf("reconcile during the overlay: %v", err)
-					}
-				} else {
-					reconcile(t, pool) // runs before the overlay's commit
-					if err := overlay.Commit(ctx); err != nil {
-						t.Fatalf("commit overlay: %v", err)
-					}
-				}
+			}
+			rdone := make(chan error, 1)
+			go func() {
+				_, err := store.ReconcileEmbedExcluded(ctx, pool)
+				rdone <- err
+			}()
+			if !lockWaitSeen(t, pool, func() bool { return len(rdone) == 0 }) {
+				t.Errorf("the reconcile did not wait for the open overlay")
+			}
+			if err := overlay.Commit(ctx); err != nil {
+				t.Fatalf("commit overlay: %v", err)
+			}
+			if err := <-rdone; err != nil {
+				t.Fatalf("reconcile during the overlay: %v", err)
 			}
 
 			reconcile(t, pool)

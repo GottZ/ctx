@@ -38,11 +38,14 @@ const EmbedExcludedReconcileBatch = 1000
 //     on idx_embedding_stale_scope_sens: no reader ranks their vector, the
 //     backfill would never replace it, and the stale-pick indexes of 173 know
 //     no marker, so such a block would stay in them for good and every pick
-//     of its class would filter it row by row. The batch drops the vector
-//     pair and sets the marker, as store.InvalidateEmbeddingTx does on a
-//     content change; every row it writes leaves the stale set.
-//   - clearEmbedExcludedSQL: a scope of the entry answers false (for '*'
-//     always). The marked live blocks of the name in the group whose own
+//     of its class would filter it row by row. The batch flips the marker
+//     column, which makes trg_block_embed_excluded decide the block again
+//     under its locks: when the answer is still true it marks the block and
+//     drops the stale vector pair; when a lift committed meanwhile it keeps
+//     the vector and false (the batch counts the row as set back, and the
+//     pass stops).
+//   - clearEmbedExcludedSQL: a scope of the entry answers false (for '*':
+//     embedExcludedStarClearGroups). The marked live blocks of the name in the group whose own
 //     answer is false, on idx_blocks_embed_excluded (type_name, id) from the
 //     keyset cursor $3 on: the cleared rows leave the index, but their
 //     entries stay in it until a vacuum may remove them, and a batch from the
@@ -94,9 +97,7 @@ var (
 		RETURNING embed_excluded)
 		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE embed_excluded)`
 	markEmbedExcludedStaleSQL = `WITH u AS (
-		UPDATE context_blocks
-		   SET embedding = NULL, embed_model = NULL, embedding_stale = false,
-		       embedding_next = NULL, embed_model_next = NULL, embed_excluded = true
+		UPDATE context_blocks SET embed_excluded = NOT embed_excluded
 		 WHERE id IN (SELECT id FROM context_blocks
 		               WHERE embedding_stale AND NOT is_archived
 		                 AND scope = $2 AND type_name = $1
@@ -244,8 +245,8 @@ func ReconcileEmbedExcluded(ctx context.Context, pool *pgxpool.Pool) (EmbedExclu
 // reconcileEmbedExcludedEntry runs the rounds of one queue entry. Each round
 // reads the answer of every scope of the entry once, marks the scopes that
 // answer true (pending blocks, then stale ones) and, when a scope answers
-// false (always for '*'), clears the group's marked blocks whose own answer
-// is false. done=false: a block of the entry still needs a change after
+// false, clears the group's marked blocks whose own answer is false; a '*'
+// entry clears the groups embedExcludedStarClearGroups names. done=false: a block of the entry still needs a change after
 // embedExcludedRounds rounds, or a batch's rows were all set back by the
 // trigger (the answer moved after the batch chose them), so the entry is
 // left for the next pass.
@@ -256,7 +257,7 @@ func reconcileEmbedExcludedEntry(ctx context.Context, pool *pgxpool.Pool, name, 
 			return updated, false, err
 		}
 		settled := true
-		clear := grp == "*"
+		clear := false
 		var marking []string
 		for _, scope := range scopes {
 			var never bool
@@ -275,15 +276,23 @@ func reconcileEmbedExcludedEntry(ctx context.Context, pool *pgxpool.Pool, name, 
 			}
 			settled = settled && ok
 		}
-		if clear {
-			n, ok, err := clearEmbedExcludedPass(ctx, pool, name, grp)
+		var clearing []string
+		if grp == "*" {
+			if clearing, err = embedExcludedStarClearGroups(ctx, pool, name); err != nil {
+				return updated, false, err
+			}
+		} else if clear {
+			clearing = []string{grp}
+		}
+		for _, g := range clearing {
+			n, ok, err := clearEmbedExcludedPass(ctx, pool, name, g)
 			updated += n
 			if err != nil {
 				return updated, false, err
 			}
 			settled = settled && ok
 		}
-		left, err := embedExcludedLeft(ctx, pool, name, grp, marking, clear)
+		left, err := embedExcludedLeft(ctx, pool, name, marking, clearing)
 		if err != nil {
 			return updated, false, err
 		}
@@ -292,6 +301,36 @@ func reconcileEmbedExcludedEntry(ctx context.Context, pool *pgxpool.Pool, name, 
 		}
 	}
 	return updated, false, nil
+}
+
+// embedExcludedStarClearGroups returns the groups a '*' entry (a change of
+// the name's _global row, the seed of 176, a moved 175 entry) has to clear.
+// While the name's _global row is excluded, a group answers false only when
+// it holds a row of the name with another policy, so only those groups are
+// cleared; every other group answers true and has nothing to clear. Without
+// an excluded _global row (deleted, or another policy) every group without
+// an all-excluded row set answers false, and the clear runs over every scope
+// ('*').
+func embedExcludedStarClearGroups(ctx context.Context, pool *pgxpool.Pool, name string) ([]string, error) {
+	var globalExcluded bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM context_block_types
+		 WHERE name = $1 AND scope = '_global' AND config->'retrieval'->>'policy' = 'excluded')`, name).Scan(&globalExcluded); err != nil {
+		return nil, fmt.Errorf("store: embed-excluded _global row %q: %w", name, err)
+	}
+	if !globalExcluded {
+		return []string{"*"}, nil
+	}
+	rows, err := pool.Query(ctx, `SELECT DISTINCT ctx_embed_excluded_group(scope) FROM context_block_types
+		 WHERE name = $1 AND scope <> '_global' AND config->'retrieval'->>'policy' IS DISTINCT FROM 'excluded'
+		 ORDER BY 1`, name)
+	if err != nil {
+		return nil, fmt.Errorf("store: embed-excluded lifting groups %q: %w", name, err)
+	}
+	groups, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("store: embed-excluded lifting groups %q: %w", name, err)
+	}
+	return groups, nil
 }
 
 // embedExcludedEntryScopes returns the scopes of a queue entry's group: the
@@ -324,9 +363,9 @@ func embedExcludedEntryScopes(ctx context.Context, pool *pgxpool.Pool, name, grp
 
 // embedExcludedLeft reports whether a block of the entry still needs a
 // change: an unmarked pending or a stale block of the name in a scope that
-// answered true, or (when the round cleared) a marked block of the group
-// whose own answer is false.
-func embedExcludedLeft(ctx context.Context, pool *pgxpool.Pool, name, grp string, marking []string, clear bool) (bool, error) {
+// answered true, or a marked block of a group the round cleared whose own
+// answer is false.
+func embedExcludedLeft(ctx context.Context, pool *pgxpool.Pool, name string, marking, clearing []string) (bool, error) {
 	for _, scope := range marking {
 		var left bool
 		if err := pool.QueryRow(ctx, embedExcludedMarkLeftSQL, name, scope).Scan(&left); err != nil {
@@ -336,14 +375,16 @@ func embedExcludedLeft(ctx context.Context, pool *pgxpool.Pool, name, grp string
 			return true, nil
 		}
 	}
-	if !clear {
-		return false, nil
+	for _, g := range clearing {
+		var left bool
+		if err := pool.QueryRow(ctx, embedExcludedClearLeftSQL, name, g).Scan(&left); err != nil {
+			return false, fmt.Errorf("store: embed-excluded left %q %q: %w", name, g, err)
+		}
+		if left {
+			return true, nil
+		}
 	}
-	var left bool
-	if err := pool.QueryRow(ctx, embedExcludedClearLeftSQL, name, grp).Scan(&left); err != nil {
-		return false, fmt.Errorf("store: embed-excluded left %q %q: %w", name, grp, err)
-	}
-	return left, nil
+	return false, nil
 }
 
 // markEmbedExcludedScope marks the name's blocks of one scope that answered

@@ -97,7 +97,7 @@
 --   * context_tenant_scopes: CREATE OR REPLACE TRIGGER, SHARE ROW EXCLUSIVE.
 --   * context_embed_excluded_queue: created; the rows of the old queue
 --     (context_embed_excluded_reconcile, a handful) move over in one INSERT
---     and one DELETE.
+--     and one DELETE, after the trigger swaps (see the statement).
 -- A transaction holding one of these tables longer than 3 s fails the
 -- migration with 55P03, the file rolls back, the next boot tries again.
 -- At run time the triggers order themselves on transaction-level advisory
@@ -107,10 +107,14 @@
 --     its group's lock shared, reads the group again (and takes the new
 --     group's lock too while the scope moved), and decides again on a fresh
 --     snapshot; a block it marks that holds a stale vector drops it;
---   * a registry change that queues takes the name's lock exclusive; for a
---     row of a tenant or tenantless scope it then reads the row's group and
---     takes that group's lock shared, and reads the group once more (a
---     scope assignment that committed meanwhile is seen);
+--   * a change of a _global row that queues takes the name's lock
+--     exclusive: it orders itself against the block writes of the name in
+--     every tenant;
+--   * a change of a row of a tenant or tenantless scope reads the row's group
+--     and takes that group's lock exclusive, then reads the group once more
+--     (a scope assignment that committed meanwhile is seen, and the new group
+--     is locked as well): it orders itself against the block writes of its
+--     own group and never waits for another tenant's;
 --   * a scope assignment takes the locks of the groups involved exclusive,
 --     in sorted order, before it reads the registry.
 -- So a block written on the old registry or the old assignment commits
@@ -118,6 +122,17 @@
 -- and a block written after waits and decides on the new state; a registry
 -- row written while its scope is assigned is ordered against the assignment
 -- on the group's lock, so one of the two queues the name for the new group.
+-- A tenant row and a change of the name's _global row are not ordered
+-- against each other: each queues its own entry whatever the other does,
+-- and the reconcile decides every scope on the registry it reads then.
+-- Each advisory lock is held once per key and transaction: a statement that
+-- writes blocks of never-embedded types holds one lock per name and one per
+-- group it touches, not one per row. A single statement over the blocks of
+-- more groups than the shared lock table holds (max_locks_per_transaction
+-- times the server's process slots; on a test server with 25 connections a
+-- statement over 27 728 tenants failed) fails with 53200: a mass re-type,
+-- unarchive or data migration of never-embedded blocks over thousands of
+-- tenants runs per tenant.
 -- The limits of 175 hold as they were: a block whose answer becomes true
 -- while its transaction stays open keeps false (a cost: the pick's predicate
 -- filters it), and a transaction that takes locks of two names, or of two
@@ -172,13 +187,6 @@ COMMENT ON TABLE context_embed_excluded_queue IS
 
 COMMENT ON COLUMN context_embed_excluded_queue.grp IS
     't:<tenant_id> for the scopes of a tenant, s:<scope> for a scope without a tenant, * for every scope; see ctx_embed_excluded_group (migration 176).';
-
--- The rows the triggers of 175 queued move over, for every group; the old
--- table stays, empty, for a binary before this migration (ROLLING DEPLOY).
-INSERT INTO context_embed_excluded_queue (name, grp, queued_at)
-SELECT name, '*', queued_at FROM context_embed_excluded_reconcile
-ON CONFLICT (name, grp) DO NOTHING;
-DELETE FROM context_embed_excluded_reconcile;
 
 COMMENT ON TABLE context_embed_excluded_reconcile IS
     'The reconcile queue of migration 175, superseded by context_embed_excluded_queue (migration 176): nothing writes it any more; it stays for a binary before 176 that reads it during a rolling deploy.';
@@ -322,17 +330,19 @@ BEGIN
                 END IF;
             END IF;
         ELSIF v_side.policy = 'excluded' OR v_moved THEN
-            -- A row of a tenant or tenantless scope reaches the groups of its
-            -- scope only. The name's lock orders it against block writes and
-            -- the _global row; the group's lock against an assignment of its
-            -- scope, after which the group is read once more.
-            PERFORM pg_advisory_xact_lock(hashtext('ctx:embed_excluded:' || v_side.name));
+            -- A row of a tenant or tenantless scope reaches the blocks of its
+            -- scope's group only, so it orders itself on that group's lock,
+            -- exclusive: against the block writes of the group (which take it
+            -- shared) and against an assignment of its scope (exclusive) — not
+            -- against the blocks of other tenants. The group is read again
+            -- after the lock (an assignment that committed meanwhile moved the
+            -- scope), and the new group is locked and queued too.
             v_grp := ctx_embed_excluded_group(v_side.scope);
-            PERFORM pg_advisory_xact_lock_shared(hashtext('ctx:embed_excluded:grp:' || v_grp));
+            PERFORM pg_advisory_xact_lock(hashtext('ctx:embed_excluded:grp:' || v_grp));
             PERFORM ctx_embed_excluded_queue(v_side.name, v_grp);
             v_again := ctx_embed_excluded_group(v_side.scope);
             IF v_again IS DISTINCT FROM v_grp THEN
-                PERFORM pg_advisory_xact_lock_shared(hashtext('ctx:embed_excluded:grp:' || v_again));
+                PERFORM pg_advisory_xact_lock(hashtext('ctx:embed_excluded:grp:' || v_again));
                 PERFORM ctx_embed_excluded_queue(v_side.name, v_again);
             END IF;
         END IF;
@@ -398,6 +408,17 @@ COMMENT ON FUNCTION context_tenant_scopes_embed_excluded() IS
 CREATE OR REPLACE TRIGGER trg_tenant_scopes_embed_excluded
     AFTER INSERT OR UPDATE OF scope, tenant_id OR DELETE ON context_tenant_scopes
     FOR EACH ROW EXECUTE FUNCTION context_tenant_scopes_embed_excluded();
+
+-- The rows the triggers of 175 queued move over, for every group, and only
+-- now: a registry write under the 175 trigger that was in flight when this
+-- file began holds context_block_types, so CREATE OR REPLACE TRIGGER above
+-- waited for its commit, and the row it queued in the old table is seen by
+-- this statement. The old table stays, empty, for a binary before this
+-- migration (ROLLING DEPLOY); nothing writes it any more.
+INSERT INTO context_embed_excluded_queue (name, grp, queued_at)
+SELECT name, '*', queued_at FROM context_embed_excluded_reconcile
+ON CONFLICT (name, grp) DO NOTHING;
+DELETE FROM context_embed_excluded_reconcile;
 
 -- The names whose answer this rule may change: every name with a row outside
 -- _global, for every group.

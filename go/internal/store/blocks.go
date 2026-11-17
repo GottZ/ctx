@@ -1182,25 +1182,23 @@ func StoreEmbeddingNext(ctx context.Context, q pgxdb.Execer, blockID, model stri
 // reader ranks its vector, the backfill would never replace it, and as a
 // stale block it would sit in the stale-pick indexes of migration 173 (which
 // know no marker) for good, filtered row by row by every pick of its class.
-// The answer is read once, from the row the caller's transaction holds (the
-// pick's rule, as in RetrievalExcludedTypePredicate). The marker is written
-// through the column, so trg_block_embed_excluded decides it again under its
-// lock when it changes. No other reader needs such a vector: the
-// duplicate guard neither checks nor matches a stale one, and the dream
-// candidates, the cluster centroids and the /status channel probe read
-// visible types only.
+// The statement flips the marker column, which makes trg_block_embed_excluded
+// decide the block again under its locks: when the answer is true it sets the
+// marker and drops the stale pair; when a lift of the type is in flight it
+// waits for its commit and keeps the vector stale. No other reader needs such
+// a vector: the duplicate guard neither checks nor matches a stale one, and
+// the dream candidates, the cluster centroids and the /status channel probe
+// read visible types only.
 func InvalidateEmbeddingTx(ctx context.Context, q pgxdb.Execer, blockID string) error {
 	if _, err := q.Exec(ctx,
-		`WITH r AS (SELECT `+StaleIndexesReady+` AS keep),
-		      n AS (SELECT ctx_block_type_never_embedded(b.type_name, b.scope) AS never
-		              FROM context_blocks b WHERE b.id = $1)
+		`WITH r AS (SELECT `+StaleIndexesReady+` AS keep)
 		 UPDATE context_blocks
-		 SET embedding_stale = (embedding IS NOT NULL AND r.keep AND NOT n.never),
-		     embedding = CASE WHEN r.keep AND NOT n.never THEN embedding END,
-		     embed_model = CASE WHEN r.keep AND NOT n.never THEN embed_model END,
+		 SET embedding_stale = (embedding IS NOT NULL AND r.keep),
+		     embedding = CASE WHEN r.keep THEN embedding END,
+		     embed_model = CASE WHEN r.keep THEN embed_model END,
 		     embedding_next = NULL, embed_model_next = NULL,
-		     embed_excluded = n.never
-		 FROM r, n
+		     embed_excluded = NOT embed_excluded
+		 FROM r
 		 WHERE id = $1`,
 		blockID,
 	); err != nil {
