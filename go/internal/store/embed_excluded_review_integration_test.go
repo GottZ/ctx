@@ -129,14 +129,15 @@ func TestEmbedExcludedReviewStaleBecomesExcluded(t *testing.T) {
 	reconcile(t, pool)
 	ownerTenant(t, pool, "se-a", "se-a")
 	row := createType(t, pool, "se-x", "se-a", "full-pass")
+	createType(t, pool, "se-z", "se-a", "full-pass")
 	createType(t, pool, "se-y", "se-a", "excluded")
 	reconcile(t, pool)
-	staleBlock := func(title string) *store.Block {
-		b := storeTyped(t, pool, "se-a", title, "se-x")
+	staleBlock := func(title, typ string) *store.Block {
+		b := storeTyped(t, pool, "se-a", title, typ)
 		if _, err := pool.Exec(ctx, `UPDATE context_blocks SET embedding = array_fill(0.1::real, ARRAY[1024])::vector, embed_model = 'test' WHERE id = $1`, b.ID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.UpsertBlock(ctx, pool, "ee-cat", title, "changed body", nil, nil, "se-a", true, store.SensitivityWrite{}, "se-x"); err != nil {
+		if _, err := store.UpsertBlock(ctx, pool, "ee-cat", title, "changed body", nil, nil, "se-a", true, store.SensitivityWrite{}, typ); err != nil {
 			t.Fatal(err)
 		}
 		return b
@@ -148,19 +149,22 @@ func TestEmbedExcludedReviewStaleBecomesExcluded(t *testing.T) {
 		}
 		return
 	}
-	viaRegistry := staleBlock("se registry")
-	viaRetype := staleBlock("se retype")
-	if v, s, _ := state(viaRegistry.ID); !v || !s {
-		t.Fatalf("fixture: vector %v stale %v", v, s)
+	viaRegistry := staleBlock("se registry", "se-x")
+	viaRetype := staleBlock("se retype", "se-z")
+	for _, b := range []*store.Block{viaRegistry, viaRetype} {
+		if v, s, _ := state(b.ID); !v || !s {
+			t.Fatalf("fixture %s: vector %v stale %v", b.Title, v, s)
+		}
 	}
 	updateType(t, pool, row.ID, "se-a", "excluded")
 	reconcile(t, pool)
 	if v, s, m := state(viaRegistry.ID); v || s || !m {
 		t.Errorf("stale block after its type became excluded and the reconcile: vector %v, stale %v, marker %v; want false, false, true", v, s, m)
 	}
-	updateType(t, pool, row.ID, "se-a", "full-pass")
-	reconcile(t, pool)
-	// viaRetype is stale under se-x (embeddable again); a re-type into the
+	if v, s, _ := state(viaRetype.ID); !v || !s {
+		t.Fatalf("fixture: the block of se-z lost its stale vector before the re-type (vector %v stale %v)", v, s)
+	}
+	// viaRetype is stale under the embeddable se-z; a re-type into the
 	// excluded se-y marks it and drops the vector at once.
 	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET type_name = 'se-y' WHERE id = $1`, viaRetype.ID); err != nil {
 		t.Fatal(err)

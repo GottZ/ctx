@@ -228,6 +228,30 @@ func TestEmbedExcludedOwnerBoundary(t *testing.T) {
 	step("A creates bnd-z while B's rows of it are out of step", "bnd-a", "bnd-b",
 		func() { createType(t, pool, "bnd-z", "bnd-a", "excluded") },
 		func() { want("B out of step", "bnd-b", "bnd-z", 0) })
+
+	// The other direction: B's rows of bnd-w carry the marker although B's
+	// own row lifts the name; A's lifting row of the name makes A's entry
+	// clear, and that clear leaves B's rows as they are.
+	createType(t, pool, "bnd-w", "bnd-b", "full-pass")
+	reconcile(t, pool)
+	tx2, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx2.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx2.Exec(ctx,
+		`INSERT INTO context_blocks (category, title, content, type_name, scope, sensitivity, updated_at, embed_excluded)
+		 SELECT 'own-cat', 'bnd w ' || i, 'x', 'bnd-w', 'bnd-b', 'public', now(), true FROM generate_series(1, 10) i`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx2.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	step("A lifts bnd-w while B's marked rows of it are out of step", "bnd-a", "bnd-b",
+		func() { createType(t, pool, "bnd-w", "bnd-a", "full-pass") },
+		func() { want("B out of step, marked", "bnd-b", "bnd-w", 10) })
 }
 
 // TestEmbedExcludedOwnerTransitions walks the transitions of a tenant-own
