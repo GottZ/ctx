@@ -618,16 +618,51 @@ func (s *Scheduler) ensureConcurrentIndexValid(ctx context.Context, name, ddl st
 		action = indexActionRebuiltDefinition
 	}
 	if action != indexActionCreated {
+		// The index found on context_blocks, by schema and name: the bare
+		// name would resolve through the session's search_path and could
+		// meet a same-named index of another schema first.
 		if _, err := s.pool.Exec(ctx,
-			`DROP INDEX CONCURRENTLY IF EXISTS `+name); err != nil {
+			`DROP INDEX CONCURRENTLY IF EXISTS `+st.qualifiedName(name)); err != nil {
 			return "", fmt.Errorf("embed-migrate: drop index for rebuild (%s): %w", name, err)
 		}
 	}
 	if _, err := s.pool.Exec(ctx, ddl); err != nil {
 		return "", fmt.Errorf("embed-migrate: create index (%s): %w", name, err)
 	}
+	if err := s.runtimeIndexBuilt(ctx, name, ddl); err != nil {
+		return "", err
+	}
 	slog.Info("scheduler: embed migration index ready", "index", name, "action", action)
 	return action, nil
+}
+
+// runtimeIndexBuilt reads the index back after its build. CREATE INDEX ...
+// IF NOT EXISTS skips without an error when the name is already taken in the
+// schema of context_blocks — by an index on another table, or by another
+// session's build of that name, which the CREATE waits for (another
+// instance, possibly of another release, or a failed build left INVALID) —
+// so a build is reported only when a valid index of the definition ddl
+// builds stands on context_blocks. One catalog read and one probe per
+// build.
+func (s *Scheduler) runtimeIndexBuilt(ctx context.Context, name, ddl string) error {
+	st, err := readRuntimeIndex(ctx, s.pool, name)
+	if err != nil {
+		return fmt.Errorf("embed-migrate: index %s read after the build: %w", name, err)
+	}
+	if !st.exists || !st.valid {
+		return fmt.Errorf("embed-migrate: index %s after the build: exists=%t, valid=%t on context_blocks — the name is taken by another index or another session's build",
+			name, st.exists, st.valid)
+	}
+	live, expected, same, err := runtimeIndexMatches(ctx, s.pool, name, ddl, st.def)
+	if err != nil {
+		return fmt.Errorf("embed-migrate: index %s after the build: %w", name, err)
+	}
+	if !same {
+		return fmt.Errorf("embed-migrate: index %s after the build has the definition %q, its DDL builds %q — another session built it",
+			name, live, expected)
+	}
+	s.runtimeIndexDefOK.Store(name, st.def)
+	return nil
 }
 
 // runtimeIndexDefinitionSame reports whether the valid index name, whose

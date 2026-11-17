@@ -64,12 +64,20 @@ const managedIndexDDLPrefix = "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
 var errIndexDefinitionUndetermined = errors.New("index definition could not be compared with its DDL")
 
 // runtimeIndexState is the catalog view of one runtime index on
-// context_blocks: whether it exists, pg_index.indisvalid, and its
-// pg_get_indexdef.
+// context_blocks: whether it exists, pg_index.indisvalid, its
+// pg_get_indexdef, and the schema it lives in (the schema of
+// context_blocks), which a DROP names instead of resolving the bare index
+// name through the session's search_path.
 type runtimeIndexState struct {
 	exists bool
 	valid  bool
 	def    string
+	schema string
+}
+
+// qualifiedName is the index as a quoted schema-qualified identifier.
+func (st runtimeIndexState) qualifiedName(name string) string {
+	return pgx.Identifier{st.schema, name}.Sanitize()
 }
 
 // runtimeIndexReadAttempts bounds readRuntimeIndex's re-reads after a
@@ -99,9 +107,10 @@ func readRuntimeIndex(ctx context.Context, q pgxdb.Rower, name string) (runtimeI
 		var st runtimeIndexState
 		var def *string
 		err = q.QueryRow(ctx,
-			`SELECT i.indisvalid, pg_get_indexdef(i.indexrelid) FROM pg_index i
+			`SELECT i.indisvalid, pg_get_indexdef(i.indexrelid), n.nspname FROM pg_index i
 			 JOIN pg_class c ON c.oid = i.indexrelid
-			 WHERE c.relname = $1 AND i.indrelid = 'context_blocks'::regclass`, name).Scan(&st.valid, &def)
+			 JOIN pg_namespace n ON n.oid = c.relnamespace
+			 WHERE c.relname = $1 AND i.indrelid = 'context_blocks'::regclass`, name).Scan(&st.valid, &def, &st.schema)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return st, nil
 		}

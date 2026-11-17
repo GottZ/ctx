@@ -358,6 +358,19 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 		stale := preMigration175PickSisters[0].name
 		oid, node := indexIdentityT(t, pool, stale)
 		defBefore := indexDefT(t, pool, stale)
+		// Every other managed index stands with its DDL's definition and is
+		// known to the scheduler as such (a build is read back with a probe
+		// too, which this pool cannot run): the stale sister is the one
+		// comparison the verify stage has to make.
+		for _, ix := range managedRuntimeIndexes() {
+			if ix.name == preMigration175PickSisters[0].name || ix.name == preMigration175PickSisters[1].name {
+				continue
+			}
+			if _, err := newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, ix.name, ix.ddl); err != nil {
+				t.Fatalf("build %s: %v", ix.name, err)
+			}
+			s.runtimeIndexDefOK.Store(ix.name, indexDefT(t, pool, ix.name))
+		}
 
 		runVerifyCycle(t, pool, s, verifyTestCfg())
 
@@ -536,4 +549,167 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 			}
 		}
 	})
+
+	// drop_names_the_schema_of_the_found_index: the session resolves names
+	// through a search_path that puts another schema first, and that schema
+	// holds an index of the managed name on a table of its own. The rebuild
+	// of the stale managed index on context_blocks drops that index, not the
+	// other schema's one.
+	t.Run("drop_names_the_schema_of_the_found_index", func(t *testing.T) {
+		pool := testdb.SetupTestDB(t)
+		name := preMigration175PickSisters[1].name
+		for _, sql := range []string{
+			`CREATE SCHEMA ctx_other`,
+			`CREATE TABLE ctx_other.t (x int)`,
+			`CREATE INDEX ` + name + ` ON ctx_other.t (x)`,
+		} {
+			if _, err := pool.Exec(ctx, sql); err != nil {
+				t.Fatalf("%s: %v", sql, err)
+			}
+		}
+		seedPreMigration175PickSisters(t, pool)
+		var otherOID int64
+		if err := pool.QueryRow(ctx, `SELECT 'ctx_other.`+name+`'::regclass::oid::bigint`).Scan(&otherOID); err != nil {
+			t.Fatalf("other index: %v", err)
+		}
+		cfg := pool.Config()
+		cfg.ConnConfig.RuntimeParams["search_path"] = "ctx_other, public"
+		other, err := pgxpool.NewWithConfig(ctx, cfg)
+		if err != nil {
+			t.Fatalf("pool: %v", err)
+		}
+		t.Cleanup(other.Close)
+
+		action, err := newIndexTestScheduler(other).ensureConcurrentIndexValid(ctx, name, ddlOfManaged(name))
+		t.Logf("action=%q err=%v", action, err)
+		var still int64
+		if err := pool.QueryRow(ctx, `SELECT COALESCE((SELECT oid::bigint FROM pg_class WHERE oid = to_regclass('ctx_other.`+name+`')), 0)`).Scan(&still); err != nil {
+			t.Fatalf("other index after: %v", err)
+		}
+		if still != otherOID {
+			t.Errorf("the index of schema ctx_other was dropped (oid %d → %d)", otherOID, still)
+		}
+		if def := indexDefT(t, pool, name); !strings.Contains(def, "public.context_blocks") || !strings.Contains(def, "NOT embed_excluded") {
+			// indexDefT reads by name only; ask for the public one explicitly.
+			var pub string
+			if err := pool.QueryRow(ctx, `SELECT pg_get_indexdef(to_regclass('public.`+name+`'))`).Scan(&pub); err != nil || !strings.Contains(pub, "NOT embed_excluded") {
+				t.Errorf("public %s after the rebuild: %q (err %v), want the shipped definition", name, pub, err)
+			}
+		}
+		if err != nil || action != indexActionRebuiltDefinition {
+			t.Errorf("action=%q err=%v, want %s", action, err, indexActionRebuiltDefinition)
+		}
+	})
+
+	// build_skipped_under_a_taken_name_is_not_reported: CREATE INDEX ... IF
+	// NOT EXISTS skips without an error when the name is taken in the schema
+	// of context_blocks by an index on another table. The helper must not
+	// report a build then: no index of the DDL stands on context_blocks.
+	t.Run("build_skipped_under_a_taken_name_is_not_reported", func(t *testing.T) {
+		pool := testdb.SetupTestDB(t)
+		for _, sql := range []string{
+			`CREATE TABLE ctx_other_t (x int)`,
+			`CREATE INDEX ` + migrationPendingIndexName + ` ON ctx_other_t (x)`,
+		} {
+			if _, err := pool.Exec(ctx, sql); err != nil {
+				t.Fatalf("%s: %v", sql, err)
+			}
+		}
+		action, err := newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL)
+		if err == nil || !strings.Contains(err.Error(), "after the build") {
+			t.Errorf("action=%q err=%v, want an error: no index of the DDL on context_blocks after the build", action, err)
+		}
+	})
+
+	// build_skipped_behind_a_concurrent_build_is_checked: another session
+	// builds an index under the managed name between the helper's DROP and
+	// its CREATE (another instance, possibly of another release). The
+	// helper's CREATE ... IF NOT EXISTS waits for it and skips; the helper
+	// reports a build only when what stands is valid and of its DDL's
+	// definition.
+	for _, c := range []struct{ label, other, want string }{
+		// A plain build: two concurrent CREATE INDEX CONCURRENTLY on one
+		// table can deadlock on each other's snapshot wait, which ends the
+		// helper's build with 40P01 instead of a skip.
+		{"of_another_definition", `CREATE INDEX ` + preMigration175PickSisters[0].name +
+			` ON context_blocks (updated_at)`, "after the build has the definition"},
+		{"left_invalid", `CREATE UNIQUE INDEX CONCURRENTLY ` + preMigration175PickSisters[0].name +
+			` ON context_blocks (category)`, "valid=false"},
+	} {
+		t.Run("build_skipped_behind_a_concurrent_build_"+c.label, func(t *testing.T) {
+			pool := testdb.SetupTestDB(t)
+			name := preMigration175PickSisters[0].name
+			seedCleanMigrated(t, pool, 2) // two blocks of one category: the unique build fails
+			seedPreMigration175PickSisters(t, pool)
+
+			// A reader holds context_blocks, so the helper's DROP INDEX
+			// CONCURRENTLY waits for it while holding the table's SHARE
+			// UPDATE EXCLUSIVE; the other build queues behind that lock and
+			// gets it before the helper's CREATE asks for it.
+			reader, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("reader: %v", err)
+			}
+			defer func() { _ = reader.Rollback(ctx) }()
+			if _, err := reader.Exec(ctx, `SELECT count(*) FROM context_blocks`); err != nil {
+				t.Fatalf("reader read: %v", err)
+			}
+			type result struct {
+				action string
+				err    error
+			}
+			helper := make(chan result, 1)
+			go func() {
+				a, err := newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, name, ddlOfManaged(name))
+				helper <- result{a, err}
+			}()
+			waitForStatementWaiting(t, pool, "DROP INDEX CONCURRENTLY%")
+			otherDone := make(chan error, 1)
+			go func() {
+				_, err := pool.Exec(ctx, c.other)
+				otherDone <- err
+			}()
+			waitForStatementWaiting(t, pool, "CREATE %INDEX% "+name+" %")
+			if err := reader.Rollback(ctx); err != nil {
+				t.Fatalf("reader end: %v", err)
+			}
+			otherErr := <-otherDone
+			r := <-helper
+			t.Logf("other build: %v; helper: action=%q err=%v", otherErr, r.action, r.err)
+			if r.err == nil || !strings.Contains(r.err.Error(), c.want) {
+				t.Errorf("helper action=%q err=%v, want an error containing %q", r.action, r.err, c.want)
+			}
+		})
+	}
+}
+
+// ddlOfManaged returns the production DDL of a managed runtime index.
+func ddlOfManaged(name string) string {
+	for _, ix := range managedRuntimeIndexes() {
+		if ix.name == name {
+			return ix.ddl
+		}
+	}
+	return ""
+}
+
+// waitForStatementWaiting waits until a backend runs a statement matching
+// the LIKE pattern and waits on a lock (heavyweight or virtualxid).
+func waitForStatementWaiting(t *testing.T, pool *pgxpool.Pool, like string) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int
+		if err := pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM pg_stat_activity
+			 WHERE datname = current_database() AND pid <> pg_backend_pid()
+			   AND query LIKE $1 AND wait_event_type = 'Lock'`, like).Scan(&n); err != nil {
+			t.Fatalf("wait probe: %v", err)
+		}
+		if n > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("no backend waiting on %q within 20s", like)
 }
