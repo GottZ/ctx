@@ -185,7 +185,9 @@
 -- reassigned in a loop, and the statement can no longer order itself against
 -- the scope's owner. It then fails with 40001 (serialization_failure) rather
 -- than decide or queue for a group it holds no lock of, which could leave a
--- block's marker out of step with its owner's registry; the caller retries.
+-- block's marker out of step with its owner's registry. Nothing in ctx
+-- retries it: the request fails with that error and the client sends the
+-- write again.
 -- (TestEmbedExcludedGroupMovesDuringLockWait drives both loops.)
 -- So a block written on the old registry or the old assignment commits
 -- before the change does (the reconcile, which starts after it, sees it),
