@@ -272,6 +272,29 @@ curl -sS -X PUT https://<host>/api/settings/federation.require_peer_hop \
 
 No validation rule (a boolean has no invalid value). The peer binding itself needs no setting: it is written on a peer's first request with `Ctx-Path` ([security](security.md#peer-binding)).
 
+## MCP instructions: `mcp.instructions_enabled` and `mcp.instructions`
+
+The MCP server sends a short text with every `initialize` answer: the one text a connecting agent gets before it has read any documentation (Claude Code puts it into the model's context; Hermes does not pass it on). Two settings-only keys, both `hot` and **global-only** — the text reaches the agents of every tenant, so only a server-admin sets it; a tenant-admin's PUT is a `422`:
+
+- **`mcp.instructions_enabled`** (`bool`, default **true**): `false` sends no instructions at all.
+- **`mcp.instructions`** (`string`): the text. Its default is **the wording this ctx release ships**, and the instance follows that wording across updates as long as no own text is set — or as long as the stored value is byte-equal to *any* wording ctx has ever shipped (a stored copy of a shipped wording is not an own text). An own text is never overwritten by an update.
+
+ctx keeps the history of every wording it shipped, each with an id and the release that first shipped it (#1 since v0.26.0, #2 since v5.49.0). When you set an own text with `PUT /api/settings/mcp.instructions` (or `ctx settings set mcp.instructions < rules.txt`), the row records the shipped wording that was current at that moment as its **base** (`metadata.shipped_base`); writing the same text again keeps the base, so a re-apply from configuration management does not hide a change. A PUT of a text that equals a shipped wording answers with a warning that it is no own text. Limits, checked at the write (`422`) and on a stored row at boot (dropped with a WARN, the shipped wording applies): valid UTF-8, no control characters other than tab and line breaks, at most **2,048 characters**, counted as UTF-16 code units (an emoji counts two) — the length every Claude Code release since 2.1.84 passes on uncut. A blank text is refused: to send nothing, set `mcp.instructions_enabled` to `false`; to send the shipped wording, remove the override. The boot record (`config: effective`) carries the state as `mcp_instructions` — `state` (`shipped`, `custom` or `off`), `shipped` (the id of the wording this release ships) and `matches` (the shipped wording the stored text equals, `0` for an own text) — never the text.
+
+**After an update, check whether the shipped wording changed.**
+
+```bash
+ctx settings get mcp.instructions
+#   sending:    custom
+#   shipped:    #3 (since vX.Y.0)        (example after a release that ships wording #3)
+#   text:       custom, based on shipped #2 (since v5.49.0)
+#   note:       ctx has changed its shipped wording since your text was written (#2 -> #3); ...
+diff <(ctx settings get mcp.instructions --text base) <(ctx settings get mcp.instructions --text current)   # what ctx changed
+diff <(ctx settings get mcp.instructions --text base) <(ctx settings get mcp.instructions --text value)     # what you changed
+```
+
+The same comparison is in `GET /api/settings/mcp.instructions` (`instructions.state`, `.base`, `.current`, `.changed_since_base`, `.history` — [api](api.md#settings-api)), and `--text <id>` prints any shipped wording. Then decide: take the new wording with `ctx settings unset mcp.instructions` (the instance follows the shipped wording again), or edit your own text — the new write moves its base to the current wording, and the note disappears. Without an own text there is nothing to do: the instance already sends the new wording.
+
 ## Write rejections in the server log
 
 A write `POST /api/store` refuses after its body parsed leaves a `WARN` record `store: write rejected` — at most one per key, code and minute (see *Throttled* below); the request logger's `http request` line names method, path, status and `request_id`, but not the key, and `ctx persist --hook` is silent on the client by design. The record carries:

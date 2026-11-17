@@ -112,6 +112,9 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGatewaySoftRatio(c)...)
 	// V59 (FOLGE-Z Z1): pool.capability_probe_interval at least 1 s.
 	issues = append(issues, validatePoolCapabilityProbe(c)...)
+	// V60 (#315): the MCP instructions text is valid UTF-8 without control
+	// characters, not blank, and at most MCPInstructionsMaxChars long.
+	issues = append(issues, validateMCPInstructions(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and

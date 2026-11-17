@@ -41,13 +41,15 @@ func TestSettingsGlobalOnlyTenantWrite_Integration(t *testing.T) {
 	t.Setenv(sealbox.EnvKeyPrev, "")
 	api := newTenantAPI(t, pool)
 
-	for _, c := range []struct{ key, global, tenant string }{
+	for _, c := range []struct{ key, global, tenant, globalRow string }{
 		// read directly at the tenant scope (store.TenantAllowsSharedSecrets)
-		{store.AllowSharedSecretsKey, `{"value":false}`, `{"value":true}`},
+		{store.AllowSharedSecretsKey, `{"value":false}`, `{"value":true}`, `false`},
 		// read directly, but at the tenant id: a row at the home scope is dead
-		{store.AllowCrossTenantBlockGrantKey, `{"value":false}`, `{"value":true}`},
+		{store.AllowCrossTenantBlockGrantKey, `{"value":false}`, `{"value":true}`, `false`},
 		// read only through the overlay, which drops a tenant row: a dead row
-		{"graph_cache.enabled", `{"value":false}`, `{"value":true}`},
+		{"graph_cache.enabled", `{"value":false}`, `{"value":true}`, `false`},
+		// #315: the text every tenant's agents receive
+		{"mcp.instructions", `{"value":"operator text"}`, `{"value":"tenant text"}`, `"operator text"`},
 	} {
 		t.Run(c.key, func(t *testing.T) {
 			if !config.IsGlobalOnly(c.key) {
@@ -63,8 +65,8 @@ func TestSettingsGlobalOnlyTenantWrite_Integration(t *testing.T) {
 			if v, ok := scopeRowValue(t, pool, c.key, "tenantg"); ok {
 				t.Errorf("a tenant-scope row was written: %s", v)
 			}
-			if v, ok := scopeRowValue(t, pool, c.key, store.GlobalScope); !ok || v != "false" {
-				t.Errorf("_global row = %q ok=%v, want false unchanged", v, ok)
+			if v, ok := scopeRowValue(t, pool, c.key, store.GlobalScope); !ok || v != c.globalRow {
+				t.Errorf("_global row = %q ok=%v, want %s unchanged", v, ok, c.globalRow)
 			}
 		})
 	}

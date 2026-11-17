@@ -4,13 +4,14 @@
 // client mirror of the three validate.go cross-field rules.
 
 import { describe, expect, it } from 'vitest'
-import type { SettingView } from './api/types'
+import type { McpInstructionsView, SettingView } from './api/types'
 import {
   crossFieldIssues,
   draftFor,
   formatValue,
   groupByPrefix,
   groupDomId,
+  instructionsNotes,
   isEditable,
   mutabilityNote,
   parseDraft,
@@ -190,5 +191,52 @@ describe('groupDomId', () => {
 
   it('sanitises characters an HTML id must not carry', () => {
     expect(groupDomId('two words')).toBe('settings-two-words')
+  })
+})
+
+// mcp.instructions (#315): prose sent as is, and the comparison with the
+// wording ctx ships.
+describe('mcp.instructions', () => {
+  const v1 = { id: 1, since: 'v0.26.0', text: 'old wording' }
+  const v2 = { id: 2, since: 'v5.49.0', text: 'new wording' }
+  const cmp = (p: Partial<McpInstructionsView>): McpInstructionsView => ({
+    state: 'shipped',
+    custom: false,
+    matches: 2,
+    current: v2,
+    changed_since_base: false,
+    history: [v1, v2],
+    ...p,
+  })
+  const instr = view({ key: 'mcp.instructions', type: 'string', instructions: cmp({}) })
+
+  it('keeps line breaks and indentation of the draft, refuses a blank one', () => {
+    expect(parseDraft(instr, '  rule 1\n\trule 2\n')).toEqual({ ok: true, value: '  rule 1\n\trule 2\n' })
+    const blank = parseDraft(instr, ' \n ')
+    expect(blank.ok).toBe(false)
+    expect(blank.ok ? '' : blank.error).toContain('mcp.instructions_enabled')
+    // every other string key is still trimmed
+    expect(parseDraft(view({ key: 'a.b', type: 'string' }), '  x  ')).toEqual({ ok: true, value: 'x' })
+  })
+
+  it('states what is sent and which wording ctx ships', () => {
+    const [n] = instructionsNotes(cmp({}))
+    expect(n.text).toContain('sends the shipped wording #2')
+    expect(n.text).toContain('follows every update')
+    expect(instructionsNotes(cmp({ matches: 1 }))[0].text).toContain('shipped wording #1')
+    expect(instructionsNotes(cmp({ state: 'off' }))[0].text).toContain('sends nothing')
+  })
+
+  it('names the base of a custom text and flags a changed shipped wording', () => {
+    const same = instructionsNotes(cmp({ state: 'custom', custom: true, matches: undefined, base: v2 }))
+    expect(same).toHaveLength(1)
+    expect(same[0].text).toContain('based on shipped wording #2')
+    const changed = instructionsNotes(
+      cmp({ state: 'custom', custom: true, matches: undefined, base: v1, changed_since_base: true }),
+    )
+    expect(changed).toHaveLength(2)
+    expect(changed[1]).toEqual({ kind: 'changed', text: expect.stringContaining('#1 → #2') })
+    const unknown = instructionsNotes(cmp({ state: 'custom', custom: true, matches: undefined }))
+    expect(unknown[0].text).toContain('unknown')
   })
 })

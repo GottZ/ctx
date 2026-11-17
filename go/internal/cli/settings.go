@@ -4,6 +4,7 @@
 //	ctx settings get <key>    # single key + source + recent audit rows
 //	ctx settings set <key> <value>   # or: echo '0.7' | ctx settings set <key>
 //	ctx settings unset <key>  # drop the override, revert to env/default
+//	ctx settings get mcp.instructions --text base   # one text, raw, for diff
 //
 // Every subcommand parses the response envelope: success:false (422
 // validation, 409 mutability, 403 non-admin, 404 unknown key) reaches stderr
@@ -37,6 +38,106 @@ type settingRow struct {
 	Default    any    `json:"default"`
 	Sensitive  bool   `json:"sensitive"`
 	Desc       string `json:"description"`
+	// Instructions is the server's comparison of mcp.instructions with the
+	// wording ctx ships (#315); nil on every other key.
+	Instructions *instructionsRow `json:"instructions"`
+}
+
+// shippedRow mirrors config.ShippedInstructions on the wire.
+type shippedRow struct {
+	ID    int    `json:"id"`
+	Since string `json:"since"`
+	Text  string `json:"text"`
+}
+
+// instructionsRow mirrors the server's mcpInstructionsView.
+type instructionsRow struct {
+	State            string       `json:"state"`
+	Custom           bool         `json:"custom"`
+	Matches          int          `json:"matches"`
+	Current          shippedRow   `json:"current"`
+	Base             *shippedRow  `json:"base"`
+	ChangedSinceBase bool         `json:"changed_since_base"`
+	History          []shippedRow `json:"history"`
+}
+
+// instructionsText picks one text of mcp.instructions for --text: "value"
+// (the configured text), "current" (the wording this release ships), "base"
+// (the shipped wording a custom text was based on) or a history id. Printed
+// raw, so two calls feed diff directly.
+func instructionsText(s settingRow, which string) (string, error) {
+	in := s.Instructions
+	if in == nil {
+		return "", fmt.Errorf("--text applies to mcp.instructions only")
+	}
+	switch which {
+	case "value":
+		v, _ := s.Value.(string)
+		return v, nil
+	case "current":
+		return in.Current.Text, nil
+	case "base":
+		if in.Base == nil {
+			return "", fmt.Errorf("no base: the configured text is not a custom text written through the settings API")
+		}
+		return in.Base.Text, nil
+	}
+	for _, h := range in.History {
+		if fmt.Sprint(h.ID) == which {
+			return h.Text, nil
+		}
+	}
+	return "", fmt.Errorf("--text takes value, current, base or a shipped id (1..%d), not %q", len(in.History), which)
+}
+
+// instructionsCell is the table cell of mcp.instructions: its state, not the
+// text — a prose value of up to 2,048 characters (with line breaks) would set
+// the width of the whole VALUE column. `settings get` shows the text. While
+// mcp.instructions_enabled is off the cell says so first: the text it names
+// is the one that would be sent, not one that is.
+func instructionsCell(s settingRow) string {
+	in := s.Instructions
+	var text string
+	switch {
+	case !in.Custom:
+		text = fmt.Sprintf("shipped #%d", in.Current.ID)
+	case in.Base != nil && in.ChangedSinceBase:
+		text = fmt.Sprintf("own text, based on #%d; ctx ships #%d", in.Base.ID, in.Current.ID)
+	default:
+		v, _ := s.Value.(string)
+		text = fmt.Sprintf("own text, %d characters", len([]rune(v)))
+	}
+	if in.State == instructionsOff {
+		return "(off, sends nothing; " + text + ")"
+	}
+	return "(" + text + ")"
+}
+
+// instructionsOff is the state the settings API reports while
+// mcp.instructions_enabled is false (config.MCPInstructionsOff on the server).
+const instructionsOff = "off"
+
+// printInstructions renders the comparison block of `settings get` (TTY).
+func printInstructions(in *instructionsRow) {
+	fmt.Printf("  sending:    %s\n", in.State)
+	fmt.Printf("  shipped:    #%d (since %s)\n", in.Current.ID, in.Current.Since)
+	switch {
+	case !in.Custom:
+		fmt.Printf("  text:       the shipped wording (configured text equals #%d; follows every update)\n", in.Matches)
+	case in.Base == nil:
+		fmt.Printf("  text:       custom; the shipped wording it was based on is unknown (not written through the settings API)\n")
+	default:
+		fmt.Printf("  text:       custom, based on shipped #%d (since %s)\n", in.Base.ID, in.Base.Since)
+	}
+	if in.ChangedSinceBase {
+		fmt.Printf("  note:       ctx has changed its shipped wording since your text was written (#%d -> #%d);\n", in.Base.ID, in.Current.ID)
+		fmt.Printf("              compare with --text base / --text current / --text value, then edit yours or unset it\n")
+	}
+	ids := make([]string, 0, len(in.History))
+	for _, h := range in.History {
+		ids = append(ids, fmt.Sprintf("#%d %s", h.ID, h.Since))
+	}
+	fmt.Printf("  history:    %s (--text <id> prints one)\n", strings.Join(ids, ", "))
 }
 
 // settingAuditRow mirrors store.SettingAudit on the wire.
@@ -91,14 +192,18 @@ func settingsCmd(getClient func() (*Client, error)) *cobra.Command {
 			return runSettingsList(getClient)
 		},
 	})
-	cmd.AddCommand(&cobra.Command{
+	var text string
+	getCmd := &cobra.Command{
 		Use:   "get <key>",
 		Short: "Show one key with source and recent audit entries",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSettingsGet(getClient, args[0])
+			return runSettingsGet(getClient, args[0], text)
 		},
-	})
+	}
+	getCmd.Flags().StringVar(&text, "text", "",
+		"mcp.instructions only: print one text raw — value, current, base or a shipped id")
+	cmd.AddCommand(getCmd)
 	var confirmDowngrade bool
 	setCmd := &cobra.Command{
 		Use:   "set <key> [value]",
@@ -162,7 +267,11 @@ func printSettingsTable(rows []settingRow) {
 	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "KEY\tVALUE\tSOURCE\tMUTABILITY")
 	for _, r := range rows {
-		_, _ = fmt.Fprintf(w, "%s\t%v\t%s\t%s\n", r.Key, renderCell(r.Value), r.Source, r.Mutability)
+		cell := renderCell(r.Value)
+		if r.Instructions != nil {
+			cell = instructionsCell(r)
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%v\t%s\t%s\n", r.Key, cell, r.Source, r.Mutability)
 	}
 	_ = w.Flush()
 }
@@ -179,7 +288,7 @@ func renderCell(v any) string {
 	return fmt.Sprintf("%v", v)
 }
 
-func runSettingsGet(getClient func() (*Client, error), key string) error {
+func runSettingsGet(getClient func() (*Client, error), key, text string) error {
 	c, err := getClient()
 	if err != nil {
 		return err
@@ -190,6 +299,20 @@ func runSettingsGet(getClient func() (*Client, error), key string) error {
 	}
 	if err := checkEnvelope(resp, envelopeRequired); err != nil {
 		return err
+	}
+	if text != "" {
+		var payload struct {
+			Setting settingRow `json:"setting"`
+		}
+		if err := json.Unmarshal(resp, &payload); err != nil {
+			return err
+		}
+		out, err := instructionsText(payload.Setting, text)
+		if err != nil {
+			return err
+		}
+		fmt.Println(out)
+		return nil
 	}
 	return renderOrJSON(resp, func(resp []byte) error {
 		var payload struct {
@@ -215,6 +338,9 @@ func runSettingsGet(getClient func() (*Client, error), key string) error {
 		}
 		if s.Sensitive {
 			fmt.Printf("  sensitive:  true (values masked everywhere)\n")
+		}
+		if s.Instructions != nil {
+			printInstructions(s.Instructions)
 		}
 		if len(payload.Audit) > 0 {
 			fmt.Println("  audit:")

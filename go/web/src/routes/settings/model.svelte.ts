@@ -6,7 +6,7 @@
 
 import { toApiError } from '../../lib/api'
 import { deleteSetting, putSetting } from '../../lib/api/settings'
-import type { SettingPutResponse, SettingView } from '../../lib/api/types'
+import type { McpInstructionsView, SettingPutResponse, SettingView } from '../../lib/api/types'
 import {
   crossFieldIssues,
   draftFor,
@@ -111,6 +111,7 @@ export class SettingsModel {
       s.value = res.value
       s.source = res.source
       this.drafts[key] = draftFor(s)
+      this.#applyInstructions(res.instructions)
     } catch (err) {
       this.errors[key] = toApiError(err).message
     }
@@ -129,6 +130,18 @@ export class SettingsModel {
     s.source = res.source
     this.drafts[s.key] = draftFor(s)
     if (res.warnings.length > 0) this.warnings[s.key] = res.warnings
+    this.#applyInstructions(res.instructions)
+  }
+
+  /**
+   * A write of either mcp.instructions key changes what the text field's
+   * comparison says (#315); the answer carries the comparison after the write,
+   * and it belongs to mcp.instructions whichever of the two keys was written.
+   */
+  #applyInstructions(instructions: McpInstructionsView | undefined): void {
+    if (instructions === undefined) return
+    const text = this.byKey('mcp.instructions')
+    if (text !== undefined) text.instructions = instructions
   }
 
   /** Would-be effective value: the parsed draft where dirty, else current. */
