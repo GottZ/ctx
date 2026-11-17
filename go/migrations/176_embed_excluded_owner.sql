@@ -79,10 +79,12 @@
 --     involved or in the scope itself, for the old and the new group of the
 --     scope.
 --   * nothing else: a grant changes no answer.
--- The scheduler's reconcile (store.ReconcileEmbedExcluded) marks or clears
--- the live blocks of the queued name in the scopes of the group, each block
--- by its own answer, in batches, outside the registry write; a group never
--- reaches a block outside its scopes.
+-- The scheduler's reconcile (store.ReconcileEmbedExcluded) reads the answer
+-- of every scope of the entry once; it marks the pending and the stale
+-- blocks of the name in the scopes that answer true (a stale one drops its
+-- vector), scope by scope, and clears the marked blocks of the group whose
+-- own answer is false only when a scope answers false; in batches, outside
+-- the registry write; a group never reaches a block outside its scopes.
 --
 -- LOCKS. SET LOCAL lock_timeout = '3s' (house pattern). Every statement of
 -- this file is a catalog change on its tables or reads context_block_types:
@@ -102,7 +104,9 @@
 -- locks, hashtext('ctx:embed_excluded:' || name) as in 175 and
 -- hashtext('ctx:embed_excluded:grp:' || grp) for a group:
 --   * a block write whose answer is true takes the name's lock shared, then
---     its group's lock shared, and decides again on a fresh snapshot;
+--     its group's lock shared, reads the group again (and takes the new
+--     group's lock too while the scope moved), and decides again on a fresh
+--     snapshot; a block it marks that holds a stale vector drops it;
 --   * a registry change that queues takes the name's lock exclusive; for a
 --     row of a tenant or tenantless scope it then reads the row's group and
 --     takes that group's lock shared, and reads the group once more (a
@@ -212,6 +216,10 @@ COMMENT ON FUNCTION ctx_block_type_never_embedded(TEXT, TEXT) IS
 
 CREATE OR REPLACE FUNCTION context_blocks_embed_excluded() RETURNS trigger
 LANGUAGE plpgsql AS $$
+DECLARE
+    v_grp   TEXT;
+    v_again TEXT;
+    v_turns INT := 0;
 BEGIN
     IF TG_OP = 'UPDATE'
        AND NEW.type_name IS NOT DISTINCT FROM OLD.type_name
@@ -225,10 +233,29 @@ BEGIN
         -- Take the name's lock and the group's lock, then decide again on a
         -- fresh snapshot: a registry change or a scope assignment that turns
         -- the answer either waits for this commit (and its reconcile sees
-        -- this row) or has committed before this second look.
+        -- this row) or has committed before this second look. The group is
+        -- read again after its lock: a scope that moved to another tenant
+        -- meanwhile takes that group's lock as well, so a second move waits.
         PERFORM pg_advisory_xact_lock_shared(hashtext('ctx:embed_excluded:' || NEW.type_name));
-        PERFORM pg_advisory_xact_lock_shared(hashtext('ctx:embed_excluded:grp:' || ctx_embed_excluded_group(NEW.scope)));
+        v_grp := ctx_embed_excluded_group(NEW.scope);
+        LOOP
+            PERFORM pg_advisory_xact_lock_shared(hashtext('ctx:embed_excluded:grp:' || v_grp));
+            v_again := ctx_embed_excluded_group(NEW.scope);
+            v_turns := v_turns + 1;
+            EXIT WHEN v_again IS NOT DISTINCT FROM v_grp OR v_turns >= 8;
+            v_grp := v_again;
+        END LOOP;
         NEW.embed_excluded := ctx_block_type_never_embedded(NEW.type_name, NEW.scope);
+        -- A block marked here that holds a vector kept over a content change
+        -- (stale) drops it: no reader ranks it, and the stale-pick indexes of
+        -- migration 173 know no marker (the block would sit in them for good).
+        IF NEW.embed_excluded AND NEW.embedding_stale THEN
+            NEW.embedding        := NULL;
+            NEW.embed_model      := NULL;
+            NEW.embedding_stale  := false;
+            NEW.embedding_next   := NULL;
+            NEW.embed_model_next := NULL;
+        END IF;
     END IF;
     RETURN NEW;
 END;
