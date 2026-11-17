@@ -81,8 +81,8 @@ const (
 // verifyNextHNSWIndexName / DDL: §4.7 Stufe 3. Parameters from the
 // CANONICAL live recommendation (m=16, ef_construction=128 — migration 115
 // codified the live state; NOT 001's stale 64). CONCURRENTLY + INVALID
-// recovery via ensureConcurrentIndexValid; an existing VALID index is
-// reused, never rebuilt (§4.7 idempotent re-run). Build-memory note
+// recovery via ensureConcurrentIndexValid; an existing VALID index of this
+// definition is reused, never rebuilt (§4.7 idempotent re-run). Build-memory note
 // (§6.1): the HNSW graph (~2.8 kB/vector → ~2.8 GB @1M, ~28 GB @10M) must
 // fit maintenance_work_mem for the fast build path — the verify runbook
 // sets a session-level mwm per scale step; graph > available RAM is a
@@ -212,6 +212,11 @@ type verifyIndexState struct {
 	Name   string `json:"name"`
 	Valid  bool   `json:"valid"`
 	Reused bool   `json:"reused"`
+	// Action is what Stufe 3 did with the index (issue #312): reused,
+	// created, rebuilt_invalid (an INVALID CIC leftover) or
+	// rebuilt_definition_mismatch (a valid index of another definition than
+	// its DDL builds). Absent in reports stored before it existed.
+	Action string `json:"action,omitempty"`
 }
 
 type verifyIndexSection struct {
@@ -735,22 +740,31 @@ func (s *Scheduler) guardThresholdBounds() (dup, review float64) {
 	return dup, review
 }
 
+// verifyNextIndexes are the indexes Stufe 3 builds and the cutover renames
+// onto the serving names: the HNSW twin first, then the sister indexes.
+func verifyNextIndexes() []struct{ name, ddl string } {
+	out := make([]struct{ name, ddl string }, 0, 1+len(verifySisterIndexes))
+	out = append(out, struct{ name, ddl string }{verifyNextHNSWIndexName, verifyNextHNSWIndexDDL})
+	return append(out, verifySisterIndexes...)
+}
+
 // verifyEnsureIndexes is Stufe 3: HNSW + the sister partial indexes,
 // all CONCURRENTLY with INVALID recovery (shared ensureConcurrentIndexValid
-// helper — the W04-4 CIC lifecycle doctrine). A VALID exemplar is reused
-// (Reused=true), which is what makes verify re-runs idempotent: a
-// paused→resume→verifying round-trip never rebuilds a finished 10M HNSW.
+// helper — the W04-4 CIC lifecycle doctrine). A VALID exemplar of the
+// definition its DDL builds is reused (Reused=true), which is what makes
+// verify re-runs idempotent: a paused→resume→verifying round-trip never
+// rebuilds a finished 10M HNSW. A valid exemplar of another definition is
+// rebuilt (issue #312); a comparison that cannot be made ends the stage
+// with an error, which runEmbedVerify turns into a red verdict naming it.
 func (s *Scheduler) verifyEnsureIndexes(ctx context.Context) (verifyIndexSection, error) {
 	sec := verifyIndexSection{Result: verifyGreen}
-	builds := make([]struct{ name, ddl string }, 0, 1+len(verifySisterIndexes))
-	builds = append(builds, struct{ name, ddl string }{verifyNextHNSWIndexName, verifyNextHNSWIndexDDL})
-	builds = append(builds, verifySisterIndexes...)
-	for _, b := range builds {
-		reused, err := s.ensureConcurrentIndexValid(ctx, b.name, b.ddl)
+	for _, b := range verifyNextIndexes() {
+		action, err := s.ensureConcurrentIndexValid(ctx, b.name, b.ddl)
 		if err != nil {
 			return sec, err
 		}
-		sec.Indexes = append(sec.Indexes, verifyIndexState{Name: b.name, Valid: true, Reused: reused})
+		sec.Indexes = append(sec.Indexes, verifyIndexState{Name: b.name, Valid: true,
+			Reused: action == indexActionReused, Action: action})
 	}
 	return sec, nil
 }

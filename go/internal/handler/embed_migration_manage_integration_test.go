@@ -102,6 +102,13 @@ func emcSeedBackend(t *testing.T, pool *pgxpool.Pool) {
 // emcNextIndexes builds the _next indexes (production DDL minus CONCURRENTLY
 // — a test container has no concurrent writers; the names are what confirm's swap
 // renames). Confirm refuses (ErrConfirmNextIndexNotReady) without a valid HNSW.
+//
+// A copy of the verify gate's DDL (events.verifyNextIndexes), not a reference
+// to it: the events package exports none of it. The confirm compares every
+// _next index with the definition of that DDL (issue #312) and refuses a
+// difference, so a copy that falls behind a DDL change turns the confirm
+// tests of this file red; the two pick sisters carry migration 175's
+// AND NOT embed_excluded.
 func emcNextIndexes(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	for _, ddl := range []string{
@@ -111,9 +118,11 @@ func emcNextIndexes(t *testing.T, pool *pgxpool.Pool) {
 		`CREATE INDEX IF NOT EXISTS idx_embedding_pending_next
 		   ON context_blocks (created_at) WHERE embedding_next IS NULL AND NOT is_archived`,
 		`CREATE INDEX IF NOT EXISTS idx_embedding_pending_scope_sens_next
-		   ON context_blocks (scope, sensitivity, created_at, id) WHERE embedding_next IS NULL AND NOT is_archived`,
+		   ON context_blocks (scope, sensitivity, created_at, id)
+		   WHERE embedding_next IS NULL AND NOT is_archived AND NOT embed_excluded`,
 		`CREATE INDEX IF NOT EXISTS idx_embedding_pending_sens_next
-		   ON context_blocks (sensitivity, created_at, id) WHERE embedding_next IS NULL AND NOT is_archived`,
+		   ON context_blocks (sensitivity, created_at, id)
+		   WHERE embedding_next IS NULL AND NOT is_archived AND NOT embed_excluded`,
 		`CREATE INDEX IF NOT EXISTS idx_dream_pending_next
 		   ON context_blocks (dream_checked_at ASC NULLS FIRST, quality_score ASC)
 		   WHERE NOT is_archived AND embedding_next IS NOT NULL`,
