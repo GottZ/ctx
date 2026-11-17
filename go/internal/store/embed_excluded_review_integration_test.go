@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -181,7 +180,7 @@ func TestEmbedExcludedReviewStaleBecomesExcluded(t *testing.T) {
 // order, the assignment takes them exclusive and sorted: 40P01. A batch now
 // stays within one scope.
 func TestEmbedExcludedReviewStarVsAssignment(t *testing.T) {
-	pool := testdb.SetupTestDB(t)
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
 	ctx := context.Background()
 	reconcile(t, pool)
 	ta := ownerTenant(t, pool, "dl-a", "dl-a")
@@ -190,6 +189,7 @@ func TestEmbedExcludedReviewStarVsAssignment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
 		t.Fatal(err)
 	}
@@ -208,6 +208,7 @@ func TestEmbedExcludedReviewStarVsAssignment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = hold.Rollback(ctx) }()
 	if _, err := hold.Exec(ctx, `SELECT 1 FROM context_blocks WHERE title = 'dl 2' FOR UPDATE`); err != nil {
 		t.Fatal(err)
 	}
@@ -219,16 +220,30 @@ func TestEmbedExcludedReviewStarVsAssignment(t *testing.T) {
 	if !lockWaitSeen(t, pool, func() bool { return len(rdone) == 0 }) {
 		t.Fatalf("the reconcile did not wait for the held block")
 	}
+	// The assignment runs on a connection of its own while the batch waits
+	// for the held block. It has done its part of the overlap once it has
+	// ended or waits on a lock itself (a batch that spanned groups held the
+	// tenant's group lock shared, which the assignment takes exclusive);
+	// only then is the held block released.
+	apool, apid := r5OwnPool(t, dsn)
 	adone := make(chan error, 1)
 	go func() {
-		_, err := store.AssignTenantScope(ctx, pool, ta, "dl-x", nil)
+		_, err := store.AssignTenantScope(ctx, apool, ta, "dl-x", nil)
 		adone <- err
 	}()
-	time.Sleep(500 * time.Millisecond)
+	r5EndedOrWaiting(t, pool, apid, func() bool { return len(adone) > 0 })
 	_ = hold.Rollback(ctx)
 	rerr, aerr := <-rdone, <-adone
-	if rerr != nil && strings.Contains(rerr.Error(), "40P01") || aerr != nil && strings.Contains(aerr.Error(), "40P01") {
-		t.Errorf("deadlock between a '*' reconcile batch and a scope assignment: reconcile %v, assignment %v", rerr, aerr)
+	for _, e := range []struct {
+		what string
+		err  error
+	}{{"reconcile", rerr}, {"assignment", aerr}} {
+		switch {
+		case e.err != nil && strings.Contains(e.err.Error(), "40P01"):
+			t.Errorf("deadlock between a '*' reconcile batch and a scope assignment: %s %v", e.what, e.err)
+		case e.err != nil:
+			t.Errorf("%s: %v", e.what, e.err)
+		}
 	}
 	reconcile(t, pool)
 	if got := markedCount(t, pool, "dl-a", "checkpoint") + markedCount(t, pool, "dl-x", "checkpoint"); got != 2 {
@@ -269,6 +284,9 @@ func TestEmbedExcludedReviewDoubleMove(t *testing.T) {
 	}
 	wrote := make(chan res, 1)
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseTx3 := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseTx3() // every exit of the test lets the block write end
 	committed := make(chan error, 1)
 	go func() {
 		tx3, err := pool.Begin(ctx)
@@ -276,10 +294,14 @@ func TestEmbedExcludedReviewDoubleMove(t *testing.T) {
 			wrote <- res{err: err}
 			return
 		}
+		defer func() { _ = tx3.Rollback(ctx) }()
 		var id string
 		err = tx3.QueryRow(ctx, `INSERT INTO context_blocks (category, title, content, type_name, scope, sensitivity, updated_at)
 			VALUES ('own-cat', 'dm open', 'x', 'dm-x', 'dm-s', 'public', now()) RETURNING id`).Scan(&id)
 		wrote <- res{id: id, err: err}
+		if err != nil {
+			return
+		}
 		<-release
 		committed <- tx3.Commit(ctx)
 	}()
@@ -301,7 +323,7 @@ func TestEmbedExcludedReviewDoubleMove(t *testing.T) {
 	if !lockWaitSeen(t, pool, func() bool { return len(moved) == 0 }) {
 		t.Errorf("the second move did not wait for the open block write")
 	}
-	close(release)
+	releaseTx3()
 	if err := <-committed; err != nil {
 		t.Fatal(err)
 	}

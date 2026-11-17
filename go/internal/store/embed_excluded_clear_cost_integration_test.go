@@ -63,6 +63,15 @@ func TestEmbedExcludedTenantEntryCostBothDirections(t *testing.T) {
 		if want := "t:"; !strings.HasPrefix(grp, want) || strings.Contains(grp, ",") {
 			t.Fatalf("%s: queued groups %q, want A's group alone", label, grp)
 		}
+		// The statements are read again after the pass, with the arguments
+		// they ran with: the rows they changed have left their range, so the
+		// replay reads the range each statement scans and none of A's three
+		// rows it wrote. That range is what this pin is about: the writes of
+		// A's three rows cost the same in every state, and what grows is the
+		// other tenant's marked blocks a statement walks on its way. On
+		// 7adaa9b0 the replayed clear read 2 775 -> 15 341 buffers, and the
+		// mutants that take the scope out of the clear's index access or
+		// leave the index of 175 in place are red here.
 		tracer.take()
 		if _, err := store.ReconcileEmbedExcluded(ctx, traced); err != nil {
 			t.Fatalf("%s: reconcile: %v", label, err)

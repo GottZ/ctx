@@ -161,19 +161,32 @@
 -- locks, hashtext('ctx:embed_excluded:' || name) as in 175 and
 -- hashtext('ctx:embed_excluded:grp:' || grp) for a group:
 --   * a block write whose answer is true takes the name's lock shared, then
---     its group's lock shared, reads the group again (and takes the new
---     group's lock too while the scope moved), and decides again on a fresh
---     snapshot; a block it marks that holds a stale vector drops it;
+--     its group's lock shared, reads the group again after each group lock
+--     until it holds still (taking the new group's lock while the scope
+--     moved), and decides again on a fresh snapshot; a block it marks that
+--     holds a stale vector drops it;
 --   * a change of a _global row that queues takes the name's lock
 --     exclusive: it orders itself against the block writes of the name in
 --     every tenant;
 --   * a change of a row of a tenant or tenantless scope reads the row's group
---     and takes that group's lock exclusive, then reads the group once more
---     (a scope assignment that committed meanwhile is seen, and the new group
---     is locked as well): it orders itself against the block writes of its
---     own group and never waits for another tenant's;
+--     and takes that group's lock exclusive, queues it, and reads the group
+--     again after each group lock until it holds still (a scope assignment
+--     that committed meanwhile is seen, and every group read is locked and
+--     queued; an assignment cannot see the uncommitted row and queues
+--     nothing for it): it orders itself against the block writes of its own
+--     group and never waits for another tenant's;
 --   * a scope assignment takes the locks of the groups involved exclusive,
 --     in sorted order, before it reads the registry.
+-- A further turn of either loop needs a reassignment of the scope that
+-- commits while the statement waits for a group lock (the reassignment
+-- holds the old and the new group exclusive, so it cannot commit while the
+-- statement holds the group it read). Both loops stop at 8 group locks for
+-- one row: a scope reassigned eight times during one write is being
+-- reassigned in a loop, and the statement can no longer order itself against
+-- the scope's owner. It then fails with 40001 (serialization_failure) rather
+-- than decide or queue for a group it holds no lock of, which could leave a
+-- block's marker out of step with its owner's registry; the caller retries.
+-- (TestEmbedExcludedGroupMovesDuringLockWait drives both loops.)
 -- So a block written on the old registry or the old assignment commits
 -- before the change does (the reconcile, which starts after it, sees it),
 -- and a block written after waits and decides on the new state; a registry
@@ -334,6 +347,7 @@ DECLARE
     v_grp   TEXT;
     v_again TEXT;
     v_turns INT := 0;
+    c_turns CONSTANT INT := 8;  -- group locks per statement row; LOCKS in the header
 BEGIN
     IF TG_OP = 'UPDATE'
        AND NEW.type_name IS NOT DISTINCT FROM OLD.type_name
@@ -348,15 +362,21 @@ BEGIN
         -- fresh snapshot: a registry change or a scope assignment that turns
         -- the answer either waits for this commit (and its reconcile sees
         -- this row) or has committed before this second look. The group is
-        -- read again after its lock: a scope that moved to another tenant
-        -- meanwhile takes that group's lock as well, so a second move waits.
+        -- read again after each of its locks until it holds still: a scope
+        -- that moved to another tenant meanwhile takes that group's lock as
+        -- well, so a further move waits.
         PERFORM pg_advisory_xact_lock_shared(hashtext('ctx:embed_excluded:' || NEW.type_name));
         v_grp := ctx_embed_excluded_group(NEW.scope);
         LOOP
             PERFORM pg_advisory_xact_lock_shared(hashtext('ctx:embed_excluded:grp:' || v_grp));
-            v_again := ctx_embed_excluded_group(NEW.scope);
             v_turns := v_turns + 1;
-            EXIT WHEN v_again IS NOT DISTINCT FROM v_grp OR v_turns >= 8;
+            v_again := ctx_embed_excluded_group(NEW.scope);
+            EXIT WHEN v_again IS NOT DISTINCT FROM v_grp;
+            IF v_turns >= c_turns THEN
+                RAISE EXCEPTION 'scope % changed its tenant % times while a write of type % waited for its group lock', NEW.scope, v_turns, NEW.type_name
+                    USING ERRCODE = 'serialization_failure',
+                          HINT = 'Retry the write once the scope assignment holds still.';
+            END IF;
             v_grp := v_again;
         END LOOP;
         NEW.embed_excluded := ctx_block_type_never_embedded(NEW.type_name, NEW.scope);
@@ -398,6 +418,8 @@ DECLARE
     v_moved BOOLEAN;
     v_grp   TEXT;
     v_again TEXT;
+    v_turns INT;
+    c_turns CONSTANT INT := 8;  -- group locks per side; LOCKS in the header
 BEGIN
     IF TG_OP = 'UPDATE'
        AND NEW.name IS NOT DISTINCT FROM OLD.name
@@ -441,16 +463,25 @@ BEGIN
             -- exclusive: against the block writes of the group (which take it
             -- shared) and against an assignment of its scope (exclusive) — not
             -- against the blocks of other tenants. The group is read again
-            -- after the lock (an assignment that committed meanwhile moved the
-            -- scope), and the new group is locked and queued too.
+            -- after each of its locks until it holds still (an assignment that
+            -- committed meanwhile moved the scope; an assignment cannot see
+            -- this uncommitted row and queues nothing for it), and every group
+            -- read is locked and queued.
             v_grp := ctx_embed_excluded_group(v_side.scope);
-            PERFORM pg_advisory_xact_lock(hashtext('ctx:embed_excluded:grp:' || v_grp));
-            PERFORM ctx_embed_excluded_queue(v_side.name, v_grp);
-            v_again := ctx_embed_excluded_group(v_side.scope);
-            IF v_again IS DISTINCT FROM v_grp THEN
-                PERFORM pg_advisory_xact_lock(hashtext('ctx:embed_excluded:grp:' || v_again));
-                PERFORM ctx_embed_excluded_queue(v_side.name, v_again);
-            END IF;
+            v_turns := 0;
+            LOOP
+                PERFORM pg_advisory_xact_lock(hashtext('ctx:embed_excluded:grp:' || v_grp));
+                v_turns := v_turns + 1;
+                PERFORM ctx_embed_excluded_queue(v_side.name, v_grp);
+                v_again := ctx_embed_excluded_group(v_side.scope);
+                EXIT WHEN v_again IS NOT DISTINCT FROM v_grp;
+                IF v_turns >= c_turns THEN
+                    RAISE EXCEPTION 'scope % changed its tenant % times while a registry write of type % waited for its group lock', v_side.scope, v_turns, v_side.name
+                        USING ERRCODE = 'serialization_failure',
+                              HINT = 'Retry the write once the scope assignment holds still.';
+                END IF;
+                v_grp := v_again;
+            END LOOP;
         END IF;
     END LOOP;
     RETURN NULL;

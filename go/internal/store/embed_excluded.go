@@ -70,12 +70,21 @@ const EmbedExcludedReconcileBatch = 1000
 // sorted), and no statement of an entry reads a block outside the scopes it
 // works on.
 //
-// The outer condition of an update repeats the change, so a row another
-// statement changed in the meantime is skipped when its lock is granted
-// (EvalPlanQual re-reads it). trg_block_embed_excluded decides the value
-// from the registry again for every row it writes; a batch reports how many
-// rows it wrote and how many of them reached the value the batch set (fewer
-// when the answer moved under it).
+// The id subquery of every batch locks the rows it selects (FOR NO KEY
+// UPDATE, the strength the update takes anyway): a row another transaction
+// changed in the meantime is read again once its lock is granted and checked
+// against the whole selection, name and scope included (EvalPlanQual of the
+// locking clause), so a block moved to another scope while the batch waited
+// for it drops out of the batch instead of being written there. A recheck in
+// the outer WHERE would see only the outer conditions, and repeating the
+// selection there lets the planner drive the update from the scope's range
+// (measured on the cost pin: the clear walked idx_context_scope over the
+// scope's 20 000 blocks, 972 buffers, where it reads 7). The outer condition
+// repeats the change only, so a row still matching is skipped when another
+// statement made the change first. trg_block_embed_excluded decides the
+// value from the registry again for every row it writes; a batch reports how
+// many rows it wrote and how many of them reached the value the batch set
+// (fewer when the answer moved under it).
 var (
 	markEmbedExcludedSQL = `WITH u AS (
 		UPDATE context_blocks SET embed_excluded = true
@@ -84,7 +93,8 @@ var (
 		                 AND scope = $2 AND type_name = $1 AND created_at IS NOT NULL
 		                 AND (scope, sensitivity, created_at, id) > ($2::text, $3::text, $4::timestamptz, $5::uuid)
 		               ORDER BY scope, sensitivity, created_at, id
-		               LIMIT $6)
+		               LIMIT $6
+		               FOR NO KEY UPDATE)
 		   AND NOT embed_excluded
 		RETURNING embed_excluded, sensitivity, created_at, id)
 		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE embed_excluded),
@@ -98,7 +108,8 @@ var (
 		               WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded
 		                 AND scope = $2 AND type_name = $1 AND created_at IS NULL AND id > $4::uuid
 		               ORDER BY id
-		               LIMIT $3)
+		               LIMIT $3
+		               FOR NO KEY UPDATE)
 		   AND NOT embed_excluded
 		RETURNING embed_excluded, id)
 		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE embed_excluded), (SELECT id FROM u ORDER BY id DESC LIMIT 1)`
@@ -108,7 +119,8 @@ var (
 		               WHERE embedding_stale AND NOT is_archived
 		                 AND scope = $2 AND type_name = $1 AND id > $4::uuid
 		               ORDER BY id
-		               LIMIT $3)
+		               LIMIT $3
+		               FOR NO KEY UPDATE)
 		   AND embedding_stale
 		RETURNING embed_excluded, id)
 		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE embed_excluded), (SELECT id FROM u ORDER BY id DESC LIMIT 1)`
@@ -119,7 +131,8 @@ var (
 		                 AND type_name = $1 AND scope = $2 AND id > $3::uuid
 		                 AND NOT ctx_block_type_never_embedded($1::text, $2::text)
 		               ORDER BY id
-		               LIMIT $4)
+		               LIMIT $4
+		               FOR NO KEY UPDATE)
 		   AND embed_excluded
 		RETURNING embed_excluded, id)
 		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE NOT embed_excluded), (SELECT id FROM u ORDER BY id DESC LIMIT 1)`

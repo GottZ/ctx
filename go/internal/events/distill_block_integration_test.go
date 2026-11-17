@@ -540,15 +540,16 @@ func TestDistillBlockWrite(t *testing.T) {
 			if err := s.distillWriteBlock(ctx, opts, st); err != nil {
 				t.Fatalf("third write: %v", err)
 			}
-			var stale, dropped bool
+			var stale, dropped, marked bool
 			if err := pool.QueryRow(ctx,
-				`SELECT COALESCE(embed_model,''), embedding_stale, embedding IS NULL FROM context_blocks
+				`SELECT COALESCE(embed_model,''), embedding_stale, embedding IS NULL, embed_excluded FROM context_blocks
 				  WHERE category='session-insights' AND title=$1 AND scope=$2`,
-				distillBlockTitle(dfRoot, 0, 1), dfScope).Scan(&model, &stale, &dropped); err != nil {
+				distillBlockTitle(dfRoot, 0, 1), dfScope).Scan(&model, &stale, &dropped, &marked); err != nil {
 				t.Fatalf("read embed_model: %v", err)
 			}
-			if !stale && !dropped {
-				t.Errorf("embedding_stale = false and the vector kept after a content change (embed_model %q), want the vector invalidated", model)
+			if !dropped || stale || !marked {
+				t.Errorf("after a content change of the never-embedded block: vector dropped %v, embedding_stale %v, embed_excluded %v (embed_model %q); want the vector dropped, not stale, and the marker set",
+					dropped, stale, marked, model)
 			}
 		})
 	})

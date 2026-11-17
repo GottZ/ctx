@@ -15,7 +15,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -29,7 +28,7 @@ import (
 // checkpoint and tenant C's checkpoint block do not wait for it; a lift of A
 // waits for an open block write of A.
 func TestEmbedExcludedR3TenantRowWaitsForItsGroupOnly(t *testing.T) {
-	pool := testdb.SetupTestDB(t)
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
 	ctx := context.Background()
 	reconcile(t, pool)
 	ownerTenant(t, pool, "wg-a", "wg-a")
@@ -61,16 +60,25 @@ func TestEmbedExcludedR3TenantRowWaitsForItsGroupOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !aWaited {
-		// C's block write of the same name may wait for B's open transaction
-		// on a row lock outside this change (a block write updates shared
-		// rows of other triggers); it must not wait on an advisory lock.
+		// C's block write of the same name, on a connection of its own, must
+		// not wait on an advisory lock. It waits for B's open transaction on
+		// a row lock outside this change: its INSERT updates rows that B's
+		// insert updated too, in AFTER row triggers, which fire after the
+		// BEFORE trigger that takes the advisory locks. So C's INSERT seen
+		// waiting on anything but an advisory lock holds them; C's statement
+		// not seen at all within the deadline fails the test (r5EndedOrWaiting).
+		cpool, cpid := r5OwnPool(t, dsn)
 		cdone := make(chan error, 1)
 		go func() {
-			_, err := store.UpsertBlock(ctx, pool, "wg", "c checkpoint", "x", nil, nil, "wg-c", true, store.SensitivityWrite{}, "checkpoint")
+			_, err := store.UpsertBlock(ctx, cpool, "wg", "c checkpoint", "x", nil, nil, "wg-c", true, store.SensitivityWrite{}, "checkpoint")
 			cdone <- err
 		}()
-		if advisoryWaitSeen(t, pool, func() bool { return len(cdone) == 0 }) {
+		waits, event, query := r5EndedOrWaiting(t, pool, cpid, func() bool { return len(cdone) > 0 })
+		switch {
+		case waits && event == "advisory":
 			t.Errorf("tenant C's block write waits on an advisory lock behind tenant B's open block write")
+		case waits && !strings.HasPrefix(strings.TrimSpace(query), "INSERT INTO context_blocks"):
+			t.Fatalf("tenant C's write waits on %s in %q, not in its INSERT: inconclusive", event, query)
 		}
 		if err := btx.Commit(ctx); err != nil {
 			t.Fatal(err)
@@ -198,29 +206,6 @@ func TestEmbedExcludedR3MigrationStraggler(t *testing.T) {
 
 // staleFixture writes a block of typ in scope with a vector, then changes its
 // content so the vector is kept stale (the type is embeddable then).
-// advisoryWaitSeen reports whether a session waits on an advisory lock
-// before the statement behind pending ends (or 2 s pass without either).
-func advisoryWaitSeen(t *testing.T, pool *pgxpool.Pool, pending func() bool) bool {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		var waiting int
-		if err := pool.QueryRow(context.Background(),
-			`SELECT count(*) FROM pg_stat_activity
-			  WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND wait_event = 'advisory'`).Scan(&waiting); err != nil {
-			t.Fatalf("advisory wait probe: %v", err)
-		}
-		if waiting > 0 {
-			return true
-		}
-		if !pending() {
-			return false
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return false
-}
-
 func staleFixture(t *testing.T, pool *pgxpool.Pool, scope, title, typ string) *store.Block {
 	t.Helper()
 	ctx := context.Background()
