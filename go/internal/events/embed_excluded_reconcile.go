@@ -9,9 +9,10 @@ import (
 )
 
 // embedExcludedReconcileInterval is the cadence of the embed_excluded
-// reconcile (issue #291, migration 175): how soon after a registry change
-// the blocks of a type that became never-embedded leave the pick indexes,
-// and the blocks of a type that became embeddable return to them. Fixed
+// reconcile (issue #291, migration 175; issue #213, migration 176): how soon
+// after a registry change or a scope assignment the blocks of a type that
+// became never-embedded leave the pick indexes, and the blocks of a type that
+// became embeddable return to them. Fixed
 // (blockCountFoldInterval precedent): an empty queue costs one read of an
 // empty table per tick, and a registry change is rare. A var, not a const,
 // for tests (blockCountReconcilePoll precedent).

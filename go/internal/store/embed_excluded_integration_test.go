@@ -78,10 +78,13 @@ func reconcile(t *testing.T, pool *pgxpool.Pool) store.EmbedExcludedReconcileRes
 	return res
 }
 
-// TestEmbedExcludedPick: a checkpoint block and a block of a tenant-own type
-// whose only row is excluded are never picked; a lifting overlay makes the
-// checkpoint block pickable once the reconcile has run, and its delete makes
-// it unpickable again.
+// TestEmbedExcludedPick: a checkpoint block is never picked, and so is a
+// block of a type whose only registry row is the row of its own scope,
+// excluded (marked since migration 176, issue #213; before it such a block
+// was not marked and was embedded). An overlay in the block's own scope that
+// lifts the exclusion makes the checkpoint block pickable once the reconcile
+// has run, and narrowing the overlay back to excluded makes it unpickable
+// again (a type row with blocks in its tenant's scopes cannot be deleted).
 func TestEmbedExcludedPick(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -132,22 +135,25 @@ func TestEmbedExcludedPick(t *testing.T) {
 		t.Errorf("a statement cleared the marker of a checkpoint block")
 	}
 
-	// A name whose only registry row is a tenant row, excluded, is not
-	// marked: the answer never depends on tenant rows alone (issue #213
-	// stays open), so the block stays pickable as before migration 175.
+	// A name whose only registry row is the row of the block's own scope,
+	// excluded, is marked and not picked (issue #213, migration 176).
 	createType(t, pool, "ee-tenant-excluded", "ee-b", "excluded")
 	reconcile(t, pool)
 	te := storeTyped(t, pool, "ee-b", "ee tenant excluded", "ee-tenant-excluded")
-	if marker(t, pool, te.ID) {
-		t.Errorf("block of a type without a _global row is marked")
+	if !marker(t, pool, te.ID) {
+		t.Errorf("block of a type whose only row (its scope's) is excluded is not marked")
+	}
+	if got := eePick(t, pool, "ee-b", te.Sensitivity); got != "" {
+		t.Errorf("block of a type whose only row (its scope's) is excluded is picked: %s", got)
 	}
 
-	// A tenant overlay lifts the _global exclusion of checkpoint: the
-	// marker follows after the reconcile, and the block is picked.
+	// An overlay of the block's own scope lifts the _global exclusion of
+	// checkpoint: the marker follows after the reconcile, and the block is
+	// picked.
 	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET embedding = array_fill(0.1::real, ARRAY[1024])::vector, embed_model = 'test' WHERE id = $1`, plain.ID); err != nil {
 		t.Fatalf("embed plain: %v", err)
 	}
-	overlay := createType(t, pool, "checkpoint", "ee-c", "full-pass")
+	overlay := createType(t, pool, "checkpoint", "ee-a", "full-pass")
 	if res := reconcile(t, pool); res.Updated < 1 {
 		t.Errorf("reconcile after the lift updated %d blocks, want the checkpoint block", res.Updated)
 	}
@@ -158,22 +164,25 @@ func TestEmbedExcludedPick(t *testing.T) {
 		t.Errorf("checkpoint block not picked after the lift: %q", got)
 	}
 
-	// The overlay goes: checkpoint is never embedded again.
-	if found, err := store.DeleteBlockType(ctx, pool, overlay.ID, []string{"ee-c"}, nil, "ee-test"); err != nil || !found {
-		t.Fatalf("delete overlay: found=%v err=%v", found, err)
+	// The overlay narrows back: checkpoint is never embedded again.
+	excl := json.RawMessage(`{"retrieval":{"policy":"excluded"}}`)
+	if _, err := store.UpdateBlockType(ctx, pool, overlay.ID, []string{"ee-a"}, store.BlockTypeUpdate{Config: excl}, nil, "ee-test"); err != nil {
+		t.Fatalf("narrow overlay: %v", err)
 	}
 	reconcile(t, pool)
 	if !marker(t, pool, cp.ID) {
-		t.Errorf("checkpoint block not marked after the overlay's delete and the reconcile")
+		t.Errorf("checkpoint block not marked after the overlay narrowed and the reconcile")
 	}
 	if got := eePick(t, pool, "ee-a", cp.Sensitivity); got != "" {
-		t.Errorf("checkpoint block picked after the overlay's delete: %s", got)
+		t.Errorf("checkpoint block picked after the overlay narrowed: %s", got)
 	}
 }
 
 // TestEmbedExcludedLiftWaitsForOpenWrite is the interleaving of the lock order
 // in the header of migration 175: a checkpoint block is written in a
-// transaction that stays open; a lifting overlay is created meanwhile. The
+// transaction that stays open; a lifting overlay of the block's own scope
+// (since migration 176 an overlay lifts for its own tenant's blocks only) is
+// created meanwhile. The
 // overlay's create must wait for that commit, so a reconcile that runs after
 // the create sees the block. Without the wait the reconcile runs while the
 // block is uncommitted, removes the queue row, and the block keeps its marker
@@ -198,7 +207,7 @@ func TestEmbedExcludedLiftWaitsForOpenWrite(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		cfg := json.RawMessage(`{"retrieval":{"policy":"full-pass"}}`)
-		_, err := store.CreateBlockType(ctx, pool, store.BlockTypeWrite{Name: "checkpoint", Scope: "ee-c", DisplayName: "checkpoint", Config: cfg}, nil, "ee-test")
+		_, err := store.CreateBlockType(ctx, pool, store.BlockTypeWrite{Name: "checkpoint", Scope: "ee-a", DisplayName: "checkpoint", Config: cfg}, nil, "ee-test")
 		done <- err
 	}()
 	if !lockWaitSeen(t, pool, func() bool { return len(done) == 0 }) {
@@ -226,7 +235,8 @@ func TestEmbedExcludedLiftWaitsForOpenWrite(t *testing.T) {
 }
 
 // TestEmbedExcludedBlockWaitsForOpenLift is the other order: a lifting
-// overlay is written in a transaction that stays open; a checkpoint block is
+// overlay of the block's scope is written in a transaction that stays open; a
+// checkpoint block is
 // written meanwhile. The block write must wait for that commit and then
 // decide on the new registry state — before any reconcile runs.
 func TestEmbedExcludedBlockWaitsForOpenLift(t *testing.T) {
@@ -241,7 +251,7 @@ func TestEmbedExcludedBlockWaitsForOpenLift(t *testing.T) {
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO context_block_types (name, scope, display_name, builtin, is_default, config)
-		 VALUES ('checkpoint', 'ee-c', 'checkpoint', false, false, '{"retrieval":{"policy":"full-pass"}}')`); err != nil {
+		 VALUES ('checkpoint', 'ee-a', 'checkpoint', false, false, '{"retrieval":{"policy":"full-pass"}}')`); err != nil {
 		t.Fatalf("open lift: %v", err)
 	}
 
@@ -281,7 +291,8 @@ func TestEmbedExcludedBlockWaitsForOpenLift(t *testing.T) {
 }
 
 // TestEmbedExcludedOverlayAndGlobalChange is the interleaving of a lifting
-// overlay with a change of the name's _global row to excluded (#291, review
+// overlay (of the blocks' own scope since migration 176) with a change of the
+// name's _global row to excluded (#291, review
 // round 4). The overlay's trigger read the _global row before it took the
 // name's lock, on its statement snapshot: with the _global change still open
 // (global_first) or not yet begun (overlay_first) it saw full-pass, took no
@@ -291,9 +302,10 @@ func TestEmbedExcludedBlockWaitsForOpenLift(t *testing.T) {
 // embeddable and its blocks stayed marked for good.
 //
 // RED before the trigger takes the lock first: no lock wait in either order,
-// and the blocks are marked after the overlay's commit. GREEN after: the
-// later of the two writes waits for the earlier one's commit, and the
-// blocks stay unmarked.
+// and the blocks are marked after the overlay's commit. Since migration 176
+// the overlay queues its own group whatever the _global row says, so the
+// two writes need not wait for each other; a reconcile that runs while the
+// overlay is open waits for it, and the blocks stay unmarked.
 func TestEmbedExcludedOverlayAndGlobalChange(t *testing.T) {
 	for _, order := range []string{"overlay_first", "global_first"} {
 		t.Run(order, func(t *testing.T) {
@@ -310,9 +322,12 @@ func TestEmbedExcludedOverlayAndGlobalChange(t *testing.T) {
 			reconcile(t, pool)
 			excl := json.RawMessage(`{"retrieval":{"policy":"excluded"}}`)
 			insertOverlay := func(tx pgx.Tx) error {
-				_, err := tx.Exec(ctx,
+				// Bounded like the _global change below.
+				octx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
+				_, err := tx.Exec(octx,
 					`INSERT INTO context_block_types (name, scope, display_name, builtin, is_default, config)
-					 VALUES ($1::text, 'ee-c', $1::text, false, false, '{"retrieval":{"policy":"full-pass"}}')`, name)
+					 VALUES ($1::text, 'ee-a', $1::text, false, false, '{"retrieval":{"policy":"full-pass"}}')`, name)
 				return err
 			}
 
@@ -322,31 +337,22 @@ func TestEmbedExcludedOverlayAndGlobalChange(t *testing.T) {
 			}
 			defer func() { _ = overlay.Rollback(ctx) }()
 
+			// Since migration 176 the overlay (a row of a tenantless scope)
+			// takes its group's lock and the _global change the name's: the two
+			// writes do not wait for each other, each queues its own entry. A
+			// reconcile that runs while the overlay is still open waits for it
+			// on the group's lock when it marks, and the blocks end unmarked.
 			if order == "overlay_first" {
 				if err := insertOverlay(overlay); err != nil {
 					t.Fatalf("open overlay: %v", err)
 				}
-				done := make(chan error, 1)
-				go func() {
-					_, err := store.UpdateBlockType(ctx, pool, global.ID, []string{"_global"}, store.BlockTypeUpdate{Config: excl}, nil, "ee-test")
-					done <- err
-				}()
-				if lockWaitSeen(t, pool, func() bool { return len(done) == 0 }) {
-					if err := overlay.Commit(ctx); err != nil {
-						t.Fatalf("commit overlay: %v", err)
-					}
-					if err := <-done; err != nil {
-						t.Fatalf("exclude _global: %v", err)
-					}
-				} else {
-					t.Errorf("the _global change did not wait for the open overlay")
-					if err := <-done; err != nil {
-						t.Fatalf("exclude _global: %v", err)
-					}
-					reconcile(t, pool) // runs before the overlay's commit
-					if err := overlay.Commit(ctx); err != nil {
-						t.Fatalf("commit overlay: %v", err)
-					}
+				// Bounded: a regression that made it wait for the open overlay
+				// must fail the test, not hang it.
+				uctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				_, err := store.UpdateBlockType(uctx, pool, global.ID, []string{"_global"}, store.BlockTypeUpdate{Config: excl}, nil, "ee-test")
+				cancel()
+				if err != nil {
+					t.Fatalf("exclude _global: %v", err)
 				}
 			} else {
 				glob, err := pool.Begin(ctx)
@@ -358,41 +364,26 @@ func TestEmbedExcludedOverlayAndGlobalChange(t *testing.T) {
 					`UPDATE context_block_types SET config = $2::jsonb WHERE id = $1::uuid`, global.ID, string(excl)); err != nil {
 					t.Fatalf("open _global change: %v", err)
 				}
-				done := make(chan error, 1)
-				go func() { done <- insertOverlay(overlay) }()
-				waited := lockWaitSeen(t, pool, func() bool { return len(done) == 0 })
-				if !waited {
-					t.Errorf("the overlay did not wait for the open _global change")
+				if err := insertOverlay(overlay); err != nil {
+					t.Fatalf("overlay: %v", err)
 				}
 				if err := glob.Commit(ctx); err != nil {
 					t.Fatalf("commit _global: %v", err)
 				}
-				if err := <-done; err != nil {
-					t.Fatalf("overlay: %v", err)
-				}
-				// The overlay is written and not committed: a reconcile now
-				// must not leave the blocks marked once it commits.
-				if waited {
-					rdone := make(chan error, 1)
-					go func() {
-						_, err := store.ReconcileEmbedExcluded(ctx, pool)
-						rdone <- err
-					}()
-					if !lockWaitSeen(t, pool, func() bool { return len(rdone) == 0 }) {
-						t.Errorf("the reconcile did not wait for the open overlay")
-					}
-					if err := overlay.Commit(ctx); err != nil {
-						t.Fatalf("commit overlay: %v", err)
-					}
-					if err := <-rdone; err != nil {
-						t.Fatalf("reconcile during the overlay: %v", err)
-					}
-				} else {
-					reconcile(t, pool) // runs before the overlay's commit
-					if err := overlay.Commit(ctx); err != nil {
-						t.Fatalf("commit overlay: %v", err)
-					}
-				}
+			}
+			rdone := make(chan error, 1)
+			go func() {
+				_, err := store.ReconcileEmbedExcluded(ctx, pool)
+				rdone <- err
+			}()
+			if !lockWaitSeen(t, pool, func() bool { return len(rdone) == 0 }) {
+				t.Errorf("the reconcile did not wait for the open overlay")
+			}
+			if err := overlay.Commit(ctx); err != nil {
+				t.Fatalf("commit overlay: %v", err)
+			}
+			if err := <-rdone; err != nil {
+				t.Fatalf("reconcile during the overlay: %v", err)
 			}
 
 			reconcile(t, pool)
@@ -409,7 +400,7 @@ func TestEmbedExcludedOverlayAndGlobalChange(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err := pool.QueryRow(ctx,
-				`SELECT count(*) FROM context_embed_excluded_reconcile WHERE name = $1`, name).Scan(&queued); err != nil {
+				`SELECT count(*) FROM context_embed_excluded_queue WHERE name = $1`, name).Scan(&queued); err != nil {
 				t.Fatal(err)
 			}
 			if marked != 0 {
@@ -476,7 +467,7 @@ func TestEmbedExcludedReconcileAnswerMoves(t *testing.T) {
 		t.Errorf("%d blocks of the excluded type are unmarked after the reconcile", unmarked)
 	}
 	var queued int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_excluded_reconcile`).Scan(&queued); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_excluded_queue`).Scan(&queued); err != nil {
 		t.Fatal(err)
 	}
 	if queued != 0 {
@@ -547,7 +538,7 @@ func TestEmbedExcludedReconcileNullCreatedAt(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_blocks WHERE title LIKE 'ee null %' AND NOT embed_excluded`).Scan(&unmarked); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_excluded_reconcile WHERE name = 'checkpoint'`).Scan(&queued); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_excluded_queue WHERE name = 'checkpoint'`).Scan(&queued); err != nil {
 		t.Fatal(err)
 	}
 	if unmarked != 0 || queued != 0 {
@@ -589,7 +580,7 @@ func TestEmbedExcludedReconcileFailingNameDoesNotBlock(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_blocks WHERE type_name = 'ee-next' AND NOT embed_excluded`).Scan(&unmarked); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_excluded_reconcile WHERE name = 'ee-fail'`).Scan(&failQueued); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_excluded_queue WHERE name = 'ee-fail'`).Scan(&failQueued); err != nil {
 		t.Fatal(err)
 	}
 	if unmarked != 0 {
@@ -601,13 +592,14 @@ func TestEmbedExcludedReconcileFailingNameDoesNotBlock(t *testing.T) {
 }
 
 // TestEmbedExcludedTenantCannotWriteForeignBlocks: a tenant's change to its
-// own registry rows never makes the reconcile write blocks of another
-// tenant, and never queues a name. Tenant B holds a tenant-own type ee-shared
-// (excluded) with blocks; tenant A creates the same name embeddable, turns it
-// excluded and deletes it; then A overlays the _global-excluded checkpoint
-// with an excluded row (the only overlay the narrowing gate lets a tenant
-// write for it) and deletes that. B's blocks keep their row versions and
-// markers, and the queue stays empty.
+// own registry rows never makes the reconcile write blocks of another tenant
+// and queues only its own group (migration 176). Tenant B holds a tenant-own
+// type ee-shared (excluded, so B's blocks of it are marked) and checkpoint
+// blocks; tenant A creates the same name embeddable, turns it excluded and
+// back and deletes it; then A overlays the _global-excluded checkpoint with
+// an excluded row (the only overlay the narrowing gate lets a tenant write
+// for it) and deletes that. B's blocks keep their row versions and markers,
+// and every queue entry A's writes leave carries A's group.
 func TestEmbedExcludedTenantCannotWriteForeignBlocks(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -630,9 +622,9 @@ func TestEmbedExcludedTenantCannotWriteForeignBlocks(t *testing.T) {
 		}
 		return s
 	}
-	queued := func() int {
+	foreignQueued := func() int {
 		var n int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_excluded_reconcile`).Scan(&n); err != nil {
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_excluded_queue WHERE grp <> 's:ee-tenant-a'`).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
 		return n
@@ -641,15 +633,19 @@ func TestEmbedExcludedTenantCannotWriteForeignBlocks(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_blocks WHERE type_name = 'ee-shared' AND embed_excluded`).Scan(&sharedMarked); err != nil {
 		t.Fatal(err)
 	}
-	if sharedMarked != 0 {
-		t.Errorf("%d blocks of a type without a _global row are marked: the answer depends on tenant rows", sharedMarked)
+	if sharedMarked != 50 {
+		t.Errorf("%d/50 of B's blocks of its own excluded type are marked", sharedMarked)
 	}
 	before := state()
 
 	full := json.RawMessage(`{"retrieval":{"policy":"full-pass"}}`)
 	excl := json.RawMessage(`{"retrieval":{"policy":"excluded"}}`)
-	a := createType(t, pool, "ee-shared", "ee-tenant-a", "full-pass")
+	var a *store.BlockTypeRow
 	steps := []func() error{
+		func() error {
+			a = createType(t, pool, "ee-shared", "ee-tenant-a", "full-pass")
+			return nil
+		},
 		func() error {
 			_, err := store.UpdateBlockType(ctx, pool, a.ID, []string{"ee-tenant-a"}, store.BlockTypeUpdate{Config: excl}, nil, "ee-test")
 			return err
@@ -669,16 +665,13 @@ func TestEmbedExcludedTenantCannotWriteForeignBlocks(t *testing.T) {
 		},
 	}
 	for i, step := range steps {
-		if q := queued(); q != 0 {
-			t.Errorf("before step %d: %d names queued by tenant A's own registry writes", i+1, q)
-		}
 		if err := step(); err != nil {
 			t.Fatalf("step %d: %v", i+1, err)
 		}
+		if q := foreignQueued(); q != 0 {
+			t.Errorf("step %d: tenant A's own registry write queued %d entries outside A's group", i+1, q)
+		}
 		reconcile(t, pool)
-	}
-	if q := queued(); q != 0 {
-		t.Errorf("after the last step: %d names queued by tenant A's own registry writes", q)
 	}
 	if after := state(); after != before {
 		t.Errorf("tenant A's registry writes changed tenant B's blocks (row versions or markers)")

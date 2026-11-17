@@ -530,7 +530,9 @@ func TestDistillBlockWrite(t *testing.T) {
 
 			// A real content change DOES invalidate it, which is the other half
 			// of the same property. Since issue #198 part B the invalidation
-			// keeps the vector and marks it stale for the backfill.
+			// keeps the vector and marks it stale for the backfill; for a type
+			// that is never embedded (the distilled block's) it drops the
+			// vector instead, since issue #213.
 			st.addBatch(distillExtractResult{insights: []distillKept{
 				{claim: "Der Retrieval-Pfad faltet vier Arme per Reciprocal Rank Fusion zusammen.",
 					quote: "harmloser Zitattext", blockID: a8Block2, chunk: 2},
@@ -538,15 +540,16 @@ func TestDistillBlockWrite(t *testing.T) {
 			if err := s.distillWriteBlock(ctx, opts, st); err != nil {
 				t.Fatalf("third write: %v", err)
 			}
-			var stale bool
+			var stale, dropped, marked bool
 			if err := pool.QueryRow(ctx,
-				`SELECT COALESCE(embed_model,''), embedding_stale FROM context_blocks
+				`SELECT COALESCE(embed_model,''), embedding_stale, embedding IS NULL, embed_excluded FROM context_blocks
 				  WHERE category='session-insights' AND title=$1 AND scope=$2`,
-				distillBlockTitle(dfRoot, 0, 1), dfScope).Scan(&model, &stale); err != nil {
+				distillBlockTitle(dfRoot, 0, 1), dfScope).Scan(&model, &stale, &dropped, &marked); err != nil {
 				t.Fatalf("read embed_model: %v", err)
 			}
-			if !stale {
-				t.Errorf("embedding_stale = false after a content change (embed_model %q), want the vector invalidated", model)
+			if !dropped || stale || !marked {
+				t.Errorf("after a content change of the never-embedded block: vector dropped %v, embedding_stale %v, embed_excluded %v (embed_model %q); want the vector dropped, not stale, and the marker set",
+					dropped, stale, marked, model)
 			}
 		})
 	})

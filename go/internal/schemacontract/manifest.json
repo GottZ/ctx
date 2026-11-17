@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 175,
-    "migration_count": 63,
+    "migration_max": 176,
+    "migration_count": 64,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -1394,6 +1394,29 @@
         },
         {
           "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_embed_excluded_queue": {
+      "columns": [
+        {
+          "name": "name",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "grp",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "queued_at",
           "type": "timestamp with time zone",
           "not_null": true,
           "storage": "p"
@@ -5190,6 +5213,9 @@
     "context_embed_cache_pkey": {
       "def_hash": "4f1bd9c1ec05f655c3c25785f75ecc4fa840f92a7db43181be0f8e30d4121b6f"
     },
+    "context_embed_excluded_queue_pkey": {
+      "def_hash": "53ef0f2da6cb1642c0e165254cc47c0e45421ac99d8354eea62fa8057a9810bd"
+    },
     "context_embed_excluded_reconcile_pkey": {
       "def_hash": "43c22edcb262f803a23cd4a9b41be9c1087a06e96c51b9001abf8a8ceff0f8b8"
     },
@@ -5437,7 +5463,7 @@
       "def_hash": "69a2610cbcf0ae402349859dfc9ce4b5c1fce0c4c725405aec07200fb6eb1eb4"
     },
     "idx_blocks_embed_excluded": {
-      "def_hash": "3989d973c048b07779a4f023d53dcb991051c0544303462379b0986d8c96fa4a"
+      "def_hash": "928f8b4ee5bec68fb51d5e7b6747d0ce772c542c03507a12163b45b29420fcf5"
     },
     "idx_blocks_sensitivity": {
       "def_hash": "2a00f9e1404aebddc150557068562c6472f426d2745376bf6af44664cbe25a80"
@@ -6034,13 +6060,16 @@
       "src_hash": "3178553d752b1bda3afbbc13a68ed1759979daba67871dff4d818d136f9edc6e"
     },
     "context_block_types_embed_excluded()": {
-      "src_hash": "dbf414ac8bb93ef4ec1bb1e52572d2eaa597e287a5aae634ea6312ff4f2cc6fa"
+      "src_hash": "0098a295175f1675f88ffb869406ab6a97d0e04e5f46f57246a232335d7fff29"
     },
     "context_blocks_embed_excluded()": {
-      "src_hash": "4822cbda76bc2c4b5f57772d085a2ef48dc6c2f46bc32e25110a0e38d367d293"
+      "src_hash": "2ac3e8e99b0175a73002be99cf595b7f623ddec903f7fa2e85ad1fcc73988c60"
     },
     "context_blocks_retype()": {
       "src_hash": "510b3cc776e86b2dbc44a6245b33ada942e5e9e306e98fbe0d3f3a568135022c"
+    },
+    "context_tenant_scopes_embed_excluded()": {
+      "src_hash": "6f2a007e8bcca7616bfd644389e6cf4d9cf348aa957841d4e21046850055ddf5"
     },
     "ctx_auth(p_api_key text)": {
       "src_hash": "a5b51033a10c0016c1e560c15721d218bad483757fc31e49706ce5c660c01d58"
@@ -6050,6 +6079,15 @@
     },
     "ctx_block_type_never_embedded(p_name text)": {
       "src_hash": "c49f0fca7880acce18b8efeab59f12ef400179fcd83b6c90a637c4f2d12abf63"
+    },
+    "ctx_block_type_never_embedded(p_name text, p_scope text)": {
+      "src_hash": "11f473e5609f9caf81170b663b24387e2aead26d9cd38500087adc5007ce3303"
+    },
+    "ctx_embed_excluded_group(p_scope text)": {
+      "src_hash": "e41d2f3be4d13901cb4f12f158c951b9f9e252ce66bd0f39af306aac4594e216"
+    },
+    "ctx_embed_excluded_queue(p_name text, p_grp text)": {
+      "src_hash": "07bdaa290e1d6eadf2415be8401bc8f52479648e2fe26019ca6a3c61ff271ed8"
     },
     "ctx_guard_check(p_block_id uuid, p_threshold_duplicate real, p_threshold_review real, p_candidate_types text[], p_same_scope_only boolean)": {
       "src_hash": "ac5ce9d8a27d12c49a318edc0b64de8b52927698cdd6931605fee1cf68fc096e"
@@ -6159,7 +6197,7 @@
       "def_hash": "a32b0d48259ce7cf0cf3b83942ba2ea4fea8c0e0e4941b252c91f8fe40ad6d03"
     },
     "context_blocks.trg_block_embed_excluded": {
-      "def_hash": "27027aa8208a06538dcad522525c0389b7d08ad154d78169113389fca7f5ec47"
+      "def_hash": "b3804b6204712995902b1188e6eb2336a7ed4566fecb94f5641fc811c1809673"
     },
     "context_blocks.trg_block_retype": {
       "def_hash": "0da2d78c0902ef152a6e9d813b17879bd8e39ab5e55b0da39119f9d0ef25eb09"
@@ -6295,6 +6333,9 @@
     },
     "context_tenant_scopes.trg_tenant_scopes_access_notify": {
       "def_hash": "926fb0593fe92ae1b889151e41787e968172e1095405464e85ae92f23b58c4ad"
+    },
+    "context_tenant_scopes.trg_tenant_scopes_embed_excluded": {
+      "def_hash": "9e98108eef2294c60260d76610047c6306a5ccfff613bfe8b445e7ef8f002190"
     },
     "context_tenants.trg_tenants_access_notify": {
       "def_hash": "4a475477486530b4379423b5f8d718b22a4b655bac78fc7ad862349a75ed4fc4"

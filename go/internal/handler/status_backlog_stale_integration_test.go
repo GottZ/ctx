@@ -67,10 +67,13 @@ func TestStatusDBEmbedBacklogCountsStale(t *testing.T) {
 
 // TestStatusDBEmbedBacklogStaleNeverEmbedded (#291, review round 4): a block
 // that held a vector when its type became never-embedded keeps its vector
-// and no marker (the reconcile marks unembedded blocks only); a later
-// content change marks it stale. The pick's stale branches filter it by the
-// type predicate, so the backfill never re-embeds it, and the /status count
-// must not count it either.
+// and no marker (the reconcile marks unembedded blocks only); a content change
+// before migration 176's second change (issue #213) marked it stale and kept
+// the vector — a row of that kind is left from before it (since then a
+// content change drops the vector, and the reconcile's stale pass of a queued
+// name does too). The pick's stale branches filter it by the type predicate,
+// so the backfill never re-embeds it, and the /status count must not count it
+// either.
 //
 // RED before the stale branch carries store.RetrievalExcludedTypePredicate:
 // EmbedBacklog = 3 (the stale block of the embeddable type and the two of
@@ -112,11 +115,9 @@ func TestStatusDBEmbedBacklogStaleNeverEmbedded(t *testing.T) {
 	if _, err := store.ReconcileEmbedExcluded(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	changed := "text v2"
-	for _, id := range ids {
-		if _, _, err := store.UpdateBlock(ctx, pool, id, store.UpdateBlockData{Content: &changed}, []string{scope}); err != nil {
-			t.Fatal(err)
-		}
+	// The state a content change left before issue #213: stale, vector kept.
+	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET embedding_stale = true WHERE id = ANY($1::uuid[])`, ids); err != nil {
+		t.Fatal(err)
 	}
 	var stale, marked int
 	if err := pool.QueryRow(ctx,

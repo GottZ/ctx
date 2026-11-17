@@ -25,7 +25,7 @@ func migration175Def(name, cols string) string {
 func TestMigration175(t *testing.T) {
 	ctx := context.Background()
 	t.Run("fresh_chain_and_171_definition_get_the_new_definition", func(t *testing.T) {
-		pool := testdb.SetupTestDB(t) // 171 builds, 175 rebuilds
+		pool := testdb.SetupTestDBUpTo(t, 175) // 171 builds, 175 rebuilds; 176 gives idx_blocks_embed_excluded scope in its key
 		for _, ix := range migration171Indexes {
 			var def string
 			if err := pool.QueryRow(ctx, `SELECT pg_get_indexdef($1::regclass)`, ix.name).Scan(&def); err != nil {

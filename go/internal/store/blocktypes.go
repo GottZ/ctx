@@ -79,48 +79,52 @@ func (e *BlockTypeInUseError) Error() string {
 // (type=system-meta, 73.7 kB ≈ ~32k real tokens) on EVERY boot → ClearEmbedding
 // → ~60 min of CPU embed for a dead vector, recurring.
 //
-// The rule is the SQL function ctx_block_type_never_embedded (migration 175,
-// issue #291), deliberately conservative in the fail-safe direction —
-// skipping an embedding is the destructive move (an unembedded block is
-// FTS-only), so a block is skipped only when NO reader in the system could
-// ever rank it:
+// The rule is the SQL function ctx_block_type_never_embedded(name, scope)
+// (migration 176, issue #213; migration 175, issue #291, before it),
+// deliberately conservative in the fail-safe direction — skipping an
+// embedding is the destructive move (an unembedded block is FTS-only), so a
+// block is skipped only when no reader whose registry decides about it could
+// rank it. The registry rows it reads are R: the name's '_global' row, the
+// row of the block's own scope and the rows of every scope of the tenant
+// that owns the block's scope (context_tenant_scopes) — the set
+// trg_block_retype (migration 174) reads. The block is never embedded when
+// the name has at least one row in R and every row in R carries `excluded`:
 //
-//   - The '_global' row is the base every tenant inherits; only `= 'excluded'`
-//     skips. Absent `retrieval.policy` decodes to full-pass (blocktype.DecodePolicy),
-//     and 'damped'/'aggregate-to-parent' are visible types (Set.VisibleTypes) —
-//     all of them stay embeddable.
-//   - Tenant overlay: the retrieval exclusion in the search path IS reader-aware
-//     ("Overlay gewinnt", design/01 §5.4 / D6, pinned by rrf T12) — an overlay
-//     that lifts a _global exclusion gives blocks of that type a consumer. The
-//     backfill has no reader identity, so the reader-aware rule is mirrored as
-//     the UNION over all possible readers: one non-_global row of the name with
-//     a non-excluded policy keeps the type embeddable. While the name has a
-//     _global row, the narrowing gate (blocktype.NarrowingViolation, N8)
-//     admits no such row through the write path, and blocktype.DecodePolicy
-//     reads the config by the exact keys this rule reads. Such a row is an
-//     operator's (psql, migration) or a tenant row that predates its _global
-//     base; migration 175's header names what the second can do.
-//   - A block whose type has NO _global row stays embeddable, also when its
-//     tenant rows are all excluded (issue #213, open): the answer must not
-//     depend on another tenant's rows (migration 175's header).
+//   - '_global' is the base every tenant inherits and stands for every reader
+//     of another tenant without its own row of the name; only `= 'excluded'`
+//     skips. Absent `retrieval.policy` decodes to full-pass
+//     (blocktype.DecodePolicy), and 'damped'/'aggregate-to-parent' are
+//     visible types (Set.VisibleTypes) — all of them stay embeddable.
+//   - The owning tenant's rows: its keys resolve types by their home scope,
+//     one of its scopes ("Overlay gewinnt", design/01 §5.4 / D6). A tenant-own
+//     type (no '_global' row) that is excluded there is never embedded; an
+//     overlay of the tenant that lifts a '_global' exclusion keeps the type
+//     embeddable for that tenant's blocks.
+//   - Rows of ANOTHER tenant are not read: a tenant's registry never decides
+//     about another tenant's blocks (no write across the tenant boundary by
+//     the reconcile, no oracle on another tenant's registry). A reader of
+//     another tenant that may read the scope and holds its own visible row of
+//     the same name ranks such blocks by full text only
+//     (docs/multi-tenancy.md).
+//   - A name without a row in R stays embeddable.
 //
 // The same function sets context_blocks.embed_excluded (trigger
 // trg_block_embed_excluded, and the reconcile ReconcileEmbedExcluded after a
-// registry change), which keeps such blocks out of the pick indexes
-// altogether (PendingPickSQL). This predicate stays the authority over the
-// rows a pick reads: a block whose marker is not yet set (a registry change
-// the reconcile has not reached) is filtered here row by row.
+// registry change or a scope assignment), which keeps such blocks out of the
+// pick indexes altogether (PendingPickSQL). This predicate stays the
+// authority over the rows a pick reads: a block whose marker is not yet set
+// (a change the reconcile has not reached) is filtered here row by row.
 //
 // Defined ONCE (design/04 §3.3 "je einmal definiert in Go-Konstanten") and
 // interpolated into the call sites, exactly like its EmbedFailureExcludedPredicate
-// sibling; it carries no bind parameters and references context_blocks.type_name,
-// so it composes into any query whose outer FROM is the bare (unaliased)
-// context_blocks table.
+// sibling; it carries no bind parameters and references context_blocks.type_name
+// and context_blocks.scope, so it composes into any query whose outer FROM is
+// the bare (unaliased) context_blocks table.
 //
 // NOT covered on purpose (own waves): the re-embed migration worker
 // (embed_cutover.go) keeps its own predicate.
 const RetrievalExcludedTypePredicate = `
-	AND NOT ctx_block_type_never_embedded(context_blocks.type_name)`
+	AND NOT ctx_block_type_never_embedded(context_blocks.type_name, context_blocks.scope)`
 
 const blockTypeCols = `id, name, scope, display_name, description, builtin, is_default, config, created_at, updated_at, updated_by`
 
