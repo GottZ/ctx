@@ -32,7 +32,7 @@ const EmbedExcludedReconcileBatch = 1000
 //     row comparison with a NULL in it is NULL: such a block would sort last
 //     and turn the cursor into a value no later row compares above, so the
 //     cursor pass leaves them out and markEmbedExcludedNullAtSQL takes them
-//     (no cursor: a marked block leaves the set it reads).
+//     (from a cursor on id).
 //   - markEmbedExcludedStaleSQL: answer true. The scope's blocks of the name
 //     marked stale (a vector kept over a content change, issue #198 part B),
 //     on idx_embedding_stale_scope_sens: no reader ranks their vector, the
@@ -91,20 +91,22 @@ var (
 		UPDATE context_blocks SET embed_excluded = true
 		 WHERE id IN (SELECT id FROM context_blocks
 		               WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded
-		                 AND scope = $2 AND type_name = $1 AND created_at IS NULL
+		                 AND scope = $2 AND type_name = $1 AND created_at IS NULL AND id > $4::uuid
+		               ORDER BY id
 		               LIMIT $3)
 		   AND NOT embed_excluded
-		RETURNING embed_excluded)
-		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE embed_excluded)`
+		RETURNING embed_excluded, id)
+		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE embed_excluded), (SELECT id FROM u ORDER BY id DESC LIMIT 1)`
 	markEmbedExcludedStaleSQL = `WITH u AS (
 		UPDATE context_blocks SET embed_excluded = NOT embed_excluded
 		 WHERE id IN (SELECT id FROM context_blocks
 		               WHERE embedding_stale AND NOT is_archived
-		                 AND scope = $2 AND type_name = $1
+		                 AND scope = $2 AND type_name = $1 AND id > $4::uuid
+		               ORDER BY id
 		               LIMIT $3)
 		   AND embedding_stale
-		RETURNING embed_excluded)
-		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE embed_excluded)`
+		RETURNING embed_excluded, id)
+		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE embed_excluded), (SELECT id FROM u ORDER BY id DESC LIMIT 1)`
 	clearEmbedExcludedSQL = `WITH u AS (
 		UPDATE context_blocks SET embed_excluded = false
 		 WHERE id IN (SELECT id FROM context_blocks
@@ -414,12 +416,16 @@ func markEmbedExcludedScope(ctx context.Context, pool *pgxpool.Pool, name, scope
 			cursor = embedExcludedKey{sens: *sens, at: *at, id: *id}
 		}
 	}
-	// Without a cursor: every row these two statements write leaves the set
-	// they read (marked, or no longer stale), whatever the trigger decides.
+	// The blocks without a created_at and the stale ones, each from a cursor
+	// on id: a row the trigger set back (the answer moved) stays in the set
+	// these statements read, and the cursor keeps a pass from reading it
+	// again; the left check and the next round take what a pass passed.
 	for _, st := range []string{markEmbedExcludedNullAtSQL, markEmbedExcludedStaleSQL} {
+		from := embedExcludedKeyStart.id
 		for {
 			var wrote, reached int
-			if err := pool.QueryRow(ctx, st, name, scope, EmbedExcludedReconcileBatch).Scan(&wrote, &reached); err != nil {
+			var last *string
+			if err := pool.QueryRow(ctx, st, name, scope, EmbedExcludedReconcileBatch, from).Scan(&wrote, &reached, &last); err != nil {
 				return updated, false, fmt.Errorf("store: embed-excluded mark %q %q: %w", name, scope, err)
 			}
 			updated += reached
@@ -428,6 +434,9 @@ func markEmbedExcludedScope(ctx context.Context, pool *pgxpool.Pool, name, scope
 			}
 			if wrote == 0 {
 				break
+			}
+			if last != nil {
+				from = *last
 			}
 		}
 	}
