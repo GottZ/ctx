@@ -49,7 +49,7 @@ accounts, the admin bypass excepted (see below); the second ruleset
 3. **Required status checks** (exact context names): `Lint`, `Unit Tests`,
    `Unit Tests (windows, tagged packages)`, `Conformance`, `Build`, `Web`,
    `Cross-compile (darwin/arm64)`, `Cross-compile (windows/amd64)`,
-   `Integration Tests (handler|store|guard|rest|heavy|distill)` and
+   `Integration Tests (handler|store|guard|rest|heavy|distill|events|oai)` and
    `PR title` — the `ci.yml` jobs that run on every pull request. Label-gated
    and nightly jobs are not required.
 4. **Merge method**: *merge commit* (default) or *squash*. A merge commit
