@@ -322,7 +322,10 @@ func TestEmbedExcludedOverlayAndGlobalChange(t *testing.T) {
 			reconcile(t, pool)
 			excl := json.RawMessage(`{"retrieval":{"policy":"excluded"}}`)
 			insertOverlay := func(tx pgx.Tx) error {
-				_, err := tx.Exec(ctx,
+				// Bounded like the _global change below.
+				octx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
+				_, err := tx.Exec(octx,
 					`INSERT INTO context_block_types (name, scope, display_name, builtin, is_default, config)
 					 VALUES ($1::text, 'ee-a', $1::text, false, false, '{"retrieval":{"policy":"full-pass"}}')`, name)
 				return err
