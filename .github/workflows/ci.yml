@@ -724,6 +724,20 @@ jobs:
   # run shows what it actually covered.
   # Budgets are PER SHARD (matrix.pkg_timeout / matrix.job_timeout) so one slow
   # shard never has to weaken the hang detection of the fast ones.
+  # 8-way since 2026-11-17: `events` left heavy and `oai` left rest, each as
+  # its own shard. Measured on root run 44146102379 (package seconds as go test
+  # prints them, job seconds in brackets): heavy [1053] = events 493 + rrf 238
+  # + overview 127 + dream 77; rest [985] = oai 351 + 68 further packages 427;
+  # handler [629] = 498; store [502] = 402; guard [302] = 204. With both cuts
+  # the longest shard is handler, and no shard carries two of the long
+  # packages one after the other.
+  # No `needs:` since the same day: the shards used to wait for `Unit Tests`
+  # (513s in that run) before they started, which put those minutes in front
+  # of the pipeline's longest jobs on every run. They test other things than
+  # the unit job and gate nothing it gates: `docker` still needs `build`
+  # (which needs lint + unit-tests) AND every shard, and the ruleset requires
+  # each check by name, so a red unit job blocks a merge and a push exactly as
+  # before — the shards merely no longer idle until it is green.
   integration-tests:
     name: Integration Tests (${{ matrix.shard }})
     runs-on: ubuntu-latest
@@ -731,7 +745,6 @@ jobs:
     # to its 15m package budget on slow nightly runners — see the -timeout note
     # below. distill runs on 40; the reasoning sits in its matrix entry.
     timeout-minutes: ${{ matrix.job_timeout }}
-    needs: [unit-tests]
     permissions:
       contents: read
     strategy:
@@ -751,7 +764,15 @@ jobs:
             pkg_timeout: 15m
             job_timeout: 25
           - shard: heavy
-            packages: "./internal/overview/... ./internal/events/... ./internal/rrf/... ./internal/dream/..."
+            packages: "./internal/overview/... ./internal/rrf/... ./internal/dream/..."
+            pkg_timeout: 15m
+            job_timeout: 25
+          - shard: events
+            packages: "./internal/events/..."
+            pkg_timeout: 15m
+            job_timeout: 25
+          - shard: oai
+            packages: "./internal/oai/..."
             pkg_timeout: 15m
             job_timeout: 25
           - shard: distill
@@ -852,7 +873,7 @@ jobs:
           if [ -n "${{ matrix.packages }}" ]; then
             PKGS="${{ matrix.packages }}"
           else
-            PKGS=$(go list -tags=integration ./... | grep -vE '/internal/(handler|store|overview|guard|events|rrf|dream|distillsource)(/|$)' | tr '\n' ' ')
+            PKGS=$(go list -tags=integration ./... | grep -vE '/internal/(handler|store|overview|guard|events|rrf|dream|distillsource|oai)(/|$)' | tr '\n' ' ')
           fi
           echo "Shard '${{ matrix.shard }}' packages: ${PKGS}"
           echo "packages=${PKGS}" >> "$GITHUB_OUTPUT"
