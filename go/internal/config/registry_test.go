@@ -388,6 +388,8 @@ func TestRegistryEnvNamespace(t *testing.T) {
 		"federation.max_depth":                  true, // F-W8: federation topology is settings-only (design/04 §3.1), like every federation.* key
 		"federation.require_peer_hop":           true, // F-W12: the pathless-peer switch, settings-only like every federation.* key (design/04 §3.1)
 		"tenant.devmode":                        true, // C6-C: developer-transparency umbrella; settings-only ON PURPOSE — an env would let the privacy default fall without an audit row
+		"mcp.instructions_enabled":              true, // #315: settings-only like its text — one surface for what every connecting agent is told
+		"mcp.instructions":                      true, // #315: settings-only ON PURPOSE — only the settings PUT records the shipped wording a custom text was based on, and the audit row
 	}
 	seen := map[string]string{}
 	for _, e := range registry() {

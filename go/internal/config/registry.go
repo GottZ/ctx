@@ -153,6 +153,13 @@ func buildRegistry(root reflect.Type) ([]entry, error) {
 	return out, nil
 }
 
+// shippedDefaultTag is the default tag of mcp.instructions: its default is not
+// a literal but the newest wording of the shipped history
+// (shippedMCPInstructions), so the wording lives in exactly one place and the
+// registry default, every surface that renders it and the history agree by
+// construction. No other key may carry it.
+const shippedDefaultTag = "@shipped"
+
 // GuardFederationIngress is the guard of a bool key that switches the model
 // API on (gateway.enabled; wave F-W8, design/04 §4.6, §7.2 no. 1): a
 // settings write that would make it true — PUT true, or a DELETE that falls
@@ -171,6 +178,12 @@ func buildEntry(owner string, f reflect.StructField, key string, path []int) (en
 	def, hasDef := f.Tag.Lookup("default")
 	if !hasDef {
 		return entry{}, fmt.Errorf("%s: missing default tag", loc)
+	}
+	if def == shippedDefaultTag {
+		if key != "mcp.instructions" || f.Type != typString {
+			return entry{}, fmt.Errorf("%s: default %q belongs to mcp.instructions alone", loc, def)
+		}
+		def = shippedMCPInstructions[len(shippedMCPInstructions)-1].Text
 	}
 	mut := f.Tag.Get("mut")
 	if !validMut[mut] {

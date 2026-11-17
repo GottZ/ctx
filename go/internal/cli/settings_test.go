@@ -81,3 +81,50 @@ func TestClientDo(t *testing.T) {
 		t.Errorf("envelope err = %v", err)
 	}
 }
+
+// mcp.instructions (#315): --text picks one text raw for diff, and the table
+// cell names the state instead of carrying the prose.
+func TestInstructionsTextAndCell(t *testing.T) {
+	v1 := shippedRow{ID: 1, Since: "v0.26.0", Text: "old wording"}
+	v2 := shippedRow{ID: 2, Since: "v5.49.0", Text: "new wording"}
+	own := settingRow{Key: "mcp.instructions", Value: "own\ntext", Instructions: &instructionsRow{
+		State: "custom", Custom: true, Current: v2, Base: &v1, ChangedSinceBase: true, History: []shippedRow{v1, v2}}}
+	for which, want := range map[string]string{"value": "own\ntext", "current": "new wording", "base": "old wording", "1": "old wording", "2": "new wording"} {
+		if got, err := instructionsText(own, which); err != nil || got != want {
+			t.Errorf("--text %s = %q, %v; want %q", which, got, err, want)
+		}
+	}
+	if _, err := instructionsText(own, "3"); err == nil {
+		t.Errorf("--text 3 (no such wording) did not fail")
+	}
+	if _, err := instructionsText(settingRow{Key: "rerank.enabled"}, "value"); err == nil {
+		t.Errorf("--text on another key did not fail")
+	}
+	noBase := own
+	noBase.Instructions = &instructionsRow{State: "custom", Custom: true, Current: v2, History: []shippedRow{v1, v2}}
+	if _, err := instructionsText(noBase, "base"); err == nil {
+		t.Errorf("--text base without a base did not fail")
+	}
+
+	if got := instructionsCell(own); got != "(own text, based on #1; ctx ships #2)" {
+		t.Errorf("cell of a custom text with an older base = %q", got)
+	}
+	if got := instructionsCell(noBase); got != "(own text, 8 characters)" {
+		t.Errorf("cell of a custom text = %q", got)
+	}
+	shipped := settingRow{Value: "new wording", Instructions: &instructionsRow{State: "shipped", Matches: 2, Current: v2}}
+	if got := instructionsCell(shipped); got != "(shipped #2)" || strings.Contains(got, "\n") {
+		t.Errorf("cell of the shipped wording = %q", got)
+	}
+	// off: the server sends nothing, whatever text is configured (#327 review)
+	offShipped := shipped
+	offShipped.Instructions = &instructionsRow{State: "off", Matches: 2, Current: v2}
+	if got := instructionsCell(offShipped); got != "(off, sends nothing; shipped #2)" {
+		t.Errorf("cell of the shipped wording while off = %q", got)
+	}
+	offOwn := noBase
+	offOwn.Instructions = &instructionsRow{State: "off", Custom: true, Current: v2, History: []shippedRow{v1, v2}}
+	if got := instructionsCell(offOwn); got != "(off, sends nothing; own text, 8 characters)" {
+		t.Errorf("cell of a custom text while off = %q", got)
+	}
+}

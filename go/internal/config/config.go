@@ -123,6 +123,7 @@ type Config struct {
 	Distill        DistillConfig
 	Gateway        GatewayConfig
 	Federation     FederationConfig
+	MCP            MCPServerConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -2815,6 +2816,24 @@ type FederationConfig struct {
 	// counter stayed 0 over the observation window (§7.2 no. 5). No
 	// validation rule (a bool has no invalid value; V56 stays reserved).
 	RequirePeerHop bool `key:"federation.require_peer_hop" env:"-" default:"false" mut:"hot" tenancy:"global-only"`
+}
+
+// MCPServerConfig is what the MCP server tells a connecting agent at
+// initialize (GottZ/ctx#315). Both keys are settings-only (env:"-"), hot and
+// global-only: the text reaches the agents of every tenant, so only an
+// operator writes it, and every custom text goes through the settings PUT,
+// which records the shipped wording it was based on (context_settings metadata
+// "shipped_base"). The resolution of the two keys into what is sent lives in
+// one function, Config.MCPInstructions (mcpinstructions.go).
+type MCPServerConfig struct {
+	// InstructionsEnabled switches the instructions on; false sends none.
+	InstructionsEnabled bool `key:"mcp.instructions_enabled" env:"-" default:"true" mut:"hot" tenancy:"global-only"`
+	// Instructions is the text sent with initialize. Its default is not a
+	// literal but the newest wording of the shipped history
+	// (shippedDefaultTag): an instance that never set a text — or stored one
+	// that equals any shipped wording — follows the wording of the running
+	// release. V60 bounds the text (validateMCPInstructions).
+	Instructions string `key:"mcp.instructions" env:"-" default:"@shipped" mut:"hot" tenancy:"global-only"`
 }
 
 // GatewayConsumersConfig is the policy of the consumer and model-key

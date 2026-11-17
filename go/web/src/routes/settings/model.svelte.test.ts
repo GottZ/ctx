@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../../lib/api'
-import type { SettingDeleteResponse, SettingPutResponse, SettingView } from '../../lib/api/types'
+import type { McpInstructionsView, SettingDeleteResponse, SettingPutResponse, SettingView } from '../../lib/api/types'
 import { SettingsModel } from './model.svelte'
 
 function view(partial: Partial<SettingView> & Pick<SettingView, 'key' | 'type'>): SettingView {
@@ -158,6 +158,34 @@ describe('SettingsModel', () => {
     const s = m.byKey('rerank.blend_weight')
     expect(s?.value).toBe('reverted')
     expect(s?.source).toBe('env')
+  })
+
+  // #315: a write of either mcp.instructions key changes the text field's
+  // comparison; the page must not keep showing the state from before it.
+  it('adopts the mcp.instructions comparison a write answers with', async () => {
+    const shipped = { id: 2, since: 'v5.49.0', text: 'shipped' }
+    const before: McpInstructionsView = { state: 'shipped', custom: false, matches: 2, current: shipped, changed_since_base: false, history: [shipped] }
+    const off: McpInstructionsView = { ...before, state: 'off' }
+    const reset: McpInstructionsView = { ...before }
+    const api = stubApi({
+      'mcp.instructions_enabled': {
+        success: true, key: 'mcp.instructions_enabled', value: false, source: 'db',
+        previous: { value: true, source: 'default' }, warnings: [], instructions: off,
+      },
+      'mcp.instructions': { success: true, key: 'mcp.instructions', value: 'shipped', source: 'default', instructions: reset },
+    })
+    const m = new SettingsModel(api)
+    m.load([
+      view({ key: 'mcp.instructions_enabled', type: 'bool', value: true, source: 'default' }),
+      view({ key: 'mcp.instructions', type: 'string', value: 'own', source: 'db', instructions: { ...before, state: 'custom', custom: true } }),
+    ])
+
+    m.drafts['mcp.instructions_enabled'] = 'false'
+    await m.saveGroup('mcp')
+    expect(m.byKey('mcp.instructions')?.instructions?.state).toBe('off')
+
+    await m.reset('mcp.instructions')
+    expect(m.byKey('mcp.instructions')?.instructions).toEqual(reset)
   })
 
   it('starts sensitive drafts empty and PUTs the secret name', async () => {

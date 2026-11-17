@@ -3,7 +3,7 @@
 // the client-side mirror of the known config cross-field rules. Everything
 // here is preview/UX — the server-side candidate build stays authoritative.
 
-import type { SettingView } from './api/types'
+import type { McpInstructionsView, SettingView } from './api/types'
 
 /** The five rendering strategies the generic UI knows. */
 export type Widget = 'switch' | 'number' | 'select' | 'text' | 'readonly'
@@ -187,6 +187,15 @@ export type ParsedDraft = { ok: true; value: string | number | boolean } | { ok:
  * so the obvious failures never leave the browser.
  */
 export function parseDraft(s: SettingView, draft: string): ParsedDraft {
+  if (s.instructions !== undefined) {
+    // mcp.instructions is prose sent as is: line breaks and indentation are
+    // part of the text, so it is never trimmed. Blank has no meaning of its
+    // own (the server's V60 refuses it): off is the other key, the shipped
+    // wording is reset.
+    if (draft.trim() === '')
+      return { ok: false, error: 'blank text — switch mcp.instructions_enabled off to send nothing, or reset to the shipped wording' }
+    return { ok: true, value: draft }
+  }
   const t = draft.trim()
   if (t === '') {
     // A role list is the one type whose empty value is a value — the empty
@@ -264,4 +273,35 @@ export function crossFieldIssues(effective: (key: string) => unknown): CrossFiel
   }
 
   return issues
+}
+
+/** One line of the mcp.instructions comparison, for the settings field. */
+export interface InstructionsNote {
+  kind: 'state' | 'changed'
+  text: string
+}
+
+/**
+ * The mcp.instructions comparison in words (#315): what is sent, which
+ * wording ctx ships, what the configured text is based on, and — after an
+ * update — that ctx has changed its wording since the custom text was written.
+ */
+export function instructionsNotes(v: McpInstructionsView): InstructionsNote[] {
+  const sending =
+    v.state === 'off' ? 'sends nothing (mcp.instructions_enabled is off)'
+    : v.state === 'shipped' ? `sends the shipped wording #${v.current.id}`
+    : 'sends your own text'
+  let text: string
+  if (!v.custom) text = `the configured text is shipped wording #${v.matches ?? v.current.id}; it follows every update`
+  else if (v.base === undefined) text = 'own text; the shipped wording it was based on is unknown'
+  else text = `own text, based on shipped wording #${v.base.id} (${v.base.since})`
+  const notes: InstructionsNote[] = [
+    { kind: 'state', text: `${sending} · ctx ships #${v.current.id} (${v.current.since}) · ${text}` },
+  ]
+  if (v.changed_since_base && v.base !== undefined)
+    notes.push({
+      kind: 'changed',
+      text: `ctx has changed its shipped wording since your text was written (#${v.base.id} → #${v.current.id}): compare below, then edit your text or reset to the shipped wording`,
+    })
+  return notes
 }

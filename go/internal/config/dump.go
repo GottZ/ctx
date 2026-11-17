@@ -191,6 +191,13 @@ func BootDumpArgs(c *Config, issues []Issue) []any {
 			args = append(args, name, g)
 		}
 	}
+	// #315: what the MCP server tells every connecting agent — sent or not,
+	// and whether it is the shipped wording (and which) or the operator's own.
+	// The state, not the text: no free-text value is part of the boot record.
+	mi := c.MCPInstructions()
+	args = append(args, "mcp_instructions", map[string]any{
+		"state": mi.State, "shipped": mi.Current.ID, "matches": mi.Matches,
+	})
 	args = append(args, "sources", groups["sources"])
 
 	// Issue order is preserved: parse findings (registry order) before

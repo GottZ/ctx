@@ -173,7 +173,7 @@ func TestBootDumpArgsShape(t *testing.T) {
 		}
 		keys = append(keys, s)
 	}
-	want := append(append([]string{}, dumpGroupOrder...), "sources", "issues")
+	want := append(append([]string{}, dumpGroupOrder...), "mcp_instructions", "sources", "issues")
 	if strings.Join(keys, ",") != strings.Join(want, ",") {
 		t.Errorf("arg keys = %v, want %v", keys, want)
 	}
