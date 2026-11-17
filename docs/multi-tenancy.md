@@ -208,7 +208,7 @@ Two consequences, both deliberate:
 - **Grantees with a type of the same name.** A reader of another tenant that may read the scope (a scope grant, a block grant, a key that reads the shared layer) and holds its **own** visible row of the same type name ranks the owner's blocks of that type by full text only: the owner excluded the type, so the blocks carry no vector. A grantee without its own row of the name does not see them at all (an unknown type is invisible), as before.
 - **Lifting overlays on `_global` names.** An overlay that lifts a `_global` exclusion (`checkpoint` and the other shipped excluded types; possible past the narrowing gate, or for a tenant row that predates its `_global` base) keeps the type embeddable for **its own tenant's blocks only**. Before migration 176 such an overlay kept the type embeddable for every tenant, and narrowing a predating row back to `excluded` marked the blocks of every tenant.
 
-A scope without a tenant is decided by `_global` and its own row. A block a tenant writes into a scope it does not own (the shared layer of the default tenant) is decided by the registry of the scope's owner. Assigning a scope to a tenant (or removing it) re-decides the blocks it affects in the background; a grant changes nothing.
+A scope without a tenant is decided by `_global` and its own row. A block a tenant writes into a scope it does not own (the shared layer of the default tenant) is decided by the registry of the scope's owner. Assigning a scope to a tenant (or removing it) re-decides the blocks it affects in the background; a grant changes no answer and queues nothing.
 
 ## Background pipeline isolation
 

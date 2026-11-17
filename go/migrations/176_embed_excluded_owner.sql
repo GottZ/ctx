@@ -64,7 +64,7 @@
 -- WHO QUEUES. The marker is still written only by trg_block_embed_excluded,
 -- now BEFORE INSERT OR UPDATE OF type_name, scope, embed_excluded,
 -- is_archived: an insert, a re-type, a scope move and an unarchive set it
--- from the two-argument rule. Three AFTER triggers queue the groups whose
+-- from the two-argument rule. Two AFTER triggers queue the groups whose
 -- answer may have turned:
 --   * trg_block_types_embed_excluded (context_block_types, replaced): a row
 --     of a tenant or tenantless scope that appears, disappears or is or was
@@ -78,7 +78,7 @@
 --     (name, group) for every name with a row in a scope of the tenants
 --     involved or in the scope itself, for the old and the new group of the
 --     scope.
---   * nothing else: a grant changes no answer.
+--   A grant changes no answer and queues nothing.
 -- The scheduler's reconcile (store.ReconcileEmbedExcluded) reads the answer
 -- of every scope of the entry once; it marks the pending and the stale
 -- blocks of the name in the scopes that answer true (a stale one drops its
