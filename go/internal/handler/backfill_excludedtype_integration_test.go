@@ -148,13 +148,16 @@ func TestBackfillPending_RetrievalExcludedType_Integration(t *testing.T) {
 	t.Logf("backfilled=%d wire_hits=%d still_pending=%v", got, hits.Load(), still)
 
 	// Tenant-Overlay-Arm (design/01 §5.4 / D6 "Overlay gewinnt", gepinnt von
-	// rrf T12): hebt EIN Tenant-Scope checkpoint auf full-pass, hat der Vektor
-	// dieses Typs wieder einen Leser — der Pick muss ihn ab da wieder sehen.
-	// Diskriminierend, weil system-meta unangetastet bleibt und weiter
-	// ausgeschlossen ist (der Filter liest die Policy, nicht eine Typ-Liste).
+	// rrf T12): hebt der Tenant, dem der Scope der Blöcke gehört ('private',
+	// Default-Tenant), checkpoint auf full-pass, hat der Vektor dieses Typs
+	// wieder einen Leser — der Pick muss ihn ab da wieder sehen. Seit
+	// Migration 176 (issue #213) hebt ein Overlay nur für die Blöcke seines
+	// eigenen Tenants. Diskriminierend, weil system-meta unangetastet bleibt
+	// und weiter ausgeschlossen ist (der Filter liest die Policy, nicht eine
+	// Typ-Liste).
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO context_block_types (name, scope, builtin, is_default, config)
-		 VALUES ('checkpoint', 'exclx-tenant', false, false,
+		 VALUES ('checkpoint', 'private', false, false,
 		         '{"v":1,"retrieval":{"policy":"full-pass"}}'::jsonb)`); err != nil {
 		t.Fatalf("insert tenant override: %v", err)
 	}

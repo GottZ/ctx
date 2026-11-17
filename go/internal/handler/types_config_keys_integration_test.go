@@ -167,7 +167,7 @@ func TestTypesWriteConfigKeysReadAlikeInGoAndSQL(t *testing.T) {
 				}
 				var queued int
 				if err := pool.QueryRow(ctx,
-					`SELECT count(*) FROM context_embed_excluded_reconcile WHERE name = $1`, name).Scan(&queued); err != nil {
+					`SELECT count(*) FROM context_embed_excluded_queue WHERE name = $1`, name).Scan(&queued); err != nil {
 					t.Fatal(err)
 				}
 				if queued != 0 {
