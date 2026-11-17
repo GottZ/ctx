@@ -654,6 +654,7 @@ func TestEmbedExcludedOwnerCrash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = hold.Rollback(ctx) }()
 	if _, err := hold.Exec(ctx, `SELECT 1 FROM context_blocks WHERE title = 'cr 1500' FOR UPDATE`); err != nil {
 		t.Fatal(err)
 	}

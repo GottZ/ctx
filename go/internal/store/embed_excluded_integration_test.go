@@ -343,7 +343,12 @@ func TestEmbedExcludedOverlayAndGlobalChange(t *testing.T) {
 				if err := insertOverlay(overlay); err != nil {
 					t.Fatalf("open overlay: %v", err)
 				}
-				if _, err := store.UpdateBlockType(ctx, pool, global.ID, []string{"_global"}, store.BlockTypeUpdate{Config: excl}, nil, "ee-test"); err != nil {
+				// Bounded: a regression that made it wait for the open overlay
+				// must fail the test, not hang it.
+				uctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				_, err := store.UpdateBlockType(uctx, pool, global.ID, []string{"_global"}, store.BlockTypeUpdate{Config: excl}, nil, "ee-test")
+				cancel()
+				if err != nil {
 					t.Fatalf("exclude _global: %v", err)
 				}
 			} else {
