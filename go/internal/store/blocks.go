@@ -2020,9 +2020,13 @@ func SearchBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, q
 // whenever the last page happened to be full. The full-text path is "top
 // matches" and never pages; there `more` is always false and no extra row is
 // read.
-func SearchBlocksPage(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, query string, readScopes []string, category string, tags []string, limit int, compact bool, after *SearchCursor, grantedBlockIDs []string, types []string, typesExclude []string, cluster *string) (rows []BlockPreview, more bool, err error) {
+//
+// tagsAll (#219) is the containment filter beside the overlap of tags: a row
+// carries every one of them. nil/empty = no filter. SearchBlocks has no such
+// argument; its one caller (the chat ctx_search tool) offers no such field.
+func SearchBlocksPage(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, query string, readScopes []string, category string, tags, tagsAll []string, limit int, compact bool, after *SearchCursor, grantedBlockIDs []string, types []string, typesExclude []string, cluster *string) (rows []BlockPreview, more bool, err error) {
 	return searchBlocks(ctx, pool, set, searchParams{
-		Query: query, ReadScopes: readScopes, Category: category, Tags: tags,
+		Query: query, ReadScopes: readScopes, Category: category, Tags: tags, TagsAll: tagsAll,
 		Limit: limit, Compact: compact, After: after, GrantedBlockIDs: grantedBlockIDs,
 		Types: types, TypesExclude: typesExclude, Cluster: cluster, ProbeNext: true,
 	})
@@ -2053,6 +2057,7 @@ type searchParams struct {
 	ReadScopes      []string
 	Category        string
 	Tags            []string
+	TagsAll         []string // #219: rows that carry every one of these tags; empty = no filter
 	Limit           int
 	Compact         bool
 	After           *SearchCursor
@@ -2134,6 +2139,14 @@ func searchBlocksSQL(p searchParams) (string, []any) {
 	if len(tags) > 0 {
 		whereClauses = append(whereClauses, fmt.Sprintf("tags && $%d", argIdx))
 		args = append(args, tags)
+		argIdx++
+	}
+	// tags_all (#219): the block carries EVERY given tag (containment), next
+	// to the overlap above, so the two combine to "all of these, and any of
+	// those". idx_context_tags (GIN, array_ops) serves @> as it serves &&.
+	if len(p.TagsAll) > 0 {
+		whereClauses = append(whereClauses, fmt.Sprintf("tags @> $%d", argIdx))
+		args = append(args, p.TagsAll)
 		argIdx++
 	}
 

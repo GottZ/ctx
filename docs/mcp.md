@@ -184,7 +184,8 @@ Lightweight search without an LLM call. Read-only.
 |---|---|---|---|
 | `query` | string | | search text |
 | `category` | string | | filter by category |
-| `tags` | string[] | | filter by tags |
+| `tags` | string[] | | blocks that carry at least one of these tags |
+| `tags_all` | string[] | | blocks that carry all of these tags; with `tags` both apply (all of these, and at least one of those) |
 | `limit` | integer | | maximum results (default 10, max 50) |
 | `after` | object | | page a listing with an empty `query`: `{}` for the first page, then the `next_after` of the previous answer |
 | `include_content` | boolean | | answer each block's full `content` and `metadata` instead of the preview |

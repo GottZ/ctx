@@ -308,7 +308,7 @@ func saveCmd(getClient func() (*Client, error)) *cobra.Command {
 
 func searchCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
-		Use:     "search [category] [query:text] [tags:a,b] [types:a,b] [cluster:handle] [limit:N] [compact:false]",
+		Use:     "search [category] [query:text] [tags:a,b] [tags_all:a,b] [types:a,b] [cluster:handle] [limit:N] [compact:false]",
 		Aliases: []string{"browse", "b"},
 		Short:   "Compact search (no LLM)",
 		Long: "Search the context store with compact results. Key-value args for filtering.\n\n" +
@@ -317,12 +317,15 @@ func searchCmd(getClient func() (*Client, error)) *cobra.Command {
 			"the ego annotation), never an internal id. The facet is server-gated\n" +
 			"(cluster.facet_enabled); while it is off the argument is ignored, so the\n" +
 			"answer is an ordinary unfiltered search.\n\n" +
+			"tags:<a,b> keeps the blocks that carry at least one of these tags,\n" +
+			"tags_all:<a,b> the blocks that carry all of them; both given, both apply.\n\n" +
 			"types:<a,b> restricts the result to these block types. With the server's\n" +
 			"search.leave_out_never_ranked on, a search with query: and without types:\n" +
 			"leaves out the types query never ranks (checkpoint, system-meta, the\n" +
 			"derived layers); name them here to search them by text.",
 		Example: `  ctx search learnings query:prompt
   ctx search decisions query:guard tags:security limit:5
+  ctx search tags_all:acme,invoice
   ctx search index query:topic-map types:system-meta
   ctx search cluster:019c9629-0000-7000-9000-00000000a001`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -342,6 +345,9 @@ func searchCmd(getClient func() (*Client, error)) *cobra.Command {
 					body["query"] = strings.TrimPrefix(arg, "query:")
 				case strings.HasPrefix(arg, "tags:"):
 					body["tags"] = strings.Split(strings.TrimPrefix(arg, "tags:"), ",")
+				case strings.HasPrefix(arg, "tags_all:"):
+					// #219: containment, POST /api/search's tags_all.
+					body["tags_all"] = strings.Split(strings.TrimPrefix(arg, "tags_all:"), ",")
 				case strings.HasPrefix(arg, "types:"):
 					body["types"] = strings.Split(strings.TrimPrefix(arg, "types:"), ",")
 				case strings.HasPrefix(arg, "cluster:"):

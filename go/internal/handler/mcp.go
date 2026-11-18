@@ -199,8 +199,12 @@ type storeInput struct {
 type searchInput struct {
 	Query    string   `json:"query,omitempty" jsonschema:"search text"`
 	Category string   `json:"category,omitempty" jsonschema:"filter by category"`
-	Tags     []string `json:"tags,omitempty" jsonschema:"filter by tags"`
-	Limit    int      `json:"limit,omitempty" jsonschema:"max results (default 10, max 50)"`
+	Tags     []string `json:"tags,omitempty" jsonschema:"filter by tags: blocks that carry at least one of these tags"`
+	// TagsAll (#219) is POST /api/search's field of the same name, through the
+	// same core: containment beside the overlap of `tags`. Absent ⇒ the call
+	// binds exactly what it bound before the field existed.
+	TagsAll []string `json:"tags_all,omitempty" jsonschema:"only blocks that carry all of these tags; combines with tags (all of these, and at least one of those)"`
+	Limit   int      `json:"limit,omitempty" jsonschema:"max results (default 10, max 50)"`
 	// After and IncludeContent (#206, #207) are POST /api/search's keyset
 	// cursor and the inverse of its `compact`, through the same core. Either one
 	// present switches the answer to the page object (mcp_search_page.go); a
@@ -249,6 +253,7 @@ func (input searchInput) coreArgs(facetEnabled, leaveOutNeverRanked bool) search
 		Category:          input.Category,
 		Cluster:           input.Cluster,
 		Tags:              input.Tags,
+		TagsAll:           input.TagsAll,
 		Types:             input.Types,
 		TypesExclude:      input.TypesExclude,
 		BlockRolesExclude: input.BlockRolesExclude,
