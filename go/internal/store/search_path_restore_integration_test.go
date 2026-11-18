@@ -20,10 +20,12 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -341,6 +343,14 @@ func TestDataOnlyRestoreWithTriggersOn(t *testing.T) {
 	if _, err := store.DeleteBlock(ctx, src, archived, []string{"rs-351"}); err != nil {
 		t.Fatalf("archive: %v", err)
 	}
+	// Two LLM calls through the log writer: the rollup trigger of
+	// context_llm_log fills context_llm_usage_hourly.
+	for i := 0; i < 2; i++ {
+		llmlog.Record(src, llmlog.Entry{Pipeline: "query", Model: "m-351", Host: "h", Duration: time.Second, PromptTokens: 10, CompletionTokens: 5})
+	}
+	if err := llmlog.Settle(ctx, src); err != nil {
+		t.Fatalf("settle llm log: %v", err)
+	}
 	if _, err := store.FoldBlockCountDeltas(ctx, src); err != nil {
 		t.Fatalf("fold source deltas: %v", err)
 	}
@@ -402,6 +412,9 @@ func TestDataOnlyRestoreWithTriggersOn(t *testing.T) {
 	} else {
 		t.Logf("embed_excluded reconcile: %+v", res)
 	}
+	srcUsage := countsBy(t, src, `SELECT model, sum(calls)::bigint FROM context_llm_usage_hourly GROUP BY 1`)
+	dstUsage := countsBy(t, dst, `SELECT model, sum(calls)::bigint FROM context_llm_usage_hourly GROUP BY 1`)
+	t.Logf("context_llm_usage_hourly calls by model: source %v, after restore %v", srcUsage, dstUsage)
 	var srcAudit, dstAudit int
 	_ = src.QueryRow(ctx, `SELECT count(*) FROM context_settings_audit`).Scan(&srcAudit)
 	_ = dst.QueryRow(ctx, `SELECT count(*) FROM context_settings_audit`).Scan(&dstAudit)
@@ -453,5 +466,51 @@ func TestDataOnlyRestoreWithTriggersOn(t *testing.T) {
 	}
 	if counters := countsBy(t, dst, blockCountCounterSQL); fmt.Sprint(counters) != fmt.Sprint(truth) {
 		t.Errorf("counters after reconcile %v, real counts %v", counters, truth)
+	}
+}
+
+// TestMigration179WaitsForNoWriter: migration 179 changes function settings
+// only and takes no lock on a table. A writer that holds an uncommitted
+// insert of context_blocks, run through the triggers it pins, does not hold
+// the migration up, and its next statement in the same transaction runs the
+// pinned functions.
+func TestMigration179WaitsForNoWriter(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.SetupTestDBUpTo(t, 178)
+	writer, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin writer: %v", err)
+	}
+	defer func() { _ = writer.Rollback(ctx) }()
+	insert := `INSERT INTO context_blocks (category, title, content, scope, type_name) VALUES ('w', $1, 'held by an open writer', 'w-179', 'checkpoint')`
+	if _, err := writer.Exec(ctx, insert, "first"); err != nil {
+		t.Fatalf("writer insert: %v", err)
+	}
+	migCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	t0 := time.Now()
+	if err := store.RunMigrations(migCtx, pool); err != nil {
+		t.Fatalf("migration 179 next to an open writer: %v", err)
+	}
+	took := time.Since(t0)
+	if took > 2*time.Second {
+		t.Fatalf("migration 179 took %v next to an open writer; it waits for none", took)
+	}
+	t.Logf("migration 179 next to an open writer: %v", took)
+	if _, err := writer.Exec(ctx, `SELECT pg_catalog.set_config('search_path', '', true)`); err != nil {
+		t.Fatalf("writer empty search_path: %v", err)
+	}
+	if _, err := writer.Exec(ctx, `INSERT INTO public.context_blocks (category, title, content, scope, type_name) VALUES ('w', 'second', 'after the migration', 'w-179', 'checkpoint')`); err != nil {
+		t.Fatalf("writer insert after the migration under an empty search_path: %v", err)
+	}
+	if err := writer.Commit(ctx); err != nil {
+		t.Fatalf("writer commit: %v", err)
+	}
+	var excluded int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_blocks WHERE scope = 'w-179' AND embed_excluded`).Scan(&excluded); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if excluded != 2 {
+		t.Fatalf("%d of the writer's two checkpoint blocks marked embed_excluded, want 2", excluded)
 	}
 }
