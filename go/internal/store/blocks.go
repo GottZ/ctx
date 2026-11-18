@@ -358,9 +358,7 @@ type GuardStats struct {
 	Unchecked       int        `json:"unchecked"`
 	ArchivedDups    int        `json:"archived_dups"`
 	WriteLogEntries int        `json:"write_log_entries"`
-	DirtySince      *time.Time `json:"dirty_since"`
 	LastGuardAt     *time.Time `json:"last_guard_at"`
-	PendingCount    int        `json:"pending_count"`
 }
 
 // ClampLimit constrains a limit value between defaultVal (when <= 0) and maxVal.
@@ -2667,7 +2665,9 @@ func GuardList(ctx context.Context, pool *pgxpool.Pool, readScopes []string, cat
 // the block counters (blockCountRowsSQL, migration 170) with the predicates the per-call counts
 // had: every live number is NOT is_archived, archived_dups counts
 // guard_status = 'archived_dup' archived or not, unchecked is guard_status IS
-// NULL.
+// NULL. The blocks the guard still has to check (pending_count, dirty_since
+// of manage guard-stats) are counted by guard.PendingStats since migration
+// 181 (issue #341); context_guard_state is read for last_guard_at only.
 const guardStatsSQL = `SELECT
 			COALESCE(sum(c.n) FILTER (WHERE NOT c.is_archived), 0)::int,
 			COALESCE(sum(c.n) FILTER (WHERE NOT c.is_archived AND c.guard_status = 'active'), 0)::int,
@@ -2677,9 +2677,7 @@ const guardStatsSQL = `SELECT
 			COALESCE(sum(c.n) FILTER (WHERE NOT c.is_archived AND c.guard_status IS NULL), 0)::int,
 			COALESCE(sum(c.n) FILTER (WHERE c.guard_status = 'archived_dup'), 0)::int,
 			COALESCE((SELECT count(*)::int FROM context_write_log), 0),
-			(SELECT dirty_since FROM context_guard_state WHERE id = true),
-			(SELECT last_guard_at FROM context_guard_state WHERE id = true),
-			COALESCE((SELECT pending_count FROM context_guard_state WHERE id = true), 0)
+			(SELECT last_guard_at FROM context_guard_state WHERE id = true)
 		 FROM ` + blockCountRowsSQL + ` c
 		 WHERE c.scope = ANY($1::text[])`
 
@@ -2692,7 +2690,7 @@ func GetGuardStats(ctx context.Context, pool *pgxpool.Pool, readScopes []string)
 	err := pool.QueryRow(ctx, guardStatsSQL, readScopes).Scan(
 		&gs.TotalBlocks, &gs.Active, &gs.Clean, &gs.NeedsReview, &gs.NearDuplicate,
 		&gs.Unchecked, &gs.ArchivedDups, &gs.WriteLogEntries,
-		&gs.DirtySince, &gs.LastGuardAt, &gs.PendingCount,
+		&gs.LastGuardAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: guard stats: %w", err)

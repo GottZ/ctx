@@ -256,8 +256,9 @@ func TestTriggerFunctionsResolveUnderAnEmptySearchPath(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
 	checked, bad := unresolvedFunctions(t, pool)
-	if checked < 39 {
-		t.Fatalf("the catalog query found %d expression functions; the schema at 179 has 39 — the query no longer sees them", checked)
+	// 39 at 179; migration 181 dropped mark_guard_dirty() (issue #341).
+	if checked < 38 {
+		t.Fatalf("the catalog query found %d expression functions; the schema at 181 has 38 — the query no longer sees them", checked)
 	}
 	if len(bad) > 0 {
 		t.Fatalf("%d of %d functions called on a row write do not resolve under an empty search_path (pg_restore, pg_dump's COPY):\n  %s",
@@ -330,9 +331,11 @@ func TestTriggerFunctionsResolveUnderAnEmptySearchPath(t *testing.T) {
 
 // TestPinnedFunctionsKeepTheirOtherSettings: migration 179 adds search_path
 // to functions that already carry settings; mark_guard_dirty keeps the two of
-// migration 177 (issue #337).
+// migration 177 (issue #337). It runs on schema 180, the last one with
+// mark_guard_dirty (migration 181 drops it, issue #341); the jit setting of
+// 180 adds nothing to this function.
 func TestPinnedFunctionsKeepTheirOtherSettings(t *testing.T) {
-	pool := testdb.SetupTestDB(t)
+	pool := testdb.SetupTestDBUpTo(t, 180)
 	var cfg []string
 	if err := pool.QueryRow(context.Background(),
 		`SELECT coalesce(proconfig, '{}') FROM pg_proc WHERE oid = 'mark_guard_dirty()'::regprocedure`).Scan(&cfg); err != nil {
@@ -561,7 +564,10 @@ func TestMigration179WaitsForNoWriter(t *testing.T) {
 	migCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	t0 := time.Now()
-	if err := store.RunMigrations(migCtx, pool); err != nil {
+	// Up to 179 only: migration 181 drops two triggers of context_blocks and
+	// waits for every open writer by design (ACCESS EXCLUSIVE, lock_timeout
+	// 3 s, issue #341).
+	if err := store.RunMigrationsUpTo(migCtx, pool, 179); err != nil {
 		t.Fatalf("migration 179 next to an open writer: %v", err)
 	}
 	took := time.Since(t0)

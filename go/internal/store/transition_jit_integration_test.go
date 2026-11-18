@@ -85,7 +85,10 @@ func TestTransitionTableFunctionsRunWithoutJit(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
 	readers, bad := transitionFunctionsWithJit(t, pool)
-	want := "context_block_counts_del() context_block_counts_ins() context_block_counts_upd() mark_guard_dirty() notify_project_delete()"
+	// mark_guard_dirty() (177, jit = off since then) left the class with
+	// migration 181 (issue #341); TestMigration181_DropsTheCounterKeepsTheTable
+	// pins its settings on the way back.
+	want := "context_block_counts_del() context_block_counts_ins() context_block_counts_upd() notify_project_delete()"
 	if got := strings.Join(readers, " "); got != want {
 		t.Fatalf("functions that read a transition table: %s, want %s — a new function of the class belongs in this list (with jit = off); one missing means the catalog query no longer sees it", got, want)
 	}
@@ -102,7 +105,6 @@ func TestTransitionTableFunctionsRunWithoutJit(t *testing.T) {
 		"context_block_counts_upd()": {"jit=off", pinned},
 		"context_block_counts_del()": {"jit=off", pinned},
 		"notify_project_delete()":    {"jit=off"},
-		"mark_guard_dirty()":         {"enable_nestloop=off", "jit=off", pinned},
 	} {
 		var cfg []string
 		if err := pool.QueryRow(ctx, `SELECT coalesce(proconfig, '{}') FROM pg_proc WHERE oid = $1::regprocedure`, sig).Scan(&cfg); err != nil {

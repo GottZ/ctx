@@ -116,7 +116,7 @@ func TestT7ExplainGuardPendingIndex(t *testing.T) {
 		return plan
 	}
 
-	// THE three production queries, built from the ACTUAL shared fragment.
+	// THE two production queries (pick, PendingStats), built from the ACTUAL shared fragment.
 	// Pick (without FOR UPDATE — EXPLAIN ANALYZE would lock/skip rows; the
 	// LockRows node sits above the scan and does not change index choice).
 	explain("guard-pick",
@@ -124,8 +124,7 @@ func TestT7ExplainGuardPendingIndex(t *testing.T) {
 		WHERE `+guardPendingWhere("$1")+`
 		ORDER BY created_at ASC
 		LIMIT $2`, types, 100)
-	explain("state-count",
-		`SELECT count(*) FROM context_blocks WHERE `+guardPendingWhere("$1"), types)
-	explain("state-count-int",
-		`SELECT count(*)::int FROM context_blocks WHERE `+guardPendingWhere("$1"), types)
+	// The two state-row counts of the batch are gone since migration 181
+	// (issue #341); manage guard-stats counts with PendingStats' statement.
+	explain("pending-stats", pendingStatsSQL, []string{"private"}, types)
 }

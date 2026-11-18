@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 180,
-    "migration_count": 68,
+    "migration_max": 181,
+    "migration_count": 69,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -6120,9 +6120,6 @@
     "llm_usage_rollup_ins()": {
       "src_hash": "859c5635cd38bd48d2ce7a6f30544f8099d56f5b18a1963d8f0580f78d8346e2"
     },
-    "mark_guard_dirty()": {
-      "src_hash": "33035a03a9becbe523a8b80e403e5c64af6e2cf6f0feca24d5558cf10b536295"
-    },
     "model_aliases_identity_immutable()": {
       "src_hash": "8b5b629e854c0b2936a90223162c3d33ed3766b425f1dda5931dbbeec0197058"
     },
@@ -6214,12 +6211,6 @@
     },
     "context_blocks.trg_block_write": {
       "def_hash": "87078ebbfc30decd6abebdaca03f3e478ff1b880615144428d477ebd60ac0508"
-    },
-    "context_blocks.trg_guard_dirty": {
-      "def_hash": "0c2ce0ad0067a5328825908635d24df3ad88010c6199c74b4f6891cf6584cc28"
-    },
-    "context_blocks.trg_guard_dirty_upd": {
-      "def_hash": "b4c600730ba11f452d67bee97687d350a5e4e673d9c55acb436137f168f40a23"
     },
     "context_blocks.trg_project_delete": {
       "def_hash": "39771d9e83571827dc6765024f18ede97903d84b2308a198e79c5427f5c62d26"
