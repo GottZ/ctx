@@ -712,24 +712,21 @@ func printPathList(heading string, list []ingestError) {
 	}
 }
 
-// filePayloads builds the upload payloads of one file's chunks.
+// filePayloads builds the upload payloads of one file's chunks. The file's
+// links and dates go into the metadata of its first chunk only (noteList).
 func filePayloads(relPath, cat string, parsed *ingest.ParseResult, chunks []ingest.ChunkResult) []ingestChunkPayload {
 	tags := parsed.Tags
 	if tags == nil {
 		tags = []string{}
 	}
 	payloads := make([]ingestChunkPayload, 0, len(chunks))
-	for _, ch := range chunks {
+	for i, ch := range chunks {
 		meta := map[string]any{
 			"source":     "obsidian",
 			"vault_path": relPath,
 		}
-		if len(parsed.Links) > 0 {
-			meta["links"] = parsed.Links
-		}
-		if len(parsed.Dates) > 0 {
-			meta["dates"] = parsed.Dates
-		}
+		noteList(meta, "links", parsed.Links, i == 0)
+		noteList(meta, "dates", parsed.Dates, i == 0)
 		p := ingestChunkPayload{
 			Category:   cat,
 			Title:      ch.Title,
@@ -742,6 +739,27 @@ func filePayloads(relPath, cat string, parsed *ingest.ParseResult, chunks []inge
 		payloads = append(payloads, p)
 	}
 	return payloads
+}
+
+// noteList puts a list that belongs to the whole note (its links, its dates)
+// into the metadata of one of its chunks under key: the list on the note's
+// first chunk, JSON null on every other chunk, nothing on any chunk when the
+// note has no such list (#329). Before, every chunk carried the list, and a
+// note with thousands of links repeated them with every chunk, in the request
+// and in every stored block. The other chunks name the key with null, not
+// leave it out, because the server merges the metadata of a chunk whose
+// content is unchanged into the stored block (store.UpsertBlock): a missing
+// key would keep the list such a block stored before, also on a chunk that
+// has stopped being the first. A reader finds the note's lists on the chunk of
+// its vault_path whose key holds an array (docs/cli.md).
+func noteList(meta map[string]any, key string, list []string, first bool) {
+	switch {
+	case len(list) == 0:
+	case first:
+		meta[key] = list
+	default:
+		meta[key] = nil
+	}
 }
 
 // ingestRequest is the body of POST /api/ingest for one batch.
@@ -797,8 +815,9 @@ func encodedLen(p ingestChunkPayload) int {
 // the handler's own predicate, derived.IsReservedCategory. A chunk whose
 // request alone, overhead bytes plus the chunk (requestOverhead), passes the
 // server's body limit cannot be sent in any batch, and is held back too: every
-// chunk carries the file's links, dates and tags, so a file with very many
-// links can make one chunk of short content a request of several MB.
+// chunk carries the file's tags and the first its links and dates, so a file
+// with very many links can make one chunk of short content a request of
+// several MB.
 func limitBreach(payloads []ingestChunkPayload, overhead int) string {
 	for _, p := range payloads {
 		cat, title, content := wireLen(p.Category), wireLen(p.Title), wireLen(p.Content)
