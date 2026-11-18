@@ -137,7 +137,7 @@ load() { uptime | sed 's/.*load average: *//'; }
 # "Integration packages side by side"); CTX_GATES_* overrides each of them.
 ROOM_MEM_MEASURED_MB="${CTX_GATES_SLOT_MEM_MB:-3072}"            # container memory.peak 2443 MB (largest, page cache included) + 508 MB go/build/test binary
 ROOM_MEM_OTHER_MB="${CTX_GATES_SLOT_MEM_UNMEASURED_MB:-5120}"    # a package without a measurement: × 1.6, the spread of the measured container peaks
-ROOM_MEM_RESERVE_MB="${CTX_GATES_MEM_RESERVE_MB:-16384}"         # MemAvailable never planned: twice the foreign swing measured during one package (7.6 GB)
+ROOM_MEM_RESERVE_MB="${CTX_GATES_MEM_RESERVE_MB:-8192}"          # MemAvailable never planned: the foreign swing measured during one package (7.6 GB); a slot budget is already 3x what a container holds outside the page cache
 ROOM_DISK_GB="${CTX_GATES_SLOT_DISK_GB:-3}"                      # writable layer of a container at most 2650 MB (pg_wal stays at max_wal_size)
 ROOM_DISK_RESERVE_GB="${CTX_GATES_DISK_RESERVE_GB:-120}"         # free space on the Docker file system never planned
 ROOM_CPU="${CTX_GATES_SLOT_CPU:-2}"                              # cores per slot: a test container computes p50 1.0, p99 2.0 cores

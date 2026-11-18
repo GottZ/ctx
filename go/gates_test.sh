@@ -57,7 +57,7 @@ reject() {
 same() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "want: $3" "got:  $2"; fi; }
 
 H=./internal/handler/; E=./internal/events/; S=./internal/store/
-R=16384 # the memory reserve, MB
+R=8192 # the memory reserve, MB
 
 echo "== starting values"
 same "slot memory of a measured package (MB)" "$(room_mem_need "$H")" 3072
@@ -120,9 +120,9 @@ ls_start=$(proc_start "$SLEEPER")
 now=$(date +%s)
 printf '%s %s 6144 6 2 %s ./internal/handler/ /other/run\n' "$SLEEPER" "$ls_start" "$now" > "$L/slot-1-1"
 same "a live foreign slot counts with its whole budget" "$(ledger_sum 0)" "1 6144 6 2.00"
-out=$(room_plan 25000 300 1.00 12 6144 6 2.00 "$H" "$E" "$S")
+out=$(room_plan 16808 300 1.00 12 6144 6 2.00 "$H" "$E" "$S")
 expect "foreign reservation decides: 0 instead of 2 slots" "$out" "plan: 0 of 3 packages at once now" "bound=mem" "- 6144 reserved"
-out=$(room_plan 25000 300 1.00 12 0 0 0 "$H" "$E" "$S")
+out=$(room_plan 16808 300 1.00 12 0 0 0 "$H" "$E" "$S")
 expect "the same host without it: 2 slots" "$out" "plan: 2 of 3 packages at once now"
 out=$(room_plan 40000 300 6.50 12 0 0 2.00 "$H" "$E" "$S")
 expect "a young foreign slot's CPU counts too: 1 instead of 2" "$out" "plan: 1 of 3 packages at once now" "bound=cpu"

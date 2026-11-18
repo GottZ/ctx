@@ -286,7 +286,7 @@ room for it, **measured right before that start**, not once per run:
 | `CTX_GATES_SERIAL` | `0` | `1` runs one package at a time; the room check before each start stays |
 | `CTX_GATES_SLOT_MEM_MB` | `3072` | memory per slot of a measured package (`internal/handler`, `internal/events`, `internal/store`) |
 | `CTX_GATES_SLOT_MEM_UNMEASURED_MB` | `5120` | memory per slot of any other package |
-| `CTX_GATES_MEM_RESERVE_MB` | `16384` | `MemAvailable` never planned |
+| `CTX_GATES_MEM_RESERVE_MB` | `8192` | `MemAvailable` never planned |
 | `CTX_GATES_SLOT_DISK_GB` | `3` | disk per slot |
 | `CTX_GATES_DISK_RESERVE_GB` | `120` | free disk on the Docker file system never planned |
 | `CTX_GATES_SLOT_CPU` | `2` | cores per slot |
@@ -305,7 +305,11 @@ measured peaks on top (× 1.6): 5 GB. The writable layer reached 2650 MB at most
 (`pg_wal` stays at `max_wal_size`, 1 GB): 3 GB. A test container computes 1.0
 cores at the median and 2.0 at p99 (`max_parallel_workers=2`): 2 cores per slot,
 hence `floor((cores − load1) / 2)`. During one package `MemAvailable` swung by
-7.6 GB from foreign load alone; the 16 GB reserve covers twice that. Three
+7.6 GB from foreign load alone; the 8 GB reserve covers that swing once — a
+slot budget is itself about three times what a container holds outside the page
+cache (0.95 GB of 3 GB), and with a reserve of twice the swing a host with
+18–20 GB available started no unmeasured package at all (observed while this
+was built: the step waited out its deadline and ended with exit 6). Three
 packages at once lowered `MemAvailable` by 4.4 GB and slowed the short tests by
 1–13 %.
 
