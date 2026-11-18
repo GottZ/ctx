@@ -123,7 +123,11 @@ def _client(config: dict[str, Any]) -> CtxClient | None:
 
 
 def _types_exclude(args, config: dict[str, Any]) -> list[str]:
-    return [] if getattr(args, "all_types", False) else list(config.get("prefetch_types_exclude") or [])
+    """``prefetch_types_exclude``, or nothing with ``--all-types`` or with ``--type`` (named types are
+    what the caller asked for)."""
+    if getattr(args, "all_types", False) or getattr(args, "type", None):
+        return []
+    return list(config.get("prefetch_types_exclude") or [])
 
 
 def _parse_memory_file(path: Path) -> list[str]:
@@ -282,6 +286,7 @@ def cmd_search(args, home: Path, config: dict[str, Any]) -> int:
         args.text,
         category=args.category or None,
         tags=args.tag or None,
+        types=getattr(args, "type", None) or None,
         types_exclude=_types_exclude(args, config) or None,
     )
     if not resp.get("success"):
@@ -365,6 +370,11 @@ def register_cli(subparser) -> None:
     p_search.add_argument("--category", help="Category filter")
     p_search.add_argument("--tag", action="append", help="Tag filter, any-of (repeatable)")
     p_search.add_argument("--all-types", action="store_true", help="Ignore prefetch_types_exclude (e.g. checkpoints)")
+    p_search.add_argument(
+        "--type",
+        action="append",
+        help="Only blocks of this type, e.g. checkpoint (repeatable; prefetch_types_exclude does not apply)",
+    )
     p_search.set_defaults(func=ctx_command)
 
     p_get = subs.add_parser("get", help="Fetch a full block by id")

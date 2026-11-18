@@ -176,17 +176,20 @@ func TestMCPTypeFilterQueryByteIdenticalWithoutFields(t *testing.T) {
 	}
 }
 
-// TestMCPTypeFilterRejections covers the two rejecting negative probes on BOTH
-// retrieval tools:
+// TestMCPTypeFilterRejections covers the rejecting negative probes:
 //
-//	(a) an unknown type name is a caller error, not an empty result — a typo
-//	    must not read as "nothing matched";
-//	(b) a name that EXISTS but is not retrieval-visible (checkpoint) is refused
-//	    too. Admitting it would widen retrieval visibility for every key without
-//	    an admin gate; dropping it silently would let the caller believe the
-//	    filter applied. There is no admin bypass on this path.
+//	(a) an unknown type name is a caller error on BOTH retrieval tools, not an
+//	    empty result — a typo must not read as "nothing matched";
+//	(b) on the query tool, a name that EXISTS but is not retrieval-visible
+//	    (checkpoint) is refused too. Admitting it would widen retrieval
+//	    visibility for every key without an admin gate; dropping it silently
+//	    would let the caller believe the filter applied. There is no admin
+//	    bypass on this path. The search tool admits such a name since #342 — it
+//	    answers those rows without a filter anyway
+//	    (TestMCPSearchTypesNameNeverRankedTypes_Integration) — and is therefore
+//	    not probed for (b) here.
 //
-// RED before this wave: both arguments are dropped by the decoder, the tools
+// RED before V-W6: both arguments are dropped by the decoder, the tools
 // answer a normal (unfiltered) result and IsError stays false.
 func TestMCPTypeFilterRejections(t *testing.T) {
 	cfg := MCPConfig{Blocktypes: blocktype.NewRegistry(), QueryHandler: &recordingQueryDelegate{}}
@@ -208,6 +211,9 @@ func TestMCPTypeFilterRejections(t *testing.T) {
 
 	for tool, call := range tools {
 		for probe, arg := range probes {
+			if tool == "search" && probe == "invisible_but_existing" {
+				continue // admitted since #342, see above
+			}
 			t.Run(tool+"/"+probe, func(t *testing.T) {
 				raw := `{"question":"frage","query":"frage",` + arg + `}`
 				res, err := call(typeFilterCtx(), raw)

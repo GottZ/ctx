@@ -1,8 +1,10 @@
 //go:build integration
 
 // V-W6 result-set gate (design/05 §7): the MCP `search` tool's `types` argument
-// must CUT the answer down to the requested visible types — and the cut has to
-// come from the visible allowlist, not from a bare registry-existence check.
+// must CUT the answer down to the requested types. Since #342 the names are
+// checked against the registry snapshot, not the visible allowlist: a
+// retrieval-excluded type is a filter like any other
+// (mcp_search_types_neverranked_integration_test.go), an unknown name a refusal.
 //
 // Like the short probes, every argument object is decoded from JSON rather than
 // written as a Go struct literal: before this wave the key was unknown and the
@@ -178,10 +180,10 @@ func TestMCPTypeFilterSearchCutsToRequestedVisibleTypes_Integration(t *testing.T
 	})
 }
 
-// TestMCPTypeFilterSearchRejectsInvisibleAndUnknown covers negative probes (a)
-// and (b) at the RESULT level: neither answers rows, and neither answers an
-// empty list — both are refusals.
-func TestMCPTypeFilterSearchRejectsInvisibleAndUnknown_Integration(t *testing.T) {
+// TestMCPTypeFilterSearchRejectsUnknown covers negative probe (a) at the
+// RESULT level: an unknown name answers neither rows nor an empty list, it is a
+// refusal. Probe (b), a retrieval-excluded name, is admitted since #342.
+func TestMCPTypeFilterSearchRejectsUnknown_Integration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
@@ -190,8 +192,7 @@ func TestMCPTypeFilterSearchRejectsInvisibleAndUnknown_Integration(t *testing.T)
 	cfg := vw6Cfg(t, pool)
 
 	for name, raw := range map[string]string{
-		"unknown_name":           `{"category":"` + vw6Category + `","types":["nicht-existent"]}`,
-		"existing_but_invisible": `{"category":"` + vw6Category + `","types":["checkpoint"]}`,
+		"unknown_name": `{"category":"` + vw6Category + `","types":["nicht-existent"]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			var in searchInput
@@ -207,69 +208,4 @@ func TestMCPTypeFilterSearchRejectsInvisibleAndUnknown_Integration(t *testing.T)
 			}
 		})
 	}
-}
-
-// existenceOnlyCut is the WRONG implementation the gate has to be able to tell
-// apart: it checks only that every requested name is REGISTERED and passes the
-// list straight through — the shape recentInput's raw `type_name = ANY($n)`
-// predicate has today.
-func existenceOnlyCut(set *blocktype.Set, requested []string) ([]string, bool) {
-	for _, n := range requested {
-		if _, ok := set.Resolve(n); !ok {
-			return nil, false
-		}
-	}
-	return requested, true
-}
-
-// TestMCPTypeFilterSearchGateSelfProbe is negative probe (c): the same fixture,
-// the same store call, the two candidate implementations side by side. The
-// existence-only variant accepts `checkpoint` and RETURNS checkpoint rows —
-// i.e. it would widen retrieval visibility for every key. The gate above is red
-// against it, which is what makes the gate a real gate rather than a
-// restatement of the implementation.
-func TestMCPTypeFilterSearchGateSelfProbe_Integration(t *testing.T) {
-	if testing.Short() {
-		t.Skip("integration test")
-	}
-	pool := testdb.SetupTestDB(t)
-	seedVW6Fixture(t, pool)
-	cfg := vw6Cfg(t, pool)
-	ctx := vw6Ctx()
-	set := cfg.Blocktypes.SnapshotForRequest(ctx)
-
-	// Variant 1 — existence only.
-	cut, ok := existenceOnlyCut(set, []string{"checkpoint"})
-	if !ok {
-		t.Fatalf("existence-only variant rejected checkpoint — the fixture premise is wrong")
-	}
-	rows, err := store.SearchBlocks(ctx, pool, nil, "", []string{"private"}, vw6Category, nil, 10, true,
-		nil, nil, cut, nil, nil)
-	if err != nil {
-		t.Fatalf("existence-only search: %v", err)
-	}
-	naive := 0
-	for _, r := range rows {
-		if r.TypeName == "checkpoint" {
-			naive++
-		}
-	}
-	if naive == 0 {
-		t.Fatalf("existence-only variant returned no checkpoint row — it would not have been distinguishable")
-	}
-
-	// Variant 2 — the shipped handler, same fixture, same argument.
-	var in searchInput
-	if err := json.Unmarshal([]byte(`{"category":"`+vw6Category+`","types":["checkpoint"]}`), &in); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	res, _, err := mcpSearchHandler(cfg)(ctx, nil, in)
-	if err != nil {
-		t.Fatalf("transport error: %v", err)
-	}
-	if !res.IsError {
-		t.Fatalf("shipped handler behaves like the existence-only variant: %s", mcpTextOf(res))
-	}
-	t.Logf("existence-only variant returned %d checkpoint row(s); shipped handler refuses: %s",
-		naive, mcpTextOf(res))
 }

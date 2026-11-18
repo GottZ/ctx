@@ -70,15 +70,16 @@ type searchArgs struct {
 	Limit             int
 	Compact           bool
 	After             *store.SearchCursor
-	// VisibleTypesOnly is the MCP-only strictness of `types` (V-W6,
-	// mcp.go:111-129): on the tool surface a type name CUTS against the
-	// caller's retrieval-visible set and an unknown or non-visible name is a
-	// refusal, while on the REST browse route the same name is a pure opt-in
-	// bind parameter and retrieval-excluded types stay browseable (D5). That is
-	// a documented asymmetry, not a bug, so it is carried as a field rather
-	// than levelled — levelling it would either widen the model's retrieval
-	// surface or take browseability away from the operator.
-	VisibleTypesOnly bool
+	// KnownTypesOnly is the MCP-only strictness of `types` (V-W6, #342,
+	// mcp.go searchInput.Types): on the tool surface every name has to be a
+	// type of the caller's registry snapshot and an unknown name is a refusal,
+	// while on the REST browse route the same name is a pure opt-in bind
+	// parameter that an unknown name simply leaves without rows. Both admit
+	// the retrieval-excluded types (D5: they stay browseable). Until #342 the
+	// tool also refused those, cutting against the retrieval-visible set. That
+	// is a documented asymmetry, not a bug, so it is carried as a field rather
+	// than levelled.
+	KnownTypesOnly bool
 	// FacetEnabled is the cluster.facet_enabled flag AS A VALUE, taken by the
 	// transport from the ONE config snapshot it already holds for the request
 	// (context_search.go: "ONE config snapshot per request: the rate limit and
@@ -218,12 +219,12 @@ func clusterFacetOf(enabled bool, cluster string) *string {
 // keep printing "search failed: %v" byte-for-byte.
 func executeSearch(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, ar *auth.AuthResult, a searchArgs) (searchPage, error) {
 	types := a.Types
-	if a.VisibleTypesOnly {
-		cut, rejection := resolveMCPVisibleTypes(set, a.Types)
+	if a.KnownTypesOnly {
+		known, rejection := resolveMCPKnownTypes(set, a.Types)
 		if rejection != "" {
 			return searchPage{}, &searchRejected{msg: rejection}
 		}
-		types = cut
+		types = known
 	}
 
 	facet := clusterFacetOf(a.FacetEnabled, a.Cluster)

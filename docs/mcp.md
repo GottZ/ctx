@@ -189,12 +189,32 @@ Lightweight search without an LLM call. Read-only.
 | `after` | object | | page a listing with an empty `query`: `{}` for the first page, then the `next_after` of the previous answer |
 | `include_content` | boolean | | answer each block's full `content` and `metadata` instead of the preview |
 | `cluster` | string | | restrict to one topic by its stable handle (from the graph surfaces) |
-| `types` | string[] | | restrict to these block types; each must be retrieval-visible, otherwise an error |
+| `types` | string[] | | restrict to these block types: any registered type, `checkpoint` and `system-meta` included; an unknown name is an error |
 | `types_exclude` | string[] | | exclude these block types |
 | `block_roles_exclude` | string[] | | legacy alias of `types_exclude`; both given ⇒ union |
 
-Unlike `POST /api/search`, `types` here cuts against the retrieval-visible set: types
-that retrieval policy keeps out cannot be named. **Answer:** a JSON array of compact
+`types` takes every type of the key's registry, including the types that `query` never
+ranks (`checkpoint`, `system-meta`): the tool returns their blocks without a type filter,
+so naming one narrows the answer to them. A client that looks for its checkpoint blocks
+(a checkpoint head, a passage of a saved transcript) names `checkpoint`. Unlike
+`POST /api/search`, where an unknown name matches nothing, an unknown name is an error
+here; a type that another tenant registered for itself is unknown. Older ctx servers
+refuse a retrieval-excluded name in one of two ways: from v5.8.0 with the error
+`block type "<name>" is not retrieval-visible` (the `query` tool still answers that), and
+before v5.8.0, which has no `types` on this tool, with a schema error that names `types`
+as an unexpected additional property. A client that has to work with both sends `types`
+and, on exactly one of these two errors, the same search without it, narrowed to the rows
+of the asked types — as the Hermes plugins `ctx_checkpoint` (0.16.0) and `ctx_handover`
+(0.1.2) do for their checkpoint searches. `unknown block type` is not such an error: the
+name is wrong, and a search without `types` would not answer the question. The retry is
+best effort. The search without `types` ranks every type, so its limit can be filled with
+rows of other types while matching rows of the asked type fall behind it, and a full-text
+search has no next page: the narrowed answer can miss rows, or be empty, where the typed
+search would find them. Narrow the query, or page an empty-query listing (`after`), which
+can go on until it reaches them. The narrowing keeps a row that carries no `type`, as a
+server older than that field answers, so it is not a strict type filter either;
+`ctx_handover` takes such a row as the checkpoint head when its title is the head's
+title. **Answer:** a JSON array of compact
 rows — `id`, `category`, `tags`, `title`, `content_preview`, `content_length`, `scope`,
 `sensitivity`, `type`, `lifecycle_state`, `type_source`, `untrusted`, `score`,
 `created_at`, `updated_at` (empty fields are omitted).
