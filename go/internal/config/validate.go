@@ -79,6 +79,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGraphOverview(c)...) // V17b
 	issues = append(issues, validateDurations(c)...)     // V17
 	issues = append(issues, validateEmbedBackoff(c)...)  // V21
+	// V61 (#221): the query path's backfill step off needs another embedder.
+	issues = append(issues, validateEmbedBackfillSync(c)...)
 	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V33
 	// V37 (W06-8): the foreign-load detector's floors and ratio range.
 	issues = append(issues, validateStatusForeignLoad(c)...)
@@ -675,6 +677,26 @@ func validateEmbedBackoff(c *Config) []Issue {
 		}
 	}
 	return issues
+}
+
+// validateEmbedBackfillSync is V61 (issue #221): embed_backfill.sync_disabled
+// switches the query path's pre-search backfill step off, which is only safe
+// while something else embeds pending blocks. With the background arm off
+// (embed_backfill.interval = 0) and Dream off (dream.enabled = false) the
+// query path is the only embedder there is, and switching it off leaves
+// every new block without a vector for good (FTS-only), with nothing that
+// says so. Fatal, the V21 class: boot drops the offending override, a
+// settings write is a 422. It is checked on every generation, a tenant's
+// too: a tenant's override is dropped while the deployment has neither the
+// arm nor Dream, although other tenants' queries would still reach its
+// blocks at the old end of their pick — the check cannot see other tenants,
+// and the side it errs on is the step staying on.
+func validateEmbedBackfillSync(c *Config) []Issue {
+	if !c.EmbedBackfill.SyncDisabled || c.EmbedBackfill.Interval > 0 || c.Dream.Enabled {
+		return nil
+	}
+	return []Issue{{Field: "embed_backfill.sync_disabled", Severity: SeverityError,
+		Msg: "embed_backfill.sync_disabled=true needs another embedder: with embed_backfill.interval=0 (background arm off) and dream.enabled=false the query path's backfill step is the only one, and without it new blocks never get a vector"}}
 }
 
 // validateStatusForeignLoad is V37 (waves W06-8, W06-8b): the floors and the

@@ -1718,8 +1718,25 @@ type StatusConfig struct {
 // line class (design/04 §4.4). global-only: this governs a single shared
 // physical resource (the embed backend pool + one process-wide failures
 // table) the same way scheduler.llmlog_retention_days and
-// events.db_stats_interval do — not a per-tenant query-time knob.
+// events.db_stats_interval do — not a per-tenant query-time knob. The one
+// exception is SyncDisabled: a tenant may switch its own queries' step off,
+// which only takes load off the shared pool.
 type EmbedBackfillConfig struct {
+	// SyncDisabled skips Pfad A, the query path's pre-search backfill step,
+	// altogether (issue #221). SyncCap and SyncBudget cannot: their 0 is the
+	// documented opt-out to UNBOUNDED, and their tightest values (1 block,
+	// 1 s) still have every query attempt a pending block. A false zero value
+	// is today's behavior, so a raw &Config{} in a test keeps the step on
+	// (the SyncCap convention below). Tenant-overridable, unlike the rest of
+	// the group: switching the step off only lowers what a tenant's queries
+	// take from the shared embed pool, so one tenant can opt out alone, while
+	// SyncCap and SyncBudget stay global-only because a tenant value of 0
+	// (unbounded) would let one query take the shared pool for the whole
+	// backlog. Pending blocks are then embedded by the background arm
+	// (Interval > 0), by Dream, and with the arm off by other tenants'
+	// queries at the old end of their pick; V61 refuses switching it off
+	// where neither the arm nor Dream runs. Settings-only (no env source).
+	SyncDisabled bool `key:"embed_backfill.sync_disabled" env:"-" default:"false" mut:"hot" tenancy:"tenant-overridable"`
 	// SyncCap bounds Pfad A's synchronous per-request work (design/04 §4.3
 	// "Pfad-A-Kappung"): the query-path backfill loop today has no cap and
 	// embeds EVERY pending block inline before the triggering search runs —

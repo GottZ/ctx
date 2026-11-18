@@ -943,8 +943,12 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	//
 	// The floor of a picked block is its owner's as well as the caller's
 	// (issue #253, backfillFloor): the pick reaches scopes of other tenants.
+	//
+	// embed_backfill.sync_disabled (issue #221, tenant-overridable, read from
+	// this request's snapshot) skips the step for the caller's tenant: no
+	// floor read, no pick, no embed.
 	floor := cfg.Pool.ScopeSensitivityFloor
-	if len(req.ShadowTypes) == 0 {
+	if len(req.ShadowTypes) == 0 && !cfg.EmbedBackfill.SyncDisabled {
 		if bfFloor, ferr := h.backfillFloor(ctx, floor); ferr != nil {
 			slog.Warn("query backfill: sensitivity floors unreadable, backfill skipped", "error", ferr, "request_id", requestID)
 		} else if backfilled := h.backfillPending(ctx, bfFloor, ar.ReadScopes, h.embedAdmission(), cfg); backfilled > 0 {
