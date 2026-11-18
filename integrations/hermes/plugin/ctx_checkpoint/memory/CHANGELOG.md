@@ -41,6 +41,19 @@ Checkpoint searches name the `checkpoint` type, over MCP too (GottZ/ctx#342).
   raised as it is on a first search. Any other error (an unknown type, a rate limit, another type
   than the sent ones) is raised as before. The refusal's log line names the server, not the type
   values. The REST client sent `types` already.
+- **An unknown type is read whole.** ctx quotes the name in `unknown block type "<name>"` with
+  Go's `%q`; the client reads the whole quoted name, escapes undone, and compares it with the
+  types it sent. A name with a space, a quote, a backslash or an escaped character is raised on
+  the first search and on the ask again alike; before, only its first word was read, and the
+  ask again answered such a refusal with the older server's rows. The unknown name is read
+  before the refusal of a never-ranked type, so a name holding that refusal's words is no
+  fallback either.
+- **A staged write is a store's answer only.** The staging refusal (`code="confirm_writes"`,
+  `staged, not stored`, the hash, the advice to use another key) is read from a tool the
+  server stages (`store` here). An error of `search`, `get` or `query` that echoes
+  `confirm_writes` — a search for a type of that name — is raised as that tool's error,
+  uncoded; before, it was reported as a staged write, and the ask again took it for a failing
+  ask. The staged store's message is unchanged.
 - **The agent's read path names the type.** The passage search of the system prompt block and
   the compaction receipt: `ctx_search … types=["checkpoint"]` with memory features on,
   `hermes ctx_checkpoint search … --type checkpoint` on REST without them, and

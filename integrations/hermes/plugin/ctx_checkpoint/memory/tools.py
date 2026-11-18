@@ -54,6 +54,14 @@ _TYPES_EXCLUDE_PROP = {
         "(checkpoint, tool-evidence, tool-overview); pass [] to exclude nothing."
     ),
 }
+# ctx_search's own: named types replace the configured default (``_tool_search``).
+_SEARCH_TYPES_EXCLUDE_PROP = {
+    **_TYPES_EXCLUDE_PROP,
+    "description": (
+        "Block types to exclude. Omitted, it is [] when types names a type and the configured default "
+        "(checkpoint, tool-evidence, tool-overview) otherwise; pass [] to exclude nothing."
+    ),
+}
 
 QUERY_SCHEMA = {
     "name": "ctx_query",
@@ -149,7 +157,7 @@ SEARCH_SCHEMA = {
                     "rows without a type, and can miss matches that other types crowd out."
                 ),
             },
-            "types_exclude": _TYPES_EXCLUDE_PROP,
+            "types_exclude": _SEARCH_TYPES_EXCLUDE_PROP,
         },
         "required": ["query"],
     },

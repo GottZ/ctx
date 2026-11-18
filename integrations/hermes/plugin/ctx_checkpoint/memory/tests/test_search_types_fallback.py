@@ -29,6 +29,22 @@ UNKNOWN_ARG = 'validating "arguments": validating root: unexpected additional pr
 HEAD_TITLE = "Compaction checkpoint head r1"
 HEAD = {"id": "019f6000-0000-7000-8000-000000000001", "title": HEAD_TITLE, "category": "compaction-checkpoints"}
 NEVER_RANKED = ("checkpoint", "system-meta")
+BS = "\\"
+# A ctx server's answer to a type name it does not know: ``fmt.Sprintf("unknown block type %q", name)``
+# (go/internal/handler/mcp.go, resolveMCPKnownTypes). Go printed these texts for these names: %q escapes a
+# quote, a backslash and an unprintable character, and keeps a space and a printable letter as they are.
+UNKNOWN_TYPE_ANSWERS = {
+    "no such type": 'unknown block type "no such type"',
+    'say "hi"': f'unknown block type "say {BS}"hi{BS}""',
+    f"back{BS}slash": f'unknown block type "back{BS}{BS}slash"',
+    "tab\there": f'unknown block type "tab{BS}there"',
+    "nul\x00byte": f'unknown block type "nul{BS}x00byte"',
+    "del\x7f": f'unknown block type "del{BS}x7f"',
+    "zw\N{ZERO WIDTH SPACE}sp": f'unknown block type "zw{BS}u200bsp"',
+    "\N{LATIN SMALL LETTER E WITH ACUTE}-type": 'unknown block type "\N{LATIN SMALL LETTER E WITH ACUTE}-type"',
+    "checkpoint is not retrieval-visible": 'unknown block type "checkpoint is not retrieval-visible"',
+    "confirm_writes": 'unknown block type "confirm_writes"',
+}
 
 
 def _row(row_id: str, title: str, block_type: str) -> dict:
@@ -78,7 +94,7 @@ class Server:
             return json.dumps({"error": self.refuses})
         for name in types or ():
             if self.registered is not None and name not in self.registered:
-                return json.dumps({"error": f'unknown block type "{name}"'})
+                return json.dumps({"error": UNKNOWN_TYPE_ANSWERS.get(name, f'unknown block type "{name}"')})
             if self.old and name in NEVER_RANKED:
                 return json.dumps({"error": REFUSED.replace('"checkpoint"', f'"{name}"')})
         rows = self.rows
@@ -280,6 +296,17 @@ def test_a_refusal_of_one_type_does_not_stop_a_typed_search_for_another():
     assert _types_sent(server) == [["checkpoint"], None, ["knowledge"]], "one typed search, no search without types"
 
 
+def test_a_refusal_of_the_argument_sends_no_types_first_for_any_type():
+    """A server before v5.8.0 refuses the argument itself: after that, a search for another type goes without
+    ``types`` first as well, and its rows are narrowed in the client (the README tells the two refusals apart)."""
+    server = Server(refuses=UNKNOWN_ARG, rows=[ROWS[0]])
+    client = McpClient(server.dispatch)
+    client.search("checkpoint head", types=["checkpoint"])
+    data = client.search("checkpoint head", types=["knowledge"])
+    assert _ids(data) == [ROWS[0]["id"]]
+    assert _types_sent(server) == [["checkpoint"], None, None], "the knowledge search sent no types"
+
+
 def test_a_remembered_refusal_is_asked_again_when_the_narrowing_drops_rows():
     """The client met a server before #342; the server now takes the types but still answers a search
     without them with every type. The narrowing dropped a row, so the client asks with the types again,
@@ -337,6 +364,92 @@ def test_an_unknown_type_in_the_ask_again_is_raised():
     with pytest.raises(CtxApiError) as fresh:
         McpClient(server.dispatch).search("checkpoint head", types=["checkpoint", "nope"])
     assert "unknown block type" in str(remembered.value) and "unknown block type" in str(fresh.value)
+
+
+def _client_that_remembers_a_refusal(server: Server) -> McpClient:
+    """A client that met a server before #342; the server is then updated to one that knows checkpoint and
+    knowledge only (and still answers a search without types with every type)."""
+    client = McpClient(server.dispatch)
+    client.search("checkpoint head", types=["checkpoint"])
+    server.old, server.registered = False, {"checkpoint", "knowledge"}
+    return client
+
+
+@pytest.mark.parametrize("name", list(UNKNOWN_TYPE_ANSWERS), ids=lambda name: ascii(name))
+def test_an_unknown_type_ends_alike_on_a_fresh_client_and_after_a_remembered_refusal(name):
+    """The server quotes the unknown name with Go's %q: the client reads the whole quoted name, escapes undone, and
+    compares it with the types it sent. So the same search ends with the server's refusal on both ways — the first
+    search of a fresh client, and the ask with types again after a remembered refusal (whose own failures are
+    otherwise answered with the older server's answer)."""
+    server = Server(old=True)
+    remembered = _client_that_remembers_a_refusal(server)
+    for client in (McpClient(server.dispatch), remembered):
+        with pytest.raises(CtxApiError) as raised:
+            client.search("checkpoint head", types=["checkpoint", name])
+        assert "unknown block type" in str(raised.value)
+    assert _types_sent(server)[-2:] == [None, ["checkpoint", name]], "the remembered client asked again"
+
+
+def test_an_unknown_type_is_read_when_the_transport_escapes_the_quotes_once_more():
+    """A transport that escapes the server's text once more turns its quotes into ``\\"``: the name is still read
+    whole."""
+    server = Server(old=True)
+    client = _client_that_remembers_a_refusal(server)
+    answer = UNKNOWN_TYPE_ANSWERS['say "hi"']
+    escaped_again = json.dumps(answer)[1:-1]
+    assert escaped_again != answer and f"{BS}{BS}{BS}" in escaped_again
+
+    def dispatch(name, args):
+        if args.get("types") and 'say "hi"' in args["types"]:
+            return json.dumps({"error": escaped_again})
+        return server.dispatch(name, args)
+
+    client._dispatch = dispatch
+    with pytest.raises(CtxApiError, match="unknown block type"):
+        client.search("checkpoint head", types=["checkpoint", 'say "hi"'])
+
+
+def test_a_search_error_that_names_confirm_writes_is_no_staged_write():
+    """``confirm_writes`` is a key capability; a server that knows no type of that name echoes the name in its
+    refusal. A search is never staged: the error is the server's refusal, uncoded, on a fresh client and after a
+    remembered refusal — not "staged, not stored" with the advice to change the key."""
+    server = Server(old=True)
+    remembered = _client_that_remembers_a_refusal(server)
+    for client in (McpClient(server.dispatch), remembered):
+        with pytest.raises(CtxApiError) as raised:
+            client.search("checkpoint head", types=["checkpoint", "confirm_writes"])
+        assert str(raised.value) == 'mcp search: unknown block type "confirm_writes"'
+        assert raised.value.code == "" and not raised.value.permanent
+
+
+def test_a_read_tool_error_that_names_confirm_writes_is_no_staged_write():
+    """``get`` and ``query`` are never staged either, whatever their error text echoes."""
+    client = McpClient(lambda name, args: json.dumps({"error": "lookup of confirm_writes failed"}))
+    with pytest.raises(CtxApiError) as raised:
+        client.get_block("019f6000-0000-7000-8000-000000000001")
+    assert str(raised.value) == "mcp get: lookup of confirm_writes failed" and raised.value.code == ""
+    with pytest.raises(CtxApiError) as raised:
+        client.query("which key has confirm_writes?", synthesize=True)
+    assert str(raised.value) == "mcp query: lookup of confirm_writes failed" and raised.value.code == ""
+
+
+def test_a_staged_store_keeps_its_code_guidance_and_hash():
+    """The store a confirm_writes key gets staged (``mcp_confirm.go``, ``mcpStageStore``): refused with the code, the
+    advice and the hash, byte for byte as before."""
+    staged = (
+        "STAGED — NOT saved yet. This key requires write confirmation (confirm_writes).\n"
+        "payload_hash: " + "ab" * 32 + "\nexpires: never (writes.confirm_ttl = 0)\n"
+        "To execute this exact write, call the 'confirm' tool with this payload_hash. "
+        "The server holds the authoritative payload; confirming cannot alter it."
+    )
+    client = McpClient(lambda name, args: json.dumps({"error": staged}, ensure_ascii=False), "ctx-prod")
+    with pytest.raises(CtxApiError) as raised:
+        client.store("compaction-checkpoints", "t", "x")
+    assert raised.value.code == "confirm_writes"
+    assert str(raised.value) == (
+        "mcp store: staged, not stored — the key has confirm_writes and this plugin never confirms on the "
+        "operator's behalf; payload_hash " + "ab" * 32 + "; use a key without confirm_writes for mcp_servers.ctx-prod"
+    )
 
 
 def test_the_refusal_log_names_no_type_value(caplog):
