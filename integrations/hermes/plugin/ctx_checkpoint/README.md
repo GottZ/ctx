@@ -223,14 +223,25 @@ ctx is unreachable, instead of an unarchived compaction. The halt also triggers
 when a checkpoint does not finish inside its budget. Since 0.10.0 a checkpoint
 with more than `max_parts` parts is no longer refused: it writes `max_parts` parts
 (plus manifest and head) per minute and waits for the next minute with the rest,
-its budget grows by 61 s per extra minute, and Hermes shows a notice before it
-waits (by the part sizes measured for 0.7.0, a 1M-token conversation of Latin
+its budget grows by 61 s for each extra minute its writes enter, and Hermes shows a
+notice before it waits (by the part sizes measured for 0.7.0, a 1M-token conversation of Latin
 prose needs 130 to 230 parts at the default sizes: one or two extra minutes).
-Hermes gives a compaction about 300 s without progress by default
+A retry whose parts ctx already holds books no write for them, so it adds no
+minute and sends no notice (0.16.2; before, the minutes were added from the part
+count). Hermes gives a compaction about 300 s without progress by default
 (`compression.context_timeout_seconds`, raised to the auxiliary compression
-timeout) and then retries it; with the default `max_parts` and `budget_s` a
-paced checkpoint stays below that up to three extra minutes (326 parts), a
-smaller `max_parts` multiplies the minutes. A store that ctx refuses for its write limit (other
+timeout) and then abandons it and runs it again; the checkpoint runs before the
+summary, which is the first progress Hermes sees. Since 0.16.2 the checkpoint ends
+10 s before that window — its budget, the extra minutes and the minute a refusal
+adds all stop there, and so do the required facts after it: a transcript that needs
+more saves what fits, fails with `Hermes waits <n>s for a compaction to make
+progress`, and the next attempt continues from the saved parts. Before, a paced
+checkpoint past the window kept writing while Hermes started the compaction again,
+so two checkpoints of one conversation wrote at the same time (GottZ/ctx#299).
+With the default `max_parts` and `budget_s` up to three extra minutes (326 parts)
+fit a 300 s window; a smaller `max_parts` multiplies the minutes. On a Hermes
+without that wait, or with it switched off, nothing is bounded beyond the budget.
+A store that ctx refuses for its write limit (other
 writers on the same key) waits for a free slot — the first refusal adds one
 minute to the budget — at the latest until just before the deadline, and stops
 at the second refusal in a row: the third would open Hermes' circuit breaker

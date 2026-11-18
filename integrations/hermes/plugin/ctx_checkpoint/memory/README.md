@@ -378,6 +378,10 @@ the plugin and runs over either transport.
   process' cached last manifest) with its head published over the broken one (`lookup=
   head-invalid`); the earlier chain's blocks stay. Before 0.12.0 it blocked every later
   checkpoint of that root.
+- The chain never runs past Hermes' wait for the compaction (`resolve_context_compression_
+  timeouts` of the loading Hermes, less 10 s): budget, paced windows, the refusal window and
+  the required facts end there, and the error names the wait. A paced window is added to the
+  deadline when a write enters it, so a retry whose parts ctx confirms reports `windows=1`.
 - Log: `CTX checkpoint chain stored (… head= manifest= parent= parts= writes= sha= lookup= …)`.
 
 ### Fact selection and dedupe

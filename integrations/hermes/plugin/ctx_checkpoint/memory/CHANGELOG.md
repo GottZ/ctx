@@ -6,6 +6,36 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.16.2] — 2026-11-19
+
+A checkpoint ends inside Hermes' wait for the compaction, and a retry adds no window it does
+not use (part of GottZ/ctx#299).
+
+- **Hermes' wait.** Hermes calls `on_pre_compress` in the compaction worker before the summary
+  call and waits for that worker from its last progress, which only the summary stream reports
+  (`compression.context_timeout_seconds`, raised to the summary call's own timeout: 300 s by
+  default). A paced checkpoint past that window kept writing while Hermes abandoned the worker
+  and ran the compaction again, so two chains of one root wrote at the same time — five windows
+  with the defaults (327 parts), fewer with a smaller `max_parts`, and any chain with a
+  `budget_s` above the window. `checkpoint.host_compaction_wait_s` reads the window from the
+  loading Hermes (`resolve_context_compression_timeouts` of `agent.conversation_compression`,
+  the function the host itself calls; `None` on a Hermes without it, with the wait switched
+  off or on any failure, and then nothing changes). The provider reads it before its clock
+  starts and gives the chain a limit 10 s before the window (`HOST_WAIT_MARGIN_S`): the
+  deadline, every paced window and the window a refusal grants stop there, and so do the
+  required facts after the chain. A chain that needs more stops before the next write with
+  `ctx checkpoint stopped before <step>: Hermes waits <n>s for a compaction to make progress
+  …`; the parts it stored are kept, and the next attempt continues from them (ctx confirms
+  them without a write). The notice before the second window says so, and the failure notice
+  names `compression.context_timeout_seconds` instead of `budget_s`.
+- **Windows a retry does not use.** 0.10.0 added every paced window to the deadline before the
+  first write, from the part count, and told the user the compaction would wait minutes. A
+  retry whose parts ctx confirms books no write for them: its receipt said `windows=3`, its
+  deadline (which the required facts share) was two windows longer, and the notice came again,
+  although nothing was paced. A window is now added when a write enters it (every
+  `max_parts + 2` booked writes); the receipt's `windows` counts the windows the writes entered.
+  A chain whose writes are all booked gets the same deadline and the same notice as before,
+  only at its first write of the second window instead of before the first.
 ## [ctx_checkpoint 0.16.1] — 2026-11-18
 
 No output names the credentials of a configured URL (GottZ/ctx#311), and the code of an MCP
