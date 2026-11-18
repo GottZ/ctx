@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -33,7 +34,9 @@ type MCPConfig struct {
 	Pool         *pgxpool.Pool
 	QueryHandler http.Handler // The full /api/query handler (with scheduler wiring).
 	// Cfg feeds the store tool's sensitivity default
-	// (pool.default_block_sensitivity, F3 §3.5) — one snapshot per call.
+	// (pool.default_block_sensitivity, F3 §3.5) and the types the search and
+	// recent tools book in the read record (mcp.read_log_types, #345) — one
+	// snapshot per call.
 	Cfg ConfigStore
 	// Blocktypes feeds the store tool's classify hook (WF T4) — registry
 	// snapshot per call, never the compiled-in builtin set. nil in tests
@@ -928,7 +931,13 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 		// gate would come from a second generation). cfg.Cfg is nil in tests
 		// without config wiring — a nil there means "not configured", which
 		// reads as off, the fail-closed direction for a dark feature.
-		facetEnabled := cfg.Cfg != nil && cfg.Cfg.SnapshotForRequest(ctx).ClusterOps.FacetEnabled
+		//
+		// The same snapshot names the types the read record books (#345).
+		var snap *config.Config
+		if cfg.Cfg != nil {
+			snap = cfg.Cfg.SnapshotForRequest(ctx)
+		}
+		facetEnabled := snap != nil && snap.ClusterOps.FacetEnabled
 
 		// REST leaves a cursor next to a query inert; here it is refused, so a
 		// caller cannot take the repeated top matches for a second page (#206).
@@ -962,7 +971,9 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 			}
 		}
 
-		return renderMCPSearch(input, page), nil, nil
+		res, answered := renderMCPSearch(input, page)
+		store.RecordBlockReads(cfg.Pool, ar.ApiKeyID, store.ActionMCPSearch, readLogIDs(snap, answered))
+		return res, nil, nil
 	}
 }
 
@@ -1011,6 +1022,9 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 		if block == nil {
 			return errResult("block not found"), nil, nil
 		}
+		// The read record (#345): booked only for a block this answer hands
+		// over — every refusal above leaves no row, as on REST manage-get.
+		store.RecordBlockReads(cfg.Pool, ar.ApiKeyID, store.ActionMCPGet, []string{block.ID})
 
 		data, _ := json.MarshalIndent(block, "", "  ")
 		return &mcp.CallToolResult{
@@ -1053,6 +1067,11 @@ func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, any] {
 				Content: []mcp.Content{textContent("No blocks found.")},
 			}, nil, nil
 		}
+		var snap *config.Config
+		if cfg.Cfg != nil {
+			snap = cfg.Cfg.SnapshotForRequest(ctx)
+		}
+		store.RecordBlockReads(cfg.Pool, ar.ApiKeyID, store.ActionMCPRecent, readLogIDs(snap, previews))
 
 		var sb strings.Builder
 		for i, bp := range previews {
@@ -1121,6 +1140,25 @@ func resolveGrants(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthResult)
 		return []string{}, nil
 	}
 	return grants, nil
+}
+
+// readLogIDs is what the read record books for a search or recent answer
+// (#345): the ids of the answered rows whose type is in mcp.read_log_types of
+// the request's config snapshot. A nil snapshot (MCPConfig.Cfg is nil only in
+// tests without config wiring) reads as an empty list, so a listing books
+// nothing there.
+func readLogIDs(snap *config.Config, rows []store.BlockPreview) []string {
+	if snap == nil || len(rows) == 0 {
+		return nil
+	}
+	types := snap.MCP.ReadLogTypes
+	var ids []string
+	for _, r := range rows {
+		if slices.Contains(types, r.TypeName) {
+			ids = append(ids, r.ID)
+		}
+	}
+	return ids
 }
 
 func textContent(text string) mcp.Content {

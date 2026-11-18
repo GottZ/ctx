@@ -325,6 +325,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl�
 	// F-W8 (design/04 §3.1, §4.6): the federation depth limit.
 	"federation.max_depth":        "Longest incoming Ctx-Hop chain this instance serves: a request whose chain already holds this many entries is refused with a loop-detected federation_depth error; at least 1, at most the Ctx-Hop parse limit",
 	"federation.require_peer_hop": "Refuse a ctx-peer request that carries no Ctx-Path with a federation_hop_required error instead of serving it without hints; switch on only after the federation_peer_without_path counter stayed at zero",
+	"mcp.read_log_types":          "Block types whose rows the MCP search and recent tools book in the access log (one row per answered block of these types; get books every block it answers)",
 	"mcp.instructions_enabled":    "Send the instructions text to every agent that connects over MCP (initialize); false sends none",
 	"mcp.instructions":            "Instructions text the MCP server sends at initialize; the default is the text this ctx release ships, and an instance that keeps it (or stores any text ctx ever shipped) follows the shipped text across updates; a custom text stays and records the shipped text it was based on; unset returns to the shipped text; at most 2048 characters",
 }

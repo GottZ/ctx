@@ -290,6 +290,20 @@ Newest blocks first — for questions like "what was saved this week". Read-only
 The `untrusted_origin` line appears only for a block that carries the record (see
 **Untrusted origin** above).
 
+### The read record of `get`, `search` and `recent`
+
+Each block these tools hand to the caller can leave one row in `context_access_log`,
+the table REST `manage get` writes as well: the reading key and its principal, the
+block id, the tool as the action (`mcp-get`, `mcp-search`, `mcp-recent`; REST stays
+`manage-get`), and in `metadata` the block's `type` and `block_created_at`. `get`
+books every block it answers; `search` and `recent` book only the answered rows whose
+type is listed in `mcp.read_log_types` (default `checkpoint,insight`). A refusal
+(`block not found`, an ambiguous prefix, a type rejection) books nothing, and a page
+that `include_content` ended early books only the rows it carries. No content, title
+or query text is recorded. The row is written in the background: a slow or failing
+access log never slows or fails the read. Details, cost and an example analysis:
+[operations](operations.md#the-read-record-in-context_access_log).
+
 ## Writing
 
 ### store

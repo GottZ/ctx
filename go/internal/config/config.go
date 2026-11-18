@@ -2834,6 +2834,18 @@ type MCPServerConfig struct {
 	// that equals any shipped wording — follows the wording of the running
 	// release. V60 bounds the text (validateMCPInstructions).
 	Instructions string `key:"mcp.instructions" env:"-" default:"@shipped" mut:"hot" tenancy:"global-only"`
+	// ReadLogTypes are the block types whose rows the search and recent tools
+	// book in the read record of context_access_log (issue #345, store.
+	// RecordBlockReads): one row per answered block of these types. get books
+	// every block it answers, whatever this says — one row per call, and the
+	// explicit read of a whole block. A listing answers up to 50 rows per call,
+	// and the record keeps its rows (the table has no retention), so the list
+	// rows are booked for the types whose age at read is a question, not for
+	// every row: the checkpoint chains and the insights derived from them
+	// (#291). Unknown names match nothing; a list with no name falls back to
+	// the default. global-only: the record is one table for every tenant, and
+	// its volume is the server's to bound.
+	ReadLogTypes []string `key:"mcp.read_log_types" env:"CTX_MCP_READ_LOG_TYPES" default:"checkpoint,insight" mut:"hot" tenancy:"global-only"`
 }
 
 // GatewayConsumersConfig is the policy of the consumer and model-key
