@@ -2203,7 +2203,10 @@ func searchBlocksSQL(p searchParams) (string, []any) {
 				// reuse the query arg index
 				2, 2,
 			)
-			orderBy = `search_rank DESC`
+			// id DESC is the tie-break among rows of one rank (#368), as in
+			// the browse order: without it they came in scan order and the
+			// cut at the limit among them was arbitrary.
+			orderBy = `search_rank DESC, id DESC`
 		} else {
 			// Browse path: id DESC is the MANDATORY tiebreak (updated_at is not
 			// unique) so the keyset cursor (updated_at, id) is a total order —
@@ -2213,8 +2216,9 @@ func searchBlocksSQL(p searchParams) (string, []any) {
 	} else {
 		selectFields = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, content, ` + guardRedactedMetadataSQL("$1") + `, created_at, updated_at, ` + untrustedOriginCol
 		if hasQuery {
+			// The same tie-break as the compact form (#368).
 			orderBy = fmt.Sprintf(
-				`GREATEST(ts_rank_cd(ts_de, plainto_tsquery('german', $%d)), ts_rank_cd(ts_en, plainto_tsquery('english', $%d))) DESC`,
+				`GREATEST(ts_rank_cd(ts_de, plainto_tsquery('german', $%d)), ts_rank_cd(ts_en, plainto_tsquery('english', $%d))) DESC, id DESC`,
 				2, 2,
 			)
 		} else {
