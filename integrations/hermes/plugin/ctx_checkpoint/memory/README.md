@@ -212,7 +212,7 @@ block that has the record. Error lines are redacted with the keys the provider b
   server), so a server updated meanwhile is not read through the fallback. That ask takes at
   most half of what is left of the call's timeout and is not sent below 0.5 s, so the caller
   keeps time for its next call; when it fails, the answer stays. A type the server does not
-  know (`unknown block type "<name>"`, the name read whole) is raised, also from that ask.
+  know (`unknown block type`, whatever name it quotes) is raised, also from that ask.
   Any other error is raised.
 - Hits with `untrusted: true` (foreign text — server V-11: `checkpoint`, `tool-evidence`,
   `tool-overview`, `insight`) are labelled in the injected context (or dropped with

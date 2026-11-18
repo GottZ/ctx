@@ -30,10 +30,16 @@ HEAD_TITLE = "Compaction checkpoint head r1"
 HEAD = {"id": "019f6000-0000-7000-8000-000000000001", "title": HEAD_TITLE, "category": "compaction-checkpoints"}
 NEVER_RANKED = ("checkpoint", "system-meta")
 BS = "\\"
-# A ctx server's answer to a type name it does not know: ``fmt.Sprintf("unknown block type %q", name)``
-# (go/internal/handler/mcp.go, resolveMCPKnownTypes). Go printed these texts for these names: %q escapes a
-# quote, a backslash and an unprintable character, and keeps a space and a printable letter as they are.
+LONG_NAME = "x" * 3000
+# A ctx server's answer to a type name it does not know, as the plugin gets it: ``fmt.Sprintf("unknown block type
+# %q", name)`` (go/internal/handler/mcp.go, resolveMCPKnownTypes) — Go printed these texts for these names: %q escapes
+# a quote, a backslash and an unprintable character, and keeps a space and a printable letter as they are — and then
+# Hermes' error handling (tools/mcp_tool_handlers.py: ``tool_error(_sanitize_error(text))``), which masks
+# credential-like text, also inside an ordinary name (``task-list`` comes back as ``ta[REDACTED]``), and cuts a text
+# after 2048 characters (``_bound_error_text``).
 UNKNOWN_TYPE_ANSWERS = {
+    "task-list": 'unknown block type "ta[REDACTED]"',
+    LONG_NAME: f'unknown block type "{LONG_NAME}"'[:2048] + "\N{HORIZONTAL ELLIPSIS} [truncated]",
     "no such type": 'unknown block type "no such type"',
     'say "hi"': f'unknown block type "say {BS}"hi{BS}""',
     f"back{BS}slash": f'unknown block type "back{BS}{BS}slash"',
@@ -375,12 +381,12 @@ def _client_that_remembers_a_refusal(server: Server) -> McpClient:
     return client
 
 
-@pytest.mark.parametrize("name", list(UNKNOWN_TYPE_ANSWERS), ids=lambda name: ascii(name))
+@pytest.mark.parametrize("name", list(UNKNOWN_TYPE_ANSWERS), ids=lambda name: ascii(name)[:40])
 def test_an_unknown_type_ends_alike_on_a_fresh_client_and_after_a_remembered_refusal(name):
-    """The server quotes the unknown name with Go's %q: the client reads the whole quoted name, escapes undone, and
-    compares it with the types it sent. So the same search ends with the server's refusal on both ways — the first
-    search of a fresh client, and the ask with types again after a remembered refusal (whose own failures are
-    otherwise answered with the older server's answer)."""
+    """ctx names only a name of the search's ``types`` in ``unknown block type``, so that text is the refusal whatever
+    name it quotes — Go-quoted, masked or cut by Hermes. The same search ends with it on both ways: the first search of
+    a fresh client, and the ask with types again after a remembered refusal (whose own failures are otherwise answered
+    with the older server's answer)."""
     server = Server(old=True)
     remembered = _client_that_remembers_a_refusal(server)
     for client in (McpClient(server.dispatch), remembered):
@@ -388,25 +394,6 @@ def test_an_unknown_type_ends_alike_on_a_fresh_client_and_after_a_remembered_ref
             client.search("checkpoint head", types=["checkpoint", name])
         assert "unknown block type" in str(raised.value)
     assert _types_sent(server)[-2:] == [None, ["checkpoint", name]], "the remembered client asked again"
-
-
-def test_an_unknown_type_is_read_when_the_transport_escapes_the_quotes_once_more():
-    """A transport that escapes the server's text once more turns its quotes into ``\\"``: the name is still read
-    whole."""
-    server = Server(old=True)
-    client = _client_that_remembers_a_refusal(server)
-    answer = UNKNOWN_TYPE_ANSWERS['say "hi"']
-    escaped_again = json.dumps(answer)[1:-1]
-    assert escaped_again != answer and f"{BS}{BS}{BS}" in escaped_again
-
-    def dispatch(name, args):
-        if args.get("types") and 'say "hi"' in args["types"]:
-            return json.dumps({"error": escaped_again})
-        return server.dispatch(name, args)
-
-    client._dispatch = dispatch
-    with pytest.raises(CtxApiError, match="unknown block type"):
-        client.search("checkpoint head", types=["checkpoint", 'say "hi"'])
 
 
 def test_a_search_error_that_names_confirm_writes_is_no_staged_write():

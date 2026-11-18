@@ -21,8 +21,8 @@ What the ctx MCP tools answer (``go/internal/handler/mcp.go``) and how it is map
   goes without them first and asks with them again when the narrowed answer may differ from the
   typed one (an asked type has no row, or the narrowing dropped rows), with at most half of the
   time left, so a server updated meanwhile is not read through the fallback. ``unknown block
-  type "<name>"`` (the name read whole, Go's quoting undone, and compared with the types sent) is
-  raised on every way, that ask included; any other error is raised.
+  type`` is raised on every way, that ask included, whatever name it quotes (ctx names only a
+  name of ``types`` there; Hermes can mask or cut it); any other error is raised.
 - ``query`` → prose answer followed by ``Sources:`` lines ``[N] title (category) id:uuid``,
   ``key:value`` tokens after the id kept (`` superseded_by:<uuid>`` is read), and an indented
   ``untrusted_origin:<type> (…)`` line under a source with that record (ctx v5.41.0, #280), read
@@ -106,16 +106,10 @@ _RETRIEVAL_ARGS_RE = re.compile(r"\b(?:synthesize|include_content)\b")
 # the words, not with its quotes, for the same reason as :func:`_refuses_retrieval_args`.
 _TYPE_NOT_VISIBLE_RE = re.compile(r"\bblock type\W+([A-Za-z0-9_.:-]+)\W+is not retrieval-visible\b")
 _TYPES_ARG_RE = re.compile(r"\btypes\b")
-# Any ctx server refusing a type name it does not know: a caller error. The text is ``unknown block type "<name>"``
-# with the name quoted by Go's %q (``handler/mcp.go`` ``resolveMCPKnownTypes``): a quote, a backslash and an
-# unprintable character arrive escaped, a space as it is. The optional backslash admits a transport that escaped
-# the text once more (its quotes arrive as ``\"``).
-_UNKNOWN_TYPE_RE = re.compile(r'\bunknown block type (\\?)"')
-# The rest of a Go-quoted string after its opening quote: the body up to the closing quote.
-_GO_QUOTED_BODY_RE = re.compile(r'((?:[^"\\]|\\.)*)"', re.S)
-# The escapes Go's strconv.Quote writes into a double-quoted string.
-_GO_ESCAPE_RE = re.compile(r"\\(?:([abfnrtv\\\"])|x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8}))")
-_GO_SIMPLE_ESCAPES = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "\\": "\\", '"': '"'}
+# Any ctx server refusing a type name it does not know (``unknown block type "<name>"``): a caller error. The search
+# tool names only a name of the search's ``types`` there (``handler/mcp.go`` ``resolveMCPKnownTypes``), so the words
+# decide and the name is not read: Hermes' error handling can mask it (a name holding ``sk-``) or cut it.
+_UNKNOWN_TYPE_RE = re.compile(r"\bunknown block type\b")
 # The tools a ctx server stages for a key with confirm_writes (``mcpStageStore`` and its update, archive and blob
 # twins); of them this client sends store. A read tool is never staged, so its error is never taken for a staged
 # write, whatever it echoes (a type named ``confirm_writes``).
@@ -141,33 +135,6 @@ def _refused_type(text: str, types: Iterable[str]) -> str | None:
     if _UNKNOWN_ARGS_MARKER in text.lower() and _TYPES_ARG_RE.search(text) is not None:
         return _TYPES_ARGUMENT
     return None
-
-
-def _go_unquote(body: str) -> str:
-    """The body of a Go-quoted string with its escapes undone."""
-
-    def one(match: re.Match[str]) -> str:
-        simple, *digits = match.groups()
-        if simple:
-            return _GO_SIMPLE_ESCAPES[simple]
-        point = int(next(d for d in digits if d), 16)
-        return chr(point) if point <= 0x10FFFF else match.group(0)
-
-    return _GO_ESCAPE_RE.sub(one, body)
-
-
-def _unknown_type(text: str) -> str | None:
-    """The name of a server's ``unknown block type "<name>"`` refusal, read whole: the quoted name up to its closing
-    quote, escapes undone (a level a transport added first). ``None`` for any other text and for a name without its
-    closing quote."""
-    match = _UNKNOWN_TYPE_RE.search(text)
-    if match is None:
-        return None
-    rest = text[match.end() :]
-    if match.group(1):
-        rest = re.sub(r"\\(.)", r"\1", rest, flags=re.S)
-    body = _GO_QUOTED_BODY_RE.match(rest)
-    return None if body is None else _go_unquote(body.group(1))
 
 
 def _refuses_retrieval_args(text: str) -> bool:
@@ -202,8 +169,8 @@ def _refusal_kind(tool: str, args: dict[str, Any], text: str) -> tuple[type[CtxA
     the refusal of exactly the ``types`` this search sent counts as one."""
     types = args.get("types")
     if tool == "search" and types:
-        # The unknown name first: read whole, it can hold the words of the other refusal.
-        if _unknown_type(text) in set(types):
+        # The unknown name first: it can hold the words of the other refusal.
+        if _UNKNOWN_TYPE_RE.search(text) is not None:
             return _TypesUnknown, None
         refused = _refused_type(text, types)
         if refused is not None:
