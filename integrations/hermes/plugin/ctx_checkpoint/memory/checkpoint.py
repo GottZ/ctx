@@ -1241,6 +1241,7 @@ class ChainWriter:
         *,
         root_session_id: str | None = None,
         record_invalid: bool = True,
+        tagged: bool = True,
     ) -> tuple[str | None, list[str], str]:
         """``(latest_manifest_id, fact_hashes, checkpoint_id)`` of the existing head (upstream
         ``_load_previous_manifest_id`` plus the P4 dedupe keys and, 0.10.0, the checkpoint id the
@@ -1262,15 +1263,21 @@ class ChainWriter:
         With ``root_session_id`` (the lookup under the 0.6.0 title) a head whose metadata
         names another root counts as no head: under that title ``team/alice:1`` and
         ``team:alice/1`` shared one head, and continuing it would mix their chains again.
+
+        ``tagged=False`` (#289, after a miss of the tagged search under the same title) searches
+        without the tag: a block under the head title whose tags were replaced outside the
+        plugin. With a valid ``latest_manifest_id`` the chain continues from it (the new head
+        carries the tag again); without one it is an invalid head as above.
         """
+        what = "head search" if tagged else "untagged head search"
         result = self._call(
-            "head search",
+            what,
             run,
             self.client.search,
             text=head_title,
             category=self.category,
             types=[CHECKPOINT_TYPE],
-            tags=["checkpoint-head"],
+            **({"tags": ["checkpoint-head"]} if tagged else {}),
             limit=10,
         )
         head_id = _find_block_id_by_title(result, head_title)
@@ -1280,6 +1287,13 @@ class ChainWriter:
         if root_session_id is not None and _find_value(head, "root_session_id") != root_session_id:
             return None, [], ""
         manifest_id = _find_value(head, "latest_manifest_id")
+        if not tagged and manifest_id and _UUID_RE.fullmatch(manifest_id):
+            logger.warning(
+                "ctx checkpoint head %s (%s) carries no checkpoint-head tag (its tags were replaced outside "
+                "ctx_checkpoint); the chain continues from it and the new head carries the tag again",
+                head_id,
+                head_title,
+            )
         if not manifest_id or not _UUID_RE.fullmatch(manifest_id):
             logger.warning(
                 "ctx checkpoint head %s (%s) carries no valid latest_manifest_id; a new chain starts%s "
@@ -1412,6 +1426,15 @@ class ChainWriter:
         checkpoint_id = checkpoint_id_for(root, digest)
         previous_manifest_id, previous_fact_hashes, head_checkpoint_id = self.load_previous_head(head_title, run)
         lookup = "server" if previous_manifest_id else ("head-invalid" if run.invalid_head else "none")
+        if lookup == "none":
+            # #289: a block under the head title that lost the head tag (an update or store
+            # outside the plugin replaced its tags) cut the chain silently: the head search
+            # missed it and the new head replaced it with no parent. One more search, only
+            # while the tagged one finds nothing (the first checkpoint of every root).
+            previous_manifest_id, previous_fact_hashes, head_checkpoint_id = self.load_previous_head(
+                head_title, run, tagged=False
+            )
+            lookup = "untagged" if previous_manifest_id else ("head-invalid" if run.invalid_head else "none")
         # The head already names this transcript's checkpoint: its manifest's own parent is the
         # parent (possibly none) — neither the process cache nor the 0.6.0 title may replace it.
         own_checkpoint = bool(previous_manifest_id) and head_checkpoint_id == checkpoint_id

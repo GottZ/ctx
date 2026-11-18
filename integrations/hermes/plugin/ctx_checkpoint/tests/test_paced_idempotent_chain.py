@@ -781,3 +781,72 @@ def test_a_chain_slower_than_the_host_wait_names_the_host_wait(monkeypatch, cloc
         provider.on_pre_compress(_transcript(60), require_checkpoint=True)
     assert clock.now <= started + 12.0 - _MODULE._cp.HOST_WAIT_MARGIN_S + CALL_LATENCY_S
     assert server.parts() and "budget_s" not in notices[-1], notices
+
+
+# -- GottZ/ctx#289: a head whose tags were replaced outside the plugin -----------------------
+
+
+def _strip_head_tags(server: CtxServerDouble, *, keep_metadata: bool) -> str:
+    """An update or store outside the plugin replaced the head's tags (and, ``keep_metadata=False``,
+    its metadata: an update replaces the whole object)."""
+    head = server.head()
+    head["tags"] = ["edited-by-hand"]
+    if not keep_metadata:
+        head["metadata"] = {"note": "edited"}
+    return head["id"]
+
+
+def test_a_head_without_its_tag_still_continues_the_chain(monkeypatch, clock):
+    """The head search names the tag, so a head that lost it was not found: the next checkpoint
+    started a new chain without a parent and replaced the head, silently."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, notices = _provider(server, chunk_chars=1_000)
+    provider.on_pre_compress(_transcript(4, tag="first"), require_checkpoint=True)
+    first_manifest = server.head()["metadata"]["latest_manifest_id"]
+    head_id = _strip_head_tags(server, keep_metadata=True)
+    provider._last_manifest_by_root.clear()  # another process: no cached manifest to fall back on
+
+    provider.on_pre_compress(_transcript(6, tag="second"), require_checkpoint=True)
+
+    receipt = provider._last_chain_receipt
+    assert receipt.lookup == "untagged"
+    assert receipt.parent_manifest_id == first_manifest
+    assert _manifest_of_head(server)["metadata"]["parent_manifest_id"] == first_manifest
+    head = server.head()
+    assert head["id"] == head_id and "checkpoint-head" in head["tags"]
+    assert not [n for n in notices if "head" in n], notices  # nothing lost, nothing to tell
+
+
+def test_a_head_without_its_tag_and_its_manifest_is_replaced_with_a_notice(monkeypatch, clock):
+    """Tags and metadata replaced: the block under the head title names no manifest; the new
+    head is published over it and the user is told (as for a tagged head without one)."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, notices = _provider(server, chunk_chars=1_000)
+    provider.on_pre_compress(_transcript(4, tag="first"), require_checkpoint=True)
+    head_id = _strip_head_tags(server, keep_metadata=False)
+    provider._last_manifest_by_root.clear()
+
+    provider.on_pre_compress(_transcript(6, tag="second"), require_checkpoint=True)
+
+    assert provider._last_chain_receipt.lookup == "head-invalid"
+    assert provider._last_chain_receipt.parent_manifest_id is None
+    assert any(head_id in n and "latest_manifest_id" in n for n in notices), notices
+    assert "checkpoint-head" in server.head()["tags"]
+
+
+def test_the_untagged_search_runs_only_when_the_tagged_one_finds_nothing(monkeypatch, clock):
+    """Cost: one more search for the first checkpoint of a root, none while the head carries its tag."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server, chunk_chars=1_000)
+
+    def searches() -> list[dict]:
+        return [args for tool, args in server.calls if tool == "search"]
+
+    provider.on_pre_compress(_transcript(4, tag="first"), require_checkpoint=True)
+    assert [bool(s.get("tags")) for s in searches()] == [True, False]  # a new root
+    server.calls.clear()
+    provider.on_pre_compress(_transcript(6, tag="second"), require_checkpoint=True)
+    assert [bool(s.get("tags")) for s in searches()] == [True]

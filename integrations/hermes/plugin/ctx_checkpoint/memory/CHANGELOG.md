@@ -8,8 +8,9 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 
 ## [ctx_checkpoint 0.16.2] — 2026-11-19
 
-A checkpoint ends inside Hermes' wait for the compaction, and a retry adds no window it does
-not use (part of GottZ/ctx#299).
+A checkpoint ends inside Hermes' wait for the compaction, a retry adds no window it does not
+use (part of GottZ/ctx#299), and a head whose tags were replaced still continues the chain
+(part of GottZ/ctx#289).
 
 - **Hermes' wait.** Hermes calls `on_pre_compress` in the compaction worker before the summary
   call and waits for that worker from its last progress, which only the summary stream reports
@@ -36,6 +37,15 @@ not use (part of GottZ/ctx#299).
   `max_parts + 2` booked writes); the receipt's `windows` counts the windows the writes entered.
   A chain whose writes are all booked gets the same deadline and the same notice as before,
   only at its first write of the second window instead of before the first.
+- **A head without its tag.** The head search names the tag `checkpoint-head`; a head whose
+  tags an update or a store outside the plugin replaced was not found, and the next checkpoint
+  started a new chain without a parent and replaced the head silently. When the tagged search
+  finds nothing, the writer searches the head title once more without the tag (the first
+  checkpoint of every root costs one search more): a block there with a valid
+  `latest_manifest_id` continues the chain, logged as a WARNING, and the new head carries the
+  tag again (`lookup=untagged`); one without is an invalid head as since 0.12.0 (notice, the
+  new head published over it, `lookup=head-invalid`).
+
 ## [ctx_checkpoint 0.16.1] — 2026-11-18
 
 No output names the credentials of a configured URL (GottZ/ctx#311), and the code of an MCP
