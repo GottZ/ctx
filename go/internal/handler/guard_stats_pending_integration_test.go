@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -32,17 +33,18 @@ type guardStatsFixture struct {
 	t    *testing.T
 	ctx  context.Context
 	pool *pgxpool.Pool
+	dsn  string
 	reg  *blocktype.Registry
 	h    *ManageHandler
 }
 
 func newGuardStatsFixture(t *testing.T) *guardStatsFixture {
 	t.Helper()
-	pool := testdb.SetupTestDB(t)
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
 	ctx := context.Background()
 	reg := blocktype.NewRegistry()
 	reg.Boot(ctx, pool)
-	return &guardStatsFixture{t: t, ctx: ctx, pool: pool, reg: reg,
+	return &guardStatsFixture{t: t, ctx: ctx, pool: pool, dsn: dsn, reg: reg,
 		h: NewManageHandler(pool, nil, nil, nil, nil, nil, nil, reg)}
 }
 
@@ -369,17 +371,116 @@ func TestGuardStatsPendingEqualsWhatTheGuardProcesses(t *testing.T) {
 	f.expect("after the guard ran empty", ar, guardStatsView{})
 }
 
-// Pflichttest 4 (D1): a guard run that finds nothing while the write that
-// makes a block pending is in flight. Afterwards guard-stats shows the block.
+// Pflichttests 4 (D1, D2) — the recount races of issue #341. Before
+// migration 181 the guard run ended with an update of the state row; when
+// the vector write that makes a block pending held that row (uncommitted),
+// the run waited for it and then wrote the numbers of its earlier snapshot:
+// pending_count 0, dirty_since NULL while the block waited. Since 181 the
+// run takes no lock a block writer holds and stores no count. What the two
+// tests construct, on any schema: the guard run takes its snapshot while the
+// vector write is open — it either finishes while the write is still open
+// (since 181) or stands in a lock wait on its own backend (before 181) —
+// and only then does the write commit. guardRunHeldOrDone establishes one of
+// the two states or fails the test; it never returns without one. What they
+// pin since 181: the run does not wait for an open block write, it does not
+// see the uncommitted block (processed 0 in D1, 1 in D2), and guard-stats
+// counts the block afterwards — there is no stored value the run could have
+// left stale.
+
+type guardRunResult struct {
+	n   int
+	err error
+}
+
+// guardRunApp names the guard run's own connections (application_name), so
+// its backends can be told apart from the open writer's.
+const guardRunApp = "q341-guard-run"
+
+// startGuardRun runs one guard batch on a pool of its own whose backends
+// carry guardRunApp.
+func (f *guardStatsFixture) startGuardRun() <-chan guardRunResult {
+	f.t.Helper()
+	cfg, err := pgxpool.ParseConfig(f.dsn)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["application_name"] = guardRunApp
+	gp, err := pgxpool.NewWithConfig(f.ctx, cfg)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.t.Cleanup(gp.Close)
+	done := make(chan guardRunResult, 1)
+	set := f.reg.Snapshot()
+	go func() {
+		n, err := guard.RunGuardBatch(f.ctx, gp, set, 100)
+		done <- guardRunResult{n, err}
+	}()
+	return done
+}
+
+// guardRunHeldOrDone blocks until the guard run started by startGuardRun has
+// finished ("done", with its result) or one of its own backends stands in a
+// lock wait ("waiting"). Neither within 10 s fails the test.
+func (f *guardStatsFixture) guardRunHeldOrDone(done <-chan guardRunResult) (string, guardRunResult) {
+	f.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case r := <-done:
+			return "done", r
+		default:
+		}
+		var waiting int
+		if err := f.pool.QueryRow(f.ctx, `SELECT count(*)::int FROM pg_stat_activity
+			WHERE datname = current_database() AND application_name = $1 AND wait_event_type = 'Lock'`, guardRunApp).Scan(&waiting); err != nil {
+			f.t.Fatal(err)
+		}
+		if waiting > 0 {
+			return "waiting", guardRunResult{}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	f.t.Fatalf("the guard run neither finished nor waited for a lock within 10 s")
+	return "", guardRunResult{}
+}
+
+// raceGuardRunWithOpenWrite runs a guard batch while tx holds an uncommitted
+// vector write, commits tx only once the run has finished or stands in a
+// lock wait, and returns the run's result. A run that waits for the open
+// write (the shape before migration 181) is an error.
+func (f *guardStatsFixture) raceGuardRunWithOpenWrite(label string, tx pgx.Tx) guardRunResult {
+	f.t.Helper()
+	done := f.startGuardRun()
+	state, r := f.guardRunHeldOrDone(done)
+	switch state {
+	case "done":
+	case "waiting":
+		f.t.Errorf("%s: the guard run waits for the open block write", label)
+	default:
+		f.t.Fatalf("%s: the guard run reached no defined state (%q)", label, state)
+	}
+	if err := tx.Commit(f.ctx); err != nil {
+		f.t.Fatal(err)
+	}
+	if state == "waiting" {
+		r = <-done
+	}
+	if r.err != nil {
+		f.t.Fatalf("%s: guard run: %v", label, r.err)
+	}
+	return r
+}
+
+// D1: the run finds nothing — the block's vector write is open.
 func TestGuardStatsPendingAfterEmptyRunRacesAWrite(t *testing.T) {
 	f := newGuardStatsFixture(t)
 	ar := f.auth(f.adminKey())
-	set := f.reg.Snapshot()
 	x, err := store.UpsertBlock(f.ctx, f.pool, "q341", "x one", "content of x one", nil, nil, "private", true, store.SensitivityWrite{}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := guard.RunGuardBatch(f.ctx, f.pool, set, 100); err != nil {
+	if _, err := guard.RunGuardBatch(f.ctx, f.pool, f.reg.Snapshot(), 100); err != nil {
 		t.Fatal(err)
 	}
 	tx, err := f.pool.Begin(f.ctx)
@@ -390,18 +491,8 @@ func TestGuardStatsPendingAfterEmptyRunRacesAWrite(t *testing.T) {
 	if err := store.StoreEmbedding(f.ctx, tx, x.ID, "q341", guardStatsVec()); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
-	go func() {
-		_, err := guard.RunGuardBatch(f.ctx, f.pool, set, 100)
-		done <- err
-	}()
-	// Let the run reach whatever it waits for (today: the state row) or end.
-	waitForGuardWaitOrDone(t, f.pool, 2*time.Second)
-	if err := tx.Commit(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	if r := f.raceGuardRunWithOpenWrite("D1", tx); r.n != 0 {
+		t.Fatalf("D1: the run processed %d blocks, want 0 — it saw the block, so it did not run while the write was open", r.n)
 	}
 	want := f.truth(ar.ReadScopes)
 	if want.pending != 1 {
@@ -410,14 +501,13 @@ func TestGuardStatsPendingAfterEmptyRunRacesAWrite(t *testing.T) {
 	f.expect("D1 after the race", ar, want)
 }
 
-// Pflichttest 4 (D2): the run re-checks a block whose verdict does not count
-// and recounts while another block's vector write is in flight.
+// D2: the run processes another block (x2, re-pending after a content edit)
+// while y2's vector write is open.
 func TestGuardStatsPendingAfterRecountRacesAWrite(t *testing.T) {
 	f := newGuardStatsFixture(t)
 	ar := f.auth(f.adminKey())
-	set := f.reg.Snapshot()
 	x2 := f.pendingBlock("private", "x two", "")
-	if _, err := guard.RunGuardBatch(f.ctx, f.pool, set, 100); err != nil {
+	if _, err := guard.RunGuardBatch(f.ctx, f.pool, f.reg.Snapshot(), 100); err != nil {
 		t.Fatal(err)
 	}
 	edited := "content of x two, edited"
@@ -439,44 +529,12 @@ func TestGuardStatsPendingAfterRecountRacesAWrite(t *testing.T) {
 	if err := store.StoreEmbedding(f.ctx, tx, y2.ID, "q341", guardStatsVec()); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
-	go func() {
-		n, err := guard.RunGuardBatch(f.ctx, f.pool, set, 100)
-		if err == nil && n != 1 {
-			t.Errorf("fixture: the run processed %d blocks, want x2", n)
-		}
-		done <- err
-	}()
-	waitForGuardWaitOrDone(t, f.pool, 2*time.Second)
-	if err := tx.Commit(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	if r := f.raceGuardRunWithOpenWrite("D2", tx); r.n != 1 {
+		t.Fatalf("D2: the run processed %d blocks, want 1 (x2) — with 2 it saw y2, so it did not run while the write was open", r.n)
 	}
 	want := f.truth(ar.ReadScopes)
 	if want.pending != 1 {
 		t.Fatalf("fixture: %d pending blocks, want 1 (y2)", want.pending)
 	}
 	f.expect("D2 after the race", ar, want)
-}
-
-// waitForGuardWaitOrDone gives the guard run up to d to either wait for a
-// lock (the interleaving of phase 1) or finish (no wait to reach any more).
-func waitForGuardWaitOrDone(t *testing.T, pool *pgxpool.Pool, d time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		var n int
-		if err := pool.QueryRow(context.Background(), `SELECT count(*)::int FROM pg_stat_activity
-			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		if n > 0 {
-			t.Logf("guard run waits for a lock")
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Logf("no lock wait within %v (the run did not wait)", d)
 }
