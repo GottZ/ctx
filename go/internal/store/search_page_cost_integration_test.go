@@ -68,7 +68,7 @@ func TestSearchPageCost(t *testing.T) {
 				ReadScopes: []string{"private"}, Category: "cost-listed", Limit: store.SearchMaxLimit,
 				Compact: true, After: c.after, ProbeNext: true,
 			})
-			if !strings.HasSuffix(sql, "LIMIT $"+strconv.Itoa(len(args))) || args[len(args)-1] != store.SearchMaxLimit+1 {
+			if !strings.Contains(sql, "LIMIT $"+strconv.Itoa(len(args))) || args[len(args)-1] != store.SearchMaxLimit+1 {
 				t.Fatalf("%s: not the probed statement (last arg %v)", c.name, args[len(args)-1])
 			}
 			cost := testdb.ExplainGeneric(t, pool, sql, args...)

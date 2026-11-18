@@ -2196,13 +2196,16 @@ func searchBlocksSQL(p searchParams) (string, []any) {
 	var selectFields string
 	var orderBy string
 	if compact {
-		selectFields = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, LEFT(content, 200) AS content_preview, length(content) AS content_length, created_at, updated_at, ` + untrustedOriginCol
+		// The page subquery carries content unread; the preview is computed
+		// above it (compactPreviewCols).
+		selectFields = compactPageCols
 		if hasQuery {
-			orderBy = fmt.Sprintf(
-				`GREATEST(ts_rank_cd(ts_de, plainto_tsquery('german', $%d)), ts_rank_cd(ts_en, plainto_tsquery('english', $%d))) DESC`,
+			selectFields += fmt.Sprintf(
+				`, GREATEST(ts_rank_cd(ts_de, plainto_tsquery('german', $%d)), ts_rank_cd(ts_en, plainto_tsquery('english', $%d))) AS search_rank`,
 				// reuse the query arg index
 				2, 2,
 			)
+			orderBy = `search_rank DESC`
 		} else {
 			// Browse path: id DESC is the MANDATORY tiebreak (updated_at is not
 			// unique) so the keyset cursor (updated_at, id) is a total order —
@@ -2227,11 +2230,41 @@ func searchBlocksSQL(p searchParams) (string, []any) {
 	args = append(args, limit)
 	limitIdx := argIdx
 
-	return fmt.Sprintf(
+	stmt := fmt.Sprintf(
 		`SELECT %s FROM context_blocks WHERE %s ORDER BY %s LIMIT $%d`,
 		selectFields, whereClause, orderBy, limitIdx,
-	), args
+	)
+	if compact {
+		stmt = fmt.Sprintf(`SELECT %s FROM (%s) page ORDER BY %s`, compactPreviewCols, stmt, orderBy)
+	}
+	return stmt, args
 }
+
+// The compact statements (the compact search, both paths, and RecentBlocks)
+// are a page subquery and a projection above it (issue #342). The subquery
+// filters, sorts and limits with content as it is stored — for a wide block a
+// TOAST pointer, which the sort carries without reading it; the projection
+// then computes the preview, LEFT(content, 200), and the character count only
+// for the rows of the page. In one statement the two expressions sat below
+// the sort, so every visible row had its content read out of TOAST and
+// decompressed (a character count needs all of it) for a preview the LIMIT
+// then dropped: the planner postpones only expressions it costs as expensive
+// past a sort, and both are costed as one operator each. Measured on a store
+// with 57 % never-ranked rows of 35 000 characters, browse and recent read
+// 87 027 buffers at 10 000 rows; as a page subquery they read the heap and the
+// page, 937 (TestSearchRecentNeverRankedRowsMeasure). The rows, their order
+// and every output column are unchanged — the projection reads the same row
+// versions in the same snapshot. The full
+// (non-compact) statement needs no subquery: it outputs content unread, and
+// its one expensive expression, the redacted metadata, is postponed past the
+// sort by the planner itself (it holds a subquery).
+const (
+	// compactPageCols are the columns the page subquery hands up.
+	compactPageCols = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, content, created_at, updated_at, untrusted_origin`
+	// compactPreviewCols are the columns of a compact answer, in the order
+	// runSearchBlocks scans them, computed over the page.
+	compactPreviewCols = `id, category, tags, title, scope, sensitivity, type_name, lifecycle_state, type_source, LEFT(content, 200) AS content_preview, length(content) AS content_length, created_at, updated_at, ` + untrustedOriginCol
+)
 
 // runSearchBlocks executes a statement built by searchBlocksSQL and scans it
 // into the preview rows. Split from the builder purely so the builder stays
@@ -2281,33 +2314,8 @@ func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, r
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 50 {
-		limit = 50
-	}
-	// $1=scopes, $2=grants (block-grant OR-arm, T40a). The mandatory
-	// parentheses keep NOT is_archived OUTSIDE the scope/grant OR (a granted
-	// archived block must not leak). category, if present, shifts to $3.
-	q := `SELECT id, category, tags, title, scope, type_name, lifecycle_state, type_source, LEFT(content, 200), char_length(content), created_at, updated_at, ` + untrustedOriginCol + `
-	      FROM context_blocks
-	      WHERE NOT is_archived AND ( scope = ANY($1::text[]) OR id = ANY($2::uuid[]) )`
-	args := []any{readScopes, grantedBlockIDs}
-	if category != "" {
-		args = append(args, category)
-		q += fmt.Sprintf(` AND category = $%d`, len(args))
-	}
-	if len(types) > 0 {
-		args = append(args, types)
-		q += fmt.Sprintf(` AND type_name = ANY($%d::text[])`, len(args))
-	}
-	if len(typesExclude) > 0 {
-		args = append(args, typesExclude)
-		q += fmt.Sprintf(` AND NOT (type_name = ANY($%d::text[]))`, len(args))
-	}
-	args = append(args, limit)
-	q += fmt.Sprintf(` ORDER BY updated_at DESC LIMIT $%d`, len(args))
+	limit = ClampLimit(limit, 10, 50)
+	q, args := recentBlocksSQL(readScopes, category, limit, types, typesExclude, grantedBlockIDs)
 
 	rows, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -2328,6 +2336,37 @@ func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, r
 		return nil, fmt.Errorf("store: recent blocks rows: %w", err)
 	}
 	return results, nil
+}
+
+// recentBlocksSQL composes RecentBlocks' statement for an already clamped
+// limit. Pure, like searchBlocksSQL, so the cost gate EXPLAINs the statement
+// production runs.
+func recentBlocksSQL(readScopes []string, category string, limit int, types, typesExclude, grantedBlockIDs []string) (string, []any) {
+	// $1=scopes, $2=grants (block-grant OR-arm, T40a). The mandatory
+	// parentheses keep NOT is_archived OUTSIDE the scope/grant OR (a granted
+	// archived block must not leak). category, if present, shifts to $3.
+	// A page subquery and the preview above it, like the compact search
+	// (compactPageCols).
+	q := `SELECT id, category, tags, title, scope, type_name, lifecycle_state, type_source, content, created_at, updated_at, untrusted_origin
+	      FROM context_blocks
+	      WHERE NOT is_archived AND ( scope = ANY($1::text[]) OR id = ANY($2::uuid[]) )`
+	args := []any{readScopes, grantedBlockIDs}
+	if category != "" {
+		args = append(args, category)
+		q += fmt.Sprintf(` AND category = $%d`, len(args))
+	}
+	if len(types) > 0 {
+		args = append(args, types)
+		q += fmt.Sprintf(` AND type_name = ANY($%d::text[])`, len(args))
+	}
+	if len(typesExclude) > 0 {
+		args = append(args, typesExclude)
+		q += fmt.Sprintf(` AND NOT (type_name = ANY($%d::text[]))`, len(args))
+	}
+	args = append(args, limit)
+	q += fmt.Sprintf(` ORDER BY updated_at DESC LIMIT $%d`, len(args))
+	return `SELECT id, category, tags, title, scope, type_name, lifecycle_state, type_source, LEFT(content, 200), char_length(content), created_at, updated_at, ` + untrustedOriginCol + `
+	      FROM (` + q + `) page ORDER BY updated_at DESC`, args
 }
 
 // listCategoriesSQL is ListCategories' statement.
