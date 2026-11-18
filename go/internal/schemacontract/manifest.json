@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 177,
-    "migration_count": 65,
+    "migration_max": 178,
+    "migration_count": 66,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -915,14 +915,12 @@
           "name": "ts_de",
           "type": "tsvector",
           "not_null": false,
-          "generated_expr_hash": "9bf1ba341d7a10dc7280f8b151bdb534c85a9d13151927cf96f1d4e83676b3ea",
           "storage": "x"
         },
         {
           "name": "ts_en",
           "type": "tsvector",
           "not_null": false,
-          "generated_expr_hash": "046e8339821c22198f544263fa10d5bcce739515aad106d4add3f4f08f2bf63a",
           "storage": "x"
         },
         {
@@ -6065,6 +6063,9 @@
     "context_blocks_embed_excluded()": {
       "src_hash": "2ac3e8e99b0175a73002be99cf595b7f623ddec903f7fa2e85ad1fcc73988c60"
     },
+    "context_blocks_fulltext()": {
+      "src_hash": "14475d5dcc5558fd31d2aeec963a26ebab9d54a3e83b25fdca952128a6499c3f"
+    },
     "context_blocks_retype()": {
       "src_hash": "510b3cc776e86b2dbc44a6245b33ada942e5e9e306e98fbe0d3f3a568135022c"
     },
@@ -6198,6 +6199,12 @@
     },
     "context_blocks.trg_block_embed_excluded": {
       "def_hash": "b3804b6204712995902b1188e6eb2336a7ed4566fecb94f5641fc811c1809673"
+    },
+    "context_blocks.trg_block_fulltext": {
+      "def_hash": "15d6c2217e448307169bac4743baecf102a8eccb7937267f59494f9c501f13a1"
+    },
+    "context_blocks.trg_block_fulltext_text": {
+      "def_hash": "76f2fb2a56b7be594ab5812ae7dd3bf281ec796d3d7f65af9ae52e4ea944857b"
     },
     "context_blocks.trg_block_retype": {
       "def_hash": "0da2d78c0902ef152a6e9d813b17879bd8e39ab5e55b0da39119f9d0ef25eb09"
