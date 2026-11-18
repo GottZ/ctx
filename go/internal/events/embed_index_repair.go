@@ -107,9 +107,8 @@ func (s *Scheduler) runEmbedIndexRepair(ctx context.Context, mig *embedmigration
 			return nil
 		}
 		if err != nil {
-			if ctx.Err() != nil {
-				return err
-			}
+			// A build its process stopped (canceled context) stores nothing
+			// either: the transaction below cannot begin on that context.
 			rep.Result, rep.Detail, rep.FinishedAt = verifyRed, err.Error(), time.Now().UTC()
 			return s.finishIndexRepairRed(ctx, mig, &rep)
 		}
