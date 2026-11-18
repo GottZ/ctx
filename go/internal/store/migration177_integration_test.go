@@ -11,12 +11,15 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/store"
@@ -632,4 +635,175 @@ func TestMigration177_StateRowAfterForeignKeyChecks(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("two-row insert did not finish after the parent was released")
 	}
+}
+
+// TestMigration177_JitOfAFirstCallDoesNotStick: the trigger's queries keep the
+// plan of their first call on a backend, JIT decision included. A first call
+// that passes jit_above_cost (a whole-table data migration on the application
+// pool) must not leave plans that compile again for every later one-row
+// statement of that backend. Needs a server with JIT, as the production image
+// has one (CTX_TEST_PG_IMAGE=pgvector-timescaledb:pg18); skipped where
+// pg_jit_available() is false.
+func TestMigration177_JitOfAFirstCallDoesNotStick(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	var avail bool
+	if err := pool.QueryRow(ctx, `SELECT pg_jit_available()`).Scan(&avail); err != nil {
+		t.Fatal(err)
+	}
+	if !avail {
+		t.Skip("the server has no JIT (pg_jit_available() is false); the production image has one: CTX_TEST_PG_IMAGE=pgvector-timescaledb:pg18")
+	}
+	g177Exec(t, pool, "g177jit",
+		`INSERT INTO context_blocks (category, title, content, scope) SELECT 'g177jit', '{p} ' || g, 'x', 'private' FROM generate_series(1, 2000) g`)
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var notices []string
+	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
+		mu.Lock()
+		notices = append(notices, n.Message)
+		mu.Unlock()
+	}
+	c, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close(ctx) }()
+	for _, s := range []string{
+		// The first calls of both triggers on this backend, planned with JIT.
+		`SET jit = on`,
+		`SET jit_above_cost = 0`,
+		`UPDATE context_blocks SET tags = ARRAY['t'] WHERE category = 'g177jit'`,
+		`INSERT INTO context_blocks (category, title, content, scope) SELECT 'g177jit2', 'g177jit ins ' || g, 'x', 'private' FROM generate_series(1, 10) g`,
+		`RESET jit_above_cost`,
+		// Every nested plan of the next statements to this client.
+		`LOAD 'auto_explain'`,
+		`SET auto_explain.log_min_duration = 0`,
+		`SET auto_explain.log_analyze = on`,
+		`SET auto_explain.log_nested_statements = on`,
+		`SET client_min_messages = log`,
+		`UPDATE context_blocks SET content = content || '.' WHERE title = 'g177jit 1'`,
+		`INSERT INTO context_blocks (category, title, content, scope) VALUES ('learnings', 'g177jit one', 'x', 'private')`,
+	} {
+		if _, err := c.Exec(ctx, s); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	countPlans := 0
+	for _, n := range notices {
+		if !strings.Contains(n, "IS DISTINCT FROM 'index'") {
+			continue
+		}
+		countPlans++
+		if strings.Contains(n, "JIT:") {
+			t.Errorf("a one-row statement after a JIT-planned first call compiles the count query again:\n%s", n)
+		}
+	}
+	if countPlans != 2 {
+		t.Fatalf("plans of the guard trigger's count query: %d, want 2 (one update, one insert)", countPlans)
+	}
+}
+
+// TestMigration177_ForeignKeyLocksOfEveryRowBeforeTheStateRow pins the other
+// side of the lock order: a multi-row insert that waits for the state row
+// already holds FOR KEY SHARE on the parents of ALL its rows (before 177 only
+// on the first row's). A transaction that holds the state row and then locks
+// such a parent FOR UPDATE closes a deadlock with it, and PostgreSQL ends one
+// of the two with 40P01. No write path takes a row lock after a counted block
+// write in its transaction (migration 177's header names them).
+func TestMigration177_ForeignKeyLocksOfEveryRowBeforeTheStateRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool := testdb.SetupTestDB(t)
+	var p1, p2 string
+	for _, v := range []*string{&p1, &p2} {
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO context_blocks (category, title, content, scope) VALUES ('learnings', 'g177 kparent ' || uuidv7(), 'x', 'private') RETURNING id::text`).Scan(v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writer, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	finished := false
+	defer func() {
+		_ = holder.Rollback(ctx)
+		if !finished {
+			select {
+			case <-done:
+			case <-time.After(15 * time.Second):
+			}
+		}
+		writer.Release()
+	}()
+	// The holder's counted write: it holds the state row until it ends.
+	if _, err := holder.Exec(ctx,
+		`INSERT INTO context_blocks (category, title, content, scope) VALUES ('learnings', 'g177 kholder', 'x', 'private')`); err != nil {
+		t.Fatal(err)
+	}
+	pid := writer.Conn().PgConn().PID()
+	go func() {
+		_, err := writer.Exec(ctx,
+			`INSERT INTO context_blocks (category, title, content, scope, parent_id)
+			 VALUES ('learnings', 'g177 kchild 1', 'x', 'private', $1), ('learnings', 'g177 kchild 2', 'x', 'private', $2)`, p1, p2)
+		done <- err
+	}()
+	g177WaitForLock(t, pool, pid)
+
+	probe, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, probeErr := probe.Exec(ctx, `SELECT 1 FROM context_blocks WHERE id = $1 FOR UPDATE NOWAIT`, p2)
+	_ = probe.Rollback(ctx)
+	if g177SQLState(probeErr) != "55P03" {
+		t.Fatalf("FOR UPDATE NOWAIT on the second row's parent while the insert waits for the state row: %v, want 55P03 (the insert holds FOR KEY SHARE on it)", probeErr)
+	}
+
+	_, holderErr := holder.Exec(ctx, `SELECT 1 FROM context_blocks WHERE id = $1 FOR UPDATE`, p2)
+	if holderErr == nil {
+		if err := holder.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		_ = holder.Rollback(ctx)
+	}
+	var writerErr error
+	select {
+	case writerErr = <-done:
+		finished = true
+	case <-time.After(15 * time.Second):
+		t.Fatal("two-row insert did not finish")
+	}
+	codes := g177SQLState(holderErr) + "/" + g177SQLState(writerErr)
+	if codes != "40P01/" && codes != "/40P01" {
+		t.Fatalf("holder of the state row locking the second row's parent: holder %v, insert %v; want exactly one 40P01", holderErr, writerErr)
+	}
+}
+
+func g177SQLState(err error) string {
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) {
+		return pe.Code
+	}
+	if err != nil {
+		return err.Error()
+	}
+	return ""
 }
