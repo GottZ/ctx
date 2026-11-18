@@ -269,6 +269,38 @@ func TestGuardStatsPendingFollowsTypeScopeAndArchive(t *testing.T) {
 	}
 }
 
+// dirty_since is the oldest updated_at among the waiting blocks, not the
+// oldest created_at: an old block whose text changed waits since its change.
+func TestGuardStatsDirtySinceIsTheOldestChange(t *testing.T) {
+	f := newGuardStatsFixture(t)
+	_, raw := f.tenantKey("q341-d")
+	ar := f.auth(raw)
+	scopes := []string{"q341-d"}
+	old := f.pendingBlock("q341-d", "created first", "")
+	if _, err := guard.RunGuardBatch(f.ctx, f.pool, f.reg.Snapshot(), 100); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	young := f.pendingBlock("q341-d", "created second", "")
+	time.Sleep(5 * time.Millisecond)
+	edited := "content of created first, edited"
+	if _, _, err := store.UpdateBlock(f.ctx, f.pool, old.ID, store.UpdateBlockData{Content: &edited}, scopes); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreEmbedding(f.ctx, f.pool, old.ID, "q341", guardStatsVec()); err != nil {
+		t.Fatal(err)
+	}
+	var youngUpdated, oldCreated time.Time
+	if err := f.pool.QueryRow(f.ctx, `SELECT (SELECT updated_at FROM context_blocks WHERE id = $1::uuid),
+		(SELECT created_at FROM context_blocks WHERE id = $2::uuid)`, young.ID, old.ID).Scan(&youngUpdated, &oldCreated); err != nil {
+		t.Fatal(err)
+	}
+	if !oldCreated.Before(youngUpdated) {
+		t.Fatalf("fixture: the first block's created_at %v is not before the second's updated_at %v", oldCreated, youngUpdated)
+	}
+	f.expect("two waiting blocks, the older one edited", ar, guardStatsView{pending: 2, dirty: &youngUpdated})
+}
+
 // Pflichttest 7: for a server-admin on a mixed store, the count equals the
 // number of blocks the guard actually processes until its pick runs empty.
 func TestGuardStatsPendingEqualsWhatTheGuardProcesses(t *testing.T) {
