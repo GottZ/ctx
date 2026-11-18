@@ -294,7 +294,8 @@ room_take() {
     read -r a d l np <<<"$host"
     out=$(room_check "$a" "$d" "$l" "$np" "$resm" "$resd" "$resc" "$own" "$need")
     if [ "${out%% *}" = start ]; then
-      printf '%s %s %s %s %s %s %s %s\n' "$owner" "$(proc_start "$owner" || echo 0)" "$need" "$ROOM_DISK_GB" "$ROOM_CPU" "$(date +%s)" "$pkg" "$RUN_DIR" > "$ROOM_LEDGER/$entry"
+      printf '%s %s %s %s %s %s %s %s\n' "$owner" "$(proc_start "$owner" || echo 0)" "$need" "$ROOM_DISK_GB" "$ROOM_CPU" "$(date +%s)" "$pkg" "$RUN_DIR" > "$ROOM_LEDGER/$entry" \
+        || out="$v ledger cannot record the reservation in $ROOM_LEDGER/$entry"
     fi
     echo "$out; ledger: $n live slot(s) on this host"
   ) 9>>"$ROOM_LEDGER/.lock"
@@ -327,7 +328,10 @@ step_integ() {
   if ! command -v flock >/dev/null 2>&1; then mode=unchecked; why="${why}flock is not installed"
   elif ! { mkdir -m 0755 "$ROOM_LEDGER" 2>/dev/null; room_ledger_ok "$ROOM_LEDGER"; }; then
     why="${why}ledger $ROOM_LEDGER not usable (not writable, or another user's, or writable by others) — this user's runs only; "
-    ROOM_LEDGER="${XDG_RUNTIME_DIR:-$TMPDIR}/ctx-gates"; mkdir -m 0700 "$ROOM_LEDGER" 2>/dev/null
+    # the fallback is the same directory for every checkout of this user (never
+    # TMPDIR: that differs per run), and it passes the same check as the first
+    ROOM_LEDGER="${XDG_RUNTIME_DIR:-${HOME:-/nonexistent}/.cache}/ctx-gates"; mkdir -m 0700 "$ROOM_LEDGER" 2>/dev/null
+    room_ledger_ok "$ROOM_LEDGER" || { mode=unchecked; why="${why}fallback ledger $ROOM_LEDGER not usable either"; }
   fi
   [ "$mode" = checked ] && ! room_measure >/dev/null && { mode=unchecked; why="${why}host values not readable (/proc/meminfo, /proc/loadavg, df)"; }
   say "integration: $total packages, longest first: ${queue[*]}"
@@ -462,7 +466,7 @@ fi
 export GOFLAGS="${GOFLAGS# }"
 mkdir -p "$GOCACHE" "$GOLANGCI_LINT_CACHE" "$GOTMPDIR" "$TMPDIR"
 LOG_ROOT="${CTX_GATES_LOG:-$TMPDIR/gates}"
-RUN_DIR="$LOG_ROOT/$CMD-$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_DIR="$LOG_ROOT/$CMD-$(date -u +%Y%m%dT%H%M%SZ)-$$" # the pid: two runs started in the same second keep their logs and their not-started list apart
 mkdir -p "$RUN_DIR"
 echo "gates: env GOCACHE=$GOCACHE GOLANGCI_LINT_CACHE=$GOLANGCI_LINT_CACHE GOTMPDIR=$GOTMPDIR TMPDIR=$TMPDIR GOFLAGS='$GOFLAGS' log=$RUN_DIR"
 

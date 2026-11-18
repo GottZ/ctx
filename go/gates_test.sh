@@ -119,7 +119,9 @@ sleep 0.2
 ls_start=$(proc_start "$SLEEPER")
 now=$(date +%s)
 printf '%s %s 6144 6 2 %s ./internal/handler/ /other/run\n' "$SLEEPER" "$ls_start" "$now" > "$L/slot-1-1"
-same "a live foreign slot counts with its whole budget" "$(ledger_sum 0)" "1 6144 6 2.00"
+ls_sum=$(ledger_sum 0) # the cores decay with the entry's age (e^(-age/60 s)): a second may pass between the entry and the sum
+same "a live foreign slot counts with its whole memory and disk budget" "${ls_sum% *}" "1 6144 6"
+case "${ls_sum##* }" in 2.00|1.9[0-9]) ok "a fresh foreign slot counts with (nearly) all of its cores" ;; *) bad "a fresh foreign slot counts with (nearly) all of its cores" "want: 1.90–2.00" "got:  ${ls_sum##* }" ;; esac
 out=$(room_plan 16808 300 1.00 12 6144 6 2.00 "$H" "$E" "$S")
 expect "foreign reservation decides: 0 instead of 2 slots" "$out" "plan: 0 of 3 packages at once now" "bound=mem" "- 6144 reserved"
 out=$(room_plan 16808 300 1.00 12 0 0 0 "$H" "$E" "$S")

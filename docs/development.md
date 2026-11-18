@@ -291,7 +291,7 @@ room for it, **measured right before that start**, not once per run:
 | `CTX_GATES_DISK_RESERVE_GB` | `120` | free disk on the Docker file system never planned |
 | `CTX_GATES_SLOT_CPU` | `2` | cores per slot |
 | `CTX_GATES_ROOM_WAIT` | `1800` | seconds to wait when not even one package fits (the longest measured package took 770 s), then exit 6 |
-| `CTX_GATES_SLOTS` | `/run/lock/ctx-gates` | the ledger directory (tmpfs: a reboot ends every slot); used only when it is a real directory of this user or root that nobody else can write to, otherwise `$XDG_RUNTIME_DIR/ctx-gates` — then only this user's runs see each other |
+| `CTX_GATES_SLOTS` | `/run/lock/ctx-gates` | the ledger directory (tmpfs: a reboot ends every slot); used only when it is a real directory of this user or root that nobody else can write to, otherwise `$XDG_RUNTIME_DIR/ctx-gates` (without that variable `~/.cache/ctx-gates`), held to the same check — then only this user's runs see each other; when neither is usable the step runs one package at a time and says so |
 
 Where the starting values come from — a measurement on the 12-core, 64 GB build
 host (2026-11-17, one sample per configuration under foreign load, load1 3.8–8.4
