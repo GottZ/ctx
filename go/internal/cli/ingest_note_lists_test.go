@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -135,6 +136,32 @@ func TestIngestNoteListsOnFirstChunkOnly(t *testing.T) {
 				t.Errorf("plain.md: %d chunks, want several", len(c.fileChunks("plain.md")))
 			}
 		})
+	}
+}
+
+// A note in a folder followed out of the vault by a link (#324) is sent like
+// any other: its lists on its first chunk, under its path through the link.
+func TestIngestNoteListsThroughFolderLink(t *testing.T) {
+	outside := t.TempDir()
+	writeIngestFixture(t, outside, "ext.md", linkedNote(3))
+	vault := t.TempDir()
+	symlinkOrSkip(t, outside, filepath.Join(vault, "shared"))
+	c := &cappedIngest{}
+	srv := httptest.NewServer(http.HandlerFunc(c.serveHTTP))
+	defer srv.Close()
+	if stderr, err := runIngestCmd(t, srv.URL, vault, "--category", "lists"); err != nil {
+		t.Fatalf("run: %v\n%s", err, stderr)
+	}
+	ext := c.fileChunks("shared/ext.md")
+	if len(ext) != 3 {
+		t.Fatalf("shared/ext.md: %d chunks, want 3", len(ext))
+	}
+	for i, ch := range ext {
+		_, isList := listOf(ch.Metadata, "links")
+		v, present := ch.Metadata["links"]
+		if (i == 0) != isList || (i > 0 && (!present || v != nil)) {
+			t.Errorf("shared/ext.md chunk %d: links %v (present %v); want the list on chunk 1 only, null after", i+1, v, present)
+		}
 	}
 }
 
