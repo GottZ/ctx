@@ -167,17 +167,24 @@ func g177Triggers(t *testing.T, pool *pgxpool.Pool) map[string]string {
 	return m
 }
 
-// g177Pair returns a database on the row-trigger schema and one on the head
-// schema, and checks that each carries the trigger shape it stands for.
+// g177LastVersion is the last schema that carries the statement-level guard
+// triggers of 177: migration 181 drops them and mark_guard_dirty() (issue
+// #341). The tests of this file pin what 177 changed, so they run on 180
+// instead of the head; TestMigration181_DropsTheCounterKeepsTheTable pins
+// that the way back of 181 restores this catalog.
+const g177LastVersion = 180
+
+// g177Pair returns a database on the row-trigger schema and one on the
+// schema of 180, and checks that each carries the trigger shape it stands for.
 func g177Pair(t *testing.T) (rowTrig, head *pgxpool.Pool) {
 	t.Helper()
 	rowTrig = testdb.SetupTestDBUpTo(t, g177RowTriggerVersion)
-	head = testdb.SetupTestDB(t)
+	head = testdb.SetupTestDBUpTo(t, g177LastVersion)
 	if got := g177Triggers(t, rowTrig); fmt.Sprint(got) != "map[trg_guard_dirty:row]" {
 		t.Fatalf("schema %d: guard triggers %v, want the row-level trg_guard_dirty", g177RowTriggerVersion, got)
 	}
 	if got := g177Triggers(t, head); fmt.Sprint(got) != "map[trg_guard_dirty:statement trg_guard_dirty_upd:statement]" {
-		t.Fatalf("head schema: guard triggers %v, want trg_guard_dirty and trg_guard_dirty_upd statement-level", got)
+		t.Fatalf("schema 180: guard triggers %v, want trg_guard_dirty and trg_guard_dirty_upd statement-level", got)
 	}
 	return rowTrig, head
 }
@@ -427,7 +434,7 @@ func TestMigration177_StateRowWrittenOncePerStatement(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
-	pool := testdb.SetupTestDB(t)
+	pool := testdb.SetupTestDBUpTo(t, g177LastVersion)
 	m := g177Run(t, pool, "g177once", nil, false,
 		g177SQL(`INSERT INTO context_blocks (category, title, content, scope)
 		         SELECT 'learnings', '{p} ' || g, 'x', 'private' FROM generate_series(1, 500) g`),
@@ -475,7 +482,7 @@ func TestMigration177_LargeUpdateAfterAOneRowUpdate(t *testing.T) {
 		t.Skip("integration test")
 	}
 	ctx := context.Background()
-	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	pool, dsn := testdb.SetupTestDBUpToWithDSN(t, g177LastVersion)
 	g177Exec(t, pool, "g177plan",
 		`INSERT INTO context_blocks (category, title, content, scope)
 		 SELECT 'g177plan' || (g / 4000), '{p} ' || g, 'x', 'private' FROM generate_series(0, 8000) g`)
@@ -524,8 +531,8 @@ func TestMigration177_AppliesOnARowTriggerDatabase(t *testing.T) {
 	ctx := context.Background()
 	pool := testdb.SetupTestDBUpTo(t, g177RowTriggerVersion)
 	g177Exec(t, pool, "g177mig", g177Plain("a"), g177Checked("b"), g177Index("c"))
-	if err := store.RunMigrations(ctx, pool); err != nil {
-		t.Fatalf("migrate to head: %v", err)
+	if err := store.RunMigrationsUpTo(ctx, pool, g177LastVersion); err != nil {
+		t.Fatalf("migrate to %d: %v", g177LastVersion, err)
 	}
 	if got := g177Triggers(t, pool); fmt.Sprint(got) != "map[trg_guard_dirty:statement trg_guard_dirty_upd:statement]" {
 		t.Fatalf("after the migration: guard triggers %v", got)
@@ -568,7 +575,7 @@ func TestMigration177_StateRowAfterForeignKeyChecks(t *testing.T) {
 		t.Skip("integration test")
 	}
 	ctx := context.Background()
-	pool := testdb.SetupTestDB(t)
+	pool := testdb.SetupTestDBUpTo(t, g177LastVersion)
 	var p1, p2 string
 	for _, v := range []*string{&p1, &p2} {
 		if err := pool.QueryRow(ctx,
@@ -649,7 +656,7 @@ func TestMigration177_JitOfAFirstCallDoesNotStick(t *testing.T) {
 		t.Skip("integration test")
 	}
 	ctx := context.Background()
-	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	pool, dsn := testdb.SetupTestDBUpToWithDSN(t, g177LastVersion)
 	var avail bool
 	if err := pool.QueryRow(ctx, `SELECT pg_jit_available()`).Scan(&avail); err != nil {
 		t.Fatal(err)
@@ -724,7 +731,7 @@ func TestMigration177_ForeignKeyLocksOfEveryRowBeforeTheStateRow(t *testing.T) {
 		t.Skip("integration test")
 	}
 	ctx := context.Background()
-	pool := testdb.SetupTestDB(t)
+	pool := testdb.SetupTestDBUpTo(t, g177LastVersion)
 	var p1, p2 string
 	for _, v := range []*string{&p1, &p2} {
 		if err := pool.QueryRow(ctx,

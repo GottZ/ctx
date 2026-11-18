@@ -237,12 +237,12 @@ func TestDreamSupersedesBatchesDoNotCloseACycleTogether(t *testing.T) {
 
 // TestDreamSupersedesGuessWaitsForAnArchiveOfItsSource: an archive of S has
 // locked S and its supersedes targets and is held before its commit (a third
-// connection holds the guard-state row its UPDATE needs); a dream batch then
-// guesses S supersedes L. Without the archive's shared guess lock the batch
-// reads S as live, makes L a snapshot of S and commits beside the archive —
-// L ends a snapshot of an archived block, and the archive's reconcile never
-// saw L. With it, the batch waits for the archive, reads S as archived and
-// leaves L knowledge.
+// connection holds the write gate, holdWriteGate, that its UPDATE of S takes);
+// a dream batch then guesses S supersedes L. Without the archive's shared
+// guess lock the batch reads S as live, makes L a snapshot of S and commits
+// beside the archive — L ends a snapshot of an archived block, and the
+// archive's reconcile never saw L. With it, the batch waits for the archive,
+// reads S as archived and leaves L knowledge.
 func TestDreamSupersedesGuessWaitsForAnArchiveOfItsSource(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -255,14 +255,14 @@ func TestDreamSupersedesGuessWaitsForAnArchiveOfItsSource(t *testing.T) {
 	l := raceBlock(t, pool, "archive-note")    // older
 	s := raceBlock(t, pool, "archive-note v2") // newer: dream may guess "s supersedes l"
 
-	release := gateTx(t, pool, `SELECT 1 FROM context_guard_state FOR NO KEY UPDATE`)
+	release := holdWriteGate(t, pool)
 	archivePool := actorPool(t, dsn, "guess-archive", nil)
 	archived := make(chan error, 1)
 	go func() {
 		_, err := store.DeleteBlock(ctx, archivePool, s, []string{"private"})
 		archived <- err
 	}()
-	waitForLockWait(t, pool, "guess-archive") // locked S, waits for the guard row in its UPDATE
+	waitForLockWait(t, pool, "guess-archive") // locked S, waits for the write gate in its UPDATE
 
 	batchPool := actorPool(t, dsn, "guess-batch", nil)
 	done := make(chan writeResult, 1)

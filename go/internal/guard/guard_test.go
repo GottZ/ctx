@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -96,10 +97,12 @@ func expectAuditInsert(mock pgxmock.PgxPoolIface) *pgxmock.ExpectedExec {
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 }
 
-// expectGuardStateUpdate matches the final guard_state UPDATE.
+// expectGuardStateUpdate matches the run's one write of the state row: the
+// last_guard_at stamp on the pool, AFTER the batch transaction committed
+// (issue #341 — the run holds the row for no block work, so it is expected
+// after ExpectCommit; inside the transaction it would fail the order).
 func expectGuardStateUpdate(mock pgxmock.PgxPoolIface) {
-	mock.ExpectExec(`UPDATE context_guard_state`).
-		WithArgs(pgxmock.AnyArg()).
+	mock.ExpectExec(`^` + regexp.QuoteMeta(lastGuardAtSQL) + `$`).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 }
 
@@ -173,10 +176,9 @@ func TestRunGuardBatch_NoPending(t *testing.T) {
 	mock.ExpectQuery(`SELECT id, type_name FROM context_blocks`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(mock.NewRows([]string{"id", "type_name"}))
-	// State update for empty case.
-	mock.ExpectExec(`UPDATE context_guard_state`).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
+	// The stamp of an empty run, after its commit.
+	expectGuardStateUpdate(mock)
 
 	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
 	if err != nil {
@@ -201,8 +203,8 @@ func TestRunGuardBatch_HappyPath_ThreeBlocks(t *testing.T) {
 	expectFullBlockSuccess(mock, blockA)
 	expectFullBlockSuccess(mock, blockB)
 	expectFullBlockSuccess(mock, blockC)
-	expectGuardStateUpdate(mock)
 	mock.ExpectCommit()
+	expectGuardStateUpdate(mock)
 
 	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
 	if err != nil {
@@ -236,8 +238,8 @@ func TestRunGuardBatch_MiddleBlockFails_OthersProceed(t *testing.T) {
 	// Block C: succeeds, proving the tx is still usable after B's rollback.
 	expectFullBlockSuccess(mock, blockC)
 
-	expectGuardStateUpdate(mock)
 	mock.ExpectCommit()
+	expectGuardStateUpdate(mock)
 
 	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
 	if err != nil {
@@ -272,8 +274,8 @@ func TestRunGuardBatch_ApplyDecisionFails_RollsBack(t *testing.T) {
 	// Block B: succeeds.
 	expectFullBlockSuccess(mock, blockB)
 
-	expectGuardStateUpdate(mock)
 	mock.ExpectCommit()
+	expectGuardStateUpdate(mock)
 
 	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
 	if err != nil {
@@ -310,8 +312,8 @@ func TestRunGuardBatch_AuditLogFails_RollsBack(t *testing.T) {
 	// Block B: succeeds — proves tx is still usable.
 	expectFullBlockSuccess(mock, blockB)
 
-	expectGuardStateUpdate(mock)
 	mock.ExpectCommit()
+	expectGuardStateUpdate(mock)
 
 	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
 	if err != nil {
@@ -342,8 +344,8 @@ func TestRunGuardBatch_SavepointCreateFails_SkipsBlock(t *testing.T) {
 	// Block B: succeeds.
 	expectFullBlockSuccess(mock, blockB)
 
-	expectGuardStateUpdate(mock)
 	mock.ExpectCommit()
+	expectGuardStateUpdate(mock)
 
 	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
 	if err != nil {
@@ -417,9 +419,8 @@ func TestRunGuardBatch_BatchCompleteLogOnlyWithWork(t *testing.T) {
 		mock.ExpectQuery(`SELECT id, type_name FROM context_blocks`).
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(mock.NewRows([]string{"id", "type_name"}))
-		mock.ExpectExec(`UPDATE context_guard_state`).
-			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 		mock.ExpectCommit()
+		expectGuardStateUpdate(mock)
 	}, 0)
 	if strings.Contains(empty, batchLine) {
 		t.Errorf("empty batch logged the batch line, want silence: %s", empty)
@@ -429,8 +430,8 @@ func TestRunGuardBatch_BatchCompleteLogOnlyWithWork(t *testing.T) {
 		mock.ExpectBegin()
 		expectPendingFetch(mock, blockA)
 		expectFullBlockSuccess(mock, blockA)
-		expectGuardStateUpdate(mock)
 		mock.ExpectCommit()
+		expectGuardStateUpdate(mock)
 	}, 1)
 	if !strings.Contains(worked, batchLine) {
 		t.Errorf("processed batch did not log the batch line: %s", worked)

@@ -56,8 +56,8 @@ type pendingBlock struct {
 }
 
 // guardPendingWhere is THE single guard-batch pending predicate (WF T7,
-// design/01 §7-T7): the pick query and both count subqueries in the state
-// update consume this one fragment instead of carrying three copies.
+// design/01 §7-T7): the pick query and PendingStats (manage guard-stats,
+// issue #341) consume this one fragment instead of carrying two copies.
 // typesParam binds the GuardCheckTypes allowlist (guard.check=true types).
 // The first three conjuncts mirror idx_guard_pending (M074) byte-for-byte —
 // only pending rows are IN that partial index; NOT embedding_stale (issue
@@ -81,6 +81,44 @@ func guardPendingWhere(typesParam string) string {
 		  AND type_name = ANY(` + typesParam + `::text[])`
 }
 
+// lastGuardAtSQL stamps the end of a committed guard run. It is the only
+// write of context_guard_state left (issue #341, migration 181).
+const lastGuardAtSQL = `UPDATE context_guard_state SET last_guard_at = now() WHERE id = true`
+
+// pendingStatsSQL counts what the pick would take, within the read scopes in
+// $1 ($2 = the GuardCheckTypes allowlist), and the oldest updated_at among
+// those blocks — one pass over idx_guard_pending (its partial predicate has
+// no parameter, so a generic plan can use it too); scope = ANY($1) filters
+// the index result or joins idx_context_scope in a BitmapAnd. The cost grows
+// with the entries of idx_guard_pending, not with the corpus and not only
+// with the waiting blocks: the index predicate is the first three conjuncts
+// of guardPendingWhere, so it also holds unchecked blocks with a vector that
+// the pick filters out and never takes out of the index (a type with
+// guard.check = false, category index, another lifecycle, a stale vector)
+// — docs/operations.md, "Migration 181".
+var pendingStatsSQL = `SELECT count(*)::int, min(updated_at) FROM context_blocks
+	WHERE scope = ANY($1::text[])
+	  AND ` + guardPendingWhere("$2")
+
+// PendingStats returns how many blocks within readScopes the guard pick would
+// still take (the pick's own predicate, guardPendingWhere, with the
+// allowlist checkTypes — the pick's, i.e. the BASE registry snapshot), and
+// the oldest updated_at among them (nil when none waits). It backs manage
+// guard-stats' pending_count and dirty_since (issue #341): counted when asked,
+// per caller, instead of a global counter every block writer had to lock.
+// Empty or nil readScopes count nothing (scope = ANY of an empty or NULL
+// array matches no row).
+func PendingStats(ctx context.Context, q pgxdb.Rower, readScopes, checkTypes []string) (int, *time.Time, error) {
+	var (
+		n      int
+		oldest *time.Time
+	)
+	if err := q.QueryRow(ctx, pendingStatsSQL, readScopes, checkTypes).Scan(&n, &oldest); err != nil {
+		return 0, nil, fmt.Errorf("guard: pending stats: %w", err)
+	}
+	return n, oldest, nil
+}
+
 // RunGuardBatch processes pending blocks through the duplicate detection guard.
 // Uses the ctx_guard_check PG function for each block.
 // Returns the number of blocks processed and any error.
@@ -95,8 +133,17 @@ func guardPendingWhere(typesParam string) string {
 // the block's type and passes GuardCandidateTypes as the candidate allowlist.
 // A nil set is a wiring bug and fails loudly (rrf.Search pattern) — an empty
 // GuardCheckTypes list is legitimate policy ("no type is guard-checked") and
-// simply yields zero picks. The singleton state counts stay GLOBAL and count
-// with the same allowlist (telemetry, not policy — design/01 §7-T12 note).
+// simply yields zero picks.
+//
+// The run takes no lock on context_guard_state while it works (issue #341):
+// since migration 181 no trigger counts block writes into that row, and the
+// run writes only last_guard_at, in a statement of its own after its
+// transaction has committed. It then holds no block row while it waits for
+// the state row (another instance's run may hold it for a moment), so no
+// block writer waits for it and no lock cycle runs through the row. The
+// value is the time just after the run's commit (before 181 it was the start
+// of the run's transaction); a run that fails or is interrupted writes none,
+// as before. How many blocks wait is counted on demand (PendingStats).
 //
 // Tx-Abort-Kaskade fix (W47-02): Each block is wrapped in a SAVEPOINT so a
 // failed block (SQL error in checkBlock/applyDecision/writeAuditLog) does not
@@ -166,17 +213,7 @@ func RunGuardBatch(ctx context.Context, pool interface {
 		}
 
 		if len(blocks) == 0 {
-			// No pending blocks. Clear dirty state.
-			_, _ = tx.Exec(ctx,
-				`UPDATE context_guard_state SET
-					last_guard_at = now(),
-					dirty_since = NULL,
-					pending_count = 0
-				WHERE id = true`,
-			)
-			// Nothing to process: the state update above is all this batch
-			// writes, and the helper persists it — a nil return closes the
-			// transaction exactly where the explicit call used to sit.
+			// Nothing to process: a nil return closes the transaction.
 			return nil
 		}
 
@@ -193,32 +230,18 @@ func RunGuardBatch(ctx context.Context, pool interface {
 				processed++
 			}
 		}
-
-		// Update guard state — both count subqueries reuse the SAME pending
-		// fragment as the pick ($1 = the type allowlist).
-		_, err = tx.Exec(ctx,
-			`UPDATE context_guard_state SET
-				last_guard_at = now(),
-				dirty_since = CASE
-					WHEN (SELECT count(*) FROM context_blocks
-						WHERE `+guardPendingWhere("$1")+`
-					) = 0 THEN NULL
-					ELSE dirty_since
-				END,
-				pending_count = (SELECT count(*)::int FROM context_blocks
-					WHERE `+guardPendingWhere("$1")+`
-				)
-			WHERE id = true`,
-			checkTypes,
-		)
-		if err != nil {
-			slog.Error("guard: update state failed", "error", err)
-		}
 		return nil
 	})
 
 	if err != nil {
 		return processed, err
+	}
+
+	// After the commit, in a statement of its own: see the doc comment. A
+	// context cancelled right after the commit (shutdown) leaves the stamp
+	// out without an error line; the batch itself is committed.
+	if _, err := pool.Exec(ctx, lastGuardAtSQL); err != nil && ctx.Err() == nil {
+		slog.Error("guard: update state failed", "error", err)
 	}
 
 	if len(blocks) > 0 {

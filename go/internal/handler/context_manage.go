@@ -16,6 +16,7 @@ import (
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/gatewaylimits"
+	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/keyquota"
 	"github.com/GottZ/ctx/internal/modelalias"
 	"github.com/GottZ/ctx/internal/sealbox"
@@ -134,6 +135,19 @@ func (h *ManageHandler) dreamLinkableTypes(ctx context.Context) []string {
 		return nil
 	}
 	return h.blocktypes.SnapshotForRequest(ctx).DreamLinkableTypes()
+}
+
+// guardCheckTypes is the guard pick's type allowlist for guard-stats' pending
+// count (issue #341): the BASE registry snapshot, the one the scheduler hands
+// to guard.RunGuardBatch — not the request's tenant view, so the count is
+// exactly what the pick takes. nil registry (test wiring) ⇒ empty allowlist,
+// the count reads 0 (dreamLinkableTypes pattern).
+func (h *ManageHandler) guardCheckTypes() []string {
+	if h.blocktypes == nil {
+		slog.Warn("manage: block-type registry not wired — guard pending count runs fail-closed empty")
+		return nil
+	}
+	return h.blocktypes.Snapshot().GuardCheckTypes()
 }
 
 // NewManageHandler creates a new ManageHandler. cfg is the runtime-config
@@ -867,7 +881,18 @@ func (h *ManageHandler) handleGuardStats(w http.ResponseWriter, r *http.Request,
 	ctx := r.Context()
 	reqID := RequestIDFromContext(ctx)
 
+	// pending_count and dirty_since: the blocks the guard still has to check
+	// within the caller's read scopes, counted now (issue #341, migration
+	// 181) — the read scopes of the block numbers of this answer.
+	// last_guard_at and write_log_entries stay server-wide, as before.
 	stats, err := store.GetGuardStats(ctx, h.pool, ar.ReadScopes)
+	var (
+		pending    int
+		dirtySince *time.Time
+	)
+	if err == nil {
+		pending, dirtySince, err = guard.PendingStats(ctx, h.pool, ar.ReadScopes, h.guardCheckTypes())
+	}
 	if err != nil {
 		slog.Error("manage: guard-stats error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -887,9 +912,9 @@ func (h *ManageHandler) handleGuardStats(w http.ResponseWriter, r *http.Request,
 		"unchecked":         stats.Unchecked,
 		"archived_dups":     stats.ArchivedDups,
 		"write_log_entries": stats.WriteLogEntries,
-		"dirty_since":       stats.DirtySince,
+		"dirty_since":       dirtySince,
 		"last_guard_at":     stats.LastGuardAt,
-		"pending_count":     stats.PendingCount,
+		"pending_count":     pending,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

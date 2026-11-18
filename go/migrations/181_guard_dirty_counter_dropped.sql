@@ -1,0 +1,85 @@
+-- =============================================================================
+-- 181_guard_dirty_counter_dropped.sql — no block writer queues on the guard's
+-- state row any more; guard-stats counts the waiting blocks on demand (issue
+-- #341)
+-- Part of ctx by GottZ (https://github.com/GottZ/ctx)
+-- =============================================================================
+-- mark_guard_dirty() (113_baseline, per statement since migration 177) added
+-- every counted block write to context_guard_state.pending_count and set
+-- dirty_since. That one row was taken by the first counted statement of a
+-- transaction and held to its commit, so every block writer queued behind
+-- every other open block transaction, and behind the guard run, which took it
+-- with its first verdict and held it over up to 100 checks and a recount.
+-- Measured on the production image (pgvector-timescaledb:pg18, issue #341):
+-- transactions that keep working 50 ms after their block write never passed
+-- 1 / 50 ms = 20 tx/s whatever the number of writers (598 tx/s at 32 writers
+-- without the row); during a guard run over 100 blocks block writes stood
+-- still (p99 542-585 ms against 7-18 ms without the row). The row also closed
+-- a deadlock cycle: the guard holds it and waits at its audit-log insert for a
+-- key-share lock on the matched neighbour; a writer that locked that
+-- neighbour first and then writes it needs the row (40P01, either side the
+-- victim). And the values only fed a display (manage guard-stats): the guard
+-- run picks its blocks itself, its wake-up is a flag in memory, /status and
+-- the web UI do not read the row.
+--
+-- Since this migration the trigger and its function are gone. manage
+-- guard-stats counts the blocks the guard pick would take within the
+-- caller's read scopes when it is called (guard.PendingStats, over
+-- idx_guard_pending), and dirty_since is the oldest updated_at among them.
+-- The guard run writes only last_guard_at, in a statement of its own after
+-- its transaction has committed, so it holds no block row while it waits for
+-- the state row and no block writer waits for it.
+--
+-- context_guard_state and all its columns stay: a binary before this
+-- migration reads all three columns in guard-stats and writes them in its
+-- guard run. pending_count and dirty_since keep the values they hold at this
+-- migration; no code of this version writes or reads them. An older binary
+-- that runs beside or after this one (rolling deploy, rollback) writes them
+-- in its guard run as before (recount at the end of a run that processed
+-- blocks, 0 / NULL after a run that found none); between its runs its
+-- display no longer grows with writes. Setting them to 0 / NULL here would
+-- not hold either (that guard run overwrites them) and would show such a
+-- binary "nothing pending" while blocks wait.
+--
+-- LOCKS. DROP TRIGGER takes ACCESS EXCLUSIVE on context_blocks, readers
+-- included, and holds it until this file commits (a catalog change, no row is
+-- read or written, the duration does not grow with the table). To get it, it
+-- waits for every transaction that has touched the table and for every holder
+-- of SHARE UPDATE EXCLUSIVE (VACUUM, ANALYZE, CREATE INDEX CONCURRENTLY, an
+-- anti-wraparound autovacuum); while it waits, every later statement on the
+-- table queues behind it. `SET LOCAL lock_timeout = '3s'` (house pattern, 178)
+-- bounds that wait: a holder that stays longer fails the migration with
+-- lock_not_available (55P03), the file rolls back with nothing changed and the
+-- boot fails loudly; start again once the holder has finished. All three
+-- statements are one transaction (store.RunMigrations runs each file in one).
+-- An instance where the lock cannot be had can empty the function's body
+-- instead, without a table lock: docs/operations.md, "Migration 181".
+--
+-- OLDER BINARY. Its writes and reads work on this schema: its inserts and
+-- updates no longer fire a trigger, its guard-stats reads the columns, its
+-- guard run writes them. Its migration runner leaves version 181 alone. Its
+-- schema-contract check finds _migrations:181 without an embedded file and
+-- the function and the two triggers missing (breaking): in mode warn (the
+-- default) it starts, logs them and /health reports schema_contract
+-- attention; in mode enforce it refuses to start until CTX_CONTRACT_MODE=warn
+-- or off is set, or the schema is taken back (below).
+--
+-- WAY BACK (needed only for a binary before 181 in mode enforce), in ONE
+-- transaction: CREATE OR REPLACE FUNCTION mark_guard_dirty() with the body,
+-- the three SET clauses (enable_nestloop = off, jit = off of migration 177;
+-- search_path = pg_catalog, public, pg_temp of 179) and the comment of 177;
+-- the two CREATE TRIGGER of 177; DELETE FROM _migrations WHERE version = 181.
+-- The full statement: docs/operations.md, "Migration 181";
+-- TestMigration181_DropsTheCounterKeepsTheTable runs it and compares the
+-- catalog with that of 180.
+--
+-- No table or column changes (test.sh T07 counts stay). The schema-contract
+-- manifest drops the function and the two triggers and records migration_max
+-- 180 -> 181. Forward-only.
+-- =============================================================================
+
+SET LOCAL lock_timeout = '3s';
+
+DROP TRIGGER IF EXISTS trg_guard_dirty ON context_blocks;
+DROP TRIGGER IF EXISTS trg_guard_dirty_upd ON context_blocks;
+DROP FUNCTION IF EXISTS mark_guard_dirty();

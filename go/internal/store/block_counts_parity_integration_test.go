@@ -41,7 +41,10 @@ func refStats(t *testing.T, pool *pgxpool.Pool, scopes []string) store.Stats {
 	return s
 }
 
-// refGuardStats is GetGuardStats' pre-#266 statement.
+// refGuardStats is GetGuardStats' pre-#266 statement, without pending_count
+// and dirty_since: since migration 181 (issue #341) they are no columns of
+// context_guard_state that GetGuardStats reads but guard.PendingStats'
+// count (pinned by internal/handler's TestGuardStatsPending*).
 func refGuardStats(t *testing.T, pool *pgxpool.Pool, scopes []string) store.GuardStats {
 	t.Helper()
 	var gs store.GuardStats
@@ -55,12 +58,10 @@ func refGuardStats(t *testing.T, pool *pgxpool.Pool, scopes []string) store.Guar
 			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND NOT is_archived AND guard_status IS NULL), 0),
 			COALESCE((SELECT count(*)::int FROM context_blocks WHERE scope = ANY($1::text[]) AND guard_status = 'archived_dup'), 0),
 			COALESCE((SELECT count(*)::int FROM context_write_log), 0),
-			(SELECT dirty_since FROM context_guard_state WHERE id = true),
-			(SELECT last_guard_at FROM context_guard_state WHERE id = true),
-			COALESCE((SELECT pending_count FROM context_guard_state WHERE id = true), 0)`, scopes,
+			(SELECT last_guard_at FROM context_guard_state WHERE id = true)`, scopes,
 	).Scan(&gs.TotalBlocks, &gs.Active, &gs.Clean, &gs.NeedsReview, &gs.NearDuplicate,
 		&gs.Unchecked, &gs.ArchivedDups, &gs.WriteLogEntries,
-		&gs.DirtySince, &gs.LastGuardAt, &gs.PendingCount); err != nil {
+		&gs.LastGuardAt); err != nil {
 		t.Fatalf("ref guard stats: %v", err)
 	}
 	return gs

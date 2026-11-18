@@ -207,9 +207,9 @@ type supersedesTarget struct {
 // target, not id order: a dream batch that already inserted a link touching
 // the source holds FOR KEY SHARE on it and then locks its supersedes targets,
 // so taking the target first and then waiting for the source would close a
-// cycle with it. Every write on context_blocks fires mark_guard_dirty, which
-// holds the context_guard_state row until commit, so no row lock may be
-// waited for after the upsert (ReconcileSupersedesTargets). A declaration
+// cycle with it. No row lock may be waited for after the upsert
+// (ReconcileSupersedesTargets; until migration 181 every write on
+// context_blocks also held the context_guard_state row to commit). A declaration
 // holds the scope lock exclusively, so it runs alone against the dream
 // batches, the archives and scope moves and the other declarations of its
 // scope: a dream batch writing links from the same block, an archive of the
