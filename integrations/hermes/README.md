@@ -401,7 +401,7 @@ By hand, ask ctx for the session's checkpoint head (its title is stable per root
 session):
 
 ```
-ctx search compaction-checkpoints query:"Compaction checkpoint head <root-session>"
+ctx search compaction-checkpoints query:"Compaction checkpoint head <root-session>" types:checkpoint
 ctx get <head-id>        # → latest_manifest_id
 ctx get <manifest-id>    # → source part IDs, parent manifest chain
 ```

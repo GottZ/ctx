@@ -40,7 +40,7 @@ from .config import (
     untrusted_origin_note,
     with_untrusted_origin_checked,
 )
-from .status import REST_API_KEY_ENV, mcp_report, profile_ctx_keys, redact_error
+from .status import REST_API_KEY_ENV, display_url, mcp_report, profile_ctx_keys, redact_error
 
 # Built-in memory files separate entries with a line holding only "§" (host ENTRY_DELIMITER
 # "\n§\n"); a "§" inside an entry ("gemäß § 22 UStG") must not split it.
@@ -111,6 +111,12 @@ def _error(config: dict[str, Any], text: Any) -> str:
     return redact_error(text, _secrets(config))
 
 
+def _setting_text(name: str, value: Any) -> str:
+    """A ctx.json setting as ``status`` prints it: the base URL without user info, query and
+    fragment (``status.display_url``, #311), every other value as written."""
+    return display_url(value) if name == "ctx_base_url" else str(value)
+
+
 def _client(config: dict[str, Any]) -> CtxClient | None:
     if config.get("_transport", "rest") != "rest":
         print(_MCP_HINT)
@@ -175,9 +181,9 @@ def cmd_status(args, home: Path, config: dict[str, Any]) -> int:
         if settings:
             print("  ctx.json settings:")
             for name, value in sorted(settings.items()):
-                print(f"    {name}: {value}")
+                print(f"    {name}: {_setting_text(name, value)}")
         return 0 if report.get("ok") is not False else 1
-    print(f"  base URL: {base or '(not set)'}")
+    print(f"  base URL: {display_url(base) or '(not set)'}")
     print(f"  key:      {'set' if key else 'NOT set'}")
     if not (base and key):
         print("  ✗ Configure CTX_KEY and CTX_BASE_URL (env, or ctx_base_url in ctx.json) first.")
@@ -197,7 +203,7 @@ def cmd_status(args, home: Path, config: dict[str, Any]) -> int:
     if settings:
         print("  ctx.json settings:")
         for name, value in sorted(settings.items()):
-            print(f"    {name}: {value}")
+            print(f"    {name}: {_setting_text(name, value)}")
     return rc
 
 

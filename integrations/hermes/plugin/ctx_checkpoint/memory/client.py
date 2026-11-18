@@ -65,6 +65,11 @@ RESERVED_METADATA_KEYS = ("provenance",)
 REDACTED = "[REDACTED]"
 # Redirect statuses urllib's HTTPRedirectHandler would follow; CtxClient refuses all of them.
 REDIRECT_CODES = (301, 302, 303, 307, 308)
+# Why CtxClient sends nothing for a base URL with user info, a query or a fragment (#311).
+BASE_URL_REFUSED = (
+    "CTX base URL refused before any connection: it carries user info, a query or a fragment, which the "
+    "ctx API does not take; set it to the server address alone (https://host[:port]) and the key in CTX_KEY"
+)
 
 
 class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
@@ -206,6 +211,12 @@ class CtxClient:
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             # urllib would happily open file:// or other schemes; the store is an http(s) API.
             raise ValueError("CTX base URL must be an http(s) URL with a host")
+        # urllib takes user info for part of the host (a lookup of ``user:pass@host``, or the password
+        # read as the port, which its error text then repeats) and puts every request path after a
+        # query or fragment: such a base URL never reaches the API. Requests are refused before any
+        # connection, with a text that names no part of the URL (#311). Any ``@`` after the scheme
+        # counts: a ``/`` in the user info ends the host before it (``https://u:1234/pass@host``).
+        self._url_refused = "@" in str(base_url).split("://", 1)[1] or bool(parsed.query or parsed.fragment)
         self._base = base_url.strip().rstrip("/")
         self._key = api_key
         self._timeout = timeout
@@ -243,6 +254,8 @@ class CtxClient:
     def _request(
         self, method: str, path: str, payload: dict[str, Any] | None = None, timeout: float | None = None
     ) -> dict[str, Any]:
+        if self._url_refused:
+            raise CtxApiError(BASE_URL_REFUSED)
         url = f"{self._base}{path}"
         headers = {
             "X-Context-Key": self._key,
