@@ -172,11 +172,11 @@ id. The search names the type `checkpoint` and the head tag `checkpoint-head` (0
 may leave that type out of a search that names none. A ctx server that refuses the type there (before #342) is
 searched without it; the refusal is remembered per MCP server name in the process, not across servers. A later search
 without the type that finds no head drops the memory, so the next record's search asks with the type again: on such a
-server one more refused call for every second record without a head. After the server is updated, each record whose
-search still ran without the type is stored without the link: usually the first one, more when flushes overlap (the
-janitor's and the background flush each run such a search) or when the update falls between a record's refused search
-and its search without the type. ctx is never
-needed for a handover, a ctx failure never stops one, and a job start waits at most 2 seconds for ctx (the records
+server one more refused call after a record without a head, after every second one when such records follow each other
+(a lookup keeps a memory it has just set). After the server is updated, each record whose search still ran without the
+type is stored without the link: usually the first one, more when flushes overlap (the janitor's and the background
+flush each run such a search) or when the update falls between a record's refused search and its search without the
+type. ctx is never needed for a handover, a ctx failure never stops one, and a job start waits at most 2 seconds for ctx (the records
 go out on a thread of their own).
 
 **Core modules used:** `hermes_state`, `hermes_constants`, `hermes_cli.config`, `agent.secret_scope`,

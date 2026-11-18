@@ -115,8 +115,9 @@ def test_a_head_search_without_the_type_misses_the_head_after_the_later_step():
 
 def test_a_miss_after_a_remembered_refusal_lets_the_next_record_ask_with_the_type():
     """A search without the type that finds no head drops the memory: the next record asks with the type again. On a
-    server before #342 that costs one refused call after each record without a head; after an update to a server that
-    leaves checkpoints out of a search without a type, the record that missed is the only one without the link."""
+    server before #342 that costs one refused call after such a record; after an update to a server that leaves
+    checkpoints out of a search without a type, the record that missed is, with one flusher, the only one without the
+    link."""
     old = Ctx(refuses=REFUSED)
     assert ctxrecords._checkpoint_head(old.call_mcp, "ctx", ROOT, 5.0) == HEAD_ID
     assert ctxrecords._checkpoint_head(old.call_mcp, "ctx", "20261118_120000_headless", 5.0) is None
