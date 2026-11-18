@@ -284,10 +284,16 @@ SELECT COALESCE(max((EXTRACT(EPOCH FROM created_at) * 1000000)::BIGINT), 0)
 // QuietFor reports how long the session's newest live checkpoint block has been
 // standing, clamped at zero.
 //
-// It measures over ALL live blocks of the root, not only manifests: the
-// question is whether a human is still working in that session, and a part
-// written seconds ago answers it just as well as the manifest that will list it
-// a moment later.
+// It measures over ALL live blocks of the root that name it, not only
+// manifests: the question is whether a human is still working in that session,
+// and a part written seconds ago answered it just as well as the manifest that
+// lists it a moment later. Since the hermes ctx_checkpoint plugin 0.15.0
+// (GottZ/ctx#344) a part is stored once per write and names no root, so for new
+// chains the measure sees manifests (and heads, whose created_at an upsert
+// keeps) only: a chain still writing its parts does not count as activity.
+// Reading is unaffected — Read only ever sees a manifest after all its parts
+// were stored. No production caller yet (distill.ctx_quiet_for has no reader);
+// the wave that wires the gate decides whether the manifest time suffices.
 func (s *Source) QuietFor(ctx context.Context, sess string, now time.Time) (time.Duration, error) {
 	const q = `
 SELECT max(created_at)

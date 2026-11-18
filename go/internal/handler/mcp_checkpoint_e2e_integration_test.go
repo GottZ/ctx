@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -94,23 +95,31 @@ func TestCheckpointPluginChainAgainstMCPEndpoint(t *testing.T) {
 
 	// Two roots wrote the same transcript (GottZ/ctx#344): each has its own head and manifest,
 	// and each part's text is in the database once — both manifests list the same blocks.
-	var heads, manifests, parts, texts, listed int
+	var heads, manifests, parts, texts int
+	var stored, listed []string
 	if err := pool.QueryRow(ctx, `
 		WITH chain AS (
-		  SELECT title, content, metadata FROM context_blocks
+		  SELECT id, title, content, metadata FROM context_blocks
 		   WHERE category = 'compaction-checkpoints' AND type_name = 'checkpoint' AND NOT is_archived)
 		SELECT (SELECT count(*) FROM chain WHERE title LIKE 'Compaction checkpoint head %'),
 		       (SELECT count(*) FROM chain WHERE title LIKE '% manifest'),
 		       (SELECT count(*) FROM chain WHERE title LIKE 'Compaction source part %'),
 		       (SELECT count(DISTINCT content) FROM chain WHERE title LIKE 'Compaction source part %'),
-		       (SELECT count(DISTINCT e.pid) FROM chain, jsonb_array_elements_text(metadata->'source_block_ids') e(pid))`,
-	).Scan(&heads, &manifests, &parts, &texts, &listed); err != nil {
+		       (SELECT COALESCE(array_agg(id::text ORDER BY id::text), '{}') FROM chain
+		         WHERE title LIKE 'Compaction source part %'),
+		       (SELECT COALESCE(array_agg(DISTINCT e.pid ORDER BY e.pid), '{}')
+		          FROM chain, jsonb_array_elements_text(metadata->'source_block_ids') e(pid))`,
+	).Scan(&heads, &manifests, &parts, &texts, &stored, &listed); err != nil {
 		t.Fatalf("count the chain blocks: %v", err)
 	}
 	if heads != 2 || manifests != 2 {
 		t.Errorf("the database holds %d heads and %d manifests after two roots, want 2 and 2", heads, manifests)
 	}
-	if parts < 2 || texts != parts || listed != parts {
-		t.Errorf("parts: %d blocks, %d distinct texts, %d listed ids — want one block per text, every one listed", parts, texts, listed)
+	if parts < 2 || texts != parts {
+		t.Errorf("parts: %d blocks, %d distinct texts — want one block per text", parts, texts)
+	}
+	// The ids both manifests list are exactly the stored parts: none dangling, none unlisted.
+	if !slices.Equal(stored, listed) {
+		t.Errorf("stored part ids %v, ids the manifests list %v — want the same set", stored, listed)
 	}
 }

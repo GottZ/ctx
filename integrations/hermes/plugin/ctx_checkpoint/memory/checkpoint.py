@@ -867,12 +867,15 @@ def read_path(tools: ReadTools, *, head_id: str, category: str) -> str:
     """One line: from the head to the saved parts, and how to find a passage. A part is stored
     once for its text and may be listed by other conversations' manifests too (0.15.0,
     GottZ/ctx#344), so it carries no root token: a hit belongs to this conversation when one of
-    its manifests lists it. Parts written before 0.15.0 match the same words."""
+    its manifests lists it. A search with a query answers its top matches without a cursor, so
+    other conversations' parts can fill the page: without a verified hit the agent reads the
+    listed parts along the chain. Parts written before 0.15.0 match the same words."""
     return (
         f"Read: {tools.get.format(id=head_id)} → metadata.latest_manifest_id; get that manifest → "
         "metadata.source_block_ids are the saved parts (metadata.parent_manifest_id: the checkpoint "
         f"before). Find a passage: {tools.search.format(category=category, query='<words>')}; a hit is "
-        "from this conversation when one of these manifests lists its id."
+        "from this conversation when one of these manifests lists its id — without such a hit, read the "
+        "listed parts (and those of the parent manifests) before concluding it is not saved."
     )
 
 
@@ -1089,6 +1092,8 @@ class ChainWriter:
         metadata: dict[str, Any],
         tags: list[str],
     ) -> str:
+        """Stores one block of the chain. ``tags`` are sent as given: the caller resolves them through
+        ``tags_for`` once, so a part is stored with exactly the tags its title digest covers (#344)."""
         self._pace(what, run)
         data = self._call(
             what,
@@ -1098,7 +1103,7 @@ class ChainWriter:
             title=title,
             content=content,
             sensitivity=self.sensitivity,
-            tags=self.tags_for(tags),
+            tags=list(tags),
             type=CHECKPOINT_TYPE,
             metadata=metadata,
         )
@@ -1357,7 +1362,7 @@ class ChainWriter:
                     title=title,
                     content=body,
                     metadata=metadata,
-                    tags=PART_TAGS,
+                    tags=part_tags,
                 )
             )
 
@@ -1386,7 +1391,7 @@ class ChainWriter:
                 "parent_manifest_id": previous_manifest_id,
                 FACT_HASHES_KEY: chain_fact_hashes,
             },
-            tags=MANIFEST_TAGS,
+            tags=self.tags_for(MANIFEST_TAGS),
         )
 
         head = (
@@ -1412,7 +1417,7 @@ class ChainWriter:
                 "source_block_count": len(chunk_ids),
                 FACT_HASHES_KEY: chain_fact_hashes,
             },
-            tags=HEAD_TAGS,
+            tags=self.tags_for(HEAD_TAGS),
         )
         if run.invalid_head:
             linked = " linked to the last checkpoint of this process" if previous_manifest_id else ""

@@ -592,3 +592,62 @@ def test_a_manifest_lists_a_repeated_part_once_per_position(monkeypatch, clock):
     by_id = {b["id"]: b["content"].split("## Direct transcript\n\n", 1)[1] for b in server.parts()}
     assert len(ids) > len(set(ids)) >= 2
     assert "".join(by_id[i] for i in ids) == _MODULE._cp.render_direct_evidence(messages)
+
+
+def test_a_part_is_stored_with_the_tags_its_title_names(monkeypatch, clock):
+    """The writer accepts any tags callable: the tags are resolved once per chain and the part is
+    stored with exactly the tags its title digest covers."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server, session="root-tags", chunk_chars=1_000)
+    writer = provider._chain()
+    calls = iter(range(1_000))
+    resolve = writer.tags_for
+    writer.tags_for = lambda tags: [*resolve(tags), f"call:{next(calls)}"]
+
+    provider.on_pre_compress(_transcript(3), require_checkpoint=True)
+
+    part_writes = [a for t, a in server.calls if t == "store" and a["title"].startswith("Compaction source part ")]
+    assert len(part_writes) == 3
+    for args in part_writes:
+        payload = {key: args[key] for key in ("category", "content", "metadata", "sensitivity", "tags", "type")}
+        canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        assert args["title"] == "Compaction source part " + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
+
+def test_a_failed_head_write_after_a_retry_leaves_the_head_on_a_complete_list_of_its_text(monkeypatch, clock):
+    """A retry of the checkpoint the head names rewrites that manifest in place (0.10.0) — here with
+    another split, as a 0.15.0 retry of a 0.14.0 checkpoint does with the new part format. Every
+    part it lists is stored before the manifest is written, so when the head write fails after it,
+    the head still names a manifest whose parts exist and give back the same transcript."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server, session="root-retry", chunk_chars=1_000)
+    messages = [{"role": "user", "content": "s" * 2_500}]
+    provider.on_pre_compress(messages, require_checkpoint=True)
+    manifest_id = server.head()["metadata"]["latest_manifest_id"]
+    listed_before = _manifest_of_head(server)["metadata"]["source_block_ids"]
+
+    provider._chain().chunk_chars = 1_100  # another split of the same transcript
+    real_store = server._store
+
+    def head_fails(args):
+        if args["title"].startswith("Compaction checkpoint head"):
+            return {"error": "store failed: connection reset by peer"}
+        return real_store(args)
+
+    server._store = head_fails
+    with pytest.raises(CtxCheckpointError):
+        provider.on_pre_compress(messages, require_checkpoint=True)
+
+    assert server.head()["metadata"]["latest_manifest_id"] == manifest_id
+    manifest = _manifest_of_head(server)
+    listed = manifest["metadata"]["source_block_ids"]
+    assert listed != listed_before  # the manifest the head names was rewritten in place
+    by_id = {b["id"]: b["content"] for b in server.parts()}
+    assert all(block_id in by_id for block_id in listed)
+    rendered = _MODULE._cp.render_direct_evidence(messages)
+    assert "".join(by_id[i].split("## Direct transcript\n\n", 1)[1] for i in listed) == rendered
+    assert manifest["metadata"]["sha256"] == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+    # The parts of the first split stay stored (no part is ever rewritten or removed).
+    assert all(block_id in by_id for block_id in listed_before)

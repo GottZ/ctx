@@ -275,17 +275,22 @@ the plugin and runs over either transport.
   (`Compaction checkpoint head <root>`, `Compaction source <root> <sha16> <cpid> manifest` /
   `… after <parent id> manifest`; up to 0.9.0 without the parent): the server classifies them
   as `checkpoint` (migrations M107/M120) and the distiller parses the part format.
-- A part is stored once per text (0.15.0, GottZ/ctx#344): title `Compaction source part <32 hex>`,
-  the SHA-256 of its whole write (category, content after redaction, metadata, sensitivity,
-  tags, type; `checkpoint.part_title_for`), and a header and metadata that name no root,
-  session, transcript or position. The same text from another compaction, a branch or another
-  conversation of the profile meets the stored block: ctx answers "No change needed" with its
+- A part is stored once per identical write (0.15.0, GottZ/ctx#344): title
+  `Compaction source part <32 hex>`, the first 32 hex characters of the SHA-256 of its whole
+  write (category, content after redaction, metadata, sensitivity, tags, type;
+  `checkpoint.part_title_for`), and a header and metadata that name no root, session,
+  transcript or position. The same text from another compaction, a branch or another
+  conversation of the profile, with the same platform, agent context, host contract,
+  redaction passes and sensitivity, meets the stored block (any of those different makes
+  another block): ctx answers "No change needed" with its
   id, books no write, and the manifest lists it; a store under a part title can only meet the
   payload that title names, so a part another manifest lists is never rewritten. Scope and
   category are part of ctx's upsert identity: the same text in another scope (another tenant)
   or category is another block. The part's position is its place in the manifest's
   `source_block_ids`. Parts up to 0.14.0 (`Compaction source <root> <sha16> <cpid> <part sha16>
-  part NNN of NNN`, header with root, session, digest and `Part: i/n`) stay as they are. Category `compaction-checkpoints`, sensitivity `checkpoint_sensitivity`.
+  part NNN of NNN`, header with root, session, digest and `Part: i/n`) are not rewritten; a
+  retry of the checkpoint the head names rewrites that manifest in place (0.10.0), so a 0.15.0
+  retry of a 0.14.0 checkpoint lists new-format parts in it, all stored before the manifest. Category `compaction-checkpoints`, sensitivity `checkpoint_sensitivity`.
 - Only direct user/assistant text; tool rows, system prompts, `_compressed_summary`
   carriers and synthetic hand-offs are dropped. Redaction (`checkpoint.redact_text`, the same
   for every automatic write) runs three passes: the bound ctx keys (`_bound_secrets()`: the REST
@@ -308,8 +313,9 @@ the plugin and runs over either transport.
   where its text was captured (`source_kind`, `platform`, `agent_context`, the host contract,
   `tool_index_status`, `warnings`, `invalidated_by`, `ctx_plugin` with writer, profile and
   redaction passes — the version stays on manifest and head)
-  plus `part_sha256`; `root_session_id`, `active_session_id`, `sha256` and `part`/`parts` are
-  the manifest's (0.15.0).
+  plus `part_sha256`; it has no `root_session_id`, `active_session_id`, `sha256` or
+  `part`/`parts` any more (0.15.0). A part's position is its place in the manifest's
+  `source_block_ids`, the count is that list's length (and the head's `source_block_count`).
 - Pacing (0.10.0): at most `checkpoint_max_parts` + 2 writes inside one 60 s window; a
   longer chain waits for the next window (the user is told before), and its deadline
   grows by 61 s per window after the first. A refused write (other writers on the key)

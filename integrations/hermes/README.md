@@ -11,7 +11,7 @@ Every checkpoint is a chain of ctx blocks:
 ```
 Compaction checkpoint head <root-session>     ← stable title, upserted per session
   └── manifest (per checkpoint, parent-linked to the previous manifest)
-        └── source parts, in order (redacted direct transcript, ≤40k chars each; stored once per text)
+        └── source parts, in order (redacted direct transcript, ≤40k chars each; stored once per identical write)
 ```
 
 The provider returns the head/manifest IDs to Hermes, which carries them
@@ -580,14 +580,18 @@ and manifest are deliberately small so routine recall stays cheap.
   `origin_note` in `ctx_query`, `ctx_search` and `ctx_get`; such a block stays in the recall
   under `prefetch_untrusted: drop`. Source lines of the MCP query text with
   `superseded_by:` after the id are no longer dropped (part of GottZ/ctx#295).
-- 0.15.0: a source part is stored once per text (GottZ/ctx#344). Its title is the SHA-256 of
-  its whole write (`Compaction source part <32 hex>`), and it names no root, session,
-  transcript or position: another compaction, a branch or another conversation of the profile
-  that holds the same text gets ctx's "No change needed" with the stored id, books no write,
-  and its manifest lists that part. Manifest and head are unchanged and name the conversation;
+- 0.15.0: a source part is stored once per identical write (GottZ/ctx#344). Its title is the
+  first 32 hex characters of the SHA-256 of its whole write (`Compaction source part <32 hex>`),
+  and it names no root, session, transcript or position: another compaction, a branch or
+  another conversation of the profile that holds the same text with the same platform, agent
+  context, host contract and sensitivity gets ctx's "No change needed" with the stored id,
+  books no write, and its manifest lists that part. Manifest and head name the conversation;
   the part's position is its place in the manifest's `source_block_ids`. The read path finds a
-  passage by its words (a part carries no root token any more). Chains written before stay as
-  they are. Archiving a part reaches every manifest that lists it.
+  passage by its words (a part carries no root token any more) and, without a hit its
+  manifests list, reads the listed parts. Existing parts are not rewritten in bulk; a retry of
+  the checkpoint a head names rewrites that manifest in place, as since 0.10.0, so after a
+  0.14.0 checkpoint it can list new-format parts. Archiving a part reaches every manifest
+  that lists it.
 
 ## Licensing
 

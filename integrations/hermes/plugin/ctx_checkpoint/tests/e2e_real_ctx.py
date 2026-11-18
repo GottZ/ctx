@@ -121,6 +121,8 @@ def main() -> int:
         ):
             _fail(f"the other root's manifest: {other_manifest!r}")
         part = client.get_block(first.part_ids[0]).get("block") or {}
+        if part.get("id") != first.part_ids[0] or "## Direct transcript" not in str(part.get("content") or ""):
+            _fail(f"the part {first.part_ids[0]} was not read back: {sorted(part)}")
         part_meta = part.get("metadata") or {}
         if ROOT in str(part.get("content")) or "root_session_id" in part_meta or OTHER_ROOT in str(part.get("content")):
             _fail("a part names a conversation")
