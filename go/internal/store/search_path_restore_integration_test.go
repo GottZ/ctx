@@ -25,7 +25,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -343,14 +342,6 @@ func TestDataOnlyRestoreWithTriggersOn(t *testing.T) {
 	if _, err := store.DeleteBlock(ctx, src, archived, []string{"rs-351"}); err != nil {
 		t.Fatalf("archive: %v", err)
 	}
-	// Two LLM calls through the log writer: the rollup trigger of
-	// context_llm_log fills context_llm_usage_hourly.
-	for i := 0; i < 2; i++ {
-		llmlog.Record(src, llmlog.Entry{Pipeline: "query", Model: "m-351", Host: "h", Duration: time.Second, PromptTokens: 10, CompletionTokens: 5})
-	}
-	if err := llmlog.Settle(ctx, src); err != nil {
-		t.Fatalf("settle llm log: %v", err)
-	}
 	if _, err := store.FoldBlockCountDeltas(ctx, src); err != nil {
 		t.Fatalf("fold source deltas: %v", err)
 	}
@@ -412,9 +403,6 @@ func TestDataOnlyRestoreWithTriggersOn(t *testing.T) {
 	} else {
 		t.Logf("embed_excluded reconcile: %+v", res)
 	}
-	srcUsage := countsBy(t, src, `SELECT model, sum(calls)::bigint FROM context_llm_usage_hourly GROUP BY 1`)
-	dstUsage := countsBy(t, dst, `SELECT model, sum(calls)::bigint FROM context_llm_usage_hourly GROUP BY 1`)
-	t.Logf("context_llm_usage_hourly calls by model: source %v, after restore %v", srcUsage, dstUsage)
 	var srcAudit, dstAudit int
 	_ = src.QueryRow(ctx, `SELECT count(*) FROM context_settings_audit`).Scan(&srcAudit)
 	_ = dst.QueryRow(ctx, `SELECT count(*) FROM context_settings_audit`).Scan(&dstAudit)

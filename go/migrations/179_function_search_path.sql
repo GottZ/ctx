@@ -40,9 +40,15 @@
 -- drop them; this file replaces no body.
 --
 -- COST. A SET clause makes the function manager save, set and restore the
--- setting around every call (fmgr_security_definer). Measured on the store
--- (TestFunctionSearchPathCost in internal/store; numbers in the PR of #351):
--- see docs/operations.md, Migration 179.
+-- setting around every call (fmgr_security_definer). Measured on the
+-- production image (TestFunctionSearchPathCost in internal/store, 10 000
+-- blocks, the seven pinned functions of context_blocks with and without the
+-- clause, alternating): one store.UpsertBlock 2.147 -> 2.154 ms (knowledge)
+-- and 2.126 -> 2.096 ms (checkpoint), single statements inside the noise;
+-- archiving 5 000 blocks in one statement +2.3 to +2.9 us per row (the two
+-- row-level functions). Schema-qualified bodies would cost nothing at run
+-- time but replace every body and write the schema name into it; this file
+-- follows 178 (SET search_path on context_blocks_fulltext()).
 --
 -- LOCKS. ALTER FUNCTION updates the function's pg_proc row and takes no lock
 -- on a table: a writer that holds context_blocks rows does not block it and
