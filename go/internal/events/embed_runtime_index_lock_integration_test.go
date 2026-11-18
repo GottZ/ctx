@@ -245,6 +245,17 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 			t.Fatalf("held build: exists=%t valid=%t, want an INVALID index in the catalog", st.exists, st.valid)
 		}
 		oidA := indexOIDT(t, pool, migrationPendingIndexName)
+		// The lock lives in the session that builds: when that session ends,
+		// its build ends with it, so an INVALID index found under the lock is
+		// never a build in progress.
+		var holders []int32
+		if err := pool.QueryRow(ctx, `SELECT COALESCE(array_agg(pid), '{}') FROM pg_locks
+			WHERE locktype = 'advisory' AND granted`).Scan(&holders); err != nil {
+			t.Fatalf("lock holders: %v", err)
+		}
+		if len(holders) != 1 || holders[0] != pidA {
+			t.Errorf("advisory lock holders %v during A's build, want exactly the building session %d", holders, pidA)
+		}
 
 		chB, doneB := ensureAsync(ctx, sB, migrationPendingIndexName, migrationPendingIndexDDL)
 		seen := watchIndexDDL(t, pool, pidA, 3*time.Second, doneB)
@@ -507,6 +518,53 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 		for _, ix := range rep.Index.Indexes {
 			if ix.Name == verifyNextHNSWIndexName && ix.Action != indexActionReused {
 				t.Errorf("B's report: HNSW action %q, want %s (A built it)", ix.Action, indexActionReused)
+			}
+		}
+	})
+
+	// waiting_verify_ends_when_the_row_leaves_it: B's gate waits for A's
+	// build; meanwhile the operator pauses the row. B's next attempt finds
+	// that the row no longer waits for its run and ends without a verdict
+	// and without building the rest of the stage.
+	t.Run("waiting_verify_ends_when_the_row_leaves_it", func(t *testing.T) {
+		pool := testdb.SetupTestDB(t)
+		migID := seedMigrationRow(t, pool, "verifying")
+		seedCleanMigrated(t, pool, 3)
+		sA := newIndexTestScheduler(instancePool(t, pool, 4))
+		sB := newIndexTestScheduler(instancePool(t, pool, 4))
+		release := holdBuilds(t, pool)
+		chA, _ := ensureAsync(ctx, sA, verifyNextHNSWIndexName, verifyNextHNSWIndexDDL)
+		buildingPID(t, pool, verifyNextHNSWIndexName)
+
+		mig, err := embedmigration.Active(ctx, pool)
+		if err != nil || mig == nil {
+			t.Fatalf("active: %+v %v", mig, err)
+		}
+		runDone := make(chan error, 1)
+		go func() { runDone <- sB.runEmbedVerify(ctx, mig, verifyTestCfg()) }()
+		time.Sleep(time.Second) // B reaches the index stage and waits
+		if err := embedmigration.Transition(ctx, pool, migID, embedmigration.StatusVerifying, embedmigration.StatusPaused); err != nil {
+			t.Fatalf("operator pause: %v", err)
+		}
+		release()
+		rA := waitEnsure(t, chA, "A")
+		var runErr error
+		select {
+		case runErr = <-runDone:
+		case <-time.After(90 * time.Second):
+			t.Fatalf("B's verify did not end within 90s")
+		}
+		st := readVerifyRow(t, pool, migID)
+		t.Logf("A: action=%q err=%v; B's run: %v; status=%s report=%t", rA.action, rA.err, runErr, st.Status, len(st.Report) > 0)
+		if runErr != nil {
+			t.Errorf("B's run: %v, want an end without a verdict and without an error", runErr)
+		}
+		if st.Status != "paused" || len(st.Report) > 0 || st.LastErr != nil {
+			t.Errorf("row after B's run: status=%q report=%t last_error=%v, want paused by the operator, untouched", st.Status, len(st.Report) > 0, st.LastErr)
+		}
+		for _, ix := range verifySisterIndexes {
+			if indexOIDT(t, pool, ix.name) != 0 {
+				t.Errorf("B built %s for a run the row had left", ix.name)
 			}
 		}
 	})

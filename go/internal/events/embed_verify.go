@@ -866,11 +866,11 @@ func (s *Scheduler) finishVerifyGreen(ctx context.Context, mig *embedmigration.M
 // finishVerifyRed stores the red report and CAS-pauses the migration in
 // ONE tx (§4.7: rot → paused with the finding in verify_report AND
 // last_error — NEVER auto-abort; the operator decides between fixing the
-// fehlmenge, adjusting thresholds/config and aborting). Both statements are
-// bound to the run's watermark (issue #332). A lost CAS race (operator
-// moved the row mid-verify, or the row re-entered verifying with a newer
-// watermark) rolls the report back too — the verdict belonged to a state
-// that no longer exists.
+// fehlmenge, adjusting thresholds/config and aborting). The CAS is bound to
+// the run's watermark (issue #332). A lost CAS race (operator moved the row
+// mid-verify, or the row re-entered verifying with a newer watermark) rolls
+// the report back too — the verdict belonged to a state that no longer
+// exists.
 func (s *Scheduler) finishVerifyRed(ctx context.Context, mig *embedmigration.Migration, rep *verifyReport) error {
 	rep.Result = verifyRed
 	if rep.FinishedAt.IsZero() {
@@ -887,8 +887,8 @@ func (s *Scheduler) finishVerifyRed(ctx context.Context, mig *embedmigration.Mig
 	}, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
 			`UPDATE context_embed_migrations SET verify_report = $2
-			 WHERE id = $1::uuid AND status = 'verifying' AND verify_started_at = $3`,
-			mig.ID, string(body), rep.Watermark); err != nil {
+			 WHERE id = $1::uuid AND status = 'verifying'`,
+			mig.ID, string(body)); err != nil {
 			return fmt.Errorf("embed-verify: store red report: %w", err)
 		}
 		terr := embedmigration.Transition(ctx, tx, mig.ID,
