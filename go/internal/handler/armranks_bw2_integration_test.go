@@ -104,7 +104,7 @@ func bw2Config() *config.Config {
 	return &config.Config{
 		Server:         config.ServerConfig{DBPass: "test-password"},
 		Graph:          config.GraphConfig{HopDepth: 1},
-		Query:          config.QueryConfig{Timezone: time.UTC},
+		Query:          config.QueryConfig{Timezone: time.UTC, LowConfidenceMaxSources: config.Defaults().Query.LowConfidenceMaxSources}, // #226: V61 floor
 		EmbedBackfill:  config.EmbedBackfillConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
 		EmbedMigration: config.EmbedMigrationConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
 		Distill:        config.Defaults().Distill,

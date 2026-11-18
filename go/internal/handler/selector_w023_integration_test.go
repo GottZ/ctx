@@ -97,8 +97,10 @@ func w023Config(enabled bool) *config.Config {
 		// field that used to sit here retired in β8 with V4
 		// (validateBackendTuples), the only check that read it.
 		Server: config.ServerConfig{DBPass: "test-password"},
-		Graph:  config.GraphConfig{HopDepth: 1},        // Enabled stays false
-		Query:  config.QueryConfig{Timezone: time.UTC}, // RateLimitRead 0 = disabled
+		Graph:  config.GraphConfig{HopDepth: 1}, // Enabled stays false
+		Query:  config.QueryConfig{Timezone: time.UTC, LowConfidenceMaxSources: config.Defaults().Query.LowConfidenceMaxSources},
+		// Query: RateLimitRead 0 = disabled; #226: low_confidence_max_sources
+		// carries a fatal floor (V61).
 		// V21 (#38): the embed back-off bases must be > 0 to pass Validate —
 		// registry defaults, not wire-active here.
 		EmbedBackfill:  config.EmbedBackfillConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},

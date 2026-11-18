@@ -900,6 +900,21 @@ type QueryConfig struct {
 	// tenant-overridable like the two thresholds above and for the same reason:
 	// it changes only how that tenant's OWN queries are answered.
 	SemanticFloor float64 `key:"query.semantic_floor" env:"CTX_SEMANTIC_FLOOR" default:"0" mut:"hot" tenancy:"tenant-overridable"`
+	// LowConfidenceMaxSources is how many sources a low_confidence answer's
+	// synthesis prompt carries (#226; llm.LowConfidenceMaxSources is the
+	// default). The response still lists every source; the ones the cut kept
+	// out carry no citation_index. A value at or above the query limit (at
+	// most llm.MaxPromptSources) is no cut. 0 is refused (V61): a prompt
+	// without a source is not "no cut", it is no answer.
+	//
+	// It sits beside the two thresholds because it is what follows from them:
+	// a tenant whose good answers are spread over several records each partly
+	// relevant scores them low_confidence, and today the only way out of the
+	// two-source cut is to lower confident_threshold, i.e. to call weak
+	// answers confident. tenant-overridable for the thresholds' reason — it
+	// changes only how that tenant's OWN answers are synthesized, and the
+	// prompt stays inside promptguard.BudgetSynthesis whatever the value.
+	LowConfidenceMaxSources int `key:"query.low_confidence_max_sources" env:"CTX_LOW_CONFIDENCE_MAX_SOURCES" default:"2" mut:"hot" tenancy:"tenant-overridable"`
 }
 
 // DigestConfig is the LINEAR topic map's remaining knob (plan-cluster-topicmap
@@ -3071,12 +3086,13 @@ func (c *Config) DreamBackoff() dream.BackoffConfig {
 // copy).
 func (c *Config) SynthesisSettings() llm.SynthesisSettings {
 	return llm.SynthesisSettings{
-		ScoreThreshold:         c.Query.ScoreThreshold,
-		ConfidentThreshold:     c.Query.ConfidentThreshold,
-		PromptVersion:          c.Query.PromptVersion,
-		ExternalNumCtxFallback: c.Pool.ExternalNumCtxFallback,
-		OpenRouterWindowTTL:    c.Pool.OpenRouterWindowTTL,
-		Devmode:                c.Tenant.Devmode,
+		ScoreThreshold:          c.Query.ScoreThreshold,
+		ConfidentThreshold:      c.Query.ConfidentThreshold,
+		LowConfidenceMaxSources: c.Query.LowConfidenceMaxSources,
+		PromptVersion:           c.Query.PromptVersion,
+		ExternalNumCtxFallback:  c.Pool.ExternalNumCtxFallback,
+		OpenRouterWindowTTL:     c.Pool.OpenRouterWindowTTL,
+		Devmode:                 c.Tenant.Devmode,
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/httpx"
+	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/promptguard"
@@ -73,7 +74,7 @@ func temporalTimeoutBudgetOf(c *Config) time.Duration {
 // logging everything; Store.Replace rejects.
 func Validate(c *Config) []Issue {
 	var issues []Issue
-	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V9d, V11, V26
+	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V9d, V11, V26, V61
 	issues = append(issues, validateRerankGraph(c)...)   // V3, V9
 	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c, V18, V19, V20
 	issues = append(issues, validateGraphOverview(c)...) // V17b
@@ -912,6 +913,16 @@ func validateQuery(c *Config) []Issue {
 	if c.Query.SemanticFloor < 0 || c.Query.SemanticFloor >= 1 {
 		issues = append(issues, Issue{Field: "query.semantic_floor", Severity: SeverityError,
 			Msg: fmt.Sprintf("semantic floor %g must be >= 0 and < 1 (0 = off)", c.Query.SemanticFloor)})
+	}
+
+	// V61 (#226) — query.low_confidence_max_sources counts the sources a
+	// low_confidence prompt keeps. 0 renders as a configured cut and would
+	// send the model a question without a single source; "no cut" is any
+	// value at or above the query limit. Negatives belong to V35.
+	if c.Query.LowConfidenceMaxSources == 0 {
+		issues = append(issues, Issue{Field: "query.low_confidence_max_sources", Severity: SeverityError,
+			Msg: fmt.Sprintf("low_confidence_max_sources must be >= 1 — a low-confidence prompt without a source has nothing to answer from; for no cut set %d (the query limit's maximum) or more",
+				llm.MaxPromptSources)})
 	}
 
 	// V5 — today's llm init() semantics: log + fall back to v5.2.

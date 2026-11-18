@@ -30,7 +30,9 @@ const (
 	// to SEE that number.
 	MaxPromptSources = 20
 
-	// LowConfidenceMaxSources limits sources for low-confidence queries.
+	// LowConfidenceMaxSources limits sources for low-confidence queries. It is
+	// the default of the settings key query.low_confidence_max_sources (#226)
+	// and what a SynthesisSettings without that value (zero) cuts to.
 	LowConfidenceMaxSources = 2
 
 	// NoRelevantResponse is the LLM's rejection marker.
@@ -84,6 +86,15 @@ type SynthesisSettings struct {
 	// ConfidentThreshold is the minimum RRF score for "confident"
 	// classification.
 	ConfidentThreshold float64
+
+	// LowConfidenceMaxSources is how many of the filtered sources a
+	// low_confidence answer's prompt carries — settings key
+	// query.low_confidence_max_sources (#226). A value at or above the source
+	// count is no cut. 0, the value of a struct built literally (a bench
+	// harness, a test), reads as the LowConfidenceMaxSources constant, so such
+	// a caller keeps today's cut without knowing the key exists — the same
+	// zero-is-default rule Devmode follows.
+	LowConfidenceMaxSources int
 
 	// PromptVersion selects which system prompt is fed to the synthesis LLM.
 	// PromptVersionV52 preserves prod behavior; PromptVersionV6 enables the
@@ -334,6 +345,16 @@ func ClassifyConfidence(maxScore float64, s SynthesisSettings) string {
 		return ConfidenceLow
 	}
 	return ConfidenceNoRelevant
+}
+
+// lowConfidenceCut is the number of sources a low_confidence prompt keeps:
+// the configured value, or the LowConfidenceMaxSources constant for a zero
+// value (see SynthesisSettings.LowConfidenceMaxSources).
+func lowConfidenceCut(s SynthesisSettings) int {
+	if s.LowConfidenceMaxSources <= 0 {
+		return LowConfidenceMaxSources
+	}
+	return s.LowConfidenceMaxSources
 }
 
 // FilterByScore filters sources below s.ScoreThreshold.
@@ -744,8 +765,8 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 
 	// Step 4: Low-confidence source limiting.
 	llmSources := filtered
-	if confidence == ConfidenceLow && len(llmSources) > LowConfidenceMaxSources {
-		llmSources = llmSources[:LowConfidenceMaxSources]
+	if lowCut := lowConfidenceCut(settings); confidence == ConfidenceLow && len(llmSources) > lowCut {
+		llmSources = llmSources[:lowCut]
 	}
 
 	// Step 5: Lost-in-middle reordering.
