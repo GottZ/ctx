@@ -184,8 +184,9 @@ hermes ctx_checkpoint get <block-id>
 CLI writes use `sensitivity_default` unless `--sensitivity` is given and are tagged
 `hook:cli`. Hit lines of `query` and `search` carry the `untrusted_origin:` note line of a
 block that has the record. Error lines are redacted with the keys the provider binds
-(`CTX_KEY` and `status.profile_ctx_keys`) and the checkpoint rules. `--all-types` disables `prefetch_types_exclude`, e.g. to browse checkpoints;
-`search --type checkpoint` searches only checkpoint blocks (repeatable; named types replace `prefetch_types_exclude`).
+(`CTX_KEY` and `status.profile_ctx_keys`) and the checkpoint rules. `--all-types` disables `prefetch_types_exclude`;
+`search --type checkpoint` searches only checkpoint blocks (a ctx server with
+`search.leave_out_never_ranked` on leaves checkpoints out of a text search that names no type, `--all-types` included) (repeatable; named types replace `prefetch_types_exclude`).
 
 ## How it works
 
@@ -193,8 +194,10 @@ block that has the record. Error lines are redacted with the keys the provider b
 
 - Prefetch, `ctx_query` and `ctx_search` send `types_exclude` (default `checkpoint`,
   `tool-evidence`, `tool-overview`); excluded types are also dropped client-side for
-  older servers. Checkpoints stay browseable: `ctx_search` with `types: ["checkpoint"]` (or
-  `types_exclude: []`) or `hermes ctx_checkpoint search --type checkpoint`.
+  older servers. Checkpoints stay browseable: `ctx_search` with `types: ["checkpoint"]` or
+  `hermes ctx_checkpoint search --type checkpoint`. `types_exclude: []` finds them only while
+  the ctx server has `search.leave_out_never_ranked` off (its default): with it on, a text
+  search that names no type leaves checkpoints out.
 - `search` sends `types` (0.16.0, GottZ/ctx#342), over MCP too: a ctx server with #342 takes
   every registered type there. An older one refuses a type that retrieval never ranks
   (`block type "checkpoint" is not retrieval-visible`, or before ctx v5.8.0 the argument
@@ -207,7 +210,11 @@ block that has the record. Error lines are redacted with the keys the provider b
   (before ctx v5.8.0), every search with `types` goes without them first and is narrowed in
   the client, whatever types it names. A search the server later answers with `types`
   drops the memory of those types and of the argument. The fallback is best effort: the search without `types` fills its limit with every type, so rows of the
-  asked type can fall behind it. When an asked type has no row in such a search, or the
+  asked type can fall behind it. It asks with `types` again under two conditions: the
+  refusal was remembered from an earlier search (the search that meets the refusal first
+  answers from the fallback without a second typed request), and every row of the answer
+  without `types` carries a `type` (a row without one means a server older than the type
+  filter, which cannot take it). Then, when an asked type has no row in that answer, or the
   narrowing dropped rows, it asks with `types` again (one more refused call on an older
   server), so a server updated meanwhile is not read through the fallback. That ask takes at
   most half of what is left of the call's timeout and is not sent below 0.5 s, so the caller

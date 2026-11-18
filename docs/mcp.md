@@ -195,7 +195,10 @@ Lightweight search without an LLM call. Read-only.
 
 `types` takes every type of the key's registry, including the types that `query` never
 ranks (`checkpoint`, `system-meta`): the tool returns their blocks without a type filter,
-so naming one narrows the answer to them. A client that looks for its checkpoint blocks
+so naming one narrows the answer to them. With the server's settings key
+`search.leave_out_never_ranked` on (default off), a search with a `query` and without
+`types` leaves those types out, and the answer does not say so; naming the type is then
+the only way to find such blocks by text. A listing (empty `query`) keeps every type. A client that looks for its checkpoint blocks
 (a checkpoint head, a passage of a saved transcript) names `checkpoint`. Unlike
 `POST /api/search`, where an unknown name matches nothing, an unknown name is an error
 here; a type that another tenant registered for itself is unknown. Older ctx servers
