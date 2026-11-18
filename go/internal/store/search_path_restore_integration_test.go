@@ -564,7 +564,10 @@ func TestMigration179WaitsForNoWriter(t *testing.T) {
 	migCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	t0 := time.Now()
-	if err := store.RunMigrations(migCtx, pool); err != nil {
+	// Up to 179 only: migration 181 drops two triggers of context_blocks and
+	// waits for every open writer by design (ACCESS EXCLUSIVE, lock_timeout
+	// 3 s, issue #341).
+	if err := store.RunMigrationsUpTo(migCtx, pool, 179); err != nil {
 		t.Fatalf("migration 179 next to an open writer: %v", err)
 	}
 	took := time.Since(t0)
