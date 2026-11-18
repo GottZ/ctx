@@ -11,8 +11,10 @@
 #                   plus the source-census tests (they read source files of other
 #                   packages, no import edge leads to them)
 #   wave [--final]  quick + go test -short -race on the touched packages and their
-#                   direct importers + integration (-tags=integration -p 1, no
-#                   -short) of the touched packages and of the trigger rows + the
+#                   direct importers + integration (no -short) of the touched
+#                   packages and of the trigger rows — each package its own
+#                   go test -tags=integration -p 1, side by side as far as memory,
+#                   disk and load allow, checked before every package start — + the
 #                   extra gates of the trigger table; --final picks the long forms
 #                   (fuzzer 300 s, the full heap-gate matrix) and deadcode
 #   full            the complete local list of FOLGE-P hardening 7
@@ -20,7 +22,9 @@
 #                   united with whatever wave selects for this diff, so every stage
 #                   is a subset of full
 #   explain         changed files -> packages -> dependents -> chosen gates with the
-#                   reason; runs nothing but git and go list (--stage quick|wave|full)
+#                   reason, and how many integration packages would start at once
+#                   now; runs nothing but git, go list and that reading of the host
+#                   (--stage quick|wave|full)
 #   mutant <overlay.json> <test-regex> [pkg] [--race]
 #                   one mutant (go test -overlay) against exactly the tests that must
 #                   catch it: exit 0 = killed (red), 4 = survived, 5 = no red proof
@@ -29,7 +33,9 @@
 # Base: --base <ref> (default origin/root); the merge base with HEAD is compared
 # with the working tree, untracked files count.
 # Exit code: 0 green; 1/2/3 = the first red tier (quick/wave/full) — a red tier
-# stops the run unless --keep-going; 4/5 mutant; 64 usage.
+# stops the run unless --keep-going; 4/5 mutant; 6 = no room: an integration
+# package found no room on the host within CTX_GATES_ROOM_WAIT (neither green
+# nor red; it does not stop the run); 64 usage.
 #
 # The categories stay where they are (build tags, -short, env-gated measurement
 # tests, packages); this script only selects. CI stays the authority: ci.yml runs
@@ -107,10 +113,317 @@ STREAM_HEAP_FILE="$GO_DIR/internal/oai/folge_s_frame_test.go"
 # under GOMEMLIMIT=200MiB themselves
 STREAM_HEAP_GATES='^(TestStreamFrameWorkPerFrame|TestNonStreamWorkAtTheCap|TestStreamHeapGateLargeFrames|TestStreamLiveHeapConcurrent)$'
 
-usage() { sed -n '3,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 64; }
+usage() { sed -n '3,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 64; }
 die() { echo "gates: $*" >&2; exit 64; }
 now() { date -u +%FT%TZ; }
 load() { uptime | sed 's/.*load average: *//'; }
+
+# ── integration step: packages side by side, as far as the host has room (#337)
+# One slot = one integration package = one `go test -tags=integration -count=1
+# -p 1` process plus the PostgreSQL test container its test binary starts
+# (separate processes share nothing: own testcontainers session, own reaper,
+# random names and ports). Before EVERY package start the step reads
+# MemAvailable, the free space of the file system Docker keeps its writable
+# layers on, and load1, and subtracts what every live slot on the host has
+# reserved — its own and those of every other gates.sh run, kept in a host-wide
+# ledger (one file per slot, read and written under flock; an entry whose
+# process is gone is removed). Memory and disk stay reserved for a slot's whole
+# life, even where MemAvailable already shows part of it: a container reaches
+# its peak late, and overcommitting either ends in an OOM kill or a full disk.
+# CPU overcommit only slows down, and load1 shows a running slot by itself: a
+# slot's cores count with the part load1 cannot show yet, e^(-age/60 s). The
+# load bounds parallelism only — a run's first package needs memory and disk.
+# Starting values from the measurement of 2026-11-17 (docs/development.md,
+# "Integration packages side by side"); CTX_GATES_* overrides each of them.
+ROOM_MEM_MEASURED_MB="${CTX_GATES_SLOT_MEM_MB:-3072}"            # container memory.peak 2443 MB (largest, page cache included) + 508 MB go/build/test binary
+ROOM_MEM_OTHER_MB="${CTX_GATES_SLOT_MEM_UNMEASURED_MB:-5120}"    # a package without a measurement: × 1.6, the spread of the measured container peaks
+ROOM_MEM_RESERVE_MB="${CTX_GATES_MEM_RESERVE_MB:-16384}"         # MemAvailable never planned: twice the foreign swing measured during one package (7.6 GB)
+ROOM_DISK_GB="${CTX_GATES_SLOT_DISK_GB:-3}"                      # writable layer of a container at most 2650 MB (pg_wal stays at max_wal_size)
+ROOM_DISK_RESERVE_GB="${CTX_GATES_DISK_RESERVE_GB:-120}"         # free space on the Docker file system never planned
+ROOM_CPU="${CTX_GATES_SLOT_CPU:-2}"                              # cores per slot: a test container computes p50 1.0, p99 2.0 cores
+ROOM_WAIT="${CTX_GATES_ROOM_WAIT:-1800}"                         # s to wait when not even one package fits (the longest measured package takes 770 s), then exit 6
+ROOM_SERIAL="${CTX_GATES_SERIAL:-0}"                             # 1: one package at a time (the room check before each start stays)
+ROOM_LEDGER="${CTX_GATES_SLOTS:-/run/lock/ctx-gates}"            # host-wide slot ledger, outside every checkout; tmpfs: a reboot ends every slot
+ROOM_MEASURED=" ./internal/handler/ ./internal/events/ ./internal/store/ " # the packages the measurement covers (ROOM_MEM_MEASURED_MB)
+ROOM_POLL=2        # s between two looks at the running packages and the room while packages wait
+ROOM_LOAD_TAU=60   # s, the time constant of load1: a slot started t s ago shows in it with 1 - e^(-t/60) of its cores
+ROOM_SAY_EVERY=60  # s between two equal "waiting" lines
+ROOM_LOCK_WAIT=30  # s to wait for the ledger lock (a holder keeps it for one measurement, milliseconds)
+ROOM_EXIT=6        # exit code of the step and of gates.sh when a package found no room: neither green nor red
+# start order: longest first — seconds per package in the integration jobs of CI
+# run 44182731071 (be187861, 2 cores); packages not listed start after these,
+# in the order they were selected
+INTEG_RANK=(
+  ./internal/handler/                   # 606 s
+  ./internal/events/                    # 388 s
+  ./internal/oai/                       # 341 s
+  ./internal/store/                     # 334 s
+  ./internal/guard/                     # 200 s
+  ./internal/rrf/                       # 180 s
+  ./internal/distillsource/ctxcheckpoint/ # 121 s
+  ./internal/overview/                  #  97 s
+  ./internal/dispatch/                  #  88 s
+  ./internal/llmusage/                  #  56 s
+  ./internal/dream/                     #  56 s
+  ./cmd/ctxd/                           #  47 s
+  ./internal/schemacontract/            #  37 s
+  ./internal/armsweep/                  #  28 s
+  ./internal/recall/                    #  28 s
+  ./internal/backends/                  #  19 s
+  ./internal/llmlog/                    #  18 s
+)
+for _v in CTX_GATES_SLOT_MEM_MB:ROOM_MEM_MEASURED_MB CTX_GATES_SLOT_MEM_UNMEASURED_MB:ROOM_MEM_OTHER_MB \
+  CTX_GATES_MEM_RESERVE_MB:ROOM_MEM_RESERVE_MB CTX_GATES_SLOT_DISK_GB:ROOM_DISK_GB CTX_GATES_DISK_RESERVE_GB:ROOM_DISK_RESERVE_GB \
+  CTX_GATES_SLOT_CPU:ROOM_CPU CTX_GATES_ROOM_WAIT:ROOM_WAIT CTX_GATES_SERIAL:ROOM_SERIAL; do
+  _n="${_v#*:}"
+  case "${!_n}" in ''|*[!0-9]*|0?*) die "${_v%%:*} must be a whole number without leading zeros, got '${!_n}'" ;; esac
+done
+_v="${ROOM_MEM_MEASURED_MB}:${ROOM_MEM_OTHER_MB}:${ROOM_DISK_GB}:${ROOM_CPU}"
+case ":$_v:" in *:0:*) die "CTX_GATES_SLOT_MEM_MB, CTX_GATES_SLOT_MEM_UNMEASURED_MB, CTX_GATES_SLOT_DISK_GB and CTX_GATES_SLOT_CPU must be above 0" ;; esac
+case "$ROOM_SERIAL" in 0|1) ;; *) die "CTX_GATES_SERIAL must be 0 or 1, got '$ROOM_SERIAL'" ;; esac
+
+room_mem_need() { case "$ROOM_MEASURED" in *" $1 "*) echo "$ROOM_MEM_MEASURED_MB" ;; *) echo "$ROOM_MEM_OTHER_MB" ;; esac; }
+room_rank() { # the packages longest first (INTEG_RANK), the unranked after them
+  local r p out=""
+  for r in "${INTEG_RANK[@]}"; do for p in "$@"; do [ "$p" = "$r" ] && out="$out $p"; done; done
+  for p in "$@"; do case " ${INTEG_RANK[*]} " in *" $p "*) ;; *) out="$out $p" ;; esac; done
+  echo "${out# }"
+}
+# room_check <MemAvailable MB> <free GB> <load1> <cores> <reserved MB> <reserved GB>
+#   <reserved cores> <own packages running> <memory of the next slot, MB>
+# One start decision from given values (no measurement, no ledger): prints
+# "<verdict> <bound> <values>". Verdict start; wait (own packages run, they free
+# room); none (nothing of this run runs and not even one slot fits). Bound: every
+# limit that holds the package back, joined by + (mem, disk, serial, cpu); - when
+# nothing limits; cpu-first when the load leaves no room but the run's first
+# package starts (the load bounds parallelism only).
+room_check() {
+  awk -v a="$1" -v d="$2" -v l="$3" -v n="$4" -v rm="$5" -v rd="$6" -v rc="$7" -v own="$8" -v nm="$9" \
+    -v mres="$ROOM_MEM_RESERVE_MB" -v nd="$ROOM_DISK_GB" -v dres="$ROOM_DISK_RESERVE_GB" -v nc="$ROOM_CPU" -v serial="$ROOM_SERIAL" '
+    function floor(x) { return x == int(x) ? x : (x < 0 ? int(x) - 1 : int(x)) }
+    BEGIN {
+      mf = a - mres - rm; ms = floor(mf / nm)
+      df = d - dres - rd; ds = floor(df / nd)
+      cf = n - l - rc; cs = floor(cf / nc)
+      lim = ""
+      if (ms < 1) lim = "mem"
+      if (ds < 1) lim = lim (lim == "" ? "" : "+") "disk"
+      hard = (lim != "")
+      if (own > 0 && serial == 1) lim = lim (lim == "" ? "" : "+") "serial"
+      if (own > 0 && cs < 1) lim = lim (lim == "" ? "" : "+") "cpu"
+      if (hard) { v = (own > 0 ? "wait" : "none"); b = lim }
+      else if (lim != "") { v = "wait"; b = lim }
+      else { v = "start"; b = (cs < 1 ? "cpu-first" : "-") }
+      printf "%s %s mem: %d avail - %d reserve - %d reserved = %d MB -> %d x %d MB; disk: %d free - %d reserve - %d reserved = %d GB -> %d x %d GB; cpu: %d cores - %.2f load1 - %.2f reserved = %.2f -> %d x %d\n",
+        v, b, a, mres, rm, mf, (ms > 0 ? ms : 0), nm, d, dres, rd, df, (ds > 0 ? ds : 0), nd, n, l, rc, cf, (cs > 0 ? cs : 0), nc
+    }'
+}
+# room_plan <MemAvailable MB> <free GB> <load1> <cores> <reserved MB> <reserved GB>
+#   <reserved cores> <pkg…>: how many of the packages start at once with these
+# values, in start order; each start reserves its slot (all of its cores: it has
+# not shown in load1 yet). The last line names the bound with its values.
+room_plan() {
+  local a=$1 d=$2 l=$3 n=$4 resm=$5 resd=$6 resc=$7 p need out v b started=0 stop="" last="" mode; shift 7
+  for p in $(room_rank "$@"); do
+    if [ -n "$stop" ]; then echo "queue $p"; continue; fi
+    need=$(room_mem_need "$p")
+    out=$(room_check "$a" "$d" "$l" "$n" "$resm" "$resd" "$resc" "$started" "$need"); v=${out%% *}; b=${out#* }; b=${b%% *}
+    if [ "$v" = start ]; then
+      echo "start $p (${need} MB$( [ "$b" = cpu-first ] && echo '; the load leaves no room for a second, the first starts anyway')) | ${out#* * }"
+      started=$((started + 1)); resm=$((resm + need)); resd=$((resd + ROOM_DISK_GB)); resc=$(awk -v x="$resc" -v y="$ROOM_CPU" 'BEGIN { printf "%.2f", x + y }')
+      last="$b|${out#* * }"; continue
+    fi
+    stop="$b"; last="$b|${out#* * }"; echo "queue $p ($v: $b)"
+  done
+  if [ -z "$stop" ]; then mode="all of them"; b="-"
+  else b="$stop"; case "$started" in 0) mode="no room for even one" ;; 1) mode="serial" ;; *) mode="side by side" ;; esac; fi
+  echo "plan: $started of $# packages at once now ($mode; bound=$b) | ${last#*|}"
+}
+proc_start() { # the start time of a live process (clock ticks since boot); fails for a dead or zombie one
+  local s
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  { read -r s < "/proc/$1/stat"; } 2>/dev/null || return 1
+  s=${s##*) }
+  set -- $s
+  case "$1" in Z|X|x) return 1 ;; esac
+  echo "${20}"
+}
+# ledger_sum <clean 0|1>: "<live slots> <reserved MB> <reserved GB> <reserved cores>"
+# over the ledger; an entry is live while its process runs with the recorded
+# start time (a reused pid does not count). With 1 — only under the ledger lock —
+# the dead entries are removed.
+ledger_sum() {
+  local f pid st mem disk cpu since rest lines="" now
+  now=$(date +%s)
+  if [ -d "$ROOM_LEDGER" ]; then
+    while IFS= read -r f; do
+      { read -r pid st mem disk cpu since rest < "$f"; } 2>/dev/null || continue
+      if [ -n "$st" ] && [ "$(proc_start "$pid")" = "$st" ]; then lines="$lines$mem $disk $cpu $since"$'\n'
+      elif [ "$1" = 1 ]; then rm -f "$f"; fi
+    done < <(find "$ROOM_LEDGER" -maxdepth 1 -type f -name 'slot-*' 2>/dev/null)
+  fi
+  printf '%s' "$lines" | awk -v now="$now" -v tau="$ROOM_LOAD_TAU" '
+    NF == 4 { n++; m += $1; d += $2; age = now - $4; if (age < 0) age = 0; c += $3 * exp(-age / tau) }
+    END { printf "%d %d %d %.2f\n", n, m, d, c }'
+}
+room_measure() { # "<MemAvailable MB> <free GB on ROOM_DOCKER_FS> <load1> <cores>"
+  local a d l n
+  a=$(awk '/^MemAvailable:/ { printf "%d", $2 / 1024 }' /proc/meminfo 2>/dev/null)
+  d=$(df -BG --output=avail "$ROOM_DOCKER_FS" 2>/dev/null | awk 'NR == 2 { sub(/G$/, "", $1); print $1 }')
+  { read -r l _ < /proc/loadavg; } 2>/dev/null
+  n=$(nproc 2>/dev/null)
+  [ -n "$a" ] && [ -n "$d" ] && [ -n "${l:-}" ] && [ -n "$n" ] || return 1
+  echo "$a $d $l $n"
+}
+room_docker_fs() { # the directory Docker keeps its writable layers under (the containers' PGDATA lives there)
+  local d; d=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)
+  if [ -n "$d" ] && [ -d "$d" ]; then echo "$d"; else echo /; return 1; fi
+}
+# room_take <owner pid> <entry> <pkg> <memory MB> <own packages running>: one
+# start decision under the ledger lock — dead entries out, measure, decide, and
+# on start write the entry before the lock is released, so a second run that
+# decides at the same moment sees this reservation
+room_take() {
+  local owner=$1 entry=$2 pkg=$3 need=$4 own=$5 v="none"
+  [ "$own" -gt 0 ] && v="wait"
+  { : >> "$ROOM_LEDGER/.lock"; } 2>/dev/null || { echo "$v lock cannot open the ledger lock $ROOM_LEDGER/.lock"; return 0; }
+  (
+    flock -x -w "$ROOM_LOCK_WAIT" 9 || { echo "$v lock no ledger lock within ${ROOM_LOCK_WAIT}s ($ROOM_LEDGER/.lock)"; exit 0; }
+    read -r n resm resd resc <<<"$(ledger_sum 1)"
+    host=$(room_measure) || { echo "$v measure host values not readable (/proc/meminfo, /proc/loadavg, df on $ROOM_DOCKER_FS)"; exit 0; }
+    read -r a d l np <<<"$host"
+    out=$(room_check "$a" "$d" "$l" "$np" "$resm" "$resd" "$resc" "$own" "$need")
+    if [ "${out%% *}" = start ]; then
+      printf '%s %s %s %s %s %s %s %s\n' "$owner" "$(proc_start "$owner" || echo 0)" "$need" "$ROOM_DISK_GB" "$ROOM_CPU" "$(date +%s)" "$pkg" "$RUN_DIR" > "$ROOM_LEDGER/$entry"
+    fi
+    echo "$out; ledger: $n live slot(s) on this host"
+  ) 9>>"$ROOM_LEDGER/.lock"
+}
+room_follow() { # room_follow <entry> <pid>: from now on the entry lives as long as the go test process
+  local f="$ROOM_LEDGER/$1" rest
+  { read -r _ _ rest < "$f"; } 2>/dev/null || return 0
+  printf '%s %s %s\n' "$2" "$(proc_start "$2" || echo 0)" "$rest" > "$ROOM_LEDGER/tmp-$1" && mv -f "$ROOM_LEDGER/tmp-$1" "$f"
+}
+room_ledger_ok() { # room_ledger_ok <dir>: a real directory of this user or root that nobody else can write to
+  local o
+  [ -d "$1" ] && [ ! -L "$1" ] && [ -w "$1" ] || return 1
+  o=$(stat -c %u "$1" 2>/dev/null) || return 1
+  { [ "$o" = "$(id -u)" ] || [ "$o" = 0 ]; } && [ -z "$(find "$1" -maxdepth 0 -perm /022 2>/dev/null)" ]
+}
+say() { echo "$*"; { echo "gates: $*" >&3; } 2>/dev/null; } # step log, and the console: the main loop opens fd 3 for this step only
+# step_integ <pkg…>: the integration step. Every package runs as its own go test
+# process (own log, GOTMPDIR and TMPDIR), longest first, each started only once
+# room_take found room for it. Stdout (the step log) gets every package's output
+# when it ends and one line per package at the end. Exit 0 all green, 1 a package
+# failed, ROOM_EXIT none failed but a package found no room within ROOM_WAIT
+# (the list of those is in <run>/integ/not-started for the main loop).
+step_integ() {
+  local dir="$RUN_DIR/integ" owner=$BASHPID total=$# queue=() run=() still=() fin=() notstarted=() p rc_all=0
+  local out v b seq=0 maxrun=0 wait0="" said="" said_at=0 t_start host resm resd resc ok=0 failed=0 slug mode=checked why="" sum=0
+  local -A PID=() T0=() ENT=() LOG=() RC=() DUR=() GT=() TT=()
+  mkdir -p "$dir"; t_start=$(date +%s)
+  read -r -a queue <<<"$(room_rank "$@")"
+  ROOM_DOCKER_FS=$(room_docker_fs) || why="docker info named no root directory — disk measured on /; "
+  if ! command -v flock >/dev/null 2>&1; then mode=unchecked; why="${why}flock is not installed"
+  elif ! { mkdir -m 0755 "$ROOM_LEDGER" 2>/dev/null; room_ledger_ok "$ROOM_LEDGER"; }; then
+    why="${why}ledger $ROOM_LEDGER not usable (not writable, or another user's, or writable by others) — this user's runs only; "
+    ROOM_LEDGER="${XDG_RUNTIME_DIR:-$TMPDIR}/ctx-gates"; mkdir -m 0700 "$ROOM_LEDGER" 2>/dev/null
+  fi
+  [ "$mode" = checked ] && ! room_measure >/dev/null && { mode=unchecked; why="${why}host values not readable (/proc/meminfo, /proc/loadavg, df)"; }
+  say "integration: $total packages, longest first: ${queue[*]}"
+  if [ "$mode" = checked ]; then
+    say "integration: room check before every start — per slot ${ROOM_MEM_MEASURED_MB} MB (handler, events, store) or ${ROOM_MEM_OTHER_MB} MB, ${ROOM_DISK_GB} GB, ${ROOM_CPU} cores; reserves ${ROOM_MEM_RESERVE_MB} MB MemAvailable, ${ROOM_DISK_RESERVE_GB} GB on $ROOM_DOCKER_FS; ledger $ROOM_LEDGER$( [ "$ROOM_SERIAL" = 1 ] && echo '; CTX_GATES_SERIAL=1')${why:+; $why}"
+    read -r _ resm resd resc <<<"$(ledger_sum 0)"; host=$(room_measure)
+    say "integration: $(room_plan $host "$resm" "$resd" "$resc" "${queue[@]}" | tail -1)"
+  else
+    say "integration: room not measurable ($why) — one package at a time, unchecked"
+  fi
+  while [ ${#queue[@]} -gt 0 ] || [ ${#run[@]} -gt 0 ]; do
+    still=(); fin=()
+    for p in "${run[@]}"; do
+      if proc_start "${PID[$p]}" >/dev/null; then still+=("$p"); continue; fi
+      wait "${PID[$p]}"; RC[$p]=$?; DUR[$p]=$(( $(date +%s) - ${T0[$p]} ))
+      rm -f "$ROOM_LEDGER/${ENT[$p]}"; rm -rf "${GT[$p]}" "${TT[$p]}"; fin+=("$p")
+    done
+    run=("${still[@]}")
+    for p in "${fin[@]}"; do
+      echo "== integration $p rc=${RC[$p]} seconds=${DUR[$p]} log=${LOG[$p]}"; cat "${LOG[$p]}"
+      say "integration: done $p rc=${RC[$p]} ${DUR[$p]}s (${#run[@]} still running, ${#queue[@]} waiting)"
+    done
+    while [ ${#queue[@]} -gt 0 ]; do
+      p=${queue[0]}; seq=$((seq + 1))
+      if [ "$mode" = unchecked ]; then
+        if [ ${#run[@]} -eq 0 ]; then out="start unchecked $why"; else out="wait unchecked $why"; fi
+      else
+        out=$(room_take "$owner" "slot-$owner-$seq" "$p" "$(room_mem_need "$p")" "${#run[@]}")
+      fi
+      v=${out%% *}; b=${out#* }; b=${b%% *}
+      case "$v" in start|wait|none) ;; *) out="none ledger no decision from the room check: $out"; v=none; b=ledger ;; esac
+      [ "$v" = wait ] && [ ${#run[@]} -eq 0 ] && v=none # waiting for an own package needs one running; else the deadline applies
+      if [ "$v" = start ]; then
+        slug=${p#./}; slug=${slug%/}; slug=${slug//\//_}; [ -n "$slug" ] && [ "$slug" != . ] || slug=module
+        LOG[$p]="$dir/$slug.log"; GT[$p]="$GOTMPDIR/integ-$owner-$slug"; TT[$p]="$TMPDIR/integ-$owner-$slug"; ENT[$p]="slot-$owner-$seq"
+        mkdir -p "${GT[$p]}" "${TT[$p]}"
+        env GOTMPDIR="${GT[$p]}" TMPDIR="${TT[$p]}" go test -tags=integration -count=1 -p 1 -timeout 60m "$p" > "${LOG[$p]}" 2>&1 3>&- &
+        PID[$p]=$!; T0[$p]=$(date +%s)
+        [ "$mode" = checked ] && room_follow "${ENT[$p]}" "${PID[$p]}"
+        run+=("$p"); queue=("${queue[@]:1}"); [ ${#run[@]} -gt "$maxrun" ] && maxrun=${#run[@]}
+        say "integration: start $p ($(( total - ${#queue[@]} )) of $total, ${#run[@]} running$( [ "$b" = cpu-first ] && echo '; the load leaves no room for a second, the first starts anyway')) | ${out#* * }"
+        wait0=""; said=""; continue
+      fi
+      if [ "$v" = none ]; then
+        [ -n "$wait0" ] || wait0=$(date +%s)
+        if [ $(( $(date +%s) - wait0 )) -ge "$ROOM_WAIT" ]; then
+          notstarted=("${queue[@]}"); queue=()
+          say "integration: no room within ${ROOM_WAIT}s (CTX_GATES_ROOM_WAIT), bound=$b — not started: ${notstarted[*]} | ${out#* * }"
+          break
+        fi
+      fi
+      if [ "$b" != "$said" ] || [ $(( $(date +%s) - said_at )) -ge "$ROOM_SAY_EVERY" ]; then
+        if [ "$v" = none ]; then
+          say "integration: waiting — no room for $p, bound=$b, $(( ROOM_WAIT - $(date +%s) + wait0 ))s left of CTX_GATES_ROOM_WAIT | ${out#* * }"
+        else
+          say "integration: waiting — $p after a running package (${#run[@]} running), bound=$b$( [ ${#run[@]} -eq 1 ] && echo ', serial') | ${out#* * }"
+        fi
+        said=$b; said_at=$(date +%s)
+      fi
+      break
+    done
+    if [ ${#queue[@]} -gt 0 ] || [ ${#run[@]} -gt 0 ]; then sleep "$ROOM_POLL"; fi
+  done
+  for p in $(room_rank "$@"); do
+    if [ -n "${RC[$p]:-}" ]; then
+      sum=$((sum + ${DUR[$p]}))
+      if [ "${RC[$p]}" = 0 ]; then ok=$((ok + 1)); say "integration: $p rc=0 ok ${DUR[$p]}s log=${LOG[$p]}"
+      else failed=$((failed + 1)); say "integration: $p rc=${RC[$p]} FAIL ${DUR[$p]}s log=${LOG[$p]}"; fi
+    else say "integration: $p not started (no room)"; fi
+  done
+  say "integration: $total packages: $ok ok, $failed failed, ${#notstarted[@]} not started; at most $maxrun at once; wall $(( $(date +%s) - t_start ))s, sum of package times ${sum}s"
+  if [ ${#notstarted[@]} -gt 0 ]; then echo "${notstarted[*]}" > "$dir/not-started"; fi
+  if [ "$failed" -gt 0 ]; then rc_all=1; elif [ ${#notstarted[@]} -gt 0 ]; then rc_all=$ROOM_EXIT; fi
+  return "$rc_all"
+}
+room_explain() { # room_explain <pkg…>: what the integration step would start right now (read-only: no lock, no entry)
+  local host n resm resd resc note=""
+  ROOM_DOCKER_FS=$(room_docker_fs) || note=" (docker info named no root directory)"
+  host=$(room_measure) || { echo "integration room: host values not readable here"; return 0; }
+  read -r n resm resd resc <<<"$(ledger_sum 0)"
+  echo "integration room now: MemAvailable/free GB on $ROOM_DOCKER_FS$note/load1/cores = $host; ledger $ROOM_LEDGER: $n live slot(s), reserved $resm MB, $resd GB, $resc cores"
+  room_plan $host "$resm" "$resd" "$resc" "$@" | sed 's/^/  /'
+}
+
+# how the main loop reads a step's rc: the integration step's ROOM_EXIT is no
+# room — neither green nor red, it does not stop the run and ends it with exit 6
+step_is_red() { [ "$2" != 0 ] && ! { [ "$1" = integration ] && [ "$2" = "$ROOM_EXIT" ]; }; }
+room_noroom() { # room_noroom <step> <rc> <run dir>: the packages the integration step could not start, empty when none
+  [ "$1" = integration ] || return 0
+  if [ -s "$3/integ/not-started" ]; then cat "$3/integ/not-started"
+  elif [ "$2" = "$ROOM_EXIT" ]; then echo "(see the integration step log)"; fi
+}
+gates_exit() { if [ "$1" != 0 ]; then echo "$1"; elif [ -n "$2" ]; then echo "$ROOM_EXIT"; else echo 0; fi; } # gates_exit <red tier> <not started>
+
+# sourced (go/gates_test.sh): the room functions above, nothing else
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then return 0; fi
 
 # ── arguments
 CMD="${1:-}"; [ -n "$CMD" ] || usage; shift
@@ -260,7 +573,7 @@ for f in "${CHANGED[@]}"; do
     go/go.mod|go/go.sum) MODALL=1; GO_CHANGED=1; LINT_ALL=1 ;;
     go/.golangci.yml|.golangci.yml) LINT_ALL=1 ;;
     deadcode.sh|go/deadcode-allow.txt|go/deadcode-testonly-allow.txt) DEADCODE_HIT=1 ;;
-    go/gates.sh) SELF_HIT=1 ;;
+    go/gates.sh|go/gates_test.sh) SELF_HIT=1 ;;
   esac
   if [[ "$f" == go/*.go ]]; then
     GO_CHANGED=1
@@ -359,7 +672,7 @@ count() { printf '%s\n' $1 | sed '/^$/d' | wc -l; }
 relset() { for p in $1; do rel "$p"; done; }
 
 # ── steps
-STEP_TIER=(); STEP_NAME=(); STEP_WHY=(); STEP_CMD=(); SKIPPED=()
+STEP_TIER=(); STEP_NAME=(); STEP_WHY=(); STEP_CMD=(); SKIPPED=(); INTEG_PKGS=""
 step() { local tier=$1 name=$2 why=$3; shift 3; STEP_TIER+=("$tier"); STEP_NAME+=("$name"); STEP_WHY+=("$why"); STEP_CMD+=("$(printf '%q ' "$@")"); }
 skip() { SKIPPED+=("$1: $2"); }
 
@@ -440,7 +753,11 @@ step_doccheck() { # whitespace errors and conflict markers; tracked files via gi
   return $bad
 }
 step_web() { command -v bun >/dev/null 2>&1 || { echo "bun not on PATH"; return 1; }; (cd "$GO_DIR/web" && bun run check && bun run test); }
-step_self() { bash -n "$GO_DIR/gates.sh" || return 1; if command -v shellcheck >/dev/null 2>&1; then shellcheck "$GO_DIR/gates.sh"; else echo "shellcheck not installed — bash -n only"; fi; }
+step_self() { # syntax, shellcheck, and the room self-test (go/gates_test.sh)
+  bash -n "$GO_DIR/gates.sh" && bash -n "$GO_DIR/gates_test.sh" || return 1
+  if command -v shellcheck >/dev/null 2>&1; then shellcheck "$GO_DIR/gates.sh" "$GO_DIR/gates_test.sh" || return 1; else echo "shellcheck not installed — bash -n only"; fi
+  bash "$GO_DIR/gates_test.sh"
+}
 step_lint_precommit() { local c="$REPO/.gotmp/glci-precommit"; mkdir -p "$c"; GOLANGCI_LINT_CACHE="$c" golangci-lint run --timeout=2m; }
 
 plan() {
@@ -455,7 +772,7 @@ plan() {
   elif [ -n "$TOUCHED" ]; then step 1 lint "touched packages" golangci-lint run --timeout=5m $(relset "$TOUCHED")
   else skip lint "no Go package touched"; fi
   if [ ${#NONGO_TEXT[@]} -gt 0 ]; then step 1 doccheck "non-Go text changed: whitespace and conflict markers" step_doccheck "${NONGO_TEXT[@]}"; fi
-  [ "$SELF_HIT" = 1 ] && step 1 selfcheck "go/gates.sh changed" step_self
+  [ "$SELF_HIT" = 1 ] && step 1 selfcheck "go/gates.sh or go/gates_test.sh changed" step_self
   if [ "$DEADCODE_HIT" = 1 ] && [ "$st" != full ]; then step 1 deadcode "deadcode files changed" bash "$REPO/deadcode.sh"; step 1 deadcode-testonly "deadcode files changed" bash "$REPO/deadcode.sh" testonly; fi
   if [ "$st" = full ]; then short="$ALL_PKGS"; else short="$SHORT_SET"; fi
   # wave: a package that also runs in this wave's integration step (-tags=integration
@@ -484,7 +801,8 @@ plan() {
   else skip race "no Go package touched"; fi
   integ=$(printf '%s\n' "${!INTEG[@]}" | sed '/^$/d' | sort -u)
   [ "$st" = full ] && integ=$(printf '%s\n' $integ "${FULL_INTEG[@]}" | sort -u)
-  if [ -n "$integ" ]; then step 2 integration "$( [ "$st" = full ] && echo 'hardening-7 list + ')$(for p in $integ; do printf '%s[%s] ' "$p" "${INTEG_WHY[$p]:-hardening-7 list}"; done)" go test -tags=integration -count=1 -p 1 -timeout 60m $integ
+  INTEG_PKGS="$integ"
+  if [ -n "$integ" ]; then step 2 integration "each package its own go test -tags=integration -count=1 -p 1 -timeout 60m, side by side as far as the host has room: $( [ "$st" = full ] && echo 'hardening-7 list + ')$(for p in $integ; do printf '%s[%s] ' "$p" "${INTEG_WHY[$p]:-hardening-7 list}"; done)" step_integ $integ
   else skip integration "no package with a reason"; fi
   python=0; [ -n "${EXTRA[python]:-}" ] && python=1; [ "$st" = full ] && python=1
   if [ "$python" = 1 ]; then
@@ -547,6 +865,7 @@ explain() {
   for g in "${!EXTRA[@]}"; do echo "extra $g ← ${EXTRA_WHY[$g]}"; done
   local i
   for i in "${!STEP_NAME[@]}"; do echo "step ${STEP_TIER[$i]}/${STEP_NAME[$i]}: ${STEP_WHY[$i]}"; echo "    \$ ${STEP_CMD[$i]}"; done
+  if [ -n "$INTEG_PKGS" ]; then room_explain $INTEG_PKGS; fi
 }
 
 summary() {
@@ -560,7 +879,7 @@ plan "$STAGE"
 if [ "$CMD" = explain ]; then explain; summary; exit 0; fi
 
 echo "gates: $STAGE start $(now) load $(load) base=$BASE_REF merge-base=${MB:0:12} changed=${#CHANGED[@]}"
-RED=0; RESULTS=(); cur_tier=1
+RED=0; RESULTS=(); cur_tier=1; NOROOM=""
 for i in "${!STEP_NAME[@]}"; do
   t=${STEP_TIER[$i]}
   if [ "$t" != "$cur_tier" ]; then
@@ -570,18 +889,21 @@ for i in "${!STEP_NAME[@]}"; do
   name=${STEP_NAME[$i]}; lf="$RUN_DIR/$(printf '%02d' "$i")-$name.log"
   s=$(date +%s)
   echo "== $name start $(now) load $(load) :: ${STEP_CMD[$i]}" > "$lf"
+  # fd 3 = the console, for the integration step's starts, waits and results; no other step's processes hold it
+  if [ "$name" = integration ]; then exec 3>&1; else exec 3>&-; fi
   (cd "$GO_DIR" && eval "${STEP_CMD[$i]}") >> "$lf" 2>&1; rc=$?
   d=$(( $(date +%s) - s ))
   echo "== $name rc=$rc seconds=$d end $(now) load $(load)" >> "$lf"
   fails=$(grep -c '^--- FAIL\|^FAIL' "$lf"); races=$(grep -c 'WARNING: DATA RACE' "$lf")
-  last=$(grep -E '^(heap |cpu gates|census:|ok  |FAIL|PASS$)' "$lf" | tail -1 | cut -c1-120)
+  last=$(grep -E '^(heap |cpu gates|census:|integration: [0-9]+ packages:|ok  |FAIL|PASS$)' "$lf" | tail -1 | cut -c1-120)
   echo "gates: step $t/$name rc=$rc ${d}s fails=$fails races=$races ${last:+| $last}"
   if [ "$name" = race ]; then # CI's unit job runs -race with -timeout=5m per test binary (ci.yml)
     awk -F'\t' '/^ok/ { t = $3; sub(/s$/, "", t); if (t + 0 > 300) printf "gates: warning: %s took %ss under -race here; CI allows 5m per binary (ci.yml unit job)\n", $2, t }' "$lf"
   fi
   RESULTS+=("$name:$rc:${d}s")
-  if [ "$rc" != 0 ] && [ "$RED" = 0 ]; then RED=$t; fi
+  nr=$(room_noroom "$name" "$rc" "$RUN_DIR"); [ -n "$nr" ] && NOROOM="$nr"
+  if step_is_red "$name" "$rc" && [ "$RED" = 0 ]; then RED=$t; fi
 done
 echo "gates: $STAGE end $(now) load $(load)"
-summary "rot=$RED log=$RUN_DIR"
-exit "$RED"
+summary "rot=$RED${NOROOM:+ kein-platz=[$NOROOM]} log=$RUN_DIR"
+exit "$(gates_exit "$RED" "$NOROOM")"
