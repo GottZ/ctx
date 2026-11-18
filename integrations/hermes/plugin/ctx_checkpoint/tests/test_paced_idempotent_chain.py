@@ -20,6 +20,7 @@ Time is a fake clock: the plugin's sleep and monotonic seams move it, every call
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -224,12 +225,7 @@ def test_a_retry_meets_its_own_titles_and_reuses_the_parts_ctx_confirms(monkeypa
     messages = _transcript(10)
     real_store = server._store
 
-    def store_failing_at_part_6(args):
-        if " part 006 of " in args["title"]:
-            return {"error": "store failed: connection reset by peer"}
-        return real_store(args)
-
-    server._store = store_failing_at_part_6
+    server._store = _failing_at_part(server, 6)
     with pytest.raises(CtxCheckpointError):
         provider.on_pre_compress(messages, require_checkpoint=True)
     assert len(server.parts()) == 5 and not server.manifests()
@@ -275,12 +271,18 @@ def _published_wording(server: CtxServerDouble) -> dict[str, str]:
     return {block_id: by_id[block_id] for block_id in ids}
 
 
-def _failing_at_part_2(server: CtxServerDouble):
+def _failing_at_part(server: CtxServerDouble, n: int):
+    """The store of the double, failing the n-th part write it receives (a part title names no
+    position since 0.15.0, so the count of part stores stands for the index)."""
     real_store = server._store
+    seen = 0
 
     def store(args):
-        if " part 002 of " in args["title"]:
-            return {"error": "store failed: connection reset by peer"}
+        nonlocal seen
+        if args["title"].startswith("Compaction source part "):
+            seen += 1
+            if seen == n:
+                return {"error": "store failed: connection reset by peer"}
         return real_store(args)
 
     return store
@@ -289,7 +291,8 @@ def _failing_at_part_2(server: CtxServerDouble):
 def test_a_retry_with_another_split_never_rewrites_a_published_part(monkeypatch, clock):
     """Same transcript, same part count, cut elsewhere (chunk_chars 1000 → 1100): a part's
     title must name its exact content, or the retry overwrites a published part with another
-    cut and a failure after it leaves the published manifest on a mix of both splits."""
+    cut and a failure after it leaves the published manifest on a mix of both splits. Since
+    0.15.0 the title is the digest of the whole write (``part_title_for``)."""
     server = CtxServerDouble(clock)
     _sleep_outside_the_lock(monkeypatch, clock, server)
     provider, _ = _provider(server, chunk_chars=1_000)
@@ -299,7 +302,7 @@ def test_a_retry_with_another_split_never_rewrites_a_published_part(monkeypatch,
     assert len(published) == 3
 
     provider._chain().chunk_chars = 1_100  # still three parts
-    server._store = _failing_at_part_2(server)
+    server._store = _failing_at_part(server, 2)
     with pytest.raises(CtxCheckpointError):
         provider.on_pre_compress(messages, require_checkpoint=True)
 
@@ -307,8 +310,10 @@ def test_a_retry_with_another_split_never_rewrites_a_published_part(monkeypatch,
 
 
 def test_a_retry_after_a_session_switch_never_rewrites_a_published_part(monkeypatch, clock):
-    """Same root and transcript, another active session: the part header names the session,
-    so the content differs while the root, digest, index and count stay the same."""
+    """Same root and transcript, another active session. Up to 0.14.0 the part header named the
+    session, so the content differed under the same root, digest, index and count; since 0.15.0
+    a part names no session and the retry's parts are the stored ones. Either way a failure in
+    between leaves the published wording as it was."""
     server = CtxServerDouble(clock)
     _sleep_outside_the_lock(monkeypatch, clock, server)
     provider, _ = _provider(server, chunk_chars=1_000)
@@ -318,7 +323,7 @@ def test_a_retry_after_a_session_switch_never_rewrites_a_published_part(monkeypa
 
     provider.on_session_switch("session-paced-2", reason="compression")
     assert provider._checkpoint_root() == "session-paced"
-    server._store = _failing_at_part_2(server)
+    server._store = _failing_at_part(server, 2)
     with pytest.raises(CtxCheckpointError):
         provider.on_pre_compress(messages, require_checkpoint=True)
 
@@ -408,3 +413,182 @@ def test_a_window_that_stays_full_fails_after_two_refusals(monkeypatch, clock):
     assert server.max_consecutive_errors == 2
     assert clock.slept and all(s <= 62.0 for s in clock.slept)
     assert any("rate-limited" in n or "write limit" in n for n in notices), notices
+
+
+# -- GottZ/ctx#344: a part is stored once per text ------------------------------------------
+#
+# Measured on the reference instance (2026-11-18): 44 % of all checkpoint characters were exact
+# duplicates of a part ctx already held, 34 % of them across conversations (one burst wrote 23
+# roots with the same 34-part text). Every part named its root, active session, transcript digest
+# and position in its header and title, so no copy could ever meet the stored one.
+
+
+def _listed(server: CtxServerDouble, root: str, generation: int = 0) -> list[str]:
+    return _manifests_of(server, root)[generation]["metadata"]["source_block_ids"]
+
+
+def test_a_second_conversation_with_the_same_text_lists_the_parts_already_stored(monkeypatch, clock):
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    first, _ = _provider(server, session="root-a", chunk_chars=1_000)
+    second, _ = _provider(server, session="root-b", chunk_chars=1_000)
+    messages = _transcript(8)
+
+    first.on_pre_compress(messages, require_checkpoint=True)
+    booked = len(server.booked)
+    second.on_pre_compress(messages, require_checkpoint=True)
+
+    assert len(_listed(server, "root-a")) == 8
+    assert _listed(server, "root-b") == _listed(server, "root-a")
+    assert len(server.parts()) == 8
+    # ctx answered every part "No change needed": root-b booked its manifest and its head only.
+    assert server.noops == 8 and len(server.booked) - booked == 2
+    assert second._last_chain_receipt.reused == 8 and second._last_chain_receipt.writes == 2
+    # Each conversation keeps its own manifest and head.
+    assert len(server.titled("Compaction checkpoint head")) == 2
+
+
+def test_a_branch_lists_the_stored_parts_of_the_turns_it_carries_over(monkeypatch, clock):
+    """A branch is a root of its own and carries its parent's turns (memory/digest.py
+    resolve_lineage_root): its first checkpoint used to store all of them again."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    parent, _ = _provider(server, session="root-parent", chunk_chars=1_000)
+    branch, _ = _provider(server, session="root-branch", chunk_chars=1_000)
+    carried = _transcript(6)
+
+    parent.on_pre_compress(carried, require_checkpoint=True)
+    branch.on_pre_compress(carried + _transcript(3, tag="b"), require_checkpoint=True)
+
+    parent_parts, branch_parts = _listed(server, "root-parent"), _listed(server, "root-branch")
+    # One part per turn. The parent's last part ends its transcript and keeps the final newline;
+    # in the branch that turn is followed by another and the cut trims it (split_chunks), so the
+    # branch shares the five parts before it.
+    assert len(parent_parts) == 6 and len(branch_parts) == 9
+    assert branch_parts[:5] == parent_parts[:5]
+    assert not set(branch_parts[5:]) & set(parent_parts)
+    assert len(server.parts()) == 6 + 4
+
+
+def test_the_next_compaction_lists_the_stored_parts_of_the_turns_it_keeps(monkeypatch, clock):
+    """Hermes hands the whole live transcript to every compaction (agent/conversation_compression.py
+    _pre_compress_memory_context): the protected first turns come again under the same ordinals."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server, session="root-gen", chunk_chars=1_000)
+    kept = _transcript(3, tag="h")
+
+    provider.on_pre_compress(kept + _transcript(5, tag="x"), require_checkpoint=True)
+    provider.on_pre_compress(kept + _transcript(4, tag="y"), require_checkpoint=True)
+
+    first, second = _listed(server, "root-gen", 0), _listed(server, "root-gen", 1)
+    assert second[:3] == first[:3]
+    assert not set(second[3:]) & set(first)
+    assert provider._last_chain_receipt.reused == 3
+
+
+def test_a_part_is_shared_only_with_a_write_of_the_same_payload(monkeypatch, clock):
+    """A store under a part title must never rewrite a part another manifest lists: the title
+    names the whole write (here the sensitivity differs; tags, metadata and category count the
+    same way), so another payload makes another block and the stored one stays as it was."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    plain, _ = _provider(server, session="root-s", chunk_chars=1_000)
+    strict, _ = _provider(server, session="root-s", chunk_chars=1_000, sensitivity="credentials")
+    messages = _transcript(4)
+
+    plain.on_pre_compress(messages, require_checkpoint=True)
+    before = {b["id"]: json.dumps(b, sort_keys=True) for b in server.parts()}
+    strict.on_pre_compress(messages, require_checkpoint=True)
+
+    assert len(before) == 4 and len(server.parts()) == 8
+    for block in server.parts():
+        if block["id"] in before:
+            assert json.dumps(block, sort_keys=True) == before[block["id"]], "a listed part was rewritten"
+        else:
+            assert block["sensitivity"] == "credentials"
+
+
+def test_a_part_names_nothing_of_its_conversation_and_its_title_is_the_digest_of_its_write(monkeypatch, clock):
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server, session="root-names", chunk_chars=1_000)
+    provider.on_pre_compress(_transcript(3), require_checkpoint=True)
+
+    (manifest,) = server.manifests()
+    digest = manifest["metadata"]["sha256"]
+    part_writes = [
+        args for tool, args in server.calls if tool == "store" and args["title"].startswith("Compaction source part ")
+    ]
+    assert len(part_writes) == 3
+    for args in part_writes:
+        assert (
+            "root-names" not in args["content"] and digest not in args["content"] and "- Part:" not in args["content"]
+        )
+        assert "## Direct transcript\n\n### Message " in args["content"]
+        for key in ("root_session_id", "active_session_id", "sha256", "part", "parts", "evidence_date"):
+            assert key not in args["metadata"], key
+        assert sorted(args["metadata"]["ctx_plugin"]) == ["profile", "redaction", "writer"]
+        assert args["metadata"]["platform"] == "cli" and "part_sha256" in args["metadata"]
+        payload = {key: args[key] for key in ("category", "content", "metadata", "sensitivity", "tags", "type")}
+        canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        assert args["title"] == "Compaction source part " + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+    # The manifest names the conversation and the parts in their order.
+    meta = manifest["metadata"]
+    assert meta["root_session_id"] == "root-names" and meta["active_session_id"] == "root-names"
+    assert meta["source_block_ids"] == [
+        server.blocks[("compaction-checkpoints", a["title"])]["id"] for a in part_writes
+    ]
+
+
+def test_text_that_differs_only_in_a_masked_secret_is_one_part(monkeypatch, clock):
+    """The title is taken over the text as stored, after redaction: two conversations that differ
+    only in a credential the redaction masks hold the same part, and the value is in neither."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    first, _ = _provider(server, session="root-x", chunk_chars=1_000)
+    second, _ = _provider(server, session="root-y", chunk_chars=1_000)
+
+    def turns(secret: str) -> list[dict]:
+        return [{"role": "user", "content": f"the deploy password is {secret} for the staging box " + "w" * 800}]
+
+    first.on_pre_compress(turns("Hunter2Hunter2x9"), require_checkpoint=True)
+    second.on_pre_compress(turns("Zebra77Zebra77q1"), require_checkpoint=True)
+
+    assert _listed(server, "root-x") == _listed(server, "root-y")
+    (part,) = server.parts()
+    for value in ("Hunter2Hunter2x9", "Zebra77Zebra77q1"):
+        assert value not in part["content"] and value not in part["title"]
+
+
+def test_a_plugin_update_keeps_the_stored_parts(monkeypatch, clock):
+    """The writer's version is the manifest's: a part is shared only for byte-identical text, so
+    its version adds nothing to what it holds, and in the part's write it would end the sharing
+    at every release for every conversation that carries its turns on."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server, session="root-up", chunk_chars=1_000)
+    kept = _transcript(3, tag="k")
+    provider.on_pre_compress(kept + _transcript(2, tag="a"), require_checkpoint=True)
+
+    monkeypatch.setattr(_MODULE._cp, "PLUGIN_VERSION", "99.0.0")
+    provider.on_pre_compress(kept + _transcript(2, tag="b"), require_checkpoint=True)
+
+    first, second = _manifests_of(server, "root-up")
+    assert second["metadata"]["ctx_plugin"]["version"] == "99.0.0"
+    assert second["metadata"]["source_block_ids"][:3] == first["metadata"]["source_block_ids"][:3]
+
+
+def test_a_manifest_lists_a_repeated_part_once_per_position(monkeypatch, clock):
+    """A transcript that holds the same window twice (hard cuts inside one long message) lists the
+    same part at both positions; the listed parts in order give back the whole transcript."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server, session="root-rep", chunk_chars=1_000)
+    messages = [{"role": "user", "content": "z" * 4_000}]
+    provider.on_pre_compress(messages, require_checkpoint=True)
+
+    ids = _listed(server, "root-rep")
+    by_id = {b["id"]: b["content"].split("## Direct transcript\n\n", 1)[1] for b in server.parts()}
+    assert len(ids) > len(set(ids)) >= 2
+    assert "".join(by_id[i] for i in ids) == _MODULE._cp.render_direct_evidence(messages)

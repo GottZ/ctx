@@ -9,7 +9,9 @@ Streamable HTTP to ctx. Nothing is faked.
 Checked: a first write stores every part, the manifest and the head; the same transcript
 again (a retry after a compaction that did not land) is answered "No change needed" for every
 part and rewrites manifest and head in place (same ids); get returns the head and the
-manifest with the ids the receipt names.
+manifest with the ids the receipt names; another root with the same transcript lists the
+stored parts (every part "No change needed") under a manifest and head of its own, and a part
+names no conversation (GottZ/ctx#344).
 
 Environment: ``CTX_E2E_URL`` (the MCP endpoint), ``CTX_E2E_KEY`` (a key of that database),
 ``HERMES_REPO`` (the hermes-agent checkout on ``sys.path``). Exit 0 = pass; the last line of the
@@ -26,6 +28,7 @@ from pathlib import Path
 
 ENGINE_DIR = Path(__file__).resolve().parents[1] / "memory"
 ROOT = "20261116_120000_e2e290"
+OTHER_ROOT = "20261118_120000_e2e344"
 
 
 def _fail(message: str) -> None:
@@ -101,10 +104,32 @@ def main() -> int:
         if head.get("type") != "checkpoint" or manifest.get("type") != "checkpoint":
             _fail(f"types: head {head.get('type')!r}, manifest {manifest.get('type')!r}")
 
+        # Another conversation with the same text (a branch, GottZ/ctx#344): ctx's own
+        # identical-content check answers every part "No change needed" and names the stored
+        # block; only the other root's manifest and head are written.
+        other = writer.write(messages, root_session_id=OTHER_ROOT, session_id=OTHER_ROOT, budget_s=60.0, host_api=2)
+        if other.part_ids != first.part_ids:
+            _fail(f"the other root lists other parts: {other.part_ids} vs {first.part_ids}")
+        if (other.reused, other.writes) != (parts, 2):
+            _fail(f"the other root: reused={other.reused} writes={other.writes}, want {parts} and 2")
+        if other.head_id == first.head_id or other.manifest_id == first.manifest_id:
+            _fail(f"the other root shares a head or manifest: {other} vs {first}")
+        other_manifest = (client.get_block(other.manifest_id).get("block") or {}).get("metadata") or {}
+        if (
+            other_manifest.get("root_session_id") != OTHER_ROOT
+            or other_manifest.get("source_block_ids") != first.part_ids
+        ):
+            _fail(f"the other root's manifest: {other_manifest!r}")
+        part = client.get_block(first.part_ids[0]).get("block") or {}
+        part_meta = part.get("metadata") or {}
+        if ROOT in str(part.get("content")) or "root_session_id" in part_meta or OTHER_ROOT in str(part.get("content")):
+            _fail("a part names a conversation")
+
         summary = {
             "parts": parts,
             "first": {"writes": first.writes, "reused": first.reused, "lookup": first.lookup},
             "again": {"writes": again.writes, "reused": again.reused, "lookup": again.lookup},
+            "other": {"writes": other.writes, "reused": other.reused, "lookup": other.lookup},
             "head": first.head_id,
         }
         print(json.dumps(summary, sort_keys=True), flush=True)

@@ -11,7 +11,7 @@ Every checkpoint is a chain of ctx blocks:
 ```
 Compaction checkpoint head <root-session>     ← stable title, upserted per session
   └── manifest (per checkpoint, parent-linked to the previous manifest)
-        └── source parts 001..NNN (redacted direct transcript, ≤40k chars each)
+        └── source parts, in order (redacted direct transcript, ≤40k chars each; stored once per text)
 ```
 
 The provider returns the head/manifest IDs to Hermes, which carries them
@@ -73,7 +73,7 @@ is about the checkpoint layer.
 The plugin is a plain Hermes **user plugin** — it lives in
 `$HERMES_HOME/plugins/ctx_checkpoint/`, whether the catalog or the installer
 put it there, and works in best-effort mode on a completely stock Hermes.
-Plugin 0.14.0 declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
+Plugin 0.15.0 declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
 `delegate_task` children inherit the provider under the fail-closed gate; the
 catalog pin (0.6.2) still declares ≥ 0.20.4 (since upstream v2026.8.18,
 provider text is forwarded into the compaction summary).
@@ -580,6 +580,14 @@ and manifest are deliberately small so routine recall stays cheap.
   `origin_note` in `ctx_query`, `ctx_search` and `ctx_get`; such a block stays in the recall
   under `prefetch_untrusted: drop`. Source lines of the MCP query text with
   `superseded_by:` after the id are no longer dropped (part of GottZ/ctx#295).
+- 0.15.0: a source part is stored once per text (GottZ/ctx#344). Its title is the SHA-256 of
+  its whole write (`Compaction source part <32 hex>`), and it names no root, session,
+  transcript or position: another compaction, a branch or another conversation of the profile
+  that holds the same text gets ctx's "No change needed" with the stored id, books no write,
+  and its manifest lists that part. Manifest and head are unchanged and name the conversation;
+  the part's position is its place in the manifest's `source_block_ids`. The read path finds a
+  passage by its words (a part carries no root token any more). Chains written before stay as
+  they are. Archiving a part reaches every manifest that lists it.
 
 ## Licensing
 

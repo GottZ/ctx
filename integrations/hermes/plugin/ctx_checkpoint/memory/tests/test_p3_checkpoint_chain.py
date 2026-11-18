@@ -168,8 +168,11 @@ def test_provider_frame_stays_bounded_when_transcript_spans_many_source_blocks(f
     frame = provider.on_pre_compress([{"role": "user", "content": "durable " + "x" * 12_000}])
 
     assert len(c.calls) > 7
-    source_parts = [call[1]["metadata"]["part"] for call in c.calls[1:-2]]
-    assert source_parts == list(range(1, len(source_parts) + 1))
+    # The calls between the head search and manifest + head are the parts, in transcript order:
+    # the manifest lists one id per part (a part names no position since 0.15.0, #344).
+    source_parts = [call[1] for call in c.calls[1:-2]]
+    assert all(a["title"].startswith("Compaction source part ") for a in source_parts)
+    assert len(source_parts) == len(c.calls[-2][1]["metadata"]["source_block_ids"])
     assert len(frame) < 1_000
     assert "ctx source blocks:" not in frame
 
@@ -457,7 +460,7 @@ def test_metadata_carries_negotiated_contract_on_part_manifest_and_head(factory)
     provider, c = _provider(factory)
     provider.on_pre_compress([{"role": "user", "content": "negotiated contract"}])
     part, manifest, head = _stores(c.calls)
-    assert part["title"].endswith("part 001 of 001")
+    assert part["title"].startswith("Compaction source part ")
     assert manifest["title"].endswith("manifest")
     assert head["title"] == "Compaction checkpoint head session-negotiation"
     for args in (part, manifest, head):
@@ -513,7 +516,11 @@ def test_two_compactions_one_head_two_linked_manifests(factory):
         assert a["type"] == "checkpoint" and a["category"] == CHAIN_CAT and a["sensitivity"] == "personal"
         assert "provenance" not in a["metadata"]
         assert a["metadata"]["ctx_plugin"]["writer"] == "ctx_checkpoint"
-        assert a["metadata"]["root_session_id"] == "sess-chain"
+        # Manifest and head name the root; a part names no conversation (0.15.0, #344).
+        if a["title"].startswith(_MODULE.PART_TITLE_PREFIX + " "):
+            assert "root_session_id" not in a["metadata"]
+        else:
+            assert a["metadata"]["root_session_id"] == "sess-chain"
         assert "source:hermes" in a["tags"] and "hook:checkpoint" in a["tags"]
         assert "parent_id" not in a, "chain lives in metadata (FK CASCADE on parent_id)"
 
@@ -550,13 +557,15 @@ def test_part_splitting_at_message_boundaries_and_40k_cap(factory):
     n = len(parts)
     rendered = _MODULE.render_direct_evidence(msgs)
     bodies = []
-    for i, a in enumerate(parts, start=1):
-        assert a["title"].endswith(f"part {i:03d} of {n:03d}")
+    for a in parts:
+        # The position is the manifest's (source_block_ids below), not the part's (0.15.0, #344).
+        assert a["title"].startswith(_MODULE.PART_TITLE_PREFIX + " ")
         body = a["content"].split("## Direct transcript\n\n", 1)[1]
         assert len(body) <= _MODULE.MAX_CHUNK_CHARS
         assert body.startswith("### Message "), "split must land on a message boundary"
-        assert a["metadata"]["part"] == i and a["metadata"]["parts"] == n
+        assert "part" not in a["metadata"] and "parts" not in a["metadata"]
         bodies.append(body)
+    assert len({a["title"] for a in parts}) == n
     # lossless: concatenated parts == rendered transcript (modulo the boundary whitespace)
     assert re.sub(r"\s+", "", "".join(bodies)) == re.sub(r"\s+", "", rendered)
     manifest = _stores(c.calls)[-2]
@@ -597,12 +606,18 @@ def test_golden_part_format_matches_distiller_parser(factory):
         ]
     )
     part = _stores(c.calls)[0]
-    assert part["title"].startswith("Compaction source sess-golden ")
+    assert re.fullmatch(r"Compaction source part [0-9a-f]{32}", part["title"])
     headers = PARSE_GO_HEADER.findall(part["content"])
     assert headers == [("1", "user"), ("3", "assistant"), ("5", "assistant")]
     assert "TOOLROW-MARKER" not in part["content"] and "SYSPROMPT-MARKER" not in part["content"]
     assert part["content"].startswith("# Compaction source evidence\n\nThis is deterministic, redacted source evidence")
-    assert "- Part: 1/1\n\n## Direct transcript\n\n### Message 1 — user\n\nFrage A\n" in part["content"]
+    # The header is the same for every part and names no conversation (0.15.0, #344); the
+    # distiller cuts it at the marker (go/internal/distillsource/ctxcheckpoint/parse.go).
+    assert part["content"].startswith(_MODULE.part_header())
+    assert part["content"].count("## Direct transcript\n\n") == 1
+    assert "sess-golden" not in part["content"]
+    assert "manifest names the root session, the active session and the transcript SHA-256.\n\n" in part["content"]
+    assert "## Direct transcript\n\n### Message 1 — user\n\nFrage A\n" in part["content"]
 
 
 def test_synthetic_handoffs_and_summaries_excluded(factory):

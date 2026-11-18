@@ -569,7 +569,7 @@ def test_bound_values_given_as_an_iterator_cover_every_message():
 
 
 def test_the_part_header_promises_the_key_only_where_the_entry_names_it():
-    header = cp.part_header("root", "session", "0" * 64, 1, 1)
+    header = cp.part_header()
     assert "credentials are intentionally excluded" not in header
     assert "this profile's ctx key where its server entry names it" in header.replace("\n", " ")
 

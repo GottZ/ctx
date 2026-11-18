@@ -81,8 +81,11 @@ def test_provider_frame_stays_bounded_when_transcript_spans_many_source_blocks()
     frame = provider.on_pre_compress([{"role": "user", "content": "durable " + "x" * 12_000}])
 
     assert len(calls) > 7
-    source_parts = [call[1]["metadata"]["part"] for call in calls[1:-2]]
-    assert source_parts == list(range(1, len(source_parts) + 1))
+    # The calls between the head search and manifest + head are the parts, in transcript order:
+    # the manifest lists one id per part (a part names no position since 0.15.0, #344).
+    source_parts = [call[1] for call in calls[1:-2]]
+    assert all(a["title"].startswith("Compaction source part ") for a in source_parts)
+    assert len(source_parts) == len(calls[-2][1]["metadata"]["source_block_ids"])
     assert len(frame) < 1_000
     assert "ctx source blocks:" not in frame
 

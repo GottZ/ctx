@@ -266,7 +266,7 @@ def test_metadata_carries_negotiated_contract_on_part_manifest_and_head():
     provider.on_pre_compress([{"role": "user", "content": "negotiated contract"}])
 
     part, manifest, head = _stores(calls)
-    assert part["title"].endswith("part 001 of 001")
+    assert part["title"].startswith("Compaction source part ")
     assert manifest["title"].endswith("manifest")
     assert head["title"] == "Compaction checkpoint head session-negotiation"
     for args in (part, manifest, head):
