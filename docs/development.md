@@ -147,7 +147,7 @@ categories stay where they are — build tags, `-short`, env-gated measurement
 tests, packages; the script only chooses among them.
 
 ```bash
-bash go/gates.sh explain              # what wave would run for this diff, and why — runs nothing but git and go list
+bash go/gates.sh explain              # what wave would run for this diff, and why, and how many integration packages would start at once now — runs nothing but git, go list and that reading of the host
 bash go/gates.sh quick                # build + vet -tags=integration; lint and -short of the touched packages and their reverse dependents
 bash go/gates.sh wave                 # quick + -race of the touched packages and their direct importers + integration + trigger extras
 bash go/gates.sh wave --final         # before the PR: fuzzer 300 s, the full heap-gate matrix, both deadcode ratchets
@@ -158,7 +158,7 @@ bash go/gates.sh mutant m.json '^TestX$' [./internal/oai/] [--race]   # one go t
 | Stage | Runs |
 |---|---|
 | `quick` | `go build ./...`, `go vet -tags=integration ./...`, golangci-lint on the touched packages, `go test -short` on the touched packages plus every package whose test binary depends on one of them (`go list -test -deps`, transitive) |
-| `wave` | `quick` + `go test -short -race` on the touched packages and their direct importers + `go test -tags=integration -p 1` (no `-short`, so it also runs the package's non-short tests) of the touched packages and the trigger rows + the trigger extras; a package that runs in this integration step leaves the `-short` step, since the integration run executes all of its tests (the tree has no `!integration` file and no test that runs only under `-short`) |
+| `wave` | `quick` + `go test -short -race` on the touched packages and their direct importers + integration of the touched packages and the trigger rows — each package its own `go test -tags=integration -p 1` (no `-short`, so it also runs the package's non-short tests), side by side as far as the host has room ([below](#integration-packages-side-by-side)) + the trigger extras; a package that runs in this integration step leaves the `-short` step, since the integration run executes all of its tests (the tree has no `!integration` file and no test that runs only under `-short`) |
 | `full` | build, vet, `-short ./...`, `-short -race ./...`, integration of `internal/oai`, `internal/config`, `cmd/ctxd`, `internal/handler` plus the wave set, Python conformance over the whole package, differential + fuzzer 300 s, the heap gates, the chat CPU gates `-count=20`, golangci-lint (CI form over the tree and the pre-commit form), both deadcode ratchets, a census of numeric literals added to production files |
 
 Trigger table (path → extra gate; applies to non-test files):
@@ -198,7 +198,8 @@ integration step, and when it is the touched one, its importers' integration
 suites run. `go.mod`, `go.sum` or a directory `go list` does not know select
 every package (lint over the whole tree, and the script says to run `full`). Every stage
 ends with one line `gates: stufe=… pakete=N gates=[…] ausgelassen=[… with reason]`;
-the exit code is the first red tier (1 quick, 2 wave, 3 full; 4/5 for `mutant`),
+the exit code is the first red tier (1 quick, 2 wave, 3 full; 4/5 for `mutant`; 6
+when an integration package found no room on the host, see below),
 and a red tier stops the run unless `--keep-going`. Logs go to
 `${CTX_GATES_LOG:-$TMPDIR/gates}`. The local `-race` and integration runs use a
 60 m timeout (a loaded dev host); CI's unit job allows 5 m per test binary, and
@@ -224,6 +225,99 @@ without `-trimpath` and 2.4 s with it. Tests must therefore not derive source
 paths from `runtime.Caller`; `go test` runs a test binary in its package
 directory, so relative paths work in both forms. `GOTMPDIR` and `TMPDIR` stay per
 wave (default `<worktree>/.gotmp/gates/`; `/tmp` is noexec on the dev host).
+
+#### Integration packages side by side
+
+The integration step runs every selected package as its own
+`go test -tags=integration -count=1 -p 1 -timeout 60m` process — own log
+(`<log>/integ/<package>.log`), own `GOTMPDIR` and `TMPDIR`, own exit code —
+longest first (a ranking kept in the script, taken from the integration jobs of
+CI; unranked packages start last), and starts a package only when the host has
+room for it, **measured right before that start**, not once per run:
+
+- A **slot** is one package: its `go test` process plus the PostgreSQL container
+  its test binary starts. Separate processes share nothing (own testcontainers
+  session and reaper, random container names and ports, databases per container).
+- **Memory:** `MemAvailable − reserve − reserved` must hold the slot's budget.
+  **Disk:** the free space of the file system Docker keeps its writable layers on
+  (`docker info` → `DockerRootDir`, `/` with a note when `docker info` names
+  none; the containers' `PGDATA` lives in the writable layer)
+  `− reserve − reserved` must hold the slot's disk budget. **CPU:**
+  `(cores − load1 − reserved cores) / cores per slot ≥ 1`.
+- **Reserved** means the budgets of every live slot on the host — this run's and
+  every other `gates.sh` run's, since several build agents run gates on the same
+  host at once. A host-wide ledger (`/run/lock/ctx-gates`, one file per slot)
+  keeps them; each start decision — remove dead entries, measure, decide, write
+  the new entry — happens under one `flock`, so two runs that start at the same
+  moment cannot both spend the last room (a check that only saw the host would
+  let both start: a container that just started has not used anything yet). An
+  entry lives as long as its `go test` process (pid plus start time, so a reused
+  pid does not count); a run that dies leaves nothing that blocks others. A
+  ledger lock that cannot be opened or taken within 30 s counts as no room.
+  Without `flock` or `/proc/meminfo` (not Linux) the step runs one package at a
+  time without a room check, as before, and says so.
+- Memory and disk of a slot stay reserved for its whole life, even where
+  `MemAvailable` already shows part of it: a container reaches its peak late (the
+  large seeds), and overcommitting either ends in an OOM kill or a full disk.
+  CPU overcommit only slows down, and load1 shows a running slot by itself, so a
+  slot's cores count only with the part load1 cannot show yet — `e^(−age/60 s)`,
+  load1's time constant.
+- The load bounds **parallelism only**: the first package of a run needs memory
+  and disk room, not CPU room. When room is left for one package only, the step
+  runs serially, and its log and the console name the bound that decided, with
+  the numbers (`bound=mem`, `bound=cpu`, `bound=mem+cpu`, …).
+- When not even one package fits (below a reserve), the step waits, says so on
+  the console once a minute, and after `CTX_GATES_ROOM_WAIT` gives up: the
+  packages it could not start are listed as `not started (no room)`, the run goes
+  on with its other steps, the summary line carries `kein-platz=[…]`, and the
+  exit code is **6** unless a step was red. No room is never reported as green
+  or as red.
+- The step log (`NN-integration.log`) stays the whole view: the package list,
+  every package's output as it ends (its `ok`/`FAIL` lines included), and one
+  line per package with rc, time and log path. The console shows starts, waits
+  and results as they happen. `explain` prints what would start right now.
+- `go/gates_test.sh` checks the slot arithmetic for every bound, the start order,
+  the ledger (foreign reservations, dead entries, two simultaneous decisions) and
+  the step end to end with a fake `go` — no test container, about half a minute; the
+  `selfcheck` step runs it whenever `go/gates.sh` or the test changes.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CTX_GATES_SERIAL` | `0` | `1` runs one package at a time; the room check before each start stays |
+| `CTX_GATES_SLOT_MEM_MB` | `3072` | memory per slot of a measured package (`internal/handler`, `internal/events`, `internal/store`) |
+| `CTX_GATES_SLOT_MEM_UNMEASURED_MB` | `5120` | memory per slot of any other package |
+| `CTX_GATES_MEM_RESERVE_MB` | `8192` | `MemAvailable` never planned |
+| `CTX_GATES_SLOT_DISK_GB` | `3` | disk per slot |
+| `CTX_GATES_DISK_RESERVE_GB` | `120` | free disk on the Docker file system never planned |
+| `CTX_GATES_SLOT_CPU` | `2` | cores per slot |
+| `CTX_GATES_ROOM_WAIT` | `1800` | seconds to wait when not even one package fits (the longest measured package took 770 s), then exit 6 |
+| `CTX_GATES_SLOTS` | `/run/lock/ctx-gates` | the ledger directory (tmpfs: a reboot ends every slot); used only when it is a real directory of this user or root that nobody else can write to, otherwise `$XDG_RUNTIME_DIR/ctx-gates` (without that variable `~/.cache/ctx-gates`), held to the same check — then only this user's runs see each other; when neither is usable the step runs one package at a time and says so |
+
+Where the starting values come from — a measurement on the 12-core, 64 GB build
+host (2026-11-17, one sample per configuration under foreign load, load1 3.8–8.4
+on average): `internal/handler`, `internal/events` and `internal/store` took
+1918 s one after the other and 754 s as three processes at once, all green. Per
+package the container's `memory.peak` was 1518–2066 MB (2443 MB with an 814 MB
+database), page cache included — the container cgroup has no limit and up to
+780 MB of it were dirty — plus at most 508 MB for `go test`, the build and the
+test binary: 3 GB per slot. Packages without a measurement get the spread of the
+measured peaks on top (× 1.6): 5 GB. The writable layer reached 2650 MB at most
+(`pg_wal` stays at `max_wal_size`, 1 GB): 3 GB. A test container computes 1.0
+cores at the median and 2.0 at p99 (`max_parallel_workers=2`): 2 cores per slot,
+hence `floor((cores − load1) / 2)`. During one package `MemAvailable` swung by
+7.6 GB from foreign load alone; the 8 GB reserve covers that swing once — a
+slot budget is itself about three times what a container holds outside the page
+cache (0.95 GB of 3 GB), and with a reserve of twice the swing a host with
+18–20 GB available started no unmeasured package at all (observed while this
+was built: the step waited out its deadline and ended with exit 6). Three
+packages at once lowered `MemAvailable` by 4.4 GB and slowed the short tests by
+1–13 %.
+
+CI is unchanged: `ci.yml` runs `-p 1` per shard (2 cores, 7 GB). A caller that
+caps `gates.sh` with `systemd-run --scope -p MemoryMax=…` caps every `go test`
+process, build and test binary of the parallel step together, but not the
+PostgreSQL containers — they are children of the Docker daemon, outside the
+scope, which is why the step measures the host instead of the scope.
 
 `eval.sh` fires every query **twice**: an unscored warm-up pass, then the scored
 pass. That is the old "run it twice, score run 2" rule moved into the script, and
