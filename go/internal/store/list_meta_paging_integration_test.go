@@ -8,8 +8,13 @@
 // no row twice, `more` only before the last page — with blocks of one
 // (category, title) in two read scopes, an archived block and a block of an
 // unread scope among them. TestListMetaPageCost pins that a page after a
-// position costs no more than the first page: the position is an index
-// condition, so walking a large store page by page stays linear.
+// position costs no more than the first page. Where the plan walks
+// uq_context_category_title_scope in its order (the eight-scope arm, and a
+// scope that holds more rows than a page) the position is an index
+// condition, so walking a large store page by page stays linear; the
+// one-scope arm's custom plan reads the scope by bitmap and filters the
+// position, which reads no more than the first page either. The eight-scope
+// arm is the one that turns red on a position the index cannot take.
 //
 //	go test -tags=integration -p 1 ./internal/store/ -run 'TestListMeta' -count=1 -v
 package store_test
@@ -166,7 +171,7 @@ func TestListMetaPageCost(t *testing.T) {
 			t.Logf("%d scope(s), %s plan: first page %d buffers (%.1f ms), page after the middle %d buffers (%.1f ms), bound %d",
 				len(scopes), plan, first.Buffers, first.ExecMs, after.Buffers, after.ExecMs, bound)
 			if after.Buffers > bound {
-				t.Errorf("%d scope(s), %s plan: the page after a position read %d buffers, more than the first page %d + 10 %% + 16: the position is not an index condition",
+				t.Errorf("%d scope(s), %s plan: the page after a position read %d buffers, more than the first page %d + 10 %% + 16: the position does not bound the read",
 					len(scopes), plan, after.Buffers, first.Buffers)
 			}
 		}

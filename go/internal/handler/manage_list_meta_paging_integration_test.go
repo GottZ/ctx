@@ -143,13 +143,15 @@ func TestManageListMetaPaging(t *testing.T) {
 		t.Errorf("the two pages answer %d distinct rows, want all %d readable ones", len(seen), readable)
 	}
 
-	// A position that is not the cursor object is a caller error, never a
-	// first page; another action still decodes a body that carries the key.
+	// A position that is not the cursor object (a string, the search
+	// cursor's shape) is a caller error, never a first page; another action
+	// still decodes a body that carries the key.
 	for _, tc := range []struct {
 		body string
 		code int
 	}{
 		{`{"action":"list-meta","after":"b-same"}`, http.StatusBadRequest},
+		{`{"action":"list-meta","after":{"after_updated":"2026-11-01T00:00:00Z","after_id":"019f0000-0000-7000-8000-000000000001"}}`, http.StatusBadRequest},
 		{`{"action":"list-meta","after":null}`, http.StatusOK},
 		{`{"action":"list-categories","after":"b-same"}`, http.StatusOK},
 	} {

@@ -9,7 +9,8 @@
 // MCP `query` tool, both with synthesize:false and include_content:true, and
 // holds the two answers against each other: the same rows, each with the same
 // content snippet and the same truncation flag (point 2), and none of a scope
-// the key does not read.
+// the key does not read. The same budget, used up, then refuses both calls:
+// the quota the answers ran under is the one the gate reads for this key.
 //
 // The blocks are written through POST /api/store. The tool talks to the real
 // query handler without a seam in between, so with the two forwarding lines
@@ -170,5 +171,28 @@ func TestMCPQueryRetrievalOnlyParityUnderQuota(t *testing.T) {
 	}
 	if !strings.HasPrefix(long, cut.Content) {
 		t.Errorf("the snippet is not a prefix of the block")
+	}
+
+	// Premise: the quota above is the one the gate reads for this key. The
+	// same budget, used up, refuses both calls with the same code — so the
+	// green answers above ran through the gate rather than past it.
+	acc.SeedForTest("private", backends.TenantQuota{DailyCalls: &budget, Enabled: true}, budget, 0)
+	body := `{"query":"` + bw2GoldenQuery + `","synthesize":false,"include_content":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(body)).WithContext(member)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.HandleQuery(rec, req)
+	var refused struct {
+		ErrorCode string `json:"error_code"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &refused)
+	if refused.ErrorCode != "quota_exceeded" {
+		t.Fatalf("REST with the budget used up: status %d body %s; want quota_exceeded", rec.Code, rec.Body.String())
+	}
+	cfg := MCPConfig{Pool: pool, Blocktypes: reg, QueryHandler: http.HandlerFunc(h.HandleQuery)}
+	res, _, err := mcpQueryHandler(cfg)(member, nil, typeFilterArgs[queryInput](t,
+		`{"question":"`+bw2GoldenQuery+`","synthesize":false,"include_content":true}`))
+	if env, ok := res.StructuredContent.(mcpErrorEnvelope); err != nil || !res.IsError || !ok || env.Code != refused.ErrorCode {
+		t.Fatalf("MCP with the budget used up: err=%v IsError=%v text=%q; want the refusal %q", err, res.IsError, mcpTextOf(res), refused.ErrorCode)
 	}
 }

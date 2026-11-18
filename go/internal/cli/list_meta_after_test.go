@@ -24,6 +24,7 @@ func TestListMetaCmdAfter(t *testing.T) {
 		{"with the flag", []string{"--after", cursor},
 			`{"action":"list-meta","after":` + cursor + `}`, false},
 		{"not JSON", []string{"--after", "b-same/twin"}, "", true},
+		{"JSON but no object", []string{"--after", "null"}, "", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

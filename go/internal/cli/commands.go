@@ -443,7 +443,7 @@ func listMetaCmd(getClient func() (*Client, error)) *cobra.Command {
 	cmd.Flags().StringVar(&after, "after", "",
 		"continue a cut listing: the next_after object of the previous answer (it carries truncated: true)")
 	cmd.PreRunE = func(*cobra.Command, []string) error {
-		if after != "" && !json.Valid([]byte(after)) {
+		if v := strings.TrimSpace(after); after != "" && (!strings.HasPrefix(v, "{") || !json.Valid([]byte(v))) {
 			return fmt.Errorf("--after must be the next_after JSON object of a previous list-meta answer")
 		}
 		return nil

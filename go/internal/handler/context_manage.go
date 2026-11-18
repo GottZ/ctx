@@ -551,12 +551,17 @@ func (h *ManageHandler) handleListMeta(w http.ResponseWriter, r *http.Request, a
 	ctx := r.Context()
 	reqID := RequestIDFromContext(ctx)
 
-	// #212: the position to go on from, the next_after of a cut answer. Not
-	// an object of three strings ⇒ a caller error, never a first page.
+	// #212: the position to go on from, the next_after of a cut answer. A
+	// value that is not an object of those three keys (another cursor's
+	// shape, a string) is a caller error, never a silent first page — a
+	// client sending it page after page would loop on page 1. {} is the
+	// first page, as the search cursor's {} is.
 	var after *store.ListMetaCursor
 	if len(req.After) > 0 && string(req.After) != "null" {
 		after = &store.ListMetaCursor{}
-		if err := json.Unmarshal(req.After, after); err != nil {
+		dec := json.NewDecoder(strings.NewReader(string(req.After)))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(after); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{
 				"success": false, "error": "after must be the next_after of a previous list-meta answer",
 			})
