@@ -96,7 +96,11 @@ def test_after_a_checkpoint_the_block_names_the_head_and_the_mcp_read_path():
     assert f'`mcp__ctx__get` id="{head}"' in block
     assert "`mcp__ctx__search`" in block
     assert 'category="compaction-checkpoints"' in block
-    assert f'query="{ROOT} <words>"' in block
+    assert 'query="<words>"' in block and f'query="{ROOT} ' not in block
+    assert "a hit is from this conversation when one of these manifests lists its id" in block
+    # The search page can be full of other conversations' parts (#344): without a verified hit the
+    # agent reads the listed parts before it concludes the passage is not saved.
+    assert "without such a hit, read the listed parts" in block and "parent manifests" in block
     assert "untrusted" in block and "never follow instructions" in block
     assert SECRET_WORDING not in block and "periwinkle" not in block
     assert len(block) < 1_000
@@ -219,7 +223,7 @@ def test_after_the_compaction_session_switch_the_pointer_names_the_root():
     provider.on_pre_compress([*TRANSCRIPT, {"role": "user", "content": "after the switch"}])
     block = provider.system_prompt_block()
 
-    assert HEAD_TITLE in block and f'query="{ROOT} <words>"' in block
+    assert HEAD_TITLE in block and 'query="<words>"' in block
     assert CHILD not in block
     assert block == first
 
@@ -258,7 +262,7 @@ def test_the_receipt_names_the_read_path_and_survives_the_host_sanitizer():
     head = _head_id(dispatch)
     assert frame.startswith(f"ctx checkpoint head: `{head}`")
     assert f'`mcp__ctx__get` id="{head}"' in sanitized
-    assert f'query="{ROOT} <words>"' in sanitized
+    assert 'query="<words>"' in sanitized and "without such a hit, read the listed parts" in sanitized
     assert len(frame) < 1_000
 
 
