@@ -33,7 +33,9 @@ import (
 // Deliberately NOT listed and deliberately unguarded:
 //   - "id", "scope", "created_at", "updated_at", "score", "age_days",
 //     "next_offset", "count", "confidence" — server-generated or code-generated,
-//     no foreign writer.
+//     no foreign writer. So are "untrusted" (derived from the turn's registry
+//     snapshot) and "untrusted_origin" (written by the database trigger from a
+//     registered type name, issue #280).
 //   - the EventBlock rows and Summary — SPA display material, not prompt
 //     material; the Ops-surface half is design/04 §9-N5, a different axis.
 var guardedResultKeys = map[string][]string{
