@@ -23,11 +23,12 @@ Checkpoint searches name the `checkpoint` type, over MCP too (GottZ/ctx#342).
   before v5.8.0, `unexpected additional properties ["types"]`; on exactly that refusal of the
   sent types `McpClient.search` searches again without `types`, within what is left of the
   call's timeout, and keeps only rows of the asked types (a row without a `type` is kept).
-  The refusal is remembered per client, so an older server pays one refused call per
-  binding; when a search without `types` holds none of the asked types, the client asks with
-  `types` again, so a server updated meanwhile — one that may leave checkpoints out of a
-  search without a type — is not read through the fallback (when that extra ask fails, the
-  answer stays the one the older server gave). Any other error (an unknown type,
+  The refusal is remembered per client: an older server pays one refused call per binding,
+  and one more for each search without `types` in which an asked type has no row (the first
+  head lookup of a new root: two). Such a search asks with `types` again, so a server updated
+  meanwhile — one that may leave checkpoints out of a search without a type — is not read
+  through the fallback (when that extra ask fails, the answer stays the one the older server
+  gave). Any other error (an unknown type,
   a rate limit, another type than the sent ones) is raised as before. The REST client sent
   `types` already.
 - **The agent's read path names the type.** The passage search of the system prompt block and

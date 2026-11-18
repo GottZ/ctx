@@ -262,7 +262,7 @@ func (input searchInput) coreArgs(facetEnabled bool) searchArgs {
 		// the documented difference between the two and stays a visible field
 		// rather than a hidden branch (mcp.go searchInput.Types).
 		KnownTypesOnly: true,
-		FacetEnabled:     facetEnabled,
+		FacetEnabled:   facetEnabled,
 	}
 }
 

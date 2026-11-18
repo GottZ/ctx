@@ -199,10 +199,10 @@ block that has the record. Error lines are redacted with the keys the provider b
   every registered type there. An older one refuses a type that retrieval never ranks
   (`block type "checkpoint" is not retrieval-visible`, or before ctx v5.8.0 the argument
   itself); on exactly that refusal the MCP client searches again without `types`, keeps only
-  rows of the asked types, and remembers the refusal for the binding. When such a search
-  holds none of the asked types it asks with `types` again, so a server updated meanwhile is
-  not read through the fallback (a failure of that extra ask keeps the answer). Any other
-  error is raised.
+  rows of the asked types, and remembers the refusal for the binding. When an asked type has
+  no row in such a search it asks with `types` again (one more refused call on an older
+  server), so a server updated meanwhile is not read through the fallback (a failure of that
+  extra ask keeps the answer). Any other error is raised.
 - Hits with `untrusted: true` (foreign text — server V-11: `checkpoint`, `tool-evidence`,
   `tool-overview`, `insight`) are labelled in the injected context (or dropped with
   `prefetch_untrusted: drop`), and the context tells the model to treat them as data.

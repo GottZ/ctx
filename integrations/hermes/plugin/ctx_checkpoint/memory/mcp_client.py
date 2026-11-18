@@ -17,9 +17,9 @@ What the ctx MCP tools answer (``go/internal/handler/mcp.go``) and how it is map
   v5.8.0, the argument itself (``unexpected additional properties ["types"]``). On exactly that
   refusal the call is repeated without ``types`` and the rows are narrowed here to the asked types
   (a row without a ``type`` is kept: such a server names none); any other error is raised. The
-  answer is remembered per client, so an older server is asked once; a narrowed answer without any
-  row of the asked types asks again, so a server updated meanwhile — one that may leave those types
-  out of a search without ``types`` — is not read through the fallback.
+  refusal is remembered per client; a narrowed answer in which an asked type has no row asks again
+  (one more refused call on an older server), so a server updated meanwhile — one that may leave
+  those types out of a search without ``types`` — is not read through the fallback.
 - ``query`` → prose answer followed by ``Sources:`` lines ``[N] title (category) id:uuid``,
   ``key:value`` tokens after the id kept (`` superseded_by:<uuid>`` is read), and an indented
   ``untrusted_origin:<type> (…)`` line under a source with that record (ctx v5.41.0, #280), read
@@ -439,10 +439,11 @@ class McpClient:
                 return rows
         data = self._search_rows(*self._call("search", args, self._remaining(deadline)), only_types=wanted)
         left = None if deadline is None else deadline - time.monotonic()
-        if state == _NO and not data["results"] and (left is None or left > 0):
-            # Nothing of the asked types without the filter: a server updated since the refusal may
-            # leave those types out of a search that names none, so it is asked again. That ask is
-            # extra: when it fails, the answer is the one a server before #342 gave, as before.
+        missing = set(wanted) - {row.get("type") for row in data["results"]}
+        if state == _NO and missing and (left is None or left > 0):
+            # An asked type without a row in the answer without the filter: a server updated since
+            # the refusal may leave that type out of a search that names none, so it is asked again.
+            # That ask is extra: when it fails, the answer is the one a server before #342 gave.
             try:
                 rows = self._search_with_types(args, wanted, left)
             except CtxApiError as exc:

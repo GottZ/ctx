@@ -52,6 +52,8 @@ HEAD_TITLE = "Compaction checkpoint head {root}"
 root's title token (``head_token``)."""
 ROOT_TOKEN_MAX = 48
 CHECKPOINT_TYPE = "checkpoint"
+HEAD_TAG = "checkpoint-head"
+"""The tag every ctx_checkpoint head carries (its ``HEAD_TAGS``); the head search names it (GottZ/ctx#342)."""
 """The type ctx_checkpoint stores its heads under. The head search names it (GottZ/ctx#342): ctx may leave types that
 retrieval never ranks out of a search that names no type."""
 _TYPE_NOT_VISIBLE_RE = re.compile(r"\bblock type\W+([A-Za-z0-9_.:-]+)\W+is not retrieval-visible\b")
@@ -289,7 +291,9 @@ def _checkpoint_head(call_mcp: Callable[..., dict], server: str, root: str, time
     if not root:
         return None
     title = HEAD_TITLE.format(root=head_token(root))
-    args = {"query": title, "limit": 5}
+    # Every head carries the tag (ctx_checkpoint HEAD_TAGS): the tag index finds the heads, where the title words alone
+    # read the text vectors of every checkpoint part.
+    args = {"query": title, "tags": [HEAD_TAG], "limit": 5}
     typed = {**args, "types": [CHECKPOINT_TYPE]}
     deadline = time.monotonic() + timeout
     with _types_refused_lock:
@@ -307,7 +311,8 @@ def _checkpoint_head(call_mcp: Callable[..., dict], server: str, root: str, time
     head = _head_in(_head_search(call_mcp, server, args, remaining), title)
     if head is not None or not refused:
         return head
-    remaining = deadline - time.monotonic()
+    # The ask again is extra: it runs only while it leaves the record's store a call's time.
+    remaining = deadline - time.monotonic() - MIN_CALL_S
     if remaining < MIN_CALL_S:
         return None
     envelope = _head_search(call_mcp, server, typed, remaining)

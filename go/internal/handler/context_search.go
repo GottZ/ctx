@@ -99,7 +99,7 @@ func (req searchRequest) coreArgs(limit int, compact bool, after *store.SearchCu
 		// retrieval-excluded types stay browseable (D5). The refusal of an
 		// unknown name belongs to the MCP tool alone.
 		KnownTypesOnly: false,
-		FacetEnabled:     facetEnabled,
+		FacetEnabled:   facetEnabled,
 	}
 }
 

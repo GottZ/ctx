@@ -152,6 +152,18 @@ def test_a_search_without_types_is_unchanged():
     assert server.searches == [{"query": "checkpoint head", "category": "c", "tags": ["t"], "limit": 5}]
 
 
+def test_an_asked_type_without_a_row_asks_again_even_beside_rows_of_another():
+    """Mixed types after the update: the answer without ``types`` holds knowledge rows but no checkpoint
+    row, so the client asks with the types again instead of answering without the checkpoint rows."""
+    server = Server(refuses=REFUSED)
+    client = McpClient(server.dispatch)
+    client.search("checkpoint head", types=["checkpoint", "knowledge"])
+    server.refuses, server.drops_never_ranked = None, True
+    data = client.search("checkpoint head", types=["checkpoint", "knowledge"])
+    assert sorted(_ids(data)) == sorted(row["id"] for row in ROWS)
+    assert _types_sent(server)[-2:] == [None, ["checkpoint", "knowledge"]]
+
+
 def test_after_a_refusal_a_server_updated_meanwhile_is_asked_again():
     """The client met a server before #342; the server is updated to one that leaves never-ranked
     types out of a search without ``types``. The narrowed answer holds no checkpoint row, so the

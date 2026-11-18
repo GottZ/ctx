@@ -68,7 +68,7 @@ def _types_sent(ctx: Ctx) -> list:
 def test_the_head_search_names_the_checkpoint_type():
     ctx = Ctx()
     assert ctxrecords._checkpoint_head(ctx.call_mcp, "ctx", ROOT, 5.0) == HEAD_ID
-    assert ctx.searches == [{"query": TITLE, "limit": 5, "types": ["checkpoint"]}]
+    assert ctx.searches == [{"query": TITLE, "tags": ["checkpoint-head"], "limit": 5, "types": ["checkpoint"]}]
 
 
 @pytest.mark.parametrize("refusal", [REFUSED, UNKNOWN_ARG], ids=["not-retrieval-visible", "unknown-argument"])
@@ -125,6 +125,19 @@ def test_a_failing_second_ask_keeps_the_memory_and_finds_no_head():
         ROWS.extend(ROWS_BEFORE)
     assert _types_sent(ctx) == [["checkpoint"], None, None, ["checkpoint"]]
     assert ctxrecords._types_refused == {"ctx": True}
+
+
+def test_the_second_ask_leaves_the_store_its_time():
+    """The ask again runs only while a call's time is left for the record's store after it (``flush``'s budget)."""
+    ctx = Ctx(refuses=REFUSED)
+    rows_before = list(ROWS)
+    ROWS.clear()
+    try:
+        assert ctxrecords._checkpoint_head(ctx.call_mcp, "ctx", ROOT, 5.0) is None
+        assert ctxrecords._checkpoint_head(ctx.call_mcp, "ctx", ROOT, 1.5) is None
+    finally:
+        ROWS.extend(rows_before)
+    assert _types_sent(ctx) == [["checkpoint"], None, None], "no ask again with 1.5 s left"
 
 
 def test_after_a_refusal_a_server_updated_meanwhile_is_asked_again():
