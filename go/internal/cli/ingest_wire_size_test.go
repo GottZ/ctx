@@ -19,9 +19,11 @@ import (
 
 // `ctx ingest` cut its batches by chunk count only, and the server refuses a
 // request body over ingest.MaxRequestBytes whole. Every chunk of a file
-// carries the file's metadata.links, so a note with many links made a batch
-// over the limit out of few chunks, and the chunks of the other files in it
-// were lost with it (#323). The integration test in cmd/ctxd runs the command
+// carried the file's metadata.links then, so a note with many links made a
+// batch over the limit out of few chunks, and the chunks of the other files in
+// it were lost with it (#323). Since #329 only the first chunk carries them;
+// chunks long by their content (paragraphs near 50 KB, text that JSON escapes)
+// still make such a batch. The integration test in cmd/ctxd runs the command
 // against the production router and its mounted body limit.
 
 // cappedIngest is fakeIngest behind the body limit ctxd mounts POST
@@ -74,8 +76,8 @@ func (c *cappedIngest) requests() []cappedRequest {
 }
 
 // hubNote is a note with n distinct wikilinks, 150 to a "## Part" section, so
-// that it is cut into n/150 chunks, every one of which carries all n link
-// targets in metadata.links.
+// that it is cut into n/150 chunks, the first of which carries all n link
+// targets in metadata.links (every one did before #329).
 func hubNote(n int) string {
 	var b strings.Builder
 	b.WriteString("# Hub\n")
@@ -100,11 +102,23 @@ func bigLinks(n, targetBytes int) string {
 	return b.String()
 }
 
-// The five normal notes sort before the hub, so a batch of 50 by count
-// carries them and 45 hub chunks of about 245 KB each, about 11 MB. Every
-// request now stays within the limit, every chunk is written, the run exits
-// 0, and a batch is cut only where the next chunk would pass the limit or
-// --batch.
+// heavyNote is a note of n "## Part" sections of 40 000 bytes of "<" each:
+// n chunks of about 240 KB each on the wire, where JSON writes "<" as six
+// bytes.
+func heavyNote(n int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, "## Part %d\n\n%s\n\n", i, strings.Repeat("<", 40_000))
+	}
+	return b.String()
+}
+
+// The five normal notes sort before the heavy note, so a batch of 50 by count
+// carries them and 45 of its chunks of about 240 KB each, about 11 MB. (The
+// test used the #323 hub note with 9 000 links until #329 took the links off
+// all but its first chunk.) Every request now stays within the limit, every
+// chunk is written, the run exits 0, and a batch is cut only where the next
+// chunk would pass the limit or --batch.
 func TestIngestCutsBatchesByWireSize(t *testing.T) {
 	for _, workers := range []string{"1", "4"} {
 		t.Run("workers_"+workers, func(t *testing.T) {
@@ -113,7 +127,7 @@ func TestIngestCutsBatchesByWireSize(t *testing.T) {
 			for _, rel := range normals {
 				writeIngestFixture(t, vault, rel, ingestNote("MARKER-"+rel))
 			}
-			writeIngestFixture(t, vault, "hub.md", hubNote(9000))
+			writeIngestFixture(t, vault, "heavy.md", heavyNote(60))
 			c := &cappedIngest{}
 			srv := httptest.NewServer(http.HandlerFunc(c.serveHTTP))
 			defer srv.Close()
@@ -122,11 +136,11 @@ func TestIngestCutsBatchesByWireSize(t *testing.T) {
 
 			for _, rel := range normals {
 				if n := c.acceptedFrom(rel); n != 1 {
-					t.Errorf("%s: %d chunks written, want 1 — the note with many links took its batch down", rel, n)
+					t.Errorf("%s: %d chunks written, want 1 — the note with long chunks took its batch down", rel, n)
 				}
 			}
-			if n := c.acceptedFrom("hub.md"); n != 60 {
-				t.Errorf("hub.md: %d chunks written, want 60", n)
+			if n := c.acceptedFrom("heavy.md"); n != 60 {
+				t.Errorf("heavy.md: %d chunks written, want 60", n)
 			}
 			if err != nil {
 				t.Errorf("run returned %v, want nil: every chunk was written", err)
@@ -166,9 +180,11 @@ func sizes(reqs []cappedRequest) []string {
 // A chunk whose request alone is over the limit cannot be sent in any batch.
 // Its file is held back before the upload, whole, like a file with a chunk
 // over a per-chunk limit, and reported with the size and the limit; the other
-// files are written and the run exits 1. second_of_two: the first chunk of the
-// file fits a request (its content is short), the second does not (40 000
-// bytes of "<", six bytes each on the wire); the first is not sent either.
+// files are written and the run exits 1. first_of_two: the first chunk of the
+// file does not fit a request (it carries the file's links), the second does
+// (40 000 bytes of "<", six bytes each on the wire); the second is not sent
+// either. Until #329 the case was second_of_two, links of 10.3 MB that the
+// second chunk repeated: TestIngestUploadsNoteWhoseListsFitTheFirstChunk.
 func TestIngestHoldsBackChunkOverRequestLimit(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -176,7 +192,7 @@ func TestIngestHoldsBackChunkOverRequestLimit(t *testing.T) {
 		chunk string // the chunk the report names
 	}{
 		{"single_chunk", "# Giant\n\n" + bigLinks(1100, 10_000) + "\n", "chunk 1 of 1"},
-		{"second_of_two", "# Giant\n\n" + bigLinks(1030, 10_000) + "\n\n## Escaped\n\n" + strings.Repeat("<", 40_000) + "\n", "chunk 2 of 2"},
+		{"first_of_two", "# Giant\n\n" + bigLinks(1100, 10_000) + "\n\n## Escaped\n\n" + strings.Repeat("<", 40_000) + "\n", "chunk 1 of 2"},
 	}
 	for _, tc := range cases {
 		for _, dry := range []bool{false, true} {
