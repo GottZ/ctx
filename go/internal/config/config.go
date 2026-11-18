@@ -1740,7 +1740,8 @@ type EmbedBackfillConfig struct {
 	// is memoized as caller_timeout (store.EmbedFailureCallerTimeout) and
 	// left to the background arm while that arm runs (Interval > 0; with
 	// the arm off the query path retries it itself after a backoff); the
-	// question embed keeps the rest of the deadline. Default 30 s (a quarter
+	// search keeps the rest of the deadline (the question is embedded before
+	// the loop, issue #222). Default 30 s (a quarter
 	// of the CLI deadline). 0 = unbounded, the pre-budget behavior (explicit
 	// opt-out, SyncCap convention): no deadline on the wire call, and a
 	// request cancel keeps the class wire.
