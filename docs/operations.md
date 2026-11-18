@@ -1429,7 +1429,7 @@ Run it with `SET lock_timeout = '3s';` first and repeat the `ALTER` on `55P03`: 
 
 ### Migration 177: the guard's dirty counter is written once per statement
 
-`context_guard_state` is one row: `pending_count`, the blocks written since the last guard batch that the guard has to look at, and `dirty_since`, the start of the first transaction that wrote one of them; `manage guard-stats` shows both (`Pending`, `Dirty since`), the guard batch resets them. Until 177 a row-level trigger updated that row once per inserted or updated block. Every one of those updates leaves a version of the row that its own transaction cannot prune, and the next update reads past all of them, so the cost per row grew with the rows of the statement (measured: after a 20 000-row insert in one transaction the state table had grown from 8 KB to 1 MB, and one more update of the row read 130 buffers; since 177 8 KB and 3 buffers). Since 177 two statement-level triggers (`trg_guard_dirty` on insert, `trg_guard_dirty_upd` on update) count the statement's rows and update the state row once per statement; a statement without a counted row does not touch it.
+`context_guard_state` is one row: `pending_count`, the blocks written since the last guard batch that the guard has to look at, and `dirty_since`, the start of the first transaction that wrote one of them; `manage guard-stats` showed both (`Pending`, `Dirty since`), the guard batch reset them. Since [migration 181](#migration-181-no-block-writer-waits-on-the-guards-state-row-guard-stats-counts-the-waiting-blocks) the counter and its triggers are gone and `guard-stats` counts the waiting blocks on demand; this section describes 177 to 180. Until 177 a row-level trigger updated that row once per inserted or updated block. Every one of those updates leaves a version of the row that its own transaction cannot prune, and the next update reads past all of them, so the cost per row grew with the rows of the statement (measured: after a 20 000-row insert in one transaction the state table had grown from 8 KB to 1 MB, and one more update of the row read 130 buffers; since 177 8 KB and 3 buffers). Since 177 two statement-level triggers (`trg_guard_dirty` on insert, `trg_guard_dirty_upd` on update) count the statement's rows and update the state row once per statement; a statement without a counted row does not touch it.
 
 **What stays.** The counts are the same: a block counts unless its category is `index`, or the write is an update of a checked block that leaves its content alone — the old and the new metadata both carry `guard_status` and the content is unchanged (the guard's verdict write, and also a tag, lifecycle or embedding update of a checked block). `dirty_since` takes the writing transaction's start time when it was empty. Inserts, updates, `INSERT … ON CONFLICT DO UPDATE`, `MERGE`, `COPY` and the updates of a foreign-key action count as before. Two declared differences, neither on a code path: the old row of an update is found by `id`, so an update that changes a block's `id` counts even when the skip rule held for that row; and a statement that updates the same block twice (a writable CTE plus a foreign-key action on that block) counts each new version once and skips it when any old version of the `id` meets the skip rule.
 
@@ -1467,7 +1467,7 @@ A trigger function, and a function in a `CHECK` constraint, a default, a generat
 
 ### Migration 180: the trigger functions that read a transition table run without JIT
 
-A trigger function's query over a transition table (`REFERENCING OLD TABLE` / `NEW TABLE`) has no parameters, so PL/pgSQL plans it once per backend and keeps the plan, sized by the transition table of the first call; the JIT decision (`jit_above_cost`) is part of the plan. A backend whose first statement of a kind was large enough for JIT kept a compiled plan, and every later statement of that kind on the backend compiled it again, however few rows it wrote. `mark_guard_dirty()` has carried `jit = off` since [migration 177](#migration-177-the-guards-dirty-counter-is-written-once-per-statement); since 180 the other functions of the class do: `context_block_counts_ins()`, `_upd()` and `_del()` (the block counters of [migration 170](#migration-170-block-counters-behind-stats-guard-stats-and-list-categories)) and `notify_project_delete()` (the bulk delete notification of the project hub). The class is "a trigger function that reads a transition table of its trigger"; `TestTransitionTableFunctionsRunWithoutJit` (`internal/store`) reads it from the catalog and fails for a function of the class without `jit = off`.
+A trigger function's query over a transition table (`REFERENCING OLD TABLE` / `NEW TABLE`) has no parameters, so PL/pgSQL plans it once per backend and keeps the plan, sized by the transition table of the first call; the JIT decision (`jit_above_cost`) is part of the plan. A backend whose first statement of a kind was large enough for JIT kept a compiled plan, and every later statement of that kind on the backend compiled it again, however few rows it wrote. `mark_guard_dirty()` carried `jit = off` from [migration 177](#migration-177-the-guards-dirty-counter-is-written-once-per-statement) until [181](#migration-181-no-block-writer-waits-on-the-guards-state-row-guard-stats-counts-the-waiting-blocks) dropped it; since 180 the other functions of the class do: `context_block_counts_ins()`, `_upd()` and `_del()` (the block counters of [migration 170](#migration-170-block-counters-behind-stats-guard-stats-and-list-categories)) and `notify_project_delete()` (the bulk delete notification of the project hub). The class is "a trigger function that reads a transition table of its trigger"; `TestTransitionTableFunctionsRunWithoutJit` (`internal/store`) reads it from the catalog and fails for a function of the class without `jit = off`.
 
 **Measured** in the testcontainer (production image `pgvector-timescaledb:pg18`, JIT available; first statements of a backend forced into JIT with `jit_above_cost = 0`, then one-row writes, median of 30 per statement): `trg_block_counts_upd` 52 → 7 621 µs per one-row update, `trg_block_counts_ins` 27 → 5 854 µs per one-row insert, `trg_block_counts_del` 29 → 6 248 µs and `trg_project_delete` 13 → 9 626 µs per one-row delete; a one-row update took 9.3 ms instead of 0.46 ms, an insert 19.4 ms instead of 0.33 ms, a delete 16.3 ms instead of 0.21 ms. With `jit = off` on the functions, same procedure: 42, 50, 35 and 17 µs. (The forcing itself leaves a remainder in two row-level functions, 11.4 ms in `trg_block_embed_excluded` and 0.8 ms in `trg_block_write` per one-row write: PostgreSQL planned their generic plans while `jit_above_cost` was 0 and keeps them. No threshold above their own plan cost reaches them.) Under a constant `jit_above_cost` (scaled to 500, `TestTransitionTablePlansDoNotKeepJit`) a 30 000-row first statement leaves a compiled plan in exactly these four functions; the row-level trigger functions and their helpers are planned by the table statistics, not by the size of the writing statement (their most expensive query, `ctx_block_type_never_embedded`, costs 10), and none of them compiled.
 
@@ -1480,6 +1480,92 @@ A trigger function's query over a transition table (`REFERENCING OLD TABLE` / `N
 **Migration.** `ALTER FUNCTION … SET jit = off` adds to the function's settings: the three counter functions keep `search_path` of [migration 179](#migration-179-the-functions-a-row-write-calls-resolve-under-an-empty-search_path). It changes the function's catalog row and takes no lock on a table. A backend that holds a compiled plan of a function sees the changed catalog row on its next call and plans the function's queries again, under `jit = off`. `lock_timeout` is 3 s, as before.
 
 **Rolling back the binary.** A binary before 180 writes and reads as before. Its schema-contract check finds `_migrations:180` without an embedded file (breaking) and a body hash drift (param) for each of the four functions, since `pg_get_functiondef` prints the `SET` clause; in mode `warn` (the default) it starts, logs them and reports `schema_contract: attention` on `/health`, in `enforce` it refuses to start until `CTX_CONTRACT_MODE=warn` or `off` is set. Way back of the schema: `ALTER FUNCTION context_block_counts_ins() RESET jit;` and the same for `context_block_counts_upd()`, `context_block_counts_del()` and `notify_project_delete()`, then `DELETE FROM _migrations WHERE version = 180;`.
+
+### Migration 181: no block writer waits on the guard's state row; guard-stats counts the waiting blocks
+
+Until 180 every counted write on `context_blocks` added itself to `context_guard_state.pending_count` through `mark_guard_dirty()` ([migration 177](#migration-177-the-guards-dirty-counter-is-written-once-per-statement)). That one row was taken by the first counted statement of a transaction and held until its commit, so every block writer queued behind every other open block transaction — and behind the guard run, which took the row with its first verdict and held it over up to 100 checks and a recount of the whole queue. The two values only fed a display (`manage guard-stats`, `ctx guard stats`): the guard picks its blocks itself (`FOR UPDATE SKIP LOCKED`), its wake-up is a flag in memory, `/status` and the web UI do not read the row. Since 181 the trigger pair and the function are gone; nothing on the write path touches the row.
+
+**What `guard-stats` reports now (behaviour change).** The wire format is unchanged (same fields, same types); two fields change meaning:
+
+- `pending_count` is the number of blocks **in the caller's read scopes** that the guard still has to check — exactly the blocks its pick would take: not archived, no `guard_checked_at`, a current vector (`embedding IS NOT NULL AND NOT embedding_stale`), category not `index`, lifecycle `knowledge`, a type with `guard.check = true` in the registry's base generation (the one the scheduler hands to the guard). Before 181 it was a global count of block writes since the last guard run, the same for every key, and it counted writes the guard would never check (blocks without a vector, other types).
+- `dirty_since` is the oldest `updated_at` among those blocks, `null` when none waits. Before 181 it was the start of the first counted write transaction of any tenant since the last run.
+
+Both are counted when the action is called, in one pass (`guard.PendingStats`); a key sees only its own read scopes, a key with a read grant on another tenant's scope sees that scope too, a server-admin sees its read scopes as for every other number of the answer. The count cannot go stale: before 181 the guard's recount could wait for the state row and then write the numbers of its earlier snapshot (`pending_count = 0`, `dirty_since = null` while a block waited) until the next run that processed a block. `last_guard_at` stays global (the time of the server's last guard run).
+
+**Cost of the count.** It reads `idx_guard_pending` (a partial index that holds only waiting blocks; its predicate has no parameter, so a generic plan uses it too), with `idx_context_scope` in a `BitmapAnd` for a scope filter. The cost follows the waiting blocks of the caller's scopes, not the corpus. Measured on the production image (one pass, count and minimum): for 10 000 / 100 000 / 1 000 000 waiting blocks 3.8 / 41 / 594 ms over all of them (565 / 5 636 / 58 995 buffers), 2.6 / 3.6 / 36 ms for one scope of 100 holding a hundredth of them (565 / 1 082 / 10 802 buffers). A key whose scopes hold the whole queue pays the global figure. `guard-stats` is a pull (CLI, REST); `manage stats`, the statusline and `/status` do not run it.
+
+**Write path, measured** on the production image `pgvector-timescaledb:pg18` (issue #341; with the row = 180, without = 181's write path): transactions that keep working 50 ms after their block write passed 20 tx/s with the row whatever the number of writers (1/50 ms; p99 3 366 ms at 32 writers) and 598 tx/s, p99 66 ms, without it (the throughput grows with the writers) without it. A guard run over 100 blocks with 8 concurrent writers: with the row 80–138 block writes got through during a run, p99 542–585 ms (the length of the run); without it about 4 600, p99 7–18 ms. Single one-statement writes through `UpsertBlock` show no difference separable from the noise up to 8 writers; at 16 writers +35 % throughput and p99 32.5 → 12.4 ms. The trigger itself cost 38–49 µs per one-row statement.
+
+**Locks and deadlocks.** No block writer waits on `context_guard_state` any more. The guard run writes only `last_guard_at`, in a statement of its own after its transaction has committed: it holds no block row while it waits for the state row (another instance's run may hold it for one statement), and no block writer waits for it. Two lock cycles through the row are gone: the guard run held the row and waited at its audit-log insert for a key-share lock on the matched neighbour block, while a writer that had locked that neighbour first (the pre-read of `UpsertBlock`, an issue update, the embedding backfill's pick) and then wrote it waited for the row — `40P01` after `deadlock_timeout`, the guard's verdict or the client's write lost (`TestGuardState_*` in `internal/guard` run both orders). The forge pull's shape (counted write, then a share lock on referenced issues) closed the same cycle with the backfill. The rule "row locks first, block writes after" stays for block rows among themselves.
+
+**`last_guard_at`.** Written after a committed run, so it is now the time just after the run's commit; before 181 it was the start of the run's transaction (the difference is one run, about 0.5 s for 100 blocks in the testcontainer). A run that fails or is interrupted writes none, as before.
+
+**The migration.** `DROP TRIGGER` (twice) and `DROP FUNCTION` in one transaction under `lock_timeout` 3 s. `DROP TRIGGER` takes `ACCESS EXCLUSIVE` on `context_blocks`, readers included, until the migration commits — a catalog change, no row is read or written, the duration does not grow with the table. To get the lock it waits for every transaction that has touched the table and for every holder of `SHARE UPDATE EXCLUSIVE` (`VACUUM`, `ANALYZE`, `CREATE INDEX CONCURRENTLY`, an anti-wraparound autovacuum); while it waits, every later statement on the table queues behind it. A holder that stays longer than 3 s (for example the embedding backfill's transaction around a slow embed call) fails the boot with `55P03`; the migration rolls back with nothing changed; start again. `context_guard_state` keeps all its columns and its row; `pending_count` and `dirty_since` keep the values they had (no code of this version writes or reads them; an older binary's guard run overwrites them).
+
+**If the lock cannot be had.** On an instance where `ACCESS EXCLUSIVE` on `context_blocks` cannot be obtained in a maintenance window, the write path can be freed without a table lock first: replace the function's body by one that does nothing, as superuser in one statement —
+
+```sql
+CREATE OR REPLACE FUNCTION mark_guard_dirty() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp
+AS $$ BEGIN RETURN NULL; END; $$;
+```
+
+(`CREATE OR REPLACE FUNCTION` takes no table lock; the triggers stay and cost 5–6 µs per one-row statement and 11–16 µs per 10 000-row statement, measured, instead of 38–49 µs and 6–18 ms). The state row is then no longer taken. Migration 181 still has to run (it is applied on boot); it then drops the two triggers and the function under the same `ACCESS EXCLUSIVE`. The empty body is not a state to keep: the schema contract reports the changed function until 181 has run.
+
+**Rolling back the binary.** A binary before 181 works on this schema: its writes fire no trigger any more, its `guard-stats` reads the three columns, its guard run writes them (recount after a run that processed blocks, `0`/`null` after an empty one) — between its runs its display no longer grows with writes. Its schema-contract check finds `_migrations:181` without an embedded file and the function and the two triggers missing: in mode `warn` (the default) it starts, logs them and reports `schema_contract: attention` on `/health`; in `enforce` it refuses to start until `CTX_CONTRACT_MODE=warn` or `off` is set, or the schema is taken back. During a rolling deploy the same holds for the instances still on the older binary once one instance has migrated.
+
+**Way back of the schema** (needed only for a binary before 181 in mode `enforce`), as superuser in one transaction; `CREATE TRIGGER` takes `SHARE ROW EXCLUSIVE` on `context_blocks`:
+
+```sql
+BEGIN;
+SET LOCAL lock_timeout = '3s';
+CREATE OR REPLACE FUNCTION mark_guard_dirty() RETURNS trigger
+LANGUAGE plpgsql
+SET enable_nestloop = off
+SET jit = off
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    n bigint;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        SELECT count(*) INTO n
+          FROM new_rows w
+         WHERE w.category IS DISTINCT FROM 'index';
+    ELSE
+        SELECT count(*) INTO n
+          FROM new_rows w
+         WHERE w.category IS DISTINCT FROM 'index'
+           AND NOT EXISTS (SELECT 1
+                             FROM old_rows o
+                            WHERE o.id = w.id
+                              AND o.metadata ? 'guard_status'
+                              AND w.metadata ? 'guard_status'
+                              AND o.content = w.content);
+    END IF;
+    IF n > 0 THEN
+        UPDATE context_guard_state
+           SET dirty_since = COALESCE(dirty_since, now()),
+               pending_count = pending_count + n;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+COMMENT ON FUNCTION mark_guard_dirty() IS
+    'trg_guard_dirty / trg_guard_dirty_upd (migration 177): adds the statement''s blocks the guard has to look at to context_guard_state.pending_count in one update; skips category index and updates of a checked block (guard_status in old and new metadata) with unchanged content.';
+CREATE TRIGGER trg_guard_dirty
+    AFTER INSERT ON context_blocks
+    REFERENCING NEW TABLE AS new_rows
+    FOR EACH STATEMENT EXECUTE FUNCTION mark_guard_dirty();
+CREATE TRIGGER trg_guard_dirty_upd
+    AFTER UPDATE ON context_blocks
+    REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows
+    FOR EACH STATEMENT EXECUTE FUNCTION mark_guard_dirty();
+DELETE FROM _migrations WHERE version = 181;
+COMMIT;
+```
+
+`TestMigration181_DropsTheCounterKeepsTheTable` (`internal/store`) runs exactly this and compares function, settings, comment, triggers and columns with a database at 180.
 
 ### `graph_overview.csr_loader`: the rebuild's input substrate
 

@@ -33,10 +33,12 @@ const supersedesSnapshotConfidence = 0.7
 //     therefore acquire them in the same order and cannot deadlock on each
 //     other (the model emits links in arbitrary order; locking per link in
 //     that order produced 40P01 between concurrent dream workers). Taking the
-//     locks before any UPDATE also matters because every UPDATE on
-//     context_blocks fires mark_guard_dirty, which locks the single
-//     context_guard_state row until commit: a transaction that already holds
-//     that row must not wait for a target lock afterwards.
+//     locks before any UPDATE also matters because a transaction that has
+//     written must not wait for a target lock afterwards: until migration 181
+//     every UPDATE on context_blocks fired mark_guard_dirty, which held the
+//     single context_guard_state row to commit, and any lock a block write
+//     takes and keeps closes the same cycle (row locks first, block writes
+//     after).
 //   - FOR NO KEY UPDATE, not FOR UPDATE: the reconcile never changes a key
 //     column, and FOR UPDATE would also block the FOR KEY SHARE that every
 //     concurrent INSERT into context_dream_links takes on its target for the
@@ -269,10 +271,10 @@ func writeSupersedesSource(ctx context.Context, db pgxdb.Beginner, s pgxdb.Stage
 // — archiving it, or moving it to another scope: it takes the block's scope's
 // supersedes locks, then locks the block itself and every target of its
 // supersedes links, in ONE statement and id order, and returns the targets. It
-// runs BEFORE the caller's first write, because that write fires
-// mark_guard_dirty and holds the context_guard_state row until commit, and the
-// reconcile afterwards must not wait for a target lock (the lock discipline of
-// ReconcileSupersedesTargets). The caller passes the targets to
+// runs BEFORE the caller's first write, because the reconcile after that
+// write must not wait for a target lock (the lock discipline of
+// ReconcileSupersedesTargets; until migration 181 the write also held the
+// context_guard_state row to commit). The caller passes the targets to
 // ReconcileSupersedesTargets after its write, and runs its transaction through
 // writeSupersedesSource.
 //

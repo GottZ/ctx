@@ -37,7 +37,7 @@ func TestFunctionSearchPathCost(t *testing.T) {
 	if os.Getenv("CTX_SEARCHPATH_MEASURE") == "" {
 		t.Skip("measurement; set CTX_SEARCHPATH_MEASURE=1")
 	}
-	pool := testdb.SetupTestDB(t)
+	pool := testdb.SetupTestDBUpTo(t, 180) // the measurement of 179 includes mark_guard_dirty(), dropped by 181 (issue #341)
 	ctx := context.Background()
 	const seed = 10000
 	if _, err := pool.Exec(ctx, `
