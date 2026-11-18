@@ -850,3 +850,42 @@ def test_the_untagged_search_runs_only_when_the_tagged_one_finds_nothing(monkeyp
     server.calls.clear()
     provider.on_pre_compress(_transcript(6, tag="second"), require_checkpoint=True)
     assert [bool(s.get("tags")) for s in searches()] == [True]
+
+
+def test_required_facts_after_the_chain_end_within_the_host_wait(monkeypatch, clock):
+    """Memory features on: the required facts after a stored chain shared its deadline, which a
+    budget_s beyond the host's wait (600 s) put past it. They end where the host stops waiting:
+    a fact that would start later is left for a later compaction, the checkpoint stands (#299;
+    the chain stored, a late fact is no failure since 0.12.0)."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    _host_waits(monkeypatch, 40.0)
+    real_store = server._store
+
+    def slow_facts(args):
+        if args["category"] == "learnings":
+            clock.now += 12.0  # a fact store that takes 12 s
+        return real_store(args)
+
+    server._store = slow_facts
+    provider, _ = _provider(server, chunk_chars=1_000, budget_s=600, memory=True)
+    facts = [
+        "The proxy on INFRA-WWW terminates TLS for every service with Traefik 3.2 since 2026-10-01.",
+        "Backups of the gitea database run nightly at 03:15 to the NAS share /volume1/backup/gitea.",
+        "The staging cluster uses PostgreSQL 18.6 with pgvector 0.8.7 on host db-stage-02.",
+        "Release tags are annotated and signed with the SSH key of the build host since v5.0.0.",
+    ]
+    # An assistant turn counts as a fact when it closes a turn (config.extract_salient_facts).
+    messages = [
+        m for fact in facts for m in ({"role": "user", "content": "And then?"}, {"role": "assistant", "content": fact})
+    ]
+    started = clock.now
+
+    receipt = provider.on_pre_compress(messages, require_checkpoint=True)
+
+    stored = [b for b in server.blocks.values() if b["category"] == "learnings"]
+    assert "ctx checkpoint head:" in receipt
+    assert 0 < len(stored) < len(facts), (len(stored), receipt)
+    assert "not stored" in receipt, receipt
+    # The last fact store started before the host's wait ended (less the margin).
+    assert clock.now - 12.0 <= started + 40.0 - _MODULE._cp.HOST_WAIT_MARGIN_S, clock.now - started
