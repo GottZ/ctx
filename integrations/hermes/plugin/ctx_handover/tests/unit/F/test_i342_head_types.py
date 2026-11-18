@@ -200,6 +200,21 @@ def test_through_flush_with_the_default_budget_the_upgrade_costs_one_link(tmp_pa
     for now in (5.0, 6.0, 7.0):
         ctxrecords.flush(ledger, call_mcp, "ctx", "handover", now=now)
     assert [s["metadata"].get("checkpoint_head") for s in stores] == [None, HEAD_ID, HEAD_ID]
+    assert ledger.outbox_due(float("inf"), 1000) == [], "every row is delivered, none is left claimed or due"
+
+
+def test_records_without_a_head_on_an_older_server_cost_two_and_one_searches_in_turn():
+    """The cost the disclosure names: on a server before #342, a record whose root has no head costs the refused search
+    and the one without the type (the refusal is remembered), the next costs the search without the type alone (it
+    finds no head and drops the memory), and so on. A lookup does not drop the memory it set itself."""
+    ctx = Ctx(refuses=REFUSED)
+    searches = []
+    for n in range(4):
+        before = len(ctx.searches)
+        assert ctxrecords._checkpoint_head(ctx.call_mcp, "ctx", f"20261118_120000_headless{n}", 5.0) is None
+        searches.append(len(ctx.searches) - before)
+    assert searches == [2, 1, 2, 1]
+    assert _types_sent(ctx) == [["checkpoint"], None, None, ["checkpoint"], None, None]
 
 
 def test_a_flush_searches_before_it_stores(tmp_path):

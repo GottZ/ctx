@@ -287,11 +287,15 @@ def _checkpoint_head(call_mcp: Callable[..., dict], server: str, root: str, time
     """The checkpoint head of ``root``, searched by title and head tag with ``types=["checkpoint"]``.
 
     A server that refuses the type (before GottZ/ctx#342) is searched without it, within the same ``timeout``, and the
-    refusal is remembered for that MCP server name in this process. A search without the type that finds no head drops
-    the memory, so the next record's search asks with the type again: a server updated meanwhile may leave checkpoints
-    out of a search that names no type. On a server before #342 that costs one refused call after each record without a
-    head; after such an update, at most the one record whose search missed goes without the link. The search is not
-    repeated within the same record: the flush budget leaves no room for a third call before the store."""
+    refusal is remembered for that MCP server name in this process. A later search without the type that finds no head
+    drops the memory, so the next record's search asks with the type again: a server updated meanwhile may leave
+    checkpoints out of a search that names no type. A lookup keeps a memory it has just set, so on a server before #342
+    records without a head cost two calls and one call in turn, not two each. After such an update, every record whose
+    search still ran without the type goes without the link: the first one; one more per flush that ran such a search
+    at the same time (the memory is read under the lock and the search runs outside it, so no flush waits for
+    another's network call); and the next one as well when the update fell between a lookup's refused search and its
+    search without the type. The search is not repeated within the same record: the flush budget leaves no room for a
+    third call before the store."""
     if not root:
         return None
     title = HEAD_TITLE.format(root=head_token(root))
