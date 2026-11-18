@@ -2468,13 +2468,69 @@ func GetStats(ctx context.Context, pool *pgxpool.Pool, readScopes []string) (*St
 	return s, nil
 }
 
-// ListMeta returns all blocks without content (metadata listing).
+// ListMetaMaxRows is the most rows one list-meta answer holds (issue #212).
+// It is the cap the listing always had; since #212 an answer that stops at it
+// says so and hands out the position to go on from (ListMetaCursor).
+const ListMetaMaxRows = 10000
+
+// ListMetaCursor is a position in the list-meta order (category, title,
+// scope): the last row of the previous page. (category, title, scope) is
+// unique among the non-archived rows (uq_context_category_title_scope), so
+// the order is total and a page boundary skips or repeats no row. The cursor
+// is a position only — any three strings are one — and carries no filter or
+// scope: each page applies the read scopes and type filters of its own
+// request. A nil or empty cursor is the first page.
+type ListMetaCursor struct {
+	Category string `json:"after_category,omitempty"`
+	Title    string `json:"after_title,omitempty"`
+	Scope    string `json:"after_scope,omitempty"`
+}
+
+// ListMeta returns the blocks without content (metadata listing), at most
+// ListMetaMaxRows of them, in (category, title, scope) order, starting after
+// the cursor. more reports whether rows follow the last one returned: the
+// statement reads one row past the page, so it is an observed fact.
 // types / typesExclude (WF T10): opt-in server-side type filters as bind
 // parameters, nil/empty = no filter (see SearchBlocks).
-func ListMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string, types []string, typesExclude []string) ([]BlockMeta, error) {
+func ListMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string, types []string, typesExclude []string, after *ListMetaCursor) (rows []BlockMeta, more bool, err error) {
+	return listMeta(ctx, pool, readScopes, types, typesExclude, after, ListMetaMaxRows)
+}
+
+// listMeta is ListMeta with the page size as a parameter, so a test can page
+// a small store; production always passes ListMetaMaxRows.
+func listMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string, types []string, typesExclude []string, after *ListMetaCursor, page int) ([]BlockMeta, bool, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
-		return nil, err
+		return nil, false, err
 	}
+	q, args := listMetaSQL(readScopes, types, typesExclude, after, page)
+	rows, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("store: list meta: %w", err)
+	}
+	defer rows.Close()
+
+	results := make([]BlockMeta, 0)
+	for rows.Next() {
+		var bm BlockMeta
+		if err := rows.Scan(&bm.ID, &bm.Title, &bm.Category, &bm.Tags, &bm.Scope, &bm.TypeName, &bm.LifecycleState, &bm.TypeSource, &bm.UpdatedAt); err != nil {
+			return nil, false, fmt.Errorf("store: list meta scan: %w", err)
+		}
+		results = append(results, bm)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("store: list meta rows: %w", err)
+	}
+	if len(results) > page {
+		return results[:page], true, nil
+	}
+	return results, false, nil
+}
+
+// listMetaSQL composes ListMeta's statement: the page plus one probe row.
+// Pure, like searchBlocksSQL, so a cost gate can EXPLAIN the statement
+// production runs. scope is the tie-break that makes the order total; before
+// #212 rows of one (category, title) in two scopes came in no defined order.
+func listMetaSQL(readScopes []string, types []string, typesExclude []string, after *ListMetaCursor, page int) (string, []any) {
 	q := `SELECT id, title, category, tags, scope, type_name, lifecycle_state, type_source, updated_at
 		 FROM context_blocks
 		 WHERE scope = ANY($1::text[]) AND NOT is_archived`
@@ -2487,25 +2543,15 @@ func ListMeta(ctx context.Context, pool *pgxpool.Pool, readScopes []string, type
 		args = append(args, typesExclude)
 		q += fmt.Sprintf(` AND NOT (type_name = ANY($%d::text[]))`, len(args))
 	}
-	q += ` ORDER BY category, title LIMIT 10000`
-	rows, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("store: list meta: %w", err)
+	if after != nil && (after.Category != "" || after.Title != "" || after.Scope != "") {
+		args = append(args, after.Category, after.Title, after.Scope)
+		q += fmt.Sprintf(` AND (category, title, scope) > ($%d, $%d, $%d)`, len(args)-2, len(args)-1, len(args))
 	}
-	defer rows.Close()
-
-	results := make([]BlockMeta, 0)
-	for rows.Next() {
-		var bm BlockMeta
-		if err := rows.Scan(&bm.ID, &bm.Title, &bm.Category, &bm.Tags, &bm.Scope, &bm.TypeName, &bm.LifecycleState, &bm.TypeSource, &bm.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("store: list meta scan: %w", err)
-		}
-		results = append(results, bm)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: list meta rows: %w", err)
-	}
-	return results, nil
+	// The limit stays a literal, as it was: a bind parameter would leave a
+	// generic plan to guess the row count. page is the caller's int, never
+	// request input.
+	q += fmt.Sprintf(` ORDER BY category, title, scope LIMIT %d`, page+1)
+	return q, args
 }
 
 // LogAccess inserts an access log entry (read or write). principal_id is

@@ -429,8 +429,26 @@ func deleteCmd(getClient func() (*Client, error)) *cobra.Command {
 // ── list-meta ────────────────────────────────────────────────────────.
 
 func listMetaCmd(getClient func() (*Client, error)) *cobra.Command {
-	return simpleCmd("list-meta", []string{"lm"}, "All blocks (no content)", "manage", nil,
-		func([]string) map[string]any { return map[string]any{"action": "list-meta"} }, getClient)
+	var after string
+	cmd := simpleCmd("list-meta", []string{"lm"}, "All blocks (no content)", "manage", nil,
+		func([]string) map[string]any {
+			body := map[string]any{"action": "list-meta"}
+			// #212: absent unless asked, so a plain `ctx list-meta` posts the
+			// bytes it always posted. PreRunE has checked the form.
+			if after != "" {
+				body["after"] = json.RawMessage(after)
+			}
+			return body
+		}, getClient)
+	cmd.Flags().StringVar(&after, "after", "",
+		"continue a cut listing: the next_after object of the previous answer (it carries truncated: true)")
+	cmd.PreRunE = func(*cobra.Command, []string) error {
+		if after != "" && !json.Valid([]byte(after)) {
+			return fmt.Errorf("--after must be the next_after JSON object of a previous list-meta answer")
+		}
+		return nil
+	}
+	return cmd
 }
 
 // ── digest ───────────────────────────────────────────────────────────.

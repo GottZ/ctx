@@ -183,6 +183,11 @@ type manageRequest struct {
 	// `ctx get --include-archived` posts. Shared with the MCP get tool
 	// (get_archived.go). Absent ⇒ get answers exactly as before.
 	IncludeArchived bool `json:"include_archived"`
+	// After (#212) is list-meta's position: the next_after of a cut answer.
+	// Absent ⇒ the first page, as before the field existed. Raw here and
+	// decoded by list-meta alone, so a body of another action decodes exactly
+	// as it did before the field existed, whatever it carries under this key.
+	After json.RawMessage `json:"after"`
 }
 
 // handleOverviewRebuildStart kicks the cluster-overview rebuild ahead of its
@@ -546,9 +551,22 @@ func (h *ManageHandler) handleListMeta(w http.ResponseWriter, r *http.Request, a
 	ctx := r.Context()
 	reqID := RequestIDFromContext(ctx)
 
+	// #212: the position to go on from, the next_after of a cut answer. Not
+	// an object of three strings ⇒ a caller error, never a first page.
+	var after *store.ListMetaCursor
+	if len(req.After) > 0 && string(req.After) != "null" {
+		after = &store.ListMetaCursor{}
+		if err := json.Unmarshal(req.After, after); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"success": false, "error": "after must be the next_after of a previous list-meta answer",
+			})
+			return
+		}
+	}
+
 	// WF T10: opt-in server-side type filters; block_roles_exclude is the
 	// legacy alias for types_exclude — both present ⇒ union (see manageRequest).
-	blocks, err := store.ListMeta(ctx, h.pool, ar.ReadScopes, req.Types, unionExcludes(req.TypesExclude, req.BlockRolesExclude))
+	blocks, more, err := store.ListMeta(ctx, h.pool, ar.ReadScopes, req.Types, unionExcludes(req.TypesExclude, req.BlockRolesExclude), after)
 	if err != nil {
 		slog.Error("manage: list-meta error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -557,11 +575,19 @@ func (h *ManageHandler) handleListMeta(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"action":  "list-meta",
 		"success": true,
 		"blocks":  blocks,
-	})
+	}
+	// #212: an answer cut at store.ListMetaMaxRows says so and names the
+	// position to go on from; a complete one keeps the three keys it had.
+	if more && len(blocks) > 0 {
+		last := blocks[len(blocks)-1]
+		resp["truncated"] = true
+		resp["next_after"] = store.ListMetaCursor{Category: last.Category, Title: last.Title, Scope: last.Scope}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // updateClaimReject is the manage-update entry into the I7 claim gates: the
