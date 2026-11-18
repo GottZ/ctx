@@ -171,13 +171,16 @@ func TestEmbedIndexDefinition_Integration(t *testing.T) {
 			}
 		}
 
-		// The way out the refusal names: resume (verifying → running, as the
-		// operator surface does), the drained arm re-enters verifying, the
-		// gate rebuilds the sisters, the confirm swaps, the contract is clean.
+		// The refusal names the way out: the migration cycle rebuilds the
+		// index alone on the green verdict (issue #333, its own tests). The
+		// whole way through a new watermark stays open: resume (verifying →
+		// running, as the operator surface does), the drained arm re-enters
+		// verifying, the gate rebuilds the sisters, the confirm swaps, the
+		// contract is clean.
 		if err == nil {
 			return
 		}
-		if !strings.Contains(err.Error(), "resume the migration") {
+		if !strings.Contains(err.Error(), "the migration cycle rebuilds it") {
 			t.Errorf("refusal %q does not name the way out", err)
 		}
 		seedCleanMigrated(t, pool, 3)
