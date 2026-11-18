@@ -189,12 +189,18 @@ Lightweight search without an LLM call. Read-only.
 | `after` | object | | page a listing with an empty `query`: `{}` for the first page, then the `next_after` of the previous answer |
 | `include_content` | boolean | | answer each block's full `content` and `metadata` instead of the preview |
 | `cluster` | string | | restrict to one topic by its stable handle (from the graph surfaces) |
-| `types` | string[] | | restrict to these block types; each must be retrieval-visible, otherwise an error |
+| `types` | string[] | | restrict to these block types: any registered type, `checkpoint` and `system-meta` included; an unknown name is an error |
 | `types_exclude` | string[] | | exclude these block types |
 | `block_roles_exclude` | string[] | | legacy alias of `types_exclude`; both given ⇒ union |
 
-Unlike `POST /api/search`, `types` here cuts against the retrieval-visible set: types
-that retrieval policy keeps out cannot be named. **Answer:** a JSON array of compact
+`types` takes every type of the key's registry, including the types that `query` never
+ranks (`checkpoint`, `system-meta`): the tool returns their blocks without a type filter,
+so naming one narrows the answer to them. A client that looks for its checkpoint blocks
+(a checkpoint head, a passage of a saved transcript) names `checkpoint`. Unlike
+`POST /api/search`, where an unknown name matches nothing, an unknown name is an error
+here; a type that another tenant registered for itself is unknown. Older ctx servers
+refuse a retrieval-excluded name with the error
+`block type "<name>" is not retrieval-visible`; the `query` tool still does. **Answer:** a JSON array of compact
 rows — `id`, `category`, `tags`, `title`, `content_preview`, `content_length`, `scope`,
 `sensitivity`, `type`, `lifecycle_state`, `type_source`, `untrusted`, `score`,
 `created_at`, `updated_at` (empty fields are omitted).
