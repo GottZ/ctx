@@ -176,6 +176,94 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		}
 	})
 
+	// The server ends the session of the repair's build (pg_terminate_backend,
+	// as a database restart does): nothing is recorded, nothing paused, the
+	// green verdict stands; the next cycle drops the INVALID leftover and
+	// builds again. Found by the review: the build error paused the row, and
+	// resume then cost the whole gate.
+	t.Run("server_ends_the_build_session_next_cycle_rebuilds", func(t *testing.T) {
+		pool := testdb.SetupTestDB(t)
+		migID, wm, _ := verifiedGreen(t, pool)
+		dropIndexT(t, pool, "idx_guard_pending_next")
+		sB, _ := probeScheduler(t, pool)
+		mig, err := embedmigration.Active(ctx, pool)
+		if err != nil || mig == nil {
+			t.Fatalf("active: %+v %v", mig, err)
+		}
+		release := holdBuilds(t, pool)
+		runDone := make(chan error, 1)
+		go func() { runDone <- sB.runEmbedIndexRepair(ctx, mig) }()
+		pid := buildingPID(t, pool, "idx_guard_pending_next")
+		if _, err := pool.Exec(ctx, `SELECT pg_terminate_backend($1)`, pid); err != nil {
+			t.Fatalf("terminate: %v", err)
+		}
+		select {
+		case <-runDone:
+		case <-time.After(60 * time.Second):
+			t.Fatalf("repair did not end within 60s")
+		}
+		release()
+		st := readVerifyRow(t, pool, migID)
+		if st.Status != "verifying" || st.LastErr != nil || !st.VerifyStartedAt.Equal(wm) || len(repairEntries(t, st.Report)) != 0 {
+			t.Fatalf("after the ended session: status=%q last_error=%v watermark=%v report=%s, want verifying at %v, untouched",
+				st.Status, st.LastErr, st.VerifyStartedAt, st.Report, wm)
+		}
+		if ix := indexStateT(t, pool, "idx_guard_pending_next"); !ix.exists || ix.valid {
+			t.Fatalf("after the ended session: exists=%t valid=%t, want an INVALID leftover", ix.exists, ix.valid)
+		}
+		measuredCycles(t, pool, 1)
+		requireIndexOfDDL(t, pool, "idx_guard_pending_next")
+		e := repairEntries(t, readVerifyRow(t, pool, migID).Report)
+		if len(e) != 1 || len(e[0].Indexes) != 1 || e[0].Indexes[0].Action != indexActionRebuiltInvalid {
+			t.Errorf("index_repairs %+v, want one rebuilt_invalid", e)
+		}
+	})
+
+	// The repair of W1 builds (held); the row is resumed, re-enters verifying
+	// with W2 and holds the green verdict of W2 (another instance's gate)
+	// before the W1 build ends. The W1 repair records nothing on the verdict
+	// of W2. From the review: without the watermark clauses this record
+	// landed on W2.
+	t.Run("repair_of_an_earlier_watermark_records_nothing_on_a_newer_green_verdict", func(t *testing.T) {
+		pool := testdb.SetupTestDB(t)
+		migID, wm, _ := verifiedGreen(t, pool)
+		dropIndexT(t, pool, "idx_guard_pending_next")
+		sB, _ := probeScheduler(t, pool)
+		mig, err := embedmigration.Active(ctx, pool)
+		if err != nil || mig == nil {
+			t.Fatalf("active: %+v %v", mig, err)
+		}
+		release := holdBuilds(t, pool)
+		runDone := make(chan error, 1)
+		go func() { runDone <- sB.runEmbedIndexRepair(ctx, mig) }()
+		buildingPID(t, pool, "idx_guard_pending_next")
+		if err := embedmigration.Transition(ctx, pool, migID, embedmigration.StatusVerifying, embedmigration.StatusRunning); err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+		if err := embedmigration.Transition(ctx, pool, migID, embedmigration.StatusRunning, embedmigration.StatusVerifying,
+			embedmigration.WithVerifyStartedAt(), embedmigration.WithVerifyReportCleared()); err != nil {
+			t.Fatalf("re-enter verifying: %v", err)
+		}
+		if _, err := pool.Exec(ctx,
+			`UPDATE context_embed_migrations SET verify_report = jsonb_build_object('result', 'green', 'watermark', verify_started_at)
+			 WHERE id = $1::uuid`, migID); err != nil {
+			t.Fatalf("green verdict of W2: %v", err)
+		}
+		release()
+		select {
+		case err := <-runDone:
+			if err != nil {
+				t.Errorf("repair: %v", err)
+			}
+		case <-time.After(60 * time.Second):
+			t.Fatalf("repair did not end within 60s")
+		}
+		st := readVerifyRow(t, pool, migID)
+		if e := repairEntries(t, st.Report); len(e) != 0 || st.Status != "verifying" || st.VerifyStartedAt.Equal(wm) {
+			t.Errorf("row status=%q watermark=%v (W1 %v), index_repairs %+v: want the verdict of W2 without a record of W1", st.Status, st.VerifyStartedAt, wm, e)
+		}
+	})
+
 	// The row leaves the run while the repair builds its last index (held):
 	// the build finishes, and its record does not land on the row, which no
 	// longer waits at the green verdict.

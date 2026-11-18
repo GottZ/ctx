@@ -5,13 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/embedmigration"
 	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Issue #333: the index stage of the verify gate alone, on a migration whose
@@ -27,8 +31,8 @@ import (
 // the arm drains post-watermark blocks and blocks a content change made
 // pending again — do not end that verdict; they pass the write path's gates
 // and the confirm's completeness re-check. A verdict ends only when the row
-// leaves the run of its watermark: resume, pause (operator, model guard, a
-// red verdict), abort, or a new watermark, which clears the report. An index
+// leaves the run of its watermark: resume, a pause (model guard, a red
+// verdict), abort, or a new watermark, which clears the report. An index
 // build writes no row, so it changes no input of the scan stages: the repair
 // keeps the verdict, runs no scan stage, stores no new verdict and records
 // what it built in verify_report.index_repairs, bound to the run of that
@@ -81,8 +85,11 @@ func (s *Scheduler) runEmbedIndexRepair(ctx context.Context, mig *embedmigration
 	wm := *mig.VerifyStartedAt
 	stand, err := s.verifyNextIndexesStand(ctx)
 	if err != nil || stand {
-		// An undeterminable comparison builds nothing (issue #312): the
-		// confirm refuses with the same reason, the next cycle asks again.
+		// A failed read here builds nothing and pauses nothing (an
+		// undeterminable comparison: the confirm refuses with the same
+		// reason); the next cycle asks again. Once a build runs, a comparison
+		// that fails inside ensureConcurrentIndexValid is the red index stage,
+		// as in the gate.
 		return err
 	}
 	wanted := func(ctx context.Context) (bool, error) { return indexRepairWanted(ctx, s.pool, mig.ID, wm) }
@@ -107,8 +114,14 @@ func (s *Scheduler) runEmbedIndexRepair(ctx context.Context, mig *embedmigration
 			return nil
 		}
 		if err != nil {
-			// A build its process stopped (canceled context) stores nothing
-			// either: the transaction below cannot begin on that context.
+			if repairSessionEnded(err) {
+				// The server ended the build with its session: nothing is
+				// recorded and nothing paused, the next cycle drops the
+				// INVALID leftover and builds again — as after a stop of the
+				// process, whose canceled context cannot begin the
+				// transaction of finishIndexRepairRed either.
+				return err
+			}
 			rep.Result, rep.Detail, rep.FinishedAt = verifyRed, err.Error(), time.Now().UTC()
 			return s.finishIndexRepairRed(ctx, mig, &rep)
 		}
@@ -124,6 +137,20 @@ func (s *Scheduler) runEmbedIndexRepair(ctx context.Context, mig *embedmigration
 	}
 	rep.FinishedAt = time.Now().UTC()
 	return s.finishIndexRepairGreen(ctx, mig, &rep)
+}
+
+// repairSessionEnded reports whether err is the end of the session that ran
+// the build rather than a failure of the build: the server terminated it
+// (admin_shutdown, crash_shutdown, cannot_connect_now: SQLSTATE 57P01-57P03,
+// a database restart or pg_terminate_backend) or the connection broke (class
+// 08, or a network error / EOF before PostgreSQL answered).
+func repairSessionEnded(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "57P01" || pgErr.Code == "57P02" || pgErr.Code == "57P03" || strings.HasPrefix(pgErr.Code, "08")
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // verifyNextIndexesStand reports whether every _next index stands valid with
