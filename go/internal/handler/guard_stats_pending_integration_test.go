@@ -11,6 +11,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -369,6 +370,138 @@ func TestGuardStatsPendingEqualsWhatTheGuardProcesses(t *testing.T) {
 		t.Errorf("fixture: the guard processed %d blocks, want the 5 pending ones", processed)
 	}
 	f.expect("after the guard ran empty", ar, guardStatsView{})
+}
+
+// setGuardCheck switches guard.check of a type's _global row through the
+// registry's write path (store.UpdateBlockType, as the type API does) and
+// reloads the registry: the base generation the guard pick and guard-stats
+// read.
+func (f *guardStatsFixture) setGuardCheck(name string, on bool) {
+	f.t.Helper()
+	var id string
+	var cfg []byte
+	if err := f.pool.QueryRow(f.ctx, `SELECT id::text,
+			jsonb_set(COALESCE(config, '{}'::jsonb), '{guard}', COALESCE(config->'guard', '{}'::jsonb) || jsonb_build_object('check', $2::boolean))
+		  FROM context_block_types WHERE name = $1 AND scope = '_global'`, name, on).Scan(&id, &cfg); err != nil {
+		f.t.Fatalf("the _global row of %s: %v", name, err)
+	}
+	if bt, err := store.UpdateBlockType(f.ctx, f.pool, id, []string{"_global"}, store.BlockTypeUpdate{Config: cfg}, nil, "q360"); err != nil || bt == nil {
+		f.t.Fatalf("guard.check of %s -> %v: %v (row %v)", name, on, err, bt)
+	}
+	if err := f.reg.Reload(f.ctx, f.pool); err != nil {
+		f.t.Fatal(err)
+	}
+	if got := slices.Contains(f.reg.Snapshot().GuardCheckTypes(), name); got != on {
+		f.t.Fatalf("after the switch the registry checks %s: %v, want %v", name, got, on)
+	}
+}
+
+// guardUntilEmpty runs guard batches of two until one processes nothing and
+// returns how many blocks they processed.
+func (f *guardStatsFixture) guardUntilEmpty() int {
+	f.t.Helper()
+	processed := 0
+	for i := 0; i < 50; i++ {
+		n, err := guard.RunGuardBatch(f.ctx, f.pool, f.reg.Snapshot(), 2)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		if n == 0 {
+			return processed
+		}
+		processed += n
+	}
+	f.t.Fatalf("the guard did not run empty in 50 batches")
+	return processed
+}
+
+// Issue #360: since migration 182 the type allowlist is the index condition
+// of idx_guard_pending, which holds the unchecked blocks with a vector of
+// every type. A guard.check switch on a type takes effect with the next
+// registry snapshot, in both directions: guard-stats counts what the guard
+// then processes, before and after each switch. Beside them wait the blocks
+// of every other kind the pick filters out (another lifecycle, a stale
+// vector, category index), which neither counts nor processes.
+func TestGuardStatsPendingFollowsTheGuardCheckSwitch(t *testing.T) {
+	f := newGuardStatsFixture(t)
+	ar := f.auth(f.adminKey())
+	scope := "private"
+	set := f.reg.Snapshot()
+	var off string
+	for _, name := range []string{"comment", "tool-evidence", "tool-overview", "insight"} {
+		if !slices.Contains(set.GuardCheckTypes(), name) {
+			off = name
+			break
+		}
+	}
+	on := "reference"
+	if off == "" || !slices.Contains(set.GuardCheckTypes(), on) {
+		t.Fatalf("fixture: the shipped registry checks %v; the test needs %q checked and one of comment/tool-evidence/tool-overview/insight not", set.GuardCheckTypes(), on)
+	}
+	ids := map[string][]string{}
+	for i := 0; i < 3; i++ {
+		for _, typ := range []string{"", on, off} {
+			b := f.pendingBlock(scope, fmt.Sprintf("switch %s %d", typ, i), typ)
+			ids[typ] = append(ids[typ], b.ID)
+		}
+	}
+	// Filtered by the pick whatever the switch: the synthesis lifecycle (the
+	// dream report's write, dream/synthesize_report.go), a stale vector (a
+	// content change after the vector), category index.
+	syn := f.pendingBlock(scope, "synthesis report", "")
+	if _, err := f.pool.Exec(f.ctx, `UPDATE context_blocks SET lifecycle_state = 'synthesis' WHERE id = $1::uuid`, syn.ID); err != nil {
+		t.Fatal(err)
+	}
+	stale := f.pendingBlock(scope, "stale", "")
+	edited := "content of stale, edited"
+	if _, _, err := store.UpdateBlock(f.ctx, f.pool, stale.ID, store.UpdateBlockData{Content: &edited}, []string{scope}); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := store.UpsertBlock(f.ctx, f.pool, "index", "index block", "content of the index block", nil, nil, scope, true, store.SensitivityWrite{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreEmbedding(f.ctx, f.pool, idx.ID, "q341", guardStatsVec()); err != nil {
+		t.Fatal(err)
+	}
+
+	unchecked := func(typ string) int {
+		t.Helper()
+		var n int
+		if err := f.pool.QueryRow(f.ctx, `SELECT count(*)::int FROM context_blocks WHERE id = ANY($1::uuid[]) AND (metadata->>'guard_checked_at') IS NULL`, ids[typ]).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	step := func(label string, wantCount int, wantLeft map[string]int) {
+		t.Helper()
+		before := f.stats(ar)
+		f.expect(label+": guard-stats against the pick's predicate", ar, f.truth(ar.ReadScopes))
+		processed := f.guardUntilEmpty()
+		if before.pending != processed || processed != wantCount {
+			t.Errorf("%s: guard-stats pending_count=%d before the guard ran, the guard then processed %d blocks, want %d", label, before.pending, processed, wantCount)
+		}
+		for typ, want := range wantLeft {
+			if got := unchecked(typ); got != want {
+				t.Errorf("%s: %d of the 3 blocks of type %q left unchecked, want %d", label, got, typ, want)
+			}
+		}
+		f.expect(label+": after the guard ran empty", ar, guardStatsView{})
+	}
+
+	// The type that is not checked waits; the guard takes the other six.
+	f.setGuardCheck(on, false)
+	step("reference switched off", 3, map[string]int{"": 0, on: 3, off: 3})
+	f.setGuardCheck(off, true)
+	step(off+" switched on", 3, map[string]int{on: 3, off: 0})
+	f.setGuardCheck(on, true)
+	step("reference switched on again", 3, map[string]int{on: 0})
+	for _, id := range []string{syn.ID, stale.ID, idx.ID} {
+		var checked bool
+		if err := f.pool.QueryRow(f.ctx, `SELECT (metadata->>'guard_checked_at') IS NOT NULL FROM context_blocks WHERE id = $1::uuid`, id).Scan(&checked); err != nil || checked {
+			t.Errorf("block %s (filtered by the pick) was checked (err %v)", id, err)
+		}
+	}
 }
 
 // Pflichttests 4 (D1, D2) — the recount races of issue #341. Before

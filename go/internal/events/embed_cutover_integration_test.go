@@ -529,7 +529,9 @@ func TestEmbedCutover_Integration(t *testing.T) {
 		for _, probe := range []struct{ needle, sql string }{
 			{"idx_embedding_pending on", `SELECT id FROM context_blocks WHERE embedding IS NULL AND NOT is_archived ORDER BY created_at LIMIT 1`},
 			{"idx_dream_pending on", `SELECT id FROM context_blocks WHERE NOT is_archived AND embedding IS NOT NULL ORDER BY dream_checked_at ASC NULLS FIRST, quality_score ASC LIMIT 1`},
-			{"idx_guard_pending on", `SELECT id FROM context_blocks WHERE NOT is_archived AND (metadata->>'guard_checked_at') IS NULL AND embedding IS NOT NULL ORDER BY created_at ASC LIMIT 1`},
+			{"idx_guard_pending on", `SELECT id FROM context_blocks WHERE NOT is_archived AND (metadata->>'guard_checked_at') IS NULL AND embedding IS NOT NULL
+				AND NOT embedding_stale AND category != 'index' AND lifecycle_state = 'knowledge' AND type_name = ANY('{knowledge,reference}'::text[])
+				ORDER BY created_at ASC LIMIT 1`},
 		} {
 			if plan := explainPlan(t, pool, probe.sql); !strings.Contains(plan, probe.needle) {
 				t.Errorf("post-swap EXPLAIN misses %q — plan:\n%s", probe.needle, plan)

@@ -199,6 +199,11 @@ var repairBreaks = []struct {
 		indexActionRebuiltDefinition, seedPreMigration175PickSisters},
 	{"invalid", []string{"idx_dream_pending_next"}, indexActionRebuiltInvalid,
 		func(t *testing.T, pool *pgxpool.Pool) { invalidateIndexT(t, pool, "idx_dream_pending_next") }},
+	// The release of migration 182 (issue #360) while a migration waits at
+	// its green verdict: the guard twin of the older release no longer has
+	// the definition the gate builds.
+	{"definition_mismatch_182", []string{"idx_guard_pending_next"},
+		indexActionRebuiltDefinition, seedPreMigration182GuardSister},
 	{"missing", []string{"idx_guard_pending_next"}, indexActionCreated,
 		func(t *testing.T, pool *pgxpool.Pool) { dropIndexT(t, pool, "idx_guard_pending_next") }},
 }

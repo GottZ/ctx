@@ -122,13 +122,18 @@ var verifySisterIndexes = []struct{ name, ddl string }{
 	{"idx_dream_pending_next", `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_dream_pending_next
 		ON context_blocks (dream_checked_at ASC NULLS FIRST, quality_score ASC)
 		WHERE NOT is_archived AND embedding_next IS NOT NULL`},
-	// Twin of idx_guard_pending (074_guard_check_type_policy.sql:68-72),
-	// embedding → embedding_next.
+	// Twin of idx_guard_pending (migration 182: keyed by type, partial on
+	// every condition of the guard pick a predicate can hold), embedding →
+	// embedding_next. A twin of the definition before 182 is rebuilt by the
+	// gate, or on a green verdict by the index repair (issue #333).
 	{"idx_guard_pending_next", `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_guard_pending_next
-		ON context_blocks (created_at ASC)
+		ON context_blocks (type_name, created_at)
 		WHERE NOT is_archived
 		  AND (metadata->>'guard_checked_at') IS NULL
-		  AND embedding_next IS NOT NULL`},
+		  AND embedding_next IS NOT NULL
+		  AND NOT embedding_stale
+		  AND category <> 'index'
+		  AND lifecycle_state = 'knowledge'`},
 }
 
 // verifyCompletenessWhere is the §4.7 Stufe-1 predicate, defined ONCE

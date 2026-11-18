@@ -59,18 +59,25 @@ type pendingBlock struct {
 // design/01 §7-T7): the pick query and PendingStats (manage guard-stats,
 // issue #341) consume this one fragment instead of carrying two copies.
 // typesParam binds the GuardCheckTypes allowlist (guard.check=true types).
-// The first three conjuncts mirror idx_guard_pending (M074) byte-for-byte —
-// only pending rows are IN that partial index; NOT embedding_stale (issue
-// #198, part B: a title or content change keeps the previous vector until the
-// backfill writes the new one, and the change also drops guard_checked_at, so
-// without it the batch would check the new text by the old text's vector and
-// write the verdict as final), category != 'index' (topic-map mechanism rest,
-// §4.2: agent briefings share the system-meta type but ARE checked — dropping
-// the category rest would silently guard-check the topic-map), the lifecycle
-// gate and the type allowlist filter on the index result. A stale block waits
-// in the index until its new vector lands, as a block without a vector waited
-// outside it before. typesParam is a code-owned bind placeholder at every call
-// site — never user input.
+// NOT embedding_stale (issue #198, part B: a title or content change keeps
+// the previous vector until the backfill writes the new one, and the change
+// also drops guard_checked_at, so without it the batch would check the new
+// text by the old text's vector and write the verdict as final), category !=
+// 'index' (topic-map mechanism rest, §4.2: agent briefings share the
+// system-meta type but ARE checked — dropping the category rest would
+// silently guard-check the topic-map), the lifecycle gate. Since migration
+// 182 (issue #360) idx_guard_pending is (type_name, created_at), partial on
+// the first six conjuncts: only the blocks waiting for a check are IN that
+// index, and the type allowlist, which comes from the registry and so cannot
+// be in a predicate, is its index condition — the waiting blocks of a type
+// with guard.check = false are entries no pick or count reads. The planner
+// proves that this fragment implies the index predicate (in any order of the
+// conjuncts; != is <>), for a generic plan too, as the predicate has no
+// parameter: a change of one of the six conjuncts changes the index in the
+// same step (a migration and its twin in events.verifySisterIndexes), or the
+// pick and the count walk past the blocks the index then holds and they do
+// not take. typesParam is a code-owned bind placeholder at every call site —
+// never user input.
 func guardPendingWhere(typesParam string) string {
 	return `NOT is_archived
 		  AND (metadata->>'guard_checked_at') IS NULL
@@ -81,21 +88,33 @@ func guardPendingWhere(typesParam string) string {
 		  AND type_name = ANY(` + typesParam + `::text[])`
 }
 
+// guardPickSQL is the guard batch's pick ($1 = the GuardCheckTypes
+// allowlist, $2 = the batch limit); RunGuardBatch runs it in its transaction.
+// It reads the entries of the checked types in idx_guard_pending (migration
+// 182) and sorts them by created_at: the batch is the oldest waiting blocks
+// over all checked types. The sort reads every waiting block of those types,
+// not only the batch — about 0.12 buffers per waiting block in a backlog
+// (issue #360), none per entry of an unchecked type.
+var guardPickSQL = `SELECT id, type_name FROM context_blocks
+	WHERE ` + guardPendingWhere("$1") + `
+	ORDER BY created_at ASC
+	LIMIT $2
+	FOR NO KEY UPDATE SKIP LOCKED`
+
 // lastGuardAtSQL stamps the end of a committed guard run. It is the only
 // write of context_guard_state left (issue #341, migration 181).
 const lastGuardAtSQL = `UPDATE context_guard_state SET last_guard_at = now() WHERE id = true`
 
 // pendingStatsSQL counts what the pick would take, within the read scopes in
 // $1 ($2 = the GuardCheckTypes allowlist), and the oldest updated_at among
-// those blocks — one pass over idx_guard_pending (its partial predicate has
-// no parameter, so a generic plan can use it too); scope = ANY($1) filters
-// the index result or joins idx_context_scope in a BitmapAnd. The cost grows
-// with the entries of idx_guard_pending, not with the corpus and not only
-// with the waiting blocks: the index predicate is the first three conjuncts
-// of guardPendingWhere, so it also holds unchecked blocks with a vector that
-// the pick filters out and never takes out of the index (a type with
-// guard.check = false, category index, another lifecycle, a stale vector)
-// — docs/operations.md, "Migration 181".
+// those blocks — one pass over the entries of the checked types in
+// idx_guard_pending (its partial predicate has no parameter, so a generic
+// plan can use it too); scope = ANY($1) filters the index result or joins
+// idx_context_scope in a BitmapAnd. Since migration 182 the cost follows the
+// waiting blocks, not the unchecked blocks with a vector that the pick
+// filters out (issue #360); a generic plan's BitmapAnd adds the entries of
+// idx_context_scope for the caller's scopes — docs/operations.md,
+// "Migration 182".
 var pendingStatsSQL = `SELECT count(*)::int, min(updated_at) FROM context_blocks
 	WHERE scope = ANY($1::text[])
 	  AND ` + guardPendingWhere("$2")
@@ -184,7 +203,8 @@ func RunGuardBatch(ctx context.Context, pool interface {
 	}, func(tx pgx.Tx) error {
 		// Fetch pending blocks (the shared guardPendingWhere fragment: unchecked,
 		// not archived, not index, has embedding, knowledge lifecycle, policy
-		// type allowlist). ORDER BY created_at ASC rides idx_guard_pending (M074).
+		// type allowlist), guardPickSQL: the oldest by created_at over all
+		// checked types, read from idx_guard_pending by type (migration 182).
 		// SKIP LOCKED prevents concurrent guard runs from processing the same
 		// blocks; row locks are held for the duration of the transaction.
 		//
@@ -195,14 +215,7 @@ func RunGuardBatch(ctx context.Context, pool interface {
 		// (matched_block_id); under FOR UPDATE that insert waited for this
 		// whole batch, and two runs holding each other's neighbours waited
 		// for each other until PostgreSQL aborted one insert with 40P01.
-		rows, err := tx.Query(ctx,
-			`SELECT id, type_name FROM context_blocks
-			WHERE `+guardPendingWhere("$1")+`
-			ORDER BY created_at ASC
-			LIMIT $2
-			FOR NO KEY UPDATE SKIP LOCKED`,
-			checkTypes, limit,
-		)
+		rows, err := tx.Query(ctx, guardPickSQL, checkTypes, limit)
 		if err != nil {
 			return fmt.Errorf("guard: fetch pending: %w", err)
 		}
