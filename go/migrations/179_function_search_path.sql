@@ -8,9 +8,11 @@
 -- dump), and the trigger functions of ctx named their tables and helper
 -- functions without a schema: a data-only restore with the triggers on failed
 -- on its first block with 42883 (context_blocks_embed_excluded() calls
--- ctx_block_type_never_embedded), and every other function below fails the
--- same way, with 42883 for a function or 42P01 for a table, on the first row
--- of its table. The only way to restore data alone was --disable-triggers,
+-- ctx_block_type_never_embedded), and the other functions below fail the
+-- same way when they fire, with 42883 for a function or 42P01 for a table
+-- (five name tables only in string literals and would resolve without the
+-- pin: notify_model_access_write and the four *_identity_immutable guards).
+-- The only way to restore data alone was --disable-triggers,
 -- under which nothing keeps embed_excluded (migration 175) or the full-text
 -- vectors (migration 178).
 --
@@ -32,7 +34,9 @@
 -- every call from the reconcile and the read paths, where the session's path
 -- already finds it. context_blocks_fulltext() (178, SET search_path =
 -- pg_catalog, names no table) and the functions that name nothing of the
--- schema (notify_*, model_cidrs_private) need nothing.
+-- schema (notify_block_write, notify_link_write, notify_project_write,
+-- notify_project_delete, notify_settings_write, model_cidrs_private) need
+-- nothing.
 --
 -- ALTER FUNCTION … SET adds the setting to the function's proconfig and keeps
 -- what is there: mark_guard_dirty() keeps enable_nestloop = off and jit = off
@@ -45,8 +49,9 @@
 -- blocks, the seven pinned functions of context_blocks with and without the
 -- clause, alternating): one store.UpsertBlock 2.147 -> 2.154 ms (knowledge)
 -- and 2.126 -> 2.096 ms (checkpoint), single statements inside the noise;
--- archiving 5 000 blocks in one statement +2.3 to +2.9 us per row (the two
--- row-level functions). Schema-qualified bodies would cost nothing at run
+-- archiving 5 000 blocks in one statement +10.6 %, +7.4 % and -8.9 % in
+-- three runs at load average 6-21, not separable from the noise (the two
+-- row-level functions run once per row). Schema-qualified bodies would cost nothing at run
 -- time but replace every body and write the schema name into it; this file
 -- follows 178 (SET search_path on context_blocks_fulltext()).
 --

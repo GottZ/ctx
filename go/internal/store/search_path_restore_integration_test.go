@@ -92,19 +92,59 @@ SELECT lower(name) FROM (
 var sqlComments = regexp.MustCompile(`(?s)--[^\n]*|/\*.*?\*/`)
 
 // unqualifiedNames returns the schema names the body uses without a schema
-// prefix. Comments are dropped; string literals stay, so a name in the text
-// of an EXECUTE counts.
+// prefix, bare or double-quoted. Comments are dropped; string literals stay,
+// so a name in the text of an EXECUTE counts (and so does a table name in a
+// RAISE text: a pin more than needed, never one less). Operators are not
+// read: an extension operator in the schema (pg_trgm's %) is reached through
+// the search_path as well, and no function of the class uses one today.
 func unqualifiedNames(body string, names []string) []string {
 	text := strings.ToLower(sqlComments.ReplaceAllString(body, " "))
 	var hits []string
 	for _, n := range names {
-		re := regexp.MustCompile(`(^|[^\w.$"])` + regexp.QuoteMeta(n) + `([^\w$]|$)`)
+		q := regexp.QuoteMeta(n)
+		re := regexp.MustCompile(`(^|[^\w.$"])` + q + `([^\w$"]|$)|(^|[^\w.$])"` + q + `"`)
 		if re.MatchString(text) {
 			hits = append(hits, n)
 		}
 	}
 	return hits
 }
+
+// calledFunctions returns the names of the schema's functions the body calls,
+// with or without a schema prefix.
+func calledFunctions(body string, funcs []string) []string {
+	text := strings.ToLower(sqlComments.ReplaceAllString(body, " "))
+	var hits []string
+	for _, n := range funcs {
+		q := regexp.QuoteMeta(n)
+		if regexp.MustCompile(`(^|[^\w$])"?` + q + `"?\s*\(`).MatchString(text) {
+			hits = append(hits, n)
+		}
+	}
+	return hits
+}
+
+// pinsSchema: the function's own search_path holds its schema and ends with
+// pg_temp (a temporary table of the writer's session cannot stand in for one
+// of the schema's tables).
+func pinsSchema(config []string, schema string) bool {
+	path := pinnedPath(config)
+	holds := false
+	for _, e := range path {
+		holds = holds || e == schema
+	}
+	return holds && path[len(path)-1] == "pg_temp"
+}
+
+// schemaFunctionsSQL lists the functions of a schema a body can call by name
+// (not of an extension, not BEGIN ATOMIC).
+const schemaFunctionsSQL = `
+SELECT p.oid::regprocedure::text, p.proname, p.prosrc, coalesce(p.proconfig, '{}')
+  FROM pg_proc p
+ WHERE p.pronamespace = $1::regnamespace
+   AND p.prosqlbody IS NULL
+   AND NOT EXISTS (SELECT 1 FROM pg_depend e
+                    WHERE e.classid = 'pg_proc'::regclass AND e.objid = p.oid AND e.deptype = 'e')`
 
 // pinnedPath returns the elements of the function's own search_path, or nil
 // when it carries none.
@@ -125,8 +165,9 @@ func pinnedPath(config []string) []string {
 
 // unresolvedFunctions applies the rule to every expression function: one
 // that names an object of its schema without a prefix pins a search_path
-// that holds the schema and ends with pg_temp (a temporary table of the
-// writer's session cannot stand in for one of the schema's tables).
+// (pinsSchema). A function it calls runs under that pin; a function called
+// by one without a pin (by a qualified name, say) runs under the writer's
+// path and is checked the same way.
 func unresolvedFunctions(t *testing.T, pool *pgxpool.Pool) (checked int, bad []string) {
 	t.Helper()
 	ctx := context.Background()
@@ -134,54 +175,81 @@ func unresolvedFunctions(t *testing.T, pool *pgxpool.Pool) (checked int, bad []s
 	if err != nil {
 		t.Fatalf("list expression functions: %v", err)
 	}
-	var fns []expressionFunction
+	var queue []expressionFunction
 	for rows.Next() {
 		var f expressionFunction
 		if err := rows.Scan(&f.sig, &f.schema, &f.body, &f.config, &f.uses); err != nil {
 			t.Fatalf("scan expression function: %v", err)
 		}
-		fns = append(fns, f)
+		queue = append(queue, f)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		t.Fatalf("list expression functions: %v", err)
 	}
+	checked = len(queue)
 	names := map[string][]string{}
-	for _, f := range fns {
-		if _, ok := names[f.schema]; ok {
-			continue
+	funcs := map[string]map[string][]expressionFunction{}
+	load := func(schema string) {
+		if _, ok := names[schema]; ok {
+			return
 		}
-		r, err := pool.Query(ctx, schemaNamesSQL, f.schema)
+		r, err := pool.Query(ctx, schemaNamesSQL, schema)
 		if err != nil {
-			t.Fatalf("list names of schema %s: %v", f.schema, err)
+			t.Fatalf("list names of schema %s: %v", schema, err)
 		}
-		var ns []string
 		for r.Next() {
 			var n string
 			if err := r.Scan(&n); err != nil {
 				t.Fatalf("scan name: %v", err)
 			}
-			ns = append(ns, n)
+			names[schema] = append(names[schema], n)
 		}
 		r.Close()
-		names[f.schema] = ns
+		funcs[schema] = map[string][]expressionFunction{}
+		r, err = pool.Query(ctx, schemaFunctionsSQL, schema)
+		if err != nil {
+			t.Fatalf("list functions of schema %s: %v", schema, err)
+		}
+		for r.Next() {
+			f := expressionFunction{schema: schema}
+			var name string
+			if err := r.Scan(&f.sig, &name, &f.body, &f.config); err != nil {
+				t.Fatalf("scan function: %v", err)
+			}
+			funcs[schema][strings.ToLower(name)] = append(funcs[schema][strings.ToLower(name)], f)
+		}
+		r.Close()
 	}
-	for _, f := range fns {
-		hits := unqualifiedNames(f.body, names[f.schema])
-		if len(hits) == 0 {
+	seen := map[string]bool{}
+	for len(queue) > 0 {
+		f := queue[0]
+		queue = queue[1:]
+		if seen[f.sig] {
 			continue
 		}
-		path := pinnedPath(f.config)
-		holds := false
-		for _, e := range path {
-			holds = holds || e == f.schema
+		seen[f.sig] = true
+		load(f.schema)
+		if pinsSchema(f.config, f.schema) {
+			continue
 		}
-		if !holds || path[len(path)-1] != "pg_temp" {
+		if hits := unqualifiedNames(f.body, names[f.schema]); len(hits) > 0 {
 			sort.Strings(hits)
-			bad = append(bad, fmt.Sprintf("%s (%s): names %s without a schema, search_path %v", f.sig, f.uses, strings.Join(hits, ", "), path))
+			bad = append(bad, fmt.Sprintf("%s (%s): names %s without a schema, search_path %v", f.sig, f.uses, strings.Join(hits, ", "), pinnedPath(f.config)))
+		}
+		fnames := make([]string, 0, len(funcs[f.schema]))
+		for n := range funcs[f.schema] {
+			fnames = append(fnames, n)
+		}
+		for _, n := range calledFunctions(f.body, fnames) {
+			for _, callee := range funcs[f.schema][n] {
+				callee.uses = "called by " + f.sig
+				queue = append(queue, callee)
+			}
 		}
 	}
-	return len(fns), bad
+	sort.Strings(bad)
+	return checked, bad
 }
 
 func TestTriggerFunctionsResolveUnderAnEmptySearchPath(t *testing.T) {
@@ -205,14 +273,23 @@ func TestTriggerFunctionsResolveUnderAnEmptySearchPath(t *testing.T) {
 		`CREATE FUNCTION zz351_trigger() RETURNS trigger LANGUAGE plpgsql AS $$
          BEGIN PERFORM ctx_embed_excluded_group(NEW.scope); RETURN NEW; END $$`,
 		`CREATE TRIGGER zz351_trg BEFORE INSERT ON zz351_rows FOR EACH ROW EXECUTE FUNCTION zz351_trigger()`,
+		// A quoted name, and a helper reached through a qualified call from
+		// a function without a pin: both resolve through the writer's path.
+		`CREATE FUNCTION zz351_helper() RETURNS bigint LANGUAGE sql AS $$ SELECT count(*) FROM context_tenant_scopes $$`,
+		`CREATE FUNCTION zz351_quoted() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM 1 FROM "context_embed_excluded_queue"; PERFORM public.zz351_helper(); RETURN NEW; END $$`,
+		`CREATE TRIGGER zz351_trg_quoted BEFORE INSERT ON zz351_rows FOR EACH ROW EXECUTE FUNCTION zz351_quoted()`,
 	} {
 		if _, err := pool.Exec(ctx, s); err != nil {
 			t.Fatalf("plant: %v", err)
 		}
 	}
 	_, bad = unresolvedFunctions(t, pool)
-	if len(bad) != 1 || !strings.HasPrefix(bad[0], "zz351_trigger()") {
-		t.Fatalf("the check does not name the planted function alone: %v", bad)
+	if len(bad) != 3 || !strings.HasPrefix(bad[0], "zz351_helper()") || !strings.HasPrefix(bad[1], "zz351_quoted()") || !strings.HasPrefix(bad[2], "zz351_trigger()") {
+		t.Fatalf("the check does not name the three planted functions alone: %v", bad)
+	}
+	if _, err := pool.Exec(ctx, `DROP TRIGGER zz351_trg_quoted ON zz351_rows`); err != nil {
+		t.Fatalf("drop: %v", err)
 	}
 	emptyPathInsert := func() error {
 		conn, err := pool.Acquire(ctx)

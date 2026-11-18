@@ -60,9 +60,10 @@ var shared struct {
 	once     sync.Once
 	err      error
 	adminDSN string        // DSN of the container's default DB (admin surface)
+	admin    *pgxpool.Pool // CREATE/DROP DATABASE connection
+
 	// container runs RunClientTool's programs; nothing else touches it.
 	container *tcpostgres.PostgresContainer
-	admin    *pgxpool.Pool // CREATE/DROP DATABASE connection
 }
 
 // dbSeq names the per-test databases (process-local — each test binary owns
