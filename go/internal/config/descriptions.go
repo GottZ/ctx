@@ -121,6 +121,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl√
 	"query.rate_limit_write":                         "Maximum write operations per API key in a 60-second window; 0 disables write rate limiting",
 	"query.rate_limit_read":                          "Maximum read operations per API key in a 60-second window on search/graph/overview endpoints; 0 (default) disables it",
 	"digest.mode":                                    "Linear topic-map build mode: full keeps writing it, stub shrinks it to a pointer at the root map, off stops digest writes entirely",
+	"search.leave_out_never_ranked":                  "A full-text search that names no type leaves out the types query never ranks (checkpoint, system-meta, derived layers); name them in types to get them",
 	"scheduler.read_scopes":                          "Scopes the background pipelines (dream, digest, topic labeling, audit) read blocks from, intersected with actual entitlements",
 	"scheduler.home_scope":                           "Scope that background jobs write their derived blocks and classification/audit results into",
 	"scheduler.llmlog_retention_days":                "Days before the janitor blanks prompt/response bodies in the LLM log; telemetry rows survive, 0 keeps bodies forever",

@@ -461,6 +461,10 @@ func TestRegistryTenancySet(t *testing.T) {
 		// decides whether a tenant's OWN query is worth a synthesis call, and
 		// the separating value is a property of that tenant's corpus.
 		"query.semantic_floor": true,
+		// #342: same class as the query thresholds — it decides which rows the
+		// tenant's OWN full-text searches answer, not their shape, and the
+		// clients that still need the old answer are per installation.
+		"search.leave_out_never_ranked": true,
 		// per-tenant scope resolution (consumer MUST intersect with entitlements — T38)
 		"scheduler.read_scopes": true, "scheduler.home_scope": true,
 		// per-tenant trust policy
@@ -523,8 +527,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 67 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 67 (change it with intent)", got)
+	if got := len(overridable); got != 68 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 68 (change it with intent)", got)
 	}
 	// The NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant: a
 	// tenant override here would flush the process-wide embed cache / flip the
