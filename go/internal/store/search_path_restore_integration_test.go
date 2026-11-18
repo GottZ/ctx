@@ -284,9 +284,16 @@ func TestTriggerFunctionsResolveUnderAnEmptySearchPath(t *testing.T) {
 			t.Fatalf("plant: %v", err)
 		}
 	}
+	// ctx_embed_excluded_group, which zz351_trigger calls, names its table
+	// without a schema and runs under the writer's path while its caller
+	// pins none: it is named too.
 	_, bad = unresolvedFunctions(t, pool)
-	if len(bad) != 3 || !strings.HasPrefix(bad[0], "zz351_helper()") || !strings.HasPrefix(bad[1], "zz351_quoted()") || !strings.HasPrefix(bad[2], "zz351_trigger()") {
-		t.Fatalf("the check does not name the three planted functions alone: %v", bad)
+	var named []string
+	for _, b := range bad {
+		named = append(named, b[:strings.Index(b, " ")])
+	}
+	if want := "ctx_embed_excluded_group(text) zz351_helper() zz351_quoted() zz351_trigger()"; strings.Join(named, " ") != want {
+		t.Fatalf("the check names %v, want %s:\n  %s", named, want, strings.Join(bad, "\n  "))
 	}
 	if _, err := pool.Exec(ctx, `DROP TRIGGER zz351_trg_quoted ON zz351_rows`); err != nil {
 		t.Fatalf("drop: %v", err)
