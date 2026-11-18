@@ -21,6 +21,7 @@ import (
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/promptguard"
+	"github.com/GottZ/ctx/internal/rerank"
 )
 
 // sharedScope is the one scope name V22 refuses for distill.scope. A literal
@@ -75,7 +76,7 @@ func temporalTimeoutBudgetOf(c *Config) time.Duration {
 func Validate(c *Config) []Issue {
 	var issues []Issue
 	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V9d, V11, V26, V61, V62
-	issues = append(issues, validateRerankGraph(c)...)   // V3, V9
+	issues = append(issues, validateRerankGraph(c)...)   // V3, V9, V63
 	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c, V18, V19, V20
 	issues = append(issues, validateGraphOverview(c)...) // V17b
 	issues = append(issues, validateDurations(c)...)     // V17
@@ -969,6 +970,16 @@ func validateRerankGraph(c *Config) []Issue {
 		issues = append(issues, Issue{Field: "rerank.blend_weight", Severity: SeverityError,
 			Msg: fmt.Sprintf("blend_weight %g must be in [0,1]", c.Rerank.BlendWeight)})
 	}
+	// V63 (#223) — rerank.timeout is capped by the wire's own rerank.Timeout:
+	// rerank.Score ends every call there, so a larger value renders as
+	// configured and acts as the cap. 0 is the default (the timeout keys'
+	// sentinel), negatives belong to V17.
+	if c.Rerank.Timeout > rerank.Timeout {
+		issues = append(issues, Issue{Field: "rerank.timeout", Severity: SeverityError,
+			Msg: fmt.Sprintf("rerank.timeout %v exceeds the cross-encoder wire's own cap %v — the call would end there anyway; set at most %d (seconds), or 0 for the default",
+				c.Rerank.Timeout, rerank.Timeout, int(rerank.Timeout/time.Second))})
+	}
+
 	// rerank.max_docs was a pure sign check and folded into V35
 	// (validateIntSigns) with the other fifteen.
 	//

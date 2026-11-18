@@ -36,6 +36,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl√
 	"rerank.enabled":                                 "Turns the post-retrieval rerank stage on or off; off keeps the RRF fusion order as the final ranking",
 	"rerank.max_docs":                                "How many top candidates are sent to the cross-encoder for rescoring; 0 or less falls back to 50",
 	"rerank.blend_weight":                            "Cross-encoder share of the blended score in [0,1]; 1.0 lets the reranker fully decide the final ranking over the RRF order",
+	"rerank.timeout":                                 "Deadline in seconds of the cross-encoder call on the query path, from admission on; a call it ends keeps the pre-rerank order. 0 = the default 180, larger values are refused",
 	"graph.enabled":                                  "Master switch for the post-RRF dream-graph expansion stage; off leaves query results byte-identical to plain RRF",
 	"graph.directed":                                 "When true only outbound dream links are traversed; false also follows inbound edges, treating the link graph as undirected",
 	"graph.hop_depth":                                "Number of traversal hops from each seed; hops beyond 1 decay by an extra boost_weight factor per hop, with a visited-set against loops",

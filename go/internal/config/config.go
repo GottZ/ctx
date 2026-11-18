@@ -418,6 +418,28 @@ type RerankConfig struct {
 	Enabled     bool    `key:"rerank.enabled" env:"CTX_RERANK_ENABLED" default:"false" mut:"hot" tenancy:"tenant-overridable"`
 	MaxDocs     int     `key:"rerank.max_docs" env:"CTX_RERANK_MAX_DOCS" default:"50" mut:"hot" tenancy:"tenant-overridable"`
 	BlendWeight float64 `key:"rerank.blend_weight" env:"CTX_RERANK_BLEND_WEIGHT" default:"1.0" mut:"hot" tenancy:"tenant-overridable"`
+	// Timeout is the deadline of the query path's ONE cross-encoder call, in
+	// seconds from admission on (#223). The default is rerank.Timeout (180 s),
+	// the wire's own safety net, and it is also the cap: V63 refuses a larger
+	// value, because the wire would end the call at 180 s anyway. 0 reads as
+	// the default (the timeout keys' sentinel). A call the deadline ends fails
+	// open on the pre-rerank order, as every rerank failure does — the key lets
+	// a deployment for which query latency is a constraint give up earlier.
+	//
+	// What it does not bound: the wait for a lease in ctx's own dispatcher on
+	// a rerank target with declared slots, which runs before admission (the
+	// in-house classes carry no wait budget). On a target without declared
+	// slots the engine's own queue runs inside this deadline.
+	//
+	// tenant-overridable with the rest of the group: it shapes only the
+	// tenant's OWN queries, and it ends a call earlier, never later — the
+	// lease is released when it does. Whether the engine stops scoring when
+	// the client goes away is not verified; a client that disconnects from a
+	// query early ends the call the same way today. A call it ends is reported
+	// to the pool like any timeout (ClassTimeout: a failure streak, no
+	// cooldown — backends/classify.go), the same report a tenant's large
+	// rerank.max_docs already produces.
+	Timeout time.Duration `key:"rerank.timeout" env:"CTX_RERANK_TIMEOUT" default:"180" mut:"hot" tenancy:"tenant-overridable"`
 }
 
 // GraphConfig is the dream-graph expansion stage (post-RRF 1-hop traversal).
@@ -2999,6 +3021,7 @@ func (c *Config) RerankRRF() rrf.RerankConfig {
 		Enabled:     c.Rerank.Enabled,
 		MaxDocs:     c.Rerank.MaxDocs,
 		BlendWeight: c.Rerank.BlendWeight,
+		Timeout:     c.Rerank.Timeout,
 	}
 }
 

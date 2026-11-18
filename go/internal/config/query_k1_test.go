@@ -2,8 +2,10 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/rerank"
 )
 
 // k1Entry asserts the registry shape of one key of the K1 group (issues #208,
@@ -95,6 +97,40 @@ func TestMaxSourceRunesKey(t *testing.T) {
 		issues := Validate(c)
 		if got := severityFor(issues, "query.max_source_runes"); got != tc.want {
 			t.Errorf("query.max_source_runes=%s: severity %d, want %d (%v)", tc.val, got, tc.want, issues)
+		}
+	}
+}
+
+// TestRerankTimeoutKey (#223): the cross-encoder deadline is a hot,
+// tenant-overridable key next to rerank.max_docs, its default IS
+// rerank.Timeout, it reaches the rrf stage, and V63 refuses a value above the
+// wire's own cap. 0 reads as the default, the timeout keys' legacy sentinel.
+func TestRerankTimeoutKey(t *testing.T) {
+	k1Entry(t, "rerank.timeout", "CTX_RERANK_TIMEOUT", "180")
+	if got := defaultFor("rerank.timeout"); got != rerank.Timeout {
+		t.Errorf("registry default %v != rerank.Timeout %v", got, rerank.Timeout)
+	}
+
+	c := validCfg(t, map[string]string{"rerank.timeout": "30"})
+	if got := c.RerankRRF().Timeout; got != 30*time.Second {
+		t.Errorf("RerankRRF().Timeout = %v, want 30s", got)
+	}
+
+	for _, tc := range []struct {
+		val  string
+		want Severity
+	}{
+		{"-1", SeverityError}, // V17
+		{"0", -1},             // the timeout keys' 0: the default
+		{"1", -1},
+		{"30", -1},
+		{"180", -1},
+		{"181", SeverityError}, // renders as configured, acts as 180
+	} {
+		c, _ := cfgFrom(t, map[string]string{"rerank.timeout": tc.val})
+		issues := Validate(c)
+		if got := severityFor(issues, "rerank.timeout"); got != tc.want {
+			t.Errorf("rerank.timeout=%s: severity %d, want %d (%v)", tc.val, got, tc.want, issues)
 		}
 	}
 }

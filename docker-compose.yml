@@ -87,7 +87,7 @@ services:
       CTX_DREAM_BACKOFF_MIN: ${CTX_DREAM_BACKOFF_MIN:-}
       CTX_DREAM_BACKOFF_INERT_OFFSET: ${CTX_DREAM_BACKOFF_INERT_OFFSET:-}
 
-      # ── rerank.* (3) ──
+      # ── rerank.* (4) ──
       # Reranker (post-RRF re-score). Opt-in since v5.0.0, and the default is
       # OFF for the same reason the tuples above are gone: whether a reranker
       # exists is a pool question, and a fresh install has no row of role
@@ -105,6 +105,7 @@ services:
       # client timeout is sized for 50).
       CTX_RERANK_ENABLED: ${CTX_RERANK_ENABLED:-}
       CTX_RERANK_MAX_DOCS: ${CTX_RERANK_MAX_DOCS:-}
+      CTX_RERANK_TIMEOUT: ${CTX_RERANK_TIMEOUT:-}
       # BLEND_WEIGHT default 0.5 (not 1.0): the Wave-3 sweep showed pure
       # cross-encoder (bw1.0) discards the RRF prior and re-ranks latent neighbors
       # down — and as final arbiter over graph-injected neighbors it is destructive
