@@ -909,7 +909,7 @@ func (s *Scheduler) finishVerifyRed(ctx context.Context, mig *embedmigration.Mig
 		}
 		terr := embedmigration.Transition(ctx, tx, mig.ID,
 			embedmigration.StatusVerifying, embedmigration.StatusPaused,
-			embedmigration.WithLastError(summary), embedmigration.OnWatermark(rep.Watermark))
+			embedmigration.WithLastError(summary))
 		if terr != nil && !errors.Is(terr, embedmigration.ErrTransitionRaceLost) {
 			return fmt.Errorf("embed-verify: pause transition: %w", terr)
 		}

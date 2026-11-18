@@ -185,11 +185,11 @@ func WithFinishedAt() TransitionOption {
 }
 
 // OnWatermark binds the CAS to the verify run of watermark wm (issue #332):
-// the UPDATE also requires verify_started_at = wm. A transition that carries
-// the outcome of one verify run — its red verdict, the confirm of its green
-// one — must not land on a row that re-entered verifying with a newer
-// watermark since (resume, drain, verifying again): the status alone is the
-// same there. Zero rows is ErrTransitionRaceLost, as for the status.
+// the UPDATE also requires verify_started_at = wm. A transition that acts on
+// the outcome of one verify run — the confirm of its green verdict — must
+// not land on a row that re-entered verifying with a newer watermark since
+// (resume, drain, verifying again): the status alone is the same there.
+// Zero rows is ErrTransitionRaceLost, as for the status.
 func OnWatermark(wm time.Time) TransitionOption {
 	return func(o *transitionOpts) {
 		o.watermark = &wm
