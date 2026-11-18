@@ -3,10 +3,17 @@
 // Issue #343, part 1: migration 178 turns ts_de / ts_en from generated
 // columns into ordinary columns kept by a trigger. /api/search reads them for
 // its match and its rank, so its answers must be the same before and after:
-// the same blocks, written through the same store calls, give the same rows in
-// the same order on a database at 177 and on one with 178 — with and without a
-// type filter, after inserts, upserts, title and content updates, metadata
-// writes and archives.
+// the same blocks, written through the same store calls, give the same rows
+// with the same ranks in the same rank order on a database at 177 and on one
+// with 178 — with and without a type filter, after inserts, upserts, title and
+// content updates, metadata writes and archives.
+//
+// The full-text statement orders by rank alone (store.searchBlocksSQL): rows
+// of the same rank come in the order the scan reads them, which the physical
+// placement of row versions decides — not the schema. The comparison is
+// therefore the answer's rank groups in order, each group as a set of rows
+// (issue #362: under host load the tie order of the same rows differed
+// between the two databases in 1 of 30 runs).
 package handler
 
 import (
@@ -16,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -78,7 +86,8 @@ func TestSearchFullTextSameAcrossMigration178(t *testing.T) {
 
 	ar := &auth.AuthResult{IsValid: true, ApiKeyID: "00000000-0000-7000-8000-000000000000",
 		HomeScope: "private", ReadScopes: []string{"private"}}
-	search := func(pool *pgxpool.Pool, body map[string]any) []string {
+	type hit struct{ id, row string }
+	search := func(pool *pgxpool.Pool, body map[string]any) []hit {
 		t.Helper()
 		h := NewSearchHandler(pool, staticConfigStore{cfg: &config.Config{}}, nil)
 		raw, _ := json.Marshal(body)
@@ -95,11 +104,61 @@ func TestSearchFullTextSameAcrossMigration178(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		out := make([]string, 0, len(resp.Results))
+		out := make([]hit, 0, len(resp.Results))
 		for _, r := range resp.Results {
-			out = append(out, fmt.Sprintf("%v|%v|%v", r["title"], r["type"], r["score"]))
+			out = append(out, hit{fmt.Sprint(r["id"]), fmt.Sprintf("%v|%v", r["title"], r["type"])})
 		}
 		return out
+	}
+	// rankGroups is an answer as its rank groups in answer order: each group
+	// the rank (the statement's own expression, read per row on the answer's
+	// database) and its rows as a sorted set. An answer whose ranks rise is a
+	// broken rank order and fails the test.
+	rankGroups := func(pool *pgxpool.Pool, body map[string]any, hits []hit) []string {
+		t.Helper()
+		if len(hits) >= body["limit"].(int) {
+			t.Fatalf("search %v answered %d rows, its limit: the last rank group may be cut, the comparison needs whole groups", body, len(hits))
+		}
+		ids := make([]string, len(hits))
+		for i, h := range hits {
+			ids[i] = h.id
+		}
+		rows, err := pool.Query(context.Background(),
+			`SELECT id::text, GREATEST(ts_rank_cd(ts_de, plainto_tsquery('german', $1)), ts_rank_cd(ts_en, plainto_tsquery('english', $1)))::float8
+			   FROM context_blocks WHERE id = ANY($2::uuid[])`, body["query"], ids)
+		if err != nil {
+			t.Fatalf("ranks of %v: %v", body, err)
+		}
+		rank := map[string]float64{}
+		for rows.Next() {
+			var id string
+			var r float64
+			if err := rows.Scan(&id, &r); err != nil {
+				t.Fatalf("scan rank: %v", err)
+			}
+			rank[id] = r
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("ranks of %v: %v", body, err)
+		}
+		var groups []string
+		var group []string
+		for i, h := range hits {
+			r, ok := rank[h.id]
+			if !ok {
+				t.Fatalf("search %v: no rank for row %s (%s)", body, h.id, h.row)
+			}
+			if i > 0 && r > rank[hits[i-1].id] {
+				t.Fatalf("search %v: row %d (%s) ranks %v above the row before it (%v) — the answer is not in rank order", body, i, h.row, r, rank[hits[i-1].id])
+			}
+			group = append(group, h.row)
+			if i == len(hits)-1 || rank[hits[i+1].id] != r {
+				slices.Sort(group)
+				groups = append(groups, fmt.Sprintf("%v %v", r, group))
+				group = nil
+			}
+		}
+		return groups
 	}
 
 	nonEmpty := 0
@@ -115,11 +174,12 @@ func TestSearchFullTextSameAcrossMigration178(t *testing.T) {
 				for k, v := range filter {
 					body[k] = v
 				}
-				b, a := search(before, body), search(after, body)
+				bh, ah := search(before, body), search(after, body)
+				b, a := rankGroups(before, body, bh), rankGroups(after, body, ah)
 				if !reflect.DeepEqual(b, a) {
 					t.Errorf("search %v differs:\n  at 177: %v\n  at 178: %v", body, b, a)
 				}
-				if len(a) > 0 {
+				if len(ah) > 0 {
 					nonEmpty++
 				}
 			}

@@ -33,6 +33,65 @@ func allocOf[T any](f func() T) (least uint64, last T) {
 	return least, last
 }
 
+// allocIn is what f allocated in calls of the function frame (its full
+// name, as runtime.Frame.Function spells it), with f's result. It reads the
+// memory profile at a rate of one record per allocation, each attributed to
+// its stack, so an allocation outside the frame — the harness, the fake
+// engine, the transport, a sync.Pool that dropped its buffer under -race,
+// another goroutine of the process — never enters the number (issue #362:
+// allocOf's process-wide TotalAlloc moved by up to 47 KB between two runs of
+// the same request under -race, alone in its process). The caller sets
+// runtime.MemProfileRate to 1 for the test (memProfileEveryAllocation).
+func allocIn[T any](t *testing.T, frame string, f func() T) (int64, T) {
+	t.Helper()
+	if runtime.MemProfileRate != 1 {
+		t.Fatalf("allocIn needs runtime.MemProfileRate 1, have %d", runtime.MemProfileRate)
+	}
+	before := profiledAllocIn(frame)
+	last := f()
+	return profiledAllocIn(frame) - before, last
+}
+
+// memProfileEveryAllocation records every allocation in the memory profile
+// for the rest of the test.
+func memProfileEveryAllocation(t *testing.T) {
+	rate := runtime.MemProfileRate
+	runtime.MemProfileRate = 1
+	t.Cleanup(func() { runtime.MemProfileRate = rate })
+}
+
+// profiledAllocIn is the bytes the memory profile has seen allocated by a
+// stack through frame. runtime.GC publishes the allocations made up to it
+// (the profile is as of the last completed collection).
+func profiledAllocIn(frame string) int64 {
+	runtime.GC()
+	n, _ := runtime.MemProfile(nil, true)
+	var recs []runtime.MemProfileRecord
+	for {
+		recs = make([]runtime.MemProfileRecord, n+64)
+		var ok bool
+		if n, ok = runtime.MemProfile(recs, true); ok {
+			recs = recs[:n]
+			break
+		}
+	}
+	var sum int64
+	for i := range recs {
+		frames := runtime.CallersFrames(recs[i].Stack())
+		for {
+			f, more := frames.Next()
+			if f.Function == frame {
+				sum += recs[i].AllocBytes
+				break
+			}
+			if !more {
+				break
+			}
+		}
+	}
+	return sum
+}
+
 // TestEmbedDepthIsBookedBeforeTheCheck (E05): the JSON check's nesting
 // state — 24 B per level — is booked before the check runs. json.Valid
 // keeps that state on a body that fails at the decoder's nesting limit
@@ -76,13 +135,19 @@ func TestEmbedDepthIsBookedBeforeTheCheck(t *testing.T) {
 	}
 }
 
+// embedRecordFrame is the function that books and writes the embeddings
+// route's log row.
+const embedRecordFrame = "github.com/GottZ/ctx/internal/oai.(*embedCall).record"
+
 // TestEmbedLogRowTextIsBookedBeforeItIsWritten (E04): the log row's text of
 // the input is sized, booked, then written. With body logging full, a
 // request whose reservation at its end holds H is served at a budget of H
 // with the text in its row and at H − 1 without it — the text is the last
-// booking — and at H − 1 it allocates at least half the text less: the text
-// was never built.
+// booking — and at H − 1 the row's writer allocates at least half the text
+// less: the text was never built. The allocations are the row writer's own
+// (allocIn), not the process's.
 func TestEmbedLogRowTextIsBookedBeforeItIsWritten(t *testing.T) {
+	memProfileEveryAllocation(t)
 	inputs := repeatInputs(strings.Repeat("a", 32<<10), 4) // 128 KiB of input: the row's text is cut at its cap
 	srv := leanEmbedEngine(t, 8)
 	row := backends.Backend{
@@ -101,9 +166,9 @@ func TestEmbedLogRowTextIsBookedBeforeItIsWritten(t *testing.T) {
 		status     int
 		held, text int64
 	}
-	at := func(budget int64) (uint64, run) {
+	at := func(budget int64) (int64, run) {
 		rig.setSettings(func(s *oai.Settings) { s.BodyLogging, s.InflightBudget = llmlog.BodyLoggingFull, budget })
-		return allocOf(func() run {
+		return allocIn(t, embedRecordFrame, func() run {
 			before, _ := held.sum()
 			a := rig.postEmbed(t, body)
 			after, _ := held.sum()
@@ -113,13 +178,13 @@ func TestEmbedLogRowTextIsBookedBeforeItIsWritten(t *testing.T) {
 	_, big := at(memBudget)
 	full, f := at(big.held)
 	cut, c := at(big.held - 1)
-	t.Logf("FOLGEE log text order: held %d B; at it: %d, text %d B, %d B allocated; one byte short: %d, text %d B, held %d B, %d B allocated",
+	t.Logf("FOLGEE log text order: held %d B; at it: %d, text %d B, the row's writer allocated %d B; one byte short: %d, text %d B, held %d B, the row's writer allocated %d B",
 		big.held, f.status, f.text, full, c.status, c.text, c.held, cut)
 	if f.status != http.StatusOK || c.status != http.StatusOK || f.text == 0 || c.text != 0 || f.held-c.held != f.text {
 		t.Fatalf("at the reservation: %d with a text of %d B; one byte short: %d with %d B, %d B less held — want both served, the text only at the reservation, held less by the text", f.status, f.text, c.status, c.text, f.held-c.held)
 	}
-	if saved := int64(full) - int64(cut); saved < f.text/2 {
-		t.Errorf("without its booking the row's text saved %d B of allocation, the text is %d B — it was built before its booking", saved, f.text)
+	if saved := full - cut; saved < f.text/2 {
+		t.Errorf("without its booking the row's text saved %d B of the row writer's allocation, the text is %d B — it was built before its booking", saved, f.text)
 	}
 }
 
