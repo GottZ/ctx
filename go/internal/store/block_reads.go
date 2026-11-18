@@ -200,9 +200,10 @@ func (w *blockReadWriter) drain() {
 			slog.Debug("access log: read record insert failed", "rows", rows, "error", err)
 			warnBlockReadLoss("access log: read record insert failed, rows lost", batch[0].action, err)
 		case inserted < int64(rows):
-			// Skips are part of normal operation (a guard batch holds its
-			// blocks FOR UPDATE for the batch), so they are counted and named
-			// in every loss line, but raise no WARN of their own.
+			// Skips are part of normal operation (the embedding backfill
+			// holds its blocks FOR UPDATE over the embed call), so they are
+			// counted and named in every loss line, but raise no WARN of
+			// their own.
 			blockReadSkipped.Add(int64(rows) - inserted)
 			slog.Debug("access log: read record rows skipped", "rows", rows, "inserted", inserted)
 		}

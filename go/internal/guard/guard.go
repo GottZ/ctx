@@ -355,39 +355,50 @@ func archives(decision, mode string) bool {
 }
 
 // archiveLockSQL takes, without waiting, the transaction-level advisory locks
-// of both blocks of an archive verdict: the lower id first, the higher only
-// when the lower was free (CASE fixes the order of evaluation, so two runs
-// that want the same two locks cannot each end up holding one). One key per
-// block in a two-key class of its own ('ctx:guard-archive'), which shares no
-// key with the one-key advisory locks or the supersedes-guess class.
-const archiveLockSQL = `SELECT CASE
-	WHEN pg_try_advisory_xact_lock(hashtext('ctx:guard-archive'), hashtext(least($1::uuid, $2::uuid)::text))
-	THEN pg_try_advisory_xact_lock(hashtext('ctx:guard-archive'), hashtext(greatest($1::uuid, $2::uuid)::text))
-	ELSE false END`
+// of an archive verdict: exclusive on the block that is archived ($1), shared
+// on the neighbour that has to stay ($2), the lower id first and the second
+// only when the first was granted (CASE fixes the order of evaluation). One
+// key per block in a two-key class of its own ('ctx:guard-archive'), which
+// shares no key with the one-key advisory locks or the supersedes-guess class.
+const archiveLockSQL = `SELECT CASE WHEN $1::uuid < $2::uuid
+	THEN CASE WHEN pg_try_advisory_xact_lock(hashtext('ctx:guard-archive'), hashtext($1::uuid::text))
+		THEN pg_try_advisory_xact_lock_shared(hashtext('ctx:guard-archive'), hashtext($2::uuid::text))
+		ELSE false END
+	ELSE CASE WHEN pg_try_advisory_xact_lock_shared(hashtext('ctx:guard-archive'), hashtext($2::uuid::text))
+		THEN pg_try_advisory_xact_lock(hashtext('ctx:guard-archive'), hashtext($1::uuid::text))
+		ELSE false END
+	END`
 
 // archiveNeighbourLiveSQL reads, in a statement of its own after the locks,
 // whether the matched neighbour still stands.
 const archiveNeighbourLiveSQL = `SELECT EXISTS (SELECT 1 FROM context_blocks WHERE id = $1 AND NOT is_archived)`
 
-// claimArchivePair makes an archive verdict exclusive per block across
-// concurrent guard runs (issue #359): archiving blockID against matchedID
-// first takes the advisory locks of both blocks, then reads that matchedID
-// still stands. Each run checks its block in its own snapshot, where another
-// run's uncommitted archive is invisible, and the pick cannot order the runs
-// by neighbour, because it takes its blocks before any neighbour is known.
+// claimArchivePair makes archive verdicts that share a block mutually
+// exclusive across concurrent guard runs (issue #359): archiving blockID
+// against matchedID first takes the advisory lock of blockID exclusive and
+// that of matchedID shared, then reads that matchedID still stands. Each run
+// checks its block in its own snapshot, where another run's uncommitted
+// archive is invisible, and the pick cannot order the runs by neighbour,
+// because it takes its blocks before any neighbour is known.
 //
-// Locking both ends, not only the pair, is what keeps archives from closing a
-// cycle of any length: two archive verdicts that share a block cannot be in
-// flight at the same time, and the later one reads the earlier one's archive
-// after its locks. A→B and B→A cannot both stand, nor A→B, B→C, C→A — where
-// C finds A as its neighbour only once B is gone, three different pairs.
+// Two archive verdicts in a row of a cycle meet in one block, the archived
+// block of the one (exclusive) and the neighbour of the other (shared), so
+// they cannot be in flight at the same time, and the later one reads the
+// earlier one's archive after its locks. That keeps archives from closing a
+// cycle of any length: A→B and B→A cannot both stand, nor A→B, B→C, C→A —
+// where C finds A as its neighbour only once B is gone, three different
+// pairs. Verdicts that archive several blocks against the same standing
+// neighbour only share its shared lock and go through side by side.
 //
 // It returns false, and the caller leaves the block pending for the next run,
-// when another transaction holds either lock (it is deciding an archive that
-// involves one of the two blocks; the decision becomes visible with its
-// commit) or when the neighbour no longer stands. The read comes AFTER the
-// locks, in a statement of its own: the check's snapshot predates them, and
-// an archive committed in between is visible only to a later statement. The
+// when another transaction holds a conflicting lock (it is deciding an
+// archive that involves one of the two blocks; the decision becomes visible
+// with its commit) or when the neighbour no longer stands. The read comes
+// AFTER the locks, in a statement of its own: the check's snapshot predates
+// them, and an archive committed in between is visible only to a later
+// statement — under READ COMMITTED, the isolation the batch transaction runs
+// at (pgxdb.Write opens it with the server default); a snapshot that lasted
+// the whole transaction would read the neighbour as of the batch start. The
 // locks never wait, so they add no edge a lock cycle could run through; they
 // are held to the end of the batch transaction, when its archives become
 // visible (a rolled-back savepoint releases them earlier).

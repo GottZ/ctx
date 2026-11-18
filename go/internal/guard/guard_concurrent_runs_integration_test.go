@@ -483,6 +483,50 @@ func TestConcurrentGuardRuns_NoArchiveCycleOverThreeBlocks(t *testing.T) {
 	}
 }
 
+// Two runs archive a block each against the same standing neighbour H (a
+// hub; the two blocks are each other's duplicates too, but each is closer to
+// H than to the other). X stands before its audit insert with its archive
+// open; Y must still archive its block against H in the same moment instead
+// of leaving it for the next run: H stays, so the two verdicts cannot form a
+// cycle. On root this held as well (H is no pick of either run); it pins
+// that the archive locks take the standing neighbour shared.
+func TestConcurrentGuardRuns_ArchivesAgainstOneStandingBlockGoSideBySide(t *testing.T) {
+	f := newConcurrentFixture(t)
+	ctx := context.Background()
+	const c = 0.995 // sim(s,h) = c, sim(s1,s2) = c*c
+	s := math.Sqrt(1 - c*c)
+	vec := func(x, y, z float64) []float32 {
+		v := make([]float32, 1024)
+		v[0], v[1], v[2] = float32(x), float32(y), float32(z)
+		return v
+	}
+	h := stateLockBlock(t, f.pool, "hub h", vec(1, 0, 0))
+	drain(t, f)
+	s1 := stateLockBlock(t, f.pool, "spoke s1", vec(c, s, 0))
+	time.Sleep(2 * time.Millisecond)
+	s2 := stateLockBlock(t, f.pool, "spoke s2", vec(c, 0, s))
+
+	tr := newStopTracer("INSERT INTO context_write_log", s1, true)
+	dx := startRun(ctx, tracedPool(t, f.pool, tr), f, 1)
+	tr.waitReached(t)
+	var ry runResult
+	select {
+	case ry = <-startRun(ctx, f.pool, f, 1):
+	case <-time.After(5 * time.Second):
+		t.Fatal("run Y did not finish while run X stood")
+	}
+	close(tr.release)
+	rx := <-dx
+	if rx.err != nil || ry.err != nil || rx.n != 1 || ry.n != 1 {
+		t.Errorf("runs: X processed=%d err=%v, Y processed=%d err=%v, want one verdict each", rx.n, rx.err, ry.n, ry.err)
+	}
+	v := assertSettled(t, f.pool, []string{s1, s2})
+	if !v[s1].archived || !v[s2].archived || v[s1].matched != h || v[s2].matched != h {
+		t.Errorf("spokes: s1 archived=%v against hub=%v, s2 archived=%v against hub=%v, want both archived against h",
+			v[s1].archived, v[s1].matched == h, v[s2].archived, v[s2].matched == h)
+	}
+}
+
 // Free-running: k runs started together over rounds of pending pairs laid
 // out so that every pair is split across two runs, then one run alone takes
 // what is left. The deadlock counter must not move.
