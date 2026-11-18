@@ -220,7 +220,7 @@ type searchInput struct {
 	// and a client could not narrow a search to its checkpoint blocks. REST
 	// /api/search binds the field without any check (an unknown name matches
 	// nothing); the query tool keeps the retrieval-visible cut.
-	Types        []string `json:"types,omitempty" jsonschema:"restrict results to these block types; any registered type, including checkpoint and system-meta, which query never ranks (an unknown name is an error)"`
+	Types        []string `json:"types,omitempty" jsonschema:"restrict results to these block types; any registered type, including checkpoint and system-meta, which query never ranks and a full-text search without types may leave out (an unknown name is an error)"`
 	TypesExclude []string `json:"types_exclude,omitempty" jsonschema:"exclude these block types from the results"`
 	// BlockRolesExclude is the documented legacy alias of types_exclude (seam
 	// 17), accepted here since T03-9 (E03-3 = A). Before that this tool was the

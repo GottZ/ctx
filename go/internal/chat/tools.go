@@ -315,7 +315,8 @@ func (ex *Executor) runSearch(ctx context.Context, readScopes []string, raw json
 	// cluster nil (C6): the chat tool has no facet argument — a model that cannot
 	// see the graph surfaces has no way to learn a handle, so exposing one here
 	// would be a knob nothing can turn.
-	// set nil (V-11): the executor holds no block-type registry, and the three
+	// set nil (V-11): the executor's registry snapshot (WithSearchTypes) feeds
+	// only the type exclusion below, and the three
 	// chat renderers below project into their OWN local DTOs — the framing does
 	// not ride BlockPreview onto this wire even with a set. Framing the chat
 	// tools is therefore a wiring change of its own (registry into

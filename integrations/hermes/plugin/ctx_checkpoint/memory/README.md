@@ -185,8 +185,9 @@ CLI writes use `sensitivity_default` unless `--sensitivity` is given and are tag
 `hook:cli`. Hit lines of `query` and `search` carry the `untrusted_origin:` note line of a
 block that has the record. Error lines are redacted with the keys the provider binds
 (`CTX_KEY` and `status.profile_ctx_keys`) and the checkpoint rules. `--all-types` disables `prefetch_types_exclude`;
-`search --type checkpoint` searches only checkpoint blocks (a ctx server with
-`search.leave_out_never_ranked` on leaves checkpoints out of a text search that names no type, `--all-types` included) (repeatable; named types replace `prefetch_types_exclude`).
+`search --type checkpoint` searches only checkpoint blocks (repeatable; named types replace `prefetch_types_exclude`).
+A ctx server with `search.leave_out_never_ranked` on leaves checkpoints out of a text search
+that names no type, `--all-types` included.
 
 ## How it works
 

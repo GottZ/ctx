@@ -55,7 +55,11 @@ func TestSearchUntypedFullTextLeavesOutNeverRankedCost(t *testing.T) {
 	// ones; the mid-frequency word is somewhere in about a fifth of the wide
 	// rows and in some ranked ones.
 	terms := []string{unrankedTerm, unrankedWords[2000]}
-	for _, term := range terms {
+	for _, form := range []struct {
+		term    string
+		compact bool
+	}{{terms[0], true}, {terms[1], true}, {terms[0], false}} {
+		term := form.term
 		off := store.SearchTypesExclude(set, false, term, nil, nil)
 		on := store.SearchTypesExclude(set, true, term, nil, nil)
 		if off != nil {
@@ -73,7 +77,7 @@ func TestSearchUntypedFullTextLeavesOutNeverRankedCost(t *testing.T) {
 			}
 			stmt := func(exclude []string) (string, []any) {
 				return store.SearchBlocksSQLForTest(store.SearchBlocksParams{
-					Query: term, ReadScopes: scopes, Limit: store.SearchDefaultLimit, Compact: true,
+					Query: term, ReadScopes: scopes, Limit: store.SearchDefaultLimit, Compact: form.compact,
 					ProbeNext: true, TypesExclude: exclude,
 				})
 			}
@@ -83,8 +87,8 @@ func TestSearchUntypedFullTextLeavesOutNeverRankedCost(t *testing.T) {
 			gotOn := explain(t, with, onSQL, onArgs...)
 			ref := explain(t, alone, onSQL, onArgs...)
 			bound := int64(float64(ref.Buffers)*heapRatio*1.25) + 16
-			t.Logf("%q (%s plan): key off %d buffers (%.1f ms), key on %d (%.1f ms), on the store without never-ranked rows %d, bound %d",
-				term, plan, gotOff.Buffers, gotOff.ExecMs, gotOn.Buffers, gotOn.ExecMs, ref.Buffers, bound)
+			t.Logf("%q compact=%t (%s plan): key off %d buffers (%.1f ms), key on %d (%.1f ms), on the store without never-ranked rows %d, bound %d",
+				term, form.compact, plan, gotOff.Buffers, gotOff.ExecMs, gotOn.Buffers, gotOn.ExecMs, ref.Buffers, bound)
 			for _, idx := range []string{"idx_context_ts_de", "idx_context_ts_en"} {
 				if !strings.Contains(gotOn.Plan, `"Index Name": "`+idx+`"`) {
 					t.Errorf("%q (%s plan), key on: the plan does not use %s:\n%s", term, plan, idx, gotOn.Plan)
@@ -100,11 +104,12 @@ func TestSearchUntypedFullTextLeavesOutNeverRankedCost(t *testing.T) {
 		}
 	}
 
-	// A tenant overlay that lifts checkpoint into retrieval keeps it in the
-	// search: the exclusion then lacks one name of the deny-list, no index
-	// premise is declared, and the search costs what it costs with the key off.
-	// Logged, not gated: correctness decides that case (never hide a row the
-	// caller's registry ranks), and the cost is the one before the key.
+	// A registry that ranks checkpoint (the type API refuses such a tenant
+	// overlay; a row written around it) keeps it in the search: the exclusion
+	// then lacks one name of the deny-list, no index premise is declared, and
+	// the search costs what it costs with the key off. Logged, not gated:
+	// correctness decides that case (never hide a row the caller's registry
+	// ranks), and the cost is the one before the key.
 	lifted := []string{"catalog", "insight", "system-meta"}
 	for _, plan := range []string{"custom", "generic"} {
 		explain := testdb.ExplainCustom
@@ -116,6 +121,6 @@ func TestSearchUntypedFullTextLeavesOutNeverRankedCost(t *testing.T) {
 			ProbeNext: true, TypesExclude: lifted,
 		})
 		got := explain(t, with, sql, args...)
-		t.Logf("checkpoint lifted by an overlay (%s plan): %d buffers (%.1f ms)", plan, got.Buffers, got.ExecMs)
+		t.Logf("checkpoint ranked by the registry (%s plan): %d buffers (%.1f ms)", plan, got.Buffers, got.ExecMs)
 	}
 }

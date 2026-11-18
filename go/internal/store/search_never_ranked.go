@@ -19,10 +19,10 @@ import (
 // the types query never ranks: checkpoint, system-meta and the derived layers
 // on a stock registry. set is the caller's tenant-resolved registry snapshot,
 // the one query takes its visible types from (Set.VisibleTypes), so a tenant's
-// own excluded type is left out for that tenant, and a tenant overlay that lifts
-// a _global exclusion keeps its type in for that tenant. A type the snapshot
-// does not know stays in: the MCP tool could not name it in types, so leaving
-// it out would make it unreachable by full text.
+// own excluded type is left out for that tenant, and a type the snapshot ranks
+// stays in, whatever another tenant's registry says. A type the snapshot does
+// not know stays in: the MCP tool could not name it in types, so leaving it out
+// would make it unreachable by full text.
 //
 // What it leaves alone, and why:
 //
@@ -37,9 +37,11 @@ import (
 // never-ranked names in name order, each once. When it holds both names of the
 // partial indexes' deny-list, searchBlocksSQL declares the indexes' predicate
 // as constant text (impliesHardFTSDeny), which is what lets the planner use
-// them under a generic plan as well. On a registry where checkpoint or
-// system-meta is not excluded (a tenant overlay lifted it) the conjunct is not
-// declared and the search reads every vector of the remaining rows, as before.
+// them under a generic plan as well. The type API refuses a tenant overlay
+// that lifts checkpoint or system-meta (handler/types_write.go,
+// hardDenyOverlayViolation); should a registry rank one of them all the same (a
+// row written around the API), the conjunct is not declared, the type stays in,
+// and the search reads every vector of the remaining rows, as before.
 func SearchTypesExclude(set *blocktype.Set, leaveOutNeverRanked bool, query string, types, typesExclude []string) []string {
 	if !leaveOutNeverRanked || query == "" || len(types) > 0 || set == nil {
 		return typesExclude

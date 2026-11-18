@@ -33,6 +33,7 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/chat"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/store"
@@ -167,13 +168,17 @@ func NewChatHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.P
 	return h
 }
 
-// searchTypes is the turn's registry snapshot for ctx_search's type exclusion
-// (#342): the request's tenant-resolved view, as REST /api/search takes it.
-func (h *ChatHandler) searchTypes(ctx context.Context) *blocktype.Set {
-	if h.blocktypes == nil {
-		return nil
+// turnExecutor builds one turn's tool executor from the turn's config
+// snapshot: the webchat window, the staging tool, and ctx_search's type
+// exclusion (#342) — the request's tenant-resolved registry view, as REST
+// /api/search takes it, and search.leave_out_never_ranked.
+func (h *ChatHandler) turnExecutor(ctx context.Context, cfg *config.Config) *chat.Executor {
+	var set *blocktype.Set
+	if h.blocktypes != nil {
+		set = h.blocktypes.SnapshotForRequest(ctx)
 	}
-	return h.blocktypes.SnapshotForRequest(ctx)
+	return chat.NewExecutor(h.pool, h.queryRunner, cfg.WebChat.ToolResultMaxChars).WithStage(h.stageRunner).
+		WithSearchTypes(set, cfg.Search.LeaveOutNeverRanked)
 }
 
 // acquire reserves a turn slot for home_scope; ok=false means the per-scope cap
@@ -298,8 +303,7 @@ func (h *ChatHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		LLMTimeout:         wc.LLMTimeout,
 		Timezone:           tzName(cfg.Query.Timezone),
 	}
-	exec := chat.NewExecutor(h.pool, h.queryRunner, wc.ToolResultMaxChars).WithStage(h.stageRunner).
-		WithSearchTypes(h.searchTypes(r.Context()), cfg.Search.LeaveOutNeverRanked)
+	exec := h.turnExecutor(r.Context(), cfg)
 	engine := chat.NewEngine(h.pool, h.provider, exec, engineCfg, h.admitter)
 
 	sink := newChatSink(w)

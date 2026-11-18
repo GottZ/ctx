@@ -323,7 +323,7 @@ docker compose logs ctx | grep '"store: write reject' | grep '"api_key_id":"<key
 
 - **`false` (the default):** every type, as before the key existed. The two full-text GIN indexes have been partial since migration 145 (they leave out `checkpoint` and `system-meta`), so such a search cannot use them and reads the text vectors of every visible block. On a store with many checkpoint parts this is most of its cost: at 10,000 blocks with 57 % checkpoint parts it read 95,200 buffers (`TestSearchUntypedFullTextLeavesOutNeverRankedCost`), and it grows with the checkpoint volume.
 - **`true`:** a full-text search without `types` also excludes the types `query` never ranks — every type whose retrieval policy is `excluded` in the caller's tenant-resolved registry (`checkpoint`, `system-meta`, `insight`, `catalog` on a stock registry; a tenant's own excluded type for that tenant). The search then uses both partial indexes, under a custom and a generic plan: 105 buffers instead of 95,200 in the same measurement. A search that names `types` gets exactly those types, `types_exclude`, `category`, `tags` and `limit` work as before, and a listing (empty query) and `recent` are not affected. `POST /api/search` echoes the types it left out in `filters.types_exclude`; the MCP tool and the chat tool do not say it in their answer.
-- **Tenants:** a tenant overlay that lifts `checkpoint` or `system-meta` into retrieval keeps that type in the tenant's full-text search. The search then cannot declare the index predicate and costs what it costs with the key off. A type the caller's registry does not know stays in, because the MCP tool could not name it.
+- **Tenants:** the caller's registry decides. A tenant's own excluded type is left out for that tenant. The type API refuses a tenant overlay that ranks `checkpoint` or `system-meta`; should a registry rank one of them all the same, the type stays in, the search cannot declare the index predicate and costs what it costs with the key off. A type the caller's registry does not know stays in, because the MCP tool could not name it.
 
 Switch it on a running instance, without a restart:
 
@@ -332,13 +332,14 @@ ctx settings set search.leave_out_never_ranked true     # on
 ctx settings unset search.leave_out_never_ranked        # back to the default (off)
 ```
 
-**Clients that depend on the old answer.** With the key on, a client that finds checkpoint or system-meta blocks by full text without naming the type finds nothing:
+**Clients that depend on the old answer.** With the key on, a client that finds blocks of these types by full text without naming the type finds nothing:
 
 - `ctx_checkpoint` before 0.16.0 looks its chain head up through MCP `search` without a type. It no longer finds the head and starts a new chain at every compaction. From 0.16.0 on, the plugin names the type; `ctx_handover` does so from 0.1.2.
 - Manual lookups: `ctx search index query:topic-map` (the linear topic map) and a checkpoint head search by title need `types:system-meta` resp. `types:checkpoint`. The pointer the topic map becomes with `digest.mode=stub` (`ctx search index query:root-map`) names no type and finds nothing with the key on.
 - The web UI's block search sends no `types`, so it no longer finds those blocks by text; an empty-query listing by category still does.
+- `insight` and `catalog` blocks drop out as well: `ctx_checkpoint` with `prefetch_mode: search`, and its `ctx_search` without `types`, no longer get the session insights it otherwise keeps visible.
 
-**The planned change of the default.** The default is meant to become `true` in a later release, once the shipped clients that look these blocks up without a type are gone: that waits on the Hermes plugin catalog pinning `ctx_checkpoint` 0.16.0 or later. Until then, switch it on per instance or per tenant where every client names the type.
+**The planned change of the default.** The default is meant to become `true` in a later release, once the shipped clients that look these blocks up without a type are gone: that waits on the Hermes plugin catalog pinning `ctx_checkpoint` 0.16.0 or later, and on the pointers in ctx itself that still name no type (the web UI's block search, the `digest.mode=stub` text, the insight prefetch above). Until then, switch it on per instance or per tenant where every client names the type.
 
 ## The read record in `context_access_log`
 

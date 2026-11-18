@@ -72,10 +72,13 @@ func i342cWire(t *testing.T, pool *pgxpool.Pool, reg *blocktype.Registry, ar *au
 	t.Helper()
 	cfg := staticConfigStore{cfg: &config.Config{Search: config.SearchConfig{LeaveOutNeverRanked: on}}}
 	ctx := context.WithValue(context.Background(), authResultKey, ar)
+	// The chat tool as a turn of the chat route gets it: the handler's own
+	// per-turn wiring of the registry snapshot and the key.
+	chatH := NewChatHandler(pool, cfg, nil, nil, nil, reg, nil)
 	return i342cSurfaces{
 		rest: NewSearchHandler(pool, cfg, reg),
 		mcp:  MCPConfig{Pool: pool, Blocktypes: reg, Cfg: cfg},
-		chat: chat.NewExecutor(pool, nil, 0).WithSearchTypes(reg.SnapshotForRequest(ctx), on),
+		chat: chatH.turnExecutor(ctx, cfg.cfg),
 		ar:   ar,
 	}
 }
@@ -138,6 +141,18 @@ func i342cRESTTypes(t *testing.T, raw []byte) map[string]int {
 		out[r.Type]++
 	}
 	return out
+}
+
+// i342cEcho is the JSON of a REST answer's filters.types_exclude.
+func i342cEcho(t *testing.T, raw []byte) string {
+	t.Helper()
+	var resp struct {
+		Filters map[string]json.RawMessage `json:"filters"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("decode REST filters: %v", err)
+	}
+	return string(resp.Filters["types_exclude"])
 }
 
 func i342cMCPTypes(t *testing.T, text string) map[string]int {
@@ -216,8 +231,15 @@ func TestSearchLeaveOutNeverRanked_Integration(t *testing.T) {
 	all := map[string]int{"knowledge": 1, "audit-trail": 1, "catalog": 1, "checkpoint": 1, "insight": 1, "system-meta": 1}
 
 	t.Run("key off answers every type, as before", func(t *testing.T) {
-		if got := i342cRESTTypes(t, off.restRaw(t, `{"query":"`+i342cTerm+`","limit":50}`)); !reflect.DeepEqual(got, all) {
+		raw := off.restRaw(t, `{"query":"`+i342cTerm+`","limit":50}`)
+		if got := i342cRESTTypes(t, raw); !reflect.DeepEqual(got, all) {
 			t.Errorf("REST: %v, want %v", got, all)
+		}
+		if got := i342cEcho(t, raw); got != `null` {
+			t.Errorf("REST filters.types_exclude = %s, want null with the key off", got)
+		}
+		if got := i342cEcho(t, off.restRaw(t, `{"query":"`+i342cTerm+`","types_exclude":["audit-trail"]}`)); got != `["audit-trail"]` {
+			t.Errorf("REST filters.types_exclude = %s, want the request's list with the key off", got)
 		}
 		if got := i342cMCPTypes(t, off.mcpRaw(t, `{"query":"`+i342cTerm+`","limit":50}`)); !reflect.DeepEqual(got, all) {
 			t.Errorf("MCP: %v, want %v", got, all)
@@ -241,14 +263,11 @@ func TestSearchLeaveOutNeverRanked_Integration(t *testing.T) {
 		}
 		// The REST answer echoes the exclusion that ran, so it does not read as
 		// the whole match set.
-		var resp struct {
-			Filters map[string]any `json:"filters"`
-		}
-		if err := json.Unmarshal(raw, &resp); err != nil {
-			t.Fatal(err)
-		}
-		if got, _ := json.Marshal(resp.Filters["types_exclude"]); string(got) != `["catalog","checkpoint","insight","system-meta"]` {
+		if got := i342cEcho(t, raw); got != `["catalog","checkpoint","insight","system-meta"]` {
 			t.Errorf("REST filters.types_exclude = %s, want the four left-out types", got)
+		}
+		if got := i342cEcho(t, on.restRaw(t, `{"query":"`+i342cTerm+`","types_exclude":["audit-trail"]}`)); got != `["audit-trail","catalog","checkpoint","insight","system-meta"]` {
+			t.Errorf("REST filters.types_exclude = %s, want the request's list, then the left-out types", got)
 		}
 	})
 
@@ -333,9 +352,10 @@ func TestSearchLeaveOutNeverRanked_Integration(t *testing.T) {
 
 // TestSearchLeaveOutNeverRankedTenantRegistry_Integration: what is never-ranked
 // is decided by the caller's tenant-resolved registry snapshot. Tenant B's own
-// excluded type is left out for B; B's overlay that lifts checkpoint into
-// retrieval keeps B's checkpoint rows in B's full-text search; tenant A, on the
-// stock registry, still leaves checkpoint out.
+// excluded type is left out for B; a B row that ranks checkpoint (the type API
+// refuses such an overlay, hardDenyOverlayViolation — written here through the
+// store, around that gate) keeps B's checkpoint rows in B's full-text search;
+// tenant A, on the stock registry, still leaves checkpoint out.
 func TestSearchLeaveOutNeverRankedTenantRegistry_Integration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
