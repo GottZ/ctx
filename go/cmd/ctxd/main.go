@@ -889,6 +889,8 @@ const (
 	// llmlogSettleTimeout bounds EACH of the two llmlog.Settle calls: queued
 	// and running context_llm_log inserts land before the teardown moves on.
 	// Rows still pending after the second one are lost when the pool closes.
+	// It also bounds the read record's settle (store.SettleBlockReads), which
+	// runs alongside the first one.
 	llmlogSettleTimeout = 5 * time.Second
 	// rejectionFlushTimeout bounds the refusal ledger's flush (W06-12,
 	// design/06 §4.2 Shutdown-Reihenfolge step 3): its own step after
@@ -953,8 +955,17 @@ func shutdownSequence(srv *http.Server, sched drainer, pool *pgxpool.Pool, force
 		defer close(gatewayStopped)
 		stopGateway()
 	}()
+	// The read record (issue #345) is written by request paths only, so after
+	// srv.Shutdown nothing adds to it: one settle, alongside the first llmlog
+	// settle and bounded by the same timeout, so it adds nothing to the sum.
+	readsSettled := make(chan struct{})
+	go func() {
+		defer close(readsSettled)
+		settleBlockReads(pool, llmlogSettleTimeout)
+	}()
 	settleLLMLog(pool, llmlogSettleTimeout, "http")
 	<-gatewayStopped
+	<-readsSettled
 
 	// Wait for scheduler to finish (drains active dream cycle before pool closes).
 	slog.Info("waiting for scheduler shutdown")
@@ -981,6 +992,18 @@ func settleLLMLog(pool *pgxpool.Pool, timeout time.Duration, after string) {
 		"after", after, "elapsed", time.Since(begin).Round(time.Millisecond),
 		"insert_failures_total", llmlog.InsertFailures(),
 		"insert_dropped_total", llmlog.InsertDropped())
+}
+
+// settleBlockReads waits up to timeout for the pool's queued read-record rows
+// (store.RecordBlockReads) and logs the outcome with the loss totals.
+func settleBlockReads(pool *pgxpool.Pool, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := store.SettleBlockReads(ctx, pool); err != nil {
+		failed, dropped, skipped := store.BlockReadsLost()
+		slog.Warn("access log: settle at shutdown incomplete, pending read records are lost",
+			"error", err, "timeout", timeout, "rows_failed_total", failed, "rows_dropped_total", dropped, "rows_skipped_total", skipped)
+	}
 }
 
 // maxHeaderValueCount is the per-request cap on header VALUES that ctxd will

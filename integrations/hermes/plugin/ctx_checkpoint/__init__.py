@@ -867,9 +867,7 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         return _cp.mcp_read_tools(mcp_tool_name(server, "get"), mcp_tool_name(server, "search"))
 
     def _receipt_read_path(self, head_id: str, root: str) -> str:
-        return _cp.read_path(
-            self._read_tools(), head_id=head_id, root_session_id=root, category=self._checkpoint_category()
-        )
+        return _cp.read_path(self._read_tools(), head_id=head_id, category=self._checkpoint_category())
 
     def _checkpoint_pointer(self) -> str:
         """The pointer block for the session root, ``""`` while no head is known. The head comes

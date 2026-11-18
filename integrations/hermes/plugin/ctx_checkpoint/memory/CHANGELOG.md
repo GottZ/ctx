@@ -6,6 +6,61 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.15.0] — 2026-11-18
+
+A source part is stored once per identical write (GottZ/ctx#344).
+
+- **The same write is one part.** Measured on the reference instance: 44 % of all checkpoint
+  characters were exact copies of a part ctx already held — 34 % across conversations (one
+  burst wrote 23 roots with the same 34-part transcript), 10 % repeats of one transcript by
+  the writer before 0.10.0. Every part named its root, active session, transcript digest and
+  position in its header and title, so no copy could meet the stored one. A part's title is
+  now the first 32 hex characters (128 bits) of the SHA-256 of its whole write
+  (`Compaction source part <32 hex>`,
+  `checkpoint.part_title_for`: category, content after redaction, metadata, sensitivity, tags,
+  type), and header and metadata name no conversation: the header is the same for every part,
+  the metadata keeps how and where the text was captured (`source_kind`, `platform`,
+  `agent_context`, the host contract, `tool_index_status`, `warnings`, `invalidated_by`,
+  `ctx_plugin` with writer, profile and redaction passes) plus `part_sha256`. The writer's
+  version stays on manifest and head: a part is shared only for byte-identical text, and the
+  version in its write would end the sharing at every release. Reuse needs the identical
+  complete write, not only the same text: another compaction of the conversation (Hermes
+  hands every compaction the whole live transcript, so the protected first turns come
+  again), a branch (a root of its own that carries its parent's turns) or another
+  conversation of the profile that holds the same text with the same platform, agent
+  context, host contract, redaction passes and sensitivity gets ctx's "No change needed"
+  with the stored id — no write booked, so it also takes nothing from the write window — and
+  its manifest lists that id. No server change: ctx's identical-content check already
+  compares title, content, metadata, tags, sensitivity and type, and scope (one tenant per
+  scope) and category are part of its upsert identity, so the same text in another scope or
+  category stays another block, and so does the same text with another agent context or
+  sensitivity. A store under a part title can only meet the payload the title names, so a
+  part another manifest lists is never rewritten.
+- **The manifest carries the conversation.** Manifest and head keep `root_session_id`,
+  `active_session_id` and `sha256` as before; the manifest keeps the parts in order
+  (`source_block_ids`, the position of a part is its place there), the head keeps
+  `latest_manifest_id` and `source_block_count`. A part's `part`/`parts` keys and its
+  `Root session`/`Active session`/`Transcript SHA-256`/`Part: i/n` header lines are gone. The distiller cuts the header at `## Direct transcript`
+  and reads parts by id in the manifest's order, as before.
+- **Finding a passage.** The read path in the system prompt, the receipt and the skill
+  searches by the words alone (`query="<words>"`) and names the rule: a hit is from this
+  conversation when one of its manifests lists the hit's id; without such a hit the agent
+  reads the listed parts (and those of the parent manifests) before it concludes a passage
+  is not saved. The root token narrowed the search to one conversation's parts; a shared
+  part carries none, and a search with a query answers its top matches without a cursor, so
+  other conversations' parts can fill the page.
+- **Existing chains.** Nothing rewrites existing parts in bulk; they keep their titles and
+  headers. A retry of the checkpoint a head names rewrites that manifest in place, as every
+  such retry has since 0.10.0: after a 0.14.0 checkpoint, a 0.15.0 retry of the same
+  transcript replaces the manifest's `source_block_ids` with new-format parts. Every listed
+  part is stored before the manifest is written, so the head names a complete list of the
+  same transcript even when the head write after it fails, and the parts listed before stay
+  stored. An older plugin never reads parts, only head and manifest.
+- `ChainWriter._store` sends the tags it is given; the writer resolves them through
+  `tags_for` once, so a part is stored with exactly the tags its title digest covers, whatever
+  callable the writer was given.
+- Archiving or deleting a part now reaches every manifest that lists it.
+
 ## [ctx_checkpoint 0.14.0] — 2026-11-16
 
 Redaction keys of status and CLI, installer tests, untrusted_origin in the recall

@@ -40,6 +40,14 @@ func TestFitSearchBudget(t *testing.T) {
 	}
 }
 
+func previewIDsOf(rows []store.BlockPreview) []string {
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+	return ids
+}
+
 // TestRenderMCPSearchForms pins the two answer forms without a database.
 func TestRenderMCPSearchForms(t *testing.T) {
 	when := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
@@ -50,7 +58,10 @@ func TestRenderMCPSearchForms(t *testing.T) {
 	next := &store.SearchCursor{UpdatedAt: when.Add(-time.Second), ID: "b"}
 
 	t.Run("legacy_without_signals_is_the_array_alone", func(t *testing.T) {
-		res := renderMCPSearch(searchInput{Limit: 10}, searchPage{Rows: rows, Limit: 10})
+		res, answered := renderMCPSearch(searchInput{Limit: 10}, searchPage{Rows: rows, Limit: 10})
+		if len(answered) != 2 {
+			t.Errorf("answered rows = %v, want both rows of the page", previewIDsOf(answered))
+		}
 		want, _ := json.MarshalIndent(rows, "", "  ")
 		if len(res.Content) != 1 || mcpTextOf(res) != string(want) || res.StructuredContent != nil || res.Meta != nil {
 			t.Errorf("legacy answer = %d blocks, structured %#v, meta %#v; want the array alone", len(res.Content), res.StructuredContent, res.Meta)
@@ -58,7 +69,7 @@ func TestRenderMCPSearchForms(t *testing.T) {
 	})
 
 	t.Run("legacy_signals_ride_beside_the_array", func(t *testing.T) {
-		res := renderMCPSearch(searchInput{Limit: 200}, searchPage{Rows: rows, Limit: 50, NextAfter: next})
+		res, _ := renderMCPSearch(searchInput{Limit: 200}, searchPage{Rows: rows, Limit: 50, NextAfter: next})
 		want, _ := json.MarshalIndent(rows, "", "  ")
 		if mcpTextOf(res) != string(want) {
 			t.Error("legacy text changed")
@@ -70,7 +81,12 @@ func TestRenderMCPSearchForms(t *testing.T) {
 	})
 
 	t.Run("content_budget_ends_the_browse_page_at_a_row", func(t *testing.T) {
-		res := renderMCPSearch(searchInput{IncludeContent: true}, searchPage{Rows: rows, Limit: 10})
+		res, answered := renderMCPSearch(searchInput{IncludeContent: true}, searchPage{Rows: rows, Limit: 10})
+		// The rows it returns are the rows the answer carries — what the read
+		// record books (#345), not the page the core handed in.
+		if len(answered) != 1 || answered[0].ID != "a" {
+			t.Errorf("answered rows = %v, want the one row the page carries (a)", previewIDsOf(answered))
+		}
 		var got struct {
 			NextAfter *store.SearchCursor `json:"next_after"`
 			Truncated bool                `json:"truncated"`
@@ -91,7 +107,7 @@ func TestRenderMCPSearchForms(t *testing.T) {
 	})
 
 	t.Run("content_budget_on_a_query_has_no_cursor", func(t *testing.T) {
-		res := renderMCPSearch(searchInput{Query: "q", IncludeContent: true}, searchPage{Rows: rows, Limit: 10})
+		res, _ := renderMCPSearch(searchInput{Query: "q", IncludeContent: true}, searchPage{Rows: rows, Limit: 10})
 		var got mcpSearchAnswer
 		if err := json.Unmarshal([]byte(mcpTextOf(res)), &got); err != nil {
 			t.Fatalf("decode: %v", err)

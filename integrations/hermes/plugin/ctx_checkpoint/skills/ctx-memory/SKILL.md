@@ -1,7 +1,7 @@
 ---
 name: ctx-memory
 description: "Use the ctx knowledge store as long-term memory and evidence layer: query as a question, search to browse, get by id, verify before acting, persist one durable fact per block."
-version: 0.14.0
+version: 0.15.0
 author: ctx (GottZ/ctx)
 license: MPL-2.0
 metadata:
@@ -106,8 +106,12 @@ explicit stores so provenance tags stay consistent (`source:hermes`, `profile:<n
   session; the compaction receipt carries the same line. To read it, `get` the head →
   `metadata.latest_manifest_id` → `get` that manifest → `metadata.source_block_ids` are
   the parts (`metadata.parent_manifest_id` leads to the checkpoint before). To find a
-  passage, search category `compaction-checkpoints` with the root token in the query
-  (`<root-token> <words>`): it narrows the hits to this conversation's blocks. With memory
+  passage, search category `compaction-checkpoints` with its words (`<words>`); a part is
+  stored once per identical write and other conversations' manifests may list it too, so a
+  hit is from this conversation when one of its manifests lists the hit's id. The search
+  answers its top matches only and other conversations' parts can fill them: without a
+  verified hit, `get` the parts the manifest lists (and those of the manifests along
+  `parent_manifest_id`) before concluding the passage is not saved. With memory
   features off, the tools are the ctx MCP server's `mcp__<server>__get` (`id`) and
   `mcp__<server>__search` (`category`, `query`; no `types` filter — it refuses
   `checkpoint`); server `ctx` gives `mcp__ctx__get`, server `ctx-prod` gives
