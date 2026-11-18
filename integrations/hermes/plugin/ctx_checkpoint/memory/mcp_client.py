@@ -22,7 +22,8 @@ What the ctx MCP tools answer (``go/internal/handler/mcp.go``) and how it is map
   typed one (an asked type has no row, or the narrowing dropped rows), with at most half of the
   time left, so a server updated meanwhile is not read through the fallback. ``unknown block
   type`` is raised on every way, that ask included, whatever name it quotes (ctx names only a
-  name of ``types`` there; Hermes can mask or cut it); any other error is raised.
+  name of ``types`` there; Hermes can mask or cut it). Any other error of that extra ask keeps
+  the fallback answer; any other error of the search itself is raised.
 - ``query`` → prose answer followed by ``Sources:`` lines ``[N] title (category) id:uuid``,
   ``key:value`` tokens after the id kept (`` superseded_by:<uuid>`` is read), and an indented
   ``untrusted_origin:<type> (…)`` line under a source with that record (ctx v5.41.0, #280), read
