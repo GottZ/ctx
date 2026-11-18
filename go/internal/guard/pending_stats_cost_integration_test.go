@@ -20,15 +20,21 @@ import (
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
-// pendingStatsBuffersPerWaiting bounds the shared buffers PendingStats' one
-// pass may read per waiting block of the whole store (custom and generic
-// plan, all scopes or one): the statement reads idx_guard_pending, whose
-// entries are the waiting blocks only, and the heap rows behind them (plus,
-// for a scope filter, that scope's entries of idx_context_scope). Measured on
-// the production image: 0.057 per waiting block globally, 0.011 for one
+// pendingStatsBuffersPerEntry bounds the shared buffers PendingStats' one
+// pass may read per entry of idx_guard_pending in the whole store (custom and
+// generic plan, all scopes or one). The statement reads that partial index
+// and the heap rows behind its entries (plus, for a scope filter, that
+// scope's entries of idx_context_scope). The index predicate is only the
+// first three conjuncts of guardPendingWhere (not archived, no
+// guard_checked_at, a vector): besides the waiting blocks it holds unchecked
+// blocks with a vector that the pick filters out — a type with guard.check
+// = false (comment, tool-evidence, tool-overview on the shipped registry),
+// category index, another lifecycle, a stale vector — and the guard never
+// takes them out. The cost follows those entries, not pending_count.
+// Measured on the production image: 0.057 per entry globally, 0.011 for one
 // scope of 100 at 100 000 waiting blocks (issue #341); the bound is twice the
 // global figure.
-const pendingStatsBuffersPerWaiting = 0.12
+const pendingStatsBuffersPerEntry = 0.12
 
 // pendingStatsBufferSlack covers the fixed part: the index metapages and
 // root pages, the registry-free plan's catalog reads.
@@ -39,6 +45,9 @@ type pendingStatsCostDB struct {
 	pool  *pgxpool.Pool
 	types []string
 	have  int
+	// entries counts the rows seeded into idx_guard_pending: waiting blocks
+	// plus resident ones (seedResident).
+	entries int
 }
 
 func newPendingStatsCostDB(t *testing.T) *pendingStatsCostDB {
@@ -75,6 +84,7 @@ func (d *pendingStatsCostDB) seed(waiting, checked int) {
 			d.t.Fatal(err)
 		}
 		d.have += waiting
+		d.entries += waiting
 	}
 	if checked > 0 {
 		if _, err := d.pool.Exec(ctx, `INSERT INTO context_blocks (category, title, content, scope, type_name, metadata)
@@ -84,6 +94,24 @@ func (d *pendingStatsCostDB) seed(waiting, checked int) {
 			d.t.Fatal(err)
 		}
 	}
+	if _, err := d.pool.Exec(ctx, `VACUUM ANALYZE context_blocks`); err != nil {
+		d.t.Fatal(err)
+	}
+}
+
+// seedResident adds unchecked blocks with a vector of a type with
+// guard.check = false over the same 100 scopes: entries of idx_guard_pending
+// that the pick, and so the count, filter out.
+func (d *pendingStatsCostDB) seedResident(n int) {
+	d.t.Helper()
+	ctx := context.Background()
+	if _, err := d.pool.Exec(ctx, `INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model)
+		SELECT 'pc', 'pc-r-' || ($1::int + g), 'resident ' || g, 'pc-' || (($1::int + g) % 100), 'tool-evidence',
+		       array_fill(0.01::real, ARRAY[1024])::vector(1024), 'q341'
+		  FROM generate_series(1, $2::int) g`, d.entries, n); err != nil {
+		d.t.Fatal(err)
+	}
+	d.entries += n
 	if _, err := d.pool.Exec(ctx, `VACUUM ANALYZE context_blocks`); err != nil {
 		d.t.Fatal(err)
 	}
@@ -161,10 +189,15 @@ func allPendingScopes() []string {
 }
 
 // check runs the four shapes (all 100 scopes / one scope, custom / generic)
-// against the bound for the waiting blocks of the whole store.
-func (d *pendingStatsCostDB) check(label string, waitingTotal, wantAll, wantOne int) {
+// against the bound for the entries of idx_guard_pending in the whole store.
+func (d *pendingStatsCostDB) check(label string, wantAll, wantOne int) {
 	d.t.Helper()
-	bound := int64(float64(waitingTotal)*pendingStatsBuffersPerWaiting) + pendingStatsBufferSlack
+	var entries int
+	if err := d.pool.QueryRow(context.Background(), `SELECT count(*)::int FROM context_blocks
+		WHERE NOT is_archived AND (metadata->>'guard_checked_at') IS NULL AND embedding IS NOT NULL`).Scan(&entries); err != nil || entries != d.entries {
+		d.t.Fatalf("%s: %d rows match the predicate of idx_guard_pending (err=%v), the fixture seeded %d", label, entries, err, d.entries)
+	}
+	bound := int64(float64(entries)*pendingStatsBuffersPerEntry) + pendingStatsBufferSlack
 	for _, c := range []struct {
 		name   string
 		scopes []string
@@ -172,15 +205,16 @@ func (d *pendingStatsCostDB) check(label string, waitingTotal, wantAll, wantOne 
 	}{{"all scopes", allPendingScopes(), wantAll}, {"one scope of 100", []string{"pc-7"}, wantOne}} {
 		for _, generic := range []bool{false, true} {
 			r := d.run(c.scopes, generic)
-			d.t.Logf("%s, %s, generic=%v: n=%d buffers=%d (bound %d) %.1f ms plan %s", label, c.name, generic, r.n, r.buffers, bound, r.ms, r.plan)
+			d.t.Logf("%s, %s, generic=%v: n=%d index entries=%d buffers=%d (bound %d) %.1f ms plan %s", label, c.name, generic, r.n, entries, r.buffers, bound, r.ms, r.plan)
 			if r.n != c.want {
 				d.t.Errorf("%s, %s, generic=%v: counted %d, want %d", label, c.name, generic, r.n, c.want)
 			}
 			if r.buffers > bound {
-				d.t.Errorf("%s, %s, generic=%v: %d buffers for %d waiting blocks — over the bound %d (%.2f per waiting block + %d): the count grows with something else than the waiting blocks",
-					label, c.name, generic, r.buffers, waitingTotal, bound, pendingStatsBuffersPerWaiting, pendingStatsBufferSlack)
+				d.t.Errorf("%s, %s, generic=%v: %d buffers for %d entries of idx_guard_pending — over the bound %d (%.2f per entry + %d): the count grows with something else than the partial index",
+					label, c.name, generic, r.buffers, entries, bound, pendingStatsBuffersPerEntry, pendingStatsBufferSlack)
 			}
-			if strings.Contains(r.plan, "Seq Scan") {
+			// A store of a few hundred rows is read whole by design.
+			if entries >= 1000 && strings.Contains(r.plan, "Seq Scan") {
 				d.t.Errorf("%s, %s, generic=%v: plan seq-scans: %s", label, c.name, generic, r.plan)
 			}
 		}
@@ -190,16 +224,35 @@ func (d *pendingStatsCostDB) check(label string, waitingTotal, wantAll, wantOne 
 // TestPendingStatsCostFollowsTheWaitingBlocks: Pflichttest 8 of issue #341.
 // First a store where 1 % of the blocks wait (1 000 of 100 000, the checked
 // ones in the same scopes): the count stays within the bound of the 1 000
-// waiting blocks, far below one page per 50 blocks of the corpus. Then
+// index entries, far below one page per 50 blocks of the corpus. Then
 // 10 000 and 100 000 waiting blocks.
 func TestPendingStatsCostFollowsTheWaitingBlocks(t *testing.T) {
 	d := newPendingStatsCostDB(t)
 	d.seed(1000, 99000)
-	d.check("1 % of 100 000 waiting", 1000, 1000, 10)
+	d.check("1 % of 100 000 waiting", 1000, 10)
 	d.seed(9000, 0)
-	d.check("10 000 waiting", 10000, 10000, 100)
+	d.check("10 000 waiting", 10000, 100)
 	d.seed(90000, 0)
-	d.check("100 000 waiting", 100000, 100000, 1000)
+	d.check("100 000 waiting", 100000, 1000)
+}
+
+// TestPendingStatsCostFollowsTheIndexEntriesNotTheCount: 100 waiting blocks
+// beside 10 000 and then 100 000 unchecked blocks with a vector of a type
+// with guard.check = false. The count stays 100, the buffers grow with the
+// entries of idx_guard_pending: the bound is per entry, not per waiting
+// block (PR #358 review). Measured: 7 buffers for 100 waiting alone; beside
+// 10 000 resident 604 (all scopes, custom and generic); beside 100 000
+// resident 5 969 in a generic plan, while a custom plan turns to
+// idx_blocks_type_name (89) or, for one scope, idx_blocks_stratify_covering
+// (3).
+func TestPendingStatsCostFollowsTheIndexEntriesNotTheCount(t *testing.T) {
+	d := newPendingStatsCostDB(t)
+	d.seed(100, 0)
+	d.check("100 waiting alone", 100, 1)
+	d.seedResident(10000)
+	d.check("100 waiting beside 10 000 resident", 100, 1)
+	d.seedResident(90000)
+	d.check("100 waiting beside 100 000 resident", 100, 1)
 }
 
 // TestPendingStatsTimeAtAMillionWaiting is the one-off measurement at the

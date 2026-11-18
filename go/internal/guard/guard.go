@@ -90,8 +90,12 @@ const lastGuardAtSQL = `UPDATE context_guard_state SET last_guard_at = now() WHE
 // those blocks — one pass over idx_guard_pending (its partial predicate has
 // no parameter, so a generic plan can use it too); scope = ANY($1) filters
 // the index result or joins idx_context_scope in a BitmapAnd. The cost grows
-// with the waiting blocks, not with the corpus (docs/operations.md,
-// "Migration 181").
+// with the entries of idx_guard_pending, not with the corpus and not only
+// with the waiting blocks: the index predicate is the first three conjuncts
+// of guardPendingWhere, so it also holds unchecked blocks with a vector that
+// the pick filters out and never takes out of the index (a type with
+// guard.check = false, category index, another lifecycle, a stale vector)
+// — docs/operations.md, "Migration 181".
 var pendingStatsSQL = `SELECT count(*)::int, min(updated_at) FROM context_blocks
 	WHERE scope = ANY($1::text[])
 	  AND ` + guardPendingWhere("$2")
