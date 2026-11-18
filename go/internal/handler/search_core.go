@@ -90,6 +90,11 @@ type searchArgs struct {
 	// exactly the split this comment forbids. Pinned by
 	// TestSearchCoreReadsNoConfigSnapshot.
 	FacetEnabled bool
+	// LeaveOutNeverRanked is the search.leave_out_never_ranked key AS A VALUE,
+	// out of the same one snapshot as FacetEnabled and for the same reason
+	// (#342): with it on, a full-text search that names no type leaves the
+	// caller's never-ranked types out (store.SearchTypesExclude).
+	LeaveOutNeverRanked bool
 }
 
 // effectiveTypesExclude folds the canonical exclude list with its legacy alias
@@ -169,6 +174,11 @@ type searchPage struct {
 	// NextAfter resumes after the last row when the browse listing goes on;
 	// nil on its last page and always on the full-text path ("top matches").
 	NextAfter *store.SearchCursor
+	// TypesExclude is the type exclusion the statement bound: the request's
+	// (types_exclude ∪ block_roles_exclude) and, with LeaveOutNeverRanked on,
+	// the never-ranked types a full-text search without types left out. REST
+	// echoes it, so its answer does not read as the whole match set.
+	TypesExclude []string
 }
 
 // clusterFacetOf is the FIRST stage of the C6 gate: the flag decides whether the
@@ -250,12 +260,13 @@ func executeSearch(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, 
 	}
 
 	limit := searchLimit(a.Limit)
+	exclude := store.SearchTypesExclude(set, a.LeaveOutNeverRanked, a.Query, types, a.effectiveTypesExclude())
 	rows, more, err := store.SearchBlocksPage(ctx, pool, set, a.Query, ar.ReadScopes, a.Category, a.Tags,
-		limit, a.Compact, after, grants, types, a.effectiveTypesExclude(), facet)
+		limit, a.Compact, after, grants, types, exclude, facet)
 	if err != nil {
 		return searchPage{}, err
 	}
-	page := searchPage{Rows: rows, Limit: limit}
+	page := searchPage{Rows: rows, Limit: limit, TypesExclude: exclude}
 	if more && len(rows) > 0 {
 		page.NextAfter = searchCursorAfter(rows[len(rows)-1])
 	}

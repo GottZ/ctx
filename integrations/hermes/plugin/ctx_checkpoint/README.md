@@ -350,12 +350,14 @@ block when the `memory` toolset is turned off for the session
 id of the last checkpoint. Read it by asking the agent of that session, or in ctx itself:
 
 ```
-ctx search compaction-checkpoints query:"Compaction checkpoint head <root-session>"
+ctx search compaction-checkpoints query:"Compaction checkpoint head <root-session>" types:checkpoint
 ctx get <head-id>        # → latest_manifest_id
 ctx get <manifest-id>    # → source part IDs, parent manifest chain
 ```
 
-On `transport: rest`, `hermes ctx_checkpoint search|get` do the same; on MCP these
+`types:checkpoint` names the type: a ctx server with `search.leave_out_never_ranked` on
+leaves checkpoint blocks out of a text search without it. On `transport: rest`,
+`hermes ctx_checkpoint search --type checkpoint` and `get` do the same; on MCP these
 commands need the REST transport (the CLI process has no MCP dispatch).
 
 ## Troubleshooting
