@@ -44,7 +44,12 @@ import (
 // tenant; there is no scope parameter to spoof (fail-closed by construction,
 // §5.1). SnapshotForTenant takes an explicit scope and is for BACKGROUND
 // iteration over the authoritative tenant list ONLY (it has no AuthResult);
-// request handlers must use SnapshotForRequest. Both fall back to the base
+// request handlers must use SnapshotForRequest. One exception reads another
+// tenant's generation on the request path: the embed backfill's floor
+// (backfillFloor) takes the sensitivity floor of the tenant that owns a
+// scope it may embed from, with a scope read from the settings table and
+// context_tenant_scopes, never from the request, and reads nothing else of
+// that generation. Both fall back to the base
 // generation while the overlay/hook are unset, so single-tenant behavior is
 // byte-identical.
 type ConfigStore interface {
@@ -869,9 +874,14 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// embedding created DURING a sweep changes the corpus the sweep is
 	// measuring. Nothing is lost — the pending block keeps its place in the
 	// scheduler's own backfill and in the next ordinary query.
+	//
+	// The floor of a picked block is its owner's as well as the caller's
+	// (issue #253, backfillFloor): the pick reaches scopes of other tenants.
 	floor := cfg.Pool.ScopeSensitivityFloor
 	if len(req.ShadowTypes) == 0 {
-		if backfilled := h.backfillPending(ctx, floor, ar.ReadScopes, h.embedAdmission(), cfg); backfilled > 0 {
+		if bfFloor, ferr := h.backfillFloor(ctx, floor); ferr != nil {
+			slog.Warn("query backfill: sensitivity floors unreadable, backfill skipped", "error", ferr, "request_id", requestID)
+		} else if backfilled := h.backfillPending(ctx, bfFloor, ar.ReadScopes, h.embedAdmission(), cfg); backfilled > 0 {
 			slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
 		}
 	}
