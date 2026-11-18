@@ -233,8 +233,10 @@ func RunGuardBatch(ctx context.Context, pool interface {
 		return processed, err
 	}
 
-	// After the commit, in a statement of its own: see the doc comment.
-	if _, err := pool.Exec(ctx, lastGuardAtSQL); err != nil {
+	// After the commit, in a statement of its own: see the doc comment. A
+	// context cancelled right after the commit (shutdown) leaves the stamp
+	// out without an error line; the batch itself is committed.
+	if _, err := pool.Exec(ctx, lastGuardAtSQL); err != nil && ctx.Err() == nil {
 		slog.Error("guard: update state failed", "error", err)
 	}
 

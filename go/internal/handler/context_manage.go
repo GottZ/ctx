@@ -883,7 +883,8 @@ func (h *ManageHandler) handleGuardStats(w http.ResponseWriter, r *http.Request,
 
 	// pending_count and dirty_since: the blocks the guard still has to check
 	// within the caller's read scopes, counted now (issue #341, migration
-	// 181) — the same read scopes as every other number of this answer.
+	// 181) — the read scopes of the block numbers of this answer.
+	// last_guard_at and write_log_entries stay server-wide, as before.
 	stats, err := store.GetGuardStats(ctx, h.pool, ar.ReadScopes)
 	var (
 		pending    int
