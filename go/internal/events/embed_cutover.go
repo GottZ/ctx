@@ -378,6 +378,13 @@ func confirmPreflight(ctx context.Context, db *pgxpool.Pool, migrationID string)
 	return row, targets, nil
 }
 
+// confirmIndexWayOut ends the refusal of a _next index that does not stand.
+// The preflight reaches it only on a green verdict, and on one the migration
+// cycle rebuilds such an index alone (issue #333, embed_index_repair.go).
+const confirmIndexWayOut = " — the migration cycle rebuilds it in the background without running the verify gate again " +
+	"(index stage only; the green verdict of this watermark stands, verify_report.index_repairs records the rebuild): " +
+	"confirm again once it is ready"
+
 // confirmNextIndexesReady requires every _next index (the HNSW twin and the
 // sister indexes) to exist VALID, with the definition the verify gate
 // builds, before its canonical rename — renaming an INVALID CIC leftover
@@ -393,15 +400,15 @@ func confirmNextIndexesReady(ctx context.Context, db *pgxpool.Pool) error {
 			return fmt.Errorf("embed-cutover: index probe (%s): %w", ix.name, err)
 		}
 		if !st.exists || !st.valid {
-			return fmt.Errorf("%w: %s (exists=%t, valid=%t)", ErrConfirmNextIndexNotReady, ix.name, st.exists, st.valid)
+			return fmt.Errorf("%w: %s (exists=%t, valid=%t)%s", ErrConfirmNextIndexNotReady, ix.name, st.exists, st.valid, confirmIndexWayOut)
 		}
 		live, expected, same, err := runtimeIndexMatches(ctx, db, ix.name, ix.ddl, st.def)
 		if err != nil {
 			return fmt.Errorf("embed-cutover: confirm: %s: %w", ix.name, err)
 		}
 		if !same {
-			return fmt.Errorf("%w: %s has the definition %q, the verify gate builds %q — resume the migration (verifying → running): it re-enters verifying and the verify gate rebuilds it",
-				ErrConfirmNextIndexNotReady, ix.name, live, expected)
+			return fmt.Errorf("%w: %s has the definition %q, the verify gate builds %q%s",
+				ErrConfirmNextIndexNotReady, ix.name, live, expected, confirmIndexWayOut)
 		}
 	}
 	return nil

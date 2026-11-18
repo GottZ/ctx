@@ -222,12 +222,12 @@ func (s *Scheduler) runEmbedMigrationCycle(ctx context.Context, router *dream.Ro
 	}
 
 	// W04-5: kick the verify run when the row sits in verifying WITHOUT a
-	// verdict for the current watermark (§4.7). Fire-and-forget goroutine —
-	// the arm keeps draining below while the gate runs (drain semantics
-	// §4.1); the atomic start guard makes repeated ticks harmless.
-	if mig.Status == embedmigration.StatusVerifying && !mig.HasVerifyReport && mig.VerifyStartedAt != nil {
-		s.maybeStartEmbedVerify(ctx, mig, cfg)
-	}
+	// verdict for the current watermark (§4.7), and with a verdict the index
+	// stage alone when a _next index does not stand (issue #333).
+	// Fire-and-forget goroutine — the arm keeps draining below while the gate
+	// runs (drain semantics §4.1); the atomic start guard makes repeated ticks
+	// harmless.
+	s.maybeStartVerifyRunner(ctx, mig, cfg)
 
 	b := s.runEmbedMigrationBatch(ctx, router, cfg, mig, batch)
 	cycleErr := b.err

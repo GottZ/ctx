@@ -167,6 +167,10 @@ type verifyReport struct {
 	Index        verifyIndexSection        `json:"index"`
 	Quality      verifyQualitySection      `json:"quality"`
 	Guard        verifyGuardSection        `json:"guard"`
+	// IndexRepairs records each rebuild of the index stage alone on this
+	// green verdict (issue #333, embed_index_repair.go); the sections above
+	// stay those of the run of Watermark. Absent until the first one.
+	IndexRepairs []verifyIndexRepair `json:"index_repairs,omitempty"`
 }
 
 type verifySkipEntry struct {
@@ -262,14 +266,22 @@ type verifyGuardSection struct {
 // verify_report NULL — the next verifying-tick re-triggers it, so
 // transient DB errors self-heal without dedicated retry code.
 func (s *Scheduler) maybeStartEmbedVerify(ctx context.Context, mig *embedmigration.Migration, cfg *config.Config) {
+	s.startEmbedVerifyRunner(mig, "embed verify", func() error { return s.runEmbedVerify(ctx, mig, cfg) })
+}
+
+// startEmbedVerifyRunner runs one verify-stage job (the gate, or the index
+// stage alone on a green verdict, issue #333) unless one is already active in
+// this process: one single-flight guard for both, so a process never runs
+// the gate and the index repair side by side.
+func (s *Scheduler) startEmbedVerifyRunner(mig *embedmigration.Migration, label string, job func() error) {
 	if !s.embedVerifyActive.CompareAndSwap(false, true) {
 		return
 	}
 	run := func() {
 		defer s.embedVerifyActive.Store(false)
-		defer guardPanic("embed verify")
-		if err := s.runEmbedVerify(ctx, mig, cfg); err != nil {
-			slog.Error("scheduler: embed verify run failed — no verdict stored, next cycle retries",
+		defer guardPanic(label)
+		if err := job(); err != nil {
+			slog.Error("scheduler: "+label+" run failed — no verdict stored, next cycle retries",
 				"migration_id", mig.ID, "error", err)
 		}
 	}
@@ -765,8 +777,9 @@ func verifyNextIndexes() []struct{ name, ddl string } {
 // waits for it (verifyEnsureIndex) instead of building beside it.
 func (s *Scheduler) verifyEnsureIndexes(ctx context.Context, mig *embedmigration.Migration, wm time.Time) (verifyIndexSection, error) {
 	sec := verifyIndexSection{Result: verifyGreen}
+	wanted := func(ctx context.Context) (bool, error) { return verifyRunWanted(ctx, s.pool, mig.ID, wm) }
 	for _, b := range verifyNextIndexes() {
-		action, err := s.verifyEnsureIndex(ctx, mig, wm, b.name, b.ddl)
+		action, err := s.verifyEnsureIndex(ctx, mig, b.name, b.ddl, wanted)
 		if err != nil {
 			return sec, err
 		}
@@ -789,10 +802,10 @@ var errVerifyRunLeft = errors.New("embed-verify: the row left this verify run")
 // holding no connection between the attempts: ending the run instead would
 // make the next cycle start it again from Stufe 1, a full table pass per
 // retry at 10M. Before each new attempt it checks that the row still waits
-// for this run (verifyRunWanted); otherwise it ends with errVerifyRunLeft. A
-// failed check is asked again after the next wait instead of ending the
-// stage red.
-func (s *Scheduler) verifyEnsureIndex(ctx context.Context, mig *embedmigration.Migration, wm time.Time, name, ddl string) (string, error) {
+// for this run (wanted: verifyRunWanted for the gate, indexRepairWanted for
+// the index stage alone); otherwise it ends with errVerifyRunLeft. A failed
+// check is asked again after the next wait instead of ending the stage red.
+func (s *Scheduler) verifyEnsureIndex(ctx context.Context, mig *embedmigration.Migration, name, ddl string, wanted func(context.Context) (bool, error)) (string, error) {
 	waiting := false
 	for {
 		action, err := s.ensureConcurrentIndexValid(ctx, name, ddl)
@@ -814,7 +827,7 @@ func (s *Scheduler) verifyEnsureIndex(ctx context.Context, mig *embedmigration.M
 			return "", ctx.Err()
 		case <-timer.C:
 		}
-		wanted, err := verifyRunWanted(ctx, s.pool, mig.ID, wm)
+		still, err := wanted(ctx)
 		if err != nil {
 			// Asked again after the next wait; a database that stays
 			// unreachable fails the next ensure, which ends the stage as
@@ -822,7 +835,7 @@ func (s *Scheduler) verifyEnsureIndex(ctx context.Context, mig *embedmigration.M
 			slog.Warn("scheduler: embed verify could not check its row while waiting — asking again", "migration_id", mig.ID, "error", err)
 			continue
 		}
-		if !wanted {
+		if !still {
 			return "", errVerifyRunLeft
 		}
 	}
