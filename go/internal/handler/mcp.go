@@ -162,7 +162,7 @@ type queryInput struct {
 	// block the key may already read in full with `get`. Absent ⇒ the delegated
 	// body is byte-identical to before the fields existed.
 	Synthesize     *bool `json:"synthesize,omitempty" jsonschema:"false = retrieval only: answer the ranked sources as JSON without the LLM synthesis (default true)"`
-	IncludeContent bool  `json:"include_content,omitempty" jsonschema:"with synthesize false: attach each source's content (up to 1500 characters); an error otherwise"`
+	IncludeContent bool  `json:"include_content,omitempty" jsonschema:"with synthesize false: attach each source's content (up to 1500 characters; a cut one carries truncated true, get the id for the full text); an error otherwise"`
 }
 
 type storeInput struct {
@@ -650,6 +650,8 @@ type mcpRetrievalSource struct {
 	// UntrustedOrigin (issue #280): /api/query's field under the same name.
 	UntrustedOrigin string `json:"untrusted_origin,omitempty"`
 	Content      string  `json:"content,omitempty"`
+	// Truncated (#234): /api/query's flag on a cut snippet, under its name.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // renderMCPRetrievalOnly answers a synthesize:false call: the ranked sources in

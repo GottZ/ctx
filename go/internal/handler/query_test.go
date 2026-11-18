@@ -190,3 +190,41 @@ func TestBuildSourceResponses_IncludeContent(t *testing.T) {
 		t.Errorf("snippet = %d runes, want %d", n, maxRetrievalSnippet)
 	}
 }
+
+// TestBuildSourceResponses_TruncatedFlag (#234): a snippet cut at
+// maxRetrievalSnippet runes says so on the wire (`"truncated":true`), so a
+// reader can tell a block of that length from the first part of a longer one.
+// A whole content, also one of exactly the cap, carries no key, and without
+// include_content there is no snippet to flag.
+func TestBuildSourceResponses_TruncatedFlag(t *testing.T) {
+	sources := []llm.Source{
+		{ID: "cut", Content: strings.Repeat("ä", maxRetrievalSnippet+1)},
+		{ID: "exact", Content: strings.Repeat("ä", maxRetrievalSnippet)},
+		{ID: "short", Content: "short"},
+	}
+	wire := func(includeContent bool) []map[string]any {
+		b, err := json.Marshal(buildSourceResponses(sources, nil, includeContent))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal(b, &rows); err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	rows := wire(true)
+	if rows[0]["truncated"] != true {
+		t.Errorf("cut snippet: truncated = %v, want true", rows[0]["truncated"])
+	}
+	for _, r := range rows[1:] {
+		if _, ok := r["truncated"]; ok {
+			t.Errorf("source %v is whole and carries truncated", r["id"])
+		}
+	}
+	for _, r := range wire(false) {
+		if _, ok := r["truncated"]; ok {
+			t.Errorf("source %v without include_content carries truncated", r["id"])
+		}
+	}
+}
