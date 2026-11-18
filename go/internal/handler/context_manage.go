@@ -476,13 +476,9 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 	// unconditionally; logging BEFORE GetBlock re-gates would write one access_log
 	// row even for a foreign/ungranted block, an existence oracle over the log
 	// channel. Logging here (block != nil) closes it. Log against the resolved ID.
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := store.LogAccess(bgCtx, h.pool, ar.ApiKeyID, resolvedID, "manage-get"); err != nil {
-			slog.Error("manage: access log error", "error", err, "request_id", reqID)
-		}
-	}()
+	// The same read record the MCP read tools book (#345): bounded queue, the
+	// block's type and created_at in the row, a lost or skipped row counted.
+	store.RecordBlockReads(h.pool, ar.ApiKeyID, store.ActionManageGet, []string{resolvedID})
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"action":  "get",

@@ -107,8 +107,11 @@ func serializedSizes(rows []store.BlockPreview) []int {
 	return sizes
 }
 
-// renderMCPSearch turns one core answer into the tool result.
-func renderMCPSearch(input searchInput, page searchPage) *mcp.CallToolResult {
+// renderMCPSearch turns one core answer into the tool result, and returns the
+// rows the result carries — fewer than page.Rows when the rows budget ended an
+// include_content page early. Those rows are what the caller was handed, the
+// rows the read record books (issue #345).
+func renderMCPSearch(input searchInput, page searchPage) (*mcp.CallToolResult, []store.BlockPreview) {
 	sig := mcpSearchSignals{Limit: page.Limit, NextAfter: page.NextAfter}
 	if input.Limit > page.Limit {
 		sig.RequestedLimit = input.Limit
@@ -126,7 +129,7 @@ func renderMCPSearch(input searchInput, page searchPage) *mcp.CallToolResult {
 
 	if input.After != nil || input.IncludeContent {
 		data, _ := json.MarshalIndent(mcpSearchAnswer{mcpSearchSignals: sig, Results: rows}, "", "  ")
-		return &mcp.CallToolResult{Content: []mcp.Content{textContent(string(data))}}
+		return &mcp.CallToolResult{Content: []mcp.Content{textContent(string(data))}}, rows
 	}
 
 	data, _ := json.MarshalIndent(rows, "", "  ")
@@ -134,5 +137,5 @@ func renderMCPSearch(input searchInput, page searchPage) *mcp.CallToolResult {
 	if sig.RequestedLimit != 0 || sig.NextAfter != nil {
 		res.Meta = mcp.Meta{mcpSearchPageMetaKey: sig}
 	}
-	return res
+	return res, rows
 }
