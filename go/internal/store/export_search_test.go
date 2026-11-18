@@ -16,3 +16,7 @@ type SearchBlocksParams = searchParams
 
 // SearchBlocksSQLForTest exposes the statement builder. Production never calls it.
 var SearchBlocksSQLForTest = searchBlocksSQL
+
+// RecentBlocksSQLForTest exposes RecentBlocks' statement builder for the cost
+// gate of issue #342. Production never calls it.
+var RecentBlocksSQLForTest = recentBlocksSQL
