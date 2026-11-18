@@ -379,6 +379,26 @@ func TestConcurrentGuardRuns_PairDecidedWhileTheOtherStandsUncommitted(t *testin
 	}
 }
 
+// chainBlocks writes three pending blocks a, b, c (in that order) whose
+// nearest neighbours form a chain: a's is b, b's is c, c's is b. With b
+// archived, c's nearest live neighbour is a, still a duplicate (0.985).
+func chainBlocks(t *testing.T, pool *pgxpool.Pool) (a, b, c string) {
+	t.Helper()
+	const c1, c2 = 0.995, 0.99 // sim(b,c) = c1, sim(a,b) = c2, sim(a,c) = c1*c2
+	s1, s2 := math.Sqrt(1-c1*c1), math.Sqrt(1-c2*c2)
+	vec := func(x, y, z float64) []float32 {
+		v := make([]float32, 1024)
+		v[0], v[1], v[2] = float32(x), float32(y), float32(z)
+		return v
+	}
+	a = stateLockBlock(t, pool, "chain a", vec(c2*c1, c2*s1, s2))
+	time.Sleep(2 * time.Millisecond)
+	b = stateLockBlock(t, pool, "chain b", vec(c1, s1, 0))
+	time.Sleep(2 * time.Millisecond)
+	c = stateLockBlock(t, pool, "chain c", vec(1, 0, 0))
+	return a, b, c
+}
+
 // Three runs, each holding one block of a chain: A's nearest neighbour is B,
 // B's is C, C's is B. (A cycle A→B→C→A of nearest neighbours cannot exist:
 // it would need sim(A,B) < sim(B,C) < sim(C,A) < sim(A,B).) All three stand
@@ -387,18 +407,7 @@ func TestConcurrentGuardRuns_PairDecidedWhileTheOtherStandsUncommitted(t *testin
 func TestConcurrentGuardRuns_ThreeRunsOnAChain(t *testing.T) {
 	f := newConcurrentFixture(t)
 	ctx := context.Background()
-	const c1, c2 = 0.995, 0.99 // sim(B,C) = c1, sim(A,B) = c2, sim(A,C) = c1*c2
-	s1, s2 := math.Sqrt(1-c1*c1), math.Sqrt(1-c2*c2)
-	vec := func(x, y, z float64) []float32 {
-		v := make([]float32, 1024)
-		v[0], v[1], v[2] = float32(x), float32(y), float32(z)
-		return v
-	}
-	a := stateLockBlock(t, f.pool, "chain a", vec(c2*c1, c2*s1, s2))
-	time.Sleep(2 * time.Millisecond)
-	b := stateLockBlock(t, f.pool, "chain b", vec(c1, s1, 0))
-	time.Sleep(2 * time.Millisecond)
-	c := stateLockBlock(t, f.pool, "chain c", vec(1, 0, 0))
+	a, b, c := chainBlocks(t, f.pool)
 	dl0 := deadlockCount(t, f.pool)
 
 	var dones []chan runResult
@@ -424,6 +433,53 @@ func TestConcurrentGuardRuns_ThreeRunsOnAChain(t *testing.T) {
 	v := assertSettled(t, f.pool, []string{a, b, c})
 	if n := archivedOf(v, a, b, c); n > 2 {
 		t.Errorf("all three blocks of the chain archived")
+	}
+}
+
+// An archive cycle over three blocks: X has archived A against B and stands
+// before A's audit insert (uncommitted); Y archives B against C and commits;
+// Z checks C, finds B gone and A live, and archives C against A. A rule that
+// only keeps two blocks from being archived against each other lets all
+// three go (A→B, B→C, C→A: three different pairs). On root the same
+// interleaving archives all three as well: Z's audit insert waits for X's
+// pick of A, and X commits.
+func TestConcurrentGuardRuns_NoArchiveCycleOverThreeBlocks(t *testing.T) {
+	f := newConcurrentFixture(t)
+	ctx := context.Background()
+	a, b, c := chainBlocks(t, f.pool)
+	dl0 := deadlockCount(t, f.pool)
+
+	tr := newStopTracer("INSERT INTO context_write_log", a, true)
+	dx := startRun(ctx, tracedPool(t, f.pool, tr), f, 1)
+	tr.waitReached(t)
+	others := []chan runResult{startRun(ctx, f.pool, f, 1)} // Y picks B
+	select {
+	case r := <-others[0]:
+		others[0] <- r
+	case <-time.After(3 * time.Second):
+	}
+	others = append(others, startRun(ctx, f.pool, f, 1)) // Z picks C
+	select {
+	case r := <-others[1]:
+		others[1] <- r
+	case <-time.After(3 * time.Second):
+	}
+	close(tr.release)
+	if r := <-dx; r.err != nil {
+		t.Errorf("run X: %v", r.err)
+	}
+	for i, d := range others {
+		if r := <-d; r.err != nil {
+			t.Errorf("run %d: %v", i+1, r.err)
+		}
+	}
+	if dl1 := deadlockCount(t, f.pool); dl1 != dl0 {
+		t.Errorf("deadlocks %d -> %d, want none", dl0, dl1)
+	}
+	drain(t, f)
+	v := assertSettled(t, f.pool, []string{a, b, c})
+	if n := archivedOf(v, a, b, c); n > 2 {
+		t.Errorf("all three blocks archived: a→%s b→%s c→%s", v[v[a].matched].title, v[v[b].matched].title, v[v[c].matched].title)
 	}
 }
 
