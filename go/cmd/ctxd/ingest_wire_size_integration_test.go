@@ -3,9 +3,11 @@
 // #323 on the PRODUCTION mount: `ctx ingest` cut its batches by chunk count
 // only, and ctxd mounts POST /api/ingest behind a 10 MB body limit
 // (handler.MaxBodySize(IngestMaxBodySize) in server.go). Every chunk of a
-// file carries the file's metadata.links, so a note with many links made a
-// batch over the limit out of few chunks; the server refused it whole, and
-// the chunks of the other files in it were lost with it, on every run.
+// file carried the file's metadata.links then, so a note with many links made
+// a batch over the limit out of few chunks; the server refused it whole, and
+// the chunks of the other files in it were lost with it, on every run. Since
+// #329 only the first chunk carries them; chunks long by their content still
+// make such a batch, and long_chunks_note is built from those.
 //
 // The CLI now cuts a batch by its size on the wire as well, and holds back a
 // file with a chunk whose request alone is over the limit. These probes drive
@@ -15,8 +17,9 @@
 // client gets.
 //
 // RED against the parent commit:
-//   - many_links_note: the normal notes of the first batch have no block, a
-//     request was over the limit and answered 400, and the run errs.
+//   - long_chunks_note: the normal notes of the first batch have no block, a
+//     request was over the limit and answered 400, and the run errs (shown
+//     with its #323 form, many_links_note, a note of 9 000 links).
 //   - chunk_over_request_limit: the normal notes have no block, and stderr does
 //     not name the held-back file.
 //   - TestIngestBodyCapBoundary_Integration/one_byte_over: 400 "Invalid request
@@ -153,19 +156,14 @@ func plainNote(marker string) string {
 	return "# Note\n\n" + marker + " " + strings.Repeat("Run the importer and compare the counts with the source. ", 6) + "\n"
 }
 
-// hubNote is a note with n distinct wikilinks, 150 to a "## Part" section,
-// so that it is cut into n/150 chunks, every one of which carries all n link
-// targets in metadata.links.
-func hubNote(n int) string {
+// heavyNote is a note of n "## Part" sections of 40 000 bytes of "<" each:
+// n chunks of about 240 KB each on the wire, where JSON writes "<" as six
+// bytes.
+func heavyNote(n int) string {
 	var b strings.Builder
-	b.WriteString("# Hub\n")
 	for i := 0; i < n; i++ {
-		if i%150 == 0 {
-			fmt.Fprintf(&b, "\n## Part %d\n\n", i/150)
-		}
-		fmt.Fprintf(&b, "[[Linked note number %05d]] ", i)
+		fmt.Fprintf(&b, "## Part %d\n\n%s\n\n", i, strings.Repeat("<", 40_000))
 	}
-	b.WriteString("\n")
 	return b.String()
 }
 
@@ -202,28 +200,29 @@ func TestIngestCLIWireSize_Integration(t *testing.T) {
 		t.Skip("integration test")
 	}
 
-	// 9 000 links: 60 chunks of about 245 KB each on the wire. The five
-	// normal notes sort before the hub, so a batch of 50 by count carries
-	// them and 45 hub chunks, about 11 MB.
-	t.Run("many_links_note", func(t *testing.T) {
+	// 60 chunks of about 240 KB each on the wire. The five normal notes sort
+	// before the heavy note, so a batch of 50 by count carries them and 45 of
+	// its chunks, about 11 MB. Until #329 this was a note with 9 000 links,
+	// every chunk of which carried them.
+	t.Run("long_chunks_note", func(t *testing.T) {
 		url, pool, key, calls := wireSizeServer(t)
 		vault := t.TempDir()
 		normals := []string{"a-note-1.md", "a-note-2.md", "a-note-3.md", "a-note-4.md", "a-note-5.md"}
 		for _, rel := range normals {
 			writeNote(t, vault, rel, plainNote("MARKER-"+rel))
 		}
-		writeNote(t, vault, "hub.md", hubNote(9000))
+		writeNote(t, vault, "heavy.md", heavyNote(60))
 
 		out, err := runIngestCLI(t, url, key, "ingest", vault, "--category", "wiresize")
 		logIngestSummary(t, out, calls.all())
 
 		for _, rel := range normals {
 			if n := blocksOfFile(t, pool, rel); n != 1 {
-				t.Errorf("%s: %d live blocks, want 1 — the note with many links took its batch down", rel, n)
+				t.Errorf("%s: %d live blocks, want 1 — the note with long chunks took its batch down", rel, n)
 			}
 		}
-		if n := blocksOfFile(t, pool, "hub.md"); n != 60 {
-			t.Errorf("hub.md: %d live blocks, want 60 (every chunk fits a request of its own)", n)
+		if n := blocksOfFile(t, pool, "heavy.md"); n != 60 {
+			t.Errorf("heavy.md: %d live blocks, want 60 (every chunk fits a request of its own)", n)
 		}
 		if err != nil {
 			t.Errorf("ctx ingest returned %v, want nil: every chunk was written", err)

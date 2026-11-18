@@ -61,6 +61,9 @@ var shared struct {
 	err      error
 	adminDSN string        // DSN of the container's default DB (admin surface)
 	admin    *pgxpool.Pool // CREATE/DROP DATABASE connection
+
+	// container runs RunClientTool's programs; nothing else touches it.
+	container *tcpostgres.PostgresContainer
 }
 
 // dbSeq names the per-test databases (process-local — each test binary owns
@@ -253,6 +256,7 @@ func buildShared() {
 		return
 	}
 	shared.adminDSN = dsn
+	shared.container = container
 
 	admin, err := pgxpool.New(ctx, dsn)
 	if err != nil {
