@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 179,
-    "migration_count": 67,
+    "migration_max": 180,
+    "migration_count": 68,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -6046,16 +6046,16 @@
       "src_hash": "1512b52769433acb052993c39352e2df02da9be858cf4b7e27543980bf0cf9eb"
     },
     "context_block_counts_del()": {
-      "src_hash": "161eb4b2610471a9c8a864f30627d17cc55c1c2e73200fb06dea06bbe7478e42"
+      "src_hash": "2e4f008e1c2fd091f9a869efdae2d23d7b2c0a1c7de612135fd7aa0edb5a049e"
     },
     "context_block_counts_ins()": {
-      "src_hash": "2cd84739d30db9e3f4bbb983f0a39028e41848ea02f3d608533ff22df2a2d571"
+      "src_hash": "d77f5399d07835bad3521953f225b0d048ecb9fd24ef1c5d5fcc1de12fcfc446"
     },
     "context_block_counts_trunc()": {
       "src_hash": "51b409779adf633e3394542b67171c6a30abf3a2988a30ca1a8ade6f4ca75e37"
     },
     "context_block_counts_upd()": {
-      "src_hash": "5d19ada298517d809337329a1dab85ad162da2fd8323159f1e9c39965893f76d"
+      "src_hash": "0450fbf6538c63c9c85ac9bd2d4355448720f8b4a33290ac2363f9bba8686455"
     },
     "context_block_types_embed_excluded()": {
       "src_hash": "ebc2bd054af315a13118f81dbd5cde97a81af30d75f78dce9131ada1709bb1e9"
@@ -6154,7 +6154,7 @@
       "src_hash": "18edfee8b6764c140d859ba004e7b78354dde5c9fbda1215445c15ced8e0a821"
     },
     "notify_project_delete()": {
-      "src_hash": "94444f2e3d1184fecb5b61c4d80e17e7f4a80fc9a47bba7845d644339cd96a60"
+      "src_hash": "a562ed908b22b36c2d546abf75eabd919c2c3e3d25507b81ef9a1f0cf75fffc0"
     },
     "notify_project_write()": {
       "src_hash": "e2dae3477515ce32b4a03006f2270254c0028df8621aec1f9c4acff38e6bb9d2"

@@ -1,0 +1,94 @@
+-- =============================================================================
+-- 180_transition_table_functions_jit_off.sql — the trigger functions that read
+-- a transition table run without JIT (issue #340)
+-- Part of ctx by GottZ (https://github.com/GottZ/ctx)
+-- =============================================================================
+-- A query of a PL/pgSQL function over a transition table (REFERENCING OLD/NEW
+-- TABLE) has no parameters. PL/pgSQL plans it once per backend and keeps that
+-- plan, sized by the transition table of the FIRST call (the planner reads
+-- the row count of the tuplestore at hand), until an invalidation plans it
+-- again (below); the JIT decision (jit_above_cost) is part of the plan. A backend whose first statement of a kind was large
+-- enough for JIT kept a compiled plan, and every later statement of that kind
+-- on the backend compiled it again, however few rows it wrote. Migration 177
+-- gave mark_guard_dirty() SET jit = off for this reason; the other functions
+-- of the class kept the defect:
+--   context_block_counts_ins()   trg_block_counts_ins   (migration 170)
+--   context_block_counts_upd()   trg_block_counts_upd   (migration 170)
+--   context_block_counts_del()   trg_block_counts_del   (migration 170)
+--   notify_project_delete()      trg_project_delete     (113_baseline)
+-- Measured on the production image pgvector-timescaledb:pg18 (JIT available),
+-- first statements of a backend forced into JIT, then one-row writes, median
+-- trigger time per statement: trg_block_counts_upd 52 -> 7 621 µs,
+-- trg_block_counts_ins 27 -> 5 854 µs, trg_block_counts_del 29 -> 6 248 µs,
+-- trg_project_delete 13 -> 9 626 µs. With jit = off on the function no plan
+-- of these queries is compiled, whatever the first call held. At the default
+-- jit_above_cost (100 000, the live setting) a statement passes it from
+-- roughly 1.25 million updated, 2.9 million inserted or deleted rows (plan
+-- cost per row 0.080 / 0.035 / 0.035, notify_project_delete 0.023): one
+-- statement over the whole table at the target scale, on the application
+-- pool (a data migration, the embedding cutover's sweep). Measured: a
+-- VACUUM of context_blocks plans all four again, an ANALYZE of
+-- context_block_count_deltas the three counter functions, an ANALYZE of
+-- context_blocks none; until autovacuum gets there, or the connection ends
+-- (MaxConnLifetime 30 min), every statement of that kind compiles. Numbers
+-- and paths: docs/operations.md, "Migration 180".
+--
+-- The class is "reads a transition table of its trigger", read from the
+-- catalog by TestTransitionTableFunctionsRunWithoutJit (internal/store): a
+-- later trigger function that reads one without jit = off fails it. Not in
+-- the class, and left alone:
+--   - Row-level trigger functions and their helpers: their queries take the
+--     row's values as parameters. PostgreSQL plans them per call for the
+--     first five calls and may keep a generic plan after that, but either
+--     plan is sized by the table statistics, not by the size of the writing
+--     statement; their costs are index lookups and inserts of one row
+--     (largest: 10 in ctx_block_type_never_embedded), far below
+--     jit_above_cost. A large statement leaves nothing behind there.
+--   - context_block_counts_trunc() and the other statement-level functions
+--     without a transition table (notify_link_write on TRUNCATE,
+--     instance_row_guard): no transition table, so no plan sized by a
+--     statement; the TRUNCATE one deletes from two small tables, planned by
+--     their statistics and planned again when an ANALYZE changes them.
+-- Only jit = off: none of the four queries joins (an aggregate over one or
+-- two scans of the transition tables), so the nested-loop case of 177 has no
+-- counterpart here; measured both ways, a 100 000-row statement after a
+-- one-row statement costs per row what it costs on a fresh backend.
+--
+-- ALTER FUNCTION … SET adds the setting to the function's proconfig and keeps
+-- what is there: the three counter functions keep search_path = pg_catalog,
+-- public, pg_temp of migration 179. CREATE OR REPLACE FUNCTION without the SET
+-- clauses would drop them; this file replaces no body. A SET clause makes the
+-- function manager save, set and restore the setting around every call; the
+-- four are statement-level, so the price is paid once per statement, not per
+-- row (measured: docs/operations.md, "Migration 180").
+--
+-- LOCKS. ALTER FUNCTION updates the function's pg_proc row and takes no lock
+-- on a table: a writer that holds context_blocks rows does not block it and
+-- is not blocked by it. A backend that holds a compiled plan of an old
+-- version notices the changed pg_proc row on the next call, compiles the
+-- function again and plans its queries under jit = off. `SET LOCAL
+-- lock_timeout = '3s'` as in the migrations before it bounds the wait for
+-- another ALTER of the same function.
+--
+-- OLDER BINARY. A binary before this migration writes and reads as before.
+-- Its migration runner leaves version 180 alone. Its schema-contract check
+-- finds _migrations:180 without an embedded file (breaking) and a function
+-- body hash drift (param) for the four functions, since pg_get_functiondef
+-- prints the SET clause: in mode warn (the default) it starts, logs them and
+-- /health reports schema_contract attention; in mode enforce it refuses to
+-- start until CTX_CONTRACT_MODE=warn or off is set.
+--
+-- REVERT: ALTER FUNCTION <name>() RESET jit for each function below;
+-- DELETE FROM _migrations WHERE version = 180.
+--
+-- No table, column, index or trigger changes (test.sh T07 counts stay). The
+-- schema-contract manifest records the new function definitions and
+-- migration_max 179 -> 180. Idempotent, forward-only.
+-- =============================================================================
+
+SET LOCAL lock_timeout = '3s';
+
+ALTER FUNCTION context_block_counts_ins() SET jit = off;
+ALTER FUNCTION context_block_counts_upd() SET jit = off;
+ALTER FUNCTION context_block_counts_del() SET jit = off;
+ALTER FUNCTION notify_project_delete() SET jit = off;
