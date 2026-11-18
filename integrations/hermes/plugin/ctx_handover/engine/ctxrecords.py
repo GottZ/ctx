@@ -60,8 +60,8 @@ _TYPE_NOT_VISIBLE_RE = re.compile(r"\bblock type\W+([A-Za-z0-9_.:-]+)\W+is not r
 _UNKNOWN_ARGS_MARKER = "unexpected additional properties"
 _TYPES_ARG_RE = re.compile(r"\btypes\b")
 _types_refused: dict[str, bool] = {}
-"""MCP servers (by name) that refused the head search's ``types`` in this process: a ctx server before GottZ/ctx#342.
-They are searched without it, so they pay one refused call per process, not one per record."""
+"""MCP servers (by ``mcp_servers`` name) that refused the head search's ``types`` in this process: a ctx server before
+GottZ/ctx#342. They are searched without it until such a search finds no head (see :func:`_checkpoint_head`)."""
 _types_refused_lock = threading.Lock()
 
 
@@ -284,22 +284,25 @@ def _head_in(envelope: Any, title: str) -> str | None:
 
 
 def _checkpoint_head(call_mcp: Callable[..., dict], server: str, root: str, timeout: float) -> str | None:
-    """The checkpoint head of ``root``, searched with ``types=["checkpoint"]``. A server that refuses the type (before
-    GottZ/ctx#342) is searched without it, within the same ``timeout``, and remembered for this process; when such a
-    search finds no head, the server is asked with the type again (it may have been updated to one that leaves
-    checkpoints out of a search without a type)."""
+    """The checkpoint head of ``root``, searched by title and head tag with ``types=["checkpoint"]``.
+
+    A server that refuses the type (before GottZ/ctx#342) is searched without it, within the same ``timeout``, and the
+    refusal is remembered for that MCP server name in this process. A search without the type that finds no head drops
+    the memory, so the next record's search asks with the type again: a server updated meanwhile may leave checkpoints
+    out of a search that names no type. On a server before #342 that costs one refused call after each record without a
+    head; after such an update, at most the one record whose search missed goes without the link. The search is not
+    repeated within the same record: the flush budget leaves no room for a third call before the store."""
     if not root:
         return None
     title = HEAD_TITLE.format(root=head_token(root))
     # Every head carries the tag (ctx_checkpoint HEAD_TAGS): the tag index finds the heads, where the title words alone
     # read the text vectors of every checkpoint part.
     args = {"query": title, "tags": [HEAD_TAG], "limit": 5}
-    typed = {**args, "types": [CHECKPOINT_TYPE]}
     deadline = time.monotonic() + timeout
     with _types_refused_lock:
-        refused = _types_refused.get(server, False)
-    if not refused:
-        envelope = _head_search(call_mcp, server, typed, timeout)
+        remembered = _types_refused.get(server, False)
+    if not remembered:
+        envelope = _head_search(call_mcp, server, {**args, "types": [CHECKPOINT_TYPE]}, timeout)
         if not _refuses_types(envelope):
             return _head_in(envelope, title)
         with _types_refused_lock:
@@ -308,19 +311,13 @@ def _checkpoint_head(call_mcp: Callable[..., dict], server: str, root: str, time
     remaining = deadline - time.monotonic()
     if remaining < MIN_CALL_S:
         return None
-    head = _head_in(_head_search(call_mcp, server, args, remaining), title)
-    if head is not None or not refused:
-        return head
-    # The ask again is extra: it runs only while it leaves the record's store a call's time.
-    remaining = deadline - time.monotonic() - MIN_CALL_S
-    if remaining < MIN_CALL_S:
-        return None
-    envelope = _head_search(call_mcp, server, typed, remaining)
-    if not isinstance(envelope, Mapping) or envelope.get("ok") is not True:
-        return None  # refused again, or the extra ask failed: no head, as the older server answered
-    with _types_refused_lock:
-        _types_refused.pop(server, None)
-    return _head_in(envelope, title)
+    envelope = _head_search(call_mcp, server, args, remaining)
+    head = _head_in(envelope, title)
+    answered = isinstance(envelope, Mapping) and envelope.get("ok") is True
+    if head is None and remembered and answered:
+        with _types_refused_lock:
+            _types_refused.pop(server, None)
+    return head
 
 
 def flush(

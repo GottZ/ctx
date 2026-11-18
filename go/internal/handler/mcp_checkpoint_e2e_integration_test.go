@@ -8,9 +8,23 @@
 // also runs both plugins' checkpoint head lookups (ctx_checkpoint and
 // ctx_handover, #342): with `types` against this server, and against this server
 // answering as one before #342 (the refusal of the shared answer fixture) and as
-// one that leaves never-ranked types out of a search without `types`. With
-// CTX_E2E_SERVER=before-342 the driver expects the endpoint itself to refuse
-// the type (run it from a checkout of an older server with this driver).
+// one that leaves never-ranked types out of a search without `types`.
+//
+// The Go command below starts the MCP handler of its own checkout, so it checks
+// the current server. CTX_E2E_SERVER=before-342 changes what the driver
+// expects, not the server: the endpoint itself must refuse the type. To check
+// the plugins against a real older server, start that server on its own (a
+// checkout or image of the older release, with a key of its database) and run
+// the driver from this checkout against it:
+//
+//	CTX_E2E_URL=https://<older server>/mcp CTX_E2E_KEY=<key> HERMES_REPO=/path/to/hermes-agent \
+//	  CTX_E2E_SERVER=before-342 /path/to/venv/bin/python -I \
+//	  integrations/hermes/plugin/ctx_checkpoint/tests/e2e_real_ctx.py
+//
+// The driver writes a chain under its own two root ids into that database. A
+// checkout from #290 on also has this Go test: with this driver and both plugin
+// directories copied into it, the Go command there with CTX_E2E_SERVER set
+// starts the older handler on a fresh test database instead.
 //
 // It needs a Python with hermes-agent's dependencies and the hermes-agent
 // checkout: CTX_CHECKPOINT_E2E_PYTHON names the interpreter, HERMES_REPO the

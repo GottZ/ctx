@@ -198,11 +198,17 @@ block that has the record. Error lines are redacted with the keys the provider b
 - `search` sends `types` (0.16.0, GottZ/ctx#342), over MCP too: a ctx server with #342 takes
   every registered type there. An older one refuses a type that retrieval never ranks
   (`block type "checkpoint" is not retrieval-visible`, or before ctx v5.8.0 the argument
-  itself); on exactly that refusal the MCP client searches again without `types`, keeps only
-  rows of the asked types, and remembers the refusal for the binding. When an asked type has
-  no row in such a search it asks with `types` again (one more refused call on an older
-  server), so a server updated meanwhile is not read through the fallback (a failure of that
-  extra ask keeps the answer). Any other error is raised.
+  itself); on exactly that refusal the MCP client searches again without `types` and keeps
+  the rows of the asked types and the rows that carry no `type` (a server older than that
+  field names none, so the fallback is not a strict type filter). It remembers the refused
+  type for the binding; a search that names other types still sends them. The fallback is
+  best effort: the search without `types` fills its limit with every type, so rows of the
+  asked type can fall behind it. When an asked type has no row in such a search, or the
+  narrowing dropped rows, it asks with `types` again (one more refused call on an older
+  server), so a server updated meanwhile is not read through the fallback. That ask takes at
+  most half of what is left of the call's timeout and is not sent below 0.5 s, so the caller
+  keeps time for its next call; when it fails, the answer stays. A type the server does not
+  know (`unknown block type`) is raised, also from that ask. Any other error is raised.
 - Hits with `untrusted: true` (foreign text — server V-11: `checkpoint`, `tool-evidence`,
   `tool-overview`, `insight`) are labelled in the injected context (or dropped with
   `prefetch_untrusted: drop`), and the context tells the model to treat them as data.

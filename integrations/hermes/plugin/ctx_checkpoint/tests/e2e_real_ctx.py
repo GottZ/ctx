@@ -129,36 +129,36 @@ def _head_lookups(registry, McpClient, ChainWriter, first) -> dict:
         server.searches.clear()
         return client
 
-    def handover_lookup(label: str, server: Server):
+    def handover_lookup(label: str, server: Server, sent: list, *, finds: bool = True):
+        """ctx_handover's head search for ROOT: it finds the head (or, ``finds=False``, not) and sends ``sent``."""
+
         def call_mcp(name, tool, args, timeout):
             handler = _make_tool_handler(name, tool, max(1.0, float(timeout)))
             return PluginContext._mcp_envelope(server.answer(tool, dict(args), handler))
 
         head = ctxrecords._checkpoint_head(call_mcp, "ctx", ROOT, 10.0)
-        if head != first.head_id:
-            _fail(f"{label}: ctx_handover found head {head!r}, want {first.head_id}")
+        if head != (first.head_id if finds else None):
+            _fail(f"{label}: ctx_handover found head {head!r}, want {first.head_id if finds else None}")
         out[f"handover {label}"] = [s.get("types") for s in server.searches]
+        if out[f"handover {label}"] != sent:
+            _fail(f"{label}: ctx_handover sent {out[f'handover {label}']}, want {sent}")
         server.searches.clear()
 
     real = Server()
     client = checkpoint_lookup("this server", real)
-    want = None if real_before_342 else ["checkpoint"]
-    if out["checkpoint this server"][:1] != [["checkpoint"]] or client._search_types_state != (
-        "no" if real_before_342 else "yes"
-    ):
-        _fail(f"this server: searches {out['checkpoint this server']}, state {client._search_types_state}")
+    if out["checkpoint this server"][:1] != [["checkpoint"]] or bool(client._refused_types) != real_before_342:
+        _fail(f"this server: searches {out['checkpoint this server']}, refused {client._refused_types}")
     ctxrecords._types_refused.clear()
-    handover_lookup("this server", real)
-    if out["handover this server"][-1] != want:
-        _fail(f"this server: the handover head search sent {out['handover this server']}")
+    handover_lookup("this server", real, [["checkpoint"], None] if real_before_342 else [["checkpoint"]])
 
     old = Server()
     old.refuses = True
     client = checkpoint_lookup("before 342", old)
-    if client._search_types_state != "no":
-        _fail(f"before 342: the client did not remember the refusal ({client._search_types_state})")
+    if client._refused_types != {"checkpoint"}:
+        _fail(f"before 342: the client did not remember the refusal ({client._refused_types})")
     ctxrecords._types_refused.clear()
-    handover_lookup("before 342", old)
+    handover_lookup("before 342", old, [["checkpoint"], None])
+    handover_lookup("before 342, remembered", old, [None])
 
     if not real_before_342:
         later = Server()
@@ -171,7 +171,7 @@ def _head_lookups(registry, McpClient, ChainWriter, first) -> dict:
         later.searches.clear()
         checkpoint_lookup("after the later step", later)
         ctxrecords._types_refused.clear()
-        handover_lookup("after the later step", later)
+        handover_lookup("after the later step", later, [["checkpoint"]])
 
         # A client that met a server before #342, the server then updated to the later step.
         updated = Server()
@@ -179,11 +179,17 @@ def _head_lookups(registry, McpClient, ChainWriter, first) -> dict:
         client = checkpoint_lookup("updated meanwhile (before)", updated)
         updated.refuses, updated.drops_never_ranked = False, True
         checkpoint_lookup("updated meanwhile (after)", updated, client)
+        if out["checkpoint updated meanwhile (after)"] != [None, ["checkpoint"]] or client._refused_types:
+            _fail(f"updated meanwhile: ctx_checkpoint sent {out['checkpoint updated meanwhile (after)']}")
+        # ctx_handover remembers the refusal; after the update the first search without the type misses (that
+        # record goes without the link) and drops the memory, so the next asks with the type and finds the head.
         ctxrecords._types_refused.clear()
         updated.refuses, updated.drops_never_ranked = True, False
-        handover_lookup("updated meanwhile (before)", updated)
+        handover_lookup("updated meanwhile (before)", updated, [["checkpoint"], None])
+        handover_lookup("updated meanwhile (before, remembered)", updated, [None])
         updated.refuses, updated.drops_never_ranked = False, True
-        handover_lookup("updated meanwhile (after)", updated)
+        handover_lookup("updated meanwhile (after, the miss)", updated, [None], finds=False)
+        handover_lookup("updated meanwhile (after)", updated, [["checkpoint"]])
     return out
 
 

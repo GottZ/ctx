@@ -113,37 +113,112 @@ def test_a_head_search_without_the_type_misses_the_head_after_the_later_step():
     assert ctxrecords._head_in(envelope, TITLE) is None
 
 
-def test_a_failing_second_ask_keeps_the_memory_and_finds_no_head():
+def test_a_miss_after_a_remembered_refusal_lets_the_next_record_ask_with_the_type():
+    """A search without the type that finds no head drops the memory: the next record asks with the type again. On a
+    server before #342 that costs one refused call after each record without a head; after an update to a server that
+    leaves checkpoints out of a search without a type, the record that missed is the only one without the link."""
+    old = Ctx(refuses=REFUSED)
+    assert ctxrecords._checkpoint_head(old.call_mcp, "ctx", ROOT, 5.0) == HEAD_ID
+    assert ctxrecords._checkpoint_head(old.call_mcp, "ctx", "20261118_120000_headless", 5.0) is None
+    assert ctxrecords._checkpoint_head(old.call_mcp, "ctx", ROOT, 5.0) == HEAD_ID
+    assert _types_sent(old) == [["checkpoint"], None, None, ["checkpoint"], None]
+    assert ctxrecords._types_refused == {"ctx": True}
+
+    old.refuses, old.drops_never_ranked = None, True
+    assert ctxrecords._checkpoint_head(old.call_mcp, "ctx", ROOT, 5.0) is None, "the one record without the link"
+    assert ctxrecords._checkpoint_head(old.call_mcp, "ctx", ROOT, 5.0) == HEAD_ID
+    assert _types_sent(old)[-2:] == [None, ["checkpoint"]]
+    assert ctxrecords._types_refused == {}
+
+
+def test_a_failure_of_the_search_without_the_type_keeps_the_memory():
+    """Only a search that answers without the head drops the memory, not one that fails."""
     ctx = Ctx(refuses=REFUSED)
-    ROWS_BEFORE = list(ROWS)
-    ROWS.clear()
-    try:
-        assert ctxrecords._checkpoint_head(ctx.call_mcp, "ctx", ROOT, 5.0) is None
-        ctx.refuses = "read rate limit exceeded"
-        assert ctxrecords._checkpoint_head(ctx.call_mcp, "ctx", ROOT, 5.0) is None
-    finally:
-        ROWS.extend(ROWS_BEFORE)
-    assert _types_sent(ctx) == [["checkpoint"], None, None, ["checkpoint"]]
+    assert ctxrecords._checkpoint_head(ctx.call_mcp, "ctx", ROOT, 5.0) == HEAD_ID
+
+    def failing(server, tool, arguments=None, timeout=30):
+        ctx.searches.append(dict(arguments or {}))
+        return {"ok": False, "error": "read rate limit exceeded"}
+
+    assert ctxrecords._checkpoint_head(failing, "ctx", ROOT, 5.0) is None
     assert ctxrecords._types_refused == {"ctx": True}
 
 
-def test_the_second_ask_leaves_the_store_its_time():
-    """The ask again runs only while a call's time is left for the record's store after it (``flush``'s budget)."""
-    ctx = Ctx(refuses=REFUSED)
-    rows_before = list(ROWS)
-    ROWS.clear()
-    try:
-        assert ctxrecords._checkpoint_head(ctx.call_mcp, "ctx", ROOT, 5.0) is None
-        assert ctxrecords._checkpoint_head(ctx.call_mcp, "ctx", ROOT, 1.5) is None
-    finally:
-        ROWS.extend(rows_before)
-    assert _types_sent(ctx) == [["checkpoint"], None, None], "no ask again with 1.5 s left"
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 500.0
+
+    def monotonic(self) -> float:
+        return self.now
 
 
-def test_after_a_refusal_a_server_updated_meanwhile_is_asked_again():
+def test_the_search_without_the_type_gets_what_is_left_of_the_timeout(monkeypatch):
+    """The refused search and the one without the type share one timeout: the second gets what the first left, and
+    none is sent with less than a call's minimum."""
+    clock = _Clock()
+    monkeypatch.setattr(ctxrecords, "time", clock)
     ctx = Ctx(refuses=REFUSED)
-    assert ctxrecords._checkpoint_head(ctx.call_mcp, "ctx", ROOT, 5.0) == HEAD_ID
+    timeouts: list = []
+
+    def timed(server, tool, arguments=None, timeout=30):
+        timeouts.append(((arguments or {}).get("types"), timeout))
+        clock.now += 0.4 if (arguments or {}).get("types") else 0.0
+        return ctx.call_mcp(server, tool, arguments, timeout)
+
+    assert ctxrecords._checkpoint_head(timed, "ctx", ROOT, 2.0) == HEAD_ID
+    assert timeouts[0] == (["checkpoint"], 2.0)
+    assert timeouts[1][0] is None and timeouts[1][1] == pytest.approx(1.6)
+    ctxrecords._types_refused.clear()
+    timeouts.clear()
+    clock.now += 0.0
+    assert ctxrecords._checkpoint_head(timed, "ctx", ROOT, 1.2) is None
+    assert [t for t, _ in timeouts] == [["checkpoint"]], "0.8 s left: below a call's minimum, no second search"
+
+
+def test_through_flush_with_the_default_budget_the_upgrade_costs_one_link(tmp_path):
+    """The case through ``flush`` with its default budget: the process remembers a refusal, the server is then updated
+    to one that leaves checkpoints out of a search without a type. The first record goes without the link (its search
+    without the type missed and drops the memory), every later one carries it; each record is stored once."""
+    from ctx_handover.tests.fakes.surfaces_fake import FakeOutboxLedger
+    from ctx_handover.tests.unit.F.test_ctxrecords import _data
+
+    ctx = Ctx(refuses=REFUSED)
+    stores: list[dict] = []
+
+    def call_mcp(server, tool, arguments=None, timeout=30):
+        if tool == "store":
+            stores.append(dict(arguments or {}))
+            return {"ok": True, "result": f"Stored block (id: 0199{len(stores):04d}-0000-7000-8000-000000000000)"}
+        return ctx.call_mcp(server, tool, arguments, timeout)
+
+    assert ctxrecords._checkpoint_head(ctx.call_mcp, "ctx", ROOT, 5.0) == HEAD_ID  # the refusal is remembered
     ctx.refuses, ctx.drops_never_ranked = None, True
-    assert ctxrecords._checkpoint_head(ctx.call_mcp, "ctx", ROOT, 5.0) == HEAD_ID
-    assert _types_sent(ctx) == [["checkpoint"], None, None, ["checkpoint"]]
-    assert ctxrecords._types_refused == {}
+    ledger = FakeOutboxLedger(tmp_path / "outbox.sqlite3")
+    for n in range(3):
+        record = _data(job_id=f"job-i342-{n}", source_root=ROOT, source_session=ROOT)
+        ctxrecords.enqueue(ledger, "departure", record, redact=lambda s: s)
+    for now in (5.0, 6.0, 7.0):
+        ctxrecords.flush(ledger, call_mcp, "ctx", "handover", now=now)
+    assert [s["metadata"].get("checkpoint_head") for s in stores] == [None, HEAD_ID, HEAD_ID]
+
+
+def test_a_flush_searches_before_it_stores(tmp_path):
+    """The record of a root with a checkpoint head: its search runs before its store (the disclosure in
+    docs/security.md), and the store carries the head."""
+    from ctx_handover.tests.fakes.surfaces_fake import FakeOutboxLedger
+    from ctx_handover.tests.unit.F.test_ctxrecords import _data
+
+    ctx = Ctx()
+    calls: list[str] = []
+
+    def call_mcp(server, tool, arguments=None, timeout=30):
+        calls.append(tool)
+        if tool == "store":
+            assert (arguments or {}).get("metadata", {}).get("checkpoint_head") == HEAD_ID
+            return {"ok": True, "result": "Stored block (id: 01990000-0000-7000-8000-000000000001)"}
+        return ctx.call_mcp(server, tool, arguments, timeout)
+
+    ledger = FakeOutboxLedger(tmp_path / "outbox.sqlite3")
+    ctxrecords.enqueue(ledger, "departure", _data(source_root=ROOT, source_session=ROOT), redact=lambda s: s)
+    assert ctxrecords.flush(ledger, call_mcp, "ctx", "handover", now=5.0) == 1
+    assert calls == ["search", "store"]

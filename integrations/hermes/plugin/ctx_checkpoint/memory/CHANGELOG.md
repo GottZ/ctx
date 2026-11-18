@@ -22,15 +22,25 @@ Checkpoint searches name the `checkpoint` type, over MCP too (GottZ/ctx#342).
   #342 answers `block type "checkpoint" is not retrieval-visible` (ctx v5.8.0 to v5.52.x) or,
   before v5.8.0, `unexpected additional properties ["types"]`; on exactly that refusal of the
   sent types `McpClient.search` searches again without `types`, within what is left of the
-  call's timeout, and keeps only rows of the asked types (a row without a `type` is kept).
-  The refusal is remembered per client: an older server pays one refused call per binding,
-  and one more for each search without `types` in which an asked type has no row (the first
-  head lookup of a new root: two). Such a search asks with `types` again, so a server updated
-  meanwhile — one that may leave checkpoints out of a search without a type — is not read
-  through the fallback (when that extra ask fails, the answer stays the one the older server
-  gave). Any other error (an unknown type,
-  a rate limit, another type than the sent ones) is raised as before. The REST client sent
-  `types` already.
+  call's timeout, and keeps the rows of the asked types and the rows without a `type` (a
+  server older than that field names none, so this is no strict type filter). The fallback is
+  best effort: the search without `types` fills its limit with every type, so rows of the
+  asked type can fall behind it.
+- **What is remembered.** The refused type per client (or that the argument itself was
+  refused): a search that names other types still sends them, and an older server, which takes
+  the types retrieval ranks, answers it typed. A search whose types were refused before goes
+  without them first and asks with them again when its narrowed answer may differ from the
+  typed one — an asked type has no row, or the narrowing dropped rows — so a server updated
+  meanwhile is not read through the fallback; a typed answer clears the memory. Against an
+  older server that costs one refused call per binding, plus one for such a search: the head
+  lookup by title, category and tag costs one call when it finds the head and two when it finds
+  none. A row without a `type` means a server that predates the filter: no ask again. The ask
+  takes at most half of what is left of the call's timeout (`EXTRA_ASK_SHARE`) and is not sent
+  below 0.5 s (`MIN_EXTRA_ASK_S`), so the chain writer keeps time to read the head; when it
+  fails, the answer stays the one the older server gave, except `unknown block type`, which is
+  raised as it is on a first search. Any other error (an unknown type, a rate limit, another type
+  than the sent ones) is raised as before. The refusal's log line names the server, not the type
+  values. The REST client sent `types` already.
 - **The agent's read path names the type.** The passage search of the system prompt block and
   the compaction receipt: `ctx_search … types=["checkpoint"]` with memory features on,
   `hermes ctx_checkpoint search … --type checkpoint` on REST without them, and

@@ -144,7 +144,9 @@ SEARCH_SCHEMA = {
                 "items": {"type": "string"},
                 "description": (
                     'Optional: only blocks of these types (e.g. ["checkpoint"] for the saved turns of a '
-                    "compaction checkpoint). Given types_exclude defaults to []."
+                    "compaction checkpoint). Given types_exclude defaults to []. An older ctx server that "
+                    "refuses the type is searched without it: the result then keeps rows of these types and "
+                    "rows without a type, and can miss matches that other types crowd out."
                 ),
             },
             "types_exclude": _TYPES_EXCLUDE_PROP,

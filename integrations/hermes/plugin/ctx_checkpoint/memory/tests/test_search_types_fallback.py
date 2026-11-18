@@ -11,7 +11,6 @@ raised. And a server that leaves never-ranked types out of a search without ``ty
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -46,11 +45,23 @@ ROWS = [
 class Server:
     """The MCP ``search``/``get`` tools of a ctx server, as Hermes hands their answers to the plugin.
 
-    ``refuses``: the answer to a search with ``types`` (``None`` = takes them). ``drops_never_ranked``:
-    a search without ``types`` leaves the never-ranked types out (the later step of #342)."""
+    ``refuses``: the answer to a search with ``types`` (``None`` = takes them). ``old``: a server from
+    v5.8.0 to v5.52.x, which refuses a never-ranked type by name and takes the others. ``registered``:
+    the type names the server knows (``None`` = all). ``drops_never_ranked``: a search without
+    ``types`` leaves the never-ranked types out (the later step of #342)."""
 
-    def __init__(self, *, refuses: str | None = None, drops_never_ranked: bool = False, rows=None):
+    def __init__(
+        self,
+        *,
+        refuses: str | None = None,
+        old: bool = False,
+        registered=None,
+        drops_never_ranked: bool = False,
+        rows=None,
+    ):
         self.refuses = refuses
+        self.old = old
+        self.registered = registered
         self.drops_never_ranked = drops_never_ranked
         self.rows = list(ROWS if rows is None else rows)
         self.searches: list[dict] = []
@@ -65,6 +76,11 @@ class Server:
         types = args.get("types")
         if types and self.refuses is not None:
             return json.dumps({"error": self.refuses})
+        for name in types or ():
+            if self.registered is not None and name not in self.registered:
+                return json.dumps({"error": f'unknown block type "{name}"'})
+            if self.old and name in NEVER_RANKED:
+                return json.dumps({"error": REFUSED.replace('"checkpoint"', f'"{name}"')})
         rows = self.rows
         if types:
             rows = [r for r in rows if r.get("type") in types]
@@ -97,9 +113,10 @@ def test_an_older_server_is_searched_without_types_and_the_rows_are_narrowed(ref
     assert _ids(data) == [HEAD["id"], ROWS[2]["id"]], "the knowledge row is narrowed away"
     assert _types_sent(server) == [["checkpoint"], None]
     assert server.searches[1] == {"query": "checkpoint head", "category": "compaction-checkpoints"}
-    # Remembered: the next search does not send the types again.
+    # Remembered: the next search goes without the types first. Its narrowing dropped a row a typed
+    # search would not have spent a place on, so it asks with the types once more (refused again).
     client.search("checkpoint head", types=["checkpoint"])
-    assert _types_sent(server) == [["checkpoint"], None, None]
+    assert _types_sent(server) == [["checkpoint"], None, None, ["checkpoint"]]
 
 
 def test_a_row_without_a_type_survives_the_narrowing():
@@ -191,27 +208,143 @@ def test_a_failing_second_ask_leaves_the_answer_of_the_older_server():
     assert _types_sent(server) == [["checkpoint"], None, None, ["checkpoint"]]
 
 
-def test_the_fallback_keeps_to_the_callers_timeout():
-    """The search without types gets what is left of the call's timeout, not a second full one."""
-    server = Server(refuses=REFUSED)
+class _Clock:
+    """A monotonic clock the test moves: ``mcp_client.time`` is replaced by it."""
 
-    def slow_refusal(name, args):
-        if args.get("types"):
-            time.sleep(0.4)
-        return server.dispatch(name, args)
+    def __init__(self) -> None:
+        self.now = 1000.0
 
-    client = McpClient(slow_refusal)
+    def monotonic(self) -> float:
+        return self.now
+
+
+def _timed_client(monkeypatch, server: Server, cost: dict) -> tuple[McpClient, list, _Clock]:
+    """A client whose dispatches take ``cost[<types or None>]`` seconds of the test clock; the timeout
+    each dispatch got is recorded."""
+    import ctx_plugin.mcp_client as mcp_client
+
+    clock = _Clock()
+    monkeypatch.setattr(mcp_client, "time", clock)
+    client = McpClient(server.dispatch)
     timeouts: list = []
     dispatch_once = client._call
 
-    def spy(tool, args, timeout=None):
-        timeouts.append(timeout)
-        return dispatch_once(tool, args, timeout)
+    def timed(tool, args, timeout=None):
+        timeouts.append((args.get("types"), timeout))
+        clock.now += cost.get("typed" if args.get("types") else "untyped", 0.0)
+        return dispatch_once(tool, args, None)
 
-    client._call = spy
+    client._call = timed
+    return client, timeouts, clock
+
+
+def test_the_fallback_keeps_to_the_callers_timeout(monkeypatch):
+    """The search without types gets what is left of the call's timeout, not a second full one."""
+    client, timeouts, _clock = _timed_client(monkeypatch, Server(refuses=REFUSED), {"typed": 0.4})
     client.search("checkpoint head", types=["checkpoint"], timeout=1.0)
-    assert timeouts[0] == 1.0
-    assert timeouts[1] is not None and timeouts[1] <= 0.61
+    assert timeouts[0] == (["checkpoint"], 1.0)
+    assert timeouts[1][0] is None and timeouts[1][1] == pytest.approx(0.6)
+
+
+def test_the_ask_again_leaves_the_caller_half_of_what_is_left(monkeypatch):
+    """After a remembered refusal the ask with types is extra: it takes at most half of what is left of
+    the call's timeout, so the caller keeps time for its next call (the chain writer reads the head it
+    found). With too little left it is not sent."""
+    server = Server(old=True)
+    client, timeouts, _clock = _timed_client(monkeypatch, server, {"untyped": 2.0})
+    client.search("checkpoint head", types=["checkpoint"], timeout=10.0)
+    server.old, server.drops_never_ranked = False, True
+    timeouts.clear()
+    data = client.search("checkpoint head", types=["checkpoint"], timeout=10.0)
+    assert _ids(data) == [HEAD["id"], ROWS[2]["id"]]
+    assert [t for t, _ in timeouts] == [None, ["checkpoint"]]
+    assert timeouts[1][1] == pytest.approx((10.0 - 2.0) / 2)
+    # Memory cleared by the accepted ask: the old server comes back, the client is refused again,
+    # then a search whose fallback leaves less than the minimum sends no extra ask.
+    server.old, server.drops_never_ranked = True, False
+    client.search("checkpoint head", types=["checkpoint"], timeout=10.0)
+    server.old, server.drops_never_ranked = False, True
+    timeouts.clear()
+    assert client.search("checkpoint head", types=["checkpoint"], timeout=2.6)["results"] == []
+    assert [t for t, _ in timeouts] == [None], "0.3 s would be half of what is left: no extra ask"
+
+
+def test_a_refusal_of_one_type_does_not_stop_a_typed_search_for_another():
+    """A server before #342 refuses ``checkpoint`` and takes ``knowledge``: after the refusal a search
+    for knowledge is still sent with its type and answered by the server."""
+    server = Server(old=True)
+    client = McpClient(server.dispatch)
+    client.search("checkpoint head", types=["checkpoint"])
+    data = client.search("checkpoint head", types=["knowledge"])
+    assert _ids(data) == [ROWS[0]["id"]]
+    assert _types_sent(server) == [["checkpoint"], None, ["knowledge"]], "one typed search, no search without types"
+
+
+def test_a_remembered_refusal_is_asked_again_when_the_narrowing_drops_rows():
+    """The client met a server before #342; the server now takes the types but still answers a search
+    without them with every type. The narrowing dropped a row, so the client asks with the types again,
+    gets the typed answer and sends the types first from then on."""
+    server = Server(old=True)
+    client = McpClient(server.dispatch)
+    client.search("checkpoint head", types=["checkpoint"])
+    server.old = False
+    data = client.search("checkpoint head", types=["checkpoint"])
+    assert _ids(data) == [HEAD["id"], ROWS[2]["id"]]
+    client.search("checkpoint head", types=["checkpoint"])
+    assert _types_sent(server) == [["checkpoint"], None, None, ["checkpoint"], ["checkpoint"]]
+
+
+@pytest.mark.parametrize(
+    ("rows", "searches"),
+    [
+        ([{**HEAD, "type": "checkpoint"}], 1),
+        ([], 2),
+        (ROWS, 2),
+    ],
+    ids=["head-lookup-finds-the-head", "nothing-found", "narrowing-drops-a-row"],
+)
+def test_calls_against_an_older_server_after_the_refusal(rows, searches):
+    """What a remembered refusal costs a search on a server before #342: one call when the answer
+    without types holds rows of the asked type only (the head lookup by title, category and tag), two
+    when it holds none of them or rows the narrowing drops (the extra ask, refused again)."""
+    server = Server(old=True, rows=rows)
+    client = McpClient(server.dispatch)
+    client.search(HEAD_TITLE, types=["checkpoint"])
+    before = len(server.searches)
+    client.search(HEAD_TITLE, category="compaction-checkpoints", tags=["checkpoint-head"], types=["checkpoint"])
+    assert len(server.searches) - before == searches
+
+
+def test_rows_without_a_type_are_not_asked_again():
+    """A server that names no row's type predates the type filter: its narrowed answer is not checked
+    again with the types, even when no row carries the asked type."""
+    server = Server(refuses=UNKNOWN_ARG, rows=[dict(HEAD)])
+    client = McpClient(server.dispatch)
+    client.search("checkpoint head", types=["checkpoint"])
+    client.search("checkpoint head", types=["checkpoint"])
+    assert _types_sent(server) == [["checkpoint"], None, None]
+
+
+def test_an_unknown_type_in_the_ask_again_is_raised():
+    """After a remembered refusal, a type the updated server does not know is refused by the ask again
+    and raised — as a fresh client gets it — instead of answering an empty search."""
+    server = Server(old=True)
+    client = McpClient(server.dispatch)
+    client.search("checkpoint head", types=["checkpoint"])
+    server.old, server.registered = False, {"checkpoint", "knowledge"}
+    with pytest.raises(CtxApiError) as remembered:
+        client.search("checkpoint head", types=["checkpoint", "nope"])
+    with pytest.raises(CtxApiError) as fresh:
+        McpClient(server.dispatch).search("checkpoint head", types=["checkpoint", "nope"])
+    assert "unknown block type" in str(remembered.value) and "unknown block type" in str(fresh.value)
+
+
+def test_the_refusal_log_names_no_type_value(caplog):
+    """A value a caller put into ``types`` by mistake (a key) is not written to the log."""
+    server = Server(refuses=UNKNOWN_ARG)
+    with caplog.at_level("DEBUG"):
+        McpClient(server.dispatch).search("checkpoint head", types=["sk-live-0000-not-a-key"])
+    assert caplog.records and not any("sk-live" in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.parametrize("server", [Server(), Server(drops_never_ranked=True), Server(refuses=REFUSED)])

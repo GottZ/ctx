@@ -31,6 +31,9 @@ import (
 
 const (
 	i342Category = "i342-types"
+	// i342OtherCategory holds one more checkpoint with the term, so a search that
+	// names i342Category shows when it ignores the category.
+	i342OtherCategory = "i342-other"
 	// i342Term is in every fixture block, so the full-text path matches all of them.
 	i342Term = "quarzkopf"
 )
@@ -42,7 +45,7 @@ type i342Row struct {
 }
 
 // i342SearchCall runs the MCP search tool for ctx over a raw argument object.
-// It returns the rows of the fixture category, or the refusal text.
+// It returns every row of the answer, or the refusal text.
 func i342SearchCall(t *testing.T, cfg MCPConfig, ctx context.Context, raw string) (rows []i342Row, refusal string) {
 	t.Helper()
 	var in searchInput
@@ -56,16 +59,21 @@ func i342SearchCall(t *testing.T, cfg MCPConfig, ctx context.Context, raw string
 	if res.IsError {
 		return nil, mcpTextOf(res)
 	}
-	var all []i342Row
-	if err := json.Unmarshal([]byte(mcpTextOf(res)), &all); err != nil {
+	if err := json.Unmarshal([]byte(mcpTextOf(res)), &rows); err != nil {
 		t.Fatalf("decode search rows of %s: %v (%s)", raw, err, mcpTextOf(res))
 	}
-	for _, r := range all {
-		if r.Category == i342Category {
-			rows = append(rows, r)
+	return rows, ""
+}
+
+// i342InCategory fails the test when a row of an answer to a search that named
+// category lies outside it.
+func i342InCategory(t *testing.T, raw string, rows []i342Row, category string) {
+	t.Helper()
+	for _, r := range rows {
+		if r.Category != category {
+			t.Errorf("%s: row %s of category %q in the answer, want only %q", raw, r.ID, r.Category, category)
 		}
 	}
-	return rows, ""
 }
 
 func i342TypesOf(rows []i342Row) map[string]int {
@@ -82,12 +90,17 @@ func i342TypesOf(rows []i342Row) map[string]int {
 // path.
 func i342Seed(t *testing.T, pool *pgxpool.Pool, scope string, typeNames ...string) {
 	t.Helper()
+	i342SeedIn(t, pool, i342Category, scope, typeNames...)
+}
+
+func i342SeedIn(t *testing.T, pool *pgxpool.Pool, category, scope string, typeNames ...string) {
+	t.Helper()
 	for _, name := range typeNames {
 		if _, err := pool.Exec(context.Background(),
 			`INSERT INTO context_blocks (category, title, content, scope, type_name)
 			 VALUES ($1, $2, $3, $4, $5)`,
-			i342Category, "i342 "+name, "i342 fixture "+i342Term+" of type "+name, scope, name); err != nil {
-			t.Fatalf("seed %s: %v", name, err)
+			category, "i342 "+name, "i342 fixture "+i342Term+" of type "+name, scope, name); err != nil {
+			t.Fatalf("seed %s in %s: %v", name, category, err)
 		}
 	}
 }
@@ -98,6 +111,7 @@ func TestMCPSearchTypesNameNeverRankedTypes_Integration(t *testing.T) {
 	}
 	pool := testdb.SetupTestDB(t)
 	i342Seed(t, pool, "private", "knowledge", "audit-trail", "checkpoint", "system-meta")
+	i342SeedIn(t, pool, i342OtherCategory, "private", "checkpoint")
 	cfg := vw6Cfg(t, pool)
 	ctx := vw6Ctx()
 	set := cfg.Blocktypes.SnapshotForRequest(ctx)
@@ -112,26 +126,31 @@ func TestMCPSearchTypesNameNeverRankedTypes_Integration(t *testing.T) {
 		}
 	}
 
-	unfiltered, refusal := i342SearchCall(t, cfg, ctx, `{"category":"`+i342Category+`"}`)
+	unfilteredRaw := `{"category":"` + i342Category + `"}`
+	unfiltered, refusal := i342SearchCall(t, cfg, ctx, unfilteredRaw)
 	if refusal != "" || len(unfiltered) != 4 {
 		t.Fatalf("search without types: %d rows, refusal %q — want the four fixture rows", len(unfiltered), refusal)
 	}
+	i342InCategory(t, unfilteredRaw, unfiltered, i342Category)
 
 	for _, tc := range []struct {
-		name, raw string
-		want      map[string]int
+		name, raw, category string
+		want                map[string]int
 	}{
-		{"checkpoint listing", `{"category":"` + i342Category + `","types":["checkpoint"]}`, map[string]int{"checkpoint": 1}},
-		{"system-meta listing", `{"category":"` + i342Category + `","types":["system-meta"]}`, map[string]int{"system-meta": 1}},
-		{"checkpoint full text", `{"query":"` + i342Term + `","types":["checkpoint"]}`, map[string]int{"checkpoint": 1}},
-		{"checkpoint full text in category", `{"query":"` + i342Term + `","category":"` + i342Category + `","types":["checkpoint"]}`, map[string]int{"checkpoint": 1}},
-		{"never-ranked and ranked together", `{"category":"` + i342Category + `","types":["checkpoint","knowledge"]}`, map[string]int{"checkpoint": 1, "knowledge": 1}},
-		{"a name twice", `{"category":"` + i342Category + `","types":["checkpoint","checkpoint"]}`, map[string]int{"checkpoint": 1}},
+		{"checkpoint listing", `{"category":"` + i342Category + `","types":["checkpoint"]}`, i342Category, map[string]int{"checkpoint": 1}},
+		{"system-meta listing", `{"category":"` + i342Category + `","types":["system-meta"]}`, i342Category, map[string]int{"system-meta": 1}},
+		{"checkpoint full text", `{"query":"` + i342Term + `","types":["checkpoint"]}`, "", map[string]int{"checkpoint": 2}},
+		{"checkpoint full text in category", `{"query":"` + i342Term + `","category":"` + i342Category + `","types":["checkpoint"]}`, i342Category, map[string]int{"checkpoint": 1}},
+		{"never-ranked and ranked together", `{"category":"` + i342Category + `","types":["checkpoint","knowledge"]}`, i342Category, map[string]int{"checkpoint": 1, "knowledge": 1}},
+		{"a name twice", `{"category":"` + i342Category + `","types":["checkpoint","checkpoint"]}`, i342Category, map[string]int{"checkpoint": 1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rows, refusal := i342SearchCall(t, cfg, ctx, tc.raw)
 			if refusal != "" {
 				t.Fatalf("%s: refused (%s), want the rows of the named types", tc.raw, refusal)
+			}
+			if tc.category != "" {
+				i342InCategory(t, tc.raw, rows, tc.category)
 			}
 			got := i342TypesOf(rows)
 			if len(got) != len(tc.want) {
@@ -153,11 +172,13 @@ func TestMCPSearchTypesNameNeverRankedTypes_Integration(t *testing.T) {
 			ids = append(ids, r.ID)
 		}
 		for _, name := range set.Names() {
-			rows, refusal := i342SearchCall(t, cfg, ctx, `{"category":"`+i342Category+`","types":["`+name+`"]}`)
+			raw := `{"category":"` + i342Category + `","types":["` + name + `"]}`
+			rows, refusal := i342SearchCall(t, cfg, ctx, raw)
 			if refusal != "" {
 				t.Errorf("types=[%s]: refused (%s), want a filtered answer", name, refusal)
 				continue
 			}
+			i342InCategory(t, raw, rows, i342Category)
 			for _, r := range rows {
 				if r.Type != name || !slices.Contains(ids, r.ID) {
 					t.Errorf("types=[%s] answered row %s of type %s, which the search without types does not answer as such", name, r.ID, r.Type)
@@ -221,10 +242,12 @@ func TestMCPSearchTypesForeignTenantTypeIsUnknown_Integration(t *testing.T) {
 	}
 
 	t.Run("tenant B narrows to its own excluded type", func(t *testing.T) {
-		rows, refusal := i342SearchCall(t, cfg, ctxB, `{"category":"`+i342Category+`","types":["`+own+`"]}`)
+		raw := `{"category":"` + i342Category + `","types":["` + own + `"]}`
+		rows, refusal := i342SearchCall(t, cfg, ctxB, raw)
 		if refusal != "" {
 			t.Fatalf("tenant B, types=[%s]: refused (%s)", own, refusal)
 		}
+		i342InCategory(t, raw, rows, i342Category)
 		if got := i342TypesOf(rows); len(got) != 1 || got[own] != 1 {
 			t.Fatalf("tenant B, types=[%s]: rows by type %v, want one row of %s", own, got, own)
 		}

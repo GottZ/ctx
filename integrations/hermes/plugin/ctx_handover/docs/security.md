@@ -168,9 +168,12 @@ record per side of each handover through Hermes' MCP dispatch, with a `search` f
 `store` (to link the record to it); a side finished without ctx (e.g. offline) is recorded later. A long session id,
 or one with other characters (such as Hermes' 70-character `local-<sha256>` ids), is shortened for that search the way
 ctx_checkpoint shortens it in its titles (cut, with a hash of the full id), so the record finds the head for every
-id. The search names the type `checkpoint` (0.1.2, GottZ/ctx#342), because ctx may leave that type out of a search
-that names none; a ctx server that refuses the type there (before #342) is searched without it, once per process
-remembered. ctx is never
+id. The search names the type `checkpoint` and the head tag `checkpoint-head` (0.1.2, GottZ/ctx#342), because ctx
+may leave that type out of a search that names none. A ctx server that refuses the type there (before #342) is
+searched without it; the refusal is remembered per MCP server name in the process, not across servers. A search
+without the type that finds no head drops the memory, so the next record's search asks with the type again: one more
+refused call after each record without a head on such a server, and at most one record without the link after the
+server is updated. ctx is never
 needed for a handover, a ctx failure never stops one, and a job start waits at most 2 seconds for ctx (the records
 go out on a thread of their own).
 
