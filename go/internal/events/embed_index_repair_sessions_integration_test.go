@@ -176,6 +176,41 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		}
 	})
 
+	// The row leaves the run while the repair builds its last index (held):
+	// the build finishes, and its record does not land on the row, which no
+	// longer waits at the green verdict.
+	t.Run("row_left_during_the_last_build_gets_no_record", func(t *testing.T) {
+		pool := testdb.SetupTestDB(t)
+		migID, _, _ := verifiedGreen(t, pool)
+		dropIndexT(t, pool, "idx_guard_pending_next")
+		sB, _ := probeScheduler(t, pool)
+		mig, err := embedmigration.Active(ctx, pool)
+		if err != nil || mig == nil {
+			t.Fatalf("active: %+v %v", mig, err)
+		}
+		release := holdBuilds(t, pool)
+		runDone := make(chan error, 1)
+		go func() { runDone <- sB.runEmbedIndexRepair(ctx, mig) }()
+		buildingPID(t, pool, "idx_guard_pending_next")
+		if err := embedmigration.Transition(ctx, pool, migID, embedmigration.StatusVerifying, embedmigration.StatusRunning); err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+		release()
+		select {
+		case err := <-runDone:
+			if err != nil {
+				t.Errorf("repair: %v", err)
+			}
+		case <-time.After(60 * time.Second):
+			t.Fatalf("repair did not end within 60s")
+		}
+		requireIndexOfDDL(t, pool, "idx_guard_pending_next")
+		st := readVerifyRow(t, pool, migID)
+		if st.Status != "running" || st.LastErr != nil || len(repairEntries(t, st.Report)) != 0 {
+			t.Errorf("row status=%q last_error=%v report=%s, want running without a repair record", st.Status, st.LastErr, st.Report)
+		}
+	})
+
 	// The repair waits for another session's build; meanwhile the operator
 	// resumes the row (verifying → running). The repair ends without
 	// building, without a record and without touching the status.
