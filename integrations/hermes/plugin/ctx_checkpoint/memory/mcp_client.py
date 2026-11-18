@@ -43,12 +43,15 @@ What the ctx MCP tools answer (``go/internal/handler/mcp.go``) and how it is map
   identical content already exists (id: <uuid>)``. The block id is the ``(id: …)`` group
   (or a structured ``id``), never another UUID in the text: the title in front of it can
   carry a UUID-shaped session id. Rejections come back as ``{"error": "..."}`` from the
-  dispatcher; a rate-limit text maps to ``code="rate_limit"`` so the chain writer's backoff
-  applies. A ``confirm_writes`` key gets the write STAGED instead (``mcp_confirm.go``),
-  which also arrives as an error envelope; it maps to ``code="confirm_writes"`` and is
-  refused — writes from this plugin run unattended and are never confirmed on the
-  operator's behalf (0.6.1). Only a tool the server stages is read that way: a search
-  error that echoes ``confirm_writes`` (a type of that name) is the search's error.
+  dispatcher; ctx's rate-limit answer (the whole text ``Rate limit exceeded: max <n> … per 60
+  seconds``) maps to ``code="rate_limit"`` so the chain writer's backoff applies. A
+  ``confirm_writes`` key gets the write STAGED instead (``mcp_confirm.go``), which also arrives
+  as an error envelope starting with ``STAGED — NOT``; it maps to ``code="confirm_writes"`` and
+  is refused — writes from this plugin run unattended and are never confirmed on the
+  operator's behalf (0.6.1). Only a tool the server stages is read that way. Both codes come
+  from the form of ctx's answer, never from words inside an error text: a search refusing a
+  type named ``rate_limit`` or ``confirm_writes``, or a transport error that mentions a rate
+  limit, keeps its own text and no code (0.16.1, GottZ/ctx#354).
 - ``get`` → the full block JSON → ``{"success", "block"}``.
 
 Hermes wraps every MCP text result as ``{"result": "<text>"}`` (``tools/mcp_tool_handlers``)
@@ -96,7 +99,12 @@ _SERVER_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 _NAME_PART_RE = re.compile(r"[^A-Za-z0-9_]")
 MCP_TOOL_NAME_MAX_CHARS = 64
 MCP_TOOL_NAME_HASH_CHARS = 8
-_RATE_LIMIT_MARKERS = ("rate limit", "rate_limit")
+# ctx's whole answer when a key's budget is spent (``handler/ratelimit.go``, ``stage_gates.go``, ``mcp_update.go``,
+# ``mcp_archive.go``, ``blob_core.go``: ``Rate limit exceeded: max <n> <writes|reads|…> per 60 seconds``).
+_RATE_LIMIT_ANSWER_RE = re.compile(r"Rate limit exceeded: max \d+ [a-z ]+ per \d+ seconds")
+# How ctx's answer for a write it staged for a confirm_writes key starts (``mcp_confirm.go`` and its update,
+# archive and blob twins: ``STAGED — NOT saved yet. …``).
+_STAGED_PREFIX = "STAGED — NOT "
 _MAX_CONTENT_FETCH = 10  # query(include_content=True) over MCP: one get per source, capped
 # The go-sdk's schema validation refusal of an argument the tool does not declare.
 _UNKNOWN_ARGS_MARKER = "unexpected additional properties"
@@ -212,10 +220,14 @@ def _find_value(value: Any, key: str) -> str | None:
 
 
 def _code_for_error(tool: str, text: str) -> str:
-    lowered = text.lower()
-    if tool in _STAGING_TOOLS and (lowered.lstrip().startswith("staged") or "confirm_writes" in lowered):
+    """The code of a tool error, read from the form of ctx's own answer about the call, never from words
+    anywhere in the text: an error can repeat what the caller sent (a type, a title), and Hermes' text for
+    a transport failure can name anything (GottZ/ctx#354). Hermes passes a tool error's text alone, without
+    the code ctx puts next to it."""
+    answer = text.strip()
+    if tool in _STAGING_TOOLS and answer.startswith(_STAGED_PREFIX):
         return "confirm_writes"
-    if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
+    if _RATE_LIMIT_ANSWER_RE.fullmatch(answer):
         return "rate_limit"
     return ""
 
