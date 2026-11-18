@@ -201,7 +201,8 @@ block that has the record. Error lines are redacted with the keys the provider b
   itself); on exactly that refusal the MCP client searches again without `types`, keeps only
   rows of the asked types, and remembers the refusal for the binding. When such a search
   holds none of the asked types it asks with `types` again, so a server updated meanwhile is
-  not read through the fallback. Any other error is raised.
+  not read through the fallback (a failure of that extra ask keeps the answer). Any other
+  error is raised.
 - Hits with `untrusted: true` (foreign text — server V-11: `checkpoint`, `tool-evidence`,
   `tool-overview`, `insight`) are labelled in the injected context (or dropped with
   `prefetch_untrusted: drop`), and the context tells the model to treat them as data.

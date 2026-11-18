@@ -311,8 +311,8 @@ def _checkpoint_head(call_mcp: Callable[..., dict], server: str, root: str, time
     if remaining < MIN_CALL_S:
         return None
     envelope = _head_search(call_mcp, server, typed, remaining)
-    if _refuses_types(envelope):
-        return None
+    if not isinstance(envelope, Mapping) or envelope.get("ok") is not True:
+        return None  # refused again, or the extra ask failed: no head, as the older server answered
     with _types_refused_lock:
         _types_refused.pop(server, None)
     return _head_in(envelope, title)

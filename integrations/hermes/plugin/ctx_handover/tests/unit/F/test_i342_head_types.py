@@ -113,6 +113,20 @@ def test_a_head_search_without_the_type_misses_the_head_after_the_later_step():
     assert ctxrecords._head_in(envelope, TITLE) is None
 
 
+def test_a_failing_second_ask_keeps_the_memory_and_finds_no_head():
+    ctx = Ctx(refuses=REFUSED)
+    ROWS_BEFORE = list(ROWS)
+    ROWS.clear()
+    try:
+        assert ctxrecords._checkpoint_head(ctx.call_mcp, "ctx", ROOT, 5.0) is None
+        ctx.refuses = "read rate limit exceeded"
+        assert ctxrecords._checkpoint_head(ctx.call_mcp, "ctx", ROOT, 5.0) is None
+    finally:
+        ROWS.extend(ROWS_BEFORE)
+    assert _types_sent(ctx) == [["checkpoint"], None, None, ["checkpoint"]]
+    assert ctxrecords._types_refused == {"ctx": True}
+
+
 def test_after_a_refusal_a_server_updated_meanwhile_is_asked_again():
     ctx = Ctx(refuses=REFUSED)
     assert ctxrecords._checkpoint_head(ctx.call_mcp, "ctx", ROOT, 5.0) == HEAD_ID

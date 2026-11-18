@@ -168,6 +168,17 @@ def test_after_a_refusal_a_server_updated_meanwhile_is_asked_again():
     assert _types_sent(server)[-1] == ["checkpoint"]
 
 
+def test_a_failing_second_ask_leaves_the_answer_of_the_older_server():
+    """The ask after an empty fallback is extra: a rate limit or timeout there must not turn the answer
+    an older server gave (nothing found) into an error."""
+    server = Server(refuses=REFUSED, rows=[])
+    client = McpClient(server.dispatch)
+    assert client.search("checkpoint head", types=["checkpoint"])["results"] == []
+    server.refuses = "read rate limit exceeded (60/min)"
+    assert client.search("checkpoint head", types=["checkpoint"])["results"] == []
+    assert _types_sent(server) == [["checkpoint"], None, None, ["checkpoint"]]
+
+
 def test_the_fallback_keeps_to_the_callers_timeout():
     """The search without types gets what is left of the call's timeout, not a second full one."""
     server = Server(refuses=REFUSED)

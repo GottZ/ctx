@@ -438,10 +438,16 @@ class McpClient:
             if rows is not None:
                 return rows
         data = self._search_rows(*self._call("search", args, self._remaining(deadline)), only_types=wanted)
-        if state == _NO and not data["results"]:
+        left = None if deadline is None else deadline - time.monotonic()
+        if state == _NO and not data["results"] and (left is None or left > 0):
             # Nothing of the asked types without the filter: a server updated since the refusal may
-            # leave those types out of a search that names none, so it is asked again.
-            rows = self._search_with_types(args, wanted, self._remaining(deadline))
+            # leave those types out of a search that names none, so it is asked again. That ask is
+            # extra: when it fails, the answer is the one a server before #342 gave, as before.
+            try:
+                rows = self._search_with_types(args, wanted, left)
+            except CtxApiError as exc:
+                logger.debug("ctx MCP search with types asked again and failed: %s", self._redact(exc))
+                rows = None
             if rows is not None:
                 return rows
         return data
