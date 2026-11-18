@@ -949,9 +949,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// floor read, no pick, no embed.
 	floor := cfg.Pool.ScopeSensitivityFloor
 	if len(req.ShadowTypes) == 0 && !cfg.EmbedBackfill.SyncDisabled {
-		if bfFloor, ferr := h.backfillFloor(ctx, floor); ferr != nil {
-			slog.Warn("query backfill: sensitivity floors unreadable, backfill skipped", "error", ferr, "request_id", requestID)
-		} else if backfilled := h.backfillPending(ctx, bfFloor, ar.ReadScopes, h.embedAdmission(), cfg); backfilled > 0 {
+		if backfilled := h.backfillPending(ctx, floor, ar.ReadScopes, h.embedAdmission(), cfg); backfilled > 0 {
 			slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
 		}
 	}
@@ -1876,7 +1874,7 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 // position — a younger interactive query embed overtakes the waiting
 // backfill rest between two blocks. (Dispatch attribution is separate from
 // the T35b llmlog attribution below, which stays NULL/background in nature.)
-func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFloor, readScopes []string, adm embedcache.Admission, cfg *config.Config) int {
+func (h *QueryHandler) backfillPending(ctx context.Context, callerFloor config.ScopeFloor, readScopes []string, adm embedcache.Admission, cfg *config.Config) int {
 	count := 0
 	syncCap := cfg.EmbedBackfill.SyncCap
 	// Time budget next to the count cap (embed_backfill.sync_budget, issue
@@ -1910,6 +1908,14 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 	// interval is global-only, so this per-request snapshot reads the value
 	// the arm runs on.
 	armRuns := cfg.EmbedBackfill.Interval > 0
+	// The floor of a block the pick can reach is its owner's as well as the
+	// caller's (issue #253); with the arm on the pick reaches the caller's
+	// read scopes, with the arm off every scope.
+	floor, err := h.backfillFloor(ctx, callerFloor, readScopes, !armRuns)
+	if err != nil {
+		slog.Warn("query backfill: sensitivity floors unreadable, backfill skipped", "error", err)
+		return 0
+	}
 	picker := newBackfillPicker(h.pool, armRuns, h.backendPool.TrustCeilings(backends.RoleEmbed), floor, readScopes)
 	picker.backoffBase, picker.backoffCap = cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap
 	for attempts := 0; syncCap <= 0 || attempts < syncCap; attempts++ {

@@ -260,14 +260,22 @@ func TestQueryBackfillOwnerFloor(t *testing.T) {
 
 	// A floor counts only for a scope its tenant owns: the foreign tenant
 	// flooring `private` (the caller's scope, owned by the default tenant)
-	// does not hold the caller's block back.
-	t.Run("floor_of_a_scope_the_tenant_does_not_own", func(t *testing.T) {
-		f, rec := bfsSetup(t), ownfNewRecorder(t)
-		ownfSetFloor(t, f, bfsForeignScope, map[string]string{"private": credentials})
-		f.write(t, f.callerCtx, bfsCallerTitle)
-		ownfQuery(t, f, rec, f.callerCtx, nil, true)
-		if !f.embedded(t, bfsCallerTitle) {
-			t.Error("a tenant's floor on a scope it does not own held back the owner's block")
+	// does not hold the caller's block back. Both arm modes: with the arm on
+	// only the owners of the caller's read scopes are read, with the arm off
+	// every configured floor is, the foreign one among them.
+	for _, armOn := range []bool{true, false} {
+		name := "floor_of_a_scope_the_tenant_does_not_own_arm_off"
+		if armOn {
+			name = "floor_of_a_scope_the_tenant_does_not_own_arm_on"
 		}
-	})
+		t.Run(name, func(t *testing.T) {
+			f, rec := bfsSetup(t), ownfNewRecorder(t)
+			ownfSetFloor(t, f, bfsForeignScope, map[string]string{"private": credentials})
+			f.write(t, f.callerCtx, bfsCallerTitle)
+			ownfQuery(t, f, rec, f.callerCtx, nil, armOn)
+			if !f.embedded(t, bfsCallerTitle) {
+				t.Error("a tenant's floor on a scope it does not own held back the owner's block")
+			}
+		})
+	}
 }
