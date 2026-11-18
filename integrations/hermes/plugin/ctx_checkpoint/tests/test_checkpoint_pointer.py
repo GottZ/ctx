@@ -95,6 +95,8 @@ def test_after_a_checkpoint_the_block_names_the_head_and_the_mcp_read_path():
     assert HEAD_TITLE in block
     assert f'`mcp__ctx__get` id="{head}"' in block
     assert "`mcp__ctx__search`" in block
+    # The passage search names the type (#342) and says what to do on a server that refuses it.
+    assert 'types=["checkpoint"]' in block and "refuses the type" in block
     assert 'category="compaction-checkpoints"' in block
     assert 'query="<words>"' in block and f'query="{ROOT} ' not in block
     assert "a hit is from this conversation when one of these manifests lists its id" in block
@@ -130,7 +132,7 @@ def test_with_memory_features_the_block_keeps_the_memory_text_and_names_the_plug
     assert before.startswith("# CTX Long-Term Memory") and "ctx checkpoint" not in before
     assert after.startswith(before + "\n\n")
     assert f'`ctx_get` block_id="{_head_id(dispatch)}"' in after
-    assert "`ctx_search`" in after and "types_exclude=[]" in after
+    assert "`ctx_search`" in after and 'types=["checkpoint"]' in after and "types_exclude" not in after
     assert "mcp__ctx__get" not in after
 
 
@@ -159,7 +161,7 @@ def test_on_rest_without_memory_features_the_block_names_the_plugin_cli():
     block = provider.system_prompt_block()
 
     assert f"`hermes ctx_checkpoint get {head}`" in block
-    assert "--all-types" in block
+    assert "--type checkpoint" in block and "--all-types" not in block
     assert "mcp__" not in block and "ctx_get" not in block
 
 

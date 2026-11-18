@@ -6,6 +6,67 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.16.0] — 2026-11-18
+
+Checkpoint searches name the `checkpoint` type, over MCP too (GottZ/ctx#342).
+
+- **Why.** ctx plans to leave the types that retrieval never ranks (`checkpoint`,
+  `system-meta`) out of a full-text search that names no type: those searches cannot use the
+  full-text indexes, which leave both types out since ctx migration 145, and read every
+  block's text vectors. A search that names the type keeps finding checkpoint blocks then.
+  Until now the MCP client dropped `types`, because the ctx MCP `search` tool refused a type
+  that retrieval never ranks; a ctx server with #342 takes it.
+- **MCP `search` sends `types`.** The head lookup of the chain writer
+  (`ChainWriter.load_previous_head`: title, category, tag `checkpoint-head`,
+  `types=["checkpoint"]`) and every other search that names types send them. A server before
+  #342 answers `block type "checkpoint" is not retrieval-visible` (ctx v5.8.0 to v5.52.x) or,
+  before v5.8.0, `unexpected additional properties ["types"]`; on exactly that refusal of the
+  sent types `McpClient.search` searches again without `types`, within what is left of the
+  call's timeout, and keeps the rows of the asked types and the rows without a `type` (a
+  server older than that field names none, so this is no strict type filter). The fallback is
+  best effort: the search without `types` fills its limit with every type, so rows of the
+  asked type can fall behind it.
+- **What is remembered.** The refused type per client (or that the argument itself was
+  refused): a search that names other types still sends them, and an older server, which takes
+  the types retrieval ranks, answers it typed. A search whose types were refused before goes
+  without them first and asks with them again when its narrowed answer may differ from the
+  typed one — an asked type has no row, or the narrowing dropped rows — so a server updated
+  meanwhile is not read through the fallback; a typed answer clears the memory. Against an
+  older server that costs one refused call per binding, plus one for such a search: the head
+  lookup by title, category and tag costs one call when it finds the head and two when it finds
+  none. A row without a `type` means a server that predates the filter: no ask again. The ask
+  takes at most half of what is left of the call's timeout (`EXTRA_ASK_SHARE`) and is not sent
+  below 0.5 s (`MIN_EXTRA_ASK_S`), so the chain writer keeps time to read the head; when it
+  fails, the answer stays the one the older server gave, except `unknown block type`, which is
+  raised as it is on a first search. Any other error (an unknown type, a rate limit, another type
+  than the sent ones) is raised as before. The refusal's log line names the server, not the type
+  values. The REST client sent `types` already.
+- **An unknown type is raised on every way.** In a search with `types`, ctx answers
+  `unknown block type "<name>"` only for a name of those types, so the client takes that text
+  for the refusal whatever name it quotes, and raises it on the first search and on the ask
+  again alike. The name is not read: Go quotes it with `%q`, and Hermes' error handling can
+  mask it (a name holding `sk-`, such as `task-list`) or cut it. Before, only a name's first
+  word was read and compared with the sent types, and the ask again answered such a refusal
+  with the older server's rows. The check comes before the one for a never-ranked type, so a
+  name holding that refusal's words is no fallback either.
+- **A staged write is a store's answer only.** The staging refusal (`code="confirm_writes"`,
+  `staged, not stored`, the hash, the advice to use another key) is read from a tool the
+  server stages (`store` here). An error of `search`, `get` or `query` that echoes
+  `confirm_writes` — a search for a type of that name — is raised as that tool's error,
+  uncoded; before, it was reported as a staged write, and the ask again took it for a failing
+  ask. The staged store's message is unchanged.
+- **The agent's read path names the type.** The passage search of the system prompt block and
+  the compaction receipt: `ctx_search … types=["checkpoint"]` with memory features on,
+  `hermes ctx_checkpoint search … --type checkpoint` on REST without them, and
+  `mcp__<server>__search … types=["checkpoint"]` with the instruction to search without
+  `types` if the server refuses the type (the agent calls that tool itself, no client falls
+  back for it). The skill `ctx-memory` says the same.
+- **`ctx_search` takes `types`.** Named types replace the `prefetch_types_exclude` default
+  (which lists `checkpoint`) unless `types_exclude` is given; the CLI's `search` takes
+  `--type` (repeatable) with the same rule.
+- **Unchanged:** every search without `types`, and every answer of a server with #342 to the
+  head lookup (the head carries the type).
+
 ## [ctx_checkpoint 0.15.0] — 2026-11-18
 
 A source part is stored once per identical write (GottZ/ctx#344).

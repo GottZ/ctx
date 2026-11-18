@@ -211,14 +211,16 @@ type searchInput struct {
 	// eighth tool: a new tool raises the selection load of every MCP client,
 	// an optional argument on a known one does not (design/03 §4.8).
 	Cluster string `json:"cluster,omitempty" jsonschema:"restrict to one topic by its stable handle (from the graph surfaces)"`
-	// V-W6: same two fields, same semantics as on queryInput — `types` cuts
-	// against the visible allowlist. This is STRICTER than the identically
-	// named field on REST /api/search, which is a pure opt-in bind parameter
-	// and deliberately keeps retrieval-excluded types browseable (searchRequest,
-	// context_search.go). The MCP tools are a model's retrieval surface, not the
-	// operator browse route, and the A/B measurement they exist for must not be
-	// able to name a type retrieval policy keeps out.
-	Types        []string `json:"types,omitempty" jsonschema:"restrict results to these block types; each name must be a retrieval-visible type (unknown or non-visible name is an error)"`
+	// V-W6, widened by #342: `types` names any type of the caller's registry
+	// snapshot, the retrieval-excluded ones (checkpoint, system-meta, the
+	// derived layers) included, and an unknown name is a tool error
+	// (resolveMCPKnownTypes). The tool answers rows of those types without a
+	// filter, so naming one only narrows an answer the key already gets; until
+	// #342 the field cut against the retrieval-visible set like queryInput's,
+	// and a client could not narrow a search to its checkpoint blocks. REST
+	// /api/search binds the field without any check (an unknown name matches
+	// nothing); the query tool keeps the retrieval-visible cut.
+	Types        []string `json:"types,omitempty" jsonschema:"restrict results to these block types; any registered type, including checkpoint and system-meta, which query never ranks (an unknown name is an error)"`
 	TypesExclude []string `json:"types_exclude,omitempty" jsonschema:"exclude these block types from the results"`
 	// BlockRolesExclude is the documented legacy alias of types_exclude (seam
 	// 17), accepted here since T03-9 (E03-3 = A). Before that this tool was the
@@ -255,12 +257,12 @@ func (input searchInput) coreArgs(facetEnabled bool) searchArgs {
 		// read by the core exactly as REST's.
 		Compact: !input.IncludeContent,
 		After:   input.After,
-		// V-W6: `types` CUTS against the caller's retrieval-visible set here,
-		// and an unknown or non-visible name is a tool error. That strictness is
-		// the documented difference to the REST browse route and stays a visible
-		// field rather than a hidden branch (mcp.go searchInput.Types).
-		VisibleTypesOnly: true,
-		FacetEnabled:     facetEnabled,
+		// `types` names registered types only: an unknown name is a tool error
+		// here, while the REST browse route binds any name. That strictness is
+		// the documented difference between the two and stays a visible field
+		// rather than a hidden branch (mcp.go searchInput.Types).
+		KnownTypesOnly: true,
+		FacetEnabled:   facetEnabled,
 	}
 }
 
@@ -367,8 +369,9 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 // unfiltered would silently WIDEN what the caller asked to narrow.
 const mcpTypeFilterUnwired = "type filter unavailable: block-type registry not wired"
 
-// resolveMCPVisibleTypes turns the `types` argument of the MCP retrieval tools
-// into the effective allowlist: intersect(set.VisibleTypes(), requested).
+// resolveMCPVisibleTypes turns the `types` argument of the MCP query tool into
+// the effective allowlist: intersect(set.VisibleTypes(), requested). (The
+// search tool used it too until #342; it now takes resolveMCPKnownTypes.)
 //
 // `types` CUTS, it does not assign. Two rejections keep that honest instead of
 // silent:
@@ -415,6 +418,45 @@ func resolveMCPVisibleTypes(set *blocktype.Set, requested []string) ([]string, s
 		}
 	}
 	return cut, ""
+}
+
+// resolveMCPKnownTypes turns the `types` argument of the MCP search tool into
+// the list the statement binds (#342). It admits every type of the request's
+// registry snapshot, the retrieval-excluded ones included. The search tool
+// answers rows of those types without a filter, so naming one narrows an answer
+// the key already gets and grants nothing: the statement still applies the
+// key's read scopes and grants. Retrieval visibility matters where a type's
+// policy decides whether it is ranked at all — the query tool, which keeps
+// resolveMCPVisibleTypes.
+//
+// An unknown name stays a refusal, worded as before, so a typo does not read as
+// "nothing matched". The snapshot is the request's tenant-resolved one
+// (Registry.SnapshotForRequest): a type another tenant registered for itself is
+// not in it and is refused exactly like a name nobody registered, so the answer
+// says nothing about other tenants' types.
+//
+// An empty/absent list returns (nil, "") — the caller binds no type filter, as
+// before the field existed. Duplicates are dropped; the second return value is
+// the refusal text, empty when there is none.
+func resolveMCPKnownTypes(set *blocktype.Set, requested []string) ([]string, string) {
+	if len(requested) == 0 {
+		return nil, ""
+	}
+	if set == nil {
+		return nil, mcpTypeFilterUnwired
+	}
+	known := make([]string, 0, len(requested))
+	seen := make(map[string]bool, len(requested))
+	for _, name := range requested {
+		if _, ok := set.Resolve(name); !ok {
+			return nil, fmt.Sprintf("unknown block type %q", name)
+		}
+		if !seen[name] {
+			seen[name] = true
+			known = append(known, name)
+		}
+	}
+	return known, ""
 }
 
 // mcpQueryTypesExclude folds the query tool's positive cut into the ONE seam

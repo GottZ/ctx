@@ -94,11 +94,12 @@ func (req searchRequest) coreArgs(limit int, compact bool, after *store.SearchCu
 		Limit:             limit,
 		Compact:           compact,
 		After:             after,
-		// VisibleTypesOnly stays FALSE here: on the browse route `types` is a
-		// pure opt-in bind parameter and retrieval-excluded types stay
-		// browseable (D5). The strict reading belongs to the MCP tool alone.
-		VisibleTypesOnly: false,
-		FacetEnabled:     facetEnabled,
+		// KnownTypesOnly stays FALSE here: on the browse route `types` is a
+		// pure opt-in bind parameter, an unknown name matches nothing, and
+		// retrieval-excluded types stay browseable (D5). The refusal of an
+		// unknown name belongs to the MCP tool alone.
+		KnownTypesOnly: false,
+		FacetEnabled:   facetEnabled,
 	}
 }
 

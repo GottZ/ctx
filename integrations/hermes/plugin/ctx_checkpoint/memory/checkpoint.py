@@ -46,7 +46,7 @@ from .client import (
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.15.0"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
+PLUGIN_VERSION = "0.16.0"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
 UPSTREAM_REF = "GottZ/ctx integrations/hermes/plugin/ctx_checkpoint 0.4.3 @ 38fdb74 (MPL-2.0)"
 
 CATEGORY_CHECKPOINT = "compaction-checkpoints"
@@ -840,26 +840,34 @@ class ReadTools:
     search: str
 
 
-# Memory features on: the plugin's own tools. Their search leaves checkpoint blocks out unless
-# ``types_exclude`` is given (the ``prefetch_types_exclude`` default lists ``checkpoint``).
+# The passage search names the checkpoint type (0.16.0, GottZ/ctx#342): ctx may leave the types that
+# retrieval never ranks out of a search that names no type, so a search without it would stop
+# finding saved turns there.
+#
+# Memory features on: the plugin's own tools. Named ``types`` replace the ``prefetch_types_exclude``
+# default (which lists ``checkpoint``); the client falls back for a server that refuses them.
 PLUGIN_READ_TOOLS = ReadTools(
     get='`ctx_get` block_id="{id}"',
-    search='`ctx_search` category="{category}" query="{query}" types_exclude=[]',
+    search='`ctx_search` category="{category}" query="{query}" types=["checkpoint"]',
 )
 # transport rest without memory features: no agent tool; the plugin CLI reads over REST.
 CLI_READ_TOOLS = ReadTools(
     get="`hermes ctx_checkpoint get {id}` in a terminal",
-    search='`hermes ctx_checkpoint search "{query}" --category {category} --all-types`',
+    search='`hermes ctx_checkpoint search "{query}" --category {category} --type checkpoint`',
 )
 
 
 def mcp_read_tools(get_tool: str, search_tool: str) -> ReadTools:
-    """The ctx MCP server's ``get``/``search`` tools under their Hermes tool names. The MCP
-    ``search`` returns checkpoint blocks without a type filter (a ``types`` filter naming
-    ``checkpoint`` is refused: the type is not retrieval-visible)."""
+    """The ctx MCP server's ``get``/``search`` tools under their Hermes tool names. The agent calls
+    the MCP ``search`` itself, so no client falls back for it: a ctx server before GottZ/ctx#342
+    refuses ``types=["checkpoint"]`` (the type is not retrieval-visible there) and answers the same
+    search without ``types`` with checkpoint blocks among the rows."""
     return ReadTools(
         get=f'`{get_tool}` id="{{id}}"',
-        search=f'`{search_tool}` category="{{category}}" query="{{query}}"',
+        search=(
+            f'`{search_tool}` category="{{category}}" query="{{query}}" types=["checkpoint"] '
+            "(if it refuses the type: the same without types)"
+        ),
     )
 
 
@@ -1138,11 +1146,11 @@ class ChainWriter:
         published over it. Its dedupe keys are not taken over; the blocks of the earlier chain stay.
         ``record_invalid=False`` (the 0.6.0 title, whose head is not replaced): only logged.
 
-        Narrowed to heads by their tag (every head carries ``checkpoint-head``). Parts and
-        manifests share the ``checkpoint`` type, and the MCP transport drops ``types``
-        altogether, so without the tag source parts that talk about checkpoints or
-        headings could rank ahead of the head and push it out of the result window,
-        silently starting a new chain (0.6.1).
+        Narrowed to heads by their tag (every head carries ``checkpoint-head``) and to the
+        ``checkpoint`` type. Parts and manifests share that type, and a ctx server before
+        GottZ/ctx#342 refuses the type over MCP (the client then searches without it), so without
+        the tag source parts that talk about checkpoints or headings could rank ahead of the head
+        and push it out of the result window, silently starting a new chain (0.6.1).
 
         With ``root_session_id`` (the lookup under the 0.6.0 title) a head whose metadata
         names another root counts as no head: under that title ``team/alice:1`` and

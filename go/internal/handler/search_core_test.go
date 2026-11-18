@@ -96,19 +96,19 @@ func TestSearchAliasAloneBindsLikeTheCanonicalName(t *testing.T) {
 }
 
 // TestSearchTypeStrictnessStaysATransportProperty pins the ONE documented
-// difference between the two surfaces (V-W6, design/03 §4.9): on the tool
-// surface `types` CUTS against the caller's retrieval-visible set and an
-// unknown/non-visible name is a refusal; on the REST browse route the same name
-// is a pure opt-in bind parameter and retrieval-excluded types stay browseable
-// (D5). It is a field, not a hidden branch — and it must not flip by accident in
-// either direction: flipping it on would take browseability away from operators,
-// flipping it off would widen a model's retrieval surface without an admin gate.
+// difference between the two surfaces (V-W6, #342, design/03 §4.9): on the tool
+// surface every `types` name has to be a registered type and an unknown name is
+// a refusal; on the REST browse route the same name is a pure opt-in bind
+// parameter that an unknown name leaves without rows. It is a field, not a
+// hidden branch — and it must not flip by accident in either direction: on for
+// REST would turn a request that answers today into a 400, off for the tool
+// would answer a typo with "nothing matched".
 func TestSearchTypeStrictnessStaysATransportProperty(t *testing.T) {
-	if (searchRequest{}).coreArgs(10, true, nil, false).VisibleTypesOnly {
-		t.Error("REST /api/search must NOT cut against the visible set (D5 browse asymmetry)")
+	if (searchRequest{}).coreArgs(10, true, nil, false).KnownTypesOnly {
+		t.Error("REST /api/search must NOT refuse type names (pure bind parameter)")
 	}
-	if !(searchInput{}).coreArgs(false).VisibleTypesOnly {
-		t.Error("the MCP search tool MUST cut against the visible set (V-W6)")
+	if !(searchInput{}).coreArgs(false).KnownTypesOnly {
+		t.Error("the MCP search tool MUST refuse an unknown type name (V-W6)")
 	}
 	// Without the #206/#207 arguments the tool answers compact rows from page 1,
 	// as it always did; with them it reads full rows and the caller's cursor.

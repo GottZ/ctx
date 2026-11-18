@@ -54,6 +54,14 @@ _TYPES_EXCLUDE_PROP = {
         "(checkpoint, tool-evidence, tool-overview); pass [] to exclude nothing."
     ),
 }
+# ctx_search's own: named types replace the configured default (``_tool_search``).
+_SEARCH_TYPES_EXCLUDE_PROP = {
+    **_TYPES_EXCLUDE_PROP,
+    "description": (
+        "Block types to exclude. Omitted, it is [] when types names a type and the configured default "
+        "(checkpoint, tool-evidence, tool-overview) otherwise; pass [] to exclude nothing."
+    ),
+}
 
 QUERY_SCHEMA = {
     "name": "ctx_query",
@@ -139,7 +147,17 @@ SEARCH_SCHEMA = {
                 "items": {"type": "string"},
                 "description": "Optional tag filter (matches blocks carrying ANY of these tags).",
             },
-            "types_exclude": _TYPES_EXCLUDE_PROP,
+            "types": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    'Optional: only blocks of these types (e.g. ["checkpoint"] for the saved turns of a '
+                    "compaction checkpoint). Given types_exclude defaults to []. An older ctx server that "
+                    "refuses the type is searched without it: the result then keeps rows of these types and "
+                    "rows without a type, and can miss matches that other types crowd out."
+                ),
+            },
+            "types_exclude": _SEARCH_TYPES_EXCLUDE_PROP,
         },
         "required": ["query"],
     },
@@ -355,8 +373,12 @@ def _tool_search(provider, args: dict[str, Any]) -> str:
         return tool_error("query is required")
     category = str(args.get("category") or "").strip() or None
     tags = _str_list(args.get("tags"))
+    types = [t.lower() for t in _str_list(args.get("types"))]
+    # Named types are what the caller asked for: the configured default exclusion (checkpoint among
+    # it) does not apply to them unless types_exclude is given.
+    types_exclude = [] if types and args.get("types_exclude") is None else _types_exclude_arg(provider, args)
     data = provider._client.search(
-        query, category=category, tags=tags or None, types_exclude=_types_exclude_arg(provider, args)
+        query, category=category, tags=tags or None, types=types or None, types_exclude=types_exclude
     )
     if not data.get("success"):
         return tool_error(f"CTX search failed: {_safe(provider, data.get('error') or 'unknown error')}")

@@ -11,9 +11,19 @@ What the ctx MCP tools answer (``go/internal/handler/mcp.go``) and how it is map
 
 - ``search`` → JSON list of block previews (``id``, ``title``, ``category``, ``type``,
   ``untrusted``, ``content``/``content_preview``, ``score`` …) → ``{"success", "results",
-  "count"}``. The MCP tool rejects a ``types`` filter that names a retrieval-excluded type
-  (``checkpoint``), while results of every type are returned when no filter is given — so
-  ``types`` is dropped here on purpose and the chain writer's head lookup works by title.
+  "count"}``. ``types`` is sent (0.16.0, GottZ/ctx#342): a ctx server with #342 takes every
+  registered type there, ``checkpoint`` included. An older one refuses a type that retrieval never
+  ranks — ``block type "checkpoint" is not retrieval-visible`` (ctx v5.8.0 to v5.52.x) — or, before
+  v5.8.0, the argument itself (``unexpected additional properties ["types"]``). On exactly that
+  refusal the call is repeated without ``types`` and the rows are narrowed here to the asked types
+  (a row without a ``type`` is kept: such a server names none). The refused type is remembered per
+  client; a search naming other types still sends them. A search whose types were refused before
+  goes without them first and asks with them again when the narrowed answer may differ from the
+  typed one (an asked type has no row, or the narrowing dropped rows), with at most half of the
+  time left, so a server updated meanwhile is not read through the fallback. ``unknown block
+  type`` is raised on every way, that ask included, whatever name it quotes (ctx names only a
+  name of ``types`` there; Hermes can mask or cut it). Any other error of that extra ask keeps
+  the fallback answer; any other error of the search itself is raised.
 - ``query`` → prose answer followed by ``Sources:`` lines ``[N] title (category) id:uuid``,
   ``key:value`` tokens after the id kept (`` superseded_by:<uuid>`` is read), and an indented
   ``untrusted_origin:<type> (…)`` line under a source with that record (ctx v5.41.0, #280), read
@@ -37,7 +47,8 @@ What the ctx MCP tools answer (``go/internal/handler/mcp.go``) and how it is map
   applies. A ``confirm_writes`` key gets the write STAGED instead (``mcp_confirm.go``),
   which also arrives as an error envelope; it maps to ``code="confirm_writes"`` and is
   refused — writes from this plugin run unattended and are never confirmed on the
-  operator's behalf (0.6.1).
+  operator's behalf (0.6.1). Only a tool the server stages is read that way: a search
+  error that echoes ``confirm_writes`` (a type of that name) is the search's error.
 - ``get`` → the full block JSON → ``{"success", "block"}``.
 
 Hermes wraps every MCP text result as ``{"result": "<text>"}`` (``tools/mcp_tool_handlers``)
@@ -60,6 +71,7 @@ import json
 import logging
 import re
 import threading
+import time
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -90,6 +102,40 @@ _MAX_CONTENT_FETCH = 10  # query(include_content=True) over MCP: one get per sou
 _UNKNOWN_ARGS_MARKER = "unexpected additional properties"
 _UNKNOWN, _PROBING, _YES, _NO = "unknown", "probing", "yes", "no"  # McpClient._query_retrieval_state
 _RETRIEVAL_ARGS_RE = re.compile(r"\b(?:synthesize|include_content)\b")
+# A ctx server before GottZ/ctx#342 refusing a ``types`` filter that names a type retrieval never
+# ranks (``handler/mcp.go`` ``resolveMCPVisibleTypes``, v5.8.0 to v5.52.x). The name is read between
+# the words, not with its quotes, for the same reason as :func:`_refuses_retrieval_args`.
+_TYPE_NOT_VISIBLE_RE = re.compile(r"\bblock type\W+([A-Za-z0-9_.:-]+)\W+is not retrieval-visible\b")
+_TYPES_ARG_RE = re.compile(r"\btypes\b")
+# Any ctx server refusing a type name it does not know (``unknown block type "<name>"``): a caller error. The search
+# tool names only a name of the search's ``types`` there (``handler/mcp.go`` ``resolveMCPKnownTypes``), so the words
+# decide and the name is not read: Hermes' error handling can mask it (a name holding ``sk-``) or cut it.
+_UNKNOWN_TYPE_RE = re.compile(r"\bunknown block type\b")
+# The tools a ctx server stages for a key with confirm_writes (``mcpStageStore`` and its update, archive and blob
+# twins); of them this client sends store. A read tool is never staged, so its error is never taken for a staged
+# write, whatever it echoes (a type named ``confirm_writes``).
+_STAGING_TOOLS = frozenset({"store", "update", "archive", "blob_store", "blob_link"})
+# In McpClient's memory of refusals: the server refused the ``types`` argument itself (before v5.8.0).
+_TYPES_ARGUMENT = ""
+EXTRA_ASK_SHARE = 0.5
+"""After a remembered refusal, the ask with ``types`` again (:meth:`McpClient.search`) takes at most this
+share of what is left of the call's timeout: the rest stays with the caller's next call, as the chain
+writer's read of the head the search found."""
+MIN_EXTRA_ASK_S = 0.5
+"""The ask with ``types`` again is not sent with less time than this: the shortest timeout the chain
+writer gives a call (``ChainWriter._call``)."""
+
+
+def _refused_type(text: str, types: Iterable[str]) -> str | None:
+    """What a search tool error refuses of the ``types`` sent, when it is an older server's refusal: the
+    type the filter names that is not retrieval-visible there, or :data:`_TYPES_ARGUMENT` when the server
+    does not know the argument. ``None`` for any other error."""
+    match = _TYPE_NOT_VISIBLE_RE.search(text)
+    if match is not None:
+        return match.group(1) if match.group(1) in set(types) else None
+    if _UNKNOWN_ARGS_MARKER in text.lower() and _TYPES_ARG_RE.search(text) is not None:
+        return _TYPES_ARGUMENT
+    return None
 
 
 def _refuses_retrieval_args(text: str) -> bool:
@@ -105,6 +151,41 @@ class _RetrievalArgsRefused(CtxApiError):
     """The server refused ``synthesize``/``include_content`` (a server from before GottZ/ctx#183).
     Told apart on the text as it arrived, before redaction: a failing redactor withholds the text
     and must not cost the fallback to ``search``."""
+
+
+class _TypesRefused(CtxApiError):
+    """The server refused the ``types`` of a search (a server from before GottZ/ctx#342). Told
+    apart on the text as it arrived, before redaction, like :class:`_RetrievalArgsRefused`.
+    ``refused`` is the refused type name, or :data:`_TYPES_ARGUMENT` for the argument itself."""
+
+    refused = _TYPES_ARGUMENT
+
+
+class _TypesUnknown(CtxApiError):
+    """The server does not know a type the search names: a caller error, raised wherever it comes."""
+
+
+def _refusal_kind(tool: str, args: dict[str, Any], text: str) -> tuple[type[CtxApiError], str | None]:
+    """The error class for a tool error ``text`` and, for :class:`_TypesRefused`, what it refuses. Only
+    the refusal of exactly the ``types`` this search sent counts as one."""
+    types = args.get("types")
+    if tool == "search" and types:
+        # The unknown name first: it can hold the words of the other refusal.
+        if _UNKNOWN_TYPE_RE.search(text) is not None:
+            return _TypesUnknown, None
+        refused = _refused_type(text, types)
+        if refused is not None:
+            return _TypesRefused, refused
+    if _refuses_retrieval_args(text):
+        return _RetrievalArgsRefused, None
+    return CtxApiError, None
+
+
+def _raise_kind(kind: type[CtxApiError], refused: str | None, message: str, **kwargs: Any) -> CtxApiError:
+    error = kind(message, **kwargs)
+    if isinstance(error, _TypesRefused) and refused is not None:
+        error.refused = refused
+    return error
 
 
 def _find_value(value: Any, key: str) -> str | None:
@@ -130,9 +211,9 @@ def _find_value(value: Any, key: str) -> str | None:
     return None
 
 
-def _code_for_error(text: str) -> str:
+def _code_for_error(tool: str, text: str) -> str:
     lowered = text.lower()
-    if lowered.lstrip().startswith("staged") or "confirm_writes" in lowered:
+    if tool in _STAGING_TOOLS and (lowered.lstrip().startswith("staged") or "confirm_writes" in lowered):
         return "confirm_writes"
     if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
         return "rate_limit"
@@ -276,6 +357,11 @@ class McpClient:
         # once, not once per overlapping call), then "yes" or "no" ("no" = search from then on).
         self._query_retrieval_state = _UNKNOWN
         self._query_retrieval_lock = threading.Lock()
+        # What the server's search tool refused of the ``types`` this client sent (GottZ/ctx#342): the
+        # type names a server before #342 calls not retrieval-visible, and _TYPES_ARGUMENT when it
+        # refused the argument itself. A search naming none of them sends its types first.
+        self._refused_types: set[str] = set()
+        self._search_types_lock = threading.Lock()
 
     @property
     def server_name(self) -> str:
@@ -316,8 +402,8 @@ class McpClient:
         except CtxApiError:
             raise
         except Exception as exc:
-            kind = _RetrievalArgsRefused if _refuses_retrieval_args(str(exc)) else CtxApiError
-            failure = kind(f"mcp dispatch failed: {type(exc).__name__}: {self._redact(exc)}")
+            kind, refused = _refusal_kind(tool, args, str(exc))
+            failure = _raise_kind(kind, refused, f"mcp dispatch failed: {type(exc).__name__}: {self._redact(exc)}")
         if failure is not None:
             # Raised after the handler and without the original: its text is unredacted, and raised
             # in the handler it would stay the implicit ``__context__`` (#304).
@@ -332,7 +418,7 @@ class McpClient:
             error = payload.get("error")
             if error:
                 text = str(error)
-                code = _code_for_error(text)
+                code = _code_for_error(tool, text)
                 if code == "confirm_writes":
                     # Guidance and hash first: the chain writer keeps only the first 200
                     # characters of this message, and the server name is the variable part.
@@ -344,9 +430,13 @@ class McpClient:
                         + f"use a key without confirm_writes for mcp_servers.{self._server}",
                         code=code,
                     )
-                kind = _RetrievalArgsRefused if _refuses_retrieval_args(text) else CtxApiError
-                raise kind(
-                    f"mcp {tool}: {self._redact(text)[:300]}", status=429 if code == "rate_limit" else None, code=code
+                kind, refused = _refusal_kind(tool, args, text)
+                raise _raise_kind(
+                    kind,
+                    refused,
+                    f"mcp {tool}: {self._redact(text)[:300]}",
+                    status=429 if code == "rate_limit" else None,
+                    code=code,
                 )
             if "result" in payload and isinstance(payload["result"], str):
                 return payload, payload["result"]
@@ -385,7 +475,72 @@ class McpClient:
             args["types_exclude"] = list(types_exclude)
         if limit:
             args["limit"] = int(limit)
-        payload, body = self._call("search", args, timeout)
+        wanted = list(dict.fromkeys(str(t) for t in types or () if t))
+        if not wanted:
+            return self._search_rows(*self._call("search", args, timeout))
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._search_types_lock:
+            remembered = _TYPES_ARGUMENT in self._refused_types or not self._refused_types.isdisjoint(wanted)
+        if not remembered:
+            data = self._search_with_types(args, wanted, self._remaining(deadline))
+            if data is not None:
+                return data
+        payload, body = self._call("search", args, self._remaining(deadline))
+        rows = self._rows(payload, body)
+        kept = [row for row in rows if not row.get("type") or row.get("type") in wanted]
+        if remembered and _worth_asking_again(wanted, rows, kept):
+            # The refusal was remembered from an earlier search, and this answer is one a typed search
+            # might answer otherwise: an asked type has no row (a server updated since may leave it out
+            # of a search that names no type), or the narrowing dropped rows (a typed search would have
+            # spent those places on rows of the asked types). So it is asked again — extra, with a share
+            # of the time left, and when that ask fails, the answer is the one an older server gave.
+            left = None if deadline is None else (deadline - time.monotonic()) * EXTRA_ASK_SHARE
+            if left is None or left >= MIN_EXTRA_ASK_S:
+                try:
+                    data = self._search_with_types(args, wanted, left)
+                except _TypesUnknown:
+                    raise
+                except CtxApiError as exc:
+                    logger.debug("ctx MCP search with types asked again and failed: %s", self._redact(exc))
+                    data = None
+                if data is not None:
+                    return data
+        return {"success": True, "results": kept, "count": len(kept)}
+
+    def _search_with_types(
+        self, args: dict[str, Any], wanted: list[str], timeout: float | None
+    ) -> dict[str, Any] | None:
+        """The search with ``types``; ``None`` (and remembered) when the server refuses them. The log
+        names the server, never the type values (a caller can put anything there)."""
+        try:
+            payload, body = self._call("search", {**args, "types": wanted}, timeout)
+        except _TypesRefused as exc:
+            with self._search_types_lock:
+                if not self._refused_types:
+                    logger.info(
+                        "ctx MCP server %r refuses a type in the search filter (a server before GottZ/ctx#342); "
+                        "such searches run without types and keep the rows of the asked types",
+                        self._server,
+                    )
+                self._refused_types.add(exc.refused)
+            return None
+        with self._search_types_lock:
+            self._refused_types.difference_update(wanted)
+            self._refused_types.discard(_TYPES_ARGUMENT)
+        return self._search_rows(payload, body)
+
+    @staticmethod
+    def _remaining(deadline: float | None) -> float | None:
+        """What is left of a call's ``timeout`` for its second dispatch; raises when nothing is."""
+        if deadline is None:
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CtxApiError("mcp search: no time left for the search without types", code="timeout")
+        return remaining
+
+    def _rows(self, payload: Any, body: str) -> list[dict[str, Any]]:
+        """The rows of a search answer."""
         results = self._as_json(body)
         if results is None and isinstance(payload, list):
             results = payload
@@ -393,7 +548,11 @@ class McpClient:
             results = results["results"]
         if not isinstance(results, list):
             results = []
-        rows = [r for r in results if isinstance(r, dict)]
+        return [r for r in results if isinstance(r, dict)]
+
+    def _search_rows(self, payload: Any, body: str) -> dict[str, Any]:
+        """The search answer as ``{"success", "results", "count"}``."""
+        rows = self._rows(payload, body)
         return {"success": True, "results": rows, "count": len(rows)}
 
     def query(
@@ -546,6 +705,15 @@ class McpClient:
         if isinstance(block.get("block"), dict):
             block = block["block"]
         return {"success": True, "block": block}
+
+
+def _worth_asking_again(wanted: list[str], rows: list[dict[str, Any]], kept: list[dict[str, Any]]) -> bool:
+    """Whether an answer without ``types``, narrowed to ``kept``, may differ from the typed answer: an
+    asked type has no row, or the narrowing dropped rows. Not when a row carries no ``type``: such a
+    server predates the type filter and cannot take it."""
+    if any(not row.get("type") for row in rows):
+        return False
+    return len(kept) < len(rows) or not set(wanted) <= {row.get("type") for row in kept}
 
 
 def _store_id(payload: Any, text: str) -> str | None:

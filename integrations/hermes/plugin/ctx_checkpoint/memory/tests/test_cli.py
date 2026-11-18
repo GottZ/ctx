@@ -157,6 +157,17 @@ def test_search_and_query_honour_types_exclude(run, capsys):
     assert "42" in out and "[untrusted" in out and "<insight>" in out
 
 
+def test_search_type_names_the_types_and_drops_the_default_exclusion(run):
+    """``--type`` (GottZ/ctx#342): the read path's passage search names the checkpoint type, so it
+    still finds saved turns where a search without a type leaves them out."""
+    run("search", "proxy", "--type", "checkpoint", "--category", "compaction-checkpoints")
+    run("search", "proxy")
+    named, plain = _calls("search")
+    assert named["types"] == ["checkpoint"] and named["types_exclude"] is None
+    assert named["category"] == "compaction-checkpoints"
+    assert plain["types"] is None and plain["types_exclude"] == list(DEFAULT_PREFETCH_TYPES_EXCLUDE)
+
+
 def test_get_goes_through_client_get_block(run, capsys):
     assert run("get", "019f6000-0000-7000-8000-000000000001") == 0
     assert _calls("get") == [{"block_id": "019f6000-0000-7000-8000-000000000001"}]
