@@ -263,12 +263,13 @@ func SettleBlockReads(ctx context.Context, pool *pgxpool.Pool) error {
 //     with a delete and with an explicit FOR UPDATE, never with an update or
 //     an archive (FOR NO KEY UPDATE). SKIP LOCKED therefore skips the rows a
 //     delete in flight holds — the insert never waits behind a purge — and
-//     also the rows a picker holds FOR UPDATE at that moment: the guard batch
-//     (for its transaction), the embedding backfill and migration (over the
-//     embed call) and the dream pick. Waiting instead would hold one of the
-//     two insert slots for as long as those run. A skipped row is counted
-//     (BlockReadsLost); the types the record exists for (checkpoint, insight)
-//     are on none of those pickers' paths;
+//     also the rows a picker holds FOR UPDATE at that moment: the embedding
+//     backfill and migration (over the embed call) and the dream pick. The
+//     guard batch holds its blocks FOR NO KEY UPDATE (issue #359), which does
+//     not conflict, so a block under its duplicate check is recorded. Waiting
+//     instead would hold one of the two insert slots for as long as those
+//     run. A skipped row is counted (BlockReadsLost); the types the record
+//     exists for (checkpoint, insight) are on none of those pickers' paths;
 //   - the key row is joined the same way: a key deleted since it
 //     authenticated skips its rows (api_key_id is a foreign key too), and
 //     principal_id is read from it — the person anchor of LogAccess (096).

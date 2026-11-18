@@ -185,14 +185,22 @@ func RunGuardBatch(ctx context.Context, pool interface {
 		// Fetch pending blocks (the shared guardPendingWhere fragment: unchecked,
 		// not archived, not index, has embedding, knowledge lifecycle, policy
 		// type allowlist). ORDER BY created_at ASC rides idx_guard_pending (M074).
-		// FOR UPDATE SKIP LOCKED prevents concurrent guard runs from processing
-		// the same blocks; row locks are held for the duration of the transaction.
+		// SKIP LOCKED prevents concurrent guard runs from processing the same
+		// blocks; row locks are held for the duration of the transaction.
+		//
+		// FOR NO KEY UPDATE, not FOR UPDATE (issue #359): it is the lock the
+		// verdict's own UPDATE takes (no key column changes), and it does not
+		// conflict with the key-share lock a foreign-key check takes. Another
+		// run's audit row names one of these blocks as its matched neighbour
+		// (matched_block_id); under FOR UPDATE that insert waited for this
+		// whole batch, and two runs holding each other's neighbours waited
+		// for each other until PostgreSQL aborted one insert with 40P01.
 		rows, err := tx.Query(ctx,
 			`SELECT id, type_name FROM context_blocks
 			WHERE `+guardPendingWhere("$1")+`
 			ORDER BY created_at ASC
 			LIMIT $2
-			FOR UPDATE SKIP LOCKED`,
+			FOR NO KEY UPDATE SKIP LOCKED`,
 			checkTypes, limit,
 		)
 		if err != nil {
@@ -263,7 +271,9 @@ func savepointName(blockID string) string {
 // processBlock runs checkBlock + applyDecision + writeAuditLog for a single
 // block inside its own SAVEPOINT. Returns true iff all three steps succeeded.
 // On any error the savepoint is rolled back so the surrounding transaction
-// stays usable for the next block.
+// stays usable for the next block. A verdict that would archive the block
+// first claims both of its blocks (claimArchivePair); an unclaimed verdict
+// rolls back the same way and leaves the block pending, without an error.
 //
 // The per-type policy resolves HERE (by the block's type name) — one policy
 // source for the SQL decision, the persisted metadata and the audit row:
@@ -295,6 +305,23 @@ func processBlock(ctx context.Context, tx pgx.Tx, block pendingBlock, set *block
 		return false
 	}
 
+	if archives(result.Decision, mode) && result.MatchedID != nil {
+		claimed, err := claimArchivePair(ctx, tx, blockID, *result.MatchedID)
+		if err != nil {
+			slog.Error("guard: claim archive failed", "block_id", blockID, "error", err)
+			rollbackToSavepoint(ctx, tx, sp)
+			return false
+		}
+		if !claimed {
+			// Not an error: the block stays pending and the next run checks
+			// it against what the concurrent decision left.
+			slog.Info("guard: archive verdict meets a concurrent one, block left for the next run",
+				"block_id", blockID, "matched_id", *result.MatchedID)
+			rollbackToSavepoint(ctx, tx, sp)
+			return false
+		}
+	}
+
 	if err := applyDecision(ctx, tx, blockID, result, mode); err != nil {
 		slog.Error("guard: apply decision failed", "block_id", blockID, "error", err)
 		rollbackToSavepoint(ctx, tx, sp)
@@ -319,6 +346,64 @@ func processBlock(ctx context.Context, tx pgx.Tx, block pendingBlock, set *block
 		"similarity", result.Similarity,
 	)
 	return true
+}
+
+// archives reports whether a verdict archives the checked block: a
+// near_duplicate in every mode except flag (applyDecision's archive branch).
+func archives(decision, mode string) bool {
+	return decision == "near_duplicate" && mode != blocktype.GuardModeFlag
+}
+
+// archiveLockSQL takes, without waiting, the transaction-level advisory locks
+// of both blocks of an archive verdict: the lower id first, the higher only
+// when the lower was free (CASE fixes the order of evaluation, so two runs
+// that want the same two locks cannot each end up holding one). One key per
+// block in a two-key class of its own ('ctx:guard-archive'), which shares no
+// key with the one-key advisory locks or the supersedes-guess class.
+const archiveLockSQL = `SELECT CASE
+	WHEN pg_try_advisory_xact_lock(hashtext('ctx:guard-archive'), hashtext(least($1::uuid, $2::uuid)::text))
+	THEN pg_try_advisory_xact_lock(hashtext('ctx:guard-archive'), hashtext(greatest($1::uuid, $2::uuid)::text))
+	ELSE false END`
+
+// archiveNeighbourLiveSQL reads, in a statement of its own after the locks,
+// whether the matched neighbour still stands.
+const archiveNeighbourLiveSQL = `SELECT EXISTS (SELECT 1 FROM context_blocks WHERE id = $1 AND NOT is_archived)`
+
+// claimArchivePair makes an archive verdict exclusive per block across
+// concurrent guard runs (issue #359): archiving blockID against matchedID
+// first takes the advisory locks of both blocks, then reads that matchedID
+// still stands. Each run checks its block in its own snapshot, where another
+// run's uncommitted archive is invisible, and the pick cannot order the runs
+// by neighbour, because it takes its blocks before any neighbour is known.
+//
+// Locking both ends, not only the pair, is what keeps archives from closing a
+// cycle of any length: two archive verdicts that share a block cannot be in
+// flight at the same time, and the later one reads the earlier one's archive
+// after its locks. A→B and B→A cannot both stand, nor A→B, B→C, C→A — where
+// C finds A as its neighbour only once B is gone, three different pairs.
+//
+// It returns false, and the caller leaves the block pending for the next run,
+// when another transaction holds either lock (it is deciding an archive that
+// involves one of the two blocks; the decision becomes visible with its
+// commit) or when the neighbour no longer stands. The read comes AFTER the
+// locks, in a statement of its own: the check's snapshot predates them, and
+// an archive committed in between is visible only to a later statement. The
+// locks never wait, so they add no edge a lock cycle could run through; they
+// are held to the end of the batch transaction, when its archives become
+// visible (a rolled-back savepoint releases them earlier).
+func claimArchivePair(ctx context.Context, tx pgx.Tx, blockID, matchedID string) (bool, error) {
+	var locked bool
+	if err := tx.QueryRow(ctx, archiveLockSQL, blockID, matchedID).Scan(&locked); err != nil {
+		return false, fmt.Errorf("archive locks: %w", err)
+	}
+	if !locked {
+		return false, nil
+	}
+	var live bool
+	if err := tx.QueryRow(ctx, archiveNeighbourLiveSQL, matchedID).Scan(&live); err != nil {
+		return false, fmt.Errorf("archive neighbour: %w", err)
+	}
+	return live, nil
 }
 
 // rollbackToSavepoint rolls the tx back to the given savepoint. After
@@ -440,7 +525,7 @@ func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 		matchedIDVal = *result.MatchedID
 	}
 
-	if result.Decision == "near_duplicate" && mode != blocktype.GuardModeFlag {
+	if archives(result.Decision, mode) {
 		// Auto-archive near duplicates. Bestand for every mode EXCEPT flag —
 		// fail-safe to archive so an empty/unset mode (e.g. a policy built
 		// outside DecodePolicy) never silently degrades to flag-only.
