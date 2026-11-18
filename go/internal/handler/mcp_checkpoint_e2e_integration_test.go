@@ -26,6 +26,15 @@
 // directories copied into it, the Go command there with CTX_E2E_SERVER set
 // starts the older handler on a fresh test database instead.
 //
+// CTX_E2E_SERVER=leaves-out-never-ranked starts the handler with
+// search.leave_out_never_ranked on (#342, step c): the endpoint itself then
+// leaves checkpoint rows out of a search without `types`, and the driver checks
+// that both plugins still find their head (they name the type) and that a
+// search without the type does not. A plugin from before ctx_checkpoint 0.16.0
+// sends no type over MCP and does not find its head against such a server; to
+// see that, copy that release's plugin directories into a checkout of this test
+// and run it there with the same variable.
+//
 // It needs a Python with hermes-agent's dependencies and the hermes-agent
 // checkout: CTX_CHECKPOINT_E2E_PYTHON names the interpreter, HERMES_REPO the
 // checkout. Without CTX_CHECKPOINT_E2E_PYTHON the test skips — the ci.yml
@@ -87,6 +96,7 @@ func TestCheckpointPluginChainAgainstMCPEndpoint(t *testing.T) {
 		Query:  config.QueryConfig{RateLimitWrite: 0},
 		Pool:   config.PoolConfig{DefaultBlockSensitivity: backends.SensPublic},
 		Writes: config.WritesConfig{ConfirmTTL: 10 * time.Minute},
+		Search: config.SearchConfig{LeaveOutNeverRanked: os.Getenv("CTX_E2E_SERVER") == "leaves-out-never-ranked"},
 	}}})
 	srv := httptest.NewServer(Auth(pool)(mcpH))
 	t.Cleanup(srv.Close)
