@@ -74,7 +74,7 @@ func temporalTimeoutBudgetOf(c *Config) time.Duration {
 // logging everything; Store.Replace rejects.
 func Validate(c *Config) []Issue {
 	var issues []Issue
-	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V9d, V11, V26, V61
+	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V9d, V11, V26, V61, V62
 	issues = append(issues, validateRerankGraph(c)...)   // V3, V9
 	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c, V18, V19, V20
 	issues = append(issues, validateGraphOverview(c)...) // V17b
@@ -923,6 +923,18 @@ func validateQuery(c *Config) []Issue {
 		issues = append(issues, Issue{Field: "query.low_confidence_max_sources", Severity: SeverityError,
 			Msg: fmt.Sprintf("low_confidence_max_sources must be >= 1 — a low-confidence prompt without a source has nothing to answer from; for no cut set %d (the query limit's maximum) or more",
 				llm.MaxPromptSources)})
+	}
+
+	// V62 (#208) — query.max_source_runes lives in [llm.MaxBlockChars,
+	// llm.SourceRunesShare]. Below the floor the key would cut the head off
+	// every head-heavy format sized against today's 1500 runes (the derived
+	// renderer, the distiller's block) while still rendering as a window size;
+	// above the share it renders as configured and acts as the share
+	// (llm.SourceRuneCap). Negatives belong to V35.
+	if v := c.Query.MaxSourceRunes; v >= 0 && (v < llm.MaxBlockChars || v > llm.SourceRunesShare) {
+		issues = append(issues, Issue{Field: "query.max_source_runes", Severity: SeverityError,
+			Msg: fmt.Sprintf("max_source_runes %d must be >= %d (the per-source window every head-heavy block format is sized against) and <= %d (the source text one prompt may carry; a single source can use all of it)",
+				v, llm.MaxBlockChars, llm.SourceRunesShare)})
 	}
 
 	// V5 — today's llm init() semantics: log + fall back to v5.2.

@@ -120,8 +120,9 @@ func captureTestConfig(t *testing.T, backoffMinHours float64) *config.Config {
 		Dispatch: config.DispatchConfig{ExternalRetryAfterSteps: config.Defaults().Dispatch.ExternalRetryAfterSteps},
 		Query: config.QueryConfig{
 			ScoreThreshold: 0.001, ConfidentThreshold: 0.008, PromptVersion: "v5.2",
-			// #226: query.low_confidence_max_sources carries a fatal floor (V61).
+			// #226/#208: the two synthesis cuts carry fatal floors (V61, V62).
 			LowConfidenceMaxSources: config.Defaults().Query.LowConfidenceMaxSources,
+			MaxSourceRunes:          config.Defaults().Query.MaxSourceRunes,
 		},
 		Scheduler: config.SchedulerConfig{
 			ReadScopes: []string{"private"}, HomeScope: "private",

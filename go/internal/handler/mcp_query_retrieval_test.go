@@ -46,7 +46,7 @@ func (h *countingQueryDelegate) ServeHTTP(w http.ResponseWriter, r *http.Request
 // answer, no citation_index. Order is the retrieval order the tool must keep.
 func retrievalOnlyBody(t *testing.T) string {
 	t.Helper()
-	long := strings.Repeat("x", maxRetrievalSnippet+200)
+	long := strings.Repeat("x", llm.MaxBlockChars+200)
 	sources := []llm.Source{
 		{ID: "id-b", Title: "Second by id, first by rank", Category: "decisions", Score: 0.91, Content: "content B"},
 		{ID: "id-a", Title: "Captured tool output", Category: "learnings", Score: 0.42, Content: long, Untrusted: true},
@@ -56,7 +56,7 @@ func retrievalOnlyBody(t *testing.T) string {
 	}
 	resp := queryResponse{
 		Success:    true,
-		Sources:    buildSourceResponses(sources, map[string][]string{"id-c": {"id-new"}}, true),
+		Sources:    buildSourceResponses(sources, map[string][]string{"id-c": {"id-new"}}, retrievalSnippetRunes(true, 0, len(sources))),
 		Confidence: "confident",
 	}
 	b, err := json.Marshal(resp)
@@ -217,8 +217,8 @@ func TestMCPQueryRetrievalOnlyRendersRankedSources(t *testing.T) {
 			t.Errorf("sources[%d] carries no content under include_content", i)
 		}
 	}
-	if n := len([]rune(*got.Sources[1].Content)); n != maxRetrievalSnippet {
-		t.Errorf("content snippet = %d runes, want the REST cap %d", n, maxRetrievalSnippet)
+	if n := len([]rune(*got.Sources[1].Content)); n != llm.MaxBlockChars {
+		t.Errorf("content snippet = %d runes, want the REST cap %d", n, llm.MaxBlockChars)
 	}
 	if !got.Sources[1].Untrusted || got.Sources[0].Untrusted || got.Sources[2].Untrusted || got.Sources[3].Untrusted {
 		t.Errorf("untrusted framing not carried per source: %+v", got.Sources)

@@ -915,6 +915,22 @@ type QueryConfig struct {
 	// changes only how that tenant's OWN answers are synthesized, and the
 	// prompt stays inside promptguard.BudgetSynthesis whatever the value.
 	LowConfidenceMaxSources int `key:"query.low_confidence_max_sources" env:"CTX_LOW_CONFIDENCE_MAX_SOURCES" default:"2" mut:"hot" tenancy:"tenant-overridable"`
+	// MaxSourceRunes is the per-source content cut of a synthesis prompt and
+	// of the include_content snippet (#208; llm.MaxBlockChars is the default).
+	// What a prompt with n sources applies is llm.SourceRuneCap: this value,
+	// bounded by llm.SourceRunesShare / n — so a query with the default limit
+	// of 5 can show the model up to 6000 runes of each source, while a query
+	// at the 20-source clamp keeps 1500, and no prompt carries more source
+	// text than the worst case the H12 budget gate already proves. V62 keeps
+	// it in [llm.MaxBlockChars, llm.SourceRunesShare]: below, the head-heavy
+	// formats sized against 1500 (derived/render.go, the distiller's block)
+	// would lose their head; above, the value renders as configured and acts
+	// as the share.
+	//
+	// tenant-overridable like the thresholds: it shapes only that tenant's OWN
+	// prompts, and the prompt-size bound is the same one every tenant already
+	// reaches with limit = 20 — a raised value moves no request past it.
+	MaxSourceRunes int `key:"query.max_source_runes" env:"CTX_MAX_SOURCE_RUNES" default:"1500" mut:"hot" tenancy:"tenant-overridable"`
 }
 
 // DigestConfig is the LINEAR topic map's remaining knob (plan-cluster-topicmap
@@ -3089,6 +3105,7 @@ func (c *Config) SynthesisSettings() llm.SynthesisSettings {
 		ScoreThreshold:          c.Query.ScoreThreshold,
 		ConfidentThreshold:      c.Query.ConfidentThreshold,
 		LowConfidenceMaxSources: c.Query.LowConfidenceMaxSources,
+		MaxSourceRunes:          c.Query.MaxSourceRunes,
 		PromptVersion:           c.Query.PromptVersion,
 		ExternalNumCtxFallback:  c.Pool.ExternalNumCtxFallback,
 		OpenRouterWindowTTL:     c.Pool.OpenRouterWindowTTL,

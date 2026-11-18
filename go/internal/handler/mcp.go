@@ -162,7 +162,7 @@ type queryInput struct {
 	// block the key may already read in full with `get`. Absent ⇒ the delegated
 	// body is byte-identical to before the fields existed.
 	Synthesize     *bool `json:"synthesize,omitempty" jsonschema:"false = retrieval only: answer the ranked sources as JSON without the LLM synthesis (default true)"`
-	IncludeContent bool  `json:"include_content,omitempty" jsonschema:"with synthesize false: attach each source's content (up to 1500 characters); an error otherwise"`
+	IncludeContent bool  `json:"include_content,omitempty" jsonschema:"with synthesize false: attach each source's content (up to 1500 characters by default, settings key query.max_source_runes); an error otherwise"`
 }
 
 type storeInput struct {

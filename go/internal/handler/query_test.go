@@ -121,7 +121,7 @@ func TestBuildSourceResponses(t *testing.T) {
 	}
 	supersedes := map[string][]string{"a": {"superseder-1", "superseder-2"}}
 
-	out := buildSourceResponses(sources, supersedes, false)
+	out := buildSourceResponses(sources, supersedes, 0)
 	if len(out) != 2 {
 		t.Fatalf("got %d responses, want 2", len(out))
 	}
@@ -151,7 +151,7 @@ func TestBuildSourceResponses_CitationIndex(t *testing.T) {
 	out := buildSourceResponses([]llm.Source{
 		{ID: "a", Title: "A", CitationIndex: &two},
 		{ID: "b", Title: "B"},
-	}, nil, false)
+	}, nil, 0)
 	if out[0].CitationIndex == nil || *out[0].CitationIndex != 2 {
 		t.Errorf("source[0] CitationIndex = %v, want 2", out[0].CitationIndex)
 	}
@@ -171,22 +171,22 @@ func TestBuildSourceResponses_CitationIndex(t *testing.T) {
 
 func TestBuildSourceResponses_NilMap(t *testing.T) {
 	// A nil supersedes map must not panic and yields no SupersededBy.
-	out := buildSourceResponses([]llm.Source{{ID: "a", Title: "A"}}, nil, false)
+	out := buildSourceResponses([]llm.Source{{ID: "a", Title: "A"}}, nil, 0)
 	if len(out) != 1 || out[0].SupersededBy != nil {
 		t.Errorf("nil map: got %+v", out)
 	}
 }
 
 func TestBuildSourceResponses_IncludeContent(t *testing.T) {
-	long := strings.Repeat("ä", maxRetrievalSnippet+500) // multibyte, over the cap
+	long := strings.Repeat("ä", llm.MaxBlockChars+500) // multibyte, over the cap
 	sources := []llm.Source{{ID: "a", Title: "A", Content: long}}
 	// Default (eval.sh / A-B sweep): no content attached, responses unchanged.
-	if out := buildSourceResponses(sources, nil, false); out[0].Content != "" {
+	if out := buildSourceResponses(sources, nil, 0); out[0].Content != "" {
 		t.Errorf("include_content=false must not attach content")
 	}
-	// include_content: snippet capped at maxRetrievalSnippet runes (rune-safe).
-	out := buildSourceResponses(sources, nil, true)
-	if n := len([]rune(out[0].Content)); n != maxRetrievalSnippet {
-		t.Errorf("snippet = %d runes, want %d", n, maxRetrievalSnippet)
+	// include_content: snippet capped at the default window (rune-safe).
+	out := buildSourceResponses(sources, nil, retrievalSnippetRunes(true, 0, len(sources)))
+	if n := len([]rune(out[0].Content)); n != llm.MaxBlockChars {
+		t.Errorf("snippet = %d runes, want %d", n, llm.MaxBlockChars)
 	}
 }

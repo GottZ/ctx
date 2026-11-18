@@ -196,7 +196,7 @@ func shadowGate(req *queryRequest, isAdmin, armRanks bool, typeSet *blocktype.Se
 		}
 	}
 	// G7 — the leak that a "no content in the sub-block" reading missed: the
-	// SURROUNDING response carries up to maxRetrievalSnippet runes per source.
+	// SURROUNDING response carries up to retrievalSnippetRunes runes per source.
 	if req.IncludeContent {
 		return http.StatusBadRequest, "shadow_types cannot be combined with include_content",
 			"include_content set"

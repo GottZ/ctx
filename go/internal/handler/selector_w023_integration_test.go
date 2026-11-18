@@ -98,9 +98,9 @@ func w023Config(enabled bool) *config.Config {
 		// (validateBackendTuples), the only check that read it.
 		Server: config.ServerConfig{DBPass: "test-password"},
 		Graph:  config.GraphConfig{HopDepth: 1}, // Enabled stays false
-		Query:  config.QueryConfig{Timezone: time.UTC, LowConfidenceMaxSources: config.Defaults().Query.LowConfidenceMaxSources},
-		// Query: RateLimitRead 0 = disabled; #226: low_confidence_max_sources
-		// carries a fatal floor (V61).
+		Query:  config.QueryConfig{Timezone: time.UTC, LowConfidenceMaxSources: config.Defaults().Query.LowConfidenceMaxSources, MaxSourceRunes: config.Defaults().Query.MaxSourceRunes},
+		// Query: RateLimitRead 0 = disabled; #226/#208: the two synthesis cuts
+		// carry fatal floors (V61, V62).
 		// V21 (#38): the embed back-off bases must be > 0 to pass Validate —
 		// registry defaults, not wire-active here.
 		EmbedBackfill:  config.EmbedBackfillConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},

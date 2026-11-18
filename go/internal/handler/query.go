@@ -227,8 +227,8 @@ type queryRequest struct {
 	// credentials would lock translate/synthesis failover for harmless
 	// questions, decision F3-E2). MCP query inherits via delegation.
 	Sensitivity string `json:"sensitivity,omitempty"`
-	// IncludeContent attaches a content snippet (<= maxRetrievalSnippet chars)
-	// to each source on the retrieval-only path (F6 ctx_query tool delegation).
+	// IncludeContent attaches a content snippet (retrievalSnippetRunes) to
+	// each source on the retrieval-only path (F6 ctx_query tool delegation).
 	// Default false ⇒ eval.sh / A-B sweep responses are byte-for-byte unchanged.
 	IncludeContent bool `json:"include_content,omitempty"`
 
@@ -267,9 +267,18 @@ type queryRequest struct {
 	ShadowTypes []string `json:"shadow_types,omitempty"`
 }
 
-// maxRetrievalSnippet caps the per-source content attached when include_content
-// is set — the same window the synthesis prompt feeds the model.
-const maxRetrievalSnippet = 1500
+// retrievalSnippetRunes is the per-source content cut of an include_content
+// response: the window a synthesis prompt carrying the same number of sources
+// feeds the model — llm.SourceRuneCap over the tenant's query.max_source_runes
+// (#208), llm.MaxBlockChars without the key. One function for both surfaces:
+// the snippet used to be a hand copy of the number (1500) that a raised prompt
+// window would have left behind. 0 = no content (include_content off).
+func retrievalSnippetRunes(includeContent bool, configured, n int) int {
+	if !includeContent {
+		return 0
+	}
+	return llm.SourceRuneCap(configured, n)
+}
 
 // queryResponse is the JSON response from the query endpoint.
 type queryResponse struct {
@@ -430,7 +439,9 @@ func (h *QueryHandler) sourceOrigins(ctx context.Context, results []rrf.SearchRe
 // buildSourceResponses maps retrieval sources to the API response shape,
 // attaching superseded_by where the supersedes map has an entry. Shared by the
 // full-synthesis path (Step 10) and the retrieval-only path (Step 7b).
-func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]string, includeContent bool) []sourceResponse {
+// contentRunes > 0 attaches each source's content cut at that many runes
+// (retrievalSnippetRunes); 0 attaches none.
+func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]string, contentRunes int) []sourceResponse {
 	out := make([]sourceResponse, len(sources))
 	for i, s := range sources {
 		out[i] = sourceResponse{
@@ -445,9 +456,9 @@ func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]strin
 			Untrusted:        s.Untrusted, // V-11
 			UntrustedOrigin:  s.UntrustedOrigin,
 		}
-		if includeContent && s.Content != "" {
-			if r := []rune(s.Content); len(r) > maxRetrievalSnippet {
-				out[i].Content = string(r[:maxRetrievalSnippet])
+		if contentRunes > 0 && s.Content != "" {
+			if r := []rune(s.Content); len(r) > contentRunes {
+				out[i].Content = string(r[:contentRunes])
 			} else {
 				out[i].Content = s.Content
 			}
@@ -1424,7 +1435,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		)
 		resp := queryResponse{
 			Success:             true,
-			Sources:             buildSourceResponses(sources, supersedesMap, req.IncludeContent),
+			Sources:             buildSourceResponses(sources, supersedesMap, retrievalSnippetRunes(req.IncludeContent, cfg.Query.MaxSourceRunes, len(sources))),
 			Confidence:          llm.ClassifyConfidence(maxScore, cfg.SynthesisSettings()),
 			Translated:          translated,
 			ActivatedDimWeights: activatedDimWeights(temporalResult),
@@ -1485,7 +1496,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		hb.finish(http.StatusOK, queryResponse{
 			Success:             true,
 			Answer:              llm.NoRelevantReplacement,
-			Sources:             buildSourceResponses(nil, supersedesMap, false),
+			Sources:             buildSourceResponses(nil, supersedesMap, 0),
 			Confidence:          llm.ConfidenceNoRelevant,
 			Model:               h.backendPool.PrimaryModel(backends.RoleSynthesis),
 			Translated:          translated,
@@ -1549,7 +1560,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	go h.logAccess(ar, results, query, selectorDec, accessSourceAgent)
 
 	// Step 10: Build response.
-	respSources := buildSourceResponses(synthResult.Sources, supersedesMap, false)
+	respSources := buildSourceResponses(synthResult.Sources, supersedesMap, 0)
 
 	resp := queryResponse{
 		Success:             true,

@@ -63,3 +63,38 @@ func TestLowConfidenceMaxSourcesKey(t *testing.T) {
 		}
 	}
 }
+
+// TestMaxSourceRunesKey (#208): the per-source cut is a hot,
+// tenant-overridable key whose default IS llm.MaxBlockChars, it reaches the
+// synthesis settings, and V62 keeps it between today's cut (the floor every
+// head-heavy format was sized against) and the share one prompt can carry.
+func TestMaxSourceRunesKey(t *testing.T) {
+	k1Entry(t, "query.max_source_runes", "CTX_MAX_SOURCE_RUNES", "1500")
+	if got := defaultFor("query.max_source_runes"); got != llm.MaxBlockChars {
+		t.Errorf("registry default %v != llm.MaxBlockChars %d", got, llm.MaxBlockChars)
+	}
+
+	c := validCfg(t, map[string]string{"query.max_source_runes": "6000"})
+	if got := c.SynthesisSettings().MaxSourceRunes; got != 6000 {
+		t.Errorf("SynthesisSettings().MaxSourceRunes = %d, want 6000", got)
+	}
+
+	for _, tc := range []struct {
+		val  string
+		want Severity
+	}{
+		{"0", SeverityError},
+		{"-1", SeverityError},
+		{"1499", SeverityError}, // below the floor head-heavy formats were sized against
+		{"1500", -1},
+		{"6000", -1},
+		{"30000", -1},            // llm.SourceRunesShare: one source may carry the whole share
+		{"30001", SeverityError}, // renders as configured, acts as 30000
+	} {
+		c, _ := cfgFrom(t, map[string]string{"query.max_source_runes": tc.val})
+		issues := Validate(c)
+		if got := severityFor(issues, "query.max_source_runes"); got != tc.want {
+			t.Errorf("query.max_source_runes=%s: severity %d, want %d (%v)", tc.val, got, tc.want, issues)
+		}
+	}
+}
