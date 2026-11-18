@@ -102,6 +102,12 @@ def rest(home, monkeypatch):
         ("ctx.example.test:8443/mcp", "(unreadable URL)"),
         ("https://alice/x:pw@ctx.example.test/mcp", "(unreadable URL)"),
         ("https://ctx.example.test/a@b/mcp", "(unreadable URL)"),
+        # A ``?`` or ``#`` in the user info ends the host early: user and password head look like host and port.
+        ("https://alice311:1234#pw@ctx.example.test/mcp", "(unreadable URL)"),
+        ("https://alice311#pw@ctx.example.test/mcp", "(unreadable URL)"),
+        ("https://alice311:1234?pw@ctx.example.test/mcp", "(unreadable URL)"),
+        ("${SCHEME}://alice311:pw?x@ctx.example.test/mcp", "(unreadable URL)"),
+        ("https://ctx.example.test/mcp?mail=a@b", "(unreadable URL)"),
         ("https://[::1/mcp", "(unreadable URL)"),
         ("https://ctx.example.test:99999/mcp", "(unreadable URL)"),
         ("https://user:pw@:8443/mcp", "(unreadable URL)"),
@@ -175,6 +181,9 @@ def test_hermes_ctx_checkpoint_status_on_rest_prints_no_credentials(rest, capsys
         f"https://{USER}@127.0.0.1:9/ctx",
         f"https://127.0.0.1:9/ctx?sig={QUERY_VALUE}",
         f"https://127.0.0.1:9/ctx#{FRAGMENT}",
+        # A ``/`` in the user info ends the host before the ``@``: the netloc holds no ``@``.
+        f"https://{USER}:1234/{PASSWORD}@127.0.0.1/ctx",
+        f"https://{USER}:ab/{PASSWORD}@127.0.0.1/ctx",
     ],
 )
 def test_the_rest_client_sends_nothing_for_a_base_url_with_credentials(base, monkeypatch):
@@ -261,16 +270,39 @@ def test_the_connection_test_masks_the_entry_url_in_a_probe_error(home, monkeypa
     _assert_clean(test.detail)
 
 
-def test_the_connection_test_withholds_a_probe_error_for_a_url_it_cannot_take_apart(home, monkeypatch):
-    """Hermes names a URL it refuses, and for ``user:pass@host`` the user name stands in its text as the scheme."""
+@pytest.mark.parametrize(
+    ("url", "error"),
+    [
+        (
+            f"{USER}:{PASSWORD}@ctx.example.test/mcp",
+            f"Invalid MCP URL for 'ctx': scheme must be http or https, got '{USER}' "
+            f"('{USER}:{PASSWORD}@ctx.example.test/mcp')",
+        ),
+        (
+            f"https://{USER}:1234#{PASSWORD}@ctx.example.test/mcp",
+            f"connect failed: host '{USER}' port 1234 (https://{USER}:1234#{PASSWORD}@ctx.example.test/mcp)",
+        ),
+    ],
+    ids=["no scheme", "fragment mark in the user info"],
+)
+def test_the_connection_test_withholds_a_probe_error_for_a_url_it_cannot_take_apart(home, monkeypatch, url, error):
+    """Hermes names a URL it refuses, and for ``user:pass@host`` the user name stands in its text as the scheme; with a
+    ``#`` in the user info a client takes the user name for the host."""
     status = _submodule("memory.status")
-    url = f"{USER}:{PASSWORD}@ctx.example.test/mcp"
 
     def probe(name, entry, timeout):
-        raise RuntimeError(f"Invalid MCP URL for 'ctx': scheme must be http or https, got '{USER}' ('{url}')")
+        raise RuntimeError(error)
 
     monkeypatch.setattr(status, "probe_server", probe)
     test = status.run_connection_test("ctx", {"url": url})
 
     assert test.ok is False and test.detail.endswith(status.URL_DETAILS_WITHHELD)
+    assert "mcp_servers.ctx ((unreadable URL))" in test.detail
     _assert_clean(test.detail)
+
+
+def test_setup_refuses_a_url_without_scheme_without_repeating_it(home):
+    with pytest.raises(ValueError) as raised:
+        _MODULE._normalize_setup_values({"ctx_url": f"{USER}:{PASSWORD}@ctx.example.test/mcp?sig={QUERY_VALUE}"}, {})
+    assert "must start with https:// or http://" in str(raised.value)
+    _assert_clean(str(raised.value))

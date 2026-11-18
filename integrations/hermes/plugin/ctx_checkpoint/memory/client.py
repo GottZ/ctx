@@ -214,8 +214,9 @@ class CtxClient:
         # urllib takes user info for part of the host (a lookup of ``user:pass@host``, or the password
         # read as the port, which its error text then repeats) and puts every request path after a
         # query or fragment: such a base URL never reaches the API. Requests are refused before any
-        # connection, with a text that names no part of the URL (#311).
-        self._url_refused = "@" in parsed.netloc or bool(parsed.query or parsed.fragment)
+        # connection, with a text that names no part of the URL (#311). Any ``@`` after the scheme
+        # counts: a ``/`` in the user info ends the host before it (``https://u:1234/pass@host``).
+        self._url_refused = "@" in str(base_url).split("://", 1)[1] or bool(parsed.query or parsed.fragment)
         self._base = base_url.strip().rstrip("/")
         self._key = api_key
         self._timeout = timeout

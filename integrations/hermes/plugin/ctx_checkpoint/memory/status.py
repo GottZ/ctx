@@ -249,20 +249,22 @@ def display_url(url: Any) -> str:
     port and path. A URL that starts with a ``${VAR}`` template keeps the template and loses its
     query, its fragment and any user info after ``://``. Never the text of a URL it cannot take
     apart — no ``scheme://host`` (``user:pass@host/mcp``, ``host:8443/mcp``), an unreadable port or
-    host, an ``@`` in the path (``https://user/x:pass@host``: where the user info ends is unclear) —
-    those are :data:`UNREADABLE_URL` (#311)."""
+    host, an ``@`` after the host (``https://user/x:pass@host``, ``https://user:12#pass@host``: a
+    ``/``, ``?`` or ``#`` in the user info ends the host early, so where the user info ends is
+    unclear) — those are :data:`UNREADABLE_URL` (#311)."""
     raw = str(url or "").strip()
     if not raw:
         return ""
     if raw.startswith("${"):
-        return _display_template_url(raw.split("?", 1)[0].split("#", 1)[0])
+        head = raw.split("?", 1)[0].split("#", 1)[0]
+        return UNREADABLE_URL if "@" in raw[len(head) :] else _display_template_url(head)
     try:
         parts = urlsplit(raw)
         host = parts.hostname or ""
         port = parts.port
     except ValueError:
         return UNREADABLE_URL
-    if not (parts.scheme and parts.netloc and host) or "@" in parts.path:
+    if not (parts.scheme and parts.netloc and host) or "@" in f"{parts.path}{parts.query}{parts.fragment}":
         return UNREADABLE_URL
     if ":" in host:
         host = f"[{host}]"
