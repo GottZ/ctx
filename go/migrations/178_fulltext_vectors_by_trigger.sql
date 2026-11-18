@@ -66,14 +66,18 @@
 -- scan (measured: 3.1 ms at 10 000 blocks and 2.2 ms at 50 000, the same
 -- relfilenode before and after). It takes ACCESS EXCLUSIVE on context_blocks,
 -- readers included, and holds it until the migration commits; the two CREATE
--- TRIGGER run under it. All of it is one transaction (the runner runs each
+-- TRIGGER run under it. To get the lock it waits for every transaction that
+-- has touched the table, readers included, and for every holder of SHARE
+-- UPDATE EXCLUSIVE (VACUUM, ANALYZE, CREATE INDEX CONCURRENTLY, an
+-- anti-wraparound autovacuum); while it waits, every later statement on the
+-- table, a plain read included, queues behind it. All of it is one transaction (the runner runs each
 -- file in one, store/migrations.go): no write between the drop of the
 -- expression and the triggers can store a row without vectors.
 --
 -- `SET LOCAL lock_timeout = '3s'` (house pattern 116/117/126/128/140/145/171/
--- 173): a transaction holding context_blocks longer fails the migration with
+-- 173) bounds that wait: a holder that stays longer fails the migration with
 -- lock_not_available (55P03), the file rolls back and the boot fails loudly;
--- the next boot tries again.
+-- start again once the holder has finished.
 --
 -- The function runs no query, only two expressions, so a backend keeps no
 -- plan sized by its first call (the concern migration 177 answers with SET
@@ -84,20 +88,34 @@
 -- that schema's 'german'.
 --
 -- INVARIANT. The generated columns were computed after every BEFORE trigger;
--- trg_block_fulltext_text runs in name order among them and fires only when
--- title or content is a target of the statement. No BEFORE trigger on
--- context_blocks changes title or content today (trg_block_retype writes
--- untrusted_origin, trg_block_embed_excluded embed_excluded and the embedding
--- columns). A trigger that did would have to sort before trg_block_fulltext_text
--- and fire only on statements that name title or content, or the vectors would
--- keep the old text; so would an ALTER COLUMN title/content TYPE … USING that
--- changes the text. The repair below covers both.
+-- the two triggers fire in name order (byte order) among them. On an insert
+-- trg_block_fulltext computes the vectors, so no BEFORE INSERT trigger whose
+-- name sorts after it may change title or content. On an update
+-- trg_block_fulltext_text computes them, and only when the statement names
+-- title or content, so no BEFORE UPDATE trigger may change them at all: one
+-- that changed the text of an update naming neither would leave the vectors
+-- of the old text, whatever its name. No trigger does today (trg_block_retype
+-- writes untrusted_origin, trg_block_embed_excluded embed_excluded and the
+-- embedding columns); TestFullTextVectorTriggersSeeTheFinalText reads the
+-- rule from the catalog. The vectors also depend on SET search_path =
+-- pg_catalog on the function; TestFullTextVectorsIgnoreTheSessionSearchPath
+-- writes through a session that puts a schema with its own 'german' first.
+--
+-- TYPE CHANGES. ALTER COLUMN title TYPE is refused while
+-- trg_block_fulltext_text exists (0A000, the trigger names the column);
+-- ALTER COLUMN content TYPE is refused by the generated column content_hash
+-- (0A000, as before this migration). A type change of title drops
+-- trg_block_fulltext_text first and creates it again afterwards; the rewrite
+-- fires no trigger, so a USING clause that changes the text leaves the
+-- vectors of the old text until the repair below runs.
 --
 -- PG_DUMP. pg_dump leaves generated columns out of the data and pg_restore
 -- recomputes them; ordinary columns are dumped. A dump taken after this
 -- migration carries both vectors as text (measured on the store above: the
 -- COPY text of context_blocks gzip-6 59.6 MB without them, 160.8 MB with
--- them), and a restore loads them instead of computing them. pg_restore
+-- them; a second, independent measurement of a full pg_dump -Fc of a smaller
+-- store: 11.6 -> 31.2 MB, dump 2.4 -> 4.6 s, full restore 16.8 -> 5.6 s),
+-- and a restore loads them instead of computing them. pg_restore
 -- creates the triggers after the data, so the dumped values are kept.
 -- On the measured shape the data of context_blocks in a dump grows by a
 -- factor of 2.7; most of it is the vectors of checkpoint blocks, which issue
@@ -114,12 +132,19 @@
 -- OLDER BINARY. A binary before this migration never writes either column;
 -- its inserts and its updates of title or content go through the triggers
 -- and get the same vectors as before, and its reads are unchanged. Its
--- schema-contract check reports the function, the two triggers and the
--- dropped expressions as drift, as for every migration after its own.
+-- migration runner leaves version 178 alone. Its schema-contract check finds
+-- four breaking drifts (_migrations:178 without an embedded file, the
+-- function and the two triggers as unknown active objects) and two param
+-- drifts (ts_de, ts_en: generated expression differs): in mode warn (the
+-- default) it starts, logs them and /health reports schema_contract
+-- attention, status degraded, HTTP 200; in mode enforce it refuses to start
+-- (exit 1) until CTX_CONTRACT_MODE=warn or off is set, or the schema is
+-- taken back (REVERT below); in mode off it starts without degrading.
 --
--- REVERT (forward-only tree; nothing needs it for a rollback of the binary):
--- turning the columns back into generated ones is a table rewrite under
--- ACCESS EXCLUSIVE —
+-- REVERT (forward-only tree; needed only to start a binary before 178 in
+-- mode enforce without switching it to warn): turning the columns back into
+-- generated ones is a table rewrite under ACCESS EXCLUSIVE (measured: 16.2 s
+-- on a 116.5 MB table) —
 --     DROP TRIGGER trg_block_fulltext ON context_blocks;
 --     DROP TRIGGER trg_block_fulltext_text ON context_blocks;
 --     ALTER TABLE context_blocks DROP COLUMN ts_de, DROP COLUMN ts_en,

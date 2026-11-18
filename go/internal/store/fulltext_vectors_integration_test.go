@@ -15,6 +15,7 @@ package store_test
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"testing"
 	"time"
 
@@ -284,6 +285,148 @@ func TestMigration178KeepsTheVectorsOfAFilledStore(t *testing.T) {
 	if got := read(ids[1]); got.de == before[ids[1]].de {
 		t.Errorf("content update after 178 left the old vector in place")
 	}
+}
+
+// ftsTextAssignment finds a PL/pgSQL statement that writes the new row's
+// title or content, or the whole new row, at the start of a line.
+var ftsTextAssignment = regexp.MustCompile(`(?im)^\s*NEW\s*(\.\s*"?(title|content)"?\s*)?:?=`)
+
+// TestFullTextVectorTriggersSeeTheFinalText pins the invariant migration 178
+// rests on: the vectors are computed from the text the row is stored with.
+// BEFORE ROW triggers fire in name order (byte order), and a generated column
+// was computed after all of them. So:
+//   - an insert: no BEFORE INSERT trigger that fires after trg_block_fulltext
+//     may change title or content;
+//   - an update: no BEFORE UPDATE trigger may change them at all.
+//     trg_block_fulltext_text fires only when the statement names title or
+//     content; a trigger that changes the text of an update that names
+//     neither would leave the vectors of the old text, whatever its name.
+//
+// The rule is read from the catalog: every such trigger's function must be
+// PL/pgSQL (another language cannot be read here) and must not assign
+// NEW.title, NEW.content or NEW as a whole.
+func TestFullTextVectorTriggersSeeTheFinalText(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool := testdb.SetupTestDB(t)
+	const (
+		tgRow    = 1
+		tgBefore = 2
+		tgInsert = 4
+		tgUpdate = 16
+	)
+	rows, err := pool.Query(ctx, `
+		SELECT t.tgname, t.tgtype, l.lanname, p.prosrc
+		  FROM pg_trigger t
+		  JOIN pg_proc p ON p.oid = t.tgfoid
+		  JOIN pg_language l ON l.oid = p.prolang
+		 WHERE t.tgrelid = 'context_blocks'::regclass AND NOT t.tgisinternal`)
+	if err != nil {
+		t.Fatalf("read triggers: %v", err)
+	}
+	defer rows.Close()
+	own := map[string]int16{}
+	checked := 0
+	for rows.Next() {
+		var name, lang, src string
+		var tgtype int16
+		if err := rows.Scan(&name, &tgtype, &lang, &src); err != nil {
+			t.Fatal(err)
+		}
+		if name == "trg_block_fulltext" || name == "trg_block_fulltext_text" {
+			own[name] = tgtype
+			continue
+		}
+		if tgtype&tgRow == 0 || tgtype&tgBefore == 0 {
+			continue
+		}
+		afterInsert := tgtype&tgInsert != 0 && name > "trg_block_fulltext"
+		if !afterInsert && tgtype&tgUpdate == 0 {
+			continue
+		}
+		checked++
+		if lang != "plpgsql" {
+			t.Errorf("BEFORE ROW trigger %s runs a %s function; this test can read only PL/pgSQL — check by hand that it leaves title and content alone, then extend the test", name, lang)
+			continue
+		}
+		if m := ftsTextAssignment.FindString(src); m != "" {
+			t.Errorf("BEFORE ROW trigger %s writes the text of the row (%q): the full-text vectors would not follow it", name, m)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if want := int16(tgRow | tgBefore | tgInsert | tgUpdate); own["trg_block_fulltext"] != want {
+		t.Errorf("trg_block_fulltext has tgtype %d, want BEFORE INSERT OR UPDATE FOR EACH ROW (%d)", own["trg_block_fulltext"], want)
+	}
+	if want := int16(tgRow | tgBefore | tgUpdate); own["trg_block_fulltext_text"] != want {
+		t.Errorf("trg_block_fulltext_text has tgtype %d, want BEFORE UPDATE FOR EACH ROW (%d)", own["trg_block_fulltext_text"], want)
+	}
+	if checked == 0 {
+		t.Errorf("no other BEFORE ROW trigger was checked; the table has trg_block_retype and trg_block_embed_excluded")
+	}
+}
+
+// TestFullTextVectorsIgnoreTheSessionSearchPath: the generated expression
+// bound pg_catalog's to_tsvector and configurations when it was created; the
+// trigger function resolves them at run time and pins search_path to
+// pg_catalog for that. A writer whose session puts a schema with its own
+// configuration 'german' ahead of pg_catalog (or holds one in pg_temp) gets
+// the same vectors as everyone else.
+func TestFullTextVectorsIgnoreTheSessionSearchPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	for _, s := range []string{
+		`CREATE SCHEMA hostile`,
+		`CREATE TEXT SEARCH CONFIGURATION hostile.german (COPY = pg_catalog.simple)`,
+		`CREATE TEXT SEARCH CONFIGURATION hostile.english (COPY = pg_catalog.simple)`,
+	} {
+		if _, err := pool.Exec(ctx, s); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = "hostile, pg_catalog, public"
+	hostile, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hostile.Close()
+
+	b, err := store.UpsertBlock(ctx, hostile, "notes", "Häuser laufen", "Die Häuser laufen schnell über die Brücken.", nil, nil,
+		"private", true, store.SensitivityWrite{}, "knowledge")
+	if err != nil {
+		t.Fatalf("insert on the hostile search_path: %v", err)
+	}
+	assertFTSVectorsOfText(t, pool, b.ID, "insert on the hostile search_path")
+	content := "Die Bäume wachsen langsam."
+	if _, _, err := store.UpdateBlock(ctx, hostile, b.ID, store.UpdateBlockData{Content: &content}, []string{"private"}); err != nil {
+		t.Fatalf("content update on the hostile search_path: %v", err)
+	}
+	assertFTSVectorsOfText(t, pool, b.ID, "content update on the hostile search_path")
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `CREATE TEXT SEARCH CONFIGURATION pg_temp.german (COPY = pg_catalog.simple)`); err != nil {
+		t.Fatalf("temporary configuration: %v", err)
+	}
+	var id string
+	if err := conn.QueryRow(ctx, `INSERT INTO context_blocks (category, title, content, scope, type_name)
+		VALUES ('notes', 'Brücken', 'Die Häuser laufen schnell.', 'private', 'knowledge') RETURNING id::text`).Scan(&id); err != nil {
+		t.Fatalf("insert with pg_temp.german: %v", err)
+	}
+	assertFTSVectorsOfText(t, pool, id, "insert with a configuration german in pg_temp")
 }
 
 // TestFullTextVectorsUpdateCost bounds the WAL of archiving wide blocks by
