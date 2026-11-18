@@ -403,9 +403,10 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 			t.Errorf("advisory locks held after the failed read-back")
 		}
 
-		// A context canceled during a held build: the session that carries
-		// the build is not pooled again; it keeps building server-side and
-		// gives up its lock when the build is done.
+		// A context canceled during a held build: pgx cancels the statement
+		// and closes the connection, the build session ends with its lock
+		// (an INVALID leftover stays), and the connection is not pooled
+		// again.
 		release := holdBuilds(t, pool)
 		cctx, cancel := context.WithCancel(ctx)
 		ch, _ := ensureAsync(cctx, s, "idx_dream_pending_next", ddlOfManaged("idx_dream_pending_next"))
@@ -416,10 +417,12 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 		if r.err == nil {
 			t.Errorf("canceled build: no error")
 		}
+		waitNoAdvisoryLocks(t, pool, 10*time.Second)
+		if st := indexStateT(t, pool, "idx_dream_pending_next"); !st.exists || st.valid {
+			t.Errorf("after the canceled build: exists=%t valid=%t, want an INVALID leftover", st.exists, st.valid)
+		}
 		pooledPIDHoldsNoLock("after a canceled build")
 		release()
-		waitNoAdvisoryLocks(t, pool, 20*time.Second)
-		pooledPIDHoldsNoLock("after the canceled build ended server-side")
 	})
 
 	// confirm_refuses_while_another_instance_builds: a green verdict stands,
@@ -709,8 +712,14 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 		}
 		defer holder.Release()
 		var locked bool
-		if err := holder.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtext('ctx:runtime_index'), hashtext('context_blocks'))`).Scan(&locked); err != nil || !locked {
+		if err := holder.QueryRow(ctx, runtimeIndexLockSQL).Scan(&locked); err != nil || !locked {
 			t.Fatalf("holder lock: %v %v", locked, err)
+		}
+		// The class key differs from the one other two-key class of ctx
+		// (ctx:supersedes-guess): the two lock spaces cannot meet.
+		var distinct bool
+		if err := pool.QueryRow(ctx, `SELECT hashtext('ctx:runtime_index') <> hashtext('ctx:supersedes-guess')`).Scan(&distinct); err != nil || !distinct {
+			t.Errorf("class key of the runtime index lock equals the one of ctx:supersedes-guess (%v)", err)
 		}
 		defer func() { _, _ = holder.Exec(ctx, `SELECT pg_advisory_unlock_all()`) }()
 
@@ -907,6 +916,47 @@ func TestEmbedVerifyRunBinding_Integration(t *testing.T) {
 		}
 		if st.LastErr != nil {
 			t.Errorf("last_error %q set by run 1", *st.LastErr)
+		}
+	})
+
+	// second_verdict_of_the_same_watermark_is_discarded: two runs of one
+	// watermark (two ctxd instances each start the gate; the run single
+	// flight is per process). The first verdict is final: a later red one
+	// of the same watermark neither replaces the green report nor pauses
+	// the row (the confirm re-checks completeness in its own transaction).
+	t.Run("second_verdict_of_the_same_watermark_is_discarded", func(t *testing.T) {
+		pool := testdb.SetupTestDB(t)
+		s := newIndexTestScheduler(pool)
+		migID := seedMigrationRow(t, pool, "verifying")
+		ids := seedCleanMigrated(t, pool, 3)
+		run := activeT(t, pool)
+		if err := s.runEmbedVerify(ctx, run, verifyTestCfg()); err != nil {
+			t.Fatalf("first run: %v", err)
+		}
+		first := parseReport(t, readVerifyRow(t, pool, migID).Report)
+		if first.Result != verifyGreen {
+			t.Fatalf("first run: %q, want green", first.Result)
+		}
+		// A second green run of the same watermark leaves the first report.
+		if err := newIndexTestScheduler(pool).runEmbedVerify(ctx, run, verifyTestCfg()); err != nil {
+			t.Fatalf("second green run: %v", err)
+		}
+		if again := parseReport(t, readVerifyRow(t, pool, migID).Report); !again.StartedAt.Equal(first.StartedAt) {
+			t.Errorf("a second green verdict of the same watermark replaced the first (started_at %v → %v)", first.StartedAt, again.StartedAt)
+		}
+		// A block before the watermark loses its new-space vector after the
+		// first verdict: the second run of the same watermark goes red.
+		if _, err := pool.Exec(ctx, `UPDATE context_blocks SET embedding_next = NULL, embed_model_next = NULL WHERE id = $1::uuid`, ids[0]); err != nil {
+			t.Fatalf("clear next vector: %v", err)
+		}
+		if err := newIndexTestScheduler(pool).runEmbedVerify(ctx, run, verifyTestCfg()); err != nil {
+			t.Fatalf("second run: %v", err)
+		}
+		st := readVerifyRow(t, pool, migID)
+		rep := parseReport(t, st.Report)
+		t.Logf("after the second run: status=%s result=%s last_error=%v", st.Status, rep.Result, st.LastErr)
+		if st.Status != "verifying" || rep.Result != verifyGreen || st.LastErr != nil {
+			t.Errorf("second run of the same watermark: status=%q result=%q last_error=%v, want the first (green) verdict to stand", st.Status, rep.Result, st.LastErr)
 		}
 	})
 

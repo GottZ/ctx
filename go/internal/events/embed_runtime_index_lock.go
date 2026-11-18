@@ -26,12 +26,13 @@ import (
 // A session-level lock, not a transaction-level one: CREATE and DROP INDEX
 // CONCURRENTLY cannot run inside a transaction. The lock and the DDL run on
 // the same connection, so a build never outlives its lock: when the session
-// ends (ctxd killed, connection terminated), the server ends the build (an
-// INVALID leftover stays) and releases the lock together; when the client
-// is gone but the server-side statement still runs, the lock stays held
-// until the statement is done. An INVALID index found under the lock is
-// therefore a leftover, never a build in progress of a session that takes
-// the lock.
+// ends (pg_terminate_backend, or a canceled caller context — pgx then sends
+// a cancel request and closes the connection), the server ends the build
+// (an INVALID leftover stays) and releases the lock together; when the
+// client is gone without either (the ctxd process killed), the server-side
+// statement runs on and the lock stays held until it is done. An INVALID
+// index found under the lock is therefore a leftover, never a build in
+// progress of a session that takes the lock.
 //
 // The lock is only tried (pg_try_advisory_lock), as the neighbouring
 // background runs do with theirs (the overview rebuild, the block-count

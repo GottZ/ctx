@@ -789,7 +789,9 @@ var errVerifyRunLeft = errors.New("embed-verify: the row left this verify run")
 // holding no connection between the attempts: ending the run instead would
 // make the next cycle start it again from Stufe 1, a full table pass per
 // retry at 10M. Before each new attempt it checks that the row still waits
-// for this run (verifyRunWanted); otherwise it ends with errVerifyRunLeft.
+// for this run (verifyRunWanted); otherwise it ends with errVerifyRunLeft. A
+// failed check is asked again after the next wait instead of ending the
+// stage red.
 func (s *Scheduler) verifyEnsureIndex(ctx context.Context, mig *embedmigration.Migration, wm time.Time, name, ddl string) (string, error) {
 	waiting := false
 	for {
@@ -814,7 +816,11 @@ func (s *Scheduler) verifyEnsureIndex(ctx context.Context, mig *embedmigration.M
 		}
 		wanted, err := verifyRunWanted(ctx, s.pool, mig.ID, wm)
 		if err != nil {
-			return "", err
+			// Asked again after the next wait; a database that stays
+			// unreachable fails the next ensure, which ends the stage as
+			// before.
+			slog.Warn("scheduler: embed verify could not check its row while waiting — asking again", "migration_id", mig.ID, "error", err)
+			continue
 		}
 		if !wanted {
 			return "", errVerifyRunLeft
@@ -837,11 +843,13 @@ func verifyRunWanted(ctx context.Context, db pgxdb.Rower, id string, wm time.Tim
 
 // finishVerifyGreen stores the green report; the row STAYS `verifying` —
 // the cutover is the operator confirm (W04-6/W04-7, E-04-2). The UPDATE is
-// conditional on status='verifying' AND the run's watermark (issue #332): a
-// concurrent operator transition (pause/abort) wins and the verdict is
-// discarded, and so is the verdict of a run whose row re-entered verifying
-// with a newer watermark meanwhile (resume, drain, verifying again) — that
-// is another run, which the next cycle starts against the fresh watermark.
+// conditional on status='verifying', the run's watermark and no verdict yet
+// (issue #332): a concurrent operator transition (pause/abort) wins and the
+// verdict is discarded; so is the verdict of a run whose row re-entered
+// verifying with a newer watermark meanwhile (resume, drain, verifying
+// again) — that is another run, which the next cycle starts against the
+// fresh watermark — and the verdict of a second run of the same watermark
+// (another ctxd instance's): the first verdict of a watermark is final.
 func (s *Scheduler) finishVerifyGreen(ctx context.Context, mig *embedmigration.Migration, rep *verifyReport) error {
 	body, err := json.Marshal(rep)
 	if err != nil {
@@ -849,13 +857,14 @@ func (s *Scheduler) finishVerifyGreen(ctx context.Context, mig *embedmigration.M
 	}
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE context_embed_migrations SET verify_report = $2
-		 WHERE id = $1::uuid AND status = 'verifying' AND verify_started_at = $3`,
+		 WHERE id = $1::uuid AND status = 'verifying' AND verify_started_at = $3
+		   AND verify_report IS NULL`,
 		mig.ID, string(body), rep.Watermark)
 	if err != nil {
 		return fmt.Errorf("embed-verify: store green report: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		slog.Info("scheduler: embed verify green verdict discarded — the row left verifying or re-entered it with a newer watermark",
+		slog.Info("scheduler: embed verify green verdict discarded — the row left verifying, re-entered it with a newer watermark, or holds a verdict of this watermark",
 			"migration_id", mig.ID, "watermark", rep.Watermark)
 		return nil
 	}
@@ -866,11 +875,13 @@ func (s *Scheduler) finishVerifyGreen(ctx context.Context, mig *embedmigration.M
 // finishVerifyRed stores the red report and CAS-pauses the migration in
 // ONE tx (§4.7: rot → paused with the finding in verify_report AND
 // last_error — NEVER auto-abort; the operator decides between fixing the
-// fehlmenge, adjusting thresholds/config and aborting). The CAS is bound to
-// the run's watermark (issue #332). A lost CAS race (operator moved the row
-// mid-verify, or the row re-entered verifying with a newer watermark) rolls
-// the report back too — the verdict belonged to a state that no longer
-// exists.
+// fehlmenge, adjusting thresholds/config and aborting). The report UPDATE
+// carries the same run binding as the green one (issue #332: status
+// verifying, the run's watermark, no verdict yet) and locks the row; when
+// it matches nothing — operator moved the row mid-verify, the row
+// re-entered verifying with a newer watermark, or another run's verdict of
+// this watermark stands — the tx rolls back and nothing is paused: the
+// verdict belonged to a state that no longer exists.
 func (s *Scheduler) finishVerifyRed(ctx context.Context, mig *embedmigration.Migration, rep *verifyReport) error {
 	rep.Result = verifyRed
 	if rep.FinishedAt.IsZero() {
@@ -885,11 +896,16 @@ func (s *Scheduler) finishVerifyRed(ctx context.Context, mig *embedmigration.Mig
 		Begin:  "embed-verify: begin red tx",
 		Commit: "embed-verify: commit red verdict",
 	}, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
+		tag, err := tx.Exec(ctx,
 			`UPDATE context_embed_migrations SET verify_report = $2
-			 WHERE id = $1::uuid AND status = 'verifying'`,
-			mig.ID, string(body)); err != nil {
+			 WHERE id = $1::uuid AND status = 'verifying' AND verify_started_at = $3
+			   AND verify_report IS NULL`,
+			mig.ID, string(body), rep.Watermark)
+		if err != nil {
 			return fmt.Errorf("embed-verify: store red report: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return embedmigration.ErrTransitionRaceLost
 		}
 		terr := embedmigration.Transition(ctx, tx, mig.ID,
 			embedmigration.StatusVerifying, embedmigration.StatusPaused,
@@ -903,7 +919,7 @@ func (s *Scheduler) finishVerifyRed(ctx context.Context, mig *embedmigration.Mig
 		return terr
 	})
 	if errors.Is(err, embedmigration.ErrTransitionRaceLost) {
-		slog.Warn("scheduler: embed verify red verdict discarded — the row left verifying or re-entered it with a newer watermark",
+		slog.Warn("scheduler: embed verify red verdict discarded — the row left verifying, re-entered it with a newer watermark, or holds a verdict of this watermark",
 			"migration_id", mig.ID, "watermark", rep.Watermark)
 		return nil
 	}
