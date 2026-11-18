@@ -110,8 +110,8 @@ func TestBlockReadsSkipGoneAndDeleting_Integration(t *testing.T) {
 		t.Errorf("the block whose delete was in flight got %d rows, want 0 (skipped)", n)
 	}
 
-	// A picker holding a block FOR UPDATE (the guard batch, the embedding
-	// backfill) is not a delete, and its block stays: the insert neither waits
+	// A picker holding a block FOR UPDATE (the embedding backfill, the dream
+	// pick) is not a delete, and its block stays: the insert neither waits
 	// for it nor loses the row silently — it skips and counts it.
 	held := br345Block(t, pool, "br345 held")
 	tx2, err := conn.Begin(ctx)
