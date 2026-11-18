@@ -10,7 +10,9 @@
 // quals. Measured (TestCheckpointHeadSearchMeasure, 100 000 rows): the
 // ctx_checkpoint form reads 809 buffers without the filter and 809 with it under
 // a generic plan, 871 under a custom plan (the planner adds the type index as a
-// third bitmap arm); the ctx_handover form reads a third less with it. The gate
+// third bitmap arm); the ctx_handover form as it was before #342 (title words
+// only) reads a third less with it, and with the head tag it sends since #342
+// it reads what the ctx_checkpoint form reads. The gate
 // holds the filter within 10 % (+16 buffers) of the search without it, so a
 // change of indexes or statement that turns the typed search into a walk over
 // the checkpoint rows shows here.
@@ -138,14 +140,17 @@ type headForm struct {
 	p    store.SearchBlocksParams
 }
 
-// headForms are the three searches: the ctx_checkpoint head search, the
-// ctx_handover head search and the agent's search for a passage.
+// headForms are the searches: the ctx_checkpoint head search, the ctx_handover
+// head search (with the head tag since #342) and, as it was before, without it,
+// and the agent's search for a passage.
 func headForms(title string) []headForm {
 	scopes := []string{"private"}
 	return []headForm{
 		{"checkpoint head", store.SearchBlocksParams{Query: title, ReadScopes: scopes, Category: "compaction-checkpoints",
 			Tags: []string{"checkpoint-head"}, Limit: 10, Compact: true, ProbeNext: true}},
-		{"handover head", store.SearchBlocksParams{Query: title, ReadScopes: scopes, Limit: 5, Compact: true, ProbeNext: true}},
+		{"handover head", store.SearchBlocksParams{Query: title, ReadScopes: scopes, Tags: []string{"checkpoint-head"},
+			Limit: 5, Compact: true, ProbeNext: true}},
+		{"handover head, title only", store.SearchBlocksParams{Query: title, ReadScopes: scopes, Limit: 5, Compact: true, ProbeNext: true}},
 		{"agent passage", store.SearchBlocksParams{Query: unrankedWords[2000], ReadScopes: scopes, Category: "compaction-checkpoints",
 			Limit: 10, Compact: true, ProbeNext: true}},
 	}
@@ -270,7 +275,7 @@ func TestCheckpointHeadSearchCost(t *testing.T) {
 	title := headFixture(t, pool, shape)
 	t.Logf("fixture: %d ranked, %d parts, %d heads; searching %q", shape.ranked, shape.unranked, len(headRoots(shape)), title)
 
-	for _, f := range headForms(title)[:2] {
+	for _, f := range headForms(title)[:3] {
 		// The head is found, and only the head, with and without the filter:
 		// both statements answer the same question.
 		for _, on := range []bool{false, true} {
