@@ -82,7 +82,7 @@ type searchRequest struct {
 // therefore computes itself: the effective limit (echoed, and the input of the
 // next-page cursor), compact (echoed), the sanitised cursor, and the C6 flag
 // out of this request's ONE config snapshot.
-func (req searchRequest) coreArgs(limit int, compact bool, after *store.SearchCursor, facetEnabled bool) searchArgs {
+func (req searchRequest) coreArgs(limit int, compact bool, after *store.SearchCursor, facetEnabled, leaveOutNeverRanked bool) searchArgs {
 	return searchArgs{
 		Query:             req.Query,
 		Category:          req.Category,
@@ -98,8 +98,9 @@ func (req searchRequest) coreArgs(limit int, compact bool, after *store.SearchCu
 		// pure opt-in bind parameter, an unknown name matches nothing, and
 		// retrieval-excluded types stay browseable (D5). The refusal of an
 		// unknown name belongs to the MCP tool alone.
-		KnownTypesOnly: false,
-		FacetEnabled:   facetEnabled,
+		KnownTypesOnly:      false,
+		FacetEnabled:        facetEnabled,
+		LeaveOutNeverRanked: leaveOutNeverRanked,
 	}
 }
 
@@ -160,7 +161,7 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	//
 	// The C6 flag rides in as a VALUE out of the ONE snapshot taken above — the
 	// core must never take a second one (search_core.go, searchArgs.FacetEnabled).
-	a := req.coreArgs(limit, compact, after, cfgSnap.ClusterOps.FacetEnabled)
+	a := req.coreArgs(limit, compact, after, cfgSnap.ClusterOps.FacetEnabled, cfgSnap.Search.LeaveOutNeverRanked)
 	page, err := executeSearch(ctx, h.pool, h.typeSnapshot(ctx), authResult, a)
 	if err != nil {
 		var rejected *searchRejected
@@ -210,10 +211,12 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	if len(req.Types) > 0 {
 		typesFilter = req.Types
 	}
-	// The EFFECTIVE exclude list, folded by the same method the core binds
-	// (searchArgs.effectiveTypesExclude) — the echo can therefore not claim a
-	// different filter from the one that ran.
-	typesExclude := a.effectiveTypesExclude()
+	// The EFFECTIVE exclude list, the one the core bound (searchPage.
+	// TypesExclude: types_exclude ∪ block_roles_exclude, plus the never-ranked
+	// types a full-text search without types left out when
+	// search.leave_out_never_ranked is on) — the echo can therefore not claim
+	// a different filter from the one that ran.
+	typesExclude := page.TypesExclude
 	var typesExcludeFilter any = nil
 	if len(typesExclude) > 0 {
 		typesExcludeFilter = typesExclude

@@ -541,6 +541,9 @@ services:
       # ── mcp.* (1) ──
       CTX_MCP_READ_LOG_TYPES: ${CTX_MCP_READ_LOG_TYPES:-}
 
+      # ── search.* (1) ──
+      CTX_SEARCH_LEAVE_OUT_NEVER_RANKED: ${CTX_SEARCH_LEAVE_OUT_NEVER_RANKED:-}
+
       # ── env-only names (deliberately NOT in the config registry) ──
       # These have no settings key and no registry default: they are read
       # straight from the environment, so a .env value only reaches the

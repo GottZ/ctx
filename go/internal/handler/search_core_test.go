@@ -44,8 +44,8 @@ func TestSearchTransportsAgreeOnTheAliasUnion(t *testing.T) {
 		t.Fatalf("decode MCP arguments: %v", err)
 	}
 
-	restArgs := rest.coreArgs(10, true, nil, true)
-	toolArgs := tool.coreArgs(true)
+	restArgs := rest.coreArgs(10, true, nil, true, false)
+	toolArgs := tool.coreArgs(true, false)
 
 	// Order-preserving union, deduped: the alias's repeated "audit-trail" folds
 	// into the canonical one rather than binding twice.
@@ -104,20 +104,20 @@ func TestSearchAliasAloneBindsLikeTheCanonicalName(t *testing.T) {
 // REST would turn a request that answers today into a 400, off for the tool
 // would answer a typo with "nothing matched".
 func TestSearchTypeStrictnessStaysATransportProperty(t *testing.T) {
-	if (searchRequest{}).coreArgs(10, true, nil, false).KnownTypesOnly {
+	if (searchRequest{}).coreArgs(10, true, nil, false, false).KnownTypesOnly {
 		t.Error("REST /api/search must NOT refuse type names (pure bind parameter)")
 	}
-	if !(searchInput{}).coreArgs(false).KnownTypesOnly {
+	if !(searchInput{}).coreArgs(false, false).KnownTypesOnly {
 		t.Error("the MCP search tool MUST refuse an unknown type name (V-W6)")
 	}
 	// Without the #206/#207 arguments the tool answers compact rows from page 1,
 	// as it always did; with them it reads full rows and the caller's cursor.
-	toolArgs := (searchInput{}).coreArgs(false)
+	toolArgs := (searchInput{}).coreArgs(false, false)
 	if !toolArgs.Compact || toolArgs.After != nil {
 		t.Errorf("tool args = compact %t, after %v; want compact true, after nil", toolArgs.Compact, toolArgs.After)
 	}
 	cur := &store.SearchCursor{ID: "x"}
-	toolArgs = (searchInput{IncludeContent: true, After: cur}).coreArgs(false)
+	toolArgs = (searchInput{IncludeContent: true, After: cur}).coreArgs(false, false)
 	if toolArgs.Compact || toolArgs.After != cur {
 		t.Errorf("tool args = compact %t, after %v; want compact false and the caller's cursor", toolArgs.Compact, toolArgs.After)
 	}

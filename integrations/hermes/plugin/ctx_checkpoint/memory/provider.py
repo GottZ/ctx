@@ -56,6 +56,7 @@ from .config import (
     untrusted_origin,
     untrusted_origin_note,
 )
+from .status import display_url
 
 # Host features newer than the MemoryProvider ABC itself; older hosts get plain fallbacks.
 try:  # profile multiplexing: background work must run under the spawner's contextvars
@@ -365,7 +366,9 @@ class CtxMemoryProvider(MemoryProvider):
 
             cfg = self._load_config(str(get_hermes_home()))
             fallback = cfg.get("ctx_base_url") or (provider_config or {}).get("ctx_base_url") or ""
-            base = status["base_url"] = resolve_base_url(str(fallback))
+            base = resolve_base_url(str(fallback))
+            # Shown without user info, query and fragment (#311); the client gets the URL as configured.
+            shown = status["base_url"] = display_url(base)
             api_key = env_secret("CTX_KEY")
         except Exception as exc:
             text = redact_error_text(exc, (api_key, *self._profile_secrets()))
@@ -382,7 +385,7 @@ class CtxMemoryProvider(MemoryProvider):
                 status.update(
                     {
                         "ok": True,
-                        "summary": f"✓ Connected · {base} · scope: {scope} · label: {info.get('label') or '?'}",
+                        "summary": f"✓ Connected · {shown} · scope: {scope} · label: {info.get('label') or '?'}",
                         "home_scope": scope,
                         "label": info.get("label") or "",
                         "role": info.get("role") or "",
@@ -390,9 +393,9 @@ class CtxMemoryProvider(MemoryProvider):
                 )
             else:
                 cause = redact_error_text(info.get("error") or "unknown", secrets)
-                status["summary"] = f"✗ whoami failed: {shorten(cause, 140)} · {base}"
+                status["summary"] = f"✗ whoami failed: {shorten(cause, 140)} · {shown}"
         except Exception as exc:
-            status["summary"] = f"✗ {shorten(redact_error_text(exc, secrets), 140)} · {base}"
+            status["summary"] = f"✗ {shorten(redact_error_text(exc, secrets), 140)} · {shown}"
         return status
 
     # -- Lifecycle ------------------------------------------------------------
@@ -535,7 +538,7 @@ class CtxMemoryProvider(MemoryProvider):
             return ""
         lines = [
             "# CTX Long-Term Memory",
-            f"Active. Server: {self._base_url} · scope: {self._home_scope or '?'}.",
+            f"Active. Server: {display_url(self._base_url)} · scope: {self._home_scope or '?'}.",
             "Tools: ctx_query (recall, optional LLM synthesis), ctx_store (persist), ctx_search (lightweight), "
             "ctx_get (block detail).",
             "Conventions: one fact per block (~1–1.5k chars); store curated facts, never raw dialog dumps.",

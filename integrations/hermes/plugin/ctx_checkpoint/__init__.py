@@ -338,7 +338,8 @@ def _normalize_setup_values(values: dict[str, Any], current: dict[str, Any]) -> 
         raise ValueError(f"memory must be one of {', '.join(_MEMORY_CHOICES)}, not {memory_raw!r}")
     ctx_url = str(values.get("ctx_url") or "").strip()
     if ctx_url and not ctx_url.startswith(("https://", "http://", "${")):
-        raise ValueError(f"ctx server URL must start with https:// or http://, not {ctx_url!r}")
+        # Shown without its user info and query (#311): the message reaches the terminal and the form.
+        raise ValueError(f"ctx server URL must start with https:// or http://, not {_st.display_url(ctx_url)!r}")
     return {
         "mcp_server": mcp_server,
         "category": text("category", _DEFAULT_CATEGORY),

@@ -111,6 +111,7 @@ def _head_lookups(registry, McpClient, ChainWriter, first) -> dict:
 
     ctxrecords = _load_handover_records()
     real_before_342 = os.environ.get("CTX_E2E_SERVER", "") == "before-342"
+    real_leaves_out = os.environ.get("CTX_E2E_SERVER", "") == "leaves-out-never-ranked"
     out: dict = {}
 
     def checkpoint_lookup(label: str, server: Server, client=None):
@@ -150,6 +151,17 @@ def _head_lookups(registry, McpClient, ChainWriter, first) -> dict:
         _fail(f"this server: searches {out['checkpoint this server']}, refused {client._refused_types}")
     ctxrecords._types_refused.clear()
     handover_lookup("this server", real, [["checkpoint"], None] if real_before_342 else [["checkpoint"]])
+
+    if real_leaves_out:
+        # The endpoint itself leaves never-ranked types out of a search without types (search.leave_out_never_ranked
+        # on): both lookups above found the head because they name the type, and a search without it does not. A
+        # server that refuses the type cannot also leave it out, so the simulations below do not apply.
+        bare = McpClient(registry.dispatch, "ctx")
+        if any(
+            row.get("id") == first.head_id for row in bare.search(_head_title(), tags=["checkpoint-head"])["results"]
+        ):
+            _fail("this server leaves never-ranked types out, yet a search without types finds the head")
+        return out
 
     old = Server()
     old.refuses = True

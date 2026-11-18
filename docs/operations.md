@@ -147,6 +147,7 @@ The 29 names, to grep an inherited `.env` against — `CTX_CHAT_{HOST,API_KEY,PR
 | `CTX_LLMLOG_MAX_LIMIT` | `200` | hot | Cap on `GET /api/llmlog?limit=` |
 | `CTX_AUDIT_MAX_LIMIT` | `200` | hot | Cap on `GET /api/audit?limit=` and its page size when `limit` is absent ([api](api.md#endpoints)); parse-strict, `0` falls back to the default |
 | `CTX_MCP_READ_LOG_TYPES` | `checkpoint,insight` | hot | Block types whose rows the MCP `search` and `recent` tools book in the read record of `context_access_log`, one row per answered block of these types; MCP `get` and REST `manage get` book every block they answer, whatever this says ([read record](#the-read-record-in-context_access_log)). Unknown names match nothing; a list with no name falls back to the default. global-only |
+| `CTX_SEARCH_LEAVE_OUT_NEVER_RANKED` | `false` | hot | Settings key `search.leave_out_never_ranked` (tenant-overridable): with `true`, a **full-text search that names no type** (`POST /api/search`, MCP `search`, `ctx search query:…`, the web chat's `ctx_search`) leaves out the types `query` never ranks (retrieval policy `excluded` in the caller's registry: `checkpoint`, `system-meta`, `insight`, `catalog` on a stock registry) and can use the partial full-text indexes. Name those types in `types` to search them. **The default is due to change to `true`** in a later release; see [Full-text search and the never-ranked types](#full-text-search-and-the-never-ranked-types) for what it changes and what the flip waits for |
 | `CTX_EVENTS_TICK_INTERVAL` / `CTX_EVENTS_QUEUE_STATS_INTERVAL` | `5` (s) / `30` (s) | hot | Status-collector cadence: the cheap sources (health / pool / dream mode / gaming / llm-24h) refresh at most once per tick; the O(n) dream-queue scan decouples to its own slower interval. Also the SSE diff cadence (one snapshot+diff per tick, fanned to every connection) |
 | `CTX_EVENTS_PING_INTERVAL` / `CTX_EVENTS_MAX_CONNECTIONS` | `25` (s) / `8` | hot | SSE knobs (`GET /api/events`): the `: ping` keepalive cadence — MUST stay below the fronting proxy's read timeout (nginx 60s) — and the concurrent-stream cap (429 above it). `MAX_CONNECTIONS` is parse-strict (a malformed cap aborts boot) |
 | `CTX_WEBCHAT_ENABLED` / `_MAX_ITERATIONS` / `_MAX_TOKENS` / `_COMPLETION_BUDGET` / `_TOOL_RESULT_MAX_CHARS` / `_HISTORY_BUDGET_CHARS` / `_LLM_TIMEOUT` / `_CONCURRENT_TURNS` / `_SESSION_RETENTION` | `true` / `6` / `2048` / `8192` / `8000` / `60000` / `900` (s) / `1` / `0` (off) | hot | Web-chat harness (`POST /api/chat/stream`). `ENABLED` gates the endpoint (off ⇒ 404). The budgets cap one turn. `CONCURRENT_TURNS` is the per-`home_scope` semaphore (429 above it; parse-strict). `SESSION_RETENTION` takes a duration suffix (`h/d/w/m/y`); `0` keeps sessions forever |
@@ -315,6 +316,30 @@ It never carries the title, the content, the metadata, the tags or the rejection
 ```bash
 docker compose logs ctx | grep '"store: write reject' | grep '"api_key_id":"<key-uuid>"'
 ```
+
+## Full-text search and the never-ranked types
+
+`search.leave_out_never_ranked` (env `CTX_SEARCH_LEAVE_OUT_NEVER_RANKED`, default `false`, hot, tenant-overridable) decides what a full-text search answers when it names no `types`. It applies to every surface that reaches the block search: `POST /api/search`, the MCP `search` tool, `ctx search … query:…` and the web chat's `ctx_search`.
+
+- **`false` (the default):** every type, as before the key existed. The two full-text GIN indexes have been partial since migration 145 (they leave out `checkpoint` and `system-meta`), so such a search cannot use them and reads the text vectors of every visible block. On a store with many checkpoint parts this is most of its cost: at 10,000 blocks with 57 % checkpoint parts it read 95,200 buffers (`TestSearchUntypedFullTextLeavesOutNeverRankedCost`), and it grows with the checkpoint volume.
+- **`true`:** a full-text search without `types` also excludes the types `query` never ranks — every type whose retrieval policy is `excluded` in the caller's tenant-resolved registry (`checkpoint`, `system-meta`, `insight`, `catalog` on a stock registry; a tenant's own excluded type for that tenant). The search then uses both partial indexes, under a custom and a generic plan: 105 buffers instead of 95,200 in the same measurement. A search that names `types` gets exactly those types, `types_exclude`, `category`, `tags` and `limit` work as before, and a listing (empty query) and `recent` are not affected. `POST /api/search` echoes the types it left out in `filters.types_exclude`; the MCP tool and the chat tool do not say it in their answer.
+- **Tenants:** the caller's registry decides. A tenant's own excluded type is left out for that tenant. The type API refuses a tenant overlay that ranks `checkpoint` or `system-meta`; should a registry rank one of them all the same, the type stays in, the search cannot declare the index predicate and costs what it costs with the key off. A type the caller's registry does not know stays in, because the MCP tool could not name it.
+
+Switch it on a running instance, without a restart:
+
+```bash
+ctx settings set search.leave_out_never_ranked true     # on
+ctx settings unset search.leave_out_never_ranked        # back to the default (off)
+```
+
+**Clients that depend on the old answer.** With the key on, a client that finds blocks of these types by full text without naming the type finds nothing:
+
+- `ctx_checkpoint` before 0.16.0 looks its chain head up through MCP `search` without a type. It no longer finds the head and starts a new chain at every compaction. From 0.16.0 on, the plugin names the type; `ctx_handover` does so from 0.1.2.
+- Manual lookups: `ctx search index query:topic-map` (the linear topic map) and a checkpoint head search by title need `types:system-meta` resp. `types:checkpoint`. The pointer the topic map becomes with `digest.mode=stub` (`ctx search index query:root-map`) names no type and finds nothing with the key on.
+- The web UI's block search sends no `types`, so it no longer finds those blocks by text; an empty-query listing by category still does.
+- `insight` and `catalog` blocks drop out as well: `ctx_checkpoint` with `prefetch_mode: search`, and its `ctx_search` without `types`, no longer get the session insights it otherwise keeps visible.
+
+**The planned change of the default.** The default is meant to become `true` in a later release, once the shipped clients that look these blocks up without a type are gone: that waits on the Hermes plugin catalog pinning `ctx_checkpoint` 0.16.0 or later, and on the pointers in ctx itself that still name no type (the web UI's block search, the `digest.mode=stub` text, the insight prefetch above). Until then, switch it on per instance or per tenant where every client names the type.
 
 ## The read record in `context_access_log`
 
