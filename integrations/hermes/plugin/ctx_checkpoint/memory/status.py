@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 try:
     import fcntl
@@ -245,22 +245,65 @@ def redact_error(error: Any, secrets: Iterable[str] = ()) -> str:
 
 
 def display_url(url: Any) -> str:
-    """The URL without user info, query and fragment (they can carry credentials). A URL that
-    starts with a ``${VAR}`` template keeps the template and loses its query and fragment."""
+    """The URL without user info, query and fragment (they can carry credentials): scheme, host,
+    port and path. A URL that starts with a ``${VAR}`` template keeps the template and loses its
+    query, its fragment and any user info after ``://``. Never the text of a URL it cannot take
+    apart — no ``scheme://host`` (``user:pass@host/mcp``, ``host:8443/mcp``), an unreadable port or
+    host, an ``@`` after the host (``https://user/x:pass@host``, ``https://user:12#pass@host``: a
+    ``/``, ``?`` or ``#`` in the user info ends the host early, so where the user info ends is
+    unclear) — those are :data:`UNREADABLE_URL` (#311)."""
     raw = str(url or "").strip()
-    if raw.startswith("${"):
-        return raw.split("?", 1)[0].split("#", 1)[0]
     if not raw:
-        return raw
+        return ""
+    if raw.startswith("${"):
+        head = raw.split("?", 1)[0].split("#", 1)[0]
+        return UNREADABLE_URL if "@" in raw[len(head) :] else _display_template_url(head)
     try:
         parts = urlsplit(raw)
         host = parts.hostname or ""
-        if ":" in host:
-            host = f"[{host}]"
-        port = f":{parts.port}" if parts.port else ""
+        port = parts.port
     except ValueError:
-        return "(unreadable URL)"
-    return f"{parts.scheme}://{host}{port}{parts.path}"
+        return UNREADABLE_URL
+    if not (parts.scheme and parts.netloc and host) or "@" in f"{parts.path}{parts.query}{parts.fragment}":
+        return UNREADABLE_URL
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{parts.scheme}://{host}{f':{port}' if port else ''}{parts.path}"
+
+
+# What :func:`display_url` shows for a URL it cannot take apart.
+UNREADABLE_URL = "(unreadable URL)"
+# The connection test's error detail for such a URL with an ``@`` in it (see run_connection_test).
+URL_DETAILS_WITHHELD = (
+    "details withheld: the URL cannot be taken apart (write it as https://host/mcp; user info, if any, before the host)"
+)
+
+
+def _display_template_url(head: str) -> str:
+    """:func:`display_url` of a URL that starts with a template, query and fragment already cut."""
+    if "@" not in head:
+        return head
+    scheme, separator, rest = head.partition("://")
+    authority, slash, path = rest.partition("/")
+    if not separator or "@" in path:
+        return UNREADABLE_URL
+    return f"{scheme}://{authority.rsplit('@', 1)[1]}{slash}{path}"
+
+
+def url_secret_parts(url: Any) -> tuple[str, ...]:
+    """The parts of a configured URL that can carry a credential — user info (whole, user name and
+    password, as written and percent-decoded), query and fragment — longest first, for masking where
+    a text repeats them outside the URL (``nonnumeric port: '<password>@host'``). ``()`` for a URL
+    without them or one that cannot be taken apart."""
+    raw = str(url or "").strip()
+    try:
+        parts = urlsplit(raw)
+        userinfo = parts.netloc.rpartition("@")[0]
+        values = [userinfo, parts.username or "", parts.password or "", parts.query, parts.fragment]
+    except ValueError:
+        return ()
+    values += [unquote(value) for value in values]
+    return tuple(sorted({value for value in values if value}, key=lambda value: (-len(value), value)))
 
 
 def _test_timeout(entry: dict[str, Any]) -> float:
@@ -279,19 +322,25 @@ def run_connection_test(
     profile, for the check that no other entry gets the same tool names. A probe error is redacted
     with ``secrets`` and the keys of ``entry`` itself (:func:`entry_keys`), so the key of the entry
     under test is masked whatever the caller passed (#308)."""
-    secrets = (*secrets, *entry_keys(entry))
+    url = entry.get("url")
+    # A probe error can repeat the URL or parts of it (Hermes quotes a URL it refuses): its user info,
+    # query and fragment are masked like a key (#311).
+    secrets = (*secrets, *entry_keys(entry), *url_secret_parts(url))
     timeout = _test_timeout(entry)
     where = f"mcp_servers.{name}"
     others = colliding_servers(name, servers)
     if others:
         return ConnectionTest(False, f"connection test of {where}: {collision_text(name, others)}")
-    if entry.get("url"):
-        where += f" ({display_url(entry.get('url'))})"
+    if url:
+        where += f" ({display_url(url)})"
     try:
         tools = probe_server(name, entry, timeout)
     except ImportError:
         return ConnectionTest(None, f"{where}: this Hermes has no MCP connection test; try `hermes mcp test {name}`")
     except Exception as exc:
+        if url and "@" in str(url) and display_url(url) == UNREADABLE_URL:
+            # Where its user info ends is unclear, so no part of the error text is known to be free of it.
+            return ConnectionTest(False, f"connection test of {where} failed: {URL_DETAILS_WITHHELD}")
         return ConnectionTest(False, f"connection test of {where} failed: {redact_error(exc, secrets)}")
     missing = [tool for tool in CHECKPOINT_TOOLS if tool not in tools]
     if missing:

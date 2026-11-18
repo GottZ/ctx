@@ -256,7 +256,11 @@ that names no type, `--all-types` included.
 - Rejections carry the server's `code` (`reserved_category`, `reserved_type`,
   `reserved_metadata`, `unknown_type`, `parent_required`, `unknown_parent`,
   `provenance_protected`, `rate_limit`, …). Only `rate_limit`/429 is retried (once by the
-  client after 1 s). `metadata.provenance` is server-owned and rejected client-side.
+  client after 1 s). `metadata.provenance` is server-owned and rejected client-side. Over
+  MCP, Hermes passes a tool error's text without ctx's code: `rate_limit` is read from ctx's
+  whole answer `Rate limit exceeded: max <n> … per 60 seconds`, `confirm_writes` from an
+  answer starting `STAGED — NOT` — never from words an error repeats from the call (0.16.1,
+  GottZ/ctx#354).
 - Every automatic store is logged at INFO (hook, profile, category/title, action
   `created`/`updated`/`noop`, block id), failures at WARNING. Only the shortened title is
   logged, never content.

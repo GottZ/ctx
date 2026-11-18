@@ -6,6 +6,39 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.16.1] — 2026-11-18
+
+No output names the credentials of a configured URL (GottZ/ctx#311), and the code of an MCP
+tool error comes from the form of ctx's answer (GottZ/ctx#354).
+
+- **Status, CLI and system prompt on `transport: rest`.** `hermes memory status`
+  (`base_url`, summary), `hermes ctx_checkpoint status` (`base URL:` and the `ctx_base_url`
+  of `ctx.json`) and the memory block of the system prompt printed the base URL as written,
+  user info, query and fragment included. They show it through `status.display_url` now, as
+  the MCP status did.
+- **`display_url`** never returns the text of a URL it cannot take apart: without
+  `scheme://host` (`user:pass@host/mcp` came back as `user://pass@host/mcp`), with an `@`
+  after the host (a `/`, `?` or `#` in the user info ends the host early:
+  `https://user:12#pass@host` came back as `https://user:12`), an unreadable host or port —
+  `(unreadable URL)`. A URL starting with a `${VAR}` template also loses user info after `://`.
+- **Error texts.** `redact_error_text` (every error text the plugin raises, logs, records in
+  the outcome file, shows in the status or hands to the model) replaces every URL with user
+  info, a query or a fragment by its display form: a transport error naming the MCP entry's
+  URL kept its fragment and query values that no credential rule names. The connection test
+  also masks the entry URL's parts where the error repeats them without the URL, and
+  withholds the error of a URL that cannot be taken apart and holds an `@`.
+- **REST client.** A base URL with user info, a query or a fragment never reached the API
+  (urllib read the password as the port and repeated it in its error, or looked the user
+  info up as part of the host; a query or fragment came before every request path). It is
+  refused before any connection now — also with an `@` after a `/` of the user info — with a
+  text that names no part of the URL.
+- **Error codes over MCP.** `rate_limit` was set for every tool error holding `rate limit` or
+  `rate_limit` — a search refusing a type of that name, a transport error mentioning one —
+  with status 429: the chain writer waited a whole window (61 s), then failed as
+  "rate-limited", and the agent tool told the model to retry. Now only ctx's whole answer
+  `Rate limit exceeded: max <n> … per 60 seconds` is a rate limit. `confirm_writes` likewise
+  only for an answer starting `STAGED — NOT`, no longer for a store error naming the word.
+
 ## [ctx_checkpoint 0.16.0] — 2026-11-18
 
 Checkpoint searches name the `checkpoint` type, over MCP too (GottZ/ctx#342).

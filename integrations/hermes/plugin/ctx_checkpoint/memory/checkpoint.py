@@ -46,7 +46,7 @@ from .client import (
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.16.0"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
+PLUGIN_VERSION = "0.16.1"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
 UPSTREAM_REF = "GottZ/ctx integrations/hermes/plugin/ctx_checkpoint 0.4.3 @ 38fdb74 (MPL-2.0)"
 
 CATEGORY_CHECKPOINT = "compaction-checkpoints"
@@ -495,6 +495,8 @@ def redact_text(text: str, secret: str | Iterable[str] = ()) -> str:
 _CLIENT_CODES = frozenset({"confirm_writes", "timeout"})
 # What an error text says when its redaction failed (it is withheld, never passed on raw).
 ERROR_WITHHELD = "(details withheld: redaction failed)"
+# A URL in an error text (``_shown_urls``): ``scheme://`` up to white space, a quote or an angle bracket.
+_URL_IN_TEXT_RE = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>`]+")
 
 
 def _mask_cut_secret(text: str, value: str) -> str:
@@ -517,13 +519,28 @@ def _mask_cut_secret(text: str, value: str) -> str:
     return "".join(pieces)
 
 
+def _shown_urls(text: str) -> str:
+    """``text`` with every URL that carries user info, a query or a fragment in the form the status
+    shows (``status.display_url``): a transport error names the URL it failed on, and the URL of a
+    ctx server entry can hold credentials there (#311). Other URLs stay as they are."""
+    from .status import display_url
+
+    def shown(match: re.Match) -> str:
+        url = match.group(0)
+        rest = url.split("://", 1)[1]
+        return display_url(url) if "@" in rest or "?" in rest or "#" in rest else url
+
+    return _URL_IN_TEXT_RE.sub(shown, text)
+
+
 def redact_error_text(text: Any, secret: str | Iterable[str] = ()) -> str:
     """An error text that can carry foreign text (a server answer, a dispatch error), redacted
-    before it is raised or logged (#301): :func:`redact_text` with the bound keys, and a piece of a
-    bound key that a client cut off masked as well. Cut it to length only after this. Never
-    raises; on a redaction failure the text is withheld (:data:`ERROR_WITHHELD`)."""
+    before it is raised or logged (#301): every URL in it without user info, query and fragment
+    (#311), :func:`redact_text` with the bound keys, and a piece of a bound key that a client cut off
+    masked as well. Cut it to length only after this. Never raises; on a redaction failure the text
+    is withheld (:data:`ERROR_WITHHELD`)."""
     try:
-        text = "" if text is None else str(text)
+        text = _shown_urls("" if text is None else str(text))
         values = bound_secret_values(secret)
         for value in values:
             text = _mask_cut_secret(text, value)

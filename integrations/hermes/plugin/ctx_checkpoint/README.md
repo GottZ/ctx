@@ -275,12 +275,26 @@ kept when `state_retention_days` prunes the other state files. Warnings
 follow as `warning:` lines: plain `http://` to a remote host, and
 `checkpoint_mode: off` (see [Troubleshooting](#troubleshooting)).
 
+A URL is shown with scheme, host, port and path only — on `transport: rest` too
+(`base_url:`, the CLI's `base URL:` and the `ctx_base_url` of `ctx.json`), and in the
+memory block of the system prompt: user info, query and fragment can carry credentials
+and are left out; a URL that cannot be taken apart this way (no `scheme://host`, an `@`
+after the host) shows as `(unreadable URL)` (0.16.1). Error texts lose the same parts of
+every URL they name. The REST client sends nothing for a base URL with user info, a
+query or a fragment — ctx's API takes none of them; the key belongs in `CTX_KEY` — and
+the status names that refusal. Setup's refusal of a URL without `http(s)://` names it the
+same way.
+
 When a checkpoint fails, the provider also tells the session why — the part
 limit, the time limit, a ctx MCP server that is not connected (with
 `hermes mcp test <name>`), a rate limit or a key that stages its writes — through
 Hermes' warning channel, once per distinct cause. Hermes hands that channel to the
 provider only on sessions of the CLI platform; elsewhere (gateway chats) the
-reason is in the log and in the status.
+reason is in the log and in the status. A rate limit is ctx's answer
+`Rate limit exceeded: max <n> … per 60 seconds` and a staged write an answer that
+starts `STAGED — NOT`; an error that only repeats such words (a search for a type
+named `rate_limit`, a transport error that mentions a rate limit) keeps its own text,
+without the wait of a rate limit (0.16.1).
 
 ## Recall of a checkpoint
 
