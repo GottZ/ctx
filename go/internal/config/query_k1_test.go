@@ -134,3 +134,33 @@ func TestRerankTimeoutKey(t *testing.T) {
 		}
 	}
 }
+
+// TestQueryTranslateKey (#210): the translation switch is a hot,
+// tenant-overridable key next to the query thresholds, default auto, and V64
+// refuses anything but auto and off after trim + lower-case — a tolerant
+// reading would turn a typo of "off" into the step the operator tried to
+// switch off (the V20 reasoning for dream.json_mode).
+func TestQueryTranslateKey(t *testing.T) {
+	k1Entry(t, "query.translate", "CTX_QUERY_TRANSLATE", llm.TranslateAuto)
+
+	for _, tc := range []struct {
+		val, norm string
+		want      Severity
+	}{
+		{"auto", llm.TranslateAuto, -1},
+		{"off", llm.TranslateOff, -1},
+		{" OFF ", llm.TranslateOff, -1},
+		{"", "", -1}, // reads as auto, the empty-is-default sentinel
+		{"of", "of", SeverityError},
+		{"false", "false", SeverityError},
+	} {
+		c, _ := cfgFrom(t, map[string]string{"query.translate": tc.val})
+		issues := Validate(c)
+		if got := severityFor(issues, "query.translate"); got != tc.want {
+			t.Errorf("query.translate=%q: severity %d, want %d (%v)", tc.val, got, tc.want, issues)
+		}
+		if c.Query.Translate != tc.norm {
+			t.Errorf("query.translate=%q normalized to %q, want %q", tc.val, c.Query.Translate, tc.norm)
+		}
+	}
+}

@@ -470,6 +470,9 @@ func TestRegistryTenancySet(t *testing.T) {
 		// #208: the per-source window of the tenant's OWN synthesis prompts,
 		// bounded by the same worst case every tenant reaches with limit = 20.
 		"query.max_source_runes": true,
+		// #210: whether the tenant's OWN questions are translated before
+		// retrieval — the right answer is a property of that tenant's corpus.
+		"query.translate": true,
 		// #342: same class as the query thresholds — it decides which rows the
 		// tenant's OWN full-text searches answer, not their shape, and the
 		// clients that still need the old answer are per installation.
@@ -536,8 +539,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 71 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 71 (change it with intent)", got)
+	if got := len(overridable); got != 72 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 72 (change it with intent)", got)
 	}
 	// The NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant: a
 	// tenant override here would flush the process-wide embed cache / flip the

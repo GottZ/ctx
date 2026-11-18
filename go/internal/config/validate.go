@@ -75,13 +75,15 @@ func temporalTimeoutBudgetOf(c *Config) time.Duration {
 // logging everything; Store.Replace rejects.
 func Validate(c *Config) []Issue {
 	var issues []Issue
-	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V9d, V11, V26, V61, V62
-	issues = append(issues, validateRerankGraph(c)...)   // V3, V9, V63
-	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c, V18, V19, V20
-	issues = append(issues, validateGraphOverview(c)...) // V17b
-	issues = append(issues, validateDurations(c)...)     // V17
-	issues = append(issues, validateEmbedBackoff(c)...)  // V21
-	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V33
+	issues = append(issues, validateQuery(c)...)              // V2, V5, V9b, V9c, V9d, V11, V26
+	issues = append(issues, validateQuerySynthesisCuts(c)...) // V61, V62
+	issues = append(issues, validateQueryTranslate(c)...)     // V64
+	issues = append(issues, validateRerankGraph(c)...)        // V3, V9, V63
+	issues = append(issues, validateDream(c)...)              // V6, V10, V14, V15, V16b, V16c, V18, V19, V20
+	issues = append(issues, validateGraphOverview(c)...)      // V17b
+	issues = append(issues, validateDurations(c)...)          // V17
+	issues = append(issues, validateEmbedBackoff(c)...)       // V21
+	issues = append(issues, validateDistill(c)...)            // V22-V25, V27-V33
 	// V37 (W06-8): the foreign-load detector's floors and ratio range.
 	issues = append(issues, validateStatusForeignLoad(c)...)
 	// V38, V39 (W02-02): the gateway group's floors, caps and budget relation;
@@ -916,6 +918,36 @@ func validateQuery(c *Config) []Issue {
 			Msg: fmt.Sprintf("semantic floor %g must be >= 0 and < 1 (0 = off)", c.Query.SemanticFloor)})
 	}
 
+	// V5 — today's llm init() semantics: log + fall back to v5.2.
+	if c.Query.PromptVersion != promptVersionV52 && c.Query.PromptVersion != promptVersionV6 {
+		issues = append(issues, Issue{Field: "query.prompt_version", Severity: SeverityWarn,
+			Msg: fmt.Sprintf("unknown prompt version %q — using %q", c.Query.PromptVersion, promptVersionV52)})
+		c.Query.PromptVersion = promptVersionV52
+	}
+
+	// V9's rate-limit loop (query.rate_limit_write, query.rate_limit_read,
+	// pool.blob_rate_limit_write) and the four single-key sign checks V9d
+	// (pool.blob_stage_max_bytes), V9e (pool.blob_scan_max_bytes), V9b
+	// (pool.external_num_ctx_fallback) and V9c (pool.openrouter_window_ttl)
+	// were FOLDED into V35 (validateIntSigns) — the generic sign walk over
+	// every int key, for the reason V17 gives for the same fold on durations:
+	// a per-key allowlist next to a generic walk double-reports the field.
+	// None of them said anything the walk does not say; what each said about
+	// its own ZERO (staging off, scan off, "unset", discovery off) is a
+	// statement about the key, not about the check, and now lives in the field
+	// docs of the four PoolConfig fields in config.go, where descriptions.go
+	// mirrors it. The three rate limits said nothing about their zero — the
+	// 0-is-off convention is already in their own field docs.
+
+	return issues
+}
+
+// validateQuerySynthesisCuts holds V61 (#226) and V62 (#208), the two cuts the
+// synthesis prompt applies to the retrieved sources — own function, because
+// validateQuery sits near the cyclop ceiling.
+func validateQuerySynthesisCuts(c *Config) []Issue {
+	var issues []Issue
+
 	// V61 (#226) — query.low_confidence_max_sources counts the sources a
 	// low_confidence prompt keeps. 0 renders as a configured cut and would
 	// send the model a question without a single source; "no cut" is any
@@ -938,26 +970,26 @@ func validateQuery(c *Config) []Issue {
 				v, llm.MaxBlockChars, llm.SourceRunesShare)})
 	}
 
-	// V5 — today's llm init() semantics: log + fall back to v5.2.
-	if c.Query.PromptVersion != promptVersionV52 && c.Query.PromptVersion != promptVersionV6 {
-		issues = append(issues, Issue{Field: "query.prompt_version", Severity: SeverityWarn,
-			Msg: fmt.Sprintf("unknown prompt version %q — using %q", c.Query.PromptVersion, promptVersionV52)})
-		c.Query.PromptVersion = promptVersionV52
-	}
+	return issues
+}
 
-	// V9's rate-limit loop (query.rate_limit_write, query.rate_limit_read,
-	// pool.blob_rate_limit_write) and the four single-key sign checks V9d
-	// (pool.blob_stage_max_bytes), V9e (pool.blob_scan_max_bytes), V9b
-	// (pool.external_num_ctx_fallback) and V9c (pool.openrouter_window_ttl)
-	// were FOLDED into V35 (validateIntSigns) — the generic sign walk over
-	// every int key, for the reason V17 gives for the same fold on durations:
-	// a per-key allowlist next to a generic walk double-reports the field.
-	// None of them said anything the walk does not say; what each said about
-	// its own ZERO (staging off, scan off, "unset", discovery off) is a
-	// statement about the key, not about the check, and now lives in the field
-	// docs of the four PoolConfig fields in config.go, where descriptions.go
-	// mirrors it. The three rate limits said nothing about their zero — the
-	// 0-is-off convention is already in their own field docs.
+// validateQueryTranslate is V64 (#210), the enum of query.translate.
+func validateQueryTranslate(c *Config) []Issue {
+	var issues []Issue
+
+	// V64 (#210) — query.translate is auto or off, normalized in place (trim +
+	// lower, the V20 pattern). Fatal, not V5's fallback: the fallback would be
+	// auto, so a typo of "off" would keep the translate step the operator was
+	// switching off while the settings surface renders the typo. Empty reads as
+	// auto.
+	c.Query.Translate = strings.ToLower(strings.TrimSpace(c.Query.Translate))
+	switch c.Query.Translate {
+	case "", llm.TranslateAuto, llm.TranslateOff:
+	default:
+		issues = append(issues, Issue{Field: "query.translate", Severity: SeverityError,
+			Msg: fmt.Sprintf("query.translate %q must be %q (translate a question the German heuristic matches) or %q (never translate) — empty reads as %q",
+				c.Query.Translate, llm.TranslateAuto, llm.TranslateOff, llm.TranslateAuto)})
+	}
 
 	return issues
 }
