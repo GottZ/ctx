@@ -116,7 +116,9 @@ func TestIJRecallFilteredANN(t *testing.T) {
 	t0 := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 
 	seedStart := time.Now()
-	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks DISABLE TRIGGER USER`); err != nil {
+	// trg_block_fulltext stays on: it fills ts_de/ts_en, generated columns before
+	// migration 178, so the seeded rows keep their production shape.
+	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks DISABLE TRIGGER USER; ALTER TABLE context_blocks ENABLE TRIGGER trg_block_fulltext`); err != nil {
 		t.Fatalf("disable triggers: %v", err)
 	}
 	// Foreign rows (scope 'other'), two populations. The recall hazard is that a

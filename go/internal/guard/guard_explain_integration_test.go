@@ -53,7 +53,9 @@ func TestT7ExplainGuardPendingIndex(t *testing.T) {
 	// pending list — 1M distinct payloads turn the seed quadratic (observed:
 	// >17min without finishing). Triggers do not influence planner shape,
 	// which is the only thing this gate measures; re-enabled right after.
-	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks DISABLE TRIGGER USER`); err != nil {
+	// trg_block_fulltext stays on: it fills ts_de/ts_en, generated columns before
+	// migration 178, so the seeded rows keep their production shape.
+	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks DISABLE TRIGGER USER; ALTER TABLE context_blocks ENABLE TRIGGER trg_block_fulltext`); err != nil {
 		t.Fatalf("disable triggers: %v", err)
 	}
 	// Bulk: 1M-shaped table mass OUTSIDE the partial index (embedding NULL).
