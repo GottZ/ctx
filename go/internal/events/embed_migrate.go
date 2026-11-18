@@ -748,7 +748,10 @@ func (s *Scheduler) ensureMigrationPendingIndex(ctx context.Context) error {
 // dropMigrationPendingIndex removes the runtime index once no migration is
 // active (terminal cleanup, §3.3). Existence-probe first so the common case
 // (no migration ever — years of normal operation) costs one catalog lookup
-// per tick, never a DDL statement.
+// per tick, never a DDL statement. The drop is runtime index DDL on
+// context_blocks and takes the runtime index lock (issue #332): beside a
+// build of another session (the verify gate of an instance that has not
+// seen the abort yet) it waits for the next tick instead.
 func (s *Scheduler) dropMigrationPendingIndex(ctx context.Context) error {
 	var exists bool
 	if err := s.pool.QueryRow(ctx,
@@ -759,8 +762,16 @@ func (s *Scheduler) dropMigrationPendingIndex(ctx context.Context) error {
 	if !exists {
 		return nil
 	}
-	if _, err := s.pool.Exec(ctx,
-		`DROP INDEX CONCURRENTLY IF EXISTS `+migrationPendingIndexName); err != nil {
+	err := withRuntimeIndexLock(ctx, s.pool, func(conn *pgxpool.Conn) error {
+		_, err := conn.Exec(ctx, `DROP INDEX CONCURRENTLY IF EXISTS `+migrationPendingIndexName)
+		return err
+	})
+	if errors.Is(err, errRuntimeIndexBusy) {
+		slog.Debug("scheduler: embed migration pending index drop deferred — another session is building a runtime index on context_blocks",
+			"index", migrationPendingIndexName)
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("embed-migrate: drop pending index: %w", err)
 	}
 	slog.Info("scheduler: embed migration pending index dropped (no active migration)",

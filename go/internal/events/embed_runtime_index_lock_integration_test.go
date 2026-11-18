@@ -207,6 +207,14 @@ func indexOIDT(t *testing.T, pool *pgxpool.Pool, name string) int64 {
 	return oid
 }
 
+func sortDurations(d []time.Duration) {
+	for i := 1; i < len(d); i++ {
+		for j := i; j > 0 && d[j] < d[j-1]; j-- {
+			d[j], d[j-1] = d[j-1], d[j]
+		}
+	}
+}
+
 // isBusy reports whether err says another session is building (the
 // refusal of a second session that meets a build in progress).
 func isBusy(err error) bool {
@@ -566,6 +574,103 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 		if st := readMigrationRow(t, pool, migID); st.Migrated != 1 {
 			t.Errorf("migrated_count %d, want 1", st.Migrated)
 		}
+	})
+
+	// terminal_drop_waits_for_a_build: no migration is active any more (the
+	// row was aborted), and another instance's verify gate still builds a
+	// _next index (held). B's cycle, which drops the pending index once no
+	// migration is active, must not run its DROP INDEX CONCURRENTLY beside
+	// that build; it drops on a later tick.
+	t.Run("terminal_drop_waits_for_a_build", func(t *testing.T) {
+		pool := testdb.SetupTestDB(t)
+		seedCleanMigrated(t, pool, 3)
+		sA := newIndexTestScheduler(instancePool(t, pool, 4))
+		sB := newIndexTestScheduler(instancePool(t, pool, 4))
+		if _, err := sA.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL); err != nil {
+			t.Fatalf("pending index: %v", err)
+		}
+		migID := seedMigrationRow(t, pool, "verifying")
+		if err := embedmigration.Transition(ctx, pool, migID, embedmigration.StatusVerifying, embedmigration.StatusAborted,
+			embedmigration.WithAbortReason("test")); err != nil {
+			t.Fatalf("abort: %v", err)
+		}
+
+		release := holdBuilds(t, pool)
+		chA, _ := ensureAsync(ctx, sA, "idx_dream_pending_next", ddlOfManaged("idx_dream_pending_next"))
+		pidA := buildingPID(t, pool, "idx_dream_pending_next")
+		cycleDone := make(chan error, 1)
+		doneB := make(chan struct{})
+		go func() {
+			cycleDone <- sB.runEmbedMigrationCycle(ctx, nil, migCfg(8, 0))
+			close(doneB)
+		}()
+		seen := watchIndexDDL(t, pool, pidA, 3*time.Second, doneB)
+		release()
+		rA := waitEnsure(t, chA, "A")
+		var cycleErr error
+		select {
+		case cycleErr = <-cycleDone:
+		case <-time.After(60 * time.Second):
+			t.Fatalf("B's cycle did not end within 60s")
+		}
+		t.Logf("A: action=%q err=%v; B cycle: %v; DDL of B during A's build: %q", rA.action, rA.err, cycleErr, seen)
+		if len(seen) > 0 {
+			t.Errorf("B's terminal drop ran beside A's build: %q", seen)
+		}
+		if cycleErr != nil {
+			t.Errorf("B's cycle: %v, want a deferred drop without an error", cycleErr)
+		}
+		if rA.err != nil || rA.action != indexActionCreated {
+			t.Errorf("A: action=%q err=%v, want %s", rA.action, rA.err, indexActionCreated)
+		}
+		if err := sB.runEmbedMigrationCycle(ctx, nil, migCfg(8, 0)); err != nil {
+			t.Fatalf("B's next cycle: %v", err)
+		}
+		if indexOIDT(t, pool, migrationPendingIndexName) != 0 {
+			t.Errorf("pending index still there after the next cycle without an active migration")
+		}
+	})
+
+	// reuse_takes_no_lock: the common case — every runtime index valid and of
+	// its DDL's definition — reads the catalog and reuses without the lock,
+	// so a lock held by another session does not hold it up. It also times
+	// the reuse of all seven managed indexes (the per-cycle and per-re-run
+	// cost of the stage).
+	t.Run("reuse_takes_no_lock", func(t *testing.T) {
+		pool := testdb.SetupTestDB(t)
+		seedCleanMigrated(t, pool, 3)
+		s := newIndexTestScheduler(instancePool(t, pool, 4))
+		for _, ix := range managedRuntimeIndexes() {
+			if _, err := s.ensureConcurrentIndexValid(ctx, ix.name, ix.ddl); err != nil {
+				t.Fatalf("build %s: %v", ix.name, err)
+			}
+		}
+		holder, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("holder: %v", err)
+		}
+		defer holder.Release()
+		var locked bool
+		if err := holder.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtext('ctx:runtime_index'), hashtext('context_blocks'))`).Scan(&locked); err != nil || !locked {
+			t.Fatalf("holder lock: %v %v", locked, err)
+		}
+		defer func() { _, _ = holder.Exec(ctx, `SELECT pg_advisory_unlock_all()`) }()
+
+		const n = 50
+		durs := make([]time.Duration, 0, n)
+		for i := 0; i < n; i++ {
+			start := time.Now()
+			for _, ix := range managedRuntimeIndexes() {
+				a, err := s.ensureConcurrentIndexValid(ctx, ix.name, ix.ddl)
+				if err != nil || a != indexActionReused {
+					t.Fatalf("%s with the lock held elsewhere: action=%q err=%v, want %s", ix.name, a, err, indexActionReused)
+				}
+			}
+			durs = append(durs, time.Since(start))
+		}
+		sortDurations(durs)
+		t.Logf("reuse of %d managed indexes, n=%d: median %s, p90 %s, max %s",
+			len(managedRuntimeIndexes()), n, durs[n/2], durs[n*9/10], durs[n-1])
 	})
 
 	// two_free_running_instances: the reviewer's case of #331 as a

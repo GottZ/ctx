@@ -475,7 +475,8 @@ func runConfirmSwapTx(ctx context.Context, db *pgxpool.Pool, migrationID string,
 		if err := embedmigration.Transition(ctx, tx, migrationID,
 			embedmigration.StatusVerifying, embedmigration.StatusDone,
 			embedmigration.WithFinishedAt(), embedmigration.OnWatermark(*row.watermark)); err != nil {
-			return fmt.Errorf("embed-cutover: confirm CAS: %w", err)
+			return fmt.Errorf("embed-cutover: confirm CAS (verifying at watermark %s): %w",
+				row.watermark.UTC().Format(time.RFC3339Nano), err)
 		}
 		return nil
 	})
