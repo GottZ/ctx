@@ -164,7 +164,7 @@ func RunGuardBatch(ctx context.Context, pool interface {
 	}
 	checkTypes := set.GuardCheckTypes()
 
-	// Wrap entire batch in a transaction so FOR UPDATE SKIP LOCKED row locks
+	// Wrap entire batch in a transaction so the pick's SKIP LOCKED row locks
 	// are held until all blocks are processed, preventing race conditions.
 	// The bracket itself — open, deferred rollback, close — belongs to
 	// pgxdb.Write; the two stage labels stay HERE and keep their wording,
