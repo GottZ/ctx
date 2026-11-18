@@ -5,7 +5,10 @@
     "with the write below and compares their answers with this file; memory/tests/test_mcp_answer_contract.py and",
     "tests/test_paced_idempotent_chain.py feed exactly these answers to the plugin. A change on either side turns the other red.",
     "Placeholders in the store templates: {title}, {id}, {category}. Hermes hands every MCP text result to the plugin as",
-    "{\"result\": \"<text>\"}."
+    "{\"result\": \"<text>\"}.",
+    "search.types is what the head lookup sends (GottZ/ctx#342); search.types_refused is the error a ctx server before",
+    "#342 answers to it (Hermes hands an error to the plugin as {\"error\": \"<text>\"}). The query tool still answers that",
+    "text to the same types, which the ctx side checks, so the wording the plugin falls back on is the server's own."
   ],
   "write": {
     "category": "compaction-checkpoints",
@@ -33,7 +36,9 @@
   "search": {
     "query": "Compaction checkpoint head 019f6000-0000-7000-8000-00000000c0de",
     "tags": ["checkpoint-head"],
-    "row_keys": ["id", "title", "category"]
+    "types": ["checkpoint"],
+    "row_keys": ["id", "title", "category", "type"],
+    "types_refused": "block type \"checkpoint\" is not retrieval-visible"
   },
   "origin": {
     "about": [

@@ -210,7 +210,8 @@ def test_rv_f_l26_disclosure_names_facts_reads_search_and_thread():
     assert "`/etc/os-release`" in reads and "`/proc/self/status`" in reads
     ctx = _section("**ctx (optional):**", "**Core modules used:**")
     assert "a `search` for the checkpoint head before each `store`" in ctx
-    assert '"search"' in inspect.getsource(ctxrecords._checkpoint_head)
+    assert "_head_search" in inspect.getsource(ctxrecords._checkpoint_head)
+    assert '"search"' in inspect.getsource(ctxrecords._head_search)
     background = _section("**Background work:**", "**Stored secrets:**")
     assert "`ctxh-maintenance`" in background
     assert "ctxh-maintenance" in (PLUGIN_ROOT / "engine" / "jobs.py").read_text(encoding="utf-8")

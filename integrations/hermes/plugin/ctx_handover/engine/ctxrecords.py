@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
@@ -50,6 +51,16 @@ HEAD_TITLE = "Compaction checkpoint head {root}"
 """ctx_checkpoint's stable head title per root session (its README "Recall of a checkpoint"); ``{root}`` is the
 root's title token (``head_token``)."""
 ROOT_TOKEN_MAX = 48
+CHECKPOINT_TYPE = "checkpoint"
+"""The type ctx_checkpoint stores its heads under. The head search names it (GottZ/ctx#342): ctx may leave types that
+retrieval never ranks out of a search that names no type."""
+_TYPE_NOT_VISIBLE_RE = re.compile(r"\bblock type\W+([A-Za-z0-9_.:-]+)\W+is not retrieval-visible\b")
+_UNKNOWN_ARGS_MARKER = "unexpected additional properties"
+_TYPES_ARG_RE = re.compile(r"\btypes\b")
+_types_refused: dict[str, bool] = {}
+"""MCP servers (by name) that refused the head search's ``types`` in this process: a ctx server before GottZ/ctx#342.
+They are searched without it, so they pay one refused call per process, not one per record."""
+_types_refused_lock = threading.Lock()
 
 
 def head_token(root: str) -> str:
@@ -240,20 +251,71 @@ def _rows_of(result: Any) -> list[dict]:
     return [r for r in result if isinstance(r, Mapping)] if isinstance(result, list) else []
 
 
-def _checkpoint_head(call_mcp: Callable[..., dict], server: str, root: str, timeout: float) -> str | None:
-    if not root:
-        return None
-    title = HEAD_TITLE.format(root=head_token(root))
+def _refuses_types(envelope: Any) -> bool:
+    """True when a search envelope is an older ctx server's refusal of ``types=["checkpoint"]``: the type is not
+    retrieval-visible there (v5.8.0 to v5.52.x), or the server does not know the argument (before v5.8.0). Any other
+    failure is not."""
+    if not isinstance(envelope, Mapping) or envelope.get("ok") is True:
+        return False
+    text = str(envelope.get("error") or "")
+    match = _TYPE_NOT_VISIBLE_RE.search(text)
+    if match is not None:
+        return match.group(1) == CHECKPOINT_TYPE
+    return _UNKNOWN_ARGS_MARKER in text.lower() and _TYPES_ARG_RE.search(text) is not None
+
+
+def _head_search(call_mcp: Callable[..., dict], server: str, args: dict, timeout: float) -> Any:
     try:
-        envelope = call_mcp(server, "search", {"query": title, "limit": 5}, timeout)
+        return call_mcp(server, "search", args, timeout)
     except Exception:
         return None
+
+
+def _head_in(envelope: Any, title: str) -> str | None:
+    """The id of the row titled ``title`` (of type checkpoint, when the row names its type) in a search envelope."""
     if not isinstance(envelope, Mapping) or envelope.get("ok") is not True:
         return None
     for row in _rows_of(envelope.get("result")):
-        if row.get("title") == title and isinstance(row.get("id"), str):
+        if row.get("title") == title and isinstance(row.get("id"), str) and row.get("type") in (None, CHECKPOINT_TYPE):
             return row["id"]
     return None
+
+
+def _checkpoint_head(call_mcp: Callable[..., dict], server: str, root: str, timeout: float) -> str | None:
+    """The checkpoint head of ``root``, searched with ``types=["checkpoint"]``. A server that refuses the type (before
+    GottZ/ctx#342) is searched without it, within the same ``timeout``, and remembered for this process; when such a
+    search finds no head, the server is asked with the type again (it may have been updated to one that leaves
+    checkpoints out of a search without a type)."""
+    if not root:
+        return None
+    title = HEAD_TITLE.format(root=head_token(root))
+    args = {"query": title, "limit": 5}
+    typed = {**args, "types": [CHECKPOINT_TYPE]}
+    deadline = time.monotonic() + timeout
+    with _types_refused_lock:
+        refused = _types_refused.get(server, False)
+    if not refused:
+        envelope = _head_search(call_mcp, server, typed, timeout)
+        if not _refuses_types(envelope):
+            return _head_in(envelope, title)
+        with _types_refused_lock:
+            _types_refused[server] = True
+        logger.info("ctx_handover: ctx server %s refuses the checkpoint type in search; searching without it", server)
+    remaining = deadline - time.monotonic()
+    if remaining < MIN_CALL_S:
+        return None
+    head = _head_in(_head_search(call_mcp, server, args, remaining), title)
+    if head is not None or not refused:
+        return head
+    remaining = deadline - time.monotonic()
+    if remaining < MIN_CALL_S:
+        return None
+    envelope = _head_search(call_mcp, server, typed, remaining)
+    if _refuses_types(envelope):
+        return None
+    with _types_refused_lock:
+        _types_refused.pop(server, None)
+    return _head_in(envelope, title)
 
 
 def flush(

@@ -200,7 +200,10 @@ so naming one narrows the answer to them. A client that looks for its checkpoint
 `POST /api/search`, where an unknown name matches nothing, an unknown name is an error
 here; a type that another tenant registered for itself is unknown. Older ctx servers
 refuse a retrieval-excluded name with the error
-`block type "<name>" is not retrieval-visible`; the `query` tool still does. **Answer:** a JSON array of compact
+`block type "<name>" is not retrieval-visible`; the `query` tool still does. A client that
+has to work with both sends `types` and, on exactly that error, the same search without it,
+keeping only rows of the asked types — as the Hermes plugins `ctx_checkpoint` (0.16.0) and
+`ctx_handover` (0.1.2) do for their checkpoint searches. **Answer:** a JSON array of compact
 rows — `id`, `category`, `tags`, `title`, `content_preview`, `content_length`, `scope`,
 `sensitivity`, `type`, `lifecycle_state`, `type_source`, `untrusted`, `score`,
 `created_at`, `updated_at` (empty fields are omitted).

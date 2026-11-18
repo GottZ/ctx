@@ -48,7 +48,7 @@ def _get_answer() -> str:
 
 
 def _search_answer() -> str:
-    row = {"id": BLOCK_ID, "title": WRITE["title"], "category": WRITE["category"]}
+    row = {"id": BLOCK_ID, "title": WRITE["title"], "category": WRITE["category"], "type": WRITE["type"]}
     assert set(row) == set(FIXTURE["search"]["row_keys"]), "the sample row must carry exactly the pinned keys"
     return json.dumps([row], indent=2, ensure_ascii=False)
 
@@ -129,4 +129,26 @@ def test_the_head_lookup_reads_search_and_get_answers():
     assert search_args["category"] == WRITE["category"]
     assert search_args["tags"] == FIXTURE["search"]["tags"]
     assert search_args["query"] == FIXTURE["search"]["query"]
+    assert search_args["types"] == FIXTURE["search"]["types"]
     assert calls[1] == ("mcp__ctx__get", {"id": BLOCK_ID})
+
+
+def test_the_head_lookup_falls_back_on_the_refusal_of_a_server_before_342():
+    """A server before GottZ/ctx#342 answers the types with the fixture's refusal: the lookup searches
+    again without them and still finds the head; the next lookup does not send them again."""
+    calls: list = []
+
+    def dispatch(name, args):
+        calls.append((name, args))
+        tool = name.rsplit("__", 1)[-1]
+        if tool == "search" and "types" in args:
+            return json.dumps({"error": FIXTURE["search"]["types_refused"]}, ensure_ascii=False)
+        return _hermes_result({"search": _search_answer(), "get": _get_answer()}[tool])
+
+    client = McpClient(dispatch)
+    writer = ChainWriter(client=client, category=WRITE["category"])
+    run = _ChainRun(deadline=writer.monotonic() + 30.0, budget_s=30.0, window_writes=writer._window_writes())
+    assert writer.load_previous_head(WRITE["title"], run)[0] == WRITE["metadata"]["latest_manifest_id"]
+    assert writer.load_previous_head(WRITE["title"], run)[0] == WRITE["metadata"]["latest_manifest_id"]
+    searches = [args for name, args in calls if name == "mcp__ctx__search"]
+    assert [args.get("types") for args in searches] == [FIXTURE["search"]["types"], None, None]

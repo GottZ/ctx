@@ -572,8 +572,9 @@ def test_head_search_over_mcp_is_narrowed_to_checkpoint_heads():
     assert name == "mcp__ctx__search"
     assert args["query"] == "Compaction checkpoint head 20261031_120000_abcdef"
     assert args["category"] == "hermes-checkpoints"
-    # The MCP search drops ``types``; the tag is what keeps source parts out of the window.
-    assert args["tags"] == ["checkpoint-head"] and "types" not in args
+    # The MCP search names the type (GottZ/ctx#342); the tag keeps source parts, which share the
+    # type, out of the window.
+    assert args["tags"] == ["checkpoint-head"] and args["types"] == ["checkpoint"]
     head = [a for n, a in calls if n == "mcp__ctx__store"][-1]
     assert "checkpoint-head" in head["tags"]
 

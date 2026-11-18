@@ -1,7 +1,7 @@
 ---
 name: ctx-memory
 description: "Use the ctx knowledge store as long-term memory and evidence layer: query as a question, search to browse, get by id, verify before acting, persist one durable fact per block."
-version: 0.15.0
+version: 0.16.0
 author: ctx (GottZ/ctx)
 license: MPL-2.0
 metadata:
@@ -106,18 +106,20 @@ explicit stores so provenance tags stay consistent (`source:hermes`, `profile:<n
   session; the compaction receipt carries the same line. To read it, `get` the head →
   `metadata.latest_manifest_id` → `get` that manifest → `metadata.source_block_ids` are
   the parts (`metadata.parent_manifest_id` leads to the checkpoint before). To find a
-  passage, search category `compaction-checkpoints` with its words (`<words>`); a part is
+  passage, search category `compaction-checkpoints` with its words (`<words>`) and the type
+  filter `checkpoint` (ctx may leave checkpoint blocks out of a search that names no type); a part is
   stored once per identical write and other conversations' manifests may list it too, so a
   hit is from this conversation when one of its manifests lists the hit's id. The search
   answers its top matches only and other conversations' parts can fill them: without a
   verified hit, `get` the parts the manifest lists (and those of the manifests along
   `parent_manifest_id`) before concluding the passage is not saved. With memory
   features off, the tools are the ctx MCP server's `mcp__<server>__get` (`id`) and
-  `mcp__<server>__search` (`category`, `query`; no `types` filter — it refuses
-  `checkpoint`); server `ctx` gives `mcp__ctx__get`, server `ctx-prod` gives
+  `mcp__<server>__search` (`category`, `query`, `types: ["checkpoint"]`; a ctx server
+  older than this filter refuses it — then search without `types`, its answer holds the
+  checkpoint blocks); server `ctx` gives `mcp__ctx__get`, server `ctx-prod` gives
   `mcp__ctx_prod__get` (Hermes turns `-` into `_`). With memory features on, use
-  `ctx_get` and `ctx_search` with `types_exclude: []` (the plugin's search leaves
-  checkpoint blocks out by default). Parts are long (up to ~36k characters each): search
+  `ctx_get` and `ctx_search` with `types: ["checkpoint"]` (named types replace the
+  default exclusion, which leaves checkpoint blocks out). Parts are long (up to ~36k characters each): search
   first, then read the hits. A root session id outside `[A-Za-z0-9_.-]` or longer than 48
   characters (Hermes' `local-<sha256>` ids among them) appears in the title sanitized
   (`_` for other characters), cut and with an 8-character hash suffix; the full id is in

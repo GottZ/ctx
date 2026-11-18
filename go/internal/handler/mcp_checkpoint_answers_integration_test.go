@@ -61,7 +61,11 @@ type checkpointAnswers struct {
 	Search struct {
 		Query   string   `json:"query"`
 		Tags    []string `json:"tags"`
+		Types   []string `json:"types"`
 		RowKeys []string `json:"row_keys"`
+		// TypesRefused is the answer of a server before #342 to Types; the
+		// plugins fall back on exactly this text.
+		TypesRefused string `json:"types_refused"`
 	} `json:"search"`
 }
 
@@ -76,7 +80,7 @@ func loadCheckpointAnswers(t *testing.T) checkpointAnswers {
 		t.Fatalf("parse %s: %v", checkpointAnswersFixture, err)
 	}
 	if fx.Store.Stored == "" || fx.Store.NoChange == "" || fx.Write.Title == "" || len(fx.Get.Keys) == 0 ||
-		len(fx.Search.RowKeys) == 0 {
+		len(fx.Search.RowKeys) == 0 || len(fx.Search.Types) == 0 || fx.Search.TypesRefused == "" {
 		t.Fatalf("%s lacks a template, the write or the key lists: %+v", checkpointAnswersFixture, fx)
 	}
 	return fx
@@ -189,34 +193,50 @@ func TestMCPAnswerFormsMatchCheckpointPluginFixture(t *testing.T) {
 		}
 	}
 
-	// search (the head lookup: query = the title, category, tag, limit 10; no
-	// types filter over MCP): a JSON array of rows, the head among them.
-	r, _, err = mcpSearchHandler(mcpCfg)(keyCtx, nil, searchInput{
-		Query:    fx.Search.Query,
-		Category: w.Category,
-		Tags:     fx.Search.Tags,
-		Limit:    10,
-	})
-	if err != nil || r.IsError {
-		t.Fatalf("mcp search: err=%v answer=%s", err, resultText(t, r))
-	}
-	var rows []map[string]any
-	if err := json.Unmarshal([]byte(resultText(t, r)), &rows); err != nil {
-		t.Fatalf("search answer is not a JSON array: %v", err)
-	}
-	found := false
-	for _, row := range rows {
-		for _, key := range fx.Search.RowKeys {
-			if _, ok := row[key]; !ok {
-				t.Errorf("search row lacks %q (keys the plugin reads: %v): %v", key, fx.Search.RowKeys, row)
+	// search (the head lookup: query = the title, category, tag, limit 10,
+	// types since #342): a JSON array of rows, the head among them. The same
+	// search without types is the plugins' fallback for a server before #342
+	// and answers the head as well.
+	for _, types := range [][]string{fx.Search.Types, nil} {
+		r, _, err = mcpSearchHandler(mcpCfg)(keyCtx, nil, searchInput{
+			Query:    fx.Search.Query,
+			Category: w.Category,
+			Tags:     fx.Search.Tags,
+			Types:    types,
+			Limit:    10,
+		})
+		if err != nil || r.IsError {
+			t.Fatalf("mcp search types=%v: err=%v answer=%s", types, err, resultText(t, r))
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal([]byte(resultText(t, r)), &rows); err != nil {
+			t.Fatalf("search answer is not a JSON array: %v", err)
+		}
+		found := false
+		for _, row := range rows {
+			for _, key := range fx.Search.RowKeys {
+				if _, ok := row[key]; !ok {
+					t.Errorf("search row lacks %q (keys the plugin reads: %v): %v", key, fx.Search.RowKeys, row)
+				}
+			}
+			if row["id"] == id && row["title"] == w.Title && row["type"] == w.Type {
+				found = true
 			}
 		}
-		if row["id"] == id && row["title"] == w.Title {
-			found = true
+		if !found {
+			t.Errorf("search types=%v for the head title did not return the head %s: %v", types, id, rows)
 		}
 	}
-	if !found {
-		t.Errorf("search for the head title did not return the head %s: %v", id, rows)
+
+	// The refusal the plugins fall back on: what the search tool answered to
+	// these types before #342. The query tool keeps that check
+	// (resolveMCPVisibleTypes), so its answer is the server's own wording.
+	r, _, err = mcpQueryHandler(mcpCfg)(keyCtx, nil, queryInput{Question: fx.Search.Query, Types: fx.Search.Types})
+	if err != nil || !r.IsError {
+		t.Fatalf("mcp query types=%v: err=%v, IsError=%t (%s) — want the refusal", fx.Search.Types, err, r != nil && r.IsError, resultText(t, r))
+	}
+	if got := resultText(t, r); got != fx.Search.TypesRefused {
+		t.Errorf("the refusal of types=%v is\n  %q\nthe fixture says\n  %q", fx.Search.Types, got, fx.Search.TypesRefused)
 	}
 }
 

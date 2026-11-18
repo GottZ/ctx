@@ -4,7 +4,11 @@
 // endpoint as ctxd mounts it (Auth middleware, then the Streamable HTTP
 // handler) on a fresh database, and the plugin's checkpoint chain written
 // against it through Hermes' own MCP client
-// (integrations/hermes/plugin/ctx_checkpoint/tests/e2e_real_ctx.py).
+// (integrations/hermes/plugin/ctx_checkpoint/tests/e2e_real_ctx.py). The driver
+// also runs both plugins' checkpoint head lookups (ctx_checkpoint and
+// ctx_handover, #342): with `types` against this server, and against this server
+// answering as one before #342 (the refusal of the shared answer fixture) and as
+// one that leaves never-ranked types out of a search without `types`.
 //
 // It needs a Python with hermes-agent's dependencies and the hermes-agent
 // checkout: CTX_CHECKPOINT_E2E_PYTHON names the interpreter, HERMES_REPO the

@@ -177,14 +177,15 @@ hermes ctx_checkpoint status                                  # profile, connect
 hermes ctx_checkpoint sync                                    # push MEMORY.md/USER.md entries to CTX
 hermes ctx_checkpoint query "what port does X use?"           # [--synthesize] [--all-types]
 hermes ctx_checkpoint store infrastructure "INFRA-GIT" "Host 192.0.2.10, user hermes" --sensitivity internal --tag git
-hermes ctx_checkpoint search "docker compose" --category reference   # [--tag T]... [--all-types]
+hermes ctx_checkpoint search "docker compose" --category reference   # [--tag T]... [--all-types] [--type T]...
 hermes ctx_checkpoint get <block-id>
 ```
 
 CLI writes use `sensitivity_default` unless `--sensitivity` is given and are tagged
 `hook:cli`. Hit lines of `query` and `search` carry the `untrusted_origin:` note line of a
 block that has the record. Error lines are redacted with the keys the provider binds
-(`CTX_KEY` and `status.profile_ctx_keys`) and the checkpoint rules. `--all-types` disables `prefetch_types_exclude`, e.g. to browse checkpoints.
+(`CTX_KEY` and `status.profile_ctx_keys`) and the checkpoint rules. `--all-types` disables `prefetch_types_exclude`, e.g. to browse checkpoints;
+`search --type checkpoint` searches only checkpoint blocks (repeatable; named types replace `prefetch_types_exclude`).
 
 ## How it works
 
@@ -192,8 +193,15 @@ block that has the record. Error lines are redacted with the keys the provider b
 
 - Prefetch, `ctx_query` and `ctx_search` send `types_exclude` (default `checkpoint`,
   `tool-evidence`, `tool-overview`); excluded types are also dropped client-side for
-  older servers. Checkpoints stay browseable: `ctx_search` with `types_exclude: []` or
-  `hermes ctx search --all-types`.
+  older servers. Checkpoints stay browseable: `ctx_search` with `types: ["checkpoint"]` (or
+  `types_exclude: []`) or `hermes ctx_checkpoint search --type checkpoint`.
+- `search` sends `types` (0.16.0, GottZ/ctx#342), over MCP too: a ctx server with #342 takes
+  every registered type there. An older one refuses a type that retrieval never ranks
+  (`block type "checkpoint" is not retrieval-visible`, or before ctx v5.8.0 the argument
+  itself); on exactly that refusal the MCP client searches again without `types`, keeps only
+  rows of the asked types, and remembers the refusal for the binding. When such a search
+  holds none of the asked types it asks with `types` again, so a server updated meanwhile is
+  not read through the fallback. Any other error is raised.
 - Hits with `untrusted: true` (foreign text — server V-11: `checkpoint`, `tool-evidence`,
   `tool-overview`, `insight`) are labelled in the injected context (or dropped with
   `prefetch_untrusted: drop`), and the context tells the model to treat them as data.

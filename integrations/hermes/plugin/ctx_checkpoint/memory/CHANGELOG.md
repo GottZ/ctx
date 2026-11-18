@@ -6,6 +6,41 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.16.0] — 2026-11-18
+
+Checkpoint searches name the `checkpoint` type, over MCP too (GottZ/ctx#342).
+
+- **Why.** ctx plans to leave the types that retrieval never ranks (`checkpoint`,
+  `system-meta`) out of a full-text search that names no type: those searches cannot use the
+  full-text indexes, which leave both types out since ctx migration 145, and read every
+  block's text vectors. A search that names the type keeps finding checkpoint blocks then.
+  Until now the MCP client dropped `types`, because the ctx MCP `search` tool refused a type
+  that retrieval never ranks; a ctx server with #342 takes it.
+- **MCP `search` sends `types`.** The head lookup of the chain writer
+  (`ChainWriter.load_previous_head`: title, category, tag `checkpoint-head`,
+  `types=["checkpoint"]`) and every other search that names types send them. A server before
+  #342 answers `block type "checkpoint" is not retrieval-visible` (ctx v5.8.0 to v5.52.x) or,
+  before v5.8.0, `unexpected additional properties ["types"]`; on exactly that refusal of the
+  sent types `McpClient.search` searches again without `types`, within what is left of the
+  call's timeout, and keeps only rows of the asked types (a row without a `type` is kept).
+  The refusal is remembered per client, so an older server pays one refused call per
+  binding; when a search without `types` holds none of the asked types, the client asks with
+  `types` again, so a server updated meanwhile — one that may leave checkpoints out of a
+  search without a type — is not read through the fallback. Any other error (an unknown type,
+  a rate limit, another type than the sent ones) is raised as before. The REST client sent
+  `types` already.
+- **The agent's read path names the type.** The passage search of the system prompt block and
+  the compaction receipt: `ctx_search … types=["checkpoint"]` with memory features on,
+  `hermes ctx_checkpoint search … --type checkpoint` on REST without them, and
+  `mcp__<server>__search … types=["checkpoint"]` with the instruction to search without
+  `types` if the server refuses the type (the agent calls that tool itself, no client falls
+  back for it). The skill `ctx-memory` says the same.
+- **`ctx_search` takes `types`.** Named types replace the `prefetch_types_exclude` default
+  (which lists `checkpoint`) unless `types_exclude` is given; the CLI's `search` takes
+  `--type` (repeatable) with the same rule.
+- **Unchanged:** every search without `types`, and every answer of a server with #342 to the
+  head lookup (the head carries the type).
+
 ## [ctx_checkpoint 0.15.0] — 2026-11-18
 
 A source part is stored once per identical write (GottZ/ctx#344).

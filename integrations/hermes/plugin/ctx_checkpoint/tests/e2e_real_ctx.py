@@ -27,8 +27,13 @@ import sys
 from pathlib import Path
 
 ENGINE_DIR = Path(__file__).resolve().parents[1] / "memory"
+HANDOVER_ENGINE_DIR = Path(__file__).resolve().parents[2] / "ctx_handover" / "engine"
 ROOT = "20261116_120000_e2e290"
 OTHER_ROOT = "20261118_120000_e2e344"
+TYPES_REFUSED = json.loads((ENGINE_DIR / "tests" / "mcp_answers.json").read_text(encoding="utf-8"))["search"][
+    "types_refused"
+]
+NEVER_RANKED = ("checkpoint", "system-meta")
 
 
 def _fail(message: str) -> None:
@@ -53,6 +58,139 @@ def _transcript() -> list[dict[str, str]]:
         turns.append({"role": "user", "content": f"Frage {n}: wie ist der Stand der Welle? " * 18})
         turns.append({"role": "assistant", "content": f"Antwort {n}: der Stand ist belegt und gemessen. " * 18})
     return turns
+
+
+class Server:
+    """What a search reaches: the real ctx MCP endpoint, or that endpoint seen as another ctx would answer
+    (GottZ/ctx#342). ``refuses``: a search whose ``types`` name ``checkpoint`` gets the error a ctx server before
+    #342 answers — the fixture's ``search.types_refused``, which the ctx side checks against its own code — in the
+    form Hermes hands a tool error over (``{"error": "<text>"}``). ``drops_never_ranked``: a search without
+    ``types`` answers without checkpoint and system-meta rows, as the later step of #342 will."""
+
+    def __init__(self) -> None:
+        self.refuses = False
+        self.drops_never_ranked = False
+        self.searches: list[dict] = []
+
+    def answer(self, tool: str, args: dict, call):
+        if tool != "search":
+            return call(args)
+        self.searches.append(dict(args))
+        if self.refuses and "checkpoint" in (args.get("types") or []):
+            return json.dumps({"error": TYPES_REFUSED}, ensure_ascii=False)
+        raw = call(args)
+        if not self.drops_never_ranked or args.get("types"):
+            return raw
+        envelope = json.loads(raw)
+        rows = [row for row in json.loads(envelope["result"]) if row.get("type") not in NEVER_RANKED]
+        return json.dumps({"result": json.dumps(rows, ensure_ascii=False)}, ensure_ascii=False)
+
+
+def _load_handover_records():
+    """ctx_handover's ``engine/ctxrecords.py``, loaded by path the way its dashboard loads the engine."""
+    spec = importlib.util.spec_from_file_location(
+        "ctxh_engine", HANDOVER_ENGINE_DIR / "__init__.py", submodule_search_locations=[str(HANDOVER_ENGINE_DIR)]
+    )
+    if spec is None or spec.loader is None:
+        _fail(f"cannot load the ctx_handover engine from {HANDOVER_ENGINE_DIR}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["ctxh_engine"] = module
+    spec.loader.exec_module(module)
+    import ctxh_engine.ctxrecords as ctxrecords
+
+    return ctxrecords
+
+
+def _head_lookups(registry, McpClient, ChainWriter, first) -> dict:
+    """The head lookups of both plugins (GottZ/ctx#342) against this endpoint: with ``types`` on this server, and
+    on the same server answering as a server before #342, as one after the later step, and as one that is updated
+    from the first to the second while the client runs. ``CTX_E2E_SERVER=before-342`` says the endpoint itself is
+    a server before #342: then the first lookup must be refused and fall back."""
+    from hermes_cli.plugins_context import PluginContext
+    from tools.mcp_tool_handlers import _make_tool_handler
+
+    ctxrecords = _load_handover_records()
+    real_before_342 = os.environ.get("CTX_E2E_SERVER", "") == "before-342"
+    out: dict = {}
+
+    def checkpoint_lookup(label: str, server: Server, client=None):
+        def dispatch(name, args):
+            return server.answer(name.rsplit("__", 1)[-1], args, lambda a: registry.dispatch(name, a))
+
+        from ctx_plugin.checkpoint import _ChainRun
+
+        client = client or McpClient(dispatch, "ctx")
+        writer = ChainWriter(client=client, chunk_chars=1_000)
+        run = _ChainRun(deadline=writer.monotonic() + 60.0, budget_s=60.0, window_writes=writer._window_writes())
+        manifest_id, _hashes, _checkpoint_id = writer.load_previous_head(_head_title(), run)
+        if manifest_id != first.manifest_id:
+            _fail(f"{label}: ctx_checkpoint's head lookup answered manifest {manifest_id!r}, want {first.manifest_id}")
+        out[f"checkpoint {label}"] = [s.get("types") for s in server.searches]
+        server.searches.clear()
+        return client
+
+    def handover_lookup(label: str, server: Server):
+        def call_mcp(name, tool, args, timeout):
+            handler = _make_tool_handler(name, tool, max(1.0, float(timeout)))
+            return PluginContext._mcp_envelope(server.answer(tool, dict(args), handler))
+
+        head = ctxrecords._checkpoint_head(call_mcp, "ctx", ROOT, 10.0)
+        if head != first.head_id:
+            _fail(f"{label}: ctx_handover found head {head!r}, want {first.head_id}")
+        out[f"handover {label}"] = [s.get("types") for s in server.searches]
+        server.searches.clear()
+
+    real = Server()
+    client = checkpoint_lookup("this server", real)
+    want = None if real_before_342 else ["checkpoint"]
+    if out["checkpoint this server"][:1] != [["checkpoint"]] or client._search_types_state != (
+        "no" if real_before_342 else "yes"
+    ):
+        _fail(f"this server: searches {out['checkpoint this server']}, state {client._search_types_state}")
+    ctxrecords._types_refused.clear()
+    handover_lookup("this server", real)
+    if out["handover this server"][-1] != want:
+        _fail(f"this server: the handover head search sent {out['handover this server']}")
+
+    old = Server()
+    old.refuses = True
+    client = checkpoint_lookup("before 342", old)
+    if client._search_types_state != "no":
+        _fail(f"before 342: the client did not remember the refusal ({client._search_types_state})")
+    ctxrecords._types_refused.clear()
+    handover_lookup("before 342", old)
+
+    if not real_before_342:
+        later = Server()
+        later.drops_never_ranked = True
+        bare = McpClient(lambda name, args: later.answer("search", args, lambda a: registry.dispatch(name, a)), "ctx")
+        if any(
+            row.get("id") == first.head_id for row in bare.search(_head_title(), tags=["checkpoint-head"])["results"]
+        ):
+            _fail("after the later step: a search without types still finds the head (the simulation is not one)")
+        later.searches.clear()
+        checkpoint_lookup("after the later step", later)
+        ctxrecords._types_refused.clear()
+        handover_lookup("after the later step", later)
+
+        # A client that met a server before #342, the server then updated to the later step.
+        updated = Server()
+        updated.refuses = True
+        client = checkpoint_lookup("updated meanwhile (before)", updated)
+        updated.refuses, updated.drops_never_ranked = False, True
+        checkpoint_lookup("updated meanwhile (after)", updated, client)
+        ctxrecords._types_refused.clear()
+        updated.refuses, updated.drops_never_ranked = True, False
+        handover_lookup("updated meanwhile (before)", updated)
+        updated.refuses, updated.drops_never_ranked = False, True
+        handover_lookup("updated meanwhile (after)", updated)
+    return out
+
+
+def _head_title() -> str:
+    from ctx_plugin.checkpoint import head_title_for
+
+    return head_title_for(ROOT)
 
 
 def main() -> int:
@@ -127,12 +265,15 @@ def main() -> int:
         if ROOT in str(part.get("content")) or "root_session_id" in part_meta or OTHER_ROOT in str(part.get("content")):
             _fail("a part names a conversation")
 
+        heads = _head_lookups(registry, McpClient, ChainWriter, first)
+
         summary = {
             "parts": parts,
             "first": {"writes": first.writes, "reused": first.reused, "lookup": first.lookup},
             "again": {"writes": again.writes, "reused": again.reused, "lookup": again.lookup},
             "other": {"writes": other.writes, "reused": other.reused, "lookup": other.lookup},
             "head": first.head_id,
+            "head_lookups": heads,
         }
         print(json.dumps(summary, sort_keys=True), flush=True)
         return 0
