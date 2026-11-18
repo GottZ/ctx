@@ -138,6 +138,56 @@ func gateTx(t *testing.T, pool *pgxpool.Pool, lockSQL string, args ...any) (rele
 	return release
 }
 
+// writeGateDDL installs, in the test's own database, the shared row that every
+// block write used to take: until migration 181, mark_guard_dirty (per
+// statement since 177) updated the one context_guard_state row at the end of
+// each INSERT or UPDATE on context_blocks and held it until commit. The gates
+// that park a writer at its first block write need such a row; 181 dropped
+// the trigger, so they install this one. test_take_write_gate updates the one
+// test_write_gate row at the end of every statement that inserted or updated
+// at least one block row, from statement-level AFTER triggers with transition
+// tables like those of 177, named to fire after trg_block_counts_* as
+// trg_guard_dirty did. mark_guard_dirty's skip rules (category index, a
+// guard verdict write with unchanged content) are left out: no fixture here
+// writes such a row.
+const writeGateDDL = `
+CREATE TABLE test_write_gate (
+    id     boolean PRIMARY KEY DEFAULT true CHECK (id),
+    writes bigint  NOT NULL DEFAULT 0
+);
+INSERT INTO test_write_gate DEFAULT VALUES;
+CREATE FUNCTION test_take_write_gate() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM new_rows) THEN
+        UPDATE test_write_gate SET writes = writes + 1;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER trg_test_write_gate
+    AFTER INSERT ON context_blocks
+    REFERENCING NEW TABLE AS new_rows
+    FOR EACH STATEMENT EXECUTE FUNCTION test_take_write_gate();
+CREATE TRIGGER trg_test_write_gate_upd
+    AFTER UPDATE ON context_blocks
+    REFERENCING NEW TABLE AS new_rows
+    FOR EACH STATEMENT EXECUTE FUNCTION test_take_write_gate();`
+
+// holdWriteGate installs writeGateDDL and holds the gate row on a third
+// connection until release: every transaction that writes a block row in
+// between parks at the end of that statement, keeping every lock it took
+// before. After release the first one queued takes the row and holds it until
+// its commit, and the others wait for it in turn — the shared lock, taken at
+// the end of each block write and held until commit, that makes "row locks
+// first, block writes after" a rule for every write path.
+func holdWriteGate(t *testing.T, pool *pgxpool.Pool) (release func()) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), writeGateDDL); err != nil {
+		t.Fatalf("install write gate: %v", err)
+	}
+	return gateTx(t, pool, `SELECT 1 FROM test_write_gate FOR NO KEY UPDATE`)
+}
+
 // TestWriteLinks_ReconcileLock_DoesNotBlockConcurrentLinkInsert is the F1
 // gate. Writer A supersedes T and U; a gate pins U, so A stalls in its
 // reconcile phase while it already holds its lock on T. Writer B then writes
@@ -269,18 +319,23 @@ func TestWriteLinks_ReconcileLock_CrossOrderNoDeadlock(t *testing.T) {
 }
 
 // TestWriteLinks_ReconcileLock_LocksAllTargetsBeforeFirstUpdate pins the
-// end-of-transaction half of F6. Every UPDATE on context_blocks fires
-// mark_guard_dirty, which updates the singleton context_guard_state row — so a
-// transaction that has updated one target holds that row until commit. If the
-// reconcile locked and updated targets one by one (in model order, or even in
-// id order), A could hold T plus the guard row and wait for U while B holds U
-// and waits for the guard row: 40P01. The gate pins the guard row so both
-// writers park at their first UPDATE; A queues first. Locking ALL targets in
-// one ordered statement before the first UPDATE makes B wait on A's lock on U
-// instead of holding it. B re-classifies its own supersedes link onto U as
-// topical: a batch without a supersedes guess, so it does not wait for A's
-// guess lock (store.LockSupersedesGuesses, issue #197) and reaches its
-// reconcile beside A.
+// end-of-transaction half of F6: the reconcile takes every target lock before
+// its first block write. A row that each block write takes and holds until
+// commit — the context_guard_state row of mark_guard_dirty until migration
+// 181, the test's write gate (holdWriteGate) here — turns a target lock taken
+// after a write into a lock-order cycle. If the reconcile locked and updated
+// targets one by one (in model order, or even in id order), A could hold T
+// plus the shared row and wait for U while B holds U and waits for the shared
+// row: 40P01. The gate holds that row so both writers park at their first
+// UPDATE; A queues first. Locking ALL targets in one ordered statement before
+// the first UPDATE makes B wait on A's lock on U instead of holding it. Since
+// 181 no schema trigger takes such a row (the block counts of 170 insert delta
+// rows); the gate keeps the rule pinned for any shared lock a write path or
+// trigger takes at a block write: row locks first, block writes after. B
+// re-classifies its own supersedes link onto U as topical: a batch without a
+// supersedes guess, so it does not wait for A's guess lock
+// (store.LockSupersedesGuesses, issue #197) and reaches its reconcile beside
+// A.
 func TestWriteLinks_ReconcileLock_LocksAllTargetsBeforeFirstUpdate(t *testing.T) {
 	pool, dsn := testdb.SetupTestDBWithDSN(t)
 	ctx := context.Background()
@@ -291,7 +346,7 @@ func TestWriteLinks_ReconcileLock_LocksAllTargetsBeforeFirstUpdate(t *testing.T)
 		t.Fatalf("seed B's supersedes link: n=%d err=%v", n, err)
 	}
 
-	release := gateTx(t, pool, `SELECT 1 FROM context_guard_state FOR NO KEY UPDATE`)
+	release := holdWriteGate(t, pool)
 
 	poolA := actorPool(t, dsn, "f6b-writer-a", nil)
 	doneA := writeAsync(ctx, poolA, lkSourceA, []dream.Link{
