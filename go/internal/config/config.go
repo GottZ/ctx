@@ -124,6 +124,7 @@ type Config struct {
 	Gateway        GatewayConfig
 	Federation     FederationConfig
 	MCP            MCPServerConfig
+	Search         SearchConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -2846,6 +2847,29 @@ type MCPServerConfig struct {
 	// the default. global-only: the record is one table for every tenant, and
 	// its volume is the server's to bound.
 	ReadLogTypes []string `key:"mcp.read_log_types" env:"CTX_MCP_READ_LOG_TYPES" default:"checkpoint,insight" mut:"hot" tenancy:"global-only"`
+}
+
+// SearchConfig is the block search surface (REST /api/search, the MCP search
+// tool, the CLI's ctx search and the web chat's ctx_search).
+type SearchConfig struct {
+	// LeaveOutNeverRanked decides what a full-text search that names no type
+	// answers (issue #342). false, the shipped default, is the behaviour before
+	// the key existed: every type, the ones query never ranks included. true
+	// leaves the types the caller's registry snapshot marks retrieval-excluded
+	// (checkpoint, system-meta, the derived layers) out of such a search, so it
+	// can use the partial full-text indexes of migration 145 instead of reading
+	// every block's vectors; a caller that wants those types names them in
+	// `types`. A listing (empty query) and recent are not affected.
+	//
+	// The default is meant to flip to true in a later release, once the
+	// clients that look checkpoints up without naming the type are gone: the
+	// Hermes plugins name it from ctx_checkpoint 0.16.0 and ctx_handover 0.1.2
+	// on, and an older ctx_checkpoint would not find its chain head with the
+	// key on and would start a new chain at every compaction.
+	//
+	// tenant-overridable: it changes only what that tenant's own keys find,
+	// and the clients that depend on the old answer are per installation.
+	LeaveOutNeverRanked bool `key:"search.leave_out_never_ranked" env:"CTX_SEARCH_LEAVE_OUT_NEVER_RANKED" default:"false" mut:"hot" tenancy:"tenant-overridable"`
 }
 
 // GatewayConsumersConfig is the policy of the consumer and model-key

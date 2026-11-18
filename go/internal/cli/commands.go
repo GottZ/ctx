@@ -308,7 +308,7 @@ func saveCmd(getClient func() (*Client, error)) *cobra.Command {
 
 func searchCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
-		Use:     "search [category] [query:text] [tags:a,b] [cluster:handle] [limit:N] [compact:false]",
+		Use:     "search [category] [query:text] [tags:a,b] [types:a,b] [cluster:handle] [limit:N] [compact:false]",
 		Aliases: []string{"browse", "b"},
 		Short:   "Compact search (no LLM)",
 		Long: "Search the context store with compact results. Key-value args for filtering.\n\n" +
@@ -316,9 +316,14 @@ func searchCmd(getClient func() (*Client, error)) *cobra.Command {
 			"stable handle the graph surfaces emit (`topic` on /api/graph/overview and on\n" +
 			"the ego annotation), never an internal id. The facet is server-gated\n" +
 			"(cluster.facet_enabled); while it is off the argument is ignored, so the\n" +
-			"answer is an ordinary unfiltered search.",
+			"answer is an ordinary unfiltered search.\n\n" +
+			"types:<a,b> restricts the result to these block types. With the server's\n" +
+			"search.leave_out_never_ranked on, a search with query: and without types:\n" +
+			"leaves out the types query never ranks (checkpoint, system-meta, the\n" +
+			"derived layers); name them here to search them by text.",
 		Example: `  ctx search learnings query:prompt
   ctx search decisions query:guard tags:security limit:5
+  ctx search index query:topic-map types:system-meta
   ctx search cluster:019c9629-0000-7000-9000-00000000a001`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := getClient()
@@ -337,6 +342,8 @@ func searchCmd(getClient func() (*Client, error)) *cobra.Command {
 					body["query"] = strings.TrimPrefix(arg, "query:")
 				case strings.HasPrefix(arg, "tags:"):
 					body["tags"] = strings.Split(strings.TrimPrefix(arg, "tags:"), ",")
+				case strings.HasPrefix(arg, "types:"):
+					body["types"] = strings.Split(strings.TrimPrefix(arg, "types:"), ",")
 				case strings.HasPrefix(arg, "cluster:"):
 					// C6 topic facet. Parsed unconditionally — the CLI cannot know
 					// the server's cluster.facet_enabled state, and probing for it

@@ -243,7 +243,7 @@ type searchInput struct {
 // limit. The cap is the store's clamp at 50, which this tool has always run
 // into; E03-2 = B / K28 records the surface as uncapped, and lifting the clamp
 // for it is open there (search_core.go, LIMIT note).
-func (input searchInput) coreArgs(facetEnabled bool) searchArgs {
+func (input searchInput) coreArgs(facetEnabled, leaveOutNeverRanked bool) searchArgs {
 	return searchArgs{
 		Query:             input.Query,
 		Category:          input.Category,
@@ -261,8 +261,9 @@ func (input searchInput) coreArgs(facetEnabled bool) searchArgs {
 		// here, while the REST browse route binds any name. That strictness is
 		// the documented difference between the two and stays a visible field
 		// rather than a hidden branch (mcp.go searchInput.Types).
-		KnownTypesOnly: true,
-		FacetEnabled:   facetEnabled,
+		KnownTypesOnly:      true,
+		FacetEnabled:        facetEnabled,
+		LeaveOutNeverRanked: leaveOutNeverRanked,
 	}
 }
 
@@ -980,6 +981,9 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 			snap = cfg.Cfg.SnapshotForRequest(ctx)
 		}
 		facetEnabled := snap != nil && snap.ClusterOps.FacetEnabled
+		// search.leave_out_never_ranked out of the same snapshot (#342); no
+		// config wiring reads as off, the behaviour before the key.
+		leaveOutNeverRanked := snap != nil && snap.Search.LeaveOutNeverRanked
 
 		// REST leaves a cursor next to a query inert; here it is refused, so a
 		// caller cannot take the repeated top matches for a second page (#206).
@@ -996,7 +1000,7 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 		// The registry snapshot handed in is the SAME one that frames the
 		// untrusted rows (V-11) — flag and admission to retrieval can never come
 		// from two registry generations.
-		page, err := executeSearch(ctx, cfg.Pool, cfg.mcpTypeSnapshot(ctx), ar, input.coreArgs(facetEnabled))
+		page, err := executeSearch(ctx, cfg.Pool, cfg.mcpTypeSnapshot(ctx), ar, input.coreArgs(facetEnabled, leaveOutNeverRanked))
 		if err != nil {
 			var rejected *searchRejected
 			switch {

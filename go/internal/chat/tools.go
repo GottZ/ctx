@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/promptguard"
 	"github.com/GottZ/ctx/internal/store"
@@ -172,6 +173,12 @@ type Executor struct {
 	query            QueryRunner
 	stage            StageRunner // nil = ctx_store not offered (read-only executor)
 	maxContentWindow int
+	// searchTypes and leaveOutNeverRanked feed ctx_search's type exclusion
+	// (store.SearchTypesExclude, search.leave_out_never_ranked, #342): the
+	// turn's registry snapshot and the key out of the turn's config snapshot.
+	// Unset (nil, false), ctx_search binds no exclusion, as before the key.
+	searchTypes         *blocktype.Set
+	leaveOutNeverRanked bool
 }
 
 // NewExecutor builds the tool executor. maxContentWindow <= 0 falls back to 8000.
@@ -187,6 +194,15 @@ func NewExecutor(pool *pgxpool.Pool, query QueryRunner, maxContentWindow int) *E
 // existing wiring keeps its exact behaviour (D3-m1).
 func (ex *Executor) WithStage(stage StageRunner) *Executor {
 	ex.stage = stage
+	return ex
+}
+
+// WithSearchTypes hands ctx_search the turn's registry snapshot and the
+// search.leave_out_never_ranked key, so a full-text search without types
+// follows the same rule as REST /api/search and the MCP search tool (#342).
+func (ex *Executor) WithSearchTypes(set *blocktype.Set, leaveOutNeverRanked bool) *Executor {
+	ex.searchTypes = set
+	ex.leaveOutNeverRanked = leaveOutNeverRanked
 	return ex
 }
 
@@ -287,6 +303,7 @@ func (ex *Executor) runSearch(ctx context.Context, readScopes []string, raw json
 		Query    string   `json:"query"`
 		Category string   `json:"category"`
 		Tags     []string `json:"tags"`
+		Types    []string `json:"types"`
 		Limit    int      `json:"limit"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
@@ -304,7 +321,10 @@ func (ex *Executor) runSearch(ctx context.Context, readScopes []string, raw json
 	// tools is therefore a wiring change of its own (registry into
 	// chat.Executor + a field per DTO), tracked as the V-11 follow-up. nil is
 	// "no statement", never "trusted".
-	previews, err := store.SearchBlocks(ctx, ex.pool, nil, a.Query, readScopes, a.Category, a.Tags, limit, true, nil, nil, nil, nil, nil)
+	// types binds like REST's (any name; an unknown one matches nothing), and
+	// the exclusion is the rule every search surface shares (#342).
+	exclude := store.SearchTypesExclude(ex.searchTypes, ex.leaveOutNeverRanked, a.Query, a.Types, nil)
+	previews, err := store.SearchBlocks(ctx, ex.pool, nil, a.Query, readScopes, a.Category, a.Tags, limit, true, nil, nil, a.Types, exclude, nil)
 	if err != nil {
 		return errOutcome("search failed")
 	}
@@ -515,6 +535,7 @@ var toolDefs = []llm.ToolDef{
 			`"query":{"type":"string"},` +
 			`"category":{"type":"string"},` +
 			`"tags":{"type":"array","items":{"type":"string"}},` +
+			`"types":{"type":"array","items":{"type":"string"},"description":"restrict to these block types; name checkpoint or system-meta to search them by keywords"},` +
 			`"limit":{"type":"integer","minimum":1,"maximum":20,"default":10}}}`),
 	}},
 	{Type: "function", Function: llm.ToolDefFunction{

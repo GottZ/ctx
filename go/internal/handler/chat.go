@@ -128,6 +128,9 @@ type ChatHandler struct {
 	provider    chat.BackendProvider
 	queryRunner chat.QueryRunner
 	stageRunner chat.StageRunner // D-W6b: ctx_store staging (nil = tool off)
+	// blocktypes gives ctx_search the turn's registry snapshot for its type
+	// exclusion (#342); nil leaves the exclusion off.
+	blocktypes *blocktype.Registry
 	// admitter is the ONE process-wide dispatch admission layer (MW5, I-D1);
 	// the per-turn engine's stream wire calls acquire through it.
 	admitter dispatch.Admitter
@@ -154,6 +157,7 @@ func NewChatHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.P
 		cfg:         cfg,
 		provider:    provider,
 		queryRunner: &chatQueryRunner{handler: queryHandler},
+		blocktypes:  blocktypes,
 		admitter:    admitter,
 		inflight:    map[string]int{},
 	}
@@ -161,6 +165,15 @@ func NewChatHandler(pool *pgxpool.Pool, cfg ConfigStore, backendPool *backends.P
 	// is a harness without an own gating layer, DECISIONS §Klarstellung).
 	h.stageRunner = &chatStageRunner{pool: pool, cfg: cfg, blocktypes: blocktypes}
 	return h
+}
+
+// searchTypes is the turn's registry snapshot for ctx_search's type exclusion
+// (#342): the request's tenant-resolved view, as REST /api/search takes it.
+func (h *ChatHandler) searchTypes(ctx context.Context) *blocktype.Set {
+	if h.blocktypes == nil {
+		return nil
+	}
+	return h.blocktypes.SnapshotForRequest(ctx)
 }
 
 // acquire reserves a turn slot for home_scope; ok=false means the per-scope cap
@@ -285,7 +298,8 @@ func (h *ChatHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		LLMTimeout:         wc.LLMTimeout,
 		Timezone:           tzName(cfg.Query.Timezone),
 	}
-	exec := chat.NewExecutor(h.pool, h.queryRunner, wc.ToolResultMaxChars).WithStage(h.stageRunner)
+	exec := chat.NewExecutor(h.pool, h.queryRunner, wc.ToolResultMaxChars).WithStage(h.stageRunner).
+		WithSearchTypes(h.searchTypes(r.Context()), cfg.Search.LeaveOutNeverRanked)
 	engine := chat.NewEngine(h.pool, h.provider, exec, engineCfg, h.admitter)
 
 	sink := newChatSink(w)
