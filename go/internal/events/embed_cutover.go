@@ -467,10 +467,14 @@ func runConfirmSwapTx(ctx context.Context, db *pgxpool.Pool, migrationID string,
 			return fmt.Errorf("%w (%d of %d)", ErrConfirmFlipRowCountMismatch, tag.RowsAffected(), len(targets))
 		}
 		// (5) Statemachine CAS — 0 rows = a concurrent transition won; the
-		// deferred rollback aborts the whole cutover (§4.8).
+		// deferred rollback aborts the whole cutover (§4.8). Bound to the
+		// watermark the preflight read with the green report and the
+		// re-check above used (issue #332): a row that re-entered verifying
+		// since (resume, drain, verifying again) is another verify run,
+		// whose verdict is not in yet.
 		if err := embedmigration.Transition(ctx, tx, migrationID,
 			embedmigration.StatusVerifying, embedmigration.StatusDone,
-			embedmigration.WithFinishedAt()); err != nil {
+			embedmigration.WithFinishedAt(), embedmigration.OnWatermark(*row.watermark)); err != nil {
 			return fmt.Errorf("embed-cutover: confirm CAS: %w", err)
 		}
 		return nil

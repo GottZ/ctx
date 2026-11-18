@@ -18,6 +18,7 @@ import (
 	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Achse 04 W04-4 (design/04-reembed-migration.md §4.3): the re-embed
@@ -204,6 +205,14 @@ func (s *Scheduler) runEmbedMigrationCycle(ctx context.Context, router *dream.Ro
 	}
 
 	if err := s.ensureMigrationPendingIndex(ctx); err != nil {
+		if errors.Is(err, errRuntimeIndexBusy) {
+			// Another session builds or drops a runtime index on
+			// context_blocks (issue #332): this cycle neither builds beside it
+			// nor picks without the index; the next tick asks again.
+			slog.Info("scheduler: embed migration cycle deferred — another session is building a runtime index on context_blocks",
+				"migration_id", mig.ID, "index", migrationPendingIndexName)
+			return nil
+		}
 		return fmt.Errorf("embed-migrate: ensure pending index: %w", err)
 	}
 
@@ -587,16 +596,55 @@ func (s *Scheduler) migrateWireFailure(ctx context.Context, tx pgx.Tx, tail *txT
 // flight, issue #312) and an INVALID leftover of a crashed/canceled CIC are
 // dropped CONCURRENTLY and rebuilt; a missing index is created via ddl
 // (which MUST be a CREATE INDEX CONCURRENTLY IF NOT EXISTS statement on
-// context_blocks; pool.Exec sends it as a single autocommit statement
-// outside any tx — PG requirement). When the definition cannot be compared
+// context_blocks; it runs as a single autocommit statement outside any tx —
+// PG requirement). When the definition cannot be compared
 // (expectedIndexDefinition), the index is left as it is and the error says
 // why: neither a rebuild nor a reuse on an unknown definition.
+//
+// Only the DDL takes the runtime index lock (issue #332): the reuse of a
+// valid index of the DDL's definition, the common case on every migration
+// cycle and every verify re-run, reads the catalog without it. Every other
+// outcome is decided again under the lock (withRuntimeIndexLock), on the
+// connection that holds it; when another session holds it, the helper
+// returns errRuntimeIndexBusy without any DDL.
 //
 // Callers pass runtime names only (the _next twins and the pending index),
 // never a serving index: the cutover renames the _next twins away from
 // these names, and the DROP resolves the name when it runs.
-func (s *Scheduler) ensureConcurrentIndexValid(ctx context.Context, name, ddl string) (action string, err error) {
+func (s *Scheduler) ensureConcurrentIndexValid(ctx context.Context, name, ddl string) (string, error) {
 	st, err := readRuntimeIndex(ctx, s.pool, name)
+	if err != nil {
+		return "", fmt.Errorf("embed-migrate: index validity probe (%s): %w", name, err)
+	}
+	if st.exists && st.valid {
+		same, _, _, err := s.runtimeIndexDefinitionSame(ctx, s.pool, name, ddl, st.def)
+		if err != nil {
+			return "", fmt.Errorf("embed-migrate: index %s left as it is: %w", name, err)
+		}
+		if same {
+			return indexActionReused, nil
+		}
+	}
+	var action string
+	err = withRuntimeIndexLock(ctx, s.pool, func(conn *pgxpool.Conn) error {
+		var lerr error
+		action, lerr = s.ensureRuntimeIndexLocked(ctx, conn, name, ddl)
+		return lerr
+	})
+	if errors.Is(err, errRuntimeIndexBusy) {
+		return "", fmt.Errorf("embed-migrate: index %s: %w", name, err)
+	}
+	return action, err
+}
+
+// ensureRuntimeIndexLocked decides and runs the DDL of index name on conn,
+// the connection that holds the runtime index lock. The catalog is read
+// again: between the caller's read and the lock another session may have
+// finished a build (then the index is reused) or died in one (an INVALID
+// leftover, which no living session builds any more: a build runs on the
+// session that holds the lock, so its lock ends with it).
+func (s *Scheduler) ensureRuntimeIndexLocked(ctx context.Context, conn *pgxpool.Conn, name, ddl string) (action string, err error) {
+	st, err := readRuntimeIndex(ctx, conn, name)
 	if err != nil {
 		return "", fmt.Errorf("embed-migrate: index validity probe (%s): %w", name, err)
 	}
@@ -608,28 +656,30 @@ func (s *Scheduler) ensureConcurrentIndexValid(ctx context.Context, name, ddl st
 		slog.Warn("scheduler: embed migration index INVALID — dropping for rebuild", "index", name)
 		action = indexActionRebuiltInvalid
 	default:
-		same, err := s.runtimeIndexDefinitionSame(ctx, name, ddl, st.def)
+		same, live, expected, err := s.runtimeIndexDefinitionSame(ctx, conn, name, ddl, st.def)
 		if err != nil {
 			return "", fmt.Errorf("embed-migrate: index %s left as it is: %w", name, err)
 		}
 		if same {
 			return indexActionReused, nil
 		}
+		slog.Warn("scheduler: embed migration index definition differs from its DDL — dropping for rebuild",
+			"index", name, "live_definition", live, "expected_definition", expected)
 		action = indexActionRebuiltDefinition
 	}
 	if action != indexActionCreated {
 		// The index found on context_blocks, by schema and name: the bare
 		// name would resolve through the session's search_path and could
 		// meet a same-named index of another schema first.
-		if _, err := s.pool.Exec(ctx,
+		if _, err := conn.Exec(ctx,
 			`DROP INDEX CONCURRENTLY IF EXISTS `+st.qualifiedName(name)); err != nil {
 			return "", fmt.Errorf("embed-migrate: drop index for rebuild (%s): %w", name, err)
 		}
 	}
-	if _, err := s.pool.Exec(ctx, ddl); err != nil {
+	if _, err := conn.Exec(ctx, ddl); err != nil {
 		return "", fmt.Errorf("embed-migrate: create index (%s): %w", name, err)
 	}
-	if err := s.runtimeIndexBuilt(ctx, name, ddl); err != nil {
+	if err := s.runtimeIndexBuilt(ctx, conn, name, ddl); err != nil {
 		return "", err
 	}
 	slog.Info("scheduler: embed migration index ready", "index", name, "action", action)
@@ -639,13 +689,13 @@ func (s *Scheduler) ensureConcurrentIndexValid(ctx context.Context, name, ddl st
 // runtimeIndexBuilt reads the index back after its build. CREATE INDEX ...
 // IF NOT EXISTS skips without an error when the name is already taken in the
 // schema of context_blocks — by an index on another table, or by another
-// session's build of that name, which the CREATE waits for (another
-// instance, possibly of another release, or a failed build left INVALID) —
-// so a build is reported only when a valid index of the definition ddl
-// builds stands on context_blocks. One catalog read and one probe per
-// build.
-func (s *Scheduler) runtimeIndexBuilt(ctx context.Context, name, ddl string) error {
-	st, err := readRuntimeIndex(ctx, s.pool, name)
+// session's build of that name, which the CREATE waits for (a session that
+// does not take the runtime index lock, e.g. an older release, or a failed
+// build left INVALID) — so a build is reported only when a valid index of
+// the definition ddl builds stands on context_blocks. One catalog read and
+// one probe per build.
+func (s *Scheduler) runtimeIndexBuilt(ctx context.Context, conn *pgxpool.Conn, name, ddl string) error {
+	st, err := readRuntimeIndex(ctx, conn, name)
 	if err != nil {
 		return fmt.Errorf("embed-migrate: index %s read after the build: %w", name, err)
 	}
@@ -653,7 +703,7 @@ func (s *Scheduler) runtimeIndexBuilt(ctx context.Context, name, ddl string) err
 		return fmt.Errorf("embed-migrate: index %s after the build: exists=%t, valid=%t on context_blocks — the name is taken by another index or another session's build",
 			name, st.exists, st.valid)
 	}
-	live, expected, same, err := runtimeIndexMatches(ctx, s.pool, name, ddl, st.def)
+	live, expected, same, err := runtimeIndexMatches(ctx, conn, name, ddl, st.def)
 	if err != nil {
 		return fmt.Errorf("embed-migrate: index %s after the build: %w", name, err)
 	}
@@ -667,25 +717,22 @@ func (s *Scheduler) runtimeIndexBuilt(ctx context.Context, name, ddl string) err
 
 // runtimeIndexDefinitionSame reports whether the valid index name, whose
 // pg_get_indexdef is liveDef, has the definition ddl builds (issue #312),
-// and logs a difference with both definitions. A live definition this
+// with both comparable forms when it was compared. A live definition this
 // process has already found equal is not probed again: the pending index is
 // ensured on every migration cycle, and its definition can only change by
 // an index of another definition taking the name, which changes liveDef.
-func (s *Scheduler) runtimeIndexDefinitionSame(ctx context.Context, name, ddl, liveDef string) (bool, error) {
+func (s *Scheduler) runtimeIndexDefinitionSame(ctx context.Context, db pgxdb.Beginner, name, ddl, liveDef string) (same bool, live, expected string, err error) {
 	if known, ok := s.runtimeIndexDefOK.Load(name); ok && known.(string) == liveDef {
-		return true, nil
+		return true, "", "", nil
 	}
-	live, expected, same, err := runtimeIndexMatches(ctx, s.pool, name, ddl, liveDef)
+	live, expected, same, err = runtimeIndexMatches(ctx, db, name, ddl, liveDef)
 	if err != nil {
-		return false, err
+		return false, "", "", err
 	}
 	if same {
 		s.runtimeIndexDefOK.Store(name, liveDef)
-		return true, nil
 	}
-	slog.Warn("scheduler: embed migration index definition differs from its DDL — dropping for rebuild",
-		"index", name, "live_definition", live, "expected_definition", expected)
-	return false, nil
+	return same, live, expected, nil
 }
 
 // ensureMigrationPendingIndex creates the runtime partial index if missing

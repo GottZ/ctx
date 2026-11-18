@@ -533,7 +533,7 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 			o, f := indexIdentityT(t, pool, n)
 			before[n] = [3]any{o, f, indexDefT(t, pool, n)}
 		}
-		sec, err := newIndexTestScheduler(pool).verifyEnsureIndexes(ctx)
+		sec, err := newIndexTestScheduler(pool).verifyEnsureIndexes(ctx, &embedmigration.Migration{ID: migID}, time.Time{})
 		if err != nil {
 			t.Fatalf("verify index stage after the swap: %v", err)
 		}

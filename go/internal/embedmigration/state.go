@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/GottZ/ctx/internal/pgxdb"
 )
@@ -104,6 +105,9 @@ type transitionOpts struct {
 	args         []any
 	hasAbortReas bool
 	hasRollbReas bool
+	// watermark, when set, is a second CAS condition: verify_started_at =
+	// watermark (OnWatermark).
+	watermark *time.Time
 }
 
 // WithAbortReason sets abort_reason in the same UPDATE as the CAS — required
@@ -180,6 +184,18 @@ func WithFinishedAt() TransitionOption {
 	}
 }
 
+// OnWatermark binds the CAS to the verify run of watermark wm (issue #332):
+// the UPDATE also requires verify_started_at = wm. A transition that carries
+// the outcome of one verify run — its red verdict, the confirm of its green
+// one — must not land on a row that re-entered verifying with a newer
+// watermark since (resume, drain, verifying again): the status alone is the
+// same there. Zero rows is ErrTransitionRaceLost, as for the status.
+func OnWatermark(wm time.Time) TransitionOption {
+	return func(o *transitionOpts) {
+		o.watermark = &wm
+	}
+}
+
 // sqlNow is a marker consumed by Transition's SQL builder to emit now()
 // instead of a bound parameter — kept as a distinct type (not a bare bool
 // or string sentinel) so it can never collide with a genuine caller value.
@@ -195,7 +211,8 @@ type sqlNow struct{}
 // Ordering: the statemachine check (IsAllowedTransition) and the mandatory-
 // reason check both run BEFORE any SQL — an illegal or under-specified
 // transition never reaches the database. Zero rows affected by the UPDATE
-// itself means the row's status had already moved (or id is unknown) —
+// itself means the row's status had already moved (or id is unknown, or,
+// under OnWatermark, the row carries another watermark) —
 // ErrTransitionRaceLost, never a silent no-op.
 func Transition(ctx context.Context, q Querier, id string, from, to Status, opts ...TransitionOption) error {
 	if !IsAllowedTransition(from, to) {
@@ -232,6 +249,10 @@ func Transition(ctx context.Context, q Querier, id string, from, to Status, opts
 		`UPDATE context_embed_migrations SET %s WHERE id = $%d::uuid AND status = $%d`,
 		setClauses, idPos, fromPos,
 	)
+	if o.watermark != nil {
+		args = append(args, *o.watermark)
+		sql += fmt.Sprintf(` AND verify_started_at = $%d`, len(args))
+	}
 	tag, err := q.Exec(ctx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("embedmigration: transition %s->%s: %w", from, to, err)
