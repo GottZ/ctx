@@ -71,9 +71,10 @@ const (
 )
 
 // c23TieTitle and c23TieContent are shared VERBATIM by all c23TieBlocks rows.
-// ts_de/ts_en are GENERATED ALWAYS AS to_tsvector(config, title || ' ' ||
-// content) (113_baseline.sql:89-94), so identical text is identical tsvector is
-// identical ts_rank_cd — the tie is a construction, not an observation.
+// ts_de/ts_en are to_tsvector(config, title || ' ' || content) (generated
+// columns of 113_baseline.sql:89-94, kept by trg_block_fulltext since
+// migration 178), so identical text is identical tsvector is identical
+// ts_rank_cd — the tie is a construction, not an observation.
 const (
 	c23TieTitle   = "Gleichstand " + c23TieWordA + " " + c23TieWordB
 	c23TieContent = "Der " + c23TieWordA + " und der " + c23TieWordB + " stehen hier in derselben Reihenfolge. " +

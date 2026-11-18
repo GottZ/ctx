@@ -57,7 +57,9 @@ func w6Seed(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks DISABLE TRIGGER USER`); err != nil {
+	// trg_block_fulltext stays on: it fills ts_de/ts_en, generated columns before
+	// migration 178, so the seeded rows keep their production shape.
+	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks DISABLE TRIGGER USER; ALTER TABLE context_blocks ENABLE TRIGGER trg_block_fulltext`); err != nil {
 		t.Fatalf("disable triggers: %v", err)
 	}
 	// 10k issues: created_at = epoch + i s; updated_at same; status cycles; content
@@ -99,6 +101,15 @@ func w6Seed(t *testing.T, pool *pgxpool.Pool) {
 	}
 	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks ENABLE TRIGGER USER`); err != nil {
 		t.Fatalf("re-enable triggers: %v", err)
+	}
+	// The q gates below measure the full-text path; a seed without vectors
+	// would leave the GIN indexes empty and the gates measuring nothing.
+	var noVector int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_blocks WHERE ts_de IS NULL OR ts_en IS NULL`).Scan(&noVector); err != nil {
+		t.Fatalf("count rows without vectors: %v", err)
+	}
+	if noVector != 0 {
+		t.Fatalf("seed: %d rows without full-text vectors", noVector)
 	}
 	if _, err := pool.Exec(ctx, `VACUUM ANALYZE context_blocks`); err != nil {
 		t.Fatalf("vacuum analyze: %v", err)
@@ -450,7 +461,9 @@ func TestW6CursorAndSemantics_Integration(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
 
-	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks DISABLE TRIGGER USER`); err != nil {
+	// trg_block_fulltext stays on: it fills ts_de/ts_en, generated columns before
+	// migration 178, so the seeded rows keep their production shape.
+	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks DISABLE TRIGGER USER; ALTER TABLE context_blocks ENABLE TRIGGER trg_block_fulltext`); err != nil {
 		t.Fatalf("disable triggers: %v", err)
 	}
 	// 120 issues in 'cur', distinct created_at/updated_at, single status so the

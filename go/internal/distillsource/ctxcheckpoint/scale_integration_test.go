@@ -95,7 +95,9 @@ func scaleSpread(n int) time.Duration {
 // per test cost four identical million-row loads, ~2.5 min each, and pushed
 // the package past go test's default 10-minute timeout on a local run.
 func seedScaleRows(ctx context.Context, pool *pgxpool.Pool, n int) (err error) {
-	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks DISABLE TRIGGER USER`); err != nil {
+	// trg_block_fulltext stays on: it fills ts_de/ts_en, generated columns before
+	// migration 178, so the seeded rows keep their production shape.
+	if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks DISABLE TRIGGER USER; ALTER TABLE context_blocks ENABLE TRIGGER trg_block_fulltext`); err != nil {
 		return fmt.Errorf("disable triggers: %w", err)
 	}
 	defer func() {
