@@ -95,6 +95,9 @@ type confirmOutcome struct {
 	// Supersedes is the block a confirmed op 'store' declared to supersede
 	// (issue #197), "" otherwise.
 	Supersedes string
+	// Blocks are the written blocks of a confirmed op 'store_batch' (issue
+	// #211), in the order of the card's items.
+	Blocks []*store.Block
 }
 
 // confirmIdentityTakenPrefix opens the confirmExecRejected wording of a staged
@@ -242,6 +245,11 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 	if out := confirmDriftReject(ctx, pool, ar, cw); out != nil {
 		return *out
 	}
+	// A staged batch (#211): the D1-M1 scope and the claim re-checks above,
+	// for each of its items — on the un-consumed row, like theirs.
+	if out := confirmBatchReject(ctx, blocktypes, ar, cw); out != nil {
+		return *out
+	}
 
 	// Atomic consume (exactly once) — a racing double-confirm loses here and
 	// gets the generic miss.
@@ -257,6 +265,9 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 	}
 	if cw.Op == store.OpArchive {
 		return executeConfirmedArchive(ctx, pool, ar, cw, pw.ID)
+	}
+	if cw.Op == store.OpStoreBatch {
+		return executeConfirmedStoreBatch(ctx, pool, blocktypes, ar, cw, pw.ID)
 	}
 
 	if cw.Op == "update" {
@@ -341,7 +352,7 @@ func executeConfirmedStore(ctx context.Context, pool *pgxpool.Pool, blocktypes *
 // into the generic miss (no oracle).
 func confirmOpKnown(op string) bool {
 	switch op {
-	case "store", "update", store.OpBlobStore, store.OpBlobLink, store.OpArchive:
+	case "store", "update", store.OpBlobStore, store.OpBlobLink, store.OpArchive, store.OpStoreBatch:
 		return true
 	default:
 		return false

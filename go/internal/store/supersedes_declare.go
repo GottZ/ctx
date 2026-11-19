@@ -222,27 +222,43 @@ func UpsertBlockSupersedes(ctx context.Context, pool *pgxpool.Pool, category, ti
 		if err := LockSupersedesScope(ctx, tx, scope); err != nil {
 			return err
 		}
-		tgt, _, err := lockSupersedesPair(ctx, tx, category, title, scope, decl.TargetID)
-		if err != nil {
-			return err
-		}
-		if err := supersedesTargetAllowed(tgt, decl.Types); err != nil {
-			return err
-		}
-		if b, err = u.exec(ctx, tx); err != nil {
-			return err
-		}
-		if b.ID == tgt.id {
-			// A concurrent first create of this identity, committed between
-			// the source lock and the upsert, can still land here.
-			return ErrSupersedesTarget
-		}
-		if err := supersedesStateAllows(ctx, tx, b.ID, tgt.id, scope); err != nil {
-			return err
-		}
-		return declareSupersedes(ctx, tx, b.ID, tgt.id, scope, decl.APIKeyID)
+		var err error
+		b, err = u.execDeclaring(ctx, tx, decl)
+		return err
 	})
 	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// execDeclaring is the in-transaction half of UpsertBlockSupersedes: the lock
+// pair, the gates, the upsert and the declaration, in the caller's
+// transaction. The caller holds LockSupersedesScope of u's scope, taken as the
+// first lock of that transaction — UpsertBlockSupersedes' own, or UpsertBlocks'
+// for every scope of its batch (issue #211).
+func (u upsertStatement) execDeclaring(ctx context.Context, tx pgx.Tx, decl SupersedesDeclaration) (*Block, error) {
+	category, title, scope := u.category, u.title, u.scope
+	tgt, _, err := lockSupersedesPair(ctx, tx, category, title, scope, decl.TargetID)
+	if err != nil {
+		return nil, err
+	}
+	if err := supersedesTargetAllowed(tgt, decl.Types); err != nil {
+		return nil, err
+	}
+	b, err := u.exec(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	if b.ID == tgt.id {
+		// A concurrent first create of this identity, committed between
+		// the source lock and the upsert, can still land here.
+		return nil, ErrSupersedesTarget
+	}
+	if err := supersedesStateAllows(ctx, tx, b.ID, tgt.id, scope); err != nil {
+		return nil, err
+	}
+	if err := declareSupersedes(ctx, tx, b.ID, tgt.id, scope, decl.APIKeyID); err != nil {
 		return nil, err
 	}
 	return b, nil

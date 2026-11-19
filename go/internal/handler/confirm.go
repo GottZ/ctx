@@ -81,6 +81,16 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"success": true, "op": out.Op, "blob": blob})
 			return
 		}
+		if out.Op == store.OpStoreBatch {
+			// Issue #211: a confirmed batch answers its blocks, in the card's
+			// order, each in the shape of the single answer's `block`.
+			blocks := make([]map[string]any, len(out.Blocks))
+			for i, b := range out.Blocks {
+				blocks[i] = map[string]any{"id": b.ID, "title": b.Title, "category": b.Category, "scope": b.Scope}
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"success": true, "op": out.Op, "blocks": blocks})
+			return
+		}
 		resp := map[string]any{
 			"success": true,
 			"op":      out.Op,

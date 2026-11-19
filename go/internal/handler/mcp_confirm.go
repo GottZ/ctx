@@ -188,6 +188,11 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 						out.Blob.Title, out.Blob.ID, linked))},
 				}, nil, nil
 			}
+			if out.Op == store.OpStoreBatch {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{textContent(renderConfirmedStoreBatch(out.Blocks))},
+				}, nil, nil
+			}
 			if out.Op == store.OpBlobStore {
 				return &mcp.CallToolResult{
 					Content: []mcp.Content{textContent(fmt.Sprintf("Confirmed and stored blob: %s (id: %s, category: %s, %d bytes)",

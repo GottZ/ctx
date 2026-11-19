@@ -305,6 +305,9 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 		r.Post("/api/query", queryHTTPHandler)
 		// Store — Upsert + Auto-Embedding
 		r.Post("/api/store", storeH.HandleStore)
+		// Store batch — several /api/store writes, all or none (issue #211);
+		// the core the MCP store_batch tool runs, under the same 1 MB cap.
+		r.Post("/api/store/batch", storeH.HandleStoreBatch)
 		// Search — Lightweight FTS (no LLM)
 		r.Post("/api/search", searchH.HandleSearch)
 		// Recent — newest visible blocks (no LLM, no FTS). Same store read as

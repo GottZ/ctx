@@ -157,6 +157,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: SchlÃ
 	"webchat.session_retention":                      "Age after which idle chat sessions and their messages are deleted (hours, suffixes h/d/w/m/y); 0 keeps them forever",
 	"writes.confirm_ttl":                             "Seconds a staged LLM-path write stays confirmable before it expires; 0 lets staged writes wait forever",
 	"writes.confirm_retention":                       "Age (h/d/w/m/y suffix) after which staged-write history is chunk-dropped; 0 keeps it forever â€” keep well above the confirm TTL",
+	"writes.batch_max_items":                         "Most blocks one all-or-none batch (MCP store_batch, POST /api/store/batch) may write in its single transaction; 0 switches batches off",
 	"pool.default_query_sensitivity":                 "Sensitivity assumed for query text without an explicit classification; decides which backend trust tiers may receive the prompt",
 	"pool.default_block_sensitivity":                 "Sensitivity assigned to new blocks without an explicit classification; decides which backend trust tiers may ever see them",
 	"pool.scope_sensitivity_floor":                   "JSON map of scope to minimum sensitivity; raises the effective sensitivity of blocks in that scope, never lowers it",

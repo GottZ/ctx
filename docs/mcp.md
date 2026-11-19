@@ -1,7 +1,7 @@
 # MCP reference
 
 ctx serves a [Model Context Protocol](https://modelcontextprotocol.io) tool server at
-`/mcp`. This page is the reference for its sixteen tools: what each one takes and what
+`/mcp`. This page is the reference for its seventeen tools: what each one takes and what
 it answers. The tool definitions live in `go/internal/handler/mcp*.go`; the JSON
 schemas a client receives from `tools/list` are generated from the same Go structs,
 so the parameter descriptions below match what an agent sees.
@@ -18,7 +18,7 @@ tool section says so.
 | Server name | `ctx` |
 | Instructions | sent with `initialize` (and `server/discover`), the one text every connecting agent gets before it has read any documentation. By default the text ctx ships: ctx is the agent's memory across sessions; before it answers from memory or starts work it looks things up (`search` for a lightweight lookup, `query` for a synthesized answer); what should outlast the session it saves with `store`, its source in `metadata.source`. An operator can switch it off or replace it (`mcp.instructions_enabled`, `mcp.instructions`, see [operations](operations.md#mcp-instructions-mcpinstructions_enabled-and-mcpinstructions)); a change reaches the next connecting agent without a restart. Clients decide whether they show it to the model — Claude Code does (it cuts server instructions after 2,048 characters, 4,096 since 2.1.296), Hermes does not |
 | Authentication | the same API key as the HTTP API, as `X-Context-Key: <key>` or `Authorization: Bearer <key>`; remote clients such as claude.ai use OAuth 2.1 with PKCE — register one with `ctx mcp add <label>` ([architecture](architecture.md)); `/authorize` is a consent screen that names the client and the address the browser returns to, warns about self-registered (DCR) clients unless they return to a known connector callback (static allowlist or `CTX_OAUTH_REDIRECT_EXTRA`) and needs an explicit consent tick next to the key; a refresh token is issued only to clients registered with the `refresh_token` grant (DCR default: both grants; `ctx mcp add` clients always get it) |
-| Request size | the body is capped at 1 MB before the MCP layer reads it; `store`, `update` and the issue tools cap content at 50 KB |
+| Request size | the body is capped at 1 MB before the MCP layer reads it — for `store_batch` that is the bound on all its items together; `store`, `store_batch` (per item), `update` and the issue tools cap content at 50 KB |
 | Scope | every tool acts within the scopes the key may read or write ([multi-tenancy](multi-tenancy.md)); a key without a resolved tenant identity is refused |
 
 A minimal client configuration (Claude Code):
@@ -369,6 +369,60 @@ archived, other-scope, malformed or self id — one answer for all), `supersedes
 A staged store is checked at stage time and again at `confirm`. Details and the rules in
 [api.md](api.md#endpoints), *A writer-declared supersedes*.
 
+### store_batch
+
+Save or update several blocks, **all or none**: every item is written in one
+transaction, or none is.
+
+| Parameter | Type | | Description |
+|---|---|---|---|
+| `items` | object[] | required | the blocks to write; each takes the [`store`](#store) arguments (`category`, `title`, `content` required) |
+
+```json
+{"items": [
+  {"category": "decisions", "title": "Cache layer", "content": "We cache …", "metadata": {"source": "design review"}},
+  {"category": "decisions", "title": "Decision index", "content": "- Cache layer"}
+]}
+```
+
+Each item runs the gate chain of `store` and upserts on (category, title, scope); an
+item may name its own `scope` and `supersedes`. Any refusal — of one item or of the
+batch — writes nothing and answers `isError: true` with the refusal's code and text
+behind `items[<i>]: `, the item's position: a gate of the item (as `store` answers
+it), `constraint` for two items with the same category, title and scope,
+`supersedes_conflict` for two items that declare to supersede the same block, and, decided
+in the transaction on the block as it is then, `provenance_protected`, `constraint`
+(an explicit type onto a comment or an issue) and the supersedes codes — the items
+written before it in the transaction are rolled back. A batch without items answers
+`missing_fields`; more items than `writes.batch_max_items` (default 100, `0` switches
+batches off) `size_cap`. An item whose write would change nothing is not written and
+costs nothing (nor is its block locked: a write to it after the check is ordered after
+the batch); every other item counts as one write of the key's write budget
+(`query.rate_limit_write`), and a batch that does not fit into what is left of the
+current 60-second window is refused whole with `rate_limit`. The count and the booking
+happen inside the batch's transaction under a lock of the key, so two batches of one
+key — on any ctxd instance — cannot both spend the same rest of the window.
+**Answer:**
+
+```
+Batch written in one transaction: 2 stored, 1 unchanged.
+items[0]: Stored: <title> (id: <uuid>, category: <category>)
+items[1]: No change needed — identical content already exists (id: <uuid>)
+items[2]: Stored: <title> (id: <uuid>, category: <category>, supersedes: <uuid>)
+```
+
+For a `confirm_writes` key the batch is **staged as one card**: one `payload_hash`
+over every item that writes (an unchanged item is answered at once and is not part of
+it), the budget charged in the transaction that stages the card. A staged batch whose
+declarations would refuse each other at the confirm (two blocks declaring each other)
+is refused at stage time. [`confirm`](#confirm) then writes every item of
+the card in one transaction. Before it spends the hash, the confirm re-checks each
+item's scope and claims against the key and the registry of that moment — a refusal
+there keeps the card; a refusal of the transaction itself (a supersedes target that
+changed, a derivative in the way) spends it, writes nothing, and answers behind
+`confirmed store_batch not executed, nothing of it is written, the stage token is consumed: `.
+REST `POST /api/store/batch` runs the same core ([api.md](api.md#endpoints)).
+
 ### update
 
 Change fields of an existing block.
@@ -459,6 +513,10 @@ Only meaningful for `confirm_writes` keys; for every other key each hash is unkn
 A hash is bound to the key that staged it and expires. **Answer:**
 `Confirmed and stored: …` / `Confirmed and updated: <title> (id: <uuid>, category: <category>)` /
 `Confirmed and archived: <title> (id: <uuid>, category: <category>)`,
+for a staged [`store_batch`](#store_batch)
+`Confirmed and stored <n> blocks in one transaction:` and one line
+`items[<k>]: <title> (id: <uuid>, category: <category>)` per item of the card (on
+`POST /api/confirm`: `{"success": true, "op": "store_batch", "blocks": [{id, title, category, scope}, …]}`),
 or for blobs `Confirmed and stored blob: <title> (id: <uuid>, category: <category>, <n> bytes)` /
 `Confirmed and linked blob: <title> (id: <uuid>, context_block_id: <uuid>)`.
 A confirmed update that would give the block another active block's category and

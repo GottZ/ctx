@@ -1248,6 +1248,15 @@ type WritesConfig struct {
 	// (operator opt-out, same convention as llmlog/webchat/webhook retention).
 	// Duration suffix h/d/w/m/y (Hours parser); keep well above confirm_ttl.
 	ConfirmRetention Hours `key:"writes.confirm_retention" env:"CTX_WRITES_CONFIRM_RETENTION" default:"24h" mut:"hot" tenancy:"global-only"`
+	// BatchMaxItems caps one all-or-none block batch (MCP store_batch, REST
+	// POST /api/store/batch, issue #211). The batch is ONE transaction that
+	// holds the supersedes lock of every scope it writes and a row lock per
+	// existing block until it commits, so the cap bounds how long a batch
+	// keeps dream batches, archives, scope moves, declarations and other
+	// batches of those scopes waiting. 0 switches batches off (every batch is
+	// refused by name); the 1 MB body cap of both routes bounds the bytes.
+	// global-only: the lock time is spent in the shared database.
+	BatchMaxItems int `key:"writes.batch_max_items" env:"CTX_WRITES_BATCH_MAX_ITEMS" default:"100" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 
 // ScopeFloor maps a scope to its minimum effective sensitivity (F3 §2.3d).

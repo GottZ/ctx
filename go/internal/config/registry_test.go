@@ -279,6 +279,11 @@ func TestRegistryStrictSet(t *testing.T) {
 		// operator limit while the runtime scanned far more — or, read the
 		// other way, hide that the net was never narrowed at all.
 		"pool.blob_scan_max_bytes": true,
+		// #211: the batch cap bounds how long one transaction holds the
+		// supersedes lock of its scopes, and its 0 is a switch ("no batches").
+		// A typo'd value silently falling back to 100 would present as the
+		// operator's number while the runtime admitted another.
+		"writes.batch_max_items": true,
 		// H12: the context-window fallback is the ONE key that decides whether a
 		// prompt carrying foreign text may be built for a chain member without a
 		// declared window. A typo'd value silently defaulting to 0 would flip the

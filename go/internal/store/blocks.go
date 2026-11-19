@@ -1220,10 +1220,11 @@ func CheckRateLimit(ctx context.Context, pool *pgxpool.Pool, apiKeyID string) (i
 }
 
 // CheckRateLimitByAction returns the number of operations with the given action
-// in the last 60 seconds for a given API key.
-func CheckRateLimitByAction(ctx context.Context, pool *pgxpool.Pool, apiKeyID, action string) (int, error) {
+// in the last 60 seconds for a given API key. q is the pool, or the
+// transaction of a block batch that counts under its budget lock (WriteBudget).
+func CheckRateLimitByAction(ctx context.Context, q pgxdb.Rower, apiKeyID, action string) (int, error) {
 	var count int
-	err := pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT count(*)::int FROM context_access_log
 		 WHERE api_key_id = $1::uuid
 		   AND action = $2

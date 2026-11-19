@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // ErrPendingWriteNotFound is the fail-closed consume/lookup result: no OPEN,
@@ -44,8 +46,11 @@ type PendingWrite struct {
 //
 // ttl <= 0 stores expires_at = NULL — the stage never expires. Expiry is
 // deliberately DECOUPLED from eviction (writes.confirm_retention, D-E3).
-func StagePendingWrite(ctx context.Context, pool *pgxpool.Pool, apiKeyID, scope, op, origin string, payload json.RawMessage, payloadHash string, ttl time.Duration) (*PendingWrite, error) {
-	row := pool.QueryRow(ctx, `
+//
+// q is the pool, or the transaction of a staged block batch that reserves its
+// write budget in the same transaction (issue #211).
+func StagePendingWrite(ctx context.Context, q pgxdb.Rower, apiKeyID, scope, op, origin string, payload json.RawMessage, payloadHash string, ttl time.Duration) (*PendingWrite, error) {
+	row := q.QueryRow(ctx, `
 		WITH rearm AS (
 			UPDATE context_pending_writes
 			   SET expires_at = CASE WHEN $7 <= 0::double precision THEN NULL
