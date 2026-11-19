@@ -143,7 +143,7 @@ func TestFoldAggregates_FullChain_Integration(t *testing.T) {
 	}
 
 	h := &QueryHandler{pool: pool}
-	folded := h.foldAggregates(ctx, results, set.AggregateTypes(), visible, readScopes, nil, "fold-it")
+	folded := h.foldAggregates(ctx, results, set.AggregateTypes(), visible, readScopes, nil, rrf.RequestFilter{}, "fold-it")
 	post := present(folded)
 
 	// Fold-negativ + merge: parents delivered, their comments folded away.
@@ -208,7 +208,7 @@ func TestFoldParentData_Hydration_Integration(t *testing.T) {
 	h := &QueryHandler{pool: pool}
 
 	folds, hydrated, err := h.foldParentData(ctx,
-		[]string{fCommentA, fOrphan, fCommentX}, set.VisibleTypes(), []string{foldHome}, nil)
+		[]string{fCommentA, fOrphan, fCommentX}, set.VisibleTypes(), []string{foldHome}, nil, rrf.RequestFilter{})
 	if err != nil {
 		t.Fatalf("foldParentData: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestAggregateOverFetch_ScaleDiversity_Integration(t *testing.T) {
 
 	// RED: base window (200) = hot only ⇒ <5 distinct parents, under-fills limit.
 	baseWindow := truncate(results, 200)
-	baseFolded := h.foldAggregates(ctx, baseWindow, aggTypes, visible, readScopes, nil, "scale-base")
+	baseFolded := h.foldAggregates(ctx, baseWindow, aggTypes, visible, readScopes, nil, rrf.RequestFilter{}, "scale-base")
 	baseOut := truncate(baseFolded, userLimit)
 	if p := distinctParents(baseOut); p >= 5 {
 		t.Fatalf("base(200) distinct parents = %d, expected <5 (RED: hot thread monopolises the window)", p)
@@ -346,7 +346,7 @@ func TestAggregateOverFetch_ScaleDiversity_Integration(t *testing.T) {
 		t.Fatalf("aggregateOverFetchLimit = %d, want 400 (×2 widen when aggregate blocks present)", of)
 	}
 	ofWindow := truncate(results, of)
-	ofFolded := h.foldAggregates(ctx, ofWindow, aggTypes, visible, readScopes, nil, "scale-of")
+	ofFolded := h.foldAggregates(ctx, ofWindow, aggTypes, visible, readScopes, nil, rrf.RequestFilter{}, "scale-of")
 	ofOut := truncate(ofFolded, userLimit)
 	if len(ofOut) != userLimit {
 		t.Errorf("over-fetch out rows = %d, want %d (must reach the user limit)", len(ofOut), userLimit)

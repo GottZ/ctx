@@ -138,11 +138,11 @@ func (h *QueryHandler) expandCache(cfg *config.Config) rrf.ExpandCache {
 func (h *QueryHandler) SetClusterFreshness(src rrf.ClusterFreshness) { h.clusterFresh = src }
 
 func (h *QueryHandler) applyClusterBoost(ctx context.Context, results []rrf.SearchResult, embedding []float32,
-	readScopes, grantedBlockIDs, visibleTypes []string, cfg rrf.ClusterConfig, requestID string) []rrf.SearchResult {
+	readScopes, grantedBlockIDs, visibleTypes []string, filter rrf.RequestFilter, cfg rrf.ClusterConfig, requestID string) []rrf.SearchResult {
 	if !cfg.Enabled {
 		return results
 	}
-	boosted, rep, err := rrf.ClusterBoost(ctx, h.pool, results, embedding, readScopes, grantedBlockIDs, visibleTypes, cfg, h.clusterFresh)
+	boosted, rep, err := rrf.ClusterBoost(ctx, h.pool, results, embedding, readScopes, grantedBlockIDs, visibleTypes, filter, cfg, h.clusterFresh)
 	if err != nil {
 		slog.Warn("cluster boost failed; using pre-boost results",
 			"error", err,
@@ -956,6 +956,15 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// Wire compat (seam 17, closed in WF T10): types_exclude is the canonical
 	// wire name for the request-level p_types_exclude; block_roles_exclude
 	// stays as the documented legacy alias — both present ⇒ union.
+	//
+	// Issue #225: the request's four filters as ONE value, handed to the fusion
+	// and to every stage after it that can add a block (cluster injection,
+	// graph expansion, aggregate fold) — a block the request excluded never
+	// comes back as a sibling, a neighbour or a parent.
+	reqFilter := rrf.RequestFilter{
+		Category: req.Category, Tags: req.Tags, CategoriesExclude: req.CategoriesExclude,
+		TypesExclude: unionExcludes(req.TypesExclude, req.BlockRolesExclude),
+	}
 	var (
 		results     []rrf.SearchResult
 		selectorDec rrf.SelectorDecision
@@ -964,15 +973,15 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if armRanks {
 		results, selectorDec, armRows, err = h.armSweepSearch(ctx, armSweepParams{
 			embedding: embedding, query: searchQuery, querySpaced: querySpaced,
-			scopes: ar.ReadScopes, category: req.Category, tags: req.Tags, limit: internalLimit,
+			scopes: ar.ReadScopes, category: reqFilter.Category, tags: reqFilter.Tags, limit: internalLimit,
 			temporal: temporal, queryOR: queryOR, measureVisibleTypes: measureVisibleTypes,
 			dampedTypes: dampedTypes, dampedFactors: dampedFactors,
-			categoriesExclude: req.CategoriesExclude,
-			typesExclude:      unionExcludes(req.TypesExclude, req.BlockRolesExclude),
+			categoriesExclude: reqFilter.CategoriesExclude,
+			typesExclude:      reqFilter.TypesExclude,
 			grantedBlockIDs:   grantedBlockIDs, policy: selectorPolicy,
 		})
 	} else {
-		results, selectorDec, err = rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR, visibleTypes, dampedTypes, dampedFactors, req.CategoriesExclude, unionExcludes(req.TypesExclude, req.BlockRolesExclude), grantedBlockIDs, selectorPolicy)
+		results, selectorDec, err = rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, reqFilter.Category, reqFilter.Tags, internalLimit, temporal, queryOR, visibleTypes, dampedTypes, dampedFactors, reqFilter.CategoriesExclude, reqFilter.TypesExclude, grantedBlockIDs, selectorPolicy)
 	}
 	if err != nil {
 		slog.Error("rrf search failed",
@@ -1131,8 +1140,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// C9 additionally threads the SAME grant set and type allowlist that gate
 	// rrf.Search and GraphExpand: the moment the stage may INTRODUCE a block, the
 	// membership scope filter alone is not enough — the block's own visibility
-	// has to hold, from the one per-request policy source (§5.4).
-	results = h.applyClusterBoost(ctx, results, embedding, ar.ReadScopes, grantedBlockIDs, visibleTypes, cfg.ClusterRRF(), requestID)
+	// has to hold, from the one per-request policy source (§5.4). The request
+	// filter rides along for the same reason (#225).
+	results = h.applyClusterBoost(ctx, results, embedding, ar.ReadScopes, grantedBlockIDs, visibleTypes, reqFilter, cfg.ClusterRRF(), requestID)
 
 	// Step 6a-graph: Dream-graph expansion (GottZ Graph Expansion, Wave 1).
 	// Post-RRF, post-gravity (so seeds enter sorted by boosted RRFScore) and
@@ -1162,7 +1172,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		// nor events). expandCache returns the zero value unless the snapshot is
 		// Fresh AND graph_cache.serve_expand is on, and GraphExpandCached then runs
 		// the byte-identical SQL path — same call, same fail-open handling below.
-		if expanded, gerr := rrf.GraphExpandCached(ctx, h.pool, results, ar.ReadScopes, grantedBlockIDs, visibleTypes, graphCfg, h.expandCache(cfg)); gerr != nil {
+		// #225: and the request filter, so a neighbour the request excluded is
+		// never hydrated.
+		if expanded, gerr := rrf.GraphExpandCached(ctx, h.pool, results, ar.ReadScopes, grantedBlockIDs, visibleTypes, reqFilter, graphCfg, h.expandCache(cfg)); gerr != nil {
 			slog.Warn("graph expand failed; using pre-expansion results",
 				"error", gerr,
 				"request_id", requestID,
@@ -1180,7 +1192,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// filterSuperseded via the existing machinery instead of carrying a
 	// zero-value (credentials, over-blocking) sensitivity. Fast-path: no
 	// aggregating type registered ⇒ zero DB calls ⇒ eval baseline byte-identical.
-	results = h.foldAggregates(ctx, results, typeSet.AggregateTypes(), visibleTypes, ar.ReadScopes, grantedBlockIDs, requestID)
+	// #225: a parent the request filter excludes is not delivered; its child,
+	// which passed the fusion, stays itself.
+	results = h.foldAggregates(ctx, results, typeSet.AggregateTypes(), visibleTypes, ar.ReadScopes, grantedBlockIDs, reqFilter, requestID)
 
 	// Step 6a-sens: batch sensitivity lookup over ALL candidate IDs — not
 	// top-N: filterSuperseded (6d) and graph placement advance stragglers

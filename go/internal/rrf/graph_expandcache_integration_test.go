@@ -203,7 +203,7 @@ func TestGraphExpandCache_DampingOracle_Integration(t *testing.T) {
 	types := []string{"knowledge"}
 
 	before := w57Build(t, pool)
-	outBefore, err := rrf.GraphExpandCached(ctx, pool, seeds, []string{scope}, nil, types, cfg,
+	outBefore, err := rrf.GraphExpandCached(ctx, pool, seeds, []string{scope}, nil, types, rrf.RequestFilter{}, cfg,
 		rrf.ExpandCache{Snapshot: before})
 	if err != nil {
 		t.Fatalf("cache arm (no foreign edges): %v", err)
@@ -225,7 +225,7 @@ func TestGraphExpandCache_DampingOracle_Integration(t *testing.T) {
 	w57Link(t, pool, w57Foreig2, w57Hub, "topical", 0.95)
 
 	after := w57Build(t, pool)
-	outAfter, err := rrf.GraphExpandCached(ctx, pool, seeds, []string{scope}, nil, types, cfg,
+	outAfter, err := rrf.GraphExpandCached(ctx, pool, seeds, []string{scope}, nil, types, rrf.RequestFilter{}, cfg,
 		rrf.ExpandCache{Snapshot: after})
 	if err != nil {
 		t.Fatalf("cache arm (with foreign edges): %v", err)
@@ -324,7 +324,7 @@ func TestGraphExpandCache_HopDepth2Bridges_Integration(t *testing.T) {
 	t.Logf("stub (red anchor) violations: %v", stubViolations)
 
 	// Production arm: no bridge, no block behind one.
-	out, err := rrf.GraphExpandCached(ctx, pool, seeds, []string{scope}, granted, types, cfg,
+	out, err := rrf.GraphExpandCached(ctx, pool, seeds, []string{scope}, granted, types, rrf.RequestFilter{}, cfg,
 		rrf.ExpandCache{Snapshot: snap})
 	if err != nil {
 		t.Fatalf("cache arm: %v", err)
@@ -409,7 +409,7 @@ func TestGraphExpandCache_Differential_Integration(t *testing.T) {
 			if err != nil {
 				t.Fatalf("sql arm: %v", err)
 			}
-			cacheOut, rep, err := rrf.GraphExpandCachedWithReport(ctx, pool, seeds, []string{scope}, nil, types, cfg,
+			cacheOut, rep, err := rrf.GraphExpandCachedWithReport(ctx, pool, seeds, []string{scope}, nil, types, rrf.RequestFilter{}, cfg,
 				rrf.ExpandCache{Snapshot: snap})
 			if err != nil {
 				t.Fatalf("cache arm: %v", err)
@@ -493,7 +493,7 @@ func TestGraphExpandCache_StructuralIsolation_Integration(t *testing.T) {
 	snap := w57Build(t, pool)
 	out, err := rrf.GraphExpandCached(ctx, pool,
 		[]rrf.SearchResult{{ID: w57GA, Title: "A", RRFScore: 1.0, Scope: scope}},
-		[]string{scope}, nil, []string{"knowledge"}, cfg, rrf.ExpandCache{Snapshot: snap})
+		[]string{scope}, nil, []string{"knowledge"}, rrf.RequestFilter{}, cfg, rrf.ExpandCache{Snapshot: snap})
 	if err != nil {
 		t.Fatalf("cache arm: %v", err)
 	}
@@ -530,7 +530,7 @@ func TestGraphExpandCache_RecheckErrorFailsOpen_Integration(t *testing.T) {
 	defer dead.Close()
 
 	in := []rrf.SearchResult{{ID: "019f9700-0000-7000-9000-000000000051", Title: "S", RRFScore: 1.0, Scope: scope}}
-	out, gerr := rrf.GraphExpandCached(ctx, dead, in, []string{scope}, nil, []string{"knowledge"}, w57Cfg(),
+	out, gerr := rrf.GraphExpandCached(ctx, dead, in, []string{scope}, nil, []string{"knowledge"}, rrf.RequestFilter{}, w57Cfg(),
 		rrf.ExpandCache{Snapshot: snap})
 	if gerr == nil {
 		t.Fatal("expected a hydrate error from an unreachable pool")
@@ -557,7 +557,7 @@ func TestGraphExpandCache_StaleSeedFallsBackToSQL_Integration(t *testing.T) {
 	seeds := []rrf.SearchResult{{ID: w57Late, Title: "late", RRFScore: 1.0, Scope: scope}}
 	types := []string{"knowledge"}
 
-	out, rep, err := rrf.GraphExpandCachedWithReport(ctx, pool, seeds, []string{scope}, nil, types, cfg,
+	out, rep, err := rrf.GraphExpandCachedWithReport(ctx, pool, seeds, []string{scope}, nil, types, rrf.RequestFilter{}, cfg,
 		rrf.ExpandCache{Snapshot: snap})
 	if err != nil {
 		t.Fatalf("stale fallback: %v", err)
