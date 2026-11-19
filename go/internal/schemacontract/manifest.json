@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 186,
-    "migration_count": 74,
+    "migration_max": 187,
+    "migration_count": 75,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -5504,6 +5504,9 @@
     },
     "idx_context_created": {
       "def_hash": "c181d7579b44cb84cdc533c2e0e24edb1fe7fe8a1dd3646fcbb45bdf507434b9"
+    },
+    "idx_context_derived_identity": {
+      "def_hash": "5a36c9c00e8a69e76d061de62d52eb11a86386a6296442690071e19521fa8ad8"
     },
     "idx_context_metadata": {
       "def_hash": "e5a94e1f7e2069aa51978cca91c20dce54d6971777c5592eaea0a1fe99a0bc46"

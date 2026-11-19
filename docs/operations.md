@@ -1774,6 +1774,37 @@ The `UPDATE` scans the heap with row locks (measured 0.35 s at 1 000 000 rows); 
 
 **Rolling deploy and way back.** The rollback image v5.65.0 writes neither column as `NULL` (its inserts take the defaults, its updates write `updated_at = now()`) and keeps working. Its schema-contract check finds `_migrations:186` without an embedded file (`migration_integrity`, breaking) and `not_null` on both columns where its manifest says nullable (definition drift, param): in mode `warn` it starts with `/health` `schema_contract: attention`; in mode `enforce` it refuses to start until `CTX_CONTRACT_MODE=warn` or `off` is set. To take 186 back: `ALTER TABLE context_blocks ALTER COLUMN created_at DROP NOT NULL, ALTER COLUMN updated_at DROP NOT NULL;` then `DELETE FROM _migrations WHERE version = 186;`.
 
+### Migration 187: the derived-identity claim probe is one index descent
+
+`store.ProvenanceClaimed` asks whether a derivative — live or archived — holds a `(category, title, scope)`; it runs on every fresh upsert insert, on the ingest pre-flight and after every update that moves a block's identity (#392), and `foreignProvenanceClaim` asks the same for a derivative of another arm. No index served the question — the identity index is partial on live rows — and the planner answered it from the trigram GiST on `title`, over every row, archive included: a miss read p50 69 / 197 / 312 and p95 618 / 1 845 / 2 942 buffers beside 20 000 / 220 000 / 420 000 archived blocks (#386 follow-up). Migration 187 adds
+
+```sql
+CREATE INDEX idx_context_derived_identity ON context_blocks
+    (category, title COLLATE "C", scope)
+ WHERE metadata ? 'provenance';
+```
+
+which holds the derivatives only, and the probe compares the title under the C collation (`title COLLATE "C" = $2`): the trigram indexes, built on the default collation, cannot serve that comparison, so the planner takes the new index in every plan mode and statistics state. A plain `(category, title, scope)` index was not enough: the planner went back to the GiST at 270 000 and 470 000 rows, whose estimate for `title = $2` stays at a few rows whatever the scan reads.
+
+**Same answers.** Equality under a deterministic collation is byte equality, and the default collation of a database is deterministic, so both forms of the probe answer alike. `TestDerivedIdentityProbeParity` compares them for 472 identities — case, the German sharp s, the Turkish dotted I, composed and decomposed accents, a ligature, blanks before and after the title, a tab, wide characters, an emoji; hit and miss; live and archived derivatives, a client block of the same title, another category or scope — for `ProvenanceClaimed` and the foreign claim of the owning and of another arm.
+
+**Gated on the index.** Without the index the C-collated probe has no title index left and reads every row of the category, so the probe sends the C-collated form only while `idx_context_derived_identity` stands as 187 builds it (valid, ready, the deparsed definition) and its form before 187 otherwise. The reading of the catalog costs more than the probe it gates, so a process takes it once a minute per database (`store.derivedIdentityProbeInterval`): within that minute after an out-of-band build the probe still runs the old form, within that minute after a drop it runs the new form without its index — same answers either way, only the other form's cost (`TestDerivedIdentityProbeGate`).
+
+**Cost.** Beside 50 000 live blocks, 200 000 archived ones without provenance and 5 000 derivatives (half archived), a probe read 2–3 buffers — hit on a live or an archived derivative, miss on an archived client block's title, an unknown title, a derivative's title in another scope — in custom, generic and cached plans, statistics fresh, stale and never taken; the test bounds it by 10 (`TestDerivedIdentityProbeCost`; on the schema before 187 it read 41–291 buffers from the trigram GiST, 4 268 with statistics never taken). A row enters the index only when it carries a provenance; `metadata`, `category`, `title` and `scope` are indexed already, so the index takes no update off the HOT path that was on it.
+
+**The migration.** Below 500 000 rows (`pg_class.reltuples`) it builds the index inline. `CREATE INDEX` takes `SHARE` on `context_blocks` until the commit: readers go on, every insert, update and delete waits; the build reads the whole heap. Measured with a writer on a second connection, rows of about 1.5 KB of heap, warm cache: the writer waited 62–79 ms at 250 000 rows, 102–139 ms at 500 000, 234–407 ms at 1 000 000; a cold cache reads the heap once. Above the threshold, or when the name holds an `INVALID` index or another definition, it logs a WARNING, builds and drops nothing and takes no lock on `context_blocks`. Build it out of band on the running binary (readers and writers go on; 0.46 s at 1 000 000 rows):
+
+```sql
+DROP INDEX CONCURRENTLY IF EXISTS idx_context_derived_identity;  -- only an INVALID leftover or a foreign index of this name; check first
+CREATE INDEX CONCURRENTLY idx_context_derived_identity
+    ON context_blocks (category, title COLLATE "C", scope)
+    WHERE metadata ? 'provenance';
+```
+
+Until it stands the probe runs in its form before 187, at its cost before 187, and the schema-contract manifest stays red. `lock_timeout` is 3 s, as for every index migration above.
+
+**Rolling deploy and way back.** The rollback image v5.65.0 sends the probe in its form before 187 and keeps its plan (the index cannot serve the default-collation title). Its schema-contract check finds `_migrations:187` without an embedded file (`migration_integrity`, breaking) and an index it does not know (param): in mode `warn` it starts with `/health` reporting `schema_contract: attention`, in mode `enforce` it refuses to start until `CTX_CONTRACT_MODE=warn` or `off` is set. Way back: `DROP INDEX CONCURRENTLY idx_context_derived_identity;` then `DELETE FROM _migrations WHERE version = 187;` — the probe of this release returns to its old form within a minute.
+
 ### `graph_overview.csr_loader`: the rebuild's input substrate
 
 `CTX_GRAPH_OVERVIEW_CSR_LOADER` (default `false`, hot) switches how the rebuild gets its graph into memory. It changes no result — the partition, the modularity and the intra-cluster degrees are byte-identical either way, and that identity is a gate, not a hope.

@@ -601,13 +601,16 @@ const notDerivedSQL = `NOT COALESCE(metadata ? '` + derived.MetadataKey + `', fa
 // this probe is the second line: it also covers a row archived before this wave
 // or by a path outside the Go code.
 //
-// Scale: no index answers this exact question — the identity index is partial
-// on live rows. Measured on PG18 (issue #386 follow-up, 50k live blocks plus
-// 20k / 220k / 420k archived ones, a quarter of them derivatives), the planner
-// serves it with an index scan of idx_trgm_title_gist on title = $2, custom and
-// generic plan alike, and the scan grows with the corpus, archive included: a
-// miss read p50 69 / 197 / 312 and p95 618 / 1845 / 2942 buffers. A partial
-// index on the derivatives' identity is the remedy and needs a migration.
+// Scale: the identity index is partial on live rows, so it cannot answer this
+// question. Migration 187 adds idx_context_derived_identity (category, title
+// COLLATE "C", scope) WHERE metadata ? 'provenance', and the probe compares
+// the title under the C collation while that index stands
+// (provenanceTitleEq): one btree descent, whatever the size of the archive.
+// Without it the probe runs in its form before 187, which the planner serves
+// with an index scan of idx_trgm_title_gist on title = $2, custom and generic
+// plan alike, and that scan grows with the corpus, archive included (issue
+// #386 follow-up, 50k live blocks plus 20k / 220k / 420k archived ones: a miss
+// read p50 69 / 197 / 312 and p95 618 / 1845 / 2942 buffers).
 // The upsert calls it only on the INSERT path (no live conflicting row), never
 // on the hot conflict path; UpdateBlock only after an update that moved the
 // block's identity (guardIdentityMove).
@@ -616,12 +619,16 @@ const notDerivedSQL = `NOT COALESCE(metadata ? '` + derived.MetadataKey + `', fa
 // pre-flight) and pgx.Tx (inside the upsert's own transaction), so the
 // statement exists once.
 func ProvenanceClaimed(ctx context.Context, q pgxdb.Rower, category, title, scope string) (bool, error) {
+	titleEq, err := provenanceTitleEq(ctx, q)
+	if err != nil {
+		return false, fmt.Errorf("store: provenance claim probe: %w", err)
+	}
 	var claimed bool
 	if err := q.QueryRow(ctx,
 		`SELECT EXISTS (
 		   SELECT 1 FROM context_blocks
 		    WHERE metadata ? '`+derived.MetadataKey+`'
-		      AND category = $1 AND title = $2 AND scope = $3
+		      AND category = $1 AND `+titleEq+` AND scope = $3
 		 )`, category, title, scope).Scan(&claimed); err != nil {
 		return false, fmt.Errorf("store: provenance claim probe: %w", err)
 	}
@@ -684,12 +691,16 @@ func writeProvenanceIdentity(metadata map[string]any) (provenanceIdentity, bool)
 // archived block still holds. The predicate is ProvenanceClaimed's, plus the
 // identity mismatch — same plan, same scale properties (see there).
 func foreignProvenanceClaim(ctx context.Context, q pgxdb.Rower, category, title, scope string, id provenanceIdentity) (bool, error) {
+	titleEq, err := provenanceTitleEq(ctx, q)
+	if err != nil {
+		return false, fmt.Errorf("store: foreign provenance claim probe: %w", err)
+	}
 	var claimed bool
 	if err := q.QueryRow(ctx,
 		`SELECT EXISTS (
 		   SELECT 1 FROM context_blocks
 		    WHERE metadata ? '`+derived.MetadataKey+`'
-		      AND category = $1 AND title = $2 AND scope = $3
+		      AND category = $1 AND `+titleEq+` AND scope = $3
 		      AND NOT (COALESCE(metadata->'`+derived.MetadataKey+`'->>'arm', '') = $4
 		           AND COALESCE(metadata->'`+derived.MetadataKey+`'->>'stratum', '') = $5)
 		 )`, category, title, scope, id.arm, id.stratum).Scan(&claimed); err != nil {
