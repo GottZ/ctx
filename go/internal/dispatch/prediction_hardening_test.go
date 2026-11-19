@@ -13,12 +13,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/GottZ/ctx/internal/testgoroutine"
 )
 
 // ageLease moves the admission instant of a held lease by back: the lease has
@@ -363,33 +364,6 @@ func TestRetryAfterStepsAreWholeSeconds(t *testing.T) {
 	}
 }
 
-// leftGoroutines are the goroutines of now that before did not have, less
-// those a goroutine of before created that is neither me nor one me
-// started: goroutines of other tests, of the harness or of the runtime
-// that were running already. A goroutine the test's calls left counts also
-// when the goroutine that started it has ended — a worker of the test, the
-// caller of a refused acquire — which descendants, linking through the
-// goroutines still in the dump, could no longer attribute.
-func leftGoroutines(before, now []goroutineRecord, me int64) []goroutineRecord {
-	was := map[int64]bool{}
-	for _, g := range before {
-		was[g.id] = true
-	}
-	own, _ := descendants(before, me)
-	foreign := maps.Clone(was)
-	delete(foreign, me)
-	for _, g := range own {
-		delete(foreign, g.id)
-	}
-	var left []goroutineRecord
-	for _, g := range now {
-		if !was[g.id] && !foreign[g.creator] {
-			left = append(left, g)
-		}
-	}
-	return left
-}
-
 // TestPredictedRefusalAfterThePushLeavesNoTrace is the target gate of the
 // wave under lead decision 1 of the hardening (review 2 P9, ported): with
 // the prediction behind the push a predicted refusal is a push and a
@@ -409,16 +383,18 @@ func leftGoroutines(before, now []goroutineRecord, me int64) []goroutineRecord {
 // two cores at GOMAXPROCS=2 beside two busy loops it stayed below 42.73 ms
 // in 394 runs at a 1-minute load of 10–30, and passed 50 ms in 17 of 171
 // runs at 38–46, up to 74.83 ms, in runs whose counts proved one section
-// per refusal). The slowest refusal stays bounded by 1 s, a wait outside
-// the dispatcher the counts cannot see (the same runs: at most 234.72 ms
-// and 308.48 ms; review 3 delta D-2).
+// per refusal). A wait outside the dispatcher the counts cannot see stays
+// bounded twice: the median refusal under 50 ms — a slowdown every refusal
+// pays (the same 565 runs: median at most 43 µs) — and the slowest under
+// 1 s (at most 234.72 ms and 308.48 ms; review 3 delta D-2).
 //
-// "No goroutine is left" is read by goroutine id: a goroutine in the stack
-// dump after the run that was not there before it — unless a goroutine
-// that was already running and is not the test's own started it (another
-// test's, the harness's) — was left by the run, also when the worker that
-// started it has ended (issue #369: the process-wide count after a fixed
-// 50-ms wait took every goroutine of the process into its numbers).
+// "No goroutine is left" is read by goroutine id (testgoroutine.Baseline.New):
+// a goroutine in the stack dump after the run that was not there before it
+// — unless a goroutine that was already running and is not the test's own
+// started it (another test's, the harness's) — was left by the run, also
+// when the worker that started it has ended (issue #369: the process-wide
+// count after a fixed 50-ms wait took every goroutine of the process into
+// its numbers).
 func TestPredictedRefusalAfterThePushLeavesNoTrace(t *testing.T) {
 	s := budgetSettings(5 * time.Second)
 	s.ExternalQueuePerConsumer, s.ExternalQueuePerTenant = 0, 0
@@ -431,7 +407,7 @@ func TestPredictedRefusalAfterThePushLeavesNoTrace(t *testing.T) {
 	queueAt(t, d, ctx, testOrigin, "q0", "tenant-q", 1, ch) // cold: queues
 	seedLeases(d, testOrigin, waitRingK, 60*time.Second)
 	d.Close() // no publication pass may add sections while the gate counts
-	me, before := currentGoroutineID(), goroutineDump()
+	gate := testgoroutine.Take()
 	seq0, ops0 := targetSeq(d), d.Snapshot().OpsTotal
 
 	var peak atomic.Int64
@@ -485,8 +461,8 @@ func TestPredictedRefusalAfterThePushLeavesNoTrace(t *testing.T) {
 	pushes, ops := targetSeq(d)-seq0, d.Snapshot().OpsTotal-ops0
 	// A goroutine on its way out (a worker past wg.Done) may still be in
 	// the dump for a moment; one the run left stays.
-	left := leftGoroutines(before, goroutineDump(), me)
-	for deadline := time.Now().Add(2 * time.Second); len(left) > 0 && time.Now().Before(deadline); left = leftGoroutines(before, goroutineDump(), me) {
+	left := gate.New(testgoroutine.Dump())
+	for deadline := time.Now().Add(2 * time.Second); len(left) > 0 && time.Now().Before(deadline); left = gate.New(testgoroutine.Dump()) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Logf("%d refusals: pushes %d, ops %d, waiting peak %d / after %d, goroutines left %d, latency p50 %v p99 %v max %v, rejects %+v",
@@ -495,8 +471,8 @@ func TestPredictedRefusalAfterThePushLeavesNoTrace(t *testing.T) {
 	if ts.ExternalRejects != (ExternalRejectStats{Predicted: n}) || pushes != n || ops != n {
 		t.Fatalf("rejects %+v, pushes %d, ops %d, want predicted=%d, one transient push and one section per refusal", ts.ExternalRejects, pushes, ops, n)
 	}
-	if peak.Load() != 1 || ts.External.Waiting != 1 || len(left) > 0 || all[len(all)-1] > time.Second {
-		t.Fatalf("residue: waiting peak %d after %d, %d goroutines left (the first: %+v), slowest refusal %v", peak.Load(), ts.External.Waiting, len(left), left[:min(len(left), 8)], all[len(all)-1])
+	if peak.Load() != 1 || ts.External.Waiting != 1 || len(left) > 0 || all[len(all)/2] > 50*time.Millisecond || all[len(all)-1] > time.Second {
+		t.Fatalf("residue: waiting peak %d after %d, %d goroutines left (the first: %+v), median refusal %v, slowest %v", peak.Load(), ts.External.Waiting, len(left), left[:min(len(left), 8)], all[len(all)/2], all[len(all)-1])
 	}
 	if diff, _ := d.fairAuditForTest(testOrigin); diff != "" {
 		t.Fatalf("fairness bookkeeping differs from its recomputation: %s", diff)

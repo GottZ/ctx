@@ -69,7 +69,9 @@ func TestTryAcquireExternalWouldBlockCarriesRetryAfter(t *testing.T) {
 	defer held.Release()
 
 	var l *Lease
-	ops := sectionsOf(d, func() { l, _, err = d.TryAcquire(ctxB, Request{Target: Target{Origin: origin}, Class: ClassExternal, Role: "chat"}) })
+	ops := sectionsOf(d, func() {
+		l, _, err = d.TryAcquire(ctxB, Request{Target: Target{Origin: origin}, Class: ClassExternal, Role: "chat"})
+	})
 	if l != nil {
 		l.Release()
 		t.Fatal("external try on a full partition was admitted")
