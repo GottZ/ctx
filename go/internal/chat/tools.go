@@ -147,10 +147,12 @@ type QueryBlock struct {
 // The trust fields every block row of the four read tools carries, named and
 // omitted as on REST and MCP (docs/api.md, "Untrusted framing on read
 // responses"): absent for a first-party block, so such a row is byte-identical
-// to the row before issue #295. Neither value has a foreign writer — untrusted
-// is derived from the turn's registry snapshot, untrusted_origin is written
-// by the database trigger from a registered type name — so they are not
-// guarded (H7).
+// to the row before issue #295. They are not guarded (H7): untrusted is
+// derived from the turn's registry snapshot, and untrusted_origin is written
+// only by the database trigger (migration 174), from the name of a registered
+// type — a name a tenant may choose, but always of the registry's name format
+// (blocktype nameFormat, lower-case letters, digits and "-"), which
+// promptguard.Neutralize would leave as it is.
 
 // EventBlock is the slim per-block reference carried in the tool_result SSE
 // event (never the full content — that lives in the session API, §3.5).
