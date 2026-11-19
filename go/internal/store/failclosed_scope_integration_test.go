@@ -68,7 +68,7 @@ func TestReadPathsFailClosedOnEmptyScopes_Integration(t *testing.T) {
 		{"RecentBlocks", func() error { _, e := store.RecentBlocks(ctx, pool, nil, empty, "", 10, nil, nil, nil); return e }},
 		{"ListCategories", func() error { _, e := store.ListCategories(ctx, pool, empty); return e }},
 		{"GetStats", func() error { _, e := store.GetStats(ctx, pool, empty); return e }},
-		{"ListMeta", func() error { _, e := store.ListMeta(ctx, pool, empty, nil, nil); return e }},
+		{"ListMeta", func() error { _, _, e := store.ListMeta(ctx, pool, empty, nil, nil, nil); return e }},
 		{"GuardList", func() error { _, e := store.GuardList(ctx, pool, empty, "", "", nil, 10); return e }},
 		{"GetGuardStats", func() error { _, e := store.GetGuardStats(ctx, pool, empty); return e }},
 		// blobs.go
