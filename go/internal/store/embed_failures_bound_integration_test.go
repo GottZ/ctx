@@ -124,6 +124,25 @@ func TestRecordEmbedFailureIfUnchanged(t *testing.T) {
 		})
 	}
 
+	// Another writer embedded the block at the same text meanwhile (the arm
+	// next to the query path): the block is no longer pending, no memo.
+	t.Run("embedded_meanwhile", func(t *testing.T) {
+		id := boundSeed(t, pool, "bound embedded meanwhile", "the text", false)
+		vec := make([]float32, 1024)
+		vec[0] = 1
+		if err := store.StoreEmbedding(ctx, pool, id, "test-embed", vec); err != nil {
+			t.Fatal(err)
+		}
+		written, err := store.RecordEmbedFailureIfUnchanged(ctx, pool, id, "bound embedded meanwhile", "the text",
+			store.EmbedFailureCallerTimeout, "caller_timeout: cut", time.Minute, time.Hour)
+		if err != nil || written {
+			t.Fatalf("written=%v err=%v, want no memo for a block that has its vector", written, err)
+		}
+		if present, _, _, _ := boundMemo(t, pool, id); present {
+			t.Errorf("a memo was left on an embedded block")
+		}
+	})
+
 	t.Run("request_gone_after_a_change", func(t *testing.T) {
 		id := boundSeed(t, pool, "bound gone", "first text", false)
 		if _, _, err := store.UpdateBlock(ctx, pool, id, store.UpdateBlockData{Content: strptr("second text")}, []string{"private"}); err != nil {

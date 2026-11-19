@@ -245,14 +245,17 @@ func RecordEmbedRequestGoneIfUnchanged(ctx context.Context, q pgxdb.Execer, bloc
 
 // attemptGuard is the head of a memo write bound to the text an embed attempt
 // read: the CTE b holds the block's row ($1), locked FOR NO KEY UPDATE, while
-// it still holds that title ($titleArg) and content ($contentArg), and no row
-// otherwise. cols are the columns of b.
+// it still holds that title ($titleArg) and content ($contentArg) and is
+// still pending (EmbedPendingPredicate), and no row otherwise. A block that
+// another writer embedded meanwhile, at the same text, needs no memo; one
+// left on it would outlive the vector, and a caller_timeout memo outlives an
+// edit too (InvalidateEmbeddingTx). cols are the columns of b.
 func attemptGuard(titleArg, contentArg int, cols string) string {
 	return fmt.Sprintf(`WITH b AS (
 		SELECT %s FROM context_blocks
-		 WHERE id = $1 AND title = $%d AND content = $%d
+		 WHERE id = $1 AND title = $%d AND content = $%d AND %s
 		 FOR NO KEY UPDATE)
-		`, cols, titleArg, contentArg)
+		`, cols, titleArg, contentArg, EmbedPendingPredicate)
 }
 
 // CallerTimeoutHoldEnd is the SQL expression of the time a caller_timeout
