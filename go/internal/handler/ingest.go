@@ -359,6 +359,11 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 			// chunk are ONE answer (no oracle, §9e); nothing was written.
 			return IngestResult{Index: index, Status: "failed", Error: "source not found"}
 		}
+		if rej := identityTakenReject(err); rej != nil {
+			// Another active block holds the chunk's identity (issue #275):
+			// the caller's input, no ERROR line.
+			return IngestResult{Index: index, Status: "failed", Error: rej.Msg}
+		}
 		if err != nil {
 			slog.Error("ingest: insert chunk error",
 				"error", err, "index", index, "source_id", chunk.SourceID, "request_id", reqID)

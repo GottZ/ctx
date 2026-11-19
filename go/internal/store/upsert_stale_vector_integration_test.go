@@ -79,7 +79,7 @@ func TestUpsertBlock_StaleVector_Integration(t *testing.T) {
 		if err := store.StoreEmbedding(ctx, pool, b.ID, "from-model", vec(0.4)); err != nil {
 			t.Fatalf("StoreEmbedding: %v", err)
 		}
-		// Seed a backfill memo too — ClearEmbedding's contract (W04-2/W04-3
+		// Seed a backfill memo too — InvalidateEmbeddingTx's contract (W04-2/W04-3
 		// coupling) deletes it; the upsert-conflict path must inherit that,
 		// not hand-roll a partial clear that forgets the memo.
 		if err := store.RecordEmbedFailure(ctx, pool, b.ID, store.EmbedFailureOversize, "oversize: too big", 0, 0); err != nil {

@@ -3,8 +3,8 @@
 // (confirm.go) with an explicit consolidation note — this file redeems that
 // note: lookup → payload validation → D1-M1 scope re-check → D1-M3 TOCTOU
 // pin re-check (updates, archives) → atomic consume → execute, in exactly one place.
-// The surfaces keep their own MESSAGE formatting (MCP surfaces raw errors,
-// HTTP launders them to "internal error") — the core returns a typed outcome
+// The surfaces keep their own MESSAGE formatting (a server fault stays opaque
+// on both since issue #275) — the core returns a typed outcome
 // and never a user-facing string for the cases whose wording differs.
 package handler
 
@@ -14,8 +14,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -68,7 +70,9 @@ const (
 	confirmExecGone
 	// confirmExecRejected — the token IS consumed and the execute was refused
 	// for a cause in the payload, not for a server fault: a staged update that
-	// would give the block the identity of another active block (issue #227).
+	// would give the block the identity of another active block (issue #227);
+	// since #275 also a staged store onto a derivative's identity and a staged
+	// blob_store that violates an integrity constraint.
 	// Outcome.Reject carries the class — the 409 the direct update answers —
 	// with a prefix that says the token is spent. The unique index decides the
 	// collision atomically, and only the statement after the consume consults
@@ -104,10 +108,15 @@ const confirmIdentityTakenPrefix = "confirmed update not executed, the stage tok
 // store whose supersedes declaration the execute refused (issue #197): the
 // target changed between stage and confirm. The reason follows verbatim from
 // supersedesReject (or retypeBoundReject: an explicit type on the conflict row
-// of a comment or an issue, #280). Like #227, the gate
+// of a comment or an issue, #280; or the S3 provenance refusal: the identity
+// belongs to a derivative, which the stage gates do not probe). Like #227, the gate
 // runs on the statement after the consume — a probe before it would keep the
 // token for most changes but not for one that lands in between.
 const confirmSupersedesPrefix = "confirmed store not executed, the stage token is consumed: "
+
+// confirmBlobStorePrefix opens the confirmExecRejected wording of a staged
+// blob_store whose execute hit an integrity constraint (blobConstraintError).
+const confirmBlobStorePrefix = "confirmed blob_store not executed, the stage token is consumed: "
 
 // confirmClaimReject re-runs the I7 claim gates over a staged payload. nil =
 // admissible, and nil for the blob ops, which carry no block claim.
@@ -306,6 +315,11 @@ func executeConfirmedStore(ctx context.Context, pool *pgxpool.Pool, blocktypes *
 	if rej := retypeBoundReject(err); rej != nil {
 		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmSupersedesPrefix)}
 	}
+	if rej := provenanceRejectOr(err, nil); rej != nil {
+		// The answer the direct store gives (provenance_protected): the caller's
+		// payload, not a server fault (issue #275).
+		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmSupersedesPrefix)}
+	}
 	if err != nil {
 		slog.Error("confirm: confirmed write execute failed", "error", err, "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
@@ -362,6 +376,15 @@ func executeConfirmedBlobOp(ctx context.Context, pool *pgxpool.Pool, ar *auth.Au
 	}
 
 	blob, err := store.UpsertBlob(ctx, pool, cw.Category, cw.Title, cw.Filename, cw.MimeType, cw.Scope, cw.Data, cw.Tags, cw.Metadata, cw.ContextBlockID)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "23") {
+		// An integrity-constraint violation is the request's, answered as the
+		// direct blob_store answers it (blobConstraintError), not as a server
+		// fault (issue #275).
+		status, reason := blobConstraintError(pgErr)
+		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op,
+			Reject: classConstraint.rejectStatus(status, reason).prefixed(confirmBlobStorePrefix)}
+	}
 	if err != nil {
 		slog.Error("confirm: confirmed blob write execute failed", "error", err, "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}

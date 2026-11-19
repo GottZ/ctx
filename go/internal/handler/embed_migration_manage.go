@@ -247,8 +247,9 @@ func (h *ManageHandler) handleEmbedMigrationStatus(w http.ResponseWriter, r *htt
 }
 
 // loadEmbedMigrationView reads one context_embed_migrations row into the rich
-// view. pending is derived arithmetically (§6.3, clamped at 0 — ClearEmbedding
-// re-pending drift can only push it low, never below zero on the display); the
+// view. pending is derived arithmetically (§6.3, clamped at 0 — the re-pending
+// drift of a title or content change, which nulls the _next pair through
+// InvalidateEmbeddingTx, can only push it low, never below zero on the display); the
 // exact index count runs ONLY when requested (a scan the Verify gate normally
 // owns). The infinity counts are two indexed count(*) over context_embed_failures.
 func (h *ManageHandler) loadEmbedMigrationView(ctx context.Context, id string, exact bool) (*embedMigrationView, error) {
