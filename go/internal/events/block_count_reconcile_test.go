@@ -10,7 +10,7 @@ import (
 // TestWaitHotIntervalAppliesALoweredInterval is PR #269 finding 4: a wait that
 // began under a long interval ends within one slice after the interval is
 // lowered, instead of after the old interval (the runEmbedBackfillLoop
-// waitIdle convention).
+// convention).
 func TestWaitHotIntervalAppliesALoweredInterval(t *testing.T) {
 	var iv atomic.Int64
 	iv.Store(int64(time.Hour))

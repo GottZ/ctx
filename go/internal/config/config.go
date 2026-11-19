@@ -1836,15 +1836,18 @@ type EmbedBackfillConfig struct {
 	// opt-out, SyncCap convention): no deadline on the wire call, and a
 	// request cancel keeps the class wire.
 	SyncBudget time.Duration `key:"embed_backfill.sync_budget" env:"CTX_EMBED_BACKFILL_SYNC_BUDGET" default:"30" mut:"hot" tenancy:"global-only"`
-	// Interval is the idle wait in seconds of the dedicated background
-	// backfill arm (runEmbedBackfillLoop) between two empty picks. Until
+	// Interval is the hold in seconds that the dedicated background
+	// backfill arm (runEmbedBackfillLoop) puts on a tenant between two empty
+	// picks for it. Until
 	// this key the only background backfill was the call at the top of the
 	// dream loop, so with dream.enabled=false (the default) NOTHING embedded
 	// pending blocks in the background and Pfad A was the only path (issue
 	// force-push.me/damienmoon/ctx/issues/1). The arm runs regardless of Dream; a pick
-	// that embedded or parked (oversize) a block loops at once, an empty
-	// pick or a wire-class memo waits this long — in 15 s slices that
-	// re-read the key, so a hot change applies within one slice. 0 = arm
+	// that embedded or parked (oversize) a block leaves its tenant due, an
+	// empty pick or a wire-class memo holds that tenant this long while the
+	// other tenants are served (issue #228; a wire failure on a shared
+	// backend row holds the whole arm) — the arm sleeps at most 15 s at a
+	// time and re-reads the key, so a hot change applies within one slice. 0 = arm
 	// off (polled every 15 s for a hot re-enable, contract.recheck_interval
 	// convention); the query path then retries caller_timeout blocks
 	// itself instead of handing them off: after a backoff counted from the
