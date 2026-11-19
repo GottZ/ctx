@@ -12,8 +12,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/pgxdb"
@@ -65,9 +67,93 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 // was never visible against. No production caller needs this — main.go's
 // boot path and every other test keep calling RunMigrations.
 func RunMigrationsUpTo(ctx context.Context, pool *pgxpool.Pool, maxVersion int) error {
-	// Ensure the tracking table exists (idempotent).
-	if _, err := pool.Exec(ctx, migrationsTable); err != nil {
-		return fmt.Errorf("creating _migrations table: %w", err)
+	return runMigrations(ctx, pool, migrations.FS, maxVersion, migrationLockWait)
+}
+
+// The migration lock (issue #398). Several ctxd instances on one database
+// that boot at the same moment each run the loop of runMigrations. Without a
+// lock both can find a version unrecorded and both run its file: the second
+// one ends with 23505 (an index or table name the first one created) or with
+// 55P03 (the file's lock_timeout, behind the first one's locks) and its boot
+// stops — or, for a file that does not collide with itself, its effect lands
+// twice. Each pending file therefore runs in a transaction that first takes
+// this transaction-level advisory lock and then reads _migrations again: a
+// runner that waited finds the version the other one recorded and skips the
+// file; a runner whose predecessor failed inside the file finds it
+// unrecorded and runs it itself. The lock ends with the file's transaction,
+// on commit, on rollback and when its session dies.
+//
+// The key is the two-key form of the class 'ctx:migrations'. PostgreSQL keeps
+// one-key (bigint) and two-key advisory locks apart (pg_locks.objsubid 1 and
+// 2), so it cannot meet the one-key locks of the tree (block counts, issue
+// sequences, model aliases, supersedes per scope, the embed_excluded
+// triggers, the overview rebuild, the 94094094 of the baseline); among the
+// two-key classes (ctx:distiller, ctx:runtime_index, ctx:embed_verify_run,
+// ctx:guard-archive, ctx:supersedes-guess, ctx:write-budget) its first key
+// hashtext('ctx:migrations') is one of its own. Only this runner takes it.
+const migrationLockTrySQL = `SELECT pg_try_advisory_xact_lock(hashtext('ctx:migrations'), hashtext('runner'))`
+
+// migrationLockHolderSQL names the backend that holds the lock, for the line
+// a waiting runner logs. pg_locks shows a two-key lock as classid = first
+// key, objid = second key, objsubid = 2, each key as its unsigned 32 bits.
+// It runs on the pool, outside the waiting transaction, which therefore holds
+// no catalog lock of its own while it waits.
+const migrationLockHolderSQL = `SELECT l.pid FROM pg_locks l
+ WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 2
+   AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+   AND l.classid = hashtext('ctx:migrations')::oid AND l.objid = hashtext('runner')::oid
+ LIMIT 1`
+
+// migrationLockWait bounds how long a runner waits for the lock held by
+// another one: the time one file of the other runner may take. It is fixed,
+// sized on the longest inline path of the chain (issue #398, measured on a
+// testcontainer of 2 CPUs): 115 rebuilds idx_embedding_hnsw inline below
+// 500 000 rows, 8.3–8.8 s at 10 000 random 1024-dimensional vectors, 64–77 s
+// at 50 000, 232–267 s at 100 000 (host under load) — extrapolated 23–31 min
+// at its threshold, a lower bound: beyond about 97 000 vectors the graph no
+// longer fits a maintenance_work_mem of 256 MB, and that slower part is not
+// measured. The hour is twice that extrapolation and no upper bound for 115
+// above about 100 000 rows. Every other inline path that docs/operations.md
+// measures or extrapolates stays within a minute at the target scale (the
+// longest: 158, 40–60 s for a 30 GB llm_log heap read cold; 170, 1.4 s per
+// 1 000 000 blocks). A rebuild of 115 that takes longer, or a holder that
+// stopped working inside its file, ends the waiting runner with
+// ErrMigrationLockTimeout before it runs that file; a restarted instance
+// waits again.
+const migrationLockWait = time.Hour
+
+// migrationLockWaitSQL waits for the lock, at most wait. lock_timeout bounds
+// this one wait and is then set back to what the session had: a file that
+// sets its own (SET LOCAL lock_timeout = '3s', the house pattern) does so
+// after the wait and cannot cut it short, and a file that sets none runs
+// under the session's value as it did before the lock existed. On a timeout
+// the transaction is aborted, which reverts the setting anyway.
+func migrationLockWaitSQL(wait time.Duration) string {
+	return fmt.Sprintf(`DO $lock$
+DECLARE
+    v_prev text := current_setting('lock_timeout');
+BEGIN
+    PERFORM set_config('lock_timeout', '%d', true);
+    PERFORM pg_advisory_xact_lock(hashtext('ctx:migrations'), hashtext('runner'));
+    PERFORM set_config('lock_timeout', v_prev, true);
+END
+$lock$`, max(wait.Milliseconds(), 1))
+}
+
+// ErrMigrationLockTimeout reports a runner that waited the whole bound for the
+// migration lock: another runner — another ctxd instance on this database —
+// held it inside one migration file for that long.
+var ErrMigrationLockTimeout = errors.New("timed out waiting for the migration lock")
+
+// errAppliedMeanwhile is the commit-less exit of a file's transaction whose
+// version another runner recorded while this one waited for the lock.
+var errAppliedMeanwhile = errors.New("migration applied by another runner")
+
+// runMigrations is RunMigrationsUpTo over the migration files of fsys, with
+// lockWait as the bound of the wait for the migration lock.
+func runMigrations(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS, maxVersion int, lockWait time.Duration) error {
+	if err := ensureMigrationsTable(ctx, pool); err != nil {
+		return err
 	}
 
 	if err := checkBaselinePrecondition(ctx, pool, maxVersion); err != nil {
@@ -75,7 +161,7 @@ func RunMigrationsUpTo(ctx context.Context, pool *pgxpool.Pool, maxVersion int) 
 	}
 
 	// Collect and sort .sql files from the embedded FS.
-	entries, err := fs.ReadDir(migrations.FS, ".")
+	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
 		return fmt.Errorf("reading embedded migrations: %w", err)
 	}
@@ -111,7 +197,9 @@ func RunMigrationsUpTo(ctx context.Context, pool *pgxpool.Pool, maxVersion int) 
 		return migs[i].version < migs[j].version
 	})
 
-	// Apply each pending migration in its own transaction.
+	// Apply each pending migration in its own transaction. The check here,
+	// outside any lock, is the steady-state path: a boot with nothing pending
+	// reads the recorded versions and never touches the migration lock.
 	for _, m := range migs {
 		var exists bool
 		err := pool.QueryRow(ctx,
@@ -126,47 +214,147 @@ func RunMigrationsUpTo(ctx context.Context, pool *pgxpool.Pool, maxVersion int) 
 			continue
 		}
 
-		sql, err := fs.ReadFile(migrations.FS, m.filename)
+		sql, err := fs.ReadFile(fsys, m.filename)
 		if err != nil {
 			return fmt.Errorf("reading migration %s: %w", m.filename, err)
 		}
 
-		// One migration, one transaction, one commit exit — the shape
-		// pgxdb.Write brackets. The stage labels carry the version exactly as
-		// the hand-written fmt.Errorf pair did (the helper appends the ": %w");
-		// the body's own two errors travel back unwrapped. The rollback that
-		// stood before each of those returns is the bracket's deferred one now,
-		// which also covers what the explicit calls never did (failed commit,
-		// panic). It runs detached from ctx, which buys nothing for a SIGTERM
-		// mid-statement (cmd/ctxd/main.go:353 NotifyContext, :370): pgx's deadline
-		// watcher has closed the connection before the rollback runs, on the old
-		// form and this one alike — and the process exits right after anyway.
-		if err := pgxdb.Write(ctx, pool, pgxdb.Stages{
-			Begin:  fmt.Sprintf("beginning transaction for migration %d", m.version),
-			Commit: fmt.Sprintf("committing migration %d", m.version),
-		}, func(tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx, string(sql)); err != nil {
-				return fmt.Errorf("executing migration %d (%s): %w", m.version, m.filename, err)
-			}
-
-			// ON CONFLICT DO NOTHING tolerates migrations that record
-			// themselves in the file body (M031+ pattern). Without it, the
-			// file's INSERT and this INSERT collide on the version primary key.
-			sum := sha256.Sum256(sql)
-			if _, err := tx.Exec(ctx,
-				"INSERT INTO _migrations (version, filename, checksum) VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
-				m.version, m.filename, hex.EncodeToString(sum[:]),
-			); err != nil {
-				return fmt.Errorf("recording migration %d: %w", m.version, err)
-			}
-			return nil
-		}); err != nil {
+		err = applyMigration(ctx, pool, m.version, m.filename, sql, lockWait)
+		if errors.Is(err, errAppliedMeanwhile) {
+			slog.Info("migration applied by another instance", "version", m.version, "file", m.filename)
+			continue
+		}
+		if err != nil {
 			return err
 		}
 
 		slog.Info("migration applied", "version", m.version, "file", m.filename)
 	}
 
+	return nil
+}
+
+// ensureMigrationsTable creates the tracking table. CREATE TABLE IF NOT EXISTS
+// does not hold against a creation in flight: on a fresh database where two
+// runners start together, the second one does not see the first one's
+// uncommitted table, inserts the same catalog rows, waits for the first
+// transaction and meets them on its commit — 23505 on
+// pg_type_typname_nsp_index, or 42P07/42710 when the commit lands between the
+// IF NOT EXISTS check and the catalog insert. Each of these means the table
+// stands now, so the statement runs once more and finds it.
+func ensureMigrationsTable(ctx context.Context, pool *pgxpool.Pool) error {
+	_, err := pool.Exec(ctx, migrationsTable)
+	if err != nil && createdBesideUs(err) {
+		_, err = pool.Exec(ctx, migrationsTable)
+	}
+	if err != nil {
+		return fmt.Errorf("creating _migrations table: %w", err)
+	}
+	return nil
+}
+
+// createdBesideUs reports the errors a CREATE TABLE IF NOT EXISTS raises when
+// another session created the same table at the same moment.
+func createdBesideUs(err error) bool {
+	switch sqlState(err) {
+	case "23505", "42P07", "42710": // unique_violation, duplicate_table, duplicate_object
+		return true
+	}
+	return false
+}
+
+// sqlState is the SQLSTATE of a server error, "" for anything else.
+func sqlState(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
+}
+
+// applyMigration runs one file in its own transaction under the migration
+// lock. It returns errAppliedMeanwhile, with nothing done, when the version
+// was recorded by another runner while this one waited for the lock.
+//
+// One migration, one transaction, one commit exit — the shape pgxdb.WriteOpts
+// brackets. The stage labels carry the version exactly as the hand-written
+// fmt.Errorf pair did (the helper appends the ": %w"); the body's own errors
+// travel back unwrapped. The deferred rollback runs detached from ctx, which
+// buys nothing for a SIGTERM mid-statement (cmd/ctxd/main.go:575
+// NotifyContext, :612): pgx's deadline watcher has closed the connection
+// before the rollback runs — and the process exits right after anyway.
+//
+// READ COMMITTED explicitly: the check under the lock must read a snapshot
+// taken after the lock was granted. Under REPEATABLE READ or SERIALIZABLE (a
+// database or role default) the transaction's snapshot would be the one of
+// its first statement, taken before the wait, and the check would miss the
+// version the other runner committed meanwhile.
+func applyMigration(ctx context.Context, pool *pgxpool.Pool, version int, filename string, sql []byte, lockWait time.Duration) error {
+	return pgxdb.WriteOpts(ctx, pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, pgxdb.Stages{
+		Begin:  fmt.Sprintf("beginning transaction for migration %d", version),
+		Commit: fmt.Sprintf("committing migration %d", version),
+	}, func(tx pgx.Tx) error {
+		if err := takeMigrationLock(ctx, pool, tx, version, filename, lockWait); err != nil {
+			return err
+		}
+		// A statement of its own, after the lock — see above.
+		var recorded bool
+		if err := tx.QueryRow(ctx,
+			"SELECT EXISTS(SELECT 1 FROM _migrations WHERE version = $1)",
+			version,
+		).Scan(&recorded); err != nil {
+			return fmt.Errorf("checking migration %d under the migration lock: %w", version, err)
+		}
+		if recorded {
+			return errAppliedMeanwhile
+		}
+
+		if _, err := tx.Exec(ctx, string(sql)); err != nil {
+			return fmt.Errorf("executing migration %d (%s): %w", version, filename, err)
+		}
+
+		// ON CONFLICT DO NOTHING tolerates migrations that record
+		// themselves in the file body (M031+ pattern). Without it, the
+		// file's INSERT and this INSERT collide on the version primary key.
+		sum := sha256.Sum256(sql)
+		if _, err := tx.Exec(ctx,
+			"INSERT INTO _migrations (version, filename, checksum) VALUES ($1, $2, $3) ON CONFLICT (version) DO NOTHING",
+			version, filename, hex.EncodeToString(sum[:]),
+		); err != nil {
+			return fmt.Errorf("recording migration %d: %w", version, err)
+		}
+		return nil
+	})
+}
+
+// takeMigrationLock takes the migration lock in tx. Free, it costs one
+// statement; held by another runner, the runner logs who holds it (looked up
+// on pool) and waits for it, at most wait.
+func takeMigrationLock(ctx context.Context, pool *pgxpool.Pool, tx pgx.Tx, version int, filename string, wait time.Duration) error {
+	var got bool
+	if err := tx.QueryRow(ctx, migrationLockTrySQL).Scan(&got); err != nil {
+		return fmt.Errorf("taking the migration lock for migration %d: %w", version, err)
+	}
+	if got {
+		return nil
+	}
+
+	var holder int
+	if err := pool.QueryRow(ctx, migrationLockHolderSQL).Scan(&holder); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("looking up the holder of the migration lock for migration %d: %w", version, err)
+	}
+	slog.Info("migration lock held by another instance, waiting",
+		"version", version, "file", filename, "holder_pid", holder, "max_wait", wait)
+
+	if _, err := tx.Exec(ctx, migrationLockWaitSQL(wait)); err != nil {
+		if sqlState(err) == "55P03" { // lock_not_available: the bound ran out
+			return fmt.Errorf("%w: migration %d (%s): another ctxd instance on this database (backend pid %d) "+
+				"has held it inside one migration file for longer than %s; this instance stops before it runs this file, "+
+				"its next start waits again (docs/operations.md, \"Several instances booting together\")",
+				ErrMigrationLockTimeout, version, filename, holder, wait)
+		}
+		return fmt.Errorf("waiting for the migration lock for migration %d: %w", version, err)
+	}
 	return nil
 }
 
