@@ -141,6 +141,7 @@ SET LOCAL lock_timeout = '3s';
 DO $do$
 DECLARE
     v_idx   RECORD;
+    v_kind  TEXT;
     v_def   TEXT;
     v_valid BOOLEAN;
     v_rows  BIGINT;
@@ -158,18 +159,21 @@ BEGIN
         v_want := format('CREATE INDEX %s ON public.%s USING btree (%s)', v_idx.name, v_idx.tbl, v_idx.col)
                || CASE WHEN v_idx.pred IS NULL THEN '' ELSE format(' WHERE (%s)', v_idx.pred) END;
 
-        SELECT pg_get_indexdef(c.oid), i.indisvalid INTO v_def, v_valid
+        -- Whatever relation holds the name: CREATE INDEX could not pass a
+        -- view, a table or a sequence of this name either.
+        SELECT c.relkind::text, pg_get_indexdef(i.indexrelid), i.indisvalid INTO v_kind, v_def, v_valid
           FROM pg_class c
           JOIN pg_namespace n ON n.oid = c.relnamespace
-          JOIN pg_index     i ON i.indexrelid = c.oid
+          LEFT JOIN pg_index i ON i.indexrelid = c.oid
          WHERE n.nspname = 'public' AND c.relname = v_idx.name;
 
         IF FOUND THEN
-            IF v_valid AND v_def = v_want THEN
+            IF v_kind = 'i' AND v_valid AND v_def = v_want THEN
                 CONTINUE;               -- usable, nothing to do
             END IF;
-            RAISE WARNING '% exists but is not the foreign-key lookup index of %(%) (valid=%): %. Nothing built or dropped; the token sweep scans % once per deleted token until it is there. Runbook in the header of 184_access_token_fk_lookup_indexes.sql: rename or drop it, then build it CONCURRENTLY; the schema-contract manifest stays red until then.',
-                v_idx.name, v_idx.tbl, v_idx.col, v_valid, v_def, v_idx.tbl;
+            RAISE WARNING '% exists but is not the foreign-key lookup index of %(%) (valid=%): %. Nothing built or dropped; the token sweep scans % once per deleted token until it is there. Runbook in the header of 184_access_token_fk_lookup_indexes.sql: rename it, or drop an INVALID leftover, then build it CONCURRENTLY; the schema-contract manifest stays red until then.',
+                v_idx.name, v_idx.tbl, v_idx.col, COALESCE(v_valid, false),
+                COALESCE(v_def, format('a relation of relkind %s, not an index', v_kind)), v_idx.tbl;
             CONTINUE;
         END IF;
 

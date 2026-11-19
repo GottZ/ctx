@@ -129,24 +129,27 @@ SET LOCAL lock_timeout = '3s';
 DO $do$
 DECLARE
     c_def   CONSTANT TEXT := 'CREATE INDEX idx_context_derived_identity ON public.context_blocks USING btree (category, title COLLATE "C", scope) WHERE (metadata ? ''provenance''::text)';
+    v_kind  TEXT;
     v_def   TEXT;
     v_valid BOOLEAN;
     v_rows  BIGINT;
 BEGIN
-    SELECT pg_get_indexdef(c.oid), i.indisvalid INTO v_def, v_valid
+    -- Whatever relation holds the name: CREATE INDEX could not pass a view,
+    -- a table or a sequence of this name either.
+    SELECT c.relkind::text, pg_get_indexdef(i.indexrelid), i.indisvalid INTO v_kind, v_def, v_valid
       FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
-      JOIN pg_index     i ON i.indexrelid = c.oid
+      LEFT JOIN pg_index i ON i.indexrelid = c.oid
      WHERE n.nspname = 'public' AND c.relname = 'idx_context_derived_identity';
 
     IF FOUND THEN
         -- The definition as PostgreSQL deparses it, so a same-named index on
         -- another table, key or predicate is not adopted.
-        IF v_valid AND v_def = c_def THEN
+        IF v_kind = 'i' AND v_valid AND v_def = c_def THEN
             RETURN;                 -- usable, nothing to do
         END IF;
         RAISE WARNING 'idx_context_derived_identity exists but is not the derived-identity index (valid=%): %. Nothing built or dropped; until it is replaced the provenance claim probe runs in its form before 187, at its cost before 187. Runbook in the header of 187_derived_identity_index.sql; the schema-contract manifest stays red until then.',
-            v_valid, v_def;
+            COALESCE(v_valid, false), COALESCE(v_def, format('a relation of relkind %s, not an index', v_kind));
         RETURN;
     END IF;
 
