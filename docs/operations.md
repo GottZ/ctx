@@ -1743,6 +1743,37 @@ Until all four exist a deleted key scans the table that lacks one, as before 185
 
 **Rolling deploy and way back.** v5.65.0 writes and deletes as before; the indexes serve its statements too. Its schema-contract check finds `_migrations:185` without an embedded file (`migration_integrity`, breaking) and four indexes it does not know (param): in mode `warn` it starts with `/health` reporting `schema_contract: attention`, in mode `enforce` it refuses to start until `CTX_CONTRACT_MODE=warn` or `off` is set. Way back: `DROP INDEX CONCURRENTLY` of the four, then `DELETE FROM _migrations WHERE version = 185;`.
 
+### Migration 186: `context_blocks.created_at` and `updated_at` are NOT NULL
+
+Both columns were nullable since migration 001 (`TIMESTAMPTZ DEFAULT now()`). Every list read scans `created_at` into a non-null time since #217, and the block read (`get`) scans both: a row without one failed compact search (browse and full text), `recent` and `get` for every page that contained it (`cannot scan NULL into *time.Time`, issue #237). No write path produces such a row — no insert names `created_at`, every update that writes `updated_at` writes `now()` — only a manual write does. Migration 186 makes both columns `NOT NULL`, with PostgreSQL 18's not-null constraints (`context_blocks_created_at_not_null`, `context_blocks_updated_at_not_null`, the names `ALTER COLUMN … SET NOT NULL` gives them; the end state is the one of `SET NOT NULL`). From then on an insert or update that leaves either column `NULL` is refused with `23502`.
+
+**What it does.**
+
+1. Adds the constraint on `created_at` `NOT VALID` (a catalog change, no scan).
+2. Repairs the rows without `created_at`: `COALESCE(uuid_extract_timestamp(id), updated_at, now())` — the id default is `uuidv7()`, whose timestamp is the millisecond of the insert (on the reference instance every id is version 7 and lies within 16 ms of `created_at`). The rows are found through `idx_context_created`, which holds `NULL`s: a few buffers whatever the size of the store (`TestMigration186RepairReadsTheIndex`: the repair reads that index and no other path beside 200 000 rows, statistics fresh, stale and never taken). A NOTICE names the count and the first 20 ids.
+3. Below 500 000 rows (`pg_class.reltuples`): adds the constraint on `updated_at` `NOT VALID` and validates both in one `ALTER TABLE` — one scan of the heap for both (measured: the two constraints 305–407 ms against 315–411 ms for `created_at` alone at 500 000 rows). Only if the validation finds a row without `updated_at` does the file repair those rows (`COALESCE(created_at, uuid_extract_timestamp(id), now())`, a second scan — no index holds `updated_at`) and validate again; a NOTICE names them.
+
+Each repair names one column, which no `BEFORE UPDATE OF` trigger of `context_blocks` names: no trigger rewrites the other column; the row-level write notify fires per repaired row. No table is rewritten and no index rebuilt — `idx_guard_pending_type` of 182, which keys `timezone('UTC', created_at)`, keeps its file (`TestMigration186` compares every index's file node).
+
+**Locks.** Step 1 takes `ACCESS EXCLUSIVE` on `context_blocks`, readers included, held to the commit of the file, so the inline validation scans the heap with readers and writers waiting. Measured with a writer and a reader on second connections, rows of about 1.5 KB of heap, warm cache (`TestMigrationWave183MeasureBlocks`): the whole inline path 151–229 ms at 250 000 rows (390 MB heap), 305–407 ms at 500 000 (781 MB), 0.60–0.95 s at 1 000 000; the reader and the writer waited as long. Hence the threshold of 500 000 rows; a cold cache reads the heap from disk once. `lock_timeout` is 3 s: a transaction that holds `context_blocks` longer fails the boot with `55P03`, nothing changed, and the next start retries.
+
+**Above the threshold** the file adds the `created_at` constraint `NOT VALID` and repairs `created_at` only — the lock is then held for the catalog change and the index-driven repair — and logs a WARNING (`context_blocks.created_at carries a not-null constraint that is not validated …`). It leaves `updated_at` alone: a `NOT VALID` constraint there would refuse every later update of a row still without `updated_at` that does not write the column (the guard and dream batches write metadata only), until someone repaired it. Run, out of band, at any time:
+
+```sql
+UPDATE context_blocks
+   SET updated_at = COALESCE(created_at, uuid_extract_timestamp(id), now())
+ WHERE updated_at IS NULL;                         -- a heap scan, row locks only
+ALTER TABLE context_blocks
+    ADD CONSTRAINT context_blocks_updated_at_not_null NOT NULL updated_at NOT VALID;   -- catalog only
+ALTER TABLE context_blocks
+    VALIDATE CONSTRAINT context_blocks_created_at_not_null,
+    VALIDATE CONSTRAINT context_blocks_updated_at_not_null;                            -- SHARE UPDATE EXCLUSIVE
+```
+
+The `UPDATE` scans the heap with row locks (measured 0.35 s at 1 000 000 rows); the `ADD` holds `ACCESS EXCLUSIVE` for milliseconds after its wait for the lock; the `VALIDATE` takes `SHARE UPDATE EXCLUSIVE` — readers and writers go on, it waits for and blocks VACUUM, ANALYZE and `CREATE INDEX CONCURRENTLY` — and took 0.64 s (readers and writers waited 1 ms) at 1 000 000 rows. Should it report a row without `updated_at` (one written by hand between the `UPDATE` and the `ADD`), repeat the `UPDATE` and the `VALIDATE`. The same statements can run before the upgrade; the file then finds valid constraints and changes nothing. Until then the schema-contract manifest reports `updated_at` (`not_null` drift, param).
+
+**Rolling deploy and way back.** The rollback image v5.65.0 writes neither column as `NULL` (its inserts take the defaults, its updates write `updated_at = now()`) and keeps working. Its schema-contract check finds `_migrations:186` without an embedded file (`migration_integrity`, breaking) and `not_null` on both columns where its manifest says nullable (definition drift, param): in mode `warn` it starts with `/health` `schema_contract: attention`; in mode `enforce` it refuses to start until `CTX_CONTRACT_MODE=warn` or `off` is set. To take 186 back: `ALTER TABLE context_blocks ALTER COLUMN created_at DROP NOT NULL, ALTER COLUMN updated_at DROP NOT NULL;` then `DELETE FROM _migrations WHERE version = 186;`.
+
 ### `graph_overview.csr_loader`: the rebuild's input substrate
 
 `CTX_GRAPH_OVERVIEW_CSR_LOADER` (default `false`, hot) switches how the rebuild gets its graph into memory. It changes no result — the partition, the modularity and the intra-cluster degrees are byte-identical either way, and that identity is a gate, not a hope.

@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 185,
-    "migration_count": 73,
+    "migration_max": 186,
+    "migration_count": 74,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -769,13 +769,13 @@
         {
           "name": "created_at",
           "type": "timestamp with time zone",
-          "not_null": false,
+          "not_null": true,
           "storage": "p"
         },
         {
           "name": "updated_at",
           "type": "timestamp with time zone",
-          "not_null": false,
+          "not_null": true,
           "storage": "p"
         },
         {

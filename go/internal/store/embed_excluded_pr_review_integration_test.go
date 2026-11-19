@@ -109,6 +109,12 @@ func TestEmbedExcludedBatchSkipsBlockMovedAway(t *testing.T) {
 				ids = ownerSeed(t, pool, "mv-a", "mv-x", 3)
 			case "mark_null_created_at":
 				ids = ownerSeed(t, pool, "mv-a", "mv-x", 3)
+				// Since migration 186 created_at is NOT NULL; the batch
+				// statement for rows without it stays as long as the code has
+				// it, so the case drops the constraint first.
+				if _, err := pool.Exec(ctx, `ALTER TABLE context_blocks ALTER COLUMN created_at DROP NOT NULL`); err != nil {
+					t.Fatal(err)
+				}
 				if _, err := pool.Exec(ctx, `UPDATE context_blocks SET created_at = NULL WHERE id = ANY($1::uuid[])`, ids); err != nil {
 					t.Fatal(err)
 				}
