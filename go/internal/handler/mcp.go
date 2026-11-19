@@ -310,6 +310,12 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 		Description: "Save or update a knowledge block. Upserts on (category, title, scope). Writes the key's home scope unless an explicit scope the key may write is given. With supersedes: the written block replaces that block of the same scope — the old block stays as history (a query with a date still finds it), a query without a date no longer returns it.",
 	}, mcpStoreHandler(cfg))
 
+	// store_batch (#211): several store writes in one transaction, all or
+	// none. A tool of its own rather than a list argument on `store`: the
+	// store tool's schema requires category, title and content, and a list
+	// beside them would have to drop that requirement for every caller.
+	registerStoreBatchTool(server, cfg)
+
 	// search
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search",

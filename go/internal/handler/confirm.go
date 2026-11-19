@@ -81,6 +81,22 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"success": true, "op": out.Op, "blob": blob})
 			return
 		}
+		if out.Op == store.OpStoreBatch {
+			// Issue #211: a confirmed batch answers its blocks, in the card's
+			// order, each in the shape of the single answer's `block` — or,
+			// for an item whose block already held what it asks for, the
+			// /api/store noop answer.
+			blocks := make([]map[string]any, len(out.Batch))
+			for i, it := range out.Batch {
+				if b := it.Block; b != nil {
+					blocks[i] = map[string]any{"id": b.ID, "title": b.Title, "category": b.Category, "scope": b.Scope}
+					continue
+				}
+				blocks[i] = map[string]any{"action": "noop", "reason": "identical_content", "existing_id": it.UnchangedID}
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"success": true, "op": out.Op, "blocks": blocks})
+			return
+		}
 		resp := map[string]any{
 			"success": true,
 			"op":      out.Op,
@@ -97,7 +113,7 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 	case confirmMiss:
 		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": confirmNotFoundMsg})
 	case confirmScopeRejected:
-		writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": confirmScopeRejectMsg(out.Scope)})
+		writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": out.scopeRejectMsg()})
 	case confirmClaimRejected, confirmExecRejected:
 		// The class the stage gates (claim) or the direct update (#227
 		// identity collision, 409 constraint) would have answered — same
