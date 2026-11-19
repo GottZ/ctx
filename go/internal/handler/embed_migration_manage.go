@@ -156,6 +156,7 @@ func embedMigrationMechErr(w http.ResponseWriter, err error) {
 		errors.Is(err, events.ErrConfirmEmbedNextForeign),
 		errors.Is(err, events.ErrConfirmNextIndexNotReady),
 		errors.Is(err, events.ErrConfirmIncomplete),
+		errors.Is(err, events.ErrConfirmRuntimeIndexBusy),
 		errors.Is(err, events.ErrConfirmFlipRowCountMismatch),
 		errors.Is(err, events.ErrRollbackReasonRequired),
 		errors.Is(err, events.ErrRollbackNotDone),

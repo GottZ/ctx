@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -48,6 +49,15 @@ const (
 	runtimeIndexUnlockSQL = `SELECT pg_advisory_unlock(hashtext('ctx:runtime_index'), hashtext('context_blocks'))`
 )
 
+// runtimeIndexXactTrySQL is the runtime index lock in its transaction form,
+// tried: the confirm's swap transaction takes it (issue #370) so that no
+// runtime index DDL runs between a builder's row check and its DDL while the
+// swap renames the _next names away. Transaction-level and session-level
+// advisory locks on one key conflict across sessions. Tried, never waited
+// on: a wait would hold a snapshot that a CREATE INDEX CONCURRENTLY of the
+// lock holder waits for in turn (SQLSTATE 40P01).
+const runtimeIndexXactTrySQL = `SELECT pg_try_advisory_xact_lock(hashtext('ctx:runtime_index'), hashtext('context_blocks'))`
+
 // runtimeIndexUnlockTimeout bounds the unlock statement, which runs on a
 // context detached from the caller's (a canceled caller must still give the
 // lock back). Fixed: it is the budget of one statement on an open
@@ -64,6 +74,32 @@ const runtimeIndexBusyRetry = embedMigrateInterval
 // building or dropping a runtime index on context_blocks right now.
 var errRuntimeIndexBusy = errors.New("another session is building a runtime index on context_blocks")
 
+// errRuntimeIndexUnwanted: under the runtime index lock, right before its
+// DDL, the row no longer waits for the index (issue #370) — no DDL ran.
+var errRuntimeIndexUnwanted = errors.New("the row no longer waits for this runtime index — no DDL")
+
+// runtimeIndexWanted asks, on db, whether the row still waits for a runtime
+// index (ensureConcurrentIndexValid).
+type runtimeIndexWanted func(ctx context.Context, db pgxdb.Rower) (bool, error)
+
+// Stages of ensureConcurrentIndexValid at which runtimeIndexDDLHook runs.
+const (
+	// runtimeIndexStageUnlocked: after the lock-free catalog read found DDL
+	// to do, before the lock is tried.
+	runtimeIndexStageUnlocked = "unlocked"
+	// runtimeIndexStageLocked: under the lock, after the catalog re-read and
+	// the row check, right before the DROP or CREATE.
+	runtimeIndexStageLocked = "locked"
+)
+
+// runtimeIndexDDLHook is the test seam of the check-then-act window before
+// the runtime index DDL (issue #370): nil in production; a test sets it to
+// let another session act at a defined stage (a confirm, a finished build) —
+// a window of microseconds that no timing produces deterministically. The
+// distillWriteBarrier precedent: a package variable, set and reset by a
+// test that does not run in parallel.
+var runtimeIndexDDLHook func(stage, name string)
+
 // withRuntimeIndexLock acquires one pooled connection, takes the runtime
 // index lock on it, runs fn with that connection and gives the lock back.
 // A connection goes back into the pool only when the unlock answered that
@@ -72,32 +108,60 @@ var errRuntimeIndexBusy = errors.New("another session is building a runtime inde
 // connection broke under a canceled context) it is closed, and the server
 // releases a closed session's advisory locks.
 func withRuntimeIndexLock(ctx context.Context, pool *pgxpool.Pool, fn func(conn *pgxpool.Conn) error) error {
+	return withTriedSessionLock(ctx, pool, triedSessionLock{
+		label: "runtime index lock", lockSQL: runtimeIndexLockSQL, unlockSQL: runtimeIndexUnlockSQL, busy: errRuntimeIndexBusy,
+	}, fn)
+}
+
+// triedSessionLock names one session-level advisory lock that is tried,
+// never waited on: the runtime index lock, the verify run lock of a watermark
+// (embed_verify.go) and the distiller's arm lock (distill.go). label names it
+// in errors and log lines; lockSQL returns the boolean of
+// pg_try_advisory_lock, unlockSQL that of pg_advisory_unlock, both with args;
+// busy is returned when another session holds it.
+type triedSessionLock struct {
+	label              string
+	lockSQL, unlockSQL string
+	args               []any
+	busy               error
+}
+
+// withTriedSessionLock acquires one pooled connection, tries the lock on it,
+// runs fn with that connection and gives the lock back. A connection goes
+// back into the pool only when the unlock answered that the lock was
+// released; on every other way out (the lock statement failed with an
+// unknown outcome, the unlock failed or found no lock, the connection broke
+// under a canceled context) it is closed, and the server releases a closed
+// session's advisory locks. fn may run its statements on other connections:
+// the lock then only marks that the holder is alive, and it ends with the
+// holder's process.
+func withTriedSessionLock(ctx context.Context, pool *pgxpool.Pool, l triedSessionLock, fn func(conn *pgxpool.Conn) error) error {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
-		return fmt.Errorf("embed-migrate: runtime index lock: acquire a connection: %w", err)
+		return fmt.Errorf("%s: acquire a connection: %w", l.label, err)
 	}
 	var locked bool
-	if err := conn.QueryRow(ctx, runtimeIndexLockSQL).Scan(&locked); err != nil {
+	if err := conn.QueryRow(ctx, l.lockSQL, l.args...).Scan(&locked); err != nil {
 		closeRuntimeIndexConn(ctx, conn)
-		return fmt.Errorf("embed-migrate: runtime index lock: %w", err)
+		return fmt.Errorf("%s: %w", l.label, err)
 	}
 	if !locked {
 		conn.Release()
-		return errRuntimeIndexBusy
+		return l.busy
 	}
-	defer unlockRuntimeIndex(ctx, conn)
+	defer unlockTriedSessionLock(ctx, conn, l)
 	return fn(conn)
 }
 
-// unlockRuntimeIndex gives the runtime index lock back and returns conn to
-// the pool, or closes conn when the release is not proven.
-func unlockRuntimeIndex(ctx context.Context, conn *pgxpool.Conn) {
+// unlockTriedSessionLock gives the lock back and returns conn to the pool, or
+// closes conn when the release is not proven.
+func unlockTriedSessionLock(ctx context.Context, conn *pgxpool.Conn, l triedSessionLock) {
 	uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runtimeIndexUnlockTimeout)
 	defer cancel()
 	var released bool
-	err := conn.QueryRow(uctx, runtimeIndexUnlockSQL).Scan(&released)
+	err := conn.QueryRow(uctx, l.unlockSQL, l.args...).Scan(&released)
 	if err != nil || !released {
-		slog.Warn("scheduler: runtime index lock not released on its connection — closing the connection, the server releases the lock with the session",
+		slog.Warn("scheduler: "+l.label+" not released on its connection — closing the connection, the server releases the lock with the session",
 			"released", released, "error", err)
 		closeRuntimeIndexConn(ctx, conn)
 		return

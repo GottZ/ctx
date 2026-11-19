@@ -505,7 +505,7 @@ func distillOpenDump(dir, runID string) (*distillDump, error) {
 		return nil, fmt.Errorf("%w: sealing dryrun_dir %q: %w", errDistillDump, dir, err)
 	}
 	path := filepath.Join(dir, runID+".ndjson")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|os.O_EXCL, safepath.FileMode)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|os.O_EXCL, safepath.FileMode) //nolint:gosec // G703: dir passed distillDumpDir and the git-working-copy check above; the name is the run id the journal returned for this run
 	if err != nil {
 		return nil, fmt.Errorf("%w: opening dump %q: %w", errDistillDump, path, err)
 	}

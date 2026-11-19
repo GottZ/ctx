@@ -14,6 +14,7 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/embedmigration"
 	"github.com/GottZ/ctx/internal/pgxdb"
+	"github.com/GottZ/ctx/internal/provenance"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -58,7 +59,19 @@ type verifyIndexRepair struct {
 	ScanStages string             `json:"scan_stages"`
 	Detail     string             `json:"detail,omitempty"`
 	Indexes    []verifyIndexState `json:"indexes,omitempty"`
+	// Release is the ctxd build that ran the repair (issue #370): two
+	// releases whose DDL of an index differs rebuild each other's index, and
+	// the entries name which one built it.
+	Release string `json:"release,omitempty"`
 }
+
+// verifyIndexRepairsCap bounds verify_report.index_repairs to its newest
+// entries (issue #370): instances of two releases whose DDL of an index
+// differs rebuild each other's index on every tick while a green verdict
+// waits, one entry per rebuild, and the row would grow without end.
+// index_repairs_total keeps the exact count. Fixed, the cap of the report's
+// other named lists (verifyOffenderListCap).
+const verifyIndexRepairsCap = verifyOffenderListCap
 
 // maybeStartVerifyRunner starts the verify-stage job the row in verifying
 // waits for: the gate while the watermark has no verdict, the index stage
@@ -92,13 +105,15 @@ func (s *Scheduler) runEmbedIndexRepair(ctx context.Context, mig *embedmigration
 		// as in the gate.
 		return err
 	}
-	wanted := func(ctx context.Context) (bool, error) { return indexRepairWanted(ctx, s.pool, mig.ID, wm) }
-	rep := verifyIndexRepair{Result: verifyGreen, StartedAt: time.Now().UTC(), Watermark: wm, ScanStages: indexRepairScanStages}
+	wanted := func(ctx context.Context, db pgxdb.Rower) (bool, error) { return indexRepairWanted(ctx, db, mig.ID, wm) }
+	rep := verifyIndexRepair{Result: verifyGreen, StartedAt: time.Now().UTC(), Watermark: wm, ScanStages: indexRepairScanStages,
+		Release: provenance.BuildVersion()}
 	built := false
 	for _, b := range verifyNextIndexes() {
 		// Asked before every index: a row that left the run (resume, a
-		// confirm, a new watermark) gets no further build.
-		still, err := wanted(ctx)
+		// confirm, a new watermark) gets no further build. Asked again under
+		// the lock before the DDL (issue #370).
+		still, err := wanted(ctx, s.pool)
 		if err != nil {
 			return err
 		}
@@ -114,7 +129,7 @@ func (s *Scheduler) runEmbedIndexRepair(ctx context.Context, mig *embedmigration
 			return nil
 		}
 		if err != nil {
-			if repairSessionEnded(err) {
+			if indexBuildSessionEnded(err) {
 				// The server ended the build with its session: nothing is
 				// recorded and nothing paused, the next cycle drops the
 				// INVALID leftover and builds again — as after a stop of the
@@ -139,12 +154,14 @@ func (s *Scheduler) runEmbedIndexRepair(ctx context.Context, mig *embedmigration
 	return s.finishIndexRepairGreen(ctx, mig, &rep)
 }
 
-// repairSessionEnded reports whether err is the end of the session that ran
-// the build rather than a failure of the build: the server terminated it
+// indexBuildSessionEnded reports whether err is the end of the session that
+// ran the build rather than a failure of the build: the server terminated it
 // (admin_shutdown, crash_shutdown, cannot_connect_now: SQLSTATE 57P01-57P03,
 // a database restart or pg_terminate_backend) or the connection broke (class
-// 08, or a network error / EOF before PostgreSQL answered).
-func repairSessionEnded(err error) bool {
+// 08, or a network error / EOF before PostgreSQL answered). The index stage of
+// the gate and the repair both end without a verdict and without a pause on
+// it (issue #370).
+func indexBuildSessionEnded(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		return pgErr.Code == "57P01" || pgErr.Code == "57P02" || pgErr.Code == "57P03" || strings.HasPrefix(pgErr.Code, "08")
@@ -192,9 +209,17 @@ func indexRepairWanted(ctx context.Context, db pgxdb.Rower, id string, wm time.T
 // indexRepairAppendSQL appends one entry to verify_report.index_repairs of the
 // row that waits at the green verdict of the entry's watermark ($3); zero rows
 // when it no longer does. The verdict and the run's sections stay as they are.
+// The list keeps its newest $4 entries; index_repairs_total counts every entry
+// (for a report written before the count existed, from the list's length).
 const indexRepairAppendSQL = `UPDATE context_embed_migrations
-	SET verify_report = jsonb_set(verify_report, '{index_repairs}',
-	        COALESCE(verify_report->'index_repairs', '[]'::jsonb) || jsonb_build_array($2::jsonb))
+	SET verify_report = jsonb_set(jsonb_set(verify_report, '{index_repairs}',
+	        (SELECT jsonb_agg(e ORDER BY i)
+	           FROM jsonb_array_elements(COALESCE(verify_report->'index_repairs', '[]'::jsonb) || jsonb_build_array($2::jsonb))
+	                WITH ORDINALITY AS x(e, i)
+	          WHERE i > jsonb_array_length(COALESCE(verify_report->'index_repairs', '[]'::jsonb)) + 1 - $4)),
+	    '{index_repairs_total}',
+	        to_jsonb(COALESCE((verify_report->>'index_repairs_total')::bigint,
+	                          jsonb_array_length(COALESCE(verify_report->'index_repairs', '[]'::jsonb))) + 1))
 	WHERE id = $1::uuid AND status = 'verifying' AND verify_started_at = $3
 	  AND verify_report->>'result' = 'green'`
 
@@ -204,7 +229,7 @@ func (s *Scheduler) finishIndexRepairGreen(ctx context.Context, mig *embedmigrat
 	if err != nil {
 		return fmt.Errorf("embed-verify: marshal index repair: %w", err)
 	}
-	tag, err := s.pool.Exec(ctx, indexRepairAppendSQL, mig.ID, string(body), rep.Watermark)
+	tag, err := s.pool.Exec(ctx, indexRepairAppendSQL, mig.ID, string(body), rep.Watermark, verifyIndexRepairsCap)
 	if err != nil {
 		return fmt.Errorf("embed-verify: record index repair: %w", err)
 	}
@@ -235,7 +260,7 @@ func (s *Scheduler) finishIndexRepairRed(ctx context.Context, mig *embedmigratio
 		Begin:  "embed-verify: begin index repair red tx",
 		Commit: "embed-verify: commit index repair red",
 	}, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, indexRepairAppendSQL, mig.ID, string(body), rep.Watermark)
+		tag, err := tx.Exec(ctx, indexRepairAppendSQL, mig.ID, string(body), rep.Watermark, verifyIndexRepairsCap)
 		if err != nil {
 			return fmt.Errorf("embed-verify: record red index repair: %w", err)
 		}

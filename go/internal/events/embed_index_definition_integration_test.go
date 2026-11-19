@@ -261,7 +261,7 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 	t.Run("fresh_ddl_compares_equal", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		for _, ix := range managedRuntimeIndexes() {
-			action, err := newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, ix.name, ix.ddl)
+			action, err := newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, ix.name, ix.ddl, nil)
 			if err != nil || action != indexActionCreated {
 				t.Fatalf("%s first ensure: action=%q err=%v, want created", ix.name, action, err)
 			}
@@ -271,7 +271,7 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 				t.Errorf("%s built from its DDL does not compare equal: same=%t err=%v\n live:     %s\n expected: %s",
 					ix.name, same, err, live, expected)
 			}
-			action, err = newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, ix.name, ix.ddl)
+			action, err = newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, ix.name, ix.ddl, nil)
 			if err != nil || action != indexActionReused {
 				t.Errorf("%s second ensure: action=%q err=%v, want reused", ix.name, action, err)
 			}
@@ -330,7 +330,7 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 				t.Fatalf("%s: build deviant: %v", c.class, err)
 			}
 			oid, _ := indexIdentityT(t, pool, c.name)
-			action, err := newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, c.name, ddlOf[c.name])
+			action, err := newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, c.name, ddlOf[c.name], nil)
 			if err != nil || action != indexActionRebuiltDefinition {
 				t.Errorf("%s (%s): action=%q err=%v, want %s", c.class, c.name, action, err, indexActionRebuiltDefinition)
 				continue
@@ -369,7 +369,7 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 			if ix.name == preMigration175PickSisters[0].name || ix.name == preMigration175PickSisters[1].name {
 				continue
 			}
-			if _, err := newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, ix.name, ix.ddl); err != nil {
+			if _, err := newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, ix.name, ix.ddl, nil); err != nil {
 				t.Fatalf("build %s: %v", ix.name, err)
 			}
 			s.runtimeIndexDefOK.Store(ix.name, indexDefT(t, pool, ix.name))
@@ -425,10 +425,10 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		name, ddl := migrationPendingIndexName, migrationPendingIndexDDL
 		good := newIndexTestScheduler(pool)
-		if _, err := good.ensureConcurrentIndexValid(ctx, name, ddl); err != nil {
+		if _, err := good.ensureConcurrentIndexValid(ctx, name, ddl, nil); err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		if action, err := good.ensureConcurrentIndexValid(ctx, name, ddl); err != nil || action != indexActionReused {
+		if action, err := good.ensureConcurrentIndexValid(ctx, name, ddl, nil); err != nil || action != indexActionReused {
 			t.Fatalf("reuse: action=%q err=%v", action, err)
 		}
 		liveDef := indexDefT(t, pool, name)
@@ -438,11 +438,11 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 
 		s := newIndexTestScheduler(probeFailingPool(t, pool))
 		s.runtimeIndexDefOK.Store(name, liveDef)
-		if action, err := s.ensureConcurrentIndexValid(ctx, name, ddl); err != nil || action != indexActionReused {
+		if action, err := s.ensureConcurrentIndexValid(ctx, name, ddl, nil); err != nil || action != indexActionReused {
 			t.Errorf("remembered definition: action=%q err=%v, want reused without a probe", action, err)
 		}
 		s.runtimeIndexDefOK.Store(name, liveDef+" ")
-		if _, err := s.ensureConcurrentIndexValid(ctx, name, ddl); err == nil || !strings.Contains(err.Error(), "could not be compared") {
+		if _, err := s.ensureConcurrentIndexValid(ctx, name, ddl, nil); err == nil || !strings.Contains(err.Error(), "could not be compared") {
 			t.Errorf("another live definition was not probed again: err=%v", err)
 		}
 	})
@@ -461,7 +461,7 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 				t.Fatalf("%s: %v", sql, err)
 			}
 		}
-		action, err := newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, verifyNextHNSWIndexName, verifyNextHNSWIndexDDL)
+		action, err := newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, verifyNextHNSWIndexName, verifyNextHNSWIndexDDL, nil)
 		if err != nil || action != indexActionCreated {
 			t.Errorf("action=%q err=%v, want created (the other schema's index is not the managed one)", action, err)
 		}
@@ -518,8 +518,10 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 	// serving_indexes_untouched_after_cutover: after the swap the _next
 	// names are free and the serving indexes carry the canonical names. A
 	// verify stage that still runs (another instance, started before the
-	// confirm) creates fresh _next twins and leaves every serving index as
-	// it is — none is compared or dropped.
+	// confirm) leaves every serving index as it is — none is compared or
+	// dropped — and builds no _next twin on the fresh, empty embedding_next
+	// pair: under the runtime index lock it finds that the row left its run
+	// (issue #370; before, it created all six twins there).
 	t.Run("serving_indexes_untouched_after_cutover", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID := seedConfirmReady(t, pool, 0)
@@ -536,13 +538,16 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 			o, f := indexIdentityT(t, pool, n)
 			before[n] = [3]any{o, f, indexDefT(t, pool, n)}
 		}
-		sec, err := newIndexTestScheduler(pool).verifyEnsureIndexes(ctx, &embedmigration.Migration{ID: migID}, time.Time{})
-		if err != nil {
-			t.Fatalf("verify index stage after the swap: %v", err)
+		wm := readVerifyRow(t, pool, migID).VerifyStartedAt
+		if wm == nil {
+			t.Fatalf("no watermark on the confirmed row")
 		}
-		for _, ix := range sec.Indexes {
-			if ix.Action != indexActionCreated {
-				t.Errorf("%s: action %q after the swap, want created (the _next name was free)", ix.Name, ix.Action)
+		if _, err := newIndexTestScheduler(pool).verifyEnsureIndexes(ctx, &embedmigration.Migration{ID: migID}, *wm); !errors.Is(err, errVerifyRunLeft) {
+			t.Fatalf("verify index stage after the swap: %v, want errVerifyRunLeft", err)
+		}
+		for _, ix := range verifyNextIndexes() {
+			if oid := indexOIDT(t, pool, ix.name); oid != 0 {
+				t.Errorf("%s built after the swap (oid %d): an index on the fresh embedding_next pair", ix.name, oid)
 			}
 		}
 		for _, n := range serving {
@@ -583,7 +588,7 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 		}
 		t.Cleanup(other.Close)
 
-		action, err := newIndexTestScheduler(other).ensureConcurrentIndexValid(ctx, name, ddlOfManaged(name))
+		action, err := newIndexTestScheduler(other).ensureConcurrentIndexValid(ctx, name, ddlOfManaged(name), nil)
 		t.Logf("action=%q err=%v", action, err)
 		var still int64
 		if err := pool.QueryRow(ctx, `SELECT COALESCE((SELECT oid::bigint FROM pg_class WHERE oid = to_regclass('ctx_other.`+name+`')), 0)`).Scan(&still); err != nil {
@@ -618,7 +623,7 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 				t.Fatalf("%s: %v", sql, err)
 			}
 		}
-		action, err := newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL)
+		action, err := newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL, nil)
 		if err == nil || !strings.Contains(err.Error(), "after the build") {
 			t.Errorf("action=%q err=%v, want an error: no index of the DDL on context_blocks after the build", action, err)
 		}
@@ -663,7 +668,7 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 			}
 			helper := make(chan result, 1)
 			go func() {
-				a, err := newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, name, ddlOfManaged(name))
+				a, err := newIndexTestScheduler(pool).ensureConcurrentIndexValid(ctx, name, ddlOfManaged(name), nil)
 				helper <- result{a, err}
 			}()
 			waitForStatementWaiting(t, pool, "DROP INDEX CONCURRENTLY%")
