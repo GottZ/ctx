@@ -15,9 +15,19 @@ type statsReconcileSpec struct {
 	Scope string `json:"scope"`
 }
 
+// statsReconcileMaxCorrections bounds the corrections one stats-reconcile
+// answer carries (issue #271). A correction is one drifted counter key, and
+// after a restore into an existing database every key of the store drifts:
+// at the 1M–10M-block target hundreds of thousands, an answer of tens of
+// megabytes that the CLI's 10 MB read cap would cut into invalid JSON. 1 000
+// corrections are a few hundred kilobytes at most. The pass applies and logs
+// every correction whatever the bound; corrections_total is their number.
+const statsReconcileMaxCorrections = 1000
+
 // handleStatsReconcile (issue #266) compares the block counters that
 // stats, guard-stats and list-categories read (context_block_counts) with a
-// real count, scope by scope, and corrects every difference. Server-admin
+// real count, scope by scope, and corrects every difference; the answer names
+// at most statsReconcileMaxCorrections of them (issue #271). Server-admin
 // (tierServerAdmin): the pass reads and repairs every tenant's scopes, and the
 // answer names them. Each scope is its own transaction, so a request that ends
 // early leaves the scopes it finished corrected; a scope that fails is named in
@@ -46,14 +56,21 @@ func (h *ManageHandler) handleStatsReconcile(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	// A pass in which some scopes failed still reports what it corrected and
-	// names the failed scopes; the database errors stay in the log.
+	// names the failed scopes; the database errors stay in the log. The answer
+	// carries the first statsReconcileMaxCorrections corrections of the pass
+	// and their total.
+	corrections := res.Corrections
+	if len(corrections) > statsReconcileMaxCorrections {
+		corrections = corrections[:statsReconcileMaxCorrections]
+	}
 	body := map[string]any{
-		"action":      "stats-reconcile",
-		"success":     err == nil,
-		"scopes":      res.Scopes,
-		"corrections": res.Corrections,
-		"pruned":      res.Pruned,
-		"failed":      res.Failed,
+		"action":            "stats-reconcile",
+		"success":           err == nil,
+		"scopes":            res.Scopes,
+		"corrections":       corrections,
+		"corrections_total": len(res.Corrections),
+		"pruned":            res.Pruned,
+		"failed":            res.Failed,
 	}
 	status := http.StatusOK
 	if err != nil {

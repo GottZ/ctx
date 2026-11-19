@@ -36,9 +36,9 @@ type ScopeOverview struct {
 // authorisation), and only per-scope COUNTS plus the scope→tenant mapping leave
 // the store — never block content. That is why the deliberate omission of the
 // `scope = ANY($1)` filter that ListCategories carries is NOT a cross-tenant leak
-// (design/04 §3 A0). The cost is named there: the block-count GROUP BY is an
-// index-scan over idx_context_scope (001_initial.sql:197), accepted as an
-// admin-only / on-demand read at the 1M-block target.
+// (design/04 §3 A0). The block counts sum the block counters of migration 170
+// (scopeOverviewBlockCountsSQL, issue #271), so the read costs the number of
+// counter rows, not a pass over every block.
 //
 // The scope universe is the UNION of every scope that appears in context_blocks,
 // context_api_keys (home_scope ∪ allowed_scopes) or context_tenant_scopes, so a
@@ -56,10 +56,9 @@ func ScopeOverviews(ctx context.Context, pool *pgxpool.Pool) ([]ScopeOverview, e
 		return o
 	}
 
-	// 1. Per-scope block counts — the ListCategories GROUP-BY WITHOUT the
-	//    readScopes filter (see the doc comment for why that is safe here).
-	if err := scanScopeCounts(ctx, pool,
-		`SELECT scope, count(*)::int FROM context_blocks GROUP BY scope`,
+	// 1. Per-scope block counts — the block counters WITHOUT a readScopes
+	//    filter (see the doc comment for why that is safe here).
+	if err := scanScopeCounts(ctx, pool, scopeOverviewBlockCountsSQL,
 		func(scope string, n int) { get(scope).BlockCount = n }); err != nil {
 		return nil, fmt.Errorf("store: scope overview block counts: %w", err)
 	}
@@ -109,6 +108,19 @@ func ScopeOverviews(ctx context.Context, pool *pgxpool.Pool) ([]ScopeOverview, e
 	}
 	return results, nil
 }
+
+// scopeOverviewBlockCountsSQL is the per-scope block count of ScopeOverviews:
+// every block, archived or not, summed over the block counters (folded rows
+// plus pending deltas, blockCountRowsSQL; issue #271). Its cost is the number
+// of counter rows of the store (categories × guard states × archived per
+// scope, plus a few seconds of deltas), not the number of blocks. A scope
+// whose counters sum to zero has no blocks and is left out, as the count left
+// it out. The numbers are the counters', so a drift the triggers cannot see
+// (block_counts.go) shows here until the reconcile corrects it, as in stats.
+const scopeOverviewBlockCountsSQL = `SELECT scope, sum(n)::int
+	  FROM ` + blockCountRowsSQL + ` k
+	 GROUP BY scope
+	HAVING sum(n) <> 0`
 
 // scanScopeCounts runs a (scope, count) aggregate query and feeds each row to set.
 // Shared by the block-count and key-count passes of ScopeOverviews so both close

@@ -13,6 +13,10 @@ var GuardStatsSQLForTest = guardStatsSQL
 // ListCategoriesSQLForTest is ListCategories' statement.
 var ListCategoriesSQLForTest = listCategoriesSQL
 
+// ScopeOverviewBlockCountsSQLForTest is the per-scope block count of
+// ScopeOverviews (issue #271). It takes no parameter.
+var ScopeOverviewBlockCountsSQLForTest = scopeOverviewBlockCountsSQL
+
 // CappedCountForTest is the cap helper of the root-map counts. Since migration
 // 170 ActiveBlockCount is a counter read that no 1 ms cap catches, so the cap
 // gate (TestRootMapActiveBlockCount) drives the helper with a scanning count.

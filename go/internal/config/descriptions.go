@@ -131,7 +131,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl√
 	"scheduler.llmlog_retention_days":                "Days before the janitor blanks prompt/response bodies in the LLM log; telemetry rows survive, 0 keeps bodies forever",
 	"scheduler.block_count_reconcile_interval":       "Seconds between reconcile passes of the block counters behind stats, guard-stats and list-categories: each pass recounts every scope and corrects drift left by writes the triggers cannot see (default 24h); 0 disables the pass (manage stats-reconcile still runs on demand)",
 	"events.tick_interval":                           "Seconds between status-collector refreshes of the cheap sources; /api/status serves this cache instead of rebuilding per request",
-	"events.queue_stats_interval":                    "Seconds between dream-queue depth scans, kept off the base tick because each scan is a full pass over context_blocks",
+	"events.queue_stats_interval":                    "Seconds between dream-queue depth scans (the /api/status collector, and per read-scope set the dream_queue section of manage stats), kept off the base tick because each scan is a full pass over context_blocks",
 	"events.ping_interval":                           "Seconds between SSE keepalive pings on /api/events; must stay below the fronting proxy's read timeout or idle streams get dropped",
 	"events.max_connections":                         "Cap on concurrent /api/events SSE streams; above it new clients get 429 and degrade to polling",
 	"events.db_stats_interval":                       "Seconds between refreshes of the /api/status db section (migrations, extensions, relations, HNSW, embed backlog)",
