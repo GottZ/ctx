@@ -756,10 +756,9 @@ func TestExternalBulkPredictionPerClass(t *testing.T) {
 		waitQueued(t, d, ch, 2, "XU b queued")
 		xb := xbReq()
 		xb.MaxWait = 150 * time.Millisecond
-		start := time.Now()
-		_, _, err := d.Acquire(xctx(bg, "x", "tenant-x"), xb)
-		if !errors.Is(err, ErrWaitExpired) || time.Since(start) > 50*time.Millisecond {
-			t.Fatalf("lone XB head behind 4 XU units: %v after %v, want a predicted ErrWaitExpired at once", err, time.Since(start))
+		var err error
+		if ops := sectionsOf(d, func() { _, _, err = d.Acquire(xctx(bg, "x", "tenant-x"), xb) }); !errors.Is(err, ErrWaitExpired) || ops != 1 {
+			t.Fatalf("lone XB head behind 4 XU units: %v in %d dispatcher sections, want a predicted ErrWaitExpired at once (its arrival's one section)", err, ops)
 		}
 		if rej := target(t, d).ExternalBulkRejects; rej != (ExternalRejectStats{Predicted: 1}) {
 			t.Fatalf("XB rejects %+v, want predicted 1", rej)

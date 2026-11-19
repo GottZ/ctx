@@ -497,25 +497,26 @@ func TestEmbeddingsUnknownDimensionReservesTheCeiling(t *testing.T) {
 		})
 	}
 	// A ceiling below the decode clamp and a small budget: an unknown
-	// dimension is refused at the entry within 50 ms (by the answer's share
-	// or the decode share's, whichever comes first), and a known native
-	// dimension is served at the same budget — it pays n × native × 4 B and
-	// the decode share of a one-input block at its dimension, never the
-	// ceiling.
+	// dimension is refused at the entry (by the answer's share or the decode
+	// share's, whichever comes first), and a known native dimension is
+	// served at the same budget — it pays n × native × 4 B and the decode
+	// share of a one-input block at its dimension, never the ceiling. "At
+	// the entry" is counted, not timed: no acquire (the only wait of the
+	// route is the dispatcher's) and no wire contact — the 50-ms wall-clock
+	// bound this subtest read measured the scheduler under load (issue
+	// #369).
 	t.Run("a known dimension does not pay the ceiling", func(t *testing.T) {
 		e := newEmbedEngine(t, 8)
 		rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 2, 1)
 		rig.setSettings(func(s *oai.Settings) { s.EmbeddingMaxFloats = 1 << 20; s.InflightBudget = 4<<20 + 32<<10 })
 		_ = rig.recorder.Take()
-		start := time.Now()
 		a := rig.postEmbed(t, embedBody("emb", []string{"x"}))
-		took := time.Since(start)
 		code, _, _ := a.envelope(t)
-		if a.status != http.StatusServiceUnavailable || code != oai.CodeServerOverloaded || took > 50*time.Millisecond {
-			t.Fatalf("%d %s after %v, want 503 server_overloaded within 50 ms", a.status, a.body, took)
+		if a.status != http.StatusServiceUnavailable || code != oai.CodeServerOverloaded {
+			t.Fatalf("%d %s, want 503 server_overloaded at the entry", a.status, a.body)
 		}
 		if n := acquires(rig.recorder.Take()); n != 0 || e.hits.Load() != 0 {
-			t.Errorf("acquires %d wire hits %d, want 0/0", n, e.hits.Load())
+			t.Errorf("acquires %d wire hits %d, want 0/0 (refused at the entry, before the dispatcher and the wire)", n, e.hits.Load())
 		}
 		decodeEmbed(t, rig.postEmbed(t, embedBody("embsmall", []string{"x"})))
 	})

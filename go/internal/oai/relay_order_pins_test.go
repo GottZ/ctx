@@ -16,6 +16,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/oai"
+	"github.com/GottZ/ctx/internal/testalloc"
 )
 
 // TestRelayRingIsBookedBeforeItIsMade (P-1, mutant Y1): the relay buffer is
@@ -26,8 +27,11 @@ import (
 // half the buffer. With the budget that holds the buffer too the same
 // request is served and allocates the whole ring — the measurement sees it.
 // Red with the allocation before the booking (Y1): the refused request
-// allocates the 8 MiB ring.
+// allocates the 8 MiB ring. The allocations are the route's own
+// (routeFrame), in the server's goroutine that serves the request — not the
+// process's.
 func TestRelayRingIsBookedBeforeItIsMade(t *testing.T) {
+	testalloc.EveryAllocation(t)
 	const buffer = 8 << 20
 	u := newUpstream(t, "")
 	u.setRespond(sseRespond(streamShapes[0].steps(), nil, nil))
@@ -35,16 +39,20 @@ func TestRelayRingIsBookedBeforeItIsMade(t *testing.T) {
 		withRelay(buffer, 1024, 30*time.Second))
 	srv := serveHTTP(t, rig.router)
 	body := streamBody("chat")
-	post := func() streamAnswer { return postStream(context.Background(), t, srv, body) }
+	route := routeFrame(t, oai.ChatCompletions(rig.deps))
+	post := func() (int64, streamAnswer) {
+		got, a := testalloc.In(t, route, func() streamAnswer { return postStream(context.Background(), t, srv, body) })
+		return got.Bytes, a
+	}
 
 	streamBudget(rig, body) // the shares, 4 KiB of slack and the buffer
-	full, served := allocOf(post)
+	full, served := post()
 	if served.status != http.StatusOK || served.dones() != 1 {
 		t.Fatalf("with the buffer in the budget: %d dones %d %q — want 200 (the control)", served.status, served.dones(), served.raw)
 	}
 	rig.setSettings(func(s *oai.Settings) { s.InflightBudget -= buffer / 2 })
 	hits := len(ownRaws(u))
-	refusedAlloc, refused := allocOf(post)
+	refusedAlloc, refused := post()
 	var e struct {
 		Error struct{ Code string } `json:"error"`
 	}
