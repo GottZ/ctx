@@ -65,7 +65,7 @@ func TestFetchDailyGuardReviewAgesFromTheFlag(t *testing.T) {
 		t.Fatalf("backdate: %v", err)
 	}
 
-	processed, err := guard.RunGuardBatch(ctx, pool, blocktype.NewRegistry().Snapshot(), 10)
+	processed, err := guard.RunGuardBatch(ctx, pool, blocktype.NewRegistry().Snapshot(), 10, guard.Search{EfSearch: 800, ExactMaxCandidates: 400} /* the guard.* defaults */)
 	if err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
 	}

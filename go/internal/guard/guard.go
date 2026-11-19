@@ -53,6 +53,9 @@ type GuardResult struct {
 type pendingBlock struct {
 	id       string
 	typeName string
+	// exact is set by prepareChecks: the block's candidate circle is small
+	// enough to be checked exactly (candidateCircle.exact, issue #381).
+	exact bool
 }
 
 // guardPendingIndexWhere is the part of the guard-batch pending predicate a
@@ -399,9 +402,13 @@ func PendingStats(ctx context.Context, q pgxdb.Rower, readScopes, checkTypes []s
 func RunGuardBatch(ctx context.Context, pool interface {
 	pgxdb.Beginner
 	pgxdb.Execer
-}, set *blocktype.Set, limit int) (int, error) {
+}, set *blocktype.Set, limit int, search Search) (int, error) {
 	if set == nil {
 		return 0, fmt.Errorf("guard: nil block-type policy set (registry not wired?)")
+	}
+	if search.EfSearch < EfSearchMin || search.EfSearch > EfSearchMax || search.ExactMaxCandidates < 0 {
+		return 0, fmt.Errorf("guard: search %+v outside hnsw.ef_search [%d, %d] or a negative exact limit (guard.* settings not wired?)",
+			search, EfSearchMin, EfSearchMax)
 	}
 	if limit <= 0 {
 		limit = 100
@@ -449,6 +456,12 @@ func RunGuardBatch(ctx context.Context, pool interface {
 		if len(blocks) == 0 {
 			// Nothing to process: a nil return closes the transaction.
 			return nil
+		}
+
+		// After the pick, so its statement plans without the setting, and
+		// before the first check, so every check sees it (checkpath.go).
+		if err := prepareChecks(ctx, tx, blocks, set, search); err != nil {
+			return err
 		}
 
 		for _, block := range blocks {
@@ -524,7 +537,7 @@ func processBlock(ctx context.Context, tx pgx.Tx, block pendingBlock, set *block
 	dup, review := set.GuardThresholds(block.typeName)
 	sameScopeOnly := set.GuardSameScopeOnly(block.typeName)
 	mode := set.GuardMode(block.typeName)
-	result, err := checkBlock(ctx, tx, blockID, dup, review, set.GuardCandidateTypes(), sameScopeOnly)
+	result, err := checkBlock(ctx, tx, blockID, dup, review, set.GuardCandidateTypes(), sameScopeOnly, block.exact)
 	if err != nil {
 		slog.Error("guard: check block failed", "block_id", blockID, "error", err)
 		rollbackToSavepoint(ctx, tx, sp)
@@ -664,7 +677,11 @@ func rollbackToSavepoint(ctx context.Context, tx pgx.Tx, sp string) {
 // same-scope, §4.7/§5.3). When TRUE, ctx_guard_check sets
 // hnsw.iterative_scan='relaxed_order' so the filtered-ANN does not silently
 // miss the same-scope neighbour at 1M+ scale (M074, §4.7 recall gate).
-func checkBlock(ctx context.Context, tx pgx.Tx, blockID string, thresholdDuplicate, thresholdReview float64, candidateTypes []string, sameScopeOnly bool) (*GuardResult, error) {
+// exact selects the statement that computes the same check exactly, without
+// the HNSW index, for a block whose candidate circle is small; otherwise the
+// call runs with its plan pinned to the index (guardIndexPlanOn, checkpath.go,
+// issue #381). Both forms take the same five parameters.
+func checkBlock(ctx context.Context, tx pgx.Tx, blockID string, thresholdDuplicate, thresholdReview float64, candidateTypes []string, sameScopeOnly, exact bool) (*GuardResult, error) {
 	var (
 		decision      string
 		topSimilarity float64
@@ -685,18 +702,23 @@ func checkBlock(ctx context.Context, tx pgx.Tx, blockID string, thresholdDuplica
 	// filter. The check stays top-1: the pair is recorded clean, and a second,
 	// unrelated near-duplicate behind the predecessor is not looked for.
 	var supersedesPair bool
-	err := tx.QueryRow(ctx,
-		`SELECT g.decision, g.top_similarity, g.matched_id::text, g.matched_title, g.matched_scope, g.is_cross_scope,
-		        g.matched_id IS NOT NULL AND EXISTS (
-		          SELECT 1 FROM context_dream_links dl
-		           WHERE dl.relationship = 'supersedes' AND dl.pinned
-		             AND ((dl.source_block_id = $1::uuid AND dl.target_block_id = g.matched_id)
-		               OR (dl.source_block_id = g.matched_id AND dl.target_block_id = $1::uuid)))
-		FROM ctx_guard_check($1::uuid, $2::real, $3::real, $4::text[], $5::boolean) g`,
+	stmt := guardCheckExactSQL
+	if !exact {
+		stmt = guardCheckIndexSQL
+		if _, err := tx.Exec(ctx, guardIndexPlanOn); err != nil {
+			return nil, fmt.Errorf("guard: index plan: %w", err)
+		}
+	}
+	err := tx.QueryRow(ctx, stmt,
 		blockID, thresholdDuplicate, thresholdReview, candidateTypes, sameScopeOnly,
 	).Scan(&decision, &topSimilarity, &matchedID, &matchedTitle, &matchedScope, &isCrossScope, &supersedesPair)
 	if err != nil {
 		return nil, fmt.Errorf("guard: ctx_guard_check: %w", err)
+	}
+	if !exact {
+		if _, err := tx.Exec(ctx, guardIndexPlanOff); err != nil {
+			return nil, fmt.Errorf("guard: index plan end: %w", err)
+		}
 	}
 	if supersedesPair {
 		decision = "clean"

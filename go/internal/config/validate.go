@@ -16,6 +16,7 @@ import (
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/fedhop"
+	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/httpx"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
@@ -123,6 +124,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateQuerySynthesisCuts(c)...)
 	// V65 (#210): query.translate is auto or off.
 	issues = append(issues, validateQueryTranslate(c)...)
+	// V66 (#381): guard.ef_search in [guard.EfSearchMin, guard.EfSearchMax].
+	issues = append(issues, validateGuardEfSearch(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1589,6 +1592,21 @@ func validateFederation(c *Config) []Issue {
 	return []Issue{{Field: "federation.max_depth", Severity: SeverityError,
 		Msg: fmt.Sprintf("federation.max_depth (%d) must be between 1 and %d (the Ctx-Hop parse limit) — 0 refuses every request, a larger value is never reached",
 			d, fedhop.MaxHopEntries)}}
+}
+
+// validateGuardEfSearch is V66 (#381): guard.ef_search lies in
+// [guard.EfSearchMin, guard.EfSearchMax]. Fatal: above the ceiling pgvector
+// refuses the value and every guard batch fails on its set_config; below the
+// floor the guard searches a narrower window than pgvector's default it ran
+// with before the key existed. A negative value is V35's report alone.
+func validateGuardEfSearch(c *Config) []Issue {
+	ef := c.Guard.EfSearch
+	if ef < 0 || (ef >= guard.EfSearchMin && ef <= guard.EfSearchMax) {
+		return nil
+	}
+	return []Issue{{Field: "guard.ef_search", Severity: SeverityError,
+		Msg: fmt.Sprintf("guard.ef_search (%d) must be between %d (pgvector's default, the guard's window before the key existed) and %d (pgvector's maximum; a larger value fails every guard batch)",
+			ef, guard.EfSearchMin, guard.EfSearchMax)}}
 }
 
 // validateDreamDecideTieOdds is V36: dream.decide_tie_odds is an odds RATIO

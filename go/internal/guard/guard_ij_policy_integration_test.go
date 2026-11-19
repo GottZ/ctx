@@ -108,7 +108,7 @@ func TestIJGuardPolicy(t *testing.T) {
 	t7Insert(t, pool, ijKnowB, "know-b", "knowledge", "learnings", "kB", blendedVec1024(30, 31, 0.995, 0.0999), t0.Add(5*time.Hour))
 	t7Insert(t, pool, ijKnowC, "know-c", "knowledge", "learnings", "kC", unitVec1024(30, 1.0), t0.Add(6*time.Hour))
 
-	if _, err := guard.RunGuardBatch(ctx, pool, set, 100); err != nil {
+	if _, err := guard.RunGuardBatch(ctx, pool, set, 100, guard.SearchIndexForTest); err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
 	}
 

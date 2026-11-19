@@ -88,7 +88,7 @@ func TestT7GuardPolicy(t *testing.T) {
 	// topic-map shape: category='index' stays outside the batch (mechanism).
 	t7Insert(t, pool, t7Index, "topic-map-private", "system-meta", "index", "private", unitVec1024(4, 1.0), t0.Add(4*time.Hour))
 
-	if _, err := guard.RunGuardBatch(ctx, pool, set, 10); err != nil {
+	if _, err := guard.RunGuardBatch(ctx, pool, set, 10, guard.SearchIndexForTest); err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
 	}
 
@@ -234,7 +234,7 @@ func TestT7GuardPolicy(t *testing.T) {
 
 	// GATE 8 (batch fail-closed wiring): a nil policy set errors loudly.
 	t.Run("NilSetFailsClosed", func(t *testing.T) {
-		if _, err := guard.RunGuardBatch(ctx, pool, nil, 10); err == nil ||
+		if _, err := guard.RunGuardBatch(ctx, pool, nil, 10, guard.SearchIndexForTest); err == nil ||
 			!strings.Contains(err.Error(), "policy set") {
 			t.Errorf("nil set: err=%v, want loud policy-set error", err)
 		}

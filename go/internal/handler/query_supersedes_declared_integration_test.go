@@ -181,7 +181,7 @@ func (f *sdFixture) guardUntilChecked(t *testing.T, ids ...string) {
 	t.Helper()
 	ctx := context.Background()
 	for attempt := 0; attempt < 100; attempt++ {
-		if _, err := guard.RunGuardBatch(ctx, f.pool, f.reg.Snapshot(), 100); err != nil {
+		if _, err := guard.RunGuardBatch(ctx, f.pool, f.reg.Snapshot(), 100, config.Defaults().GuardSearch()); err != nil {
 			t.Fatalf("guard batch: %v", err)
 		}
 		var pending int

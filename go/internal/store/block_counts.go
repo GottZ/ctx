@@ -33,6 +33,10 @@ const blockCountRowsSQL = `(SELECT scope, category, is_archived, guard_status, n
 		  UNION ALL
 		  SELECT scope, category, is_archived, guard_status, n FROM context_block_count_deltas)`
 
+// BlockCountRowsSQL is blockCountRowsSQL for readers outside this package:
+// the guard batch sizes its candidate circles from it (guard, issue #381).
+const BlockCountRowsSQL = blockCountRowsSQL
+
 // blockCountFoldSQL moves every delta row the statement's snapshot sees into
 // the counter rows, in one statement: the deleted rows and the added sums
 // commit together, so any reader's snapshot sees the same total before and

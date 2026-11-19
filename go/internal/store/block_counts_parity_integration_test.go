@@ -292,7 +292,7 @@ func TestBlockCounts_ParityOverWritePaths(t *testing.T) {
 	g4v[3] = 0.25
 	emb(g4, g4v)
 	emb(g5, unit(500, 0))
-	if _, err := guard.RunGuardBatch(ctx, pool, set, 50); err != nil {
+	if _, err := guard.RunGuardBatch(ctx, pool, set, 50, guard.Search{EfSearch: 800, ExactMaxCandidates: 400} /* the guard.* defaults */); err != nil {
 		t.Fatalf("guard batch: %v", err)
 	}
 	var statuses []string
