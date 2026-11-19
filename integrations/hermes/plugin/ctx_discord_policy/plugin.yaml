@@ -1,6 +1,6 @@
 manifest_version: 2
 name: ctx_discord_policy
-version: 3.0.0
+version: 3.0.1
 description: "Let your Hermes bot talk in your Discord servers while its tools stay yours: members can call the bot by name, mention it, reply to it or wake it with a reaction, and chat with it in channels you open for that, but only the operators you list in the Hermes configuration get tool calls, and no role, server admin or text in Discord can change that. Each server is set up from inside Discord with /policy: the channels where the bot joins in or keeps quiet, its name and reply language, a guidance text for the server, the Hermes profile and models it runs on, the progress display, and a thread where your own tool work goes. The form of every place where the plugin hooks into Hermes is checked when Hermes loads it and when the Discord bot connects; while it runs, protection fails closed (members get no access) and comfort features fall back to Hermes' own behaviour, shown in /policy and in hermes ctx-discord-policy status. Needs the Discord platform and plugins running in the gateway process (not plugins.isolation: host). Works without ctx."
 author: Jan-Stefan Janetzky
 license: MPL-2.0

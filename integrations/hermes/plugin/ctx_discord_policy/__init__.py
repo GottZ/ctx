@@ -21,7 +21,7 @@ import types
 from pathlib import Path
 from typing import Any, Optional
 
-PLUGIN_VERSION = "3.0.0"
+PLUGIN_VERSION = "3.0.1"
 RUNTIME_API = 1
 ANCHOR_NAME = "ctx_discord_policy"
 
