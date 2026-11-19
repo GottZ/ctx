@@ -420,6 +420,12 @@ func writeIssueStoreError(w http.ResponseWriter, action string, err error, reqID
 		writeJSONReject(w, rej)
 		return
 	}
+	// A title change onto the identity of an archived derivative (I7/S3): the
+	// 403 provenance_protected every block write surface answers, no ERROR line.
+	if rej := provenanceRejectOr(err, nil); rej != nil {
+		writeJSONReject(w, rej)
+		return
+	}
 	switch {
 	case errors.Is(err, errIssueRegistryUnavailable):
 		// Pre-store class: the core refused because no policy data is wired

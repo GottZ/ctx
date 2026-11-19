@@ -613,11 +613,16 @@ const notDerivedSQL = `NOT COALESCE(metadata ? '` + derived.MetadataKey + `', fa
 // this probe is the second line: it also covers a row archived before this wave
 // or by a path outside the Go code.
 //
-// Scale: the predicate leads with `metadata ? 'provenance'`, which the GIN index
-// on metadata (idx_context_metadata, 113_baseline.sql:236) serves directly, so
-// the scan is bounded by the number of DERIVATIVES rather than by the corpus.
+// Scale: no index answers this exact question — the identity index is partial
+// on live rows. Measured on PG18 (issue #386 follow-up, 50k live blocks plus
+// 20k / 220k / 420k archived ones, a quarter of them derivatives), the planner
+// serves it with an index scan of idx_trgm_title_gist on title = $2, custom and
+// generic plan alike, and the scan grows with the corpus, archive included: a
+// miss read p50 69 / 197 / 312 and p95 618 / 1845 / 2942 buffers. A partial
+// index on the derivatives' identity is the remedy and needs a migration.
 // The upsert calls it only on the INSERT path (no live conflicting row), never
-// on the hot conflict path.
+// on the hot conflict path; UpdateBlock only after an update that moved the
+// block's identity (guardIdentityMove).
 //
 // q is a one-row handle — satisfied by both *pgxpool.Pool (the ingest
 // pre-flight) and pgx.Tx (inside the upsert's own transaction), so the
@@ -689,7 +694,7 @@ func writeProvenanceIdentity(metadata map[string]any) (provenanceIdentity, bool)
 // collides on the partial unique index), so revival is a fresh upsert; without
 // this probe the fresh upsert would let ANY arm take a title that another arm's
 // archived block still holds. The predicate is ProvenanceClaimed's, plus the
-// identity mismatch — same GIN-served leading term, same scale properties.
+// identity mismatch — same plan, same scale properties (see there).
 func foreignProvenanceClaim(ctx context.Context, q pgxdb.Rower, category, title, scope string, id provenanceIdentity) (bool, error) {
 	var claimed bool
 	if err := q.QueryRow(ctx,
@@ -1681,6 +1686,53 @@ func blockIdentityHolder(ctx context.Context, pool *pgxpool.Pool, id string, dat
 	return holder
 }
 
+// identityMovedCol is the RETURNING column of an UpdateBlock that names a field
+// of the identity: true only when the (category, title, scope) the row now
+// has differs from the one it had. A field sent with the value the row
+// already holds moves nothing.
+const identityMovedCol = `(old.category, old.title, old.scope) IS DISTINCT FROM (new.category, new.title, new.scope)`
+
+// guardIdentityMove is the provenance gate (S3 / I7, design D-01 §4.3.1) of an
+// update that moved a block onto another (category, title, scope) — a rename,
+// a category change or a scope move (UpdateBlock), a title change of an issue
+// or a comment (UpdateIssueBlock): the identity it moved onto must not be
+// claimed by a derivative. A live derivative cannot be there (the block holds
+// the identity in the unique index now), so the claim this finds is an
+// ARCHIVED derivative's, the one the index does not see: archiving frees the
+// identity in the index, and without this probe an ordinary block moved onto
+// it stood there as a live row without provenance — every client upsert of
+// the identity wrote into it, another arm's badged upsert took it over (and
+// the owning arm's revival was then refused), and the owner's revival replaced
+// its content. The probe is UpsertBlock's INSERT half (ProvenanceClaimed), the
+// same question about the same identity.
+//
+// It runs after the statement, in its transaction, and not inside it. The
+// statement reads the snapshot it started with; when the identity was held by
+// a live derivative that another transaction was archiving (or creating and
+// archiving), the update waited for that transaction on the unique index and,
+// once it committed, wrote — while a probe in its WHERE had seen the
+// derivative still live and answered "no archived claim". This probe is a new
+// statement under READ COMMITTED: it sees every commit the update waited for.
+// Any later commit cannot put a derivative on the identity — a live one
+// collides with the moved block in the unique index and waits for this
+// transaction — so the only claim it could miss is an archived derivative
+// written as such or moved there while archived, which no writer does
+// (UpdateBlock and the issue verbs touch live rows only, the arms upsert).
+//
+// The block's own row cannot answer the probe: UpdateBlock's WHERE excludes a
+// derivative, an issue verb writes only issues and comments, and a client
+// cannot write provenance (S3b: reservedMetadataReject, rejectReservedMetadata).
+func guardIdentityMove(ctx context.Context, tx pgx.Tx, b *Block) error {
+	claimed, err := ProvenanceClaimed(ctx, tx, b.Category, b.Title, b.Scope)
+	if err != nil {
+		return fmt.Errorf("store: update block: %w", err)
+	}
+	if claimed {
+		return ErrProvenanceProtected
+	}
+	return nil
+}
+
 // UpdateBlock updates specific fields of a block. The block must live in one of
 // the caller's write-eligible scopes (home_scope ∪ shared-if-allowed).
 // Returns the updated block and whether the title or the content now differs
@@ -1695,7 +1747,9 @@ func blockIdentityHolder(ctx context.Context, pool *pgxpool.Pool, id string, dat
 // An update that would give the block the (category, title, scope) of another
 // active block — a title rename, a category change or a scope move onto an
 // identity in use — writes nothing and returns *BlockIdentityTakenError
-// (issue #227). A re-type of an issue or a comment writes nothing and returns
+// (issue #227). One that moves the block onto an identity an archived
+// derivative holds writes nothing and returns ErrProvenanceProtected
+// (guardIdentityMove). A re-type of an issue or a comment writes nothing and returns
 // ErrRetypeBound; a re-type out of a type
 // marked untrusted records that type in untrusted_origin, which the answer
 // carries (both trg_block_retype, issue #280).
@@ -1815,18 +1869,28 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	// widen the signature of all three callers for parity on one key of a
 	// write response. Plain updates and scope moves run this one query string.
 	//
-	// The last RETURNING column compares the row before and after the update
-	// (old/new in RETURNING, PostgreSQL 18): true only when the title or the
-	// content was actually replaced by a different value. No extra read to
-	// race against, and the content is not sent back twice.
+	// The RETURNING column after untrusted_origin compares the row before and
+	// after the update (old/new in RETURNING, PostgreSQL 18): true only when
+	// the title or the content was actually replaced by a different value. No
+	// extra read to race against, and the content is not sent back twice.
+	//
+	// An update that names a field of the identity returns one more: whether
+	// the identity actually moved (identityMovedCol), which decides the
+	// archived-claim probe (guardIdentityMove). An update that names none runs
+	// the statement it always ran.
+	identitySent := data.Category != nil || data.Title != nil || data.Scope != nil
+	movedCol := ""
+	if identitySent {
+		movedCol = ",\n\t\t           " + identityMovedCol
+	}
 	query := fmt.Sprintf(
 		`UPDATE context_blocks SET %s
 		 WHERE id = $%d AND scope = ANY($%d::text[]) AND NOT is_archived
 		   AND `+notDerivedSQL+`
 		 RETURNING id, category, tags, title, content, %s, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at,
 		           `+untrustedOriginCol+`,
-		           (old.title IS DISTINCT FROM new.title OR old.content IS DISTINCT FROM new.content)`,
-		strings.Join(setClauses, ", "), idIdx, scopeIdx, guardRedactedMetadataSQL(fmt.Sprintf("$%d", scopeIdx)),
+		           (old.title IS DISTINCT FROM new.title OR old.content IS DISTINCT FROM new.content)%s`,
+		strings.Join(setClauses, ", "), idIdx, scopeIdx, guardRedactedMetadataSQL(fmt.Sprintf("$%d", scopeIdx)), movedCol,
 	)
 
 	// The statement, the invalidation of the vector and (on a scope move) the
@@ -1841,7 +1905,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	if data.Scope != nil {
 		moveScopes = writeScopes
 	}
-	found, needsReEmbed, err := runBlockUpdate(ctx, pool, b, id, query, args, moveScopes)
+	found, needsReEmbed, err := runBlockUpdate(ctx, pool, b, id, query, args, moveScopes, identitySent)
 	var taken *BlockIdentityTakenError
 	if errors.As(err, &taken) {
 		taken.ConflictID = blockIdentityHolder(ctx, pool, id, data, writeScopes, taken.refusedKey)
@@ -1899,7 +1963,11 @@ func updateBlockMissReason(ctx context.Context, pool *pgxpool.Pool, id string, w
 // then it carries the caller's write scopes, and the block and the targets of
 // its supersedes links are locked before the update (lockSupersedesSource), so
 // the supersedes state the sweep ends can be reconciled in this transaction.
-func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query string, args []any, moveScopes []string) (found, needsReEmbed bool, err error) {
+//
+// identitySent says the query returns identityMovedCol as its last column (the
+// update names a category, a title or a scope); when the identity moved, the
+// archived-claim probe runs right after the statement (guardIdentityMove).
+func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query string, args []any, moveScopes []string, identitySent bool) (found, needsReEmbed bool, err error) {
 	var swept int
 	scopeMove := moveScopes != nil
 	write := pgxdb.Write
@@ -1914,11 +1982,16 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 				return err
 			}
 		}
-		err := tx.QueryRow(ctx, query, args...).Scan(
+		var moved bool
+		dest := []any{
 			&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
 			&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
 			&b.UntrustedOrigin, &needsReEmbed,
-		)
+		}
+		if identitySent {
+			dest = append(dest, &moved)
+		}
+		err := tx.QueryRow(ctx, query, args...).Scan(dest...)
 		if errors.Is(err, pgx.ErrNoRows) {
 			// A miss writes nothing: pgxdb.ErrRollback keeps it a rollback
 			// instead of a commit.
@@ -1932,6 +2005,11 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 		}
 		if err != nil {
 			return fmt.Errorf("store: update block: %w", err)
+		}
+		if moved {
+			if err := guardIdentityMove(ctx, tx, b); err != nil {
+				return err
+			}
 		}
 
 		if scopeMove {

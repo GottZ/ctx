@@ -490,6 +490,12 @@ when it is confirmed answers the same code and text behind the prefix
 `confirmed update not executed, the stage token is consumed: ` — stage the corrected
 update anew. The REST `manage update` action answers the same collision with HTTP 409.
 
+An update whose `title` (or `category`) would give the block the identity of an
+archived block the server derived is refused as well, with `provenance_protected`
+and nothing written: the identity stays reserved for the derived layer after its block
+is archived. A confirmed update refused this way has spent its stage token. A `title`
+or `category` sent with the value the block already holds is not refused.
+
 ### archive
 
 Archive a block. It leaves `query`, `search`, `recent` and `get`; the row stays, and
