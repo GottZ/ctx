@@ -2,6 +2,8 @@
   import type { BlockDetailModel } from './detail.svelte'
   import type { BlockDeleteModel } from './delete.svelte'
   import { sensitivityBadge } from '../../lib/blocks/sensitivity'
+  import { trustMarks } from '../../lib/blocks/trust'
+  import TrustMarks from '../../lib/blocks/TrustMarks.svelte'
   import Modal from '../../lib/ui/Modal.svelte'
 
   // Detail panel (block-workbench W3 read; W4 adds an Edit action; W5 a Delete
@@ -70,6 +72,10 @@
       <dd>{b.scope}</dd>
       <dt>sensitivity</dt>
       <dd><span class="badge {sb.tone}">{sb.label}</span></dd>
+      {#if trustMarks(b).length > 0}
+        <dt>trust</dt>
+        <dd><TrustMarks block={b} /></dd>
+      {/if}
       {#if b.tags.length > 0}
         <dt>tags</dt>
         <dd>{b.tags.join(', ')}</dd>

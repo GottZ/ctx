@@ -46,7 +46,7 @@ func (h *countingQueryDelegate) ServeHTTP(w http.ResponseWriter, r *http.Request
 // answer, no citation_index. Order is the retrieval order the tool must keep.
 func retrievalOnlyBody(t *testing.T) string {
 	t.Helper()
-	long := strings.Repeat("x", maxRetrievalSnippet+200)
+	long := strings.Repeat("x", llm.MaxBlockChars+200)
 	sources := []llm.Source{
 		{ID: "id-b", Title: "Second by id, first by rank", Category: "decisions", Score: 0.91, Content: "content B"},
 		{ID: "id-a", Title: "Captured tool output", Category: "learnings", Score: 0.42, Content: long, Untrusted: true},
@@ -56,7 +56,7 @@ func retrievalOnlyBody(t *testing.T) string {
 	}
 	resp := queryResponse{
 		Success:    true,
-		Sources:    buildSourceResponses(sources, map[string][]string{"id-c": {"id-new"}}, true),
+		Sources:    buildSourceResponses(sources, map[string][]string{"id-c": {"id-new"}}, retrievalSnippetRunes(true, 0, len(sources))),
 		Confidence: "confident",
 	}
 	b, err := json.Marshal(resp)
@@ -75,6 +75,7 @@ type mcpRetrievalRow struct {
 	SupersededBy *string  `json:"superseded_by"`
 	Untrusted    bool     `json:"untrusted"`
 	Content      *string  `json:"content"`
+	Truncated    bool     `json:"truncated"`
 }
 
 func runMCPQuery(t *testing.T, delegate http.Handler, raw string) (text string, isError bool) {
@@ -217,8 +218,12 @@ func TestMCPQueryRetrievalOnlyRendersRankedSources(t *testing.T) {
 			t.Errorf("sources[%d] carries no content under include_content", i)
 		}
 	}
-	if n := len([]rune(*got.Sources[1].Content)); n != maxRetrievalSnippet {
-		t.Errorf("content snippet = %d runes, want the REST cap %d", n, maxRetrievalSnippet)
+	if n := len([]rune(*got.Sources[1].Content)); n != llm.MaxBlockChars {
+		t.Errorf("content snippet = %d runes, want the REST cap %d", n, llm.MaxBlockChars)
+	}
+	// #234: the cut snippet says so, the whole ones do not.
+	if !got.Sources[1].Truncated || got.Sources[0].Truncated || got.Sources[2].Truncated || got.Sources[3].Truncated {
+		t.Errorf("truncated flag not carried per source (want only sources[1]): %+v", got.Sources)
 	}
 	if !got.Sources[1].Untrusted || got.Sources[0].Untrusted || got.Sources[2].Untrusted || got.Sources[3].Untrusted {
 		t.Errorf("untrusted framing not carried per source: %+v", got.Sources)
@@ -277,7 +282,11 @@ func TestMCPQueryIncludeContentRequiresRetrievalOnly(t *testing.T) {
 // tenant is over its call budget, once over REST and once over MCP, both with
 // synthesize:false + include_content:true. Neither surface has an admin gate on
 // the two fields: both reach the same tenant quota gate and are refused there
-// with the same code, and the embed backend is never reached.
+// with the same code, and the embed backend is never reached. The gate refuses
+// before anything reads the two fields, so this arm stays green without their
+// forwarding; the positive arm, the same kind of key under its quota with rows
+// compared over both surfaces, is TestMCPQueryRetrievalOnlyParityUnderQuota
+// (#234).
 func TestMCPQueryRetrievalOnlyPrivilegeParity(t *testing.T) {
 	zero := 0
 	acc := backends.NewQuotaAccountant(nil, 0)

@@ -171,6 +171,16 @@ export interface SearchResult {
    * (json:"sensitivity,omitempty"), so the UI fail-closes an absent value.
    */
   sensitivity?: string
+  /**
+   * retrieval.untrusted of the block's type (V-11, store.BlockPreview): the
+   * text is foreign — tool output, a transcript. Absent = no statement.
+   */
+  untrusted?: boolean
+  /**
+   * The type marked untrusted that a re-type took the block out of (#280,
+   * store.BlockPreview.UntrustedOrigin). Absent for a block without a record.
+   */
+  untrusted_origin?: string
 }
 
 export function searchBlocks(query: string, limit = 10): Promise<SearchResponse> {
@@ -200,6 +210,10 @@ export interface BlockDetail {
    * downgrade-confirm is reachable from the page.
    */
   sensitivity?: string
+  /** retrieval.untrusted of the block's type (V-11, store.Block); absent = no statement. */
+  untrusted?: boolean
+  /** The untrusted type a re-type took the block out of (#280, store.Block); absent = none. */
+  untrusted_origin?: string
 }
 
 /**
