@@ -22,6 +22,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/federation"
 	"github.com/GottZ/ctx/internal/oai"
+	"github.com/GottZ/ctx/internal/testalloc"
 )
 
 // scanForms are bodies of the public alias "pub" the route accepts, at about
@@ -128,12 +129,18 @@ func scanAlloc(required backends.Sensitivity, body []byte) (alloc int64, raised 
 
 // TestScanAtCredentialsAllocatesNothing pins the short circuit the route's
 // booking relies on: at credentials (and at an unknown requirement, which
-// ranks as credentials) ScanRaise returns without scanning.
+// ranks as credentials) ScanRaise returns without scanning. What counts is
+// what was allocated under ScanRaise's frame (testalloc.In), not the
+// process's TotalAlloc: a pin against zero has no margin for a goroutine of
+// the harness or of an earlier test allocating while it runs (issue #369).
 func TestScanAtCredentialsAllocatesNothing(t *testing.T) {
+	testalloc.EveryAllocation(t)
 	_, forms := scanForms(256 << 10)
+	scan := testalloc.Frame(federation.ScanRaise)
 	for _, req := range []backends.Sensitivity{backends.SensCredentials, ""} {
-		if alloc, raised := scanAlloc(req, forms["assign_text"]); alloc != 0 || raised != backends.SensCredentials {
-			t.Errorf("ScanRaise(%q) allocates %d bytes and answers %q, want 0 and credentials", req, alloc, raised)
+		runtime.GC() // with In's own collection: the patterns' matcher pools cold (scanAlloc), so a scan that ran would allocate
+		if alloc, raised := testalloc.In(t, scan, func() backends.Sensitivity { return federation.ScanRaise(req, forms["assign_text"]) }); alloc.Bytes != 0 || alloc.Objects != 0 || raised != backends.SensCredentials {
+			t.Errorf("ScanRaise(%q) allocates %d bytes in %d allocations and answers %q, want none and credentials", req, alloc.Bytes, alloc.Objects, raised)
 		}
 	}
 }
