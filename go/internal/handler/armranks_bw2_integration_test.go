@@ -112,6 +112,7 @@ func bw2Config() *config.Config {
 		Gateway:        config.Defaults().Gateway,    // W02-02: V38/V39 floors
 		Federation:     config.Defaults().Federation, // F-W8: V43 range
 		MCP:            config.Defaults().MCP,        // #315: V60 refuses a blank instructions text
+		Guard:          config.Defaults().Guard,      // #381: V66 range
 		// FOLGE-Z: pool.capability_probe_interval carries a fatal floor (V59).
 		Pool: config.PoolConfig{CapabilityProbeInterval: config.Defaults().Pool.CapabilityProbeInterval},
 		// A03-W6: dispatch.external_retry_after_steps is fatal when empty (V46).

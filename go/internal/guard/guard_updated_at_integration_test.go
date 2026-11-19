@@ -86,7 +86,7 @@ func TestRunGuardBatch_UpdatedAt(t *testing.T) {
 	// write above. A short pause keeps the two apart on a coarse clock too.
 	time.Sleep(20 * time.Millisecond)
 
-	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10)
+	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10, guard.SearchIndexForTest)
 	if err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
 	}

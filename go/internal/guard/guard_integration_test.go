@@ -196,7 +196,7 @@ func TestRunGuardBatch_NearDuplicatePath(t *testing.T) {
 	insertGuardBlock(t, pool, gNearAID, "near-dup-anchor", emb, tEarly)
 	insertGuardBlock(t, pool, gNearBID, "near-dup-clone", emb, tLate)
 
-	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10)
+	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10, guard.SearchIndexForTest)
 	if err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestRunGuardBatch_NeedsReviewPath(t *testing.T) {
 	insertGuardBlock(t, pool, gReviewAID, "review-anchor", anchor, tEarly)
 	insertGuardBlock(t, pool, gReviewBID, "review-peer", peer, tLate)
 
-	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10)
+	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10, guard.SearchIndexForTest)
 	if err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestRunGuardBatch_CleanPath(t *testing.T) {
 	insertGuardBlock(t, pool, gCleanAID, "clean-a", a, tEarly)
 	insertGuardBlock(t, pool, gCleanBID, "clean-b", b, tLate)
 
-	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10)
+	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10, guard.SearchIndexForTest)
 	if err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
 	}
@@ -366,7 +366,7 @@ func TestRunGuardBatch_42P08_Regression(t *testing.T) {
 	insertGuardBlock(t, pool, gP08ID, "p08-anchor", a, tEarly)
 	insertGuardBlock(t, pool, gP08PeerID, "p08-peer", b, tLate)
 
-	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10)
+	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10, guard.SearchIndexForTest)
 	if err != nil {
 		// 42P08 manifests as a wrapped pgx error from tx.Exec. If anything
 		// resembling the pre-fix surface appears we want a clear failure
@@ -401,7 +401,7 @@ func TestRunGuardBatch_42P08_Regression(t *testing.T) {
 	// regression, the second batch would crash even if the first one (somehow)
 	// passed. With the v1.6.6 fix, the cache is happy and processed=0
 	// (no pending blocks remain).
-	processed2, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10)
+	processed2, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10, guard.SearchIndexForTest)
 	if err != nil {
 		t.Fatalf("RunGuardBatch (2nd run, cached prepare path): %v", err)
 	}
@@ -433,7 +433,7 @@ func TestRunGuardBatch_WriteLogPersistence(t *testing.T) {
 	insertGuardBlock(t, pool, "019e9bbb-0000-7000-9000-000000000003", "wl-orth", orth, t0.Add(2*time.Hour))
 	insertGuardBlock(t, pool, "019e9bbb-0000-7000-9000-000000000004", "wl-review", review, t0.Add(3*time.Hour))
 
-	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10)
+	processed, err := guard.RunGuardBatch(ctx, pool, gitSet(), 10, guard.SearchIndexForTest)
 	if err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
 	}

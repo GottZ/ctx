@@ -100,7 +100,7 @@ func TestICGuardBatchSkipsComment(t *testing.T) {
 	seedBlock(t, pool, gIssue, "issue", "private", "projects", "guard-issue", ptr(vec1024(10)))
 	seedBlock(t, pool, gComment, "comment", "private", "projects", "guard-comment", ptr(vec1024(20)))
 
-	if _, err := guard.RunGuardBatch(ctx, pool, set, 100); err != nil {
+	if _, err := guard.RunGuardBatch(ctx, pool, set, 100, guard.Search{EfSearch: 800, ExactMaxCandidates: 400} /* the guard.* defaults */); err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
 	}
 

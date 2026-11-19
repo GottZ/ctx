@@ -127,6 +127,7 @@ func captureTestConfig(t *testing.T, backoffMinHours float64) *config.Config {
 		Scheduler: config.SchedulerConfig{
 			ReadScopes: []string{"private"}, HomeScope: "private",
 		},
+		Guard: config.Defaults().Guard, // #381: V66 range
 	}
 	if issues := config.Validate(c); config.HasErrors(issues) {
 		t.Fatalf("capture fixture is not Validate-clean: %+v", issues)

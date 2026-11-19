@@ -99,6 +99,7 @@ func w023Config(enabled bool) *config.Config {
 		Server: config.ServerConfig{DBPass: "test-password"},
 		Graph:  config.GraphConfig{HopDepth: 1}, // Enabled stays false
 		Query:  config.QueryConfig{Timezone: time.UTC, LowConfidenceMaxSources: config.Defaults().Query.LowConfidenceMaxSources, MaxSourceRunes: config.Defaults().Query.MaxSourceRunes},
+		Guard:  config.Defaults().Guard, // #381: V66 range
 		// Query: RateLimitRead 0 = disabled; #226/#208: the two synthesis cuts
 		// carry fatal floors (V62, V63).
 		// V21 (#38): the embed back-off bases must be > 0 to pass Validate —

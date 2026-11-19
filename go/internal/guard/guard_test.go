@@ -62,6 +62,29 @@ func expectPendingFetch(mock pgxmock.PgxPoolIface, ids ...string) {
 		WillReturnRows(rows)
 	mock.ExpectExec(`^` + regexp.QuoteMeta(guardPickRestoreSort+"; RELEASE SAVEPOINT "+guardPickSavepoint) + `$`).
 		WillReturnResult(pgxmock.NewResult("RELEASE", 0))
+	if len(ids) > 0 {
+		expectPrepareChecks(mock, ids...)
+	}
+}
+
+// testSearch is the guard.* search defaults.
+var testSearch = SearchDefaultForTest
+
+// expectPrepareChecks matches prepareChecks after a pick that yielded ids:
+// the transaction's hnsw.ef_search, then the candidate circles, each above
+// the exact limit so the blocks are checked through ctx_guard_check.
+func expectPrepareChecks(mock pgxmock.PgxPoolIface, ids ...string) {
+	mock.ExpectExec(`^` + regexp.QuoteMeta(guardSearchSQL) + `$`).
+		WithArgs("800").
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	over := int64(testSearch.ExactMaxCandidates + 1)
+	rows := mock.NewRows([]string{"id", "scope_n", "tenant_n"})
+	for _, id := range ids {
+		rows.AddRow(id, over, over)
+	}
+	mock.ExpectQuery(`FROM picked p$`).
+		WithArgs(ids).
+		WillReturnRows(rows)
 }
 
 // expectPickIndexReady matches the pick's probe of idx_guard_pending_type.
@@ -75,13 +98,28 @@ func expectPickIndexReady(mock pgxmock.PgxPoolIface, ready bool) {
 func expectGuardCheck(mock pgxmock.PgxPoolIface, id string) {
 	rows := mock.NewRows([]string{"decision", "top_similarity", "matched_id", "matched_title", "matched_scope", "is_cross_scope", "supersedes_pair"}).
 		AddRow("clean", 0.1, (*string)(nil), (*string)(nil), (*string)(nil), false, false)
+	expectIndexPlanOn(mock)
 	mock.ExpectQuery(`FROM ctx_guard_check`).
 		WithArgs(id, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(rows)
+	expectIndexPlanOff(mock)
+}
+
+// expectIndexPlanOn / expectIndexPlanOff match the switches around a check
+// through ctx_guard_check (#381).
+func expectIndexPlanOn(mock pgxmock.PgxPoolIface) {
+	mock.ExpectExec(`^` + regexp.QuoteMeta(guardIndexPlanOn) + `$`).
+		WillReturnResult(pgxmock.NewResult("SET", 0))
+}
+
+func expectIndexPlanOff(mock pgxmock.PgxPoolIface) {
+	mock.ExpectExec(`^` + regexp.QuoteMeta(guardIndexPlanOff) + `$`).
+		WillReturnResult(pgxmock.NewResult("SET", 0))
 }
 
 // expectGuardCheckFail makes ctx_guard_check return an error for the given id.
 func expectGuardCheckFail(mock pgxmock.PgxPoolIface, id string, sqlErr error) {
+	expectIndexPlanOn(mock)
 	mock.ExpectQuery(`FROM ctx_guard_check`).
 		WithArgs(id, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(sqlErr)
@@ -192,7 +230,7 @@ func TestRunGuardBatch_NoPending(t *testing.T) {
 	// The stamp of an empty run, after its commit.
 	expectGuardStateUpdate(mock)
 
-	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10, testSearch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -218,7 +256,7 @@ func TestRunGuardBatch_HappyPath_ThreeBlocks(t *testing.T) {
 	mock.ExpectCommit()
 	expectGuardStateUpdate(mock)
 
-	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10, testSearch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -253,7 +291,7 @@ func TestRunGuardBatch_MiddleBlockFails_OthersProceed(t *testing.T) {
 	mock.ExpectCommit()
 	expectGuardStateUpdate(mock)
 
-	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10, testSearch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -289,7 +327,7 @@ func TestRunGuardBatch_ApplyDecisionFails_RollsBack(t *testing.T) {
 	mock.ExpectCommit()
 	expectGuardStateUpdate(mock)
 
-	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10, testSearch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -327,7 +365,7 @@ func TestRunGuardBatch_AuditLogFails_RollsBack(t *testing.T) {
 	mock.ExpectCommit()
 	expectGuardStateUpdate(mock)
 
-	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10, testSearch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -359,7 +397,7 @@ func TestRunGuardBatch_SavepointCreateFails_SkipsBlock(t *testing.T) {
 	mock.ExpectCommit()
 	expectGuardStateUpdate(mock)
 
-	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10, testSearch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -378,7 +416,7 @@ func TestRunGuardBatch_BeginTxFails(t *testing.T) {
 
 	mock.ExpectBegin().WillReturnError(errors.New("pool exhausted"))
 
-	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10, testSearch)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -411,7 +449,7 @@ func TestRunGuardBatch_BatchCompleteLogOnlyWithWork(t *testing.T) {
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 		defer slog.SetDefault(prev)
 
-		processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
+		processed, err := RunGuardBatch(context.Background(), mock, testSet, 10, testSearch)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -481,11 +519,12 @@ func TestRunGuardBatch_PickBacklogRelocksTheKeptBlocks(t *testing.T) {
 		WillReturnRows(mock.NewRows([]string{"id", "type_name", "waiting"}).
 			AddRow(blockA, "knowledge", true).
 			AddRow(blockB, "reference", false))
+	expectPrepareChecks(mock, blockA)
 	expectFullBlockSuccess(mock, blockA)
 	mock.ExpectCommit()
 	expectGuardStateUpdate(mock)
 
-	processed, err := RunGuardBatch(context.Background(), mock, testSet, 2)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 2, testSearch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -509,11 +548,12 @@ func TestRunGuardBatch_PickWithoutTheTypeIndex(t *testing.T) {
 	mock.ExpectQuery(`ORDER BY created_at ASC\s+LIMIT \$2\s+FOR NO KEY UPDATE SKIP LOCKED$`).
 		WithArgs(pgxmock.AnyArg(), 10).
 		WillReturnRows(mock.NewRows([]string{"id", "type_name"}).AddRow(blockA, "knowledge"))
+	expectPrepareChecks(mock, blockA)
 	expectFullBlockSuccess(mock, blockA)
 	mock.ExpectCommit()
 	expectGuardStateUpdate(mock)
 
-	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10, testSearch)
 	if err != nil || processed != 1 {
 		t.Fatalf("processed = %d, err = %v; want 1, nil", processed, err)
 	}

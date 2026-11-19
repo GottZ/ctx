@@ -25,6 +25,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
@@ -280,7 +281,7 @@ func TestGuardStatsDirtySinceIsTheOldestChange(t *testing.T) {
 	ar := f.auth(raw)
 	scopes := []string{"q341-d"}
 	old := f.pendingBlock("q341-d", "created first", "")
-	if _, err := guard.RunGuardBatch(f.ctx, f.pool, f.reg.Snapshot(), 100); err != nil {
+	if _, err := guard.RunGuardBatch(f.ctx, f.pool, f.reg.Snapshot(), 100, config.Defaults().GuardSearch()); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(5 * time.Millisecond)
@@ -316,7 +317,7 @@ func TestGuardStatsPendingEqualsWhatTheGuardProcesses(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		f.pendingBlock(scope, "checked "+string(rune('a'+i)), "")
 	}
-	if _, err := guard.RunGuardBatch(f.ctx, f.pool, set, 100); err != nil {
+	if _, err := guard.RunGuardBatch(f.ctx, f.pool, set, 100, config.Defaults().GuardSearch()); err != nil {
 		t.Fatal(err)
 	}
 	// pending
@@ -354,7 +355,7 @@ func TestGuardStatsPendingEqualsWhatTheGuardProcesses(t *testing.T) {
 	before := f.stats(ar)
 	processed := 0
 	for i := 0; i < 20; i++ {
-		n, err := guard.RunGuardBatch(f.ctx, f.pool, set, 2)
+		n, err := guard.RunGuardBatch(f.ctx, f.pool, set, 2, config.Defaults().GuardSearch())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -402,7 +403,7 @@ func (f *guardStatsFixture) guardUntilEmpty() int {
 	f.t.Helper()
 	processed := 0
 	for i := 0; i < 50; i++ {
-		n, err := guard.RunGuardBatch(f.ctx, f.pool, f.reg.Snapshot(), 2)
+		n, err := guard.RunGuardBatch(f.ctx, f.pool, f.reg.Snapshot(), 2, config.Defaults().GuardSearch())
 		if err != nil {
 			f.t.Fatal(err)
 		}
@@ -547,7 +548,7 @@ func (f *guardStatsFixture) startGuardRun() <-chan guardRunResult {
 	done := make(chan guardRunResult, 1)
 	set := f.reg.Snapshot()
 	go func() {
-		n, err := guard.RunGuardBatch(f.ctx, gp, set, 100)
+		n, err := guard.RunGuardBatch(f.ctx, gp, set, 100, config.Defaults().GuardSearch())
 		done <- guardRunResult{n, err}
 	}()
 	return done
@@ -614,7 +615,7 @@ func TestGuardStatsPendingAfterEmptyRunRacesAWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := guard.RunGuardBatch(f.ctx, f.pool, f.reg.Snapshot(), 100); err != nil {
+	if _, err := guard.RunGuardBatch(f.ctx, f.pool, f.reg.Snapshot(), 100, config.Defaults().GuardSearch()); err != nil {
 		t.Fatal(err)
 	}
 	tx, err := f.pool.Begin(f.ctx)
@@ -641,7 +642,7 @@ func TestGuardStatsPendingAfterRecountRacesAWrite(t *testing.T) {
 	f := newGuardStatsFixture(t)
 	ar := f.auth(f.adminKey())
 	x2 := f.pendingBlock("private", "x two", "")
-	if _, err := guard.RunGuardBatch(f.ctx, f.pool, f.reg.Snapshot(), 100); err != nil {
+	if _, err := guard.RunGuardBatch(f.ctx, f.pool, f.reg.Snapshot(), 100, config.Defaults().GuardSearch()); err != nil {
 		t.Fatal(err)
 	}
 	edited := "content of x two, edited"

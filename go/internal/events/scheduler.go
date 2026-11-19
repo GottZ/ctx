@@ -1803,7 +1803,8 @@ func (s *Scheduler) runGuard(ctx context.Context) {
 		slog.Error("scheduler: guard batch skipped — block-type registry not wired")
 		return
 	}
-	processed, err := guard.RunGuardBatch(ctx, s.pool, s.blocktypes.Snapshot(), guardBatchLimit)
+	search := s.cfg.Snapshot().GuardSearch() //nolint:forbidigo // MT 06 background: the guard batch is ONE process-wide run over every tenant's blocks; how it searches is global-only (#381).
+	processed, err := guard.RunGuardBatch(ctx, s.pool, s.blocktypes.Snapshot(), guardBatchLimit, search)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
