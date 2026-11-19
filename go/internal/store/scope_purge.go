@@ -337,8 +337,11 @@ func purgeScopeOwner(ctx context.Context, pool *pgxpool.Pool, q PurgeQuery) (str
 
 // purgeBatchRetries bounds how often one batch is run again after a deadlock
 // or serialization failure. The batch locks blocks before it deletes their
-// dream links, the dream cycle takes link rows before the blocks they point
-// at, so a dream run on the very rows being purged can close a cycle (40P01);
+// dream links. The paths of the scope that take link rows before the blocks
+// they point at (a dream batch, a supersedes resolve, the dangling-link
+// cleanup) hold the scope's supersedes lock, which keeps them apart from a
+// batch; writers outside that lock (a link whose row scope differs from its
+// blocks', the guard's batch resolve) can still close a cycle (40P01).
 // PostgreSQL aborts one side, and the purge batch, rolled back whole, is safe
 // to repeat. A fixed bound, not a policy: three attempts separate a transient
 // collision from a persistent one, which then surfaces as the error.
@@ -370,6 +373,15 @@ func purgeBlockBatch(ctx context.Context, pool *pgxpool.Pool, pb purgeBatch, del
 	picked := 0
 	var blocks, links int64
 	err := pgxdb.Write(ctx, pool, pgxdb.At("store: purge batch"), func(tx pgx.Tx) error {
+		// The scope's supersedes lock, exclusive and first (issue #284): the
+		// batch locks its blocks in scan order and then deletes their link
+		// rows and reconciles the targets left behind; a declaration of the
+		// scope locks its source before its target, an archive or move locks
+		// a block and its targets in id order, a dream batch locks link rows
+		// before target rows. Under the lock none of them runs beside a batch.
+		if err := LockSupersedesScope(ctx, tx, pb.scope); err != nil {
+			return err
+		}
 		batch, err := collectStrings(ctx, tx, pb.pick, pb.pickArgs...)
 		if err != nil {
 			return fmt.Errorf("store: purge pick: %w", err)

@@ -202,6 +202,7 @@ func TestWriteLinks_ReconcileLock_DoesNotBlockConcurrentLinkInsert(t *testing.T)
 
 	release := gateTx(t, pool,
 		`SELECT 1 FROM context_blocks WHERE id = $1::uuid FOR NO KEY UPDATE`, lkTargetU)
+	defer release() // before the actor pools' Close (t.Cleanup, LIFO), which waits for their connections
 
 	poolA := actorPool(t, dsn, "f1-writer-a", nil)
 	doneA := writeAsync(ctx, poolA, lkSourceA, []dream.Link{
@@ -260,6 +261,7 @@ func TestWriteLinks_ReconcileLock_CrossOrderNoDeadlock(t *testing.T) {
 		`SELECT 1 FROM context_dream_links
 		  WHERE source_block_id = $1::uuid AND target_block_id = $2::uuid
 		  FOR UPDATE`, lkSourceB, lkTargetT)
+	defer release() // before the actor pools' Close (t.Cleanup, LIFO), which waits for their connections
 
 	poolB := actorPool(t, dsn, "f6-writer-b", nil)
 	doneB := writeAsync(ctx, poolB, lkSourceB, []dream.Link{
@@ -347,6 +349,7 @@ func TestWriteLinks_ReconcileLock_LocksAllTargetsBeforeFirstUpdate(t *testing.T)
 	}
 
 	release := holdWriteGate(t, pool)
+	defer release() // before the actor pools' Close (t.Cleanup, LIFO), which waits for their connections
 
 	poolA := actorPool(t, dsn, "f6b-writer-a", nil)
 	doneA := writeAsync(ctx, poolA, lkSourceA, []dream.Link{

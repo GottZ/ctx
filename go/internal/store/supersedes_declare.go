@@ -103,23 +103,27 @@ func (e *SupersedesConflictError) Error() string {
 }
 
 // LockSupersedesScope and ShareSupersedesScope are the per-scope supersedes
-// lock, a transaction advisory lock in two modes. A store declaring a
-// supersedes (UpsertBlockSupersedes, CheckSupersedesDeclarable) takes it
-// EXCLUSIVE; a dream link batch (dream.WriteLinks) and a write that can end
-// the supersedes of a block — an archive or a scope move (lockSupersedesSource)
-// — take it SHARED. The cycle checks of a declaration and of a dream guess read
-// links of OTHER blocks — the superseders above the written block — which no
-// row lock of theirs covers, so without the lock the two could each check
-// before the other commits and together close a cycle; and a declaration
-// waiting for a link row a dream batch holds, while holding that batch's
-// source, would deadlock with the batch's next insert. A declaration locks its
-// source and then its target, an archive or a scope move locks a block and its
-// targets in id order; on one pair the two orders disagree, and the lock keeps
-// them from ever interleaving. Exclusive against shared means a declaration
-// runs alone against all of them; the shared holders run side by side (dream
-// batches with a supersedes guess are ordered among themselves by the second
-// lock, LockSupersedesGuesses; the row-lock discipline of
+// lock, a transaction advisory lock in two modes.
+//
+// SHARED: the paths that lock link rows first and the target rows of their
+// reconcile after them — a dream link batch (dream.WriteLinks) and the resolve
+// of a supersedes link (DreamLinkResolve: a delete reconciles the target, a
+// confirm writes the pin a declaration's already-superseded check reads). They
+// run side by side (dream batches with a supersedes guess are ordered among themselves by
+// the second lock, LockSupersedesGuesses; the row-lock discipline of
 // ReconcileSupersedesTargets is unchanged).
+//
+// EXCLUSIVE: every path whose row-lock order differs from theirs, or whose
+// check reads links no row lock of its own covers — a store declaring a
+// supersedes (UpsertBlockSupersedes, CheckSupersedesDeclarable: source before
+// target, then the link row; its cycle and already-superseded checks read the
+// links of OTHER blocks), an archive or a scope move (lockSupersedesSource: a
+// block and its targets in id order, then, for a move, the block's link
+// rows), a purge batch (purgeBlockBatch: blocks in scan order, then their
+// link rows) and the dangling-link cleanup (dream.CleanupDanglingLinks, per
+// scope: link rows, then their targets). Each of them
+// runs alone in its scope against every other holder of the lock, so none of
+// these orders ever interleaves with another (issues #197, #284).
 //
 // The lock is the FIRST its transaction takes, and the guess lock, where a
 // transaction takes one, the second: every holder then waits for either one
@@ -148,7 +152,8 @@ func ShareSupersedesScope(ctx context.Context, tx pgx.Tx, scope string) error {
 // The lock orders them: a batch's walk sees every guess an earlier batch of the
 // scope committed. A batch without a supersedes candidate does not take it —
 // it can only delete or re-classify supersedes links, which closes no cycle.
-// An archive or a scope move takes it SHARED (shareSupersedesGuesses), so no
+// An archive or a scope move holds the scope lock exclusively
+// (lockSupersedesSource), which keeps every batch of the scope out, so no
 // guess adds a supersedes link from the block while it reads them.
 //
 // A key space apart from LockSupersedesScope's (the two-key form of the
@@ -156,14 +161,6 @@ func ShareSupersedesScope(ctx context.Context, tx pgx.Tx, scope string) error {
 func LockSupersedesGuesses(ctx context.Context, tx pgx.Tx, scope string) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('ctx:supersedes-guess'), hashtext($1::text))`, scope); err != nil {
 		return fmt.Errorf("store: supersedes guess lock: %w", err)
-	}
-	return nil
-}
-
-// shareSupersedesGuesses is LockSupersedesGuesses in shared mode (same key).
-func shareSupersedesGuesses(ctx context.Context, tx pgx.Tx, scope string) error {
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtext('ctx:supersedes-guess'), hashtext($1::text))`, scope); err != nil {
-		return fmt.Errorf("store: supersedes guess lock (shared): %w", err)
 	}
 	return nil
 }
