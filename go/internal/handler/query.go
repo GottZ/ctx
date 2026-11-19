@@ -394,6 +394,11 @@ type sourceResponse struct {
 	RRFScoreOriginal *float64 `json:"rrf_score_original,omitempty"`
 	SupersededBy     *string  `json:"superseded_by,omitempty"`
 	Content          string   `json:"content,omitempty"` // only when include_content (F6 ctx_query)
+	// Truncated (#234) marks a Content cut at the snippet window of this
+	// response (retrievalSnippetRunes, #208), so a reader can tell a block of
+	// that length from the first part of a longer one and fetch the whole
+	// block by id. Absent on a whole content.
+	Truncated bool `json:"truncated,omitempty"`
 	// CitationIndex is the <source id="N"> ordinal this source carried in the
 	// synthesis prompt — what a "[N]" in the answer refers to (V-W1). Absent
 	// on the retrieval-only path (no prompt was built) and on a source the
@@ -459,6 +464,7 @@ func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]strin
 		if contentRunes > 0 && s.Content != "" {
 			if r := []rune(s.Content); len(r) > contentRunes {
 				out[i].Content = string(r[:contentRunes])
+				out[i].Truncated = true
 			} else {
 				out[i].Content = s.Content
 			}

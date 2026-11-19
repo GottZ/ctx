@@ -43,8 +43,12 @@ type searchRequest struct {
 	Query    string   `json:"query"`
 	Category string   `json:"category"`
 	Tags     []string `json:"tags"`
-	Compact  *bool    `json:"compact"`
-	Limit    int      `json:"limit"`
+	// TagsAll (#219): only blocks that carry every one of these tags; `tags`
+	// keeps its overlap meaning, and both given means both apply. Absent =
+	// no filter, and the answer echoes the key only when it was given.
+	TagsAll []string `json:"tags_all"`
+	Compact *bool    `json:"compact"`
+	Limit   int      `json:"limit"`
 	// After is the keyset-pagination cursor (block-workbench W7) for the
 	// empty-query browse path: the {after_updated, after_id} of the last row of
 	// the previous page. nil/absent = page 1 (unchanged). Garbage is rejected
@@ -88,6 +92,7 @@ func (req searchRequest) coreArgs(limit int, compact bool, after *store.SearchCu
 		Category:          req.Category,
 		Cluster:           req.Cluster,
 		Tags:              req.Tags,
+		TagsAll:           req.TagsAll,
 		Types:             req.Types,
 		TypesExclude:      req.TypesExclude,
 		BlockRolesExclude: req.BlockRolesExclude,
@@ -238,6 +243,11 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	// the core ran; a request that got here passed its form check.
 	if clusterFacet := clusterFacetOf(a.FacetEnabled, a.Cluster); clusterFacet != nil {
 		filters["cluster"] = *clusterFacet
+	}
+	// tags_all (#219) the same way: echoed when it ran, absent otherwise, so a
+	// request without it answers the filters object it answered before.
+	if len(req.TagsAll) > 0 {
+		filters["tags_all"] = req.TagsAll
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

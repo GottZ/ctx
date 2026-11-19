@@ -20,3 +20,11 @@ var SearchBlocksSQLForTest = searchBlocksSQL
 // RecentBlocksSQLForTest exposes RecentBlocks' statement builder for the cost
 // gate of issue #342. Production never calls it.
 var RecentBlocksSQLForTest = recentBlocksSQL
+
+// ListMetaPageForTest is ListMeta with a page size of the test's choosing
+// (issue #212), so the paging can be walked on a small store. Production
+// always pages at ListMetaMaxRows.
+var ListMetaPageForTest = listMeta
+
+// ListMetaSQLForTest exposes ListMeta's statement builder for its cost gate.
+var ListMetaSQLForTest = listMetaSQL

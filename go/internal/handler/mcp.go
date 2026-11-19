@@ -162,7 +162,7 @@ type queryInput struct {
 	// block the key may already read in full with `get`. Absent ⇒ the delegated
 	// body is byte-identical to before the fields existed.
 	Synthesize     *bool `json:"synthesize,omitempty" jsonschema:"false = retrieval only: answer the ranked sources as JSON without the LLM synthesis (default true)"`
-	IncludeContent bool  `json:"include_content,omitempty" jsonschema:"with synthesize false: attach each source's content (up to 1500 characters by default, settings key query.max_source_runes); an error otherwise"`
+	IncludeContent bool  `json:"include_content,omitempty" jsonschema:"with synthesize false: attach each source's content (up to 1500 characters by default, settings key query.max_source_runes; a cut one carries truncated true, get the id for the full text); an error otherwise"`
 }
 
 type storeInput struct {
@@ -199,8 +199,12 @@ type storeInput struct {
 type searchInput struct {
 	Query    string   `json:"query,omitempty" jsonschema:"search text"`
 	Category string   `json:"category,omitempty" jsonschema:"filter by category"`
-	Tags     []string `json:"tags,omitempty" jsonschema:"filter by tags"`
-	Limit    int      `json:"limit,omitempty" jsonschema:"max results (default 10, max 50)"`
+	Tags     []string `json:"tags,omitempty" jsonschema:"filter by tags: blocks that carry at least one of these tags"`
+	// TagsAll (#219) is POST /api/search's field of the same name, through the
+	// same core: containment beside the overlap of `tags`. Absent ⇒ the call
+	// binds exactly what it bound before the field existed.
+	TagsAll []string `json:"tags_all,omitempty" jsonschema:"only blocks that carry all of these tags; combines with tags (all of these, and at least one of those)"`
+	Limit   int      `json:"limit,omitempty" jsonschema:"max results (default 10, max 50)"`
 	// After and IncludeContent (#206, #207) are POST /api/search's keyset
 	// cursor and the inverse of its `compact`, through the same core. Either one
 	// present switches the answer to the page object (mcp_search_page.go); a
@@ -249,6 +253,7 @@ func (input searchInput) coreArgs(facetEnabled, leaveOutNeverRanked bool) search
 		Category:          input.Category,
 		Cluster:           input.Cluster,
 		Tags:              input.Tags,
+		TagsAll:           input.TagsAll,
 		Types:             input.Types,
 		TypesExclude:      input.TypesExclude,
 		BlockRolesExclude: input.BlockRolesExclude,
@@ -645,6 +650,8 @@ type mcpRetrievalSource struct {
 	// UntrustedOrigin (issue #280): /api/query's field under the same name.
 	UntrustedOrigin string `json:"untrusted_origin,omitempty"`
 	Content      string  `json:"content,omitempty"`
+	// Truncated (#234): /api/query's flag on a cut snippet, under its name.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // renderMCPRetrievalOnly answers a synthesize:false call: the ranked sources in
@@ -691,7 +698,7 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
 			limit = 5
 		}
 		// /api/query attaches content on the retrieval-only path alone (the
-		// synthesis path builds its sources with includeContent=false), so
+		// synthesis path builds its sources with contentRunes 0), so
 		// include_content next to synthesis would be a silent no-op. Refused
 		// before any delegation, as /api/query refuses arm_ranks without
 		// synthesize:false.

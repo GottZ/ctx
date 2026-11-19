@@ -33,10 +33,12 @@ Three deliberate exceptions, unchanged:
 | `ctx save --tag tag1,tag2 <cat> <title>` | Upsert with tags |
 | `ctx save --sensitivity LEVEL <cat> <title>` | Classify on write (`credentials`/`personal`/`internal`/`public`) |
 | `ctx search [category] [query:text]` | Compact search (no LLM) |
+| `ctx search … tags:<a,b> tags_all:<c,d>` | `tags:` keeps the blocks that carry at least one of the tags, `tags_all:` the blocks that carry all of them (`tags` / `tags_all` of `POST /api/search`); both given, both apply |
 | `ctx search … types:<a,b>` | Restrict to these block types (`types` of `POST /api/search`). With the server's `search.leave_out_never_ranked` on, a search with `query:` and without `types:` leaves out the types `query` never ranks (`checkpoint`, `system-meta`, the derived layers); name the type to search them, e.g. `ctx search index query:topic-map types:system-meta` |
 | `ctx search cluster:<handle>` | Restrict to ONE topic of the cluster map. The handle is the stable `topic` the graph surfaces emit (`GET /api/graph/overview`, ego annotation) — a scope-pure topic, so the answer is exactly that topic's blocks, never a neighbouring scope's half of the same cluster. Server-gated (`cluster.facet_enabled`, default off): while it is off the argument is ignored and you get an ordinary unfiltered search. A malformed handle is a `400` before any database roundtrip; an unknown, foreign or empty topic is an ordinary empty result — never a distinguishable "not found" |
 | `ctx get <id>` | Fetch full block |
 | `ctx get --include-archived <id>` | Also read an archived block — full block id only, from the key's own home and allowed scopes (never through a block or cross-tenant scope grant); the answer carries `"archived": true`. A server without this flag ignores it and answers `Block not found` |
+| `ctx list-meta [--after <next_after>]` | All live blocks of the key's read scopes without content, at most 10 000 per answer. A cut answer carries `"truncated": true` and a `next_after` object; pass that object to `--after` for the rows that follow (`manage list-meta`, see [API](api.md#manage-actions)) |
 | `ctx delete <id>` | Soft-delete (archive) |
 | `ctx categories` | List all categories |
 | `ctx stats` | Database statistics + Dream backlog (`dream_queue`: pickable/cooldown/incoming-forecast) |
