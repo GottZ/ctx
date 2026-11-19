@@ -28,10 +28,13 @@ import (
 // m184Target is one index of a foreign-key lookup migration (184, 185): the
 // definition its DO block adopts as PostgreSQL deparses it, the runbook's
 // out-of-band DDL from the file header, the plain build the DO block runs
-// inline, a writer of its table (RowExclusiveLock, waits for SHARE) and the
-// rows the index must hold.
+// inline, a writer of its table (RowExclusiveLock, waits for SHARE), the
+// rows the index must hold, and the row threshold of its table (the file's
+// VALUES block must carry exactly this number; the threshold probes run at
+// it).
 type m184Target struct {
 	name, table, def, runbook, writer, entries string
+	maxRows                                    float64
 }
 
 // inline is the DDL the DO block runs below the threshold.
@@ -49,6 +52,7 @@ var m184Targets = []m184Target{
 		    WHERE parent_id IS NOT NULL`,
 		writer:  `UPDATE context_access_tokens SET revoked_at = revoked_at WHERE id = (SELECT id FROM context_access_tokens ORDER BY id LIMIT 1)`,
 		entries: `SELECT count(*) FROM context_access_tokens WHERE parent_id IS NOT NULL`,
+		maxRows: 500000,
 	},
 	{
 		name:  "idx_web_sessions_access_token",
@@ -58,6 +62,7 @@ var m184Targets = []m184Target{
 		    ON context_web_sessions (access_token_id)`,
 		writer:  `UPDATE context_web_sessions SET last_used_at = last_used_at WHERE id = (SELECT id FROM context_web_sessions ORDER BY id LIMIT 1)`,
 		entries: `SELECT count(*) FROM context_web_sessions`,
+		maxRows: 500000,
 	},
 }
 
@@ -66,9 +71,11 @@ var m184Targets = []m184Target{
 var m184ValuesRow = regexp.MustCompile(`\(\s*(\d+),\s*'(\w+)',\s*'(\w+)',\s*'(\w+)',\s*(?:NULL|'[^']*'),\s*(\d+)\s*\)`)
 
 // m184Thresholds reads the row threshold of every index from the VALUES
-// block of the file (the number is the file's to set), and checks the file
-// names exactly the targets, each on its table. The order the file builds
-// them in is pinned by its behaviour (the lock_timeout subtest).
+// block of the file, checks the file names exactly the targets, each on its
+// table, with the threshold the target expects, and returns the expected
+// thresholds per table: the probes run at the test's numbers, not at the
+// ones of the file under test. The order the file builds them in is pinned
+// by its behaviour (the lock_timeout subtest).
 func m184Thresholds(t *testing.T, body []byte, targets []m184Target) map[string]float64 {
 	t.Helper()
 	type row struct {
@@ -91,7 +98,10 @@ func m184Thresholds(t *testing.T, body []byte, targets []m184Target) map[string]
 		if i < 0 || targets[i].table != r.tbl {
 			t.Fatalf("VALUES row %d is %s on %s, which the test does not know", r.ord, r.name, r.tbl)
 		}
-		out[r.tbl] = r.maxRows
+		if r.maxRows != targets[i].maxRows {
+			t.Errorf("VALUES row %d sets the threshold of %s to %.0f rows of %s, want %.0f", r.ord, r.name, r.maxRows, r.tbl, targets[i].maxRows)
+		}
+		out[r.tbl] = targets[i].maxRows
 	}
 	return out
 }
@@ -609,26 +619,36 @@ func (c m184Contract) run(t *testing.T) {
 				if time.Since(start) > within {
 					t.Fatalf("writer on %s: within %s the file neither ended nor was its request for SHARE on %s seen waiting (last sample: held %v, waiting for %v)", tg.table, within, tg.table, r.held, r.waiting)
 				}
-				rows, err := pool.Query(ctx, `SELECT c.relname::text, l.granted FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
-					 WHERE l.pid = $1 AND l.locktype = 'relation' AND l.mode = 'ShareLock' AND c.relname = ANY($2::text[])`, pid, tables)
+				// The sample is read within the time left of within: a query
+				// that stalls ends at the deadline with an error, and a sample
+				// whose read failed is not used.
+				held, waiting, err := func() (held, waiting []string, err error) {
+					qctx, stop := context.WithDeadline(ctx, start.Add(within))
+					defer stop()
+					rows, err := pool.Query(qctx, `SELECT c.relname::text, l.granted FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+						 WHERE l.pid = $1 AND l.locktype = 'relation' AND l.mode = 'ShareLock' AND c.relname = ANY($2::text[])`, pid, tables)
+					if err != nil {
+						return nil, nil, err
+					}
+					defer rows.Close()
+					for rows.Next() {
+						var rel string
+						var granted bool
+						if err := rows.Scan(&rel, &granted); err != nil {
+							return nil, nil, err
+						}
+						if granted {
+							held = append(held, rel)
+						} else {
+							waiting = append(waiting, rel)
+						}
+					}
+					return held, waiting, rows.Err()
+				}()
 				if err != nil {
-					t.Fatal(err)
+					t.Fatalf("writer on %s: pg_locks not read within %s of the file's start: %v (last sample: held %v, waiting for %v)", tg.table, within, err, r.held, r.waiting)
 				}
-				r.held, r.waiting = nil, nil
-				for rows.Next() {
-					var rel string
-					var granted bool
-					if err := rows.Scan(&rel, &granted); err != nil {
-						rows.Close()
-						t.Fatal(err)
-					}
-					if granted {
-						r.held = append(r.held, rel)
-					} else {
-						r.waiting = append(r.waiting, rel)
-					}
-				}
-				rows.Close()
+				r.held, r.waiting = held, waiting
 				r.seen = slices.Contains(r.waiting, tg.table)
 			}
 			select {

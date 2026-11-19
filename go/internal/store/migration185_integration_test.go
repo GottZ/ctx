@@ -30,6 +30,7 @@ var m185Targets = []m184Target{
 		    WHERE granted_by IS NOT NULL`,
 		writer:  `UPDATE context_block_grants SET metadata = metadata WHERE id = (SELECT id FROM context_block_grants ORDER BY id LIMIT 1)`,
 		entries: `SELECT count(*) FROM context_block_grants WHERE granted_by IS NOT NULL`,
+		maxRows: 500000,
 	},
 	{
 		name:  "idx_oauth_codes_api_key",
@@ -39,6 +40,7 @@ var m185Targets = []m184Target{
 		    ON context_oauth_codes (api_key_id)`,
 		writer:  `UPDATE context_oauth_codes SET expires_at = expires_at WHERE id = (SELECT id FROM context_oauth_codes ORDER BY id LIMIT 1)`,
 		entries: `SELECT count(*) FROM context_oauth_codes`,
+		maxRows: 500000,
 	},
 	{
 		name:  "idx_write_log_api_key",
@@ -49,6 +51,7 @@ var m185Targets = []m184Target{
 		    WHERE api_key_id IS NOT NULL`,
 		writer:  `UPDATE context_write_log SET decision = decision WHERE id = (SELECT id FROM context_write_log ORDER BY id LIMIT 1)`,
 		entries: `SELECT count(*) FROM context_write_log WHERE api_key_id IS NOT NULL`,
+		maxRows: 2000000,
 	},
 	{
 		name:  "idx_chat_sessions_created_by",
@@ -59,6 +62,7 @@ var m185Targets = []m184Target{
 		    WHERE created_by IS NOT NULL`,
 		writer:  `UPDATE context_chat_sessions SET updated_at = updated_at WHERE id = (SELECT id FROM context_chat_sessions ORDER BY id LIMIT 1)`,
 		entries: `SELECT count(*) FROM context_chat_sessions WHERE created_by IS NOT NULL`,
+		maxRows: 500000,
 	},
 }
 
@@ -427,29 +431,40 @@ func m185Cycle(t *testing.T, pool *pgxpool.Pool, dsn string, body []byte, del fu
 	for i, tg := range m185Targets {
 		tables[i] = tg.table
 	}
-	locks := func() []m185Lock {
-		rows, err := pool.Query(ctx, `
+	// locks reads the locks of both sides within the deadline of lctx: a
+	// query that stalls ends at that deadline with an error instead of
+	// holding the test past it.
+	locks := func(lctx context.Context) ([]m185Lock, error) {
+		rows, err := pool.Query(lctx, `
 			SELECT CASE WHEN l.pid = $1 THEN 'file' ELSE 'delete' END, COALESCE(l.relation::regclass::text, l.locktype), l.mode, l.granted
 			  FROM pg_locks l LEFT JOIN pg_stat_activity a ON a.pid = l.pid
 			 WHERE (l.pid = $1 OR (a.application_name = $2 AND a.datname = current_database()))
 			   AND (NOT l.granted OR (l.locktype = 'relation' AND l.relation::regclass::text = ANY($3::text[])))
 			 ORDER BY 1, 2, 3`, filePid, m185DeleteApp, tables)
 		if err != nil {
-			t.Fatal(err)
+			return nil, err
 		}
 		defer rows.Close()
 		var out []m185Lock
 		for rows.Next() {
 			var l m185Lock
 			if err := rows.Scan(&l.who, &l.rel, &l.mode, &l.granted); err != nil {
-				t.Fatal(err)
+				return nil, err
 			}
 			out = append(out, l)
 		}
-		if err := rows.Err(); err != nil {
-			t.Fatal(err)
+		return out, rows.Err()
+	}
+	// lockReport is locks for a failure message, read within
+	// m185CycleWithin.
+	lockReport := func() string {
+		lctx, stop := context.WithTimeout(ctx, m185CycleWithin)
+		defer stop()
+		ls, err := locks(lctx)
+		if err != nil {
+			return fmt.Sprintf("not read within %s (%v)", m185CycleWithin, err)
 		}
-		return out
+		return fmt.Sprint(ls)
 	}
 	closed := func(ch chan struct{}) bool {
 		select {
@@ -463,9 +478,13 @@ func m185Cycle(t *testing.T, pool *pgxpool.Pool, dsn string, body []byte, del fu
 	var delDone chan struct{}
 	await := func(state string, reached func([]m185Lock) bool) {
 		deadline := time.Now().Add(m185CycleWithin)
+		actx, stop := context.WithDeadline(ctx, deadline)
+		defer stop()
 		for {
-			ls := locks()
+			ls, err := locks(actx)
 			switch {
+			case err != nil:
+				t.Fatalf("%s: pg_locks not read within the %s of the state: %v", state, m185CycleWithin, err)
 			case reached(ls):
 				return
 			case closed(started[0]):
@@ -517,7 +536,7 @@ func m185Cycle(t *testing.T, pool *pgxpool.Pool, dsn string, body []byte, del fu
 		select {
 		case <-ch:
 		case <-time.After(m185CycleEnd):
-			t.Fatalf("the file or the delete did not end within %s; locks %v", m185CycleEnd, locks())
+			t.Fatalf("the file or the delete did not end within %s; locks %s", m185CycleEnd, lockReport())
 		}
 	}
 	return run
@@ -595,8 +614,11 @@ func TestMigration185LockOrderAgainstDeletes(t *testing.T) {
 		return func(ctx context.Context, conn *pgxpool.Pool) error {
 				return store.PruneTenant(ctx, conn, tn.ID, store.AuditStamp{})
 			}, func() bool {
+				// Only a count read as 0 proves the delete; a failed read fails the test.
 				var n int
-				_ = pool.QueryRow(ctx, `SELECT count(*) FROM context_api_keys WHERE id = $1::uuid`, k.ID).Scan(&n)
+				if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_api_keys WHERE id = $1::uuid`, k.ID).Scan(&n); err != nil {
+					t.Fatalf("read whether the key was deleted: %v", err)
+				}
 				return n == 0
 			}
 	}
@@ -611,8 +633,11 @@ func TestMigration185LockOrderAgainstDeletes(t *testing.T) {
 				_, err := conn.Exec(ctx, `DELETE FROM context_blocks WHERE id = $1::uuid`, block)
 				return err
 			}, func() bool {
+				// Only a count read as 0 proves the delete; a failed read fails the test.
 				var n int
-				_ = pool.QueryRow(ctx, `SELECT count(*) FROM context_blocks WHERE id = $1::uuid`, block).Scan(&n)
+				if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_blocks WHERE id = $1::uuid`, block).Scan(&n); err != nil {
+					t.Fatalf("read whether the block was deleted: %v", err)
+				}
 				return n == 0
 			}
 	}
