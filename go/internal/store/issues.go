@@ -434,6 +434,8 @@ func ListIssues(ctx context.Context, pool *pgxpool.Pool, q IssueListQuery) ([]Wo
 // a title or content that now differs from the stored one invalidates the
 // vector (InvalidateEmbeddingTx: it stays searchable, marked stale, until the
 // scheduler re-embeds the block) — one sent unchanged does not (issue #236).
+// A title change onto the identity of an archived derivative writes nothing
+// and returns ErrProvenanceProtected (guardIdentityMove).
 func UpdateIssueBlock(ctx context.Context, tx pgx.Tx, id string, u IssueUpdate, set *blocktype.Set, writableScopes []string) (*Block, error) {
 	// I7/S3b, ahead of the lookup: this is the one client-supplied metadata map
 	// in the tree that is MERGED (`metadata = metadata || $n::jsonb`) rather
@@ -510,14 +512,33 @@ func UpdateIssueBlock(ctx context.Context, tx pgx.Tx, id string, u IssueUpdate, 
 	// The RETURNING redacts against writableScopes, the set the lookup above
 	// already checked — a subset of the caller's read scopes, so the
 	// fail-closed direction (see UpdateBlock).
+	//
+	// A title is the one identity field this verb writes: an update that sends
+	// one also returns whether the identity moved, and a move runs the
+	// archived-claim probe UpdateBlock runs (guardIdentityMove) — the type
+	// restriction above does not bind the category, so an issue or comment
+	// that lives in another category could otherwise be renamed onto the
+	// identity of an archived derivative.
 	idIdx := len(set2.args) + 1
-	query := fmt.Sprintf(`UPDATE context_blocks SET %s WHERE id = $%d RETURNING %s, %s`,
-		strings.Join(set2.clauses, ", "), idIdx, issueScanColsRedacted(fmt.Sprintf("$%d", idIdx+1)), textChangedCol)
+	movedCol := ""
+	var moved bool
+	extra := []any{}
+	if u.Title != nil {
+		movedCol = ", " + identityMovedCol
+		extra = append(extra, &moved)
+	}
+	query := fmt.Sprintf(`UPDATE context_blocks SET %s WHERE id = $%d RETURNING %s, %s%s`,
+		strings.Join(set2.clauses, ", "), idIdx, issueScanColsRedacted(fmt.Sprintf("$%d", idIdx+1)), textChangedCol, movedCol)
 	set2.args = append(set2.args, id, writableScopes)
 	var textChanged bool
-	b, err := scanIssue(tx.QueryRow(ctx, query, set2.args...), &textChanged)
+	b, err := scanIssue(tx.QueryRow(ctx, query, set2.args...), append([]any{&textChanged}, extra...)...)
 	if err != nil {
 		return nil, fmt.Errorf("store: update issue: %w", blockIdentityTaken(err))
+	}
+	if moved {
+		if err := guardIdentityMove(ctx, tx, b); err != nil {
+			return nil, err
+		}
 	}
 	if textChanged {
 		if err := InvalidateEmbeddingTx(ctx, tx, id); err != nil {
