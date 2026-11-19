@@ -98,13 +98,17 @@
 -- CONCURRENTLY and another VALIDATE. Should it report a row without
 -- updated_at (one written by hand between the UPDATE and the ADD), repeat
 -- the UPDATE and the VALIDATE. Running this file again afterwards is a
--- no-op; it can also run before the upgrade (ADD both NOT VALID in one
--- transaction, the VALIDATE in a second), and the file then finds valid
--- not-null constraints and changes nothing.
+-- no-op; the runbook can also run before the upgrade — in its order, the
+-- repair of updated_at first, and with the repair of created_at of REPAIR
+-- before it (UPDATE ... SET created_at = COALESCE(uuid_extract_timestamp(id),
+-- updated_at, now()) WHERE created_at IS NULL) — and the file then finds
+-- valid not-null constraints and changes nothing. Adding the constraint on
+-- updated_at NOT VALID without those repairs would make this file's repair of
+-- a row without either value fail with 23502 at every boot.
 --
 -- SCHEMA CONTRACT. The manifest records not_null true for both columns and
 -- migration_max 185 -> 186; above the threshold updated_at reads as drift
--- (param) until the runbook ran. An older binary (v5.65.0, the rollback
+-- (param) until the runbook ran. An older binary (v5.66.0, the rollback
 -- image) finds _migrations:186 without an embedded file (breaking) and
 -- not_null true where its manifest says false (definition drift, param): in mode warn (the default) it starts and
 -- /health reports schema_contract attention; in mode enforce it refuses to

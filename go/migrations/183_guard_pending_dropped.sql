@@ -10,7 +10,7 @@
 -- gone; 182 kept idx_guard_pending for the binaries before it, whose pick
 -- orders by created_at and walks idx_context_created through the store
 -- without it (214 327 buffers per pick at 1.2 million rows, issue #360). The
--- rollback image of the release of this file is v5.65.0, whose pick is the
+-- rollback image of the release of this file is v5.66.0, whose pick is the
 -- pick of 182. Until this file runs every write of an unchecked block with a
 -- vector maintains both indexes, and the count may read idx_guard_pending,
 -- whose entries include every unchecked block with a vector the pick filters
@@ -67,9 +67,16 @@
 -- the upgrade (and DROP INDEX CONCURRENTLY IF EXISTS idx_guard_pending_next,
 -- idx_guard_pending_old); the file then finds nothing to drop.
 --
--- OLDER BINARY. v5.65.0 (the rollback image) picks and counts from
--- idx_guard_pending_type as this release does. Its re-embed cutover still
--- builds the twin and renames idx_guard_pending, which no longer exists: its
+-- OLDER BINARY. v5.66.0 (the rollback image; its guard, re-embed and
+-- schema-contract code is that of v5.65.0, which the tests ran on this
+-- schema) picks and counts from idx_guard_pending_type as this release does.
+-- Its verify gate and index repair still build idx_guard_pending_next for a
+-- re-embed migration in verifying — during a rolling deploy an instance of it
+-- builds the twin again after this file dropped it, and this release never
+-- drops it again; once no older instance runs, drop it before the swap
+-- (DROP INDEX CONCURRENTLY IF EXISTS idx_guard_pending_next), or it stays as
+-- a second copy of the old index on the serving column. Its re-embed cutover
+-- still renames idx_guard_pending, which no longer exists: its
 -- confirm (the swap), its rollback of a swap and its cleanup fail with nothing
 -- changed (finish or abort a re-embed migration with this release). A binary
 -- before 182 walks the store with each pick on this schema: none may serve

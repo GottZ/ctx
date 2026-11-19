@@ -32,12 +32,13 @@
 -- TITLE COLLATE "C", AND THE PROBE CHANGES WITH IT. A plain (category,
 -- title, scope) partial index is taken only while its estimate beats the
 -- trigram GiST's, whose estimate for title = $2 stays at a few rows whatever
--- the scan reads: the planner went back to the GiST at 270 000 and 470 000
--- rows. The probe of this release therefore compares the title under the C
--- collation (title COLLATE "C" = $2), which the trigram indexes (default
--- collation) cannot serve and this index can. Equality under a
--- deterministic collation is byte equality, the database's default
--- collation is deterministic (PostgreSQL allows no other), so both forms
+-- the scan reads: measured for #386 without a VACUUM after the load, the
+-- planner went back to the GiST at 270 000 and 470 000 rows. The probe of
+-- this release therefore compares the title under the C collation
+-- (title COLLATE "C" = $2), which the trigram indexes (default collation)
+-- cannot serve and this index can: the GiST is no path for it at all.
+-- Equality under a deterministic collation is byte equality, and the
+-- default collation of a database is deterministic, so both forms
 -- answer alike (store tests compare them on titles with non-ASCII
 -- characters, case and surrounding blanks). The C-collated form without this
 -- index has no title index left and reads every row of the category, so
@@ -80,7 +81,7 @@
 -- (55P03), the file rolls back with nothing changed and the boot fails
 -- loudly; the next boot tries again.
 --
--- OLDER BINARY. v5.65.0 (the rollback image) sends the probe in its form
+-- OLDER BINARY. v5.66.0 (the rollback image) sends the probe in its form
 -- before this release; the planner may serve it from the trigram GiST as
 -- before (the index cannot serve its default-collation title). Its
 -- schema-contract check finds _migrations:187 without an embedded file

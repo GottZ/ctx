@@ -103,17 +103,20 @@
 --     start.
 -- LOCK ORDER. A key delete (the tenant prune) and a block delete (purge, the
 -- tenant prune, the parent_id cascade) on another instance lock these tables
--- too, through their foreign-key triggers, which fire in the order of their
--- names; the names carry the oid of the key, so the order is the order the
--- keys were created in. On a store grown through the releases (the
--- reference instance) a key delete reaches context_block_grants,
+-- too, through their foreign-key triggers, which fire in the byte order of
+-- their names (RI_ConstraintTrigger_a_<oid>) — not in the order the keys were
+-- created: an oid of fewer digits sorts by its leading digit (live, the write
+-- log's 50573 fires after the grants' 2095672). On a store grown through the
+-- releases (the reference instance, read from pg_trigger) a key delete
+-- reaches context_block_grants,
 -- context_oauth_codes, context_write_log, context_chat_sessions in this
 -- order, and a block delete context_block_grants before context_write_log.
 -- The file takes its locks in the same order, so neither closes a cycle
 -- with it there (before, the draft of this file took the write log first,
 -- and a block delete holding its grant rows and waiting for the write log
--- deadlocked with it). A store that has its keys in another order (a fresh
--- chain numbers them in the order of the folded baseline) can close such a
+-- deadlocked with it). A store whose trigger names sort otherwise (a fresh
+-- chain, which numbers the keys in the order of the folded baseline) can close
+-- such a
 -- cycle during the builds; PostgreSQL then aborts one of the two after
 -- deadlock_timeout (40P01): the delete reports the error and is repeated, or
 -- the boot fails and the next one retries. The write log's build is the
@@ -128,7 +131,7 @@
 -- waits for a lock, the writers of that table queue behind it, for at most
 -- those 3 s.
 --
--- OLDER BINARY. v5.65.0 (the rollback image) writes and deletes as before;
+-- OLDER BINARY. v5.66.0 (the rollback image) writes and deletes as before;
 -- the indexes serve its statements too. Its schema-contract check finds
 -- _migrations:185 without an embedded file (breaking) and four indexes it
 -- does not know (param): in mode warn (the default) it starts and
