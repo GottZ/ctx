@@ -693,19 +693,40 @@ func foreignProvenanceClaim(ctx context.Context, q pgxdb.Rower, category, title,
 	return claimed, nil
 }
 
-// guardProvenanceClaim is I7 / S3 (design D-01 §4.3.1, §5.2 B14) for one
-// upsert, both halves, and the ONE place the derived layer's server-path badge
-// opens it.
+// provenanceWriter is I7 / S3 (design D-01 §4.3.1, §5.2 B14) as one upsert
+// presents itself to it: the derivative identity the write may replace, and
+// ok=false for a write that may replace none. It is the ONE place the derived
+// layer's server-path badge opens the gate. The gate has two halves, and each
+// decides on the rows the write actually meets:
 //
-// It is refused HERE rather than in the handlers because the caller's pre-read
-// holds the conflicting row under FOR UPDATE: the check and the write are one
-// transaction, so there is no window between them. A guard at the client call
-// sites would have that window and would have to be repeated at the next
-// surface — there are seven (W01-2a review finding #1).
+//   - the CONFLICT half is the WHERE of the upsert's own DO UPDATE
+//     (provenanceGateSQL). PostgreSQL evaluates it on the conflicting row
+//     after locking it, in its latest committed version — also on a row
+//     another transaction created while this statement waited for it on the
+//     unique index, a row no read before the statement can see. A false WHERE
+//     writes nothing and returns no row, and exec answers
+//     ErrProvenanceProtected. The decision used to come from exec's pre-read:
+//     another writer's first create of the identity, still uncommitted at that
+//     read, took no lock and read as "no row", and the upsert then replaced
+//     the derivative's content and — with the wholesale metadata replacement
+//     of a content change — its provenance.
+//   - the INSERT half (guardInsertPath) runs when the pre-read found no live
+//     row, and has to see ARCHIVED rows: the unique index behind the ON
+//     CONFLICT target is partial on NOT is_archived, so archiving a derivative
+//     frees its identity and an unguarded write would create a fresh block
+//     wearing it (W01-2a review finding #5). §4.7.5 archives a derivative
+//     whose topic died or whose source set fell below MinSourceCount and
+//     forbids reviving it with is_archived=false (B11), so revival is a new
+//     upsert and an arm locked out here would be locked out of its own title
+//     forever, by its own archived block.
 //
-// derivedWriter is SensitivityWrite.Derived, and this is the declaration W01-2a
+// It is decided in the store rather than in the handlers: a guard at the
+// client call sites would be a read ahead of the write and would have to be
+// repeated at the next surface — there are seven (W01-2a review finding #1).
+//
+// The badge is SensitivityWrite.Derived, and this is the declaration W01-2a
 // asked for when it wrote "the arm has to declare itself here when it lands"
-// into the unconditional guard. The seam stayed a seam: it is still
+// into the unconditional guard. The seam stayed a seam: the gate is still
 // unconditional for every caller without the badge, and the badge is a Go
 // struct field no request body can reach (see SensitivityWrite.Derived for the
 // properties that keep it server-side, all pinned in
@@ -723,23 +744,13 @@ func foreignProvenanceClaim(ctx context.Context, q pgxdb.Rower, category, title,
 //     write with empty metadata DELETED the target's provenance — and
 //     from that moment the title was client-writable again, because S3 hangs on
 //     `metadata ? 'provenance'`. One aborted arm run reopened B14; no attacker
-//     needed. A badged write must therefore name itself.
+//     needed. A badged write must therefore name itself: one that names no v=1
+//     provenance is treated exactly like any other caller (ok=false). It
+//     cannot strip what it does not carry.
 //   - #2: the badge opened EVERY provenance row, not the writer's own. D-02 and
 //     D-03 are two arms. The identity pair (arm, stratum) is the minimal binding
 //     that makes "a derivative it owns" a statement about the code rather than
 //     about the documentation.
-//
-// Both halves of S3 are opened, and both are bound:
-//
-//   - the CONFLICT path, answered by the locked row itself;
-//   - the INSERT path, which has to see ARCHIVED rows: the unique index behind
-//     the ON CONFLICT target is partial on NOT is_archived, so archiving a
-//     derivative frees its identity and an unguarded write would create a fresh
-//     block wearing it (W01-2a review finding #5). §4.7.5 archives a derivative
-//     whose topic died or whose source set fell below MinSourceCount and
-//     forbids reviving it with is_archived=false (B11), so revival is a new
-//     upsert and an arm locked out here would be locked out of its own title
-//     forever, by its own archived block.
 //
 // What it deliberately does NOT do: bind the CONTENT of the provenance beyond
 // the identity pair, or check that the writer is entitled to the arm name it
@@ -749,48 +760,54 @@ func foreignProvenanceClaim(ctx context.Context, q pgxdb.Rower, category, title,
 //
 // The client form of the very same write stays refused:
 // handler/derived_write_lock_integration_test.go j_S3_Upsert/k_S3_Update answer
-// 403 provenance_protected across the surfaces, and W01-5 adds the direct pair
-// — same category, title and scope, once with the badge (accepted) and once
-// without (refused) — in handler/derived_server_path_integration_test.go.
-func guardProvenanceClaim(ctx context.Context, tx pgx.Tx, sens SensitivityWrite, metadata map[string]any,
-	hadRow, hadProvenance bool, existing provenanceIdentity, category, title, scope string,
-) error {
+// 403 provenance_protected across the surfaces, W01-5 adds the direct pair —
+// same category, title and scope, once with the badge (accepted) and once
+// without (refused) — in handler/derived_server_path_integration_test.go, and
+// store/upsert_provenance_race_integration_test.go drives both roles against
+// a derivative whose first create commits while the write waits for it.
+func provenanceWriter(sens SensitivityWrite, metadata map[string]any) (provenanceIdentity, bool) {
 	if !sens.Derived {
-		return guardUnbadged(ctx, tx, hadRow, hadProvenance, category, title, scope)
+		return provenanceIdentity{}, false
 	}
 	writer, ok := writeProvenanceIdentity(metadata)
 	if !ok || !writer.named() {
-		// #1: a badged write that names no v=1 provenance is treated exactly
-		// like any other caller. It cannot strip what it does not carry.
-		return guardUnbadged(ctx, tx, hadRow, hadProvenance, category, title, scope)
+		return provenanceIdentity{}, false
 	}
-	if hadRow {
-		if hadProvenance && existing != writer {
-			return ErrProvenanceProtected
-		}
-		return nil
-	}
-	claimed, err := foreignProvenanceClaim(ctx, tx, category, title, scope, writer)
-	if err != nil {
-		return err
-	}
-	if claimed {
-		return ErrProvenanceProtected
-	}
-	return nil
+	return writer, true
 }
 
-// guardUnbadged is S3 as every caller without the badge sees it — unchanged
-// since W01-2a, and the answer a badged write falls back to when it names no
-// provenance of its own.
-func guardUnbadged(ctx context.Context, tx pgx.Tx, hadRow, hadProvenance bool, category, title, scope string) error {
-	if hadRow {
-		if hadProvenance {
-			return ErrProvenanceProtected
-		}
-		return nil
+// conflictRowDerivedSQL is the provenance test on the row an upsert's DO UPDATE
+// meets: qualified, because EXCLUDED is in scope there as well, and COALESCEd
+// for the reason notDerivedSQL is — a NULL metadata holds no provenance key.
+const conflictRowDerivedSQL = `COALESCE(context_blocks.metadata ? '` + derived.MetadataKey + `', false)`
+
+// provenanceGateSQL is the CONFLICT half of the gate (see provenanceWriter):
+// the WHERE of the upsert's DO UPDATE, with the writer's identity appended to
+// args. A write that may replace no derivative updates only a row without
+// provenance; a badged writer also its own (arm, stratum), read as TEXT for the
+// reason provenanceIdentity gives.
+func provenanceGateSQL(writer provenanceIdentity, badged bool, args []any) (string, []any) {
+	if !badged {
+		return "NOT " + conflictRowDerivedSQL, args
 	}
-	claimed, err := ProvenanceClaimed(ctx, tx, category, title, scope)
+	args = append(args, writer.arm, writer.stratum)
+	return fmt.Sprintf(`(NOT %s
+			OR (COALESCE(context_blocks.metadata->'%s'->>'arm', '') = $%d
+			    AND COALESCE(context_blocks.metadata->'%s'->>'stratum', '') = $%d))`,
+		conflictRowDerivedSQL, derived.MetadataKey, len(args)-1, derived.MetadataKey, len(args)), args
+}
+
+// guardInsertPath is the INSERT half of the gate (see provenanceWriter): the
+// identity must not be claimed by a derivative, live or archived — for a
+// badged writer, by a derivative of another identity.
+func guardInsertPath(ctx context.Context, tx pgx.Tx, writer provenanceIdentity, badged bool, category, title, scope string) error {
+	var claimed bool
+	var err error
+	if badged {
+		claimed, err = foreignProvenanceClaim(ctx, tx, category, title, scope, writer)
+	} else {
+		claimed, err = ProvenanceClaimed(ctx, tx, category, title, scope)
+	}
 	if err != nil {
 		return err
 	}
@@ -832,8 +849,8 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 type upsertStatement struct {
 	query                  string
 	args                   []any
-	sens                   SensitivityWrite
-	metadata               map[string]any
+	writer                 provenanceIdentity
+	badged                 bool
 	category, title, scope string
 }
 
@@ -924,6 +941,14 @@ func prepareUpsert(category, title, content string, tags []string, metadata map[
 			"type_source = 'manual'")
 	}
 
+	// The WHERE of the DO UPDATE is the conflict half of the S3 gate (see
+	// provenanceWriter): it decides on the conflicting row as the statement
+	// locked it, so a row that is not admitted is neither written nor
+	// returned. The metadata it reads the writer's identity from is the one
+	// the statement writes (after the detector above).
+	writer, badged := provenanceWriter(sens, metadata)
+	gate, args := provenanceGateSQL(writer, badged, args)
+
 	// The last RETURNING column is the statement's own answer to "did this
 	// write replace the content of an existing row" (issue #281): old.* is the
 	// conflicting row before the update and NULL on an insert (PostgreSQL 18),
@@ -933,17 +958,19 @@ func prepareUpsert(category, title, content string, tags []string, metadata map[
 		VALUES (%s)
 		ON CONFLICT (category, title, scope) WHERE NOT is_archived DO UPDATE SET
 			%s
+		WHERE %s
 		RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at,
 		          (old.id IS NOT NULL AND old.content IS DISTINCT FROM new.content)`,
-		insertCols, insertVals, strings.Join(setClauses, ",\n\t\t\t"))
+		insertCols, insertVals, strings.Join(setClauses, ",\n\t\t\t"), gate)
 	return upsertStatement{
-		query: query, args: args, sens: sens, metadata: metadata,
+		query: query, args: args, writer: writer, badged: badged,
 		category: category, title: title, scope: scope,
 	}
 }
 
-// exec is the in-transaction half of UpsertBlock: pre-read, the S3 guard, the
-// upsert and the stale-vector clear, in the caller's transaction.
+// exec is the in-transaction half of UpsertBlock: pre-read, the INSERT half of
+// the S3 gate, the upsert (which carries the conflict half) and the
+// stale-vector clear, in the caller's transaction.
 func (u upsertStatement) exec(ctx context.Context, tx pgx.Tx) (*Block, error) {
 	category, title, scope := u.category, u.title, u.scope
 
@@ -964,40 +991,39 @@ func (u upsertStatement) exec(ctx context.Context, tx pgx.Tx) (*Block, error) {
 	// real content change) the invalidation are atomic together — "der Upsert und
 	// das Clear gehören in EINE Tx" (design §7).
 	//
-	// Whether the content changed is the upsert statement's own answer (its
-	// last RETURNING column, see prepareUpsert), not the pre-read's (issue
-	// #281). The pre-read locks the conflicting row (if any) with FOR UPDATE
+	// Whether the content changed and whether the S3 gate admits the conflict
+	// row are the upsert statement's own answers (its last RETURNING column
+	// and the WHERE of its DO UPDATE, see prepareUpsert), not the pre-read's
+	// (issue #281 for the first). A row the pre-read does not see takes no
+	// lock: another writer's first create of the identity that commits after
+	// this SELECT sends the upsert down the conflict branch on a row this read
+	// never saw. Deciding from the read let that write keep the other writer's
+	// vector next to its own content, and replace a derivative's content and
+	// provenance; the statement sees the row it updates.
+	//
+	// The pre-read still locks the conflicting row (if any) with FOR UPDATE
 	// before the upsert runs, using the exact (category, title, scope) WHERE
-	// NOT is_archived predicate of the ON CONFLICT target, and serves the S3
-	// guard below. A row it does not see takes no lock: another writer's
-	// first create of the identity that commits after this SELECT — and whose
-	// block may be embedded before the upsert resumes — sends the upsert down
-	// the conflict branch on a row this read never saw. Deciding the
-	// invalidation from the read let that write keep the other writer's
-	// vector next to its own content; the statement sees the row it updates.
-	var hadProvenance bool
-	var existing provenanceIdentity
-	hadRow := true
-	// The identity columns ride along on the row this SELECT already locks — no
-	// extra query, and they are read as TEXT (see provenanceIdentity for why a
-	// ::int cast on the stratum would be an availability bug, not a check).
+	// NOT is_archived predicate of the ON CONFLICT target. Two things hang on
+	// it: a row it sees stays the row the upsert conflicts with (nobody can
+	// archive, move or rename it meanwhile), so the gate's INSERT half — the
+	// probe for an archived claim — is skipped only when the upsert cannot
+	// insert; and the block row is locked before the statement's BEFORE INSERT
+	// triggers take theirs (trg_block_embed_excluded's advisory locks), the
+	// order every conflicting write has always had.
+	hadRow := false
 	if err := tx.QueryRow(ctx,
-		`SELECT metadata ? '`+derived.MetadataKey+`',
-		        COALESCE(metadata->'`+derived.MetadataKey+`'->>'arm', ''),
-		        COALESCE(metadata->'`+derived.MetadataKey+`'->>'stratum', '')
-		   FROM context_blocks
+		`SELECT true FROM context_blocks
 		 WHERE category = $1 AND title = $2 AND scope = $3 AND NOT is_archived
 		 FOR UPDATE`,
 		category, title, scope,
-	).Scan(&hadProvenance, &existing.arm, &existing.stratum); err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("store: upsert block: pre-read: %w", err)
-		}
-		hadRow = false
+	).Scan(&hadRow); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("store: upsert block: pre-read: %w", err)
 	}
 
-	if err := guardProvenanceClaim(ctx, tx, u.sens, u.metadata, hadRow, hadProvenance, existing, category, title, scope); err != nil {
-		return nil, err
+	if !hadRow {
+		if err := guardInsertPath(ctx, tx, u.writer, u.badged, category, title, scope); err != nil {
+			return nil, err
+		}
 	}
 
 	b := &Block{}
@@ -1007,6 +1033,13 @@ func (u upsertStatement) exec(ctx context.Context, tx pgx.Tx) (*Block, error) {
 		&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
 		&contentReplaced,
 	); err != nil {
+		// No row: the conflict branch met a row the S3 gate does not admit
+		// (the WHERE of the DO UPDATE). It is the only way this statement
+		// returns none — an insert always returns its row, and no BEFORE
+		// trigger on context_blocks skips one.
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrProvenanceProtected
+		}
 		// An explicit type on the conflict row of a comment or an issue
 		// (trg_block_retype, issue #280).
 		if retypeBound(err) {
