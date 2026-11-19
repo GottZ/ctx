@@ -251,6 +251,11 @@ class CtxMemoryProvider(MemoryProvider):
         """Extra ChainWriter kwargs (the umbrella injects its clock/sleep test seams)."""
         return {}
 
+    def _host_compaction_wait_s(self) -> float | None:
+        """The loading Hermes' wait for a compaction without progress (#299); None = no bound.
+        The umbrella reads it through a module function its tests replace."""
+        return _cp.host_compaction_wait_s()
+
     def _receipt_read_path(self, head_id: str, root: str) -> str:
         """Last line of the chain receipt: how to read the checkpoint (the umbrella names the
         tools of the session). Default: none."""
@@ -887,9 +892,16 @@ class CtxMemoryProvider(MemoryProvider):
         self._last_chain_error = None
         evidence = kwargs.get("evidence_messages")
         source = evidence if evidence is not None else (messages or [])
+        # #299: nothing of this call runs past the host's wait for the compaction (chain, its
+        # paced windows and refusal window, the required facts after it). Read before the clock
+        # starts: the host's reader loads its config, which is no time of the checkpoint budget.
+        host_wait = self._host_compaction_wait_s()
         started = self._now()
         budget = float(self._config.get("checkpoint_budget_s", 20.0))
         deadline = started + budget
+        wait_limit = started + host_wait - _cp.HOST_WAIT_MARGIN_S if host_wait else None
+        if wait_limit is not None:
+            deadline = min(deadline, wait_limit)
         api_version = self.pre_compress_checkpoint_api_version
         connected = bool(self._active and self._client)
         # The chain archives evidence in every agent context (labelled, never dropped);
@@ -937,7 +949,15 @@ class CtxMemoryProvider(MemoryProvider):
         crashed = ""
         if chain_on:
             try:
-                chain_text = self._write_chain(source, tool_evidence, budget, deadline, fact_hashes=new_keys)
+                chain_text = self._write_chain(
+                    source,
+                    tool_evidence,
+                    budget,
+                    deadline,
+                    fact_hashes=new_keys,
+                    wait_limit=wait_limit,
+                    host_wait_s=host_wait or 0.0,
+                )
             except CtxCheckpointError as exc:
                 self._last_chain_error = exc
                 if require_checkpoint:
@@ -1001,7 +1021,8 @@ class CtxMemoryProvider(MemoryProvider):
         sensitivity = self._config.get("sensitivity_default")
         if receipt is not None:
             # A paced chain was given one more rate window per window it needed (0.10.0); the
-            # required facts after it share that deadline, not the single-window budget.
+            # required facts after it share that deadline, not the single-window budget. Both end
+            # within the host's wait (#299): the chain's deadline never moves past wait_limit.
             deadline = max(deadline, float(getattr(receipt, "deadline", 0.0) or 0.0))
         if require_checkpoint:
             facts_text = self._checkpoint_facts_sync(
@@ -1075,6 +1096,8 @@ class CtxMemoryProvider(MemoryProvider):
         budget: float,
         deadline: float,
         fact_hashes: list[str] | None = None,
+        wait_limit: float | None = None,
+        host_wait_s: float = 0.0,
     ) -> str:
         """Synchronous chain write; raises ``CtxCheckpointError``. Returns the upstream receipt frame."""
         root = self._checkpoint_root()
@@ -1092,6 +1115,8 @@ class CtxMemoryProvider(MemoryProvider):
             tool_evidence=tool_evidence,
             cached_manifest_id=self._last_manifest_by_root.get(root),
             fact_hashes=fact_hashes,
+            wait_limit=wait_limit,
+            host_wait_s=host_wait_s,
         )
         self._last_manifest_by_root[root] = receipt.manifest_id
         self._last_chain_receipt = receipt

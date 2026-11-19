@@ -830,11 +830,11 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 // transaction — UpsertBlock's own, or UpsertBlockSupersedes', which composes
 // the supersedes declaration into the same transaction (issue #197).
 type upsertStatement struct {
-	query                           string
-	args                            []any
-	sens                            SensitivityWrite
-	metadata                        map[string]any
-	category, title, content, scope string
+	query                  string
+	args                   []any
+	sens                   SensitivityWrite
+	metadata               map[string]any
+	category, title, scope string
 }
 
 // prepareUpsert is the pure half of UpsertBlock (see there for the rules).
@@ -924,22 +924,28 @@ func prepareUpsert(category, title, content string, tags []string, metadata map[
 			"type_source = 'manual'")
 	}
 
+	// The last RETURNING column is the statement's own answer to "did this
+	// write replace the content of an existing row" (issue #281): old.* is the
+	// conflicting row before the update and NULL on an insert (PostgreSQL 18),
+	// so it is true only on the conflict branch with a different content —
+	// whatever the pre-read in exec saw.
 	query := fmt.Sprintf(`INSERT INTO context_blocks (%s)
 		VALUES (%s)
 		ON CONFLICT (category, title, scope) WHERE NOT is_archived DO UPDATE SET
 			%s
-		RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at`,
+		RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at,
+		          (old.id IS NOT NULL AND old.content IS DISTINCT FROM new.content)`,
 		insertCols, insertVals, strings.Join(setClauses, ",\n\t\t\t"))
 	return upsertStatement{
 		query: query, args: args, sens: sens, metadata: metadata,
-		category: category, title: title, content: content, scope: scope,
+		category: category, title: title, scope: scope,
 	}
 }
 
 // exec is the in-transaction half of UpsertBlock: pre-read, the S3 guard, the
 // upsert and the stale-vector clear, in the caller's transaction.
 func (u upsertStatement) exec(ctx context.Context, tx pgx.Tx) (*Block, error) {
-	category, title, content, scope := u.category, u.title, u.content, u.scope
+	category, title, scope := u.category, u.title, u.scope
 
 	// Achse 04 W04-8 (design/04-reembed-migration.md §3.4/§7, Inventur §3.4
 	// point 8): a conflicting upsert that CHANGES content must invalidate the
@@ -958,24 +964,17 @@ func (u upsertStatement) exec(ctx context.Context, tx pgx.Tx) (*Block, error) {
 	// real content change) the invalidation are atomic together — "der Upsert und
 	// das Clear gehören in EINE Tx" (design §7).
 	//
-	// Content-change detection mechanic: "vorheriges SELECT in der Upsert-Tx"
-	// (one of the three mechanics the design explicitly allows). Locks the
-	// conflicting row (if any) with FOR UPDATE BEFORE the upsert runs, using
-	// the exact (category, title, scope) WHERE NOT is_archived predicate the
-	// ON CONFLICT target itself uses — so hadRow is true iff this write will
-	// take the conflict-update branch, false iff it will INSERT a fresh row.
-	//
-	// Race-safety: a second, concurrent UpsertBlock on the SAME key blocks on
-	// this SELECT ... FOR UPDATE until this tx commits or rolls back, then
-	// re-reads the now-current row for ITS comparison — so two concurrent
-	// content-changing upserts on the same block serialize correctly instead
-	// of one silently missing the other's change. The only case where this
-	// SELECT sees no row (hadRow=false) for what turns out to be a
-	// conflicting write is two simultaneous FIRST-time creates racing each
-	// other — and a block that has never been through UpsertBlock before
-	// never carries an embedding yet (StoreEmbedding is always a separate,
-	// later call), so there is nothing stale to clear in that window.
-	var oldContent string
+	// Whether the content changed is the upsert statement's own answer (its
+	// last RETURNING column, see prepareUpsert), not the pre-read's (issue
+	// #281). The pre-read locks the conflicting row (if any) with FOR UPDATE
+	// before the upsert runs, using the exact (category, title, scope) WHERE
+	// NOT is_archived predicate of the ON CONFLICT target, and serves the S3
+	// guard below. A row it does not see takes no lock: another writer's
+	// first create of the identity that commits after this SELECT — and whose
+	// block may be embedded before the upsert resumes — sends the upsert down
+	// the conflict branch on a row this read never saw. Deciding the
+	// invalidation from the read let that write keep the other writer's
+	// vector next to its own content; the statement sees the row it updates.
 	var hadProvenance bool
 	var existing provenanceIdentity
 	hadRow := true
@@ -983,15 +982,14 @@ func (u upsertStatement) exec(ctx context.Context, tx pgx.Tx) (*Block, error) {
 	// extra query, and they are read as TEXT (see provenanceIdentity for why a
 	// ::int cast on the stratum would be an availability bug, not a check).
 	if err := tx.QueryRow(ctx,
-		`SELECT content,
-		        metadata ? '`+derived.MetadataKey+`',
+		`SELECT metadata ? '`+derived.MetadataKey+`',
 		        COALESCE(metadata->'`+derived.MetadataKey+`'->>'arm', ''),
 		        COALESCE(metadata->'`+derived.MetadataKey+`'->>'stratum', '')
 		   FROM context_blocks
 		 WHERE category = $1 AND title = $2 AND scope = $3 AND NOT is_archived
 		 FOR UPDATE`,
 		category, title, scope,
-	).Scan(&oldContent, &hadProvenance, &existing.arm, &existing.stratum); err != nil {
+	).Scan(&hadProvenance, &existing.arm, &existing.stratum); err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("store: upsert block: pre-read: %w", err)
 		}
@@ -1003,9 +1001,11 @@ func (u upsertStatement) exec(ctx context.Context, tx pgx.Tx) (*Block, error) {
 	}
 
 	b := &Block{}
+	var contentReplaced bool
 	if err := tx.QueryRow(ctx, u.query, u.args...).Scan(
 		&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
 		&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
+		&contentReplaced,
 	); err != nil {
 		// An explicit type on the conflict row of a comment or an issue
 		// (trg_block_retype, issue #280).
@@ -1019,14 +1019,15 @@ func (u upsertStatement) exec(ctx context.Context, tx pgx.Tx) (*Block, error) {
 	// An idempotent upsert with identical content must NOT touch the
 	// embedding — that would make the backfill re-embed on every no-op
 	// `ctx save` at the 1M-10M target scale (organic growth means repeat
-	// saves of unchanged titles are routine, not rare).
+	// saves of unchanged titles are routine, not rare). The title is part of
+	// the conflict target, so it never changes here.
 	//
 	// Reuses InvalidateEmbeddingTx — the same primitive UpdateBlock runs in
 	// its transaction — rather than duplicating its SQL, so any future
 	// extension of that primitive (it marks the serving vector stale, nulls
 	// the _next pair and deletes the backfill memo) is inherited here
 	// automatically.
-	if hadRow && oldContent != content {
+	if contentReplaced {
 		if err := InvalidateEmbeddingTx(ctx, tx, b.ID); err != nil {
 			return nil, fmt.Errorf("store: upsert block: invalidate embedding: %w", err)
 		}
@@ -1160,8 +1161,9 @@ func StoreEmbeddingNext(ctx context.Context, q pgxdb.Execer, blockID, model stri
 // StoreEmbedding): it does NOT own a transaction, so a caller that needs the
 // invalidation to be atomic with the write of the new text passes its own
 // pgx.Tx, which already holds the block's row: UpsertBlock's content-change
-// path (W04-8), UpdateBlock's (issue #198), the issue update and the two forge
-// pull updates. The block row comes before the memo row, the order the
+// path (W04-8), UpdateBlock's (issue #198), the issue update, the two forge
+// pull updates and the forge push rename — each when its statement reports
+// that the title or the content changed (issue #236). The block row comes before the memo row, the order the
 // backfill takes them in as well. Kept as ONE implementation so future
 // extensions of the invalidation (e.g. a migration-scoped memo delete) land in
 // every writer automatically, never just one.
@@ -1497,7 +1499,8 @@ type UpdateBlockData struct {
 const blockIdentityIndex = "uq_context_category_title_scope"
 
 // BlockIdentityTakenError is the refusal of a by-id update that would give a
-// block the (category, title, scope) of another active block (issue #227). It
+// block the (category, title, scope) of another active block (issue #227), and
+// of an issue verb or a chunk ingest whose identity is taken (issue #275). It
 // is a typed error and not a message for the reason ErrProvenanceProtected is
 // a sentinel: the write surfaces answer it as a 409 the caller resolves by
 // choosing another category or title, not as the generic 500 of an unexpected
@@ -1508,7 +1511,7 @@ const blockIdentityIndex = "uq_context_category_title_scope"
 // refused statement and the read), found a block of another identity (the
 // source row was changed in between), or failed. That read runs within the
 // caller's write scopes (blockIdentityHolder), so the id never names a block
-// outside them.
+// outside them. blockIdentityTaken runs no such read and leaves it "".
 type BlockIdentityTakenError struct {
 	ConflictID string
 	// refusedKey is the DETAIL of the 23505, PostgreSQL's own statement of the
@@ -1533,6 +1536,22 @@ func blockIdentityViolation(err error) (refusedKey string, ok bool) {
 		return pgErr.Detail, true
 	}
 	return "", false
+}
+
+// blockIdentityTaken turns the 23505 of blockIdentityIndex into
+// *BlockIdentityTakenError and passes any other error unchanged (issue #275).
+// It serves the writers that build the identity themselves — the issue verbs
+// (an issue or comment title can name the (category, title, scope) of another
+// active block: one stored under category issue or comment, or a comment whose
+// title was edited) and InsertChunk, whose arbiter is the chunk slot. Their
+// collision is the caller's input as UpdateBlock's is (issue #227). They run
+// no holder read: the issue verbs write in the transport's transaction, so
+// ConflictID stays "".
+func blockIdentityTaken(err error) error {
+	if refusedKey, ok := blockIdentityViolation(err); ok {
+		return &BlockIdentityTakenError{refusedKey: refusedKey}
+	}
+	return err
 }
 
 // blockIdentityHolder reads the id of the active block that holds the identity
@@ -1591,8 +1610,8 @@ func blockIdentityHolder(ctx context.Context, pool *pgxpool.Pool, id string, dat
 // searchable and is marked stale until the backfill writes the new one). A
 // title or content sent with the value the row already holds does not count:
 // the embed input is unchanged, and invalidating the vector would put the
-// block back into the backfill for nothing (issue #198, the parity of
-// UpsertBlock's `hadRow && oldContent != content`).
+// block back into the backfill for nothing (issue #198; UpsertBlock reads the
+// same difference off its own RETURNING, issue #281).
 //
 // An update that would give the block the (category, title, scope) of another
 // active block — a title rename, a category change or a scope move onto an

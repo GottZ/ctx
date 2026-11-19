@@ -82,6 +82,12 @@ def _probe_host_checkpoint_api() -> int:
     )
 
 
+def _host_compaction_wait_s() -> float | None:
+    """The loading host's wait for a compaction without progress (engine reader with this
+    module's name; GottZ/ctx#299). None = no bound."""
+    return _cp.host_compaction_wait_s(_HOST_FEATURE_MODULE)
+
+
 # Highest checkpoint contract THIS plugin implements. 2 = the fail-closed contract as
 # merged upstream (NousResearch/hermes-agent#94639, 2026-08-25). Raised to 3 once the
 # tool-index renderer lands and ``tool_evidence`` is actually rendered into the checkpoint
@@ -599,6 +605,9 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
 
     def _probe_host_api(self) -> int:
         return _probe_host_checkpoint_api()
+
+    def _host_compaction_wait_s(self) -> float | None:
+        return _host_compaction_wait_s()
 
     def _negotiate(self, host_api: int) -> int:
         return _negotiate_checkpoint_api(host_api)

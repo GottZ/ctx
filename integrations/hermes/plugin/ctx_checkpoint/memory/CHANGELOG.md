@@ -6,6 +6,47 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.16.2] — 2026-11-19
+
+A checkpoint ends inside Hermes' wait for the compaction, a retry adds no window it does not
+use (part of GottZ/ctx#299), and a head whose tags were replaced still continues the chain
+(part of GottZ/ctx#289).
+
+- **Hermes' wait.** Hermes calls `on_pre_compress` in the compaction worker before the summary
+  call and waits for that worker from its last progress, which only the summary stream reports
+  (`compression.context_timeout_seconds`, raised to the summary call's own timeout: 300 s by
+  default). A paced checkpoint past that window kept writing while Hermes abandoned the worker
+  and ran the compaction again, so two chains of one root wrote at the same time — five windows
+  with the defaults (327 parts), fewer with a smaller `max_parts`, and any chain with a
+  `budget_s` above the window. `checkpoint.host_compaction_wait_s` reads the window from the
+  loading Hermes (`resolve_context_compression_timeouts` of `agent.conversation_compression`,
+  the function the host itself calls; `None` on a Hermes without it, with the wait switched
+  off or on any failure, and then nothing changes). The provider reads it before its clock
+  starts and gives the chain a limit 10 s before the window (`HOST_WAIT_MARGIN_S`): the
+  deadline, every paced window and the window a refusal grants stop there, and so do the
+  required facts after the chain. A chain that needs more stops before the next write with
+  `ctx checkpoint stopped before <step>: Hermes waits <n>s for a compaction to make progress
+  …`; the parts it stored are kept, and the next attempt continues from them (ctx confirms
+  them without a write). The notice before the second window says so, and the failure notice
+  names `compression.context_timeout_seconds` instead of `budget_s`.
+- **Windows a retry does not use.** A retry whose parts ctx confirms books no write for them,
+  yet its receipt said `windows=3` and the user was told again that the compaction waits
+  minutes: both came from the part count before the first write. The receipt's `windows` now
+  counts the windows the booked writes entered (every `max_parts + 2` of them), and the notice
+  comes before the first write that enters the second window — a retry that is all confirmed
+  parts reports `windows=1` and sends none. The deadline still holds every window of the plan
+  (up to Hermes' wait): a confirmed part costs one call, and a retry walks all of them before
+  it reaches the new ones — with only the one-window budget, a retry over 230 confirmed parts
+  at 260 ms per call would never reach its new parts.
+- **A head without its tag.** The head search names the tag `checkpoint-head`; a head whose
+  tags an update or a store outside the plugin replaced was not found, and the next checkpoint
+  started a new chain without a parent and replaced the head silently. When the tagged search
+  finds nothing, the writer searches the head title once more without the tag (the first
+  checkpoint of every root costs one search more): a block there with a valid
+  `latest_manifest_id` continues the chain, logged as a WARNING, and the new head carries the
+  tag again (`lookup=untagged`); one without is an invalid head as since 0.12.0 (notice, the
+  new head published over it, `lookup=head-invalid`).
+
 ## [ctx_checkpoint 0.16.1] — 2026-11-18
 
 No output names the credentials of a configured URL (GottZ/ctx#311), and the code of an MCP

@@ -87,12 +87,14 @@ func (q *chatQueryRunner) RunQuery(ctx context.Context, scope string, readScopes
 		Error      string `json:"error"`
 		ErrorCode  string `json:"error_code"`
 		Sources    []struct {
-			ID       string  `json:"id"`
-			Title    string  `json:"title"`
-			Category string  `json:"category"`
-			Score    float64 `json:"score"`
-			AgeDays  int     `json:"age_days"`
-			Content  string  `json:"content"`
+			ID              string  `json:"id"`
+			Title           string  `json:"title"`
+			Category        string  `json:"category"`
+			Score           float64 `json:"score"`
+			AgeDays         int     `json:"age_days"`
+			Content         string  `json:"content"`
+			Untrusted       bool    `json:"untrusted"`
+			UntrustedOrigin string  `json:"untrusted_origin"`
 		} `json:"sources"`
 	}
 	// The recorded body may carry leading heartbeat whitespace (mcp.go note);
@@ -114,6 +116,8 @@ func (q *chatQueryRunner) RunQuery(ctx context.Context, scope string, readScopes
 		blocks[i] = chat.QueryBlock{
 			ID: s.ID, Title: s.Title, Category: s.Category,
 			Score: s.Score, AgeDays: s.AgeDays, Content: s.Content,
+			// The source's trust fields (V-11, #280) reach the tool result (#295).
+			Untrusted: s.Untrusted, UntrustedOrigin: s.UntrustedOrigin,
 		}
 	}
 	return chat.QueryResult{Confidence: resp.Confidence, Blocks: blocks}, nil

@@ -413,6 +413,13 @@ func (h *ManageHandler) writeIssueError(w http.ResponseWriter, action string, er
 // scope ⇒ 403; transition + body-cap + class ⇒ 422; everything else ⇒ 500
 // (logged, no wire detail). Shared by the manage transport and the REST W7 writes.
 func writeIssueStoreError(w http.ResponseWriter, action string, err error, reqID string) {
+	// A title the write builds names another active block's identity (issue
+	// #275): the 409 the block update surfaces answer (#227), coded, no ERROR
+	// line — the caller resolves it with another title.
+	if rej := identityTakenReject(err); rej != nil {
+		writeJSONReject(w, rej)
+		return
+	}
 	switch {
 	case errors.Is(err, errIssueRegistryUnavailable):
 		// Pre-store class: the core refused because no policy data is wired

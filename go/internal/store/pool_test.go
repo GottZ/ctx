@@ -107,11 +107,20 @@ func TestSleepCtx_CancelledContext(t *testing.T) {
 	}
 }
 
+// TestSleepCtx_ShortDuration: a 1-ms sleep returns nil, and returns long
+// before 100 ms (a sleep that ignores its duration, or scales it, does not).
+// The upper bound is wall-clock by nature — sleepCtx's only clock is the
+// runtime timer, no injected one — and stays: measured under -race on two
+// cores at GOMAXPROCS=2 beside two busy loops, 2 000 runs at a 1-minute
+// host load of 45–47 returned after 1.01–6.77 ms (p99 3.96 ms), 2 000 at
+// 30–34 after 1.00–23.92 ms (p99 6.57 ms) — at least 4 × below the bound
+// (issue #369).
 func TestSleepCtx_ShortDuration(t *testing.T) {
 	ctx := context.Background()
 	start := time.Now()
 	err := sleepCtx(ctx, 1*time.Millisecond)
 	elapsed := time.Since(start)
+	t.Logf("sleepCtx(1ms) returned after %v", elapsed)
 	if err != nil {
 		t.Errorf("expected nil error for completed sleep, got %v", err)
 	}

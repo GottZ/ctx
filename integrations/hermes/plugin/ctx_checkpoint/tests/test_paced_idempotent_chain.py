@@ -651,3 +651,276 @@ def test_a_failed_head_write_after_a_retry_leaves_the_head_on_a_complete_list_of
     assert manifest["metadata"]["sha256"] == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
     # The parts of the first split stay stored (no part is ever rewritten or removed).
     assert all(block_id in by_id for block_id in listed_before)
+
+
+# -- GottZ/ctx#299: the host's wait for the compaction, and windows a retry does not use -------
+#
+# Hermes calls on_pre_compress in the compaction worker before the summary call; its wait for the
+# worker counts from the last progress, which only the summary stream reports (300 s by default,
+# agent/conversation_compression.py). A chain still writing at the end of that window was
+# abandoned and the compaction ran again, so two chains of one root wrote at the same time.
+
+
+def _host_waits(monkeypatch, seconds):
+    # raising=False: on a plugin without the reader the tests run against its behaviour
+    monkeypatch.setattr(_MODULE, "_host_compaction_wait_s", lambda: seconds, raising=False)
+
+
+def test_a_paced_chain_stops_before_the_host_stops_waiting_and_the_next_attempt_continues(monkeypatch, clock):
+    """Three windows of writes (61 s apart) do not fit a host that waits 100 s: the chain stops
+    before the window it cannot finish, inside the host's wait, with the parts it stored kept,
+    and the user learns why; the next attempt reuses them and completes."""
+    server = CtxServerDouble(clock, write_limit=6)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    _host_waits(monkeypatch, 100.0)
+    provider, notices = _provider(server, chunk_chars=1_000, max_parts=3)  # 5 writes per window
+    messages = _transcript(12)  # 12 parts + manifest + head = 14 writes = 3 windows
+    started = clock.now
+
+    with pytest.raises(CtxCheckpointError, match="Hermes waits 100s") as failure:
+        provider.on_pre_compress(messages, require_checkpoint=True)
+
+    assert clock.now <= started + 100.0 - _MODULE._cp.HOST_WAIT_MARGIN_S, clock.now - started
+    assert "before source part 11/12" in str(failure.value)
+    assert len(server.parts()) == 10 and not server.manifests()
+    assert notices and "Hermes waits 100s" in notices[0], notices
+    # The failure notice names the host's setting instead of budget_s.
+    assert "compression.context_timeout_seconds" in notices[-1] and "budget_s" not in notices[-1], notices
+
+    _host_waits(monkeypatch, None)  # e.g. Hermes' retry in a window of its own
+    provider.on_pre_compress(messages, require_checkpoint=True)
+    assert len(_manifest_of_head(server)["metadata"]["source_block_ids"]) == 12 == len(server.parts())
+    assert provider._last_chain_receipt.reused == 10
+
+
+def test_a_budget_beyond_the_host_wait_ends_with_the_host_wait(monkeypatch, clock):
+    """budget_s (up to 600 s) is no licence to run past the host's wait: the chain's deadline,
+    and the window a refusal grants, end where the host stops waiting."""
+    server = CtxServerDouble(clock, write_limit=3)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    _host_waits(monkeypatch, 40.0)
+    provider, _ = _provider(server, chunk_chars=1_000, budget_s=600)
+    started = clock.now
+    # The key's window holds 3 writes; the 4th is refused, and the window the refusal grants
+    # (61 s) ends at the host's wait: one more try there, then the chain gives up.
+    with pytest.raises(CtxCheckpointError, match="rate-limited"):
+        provider.on_pre_compress(_transcript(6), require_checkpoint=True)  # 8 writes
+    assert clock.now <= started + 40.0 - _MODULE._cp.HOST_WAIT_MARGIN_S, clock.now - started
+    assert server.max_consecutive_errors < HOST_BREAKER_THRESHOLD
+
+
+def test_a_host_without_the_wait_leaves_the_chain_as_it_was(monkeypatch, clock):
+    """No window to read (an older Hermes, or the wait switched off): the deadline grows by one
+    window per window the writes enter, as before."""
+    server = CtxServerDouble(clock, write_limit=6)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    _host_waits(monkeypatch, None)
+    provider, _ = _provider(server, chunk_chars=1_000, max_parts=3, budget_s=5)
+    provider.on_pre_compress(_transcript(12), require_checkpoint=True)
+    assert len(server.parts()) == 12 and provider._last_chain_receipt.windows == 3
+
+
+def test_a_retry_whose_parts_ctx_confirms_enters_no_window_and_sends_no_notice(monkeypatch, clock):
+    """The receipt said windows=3 (and the user was told the compaction waits minutes) although
+    ctx confirmed every part and nothing was paced: the windows were planned from the part count."""
+    server = CtxServerDouble(clock, write_limit=6)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, notices = _provider(server, chunk_chars=1_000, max_parts=3, budget_s=60)
+    messages = _transcript(12)
+    provider.on_pre_compress(messages, require_checkpoint=True)
+    assert provider._last_chain_receipt.windows == 3 and len(notices) == 1
+
+    clock.now += 120.0  # the key's window is empty again
+    slept_before = len(clock.slept)
+    provider.on_pre_compress(messages, require_checkpoint=True)
+    receipt = provider._last_chain_receipt
+    assert receipt.reused == 12 and receipt.writes == 2  # manifest in place, head
+    assert receipt.windows == 1
+    assert len(notices) == 1, notices
+    assert len(clock.slept) == slept_before
+
+
+def test_a_retry_walks_its_confirmed_parts_within_the_planned_windows(monkeypatch, clock):
+    """A part ctx confirms books no write but costs a call: the deadline keeps every window the
+    part count plans, so a retry (or the next compaction of a grown transcript) that walks many
+    confirmed parts on a slow server is not cut at the one-window budget."""
+    server = CtxServerDouble(clock, write_limit=6)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    real_dispatch = server.dispatch
+
+    def slow(name, args, **kwargs):
+        clock.now += 0.25  # a slow server: 250 ms per call on top of the double's 50 ms
+        return real_dispatch(name, args, **kwargs)
+
+    server.dispatch = slow
+    _host_waits(monkeypatch, None)  # the plan alone (six windows) bounds this chain
+    provider, _ = _provider(server, chunk_chars=1_000, max_parts=3, budget_s=5)  # 5 writes per window
+    messages = _transcript(24)
+    provider.on_pre_compress(messages, require_checkpoint=True)
+
+    clock.now += 120.0
+    provider.on_pre_compress(messages + _transcript(2, tag="more"), require_checkpoint=True)
+    receipt = provider._last_chain_receipt
+    assert receipt.reused >= 23, receipt  # about 7 s of confirmed calls against a 5 s budget
+    assert len(_manifest_of_head(server)["metadata"]["source_block_ids"]) == len(receipt.part_ids)
+
+
+def test_the_first_notice_names_the_host_wait_when_the_plan_does_not_fit(monkeypatch, clock):
+    """The plan (six windows, 365 s) does not fit a host that waits 200 s, although the second
+    window still does: the notice before it says that this attempt saves what fits."""
+    server = CtxServerDouble(clock, write_limit=6)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    _host_waits(monkeypatch, 200.0)
+    provider, notices = _provider(server, chunk_chars=1_000, max_parts=3)
+    with pytest.raises(CtxCheckpointError, match="Hermes waits 200s"):
+        provider.on_pre_compress(_transcript(24), require_checkpoint=True)  # 26 writes, 5 per window
+    assert "Hermes waits 200s" in notices[0], notices
+
+
+def test_the_host_wait_is_read_from_the_host_function(monkeypatch):
+    """The reader takes the first value of the host's own resolver and falls back to no bound
+    for a host without it, a switched-off wait and a failing resolver."""
+    import types
+
+    reader = _MODULE._cp.host_compaction_wait_s
+    cases = {
+        "ctx_cp_t299_present": (lambda: (250.0, 600.0), 250.0),
+        "ctx_cp_t299_off": (lambda: (0.0, 600.0), None),
+        "ctx_cp_t299_negative": (lambda: (-1.0, 600.0), None),
+        "ctx_cp_t299_raises": (lambda: (_ for _ in ()).throw(RuntimeError("config")), None),
+    }
+    for name, (resolver, want) in cases.items():
+        module = types.ModuleType(name)
+        module.resolve_context_compression_timeouts = resolver
+        monkeypatch.setitem(sys.modules, name, module)
+        assert reader(name) == want, name
+    monkeypatch.setitem(sys.modules, "ctx_cp_t299_absent", types.ModuleType("ctx_cp_t299_absent"))
+    assert reader("ctx_cp_t299_absent") is None
+    # The pinned Hermes has the function under the name the plugin reads, in the module it probes.
+    from agent import conversation_compression
+
+    host_idle, _ceiling = conversation_compression.resolve_context_compression_timeouts()
+    assert reader() == host_idle > 0
+
+
+def test_a_chain_slower_than_the_host_wait_names_the_host_wait(monkeypatch, clock):
+    """budget_s beyond the host's wait and a chain slower than that wait (62 writes at 50 ms
+    against a wait that leaves 2 s): the failure names the host's wait, not a budget the chain
+    never had."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    _host_waits(monkeypatch, 12.0)
+    provider, notices = _provider(server, chunk_chars=1_000, budget_s=600)
+    started = clock.now
+    with pytest.raises(CtxCheckpointError, match="Hermes waits 12s"):
+        provider.on_pre_compress(_transcript(60), require_checkpoint=True)
+    assert clock.now <= started + 12.0 - _MODULE._cp.HOST_WAIT_MARGIN_S + CALL_LATENCY_S
+    assert server.parts() and "budget_s" not in notices[-1], notices
+
+
+# -- GottZ/ctx#289: a head whose tags were replaced outside the plugin -----------------------
+
+
+def _strip_head_tags(server: CtxServerDouble, *, keep_metadata: bool) -> str:
+    """An update or store outside the plugin replaced the head's tags (and, ``keep_metadata=False``,
+    its metadata: an update replaces the whole object)."""
+    head = server.head()
+    head["tags"] = ["edited-by-hand"]
+    if not keep_metadata:
+        head["metadata"] = {"note": "edited"}
+    return head["id"]
+
+
+def test_a_head_without_its_tag_still_continues_the_chain(monkeypatch, clock):
+    """The head search names the tag, so a head that lost it was not found: the next checkpoint
+    started a new chain without a parent and replaced the head, silently."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, notices = _provider(server, chunk_chars=1_000)
+    provider.on_pre_compress(_transcript(4, tag="first"), require_checkpoint=True)
+    first_manifest = server.head()["metadata"]["latest_manifest_id"]
+    head_id = _strip_head_tags(server, keep_metadata=True)
+    provider._last_manifest_by_root.clear()  # another process: no cached manifest to fall back on
+
+    provider.on_pre_compress(_transcript(6, tag="second"), require_checkpoint=True)
+
+    receipt = provider._last_chain_receipt
+    assert receipt.lookup == "untagged"
+    assert receipt.parent_manifest_id == first_manifest
+    assert _manifest_of_head(server)["metadata"]["parent_manifest_id"] == first_manifest
+    head = server.head()
+    assert head["id"] == head_id and "checkpoint-head" in head["tags"]
+    assert not [n for n in notices if "head" in n], notices  # nothing lost, nothing to tell
+
+
+def test_a_head_without_its_tag_and_its_manifest_is_replaced_with_a_notice(monkeypatch, clock):
+    """Tags and metadata replaced: the block under the head title names no manifest; the new
+    head is published over it and the user is told (as for a tagged head without one)."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, notices = _provider(server, chunk_chars=1_000)
+    provider.on_pre_compress(_transcript(4, tag="first"), require_checkpoint=True)
+    head_id = _strip_head_tags(server, keep_metadata=False)
+    provider._last_manifest_by_root.clear()
+
+    provider.on_pre_compress(_transcript(6, tag="second"), require_checkpoint=True)
+
+    assert provider._last_chain_receipt.lookup == "head-invalid"
+    assert provider._last_chain_receipt.parent_manifest_id is None
+    assert any(head_id in n and "latest_manifest_id" in n for n in notices), notices
+    assert "checkpoint-head" in server.head()["tags"]
+
+
+def test_the_untagged_search_runs_only_when_the_tagged_one_finds_nothing(monkeypatch, clock):
+    """Cost: one more search for the first checkpoint of a root, none while the head carries its tag."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    provider, _ = _provider(server, chunk_chars=1_000)
+
+    def searches() -> list[dict]:
+        return [args for tool, args in server.calls if tool == "search"]
+
+    provider.on_pre_compress(_transcript(4, tag="first"), require_checkpoint=True)
+    assert [bool(s.get("tags")) for s in searches()] == [True, False]  # a new root
+    server.calls.clear()
+    provider.on_pre_compress(_transcript(6, tag="second"), require_checkpoint=True)
+    assert [bool(s.get("tags")) for s in searches()] == [True]
+
+
+def test_required_facts_after_the_chain_end_within_the_host_wait(monkeypatch, clock):
+    """Memory features on: the required facts after a stored chain shared its deadline, which a
+    budget_s beyond the host's wait (600 s) put past it. They end where the host stops waiting:
+    a fact that would start later is left for a later compaction, the checkpoint stands (#299;
+    the chain stored, a late fact is no failure since 0.12.0)."""
+    server = CtxServerDouble(clock)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    _host_waits(monkeypatch, 40.0)
+    real_store = server._store
+
+    def slow_facts(args):
+        if args["category"] == "learnings":
+            clock.now += 12.0  # a fact store that takes 12 s
+        return real_store(args)
+
+    server._store = slow_facts
+    provider, _ = _provider(server, chunk_chars=1_000, budget_s=600, memory=True)
+    facts = [
+        "The proxy on INFRA-WWW terminates TLS for every service with Traefik 3.2 since 2026-10-01.",
+        "Backups of the gitea database run nightly at 03:15 to the NAS share /volume1/backup/gitea.",
+        "The staging cluster uses PostgreSQL 18.6 with pgvector 0.8.7 on host db-stage-02.",
+        "Release tags are annotated and signed with the SSH key of the build host since v5.0.0.",
+    ]
+    # An assistant turn counts as a fact when it closes a turn (config.extract_salient_facts).
+    messages = [
+        m for fact in facts for m in ({"role": "user", "content": "And then?"}, {"role": "assistant", "content": fact})
+    ]
+    started = clock.now
+
+    receipt = provider.on_pre_compress(messages, require_checkpoint=True)
+
+    stored = [b for b in server.blocks.values() if b["category"] == "learnings"]
+    assert "ctx checkpoint head:" in receipt
+    assert 0 < len(stored) < len(facts), (len(stored), receipt)
+    assert "not stored" in receipt, receipt
+    # The last fact store started before the host's wait ended (less the margin).
+    assert clock.now - 12.0 <= started + 40.0 - _MODULE._cp.HOST_WAIT_MARGIN_S, clock.now - started

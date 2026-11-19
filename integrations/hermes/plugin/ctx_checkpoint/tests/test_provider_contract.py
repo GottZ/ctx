@@ -42,17 +42,21 @@ def test_provider_publishes_versioned_stable_head_with_bounded_frame():
     assert [name for name, _ in calls] == [
         "mcp__ctx__search",
         "mcp__ctx__search",
+        "mcp__ctx__search",
         "mcp__ctx__store",
         "mcp__ctx__store",
         "mcp__ctx__store",
     ]
     # "/" is sanitized away, so the title carries a hash of the full root id (0.6.1); with
-    # no head under it yet, the 0.6.0 title is searched once for a chain to continue.
+    # no head under it yet, the title is searched once more without the head tag (#289), then
+    # the 0.6.0 title once for a chain to continue.
     assert calls[0][1]["query"] == "Compaction checkpoint head root_session-a-a0af5788"
-    assert calls[1][1]["query"] == "Compaction checkpoint head root_session-a"
-    assert calls[4][1]["title"] == "Compaction checkpoint head root_session-a-a0af5788"
-    assert manifest_id in calls[4][1]["content"]
-    assert source_id in calls[3][1]["content"]
+    assert calls[1][1]["query"] == "Compaction checkpoint head root_session-a-a0af5788"
+    assert "tags" not in calls[1][1]
+    assert calls[2][1]["query"] == "Compaction checkpoint head root_session-a"
+    assert calls[5][1]["title"] == "Compaction checkpoint head root_session-a-a0af5788"
+    assert manifest_id in calls[5][1]["content"]
+    assert source_id in calls[4][1]["content"]
     assert head_id in frame
     assert manifest_id in frame
     assert source_id not in frame
@@ -81,9 +85,10 @@ def test_provider_frame_stays_bounded_when_transcript_spans_many_source_blocks()
     frame = provider.on_pre_compress([{"role": "user", "content": "durable " + "x" * 12_000}])
 
     assert len(calls) > 7
-    # The calls between the head search and manifest + head are the parts, in transcript order:
-    # the manifest lists one id per part (a part names no position since 0.15.0, #344).
-    source_parts = [call[1] for call in calls[1:-2]]
+    # The calls between the head searches (tagged, then without the tag for a new root, #289) and
+    # manifest + head are the parts, in transcript order: the manifest lists one id per part (a
+    # part names no position since 0.15.0, #344).
+    source_parts = [call[1] for call in calls[2:-2]]
     assert all(a["title"].startswith("Compaction source part ") for a in source_parts)
     assert len(source_parts) == len(calls[-2][1]["metadata"]["source_block_ids"])
     assert len(frame) < 1_000
@@ -115,11 +120,12 @@ def test_provider_upserts_same_head_title_for_new_transcript_digest():
     first = provider.on_pre_compress([{"role": "user", "content": "first durable decision"}])
     second = provider.on_pre_compress([{"role": "user", "content": "second corrected decision"}])
 
-    assert calls[3][1]["title"] == calls[7][1]["title"]
-    assert calls[2][1]["title"] != calls[6][1]["title"]
+    # Each run: tagged head search, the one without the tag (#289), part, manifest, head.
+    assert calls[4][1]["title"] == calls[9][1]["title"]
+    assert calls[3][1]["title"] != calls[8][1]["title"]
     assert "019f6000-0000-7000-8000-000000000062" in first
     assert "019f6000-0000-7000-8000-000000000065" in second
-    assert "019f6000-0000-7000-8000-000000000065" in calls[7][1]["content"]
+    assert "019f6000-0000-7000-8000-000000000065" in calls[9][1]["content"]
 
 
 def test_memory_manager_accepts_provider_as_required_checkpoint_api_v2():
@@ -182,7 +188,7 @@ def test_literal_prior_context_user_quote_is_preserved_as_source_evidence():
         ]
     )
 
-    assert "literal marker I want to discuss" in calls[1][1]["content"]
+    assert "literal marker I want to discuss" in calls[2][1]["content"]  # after both head searches
 
 
 def test_provider_links_new_manifest_to_previous_head_manifest_before_head_update():
@@ -535,7 +541,7 @@ def test_store_answer_without_an_id_group_fails_closed():
 
     with pytest.raises(_MODULE.CtxCheckpointError):
         provider.on_pre_compress([{"role": "user", "content": "evidence"}], require_checkpoint=True)
-    assert [name for name, _ in calls] == ["mcp__ctx__search", "mcp__ctx__store"]
+    assert [name for name, _ in calls] == ["mcp__ctx__search", "mcp__ctx__search", "mcp__ctx__store"]
 
 
 def test_staged_store_is_refused_by_name_and_never_confirmed():
@@ -555,7 +561,7 @@ def test_staged_store_is_refused_by_name_and_never_confirmed():
     # The staged hash survives the chain writer's 200-character cut of the cause.
     message = str(raised.value)
     assert "payload_hash " + "ab" * 32 in message
-    assert [name for name, _ in calls] == ["mcp__ctx__search", "mcp__ctx__store"]
+    assert [name for name, _ in calls] == ["mcp__ctx__search", "mcp__ctx__search", "mcp__ctx__store"]
     assert not any(name.endswith("__confirm") for name, _ in calls)
 
 
@@ -623,7 +629,7 @@ def test_a_hanging_store_is_abandoned_at_the_call_timeout():
     finally:
         release.set()
     assert time.monotonic() - started < 10
-    assert calls == ["mcp__ctx__search", "mcp__ctx__store"]
+    assert calls == ["mcp__ctx__search", "mcp__ctx__search", "mcp__ctx__store"]
 
 
 def test_dispatch_sees_the_callers_context_variables():

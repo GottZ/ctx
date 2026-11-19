@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/testalloc"
 )
 
 // copyRow is an openai row on an engine that reads every body through
@@ -63,7 +64,7 @@ func wireCallAlloc(t *testing.T, row backends.Backend, texts []string) (perCall 
 func wireCallAllocPass(t *testing.T, row backends.Backend, texts []string) (perCall float64, body int) {
 	t.Helper()
 	in := wireInput{texts: texts}
-	_, bodyAlloc, _, err := wireBodyAlloc(in, openAIEmbedRequest{Model: "m", Input: in.value()})
+	_, bodyAlloc, _, err := wireBodyAlloc(t, in, openAIEmbedRequest{Model: "m", Input: in.value()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,6 +95,7 @@ func wireCallAllocPass(t *testing.T, row backends.Backend, texts []string) (perC
 // bytes behind the headers, so a short body's copy is shorter than the
 // body; min(body, WireCopyBuffer) is its bound).
 func TestWireCallCopiesThroughOneBuffer(t *testing.T) {
+	testalloc.EveryAllocation(t) // wireBodyAlloc reads the body's allocation from the memory profile
 	base, _ := wireCallAlloc(t, copyRow(t, 1), []string{"a"})
 	for _, tc := range []struct {
 		name  string

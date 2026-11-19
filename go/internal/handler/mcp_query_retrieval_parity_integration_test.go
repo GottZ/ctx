@@ -33,6 +33,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -166,8 +167,8 @@ func TestMCPQueryRetrievalOnlyParityUnderQuota(t *testing.T) {
 	if short.Content != "a short ledger note" || short.Truncated {
 		t.Errorf("short block: content %q truncated %v, want the whole content and no flag", short.Content, short.Truncated)
 	}
-	if n := len([]rune(cut.Content)); n != maxRetrievalSnippet || !cut.Truncated {
-		t.Errorf("long block: %d runes, truncated %v; want the %d-rune snippet flagged truncated", n, cut.Truncated, maxRetrievalSnippet)
+	if n := len([]rune(cut.Content)); n != llm.MaxBlockChars || !cut.Truncated {
+		t.Errorf("long block: %d runes, truncated %v; want the %d-rune snippet flagged truncated", n, cut.Truncated, llm.MaxBlockChars)
 	}
 	if !strings.HasPrefix(long, cut.Content) {
 		t.Errorf("the snippet is not a prefix of the block")

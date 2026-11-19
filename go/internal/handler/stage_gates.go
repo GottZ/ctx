@@ -438,6 +438,21 @@ func provenanceRejectOr(err error, fallback *writeReject) *writeReject {
 	return fallback
 }
 
+// derivativeTargetReject is the stage-time refusal of a by-id write (archive,
+// update) whose target carries the derived layer's provenance key: the key
+// UpdateBlock's and DeleteBlock's WHERE test (store.notDerivedSQL), so the
+// confirm of such a card could only answer provenance_protected with the token
+// spent (D1-M2: a card promises a write the confirm can execute). GetBlock
+// strips only guard_matched_id from metadata, so presence here is the same
+// predicate — and a SQL NULL scans to a nil map, no key, as the WHERE reads it
+// too. nil = admissible.
+func derivativeTargetReject(target *store.Block) *writeReject {
+	if _, derivative := target.Metadata[derived.MetadataKey]; derivative {
+		return provenanceRejectOr(store.ErrProvenanceProtected, nil)
+	}
+	return nil
+}
+
 // blockIdentityTakenMsg is the one wording of the issue #227 refusal. REST
 // manage update, the MCP update tool and both confirm surfaces carry it
 // verbatim; a client may match on it as well as on the 409 / "constraint".

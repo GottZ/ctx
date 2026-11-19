@@ -33,6 +33,29 @@ import (
 	"github.com/GottZ/ctx/internal/oai"
 )
 
+// allocOf is the least TotalAlloc of three calls of f, with f's last
+// result — the process's counter, kept for TestRerankClassGateOverTheRoute
+// only: its bound carries rerankGroundLoad for the router, the middleware
+// and the lean engine's side, which a measurement under the route's frame
+// no longer sees, and that share is not separable from the route's (issue
+// #369: per combo the route frame's least of three exceeded the process's
+// by up to 26 KB, run-to-run pool variance). The bound's margin carries the
+// process's noise instead: over 3 × 256 combos without -race the worst
+// request allocated 11.6 KB beyond its reservation and body against the
+// 256 KiB ground load, the noise #362 measured is at most 47 KB; 0 of 40
+// runs red at load 31–51.
+func allocOf[T any](f func() T) (least uint64, last T) {
+	least = ^uint64(0)
+	for range 3 {
+		var m0, m1 runtime.MemStats
+		runtime.ReadMemStats(&m0)
+		last = f()
+		runtime.ReadMemStats(&m1)
+		least = min(least, m1.TotalAlloc-m0.TotalAlloc)
+	}
+	return least, last
+}
+
 // rerankGroundLoad is the heap one request may hold beside its reservation:
 // the router, the middleware, the dispatcher's lease, the lean engine's side
 // of the call — FOLGE-E's ground load per request.
