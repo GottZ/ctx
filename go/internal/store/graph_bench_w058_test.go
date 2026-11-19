@@ -263,7 +263,7 @@ func benchExpandArm(t *testing.T, pool *pgxpool.Pool, name string, iters int,
 	var rep *graphcache.BudgetReport
 	p50, p95, mx := benchMeasure(t, iters, 2, func() error {
 		o, r, e := rrf.GraphExpandCachedWithReport(ctx, pool, seeds, scopes, nil, benchVisibleTypes,
-			benchExpandCfg(), cache)
+			rrf.RequestFilter{}, benchExpandCfg(), cache)
 		out, rep = o, r
 		return e
 	})

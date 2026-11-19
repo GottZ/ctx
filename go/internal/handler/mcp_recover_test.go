@@ -114,8 +114,10 @@ func TestMCPPanicHelperProcess(t *testing.T) {
 }
 
 // panickingQueryDelegate stands in for /api/query: it panics on the question
-// "panic", starts the REST body heartbeat the synthesis path runs
-// (startHeartbeat, query.go) and then panics on "heartbeat-panic", panics after
+// "panic", starts the REST keepalive the synthesis path commits
+// (armQueryKeepalive + commit, query_keepalive.go) without the deferred close
+// HandleQuery runs, and then panics on "heartbeat-panic" — only the request
+// context can end that ticker —, panics after
 // slow on "slow-panic" (by then the keepalive has committed the response), and
 // answers otherwise. It keeps every request context so the probe can see they
 // were all released.
@@ -137,7 +139,7 @@ func (d *panickingQueryDelegate) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	case "panic":
 		panic(mcpPanicNeedle + " in the query pipeline")
 	case "heartbeat-panic":
-		startHeartbeat(r.Context(), w, true)
+		armQueryKeepalive(r.Context(), w, false).commit()
 		panic(mcpPanicNeedle + " in the query pipeline after the body heartbeat started")
 	case "slow-panic":
 		time.Sleep(d.slow)

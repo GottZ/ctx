@@ -27,6 +27,12 @@
 // dropping a readable child would be Datenverlust. So: parent visible ⇒ child
 // folds onto parent; parent invisible or parent_id NULL ⇒ child stays raw + WARN
 // (distinct WARN messages so a hand-set cross-scope parent_id is observable).
+//
+// Request filter (issue #225): a parent the request's own filter excludes
+// (category, tags, categories_exclude, types_exclude — what ctx_rrf applied to
+// the child) is not delivered either, and for the same reason the child stays
+// RAW: it passed the fusion's filter, the parent did not. That case is the
+// caller's choice, not an anomaly, so it logs nothing.
 package handler
 
 import (
@@ -56,6 +62,7 @@ func derefTime(t *time.Time) time.Time {
 type childFold struct {
 	parentID string // "" ⇒ orphan (parent_id NULL): child stays + WARN
 	visible  bool   // parent passes the caller's visibility.Predicate (only meaningful when parentID != "")
+	excluded bool   // visible parent the request filter excludes (#225): child stays raw, no WARN
 }
 
 // Over-fetch tuning (design/02 §4.4). The fold reduces the row count (several
@@ -121,7 +128,7 @@ func (h *QueryHandler) aggregateOverFetchLimit(ctx context.Context, base int, ag
 // through the existing sensitivity/rerank/supersedes/filterSuperseded machinery
 // (a literal "right before filterSuperseded" placement would leave the hydrated
 // parent's Sensitivity zero-valued = credentials = a silent over-block).
-func (h *QueryHandler) foldAggregates(ctx context.Context, results []rrf.SearchResult, aggTypes, visibleTypes, readScopes, grantedBlockIDs []string, requestID string) []rrf.SearchResult {
+func (h *QueryHandler) foldAggregates(ctx context.Context, results []rrf.SearchResult, aggTypes, visibleTypes, readScopes, grantedBlockIDs []string, filter rrf.RequestFilter, requestID string) []rrf.SearchResult {
 	if len(aggTypes) == 0 || len(results) == 0 {
 		return results
 	}
@@ -139,7 +146,7 @@ func (h *QueryHandler) foldAggregates(ctx context.Context, results []rrf.SearchR
 		return results // aggregating types exist, but none ranked → nothing to fold
 	}
 
-	folds, hydrated, err := h.foldParentData(ctx, childIDs, visibleTypes, readScopes, grantedBlockIDs)
+	folds, hydrated, err := h.foldParentData(ctx, childIDs, visibleTypes, readScopes, grantedBlockIDs, filter)
 	if err != nil {
 		// Fail-open on an infra error: the children stay (they are readable — they
 		// passed ctx_rrf's own visibility). Returning the child never leaks the
@@ -168,7 +175,16 @@ func (h *QueryHandler) foldAggregates(ctx context.Context, results []rrf.SearchR
 // the predicate yields NULL join columns ⇒ visible=false ⇒ the child is dropped
 // downstream (no leak). The FK from migration 076 guarantees a non-NULL
 // parent_id resolves to a real row, so "not hydrated" means exactly "invisible".
-func (h *QueryHandler) foldParentData(ctx context.Context, childIDs, visibleTypes, readScopes, grantedBlockIDs []string) (map[string]childFold, map[string]rrf.SearchResult, error) {
+//
+// The request filter is read as a column, not joined in (#225): joined, an
+// excluded parent would read as invisible and log the cross-scope WARN. It is
+// evaluated on the hydrated (visible) parent only; NULL reads as "fails", as
+// in ctx_rrf's WHERE. The zero filter selects TRUE.
+func (h *QueryHandler) foldParentData(ctx context.Context, childIDs, visibleTypes, readScopes, grantedBlockIDs []string, filter rrf.RequestFilter) (map[string]childFold, map[string]rrf.SearchResult, error) {
+	passes, filterArgs := filter.Predicate("p", 5)
+	if passes == "" {
+		passes = "TRUE"
+	}
 	q := `
 WITH children AS (
     SELECT id, parent_id FROM context_blocks WHERE id = ANY($1::uuid[])
@@ -182,13 +198,15 @@ SELECT c.id::text,
        p.content,
        p.scope::text,
        p.updated_at,
-       p.type_name
+       p.type_name,
+       COALESCE(` + passes + `, FALSE)
 FROM children c
 LEFT JOIN context_blocks p
        ON p.id = c.parent_id
       AND ` + visibility.Predicate("p", "$2", "$3", "$4")
 
-	rows, err := h.pool.Query(ctx, q, childIDs, visibleTypes, readScopes, grantedBlockIDs)
+	args := append([]any{childIDs, visibleTypes, readScopes, grantedBlockIDs}, filterArgs...)
+	rows, err := h.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -203,11 +221,12 @@ LEFT JOIN context_blocks p
 			pTitle, pCategory, pContent, pScope, pType *string
 			pTags                                      []string
 			pUpdated                                   *time.Time
+			pPasses                                    bool
 		)
 		// Parent columns are LEFT-JOIN nullable: they arrive non-NULL only when
 		// the parent exists AND passes the visibility predicate.
 		if err := rows.Scan(&childID, &parentID, &pID,
-			&pTitle, &pCategory, &pTags, &pContent, &pScope, &pUpdated, &pType); err != nil {
+			&pTitle, &pCategory, &pTags, &pContent, &pScope, &pUpdated, &pType, &pPasses); err != nil {
 			return nil, nil, err
 		}
 		switch {
@@ -215,6 +234,8 @@ LEFT JOIN context_blocks p
 			folds[childID] = childFold{} // orphan
 		case pID == nil:
 			folds[childID] = childFold{parentID: *parentID, visible: false} // invisible parent
+		case !pPasses:
+			folds[childID] = childFold{parentID: *parentID, visible: true, excluded: true} // filtered out (#225)
 		default:
 			folds[childID] = childFold{parentID: *parentID, visible: true}
 			hydrated[*parentID] = rrf.SearchResult{
@@ -254,7 +275,7 @@ func applyParentFold(results []rrf.SearchResult, folds map[string]childFold, hyd
 	parentBest := make(map[string]childHit)
 	for _, r := range results {
 		cf, ok := folds[r.ID]
-		if !ok || cf.parentID == "" || !cf.visible {
+		if !ok || cf.parentID == "" || !cf.visible || cf.excluded {
 			continue
 		}
 		if cur, seen := parentBest[cf.parentID]; !seen || r.RRFScore > cur.score {
@@ -272,6 +293,8 @@ func applyParentFold(results []rrf.SearchResult, folds map[string]childFold, hyd
 				out = append(out, r)
 			case !cf.visible: // parent invisible: child stays RAW, parent never delivered (§4.4/§5.2)
 				invisibleIDs = append(invisibleIDs, r.ID)
+				out = append(out, r)
+			case cf.excluded: // parent outside the request filter: child stays RAW (#225)
 				out = append(out, r)
 			case inSet[cf.parentID]: // parent emitted at its own position (score bumped there)
 			case !emitted[cf.parentID]: // hydrate parent at this (best-ranked) child's slot

@@ -51,7 +51,7 @@ func TestGraphExpandCached_NilSnapshotIsSQLPath(t *testing.T) {
 	in := []SearchResult{res("A", 1.0)}
 
 	out, rep, err := GraphExpandCachedWithReport(context.Background(), nil, in,
-		[]string{"private"}, nil, []string{"knowledge"}, cfg, ExpandCache{})
+		[]string{"private"}, nil, []string{"knowledge"}, RequestFilter{}, cfg, ExpandCache{})
 	if err != nil {
 		t.Fatalf("disabled stage returned an error: %v", err)
 	}

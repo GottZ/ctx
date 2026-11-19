@@ -585,8 +585,12 @@ func fuseShares(seed, centroid map[string]float64, weight float64) map[string]fl
 // The report is SERVER TELEMETRY. Unlike the ego path, the query envelope never
 // carries a budget report (§4.5 behaviour matrix) — retrieval quality is a blend,
 // not a completeness contract.
+//
+// filter is the request's own narrowing (issue #225). It gates the one half
+// that ADDS blocks, the C9 injection; the boost only reorders results the
+// fusion already filtered.
 func ClusterBoost(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, embedding []float32,
-	readScopes, grantedBlockIDs, visibleTypes []string, cfg ClusterConfig, fresh ClusterFreshness) ([]SearchResult, *graphcache.BudgetReport, error) {
+	readScopes, grantedBlockIDs, visibleTypes []string, filter RequestFilter, cfg ClusterConfig, fresh ClusterFreshness) ([]SearchResult, *graphcache.BudgetReport, error) {
 	rep := graphcache.NewBudgetReport(graphcache.SourceSQL)
 	if !cfg.Enabled || len(results) == 0 || len(readScopes) == 0 {
 		return results, rep, nil
@@ -654,7 +658,7 @@ func ClusterBoost(ctx context.Context, pool *pgxpool.Pool, results []SearchResul
 	// Default 0 ⇒ this returns `boosted` unchanged, so a deployed-but-unarmed C9
 	// costs exactly one integer comparison.
 	if cfg.InjectMax > 0 && len(winners) > 0 {
-		injected, err := injectDispatch(ctx, pool, boosted, winners, readScopes, grantedBlockIDs, visibleTypes, cfg, rep)
+		injected, err := injectDispatch(ctx, pool, boosted, winners, readScopes, grantedBlockIDs, visibleTypes, filter, cfg, rep)
 		if err != nil {
 			// FAIL-OPEN, as everywhere in this stage: the BOOSTED results are the
 			// honest fallback — the boost already succeeded, and discarding it
@@ -677,7 +681,7 @@ func ClusterBoost(ctx context.Context, pool *pgxpool.Pool, results []SearchResul
 // unbounded read.
 func injectDispatch(ctx context.Context, pool *pgxpool.Pool, boosted []SearchResult,
 	winners map[string]float64, readScopes, grantedBlockIDs, visibleTypes []string,
-	cfg ClusterConfig, rep *graphcache.BudgetReport) ([]SearchResult, error) {
+	filter RequestFilter, cfg ClusterConfig, rep *graphcache.BudgetReport) ([]SearchResult, error) {
 	winnerIDs := make([]string, 0, len(winners))
 	for id := range winners {
 		winnerIDs = append(winnerIDs, id)
@@ -690,7 +694,7 @@ func injectDispatch(ctx context.Context, pool *pgxpool.Pool, boosted []SearchRes
 	}
 
 	cands, err := fetchClusterInjection(ctx, pool, winnerIDs, seen, readScopes,
-		grantedBlockIDs, visibleTypes, cfg.InjectMax*len(winnerIDs))
+		grantedBlockIDs, visibleTypes, filter, cfg.InjectMax*len(winnerIDs))
 	if err != nil {
 		return nil, err
 	}
@@ -755,8 +759,12 @@ type clusterCandidate struct {
 // clustersql.MemberOf gates WHICH MEMBERSHIP ROWS may be read (the community
 // side channel, R3), visibility.Predicate gates WHICH BLOCKS may be delivered.
 // Dropping either one is a leak of a different kind.
+//
+// The request filter (#225) is a third conjunct of the same WHERE, ahead of the
+// LIMIT: the window is filled with siblings that pass it, so an excluded
+// sibling never takes the place of one that would have been injected.
 func fetchClusterInjection(ctx context.Context, pool *pgxpool.Pool,
-	clusterIDs, excludeIDs, readScopes, grantedBlockIDs, visibleTypes []string, limit int) ([]clusterCandidate, error) {
+	clusterIDs, excludeIDs, readScopes, grantedBlockIDs, visibleTypes []string, filter RequestFilter, limit int) ([]clusterCandidate, error) {
 	if len(clusterIDs) == 0 || limit <= 0 {
 		return nil, nil
 	}
@@ -782,11 +790,17 @@ JOIN context_blocks cb ON cb.id = m.block_id
 WHERE m.cluster_id = ANY($1::uuid[])
   AND ` + clustersql.MemberOf("m", "$2") + `
   AND NOT (cb.id = ANY($3::uuid[]))
-  AND ` + visibility.Predicate("cb", "$4", "$2", "$5") + `
+  AND ` + visibility.Predicate("cb", "$4", "$2", "$5")
+	args := []any{clusterIDs, readScopes, excludeIDs, visibleTypes, grantedBlockIDs, limit}
+	if fsql, fargs := filter.Predicate("cb", 7); fsql != "" {
+		q += "\n  AND " + fsql // $7..$10 request filter (#225)
+		args = append(args, fargs...)
+	}
+	q += `
 ORDER BY cb.quality_score DESC NULLS LAST, cb.id
 LIMIT $6`
 
-	rows, err := pool.Query(ctx, q, clusterIDs, readScopes, excludeIDs, visibleTypes, grantedBlockIDs, limit)
+	rows, err := pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("rrf: cluster injection: %w", err)
 	}

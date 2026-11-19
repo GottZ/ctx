@@ -88,7 +88,7 @@ func TestClusterInjectDefaultIsDark(t *testing.T) {
 	// The two arms differ in EXACTLY the injection knob, so the comparison
 	// isolates it: any other config difference would make the boost itself
 	// diverge and the test would be measuring the wrong thing.
-	dark, _, err := rrf.ClusterBoost(ctx, pool, in, nil, scopes, nil, c9Types(), c9Cfg(0), c3Now())
+	dark, _, err := rrf.ClusterBoost(ctx, pool, in, nil, scopes, nil, c9Types(), rrf.RequestFilter{}, c9Cfg(0), c3Now())
 	if err != nil {
 		t.Fatalf("inject_max 0: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestClusterInjectDefaultIsDark(t *testing.T) {
 	// The counter-arm: the SAME fixture and the SAME config with the knob armed
 	// DOES add — otherwise "the default adds nothing" would also pass on a stage
 	// that can never add anything at all.
-	armed, _, err := rrf.ClusterBoost(ctx, pool, in, nil, scopes, nil, c9Types(), c9Cfg(2), c3Now())
+	armed, _, err := rrf.ClusterBoost(ctx, pool, in, nil, scopes, nil, c9Types(), rrf.RequestFilter{}, c9Cfg(2), c3Now())
 	if err != nil {
 		t.Fatalf("inject_max 2: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestClusterInjectVisibilityFailsClosed(t *testing.T) {
 	c9Sibling(t, pool, c9SiblingID(2), "private", c3ClusterID(0), 3, false)
 
 	in := c3Results(12, "private")
-	got, _, err := rrf.ClusterBoost(ctx, pool, in, nil, []string{"private"}, nil, c9Types(), c9Cfg(5), c3Now())
+	got, _, err := rrf.ClusterBoost(ctx, pool, in, nil, []string{"private"}, nil, c9Types(), rrf.RequestFilter{}, c9Cfg(5), c3Now())
 	if err != nil {
 		t.Fatalf("inject: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestClusterInjectEmptyTypesIsLoud(t *testing.T) {
 	c9Sibling(t, pool, c9SiblingID(0), "private", c3ClusterID(0), 5, false)
 
 	in := c3Results(12, "private")
-	got, _, err := rrf.ClusterBoost(ctx, pool, in, nil, []string{"private"}, nil, nil, c9Cfg(3), c3Now())
+	got, _, err := rrf.ClusterBoost(ctx, pool, in, nil, []string{"private"}, nil, nil, rrf.RequestFilter{}, c9Cfg(3), c3Now())
 	if err == nil {
 		t.Fatal("an empty visible-types allowlist must be an error, never 0 injected rows")
 	}
@@ -247,7 +247,7 @@ func TestClusterInjectCapAndProvenance(t *testing.T) {
 	}
 
 	in := c3Results(12, "private")
-	got, rep, err := rrf.ClusterBoost(ctx, pool, in, nil, []string{"private"}, nil, c9Types(), c9Cfg(2), c3Now())
+	got, rep, err := rrf.ClusterBoost(ctx, pool, in, nil, []string{"private"}, nil, c9Types(), rrf.RequestFilter{}, c9Cfg(2), c3Now())
 	if err != nil {
 		t.Fatalf("inject: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestClusterInjectRespectsStalenessGate(t *testing.T) {
 
 	in := c3Results(12, "private")
 	stale := c3Fresh{at: c3Now().at.Add(-8 * 24 * 60 * 60 * 1e9)}
-	got, _, err := rrf.ClusterBoost(ctx, pool, in, nil, []string{"private"}, nil, c9Types(), c9Cfg(3), stale)
+	got, _, err := rrf.ClusterBoost(ctx, pool, in, nil, []string{"private"}, nil, c9Types(), rrf.RequestFilter{}, c9Cfg(3), stale)
 	if err != nil {
 		t.Fatalf("stale inject: %v", err)
 	}
