@@ -141,8 +141,9 @@ type queryInput struct {
 	// inside the scopes the key already reads, so unlike `types` below they
 	// need no visibility check. Absent or empty ⇒ no key in the delegated
 	// body; an empty category is "no filter", as on `search` and `recent`.
-	// Like every /api/query filter they bind the rank-fusion candidates only:
-	// cluster boost, graph expansion and aggregate fold do not take them.
+	// Like every /api/query filter they bind the rank-fusion candidates and
+	// every stage after it that can add a block — cluster injection, graph
+	// expansion, aggregate fold (#225).
 	Category          string   `json:"category,omitempty" jsonschema:"retrieve only blocks of this category"`
 	Tags              []string `json:"tags,omitempty" jsonschema:"retrieve only blocks that carry at least one of these tags"`
 	CategoriesExclude []string `json:"categories_exclude,omitempty" jsonschema:"do not retrieve blocks of these categories"`
@@ -162,7 +163,7 @@ type queryInput struct {
 	// block the key may already read in full with `get`. Absent ⇒ the delegated
 	// body is byte-identical to before the fields existed.
 	Synthesize     *bool `json:"synthesize,omitempty" jsonschema:"false = retrieval only: answer the ranked sources as JSON without the LLM synthesis (default true)"`
-	IncludeContent bool  `json:"include_content,omitempty" jsonschema:"with synthesize false: attach each source's content (up to 1500 characters; a cut one carries truncated true, get the id for the full text); an error otherwise"`
+	IncludeContent bool  `json:"include_content,omitempty" jsonschema:"with synthesize false: attach each source's content (up to 1500 characters by default, settings key query.max_source_runes; a cut one carries truncated true, get the id for the full text); an error otherwise"`
 }
 
 type storeInput struct {
@@ -698,7 +699,7 @@ func mcpQueryHandler(cfg MCPConfig) mcp.ToolHandlerFor[queryInput, any] {
 			limit = 5
 		}
 		// /api/query attaches content on the retrieval-only path alone (the
-		// synthesis path builds its sources with includeContent=false), so
+		// synthesis path builds its sources with contentRunes 0), so
 		// include_content next to synthesis would be a silent no-op. Refused
 		// before any delegation, as /api/query refuses arm_ranks without
 		// synthesize:false.

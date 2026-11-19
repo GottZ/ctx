@@ -204,13 +204,20 @@ func (s *Scheduler) runEmbedMigrationCycle(ctx context.Context, router *dream.Ro
 		return nil
 	}
 
-	if err := s.ensureMigrationPendingIndex(ctx); err != nil {
+	if err := s.ensureMigrationPendingIndex(ctx, mig.ID); err != nil {
 		if errors.Is(err, errRuntimeIndexBusy) {
 			// Another session builds or drops a runtime index on
 			// context_blocks (issue #332): this cycle neither builds beside it
 			// nor picks without the index; the next tick asks again.
 			slog.Info("scheduler: embed migration cycle deferred — another session is building a runtime index on context_blocks",
 				"migration_id", mig.ID, "index", migrationPendingIndexName)
+			return nil
+		}
+		if errors.Is(err, errRuntimeIndexUnwanted) {
+			// The migration was confirmed after this cycle read it: no build,
+			// no batch; the next tick finds no active migration.
+			slog.Info("scheduler: embed migration cycle ends — the migration was confirmed after the cycle read it",
+				"migration_id", mig.ID)
 			return nil
 		}
 		return fmt.Errorf("embed-migrate: ensure pending index: %w", err)
@@ -457,6 +464,21 @@ func (s *Scheduler) migrateOneEmbedding(ctx context.Context, router *dream.Route
 		if err != nil {
 			return fmt.Errorf("embed-migrate: pick: %w", err)
 		}
+		// The migration must not be confirmed yet (issue #370): a confirm that
+		// committed after this cycle read the row has swapped the columns, and
+		// the pick above then read the swapped table — a write now would land
+		// in the fresh embedding_next pair, which the rollback requires empty.
+		// Read after the pick: a confirm in flight holds ACCESS EXCLUSIVE on
+		// context_blocks until its commit, so the pick waited for it and this
+		// read sees its status; a confirm that starts after the pick waits for
+		// this transaction and swaps the column written here.
+		unswapped, err := migrationUnswapped(ctx, tx, mig.ID)
+		if err != nil {
+			return err
+		}
+		if !unswapped {
+			return errPickReleased
+		}
 
 		// Chain re-resolve for THE picked block with its floor-adjusted
 		// sensitivity (identical to backfill — the gate table binds the chain
@@ -611,7 +633,16 @@ func (s *Scheduler) migrateWireFailure(ctx context.Context, tx pgx.Tx, tail *txT
 // Callers pass runtime names only (the _next twins and the pending index),
 // never a serving index: the cutover renames the _next twins away from
 // these names, and the DROP resolves the name when it runs.
-func (s *Scheduler) ensureConcurrentIndexValid(ctx context.Context, name, ddl string) (string, error) {
+//
+// wanted, when not nil, is asked under the lock on the lock's connection right
+// before the DDL (issue #370): whether the row still waits for this index. A
+// confirm that committed between the caller's own row check and the lock has
+// renamed the _next twins away and re-added an empty embedding_next pair; a
+// build after it would put a _next index on that empty pair (or the pending
+// index on the swapped columns). The confirm takes the same lock in its swap
+// transaction, so between this check and the end of the DDL no confirm
+// commits. false ends the call with errRuntimeIndexUnwanted and no DDL.
+func (s *Scheduler) ensureConcurrentIndexValid(ctx context.Context, name, ddl string, wanted runtimeIndexWanted) (string, error) {
 	st, err := readRuntimeIndex(ctx, s.pool, name)
 	if err != nil {
 		return "", fmt.Errorf("embed-migrate: index validity probe (%s): %w", name, err)
@@ -625,10 +656,13 @@ func (s *Scheduler) ensureConcurrentIndexValid(ctx context.Context, name, ddl st
 			return indexActionReused, nil
 		}
 	}
+	if runtimeIndexDDLHook != nil {
+		runtimeIndexDDLHook(runtimeIndexStageUnlocked, name)
+	}
 	var action string
 	err = withRuntimeIndexLock(ctx, s.pool, func(conn *pgxpool.Conn) error {
 		var lerr error
-		action, lerr = s.ensureRuntimeIndexLocked(ctx, conn, name, ddl)
+		action, lerr = s.ensureRuntimeIndexLocked(ctx, conn, name, ddl, wanted)
 		return lerr
 	})
 	if errors.Is(err, errRuntimeIndexBusy) {
@@ -643,7 +677,7 @@ func (s *Scheduler) ensureConcurrentIndexValid(ctx context.Context, name, ddl st
 // finished a build (then the index is reused) or died in one (an INVALID
 // leftover, which no living session builds any more: a build runs on the
 // session that holds the lock, so its lock ends with it).
-func (s *Scheduler) ensureRuntimeIndexLocked(ctx context.Context, conn *pgxpool.Conn, name, ddl string) (action string, err error) {
+func (s *Scheduler) ensureRuntimeIndexLocked(ctx context.Context, conn *pgxpool.Conn, name, ddl string, wanted runtimeIndexWanted) (action string, err error) {
 	st, err := readRuntimeIndex(ctx, conn, name)
 	if err != nil {
 		return "", fmt.Errorf("embed-migrate: index validity probe (%s): %w", name, err)
@@ -666,6 +700,18 @@ func (s *Scheduler) ensureRuntimeIndexLocked(ctx context.Context, conn *pgxpool.
 		slog.Warn("scheduler: embed migration index definition differs from its DDL — dropping for rebuild",
 			"index", name, "live_definition", live, "expected_definition", expected)
 		action = indexActionRebuiltDefinition
+	}
+	if wanted != nil {
+		still, err := wanted(ctx, conn)
+		if err != nil {
+			return "", fmt.Errorf("embed-migrate: index %s: row check under the lock: %w", name, err)
+		}
+		if !still {
+			return "", fmt.Errorf("embed-migrate: index %s: %w", name, errRuntimeIndexUnwanted)
+		}
+	}
+	if runtimeIndexDDLHook != nil {
+		runtimeIndexDDLHook(runtimeIndexStageLocked, name)
 	}
 	if action != indexActionCreated {
 		// The index found on context_blocks, by schema and name: the bare
@@ -740,9 +786,32 @@ func (s *Scheduler) runtimeIndexDefinitionSame(ctx context.Context, db pgxdb.Beg
 // CIC leaves an INVALID index — detect via pg_index.indisvalid, DROP
 // CONCURRENTLY, rebuild; §5 Bruchpfad 7: the index state is part of the
 // deterministically checkable recovery state, no dedicated recovery code).
-func (s *Scheduler) ensureMigrationPendingIndex(ctx context.Context) error {
-	_, err := s.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL)
+//
+// The DDL runs only while migration id has not been confirmed, asked under
+// the lock (issue #370): a cycle that read the row before a confirm committed
+// would otherwise rebuild the index on the swapped columns, where its
+// predicate matches every live row.
+func (s *Scheduler) ensureMigrationPendingIndex(ctx context.Context, id string) error {
+	_, err := s.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL,
+		func(ctx context.Context, db pgxdb.Rower) (bool, error) { return migrationUnswapped(ctx, db, id) })
 	return err
+}
+
+// migrationUnswapped reports whether migration id exists and has not been
+// confirmed (status neither done nor rolled_back): the embedding_next pair
+// and the runtime indexes are still those of this migration. A pause or an
+// abort after the cycle read the row is not checked here — the arm's writes
+// stay where they were before (the _next pair of the migration); only the
+// swap moves the columns under the cycle.
+func migrationUnswapped(ctx context.Context, db pgxdb.Rower, id string) (bool, error) {
+	var unswapped bool
+	if err := db.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM context_embed_migrations
+		 WHERE id = $1::uuid AND status NOT IN ($2, $3))`,
+		id, string(embedmigration.StatusDone), string(embedmigration.StatusRolledBack)).Scan(&unswapped); err != nil {
+		return false, fmt.Errorf("embed-migrate: migration not confirmed yet: %w", err)
+	}
+	return unswapped, nil
 }
 
 // dropMigrationPendingIndex removes the runtime index once no migration is
@@ -751,19 +820,24 @@ func (s *Scheduler) ensureMigrationPendingIndex(ctx context.Context) error {
 // per tick, never a DDL statement. The drop is runtime index DDL on
 // context_blocks and takes the runtime index lock (issue #332): beside a
 // build of another session (the verify gate of an instance that has not
-// seen the abort yet) it waits for the next tick instead.
+// seen the abort yet) it waits for the next tick instead. Probe and drop name
+// the index on context_blocks by its schema (issue #366, open since #331):
+// the bare name resolves through the session's search_path and could meet a
+// same-named index of another schema first.
 func (s *Scheduler) dropMigrationPendingIndex(ctx context.Context) error {
-	var exists bool
-	if err := s.pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM pg_class WHERE relname = $1 AND relkind = 'i')`,
-		migrationPendingIndexName).Scan(&exists); err != nil {
+	st, err := readRuntimeIndex(ctx, s.pool, migrationPendingIndexName)
+	if err != nil {
 		return fmt.Errorf("embed-migrate: index existence probe: %w", err)
 	}
-	if !exists {
+	if !st.exists {
 		return nil
 	}
-	err := withRuntimeIndexLock(ctx, s.pool, func(conn *pgxpool.Conn) error {
-		_, err := conn.Exec(ctx, `DROP INDEX CONCURRENTLY IF EXISTS `+migrationPendingIndexName)
+	err = withRuntimeIndexLock(ctx, s.pool, func(conn *pgxpool.Conn) error {
+		st, err := readRuntimeIndex(ctx, conn, migrationPendingIndexName)
+		if err != nil || !st.exists {
+			return err
+		}
+		_, err = conn.Exec(ctx, `DROP INDEX CONCURRENTLY IF EXISTS `+st.qualifiedName(migrationPendingIndexName))
 		return err
 	})
 	if errors.Is(err, errRuntimeIndexBusy) {

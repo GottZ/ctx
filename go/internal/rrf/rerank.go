@@ -69,6 +69,11 @@ type RerankConfig struct {
 	// pure cross-encoder order (default — the cross-encoder is the final
 	// arbiter, incl. of graph-injected neighbors); lower mixes RRF back in.
 	BlendWeight float64
+
+	// Timeout is the deadline of the ONE cross-encoder wire call, from
+	// admission on (#223): <= 0 => rerank.Timeout, above rerank.Timeout it is
+	// capped there (crossEncoderTimeout).
+	Timeout time.Duration
 }
 
 // rerankSystemPrompt is the batch scoring prompt for the reranker.
@@ -277,7 +282,9 @@ type RerankWire struct {
 // MW5 admission (design/01 §4.6 N4): the ONE sidecar wire call runs under a
 // lease on the sidecar origin, acquired after the early-outs (no lease
 // without wire contact — the mirror of the embed cache-hit clause) with
-// rerank.Timeout as the admission-anchored deadline hint. A failed acquire
+// the resolved call deadline (crossEncoderTimeout: rerank.Timeout unless
+// rerank.timeout is set lower, #223) as the admission-anchored deadline hint.
+// A failed acquire
 // still fails open on the result order, but the returned error is an
 // llm.AdmissionError — the CALLER must honor the §4.3 doctrine on it (no
 // Classify, no health report, no llmlog row). The sidecar's reported
@@ -287,7 +294,13 @@ type RerankWire struct {
 // picks the (guarded) client, and its ScoreDomain() is the rerank dialect
 // slot handed to rerank.Score (auto keeps the wire-container coupling,
 // logit/probability override it).
-func RerankCrossEncoder(ctx context.Context, b backends.Backend, model string, maxDocs int, blendWeight float64, query string, results []SearchResult, adm llm.Admission) ([]SearchResult, RerankWire, error) {
+//
+// timeout is the call's deadline, settings key rerank.timeout (#223),
+// resolved by crossEncoderTimeout: it is the admission's deadline hint and,
+// below rerank.Timeout, the wire deadline from admission on. A call it ends
+// fails open like every other failure here — pre-rerank order, the error for
+// the caller.
+func RerankCrossEncoder(ctx context.Context, b backends.Backend, model string, maxDocs int, blendWeight float64, timeout time.Duration, query string, results []SearchResult, adm llm.Admission) ([]SearchResult, RerankWire, error) {
 	if len(results) < RerankMinResults {
 		slog.Debug("cross-encoder rerank: skipping, fewer than min results",
 			"result_count", len(results),
@@ -308,7 +321,8 @@ func RerankCrossEncoder(ctx context.Context, b backends.Backend, model string, m
 	// signal and is cheap, so prepend it to the (truncated) content.
 	docs := buildCrossEncoderDocs(docsToRerank)
 
-	lease, runCtx, admErr := adm.Acquire(ctx, &b, backends.RoleRerank, rerank.Timeout)
+	wireTimeout := crossEncoderTimeout(timeout)
+	lease, runCtx, admErr := adm.Acquire(ctx, &b, backends.RoleRerank, wireTimeout)
 	if admErr != nil {
 		return results, RerankWire{}, admErr // terminal doctrine §4.3: not an attempt — caller skips Classify/health/llmlog
 	}
@@ -319,7 +333,17 @@ func RerankCrossEncoder(ctx context.Context, b backends.Backend, model string, m
 	logits, err := func() ([]float64, error) {
 		// defer is the only allowed release form (B1: panic-safe).
 		defer lease.Release()
-		logits, ptoks, err := rerank.Score(runCtx, b, model, query, docs, b.ScoreDomain())
+		// rerank.Score applies rerank.Timeout itself; a shorter configured
+		// deadline is laid over it here, from the same instant (admission). At
+		// the cap the context stays as it was, so a request without the key
+		// runs exactly the call it ran before the key existed.
+		wireCtx := runCtx
+		if wireTimeout < rerank.Timeout {
+			var cancel context.CancelFunc
+			wireCtx, cancel = context.WithTimeout(runCtx, wireTimeout)
+			defer cancel()
+		}
+		logits, ptoks, err := rerank.Score(wireCtx, b, model, query, docs, b.ScoreDomain())
 		if err == nil && ptoks > 0 {
 			lease.ReportUsage(dispatch.Usage{PromptTokens: ptoks})
 		}
@@ -340,6 +364,19 @@ func RerankCrossEncoder(ctx context.Context, b backends.Backend, model string, m
 	}
 
 	return applyRerankScores(results, scores, len(docsToRerank), blendWeight), tel, nil
+}
+
+// crossEncoderTimeout resolves the configured cross-encoder deadline (#223):
+// <= 0 (no key, a struct built literally) is rerank.Timeout, today's value;
+// anything above it is capped there — rerank.Timeout stays the wire's safety
+// net for a stuck or oversized request, and the key can only make a query give
+// up earlier, never hold the sidecar longer. The same cap the external rerank
+// door applies to an alias's timeout_s (oai/rerank.go attemptTimeout).
+func crossEncoderTimeout(configured time.Duration) time.Duration {
+	if configured <= 0 || configured > rerank.Timeout {
+		return rerank.Timeout
+	}
+	return configured
 }
 
 // parseRerankScores extracts a JSON array of integers from the LLM response.

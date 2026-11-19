@@ -74,7 +74,7 @@ func Active(ctx context.Context, q Querier) (*Migration, error) {
 // deltas in memory and lands them in a single UPDATE at cycle end).
 // cursor==nil persists NULL — the wrap-around at queue end (§4.3: the next
 // pass re-scans from the start and catches lapsed backoffs plus rows made
-// re-pending via ClearEmbedding). Deliberately NOT a CAS on status: counter
+// re-pending via InvalidateEmbeddingTx). Deliberately NOT a CAS on status: counter
 // deltas are valid regardless of concurrent pause/abort transitions — a
 // block that WAS migrated stays counted (the Transition CAS protects the
 // status column, nothing else, §4.1).

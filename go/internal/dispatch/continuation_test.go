@@ -16,10 +16,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/GottZ/ctx/internal/testgoroutine"
 )
 
 // contReq is a continuation acquire of weight w (A03-W17): the next
@@ -596,26 +597,15 @@ func TestContinuationIgnoredInHouse(t *testing.T) {
 // TestContinuationRaceEmergencyStopRelease is the race gate: 1 000 rounds of
 // a continuation, a release of the lease that fills E and the emergency stop,
 // started in the same instant. Every continuation ends with exactly one lease
-// or one error, Held is 0 after the releases, and no goroutine stays behind.
+// or one error, Held is 0 after the releases, and no goroutine stays behind:
+// the goroutines the gate owns (gateGoroutines) are as many as before the
+// rounds.
 func TestContinuationRaceEmergencyStopRelease(t *testing.T) {
 	bg := context.Background()
 	d, _ := newTestDispatcher(t, DefaultSettings(), partitionPolicy(2, 1))
 	on, off := DefaultSettings(), DefaultSettings()
 	off.Enabled = false
-	settle := func() int {
-		runtime.GC()
-		n := runtime.NumGoroutine()
-		for i := 0; i < 50; i++ {
-			time.Sleep(2 * time.Millisecond)
-			if m := runtime.NumGoroutine(); m == n {
-				return n
-			} else {
-				n = m
-			}
-		}
-		return n
-	}
-	g0 := settle()
+	gate := testgoroutine.Take()
 	var leases, refused int
 	for round := 0; round < 1000; round++ {
 		d.UpdateSettings(on)
@@ -652,8 +642,6 @@ func TestContinuationRaceEmergencyStopRelease(t *testing.T) {
 			t.Fatalf("round %d: held %d weight %d inflight %d waiting %d, want all 0", round, ts.Held, ts.HeldWeight, ts.Inflight, ts.External.Waiting)
 		}
 	}
-	if g1 := settle(); g1 != g0 {
-		t.Fatalf("goroutines %d → %d after 1 000 rounds, want ±0", g0, g1)
-	}
+	gateGoroutines(t, gate, 2*time.Second)
 	t.Logf("1 000 rounds: %d leases, %d ErrExternalNotOffered", leases, refused)
 }

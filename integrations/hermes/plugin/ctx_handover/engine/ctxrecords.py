@@ -52,10 +52,10 @@ HEAD_TITLE = "Compaction checkpoint head {root}"
 root's title token (``head_token``)."""
 ROOT_TOKEN_MAX = 48
 CHECKPOINT_TYPE = "checkpoint"
-HEAD_TAG = "checkpoint-head"
-"""The tag every ctx_checkpoint head carries (its ``HEAD_TAGS``); the head search names it (GottZ/ctx#342)."""
 """The type ctx_checkpoint stores its heads under. The head search names it (GottZ/ctx#342): ctx may leave types that
 retrieval never ranks out of a search that names no type."""
+HEAD_TAG = "checkpoint-head"
+"""The tag every ctx_checkpoint head carries (its ``HEAD_TAGS``); the head search names it (GottZ/ctx#342)."""
 _TYPE_NOT_VISIBLE_RE = re.compile(r"\bblock type\W+([A-Za-z0-9_.:-]+)\W+is not retrieval-visible\b")
 _UNKNOWN_ARGS_MARKER = "unexpected additional properties"
 _TYPES_ARG_RE = re.compile(r"\btypes\b")

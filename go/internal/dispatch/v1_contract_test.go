@@ -68,14 +68,16 @@ func TestTryAcquireExternalWouldBlockCarriesRetryAfter(t *testing.T) {
 	}
 	defer held.Release()
 
-	start := time.Now()
-	l, _, err := d.TryAcquire(ctxB, Request{Target: Target{Origin: origin}, Class: ClassExternal, Role: "chat"})
+	var l *Lease
+	ops := sectionsOf(d, func() {
+		l, _, err = d.TryAcquire(ctxB, Request{Target: Target{Origin: origin}, Class: ClassExternal, Role: "chat"})
+	})
 	if l != nil {
 		l.Release()
 		t.Fatal("external try on a full partition was admitted")
 	}
-	if took := time.Since(start); took > 50*time.Millisecond {
-		t.Fatalf("external try took %v, want an immediate answer (<= 50 ms)", took)
+	if ops != 1 {
+		t.Fatalf("external try took %d dispatcher sections, want an immediate answer (its one section)", ops)
 	}
 	if !errors.Is(err, ErrWouldBlock) {
 		t.Fatalf("external try = %v, want ErrWouldBlock", err)

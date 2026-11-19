@@ -60,11 +60,13 @@ so a client must not rely on a code being present.
 
 Which errors carry a code is a property of each tool's write path: `store`,
 `blob_store` and `blob_link` code every rejection; `update` codes the verdict of
-its gate chain and the identity collision (`constraint`, see [`update`](#update));
+its gate chain and the identity collision (`constraint`, see [`update`](#update)),
+and, when it stages, `provenance_protected` for a target that carries the derived
+layer's provenance (no card is issued for an update the confirm cannot execute);
 `archive` codes `provenance_protected` and, when it stages,
 `rate_limit`; `confirm` codes the claim verdict and the identity collision of a
-confirmed update; the issue tools code only
-`reserved_metadata`; the read tools and the guard tools never code. Any tool can
+confirmed update; the issue tools code
+`reserved_metadata` and the identity collision (`constraint`, issue #275); the read tools and the guard tools never code. Any tool can
 additionally answer `internal` for a server fault (below).
 
 **Server faults.** A panic while a tool call runs — in its handler or anywhere below it
@@ -131,15 +133,16 @@ Hybrid semantic + fulltext search with LLM synthesis, or retrieval only. Read-on
 | `types` | string[] | | restrict retrieval to these block types; each must be a retrieval-visible type, an unknown or non-visible name is an error |
 | `types_exclude` | string[] | | exclude these block types |
 | `synthesize` | boolean | | `false` = retrieval only: no synthesis step, the answer is the ranked sources as JSON (default `true`) |
-| `include_content` | boolean | | with `synthesize: false`, attach each source's content (at most 1500 characters; a cut one carries `truncated: true`, `get` its id for the full text); an error without it |
+| `include_content` | boolean | | with `synthesize: false`, attach each source's content (at most 1500 characters by default, `query.max_source_runes`; a cut one carries `truncated: true`, `get` its id for the full text); an error without it |
 
 `category`, `tags` and `categories_exclude` are passed to `POST /api/query` under
 the same names and narrow the candidates of the rank-fusion step; given together,
-a candidate must pass all of them. The post-fusion stages (cluster boost, graph
-expansion, aggregate fold) do not take them: where one of those is enabled, a
-block linked to a hit can enter the source list from outside the filter. Unlike
-`types` they are not checked against anything: a name that matches no block
-gives an empty result, not an error.
+a candidate must pass all of them. Unlike `types` they are not checked against
+anything: a name that matches no block gives an empty result, not an error. The
+post-fusion stages that can add a block (cluster injection, graph expansion,
+aggregate fold) apply them too, together with `types` / `types_exclude`: a block
+outside the filter does not enter the source list as a neighbour, a cluster
+sibling or a folded parent.
 
 Runs the full `POST /api/query` pipeline (temporal parsing, rank fusion, temporal
 gravity, rerank, synthesis). **Answer:** the synthesized answer, then a source list:

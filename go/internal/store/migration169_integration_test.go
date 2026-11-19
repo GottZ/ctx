@@ -117,9 +117,13 @@ func m169Ingest(pool *pgxpool.Pool, sourceID, title, content string) (string, er
 	return b.ID, nil
 }
 
+// m169Is23505 reports the identity collision of the issue: the 23505 of
+// uq_context_category_title_scope, which InsertChunk returns as
+// *store.BlockIdentityTakenError since issue #275.
 func m169Is23505(err error) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+	var taken *store.BlockIdentityTakenError
+	return errors.As(err, &taken) || (errors.As(err, &pgErr) && pgErr.Code == "23505")
 }
 
 func TestMigration169_ChunkLifecycleRepair(t *testing.T) {
