@@ -116,7 +116,9 @@ DELETE FROM _migrations WHERE version = 181;
 `
 
 func TestMigration181_DropsTheCounterKeepsTheTable(t *testing.T) {
-	head := testdb.SetupTestDB(t)
+	// A database at 181: the way back of 181 takes back 181 only, so a later
+	// migration (182, issue #360) would stay in _migrations above it.
+	head := testdb.SetupTestDBUpTo(t, 181)
 	at180 := testdb.SetupTestDBUpTo(t, 180)
 	ctx := context.Background()
 

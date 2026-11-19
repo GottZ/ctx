@@ -127,6 +127,7 @@ func TestEmbedIndexDefinition_Integration(t *testing.T) {
 			"idx_embedding_pending_sens_next":       indexActionRebuiltDefinition,
 			"idx_dream_pending_next":                indexActionCreated,
 			"idx_guard_pending_next":                indexActionCreated,
+			"idx_guard_pending_type_next":           indexActionCreated,
 		}
 		if len(rep.Index.Indexes) != len(wantAction) {
 			t.Errorf("index entries = %d, want %d", len(rep.Index.Indexes), len(wantAction))
@@ -143,7 +144,9 @@ func TestEmbedIndexDefinition_Integration(t *testing.T) {
 		if err := CleanupEmbedMigration(ctx, pool, migID); err != nil {
 			t.Fatalf("cleanup: %v", err)
 		}
-		if drifts := indexDrifts(t, pool, pickIndexes...); len(drifts) != 0 {
+		// optionalAnchors adds idx_guard_pending_type (migration 182): its twin,
+		// renamed by the swap, must carry exactly the definition of 182.
+		if drifts := indexDrifts(t, pool, optionalAnchors...); len(drifts) != 0 {
 			t.Errorf("schema contract after cutover reports drift on the pick indexes: %+v", drifts)
 		}
 	})
@@ -201,7 +204,7 @@ func TestEmbedIndexDefinition_Integration(t *testing.T) {
 		if err := CleanupEmbedMigration(ctx, pool, migID); err != nil {
 			t.Fatalf("cleanup: %v", err)
 		}
-		if drifts := indexDrifts(t, pool, pickIndexes...); len(drifts) != 0 {
+		if drifts := indexDrifts(t, pool, optionalAnchors...); len(drifts) != 0 {
 			t.Errorf("schema contract after the re-verified cutover reports drift: %+v", drifts)
 		}
 	})
