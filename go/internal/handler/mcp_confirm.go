@@ -190,7 +190,7 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 			}
 			if out.Op == store.OpStoreBatch {
 				return &mcp.CallToolResult{
-					Content: []mcp.Content{textContent(renderConfirmedStoreBatch(out.Blocks))},
+					Content: []mcp.Content{textContent(renderConfirmedStoreBatch(out.Batch))},
 				}, nil, nil
 			}
 			if out.Op == store.OpBlobStore {

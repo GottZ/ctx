@@ -83,10 +83,16 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 		}
 		if out.Op == store.OpStoreBatch {
 			// Issue #211: a confirmed batch answers its blocks, in the card's
-			// order, each in the shape of the single answer's `block`.
-			blocks := make([]map[string]any, len(out.Blocks))
-			for i, b := range out.Blocks {
-				blocks[i] = map[string]any{"id": b.ID, "title": b.Title, "category": b.Category, "scope": b.Scope}
+			// order, each in the shape of the single answer's `block` — or,
+			// for an item whose block already held what it asks for, the
+			// /api/store noop answer.
+			blocks := make([]map[string]any, len(out.Batch))
+			for i, it := range out.Batch {
+				if b := it.Block; b != nil {
+					blocks[i] = map[string]any{"id": b.ID, "title": b.Title, "category": b.Category, "scope": b.Scope}
+					continue
+				}
+				blocks[i] = map[string]any{"action": "noop", "reason": "identical_content", "existing_id": it.UnchangedID}
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"success": true, "op": out.Op, "blocks": blocks})
 			return

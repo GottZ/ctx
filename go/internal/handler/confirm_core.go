@@ -95,9 +95,10 @@ type confirmOutcome struct {
 	// Supersedes is the block a confirmed op 'store' declared to supersede
 	// (issue #197), "" otherwise.
 	Supersedes string
-	// Blocks are the written blocks of a confirmed op 'store_batch' (issue
-	// #211), in the order of the card's items.
-	Blocks []*store.Block
+	// Batch is the outcome of a confirmed op 'store_batch' (issue #211), one
+	// entry per card item in the card's order: the written block, or the
+	// block an item that changed nothing matches.
+	Batch []storeBatchItem
 }
 
 // confirmIdentityTakenPrefix opens the confirmExecRejected wording of a staged

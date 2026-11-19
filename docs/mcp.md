@@ -395,13 +395,18 @@ in the transaction on the block as it is then, `provenance_protected`, `constrai
 (an explicit type onto a comment or an issue) and the supersedes codes — the items
 written before it in the transaction are rolled back. A batch without items answers
 `missing_fields`; more items than `writes.batch_max_items` (default 100, `0` switches
-batches off) `size_cap`. An item whose write would change nothing is not written and
-costs nothing (nor is its block locked: a write to it after the check is ordered after
-the batch); every other item counts as one write of the key's write budget
-(`query.rate_limit_write`), and a batch that does not fit into what is left of the
-current 60-second window is refused whole with `rate_limit`. The count and the booking
-happen inside the batch's transaction under a lock of the key, so two batches of one
-key — on any ctxd instance — cannot both spend the same rest of the window.
+batches off) `size_cap`. An item whose write would change nothing (the `store` tool's
+identical-content check) is not written and costs nothing; the batch decides that in its
+transaction on the block while it holds the block's lock, and keeps the lock to its
+commit, so no other write lands between the decision and the commit. Every other item
+counts as one write of the key's write budget (`query.rate_limit_write`), and a batch
+that does not fit into what is left of the current 60-second window is refused whole
+with `rate_limit`; a batch of only unchanged items is neither counted nor refused. The
+count and the booking happen inside the batch's transaction under a lock of the key, so
+two batches of one key — on any ctxd instance — cannot both spend the same rest of the
+window. Single `store` calls do not take that lock; how far they and a batch can
+exceed the limit together is in [api.md](api.md#endpoints) (`POST /api/store/batch`,
+*Budget*).
 **Answer:**
 
 ```
@@ -412,11 +417,15 @@ items[2]: Stored: <title> (id: <uuid>, category: <category>, supersedes: <uuid>)
 ```
 
 For a `confirm_writes` key the batch is **staged as one card**: one `payload_hash`
-over every item that writes (an unchanged item is answered at once and is not part of
-it), the budget charged in the transaction that stages the card. A staged batch whose
-declarations would refuse each other at the confirm (two blocks declaring each other)
-is refused at stage time. [`confirm`](#confirm) then writes every item of
-the card in one transaction. Before it spends the hash, the confirm re-checks each
+over every item — an item unchanged at stage time included, named in the stage answer
+as `items[<i>]: identical content exists now (id: <uuid>) — the confirm leaves it as it
+is if it still is` — and one write intent per item of the card charged in the
+transaction that stages it. A batch of which every item is unchanged at stage time
+stages nothing, costs nothing and is answered at once like a direct batch. A staged
+batch whose declarations would refuse each other at the confirm (two blocks declaring
+each other) is refused at stage time. [`confirm`](#confirm) then runs every item of the
+card in one transaction, deciding on each locked block whether it is still unchanged
+(then it is left as it is, its intent spent). Before it spends the hash, the confirm re-checks each
 item's scope and claims against the key and the registry of that moment — a refusal
 there keeps the card; a refusal of the transaction itself (a supersedes target that
 changed, a derivative in the way) spends it, writes nothing, and answers behind
@@ -514,9 +523,12 @@ A hash is bound to the key that staged it and expires. **Answer:**
 `Confirmed and stored: …` / `Confirmed and updated: <title> (id: <uuid>, category: <category>)` /
 `Confirmed and archived: <title> (id: <uuid>, category: <category>)`,
 for a staged [`store_batch`](#store_batch)
-`Confirmed and stored <n> blocks in one transaction:` and one line
-`items[<k>]: <title> (id: <uuid>, category: <category>)` per item of the card (on
-`POST /api/confirm`: `{"success": true, "op": "store_batch", "blocks": [{id, title, category, scope}, …]}`),
+`Confirmed and stored <n> blocks in one transaction:` (`, <m> unchanged` before the
+colon when the confirm left items as they were) and one line per item of the card,
+`items[<k>]: <title> (id: <uuid>, category: <category>)` or
+`items[<k>]: No change needed — identical content already exists (id: <uuid>)` (on
+`POST /api/confirm`: `{"success": true, "op": "store_batch", "blocks": [{id, title, category, scope}, …]}`,
+an unchanged item as `{"action": "noop", "reason": "identical_content", "existing_id"}`),
 or for blobs `Confirmed and stored blob: <title> (id: <uuid>, category: <category>, <n> bytes)` /
 `Confirmed and linked blob: <title> (id: <uuid>, context_block_id: <uuid>)`.
 A confirmed update that would give the block another active block's category and

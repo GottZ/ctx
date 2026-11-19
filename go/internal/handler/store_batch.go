@@ -58,23 +58,20 @@ func batchItemPrefix(i int) string { return fmt.Sprintf("items[%d]: ", i) }
 // batch promises one transaction for everything it writes.
 const storeBatchParentMsg = "parent_id is not part of a batch — write a block with a parent through POST /api/store"
 
-// storeBatchPlan is a batch that passed its gates: the items as sent, what the
-// gates decided for each (resolved scope, post-detector sensitivity and
-// metadata), the per-item outcome so far (the unchanged ones are final) and
-// the positions of the items that write.
+// storeBatchPlan is a batch that passed its gates: the items as sent and what
+// the gates decided for each (resolved scope, post-detector sensitivity and
+// metadata).
 type storeBatchPlan struct {
-	items  []storeRequest
-	gated  []*stageWriteGateResult
-	out    []storeBatchItem
-	writes []int
+	items []storeRequest
+	gated []*stageWriteGateResult
 }
 
-// upserts is the store's form of the writing items, in the order of writes.
+// upserts is the store's form of the items, in their order.
 func (p *storeBatchPlan) upserts() []store.BatchUpsert {
-	batch := make([]store.BatchUpsert, len(p.writes))
-	for k, i := range p.writes {
-		it, res := p.items[i], p.gated[i]
-		batch[k] = store.BatchUpsert{
+	batch := make([]store.BatchUpsert, len(p.items))
+	for i, it := range p.items {
+		res := p.gated[i]
+		batch[i] = store.BatchUpsert{
 			Category: it.Category, Title: it.Title, Content: it.Content, Tags: it.Tags,
 			Metadata: res.Metadata, Scope: res.WriteScope, ScopeExplicit: res.ScopeExplicit,
 			Sens: res.Sens, TypeName: it.Type, Supersedes: it.Supersedes,
@@ -84,9 +81,10 @@ func (p *storeBatchPlan) upserts() []store.BatchUpsert {
 }
 
 // runStoreBatch is the shared core of the direct path: the gates, then the one
-// transaction — the budget checked and booked inside it — then the afterwork of
-// each written block. A non-nil reject means nothing was written and nothing
-// was booked.
+// transaction — every item locked, the no-op items decided on their locked
+// rows, the budget checked and booked for the items that write — then the
+// afterwork of each written block. A non-nil reject means nothing was written
+// and nothing was booked.
 func runStoreBatch(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, ar *auth.AuthResult,
 	items []storeRequest, lim storeBatchLimits, reqID string,
 ) ([]storeBatchItem, *writeReject) {
@@ -94,39 +92,55 @@ func runStoreBatch(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, 
 	if rej != nil {
 		return nil, rej
 	}
-	if len(plan.writes) == 0 {
-		return plan.out, nil
-	}
-	blocks, err := store.UpsertBlocks(ctx, pool, plan.upserts(), ar.ApiKeyID, set,
+	results, err := store.UpsertBlocks(ctx, pool, plan.upserts(), ar.ApiKeyID, set,
 		&store.WriteBudget{APIKeyID: ar.ApiKeyID, Limit: lim.RateLimitWrite})
 	if err != nil {
-		return nil, storeBatchFailureReject(err, plan.writes, reqID)
+		return nil, storeBatchFailureReject(err, reqID)
 	}
+	out := storeBatchOutcome(results)
 	// The blocks and their booking are committed: the afterwork must not stop
 	// halfway because the client went away.
 	after := context.WithoutCancel(ctx)
-	for k, i := range plan.writes {
-		b := blocks[k]
-		plan.out[i].Block = b
-		plan.out[i].Supersedes = strings.ToLower(items[i].Supersedes)
+	for i, r := range results {
+		b := r.Block
+		if b == nil {
+			continue
+		}
+		out[i].Supersedes = strings.ToLower(items[i].Supersedes)
 		if res := plan.gated[i]; res.Sens.Manual && b.Sensitivity != string(res.Sens.Value) {
-			plan.out[i].SensWarning = fmt.Sprintf(
+			out[i].SensWarning = fmt.Sprintf(
 				"sensitivity %s not applied: existing block is %s — downgrades need manage update with confirm_sensitivity_downgrade",
 				res.Sens.Value, b.Sensitivity)
 		}
 		finishStoredBlock(after, pool, set, b, reqID)
 	}
-	return plan.out, nil
+	return out, nil
+}
+
+// storeBatchOutcome is each item's outcome as the store decided it: the
+// written block and what an identical-content write rewrote, or the block an
+// unchanged item matches.
+func storeBatchOutcome(results []store.BatchResult) []storeBatchItem {
+	out := make([]storeBatchItem, len(results))
+	for i, r := range results {
+		if r.Block == nil {
+			out[i].UnchangedID = r.Match.ID
+			continue
+		}
+		out[i].Block = r.Block
+		out[i].Changed = r.Match.Changed()
+	}
+	return out
 }
 
 // storeBatchFailureReject renders a failed store.UpsertBlocks on the direct
 // path: the budget refusal, an item's refusal (storeBatchRefusal), else the
 // opaque 500 with the cause in the log.
-func storeBatchFailureReject(err error, writes []int, reqID string) *writeReject {
+func storeBatchFailureReject(err error, reqID string) *writeReject {
 	if rej := storeBatchBudgetReject(err); rej != nil {
 		return rej
 	}
-	if rej := storeBatchRefusal(err, writes); rej != nil {
+	if rej := storeBatchRefusal(err); rej != nil {
 		return rej
 	}
 	slog.Error("store batch: upsert error", "error", err, "request_id", reqID)
@@ -135,10 +149,9 @@ func storeBatchFailureReject(err error, writes []int, reqID string) *writeReject
 
 // storeBatchRefusal is the refusal of one item inside the transaction, as the
 // single store answers it — provenance_protected, the re-type of a comment or
-// an issue (constraint), the supersedes classes — named by its position;
-// writes maps the store's index back to the caller's list. nil when err is no
-// such refusal (a fault).
-func storeBatchRefusal(err error, writes []int) *writeReject {
+// an issue (constraint), the supersedes classes — named by its position in
+// the caller's list. nil when err is no such refusal (a fault).
+func storeBatchRefusal(err error) *writeReject {
 	var itemErr *store.BatchItemError
 	if !errors.As(err, &itemErr) {
 		return nil
@@ -150,7 +163,7 @@ func storeBatchRefusal(err error, writes []int) *writeReject {
 	if rej == nil {
 		return nil
 	}
-	return rej.prefixed(batchItemPrefix(writes[itemErr.Index]))
+	return rej.prefixed(batchItemPrefix(itemErr.Index))
 }
 
 // gateStoreBatch runs every gate of a batch, in this order, each before
@@ -162,18 +175,20 @@ func storeBatchRefusal(err error, writes []int) *writeReject {
 //     registry, the credentials detector, the write scope) — the first
 //     refusing item answers, with its own class and text behind "items[i]: ";
 //  3. two items with one (category, title, scope) identity — a batch writes
-//     each block once (constraint);
-//  4. per item the identical-content no-op of /api/store: such an item is not
-//     written and spends nothing. It is not locked either: a write another
-//     client makes to that block after the check is ordered after the batch.
+//     each block once (constraint).
 //
-// The write budget — one write per item that writes, refused whole when they
-// do not fit into what is left of query.rate_limit_write in the current
-// window — is checked under the key's budget lock in the transaction that
-// writes (store.UpsertBlocks) or stages (mcpStageStoreBatch), before its first
-// write. What the store decides on the row as it is — provenance_protected,
-// the re-type of a comment or an issue, the supersedes refusals — is decided in
-// the transaction too, which then rolls back and names the item.
+// Whether an item would change nothing (the identical-content no-op of
+// /api/store) is not decided here: store.UpsertBlocks decides it on the item's
+// row while its transaction holds that row, so no other write can come
+// between the decision and the batch's commit. The write budget — one write
+// per item that writes, refused whole when they do not fit into what is left
+// of query.rate_limit_write in the current window — is checked in the same
+// transaction under the key's budget lock, after those decisions and before
+// the first write (a staged batch: in the transaction that stages it,
+// mcpStageStoreBatch). What the store decides on the row as it is —
+// provenance_protected, the re-type of a comment or an issue, the supersedes
+// refusals — is decided in the transaction too, which then rolls back and
+// names the item.
 func gateStoreBatch(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, ar *auth.AuthResult,
 	items []storeRequest, lim storeBatchLimits, reqID string,
 ) (*storeBatchPlan, *writeReject) {
@@ -196,39 +211,17 @@ func gateStoreBatch(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set,
 	if rej := storeBatchDuplicateReject(items, gated); rej != nil {
 		return nil, rej
 	}
-
-	out := make([]storeBatchItem, len(items))
-	var writes []int
-	for i, it := range items {
-		// The identical-content no-op of /api/store, on the values the gates
-		// decided. A write that names a block it supersedes is never a no-op.
-		if it.Supersedes == "" {
-			match, err := store.IdenticalContentMatch(ctx, pool, it.Content, gated[i].WriteScope, it.Category, it.Title,
-				it.Tags, gated[i].Metadata, gated[i].Sens, it.Type)
-			if err != nil {
-				slog.Error("store batch: hash noop check error", "error", err, "index", i, "request_id", reqID)
-				return nil, classInternal.reject("Internal server error")
-			}
-			if match.Unchanged() {
-				out[i].UnchangedID = match.ID
-				continue
-			}
-			out[i].Changed = match.Changed()
-		}
-		writes = append(writes, i)
-	}
-	return &storeBatchPlan{items: items, gated: gated, out: out, writes: writes}, nil
+	return &storeBatchPlan{items: items, gated: gated}, nil
 }
 
-// storeBatchCanonicalItems is the staged form of a plan's writes: each item
-// as a staged op 'store' binds it — the resolved scope, the post-detector
-// metadata and sensitivity — so the confirm writes exactly what the gates
-// decided.
+// storeBatchCanonicalItems is the staged form of a plan: each item as a staged
+// op 'store' binds it — the resolved scope, the post-detector metadata and
+// sensitivity — so the confirm writes exactly what the gates decided.
 func storeBatchCanonicalItems(p *storeBatchPlan) []store.CanonicalWrite {
-	items := make([]store.CanonicalWrite, len(p.writes))
-	for k, i := range p.writes {
-		it, res := p.items[i], p.gated[i]
-		items[k] = store.CanonicalWrite{
+	items := make([]store.CanonicalWrite, len(p.items))
+	for i, it := range p.items {
+		res := p.gated[i]
+		items[i] = store.CanonicalWrite{
 			Op:                "store",
 			Scope:             res.WriteScope,
 			Category:          it.Category,
@@ -279,21 +272,21 @@ func confirmBatchReject(ctx context.Context, blocktypes *blocktype.Registry, ar 
 }
 
 // executeConfirmedStoreBatch runs op 'store_batch' AFTER the consume: the
-// card's items through store.UpsertBlocks, the transaction of the direct path,
-// then each block's afterwork. No booking — the batch paid for its writes at
-// stage time, as every staged op does. A refusal the store decides on the row
-// as it is then (provenance, the re-type of a comment or an issue, a
-// supersedes target that changed) writes nothing and answers behind the
-// prefix that says the token is spent, as a confirmed single store does.
+// card's items through store.UpsertBlocks, the transaction of the direct path
+// — an item whose row then already holds what it asks for is left as it is,
+// decided on the locked row — then each written block's afterwork. No
+// booking — the batch paid for its items at stage time, as every staged op
+// does. A refusal the store decides on the row as it is then (provenance, the
+// re-type of a comment or an issue, a supersedes target that changed) writes
+// nothing and answers behind the prefix that says the token is spent, as a
+// confirmed single store does.
 func executeConfirmedStoreBatch(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, ar *auth.AuthResult, cw store.CanonicalWrite, pendingID string) confirmOutcome {
 	var set *blocktype.Set
 	if blocktypes != nil {
 		set = blocktypes.SnapshotForRequest(ctx)
 	}
 	batch := make([]store.BatchUpsert, len(cw.Items))
-	writes := make([]int, len(cw.Items))
 	for i, it := range cw.Items {
-		writes[i] = i
 		// ScopeExplicit stays false for the reason executeConfirmedStore gives:
 		// the conflict target carries the scope, the assignment moves nothing.
 		batch[i] = store.BatchUpsert{
@@ -307,19 +300,21 @@ func executeConfirmedStoreBatch(ctx context.Context, pool *pgxpool.Pool, blockty
 			TypeName: it.Type, Supersedes: it.Supersedes,
 		}
 	}
-	blocks, err := store.UpsertBlocks(ctx, pool, batch, ar.ApiKeyID, set, nil)
+	results, err := store.UpsertBlocks(ctx, pool, batch, ar.ApiKeyID, set, nil)
 	if err != nil {
-		if rej := storeBatchRefusal(err, writes); rej != nil {
+		if rej := storeBatchRefusal(err); rej != nil {
 			return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmStoreBatchPrefix)}
 		}
 		slog.Error("confirm: confirmed batch execute failed", "error", err, "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
 	after := context.WithoutCancel(ctx)
-	for _, b := range blocks {
-		finishStoredBlock(after, pool, set, b, RequestIDFromContext(ctx))
+	for _, r := range results {
+		if r.Block != nil {
+			finishStoredBlock(after, pool, set, r.Block, RequestIDFromContext(ctx))
+		}
 	}
-	return confirmOutcome{Kind: confirmOK, Op: cw.Op, Blocks: blocks}
+	return confirmOutcome{Kind: confirmOK, Op: cw.Op, Batch: storeBatchOutcome(results)}
 }
 
 // storeBatchShapeReject refuses a batch without items or above the cap.

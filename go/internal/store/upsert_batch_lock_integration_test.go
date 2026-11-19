@@ -451,6 +451,87 @@ func TestUpsertBlocksCostAgainstSingleWrites(t *testing.T) {
 	}
 }
 
+// TestUpsertBlocksNoopCost measures what an item that changes nothing costs
+// since the batch decides it on its locked row (review of #389): before, one
+// IdenticalContentMatch per item on the pool, outside any transaction and
+// without a lock; now one lock-and-compare statement per item inside the
+// batch's transaction, the row held to the commit. Logged: statements,
+// shared-buffer accesses, WAL bytes (a row lock marks the tuple, which writes
+// WAL) and wall time. Asserted: the statement count of each form.
+func TestUpsertBlocksNoopCost(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+	for _, n := range []int{50, 100} {
+		t.Run(fmt.Sprintf("%d unchanged items", n), func(t *testing.T) {
+			items := make([]store.BatchUpsert, n)
+			for i := range items {
+				title := fmt.Sprintf("noop-%d-%03d", n, i)
+				ubSeed(t, pool, "ub-noop", title)
+				items[i] = store.BatchUpsert{Category: "batch", Title: title, Content: title + " body", Scope: "ub-noop"}
+			}
+			var before, after ubCounter
+			prePool := ubActor(t, dsn, "ub-noop-before", &before)
+			batchPool := ubActor(t, dsn, "ub-noop-after", &after)
+
+			hits, wal := ubBufferAccesses(t, prePool), ubWALBytes(t, prePool)
+			start := time.Now()
+			for _, it := range items {
+				m, err := store.IdenticalContentMatch(ctx, prePool, it.Content, it.Scope, it.Category, it.Title,
+					it.Tags, it.Metadata, it.Sens, it.TypeName)
+				if err != nil || !m.Unchanged() {
+					t.Fatalf("pre-check %s: %+v %v", it.Title, m, err)
+				}
+			}
+			preTime := time.Since(start)
+			preHits, preWAL := ubBufferAccesses(t, prePool)-hits, ubWALBytes(t, prePool)-wal
+			preStmts := before.n.Load() - 8 // ubBufferAccesses and ubWALBytes before and after, two statements each
+
+			hits, wal = ubBufferAccesses(t, batchPool), ubWALBytes(t, batchPool)
+			start = time.Now()
+			results, err := store.UpsertBlocks(ctx, batchPool, items, "ub", nil, nil)
+			if err != nil {
+				t.Fatalf("batch: %v", err)
+			}
+			batchTime := time.Since(start)
+			batchHits, batchWAL := ubBufferAccesses(t, batchPool)-hits, ubWALBytes(t, batchPool)-wal
+			batchStmts := after.n.Load() - 8
+			for i, r := range results {
+				if r.Block != nil || !r.Match.Unchanged() {
+					t.Fatalf("items[%d] written or not unchanged: %+v", i, r)
+				}
+			}
+			t.Logf("before (unlocked pre-check): %v (%v per item), %d statements, %d buffer accesses, %d WAL bytes | "+
+				"after (lock and compare in the batch): %v (%v per item), %d statements, %d buffer accesses, %d WAL bytes",
+				preTime, preTime/time.Duration(n), preStmts, preHits, preWAL,
+				batchTime, batchTime/time.Duration(n), batchStmts, batchHits, batchWAL)
+			// Before: one statement per item. After: begin, the scope lock,
+			// one statement per item, commit.
+			if preStmts != int64(n) || batchStmts != int64(n)+3 {
+				t.Errorf("statements before %d, after %d; want n = %d and n+3 = %d", preStmts, batchStmts, n, n+3)
+			}
+		})
+	}
+}
+
+// ubWALBytes is the WAL the pool's one backend has written (PostgreSQL 18's
+// per-backend WAL statistics), flushed to the statistics first.
+func ubWALBytes(t *testing.T, pool *pgxpool.Pool) int64 {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `SELECT pg_stat_force_next_flush()`); err != nil {
+		t.Fatalf("flush stats: %v", err)
+	}
+	var n int64
+	if err := pool.QueryRow(ctx,
+		`SELECT COALESCE(wal_bytes, 0)::bigint FROM pg_stat_get_backend_wal(pg_backend_pid())`).Scan(&n); err != nil {
+		t.Fatalf("pg_stat_get_backend_wal: %v", err)
+	}
+	return n
+}
+
 // ubBufferAccesses is the shared-buffer accesses (hits and reads) the pool's
 // one backend has made (PostgreSQL 18's per-backend I/O statistics), flushed
 // to the statistics first.

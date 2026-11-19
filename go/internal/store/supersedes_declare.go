@@ -235,11 +235,19 @@ func UpsertBlockSupersedes(ctx context.Context, pool *pgxpool.Pool, category, ti
 // first lock of that transaction — UpsertBlockSupersedes' own, or UpsertBlocks'
 // for every scope of its batch (issue #211).
 func (u upsertStatement) execDeclaring(ctx context.Context, tx pgx.Tx, decl SupersedesDeclaration) (*Block, error) {
-	category, title, scope := u.category, u.title, u.scope
-	tgt, _, err := lockSupersedesPair(ctx, tx, category, title, scope, decl.TargetID)
+	tgt, _, err := lockSupersedesPair(ctx, tx, u.category, u.title, u.scope, decl.TargetID)
 	if err != nil {
 		return nil, err
 	}
+	return u.execDeclared(ctx, tx, decl, tgt)
+}
+
+// execDeclared is execDeclaring after its lock pair: tgt is the target
+// lockSupersedesPair locked in this transaction — execDeclaring's own call, or
+// the lock pass of a block batch (UpsertBlocks), which takes every item's
+// locks before its first write.
+func (u upsertStatement) execDeclared(ctx context.Context, tx pgx.Tx, decl SupersedesDeclaration, tgt supersedesTarget) (*Block, error) {
+	scope := u.scope
 	if err := supersedesTargetAllowed(tgt, decl.Types); err != nil {
 		return nil, err
 	}

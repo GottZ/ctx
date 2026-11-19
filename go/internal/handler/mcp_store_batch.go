@@ -127,8 +127,8 @@ func stageBatchSupersedesCheck(ctx context.Context, cfg MCPConfig, set *blocktyp
 	plan *storeBatchPlan, reqID string,
 ) *mcp.CallToolResult {
 	var declaring []int
-	for _, i := range plan.writes {
-		if plan.items[i].Supersedes != "" {
+	for i, it := range plan.items {
+		if it.Supersedes != "" {
 			declaring = append(declaring, i)
 		}
 	}
@@ -146,7 +146,7 @@ func stageBatchSupersedesCheck(ctx context.Context, cfg MCPConfig, set *blocktyp
 		}
 	default:
 		err = store.CheckUpsertBlocks(ctx, cfg.Pool, plan.upserts(), ar.ApiKeyID, set)
-		if rej := storeBatchRefusal(err, plan.writes); rej != nil {
+		if rej := storeBatchRefusal(err); rej != nil {
 			return errResultReject(rej)
 		}
 	}
@@ -158,12 +158,27 @@ func stageBatchSupersedesCheck(ctx context.Context, cfg MCPConfig, set *blocktyp
 }
 
 // renderConfirmedStoreBatch is the confirm tool's answer to a staged batch:
-// the card's items in their order, in the confirm tool's wording.
-func renderConfirmedStoreBatch(blocks []*store.Block) string {
+// the card's items in their order, in the confirm tool's wording — an item
+// whose block already held what it asks for in the store tool's.
+func renderConfirmedStoreBatch(items []storeBatchItem) string {
+	written := 0
+	for _, it := range items {
+		if it.Block != nil {
+			written++
+		}
+	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Confirmed and stored %d blocks in one transaction:\n", len(blocks))
-	for i, b := range blocks {
-		fmt.Fprintf(&sb, "%s%s (id: %s, category: %s)\n", batchItemPrefix(i), b.Title, b.ID, b.Category)
+	fmt.Fprintf(&sb, "Confirmed and stored %d blocks in one transaction", written)
+	if unchanged := len(items) - written; unchanged > 0 {
+		fmt.Fprintf(&sb, ", %d unchanged", unchanged)
+	}
+	sb.WriteString(":\n")
+	for i, it := range items {
+		if b := it.Block; b != nil {
+			fmt.Fprintf(&sb, "%s%s (id: %s, category: %s)\n", batchItemPrefix(i), b.Title, b.ID, b.Category)
+			continue
+		}
+		sb.WriteString(batchItemPrefix(i) + storeBatchItemLine(it) + "\n")
 	}
 	return sb.String()
 }
@@ -177,13 +192,46 @@ func storeBatchItemLine(it storeBatchItem) string {
 		supersedesSuffix(it.Supersedes))
 }
 
+// stageBatchUnchanged is the stage-time look at each item's block (the store
+// tool's identical-content check, IdenticalContentMatch, on the values the
+// gates decided): per item the id of the block that already holds what the
+// item asks for, "" for an item that would write — and a declaring item
+// always would. Nothing is locked: it decides only whether a card is staged
+// at all and what the stage answer says; the confirm decides each item again
+// on its locked row.
+func stageBatchUnchanged(ctx context.Context, cfg MCPConfig, plan *storeBatchPlan, reqID string) ([]string, *writeReject) {
+	ids := make([]string, len(plan.items))
+	for i, it := range plan.items {
+		if it.Supersedes != "" {
+			continue
+		}
+		res := plan.gated[i]
+		match, err := store.IdenticalContentMatch(ctx, cfg.Pool, it.Content, res.WriteScope, it.Category, it.Title,
+			it.Tags, res.Metadata, res.Sens, it.Type)
+		if err != nil {
+			slog.Error("mcp: stage batch hash noop check error", "error", err, "index", i, "request_id", reqID)
+			return nil, classInternal.reject("Internal server error")
+		}
+		if match.Unchanged() {
+			ids[i] = match.ID
+		}
+	}
+	return ids, nil
+}
+
 // mcpStageStoreBatch stages a batch for a confirm_writes key: the gates the
 // direct path runs (gateStoreBatch), the supersedes declarations checked
-// (stageBatchSupersedesCheck), then ONE card whose hash binds every item. The
-// card holds the items that write; an unchanged item is answered at once, as
-// the store tool answers it. The budget is charged at stage time, one write
-// intent per staged item in the transaction that stages the card, and the
-// confirm books nothing — the rule of every staged op.
+// (stageBatchSupersedesCheck), then ONE card whose hash binds every item. A
+// batch of which every item would change nothing right now stages nothing and
+// costs nothing; it is answered at once, as the direct path answers it.
+// Otherwise the card holds EVERY item, the ones unchanged at stage time
+// included: a card without them would let the confirm write the rest of the
+// batch around a block another writer changed in between, so the confirm
+// decides each item on its locked row (executeConfirmedStoreBatch). The
+// budget is charged at stage time, one write intent per item of the card, in
+// the transaction that stages it, and the confirm books nothing — the rule of
+// every staged op; an item the confirm then finds unchanged was charged
+// without being written.
 func mcpStageStoreBatch(ctx context.Context, cfg MCPConfig, set *blocktype.Set, ar *auth.AuthResult,
 	items []storeRequest, lim storeBatchLimits, ttl time.Duration, reqID string,
 ) (*mcp.CallToolResult, any, error) {
@@ -191,8 +239,16 @@ func mcpStageStoreBatch(ctx context.Context, cfg MCPConfig, set *blocktype.Set, 
 	if rej != nil {
 		return errResultReject(rej), nil, nil
 	}
-	if len(plan.writes) == 0 {
-		return &mcp.CallToolResult{Content: []mcp.Content{textContent(renderStoreBatch(plan.out))}}, nil, nil
+	unchanged, rej := stageBatchUnchanged(ctx, cfg, plan, reqID)
+	if rej != nil {
+		return errResultReject(rej), nil, nil
+	}
+	if !slices.Contains(unchanged, "") {
+		out := make([]storeBatchItem, len(items))
+		for i, id := range unchanged {
+			out[i].UnchangedID = id
+		}
+		return &mcp.CallToolResult{Content: []mcp.Content{textContent(renderStoreBatch(out))}}, nil, nil
 	}
 	if res := stageBatchSupersedesCheck(ctx, cfg, set, ar, plan, reqID); res != nil {
 		return res, nil, nil
@@ -216,7 +272,7 @@ func mcpStageStoreBatch(ctx context.Context, cfg MCPConfig, set *blocktype.Set, 
 	var pw *store.PendingWrite
 	err = pgxdb.Write(ctx, cfg.Pool, pgxdb.At("mcp: stage block batch"), func(tx pgx.Tx) error {
 		budget := store.WriteBudget{APIKeyID: ar.ApiKeyID, Limit: lim.RateLimitWrite}
-		if err := store.ReserveWriteIntents(ctx, tx, budget, len(plan.writes)); err != nil {
+		if err := store.ReserveWriteIntents(ctx, tx, budget, len(cardItems)); err != nil {
 			return err
 		}
 		var err error
@@ -237,14 +293,11 @@ func mcpStageStoreBatch(ctx context.Context, cfg MCPConfig, set *blocktype.Set, 
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "STAGED — NOT saved yet. This key requires write confirmation (confirm_writes).\n"+
-		"%d of %d items staged as one batch:", len(plan.writes), len(items))
-	for _, i := range plan.writes {
-		sb.WriteString(" " + strings.TrimSuffix(batchItemPrefix(i), ": "))
-	}
-	sb.WriteString("\n")
-	for i, it := range plan.out {
-		if it.UnchangedID != "" {
-			sb.WriteString(batchItemPrefix(i) + storeBatchItemLine(it) + " — not part of the batch\n")
+		"%d items staged as one batch.\n", len(cardItems))
+	for i, id := range unchanged {
+		if id != "" {
+			fmt.Fprintf(&sb, "%sidentical content exists now (id: %s) — the confirm leaves it as it is if it still is\n",
+				batchItemPrefix(i), id)
 		}
 	}
 	fmt.Fprintf(&sb, "payload_hash: %s\nexpires: %s\n"+
