@@ -467,3 +467,52 @@ func ubBufferAccesses(t *testing.T, pool *pgxpool.Pool) int64 {
 	}
 	return n
 }
+
+// TestWriteBookingCarriesTheBookingTime: a booking row carries the time it was
+// written, not the start of its transaction. A batch waits for the key's
+// budget lock and for scope locks before it books; with the column default
+// now() a wait past the 60 s window put its rows outside every later count of
+// the key (review of #389). The wait is a pg_sleep inside the transaction.
+func TestWriteBookingCarriesTheBookingTime(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	key, _, err := store.CreateApiKey(ctx, pool, "ub-booktime", "ub-bt", nil, store.DefaultTenantID)
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var started time.Time
+	if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&started); err != nil {
+		t.Fatal(err)
+	}
+	const wait = 1500 * time.Millisecond
+	if _, err := tx.Exec(ctx, `SELECT pg_sleep($1)`, wait.Seconds()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReserveWriteIntents(ctx, tx, store.WriteBudget{APIKeyID: key.ID, Limit: 10}, 2); err != nil {
+		t.Fatalf("reserve intents: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var rows int
+	var oldest time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*), min(created_at) FROM context_access_log WHERE api_key_id = $1::uuid AND action = 'write'`,
+		key.ID).Scan(&rows, &oldest); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 2 {
+		t.Fatalf("booked rows %d, want 2", rows)
+	}
+	if got := oldest.Sub(started); got < wait {
+		t.Errorf("booking row is dated %v after the start of its transaction, want at least the %v the transaction waited before it booked — the row carries the transaction's start", got, wait)
+	}
+}

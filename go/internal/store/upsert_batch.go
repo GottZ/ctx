@@ -203,9 +203,13 @@ const writeBudgetLockSQL = `SELECT pg_advisory_xact_lock(hashtext('ctx:write-bud
 
 // writeBookingSQL books one 'write' row per block id ($2) or, with $2 empty,
 // $3 rows without a block (the write INTENTS of a stage) — LogAccess's row,
-// principal included.
-const writeBookingSQL = `INSERT INTO context_access_log (api_key_id, block_id, action, metadata, principal_id)
-	SELECT $1::uuid, b.id, 'write', '{}'::jsonb, (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $1::uuid)
+// principal included. created_at is the time of the booking
+// (clock_timestamp), not the column default now(): now() is the start of the
+// transaction, and a batch that waited for the budget lock or a scope lock
+// would book its rows that far in the past — past the 60 s window after a
+// long wait, where no later count of the key sees them.
+const writeBookingSQL = `INSERT INTO context_access_log (api_key_id, block_id, action, metadata, principal_id, created_at)
+	SELECT $1::uuid, b.id, 'write', '{}'::jsonb, (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $1::uuid), clock_timestamp()
 	  FROM (SELECT unnest($2::uuid[]) AS id
 	        UNION ALL
 	        SELECT NULL::uuid FROM generate_series(1, $3::int)) b`
