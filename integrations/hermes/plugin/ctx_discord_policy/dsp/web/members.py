@@ -70,7 +70,7 @@ def _store(key: tuple, value: Any) -> None:
 
 def _rest(path: str, token: str) -> Any:
     request = urllib.request.Request(API + path, headers={"Authorization": f"Bot {token}",
-                                                          "User-Agent": "DiscordBot (hermes-plugin, 3.0.0)"})
+                                                          "User-Agent": "DiscordBot (hermes-plugin, 3.0.1)"})
     with urllib.request.urlopen(request, timeout=REST_TIMEOUT) as response:  # noqa: S310 - fixed https host
         return json.loads(response.read().decode("utf-8"))
 

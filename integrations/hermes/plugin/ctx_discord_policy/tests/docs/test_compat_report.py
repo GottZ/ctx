@@ -118,6 +118,60 @@ def test_findings_are_sorted_into_security_comfort_and_infrastructure(report, tm
     assert _findings(missing, "infrastructure") == [("-", "refs")]  # a failed refs job is never "no drift"
 
 
+def test_p3_off_is_expected_only_on_a_release_without_plugin_rpc(report, tmp_path):
+    """P3 is off by design where Hermes has no plugin RPC (releases before v0.23.1): no drift on such a release.
+    On main, on a release from v0.23.1 on, without a readable measurement, or with another outcome it stays a
+    comfort finding, and other interventions of the same ref are not touched."""
+    cases = {  # ref: (P3 outcome, the ref's dashboard-rpc report: True/False = plugin RPC measured, else no answer)
+        "v0.23.0": ("off", False),
+        "v0.23.1": ("off", False),          # plugin RPC belongs to this release: gone here means removed
+        "v0.23.2": ("off", True),
+        "main": ("off", False),
+        "v0.22.7": ("off", None),           # no report (the measuring test did not get that far)
+        "v0.22.6": ("fallback", False),     # only "off" is the designed outcome
+        "v0.22.5": ("off", "unreadable"),
+        "v0.22.4": ("off", "no-key"),
+        "v0.22.3": ("off", "nested"),       # only the ref's own report file counts, not one further down
+        "v0.22.2": ("off", "list"),
+        "v0.22.1": ("off", "deep"),         # nesting past the parser's recursion limit reads as unreadable
+    }
+    for ref, (outcome, rpc) in cases.items():
+        directory = tmp_path / f"compat-{ref}"
+        _junit(directory, [("tests.contract.test_dashboard_sources_contract", "test_plugin_rpc_is_probed", "passed")])
+        interventions = {"P3": {"outcome": outcome, "klass": "K", "reason": "ctx.register_rpc missing"}}
+        if ref == "v0.23.0":
+            interventions.update({"K6": {"outcome": "off", "klass": "K", "reason": "x"},
+                                  "A5": {"outcome": "off", "klass": "S", "reason": "x"}})
+        matrix = {"hermes_ref": ref, "hermes_sha": "a" * 40, "interventions": interventions}
+        (directory / f"status-matrix-e2e-comfort-{ref}.json").write_text(json.dumps(matrix), encoding="utf-8")
+        measured = {"hermes_ref": ref, "hermes_sha": "a" * 40, "methods": [], "rpc": rpc}
+        if rpc == "no-key":
+            del measured["rpc"]
+        text = {"unreadable": "{not json", "list": "[false]", "deep": "[" * 200_000 + "]" * 200_000}.get(
+            rpc, json.dumps(measured))
+        if rpc == "nested":
+            measured["rpc"] = False
+            (directory / "extra").mkdir()
+            (directory / "extra" / f"dashboard-rpc-{ref}.json").write_text(json.dumps(measured), encoding="utf-8")
+        elif rpc is not None:
+            (directory / f"dashboard-rpc-{ref}.json").write_text(text, encoding="utf-8")
+
+    rep = report.summarize(tmp_path, list(cases))
+    assert _findings(rep, "comfort") == sorted([
+        ("v0.23.0", "intervention:K6:off"),
+        ("v0.23.1", "intervention:P3:off"), ("v0.23.2", "intervention:P3:off"), ("main", "intervention:P3:off"),
+        ("v0.22.7", "intervention:P3:off"), ("v0.22.6", "intervention:P3:fallback"),
+        ("v0.22.5", "intervention:P3:off"), ("v0.22.4", "intervention:P3:off"), ("v0.22.3", "intervention:P3:off"),
+        ("v0.22.2", "intervention:P3:off"), ("v0.22.1", "intervention:P3:off")])
+    assert _findings(rep, "security") == [("v0.23.0", "intervention:A5:off")]
+    assert _findings(rep, "infrastructure") == []
+    row = next(line for line in report.render_summary(rep).splitlines() if line.startswith("| `P3` |"))
+    assert row == "| `P3` | " + " | ".join(f"`{outcome}`" for outcome, _ in cases.values()) + " |"
+    # The measurement this expectation reads is the one the contract test writes.
+    source = (ROOT / "tests" / "contract" / "test_dashboard_sources_contract.py").read_text(encoding="utf-8")
+    assert 'report = {"rpc": present' in source and 'hermes.write_report("dashboard-rpc", report)' in source
+
+
 def test_a_degraded_outcome_wins_whatever_the_file_order(report, tmp_path):
     for first, second in (("wrapped", "off"), ("off", "wrapped")):
         directory = tmp_path / f"compat-{first}"

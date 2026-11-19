@@ -14,7 +14,9 @@ Subcommands (used by ``.github/workflows/hermes-ctx-discord-policy-upstream.yml`
     status register after the end-to-end flows) and sorts every finding into one category:
     ``security`` (a failed or skipped security contract test, a degraded security intervention),
     ``comfort`` (a failed comfort contract test, a comfort intervention that fell back), ``infrastructure``
-    (no refs, a ref whose job produced no test results).
+    (no refs, a ref whose job produced no test results). An outcome that is the designed degrade on a release
+    older than the Hermes feature it needs (``EXPECTED_WITHOUT_FEATURE``, the feature measured absent by that ref's
+    contract run) is no finding.
 
 ``issues report.json --repo OWNER/NAME [--run-url URL] [--label L] [--title-prefix T] [--dry-run]``
     One issue per category with a fixed title (``--title-prefix`` in front of it; ``--label`` on every issue
@@ -48,6 +50,13 @@ REF_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 GOOD = {"ok", "armed", "wrapped", "native", "injected"}
 # A4 falls back by design in the end-to-end flow's own unarmed-profile case.
 EXPECTED = {("A4", "fallback")}
+# Outcomes that are the designed degrade on a release older than the Hermes feature they use: the contract report
+# (``<report>-<ref>.json`` in the ref's results) and key that measure the feature on that ref, and the first release
+# that has it. P3 is off where Hermes has no plugin RPC (``hermes_cli.plugin_rpc``, first released in v0.23.1; the
+# report comes from test_dashboard_sources_contract.py). Only an older release that measured the feature absent
+# counts: on main or a later release the same outcome means upstream removed it, and an unmeasured ref keeps the
+# finding.
+EXPECTED_WITHOUT_FEATURE = {("P3", "off"): ("dashboard-rpc", "rpc", "v0.23.1")}
 # Per-context notices of the turn context (A9[bot/guild/lane/mode]): configuration findings, not adaptation drift.
 NOTICE = re.compile(r"A9\[.+\]")
 # Contract test files (and end-to-end flows) whose failure is a comfort regression; everything else counts as
@@ -143,6 +152,23 @@ def read_matrices(directory: Path) -> dict[str, dict]:
     return merged
 
 
+def _release_version(tag: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in tag[1:].split("."))
+
+
+def lacks_feature(directory: Path, ref: str, report: str, key: str, first: str) -> bool:
+    """Whether release ``ref``, older than ``first`` (the first release with the feature), measured the Hermes
+    feature as absent: its contract report ``<directory>/<report>-<ref>.json`` holds ``key: false``. Never on main or
+    a later release; no report, an unreadable one or another value says nothing."""
+    if not RELEASE_TAG.fullmatch(ref) or _release_version(ref) >= _release_version(first):
+        return False
+    try:
+        data = json.loads((directory / f"{report}-{ref}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return False
+    return isinstance(data, dict) and data.get(key) is False
+
+
 def _finding(category: str, ref: str, key: str, text: str) -> dict:
     return {"category": category, "ref": ref, "key": key, "text": text}
 
@@ -185,6 +211,9 @@ def summarize(artifacts: Path, expect: list[str], refs_result: str = "success") 
         for name, result in sorted(entry["interventions"].items()):
             outcome = str(result.get("outcome", "?"))
             if outcome in GOOD or (name, outcome) in EXPECTED or NOTICE.fullmatch(name):
+                continue
+            feature = EXPECTED_WITHOUT_FEATURE.get((name, outcome))
+            if feature and lacks_feature(directory, ref, *feature):
                 continue
             category = "comfort" if result.get("klass") == "K" or name.startswith("K") else "security"
             findings.append(_finding(category, ref, f"intervention:{name}:{outcome}",

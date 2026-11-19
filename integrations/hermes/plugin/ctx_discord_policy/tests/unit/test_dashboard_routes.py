@@ -127,7 +127,7 @@ def test_host_actor_comes_from_the_guard(web, anchor):
 
 def test_meta_names_process_and_version(web):
     body = web.call("GET", "/meta", process="gateway").body
-    assert body["plugin_version"] == "3.0.0" and body["api"] == 1 and body["process"] == "gateway"
+    assert body["plugin_version"] == "3.0.1" and body["api"] == 1 and body["process"] == "gateway"
     assert body["features"]["guidance_ops"] is callable(getattr(web.ops, "set_guidance", None))
 
 
