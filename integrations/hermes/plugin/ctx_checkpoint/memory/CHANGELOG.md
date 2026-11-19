@@ -29,14 +29,15 @@ use (part of GottZ/ctx#299), and a head whose tags were replaced still continues
   …`; the parts it stored are kept, and the next attempt continues from them (ctx confirms
   them without a write). The notice before the second window says so, and the failure notice
   names `compression.context_timeout_seconds` instead of `budget_s`.
-- **Windows a retry does not use.** 0.10.0 added every paced window to the deadline before the
-  first write, from the part count, and told the user the compaction would wait minutes. A
-  retry whose parts ctx confirms books no write for them: its receipt said `windows=3`, its
-  deadline (which the required facts share) was two windows longer, and the notice came again,
-  although nothing was paced. A window is now added when a write enters it (every
-  `max_parts + 2` booked writes); the receipt's `windows` counts the windows the writes entered.
-  A chain whose writes are all booked gets the same deadline and the same notice as before,
-  only at its first write of the second window instead of before the first.
+- **Windows a retry does not use.** A retry whose parts ctx confirms books no write for them,
+  yet its receipt said `windows=3` and the user was told again that the compaction waits
+  minutes: both came from the part count before the first write. The receipt's `windows` now
+  counts the windows the booked writes entered (every `max_parts + 2` of them), and the notice
+  comes before the first write that enters the second window — a retry that is all confirmed
+  parts reports `windows=1` and sends none. The deadline still holds every window of the plan
+  (up to Hermes' wait): a confirmed part costs one call, and a retry walks all of them before
+  it reaches the new ones — with only the one-window budget, a retry over 230 confirmed parts
+  at 260 ms per call would never reach its new parts.
 - **A head without its tag.** The head search names the tag `checkpoint-head`; a head whose
   tags an update or a store outside the plugin replaced was not found, and the next checkpoint
   started a new chain without a parent and replaced the head silently. When the tagged search

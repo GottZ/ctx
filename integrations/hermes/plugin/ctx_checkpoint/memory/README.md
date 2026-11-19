@@ -386,8 +386,9 @@ the plugin and runs over either transport.
   was missed: the chain started without a parent and the new head replaced it silently.
 - The chain never runs past Hermes' wait for the compaction (`resolve_context_compression_
   timeouts` of the loading Hermes, less 10 s): budget, paced windows, the refusal window and
-  the required facts end there, and the error names the wait. A paced window is added to the
-  deadline when a write enters it, so a retry whose parts ctx confirms reports `windows=1`.
+  the required facts end there, and the error names the wait. The receipt's `windows` counts the
+  windows the booked writes entered (a retry whose parts ctx confirms reports `windows=1`); the
+  deadline holds every window of the plan, because a confirmed part still costs one call.
 - Log: `CTX checkpoint chain stored (… head= manifest= parent= parts= writes= sha= lookup= …)`.
 
 ### Fact selection and dedupe

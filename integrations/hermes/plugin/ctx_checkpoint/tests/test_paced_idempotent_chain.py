@@ -720,9 +720,9 @@ def test_a_host_without_the_wait_leaves_the_chain_as_it_was(monkeypatch, clock):
     assert len(server.parts()) == 12 and provider._last_chain_receipt.windows == 3
 
 
-def test_a_retry_whose_parts_ctx_confirms_adds_no_window(monkeypatch, clock):
-    """The receipt said windows=3 and the deadline was extended by two windows (and the user was
-    told the compaction waits minutes) although ctx confirmed every part and nothing was paced."""
+def test_a_retry_whose_parts_ctx_confirms_enters_no_window_and_sends_no_notice(monkeypatch, clock):
+    """The receipt said windows=3 (and the user was told the compaction waits minutes) although
+    ctx confirmed every part and nothing was paced: the windows were planned from the part count."""
     server = CtxServerDouble(clock, write_limit=6)
     _sleep_outside_the_lock(monkeypatch, clock, server)
     provider, notices = _provider(server, chunk_chars=1_000, max_parts=3, budget_s=60)
@@ -732,14 +732,49 @@ def test_a_retry_whose_parts_ctx_confirms_adds_no_window(monkeypatch, clock):
 
     clock.now += 120.0  # the key's window is empty again
     slept_before = len(clock.slept)
-    started = clock.now
     provider.on_pre_compress(messages, require_checkpoint=True)
     receipt = provider._last_chain_receipt
     assert receipt.reused == 12 and receipt.writes == 2  # manifest in place, head
     assert receipt.windows == 1
-    assert receipt.deadline <= started + 60.0
     assert len(notices) == 1, notices
     assert len(clock.slept) == slept_before
+
+
+def test_a_retry_walks_its_confirmed_parts_within_the_planned_windows(monkeypatch, clock):
+    """A part ctx confirms books no write but costs a call: the deadline keeps every window the
+    part count plans, so a retry (or the next compaction of a grown transcript) that walks many
+    confirmed parts on a slow server is not cut at the one-window budget."""
+    server = CtxServerDouble(clock, write_limit=6)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    real_dispatch = server.dispatch
+
+    def slow(name, args, **kwargs):
+        clock.now += 0.25  # a slow server: 250 ms per call on top of the double's 50 ms
+        return real_dispatch(name, args, **kwargs)
+
+    server.dispatch = slow
+    _host_waits(monkeypatch, None)  # the plan alone (six windows) bounds this chain
+    provider, _ = _provider(server, chunk_chars=1_000, max_parts=3, budget_s=5)  # 5 writes per window
+    messages = _transcript(24)
+    provider.on_pre_compress(messages, require_checkpoint=True)
+
+    clock.now += 120.0
+    provider.on_pre_compress(messages + _transcript(2, tag="more"), require_checkpoint=True)
+    receipt = provider._last_chain_receipt
+    assert receipt.reused >= 23, receipt  # about 7 s of confirmed calls against a 5 s budget
+    assert len(_manifest_of_head(server)["metadata"]["source_block_ids"]) == len(receipt.part_ids)
+
+
+def test_the_first_notice_names_the_host_wait_when_the_plan_does_not_fit(monkeypatch, clock):
+    """The plan (six windows, 365 s) does not fit a host that waits 200 s, although the second
+    window still does: the notice before it says that this attempt saves what fits."""
+    server = CtxServerDouble(clock, write_limit=6)
+    _sleep_outside_the_lock(monkeypatch, clock, server)
+    _host_waits(monkeypatch, 200.0)
+    provider, notices = _provider(server, chunk_chars=1_000, max_parts=3)
+    with pytest.raises(CtxCheckpointError, match="Hermes waits 200s"):
+        provider.on_pre_compress(_transcript(24), require_checkpoint=True)  # 26 writes, 5 per window
+    assert "Hermes waits 200s" in notices[0], notices
 
 
 def test_the_host_wait_is_read_from_the_host_function(monkeypatch):

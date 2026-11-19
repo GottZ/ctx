@@ -850,8 +850,8 @@ class ChainReceipt:
     previous_fact_hashes: list[str] = field(default_factory=list)
     # 0.10.0: parts ctx confirmed as already stored (same title, identical content; no write),
     # the rate windows the chain's writes entered (#299; 0.10.0 to 0.16.1: the windows planned
-    # from the part count), and the deadline they gave it — the required facts after the chain
-    # share it.
+    # from the part count), and the deadline the plan gave it, up to the host's wait — the
+    # required facts after the chain share it.
     reused: int = 0
     windows: int = 1
     deadline: float = 0.0
@@ -1009,9 +1009,9 @@ class _ChainRun:
     wait_limit: float = math.inf
     host_wait_s: float = 0.0
     capped: bool = False
-    # The rate windows the chain's writes have entered (a window is added to the deadline when
-    # a write needs it, so a retry whose parts ctx confirms adds none, #299) and what the user
-    # is told before the second one: the writes and windows the whole transcript would need.
+    # The rate windows the chain's writes have entered (a retry whose parts ctx confirms enters
+    # one, #299) and what the user is told before the second one: the writes and windows the
+    # whole transcript would need (the deadline holds that plan, up to ``wait_limit``).
     windows: int = 1
     planned_writes: int = 0
     planned_windows: int = 1
@@ -1089,14 +1089,15 @@ class ChainWriter:
         )
 
     def _enter_window(self, what: str, run: _ChainRun) -> None:
-        """Before a write: the rate window it falls into (``window_writes`` booked writes each). A
-        window the chain has not entered yet adds one window to its deadline, and before the
-        second one the user learns that the compaction waits for the chain (0.10.0 added every
-        window up front from the part count; #299)."""
+        """Before a write: the rate window it falls into (``window_writes`` booked writes each).
+        The windows the receipt reports are the ones the writes entered, and the user learns that
+        the compaction waits for the chain before a write enters the second one (#299: a retry
+        whose parts ctx confirms enters none). The deadline is not moved here: it holds every
+        window of the plan from the start, because a part ctx confirms books no write but still
+        costs one call, and a retry walks all of them before it reaches the new ones."""
         needed = run.writes // run.window_writes + 1
         while run.windows < needed:
             run.windows += 1
-            self._extend(run, RATE_WINDOW_S + RATE_WINDOW_MARGIN_S)
             if run.notified:
                 continue
             run.notified = True
@@ -1398,18 +1399,19 @@ class ChainWriter:
                 f"{CTX_CONTENT_MAX_BYTES}-byte content cap; nothing written"
             )
         chunks = split_chunks(rendered, self.chunk_chars, byte_budget)
-        # Paced instead of refused (0.10.0): the budget covers one rate window, and every further
-        # window the chain's writes enter is added to it when a write enters it (#299: a part
-        # ctx confirms as stored books no write, so a retry adds no window it does not use).
+        # Paced instead of refused (0.10.0): the budget covers one rate window, every further
+        # window the part count needs is added to it — up to the host's wait (#299). The receipt
+        # and the notice follow the windows the writes enter (see _enter_window).
         window_writes = self._window_writes()
         writes_needed = len(chunks) + 2
+        planned_windows = -(-writes_needed // window_writes)
         # budget_s in the run is the effective one (messages name what the chain really had).
         run = _ChainRun(
             deadline=deadline,
             budget_s=float(budget_s),
             window_writes=window_writes,
             planned_writes=writes_needed,
-            planned_windows=-(-writes_needed // window_writes),
+            planned_windows=planned_windows,
         )
         if wait_limit is not None:
             run.wait_limit = float(wait_limit)
@@ -1419,6 +1421,7 @@ class ChainWriter:
                 run.deadline = run.wait_limit
                 run.budget_s = max(0.0, run.deadline - started)
                 run.capped = True
+        self._extend(run, (planned_windows - 1) * (RATE_WINDOW_S + RATE_WINDOW_MARGIN_S))
 
         now = datetime.now(timezone.utc).isoformat()
         short_root = _short_root(root)

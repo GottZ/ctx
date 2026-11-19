@@ -223,12 +223,11 @@ ctx is unreachable, instead of an unarchived compaction. The halt also triggers
 when a checkpoint does not finish inside its budget. Since 0.10.0 a checkpoint
 with more than `max_parts` parts is no longer refused: it writes `max_parts` parts
 (plus manifest and head) per minute and waits for the next minute with the rest,
-its budget grows by 61 s for each extra minute its writes enter, and Hermes shows a
+its budget grows by 61 s per extra minute, and Hermes shows a
 notice before it waits (by the part sizes measured for 0.7.0, a 1M-token conversation of Latin
 prose needs 130 to 230 parts at the default sizes: one or two extra minutes).
-A retry whose parts ctx already holds books no write for them, so it adds no
-minute and sends no notice (0.16.2; before, the minutes were added from the part
-count). Hermes gives a compaction about 300 s without progress by default
+A retry whose parts ctx already holds books no write for them; it reports one
+window and sends no notice (0.16.2; before, both came from the part count). Hermes gives a compaction about 300 s without progress by default
 (`compression.context_timeout_seconds`, raised to the auxiliary compression
 timeout) and then abandons it and runs it again; the checkpoint runs before the
 summary, which is the first progress Hermes sees. Since 0.16.2 the checkpoint ends
