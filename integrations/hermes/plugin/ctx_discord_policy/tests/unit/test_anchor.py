@@ -98,7 +98,7 @@ def test_status_file_is_private_and_reports_changes(anchor, monkeypatch, caplog)
     assert not path.exists()  # register() never writes it (CLI processes load plugins too)
     anchor.bootstrap.write_status(home)
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["plugin_version"] == "3.0.0"
+    assert data["plugin_version"] == "3.0.1"
     assert data["interventions"]["A8[default]"]["outcome"] == "armed"
     if os.name == "posix":
         assert stat.S_IMODE(path.stat().st_mode) == 0o600

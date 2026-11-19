@@ -99,7 +99,7 @@ def test_second_plugin_version_in_process_registers_nothing(homes, tmp_path, cap
     assert not runtime.armed.is_armed(hermes_home_key(stale))  # ... but nothing registered
     assert "restart" in caplog.text.lower()
     assert runtime.status.snapshot()["refused"][-1]["version"] == "3.9.9"
-    assert sys.modules[ANCHOR].__version__ == "3.0.0"
+    assert sys.modules[ANCHOR].__version__ == "3.0.1"
 
 
 def test_armed_means_the_hook_is_in_the_live_registry(homes):

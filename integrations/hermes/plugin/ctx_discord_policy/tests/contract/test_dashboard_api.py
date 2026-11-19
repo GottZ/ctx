@@ -133,7 +133,7 @@ def test_every_route_needs_a_hermes_sign_in(dash, method, path):
 
 def test_meta_answers_behind_the_gate_and_names_the_process(dash, bound):
     body = dash.client.get(f"{BASE}/meta").json()
-    assert body["plugin_version"] == "3.0.0" and body["process"] == "dashboard"
+    assert body["plugin_version"] == "3.0.1" and body["process"] == "dashboard"
     dash.app.state.gateway_runner = object()
     try:
         assert dash.client.get(f"{BASE}/meta").json()["process"] == "gateway"
