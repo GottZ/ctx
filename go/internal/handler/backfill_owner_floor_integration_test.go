@@ -28,6 +28,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -136,6 +137,12 @@ func ownfSetFloor(t *testing.T, f *bfsFixture, configScope string, floor map[str
 // no-credentials, with sync_cap 4 and the background arm on or off.
 func ownfQuery(t *testing.T, f *bfsFixture, rec *ownfRecorder, keyCtx context.Context, callerFloor config.ScopeFloor, armOn bool) {
 	t.Helper()
+	ownfQueryOverlay(t, f, rec, keyCtx, callerFloor, armOn, settings.TenantOverlay(f.pool))
+}
+
+// ownfQueryOverlay is ownfQuery with the tenant overlay as a parameter.
+func ownfQueryOverlay(t *testing.T, f *bfsFixture, rec *ownfRecorder, keyCtx context.Context, callerFloor config.ScopeFloor, armOn bool, overlay config.TenantOverlay) {
+	t.Helper()
 	base := bw2Config()
 	base.EmbedBackfill.SyncCap = 4
 	if armOn {
@@ -144,7 +151,7 @@ func ownfQuery(t *testing.T, f *bfsFixture, rec *ownfRecorder, keyCtx context.Co
 	request := *base
 	request.Pool.ScopeSensitivityFloor = callerFloor
 	cs := config.NewStore(base)
-	cs.SetOverlay(settings.TenantOverlay(f.pool))
+	cs.SetOverlay(overlay)
 
 	bpool := backends.NewPool(nil, nil)
 	bpool.SeedSnapshotForTest([]backends.Backend{
@@ -255,6 +262,42 @@ func TestQueryBackfillOwnerFloor(t *testing.T) {
 		ownfQuery(t, f, rec, f.callerCtx, config.ScopeFloor{bfsForeignScope: backends.SensCredentials}, false)
 		if rec.received(bfsForeignTitle) || f.embedded(t, bfsForeignTitle) {
 			t.Error("the caller's floor on the scope no longer applies")
+		}
+	})
+
+	// The owner's configuration does not build (a failed read of its rows;
+	// config.Store then answers with the base generation): the request
+	// cannot know the owner's floor and skips the backfill, in both modes.
+	failing := func(f *bfsFixture) config.TenantOverlay {
+		real := settings.TenantOverlay(f.pool)
+		return func(ctx context.Context, base *config.Config, tenantScope string) (*config.Config, error) {
+			if tenantScope == bfsForeignScope {
+				return nil, errors.New("probe: the owner's rows cannot be read")
+			}
+			return real(ctx, base, tenantScope)
+		}
+	}
+	t.Run("owner_config_unbuildable_arm_off", func(t *testing.T) {
+		f, rec := bfsSetup(t), ownfNewRecorder(t)
+		ownfSetFloor(t, f, bfsForeignScope, map[string]string{bfsForeignScope: credentials})
+		f.write(t, f.foreignCtx, bfsForeignTitle)
+		f.write(t, f.callerCtx, bfsCallerTitle)
+		ownfQueryOverlay(t, f, rec, f.callerCtx, nil, false, failing(f))
+		if rec.received(bfsForeignTitle) || f.embedded(t, bfsForeignTitle) {
+			t.Error("the backend received the block on the base's floor although its owner's configuration did not build")
+		}
+		if f.embedded(t, bfsCallerTitle) {
+			t.Error("the backfill ran on floors it could not read in full")
+		}
+	})
+	t.Run("owner_config_unbuildable_granted_scope", func(t *testing.T) {
+		f, rec := bfsSetup(t), ownfNewRecorder(t)
+		ownfSetFloor(t, f, bfsForeignScope, map[string]string{bfsForeignScope: credentials})
+		granted := ownfGrantedCaller(t, f)
+		f.write(t, f.foreignCtx, bfsForeignTitle)
+		ownfQueryOverlay(t, f, rec, granted, nil, true, failing(f))
+		if rec.received(bfsForeignTitle) || f.embedded(t, bfsForeignTitle) {
+			t.Error("the backend received the block of a granted scope on the base's floor although its owner's configuration did not build")
 		}
 	})
 

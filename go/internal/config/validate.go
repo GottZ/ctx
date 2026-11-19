@@ -79,9 +79,9 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGraphOverview(c)...) // V17b
 	issues = append(issues, validateDurations(c)...)     // V17
 	issues = append(issues, validateEmbedBackoff(c)...)  // V21
+	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V33
 	// V61 (#221): the query path's backfill step off needs another embedder.
 	issues = append(issues, validateEmbedBackfillSync(c)...)
-	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V33
 	// V37 (W06-8): the foreign-load detector's floors and ratio range.
 	issues = append(issues, validateStatusForeignLoad(c)...)
 	// V38, V39 (W02-02): the gateway group's floors, caps and budget relation;
