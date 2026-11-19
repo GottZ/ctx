@@ -18,7 +18,7 @@ import (
 
 // t039Body is one request in the wire vocabulary BOTH surfaces accept: the
 // canonical exclude name, the legacy alias, and a positive type filter.
-const t039Body = `{"query":"frage","category":"learnings","tags":["a","b"],` +
+const t039Body = `{"query":"frage","category":"learnings","tags":["a","b"],"tags_all":["c","d"],` +
 	`"types":["knowledge"],"types_exclude":["audit-trail"],` +
 	`"block_roles_exclude":["synthesis","audit-trail"],` +
 	`"cluster":"11111111-2222-4333-8444-555555555555"}`
@@ -66,6 +66,7 @@ func TestSearchTransportsAgreeOnTheAliasUnion(t *testing.T) {
 		{"Category", restArgs.Category, toolArgs.Category},
 		{"Cluster", restArgs.Cluster, toolArgs.Cluster},
 		{"Tags", restArgs.Tags, toolArgs.Tags},
+		{"TagsAll", restArgs.TagsAll, toolArgs.TagsAll},
 		{"Types", restArgs.Types, toolArgs.Types},
 		{"TypesExclude", restArgs.TypesExclude, toolArgs.TypesExclude},
 		{"BlockRolesExclude", restArgs.BlockRolesExclude, toolArgs.BlockRolesExclude},
@@ -74,6 +75,10 @@ func TestSearchTransportsAgreeOnTheAliasUnion(t *testing.T) {
 		if !reflect.DeepEqual(f.rest, f.tool) {
 			t.Errorf("%s diverges: REST %#v, MCP %#v", f.name, f.rest, f.tool)
 		}
+	}
+	// Parity alone would hold if both forgot the field (#219).
+	if want := []string{"c", "d"}; !reflect.DeepEqual(restArgs.TagsAll, want) || !reflect.DeepEqual(toolArgs.TagsAll, want) {
+		t.Errorf("tags_all = REST %v, MCP %v; want %v on both", restArgs.TagsAll, toolArgs.TagsAll, want)
 	}
 }
 
