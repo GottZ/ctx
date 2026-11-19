@@ -47,6 +47,7 @@ import (
 	"github.com/GottZ/ctx/internal/distillsource/ctxcheckpoint"
 	"github.com/GottZ/ctx/internal/promptguard"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // The journal's skip vocabulary, verbatim from dr_skip_reason_known
@@ -198,9 +199,11 @@ func (s *Scheduler) runDistiller(ctx context.Context) {
 	// BEFORE the first tick, and a correctness condition rather than hygiene
 	// (§4.5.5): the derivation excludes running rows, so an orphan left by a
 	// killed daemon hides its own watermark_to — the arm would re-process a
-	// range whose insights are already durable. Unconditional over every
-	// source_key, because at boot no run of THIS process can be live and the
-	// journal has exactly one writer.
+	// range whose insights are already durable. Over every source_key, under the
+	// arm lock (issue #366): while this instance holds it no tick of any instance
+	// is live, so every running row is an orphan. Every tick sweeps again under
+	// the same lock, so the orphan of an instance that died while this one runs
+	// is closed without a restart.
 	s.distillStartupSweep(ctx)
 	slog.Info("scheduler: distiller arm started", "wake_debounce", distillWakeDebounce)
 
@@ -438,10 +441,56 @@ func distillInterval(d time.Duration) time.Duration {
 	return d
 }
 
-// distillStartupSweep closes orphaned running rows (§4.5.5). Never fatal: a
-// journal that cannot be swept is a diagnosis problem, and refusing to start the
-// arm over it would trade a wrong outcome value for no arm at all.
+// distillArmLock is the distiller's arm lock (issue #366): a session-level
+// advisory lock, tried, held by an instance for the length of one tick on a
+// connection of its own. Every running journal row is opened inside a tick,
+// so a running row found by the holder belongs to a tick that is over — a
+// process that was killed, or a tick that panicked — and is an orphan; the
+// rows of a live tick of another instance are never found, because that
+// instance holds the lock. A second instance whose tick finds the lock held
+// skips the tick (debug line, no journal row): the holder runs the tick
+// either way, and each instance hears every checkpoint write.
+//
+// It ends with the holder's session, not only with its process: a connection
+// the server closes mid-tick releases it while the tick runs on. The journal
+// writes of a run therefore name the open row (distillAdvance,
+// distillFinishRun), so such a tick stops at its next batch instead of
+// writing over a row another instance has closed.
+var distillArmLock = triedSessionLock{
+	label:     "distiller arm lock",
+	lockSQL:   `SELECT pg_try_advisory_lock(hashtext('ctx:distiller'), hashtext('distill_run'))`,
+	unlockSQL: `SELECT pg_advisory_unlock(hashtext('ctx:distiller'), hashtext('distill_run'))`,
+	busy:      errDistillArmBusy,
+}
+
+// errDistillArmBusy: another instance holds the distiller's arm lock.
+var errDistillArmBusy = errors.New("another instance is in a distiller tick")
+
+// errDistillRunClosed: the run row is no longer running — another instance's
+// sweep closed it while this run held no arm lock.
+var errDistillRunClosed = errors.New("distill: the run row was closed by another session")
+
+// distillStartupSweep closes orphaned running rows at the arm start (§4.5.5)
+// under the arm lock; while another instance holds it, that instance's tick
+// sweeps instead. Never fatal: a journal that cannot be swept is a diagnosis
+// problem, and refusing to start the arm over it would trade a wrong outcome
+// value for no arm at all.
 func (s *Scheduler) distillStartupSweep(ctx context.Context) {
+	err := withTriedSessionLock(ctx, s.pool, distillArmLock, func(*pgxpool.Conn) error {
+		s.distillSweepOrphans(ctx)
+		return nil
+	})
+	switch {
+	case errors.Is(err, errDistillArmBusy):
+		slog.Debug("scheduler: distiller startup sweep left to the instance in a tick")
+	case err != nil:
+		slog.Error("scheduler: distiller startup sweep failed", "error", err)
+	}
+}
+
+// distillSweepOrphans closes every running row as killed, keeping its
+// watermark_to (the last durable batch). The caller holds the arm lock.
+func (s *Scheduler) distillSweepOrphans(ctx context.Context) {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE distill_run
 		   SET outcome = $1, finished_at = now(), error = $2
@@ -474,6 +523,35 @@ func (s *Scheduler) distillOnce(ctx context.Context, demand func() int) bool {
 			"distill_enabled", d.Enabled, "ctx_enabled", d.CtxEnabled)
 		return false
 	}
+
+	// THE ARM LOCK (issue #366): one tick at a time across every ctxd instance on
+	// the database, the journal's one-writer premise the derivation and the
+	// sweep rest on. The orphan sweep runs first under it — a running row found
+	// while this instance holds the lock was opened by a tick that is over.
+	ran := false
+	err := withTriedSessionLock(ctx, s.pool, distillArmLock, func(*pgxpool.Conn) error {
+		s.distillSweepOrphans(ctx)
+		ran = s.distillTickLocked(ctx, cfg, demand)
+		return nil
+	})
+	switch {
+	case errors.Is(err, errDistillArmBusy):
+		slog.Debug("scheduler: distiller tick skipped — another instance is in a distiller tick")
+		// The wake that summoned this tick is drained; the holder normally
+		// ticks for it, but a holder that stops right after its tick would
+		// leave the checkpoint to the idle fallback. The tick is owed, so it
+		// retries after distillDemandRetry like a demand deferral.
+		s.distillDemandDeferred.Store(true)
+	case err != nil:
+		slog.Error("scheduler: distiller tick skipped — arm lock unavailable", "error", err)
+	}
+	return ran
+}
+
+// distillTickLocked is the tick past gate 0, run while this instance holds the
+// distiller's arm lock (distillOnce).
+func (s *Scheduler) distillTickLocked(ctx context.Context, cfg *config.Config, demand func() int) bool {
+	d := cfg.Distill
 
 	// Gate 5 runs FIRST (§4.2.1). A write-path guard has to stand before the
 	// arm touches foreign material, so the scope is resolved and refused BEFORE
@@ -1010,7 +1088,12 @@ func (s *Scheduler) distillSession(ctx context.Context, t distillTick, sess stri
 
 // distillClose closes an open run row and logs a failure to do so.
 func (s *Scheduler) distillClose(ctx context.Context, runID, outcome, class, skipReason string) {
-	if err := s.distillFinishRun(ctx, runID, outcome, class, skipReason); err != nil {
+	err := s.distillFinishRun(ctx, runID, outcome, class, skipReason)
+	switch {
+	case errors.Is(err, errDistillRunClosed):
+		slog.Warn("scheduler: distiller run row was closed by another instance's sweep — left as it is",
+			"run_id", runID, "outcome", outcome)
+	case err != nil:
 		slog.Error("scheduler: distiller could not close run row", "run_id", runID, "error", err)
 	}
 }
@@ -1544,7 +1627,7 @@ var distillWriteBarrier = func(context.Context) error { return nil }
 // rej_g1..rej_schema and the equation reads sum(g1..g7)+schema+novelty =
 // insights_rejected from this wave on.
 func (s *Scheduler) distillAdvance(ctx context.Context, runID string, l distillLedger, wm int64) error {
-	_, err := s.pool.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE distill_run
 		   SET rows_seen         = rows_seen + $2,
 		       rows_selected     = rows_selected + $3,
@@ -1570,7 +1653,7 @@ func (s *Scheduler) distillAdvance(ctx context.Context, runID string, l distillL
 		       rej_g3_none       = rej_g3_none + $24,
 		       rej_novelty       = rej_novelty + $25,
 		       watermark_to      = GREATEST(watermark_to, $7)
-		 WHERE run_id = $1::uuid`,
+		 WHERE run_id = $1::uuid AND outcome = $26`,
 		runID, l.seen, l.selected, l.droppedCred, l.droppedDup, l.chars, wm,
 		l.calls, l.insightsKept, l.insightsRejected, l.blocksWritten,
 		// SPELLED OUT RATHER THAN INDEXED OVER distillRejectKeys: the key sits
@@ -1586,9 +1669,16 @@ func (s *Scheduler) distillAdvance(ctx context.Context, runID string, l distillL
 		// The ninth bucket of the FIRST histogram (151, wave C5-E) — it stands
 		// here and not next to rej_schema above because the column order of the
 		// UPDATE follows the migrations, not the equation.
-		l.rejects["novelty"])
+		l.rejects["novelty"],
+		// THE ROW MUST STILL BE OPEN (issue #366): a row another instance's
+		// sweep closed keeps the watermark of the last batch booked before it,
+		// exactly as after a crash, and this run stops instead of moving it.
+		distillOutcomeRunning)
 	if err != nil {
 		return fmt.Errorf("distill: advancing run row %s: %w", runID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: advancing run row %s", errDistillRunClosed, runID)
 	}
 	return nil
 }
@@ -1892,13 +1982,18 @@ func (s *Scheduler) distillFinishRun(ctx context.Context, runID, outcome, errCla
 	// (135:147-150), and the trip row already carries both columns at once. It is
 	// how an in-run brake says WHY the run stopped (round-2 blocker #3) — without
 	// it, `partial` answers "did not finish" and nothing else.
-	_, err := s.pool.Exec(ctx, `
+	// Only the open row (issue #366): a row another instance's sweep closed as
+	// killed stays as that sweep left it.
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE distill_run
 		   SET outcome = $2, error = $3, skip_reason = $4, finished_at = now()
-		 WHERE run_id = $1::uuid`,
-		runID, outcome, distillNull(errClass), distillNull(skipReason))
+		 WHERE run_id = $1::uuid AND outcome = $5`,
+		runID, outcome, distillNull(errClass), distillNull(skipReason), distillOutcomeRunning)
 	if err != nil {
 		return fmt.Errorf("distill: closing run row %s: %w", runID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: closing run row %s", errDistillRunClosed, runID)
 	}
 	return nil
 }

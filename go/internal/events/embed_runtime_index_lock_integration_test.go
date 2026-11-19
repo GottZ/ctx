@@ -170,7 +170,7 @@ func ensureAsync(ctx context.Context, s *Scheduler, name, ddl string) (<-chan en
 	out := make(chan ensureResult, 1)
 	done := make(chan struct{})
 	go func() {
-		a, err := s.ensureConcurrentIndexValid(ctx, name, ddl)
+		a, err := s.ensureConcurrentIndexValid(ctx, name, ddl, nil)
 		out <- ensureResult{a, err}
 		close(done)
 	}()
@@ -279,7 +279,7 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 		if got := indexOIDT(t, pool, migrationPendingIndexName); got != oidA {
 			t.Errorf("index oid %d → %d: A's build was replaced", oidA, got)
 		}
-		if a, err := sB.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL); err != nil || a != indexActionReused {
+		if a, err := sB.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL, nil); err != nil || a != indexActionReused {
 			t.Errorf("B after A's build: action=%q err=%v, want %s", a, err, indexActionReused)
 		}
 	})
@@ -314,7 +314,7 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 		if rA.err != nil || rA.action != indexActionCreated {
 			t.Errorf("A: action=%q err=%v, want %s", rA.action, rA.err, indexActionCreated)
 		}
-		if a, err := sB.ensureConcurrentIndexValid(ctx, other, ddlOfManaged(other)); err != nil || a != indexActionCreated {
+		if a, err := sB.ensureConcurrentIndexValid(ctx, other, ddlOfManaged(other), nil); err != nil || a != indexActionCreated {
 			t.Errorf("B after A's build: action=%q err=%v, want %s", a, err, indexActionCreated)
 		}
 	})
@@ -345,7 +345,7 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 		}
 		waitNoAdvisoryLocks(t, pool, 10*time.Second)
 
-		a, err := sB.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL)
+		a, err := sB.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL, nil)
 		if err != nil || a != indexActionRebuiltInvalid {
 			t.Errorf("B on A's leftover: action=%q err=%v, want %s", a, err, indexActionRebuiltInvalid)
 		}
@@ -376,11 +376,11 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 			}
 		}
 
-		if a, err := s.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL); err != nil || a != indexActionCreated {
+		if a, err := s.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL, nil); err != nil || a != indexActionCreated {
 			t.Fatalf("build: action=%q err=%v", a, err)
 		}
 		pooledPIDHoldsNoLock("after a build")
-		if a, err := s.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL); err != nil || a != indexActionReused {
+		if a, err := s.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL, nil); err != nil || a != indexActionReused {
 			t.Fatalf("reuse: action=%q err=%v", a, err)
 		}
 		pooledPIDHoldsNoLock("after a reuse")
@@ -395,7 +395,7 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 				t.Fatalf("%s: %v", sql, err)
 			}
 		}
-		if _, err := s.ensureConcurrentIndexValid(ctx, "idx_guard_pending_next", ddlOfManaged("idx_guard_pending_next")); err == nil {
+		if _, err := s.ensureConcurrentIndexValid(ctx, "idx_guard_pending_next", ddlOfManaged("idx_guard_pending_next"), nil); err == nil {
 			t.Fatalf("taken name: no error")
 		}
 		pooledPIDHoldsNoLock("after a failed read-back")
@@ -468,7 +468,7 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 		sB.embedVerifySync = true
 		// The migration cycle ensures the pending index before it starts the
 		// gate; it stands here, so B's cycle reaches the gate.
-		if _, err := sA.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL); err != nil {
+		if _, err := sA.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL, nil); err != nil {
 			t.Fatalf("pending index: %v", err)
 		}
 
@@ -647,7 +647,7 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 		seedCleanMigrated(t, pool, 3)
 		sA := newIndexTestScheduler(instancePool(t, pool, 4))
 		sB := newIndexTestScheduler(instancePool(t, pool, 4))
-		if _, err := sA.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL); err != nil {
+		if _, err := sA.ensureConcurrentIndexValid(ctx, migrationPendingIndexName, migrationPendingIndexDDL, nil); err != nil {
 			t.Fatalf("pending index: %v", err)
 		}
 		migID := seedMigrationRow(t, pool, "verifying")
@@ -702,7 +702,7 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 		seedCleanMigrated(t, pool, 3)
 		s := newIndexTestScheduler(instancePool(t, pool, 4))
 		for _, ix := range managedRuntimeIndexes() {
-			if _, err := s.ensureConcurrentIndexValid(ctx, ix.name, ix.ddl); err != nil {
+			if _, err := s.ensureConcurrentIndexValid(ctx, ix.name, ix.ddl, nil); err != nil {
 				t.Fatalf("build %s: %v", ix.name, err)
 			}
 		}
@@ -728,7 +728,7 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 		for i := 0; i < n; i++ {
 			start := time.Now()
 			for _, ix := range managedRuntimeIndexes() {
-				a, err := s.ensureConcurrentIndexValid(ctx, ix.name, ix.ddl)
+				a, err := s.ensureConcurrentIndexValid(ctx, ix.name, ix.ddl, nil)
 				if err != nil || a != indexActionReused {
 					t.Fatalf("%s with the lock held elsewhere: action=%q err=%v, want %s", ix.name, a, err, indexActionReused)
 				}
@@ -770,7 +770,7 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 				for i := range names {
 					ix := names[(i+offset)%len(names)]
 					for attempt := 0; ; attempt++ {
-						a, err := s.ensureConcurrentIndexValid(ctx, ix.name, ix.ddl)
+						a, err := s.ensureConcurrentIndexValid(ctx, ix.name, ix.ddl, nil)
 						if isBusy(err) && attempt < 2000 {
 							time.Sleep(5 * time.Millisecond)
 							continue
