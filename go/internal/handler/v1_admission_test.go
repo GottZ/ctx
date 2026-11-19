@@ -659,16 +659,24 @@ func extRejects(r *v1Rig) dispatch.ExternalRejectStats {
 
 // TestFirstServeByFromRequestDeadline (Festlegung 3, K8): the request
 // context's deadline is Request.ServeBy — deadline now + 300 ms on a full
-// target leaves no budget (serve margin 500 ms) ⇒ 429 server_busy within
-// 50 ms, counted predicted. Red against a helper without ServeBy: it waits
-// until its context ends.
+// target leaves no budget (serve margin 500 ms) ⇒ 429 server_busy at once,
+// counted predicted. Red against a helper without ServeBy: it waits until
+// its context ends.
+//
+// "At once" is the refusal in its arrival's one dispatcher section
+// (Snapshot.OpsTotal +1, the dispatcher's loops stopped so that no pass adds
+// one): a wait its timer ended takes a second section, one its context
+// ended answers with the context's error. The 50-ms wall-clock bound this
+// test read measured the scheduler under load (issue #369).
 func TestFirstServeByFromRequestDeadline(t *testing.T) {
 	r, row := fullTargetRig(t, 20*time.Second)
 	ctx, cancel := context.WithTimeout(consumerCtx(urgentConsumer()), 300*time.Millisecond)
 	defer cancel()
+	r.disp.Close()
+	ops0 := r.disp.Snapshot().OpsTotal
 	took, err := firstOn(t, r, ctx, row)
-	if !errors.Is(err, dispatch.ErrWaitExpired) || took > 50*time.Millisecond {
-		t.Fatalf("deadline now+300ms on a full target: (%v after %v), want ErrWaitExpired within 50 ms", err, took)
+	if ops := r.disp.Snapshot().OpsTotal - ops0; !errors.Is(err, dispatch.ErrWaitExpired) || ops != 1 {
+		t.Fatalf("deadline now+300ms on a full target: (%v after %v in %d dispatcher sections), want ErrWaitExpired at once (its arrival's one section)", err, took, ops)
 	}
 	if got := extRejects(r).Predicted; got != 1 {
 		t.Fatalf("Predicted = %d, want 1", got)

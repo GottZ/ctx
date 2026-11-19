@@ -13,7 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
+	"maps"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -127,10 +127,9 @@ func TestFairnessFirstNewcomerWaits(t *testing.T) {
 	startWaiter(fairXctx(ctx, "n", "tN", 1), d, "N", r, nch)
 	waitQueued(t, d, nch, 7, "fresh tenant N queued")
 
-	start := time.Now()
-	_, _, err := d.Acquire(fairXctx(ctx, "x1", "t1", 1), r)
-	if el := time.Since(start); !errors.Is(err, ErrWaitExpired) || el > 50*time.Millisecond {
-		t.Fatalf("x1 of t1 (not fairness-first) = %v after %v, want predicted at once", err, el)
+	var err error
+	if ops := sectionsOf(d, func() { _, _, err = d.Acquire(fairXctx(ctx, "x1", "t1", 1), r) }); !errors.Is(err, ErrWaitExpired) || ops != 1 {
+		t.Fatalf("x1 of t1 (not fairness-first) = %v in %d dispatcher sections, want predicted at once (its arrival's one section)", err, ops)
 	}
 	if rej := target(t, d).ExternalRejects; rej != (ExternalRejectStats{Predicted: 1}) {
 		t.Fatalf("rejects %+v, want predicted=1 (x1 only)", rej)
@@ -161,9 +160,9 @@ func TestFairnessFirstNewcomerWaits(t *testing.T) {
 // warm window L_p50 30 s, MaxWait 20 s. The first round of ŵ is r̂ =
 // max(0, L_p50 − the age of the oldest held external lease), not a full
 // L_p50:
-//   - aged: the oldest lease has run 29.9 s and ends 100 ms later ⇒ r̂ =
-//     100 ms: the lone newcomer queues and that release admits it (red
-//     before the hardening: ŵ = 30 s > 20 s, predicted at once);
+//   - aged: the oldest lease has run 29.9 s (r̂ = 100 ms): the lone newcomer
+//     queues, and the oldest lease's release admits it (red before the
+//     hardening: ŵ = 30 s > 20 s, predicted at once);
 //   - fresh: every lease just started ⇒ r̂ ≈ 30 s > 20 s: predicted at once
 //     — the estimator sees no remaining time below L_p50 (the fail-closed
 //     side named in prediction.go and docs/operations.md; green before and
@@ -171,42 +170,79 @@ func TestFairnessFirstNewcomerWaits(t *testing.T) {
 //   - no external lease held (in-house holds the slots) ⇒ r̂ = 0: the lone
 //     newcomer queues; the next in-house release admits it (red before the
 //     hardening: predicted at once).
+//
+// The outcomes are read as events, not as wall-clock windows (issue #369):
+// "queues" is the newcomer seen waiting before anything could end its wait,
+// "that release admits it" is the slot handed over inside the release's own
+// section (Waiting 0 and the newcomer's lease held when Release returns),
+// "predicted at once" is the refusal in its arrival's one section
+// (sectionsOf). The windows they replace — a lease after 90–300 ms behind a
+// release armed at 100 ms, a refusal within 50 ms — measured the scheduler:
+// at a 1-minute load of 9–13 the aged newcomer's lease came 90.29 ms after
+// the start in the shortest of 200 runs under -race, 0.3 ms inside the
+// window, because the release was armed before the start was read.
 func TestFirstRoundIsTheRemainingTime(t *testing.T) {
-	run := func(t *testing.T, age time.Duration) (*Lease, time.Duration, error) {
+	// warm holds E = 8 external leases, ages the oldest by age and seeds a
+	// warm window of L_p50 30 s.
+	warm := func(t *testing.T, age time.Duration) (*Dispatcher, []*Lease) {
 		t.Helper()
 		d, _ := newTestDispatcher(t, budgetSettings(20*time.Second), partitionPolicy(9, 1)) // E = 8
-		bg := context.Background()
 		var held []*Lease
 		for i := 0; i < 8; i++ {
-			held = append(held, mustAcquire(t, d, fairXctx(bg, "holder", "tenant-h", 1), externalReq()))
+			held = append(held, mustAcquire(t, d, fairXctx(context.Background(), "holder", "tenant-h", 1), externalReq()))
 		}
 		ageLease(d, held[0], age)
 		seedLeases(d, testOrigin, waitRingK, 30*time.Second)
-		release := time.AfterFunc(100*time.Millisecond, held[0].Release)
-		defer release.Stop()
-		start := time.Now()
-		l, _, err := d.Acquire(fairXctx(bg, "x", "X", 1), externalReq())
-		el := time.Since(start)
-		held[0].Release()
-		for _, h := range held[1:] {
-			h.Release()
+		return d, held
+	}
+	// releaseAdmits releases first and reports whether that release handed
+	// its slot to the one queued newcomer: when Release returns, nobody
+	// waits and the target holds as many leases as before.
+	releaseAdmits := func(t *testing.T, d *Dispatcher, first *Lease, ch chan admission) {
+		t.Helper()
+		held := target(t, d).Held
+		first.Release()
+		if ts := target(t, d); ts.External.Waiting != 0 || ts.Held != held {
+			t.Fatalf("after the release: waiting %d, held %d (before it %d) — want the newcomer admitted by the release itself", ts.External.Waiting, ts.Held, held)
 		}
+		a := recvAdmission(t, ch, "the newcomer's admission")
+		if a.lease == nil || a.err != nil {
+			t.Fatalf("newcomer = (lease %v, %v), want the released slot", a.lease != nil, a.err)
+		}
+		a.lease.Release()
+		if rej := target(t, d).ExternalRejects; rej != (ExternalRejectStats{}) {
+			t.Fatalf("rejects %+v, want none (queued and admitted)", rej)
+		}
+	}
+	t.Run("aged", func(t *testing.T) {
+		d, held := warm(t, 29*time.Second+900*time.Millisecond)
+		defer func() {
+			for _, h := range held[1:] {
+				h.Release()
+			}
+		}()
+		ch := make(chan admission, 1)
+		startWaiter(fairXctx(context.Background(), "x", "X", 1), d, "X", externalReq(), ch)
+		waitQueued(t, d, ch, 1, "the newcomer queued (r̂ ≈ 100 ms ≤ 20 s)")
+		releaseAdmits(t, d, held[0], ch)
+	})
+	t.Run("fresh", func(t *testing.T) {
+		d, held := warm(t, 0)
+		defer func() {
+			for _, h := range held {
+				h.Release()
+			}
+		}()
+		var l *Lease
+		var err error
+		ops := sectionsOf(d, func() { l, _, err = d.Acquire(fairXctx(context.Background(), "x", "X", 1), externalReq()) })
+		rej := target(t, d).ExternalRejects
+		t.Logf("oldest lease aged 0s: lease %v err %v in %d dispatcher sections, rejects %+v", l != nil, err, ops, rej)
 		if l != nil {
 			l.Release()
 		}
-		t.Logf("oldest lease aged %v: lease %v err %v after %v, rejects %+v", age, l != nil, err, el, target(t, d).ExternalRejects)
-		return l, el, err
-	}
-	t.Run("aged", func(t *testing.T) {
-		l, el, err := run(t, 29*time.Second+900*time.Millisecond)
-		if l == nil || err != nil || el < 90*time.Millisecond || el > 300*time.Millisecond {
-			t.Fatalf("lease %v err %v after %v, want queued and admitted by the release at 100 ms", l != nil, err, el)
-		}
-	})
-	t.Run("fresh", func(t *testing.T) {
-		l, el, err := run(t, 0)
-		if l != nil || !errors.Is(err, ErrWaitExpired) || el > 50*time.Millisecond {
-			t.Fatalf("lease %v err %v after %v, want predicted at once (r̂ ≈ 30 s > 20 s)", l != nil, err, el)
+		if l != nil || !errors.Is(err, ErrWaitExpired) || ops != 1 || rej != (ExternalRejectStats{Predicted: 1}) {
+			t.Fatalf("lease %v err %v in %d dispatcher sections, rejects %+v, want predicted at once (r̂ ≈ 30 s > 20 s, its arrival's one section)", l != nil, err, ops, rej)
 		}
 	})
 	t.Run("no external lease", func(t *testing.T) {
@@ -215,21 +251,16 @@ func TestFirstRoundIsTheRemainingTime(t *testing.T) {
 		for i := 0; i < 3; i++ {
 			il = append(il, mustAcquire(t, d, ictx(principal(fmt.Sprint("i", i))), interactiveReq()))
 		}
+		defer func() {
+			for _, h := range il[1:] {
+				h.Release()
+			}
+		}()
 		seedLeases(d, testOrigin, waitRingK, 30*time.Second)
-		release := time.AfterFunc(100*time.Millisecond, il[0].Release)
-		defer release.Stop()
-		start := time.Now()
-		l, _, err := d.Acquire(fairXctx(context.Background(), "x", "X", 1), externalReq())
-		el := time.Since(start)
-		il[0].Release()
-		for _, h := range il[1:] {
-			h.Release()
-		}
-		t.Logf("no external lease: lease %v err %v after %v, rejects %+v", l != nil, err, el, target(t, d).ExternalRejects)
-		if l == nil || err != nil || el < 90*time.Millisecond || el > 300*time.Millisecond {
-			t.Fatalf("lease %v err %v after %v, want queued (r̂ = 0) and admitted by the in-house release", l != nil, err, el)
-		}
-		l.Release()
+		ch := make(chan admission, 1)
+		startWaiter(fairXctx(context.Background(), "x", "X", 1), d, "X", externalReq(), ch)
+		waitQueued(t, d, ch, 1, "the newcomer queued (r̂ = 0)")
+		releaseAdmits(t, d, il[0], ch)
 	})
 }
 
@@ -332,6 +363,33 @@ func TestRetryAfterStepsAreWholeSeconds(t *testing.T) {
 	}
 }
 
+// leftGoroutines are the goroutines of now that before did not have, less
+// those a goroutine of before created that is neither me nor one me
+// started: goroutines of other tests, of the harness or of the runtime
+// that were running already. A goroutine the test's calls left counts also
+// when the goroutine that started it has ended — a worker of the test, the
+// caller of a refused acquire — which descendants, linking through the
+// goroutines still in the dump, could no longer attribute.
+func leftGoroutines(before, now []goroutineRecord, me int64) []goroutineRecord {
+	was := map[int64]bool{}
+	for _, g := range before {
+		was[g.id] = true
+	}
+	own, _ := descendants(before, me)
+	foreign := maps.Clone(was)
+	delete(foreign, me)
+	for _, g := range own {
+		delete(foreign, g.id)
+	}
+	var left []goroutineRecord
+	for _, g := range now {
+		if !was[g.id] && !foreign[g.creator] {
+			left = append(left, g)
+		}
+	}
+	return left
+}
+
 // TestPredictedRefusalAfterThePushLeavesNoTrace is the target gate of the
 // wave under lead decision 1 of the hardening (review 2 P9, ported): with
 // the prediction behind the push a predicted refusal is a push and a
@@ -341,12 +399,26 @@ func TestRetryAfterStepsAreWholeSeconds(t *testing.T) {
 // is predicted (a *RejectionError), no waiter is ever visible beyond its
 // section (a concurrent sampler sees the one waiter only), each refusal is
 // one mutex section (OpsTotal +10 000) and one transient push (seq +10 000,
-// removed in place), no goroutine and no timer is left (goroutines ±0; the
-// refusals answer at once — p99 < 50 ms — and none waits anywhere near a
-// timer of its 5-s budget — the slowest < 1 s: the maximum of 10 000 samples
-// under -race on a loaded host is scheduling noise, review 3 delta D-2; the
-// per-refusal 50-ms bound stays gate (a)'s), and the bookkeeping equals its
-// recomputation.
+// removed in place), no goroutine and no timer is left, and the bookkeeping
+// equals its recomputation.
+//
+// The refusals answer at once: each is its arrival's one section (OpsTotal
+// +10 000 with the loops stopped) and none waited for a timer of its 5-s
+// budget (predicted 10 000, expired 0) — counts, not latencies (issue
+// #369: the p99 < 50 ms this gate read measured the host — under -race on
+// two cores at GOMAXPROCS=2 beside two busy loops it stayed below 42.73 ms
+// in 394 runs at a 1-minute load of 10–30, and passed 50 ms in 17 of 171
+// runs at 38–46, up to 74.83 ms, in runs whose counts proved one section
+// per refusal). The slowest refusal stays bounded by 1 s, a wait outside
+// the dispatcher the counts cannot see (the same runs: at most 234.72 ms
+// and 308.48 ms; review 3 delta D-2).
+//
+// "No goroutine is left" is read by goroutine id: a goroutine in the stack
+// dump after the run that was not there before it — unless a goroutine
+// that was already running and is not the test's own started it (another
+// test's, the harness's) — was left by the run, also when the worker that
+// started it has ended (issue #369: the process-wide count after a fixed
+// 50-ms wait took every goroutine of the process into its numbers).
 func TestPredictedRefusalAfterThePushLeavesNoTrace(t *testing.T) {
 	s := budgetSettings(5 * time.Second)
 	s.ExternalQueuePerConsumer, s.ExternalQueuePerTenant = 0, 0
@@ -359,9 +431,7 @@ func TestPredictedRefusalAfterThePushLeavesNoTrace(t *testing.T) {
 	queueAt(t, d, ctx, testOrigin, "q0", "tenant-q", 1, ch) // cold: queues
 	seedLeases(d, testOrigin, waitRingK, 60*time.Second)
 	d.Close() // no publication pass may add sections while the gate counts
-	runtime.GC()
-	time.Sleep(50 * time.Millisecond)
-	g0 := runtime.NumGoroutine()
+	me, before := currentGoroutineID(), goroutineDump()
 	seq0, ops0 := targetSeq(d), d.Snapshot().OpsTotal
 
 	var peak atomic.Int64
@@ -413,17 +483,20 @@ func TestPredictedRefusalAfterThePushLeavesNoTrace(t *testing.T) {
 	sort.Slice(all, func(i, j int) bool { return all[i] < all[j] })
 	ts := target(t, d)
 	pushes, ops := targetSeq(d)-seq0, d.Snapshot().OpsTotal-ops0
-	runtime.GC()
-	time.Sleep(50 * time.Millisecond)
-	g1 := runtime.NumGoroutine()
-	t.Logf("%d refusals: pushes %d, ops %d, waiting peak %d / after %d, goroutines %d → %d, latency p50 %v p99 %v max %v, rejects %+v",
-		len(all), pushes, ops, peak.Load(), ts.External.Waiting, g0, g1, all[len(all)/2], all[len(all)*99/100], all[len(all)-1], ts.ExternalRejects)
+	// A goroutine on its way out (a worker past wg.Done) may still be in
+	// the dump for a moment; one the run left stays.
+	left := leftGoroutines(before, goroutineDump(), me)
+	for deadline := time.Now().Add(2 * time.Second); len(left) > 0 && time.Now().Before(deadline); left = leftGoroutines(before, goroutineDump(), me) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Logf("%d refusals: pushes %d, ops %d, waiting peak %d / after %d, goroutines left %d, latency p50 %v p99 %v max %v, rejects %+v",
+		len(all), pushes, ops, peak.Load(), ts.External.Waiting, len(left), all[len(all)/2], all[len(all)*99/100], all[len(all)-1], ts.ExternalRejects)
 	bad.Range(func(k, _ any) bool { t.Errorf("not a predicted *RejectionError: %v", k); return true })
 	if ts.ExternalRejects != (ExternalRejectStats{Predicted: n}) || pushes != n || ops != n {
 		t.Fatalf("rejects %+v, pushes %d, ops %d, want predicted=%d, one transient push and one section per refusal", ts.ExternalRejects, pushes, ops, n)
 	}
-	if peak.Load() != 1 || ts.External.Waiting != 1 || g1 > g0 || all[len(all)*99/100] > 50*time.Millisecond || all[len(all)-1] > time.Second {
-		t.Fatalf("residue: waiting peak %d after %d, goroutines %d → %d, p99 %v max %v", peak.Load(), ts.External.Waiting, g0, g1, all[len(all)*99/100], all[len(all)-1])
+	if peak.Load() != 1 || ts.External.Waiting != 1 || len(left) > 0 || all[len(all)-1] > time.Second {
+		t.Fatalf("residue: waiting peak %d after %d, %d goroutines left (the first: %+v), slowest refusal %v", peak.Load(), ts.External.Waiting, len(left), left[:min(len(left), 8)], all[len(all)-1])
 	}
 	if diff, _ := d.fairAuditForTest(testOrigin); diff != "" {
 		t.Fatalf("fairness bookkeeping differs from its recomputation: %s", diff)
@@ -649,18 +722,18 @@ func TestQueuedPositionDecides(t *testing.T) {
 			startWaiter(fairXctx(ctx, "y", "tY", 1), d, "Y", externalReq(), ch)
 			waitQueued(t, d, ch, 2, "Y queued (cold)")
 			seedLeases(d, testOrigin, waitRingK, tc.l50)
-			start := time.Now()
-			l, _, err := d.Acquire(fairXctx(bg, "n", "tN", 1), externalReq())
-			el := time.Since(start)
+			var l *Lease
+			var err error
+			ops := sectionsOf(d, func() { l, _, err = d.Acquire(fairXctx(bg, "n", "tN", 1), externalReq()) })
 			if l != nil {
 				l.Release()
 				t.Fatalf("newcomer admitted, want predicted")
 			}
 			ra := retryAfterOf(t, err)
 			ts := target(t, d)
-			t.Logf("%s: %v after %v, Retry-After %v, waiting %d, rejects %+v", tc.name, err, el, ra, ts.External.Waiting, ts.ExternalRejects)
-			if !errors.Is(err, ErrWaitExpired) || el > 50*time.Millisecond || ra != tc.ra || ts.ExternalRejects != (ExternalRejectStats{Predicted: 1}) || ts.External.Waiting != 2 {
-				t.Fatalf("%s: %v after %v, Retry-After %v, rejects %+v, want predicted at once with %v", tc.name, err, el, ra, ts.ExternalRejects, tc.ra)
+			t.Logf("%s: %v in %d dispatcher sections, Retry-After %v, waiting %d, rejects %+v", tc.name, err, ops, ra, ts.External.Waiting, ts.ExternalRejects)
+			if !errors.Is(err, ErrWaitExpired) || ops != 1 || ra != tc.ra || ts.ExternalRejects != (ExternalRejectStats{Predicted: 1}) || ts.External.Waiting != 2 {
+				t.Fatalf("%s: %v in %d dispatcher sections, Retry-After %v, rejects %+v, want predicted at once (its arrival's one section) with %v", tc.name, err, ops, ra, ts.ExternalRejects, tc.ra)
 			}
 			cancel()
 			recvAdmission(t, ch, "X ends")
