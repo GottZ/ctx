@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"maps"
 	"math"
@@ -139,11 +138,11 @@ func (h *QueryHandler) expandCache(cfg *config.Config) rrf.ExpandCache {
 func (h *QueryHandler) SetClusterFreshness(src rrf.ClusterFreshness) { h.clusterFresh = src }
 
 func (h *QueryHandler) applyClusterBoost(ctx context.Context, results []rrf.SearchResult, embedding []float32,
-	readScopes, grantedBlockIDs, visibleTypes []string, cfg rrf.ClusterConfig, requestID string) []rrf.SearchResult {
+	readScopes, grantedBlockIDs, visibleTypes []string, filter rrf.RequestFilter, cfg rrf.ClusterConfig, requestID string) []rrf.SearchResult {
 	if !cfg.Enabled {
 		return results
 	}
-	boosted, rep, err := rrf.ClusterBoost(ctx, h.pool, results, embedding, readScopes, grantedBlockIDs, visibleTypes, cfg, h.clusterFresh)
+	boosted, rep, err := rrf.ClusterBoost(ctx, h.pool, results, embedding, readScopes, grantedBlockIDs, visibleTypes, filter, cfg, h.clusterFresh)
 	if err != nil {
 		slog.Warn("cluster boost failed; using pre-boost results",
 			"error", err,
@@ -240,6 +239,15 @@ type queryRequest struct {
 	// each source on the retrieval-only path (F6 ctx_query tool delegation).
 	// Default false ⇒ eval.sh / A-B sweep responses are byte-for-byte unchanged.
 	IncludeContent bool `json:"include_content,omitempty"`
+	// Keepalive arms the keepalive bytes from the start of the request,
+	// whatever synthesize is (issue #220, query_keepalive.go): after one
+	// heartbeatInterval without an answer the response commits 200 and writes
+	// one space per interval until the JSON follows. Opt-in because that first
+	// space fixes the status: a refusal after it (quota, embed, grants, search)
+	// is a 200 whose body carries the error. Absent/false keeps the wire as it
+	// was — the synthesis path commits after its search, the retrieval-only
+	// path writes nothing before its answer.
+	Keepalive bool `json:"keepalive,omitempty"`
 
 	// --- B-W2 measurement seam (design/04 §4.4). ADMIN ONLY, retrieval-only,
 	// read-only. These three exist so the arm-weight sweep (B-W5/B-W7) can
@@ -488,119 +496,6 @@ func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]strin
 	return out
 }
 
-// queryHeartbeat keeps a long-running query alive through a buffering reverse
-// proxy. With the cross-encoder reranker engaged a query runs ~80s, past a
-// typical 60s proxy_read_timeout -> 504. 1xx informational responses do NOT
-// survive nginx (proxy_buffering swallows them, the body is lost — measured); a
-// chunked body heartbeat does: each flushed byte is a real upstream read that
-// resets the timeout. We commit the 200 header up front and emit one space every
-// ~25s (leading whitespace is valid JSON per RFC 8259, so the final body still
-// decodes) until finish() writes the real payload. Gated to the slow rerank path
-// only; the fast path keeps plain writeJSON and its non-200 error statuses.
-// heartbeatInterval is the keepalive cadence — well under a typical 60s proxy
-// read timeout. A package var so tests can shrink it.
-var heartbeatInterval = 25 * time.Second
-
-// heartbeatWriteWindow is the rolling write-deadline budget per tick. The
-// global http.Server WriteTimeout (main.go) is an ABSOLUTE response deadline —
-// it killed the >120s CPU-fallback path mid-flight (context canceled, client
-// got only the tick bytes). While the heartbeat ticks, liveness is proven, so
-// every tick pushes the connection write deadline one window ahead instead.
-// 90s = ~3 missed ticks before the server gives up on a dead connection.
-var heartbeatWriteWindow = 90 * time.Second
-
-type queryHeartbeat struct {
-	w      http.ResponseWriter
-	rc     *http.ResponseController
-	ctx    context.Context // the request context: the ticker ends with it
-	mu     sync.Mutex
-	done   bool
-	active bool
-}
-
-// startHeartbeat commits the 200 header and (when active) starts the keepalive
-// goroutine. Call exactly one finish() afterwards. ctx is the request context:
-// a request that never reaches finish() — a panic below the handler, recovered
-// by Recovery on REST or by mcpRecover on an MCP delegation — still ends the
-// ticker, at the first tick after its context is canceled (net/http cancels it
-// when ServeHTTP returns, the MCP SDK when the call is answered). Without
-// that, the ticker of a recovered panic would tick forever: into the
-// in-memory recorder of an MCP delegation, whose writes never fail (#194),
-// and on REST into a response its handler has already finished.
-func startHeartbeat(ctx context.Context, w http.ResponseWriter, active bool) *queryHeartbeat {
-	hb := &queryHeartbeat{w: w, ctx: ctx, active: active}
-	if !active {
-		return hb
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	hb.rc = http.NewResponseController(w)
-	if err := hb.rc.Flush(); err != nil {
-		// Streaming is broken — likely a middleware ResponseWriter wrapper
-		// without Unwrap(), so the controller cannot reach the real Flusher.
-		// The heartbeat then buffers to the end of the response and a reverse
-		// proxy will still 504. Loud here so the regression shows up in logs
-		// instead of as silent buffering.
-		slog.Warn("query heartbeat: response writer not flushable, keepalive ineffective",
-			"error", err)
-	}
-	if err := hb.extendWriteDeadline(); err != nil {
-		// Without deadline extension the server's absolute WriteTimeout caps
-		// the response — long fallback syntheses (>120s) will be cut off.
-		slog.Warn("query heartbeat: cannot extend write deadline, server WriteTimeout caps long responses",
-			"error", err)
-	}
-	go hb.run()
-	return hb
-}
-
-// extendWriteDeadline rolls the connection write deadline one window ahead.
-// While the heartbeat ticks, liveness is proven — the absolute server
-// WriteTimeout would otherwise kill the deliberately long rerank/fallback
-// path mid-flight.
-func (hb *queryHeartbeat) extendWriteDeadline() error {
-	return hb.rc.SetWriteDeadline(time.Now().Add(heartbeatWriteWindow))
-}
-
-func (hb *queryHeartbeat) run() {
-	t := time.NewTicker(heartbeatInterval)
-	defer t.Stop()
-	for range t.C {
-		hb.mu.Lock()
-		if hb.done || hb.ctx.Err() != nil {
-			hb.mu.Unlock()
-			return
-		}
-		_ = hb.extendWriteDeadline()
-		_, err := io.WriteString(hb.w, " ")
-		if err == nil {
-			_ = hb.rc.Flush()
-		}
-		hb.mu.Unlock()
-		if err != nil {
-			return
-		}
-	}
-}
-
-// finish writes the final response exactly once. In heartbeat mode the 200 header
-// is already committed, so status is ignored and v is encoded into the
-// (whitespace-prefixed) body — a late failure can only carry success:false there.
-// Without heartbeat it is a plain writeJSON(status, v). Mutex-serialized against
-// the keepalive writes.
-func (hb *queryHeartbeat) finish(status int, v any) {
-	if !hb.active {
-		writeJSON(hb.w, status, v)
-		return
-	}
-	hb.mu.Lock()
-	defer hb.mu.Unlock()
-	hb.done = true
-	_ = hb.extendWriteDeadline()
-	_ = json.NewEncoder(hb.w).Encode(v)
-	_ = hb.rc.Flush()
-}
-
 // HandleQuery orchestrates the full query pipeline:
 // parse -> auth -> detect language -> translate -> embed -> RRF search ->
 // filter -> confidence -> reorder -> synthesize -> access log -> respond.
@@ -635,6 +530,14 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
+
+	// From here on the request answers through the keepalive (issue #220,
+	// query_keepalive.go): it rolls the server's write deadline while the
+	// request works, and with keepalive:true it also writes keepalive bytes from
+	// the first tick on. Every return below writes through w.
+	kw := armQueryKeepalive(ctx, w, req.Keepalive)
+	defer kw.close()
+	w = kw
 
 	query := strings.TrimSpace(req.Query)
 	if query == "" {
@@ -887,7 +790,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// The tenant quota gates this chain like synthesis and chat (GHSA
 	// 2026-10-31 §4): an exhausted call budget or a cost budget under block is
 	// the generic 429 quota_exceeded the synthesis step answers with (here
-	// before the heartbeat, so it is a real 429); an external_off degrade that
+	// before the synthesis path's commit, so it is a real 429 — unless a
+	// keepalive:true request already got its first keepalive byte, #220); an
+	// external_off degrade that
 	// empties the chain is the no-eligible 500 below. The gate runs before the
 	// embed cache, so a budget-exhausted tenant gets no cached vector either —
 	// the call budget is a coarse foreground limit, not a wire-call meter.
@@ -925,9 +830,10 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		if dispatch.IsRejection(err) {
 			// Capacity rejection at the embed step (design/03 §4.5.2 embed row):
 			// map to a generic 429 + B1 Retry-After instead of the 500 that
-			// poisons client retry/alerting. This site runs BEFORE the heartbeat
-			// commits the 200, so the header travels on the wire. Body stays
-			// B6-generic (§3.3): no target, no depth.
+			// poisons client retry/alerting. This site runs BEFORE the synthesis
+			// path commits the 200, so the header travels on the wire (after a
+			// keepalive:true request's first keepalive byte it cannot, #220).
+			// Body stays B6-generic (§3.3): no target, no depth.
 			setRejectRetryAfter(w, h.admitter, err, dispatch.ClassInteractive)
 			slog.Warn("query embed rejected by dispatcher", "error", err, "request_id", requestID)
 			writeJSON(w, http.StatusTooManyRequests, rejectionBody())
@@ -1050,6 +956,15 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// Wire compat (seam 17, closed in WF T10): types_exclude is the canonical
 	// wire name for the request-level p_types_exclude; block_roles_exclude
 	// stays as the documented legacy alias — both present ⇒ union.
+	//
+	// Issue #225: the request's four filters as ONE value, handed to the fusion
+	// and to every stage after it that can add a block (cluster injection,
+	// graph expansion, aggregate fold) — a block the request excluded never
+	// comes back as a sibling, a neighbour or a parent.
+	reqFilter := rrf.RequestFilter{
+		Category: req.Category, Tags: req.Tags, CategoriesExclude: req.CategoriesExclude,
+		TypesExclude: unionExcludes(req.TypesExclude, req.BlockRolesExclude),
+	}
 	var (
 		results     []rrf.SearchResult
 		selectorDec rrf.SelectorDecision
@@ -1058,15 +973,15 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if armRanks {
 		results, selectorDec, armRows, err = h.armSweepSearch(ctx, armSweepParams{
 			embedding: embedding, query: searchQuery, querySpaced: querySpaced,
-			scopes: ar.ReadScopes, category: req.Category, tags: req.Tags, limit: internalLimit,
+			scopes: ar.ReadScopes, category: reqFilter.Category, tags: reqFilter.Tags, limit: internalLimit,
 			temporal: temporal, queryOR: queryOR, measureVisibleTypes: measureVisibleTypes,
 			dampedTypes: dampedTypes, dampedFactors: dampedFactors,
-			categoriesExclude: req.CategoriesExclude,
-			typesExclude:      unionExcludes(req.TypesExclude, req.BlockRolesExclude),
+			categoriesExclude: reqFilter.CategoriesExclude,
+			typesExclude:      reqFilter.TypesExclude,
 			grantedBlockIDs:   grantedBlockIDs, policy: selectorPolicy,
 		})
 	} else {
-		results, selectorDec, err = rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, req.Category, req.Tags, internalLimit, temporal, queryOR, visibleTypes, dampedTypes, dampedFactors, req.CategoriesExclude, unionExcludes(req.TypesExclude, req.BlockRolesExclude), grantedBlockIDs, selectorPolicy)
+		results, selectorDec, err = rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, reqFilter.Category, reqFilter.Tags, internalLimit, temporal, queryOR, visibleTypes, dampedTypes, dampedFactors, reqFilter.CategoriesExclude, reqFilter.TypesExclude, grantedBlockIDs, selectorPolicy)
 	}
 	if err != nil {
 		slog.Error("rrf search failed",
@@ -1115,15 +1030,17 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	slog.Info("rrf search complete", searchAttrs...)
 
 	// RRF (the last 500-capable stage) has succeeded. From here the keepalive
-	// heartbeat runs UNCONDITIONALLY for the synthesis path (X4, F3-P2): with
-	// pool chains ANY synthesis can exceed 60s (the CPU link runs minutes, a
+	// bytes run UNCONDITIONALLY for the synthesis path (X4, F3-P2): with pool
+	// chains ANY synthesis can exceed 60s (the CPU link runs minutes, a
 	// failover attempt adds latency) — the old rerank-only gate left the
-	// CPU-failover-without-rerank case unprotected against a 60s proxy. It
-	// commits the 200 header now; every later return goes through hb.finish
-	// (errors after commit become success:false in a 200 body). Retrieval-only
-	// requests stay heartbeat-free (fast, no LLM in the path).
-	useHeartbeat := req.Synthesize == nil || *req.Synthesize
-	hb := startHeartbeat(r.Context(), w, useHeartbeat)
+	// CPU-failover-without-rerank case unprotected against a 60s proxy. commit
+	// puts the 200 header on the wire now (errors after it become success:false
+	// in a 200 body). The retrieval-only path writes no byte before its answer
+	// unless the request asked for keepalive:true; its write deadline rolls
+	// either way.
+	if req.Synthesize == nil || *req.Synthesize {
+		kw.commit()
+	}
 
 	// Step 6a: Post-RRF temporal gravity boost (GottZ Cyclic Phase Model).
 	//
@@ -1223,8 +1140,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// C9 additionally threads the SAME grant set and type allowlist that gate
 	// rrf.Search and GraphExpand: the moment the stage may INTRODUCE a block, the
 	// membership scope filter alone is not enough — the block's own visibility
-	// has to hold, from the one per-request policy source (§5.4).
-	results = h.applyClusterBoost(ctx, results, embedding, ar.ReadScopes, grantedBlockIDs, visibleTypes, cfg.ClusterRRF(), requestID)
+	// has to hold, from the one per-request policy source (§5.4). The request
+	// filter rides along for the same reason (#225).
+	results = h.applyClusterBoost(ctx, results, embedding, ar.ReadScopes, grantedBlockIDs, visibleTypes, reqFilter, cfg.ClusterRRF(), requestID)
 
 	// Step 6a-graph: Dream-graph expansion (GottZ Graph Expansion, Wave 1).
 	// Post-RRF, post-gravity (so seeds enter sorted by boosted RRFScore) and
@@ -1254,7 +1172,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		// nor events). expandCache returns the zero value unless the snapshot is
 		// Fresh AND graph_cache.serve_expand is on, and GraphExpandCached then runs
 		// the byte-identical SQL path — same call, same fail-open handling below.
-		if expanded, gerr := rrf.GraphExpandCached(ctx, h.pool, results, ar.ReadScopes, grantedBlockIDs, visibleTypes, graphCfg, h.expandCache(cfg)); gerr != nil {
+		// #225: and the request filter, so a neighbour the request excluded is
+		// never hydrated.
+		if expanded, gerr := rrf.GraphExpandCached(ctx, h.pool, results, ar.ReadScopes, grantedBlockIDs, visibleTypes, reqFilter, graphCfg, h.expandCache(cfg)); gerr != nil {
 			slog.Warn("graph expand failed; using pre-expansion results",
 				"error", gerr,
 				"request_id", requestID,
@@ -1272,7 +1192,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// filterSuperseded via the existing machinery instead of carrying a
 	// zero-value (credentials, over-blocking) sensitivity. Fast-path: no
 	// aggregating type registered ⇒ zero DB calls ⇒ eval baseline byte-identical.
-	results = h.foldAggregates(ctx, results, typeSet.AggregateTypes(), visibleTypes, ar.ReadScopes, grantedBlockIDs, requestID)
+	// #225: a parent the request filter excludes is not delivered; its child,
+	// which passed the fusion, stays itself.
+	results = h.foldAggregates(ctx, results, typeSet.AggregateTypes(), visibleTypes, ar.ReadScopes, grantedBlockIDs, reqFilter, requestID)
 
 	// Step 6a-sens: batch sensitivity lookup over ALL candidate IDs — not
 	// top-N: filterSuperseded (6d) and graph placement advance stragglers
@@ -1499,7 +1421,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				},
 			}
 		}
-		hb.finish(http.StatusOK, resp)
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
@@ -1524,7 +1446,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			"request_id", requestID,
 		)
 		go h.logAccess(ar, results, query, selectorDec, accessSourceAgent)
-		hb.finish(http.StatusOK, queryResponse{
+		writeJSON(w, http.StatusOK, queryResponse{
 			Success:             true,
 			Answer:              llm.NoRelevantReplacement,
 			Sources:             buildSourceResponses(nil, supersedesMap, 0),
@@ -1554,21 +1476,21 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		// is tenant policy and stays in slog/admin, never on the wire.
 		var quotaErr *backends.ErrQuotaExceeded
 		if errors.As(err, &quotaErr) {
-			hb.finish(http.StatusTooManyRequests, map[string]any{
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
 				"success": false, "error_code": "quota_exceeded",
 			})
 			return
 		}
 		// Dispatcher capacity rejection (design/03 §4.5.2 synthesis row): hooked
 		// into the EXISTING mapper as a 429 — one mapper, one doctrine. The
-		// heartbeat has already committed the 200 header on the synthesis path
-		// (useHeartbeat is always true here), so the Retry-After header cannot
+		// keepalive has already committed the 200 header on the synthesis path
+		// (commit above), so the Retry-After header cannot
 		// travel; the generic B6 body carries the signal, exactly as the
 		// quota_exceeded 429 above does. Best-effort header set is a no-op after
 		// commit but correct should the path ever run heartbeat-free.
 		if dispatch.IsRejection(err) {
 			setRejectRetryAfter(w, h.admitter, err, dispatch.ClassInteractive)
-			hb.finish(http.StatusTooManyRequests, rejectionBody())
+			writeJSON(w, http.StatusTooManyRequests, rejectionBody())
 			return
 		}
 		// Empty chain: generic client error — role + required sensitivity are
@@ -1576,14 +1498,14 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		// gaming, disabled) are topology disclosure and stay in slog/admin.
 		var noElig *backends.ErrNoEligibleBackend
 		if errors.As(err, &noElig) {
-			hb.finish(http.StatusServiceUnavailable, map[string]any{
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 				"success": false, "error_code": "no_eligible_backend",
 				"role": noElig.Role, "required_sensitivity": string(noElig.Required),
 			})
 			return
 		}
 		// In heartbeat mode the 200 is already committed -> success:false in body.
-		hb.finish(http.StatusInternalServerError, map[string]any{"success": false, "error": "synthesis failed"})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "synthesis failed"})
 		return
 	}
 
@@ -1618,7 +1540,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		"request_id", requestID,
 	)
 
-	hb.finish(http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // Access-log provenance (B-W2). "agent" is the value every production query

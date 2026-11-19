@@ -45,7 +45,7 @@ const mcpInternalErrorMsg = "Internal server error"
 //   - the handler returns normally, so the SDK finishes the request the way it
 //     finishes a failed one: the response is written, the request context is
 //     canceled, which ends the body heartbeat a delegated query may have
-//     started (startHeartbeat, query.go). What the request held through
+//     started (armQueryKeepalive, query_keepalive.go). What the request held through
 //     defers — the query tool's keepalive arm, the admission slot of
 //     WithScheduler, a pool connection — was released while the panic
 //     unwound.

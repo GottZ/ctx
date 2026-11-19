@@ -137,11 +137,12 @@ Hybrid semantic + fulltext search with LLM synthesis, or retrieval only. Read-on
 
 `category`, `tags` and `categories_exclude` are passed to `POST /api/query` under
 the same names and narrow the candidates of the rank-fusion step; given together,
-a candidate must pass all of them. The post-fusion stages (cluster boost, graph
-expansion, aggregate fold) do not take them: where one of those is enabled, a
-block linked to a hit can enter the source list from outside the filter. Unlike
-`types` they are not checked against anything: a name that matches no block
-gives an empty result, not an error.
+a candidate must pass all of them. Unlike `types` they are not checked against
+anything: a name that matches no block gives an empty result, not an error. The
+post-fusion stages that can add a block (cluster injection, graph expansion,
+aggregate fold) apply them too, together with `types` / `types_exclude`: a block
+outside the filter does not enter the source list as a neighbour, a cluster
+sibling or a folded parent.
 
 Runs the full `POST /api/query` pipeline (temporal parsing, rank fusion, temporal
 gravity, rerank, synthesis). **Answer:** the synthesized answer, then a source list:

@@ -174,7 +174,7 @@ func GraphExpandWithStub(ctx context.Context, pool *pgxpool.Pool, results []Sear
 	switch kind {
 	case StubRawDegree:
 		arm = &rawDegreeExpandArm{
-			expandCacheArm: newExpandCacheArm(snap, pool, readScopes, grantedBlockIDs, visibleTypes, cfg),
+			expandCacheArm: newExpandCacheArm(snap, pool, readScopes, grantedBlockIDs, visibleTypes, RequestFilter{}, cfg),
 			snap:           snap,
 		}
 	case StubHintTrusting:
@@ -219,7 +219,7 @@ func toProbes(edges []graphEdge) []ExpandEdgeProbe {
 // ProbeFetchSQL returns one hop's edges from the SQL arm (fetchNeighbors).
 func ProbeFetchSQL(ctx context.Context, pool *pgxpool.Pool, seedIDs,
 	readScopes, grantedBlockIDs, visibleTypes []string, cfg GraphConfig, hopDecay float64) ([]ExpandEdgeProbe, error) {
-	edges, err := fetchNeighbors(ctx, pool, seedIDs, readScopes, grantedBlockIDs, visibleTypes, cfg, hopDecay)
+	edges, err := fetchNeighbors(ctx, pool, seedIDs, readScopes, grantedBlockIDs, visibleTypes, RequestFilter{}, cfg, hopDecay)
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +229,7 @@ func ProbeFetchSQL(ctx context.Context, pool *pgxpool.Pool, seedIDs,
 // ProbeFetchCache returns one hop's edges from the PRODUCTION cache arm.
 func ProbeFetchCache(ctx context.Context, pool *pgxpool.Pool, snap *graphcache.Snapshot, seedIDs,
 	readScopes, grantedBlockIDs, visibleTypes []string, cfg GraphConfig, hopDecay float64) ([]ExpandEdgeProbe, error) {
-	arm := newExpandCacheArm(snap, pool, readScopes, grantedBlockIDs, visibleTypes, cfg)
+	arm := newExpandCacheArm(snap, pool, readScopes, grantedBlockIDs, visibleTypes, RequestFilter{}, cfg)
 	edges, err := arm.fetch(ctx, seedIDs, hopDecay)
 	if err != nil {
 		return nil, err

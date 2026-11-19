@@ -22,7 +22,9 @@ func TestQueryHeartbeat_WhitespaceThenValidJSON(t *testing.T) {
 	defer func() { heartbeatInterval = old }()
 
 	rec := httptest.NewRecorder()
-	hb := startHeartbeat(context.Background(), rec, true)
+	kw := armQueryKeepalive(context.Background(), rec, false)
+	defer kw.close()
+	kw.commit()
 	if rec.Code != http.StatusOK {
 		t.Fatalf("200 header not committed up front: code=%d", rec.Code)
 	}
@@ -30,7 +32,7 @@ func TestQueryHeartbeat_WhitespaceThenValidJSON(t *testing.T) {
 		t.Errorf("Content-Type = %q, want application/json", ct)
 	}
 	time.Sleep(40 * time.Millisecond) // let a few heartbeats fire
-	hb.finish(http.StatusOK, queryResponse{Success: true, Answer: "ok", Confidence: "confident"})
+	writeJSON(kw, http.StatusOK, queryResponse{Success: true, Answer: "ok", Confidence: "confident"})
 
 	body := rec.Body.String()
 	if !strings.HasPrefix(body, " ") {
@@ -48,8 +50,9 @@ func TestQueryHeartbeat_WhitespaceThenValidJSON(t *testing.T) {
 // Inactive (fast path) = plain writeJSON: honours the status code, no whitespace.
 func TestQueryHeartbeat_InactivePlainWriteJSON(t *testing.T) {
 	rec := httptest.NewRecorder()
-	hb := startHeartbeat(context.Background(), rec, false)
-	hb.finish(http.StatusInternalServerError, map[string]any{"success": false, "error": "boom"})
+	kw := armQueryKeepalive(context.Background(), rec, false)
+	defer kw.close()
+	writeJSON(kw, http.StatusInternalServerError, map[string]any{"success": false, "error": "boom"})
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("inactive code = %d, want 500", rec.Code)
 	}
@@ -72,9 +75,11 @@ func TestQueryHeartbeat_StreamsThroughMiddlewareStack(t *testing.T) {
 
 	const handlerWork = 300 * time.Millisecond
 	h := SecurityHeaders(RequestID(Logger(Recovery(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hb := startHeartbeat(r.Context(), w, true)
+		kw := armQueryKeepalive(r.Context(), w, false)
+		defer kw.close()
+		kw.commit()
 		time.Sleep(handlerWork) // stands in for the slow rerank stage
-		hb.finish(http.StatusOK, queryResponse{Success: true, Answer: "done", Confidence: "confident"})
+		writeJSON(kw, http.StatusOK, queryResponse{Success: true, Answer: "done", Confidence: "confident"})
 	})))))
 	srv := httptest.NewServer(h)
 	defer srv.Close()
