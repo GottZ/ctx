@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -19,15 +18,6 @@ import (
 // scopeFloorSettingKey is the registry key of config.PoolConfig's
 // ScopeSensitivityFloor (pinned by TestScopeFloorSettingKeyIsTheRegistryKey).
 const scopeFloorSettingKey = "pool.scope_sensitivity_floor"
-
-// ownerConfigBuildTimeout bounds the build of another tenant's configuration
-// that backfillFloor can trigger (config.Store builds a generation the first
-// time it is asked for after a change). The build runs on a context of its
-// own: config.Store builds a cold generation once for every waiter, on the
-// context of the first, so a request that is not the owner's must not end
-// the owner's build when its client goes away. A fixed bound, the one the
-// detached memo writes of backfillPending use.
-const ownerConfigBuildTimeout = 5 * time.Second
 
 // errOwnerConfigFallback: config.Store answered with its fallback, the base
 // generation, for a configuration that has a floor row of its own: the
@@ -76,11 +66,18 @@ var errOwnerConfigFallback = errors.New("backfill floor: an owner's configuratio
 // An error leaves the caller nothing to apply; backfillPending then skips
 // the backfill for the request (fail-closed: no block leaves on a floor that
 // could not be read). That includes an owner's configuration that did not
-// build (errOwnerConfigFallback).
+// build (errOwnerConfigFallback) and one that did not build before ctx ended.
+//
+// ctx bounds the whole resolution, the statements and the wait for an owner's
+// configuration (issue #372, part 4): backfillPending passes the request's
+// context under its sync budget. A configuration that has to be built is
+// built by config.Store on a context of its own and cached, so a wait that
+// ends with the budget ends this request's backfill and not the build, and a
+// later request finds the configuration built. Only a configuration with a
+// floor row of its own is built: one without inherits the base's floor
+// (floorOf).
 func (h *QueryHandler) backfillFloor(ctx context.Context, callerFloor config.ScopeFloor, readScopes []string, everyScope bool) (config.ScopeFloor, error) {
-	buildCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ownerConfigBuildTimeout)
-	defer cancel()
-	r := &ownerFloors{cfg: h.cfg, buildCtx: buildCtx, floors: map[string]config.ScopeFloor{}, out: maps.Clone(callerFloor)}
+	r := &ownerFloors{cfg: h.cfg, ctx: ctx, floors: map[string]config.ScopeFloor{}, out: maps.Clone(callerFloor)}
 	if r.out == nil {
 		r.out = config.ScopeFloor{}
 	}
@@ -99,23 +96,36 @@ func (h *QueryHandler) backfillFloor(ctx context.Context, callerFloor config.Sco
 // ownerFloors is one backfillFloor call: the configurations' floors read so
 // far and the fold of them into the caller's.
 type ownerFloors struct {
-	cfg      ConfigStore
-	buildCtx context.Context
-	floors   map[string]config.ScopeFloor
-	out      config.ScopeFloor
+	cfg    ConfigStore
+	ctx    context.Context
+	floors map[string]config.ScopeFloor
+	out    config.ScopeFloor
 }
 
 // floorOf is the floor of the configuration at configScope. hasRow says the
 // configuration has a floor row of its own, so it must not resolve to
-// config.Store's fallback to the base generation (errOwnerConfigFallback).
-// The base answering for _global is not a fallback: it is that
-// configuration.
+// config.Store's fallback to the base generation (errOwnerConfigFallback),
+// nor to the base because the wait for its build ended with r.ctx. The base
+// answering for _global is not a fallback: it is that configuration. A
+// configuration without a floor row of its own inherits the base's floor,
+// which the base generation holds: it is read there, without building the
+// tenant's generation on the request path.
 func (r *ownerFloors) floorOf(configScope string, hasRow bool) (config.ScopeFloor, error) {
 	if f, ok := r.floors[configScope]; ok {
 		return f, nil
 	}
-	snap, resolved := r.cfg.SnapshotForTenantResolved(r.buildCtx, configScope)
-	if hasRow && !resolved && configScope != store.GlobalScope {
+	if !hasRow || configScope == store.GlobalScope {
+		// The base generation: config.Store answers the reserved _global
+		// scope with it at once, without a build.
+		base, _ := r.cfg.SnapshotForTenantResolved(r.ctx, store.GlobalScope)
+		r.floors[configScope] = base.Pool.ScopeSensitivityFloor
+		return r.floors[configScope], nil
+	}
+	snap, resolved := r.cfg.SnapshotForTenantResolved(r.ctx, configScope)
+	if err := r.ctx.Err(); err != nil && !resolved {
+		return nil, fmt.Errorf("backfill floor: the wait for %s's configuration ended: %w", configScope, err)
+	}
+	if !resolved {
 		return nil, fmt.Errorf("%w (%s)", errOwnerConfigFallback, configScope)
 	}
 	r.floors[configScope] = snap.Pool.ScopeSensitivityFloor

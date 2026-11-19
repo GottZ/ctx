@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/singleflight"
 )
@@ -153,24 +154,81 @@ func (s *Store) SnapshotForTenant(ctx context.Context, tenantScope string) *Conf
 // so a Replace between two reads cannot make a fallback look like a tenant
 // generation (comparing the result with a base read at another time can).
 // Same scope rule as SnapshotForTenant: never a scope from request input.
+//
+// ctx bounds the caller's wait and not the build (issue #372, part 4). A
+// cached generation answers at once. A generation that has to be built is
+// built once for every caller that asks for it meanwhile (single-flight), on
+// a context of its own: detached from ctx and ended after
+// resolvedBuildTimeout. When ctx ends first the call answers with the base
+// and false, as for a failed build, and the build goes on: its generation is
+// cached for the next call, and no other waiter loses it. A caller-bound
+// build context would end the build for every waiter with the first caller's
+// deadline; the caller that waited without its own deadline held a request
+// path that has a budget (embed_backfill.sync_budget) for the whole build.
 func (s *Store) SnapshotForTenantResolved(ctx context.Context, tenantScope string) (cfg *Config, resolved bool) {
-	return s.snapshotForScope(ctx, tenantScope)
+	base := s.p.Load()
+	if cfg, resolved, ok := s.cached(base, tenantScope); ok {
+		return cfg, resolved
+	}
+	type answer struct {
+		cfg      *Config
+		resolved bool
+		panicked any
+	}
+	done := make(chan answer, 1)
+	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				done <- answer{panicked: p}
+			}
+		}()
+		buildCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resolvedBuildTimeout)
+		defer cancel()
+		cfg, resolved := s.snapshotForScope(buildCtx, tenantScope)
+		done <- answer{cfg: cfg, resolved: resolved}
+	}()
+	select {
+	case a := <-done:
+		if a.panicked != nil {
+			// The overlay panicked: raised in the caller, as single-flight
+			// raises it in the caller that runs the build.
+			panic(a.panicked)
+		}
+		return a.cfg, a.resolved
+	case <-ctx.Done():
+		return base, false
+	}
+}
+
+// resolvedBuildTimeout bounds a tenant generation build that
+// SnapshotForTenantResolved starts. The build runs on a context of its own,
+// since every caller that joins it shares its result.
+const resolvedBuildTimeout = 5 * time.Second
+
+// cached answers for tenantScope without a build: the base and false for a
+// scope that never gets a tenant generation (no overlay, an empty or a
+// reserved scope), or a current cache entry and true. ok is false when the
+// generation has to be built.
+func (s *Store) cached(base *Config, tenantScope string) (cfg *Config, resolved, ok bool) {
+	// Fail-safe to base: no overlay (single-tenant), empty scope (unresolved),
+	// or reserved scope (_global / _-prefixed) never gets a tenant generation.
+	if s.overlay == nil || tenantScope == "" || strings.HasPrefix(tenantScope, "_") {
+		return base, false, true
+	}
+	gen := s.baseGen.Load()
+	if v, ok := s.tenants.Load().Load(tenantScope); ok {
+		if e := v.(*tenantEntry); e.gen == gen {
+			return e.cfg, true, true // hit: one atomic load, current generation
+		}
+		// stale (base advanced under it): rebuild
+	}
+	return nil, false, false
 }
 
 func (s *Store) snapshotForScope(ctx context.Context, tenantScope string) (*Config, bool) {
 	base := s.p.Load()
-	// Fail-safe to base: no overlay (single-tenant), empty scope (unresolved),
-	// or reserved scope (_global / _-prefixed) never gets a tenant generation.
-	if s.overlay == nil || tenantScope == "" || strings.HasPrefix(tenantScope, "_") {
-		return base, false
-	}
-	gen := s.baseGen.Load()
-	m := s.tenants.Load()
-	if v, ok := m.Load(tenantScope); ok {
-		if e := v.(*tenantEntry); e.gen == gen {
-			return e.cfg, true // hit: one atomic load, current generation
-		}
-		// stale (base advanced under it): fall through to rebuild
+	if cfg, resolved, ok := s.cached(base, tenantScope); ok {
+		return cfg, resolved
 	}
 	res, err, _ := s.flight.Do(tenantScope, func() (any, error) {
 		// Read baseGen BEFORE the base pointer: Replace publishes the new base

@@ -51,9 +51,10 @@ import (
 //
 // One exception reads another tenant's generation on the request path: the
 // embed backfill's floor (backfillFloor) takes the sensitivity floor of the
-// tenant that owns a scope it may embed from (SnapshotForTenantResolved),
-// with a scope read from the settings table and context_tenant_scopes, never
-// from the request, and reads nothing else of that generation.
+// tenant that owns a scope it may embed from (SnapshotForTenantResolved, or
+// the base generation's floor for a configuration without a floor row of its
+// own), with a scope read from the settings table and context_tenant_scopes,
+// never from the request, and reads nothing else of that generation.
 type ConfigStore interface {
 	Snapshot() *config.Config
 	SnapshotForRequest(ctx context.Context) *config.Config
@@ -1858,9 +1859,25 @@ func (h *QueryHandler) backfillPending(ctx context.Context, callerFloor config.S
 	armRuns := cfg.EmbedBackfill.Interval > 0
 	// The floor of a block the pick can reach is its owner's as well as the
 	// caller's (issue #253); with the arm on the pick reaches the caller's
-	// read scopes, with the arm off every scope.
-	floor, err := h.backfillFloor(ctx, callerFloor, readScopes, !armRuns)
+	// read scopes, with the arm off every scope. Its resolution spends the
+	// sync budget like the embeds do (issue #372, part 4): an owner's
+	// configuration that is built cold on this request (config.Store builds
+	// it on a context of its own, up to 5 s) holds the request until the
+	// budget ends at the latest, and the backfill is then skipped while the
+	// build goes on for the next request.
+	floorCtx := ctx
+	if !budgetDeadline.IsZero() {
+		var cancelFloor context.CancelFunc
+		floorCtx, cancelFloor = context.WithDeadline(ctx, budgetDeadline)
+		defer cancelFloor()
+	}
+	floor, err := h.backfillFloor(floorCtx, callerFloor, readScopes, !armRuns)
 	if err != nil {
+		if floorCtx.Err() != nil && ctx.Err() == nil {
+			slog.Info("query backfill: sync budget spent resolving the sensitivity floors, backfill skipped",
+				"budget", cfg.EmbedBackfill.SyncBudget, "error", err)
+			return 0
+		}
 		slog.Warn("query backfill: sensitivity floors unreadable, backfill skipped", "error", err)
 		return 0
 	}
