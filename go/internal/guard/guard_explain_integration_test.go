@@ -1,8 +1,9 @@
 //go:build integration
 
 // T7 EXPLAIN gate (design/01 §3.6/§6.4/§7-T7, G39 bench discipline): the
-// guard pick AND both state-count subqueries must ride idx_guard_pending
-// (M074 partial index) — no Seq Scan over context_blocks. Pre-M074 the pick
+// guard pick AND the pending count must ride a guard pending index — since
+// migration 183 idx_guard_pending_type (migration 182), before it also
+// idx_guard_pending (M074 partial index) — no Seq Scan over context_blocks. Pre-M074 the pick
 // predicate had NO carrying index (GIN(metadata) jsonb_ops does not serve
 // `->> IS NULL`; idx_context_created only carries the ORDER BY): at 1M+
 // blocks that was 2-3 full scans per batch.
@@ -86,9 +87,21 @@ func TestT7ExplainGuardPendingIndex(t *testing.T) {
 
 	types := []string{"audit-trail", "knowledge", "reference", "system-meta"}
 
-	explain := func(name, q string, args ...any) string {
+	explain := func(name, pre, q string, args ...any) string {
 		t.Helper()
-		rows, err := pool.Query(ctx, "EXPLAIN (ANALYZE, BUFFERS) "+q, args...)
+		// One transaction, rolled back: pre is the pick's own session setting
+		// (guardPickNoSort), and the locks EXPLAIN ANALYZE takes go with it.
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if pre != "" {
+			if _, err := tx.Exec(ctx, pre); err != nil {
+				t.Fatalf("%s: %s: %v", name, pre, err)
+			}
+		}
+		rows, err := tx.Query(ctx, "EXPLAIN (ANALYZE, BUFFERS) "+q, args...)
 		if err != nil {
 			t.Fatalf("%s: explain: %v", name, err)
 		}
@@ -107,8 +120,8 @@ func TestT7ExplainGuardPendingIndex(t *testing.T) {
 		}
 		plan := b.String()
 		t.Logf("%s plan:\n%s", name, plan)
-		if !strings.Contains(plan, "idx_guard_pending") {
-			t.Errorf("%s: plan does not use idx_guard_pending", name)
+		if !strings.Contains(plan, "idx_guard_pending_type") {
+			t.Errorf("%s: plan does not use idx_guard_pending_type", name)
 		}
 		if strings.Contains(plan, "Seq Scan on context_blocks") {
 			t.Errorf("%s: plan seq-scans context_blocks", name)
@@ -116,15 +129,10 @@ func TestT7ExplainGuardPendingIndex(t *testing.T) {
 		return plan
 	}
 
-	// THE two production queries (pick, PendingStats), built from the ACTUAL shared fragment.
-	// Pick (without FOR UPDATE — EXPLAIN ANALYZE would lock/skip rows; the
-	// LockRows node sits above the scan and does not change index choice).
-	explain("guard-pick",
-		`SELECT id, type_name FROM context_blocks
-		WHERE `+guardPendingWhere("$1")+`
-		ORDER BY created_at ASC
-		LIMIT $2`, types, 100)
+	// THE two production queries: step 1 of the pick (guardPickLockSQL, with
+	// the setting the pick sets for it) and PendingStats.
+	explain("guard-pick", guardPickNoSort, guardPickLockSQL, types, 100)
 	// The two state-row counts of the batch are gone since migration 181
 	// (issue #341); manage guard-stats counts with PendingStats' statement.
-	explain("pending-stats", pendingStatsSQL, []string{"private"}, types)
+	explain("pending-stats", "", pendingStatsSQL, []string{"private"}, types)
 }

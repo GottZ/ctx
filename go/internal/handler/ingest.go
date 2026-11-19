@@ -228,9 +228,9 @@ func (h *IngestHandler) HandleIngest(w http.ResponseWriter, r *http.Request) {
 	// endpoint too. The chunk-level S3 fallback in processChunk stays as the
 	// backstop for the race between this sweep and the write.
 	//
-	// Scale: one indexed EXISTS per chunk, bounded by maxIngestChunks = 200 and
-	// by the number of derivatives (store.ProvenanceClaimed leads with the GIN
-	// metadata predicate), alongside the per-chunk hash check this endpoint
+	// Scale: one indexed EXISTS per chunk, bounded by maxIngestChunks = 200
+	// (store.ProvenanceClaimed: one descent of idx_context_derived_identity
+	// since migration 187), alongside the per-chunk hash check this endpoint
 	// already runs.
 	for i, chunk := range req.Chunks {
 		if rej := claimReject(nil, chunk.Category, "", "", chunk.Metadata); rej != nil {

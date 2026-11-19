@@ -104,7 +104,8 @@ const (
 // seq-scan at 10M (and `cleanup` would silently drop the only carriers).
 // The swap tx (W04-6) renames them canonically. The two pick indexes of
 // migration 171 joined the class (issue #239), the guard pick index of
-// migration 182 too (issue #360).
+// migration 182 too (issue #360); the guard pending index of 113 left it
+// with migration 183, which drops it and its twin.
 var verifySisterIndexes = []struct{ name, ddl string }{
 	// Twin of idx_embedding_pending (migration 109): the regular backfill
 	// pending predicate on the post-cutover serving column.
@@ -125,13 +126,6 @@ var verifySisterIndexes = []struct{ name, ddl string }{
 	{"idx_dream_pending_next", `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_dream_pending_next
 		ON context_blocks (dream_checked_at ASC NULLS FIRST, quality_score ASC)
 		WHERE NOT is_archived AND embedding_next IS NOT NULL`},
-	// Twin of idx_guard_pending (074_guard_check_type_policy.sql:68-72),
-	// embedding → embedding_next.
-	{"idx_guard_pending_next", `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_guard_pending_next
-		ON context_blocks (created_at ASC)
-		WHERE NOT is_archived
-		  AND (metadata->>'guard_checked_at') IS NULL
-		  AND embedding_next IS NOT NULL`},
 	// Twin of idx_guard_pending_type (migration 182, issue #360): the guard
 	// pick's ranges per type on the post-cutover serving column. A re-embed
 	// migration that reached verifying before 182 has none; the gate builds

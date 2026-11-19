@@ -37,7 +37,7 @@ func TestEmbedRuntimeIndexWindow_Integration(t *testing.T) {
 	t.Run("repair_after_a_confirm_between_its_check_and_its_ddl", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, _, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		s, _ := probeScheduler(t, pool)
 		mig, err := embedmigration.Active(ctx, pool)
 		if err != nil || mig == nil {
@@ -46,11 +46,11 @@ func TestEmbedRuntimeIndexWindow_Integration(t *testing.T) {
 		var cerr error
 		fired := false
 		setRuntimeIndexHook(t, func(stage, name string) {
-			if stage != runtimeIndexStageUnlocked || name != "idx_guard_pending_next" || fired {
+			if stage != runtimeIndexStageUnlocked || name != "idx_embedding_pending_next" || fired {
 				return
 			}
 			fired = true
-			createPlainIndexT(t, pool, "idx_guard_pending_next")
+			createPlainIndexT(t, pool, "idx_embedding_pending_next")
 			_, cerr = ConfirmEmbedMigration(ctx, pool, backends.NewPool(pool, nil), migID)
 		})
 		if err := s.runEmbedIndexRepair(ctx, mig); err != nil {
@@ -62,8 +62,8 @@ func TestEmbedRuntimeIndexWindow_Integration(t *testing.T) {
 		if st := readVerifyRow(t, pool, migID); st.Status != "done" {
 			t.Fatalf("status %q, want done", st.Status)
 		}
-		if oid := indexOIDT(t, pool, "idx_guard_pending_next"); oid != 0 {
-			t.Fatalf("idx_guard_pending_next stands after the swap (oid %d): an index on the fresh embedding_next pair", oid)
+		if oid := indexOIDT(t, pool, "idx_embedding_pending_next"); oid != 0 {
+			t.Fatalf("idx_embedding_pending_next stands after the swap (oid %d): an index on the fresh embedding_next pair", oid)
 		}
 	})
 
@@ -75,7 +75,7 @@ func TestEmbedRuntimeIndexWindow_Integration(t *testing.T) {
 	t.Run("confirm_while_a_builder_holds_the_lock_before_its_ddl", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, wm, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		s, _ := probeScheduler(t, pool)
 		mig, err := embedmigration.Active(ctx, pool)
 		if err != nil || mig == nil {
@@ -85,11 +85,11 @@ func TestEmbedRuntimeIndexWindow_Integration(t *testing.T) {
 		var during verifyRowState
 		fired := false
 		setRuntimeIndexHook(t, func(stage, name string) {
-			if stage != runtimeIndexStageLocked || name != "idx_guard_pending_next" || fired {
+			if stage != runtimeIndexStageLocked || name != "idx_embedding_pending_next" || fired {
 				return
 			}
 			fired = true
-			createPlainIndexT(t, pool, "idx_guard_pending_next")
+			createPlainIndexT(t, pool, "idx_embedding_pending_next")
 			_, cerr = ConfirmEmbedMigration(ctx, pool, backends.NewPool(pool, nil), migID)
 			during = readVerifyRow(t, pool, migID)
 		})
@@ -103,8 +103,8 @@ func TestEmbedRuntimeIndexWindow_Integration(t *testing.T) {
 		if _, err := ConfirmEmbedMigration(ctx, pool, backends.NewPool(pool, nil), migID); err != nil {
 			t.Fatalf("confirm after the repair: %v", err)
 		}
-		if oid := indexOIDT(t, pool, "idx_guard_pending_next"); oid != 0 {
-			t.Fatalf("idx_guard_pending_next stands after the swap (oid %d): an index on the fresh embedding_next pair", oid)
+		if oid := indexOIDT(t, pool, "idx_embedding_pending_next"); oid != 0 {
+			t.Fatalf("idx_embedding_pending_next stands after the swap (oid %d): an index on the fresh embedding_next pair", oid)
 		}
 	})
 

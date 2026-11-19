@@ -239,7 +239,7 @@ func TestMigration182(t *testing.T) {
 			t.Fatalf("fixture: idx_guard_pending_type exists at 181: %s", ix.def)
 		}
 		before := m182Fingerprint(t, pool)
-		if err := store.RunMigrations(ctx, pool); err != nil {
+		if err := store.RunMigrationsUpTo(ctx, pool, 182); err != nil {
 			t.Fatalf("run migrations: %v", err)
 		}
 		if m182Fingerprint(t, pool) != before {

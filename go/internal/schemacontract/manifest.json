@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 182,
-    "migration_count": 70,
+    "migration_max": 187,
+    "migration_count": 75,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -769,13 +769,13 @@
         {
           "name": "created_at",
           "type": "timestamp with time zone",
-          "not_null": false,
+          "not_null": true,
           "storage": "p"
         },
         {
           "name": "updated_at",
           "type": "timestamp with time zone",
-          "not_null": false,
+          "not_null": true,
           "storage": "p"
         },
         {
@@ -5403,6 +5403,9 @@
     "idx_access_tokens_family": {
       "def_hash": "e2d6e9b80b15937e174b092dd8e97b02d09a09bb904bcca97ea2e6daba228f7a"
     },
+    "idx_access_tokens_parent": {
+      "def_hash": "a64674fc20c9d7d4dd2261d6b84568956ec4e73dd4cb673b401500c584a655f3"
+    },
     "idx_api_keys_hash": {
       "def_hash": "8a7ac97d6d567cdd127f44a9ba94c4d376c7361243e5160084cc011e127f567e"
     },
@@ -5445,6 +5448,9 @@
     "idx_block_count_deltas_scope": {
       "def_hash": "cca36e050004a2bde6491f9249fbce4c7192b4841055bb8cd16091c014f64a59"
     },
+    "idx_block_grants_granted_by": {
+      "def_hash": "2872105f2675f3262edd2103c59e0add513babaa4d192031fc99379554fc053d"
+    },
     "idx_block_grants_grantee": {
       "def_hash": "60ed333ebc1e8e0cd0dbaf26eaee44f0497c0ef02de59f67dc4e07eeab75d0ac"
     },
@@ -5478,6 +5484,9 @@
     "idx_blocks_workflow_created": {
       "def_hash": "71f4fd1b721c325c93a095d2f83ee15aa8f6b3e0ca98de4a1b368dff03e94696"
     },
+    "idx_chat_sessions_created_by": {
+      "def_hash": "2e90ad595e574fd0094b3cafe3bf930c0ec2abbdd3a4a17c11c58fc0f8017991"
+    },
     "idx_chat_sessions_scope": {
       "def_hash": "f32c4acc1bb4aa7062a4675ea831a3744113fae0d00c5a76920a881cb92b938f"
     },
@@ -5495,6 +5504,9 @@
     },
     "idx_context_created": {
       "def_hash": "c181d7579b44cb84cdc533c2e0e24edb1fe7fe8a1dd3646fcbb45bdf507434b9"
+    },
+    "idx_context_derived_identity": {
+      "def_hash": "5a36c9c00e8a69e76d061de62d52eb11a86386a6296442690071e19521fa8ad8"
     },
     "idx_context_metadata": {
       "def_hash": "e5a94e1f7e2069aa51978cca91c20dce54d6971777c5592eaea0a1fe99a0bc46"
@@ -5656,9 +5668,6 @@
     "idx_gor_started": {
       "def_hash": "63620b9f2ae94e7abb7ddc595d02d68a69cfcddae2f47a58f3f1c7bb6e2a0413"
     },
-    "idx_guard_pending": {
-      "def_hash": "4770580d194390a0c4f5069487f1f2697690a2030fe6939233b1ab6eea532608"
-    },
     "idx_guard_pending_type": {
       "def_hash": "8cab1124e616790af01f117b52551c8a6d15f7943dbc8d91a3d37a6f53431d25"
     },
@@ -5760,6 +5769,9 @@
     },
     "idx_oauth_clients_active": {
       "def_hash": "fb7988c8823da82ba293af0240e08c4e1dfb9bd682bd803b1e3d4328a8df9882"
+    },
+    "idx_oauth_codes_api_key": {
+      "def_hash": "ba8f0d6b5c810c27cd46fc7235eaef74233ee278797debcbb2ef79c8fecc0d91"
     },
     "idx_oauth_codes_expires": {
       "def_hash": "6edf0360f95fb1295b1d478d481b2b82111813ccaff1fdc4e91df53f625e15e2"
@@ -5872,6 +5884,9 @@
     "idx_trgm_title_gist": {
       "def_hash": "4fe7ec3d7f6d3a7b1f8b8000b607a5a9331b86a32ffde172ceae92ba8e0e7d0e"
     },
+    "idx_web_sessions_access_token": {
+      "def_hash": "4a7859f3a355cb718607d4874bdab955147830d4337ced84777c4365e9eb67d0"
+    },
     "idx_web_sessions_family": {
       "def_hash": "92437c88975964778b40587f074694d90fd6cf02d2bccfdefbe7bbff11b2b7c8"
     },
@@ -5886,6 +5901,9 @@
     },
     "idx_webhook_project_recent": {
       "def_hash": "48e8a777f96045d7ee34666e3a110135b1d0cbe21225155e8b1efc93985e57b4"
+    },
+    "idx_write_log_api_key": {
+      "def_hash": "c5c74ea9fd01eeee4110ea2bf2d7c08d6466ca3378e6f2271fa119baaa56dd2b"
     },
     "idx_write_log_block": {
       "def_hash": "a6aa1367bfb274b81cd54fc09fc76cf4677ebec7de978718ef21797f766005db"

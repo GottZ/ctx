@@ -64,8 +64,9 @@ type pendingBlock struct {
 // stale, a category other than index, the lifecycle knowledge. The type
 // allowlist comes from the registry and cannot be part of a predicate; it is
 // that index's leading key instead. The first three conjuncts are the
-// predicate of idx_guard_pending (M074), which the pick of a binary before
-// 182 reads. A change of one of these conjuncts changes idx_guard_pending_type
+// predicate of idx_guard_pending (M074), which the statement before 182 reads
+// while migration 183 keeps it (guardPickBefore182SQL). A change of one of
+// these conjuncts changes idx_guard_pending_type
 // in the same step (a migration and its twin in events.verifySisterIndexes):
 // the planner takes a partial index only when it proves that the statement
 // implies the predicate.
@@ -115,10 +116,11 @@ const guardPickSavepoint = "guard_pick"
 // enable_sort off the planner takes a path without a disabled node whenever
 // one exists (PostgreSQL 18 compares the count of disabled nodes before the
 // cost). Without it the planner chose, per branch, a sort over all entries
-// of idx_guard_pending — the index of 181 that stays beside 182 for binaries
-// before it — whenever its row estimates were small, and read that index
+// of idx_guard_pending — the index of 113 that stood beside 182 until
+// migration 183 — whenever its row estimates were small, and read that index
 // once per checked type (issue #360: 29 158 buffers beside 100 000 foreign
-// entries, 5 831 for the pick before 182). The sort above the branches is in
+// entries, 5 831 for the pick before 182); a sort over all waiting blocks of
+// a type is the same path without it. The sort above the branches is in
 // every plan and stays. ROLLBACK TO SAVEPOINT undoes the setting; when the
 // pick keeps step 1's locks, it is set back before the savepoint is released.
 const (
@@ -192,6 +194,10 @@ const guardPickIndexReadySQL = `SELECT EXISTS (SELECT 1 FROM pg_index
 // guardPickBefore182SQL is the pick of the releases before migration 182,
 // one statement ordered by created_at over idx_guard_pending: what the pick
 // runs while idx_guard_pending_type does not stand (guardPickIndexReadySQL).
+// Migration 183 drops idx_guard_pending only once idx_guard_pending_type
+// stands, so this statement keeps its index (without it, it walks
+// idx_context_created through the store, docs/operations.md "Migration
+// 183"); should idx_guard_pending_type be lost after 183, rebuild it.
 var guardPickBefore182SQL = `SELECT id, type_name FROM context_blocks
 	WHERE ` + guardPendingWhere("$1") + `
 	ORDER BY created_at ASC
@@ -337,12 +343,12 @@ const lastGuardAtSQL = `UPDATE context_guard_state SET last_guard_at = now() WHE
 // those blocks — one pass over a partial pending index (the predicates have
 // no parameter, so a generic plan can use them too): idx_guard_pending_type
 // with the allowlist as its index condition since migration 182 (issue
-// #360), else idx_guard_pending; scope = ANY($1) filters the index result or
-// joins idx_context_scope in a BitmapAnd. On idx_guard_pending_type the
-// cost follows the waiting blocks of the checked types; on idx_guard_pending
-// (the three first conjuncts) it follows that index's entries, which include
-// the unchecked blocks with a vector the pick filters out — docs/operations.md,
-// "Migration 181" and "Migration 182".
+// #360); scope = ANY($1) filters the index result or joins
+// idx_context_scope in a BitmapAnd. The cost follows the waiting blocks of
+// the checked types. Until migration 183 dropped idx_guard_pending the
+// planner could also read that index (the three first conjuncts), whose
+// entries include the unchecked blocks with a vector the pick filters out —
+// docs/operations.md, "Migration 181", "Migration 182" and "Migration 183".
 var pendingStatsSQL = `SELECT count(*)::int, min(updated_at) FROM context_blocks
 	WHERE scope = ANY($1::text[])
 	  AND ` + guardPendingWhere("$2")
