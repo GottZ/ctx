@@ -9,7 +9,6 @@ package oai_test
 
 import (
 	"net/http"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,79 +16,21 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/oai"
+	"github.com/GottZ/ctx/internal/testalloc"
 )
 
-// allocOf is the least TotalAlloc of three calls of f, with f's last
-// result.
-func allocOf[T any](f func() T) (least uint64, last T) {
-	least = ^uint64(0)
-	for range 3 {
-		var m0, m1 runtime.MemStats
-		runtime.ReadMemStats(&m0)
-		last = f()
-		runtime.ReadMemStats(&m1)
-		least = min(least, m1.TotalAlloc-m0.TotalAlloc)
-	}
-	return least, last
-}
-
-// allocIn is what f allocated in calls of the function frame (its full
-// name, as runtime.Frame.Function spells it), with f's result. It reads the
-// memory profile at a rate of one record per allocation, each attributed to
-// its stack, so an allocation outside the frame — the harness, the fake
-// engine, the transport, a sync.Pool that dropped its buffer under -race,
-// another goroutine of the process — never enters the number (issue #362:
-// allocOf's process-wide TotalAlloc moved by up to 47 KB between two runs of
-// the same request under -race, alone in its process). The caller sets
-// runtime.MemProfileRate to 1 for the test (memProfileEveryAllocation).
-func allocIn[T any](t *testing.T, frame string, f func() T) (int64, T) {
+// routeFrame is the frame of a route's handler — the func literal an oai
+// route constructor returns as its http.HandlerFunc. testalloc.In under it
+// sums what the route allocated for a request, in the goroutine that serves
+// it: never the harness that builds and reads the request, the fake engine
+// or the transport (issue #369: TotalAlloc counted the process).
+func routeFrame(t *testing.T, h http.Handler) string {
 	t.Helper()
-	if runtime.MemProfileRate != 1 {
-		t.Fatalf("allocIn needs runtime.MemProfileRate 1, have %d", runtime.MemProfileRate)
+	f, ok := h.(http.HandlerFunc)
+	if !ok {
+		t.Fatalf("the route's handler is a %T, not the http.HandlerFunc whose frame the pin measures under", h)
 	}
-	before := profiledAllocIn(frame)
-	last := f()
-	return profiledAllocIn(frame) - before, last
-}
-
-// memProfileEveryAllocation records every allocation in the memory profile
-// for the rest of the test.
-func memProfileEveryAllocation(t *testing.T) {
-	rate := runtime.MemProfileRate
-	runtime.MemProfileRate = 1
-	t.Cleanup(func() { runtime.MemProfileRate = rate })
-}
-
-// profiledAllocIn is the bytes the memory profile has seen allocated by a
-// stack through frame. runtime.GC publishes the allocations made up to it
-// (the profile is as of the last completed collection).
-func profiledAllocIn(frame string) int64 {
-	runtime.GC()
-	n, _ := runtime.MemProfile(nil, true)
-	var recs []runtime.MemProfileRecord
-	for {
-		recs = make([]runtime.MemProfileRecord, n+64)
-		var ok bool
-		if n, ok = runtime.MemProfile(recs, true); ok {
-			recs = recs[:n]
-			break
-		}
-	}
-	var sum int64
-	for i := range recs {
-		frames := runtime.CallersFrames(recs[i].Stack())
-		for {
-			f, more := frames.Next()
-			if f.Function == frame {
-				sum += recs[i].AllocBytes
-				break
-			}
-			if !more {
-				break
-			}
-		}
-	}
-	return sum
+	return testalloc.Frame(f)
 }
 
 // TestEmbedDepthIsBookedBeforeTheCheck (E05): the JSON check's nesting
@@ -101,8 +42,13 @@ func profiledAllocIn(frame string) int64 {
 // byte short of its read and that term is 503 server_overloaded with less
 // than half the term allocated beyond the body — the check never ran; at
 // the booking the check runs and refuses the body (400), its state
-// allocated.
+// allocated. The allocations are the route's own (routeFrame), not the
+// process's — with the ones the memory profile cannot place
+// (testalloc.Alloc.CutBytes): the check's decoder recurses once per level,
+// so its allocations at depth have stacks cut below the route's frame
+// (84 736 B of the check's on this body, go1.27.3).
 func TestEmbedDepthIsBookedBeforeTheCheck(t *testing.T) {
+	testalloc.EveryAllocation(t)
 	const (
 		levels     = 10000 + 1 // one past the decoder's nesting limit, as far as the route counts
 		depthState = 24        // the check's state per level, the gate's own constant
@@ -113,9 +59,11 @@ func TestEmbedDepthIsBookedBeforeTheCheck(t *testing.T) {
 	e := newEmbedEngine(t, 8)
 	rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 33, 1)
 	rig.reg.reload(t, embedScanAliases())
-	at := func(budget int64) (uint64, chatAnswer) {
+	route := routeFrame(t, oai.Embeddings(rig.deps))
+	at := func(budget int64) (int64, chatAnswer) {
 		rig.setSettings(func(s *oai.Settings) { s.InflightBudget = budget })
-		return allocOf(func() chatAnswer { return rig.postEmbed(t, body) })
+		got, a := testalloc.In(t, route, func() chatAnswer { return rig.postEmbed(t, body) })
+		return got.Bytes + got.CutBytes, a
 	}
 	refused, a := at(need - 1)
 	ran, r := at(need)
@@ -124,20 +72,16 @@ func TestEmbedDepthIsBookedBeforeTheCheck(t *testing.T) {
 	if code, _, _ := a.envelope(t); a.status != http.StatusServiceUnavailable || code != oai.CodeServerOverloaded || e.hits.Load() != 0 {
 		t.Fatalf("one byte short of the nesting state: %d %s, %d wire hits — want 503 server_overloaded, none", a.status, a.body, e.hits.Load())
 	}
-	if beyond := int64(refused) - int64(len(body)); beyond >= term/2 {
+	if beyond := refused - int64(len(body)); beyond >= term/2 {
 		t.Errorf("refused at the nesting state, the request allocated %d B beyond its body — the check ran before its booking (term %d B)", beyond, term)
 	}
 	if code, _, _ := r.envelope(t); r.status != http.StatusBadRequest || code != oai.CodeInvalidJSON {
 		t.Errorf("at the nesting state's booking: %d %s — want the check's 400 invalid_json", r.status, r.body)
 	}
-	if beyond := int64(ran) - int64(len(body)); beyond < term/2 {
+	if beyond := ran - int64(len(body)); beyond < term/2 {
 		t.Errorf("past the nesting state's booking the request allocated only %d B beyond its body — the pin does not see the check (term %d B)", beyond, term)
 	}
 }
-
-// embedRecordFrame is the function that books and writes the embeddings
-// route's log row.
-const embedRecordFrame = "github.com/GottZ/ctx/internal/oai.(*embedCall).record"
 
 // TestEmbedLogRowTextIsBookedBeforeItIsWritten (E04): the log row's text of
 // the input is sized, booked, then written. With body logging full, a
@@ -145,9 +89,9 @@ const embedRecordFrame = "github.com/GottZ/ctx/internal/oai.(*embedCall).record"
 // with the text in its row and at H − 1 without it — the text is the last
 // booking — and at H − 1 the row's writer allocates at least half the text
 // less: the text was never built. The allocations are the row writer's own
-// (allocIn), not the process's.
+// (testalloc.In under oai.EmbedRecordFrame), not the process's.
 func TestEmbedLogRowTextIsBookedBeforeItIsWritten(t *testing.T) {
-	memProfileEveryAllocation(t)
+	testalloc.EveryAllocation(t)
 	inputs := repeatInputs(strings.Repeat("a", 32<<10), 4) // 128 KiB of input: the row's text is cut at its cap
 	srv := leanEmbedEngine(t, 8)
 	row := backends.Backend{
@@ -168,12 +112,13 @@ func TestEmbedLogRowTextIsBookedBeforeItIsWritten(t *testing.T) {
 	}
 	at := func(budget int64) (int64, run) {
 		rig.setSettings(func(s *oai.Settings) { s.BodyLogging, s.InflightBudget = llmlog.BodyLoggingFull, budget })
-		return allocIn(t, embedRecordFrame, func() run {
+		got, r := testalloc.In(t, oai.EmbedRecordFrame, func() run {
 			before, _ := held.sum()
 			a := rig.postEmbed(t, body)
 			after, _ := held.sum()
 			return run{a.status, after - before, text.Load()}
 		})
+		return got.Bytes, r
 	}
 	_, big := at(memBudget)
 	full, f := at(big.held)

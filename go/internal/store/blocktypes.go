@@ -76,7 +76,8 @@ func (e *BlockTypeInUseError) Error() string {
 // Vorfall 2026-07-25 (the wave trigger, three independent sightings): 33 Hermes
 // "Compaction source" parts (type=checkpoint, ~36.5 kB each) saturated the CPU
 // embed backend for hours, and the digest rebuild rewrites topic-map-private
-// (type=system-meta, 73.7 kB ≈ ~32k real tokens) on EVERY boot → ClearEmbedding
+// (type=system-meta, 73.7 kB ≈ ~32k real tokens) on EVERY boot → the
+// content-change invalidation (then ClearEmbedding, today InvalidateEmbeddingTx)
 // → ~60 min of CPU embed for a dead vector, recurring.
 //
 // The rule is the SQL function ctx_block_type_never_embedded(name, scope)

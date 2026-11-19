@@ -206,6 +206,11 @@ func mcpIssueResult(key string, b *store.Block) *mcp.CallToolResult {
 // branch sets IsError (errResult) — an invalid transition is NEVER a silent
 // success (the state-transition-policy gate).
 func mcpIssueError(tool string, err error) *mcp.CallToolResult {
+	// Issue #275: an identity collision is the caller's input, with the code
+	// and the wording of the REST mapper and the MCP update tool.
+	if rej := identityTakenReject(err); rej != nil {
+		return errResultReject(rej)
+	}
 	switch {
 	case errors.Is(err, errIssueRegistryUnavailable):
 		// Pre-store class from the core (issues_core.go): no policy data wired.
