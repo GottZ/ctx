@@ -410,6 +410,15 @@ func TestUpsertBlocksCostAgainstSingleWrites(t *testing.T) {
 					}
 				}
 
+				// A fresh insert reads the catalog once a minute per process and
+				// database (derivedIdentityIndexReady, migration 187). One
+				// insert before the measurement takes that reading, so neither
+				// form is charged the statement the other one then saves.
+				if _, err := store.UpsertBlock(ctx, pool, "cost", prefix+"-warm-up", "x", nil, nil, "ub-cost", false,
+					store.SensitivityWrite{}, ""); err != nil {
+					t.Fatalf("warm-up: %v", err)
+				}
+
 				var batchCount, singleCount ubCounter
 				batchPool := ubActor(t, dsn, "ub-cost-batch", &batchCount)
 				singlePool := ubActor(t, dsn, "ub-cost-single", &singleCount)
