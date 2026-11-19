@@ -136,7 +136,23 @@ type QueryBlock struct {
 	Score    float64
 	AgeDays  int
 	Content  string
+	// Untrusted and UntrustedOrigin are the query source's own fields (V-11,
+	// issue #280): the block's type is marked retrieval.untrusted, or the block
+	// was re-typed out of such a type. The tool result carries them as the
+	// REST answer does (issue #295).
+	Untrusted       bool
+	UntrustedOrigin string
 }
+
+// The trust fields every block row of the four read tools carries, named and
+// omitted as on REST and MCP (docs/api.md, "Untrusted framing on read
+// responses"): absent for a first-party block, so such a row is byte-identical
+// to the row before issue #295. They are not guarded (H7): untrusted is
+// derived from the turn's registry snapshot, and untrusted_origin is written
+// only by the database trigger (migration 174), from the name of a registered
+// type — a name a tenant may choose, but always of the registry's name format
+// (blocktype nameFormat, lower-case letters, digits and "-"), which
+// promptguard.Neutralize would leave as it is.
 
 // EventBlock is the slim per-block reference carried in the tool_result SSE
 // event (never the full content — that lives in the session API, §3.5).
@@ -267,12 +283,14 @@ func (ex *Executor) runQuery(ctx context.Context, scope string, readScopes []str
 		return errOutcome("query failed") // laundered — raw error goes to slog upstream
 	}
 	type qb struct {
-		ID       string  `json:"id"`
-		Title    string  `json:"title"`
-		Category string  `json:"category"`
-		Score    float64 `json:"score"`
-		AgeDays  int     `json:"age_days"`
-		Content  string  `json:"content,omitempty"`
+		ID              string  `json:"id"`
+		Title           string  `json:"title"`
+		Category        string  `json:"category"`
+		Score           float64 `json:"score"`
+		AgeDays         int     `json:"age_days"`
+		Content         string  `json:"content,omitempty"`
+		Untrusted       bool    `json:"untrusted,omitempty"`
+		UntrustedOrigin string  `json:"untrusted_origin,omitempty"`
 	}
 	blocks := make([]qb, len(res.Blocks))
 	ids := make([]string, len(res.Blocks))
@@ -284,6 +302,7 @@ func (ex *Executor) runQuery(ctx context.Context, scope string, readScopes []str
 		blocks[i] = qb{
 			ID: b.ID, Title: guardText(b.Title), Category: guardText(b.Category),
 			Score: b.Score, AgeDays: b.AgeDays, Content: guardText(b.Content),
+			Untrusted: b.Untrusted, UntrustedOrigin: b.UntrustedOrigin,
 		}
 		ids[i] = b.ID
 		events[i] = EventBlock{ID: b.ID, Title: b.Title, Category: b.Category, Score: b.Score}
@@ -315,33 +334,32 @@ func (ex *Executor) runSearch(ctx context.Context, readScopes []string, raw json
 	// cluster nil (C6): the chat tool has no facet argument — a model that cannot
 	// see the graph surfaces has no way to learn a handle, so exposing one here
 	// would be a knob nothing can turn.
-	// set nil (V-11): the executor's registry snapshot (WithSearchTypes) feeds
-	// only the type exclusion below, and the three
-	// chat renderers below project into their OWN local DTOs — the framing does
-	// not ride BlockPreview onto this wire even with a set. Framing the chat
-	// tools is therefore a wiring change of its own (registry into
-	// chat.Executor + a field per DTO), tracked as the V-11 follow-up. nil is
-	// "no statement", never "trusted".
+	// set ex.searchTypes (V-11, issue #295): the turn's registry snapshot marks
+	// a row of a type flagged retrieval.untrusted, as on REST /api/search; it
+	// also feeds the type exclusion below. An executor without a snapshot
+	// (nil) marks nothing — "no statement", never "trusted".
 	// types binds like REST's (any name; an unknown one matches nothing), and
 	// the exclusion is the rule every search surface shares (#342).
 	exclude := store.SearchTypesExclude(ex.searchTypes, ex.leaveOutNeverRanked, a.Query, a.Types, nil)
-	previews, err := store.SearchBlocks(ctx, ex.pool, nil, a.Query, readScopes, a.Category, a.Tags, limit, true, nil, nil, a.Types, exclude, nil)
+	previews, err := store.SearchBlocks(ctx, ex.pool, ex.searchTypes, a.Query, readScopes, a.Category, a.Tags, limit, true, nil, nil, a.Types, exclude, nil)
 	if err != nil {
 		return errOutcome("search failed")
 	}
 	type sb struct {
-		ID        string   `json:"id"`
-		Title     string   `json:"title"`
-		Category  string   `json:"category"`
-		Tags      []string `json:"tags"`
-		Preview   string   `json:"preview"`
-		UpdatedAt string   `json:"updated_at"`
+		ID              string   `json:"id"`
+		Title           string   `json:"title"`
+		Category        string   `json:"category"`
+		Tags            []string `json:"tags"`
+		Preview         string   `json:"preview"`
+		UpdatedAt       string   `json:"updated_at"`
+		Untrusted       bool     `json:"untrusted,omitempty"`
+		UntrustedOrigin string   `json:"untrusted_origin,omitempty"`
 	}
 	blocks := make([]sb, len(previews))
 	ids := make([]string, len(previews))
 	events := make([]EventBlock, len(previews))
 	for i, p := range previews {
-		blocks[i] = sb{ID: p.ID, Title: guardText(p.Title), Category: guardText(p.Category), Tags: guardTexts(p.Tags), Preview: guardText(p.ContentPreview), UpdatedAt: p.UpdatedAt.Format(time.RFC3339)} // H7
+		blocks[i] = sb{ID: p.ID, Title: guardText(p.Title), Category: guardText(p.Category), Tags: guardTexts(p.Tags), Preview: guardText(p.ContentPreview), UpdatedAt: p.UpdatedAt.Format(time.RFC3339), Untrusted: p.Untrusted, UntrustedOrigin: p.UntrustedOrigin} // H7
 		ids[i] = p.ID
 		events[i] = EventBlock{ID: p.ID, Title: p.Title, Category: p.Category}
 	}
@@ -374,7 +392,7 @@ func (ex *Executor) runGet(ctx context.Context, readScopes []string, apiKeyID st
 	if resolvedID == "" {
 		return errOutcome("block not found")
 	}
-	block, err := store.GetBlock(ctx, ex.pool, nil, resolvedID, readScopes, nil) // set nil: V-11 follow-up, see runSearch
+	block, err := store.GetBlock(ctx, ex.pool, ex.searchTypes, resolvedID, readScopes, nil) // set: the untrusted mark, see runSearch
 	if err != nil || block == nil {
 		return errOutcome("block not found") // scope-miss laundered to not-found (no oracle)
 	}
@@ -398,6 +416,15 @@ func (ex *Executor) runGet(ctx context.Context, readScopes []string, apiKeyID st
 	if truncated {
 		result["next_offset"] = nextOffset
 	}
+	// The trust fields as on REST manage get (issue #295), only when set: a
+	// map marshals its keys sorted, so a first-party block's result is
+	// byte-identical without them.
+	if block.Untrusted {
+		result["untrusted"] = true
+	}
+	if block.UntrustedOrigin != "" {
+		result["untrusted_origin"] = block.UntrustedOrigin
+	}
 	return ToolOutcome{
 		Content:     mustJSON(result),
 		Sensitivity: ex.annotate(ctx, []string{resolvedID}),
@@ -416,22 +443,24 @@ func (ex *Executor) runRecent(ctx context.Context, readScopes []string, raw json
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return errOutcome("invalid arguments: " + err.Error())
 	}
-	previews, err := store.RecentBlocks(ctx, ex.pool, nil, readScopes, a.Category, a.Limit, nil, nil, nil) // set nil: V-11 follow-up, see runSearch; grants nil: chat reads scope-only
+	previews, err := store.RecentBlocks(ctx, ex.pool, ex.searchTypes, readScopes, a.Category, a.Limit, nil, nil, nil) // set: the untrusted mark, see runSearch; grants nil: chat reads scope-only
 	if err != nil {
 		return errOutcome("recent failed")
 	}
 	type rb struct {
-		ID        string `json:"id"`
-		Title     string `json:"title"`
-		Category  string `json:"category"`
-		Preview   string `json:"preview"`
-		UpdatedAt string `json:"updated_at"`
+		ID              string `json:"id"`
+		Title           string `json:"title"`
+		Category        string `json:"category"`
+		Preview         string `json:"preview"`
+		UpdatedAt       string `json:"updated_at"`
+		Untrusted       bool   `json:"untrusted,omitempty"`
+		UntrustedOrigin string `json:"untrusted_origin,omitempty"`
 	}
 	blocks := make([]rb, len(previews))
 	ids := make([]string, len(previews))
 	events := make([]EventBlock, len(previews))
 	for i, p := range previews {
-		blocks[i] = rb{ID: p.ID, Title: guardText(p.Title), Category: guardText(p.Category), Preview: guardText(p.ContentPreview), UpdatedAt: p.UpdatedAt.Format(time.RFC3339)} // H7
+		blocks[i] = rb{ID: p.ID, Title: guardText(p.Title), Category: guardText(p.Category), Preview: guardText(p.ContentPreview), UpdatedAt: p.UpdatedAt.Format(time.RFC3339), Untrusted: p.Untrusted, UntrustedOrigin: p.UntrustedOrigin} // H7
 		ids[i] = p.ID
 		events[i] = EventBlock{ID: p.ID, Title: p.Title, Category: p.Category}
 	}

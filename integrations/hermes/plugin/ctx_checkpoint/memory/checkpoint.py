@@ -25,6 +25,7 @@ import hashlib
 import importlib
 import json
 import logging
+import math
 import re
 import sys
 import time
@@ -46,7 +47,7 @@ from .client import (
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.16.1"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
+PLUGIN_VERSION = "0.16.2"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
 UPSTREAM_REF = "GottZ/ctx integrations/hermes/plugin/ctx_checkpoint 0.4.3 @ 38fdb74 (MPL-2.0)"
 
 CATEGORY_CHECKPOINT = "compaction-checkpoints"
@@ -96,6 +97,16 @@ RATE_WINDOW_MARGIN_S = 1.0
 # _record_call_outcome counts a tool's own error payload): a third refusal would cut recall, the
 # agent's ctx tools and other sessions' checkpoints of the profile off for a minute.
 MAX_RATE_REFUSALS = 2
+# Hermes calls on_pre_compress in the compaction worker before the summary call, and its wait for
+# that worker counts from the worker's last progress, which only the summary stream reports
+# (agent/conversation_compression.py _await_worker_within_budget; the window comes from
+# resolve_context_compression_timeouts, 300 s by default). A chain still writing when the window
+# ends is abandoned and the compaction runs again, so two chains of one root wrote at the same time
+# (GottZ/ctx#299). The chain therefore ends this many seconds before the window: the host's own
+# work before it calls the provider, and the tail of the call running at the end (a call gets at
+# most what is left of the deadline, plus its transport overhead).
+HOST_WAIT_FUNCTION = "resolve_context_compression_timeouts"
+HOST_WAIT_MARGIN_S = 10.0
 
 # -- Redaction rules (0.11.0) -------------------------------------------------------------
 # Three passes (``redact_text``): every bound credential value is replaced exactly, Hermes'
@@ -307,6 +318,23 @@ def _probe_host_checkpoint_api(
 def _negotiate_checkpoint_api(host_api: int) -> int:
     """Declared contract: min(host, plugin), never below 2 (a v1 host gate ``>= 1`` accepts 2)."""
     return max(2, min(int(host_api), PLUGIN_CHECKPOINT_API_MAX))
+
+
+def host_compaction_wait_s(feature_module: str | None = None) -> float | None:
+    """Seconds the loading Hermes waits for a compaction worker that reports no progress (its
+    idle window, ``HOST_WAIT_FUNCTION`` of the host's compaction module, which reads
+    ``compression.context_timeout_seconds`` and the summary call's own timeout), or None: a host
+    without that wait, the wait switched off (a window of 0 or less), or a failure. Never raises."""
+    module = feature_module or _HOST_FEATURE_MODULE
+    try:
+        resolve = getattr(_load_host_module(module), HOST_WAIT_FUNCTION, None)
+        if not callable(resolve):
+            return None
+        idle = float(resolve()[0])
+    except Exception:
+        logger.debug("ctx checkpoint: the host's compaction wait is not readable; no bound", exc_info=True)
+        return None
+    return idle if idle > 0 and math.isfinite(idle) else None
 
 
 # -- Rendering (upstream :156-235, :561-606) ----------------------------------------
@@ -821,7 +849,8 @@ class ChainReceipt:
     # P4: cumulative fact dedupe keys read from the previous head (server side)
     previous_fact_hashes: list[str] = field(default_factory=list)
     # 0.10.0: parts ctx confirmed as already stored (same title, identical content; no write),
-    # the rate windows the chain was planned over, and the deadline that plan gave it — the
+    # the rate windows the chain's writes entered (#299; 0.10.0 to 0.16.1: the windows planned
+    # from the part count), and the deadline the plan gave it, up to the host's wait — the
     # required facts after the chain share it.
     reused: int = 0
     windows: int = 1
@@ -974,6 +1003,19 @@ class _ChainRun:
     # A head of the root that carries the head tag but no valid ``latest_manifest_id`` (#289):
     # its id; the new head is published over it.
     invalid_head: str = ""
+    # GottZ/ctx#299: the deadline never moves past ``wait_limit`` (monotonic; the end of the
+    # host's wait for the compaction less HOST_WAIT_MARGIN_S, ``inf`` without one), and
+    # ``capped`` records that it was held there; ``host_wait_s`` names the host's window.
+    wait_limit: float = math.inf
+    host_wait_s: float = 0.0
+    capped: bool = False
+    # The rate windows the chain's writes have entered (a retry whose parts ctx confirms enters
+    # one, #299) and what the user is told before the second one: the writes and windows the
+    # whole transcript would need (the deadline holds that plan, up to ``wait_limit``).
+    windows: int = 1
+    planned_writes: int = 0
+    planned_windows: int = 1
+    notified: bool = False
 
 
 @dataclass
@@ -1028,6 +1070,51 @@ class ChainWriter:
         oldest = run.recent[0] if run.recent else now
         return oldest + RATE_WINDOW_S + RATE_WINDOW_MARGIN_S
 
+    @staticmethod
+    def _extend(run: _ChainRun, seconds: float) -> None:
+        """Move the deadline ``seconds`` later, never past ``run.wait_limit`` (#299)."""
+        target = run.deadline + seconds
+        if target > run.wait_limit:
+            target = max(run.deadline, run.wait_limit)
+            run.capped = True
+        run.budget_s += target - run.deadline
+        run.deadline = target
+
+    @staticmethod
+    def _host_wait_error(what: str, run: _ChainRun) -> CtxCheckpointError:
+        return CtxCheckpointError(
+            f"ctx checkpoint stopped before {what}: Hermes waits {run.host_wait_s:.0f}s for a compaction to make "
+            f"progress, and the chain may use {run.budget_s:.0f}s of it; the parts saved so far are kept and the "
+            "next attempt continues from them"
+        )
+
+    def _enter_window(self, what: str, run: _ChainRun) -> None:
+        """Before a write: the rate window it falls into (``window_writes`` booked writes each).
+        The windows the receipt reports are the ones the writes entered, and the user learns that
+        the compaction waits for the chain before a write enters the second one (#299: a retry
+        whose parts ctx confirms enters none). The deadline is not moved here: it holds every
+        window of the plan from the start, because a part ctx confirms books no write but still
+        costs one call, and a retry walks all of them before it reaches the new ones."""
+        needed = run.writes // run.window_writes + 1
+        while run.windows < needed:
+            run.windows += 1
+            if run.notified:
+                continue
+            run.notified = True
+            minutes = max(1, round((run.planned_windows - 1) * (RATE_WINDOW_S + RATE_WINDOW_MARGIN_S) / 60))
+            message = (
+                f"ctx checkpoint: this transcript needs up to {run.planned_writes} writes, more than the "
+                f"{run.window_writes} per minute the checkpoint uses of ctx's write limit. It is saved over "
+                f"about {minutes} minute{'s' if minutes != 1 else ''}; the compaction waits for it."
+            )
+            if run.capped:
+                message += (
+                    f" Hermes waits {run.host_wait_s:.0f}s for a compaction to make progress, so this attempt "
+                    "saves what fits and the next one continues from the saved parts."
+                )
+            logger.info("%s (before %s)", message, what)
+            self._notify(message)
+
     def _pace(self, what: str, run: _ChainRun) -> None:
         """Wait before a write while this chain already has ``window_writes`` writes in the window."""
         now = self.monotonic()
@@ -1036,6 +1123,8 @@ class ChainWriter:
             return
         resume = self._slot_free_at(run, now)
         if resume >= run.deadline:
+            if run.capped:
+                raise self._host_wait_error(what, run)
             raise CtxCheckpointError(
                 f"ctx checkpoint budget {run.budget_s:.0f}s exceeded before {what} (paced at "
                 f"{run.window_writes} writes per {RATE_WINDOW_S:.0f}s)"
@@ -1055,6 +1144,8 @@ class ChainWriter:
         while True:
             remaining = deadline - self.monotonic()
             if remaining <= 0:
+                if run.capped:
+                    raise self._host_wait_error(what, run)
                 raise CtxCheckpointError(f"ctx checkpoint budget {budget_s:.0f}s exceeded before {what}")
             failure: CtxCheckpointError | None = None
             try:
@@ -1065,8 +1156,7 @@ class ChainWriter:
                     refusals += 1
                     if not run.granted_refusal_window:
                         run.granted_refusal_window = True
-                        run.deadline += RATE_WINDOW_S + RATE_WINDOW_MARGIN_S
-                        run.budget_s += RATE_WINDOW_S + RATE_WINDOW_MARGIN_S
+                        self._extend(run, RATE_WINDOW_S + RATE_WINDOW_MARGIN_S)
                         deadline, budget_s = run.deadline, run.budget_s
                     now = self.monotonic()
                     # Until a slot is free, at the latest until just before the deadline: one
@@ -1119,6 +1209,7 @@ class ChainWriter:
     ) -> str:
         """Stores one block of the chain. ``tags`` are sent as given: the caller resolves them through
         ``tags_for`` once, so a part is stored with exactly the tags its title digest covers (#344)."""
+        self._enter_window(what, run)
         self._pace(what, run)
         data = self._call(
             what,
@@ -1151,6 +1242,7 @@ class ChainWriter:
         *,
         root_session_id: str | None = None,
         record_invalid: bool = True,
+        tagged: bool = True,
     ) -> tuple[str | None, list[str], str]:
         """``(latest_manifest_id, fact_hashes, checkpoint_id)`` of the existing head (upstream
         ``_load_previous_manifest_id`` plus the P4 dedupe keys and, 0.10.0, the checkpoint id the
@@ -1172,15 +1264,21 @@ class ChainWriter:
         With ``root_session_id`` (the lookup under the 0.6.0 title) a head whose metadata
         names another root counts as no head: under that title ``team/alice:1`` and
         ``team:alice/1`` shared one head, and continuing it would mix their chains again.
+
+        ``tagged=False`` (#289, after a miss of the tagged search under the same title) searches
+        without the tag: a block under the head title whose tags were replaced outside the
+        plugin. With a valid ``latest_manifest_id`` the chain continues from it (the new head
+        carries the tag again); without one it is an invalid head as above.
         """
+        what = "head search" if tagged else "untagged head search"
         result = self._call(
-            "head search",
+            what,
             run,
             self.client.search,
             text=head_title,
             category=self.category,
             types=[CHECKPOINT_TYPE],
-            tags=["checkpoint-head"],
+            **({"tags": ["checkpoint-head"]} if tagged else {}),
             limit=10,
         )
         head_id = _find_block_id_by_title(result, head_title)
@@ -1190,6 +1288,13 @@ class ChainWriter:
         if root_session_id is not None and _find_value(head, "root_session_id") != root_session_id:
             return None, [], ""
         manifest_id = _find_value(head, "latest_manifest_id")
+        if not tagged and manifest_id and _UUID_RE.fullmatch(manifest_id):
+            logger.warning(
+                "ctx checkpoint head %s (%s) carries no checkpoint-head tag (its tags were replaced outside "
+                "ctx_checkpoint); the chain continues from it and the new head carries the tag again",
+                head_id,
+                head_title,
+            )
         if not manifest_id or not _UUID_RE.fullmatch(manifest_id):
             logger.warning(
                 "ctx checkpoint head %s (%s) carries no valid latest_manifest_id; a new chain starts%s "
@@ -1249,7 +1354,12 @@ class ChainWriter:
         host_api: int | None = None,
         negotiated_api: int | None = None,
         fact_hashes: list[str] | None = None,
+        wait_limit: float | None = None,
+        host_wait_s: float = 0.0,
     ) -> ChainReceipt:
+        """Writes the chain. ``wait_limit`` (monotonic, optional) is the latest the chain may run
+        to — the host's wait for the compaction (``host_wait_s``) less ``HOST_WAIT_MARGIN_S``,
+        #299: no window and no refusal moves the deadline past it."""
         started = self.monotonic()
         if deadline is None:
             deadline = started + float(budget_s)
@@ -1290,30 +1400,44 @@ class ChainWriter:
             )
         chunks = split_chunks(rendered, self.chunk_chars, byte_budget)
         # Paced instead of refused (0.10.0): the budget covers one rate window, every further
-        # window this chain's writes need is added to it.
+        # window the part count needs is added to it — up to the host's wait (#299). The receipt
+        # and the notice follow the windows the writes enter (see _enter_window).
         window_writes = self._window_writes()
         writes_needed = len(chunks) + 2
-        windows = -(-writes_needed // window_writes)
-        paced_s = (windows - 1) * (RATE_WINDOW_S + RATE_WINDOW_MARGIN_S)
-        deadline += paced_s
-        if windows > 1:
-            minutes = max(1, round((windows - 1) * (RATE_WINDOW_S + RATE_WINDOW_MARGIN_S) / 60))
-            message = (
-                f"ctx checkpoint: this transcript needs up to {writes_needed} writes, more than the "
-                f"{window_writes} per minute the checkpoint uses of ctx's write limit. It is saved over "
-                f"about {minutes} minute{'s' if minutes != 1 else ''}; the compaction waits for it."
-            )
-            logger.info("%s", message)
-            self._notify(message)
+        planned_windows = -(-writes_needed // window_writes)
+        # budget_s in the run is the effective one (messages name what the chain really had).
+        run = _ChainRun(
+            deadline=deadline,
+            budget_s=float(budget_s),
+            window_writes=window_writes,
+            planned_writes=writes_needed,
+            planned_windows=planned_windows,
+        )
+        if wait_limit is not None:
+            run.wait_limit = float(wait_limit)
+            run.host_wait_s = float(host_wait_s)
+            if run.deadline >= run.wait_limit:
+                # The caller's deadline already ends at the host's wait (or after it).
+                run.deadline = run.wait_limit
+                run.budget_s = max(0.0, run.deadline - started)
+                run.capped = True
+        self._extend(run, (planned_windows - 1) * (RATE_WINDOW_S + RATE_WINDOW_MARGIN_S))
 
         now = datetime.now(timezone.utc).isoformat()
         short_root = _short_root(root)
         head_title = head_title_for(root)
-        # budget_s here is the effective one (messages name what the chain really had).
-        run = _ChainRun(deadline=deadline, budget_s=float(budget_s) + paced_s, window_writes=window_writes)
         checkpoint_id = checkpoint_id_for(root, digest)
         previous_manifest_id, previous_fact_hashes, head_checkpoint_id = self.load_previous_head(head_title, run)
         lookup = "server" if previous_manifest_id else ("head-invalid" if run.invalid_head else "none")
+        if lookup == "none":
+            # #289: a block under the head title that lost the head tag (an update or store
+            # outside the plugin replaced its tags) cut the chain silently: the head search
+            # missed it and the new head replaced it with no parent. One more search, only
+            # while the tagged one finds nothing (the first checkpoint of every root).
+            previous_manifest_id, previous_fact_hashes, head_checkpoint_id = self.load_previous_head(
+                head_title, run, tagged=False
+            )
+            lookup = "untagged" if previous_manifest_id else ("head-invalid" if run.invalid_head else "none")
         # The head already names this transcript's checkpoint: its manifest's own parent is the
         # parent (possibly none) — neither the process cache nor the 0.6.0 title may replace it.
         own_checkpoint = bool(previous_manifest_id) and head_checkpoint_id == checkpoint_id
@@ -1465,6 +1589,6 @@ class ChainWriter:
             lookup=lookup,
             previous_fact_hashes=list(previous_fact_hashes),
             reused=run.reused,
-            windows=windows,
+            windows=run.windows,
             deadline=run.deadline,
         )
