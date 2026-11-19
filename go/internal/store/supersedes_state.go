@@ -278,18 +278,26 @@ func writeSupersedesSource(ctx context.Context, db pgxdb.Beginner, s pgxdb.Stage
 // ReconcileSupersedesTargets after its write, and runs its transaction through
 // writeSupersedesSource.
 //
-// The scope's locks come first, both SHARED (ShareSupersedesScope, then
-// shareSupersedesGuesses), before any row lock: a declaration of the scope
-// holds the scope lock exclusively and locks its source before its target,
-// while the lock pass goes in id order — on a block that already supersedes a
-// target sorting before it the two orders disagree, and the lock keeps them
-// apart (without it, PostgreSQL ends one of them with 40P01). The guess lock
-// keeps dream batches with a supersedes guess out, so no new supersedes link
-// from the block commits while this transaction reads them. Archives, scope
-// moves and dream batches without a guess still run side by side. The scope is
-// read without a lock first; the lock pass then holds only rows of that scope
-// (its outer WHERE re-checks the scope on the row it locks), so a declaration
-// of another scope never holds one of its rows. A block that left the scope in
+// The scope's supersedes lock comes first, EXCLUSIVE (LockSupersedesScope),
+// before any row lock, so the transaction runs alone in its scope against
+// every other holder of that lock (issue #284):
+//   - a declaration locks its source before its target, while the lock pass
+//     goes in id order — on a block that already supersedes a target sorting
+//     before it the two orders disagree;
+//   - a dream batch (dream.WriteLinks) and a supersedes resolve
+//     (DreamLinkResolve) hold link rows and then lock target rows in their
+//     reconcile, while a scope move holds the block and its targets and then
+//     sweeps the block's link rows (sweepScopeMoveLinks);
+//   - a dream batch with a supersedes guess could add a supersedes link from
+//     the block while this transaction reads them.
+//
+// Each of these pairs ended one side with 40P01 (or missed a link) while the
+// archive and the move took the lock shared. The lock is per scope and held
+// for a few statements; dream batches, resolves and other archives of the
+// scope wait for it, none of them holding a row lock. The scope is read
+// without a lock first; the lock pass then holds only rows of that scope (its
+// outer WHERE re-checks the scope on the row it locks), so a declaration of
+// another scope never holds one of its rows. A block that left the scope in
 // between answers errSupersedesSourceChanged.
 //
 // The block is matched only inside writeScopes, and so are the links (by the
@@ -321,10 +329,7 @@ func lockSupersedesSource(ctx context.Context, tx pgx.Tx, blockID string, writeS
 	if err != nil {
 		return nil, fmt.Errorf("store: lock supersedes source: scope: %w", err)
 	}
-	if err := ShareSupersedesScope(ctx, tx, scope); err != nil {
-		return nil, err
-	}
-	if err := shareSupersedesGuesses(ctx, tx, scope); err != nil {
+	if err := LockSupersedesScope(ctx, tx, scope); err != nil {
 		return nil, err
 	}
 
