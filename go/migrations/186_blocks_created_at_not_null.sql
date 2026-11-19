@@ -47,13 +47,18 @@
 -- repairs it.
 --
 -- REPAIR. A row without created_at gets COALESCE(uuid_extract_timestamp(id),
--- updated_at, now()). The id default is uuidv7(), whose timestamp is the
--- millisecond of the insert: on the reference instance every id is version 7
--- and lies within 16 ms of created_at. A row with another id version gets
--- updated_at, else the time of this migration. The rows are found through
--- idx_context_created (created_at DESC, a full btree, which holds NULLs), a
--- few buffers whatever the size of the table. A row without updated_at gets
--- COALESCE(created_at, uuid_extract_timestamp(id), now()). Each repair
+-- updated_at, now()). uuid_extract_timestamp returns the time an id of
+-- version 7 or version 1 carries, NULL for every other version. The id
+-- default is uuidv7(), whose timestamp is the millisecond of the insert: on
+-- the reference instance every id is version 7 and lies within 16 ms of
+-- created_at. ctx writes version 7 ids only; a version 1 id (written by hand)
+-- carries the time it was made as well, and the row gets that time. A row
+-- with an id of any other version gets updated_at, else the time of this
+-- migration. The rows are found through idx_context_created (created_at
+-- DESC, a full btree, which holds NULLs), a few buffers whatever the size of
+-- the table. A row without updated_at gets COALESCE(created_at,
+-- uuid_extract_timestamp(id), now()): created_at, else the time of a version
+-- 7 or version 1 id, else the time of this migration. Each repair
 -- names one column, which no BEFORE UPDATE OF trigger of context_blocks
 -- names, so none fires and the other column stays; the row-level AFTER
 -- trigger (block-write notify) fires per repaired row, the counter triggers

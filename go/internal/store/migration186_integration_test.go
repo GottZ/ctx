@@ -45,13 +45,16 @@ func m186Constraint(t *testing.T, pool *pgxpool.Pool, col string) m186Con {
 }
 
 // m186Seed writes blocks without created_at or updated_at, as only a manual
-// write can: a uuidv7 id without created_at, a version-4 id without
-// created_at but with updated_at, a version-4 id without either, a uuidv7 id
-// without updated_at, and an untouched block.
+// write can: a uuidv7 id without created_at, a version-1 id (the example id
+// of RFC 4122, made 1997-02-03 17:43:12.216875 UTC) without created_at but with
+// updated_at, a version-4 id without created_at but with updated_at, a
+// version-4 id without either, a uuidv7 id without updated_at, and an
+// untouched block.
 func m186Seed(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	m182Exec(t, pool, `INSERT INTO context_blocks (id, category, title, content, scope, created_at, updated_at) VALUES
 		(uuidv7(),           'm186', 'm186 v7',            'x', 'm186', NULL, now() - interval '3 days'),
+		('f81d4fae-7dec-11d0-a765-00a0c91e6bf6', 'm186', 'm186 v1 updated', 'x', 'm186', NULL, '2026-04-05 06:07:08+00'),
 		(gen_random_uuid(),  'm186', 'm186 v4 updated',    'x', 'm186', NULL, '2026-01-02 03:04:05+00'),
 		(gen_random_uuid(),  'm186', 'm186 v4 none',       'x', 'm186', NULL, NULL),
 		(uuidv7(),           'm186', 'm186 no updated_at', 'x', 'm186', '2026-02-03 04:05:06+00', NULL),
@@ -143,8 +146,9 @@ func m186Is23502(err error) bool {
 // TestMigration186 applies migration 186 (issue #237) to a database at 185.
 // Below the threshold both columns become NOT NULL in one inline validation
 // under ACCESS EXCLUSIVE (a reader and a writer wait): the rows without
-// created_at get the uuidv7 timestamp of their id, else updated_at, else the
-// time of the migration; the rows without updated_at get created_at; NOTICEs
+// created_at get the time their id carries (version 7 or version 1), else
+// updated_at (any other version), else the time of the migration; the rows
+// without updated_at get created_at; NOTICEs
 // name them. Afterwards an insert or update leaving either column NULL is
 // refused with 23502 — which the schema before it accepted. No table is
 // rewritten and no index rebuilt (idx_guard_pending_type of 182 keys
@@ -188,30 +192,33 @@ func TestMigration186(t *testing.T) {
 		}
 		var noticeCreated, noticeUpdated bool
 		for _, n := range run.notices {
-			noticeCreated = noticeCreated || strings.Contains(n, "3 row(s) had no created_at")
+			noticeCreated = noticeCreated || strings.Contains(n, "4 row(s) had no created_at")
 			noticeUpdated = noticeUpdated || strings.Contains(n, "2 row(s) had no updated_at")
 		}
 		if !noticeCreated || !noticeUpdated {
-			t.Errorf("notices %v, want 3 rows without created_at and 2 without updated_at", run.notices)
+			t.Errorf("notices %v, want 4 rows without created_at and 2 without updated_at", run.notices)
 		}
 		for _, col := range []string{"created_at", "updated_at"} {
 			if c := m186Constraint(t, pool, col); c.name != "context_blocks_"+col+"_not_null" || !c.validated || !c.notnull {
 				t.Errorf("%s: %+v, want context_blocks_%s_not_null validated", col, c, col)
 			}
 		}
-		// The repaired values.
-		var v7ok, v4updOK, v4noneOK, updOK, wholeOK bool
+		// The repaired values. A version-1 id carries its time as a version-7
+		// id does (uuid_extract_timestamp reads both), so its row gets that
+		// time and not updated_at; a version-4 id carries none.
+		var v7ok, v1ok, v4updOK, v4noneOK, updOK, wholeOK bool
 		if err := pool.QueryRow(ctx, `SELECT
 			bool_and(created_at = uuid_extract_timestamp(id)) FILTER (WHERE title = 'm186 v7'),
+			bool_and(created_at = '1997-02-03 17:43:12.216875+00' AND updated_at = '2026-04-05 06:07:08+00') FILTER (WHERE title = 'm186 v1 updated'),
 			bool_and(created_at = '2026-01-02 03:04:05+00') FILTER (WHERE title = 'm186 v4 updated'),
 			bool_and(created_at > now() - interval '1 hour' AND updated_at = created_at) FILTER (WHERE title = 'm186 v4 none'),
 			bool_and(updated_at = '2026-02-03 04:05:06+00') FILTER (WHERE title = 'm186 no updated_at'),
 			bool_and(created_at = '2026-03-04 05:06:07+00' AND updated_at = '2026-03-05 05:06:07+00') FILTER (WHERE title = 'm186 whole')
-			FROM context_blocks WHERE category = 'm186'`).Scan(&v7ok, &v4updOK, &v4noneOK, &updOK, &wholeOK); err != nil {
+			FROM context_blocks WHERE category = 'm186'`).Scan(&v7ok, &v1ok, &v4updOK, &v4noneOK, &updOK, &wholeOK); err != nil {
 			t.Fatal(err)
 		}
-		if !v7ok || !v4updOK || !v4noneOK || !updOK || !wholeOK {
-			t.Errorf("repaired values: v7 %v, v4 with updated_at %v, v4 without either %v, without updated_at %v, untouched %v", v7ok, v4updOK, v4noneOK, updOK, wholeOK)
+		if !v7ok || !v1ok || !v4updOK || !v4noneOK || !updOK || !wholeOK {
+			t.Errorf("repaired values: v7 %v, v1 with updated_at %v, v4 with updated_at %v, v4 without either %v, without updated_at %v, untouched %v", v7ok, v1ok, v4updOK, v4noneOK, updOK, wholeOK)
 		}
 		// No table rewritten, no index rebuilt.
 		for n, f := range m186IndexFiles(t, pool) {
