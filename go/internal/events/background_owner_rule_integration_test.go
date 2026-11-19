@@ -4,7 +4,8 @@
 // under in the background exists twice: in Go (Scheduler.backgroundTenantFor,
 // the default tenant to _global, any other tenant to its first owned scope)
 // and in SQL (store.ScopeOwnerConfigScopes, which the query path's backfill
-// and its candidate annotation use to apply an owner's sensitivity floor).
+// and its candidate annotation use to apply an owner's sensitivity floor, and
+// store.ConfigScopeOwnedScopes, the arm-off fold's reverse reading).
 // A store test pins the SQL side alone; this test holds the two against each
 // other, for every scope of every tenant, so a change to one that the other
 // does not follow fails here.
@@ -14,6 +15,7 @@ package events
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/GottZ/ctx/internal/store"
@@ -75,6 +77,24 @@ func TestBackgroundTenantRuleIsTheScopeOwnerRule(t *testing.T) {
 			if sql[sc] != bt.scope {
 				t.Errorf("tenant %s, scope %s: background resolves under %q, ScopeOwnerConfigScopes under %q", tn.ID, sc, bt.scope, sql[sc])
 			}
+		}
+		// The arm-off fold reads the same rule the other way round: a
+		// configuration scope to the scopes its tenant owns. Every scope of
+		// a non-default tenant is asked for; only its configuration scope
+		// answers, with every owned scope. The default tenant's
+		// configuration is _global, which is no tenant scope.
+		byConfig, err := store.ConfigScopeOwnedScopes(ctx, pool, owned)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tn.ID == store.DefaultTenantID {
+			if len(byConfig) != 0 {
+				t.Errorf("default tenant: ConfigScopeOwnedScopes = %v, want nothing (its configuration is %s)", byConfig, bt.scope)
+			}
+			continue
+		}
+		if len(byConfig) != 1 || !slices.Equal(byConfig[bt.scope], owned) {
+			t.Errorf("tenant %s: ConfigScopeOwnedScopes = %v, want only %s -> %v", tn.ID, byConfig, bt.scope, owned)
 		}
 	}
 	if compared < 6 {

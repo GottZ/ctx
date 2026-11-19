@@ -133,6 +133,9 @@ func TestQueryStageBlocksCarryTheirType(t *testing.T) {
 			c.Cluster.SizeDamping = false
 			c.ClusterOps.MaxStaleness = 24 * time.Hour
 		}
+		if got := f.stSources(t, noBackfill); len(got) == 0 || got[stForeign].Title != "" {
+			t.Fatalf("cluster off names %v — the sibling is a fusion hit, the probe proves nothing", got)
+		}
 		got := f.stSources(t, clusterOn)
 		src, ok := got[stForeign]
 		if !ok {

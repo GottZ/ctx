@@ -192,29 +192,42 @@ func RecordEmbedFailure(ctx context.Context, q pgxdb.Execer, blockID string, cla
 // RecordEmbedFailureIfUnchanged is RecordEmbedFailure for a caller that read
 // the block's title and content without holding its row (the query path's
 // inline backfill, the sibling of StoreEmbeddingIfUnchanged): the memo lands
-// only while the block still holds that title and content, and written
-// reports whether a memo row was inserted or updated (issue #372, part 1).
-// A title or content change deletes the block's memo in its own transaction
-// (InvalidateEmbeddingTx); a memo of the attempt at the earlier text that
-// committed after that delete parked the changed block under the earlier
+// only while the block still holds that title and content and is pending, and
+// written reports whether a memo row was inserted or updated (issue #372,
+// part 1). A title or content change releases the block's memo in its own
+// transaction (InvalidateEmbeddingTx); a memo of the attempt at the earlier
+// text that committed after that parked the changed block under the earlier
 // attempt's verdict, and for an oversize memo that was 'infinity', so the
 // changed text was never embedded.
 //
-// One statement: it locks the block's row (FOR NO KEY UPDATE, which a content
-// writer's UPDATE conflicts with) on the condition that the row still holds
-// the text, and writes the memo, and for an infinity class drops the stale
-// vector, only for a row it locked. Under READ COMMITTED a change that holds
-// the row makes the statement wait and then re-check the condition on the
-// changed row, so a memo never lands on text the attempt did not read; a
-// change that comes later waits for the statement and deletes its memo. The
-// block row comes before the memo row, the order every content writer takes
-// them in. written is false as well for a caller_timeout cut inside the hold
-// of the memo in place (regularMemoSQL), which leaves that memo as it is.
+// The upsert locks the block's row (attemptGuard) on the condition that the
+// row still holds the text, and writes the memo, and for an infinity class
+// drops the stale vector, only for a row it locked. A change that committed
+// before is seen by the condition (READ COMMITTED re-checks a row it locks on
+// its latest version); a change that comes later waits for the statement and
+// releases its memo. A row another transaction holds is skipped instead of
+// waited for: a content writer's, whose change releases the memo anyway and
+// must not find a memo of the earlier text after it, or a background
+// embedder's (the arm, Dream or a migration worker holds the row for its
+// whole embed call, and waiting for it held the request up to the memo
+// context's 5 s). Without the row nothing is inserted, and a memo of the same
+// class already in place is updated in place (regularMemoUpdateSQL): the memo
+// row, which a content writer locks as well, orders the two. The block row
+// comes before the memo row, the order every content writer takes them in.
+// written is false as well for a caller_timeout cut inside the hold of the
+// memo in place (regularMemoParts), which leaves that memo as it is.
 func RecordEmbedFailureIfUnchanged(ctx context.Context, q pgxdb.Execer, blockID, title, content string, class EmbedFailureClass, normalizedErr string, backoffBase, backoffCap time.Duration) (written bool, err error) {
 	args := append(regularMemoArgs(blockID, class, normalizedErr, backoffBase, backoffCap), title, content)
 	tag, err := q.Exec(ctx, regularMemoSQL(class, true), args...)
 	if err != nil {
 		return false, fmt.Errorf("store: record embed failure (%s, bound to the text): %w", class, err)
+	}
+	if tag.RowsAffected() == 1 || isInfinityClass(class) {
+		return tag.RowsAffected() == 1, nil
+	}
+	tag, err = q.Exec(ctx, regularMemoUpdateSQL(class), args...)
+	if err != nil {
+		return false, fmt.Errorf("store: record embed failure (%s, in place): %w", class, err)
 	}
 	return tag.RowsAffected() == 1, nil
 }
@@ -225,8 +238,10 @@ func RecordEmbedFailureIfUnchanged(ctx context.Context, q pgxdb.Execer, blockID,
 // next_attempt_at = now() and one attempt for a block without a memo, except
 // that an existing memo keeps its attempts. Such a cut says nothing about the
 // block and is no attempt at it. Bound to the text the attempt read like
-// RecordEmbedFailureIfUnchanged, with the same lock order.
+// RecordEmbedFailureIfUnchanged, with the same lock order and the same
+// in-place update of a caller_timeout memo when the block row is held.
 func RecordEmbedRequestGoneIfUnchanged(ctx context.Context, q pgxdb.Execer, blockID, title, content, normalizedErr string) (written bool, err error) {
+	args := []any{blockID, normalizedErr, string(EmbedFailureCallerTimeout), title, content}
 	tag, err := q.Exec(ctx,
 		attemptGuard(4, 5, "id")+
 			`INSERT INTO context_embed_failures (block_id, migration_id, attempts, last_error, last_class, next_attempt_at)
@@ -234,11 +249,19 @@ func RecordEmbedRequestGoneIfUnchanged(ctx context.Context, q pgxdb.Execer, bloc
 			 ON CONFLICT (block_id) WHERE migration_id IS NULL
 			 DO UPDATE SET last_error      = EXCLUDED.last_error,
 			               last_class      = EXCLUDED.last_class,
-			               next_attempt_at = now()`,
-		blockID, normalizedErr, string(EmbedFailureCallerTimeout), title, content,
-	)
+			               next_attempt_at = now()`, args...)
 	if err != nil {
 		return false, fmt.Errorf("store: record caller_timeout memo of an ended request: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return true, nil
+	}
+	tag, err = q.Exec(ctx,
+		`UPDATE context_embed_failures SET last_error = $2, last_class = $3, next_attempt_at = now()
+		  WHERE block_id = $1 AND migration_id IS NULL AND last_class = $3
+		    AND `+attemptText(4, 5), args...)
+	if err != nil {
+		return false, fmt.Errorf("store: record caller_timeout memo of an ended request (in place): %w", err)
 	}
 	return tag.RowsAffected() == 1, nil
 }
@@ -246,16 +269,27 @@ func RecordEmbedRequestGoneIfUnchanged(ctx context.Context, q pgxdb.Execer, bloc
 // attemptGuard is the head of a memo write bound to the text an embed attempt
 // read: the CTE b holds the block's row ($1), locked FOR NO KEY UPDATE, while
 // it still holds that title ($titleArg) and content ($contentArg) and is
-// still pending (EmbedPendingPredicate), and no row otherwise. A block that
-// another writer embedded meanwhile, at the same text, needs no memo; one
-// left on it would outlive the vector, and a caller_timeout memo outlives an
-// edit too (InvalidateEmbeddingTx). cols are the columns of b.
+// still pending (EmbedPendingPredicate), and no row otherwise, also when
+// another transaction holds the row (SKIP LOCKED,
+// RecordEmbedFailureIfUnchanged). A block that another writer embedded
+// meanwhile, at the same text, needs no memo; one left on it would outlive
+// the vector. cols are the columns of b.
 func attemptGuard(titleArg, contentArg int, cols string) string {
 	return fmt.Sprintf(`WITH b AS (
 		SELECT %s FROM context_blocks
 		 WHERE id = $1 AND title = $%d AND content = $%d AND %s
-		 FOR NO KEY UPDATE)
+		 FOR NO KEY UPDATE SKIP LOCKED)
 		`, cols, titleArg, contentArg, EmbedPendingPredicate)
+}
+
+// attemptText is the condition of an in-place memo update bound to the text
+// an embed attempt read: the block ($1) holds that title and content and is
+// pending, read without a lock (the memo row the update locks orders it
+// against a content writer, which releases that row in its transaction).
+func attemptText(titleArg, contentArg int) string {
+	return fmt.Sprintf(`EXISTS (SELECT 1 FROM context_blocks
+		                WHERE id = $1 AND title = $%d AND content = $%d AND %s)`,
+		titleArg, contentArg, EmbedPendingPredicate)
 }
 
 // CallerTimeoutHoldEnd is the SQL expression of the time a caller_timeout
@@ -265,36 +299,35 @@ func attemptGuard(titleArg, contentArg int, cols string) string {
 // alias, base and cap the placeholders of the base and the cap in seconds.
 // With the arm off the query path retries such a block once its hold has
 // ended (handler.backfillPicker.pickOverran), and a cut counts as an attempt
-// only after it (regularMemoSQL), so one definition serves both.
+// only after it (regularMemoParts), so one definition serves both.
 func CallerTimeoutHoldEnd(memo, base, capArg string) string {
 	return memo + `.next_attempt_at + make_interval(secs =>
 	        least(` + base + `::float8 * power(2, least(` + memo + `.attempts, 31) - 1), ` + capArg + `::float8))`
 }
 
-// regularMemoSQL is the upsert of a block's regular-backfill memo
-// (migration_id IS NULL) for class. Placeholders: $1 the block, $2 the
-// normalized error, $3 the class; for a class with a backoff $4 and $5 the
-// base and the cap in seconds; bound to the attempt's text (attemptGuard) the
-// next two the title and the content.
+// regularMemoParts are what the upsert of a block's regular-backfill memo
+// (regularMemoSQL) and its in-place update (regularMemoUpdateSQL) share for
+// class: the number of placeholders before the text, the next_attempt_at of a
+// new memo, the SET of an existing one, and the condition under which an
+// existing one is updated at all (empty: always). Placeholders: $1 the block,
+// $2 the normalized error, $3 the class; for a class with a backoff $4 and
+// $5 the base and the cap in seconds.
 //
 // A caller_timeout cut counts an attempt only once the hold of the memo in
 // place has passed (issue #240, part 2): the hold a caller_timeout memo gives
 // (CallerTimeoutHoldEnd) or, for a memo of another class, its
 // next_attempt_at. A cut inside it leaves the memo as it is. N requests that
 // pick the same block before the first cut is written and are all cut count
-// one attempt, not N, whichever ctxd instance they run on, since the upsert
+// one attempt, not N, whichever ctxd instance they run on, since the write
 // decides under the memo row's lock; counted N times, with the arm off the
 // block's next hold was backoff_base * 2^(N-1).
-func regularMemoSQL(class EmbedFailureClass, bound bool) string {
-	var next, set, where string
-	nArgs := 3
+func regularMemoParts(class EmbedFailureClass) (nArgs int, next, set, hold string) {
 	switch {
 	case isInfinityClass(class):
-		next = `'infinity'`
-		set = `attempts        = context_embed_failures.attempts + 1,
-		               last_error      = EXCLUDED.last_error,
-		               last_class      = EXCLUDED.last_class,
-		               next_attempt_at = 'infinity'`
+		return 3, `'infinity'`, `attempts        = context_embed_failures.attempts + 1,
+		               last_error      = $2,
+		               last_class      = $3,
+		               next_attempt_at = 'infinity'`, ""
 	case class == EmbedFailureCallerTimeout:
 		// Eligible for the background arm at once: the backoff curve is
 		// for a backend that failed, this backend only took longer than
@@ -302,25 +335,34 @@ func regularMemoSQL(class EmbedFailureClass, bound bool) string {
 		// in the predicate, not in the timestamp. The timestamp is the
 		// time of the cut, and with the arm off Pfad A counts the block's
 		// backoff, and its place in the order, from it.
-		nArgs = 5
-		next = `now()`
-		set = `attempts        = context_embed_failures.attempts + 1,
-		               last_error      = EXCLUDED.last_error,
-		               last_class      = EXCLUDED.last_class,
-		               next_attempt_at = now()`
-		where = `
-			 WHERE CASE WHEN context_embed_failures.last_class = '` + string(EmbedFailureCallerTimeout) + `'
+		return 5, `now()`, `attempts        = context_embed_failures.attempts + 1,
+		               last_error      = $2,
+		               last_class      = $3,
+		               next_attempt_at = now()`,
+			`CASE WHEN context_embed_failures.last_class = '` + string(EmbedFailureCallerTimeout) + `'
 			            THEN ` + CallerTimeoutHoldEnd("context_embed_failures", "$4", "$5") + `
 			            ELSE context_embed_failures.next_attempt_at
 			       END <= now()`
 	default:
-		nArgs = 5
-		next = `now() + make_interval(secs => least($4::float8 * power(2, 0), $5::float8))`
-		set = `attempts        = context_embed_failures.attempts + 1,
-		               last_error      = EXCLUDED.last_error,
-		               last_class      = EXCLUDED.last_class,
+		return 5, `now() + make_interval(secs => least($4::float8 * power(2, 0), $5::float8))`,
+			`attempts        = context_embed_failures.attempts + 1,
+		               last_error      = $2,
+		               last_class      = $3,
 		               next_attempt_at = now() + make_interval(secs =>
-		                   least($4::float8 * power(2, context_embed_failures.attempts), $5::float8))`
+		                   least($4::float8 * power(2, context_embed_failures.attempts), $5::float8))`, ""
+	}
+}
+
+// regularMemoSQL is the upsert of a block's regular-backfill memo
+// (migration_id IS NULL) for class (regularMemoParts); bound to the
+// attempt's text (attemptGuard) the two placeholders after the class's are
+// the title and the content.
+func regularMemoSQL(class EmbedFailureClass, bound bool) string {
+	nArgs, next, set, hold := regularMemoParts(class)
+	where := ""
+	if hold != "" {
+		where = `
+		 WHERE ` + hold
 	}
 	insert := `INSERT INTO context_embed_failures (block_id, migration_id, attempts, last_error, last_class, next_attempt_at)
 		 VALUES ($1, NULL, 1, $2, $3, ` + next + `)`
@@ -344,6 +386,24 @@ func regularMemoSQL(class EmbedFailureClass, bound bool) string {
 	return head + insert + `
 		 ON CONFLICT (block_id) WHERE migration_id IS NULL
 		 DO UPDATE SET ` + set + where
+}
+
+// regularMemoUpdateSQL is the in-place update of a block's regular memo of
+// class when the bound upsert did not get the block's row
+// (RecordEmbedFailureIfUnchanged): the memo of the same class only, under
+// the class's condition, while the block holds the attempt's text
+// (attemptText). Not for an infinity class, whose park also drops the stale
+// vector and so needs the block row.
+func regularMemoUpdateSQL(class EmbedFailureClass) string {
+	nArgs, _, set, hold := regularMemoParts(class)
+	cond := ""
+	if hold != "" {
+		cond = `
+		    AND ` + hold
+	}
+	return `UPDATE context_embed_failures SET ` + set + `
+		  WHERE block_id = $1 AND migration_id IS NULL AND last_class = $3` + cond + `
+		    AND ` + attemptText(nArgs+1, nArgs+2)
 }
 
 // regularMemoArgs are the arguments of regularMemoSQL before the text.

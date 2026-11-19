@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -161,9 +162,11 @@ func (s *Store) SnapshotForTenant(ctx context.Context, tenantScope string) *Conf
 // a context of its own: detached from ctx and ended after
 // resolvedBuildTimeout. When ctx ends first the call answers with the base
 // and false, as for a failed build, and the build goes on: its generation is
-// cached for the next call, and no other waiter loses it. A caller-bound
-// build context would end the build for every waiter with the first caller's
-// deadline; the caller that waited without its own deadline held a request
+// cached for the next call, and no other waiter loses it to this caller's
+// deadline. (A build that SnapshotForRequest or SnapshotForTenant started
+// runs on that caller's context, as before, and a caller here that joins it
+// shares its outcome.) A caller-bound build context would end the build for
+// every waiter with the first caller's deadline; the caller that waited without its own deadline held a request
 // path that has a budget (embed_backfill.sync_budget) for the whole build.
 func (s *Store) SnapshotForTenantResolved(ctx context.Context, tenantScope string) (cfg *Config, resolved bool) {
 	base := s.p.Load()
@@ -179,6 +182,9 @@ func (s *Store) SnapshotForTenantResolved(ctx context.Context, tenantScope strin
 	go func() {
 		defer func() {
 			if p := recover(); p != nil {
+				// Logged here as well: a caller whose ctx has ended no
+				// longer waits to raise it.
+				slog.Error("config: tenant generation build panicked", "tenant", tenantScope, "panic", p)
 				done <- answer{panicked: p}
 			}
 		}()
