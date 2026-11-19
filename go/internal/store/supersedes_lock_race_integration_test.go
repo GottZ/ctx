@@ -78,7 +78,7 @@ func TestSupersedesArchiveOfABlockMovedDuringItsLockPass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("actor pool: %v", err)
 	}
-	defer actor.Close()
+	t.Cleanup(actor.Close) // after the deferred rollbacks of the transactions it waits for
 	done := make(chan error, 1)
 	go func() {
 		_, err := store.DeleteBlock(ctx, actor, src, []string{"private", "moved-away"})
@@ -179,7 +179,7 @@ func TestSupersedesArchiveLocksNoRowOfAnotherScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("actor pool: %v", err)
 	}
-	defer actor.Close()
+	t.Cleanup(actor.Close) // after the deferred rollbacks of the transactions it waits for
 	done := make(chan error, 1)
 	go func() {
 		_, err := store.DeleteBlock(ctx, actor, src.ID, []string{"private"})
@@ -282,7 +282,7 @@ func TestSupersedesRedeclareAndArchiveShareOneLockOrder(t *testing.T) {
 			if err != nil {
 				t.Fatalf("actor pool: %v", err)
 			}
-			defer actor.Close()
+			t.Cleanup(actor.Close) // after the deferred rollbacks of the transactions it waits for
 			done := make(chan error, 1)
 			go func() {
 				var err error

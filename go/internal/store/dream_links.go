@@ -77,13 +77,29 @@ func DreamLinkResolve(ctx context.Context, pool *pgxpool.Pool, sourceID, targetI
 		res       *DreamLinkResolution
 		storedRel string
 	)
-	if err := pgxdb.Write(ctx, pool, pgxdb.At("store: dream link resolve"), func(tx pgx.Tx) error {
+	// A supersedes resolve takes the source scope's supersedes lock first
+	// (issue #284), so its transaction may be asked to run again
+	// (writeSupersedesSource) when the source changed scope before the lock.
+	supersedes := relationship == "supersedes"
+	write := pgxdb.Write
+	if supersedes {
+		write = writeSupersedesSource
+	}
+	if err := write(ctx, pool, pgxdb.At("store: dream link resolve"), func(tx pgx.Tx) error {
+		lockedScope, found, err := lockSupersedesResolve(ctx, tx, sourceID, writeScopes, supersedes)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return pgxdb.ErrRollback // not found, as the link read below answers it
+		}
 		// Lock the link row so a concurrent dream replace sweep cannot delete it
 		// between classification and update (classifyGuardBatch pattern).
 		var pinned bool
 		var storedRationale *string
-		err := tx.QueryRow(ctx,
-			`SELECT dl.relationship, dl.pinned, dl.rationale
+		var sourceScope string
+		err = tx.QueryRow(ctx,
+			`SELECT dl.relationship, dl.pinned, dl.rationale, s.scope
 			 FROM context_dream_links dl
 			 JOIN context_blocks s ON s.id = dl.source_block_id
 			 WHERE dl.source_block_id = $1::uuid
@@ -92,7 +108,7 @@ func DreamLinkResolve(ctx context.Context, pool *pgxpool.Pool, sourceID, targetI
 			   AND s.scope = ANY($4::text[])
 			 FOR UPDATE OF dl`,
 			sourceID, targetID, relationship, writeScopes,
-		).Scan(&storedRel, &pinned, &storedRationale)
+		).Scan(&storedRel, &pinned, &storedRationale, &sourceScope)
 		if errors.Is(err, pgx.ErrNoRows) {
 			// (nil, nil) before the commit in the straight-line form —
 			// pgxdb.ErrRollback keeps that miss a rollback instead of a commit.
@@ -100,6 +116,11 @@ func DreamLinkResolve(ctx context.Context, pool *pgxpool.Pool, sourceID, targetI
 		}
 		if err != nil {
 			return fmt.Errorf("store: dream link resolve: select: %w", err)
+		}
+		if supersedes && sourceScope != lockedScope {
+			// Moved to another write scope between the scope read and the
+			// lock: the lock held is not that scope's.
+			return errSupersedesSourceChanged
 		}
 
 		res = &DreamLinkResolution{
@@ -170,4 +191,43 @@ func DreamLinkResolve(ctx context.Context, pool *pgxpool.Pool, sourceID, targetI
 	)
 
 	return res, nil
+}
+
+// lockSupersedesResolve takes, for the resolve of a supersedes link
+// (supersedes true), the supersedes lock of the source's scope in SHARED mode
+// and returns that scope; for any other relationship it does nothing and
+// returns ("", true). Shared, like a dream batch, because both kinds of resolve must
+// not run beside the exclusive holders of the scope (issue #284):
+//
+//   - delete locks the link row and then the target in its reconcile, while
+//     a declaration locks the target and then writes the link row, and an
+//     archive or scope move locks the source and its targets and then, for a
+//     move, sweeps the link rows;
+//   - confirm pins the link, which settles the target, and a declaration's
+//     already-superseded check reads the pins of other blocks, which no row
+//     lock of its own covers: side by side, a declaration checked before the
+//     confirm committed and both settled the same target. Under the lock the
+//     declaration runs before or after the confirm, and after it sees the pin
+//     and is refused.
+//
+// The scope is read without a lock, within writeScopes; a source outside them
+// answers found=false (not found, no lock taken, as before). The caller
+// compares the scope it then reads under the link lock with the returned one.
+func lockSupersedesResolve(ctx context.Context, tx pgx.Tx, sourceID string, writeScopes []string, supersedes bool) (scope string, found bool, err error) {
+	if !supersedes {
+		return "", true, nil
+	}
+	err = tx.QueryRow(ctx,
+		`SELECT scope FROM context_blocks WHERE id = $1::uuid AND scope = ANY($2::text[])`,
+		sourceID, writeScopes).Scan(&scope)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("store: dream link resolve: source scope: %w", err)
+	}
+	if err := ShareSupersedesScope(ctx, tx, scope); err != nil {
+		return "", false, err
+	}
+	return scope, true, nil
 }
