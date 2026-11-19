@@ -1125,8 +1125,9 @@ func StoreEmbeddingNext(ctx context.Context, q pgxdb.Execer, blockID, model stri
 // InvalidateEmbeddingTx is what a real title or content change does to a
 // block's vectors: it marks the serving vector stale (embedding_stale, only
 // when there is one), sets the _next pair (embedding_next/embed_model_next,
-// Achse 04 W04-3 / migration 114) to NULL, and deletes the block's
-// regular-backfill memo row (context_embed_failures, migration_id IS NULL),
+// Achse 04 W04-3 / migration 114) to NULL, and releases the block's
+// regular-backfill memo row (context_embed_failures, migration_id IS NULL;
+// deleted, a caller_timeout memo moved to the change, see below),
 // so a content change converges cleanly on every axis that content
 // invalidates:
 //
@@ -1156,6 +1157,16 @@ func StoreEmbeddingNext(ctx context.Context, q pgxdb.Execer, blockID, model stri
 //     Migration-scoped memos (migration_id NOT NULL) are untouched: those
 //     belong to a specific migration's bookkeeping, not the regular
 //     backfill, and are the migration worker's (W04-4+) concern.
+//     A caller_timeout memo is kept with its attempts, and its cut moves to
+//     the change (next_attempt_at = now()), issue #240 part 4: the memo says
+//     the block did not fit the query path's sync budget, which an edit
+//     rarely changes, and deleting it put a block that never fits back at
+//     its first attempt with every edit, so with the arm off a block that is
+//     edited often cost a request its whole budget per edit. With the arm off
+//     the query path retries it after the hold its attempts give, counted
+//     from the edit, at its place in the old end; while the arm runs the arm
+//     takes it at once, as it takes every caller_timeout block. Every other
+//     class is deleted.
 //
 // This is the pgxdb.Execer-parameterized primitive (same pattern as
 // StoreEmbedding): it does NOT own a transaction, so a caller that needs the
@@ -1205,10 +1216,14 @@ func InvalidateEmbeddingTx(ctx context.Context, q pgxdb.Execer, blockID string) 
 		return fmt.Errorf("store: invalidate embedding: %w", err)
 	}
 	if _, err := q.Exec(ctx,
-		`DELETE FROM context_embed_failures WHERE block_id = $1 AND migration_id IS NULL`,
-		blockID,
+		`WITH kept AS (
+		   UPDATE context_embed_failures SET next_attempt_at = now()
+		    WHERE block_id = $1 AND migration_id IS NULL AND last_class = $2)
+		 DELETE FROM context_embed_failures
+		  WHERE block_id = $1 AND migration_id IS NULL AND last_class <> $2`,
+		blockID, string(EmbedFailureCallerTimeout),
 	); err != nil {
-		return fmt.Errorf("store: invalidate embedding: delete backfill memo: %w", err)
+		return fmt.Errorf("store: invalidate embedding: release backfill memo: %w", err)
 	}
 	return nil
 }
