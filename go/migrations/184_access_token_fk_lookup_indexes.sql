@@ -113,7 +113,7 @@
 --                          table never analysed) + both builds;
 --   context_web_sessions   3 s + its own build.
 --
--- OLDER BINARY. v5.67.0 (the rollback image) writes, sweeps and deletes as
+-- OLDER BINARY. v5.68.0 (the rollback image) writes, sweeps and deletes as
 -- before; the indexes serve its statements too. Its schema-contract check
 -- finds _migrations:184 without an embedded file (breaking) and two indexes
 -- it does not know (param): in mode warn (the default) it starts and

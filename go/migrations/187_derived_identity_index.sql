@@ -103,7 +103,7 @@
 -- it; the bounded count of a table never analysed comes before the request
 -- and takes ACCESS SHARE only, which writers do not wait for).
 --
--- OLDER BINARY. v5.67.0 (the rollback image) sends the probe in its form
+-- OLDER BINARY. v5.68.0 (the rollback image) sends the probe in its form
 -- before this release; the planner may serve it from the trigram GiST as
 -- before (the index cannot serve its default-collation title). Its
 -- schema-contract check finds _migrations:187 without an embedded file
