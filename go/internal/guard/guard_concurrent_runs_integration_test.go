@@ -48,7 +48,7 @@ type runResult struct {
 func startRun(ctx context.Context, pool *pgxpool.Pool, f *concurrentFixture, limit int) chan runResult {
 	done := make(chan runResult, 1)
 	go func() {
-		n, err := guard.RunGuardBatch(ctx, pool, f.set, limit)
+		n, err := guard.RunGuardBatch(ctx, pool, f.set, limit, guard.SearchIndexForTest)
 		done <- runResult{n, err}
 	}()
 	return done
@@ -212,7 +212,7 @@ func archivedOf(v map[string]verdict, ids ...string) int {
 func drain(t *testing.T, f *concurrentFixture) {
 	t.Helper()
 	for i := 0; i < 5; i++ {
-		n, err := guard.RunGuardBatch(context.Background(), f.pool, f.set, 100)
+		n, err := guard.RunGuardBatch(context.Background(), f.pool, f.set, 100, guard.SearchIndexForTest)
 		if err != nil {
 			t.Fatalf("drain run: %v", err)
 		}
@@ -570,7 +570,7 @@ func TestConcurrentGuardRuns_FreeRunning(t *testing.T) {
 					go func(k int) {
 						defer wg.Done()
 						<-start
-						n, err := guard.RunGuardBatch(ctx, f.pool, f.set, tc.limit)
+						n, err := guard.RunGuardBatch(ctx, f.pool, f.set, tc.limit, guard.SearchIndexForTest)
 						res[k] = runResult{n, err}
 					}(k)
 				}
@@ -692,7 +692,7 @@ func TestConcurrentGuardRuns_FreeRunningAcrossTypes(t *testing.T) {
 					go func(k int) {
 						defer wg.Done()
 						<-start
-						n, err := guard.RunGuardBatch(ctx, widened, f.set, tc.limit)
+						n, err := guard.RunGuardBatch(ctx, widened, f.set, tc.limit, guard.SearchIndexForTest)
 						res[k] = runResult{n, err}
 					}(k)
 				}

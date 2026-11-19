@@ -549,6 +549,10 @@ services:
       # ── search.* (1) ──
       CTX_SEARCH_LEAVE_OUT_NEVER_RANKED: ${CTX_SEARCH_LEAVE_OUT_NEVER_RANKED:-}
 
+      # ── guard.* (2) ──
+      CTX_GUARD_EF_SEARCH: ${CTX_GUARD_EF_SEARCH:-}
+      CTX_GUARD_EXACT_MAX_CANDIDATES: ${CTX_GUARD_EXACT_MAX_CANDIDATES:-}
+
       # ── env-only names (deliberately NOT in the config registry) ──
       # These have no settings key and no registry default: they are read
       # straight from the environment, so a .env value only reaches the

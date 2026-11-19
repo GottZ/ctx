@@ -161,7 +161,7 @@ func TestRepair_M157_Corpus(t *testing.T) {
 	kept := "01920000-0000-7000-8000-000000157a06"
 	t7Insert(t, pool, kept, "kept", "knowledge", "learnings", "private", review(60), at(7))
 
-	if n, err := guard.RunGuardBatch(ctx, pool, gitSet(), 50); err != nil || n != 7 {
+	if n, err := guard.RunGuardBatch(ctx, pool, gitSet(), 50, guard.SearchIndexForTest); err != nil || n != 7 {
 		t.Fatalf("pre-156 guard batch: processed %d, err %v; want 7", n, err)
 	}
 	if _, err := store.GuardResolve(ctx, pool, kept, "keep", []string{"private"}); err != nil {
@@ -325,7 +325,7 @@ func TestRepair_M157_Corpus(t *testing.T) {
 	// canonical row is not pending and stays without a decision; the kept
 	// row (knowledge, with an embedding) is not pending either and keeps its
 	// verdict.
-	if n, err := guard.RunGuardBatch(ctx, pool, gitSet(), 50); err != nil || n != 4 {
+	if n, err := guard.RunGuardBatch(ctx, pool, gitSet(), 50, guard.SearchIndexForTest); err != nil || n != 4 {
 		t.Fatalf("guard batch after 157: processed %d, err %v; want the 4 returned knowledge rows", n, err)
 	}
 	checkVerdicts("after the re-check:")

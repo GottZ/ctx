@@ -126,7 +126,7 @@ func TestGuardState_StandingGuardRunDoesNotHoldWriters(t *testing.T) {
 	set := stateLockSet(t, pool)
 	base := stateLockVec(nil, 0)
 	m := stateLockBlock(t, pool, "neighbour m", base)
-	if _, err := guard.RunGuardBatch(ctx, pool, set, 100); err != nil {
+	if _, err := guard.RunGuardBatch(ctx, pool, set, 100, guard.SearchIndexForTest); err != nil {
 		t.Fatal(err)
 	}
 	p := stateLockBlock(t, pool, "pending p", stateLockVec(base, 0.2))
@@ -146,7 +146,7 @@ func TestGuardState_StandingGuardRunDoesNotHoldWriters(t *testing.T) {
 	}
 	done := make(chan res, 1)
 	go func() {
-		n, err := guard.RunGuardBatch(ctx, pool, set, 100)
+		n, err := guard.RunGuardBatch(ctx, pool, set, 100, guard.SearchIndexForTest)
 		done <- res{n, err}
 	}()
 	waitForLockWaiter(t, pool, 1) // the run waits for m at its audit-log insert
@@ -181,7 +181,7 @@ func newDeadlockFixture(t *testing.T) *deadlockFixture {
 	f := &deadlockFixture{pool: pool, set: set}
 	f.m1 = stateLockBlock(t, pool, "neighbour m1", b1)
 	f.m2 = stateLockBlock(t, pool, "neighbour m2", b2)
-	if _, err := guard.RunGuardBatch(ctx, pool, set, 100); err != nil {
+	if _, err := guard.RunGuardBatch(ctx, pool, set, 100, guard.SearchIndexForTest); err != nil {
 		t.Fatal(err)
 	}
 	f.p1 = stateLockBlock(t, pool, "pending p1", stateLockVec(b1, 0.2))
@@ -222,7 +222,7 @@ func TestGuardState_GuardAuditInsertAndNeighbourWriterDoNotDeadlock(t *testing.T
 	}
 	done := make(chan res, 1)
 	go func() {
-		n, err := guard.RunGuardBatch(ctx, f.pool, f.set, 100)
+		n, err := guard.RunGuardBatch(ctx, f.pool, f.set, 100, guard.SearchIndexForTest)
 		done <- res{n, err}
 	}()
 	waitForLockWaiter(t, f.pool, 1)
@@ -265,7 +265,7 @@ func TestGuardState_ClientWriteIsNoDeadlockVictim(t *testing.T) {
 	}
 	done := make(chan res, 1)
 	go func() {
-		n, err := guard.RunGuardBatch(ctx, f.pool, f.set, 100)
+		n, err := guard.RunGuardBatch(ctx, f.pool, f.set, 100, guard.SearchIndexForTest)
 		done <- res{n, err}
 	}()
 	waitForLockWaiter(t, f.pool, 1) // guard at p1's audit insert, behind the gate

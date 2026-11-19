@@ -226,7 +226,7 @@ func TestStoreIdenticalContentTagsMetadata(t *testing.T) {
 			if i > 0 {
 				time.Sleep(100 * time.Millisecond)
 			}
-			n, err := guard.RunGuardBatch(ctx, pool, reg.Snapshot(), 10)
+			n, err := guard.RunGuardBatch(ctx, pool, reg.Snapshot(), 10, config.Defaults().GuardSearch())
 			if err != nil {
 				t.Fatalf("guard batch: %v", err)
 			}

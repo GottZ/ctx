@@ -31,6 +31,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dream"
+	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/rrf"
@@ -125,6 +126,7 @@ type Config struct {
 	Federation     FederationConfig
 	MCP            MCPServerConfig
 	Search         SearchConfig
+	Guard          GuardConfig
 
 	// sources records the origin per registry key ("env" | "default"; F2 adds
 	// "settings"). Written once by the loader, read-only afterwards.
@@ -2975,6 +2977,43 @@ type SearchConfig struct {
 	LeaveOutNeverRanked bool `key:"search.leave_out_never_ranked" env:"CTX_SEARCH_LEAVE_OUT_NEVER_RANKED" default:"false" mut:"hot" tenancy:"tenant-overridable"`
 }
 
+// GuardConfig is the duplicate guard's batch (guard.RunGuardBatch, issue
+// #381).
+type GuardConfig struct {
+	// EfSearch is the hnsw.ef_search the guard batch sets for its own
+	// transaction, after the pick and before the first duplicate check, so
+	// every ctx_guard_check of the batch searches the HNSW graph with this
+	// window and nothing outside the batch sees it. At pgvector's default of
+	// 40 the greedy graph search ends in a local minimum for a block in a
+	// sparsely populated region and answers clean with a distant block, where
+	// an exact search finds the near-duplicate (measured on a production
+	// copy: 38 of 6 000 checks, 0.63 %, on graphs grown in write order;
+	// 1.1-3.7 % at 1.1 M rows). At 800 none of the 6 000 was wrong, for
+	// about 3 100-6 400 HNSW buffer reads and 3-10 ms per check instead of
+	// about 500 and 1 ms; the guard checks at most 100 blocks a minute. The
+	// bounds are V66: below 40 the search is narrower than before the key
+	// existed, above 1000 pgvector refuses the value and every batch would
+	// fail.
+	//
+	// global-only: the batch is one process-wide run over every tenant's
+	// blocks, and the cost is spent in the shared database.
+	EfSearch int `key:"guard.ef_search" env:"CTX_GUARD_EF_SEARCH" default:"800" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// ExactMaxCandidates is the largest candidate circle — the live blocks
+	// of the checked block's scope for a same-scope type (issue), of every
+	// scope of its tenant otherwise, read once per batch from the block
+	// counters — that the guard checks exactly, without the HNSW index: an
+	// exact check finds every duplicate whatever the graph and plan cache,
+	// and costs a read of the circle's candidates (≈ 0.042 ms and ≈ 4.7
+	// buffers each). The index check of a small circle costs more the larger
+	// the store (it passes foreign rows until it finds its own), so the
+	// circle at which both cost the same moves with the installation:
+	// measured ≈ 230 at 224 000 rows and ≈ 400 at 1.12 M; the default is the
+	// latter, the target line. A declared resource limit like
+	// cluster.centroid_ann_threshold, not a semantic one. 0 sends every
+	// block through the index.
+	ExactMaxCandidates int `key:"guard.exact_max_candidates" env:"CTX_GUARD_EXACT_MAX_CANDIDATES" default:"400" mut:"hot" parse:"strict" tenancy:"global-only"`
+}
+
 // GatewayConsumersConfig is the policy of the consumer and model-key
 // administration (design/01 §4.6, §4.9; design/05 §3.2; wave W01-5). The
 // manage handler reads it from the _global snapshot per request; it never
@@ -3167,6 +3206,11 @@ func (c *Config) DreamBackoff() dream.BackoffConfig {
 		CapHours:    float64(c.Dream.Backoff.CapHours),
 		InertOffset: c.Dream.Backoff.InertOffset,
 	}
+}
+
+// GuardSearch is how the guard batch searches (guard.RunGuardBatch, #381).
+func (c *Config) GuardSearch() guard.Search {
+	return guard.Search{EfSearch: c.Guard.EfSearch, ExactMaxCandidates: c.Guard.ExactMaxCandidates}
 }
 
 // SynthesisSettings converts the query group's scoring surface to the llm

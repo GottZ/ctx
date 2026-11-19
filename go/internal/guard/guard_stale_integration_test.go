@@ -52,7 +52,7 @@ func TestGuardStale_NeitherCheckedNorMatched(t *testing.T) {
 	}
 	batch := func(t *testing.T, want int) {
 		t.Helper()
-		n, err := guard.RunGuardBatch(ctx, pool, gitSet(), 50)
+		n, err := guard.RunGuardBatch(ctx, pool, gitSet(), 50, guard.SearchIndexForTest)
 		if err != nil || n != want {
 			t.Fatalf("guard batch: processed %d, err %v; want %d", n, err, want)
 		}

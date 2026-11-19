@@ -30,6 +30,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/guard"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
@@ -88,7 +89,7 @@ func TestGuardReviewAgingFollowsTheFlag(t *testing.T) {
 	}
 
 	passStart := time.Now().UTC().Truncate(time.Second)
-	processed, err := guard.RunGuardBatch(ctx, pool, blocktype.NewRegistry().Snapshot(), 10)
+	processed, err := guard.RunGuardBatch(ctx, pool, blocktype.NewRegistry().Snapshot(), 10, config.Defaults().GuardSearch())
 	if err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
 	}
@@ -278,7 +279,7 @@ func TestGuardReviewAgingIgnoresAStampOutsideTheRowsLifetime(t *testing.T) {
 		writeAgingBlock(t, pool, scope, "ga-forged-c", agingVec(2, 1.0, 0, 0)),
 		writeAgingBlock(t, pool, scope, "ga-forged-d", agingVec(2, 0.96, 3, 0.28)),
 	}
-	processed, err := guard.RunGuardBatch(ctx, pool, blocktype.NewRegistry().Snapshot(), 10)
+	processed, err := guard.RunGuardBatch(ctx, pool, blocktype.NewRegistry().Snapshot(), 10, config.Defaults().GuardSearch())
 	if err != nil {
 		t.Fatalf("RunGuardBatch: %v", err)
 	}

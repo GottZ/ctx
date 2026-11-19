@@ -263,6 +263,15 @@ func TestRegistryStrictSet(t *testing.T) {
 		// to 3 would present as the operator's limit while the guard enforced
 		// another, so it aborts loudly.
 		"federation.max_depth": true,
+		// #381: the guard's search window is a measured trade of recall
+		// against buffer reads per check — a typo'd value silently falling
+		// back to 800 would present as the operator's window while the guard
+		// searched another.
+		"guard.ef_search": true,
+		// #381: the exact-check limit is the same class — a declared resource
+		// limit whose typo silently falling back to the default would move
+		// checks between the exact path and the index unseen.
+		"guard.exact_max_candidates": true,
 		// B2: the blob write budget is a CEILING like its rate-limit siblings —
 		// a typo'd value silently defaulting to 10 would hide the intended cap
 		// on the one write surface that costs disk per request.
