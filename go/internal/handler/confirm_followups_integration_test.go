@@ -171,3 +171,70 @@ func TestMCPConfirmFaultIsOpaque(t *testing.T) {
 		t.Errorf("the cause of the fault is not in the log")
 	}
 }
+
+// TestConfirmedWriteRefusalsKeepTheirClass: a confirmed write that the store
+// refuses for a cause in the payload answers that cause, coded, on the MCP
+// confirm as on the direct tool — not the opaque server fault. A staged store
+// onto the identity of a derivative is refused by UpsertBlock's S3 guard
+// (provenance_protected, as the direct store answers it); a staged blob_store
+// that violates an integrity constraint is the request's (constraint, as the
+// direct blob_store answers it). Both surfaced as the raw error text before
+// the confirm fault became opaque, and would otherwise read "internal error".
+func TestConfirmedWriteRefusalsKeepTheirClass(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool, mcpCfg, keyCtx := i275Fixture(t)
+	ctx := context.Background()
+	confirm := func(t *testing.T, staged string) (text, code string) {
+		t.Helper()
+		m := hashRe.FindStringSubmatch(staged)
+		if m == nil {
+			t.Fatalf("write was not staged: %s", staged)
+		}
+		r, _, err := mcpConfirmHandler(mcpCfg)(keyCtx, nil, confirmInput{PayloadHash: m[1]})
+		if err != nil {
+			t.Fatalf("confirm: %v", err)
+		}
+		if env, ok := r.StructuredContent.(mcpErrorEnvelope); ok {
+			code = env.Code
+		}
+		return resultText(t, r), code
+	}
+
+	t.Run("store onto a derivative", func(t *testing.T) {
+		if _, err := store.UpsertBlock(ctx, pool, "learnings", "i275 derived store", "derived text", nil,
+			map[string]any{"provenance": map[string]any{"v": 1, "arm": "i275-arm", "stratum": 1}}, "private", true, store.SensitivityWrite{}, ""); err != nil {
+			t.Fatalf("seed derivative: %v", err)
+		}
+		r, _, err := mcpStoreHandler(mcpCfg)(keyCtx, nil, storeInput{Category: "learnings", Title: "i275 derived store", Content: "client text"})
+		if err != nil {
+			t.Fatalf("stage store: %v", err)
+		}
+		text, code := confirm(t, resultText(t, r))
+		if code != "provenance_protected" || !strings.Contains(text, "stage token is consumed") {
+			t.Errorf("confirmed store onto a derivative: code=%q %q, want provenance_protected with the consumed token", code, text)
+		}
+	})
+
+	t.Run("blob_store violating a constraint", func(t *testing.T) {
+		for _, st := range []string{
+			`CREATE FUNCTION i275_blob_check() RETURNS trigger LANGUAGE plpgsql AS $$
+			 BEGIN RAISE EXCEPTION 'i275 blob check' USING ERRCODE = 'check_violation', CONSTRAINT = 'i275_blob_check'; END $$`,
+			`CREATE TRIGGER i275_blob_check BEFORE INSERT ON context_blobs FOR EACH ROW
+			 WHEN (NEW.title = 'i275 blob') EXECUTE FUNCTION i275_blob_check()`,
+		} {
+			if _, err := pool.Exec(ctx, st); err != nil {
+				t.Fatalf("blob trigger: %v", err)
+			}
+		}
+		r, _, err := mcpBlobStoreHandler(mcpCfg)(keyCtx, nil, blobStoreInput{Category: "test", Title: "i275 blob", Filename: "a.txt", MimeType: "text/plain", Text: "payload"})
+		if err != nil {
+			t.Fatalf("stage blob_store: %v", err)
+		}
+		text, code := confirm(t, resultText(t, r))
+		if code != "constraint" || !strings.Contains(text, "i275_blob_check") || !strings.Contains(text, "stage token is consumed") {
+			t.Errorf("confirmed blob_store violating a constraint: code=%q %q, want constraint naming the constraint, with the consumed token", code, text)
+		}
+	})
+}
