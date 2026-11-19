@@ -849,6 +849,7 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 			RerankScore:      s.RerankScore,
 			RRFScoreOriginal: s.RRFScoreOriginal,
 			AgeDays:          s.AgeDays,
+			Untrusted:        s.Untrusted,       // V-11, issue #295: as on the retrieval-only list
 			UntrustedOrigin:  s.UntrustedOrigin, // issue #280: the answer's source list
 		}
 	}
