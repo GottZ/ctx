@@ -151,6 +151,17 @@ func TestBlockTextWritersMarkTheVector(t *testing.T) {
 			t.Fatalf("edit: %v", err)
 		}
 		wantMarked(t, "issue update with a new body", i236Read(t, pool, b.ID))
+
+		// The title is the other half of the embed input.
+		b2 := newIssue(t, "i236 retitle")
+		i236Embed(t, pool, b2.ID)
+		if err := i236Tx(t, pool, func(tx pgx.Tx) error {
+			_, err := store.UpdateIssueBlock(ctx, tx, b2.ID, store.IssueUpdate{Title: str("i236 retitled")}, nil, writable)
+			return err
+		}); err != nil {
+			t.Fatalf("retitle: %v", err)
+		}
+		wantMarked(t, "issue update with a new title only", i236Read(t, pool, b2.ID))
 	})
 
 	t.Run("forge pull updates", func(t *testing.T) {
@@ -181,6 +192,15 @@ func TestBlockTextWritersMarkTheVector(t *testing.T) {
 			t.Fatalf("pull update (body): %v", err)
 		}
 		wantMarked(t, "pull update with a new body", i236Read(t, pool, b.ID))
+		i236Embed(t, pool, b.ID)
+		c.Title = "pulled, renamed on the forge"
+		if err := i236Tx(t, pool, func(tx pgx.Tx) error {
+			_, err := store.PullUpdateIssueBlock(ctx, tx, b.ID, c)
+			return err
+		}); err != nil {
+			t.Fatalf("pull update (title): %v", err)
+		}
+		wantMarked(t, "pull update with a new title only", i236Read(t, pool, b.ID))
 
 		cm := newComment(t, b.ID, "dana")
 		i236Embed(t, pool, cm.ID)

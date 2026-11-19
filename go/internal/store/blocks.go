@@ -1161,8 +1161,9 @@ func StoreEmbeddingNext(ctx context.Context, q pgxdb.Execer, blockID, model stri
 // StoreEmbedding): it does NOT own a transaction, so a caller that needs the
 // invalidation to be atomic with the write of the new text passes its own
 // pgx.Tx, which already holds the block's row: UpsertBlock's content-change
-// path (W04-8), UpdateBlock's (issue #198), the issue update and the two forge
-// pull updates. The block row comes before the memo row, the order the
+// path (W04-8), UpdateBlock's (issue #198), the issue update, the two forge
+// pull updates and the forge push rename — each when its statement reports
+// that the title or the content changed (issue #236). The block row comes before the memo row, the order the
 // backfill takes them in as well. Kept as ONE implementation so future
 // extensions of the invalidation (e.g. a migration-scoped memo delete) land in
 // every writer automatically, never just one.
