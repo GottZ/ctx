@@ -3,6 +3,7 @@
   import type { MultiDirectedGraph } from 'graphology'
   import { toApiError, type ApiError } from '../../lib/api'
   import { getBlock, type BlockDetail } from '../../lib/graph/api'
+  import TrustMarks from '../../lib/blocks/TrustMarks.svelte'
   import { remainingDegree, type EdgeAttrs, type NodeAttrs } from '../../lib/graph/graph-client'
 
   // Reusable scope-gated block viewer (design 03-§3/§5d). Hosts (DetailSidebar
@@ -217,6 +218,9 @@
   {:else if error}
     <p class="problem" role="alert">{error.message}</p>
   {:else if detail}
+    <!-- #295: the foreign-text marks sit with the text, not in the meta list —
+         the text also shows once the node left the graph (attrs null). -->
+    <TrustMarks block={detail} />
     <!-- Always a text node, never {@html} — repo convention (design 04-§3.4). -->
     <pre class="content">{detail.content}</pre>
   {/if}

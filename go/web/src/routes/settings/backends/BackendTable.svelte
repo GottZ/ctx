@@ -23,6 +23,7 @@
   import Table from '../../../lib/ui/Table.svelte'
   import type { PoolModel } from './pool.svelte'
   import BackendDialog from './BackendDialog.svelte'
+  import { stepOrder, type Slot } from './drag-order'
   import { backendVisionBadge } from '../../gateway/vision'
 
   let {
@@ -77,40 +78,44 @@
     // instead; touch-action:none on the handle keeps touch gestures dragging.
   }
 
-  // The row group whose SLOT (layout box) holds the point. Deliberately not
-  // elementFromPoint: that hit-tests the PAINTED rows, and the FLIP transform
-  // keeps painting a just-displaced row in its old slot until the animation
-  // ends — the next move found it under the pointer again and swapped it back,
-  // so the working order flip-flopped while the FLIP ran and a drop in the
-  // wrong phase committed nothing (#56). offset* geometry ignores transforms;
-  // every row group shares the <table> as offsetParent, whose client box
-  // anchors the slots in pointer coordinates.
-  function slotAt(x: number, y: number): string | undefined {
+  // The row groups' SLOTS (layout boxes) in pointer coordinates, and the one
+  // that holds the point. Deliberately not elementFromPoint: that hit-tests
+  // the PAINTED rows, and the FLIP transform keeps painting a just-displaced
+  // row in its old slot until the animation ends — the next move found it
+  // under the pointer again and swapped it back, so the working order
+  // flip-flopped while the FLIP ran and a drop in the wrong phase committed
+  // nothing (#56). offset* geometry ignores transforms; every row group shares
+  // the <table> as offsetParent, whose client box anchors the slots in pointer
+  // coordinates.
+  function slotsAt(x: number, y: number): { overId: string | undefined; slots: Map<string, Slot> } {
+    const slots = new Map<string, Slot>()
+    let overId: string | undefined
     const groups = cardEl?.querySelectorAll<HTMLElement>('tbody[data-id]')
     const table = groups?.[0]?.offsetParent
-    if (groups === undefined || !table) return undefined
+    if (groups === undefined || !table) return { overId, slots }
     const box = table.getBoundingClientRect()
     const ox = box.left + table.clientLeft
     const oy = box.top + table.clientTop
     for (const g of groups) {
+      const id = g.dataset.id ?? ''
       const left = ox + g.offsetLeft
       const top = oy + g.offsetTop
-      if (x >= left && x < left + g.offsetWidth && y >= top && y < top + g.offsetHeight) return g.dataset.id
+      slots.set(id, { top, height: g.offsetHeight })
+      if (x >= left && x < left + g.offsetWidth && y >= top && y < top + g.offsetHeight) overId = id
     }
-    return undefined
+    return { overId, slots }
   }
 
   function dragMove(e: PointerEvent): void {
     if (dragId === null || dragIds === null) return
-    const overId = slotAt(e.clientX, e.clientY)
+    const { overId, slots } = slotsAt(e.clientX, e.clientY)
     if (overId === undefined || overId === dragId) return
-    const from = dragIds.indexOf(dragId)
-    const to = dragIds.indexOf(overId)
-    if (from < 0 || to < 0 || from === to) return
-    const next = [...dragIds]
-    next.splice(from, 1)
-    next.splice(to, 0, dragId)
-    dragIds = next
+    const held = slots.get(dragId)
+    const target = slots.get(overId)
+    if (held === undefined || target === undefined) return
+    // Swap only once the pointer lies in the slot the held row takes (#242).
+    const next = stepOrder(dragIds, dragId, overId, e.clientY, held, target)
+    if (next !== null) dragIds = next
   }
 
   function dragEnd(): void {

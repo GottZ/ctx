@@ -8,12 +8,12 @@
 // with 178 — with and without a type filter, after inserts, upserts, title and
 // content updates, metadata writes and archives.
 //
-// The full-text statement orders by rank alone (store.searchBlocksSQL): rows
-// of the same rank come in the order the scan reads them, which the physical
-// placement of row versions decides — not the schema. The comparison is
-// therefore the answer's rank groups in order, each group as a set of rows
-// (issue #362: under host load the tie order of the same rows differed
-// between the two databases in 1 of 30 runs).
+// The full-text statement orders by rank and, among rows of one rank, by id
+// (store.searchBlocksSQL, issue #368). The ids are generated per write, so the
+// same blocks carry different ids on the two databases and their tie order
+// differs between them by construction. The comparison is therefore the
+// answer's rank groups in order, each group as a set of rows (issue #362).
+// The tie order within one database is pinned by TestSearchFullTextTieOrder.
 package handler
 
 import (
@@ -150,6 +150,10 @@ func TestSearchFullTextSameAcrossMigration178(t *testing.T) {
 			}
 			if i > 0 && r > rank[hits[i-1].id] {
 				t.Fatalf("search %v: row %d (%s) ranks %v above the row before it (%v) — the answer is not in rank order", body, i, h.row, r, rank[hits[i-1].id])
+			}
+			// Within one rank the id decides, newest id first (#368).
+			if i > 0 && r == rank[hits[i-1].id] && h.id >= hits[i-1].id {
+				t.Fatalf("search %v: row %d (%s) has the rank of the row before it and an id not below it (%s after %s) — the tie order is not id DESC", body, i, h.row, h.id, hits[i-1].id)
 			}
 			group = append(group, h.row)
 			if i == len(hits)-1 || rank[hits[i+1].id] != r {

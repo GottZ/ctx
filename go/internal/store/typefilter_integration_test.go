@@ -108,7 +108,7 @@ func TestTypeFilter_Integration(t *testing.T) {
 	})
 
 	t.Run("listmeta_filters", func(t *testing.T) {
-		res, err := store.ListMeta(ctx, pool, scopes, []string{"reference"}, nil)
+		res, _, err := store.ListMeta(ctx, pool, scopes, []string{"reference"}, nil, nil)
 		if err != nil {
 			t.Fatalf("list meta: %v", err)
 		}
