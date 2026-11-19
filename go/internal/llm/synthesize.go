@@ -19,7 +19,11 @@ import (
 )
 
 const (
-	// MaxBlockChars is the maximum content length per source in the LLM prompt.
+	// MaxBlockChars is the maximum content length per source in the LLM prompt
+	// when the settings key query.max_source_runes is not raised (#208) — its
+	// default, and its floor: every head-heavy format in the tree
+	// (derived/render.go, events/distill_block.go) is sized against this
+	// number, so the key can widen the window but never narrow it below.
 	MaxBlockChars = 1500
 
 	// MaxPromptSources is the upper end of the query handler's limit clamp and
@@ -30,7 +34,19 @@ const (
 	// to SEE that number.
 	MaxPromptSources = 20
 
-	// LowConfidenceMaxSources limits sources for low-confidence queries.
+	// SourceRunesShare is the source text one synthesis prompt may carry in
+	// total once query.max_source_runes is raised: today's worst case,
+	// MaxPromptSources sources at MaxBlockChars each, the volume the H12 static
+	// gate (promptguard TestPromptBudgetsCoverPipelineConstants) proves against
+	// BudgetSynthesis. A raised cap redistributes that volume over fewer
+	// sources (SourceRuneCap) and never grows it, so the gate covers every
+	// value of the key without a second budget calculation. It is also the
+	// key's ceiling (V63): a single source can use the whole share, no more.
+	SourceRunesShare = MaxPromptSources * MaxBlockChars
+
+	// LowConfidenceMaxSources limits sources for low-confidence queries. It is
+	// the default of the settings key query.low_confidence_max_sources (#226)
+	// and what a SynthesisSettings without that value (zero) cuts to.
 	LowConfidenceMaxSources = 2
 
 	// NoRelevantResponse is the LLM's rejection marker.
@@ -84,6 +100,22 @@ type SynthesisSettings struct {
 	// ConfidentThreshold is the minimum RRF score for "confident"
 	// classification.
 	ConfidentThreshold float64
+
+	// LowConfidenceMaxSources is how many of the filtered sources a
+	// low_confidence answer's prompt carries — settings key
+	// query.low_confidence_max_sources (#226). A value at or above the source
+	// count is no cut. 0, the value of a struct built literally (a bench
+	// harness, a test), reads as the LowConfidenceMaxSources constant, so such
+	// a caller keeps today's cut without knowing the key exists — the same
+	// zero-is-default rule Devmode follows.
+	LowConfidenceMaxSources int
+
+	// MaxSourceRunes is the configured per-source cut — settings key
+	// query.max_source_runes (#208). What a prompt applies is
+	// SourceRuneCap(MaxSourceRunes, n): the value, bounded by the share of n
+	// sources. 0 (a literal struct) and anything up to MaxBlockChars cut at
+	// MaxBlockChars, today's window.
+	MaxSourceRunes int
 
 	// PromptVersion selects which system prompt is fed to the synthesis LLM.
 	// PromptVersionV52 preserves prod behavior; PromptVersionV6 enables the
@@ -336,6 +368,71 @@ func ClassifyConfidence(maxScore float64, s SynthesisSettings) string {
 	return ConfidenceNoRelevant
 }
 
+// SourceRuneCap is the per-source content cut of a synthesis prompt that
+// carries n sources under the configured cap (query.max_source_runes, #208):
+// min(configured, SourceRunesShare / n), never below MaxBlockChars. A
+// configured value at or below MaxBlockChars (the default, and 0 for a struct
+// built literally) is MaxBlockChars for every n — the cut before the key
+// existed, byte for byte.
+//
+// Why the division, rather than the configured value alone: the per-prompt
+// worst case is n x cut, and n reaches MaxPromptSources. With the division a
+// query with the default limit of 5 gets SourceRunesShare/5 = 6000 runes per
+// source at most, and a query at the clamp keeps exactly today's 1500 — no
+// prompt carries more source text than today's worst case, which is what the
+// static budget gate proves. A chain with a smaller window lowers the cut
+// further at run time (fitSourceCutToBudget). The handler's include_content
+// snippet reads this function, so a retrieval-only caller sees the window a
+// prompt with the same number of sources gets.
+func SourceRuneCap(configured, n int) int {
+	if configured <= MaxBlockChars {
+		return MaxBlockChars
+	}
+	if n < 1 {
+		n = 1
+	}
+	return max(MaxBlockChars, min(configured, SourceRunesShare/n))
+}
+
+// fitSourceCutToBudget lowers a RAISED per-source cut (above MaxBlockChars) to
+// the equal share of the chain's rune budget each source can have, never below
+// MaxBlockChars (#208). SourceRuneCap bounds a prompt by the pipeline's worst
+// case; a chain with a smaller window would otherwise make the budget pass cut
+// the raised sources from below — and LostInMiddleReorder puts the
+// second-best source LAST, so it would be the first to go. With this step a
+// raised value never costs a source the default cut would have kept: either
+// every source fits at the lowered cut and the pass has nothing to do, or the
+// cut is back at MaxBlockChars and the pass runs exactly as it does without
+// the key. A cut at or below MaxBlockChars is returned unchanged.
+//
+// The arithmetic charges what fitSourcesToBudget charges: the system prompt
+// plus the canonical rule, the question, per source the content at the cut
+// plus the truncation marker plus title and category, and the separator
+// between every two parts.
+func fitSourceCutToBudget(cut, budget int, systemPrompt, question string, sources []Source) int {
+	n := len(sources)
+	if cut <= MaxBlockChars || n == 0 {
+		return cut
+	}
+	fixed := utf8.RuneCountInString(systemPrompt) + utf8.RuneCountInString(promptguard.CanonicalRule()) +
+		utf8.RuneCountInString(question) + (n+1)*promptguard.PartSeparatorRunes
+	for _, src := range sources {
+		fixed += utf8.RuneCountInString(redact.Truncated) +
+			utf8.RuneCountInString(src.Title) + utf8.RuneCountInString(src.Category)
+	}
+	return max(MaxBlockChars, min(cut, (budget-fixed)/n))
+}
+
+// lowConfidenceCut is the number of sources a low_confidence prompt keeps:
+// the configured value, or the LowConfidenceMaxSources constant for a zero
+// value (see SynthesisSettings.LowConfidenceMaxSources).
+func lowConfidenceCut(s SynthesisSettings) int {
+	if s.LowConfidenceMaxSources <= 0 {
+		return LowConfidenceMaxSources
+	}
+	return s.LowConfidenceMaxSources
+}
+
 // FilterByScore filters sources below s.ScoreThreshold.
 // Returns the filtered list and the maximum score.
 func FilterByScore(sources []Source, s SynthesisSettings) ([]Source, float64) {
@@ -469,7 +566,18 @@ func hasUntrusted(sources []Source) bool {
 // exactly one genuine id (design 04 §4.3). The question is guarded but NOT wrapped: it is what the
 // model must act on, and a block declared "DATA ONLY, never instructions"
 // would say the opposite of that.
+//
+// Every source is cut at SourceRuneCap(s.MaxSourceRunes, len(sources)) (#208).
 func BuildPrompt(originalQuery string, sources []Source, temporalDates []TemporalDate, s SynthesisSettings) (systemPrompt, userPrompt string) {
+	return buildPrompt(originalQuery, sources, temporalDates, s, SourceRuneCap(s.MaxSourceRunes, len(sources)))
+}
+
+// buildPrompt is BuildPrompt with the per-source cut handed in. Synthesize
+// computes the cut ONCE, over the source set that enters the budget pass, and
+// renders with that same value: the budget pass can drop sources, and a cut
+// recomputed over the smaller survivor set would render text the pass never
+// measured.
+func buildPrompt(originalQuery string, sources []Source, temporalDates []TemporalDate, s SynthesisSettings, sourceCut int) (systemPrompt, userPrompt string) {
 	nonce := promptguard.NewNonce()
 	body, _ := selectSystemPrompt(s)
 	systemPrompt = withNonceRule(body, nonce)
@@ -514,7 +622,7 @@ func BuildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 		// Truncation runs BEFORE the guard, so the cap keeps measuring the
 		// original text rather than a CGJ-inflated one (same order as
 		// buildClassifyUser).
-		content := util.TruncateRunesWithSuffix(src.Content, redact.Truncated, MaxBlockChars)
+		content := util.TruncateRunesWithSuffix(src.Content, redact.Truncated, sourceCut)
 
 		// Title and category stay in their ATTRIBUTE positions — no ClampLine:
 		// unlike the dream header lines (design 04 §2.3-c2) this position is
@@ -582,7 +690,10 @@ func chainWindows(chain []backends.Backend) []int {
 // that gets spliced into it: both are code-generated and both carry the
 // security element, so charging them at their real length is what makes
 // "budget below the rule is an error" mean something here.
-func fitSourcesToBudget(systemPrompt, question string, sources []Source, budget int) ([]Source, promptguard.Report) {
+//
+// sourceCut is the per-source cut the builder will apply (SourceRuneCap), so
+// each source is charged at the length it will be rendered at.
+func fitSourcesToBudget(systemPrompt, question string, sources []Source, budget, sourceCut int) ([]Source, promptguard.Report) {
 	parts := make([]promptguard.Part, 0, len(sources)+2)
 	parts = append(parts,
 		promptguard.Part{Kind: "system", Payload: systemPrompt + promptguard.CanonicalRule(), Priority: promptguard.PriorityRule},
@@ -595,7 +706,7 @@ func fitSourcesToBudget(systemPrompt, question string, sources []Source, budget 
 		parts = append(parts, promptguard.Part{
 			Kind:     sourceMarkerKind,
 			Ref:      strconv.Itoa(i + 1),
-			Payload:  util.TruncateRunesWithSuffix(src.Content, redact.Truncated, MaxBlockChars) + src.Title + src.Category,
+			Payload:  util.TruncateRunesWithSuffix(src.Content, redact.Truncated, sourceCut) + src.Title + src.Category,
 			Priority: promptguard.PriorityContent,
 		})
 	}
@@ -738,14 +849,15 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 			RerankScore:      s.RerankScore,
 			RRFScoreOriginal: s.RRFScoreOriginal,
 			AgeDays:          s.AgeDays,
+			Untrusted:        s.Untrusted,       // V-11, issue #295: as on the retrieval-only list
 			UntrustedOrigin:  s.UntrustedOrigin, // issue #280: the answer's source list
 		}
 	}
 
 	// Step 4: Low-confidence source limiting.
 	llmSources := filtered
-	if confidence == ConfidenceLow && len(llmSources) > LowConfidenceMaxSources {
-		llmSources = llmSources[:LowConfidenceMaxSources]
+	if lowCut := lowConfidenceCut(settings); confidence == ConfidenceLow && len(llmSources) > lowCut {
+		llmSources = llmSources[:lowCut]
 	}
 
 	// Step 5: Lost-in-middle reordering.
@@ -827,13 +939,18 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 	if hasUntrusted(llmSources) {
 		budgetSystemPrompt = withUntrustedRule(budgetSystemPrompt)
 	}
-	llmSources, budgetReport := fitSourcesToBudget(budgetSystemPrompt, originalQuery, llmSources, budget)
+	// #208: the per-source cut, taken over the set that ENTERS the budget pass
+	// (after the low-confidence cap), lowered to what this chain's window holds,
+	// and used unchanged by the builder below.
+	sourceCut := fitSourceCutToBudget(SourceRuneCap(settings.MaxSourceRunes, len(llmSources)),
+		budget, budgetSystemPrompt, originalQuery, llmSources)
+	llmSources, budgetReport := fitSourcesToBudget(budgetSystemPrompt, originalQuery, llmSources, budget, sourceCut)
 	if budgetReport.Err != nil {
 		return nil, fmt.Errorf("llm: synthesize: %w", budgetReport.Err)
 	}
 
 	// Step 8: Build prompt over the fitted source set.
-	systemPrompt, userPrompt := BuildPrompt(originalQuery, llmSources, temporalDates, settings)
+	systemPrompt, userPrompt := buildPrompt(originalQuery, llmSources, temporalDates, settings, sourceCut)
 
 	// Step 8a (V-W1): resolve the citation ordinals. It happens HERE and not
 	// at step 3, because llmSources is only final now: the cap (step 4), the

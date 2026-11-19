@@ -17,9 +17,11 @@ import (
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/httpx"
+	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/promptguard"
+	"github.com/GottZ/ctx/internal/rerank"
 )
 
 // sharedScope is the one scope name V22 refuses for distill.scope. A literal
@@ -74,12 +76,14 @@ func temporalTimeoutBudgetOf(c *Config) time.Duration {
 func Validate(c *Config) []Issue {
 	var issues []Issue
 	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V9d, V11, V26
-	issues = append(issues, validateRerankGraph(c)...)   // V3, V9
+	issues = append(issues, validateRerankGraph(c)...)   // V3, V9, V64
 	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c, V18, V19, V20
 	issues = append(issues, validateGraphOverview(c)...) // V17b
 	issues = append(issues, validateDurations(c)...)     // V17
 	issues = append(issues, validateEmbedBackoff(c)...)  // V21
 	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V33
+	// V61 (#221): the query path's backfill step off needs another embedder.
+	issues = append(issues, validateEmbedBackfillSync(c)...)
 	// V37 (W06-8): the foreign-load detector's floors and ratio range.
 	issues = append(issues, validateStatusForeignLoad(c)...)
 	// V38, V39 (W02-02): the gateway group's floors, caps and budget relation;
@@ -115,6 +119,10 @@ func Validate(c *Config) []Issue {
 	// V60 (#315): the MCP instructions text is valid UTF-8 without control
 	// characters, not blank, and at most MCPInstructionsMaxChars long.
 	issues = append(issues, validateMCPInstructions(c)...)
+	// V62 (#226), V63 (#208): the two cuts of the synthesis prompt.
+	issues = append(issues, validateQuerySynthesisCuts(c)...)
+	// V65 (#210): query.translate is auto or off.
+	issues = append(issues, validateQueryTranslate(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -677,6 +685,26 @@ func validateEmbedBackoff(c *Config) []Issue {
 	return issues
 }
 
+// validateEmbedBackfillSync is V61 (issue #221): embed_backfill.sync_disabled
+// switches the query path's pre-search backfill step off, which is only safe
+// while something else embeds pending blocks. With the background arm off
+// (embed_backfill.interval = 0) and Dream off (dream.enabled = false) the
+// query path is the only embedder there is, and switching it off leaves
+// every new block without a vector for good (FTS-only), with nothing that
+// says so. Fatal, the V21 class: boot drops the offending override, a
+// settings write is a 422. It is checked on every generation, a tenant's
+// too: a tenant's override is dropped while the deployment has neither the
+// arm nor Dream, although other tenants' queries would still reach its
+// blocks at the old end of their pick — the check cannot see other tenants,
+// and the side it errs on is the step staying on.
+func validateEmbedBackfillSync(c *Config) []Issue {
+	if !c.EmbedBackfill.SyncDisabled || c.EmbedBackfill.Interval > 0 || c.Dream.Enabled {
+		return nil
+	}
+	return []Issue{{Field: "embed_backfill.sync_disabled", Severity: SeverityError,
+		Msg: "embed_backfill.sync_disabled=true needs another embedder: with embed_backfill.interval=0 (background arm off) and dream.enabled=false the query path's backfill step is the only one, and without it new blocks never get a vector"}}
+}
+
 // validateStatusForeignLoad is V37 (waves W06-8, W06-8b): the floors and the
 // ratio range of the foreign-load detector's policy keys (design/06 §4.9).
 // The signs stay with the generic walks (V17 for the timeout and the
@@ -938,6 +966,58 @@ func validateQuery(c *Config) []Issue {
 	return issues
 }
 
+// validateQuerySynthesisCuts holds V62 (#226) and V63 (#208), the two cuts the
+// synthesis prompt applies to the retrieved sources — own function, because
+// validateQuery sits near the cyclop ceiling.
+func validateQuerySynthesisCuts(c *Config) []Issue {
+	var issues []Issue
+
+	// V62 (#226) — query.low_confidence_max_sources counts the sources a
+	// low_confidence prompt keeps. 0 renders as a configured cut and would
+	// send the model a question without a single source; "no cut" is any
+	// value at or above the query limit. Negatives belong to V35.
+	if c.Query.LowConfidenceMaxSources == 0 {
+		issues = append(issues, Issue{Field: "query.low_confidence_max_sources", Severity: SeverityError,
+			Msg: fmt.Sprintf("low_confidence_max_sources must be >= 1 — a low-confidence prompt without a source has nothing to answer from; for no cut set %d (the query limit's maximum) or more",
+				llm.MaxPromptSources)})
+	}
+
+	// V63 (#208) — query.max_source_runes lives in [llm.MaxBlockChars,
+	// llm.SourceRunesShare]. Below the floor the key would cut the head off
+	// every head-heavy format sized against today's 1500 runes (the derived
+	// renderer, the distiller's block) while still rendering as a window size;
+	// above the share it renders as configured and acts as the share
+	// (llm.SourceRuneCap). Negatives belong to V35.
+	if v := c.Query.MaxSourceRunes; v >= 0 && (v < llm.MaxBlockChars || v > llm.SourceRunesShare) {
+		issues = append(issues, Issue{Field: "query.max_source_runes", Severity: SeverityError,
+			Msg: fmt.Sprintf("max_source_runes %d must be >= %d (the per-source window every head-heavy block format is sized against) and <= %d (the source text one prompt may carry; a single source can use all of it)",
+				v, llm.MaxBlockChars, llm.SourceRunesShare)})
+	}
+
+	return issues
+}
+
+// validateQueryTranslate is V65 (#210), the enum of query.translate.
+func validateQueryTranslate(c *Config) []Issue {
+	var issues []Issue
+
+	// V65 (#210) — query.translate is auto or off, normalized in place (trim +
+	// lower, the V20 pattern). Fatal, not V5's fallback: the fallback would be
+	// auto, so a typo of "off" would keep the translate step the operator was
+	// switching off while the settings surface renders the typo. Empty reads as
+	// auto.
+	c.Query.Translate = strings.ToLower(strings.TrimSpace(c.Query.Translate))
+	switch c.Query.Translate {
+	case "", llm.TranslateAuto, llm.TranslateOff:
+	default:
+		issues = append(issues, Issue{Field: "query.translate", Severity: SeverityError,
+			Msg: fmt.Sprintf("query.translate %q must be %q (translate a question the German heuristic matches) or %q (never translate) — empty reads as %q",
+				c.Query.Translate, llm.TranslateAuto, llm.TranslateOff, llm.TranslateAuto)})
+	}
+
+	return issues
+}
+
 func validateRerankGraph(c *Config) []Issue {
 	var issues []Issue
 
@@ -946,6 +1026,16 @@ func validateRerankGraph(c *Config) []Issue {
 		issues = append(issues, Issue{Field: "rerank.blend_weight", Severity: SeverityError,
 			Msg: fmt.Sprintf("blend_weight %g must be in [0,1]", c.Rerank.BlendWeight)})
 	}
+	// V64 (#223) — rerank.timeout is capped by the wire's own rerank.Timeout:
+	// rerank.Score ends every call there, so a larger value renders as
+	// configured and acts as the cap. 0 is the default (the timeout keys'
+	// sentinel), negatives belong to V17.
+	if c.Rerank.Timeout > rerank.Timeout {
+		issues = append(issues, Issue{Field: "rerank.timeout", Severity: SeverityError,
+			Msg: fmt.Sprintf("rerank.timeout %v exceeds the cross-encoder wire's own cap %v — the call would end there anyway; set at most %d (seconds), or 0 for the default",
+				c.Rerank.Timeout, rerank.Timeout, int(rerank.Timeout/time.Second))})
+	}
+
 	// rerank.max_docs was a pure sign check and folded into V35
 	// (validateIntSigns) with the other fifteen.
 	//

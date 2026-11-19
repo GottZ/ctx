@@ -22,6 +22,9 @@ type ovStubConfig struct{ cfg *config.Config }
 func (s ovStubConfig) Snapshot() *config.Config { return s.cfg }
 func (s ovStubConfig) SnapshotForRequest(context.Context) *config.Config { return s.cfg }
 func (s ovStubConfig) SnapshotForTenant(context.Context, string) *config.Config { return s.cfg }
+func (s ovStubConfig) SnapshotForTenantResolved(context.Context, string) (*config.Config, bool) {
+	return s.cfg, false // no overlay: the base answers every scope
+}
 
 // overviewReq drives HandleOverview without a DB — only the early-return gates
 // (auth, enabled) are exercised, which never touch the pool.

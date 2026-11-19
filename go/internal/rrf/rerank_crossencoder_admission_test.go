@@ -101,7 +101,7 @@ func TestRerankCrossEncoderAcquireEqualsWireAndCharges(t *testing.T) {
 	rec := newCERecAdmitter(t)
 
 	results := []SearchResult{rc("A", 0.008, "a"), rc("B", 0.006, "b"), rc("C", 0.004, "c")}
-	out, tel, err := RerankCrossEncoder(context.Background(), backends.Backend{Host: url}, "m", 50, 1.0, "q", results, ceAdmission(t, rec))
+	out, tel, err := RerankCrossEncoder(context.Background(), backends.Backend{Host: url}, "m", 50, 1.0, 0, "q", results, ceAdmission(t, rec))
 	if err != nil {
 		t.Fatalf("RerankCrossEncoder: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestRerankCrossEncoderNoUsageStaysUncharged(t *testing.T) {
 	t.Cleanup(d.Close)
 
 	results := []SearchResult{rc("A", 0.008, "a"), rc("B", 0.006, "b"), rc("C", 0.004, "c")}
-	if _, _, err := RerankCrossEncoder(context.Background(), backends.Backend{Host: url}, "m", 50, 1.0, "q", results, ceAdmission(t, d)); err != nil {
+	if _, _, err := RerankCrossEncoder(context.Background(), backends.Backend{Host: url}, "m", 50, 1.0, 0, "q", results, ceAdmission(t, d)); err != nil {
 		t.Fatalf("RerankCrossEncoder: %v", err)
 	}
 	snap := d.Snapshot()
@@ -167,7 +167,7 @@ func TestRerankCrossEncoderNoUsageStaysUncharged(t *testing.T) {
 func TestRerankCrossEncoderEarlyOutAcquiresNoLease(t *testing.T) {
 	rec := newCERecAdmitter(t)
 	results := []SearchResult{rc("A", 0.008, "a"), rc("B", 0.006, "b")}
-	out, tel, err := RerankCrossEncoder(context.Background(), backends.Backend{Host: "http://unused.invalid"}, "m", 50, 1.0, "q", results, ceAdmission(t, rec))
+	out, tel, err := RerankCrossEncoder(context.Background(), backends.Backend{Host: "http://unused.invalid"}, "m", 50, 1.0, 0, "q", results, ceAdmission(t, rec))
 	if err != nil || len(out) != 2 {
 		t.Fatalf("early-out = %v err %v", ids(out), err)
 	}
@@ -188,7 +188,7 @@ func TestRerankCrossEncoderRejectionFailsOpenTerminal(t *testing.T) {
 	rec.reject = dispatch.ErrTargetSaturated
 
 	results := []SearchResult{rc("A", 0.008, "a"), rc("B", 0.006, "b"), rc("C", 0.004, "c")}
-	out, tel, err := RerankCrossEncoder(context.Background(), backends.Backend{Name: "rr-sidecar", Host: url}, "m", 50, 1.0, "q", results, ceAdmission(t, rec))
+	out, tel, err := RerankCrossEncoder(context.Background(), backends.Backend{Name: "rr-sidecar", Host: url}, "m", 50, 1.0, 0, "q", results, ceAdmission(t, rec))
 	if !llm.IsAdmissionError(err) || !errors.Is(err, dispatch.ErrTargetSaturated) {
 		t.Fatalf("err = %v, want llm.AdmissionError wrapping ErrTargetSaturated", err)
 	}
