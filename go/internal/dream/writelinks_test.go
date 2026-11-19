@@ -33,11 +33,13 @@ var (
 
 // expectSourceFetch sets up the source-block lookup with the given metadata.
 // The fixture rows carry type_name='knowledge' (WF T8: WriteLinks resolves
-// the source type's link-class policy).
+// the source type's link-class policy) and a live source in scope "private",
+// the scope every test passes (issue #284: a source that left it writes
+// nothing).
 func expectSourceFetch(mock pgxmock.PgxPoolIface, sid, cat string, updated, created time.Time, title string) {
-	rows := mock.NewRows([]string{"category", "updated_at", "created_at", "title", "type_name"}).
-		AddRow(cat, updated, created, title, "knowledge")
-	mock.ExpectQuery(`SELECT category, updated_at, created_at, title, type_name FROM context_blocks WHERE id = \$1`).
+	rows := mock.NewRows([]string{"category", "updated_at", "created_at", "title", "type_name", "scope", "is_archived"}).
+		AddRow(cat, updated, created, title, "knowledge", "private", false)
+	mock.ExpectQuery(`SELECT category, updated_at, created_at, title, type_name, scope, is_archived FROM context_blocks WHERE id = \$1`).
 		WithArgs(sid).
 		WillReturnRows(rows)
 }
@@ -45,9 +47,9 @@ func expectSourceFetch(mock pgxmock.PgxPoolIface, sid, cat string, updated, crea
 // expectSourceFetchTyped is expectSourceFetch with an explicit source type
 // (WF T8 link-class gate tests).
 func expectSourceFetchTyped(mock pgxmock.PgxPoolIface, sid, cat string, updated, created time.Time, title, typeName string) {
-	rows := mock.NewRows([]string{"category", "updated_at", "created_at", "title", "type_name"}).
-		AddRow(cat, updated, created, title, typeName)
-	mock.ExpectQuery(`SELECT category, updated_at, created_at, title, type_name FROM context_blocks WHERE id = \$1`).
+	rows := mock.NewRows([]string{"category", "updated_at", "created_at", "title", "type_name", "scope", "is_archived"}).
+		AddRow(cat, updated, created, title, typeName, "private", false)
+	mock.ExpectQuery(`SELECT category, updated_at, created_at, title, type_name, scope, is_archived FROM context_blocks WHERE id = \$1`).
 		WithArgs(sid).
 		WillReturnRows(rows)
 }
