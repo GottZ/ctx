@@ -92,7 +92,23 @@ type CanonicalWrite struct {
 	// omitempty, so every canonicalization written before it keeps its exact
 	// bytes and every payload_hash a client already holds stays confirmable.
 	Supersedes string `json:"supersedes,omitempty"`
+
+	// Items (op OpStoreBatch, issue #211) are the writes of a staged batch,
+	// each in the form a staged op 'store' has. The hash over the batch binds
+	// every item, its order and its resolved scope and sensitivity: a confirm
+	// can no more drop, add or alter an item than alter a single write. LAST
+	// field and omitempty, so every canonicalization written before it keeps
+	// its exact bytes and every payload_hash a client already holds stays
+	// confirmable.
+	Items []CanonicalWrite `json:"items,omitempty"`
 }
+
+// OpStoreBatch is the sixth staged op (issue #211): an all-or-none batch of
+// store writes (MCP store_batch). The confirm executes it through
+// UpsertBlocks, one transaction for every item. Its Scope is the first scope
+// in sorted order among the items' scopes (the row column is one scope); the
+// confirm re-validates every item's own scope.
+const OpStoreBatch = "store_batch"
 
 // OpBlobStore is the third staged op (W02-8), beside 'store' and 'update'.
 // context_pending_writes.op is a free TEXT column, so the value needs no
@@ -119,6 +135,16 @@ const OpArchive = "archive"
 // sorted by encoding/json. These bytes are what gets staged as the
 // server-held payload.
 func (c CanonicalWrite) Canonical() ([]byte, error) {
+	b, err := json.Marshal(c.normalized())
+	if err != nil {
+		return nil, fmt.Errorf("canonical write: marshal: %w", err)
+	}
+	return b, nil
+}
+
+// normalized is the write with tags and update_fields sorted, the items of a
+// batch normalized the same way (copies; the input slices stay untouched).
+func (c CanonicalWrite) normalized() CanonicalWrite {
 	if len(c.Tags) > 0 {
 		sorted := make([]string, len(c.Tags))
 		copy(sorted, c.Tags)
@@ -131,11 +157,14 @@ func (c CanonicalWrite) Canonical() ([]byte, error) {
 		sort.Strings(sorted)
 		c.UpdateFields = sorted
 	}
-	b, err := json.Marshal(c)
-	if err != nil {
-		return nil, fmt.Errorf("canonical write: marshal: %w", err)
+	if len(c.Items) > 0 {
+		items := make([]CanonicalWrite, len(c.Items))
+		for i, it := range c.Items {
+			items[i] = it.normalized()
+		}
+		c.Items = items
 	}
-	return b, nil
+	return c
 }
 
 // PayloadHash returns sha256(canonical) as lowercase hex plus the canonical

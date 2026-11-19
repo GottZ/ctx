@@ -219,27 +219,52 @@ func UpsertBlockSupersedes(ctx context.Context, pool *pgxpool.Pool, category, ti
 		if err := LockSupersedesScope(ctx, tx, scope); err != nil {
 			return err
 		}
-		tgt, _, err := lockSupersedesPair(ctx, tx, category, title, scope, decl.TargetID)
-		if err != nil {
-			return err
-		}
-		if err := supersedesTargetAllowed(tgt, decl.Types); err != nil {
-			return err
-		}
-		if b, err = u.exec(ctx, tx); err != nil {
-			return err
-		}
-		if b.ID == tgt.id {
-			// A concurrent first create of this identity, committed between
-			// the source lock and the upsert, can still land here.
-			return ErrSupersedesTarget
-		}
-		if err := supersedesStateAllows(ctx, tx, b.ID, tgt.id, scope); err != nil {
-			return err
-		}
-		return declareSupersedes(ctx, tx, b.ID, tgt.id, scope, decl.APIKeyID)
+		var err error
+		b, err = u.execDeclaring(ctx, tx, decl)
+		return err
 	})
 	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// execDeclaring is the in-transaction half of UpsertBlockSupersedes: the lock
+// pair, the gates, the upsert and the declaration, in the caller's
+// transaction. The caller holds LockSupersedesScope of u's scope, taken as the
+// first lock of that transaction — UpsertBlockSupersedes' own, or UpsertBlocks'
+// for every scope of its batch (issue #211).
+func (u upsertStatement) execDeclaring(ctx context.Context, tx pgx.Tx, decl SupersedesDeclaration) (*Block, error) {
+	tgt, _, err := lockSupersedesPair(ctx, tx, u.category, u.title, u.scope, decl.TargetID)
+	if err != nil {
+		return nil, err
+	}
+	return u.execDeclared(ctx, tx, decl, tgt)
+}
+
+// execDeclared is execDeclaring after its lock pair: tgt is the target
+// lockSupersedesPair locked in this transaction, as the transaction sees it
+// now — execDeclaring's own call, or the lock pass of a block batch
+// (UpsertBlocks), which takes every item's locks before its first write and
+// reads the target again before the item's write (rereadSupersedesTarget).
+func (u upsertStatement) execDeclared(ctx context.Context, tx pgx.Tx, decl SupersedesDeclaration, tgt supersedesTarget) (*Block, error) {
+	scope := u.scope
+	if err := supersedesTargetAllowed(tgt, decl.Types); err != nil {
+		return nil, err
+	}
+	b, err := u.exec(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	if b.ID == tgt.id {
+		// A concurrent first create of this identity, committed between
+		// the source lock and the upsert, can still land here.
+		return nil, ErrSupersedesTarget
+	}
+	if err := supersedesStateAllows(ctx, tx, b.ID, tgt.id, scope); err != nil {
+		return nil, err
+	}
+	if err := declareSupersedes(ctx, tx, b.ID, tgt.id, scope, decl.APIKeyID); err != nil {
 		return nil, err
 	}
 	return b, nil
@@ -321,6 +346,29 @@ func lockSupersedesPair(ctx context.Context, tx pgx.Tx, category, title, scope, 
 		return supersedesTarget{}, "", ErrSupersedesTarget
 	}
 	return tgt, sourceID, nil
+}
+
+// rereadSupersedesTarget reads a target lockSupersedesPair locked earlier in
+// this transaction again — its type and chunk status as this transaction's
+// own writes since then left them. The lock is held, so no other transaction
+// changed it; a block batch (UpsertBlocks) runs its lock pass before its first
+// write, and an item written before a declaring one may have upserted the
+// target's identity with another type. The target cannot have left the scope
+// or been archived meanwhile (an upsert does neither); if it has, it is
+// refused as every id the write cannot name is.
+func rereadSupersedesTarget(ctx context.Context, tx pgx.Tx, tgt supersedesTarget, scope string) (supersedesTarget, error) {
+	err := tx.QueryRow(ctx,
+		`SELECT type_name, lifecycle_state = 'chunk' OR (source_id IS NOT NULL AND chunk_index IS NOT NULL)
+		   FROM context_blocks
+		  WHERE id = $1::uuid AND scope = $2 AND NOT is_archived`,
+		tgt.id, scope).Scan(&tgt.typeName, &tgt.chunk)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return supersedesTarget{}, ErrSupersedesTarget
+	}
+	if err != nil {
+		return supersedesTarget{}, fmt.Errorf("store: supersedes: reread target: %w", err)
+	}
+	return tgt, nil
 }
 
 // supersedesTargetAllowed refuses targets whose policy keeps them out of the

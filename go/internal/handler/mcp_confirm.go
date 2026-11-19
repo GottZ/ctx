@@ -188,6 +188,11 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 						out.Blob.Title, out.Blob.ID, linked))},
 				}, nil, nil
 			}
+			if out.Op == store.OpStoreBatch {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{textContent(renderConfirmedStoreBatch(out.Batch))},
+				}, nil, nil
+			}
 			if out.Op == store.OpBlobStore {
 				return &mcp.CallToolResult{
 					Content: []mcp.Content{textContent(fmt.Sprintf("Confirmed and stored blob: %s (id: %s, category: %s, %d bytes)",
@@ -208,7 +213,7 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 		case confirmMiss:
 			return errResult(confirmNotFoundMsg), nil, nil
 		case confirmScopeRejected:
-			return errResult(confirmScopeRejectMsg(out.Scope)), nil, nil
+			return errResult(out.scopeRejectMsg()), nil, nil
 		case confirmClaimRejected, confirmExecRejected:
 			// Same code the stage gates (claim) or the direct update (#227
 			// identity collision) carry on this surface

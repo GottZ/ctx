@@ -259,13 +259,14 @@ func TestMCPTypeFilterFailsClosedWithoutRegistry(t *testing.T) {
 }
 
 // TestMCPTypeFilterAddsNoTool restates the T17 half of the gate at the tool
-// surface: V-W6 adds FIELDS, not tools. (test.sh T17 pins the same 16 against
+// surface: V-W6 adds FIELDS, not tools. (test.sh T17 pins the same 17 against
 // the live server; TestMCPToolsListCarriesBlobTools pins the count itself. The
-// sixteenth, `archive`, is #201's, not V-W6's.)
+// sixteenth, `archive`, is #201's, the seventeenth, `store_batch`, #211's —
+// neither is V-W6's.)
 func TestMCPTypeFilterAddsNoTool(t *testing.T) {
 	names := mcpToolNames(t)
-	if len(names) != 16 {
-		t.Fatalf("tools/list exports %d tools, want 16 — V-W6 adds fields, not tools (%v)", len(names), names)
+	if len(names) != 17 {
+		t.Fatalf("tools/list exports %d tools, want 17 — V-W6 adds fields, not tools (%v)", len(names), names)
 	}
 	if !strings.Contains(strings.Join(names, ","), "search") {
 		t.Fatalf("tools/list lost the search tool: %v", names)

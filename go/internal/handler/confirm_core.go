@@ -95,6 +95,13 @@ type confirmOutcome struct {
 	// Supersedes is the block a confirmed op 'store' declared to supersede
 	// (issue #197), "" otherwise.
 	Supersedes string
+	// Batch is the outcome of a confirmed op 'store_batch' (issue #211), one
+	// entry per card item in the card's order: the written block, or the
+	// block an item that changed nothing matches.
+	Batch []storeBatchItem
+	// Item names the card item of a staged batch whose scope a
+	// confirmScopeRejected refuses (batchItemPrefix), "" for every other card.
+	Item string
 }
 
 // confirmIdentityTakenPrefix opens the confirmExecRejected wording of a staged
@@ -117,6 +124,32 @@ const confirmSupersedesPrefix = "confirmed store not executed, the stage token i
 // confirmBlobStorePrefix opens the confirmExecRejected wording of a staged
 // blob_store whose execute hit an integrity constraint (blobConstraintError).
 const confirmBlobStorePrefix = "confirmed blob_store not executed, the stage token is consumed: "
+
+// confirmScopeReject is the D1-M1 re-check: the staged scope against the
+// key's CURRENT writable scopes, nil while the key may still write it. A
+// staged batch (#211) is checked item by item first, in the card's order, and
+// the first item whose scope is no longer writable is named
+// (batchItemPrefix), as every other refusal of a batch names its item; the
+// row's scope is one of the items' (the smallest in sort order,
+// mcpStageStoreBatch). Every item's scope is checked before any item's claims
+// (confirmBatchReject), as a single card's scope is before its claims.
+//
+// Split out of executeConfirm to keep that function under the cyclop budget;
+// the placement (before the consume) lives at the call site.
+func confirmScopeReject(ar *auth.AuthResult, cw store.CanonicalWrite, rowScope string) *confirmOutcome {
+	writable := writableBlockScopes(ar)
+	if cw.Op == store.OpStoreBatch {
+		for i, it := range cw.Items {
+			if !contains(writable, it.Scope) {
+				return &confirmOutcome{Kind: confirmScopeRejected, Op: cw.Op, Scope: it.Scope, Item: batchItemPrefix(i)}
+			}
+		}
+	}
+	if !contains(writable, rowScope) {
+		return &confirmOutcome{Kind: confirmScopeRejected, Op: cw.Op, Scope: rowScope}
+	}
+	return nil
+}
 
 // confirmClaimReject re-runs the I7 claim gates over a staged payload. nil =
 // admissible, and nil for the blob ops, which carry no block claim.
@@ -195,8 +228,8 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 
 	// D1-M1: re-validate against the CURRENT key rights, on the un-consumed
 	// row — a shrunk right rejects without burning the stage token.
-	if !contains(writableBlockScopes(ar), pw.Scope) {
-		return confirmOutcome{Kind: confirmScopeRejected, Op: cw.Op, Scope: pw.Scope}
+	if out := confirmScopeReject(ar, cw, pw.Scope); out != nil {
+		return *out
 	}
 
 	// W02-10 A1, re-validated exactly like D1-M1 above and on the same
@@ -242,6 +275,11 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 	if out := confirmDriftReject(ctx, pool, ar, cw); out != nil {
 		return *out
 	}
+	// A staged batch (#211): the claim re-check above, for each of its items
+	// (their scopes: confirmScopeReject) — on the un-consumed row, like theirs.
+	if out := confirmBatchReject(ctx, blocktypes, cw); out != nil {
+		return *out
+	}
 
 	// Atomic consume (exactly once) — a racing double-confirm loses here and
 	// gets the generic miss.
@@ -257,6 +295,9 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 	}
 	if cw.Op == store.OpArchive {
 		return executeConfirmedArchive(ctx, pool, ar, cw, pw.ID)
+	}
+	if cw.Op == store.OpStoreBatch {
+		return executeConfirmedStoreBatch(ctx, pool, blocktypes, ar, cw, pw.ID)
 	}
 
 	if cw.Op == "update" {
@@ -341,7 +382,7 @@ func executeConfirmedStore(ctx context.Context, pool *pgxpool.Pool, blocktypes *
 // into the generic miss (no oracle).
 func confirmOpKnown(op string) bool {
 	switch op {
-	case "store", "update", store.OpBlobStore, store.OpBlobLink, store.OpArchive:
+	case "store", "update", store.OpBlobStore, store.OpBlobLink, store.OpArchive, store.OpStoreBatch:
 		return true
 	default:
 		return false
@@ -420,6 +461,13 @@ const confirmBlockRefGoneMsg = "confirm rejected: the referenced context_block_i
 // surface (MCP text and HTTP body agree since D-W5/D-W6b).
 func confirmScopeRejectMsg(scope string) string {
 	return fmt.Sprintf("confirm rejected: scope %q is no longer writable for this key — the staged write stays pending until it expires", scope)
+}
+
+// scopeRejectMsg is a confirmScopeRejected outcome in the D1-M1 wording, the
+// refused item of a staged batch named in front of it: the text both confirm
+// surfaces answer.
+func (o confirmOutcome) scopeRejectMsg() string {
+	return o.Item + confirmScopeRejectMsg(o.Scope)
 }
 
 // confirmBlockOpNoun names the staged by-id block op in the wordings both
