@@ -295,20 +295,28 @@ func TestMigration187(t *testing.T) {
 		name      string
 		setup     []string
 		reltuples float64
+		clear     string // the runbook's step for what holds the name
 	}{
-		{"above_threshold", nil, 600000},
-		{"invalid", []string{m187DDL[len("CREATE INDEX CONCURRENTLY "):], `UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'idx_context_derived_identity'::regclass`}, 0},
-		{"foreign_definition", []string{`idx_context_derived_identity ON context_blocks (category, title, scope) WHERE metadata ? 'provenance'`}, 0},
+		{"above_threshold", nil, 600000, ""},
+		{"invalid", []string{m187DDL[len("CREATE INDEX CONCURRENTLY "):], `UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'idx_context_derived_identity'::regclass`}, 0,
+			`DROP INDEX CONCURRENTLY idx_context_derived_identity`},
+		{"foreign_definition", []string{`idx_context_derived_identity ON context_blocks (category, title, scope) WHERE metadata ? 'provenance'`}, 0,
+			`ALTER INDEX idx_context_derived_identity RENAME TO idx_context_derived_identity_foreign`},
+		// A relation that is not an index holds the name: the file warns
+		// instead of failing on the CREATE INDEX (42P07).
+		{"view", []string{`CREATE VIEW idx_context_derived_identity AS SELECT 1 AS x`}, 0,
+			`ALTER VIEW idx_context_derived_identity RENAME TO idx_context_derived_identity_foreign`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			pool, dsn := testdb.SetupTestDBUpToWithDSN(t, 186)
 			for _, s := range c.setup {
-				if !strings.HasPrefix(s, "UPDATE") {
+				if !strings.HasPrefix(s, "UPDATE") && !strings.HasPrefix(s, "CREATE") {
 					s = "CREATE INDEX " + s
 				}
 				m182Exec(t, pool, s)
 			}
 			before := m182Index(t, pool, "idx_context_derived_identity")
+			kind := m18xRelkind(t, pool, "idx_context_derived_identity")
 			run := m18xApply(t, dsn, pool, body, "context_blocks", c.reltuples, m187Read, m187Write)
 			t.Logf("%s: %s; locks %v; warnings %v", c.name, run.took, run.modes, run.warnings)
 			if run.err != nil {
@@ -323,8 +331,14 @@ func TestMigration187(t *testing.T) {
 			if after := m182Index(t, pool, "idx_context_derived_identity"); after.found != before.found || after.oid != before.oid {
 				t.Errorf("the file changed the index: %+v -> %+v", before, after)
 			}
-			// The runbook, then the file adopts it.
-			m182Exec(t, pool, `DROP INDEX CONCURRENTLY IF EXISTS idx_context_derived_identity`)
+			if k := m18xRelkind(t, pool, "idx_context_derived_identity"); k != kind {
+				t.Errorf("the file changed what holds the name: relkind %q -> %q", kind, k)
+			}
+			// The runbook (drop the INVALID leftover, rename the foreign
+			// object), then the file adopts the index.
+			if c.clear != "" {
+				m182Exec(t, pool, c.clear)
+			}
 			m182Exec(t, pool, m187DDL)
 			again := m18xApply(t, dsn, pool, body, "context_blocks", c.reltuples, m187Read, m187Write)
 			if again.err != nil || len(again.warnings) != 0 || len(again.modes) != 0 {

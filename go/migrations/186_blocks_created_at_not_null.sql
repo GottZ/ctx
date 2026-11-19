@@ -76,12 +76,19 @@
 -- (house pattern) bounds the wait for the lock, not the time it is held: a
 -- transaction that holds context_blocks longer fails the migration with
 -- 55P03, the file rolls back with nothing changed, the next boot tries again.
+-- Every later statement of the file works on context_blocks under the lock
+-- step 1 took, so a reader or writer that queues behind the request waits at
+-- most those 3 s and then the time the file holds the lock: the catalog
+-- change and the index-driven repair above the threshold, and the
+-- validation's scan (and a repair of updated_at with a second scan) below
+-- it.
 --
 -- RUNBOOK above the threshold (WARNING "context_blocks.created_at carries
 -- ..."). Every new row is checked and no row is without created_at; what is
 -- missing is the proof on the old rows and the constraint on updated_at.
--- Run, out of band, at any time, in this order:
+-- Run, out of band, at any time, in this order, in one session:
 --
+--     SET lock_timeout = '3s';
 --     UPDATE context_blocks
 --        SET updated_at = COALESCE(created_at, uuid_extract_timestamp(id), now())
 --      WHERE updated_at IS NULL;
@@ -97,14 +104,43 @@
 -- writers go on; it waits for (and blocks) VACUUM, ANALYZE, CREATE INDEX
 -- CONCURRENTLY and another VALIDATE. Should it report a row without
 -- updated_at (one written by hand between the UPDATE and the ADD), repeat
--- the UPDATE and the VALIDATE. Running this file again afterwards is a
--- no-op; the runbook can also run before the upgrade — in its order, the
--- repair of updated_at first, and with the repair of created_at of REPAIR
--- before it (UPDATE ... SET created_at = COALESCE(uuid_extract_timestamp(id),
--- updated_at, now()) WHERE created_at IS NULL) — and the file then finds
--- valid not-null constraints and changes nothing. Adding the constraint on
--- updated_at NOT VALID without those repairs would make this file's repair of
--- a row without either value fail with 23502 at every boot.
+-- the UPDATE and the VALIDATE. The lock_timeout (house pattern of 173) makes
+-- the ADD and the VALIDATE give up after 3 s instead of queueing every reader
+-- and writer behind a long transaction on the table (a pg_dump, an
+-- anti-wraparound VACUUM): on 55P03 repeat that statement. Running this file
+-- again afterwards is a no-op.
+--
+-- RUNBOOK BEFORE THE UPGRADE (on schema 185, out of band, at any time; the
+-- file then finds two valid not-null constraints and changes nothing,
+-- without a lock on context_blocks). In this order, in one session:
+--
+--     SET lock_timeout = '3s';
+--     UPDATE context_blocks
+--        SET created_at = COALESCE(uuid_extract_timestamp(id), updated_at, now())
+--      WHERE created_at IS NULL;
+--     ALTER TABLE context_blocks
+--         ADD CONSTRAINT context_blocks_created_at_not_null NOT NULL created_at NOT VALID;
+--     UPDATE context_blocks
+--        SET updated_at = COALESCE(created_at, uuid_extract_timestamp(id), now())
+--      WHERE updated_at IS NULL;
+--     ALTER TABLE context_blocks
+--         ADD CONSTRAINT context_blocks_updated_at_not_null NOT NULL updated_at NOT VALID;
+--     ALTER TABLE context_blocks
+--         VALIDATE CONSTRAINT context_blocks_created_at_not_null,
+--         VALIDATE CONSTRAINT context_blocks_updated_at_not_null;
+--
+-- The first UPDATE finds its rows through idx_context_created, the second
+-- scans the heap; both take row locks only. Each ADD is a catalog change
+-- under ACCESS EXCLUSIVE (milliseconds, after the wait for the lock, which
+-- the lock_timeout bounds: on 55P03 repeat it); from it on, a row that leaves
+-- that column NULL is refused with 23502. The VALIDATE is the one above. Each repair runs before the ADD of its column: once a
+-- constraint stands NOT VALID, every UPDATE of an old row still without that
+-- column fails with 23502 — the repair of the other column on a row without
+-- either value, and the guard's and dream's metadata writes alike. Should a
+-- step report a row without a value (one written by hand between a repair
+-- and its ADD), set both columns of such rows in one UPDATE (created_at as in
+-- the first UPDATE where it is NULL, updated_at = COALESCE(updated_at,
+-- created_at, uuid_extract_timestamp(id), now())) and repeat the step.
 --
 -- SCHEMA CONTRACT. The manifest records not_null true for both columns and
 -- migration_max 185 -> 186; above the threshold updated_at reads as drift
@@ -117,7 +153,8 @@
 -- Its writes do not name created_at and write updated_at as now(), and keep
 -- working.
 --
--- WAY BACK (forward-only tree; to undo temporarily):
+-- WAY BACK (forward-only tree; to undo temporarily), after SET lock_timeout =
+-- '3s' (ACCESS EXCLUSIVE; on 55P03 repeat):
 --     ALTER TABLE context_blocks ALTER COLUMN created_at DROP NOT NULL,
 --                                ALTER COLUMN updated_at DROP NOT NULL;
 -- (drops the constraints, a catalog change), then DELETE FROM _migrations

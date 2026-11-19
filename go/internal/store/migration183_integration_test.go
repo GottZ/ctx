@@ -39,8 +39,9 @@ type m18xRun struct {
 // of its own whose notice handler collects the WARNINGs and NOTICEs; with
 // reltuples > 0 it first sets the row estimate of table in the same
 // transaction (the thresholds read it). While the file is open it holds,
-// other reads table (readSQL) and writes it (writeSQL), each with a short
-// timeout. A failing file is rolled back and its error returned.
+// other reads table (readSQL) and writes it (writeSQL); m18xWaits tells
+// whether each waited for the file. A failing file is rolled back and its
+// error returned.
 func m18xApply(t *testing.T, dsn string, other *pgxpool.Pool, body []byte, table string, reltuples float64, readSQL, writeSQL string) m18xRun {
 	t.Helper()
 	ctx := context.Background()
@@ -94,21 +95,109 @@ func m18xApply(t *testing.T, dsn string, other *pgxpool.Pool, body []byte, table
 		t.Fatal(err)
 	}
 	if readSQL != "" {
-		rctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-		_, rerr := other.Exec(rctx, readSQL)
-		run.readerWaited = rerr != nil
-		cancel()
+		run.readerWaited = m18xWaits(t, other, readSQL, table, "AccessShareLock")
 	}
 	if writeSQL != "" {
-		wctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-		_, werr := other.Exec(wctx, writeSQL)
-		run.writerWaited = werr != nil
-		cancel()
+		run.writerWaited = m18xWaits(t, other, writeSQL, table, "RowExclusiveLock")
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 	return run
+}
+
+// m18xProbeWithin bounds one probe of m18xWaits: the time for its statement
+// to end or for its lock request to show in pg_locks. Either happens within
+// milliseconds; the bound only ends a probe that does neither.
+const m18xProbeWithin = 5 * time.Second
+
+// m18xWaits runs sql on a connection of its own from other while an open
+// transaction holds its locks, and reports whether the statement waited for
+// a lock of mode on table: true when pg_locks shows that request of its
+// backend not granted (the statement is then cancelled on the server), false
+// when the statement ends without an error first. No connection, an error of
+// the statement, or neither within m18xProbeWithin fails the test with the
+// requests pg_locks showed: none of them is evidence either way.
+func m18xWaits(t *testing.T, other *pgxpool.Pool, sql, table, mode string) bool {
+	t.Helper()
+	ctx := context.Background()
+	actx, acancel := context.WithTimeout(ctx, m18xProbeWithin)
+	conn, err := other.Acquire(actx)
+	acancel()
+	if err != nil {
+		t.Fatalf("probe of %s: no connection: %v", table, err)
+	}
+	defer conn.Release()
+	var pid int
+	if err := conn.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+		t.Fatalf("probe of %s: %v", table, err)
+	}
+	sctx, stop := context.WithCancel(ctx)
+	defer stop()
+	done := make(chan error, 1)
+	go func() {
+		_, err := conn.Exec(sctx, sql)
+		done <- err
+	}()
+	// end cancels the statement on the server and returns how it ended; the
+	// context is the fallback should the cancel not reach it.
+	end := func() error {
+		if _, err := other.Exec(ctx, `SELECT pg_cancel_backend($1)`, pid); err != nil {
+			stop()
+		}
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(m18xProbeWithin):
+			stop()
+			return <-done
+		}
+	}
+	deadline := time.Now().Add(m18xProbeWithin)
+	var pending []string
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("probe of %s ended with %v before its request for %s was seen waiting (pending %v): no evidence either way", table, err, mode, pending)
+			}
+			return false
+		default:
+		}
+		rows, err := other.Query(ctx, `SELECT l.locktype || ' ' || l.mode || COALESCE(' on ' || l.relation::regclass::text, ''),
+			COALESCE(l.locktype = 'relation' AND l.relation = $2::regclass AND l.mode = $3, false)
+			  FROM pg_locks l WHERE l.pid = $1 AND NOT l.granted ORDER BY 1`, pid, table, mode)
+		if err != nil {
+			serr := end()
+			t.Fatalf("probe of %s: read pg_locks: %v (the probe ended with %v)", table, err, serr)
+		}
+		pending = pending[:0]
+		waited := false
+		for rows.Next() {
+			var lock string
+			var match bool
+			if err := rows.Scan(&lock, &match); err != nil {
+				rows.Close()
+				serr := end()
+				t.Fatalf("probe of %s: %v (the probe ended with %v)", table, err, serr)
+			}
+			pending = append(pending, lock)
+			waited = waited || match
+		}
+		rows.Close()
+		if waited {
+			var pgErr *pgconn.PgError
+			if err := end(); !errors.As(err, &pgErr) || pgErr.Code != "57014" {
+				t.Errorf("probe of %s waited for %s, then ended with %v, want its cancel (57014)", table, mode, err)
+			}
+			return true
+		}
+		if time.Now().After(deadline) {
+			serr := end()
+			t.Fatalf("probe of %s neither ended nor waited for %s within %s: pending %v, then ended with %v", table, mode, m18xProbeWithin, pending, serr)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func m18xWarns(run m18xRun, sub string) int {
@@ -292,6 +381,28 @@ func TestMigration183(t *testing.T) {
 		}
 		if ix := m182Index(t, pool, "idx_guard_pending_old"); ix.oid != oldName.oid {
 			t.Errorf("the foreign idx_guard_pending_old was dropped")
+		}
+		if ix := m182Index(t, pool, "idx_guard_pending"); ix.found {
+			t.Errorf("idx_guard_pending survived: %s", ix.def)
+		}
+	})
+
+	// A relation that is not an index under one of the names is no index of
+	// ctx: the file neither drops it nor fails on it (DROP INDEX on a view is
+	// 42809), and the guard's own index goes.
+	t.Run("view_name", func(t *testing.T) {
+		pool, dsn := testdb.SetupTestDBUpToWithDSN(t, 182)
+		m182Seed(t, pool)
+		m182Exec(t, pool, `CREATE VIEW idx_guard_pending_next AS SELECT 1 AS x`)
+		run := m18xApply(t, dsn, pool, body, "context_blocks", 0, m183Read, m183Write)
+		if run.err != nil {
+			t.Fatalf("apply: %v", run.err)
+		}
+		if len(run.warnings) != 0 {
+			t.Errorf("warnings %v, want none (a view is no index ctx built)", run.warnings)
+		}
+		if k := m18xRelkind(t, pool, "idx_guard_pending_next"); k != "v" {
+			t.Errorf("the view idx_guard_pending_next is gone: relkind %q", k)
 		}
 		if ix := m182Index(t, pool, "idx_guard_pending"); ix.found {
 			t.Errorf("idx_guard_pending survived: %s", ix.def)

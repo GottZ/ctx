@@ -62,9 +62,27 @@
 --                          (store/oauth_codes.go), its sweep, client deletes.
 -- The runner runs each file in ONE transaction (store/migrations.go), where
 -- CONCURRENTLY is impossible. Therefore, per index:
---   * A usable index of this name (btree, valid, on its table, exactly this
---     key and predicate) makes this a no-op. An operator can build it
---     beforehand, out of band (readers and writers go on):
+--   * A usable index of this name (valid, and its definition as PostgreSQL
+--     deparses it is exactly
+--       CREATE INDEX idx_block_grants_granted_by ON public.context_block_grants USING btree (granted_by) WHERE (granted_by IS NOT NULL)
+--       CREATE INDEX idx_oauth_codes_api_key ON public.context_oauth_codes USING btree (api_key_id)
+--       CREATE INDEX idx_write_log_api_key ON public.context_write_log USING btree (api_key_id) WHERE (api_key_id IS NOT NULL)
+--       CREATE INDEX idx_chat_sessions_created_by ON public.context_chat_sessions USING btree (created_by) WHERE (created_by IS NOT NULL)
+--     ) makes this a no-op. An operator can build it beforehand, out of
+--     band (readers and writers go on). First, per name, what holds it:
+--
+--       SELECT c.relkind, i.indisvalid, pg_get_indexdef(c.oid)
+--         FROM pg_class c
+--         JOIN pg_namespace n ON n.oid = c.relnamespace
+--         LEFT JOIN pg_index i ON i.indexrelid = c.oid
+--        WHERE n.nspname = 'public' AND c.relname = 'idx_write_log_api_key';
+--
+--     No row: build it. An index, valid, of the definition above: keep it,
+--     nothing to build. That definition with indisvalid false (an aborted
+--     CONCURRENTLY build): DROP INDEX CONCURRENTLY idx_write_log_api_key;
+--     then build it. Anything else (another definition, a view, a table, a
+--     sequence: not ctx's to drop): rename it (ALTER INDEX / ALTER VIEW ...
+--     RENAME TO another name), then build it. The builds:
 --
 --       CREATE INDEX CONCURRENTLY idx_write_log_api_key
 --           ON context_write_log (api_key_id)
@@ -78,10 +96,12 @@
 --       CREATE INDEX CONCURRENTLY idx_oauth_codes_api_key
 --           ON context_oauth_codes (api_key_id);
 --
---     (abortable; an aborted build leaves an INVALID index behind, which is
---     dropped with DROP INDEX CONCURRENTLY before the next try).
---   * A name taken by anything else (another definition, or an INVALID
---     index): WARNING, nothing built or dropped.
+--     No IF NOT EXISTS: it would pass over an INVALID index or a foreign
+--     object of the name. A build is abortable; an aborted one leaves an
+--     INVALID index behind (the case above).
+--   * A name taken by anything else (another definition, an INVALID index,
+--     or a relation that is not an index: a view, a table, a sequence):
+--     WARNING, nothing built or dropped, no SHARE lock on that table.
 --   * Below the row threshold of its table (pg_class.reltuples; never
 --     analysed: a bounded count) the migration builds inline:
 --       context_write_log       2 000 000 rows. Only background jobs and
@@ -124,12 +144,26 @@
 -- grants and the OAuth codes is held over it, the chat sessions' lock (every
 -- web chat turn) for its own build only.
 --
--- `SET LOCAL lock_timeout = '3s'` (house pattern): the 3 s bound acquiring
--- each lock, not the build. A writer holding it longer fails the migration
--- with lock_not_available (55P03), the file rolls back with nothing changed
--- and the boot fails loudly; the next boot tries again. While the migration
--- waits for a lock, the writers of that table queue behind it, for at most
--- those 3 s.
+-- `SET LOCAL lock_timeout = '3s'` (house pattern) bounds each lock
+-- acquisition on its own, neither a build nor the time a lock is held. A
+-- writer holding a table longer fails the migration with lock_not_available
+-- (55P03), the file rolls back with nothing changed and the boot fails
+-- loudly; the next boot tries again. A writer of a table that arrives while
+-- the file waits for that table queues behind the request: it waits until
+-- the file has the lock (at most 3 s) and then until the file commits or
+-- rolls back — the builds of its table and of every table after it, and the
+-- wait for each later lock (at most 3 s each: the SHARE lock of each later
+-- table and, for a later table never analysed, the ACCESS SHARE of its
+-- bounded count, which only an ACCESS EXCLUSIVE holder delays). In the lock
+-- order above, a writer waits at most:
+--   context_block_grants   4 x 3 s (+ 3 s and the count per later table
+--                          never analysed) + all four builds;
+--   context_oauth_codes    3 x 3 s (+ the same) + the builds of the codes,
+--                          the write log and the chat sessions;
+--   context_write_log      2 x 3 s (+ the same) + the builds of the write
+--                          log and the chat sessions;
+--   context_chat_sessions  3 s + its own build.
+-- A cycle with a delete (above) ends earlier, after deadlock_timeout.
 --
 -- OLDER BINARY. v5.67.0 (the rollback image) writes and deletes as before;
 -- the indexes serve its statements too. Its schema-contract check finds
@@ -139,11 +173,14 @@
 -- start (every _migrations row without an embedded file is breaking) until
 -- CTX_CONTRACT_MODE=warn or off is set.
 --
--- WAY BACK (forward-only tree; to undo temporarily):
---     DROP INDEX CONCURRENTLY IF EXISTS idx_write_log_api_key;
---     DROP INDEX CONCURRENTLY IF EXISTS idx_block_grants_granted_by;
---     DROP INDEX CONCURRENTLY IF EXISTS idx_chat_sessions_created_by;
---     DROP INDEX CONCURRENTLY IF EXISTS idx_oauth_codes_api_key;
+-- WAY BACK (forward-only tree; to undo temporarily). Drop a name only when
+-- the check query above shows an index of the definition above (any
+-- validity); a same-named object of another kind or definition is one this
+-- file left alone with a WARNING, and it stays:
+--     DROP INDEX CONCURRENTLY idx_write_log_api_key;
+--     DROP INDEX CONCURRENTLY idx_block_grants_granted_by;
+--     DROP INDEX CONCURRENTLY idx_chat_sessions_created_by;
+--     DROP INDEX CONCURRENTLY idx_oauth_codes_api_key;
 -- then DELETE FROM _migrations WHERE version = 185. Key deletes stay correct
 -- without them, at the cost named above.
 --

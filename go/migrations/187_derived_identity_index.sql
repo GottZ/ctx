@@ -57,29 +57,51 @@
 -- CREATE INDEX takes SHARE on context_blocks until the file commits: readers
 -- go on, every INSERT, UPDATE and DELETE waits; the build reads the whole
 -- heap, so its time follows the table, not the index.
---   * A valid index of this name with exactly this definition: no-op.
+--   * A valid index of this name with exactly this definition, as
+--     PostgreSQL deparses it:
+--       CREATE INDEX idx_context_derived_identity ON public.context_blocks USING btree (category, title COLLATE "C", scope) WHERE (metadata ? 'provenance'::text)
+--     no-op.
 --   * Below 500 000 rows (pg_class.reltuples; never analysed: a bounded
---     count) and no index of this name: built inline. Measured with a writer
+--     count) and nothing of this name: built inline. Measured with a writer
 --     on a second connection (docs/operations.md, "Migration 187").
---   * Above, or a name taken by anything else (another definition, or an
---     INVALID index — an aborted CONCURRENTLY build): WARNING, nothing built
---     or dropped, and no lock on context_blocks. Build it out of band on the
---     running binary (readers and writers go on):
+--   * Above, or a name taken by anything else (another definition, an
+--     INVALID index — an aborted CONCURRENTLY build — or a relation that is
+--     not an index: a view, a table, a sequence): WARNING, nothing built or
+--     dropped, and no SHARE lock on context_blocks. Build it out of band on the
+--     running binary (readers and writers go on). First, what holds the
+--     name:
 --
---       DROP INDEX CONCURRENTLY IF EXISTS idx_context_derived_identity;
+--       SELECT c.relkind, i.indisvalid, pg_get_indexdef(c.oid)
+--         FROM pg_class c
+--         JOIN pg_namespace n ON n.oid = c.relnamespace
+--         LEFT JOIN pg_index i ON i.indexrelid = c.oid
+--        WHERE n.nspname = 'public' AND c.relname = 'idx_context_derived_identity';
+--
+--     No row: build it. An index, valid, of the definition above: keep it,
+--     nothing to build. That definition with indisvalid false (an aborted
+--     build): DROP INDEX CONCURRENTLY idx_context_derived_identity; then
+--     build it. Anything else (another definition, a view, a table, a
+--     sequence: not ctx's to drop): rename it (ALTER INDEX / ALTER VIEW ...
+--     RENAME TO another name), then build it. The build:
+--
 --       CREATE INDEX CONCURRENTLY idx_context_derived_identity
 --           ON context_blocks (category, title COLLATE "C", scope)
 --           WHERE metadata ? 'provenance';
 --
---     (the DROP only removes an INVALID leftover or a foreign index of this
---     name — check what it is first). Until the index stands with this
---     definition the probe runs in its form before this release, at its cost
---     before this release, and the schema-contract manifest stays red.
+--     No IF NOT EXISTS: it would pass over an INVALID index or a foreign
+--     object of the name. Until the index stands with this definition the
+--     probe runs in its form before this release, at its cost before this
+--     release, and the schema-contract manifest stays red.
 --
--- `SET LOCAL lock_timeout = '3s'` (house pattern): a transaction that holds a
--- write on context_blocks longer fails the migration with lock_not_available
--- (55P03), the file rolls back with nothing changed and the boot fails
--- loudly; the next boot tries again.
+-- `SET LOCAL lock_timeout = '3s'` (house pattern) bounds the acquisition of
+-- the SHARE lock, not the build: a transaction that holds a write on
+-- context_blocks longer fails the migration with lock_not_available (55P03),
+-- the file rolls back with nothing changed and the boot fails loudly; the
+-- next boot tries again. A writer that arrives while the file waits queues
+-- behind the request and waits until the file commits or rolls back: at
+-- most those 3 s and then the build (the file takes no other lock after
+-- it; the bounded count of a table never analysed comes before the request
+-- and takes ACCESS SHARE only, which writers do not wait for).
 --
 -- OLDER BINARY. v5.67.0 (the rollback image) sends the probe in its form
 -- before this release; the planner may serve it from the trigram GiST as
@@ -90,9 +112,12 @@
 -- start (every _migrations row without an embedded file is breaking) until
 -- CTX_CONTRACT_MODE=warn or off is set.
 --
--- WAY BACK: DROP INDEX CONCURRENTLY IF EXISTS idx_context_derived_identity;
--- then DELETE FROM _migrations WHERE version = 187. The probe of this release
--- returns to its form before this release within a minute.
+-- WAY BACK: only when the check query above shows an index of the
+-- definition above (any validity) — a same-named object of another kind or
+-- definition is one this file left alone with a WARNING, and it stays —
+-- DROP INDEX CONCURRENTLY idx_context_derived_identity; then DELETE FROM
+-- _migrations WHERE version = 187. The probe of this release returns to its
+-- form before this release within a minute.
 --
 -- Index change only, no table or column: the test.sh T07 counts stay. The
 -- schema-contract manifest gains the index and migration_max 186 -> 187.

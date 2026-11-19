@@ -111,7 +111,8 @@ func (r m184Run) holds(table, mode string) bool { return m182Holds(r.locks[table
 // pool of its own whose notice handler collects the WARNINGs of the DO block;
 // reltuples fakes the row estimate of tables in the same transaction (the
 // threshold reads it). While the file is open it holds, a second connection
-// reads and writes every target table, each with a short timeout.
+// reads and writes every target table; m18xWaits tells whether each waited
+// for the file.
 func m184Apply(t *testing.T, dsn string, other *pgxpool.Pool, body []byte, targets []m184Target, reltuples map[string]float64) m184Run {
 	t.Helper()
 	ctx := context.Background()
@@ -173,14 +174,8 @@ func m184Apply(t *testing.T, dsn string, other *pgxpool.Pool, body []byte, targe
 	}
 	rows.Close()
 	for _, tg := range targets {
-		rctx, cancel := context.WithTimeout(ctx, 400*time.Millisecond)
-		var n int64
-		run.readerWaited[tg.table] = other.QueryRow(rctx, `SELECT count(*) FROM `+tg.table).Scan(&n) != nil
-		cancel()
-		wctx, cancel := context.WithTimeout(ctx, 400*time.Millisecond)
-		_, werr := other.Exec(wctx, tg.writer)
-		run.writerWaited[tg.table] = werr != nil
-		cancel()
+		run.readerWaited[tg.table] = m18xWaits(t, other, `SELECT count(*) FROM `+tg.table, tg.table, "AccessShareLock")
+		run.writerWaited[tg.table] = m18xWaits(t, other, tg.writer, tg.table, "RowExclusiveLock")
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
@@ -206,6 +201,22 @@ func m184Fingerprint(t *testing.T, pool *pgxpool.Pool, targets []m184Target) str
 	return strings.Join(out, " ")
 }
 
+// m18xRelkind is the kind of the relation that holds a name in public (""
+// for none): a view, a table or a sequence holds an index name as well.
+func m18xRelkind(t *testing.T, pool *pgxpool.Pool, name string) string {
+	t.Helper()
+	var k string
+	err := pool.QueryRow(context.Background(), `SELECT c.relkind::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = 'public' AND c.relname = $1`, name).Scan(&k)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ""
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
 // m184Contract is a foreign-key lookup migration under test.
 type m184Contract struct {
 	file    string
@@ -228,10 +239,12 @@ type m184Contract struct {
 //	              one WARNING, its index not built and no SHARE on its table,
 //	              the others built; one row below, built; all tables at their
 //	              threshold: one WARNING each, no SHARE anywhere;
-//	taken_name    an INVALID index of a name, and every name taken by the
-//	              same column with the predicate toggled: a WARNING each,
-//	              nothing built or dropped, no SHARE on that table; after the
-//	              runbook the file adopts them;
+//	taken_name    an INVALID index of a name, every name taken by the same
+//	              column with the predicate toggled, and a name taken by a
+//	              view: a WARNING each, nothing built or dropped, no SHARE on
+//	              that table, the other indexes built; after the runbook
+//	              (drop the INVALID leftover, rename the foreign object) the
+//	              file adopts them;
 //	lock_timeout  a writer holding each table in turn: the file holds SHARE
 //	              on exactly the tables before it (the lock order), fails
 //	              after ~3 s with 55P03 and leaves nothing built.
@@ -426,16 +439,23 @@ func (c m184Contract) run(t *testing.T) {
 		name  string
 		taken []int // indexes of c.targets whose name is taken
 		setup func(t *testing.T, pool *pgxpool.Pool)
+		clear string // the runbook's statement for a taken name, %[1]s = the name
 	}{
 		{"invalid", []int{0}, func(t *testing.T, pool *pgxpool.Pool) {
 			m182Exec(t, pool, c.targets[0].inline())
 			m182Exec(t, pool, `UPDATE pg_index SET indisvalid = false WHERE indexrelid = $1::regclass`, c.targets[0].name)
-		}},
+		}, `DROP INDEX CONCURRENTLY %[1]s`},
 		{"foreign_definition", nil, func(t *testing.T, pool *pgxpool.Pool) {
 			for _, tg := range c.targets {
 				m182Exec(t, pool, toggled(tg))
 			}
-		}},
+		}, `ALTER INDEX %[1]s RENAME TO %[1]s_foreign`},
+		// A relation that is not an index holds the first name: the file
+		// warns and goes on to the other indexes instead of failing on the
+		// CREATE INDEX (42P07).
+		{"view", []int{0}, func(t *testing.T, pool *pgxpool.Pool) {
+			m182Exec(t, pool, `CREATE VIEW `+c.targets[0].name+` AS SELECT 1 AS x`)
+		}, `ALTER VIEW %[1]s RENAME TO %[1]s_foreign`},
 	} {
 		t.Run("taken_name_"+cs.name, func(t *testing.T) {
 			taken := cs.taken
@@ -448,8 +468,10 @@ func (c m184Contract) run(t *testing.T) {
 			c.seed(t, pool)
 			cs.setup(t, pool)
 			before := map[string]m182State{}
+			kinds := map[string]string{}
 			for _, i := range taken {
 				before[c.targets[i].name] = m182Index(t, pool, c.targets[i].name)
+				kinds[c.targets[i].name] = m18xRelkind(t, pool, c.targets[i].name)
 			}
 			r := m184Apply(t, dsn, pool, body, c.targets, nil)
 			if len(r.warnings) != len(taken) {
@@ -472,6 +494,9 @@ func (c m184Contract) run(t *testing.T) {
 				if ix, b := m182Index(t, pool, tg.name), before[tg.name]; ix != b {
 					t.Errorf("the file changed the taken %s: %+v -> %+v", tg.name, b, ix)
 				}
+				if k := m18xRelkind(t, pool, tg.name); k != kinds[tg.name] {
+					t.Errorf("the file changed what holds %s: relkind %q -> %q", tg.name, kinds[tg.name], k)
+				}
 			}
 			for i, tg := range c.targets {
 				if !slices.Contains(taken, i) {
@@ -480,12 +505,13 @@ func (c m184Contract) run(t *testing.T) {
 					}
 				}
 			}
-			// The runbook: drop what holds the name, build it CONCURRENTLY; the
-			// file then adopts it without a lock or a word.
+			// The runbook: drop the INVALID leftover or rename the foreign
+			// object that holds the name, build it CONCURRENTLY; the file then
+			// adopts it without a lock or a word.
 			oids := map[string]uint32{}
 			for _, i := range taken {
 				tg := c.targets[i]
-				m182Exec(t, pool, `DROP INDEX CONCURRENTLY IF EXISTS `+tg.name)
+				m182Exec(t, pool, fmt.Sprintf(cs.clear, tg.name))
 				m182Exec(t, pool, tg.runbook)
 				oids[tg.name] = m182Index(t, pool, tg.name).oid
 			}
@@ -506,7 +532,8 @@ func (c m184Contract) run(t *testing.T) {
 	// the indexes before it, waits lock_timeout (3 s) for that table and
 	// fails with 55P03; the transaction rolls back with nothing built. With
 	// the writer on each table in turn, the SHARE locks held while waiting
-	// show the order the file takes the tables in.
+	// show the order the file takes the tables in; they are read when the
+	// file's request for that table shows waiting in pg_locks.
 	t.Run("lock_timeout", func(t *testing.T) {
 		pool, dsn := testdb.SetupTestDBUpToWithDSN(t, base)
 		c.seed(t, pool)
@@ -514,11 +541,27 @@ func (c m184Contract) run(t *testing.T) {
 		for i, tg := range c.targets {
 			tables[i] = tg.table
 		}
-		for k, tg := range c.targets {
+		// within bounds the file beside the writer: its lock_timeout ends it
+		// after ~3 s.
+		const within = 20 * time.Second
+		type besideRun struct {
+			ferr          error
+			took          time.Duration
+			seen          bool     // the file's request for SHARE on the writer's table was seen waiting
+			held, waiting []string // its SHARE locks on the targets in that sample, else in the last one
+		}
+		// beside runs the file beside a writer holding tg.table and samples
+		// pg_locks until the file's request for SHARE on that table waits or
+		// the file ends. Every path releases what it took, a failed test
+		// included: the file's statement is cancelled on the server and
+		// waited for, then its transaction rolled back, its pool closed and
+		// the writer rolled back.
+		beside := func(tg m184Target) (r besideRun) {
 			holder, err := pool.Begin(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer func() { _ = holder.Rollback(ctx) }()
 			if _, err := holder.Exec(ctx, tg.writer); err != nil {
 				t.Fatal(err)
 			}
@@ -526,63 +569,95 @@ func (c m184Contract) run(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer mpool.Close()
 			mtx, err := mpool.Begin(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer func() { _ = mtx.Rollback(ctx) }()
 			var pid int
 			if err := mtx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
 				t.Fatal(err)
 			}
+			fctx, stop := context.WithCancel(ctx)
 			done := make(chan error, 1)
+			ended := false
+			defer func() {
+				if !ended {
+					_, _ = pool.Exec(ctx, `SELECT pg_cancel_backend($1)`, pid)
+					select {
+					case <-done:
+					case <-time.After(within):
+						stop()
+						<-done
+					}
+				}
+				stop()
+			}()
 			start := time.Now()
 			go func() {
-				_, err := mtx.Exec(ctx, string(body))
+				_, err := mtx.Exec(fctx, string(body))
 				done <- err
 			}()
-			time.Sleep(1500 * time.Millisecond)
-			var held, waiting []string
-			rows, err := pool.Query(ctx, `SELECT c.relname::text, l.granted FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
-				 WHERE l.pid = $1 AND l.locktype = 'relation' AND l.mode = 'ShareLock' AND c.relname = ANY($2::text[])`, pid, tables)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for rows.Next() {
-				var rel string
-				var granted bool
-				if err := rows.Scan(&rel, &granted); err != nil {
+			for !r.seen {
+				select {
+				case r.ferr = <-done:
+					ended, r.took = true, time.Since(start)
+					return r
+				case <-time.After(5 * time.Millisecond):
+				}
+				if time.Since(start) > within {
+					t.Fatalf("writer on %s: within %s the file neither ended nor was its request for SHARE on %s seen waiting (last sample: held %v, waiting for %v)", tg.table, within, tg.table, r.held, r.waiting)
+				}
+				rows, err := pool.Query(ctx, `SELECT c.relname::text, l.granted FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+					 WHERE l.pid = $1 AND l.locktype = 'relation' AND l.mode = 'ShareLock' AND c.relname = ANY($2::text[])`, pid, tables)
+				if err != nil {
 					t.Fatal(err)
 				}
-				if granted {
-					held = append(held, rel)
-				} else {
-					waiting = append(waiting, rel)
+				r.held, r.waiting = nil, nil
+				for rows.Next() {
+					var rel string
+					var granted bool
+					if err := rows.Scan(&rel, &granted); err != nil {
+						rows.Close()
+						t.Fatal(err)
+					}
+					if granted {
+						r.held = append(r.held, rel)
+					} else {
+						r.waiting = append(r.waiting, rel)
+					}
 				}
+				rows.Close()
+				r.seen = slices.Contains(r.waiting, tg.table)
 			}
-			rows.Close()
-			var ferr error
 			select {
-			case ferr = <-done:
-			case <-time.After(20 * time.Second):
-				t.Fatalf("writer on %s: the file did not give up", tg.table)
+			case r.ferr = <-done:
+				ended, r.took = true, time.Since(start)
+			case <-time.After(within - time.Since(start)):
+				t.Fatalf("writer on %s: the file did not give up within %s (SHARE held while it waited %v, waiting for %v)", tg.table, within, r.held, r.waiting)
 			}
-			took := time.Since(start)
-			_ = mtx.Rollback(ctx)
-			mpool.Close()
-			_ = holder.Rollback(ctx)
+			return r
+		}
+		for k, tg := range c.targets {
+			r := beside(tg)
+			held := slices.Clone(r.held)
 			slices.Sort(held)
 			wantHeld := slices.Clone(tables[:k])
 			slices.Sort(wantHeld)
-			t.Logf("writer on %s: the file failed after %s (%v); SHARE held while waiting %v, waiting for %v", tg.table, took.Round(time.Millisecond), ferr, held, waiting)
+			t.Logf("writer on %s: the file failed after %s (%v); SHARE held while waiting %v, waiting for %v", tg.table, r.took.Round(time.Millisecond), r.ferr, held, r.waiting)
 			var pgErr *pgconn.PgError
-			if !errors.As(ferr, &pgErr) || pgErr.Code != "55P03" {
-				t.Errorf("writer on %s: the file ended with %v, want lock_not_available (55P03)", tg.table, ferr)
+			if !errors.As(r.ferr, &pgErr) || pgErr.Code != "55P03" {
+				t.Errorf("writer on %s: the file ended with %v, want lock_not_available (55P03)", tg.table, r.ferr)
 			}
-			if took < 2900*time.Millisecond || took > 10*time.Second {
-				t.Errorf("writer on %s: the file gave up after %s, want about the 3 s of its lock_timeout", tg.table, took)
+			if r.took < 2900*time.Millisecond || r.took > 10*time.Second {
+				t.Errorf("writer on %s: the file gave up after %s, want about the 3 s of its lock_timeout", tg.table, r.took)
 			}
-			if !slices.Equal(held, wantHeld) || !slices.Equal(waiting, []string{tg.table}) {
-				t.Errorf("writer on %s: the file held SHARE on %v and waited for %v, want held %v (the tables before it) and waiting for %s", tg.table, held, waiting, wantHeld, tg.table)
+			switch {
+			case !r.seen:
+				t.Errorf("writer on %s: the file ended after %s (%v) before its request for SHARE on %s was seen waiting (last sample: held %v, waiting for %v)", tg.table, r.took.Round(time.Millisecond), r.ferr, tg.table, held, r.waiting)
+			case !slices.Equal(held, wantHeld) || !slices.Equal(r.waiting, []string{tg.table}):
+				t.Errorf("writer on %s: the file held SHARE on %v and waited for %v, want held %v (the tables before it) and waiting for %s", tg.table, held, r.waiting, wantHeld, tg.table)
 			}
 			for _, o := range c.targets {
 				if ix := m182Index(t, pool, o.name); ix.found {

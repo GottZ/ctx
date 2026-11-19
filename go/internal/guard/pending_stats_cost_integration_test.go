@@ -122,7 +122,23 @@ type pendingStatsCostDB struct {
 	pickPool *pgxpool.Pool
 	mu       sync.Mutex
 	plans    []string
+
+	// stats is the statistics state the measurements claim (statsFresh,
+	// statsStale, statsNever; "" once rows changed and no state was claimed
+	// since); checkStats proves it before every measurement. modRows counts
+	// the rows the test changed since the last analyze, changeAnalyzes is the
+	// table's analyze count when it last changed rows.
+	stats          string
+	modRows        int64
+	changeAnalyzes int64
 }
+
+// The statistics states of context_blocks a measurement claims (checkStats).
+const (
+	statsFresh = "fresh"          // analysed after the last row the test changed
+	statsStale = "stale"          // analysed, rows changed since, no analyze since
+	statsNever = "never analysed" // no row estimate, no column statistics
+)
 
 func newPendingStatsCostDB(t *testing.T) *pendingStatsCostDB {
 	t.Helper()
@@ -204,10 +220,123 @@ func (d *pendingStatsCostDB) exec(sql string, args ...any) {
 	}
 }
 
+// write runs a statement that changes rows of context_blocks and books them.
+func (d *pendingStatsCostDB) write(sql string, args ...any) {
+	d.t.Helper()
+	tag, err := d.pool.Exec(context.Background(), sql, args...)
+	if err != nil {
+		d.t.Fatalf("%s: %v", sql, err)
+	}
+	d.changed(tag.RowsAffected())
+}
+
+// changed books n rows the test changed in context_blocks: they count
+// towards n_mod_since_analyze, and the statistics state is no longer the
+// one claimed before.
+func (d *pendingStatsCostDB) changed(n int64) {
+	d.t.Helper()
+	if n == 0 {
+		return
+	}
+	d.modRows += n
+	d.changeAnalyzes = d.statsNow().analyzes
+	d.stats = ""
+}
+
 // vacuum sets the visibility map and the row estimate of the table without
 // column statistics; analyze is a VACUUM ANALYZE.
-func (d *pendingStatsCostDB) vacuum()  { d.exec(`VACUUM context_blocks`) }
-func (d *pendingStatsCostDB) analyze() { d.exec(`VACUUM ANALYZE context_blocks`) }
+func (d *pendingStatsCostDB) vacuum() { d.exec(`VACUUM context_blocks`) }
+func (d *pendingStatsCostDB) analyze() {
+	d.exec(`VACUUM ANALYZE context_blocks`)
+	d.modRows, d.stats = 0, statsFresh
+}
+
+// leaveStale claims the statistics of the last analyze, which the rows
+// changed since have outdated.
+func (d *pendingStatsCostDB) leaveStale() { d.stats = statsStale }
+
+// statsReading is the statistics state of context_blocks as the database
+// reports it.
+type statsReading struct {
+	reltuples float64
+	columns   int   // pg_stats rows of the table and its expression indexes, pg_stats_ext rows
+	analyzes  int64 // analyze_count + autoanalyze_count
+	modSince  int64 // n_mod_since_analyze
+}
+
+func (d *pendingStatsCostDB) statsNow() statsReading {
+	d.t.Helper()
+	var s statsReading
+	if err := d.pool.QueryRow(context.Background(), `SELECT c.reltuples::float8,
+			(SELECT count(*) FROM pg_stats WHERE schemaname = 'public' AND tablename IN (
+				SELECT relname FROM pg_class WHERE oid = 'context_blocks'::regclass OR oid IN (
+					SELECT indexrelid FROM pg_index WHERE indrelid = 'context_blocks'::regclass AND indexprs IS NOT NULL)))::int
+			+ (SELECT count(*) FROM pg_stats_ext WHERE schemaname = 'public' AND tablename = 'context_blocks')::int,
+			s.analyze_count + s.autoanalyze_count, s.n_mod_since_analyze
+		FROM pg_class c JOIN pg_stat_user_tables s ON s.relid = c.oid
+		WHERE c.oid = 'context_blocks'::regclass`).Scan(&s.reltuples, &s.columns, &s.analyzes, &s.modSince); err != nil {
+		d.t.Fatal(err)
+	}
+	return s
+}
+
+// statsModWait bounds the wait for n_mod_since_analyze: a backend reports
+// its writes within a second of going idle.
+const statsModWait = 30 * time.Second
+
+// checkStats proves the statistics state the next measurement claims
+// (d.stats) as the database reports it, and returns it for the log:
+//   - fresh: a row estimate and, on a table with rows, column statistics,
+//     from an analyze after the last row the test changed;
+//   - stale: a row estimate and column statistics from an analyze, rows
+//     changed since (n_mod_since_analyze reaches the rows the test changed
+//     since), and no analyze since;
+//   - never analysed: no row estimate, no column statistics.
+//
+// An ANALYZE between the state and the measurement (such as one after an
+// index build) shows here.
+func (d *pendingStatsCostDB) checkStats(what string) string {
+	d.t.Helper()
+	s := d.statsNow()
+	fail := func(why string) {
+		d.t.Helper()
+		d.t.Errorf("%s: the statistics claimed %q are not: %s (reltuples %.0f, %d column statistics, %d analyzes, %d at the last change, n_mod_since_analyze %d, %d rows changed since the last analyze)",
+			what, d.stats, why, s.reltuples, s.columns, s.analyzes, d.changeAnalyzes, s.modSince, d.modRows)
+	}
+	switch d.stats {
+	case statsNever:
+		if s.reltuples >= 0 || s.columns > 0 {
+			fail("a row estimate or column statistics stand")
+		}
+	case statsFresh:
+		switch {
+		case s.reltuples < 0 || (s.reltuples > 0 && s.columns == 0):
+			fail("not analysed")
+		case s.analyzes <= d.changeAnalyzes:
+			fail("rows changed after the last analyze")
+		}
+	case statsStale:
+		switch {
+		case s.reltuples < 0 || s.columns == 0:
+			fail("not analysed")
+		case d.modRows == 0:
+			fail("no row changed since the last analyze")
+		case s.analyzes != d.changeAnalyzes:
+			fail("analysed after the rows changed")
+		default:
+			// n_mod_since_analyze only grows until the next analyze.
+			for deadline := time.Now().Add(statsModWait); s.modSince < d.modRows && time.Now().Before(deadline); s = d.statsNow() {
+				time.Sleep(100 * time.Millisecond)
+			}
+			if s.modSince < d.modRows {
+				fail("n_mod_since_analyze does not count the rows changed since the last analyze")
+			}
+		}
+	default:
+		d.t.Fatalf("%s: the measurement claims no statistics state", what)
+	}
+	return fmt.Sprintf("stats %s (reltuples %.0f, %d column statistics, %d analyzes, n_mod_since_analyze %d)", d.stats, s.reltuples, s.columns, s.analyzes, s.modSince)
+}
 
 // clearStats removes every column and expression statistic of context_blocks
 // and its indexes and the row estimate: the state of a table never analysed.
@@ -236,6 +365,7 @@ func (d *pendingStatsCostDB) clearStats() {
 	for _, c := range cols {
 		d.exec(`SELECT pg_clear_attribute_stats('public', $1::text, $2::text, false)`, c.rel, c.att)
 	}
+	d.stats = statsNever
 }
 
 // expressionStats creates a statistics object on the verdict key and
@@ -244,6 +374,7 @@ func (d *pendingStatsCostDB) clearStats() {
 func (d *pendingStatsCostDB) expressionStats() {
 	d.exec(`CREATE STATISTICS IF NOT EXISTS q360_guard_checked_at ON ((metadata->>'guard_checked_at')) FROM context_blocks`)
 	d.exec(`ANALYZE context_blocks`)
+	d.modRows, d.stats = 0, statsFresh
 }
 
 // seed adds waiting blocks over 100 scopes (pc-0 … pc-99) and, if checked > 0,
@@ -252,7 +383,7 @@ func (d *pendingStatsCostDB) expressionStats() {
 func (d *pendingStatsCostDB) seed(waiting, checked int) {
 	d.t.Helper()
 	if waiting > 0 {
-		d.exec(`INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model)
+		d.write(`INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model)
 			SELECT 'pc', 'pc-w-' || ($1::int + g), 'waiting ' || g, 'pc-' || (($1::int + g) % 100),
 			       CASE WHEN g % 2 = 0 THEN 'knowledge' ELSE 'reference' END,
 			       array_fill(0.01::real, ARRAY[1024])::vector(1024), 'q341'
@@ -260,7 +391,7 @@ func (d *pendingStatsCostDB) seed(waiting, checked int) {
 		d.have += waiting
 	}
 	if checked > 0 {
-		d.exec(`INSERT INTO context_blocks (category, title, content, scope, type_name, metadata)
+		d.write(`INSERT INTO context_blocks (category, title, content, scope, type_name, metadata)
 			SELECT 'pc', 'pc-c-' || g, 'checked ' || g, 'pc-' || (g % 100), 'knowledge',
 			       jsonb_build_object('guard_checked_at', '2026-11-18T00:00:00Z', 'guard_status', 'clean')
 			  FROM generate_series(1, $1::int) g`, checked)
@@ -277,7 +408,7 @@ func (d *pendingStatsCostDB) seed(waiting, checked int) {
 // checked type).
 func (d *pendingStatsCostDB) seedForeign(n int) {
 	d.t.Helper()
-	d.exec(`INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model,
+	d.write(`INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model,
 			lifecycle_state, embedding_stale, created_at, updated_at)
 		SELECT CASE WHEN m = 9 THEN 'index' ELSE 'pc' END,
 		       'pc-f-' || g, 'foreign ' || g, 'pc-' || (g % 100),
@@ -297,7 +428,7 @@ func (d *pendingStatsCostDB) seedForeign(n int) {
 // neither the pick nor the count may walk.
 func (d *pendingStatsCostDB) seedCheckedCorpus(n int) {
 	d.t.Helper()
-	d.exec(`INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model, metadata, created_at, updated_at)
+	d.write(`INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model, metadata, created_at, updated_at)
 		SELECT 'pc', 'pc-k-' || ($1::int + g), 'checked ' || g, 'pc-' || (g % 100), CASE WHEN g % 3 = 0 THEN 'reference' ELSE 'knowledge' END,
 		       array_fill(0.01::real, ARRAY[1024])::vector(1024), 'q360',
 		       jsonb_build_object('guard_checked_at', '2026-11-18T00:00:00Z', 'guard_status', 'clean'),
@@ -314,6 +445,7 @@ type pendingStatsRun struct {
 	n       int
 	plan    string
 	conds   string // "index: condition" of every index node
+	stats   string // the statistics state it ran in (checkStats)
 }
 
 // explain runs a prepared statement once under EXPLAIN (ANALYZE, BUFFERS) as
@@ -321,6 +453,7 @@ type pendingStatsRun struct {
 // the plan's buffers and shape; args are SQL literals.
 func (d *pendingStatsCostDB) explain(stmt, ptypes, args string, generic bool) pendingStatsRun {
 	d.t.Helper()
+	stats := d.checkStats(fmt.Sprintf("explain (generic=%v)", generic))
 	ctx := context.Background()
 	conn, err := d.pool.Acquire(ctx)
 	if err != nil {
@@ -349,7 +482,7 @@ func (d *pendingStatsCostDB) explain(stmt, ptypes, args string, generic bool) pe
 	if err := json.Unmarshal(raw, &out); err != nil || len(out) != 1 {
 		d.t.Fatalf("explain json: %v", err)
 	}
-	r := pendingStatsRun{ms: out[0].ExecutionTime, plan: planNodes(out[0].Plan), conds: strings.Join(indexConds(out[0].Plan), "; ")}
+	r := pendingStatsRun{ms: out[0].ExecutionTime, plan: planNodes(out[0].Plan), conds: strings.Join(indexConds(out[0].Plan), "; "), stats: stats}
 	r.buffers = planBuffers(out[0].Plan)
 	return r
 }
@@ -406,7 +539,8 @@ type pickStep struct {
 type pickMeasure struct {
 	taken int
 	steps []pickStep
-	wal   int64 // WAL bytes written while the run picked (row locks)
+	wal   int64  // WAL bytes written while the run picked (row locks)
+	stats string // the statistics state it ran in (checkStats)
 }
 
 func (m pickMeasure) buffers() int64 {
@@ -442,7 +576,7 @@ func (m pickMeasure) String() string {
 		}
 		parts = append(parts, fmt.Sprintf("step %d: %d rows %d buffers %s [%s]", s.step, s.rows, s.buffers, s.plan, s.conds))
 	}
-	return strings.Join(parts, " | ") + fmt.Sprintf(" | WAL %d bytes", m.wal)
+	return strings.Join(parts, " | ") + fmt.Sprintf(" | WAL %d bytes | %s", m.wal, m.stats)
 }
 
 // pick plan modes: a custom plan, a generic plan, and the plan the driver's
@@ -454,6 +588,7 @@ var pickModes = []string{"custom", "generic", "cached"}
 // for the run (the sixth one in mode cached).
 func (d *pendingStatsCostDB) runPick(mode string) pickMeasure {
 	d.t.Helper()
+	stats := d.checkStats("pick (" + mode + ")")
 	ctx := context.Background()
 	conn, err := d.pickPool.Acquire(ctx)
 	if err != nil {
@@ -492,7 +627,7 @@ func (d *pendingStatsCostDB) runPick(mode string) pickMeasure {
 		if err != nil {
 			d.t.Fatalf("pick (%s): %v", mode, err)
 		}
-		m = pickMeasure{taken: len(blocks)}
+		m = pickMeasure{taken: len(blocks), stats: stats}
 		if err := d.pool.QueryRow(ctx, `SELECT pg_wal_lsn_diff($1::pg_lsn, $2::pg_lsn)::bigint`, lsn1, lsn0).Scan(&m.wal); err != nil {
 			d.t.Fatal(err)
 		}
@@ -623,7 +758,9 @@ func (d *pendingStatsCostDB) hideIndex(name string) func() {
 // withOldIndex builds idx_guard_pending as 113 defines it — the state in which
 // migration 183 keeps it, because idx_guard_pending_type does not stand — and
 // returns the call that drops it again (a store at 182, where it exists,
-// keeps it).
+// keeps it). No ANALYZE: it would turn a stale or never analysed store
+// fresh under the label of the state the measurement claims (checkStats
+// proves the state is kept through the build).
 func (d *pendingStatsCostDB) withOldIndex() func() {
 	d.t.Helper()
 	var had bool
@@ -634,7 +771,6 @@ func (d *pendingStatsCostDB) withOldIndex() func() {
 		return func() {}
 	}
 	d.exec(oldPendingIndexDDL)
-	d.exec(`ANALYZE context_blocks`)
 	return func() { d.exec(`DROP INDEX idx_guard_pending`) }
 }
 
@@ -867,7 +1003,7 @@ func TestGuardPendingCostBesideACheckedCorpus(t *testing.T) {
 		name string
 		set  func()
 	}{
-		{"stale", func() {}},
+		{"stale", d.leaveStale},
 		{"never analysed", d.clearStats},
 		{"fresh", d.analyze},
 		{"fresh with a statistic on the verdict key", d.expressionStats},
@@ -914,7 +1050,9 @@ func TestPendingStatsTimeAtAMillionWaiting(t *testing.T) {
 // the pick of this binary as the schema stands since 183 and beside
 // idx_guard_pending, and the statement before 182 with idx_guard_pending_type
 // hidden, without idx_guard_pending (the order migration 183 refuses) and
-// with it kept, per statistics state and plan mode. Set
+// with it kept, per statistics state (proven before every measurement,
+// checkStats; stale: analysed before the waiting rows changed) and plan
+// mode. Set
 // CTX_GUARD_PICK_MEASURE=1; CTX_GUARD_PICK_FOREIGN / _CORPUS change the
 // sizes.
 func TestGuardPickCostAtTheTargetScale(t *testing.T) {
@@ -949,9 +1087,11 @@ func TestGuardPickCostAtTheTargetScale(t *testing.T) {
 	seed := func(sql string, args ...any) {
 		t.Helper()
 		t0 := time.Now()
-		if _, err := conn.Exec(context.Background(), sql, args...); err != nil {
+		tag, err := conn.Exec(context.Background(), sql, args...)
+		if err != nil {
 			t.Fatal(err)
 		}
+		d.changed(tag.RowsAffected())
 		t.Logf("seed %s", time.Since(t0).Round(time.Second))
 	}
 	_, _ = conn.Exec(context.Background(), `SET work_mem = '256MB'`)
@@ -975,9 +1115,9 @@ func TestGuardPickCostAtTheTargetScale(t *testing.T) {
 	d.analyze()
 	waiting := func(n int) {
 		t.Helper()
-		d.exec(`DELETE FROM context_blocks WHERE title LIKE 'pc-w-%'`)
+		d.write(`DELETE FROM context_blocks WHERE title LIKE 'pc-w-%'`)
 		if n > 0 {
-			d.exec(`INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model, metadata, created_at, updated_at)
+			d.write(`INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model, metadata, created_at, updated_at)
 				SELECT 'pc', 'pc-w-' || g, 'waiting ' || g || ' ' || `+pad+`, 'pc-' || (g % 100),
 				       CASE WHEN g % 2 = 0 THEN 'knowledge' ELSE 'reference' END, '[0.01]'::vector, 'q360',
 				       jsonb_build_object('pad', `+metaPad+`), now() + g * interval '1 millisecond', now() + g * interval '1 millisecond'
@@ -990,12 +1130,14 @@ func TestGuardPickCostAtTheTargetScale(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("store: %.0f rows on %.0f heap pages (%.1f rows per page), foreign %d, checked %d, heap order %s", rows, heapPages, rows/heapPages, foreign, corpus, order)
-	for _, w := range []int{0, 100, 10000} {
+	// W=0 last: its stale cell keeps the statistics taken beside the
+	// 10 000 waiting blocks of the cell before (a drained backlog).
+	for _, w := range []int{100, 10000, 0} {
 		for _, st := range []struct {
 			name string
 			set  func()
 		}{
-			{"stale", func() {}},
+			{"stale", d.leaveStale},
 			{"never", d.clearStats},
 			{"fresh", d.analyze},
 		} {
@@ -1025,7 +1167,7 @@ func TestGuardPickCostAtTheTargetScale(t *testing.T) {
 				kept := d.runOldPick(generic)
 				drop()
 				show()
-				t.Logf("MEASURE|%s|statement before 182 without idx_guard_pending_type|generic=%v|without idx_guard_pending %d buffers %s|idx_guard_pending kept %d buffers %s", label, generic, walk.buffers, walk.plan, kept.buffers, kept.plan)
+				t.Logf("MEASURE|%s|statement before 182 without idx_guard_pending_type|generic=%v|without idx_guard_pending %d buffers %s %s|idx_guard_pending kept %d buffers %s %s", label, generic, walk.buffers, walk.plan, walk.stats, kept.buffers, kept.plan, kept.stats)
 			}
 		}
 	}
@@ -1036,6 +1178,7 @@ func TestGuardPickCostAtTheTargetScale(t *testing.T) {
 // rolled back (the data stays as it was for the next measurement).
 func (d *pendingStatsCostDB) runBuffers(fn func(ctx context.Context, tx pgx.Tx) (int, error)) (int64, int) {
 	d.t.Helper()
+	d.checkStats("guard run")
 	ctx := context.Background()
 	conn, err := d.pickPool.Acquire(ctx)
 	if err != nil {
@@ -1088,11 +1231,11 @@ func TestGuardRunBuffersOverAHundredBlocks(t *testing.T) {
 	d.exec(`ALTER TABLE context_blocks ENABLE TRIGGER USER`)
 	d.exec(`CREATE INDEX idx_embedding_hnsw ON context_blocks USING hnsw ((embedding::halfvec(1024)) halfvec_cosine_ops) WITH (m = 16, ef_construction = 64)`)
 	vec := `(SELECT array_agg(random() - 0.5)::real[] FROM generate_series(1, 1024 + 0 * g))::vector(1024)`
-	d.exec(`INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model, metadata)
+	d.write(`INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model, metadata)
 		SELECT 'pc', 'pc-k-' || g, 'checked ' || g, 'private', 'knowledge', `+vec+`, 'q360',
 		       jsonb_build_object('guard_checked_at', '2026-11-18T00:00:00Z', 'guard_status', 'clean')
 		  FROM generate_series(1, 1000) g`)
-	d.exec(`INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model)
+	d.write(`INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model)
 		SELECT 'pc', 'pc-w-' || g, 'waiting ' || g, 'private', CASE WHEN g % 2 = 0 THEN 'knowledge' ELSE 'reference' END, `+vec+`, 'q360'
 		  FROM generate_series(1, 100) g`)
 	defer d.withOldIndex()()

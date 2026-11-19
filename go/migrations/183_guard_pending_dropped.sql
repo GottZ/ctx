@@ -38,7 +38,8 @@
 --                           its cleanup; this release's cleanup and rollback
 --                           no longer name it (events.cutoverOldIndexNames).
 -- A same-named index with another definition (an object ctx did not build)
--- is left alone with a WARNING.
+-- is left alone with a WARNING; a relation of the name that is not an index
+-- (a view, a table) is no index of ctx and is left alone without a word.
 --
 -- LOCKS. DROP INDEX takes ACCESS EXCLUSIVE on context_blocks, readers
 -- included, and holds it until this file commits (the 181 pattern: a catalog
@@ -50,10 +51,32 @@
 -- every transaction that has touched the table and for every holder of SHARE
 -- UPDATE EXCLUSIVE (VACUUM, ANALYZE, CREATE INDEX CONCURRENTLY); while it
 -- waits, every later statement on the table queues behind it. `SET LOCAL
--- lock_timeout = '3s'` (house pattern) bounds that wait: a holder that stays
--- longer fails the migration with lock_not_available (55P03), the file rolls
--- back with nothing changed and the boot fails loudly; the next boot tries
--- again. With nothing to drop the file takes no lock on context_blocks.
+-- lock_timeout = '3s'` (house pattern) bounds that acquisition, not the time
+-- the lock is held: a holder that stays longer fails the migration with
+-- lock_not_available (55P03), the file rolls back with nothing changed and
+-- the boot fails loudly; the next boot tries again. The first DROP takes the
+-- lock on the table; the later ones find it held. Each DROP also takes its
+-- index, which only a session holding that index alone (pgstatindex,
+-- pg_prewarm) delays, by at most 3 s more per index. A statement on the table
+-- that queues behind the request therefore waits at most those 3 s for the
+-- table, up to 3 s per index dropped, and the drops to the commit
+-- (milliseconds, measured above). With nothing to drop the file takes no
+-- lock on context_blocks.
+--
+-- Which index is ctx's: per name, the definition as PostgreSQL deparses it,
+--
+--     SELECT c.relname, c.relkind, i.indisvalid, pg_get_indexdef(c.oid)
+--       FROM pg_class c
+--       JOIN pg_namespace n ON n.oid = c.relnamespace
+--       LEFT JOIN pg_index i ON i.indexrelid = c.oid
+--      WHERE n.nspname = 'public'
+--        AND c.relname IN ('idx_guard_pending', 'idx_guard_pending_next', 'idx_guard_pending_old');
+--
+-- reads CREATE INDEX <name> ON public.context_blocks USING btree (created_at)
+-- WHERE ((NOT is_archived) AND ((metadata ->> 'guard_checked_at'::text) IS
+-- NULL) AND (<column> IS NOT NULL)), the column embedding, embedding_next or
+-- embedding_old. Drop a name by hand (below) only when it reads so; anything
+-- else under the name is not ctx's and stays.
 --
 -- RUNBOOK (WARNING "idx_guard_pending is kept ..."). In this order, out of
 -- band, readers and writers go on:
@@ -61,11 +84,14 @@
 --      182_guard_pending_type.sql), and check it:
 --        SELECT indisvalid, indisready, pg_get_indexdef(indexrelid)
 --          FROM pg_index WHERE indexrelid = 'idx_guard_pending_type'::regclass;
---   2. then, and only then: DROP INDEX CONCURRENTLY idx_guard_pending;
+--   2. then, and only then, when the check above shows ctx's index:
+--      DROP INDEX CONCURRENTLY idx_guard_pending;
 -- The reverse order leaves the pick's fallback without its index. An
 -- operator who wants no ACCESS EXCLUSIVE at the boot runs both steps before
--- the upgrade (and DROP INDEX CONCURRENTLY IF EXISTS idx_guard_pending_next,
--- idx_guard_pending_old); the file then finds nothing to drop.
+-- the upgrade (and DROP INDEX CONCURRENTLY idx_guard_pending_next; and DROP
+-- INDEX CONCURRENTLY idx_guard_pending_old; — one name per statement, each
+-- only when the check shows ctx's index); the file then finds nothing to
+-- drop.
 --
 -- OLDER BINARY. v5.67.0 (the rollback image; its guard, re-embed and
 -- schema-contract code is that of v5.65.0, which the tests ran on this
@@ -74,7 +100,8 @@
 -- re-embed migration in verifying — during a rolling deploy an instance of it
 -- builds the twin again after this file dropped it, and this release never
 -- drops it again; once no older instance runs, drop it before the swap
--- (DROP INDEX CONCURRENTLY IF EXISTS idx_guard_pending_next), or it stays as
+-- (DROP INDEX CONCURRENTLY idx_guard_pending_next, when the check above
+-- shows ctx's index), or it stays as
 -- a second copy of the old index on the serving column. Its re-embed cutover
 -- still renames idx_guard_pending, which no longer exists: its
 -- confirm (the swap), its rollback of a swap and its cleanup fail with nothing
@@ -90,7 +117,12 @@
 -- WAY BACK: CREATE INDEX CONCURRENTLY idx_guard_pending ON context_blocks
 -- (created_at) WHERE NOT is_archived AND (metadata->>'guard_checked_at') IS
 -- NULL AND embedding IS NOT NULL; then DELETE FROM _migrations WHERE version =
--- 183.
+-- 183. When the check above finds the name taken: ctx's index, valid —
+-- nothing to build (183 kept it); ctx's index with indisvalid false (an
+-- aborted build) — drop it first with DROP INDEX CONCURRENTLY
+-- idx_guard_pending; anything else is renamed (ALTER INDEX / ALTER VIEW ...
+-- RENAME TO another name). No IF NOT EXISTS: it would pass
+-- over an INVALID index or a foreign object of the name.
 --
 -- Index change only, no table or column: the test.sh T07 counts stay. The
 -- schema-contract manifest loses idx_guard_pending and records migration_max

@@ -80,6 +80,61 @@ func m186IndexFiles(t *testing.T, pool *pgxpool.Pool) map[string]uint32 {
 	return out
 }
 
+// m186Constraints is every not-null constraint row of context_blocks with
+// the columns that tell two of them apart, and pg_attribute.attnotnull.
+func m186Constraints(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	var s string
+	if err := pool.QueryRow(context.Background(), `
+		SELECT string_agg(format('%s(%s) validated=%s local=%s inhcount=%s noinherit=%s enforced=%s deferrable=%s attnotnull=%s',
+		         c.conname, a.attname, c.convalidated, c.conislocal, c.coninhcount, c.connoinherit, c.conenforced, c.condeferrable, a.attnotnull),
+		       '; ' ORDER BY c.conname)
+		  FROM pg_constraint c
+		  JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+		 WHERE c.conrelid = 'context_blocks'::regclass AND c.contype = 'n'`).Scan(&s); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// m186HeaderSQL is the SQL block of the file header that follows the line
+// containing marker — the lines indented by five blanks after "--" — split
+// into its statements.
+func m186HeaderSQL(t *testing.T, body []byte, marker string) []string {
+	t.Helper()
+	lines := strings.Split(string(body), "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.HasPrefix(l, "--") && strings.Contains(l, marker) {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("the header has no line with %q", marker)
+	}
+	var sql []string
+	for _, l := range lines[start+1:] {
+		code := strings.HasPrefix(l, "--     ")
+		if !code && len(sql) > 0 {
+			break
+		}
+		if code {
+			sql = append(sql, strings.TrimPrefix(l, "--     "))
+		}
+	}
+	var out []string
+	for _, s := range strings.Split(strings.Join(sql, "\n"), ";") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("no statement follows %q in the header", marker)
+	}
+	return out
+}
+
 func m186Is23502(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23502"
@@ -253,6 +308,39 @@ func TestMigration186(t *testing.T) {
 		run := m18xApply(t, dsn, pool, body, "context_blocks", 0, m186Read, m186Write)
 		if run.err != nil || len(run.modes) != 0 || len(run.warnings)+len(run.notices) != 0 {
 			t.Errorf("over SET NOT NULL: err %v, locks %v, warnings %v, notices %v", run.err, run.modes, run.warnings, run.notices)
+		}
+	})
+
+	// The runbook of the header for the time before the upgrade, statement by
+	// statement as the header writes it, on schema 185 with rows lacking
+	// either value: the file then finds nothing to do, and the constraints
+	// are those of the inline path.
+	t.Run("runbook_before_upgrade", func(t *testing.T) {
+		pool, dsn := testdb.SetupTestDBUpToWithDSN(t, 185)
+		m186Seed(t, pool)
+		for _, s := range m186HeaderSQL(t, body, "RUNBOOK BEFORE THE UPGRADE") {
+			if _, err := pool.Exec(ctx, s); err != nil {
+				t.Fatalf("runbook before the upgrade, %q: %v", s, err)
+			}
+		}
+		run := m18xApply(t, dsn, pool, body, "context_blocks", 0, m186Read, m186Write)
+		if run.err != nil || len(run.modes) != 0 || len(run.warnings)+len(run.notices) != 0 {
+			t.Errorf("after the runbook: err %v, locks %v, warnings %v, notices %v", run.err, run.modes, run.warnings, run.notices)
+		}
+		inline := testdb.SetupTestDBUpTo(t, 185)
+		m186Seed(t, inline)
+		if err := store.RunMigrationsUpTo(ctx, inline, 186); err != nil {
+			t.Fatalf("inline path: %v", err)
+		}
+		if got, want := m186Constraints(t, pool), m186Constraints(t, inline); got != want {
+			t.Errorf("not-null constraints after the runbook\n  %s\nafter the inline path\n  %s", got, want)
+		}
+		var nulls int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_blocks WHERE created_at IS NULL OR updated_at IS NULL`).Scan(&nulls); err != nil {
+			t.Fatal(err)
+		}
+		if nulls != 0 {
+			t.Errorf("%d rows without a value after the runbook", nulls)
 		}
 	})
 

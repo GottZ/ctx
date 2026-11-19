@@ -337,10 +337,45 @@ type m185CycleRun struct {
 	fileTook, delTook  time.Duration
 }
 
+const (
+	// m185CycleWithin bounds each wait of m185Cycle for a lock state; the
+	// states show within milliseconds, and the file's lock_timeout (3 s) ends
+	// its wait for context_oauth_codes. m185CycleEnd bounds the wait for both
+	// sides to end once the holder committed.
+	m185CycleWithin = 10 * time.Second
+	m185CycleEnd    = 30 * time.Second
+	// m185DeleteApp names the delete's connections in pg_stat_activity.
+	m185DeleteApp = "m185-cycle-delete"
+)
+
+// m185Lock is a lock of the file or the delete in m185Cycle: a relation lock
+// on one of the four tables, or any request that waits.
+type m185Lock struct {
+	who, rel, mode string
+	granted        bool
+}
+
+func (l m185Lock) String() string {
+	if l.granted {
+		return l.who + " holds " + l.mode + " on " + l.rel
+	}
+	return l.who + " waits for " + l.mode + " on " + l.rel
+}
+
+func m185Has(locks []m185Lock, who, rel, mode string, granted bool) bool {
+	return slices.Contains(locks, m185Lock{who, rel, mode, granted})
+}
+
 // m185Cycle runs the file and a delete against each other: a third
-// connection holds context_oauth_codes, so the file takes context_block_grants
-// (SHARE) and waits; then the delete runs and locks the tables in its
-// trigger order; then the holder commits.
+// connection holds context_oauth_codes; once pg_locks shows the file holding
+// context_block_grants (SHARE) and waiting for context_oauth_codes, the
+// delete runs and locks the tables in its trigger order; once pg_locks shows
+// it waiting for a table the file holds or waits for (a request for
+// context_oauth_codes queues behind the file's), the holder commits. A state not
+// reached within m185CycleWithin, or a side that ends before it, fails the
+// test with the locks pg_locks showed. On every path both sides are
+// cancelled (their contexts) and the holder rolled back before the test
+// waits for them and closes their pools.
 func m185Cycle(t *testing.T, pool *pgxpool.Pool, dsn string, body []byte, del func(ctx context.Context, conn *pgxpool.Pool) error) m185CycleRun {
 	t.Helper()
 	ctx := context.Background()
@@ -357,44 +392,132 @@ func m185Cycle(t *testing.T, pool *pgxpool.Pool, dsn string, body []byte, del fu
 		t.Fatal(err)
 	}
 	defer mpool.Close()
-	dpool, err := pgxpool.New(ctx, dsn)
+	dcfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dcfg.ConnConfig.RuntimeParams["application_name"] = m185DeleteApp
+	dpool, err := pgxpool.NewWithConfig(ctx, dcfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer dpool.Close()
-	var run m185CycleRun
-	fileDone := make(chan struct{})
-	go func() {
-		defer close(fileDone)
-		t0 := time.Now()
-		tx, err := mpool.Begin(ctx)
-		if err == nil {
-			_, err = tx.Exec(ctx, string(body))
-			if err == nil {
-				err = tx.Commit(ctx)
-			} else {
-				_ = tx.Rollback(ctx)
+	tx, err := mpool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var filePid int
+	if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&filePid); err != nil {
+		t.Fatal(err)
+	}
+	wctx, cancel := context.WithCancel(ctx)
+	var started []chan struct{}
+	// Deferred last, so it runs first on every path: both sides cancelled,
+	// the holder rolled back, both waited for; then the file's transaction
+	// and the pools.
+	defer func() {
+		cancel()
+		_ = holder.Rollback(ctx)
+		for _, ch := range started {
+			<-ch
+		}
+	}()
+	tables := make([]string, len(m185Targets))
+	for i, tg := range m185Targets {
+		tables[i] = tg.table
+	}
+	locks := func() []m185Lock {
+		rows, err := pool.Query(ctx, `
+			SELECT CASE WHEN l.pid = $1 THEN 'file' ELSE 'delete' END, COALESCE(l.relation::regclass::text, l.locktype), l.mode, l.granted
+			  FROM pg_locks l LEFT JOIN pg_stat_activity a ON a.pid = l.pid
+			 WHERE (l.pid = $1 OR (a.application_name = $2 AND a.datname = current_database()))
+			   AND (NOT l.granted OR (l.locktype = 'relation' AND l.relation::regclass::text = ANY($3::text[])))
+			 ORDER BY 1, 2, 3`, filePid, m185DeleteApp, tables)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []m185Lock
+		for rows.Next() {
+			var l m185Lock
+			if err := rows.Scan(&l.who, &l.rel, &l.mode, &l.granted); err != nil {
+				t.Fatal(err)
 			}
+			out = append(out, l)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	closed := func(ch chan struct{}) bool {
+		select {
+		case <-ch:
+			return true
+		default:
+			return false
+		}
+	}
+	var run m185CycleRun
+	var delDone chan struct{}
+	await := func(state string, reached func([]m185Lock) bool) {
+		deadline := time.Now().Add(m185CycleWithin)
+		for {
+			ls := locks()
+			switch {
+			case reached(ls):
+				return
+			case closed(started[0]):
+				t.Fatalf("the file ended with %v before %s; locks %v", run.fileErr, state, ls)
+			case delDone != nil && closed(delDone):
+				t.Fatalf("the delete ended with %v before %s; locks %v", run.deleteErr, state, ls)
+			case time.Now().After(deadline):
+				t.Fatalf("%s not seen within %s; locks %v", state, m185CycleWithin, ls)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	started = append(started, make(chan struct{}))
+	go func(done chan struct{}) {
+		defer close(done)
+		t0 := time.Now()
+		_, err := tx.Exec(wctx, string(body))
+		if err == nil {
+			err = tx.Commit(wctx)
+		} else {
+			_ = tx.Rollback(ctx)
 		}
 		run.fileErr, run.fileTook = err, time.Since(t0)
-	}()
-	time.Sleep(300 * time.Millisecond)
-	delDone := make(chan struct{})
+	}(started[0])
+	grants, codes := m185Targets[0].table, m185Targets[1].table
+	await("the file holding SHARE on "+grants+" and waiting for "+codes, func(ls []m185Lock) bool {
+		return m185Has(ls, "file", grants, "ShareLock", true) && m185Has(ls, "file", codes, "ShareLock", false)
+	})
+	delDone = make(chan struct{})
+	started = append(started, delDone)
 	go func() {
 		defer close(delDone)
 		t0 := time.Now()
-		run.deleteErr = del(ctx, dpool)
+		run.deleteErr = del(wctx, dpool)
 		run.delTook = time.Since(t0)
 	}()
-	time.Sleep(400 * time.Millisecond)
+	await("the delete waiting for a table the file holds or waits for", func(ls []m185Lock) bool {
+		for _, l := range ls {
+			if l.who == "delete" && !l.granted && (m185Has(ls, "file", l.rel, "ShareLock", true) || m185Has(ls, "file", l.rel, "ShareLock", false)) {
+				return true
+			}
+		}
+		return false
+	})
 	if err := holder.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, ch := range []chan struct{}{fileDone, delDone} {
+	for _, ch := range started {
 		select {
 		case <-ch:
-		case <-time.After(30 * time.Second):
-			t.Fatal("the file or the delete did not end")
+		case <-time.After(m185CycleEnd):
+			t.Fatalf("the file or the delete did not end within %s; locks %v", m185CycleEnd, locks())
 		}
 	}
 	return run
@@ -421,20 +544,28 @@ func m185Code(err error) string {
 // releases (grants before codes, write log and chats; re-created here) both
 // commit. In the order of a fresh chain, where the write log is reached
 // first, PostgreSQL detects the cycle and aborts one side (40P01); the other
-// commits, and the aborted one changed nothing.
+// commits, and the aborted one changed nothing. A delete that reaches
+// context_oauth_codes first queues behind the file's request for it and holds
+// nothing the file takes later: both commit (codes_first, re-created here; a
+// fresh chain gives that order too when the oids of its trigger names sort so).
 func TestMigration185LockOrderAgainstDeletes(t *testing.T) {
 	body, err := migrations.FS.ReadFile("185_api_key_fk_lookup_indexes.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
 	fileOrder := []string{"context_block_grants", "context_oauth_codes", "context_write_log", "context_chat_sessions"}
-	// reversed reports whether the delete reaches a table the file takes
-	// after context_block_grants before it reaches context_block_grants.
-	reversed := func(order []string) bool {
-		g := slices.Index(order, "context_block_grants")
-		for i, tbl := range order {
-			if i < g && slices.Index(fileOrder, tbl) > 0 {
-				return true
+	// closes reports whether the delete closes a cycle with the file. The
+	// delete stops at the first table the file holds (context_block_grants)
+	// or waits for (context_oauth_codes); the cycle closes when it holds a
+	// table the file takes after those by then.
+	closes := func(order []string) bool {
+		held := false
+		for _, tbl := range order {
+			switch i := slices.Index(fileOrder, tbl); {
+			case i == 0 || i == 1:
+				return held
+			case i > 1:
+				held = true
 			}
 		}
 		return false
@@ -442,6 +573,7 @@ func TestMigration185LockOrderAgainstDeletes(t *testing.T) {
 	type deleteCase struct {
 		name, parent string
 		reference    [][2]string // the foreign keys re-created in the order of the grown store
+		codesFirst   [][2]string // re-created so the delete reaches context_oauth_codes first (nil: it has no key there)
 		setup        func(t *testing.T, pool *pgxpool.Pool) (del func(ctx context.Context, conn *pgxpool.Pool) error, gone func() bool)
 	}
 	keyDelete := func(t *testing.T, pool *pgxpool.Pool) (func(context.Context, *pgxpool.Pool) error, func() bool) {
@@ -488,23 +620,36 @@ func TestMigration185LockOrderAgainstDeletes(t *testing.T) {
 		{"key_delete", "context_api_keys", [][2]string{
 			{"context_block_grants", "granted_by"}, {"context_oauth_codes", "api_key_id"},
 			{"context_write_log", "api_key_id"}, {"context_chat_sessions", "created_by"},
+		}, [][2]string{
+			{"context_oauth_codes", "api_key_id"}, {"context_write_log", "api_key_id"},
+			{"context_chat_sessions", "created_by"}, {"context_block_grants", "granted_by"},
 		}, keyDelete},
 		{"block_delete", "context_blocks", [][2]string{
 			{"context_block_grants", "block_id"}, {"context_write_log", "block_id"}, {"context_write_log", "matched_block_id"},
-		}, blockDelete},
+		}, nil, blockDelete},
 	} {
-		for _, order := range []string{"fresh_chain", "grown_store"} {
+		orders := []string{"fresh_chain", "grown_store"}
+		if dc.codesFirst != nil {
+			orders = append(orders, "codes_first")
+		}
+		for _, order := range orders {
 			t.Run(dc.name+"_"+order, func(t *testing.T) {
 				pool, dsn := testdb.SetupTestDBUpToWithDSN(t, 184)
 				m185Seed(t, pool)
-				if order == "grown_store" {
+				switch order {
+				case "grown_store":
 					m185Recreate(t, pool, dc.parent, dc.reference)
+				case "codes_first":
+					m185Recreate(t, pool, dc.parent, dc.codesFirst)
 				}
 				got := m185DeleteOrder(t, pool, dc.parent)
-				cycle := reversed(got)
+				cycle := closes(got)
 				t.Logf("a delete on %s reaches %v (cycle with the file's order %v: %v)", dc.parent, got, fileOrder, cycle)
 				if order == "grown_store" && cycle {
 					t.Fatalf("fixture: the re-created keys did not give the order of the grown store: %v", got)
+				}
+				if order == "codes_first" && (len(got) == 0 || got[0] != "context_oauth_codes") {
+					t.Fatalf("fixture: the re-created keys did not reach context_oauth_codes first: %v", got)
 				}
 				del, gone := dc.setup(t, pool)
 				run := m185Cycle(t, pool, dsn, body, del)
