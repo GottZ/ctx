@@ -243,9 +243,10 @@ func (u upsertStatement) execDeclaring(ctx context.Context, tx pgx.Tx, decl Supe
 }
 
 // execDeclared is execDeclaring after its lock pair: tgt is the target
-// lockSupersedesPair locked in this transaction — execDeclaring's own call, or
-// the lock pass of a block batch (UpsertBlocks), which takes every item's
-// locks before its first write.
+// lockSupersedesPair locked in this transaction, as the transaction sees it
+// now — execDeclaring's own call, or the lock pass of a block batch
+// (UpsertBlocks), which takes every item's locks before its first write and
+// reads the target again before the item's write (rereadSupersedesTarget).
 func (u upsertStatement) execDeclared(ctx context.Context, tx pgx.Tx, decl SupersedesDeclaration, tgt supersedesTarget) (*Block, error) {
 	scope := u.scope
 	if err := supersedesTargetAllowed(tgt, decl.Types); err != nil {
@@ -345,6 +346,29 @@ func lockSupersedesPair(ctx context.Context, tx pgx.Tx, category, title, scope, 
 		return supersedesTarget{}, "", ErrSupersedesTarget
 	}
 	return tgt, sourceID, nil
+}
+
+// rereadSupersedesTarget reads a target lockSupersedesPair locked earlier in
+// this transaction again — its type and chunk status as this transaction's
+// own writes since then left them. The lock is held, so no other transaction
+// changed it; a block batch (UpsertBlocks) runs its lock pass before its first
+// write, and an item written before a declaring one may have upserted the
+// target's identity with another type. The target cannot have left the scope
+// or been archived meanwhile (an upsert does neither); if it has, it is
+// refused as every id the write cannot name is.
+func rereadSupersedesTarget(ctx context.Context, tx pgx.Tx, tgt supersedesTarget, scope string) (supersedesTarget, error) {
+	err := tx.QueryRow(ctx,
+		`SELECT type_name, lifecycle_state = 'chunk' OR (source_id IS NOT NULL AND chunk_index IS NOT NULL)
+		   FROM context_blocks
+		  WHERE id = $1::uuid AND scope = $2 AND NOT is_archived`,
+		tgt.id, scope).Scan(&tgt.typeName, &tgt.chunk)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return supersedesTarget{}, ErrSupersedesTarget
+	}
+	if err != nil {
+		return supersedesTarget{}, fmt.Errorf("store: supersedes: reread target: %w", err)
+	}
+	return tgt, nil
 }
 
 // supersedesTargetAllowed refuses targets whose policy keeps them out of the

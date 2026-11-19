@@ -597,3 +597,55 @@ func TestWriteBookingCarriesTheBookingTime(t *testing.T) {
 		t.Errorf("booking row is dated %v after the start of its transaction, want at least the %v the transaction waited before it booked — the row carries the transaction's start", got, wait)
 	}
 }
+
+// TestWriteBudgetCountsTheWindowWhenItCounts: a batch counts the key's window
+// back from the moment its count runs, not from the start of its transaction
+// (review of #389). The batch waits for the key's budget lock, which a second
+// connection holds; while it waits, that connection books one write dated 57 s
+// back and holds on for 4 s more. When the batch counts, the booking is at
+// least 61 s old — outside the window — and a limit of 1 leaves room for the
+// batch's one write. Counted from the transaction's start, the booking was 57 s
+// old or less and the batch was refused.
+func TestWriteBudgetCountsTheWindowWhenItCounts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+	key, _, err := store.CreateApiKey(ctx, pool, "ub-window", "ub-w", nil, store.DefaultTenantID)
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	budget := store.WriteBudget{APIKeyID: key.ID, Limit: 1}
+
+	gate, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = gate.Rollback(ctx) }()
+	// The budget lock, taken the way a stage takes it (nothing reserved).
+	if err := store.ReserveWriteIntents(ctx, gate, budget, 0); err != nil {
+		t.Fatalf("take the budget lock: %v", err)
+	}
+	actor := ubActor(t, dsn, "ub-window-batch", nil)
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.UpsertBlocks(ctx, actor, []store.BatchUpsert{ubItem("ub-w", "a")}, key.ID, nil, &budget)
+		done <- err
+	}()
+	ubWaitForLockWait(t, pool, "ub-window-batch")
+	// Booked after the batch's transaction began, so inside the window as
+	// that transaction's start sees it.
+	if _, err := gate.Exec(ctx,
+		`INSERT INTO context_access_log (api_key_id, action, metadata, created_at)
+		 VALUES ($1::uuid, 'write', '{}'::jsonb, clock_timestamp() - interval '57 seconds')`, key.ID); err != nil {
+		t.Fatalf("backdated booking: %v", err)
+	}
+	time.Sleep(4 * time.Second)
+	if err := gate.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := ubAwait(t, "ub-window-batch", done); err != nil {
+		t.Fatalf("batch after the wait: %v; want it written — the one booking of the window aged out while it waited", err)
+	}
+}

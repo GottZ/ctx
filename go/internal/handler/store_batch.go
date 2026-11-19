@@ -4,9 +4,10 @@
 // of /api/store and both arms of the MCP `store` tool), the batch runs its own
 // gates over the items as a whole, and the writes land through
 // store.UpsertBlocks in ONE transaction. Any refusal — of one item or of the
-// batch — refuses the batch before or inside that transaction, names the item
-// and the reason, and leaves nothing written: no block row, no write-log row,
-// no budget spent.
+// batch — refuses the batch before or inside that transaction and leaves
+// nothing written: no block row, no write-log row, no budget spent. A refusal
+// of one item names the item (batchItemPrefix); one of the batch as a whole —
+// its shape, its write budget — names none.
 package handler
 
 import (
@@ -244,11 +245,13 @@ func storeBatchCanonicalItems(p *storeBatchPlan) []store.CanonicalWrite {
 const confirmStoreBatchPrefix = "confirmed store_batch not executed, nothing of it is written, the stage token is consumed: "
 
 // confirmBatchReject re-validates a staged batch on the un-consumed row, item
-// by item: the item's scope against the key's CURRENT writable scopes (D1-M1)
-// and the I7 claim gates against the registry of now (confirmClaimReject).
+// by item: the I7 claim gates against the registry of now
+// (confirmClaimReject); each item's scope was re-checked against the key's
+// CURRENT writable scopes before, with the row's (D1-M1, confirmScopeReject).
 // nil for every other op, and for a batch that still passes. The first
-// refusing item answers; the stage token survives, as for a single card.
-func confirmBatchReject(ctx context.Context, blocktypes *blocktype.Registry, ar *auth.AuthResult, cw store.CanonicalWrite) *confirmOutcome {
+// refusing item answers, named; the stage token survives, as for a single
+// card.
+func confirmBatchReject(ctx context.Context, blocktypes *blocktype.Registry, cw store.CanonicalWrite) *confirmOutcome {
 	if cw.Op != store.OpStoreBatch {
 		return nil
 	}
@@ -256,13 +259,9 @@ func confirmBatchReject(ctx context.Context, blocktypes *blocktype.Registry, ar 
 		// A card without items was not written by this binary.
 		return &confirmOutcome{Kind: confirmMiss}
 	}
-	writable := writableBlockScopes(ar)
 	for i, it := range cw.Items {
 		if it.Op != "store" {
 			return &confirmOutcome{Kind: confirmMiss}
-		}
-		if !contains(writable, it.Scope) {
-			return &confirmOutcome{Kind: confirmScopeRejected, Op: cw.Op, Scope: it.Scope}
 		}
 		if rej := confirmClaimReject(ctx, blocktypes, it); rej != nil {
 			return &confirmOutcome{Kind: confirmClaimRejected, Op: cw.Op, Reject: rej.prefixed(batchItemPrefix(i))}

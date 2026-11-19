@@ -525,13 +525,14 @@ func (m IdenticalContent) Changed() []string {
 //     with type_source='manual'.
 //
 // NULL in the stored row compares like the empty value the upsert writes.
-// metadata is not modified; the detector runs on a copy.
-func IdenticalContentMatch(ctx context.Context, pool *pgxpool.Pool, content, scope, category, title string,
+// metadata is not modified; the detector runs on a copy. q is the pool, or the
+// one read-only transaction a staged MCP batch reads all its items in.
+func IdenticalContentMatch(ctx context.Context, q pgxdb.Rower, content, scope, category, title string,
 	tags []string, metadata map[string]any, sens SensitivityWrite, typeName string,
 ) (IdenticalContent, error) {
 	cols, args := identicalContentCompare(content, scope, category, title, tags, metadata, sens, typeName)
 	var m IdenticalContent
-	err := pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT id, `+cols+`
 		   FROM context_blocks
 		  WHERE `+identicalContentWhere+`
@@ -1305,13 +1306,19 @@ func CheckRateLimit(ctx context.Context, pool *pgxpool.Pool, apiKeyID string) (i
 // CheckRateLimitByAction returns the number of operations with the given action
 // in the last 60 seconds for a given API key. q is the pool, or the
 // transaction of a block batch that counts under its budget lock (WriteBudget).
+//
+// The 60 seconds end when this statement starts (statement_timestamp), not
+// when its transaction did (now()): a batch counts after it waited for the
+// budget lock and its scope and row locks, and a booking that left the window
+// during that wait no longer counts (review of #389). On the pool the
+// statement is its own transaction, and the two differ by microseconds.
 func CheckRateLimitByAction(ctx context.Context, q pgxdb.Rower, apiKeyID, action string) (int, error) {
 	var count int
 	err := q.QueryRow(ctx,
 		`SELECT count(*)::int FROM context_access_log
 		 WHERE api_key_id = $1::uuid
 		   AND action = $2
-		   AND created_at > now() - INTERVAL '60 seconds'`,
+		   AND created_at > statement_timestamp() - INTERVAL '60 seconds'`,
 		apiKeyID, action,
 	).Scan(&count)
 	if err != nil {

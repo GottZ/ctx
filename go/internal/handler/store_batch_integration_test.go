@@ -481,20 +481,37 @@ func TestStoreBatchStaged(t *testing.T) {
 		}
 	})
 
-	t.Run("a scope that is no longer writable refuses the confirm and keeps the card", func(t *testing.T) {
-		k := f.key(t, true, "sb-extra")
-		hash := stage(t, k, sbItems(sbItem("sb-sc-1", "home"), sbItem("sb-sc-2", "extra", "scope", "sb-extra")))
-		if _, err := f.pool.Exec(ctx, `UPDATE context_api_keys SET write_scopes = '{}' WHERE id = $1`, k.id); err != nil {
-			t.Fatal(err)
-		}
-		k = f.auth(t, k.id, k.plain) // the confirm reads the rights of now
-		before := f.counts(t, k)
-		a := f.mcpCall(t, k, "confirm", map[string]any{"payload_hash": hash})
-		if !a.IsError || a.Text != confirmScopeRejectMsg("sb-extra") {
-			t.Fatalf("confirm after the shrink: %+v", a)
-		}
-		if after := f.counts(t, k); after != before {
-			t.Fatalf("refused confirm changed the store or spent the card: before %+v after %+v", before, after)
+	// The refusal names the item, as every other refusal of a batch does, on
+	// both confirm surfaces (review of #389) — whether the lost scope is
+	// another item's (sb-extra sorts after private) or the one the card's row
+	// binds, the smallest of the items' scopes (aa-sb-extra sorts before it).
+	t.Run("a scope that is no longer writable refuses the confirm, names the item and keeps the card", func(t *testing.T) {
+		for _, extra := range []string{"sb-extra", "aa-sb-extra"} {
+			t.Run(extra, func(t *testing.T) {
+				k := f.key(t, true, extra)
+				hash := stage(t, k, sbItems(sbItem("sb-sc-1-"+extra, "home"), sbItem("sb-sc-2-"+extra, "extra", "scope", extra)))
+				if _, err := f.pool.Exec(ctx, `UPDATE context_api_keys SET write_scopes = '{}' WHERE id = $1`, k.id); err != nil {
+					t.Fatal(err)
+				}
+				k = f.auth(t, k.id, k.plain) // the confirm reads the rights of now
+				want := "items[1]: " + confirmScopeRejectMsg(extra)
+				before := f.counts(t, k)
+				a := f.mcpCall(t, k, "confirm", map[string]any{"payload_hash": hash})
+				if !a.IsError || a.Text != want {
+					t.Errorf("MCP confirm after the shrink: %+v; want %q", a, want)
+				}
+				raw, _ := json.Marshal(map[string]any{"payload_hash": hash})
+				req := httptest.NewRequest(http.MethodPost, "/api/confirm", bytes.NewReader(raw)).WithContext(k.ctx)
+				rec := httptest.NewRecorder()
+				NewConfirmHandler(f.pool, f.reg).HandleConfirm(rec, req)
+				var resp map[string]any
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || rec.Code != http.StatusForbidden || resp["error"] != want {
+					t.Errorf("HTTP confirm after the shrink: status %d body %s; want 403 and %q", rec.Code, rec.Body.String(), want)
+				}
+				if after := f.counts(t, k); after != before {
+					t.Fatalf("refused confirm changed the store or spent the card: before %+v after %+v", before, after)
+				}
+			})
 		}
 	})
 
@@ -549,6 +566,91 @@ func TestStoreBatchStaged(t *testing.T) {
 		after := f.counts(t, k)
 		if after.blocks != before.blocks || after.links != before.links || after.openStages != before.openStages-1 {
 			t.Fatalf("before %+v after %+v; want nothing written and the card consumed", before, after)
+		}
+	})
+}
+
+// TestStoreBatchSupersedesTargetAsTheBatchLeftIt (review of #389): an item that
+// declares a supersedes is checked against its target as the items written
+// before it in the batch left that target. Item 0 retypes the target to
+// checkpoint, a type outside the dream loop, and is written first (its title
+// sorts first); item 1 declares to supersede that target. A single store
+// refuses such a declaration; the batch checked the type its lock pass had
+// read before item 0's write and committed the link.
+func TestStoreBatchSupersedesTargetAsTheBatchLeftIt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := newSBFixture(t)
+	ctx := context.Background()
+	retypeThenDeclare := func(target, tag string) map[string]any {
+		return sbItems(sbItem("sb-rt-a-"+tag, "target body", "type", "checkpoint"),
+			sbItem("sb-rt-b-"+tag, "correction", "supersedes", target))
+	}
+	wantRefusal := func(target string) string {
+		return "items[1]: supersedes: block " + target + " cannot be superseded"
+	}
+
+	t.Run("direct, REST and MCP", func(t *testing.T) {
+		target := f.seed(t, "sb-rt-a-direct", "target body")
+		k := f.key(t, false)
+		before := f.counts(t, k)
+		body := retypeThenDeclare(target, "direct")
+		status, resp := f.rest(t, k, body)
+		if status != http.StatusUnprocessableEntity || resp["code"] != "supersedes_not_allowed" ||
+			!strings.HasPrefix(fmt.Sprint(resp["error"]), wantRefusal(target)) {
+			t.Errorf("REST: status %d body %v; want 422 supersedes_not_allowed for items[1]", status, resp)
+		}
+		a := f.mcpCall(t, k, "store_batch", body)
+		if !a.IsError || a.Code != "supersedes_not_allowed" || !strings.HasPrefix(a.Text, wantRefusal(target)) {
+			t.Errorf("MCP: %+v; want supersedes_not_allowed for items[1]", a)
+		}
+		if after := f.counts(t, k); after != before {
+			t.Fatalf("the batch changed the store: before %+v after %+v", before, after)
+		}
+	})
+
+	// The card must not promise what the confirm refuses: the stage checks the
+	// declaration against the batch's own writes too.
+	t.Run("staged", func(t *testing.T) {
+		target := f.seed(t, "sb-rt-a-staged", "target body")
+		k := f.key(t, true)
+		before := f.counts(t, k)
+		a := f.mcpCall(t, k, "store_batch", retypeThenDeclare(target, "staged"))
+		if !a.IsError || a.Code != "supersedes_not_allowed" || !strings.HasPrefix(a.Text, wantRefusal(target)) {
+			t.Fatalf("stage: %+v; want the refusal and no card", a)
+		}
+		if after := f.counts(t, k); after != before {
+			t.Fatalf("refused stage changed the store, staged a card or spent budget: before %+v after %+v", before, after)
+		}
+	})
+
+	// The other write order — declare first, retype after (the target's title
+	// sorts after the declaring item's) — is admitted, as the same two writes
+	// are admitted as two single stores in that order: a block that is
+	// superseded may change its type afterwards.
+	t.Run("declare, then retype", func(t *testing.T) {
+		target := f.seed(t, "sb-ru-z-target", "target body")
+		k := f.key(t, false)
+		status, resp := f.rest(t, k, sbItems(sbItem("sb-ru-z-target", "target body", "type", "checkpoint"),
+			sbItem("sb-ru-a-new", "correction", "supersedes", target)))
+		if status != http.StatusOK {
+			t.Fatalf("batch: status %d body %v", status, resp)
+		}
+		single := f.seed(t, "sb-ru-z-single", "target body")
+		if a := f.mcpCall(t, k, "store", sbItem("sb-ru-a-single", "correction", "supersedes", single)); a.IsError {
+			t.Fatalf("single declare: %+v", a)
+		}
+		if a := f.mcpCall(t, k, "store", sbItem("sb-ru-z-single", "target body", "type", "checkpoint")); a.IsError {
+			t.Fatalf("single retype of the superseded block: %+v", a)
+		}
+		var types []string
+		if err := f.pool.QueryRow(ctx, `SELECT array_agg(type_name ORDER BY id) FROM context_blocks WHERE id IN ($1, $2)`,
+			target, single).Scan(&types); err != nil {
+			t.Fatal(err)
+		}
+		if len(types) != 2 || types[0] != "checkpoint" || types[1] != "checkpoint" {
+			t.Fatalf("types %v; want both targets retyped", types)
 		}
 	})
 }

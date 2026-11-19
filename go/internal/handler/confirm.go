@@ -113,7 +113,7 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 	case confirmMiss:
 		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": confirmNotFoundMsg})
 	case confirmScopeRejected:
-		writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": confirmScopeRejectMsg(out.Scope)})
+		writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "error": out.scopeRejectMsg()})
 	case confirmClaimRejected, confirmExecRejected:
 		// The class the stage gates (claim) or the direct update (#227
 		// identity collision, 409 constraint) would have answered — same

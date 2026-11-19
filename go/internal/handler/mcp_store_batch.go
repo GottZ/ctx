@@ -29,8 +29,8 @@ type storeBatchInput struct {
 // storeBatchToolDescription is the tool's description, example included: the
 // one place a model reads how the call is shaped before it makes one.
 const storeBatchToolDescription = "Save or update several knowledge blocks at once, all or none: every item is " +
-	"written in one transaction, and a refusal of any item (or of the batch) writes nothing and names the " +
-	"item as items[i]. Each item takes the store tool's arguments and upserts on (category, title, scope). " +
+	"written in one transaction, and a refusal of any item or of the batch writes nothing; an item's refusal " +
+	"names the item as items[i]. Each item takes the store tool's arguments and upserts on (category, title, scope). " +
 	"At most writes.batch_max_items items (default 100); each written item counts as one write of the key's " +
 	"write budget. Example: {\"items\": [{\"category\": \"decisions\", \"title\": \"Cache layer\", \"content\": " +
 	"\"We cache …\"}, {\"category\": \"decisions\", \"title\": \"Decision index\", \"content\": \"- Cache layer\"}]}"
@@ -117,32 +117,28 @@ func renderStoreBatch(results []storeBatchItem) string {
 
 // stageBatchSupersedesCheck checks the supersedes declarations of a batch
 // before it is staged, so a card does not promise a declaration its confirm
-// would refuse on today's rows: one declaring item as a staged store checks
-// it (store.CheckSupersedesDeclarable, no write); two or more through a
-// rolled-back run of the whole batch (store.CheckUpsertBlocks), because two
-// declarations can refuse each other — one target named twice, two blocks
-// declaring each other — which a check of one at a time does not see. nil =
+// would refuse on today's rows: a batch of one item that declares is checked
+// as a staged store (store.CheckSupersedesDeclarable, no write); any other
+// batch with a declaration through a rolled-back run of the whole batch
+// (store.CheckUpsertBlocks), because its items can refuse a declaration
+// together — one target named twice, two blocks declaring each other, an item
+// written before the declaring one that retypes its target (review of #389)
+// — which a check of one declaration against today's rows does not see. nil =
 // admissible; otherwise the tool's answer.
 func stageBatchSupersedesCheck(ctx context.Context, cfg MCPConfig, set *blocktype.Set, ar *auth.AuthResult,
 	plan *storeBatchPlan, reqID string,
 ) *mcp.CallToolResult {
-	var declaring []int
-	for i, it := range plan.items {
-		if it.Supersedes != "" {
-			declaring = append(declaring, i)
-		}
-	}
+	declares := slices.ContainsFunc(plan.items, func(it storeRequest) bool { return it.Supersedes != "" })
 	var err error
-	switch len(declaring) {
-	case 0:
+	switch {
+	case !declares:
 		return nil
-	case 1:
-		i := declaring[0]
-		it := plan.items[i]
-		err = store.CheckSupersedesDeclarable(ctx, cfg.Pool, it.Category, it.Title, plan.gated[i].WriteScope,
+	case len(plan.items) == 1:
+		it := plan.items[0]
+		err = store.CheckSupersedesDeclarable(ctx, cfg.Pool, it.Category, it.Title, plan.gated[0].WriteScope,
 			store.SupersedesDeclaration{TargetID: it.Supersedes, APIKeyID: ar.ApiKeyID, Types: set})
 		if rej := supersedesReject(err); rej != nil {
-			return errResultReject(rej.prefixed(batchItemPrefix(i)))
+			return errResultReject(rej.prefixed(batchItemPrefix(0)))
 		}
 	default:
 		err = store.CheckUpsertBlocks(ctx, cfg.Pool, plan.upserts(), ar.ApiKeyID, set)
@@ -196,25 +192,38 @@ func storeBatchItemLine(it storeBatchItem) string {
 // tool's identical-content check, IdenticalContentMatch, on the values the
 // gates decided): per item the id of the block that already holds what the
 // item asks for, "" for an item that would write — and a declaring item
-// always would. Nothing is locked: it decides only whether a card is staged
-// at all and what the stage answer says; the confirm decides each item again
-// on its locked row.
+// always would. Every item is read in ONE read-only transaction on one
+// snapshot (REPEATABLE READ), so the items it finds unchanged were unchanged
+// at the same moment: read one by one, each read on a snapshot of its own, a
+// batch committed between two reads could make an earlier item match before
+// it and a later one after it, and the all-unchanged answer would name a
+// state the store never held (review of #389). Nothing is locked — the single
+// store's stage reads its block the same way, at one moment: the reads decide
+// only whether a card is staged at all and what the stage answer says; the
+// confirm decides each item again on its locked row.
 func stageBatchUnchanged(ctx context.Context, cfg MCPConfig, plan *storeBatchPlan, reqID string) ([]string, *writeReject) {
 	ids := make([]string, len(plan.items))
-	for i, it := range plan.items {
-		if it.Supersedes != "" {
-			continue
-		}
-		res := plan.gated[i]
-		match, err := store.IdenticalContentMatch(ctx, cfg.Pool, it.Content, res.WriteScope, it.Category, it.Title,
-			it.Tags, res.Metadata, res.Sens, it.Type)
-		if err != nil {
-			slog.Error("mcp: stage batch hash noop check error", "error", err, "index", i, "request_id", reqID)
-			return nil, classInternal.reject("Internal server error")
-		}
-		if match.Unchanged() {
-			ids[i] = match.ID
-		}
+	err := pgxdb.WriteOpts(ctx, cfg.Pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		pgxdb.At("mcp: stage batch identical-content check"), func(tx pgx.Tx) error {
+			for i, it := range plan.items {
+				if it.Supersedes != "" {
+					continue
+				}
+				res := plan.gated[i]
+				match, err := store.IdenticalContentMatch(ctx, tx, it.Content, res.WriteScope, it.Category, it.Title,
+					it.Tags, res.Metadata, res.Sens, it.Type)
+				if err != nil {
+					return fmt.Errorf("items[%d]: %w", i, err)
+				}
+				if match.Unchanged() {
+					ids[i] = match.ID
+				}
+			}
+			return nil
+		})
+	if err != nil {
+		slog.Error("mcp: stage batch hash noop check error", "error", err, "request_id", reqID)
+		return nil, classInternal.reject("Internal server error")
 	}
 	return ids, nil
 }

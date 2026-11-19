@@ -387,15 +387,20 @@ transaction, or none is.
 
 Each item runs the gate chain of `store` and upserts on (category, title, scope); an
 item may name its own `scope` and `supersedes`. Any refusal — of one item or of the
-batch — writes nothing and answers `isError: true` with the refusal's code and text
-behind `items[<i>]: `, the item's position: a gate of the item (as `store` answers
-it), `constraint` for two items with the same category, title and scope,
-`supersedes_conflict` for two items that declare to supersede the same block, and, decided
-in the transaction on the block as it is then, `provenance_protected`, `constraint`
-(an explicit type onto a comment or an issue) and the supersedes codes — the items
-written before it in the transaction are rolled back. A batch without items answers
-`missing_fields`; more items than `writes.batch_max_items` (default 100, `0` switches
-batches off) `size_cap`. An item whose write would change nothing (the `store` tool's
+batch — writes nothing and answers `isError: true` with the refusal's code. A refusal
+of one item names it, its text behind the prefix `items[<i>]:` (the item's position):
+a gate of the item (as `store` answers it), `constraint` for two items with the same
+category, title and scope, `supersedes_conflict` for two items that declare to
+supersede the same block, and, decided in the transaction on the block as it is then,
+`provenance_protected`, `constraint` (an explicit type onto a comment or an issue) and
+the supersedes codes — the items written before it in the transaction are rolled back.
+The transaction writes the items in (scope, category, title) order, and an item that
+declares a `supersedes` is checked against its target as the items written before it
+left that target (an item may retype it). A refusal of the batch as a whole names no
+item: a batch without items answers `missing_fields` and more items than
+`writes.batch_max_items` (default 100, `0` switches batches off) `size_cap`, each with
+a text that opens with `items:`; a batch over the write budget (below) answers
+`rate_limit` with `Rate limit exceeded: …`. An item whose write would change nothing (the `store` tool's
 identical-content check) is not written and costs nothing; the batch decides that in its
 transaction on the block while it holds the block's lock, and keeps the lock to its
 commit, so no other write lands between the decision and the commit. Every other item
@@ -404,7 +409,8 @@ that does not fit into what is left of the current 60-second window is refused w
 with `rate_limit`; a batch of only unchanged items is neither counted nor refused. The
 count and the booking happen inside the batch's transaction under a lock of the key, so
 two batches of one key — on any ctxd instance — cannot both spend the same rest of the
-window. Single `store` calls do not take that lock; how far they and a batch can
+window; the count measures the window back from the moment it runs, after the batch
+waited for its locks. Single `store` calls do not take that lock; how far they and a batch can
 exceed the limit together is in [api.md](api.md#endpoints) (`POST /api/store/batch`,
 *Budget*).
 **Answer:**
@@ -420,14 +426,20 @@ For a `confirm_writes` key the batch is **staged as one card**: one `payload_has
 over every item — an item unchanged at stage time included, named in the stage answer
 as `items[<i>]: identical content exists now (id: <uuid>) — the confirm leaves it as it
 is if it still is` — and one write intent per item of the card charged in the
-transaction that stages it. A batch of which every item is unchanged at stage time
+transaction that stages it. A batch of which every item is unchanged at stage time —
+every item read on one snapshot, so all of them were unchanged at the same moment —
 stages nothing, costs nothing and is answered at once like a direct batch. A staged
-batch whose declarations would refuse each other at the confirm (two blocks declaring
-each other) is refused at stage time. [`confirm`](#confirm) then runs every item of the
+batch of more than one item that declares a `supersedes` is run at stage time as the
+confirm would run it, then rolled back: whatever its transaction would refuse on
+today's blocks — two blocks declaring each other, a target another item of the batch
+retypes out of the dream loop, a derivative in the way — refuses the stage, and no
+card is issued; a batch without a declaration meets such refusals at the confirm.
+[`confirm`](#confirm) then runs every item of the
 card in one transaction, deciding on each locked block whether it is still unchanged
 (then it is left as it is, its intent spent). Before it spends the hash, the confirm re-checks each
 item's scope and claims against the key and the registry of that moment — a refusal
-there keeps the card; a refusal of the transaction itself (a supersedes target that
+there names the item (`items[<k>]:` in front of the confirm's wording) and keeps the
+card; a refusal of the transaction itself (a supersedes target that
 changed, a derivative in the way) spends it, writes nothing, and answers behind
 `confirmed store_batch not executed, nothing of it is written, the stage token is consumed: `.
 REST `POST /api/store/batch` runs the same core ([api.md](api.md#endpoints)).

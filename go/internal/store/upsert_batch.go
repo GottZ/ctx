@@ -398,13 +398,20 @@ func ReserveWriteIntents(ctx context.Context, tx pgx.Tx, b WriteBudget, n int) e
 
 // writeBatchItem runs one item's write after the lock pass took its locks:
 // UpsertBlock's transaction half, or UpsertBlockSupersedes' for an item that
-// declares a supersedes.
+// declares a supersedes. A declaring item checks its target as the items
+// written before it left that target (rereadSupersedesTarget): an earlier item
+// of the batch may have upserted the target's identity with another type, and
+// the lock pass read it before that write (review of #389).
 func writeBatchItem(ctx context.Context, tx pgx.Tx, it BatchUpsert, h batchHold, apiKeyID string, types *blocktype.Set) (*Block, error) {
 	u := prepareUpsert(it.Category, it.Title, it.Content, it.Tags, it.Metadata, it.Scope, it.ScopeExplicit, it.Sens, it.TypeName)
 	if it.Supersedes == "" {
 		return u.execHeld(ctx, tx, h.hadRow)
 	}
-	return u.execDeclared(ctx, tx, SupersedesDeclaration{TargetID: it.Supersedes, APIKeyID: apiKeyID, Types: types}, h.target)
+	tgt, err := rereadSupersedesTarget(ctx, tx, h.target, it.Scope)
+	if err != nil {
+		return nil, err
+	}
+	return u.execDeclared(ctx, tx, SupersedesDeclaration{TargetID: it.Supersedes, APIKeyID: apiKeyID, Types: types}, tgt)
 }
 
 // batchLockOrder is the order UpsertBlocks writes the items in: by

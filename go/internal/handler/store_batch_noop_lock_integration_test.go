@@ -25,9 +25,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -396,6 +398,71 @@ func TestStoreBatchNoopStaged(t *testing.T) {
 			t.Fatalf("an all-unchanged stage changed the store: before %+v after %+v", before, after)
 		}
 	})
+}
+
+// sbBeforeRead is a query tracer that runs between once, right before the
+// stage's identical-content read of the item titled title: a write another
+// client commits between two item reads of one stage.
+type sbBeforeRead struct {
+	title   string
+	between func()
+	ran     atomic.Bool
+}
+
+func (h *sbBeforeRead) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(d.SQL, "content_hash = encode(digest($1, 'sha256'), 'hex')") && strings.Contains(d.SQL, "LIMIT 1") &&
+		len(d.Args) > 3 && d.Args[3] == h.title && h.ran.CompareAndSwap(false, true) {
+		h.between()
+	}
+	return ctx
+}
+
+func (h *sbBeforeRead) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// TestStoreBatchStageUnchangedOnOneSnapshot (review of #389): a staged batch of
+// which every item is unchanged stages nothing and is answered at once, and
+// that answer must describe one moment of the store. Read item by item, each
+// read its own snapshot, a batch Q committed between two of the reads made
+// item 0 match before Q and item 1 after it: A=a1, B=b0; Q writes A=a0, B=b1;
+// the stage asks for A=a1, B=b1 — a pair the store never held — and was
+// answered "No change needed" with no card.
+func TestStoreBatchStageUnchangedOnOneSnapshot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := newSBFixture(t)
+	ctx := context.Background()
+	a := f.seed(t, "sb-os-a", "a1")
+	f.seed(t, "sb-os-b", "b0")
+	var qErr error
+	hook := &sbBeforeRead{title: "sb-os-b", between: func() {
+		_, qErr = store.UpsertBlocks(ctx, f.pool, []store.BatchUpsert{
+			sbStoreItem("sb-os-a", "a0"), sbStoreItem("sb-os-b", "b1"),
+		}, "sb-os-q", nil, nil)
+	}}
+	cfg, err := pgxpool.ParseConfig(f.pool.Config().ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = hook
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(traced.Close)
+	on := &sbFixture{pool: traced, cfg: f.cfg, reg: f.reg,
+		mcp: NewMCPHandler(MCPConfig{Pool: traced, Cfg: f.cfg, Blocktypes: f.reg})}
+
+	k := f.key(t, true)
+	staged := on.mcpCall(t, k, "store_batch", sbItems(sbItem("sb-os-a", "a1"), sbItem("sb-os-b", "b1")))
+	if !hook.ran.Load() || qErr != nil {
+		t.Fatalf("Q between the two reads: ran %v, error %v", hook.ran.Load(), qErr)
+	}
+	if !staged.IsError || !strings.HasPrefix(staged.Text, "STAGED — NOT saved yet.") ||
+		!strings.Contains(staged.Text, "items[0]: identical content exists now (id: "+a+")") {
+		t.Fatalf("stage across Q's commit: %+v; want a card, items[0] named identical — "+
+			"A matched before Q and B after it, never both at once", staged)
+	}
 }
 
 // restNoFatal is rest without t (it runs in a goroutine).

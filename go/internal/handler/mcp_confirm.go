@@ -213,7 +213,7 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 		case confirmMiss:
 			return errResult(confirmNotFoundMsg), nil, nil
 		case confirmScopeRejected:
-			return errResult(confirmScopeRejectMsg(out.Scope)), nil, nil
+			return errResult(out.scopeRejectMsg()), nil, nil
 		case confirmClaimRejected, confirmExecRejected:
 			// Same code the stage gates (claim) or the direct update (#227
 			// identity collision) carry on this surface
