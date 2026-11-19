@@ -10,6 +10,7 @@
   import { BlockDeleteModel } from './delete.svelte'
   import { canEdit, editInitialFromDetail, type BlockDraft } from '../../lib/blocks/edit'
   import { sensitivityBadge } from '../../lib/blocks/sensitivity'
+  import TrustMarks from '../../lib/blocks/TrustMarks.svelte'
   import { session } from '../../lib/auth.svelte'
   import EmptyState from '../../lib/ui/EmptyState.svelte'
 
@@ -186,6 +187,7 @@
                 </span>
                 <span class="meta">
                   <span class="badge {sb.tone}" title="sensitivity">{sb.label}</span>
+                  <TrustMarks block={r} />
                   {r.category} · {r.scope}{r.tags.length > 0 ? ` · ${r.tags.join(', ')}` : ''}
                 </span>
                 <span class="preview">{r.content_preview}</span>

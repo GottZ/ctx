@@ -15,6 +15,7 @@
   import { toApiError } from '../../lib/api'
   import { guardList, guardResolve, type GuardListItem, type GuardSkip } from '../../lib/api/guard'
   import { getBlock, type BlockDetail } from '../../lib/api/blocks'
+  import TrustMarks from '../../lib/blocks/TrustMarks.svelte'
   import ConfirmDialog from '../../lib/components/ConfirmDialog.svelte'
   import ConnState from '../../lib/ui/ConnState.svelte'
   import Table from '../../lib/ui/Table.svelte'
@@ -257,10 +258,12 @@
               <div class="pair">
                 <div class="pane">
                   <h4>flagged: {pair.left?.title ?? item.title}</h4>
+                  {#if pair.left}<TrustMarks block={pair.left} />{/if}
                   <pre>{pair.left?.content ?? '—'}</pre>
                 </div>
                 <div class="pane">
                   <h4>matched: {pair.right?.title ?? item.matched_title ?? 'not visible in your scopes'}</h4>
+                  {#if pair.right}<TrustMarks block={pair.right} />{/if}
                   <pre>{pair.right?.content ?? '—'}</pre>
                 </div>
               </div>

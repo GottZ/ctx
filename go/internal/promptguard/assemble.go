@@ -91,6 +91,12 @@ var ErrRuleOverBudget = errors.New("promptguard: budget below the unshortenable 
 // shape every existing prompt builder already uses between its sections.
 const partSeparator = "\n\n"
 
+// PartSeparatorRunes is what Assemble charges between two live parts — for a
+// caller that sizes its parts BEFORE the pass so that the pass has nothing to
+// cut (llm's raised synthesis source cut, issue #208). ASCII, so len is the
+// rune count.
+const PartSeparatorRunes = len(partSeparator)
+
 // truncMarker keeps a shortening VISIBLE to the model — it must know it is
 // reading an excerpt. The same constant as the synthesis and classify paths,
 // and the same one internal/derived reads back as a negative list (M-W4a).

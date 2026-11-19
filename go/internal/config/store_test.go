@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -425,4 +426,81 @@ func TestSetRequestScopeHook(t *testing.T) {
 	if got := s.SnapshotForRequest(context.Background()); got != base {
 		t.Errorf("after SetRequestScopeHook(nil), SnapshotForRequest must fail safe to base, got %p", got)
 	}
+}
+
+// TestStoreSnapshotForTenantResolved: the second result says whether the
+// overlay answered for the scope (fresh build, cache hit, or the base handed
+// back as a tenant's inherited generation) or the base answered in its place
+// (no overlay, reserved or empty scope, a failed or declined build). It comes
+// from the call that returned the generation: with a Replace inside a failed
+// build the call answers with the base it started on and still says so,
+// although the store holds another base by then. The generation is the one
+// SnapshotForTenant returns.
+func TestStoreSnapshotForTenantResolved(t *testing.T) {
+	ctx := context.Background()
+	base := generation(t, "base")
+	tcfg := generation(t, "tenant")
+	broken := errors.New("probe: build failed")
+	check := func(t *testing.T, s *Store, scope string, want *Config, wantResolved bool) {
+		t.Helper()
+		got, resolved := s.SnapshotForTenantResolved(ctx, scope)
+		if got != want || resolved != wantResolved {
+			t.Errorf("SnapshotForTenantResolved(%q) = %s, %v; want %s, %v", scope, brandOf(got)[0], resolved, brandOf(want)[0], wantResolved)
+		}
+	}
+
+	t.Run("no_overlay", func(t *testing.T) {
+		check(t, NewStore(base), "acme", base, false)
+	})
+	t.Run("reserved_and_empty_scope", func(t *testing.T) {
+		s := NewStore(base)
+		s.overlay = func(context.Context, *Config, string) (*Config, error) { return tcfg, nil }
+		for _, scope := range []string{"_global", "_orphan", ""} {
+			check(t, s, scope, base, false)
+		}
+	})
+	t.Run("built_then_cached", func(t *testing.T) {
+		s := NewStore(base)
+		cur := tcfg
+		var calls int32
+		s.overlay = countingOverlay(&calls, &cur)
+		check(t, s, "acme", tcfg, true)
+		check(t, s, "acme", tcfg, true)
+		if n := atomic.LoadInt32(&calls); n != 1 {
+			t.Errorf("overlay calls = %d, want 1 (the second answer is the cache)", n)
+		}
+	})
+	t.Run("overlay_answers_with_the_base", func(t *testing.T) {
+		s := NewStore(base)
+		s.overlay = func(_ context.Context, b *Config, _ string) (*Config, error) { return b, nil }
+		check(t, s, "acme", base, true)
+		check(t, s, "acme", base, true)
+	})
+	t.Run("failed_build", func(t *testing.T) {
+		s := NewStore(base)
+		s.overlay = func(context.Context, *Config, string) (*Config, error) { return nil, broken }
+		check(t, s, "acme", base, false)
+	})
+	t.Run("declined_build", func(t *testing.T) {
+		s := NewStore(base)
+		s.overlay = func(context.Context, *Config, string) (*Config, error) { return nil, nil }
+		check(t, s, "acme", base, false)
+	})
+	t.Run("replace_during_a_failed_build", func(t *testing.T) {
+		s := NewStore(base)
+		next := generation(t, "base2")
+		s.overlay = func(context.Context, *Config, string) (*Config, error) {
+			if err := s.Replace(next); err != nil {
+				t.Errorf("replace: %v", err)
+			}
+			return nil, broken
+		}
+		check(t, s, "acme", base, false)
+		if s.Snapshot() != next {
+			t.Fatal("premise: the store holds the replaced base")
+		}
+		if got := s.SnapshotForTenant(ctx, "acme"); got != next {
+			t.Errorf("SnapshotForTenant after the replace = %s, want base2 (the fallback of that call)", brandOf(got)[0])
+		}
+	})
 }

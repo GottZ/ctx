@@ -2287,97 +2287,245 @@ func lockBackfillPick(ctx context.Context, tx pgx.Tx, cl store.PendingClasses) (
 // backfillArmPoll is how often the dedicated embed-backfill arm re-reads its
 // config while embed_backfill.interval is 0 (arm off), so a hot re-enable
 // takes effect without a restart (contract.recheck_interval convention), and
-// the longest slice of its idle wait, so a hot change of the interval itself
-// takes effect within one slice. A var, not a const, for the dreamYieldWait
-// reason: the arm tests shorten it.
+// the longest sleep between two of its turns, so a hot change of the interval
+// itself takes effect within one slice. It also bounds how old the arm's
+// tenant list may be at a pick (backfillArmPace). A var, not a const, for the
+// dreamYieldWait reason: the arm tests shorten it.
 var backfillArmPoll = 15 * time.Second
+
+// backfillArmErrorWait is the arm's wait after a pick that ended in an error
+// rather than a memo (a database or admission error): not a tenant's state,
+// so the whole arm waits, as it always has.
+const backfillArmErrorWait = 10 * time.Second
+
+// backfillArmPace is the state of the embed-backfill arm between its turns:
+// the per-tenant pacing of issue #228 and the tenant list it works from.
+//
+// A tenant whose pick came back empty (backfillIdle) or with a wire-class
+// memo (backfillFailed) is held back for embed_backfill.interval; every other
+// tenant stays due, and the arm sleeps only when no tenant is. Before, the
+// arm slept the interval after such a pick whatever the other tenants had
+// pending: with N tenants of which one had a backlog, that tenant got one
+// block per round and a round cost (N-1) intervals.
+//
+// Empty picks are held in rounds: a round starts with the first turn that
+// begins at least one interval after the current round began, and an empty
+// pick holds its tenant until the next round. The idle tenants so fall due
+// together, and a tenant whose backlog ran dry is looked at again at most one
+// interval later. A wire-class memo holds its tenant for one interval from
+// the end of that pick, so that tenant's backend is probed once per interval
+// and never sooner. When the failed chain reached a shared backend row
+// (backfillFailedShared), the backend every tenant may route to is suspect,
+// and the whole arm waits one interval, as it did for every wire memo
+// before: a shared backend that is down is probed once per interval, not
+// once per tenant.
+//
+// The tenant list (backgroundTenants: one query plus one per tenant) is read
+// again before a pick when it is older than min(interval, backfillArmPoll),
+// not before every pick: while one tenant's backlog drains, a read per block
+// would cost 1+N queries per embed. A pick so works on a list at most that
+// old (plus the yield to interactive demand before it, as before); a tenant
+// that joins, is suspended or gains a scope is seen within that bound.
+type backfillArmPace struct {
+	// tenants is the list the turns work from; nil before the first turn.
+	tenants  []backgroundTenant
+	listedAt time.Time
+	// cursor is where the next turn looks for a due tenant, so the due
+	// tenants are served round-robin.
+	cursor int
+	// round is when the current round began; zero before the first turn.
+	round time.Time
+	// held maps a tenant (backgroundTenant.scope) to its hold; a tenant
+	// without an entry is due.
+	held map[string]backfillArmHold
+	// sharedSince is the end of the last pick whose chain failed on a shared
+	// backend row; no tenant is due for one interval from it.
+	sharedSince time.Time
+}
+
+// backfillArmHold is one tenant's hold: since is the round of an empty pick,
+// or the end of a pick that left a wire-class memo (failed).
+type backfillArmHold struct {
+	since  time.Time
+	failed bool
+}
+
+func newBackfillArmPace() *backfillArmPace {
+	return &backfillArmPace{held: map[string]backfillArmHold{}}
+}
+
+// begin opens a turn at now: a new round when the current one began at least
+// one interval ago.
+func (p *backfillArmPace) begin(now time.Time, iv time.Duration) {
+	if p.round.IsZero() || !now.Before(p.round.Add(iv)) {
+		p.round = now
+	}
+}
+
+// setTenants takes a freshly read tenant list (the tenant-less single pass
+// when it is empty) and drops the holds of tenants no longer on it
+// (suspended, deleted, or keyed by another first scope), so the hold map
+// stays about as large as the list.
+func (p *backfillArmPace) setTenants(tenants []backgroundTenant, now time.Time) {
+	if len(tenants) == 0 {
+		tenants = []backgroundTenant{{scope: store.GlobalScope}}
+	}
+	p.tenants, p.listedAt = tenants, now
+	if len(p.held) <= len(tenants) {
+		return
+	}
+	listed := make(map[string]struct{}, len(tenants))
+	for _, bt := range tenants {
+		listed[bt.scope] = struct{}{}
+	}
+	for scope := range p.held {
+		if _, ok := listed[scope]; !ok {
+			delete(p.held, scope)
+		}
+	}
+}
+
+// due reports whether the tenant may be picked at now under the interval iv:
+// no shared-backend hold runs, and the tenant has no hold or one that is an
+// interval old.
+func (p *backfillArmPace) due(scope string, now time.Time, iv time.Duration) bool {
+	if now.Before(p.sharedSince.Add(iv)) {
+		return false
+	}
+	h, ok := p.held[scope]
+	return !ok || !now.Before(h.since.Add(iv))
+}
+
+// nextDue is the index of the first due tenant of the list from the cursor
+// on; false when none is due.
+func (p *backfillArmPace) nextDue(now time.Time, iv time.Duration) (int, bool) {
+	n := len(p.tenants)
+	for k := range n {
+		i := (p.cursor + k) % n
+		if p.due(p.tenants[i].scope, now, iv) {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// record applies the outcome of one pick of the tenant, at now (the end of
+// the pick).
+func (p *backfillArmPace) record(scope string, outcome backfillOutcome, now time.Time) {
+	switch outcome {
+	case backfillEmbedded, backfillParked:
+		// The tenant stays due: more may be pending. A parked block is
+		// progress too — it is out of the pick and says nothing about the
+		// backend (review finding m3: waiting the interval after each
+		// oversize memo cost 1000 such blocks ≈ 4 h at the 15 s default).
+		delete(p.held, scope)
+	case backfillFailedShared:
+		p.sharedSince = now
+	case backfillFailed:
+		p.held[scope] = backfillArmHold{since: now, failed: true}
+	default: // backfillIdle
+		p.held[scope] = backfillArmHold{since: p.round}
+	}
+}
+
+// untilDue is how long the arm sleeps when no tenant is due: until the end of
+// a shared-backend hold, else until the next round (for an empty pick's hold)
+// or the end of the first wire-class hold, at most backfillArmPoll (so a hot
+// interval change is seen within one slice), and 0 when a listed tenant has
+// no hold.
+func (p *backfillArmPace) untilDue(now time.Time, iv time.Duration) time.Duration {
+	if left := p.sharedSince.Add(iv).Sub(now); left > 0 {
+		return min(left, backfillArmPoll)
+	}
+	wait := backfillArmPoll
+	for _, bt := range p.tenants {
+		h, ok := p.held[bt.scope]
+		switch {
+		case !ok:
+			return 0
+		case h.failed:
+			wait = min(wait, h.since.Add(iv).Sub(now))
+		default:
+			wait = min(wait, p.round.Add(iv).Sub(now))
+		}
+	}
+	return max(wait, 0)
+}
 
 // runEmbedBackfillLoop is the dedicated background arm for pending
 // embeddings (tracking issue: force-push.me/damienmoon/ctx/issues/1). It is the same work as the call at the
 // top of runDreamLoop — backfillOneEmbedding under the iterated tenant's
-// snapshot and router — on its own cadence: a pick that embedded a block or
-// parked one (oversize memo) loops at once, an empty pick or a wire-class
-// memo waits embed_backfill.interval, an error waits 10 s. Under
-// !enforcing() it yields to interactive demand exactly like the dream loop
-// (P-Fallback); under Enforcing the wire call waits at its target in its
-// background lease. Interval <= 0 turns the arm off; it then polls the
-// config every backfillArmPoll so a hot enable needs no restart, and the
-// idle wait itself re-reads the interval every backfillArmPoll, so a hot
-// change applies within one slice.
+// snapshot and router — on its own cadence, paced per tenant
+// (backfillArmPace, backfillArmTurn): a pick that embedded a block or parked
+// one (oversize memo) leaves its tenant due, an empty pick or a wire-class
+// memo holds its tenant for embed_backfill.interval while the other tenants
+// are served, and the arm sleeps only when no tenant is due; an error waits
+// backfillArmErrorWait. Under !enforcing() it yields to interactive demand
+// exactly like the dream loop (P-Fallback); under Enforcing the wire call
+// waits at its target in its background lease. Interval <= 0 turns the arm
+// off; it then polls the config every backfillArmPoll so a hot enable needs
+// no restart. Each turn re-reads the interval, and no sleep is longer than
+// backfillArmPoll, so a hot change of the interval (an hour-long interval
+// lowered to 15 s used to keep the arm asleep for the rest of the hour)
+// applies within one slice.
 func (s *Scheduler) runEmbedBackfillLoop(ctx context.Context) {
 	slog.Info("scheduler: embed backfill arm started", "poll", backfillArmPoll)
-	var tenantCursor uint64
-	wait := func(d time.Duration) bool {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-time.After(d):
-			return true
-		}
-	}
-	// waitIdle waits out embed_backfill.interval from now in slices of at
-	// most backfillArmPoll and re-reads the key between slices, so a hot
-	// change takes effect within one slice instead of after the interval that
-	// was current when the wait began (an hour-long interval lowered to 15 s
-	// used to keep the arm asleep for the rest of the hour). Read through the
-	// iterated tenant's snapshot like the loop head; the key is global-only,
-	// so every tenant sees the same value. A switch to 0 (arm off) ends the
-	// wait; the loop head then takes over with its off-poll.
-	waitIdle := func(tenant string) bool {
-		start := time.Now()
-		for {
-			iv := s.cfg.SnapshotForTenant(ctx, tenant).EmbedBackfill.Interval
-			if iv <= 0 {
-				return true
-			}
-			left := time.Until(start.Add(iv))
-			if left <= 0 {
-				return true
-			}
-			if !wait(min(left, backfillArmPoll)) {
-				return false
-			}
-		}
-	}
+	pace := newBackfillArmPace()
 	for ctx.Err() == nil {
-		tenants := s.backgroundTenantsFn(ctx)
-		if len(tenants) == 0 {
-			tenants = []backgroundTenant{{scope: store.GlobalScope}}
+		// The key is global-only, so the base snapshot carries the value
+		// every tenant's snapshot carries.
+		iv := s.cfg.SnapshotForTenant(ctx, store.GlobalScope).EmbedBackfill.Interval
+		sleep := backfillArmPoll
+		if iv > 0 {
+			sleep = s.backfillArmTurn(ctx, pace, iv)
 		}
-		bt := tenants[tenantCursor%uint64(len(tenants))]
-		tenantCursor++
-		cfg := s.cfg.SnapshotForTenant(ctx, bt.scope)
+		if sleep > 0 && !sleepUnlessDone(ctx, sleep) {
+			return
+		}
+	}
+}
 
-		if cfg.EmbedBackfill.Interval <= 0 {
-			if !wait(backfillArmPoll) {
-				return
-			}
-			continue
+// backfillArmTurn is one turn of the arm: the first due tenant from the
+// cursor on gets one pick, its outcome is recorded (backfillArmPace), and the
+// cursor moves past it. The tenant list is read again first when it is older
+// than min(iv, backfillArmPoll) and a tenant is due, and on the first turn.
+// Returns how long the arm sleeps before the next turn: 0 after a pick, the
+// time until a tenant is due when none is, backfillArmErrorWait after an
+// error.
+func (s *Scheduler) backfillArmTurn(ctx context.Context, pace *backfillArmPace, iv time.Duration) time.Duration {
+	now := time.Now()
+	pace.begin(now, iv)
+	i, ok := pace.nextDue(now, iv)
+	if pace.tenants == nil || (ok && now.Sub(pace.listedAt) >= min(iv, backfillArmPoll)) {
+		pace.setTenants(s.backgroundTenantsFn(ctx), now)
+		i, ok = pace.nextDue(now, iv)
+	}
+	if !ok {
+		return pace.untilDue(now, iv)
+	}
+	bt := pace.tenants[i]
+	pace.cursor = i + 1
+	for !s.enforcing() && s.interactiveDemand() > 0 {
+		if !sleepUnlessDone(ctx, dreamYieldWait) {
+			return 0
 		}
-		for !s.enforcing() && s.interactiveDemand() > 0 {
-			if !wait(dreamYieldWait) {
-				return
-			}
-		}
+	}
+	outcome, err := s.backfillArmOnce(ctx, s.cfg.SnapshotForTenant(ctx, bt.scope), bt)
+	if err != nil {
+		slog.Error("scheduler: embed backfill arm error", "error", err)
+		return backfillArmErrorWait
+	}
+	pace.record(bt.scope, outcome, time.Now())
+	return 0
+}
 
-		outcome, err := s.backfillArmOnce(ctx, cfg, bt)
-		switch {
-		case err != nil:
-			slog.Error("scheduler: embed backfill arm error", "error", err)
-			if !wait(10 * time.Second) {
-				return
-			}
-		case outcome == backfillEmbedded, outcome == backfillParked:
-			// Loop at once: more may be pending. A parked block is progress
-			// too — it is out of the pick and says nothing about the backend
-			// (review finding m3: waiting the interval after each oversize
-			// memo cost 1000 such blocks ≈ 4 h at the 15 s default).
-			continue
-		default: // backfillIdle, backfillFailed
-			if !waitIdle(bt.scope) {
-				return
-			}
-		}
+// sleepUnlessDone waits d and reports false when ctx ended first.
+func sleepUnlessDone(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
 	}
 }
 
@@ -2413,12 +2561,36 @@ const (
 	// about the backend — the next pick can go at once.
 	backfillParked
 	// backfillFailed: a wire-class memo committed — the backend itself is
-	// suspect (down, timeout, 5xx). Paced like an empty pick, so a failing
+	// suspect (down, timeout, 5xx) — and the failed chain reached no shared
+	// backend row: the arm holds this tenant for an interval, so its failing
 	// backend is probed once per interval instead of the whole backlog being
 	// walked into memos against it (the rule Pfad A follows with its break
 	// after a wire failure).
 	backfillFailed
+	// backfillFailedShared: as backfillFailed, but the failed chain reached a
+	// shared backend row (wireFailedOnShared), which every tenant may route
+	// to: the whole arm waits an interval, so that backend is probed once per
+	// interval and not once per tenant.
+	backfillFailedShared
 )
+
+// wireFailedOnShared reports whether a failed embed chain reached a shared
+// backend row on the wire — a row every tenant may route to, as opposed to a
+// tenant-private one (backends.Backend.EgressGuarded). A "no_model" attempt
+// (embedcache.EmbedChain) never reached the wire.
+func wireFailedOnShared(chain []backends.Backend, attempts []embedcache.WireAttempt) bool {
+	for _, a := range attempts {
+		if a.Class == "no_model" {
+			continue
+		}
+		for i := range chain {
+			if chain[i].Name == a.Backend && !chain[i].EgressGuarded() {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // backfillOneEmbedding is backfillStep for callers that only need to know
 // whether a block was embedded — the dream loop, which keeps its pre-m3
@@ -2641,9 +2813,13 @@ func (s *Scheduler) backfillStep(ctx context.Context, router *dream.Router, cfg 
 			}
 			// An HTTP 400 exceed_context_size is block-specific (parked, the
 			// arm goes on); every other class is a backend suspect (m3).
-			outcome = backfillFailed
-			if class == store.EmbedFailureOversize {
+			switch {
+			case class == store.EmbedFailureOversize:
 				outcome = backfillParked
+			case wireFailedOnShared(chain, attempts):
+				outcome = backfillFailedShared
+			default:
+				outcome = backfillFailed
 			}
 			return tail.end("backfill: commit failure memo", func() {
 				slog.Warn("scheduler: backfill embed failed — memoized",

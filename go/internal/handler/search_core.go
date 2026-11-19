@@ -60,6 +60,10 @@ type searchArgs struct {
 	// filter at all is decided by FacetEnabled below, never here.
 	Cluster string
 	Tags    []string
+	// TagsAll (#219) is the containment filter beside Tags' overlap: the
+	// block carries every one of these tags. Same wire name on both
+	// transports (`tags_all`); empty = no filter.
+	TagsAll []string
 	Types   []string
 	// TypesExclude and BlockRolesExclude are the canonical name and its legacy
 	// alias. They stay SEPARATE in the argument set and are folded exactly once,
@@ -261,7 +265,7 @@ func executeSearch(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, 
 
 	limit := searchLimit(a.Limit)
 	exclude := store.SearchTypesExclude(set, a.LeaveOutNeverRanked, a.Query, types, a.effectiveTypesExclude())
-	rows, more, err := store.SearchBlocksPage(ctx, pool, set, a.Query, ar.ReadScopes, a.Category, a.Tags,
+	rows, more, err := store.SearchBlocksPage(ctx, pool, set, a.Query, ar.ReadScopes, a.Category, a.Tags, a.TagsAll,
 		limit, a.Compact, after, grants, types, exclude, facet)
 	if err != nil {
 		return searchPage{}, err

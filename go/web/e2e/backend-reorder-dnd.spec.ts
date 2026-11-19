@@ -87,6 +87,13 @@ async function installPool(page: Page, opts: PoolMockOpts = {}): Promise<{ order
       if (opts.reorderDelayMs) await delay(opts.reorderDelayMs)
       return route.fulfill({ json: { success: true } })
     }
+    if (body?.action === 'backend-test') {
+      // The row's test verdict expands a test row under it (#242: the row
+      // group becomes taller than its neighbours).
+      return route.fulfill({
+        json: { success: true, reachable: true, latency_ms: 12, checks: { models: 'ok', chat: 'ok' } },
+      })
+    }
     if (opts.brokenProfile && body?.action === 'disable-profile-list') {
       // Byte-shape of the 2026-08-04 live payload: an INACTIVE profile whose
       // append-built impact arrays marshalled as null (Go nil slices).
@@ -226,6 +233,125 @@ test.describe('backend reorder — table survival + drag commit', () => {
     await expect
       .poll(() => pool.order(), { message: 'drop must commit the reorder', timeout: 5000 })
       .toEqual(['b-beta', 'b-alpha', 'b-gamma'])
+    await expect(card.locator('tbody[data-id]')).toHaveCount(3)
+    expect(errors, errors.join('\n')).toEqual([])
+  })
+
+  // #242: rows differ in height — here an expanded test row makes one row
+  // group taller than its neighbours. Swapping as soon as the pointer entered
+  // the taller row's slot left the pointer inside the slot that row takes
+  // after the swap, so the next move swapped back: the working order flipped
+  // on every move. The held row now takes the target's place only once the
+  // pointer lies in the slot it would occupy there; short of that line the
+  // order stays, and so it does on the way back (no swap-back).
+  async function dragSetup(page: Page, tall: string): Promise<{
+    card: ReturnType<Page['locator']>
+    pool: { order: () => string[] }
+    domOrder: () => Promise<string[]>
+    moveTo: (y: number) => Promise<string[]>
+    box: (id: string) => Promise<{ y: number; height: number }>
+    hx: number
+    hy: number
+  }> {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    const pool = await installPool(page)
+    await gotoArea(page, '/settings/backends')
+    const card = page.locator('section.card[aria-label="backend pool editor"]')
+    await expect(card).toContainText('alpha-chat')
+
+    const group = card.locator(`tbody[data-id="${tall}"]`)
+    await group.getByRole('button', { name: 'test', exact: true }).click()
+    await expect(group.locator('tr.test-row')).toContainText('reachable')
+
+    const domOrder = (): Promise<string[]> =>
+      card.locator('tbody[data-id]').evaluateAll((els) => els.map((el) => (el as HTMLElement).dataset.id ?? ''))
+    // Two frames: any deferred flush of the move has landed before the read.
+    const settle = (): Promise<void> =>
+      page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))))
+    const box = async (id: string): Promise<{ y: number; height: number }> => {
+      const b = await card.locator(`tbody[data-id="${id}"]`).boundingBox()
+      if (!b) throw new Error(`no box for ${id}`)
+      return { y: b.y, height: b.height }
+    }
+    const handle = card.getByRole('button', { name: 'drag to reorder: beta-rerank' })
+    const from = await handle.boundingBox()
+    if (!from) throw new Error('drag handle geometry missing for beta-rerank')
+    const hx = from.x + from.width / 2
+    const hy = from.y + from.height / 2
+    const moveTo = async (y: number): Promise<string[]> => {
+      await page.mouse.move(hx, y)
+      await settle()
+      return domOrder()
+    }
+    return { card, pool, domOrder, moveTo, box, hx, hy }
+  }
+
+  test('#242 a shorter row dragged up over a taller one moves once, without flipping back', async ({ page }) => {
+    const errors = trackPageErrors(page)
+    const { card, pool, moveTo, box, hx, hy } = await dragSetup(page, 'b-alpha')
+    const alpha = await box('b-alpha')
+    const beta = await box('b-beta')
+    // The case under test: the target is taller than the held row by a band
+    // wide enough to move inside it.
+    expect(alpha.height - beta.height, 'expanded test row makes alpha taller').toBeGreaterThan(12)
+    const line = alpha.y + beta.height // the held row's bottom once it sits in alpha's place
+
+    await page.mouse.move(hx, hy)
+    await page.mouse.down()
+    // Inside alpha's slot, below the line: the held row would not hold the
+    // pointer after a swap — the order stays, on every move.
+    for (const y of [alpha.y + alpha.height - 3, alpha.y + alpha.height - 6, line + 3]) {
+      expect(await moveTo(y), `move to ${y - alpha.y}px into alpha's slot (line at ${beta.height}px)`).toEqual([
+        'b-alpha',
+        'b-beta',
+        'b-gamma',
+      ])
+    }
+    // Above the line: beta takes alpha's place, and further moves there and
+    // back into alpha's new slot keep it.
+    for (const y of [line - 3, alpha.y + 2, line + 3, alpha.y + alpha.height - 3]) {
+      expect(await moveTo(y), `move to ${y - alpha.y}px after the crossing`).toEqual(['b-beta', 'b-alpha', 'b-gamma'])
+    }
+    // Past the counter-line (alpha's old bottom) the order goes back, and
+    // past the line again it crosses once more.
+    expect(await moveTo(alpha.y + alpha.height + 3), 'past the counter-line').toEqual(['b-alpha', 'b-beta', 'b-gamma'])
+    expect(await moveTo(line - 3), 'past the line again').toEqual(['b-beta', 'b-alpha', 'b-gamma'])
+    await page.mouse.up()
+    await expect
+      .poll(() => pool.order(), { message: 'drop must commit the reorder', timeout: 5000 })
+      .toEqual(['b-beta', 'b-alpha', 'b-gamma'])
+    await expect(card.locator('tbody[data-id]')).toHaveCount(3)
+    expect(errors, errors.join('\n')).toEqual([])
+  })
+
+  test('#242 a shorter row dragged down over a taller one moves once, without flipping back', async ({ page }) => {
+    const errors = trackPageErrors(page)
+    const { card, pool, moveTo, box, hx, hy } = await dragSetup(page, 'b-gamma')
+    const gamma = await box('b-gamma')
+    const beta = await box('b-beta')
+    expect(gamma.height - beta.height, 'expanded test row makes gamma taller').toBeGreaterThan(12)
+    const line = gamma.y + gamma.height - beta.height // the held row's top once it sits in gamma's place
+
+    await page.mouse.move(hx, hy)
+    await page.mouse.down()
+    for (const y of [gamma.y + 3, gamma.y + 6, line - 3]) {
+      expect(await moveTo(y), `move to ${y - gamma.y}px into gamma's slot (line at ${line - gamma.y}px)`).toEqual([
+        'b-alpha',
+        'b-beta',
+        'b-gamma',
+      ])
+    }
+    for (const y of [line + 3, gamma.y + gamma.height - 2, line - 3, gamma.y + 3]) {
+      expect(await moveTo(y), `move to ${y - gamma.y}px after the crossing`).toEqual(['b-alpha', 'b-gamma', 'b-beta'])
+    }
+    // Past the counter-line (gamma's old top) the order goes back, and past
+    // the line again it crosses once more.
+    expect(await moveTo(gamma.y - 3), 'past the counter-line').toEqual(['b-alpha', 'b-beta', 'b-gamma'])
+    expect(await moveTo(line + 3), 'past the line again').toEqual(['b-alpha', 'b-gamma', 'b-beta'])
+    await page.mouse.up()
+    await expect
+      .poll(() => pool.order(), { message: 'drop must commit the reorder', timeout: 5000 })
+      .toEqual(['b-alpha', 'b-gamma', 'b-beta'])
     await expect(card.locator('tbody[data-id]')).toHaveCount(3)
     expect(errors, errors.join('\n')).toEqual([])
   })

@@ -23,6 +23,12 @@ func (s staticConfigStore) SnapshotForTenant(context.Context, string) *config.Co
 	return s.cfg
 }
 
+// SnapshotForTenantResolved: no overlay, so the one generation answers every
+// scope as the base (resolved false), as config.Store without an overlay.
+func (s staticConfigStore) SnapshotForTenantResolved(context.Context, string) (*config.Config, bool) {
+	return s.cfg, false
+}
+
 // gamingHandler wires a ManageHandler with a static (empty) config snapshot and
 // a seeded pool. No DB, no reload — the 422-before-write validation path never
 // touches them. Since U01-W5 the exclusion state lives in the eject profile
