@@ -23,6 +23,7 @@ import (
 	"github.com/GottZ/ctx/internal/embedmigration"
 	"github.com/GottZ/ctx/internal/schemacontract"
 	"github.com/GottZ/ctx/internal/testdb"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -686,6 +687,30 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 			otherErr := <-otherDone
 			r := <-helper
 			t.Logf("other build: %v; helper: action=%q err=%v", otherErr, r.action, r.err)
+			// Which of the two concurrent builds the server ends is its
+			// choice. On PostgreSQL 18.6 the other session's unique build
+			// fails on its duplicate (23505) and leaves an INVALID index the
+			// helper's CREATE ... IF NOT EXISTS skipped behind. On 18.7 the
+			// two builds wait for each other and the deadlock detector ends
+			// the other one (40P01) before it stands in the helper's way:
+			// nothing of the other build is left to skip behind, and the
+			// helper must then have built its own index — valid, of its
+			// DDL's definition — and say so.
+			var pgErr *pgconn.PgError
+			if errors.As(otherErr, &pgErr) && pgErr.Code == "40P01" {
+				if r.err != nil || r.action != indexActionRebuiltDefinition {
+					t.Errorf("the other build ended in a deadlock; helper action=%q err=%v, want %s without an error", r.action, r.err, indexActionRebuiltDefinition)
+				}
+				var valid bool
+				var def string
+				if err := pool.QueryRow(ctx, `SELECT i.indisvalid, pg_get_indexdef(i.indexrelid) FROM pg_index i WHERE i.indexrelid = to_regclass('public.'||$1)`, name).Scan(&valid, &def); err != nil {
+					t.Fatalf("read %s after the helper's build: %v", name, err)
+				}
+				if !valid || !strings.Contains(def, "embedding_next IS NULL") {
+					t.Errorf("%s after the helper's build: valid=%v %q, want a valid index of the managed definition", name, valid, def)
+				}
+				return
+			}
 			if r.err == nil || !strings.Contains(r.err.Error(), c.want) {
 				t.Errorf("helper action=%q err=%v, want an error containing %q", r.action, r.err, c.want)
 			}
