@@ -52,7 +52,7 @@ func TestBackfillFloorOfSeesTheFallbackOfItsOwnCall(t *testing.T) {
 	ownerFloor := config.ScopeFloor{owner: backends.SensCredentials}
 	broken := errors.New("probe: the owner's rows cannot be read")
 	floors := func(cs ConfigStore) *ownerFloors {
-		return &ownerFloors{cfg: cs, buildCtx: ctx, floors: map[string]config.ScopeFloor{}, out: config.ScopeFloor{}}
+		return &ownerFloors{cfg: cs, ctx: ctx, floors: map[string]config.ScopeFloor{}, out: config.ScopeFloor{}}
 	}
 	reload := func(t *testing.T, cs *config.Store, next *config.Config) {
 		t.Helper()

@@ -13,7 +13,9 @@ import (
 // for the default tenant, and for any other tenant its first owned scope in
 // scope order. That is the rule of events.backgroundTenantFor (the scheduler's
 // owned[0] of TenantScopes, ORDER BY scope; min() reads the same collation);
-// a change to one has to follow in the other. A scope no tenant owns is
+// a change to one has to follow in the other, and
+// events.TestBackgroundTenantRuleIsTheScopeOwnerRule holds the two against
+// each other for every scope of every tenant. A scope no tenant owns is
 // absent from the map: its blocks resolve under _global, as the scheduler's
 // unbounded legacy pass does.
 //
