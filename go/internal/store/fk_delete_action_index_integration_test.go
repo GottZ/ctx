@@ -56,13 +56,11 @@ var fkDeleteActionExceptions = map[string]string{
 	"context_access_tokens(principal_id) -> context_principals":        "no code path deletes a principal; a manual delete pays one scan",
 	"context_oauth_codes(principal_id) -> context_principals":          "no code path deletes a principal; a manual delete pays one scan",
 	// Tables that grow with use: index drafted for issue #277.
-	"context_write_log(api_key_id) -> context_api_keys":              "issue #277: index drafted; the tenant prune deletes every key of the tenant, each key scans the write log",
-	"context_block_grants(granted_by) -> context_api_keys":           "issue #277: index drafted",
-	"context_chat_sessions(created_by) -> context_api_keys":          "issue #277: index drafted",
-	"context_oauth_codes(api_key_id) -> context_api_keys":            "issue #277: index drafted (codes live an hour past expiry, oauth_codes.go)",
-	"context_access_tokens(parent_id) -> context_access_tokens":      "issue #277: index drafted; the token janitor (oauth_tokens.go) deletes many rows at once, each scans the tokens",
-	"context_web_sessions(access_token_id) -> context_access_tokens": "issue #277: index drafted; each token the janitor deletes scans the sessions",
-	"context_pending_writes(api_key_id) -> context_api_keys":         "issue #277: a key on a hypertable; replacement of the key drafted",
+	"context_write_log(api_key_id) -> context_api_keys":      "issue #277: index drafted; the tenant prune deletes every key of the tenant, each key scans the write log",
+	"context_block_grants(granted_by) -> context_api_keys":   "issue #277: index drafted",
+	"context_chat_sessions(created_by) -> context_api_keys":  "issue #277: index drafted",
+	"context_oauth_codes(api_key_id) -> context_api_keys":    "issue #277: index drafted (codes live an hour past expiry, oauth_codes.go)",
+	"context_pending_writes(api_key_id) -> context_api_keys": "issue #277: a key on a hypertable; replacement of the key drafted",
 }
 
 // extensionOwned reports a key the schema does not own: a TimescaleDB chunk

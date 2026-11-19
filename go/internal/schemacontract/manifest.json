@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 183,
-    "migration_count": 71,
+    "migration_max": 184,
+    "migration_count": 72,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -5403,6 +5403,9 @@
     "idx_access_tokens_family": {
       "def_hash": "e2d6e9b80b15937e174b092dd8e97b02d09a09bb904bcca97ea2e6daba228f7a"
     },
+    "idx_access_tokens_parent": {
+      "def_hash": "a64674fc20c9d7d4dd2261d6b84568956ec4e73dd4cb673b401500c584a655f3"
+    },
     "idx_api_keys_hash": {
       "def_hash": "8a7ac97d6d567cdd127f44a9ba94c4d376c7361243e5160084cc011e127f567e"
     },
@@ -5868,6 +5871,9 @@
     },
     "idx_trgm_title_gist": {
       "def_hash": "4fe7ec3d7f6d3a7b1f8b8000b607a5a9331b86a32ffde172ceae92ba8e0e7d0e"
+    },
+    "idx_web_sessions_access_token": {
+      "def_hash": "4a7859f3a355cb718607d4874bdab955147830d4337ced84777c4365e9eb67d0"
     },
     "idx_web_sessions_family": {
       "def_hash": "92437c88975964778b40587f074694d90fd6cf02d2bccfdefbe7bbff11b2b7c8"
