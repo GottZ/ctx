@@ -108,7 +108,7 @@
 --
 -- SCHEMA CONTRACT. The manifest records not_null true for both columns and
 -- migration_max 185 -> 186; above the threshold updated_at reads as drift
--- (param) until the runbook ran. An older binary (v5.66.0, the rollback
+-- (param) until the runbook ran. An older binary (v5.67.0, the rollback
 -- image) finds _migrations:186 without an embedded file (breaking) and
 -- not_null true where its manifest says false (definition drift, param): in mode warn (the default) it starts and
 -- /health reports schema_contract attention; in mode enforce it refuses to

@@ -81,7 +81,7 @@
 -- (55P03), the file rolls back with nothing changed and the boot fails
 -- loudly; the next boot tries again.
 --
--- OLDER BINARY. v5.66.0 (the rollback image) sends the probe in its form
+-- OLDER BINARY. v5.67.0 (the rollback image) sends the probe in its form
 -- before this release; the planner may serve it from the trigram GiST as
 -- before (the index cannot serve its default-collation title). Its
 -- schema-contract check finds _migrations:187 without an embedded file

@@ -10,7 +10,7 @@
 -- gone; 182 kept idx_guard_pending for the binaries before it, whose pick
 -- orders by created_at and walks idx_context_created through the store
 -- without it (214 327 buffers per pick at 1.2 million rows, issue #360). The
--- rollback image of the release of this file is v5.66.0, whose pick is the
+-- rollback image of the release of this file is v5.67.0, whose pick is the
 -- pick of 182. Until this file runs every write of an unchecked block with a
 -- vector maintains both indexes, and the count may read idx_guard_pending,
 -- whose entries include every unchecked block with a vector the pick filters
@@ -67,7 +67,7 @@
 -- the upgrade (and DROP INDEX CONCURRENTLY IF EXISTS idx_guard_pending_next,
 -- idx_guard_pending_old); the file then finds nothing to drop.
 --
--- OLDER BINARY. v5.66.0 (the rollback image; its guard, re-embed and
+-- OLDER BINARY. v5.67.0 (the rollback image; its guard, re-embed and
 -- schema-contract code is that of v5.65.0, which the tests ran on this
 -- schema) picks and counts from idx_guard_pending_type as this release does.
 -- Its verify gate and index repair still build idx_guard_pending_next for a

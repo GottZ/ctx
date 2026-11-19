@@ -131,7 +131,7 @@
 -- waits for a lock, the writers of that table queue behind it, for at most
 -- those 3 s.
 --
--- OLDER BINARY. v5.66.0 (the rollback image) writes and deletes as before;
+-- OLDER BINARY. v5.67.0 (the rollback image) writes and deletes as before;
 -- the indexes serve its statements too. Its schema-contract check finds
 -- _migrations:185 without an embedded file (breaking) and four indexes it
 -- does not know (param): in mode warn (the default) it starts and
