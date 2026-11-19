@@ -1242,7 +1242,7 @@ func CheckRateLimitByAction(ctx context.Context, pool *pgxpool.Pool, apiKeyID, a
 const MinIDPrefixLen = 8
 
 // ErrAmbiguousID is returned by ResolveBlockID when a prefix matches more than
-// one block. The accompanying []BlockPreview contains the candidates.
+// one block. The accompanying []BlockMeta contains the candidates.
 var ErrAmbiguousID = errors.New("store: ambiguous block id prefix")
 
 // IsFullUUID returns true if s has the canonical 36-char UUID shape (8-4-4-4-12
