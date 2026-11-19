@@ -109,6 +109,9 @@ func (s *swapConfig) SnapshotForRequest(context.Context) *config.Config { return
 func (s *swapConfig) SnapshotForTenant(context.Context, string) *config.Config {
 	return s.c.Load()
 }
+func (s *swapConfig) SnapshotForTenantResolved(context.Context, string) (*config.Config, bool) {
+	return s.c.Load(), false // no overlay: the base answers every scope
+}
 
 // TestMCPInstructionsOverStatelessHTTP reads the instructions through the
 // production /mcp handler (stateless Streamable HTTP, built once) while the
@@ -175,6 +178,9 @@ func (panicConfig) SnapshotForRequest(context.Context) *config.Config {
 	panic("instructions probe: snapshot")
 }
 func (panicConfig) SnapshotForTenant(context.Context, string) *config.Config {
+	panic("instructions probe: snapshot")
+}
+func (panicConfig) SnapshotForTenantResolved(context.Context, string) (*config.Config, bool) {
 	panic("instructions probe: snapshot")
 }
 

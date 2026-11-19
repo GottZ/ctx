@@ -390,6 +390,7 @@ func TestRegistryEnvNamespace(t *testing.T) {
 		"tenant.devmode":                        true, // C6-C: developer-transparency umbrella; settings-only ON PURPOSE — an env would let the privacy default fall without an audit row
 		"mcp.instructions_enabled":              true, // #315: settings-only like its text — one surface for what every connecting agent is told
 		"mcp.instructions":                      true, // #315: settings-only ON PURPOSE — only the settings PUT records the shipped wording a custom text was based on, and the audit row
+		"embed_backfill.sync_disabled":          true, // #221: a per-tenant switch; the global value is a settings row like the tenants' own
 	}
 	seen := map[string]string{}
 	for _, e := range registry() {
@@ -528,6 +529,11 @@ func TestRegistryTenancySet(t *testing.T) {
 		// appears nowhere in it, so switching it on cannot widen the tenant
 		// boundary by a single row.
 		"tenant.devmode": true,
+		// The off switch of the query path's own embed backfill step (#221):
+		// switching it off only lowers what a tenant's queries take from the
+		// shared embed pool. Its siblings sync_cap and sync_budget stay
+		// global-only, since their 0 is unbounded.
+		"embed_backfill.sync_disabled": true,
 	}
 	for _, e := range registry() {
 		gotOverridable := e.Tenancy == TenancyOverridable
@@ -539,8 +545,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 72 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 72 (change it with intent)", got)
+	if got := len(overridable); got != 73 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 73 (change it with intent)", got)
 	}
 	// The NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant: a
 	// tenant override here would flush the process-wide embed cache / flip the
