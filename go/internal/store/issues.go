@@ -100,6 +100,13 @@ func rejectReservedMetadata(metadata map[string]any) error {
 // and to build the comment title (design/02 §3.1/§3.6).
 var issuePrefixRe = regexp.MustCompile(`^(#L?\d+)(?:\s|$)`)
 
+// issueTitlePrefixRe is the prefix a title edit keeps (UpdateIssueBlock): an
+// issue's "#L<seq>"/"#<nr>", or a comment's "<issue prefix>.cL<seq>" (the
+// title InsertCommentBlock builds, which the forge push cascade renames to
+// "#<nr>.cL<seq>"). issuePrefixRe alone does not match a comment title, so an
+// edit of a comment's title dropped its prefix (issue #275).
+var issueTitlePrefixRe = regexp.MustCompile(`^(#L?\d+(?:\.cL\d+)?)(?:\s|$)`)
+
 // IssueFields carries the fields of an issue create. Title is the HUMAN title
 // WITHOUT the ctx prefix — InsertIssueBlock derives "#L<seq>". Status is the
 // workflow status to stamp ("" ⇒ NULL); the handler resolves it from the type
@@ -241,7 +248,7 @@ func InsertIssueBlock(ctx context.Context, tx pgx.Tx, f IssueFields, writableSco
 		IssueTypeName, tags, title, f.Content, meta, f.Scope, status)
 	b, err := scanIssue(row)
 	if err != nil {
-		return nil, fmt.Errorf("store: insert issue: %w", err)
+		return nil, fmt.Errorf("store: insert issue: %w", blockIdentityTaken(err))
 	}
 	return b, nil
 }
@@ -313,7 +320,7 @@ func InsertCommentBlock(ctx context.Context, tx pgx.Tx, parentID string, f Comme
 		CommentTypeName, title, f.Content, meta, parentScope)
 	b, err := scanIssue(row)
 	if err != nil {
-		return nil, fmt.Errorf("store: insert comment: %w", err)
+		return nil, fmt.Errorf("store: insert comment: %w", blockIdentityTaken(err))
 	}
 	if err := PutBlockParent(ctx, tx, b.ID, parentID, writableScopes); err != nil {
 		return nil, err // ErrLinkScopeViolation on any scope/existence breach
@@ -472,7 +479,7 @@ func UpdateIssueBlock(ctx context.Context, tx pgx.Tx, id string, u IssueUpdate, 
 	}
 	if u.Title != nil {
 		prefix := ""
-		if m := issuePrefixRe.FindStringSubmatch(curTitle); m != nil {
+		if m := issueTitlePrefixRe.FindStringSubmatch(curTitle); m != nil {
 			prefix = m[1] + " "
 		}
 		set2.bind("title = %s", prefix+*u.Title)
@@ -500,7 +507,7 @@ func UpdateIssueBlock(ctx context.Context, tx pgx.Tx, id string, u IssueUpdate, 
 	set2.args = append(set2.args, id, writableScopes)
 	b, err := scanIssue(tx.QueryRow(ctx, query, set2.args...))
 	if err != nil {
-		return nil, fmt.Errorf("store: update issue: %w", err)
+		return nil, fmt.Errorf("store: update issue: %w", blockIdentityTaken(err))
 	}
 	if u.Content != nil || u.Title != nil {
 		if err := InvalidateEmbeddingTx(ctx, tx, id); err != nil {

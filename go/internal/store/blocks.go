@@ -1498,7 +1498,8 @@ type UpdateBlockData struct {
 const blockIdentityIndex = "uq_context_category_title_scope"
 
 // BlockIdentityTakenError is the refusal of a by-id update that would give a
-// block the (category, title, scope) of another active block (issue #227). It
+// block the (category, title, scope) of another active block (issue #227), and
+// of an issue verb or a chunk ingest whose identity is taken (issue #275). It
 // is a typed error and not a message for the reason ErrProvenanceProtected is
 // a sentinel: the write surfaces answer it as a 409 the caller resolves by
 // choosing another category or title, not as the generic 500 of an unexpected
@@ -1509,7 +1510,7 @@ const blockIdentityIndex = "uq_context_category_title_scope"
 // refused statement and the read), found a block of another identity (the
 // source row was changed in between), or failed. That read runs within the
 // caller's write scopes (blockIdentityHolder), so the id never names a block
-// outside them.
+// outside them. blockIdentityTaken runs no such read and leaves it "".
 type BlockIdentityTakenError struct {
 	ConflictID string
 	// refusedKey is the DETAIL of the 23505, PostgreSQL's own statement of the
@@ -1534,6 +1535,22 @@ func blockIdentityViolation(err error) (refusedKey string, ok bool) {
 		return pgErr.Detail, true
 	}
 	return "", false
+}
+
+// blockIdentityTaken turns the 23505 of blockIdentityIndex into
+// *BlockIdentityTakenError and passes any other error unchanged (issue #275).
+// It serves the writers that build the identity themselves — the issue verbs
+// (an issue or comment title can name the (category, title, scope) of another
+// active block: one stored under category issue or comment, or a comment whose
+// title was edited) and InsertChunk, whose arbiter is the chunk slot. Their
+// collision is the caller's input as UpdateBlock's is (issue #227). They run
+// no holder read: the issue verbs write in the transport's transaction, so
+// ConflictID stays "".
+func blockIdentityTaken(err error) error {
+	if refusedKey, ok := blockIdentityViolation(err); ok {
+		return &BlockIdentityTakenError{refusedKey: refusedKey}
+	}
+	return err
 }
 
 // blockIdentityHolder reads the id of the active block that holds the identity

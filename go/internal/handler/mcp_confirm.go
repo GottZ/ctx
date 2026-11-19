@@ -158,8 +158,10 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 // mcpConfirmHandler executes a previously staged write, selected by payload
 // hash, strictly per-key (D1-M4). Since D-W6c the sequence itself lives in
 // confirm_core.go (shared with POST /api/confirm) — this handler only maps
-// the typed outcome onto the exact MCP wordings (raw errors surface here;
-// the HTTP surface launders them).
+// the typed outcome onto the exact MCP wordings. A server fault answers
+// "internal error" (uncoded, like the update tool's) and goes to the log with its cause,
+// as on the HTTP surface (issue #275; before, the raw error text surfaced
+// here).
 func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, input confirmInput) (*mcp.CallToolResult, any, error) {
 		if input.PayloadHash == "" {
@@ -222,11 +224,13 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 		case confirmUnreadable:
 			return errResult("confirm failed: staged payload unreadable"), nil, nil
 		case confirmExecErr:
+			// A server fault, logged by executeConfirm with its cause: the
+			// answer stays opaque, as on REST /api/confirm (issue #275).
 			if out.Op == "update" || out.Op == store.OpArchive {
 				noun := confirmBlockOpNoun(out.Op)
-				return errResult(fmt.Sprintf("confirmed %s failed to execute: %v — the stage token is consumed; re-stage the %s", noun, out.Err, noun)), nil, nil
+				return errResult(fmt.Sprintf("confirmed %s failed to execute: internal error — the stage token is consumed; re-stage the %s", noun, noun)), nil, nil
 			}
-			return errResult(fmt.Sprintf("confirmed write failed to execute: %v — the stage token is consumed; re-stage the write", out.Err)), nil, nil
+			return errResult("confirmed write failed to execute: internal error — the stage token is consumed; re-stage the write"), nil, nil
 		case confirmExecGone:
 			if out.Op == store.OpBlobLink {
 				return errResult("confirmed blob_link failed to execute: blob no longer accessible — the stage token is consumed; re-stage the link"), nil, nil
@@ -234,7 +238,8 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 			noun := confirmBlockOpNoun(out.Op)
 			return errResult(fmt.Sprintf("confirmed %s failed to execute: block no longer accessible — the stage token is consumed; re-stage the %s", noun, noun)), nil, nil
 		default: // confirmInfraErr
-			return errResult(fmt.Sprintf("confirm failed: %v", out.Err)), nil, nil
+			slog.Error("mcp: confirm infrastructure error", "error", out.Err, "op", out.Op, "request_id", RequestIDFromContext(ctx))
+			return errResult("confirm failed: internal error"), nil, nil
 		}
 	}
 }

@@ -289,6 +289,12 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inp
 	if block == nil {
 		return errResult("Block not found (or not in a writable scope of this key)"), nil, nil
 	}
+	// A derivative is never updated by a client (UpdateBlock's WHERE, I7/S3):
+	// no card for a write the confirm cannot execute (D1-M2), as the archive
+	// stage refuses it (issue #275).
+	if rej := derivativeTargetReject(block); rej != nil {
+		return errResultReject(rej), nil, nil
+	}
 
 	cw := store.CanonicalWrite{
 		Op:            "update",
