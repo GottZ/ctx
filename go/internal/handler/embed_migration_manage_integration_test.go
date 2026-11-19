@@ -127,7 +127,10 @@ func emcNextIndexes(t *testing.T, pool *pgxpool.Pool) {
 		   ON context_blocks (dream_checked_at ASC NULLS FIRST, quality_score ASC)
 		   WHERE NOT is_archived AND embedding_next IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_guard_pending_next
-		   ON context_blocks (type_name, created_at)
+		   ON context_blocks (created_at ASC)
+		   WHERE NOT is_archived AND (metadata->>'guard_checked_at') IS NULL AND embedding_next IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_guard_pending_type_next
+		   ON context_blocks (type_name, timezone('UTC', created_at))
 		   WHERE NOT is_archived AND (metadata->>'guard_checked_at') IS NULL AND embedding_next IS NOT NULL
 		     AND NOT embedding_stale AND category <> 'index' AND lifecycle_state = 'knowledge'`,
 	} {

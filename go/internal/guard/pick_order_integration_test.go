@@ -1,14 +1,16 @@
 //go:build integration
 
-// Issue #360: since migration 182 the pick reads idx_guard_pending by type
-// (type_name, created_at) and sorts what it reads by created_at. The order a
-// batch takes its blocks in and how runs at the same time (several ctx
-// instances on one database, FOR NO KEY UPDATE SKIP LOCKED since #359) split
-// the waiting blocks stay what they were on the created_at key: the oldest
-// over all checked types first, no block in two runs, and a run takes
-// nothing only when every waiting block is held.
+// Issue #360: since migration 182 the pick (pickPending) locks the oldest
+// waiting blocks of each checked type in a range of idx_guard_pending_type,
+// keeps the oldest over all types, gives the other locks back and locks the
+// kept blocks again. The order a batch takes its blocks in and how runs at
+// the same time (several ctx instances on one database, FOR NO KEY UPDATE
+// SKIP LOCKED since #359) split the waiting blocks stay what they were with
+// one statement over the created_at key: the oldest over all checked types
+// first, no block in two runs, and a run takes nothing only when every
+// waiting block is held.
 //
-// In-package test on purpose: it runs the ACTUAL guardPickSQL.
+// In-package test on purpose: it runs the ACTUAL pickPending.
 package guard
 
 import (
@@ -75,21 +77,19 @@ func TestGuardPickTwoRunsOldestFirstOverAllTypes(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
-		rows, err := tx.Query(ctx, guardPickSQL, types, guardPickLimit)
+		blocks, err := pickPending(ctx, tx, types, guardPickLimit)
 		if err != nil {
 			t.Fatalf("%s: %v", label, err)
 		}
 		var ids []string
-		for rows.Next() {
-			var id, typ string
-			if err := rows.Scan(&id, &typ); err != nil {
-				t.Fatal(err)
-			}
-			ids = append(ids, id)
+		for _, b := range blocks {
+			ids = append(ids, b.id)
 		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			t.Fatalf("%s: %v", label, err)
+		// The pick turns sorts off for its first step only: whichever way it
+		// ended, the batch's own statements plan with sorts as configured.
+		var sortSetting string
+		if err := tx.QueryRow(ctx, `SHOW enable_sort`).Scan(&sortSetting); err != nil || sortSetting != "on" {
+			t.Errorf("%s: enable_sort after the pick is %q (%v), want on", label, sortSetting, err)
 		}
 		return tx, ids
 	}
@@ -131,4 +131,124 @@ func TestGuardPickTwoRunsOldestFirstOverAllTypes(t *testing.T) {
 	_ = tx3.Rollback(ctx)
 	_, run6 := pick("run 6 after runs 2 and 3 ended")
 	same("run 6", run6, want[100:200])
+}
+
+// TestGuardPickSecondRunPassesHeldBlocksOfOneType: more blocks of one checked
+// type wait than a batch takes. A run that holds the oldest batch does not
+// make the next run come back empty: the lock sits in the type's branch, so
+// SKIP LOCKED passes over the held blocks and the branch goes on to the next
+// of that type (a lock above the branch would read the same oldest batch of
+// the type, find all of it held and return nothing).
+func TestGuardPickSecondRunPassesHeldBlocksOfOneType(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	reg := blocktype.NewRegistry()
+	if err := reg.Reload(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	types := reg.Snapshot().GuardCheckTypes()
+	if _, err := pool.Exec(ctx, `INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model, created_at, updated_at)
+		SELECT 'po', 'po-k-' || g, 'waiting ' || g, 'po', 'knowledge',
+		       array_fill(0.01::real, ARRAY[1024])::vector(1024), 'q360',
+		       timestamptz '2026-11-01 00:00:00+00' + g * interval '1 millisecond',
+		       timestamptz '2026-11-01 00:00:00+00' + g * interval '1 millisecond'
+		  FROM generate_series(1, 250) g`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `ANALYZE context_blocks`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := pool.Query(ctx, `SELECT id::text FROM context_blocks WHERE title LIKE 'po-k-%' ORDER BY created_at`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil || len(want) != 250 {
+		t.Fatalf("fixture: %d waiting blocks (%v)", len(want), err)
+	}
+	for i, w := range [][]string{want[:100], want[100:200], want[200:]} {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+		blocks, err := pickPending(ctx, tx, types, guardPickLimit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, b := range blocks {
+			got = append(got, b.id)
+		}
+		if !slices.Equal(got, w) {
+			t.Errorf("run %d while the runs before it hold their batches took %d blocks, want the next %d in created_at order", i+1, len(got), len(w))
+		}
+	}
+}
+
+// TestGuardPickIndexProbe: the pick reads idx_guard_pending_type only while it
+// stands as migration 182 builds it — the probe holds on a fresh database,
+// fails for an INVALID index and for another index under the name, and the
+// pick then takes the same blocks with its statement before 182.
+func TestGuardPickIndexProbe(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	reg := blocktype.NewRegistry()
+	if err := reg.Reload(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	types := reg.Snapshot().GuardCheckTypes()
+	if _, err := pool.Exec(ctx, `INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model, created_at, updated_at)
+		SELECT 'po', 'po-p-' || g, 'waiting ' || g, 'po', CASE WHEN g % 2 = 0 THEN 'knowledge' ELSE 'reference' END,
+		       array_fill(0.01::real, ARRAY[1024])::vector(1024), 'q360',
+		       timestamptz '2026-11-01 00:00:00+00' + g * interval '1 millisecond',
+		       timestamptz '2026-11-01 00:00:00+00' + g * interval '1 millisecond'
+		  FROM generate_series(1, 5) g`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := pool.Query(ctx, `SELECT id::text FROM context_blocks WHERE title LIKE 'po-p-%' ORDER BY created_at LIMIT 3`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := func(label string, wantReady bool) {
+		t.Helper()
+		var ready bool
+		if err := pool.QueryRow(ctx, guardPickIndexReadySQL).Scan(&ready); err != nil {
+			t.Fatal(err)
+		}
+		if ready != wantReady {
+			t.Errorf("%s: the probe says ready=%v, want %v", label, ready, wantReady)
+		}
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		blocks, err := pickPending(ctx, tx, types, 3)
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		var got []string
+		for _, b := range blocks {
+			got = append(got, b.id)
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("%s: the pick took %v, want the three oldest %v", label, got, want)
+		}
+	}
+	probe("the index of 182", true)
+	if _, err := pool.Exec(ctx, `UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'idx_guard_pending_type'::regclass`); err != nil {
+		t.Fatal(err)
+	}
+	probe("an INVALID index", false)
+	for _, s := range []string{`DROP INDEX idx_guard_pending_type`, `CREATE INDEX idx_guard_pending_type ON context_blocks (type_name, created_at)`} {
+		if _, err := pool.Exec(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	probe("another index under the name", false)
 }

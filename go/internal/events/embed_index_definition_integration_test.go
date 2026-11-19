@@ -39,27 +39,6 @@ var preMigration175PickSisters = []struct{ name, ddl string }{
 		WHERE embedding_next IS NULL AND NOT is_archived`},
 }
 
-// preMigration182GuardSister is idx_guard_pending_next as the verify gate
-// built it before migration 182 (issue #360): key created_at, partial on the
-// three conditions idx_guard_pending held before 182 — the state of a
-// migration that reached verifying on an older release.
-var preMigration182GuardSister = struct{ name, ddl string }{"idx_guard_pending_next", `CREATE INDEX idx_guard_pending_next
-		ON context_blocks (created_at ASC)
-		WHERE NOT is_archived
-		  AND (metadata->>'guard_checked_at') IS NULL
-		  AND embedding_next IS NOT NULL`}
-
-func seedPreMigration182GuardSister(t *testing.T, pool *pgxpool.Pool) {
-	t.Helper()
-	ix := preMigration182GuardSister
-	if _, err := pool.Exec(context.Background(), `DROP INDEX IF EXISTS `+ix.name); err != nil {
-		t.Fatalf("drop %s: %v", ix.name, err)
-	}
-	if _, err := pool.Exec(context.Background(), ix.ddl); err != nil {
-		t.Fatalf("seed old definition of %s: %v", ix.name, err)
-	}
-}
-
 func seedPreMigration175PickSisters(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	for _, ix := range preMigration175PickSisters {
@@ -148,6 +127,7 @@ func TestEmbedIndexDefinition_Integration(t *testing.T) {
 			"idx_embedding_pending_sens_next":       indexActionRebuiltDefinition,
 			"idx_dream_pending_next":                indexActionCreated,
 			"idx_guard_pending_next":                indexActionCreated,
+			"idx_guard_pending_type_next":           indexActionCreated,
 		}
 		if len(rep.Index.Indexes) != len(wantAction) {
 			t.Errorf("index entries = %d, want %d", len(rep.Index.Indexes), len(wantAction))
@@ -164,54 +144,10 @@ func TestEmbedIndexDefinition_Integration(t *testing.T) {
 		if err := CleanupEmbedMigration(ctx, pool, migID); err != nil {
 			t.Fatalf("cleanup: %v", err)
 		}
-		if drifts := indexDrifts(t, pool, pickIndexes...); len(drifts) != 0 {
+		// optionalAnchors adds idx_guard_pending_type (migration 182): its twin,
+		// renamed by the swap, must carry exactly the definition of 182.
+		if drifts := indexDrifts(t, pool, optionalAnchors...); len(drifts) != 0 {
 			t.Errorf("schema contract after cutover reports drift on the pick indexes: %+v", drifts)
-		}
-	})
-
-	// issue360_verify_rebuilds_the_pre_182_guard_sister: a verifying
-	// migration whose guard twin carries the definition before migration 182
-	// (valid). The verify run rebuilds it with the shipped DDL, and after
-	// confirm + cleanup idx_guard_pending is the index of 182 — type key and
-	// the whole predicate, no schema-contract drift. Before the twin carried
-	// the definition of 182, the next cutover brought the old index back.
-	t.Run("issue360_verify_rebuilds_the_pre_182_guard_sister", func(t *testing.T) {
-		pool := testdb.SetupTestDB(t)
-		s := NewScheduler(pool, config.NewStore(&config.Config{}), backends.NewPool(nil, nil), StartupConfig{})
-		s.embedVerifySync = true
-
-		seedCutoverBackend(t, pool, cutoverBackendName, flippableModelMap())
-		migID := seedMigrationRow(t, pool, "verifying")
-		seedCleanMigrated(t, pool, 3)
-		seedPreMigration182GuardSister(t, pool)
-
-		runVerifyCycle(t, pool, s, verifyTestCfg())
-
-		st := readVerifyRow(t, pool, migID)
-		rep := parseReport(t, st.Report)
-		if st.Status != "verifying" || rep.Result != verifyGreen {
-			t.Fatalf("verify: status=%q result=%q, want verifying/green", st.Status, rep.Result)
-		}
-		for _, ix := range rep.Index.Indexes {
-			if ix.Name == preMigration182GuardSister.name && ix.Action != indexActionRebuiltDefinition {
-				t.Errorf("index entry %+v, want action %q", ix, indexActionRebuiltDefinition)
-			}
-		}
-		requireIndexOfDDL(t, pool, preMigration182GuardSister.name)
-
-		if _, err := ConfirmEmbedMigration(ctx, pool, backends.NewPool(pool, nil), migID); err != nil {
-			t.Fatalf("confirm: %v", err)
-		}
-		if err := CleanupEmbedMigration(ctx, pool, migID); err != nil {
-			t.Fatalf("cleanup: %v", err)
-		}
-		def := indexDefT(t, pool, "idx_guard_pending")
-		t.Logf("idx_guard_pending after the cutover: %s", def)
-		if !strings.Contains(def, "(type_name, created_at)") || !strings.Contains(def, "lifecycle_state") {
-			t.Errorf("idx_guard_pending after the cutover is not the index of migration 182: %s", def)
-		}
-		if drifts := indexDrifts(t, pool, "idx_guard_pending"); len(drifts) != 0 {
-			t.Errorf("schema contract after the cutover reports drift on idx_guard_pending: %+v", drifts)
 		}
 	})
 
@@ -268,7 +204,7 @@ func TestEmbedIndexDefinition_Integration(t *testing.T) {
 		if err := CleanupEmbedMigration(ctx, pool, migID); err != nil {
 			t.Fatalf("cleanup: %v", err)
 		}
-		if drifts := indexDrifts(t, pool, pickIndexes...); len(drifts) != 0 {
+		if drifts := indexDrifts(t, pool, optionalAnchors...); len(drifts) != 0 {
 			t.Errorf("schema contract after the re-verified cutover reports drift: %+v", drifts)
 		}
 	})

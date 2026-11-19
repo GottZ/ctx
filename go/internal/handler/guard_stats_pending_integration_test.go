@@ -415,9 +415,10 @@ func (f *guardStatsFixture) guardUntilEmpty() int {
 	return processed
 }
 
-// Issue #360: since migration 182 the type allowlist is the index condition
-// of idx_guard_pending, which holds the unchecked blocks with a vector of
-// every type. A guard.check switch on a type takes effect with the next
+// Issue #360: since migration 182 the type allowlist is the leading key of
+// idx_guard_pending_type, which holds the waiting blocks of every type, and
+// the pick reads one range of it per checked type. A guard.check switch on a
+// type takes effect with the next
 // registry snapshot, in both directions: guard-stats counts what the guard
 // then processes, before and after each switch. Beside them wait the blocks
 // of every other kind the pick filters out (another lifecycle, a stale
