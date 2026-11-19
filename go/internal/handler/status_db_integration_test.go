@@ -435,7 +435,7 @@ func validTestConfig(dbStatsInterval time.Duration) *config.Config {
 		Server: config.ServerConfig{DBPass: "x"},
 		Graph:  config.GraphConfig{HopDepth: 1},
 		Events: config.EventsConfig{DBStatsInterval: dbStatsInterval},
-		// #226/#208: the two synthesis cuts carry fatal floors (V61, V62).
+		// #226/#208: the two synthesis cuts carry fatal floors (V62, V63).
 		Query: config.QueryConfig{LowConfidenceMaxSources: config.Defaults().Query.LowConfidenceMaxSources, MaxSourceRunes: config.Defaults().Query.MaxSourceRunes},
 		// V21 (#38): the embed back-off bases must be > 0 to pass Validate —
 		// registry defaults, not wire-active here.

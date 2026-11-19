@@ -34,7 +34,7 @@ func k1Entry(t *testing.T, key, env, def string) {
 
 // TestLowConfidenceMaxSourcesKey (#226): the low-confidence cut is a hot,
 // tenant-overridable key whose default IS the llm constant, it reaches the
-// synthesis settings, and V61 refuses the one value that cannot mean a cut.
+// synthesis settings, and V62 refuses the one value that cannot mean a cut.
 func TestLowConfidenceMaxSourcesKey(t *testing.T) {
 	k1Entry(t, "query.low_confidence_max_sources", "CTX_LOW_CONFIDENCE_MAX_SOURCES", "2")
 	if got := defaultFor("query.low_confidence_max_sources"); got != llm.LowConfidenceMaxSources {
@@ -68,7 +68,7 @@ func TestLowConfidenceMaxSourcesKey(t *testing.T) {
 
 // TestMaxSourceRunesKey (#208): the per-source cut is a hot,
 // tenant-overridable key whose default IS llm.MaxBlockChars, it reaches the
-// synthesis settings, and V62 keeps it between today's cut (the floor every
+// synthesis settings, and V63 keeps it between today's cut (the floor every
 // head-heavy format was sized against) and the share one prompt can carry.
 func TestMaxSourceRunesKey(t *testing.T) {
 	k1Entry(t, "query.max_source_runes", "CTX_MAX_SOURCE_RUNES", "1500")
@@ -103,7 +103,7 @@ func TestMaxSourceRunesKey(t *testing.T) {
 
 // TestRerankTimeoutKey (#223): the cross-encoder deadline is a hot,
 // tenant-overridable key next to rerank.max_docs, its default IS
-// rerank.Timeout, it reaches the rrf stage, and V63 refuses a value above the
+// rerank.Timeout, it reaches the rrf stage, and V64 refuses a value above the
 // wire's own cap. 0 reads as the default, the timeout keys' legacy sentinel.
 func TestRerankTimeoutKey(t *testing.T) {
 	k1Entry(t, "rerank.timeout", "CTX_RERANK_TIMEOUT", "180")
@@ -136,7 +136,7 @@ func TestRerankTimeoutKey(t *testing.T) {
 }
 
 // TestQueryTranslateKey (#210): the translation switch is a hot,
-// tenant-overridable key next to the query thresholds, default auto, and V64
+// tenant-overridable key next to the query thresholds, default auto, and V65
 // refuses anything but auto and off after trim + lower-case — a tolerant
 // reading would turn a typo of "off" into the step the operator tried to
 // switch off (the V20 reasoning for dream.json_mode).

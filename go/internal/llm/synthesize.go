@@ -41,7 +41,7 @@ const (
 	// BudgetSynthesis. A raised cap redistributes that volume over fewer
 	// sources (SourceRuneCap) and never grows it, so the gate covers every
 	// value of the key without a second budget calculation. It is also the
-	// key's ceiling (V62): a single source can use the whole share, no more.
+	// key's ceiling (V63): a single source can use the whole share, no more.
 	SourceRunesShare = MaxPromptSources * MaxBlockChars
 
 	// LowConfidenceMaxSources limits sources for low-confidence queries. It is

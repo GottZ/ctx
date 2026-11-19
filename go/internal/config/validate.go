@@ -75,15 +75,13 @@ func temporalTimeoutBudgetOf(c *Config) time.Duration {
 // logging everything; Store.Replace rejects.
 func Validate(c *Config) []Issue {
 	var issues []Issue
-	issues = append(issues, validateQuery(c)...)              // V2, V5, V9b, V9c, V9d, V11, V26
-	issues = append(issues, validateQuerySynthesisCuts(c)...) // V61, V62
-	issues = append(issues, validateQueryTranslate(c)...)     // V64
-	issues = append(issues, validateRerankGraph(c)...)        // V3, V9, V63
-	issues = append(issues, validateDream(c)...)              // V6, V10, V14, V15, V16b, V16c, V18, V19, V20
-	issues = append(issues, validateGraphOverview(c)...)      // V17b
-	issues = append(issues, validateDurations(c)...)          // V17
-	issues = append(issues, validateEmbedBackoff(c)...)       // V21
-	issues = append(issues, validateDistill(c)...)            // V22-V25, V27-V33
+	issues = append(issues, validateQuery(c)...)         // V2, V5, V9b, V9c, V9d, V11, V26
+	issues = append(issues, validateRerankGraph(c)...)   // V3, V9, V64
+	issues = append(issues, validateDream(c)...)         // V6, V10, V14, V15, V16b, V16c, V18, V19, V20
+	issues = append(issues, validateGraphOverview(c)...) // V17b
+	issues = append(issues, validateDurations(c)...)     // V17
+	issues = append(issues, validateEmbedBackoff(c)...)  // V21
+	issues = append(issues, validateDistill(c)...)       // V22-V25, V27-V33
 	// V37 (W06-8): the foreign-load detector's floors and ratio range.
 	issues = append(issues, validateStatusForeignLoad(c)...)
 	// V38, V39 (W02-02): the gateway group's floors, caps and budget relation;
@@ -119,6 +117,10 @@ func Validate(c *Config) []Issue {
 	// V60 (#315): the MCP instructions text is valid UTF-8 without control
 	// characters, not blank, and at most MCPInstructionsMaxChars long.
 	issues = append(issues, validateMCPInstructions(c)...)
+	// V62 (#226), V63 (#208): the two cuts of the synthesis prompt.
+	issues = append(issues, validateQuerySynthesisCuts(c)...)
+	// V65 (#210): query.translate is auto or off.
+	issues = append(issues, validateQueryTranslate(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -942,13 +944,13 @@ func validateQuery(c *Config) []Issue {
 	return issues
 }
 
-// validateQuerySynthesisCuts holds V61 (#226) and V62 (#208), the two cuts the
+// validateQuerySynthesisCuts holds V62 (#226) and V63 (#208), the two cuts the
 // synthesis prompt applies to the retrieved sources — own function, because
 // validateQuery sits near the cyclop ceiling.
 func validateQuerySynthesisCuts(c *Config) []Issue {
 	var issues []Issue
 
-	// V61 (#226) — query.low_confidence_max_sources counts the sources a
+	// V62 (#226) — query.low_confidence_max_sources counts the sources a
 	// low_confidence prompt keeps. 0 renders as a configured cut and would
 	// send the model a question without a single source; "no cut" is any
 	// value at or above the query limit. Negatives belong to V35.
@@ -958,7 +960,7 @@ func validateQuerySynthesisCuts(c *Config) []Issue {
 				llm.MaxPromptSources)})
 	}
 
-	// V62 (#208) — query.max_source_runes lives in [llm.MaxBlockChars,
+	// V63 (#208) — query.max_source_runes lives in [llm.MaxBlockChars,
 	// llm.SourceRunesShare]. Below the floor the key would cut the head off
 	// every head-heavy format sized against today's 1500 runes (the derived
 	// renderer, the distiller's block) while still rendering as a window size;
@@ -973,11 +975,11 @@ func validateQuerySynthesisCuts(c *Config) []Issue {
 	return issues
 }
 
-// validateQueryTranslate is V64 (#210), the enum of query.translate.
+// validateQueryTranslate is V65 (#210), the enum of query.translate.
 func validateQueryTranslate(c *Config) []Issue {
 	var issues []Issue
 
-	// V64 (#210) — query.translate is auto or off, normalized in place (trim +
+	// V65 (#210) — query.translate is auto or off, normalized in place (trim +
 	// lower, the V20 pattern). Fatal, not V5's fallback: the fallback would be
 	// auto, so a typo of "off" would keep the translate step the operator was
 	// switching off while the settings surface renders the typo. Empty reads as
@@ -1002,7 +1004,7 @@ func validateRerankGraph(c *Config) []Issue {
 		issues = append(issues, Issue{Field: "rerank.blend_weight", Severity: SeverityError,
 			Msg: fmt.Sprintf("blend_weight %g must be in [0,1]", c.Rerank.BlendWeight)})
 	}
-	// V63 (#223) — rerank.timeout is capped by the wire's own rerank.Timeout:
+	// V64 (#223) — rerank.timeout is capped by the wire's own rerank.Timeout:
 	// rerank.Score ends every call there, so a larger value renders as
 	// configured and acts as the cap. 0 is the default (the timeout keys'
 	// sentinel), negatives belong to V17.

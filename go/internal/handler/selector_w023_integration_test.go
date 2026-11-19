@@ -100,7 +100,7 @@ func w023Config(enabled bool) *config.Config {
 		Graph:  config.GraphConfig{HopDepth: 1}, // Enabled stays false
 		Query:  config.QueryConfig{Timezone: time.UTC, LowConfidenceMaxSources: config.Defaults().Query.LowConfidenceMaxSources, MaxSourceRunes: config.Defaults().Query.MaxSourceRunes},
 		// Query: RateLimitRead 0 = disabled; #226/#208: the two synthesis cuts
-		// carry fatal floors (V61, V62).
+		// carry fatal floors (V62, V63).
 		// V21 (#38): the embed back-off bases must be > 0 to pass Validate —
 		// registry defaults, not wire-active here.
 		EmbedBackfill:  config.EmbedBackfillConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},

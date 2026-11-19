@@ -420,7 +420,7 @@ type RerankConfig struct {
 	BlendWeight float64 `key:"rerank.blend_weight" env:"CTX_RERANK_BLEND_WEIGHT" default:"1.0" mut:"hot" tenancy:"tenant-overridable"`
 	// Timeout is the deadline of the query path's ONE cross-encoder call, in
 	// seconds from admission on (#223). The default is rerank.Timeout (180 s),
-	// the wire's own safety net, and it is also the cap: V63 refuses a larger
+	// the wire's own safety net, and it is also the cap: V64 refuses a larger
 	// value, because the wire would end the call at 180 s anyway. 0 reads as
 	// the default (the timeout keys' sentinel). A call the deadline ends fails
 	// open on the pre-rerank order, as every rerank failure does — the key lets
@@ -926,7 +926,7 @@ type QueryConfig struct {
 	// synthesis prompt carries (#226; llm.LowConfidenceMaxSources is the
 	// default). The response still lists every source; the ones the cut kept
 	// out carry no citation_index. A value at or above the query limit (at
-	// most llm.MaxPromptSources) is no cut. 0 is refused (V61): a prompt
+	// most llm.MaxPromptSources) is no cut. 0 is refused (V62): a prompt
 	// without a source is not "no cut", it is no answer.
 	//
 	// It sits beside the two thresholds because it is what follows from them:
@@ -943,7 +943,7 @@ type QueryConfig struct {
 	// bounded by llm.SourceRunesShare / n — so a query with the default limit
 	// of 5 can show the model up to 6000 runes of each source, while a query
 	// at the 20-source clamp keeps 1500, and no prompt carries more source
-	// text than the worst case the H12 budget gate already proves. V62 keeps
+	// text than the worst case the H12 budget gate already proves. V63 keeps
 	// it in [llm.MaxBlockChars, llm.SourceRunesShare]: below, the head-heavy
 	// formats sized against 1500 (derived/render.go, the distiller's block)
 	// would lose their head; above, the value renders as configured and acts
@@ -958,7 +958,7 @@ type QueryConfig struct {
 	// a question llm.DetectGerman matches into English before retrieval; "off"
 	// (llm.TranslateOff) sends every question to the retrieval arms as
 	// written, with no translate-role call. The empty value reads as auto;
-	// anything else is refused after trim + lower-case (V64) — a tolerant
+	// anything else is refused after trim + lower-case (V65) — a tolerant
 	// reading would be auto, so a typo of "off" would silently keep the step
 	// the operator was switching off (the V20 reasoning).
 	//
