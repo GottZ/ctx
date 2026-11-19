@@ -763,6 +763,9 @@ type clusterCandidate struct {
 // The request filter (#225) is a third conjunct of the same WHERE, ahead of the
 // LIMIT: the window is filled with siblings that pass it, so an excluded
 // sibling never takes the place of one that would have been injected.
+//
+// The sibling's type_name rides along (issue #384): the answer derives the
+// foreign-text flag and the aggregate fold from it, as for a fusion hit.
 func fetchClusterInjection(ctx context.Context, pool *pgxpool.Pool,
 	clusterIDs, excludeIDs, readScopes, grantedBlockIDs, visibleTypes []string, filter RequestFilter, limit int) ([]clusterCandidate, error) {
 	if len(clusterIDs) == 0 || limit <= 0 {
@@ -784,7 +787,7 @@ func fetchClusterInjection(ctx context.Context, pool *pgxpool.Pool,
 
 	q := `
 SELECT cb.id::text, cb.title, cb.category, cb.tags, cb.content, cb.scope::text,
-       cb.updated_at, COALESCE(cb.quality_score, 0)::float8, m.cluster_id::text
+       cb.updated_at, cb.type_name, COALESCE(cb.quality_score, 0)::float8, m.cluster_id::text
 FROM graph_cluster_member m
 JOIN context_blocks cb ON cb.id = m.block_id
 WHERE m.cluster_id = ANY($1::uuid[])
@@ -810,7 +813,7 @@ LIMIT $6`
 	for rows.Next() {
 		var c clusterCandidate
 		if err := rows.Scan(&c.block.ID, &c.block.Title, &c.block.Category, &c.block.Tags,
-			&c.block.Content, &c.block.Scope, &c.block.UpdatedAt, &c.quality, &c.clusterID); err != nil {
+			&c.block.Content, &c.block.Scope, &c.block.UpdatedAt, &c.block.TypeName, &c.quality, &c.clusterID); err != nil {
 			return nil, fmt.Errorf("rrf: cluster injection scan: %w", err)
 		}
 		out = append(out, c)

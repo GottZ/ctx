@@ -260,7 +260,8 @@ func (a *expandCacheArm) candidateIDs(capped []expandWalkEdge) ([]string, error)
 // parenthesised scope/grant group), gated on context_blocks.scope — never on
 // context_dream_links.scope. Ids the query does not return are invisible
 // (fail-closed direction). The request filter (#225) rides along at the same
-// position as in the SQL arm's WHERE: after the walk's per-seed cap.
+// position as in the SQL arm's WHERE: after the walk's per-seed cap. The type
+// name rides along as in the SQL arm (issue #384).
 func (a *expandCacheArm) hydrate(ctx context.Context, ids []string) (map[uint32]*SearchResult, error) {
 	q := `
 SELECT cb.id::text,
@@ -269,7 +270,8 @@ SELECT cb.id::text,
        cb.tags,
        cb.content,
        cb.scope::text,
-       cb.updated_at
+       cb.updated_at,
+       cb.type_name
 FROM context_blocks cb
 WHERE cb.id = ANY($1::uuid[])
   AND ` + visibility.Predicate("cb", "$4", "$2", "$3")
@@ -294,7 +296,7 @@ WHERE cb.id = ANY($1::uuid[])
 	for rows.Next() {
 		var r SearchResult
 		if err := rows.Scan(
-			&r.ID, &r.Title, &r.Category, &r.Tags, &r.Content, &r.Scope, &r.UpdatedAt,
+			&r.ID, &r.Title, &r.Category, &r.Tags, &r.Content, &r.Scope, &r.UpdatedAt, &r.TypeName,
 		); err != nil {
 			return nil, fmt.Errorf("scan dream neighbor row: %w", err)
 		}

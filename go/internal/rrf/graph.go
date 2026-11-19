@@ -507,6 +507,11 @@ func logExpandBudget(rep *graphcache.BudgetReport) {
 // request's neighbour set and hydrate every gated edge of a hub instead of
 // the capped few. The cap stays a cap of edges; MaxInjected (fuseNeighbors)
 // only ever counts neighbours that passed.
+//
+// The hydrate reads the neighbour's type_name like ctx_rrf does (issue #384):
+// the answer derives the foreign-text flag (retrieval.untrusted) and the
+// aggregate fold from the type, and a neighbour without one was neither
+// flagged nor folded.
 func fetchNeighbors(ctx context.Context, pool *pgxpool.Pool, seedIDs, readScopes, grantedBlockIDs, visibleTypes []string, filter RequestFilter, cfg GraphConfig, hopDecay float64) ([]graphEdge, error) {
 	if grantedBlockIDs == nil {
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL (T40a)
@@ -567,7 +572,8 @@ SELECT r.seed_id::text,
        cb.tags,
        cb.content,
        cb.scope::text,
-       cb.updated_at
+       cb.updated_at,
+       cb.type_name
 FROM ranked r
 JOIN context_blocks cb ON cb.id = r.neighbor_id
 WHERE r.seed_rn <= $5
@@ -608,6 +614,7 @@ WHERE r.seed_rn <= $5
 			&e.neighbor.Content,
 			&e.neighbor.Scope,
 			&e.neighbor.UpdatedAt,
+			&e.neighbor.TypeName,
 		); err != nil {
 			return nil, fmt.Errorf("scan dream link row: %w", err)
 		}
