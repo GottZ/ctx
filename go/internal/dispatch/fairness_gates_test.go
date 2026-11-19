@@ -21,6 +21,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/GottZ/ctx/internal/testgoroutine"
 )
 
 // fairClockSetter is the test-only clock seam of the fairness meter (A03-W4,
@@ -833,7 +835,6 @@ func TestExternalHeavyHeadReservesUnitsAgainstBackground(t *testing.T) {
 // every check; afterwards nothing is held, and after one usage window the
 // reaper's sweep leaves no fairness record. Goroutines ±0. Run 3× with -race.
 func TestExternalFairCountersDoNotDrift(t *testing.T) {
-	const self = "TestExternalFairCountersDoNotDrift"
 	s := DefaultSettings()
 	s.ExternalQueuePerConsumer, s.ExternalQueuePerTenant, s.ExternalQueueMax = 0, 0, 0
 	d, h := newTestDispatcher(t, s, weightPolicy())
@@ -845,7 +846,7 @@ func TestExternalFairCountersDoNotDrift(t *testing.T) {
 	if cs, ok := any(d).(fairClockSetter); ok {
 		cs.setFairClockForTest(func() time.Time { return time.Now().Add(time.Duration(offset.Load())) })
 	}
-	before := settledGateGoroutines(self)
+	gate := testgoroutine.Take()
 
 	var fail atomic.Value
 	report := func(format string, args ...any) { fail.CompareAndSwap(nil, fmt.Sprintf(format, args...)) }
@@ -965,11 +966,5 @@ func TestExternalFairCountersDoNotDrift(t *testing.T) {
 	if diff != "" || left != 0 || records == 0 {
 		t.Fatalf("after the window sweep: diff=%q records=%d (before %d), want no difference, 0 records left and a non-empty meter before", diff, left, records)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for gateGoroutines(self) != before && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if after := gateGoroutines(self); after != before {
-		t.Fatalf("goroutines before %d, after %d — want ±0", before, after)
-	}
+	gateGoroutines(t, gate, 2*time.Second)
 }

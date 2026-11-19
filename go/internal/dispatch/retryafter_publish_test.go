@@ -10,16 +10,15 @@ package dispatch
 // (the server-admin pull).
 
 import (
-	"bytes"
 	"context"
 	"log/slog"
-	"regexp"
-	"runtime"
 	"slices"
-	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/GottZ/ctx/internal/testgoroutine"
 )
 
 // warmRing fills origin's window of class c with n samples of wait through
@@ -209,96 +208,25 @@ func hintStormRun(b *testing.B) Snapshot {
 	return d.Snapshot()
 }
 
-// goroutineRecord is one goroutine of a stack dump: its id, the id of the
-// goroutine whose go statement created it (0 for none), and whether it runs a
-// dispatcher loop (reaper or wait publisher).
-type goroutineRecord struct {
-	id, creator int64
-	loop        bool
-}
-
-var (
-	goroutineHeader  = regexp.MustCompile(`(?m)^goroutine (\d+) \[`)
-	goroutineCreator = regexp.MustCompile(`(?m)^created by \S+ in goroutine (\d+)$`)
-)
-
-// goroutineDump reads every goroutine of the process from one stack dump.
-func goroutineDump() []goroutineRecord {
-	buf := make([]byte, 1<<20)
-	for {
-		n := runtime.Stack(buf, true)
-		if n < len(buf) {
-			buf = buf[:n]
-			break
-		}
-		buf = make([]byte, 2*len(buf))
-	}
-	var out []goroutineRecord
-	for _, block := range bytes.Split(buf, []byte("\n\n")) {
-		h := goroutineHeader.FindSubmatch(block)
-		if h == nil {
-			continue
-		}
-		g := goroutineRecord{
-			loop: bytes.Contains(block, []byte("dispatch.(*Dispatcher).reapLoop(")) ||
-				bytes.Contains(block, []byte("dispatch.(*Dispatcher).publishLoop(")),
-		}
-		g.id, _ = strconv.ParseInt(string(h[1]), 10, 64)
-		if c := goroutineCreator.FindSubmatch(block); c != nil {
-			g.creator, _ = strconv.ParseInt(string(c[1]), 10, 64)
-		}
-		out = append(out, g)
-	}
-	return out
-}
-
-// currentGoroutineID is the id of the calling goroutine.
-func currentGoroutineID() int64 {
-	buf := make([]byte, 64)
-	h := goroutineHeader.FindSubmatch(buf[:runtime.Stack(buf, false)])
-	if h == nil {
-		panic("dispatch test: no goroutine header in the stack dump")
-	}
-	id, _ := strconv.ParseInt(string(h[1]), 10, 64)
-	return id
-}
-
-// descendants are the goroutines of dump that root created — or one of
-// known, or a goroutine they started, at any depth the dump can still link —
-// together with those of known that are still in the dump, and how many of
-// them run a dispatcher loop. Goroutines of other tests have other creators:
-// a loop of an earlier test's dispatcher, still on its way out after its
-// Close, is not counted here.
-func descendants(dump []goroutineRecord, root int64, known ...int64) (all []goroutineRecord, loops int) {
-	in := map[int64]bool{root: true}
-	for _, k := range known {
-		in[k] = true
-	}
-	for grew := true; grew; {
-		grew = false
-		for _, g := range dump {
-			if !in[g.id] && in[g.creator] {
-				in[g.id], grew = true, true
-			}
+// dispatcherLoops counts the goroutines of gs that run a dispatcher loop
+// (reaper or wait publisher).
+func dispatcherLoops(gs []testgoroutine.G) int {
+	n := 0
+	for _, g := range gs {
+		if strings.Contains(g.Stack, "dispatch.(*Dispatcher).reapLoop(") || strings.Contains(g.Stack, "dispatch.(*Dispatcher).publishLoop(") {
+			n++
 		}
 	}
-	for _, g := range dump {
-		if in[g.id] && g.id != root {
-			all = append(all, g)
-			if g.loop {
-				loops++
-			}
-		}
-	}
-	return all, loops
+	return n
 }
 
 // TestWaitPublisherStopsOnClose: New starts the reaper and the wait
 // publisher, Close ends both — exactly the two loops run while the dispatcher
 // lives, and after Close no goroutine the test's New, Acquire and Close
 // started (nor one those started) is left: no loop outlives Close. The
-// goroutines are told apart by the goroutine that created them, so the
-// loops of an earlier test's dispatcher — its Close returns once each loop
+// goroutines are the test's own, new since before New (testgoroutine: told
+// apart by the goroutine that created them), so the loops of an earlier
+// test's dispatcher — its Close returns once each loop
 // has signalled its exit (WaitGroup.Done in the loop's deferred path), so
 // the goroutine can still be in the stack dump for a moment (issue #362: a
 // process-wide count took one such loop into its baseline: 7 of 2 500
@@ -311,7 +239,7 @@ func descendants(dump []goroutineRecord, root int64, known ...int64) (all []goro
 // the settle). A loop that never stops stays counted.
 func TestWaitPublisherStopsOnClose(t *testing.T) {
 	const settle = time.Second
-	me := currentGoroutineID()
+	gate := testgoroutine.Take()
 	d := New(nil, DefaultSettings())
 	d.UpdatePolicy(onSlotPolicy(2))
 	if l, _, err := d.Acquire(ictx(principal("a")), interactiveReq()); err != nil {
@@ -322,26 +250,22 @@ func TestWaitPublisherStopsOnClose(t *testing.T) {
 	// A goroutine that has not run yet shows in the stack dump as its go
 	// statement's wrapper, not as the loop — wait for both loops to start.
 	deadline := time.Now().Add(settle)
-	live, loops := descendants(goroutineDump(), me)
-	for loops != 2 && time.Now().Before(deadline) {
+	live := gate.New(testgoroutine.Dump())
+	for dispatcherLoops(live) != 2 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
-		live, loops = descendants(goroutineDump(), me)
+		live = gate.New(testgoroutine.Dump())
 	}
-	if loops != 2 {
+	if loops := dispatcherLoops(live); loops != 2 {
 		t.Fatalf("dispatcher loops with a live dispatcher %d, want 2 (reaper and wait publisher); goroutines started by the test: %+v", loops, live)
-	}
-	var started []int64
-	for _, g := range live {
-		started = append(started, g.id)
 	}
 	d.Close()
 	deadline = time.Now().Add(settle)
-	left, loops := descendants(goroutineDump(), me, started...)
+	left := gate.New(testgoroutine.Dump())
 	for len(left) > 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
-		left, loops = descendants(goroutineDump(), me, started...)
+		left = gate.New(testgoroutine.Dump())
 	}
-	if loops != 0 {
+	if loops := dispatcherLoops(left); loops != 0 {
 		t.Fatalf("dispatcher loops after Close %d, want 0 — a loop outlived Close; goroutines left: %+v", loops, left)
 	}
 	if len(left) > 0 {

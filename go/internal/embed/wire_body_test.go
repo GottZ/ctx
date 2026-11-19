@@ -12,12 +12,11 @@ import (
 	"context"
 	"encoding/json"
 	"math"
-	"runtime"
-	"runtime/debug"
 	"strings"
 	"testing"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/testalloc"
 )
 
 // encoderBody is the gateway body as wireInput.marshal wrote it before
@@ -185,8 +184,10 @@ func TestEmbedRawBodyLenIsWireBodyLen(t *testing.T) {
 // (−short: … 1 MiB) — is one allocation of at most the body's bytes and
 // WireBodySlack (the runtime's size class), the body as long as
 // wireBodyLen says. The json.Encoder it replaces allocated up to 7.105 ×
-// the body over the same forms.
+// the body over the same forms. The allocations are the encode's own
+// (wireBodyAlloc), so one pass is the measurement.
 func TestWireBodyIsOneAllocation(t *testing.T) {
+	testalloc.EveryAllocation(t)
 	units := map[string]string{"ascii": "a", "fffd": "\ufffd", "nl": "\n", "ctl": "\x01", "quote": `"`, "u2028": "\u2028", "mixctl": "abcde\x01"}
 	sizes := []int{64 << 10, 1 << 20, 8 << 20, 24 << 20}
 	if testing.Short() {
@@ -194,7 +195,6 @@ func TestWireBodyIsOneAllocation(t *testing.T) {
 	}
 	var worst float64
 	var over uint64
-	passes := 0
 	for _, size := range sizes {
 		for name, unit := range units {
 			for _, k := range []int{1, 255} {
@@ -204,18 +204,9 @@ func TestWireBodyIsOneAllocation(t *testing.T) {
 				}
 				in := wireInput{texts: texts}
 				var v any = openAIEmbedRequest{Model: "m", Input: in.value()}
-				var body []byte
-				var alloc, mallocs uint64
-				for pass := range wireAllocPasses {
-					var err error
-					body, alloc, mallocs, err = wireBodyAlloc(in, v)
-					if err != nil {
-						t.Fatalf("%s %d B ×%d: %v", name, size, k, err)
-					}
-					if mallocs == 1 && alloc <= uint64(len(body))+WireBodySlack {
-						passes = max(passes, pass+1)
-						break
-					}
+				body, alloc, mallocs, err := wireBodyAlloc(t, in, v)
+				if err != nil {
+					t.Fatalf("%s %d B ×%d: %v", name, size, k, err)
 				}
 				if n := wireBodyLen("m", texts, nil, nil); n != len(body) {
 					t.Errorf("%s %d B ×%d: wireBodyLen %d, the body has %d bytes", name, size, k, n, len(body))
@@ -228,24 +219,25 @@ func TestWireBodyIsOneAllocation(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("FOLGEE wire body: at most %.4f × the body, at most %d B past it (slack %d), passes %d", worst, over, WireBodySlack, passes)
+	t.Logf("FOLGEE wire body: at most %.4f × the body, at most %d B past it (slack %d)", worst, over, WireBodySlack)
 }
 
-// wireAllocPasses is how often a form's encode is measured before it fails:
-// the counters are the process's, and a goroutine of the runtime or the
-// test binary can allocate while the encode runs — what it adds is never
-// the encode's, so the first clean pass is the measurement.
+// wireAllocPasses is how often wireCallAlloc averages a wire call's
+// allocations: those counters are the process's, and a goroutine of the
+// runtime or the test binary can allocate while the calls run — what it adds
+// is never the call's, so the least pass is the measurement.
 const wireAllocPasses = 3
 
-// wireBodyAlloc is one encode of v and what it allocated (TotalAlloc and
-// Mallocs), the collector off while it runs and the heap collected before.
-func wireBodyAlloc(in wireInput, v any) (body []byte, alloc, mallocs uint64, err error) {
-	defer debug.SetGCPercent(debug.SetGCPercent(-1))
-	runtime.GC()
-	runtime.GC()
-	var m0, m1 runtime.MemStats
-	runtime.ReadMemStats(&m0)
-	body, err = in.marshal(v)
-	runtime.ReadMemStats(&m1)
-	return body, m1.TotalAlloc - m0.TotalAlloc, m1.Mallocs - m0.Mallocs, err
+// wireBodyAlloc is one encode of v and what it allocated: bytes and
+// allocations under the encode's frame (wireInput.marshal), read from the
+// memory profile — never the process's counters, which a goroutine of the
+// runtime or of the test binary moves while the encode runs (issue #369).
+// The test must have called testalloc.EveryAllocation.
+func wireBodyAlloc(t testing.TB, in wireInput, v any) (body []byte, alloc, mallocs uint64, err error) {
+	t.Helper()
+	got, _ := testalloc.In(t, testalloc.Frame(wireInput.marshal), func() error {
+		body, err = in.marshal(v)
+		return err
+	})
+	return body, uint64(got.Bytes), uint64(got.Objects), err
 }

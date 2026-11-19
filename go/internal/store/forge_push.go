@@ -119,7 +119,12 @@ func ListCommentPushCandidates(ctx context.Context, pool *pgxpool.Pool, projectI
 // reaches here (after this the mapping is forge_id>0 and updated_at==synced_at, so
 // the candidate filter drops it — no double-rename, no base drift). The prefix
 // regex `^#L?\d+` rewrites both the local draft "#L5" and (defensively) a stale
-// "#5" to the authoritative number.
+// "#5" to the authoritative number. The title is part of the embed input, so
+// every block whose title the rename changed has its vector invalidated in this
+// transaction (InvalidateEmbeddingTx, issue #236): kept searchable, marked
+// stale until the backfill embeds the new title. Locks: the issue row, the
+// comment rows (the cascade), then their backfill memos — block before memo,
+// the backfill's order.
 //
 // The GitHub POST happened BEFORE this Tx (a wire create can not roll back); if
 // this commit fails the forge issue exists without a local number and a re-run
@@ -142,24 +147,56 @@ func FinalizePushCreateIssue(ctx context.Context, pool *pgxpool.Pool, blockID st
 			// Block title rename "#L<seq>"→"#<nr>" ($2 is the fully built "#<nr>" prefix,
 			// passed as text to avoid an int→text concat encode).
 			newPrefix := fmt.Sprintf("#%d", number)
-			if _, err := tx.Exec(ctx, `
+			renamed, err := renamedBlockIDs(ctx, tx, `
 			UPDATE context_blocks
 			   SET title = regexp_replace(title, '^#L?\d+', $2), updated_at = now()
-			 WHERE id = $1::uuid`, blockID, newPrefix); err != nil {
+			 WHERE id = $1::uuid
+			RETURNING id::text, old.title IS DISTINCT FROM new.title`, blockID, newPrefix)
+			if err != nil {
 				return fmt.Errorf("store: finalize push create rename: %w", err)
 			}
 			// Comment-title cascade — ONE UPDATE over all comments of this issue. Comment
 			// base_hash is title-INDEPENDENT (projection {body}, §3.6), so only the titles
 			// cascade; the "defensiv base rewrite" of §4.5.2 is a no-op for comments by
 			// construction (the issue's own base was rewritten above).
-			if _, err := tx.Exec(ctx, `
+			cascaded, err := renamedBlockIDs(ctx, tx, `
 			UPDATE context_blocks
 			   SET title = regexp_replace(title, '^#L?\d+', $2), updated_at = now()
-			 WHERE parent_id = $1::uuid AND type_name = 'comment'`, blockID, newPrefix); err != nil {
+			 WHERE parent_id = $1::uuid AND type_name = 'comment'
+			RETURNING id::text, old.title IS DISTINCT FROM new.title`, blockID, newPrefix)
+			if err != nil {
 				return fmt.Errorf("store: finalize push create comment cascade: %w", err)
+			}
+			for _, id := range append(renamed, cascaded...) {
+				if err := InvalidateEmbeddingTx(ctx, tx, id); err != nil {
+					return fmt.Errorf("store: finalize push create: %w", err)
+				}
 			}
 			return nil
 		})
+}
+
+// renamedBlockIDs runs a title UPDATE that returns (id, title changed) per row
+// and answers the ids whose title it changed.
+func renamedBlockIDs(ctx context.Context, tx pgx.Tx, sql string, args ...any) ([]string, error) {
+	rows, err := tx.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		var changed bool
+		if err := rows.Scan(&id, &changed); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if changed {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	return ids, rows.Err()
 }
 
 // FinalizePushCreateComment closes a comment push-create: forge_id 0→id, base :=

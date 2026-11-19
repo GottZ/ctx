@@ -18,6 +18,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/GottZ/ctx/internal/testgoroutine"
 )
 
 // otherOrigin is the second fake target of the Retry-After oracle probe.
@@ -904,13 +906,12 @@ func TestRejectionErrorUnwrapsToSentinel(t *testing.T) {
 // identities equal to their recomputation, nothing held, and the goroutine
 // count unchanged. Run with -race -count=3.
 func TestPredictionLeavesNoResidue(t *testing.T) {
-	const self = "TestPredictionLeavesNoResidue"
 	s := budgetSettings(30 * time.Millisecond)
 	d, _ := newTestDispatcher(t, s, partitionPolicy(4, 2)) // E = 2
 	for i := 0; i < waitRingK; i++ {
 		d.SeedLeaseSamplesForTest(testOrigin, ClassExternal, 1, time.Duration(1+i%8)*time.Millisecond)
 	}
-	before := settledGateGoroutines(self)
+	gate := testgoroutine.Take()
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	outcomes := map[string]int{}
@@ -964,13 +965,7 @@ func TestPredictionLeavesNoResidue(t *testing.T) {
 	if ts.ExternalRejects.Predicted == 0 || outcomes["lease"] == 0 {
 		t.Fatalf("vacuous: %v rejects %+v — the prediction and admissions must both occur", outcomes, ts.ExternalRejects)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for gateGoroutines(self) != before && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if after := gateGoroutines(self); after != before {
-		t.Fatalf("goroutines before %d, after %d — want ±0", before, after)
-	}
+	gateGoroutines(t, gate, 2*time.Second)
 }
 
 // TestExpireWaiterIsMeasured is gate (h), second half (A03-W5 review F7):

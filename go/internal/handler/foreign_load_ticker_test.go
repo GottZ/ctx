@@ -26,6 +26,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/testgoroutine"
 )
 
 // flStepper stands in for the ticker's sleep: every wait the ticker asks for
@@ -500,12 +501,17 @@ func TestForeignLoadTickerIdleWithoutTarget(t *testing.T) {
 	rows = append(rows, tenant, disabled, backends.Backend{ID: "n", Name: "nil-meta", Host: s.srv.URL, Scope: backends.GlobalScope, Enabled: true})
 
 	cfg := config.Defaults()
-	baseline := runtime.NumGoroutine()
+	// The goroutines counted are the test's own (testgoroutine: the server's,
+	// the ticker's and whatever a tick starts), never the process's — a
+	// goroutine an earlier test armed or left, starting or still running
+	// during the ticks, moved runtime.NumGoroutine's peak (issue #369).
+	gate := testgoroutine.Take()
+	baseline := gate.Len()
 	tk := startFLTicker(t, rows, cfg, flTickDispatch{origin: s.origin(t), slots: 4}, nil)
 	peak := 0
 	for i := 0; i < 50; i++ {
 		tk.step.next(t)
-		if n := runtime.NumGoroutine(); n > peak {
+		if n := len(gate.Own(testgoroutine.Dump())); n > peak {
 			peak = n
 		}
 		if tk.col.foreignLoad.inflight.Load() {

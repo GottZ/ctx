@@ -11,7 +11,8 @@
 //
 // Post-fix (migration 109 + StoreEmbedding(model) + ClearEmbedding(embed_model
 // NULL) + the scheduler/query call-site updates) this file proves:
-//   - writer-attributed provenance on StoreEmbedding, NULL-out on ClearEmbedding;
+//   - writer-attributed provenance on StoreEmbedding, kept and marked stale by
+//     InvalidateEmbeddingTx (it was NULL-out on ClearEmbedding before #198);
 //   - the fail-closed empty-model guard (no DB round-trip);
 //   - migration 109's backfill convergence, both for a fresh-DB write path and
 //     for a simulated pre-existing row re-running the idempotent backfill;
@@ -48,7 +49,7 @@ func TestEmbedProvenance_Integration(t *testing.T) {
 	}
 
 	// (1) Provenienz: StoreEmbedding writes the model that produced the
-	// vector; ClearEmbedding nulls both together; model="" is fail-closed
+	// vector; InvalidateEmbeddingTx keeps both, marked stale; model="" is fail-closed
 	// with NO db write (a vector without provenance is worse than none).
 	t.Run("provenance_clear_and_failclosed", func(t *testing.T) {
 		var id string

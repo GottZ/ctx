@@ -149,14 +149,18 @@ def test_provider_publishes_versioned_stable_head_with_bounded_frame(factory):
     frame = provider.on_pre_compress([{"role": "user", "content": "durable source decision"}])
 
     assert provider.pre_compress_checkpoint_api_version == 2
-    assert _names(c.calls) == ["search", "search", "store", "store", "store"]
+    assert _names(c.calls) == ["search", "search", "search", "store", "store", "store"]
     # "/" is sanitized away, so the title carries a hash of the full root id (0.6.1); with
-    # no head under it yet, the 0.6.0 title is searched once for a chain to continue.
+    # no head under it yet, the title is searched once more without the head tag (#289), then
+    # the 0.6.0 title once for a chain to continue.
     assert c.calls[0][1]["query"] == "Compaction checkpoint head root_session-a-a0af5788"
-    assert c.calls[1][1]["query"] == "Compaction checkpoint head root_session-a"
-    assert c.calls[4][1]["title"] == "Compaction checkpoint head root_session-a-a0af5788"
-    assert manifest_id in c.calls[4][1]["content"]
-    assert source_id in c.calls[3][1]["content"]
+    assert c.calls[0][1]["tags"] == ["checkpoint-head"]
+    assert c.calls[1][1]["query"] == "Compaction checkpoint head root_session-a-a0af5788"
+    assert "tags" not in c.calls[1][1]
+    assert c.calls[2][1]["query"] == "Compaction checkpoint head root_session-a"
+    assert c.calls[5][1]["title"] == "Compaction checkpoint head root_session-a-a0af5788"
+    assert manifest_id in c.calls[5][1]["content"]
+    assert source_id in c.calls[4][1]["content"]
     assert head_id in frame and manifest_id in frame
     assert source_id not in frame
     assert len(frame) < 1_000
@@ -168,9 +172,10 @@ def test_provider_frame_stays_bounded_when_transcript_spans_many_source_blocks(f
     frame = provider.on_pre_compress([{"role": "user", "content": "durable " + "x" * 12_000}])
 
     assert len(c.calls) > 7
-    # The calls between the head search and manifest + head are the parts, in transcript order:
-    # the manifest lists one id per part (a part names no position since 0.15.0, #344).
-    source_parts = [call[1] for call in c.calls[1:-2]]
+    # The calls between the head searches (tagged, then without the tag for a new root, #289) and
+    # manifest + head are the parts, in transcript order: the manifest lists one id per part (a
+    # part names no position since 0.15.0, #344).
+    source_parts = [call[1] for call in c.calls[2:-2]]
     assert all(a["title"].startswith("Compaction source part ") for a in source_parts)
     assert len(source_parts) == len(c.calls[-2][1]["metadata"]["source_block_ids"])
     assert len(frame) < 1_000
@@ -193,11 +198,12 @@ def test_provider_upserts_same_head_title_for_new_transcript_digest(factory):
     first = provider.on_pre_compress([{"role": "user", "content": "first durable decision"}])
     second = provider.on_pre_compress([{"role": "user", "content": "second corrected decision"}])
 
-    assert c.calls[3][1]["title"] == c.calls[7][1]["title"]
-    assert c.calls[2][1]["title"] != c.calls[6][1]["title"]
+    # Each run: tagged head search, the one without the tag (#289), part, manifest, head.
+    assert c.calls[4][1]["title"] == c.calls[9][1]["title"]
+    assert c.calls[3][1]["title"] != c.calls[8][1]["title"]
     assert "019f6000-0000-7000-8000-000000000062" in first
     assert "019f6000-0000-7000-8000-000000000065" in second
-    assert "019f6000-0000-7000-8000-000000000065" in c.calls[7][1]["content"]
+    assert "019f6000-0000-7000-8000-000000000065" in c.calls[9][1]["content"]
 
 
 def test_memory_manager_accepts_provider_as_required_checkpoint_api_v2(factory):
@@ -233,7 +239,7 @@ def test_literal_prior_context_user_quote_is_preserved_as_source_evidence(factor
             }
         ]
     )
-    assert "literal marker I want to discuss" in c.calls[1][1]["content"]
+    assert "literal marker I want to discuss" in c.calls[2][1]["content"]  # after both head searches
 
 
 def test_provider_links_new_manifest_to_previous_head_manifest_before_head_update(factory):
@@ -1079,7 +1085,7 @@ def test_wire_payload_of_real_client(monkeypatch):
     monkeypatch.setattr(client_mod, "_urlopen", fake_urlopen)
     w = ChainWriter(client=client_mod.CtxClient("http://ctx.invalid", "k"), sensitivity="personal", api_timeout=10.0)
     r = w.write([{"role": "user", "content": "wire"}], root_session_id="r1", session_id="r1", budget_s=20)
-    assert [s["url"].rsplit("/", 1)[1] for s in sent] == ["search", "store", "store", "store"]
+    assert [s["url"].rsplit("/", 1)[1] for s in sent] == ["search", "search", "store", "store", "store"]
     assert sent[0]["body"] == {
         "query": "Compaction checkpoint head r1",
         "category": CHAIN_CAT,
@@ -1087,7 +1093,9 @@ def test_wire_payload_of_real_client(monkeypatch):
         "types": ["checkpoint"],
         "limit": 10,
     }
-    for s in sent[1:]:
+    # A new root: the head title once more without the tag (#289), same type and category.
+    assert sent[1]["body"] == {k: v for k, v in sent[0]["body"].items() if k != "tags"}
+    for s in sent[2:]:
         b = s["body"]
         assert b["type"] == "checkpoint" and b["sensitivity"] == "personal" and b["category"] == CHAIN_CAT
         assert "provenance" not in b["metadata"] and "parent_id" not in b
@@ -1211,7 +1219,7 @@ def test_head_written_before_0_6_1_continues_its_chain(factory):
 
     p.on_pre_compress([{"role": "user", "content": "erste Kompaktierung nach dem Upgrade"}])
 
-    assert _searches(c.calls) == [new_title, legacy_title]
+    assert _searches(c.calls) == [new_title, new_title, legacy_title]  # tagged, untagged (#289), 0.6.0
     manifest, head = _stores(c.calls)[-2:]
     assert manifest["metadata"]["parent_manifest_id"] == LEGACY_MANIFEST_ID
     assert f"- Parent manifest: `{LEGACY_MANIFEST_ID}`" in manifest["content"]
@@ -1273,14 +1281,15 @@ def test_legacy_head_of_another_root_is_not_continued(factory):
     assert p._last_chain_receipt.lookup == "legacy"
 
 
-def test_ordinary_ids_keep_their_title_and_search_once(factory):
+def test_ordinary_ids_keep_their_title_and_search_no_legacy_title(factory):
     for root in ("20261031_120000_abcdef", "3f1c2a9e-8b7d-4c6e-9a1b-2d3e4f5a6b7c"):
         assert _MODULE.legacy_head_title_for(root) == _MODULE.head_title_for(root)
         p, c = factory(root, agent_context="primary")
 
         p.on_pre_compress([{"role": "user", "content": "evidence"}])
 
-        assert _searches(c.calls) == [f"Compaction checkpoint head {root}"], root
+        # Tagged, then once without the tag (#289); no 0.6.0 title, it is the same.
+        assert _searches(c.calls) == [f"Compaction checkpoint head {root}"] * 2, root
         assert p._last_chain_receipt.lookup == "none"
 
 

@@ -193,6 +193,11 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 	if block == nil {
 		return nil, "Block not found (or not in a writable scope of this key)", nil
 	}
+	// No card for an update of a derivative, which the confirm cannot execute
+	// (issue #275, the MCP update stage's check).
+	if rej := derivativeTargetReject(block); rej != nil {
+		return nil, rej.Msg, nil
+	}
 
 	cw := store.CanonicalWrite{
 		Op:            "update",

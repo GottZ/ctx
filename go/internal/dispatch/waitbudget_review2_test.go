@@ -70,6 +70,15 @@ func TestWaitBudgetServeByEdges(t *testing.T) {
 
 // F-2: the ServeBy term is anchored at the arrival like the setting term — a
 // mutex wait before the enqueue must not be counted twice (kills M26).
+//
+// The window is wall-clock by nature: the wait-budget timer runs on the
+// runtime clock, the dispatcher injects none. Its lower edge cannot flake (a
+// timer never fires early; the mutex wait counted twice expires the waiter
+// at its enqueue, ≈ 200 ms); the upper
+// edge (a timer armed at the enqueue would expire ≈ 500 ms) stays, measured
+// under -race on two cores at GOMAXPROCS=2 beside two busy loops (issue
+// #369): 300.13–320.13 ms over 200 runs at a 1-minute host load of 9–13,
+// 300.11–315.19 ms over 200 runs at 47–50.
 func TestWaitBudgetServeByAnchorsAtArrival(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), partitionPolicy(2, 1))
 	holder := mustAcquire(t, d, xctx(context.Background(), "holder", "tenant-a"), externalReq())

@@ -11,6 +11,8 @@ import (
 	"io"
 	"testing"
 	"testing/iotest"
+
+	"github.com/GottZ/ctx/internal/testalloc"
 )
 
 // chunks is a reader without a length that hands out its bytes in small
@@ -23,6 +25,7 @@ func chunks(b []byte) io.Reader { return iotest.HalfReader(bytes.NewReader(b)) }
 // echo, grown once to the cap for an echo, refused past the cap — and the
 // read allocates at most AnswerReadMax.
 func TestReadAnswerStaysWithinItsCap(t *testing.T) {
+	testalloc.EveryAllocation(t)
 	const docs, body = 4, 10 << 10
 	limit := answerReadCap(docs, body)
 	for _, c := range []struct {
@@ -48,7 +51,7 @@ func TestReadAnswerStaysWithinItsCap(t *testing.T) {
 		}
 		var got []byte
 		var err error
-		b, m := folgeRMeasure(true, func() { got, err = readAnswer(r, cl, docs, body) })
+		b, m := folgeRMeasure(t, testalloc.Frame(readAnswer), true, func() { got, err = readAnswer(r, cl, docs, body) })
 		t.Logf("FOLGE-R read: %-28s %d B: allocated %d B in %d, err=%v (cap %d, AnswerReadMax %d)", c.name, c.size, b, m, err, limit, AnswerReadMax(docs, body))
 		if c.refused {
 			if err == nil {
