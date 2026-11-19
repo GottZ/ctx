@@ -46,11 +46,20 @@ import (
 // iteration over the authoritative tenant list ONLY (it has no AuthResult);
 // request handlers must use SnapshotForRequest. Both fall back to the base
 // generation while the overlay/hook are unset, so single-tenant behavior is
-// byte-identical.
+// byte-identical. SnapshotForTenantResolved is SnapshotForTenant plus
+// whether the generation is the scope's own or that fallback, both from the
+// one call.
+//
+// One exception reads another tenant's generation on the request path: the
+// embed backfill's floor (backfillFloor) takes the sensitivity floor of the
+// tenant that owns a scope it may embed from (SnapshotForTenantResolved),
+// with a scope read from the settings table and context_tenant_scopes, never
+// from the request, and reads nothing else of that generation.
 type ConfigStore interface {
 	Snapshot() *config.Config
 	SnapshotForRequest(ctx context.Context) *config.Config
 	SnapshotForTenant(ctx context.Context, tenantScope string) *config.Config
+	SnapshotForTenantResolved(ctx context.Context, tenantScope string) (*config.Config, bool)
 }
 
 var _ ConfigStore = (*config.Store)(nil)
@@ -853,34 +862,6 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// Temporal relevance handled by FTS expansion, Dimension Table, and Gravity Boost.
 	embedQuery := searchQuery
 
-	// Step 3d: Backfill pending embeddings in the caller's read scopes before
-	// searching, newest first (issue #199; see backfillPending for the old
-	// end it also works with the background arm off). Ensures freshly stored
-	// blocks are immediately searchable. Per block the
-	// chain resolves with THAT block's floor-adjusted sensitivity (F3 §2.3
-	// gate table, embed-backfill row).
-	//
-	// M-W2 (design/05 §4.2, review finding #1): NOT on the shadow path. The
-	// chain-locality obligation resolves Chain(role, querySens, ar.HomeScope);
-	// this loop resolves Chain(RoleEmbed, floor.Apply(blockSensitivity,
-	// blockScope), blockScope) — a second chain under two different keys, both
-	// of which can WIDEN it past what the gate inspected (a lower required level
-	// admits backends Trust.Allows had excluded, a foreign block scope changes
-	// the VisibleTo set outright), and title+content travel over it.
-	//
-	// Skipping is the smaller correction of the two the review offered, and it
-	// is the better measurement besides: a write in the middle of a read-only
-	// measurement request contradicts the B-W2 determinism doctrine, and an
-	// embedding created DURING a sweep changes the corpus the sweep is
-	// measuring. Nothing is lost — the pending block keeps its place in the
-	// scheduler's own backfill and in the next ordinary query.
-	floor := cfg.Pool.ScopeSensitivityFloor
-	if len(req.ShadowTypes) == 0 {
-		if backfilled := h.backfillPending(ctx, floor, ar.ReadScopes, h.embedAdmission(), cfg); backfilled > 0 {
-			slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
-		}
-	}
-
 	// Step 4: Embed the search query with query prefix. Cached by (hash(prefix||text), model) —
 	// repeated queries (debug sessions, recurring lookups) serve from cache in a single UPDATE.
 	// The chain resolves with the query sensitivity; empty/exhausted chain
@@ -941,6 +922,45 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "embedding failed"})
 		return
+	}
+
+	// Step 4b: Backfill pending embeddings in the caller's read scopes before
+	// searching, newest first (issue #199; see backfillPending for the old
+	// end it also works with the background arm off). Ensures freshly stored
+	// blocks are immediately searchable. After the question's embed (issue
+	// #222): the question's vector does not depend on the backfill, and an
+	// embed the sync budget cuts can keep an engine busy after ctx dropped
+	// the call (an engine that does not stop a started batch on disconnect),
+	// so a question embedded after the backfill waited for that batch. Per
+	// block the chain resolves with THAT block's floor-adjusted sensitivity
+	// (F3 §2.3 gate table, embed-backfill row).
+	//
+	// M-W2 (design/05 §4.2, review finding #1): NOT on the shadow path. The
+	// chain-locality obligation resolves Chain(role, querySens, ar.HomeScope);
+	// this loop resolves Chain(RoleEmbed, floor.Apply(blockSensitivity,
+	// blockScope), blockScope) — a second chain under two different keys, both
+	// of which can WIDEN it past what the gate inspected (a lower required level
+	// admits backends Trust.Allows had excluded, a foreign block scope changes
+	// the VisibleTo set outright), and title+content travel over it.
+	//
+	// Skipping is the smaller correction of the two the review offered, and it
+	// is the better measurement besides: a write in the middle of a read-only
+	// measurement request contradicts the B-W2 determinism doctrine, and an
+	// embedding created DURING a sweep changes the corpus the sweep is
+	// measuring. Nothing is lost — the pending block keeps its place in the
+	// scheduler's own backfill and in the next ordinary query.
+	//
+	// The floor of a picked block is its owner's as well as the caller's
+	// (issue #253, backfillFloor): the pick reaches scopes of other tenants.
+	//
+	// embed_backfill.sync_disabled (issue #221, tenant-overridable, read from
+	// this request's snapshot) skips the step for the caller's tenant: no
+	// floor read, no pick, no embed.
+	floor := cfg.Pool.ScopeSensitivityFloor
+	if len(req.ShadowTypes) == 0 && !cfg.EmbedBackfill.SyncDisabled {
+		if backfilled := h.backfillPending(ctx, floor, ar.ReadScopes, h.embedAdmission(), cfg); backfilled > 0 {
+			slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
+		}
 	}
 
 	// Step 5: Hyphen preprocessing for FTS.
@@ -1863,7 +1883,7 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 // position — a younger interactive query embed overtakes the waiting
 // backfill rest between two blocks. (Dispatch attribution is separate from
 // the T35b llmlog attribution below, which stays NULL/background in nature.)
-func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFloor, readScopes []string, adm embedcache.Admission, cfg *config.Config) int {
+func (h *QueryHandler) backfillPending(ctx context.Context, callerFloor config.ScopeFloor, readScopes []string, adm embedcache.Admission, cfg *config.Config) int {
 	count := 0
 	syncCap := cfg.EmbedBackfill.SyncCap
 	// Time budget next to the count cap (embed_backfill.sync_budget, issue
@@ -1875,7 +1895,8 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 	// that overruns it is memoized caller_timeout, which while the arm runs
 	// leaves it to the background arm (runEmbedBackfillLoop) and with the
 	// arm off has this loop retry it after a backoff (below), and the loop
-	// ends so the question embed keeps the rest of the request. Zero =
+	// ends so the search keeps the rest of the request (the question is
+	// embedded before this loop, issue #222). Zero =
 	// unbounded, the pre-budget shape (explicit opt-out, same convention as
 	// SyncCap).
 	var budgetDeadline time.Time
@@ -1896,6 +1917,14 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 	// interval is global-only, so this per-request snapshot reads the value
 	// the arm runs on.
 	armRuns := cfg.EmbedBackfill.Interval > 0
+	// The floor of a block the pick can reach is its owner's as well as the
+	// caller's (issue #253); with the arm on the pick reaches the caller's
+	// read scopes, with the arm off every scope.
+	floor, err := h.backfillFloor(ctx, callerFloor, readScopes, !armRuns)
+	if err != nil {
+		slog.Warn("query backfill: sensitivity floors unreadable, backfill skipped", "error", err)
+		return 0
+	}
 	picker := newBackfillPicker(h.pool, armRuns, h.backendPool.TrustCeilings(backends.RoleEmbed), floor, readScopes)
 	picker.backoffBase, picker.backoffCap = cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap
 	for attempts := 0; syncCap <= 0 || attempts < syncCap; attempts++ {
