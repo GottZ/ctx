@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 184,
-    "migration_count": 72,
+    "migration_max": 185,
+    "migration_count": 73,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -5448,6 +5448,9 @@
     "idx_block_count_deltas_scope": {
       "def_hash": "cca36e050004a2bde6491f9249fbce4c7192b4841055bb8cd16091c014f64a59"
     },
+    "idx_block_grants_granted_by": {
+      "def_hash": "2872105f2675f3262edd2103c59e0add513babaa4d192031fc99379554fc053d"
+    },
     "idx_block_grants_grantee": {
       "def_hash": "60ed333ebc1e8e0cd0dbaf26eaee44f0497c0ef02de59f67dc4e07eeab75d0ac"
     },
@@ -5480,6 +5483,9 @@
     },
     "idx_blocks_workflow_created": {
       "def_hash": "71f4fd1b721c325c93a095d2f83ee15aa8f6b3e0ca98de4a1b368dff03e94696"
+    },
+    "idx_chat_sessions_created_by": {
+      "def_hash": "2e90ad595e574fd0094b3cafe3bf930c0ec2abbdd3a4a17c11c58fc0f8017991"
     },
     "idx_chat_sessions_scope": {
       "def_hash": "f32c4acc1bb4aa7062a4675ea831a3744113fae0d00c5a76920a881cb92b938f"
@@ -5761,6 +5767,9 @@
     "idx_oauth_clients_active": {
       "def_hash": "fb7988c8823da82ba293af0240e08c4e1dfb9bd682bd803b1e3d4328a8df9882"
     },
+    "idx_oauth_codes_api_key": {
+      "def_hash": "ba8f0d6b5c810c27cd46fc7235eaef74233ee278797debcbb2ef79c8fecc0d91"
+    },
     "idx_oauth_codes_expires": {
       "def_hash": "6edf0360f95fb1295b1d478d481b2b82111813ccaff1fdc4e91df53f625e15e2"
     },
@@ -5889,6 +5898,9 @@
     },
     "idx_webhook_project_recent": {
       "def_hash": "48e8a777f96045d7ee34666e3a110135b1d0cbe21225155e8b1efc93985e57b4"
+    },
+    "idx_write_log_api_key": {
+      "def_hash": "c5c74ea9fd01eeee4110ea2bf2d7c08d6466ca3378e6f2271fa119baaa56dd2b"
     },
     "idx_write_log_block": {
       "def_hash": "a6aa1367bfb274b81cd54fc09fc76cf4677ebec7de978718ef21797f766005db"

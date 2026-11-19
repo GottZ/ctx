@@ -1715,6 +1715,34 @@ Until both exist the sweep costs as before 184, and the schema-contract manifest
 
 **Rolling deploy and way back.** v5.65.0 sweeps, mints and logs out as before; the indexes serve its statements too. Its schema-contract check finds `_migrations:184` without an embedded file (`migration_integrity`, breaking) and two indexes it does not know (param): in mode `warn` it starts with `/health` reporting `schema_contract: attention`, in mode `enforce` it refuses to start until `CTX_CONTRACT_MODE=warn` or `off` is set. Way back: `DROP INDEX CONCURRENTLY` of both, then `DELETE FROM _migrations WHERE version = 184;`.
 
+### Migration 185: an index behind the foreign keys on `context_api_keys` whose tables grow with use
+
+Deleting an API key — the tenant prune (`store.PruneTenant`: `DELETE FROM context_api_keys WHERE tenant_id = $1`) or a delete by hand — runs one lookup per foreign key that points at `context_api_keys(id)`. Four of them sit on tables that grow with use and had no index whose leading column is the key, so each deleted key scanned each of these tables once (issue #277: next to 1 000 000 write-log rows 90 189 buffers per deleted key, 317–445 ms): `context_write_log.api_key_id` (`SET NULL`; no writer of this version sets it, so every row is `NULL` and the scan finds nothing), `context_block_grants.granted_by` (`SET NULL`), `context_chat_sessions.created_by` (`SET NULL`; web chats are kept forever by default) and `context_oauth_codes.api_key_id` (`CASCADE`). Migration 185 adds
+
+```sql
+CREATE INDEX idx_block_grants_granted_by ON context_block_grants (granted_by) WHERE granted_by IS NOT NULL;
+CREATE INDEX idx_oauth_codes_api_key ON context_oauth_codes (api_key_id);
+CREATE INDEX idx_write_log_api_key ON context_write_log (api_key_id) WHERE api_key_id IS NOT NULL;
+CREATE INDEX idx_chat_sessions_created_by ON context_chat_sessions (created_by) WHERE created_by IS NOT NULL;
+```
+
+(each lookup `col = $1` implies the predicate; rows without a key stay out — today every write-log row). With them a deleted key reads beside 300 000 write-log rows and 20 000 rows of each other table at most 36 buffers on the write log, 23 on the grants, 19 on the chat sessions and 4 on the OAuth codes per key, against 18 768–18 784, 271–293, 369–386 and 573–575 for the scans before (a prune of 8 keys 42–80 ms instead of 375–566 ms) (`TestMigration185KeyDeleteUsesTheIndexes`: every lookup reads its index, custom, generic and cached plan, statistics fresh, stale and never taken). `TestForeignKeysWithADeleteActionHaveAServingIndex` no longer excepts the four keys. Not covered: `context_pending_writes.api_key_id` (`CASCADE`) is a key on a TimescaleDB hypertable — copied onto every chunk, probed in each — whose fix is a change of the key, not an index; and the `created_by`/`updated_by`/`rotated_by` keys of the registries, bounded by configuration.
+
+**Build and lock.** `CREATE INDEX` takes `SHARE` on the indexed table until the file commits: readers go on, writers wait — on other instances grant and revoke and every block delete (grants), the OAuth authorize and token steps and their sweep (codes), the guard batch, the dream audit rows and every block or key delete (write log), every web chat turn, its retention janitor and the tenant prune (chat sessions). The migration builds inline below a threshold of the indexed table (`pg_class.reltuples`): 2 000 000 rows of the write log, whose writers are background jobs and deletes, and 500 000 rows of each other table. Measured with writers on second connections (`TestMigrationWave183MeasureKeys`; write-log rows of the guard's and dream's width, every `api_key_id` `NULL` as live): the write-log build 86–96 ms at 1 000 000 rows (488 MB heap) and 178–186 ms at 2 000 000 (976 MB), its writer waiting as long; the three others at 500 000 rows each 77 ms (grants), 169 ms (OAuth codes) and 56 ms (chat sessions); all four in one file 447–502 ms with the write log at 2 000 000 rows — a writer of a table waits from the lock on its table to the commit, the grants' writers longest, the chat sessions' 143–160 ms. Above a threshold, or when a name holds an `INVALID` index or another definition, it logs a WARNING and builds nothing for that table. Build out of band (readers and writers go on; the write-log index at 2 000 000 rows took 463 ms, its writer waiting 6 ms):
+
+```sql
+CREATE INDEX CONCURRENTLY idx_block_grants_granted_by ON context_block_grants (granted_by) WHERE granted_by IS NOT NULL;
+CREATE INDEX CONCURRENTLY idx_oauth_codes_api_key ON context_oauth_codes (api_key_id);
+CREATE INDEX CONCURRENTLY idx_write_log_api_key ON context_write_log (api_key_id) WHERE api_key_id IS NOT NULL;
+CREATE INDEX CONCURRENTLY idx_chat_sessions_created_by ON context_chat_sessions (created_by) WHERE created_by IS NOT NULL;
+```
+
+Until all four exist a deleted key scans the table that lacks one, as before 185, and the schema-contract manifest stays red.
+
+**Lock order.** A key delete and a block delete on another instance lock these tables too, through their foreign-key triggers, which fire in the order of their names — the names carry the oid of the key, so the order is the order the keys were created in. On a store grown through the releases (the reference instance) a key delete reaches the grants, the OAuth codes, the write log and the chat sessions in this order, and a block delete the grants before the write log; the migration takes its locks in the same order, so neither closes a cycle with it. A store whose keys were created in another order (a fresh chain numbers them in the order of the folded baseline) can close one during the builds; PostgreSQL then aborts one side after `deadlock_timeout` (`40P01`): the delete reports the error and is repeated, or the boot fails and the next start retries. `lock_timeout` is 3 s per lock.
+
+**Rolling deploy and way back.** v5.65.0 writes and deletes as before; the indexes serve its statements too. Its schema-contract check finds `_migrations:185` without an embedded file (`migration_integrity`, breaking) and four indexes it does not know (param): in mode `warn` it starts with `/health` reporting `schema_contract: attention`, in mode `enforce` it refuses to start until `CTX_CONTRACT_MODE=warn` or `off` is set. Way back: `DROP INDEX CONCURRENTLY` of the four, then `DELETE FROM _migrations WHERE version = 185;`.
+
 ### `graph_overview.csr_loader`: the rebuild's input substrate
 
 `CTX_GRAPH_OVERVIEW_CSR_LOADER` (default `false`, hot) switches how the rebuild gets its graph into memory. It changes no result — the partition, the modularity and the intra-cluster degrees are byte-identical either way, and that identity is a gate, not a hope.
