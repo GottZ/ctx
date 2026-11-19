@@ -131,7 +131,7 @@ Hybrid semantic + fulltext search with LLM synthesis, or retrieval only. Read-on
 | `types` | string[] | | restrict retrieval to these block types; each must be a retrieval-visible type, an unknown or non-visible name is an error |
 | `types_exclude` | string[] | | exclude these block types |
 | `synthesize` | boolean | | `false` = retrieval only: no synthesis step, the answer is the ranked sources as JSON (default `true`) |
-| `include_content` | boolean | | with `synthesize: false`, attach each source's content (at most 1500 characters); an error without it |
+| `include_content` | boolean | | with `synthesize: false`, attach each source's content (at most 1500 characters; a cut one carries `truncated: true`, `get` its id for the full text); an error without it |
 
 `category`, `tags` and `categories_exclude` are passed to `POST /api/query` under
 the same names and narrow the candidates of the rank-fusion step; given together,
@@ -184,7 +184,8 @@ Lightweight search without an LLM call. Read-only.
 |---|---|---|---|
 | `query` | string | | search text |
 | `category` | string | | filter by category |
-| `tags` | string[] | | filter by tags |
+| `tags` | string[] | | blocks that carry at least one of these tags |
+| `tags_all` | string[] | | blocks that carry all of these tags; with `tags` both apply (all of these, and at least one of those) |
 | `limit` | integer | | maximum results (default 10, max 50) |
 | `after` | object | | page a listing with an empty `query`: `{}` for the first page, then the `next_after` of the previous answer |
 | `include_content` | boolean | | answer each block's full `content` and `metadata` instead of the preview |
