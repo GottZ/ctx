@@ -1,6 +1,7 @@
 <script lang="ts">
   import { toApiError, type ApiError } from '../../lib/api'
   import { searchBlocks, type SearchResult } from '../../lib/graph/api'
+  import TrustMarks from '../../lib/blocks/TrustMarks.svelte'
 
   // U03-W1 (§4.2): der Pick liefert das Fokus-Rückgabe-Ziel mit. `origin` ist
   // das Such-INPUT-Element (stabil über beide Stages, überlebt den Pick) — NIE
@@ -138,6 +139,7 @@
           <button type="button" disabled={pageBusy} onclick={() => pick(r.id)}>
             <span class="title">{r.title}</span>
             <span class="meta">{r.category} · {r.scope}</span>
+            <TrustMarks block={r} />
             <span class="preview">{r.content_preview.slice(0, 140)}</span>
           </button>
         </li>
