@@ -39,6 +39,9 @@ type swapStore struct {
 func (s *swapStore) Snapshot() *config.Config                                 { return s.p.Load() }
 func (s *swapStore) SnapshotForRequest(context.Context) *config.Config        { return s.p.Load() }
 func (s *swapStore) SnapshotForTenant(context.Context, string) *config.Config { return s.p.Load() }
+func (s *swapStore) SnapshotForTenantResolved(context.Context, string) (*config.Config, bool) {
+	return s.p.Load(), false // no overlay: the base answers every scope
+}
 
 // healthTestConfig is the config side of the fixture. It has one field left:
 // the dream master switch, which decides whether the dream role is aggregated

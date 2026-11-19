@@ -20,7 +20,9 @@
 // foreign block reaches the backend). The others pass before and after: the
 // control that the fixture reaches the foreign block at all, that the
 // caller's own floor still applies, and that a floor counts only for a scope
-// its tenant owns.
+// its tenant owns. The two owner_config_unbuildable_*_reload_during_the_build
+// probes were RED while backfillFloor told config.Store's fallback from an
+// owner's generation by comparing it with a base read at another time.
 //
 //	go test -tags=integration ./internal/handler/ -run TestQueryBackfillOwnerFloor -count=1 -v
 package handler
@@ -137,11 +139,14 @@ func ownfSetFloor(t *testing.T, f *bfsFixture, configScope string, floor map[str
 // no-credentials, with sync_cap 4 and the background arm on or off.
 func ownfQuery(t *testing.T, f *bfsFixture, rec *ownfRecorder, keyCtx context.Context, callerFloor config.ScopeFloor, armOn bool) {
 	t.Helper()
-	ownfQueryOverlay(t, f, rec, keyCtx, callerFloor, armOn, settings.TenantOverlay(f.pool))
+	ownfQueryOverlay(t, f, rec, keyCtx, callerFloor, armOn, func(*config.Store) config.TenantOverlay {
+		return settings.TenantOverlay(f.pool)
+	})
 }
 
-// ownfQueryOverlay is ownfQuery with the tenant overlay as a parameter.
-func ownfQueryOverlay(t *testing.T, f *bfsFixture, rec *ownfRecorder, keyCtx context.Context, callerFloor config.ScopeFloor, armOn bool, overlay config.TenantOverlay) {
+// ownfQueryOverlay is ownfQuery with the tenant overlay as a parameter; it
+// is built for the request's config.Store, so that it can reload it.
+func ownfQueryOverlay(t *testing.T, f *bfsFixture, rec *ownfRecorder, keyCtx context.Context, callerFloor config.ScopeFloor, armOn bool, overlay func(*config.Store) config.TenantOverlay) {
 	t.Helper()
 	base := bw2Config()
 	base.EmbedBackfill.SyncCap = 4
@@ -151,7 +156,7 @@ func ownfQueryOverlay(t *testing.T, f *bfsFixture, rec *ownfRecorder, keyCtx con
 	request := *base
 	request.Pool.ScopeSensitivityFloor = callerFloor
 	cs := config.NewStore(base)
-	cs.SetOverlay(overlay)
+	cs.SetOverlay(overlay(cs))
 
 	bpool := backends.NewPool(nil, nil)
 	bpool.SeedSnapshotForTest([]backends.Backend{
@@ -268,38 +273,56 @@ func TestQueryBackfillOwnerFloor(t *testing.T) {
 	// The owner's configuration does not build (a failed read of its rows;
 	// config.Store then answers with the base generation): the request
 	// cannot know the owner's floor and skips the backfill, in both modes.
-	failing := func(f *bfsFixture) config.TenantOverlay {
+	// With reload, a settings reload (config.Store.Replace) lands while the
+	// failing build runs: the fallback is the base the call started on, and
+	// the store holds another one by then (RED before the fallback was read
+	// from the call that returned it: the block reached the backend).
+	failing := func(t *testing.T, f *bfsFixture, reload bool) func(*config.Store) config.TenantOverlay {
 		real := settings.TenantOverlay(f.pool)
-		return func(ctx context.Context, base *config.Config, tenantScope string) (*config.Config, error) {
-			if tenantScope == bfsForeignScope {
-				return nil, errors.New("probe: the owner's rows cannot be read")
+		return func(cs *config.Store) config.TenantOverlay {
+			return func(ctx context.Context, base *config.Config, tenantScope string) (*config.Config, error) {
+				if tenantScope == bfsForeignScope {
+					if reload {
+						next := *base
+						if err := cs.Replace(&next); err != nil {
+							t.Errorf("reload: %v", err)
+						}
+					}
+					return nil, errors.New("probe: the owner's rows cannot be read")
+				}
+				return real(ctx, base, tenantScope)
 			}
-			return real(ctx, base, tenantScope)
 		}
 	}
-	t.Run("owner_config_unbuildable_arm_off", func(t *testing.T) {
-		f, rec := bfsSetup(t), ownfNewRecorder(t)
-		ownfSetFloor(t, f, bfsForeignScope, map[string]string{bfsForeignScope: credentials})
-		f.write(t, f.foreignCtx, bfsForeignTitle)
-		f.write(t, f.callerCtx, bfsCallerTitle)
-		ownfQueryOverlay(t, f, rec, f.callerCtx, nil, false, failing(f))
-		if rec.received(bfsForeignTitle) || f.embedded(t, bfsForeignTitle) {
-			t.Error("the backend received the block on the base's floor although its owner's configuration did not build")
+	for _, reload := range []bool{false, true} {
+		suffix := ""
+		if reload {
+			suffix = "_reload_during_the_build"
 		}
-		if f.embedded(t, bfsCallerTitle) {
-			t.Error("the backfill ran on floors it could not read in full")
-		}
-	})
-	t.Run("owner_config_unbuildable_granted_scope", func(t *testing.T) {
-		f, rec := bfsSetup(t), ownfNewRecorder(t)
-		ownfSetFloor(t, f, bfsForeignScope, map[string]string{bfsForeignScope: credentials})
-		granted := ownfGrantedCaller(t, f)
-		f.write(t, f.foreignCtx, bfsForeignTitle)
-		ownfQueryOverlay(t, f, rec, granted, nil, true, failing(f))
-		if rec.received(bfsForeignTitle) || f.embedded(t, bfsForeignTitle) {
-			t.Error("the backend received the block of a granted scope on the base's floor although its owner's configuration did not build")
-		}
-	})
+		t.Run("owner_config_unbuildable_arm_off"+suffix, func(t *testing.T) {
+			f, rec := bfsSetup(t), ownfNewRecorder(t)
+			ownfSetFloor(t, f, bfsForeignScope, map[string]string{bfsForeignScope: credentials})
+			f.write(t, f.foreignCtx, bfsForeignTitle)
+			f.write(t, f.callerCtx, bfsCallerTitle)
+			ownfQueryOverlay(t, f, rec, f.callerCtx, nil, false, failing(t, f, reload))
+			if rec.received(bfsForeignTitle) || f.embedded(t, bfsForeignTitle) {
+				t.Error("the backend received the block on the base's floor although its owner's configuration did not build")
+			}
+			if f.embedded(t, bfsCallerTitle) {
+				t.Error("the backfill ran on floors it could not read in full")
+			}
+		})
+		t.Run("owner_config_unbuildable_granted_scope"+suffix, func(t *testing.T) {
+			f, rec := bfsSetup(t), ownfNewRecorder(t)
+			ownfSetFloor(t, f, bfsForeignScope, map[string]string{bfsForeignScope: credentials})
+			granted := ownfGrantedCaller(t, f)
+			f.write(t, f.foreignCtx, bfsForeignTitle)
+			ownfQueryOverlay(t, f, rec, granted, nil, true, failing(t, f, reload))
+			if rec.received(bfsForeignTitle) || f.embedded(t, bfsForeignTitle) {
+				t.Error("the backend received the block of a granted scope on the base's floor although its owner's configuration did not build")
+			}
+		})
+	}
 
 	// A floor counts only for a scope its tenant owns: the foreign tenant
 	// flooring `private` (the caller's scope, owned by the default tenant)

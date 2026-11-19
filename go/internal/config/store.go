@@ -130,7 +130,8 @@ func (s *Store) Snapshot() *Config {
 // construction. While the request-scope hook is unset or the overlay is nil it
 // returns the base generation.
 func (s *Store) SnapshotForRequest(ctx context.Context) *Config {
-	return s.snapshotForScope(ctx, requestScope(ctx))
+	cfg, _ := s.snapshotForScope(ctx, requestScope(ctx))
+	return cfg
 }
 
 // SnapshotForTenant returns the tenant-resolved generation for an explicit
@@ -139,21 +140,35 @@ func (s *Store) SnapshotForRequest(ctx context.Context) *Config {
 // so the scope is passed explicitly and the reserved-prefix guard is the last
 // defense. Request handlers must use SnapshotForRequest.
 func (s *Store) SnapshotForTenant(ctx context.Context, tenantScope string) *Config {
+	cfg, _ := s.snapshotForScope(ctx, tenantScope)
+	return cfg
+}
+
+// SnapshotForTenantResolved is SnapshotForTenant that also says where the
+// generation came from. resolved is true when the overlay answered for
+// tenantScope (a cached or a fresh build; the generation can be the base
+// itself, the overlay's answer for a tenant without rows of its own) and
+// false when the base answered in its place: no overlay, an empty or reserved
+// scope, or a build that failed or was declined. Both come from the one call,
+// so a Replace between two reads cannot make a fallback look like a tenant
+// generation (comparing the result with a base read at another time can).
+// Same scope rule as SnapshotForTenant: never a scope from request input.
+func (s *Store) SnapshotForTenantResolved(ctx context.Context, tenantScope string) (cfg *Config, resolved bool) {
 	return s.snapshotForScope(ctx, tenantScope)
 }
 
-func (s *Store) snapshotForScope(ctx context.Context, tenantScope string) *Config {
+func (s *Store) snapshotForScope(ctx context.Context, tenantScope string) (*Config, bool) {
 	base := s.p.Load()
 	// Fail-safe to base: no overlay (single-tenant), empty scope (unresolved),
 	// or reserved scope (_global / _-prefixed) never gets a tenant generation.
 	if s.overlay == nil || tenantScope == "" || strings.HasPrefix(tenantScope, "_") {
-		return base
+		return base, false
 	}
 	gen := s.baseGen.Load()
 	m := s.tenants.Load()
 	if v, ok := m.Load(tenantScope); ok {
 		if e := v.(*tenantEntry); e.gen == gen {
-			return e.cfg // hit: one atomic load, current generation
+			return e.cfg, true // hit: one atomic load, current generation
 		}
 		// stale (base advanced under it): fall through to rebuild
 	}
@@ -183,9 +198,9 @@ func (s *Store) snapshotForScope(ctx context.Context, tenantScope string) *Confi
 	// Fail-safe, self-healing: an overlay error or decline yields the base
 	// generation and is NOT cached, so the next access retries.
 	if err != nil || res == nil {
-		return base
+		return base, false
 	}
-	return res.(*Config)
+	return res.(*Config), true
 }
 
 // InvalidateTenant drops exactly one tenant generation; the next

@@ -44,18 +44,22 @@ import (
 // tenant; there is no scope parameter to spoof (fail-closed by construction,
 // §5.1). SnapshotForTenant takes an explicit scope and is for BACKGROUND
 // iteration over the authoritative tenant list ONLY (it has no AuthResult);
-// request handlers must use SnapshotForRequest. One exception reads another
-// tenant's generation on the request path: the embed backfill's floor
-// (backfillFloor) takes the sensitivity floor of the tenant that owns a
-// scope it may embed from, with a scope read from the settings table and
-// context_tenant_scopes, never from the request, and reads nothing else of
-// that generation. Both fall back to the base
+// request handlers must use SnapshotForRequest. Both fall back to the base
 // generation while the overlay/hook are unset, so single-tenant behavior is
-// byte-identical.
+// byte-identical. SnapshotForTenantResolved is SnapshotForTenant plus
+// whether the generation is the scope's own or that fallback, both from the
+// one call.
+//
+// One exception reads another tenant's generation on the request path: the
+// embed backfill's floor (backfillFloor) takes the sensitivity floor of the
+// tenant that owns a scope it may embed from (SnapshotForTenantResolved),
+// with a scope read from the settings table and context_tenant_scopes, never
+// from the request, and reads nothing else of that generation.
 type ConfigStore interface {
 	Snapshot() *config.Config
 	SnapshotForRequest(ctx context.Context) *config.Config
 	SnapshotForTenant(ctx context.Context, tenantScope string) *config.Config
+	SnapshotForTenantResolved(ctx context.Context, tenantScope string) (*config.Config, bool)
 }
 
 var _ ConfigStore = (*config.Store)(nil)

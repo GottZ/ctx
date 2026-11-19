@@ -29,11 +29,12 @@ const scopeFloorSettingKey = "pool.scope_sensitivity_floor"
 // detached memo writes of backfillPending use.
 const ownerConfigBuildTimeout = 5 * time.Second
 
-// errOwnerConfigFallback: config.Store answered with the base generation for
-// a configuration that has a floor row of its own. settings.TenantOverlay
-// never answers so for such a configuration (it builds one), so the base is
-// config.Store's fallback after a failed build, and its floor is not the
-// owner's.
+// errOwnerConfigFallback: config.Store answered with its fallback, the base
+// generation, for a configuration that has a floor row of its own: the
+// overlay's build failed or declined, and the base's floor is not the
+// owner's. The store says so from the call that returned the generation
+// (SnapshotForTenantResolved); a base read at another time cannot tell, a
+// settings reload in between makes the fallback a different base.
 var errOwnerConfigFallback = errors.New("backfill floor: an owner's configuration did not build")
 
 // backfillFloor is the sensitivity floor the query path's embed backfill
@@ -67,9 +68,10 @@ var errOwnerConfigFallback = errors.New("backfill floor: an owner's configuratio
 // cost follows the owners' scope lists (each capped by max_scopes), not what
 // a floor map names. The snapshots are config.Store's cached generations.
 //
-// SnapshotForTenant on the request path: the scopes it is called with come
-// from the settings table and from context_tenant_scopes, never from the
-// request, and only the floor is read from what it returns (ConfigStore).
+// SnapshotForTenantResolved on the request path: the scopes it is called
+// with come from the settings table and from context_tenant_scopes, never
+// from the request, and only the floor and whether the store fell back to
+// the base are read from what it returns (ConfigStore).
 //
 // An error leaves the caller nothing to apply; backfillPending then skips
 // the backfill for the request (fail-closed: no block leaves on a floor that
@@ -99,28 +101,22 @@ func (h *QueryHandler) backfillFloor(ctx context.Context, callerFloor config.Sco
 type ownerFloors struct {
 	cfg      ConfigStore
 	buildCtx context.Context
-	base     *config.Config
 	floors   map[string]config.ScopeFloor
 	out      config.ScopeFloor
 }
 
 // floorOf is the floor of the configuration at configScope. hasRow says the
-// configuration has a floor row of its own, so it must not resolve to the
-// base generation (errOwnerConfigFallback).
+// configuration has a floor row of its own, so it must not resolve to
+// config.Store's fallback to the base generation (errOwnerConfigFallback).
+// The base answering for _global is not a fallback: it is that
+// configuration.
 func (r *ownerFloors) floorOf(configScope string, hasRow bool) (config.ScopeFloor, error) {
 	if f, ok := r.floors[configScope]; ok {
 		return f, nil
 	}
-	snap := r.cfg.SnapshotForTenant(r.buildCtx, configScope)
-	if hasRow && configScope != store.GlobalScope {
-		if r.base == nil {
-			// The base generation: config.Store answers the reserved
-			// _global scope with it.
-			r.base = r.cfg.SnapshotForTenant(r.buildCtx, store.GlobalScope)
-		}
-		if snap == r.base {
-			return nil, fmt.Errorf("%w (%s)", errOwnerConfigFallback, configScope)
-		}
+	snap, resolved := r.cfg.SnapshotForTenantResolved(r.buildCtx, configScope)
+	if hasRow && !resolved && configScope != store.GlobalScope {
+		return nil, fmt.Errorf("%w (%s)", errOwnerConfigFallback, configScope)
 	}
 	r.floors[configScope] = snap.Pool.ScopeSensitivityFloor
 	return r.floors[configScope], nil

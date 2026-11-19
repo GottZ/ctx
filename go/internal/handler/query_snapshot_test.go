@@ -58,6 +58,11 @@ func (s *countingStore) SnapshotForTenant(context.Context, string) *config.Confi
 	return s.cfg.Load()
 }
 
+func (s *countingStore) SnapshotForTenantResolved(context.Context, string) (*config.Config, bool) {
+	s.calls.Add(1)
+	return s.cfg.Load(), false // no overlay: the base answers every scope
+}
+
 // snapshotTestConfig builds a minimal request-path config. Since F3-P3 the
 // embed tuple comes from the backend POOL, not the config snapshot — the
 // config carries only the request-path tuning surface here. The chat tuple
