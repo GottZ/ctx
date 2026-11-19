@@ -86,9 +86,13 @@
 -- /health reports schema_contract attention; in mode enforce it refuses to
 -- start until CTX_CONTRACT_MODE=warn or off is set.
 --
--- WAY BACK (forward-only tree; to undo temporarily): run the CREATE OR
--- REPLACE FUNCTION ctx_guard_check block of 173_embedding_stale.sql, then
--- DELETE FROM _migrations WHERE version = 188.
+-- WAY BACK (forward-only tree; to undo temporarily): first stop every
+-- instance of a release that embeds this file — its runner applies every
+-- embedded file whose _migrations row is missing, so a restart after the
+-- DELETE would run this file again. Then run the CREATE OR REPLACE FUNCTION
+-- ctx_guard_check block of 173_embedding_stale.sql, then
+-- DELETE FROM _migrations WHERE version = 188, and only then start the
+-- rollback image.
 --
 -- No table, column, index or trigger changes (test.sh T07 counts stay). The
 -- schema-contract manifest records the new function definition and
