@@ -27,11 +27,14 @@ import (
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
-// blockFKInventorySQL lists every foreign key that points at context_blocks,
-// TimescaleDB chunk copies included, with the indexes that serve its lookup.
-// Deleting a block runs one lookup per such key on the referencing table
-// (`WHERE col = $1`, whatever the ON DELETE action: CASCADE deletes, SET NULL
-// updates, NO ACTION and RESTRICT check). Without an index whose leading
+// fkInventorySQL lists every foreign key of the database, TimescaleDB chunk
+// copies included, with the table it points at (ref) and the indexes that
+// serve its lookup. Deleting a referenced row runs one lookup per such key on
+// the referencing table (`WHERE col = $1`, whatever the ON DELETE action:
+// CASCADE deletes, SET NULL updates, NO ACTION and RESTRICT check). The block
+// gate below reads the keys on context_blocks, the delete-action gate
+// (fk_delete_action_index_integration_test.go, issue #277) every key whose
+// delete action writes the referencing table. Without an index whose leading
 // columns are the key's columns that lookup is a scan of the referencing
 // table, once per deleted block. A partial index serves it only when its
 // predicate follows from `col = $1`, which this query accepts in exactly one
@@ -46,8 +49,9 @@ import (
 // chunk: measured for issue #255 with an index on every chunk, 1.2 ms per
 // deleted block at 10 chunks, 7.2 ms at 100, 19.6 ms at 400. No index makes
 // that constant, so the gate refuses the key itself.
-const blockFKInventorySQL = `
+const fkInventorySQL = `
 SELECT c.conname,
+       c.confrelid::regclass::text AS ref,
        c.conrelid::regclass::text AS tbl,
        (SELECT string_agg(a.attname, ', ' ORDER BY k.ord)
           FROM unnest(c.conkey) WITH ORDINALITY k(attnum, ord)
@@ -77,12 +81,11 @@ SELECT c.conname,
   JOIN pg_class      r ON r.oid = c.conrelid
   JOIN pg_namespace  n ON n.oid = r.relnamespace
  WHERE c.contype = 'f'
-   AND c.confrelid = 'public.context_blocks'::regclass
- ORDER BY tbl, cols, c.conname`
+ ORDER BY ref, tbl, cols, c.conname`
 
 type blockFK struct {
-	name, table, cols, onDelete, serving string
-	hypertable                           bool
+	name, ref, table, cols, onDelete, serving string
+	hypertable                                bool
 }
 
 func (f blockFK) String() string {
@@ -94,9 +97,22 @@ func (f blockFK) String() string {
 	return fmt.Sprintf("%s(%s) %s [%s] served by %s", f.table, f.cols, action, f.name, serving)
 }
 
+// readBlockFKs is the inventory of the keys that point at context_blocks.
 func readBlockFKs(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []blockFK {
 	t.Helper()
-	rows, err := pool.Query(ctx, blockFKInventorySQL)
+	var out []blockFK
+	for _, f := range readFKs(t, ctx, pool) {
+		if f.ref == "context_blocks" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// readFKs is the inventory of every foreign key (fkInventorySQL).
+func readFKs(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []blockFK {
+	t.Helper()
+	rows, err := pool.Query(ctx, fkInventorySQL)
 	if err != nil {
 		t.Fatalf("fk inventory: %v", err)
 	}
@@ -104,7 +120,7 @@ func readBlockFKs(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []block
 	var fks []blockFK
 	for rows.Next() {
 		var f blockFK
-		if err := rows.Scan(&f.name, &f.table, &f.cols, &f.onDelete, &f.serving, &f.hypertable); err != nil {
+		if err := rows.Scan(&f.name, &f.ref, &f.table, &f.cols, &f.onDelete, &f.serving, &f.hypertable); err != nil {
 			t.Fatalf("fk inventory: %v", err)
 		}
 		fks = append(fks, f)

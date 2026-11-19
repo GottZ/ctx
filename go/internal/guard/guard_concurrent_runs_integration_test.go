@@ -23,8 +23,10 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/rand"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,6 +35,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/guard"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
@@ -588,6 +591,129 @@ func TestConcurrentGuardRuns_FreeRunning(t *testing.T) {
 				tc.runs, tc.rounds, verdicts, 6*tc.rounds, concurrent.Round(time.Millisecond), errs, dl0, dl1)
 			if dl1 != dl0 || errs > 0 {
 				t.Errorf("concurrent guard runs: deadlocks +%d, run errors %d, want none", dl1-dl0, errs)
+			}
+			var all []string
+			for _, p := range pairs {
+				all = append(all, p[0], p[1])
+			}
+			v := assertSettled(t, f.pool, all)
+			for _, p := range pairs {
+				if n := archivedOf(v, p[0], p[1]); n != 1 {
+					t.Errorf("pair %s/%s: %d archived, want exactly 1", v[p[0]].title, v[p[1]].title, n)
+				}
+			}
+		})
+	}
+}
+
+// windowWidener sleeps a random moment of up to max at the end of the pick's
+// ROLLBACK TO SAVEPOINT (issue #360): the window between the pick's two
+// steps, in which the kept blocks are not locked, grows from a round trip to
+// that, so the runs around it act inside it more often.
+type windowWidener struct{ max time.Duration }
+
+type widenKey struct{}
+
+func (w windowWidener) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(d.SQL, "ROLLBACK TO SAVEPOINT guard_pick") {
+		return context.WithValue(ctx, widenKey{}, true)
+	}
+	return ctx
+}
+
+func (w windowWidener) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
+	if ctx.Value(widenKey{}) != nil {
+		time.Sleep(time.Duration(rand.Int63n(int64(w.max))))
+	}
+}
+
+// typedBlock writes a pending block of a given type through the production
+// write path.
+func typedBlock(t *testing.T, pool *pgxpool.Pool, title, typ string, vec []float32) string {
+	t.Helper()
+	ctx := context.Background()
+	b, err := store.UpsertBlock(ctx, pool, "q360c", title, "content of "+title, nil, nil, "private", true, store.SensitivityWrite{}, typ)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreEmbedding(ctx, pool, b.ID, "q360", vec); err != nil {
+		t.Fatal(err)
+	}
+	return b.ID
+}
+
+// Free-running across types (issue #360): two and four runs started
+// together over rounds of duplicate pairs whose two blocks have different
+// checked types, so every pick locks more than its limit in step 1 and goes
+// through the window between its two steps; the window is widened and
+// VACUUM runs throughout. Every pair keeps exactly one block, every block
+// has one verdict and one audit row, no two blocks are archived as each
+// other's duplicate (#364), no run fails and the deadlock counter does not
+// move.
+func TestConcurrentGuardRuns_FreeRunningAcrossTypes(t *testing.T) {
+	for _, tc := range []struct{ runs, limit, rounds int }{{2, 3, 6}, {4, 2, 6}} {
+		t.Run(fmt.Sprintf("%d_runs", tc.runs), func(t *testing.T) {
+			f := newConcurrentFixture(t)
+			ctx := context.Background()
+			widened := tracedPool(t, f.pool, windowWidener{max: 3 * time.Millisecond})
+			dl0 := deadlockCount(t, f.pool)
+			var stop atomic.Bool
+			var vacuums atomic.Int64
+			vacDone := make(chan struct{})
+			go func() {
+				defer close(vacDone)
+				for !stop.Load() {
+					if _, err := f.pool.Exec(ctx, `VACUUM (INDEX_CLEANUP ON) context_blocks`); err != nil {
+						t.Errorf("vacuum: %v", err)
+						return
+					}
+					vacuums.Add(1)
+					time.Sleep(5 * time.Millisecond)
+				}
+			}()
+			var errs, verdicts int
+			var pairs [][2]string
+			for round := 0; round < tc.rounds; round++ {
+				// p1 q1 p2 q2 p3 q3 by created_at, p_i knowledge and q_i
+				// reference, each pair near-identical.
+				for i := 0; i < 3; i++ {
+					base := stateLockVec(nil, 0)
+					p := typedBlock(t, f.pool, fmt.Sprintf("p%d round %d", i, round), "knowledge", stateLockVec(base, 0.05))
+					time.Sleep(time.Millisecond)
+					q := typedBlock(t, f.pool, fmt.Sprintf("q%d round %d", i, round), "reference", stateLockVec(base, 0.05))
+					time.Sleep(time.Millisecond)
+					pairs = append(pairs, [2]string{p, q})
+				}
+				var wg sync.WaitGroup
+				start := make(chan struct{})
+				res := make([]runResult, tc.runs)
+				for k := 0; k < tc.runs; k++ {
+					wg.Add(1)
+					go func(k int) {
+						defer wg.Done()
+						<-start
+						n, err := guard.RunGuardBatch(ctx, widened, f.set, tc.limit)
+						res[k] = runResult{n, err}
+					}(k)
+				}
+				close(start)
+				wg.Wait()
+				for _, r := range res {
+					verdicts += r.n
+					if r.err != nil {
+						errs++
+						t.Errorf("run: %v", r.err)
+					}
+				}
+				drain(t, f)
+			}
+			stop.Store(true)
+			<-vacDone
+			dl1 := deadlockCount(t, f.pool)
+			t.Logf("%d runs × %d rounds: verdicts of the concurrent runs %d of %d blocks, run errors %d, VACUUM %d, deadlocks %d -> %d",
+				tc.runs, tc.rounds, verdicts, 6*tc.rounds, errs, vacuums.Load(), dl0, dl1)
+			if dl1 != dl0 {
+				t.Errorf("deadlocks %d -> %d, want none", dl0, dl1)
 			}
 			var all []string
 			for _, p := range pairs {

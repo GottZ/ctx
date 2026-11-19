@@ -26,9 +26,14 @@ type purgeSpec struct {
 	// ConfirmBlocks absent = dry run; otherwise the `counted.blocks` of the
 	// dry run, re-checked against a fresh count before anything is deleted.
 	ConfirmBlocks *int64 `json:"confirm_blocks"`
+	// Keepalive arms the keepalive bytes from the start (issue #277): one
+	// space per heartbeatInterval while the purge works, for a reverse proxy
+	// whose read timeout only bytes reset. The first space commits the 200; a
+	// refusal after it is that 200 with success:false in the body.
+	Keepalive bool `json:"keepalive"`
 }
 
-const purgeSpecHelp = "data payload required: scope; optional tags, category, created_before, created_after (RFC 3339), archived_only, confirm_blocks — unknown fields are refused"
+const purgeSpecHelp = "data payload required: scope; optional tags, category, created_before, created_after (RFC 3339), archived_only, confirm_blocks, keepalive — unknown fields are refused"
 
 // handlePurge is `manage purge`: the hard delete of block data inside one
 // scope (store.PurgeScope). Tier tierTenantAdmin; the per-scope check is the
@@ -58,8 +63,18 @@ func (h *ManageHandler) handlePurge(w http.ResponseWriter, r *http.Request, ar *
 		CreatedBefore: spec.CreatedBefore, CreatedAfter: spec.CreatedAfter,
 		ArchivedOnly: spec.ArchivedOnly,
 	}
+	// The answer goes out through the keepalive of /api/query
+	// (query_keepalive.go, issue #277): http.Server's WriteTimeout (main.go:
+	// 120 s) is an absolute deadline fixed when the request was read, and a
+	// purge at the 1M-block scale runs for minutes. Every heartbeatInterval
+	// the ticker rolls the write deadline without writing a byte, so the
+	// answer of a long run arrives with the status and body it always had;
+	// with keepalive:true each tick also writes a space (spec.Keepalive).
+	ka := armQueryKeepalive(ctx, w, spec.Keepalive)
+	defer ka.close()
+	w = ka
 	// The confirmed run is detached from the request: a client that gives up
-	// (the CLI's 120 s timeout, a dropped connection) would otherwise roll back
+	// (a dropped connection, a proxy that times out) would otherwise roll back
 	// the batch in flight and leave the purge to restart from a new dry run.
 	// Every batch is its own transaction, so a run that ends at shutdown
 	// leaves whole batches. The dry run stays bound to the request.

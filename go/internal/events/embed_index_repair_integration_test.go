@@ -188,7 +188,7 @@ func invalidateIndexT(t *testing.T, pool *pgxpool.Pool, name string) {
 	}
 }
 
-// repairBreaks are the three states of a _next index the confirm refuses.
+// repairBreaks are the states of a _next index the confirm refuses.
 var repairBreaks = []struct {
 	label   string
 	indexes []string
@@ -201,6 +201,10 @@ var repairBreaks = []struct {
 		func(t *testing.T, pool *pgxpool.Pool) { invalidateIndexT(t, pool, "idx_dream_pending_next") }},
 	{"missing", []string{"idx_guard_pending_next"}, indexActionCreated,
 		func(t *testing.T, pool *pgxpool.Pool) { dropIndexT(t, pool, "idx_guard_pending_next") }},
+	// A migration whose green verdict was given on a release before 182
+	// (issue #360): the twin of idx_guard_pending_type did not exist then.
+	{"missing_since_182", []string{"idx_guard_pending_type_next"}, indexActionCreated,
+		func(t *testing.T, pool *pgxpool.Pool) { dropIndexT(t, pool, "idx_guard_pending_type_next") }},
 }
 
 func TestEmbedIndexRepair_Integration(t *testing.T) {

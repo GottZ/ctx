@@ -55,30 +55,274 @@ type pendingBlock struct {
 	typeName string
 }
 
-// guardPendingWhere is THE single guard-batch pending predicate (WF T7,
-// design/01 §7-T7): the pick query and PendingStats (manage guard-stats,
-// issue #341) consume this one fragment instead of carrying two copies.
-// typesParam binds the GuardCheckTypes allowlist (guard.check=true types).
-// The first three conjuncts mirror idx_guard_pending (M074) byte-for-byte —
-// only pending rows are IN that partial index; NOT embedding_stale (issue
-// #198, part B: a title or content change keeps the previous vector until the
-// backfill writes the new one, and the change also drops guard_checked_at, so
-// without it the batch would check the new text by the old text's vector and
-// write the verdict as final), category != 'index' (topic-map mechanism rest,
-// §4.2: agent briefings share the system-meta type but ARE checked — dropping
-// the category rest would silently guard-check the topic-map), the lifecycle
-// gate and the type allowlist filter on the index result. A stale block waits
-// in the index until its new vector lands, as a block without a vector waited
-// outside it before. typesParam is a code-owned bind placeholder at every call
-// site — never user input.
-func guardPendingWhere(typesParam string) string {
-	return `NOT is_archived
+// guardPendingIndexWhere is the part of the guard-batch pending predicate a
+// catalog can hold, and word for word the predicate of idx_guard_pending_type
+// (migration 182, issue #360): not archived, no verdict, a vector that is not
+// stale, a category other than index, the lifecycle knowledge. The type
+// allowlist comes from the registry and cannot be part of a predicate; it is
+// that index's leading key instead. The first three conjuncts are the
+// predicate of idx_guard_pending (M074), which the pick of a binary before
+// 182 reads. A change of one of these conjuncts changes idx_guard_pending_type
+// in the same step (a migration and its twin in events.verifySisterIndexes):
+// the planner takes a partial index only when it proves that the statement
+// implies the predicate.
+const guardPendingIndexWhere = `NOT is_archived
 		  AND (metadata->>'guard_checked_at') IS NULL
 		  AND embedding IS NOT NULL
 		  AND NOT embedding_stale
 		  AND category != 'index'
-		  AND lifecycle_state = 'knowledge'
+		  AND lifecycle_state = 'knowledge'`
+
+// guardPendingWhere is THE single guard-batch pending predicate (WF T7,
+// design/01 §7-T7): the pick and PendingStats (manage guard-stats, issue
+// #341) consume this one fragment instead of carrying two copies.
+// typesParam binds the GuardCheckTypes allowlist (guard.check=true types).
+// NOT embedding_stale (issue #198, part B: a title or content change keeps
+// the previous vector until the backfill writes the new one, and the change
+// also drops guard_checked_at, so without it the batch would check the new
+// text by the old text's vector and write the verdict as final), category !=
+// 'index' (topic-map mechanism rest, §4.2: agent briefings share the
+// system-meta type but ARE checked — dropping the category rest would
+// silently guard-check the topic-map), the lifecycle gate. typesParam is a
+// code-owned bind placeholder at every call site — never user input.
+func guardPendingWhere(typesParam string) string {
+	return guardPendingIndexWhere + `
 		  AND type_name = ANY(` + typesParam + `::text[])`
+}
+
+// guardPickKey is the order of the pick: created_at as UTC wall time, which
+// orders exactly as created_at does (UTC has no offset changes) and is
+// immutable, so an index can carry it. It is the second key column of
+// idx_guard_pending_type (migration 182) and no other index carries it — the
+// point of it (issue #360): for an ORDER BY on created_at itself the planner
+// can also walk idx_context_created, the whole store in created_at order,
+// and it took that walk past a large checked corpus whenever its estimate
+// put the waiting blocks early in it (they are the newest). Ordered by this
+// key the only ordered path is idx_guard_pending_type, a range per type that
+// ends after the batch limit. Written as the function call so that the
+// statement and the index deparse alike in every session time zone.
+const guardPickKey = `timezone('UTC', created_at)`
+
+// guardPickSavepoint names the savepoint around the pick's first step.
+const guardPickSavepoint = "guard_pick"
+
+// guardPickNoSort is set for step 1 only, inside its savepoint: every path a
+// type's branch could take besides the range of idx_guard_pending_type in
+// key order needs a sort (no other index carries the key), and with
+// enable_sort off the planner takes a path without a disabled node whenever
+// one exists (PostgreSQL 18 compares the count of disabled nodes before the
+// cost). Without it the planner chose, per branch, a sort over all entries
+// of idx_guard_pending — the index of 181 that stays beside 182 for binaries
+// before it — whenever its row estimates were small, and read that index
+// once per checked type (issue #360: 29 158 buffers beside 100 000 foreign
+// entries, 5 831 for the pick before 182). The sort above the branches is in
+// every plan and stays. ROLLBACK TO SAVEPOINT undoes the setting; when the
+// pick keeps step 1's locks, it is set back before the savepoint is released.
+const (
+	guardPickNoSort      = "SET LOCAL enable_sort = off"
+	guardPickRestoreSort = "SET LOCAL enable_sort TO DEFAULT"
+)
+
+// guardPickLockSQL is step 1 of the pick ($1 = the GuardCheckTypes allowlist,
+// $2 = the batch limit): per checked type the oldest waiting blocks, at most
+// the batch limit of each, locked and returned with their row version
+// (ctid), oldest first over all types. Each type's branch is one range of
+// idx_guard_pending_type read in key order, so the cost follows the blocks it
+// locks — not the waiting blocks of unchecked types, nor the blocks the
+// predicate leaves out, nor the checked corpus. The lock sits in the branch:
+// SKIP LOCKED there passes over blocks another run holds and goes on to the
+// next of that type (a lock above the branch would read the same oldest
+// blocks of the type, find them held and skip them, so a second run got
+// nothing while more blocks of the type wait). DISTINCT keeps a type named
+// twice from returning its blocks twice.
+var guardPickLockSQL = `SELECT x.tid::text, x.id, x.type_name
+	  FROM (SELECT DISTINCT unnest($1::text[])) AS t(name)
+	 CROSS JOIN LATERAL (
+		SELECT ctid AS tid, id, type_name, ` + guardPickKey + ` AS k
+		  FROM context_blocks
+		 WHERE type_name = t.name
+		   AND ` + guardPendingIndexWhere + `
+		 ORDER BY ` + guardPickKey + `
+		 LIMIT $2
+		   FOR NO KEY UPDATE SKIP LOCKED) x
+	 ORDER BY x.k`
+
+// guardPickRelockSQL is step 2 of the pick ($1 = the row versions of the
+// blocks step 1 kept, $2 = the allowlist, $3 = their ids): it locks those
+// versions again, after step 1's locks were given back. The WHERE clause is
+// the row versions and the ids only, both bounded by the batch, so the plan
+// is a TID scan or a primary-key lookup whatever the statistics (the pick
+// predicate there let the planner turn to a pending index and read every
+// waiting block, issue #360). The id test before the lock keeps a row
+// version that VACUUM freed and a later write reused for another block out
+// of the batch and unlocked. Whether a locked row joins the batch is the
+// column waiting, computed on the version the lock got: the whole pick
+// predicate and the identity of the block. A block written between the two
+// steps has a new version and the old one is no longer visible, so it falls
+// out of this batch and waits for the next; one written while this statement
+// runs is locked on its newest version and joins the batch only if the
+// recheck of the scan returns that version and waiting holds there. A
+// locked row with waiting false stays locked to the end of the batch
+// transaction and is not processed.
+var guardPickRelockSQL = `SELECT id, type_name,
+	       COALESCE(` + guardPendingWhere("$2") + `
+		  AND id = ANY($3::uuid[]), false) AS waiting
+	  FROM context_blocks
+	 WHERE ctid = ANY($1::tid[])
+	   AND id = ANY($3::uuid[])
+	 ORDER BY created_at
+	   FOR NO KEY UPDATE SKIP LOCKED`
+
+// guardPickIndexReadySQL tells whether idx_guard_pending_type stands as
+// migration 182 builds it (valid, ready, the deparsed definition the
+// migration adopts). Migration 182 does not build it above 500 000 rows, nor
+// over an INVALID or foreign index of the name, and a re-embed migration
+// swapped by a binary before 182 leaves it on the old column and drops it at
+// the cleanup. Without it every branch of step 1 needs a sort, and the
+// planner may sort a whole index or all blocks of a type per checked type;
+// the pick then sends its statement before 182 (guardPickBefore182SQL),
+// which costs what it cost before.
+const guardPickIndexReadySQL = `SELECT EXISTS (SELECT 1 FROM pg_index
+		WHERE indexrelid = to_regclass('public.idx_guard_pending_type') AND indisvalid AND indisready
+		  AND pg_get_indexdef(indexrelid) = 'CREATE INDEX idx_guard_pending_type ON public.context_blocks USING btree (type_name, timezone(''UTC''::text, created_at)) WHERE ((NOT is_archived) AND ((metadata ->> ''guard_checked_at''::text) IS NULL) AND (embedding IS NOT NULL) AND (NOT embedding_stale) AND ((category)::text <> ''index''::text) AND ((lifecycle_state)::text = ''knowledge''::text))')`
+
+// guardPickBefore182SQL is the pick of the releases before migration 182,
+// one statement ordered by created_at over idx_guard_pending: what the pick
+// runs while idx_guard_pending_type does not stand (guardPickIndexReadySQL).
+var guardPickBefore182SQL = `SELECT id, type_name FROM context_blocks
+	WHERE ` + guardPendingWhere("$1") + `
+	ORDER BY created_at ASC
+	LIMIT $2
+	FOR NO KEY UPDATE SKIP LOCKED`
+
+// lockedPick is one row of step 1: the block and the row version it locked.
+type lockedPick struct {
+	tid   string
+	block pendingBlock
+}
+
+// pickPending takes the guard batch in tx: the oldest waiting blocks over all
+// checked types, at most limit, locked FOR NO KEY UPDATE until tx ends, in
+// created_at order; blocks another transaction holds are passed over (SKIP
+// LOCKED), so runs side by side split the waiting blocks (issue #360).
+//
+// Step 1 (guardPickLockSQL) runs in a savepoint, with sorts off for its plan
+// (guardPickNoSort), and locks up to limit blocks of every checked type, more
+// than the batch when several types wait. When it locked no more than limit,
+// every one of them is in the batch and the savepoint is released with the
+// locks. Otherwise the first limit by created_at are kept, ROLLBACK TO
+// SAVEPOINT gives back every lock of step 1,
+// and step 2 (guardPickRelockSQL) locks the kept blocks again by their row
+// versions. Between the two steps the kept blocks are not locked: another
+// run can take them (step 2 then skips them, and this batch is smaller), and
+// a writer can change them (they fall out of this batch). A run never takes
+// a block another run holds, and never a block that does not wait.
+//
+// While idx_guard_pending_type does not stand as migration 182 builds it,
+// the pick is the one statement of the releases before 182
+// (guardPickBefore182SQL), at their cost.
+func pickPending(ctx context.Context, tx pgx.Tx, checkTypes []string, limit int) ([]pendingBlock, error) {
+	var ready bool
+	if err := tx.QueryRow(ctx, guardPickIndexReadySQL).Scan(&ready); err != nil {
+		return nil, fmt.Errorf("guard: pick index probe: %w", err)
+	}
+	if !ready {
+		return pickBefore182(ctx, tx, checkTypes, limit)
+	}
+	if _, err := tx.Exec(ctx, "SAVEPOINT "+guardPickSavepoint+"; "+guardPickNoSort); err != nil {
+		return nil, fmt.Errorf("guard: pick savepoint: %w", err)
+	}
+	locked, err := lockOldestPerType(ctx, tx, checkTypes, limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(locked) <= limit {
+		if _, err := tx.Exec(ctx, guardPickRestoreSort+"; RELEASE SAVEPOINT "+guardPickSavepoint); err != nil {
+			return nil, fmt.Errorf("guard: pick release: %w", err)
+		}
+		blocks := make([]pendingBlock, len(locked))
+		for i, l := range locked {
+			blocks[i] = l.block
+		}
+		return blocks, nil
+	}
+	kept := locked[:limit]
+	if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+guardPickSavepoint+"; RELEASE SAVEPOINT "+guardPickSavepoint); err != nil {
+		return nil, fmt.Errorf("guard: pick rollback: %w", err)
+	}
+	return relockKept(ctx, tx, kept, checkTypes)
+}
+
+// pickBefore182 runs guardPickBefore182SQL.
+func pickBefore182(ctx context.Context, tx pgx.Tx, checkTypes []string, limit int) ([]pendingBlock, error) {
+	rows, err := tx.Query(ctx, guardPickBefore182SQL, checkTypes, limit)
+	if err != nil {
+		return nil, fmt.Errorf("guard: fetch pending: %w", err)
+	}
+	defer rows.Close()
+	var blocks []pendingBlock
+	for rows.Next() {
+		var b pendingBlock
+		if err := rows.Scan(&b.id, &b.typeName); err != nil {
+			return nil, fmt.Errorf("guard: scan block id: %w", err)
+		}
+		blocks = append(blocks, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("guard: rows error: %w", err)
+	}
+	return blocks, nil
+}
+
+// lockOldestPerType runs step 1 of the pick.
+func lockOldestPerType(ctx context.Context, tx pgx.Tx, checkTypes []string, limit int) ([]lockedPick, error) {
+	rows, err := tx.Query(ctx, guardPickLockSQL, checkTypes, limit)
+	if err != nil {
+		return nil, fmt.Errorf("guard: fetch pending: %w", err)
+	}
+	defer rows.Close()
+	var locked []lockedPick
+	for rows.Next() {
+		var l lockedPick
+		if err := rows.Scan(&l.tid, &l.block.id, &l.block.typeName); err != nil {
+			return nil, fmt.Errorf("guard: scan block id: %w", err)
+		}
+		locked = append(locked, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("guard: rows error: %w", err)
+	}
+	return locked, nil
+}
+
+// relockKept runs step 2 of the pick and returns the kept blocks it locked
+// that still wait, in created_at order.
+func relockKept(ctx context.Context, tx pgx.Tx, kept []lockedPick, checkTypes []string) ([]pendingBlock, error) {
+	tids := make([]string, len(kept))
+	ids := make([]string, len(kept))
+	for i, k := range kept {
+		tids[i], ids[i] = k.tid, k.block.id
+	}
+	rows, err := tx.Query(ctx, guardPickRelockSQL, tids, checkTypes, ids)
+	if err != nil {
+		return nil, fmt.Errorf("guard: relock pending: %w", err)
+	}
+	defer rows.Close()
+	var blocks []pendingBlock
+	for rows.Next() {
+		var b pendingBlock
+		var waiting bool
+		if err := rows.Scan(&b.id, &b.typeName, &waiting); err != nil {
+			return nil, fmt.Errorf("guard: scan relocked block: %w", err)
+		}
+		if waiting {
+			blocks = append(blocks, b)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("guard: relock rows error: %w", err)
+	}
+	return blocks, nil
 }
 
 // lastGuardAtSQL stamps the end of a committed guard run. It is the only
@@ -87,15 +331,15 @@ const lastGuardAtSQL = `UPDATE context_guard_state SET last_guard_at = now() WHE
 
 // pendingStatsSQL counts what the pick would take, within the read scopes in
 // $1 ($2 = the GuardCheckTypes allowlist), and the oldest updated_at among
-// those blocks — one pass over idx_guard_pending (its partial predicate has
-// no parameter, so a generic plan can use it too); scope = ANY($1) filters
-// the index result or joins idx_context_scope in a BitmapAnd. The cost grows
-// with the entries of idx_guard_pending, not with the corpus and not only
-// with the waiting blocks: the index predicate is the first three conjuncts
-// of guardPendingWhere, so it also holds unchecked blocks with a vector that
-// the pick filters out and never takes out of the index (a type with
-// guard.check = false, category index, another lifecycle, a stale vector)
-// — docs/operations.md, "Migration 181".
+// those blocks — one pass over a partial pending index (the predicates have
+// no parameter, so a generic plan can use them too): idx_guard_pending_type
+// with the allowlist as its index condition since migration 182 (issue
+// #360), else idx_guard_pending; scope = ANY($1) filters the index result or
+// joins idx_context_scope in a BitmapAnd. On idx_guard_pending_type the
+// cost follows the waiting blocks of the checked types; on idx_guard_pending
+// (the three first conjuncts) it follows that index's entries, which include
+// the unchecked blocks with a vector the pick filters out — docs/operations.md,
+// "Migration 181" and "Migration 182".
 var pendingStatsSQL = `SELECT count(*)::int, min(updated_at) FROM context_blocks
 	WHERE scope = ANY($1::text[])
 	  AND ` + guardPendingWhere("$2")
@@ -182,11 +426,13 @@ func RunGuardBatch(ctx context.Context, pool interface {
 		Begin:  "guard: begin tx",
 		Commit: "guard: commit tx",
 	}, func(tx pgx.Tx) error {
-		// Fetch pending blocks (the shared guardPendingWhere fragment: unchecked,
-		// not archived, not index, has embedding, knowledge lifecycle, policy
-		// type allowlist). ORDER BY created_at ASC rides idx_guard_pending (M074).
-		// SKIP LOCKED prevents concurrent guard runs from processing the same
-		// blocks; row locks are held for the duration of the transaction.
+		// Take the batch (pickPending: the shared guardPendingWhere fragment —
+		// unchecked, not archived, not index, a current vector, knowledge
+		// lifecycle, policy type allowlist —, the oldest by created_at over all
+		// checked types, read by type from idx_guard_pending_type, migration
+		// 182). SKIP LOCKED keeps concurrent guard runs from processing the
+		// same blocks; the row locks are held for the duration of the
+		// transaction.
 		//
 		// FOR NO KEY UPDATE, not FOR UPDATE (issue #359): it is the lock the
 		// verdict's own UPDATE takes (no key column changes), and it does not
@@ -195,29 +441,9 @@ func RunGuardBatch(ctx context.Context, pool interface {
 		// (matched_block_id); under FOR UPDATE that insert waited for this
 		// whole batch, and two runs holding each other's neighbours waited
 		// for each other until PostgreSQL aborted one insert with 40P01.
-		rows, err := tx.Query(ctx,
-			`SELECT id, type_name FROM context_blocks
-			WHERE `+guardPendingWhere("$1")+`
-			ORDER BY created_at ASC
-			LIMIT $2
-			FOR NO KEY UPDATE SKIP LOCKED`,
-			checkTypes, limit,
-		)
-		if err != nil {
-			return fmt.Errorf("guard: fetch pending: %w", err)
-		}
-
-		for rows.Next() {
-			var b pendingBlock
-			if err := rows.Scan(&b.id, &b.typeName); err != nil {
-				rows.Close()
-				return fmt.Errorf("guard: scan block id: %w", err)
-			}
-			blocks = append(blocks, b)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("guard: rows error: %w", err)
+		var err error
+		if blocks, err = pickPending(ctx, tx, checkTypes, limit); err != nil {
+			return err
 		}
 
 		if len(blocks) == 0 {

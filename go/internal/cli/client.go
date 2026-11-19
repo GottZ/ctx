@@ -61,6 +61,17 @@ func NewClientWithTimeout(cfg Config, timeout time.Duration, maxResponse int64) 
 	}
 }
 
+// withTimeout returns a copy of c with call budget d (0 = none) and
+// everything else unchanged: read cap, key, base URL and transport. c itself
+// keeps its budget.
+func (c *Client) withTimeout(d time.Duration) *Client {
+	cp := *c
+	hc := *c.HTTPClient
+	hc.Timeout = d
+	cp.HTTPClient = &hc
+	return &cp
+}
+
 // readLimit is the byte cap this client applies to a response body.
 func (c *Client) readLimit() int64 {
 	if c.maxResponse <= 0 {

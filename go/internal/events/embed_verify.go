@@ -96,14 +96,15 @@ const (
 		WITH (m = 16, ef_construction = 128)`
 )
 
-// verifySisterIndexes are the _next twins of the five partial indexes
-// whose predicates bind to the physical embedding column (§4.7 Stufe 3 /
-// §4.8 Attnum class): after the cutover's column RENAME the old exemplars
+// verifySisterIndexes are the _next twins of the partial indexes whose
+// predicates bind to the physical embedding column (§4.7 Stufe 3 / §4.8
+// Attnum class): after the cutover's column RENAME the old exemplars
 // follow embedding_old, so without these pre-built sisters the backfill
 // peek, the dream queue scan and the guard pending scan would all
 // seq-scan at 10M (and `cleanup` would silently drop the only carriers).
 // The swap tx (W04-6) renames them canonically. The two pick indexes of
-// migration 171 joined the class (issue #239).
+// migration 171 joined the class (issue #239), the guard pick index of
+// migration 182 too (issue #360).
 var verifySisterIndexes = []struct{ name, ddl string }{
 	// Twin of idx_embedding_pending (migration 109): the regular backfill
 	// pending predicate on the post-cutover serving column.
@@ -131,6 +132,18 @@ var verifySisterIndexes = []struct{ name, ddl string }{
 		WHERE NOT is_archived
 		  AND (metadata->>'guard_checked_at') IS NULL
 		  AND embedding_next IS NOT NULL`},
+	// Twin of idx_guard_pending_type (migration 182, issue #360): the guard
+	// pick's ranges per type on the post-cutover serving column. A re-embed
+	// migration that reached verifying before 182 has none; the gate builds
+	// it, or on a green verdict the index repair alone (issue #333).
+	{"idx_guard_pending_type_next", `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_guard_pending_type_next
+		ON context_blocks (type_name, timezone('UTC', created_at))
+		WHERE NOT is_archived
+		  AND (metadata->>'guard_checked_at') IS NULL
+		  AND embedding_next IS NOT NULL
+		  AND NOT embedding_stale
+		  AND category <> 'index'
+		  AND lifecycle_state = 'knowledge'`},
 }
 
 // verifyCompletenessWhere is the §4.7 Stufe-1 predicate, defined ONCE

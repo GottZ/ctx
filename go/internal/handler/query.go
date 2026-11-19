@@ -51,9 +51,10 @@ import (
 //
 // One exception reads another tenant's generation on the request path: the
 // embed backfill's floor (backfillFloor) takes the sensitivity floor of the
-// tenant that owns a scope it may embed from (SnapshotForTenantResolved),
-// with a scope read from the settings table and context_tenant_scopes, never
-// from the request, and reads nothing else of that generation.
+// tenant that owns a scope it may embed from (SnapshotForTenantResolved, or
+// the base generation's floor for a configuration without a floor row of its
+// own), with a scope read from the settings table and context_tenant_scopes,
+// never from the request, and reads nothing else of that generation.
 type ConfigStore interface {
 	Snapshot() *config.Config
 	SnapshotForRequest(ctx context.Context) *config.Config
@@ -1217,11 +1218,21 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if len(grantedBlockIDs) > 0 {
 		granteeFloor = h.granteeScopeFloor(ctx, ar.TenantID, floor)
 	}
+	// The floor of a candidate is its scope owner's as well as the caller's
+	// (issue #372, part 2; the fold of the embed backfill, issue #253): a
+	// read scope another tenant granted, and the scope of a block grant, carry
+	// the floor that tenant set, and rerank and synthesis choose the backend
+	// that receives the candidate's text by this annotation. A floor that
+	// cannot be read leaves every candidate at credentials, like a failed
+	// lookup.
 	if sensMap, serr := store.FetchSensitivities(ctx, h.pool, sensIDs); serr != nil {
 		slog.Warn("sensitivity lookup failed; candidates act as credentials",
 			"error", serr, "request_id", requestID)
+	} else if resultFloor, ferr := h.backfillFloor(ctx, floor, sensitivityScopes(sensMap), false); ferr != nil {
+		slog.Warn("owner sensitivity floors unreadable; candidates act as credentials",
+			"error", ferr, "request_id", requestID)
 	} else {
-		annotateSensitivities(results, sensMap, floor, ar.ReadScopes, granteeFloor)
+		annotateSensitivities(results, sensMap, resultFloor, ar.ReadScopes, granteeFloor)
 	}
 
 	// Step 6b: Rerank (skipped if disabled or fewer than 3 results). Dispatch
@@ -1858,9 +1869,25 @@ func (h *QueryHandler) backfillPending(ctx context.Context, callerFloor config.S
 	armRuns := cfg.EmbedBackfill.Interval > 0
 	// The floor of a block the pick can reach is its owner's as well as the
 	// caller's (issue #253); with the arm on the pick reaches the caller's
-	// read scopes, with the arm off every scope.
-	floor, err := h.backfillFloor(ctx, callerFloor, readScopes, !armRuns)
+	// read scopes, with the arm off every scope. Its resolution spends the
+	// sync budget like the embeds do (issue #372, part 4): an owner's
+	// configuration that is built cold on this request (config.Store builds
+	// it on a context of its own, up to 5 s) holds the request until the
+	// budget ends at the latest, and the backfill is then skipped while the
+	// build goes on for the next request.
+	floorCtx := ctx
+	if !budgetDeadline.IsZero() {
+		var cancelFloor context.CancelFunc
+		floorCtx, cancelFloor = context.WithDeadline(ctx, budgetDeadline)
+		defer cancelFloor()
+	}
+	floor, err := h.backfillFloor(floorCtx, callerFloor, readScopes, !armRuns)
 	if err != nil {
+		if floorCtx.Err() != nil && ctx.Err() == nil {
+			slog.Info("query backfill: sync budget spent resolving the sensitivity floors, backfill skipped",
+				"budget", cfg.EmbedBackfill.SyncBudget, "error", err)
+			return 0
+		}
 		slog.Warn("query backfill: sensitivity floors unreadable, backfill skipped", "error", err)
 		return 0
 	}
@@ -1909,8 +1936,10 @@ func (h *QueryHandler) backfillPending(ctx context.Context, callerFloor config.S
 				// Same detached-context rule as the wire-failure memo below:
 				// a request can be canceled between the SELECT and this
 				// write, and the oversize memo must not be lost to it.
+				// Bound to the text the pick read (issue #372): a change that
+				// committed since leaves the changed block unparked.
 				memoCtx, cancelMemo := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-				if ferr := store.RecordEmbedFailure(memoCtx, h.pool, blockID, store.EmbedFailureOversize, msg,
+				if _, ferr := store.RecordEmbedFailureIfUnchanged(memoCtx, h.pool, blockID, title, content, store.EmbedFailureOversize, msg,
 					cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap); ferr != nil {
 					slog.Warn("query backfill: oversize memo write failed", "block_id", blockID, "error", ferr)
 				}
@@ -1960,7 +1989,7 @@ func (h *QueryHandler) backfillPending(ctx context.Context, callerFloor config.S
 			// unavailable, and hammering it for the rest of the sync-cap
 			// budget within one request helps nobody. A block cut by the
 			// budget ends the loop as well: the budget is spent.
-			h.recordBackfillFailure(ctx, cfg, blockID, err, callerCut, requestGone, armRuns || count == 0)
+			h.recordBackfillFailure(ctx, cfg, row, err, callerCut, requestGone, armRuns || count == 0)
 			break
 		}
 		// Model is the ACTUALLY SERVING backend's role model (served, not the
@@ -2011,7 +2040,7 @@ func (h *QueryHandler) backfillPending(ctx context.Context, callerFloor config.S
 // or the request's own deadline passed) and not the budget. It says nothing
 // about the block either, and it is no attempt: the memo is the one of a cut
 // (caller_timeout, next_attempt_at = now()) with its attempts left where they
-// were (recordRequestGone). Counting it made every cancel double the hold of
+// were (store.RecordEmbedRequestGoneIfUnchanged). Counting it made every cancel double the hold of
 // the block at the old end with the arm off, for a block of any tenant and
 // for its owner's queries too (second review of #214). The memo itself stays:
 // it is the hand-off to the arm, and with the arm off its hold is what keeps
@@ -2020,10 +2049,18 @@ func (h *QueryHandler) backfillPending(ctx context.Context, callerFloor config.S
 // memo of another class (a wire memo whose backoff has passed) becomes
 // caller_timeout at its attempts as well: the arm takes the block at once,
 // and with the arm off the hold is the one those attempts already gave.
-func (h *QueryHandler) recordBackfillFailure(ctx context.Context, cfg *config.Config, blockID string, err error, callerCut, requestGone, wholeBudget bool) {
+//
+// Every memo here is bound to the title and content row carries, the text
+// the attempt embedded (issue #372, part 1): the pick held no row lock over
+// the embed, and a title or content change that committed meanwhile deleted
+// the block's memo in its own transaction; a memo of the earlier text written
+// after it parked the changed block, an oversize memo for good. Such a memo
+// is not written, and the changed block stays pending.
+func (h *QueryHandler) recordBackfillFailure(ctx context.Context, cfg *config.Config, row backfillRow, err error, callerCut, requestGone, wholeBudget bool) {
 	var (
 		class      store.EmbedFailureClass
 		normalized string
+		blockID    = row.id
 	)
 	switch {
 	case callerCut && !wholeBudget:
@@ -2044,38 +2081,21 @@ func (h *QueryHandler) recordBackfillFailure(ctx context.Context, cfg *config.Co
 	// failing queries). Detached context with its own short deadline.
 	memoCtx, cancelMemo := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancelMemo()
-	var ferr error
+	var (
+		written bool
+		ferr    error
+	)
 	if requestGone {
-		ferr = recordRequestGone(memoCtx, h.pool, blockID, normalized)
+		written, ferr = store.RecordEmbedRequestGoneIfUnchanged(memoCtx, h.pool, blockID, row.title, row.content, normalized)
 	} else {
-		ferr = store.RecordEmbedFailure(memoCtx, h.pool, blockID, class, normalized,
+		written, ferr = store.RecordEmbedFailureIfUnchanged(memoCtx, h.pool, blockID, row.title, row.content, class, normalized,
 			cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap)
 	}
 	if ferr != nil {
 		slog.Warn("query backfill: failure memo write failed", "block_id", blockID, "error", ferr)
 	}
-	slog.Warn("query backfill: embed failed — memoized", "block_id", blockID, "class", class,
-		"attempt_counted", !requestGone, "error", err)
-}
-
-// recordRequestGone writes the memo of a block whose embed ended with its
-// request (recordBackfillFailure, requestGone): the caller_timeout memo
-// store.RecordEmbedFailure writes for a cut, next_attempt_at = now() and one
-// attempt for a block without a memo, except that an existing memo keeps its
-// attempts.
-func recordRequestGone(ctx context.Context, db pgxdb.Execer, blockID, normalizedErr string) error {
-	if _, err := db.Exec(ctx,
-		`INSERT INTO context_embed_failures (block_id, migration_id, attempts, last_error, last_class, next_attempt_at)
-		 VALUES ($1, NULL, 1, $2, $3, now())
-		 ON CONFLICT (block_id) WHERE migration_id IS NULL
-		 DO UPDATE SET last_error      = EXCLUDED.last_error,
-		               last_class      = EXCLUDED.last_class,
-		               next_attempt_at = now()`,
-		blockID, normalizedErr, string(store.EmbedFailureCallerTimeout),
-	); err != nil {
-		return fmt.Errorf("query backfill: record caller_timeout memo of an ended request: %w", err)
-	}
-	return nil
+	slog.Warn("query backfill: embed failed", "block_id", blockID, "class", class,
+		"memo_written", written, "attempt_counted", !requestGone && written, "error", err)
 }
 
 // backfillRow is one pending block as the backfill pick returns it.
@@ -2189,8 +2209,7 @@ func (p *backfillPicker) pickOverran(ctx context.Context, cl store.PendingClasse
 			JOIN context_embed_failures f ON f.block_id = context_blocks.id AND f.migration_id IS NULL
 			WHERE `+store.EmbedPendingPredicate+`
 			  AND f.last_class = $5
-			  AND f.next_attempt_at + make_interval(secs =>
-			        least($6::float8 * power(2, least(f.attempts, 31) - 1), $7::float8)) <= now()`+
+			  AND `+store.CallerTimeoutHoldEnd("f", "$6", "$7")+` <= now()`+
 			store.RetrievalExcludedTypePredicate+backfillClassConjunct+`
 			ORDER BY f.next_attempt_at ASC, `+store.PendingOldestFirst+`
 			LIMIT 1`,
@@ -2361,6 +2380,18 @@ func annotateSensitivities(results []rrf.SearchResult, sensMap map[string]store.
 		}
 		results[i].Sensitivity = eff
 	}
+}
+
+// sensitivityScopes lists the distinct scopes of the looked-up candidates,
+// the scopes whose owners' floors the annotation needs (backfillFloor).
+func sensitivityScopes(sensMap map[string]store.BlockSensitivity) []string {
+	scopes := make([]string, 0, 4)
+	for _, bs := range sensMap {
+		if !slices.Contains(scopes, bs.Scope) {
+			scopes = append(scopes, bs.Scope)
+		}
+	}
+	return scopes
 }
 
 // granteeScopeFloor resolves the STRONGEST per-scope sensitivity floor configured
