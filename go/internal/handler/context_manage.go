@@ -74,6 +74,10 @@ type ManageHandler struct {
 	// mutating process env (SecretsHandler pattern); nil falls back to
 	// sealbox.FromEnv lazily (sealboxOrNil) — no constructor churn.
 	openBox func() (*sealbox.Box, error)
+	// dreamQueue serves the dream_queue section of `manage stats` per
+	// read-scope set (issue #271, stats_dream_queue.go). nil (a handler
+	// literal in tests) counts on every call, as before.
+	dreamQueue *dreamQueueCache
 	// overview feeds overview-rebuild-start (A2-Gate der Scharfschaltung).
 	// Wired via SetOverviewController (server.go); nil ⇒ the action answers 503.
 	overview OverviewController
@@ -159,7 +163,8 @@ func (h *ManageHandler) guardCheckTypes() []string {
 // production scheduler implements both controller interfaces. settingsReload
 // is the synchronous post-write config reload for gaming-mode (F3-P6).
 func NewManageHandler(pool *pgxpool.Pool, cfg ConfigStore, dreamController DreamController, backendPool *backends.Pool, auditController AuditController, settingsReload func(context.Context) error, quota *backends.QuotaAccountant, blocktypes *blocktype.Registry) *ManageHandler {
-	return &ManageHandler{pool: pool, cfg: cfg, dreamController: dreamController, backendPool: backendPool, auditController: auditController, settingsReload: settingsReload, quota: quota, blocktypes: blocktypes}
+	return &ManageHandler{pool: pool, cfg: cfg, dreamController: dreamController, backendPool: backendPool, auditController: auditController, settingsReload: settingsReload, quota: quota, blocktypes: blocktypes,
+		dreamQueue: newDreamQueueCache(dream.QueueDepth)}
 }
 
 type manageRequest struct {
@@ -330,8 +335,9 @@ func (h *ManageHandler) handleStats(w http.ResponseWriter, r *http.Request, ar *
 
 	// Dream backlog + incoming forecast at a glance — surfaces whether the GPU
 	// is busy now and how much load is queued to drop out of cooldown soon.
+	// Served from the per-scope-set cache (stats_dream_queue.go, issue #271).
 	// Non-fatal: stats stand on their own if the dream queue probe fails.
-	if queue, derr := dream.QueueDepth(ctx, h.pool, ar.ReadScopes, h.dreamLinkableTypes(ctx)); derr == nil {
+	if queue, derr := h.statsDreamQueue(ctx, ar.ReadScopes); derr == nil {
 		resp["dream_queue"] = queue
 	} else {
 		slog.Warn("manage: dream queue probe failed", "error", derr, "request_id", reqID)

@@ -572,9 +572,9 @@ const mcpNoCitationMarker = "[n/a]"
 //
 // The JSON-rendering tools (`search`, `get`) carry the framing as the
 // serialized `untrusted` field of the response type. `recent` renders prose,
-// so it needs a token — and it is the one retrieval tool that does not go
-// through store.RecentBlocks at all (it runs its own statement below), which is
-// exactly the kind of second path BA7 was written about.
+// so it needs a token: it reads its rows through store.RecentBlocks
+// (mcpRecentHandler below), which fills BlockPreview.Untrusted per row, and the
+// prose rendering has no field to carry that flag.
 //
 // ASCII and bracketed like mcpNoCitationMarker: it must survive transports that
 // drop non-ASCII runes, and it must not read as part of the block's own title

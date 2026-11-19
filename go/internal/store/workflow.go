@@ -47,9 +47,11 @@ type WorkflowCursor struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	ID        string    `json:"id"`
 	// CreatedAt carries the immutable keyset boundary for the ?sort=created
-	// traversal (W6, store/issues_read.go). It is empty/zero on the default
-	// updated-ordered board path (omitempty keeps that wire byte-identical to I-B).
-	CreatedAt time.Time `json:"created_at,omitempty"`
+	// traversal (W6, store/issues_read.go). It is zero on the default
+	// updated-ordered board path, and omitzero keeps the key off that wire
+	// (omitempty never drops a struct value: the key went out as
+	// "0001-01-01T00:00:00Z", issue #237).
+	CreatedAt time.Time `json:"created_at,omitzero"`
 }
 
 // WorkflowBlockRow is the minimal board row this primitive returns. I-D2 hydrates
