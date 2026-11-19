@@ -378,6 +378,17 @@ the plugin and runs over either transport.
   process' cached last manifest) with its head published over the broken one (`lookup=
   head-invalid`); the earlier chain's blocks stay. Before 0.12.0 it blocked every later
   checkpoint of that root.
+- A head whose tags were replaced outside the plugin (no `checkpoint-head` tag) is found by
+  a second search under the head title without the tag, made only when the tagged search
+  finds nothing (the first checkpoint of every root costs one more search). With a valid
+  `latest_manifest_id` the chain continues from it and the new head carries the tag again
+  (`lookup=untagged`, a WARNING line); without one it is handled as above. Before 0.16.2 it
+  was missed: the chain started without a parent and the new head replaced it silently.
+- The chain never runs past Hermes' wait for the compaction (`resolve_context_compression_
+  timeouts` of the loading Hermes, less 10 s): budget, paced windows, the refusal window and
+  the required facts end there, and the error names the wait. The receipt's `windows` counts the
+  windows the booked writes entered (a retry whose parts ctx confirms reports `windows=1`); the
+  deadline holds every window of the plan, because a confirmed part still costs one call.
 - Log: `CTX checkpoint chain stored (… head= manifest= parent= parts= writes= sha= lookup= …)`.
 
 ### Fact selection and dedupe

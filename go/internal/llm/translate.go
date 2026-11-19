@@ -72,6 +72,24 @@ var sqlStripper = strings.NewReplacer(
 // wordBoundary splits text into words for stopword matching.
 var wordSplitter = regexp.MustCompile(`\b\w+\b`)
 
+// The values of the settings key query.translate (#210), which decides whether
+// the query path runs the detect+translate step at all. The handler owns the
+// branch; the names live here, next to the step they switch, so the config
+// validator and the handler read one vocabulary.
+const (
+	// TranslateAuto is today's behaviour and the default: a query that
+	// DetectGerman matches is translated to English before retrieval. The
+	// empty value of a config built without the key reads the same.
+	TranslateAuto = "auto"
+	// TranslateOff skips the step: the query reaches every retrieval arm as
+	// written, without the translation call (the temporal LLM fallback, which
+	// shares the translate role, is a different step and stays) — for a
+	// tenant whose corpus is in
+	// the language its users ask in (Swedish, say, with a multilingual
+	// embedder), where an English rendering works against the lexical arms.
+	TranslateOff = "off"
+)
+
 // DetectGerman returns true if the query appears to be in German.
 // Detection triggers on:
 //   - Umlauts or sharp-s (ä, ö, ü, Ä, Ö, Ü, ß)

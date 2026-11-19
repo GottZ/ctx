@@ -133,7 +133,7 @@ Hybrid semantic + fulltext search with LLM synthesis, or retrieval only. Read-on
 | `types` | string[] | | restrict retrieval to these block types; each must be a retrieval-visible type, an unknown or non-visible name is an error |
 | `types_exclude` | string[] | | exclude these block types |
 | `synthesize` | boolean | | `false` = retrieval only: no synthesis step, the answer is the ranked sources as JSON (default `true`) |
-| `include_content` | boolean | | with `synthesize: false`, attach each source's content (at most 1500 characters; a cut one carries `truncated: true`, `get` its id for the full text); an error without it |
+| `include_content` | boolean | | with `synthesize: false`, attach each source's content (at most 1500 characters by default, `query.max_source_runes`; a cut one carries `truncated: true`, `get` its id for the full text); an error without it |
 
 `category`, `tags` and `categories_exclude` are passed to `POST /api/query` under
 the same names and narrow the candidates of the rank-fusion step; given together,

@@ -46,11 +46,20 @@ import (
 // iteration over the authoritative tenant list ONLY (it has no AuthResult);
 // request handlers must use SnapshotForRequest. Both fall back to the base
 // generation while the overlay/hook are unset, so single-tenant behavior is
-// byte-identical.
+// byte-identical. SnapshotForTenantResolved is SnapshotForTenant plus
+// whether the generation is the scope's own or that fallback, both from the
+// one call.
+//
+// One exception reads another tenant's generation on the request path: the
+// embed backfill's floor (backfillFloor) takes the sensitivity floor of the
+// tenant that owns a scope it may embed from (SnapshotForTenantResolved),
+// with a scope read from the settings table and context_tenant_scopes, never
+// from the request, and reads nothing else of that generation.
 type ConfigStore interface {
 	Snapshot() *config.Config
 	SnapshotForRequest(ctx context.Context) *config.Config
 	SnapshotForTenant(ctx context.Context, tenantScope string) *config.Config
+	SnapshotForTenantResolved(ctx context.Context, tenantScope string) (*config.Config, bool)
 }
 
 var _ ConfigStore = (*config.Store)(nil)
@@ -227,8 +236,8 @@ type queryRequest struct {
 	// credentials would lock translate/synthesis failover for harmless
 	// questions, decision F3-E2). MCP query inherits via delegation.
 	Sensitivity string `json:"sensitivity,omitempty"`
-	// IncludeContent attaches a content snippet (<= maxRetrievalSnippet chars)
-	// to each source on the retrieval-only path (F6 ctx_query tool delegation).
+	// IncludeContent attaches a content snippet (retrievalSnippetRunes) to
+	// each source on the retrieval-only path (F6 ctx_query tool delegation).
 	// Default false ⇒ eval.sh / A-B sweep responses are byte-for-byte unchanged.
 	IncludeContent bool `json:"include_content,omitempty"`
 
@@ -267,9 +276,18 @@ type queryRequest struct {
 	ShadowTypes []string `json:"shadow_types,omitempty"`
 }
 
-// maxRetrievalSnippet caps the per-source content attached when include_content
-// is set — the same window the synthesis prompt feeds the model.
-const maxRetrievalSnippet = 1500
+// retrievalSnippetRunes is the per-source content cut of an include_content
+// response: the window a synthesis prompt carrying the same number of sources
+// feeds the model — llm.SourceRuneCap over the tenant's query.max_source_runes
+// (#208), llm.MaxBlockChars without the key. One function for both surfaces:
+// the snippet used to be a hand copy of the number (1500) that a raised prompt
+// window would have left behind. 0 = no content (include_content off).
+func retrievalSnippetRunes(includeContent bool, configured, n int) int {
+	if !includeContent {
+		return 0
+	}
+	return llm.SourceRuneCap(configured, n)
+}
 
 // queryResponse is the JSON response from the query endpoint.
 type queryResponse struct {
@@ -385,9 +403,10 @@ type sourceResponse struct {
 	RRFScoreOriginal *float64 `json:"rrf_score_original,omitempty"`
 	SupersededBy     *string  `json:"superseded_by,omitempty"`
 	Content          string   `json:"content,omitempty"` // only when include_content (F6 ctx_query)
-	// Truncated (#234) marks a Content cut at maxRetrievalSnippet runes, so a
-	// reader can tell a block of that length from the first part of a longer
-	// one and fetch the whole block by id. Absent on a whole content.
+	// Truncated (#234) marks a Content cut at the snippet window of this
+	// response (retrievalSnippetRunes, #208), so a reader can tell a block of
+	// that length from the first part of a longer one and fetch the whole
+	// block by id. Absent on a whole content.
 	Truncated bool `json:"truncated,omitempty"`
 	// CitationIndex is the <source id="N"> ordinal this source carried in the
 	// synthesis prompt — what a "[N]" in the answer refers to (V-W1). Absent
@@ -434,7 +453,9 @@ func (h *QueryHandler) sourceOrigins(ctx context.Context, results []rrf.SearchRe
 // buildSourceResponses maps retrieval sources to the API response shape,
 // attaching superseded_by where the supersedes map has an entry. Shared by the
 // full-synthesis path (Step 10) and the retrieval-only path (Step 7b).
-func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]string, includeContent bool) []sourceResponse {
+// contentRunes > 0 attaches each source's content cut at that many runes
+// (retrievalSnippetRunes); 0 attaches none.
+func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]string, contentRunes int) []sourceResponse {
 	out := make([]sourceResponse, len(sources))
 	for i, s := range sources {
 		out[i] = sourceResponse{
@@ -449,9 +470,9 @@ func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]strin
 			Untrusted:        s.Untrusted, // V-11
 			UntrustedOrigin:  s.UntrustedOrigin,
 		}
-		if includeContent && s.Content != "" {
-			if r := []rune(s.Content); len(r) > maxRetrievalSnippet {
-				out[i].Content = string(r[:maxRetrievalSnippet])
+		if contentRunes > 0 && s.Content != "" {
+			if r := []rune(s.Content); len(r) > contentRunes {
+				out[i].Content = string(r[:contentRunes])
 				out[i].Truncated = true
 			} else {
 				out[i].Content = s.Content
@@ -768,10 +789,15 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			"translated", translated,
 			"request_id", requestID,
 		)
-	} else if llm.DetectGerman(query) {
+	} else if cfg.Query.Translate != llm.TranslateOff && llm.DetectGerman(query) {
 		// The heuristic fires on umlauts and German stopwords, so Swedish,
 		// Danish and Finnish questions land here too; the translation to
 		// English is right for them as well, only the old label was not.
+		// That holds for a corpus written in English; a tenant whose blocks
+		// are in the language its users ask in switches the step off with
+		// query.translate = off (#210) — then no question is translated,
+		// whatever the heuristic says. The pin above stays first, so a
+		// measurement can still pin a translation for such a tenant.
 		slog.Info("non-english heuristic matched, translating",
 			"request_id", requestID,
 		)
@@ -853,34 +879,6 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// Temporal relevance handled by FTS expansion, Dimension Table, and Gravity Boost.
 	embedQuery := searchQuery
 
-	// Step 3d: Backfill pending embeddings in the caller's read scopes before
-	// searching, newest first (issue #199; see backfillPending for the old
-	// end it also works with the background arm off). Ensures freshly stored
-	// blocks are immediately searchable. Per block the
-	// chain resolves with THAT block's floor-adjusted sensitivity (F3 §2.3
-	// gate table, embed-backfill row).
-	//
-	// M-W2 (design/05 §4.2, review finding #1): NOT on the shadow path. The
-	// chain-locality obligation resolves Chain(role, querySens, ar.HomeScope);
-	// this loop resolves Chain(RoleEmbed, floor.Apply(blockSensitivity,
-	// blockScope), blockScope) — a second chain under two different keys, both
-	// of which can WIDEN it past what the gate inspected (a lower required level
-	// admits backends Trust.Allows had excluded, a foreign block scope changes
-	// the VisibleTo set outright), and title+content travel over it.
-	//
-	// Skipping is the smaller correction of the two the review offered, and it
-	// is the better measurement besides: a write in the middle of a read-only
-	// measurement request contradicts the B-W2 determinism doctrine, and an
-	// embedding created DURING a sweep changes the corpus the sweep is
-	// measuring. Nothing is lost — the pending block keeps its place in the
-	// scheduler's own backfill and in the next ordinary query.
-	floor := cfg.Pool.ScopeSensitivityFloor
-	if len(req.ShadowTypes) == 0 {
-		if backfilled := h.backfillPending(ctx, floor, ar.ReadScopes, h.embedAdmission(), cfg); backfilled > 0 {
-			slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
-		}
-	}
-
 	// Step 4: Embed the search query with query prefix. Cached by (hash(prefix||text), model) —
 	// repeated queries (debug sessions, recurring lookups) serve from cache in a single UPDATE.
 	// The chain resolves with the query sensitivity; empty/exhausted chain
@@ -941,6 +939,45 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "embedding failed"})
 		return
+	}
+
+	// Step 4b: Backfill pending embeddings in the caller's read scopes before
+	// searching, newest first (issue #199; see backfillPending for the old
+	// end it also works with the background arm off). Ensures freshly stored
+	// blocks are immediately searchable. After the question's embed (issue
+	// #222): the question's vector does not depend on the backfill, and an
+	// embed the sync budget cuts can keep an engine busy after ctx dropped
+	// the call (an engine that does not stop a started batch on disconnect),
+	// so a question embedded after the backfill waited for that batch. Per
+	// block the chain resolves with THAT block's floor-adjusted sensitivity
+	// (F3 §2.3 gate table, embed-backfill row).
+	//
+	// M-W2 (design/05 §4.2, review finding #1): NOT on the shadow path. The
+	// chain-locality obligation resolves Chain(role, querySens, ar.HomeScope);
+	// this loop resolves Chain(RoleEmbed, floor.Apply(blockSensitivity,
+	// blockScope), blockScope) — a second chain under two different keys, both
+	// of which can WIDEN it past what the gate inspected (a lower required level
+	// admits backends Trust.Allows had excluded, a foreign block scope changes
+	// the VisibleTo set outright), and title+content travel over it.
+	//
+	// Skipping is the smaller correction of the two the review offered, and it
+	// is the better measurement besides: a write in the middle of a read-only
+	// measurement request contradicts the B-W2 determinism doctrine, and an
+	// embedding created DURING a sweep changes the corpus the sweep is
+	// measuring. Nothing is lost — the pending block keeps its place in the
+	// scheduler's own backfill and in the next ordinary query.
+	//
+	// The floor of a picked block is its owner's as well as the caller's
+	// (issue #253, backfillFloor): the pick reaches scopes of other tenants.
+	//
+	// embed_backfill.sync_disabled (issue #221, tenant-overridable, read from
+	// this request's snapshot) skips the step for the caller's tenant: no
+	// floor read, no pick, no embed.
+	floor := cfg.Pool.ScopeSensitivityFloor
+	if len(req.ShadowTypes) == 0 && !cfg.EmbedBackfill.SyncDisabled {
+		if backfilled := h.backfillPending(ctx, floor, ar.ReadScopes, h.embedAdmission(), cfg); backfilled > 0 {
+			slog.Info("query: backfilled embeddings before search", "count", backfilled, "request_id", requestID)
+		}
 	}
 
 	// Step 5: Hyphen preprocessing for FTS.
@@ -1293,7 +1330,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				b := chain[0]
 				model := b.ModelFor(backends.RoleRerank).Model
 				rrStart := time.Now()
-				reranked, rerankTel, rerr := rrf.RerankCrossEncoder(ctx, b, model, maxDocs, rerankCfg.BlendWeight, originalQuery, results, h.admission())
+				reranked, rerankTel, rerr := rrf.RerankCrossEncoder(ctx, b, model, maxDocs, rerankCfg.BlendWeight, rerankCfg.Timeout, originalQuery, results, h.admission())
 				if llm.IsAdmissionError(rerr) {
 					// Acquire-error doctrine (MW5, design/01 §4.3): a rejected
 					// admission is NOT an attempt — no Classify, no health
@@ -1429,7 +1466,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		)
 		resp := queryResponse{
 			Success:             true,
-			Sources:             buildSourceResponses(sources, supersedesMap, req.IncludeContent),
+			Sources:             buildSourceResponses(sources, supersedesMap, retrievalSnippetRunes(req.IncludeContent, cfg.Query.MaxSourceRunes, len(sources))),
 			Confidence:          llm.ClassifyConfidence(maxScore, cfg.SynthesisSettings()),
 			Translated:          translated,
 			ActivatedDimWeights: activatedDimWeights(temporalResult),
@@ -1490,7 +1527,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		hb.finish(http.StatusOK, queryResponse{
 			Success:             true,
 			Answer:              llm.NoRelevantReplacement,
-			Sources:             buildSourceResponses(nil, supersedesMap, false),
+			Sources:             buildSourceResponses(nil, supersedesMap, 0),
 			Confidence:          llm.ConfidenceNoRelevant,
 			Model:               h.backendPool.PrimaryModel(backends.RoleSynthesis),
 			Translated:          translated,
@@ -1554,7 +1591,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	go h.logAccess(ar, results, query, selectorDec, accessSourceAgent)
 
 	// Step 10: Build response.
-	respSources := buildSourceResponses(synthResult.Sources, supersedesMap, false)
+	respSources := buildSourceResponses(synthResult.Sources, supersedesMap, 0)
 
 	resp := queryResponse{
 		Success:             true,
@@ -1863,7 +1900,7 @@ func (h *QueryHandler) logAccess(ar *auth.AuthResult, results []rrf.SearchResult
 // position — a younger interactive query embed overtakes the waiting
 // backfill rest between two blocks. (Dispatch attribution is separate from
 // the T35b llmlog attribution below, which stays NULL/background in nature.)
-func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFloor, readScopes []string, adm embedcache.Admission, cfg *config.Config) int {
+func (h *QueryHandler) backfillPending(ctx context.Context, callerFloor config.ScopeFloor, readScopes []string, adm embedcache.Admission, cfg *config.Config) int {
 	count := 0
 	syncCap := cfg.EmbedBackfill.SyncCap
 	// Time budget next to the count cap (embed_backfill.sync_budget, issue
@@ -1875,7 +1912,8 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 	// that overruns it is memoized caller_timeout, which while the arm runs
 	// leaves it to the background arm (runEmbedBackfillLoop) and with the
 	// arm off has this loop retry it after a backoff (below), and the loop
-	// ends so the question embed keeps the rest of the request. Zero =
+	// ends so the search keeps the rest of the request (the question is
+	// embedded before this loop, issue #222). Zero =
 	// unbounded, the pre-budget shape (explicit opt-out, same convention as
 	// SyncCap).
 	var budgetDeadline time.Time
@@ -1896,6 +1934,14 @@ func (h *QueryHandler) backfillPending(ctx context.Context, floor config.ScopeFl
 	// interval is global-only, so this per-request snapshot reads the value
 	// the arm runs on.
 	armRuns := cfg.EmbedBackfill.Interval > 0
+	// The floor of a block the pick can reach is its owner's as well as the
+	// caller's (issue #253); with the arm on the pick reaches the caller's
+	// read scopes, with the arm off every scope.
+	floor, err := h.backfillFloor(ctx, callerFloor, readScopes, !armRuns)
+	if err != nil {
+		slog.Warn("query backfill: sensitivity floors unreadable, backfill skipped", "error", err)
+		return 0
+	}
 	picker := newBackfillPicker(h.pool, armRuns, h.backendPool.TrustCeilings(backends.RoleEmbed), floor, readScopes)
 	picker.backoffBase, picker.backoffCap = cfg.EmbedBackfill.BackoffBase, cfg.EmbedBackfill.BackoffCap
 	for attempts := 0; syncCap <= 0 || attempts < syncCap; attempts++ {

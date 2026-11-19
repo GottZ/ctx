@@ -660,6 +660,11 @@ def _failure_hint(cause: str, server: str) -> str:
             f"The ctx MCP server '{server}' is not connected in this Hermes: check it with "
             f"`hermes mcp test {server}`; a new session connects again."
         )
+    if "Hermes waits" in cause and "for a compaction to make progress" in cause:
+        return (
+            "The checkpoint needs more time than Hermes waits for a compaction (compression."
+            "context_timeout_seconds); the parts already saved are kept, and the next attempt continues from them."
+        )
     if "budget" in cause and "exceeded" in cause:
         return (
             "ctx did not finish within budget_s (Settings → Plugins → ctx_checkpoint); a retry of the same "
