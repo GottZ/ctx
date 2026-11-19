@@ -2,20 +2,24 @@
 
 // Issue #381: the guard batch searches with its own hnsw.ef_search, and a
 // block whose candidate circle is small is checked exactly, without the HNSW
-// index. Three pins, all deterministic (no ANN recall is asserted — a graph
+// index. Four pins, all deterministic (no ANN recall is asserted — a graph
 // cannot be seeded):
 //
-//   - the batch's search window is the configured value inside its
-//     transaction (jit off with it) and gone from the connection after the
-//     commit;
+//   - the batch's search window is the configured value at every check of
+//     its transaction (jit off with it) and gone from the connection after
+//     the commit;
 //   - a small circle reads no HNSW block and finds every duplicate, also on a
 //     connection whose planner is pushed onto the index (generic plans, no
 //     sequential or bitmap scan, no sort); above the circle limit the same
 //     connection reads the index;
 //   - the exact statement answers like ctx_guard_check computed exactly (the
 //     index dropped inside the transaction), column by column, over tenants,
-//     an unowned scope, archived, stale and unembedded blocks, long titles,
-//     both candidate policies, several thresholds and candidate lists.
+//     an unowned scope, archived, stale, unembedded and zero-norm blocks,
+//     long titles, both candidate policies, several thresholds and candidate
+//     lists — except where the function's similarity is NaN (a zero-norm
+//     vector on either side), where the exact statement answers clean;
+//   - a zero-norm vector archives no block, on the candidate side and on the
+//     checked side, through the exact statement and through the function.
 //
 // Fixtures go through the production write path (store.UpsertBlock,
 // store.StoreEmbedding, store.DeleteBlock, store.UpdateBlock,
@@ -80,6 +84,24 @@ func epNear(rng *rand.Rand, v []float32, c float64) []float32 {
 	return out
 }
 
+// epZeroNormForms are the two vectors of zero norm in halfvec(1024), the type
+// the check computes in: all zeros, and a vector of positive norm whose
+// components (1e-8) lie below half the smallest half-precision subnormal
+// (2^-24) and round to zero in the cast. store.StoreEmbedding takes both.
+var epZeroNormForms = []struct {
+	name string
+	vec  []float32
+}{
+	{"zero", make([]float32, 1024)},
+	{"underflow", func() []float32 {
+		v := make([]float32, 1024)
+		for i := range v {
+			v[i] = 1e-8
+		}
+		return v
+	}()},
+}
+
 // epWrite stores a block and, when vec is not nil, its vector.
 func epWrite(t *testing.T, pool *pgxpool.Pool, scope, typeName, title string, vec []float32) string {
 	t.Helper()
@@ -120,9 +142,11 @@ func epTenant(t *testing.T, pool *pgxpool.Pool, slug string, scopes ...string) {
 // check took.
 type epProbe struct {
 	conn        *pgxpool.Conn
-	checkHNSW   int64 // HNSW blocks read by the check statements
-	indexChecks int   // checks through ctx_guard_check
-	exactChecks int   // checks through the exact statement
+	checkHNSW   int64    // HNSW blocks read by the check statements
+	indexChecks int      // checks through ctx_guard_check
+	exactChecks int      // checks through the exact statement
+	efAtCheck   []string // hnsw.ef_search in the transaction at each check
+	jitAtCheck  []string // jit in the transaction at each check
 	efAtCommit  string
 	jitAtCommit string
 	libAtBegin  int // rows of pg_settings for hnsw.ef_search right after BEGIN
@@ -159,11 +183,18 @@ func (tx *epProbeTx) Commit(ctx context.Context) error {
 }
 
 // QueryRow measures checkBlock's statement (the one that selects
-// g.is_cross_scope) and passes every other statement through.
+// g.is_cross_scope), with the transaction's hnsw.ef_search and jit right
+// before it, and passes every other statement through.
 func (tx *epProbeTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	if !strings.Contains(sql, "g.is_cross_scope,") {
 		return tx.Tx.QueryRow(ctx, sql, args...)
 	}
+	var ef, jit string
+	if err := tx.Tx.QueryRow(ctx, `SELECT current_setting('hnsw.ef_search'), current_setting('jit')`).Scan(&ef, &jit); err != nil {
+		tx.p.t.Fatalf("probe settings at check: %v", err)
+	}
+	tx.p.efAtCheck = append(tx.p.efAtCheck, ef)
+	tx.p.jitAtCheck = append(tx.p.jitAtCheck, jit)
 	var before int64
 	if err := tx.Tx.QueryRow(ctx, epHNSWBlocksSQL).Scan(&before); err != nil {
 		tx.p.t.Fatalf("probe before check: %v", err)
@@ -230,7 +261,8 @@ func epRun(t *testing.T, own *pgxpool.Pool, set *blocktype.Set, limit int, searc
 }
 
 // TestGuardBatchEfSearchIsTransactionLocal: the batch runs every check with
-// the configured hnsw.ef_search, and the value ends with its transaction —
+// the configured hnsw.ef_search and jit off (read in the transaction right
+// before each check), and the value ends with its transaction —
 // the next statement on the same connection sees pgvector's default again.
 // The first run is on a fresh backend (the setting is a placeholder until the
 // first vector operation loads pgvector inside the batch).
@@ -250,6 +282,15 @@ func TestGuardBatchEfSearchIsTransactionLocal(t *testing.T) {
 		p, n := epRun(t, own, set, 100, guard.Search{EfSearch: ef, ExactMaxCandidates: guard.SearchDefaultForTest.ExactMaxCandidates})
 		if n != 3 {
 			t.Fatalf("run %d: processed %d, want 3", i, n)
+		}
+		if len(p.efAtCheck) != n {
+			t.Errorf("run %d: %d checks observed, want %d", i, len(p.efAtCheck), n)
+		}
+		for k := range p.efAtCheck {
+			if p.efAtCheck[k] != strconv.Itoa(ef) || p.jitAtCheck[k] != "off" {
+				t.Errorf("run %d check %d: hnsw.ef_search %q and jit %q in the transaction, want %d and off",
+					i, k, p.efAtCheck[k], p.jitAtCheck[k], ef)
+			}
 		}
 		if p.efAtCommit != strconv.Itoa(ef) {
 			t.Errorf("run %d: hnsw.ef_search inside the batch = %q, want %d", i, p.efAtCommit, ef)
@@ -406,7 +447,8 @@ func epCheck(ctx context.Context, tx pgx.Tx, source, id string, dup, rev float64
 
 // TestGuardExactSourceMatchesFunction: the exact statement answers like
 // ctx_guard_check computed exactly, in every column, for every block of a
-// corpus with the cases the predicates and the decision distinguish.
+// corpus with the cases the predicates and the decision distinguish — but
+// for a check whose pair has a zero-norm vector (the named exception below).
 func TestGuardExactSourceMatchesFunction(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -418,6 +460,7 @@ func TestGuardExactSourceMatchesFunction(t *testing.T) {
 	types := []string{"knowledge", "knowledge", "reference", "issue", "checkpoint"}
 	centres := []([]float32){epVec(rng), epVec(rng), epVec(rng), epVec(rng)}
 	var ids []string
+	zeroNorm := map[string]bool{}
 	for i := 0; i < 90; i++ {
 		c := centres[i%len(centres)]
 		cos := []float64{0.999, 0.985, 0.975, 0.95, 0.93, 0.91, 0.85, 0.6}[rng.Intn(8)]
@@ -432,7 +475,21 @@ func TestGuardExactSourceMatchesFunction(t *testing.T) {
 		if i%17 != 5 { // a few blocks without a vector
 			vec = epNear(rng, c, cos)
 		}
-		ids = append(ids, epWrite(t, pool, scopes[i%len(scopes)], types[i%len(types)], title, vec))
+		if i%19 == 9 { // a few zero-norm vectors, among other candidates
+			vec = epZeroNormForms[(i/19)%2].vec
+		}
+		id := epWrite(t, pool, scopes[i%len(scopes)], types[i%len(types)], title, vec)
+		ids = append(ids, id)
+		if i%19 == 9 {
+			zeroNorm[id] = true
+		}
+	}
+	// A circle of its own whose only candidates have zero norm.
+	ids = append(ids, epWrite(t, pool, "ep-zero", "knowledge", "zero-circle-n", epVec(rng)))
+	for _, f := range epZeroNormForms {
+		id := epWrite(t, pool, "ep-zero", "knowledge", "zero-circle-"+f.name, f.vec)
+		ids = append(ids, id)
+		zeroNorm[id] = true
 	}
 	// Archived and stale blocks, through their write paths.
 	for i := 0; i < len(ids); i += 11 {
@@ -480,17 +537,128 @@ func TestGuardExactSourceMatchesFunction(t *testing.T) {
 					if a.cross {
 						seen["cross"]++
 					}
-					if a.String() != b.String() {
-						t.Errorf("block %s thr=%v types#%d same_scope=%v:\n function %s\n exact    %s", id[:8], thr, ti, sso, a, b)
+					want := a
+					// The named exception: a zero-norm vector has no cosine
+					// distance, and the function computed exactly matches it
+					// with similarity NaN, which passes every threshold, or
+					// fails on the title of the arbitrary block it took. The
+					// exact statement answers as if no candidate existed, as
+					// ctx_guard_check through its index does for a zero-norm
+					// candidate (TestGuardZeroNormVector).
+					switch {
+					case zeroNorm[id]:
+						want = epRow{decision: "clean", sim: "0"}
+						seen["zero-norm checked"]++
+					case a.sim == "NaN":
+						want = epRow{decision: "clean", sim: "0"}
+						seen["zero-norm candidate"]++
+					}
+					if want.String() != b.String() {
+						t.Errorf("block %s thr=%v types#%d same_scope=%v:\n function %s\n want     %s\n exact    %s", id[:8], thr, ti, sso, a, want, b)
 					}
 				}
 			}
 		}
 	}
 	t.Logf("cases: %v", seen)
-	for _, k := range []string{"near_duplicate/", "needs_review/", "clean/", "/22001", "cross"} {
+	for _, k := range []string{"near_duplicate/", "needs_review/", "clean/", "/22001", "cross", "zero-norm checked", "zero-norm candidate"} {
 		if seen[k] == 0 {
 			t.Errorf("no case %q in the corpus; the comparison does not reach it", k)
+		}
+	}
+}
+
+// epVerdict is what the batch left on a checked block: the audit log's
+// decision, similarity and match, the block's archive flag and guard_status.
+type epVerdict struct {
+	decision, sim, matched, status string
+	archived                       bool
+}
+
+func epVerdictOf(t *testing.T, pool *pgxpool.Pool, id string) epVerdict {
+	t.Helper()
+	var v epVerdict
+	if err := pool.QueryRow(context.Background(),
+		`SELECT wl.decision, wl.similarity::text, coalesce(wl.matched_block_id::text, ''),
+		        coalesce(cb.guard_status, ''), cb.is_archived
+		   FROM context_blocks cb JOIN context_write_log wl ON wl.block_id = cb.id
+		  WHERE cb.id = $1::uuid`, id).Scan(&v.decision, &v.sim, &v.matched, &v.status, &v.archived); err != nil {
+		t.Fatalf("verdict of %s: %v", id, err)
+	}
+	return v
+}
+
+// TestGuardZeroNormVector (PR #395 review): a vector of zero norm in
+// halfvec(1024) has no cosine distance — its similarity is NaN, and NaN
+// passes every ">=" threshold. Per zero-norm form, four cells: the vector on
+// the candidate side (the only candidate of a checked block) and on the
+// checked side (one candidate), each through ctx_guard_check with the batch's
+// index plan (exact limit 0) and through the exact statement (default limit).
+// In each cell the batch first checks the block written first, alone in its
+// tenant's circle, then the second one against it; the verdict is read from
+// the audit log and the block. The exact statement answers clean in every
+// cell. ctx_guard_check answers clean on the candidate side (the HNSW index
+// holds no zero-norm vector) and near_duplicate at NaN on the checked side,
+// which archives the checked block: the named exception, a defect of the
+// function, which the exact statement does not copy.
+func TestGuardZeroNormVector(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	rng := rand.New(rand.NewSource(3814))
+	set := blocktype.NewRegistry().Snapshot()
+	plain := epOwnPool(t, pool, nil)
+	clean := epVerdict{decision: "clean", sim: "0", status: "clean"}
+
+	for _, f := range epZeroNormForms {
+		for _, side := range []string{"candidate", "checked"} {
+			for _, path := range []string{"function", "exact"} {
+				t.Run(f.name+"/"+side+"/"+path, func(t *testing.T) {
+					scope := "zn-" + f.name[:2] + "-" + side[:4] + "-" + path[:2]
+					epTenant(t, pool, scope, scope)
+					search := guard.SearchDefaultForTest
+					if path == "function" {
+						search = guard.SearchIndexForTest
+					}
+					first, second := f.vec, epVec(rng)
+					if side == "checked" {
+						first, second = second, first
+					}
+					firstID := epWrite(t, pool, scope, "knowledge", scope+"-1", first)
+					if _, n := epRun(t, plain, set, 10, search); n != 1 {
+						t.Fatalf("first batch processed %d, want 1", n)
+					}
+					id := epWrite(t, pool, scope, "knowledge", scope+"-2", second)
+					zero := firstID
+					if side == "checked" {
+						zero = id
+					}
+					var norm float64
+					if err := pool.QueryRow(ctx, `SELECT l2_norm(embedding::halfvec(1024)) FROM context_blocks WHERE id = $1::uuid`,
+						zero).Scan(&norm); err != nil {
+						t.Fatal(err)
+					}
+					if norm != 0 {
+						t.Fatalf("fixture: the %s vector has halfvec norm %v, want 0", f.name, norm)
+					}
+					p, n := epRun(t, plain, set, 10, search)
+					if n != 1 {
+						t.Fatalf("second batch processed %d, want 1", n)
+					}
+					if (path == "exact") != (p.exactChecks == 1) || p.exactChecks+p.indexChecks != 1 {
+						t.Fatalf("route: %d exact and %d index checks for the %s path", p.exactChecks, p.indexChecks, path)
+					}
+					want := clean
+					if path == "function" && side == "checked" {
+						// The named exception (see the doc comment).
+						want = epVerdict{decision: "near_duplicate", sim: "NaN", matched: firstID, status: "archived_dup", archived: true}
+					}
+					got := epVerdictOf(t, pool, id)
+					t.Logf("%s/%s/%s: %+v", f.name, side, path, got)
+					if got != want {
+						t.Errorf("verdict %+v, want %+v", got, want)
+					}
+				})
+			}
 		}
 	}
 }

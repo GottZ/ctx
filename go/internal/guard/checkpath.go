@@ -204,6 +204,17 @@ const guardCheckSourceIndex = `ctx_guard_check($1::uuid, $2::real, $3::real, $4:
 // as well as the generic one a prepared statement switches to); it reads the
 // candidates through the circle's scopes. Ties in distance are as open as in
 // the function.
+//
+// One deliberate difference: a vector of zero norm in halfvec(1024) (all
+// zeros, or components that round to zero in half precision) has no cosine
+// distance; pgvector answers NaN, which sorts after every number and passes
+// every ">=" threshold. The HNSW index holds no such vector, so through the
+// index ctx_guard_check never matches one; a zero-norm checked block, though,
+// gets NaN against whichever candidate the index returns first, and the
+// function answers near_duplicate. Here a nearest candidate at NaN (then
+// every candidate's distance is NaN) counts as no candidate: clean,
+// similarity 0, no match. The guard sits on the one row LIMIT 1 keeps, so it
+// adds nothing per candidate.
 const guardCheckSourceExact = `(SELECT
 	    CASE WHEN h.id IS NULL THEN 'clean'
 	         WHEN h.sim >= $2::real THEN 'near_duplicate'
@@ -239,4 +250,4 @@ const guardCheckSourceExact = `(SELECT
 	       AND cb.scope = ANY(b.circle)
 	     ORDER BY (cb.embedding::halfvec(1024) <=> b.embedding::halfvec(1024)) + 0
 	     LIMIT 1
-	  ) h ON b.embedding IS NOT NULL)`
+	  ) h ON b.embedding IS NOT NULL AND h.sim <> 'NaN')`
