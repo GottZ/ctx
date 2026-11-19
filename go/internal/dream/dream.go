@@ -484,6 +484,13 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 	// other outgoing link). DetectRecurrence reads no context_dream_links, so
 	// detecting before the write costs the detection nothing.
 	written, err := WriteLinks(ctx, pool, typeSet, block.ID, block.Scope, block.QualityScore, links)
+	if errors.Is(err, ErrSourceLeftScope) {
+		// Moved or archived during the cycle: no verdict about the block was
+		// recorded, so no back-off step either — a moved block comes back in
+		// its new scope after the transient cooldown (issue #284).
+		_ = SetDreamCooldownMinutes(ctx, pool, block.ID, CooldownTransientMinutes)
+		return 0, nil
+	}
 	if err != nil {
 		slog.Warn("dream: write links failed", "block_id", block.ID, "error", err)
 	} else if len(recurrentLinks) > 0 {
@@ -1289,20 +1296,109 @@ func QueueDepth(ctx context.Context, pool *pgxpool.Pool, scopes, linkable []stri
 	return &q, nil
 }
 
+// danglingLinkWhere matches, over context_dream_links aliased dl, a link whose
+// source or target block is archived (two primary-key probes per link).
+const danglingLinkWhere = `(EXISTS (SELECT 1 FROM context_blocks b WHERE b.id = dl.source_block_id AND b.is_archived)
+	    OR EXISTS (SELECT 1 FROM context_blocks b WHERE b.id = dl.target_block_id AND b.is_archived))`
+
+// danglingCleanupChunk bounds the link rows one cleanup transaction deletes.
+// The transaction holds its scope's supersedes lock exclusively, so every
+// supersedes path of that scope (dream batches, archives, moves, resolves,
+// declarations) waits for one chunk at most, not for the scope's whole
+// backlog. A fixed bound, not a policy: a chunk is a handful of primary-key
+// deletes and one reconcile pass.
+const danglingCleanupChunk = 1000
+
+// danglingKey is the primary key of one dangling link row.
+type danglingKey struct{ source, target string }
+
 // CleanupDanglingLinks removes links whose source or target block is archived.
 // Welle 45: extended from target-only to both sides — Audit (2026-05-22)
 // uncovered 2 links where both endpoints were archived but never cleaned up.
+//
+// The cleanup deletes link rows and then locks the targets of its reconcile,
+// while a scope move locks a block and its targets and then sweeps the block's
+// link rows, and a purge batch locks blocks and then deletes their link rows:
+// in one transaction without a lock that orders them, a move of a block an
+// archived block still superseded closed a cycle with the cleanup (40P01,
+// issue #284). So the dangling rows are first read without a lock, in one
+// statement, and then deleted by primary key, per scope of the row and in
+// chunks of danglingCleanupChunk, each chunk in a transaction that holds that
+// scope's supersedes lock exclusively (store.LockSupersedesScope) and checks
+// the row's scope and dangling state again. A row that turns dangling after
+// the read is left for the next run, and so is a row whose scope changed in
+// between. A scope that fails does not stop the others; the errors are
+// returned together.
 func CleanupDanglingLinks(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT dl.scope, dl.source_block_id::text, dl.target_block_id::text
+		   FROM context_dream_links dl
+		  WHERE `+danglingLinkWhere+`
+		  ORDER BY dl.scope`)
+	if err != nil {
+		return 0, fmt.Errorf("dream: cleanup dangling links: read: %w", err)
+	}
+	var scopes []string
+	keys := make(map[string][]danglingKey)
+	for rows.Next() {
+		var scope string
+		var k danglingKey
+		if err := rows.Scan(&scope, &k.source, &k.target); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("dream: cleanup dangling links: read: %w", err)
+		}
+		if _, seen := keys[scope]; !seen {
+			scopes = append(scopes, scope)
+		}
+		keys[scope] = append(keys[scope], k)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("dream: cleanup dangling links: read: %w", err)
+	}
+
+	removed := 0
+	var errs []error
+	for _, scope := range scopes {
+		for ks := keys[scope]; len(ks) > 0; {
+			n := min(len(ks), danglingCleanupChunk)
+			got, err := cleanupDanglingChunk(ctx, pool, scope, ks[:n])
+			removed += got
+			if err != nil {
+				errs = append(errs, fmt.Errorf("scope %s: %w", scope, err))
+				break
+			}
+			ks = ks[n:]
+		}
+	}
+	return removed, errors.Join(errs...)
+}
+
+// cleanupDanglingChunk deletes the given link rows of one scope that are
+// still dangling and still in that scope, under the scope's supersedes lock,
+// and reconciles the targets of the deleted supersedes links.
+func cleanupDanglingChunk(ctx context.Context, pool *pgxpool.Pool, scope string, keys []danglingKey) (int, error) {
+	sources := make([]string, len(keys))
+	targets := make([]string, len(keys))
+	for i, k := range keys {
+		sources[i], targets[i] = k.source, k.target
+	}
 	removed := 0
 	err := pgxdb.Write(ctx, pool, pgxdb.Stages{
 		Begin:  "dream: begin dangling-link cleanup",
 		Commit: "dream: commit dangling-link cleanup",
 	}, func(tx pgx.Tx) error {
+		if err := store.LockSupersedesScope(ctx, tx, scope); err != nil {
+			return err
+		}
 		rows, err := tx.Query(ctx,
-			`DELETE FROM context_dream_links
-			 WHERE source_block_id IN (SELECT id FROM context_blocks WHERE is_archived)
-			    OR target_block_id IN (SELECT id FROM context_blocks WHERE is_archived)
-			 RETURNING target_block_id::text, relationship`)
+			`DELETE FROM context_dream_links dl
+			  USING unnest($2::uuid[], $3::uuid[]) AS k(source_block_id, target_block_id)
+			  WHERE dl.source_block_id = k.source_block_id
+			    AND dl.target_block_id = k.target_block_id
+			    AND dl.scope = $1
+			    AND `+danglingLinkWhere+`
+			 RETURNING dl.target_block_id::text, dl.relationship`, scope, sources, targets)
 		if err != nil {
 			return fmt.Errorf("dream: cleanup dangling links: %w", err)
 		}

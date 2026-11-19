@@ -530,6 +530,10 @@ func TestEmbedCutover_Integration(t *testing.T) {
 			{"idx_embedding_pending on", `SELECT id FROM context_blocks WHERE embedding IS NULL AND NOT is_archived ORDER BY created_at LIMIT 1`},
 			{"idx_dream_pending on", `SELECT id FROM context_blocks WHERE NOT is_archived AND embedding IS NOT NULL ORDER BY dream_checked_at ASC NULLS FIRST, quality_score ASC LIMIT 1`},
 			{"idx_guard_pending on", `SELECT id FROM context_blocks WHERE NOT is_archived AND (metadata->>'guard_checked_at') IS NULL AND embedding IS NOT NULL ORDER BY created_at ASC LIMIT 1`},
+			// One branch of the guard pick (migration 182, issue #360).
+			{"idx_guard_pending_type on", `SELECT id FROM context_blocks WHERE type_name = 'knowledge' AND NOT is_archived AND (metadata->>'guard_checked_at') IS NULL
+				AND embedding IS NOT NULL AND NOT embedding_stale AND category <> 'index' AND lifecycle_state = 'knowledge'
+				ORDER BY timezone('UTC', created_at) LIMIT 1`},
 		} {
 			if plan := explainPlan(t, pool, probe.sql); !strings.Contains(plan, probe.needle) {
 				t.Errorf("post-swap EXPLAIN misses %q — plan:\n%s", probe.needle, plan)
@@ -751,7 +755,8 @@ func TestEmbedCutover_Integration(t *testing.T) {
 			}
 		}
 		for _, idx := range []string{"idx_embedding_hnsw_old", "idx_embedding_pending_old",
-			"idx_embedding_pending_scope_sens_old", "idx_embedding_pending_sens_old", "idx_dream_pending_old", "idx_guard_pending_old"} {
+			"idx_embedding_pending_scope_sens_old", "idx_embedding_pending_sens_old", "idx_dream_pending_old", "idx_guard_pending_old",
+			"idx_guard_pending_type_old"} {
 			if indexExistsT(t, pool, idx) {
 				t.Errorf("index %s still exists after cleanup", idx)
 			}

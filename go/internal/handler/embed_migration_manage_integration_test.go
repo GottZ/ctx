@@ -129,6 +129,10 @@ func emcNextIndexes(t *testing.T, pool *pgxpool.Pool) {
 		`CREATE INDEX IF NOT EXISTS idx_guard_pending_next
 		   ON context_blocks (created_at ASC)
 		   WHERE NOT is_archived AND (metadata->>'guard_checked_at') IS NULL AND embedding_next IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_guard_pending_type_next
+		   ON context_blocks (type_name, timezone('UTC', created_at))
+		   WHERE NOT is_archived AND (metadata->>'guard_checked_at') IS NULL AND embedding_next IS NOT NULL
+		     AND NOT embedding_stale AND category <> 'index' AND lifecycle_state = 'knowledge'`,
 	} {
 		if _, err := pool.Exec(context.Background(), ddl); err != nil {
 			t.Fatalf("build next index: %v", err)

@@ -23,6 +23,7 @@ package dream_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -186,6 +187,7 @@ func TestDreamSupersedesBatchesDoNotCloseACycleTogether(t *testing.T) {
 	declare(d, a) // D supersedes A
 
 	release := gateTx(t, pool, `SELECT 1 FROM context_blocks WHERE id = $1::uuid FOR NO KEY UPDATE`, b)
+	defer release() // before the actor pools' Close (t.Cleanup, LIFO), which waits for their connections
 
 	run := func(name, source, target string) <-chan writeResult {
 		p := actorPool(t, dsn, name, nil)
@@ -238,11 +240,12 @@ func TestDreamSupersedesBatchesDoNotCloseACycleTogether(t *testing.T) {
 // TestDreamSupersedesGuessWaitsForAnArchiveOfItsSource: an archive of S has
 // locked S and its supersedes targets and is held before its commit (a third
 // connection holds the write gate, holdWriteGate, that its UPDATE of S takes);
-// a dream batch then guesses S supersedes L. Without the archive's shared
-// guess lock the batch reads S as live, makes L a snapshot of S and commits
-// beside the archive — L ends a snapshot of an archived block, and the
-// archive's reconcile never saw L. With it, the batch waits for the archive,
-// reads S as archived and leaves L knowledge.
+// a dream batch then guesses S supersedes L. Without a lock of the archive's
+// that keeps the batch out, the batch reads S as live, makes L a snapshot of S
+// and commits beside the archive — L ends a snapshot of an archived block, and
+// the archive's reconcile never saw L. With it (the scope's supersedes lock,
+// held exclusively by the archive since issue #284), the batch waits for the
+// archive, reads S as archived, writes nothing and leaves L knowledge.
 func TestDreamSupersedesGuessWaitsForAnArchiveOfItsSource(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -256,6 +259,7 @@ func TestDreamSupersedesGuessWaitsForAnArchiveOfItsSource(t *testing.T) {
 	s := raceBlock(t, pool, "archive-note v2") // newer: dream may guess "s supersedes l"
 
 	release := holdWriteGate(t, pool)
+	defer release() // before the actor pools' Close (t.Cleanup, LIFO), which waits for their connections
 	archivePool := actorPool(t, dsn, "guess-archive", nil)
 	archived := make(chan error, 1)
 	go func() {
@@ -282,8 +286,10 @@ func TestDreamSupersedesGuessWaitsForAnArchiveOfItsSource(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatalf("archive did not finish")
 	}
-	if res := awaitWrite(t, "batch", done); res.err != nil {
-		t.Fatalf("batch: %v", res.err)
+	// The batch runs after the archive's commit and finds its source archived
+	// (issue #284: it writes nothing then).
+	if res := awaitWrite(t, "batch", done); !errors.Is(res.err, dream.ErrSourceLeftScope) {
+		t.Fatalf("batch after the archive of its source: %v, want ErrSourceLeftScope", res.err)
 	}
 	if lc := raceLifecycle(t, pool, l); lc == "snapshot" {
 		t.Errorf("%s is a snapshot of %s, which the concurrent archive left archived", l, s)

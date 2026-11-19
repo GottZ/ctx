@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -44,16 +45,29 @@ func anyArgs(n int) []any {
 	return out
 }
 
-// expectPendingFetch matches the FOR UPDATE SKIP LOCKED row-fetch and yields
-// the given block IDs as candidates.
+// expectPendingFetch matches the pick (pickPending) when it locks no more
+// than the batch limit: the savepoint with sorts off, step 1 (FOR NO KEY
+// UPDATE SKIP LOCKED per type) yielding the given block IDs, and the release
+// that keeps its locks after sorts are on again.
 func expectPendingFetch(mock pgxmock.PgxPoolIface, ids ...string) {
-	rows := mock.NewRows([]string{"id", "type_name"})
-	for _, id := range ids {
-		rows.AddRow(id, "knowledge")
+	expectPickIndexReady(mock, true)
+	mock.ExpectExec(`^` + regexp.QuoteMeta("SAVEPOINT "+guardPickSavepoint+"; "+guardPickNoSort) + `$`).
+		WillReturnResult(pgxmock.NewResult("SET", 0))
+	rows := mock.NewRows([]string{"tid", "id", "type_name"})
+	for i, id := range ids {
+		rows.AddRow(fmt.Sprintf("(0,%d)", i+1), id, "knowledge")
 	}
-	mock.ExpectQuery(`SELECT id, type_name FROM context_blocks`).
+	mock.ExpectQuery(`CROSS JOIN LATERAL`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(rows)
+	mock.ExpectExec(`^` + regexp.QuoteMeta(guardPickRestoreSort+"; RELEASE SAVEPOINT "+guardPickSavepoint) + `$`).
+		WillReturnResult(pgxmock.NewResult("RELEASE", 0))
+}
+
+// expectPickIndexReady matches the pick's probe of idx_guard_pending_type.
+func expectPickIndexReady(mock pgxmock.PgxPoolIface, ready bool) {
+	mock.ExpectQuery(`FROM pg_index`).
+		WillReturnRows(mock.NewRows([]string{"exists"}).AddRow(ready))
 }
 
 // expectGuardCheck mocks the ctx_guard_check call, returning a "clean"
@@ -173,9 +187,7 @@ func TestRunGuardBatch_NoPending(t *testing.T) {
 
 	mock.ExpectBegin()
 	// Empty result set.
-	mock.ExpectQuery(`SELECT id, type_name FROM context_blocks`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(mock.NewRows([]string{"id", "type_name"}))
+	expectPendingFetch(mock)
 	mock.ExpectCommit()
 	// The stamp of an empty run, after its commit.
 	expectGuardStateUpdate(mock)
@@ -416,9 +428,7 @@ func TestRunGuardBatch_BatchCompleteLogOnlyWithWork(t *testing.T) {
 
 	empty := capture(t, func(mock pgxmock.PgxPoolIface) {
 		mock.ExpectBegin()
-		mock.ExpectQuery(`SELECT id, type_name FROM context_blocks`).
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(mock.NewRows([]string{"id", "type_name"}))
+		expectPendingFetch(mock)
 		mock.ExpectCommit()
 		expectGuardStateUpdate(mock)
 	}, 0)
@@ -443,3 +453,71 @@ func TestRunGuardBatch_BatchCompleteLogOnlyWithWork(t *testing.T) {
 // pgxmock because pgxmock methods race against ctx.Done() — BeginTx and
 // Query randomly fire-or-skip depending on goroutine scheduling. A
 // real-DB integration test (W47-03) is the appropriate place to cover it.
+
+// TestRunGuardBatch_PickBacklogRelocksTheKeptBlocks pins the pick's second
+// step (issue #360): when step 1 locks more blocks than the batch limit
+// (several checked types wait), the pick keeps the first limit, gives every
+// lock of step 1 back (ROLLBACK TO SAVEPOINT) and locks the kept blocks
+// again by row version and id; a kept block the second step reports as no
+// longer waiting is not processed.
+func TestRunGuardBatch_PickBacklogRelocksTheKeptBlocks(t *testing.T) {
+	mock := newMockPool(t)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	expectPickIndexReady(mock, true)
+	mock.ExpectExec(`^` + regexp.QuoteMeta("SAVEPOINT "+guardPickSavepoint+"; "+guardPickNoSort) + `$`).
+		WillReturnResult(pgxmock.NewResult("SET", 0))
+	mock.ExpectQuery(`CROSS JOIN LATERAL`).
+		WithArgs(pgxmock.AnyArg(), 2).
+		WillReturnRows(mock.NewRows([]string{"tid", "id", "type_name"}).
+			AddRow("(0,1)", blockA, "knowledge").
+			AddRow("(0,2)", blockB, "reference").
+			AddRow("(0,3)", blockC, "knowledge"))
+	mock.ExpectExec(`^ROLLBACK TO SAVEPOINT ` + guardPickSavepoint + `; RELEASE SAVEPOINT ` + guardPickSavepoint + `$`).
+		WillReturnResult(pgxmock.NewResult("RELEASE", 0))
+	mock.ExpectQuery(`WHERE ctid = ANY\(\$1::tid\[\]\)\s+AND id = ANY\(\$3::uuid\[\]\)`).
+		WithArgs([]string{"(0,1)", "(0,2)"}, pgxmock.AnyArg(), []string{blockA, blockB}).
+		WillReturnRows(mock.NewRows([]string{"id", "type_name", "waiting"}).
+			AddRow(blockA, "knowledge", true).
+			AddRow(blockB, "reference", false))
+	expectFullBlockSuccess(mock, blockA)
+	mock.ExpectCommit()
+	expectGuardStateUpdate(mock)
+
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 {
+		t.Errorf("processed = %d, want 1 (the kept block that still waits)", processed)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("expectations: %v", err)
+	}
+}
+
+// TestRunGuardBatch_PickWithoutTheTypeIndex: while idx_guard_pending_type does
+// not stand as migration 182 builds it, the pick is the one statement of the
+// releases before 182 — no savepoint, no step 2 (issue #360).
+func TestRunGuardBatch_PickWithoutTheTypeIndex(t *testing.T) {
+	mock := newMockPool(t)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	expectPickIndexReady(mock, false)
+	mock.ExpectQuery(`ORDER BY created_at ASC\s+LIMIT \$2\s+FOR NO KEY UPDATE SKIP LOCKED$`).
+		WithArgs(pgxmock.AnyArg(), 10).
+		WillReturnRows(mock.NewRows([]string{"id", "type_name"}).AddRow(blockA, "knowledge"))
+	expectFullBlockSuccess(mock, blockA)
+	mock.ExpectCommit()
+	expectGuardStateUpdate(mock)
+
+	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10)
+	if err != nil || processed != 1 {
+		t.Fatalf("processed = %d, err = %v; want 1, nil", processed, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("expectations: %v", err)
+	}
+}

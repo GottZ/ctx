@@ -117,6 +117,12 @@ func carriesSupersedes(links []Link) bool {
 // writelinks_test.go:476 is the probe: that test sets NO commit expectation.
 var errUnregisteredSourceType = errors.New("dream: source type not registered")
 
+// ErrSourceLeftScope: the batch's source is no longer a live block of the
+// scope the cycle picked it in (moved or archived since the pick). The batch
+// writes nothing; RunDreamCycle books it as a transient miss, so a moved
+// block is picked again soon in its new scope.
+var ErrSourceLeftScope = errors.New("dream: write links: the source left the scope it was picked in")
+
 // WriteLinks persists dream links to the database within a transaction.
 // Enforces same-scope rule: only creates links between blocks of the same scope.
 // Checks is_archived on target blocks (Race condition mitigation V6).
@@ -178,7 +184,11 @@ func WriteLinks(ctx context.Context, pool interface {
 		// Issue #197: the scope's supersedes lock comes first, before any row
 		// lock of the batch, in SHARED mode (store.ShareSupersedesScope): a
 		// store declaring a supersedes holds it exclusively and so never
-		// interleaves with a batch. The cycle walk below then reads every
+		// interleaves with a batch, nor does an archive or a scope move of a
+		// block of the scope (issue #284: the move locks the block and its
+		// supersedes targets and then sweeps the block's link rows, the batch
+		// locks link rows and then the targets of its reconcile — side by
+		// side, PostgreSQL ended one of them with 40P01). The cycle walk below then reads every
 		// declaration committed before this batch, and a declaration after it
 		// waits and sees this batch's links in its own walk. Taken for every
 		// batch, not only for one carrying a supersedes link: a batch that
@@ -208,12 +218,33 @@ func WriteLinks(ctx context.Context, pool interface {
 		// created_at) — kept in the SELECT for column-stability but discarded.
 		var srcCategory string
 		var srcUpdatedAt, srcCreatedAt time.Time
-		var srcTitle, srcTypeName string
-		_ = tx.QueryRow(ctx,
-			`SELECT category, updated_at, created_at, title, type_name FROM context_blocks WHERE id = $1`,
+		var srcTitle, srcTypeName, srcScope string
+		var srcArchived bool
+		srcErr := tx.QueryRow(ctx,
+			`SELECT category, updated_at, created_at, title, type_name, scope, is_archived FROM context_blocks WHERE id = $1`,
 			sourceID,
-		).Scan(&srcCategory, &srcUpdatedAt, &srcCreatedAt, &srcTitle, &srcTypeName)
+		).Scan(&srcCategory, &srcUpdatedAt, &srcCreatedAt, &srcTitle, &srcTypeName, &srcScope, &srcArchived)
 		_ = srcUpdatedAt
+
+		// Issue #284: sourceScope is the scope the cycle picked the block in,
+		// minutes ago, and the locks above are that scope's. A source moved to
+		// another scope or archived since then gets no links: they would carry
+		// the old scope against a source in the new one, under locks that do
+		// not order this batch against an archive, a move or a declaration
+		// there. The read comes after the scope lock, in a statement of its
+		// own: an archive or a move of the source through
+		// store.lockSupersedesSource holds that lock exclusively, so one that
+		// committed before is seen here and none commits until this batch
+		// does. Not covered: archives that take no supersedes lock (the guard's
+		// verdicts and resolves) and an archive or move whose lock pass missed
+		// the block because it was outside the caller's write scopes then
+		// (issue #284, point 5). A vanished row (srcErr) keeps its old exit
+		// below: no type, rejected fail-closed.
+		if srcErr == nil && (srcScope != sourceScope || srcArchived) {
+			slog.Info("dream: write links skipped — the source left the scope it was picked in",
+				"source", sourceID, "picked_scope", sourceScope, "scope", srcScope, "archived", srcArchived)
+			return ErrSourceLeftScope
+		}
 
 		// WF T8 (§4.4 #20): resolve the SOURCE type's link-class policy. An
 		// unregistered source type (incl. a vanished source row — the ignored

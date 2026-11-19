@@ -136,8 +136,9 @@ var cutoverColumnRenames = [][2]string{
 	{"embed_model_next", "embed_model"},
 }
 
-// cutoverIndexRenames is §4.8 (3)+(3b): the HNSW pair plus the five
-// partial-index pairs of the Attnum class (two of them since migration 171). Without (3b) the old exemplars'
+// cutoverIndexRenames is §4.8 (3)+(3b): the HNSW pair plus the six
+// partial-index pairs of the Attnum class (two of them since migration 171,
+// one since migration 182). Without (3b) the old exemplars'
 // predicates would silently follow embedding_old while the Go queries mean
 // the new column by NAME — backfill peek, dream queue scan and guard
 // pending scan would all seq-scan at 10M (the e2e gate pins the EXPLAINs).
@@ -154,21 +155,25 @@ var cutoverIndexRenames = [][2]string{
 	{"idx_dream_pending_next", "idx_dream_pending"},
 	{"idx_guard_pending", "idx_guard_pending_old"},
 	{"idx_guard_pending_next", "idx_guard_pending"},
+	{"idx_guard_pending_type", "idx_guard_pending_type_old"},
+	{"idx_guard_pending_type_next", "idx_guard_pending_type"},
 }
 
 // cutoverOldIndexNames / cutoverOldColumnNames are the rollback anchor
 // (§4.8 "Alt-Bestand") — the exact objects `cleanup` drops BY NAME and the
 // rollback preflight requires to exist (fail-closed).
 // cutoverOptionalIndexes are the canonical and _old names of the two
-// backfill pick indexes of migration 171 (issue #239). Migration 171 builds
-// them inline below 500 000 rows only, and a swap done before 171 left no
-// _old anchors of them, so their absence before the swap, at a rollback or
-// at a cleanup is not a missing rollback anchor: the swap renames such a
-// canonical index only when it exists, and the _next twin, which the
-// preflight requires, becomes the canonical one either way.
+// backfill pick indexes of migration 171 (issue #239) and of the guard pick
+// index of migration 182 (issue #360). Both migrations build inline below
+// 500 000 rows only, and a swap done before them left no _old anchors, so
+// their absence before the swap, at a rollback or at a cleanup is not a
+// missing rollback anchor: the swap renames such a canonical index only when
+// it exists, and the _next twin, which the preflight requires, becomes the
+// canonical one either way.
 var cutoverOptionalIndexes = map[string]bool{
 	"idx_embedding_pending_scope_sens": true, "idx_embedding_pending_scope_sens_old": true,
 	"idx_embedding_pending_sens": true, "idx_embedding_pending_sens_old": true,
+	"idx_guard_pending_type": true, "idx_guard_pending_type_old": true,
 }
 
 // renameIndexIfPresent runs ALTER INDEX from RENAME TO to; an optional
@@ -191,7 +196,8 @@ func renameIndexIfPresent(ctx context.Context, tx pgx.Tx, from, to string) error
 
 var (
 	cutoverOldIndexNames = []string{"idx_embedding_hnsw_old", "idx_embedding_pending_old",
-		"idx_embedding_pending_scope_sens_old", "idx_embedding_pending_sens_old", "idx_dream_pending_old", "idx_guard_pending_old"}
+		"idx_embedding_pending_scope_sens_old", "idx_embedding_pending_sens_old", "idx_dream_pending_old", "idx_guard_pending_old",
+		"idx_guard_pending_type_old"}
 	cutoverOldColumnNames = []string{"embedding_old", "embed_model_old"}
 )
 
@@ -674,7 +680,7 @@ func runRollbackSwapTx(ctx context.Context, db *pgxpool.Pool, migrationID, reaso
 }
 
 // CleanupEmbedMigration drops the rollback anchor (§4.8 Alt-Bestand): the
-// _old indexes BY NAME (the two of migration 171 when present), then the two _old columns. Operator-explicit,
+// _old indexes BY NAME (those of migrations 171 and 182 when present), then the two _old columns. Operator-explicit,
 // only from status done (E-04-2: cleanup destroys the instant-rollback
 // path — after this, RollbackEmbedMigration refuses via its _old preflight
 // and the only way back is a NEW migration in the opposite direction,

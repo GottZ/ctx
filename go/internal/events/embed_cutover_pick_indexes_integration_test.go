@@ -5,7 +5,9 @@
 // builds them inline below 500 000 rows only, and a swap done before 171 left
 // no _old anchors of them. A confirm without the canonical indexes still
 // swaps, and their _next twins become canonical; rollback and cleanup of a
-// swap without their _old anchors still run.
+// swap without their _old anchors still run. The guard pick index of
+// migration 182 (issue #360) is built the same way and is an optional
+// anchor too.
 //
 //	go test -tags=integration ./internal/events/ -run TestEmbedCutoverPickIndexes -count=1 -v
 package events
@@ -21,13 +23,16 @@ import (
 
 var pickIndexes = []string{"idx_embedding_pending_scope_sens", "idx_embedding_pending_sens"}
 
+// optionalAnchors are the canonical indexes of cutoverOptionalIndexes.
+var optionalAnchors = append(append([]string(nil), pickIndexes...), "idx_guard_pending_type")
+
 func TestEmbedCutoverPickIndexes(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("confirm_without_the_canonical_pick_indexes", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID := seedConfirmReady(t, pool, 0)
-		for _, ix := range pickIndexes {
+		for _, ix := range optionalAnchors {
 			if _, err := pool.Exec(ctx, `DROP INDEX `+ix); err != nil {
 				t.Fatalf("drop %s: %v", ix, err)
 			}
@@ -38,7 +43,7 @@ func TestEmbedCutoverPickIndexes(t *testing.T) {
 		if st := readMigrationRow(t, pool, migID).Status; st != string(embedmigration.StatusDone) {
 			t.Fatalf("status %s, want done", st)
 		}
-		for _, ix := range pickIndexes {
+		for _, ix := range optionalAnchors {
 			if !indexExistsT(t, pool, ix) {
 				t.Errorf("%s missing after the swap: its _next twin was not renamed", ix)
 			}
@@ -54,7 +59,7 @@ func TestEmbedCutoverPickIndexes(t *testing.T) {
 		if _, err := ConfirmEmbedMigration(ctx, pool, backends.NewPool(pool, nil), migID); err != nil {
 			t.Fatalf("confirm: %v", err)
 		}
-		for _, ix := range pickIndexes {
+		for _, ix := range optionalAnchors {
 			if _, err := pool.Exec(ctx, `DROP INDEX `+ix+`_old`); err != nil {
 				t.Fatalf("drop %s_old: %v", ix, err)
 			}
@@ -73,7 +78,7 @@ func TestEmbedCutoverPickIndexes(t *testing.T) {
 		if _, err := ConfirmEmbedMigration(ctx, pool, backends.NewPool(pool, nil), migID); err != nil {
 			t.Fatalf("confirm: %v", err)
 		}
-		for _, ix := range pickIndexes {
+		for _, ix := range optionalAnchors {
 			if _, err := pool.Exec(ctx, `DROP INDEX `+ix+`_old`); err != nil {
 				t.Fatalf("drop %s_old: %v", ix, err)
 			}
