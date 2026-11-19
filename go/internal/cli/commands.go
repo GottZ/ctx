@@ -740,6 +740,14 @@ func guardResolveCmd(getClient func() (*Client, error)) *cobra.Command {
 
 // ── manage ───────────────────────────────────────────────────────────.
 
+// purgeCallBudget is the client budget of `ctx manage purge`: none (issue
+// #277). A confirmed purge runs to its end on the server whatever the client
+// does, at the 1M-block scale for minutes, and its answer is the one place its
+// deleted counts reach the caller; a client-side cap would only cut the answer
+// of a run that goes on. The call ends when the server answers or the
+// connection breaks, or with Ctrl-C.
+const purgeCallBudget time.Duration = 0
+
 func manageCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
 		Use:     "manage <action> [id] [data-json]",
@@ -748,11 +756,15 @@ func manageCmd(getClient func() (*Client, error)) *cobra.Command {
 		Long: "Direct access to the context-manage endpoint with arbitrary action/id/data.\n" +
 			"This is the short spelling of `ctx api POST /api/manage '{\"action\":…}'` and\n" +
 			"runs the same code path: same request, same output, same exit contract —\n" +
-			"a success:false envelope prints the JSON and exits 1 with the reason.",
+			"a success:false envelope prints the JSON and exits 1 with the reason.\n" +
+			"`purge` waits for the server's answer without the 120 s client timeout:\n" +
+			"a confirmed purge runs to its end on the server either way. Behind a\n" +
+			"reverse proxy with a read timeout, add \"keepalive\":true to its data.",
 		Example: `  ctx manage update <id> '{"tags":["a","b"]}'
   ctx manage stats
   ctx manage purge '' '{"scope":"acme:import","tags":["import-run-7"]}'                     # dry run: counts only
   ctx manage purge '' '{"scope":"acme:import","tags":["import-run-7"],"confirm_blocks":1234}' # deletes for good
+  ctx manage purge '' '{"scope":"acme:import","confirm_blocks":1234,"keepalive":true}'       # behind a proxy
   ctx api POST /api/manage '{"action":"stats"}'   # the long form`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -778,7 +790,18 @@ func manageCmd(getClient func() (*Client, error)) *cobra.Command {
 			// The same call `ctx api POST /api/manage` makes — Post(endpoint) and
 			// Do(method, "/api/"+endpoint) build the identical URL, headers and
 			// body, so the two spellings are one request on the wire (E03-10 B).
-			return runRawRequest(getClient, http.MethodPost, "/api/manage", body)
+			// Only the client budget of a purge differs (purgeCallBudget).
+			get := getClient
+			if args[0] == "purge" {
+				get = func() (*Client, error) {
+					c, err := getClient()
+					if err != nil {
+						return nil, err
+					}
+					return c.withTimeout(purgeCallBudget), nil
+				}
+			}
+			return runRawRequest(get, http.MethodPost, "/api/manage", body)
 		},
 	}
 }
