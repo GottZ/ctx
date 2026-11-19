@@ -389,13 +389,13 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 		// table, CREATE ... IF NOT EXISTS skips.
 		for _, sql := range []string{
 			`CREATE TABLE ctx_other_t (x int)`,
-			`CREATE INDEX idx_guard_pending_next ON ctx_other_t (x)`,
+			`CREATE INDEX idx_embedding_pending_next ON ctx_other_t (x)`,
 		} {
 			if _, err := pool.Exec(ctx, sql); err != nil {
 				t.Fatalf("%s: %v", sql, err)
 			}
 		}
-		if _, err := s.ensureConcurrentIndexValid(ctx, "idx_guard_pending_next", ddlOfManaged("idx_guard_pending_next"), nil); err == nil {
+		if _, err := s.ensureConcurrentIndexValid(ctx, "idx_embedding_pending_next", ddlOfManaged("idx_embedding_pending_next"), nil); err == nil {
 			t.Fatalf("taken name: no error")
 		}
 		pooledPIDHoldsNoLock("after a failed read-back")
@@ -432,7 +432,7 @@ func TestEmbedRuntimeIndexLock_Integration(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		seedCleanMigrated(t, pool, 3)
 		migID := seedConfirmReady(t, pool, 0)
-		sister := "idx_guard_pending_next"
+		sister := "idx_embedding_pending_next"
 		if _, err := pool.Exec(ctx, `DROP INDEX `+sister); err != nil {
 			t.Fatalf("drop %s: %v", sister, err)
 		}

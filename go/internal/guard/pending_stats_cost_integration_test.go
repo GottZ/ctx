@@ -4,9 +4,10 @@
 // the ACTUAL pick (pickPending: guardPickLockSQL, guardPickRelockSQL) and
 // pendingStatsSQL — the guard batch's pick and the statement behind manage
 // guard-stats' pending_count and dirty_since since migration 181 (issue
-// #341) — and the two statements of the binary before migration 182 (issue
-// #360), which run on this schema during a rolling deploy and after a
-// rollback of the binary.
+// #341) — and the statement before migration 182, which the pick sends
+// while idx_guard_pending_type does not stand (issue #360). Since migration
+// 183 the schema has no idx_guard_pending; the tests build it where they
+// model the state in which 183 keeps it (idx_guard_pending_type not ready).
 package guard
 
 import (
@@ -70,9 +71,9 @@ const pickProbeBuffers = 300
 const guardPickLimit = 100
 
 // v561PickSQL and v561PendingStatsSQL are the pick and the count of a binary
-// before migration 182 (v5.61.0, 6a0c3258), as it sends them: the statements
-// that run on this schema during a rolling deploy and after a rollback of
-// the binary.
+// before migration 182 (v5.61.0, 6a0c3258), as it sends them. The pick is
+// the statement guardPickBefore182SQL sends, the count is pendingStatsSQL
+// (the rollback image v5.65.0 sends the count of this release).
 const (
 	v561PickSQL = `SELECT id, type_name FROM context_blocks
 			WHERE NOT is_archived
@@ -97,10 +98,13 @@ const (
 )
 
 // pickIndex is the index of migration 182 the pick reads; oldPendingIndex is
-// the one of 181 (113_baseline), which the binary before 182 reads.
+// the one of 113_baseline, which the statement before 182 reads and which
+// migration 183 drops once pickIndex stands (oldPendingIndexDDL builds it).
 const (
-	pickIndex       = "idx_guard_pending_type"
-	oldPendingIndex = "idx_guard_pending"
+	pickIndex          = "idx_guard_pending_type"
+	oldPendingIndex    = "idx_guard_pending"
+	oldPendingIndexDDL = `CREATE INDEX IF NOT EXISTS idx_guard_pending ON context_blocks (created_at)
+		WHERE NOT is_archived AND (metadata->>'guard_checked_at') IS NULL AND embedding IS NOT NULL`
 )
 
 type pendingStatsCostDB struct {
@@ -616,16 +620,32 @@ func (d *pendingStatsCostDB) hideIndex(name string) func() {
 	return func() { d.exec(`UPDATE pg_index SET indisvalid = true WHERE indexrelid = $1::regclass`, name) }
 }
 
+// withOldIndex builds idx_guard_pending as 113 defines it — the state in which
+// migration 183 keeps it, because idx_guard_pending_type does not stand — and
+// returns the call that drops it again (a store at 182, where it exists,
+// keeps it).
+func (d *pendingStatsCostDB) withOldIndex() func() {
+	d.t.Helper()
+	var had bool
+	if err := d.pool.QueryRow(context.Background(), `SELECT to_regclass('public.idx_guard_pending') IS NOT NULL`).Scan(&had); err != nil {
+		d.t.Fatal(err)
+	}
+	if had {
+		return func() {}
+	}
+	d.exec(oldPendingIndexDDL)
+	d.exec(`ANALYZE context_blocks`)
+	return func() { d.exec(`DROP INDEX idx_guard_pending`) }
+}
+
 // check runs the count in four shapes (all 100 scopes / one scope, custom /
 // generic), for the statement of this binary and the literal of the binary
-// before migration 182 (the same statement), in three schemas: as it
-// stands (both indexes), with idx_guard_pending_type hidden (the schema
-// before 182) and with idx_guard_pending hidden (the schema once a later
-// migration drops it). Beside both indexes the count never costs more than
-// before 182 — the planner may keep idx_guard_pending, whose entries include
-// the foreign ones, or take idx_guard_pending_type; without
-// idx_guard_pending it reads the waiting entries only, within the bound for
-// the waiting blocks and the rows of the scopes asked for.
+// before migration 182 (the same statement, which the rollback image sends
+// too), on the schema as it stands: since migration 183 without
+// idx_guard_pending, so the count reads the waiting entries of
+// idx_guard_pending_type only, within the bound for the waiting blocks and
+// the rows of the scopes asked for — never the foreign entries the old index
+// held, never a scan of the store.
 func (d *pendingStatsCostDB) check(label string, wantAll, wantOne int) {
 	d.t.Helper()
 	waiting, _ := d.waitingIn(nil)
@@ -638,31 +658,21 @@ func (d *pendingStatsCostDB) check(label string, wantAll, wantOne int) {
 		bound := int64(float64(waiting)*pendingStatsBuffersPerWaiting+float64(rows)*pendingBuffersPerScopeRow) + pendingStatsBufferSlack
 		for _, st := range []struct{ name, sql string }{{"count", pendingStatsSQL}, {"count of v5.61", v561PendingStatsSQL}} {
 			for _, generic := range []bool{false, true} {
-				show := d.hideIndex(pickIndex)
-				before := d.runCount(st.sql, c.scopes, generic)
-				show()
-				show = d.hideIndex(oldPendingIndex)
-				after := d.runCount(st.sql, c.scopes, generic)
-				show()
 				r := d.runCount(st.sql, c.scopes, generic)
-				d.t.Logf("%s, %s, %s, generic=%v: n=%d waiting=%d foreign=%d corpus=%d scope rows=%d buffers=%d plan %s [%s]; before 182 %d buffers %s; without idx_guard_pending %d buffers (bound %d) %s",
-					label, st.name, c.name, generic, r.n, waiting, d.foreign, d.corpus, rows, r.buffers, r.plan, r.conds, before.buffers, before.plan, after.buffers, bound, after.plan)
-				for _, x := range []pendingStatsRun{r, before, after} {
-					if x.n != c.want {
-						d.t.Errorf("%s, %s, %s, generic=%v: counted %d, want %d (%s)", label, st.name, c.name, generic, x.n, c.want, x.plan)
-					}
+				d.t.Logf("%s, %s, %s, generic=%v: n=%d waiting=%d foreign=%d corpus=%d scope rows=%d buffers=%d (bound %d) plan %s [%s]",
+					label, st.name, c.name, generic, r.n, waiting, d.foreign, d.corpus, rows, r.buffers, bound, r.plan, r.conds)
+				if r.n != c.want {
+					d.t.Errorf("%s, %s, %s, generic=%v: counted %d, want %d (%s)", label, st.name, c.name, generic, r.n, c.want, r.plan)
 				}
-				if r.buffers > before.buffers+pendingStatsBufferSlack {
-					d.t.Errorf("%s, %s, %s, generic=%v: %d buffers beside both indexes, %d before migration 182", label, st.name, c.name, generic, r.buffers, before.buffers)
+				if r.buffers > bound {
+					d.t.Errorf("%s, %s, %s, generic=%v: %d buffers for %d waiting blocks beside %d foreign entries and %d checked blocks — over the bound %d (%.2f per waiting block + %.3f per row of the scopes + %d): the count reads more than the waiting entries (%s [%s])",
+						label, st.name, c.name, generic, r.buffers, waiting, d.foreign, d.corpus, bound, pendingStatsBuffersPerWaiting, pendingBuffersPerScopeRow, pendingStatsBufferSlack, r.plan, r.conds)
 				}
-				if after.buffers > bound {
-					d.t.Errorf("%s, %s, %s, generic=%v: without idx_guard_pending %d buffers for %d waiting blocks beside %d foreign entries and %d checked blocks — over the bound %d (%.2f per waiting block + %.3f per row of the scopes + %d): the count reads more than the waiting entries",
-						label, st.name, c.name, generic, after.buffers, waiting, d.foreign, d.corpus, bound, pendingStatsBuffersPerWaiting, pendingBuffersPerScopeRow, pendingStatsBufferSlack)
+				if strings.Contains(r.conds, oldPendingIndex+":") {
+					d.t.Errorf("%s, %s, %s, generic=%v: the count reads %s: %s [%s]", label, st.name, c.name, generic, oldPendingIndex, r.plan, r.conds)
 				}
-				for _, x := range []pendingStatsRun{r, after} {
-					if waiting+d.foreign >= 1000 && strings.Contains(x.plan, "Seq Scan") {
-						d.t.Errorf("%s, %s, %s, generic=%v: plan seq-scans: %s", label, st.name, c.name, generic, x.plan)
-					}
+				if waiting+d.foreign >= 1000 && strings.Contains(r.plan, "Seq Scan") {
+					d.t.Errorf("%s, %s, %s, generic=%v: plan seq-scans: %s", label, st.name, c.name, generic, r.plan)
 				}
 			}
 		}
@@ -674,7 +684,8 @@ func (d *pendingStatsCostDB) check(label string, wantAll, wantOne int) {
 // step 1, the batch in step 2. The bound does not grow with the foreign
 // entries or the checked corpus, so a plan that walks either goes over it.
 // Step 1 reads idx_guard_pending_type and nothing else, step 2 is a TID
-// scan, and the batch is the wantTaken oldest waiting blocks.
+// scan, and the batch is the wantTaken oldest waiting blocks. Then the pick
+// with idx_guard_pending_type hidden (checkPickBefore182).
 func (d *pendingStatsCostDB) checkPick(label string, wantTaken int) {
 	d.t.Helper()
 	perType := d.waitingPerType()
@@ -688,102 +699,79 @@ func (d *pendingStatsCostDB) checkPick(label string, wantTaken int) {
 		relocked = guardPickLimit
 	}
 	bound := int64(float64(locked+relocked)*pickBuffersPerRow) + int64(len(d.types))*pickBuffersPerType + pendingStatsBufferSlack
-	for _, schema := range []string{"beside idx_guard_pending", "without idx_guard_pending", "without idx_guard_pending_type"} {
-		show := func() {}
-		switch schema {
-		case "without idx_guard_pending":
-			show = d.hideIndex(oldPendingIndex)
-		case "without idx_guard_pending_type":
-			d.checkPickBefore182(label)
-			continue
+	for _, mode := range pickModes {
+		m := d.runPick(mode)
+		d.t.Logf("%s, pick, %s: took=%d waiting=%d foreign=%d corpus=%d buffers=%d (bound %d) %s",
+			label, mode, m.taken, waiting, d.foreign, d.corpus, m.buffers(), bound, m)
+		if m.taken != wantTaken {
+			d.t.Errorf("%s, pick, %s: took %d, want %d", label, mode, m.taken, wantTaken)
 		}
-		for _, mode := range pickModes {
-			m := d.runPick(mode)
-			d.t.Logf("%s, pick %s, %s: took=%d waiting=%d foreign=%d corpus=%d buffers=%d (bound %d) %s",
-				label, schema, mode, m.taken, waiting, d.foreign, d.corpus, m.buffers(), bound, m)
-			if m.taken != wantTaken {
-				d.t.Errorf("%s, pick %s, %s: took %d, want %d", label, schema, mode, m.taken, wantTaken)
-			}
-			if m.statementBuffers() > bound {
-				d.t.Errorf("%s, pick %s, %s: %d buffers to take %d of %d waiting blocks beside %d foreign entries and %d checked blocks — over the bound %d (%.1f per row locked + %d per type + %d): the pick walks entries it never takes. %s",
-					label, schema, mode, m.statementBuffers(), m.taken, waiting, d.foreign, d.corpus, bound, pickBuffersPerRow, pickBuffersPerType, pendingStatsBufferSlack, m)
-			}
-			if m.probeBuffers() > pickProbeBuffers {
-				d.t.Errorf("%s, pick %s, %s: the probe of idx_guard_pending_type read %d buffers, over %d", label, schema, mode, m.probeBuffers(), pickProbeBuffers)
-			}
-			for _, s := range m.steps {
-				switch s.step {
-				case 1:
-					for _, ix := range indexesOf(s.conds) {
-						if ix != pickIndex {
-							d.t.Errorf("%s, pick %s, %s: step 1 reads %s, want %s only: %s [%s]", label, schema, mode, ix, pickIndex, s.plan, s.conds)
-						}
+		if m.statementBuffers() > bound {
+			d.t.Errorf("%s, pick, %s: %d buffers to take %d of %d waiting blocks beside %d foreign entries and %d checked blocks — over the bound %d (%.1f per row locked + %d per type + %d): the pick walks entries it never takes. %s",
+				label, mode, m.statementBuffers(), m.taken, waiting, d.foreign, d.corpus, bound, pickBuffersPerRow, pickBuffersPerType, pendingStatsBufferSlack, m)
+		}
+		if m.probeBuffers() > pickProbeBuffers {
+			d.t.Errorf("%s, pick, %s: the probe of idx_guard_pending_type read %d buffers, over %d", label, mode, m.probeBuffers(), pickProbeBuffers)
+		}
+		for _, s := range m.steps {
+			switch s.step {
+			case 1:
+				for _, ix := range indexesOf(s.conds) {
+					if ix != pickIndex {
+						d.t.Errorf("%s, pick, %s: step 1 reads %s, want %s only: %s [%s]", label, mode, ix, pickIndex, s.plan, s.conds)
 					}
-					if waiting+d.foreign >= 1000 && strings.Contains(s.plan, "Seq Scan") {
-						d.t.Errorf("%s, pick %s, %s: step 1 seq-scans: %s", label, schema, mode, s.plan)
-					}
-				case 2:
-					for _, ix := range indexesOf(s.conds) {
-						if ix != "context_blocks_pkey" {
-							d.t.Errorf("%s, pick %s, %s: step 2 reads %s, want a TID scan or the primary key: %s", label, schema, mode, ix, s.plan)
-						}
-					}
-					if strings.Contains(s.plan, "Seq Scan") || strings.Contains(s.plan, "Bitmap") {
-						d.t.Errorf("%s, pick %s, %s: step 2 is %s, want a TID scan or the primary key", label, schema, mode, s.plan)
-					}
-				case 182:
-					d.t.Errorf("%s, pick %s, %s: the statement before 182 ran although idx_guard_pending_type stands", label, schema, mode)
 				}
+				if waiting+d.foreign >= 1000 && strings.Contains(s.plan, "Seq Scan") {
+					d.t.Errorf("%s, pick, %s: step 1 seq-scans: %s", label, mode, s.plan)
+				}
+			case 2:
+				for _, ix := range indexesOf(s.conds) {
+					if ix != "context_blocks_pkey" {
+						d.t.Errorf("%s, pick, %s: step 2 reads %s, want a TID scan or the primary key: %s", label, mode, ix, s.plan)
+					}
+				}
+				if strings.Contains(s.plan, "Seq Scan") || strings.Contains(s.plan, "Bitmap") {
+					d.t.Errorf("%s, pick, %s: step 2 is %s, want a TID scan or the primary key", label, mode, s.plan)
+				}
+			case 182:
+				d.t.Errorf("%s, pick, %s: the statement before 182 ran although idx_guard_pending_type stands", label, mode)
 			}
 		}
-		show()
 	}
+	d.checkPickBefore182(label)
 }
 
 // checkPickBefore182: with idx_guard_pending_type hidden (above the
 // threshold of 182 before its out-of-band build, an INVALID or foreign index
-// under the name, a re-embed cleanup of a binary before 182), the pick sends
-// its statement before 182 and costs what that statement costs on
-// idx_guard_pending alone, in every plan mode.
+// under the name), the pick sends its statement before 182. Migration 183
+// keeps idx_guard_pending in exactly that state, and on it the pick costs
+// what that statement costs on idx_guard_pending alone, in every plan mode.
+// Without idx_guard_pending (the order 183 refuses) the statement walks the
+// store; that cost is logged, the reason for the order (docs/operations.md,
+// "Migration 183").
 func (d *pendingStatsCostDB) checkPickBefore182(label string) {
 	d.t.Helper()
 	show := d.hideIndex(pickIndex)
 	defer show()
 	for _, mode := range pickModes {
+		m := d.runPick(mode)
+		d.t.Logf("%s, pick without idx_guard_pending_type and without idx_guard_pending, %s: took=%d buffers=%d %s", label, mode, m.taken, m.buffers(), m)
+	}
+	drop := d.withOldIndex()
+	defer drop()
+	for _, mode := range pickModes {
 		old := d.runOldPick(mode == "generic")
 		m := d.runPick(mode)
-		d.t.Logf("%s, pick without idx_guard_pending_type, %s: took=%d buffers=%d (the statement before 182 alone %d) %s", label, mode, m.taken, m.buffers(), old.buffers, m)
+		d.t.Logf("%s, pick without idx_guard_pending_type, idx_guard_pending kept, %s: took=%d buffers=%d (the statement before 182 alone %d) %s", label, mode, m.taken, m.buffers(), old.buffers, m)
 		if len(m.steps) != 2 || m.steps[1].step != 182 {
 			d.t.Errorf("%s, pick without idx_guard_pending_type, %s: want the probe and the statement before 182, got %s", label, mode, m)
 		}
 		if m.statementBuffers() > old.buffers+pendingStatsBufferSlack || m.probeBuffers() > pickProbeBuffers {
 			d.t.Errorf("%s, pick without idx_guard_pending_type, %s: %d buffers and a probe of %d, the statement before 182 alone %d", label, mode, m.statementBuffers(), m.probeBuffers(), old.buffers)
 		}
-	}
-}
-
-// checkOldPick runs the pick of the binary before 182 (v5.61.0), custom and
-// generic, on this schema: it reads idx_guard_pending as before migration
-// 182, never idx_context_created, and costs no more than on that index
-// alone (idx_guard_pending_type hidden from the planner for the
-// comparison).
-func (d *pendingStatsCostDB) checkOldPick(label string, wantTaken int) {
-	d.t.Helper()
-	for _, generic := range []bool{false, true} {
-		show := d.hideIndex(pickIndex)
-		alone := d.runOldPick(generic)
-		show()
-		both := d.runOldPick(generic)
-		d.t.Logf("%s, pick of v5.61, generic=%v: took=%d foreign=%d corpus=%d buffers=%d plan %s [%s]; on idx_guard_pending alone %d buffers plan %s",
-			label, generic, both.n, d.foreign, d.corpus, both.buffers, both.plan, both.conds, alone.buffers, alone.plan)
-		if both.n != wantTaken {
-			d.t.Errorf("%s, pick of v5.61, generic=%v: took %d, want %d", label, generic, both.n, wantTaken)
-		}
-		if strings.Contains(both.conds, "idx_context_created") || strings.Contains(both.plan, "Seq Scan") {
-			d.t.Errorf("%s, pick of v5.61, generic=%v: walks the store: %s [%s]", label, generic, both.plan, both.conds)
-		}
-		if both.buffers > alone.buffers+pendingStatsBufferSlack {
-			d.t.Errorf("%s, pick of v5.61, generic=%v: %d buffers beside idx_guard_pending_type, %d on idx_guard_pending alone", label, generic, both.buffers, alone.buffers)
+		if w, _ := d.waitingIn(nil); w+d.foreign+d.corpus >= 1000 &&
+			(strings.Contains(m.steps[1].conds, "idx_context_created") || strings.Contains(m.steps[1].plan, "Seq Scan")) {
+			d.t.Errorf("%s, pick without idx_guard_pending_type, %s: the statement before 182 walks the store beside idx_guard_pending: %s", label, mode, m)
 		}
 	}
 }
@@ -818,8 +806,8 @@ func TestPendingStatsCostFollowsTheWaitingBlocks(t *testing.T) {
 // idx_guard_pending they are entries every pick walked (measured before 182:
 // the idle pick 585 buffers beside 10 000, 5 832 beside 100 000). The pick
 // reads the waiting blocks only, flat over 0 / 10 000 / 100 000 foreign
-// entries, and the pick of the binary before 182 keeps its plan. Last the
-// backlog: 10 000 waiting beside 100 000 foreign.
+// entries, and so does the count. Last the backlog: 10 000 waiting beside
+// 100 000 foreign.
 func TestGuardPendingCostBesideForeignEntries(t *testing.T) {
 	d := newPendingStatsCostDB(t)
 	d.analyze()
@@ -833,12 +821,10 @@ func TestGuardPendingCostBesideForeignEntries(t *testing.T) {
 	d.analyze()
 	d.check(fmt.Sprintf("100 waiting beside %d foreign", d.foreign), 100, 1)
 	d.checkPick(fmt.Sprintf("100 waiting beside %d foreign", d.foreign), guardPickLimit)
-	d.checkOldPick(fmt.Sprintf("100 waiting beside %d foreign", d.foreign), guardPickLimit)
 	d.seed(9900, 0)
 	d.analyze()
 	d.check(fmt.Sprintf("backlog of 10 000 waiting beside %d foreign", d.foreign), 10000, 100)
 	d.checkPick(fmt.Sprintf("backlog of 10 000 waiting beside %d foreign", d.foreign), guardPickLimit)
-	d.checkOldPick(fmt.Sprintf("backlog of 10 000 waiting beside %d foreign", d.foreign), guardPickLimit)
 }
 
 // TestGuardPendingCostHundredWaitingBesideForeignEntries: the count and the
@@ -854,7 +840,6 @@ func TestGuardPendingCostHundredWaitingBesideForeignEntries(t *testing.T) {
 	d.analyze()
 	d.check("100 waiting beside 10 000 foreign", 100, 1)
 	d.checkPick("100 waiting beside 10 000 foreign", guardPickLimit)
-	d.checkOldPick("100 waiting beside 10 000 foreign", guardPickLimit)
 }
 
 // TestGuardPendingCostBesideACheckedCorpus (issue #360): 100 waiting blocks,
@@ -870,8 +855,8 @@ func TestGuardPendingCostHundredWaitingBesideForeignEntries(t *testing.T) {
 // driver's cached statement) and statistics state: stale (analysed before
 // the corpus was written), never analysed, fresh, and fresh with a
 // statistics object on the verdict key (the state in which a created_at
-// walk looks cheapest). The pick of the binary before 182 keeps
-// idx_guard_pending in each state.
+// walk looks cheapest). With idx_guard_pending_type hidden, the statement
+// before 182 keeps idx_guard_pending in each state (checkPickBefore182).
 func TestGuardPendingCostBesideACheckedCorpus(t *testing.T) {
 	d := newPendingStatsCostDB(t)
 	d.seedForeign(10000)
@@ -891,7 +876,6 @@ func TestGuardPendingCostBesideACheckedCorpus(t *testing.T) {
 		label := "100 waiting beside 10 000 foreign and 200 000 checked, statistics " + st.name
 		d.check(label, 100, 1)
 		d.checkPick(label, guardPickLimit)
-		d.checkOldPick(label, guardPickLimit)
 	}
 }
 
@@ -927,9 +911,10 @@ func TestPendingStatsTimeAtAMillionWaiting(t *testing.T) {
 // named in issue #360 (not a gate): one million foreign entries beside one
 // million checked blocks, rows as wide as the live ones, the heap in
 // created_at order (CTX_GUARD_PICK_ORDER=random: in random order). It logs
-// the pick of this binary beside idx_guard_pending and without it, the pick
-// of the binary before 182 on idx_guard_pending alone (today) and beside
-// idx_guard_pending_type, per statistics state and plan mode. Set
+// the pick of this binary as the schema stands since 183 and beside
+// idx_guard_pending, and the statement before 182 with idx_guard_pending_type
+// hidden, without idx_guard_pending (the order migration 183 refuses) and
+// with it kept, per statistics state and plan mode. Set
 // CTX_GUARD_PICK_MEASURE=1; CTX_GUARD_PICK_FOREIGN / _CORPUS change the
 // sizes.
 func TestGuardPickCostAtTheTargetScale(t *testing.T) {
@@ -1022,10 +1007,10 @@ func TestGuardPickCostAtTheTargetScale(t *testing.T) {
 			}
 			st.set()
 			label := fmt.Sprintf("W=%d stats=%s", w, st.name)
-			for _, schema := range []string{"both", "without 181"} {
+			for _, schema := range []string{"with idx_guard_pending", "as is (183)"} {
 				show := func() {}
-				if schema == "without 181" {
-					show = d.hideIndex(oldPendingIndex)
+				if schema == "with idx_guard_pending" {
+					show = d.withOldIndex()
 				}
 				for _, mode := range pickModes {
 					m := d.runPick(mode)
@@ -1035,10 +1020,12 @@ func TestGuardPickCostAtTheTargetScale(t *testing.T) {
 			}
 			for _, generic := range []bool{false, true} {
 				show := d.hideIndex(pickIndex)
-				today := d.runOldPick(generic)
+				walk := d.runOldPick(generic)
+				drop := d.withOldIndex()
+				kept := d.runOldPick(generic)
+				drop()
 				show()
-				both := d.runOldPick(generic)
-				t.Logf("MEASURE|%s|old pick|generic=%v|today %d buffers %s|beside 182 %d buffers %s", label, generic, today.buffers, today.plan, both.buffers, both.plan)
+				t.Logf("MEASURE|%s|statement before 182 without idx_guard_pending_type|generic=%v|without idx_guard_pending %d buffers %s|idx_guard_pending kept %d buffers %s", label, generic, walk.buffers, walk.plan, kept.buffers, kept.plan)
 			}
 		}
 	}
@@ -1086,8 +1073,9 @@ func (d *pendingStatsCostDB) runBuffers(fn func(ctx context.Context, tx pgx.Tx) 
 // waiting blocks with a vector each, end to end (the pick and every
 // statement of the hundred checks, verdicts and audit rows), with the pick
 // of this binary and with the pick before migration 182 (v5.61.0) followed
-// by the same checks — alone and beside 10 000 foreign entries. Logged,
-// not a gate; the pick's own bounds are the pins above.
+// by the same checks — alone and beside 10 000 foreign entries, with
+// idx_guard_pending built as it stood before migration 183. Logged, not a
+// gate; the pick's own bounds are the pins above.
 func TestGuardRunBuffersOverAHundredBlocks(t *testing.T) {
 	d := newPendingStatsCostDB(t)
 	set := func() *blocktype.Set {
@@ -1107,6 +1095,7 @@ func TestGuardRunBuffersOverAHundredBlocks(t *testing.T) {
 	d.exec(`INSERT INTO context_blocks (category, title, content, scope, type_name, embedding, embed_model)
 		SELECT 'pc', 'pc-w-' || g, 'waiting ' || g, 'private', CASE WHEN g % 2 = 0 THEN 'knowledge' ELSE 'reference' END, `+vec+`, 'q360'
 		  FROM generate_series(1, 100) g`)
+	defer d.withOldIndex()()
 	d.analyze()
 	oldRun := func(ctx context.Context, tx pgx.Tx) (int, error) {
 		rows, err := tx.Query(ctx, v561PickSQL, d.types, guardPickLimit)

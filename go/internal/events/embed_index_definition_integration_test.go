@@ -126,7 +126,6 @@ func TestEmbedIndexDefinition_Integration(t *testing.T) {
 			"idx_embedding_pending_scope_sens_next": indexActionRebuiltDefinition,
 			"idx_embedding_pending_sens_next":       indexActionRebuiltDefinition,
 			"idx_dream_pending_next":                indexActionCreated,
-			"idx_guard_pending_next":                indexActionCreated,
 			"idx_guard_pending_type_next":           indexActionCreated,
 		}
 		if len(rep.Index.Indexes) != len(wantAction) {
@@ -535,7 +534,7 @@ func TestEmbedIndexDefinitionCompare_Integration(t *testing.T) {
 			t.Fatalf("status %s, want done", st)
 		}
 		serving := []string{"idx_embedding_hnsw", "idx_embedding_pending", "idx_embedding_pending_scope_sens",
-			"idx_embedding_pending_sens", "idx_dream_pending", "idx_guard_pending"}
+			"idx_embedding_pending_sens", "idx_dream_pending"}
 		before := map[string][3]any{}
 		for _, n := range serving {
 			o, f := indexIdentityT(t, pool, n)

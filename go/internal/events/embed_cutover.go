@@ -136,9 +136,10 @@ var cutoverColumnRenames = [][2]string{
 	{"embed_model_next", "embed_model"},
 }
 
-// cutoverIndexRenames is §4.8 (3)+(3b): the HNSW pair plus the six
+// cutoverIndexRenames is §4.8 (3)+(3b): the HNSW pair plus the five
 // partial-index pairs of the Attnum class (two of them since migration 171,
-// one since migration 182). Without (3b) the old exemplars'
+// one since migration 182; the pair of idx_guard_pending left with migration
+// 183, which drops that index). Without (3b) the old exemplars'
 // predicates would silently follow embedding_old while the Go queries mean
 // the new column by NAME — backfill peek, dream queue scan and guard
 // pending scan would all seq-scan at 10M (the e2e gate pins the EXPLAINs).
@@ -153,8 +154,6 @@ var cutoverIndexRenames = [][2]string{
 	{"idx_embedding_pending_sens_next", "idx_embedding_pending_sens"},
 	{"idx_dream_pending", "idx_dream_pending_old"},
 	{"idx_dream_pending_next", "idx_dream_pending"},
-	{"idx_guard_pending", "idx_guard_pending_old"},
-	{"idx_guard_pending_next", "idx_guard_pending"},
 	{"idx_guard_pending_type", "idx_guard_pending_type_old"},
 	{"idx_guard_pending_type_next", "idx_guard_pending_type"},
 }
@@ -196,7 +195,7 @@ func renameIndexIfPresent(ctx context.Context, tx pgx.Tx, from, to string) error
 
 var (
 	cutoverOldIndexNames = []string{"idx_embedding_hnsw_old", "idx_embedding_pending_old",
-		"idx_embedding_pending_scope_sens_old", "idx_embedding_pending_sens_old", "idx_dream_pending_old", "idx_guard_pending_old",
+		"idx_embedding_pending_scope_sens_old", "idx_embedding_pending_sens_old", "idx_dream_pending_old",
 		"idx_guard_pending_type_old"}
 	cutoverOldColumnNames = []string{"embedding_old", "embed_model_old"}
 )

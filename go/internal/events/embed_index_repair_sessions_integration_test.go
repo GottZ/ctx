@@ -29,7 +29,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 	t.Run("repair_waits_for_the_repair_of_another_instance", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, wm, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		sA := newIndexTestScheduler(instancePool(t, pool, 4))
 		sB, _ := probeScheduler(t, pool)
 		mig, err := embedmigration.Active(ctx, pool)
@@ -40,8 +40,8 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		release := holdBuilds(t, pool)
 		chA := make(chan ensureResult, 1)
 		go func() { chA <- ensureResult{err: sA.runEmbedIndexRepair(ctx, mig)} }()
-		pidA := buildingPID(t, pool, "idx_guard_pending_next")
-		oidA := indexOIDT(t, pool, "idx_guard_pending_next")
+		pidA := buildingPID(t, pool, "idx_embedding_pending_next")
+		oidA := indexOIDT(t, pool, "idx_embedding_pending_next")
 		doneB := make(chan struct{})
 		go func() {
 			defer close(doneB)
@@ -66,8 +66,8 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		if len(seen) > 0 {
 			t.Errorf("B ran index DDL while A's build was in progress: %q", seen)
 		}
-		if rA.err != nil || indexOIDT(t, pool, "idx_guard_pending_next") != oidA {
-			t.Errorf("A: %+v; oid %d → %d: A's build was replaced", rA, oidA, indexOIDT(t, pool, "idx_guard_pending_next"))
+		if rA.err != nil || indexOIDT(t, pool, "idx_embedding_pending_next") != oidA {
+			t.Errorf("A: %+v; oid %d → %d: A's build was replaced", rA, oidA, indexOIDT(t, pool, "idx_embedding_pending_next"))
 		}
 		e := repairEntries(t, readVerifyRow(t, pool, migID).Report)
 		if len(e) != 1 || len(e[0].Indexes) != 1 || e[0].Indexes[0].Action != indexActionCreated || !e[0].Watermark.Equal(wm) {
@@ -86,7 +86,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 	t.Run("repair_of_an_earlier_watermark_beside_the_gate_of_a_new_one", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, wm, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		sA := newIndexTestScheduler(instancePool(t, pool, 4))
 		sB, _ := probeScheduler(t, pool)
 		mig, err := embedmigration.Active(ctx, pool)
@@ -96,7 +96,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		release := holdBuilds(t, pool)
 		chA := make(chan error, 1)
 		go func() { chA <- sA.runEmbedIndexRepair(ctx, mig) }()
-		buildingPID(t, pool, "idx_guard_pending_next")
+		buildingPID(t, pool, "idx_embedding_pending_next")
 		if err := embedmigration.Transition(ctx, pool, migID, embedmigration.StatusVerifying, embedmigration.StatusRunning); err != nil {
 			t.Fatalf("resume: %v", err)
 		}
@@ -135,7 +135,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		if e := repairEntries(t, st.Report); len(e) != 0 {
 			t.Errorf("A's repair of %v was recorded on the run of %v: %+v", wm, st.VerifyStartedAt, e)
 		}
-		requireIndexOfDDL(t, pool, "idx_guard_pending_next")
+		requireIndexOfDDL(t, pool, "idx_embedding_pending_next")
 	})
 
 	// The repair builds the first of two indexes (held); meanwhile the
@@ -145,7 +145,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, _, _ := verifiedGreen(t, pool)
 		dropIndexT(t, pool, "idx_dream_pending_next")
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_guard_pending_type_next")
 		sB, _ := probeScheduler(t, pool)
 		mig, err := embedmigration.Active(ctx, pool)
 		if err != nil || mig == nil {
@@ -171,8 +171,8 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		if st.Status != "running" || st.LastErr != nil || len(repairEntries(t, st.Report)) != 0 {
 			t.Errorf("row status=%q last_error=%v report=%s, want running, untouched", st.Status, st.LastErr, st.Report)
 		}
-		if indexOIDT(t, pool, "idx_guard_pending_next") != 0 {
-			t.Errorf("the repair built idx_guard_pending_next after the row had left the run")
+		if indexOIDT(t, pool, "idx_guard_pending_type_next") != 0 {
+			t.Errorf("the repair built idx_guard_pending_type_next after the row had left the run")
 		}
 	})
 
@@ -184,7 +184,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 	t.Run("server_ends_the_build_session_next_cycle_rebuilds", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, wm, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		sB, _ := probeScheduler(t, pool)
 		mig, err := embedmigration.Active(ctx, pool)
 		if err != nil || mig == nil {
@@ -193,7 +193,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		release := holdBuilds(t, pool)
 		runDone := make(chan error, 1)
 		go func() { runDone <- sB.runEmbedIndexRepair(ctx, mig) }()
-		pid := buildingPID(t, pool, "idx_guard_pending_next")
+		pid := buildingPID(t, pool, "idx_embedding_pending_next")
 		if _, err := pool.Exec(ctx, `SELECT pg_terminate_backend($1)`, pid); err != nil {
 			t.Fatalf("terminate: %v", err)
 		}
@@ -208,11 +208,11 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 			t.Fatalf("after the ended session: status=%q last_error=%v watermark=%v report=%s, want verifying at %v, untouched",
 				st.Status, st.LastErr, st.VerifyStartedAt, st.Report, wm)
 		}
-		if ix := indexStateT(t, pool, "idx_guard_pending_next"); !ix.exists || ix.valid {
+		if ix := indexStateT(t, pool, "idx_embedding_pending_next"); !ix.exists || ix.valid {
 			t.Fatalf("after the ended session: exists=%t valid=%t, want an INVALID leftover", ix.exists, ix.valid)
 		}
 		measuredCycles(t, pool, 1)
-		requireIndexOfDDL(t, pool, "idx_guard_pending_next")
+		requireIndexOfDDL(t, pool, "idx_embedding_pending_next")
 		e := repairEntries(t, readVerifyRow(t, pool, migID).Report)
 		if len(e) != 1 || len(e[0].Indexes) != 1 || e[0].Indexes[0].Action != indexActionRebuiltInvalid {
 			t.Errorf("index_repairs %+v, want one rebuilt_invalid", e)
@@ -227,7 +227,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 	t.Run("repair_of_an_earlier_watermark_records_nothing_on_a_newer_green_verdict", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, wm, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		sB, _ := probeScheduler(t, pool)
 		mig, err := embedmigration.Active(ctx, pool)
 		if err != nil || mig == nil {
@@ -236,7 +236,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		release := holdBuilds(t, pool)
 		runDone := make(chan error, 1)
 		go func() { runDone <- sB.runEmbedIndexRepair(ctx, mig) }()
-		buildingPID(t, pool, "idx_guard_pending_next")
+		buildingPID(t, pool, "idx_embedding_pending_next")
 		if err := embedmigration.Transition(ctx, pool, migID, embedmigration.StatusVerifying, embedmigration.StatusRunning); err != nil {
 			t.Fatalf("resume: %v", err)
 		}
@@ -270,7 +270,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 	t.Run("row_left_during_the_last_build_gets_no_record", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, _, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		sB, _ := probeScheduler(t, pool)
 		mig, err := embedmigration.Active(ctx, pool)
 		if err != nil || mig == nil {
@@ -279,7 +279,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		release := holdBuilds(t, pool)
 		runDone := make(chan error, 1)
 		go func() { runDone <- sB.runEmbedIndexRepair(ctx, mig) }()
-		buildingPID(t, pool, "idx_guard_pending_next")
+		buildingPID(t, pool, "idx_embedding_pending_next")
 		if err := embedmigration.Transition(ctx, pool, migID, embedmigration.StatusVerifying, embedmigration.StatusRunning); err != nil {
 			t.Fatalf("resume: %v", err)
 		}
@@ -292,7 +292,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		case <-time.After(60 * time.Second):
 			t.Fatalf("repair did not end within 60s")
 		}
-		requireIndexOfDDL(t, pool, "idx_guard_pending_next")
+		requireIndexOfDDL(t, pool, "idx_embedding_pending_next")
 		st := readVerifyRow(t, pool, migID)
 		if st.Status != "running" || st.LastErr != nil || len(repairEntries(t, st.Report)) != 0 {
 			t.Errorf("row status=%q last_error=%v report=%s, want running without a repair record", st.Status, st.LastErr, st.Report)
@@ -305,13 +305,13 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 	t.Run("waiting_repair_ends_on_resume", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, _, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		dropIndexT(t, pool, "idx_dream_pending_next")
 		sA := newIndexTestScheduler(instancePool(t, pool, 4))
 		sB, _ := probeScheduler(t, pool)
 		release := holdBuilds(t, pool)
-		chA, _ := ensureAsync(ctx, sA, "idx_guard_pending_next", ddlOfManaged("idx_guard_pending_next"))
-		buildingPID(t, pool, "idx_guard_pending_next")
+		chA, _ := ensureAsync(ctx, sA, "idx_embedding_pending_next", ddlOfManaged("idx_embedding_pending_next"))
+		buildingPID(t, pool, "idx_embedding_pending_next")
 		mig, err := embedmigration.Active(ctx, pool)
 		if err != nil || mig == nil {
 			t.Fatalf("active: %+v %v", mig, err)
@@ -344,7 +344,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 	t.Run("confirm_during_the_repair_build_refuses", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, wm, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		sB, _ := probeScheduler(t, pool)
 		release := holdBuilds(t, pool)
 		mig, err := embedmigration.Active(ctx, pool)
@@ -353,7 +353,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		}
 		runDone := make(chan error, 1)
 		go func() { runDone <- sB.runEmbedIndexRepair(ctx, mig) }()
-		buildingPID(t, pool, "idx_guard_pending_next")
+		buildingPID(t, pool, "idx_embedding_pending_next")
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		_, cerr := ConfirmEmbedMigration(cctx, pool, backends.NewPool(pool, nil), migID)
 		cancel()
@@ -386,7 +386,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 	t.Run("stop_mid_rebuild_next_cycle_cleans_up", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, wm, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		sB, _ := probeScheduler(t, pool)
 		release := holdBuilds(t, pool)
 		mig, err := embedmigration.Active(ctx, pool)
@@ -396,7 +396,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		rctx, cancel := context.WithCancel(ctx)
 		runDone := make(chan error, 1)
 		go func() { runDone <- sB.runEmbedIndexRepair(rctx, mig) }()
-		buildingPID(t, pool, "idx_guard_pending_next")
+		buildingPID(t, pool, "idx_embedding_pending_next")
 		cancel()
 		select {
 		case <-runDone:
@@ -412,11 +412,11 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		if st.Status != "verifying" || st.LastErr != nil || len(repairEntries(t, st.Report)) != 0 {
 			t.Fatalf("after the stop: status=%q last_error=%v report=%s, want verifying, untouched", st.Status, st.LastErr, st.Report)
 		}
-		if ix := indexStateT(t, pool, "idx_guard_pending_next"); !ix.exists || ix.valid {
+		if ix := indexStateT(t, pool, "idx_embedding_pending_next"); !ix.exists || ix.valid {
 			t.Fatalf("after the stop: exists=%t valid=%t, want an INVALID leftover", ix.exists, ix.valid)
 		}
 		measuredCycles(t, pool, 1)
-		requireIndexOfDDL(t, pool, "idx_guard_pending_next")
+		requireIndexOfDDL(t, pool, "idx_embedding_pending_next")
 		st = readVerifyRow(t, pool, migID)
 		e := repairEntries(t, st.Report)
 		if len(e) != 1 || len(e[0].Indexes) != 1 || e[0].Indexes[0].Action != indexActionRebuiltInvalid || !st.VerifyStartedAt.Equal(wm) {
@@ -433,10 +433,10 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 	t.Run("failed_rebuild_pauses_like_the_gate", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, wm, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		for _, sql := range []string{
 			`CREATE TABLE repair_name_taker (x int)`,
-			`CREATE INDEX idx_guard_pending_next ON repair_name_taker (x)`,
+			`CREATE INDEX idx_embedding_pending_next ON repair_name_taker (x)`,
 		} {
 			if _, err := pool.Exec(ctx, sql); err != nil {
 				t.Fatalf("%s: %v", sql, err)
@@ -445,7 +445,7 @@ func TestEmbedIndexRepairSessions_Integration(t *testing.T) {
 		before := readVerifyRow(t, pool, migID)
 		measuredCycles(t, pool, 1)
 		st := readVerifyRow(t, pool, migID)
-		if st.Status != "paused" || st.LastErr == nil || !strings.Contains(*st.LastErr, "idx_guard_pending_next") {
+		if st.Status != "paused" || st.LastErr == nil || !strings.Contains(*st.LastErr, "idx_embedding_pending_next") {
 			t.Fatalf("after the failed rebuild: status=%q last_error=%v, want paused naming the index", st.Status, st.LastErr)
 		}
 		e := repairEntries(t, st.Report)

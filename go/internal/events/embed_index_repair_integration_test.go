@@ -199,8 +199,8 @@ var repairBreaks = []struct {
 		indexActionRebuiltDefinition, seedPreMigration175PickSisters},
 	{"invalid", []string{"idx_dream_pending_next"}, indexActionRebuiltInvalid,
 		func(t *testing.T, pool *pgxpool.Pool) { invalidateIndexT(t, pool, "idx_dream_pending_next") }},
-	{"missing", []string{"idx_guard_pending_next"}, indexActionCreated,
-		func(t *testing.T, pool *pgxpool.Pool) { dropIndexT(t, pool, "idx_guard_pending_next") }},
+	{"missing", []string{"idx_embedding_pending_next"}, indexActionCreated,
+		func(t *testing.T, pool *pgxpool.Pool) { dropIndexT(t, pool, "idx_embedding_pending_next") }},
 	// A migration whose green verdict was given on a release before 182
 	// (issue #360): the twin of idx_guard_pending_type did not exist then.
 	{"missing_since_182", []string{"idx_guard_pending_type_next"}, indexActionCreated,
@@ -306,12 +306,12 @@ func TestEmbedIndexRepair_Integration(t *testing.T) {
 	t.Run("paused_by_the_operator_no_shortcut", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, _, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		if err := embedmigration.Transition(ctx, pool, migID, embedmigration.StatusVerifying, embedmigration.StatusPaused); err != nil {
 			t.Fatalf("pause: %v", err)
 		}
 		measuredCycles(t, pool, 1)
-		if indexOIDT(t, pool, "idx_guard_pending_next") != 0 {
+		if indexOIDT(t, pool, "idx_embedding_pending_next") != 0 {
 			t.Errorf("a paused migration got its index rebuilt")
 		}
 		if e := repairEntries(t, readVerifyRow(t, pool, migID).Report); len(e) != 0 {
@@ -322,7 +322,7 @@ func TestEmbedIndexRepair_Integration(t *testing.T) {
 	t.Run("model_guard_pause_no_shortcut", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, _, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		s, _ := probeScheduler(t, pool)
 		srv := newMigrateEmbedServer(t)
 		bpool := backends.NewPool(nil, nil)
@@ -338,22 +338,22 @@ func TestEmbedIndexRepair_Integration(t *testing.T) {
 		if st.Status != "paused" {
 			t.Fatalf("status %q, want paused by the model guard", st.Status)
 		}
-		if indexOIDT(t, pool, "idx_guard_pending_next") != 0 || len(repairEntries(t, st.Report)) != 0 {
-			t.Errorf("the model guard's cycle rebuilt the index (oid %d, report %s)", indexOIDT(t, pool, "idx_guard_pending_next"), st.Report)
+		if indexOIDT(t, pool, "idx_embedding_pending_next") != 0 || len(repairEntries(t, st.Report)) != 0 {
+			t.Errorf("the model guard's cycle rebuilt the index (oid %d, report %s)", indexOIDT(t, pool, "idx_embedding_pending_next"), st.Report)
 		}
 	})
 
 	t.Run("red_verdict_no_shortcut", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, _, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		if _, err := pool.Exec(ctx,
 			`UPDATE context_embed_migrations SET verify_report = jsonb_set(verify_report, '{result}', '"red"') WHERE id = $1::uuid`,
 			migID); err != nil {
 			t.Fatalf("stamp red: %v", err)
 		}
 		measuredCycles(t, pool, 1)
-		if indexOIDT(t, pool, "idx_guard_pending_next") != 0 {
+		if indexOIDT(t, pool, "idx_embedding_pending_next") != 0 {
 			t.Errorf("an index was rebuilt on a red verdict")
 		}
 		if e := repairEntries(t, readVerifyRow(t, pool, migID).Report); len(e) != 0 {
@@ -367,7 +367,7 @@ func TestEmbedIndexRepair_Integration(t *testing.T) {
 	t.Run("resumed_row_runs_the_whole_gate", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, wm, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		if err := embedmigration.Transition(ctx, pool, migID, embedmigration.StatusVerifying, embedmigration.StatusRunning); err != nil {
 			t.Fatalf("resume: %v", err)
 		}
@@ -383,7 +383,7 @@ func TestEmbedIndexRepair_Integration(t *testing.T) {
 		if reads == 0 || rep.Integrity.RowsChecked != 3 {
 			t.Errorf("TOAST blocks %d, integrity rows %d: want the scan stages of a whole run", reads, rep.Integrity.RowsChecked)
 		}
-		requireIndexOfDDL(t, pool, "idx_guard_pending_next")
+		requireIndexOfDDL(t, pool, "idx_embedding_pending_next")
 	})
 
 	// A row in verifying without a verdict (a new watermark) runs the gate,
@@ -391,7 +391,7 @@ func TestEmbedIndexRepair_Integration(t *testing.T) {
 	t.Run("no_verdict_runs_the_whole_gate", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, _, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		if _, err := pool.Exec(ctx,
 			`UPDATE context_embed_migrations SET verify_report = NULL, verify_started_at = now() WHERE id = $1::uuid`, migID); err != nil {
 			t.Fatalf("new watermark: %v", err)
@@ -402,7 +402,7 @@ func TestEmbedIndexRepair_Integration(t *testing.T) {
 		if rep.Result != verifyGreen || reads == 0 || len(repairEntries(t, st.Report)) != 0 {
 			t.Errorf("result %q, TOAST blocks %d, report %s: want a whole green run", rep.Result, reads, st.Report)
 		}
-		requireIndexOfDDL(t, pool, "idx_guard_pending_next")
+		requireIndexOfDDL(t, pool, "idx_embedding_pending_next")
 	})
 
 	// A content change of a block before the watermark after the green
@@ -412,7 +412,7 @@ func TestEmbedIndexRepair_Integration(t *testing.T) {
 	t.Run("write_after_the_verdict_is_drained_before_the_swap", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		migID, wm, _ := verifiedGreen(t, pool)
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		var id string
 		if err := pool.QueryRow(ctx, `SELECT id::text FROM context_blocks ORDER BY created_at LIMIT 1`).Scan(&id); err != nil {
 			t.Fatalf("pick block: %v", err)
@@ -429,7 +429,7 @@ func TestEmbedIndexRepair_Integration(t *testing.T) {
 			t.Fatalf("confirm swapped with a missing index and a pending block")
 		}
 		measuredCycles(t, pool, 1)
-		requireIndexOfDDL(t, pool, "idx_guard_pending_next")
+		requireIndexOfDDL(t, pool, "idx_embedding_pending_next")
 		st := readVerifyRow(t, pool, migID)
 		if !st.VerifyStartedAt.Equal(wm) || len(repairEntries(t, st.Report)) != 1 {
 			t.Errorf("watermark %v (want %v), report %s: want the verdict of W with one repair", st.VerifyStartedAt, wm, st.Report)
@@ -455,7 +455,7 @@ func TestEmbedIndexRepair_Integration(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "the migration cycle rebuilds it") || strings.Contains(err.Error(), "resume the migration") {
 			t.Errorf("refusal %v, want it to name the rebuild by the migration cycle instead of resume", err)
 		}
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_embedding_pending_next")
 		_, err = ConfirmEmbedMigration(ctx, pool, backends.NewPool(pool, nil), migID)
 		if err == nil || !strings.Contains(err.Error(), "the migration cycle rebuilds it") {
 			t.Errorf("refusal of a missing index %v, want it to name the rebuild by the migration cycle", err)

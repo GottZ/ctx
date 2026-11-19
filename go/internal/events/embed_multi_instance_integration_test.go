@@ -309,7 +309,7 @@ func TestEmbedMultiInstance_Integration(t *testing.T) {
 				t.Fatalf("entry %d: %v", i, err)
 			}
 		}
-		dropIndexT(t, pool, "idx_guard_pending_next")
+		dropIndexT(t, pool, "idx_dream_pending_next")
 		measuredCycles(t, pool, 1) // a real repair: the 53rd entry
 		raw := readVerifyRow(t, pool, migID).Report
 		m := reportSections(t, raw)
