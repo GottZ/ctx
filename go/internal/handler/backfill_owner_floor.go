@@ -58,6 +58,14 @@ var errOwnerConfigFallback = errors.New("backfill floor: an owner's configuratio
 // cost follows the owners' scope lists (each capped by max_scopes), not what
 // a floor map names. The snapshots are config.Store's cached generations.
 //
+// HandleQuery applies the same fold to its candidates before rerank and
+// synthesis (annotateSensitivities, issue #372 part 2), over the scopes of
+// the candidates (everyScope false): a read scope another tenant granted and
+// the scope of a block grant carry the floor their owner set. A candidate of
+// a scope the default tenant owns resolves under _global, the base, so a
+// deployment without other tenants pays the read of the owners and nothing
+// else.
+//
 // SnapshotForTenantResolved on the request path: the scopes it is called
 // with come from the settings table and from context_tenant_scopes, never
 // from the request, and only the floor and whether the store fell back to

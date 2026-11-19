@@ -1218,11 +1218,21 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if len(grantedBlockIDs) > 0 {
 		granteeFloor = h.granteeScopeFloor(ctx, ar.TenantID, floor)
 	}
+	// The floor of a candidate is its scope owner's as well as the caller's
+	// (issue #372, part 2; the fold of the embed backfill, issue #253): a
+	// read scope another tenant granted, and the scope of a block grant, carry
+	// the floor that tenant set, and rerank and synthesis choose the backend
+	// that receives the candidate's text by this annotation. A floor that
+	// cannot be read leaves every candidate at credentials, like a failed
+	// lookup.
 	if sensMap, serr := store.FetchSensitivities(ctx, h.pool, sensIDs); serr != nil {
 		slog.Warn("sensitivity lookup failed; candidates act as credentials",
 			"error", serr, "request_id", requestID)
+	} else if resultFloor, ferr := h.backfillFloor(ctx, floor, sensitivityScopes(sensMap), false); ferr != nil {
+		slog.Warn("owner sensitivity floors unreadable; candidates act as credentials",
+			"error", ferr, "request_id", requestID)
 	} else {
-		annotateSensitivities(results, sensMap, floor, ar.ReadScopes, granteeFloor)
+		annotateSensitivities(results, sensMap, resultFloor, ar.ReadScopes, granteeFloor)
 	}
 
 	// Step 6b: Rerank (skipped if disabled or fewer than 3 results). Dispatch
@@ -2370,6 +2380,18 @@ func annotateSensitivities(results []rrf.SearchResult, sensMap map[string]store.
 		}
 		results[i].Sensitivity = eff
 	}
+}
+
+// sensitivityScopes lists the distinct scopes of the looked-up candidates,
+// the scopes whose owners' floors the annotation needs (backfillFloor).
+func sensitivityScopes(sensMap map[string]store.BlockSensitivity) []string {
+	scopes := make([]string, 0, 4)
+	for _, bs := range sensMap {
+		if !slices.Contains(scopes, bs.Scope) {
+			scopes = append(scopes, bs.Scope)
+		}
+	}
+	return scopes
 }
 
 // granteeScopeFloor resolves the STRONGEST per-scope sensitivity floor configured
