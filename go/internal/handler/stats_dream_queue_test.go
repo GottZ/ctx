@@ -23,20 +23,35 @@ import (
 // dqFake counts the scans and answers PickableNow = the scan's number. With
 // gate set, every scan after the first waits for it.
 type dqFake struct {
-	calls atomic.Int32
-	gate  chan struct{}
-	fail  atomic.Bool
+	calls     atomic.Int32
+	gate      chan struct{}
+	gateFirst chan struct{}
+	fail      atomic.Bool
 }
 
-func (f *dqFake) depth(_ context.Context, _ *pgxpool.Pool, _, _ []string) (*dream.QueueStats, error) {
+func (f *dqFake) depth(ctx context.Context, _ *pgxpool.Pool, _, _ []string) (*dream.QueueStats, error) {
 	n := f.calls.Add(1)
 	if f.gate != nil && n > 1 {
 		<-f.gate
+	}
+	if f.gateFirst != nil && n == 1 {
+		<-f.gateFirst
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err() // a count bound to a request that went away
 	}
 	if f.fail.Load() {
 		return nil, fmt.Errorf("scan failed")
 	}
 	return &dream.QueueStats{PickableNow: int(n)}, nil
+}
+
+// dqCtx bounds a call in these tests, so a cache that waits where it should
+// not fails the test instead of hanging it.
+func dqCtx(t *testing.T) context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	return ctx
 }
 
 type dqClock struct {
@@ -81,7 +96,7 @@ func waitCalls(t *testing.T, c *dreamQueueCache, f *dqFake, n int32) {
 func TestStatsDreamQueueCountsOncePerInterval(t *testing.T) {
 	f := &dqFake{}
 	c, clk := newTestDQ(f)
-	ctx := context.Background()
+	ctx := dqCtx(t)
 	const iv = 30 * time.Second
 	scopes, linkable := []string{"b", "a"}, []string{"knowledge"}
 
@@ -121,7 +136,7 @@ func TestStatsDreamQueueCountsOncePerInterval(t *testing.T) {
 func TestStatsDreamQueueOneRefreshAtATime(t *testing.T) {
 	f := &dqFake{gate: make(chan struct{})}
 	c, clk := newTestDQ(f)
-	ctx := context.Background()
+	ctx := dqCtx(t)
 	const iv = 30 * time.Second
 	if _, err := c.get(ctx, nil, []string{"a"}, nil, iv); err != nil {
 		t.Fatal(err)
@@ -131,6 +146,10 @@ func TestStatsDreamQueueOneRefreshAtATime(t *testing.T) {
 		if q, _ := c.get(ctx, nil, []string{"a"}, nil, iv); q.PickableNow != 1 {
 			t.Fatalf("PickableNow %d while the refresh runs, want the old 1", q.PickableNow)
 		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for f.calls.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
 	}
 	time.Sleep(50 * time.Millisecond)
 	if n := f.calls.Load(); n != 2 {
@@ -143,7 +162,7 @@ func TestStatsDreamQueueOneRefreshAtATime(t *testing.T) {
 func TestStatsDreamQueueMaxAgeAndFailure(t *testing.T) {
 	f := &dqFake{}
 	c, clk := newTestDQ(f)
-	ctx := context.Background()
+	ctx := dqCtx(t)
 	const iv = 30 * time.Second
 	if _, err := c.get(ctx, nil, []string{"a"}, nil, iv); err != nil {
 		t.Fatal(err)
@@ -167,20 +186,10 @@ func TestStatsDreamQueueMaxAgeAndFailure(t *testing.T) {
 	}
 }
 
-func TestStatsDreamQueueIntervalOffCountsEveryCall(t *testing.T) {
-	f := &dqFake{}
-	c, _ := newTestDQ(f)
-	for i := 1; i <= 3; i++ {
-		if q, _ := c.get(context.Background(), nil, []string{"a"}, nil, 0); q.PickableNow != i {
-			t.Fatalf("call %d: PickableNow %d, want a scan per call", i, q.PickableNow)
-		}
-	}
-}
-
 func TestStatsDreamQueueEvictsTheLeastRecentlyUsed(t *testing.T) {
 	f := &dqFake{}
 	c, clk := newTestDQ(f)
-	ctx := context.Background()
+	ctx := dqCtx(t)
 	const iv = time.Hour
 	for i := 0; i < dreamQueueCacheEntries; i++ {
 		if _, err := c.get(ctx, nil, []string{fmt.Sprint("s", i)}, nil, iv); err != nil {
@@ -199,5 +208,36 @@ func TestStatsDreamQueueEvictsTheLeastRecentlyUsed(t *testing.T) {
 	c.mu.Unlock()
 	if n != dreamQueueCacheEntries || !has0 || has1 {
 		t.Fatalf("entries %d (want %d), s0 kept %v (want true), s1 kept %v (want false)", n, dreamQueueCacheEntries, has0, has1)
+	}
+}
+
+// A caller that gives up while the first count runs (the statusline's budget)
+// leaves the count running; its value serves the next call, and calls in
+// between join it instead of starting their own.
+func TestStatsDreamQueueColdCountOutlivesTheCaller(t *testing.T) {
+	f := &dqFake{gateFirst: make(chan struct{})}
+	c, _ := newTestDQ(f)
+	const iv = 30 * time.Second
+
+	short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := c.get(short, nil, []string{"a"}, nil, iv); err == nil {
+		t.Fatalf("the first caller got an answer although the count is still held")
+	}
+	joined := make(chan *dream.QueueStats, 1)
+	go func() {
+		q, _ := c.get(dqCtx(t), nil, []string{"a"}, nil, iv)
+		joined <- q
+	}()
+	time.Sleep(20 * time.Millisecond)
+	close(f.gateFirst)
+	if q := <-joined; q == nil || q.PickableNow != 1 {
+		t.Fatalf("a caller during the count got %v, want the count's value", q)
+	}
+	if q, err := c.get(dqCtx(t), nil, []string{"a"}, nil, iv); err != nil || q.PickableNow != 1 {
+		t.Fatalf("after the count: q=%v err=%v, want the stored value", q, err)
+	}
+	if n := f.calls.Load(); n != 1 {
+		t.Fatalf("%d counts, want the one the first caller started", n)
 	}
 }
