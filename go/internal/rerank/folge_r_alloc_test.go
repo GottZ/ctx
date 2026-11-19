@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/GottZ/ctx/internal/testalloc"
 )
 
 // folgeRBodySlack is what the one allocation of a body may take beyond its
@@ -17,18 +19,20 @@ import (
 // one 8 KiB page above (embed.WireBodySlack's derivation, FOLGE-E H1).
 const folgeRBodySlack = 8 << 10
 
-// folgeRMeasure is f's heap bytes and allocations; cold empties every
-// sync.Pool first (two collections: the pools and their victims).
-func folgeRMeasure(cold bool, f func()) (bytes, mallocs uint64) {
+// folgeRMeasure is the heap bytes and allocations f made under frame (the
+// function it pins, testalloc.Frame), read from the memory profile — never
+// the process's counters, which a goroutine of the runtime or of the test
+// binary moves while f runs (issue #369); cold empties every sync.Pool first
+// (two collections: the pools and their victims). The test must have called
+// testalloc.EveryAllocation.
+func folgeRMeasure(t testing.TB, frame string, cold bool, f func()) (bytes, mallocs uint64) {
+	t.Helper()
 	if cold {
 		runtime.GC()
 		runtime.GC()
 	}
-	var a, b runtime.MemStats
-	runtime.ReadMemStats(&a)
-	f()
-	runtime.ReadMemStats(&b)
-	return b.TotalAlloc - a.TotalAlloc, b.Mallocs - a.Mallocs
+	got, _ := testalloc.In(t, frame, func() struct{} { f(); return struct{}{} })
+	return uint64(got.Bytes), uint64(got.Objects)
 }
 
 var folgeRSink []byte
@@ -38,8 +42,12 @@ var folgeRSink []byte
 // allocation of at most its length plus folgeRBodySlack, with the encoder
 // pools cold and after a warm-up that leaves a large buffer in them
 // (F-3: an earlier, larger encode in the process). Ist on the S1 stub:
-// json.Marshal, 5.6–7.25 × the body cold.
+// json.Marshal, 5.6–7.25 × the body cold. The allocations are the writer's
+// own (folgeRMeasure under wireBody's frame), so one run is the
+// measurement.
 func TestWireBodyIsOneAllocation(t *testing.T) {
+	testalloc.EveryAllocation(t)
+	writer := testalloc.Frame(wireBody)
 	for _, f := range folgeRForms {
 		for _, n := range []int{1, 128} {
 			for _, size := range []int{64, 4 << 10, 64 << 10} {
@@ -48,24 +56,17 @@ func TestWireBodyIsOneAllocation(t *testing.T) {
 				}
 				docs := folgeRDocs(f.unit, n, size)
 				// The query is built outside the measurement (a concatenation
-				// past 32 B is a heap allocation of the caller's), and the
-				// least of three runs counts (an allocation of the runtime's
-				// own during a large body's — 16 B, one run in three under
-				// load — is not the writer's; a second allocation of the
-				// writer's shows in every run). RC-D S2 FOLGE-R.
+				// past 32 B is a heap allocation of the caller's). An
+				// allocation of the runtime's own during a large body's (16 B,
+				// one run in three under load with the process's counters) is
+				// not under the writer's frame. RC-D S2 FOLGE-R.
 				query := "query " + f.unit
 				want := RequestBodyLen("bge-reranker-v2-m3", query, docs)
 				var got int
-				b, m := uint64(0), uint64(0)
-				for run := range 3 {
-					rb, rm := folgeRMeasure(true, func() {
-						folgeRSink, _ = wireBody("bge-reranker-v2-m3", query, docs)
-						got = len(folgeRSink)
-					})
-					if run == 0 || rm < m || (rm == m && rb < b) {
-						b, m = rb, rm
-					}
-				}
+				b, m := folgeRMeasure(t, writer, true, func() {
+					folgeRSink, _ = wireBody("bge-reranker-v2-m3", query, docs)
+					got = len(folgeRSink)
+				})
 				if got != want || m != 1 || b > uint64(want)+folgeRBodySlack {
 					t.Errorf("%s n=%d size=%d cold: %d allocations, %d B for a %d B body (%.3f ×; RequestBodyLen %d) — want one allocation of at most the body + %d B",
 						f.name, n, size, m, b, got, float64(b)/float64(max(got, 1)), want, folgeRBodySlack)
@@ -86,7 +87,7 @@ func TestWireBodyIsOneAllocation(t *testing.T) {
 	want := RequestBodyLen("m", "q", small)
 	var worst uint64
 	for range 4 {
-		b, _ := folgeRMeasure(false, func() { folgeRSink, _ = wireBody("m", "q", small) })
+		b, _ := folgeRMeasure(t, writer, false, func() { folgeRSink, _ = wireBody("m", "q", small) })
 		worst = max(worst, b)
 	}
 	t.Logf("FOLGE-R warm pool: a %d B body allocated up to %d B after a 20 MiB and five 4 MiB encodes", want, worst)
@@ -129,6 +130,7 @@ func folgeRHostile(limit int, prefix, elem, suffix string) []byte {
 // document plus folgeRDecodeFixed, refusal or not. Ist on the S1 stub: the
 // base's json.Unmarshal of every entry.
 func TestDecodeAnswerAllocatesNoMoreThanItsDocuments(t *testing.T) {
+	testalloc.EveryAllocation(t)
 	const limit = 1 << 20
 	echo := `{"index":0,"relevance_score":1.5,"document":{"text":"` + strings.Repeat("x", 4<<10) + `"}}`
 	for _, c := range []struct {
@@ -145,7 +147,7 @@ func TestDecodeAnswerAllocatesNoMoreThanItsDocuments(t *testing.T) {
 		{"echo-1", 1, []byte(`{"results":[` + echo + `]}`)},
 	} {
 		var err error
-		b, m := folgeRMeasure(true, func() { _, _, err = decodeAnswer(c.raw, c.n, DomainAuto) })
+		b, m := folgeRMeasure(t, testalloc.Frame(decodeAnswer), true, func() { _, _, err = decodeAnswer(c.raw, c.n, DomainAuto) })
 		bound := uint64(c.n*folgeRDecodePerDoc + folgeRDecodeFixed)
 		t.Logf("FOLGE-R decode: %-18s answer=%d B n=%d allocated=%d B mallocs=%d bound=%d err=%.80v", c.name, len(c.raw), c.n, b, m, bound, err)
 		if b > bound {

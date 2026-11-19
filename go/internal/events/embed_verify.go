@@ -17,7 +17,9 @@ import (
 	"github.com/GottZ/ctx/internal/embed"
 	"github.com/GottZ/ctx/internal/embedmigration"
 	"github.com/GottZ/ctx/internal/pgxdb"
+	"github.com/GottZ/ctx/internal/provenance"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	pgvec "github.com/pgvector/pgvector-go"
 )
 
@@ -157,11 +159,15 @@ func verifyCompletenessWhere(withWatermark bool) string {
 // The verify_report shape (JSONB, five named sections §4.7) follows.
 
 type verifyReport struct {
-	Result       string                    `json:"result"`
-	StartedAt    time.Time                 `json:"started_at"`
-	FinishedAt   time.Time                 `json:"finished_at"`
-	Watermark    time.Time                 `json:"watermark"`
-	ToModel      string                    `json:"to_model"`
+	Result     string    `json:"result"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+	Watermark  time.Time `json:"watermark"`
+	ToModel    string    `json:"to_model"`
+	// Release is the ctxd build that ran the gate (provenance.BuildVersion,
+	// issue #370): with instances of two releases on one database the report
+	// names which one built the indexes. Absent in reports stored before it.
+	Release      string                    `json:"release,omitempty"`
 	Completeness verifyCompletenessSection `json:"completeness"`
 	Integrity    verifyIntegritySection    `json:"integrity"`
 	Index        verifyIndexSection        `json:"index"`
@@ -169,8 +175,11 @@ type verifyReport struct {
 	Guard        verifyGuardSection        `json:"guard"`
 	// IndexRepairs records each rebuild of the index stage alone on this
 	// green verdict (issue #333, embed_index_repair.go); the sections above
-	// stay those of the run of Watermark. Absent until the first one.
-	IndexRepairs []verifyIndexRepair `json:"index_repairs,omitempty"`
+	// stay those of the run of Watermark. Absent until the first one. Only
+	// the newest verifyIndexRepairsCap entries are kept (issue #370);
+	// IndexRepairsTotal counts every one.
+	IndexRepairs      []verifyIndexRepair `json:"index_repairs,omitempty"`
+	IndexRepairsTotal int64               `json:"index_repairs_total,omitempty"`
 }
 
 type verifySkipEntry struct {
@@ -297,12 +306,70 @@ func (s *Scheduler) startEmbedVerifyRunner(mig *embedmigration.Migration, label 
 // (Stufe 3) runs LAST so a red completeness/integrity verdict never pays
 // an hours-long CIC first; the report keeps all five named sections either
 // way (a red run marks the index section "skipped").
+//
+// One session at a time runs the gate of a watermark (issue #366): the run
+// holds the verify run lock of its migration and watermark. Another
+// instance's cycle that finds it held starts nothing and asks again on its
+// next tick; once the verdict is stored it sees the verdict. Under the lock
+// the run first checks that the row still waits for the verdict of its
+// watermark, so a cycle that read the row before another session stored the
+// verdict does not scan again.
 func (s *Scheduler) runEmbedVerify(ctx context.Context, mig *embedmigration.Migration, cfg *config.Config) error {
 	if mig.VerifyStartedAt == nil {
 		return fmt.Errorf("embed-verify: migration %s in verifying without watermark", mig.ID)
 	}
 	wm := *mig.VerifyStartedAt
-	rep := &verifyReport{StartedAt: time.Now().UTC(), Watermark: wm, ToModel: mig.ToModel}
+	err := withTriedSessionLock(ctx, s.pool, verifyRunLock(mig.ID, wm), func(*pgxpool.Conn) error {
+		wanted, err := verifyRunWanted(ctx, s.pool, mig.ID, wm)
+		if err != nil {
+			return err
+		}
+		if !wanted {
+			slog.Info("scheduler: embed verify not started — the row no longer waits for a verdict of this watermark",
+				"migration_id", mig.ID, "watermark", wm)
+			return nil
+		}
+		return s.runEmbedVerifyLocked(ctx, mig, wm, cfg)
+	})
+	if errors.Is(err, errVerifyRunBusy) {
+		slog.Debug("scheduler: embed verify not started — another session runs the gate of this watermark; its verdict is awaited",
+			"migration_id", mig.ID, "watermark", wm)
+		return nil
+	}
+	return err
+}
+
+// errVerifyRunBusy: another session holds the verify run lock of the
+// watermark.
+var errVerifyRunBusy = errors.New("embed-verify: another session runs the verify gate of this watermark")
+
+// verifyRunLock is the lock of the verify run of migration id at watermark
+// wm (issue #366): two-key form, class key first, the second key a hash of
+// the migration id and the watermark in microseconds since the epoch — the
+// precision of timestamptz, the same on every instance whatever its TimeZone.
+// A hash collision of two runs makes one wait for the other; the verdict
+// binding of issue #332 stays the guard of correctness either way.
+//
+// The lock lives on a connection of its own for the length of the run (the
+// scan, hours at 10M, and the index stage): one pooled connection per running
+// gate. A server that ends that idle session (idle_session_timeout, a broken
+// connection) releases the lock while the run goes on; another instance may
+// then scan the same watermark, and its verdict is discarded if this one
+// lands first.
+func verifyRunLock(id string, wm time.Time) triedSessionLock {
+	return triedSessionLock{
+		label:     "verify run lock",
+		lockSQL:   `SELECT pg_try_advisory_lock(hashtext('ctx:embed_verify_run'), hashtext($1))`,
+		unlockSQL: `SELECT pg_advisory_unlock(hashtext('ctx:embed_verify_run'), hashtext($1))`,
+		args:      []any{fmt.Sprintf("%s@%d", id, wm.UnixMicro())},
+		busy:      errVerifyRunBusy,
+	}
+}
+
+// runEmbedVerifyLocked is the gate of watermark wm, run under its verify run
+// lock.
+func (s *Scheduler) runEmbedVerifyLocked(ctx context.Context, mig *embedmigration.Migration, wm time.Time, cfg *config.Config) error {
+	rep := &verifyReport{StartedAt: time.Now().UTC(), Watermark: wm, ToModel: mig.ToModel, Release: provenance.BuildVersion()}
 	slog.Info("scheduler: embed verify started", "migration_id", mig.ID, "watermark", wm)
 
 	comp, err := s.verifyCompleteness(ctx, mig, wm, cfg)
@@ -334,6 +401,16 @@ func (s *Scheduler) runEmbedVerify(ctx context.Context, mig *embedmigration.Migr
 		slog.Info("scheduler: embed verify ends without a verdict — the row left this run while it waited for another session's index build",
 			"migration_id", mig.ID, "watermark", wm)
 		return nil
+	}
+	if err != nil && indexBuildSessionEnded(err) {
+		// The server ended the session of a build (a database restart,
+		// pg_terminate_backend, a broken connection): no verdict, no pause, as
+		// in the repair (issue #370) — the next cycle runs the gate again and
+		// drops the INVALID leftover. A red verdict here paused a migration
+		// whose stages had nothing to object to.
+		slog.Warn("scheduler: embed verify ends without a verdict — the server ended the session of an index build; the next cycle runs the gate again",
+			"migration_id", mig.ID, "watermark", wm, "error", err)
+		return err
 	}
 	rep.Index = idxSection
 	if err != nil {
@@ -777,7 +854,7 @@ func verifyNextIndexes() []struct{ name, ddl string } {
 // waits for it (verifyEnsureIndex) instead of building beside it.
 func (s *Scheduler) verifyEnsureIndexes(ctx context.Context, mig *embedmigration.Migration, wm time.Time) (verifyIndexSection, error) {
 	sec := verifyIndexSection{Result: verifyGreen}
-	wanted := func(ctx context.Context) (bool, error) { return verifyRunWanted(ctx, s.pool, mig.ID, wm) }
+	wanted := func(ctx context.Context, db pgxdb.Rower) (bool, error) { return verifyRunWanted(ctx, db, mig.ID, wm) }
 	for _, b := range verifyNextIndexes() {
 		action, err := s.verifyEnsureIndex(ctx, mig, b.name, b.ddl, wanted)
 		if err != nil {
@@ -805,10 +882,15 @@ var errVerifyRunLeft = errors.New("embed-verify: the row left this verify run")
 // for this run (wanted: verifyRunWanted for the gate, indexRepairWanted for
 // the index stage alone); otherwise it ends with errVerifyRunLeft. A failed
 // check is asked again after the next wait instead of ending the stage red.
-func (s *Scheduler) verifyEnsureIndex(ctx context.Context, mig *embedmigration.Migration, name, ddl string, wanted func(context.Context) (bool, error)) (string, error) {
+// The same check runs under the lock right before any DDL (issue #370); a
+// row that left the run there also ends the stage with errVerifyRunLeft.
+func (s *Scheduler) verifyEnsureIndex(ctx context.Context, mig *embedmigration.Migration, name, ddl string, wanted runtimeIndexWanted) (string, error) {
 	waiting := false
 	for {
-		action, err := s.ensureConcurrentIndexValid(ctx, name, ddl)
+		action, err := s.ensureConcurrentIndexValid(ctx, name, ddl, wanted)
+		if errors.Is(err, errRuntimeIndexUnwanted) {
+			return "", errVerifyRunLeft
+		}
 		if !errors.Is(err, errRuntimeIndexBusy) {
 			if waiting && err == nil {
 				slog.Info("scheduler: embed verify resumes after another session's index build", "index", name, "action", action)
@@ -827,7 +909,7 @@ func (s *Scheduler) verifyEnsureIndex(ctx context.Context, mig *embedmigration.M
 			return "", ctx.Err()
 		case <-timer.C:
 		}
-		still, err := wanted(ctx)
+		still, err := wanted(ctx, s.pool)
 		if err != nil {
 			// Asked again after the next wait; a database that stays
 			// unreachable fails the next ensure, which ends the stage as

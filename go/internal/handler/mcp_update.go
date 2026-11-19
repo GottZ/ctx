@@ -2,7 +2,8 @@
 // untouched (D3-m1). Semantics mirror the REST manage-update path
 // (context_manage.go handleUpdate): resolve within writableBlockScopes
 // (home_scope ∪ shared-if-allowed, v4.0.1), size limits, then
-// store.UpdateBlock + the same re-classify/temporal/re-embed afterwork.
+// store.UpdateBlock (which invalidates the vector of a changed title or
+// content in its own transaction) + the same re-classify/temporal afterwork.
 //
 // A key WITHOUT confirm_writes updates directly; a flagged key gets the
 // update STAGED (op 'update') with a TOCTOU pin (D1-M3): the block's
@@ -288,6 +289,12 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inp
 	}
 	if block == nil {
 		return errResult("Block not found (or not in a writable scope of this key)"), nil, nil
+	}
+	// A derivative is never updated by a client (UpdateBlock's WHERE, I7/S3):
+	// no card for a write the confirm cannot execute (D1-M2), as the archive
+	// stage refuses it (issue #275).
+	if rej := derivativeTargetReject(block); rej != nil {
+		return errResultReject(rej), nil, nil
 	}
 
 	cw := store.CanonicalWrite{

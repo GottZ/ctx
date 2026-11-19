@@ -18,6 +18,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/oai"
+	"github.com/GottZ/ctx/internal/testalloc"
 )
 
 // leastBudget is the least gateway.inflight_budget in [1, 1 GiB] at which
@@ -47,8 +48,12 @@ func leastBudget(t *testing.T, rig *chatRig, run func() bool) int64 {
 // route): a body nested one level past the decoder's limit, to the
 // credentials alias, one byte short of its read and that term is 503
 // server_overloaded with less than half the term allocated beyond the body;
-// at the booking the check runs and refuses the body (400).
+// at the booking the check runs and refuses the body (400). The
+// allocations are the route's own (routeFrame), not the process's — with
+// the ones the memory profile cannot place (testalloc.Alloc.CutBytes): the
+// check's decoder recurses once per level, past the profile's 32 frames.
 func TestRerankDepthIsBookedBeforeTheCheck(t *testing.T) {
+	testalloc.EveryAllocation(t)
 	const (
 		levels     = 10000 + 1
 		depthState = 24
@@ -58,9 +63,11 @@ func TestRerankDepthIsBookedBeforeTheCheck(t *testing.T) {
 	need := int64(len(body)) + term
 	e := newRerankEngine(t)
 	rig := newRerankRig(t, []backends.Backend{e.row("spark-rerank", 10)}, 33, 1)
-	at := func(budget int64) (uint64, chatAnswer) {
+	route := routeFrame(t, oai.Rerank(rig.deps, oai.RerankJina))
+	at := func(budget int64) (int64, chatAnswer) {
 		rig.setSettings(func(s *oai.Settings) { s.InflightBudget = budget })
-		return allocOf(func() chatAnswer { return rig.postRerank(t, "/v1/rerank", body) })
+		got, a := testalloc.In(t, route, func() chatAnswer { return rig.postRerank(t, "/v1/rerank", body) })
+		return got.Bytes + got.CutBytes, a
 	}
 	refused, a := at(need - 1)
 	ran, r := at(need)
@@ -69,11 +76,14 @@ func TestRerankDepthIsBookedBeforeTheCheck(t *testing.T) {
 	if code, _, _ := a.envelope(t); a.status != http.StatusServiceUnavailable || code != oai.CodeServerOverloaded || e.hits.Load() != 0 {
 		t.Fatalf("one byte short of the nesting state: %d %s — want 503 server_overloaded", a.status, a.body)
 	}
-	if beyond := int64(refused) - int64(len(body)); beyond >= term/2 {
+	if beyond := refused - int64(len(body)); beyond >= term/2 {
 		t.Errorf("refused at the nesting state, the request allocated %d B beyond its body — the check ran before its booking (term %d B)", beyond, term)
 	}
 	if code, _, _ := r.envelope(t); r.status != http.StatusBadRequest || code != oai.CodeInvalidJSON {
 		t.Errorf("at the nesting state's booking: %d %s — want the check's 400 invalid_json", r.status, r.body)
+	}
+	if beyond := ran - int64(len(body)); beyond < term/2 {
+		t.Errorf("past the nesting state's booking the request allocated only %d B beyond its body — the pin does not see the check (term %d B)", beyond, term)
 	}
 }
 
@@ -156,19 +166,22 @@ func TestRerankAnswerIsBookedBeforeTheMeter(t *testing.T) {
 // acquire with no wire call — and it allocated at least the body's length
 // less than the served request (rerank.Score's body never built: one
 // allocation of its length since FOLGE-R, 29/4 × before — the bound was
-// twice the body then).
+// twice the body then). The allocations are the route's own (routeFrame),
+// not the process's.
 func TestRerankWireTermIsBookedBeforeTheCall(t *testing.T) {
+	testalloc.EveryAllocation(t)
 	docs := rerankDocsOf(128, 4<<10)
 	body := rerankBody("rr", "q", docs)
 	e := newRerankEngine(t)
 	rig := newRerankRig(t, []backends.Backend{e.row("spark-rerank", 10)}, 200, 1, withoutCensus)
 	served := func() bool { return rig.postRerank(t, "/v1/rerank", body).status == http.StatusOK }
 	least := leastBudget(t, rig, served)
-	at := func(budget int64) (uint64, chatAnswer, int64) {
+	route := routeFrame(t, oai.Rerank(rig.deps, oai.RerankJina))
+	at := func(budget int64) (int64, chatAnswer, int64) {
 		rig.setSettings(func(s *oai.Settings) { s.InflightBudget = budget })
 		hits := e.hits.Load()
-		alloc, a := allocOf(func() chatAnswer { return rig.postRerank(t, "/v1/rerank", body) })
-		return alloc, a, e.hits.Load() - hits
+		alloc, a := testalloc.In(t, route, func() chatAnswer { return rig.postRerank(t, "/v1/rerank", body) })
+		return alloc.Bytes, a, e.hits.Load() - hits
 	}
 	ok, okA, okHits := at(least)
 	short, a, hits := at(least - 1)
@@ -180,7 +193,7 @@ func TestRerankWireTermIsBookedBeforeTheCall(t *testing.T) {
 	if rig.limiter.rejects.Load()+rig.limiter.aborts.Load() == 0 {
 		t.Errorf("one byte short: the meter's reservation was not ended without wire contact")
 	}
-	if saved := int64(ok) - int64(short); saved < int64(len(body)) {
+	if saved := ok - short; saved < int64(len(body)) {
 		t.Errorf("one byte short of the wire term the request allocated only %d B less than served (body %d B) — the call ran before its booking", saved, len(body))
 	}
 }

@@ -200,6 +200,10 @@ internal/store/resolve_sources.go	SourceSet.UntrustedCount	# wartet: E01-2 C (C2
 internal/store/resolve_sources.go	SourceSet.readFound	# wartet: E01-2 C (C2-12) — DB-Hälfte des Gen-1-Vertrags (resolve_sources.go:202), Aufrufer fehlt
 internal/store/resolve_sources.go	classifyRest	# wartet: E01-2 C (C2-12) — DB-Hälfte des Gen-1-Vertrags (resolve_sources.go:202), Aufrufer fehlt
 internal/store/tenant.go	CreateTenant	# E02-3 A: Pool-Wrapper um CreateTenantTx (Prod-Bootstrap); 16 Aufrufe in 9 Integrationstests
+internal/testalloc/testalloc.go	EveryAllocation	# testalloc: Testhelfer der Allokations-Pins (Frame-gebundene Messung aus dem Speicherprofil statt prozessweitem TotalAlloc, issue #369), 0 Prod by design — wie testdb
+internal/testalloc/testalloc.go	Frame	# testalloc: Testhelfer der Allokations-Pins (Frame-gebundene Messung aus dem Speicherprofil statt prozessweitem TotalAlloc, issue #369), 0 Prod by design — wie testdb
+internal/testalloc/testalloc.go	In	# testalloc: Testhelfer der Allokations-Pins (Frame-gebundene Messung aus dem Speicherprofil statt prozessweitem TotalAlloc, issue #369), 0 Prod by design — wie testdb
+internal/testalloc/testalloc.go	profiled	# testalloc: Testhelfer der Allokations-Pins (Frame-gebundene Messung aus dem Speicherprofil statt prozessweitem TotalAlloc, issue #369), 0 Prod by design — wie testdb
 internal/testdb/clienttool.go	RunClientTool	# testdb: integration-getaggter Aufruf von pg_dump/pg_restore im Testcontainer (issue #351), 0 Prod
 internal/testdb/explain.go	ExplainCustom	# testdb: integration-getaggter EXPLAIN-Helfer der Kosten-Pins (issue #239), 0 Prod
 internal/testdb/explain.go	ExplainGeneric	# testdb: integration-getaggter EXPLAIN-Helfer der Kosten-Pins (issue #239), 0 Prod
@@ -220,6 +224,17 @@ internal/testdb/setup.go	newDatabase	# testdb: integration-getaggtes Container-/
 internal/testdb/setup.go	prepareDatabase	# testdb: integration-getaggtes Container-/Template-DB-Setup, 393 Test-Importeure, 0 Prod
 internal/testdb/setup.go	runPostgres	# testdb: integration-getaggtes Container-/Template-DB-Setup, 393 Test-Importeure, 0 Prod
 internal/testdb/setup.go	startContainer	# testdb: integration-getaggtes Container-/Template-DB-Setup, 393 Test-Importeure, 0 Prod
+internal/testgoroutine/testgoroutine.go	Baseline.Len	# testgoroutine: Testhelfer der Goroutinen-Pins (eigene Goroutinen eines Tests über ihre Erzeuger statt runtime.NumGoroutine, issue #369), 0 Prod by design — wie testdb
+internal/testgoroutine/testgoroutine.go	Baseline.New	# testgoroutine: Testhelfer der Goroutinen-Pins (eigene Goroutinen eines Tests über ihre Erzeuger statt runtime.NumGoroutine, issue #369), 0 Prod by design — wie testdb
+internal/testgoroutine/testgoroutine.go	Baseline.Own	# testgoroutine: Testhelfer der Goroutinen-Pins (eigene Goroutinen eines Tests über ihre Erzeuger statt runtime.NumGoroutine, issue #369), 0 Prod by design — wie testdb
+internal/testgoroutine/testgoroutine.go	Baseline.Settle	# testgoroutine: Testhelfer der Goroutinen-Pins (eigene Goroutinen eines Tests über ihre Erzeuger statt runtime.NumGoroutine, issue #369), 0 Prod by design — wie testdb
+internal/testgoroutine/testgoroutine.go	Baseline.Settled	# testgoroutine: Testhelfer der Goroutinen-Pins (eigene Goroutinen eines Tests über ihre Erzeuger statt runtime.NumGoroutine, issue #369), 0 Prod by design — wie testdb
+internal/testgoroutine/testgoroutine.go	Baseline.settled	# testgoroutine: Testhelfer der Goroutinen-Pins (eigene Goroutinen eines Tests über ihre Erzeuger statt runtime.NumGoroutine, issue #369), 0 Prod by design — wie testdb
+internal/testgoroutine/testgoroutine.go	Current	# testgoroutine: Testhelfer der Goroutinen-Pins (eigene Goroutinen eines Tests über ihre Erzeuger statt runtime.NumGoroutine, issue #369), 0 Prod by design — wie testdb
+internal/testgoroutine/testgoroutine.go	Dump	# testgoroutine: Testhelfer der Goroutinen-Pins (eigene Goroutinen eines Tests über ihre Erzeuger statt runtime.NumGoroutine, issue #369), 0 Prod by design — wie testdb
+internal/testgoroutine/testgoroutine.go	Own	# testgoroutine: Testhelfer der Goroutinen-Pins (eigene Goroutinen eines Tests über ihre Erzeuger statt runtime.NumGoroutine, issue #369), 0 Prod by design — wie testdb
+internal/testgoroutine/testgoroutine.go	Take	# testgoroutine: Testhelfer der Goroutinen-Pins (eigene Goroutinen eines Tests über ihre Erzeuger statt runtime.NumGoroutine, issue #369), 0 Prod by design — wie testdb
+internal/testgoroutine/testgoroutine.go	TakeSettled	# testgoroutine: Testhelfer der Goroutinen-Pins (eigene Goroutinen eines Tests über ihre Erzeuger statt runtime.NumGoroutine, issue #369), 0 Prod by design — wie testdb
 migrations/fold.go	IsFolded	# Prod iteriert Folded() (store/migrations.go:268, check.go:164); IsFolded nur in fold_test.go:84/87
 migrations/fold.go	Section	# Nur Tests lesen Migrations-SQL über Section (fold_test.go:34 + 33 Integrationstests); Runner nutzt FS
 internal/gatewaylimits/gatewaylimits.go	FieldError.Error	# W06-15: FieldError erfüllt error für Tests und %v-Logs; die Handler schreiben Field/Code/Msg einzeln (400 + param)

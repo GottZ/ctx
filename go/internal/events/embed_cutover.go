@@ -63,6 +63,11 @@ var (
 	// watermark+memo predicate as §4.7 Stufe 1 — §5 Bruchpfad 4) found
 	// pending blocks. The tx rolled back, the row stays verifying.
 	ErrConfirmIncomplete = errors.New("embed-cutover: confirm: completeness re-check found pending blocks before the watermark — tx rolled back, migration stays verifying")
+	// ErrConfirmRuntimeIndexBusy: another session runs runtime index DDL on
+	// context_blocks (a _next index of the verify gate or its repair, the
+	// pending index of the migration cycle, or its drop) — issue #370. The tx
+	// rolled back before any write; confirm again once the build ends.
+	ErrConfirmRuntimeIndexBusy = errors.New("embed-cutover: confirm: another session is building or dropping a runtime index on context_blocks — tx rolled back, migration stays verifying; confirm again once it ends")
 
 	ErrRollbackReasonRequired = errors.New("embed-cutover: rollback: rollback_reason is required (§4.10) — refused before any write")
 	ErrRollbackNotDone        = errors.New("embed-cutover: rollback: migration is not in status done")
@@ -422,6 +427,20 @@ func runConfirmSwapTx(ctx context.Context, db *pgxpool.Pool, migrationID string,
 	}, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '`+cutoverLockTimeout+`'`); err != nil {
 			return fmt.Errorf("embed-cutover: set lock_timeout: %w", err)
+		}
+		// (0) The runtime index lock, transaction-level and tried (issue #370):
+		// no runtime index DDL runs beside the swap, and none starts until the
+		// commit; a builder that then takes the lock asks under it whether the
+		// row still waits for its index and finds it done. Tried first, before
+		// any statement that holds a snapshot or a table lock: a builder's
+		// CREATE INDEX CONCURRENTLY waits for older snapshots, so a confirm
+		// waiting for the builder's lock would close a deadlock (40P01).
+		var locked bool
+		if err := tx.QueryRow(ctx, runtimeIndexXactTrySQL).Scan(&locked); err != nil {
+			return fmt.Errorf("embed-cutover: runtime index lock: %w", err)
+		}
+		if !locked {
+			return ErrConfirmRuntimeIndexBusy
 		}
 		// (1) Cache flush FIRST (§4.9): the up-to-50k row deletes must not run
 		// under the later ACCESS-EXCLUSIVE lock on context_blocks — locks are

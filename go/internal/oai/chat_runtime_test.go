@@ -15,7 +15,6 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,6 +29,7 @@ import (
 	"github.com/GottZ/ctx/internal/handler/v1census"
 	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/oai"
+	"github.com/GottZ/ctx/internal/testgoroutine"
 )
 
 // blocker makes an upstream hold every request until released (or until the
@@ -470,35 +470,30 @@ func TestWatcherAliasGoneEndsRequest(t *testing.T) {
 	}
 }
 
-// TestWatcherLeavesNoGoroutine: 100 requests later the goroutine count is
-// back where it started (±0 after settling) — one watcher per request, gone
-// with it.
+// TestWatcherLeavesNoGoroutine: 100 requests later the test's goroutines
+// are as many as before them (±0 after settling) — one watcher per request,
+// gone with it. The count is the test's own goroutines (testgoroutine: the
+// rig's, the engine's, the transport's connection and whatever a request
+// starts), never the process's: an earlier test's goroutine still leaving
+// moved runtime.NumGoroutine between the two counts (issue #369).
 func TestWatcherLeavesNoGoroutine(t *testing.T) {
 	u := newUpstream(t, answerSGLang)
 	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1)
 	_ = rig.post(t, chatBody("chat")) // warm the transport's idle connection
-	settle := func() int {
-		n := runtime.NumGoroutine()
-		for i := 0; i < 50; i++ {
-			time.Sleep(10 * time.Millisecond)
-			if m := runtime.NumGoroutine(); m == n {
-				return n
-			} else {
-				n = m
-			}
-		}
-		return n
-	}
-	before := settle()
+	gate := testgoroutine.TakeSettled(time.Second)
 	for i := 0; i < 100; i++ {
 		if a := rig.post(t, chatBody("chat")); a.status != http.StatusOK {
 			t.Fatalf("request %d: %d %s", i, a.status, a.body)
 		}
 	}
-	after := settle()
-	t.Logf("goroutines before %d, after 100 requests %d", before, after)
-	if after != before {
-		t.Errorf("goroutines %d → %d after 100 requests, want ±0", before, after)
+	after := gate.Settle(2 * time.Second)
+	t.Logf("the test's goroutines before %d, after 100 requests %d", gate.Len(), len(after))
+	if !gate.Settled(after) {
+		var stacks strings.Builder
+		for _, g := range after {
+			stacks.WriteString("\n" + g.Stack)
+		}
+		t.Errorf("the test's goroutines %d → %d after 100 requests, want the same ones (±0, none new); now:%s", gate.Len(), len(after), stacks.String())
 	}
 }
 

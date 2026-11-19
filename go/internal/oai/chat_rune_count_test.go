@@ -4,13 +4,19 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/GottZ/ctx/internal/testalloc"
 )
 
 // TestRuneCountIsRuneCountWithoutACopy (hardening 6): runeCount gives
 // utf8.RuneCount's number for every byte sequence, valid or not, and
 // allocates nothing — RuneCount copied the bytes after the first non-ASCII
-// one (go1.27), 8 MiB for a message array of 8 MiB.
+// one (go1.27), 8 MiB for a message array of 8 MiB. What counts is what was
+// allocated under runeCount's frame (testalloc.In), not the process's
+// TotalAlloc: a pin against zero has no margin for another goroutine
+// allocating while it runs (issue #369).
 func TestRuneCountIsRuneCountWithoutACopy(t *testing.T) {
+	testalloc.EveryAllocation(t)
 	for _, s := range []string{
 		"", "a", "é", "aé", "\xff", "\xffa", "a\xff\xff", "\xe2\x82", "\xe2\x82\xac", "\x80", "\xc0\xaf", "\xed\xa0\x80",
 		"\xf0\x9f\x98\x80x", "\xf0\x9f\x98", "\xef\xbf\xbd", strings.Repeat("aé\xff€\xf0\x9f\x98\x80", 1000),
@@ -20,8 +26,8 @@ func TestRuneCountIsRuneCountWithoutACopy(t *testing.T) {
 		}
 	}
 	big := []byte(`[{"role":"developer","content":"` + strings.Repeat("é", 512<<10) + `"}]`)
-	if got := allocatedBy(func() { _ = runeCount(big) }); got > 0 {
-		t.Errorf("runeCount of %d bytes allocates %d bytes, want 0", len(big), got)
+	if got, _ := testalloc.In(t, testalloc.Frame(runeCount), func() int { return runeCount(big) }); got.Bytes != 0 || got.Objects != 0 {
+		t.Errorf("runeCount of %d bytes allocates %d bytes in %d allocations, want none", len(big), got.Bytes, got.Objects)
 	}
 	if got := runeCount(big); got != utf8.RuneCount(big) {
 		t.Errorf("runeCount = %d, utf8.RuneCount %d", got, utf8.RuneCount(big))

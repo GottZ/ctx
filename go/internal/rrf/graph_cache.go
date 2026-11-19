@@ -94,6 +94,7 @@ type expandCacheArm struct {
 	readScopes      []string
 	grantedBlockIDs []string
 	visibleTypes    []string
+	filter          RequestFilter
 	cfg             GraphConfig
 
 	// u16 gate thresholds, precomputed once per request. CEIL side of the
@@ -106,7 +107,7 @@ type expandCacheArm struct {
 // newExpandCacheArm narrows the snapshot to the dream adjacency (the GA5 cut)
 // and precomputes the request-constant gates.
 func newExpandCacheArm(snap *graphcache.Snapshot, pool *pgxpool.Pool,
-	readScopes, grantedBlockIDs, visibleTypes []string, cfg GraphConfig) *expandCacheArm {
+	readScopes, grantedBlockIDs, visibleTypes []string, filter RequestFilter, cfg GraphConfig) *expandCacheArm {
 	if grantedBlockIDs == nil {
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL (T40a)
 	}
@@ -116,6 +117,7 @@ func newExpandCacheArm(snap *graphcache.Snapshot, pool *pgxpool.Pool,
 		readScopes:      readScopes,
 		grantedBlockIDs: grantedBlockIDs,
 		visibleTypes:    visibleTypes,
+		filter:          filter,
 		cfg:             cfg,
 		minConf:         graphcache.ThresholdToFix(cfg.MinConfidence),
 		minConfRec:      graphcache.ThresholdToFix(cfg.MinConfidenceRecurrent),
@@ -257,7 +259,8 @@ func (a *expandCacheArm) candidateIDs(capped []expandWalkEdge) ([]string, error)
 // (NOT archived, type_name = ANY(visibleTypes) registry allowlist, and the
 // parenthesised scope/grant group), gated on context_blocks.scope — never on
 // context_dream_links.scope. Ids the query does not return are invisible
-// (fail-closed direction).
+// (fail-closed direction). The request filter (#225) rides along at the same
+// position as in the SQL arm's WHERE: after the walk's per-seed cap.
 func (a *expandCacheArm) hydrate(ctx context.Context, ids []string) (map[uint32]*SearchResult, error) {
 	q := `
 SELECT cb.id::text,
@@ -270,13 +273,18 @@ SELECT cb.id::text,
 FROM context_blocks cb
 WHERE cb.id = ANY($1::uuid[])
   AND ` + visibility.Predicate("cb", "$4", "$2", "$3")
-
-	rows, err := a.pool.Query(ctx, q,
+	args := []any{
 		ids,               // $1 candidate ids
 		a.readScopes,      // $2
 		a.grantedBlockIDs, // $3 block-grant OR-arm (T40a, neighbour side)
 		a.visibleTypes,    // $4 registry type allowlist (T6)
-	)
+	}
+	if fsql, fargs := a.filter.Predicate("cb", 5); fsql != "" {
+		q += "\n  AND " + fsql // $5..$8 request filter (#225)
+		args = append(args, fargs...)
+	}
+
+	rows, err := a.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("hydrate dream neighbors: %w", err)
 	}

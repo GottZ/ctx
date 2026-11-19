@@ -242,16 +242,21 @@ func GraphExpand(ctx context.Context, pool *pgxpool.Pool, results []SearchResult
 // GraphExpandCached is GraphExpand with the OPTIONAL W05.7 snapshot arm
 // (design/05 §4.2). A zero ExpandCache is the SQL path, byte-identical to
 // pre-W05.7 — that is the permanent fallback AND the differential oracle.
-func GraphExpandCached(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, visibleTypes []string, cfg GraphConfig, cache ExpandCache) ([]SearchResult, error) {
-	out, _, err := GraphExpandCachedWithReport(ctx, pool, results, readScopes, grantedBlockIDs, visibleTypes, cfg, cache)
+//
+// filter is the request's own narrowing (issue #225): a neighbour that fails
+// it is not hydrated, exactly like one that fails the visibility predicate —
+// it is neither added nor traversed. The zero filter leaves every statement
+// as it was.
+func GraphExpandCached(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, visibleTypes []string, filter RequestFilter, cfg GraphConfig, cache ExpandCache) ([]SearchResult, error) {
+	out, _, err := GraphExpandCachedWithReport(ctx, pool, results, readScopes, grantedBlockIDs, visibleTypes, filter, cfg, cache)
 	return out, err
 }
 
 // GraphExpandCachedWithReport is GraphExpandCached plus the traversal budget
 // report. Same telemetry contract as GraphExpandWithReport; Source is "cache"
 // exactly when the snapshot arm answered.
-func GraphExpandCachedWithReport(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, visibleTypes []string, cfg GraphConfig, cache ExpandCache) ([]SearchResult, *graphcache.BudgetReport, error) {
-	return graphExpandDispatch(ctx, pool, results, readScopes, grantedBlockIDs, visibleTypes, cfg, cache)
+func GraphExpandCachedWithReport(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, visibleTypes []string, filter RequestFilter, cfg GraphConfig, cache ExpandCache) ([]SearchResult, *graphcache.BudgetReport, error) {
+	return graphExpandDispatch(ctx, pool, results, readScopes, grantedBlockIDs, visibleTypes, filter, cfg, cache)
 }
 
 // GraphExpandWithReport is GraphExpand plus the traversal budget report
@@ -265,7 +270,7 @@ func GraphExpandCachedWithReport(ctx context.Context, pool *pgxpool.Pool, result
 // before W05.4 — the only additions are Add calls on a telemetry sink and one
 // Debug log.
 func GraphExpandWithReport(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, visibleTypes []string, cfg GraphConfig) ([]SearchResult, *graphcache.BudgetReport, error) {
-	return graphExpandDispatch(ctx, pool, results, readScopes, grantedBlockIDs, visibleTypes, cfg, ExpandCache{})
+	return graphExpandDispatch(ctx, pool, results, readScopes, grantedBlockIDs, visibleTypes, RequestFilter{}, cfg, ExpandCache{})
 }
 
 // graphExpandDispatch is the W05.7 arm selection (design/05 §4.2: "Flag-Dispatch
@@ -282,7 +287,7 @@ func GraphExpandWithReport(ctx context.Context, pool *pgxpool.Pool, results []Se
 //
 // Every OTHER error keeps the fail-open contract byte-identical to pre-W05.7:
 // the ORIGINAL slice plus the error, whichever arm produced it.
-func graphExpandDispatch(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, visibleTypes []string, cfg GraphConfig, cache ExpandCache) ([]SearchResult, *graphcache.BudgetReport, error) {
+func graphExpandDispatch(ctx context.Context, pool *pgxpool.Pool, results []SearchResult, readScopes []string, grantedBlockIDs []string, visibleTypes []string, filter RequestFilter, cfg GraphConfig, cache ExpandCache) ([]SearchResult, *graphcache.BudgetReport, error) {
 	if !cfg.Enabled || len(results) == 0 || len(readScopes) == 0 {
 		return results, graphcache.NewBudgetReport(graphcache.SourceSQL), nil
 	}
@@ -298,7 +303,7 @@ func graphExpandDispatch(ctx context.Context, pool *pgxpool.Pool, results []Sear
 		defer logExpandBudget(rep)
 		out, err := expandWith(ctx, sqlNeighbors{
 			pool: pool, readScopes: readScopes, grantedBlockIDs: grantedBlockIDs,
-			visibleTypes: visibleTypes, cfg: cfg,
+			visibleTypes: visibleTypes, filter: filter, cfg: cfg,
 		}, results, readScopes, cfg, rep)
 		return out, rep, err
 	}
@@ -309,7 +314,7 @@ func graphExpandDispatch(ctx context.Context, pool *pgxpool.Pool, results []Sear
 	rep := graphcache.NewBudgetReport(graphcache.SourceCache)
 	rep.CacheAge = cache.Age
 	out, err := expandWith(ctx,
-		newExpandCacheArm(cache.Snapshot, pool, readScopes, grantedBlockIDs, visibleTypes, cfg),
+		newExpandCacheArm(cache.Snapshot, pool, readScopes, grantedBlockIDs, visibleTypes, filter, cfg),
 		results, readScopes, cfg, rep)
 	if !errors.Is(err, errExpandCacheStale) {
 		logExpandBudget(rep)
@@ -338,11 +343,12 @@ type neighborFetcher interface {
 type sqlNeighbors struct {
 	pool                                      *pgxpool.Pool
 	readScopes, grantedBlockIDs, visibleTypes []string
+	filter                                    RequestFilter
 	cfg                                       GraphConfig
 }
 
 func (s sqlNeighbors) fetch(ctx context.Context, seedIDs []string, hopDecay float64) ([]graphEdge, error) {
-	return fetchNeighbors(ctx, s.pool, seedIDs, s.readScopes, s.grantedBlockIDs, s.visibleTypes, s.cfg, hopDecay)
+	return fetchNeighbors(ctx, s.pool, seedIDs, s.readScopes, s.grantedBlockIDs, s.visibleTypes, s.filter, s.cfg, hopDecay)
 }
 
 // expandWith is the ONE traversal body behind both arms: seed selection, the
@@ -491,7 +497,17 @@ func logExpandBudget(rep *graphcache.BudgetReport) {
 // is_archived, type_name = ANY(visibleTypes) (registry allowlist, fail-closed)
 // and the parenthesised scope/grant group. scope is gated on
 // context_blocks.scope (authoritative), NOT context_dream_links.scope.
-func fetchNeighbors(ctx context.Context, pool *pgxpool.Pool, seedIDs, readScopes, grantedBlockIDs, visibleTypes []string, cfg GraphConfig, hopDecay float64) ([]graphEdge, error) {
+//
+// The request filter (issue #225) is appended to the same WHERE, after the
+// per-seed cap — the position of the visibility predicate, on purpose. A
+// filtered neighbour takes its cap slot like an invisible one does. Moving
+// the filter alone in front of the cap would let the number of neighbours a
+// filtered request gets tell whether an INVISIBLE block among a seed's top
+// edges matches the filter; moving visibility with it would change every
+// request's neighbour set and hydrate every gated edge of a hub instead of
+// the capped few. The cap stays a cap of edges; MaxInjected (fuseNeighbors)
+// only ever counts neighbours that passed.
+func fetchNeighbors(ctx context.Context, pool *pgxpool.Pool, seedIDs, readScopes, grantedBlockIDs, visibleTypes []string, filter RequestFilter, cfg GraphConfig, hopDecay float64) ([]graphEdge, error) {
 	if grantedBlockIDs == nil {
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL (T40a)
 	}
@@ -556,8 +572,7 @@ FROM ranked r
 JOIN context_blocks cb ON cb.id = r.neighbor_id
 WHERE r.seed_rn <= $5
   AND ` + visibility.Predicate("cb", "$8", "$2", "$7")
-
-	rows, err := pool.Query(ctx, q,
+	args := []any{
 		seedIDs,                    // $1
 		readScopes,                 // $2
 		cfg.MinConfidence,          // $3
@@ -566,7 +581,13 @@ WHERE r.seed_rn <= $5
 		cfg.Directed,               // $6
 		grantedBlockIDs,            // $7 block-grant OR-arm (T40a, neighbor side)
 		visibleTypes,               // $8 registry type allowlist (T6)
-	)
+	}
+	if fsql, fargs := filter.Predicate("cb", 9); fsql != "" {
+		q += "\n  AND " + fsql // $9..$12 request filter (#225)
+		args = append(args, fargs...)
+	}
+
+	rows, err := pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query dream links: %w", err)
 	}

@@ -342,7 +342,7 @@ func TestMCPUpdateType(t *testing.T) {
 	t.Run("a re-type of a derived block answers provenance_protected on both surfaces", func(t *testing.T) {
 		// insight is the one type that is untrusted AND derived: the
 		// statement's provenance refusal answers on every surface; the flagged
-		// key gets it from the confirmed write.
+		// key gets it at stage time, without a card (issue #275).
 		mkDerived := func(title string) string {
 			t.Helper()
 			b, err := store.UpsertBlock(ctx, f.pool, "learnings", title, "derived body", nil,
@@ -362,13 +362,8 @@ func TestMCPUpdateType(t *testing.T) {
 		if a := f.call(t, f.direct, "update", map[string]any{"id": mcpID, "type": "knowledge"}); a.RPCError != "" || !a.IsError || a.Code != "provenance_protected" || a.Text != msg {
 			t.Errorf("direct key: %+v, want provenance_protected with REST's text %q", a, msg)
 		}
-		a := f.call(t, f.flagged, "update", map[string]any{"id": mcpID, "type": "knowledge"})
-		m := hashRe.FindStringSubmatch(a.Text)
-		if m == nil {
-			t.Fatalf("flagged key: %+v, want a STAGED card", a)
-		}
-		if a = f.call(t, f.flagged, "confirm", map[string]any{"payload_hash": m[1]}); a.RPCError != "" || !a.IsError || a.Code != "provenance_protected" || !strings.HasSuffix(a.Text, msg) {
-			t.Errorf("flagged key, confirm: %+v, want provenance_protected ending in REST's text %q", a, msg)
+		if a := f.call(t, f.flagged, "update", map[string]any{"id": mcpID, "type": "knowledge"}); a.RPCError != "" || !a.IsError || a.Code != "provenance_protected" || a.Text != msg {
+			t.Errorf("flagged key: %+v, want provenance_protected at stage time with REST's text %q", a, msg)
 		}
 		for _, id := range []string{restID, mcpID} {
 			if name, _ := i203TypeOf(t, f.pool, id); name != derived.TypeInsight {

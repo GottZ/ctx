@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// The /mcp keepalive: the MCP twin of queryHeartbeat (query.go).
+// The /mcp keepalive: the MCP twin of queryKeepalive (query_keepalive.go).
 //
 // The SDK handler answers a tool call with ONE buffered application/json body
 // (JSONResponse, mcp.go), and the query tool delegates into a responseRecorder
@@ -27,10 +27,11 @@ import (
 //   - writes one space and flushes (leading whitespace is valid JSON per
 //     RFC 8259, the same trick HandleQuery relies on),
 //   - rolls the connection write deadline one heartbeatWriteWindow ahead (the
-//     mechanism of queryHeartbeat and sseWriteWindow in events.go).
+//     mechanism of queryKeepalive and sseWriteWindow in events.go).
 //
 // It runs from the moment the tool starts, so it also covers what the REST
-// heartbeat does not: the phase before the RRF search and synthesize:false.
+// keepalive's bytes cover only with keepalive:true: the phase before the RRF
+// search and synthesize:false.
 //
 // One response has one cadence. The arms are counted, and a single ticker
 // serves them all: a JSON-RPC batch with two query calls (the SDK still takes
@@ -204,7 +205,7 @@ func (k *mcpKeepalive) tick(window time.Duration) (alive bool) {
 	}
 	flushErr := k.rc.Flush()
 	if first {
-		// Same alarms as startHeartbeat: loud once, instead of silent
+		// Same alarms as the query keepalive: loud once, instead of silent
 		// buffering or a silent cut at the server WriteTimeout.
 		if flushErr != nil {
 			slog.Warn("mcp keepalive: response writer not flushable, keepalive ineffective",

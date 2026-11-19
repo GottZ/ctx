@@ -141,8 +141,9 @@ type queryInput struct {
 	// inside the scopes the key already reads, so unlike `types` below they
 	// need no visibility check. Absent or empty ⇒ no key in the delegated
 	// body; an empty category is "no filter", as on `search` and `recent`.
-	// Like every /api/query filter they bind the rank-fusion candidates only:
-	// cluster boost, graph expansion and aggregate fold do not take them.
+	// Like every /api/query filter they bind the rank-fusion candidates and
+	// every stage after it that can add a block — cluster injection, graph
+	// expansion, aggregate fold (#225).
 	Category          string   `json:"category,omitempty" jsonschema:"retrieve only blocks of this category"`
 	Tags              []string `json:"tags,omitempty" jsonschema:"retrieve only blocks that carry at least one of these tags"`
 	CategoriesExclude []string `json:"categories_exclude,omitempty" jsonschema:"do not retrieve blocks of these categories"`

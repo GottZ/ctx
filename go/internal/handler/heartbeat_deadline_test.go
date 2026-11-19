@@ -25,7 +25,9 @@ func TestHeartbeatOutlivesServerWriteTimeout(t *testing.T) {
 	}()
 
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hb := startHeartbeat(r.Context(), w, true)
+		kw := armQueryKeepalive(r.Context(), w, false)
+		defer kw.close()
+		kw.commit()
 		// Simulated slow synthesis: 3x the server WriteTimeout. The request
 		// context must stay alive the whole time (it is canceled when the
 		// write deadline kills the connection).
@@ -34,7 +36,7 @@ func TestHeartbeatOutlivesServerWriteTimeout(t *testing.T) {
 		case <-r.Context().Done():
 			t.Error("request context canceled — write deadline was not extended")
 		}
-		hb.finish(http.StatusOK, map[string]any{"answer": "made-it"})
+		writeJSON(kw, http.StatusOK, map[string]any{"answer": "made-it"})
 	}))
 	srv.Config.WriteTimeout = 300 * time.Millisecond
 	srv.Start()

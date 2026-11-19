@@ -216,11 +216,10 @@ func rrfBaseArgs(embedding []float32, query, querySpaced string, scopes []string
 	// Build halfvec from float32 slice.
 	hv := pgvec.NewHalfVector(embedding)
 
-	// Use native pgx []string for PG TEXT[] parameters (no manual string building).
-	var tagsParam interface{}
-	if len(tags) > 0 {
-		tagsParam = tags
-	}
+	// The four request filters (category, tags, categories_exclude,
+	// types_exclude) in ctx_rrf's form — empty list ⇒ NULL — from the ONE
+	// function the post-fusion stages bind them with (RequestFilter, #225).
+	filter := RequestFilter{Category: category, Tags: tags, CategoriesExclude: categoriesExclude, TypesExclude: typesExclude}.args()
 
 	// Pass temporal as NULL if empty (PG function default).
 	var temporalParam interface{}
@@ -232,16 +231,6 @@ func rrfBaseArgs(embedding []float32, query, querySpaced string, scopes []string
 	var queryORParam interface{}
 	if queryOR != "" {
 		queryORParam = queryOR
-	}
-
-	// v2.0.0 C2 (M048): empty slice → NULL (SQL default = no-op exclude).
-	var categoriesExcludeParam interface{}
-	if len(categoriesExclude) > 0 {
-		categoriesExcludeParam = categoriesExclude
-	}
-	var typesExcludeParam interface{}
-	if len(typesExclude) > 0 {
-		typesExcludeParam = typesExclude
 	}
 
 	// Damping arrays (M073): empty → NULL/NULL (unnest of NULL arrays yields
@@ -260,8 +249,8 @@ func rrfBaseArgs(embedding []float32, query, querySpaced string, scopes []string
 		grantedBlockIDsParam = grantedBlockIDs
 	}
 
-	return []any{hv, query, querySpaced, scopes, category, tagsParam, limit, temporalParam, queryORParam,
-		visibleTypes, dampedTypesParam, dampedFactorsParam, categoriesExcludeParam, typesExcludeParam, grantedBlockIDsParam}, nil
+	return []any{hv, query, querySpaced, scopes, filter[0], filter[1], limit, temporalParam, queryORParam,
+		visibleTypes, dampedTypesParam, dampedFactorsParam, filter[2], filter[3], grantedBlockIDsParam}, nil
 }
 
 const rrfQueryCols = `SELECT rrf_score, cosine_sim, id, title, category, tags, content, scope, updated_at, type_name`

@@ -13,11 +13,12 @@ package dispatch
 import (
 	"context"
 	"errors"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/GottZ/ctx/internal/testgoroutine"
 )
 
 // budgetSettings returns the registry defaults with the external wait budget
@@ -378,64 +379,39 @@ func TestInHouseClassesIgnoreWaitBudget(t *testing.T) {
 	}
 }
 
-// gateGoroutines counts the live goroutines that the race gate answers for:
-// all of them except those started by OTHER tests of this package — a waiter
-// an earlier test left behind ends on its own (its caller ctx, or now its
-// 20-s wait budget) and may do so in the middle of this gate. Goroutines
-// started by production code or by the gate itself all count.
-func gateGoroutines(self string) int {
-	buf := make([]byte, 1<<20)
-	for {
-		n := runtime.Stack(buf, true)
-		if n < len(buf) {
-			buf = buf[:n]
-			break
+// gateGoroutines is a race gate's goroutine check: the goroutines the gate
+// owns (testgoroutine: its dispatcher's loops, the goroutines its iterations
+// start and whatever those start, a timer's callback) are as many as at the
+// baseline taken before the loop, polled for up to settle — goroutines of
+// the gate still on their way out are not a leak. Goroutines of other tests
+// never enter either count: a waiter an earlier test left behind ends on its
+// own (its caller ctx, or its 20-s wait budget), and an earlier test's
+// dispatcher loops can still be leaving after its Close — the process-wide
+// count took such a goroutine into the baseline and failed when it ended
+// (issue #369). It returns the owned goroutines it found last.
+func gateGoroutines(t *testing.T, gate testgoroutine.Baseline, settle time.Duration) []testgoroutine.G {
+	t.Helper()
+	own := gate.Settle(settle)
+	if !gate.Settled(own) {
+		var stacks strings.Builder
+		for _, g := range own {
+			stacks.WriteString("\n" + g.Stack)
 		}
-		buf = make([]byte, 2*len(buf))
+		t.Fatalf("goroutines the gate owns: before %d, after %d (%d new since the baseline) — want the baseline's; owned now:%s", gate.Len(), len(own), len(gate.New(testgoroutine.Dump())), stacks.String())
 	}
-	count := 0
-	for _, g := range strings.Split(string(buf), "\n\n") {
-		if strings.TrimSpace(g) == "" {
-			continue
-		}
-		i := strings.LastIndex(g, "created by ")
-		if i >= 0 {
-			if lines := strings.SplitN(g[i:], "\n", 3); len(lines) >= 2 &&
-				strings.Contains(lines[1], "_test.go:") && !strings.Contains(lines[0], self) {
-				continue // started by another test of the package
-			}
-		}
-		count++
-	}
-	return count
-}
-
-// settledGateGoroutines is gateGoroutines once it has been stable for three
-// consecutive 10-ms samples (at most 1 s): goroutines still on their way out
-// (a closed reaper, a finished test runner) are not counted against the gate.
-func settledGateGoroutines(self string) int {
-	n := gateGoroutines(self)
-	for stable, deadline := 0, time.Now().Add(time.Second); stable < 3 && time.Now().Before(deadline); {
-		time.Sleep(10 * time.Millisecond)
-		if m := gateGoroutines(self); m == n {
-			stable++
-		} else {
-			n, stable = m, 0
-		}
-	}
-	return n
+	return own
 }
 
 // TestExternalWaitBudgetHandoffRace is the race gate: 1 000 iterations in
 // which the release of the occupying external lease (direct handoff) and the
 // waiter's 1-ms timer hit the same moment. Every acquire yields exactly one
 // lease or ErrWaitExpired; afterwards nothing is held, nothing waits, the
-// expired counter matches the refusals, and the goroutine count
-// (gateGoroutines) is back to its value before the loop (±0). Run with -race.
+// expired counter matches the refusals, and the goroutines the gate owns
+// (gateGoroutines) are back to their number before the loop (±0). Run with
+// -race.
 func TestExternalWaitBudgetHandoffRace(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), partitionPolicy(2, 1))
-	const self = "TestExternalWaitBudgetHandoffRace"
-	before := settledGateGoroutines(self)
+	gate := testgoroutine.Take()
 	var leases, expired int
 	for i := 0; i < 1000; i++ {
 		holder, _, err := d.Acquire(xctx(context.Background(), "holder", "tenant-a"), externalReq())
@@ -481,15 +457,9 @@ func TestExternalWaitBudgetHandoffRace(t *testing.T) {
 	if leases == 0 || rej.Expired == 0 {
 		t.Fatalf("race vacuous: %d leases, %d timer expiries — both outcomes must occur", leases, rej.Expired)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for gateGoroutines(self) != before && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if after := gateGoroutines(self); after != before {
-		t.Fatalf("goroutines before %d, after %d — want ±0", before, after)
-	}
+	after := gateGoroutines(t, gate, 2*time.Second)
 	t.Logf("1000 iterations: %d leases, %d ErrWaitExpired (predicted %d, expired %d), gate goroutines %d → %d",
-		leases, expired, rej.Predicted, rej.Expired, before, gateGoroutines(self))
+		leases, expired, rej.Predicted, rej.Expired, gate.Len(), len(after))
 }
 
 // holdMutexPastExpiry queues one external waiter with a 100-ms budget behind

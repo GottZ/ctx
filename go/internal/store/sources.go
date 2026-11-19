@@ -90,7 +90,10 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 		return nil, ErrChunkNotWritable
 	}
 	if err != nil {
-		return nil, fmt.Errorf("store: insert chunk: %w", err)
+		// The arbiter is the chunk slot, so a chunk whose (category, title,
+		// scope) another active block holds collides on the identity index
+		// (issue #275): the caller's input, typed like UpdateBlock's.
+		return nil, fmt.Errorf("store: insert chunk: %w", blockIdentityTaken(err))
 	}
 	return b, nil
 }
