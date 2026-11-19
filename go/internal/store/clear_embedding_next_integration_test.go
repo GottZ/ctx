@@ -59,7 +59,7 @@ func TestClearEmbedding_NextExtension_Integration(t *testing.T) {
 		// _next pair: simulates a migration worker having already migrated
 		// this block's vector to the NEW space (StoreEmbeddingNext itself is
 		// W04-4 — direct SQL stands in for it here, this test only pins
-		// ClearEmbedding's contract, not the worker's).
+		// InvalidateEmbeddingTx's contract, not the worker's).
 		if _, err := pool.Exec(ctx,
 			`UPDATE context_blocks SET embedding_next = $2, embed_model_next = $3 WHERE id = $1`,
 			id, pgvecLiteral(vec(0.7)), "to-model",
@@ -74,16 +74,16 @@ func TestClearEmbedding_NextExtension_Integration(t *testing.T) {
 			t.Fatalf("read pre-clear _next state: %v", err)
 		}
 		if preEmbNext || preModelNext {
-			t.Fatalf("precondition: embedding_next/embed_model_next already NULL before ClearEmbedding — seed did not take")
+			t.Fatalf("precondition: embedding_next/embed_model_next already NULL before InvalidateEmbeddingTx — seed did not take")
 		}
 
-		// This is the Content-Update-analogue: ClearEmbedding IS the path
-		// manage-update/upsert-with-content-change invoke to invalidate a
+		// This is the Content-Update-analogue: InvalidateEmbeddingTx IS the
+		// path manage-update/upsert-with-content-change invoke to invalidate a
 		// stale vector (design §3.2b/§4.3). Simulating "a content update
-		// happened during an active migration" is exactly "ClearEmbedding
+		// happened during an active migration" is exactly "InvalidateEmbeddingTx
 		// ran while embedding_next was populated".
 		if err := store.InvalidateEmbeddingTx(ctx, pool, id); err != nil {
-			t.Fatalf("ClearEmbedding: %v", err)
+			t.Fatalf("InvalidateEmbeddingTx: %v", err)
 		}
 
 		// Since issue #198 part B the live pair is kept and marked stale until
@@ -104,11 +104,11 @@ func TestClearEmbedding_NextExtension_Integration(t *testing.T) {
 	})
 
 	// Negative probe for the W04-2/W04-3 coupling-resolution decision
-	// (Lead-Entscheid, wave briefing): ClearEmbedding must ALSO delete the
-	// block's backfill memo row (context_embed_failures, migration_id IS
-	// NULL) — the oversize infinity-memo's semantics are "parked until
-	// content changes" (design §4.4), and ClearEmbedding IS the content-
-	// change path. Without the delete, a shrunk block stays parked forever
+	// (Lead-Entscheid, wave briefing): InvalidateEmbeddingTx must ALSO
+	// delete the block's backfill memo row (context_embed_failures,
+	// migration_id IS NULL) — the oversize infinity-memo's semantics are
+	// "parked until content changes" (design §4.4), and InvalidateEmbeddingTx
+	// IS the content-change path. Without the delete, a shrunk block stays parked forever
 	// even though it would now fit.
 	t.Run("clear_embedding_deletes_backfill_memo", func(t *testing.T) {
 		var id string
@@ -131,7 +131,7 @@ func TestClearEmbedding_NextExtension_Integration(t *testing.T) {
 		}
 
 		if err := store.InvalidateEmbeddingTx(ctx, pool, id); err != nil {
-			t.Fatalf("ClearEmbedding: %v", err)
+			t.Fatalf("InvalidateEmbeddingTx: %v", err)
 		}
 
 		var postCount int
@@ -141,7 +141,7 @@ func TestClearEmbedding_NextExtension_Integration(t *testing.T) {
 			t.Fatalf("read post-clear memo count: %v", err)
 		}
 		if postCount != 0 {
-			t.Errorf("backfill memo survived ClearEmbedding (count=%d), want deleted — a shrunk block would stay parked forever", postCount)
+			t.Errorf("backfill memo survived InvalidateEmbeddingTx (count=%d), want deleted — a shrunk block would stay parked forever", postCount)
 		}
 	})
 }

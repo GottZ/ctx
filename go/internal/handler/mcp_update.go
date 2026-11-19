@@ -2,7 +2,8 @@
 // untouched (D3-m1). Semantics mirror the REST manage-update path
 // (context_manage.go handleUpdate): resolve within writableBlockScopes
 // (home_scope ∪ shared-if-allowed, v4.0.1), size limits, then
-// store.UpdateBlock + the same re-classify/temporal/re-embed afterwork.
+// store.UpdateBlock (which invalidates the vector of a changed title or
+// content in its own transaction) + the same re-classify/temporal afterwork.
 //
 // A key WITHOUT confirm_writes updates directly; a flagged key gets the
 // update STAGED (op 'update') with a TOCTOU pin (D1-M3): the block's

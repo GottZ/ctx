@@ -197,14 +197,22 @@ func issueScanColsRedacted(scopesParam string) string {
 	return issueCols(guardRedactedMetadataSQL(scopesParam))
 }
 
-// scanIssue scans one row in issueScanCols order into a Block.
-func scanIssue(row pgx.Row) (*Block, error) {
+// scanIssue scans one row in issueScanCols order into a Block; extra receives
+// the columns a statement returns after them (textChangedCol).
+func scanIssue(row pgx.Row, extra ...any) (*Block, error) {
 	b := &Block{}
-	err := row.Scan(&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
+	err := row.Scan(append([]any{&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
 		&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource,
-		&b.WorkflowStatus, &b.CreatedAt, &b.UpdatedAt)
+		&b.WorkflowStatus, &b.CreatedAt, &b.UpdatedAt}, extra...)...)
 	return b, err
 }
+
+// textChangedCol is the RETURNING column of an UPDATE that tells whether it
+// replaced the block's title or content by a different value (old/new in
+// RETURNING, PostgreSQL 18) — the embed input. The by-id writers of the issue
+// domain invalidate the vector on it, as UpdateBlock does (issue #236): a
+// field sent with the value the row holds leaves the vector current.
+const textChangedCol = `(old.title IS DISTINCT FROM new.title OR old.content IS DISTINCT FROM new.content)`
 
 // InsertIssueBlock creates a local issue block (type issue) with a "#L<seq>"
 // title prefix, workflow_status = f.Status, type_source='manual' (so the
@@ -423,8 +431,9 @@ func ListIssues(ctx context.Context, pool *pgxpool.Pool, q IssueListQuery) ([]Wo
 // error the handler maps to 422. The block must be writable (scope ∈
 // writableScopes) — a foreign/absent id ⇒ ErrIssueNotFound (no oracle). Title
 // keeps its "#L<seq>" prefix; metadata is JSONB-merged (local_seq survives);
-// a content/title change invalidates the vector (InvalidateEmbeddingTx: it
-// stays searchable, marked stale, until the scheduler re-embeds the block).
+// a title or content that now differs from the stored one invalidates the
+// vector (InvalidateEmbeddingTx: it stays searchable, marked stale, until the
+// scheduler re-embeds the block) — one sent unchanged does not (issue #236).
 func UpdateIssueBlock(ctx context.Context, tx pgx.Tx, id string, u IssueUpdate, set *blocktype.Set, writableScopes []string) (*Block, error) {
 	// I7/S3b, ahead of the lookup: this is the one client-supplied metadata map
 	// in the tree that is MERGED (`metadata = metadata || $n::jsonb`) rather
@@ -502,14 +511,15 @@ func UpdateIssueBlock(ctx context.Context, tx pgx.Tx, id string, u IssueUpdate, 
 	// already checked — a subset of the caller's read scopes, so the
 	// fail-closed direction (see UpdateBlock).
 	idIdx := len(set2.args) + 1
-	query := fmt.Sprintf(`UPDATE context_blocks SET %s WHERE id = $%d RETURNING %s`,
-		strings.Join(set2.clauses, ", "), idIdx, issueScanColsRedacted(fmt.Sprintf("$%d", idIdx+1)))
+	query := fmt.Sprintf(`UPDATE context_blocks SET %s WHERE id = $%d RETURNING %s, %s`,
+		strings.Join(set2.clauses, ", "), idIdx, issueScanColsRedacted(fmt.Sprintf("$%d", idIdx+1)), textChangedCol)
 	set2.args = append(set2.args, id, writableScopes)
-	b, err := scanIssue(tx.QueryRow(ctx, query, set2.args...))
+	var textChanged bool
+	b, err := scanIssue(tx.QueryRow(ctx, query, set2.args...), &textChanged)
 	if err != nil {
 		return nil, fmt.Errorf("store: update issue: %w", blockIdentityTaken(err))
 	}
-	if u.Content != nil || u.Title != nil {
+	if textChanged {
 		if err := InvalidateEmbeddingTx(ctx, tx, id); err != nil {
 			return nil, fmt.Errorf("store: update issue: %w", err)
 		}
