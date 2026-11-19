@@ -64,7 +64,7 @@ func TestUntrustedV11QueryResponseCarriesFlag(t *testing.T) {
 	out := buildSourceResponses([]llm.Source{
 		{ID: "checkpoint-1", Title: "Compaction checkpoint", Category: "reference", Untrusted: true},
 		{ID: "knowledge-1", Title: "Architecture note", Category: "reference"},
-	}, nil, false)
+	}, nil, 0)
 	if len(out) != 2 {
 		t.Fatalf("buildSourceResponses returned %d rows, want 2", len(out))
 	}

@@ -418,6 +418,28 @@ type RerankConfig struct {
 	Enabled     bool    `key:"rerank.enabled" env:"CTX_RERANK_ENABLED" default:"false" mut:"hot" tenancy:"tenant-overridable"`
 	MaxDocs     int     `key:"rerank.max_docs" env:"CTX_RERANK_MAX_DOCS" default:"50" mut:"hot" tenancy:"tenant-overridable"`
 	BlendWeight float64 `key:"rerank.blend_weight" env:"CTX_RERANK_BLEND_WEIGHT" default:"1.0" mut:"hot" tenancy:"tenant-overridable"`
+	// Timeout is the deadline of the query path's ONE cross-encoder call, in
+	// seconds from admission on (#223). The default is rerank.Timeout (180 s),
+	// the wire's own safety net, and it is also the cap: V64 refuses a larger
+	// value, because the wire would end the call at 180 s anyway. 0 reads as
+	// the default (the timeout keys' sentinel). A call the deadline ends fails
+	// open on the pre-rerank order, as every rerank failure does — the key lets
+	// a deployment for which query latency is a constraint give up earlier.
+	//
+	// What it does not bound: the wait for a lease in ctx's own dispatcher on
+	// a rerank target with declared slots, which runs before admission (the
+	// in-house classes carry no wait budget). On a target without declared
+	// slots the engine's own queue runs inside this deadline.
+	//
+	// tenant-overridable with the rest of the group: it shapes only the
+	// tenant's OWN queries, and it ends a call earlier, never later — the
+	// lease is released when it does. Whether the engine stops scoring when
+	// the client goes away is not verified; a client that disconnects from a
+	// query early ends the call the same way today. A call it ends is reported
+	// to the pool like any timeout (ClassTimeout: a failure streak, no
+	// cooldown — backends/classify.go), the same report a tenant's large
+	// rerank.max_docs already produces.
+	Timeout time.Duration `key:"rerank.timeout" env:"CTX_RERANK_TIMEOUT" default:"180" mut:"hot" tenancy:"tenant-overridable"`
 }
 
 // GraphConfig is the dream-graph expansion stage (post-RRF 1-hop traversal).
@@ -900,6 +922,57 @@ type QueryConfig struct {
 	// tenant-overridable like the two thresholds above and for the same reason:
 	// it changes only how that tenant's OWN queries are answered.
 	SemanticFloor float64 `key:"query.semantic_floor" env:"CTX_SEMANTIC_FLOOR" default:"0" mut:"hot" tenancy:"tenant-overridable"`
+	// LowConfidenceMaxSources is how many sources a low_confidence answer's
+	// synthesis prompt carries (#226; llm.LowConfidenceMaxSources is the
+	// default). The response still lists every source; the ones the cut kept
+	// out carry no citation_index. A value at or above the query limit (at
+	// most llm.MaxPromptSources) is no cut. 0 is refused (V62): a prompt
+	// without a source is not "no cut", it is no answer.
+	//
+	// It sits beside the two thresholds because it is what follows from them:
+	// a tenant whose good answers are spread over several records each partly
+	// relevant scores them low_confidence, and today the only way out of the
+	// two-source cut is to lower confident_threshold, i.e. to call weak
+	// answers confident. tenant-overridable for the thresholds' reason — it
+	// changes only how that tenant's OWN answers are synthesized, and the
+	// prompt stays inside promptguard.BudgetSynthesis whatever the value.
+	LowConfidenceMaxSources int `key:"query.low_confidence_max_sources" env:"CTX_LOW_CONFIDENCE_MAX_SOURCES" default:"2" mut:"hot" tenancy:"tenant-overridable"`
+	// MaxSourceRunes is the per-source content cut of a synthesis prompt and
+	// of the include_content snippet (#208; llm.MaxBlockChars is the default).
+	// What a prompt with n sources applies is llm.SourceRuneCap: this value,
+	// bounded by llm.SourceRunesShare / n — so a query with the default limit
+	// of 5 can show the model up to 6000 runes of each source, while a query
+	// at the 20-source clamp keeps 1500, and no prompt carries more source
+	// text than the worst case the H12 budget gate already proves. V63 keeps
+	// it in [llm.MaxBlockChars, llm.SourceRunesShare]: below, the head-heavy
+	// formats sized against 1500 (derived/render.go, the distiller's block)
+	// would lose their head; above, the value renders as configured and acts
+	// as the share.
+	//
+	// tenant-overridable like the thresholds: it shapes only that tenant's OWN
+	// prompts, and the prompt-size bound is the same one every tenant already
+	// reaches with limit = 20 — a raised value moves no request past it.
+	MaxSourceRunes int `key:"query.max_source_runes" env:"CTX_MAX_SOURCE_RUNES" default:"1500" mut:"hot" tenancy:"tenant-overridable"`
+	// Translate switches the query path's detect+translate step (#210):
+	// "auto" (llm.TranslateAuto, the default and today's behaviour) translates
+	// a question llm.DetectGerman matches into English before retrieval; "off"
+	// (llm.TranslateOff) sends every question to the retrieval arms as
+	// written, with no translate-role call. The empty value reads as auto;
+	// anything else is refused after trim + lower-case (V65) — a tolerant
+	// reading would be auto, so a typo of "off" would silently keep the step
+	// the operator was switching off (the V20 reasoning).
+	//
+	// The heuristic matches on umlauts and German stop words, so Swedish and
+	// some English questions are translated too. For an English corpus that is
+	// the stated design; for a corpus in the users' own language the English
+	// text works against the full-text and title arms, and no detector fixes
+	// that — the step has to go. Temporal normalisation is unaffected (it reads
+	// the original question), and pinned_translation still applies.
+	//
+	// tenant-overridable with the thresholds: it changes only how that
+	// tenant's OWN questions reach retrieval, and "off" removes a wire call
+	// (the translation; the temporal fallback on the same role stays).
+	Translate string `key:"query.translate" env:"CTX_QUERY_TRANSLATE" default:"auto" mut:"hot" tenancy:"tenant-overridable"`
 }
 
 // DigestConfig is the LINEAR topic map's remaining knob (plan-cluster-topicmap
@@ -2986,6 +3059,7 @@ func (c *Config) RerankRRF() rrf.RerankConfig {
 		Enabled:     c.Rerank.Enabled,
 		MaxDocs:     c.Rerank.MaxDocs,
 		BlendWeight: c.Rerank.BlendWeight,
+		Timeout:     c.Rerank.Timeout,
 	}
 }
 
@@ -3089,12 +3163,14 @@ func (c *Config) DreamBackoff() dream.BackoffConfig {
 // copy).
 func (c *Config) SynthesisSettings() llm.SynthesisSettings {
 	return llm.SynthesisSettings{
-		ScoreThreshold:         c.Query.ScoreThreshold,
-		ConfidentThreshold:     c.Query.ConfidentThreshold,
-		PromptVersion:          c.Query.PromptVersion,
-		ExternalNumCtxFallback: c.Pool.ExternalNumCtxFallback,
-		OpenRouterWindowTTL:    c.Pool.OpenRouterWindowTTL,
-		Devmode:                c.Tenant.Devmode,
+		ScoreThreshold:          c.Query.ScoreThreshold,
+		ConfidentThreshold:      c.Query.ConfidentThreshold,
+		LowConfidenceMaxSources: c.Query.LowConfidenceMaxSources,
+		MaxSourceRunes:          c.Query.MaxSourceRunes,
+		PromptVersion:           c.Query.PromptVersion,
+		ExternalNumCtxFallback:  c.Pool.ExternalNumCtxFallback,
+		OpenRouterWindowTTL:     c.Pool.OpenRouterWindowTTL,
+		Devmode:                 c.Tenant.Devmode,
 	}
 }
 

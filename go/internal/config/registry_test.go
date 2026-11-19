@@ -437,6 +437,9 @@ func TestRegistryTenancySet(t *testing.T) {
 		// rerank query-time tuning — since β3 the whole surviving group (the
 		// topology half went with the tuple cut)
 		"rerank.enabled": true, "rerank.max_docs": true, "rerank.blend_weight": true,
+		// #223: the deadline of the tenant's OWN cross-encoder call; it can only
+		// shorten the time a call holds the shared sidecar (capped at rerank.Timeout).
+		"rerank.timeout": true,
 		// graph query-time expansion tuning (all knobs)
 		"graph.enabled": true, "graph.directed": true, "graph.hop_depth": true,
 		"graph.seed_count": true, "graph.seed_score_floor": true, "graph.per_seed_cap": true,
@@ -462,6 +465,15 @@ func TestRegistryTenancySet(t *testing.T) {
 		// decides whether a tenant's OWN query is worth a synthesis call, and
 		// the separating value is a property of that tenant's corpus.
 		"query.semantic_floor": true,
+		// #226: the consequence of the two thresholds above — how many of the
+		// tenant's OWN sources a low_confidence answer is synthesized from.
+		"query.low_confidence_max_sources": true,
+		// #208: the per-source window of the tenant's OWN synthesis prompts,
+		// bounded by the same worst case every tenant reaches with limit = 20.
+		"query.max_source_runes": true,
+		// #210: whether the tenant's OWN questions are translated before
+		// retrieval — the right answer is a property of that tenant's corpus.
+		"query.translate": true,
 		// #342: same class as the query thresholds — it decides which rows the
 		// tenant's OWN full-text searches answer, not their shape, and the
 		// clients that still need the old answer are per installation.
@@ -533,8 +545,8 @@ func TestRegistryTenancySet(t *testing.T) {
 			t.Errorf("%s: non-overridable key must be %q, got %q", e.Key, TenancyGlobalOnly, e.Tenancy)
 		}
 	}
-	if got := len(overridable); got != 69 {
-		t.Errorf("tenant-overridable allowlist has %d keys, expected 69 (change it with intent)", got)
+	if got := len(overridable); got != 73 {
+		t.Errorf("tenant-overridable allowlist has %d keys, expected 73 (change it with intent)", got)
 	}
 	// The NAMED global-only keys (design 03 §3.3) — the R-SCALE6 invariant: a
 	// tenant override here would flush the process-wide embed cache / flip the
