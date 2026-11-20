@@ -1456,13 +1456,33 @@ func guardRedactedMetadataSQL(scopesParam string) string {
 // (V-11). nil ⇒ the field stays absent from the response (write/confirm paths
 // pass nil — see untrustedOf).
 func GetBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, id string, readScopes []string, grantedBlockIDs []string) (*Block, error) {
+	return GetBlockOmitting(ctx, pool, set, id, readScopes, grantedBlockIDs, BlockReadOmit{})
+}
+
+// BlockReadOmit names the columns a by-id read leaves unread (issue #407: the
+// `fields` of MCP get and manage get). Only the two columns whose read costs
+// more than the row are here: content, stored out of line (TOAST) once it
+// passes about 2 KB and up to 50 KB long, and metadata, a jsonb read through
+// the guard-redaction probe (guardRedactedMetadataSQL). Every other column sits
+// in the heap tuple the read fetches anyway, so leaving it out would save
+// nothing. The zero value reads every column — the read every caller made
+// before the selection existed. An omitted column answers its zero value: ""
+// for Content, nil for Metadata.
+type BlockReadOmit struct {
+	Content  bool
+	Metadata bool
+}
+
+// GetBlockOmitting is GetBlock with columns left unread (BlockReadOmit): the
+// same visibility, the same row, without the omitted columns' cost.
+func GetBlockOmitting(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, id string, readScopes []string, grantedBlockIDs []string, omit BlockReadOmit) (*Block, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
 	if grantedBlockIDs == nil {
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
 	}
-	return readBlockByID(ctx, pool, set, "store: get block",
+	return readBlockByID(ctx, pool, set, omit, "store: get block",
 		`WHERE id = $1 AND NOT is_archived AND (scope = ANY($2::text[]) OR id = ANY($3::uuid[]))`,
 		id, readScopes, grantedBlockIDs)
 }
@@ -1478,12 +1498,12 @@ func GetBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, id st
 // GetBlock comment), and only rows that ARE archived — a live id answers nil
 // here, the caller reads it through GetBlock. The answer carries
 // Archived = true. A miss is (nil, nil) for an unknown id, a foreign scope and
-// a live block alike.
-func GetArchivedBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, id string, readScopes []string) (*Block, error) {
+// a live block alike. omit leaves columns unread as on GetBlockOmitting.
+func GetArchivedBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, id string, readScopes []string, omit BlockReadOmit) (*Block, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
-	b, err := readBlockByID(ctx, pool, set, "store: get archived block",
+	b, err := readBlockByID(ctx, pool, set, omit, "store: get archived block",
 		`WHERE id = $1 AND is_archived AND scope = ANY($2::text[])`,
 		id, readScopes)
 	if b != nil {
@@ -1496,11 +1516,19 @@ func GetArchivedBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Se
 // column list and one scan, so the two answer the same block shape and differ
 // only in their WHERE. where binds the id as $1 and the caller's read scopes as
 // $2 — guardRedactedMetadataSQL reads the scopes from $2. Code-owned SQL at both
-// call sites, never user input.
-func readBlockByID(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, op, where string, args ...any) (*Block, error) {
+// call sites, never user input. omit swaps an omitted column for a constant of
+// its type, so the scan stays one and the statement takes one of four shapes.
+func readBlockByID(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, omit BlockReadOmit, op, where string, args ...any) (*Block, error) {
+	content, metadata := "content", guardRedactedMetadataSQL("$2")
+	if omit.Content {
+		content = "''::text AS content"
+	}
+	if omit.Metadata {
+		metadata = "NULL::jsonb AS metadata"
+	}
 	b := &Block{}
 	err := pool.QueryRow(ctx,
-		`SELECT id, category, tags, title, content, `+guardRedactedMetadataSQL("$2")+`, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at,
+		`SELECT id, category, tags, title, `+content+`, `+metadata+`, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at,
 		        `+untrustedOriginCol+`
 		 FROM context_blocks
 		 `+where+`

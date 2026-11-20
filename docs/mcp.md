@@ -271,17 +271,22 @@ itself. A client that reads only the text never sees them.
 
 ### get
 
-Fetch a full block. Read-only.
+Fetch a block: the whole block, or only the keys and the part of the content a reader
+needs. Read-only.
 
 | Parameter | Type | | Description |
 |---|---|---|---|
 | `id` | string | required | block UUID or an unambiguous prefix |
 | `include_archived` | boolean | | also read an archived block; full block UUID only |
+| `fields` | string[] | | answer only these keys of the block (see below) |
+| `content_offset` | integer | | first character of the content to answer, counted from 0 |
+| `content_limit` | integer | | at most this many characters of the content |
 
 **Answer:** the block as JSON — `id`, `category`, `tags`, `title`, `content`,
-`metadata`, `scope`, `guard_status`, `sensitivity`, `sensitivity_source`, `type`,
-`lifecycle_state`, `type_source`, `workflow_status`, `untrusted`, `archived`,
-`created_at`, `updated_at`. An ambiguous prefix is an error whose text is JSON with
+`metadata`, `scope`, `sensitivity`, `sensitivity_source`, `type`,
+`lifecycle_state`, `type_source`, `untrusted`, `untrusted_origin`, `archived`,
+`created_at`, `updated_at`; `untrusted`, `untrusted_origin` and `archived` appear only
+where they apply. An ambiguous prefix is an error whose text is JSON with
 the candidate `matches`; an unknown or invisible id answers `block not found`. An
 archived block is invisible: it answers `block not found` like an id that never
 existed.
@@ -295,6 +300,35 @@ same with or without the field. With an id prefix the call is refused
 (`include_archived requires the full block id …`); a prefix never resolves to an
 archived block. The REST `manage get` action takes the same field, and the CLI sends
 it with `ctx get --include-archived <id>`.
+
+**Part of a block (issue #407).** `fields` names keys of the answer above; the answer
+then carries `id` and exactly the named keys, plus `untrusted`, `untrusted_origin` and
+`archived` whenever they apply, named or not — they say how to read the block, so a
+part of it keeps them. A name outside that list (also `guard_status` or
+`workflow_status`, which a by-id read never fills) is refused with the list of valid
+names; an empty list is the whole block. The keys keep the order of the whole answer.
+The server reads the `content` and `metadata`
+columns only when the answer carries them, so `fields: ["title", "updated_at"]` never
+loads a long content.
+
+`content_offset` and `content_limit` cut a window out of the content, counted in
+characters (Unicode code points), never inside one: from `content_offset` (default 0)
+at most `content_limit` characters (default: to the end). With either one the answer
+adds, right after `content`, `content_length`, the length of the whole content in the same unit, and
+`content_truncated`, true when the content goes on after the window — the window was
+then full, and the next one starts at `content_offset + content_limit`. An offset at or
+past the end answers an empty `content` that is not truncated; a limit of 0 answers
+an empty `content` with its `content_length`. Negative values are refused, and so is a
+window beside a `fields` list without `content`. Without `fields` the window answers the
+whole block around the cut content.
+
+The options are checked before the block is looked up, so a refusal says nothing
+about the block. They do not change what the key may read: an unknown, foreign or
+archived id answers `block not found` and an ambiguous prefix its `matches`, exactly as
+without them, and an answered block books the read record of a full read (see below).
+With `include_archived` they apply to the archived block as to a live one. A call
+without them answers byte for byte as before. The REST `manage get` action takes the
+same three keys and answers through the same function.
 
 ### recent
 
