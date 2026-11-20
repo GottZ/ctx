@@ -424,6 +424,94 @@ func TestMCPServeWaitingForAHangingConnectIsCancellable(t *testing.T) {
 	}
 }
 
+// TestMCPServeKeyNeverLeavesTheOrigin: a redirect from /mcp to another
+// origin is refused with its cause and the other host never sees a request,
+// let alone the key; a redirect within the configured origin is followed.
+func TestMCPServeKeyNeverLeavesTheOrigin(t *testing.T) {
+	var foreignRequests, foreignKeys atomic.Int32
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		foreignRequests.Add(1)
+		if r.Header.Get("X-Context-Key") != "" {
+			foreignKeys.Add(1)
+		}
+		http.Error(w, "not an MCP server", http.StatusNotFound)
+	}))
+	t.Cleanup(foreign.Close)
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, foreign.URL+"/mcp", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirecting.Close)
+
+	p, err := NewMCPProxy(Config{BaseURL: redirecting.URL, Key: mcpServeFixtureKey}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := connectProxy(t, p)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"content": "hi"}})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	if !res.IsError || !strings.Contains(text, "redirect") || !strings.Contains(text, foreign.URL) || strings.Contains(text, mcpServeFixtureKey) {
+		t.Errorf("call through a redirect to another origin answered isError=%v %q", res.IsError, text)
+	}
+	if n, k := foreignRequests.Load(), foreignKeys.Load(); n != 0 || k != 0 {
+		t.Errorf("the other origin got %d requests, %d of them with the key", n, k)
+	}
+
+	// Within the origin a redirect is followed (a server moving /mcp).
+	u := newUpstream(t)
+	moved := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/mcp" {
+			http.Redirect(w, r, "/moved", http.StatusPermanentRedirect)
+			return
+		}
+		u.srv.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(moved.Close)
+	p2, err := NewMCPProxy(Config{BaseURL: moved.URL, Key: mcpServeFixtureKey}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, text := callEcho(t, connectProxy(t, p2)); res.IsError || text != "hi" {
+		t.Errorf("call through a redirect within the origin answered %q", text)
+	}
+}
+
+// TestMCPServeConnectHasADeadline: a server that accepts the connection and
+// never answers ends the connect after the proxy's wait with the cause, the
+// connect token is free again for the next request, and once the server
+// answers the proxy reaches it.
+func TestMCPServeConnectHasADeadline(t *testing.T) {
+	u := newUpstream(t)
+	u.holding.Store(true)
+	p, err := NewMCPProxy(Config{BaseURL: u.srv.URL, Key: mcpServeFixtureKey}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.connectWait = 300 * time.Millisecond
+	t.Cleanup(func() { _ = p.Close() })
+	for i := range 2 { // the second request is not held by the first
+		done := make(chan error, 1)
+		go func() {
+			_, err := p.remote(context.Background())
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(p.answer(context.Background(), nil, err).Error(), "within 300ms") {
+				t.Errorf("connect #%d against a silent server: %v, want the wait named", i+1, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("connect #%d against a silent server did not end", i+1)
+		}
+	}
+	u.holding.Store(false)
+	if _, err := p.remote(context.Background()); err != nil {
+		t.Errorf("connect once the server answers: %v", err)
+	}
+}
+
 // TestMCPServeNullFileParametersAreAbsent: a client that sends optional
 // fields as null keeps working with --allow-files, and the null is not sent.
 func TestMCPServeNullFileParametersAreAbsent(t *testing.T) {

@@ -24,7 +24,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -35,13 +37,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// mcpServeInstructionsWait bounds how long the answer to the local initialize
-// waits for the remote server, whose instructions it carries. An MCP client
-// gives a stdio server a limited time to answer initialize before it drops the
-// server; a remote that does not answer within this wait costs the local
-// session its instructions, not its connection, and tools/list and every call
-// try the remote again.
-const mcpServeInstructionsWait = 10 * time.Second
+// mcpServeConnectWait bounds opening the session to the remote: one
+// server/discover or initialize exchange, which a ctx server answers in
+// milliseconds. A server that accepts the connection and never answers would
+// otherwise hold the connect — and every request waiting for it — until the
+// local client gives up. The wait also bounds the local initialize, which
+// carries the remote's instructions: an MCP client gives a stdio server a
+// limited time to answer it, and a remote that misses this wait costs the
+// session its instructions, not its connection. Tool calls themselves are not
+// bounded here (a query runs as long as the server's keepalive holds it).
+const mcpServeConnectWait = 10 * time.Second
 
 // errMCPKeyRejected is what a 401 from the remote becomes (mcpKeyTransport), so
 // the answer can name the cause instead of the SDK's bare status text.
@@ -87,6 +92,8 @@ type MCPProxy struct {
 	files    *mcpFileRoots
 	server   *mcp.Server
 
+	connectWait time.Duration // mcpServeConnectWait; a field so tests can shorten it
+
 	// connecting is a one-slot token held while a request looks up or opens the
 	// session: a request waiting behind a connect that hangs gives up with its
 	// own context instead of piling up behind a mutex.
@@ -101,13 +108,18 @@ type MCPProxy struct {
 // allowFiles are the --allow-files directories; an entry that is not a
 // directory is an error here, before any request is served.
 func NewMCPProxy(cfg Config, cfgErr error, allowFiles []string) (*MCPProxy, error) {
-	p := &MCPProxy{cfgErr: cfgErr, connecting: make(chan struct{}, 1)}
+	p := &MCPProxy{cfgErr: cfgErr, connecting: make(chan struct{}, 1), connectWait: mcpServeConnectWait}
 	if cfgErr == nil {
 		p.endpoint = strings.TrimSuffix(cfg.BaseURL, "/") + "/mcp"
+		origin, err := urlOrigin(p.endpoint)
+		if err != nil {
+			p.cfgErr = fmt.Errorf("CTX_BASE_URL is not a usable URL: %w", err)
+		}
 		// No overall timeout: a query call runs as long as the server's
 		// keepalive holds it open, and the local client cancels a call it gives
-		// up on. Dial and TLS limits are http.DefaultTransport's.
-		p.http = &http.Client{Transport: mcpKeyTransport{key: cfg.Key, base: http.DefaultTransport}}
+		// up on. Dial and TLS limits are http.DefaultTransport's; opening the
+		// session is bounded by connectWait.
+		p.http = &http.Client{Transport: mcpKeyTransport{key: cfg.Key, origin: origin, base: http.DefaultTransport}}
 	}
 	if len(allowFiles) > 0 {
 		roots, err := newMCPFileRoots(allowFiles)
@@ -168,18 +180,12 @@ func (p *MCPProxy) forward(next mcp.MethodHandler) mcp.MethodHandler {
 }
 
 // instructions are the remote's server instructions, or "" when the remote
-// cannot be reached within mcpServeInstructionsWait (the cause goes to stderr,
-// which an MCP client keeps out of the protocol).
+// cannot be reached, at most connectWait (the cause goes to stderr, which an
+// MCP client keeps out of the protocol).
 func (p *MCPProxy) instructions(ctx context.Context) string {
-	ctx, cancel := context.WithTimeout(ctx, mcpServeInstructionsWait)
-	defer cancel()
 	cs, err := p.remote(ctx)
 	if err != nil {
-		cause := p.answer(ctx, nil, err)
-		if errors.Is(cause, context.DeadlineExceeded) {
-			cause = fmt.Errorf("ctx mcp serve: %s did not answer within %s", p.endpoint, mcpServeInstructionsWait)
-		}
-		fmt.Fprintf(os.Stderr, "%v; initialize answered without the server instructions\n", cause)
+		fmt.Fprintf(os.Stderr, "%v; initialize answered without the server instructions\n", p.answer(ctx, nil, err))
 		return ""
 	}
 	if res := cs.InitializeResult(); res != nil {
@@ -240,7 +246,7 @@ func (p *MCPProxy) callTool(ctx context.Context, req *mcp.CallToolRequest) (mcp.
 
 // remote is the session to the remote /mcp, opened on first use and after a
 // failure dropped it. One session at a time; concurrent first calls wait for
-// the one that connects.
+// the one that connects, which ends after connectWait at the latest.
 func (p *MCPProxy) remote(ctx context.Context) (*mcp.ClientSession, error) {
 	if p.cfgErr != nil {
 		return nil, p.cfgErr
@@ -258,7 +264,11 @@ func (p *MCPProxy) remote(ctx context.Context) (*mcp.ClientSession, error) {
 		return cs, nil
 	}
 	client := mcp.NewClient(&mcp.Implementation{Name: "ctx mcp serve", Version: Version}, nil)
-	cs, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+	// The session outlives this deadline: the SDK detaches the connection
+	// from the context Connect gets.
+	connectCtx, cancel := context.WithTimeout(ctx, p.connectWait)
+	defer cancel()
+	cs, err := client.Connect(connectCtx, &mcp.StreamableClientTransport{
 		Endpoint:   p.endpoint,
 		HTTPClient: p.http,
 		// The server is stateless and answers GET with 405; nothing comes on
@@ -266,6 +276,9 @@ func (p *MCPProxy) remote(ctx context.Context) (*mcp.ClientSession, error) {
 		DisableStandaloneSSE: true,
 	}, nil)
 	if err != nil {
+		if ctx.Err() == nil && errors.Is(connectCtx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("no MCP session within %s: the server took the connection and did not answer", p.connectWait)
+		}
 		return nil, err
 	}
 	p.mu.Lock()
@@ -353,15 +366,26 @@ func refusalResult(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}, IsError: true}
 }
 
-// mcpKeyTransport adds the key of the CLI configuration to every request to
-// the remote, as the CLI's own client does (X-Context-Key), and turns a 401
-// into errMCPKeyRejected.
+// mcpKeyTransport adds the key of the CLI configuration to requests to the
+// remote, as the CLI's own client does (X-Context-Key), and turns a 401 into
+// errMCPKeyRejected. It sends only to the origin of CTX_BASE_URL (scheme, host
+// and port): http.Client follows redirects and calls the transport for every
+// hop, so without this check a redirect to another host — a login gateway in
+// front of the server, say — would carry the key there. A redirect within the
+// origin is followed; any other request is refused before it is sent.
 type mcpKeyTransport struct {
-	key  string
-	base http.RoundTripper
+	key    string
+	origin string
+	base   http.RoundTripper
 }
 
 func (t mcpKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if o, err := urlOrigin(req.URL.String()); err != nil || o != t.origin {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, fmt.Errorf("refused a redirect to %s: ctx mcp serve follows redirects only within %s, so the key never leaves the configured server", req.URL.Redacted(), t.origin)
+	}
 	r := req.Clone(req.Context())
 	r.Header.Set("X-Context-Key", t.key)
 	resp, err := t.base.RoundTrip(r)
@@ -373,6 +397,24 @@ func (t mcpKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, errMCPKeyRejected
 	}
 	return resp, nil
+}
+
+// urlOrigin is the scheme, host and port of a URL, the port spelled out when
+// the scheme's default is meant, so http://h and http://h:80 compare equal.
+func urlOrigin(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if (scheme != "http" && scheme != "https") || u.Hostname() == "" {
+		return "", fmt.Errorf("%s has no http or https host", u.Redacted())
+	}
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[scheme]
+	}
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port), nil
 }
 
 func mcpServeCmd(getClient func() (*Client, error)) *cobra.Command {

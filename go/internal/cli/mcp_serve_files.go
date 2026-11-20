@@ -25,6 +25,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -261,31 +263,61 @@ func (r *mcpFileRoots) outputTarget(path string) (*mcpOutputTarget, error) {
 	return &mcpOutputTarget{param: path, root: root, rel: rel}, nil
 }
 
-// write writes content to the target through the os.Root of its directory.
-// A new file is created 0600: a block's content may be anything up to
-// credentials. The file is opened without blocking and truncated only after
-// it proved to be a regular file, so neither a FIFO nor another special file
-// put in its place since outputTarget can hold the call or be written.
+// write replaces the target by a complete new file: the content goes into a
+// temporary file beside the target, created exclusively, and is renamed over
+// it — both through the os.Root of the directory, so neither step can leave
+// it. A reader and a concurrent get with the same output_file see the old or
+// a new file whole, never a truncated or mixed one. A new file is 0600 (a
+// block's content may be anything up to credentials); a replaced one keeps its
+// permission bits (a hard link to the old file keeps the old content). A
+// target that is no regular file any more — a FIFO or a link put in its place
+// since outputTarget — is refused; the rename would never block on it anyway.
 func (t *mcpOutputTarget) write(content string) (int, error) {
-	f, err := t.root.root.OpenFile(t.rel, os.O_WRONLY|os.O_CREATE|mcpOpenNonblock, 0o600)
+	root := t.root.root
+	mode := fs.FileMode(0o600)
+	switch fi, err := root.Lstat(t.rel); {
+	case err == nil && !fi.Mode().IsRegular():
+		return 0, errors.New("is not a regular file")
+	case err == nil:
+		mode = fi.Mode().Perm()
+	case !errors.Is(err, fs.ErrNotExist):
+		return 0, err
+	}
+	tmp, f, err := createOutputTemp(root, t.rel)
 	if err != nil {
 		return 0, err
 	}
-	fi, err := f.Stat()
-	if err == nil && !fi.Mode().IsRegular() {
-		err = errors.New("is not a regular file")
-	}
+	n, err := io.WriteString(f, content)
 	if err == nil {
-		err = f.Truncate(0)
-	}
-	n := 0
-	if err == nil {
-		n, err = io.WriteString(f, content)
+		err = f.Chmod(mode)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
-	return n, err
+	if err == nil {
+		err = root.Rename(tmp, t.rel)
+	}
+	if err != nil {
+		_ = root.Remove(tmp)
+		return 0, err
+	}
+	return n, nil
+}
+
+// createOutputTemp creates the temporary file for rel beside it: hidden, named
+// after the target with a random part, opened exclusively and 0600.
+func createOutputTemp(root *os.Root, rel string) (string, *os.File, error) {
+	var nonce [8]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", nil, err
+	}
+	dir, base := filepath.Split(rel)
+	tmp := filepath.Join(dir, "."+base+"."+hex.EncodeToString(nonce[:])+".tmp")
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", nil, err
+	}
+	return tmp, f, nil
 }
 
 // answer replaces the content of a get answer by the file it was written to:

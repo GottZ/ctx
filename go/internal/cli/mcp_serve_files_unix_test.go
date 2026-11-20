@@ -3,9 +3,11 @@
 package cli
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -242,5 +244,68 @@ func TestMCPServeOutputFileFIFOAfterTheCheck(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("write into a FIFO blocked")
+	}
+}
+
+// TestMCPServeOutputFileIsReplacedWhole: an output_file is replaced by a
+// complete new file, never rewritten in place. A reader that opened the old
+// file keeps reading the old content, and writers racing for one file each
+// leave a whole content of their own, never a mix, and no temporary file.
+func TestMCPServeOutputFileIsReplacedWhole(t *testing.T) {
+	f := newFileFixture(t)
+	path := filepath.Join(f.allowed, "replaced.md")
+	if err := os.WriteFile(path, []byte("old content"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	target, err := f.roots.outputTarget(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.write("new content"); err != nil {
+		t.Fatal(err)
+	}
+	if old, _ := io.ReadAll(reader); string(old) != "old content" {
+		t.Errorf("a reader of the old file sees %q: the file was rewritten in place", old)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "new content" {
+		t.Errorf("the file holds %q", b)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o640 {
+		t.Errorf("mode = %v, want 0640 kept", fi.Mode().Perm())
+	}
+
+	contents := []string{strings.Repeat("a", 40000), strings.Repeat("b", 7), strings.Repeat("c", 900)}
+	var wg sync.WaitGroup
+	for i := range 12 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 30 {
+				if _, err := target.write(contents[i%len(contents)]); err != nil {
+					t.Errorf("concurrent write: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	b, _ := os.ReadFile(path)
+	whole := false
+	for _, c := range contents {
+		whole = whole || string(b) == c
+	}
+	if !whole {
+		t.Errorf("after racing writers the file holds %d bytes that are none of the contents", len(b))
+	}
+	entries, _ := os.ReadDir(f.allowed)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("temporary file left behind: %s", e.Name())
+		}
 	}
 }
