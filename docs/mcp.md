@@ -35,6 +35,54 @@ A minimal client configuration (Claude Code):
 }
 ```
 
+## Local stdio server: `ctx mcp serve`
+
+`ctx mcp serve` runs the CLI as a local MCP server on stdin/stdout. It forwards to
+`<CTX_BASE_URL>/mcp` with the key of the CLI configuration (environment or config
+file, [CLI reference](cli.md)), so a local client needs neither a header nor an OAuth
+client:
+
+```sh
+claude mcp add ctx -- ctx mcp serve
+claude mcp add ctx -- ctx mcp serve --allow-files /home/me/notes
+```
+
+| | |
+|---|---|
+| Tools | the server's, mirrored: `tools/list` is answered from the server on every request, with its names, descriptions and schemas, so a tool added on the server appears without a CLI release. The proxy keeps no copy of the list |
+| Instructions | the server's, taken into the answer to `initialize`. A server that does not answer within 10 seconds leaves that one answer without instructions (the reason goes to stderr); the tools still work once it answers |
+| Answers and refusals | a call through the proxy has the effect and the answer of the same call against `/mcp`: the server's results, its tool errors and its JSON-RPC errors pass through unchanged. Staged writes (`confirm_writes`) stage and confirm as they do on `/mcp` |
+| Failures | a server that cannot be reached, a key the server refuses (`401`) and a missing configuration are answered, not fatal: `tools/list` answers a JSON-RPC error and a tool call an error result, each naming the cause (`ctx mcp serve: cannot use the server at <url>/mcp: …`, `… refused the API key of the ctx configuration (HTTP 401)`, `… no usable ctx configuration: …`). The process keeps serving; after a server restart the next request reaches it again. The key is never part of an answer, a log line or the command line |
+| Session | one session to the server, opened on the first request and opened anew after a failure; nothing in the proxy grows with the number of tools or the time it runs |
+| stdout | carries protocol frames only; diagnostics go to stderr |
+
+**Local files (`--allow-files DIR`, repeatable).** Without the flag the proxy offers no
+file access and forwards every argument unchanged. With it, two parameters join the
+mirrored schemas:
+
+- `content_file` on every tool whose schema has a `content` string (today `store`,
+  `update`, `issue_create`, `issue_comment`): the proxy reads the file and sends its
+  text as `content`. Give `content` or `content_file`, not both; where `content` is
+  required, the schema the proxy lists no longer requires it, since `content_file` can
+  stand in. The file must be a regular, non-empty UTF-8 file of at most 50 KB (the
+  server's content cap). Otherwise the call is refused and nothing is sent.
+- `output_file` on `get`: the proxy writes the block's content to the file (created
+  with mode `0600`, or overwritten, keeping its mode) and answers the block's JSON with
+  `"output_file": {"path": …, "bytes": …}` where `content` was. The target must be
+  absent or a regular file in an existing directory; this is checked before the `get`
+  is sent. A `get` the server refuses passes through unchanged and nothing is written.
+
+Both paths are confined to the given directories after symlink resolution: a relative
+path resolves against the directory the server was started in, symlinks are resolved
+as far as the path exists (a file that does not exist yet resolves through its
+directory), and the result must lie under one of the directories, which are resolved
+when the server starts. The file is then opened through Go's `os.Root` for that
+directory, which refuses any component that leads outside it, so a link that leaves
+the directory is refused also when it appears between the check and the open. The
+same rules apply on Windows, where `os.Root` also refuses reserved device names such
+as `NUL`. A stdio server that read any path a model asks for would hand the file's
+content to whatever the model stores it in; the directories bound that.
+
 ## Results and errors
 
 Every tool answers with one text content item. Depending on the tool that text is

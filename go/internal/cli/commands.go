@@ -1036,13 +1036,14 @@ func dreamThrottleCmd(getClient func() (*Client, error)) *cobra.Command {
 func mcpCmd(getClient func() (*Client, error)) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mcp",
-		Short: "Manage MCP OAuth clients",
-		Long:  "Create, list, and delete OAuth client registrations for MCP remote access.",
+		Short: "Manage MCP OAuth clients, or serve the MCP tools over stdio",
+		Long:  "Create, list, and delete OAuth client registrations for MCP remote access; `ctx mcp serve` runs the CLI as a local MCP server over stdio.",
 	}
 
 	cmd.AddCommand(mcpAddCmd(getClient))
 	cmd.AddCommand(mcpListCmd(getClient))
 	cmd.AddCommand(mcpDeleteCmd(getClient))
+	cmd.AddCommand(mcpServeCmd(getClient))
 
 	// Default to list.
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {

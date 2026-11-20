@@ -311,6 +311,7 @@ func envelopeInventory() map[string]inventoryEntry {
 		"statusline":     skip("reads the Claude Code JSON from stdin and must never fail a prompt"),
 		"contract":       skip("own exit scale 0/1/2/3 (contract.go:119-131); pinned by contract_test.go"),
 		"init":           skip("first-run wizard: builds its own client and probes api.github.com"),
+		"mcp serve":      skip("speaks MCP on stdin/stdout until stdin closes and reads no /api envelope; stdout carries protocol frames only (mcp_serve_test.go)"),
 	}
 }
 
