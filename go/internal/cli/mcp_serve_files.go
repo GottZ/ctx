@@ -48,17 +48,27 @@ const mcpContentFileMaxBytes = ingest.MaxContentBytes
 // mcpGetTool is the one tool output_file joins.
 const mcpGetTool = "get"
 
-// The two parameter names the proxy owns while --allow-files is set.
+// The two parameter names the proxy owns while --allow-files is set, and the
+// server's parameter content_file stands in for.
 const (
 	mcpContentFileParam = "content_file"
 	mcpOutputFileParam  = "output_file"
+	mcpContentParam     = "content"
 )
 
-// mcpFileRoots are the --allow-files directories, absolute and with their
-// symlinks resolved, plus the directory relative paths resolve against.
+// mcpFileRoot is one --allow-files directory: its path with symlinks resolved,
+// and the os.Root opened on it at start, so the directory a file is opened in
+// stays the one the user named even if a path to it is changed later.
+type mcpFileRoot struct {
+	dir  string
+	root *os.Root
+}
+
+// mcpFileRoots are the --allow-files directories, plus the working directory
+// the tool descriptions name for relative paths.
 type mcpFileRoots struct {
-	dirs []string
-	cwd  string
+	roots []mcpFileRoot
+	cwd   string
 }
 
 func newMCPFileRoots(dirs []string) (*mcpFileRoots, error) {
@@ -68,50 +78,84 @@ func newMCPFileRoots(dirs []string) (*mcpFileRoots, error) {
 	}
 	r := &mcpFileRoots{cwd: cwd}
 	for _, d := range dirs {
-		abs := d
-		if !filepath.IsAbs(abs) {
-			abs = filepath.Join(cwd, abs)
-		}
-		real, err := filepath.EvalSymlinks(abs)
+		root, err := openMCPFileRoot(d)
 		if err != nil {
-			return nil, fmt.Errorf("--allow-files %s: %w", d, err)
+			r.close()
+			return nil, err
 		}
-		fi, err := os.Stat(real)
-		if err != nil {
-			return nil, fmt.Errorf("--allow-files %s: %w", d, err)
-		}
-		if !fi.IsDir() {
-			return nil, fmt.Errorf("--allow-files %s: not a directory", d)
-		}
-		r.dirs = append(r.dirs, real)
+		r.roots = append(r.roots, root)
 	}
 	return r, nil
+}
+
+func openMCPFileRoot(d string) (mcpFileRoot, error) {
+	// An empty value (an unset variable in a registration line) must not
+	// silently become the working directory.
+	if strings.TrimSpace(d) == "" {
+		return mcpFileRoot{}, errors.New("--allow-files: an empty directory name")
+	}
+	abs, err := filepath.Abs(d)
+	if err != nil {
+		return mcpFileRoot{}, fmt.Errorf("--allow-files %s: %w", d, err)
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return mcpFileRoot{}, fmt.Errorf("--allow-files %s: %w", d, err)
+	}
+	fi, err := os.Stat(real)
+	if err != nil {
+		return mcpFileRoot{}, fmt.Errorf("--allow-files %s: %w", d, err)
+	}
+	if !fi.IsDir() {
+		return mcpFileRoot{}, fmt.Errorf("--allow-files %s: not a directory", d)
+	}
+	root, err := os.OpenRoot(real)
+	if err != nil {
+		return mcpFileRoot{}, fmt.Errorf("--allow-files %s: %w", d, err)
+	}
+	return mcpFileRoot{dir: real, root: root}, nil
+}
+
+func (r *mcpFileRoots) close() {
+	for _, root := range r.roots {
+		_ = root.root.Close()
+	}
+}
+
+func (r *mcpFileRoots) dirList() string {
+	dirs := make([]string, len(r.roots))
+	for i, root := range r.roots {
+		dirs[i] = root.dir
+	}
+	return strings.Join(dirs, ", ")
 }
 
 // errMCPOutsideRoots is a path that does not resolve into an allowed directory.
 var errMCPOutsideRoots = errors.New("is outside the directories this server may read and write")
 
 // locate resolves path to the allowed directory it lies in and its path
-// relative to that directory.
-func (r *mcpFileRoots) locate(path string) (dir, rel string, err error) {
+// relative to that directory. A relative path resolves against the working
+// directory (filepath.Abs, which on Windows also places a path that starts at
+// the drive root on the current drive).
+func (r *mcpFileRoots) locate(path string) (mcpFileRoot, string, error) {
 	if path == "" {
-		return "", "", errors.New("is empty")
+		return mcpFileRoot{}, "", errors.New("is empty")
 	}
-	abs := path
-	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(r.cwd, abs)
-	}
-	real, err := resolveExisting(filepath.Clean(abs))
+	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", "", err
+		return mcpFileRoot{}, "", err
 	}
-	for _, d := range r.dirs {
-		rel, err := filepath.Rel(d, real)
+	real, err := resolveExisting(abs)
+	if err != nil {
+		return mcpFileRoot{}, "", err
+	}
+	for _, root := range r.roots {
+		rel, err := filepath.Rel(root.dir, real)
 		if err == nil && filepath.IsLocal(rel) {
-			return d, rel, nil
+			return root, rel, nil
 		}
 	}
-	return "", "", fmt.Errorf("%w (--allow-files: %s)", errMCPOutsideRoots, strings.Join(r.dirs, ", "))
+	return mcpFileRoot{}, "", fmt.Errorf("%w (--allow-files: %s)", errMCPOutsideRoots, r.dirList())
 }
 
 // resolveExisting resolves the symlinks of path as far as it exists and keeps
@@ -139,20 +183,28 @@ func resolveExisting(path string) (string, error) {
 // readContentFile reads a content_file: a regular, non-empty UTF-8 file of at
 // most mcpContentFileMaxBytes under an allowed directory.
 func (r *mcpFileRoots) readContentFile(path string) (string, error) {
-	dir, rel, err := r.locate(path)
+	root, rel, err := r.locate(path)
 	if err != nil {
 		return "", err
 	}
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = root.Close() }()
-	// Stat before Open: opening a FIFO for reading would block the call.
-	fi, err := root.Stat(rel)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
+	return readConfined(root.root, rel)
+}
+
+// readConfined opens rel through root, so a component that leads outside the
+// directory is refused even when it appeared after locate. The open does not
+// block (mcpOpenNonblock): whether the file is regular is decided on the opened
+// file, so a FIFO put in its place cannot hold the call.
+func readConfined(root *os.Root, rel string) (string, error) {
+	f, err := root.OpenFile(rel, os.O_RDONLY|mcpOpenNonblock, 0)
+	if errors.Is(err, fs.ErrNotExist) {
 		return "", errors.New("does not exist")
+	}
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	switch {
 	case err != nil:
 		return "", err
 	case !fi.Mode().IsRegular():
@@ -160,11 +212,6 @@ func (r *mcpFileRoots) readContentFile(path string) (string, error) {
 	case fi.Size() > mcpContentFileMaxBytes:
 		return "", fmt.Errorf("is %d bytes, more than the %d a content string may carry", fi.Size(), mcpContentFileMaxBytes)
 	}
-	f, err := root.Open(rel)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, mcpContentFileMaxBytes+1))
 	switch {
 	case err != nil:
@@ -182,7 +229,7 @@ func (r *mcpFileRoots) readContentFile(path string) (string, error) {
 // mcpOutputTarget is a checked output_file: where get's content goes.
 type mcpOutputTarget struct {
 	param string // the path as the call gave it, for the answers
-	dir   string
+	root  mcpFileRoot
 	rel   string
 }
 
@@ -190,49 +237,51 @@ type mcpOutputTarget struct {
 // directory, in a directory that exists, and either absent or a regular file
 // (which is then overwritten, keeping its mode).
 func (r *mcpFileRoots) outputTarget(path string) (*mcpOutputTarget, error) {
-	dir, rel, err := r.locate(path)
+	root, rel, err := r.locate(path)
 	if err != nil {
 		return nil, err
 	}
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = root.Close() }()
-	if li, err := root.Lstat(rel); err == nil && li.Mode()&fs.ModeSymlink != 0 {
-		if _, err := root.Stat(rel); err != nil {
+	if li, err := root.root.Lstat(rel); err == nil && li.Mode()&fs.ModeSymlink != 0 {
+		if _, err := root.root.Stat(rel); err != nil {
 			return nil, fmt.Errorf("is a symbolic link that cannot be followed here: %w", err)
 		}
 	}
-	fi, err := root.Stat(rel)
+	fi, err := root.root.Stat(rel)
 	switch {
 	case err == nil && !fi.Mode().IsRegular():
 		return nil, errors.New("is not a regular file")
 	case err == nil:
 	case errors.Is(err, fs.ErrNotExist):
-		if pi, perr := root.Stat(filepath.Dir(rel)); perr != nil || !pi.IsDir() {
+		if pi, perr := root.root.Stat(filepath.Dir(rel)); perr != nil || !pi.IsDir() {
 			return nil, errors.New("is in a directory that does not exist")
 		}
 	default:
 		return nil, err
 	}
-	return &mcpOutputTarget{param: path, dir: dir, rel: rel}, nil
+	return &mcpOutputTarget{param: path, root: root, rel: rel}, nil
 }
 
 // write writes content to the target through the os.Root of its directory.
 // A new file is created 0600: a block's content may be anything up to
-// credentials.
+// credentials. The file is opened without blocking and truncated only after
+// it proved to be a regular file, so neither a FIFO nor another special file
+// put in its place since outputTarget can hold the call or be written.
 func (t *mcpOutputTarget) write(content string) (int, error) {
-	root, err := os.OpenRoot(t.dir)
+	f, err := t.root.root.OpenFile(t.rel, os.O_WRONLY|os.O_CREATE|mcpOpenNonblock, 0o600)
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = root.Close() }()
-	f, err := root.OpenFile(t.rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return 0, err
+	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		err = errors.New("is not a regular file")
 	}
-	n, err := io.WriteString(f, content)
+	if err == nil {
+		err = f.Truncate(0)
+	}
+	n := 0
+	if err == nil {
+		n, err = io.WriteString(f, content)
+	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -264,7 +313,7 @@ func (t *mcpOutputTarget) answer(res *mcp.CallToolResult) *mcp.CallToolResult {
 	at := -1
 	var content string
 	for i, m := range members {
-		if m.key == "content" {
+		if m.key == mcpContentParam {
 			at = i
 			if err := json.Unmarshal(m.value, &content); err != nil {
 				return fail("the content of the get answer is not a string; nothing was written")
@@ -278,7 +327,7 @@ func (t *mcpOutputTarget) answer(res *mcp.CallToolResult) *mcp.CallToolResult {
 	if err != nil {
 		return fail(fmt.Sprintf("writing failed: %v", err))
 	}
-	ref, _ := json.Marshal(map[string]any{"path": filepath.Join(t.dir, t.rel), "bytes": n})
+	ref, _ := json.Marshal(map[string]any{"path": filepath.Join(t.root.dir, t.rel), "bytes": n})
 	members[at] = jsonMember{key: mcpOutputFileParam, value: ref}
 	out := *res
 	out.Content = []mcp.Content{&mcp.TextContent{Text: encodeObjectMembers(members)}}
@@ -344,7 +393,7 @@ func encodeObjectMembers(members []jsonMember) string {
 func schemaTakesContent(schema any) bool {
 	s, _ := schema.(map[string]any)
 	props, _ := s["properties"].(map[string]any)
-	content, _ := props["content"].(map[string]any)
+	content, _ := props[mcpContentParam].(map[string]any)
 	switch t := content["type"].(type) {
 	case string:
 		return t == "string"
@@ -388,7 +437,7 @@ func (r *mcpFileRoots) schemaWithFileParams(tool string, schema any) any {
 		s["properties"] = props
 	}
 	where := fmt.Sprintf("Relative paths resolve against %s; the file must lie under %s after symlink resolution.",
-		r.cwd, strings.Join(r.dirs, ", "))
+		r.cwd, r.dirList())
 	if content {
 		props[mcpContentFileParam] = map[string]any{
 			"type": "string",
@@ -398,7 +447,7 @@ func (r *mcpFileRoots) schemaWithFileParams(tool string, schema any) any {
 		if req, ok := s["required"].([]any); ok {
 			kept := make([]any, 0, len(req))
 			for _, v := range req {
-				if v != "content" {
+				if v != mcpContentParam {
 					kept = append(kept, v)
 				}
 			}
@@ -424,11 +473,16 @@ func (r *mcpFileRoots) prepareCall(ctx context.Context, cs *mcp.ClientSession, n
 	if !ok {
 		return args, nil, "", nil // not an object: the server answers it in its own words
 	}
-	contentFile, hasContentFile := m[mcpContentFileParam]
-	outputFile, hasOutputFile := m[mcpOutputFileParam]
-	if !hasContentFile && !hasOutputFile {
+	_, namedContentFile := m[mcpContentFileParam]
+	_, namedOutputFile := m[mcpOutputFileParam]
+	if !namedContentFile && !namedOutputFile {
 		return args, nil, "", nil
 	}
+	// An explicit null is an absent parameter, as clients that send every
+	// optional field as null mean it; the proxy owns the two names, so a null
+	// one is not forwarded either.
+	contentFile, hasContentFile := takeArgument(m, mcpContentFileParam)
+	outputFile, hasOutputFile := takeArgument(m, mcpOutputFileParam)
 	var out *mcpOutputTarget
 	if hasOutputFile {
 		target, refusal := r.prepareOutputFile(name, outputFile)
@@ -436,7 +490,6 @@ func (r *mcpFileRoots) prepareCall(ctx context.Context, cs *mcp.ClientSession, n
 			return nil, nil, refusal, nil
 		}
 		out = target
-		delete(m, mcpOutputFileParam)
 	}
 	if hasContentFile {
 		refusal, err := r.prepareContentFile(ctx, cs, name, m, contentFile)
@@ -458,6 +511,18 @@ func argumentObject(args json.RawMessage) (map[string]json.RawMessage, bool) {
 		return nil, false
 	}
 	return m, true
+}
+
+// takeArgument removes key from m and returns its value, reporting false when
+// the key is absent or JSON null.
+func takeArgument(m map[string]json.RawMessage, key string) (json.RawMessage, bool) {
+	raw, ok := m[key]
+	delete(m, key)
+	return raw, ok && !isJSONNull(raw)
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return strings.TrimSpace(string(raw)) == "null"
 }
 
 // stringArgument decodes an argument that must be a JSON string.
@@ -490,14 +555,13 @@ func (r *mcpFileRoots) prepareContentFile(ctx context.Context, cs *mcp.ClientSes
 	if !ok {
 		return mcpContentFileParam + " must be a string path; nothing was sent", nil
 	}
-	if _, both := m["content"]; both {
+	if c, both := m[mcpContentParam]; both && !isJSONNull(c) {
 		return "give content or content_file, not both; nothing was sent", nil
 	}
 	tool, err := lookupRemoteTool(ctx, cs, name)
 	if err != nil {
 		return "", err
 	}
-	delete(m, mcpContentFileParam)
 	if tool == nil {
 		return "", nil
 	}
@@ -509,7 +573,7 @@ func (r *mcpFileRoots) prepareContentFile(ctx context.Context, cs *mcp.ClientSes
 		return fmt.Sprintf("%s %q %v; nothing was sent", mcpContentFileParam, path, err), nil
 	}
 	encoded, _ := json.Marshal(text)
-	m["content"] = encoded
+	m[mcpContentParam] = encoded
 	return "", nil
 }
 

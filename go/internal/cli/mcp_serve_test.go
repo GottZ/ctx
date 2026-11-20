@@ -129,8 +129,8 @@ func TestMCPServeStdoutCarriesProtocolFramesOnly(t *testing.T) {
 	wantCause := "cannot use the server at http://" + addr + "/mcp"
 	send(map[string]any{"id": 2, "method": "tools/list"})
 	listErr, _ := await(2)["error"].(map[string]any)
-	if msg, _ := listErr["message"].(string); !strings.Contains(msg, wantCause) {
-		t.Errorf("tools/list answered %v, want an error naming %q", answers[2], wantCause)
+	if msg, _ := listErr["message"].(string); !strings.Contains(msg, wantCause) || listErr["code"] != float64(-32603) {
+		t.Errorf("tools/list answered %v, want an internal error (-32603) naming %q", answers[2], wantCause)
 	}
 
 	for _, id := range []float64{3, 4} { // a second failed call: the process still serves
@@ -237,11 +237,20 @@ func TestMCPServeMissingConfigNamesTheCause(t *testing.T) {
 
 const upstreamInstructions = "upstream instructions"
 
-// newUpstream is a stateless SDK server with one tool, echo, behind a handler
-// that requires the key header and answers the request after failNext was set
-// with a 403 a proxy in front could send (no JSON-RPC body).
-func newUpstream(t *testing.T, failNext *atomic.Bool) *httptest.Server {
+// upstream is a stateless SDK server behind a handler that requires the key
+// header. Tools: echo, and slow, which answers once release is closed. The
+// request after failWith was set gets that status without a JSON-RPC body,
+// as a proxy in front of the server could send it.
+type upstream struct {
+	srv      *httptest.Server
+	failWith atomic.Int32
+	release  chan struct{}
+	holding  atomic.Bool // set: every request waits for release (a server that does not answer)
+}
+
+func newUpstream(t *testing.T) *upstream {
 	t.Helper()
+	u := &upstream{release: make(chan struct{})}
 	up := mcp.NewServer(&mcp.Implementation{Name: "upstream", Version: "0"}, &mcp.ServerOptions{Instructions: upstreamInstructions})
 	type echoIn struct {
 		Content string `json:"content"`
@@ -250,21 +259,61 @@ func newUpstream(t *testing.T, failNext *atomic.Bool) *httptest.Server {
 		func(_ context.Context, _ *mcp.CallToolRequest, in echoIn) (*mcp.CallToolResult, any, error) {
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: in.Content}}}, nil, nil
 		})
+	mcp.AddTool(up, &mcp.Tool{Name: "slow", Description: "answer once released"},
+		func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+			select {
+			case <-u.release:
+			case <-ctx.Done():
+			}
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "slow done"}}}, nil, nil
+		})
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return up },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	u.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Context-Key") != mcpServeFixtureKey {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
-		if failNext.CompareAndSwap(true, false) {
-			http.Error(w, "forbidden by a proxy", http.StatusForbidden)
+		if u.holding.Load() {
+			select {
+			case <-u.release:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		if status := u.failWith.Swap(0); status != 0 {
+			http.Error(w, "refused by a proxy", int(status))
 			return
 		}
 		h.ServeHTTP(w, r)
 	}))
-	t.Cleanup(srv.Close)
-	return srv
+	t.Cleanup(func() {
+		select {
+		case <-u.release:
+		default:
+			close(u.release)
+		}
+		u.srv.Close()
+	})
+	return u
+}
+
+func (u *upstream) proxy(t *testing.T) (*MCPProxy, *mcp.ClientSession) {
+	t.Helper()
+	p, err := NewMCPProxy(Config{BaseURL: u.srv.URL, Key: mcpServeFixtureKey}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p, connectProxy(t, p)
+}
+
+func callEcho(t *testing.T, cs *mcp.ClientSession) (*mcp.CallToolResult, string) {
+	t.Helper()
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"content": "hi"}})
+	if err != nil {
+		t.Fatalf("echo: %v", err)
+	}
+	return res, res.Content[0].(*mcp.TextContent).Text
 }
 
 // TestMCPServeMirrorsInstructions: the server's instructions reach the local
@@ -272,10 +321,9 @@ func newUpstream(t *testing.T, failNext *atomic.Bool) *httptest.Server {
 // 2025-11-25, which clients such as Claude Code speak) and through
 // server/discover (2026-07-28, the SDK client's default).
 func TestMCPServeMirrorsInstructions(t *testing.T) {
-	var never atomic.Bool
-	srv := newUpstream(t, &never)
+	u := newUpstream(t)
 	for _, version := range []string{"2025-11-25", ""} {
-		p, err := NewMCPProxy(Config{BaseURL: srv.URL, Key: mcpServeFixtureKey}, nil, nil)
+		p, err := NewMCPProxy(Config{BaseURL: u.srv.URL, Key: mcpServeFixtureKey}, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -303,31 +351,98 @@ func TestMCPServeMirrorsInstructions(t *testing.T) {
 // v1.8.0 takes as transient) is answered with the cause, and the next call
 // opens a new session instead of failing for the rest of the process.
 func TestMCPServeReconnectsAfterABrokenSession(t *testing.T) {
-	var failNext atomic.Bool
-	srv := newUpstream(t, &failNext)
-	p, err := NewMCPProxy(Config{BaseURL: srv.URL, Key: mcpServeFixtureKey}, nil, nil)
+	u := newUpstream(t)
+	_, cs := u.proxy(t)
+	if res, text := callEcho(t, cs); res.IsError || text != "hi" {
+		t.Fatalf("echo before the failure: %q", text)
+	}
+	u.failWith.Store(http.StatusForbidden)
+	if res, text := callEcho(t, cs); !res.IsError || !strings.Contains(text, "cannot use the server at "+u.srv.URL+"/mcp") {
+		t.Errorf("echo on a 403 answered isError=%v %q", res.IsError, text)
+	}
+	if res, text := callEcho(t, cs); res.IsError || text != "hi" {
+		t.Errorf("echo after the failure answered %q, want the proxy to reconnect", text)
+	}
+}
+
+// TestMCPServeTransientFailureDoesNotWaitForOtherCalls: a failure the SDK
+// takes as transient (a 503) is answered at once while another call is still
+// running, and that call ends normally: the session is not torn down under it.
+func TestMCPServeTransientFailureDoesNotWaitForOtherCalls(t *testing.T) {
+	u := newUpstream(t)
+	_, cs := u.proxy(t)
+	if res, _ := callEcho(t, cs); res.IsError {
+		t.Fatal("echo before the failure failed")
+	}
+	slow := make(chan *mcp.CallToolResult, 1)
+	go func() {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "slow", Arguments: map[string]any{}})
+		if err != nil {
+			res = refusalResult(err.Error())
+		}
+		slow <- res
+	}()
+	time.Sleep(200 * time.Millisecond) // the slow call is in flight
+	u.failWith.Store(http.StatusServiceUnavailable)
+	start := time.Now()
+	res, text := callEcho(t, cs)
+	if !res.IsError || !strings.Contains(text, "cannot use the server") {
+		t.Errorf("echo on a 503 answered isError=%v %q", res.IsError, text)
+	}
+	if waited := time.Since(start); waited > 2*time.Second {
+		t.Errorf("the 503 answer took %v, held by the running call", waited)
+	}
+	close(u.release)
+	if res := <-slow; res.IsError {
+		t.Errorf("the running call ended with %q", res.Content[0].(*mcp.TextContent).Text)
+	}
+}
+
+// TestMCPServeWaitingForAHangingConnectIsCancellable: while one request
+// opens the session against a server that does not answer, another request
+// gives up with its own context instead of queueing behind the first.
+func TestMCPServeWaitingForAHangingConnectIsCancellable(t *testing.T) {
+	u := newUpstream(t)
+	u.holding.Store(true)
+	p, err := NewMCPProxy(Config{BaseURL: u.srv.URL, Key: mcpServeFixtureKey}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cs := connectProxy(t, p)
-	echo := func() *mcp.CallToolResult {
-		t.Helper()
-		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"content": "hi"}})
-		if err != nil {
-			t.Fatalf("echo: %v", err)
-		}
-		return res
+	t.Cleanup(func() { _ = p.Close() })
+	first, cancelFirst := context.WithCancel(context.Background())
+	t.Cleanup(cancelFirst)
+	go func() { _, _ = p.remote(first) }()
+	time.Sleep(200 * time.Millisecond) // the first request holds the connect
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := p.remote(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("second request = %v, want its own deadline", err)
 	}
-	if res := echo(); res.IsError || res.Content[0].(*mcp.TextContent).Text != "hi" {
-		t.Fatalf("echo before the failure: %+v", res)
+	if waited := time.Since(start); waited > 2*time.Second {
+		t.Errorf("second request waited %v behind the hanging connect", waited)
 	}
-	failNext.Store(true)
-	res := echo()
-	if text := res.Content[0].(*mcp.TextContent).Text; !res.IsError || !strings.Contains(text, "cannot use the server at "+srv.URL+"/mcp") {
-		t.Errorf("echo on a 403 answered isError=%v %q", res.IsError, text)
+}
+
+// TestMCPServeNullFileParametersAreAbsent: a client that sends optional
+// fields as null keeps working with --allow-files, and the null is not sent.
+func TestMCPServeNullFileParametersAreAbsent(t *testing.T) {
+	roots := &mcpFileRoots{cwd: "/work"}
+	args := json.RawMessage(`{"category":"c","title":"t","content":"x","content_file":null,"output_file":null}`)
+	out, target, refusal, err := roots.prepareCall(context.Background(), nil, "store", args)
+	if err != nil || refusal != "" || target != nil {
+		t.Fatalf("prepareCall = target %v, refusal %q, err %v", target, refusal, err)
 	}
-	if res := echo(); res.IsError || res.Content[0].(*mcp.TextContent).Text != "hi" {
-		t.Errorf("echo after the failure answered %+v, want the proxy to reconnect", res.Content[0])
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(m, map[string]any{"category": "c", "title": "t", "content": "x"}) {
+		t.Errorf("arguments sent = %v", m)
+	}
+	untouched := json.RawMessage(`{"content":"x"}`)
+	if out, _, _, _ := roots.prepareCall(context.Background(), nil, "store", untouched); string(out) != string(untouched) {
+		t.Errorf("arguments without file parameters changed: %s", out)
 	}
 }
 
@@ -336,7 +451,7 @@ func TestMCPServeAllowFilesMustBeDirectories(t *testing.T) {
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, dir := range []string{file, filepath.Join(t.TempDir(), "missing")} {
+	for _, dir := range []string{file, filepath.Join(t.TempDir(), "missing"), "", " "} {
 		if _, err := NewMCPProxy(Config{BaseURL: "http://127.0.0.1:1", Key: "k"}, nil, []string{dir}); err == nil {
 			t.Errorf("--allow-files %s accepted, want an error", dir)
 		}
@@ -348,7 +463,7 @@ func TestMCPServeAllowFilesMustBeDirectories(t *testing.T) {
 // longer required), output_file on get, nothing on any other tool, and the
 // remote's result left untouched.
 func TestMCPServeSchemaFileParams(t *testing.T) {
-	roots := &mcpFileRoots{dirs: []string{"/allowed"}, cwd: "/work"}
+	roots := &mcpFileRoots{roots: []mcpFileRoot{{dir: "/allowed"}}, cwd: "/work"}
 	schema := func(js string) any {
 		var v any
 		if err := json.Unmarshal([]byte(js), &v); err != nil {

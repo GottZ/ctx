@@ -50,15 +50,16 @@ claude mcp add ctx -- ctx mcp serve --allow-files /home/me/notes
 | | |
 |---|---|
 | Tools | the server's, mirrored: `tools/list` is answered from the server on every request, with its names, descriptions and schemas, so a tool added on the server appears without a CLI release. The proxy keeps no copy of the list |
-| Instructions | the server's, taken into the answer to `initialize`. A server that does not answer within 10 seconds leaves that one answer without instructions (the reason goes to stderr); the tools still work once it answers |
-| Answers and refusals | a call through the proxy has the effect and the answer of the same call against `/mcp`: the server's results, its tool errors and its JSON-RPC errors pass through unchanged. Staged writes (`confirm_writes`) stage and confirm as they do on `/mcp` |
+| Instructions | the server's, taken into the answer to `initialize` (and `server/discover`) as they were when the proxy opened its session to the server; a change of `mcp.instructions` reaches the next `ctx mcp serve` process. A server that does not answer within 10 seconds leaves that one answer without instructions (the reason goes to stderr); the tools still work once it answers |
+| Answers and refusals | a call through the proxy has the effect and the answer of the same call against `/mcp`: the server's results, its tool errors and its JSON-RPC errors pass through with their values unchanged (decoded and encoded again by the go-sdk, so key order may differ and a field that SDK version does not know is not carried). Staged writes (`confirm_writes`) stage and confirm as they do on `/mcp`. The client's request `_meta` is not forwarded |
 | Failures | a server that cannot be reached, a key the server refuses (`401`) and a missing configuration are answered, not fatal: `tools/list` answers a JSON-RPC error and a tool call an error result, each naming the cause (`ctx mcp serve: cannot use the server at <url>/mcp: …`, `… refused the API key of the ctx configuration (HTTP 401)`, `… no usable ctx configuration: …`). The process keeps serving; after a server restart the next request reaches it again. The key is never part of an answer, a log line or the command line |
-| Session | one session to the server, opened on the first request and opened anew after a failure; nothing in the proxy grows with the number of tools or the time it runs |
+| Session | one session to the server, opened on the first request. A failure that leaves the connection intact (unreachable, `401`, a `429` or `5xx` the SDK treats as transient) keeps it; a failure that breaks it (an answer that is not JSON-RPC, a `403` or `404` from something in front of the server) drops it, and the next request opens a new one. A request waiting while another one connects gives up with its own deadline. Nothing in the proxy grows with the number of tools or the time it runs |
 | stdout | carries protocol frames only; diagnostics go to stderr |
 
 **Local files (`--allow-files DIR`, repeatable).** Without the flag the proxy offers no
-file access and forwards every argument unchanged. With it, two parameters join the
-mirrored schemas:
+file access and forwards every argument unchanged. Each `DIR` must be an existing
+directory; an empty value is refused at start. With the flag, two parameters join the
+mirrored schemas (a parameter sent as `null` counts as absent):
 
 - `content_file` on every tool whose schema has a `content` string (today `store`,
   `update`, `issue_create`, `issue_comment`): the proxy reads the file and sends its
@@ -78,9 +79,11 @@ as far as the path exists (a file that does not exist yet resolves through its
 directory), and the result must lie under one of the directories, which are resolved
 when the server starts. The file is then opened through Go's `os.Root` for that
 directory, which refuses any component that leads outside it, so a link that leaves
-the directory is refused also when it appears between the check and the open. The
-same rules apply on Windows, where `os.Root` also refuses reserved device names such
-as `NUL`. A stdio server that read any path a model asks for would hand the file's
+the directory is refused also when it appears between the check and the open. Each
+directory is opened once at start and held, so a file is always opened in the
+directory that was named. Files are opened without blocking and checked to be regular
+files after the open, so a FIFO put in a file's place cannot hold a call. The same
+rules apply on Windows, where reserved device names such as `NUL` are refused. A stdio server that read any path a model asks for would hand the file's
 content to whatever the model stores it in; the directories bound that.
 
 ## Results and errors

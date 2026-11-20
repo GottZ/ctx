@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // fileFixture is an allowed directory with an outside directory beside it.
@@ -55,11 +56,13 @@ func newFileFixture(t *testing.T) fileFixture {
 	if err := syscall.Mkfifo(filepath.Join(allowed, "fifo"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Relative paths resolve against the working directory of the process.
+	t.Chdir(filepath.Join(allowed, "sub"))
 	roots, err := newMCPFileRoots([]string{allowed})
 	if err != nil {
 		t.Fatal(err)
 	}
-	roots.cwd = filepath.Join(allowed, "sub")
+	t.Cleanup(roots.close)
 	return fileFixture{roots: roots, allowed: allowed, outside: outside}
 }
 
@@ -169,5 +172,75 @@ func TestMCPServeOutputFileConfinement(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(keep); string(b) != "new" {
 		t.Errorf("overwritten file = %q, want %q (truncated)", b, "new")
+	}
+}
+
+// TestMCPServeOpensThroughTheRoot: a component swapped for a link that leads
+// out of the directory after locate is refused when the file is opened, for
+// reading and for writing, and the file outside is neither read nor written.
+func TestMCPServeOpensThroughTheRoot(t *testing.T) {
+	f := newFileFixture(t)
+	dir := filepath.Join(f.allowed, "swapped")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "secret.md"), []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, rel, err := f.roots.locate(filepath.Join(dir, "secret.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := f.roots.outputTarget(filepath.Join(dir, "secret.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../outside", dir); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readConfined(root.root, rel); err == nil {
+		t.Errorf("read through the swapped link = %q, want a refusal", got)
+	}
+	if _, err := target.write("overwritten"); err == nil {
+		t.Error("write through the swapped link succeeded, want a refusal")
+	}
+	if b, _ := os.ReadFile(filepath.Join(f.outside, "secret.md")); string(b) != "outside text" {
+		t.Errorf("the file outside changed: %q", b)
+	}
+}
+
+// TestMCPServeOutputFileFIFOAfterTheCheck: a FIFO put in place of a checked
+// output_file makes the write fail at once instead of holding the call.
+func TestMCPServeOutputFileFIFOAfterTheCheck(t *testing.T) {
+	f := newFileFixture(t)
+	path := filepath.Join(f.allowed, "later-a-fifo.md")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target, err := f.roots.outputTarget(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := target.write("content")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("write into a FIFO succeeded, want a refusal")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("write into a FIFO blocked")
 	}
 }

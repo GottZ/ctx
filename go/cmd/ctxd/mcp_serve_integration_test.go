@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GottZ/ctx/internal/cli"
+	"github.com/GottZ/ctx/internal/ingest"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -249,7 +250,7 @@ func fileDirs(t *testing.T) (allowed, outside string) {
 	files := map[string]string{
 		filepath.Join(allowed, "note.md"):   "the file's text",
 		filepath.Join(allowed, "empty.md"):  "",
-		filepath.Join(allowed, "big.md"):    strings.Repeat("b", 50*1024+1),
+		filepath.Join(allowed, "big.md"):    strings.Repeat("b", ingest.MaxContentBytes+1),
 		filepath.Join(outside, "secret.md"): "outside text",
 	}
 	for p, c := range files {

@@ -57,6 +57,11 @@ const (
 	sdkCodeRejected      = -32005
 )
 
+// errSDKRejected matches the SDK's ErrRejected anywhere in a chain
+// (jsonrpc.Error.Is compares codes): the request did not get through, and the
+// connection is intact.
+var errSDKRejected = &jsonrpc.Error{Code: sdkCodeRejected}
+
 // remoteAnswered returns the JSON-RPC error the remote server answered with,
 // and false when err is not such an answer (a transport failure of the SDK, a
 // cancellation, anything else). A rejected HTTP answer that carries a JSON-RPC
@@ -82,8 +87,12 @@ type MCPProxy struct {
 	files    *mcpFileRoots
 	server   *mcp.Server
 
-	mu      sync.Mutex
-	session *mcp.ClientSession // nil until the first forwarded request, and after a failure
+	// connecting is a one-slot token held while a request looks up or opens the
+	// session: a request waiting behind a connect that hangs gives up with its
+	// own context instead of piling up behind a mutex.
+	connecting chan struct{}
+	mu         sync.Mutex
+	session    *mcp.ClientSession // nil until the first forwarded request, and after a broken connection
 }
 
 // NewMCPProxy builds the proxy. cfgErr is the error loading the CLI
@@ -92,7 +101,7 @@ type MCPProxy struct {
 // allowFiles are the --allow-files directories; an entry that is not a
 // directory is an error here, before any request is served.
 func NewMCPProxy(cfg Config, cfgErr error, allowFiles []string) (*MCPProxy, error) {
-	p := &MCPProxy{cfgErr: cfgErr}
+	p := &MCPProxy{cfgErr: cfgErr, connecting: make(chan struct{}, 1)}
 	if cfgErr == nil {
 		p.endpoint = strings.TrimSuffix(cfg.BaseURL, "/") + "/mcp"
 		// No overall timeout: a query call runs as long as the server's
@@ -120,8 +129,12 @@ func NewMCPProxy(cfg Config, cfgErr error, allowFiles []string) (*MCPProxy, erro
 // command, an in-memory pair in tests).
 func (p *MCPProxy) Server() *mcp.Server { return p.server }
 
-// Close ends the remote session, if one is open.
+// Close ends the remote session, if one is open, and releases the
+// --allow-files directories.
 func (p *MCPProxy) Close() error {
+	if p.files != nil {
+		p.files.close()
+	}
 	p.mu.Lock()
 	cs := p.session
 	p.session = nil
@@ -178,7 +191,7 @@ func (p *MCPProxy) instructions(ctx context.Context) string {
 func (p *MCPProxy) listTools(ctx context.Context, req *mcp.ListToolsRequest) (mcp.Result, error) {
 	cs, err := p.remote(ctx)
 	if err != nil {
-		return nil, p.answer(ctx, nil, err)
+		return nil, protocolError(p.answer(ctx, nil, err))
 	}
 	params := &mcp.ListToolsParams{}
 	if req.Params != nil {
@@ -186,7 +199,7 @@ func (p *MCPProxy) listTools(ctx context.Context, req *mcp.ListToolsRequest) (mc
 	}
 	res, err := cs.ListTools(ctx, params)
 	if err != nil {
-		return nil, p.answer(ctx, cs, err)
+		return nil, protocolError(p.answer(ctx, cs, err))
 	}
 	if p.files == nil {
 		return res, nil
@@ -232,10 +245,17 @@ func (p *MCPProxy) remote(ctx context.Context) (*mcp.ClientSession, error) {
 	if p.cfgErr != nil {
 		return nil, p.cfgErr
 	}
+	select {
+	case p.connecting <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-p.connecting }()
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.session != nil {
-		return p.session, nil
+	cs := p.session
+	p.mu.Unlock()
+	if cs != nil {
+		return cs, nil
 	}
 	client := mcp.NewClient(&mcp.Implementation{Name: "ctx mcp serve", Version: Version}, nil)
 	cs, err := client.Connect(ctx, &mcp.StreamableClientTransport{
@@ -248,7 +268,9 @@ func (p *MCPProxy) remote(ctx context.Context) (*mcp.ClientSession, error) {
 	if err != nil {
 		return nil, err
 	}
+	p.mu.Lock()
 	p.session = cs
+	p.mu.Unlock()
 	return cs, nil
 }
 
@@ -258,10 +280,13 @@ func (p *MCPProxy) remote(ctx context.Context) (*mcp.ClientSession, error) {
 //     invalid parameters): returned as it is, so a refusal reads here in the
 //     words it reads against /mcp. The session stays.
 //   - A cancelled request (the local client gave up) stays a cancellation.
-//   - Anything else is a failure to reach the server or to use the session:
-//     the session is dropped, so the next request opens a new one — after a
-//     server restart, a stateful server's unknown session or a rejected key
-//     the proxy recovers without restarting — and the answer names the cause.
+//   - Anything else is a failure to reach the server or to use the session,
+//     and the answer names the cause. A failure the SDK marks as rejected by
+//     the transport (a dial error, a 401, a 429 or 5xx it takes as transient)
+//     leaves its connection intact, and the session stays. Any other failure
+//     broke the connection (an answer that is no JSON-RPC, a 403 or 404 in
+//     front of the server, a stateful server's lost session): the session is
+//     dropped, and the next request opens a new one.
 func (p *MCPProxy) answer(ctx context.Context, cs *mcp.ClientSession, err error) error {
 	if wire, ok := remoteAnswered(err); ok {
 		return wire
@@ -269,7 +294,7 @@ func (p *MCPProxy) answer(ctx context.Context, cs *mcp.ClientSession, err error)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if cs != nil {
+	if cs != nil && !errors.Is(err, errSDKRejected) {
 		p.drop(cs)
 	}
 	switch {
@@ -290,13 +315,26 @@ type mcpFailure string
 
 func (f mcpFailure) Error() string { return string(f) }
 
+// drop forgets a broken session. It is closed in the background: closing
+// waits for the session's other calls, and the failure answer must not.
 func (p *MCPProxy) drop(cs *mcp.ClientSession) {
 	p.mu.Lock()
 	if p.session == cs {
 		p.session = nil
 	}
 	p.mu.Unlock()
-	_ = cs.Close()
+	go func() { _ = cs.Close() }()
+}
+
+// protocolError gives a failure the proxy names itself the JSON-RPC code of an
+// internal error; the server's own JSON-RPC errors and cancellations pass as
+// they are.
+func protocolError(err error) error {
+	var failure mcpFailure
+	if errors.As(err, &failure) {
+		return &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: failure.Error()}
+	}
+	return err
 }
 
 // toolFailure answers a tools/call that did not reach the server. A JSON-RPC
