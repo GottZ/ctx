@@ -10,11 +10,12 @@
 //     before 188 has it) and holds a block row as a verdict does, the
 //     migration finishes within its lock_timeout; the next transaction on
 //     that connection runs the same prepared call against the new body;
-//   - two runs of the file at the same moment: the second waits for the
-//     first one's uncommitted row of the function and fails — with 55P03
-//     when the first holds it past the lock_timeout, with XX000 ("tuple
-//     concurrently updated") when the first commits inside it; the next run
-//     applies it.
+//   - the file run by a session outside the runner's migration lock while
+//     the runner applies it: the runner waits for that session's uncommitted
+//     row of the function and fails — with 55P03 when the session holds it
+//     past the lock_timeout, with XX000 ("tuple concurrently updated") when
+//     it commits inside it; the next run applies it. (Two runners take turns
+//     under the migration lock, issue #398.)
 package guard_test
 
 import (

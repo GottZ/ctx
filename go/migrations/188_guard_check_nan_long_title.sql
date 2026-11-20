@@ -65,13 +65,15 @@
 -- 7 ms next to an open guard transaction that ran the old body and holds a
 -- block row, TestMigration188ReplacesTheFunctionInPlace). A call that is
 -- running keeps the body it started with; the next transaction on a backend
--- that compiled the old body runs the new one. A second instance running
--- this file at the same moment (the runner runs each file in one
--- transaction) waits for the first one's uncommitted row of the function:
+-- that compiled the old body runs the new one. Two instances of this
+-- release booting together take turns under the runner's migration lock
+-- (issue #398): the second finds 188 recorded and skips it. A session that
+-- replaces the function at the same moment outside that lock (this file run
+-- by hand) makes the runner wait for its uncommitted row of the function:
 -- `SET LOCAL lock_timeout = '3s'` (house pattern of 179/180) ends the wait
--- with 55P03, and a first run that commits inside it leaves the second one
+-- with 55P03, and a session that commits inside it leaves the runner
 -- "tuple concurrently updated" (XX000) — either way that boot fails loudly
--- and the next one finds 188 applied (TestMigration188ConcurrentRuns).
+-- and the next one applies 188 (TestMigration188ConcurrentRuns).
 --
 -- OLDER BINARY (the rollback images v5.68.0 and v5.69.0). It calls the
 -- function with the same five parameters and reads the same six columns,
