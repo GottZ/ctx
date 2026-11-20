@@ -6,6 +6,11 @@ package guard
 // small candidate circle.
 const GuardCheckSourceExactForTest = guardCheckSourceExact
 
+// CheckBlockForTest is the batch's check of one block, through
+// ctx_guard_check (exact false) or the exact statement (exact true), issue
+// #396.
+var CheckBlockForTest = checkBlock
+
 // SearchDefaultForTest is the guard.ef_search and guard.exact_max_candidates
 // defaults, for the tests of this package (internal/config may not be
 // imported here: depguard config-layering; config pins the defaults in

@@ -192,29 +192,24 @@ const guardCheckSourceIndex = `ctx_guard_check($1::uuid, $2::real, $3::real, $4:
 
 // guardCheckSourceExact is the same check computed exactly, with the same
 // parameters and the same six output columns as the function of migration
-// 173: the same candidate predicates (the scope disjunction as the array of
+// 188: the same candidate predicates (the scope disjunction as the array of
 // the circle's scopes: the own scope, plus the tenant's scopes unless
 // p_same_scope_only is not false), the same similarity expression and
 // thresholds compared with the same types, clean with similarity 0 and no
-// match when the block has no vector or no candidate exists, and the title
-// coerced to VARCHAR(255) the way the function's variable takes it (the
-// length coercion without the explicit flag: trailing blanks cut, a longer
-// title an error). The distance ordering carries "+ 0", which no index can
+// match when the block has no vector or no candidate exists, and the whole
+// title of the match. The distance ordering carries "+ 0", which no index can
 // serve, so the statement reads no HNSW block under any plan (a custom plan
 // as well as the generic one a prepared statement switches to); it reads the
 // candidates through the circle's scopes. Ties in distance are as open as in
 // the function.
 //
-// One deliberate difference: a vector of zero norm in halfvec(1024) (all
-// zeros, or components that round to zero in half precision) has no cosine
-// distance; pgvector answers NaN, which sorts after every number and passes
-// every ">=" threshold. The HNSW index holds no such vector, so through the
-// index ctx_guard_check never matches one; a zero-norm checked block, though,
-// gets NaN against whichever candidate the index returns first, and the
-// function answers near_duplicate. Here a nearest candidate at NaN (then
-// every candidate's distance is NaN) counts as no candidate: clean,
-// similarity 0, no match. The guard sits on the one row LIMIT 1 keeps, so it
-// adds nothing per candidate.
+// A vector of zero norm in halfvec(1024) (all zeros, or components that
+// round to zero in half precision) has no cosine distance; pgvector answers
+// NaN, which sorts after every number and passes every ">=" threshold. A
+// nearest candidate at NaN (the checked block has zero norm, or every
+// candidate has) counts as no candidate: clean, similarity 0, no match — the
+// rule the function follows since migration 188 (issue #396). The guard sits
+// on the one row LIMIT 1 keeps, so it adds nothing per candidate.
 const guardCheckSourceExact = `(SELECT
 	    CASE WHEN h.id IS NULL THEN 'clean'
 	         WHEN h.sim >= $2::real THEN 'near_duplicate'
@@ -222,7 +217,7 @@ const guardCheckSourceExact = `(SELECT
 	         ELSE 'clean' END::varchar AS decision,
 	    coalesce(h.sim, 0) AS top_similarity,
 	    h.id AS matched_id,
-	    pg_catalog."varchar"(h.title::varchar, 259, false) AS matched_title,
+	    h.title::varchar AS matched_title,
 	    h.scope::varchar AS matched_scope,
 	    coalesce(h.scope <> b.scope AND h.scope <> 'shared', false) AS is_cross_scope
 	  FROM (SELECT 1) one

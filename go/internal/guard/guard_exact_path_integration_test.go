@@ -16,8 +16,8 @@
 //     index dropped inside the transaction), column by column, over tenants,
 //     an unowned scope, archived, stale, unembedded and zero-norm blocks,
 //     long titles, both candidate policies, several thresholds and candidate
-//     lists — except where the function's similarity is NaN (a zero-norm
-//     vector on either side), where the exact statement answers clean;
+//     lists — a zero-norm vector on either side included, which both answer
+//     clean since migration 188 (issue #396);
 //   - a zero-norm vector archives no block, on the candidate side and on the
 //     checked side, through the exact statement and through the function.
 //
@@ -32,9 +32,11 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -447,8 +449,9 @@ func epCheck(ctx context.Context, tx pgx.Tx, source, id string, dup, rev float64
 
 // TestGuardExactSourceMatchesFunction: the exact statement answers like
 // ctx_guard_check computed exactly, in every column, for every block of a
-// corpus with the cases the predicates and the decision distinguish — but
-// for a check whose pair has a zero-norm vector (the named exception below).
+// corpus with the cases the predicates and the decision distinguish — a
+// check whose pair has a zero-norm vector and a match whose title is longer
+// than 255 characters included (issue #396).
 func TestGuardExactSourceMatchesFunction(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -461,6 +464,7 @@ func TestGuardExactSourceMatchesFunction(t *testing.T) {
 	centres := []([]float32){epVec(rng), epVec(rng), epVec(rng), epVec(rng)}
 	var ids []string
 	zeroNorm := map[string]bool{}
+	zeroCandidates := map[string]bool{} // checked blocks whose only candidates have zero norm
 	for i := 0; i < 90; i++ {
 		c := centres[i%len(centres)]
 		cos := []float64{0.999, 0.985, 0.975, 0.95, 0.93, 0.91, 0.85, 0.6}[rng.Intn(8)]
@@ -485,7 +489,9 @@ func TestGuardExactSourceMatchesFunction(t *testing.T) {
 		}
 	}
 	// A circle of its own whose only candidates have zero norm.
-	ids = append(ids, epWrite(t, pool, "ep-zero", "knowledge", "zero-circle-n", epVec(rng)))
+	zeroCircle := epWrite(t, pool, "ep-zero", "knowledge", "zero-circle-n", epVec(rng))
+	ids = append(ids, zeroCircle)
+	zeroCandidates[zeroCircle] = true
 	for _, f := range epZeroNormForms {
 		id := epWrite(t, pool, "ep-zero", "knowledge", "zero-circle-"+f.name, f.vec)
 		ids = append(ids, id)
@@ -537,31 +543,27 @@ func TestGuardExactSourceMatchesFunction(t *testing.T) {
 					if a.cross {
 						seen["cross"]++
 					}
-					want := a
-					// The named exception: a zero-norm vector has no cosine
-					// distance, and the function computed exactly matches it
-					// with similarity NaN, which passes every threshold, or
-					// fails on the title of the arbitrary block it took. The
-					// exact statement answers as if no candidate existed, as
-					// ctx_guard_check through its index does for a zero-norm
-					// candidate (TestGuardZeroNormVector).
-					switch {
-					case zeroNorm[id]:
-						want = epRow{decision: "clean", sim: "0"}
+					if a.title != nil && utf8.RuneCountInString(*a.title) > 255 {
+						seen["title over 255"]++
+					}
+					// A zero-norm vector has no cosine distance; both answer
+					// as if no candidate existed. Counted by the fixture, as
+					// the answer no longer shows it.
+					if zeroNorm[id] && a.decision == "clean" && a.matched == nil && slices.Contains(ts, "knowledge") {
 						seen["zero-norm checked"]++
-					case a.sim == "NaN":
-						want = epRow{decision: "clean", sim: "0"}
+					}
+					if zeroCandidates[id] && a.decision == "clean" && a.matched == nil && slices.Contains(ts, "knowledge") {
 						seen["zero-norm candidate"]++
 					}
-					if want.String() != b.String() {
-						t.Errorf("block %s thr=%v types#%d same_scope=%v:\n function %s\n want     %s\n exact    %s", id[:8], thr, ti, sso, a, want, b)
+					if a.String() != b.String() {
+						t.Errorf("block %s thr=%v types#%d same_scope=%v:\n function %s\n exact    %s", id[:8], thr, ti, sso, a, b)
 					}
 				}
 			}
 		}
 	}
 	t.Logf("cases: %v", seen)
-	for _, k := range []string{"near_duplicate/", "needs_review/", "clean/", "/22001", "cross", "zero-norm checked", "zero-norm candidate"} {
+	for _, k := range []string{"near_duplicate/", "needs_review/", "clean/", "title over 255", "cross", "zero-norm checked", "zero-norm candidate"} {
 		if seen[k] == 0 {
 			t.Errorf("no case %q in the corpus; the comparison does not reach it", k)
 		}
@@ -588,19 +590,18 @@ func epVerdictOf(t *testing.T, pool *pgxpool.Pool, id string) epVerdict {
 	return v
 }
 
-// TestGuardZeroNormVector (PR #395 review): a vector of zero norm in
-// halfvec(1024) has no cosine distance — its similarity is NaN, and NaN
+// TestGuardZeroNormVector (PR #395 review, issue #396): a vector of zero norm
+// in halfvec(1024) has no cosine distance — its similarity is NaN, and NaN
 // passes every ">=" threshold. Per zero-norm form, four cells: the vector on
 // the candidate side (the only candidate of a checked block) and on the
 // checked side (one candidate), each through ctx_guard_check with the batch's
 // index plan (exact limit 0) and through the exact statement (default limit).
 // In each cell the batch first checks the block written first, alone in its
 // tenant's circle, then the second one against it; the verdict is read from
-// the audit log and the block. The exact statement answers clean in every
-// cell. ctx_guard_check answers clean on the candidate side (the HNSW index
-// holds no zero-norm vector) and near_duplicate at NaN on the checked side,
-// which archives the checked block: the named exception, a defect of the
-// function, which the exact statement does not copy.
+// the audit log and the block. Every cell answers clean: the HNSW index holds
+// no zero-norm vector, and a nearest candidate at NaN counts as none on both
+// routes (before migration 188 the function answered near_duplicate at NaN on
+// the checked side and archived the checked block).
 func TestGuardZeroNormVector(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -647,15 +648,10 @@ func TestGuardZeroNormVector(t *testing.T) {
 					if (path == "exact") != (p.exactChecks == 1) || p.exactChecks+p.indexChecks != 1 {
 						t.Fatalf("route: %d exact and %d index checks for the %s path", p.exactChecks, p.indexChecks, path)
 					}
-					want := clean
-					if path == "function" && side == "checked" {
-						// The named exception (see the doc comment).
-						want = epVerdict{decision: "near_duplicate", sim: "NaN", matched: firstID, status: "archived_dup", archived: true}
-					}
 					got := epVerdictOf(t, pool, id)
 					t.Logf("%s/%s/%s: %+v", f.name, side, path, got)
-					if got != want {
-						t.Errorf("verdict %+v, want %+v", got, want)
+					if got != clean {
+						t.Errorf("verdict %+v, want %+v", got, clean)
 					}
 				})
 			}
