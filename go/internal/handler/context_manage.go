@@ -658,7 +658,7 @@ func (h *ManageHandler) updateClaimReject(ctx context.Context, data store.Update
 	if h.blocktypes != nil {
 		set = h.blocktypes.SnapshotForRequest(ctx)
 	}
-	return claimReject(set, strOrEmpty(data.Category), strOrEmpty(data.Type), "", data.Metadata)
+	return claimReject(set, strOrEmpty(data.Category), strOrEmpty(data.Type), "", updateMetadataClaim(data.Metadata, data.MetadataMerge))
 }
 
 // writeUpdateFailure renders a failed by-id block write on the manage surface
@@ -704,6 +704,16 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		slog.Warn("manage: invalid update data", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"success": false, "error": "Invalid data format",
+		})
+		return
+	}
+
+	// Issue #406: the field combinations an update cannot mean (content beside
+	// edits, metadata beside metadata_merge, a malformed edit) — the 400 of a
+	// payload this action does not take, before anything is resolved.
+	if err := store.CheckUpdatePatch(data); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false, "error": err.Error(),
 		})
 		return
 	}

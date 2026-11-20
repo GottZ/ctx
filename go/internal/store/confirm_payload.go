@@ -101,6 +101,18 @@ type CanonicalWrite struct {
 	// its exact bytes and every payload_hash a client already holds stays
 	// confirmable.
 	Items []CanonicalWrite `json:"items,omitempty"`
+
+	// MetadataMerge (op 'update', issue #406) is the staged update's merge
+	// object, listed in UpdateFields as "metadata_merge": a key with a value is
+	// set, a key with null removed. It stays a merge — the confirm merges it into
+	// the metadata as it is then — because a server-side writer may set a key
+	// without moving updated_at (a guard pass does), which the BaseUpdatedAt pin
+	// cannot see and a stage-time replacement object would write back away. An
+	// update's edits, by contrast, are staged as the Content they resolve to.
+	// LAST field and omitempty, so every canonicalization written before it
+	// keeps its exact bytes and every payload_hash a client already holds stays
+	// confirmable.
+	MetadataMerge map[string]any `json:"metadata_merge,omitempty"`
 }
 
 // OpStoreBatch is the sixth staged op (issue #211): an all-or-none batch of

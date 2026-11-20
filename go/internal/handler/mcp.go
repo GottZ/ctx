@@ -348,7 +348,7 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 	// `type` since issue #203 (mcp_update.go).
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "update",
-		Description: "Update fields of an existing block (category, title, content, tags, metadata, type). Resolves the id within this key's writable scopes. A new type is checked against the block-type registry like the store tool's and kept as a manual choice; leaving a type marked untrusted records that type on the block as untrusted_origin, and a comment or an issue keeps its type.",
+		Description: "Update fields of an existing block (category, title, content, tags, metadata, type). To change part of the content, send edits (exact old → new replacements) instead of content; to add or remove metadata keys, send metadata_merge instead of metadata. Resolves the id within this key's writable scopes. A new type is checked against the block-type registry like the store tool's and kept as a manual choice; leaving a type marked untrusted records that type on the block as untrusted_origin, and a comment or an issue keeps its type.",
 	}, mcpUpdateHandler(cfg))
 
 	// archive (#201): manage-delete parity — archives one block the key may

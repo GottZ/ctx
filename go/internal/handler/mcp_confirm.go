@@ -222,8 +222,8 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 			return errResultReject(out.Reject), nil, nil
 		case confirmTOCTOUGone:
 			return errResult(confirmTOCTOUGoneMsg(out.Op)), nil, nil
-		case confirmTOCTOUDrift:
-			return errResult(confirmTOCTOUDriftMsg(out.Op, out.BlockID)), nil, nil
+		case confirmTOCTOUDrift, confirmExecDrift:
+			return errResult(out.driftMsg()), nil, nil
 		case confirmBlockRefGone:
 			return errResult(confirmBlockRefGoneMsg), nil, nil
 		case confirmUnreadable:

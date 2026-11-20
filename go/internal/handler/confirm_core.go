@@ -80,6 +80,13 @@ const (
 	// collisions but not for one that lands between probe and statement, and
 	// the remedy (another category or title) is a new payload either way.
 	confirmExecRejected
+	// confirmExecDrift — the token IS consumed and the execute found the
+	// block at another updated_at than the card bound (issue #406): a writer
+	// whose transaction was still open when the drift check read the block
+	// committed before the statement could write. The statement carries the
+	// card's base as a pin (store.UpdateBlockData.ExpectUpdatedAt) and wrote
+	// nothing; Outcome.BlockID carries the target id.
+	confirmExecDrift
 )
 
 // confirmOutcome is the typed result of executeConfirm.
@@ -171,7 +178,7 @@ func confirmClaimReject(ctx context.Context, blocktypes *blocktype.Registry, cw 
 	if blocktypes != nil {
 		set = blocktypes.SnapshotForRequest(ctx)
 	}
-	return claimReject(set, cw.Category, cw.Type, "", cw.Metadata)
+	return claimReject(set, cw.Category, cw.Type, "", updateMetadataClaim(cw.Metadata, cw.MetadataMerge))
 }
 
 // confirmDriftReject is the D1-M3 re-check of the by-id block ops ('update',
@@ -302,7 +309,20 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 
 	if cw.Op == "update" {
 		data := updateDataFromCanonical(cw)
+		// The drift check above read without a lock; the pin makes the
+		// statement itself refuse a row that moved since (issue #406), so a
+		// staged content — an edit list resolved at stage time included — never
+		// overwrites a change it did not see.
+		base, err := time.Parse(time.RFC3339Nano, cw.BaseUpdatedAt)
+		if err != nil {
+			slog.Error("confirm: staged update base unreadable", "error", err, "pending_id", pw.ID)
+			return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
+		}
+		data.ExpectUpdatedAt = &base
 		block, _, err := store.UpdateBlock(ctx, pool, cw.ID, data, writableBlockScopes(ar))
+		if errors.Is(err, store.ErrBlockChanged) {
+			return confirmOutcome{Kind: confirmExecDrift, Op: cw.Op, BlockID: cw.ID}
+		}
 		if rej := updateFailureReject(err); rej != nil {
 			// The caller's input, not a fault: no ERROR line (#227, #280).
 			return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmIdentityTakenPrefix)}
@@ -486,6 +506,18 @@ func confirmTOCTOUGoneMsg(op string) string {
 	return fmt.Sprintf(
 		"confirm rejected: the target block no longer exists in a writable scope — the staged %s stays pending until it expires",
 		confirmBlockOpNoun(op))
+}
+
+// driftMsg is the wording of a drift refusal: before the consume
+// (confirmTOCTOUDrift) the stage stays, after it (confirmExecDrift, issue
+// #406) the message says the token is spent. Both surfaces answer it with the
+// status the drift has always had (409 on REST).
+func (o confirmOutcome) driftMsg() string {
+	if o.Kind == confirmExecDrift {
+		return confirmIdentityTakenPrefix + fmt.Sprintf(
+			"block %s changed while this update was confirmed (lost-update protection) — re-read the block and stage the update again", o.BlockID)
+	}
+	return confirmTOCTOUDriftMsg(o.Op, o.BlockID)
 }
 
 func confirmTOCTOUDriftMsg(op, blockID string) string {
