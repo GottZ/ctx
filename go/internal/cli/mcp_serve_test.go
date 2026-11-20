@@ -7,10 +7,13 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -229,6 +232,60 @@ func TestMCPServeMissingConfigNamesTheCause(t *testing.T) {
 		if !res.IsError || !strings.Contains(text, cfgErr.Error()) {
 			t.Errorf("call answered isError=%v %q, want the configuration error", res.IsError, text)
 		}
+	}
+}
+
+// TestMCPServeReconnectsAfterABrokenSession: an answer the SDK client treats
+// as fatal for its connection (a 500 without a JSON-RPC body) is answered with
+// the cause, and the next call opens a new session instead of failing for the
+// rest of the process. The upstream also requires the key header.
+func TestMCPServeReconnectsAfterABrokenSession(t *testing.T) {
+	up := mcp.NewServer(&mcp.Implementation{Name: "upstream", Version: "0"}, nil)
+	type echoIn struct {
+		Content string `json:"content"`
+	}
+	mcp.AddTool(up, &mcp.Tool{Name: "echo", Description: "echo the content"},
+		func(_ context.Context, _ *mcp.CallToolRequest, in echoIn) (*mcp.CallToolResult, any, error) {
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: in.Content}}}, nil, nil
+		})
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return up },
+		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	var failNext atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Context-Key") != mcpServeFixtureKey {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		if failNext.CompareAndSwap(true, false) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		h.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	p, err := NewMCPProxy(Config{BaseURL: srv.URL, Key: mcpServeFixtureKey}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := connectProxy(t, p)
+	echo := func() *mcp.CallToolResult {
+		t.Helper()
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"content": "hi"}})
+		if err != nil {
+			t.Fatalf("echo: %v", err)
+		}
+		return res
+	}
+	if res := echo(); res.IsError || res.Content[0].(*mcp.TextContent).Text != "hi" {
+		t.Fatalf("echo before the failure: %+v", res)
+	}
+	failNext.Store(true)
+	res := echo()
+	if text := res.Content[0].(*mcp.TextContent).Text; !res.IsError || !strings.Contains(text, "cannot use the server at "+srv.URL+"/mcp") {
+		t.Errorf("echo on a 500 answered isError=%v %q", res.IsError, text)
+	}
+	if res := echo(); res.IsError || res.Content[0].(*mcp.TextContent).Text != "hi" {
+		t.Errorf("echo after the failure answered %+v, want the proxy to reconnect", res.Content[0])
 	}
 }
 
