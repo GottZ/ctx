@@ -235,12 +235,14 @@ func TestMCPServeMissingConfigNamesTheCause(t *testing.T) {
 	}
 }
 
-// TestMCPServeReconnectsAfterABrokenSession: an answer the SDK client treats
-// as fatal for its connection (a 500 without a JSON-RPC body) is answered with
-// the cause, and the next call opens a new session instead of failing for the
-// rest of the process. The upstream also requires the key header.
-func TestMCPServeReconnectsAfterABrokenSession(t *testing.T) {
-	up := mcp.NewServer(&mcp.Implementation{Name: "upstream", Version: "0"}, nil)
+const upstreamInstructions = "upstream instructions"
+
+// newUpstream is a stateless SDK server with one tool, echo, behind a handler
+// that requires the key header and answers the request after failNext was set
+// with a 403 a proxy in front could send (no JSON-RPC body).
+func newUpstream(t *testing.T, failNext *atomic.Bool) *httptest.Server {
+	t.Helper()
+	up := mcp.NewServer(&mcp.Implementation{Name: "upstream", Version: "0"}, &mcp.ServerOptions{Instructions: upstreamInstructions})
 	type echoIn struct {
 		Content string `json:"content"`
 	}
@@ -250,19 +252,59 @@ func TestMCPServeReconnectsAfterABrokenSession(t *testing.T) {
 		})
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return up },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
-	var failNext atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Context-Key") != mcpServeFixtureKey {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 		if failNext.CompareAndSwap(true, false) {
-			http.Error(w, "boom", http.StatusInternalServerError)
+			http.Error(w, "forbidden by a proxy", http.StatusForbidden)
 			return
 		}
 		h.ServeHTTP(w, r)
 	}))
 	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestMCPServeMirrorsInstructions: the server's instructions reach the local
+// client through initialize (the handshake of protocol versions up to
+// 2025-11-25, which clients such as Claude Code speak) and through
+// server/discover (2026-07-28, the SDK client's default).
+func TestMCPServeMirrorsInstructions(t *testing.T) {
+	var never atomic.Bool
+	srv := newUpstream(t, &never)
+	for _, version := range []string{"2025-11-25", ""} {
+		p, err := NewMCPProxy(Config{BaseURL: srv.URL, Key: mcpServeFixtureKey}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, ct := mcp.NewInMemoryTransports()
+		ss, err := p.Server().Connect(context.Background(), st, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(context.Background(), ct,
+			&mcp.ClientSessionOptions{ProtocolVersion: version})
+		if err != nil {
+			t.Fatalf("connect (protocol %q): %v", version, err)
+		}
+		if got := cs.InitializeResult().Instructions; got != upstreamInstructions {
+			t.Errorf("protocol %q: instructions = %q, want the server's %q", version, got, upstreamInstructions)
+		}
+		_ = cs.Close()
+		_ = ss.Close()
+		_ = p.Close()
+	}
+}
+
+// TestMCPServeReconnectsAfterABrokenSession: an answer the SDK client treats
+// as fatal for its connection (a 403 without a JSON-RPC body; a 500 the SDK
+// v1.8.0 takes as transient) is answered with the cause, and the next call
+// opens a new session instead of failing for the rest of the process.
+func TestMCPServeReconnectsAfterABrokenSession(t *testing.T) {
+	var failNext atomic.Bool
+	srv := newUpstream(t, &failNext)
 	p, err := NewMCPProxy(Config{BaseURL: srv.URL, Key: mcpServeFixtureKey}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -282,7 +324,7 @@ func TestMCPServeReconnectsAfterABrokenSession(t *testing.T) {
 	failNext.Store(true)
 	res := echo()
 	if text := res.Content[0].(*mcp.TextContent).Text; !res.IsError || !strings.Contains(text, "cannot use the server at "+srv.URL+"/mcp") {
-		t.Errorf("echo on a 500 answered isError=%v %q", res.IsError, text)
+		t.Errorf("echo on a 403 answered isError=%v %q", res.IsError, text)
 	}
 	if res := echo(); res.IsError || res.Content[0].(*mcp.TextContent).Text != "hi" {
 		t.Errorf("echo after the failure answered %+v, want the proxy to reconnect", res.Content[0])
