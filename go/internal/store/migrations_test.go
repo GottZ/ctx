@@ -73,8 +73,8 @@ func TestMigrationVersionsUnique(t *testing.T) {
 	}
 }
 
-// migrations.go has no pure functions — RunMigrations depends on pgxpool and
-// the embedded filesystem. The parsing/sorting logic is inline within RunMigrations.
+// The parsing/sorting logic of migrations.go is inline within runMigrations,
+// which depends on pgxpool and a filesystem of migration files.
 //
 // The migration version extraction logic:
 //   parts := strings.SplitN(name, "_", 2)
