@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -28,6 +29,8 @@ type fakeGitHub struct {
 	link     func(next string) []string
 	etags    bool
 
+	commentPages atomic.Int64 // comment-listing requests served
+
 	mu     sync.Mutex
 	issues []fakeIssue
 }
@@ -35,6 +38,7 @@ type fakeGitHub struct {
 type fakeIssue struct {
 	Number  int64
 	Updated time.Time
+	PR      bool // listed with a pull_request field, as GitHub lists pull requests
 }
 
 func newFakeGitHub(t *testing.T, pageSize int, link func(next string) []string, issues ...fakeIssue) *fakeGitHub {
@@ -52,6 +56,7 @@ func (f *fakeGitHub) repo() RepoRef { return RepoRef{Owner: "o", Repo: "r", APIB
 
 func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/repos/o/r/issues/comments" {
+		f.commentPages.Add(1)
 		_, _ = w.Write([]byte(`[]`))
 		return
 	}
@@ -104,10 +109,14 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]map[string]any, 0, hi-lo)
 	for _, it := range match[lo:hi] {
-		items = append(items, map[string]any{
+		item := map[string]any{
 			"number": it.Number, "title": "issue " + strconv.FormatInt(it.Number, 10),
 			"body": "", "state": "open", "updated_at": it.Updated.UTC().Format(time.RFC3339),
-		})
+		}
+		if it.PR {
+			item["pull_request"] = map[string]any{"url": "https://example.com/pulls/" + strconv.FormatInt(it.Number, 10)}
+		}
+		items = append(items, item)
 	}
 	body, _ := json.Marshal(items)
 	if f.etags {

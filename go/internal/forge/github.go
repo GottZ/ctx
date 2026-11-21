@@ -406,6 +406,9 @@ func (c *githubClient) fetchIssues(ctx context.Context, url, etag string) (Issue
 		Issues:  make([]IssueRemote, 0, len(items)),
 	}
 	for _, it := range items {
+		if it.UpdatedAt.After(page.Listed) {
+			page.Listed = it.UpdatedAt
+		}
 		if it.PullRequest != nil { // PR, not an issue — drop it (§4.5.1)
 			page.PRsSkipped++
 			continue

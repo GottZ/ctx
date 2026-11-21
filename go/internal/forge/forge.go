@@ -77,6 +77,10 @@ type IssuePage struct {
 	ETag       string
 	NextURL    string
 	PRsSkipped int
+	// Listed is the newest updated_at of every entry the page listed, the
+	// pull requests dropped from Issues included: the since cursor follows
+	// the listing, not only what is applied (#474).
+	Listed time.Time
 }
 
 // CommentRemote is the forge projection of one issue comment (pre-apply).

@@ -263,3 +263,71 @@ func TestSyncETagOnlyForAWholeListing(t *testing.T) {
 		}
 	})
 }
+
+// #474 R10: the issue listing returns pull requests too, sorted by
+// updated_at like the issues, and the client drops them before apply. A
+// page of pull requests only committed no since, so a run that met the page
+// bound inside a prefix of pull requests left the cursor where it was: the
+// next run read the same prefix, and the issue import never moved on. The
+// comment leg of such a run did not start either. The cursor follows every
+// listed entry now, pull requests included, and the comment leg runs after
+// an issue leg that only met the bound; last_error still names the bound.
+func TestSyncBoundDoesNotStallOnPullRequests(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var items []fakeIssue
+	for i := int64(1); i <= 8; i++ { // eight pull requests updated before any issue
+		items = append(items, fakeIssue{Number: i, Updated: t0.Add(time.Duration(i) * time.Minute), PR: true})
+	}
+	items = append(items, fakeIssue{Number: 9, Updated: t0.Add(9 * time.Minute)}, fakeIssue{Number: 10, Updated: t0.Add(10 * time.Minute)})
+
+	gh := newFakeGitHub(t, 2, quotedNext, items...)
+	proj := seedIFProject(t, pool, "p474prs")
+	if _, err := pool.Exec(context.Background(), `UPDATE context_projects SET forge = $2::jsonb WHERE id = $1::uuid`,
+		proj.ID, `{"kind":"github","owner":"o","repo":"r","api_base":"`+gh.srv.URL+`"}`); err != nil {
+		t.Fatal(err)
+	}
+	ap := applierWithRegistry(pool)
+	m := mgr(pool, okTenant, okPolicy, &githubClient{http: gh.srv.Client()}, ap.ApplyIssues)
+	m.applyComments = ap.ApplyComments
+	m.pageBound = 3 // three pages of two: the bound falls inside the pull requests
+
+	run := func() (SyncStatus, store.ProjectRow) {
+		p, err := store.GetProjectByID(context.Background(), pool, proj.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.StartSync(context.Background(), *p, false); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		st := waitDone(t, m, proj.ID)
+		got, _ := store.GetProjectByID(context.Background(), pool, proj.ID)
+		return st, *got
+	}
+	mapped := func() int {
+		var n int
+		if err := pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM context_project_sync_map WHERE project_id = $1::uuid AND entity_kind = 'issue'`, proj.ID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	st, got := run()
+	if got.LastError == nil || !strings.Contains(*got.LastError, "pages in one run") {
+		t.Fatalf("run 1: last_error %v; want the page bound named", got.LastError)
+	}
+	if _, since, _ := readCursor(got.SyncCursor); !since.Equal(t0.Add(6 * time.Minute)) {
+		t.Fatalf("run 1: issue cursor since %v; want %v, the newest pull request read", since, t0.Add(6*time.Minute))
+	}
+	if gh.commentPages.Load() == 0 {
+		t.Fatalf("run 1 (aborted %v): the comment leg did not run after an issue leg that only met the bound", st.Aborted)
+	}
+	_, got = run()
+	if n := mapped(); n != 2 || got.SyncStatus != "idle" {
+		t.Fatalf("run 2: %d issues mapped, sync_status %q, last_error %v; want both issues and idle", n, got.SyncStatus, got.LastError)
+	}
+}
