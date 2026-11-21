@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GottZ/ctx/internal/clientkey"
 	"github.com/GottZ/ctx/internal/llm"
 )
 
@@ -402,6 +403,13 @@ func (c *caller) runCase(ctx context.Context, run *caseRun, reqs []ChatRequest) 
 			}
 			res, err := c.client.ChatWithUsage(ctx, sreq)
 			c.st.record(res)
+			if errors.As(err, new(*clientkey.Refusal)) {
+				// A refused redirect, of any sample: the configuration of
+				// -endpoint, which every call meets. executeJobs stops the
+				// run on it (#446).
+				run.callErr = err
+				return
+			}
 			u := CallUsage{
 				Prompt: res.PromptTokens, Completion: res.CompletionTokens, Reasoning: res.ReasoningTokens,
 				Finish: res.FinishReason, ThinkStripped: res.ThinkStripped,
@@ -451,7 +459,11 @@ func (c *caller) runCase(ctx context.Context, run *caseRun, reqs []ChatRequest) 
 
 // executeJobs fährt die LLM-Calls nebenläufig über einen Worker-Pool.
 // Transport-Fehler landen im caseRun (der Fall scored 0), sie brechen den
-// Lauf nicht ab — abgesehen von Context-Cancel.
+// Lauf nicht ab — abgesehen von Context-Cancel und einer abgewiesenen
+// Weiterleitung (clientkey.Refusal): die ist die Konfiguration von -endpoint
+// und träfe jeden Fall; ihn mit 0 zu werten, gäbe einen falsch eingestellten
+// Endpoint als Modell mit Score 0 aus. Der Lauf endet mit ihr, wie bei
+// ctx-armsweep (#446).
 func executeJobs(parent context.Context, cfg Config, jobs []job, axisRuns map[string][]caseRun, sink *dumpAppender) error {
 	// Eigener Cancel-Scope: ein Schreibfehler des Append-Sinks (ENOSPC, EIO)
 	// stoppt den Lauf sofort — weiter gegen die GPU zu fahren, ohne zu
@@ -460,6 +472,8 @@ func executeJobs(parent context.Context, cfg Config, jobs []job, axisRuns map[st
 	defer cancel()
 	var sinkErr error
 	var sinkErrOnce sync.Once
+	var refusalErr error
+	var refusalOnce sync.Once
 	client := NewClient(cfg.Endpoint, cfg.Model, cfg.APIKey, cfg.Seed,
 		time.Duration(cfg.TimeoutSec)*time.Second)
 	if err := client.SetExtraBody(cfg.ExtraBody); err != nil {
@@ -488,6 +502,12 @@ func executeJobs(parent context.Context, cfg Config, jobs []job, axisRuns map[st
 			for j := range jobCh {
 				run := &axisRuns[j.axis][j.idx]
 				cl.runCase(ctx, run, j.reqs)
+				if errors.As(run.callErr, new(*clientkey.Refusal)) {
+					refusalOnce.Do(func() {
+						refusalErr = fmt.Errorf("goldbench: run abgebrochen: %s/%s: %w", j.axis, run.c.ID, run.callErr)
+						cancel()
+					})
+				}
 				// KW3: fertigen Fall sofort persistieren — nur VOLLSTÄNDIGE
 				// Fälle (kein Abbruch, kein Transport-Fehler): so holt der
 				// Resume Fehlschläge nach, statt sie als erledigt zu überspringen.
@@ -522,6 +542,9 @@ func executeJobs(parent context.Context, cfg Config, jobs []job, axisRuns map[st
 	}
 	if sinkErr != nil {
 		return sinkErr
+	}
+	if refusalErr != nil {
+		return refusalErr
 	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("goldbench: run abgebrochen: %w", err)

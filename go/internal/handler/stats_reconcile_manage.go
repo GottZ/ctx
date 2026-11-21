@@ -3,7 +3,6 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 
 	"github.com/GottZ/ctx/internal/store"
@@ -49,7 +48,7 @@ func (h *ManageHandler) handleStatsReconcile(w http.ResponseWriter, r *http.Requ
 	}
 	res, err := store.ReconcileBlockCounts(ctx, h.pool, spec.Scope)
 	if err != nil && res == nil {
-		slog.Error("manage: stats-reconcile error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: stats-reconcile error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -74,7 +73,7 @@ func (h *ManageHandler) handleStatsReconcile(w http.ResponseWriter, r *http.Requ
 	}
 	status := http.StatusOK
 	if err != nil {
-		slog.Error("manage: stats-reconcile incomplete", "error", err, "failed", len(res.Failed), "request_id", reqID)
+		logRequestError(ctx, "manage: stats-reconcile incomplete", "error", err, "failed", len(res.Failed), "request_id", reqID)
 		body["error"] = "reconcile failed for some scopes"
 		status = http.StatusInternalServerError
 	}

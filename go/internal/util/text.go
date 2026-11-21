@@ -61,8 +61,9 @@ func PrimaryLanguageSubtag(lang string) string {
 
 // MonthDE maps a lowercased German month name to its time.Month. "maerz" is
 // carried next to "märz" because the umlaut-less spelling is what a keyboard
-// without a German layout produces, and the extraction regexes upstream match
-// both.
+// without a German layout produces. The German month patterns of the date
+// extraction in internal/store are exactly these keys (pinned by its
+// TestMonthPatterns_AreTheTableKeys), so it matches both spellings.
 //
 // READ ONLY. Package-level maps cannot be const in Go; this one is shared by
 // the temporal rules of the LLM path and the date extraction of the store

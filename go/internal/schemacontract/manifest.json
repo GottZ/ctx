@@ -1,9 +1,9 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 188,
-    "migration_count": 76,
-    "migration_chain_sha256": "2fb42023d0cdecb02ca0bedb265d8d50a7424b674db06c42ddb76f1c2e7b351e",
+    "migration_max": 189,
+    "migration_count": 77,
+    "migration_chain_sha256": "d160b539b5c0af975725c69aafd4baeab6bbabc085728675e0eeb4841ee17915",
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -3792,6 +3792,23 @@
       ],
       "row_security": false
     },
+    "context_temporal_reviews": {
+      "columns": [
+        {
+          "name": "block_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "version",
+          "type": "bytea",
+          "not_null": true,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
     "context_tenant_grants": {
       "columns": [
         {
@@ -5320,6 +5337,9 @@
     "context_temporal_block_id_source_time_dimension_key": {
       "def_hash": "5b46345db185a90edd6918d08d6ff1c78b33c572f1e15acbb77f980d9c7edfc2"
     },
+    "context_temporal_reviews_pkey": {
+      "def_hash": "6b609e6b66434bef5dd745a912c5b9988d456328a8ec26322a466e4a5d8ef9a6"
+    },
     "context_tenant_grants_pkey": {
       "def_hash": "732c3fdbc2b6965170edbacf897f67ad9f2d141af5528a2f1d3726e677b6953a"
     },
@@ -5463,9 +5483,6 @@
     },
     "idx_blocks_dream_keywords_pending": {
       "def_hash": "96b81ec6793fb5c9a1ad34b52f78213f215af1bbcf93bf108118b0a48b80043e"
-    },
-    "idx_blocks_dream_temporal_pending": {
-      "def_hash": "69a2610cbcf0ae402349859dfc9ce4b5c1fce0c4c725405aec07200fb6eb1eb4"
     },
     "idx_blocks_embed_excluded": {
       "def_hash": "928f8b4ee5bec68fb51d5e7b6747d0ce772c542c03507a12163b45b29420fcf5"

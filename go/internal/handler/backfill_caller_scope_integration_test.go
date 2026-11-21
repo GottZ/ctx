@@ -16,8 +16,10 @@
 // (caller_block_first, newest_of_the_caller_first, arm_off_caller_first, the
 // two unservable_* ones) are red before the fix only when the unordered
 // LIMIT 1 returns another row than the one they want, and that follows the
-// physical row order: POST /api/store updates content_times after it has
-// answered, so the order of the heap need not be the order of the writes.
+// physical row order. Until issue #421 POST /api/store updated content_times
+// after it had answered, a second tuple version of the block that need not
+// keep the order of the writes; since then the write sets the column in its
+// own statement, and the heap holds the rows in the order of the writes.
 // arm_off_still_drains_everything passes before and after: it pins that the
 // path stays the embedder of last resort.
 //
@@ -181,8 +183,22 @@ func (f *bfsFixture) write(t *testing.T, keyCtx context.Context, title string) {
 }
 
 // writeAs is write with a named scope and sensitivity ("" leaves the field
-// out of the request).
+// out of the request). It returns when the handler has answered: the
+// temporal afterwork POST /api/store runs after that holds no lock on the
+// block row that the query path's failure memo needs (issue #421, see
+// write_tail_memo_integration_test.go).
 func (f *bfsFixture) writeAs(t *testing.T, keyCtx context.Context, title, scope, sens string) {
+	t.Helper()
+	f.post(t, keyCtx, title, scope, sens)
+	// Premise of every probe: the write path leaves the block pending.
+	if f.embedded(t, title) {
+		t.Fatalf("block %q carries a vector right after the write; the probes need it pending", title)
+	}
+}
+
+// post is the POST /api/store of writeAs, returning the written block's id
+// as soon as the handler answered.
+func (f *bfsFixture) post(t *testing.T, keyCtx context.Context, title, scope, sens string) string {
 	t.Helper()
 	body := map[string]any{
 		"category": "test", "title": title,
@@ -201,10 +217,15 @@ func (f *bfsFixture) writeAs(t *testing.T, keyCtx context.Context, title, scope,
 	if rec.Code != http.StatusOK {
 		t.Fatalf("store %q: status %d, body %s", title, rec.Code, rec.Body.String())
 	}
-	// Premise of every probe: the write path leaves the block pending.
-	if f.embedded(t, title) {
-		t.Fatalf("block %q carries a vector right after the write; the probes need it pending", title)
+	var answer struct {
+		Block struct {
+			ID string `json:"id"`
+		} `json:"block"`
 	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &answer); err != nil || answer.Block.ID == "" {
+		t.Fatalf("store %q: no block id in the answer %s (%v)", title, rec.Body.String(), err)
+	}
+	return answer.Block.ID
 }
 
 // query runs one POST /api/query as the caller, with the given inline cap and

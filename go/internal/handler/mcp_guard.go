@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -63,7 +62,7 @@ func mcpGuardListHandler(cfg MCPConfig) mcp.ToolHandlerFor[guardListInput, any] 
 		}
 		items, err := store.GuardList(ctx, cfg.Pool, ar.ReadScopes, input.Category, input.Status, input.Types, limit)
 		if err != nil {
-			slog.Error("mcp: guard_list error", "error", err)
+			logRequestError(ctx, "mcp: guard_list error", "error", err)
 			return errResult("guard_list failed: internal error"), nil, nil
 		}
 		// JSON payload, REST field parity (GuardListItem json tags).
@@ -104,7 +103,7 @@ func mcpGuardResolveHandler(cfg MCPConfig) mcp.ToolHandlerFor[guardResolveInput,
 
 		resolved, skipped, err := store.GuardResolveBatch(ctx, cfg.Pool, input.IDs, input.Resolution, writableBlockScopes(ar))
 		if err != nil {
-			slog.Error("mcp: guard_resolve error", "error", err)
+			logRequestError(ctx, "mcp: guard_resolve error", "error", err)
 			return errResult("guard_resolve failed: internal error"), nil, nil
 		}
 		body, err := json.Marshal(map[string]any{

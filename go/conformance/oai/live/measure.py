@@ -65,10 +65,12 @@ import json
 import math
 import os
 import ssl
+import string
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -96,6 +98,66 @@ def _ssl_context() -> ssl.SSLContext | None:
     return None
 
 
+_DEFAULT_PORTS = {"http": "80", "https": "443"}
+_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def _origin(url: str) -> tuple[str, str, str]:
+    """Scheme, host and port of url as internal/clientkey compares them (#432):
+    scheme and host folded in the ASCII range only — a non-ASCII host compares
+    exactly, a refusal is the safe side — an IPv6 zone as written, the
+    scheme's default port filled in, userinfo not part of it."""
+    parts = urllib.parse.urlsplit(url)
+    hostport = parts.netloc.rpartition("@")[2]
+    if hostport.startswith("["):
+        host, _, rest = hostport[1:].partition("]")
+        port = rest[1:]
+    else:
+        host, _, port = hostport.partition(":")
+    host, pct, zone = host.partition("%")
+    scheme = parts.scheme.translate(_ASCII_LOWER)
+    return scheme, host.translate(_ASCII_LOWER) + pct + zone, port or _DEFAULT_PORTS.get(scheme, "")
+
+
+def _written(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}"
+
+
+class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only within the origin of the request — every request
+    starts at --base-url — the rule of the ctx CLI's key (internal/clientkey,
+    #432). urllib's own handler copies every request header to any Location:
+    the admin key's X-Context-Key and the model key's Authorization with it.
+    A redirect anywhere else is refused before it is sent."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _origin(newurl) != _origin(req.full_url):
+            fp.close()
+            raise urllib.error.URLError(
+                f"refused a redirect (HTTP {code}) to {_written(newurl)}: measure.py sends its keys only to the origin "
+                f"of --base-url, {_written(req.full_url)}, and follows a redirect only within it")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER: urllib.request.OpenerDirector | None = None
+
+
+def _open(req: urllib.request.Request, timeout: float):
+    """urllib.request.urlopen with _SameOriginRedirect as the redirect handler.
+    The opener is built once, as urlopen builds its own: building one loads
+    the CA store (about 6 ms, which stream_chat would otherwise count into
+    first_byte_s and prefill_s)."""
+    global _OPENER
+    if _OPENER is None:
+        handlers = [_SameOriginRedirect]
+        ctx = _ssl_context()
+        if ctx is not None:
+            handlers.append(urllib.request.HTTPSHandler(context=ctx))
+        _OPENER = urllib.request.build_opener(*handlers)
+    return _OPENER.open(req, timeout=timeout)
+
+
 def _request(method: str, url: str, body=None, headers=None):
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, method=method, headers=dict(headers or {}))
@@ -106,7 +168,7 @@ def _request(method: str, url: str, body=None, headers=None):
 
 def http(method: str, url: str, body=None, headers=None, timeout: float = TIMEOUT_S):
     try:
-        with urllib.request.urlopen(_request(method, url, body, headers), timeout=timeout, context=_ssl_context()) as r:
+        with _open(_request(method, url, body, headers), timeout) as r:
             return r.status, r.headers, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.headers, e.read()
@@ -199,7 +261,7 @@ def stream_chat(base_url: str, key: str, model: str, prompt: str, max_tokens: in
     t0 = time.monotonic()
     out = {"status": None, "first_byte_s": None, "prefill_s": None, "total_s": None, "done": False, "error": None}
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_S, context=_ssl_context()) as r:
+        with _open(req, TIMEOUT_S) as r:
             out["status"] = r.status
             out["first_byte_s"] = time.monotonic() - t0
             for line in r:

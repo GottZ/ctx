@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 
 	"github.com/GottZ/ctx/internal/store"
@@ -36,7 +35,7 @@ func rateLimitBlocked(w http.ResponseWriter, ctx context.Context, pool *pgxpool.
 	}
 	count, err := store.CheckRateLimitByAction(ctx, pool, apiKeyID, bucket)
 	if err != nil {
-		slog.Error(logMsg, "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, logMsg, "error", err, "request_id", RequestIDFromContext(ctx))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 		return true
 	}

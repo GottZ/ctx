@@ -111,7 +111,7 @@ func (h *WebhookGitHubHandler) HandleWebhook(w http.ResponseWriter, r *http.Requ
 	projectID := chi.URLParam(r, "project_id")
 	row, err := store.GetProjectByID(ctx, h.pool, projectID)
 	if err != nil {
-		slog.Error("webhook: project lookup", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "webhook: project lookup", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -141,7 +141,7 @@ func (h *WebhookGitHubHandler) HandleWebhook(w http.ResponseWriter, r *http.Requ
 	if limit > 0 {
 		count, err := store.CountWebhookEventsSince(ctx, h.pool, row.ID, webhookRateWindow)
 		if err != nil {
-			slog.Error("webhook: rate count", "error", err, "request_id", RequestIDFromContext(ctx))
+			logRequestError(ctx, "webhook: rate count", "error", err, "request_id", RequestIDFromContext(ctx))
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 			return
 		}
@@ -167,7 +167,7 @@ func (h *WebhookGitHubHandler) HandleWebhook(w http.ResponseWriter, r *http.Requ
 	}
 	event := strings.TrimSpace(r.Header.Get("X-GitHub-Event"))
 	if _, err := store.InsertWebhookEvent(ctx, h.pool, row.ID, delivery, event, body); err != nil {
-		slog.Error("webhook: insert", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "webhook: insert", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}

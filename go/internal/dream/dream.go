@@ -167,8 +167,11 @@ type BlockInfo struct {
 	Embedding                []float32
 	UpdatedAt                time.Time
 	CreatedAt                time.Time
-	DreamKeywords            []string   // nil when not yet generated — RunDreamCycle will invoke the LLM
-	DreamTemporalValidatedAt *time.Time // nil = never validated; UpdatedAt > this = re-validate
+	DreamKeywords            []string // nil when not yet generated — RunDreamCycle will invoke the LLM
+	// TemporalDue reports that the temporal review has not reviewed the
+	// title and content the pick read (store.TemporalReviewDueCol, issue
+	// #452); PickBlock answers it on the row it hands out.
+	TemporalDue bool
 }
 
 // CycleTimeout is the maximum duration for a single dream cycle.
@@ -314,23 +317,27 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 	)
 
 	// Step 1b: Validate temporal dimensions (deterministic + LLM).
-	// Once per block-version: if dream_temporal_validated_at is NULL or older than
-	// block.updated_at, run validation and mark it done. Repeated cooldown-rechecks
-	// of unchanged blocks skip this step — context_temporal already holds findings.
-	needsTemporal := block.DreamTemporalValidatedAt == nil ||
-		block.UpdatedAt.After(*block.DreamTemporalValidatedAt)
-	if needsTemporal {
-		if err := ValidateTemporal(ctx, pool, r, opts, block); err != nil {
-			slog.Warn("dream: temporal validation failed (non-fatal)", "block_id", block.ID, "error", err)
-		}
-		// Mark validated even on non-fatal LLM failure — Phase 1 (deterministic)
-		// always ran and produced baseline findings. Next block-update will re-trigger.
-		if _, err := pool.Exec(ctx,
-			`UPDATE context_blocks SET dream_temporal_validated_at = now() WHERE id = $1`,
-			block.ID,
-		); err != nil {
-			slog.Warn("dream: temporal validation marker failed (non-fatal)",
-				"block_id", block.ID, "error", err)
+	// Once per version of the block — the title and content the review reads
+	// (issue #452): the pick answers TemporalDue for the row it hands out, and
+	// the review writes the version it reviewed with its rows, only while the
+	// block holds it (store.PopulateTemporalReview). Repeated cooldown-rechecks
+	// of an unchanged block skip this step, and so do writes of tags or
+	// metadata — context_temporal already holds the review's findings.
+	//
+	// A review that failed — on the database, in its LLM call, or with an
+	// answer that does not parse — wrote no version, and one whose write
+	// found the block changed (dropped) wrote none either: the block stays
+	// due and its next pick reviews it again. What bounds such a block
+	// is the pick's claim and the cooldown the cycle ends with, not the
+	// review: the pick does not select by due-ness.
+	if block.TemporalDue {
+		dropped, err := ValidateTemporal(ctx, pool, r, opts, block)
+		switch {
+		case err != nil:
+			slog.Warn("dream: temporal validation failed (non-fatal), the block stays due", "block_id", block.ID, "error", err)
+		case dropped:
+			slog.Info("dream: temporal validation not recorded — the block's title or content changed since the pick, or it is gone",
+				"block_id", block.ID)
 		}
 	}
 
@@ -654,24 +661,10 @@ func PickBlock(ctx context.Context, pool *pgxpool.Pool, linkable []string, scope
 	// claim itself — a cycle deadline is a seconds-grained knob.
 	args := []any{int(math.Ceil(claim.Seconds())), linkable}
 	if len(scopes) > 0 {
-		scopeConjunct = "\n\t\t\t  AND scope = ANY($3::text[])"
+		scopeConjunct = pickScopeConjunct
 		args = append(args, scopes)
 	}
-	err := pool.QueryRow(ctx,
-		`UPDATE context_blocks
-		SET dream_cooldown_until = now() + ($1 * interval '1 second')
-		WHERE id = (
-			SELECT id FROM context_blocks
-			WHERE `+dreamEligibleWhere("$2")+`
-			  AND embedding IS NOT NULL
-			  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now())`+scopeConjunct+`
-			ORDER BY dream_checked_at ASC NULLS FIRST, quality_score ASC
-			LIMIT 1
-			FOR UPDATE SKIP LOCKED
-		)
-		RETURNING id, title, category, content, scope, sensitivity, quality_score, updated_at, created_at, dream_keywords, dream_temporal_validated_at`,
-		args...,
-	).Scan(&block.ID, &block.Title, &block.Category, &block.Content, &block.Scope, &block.Sensitivity, &block.QualityScore, &block.UpdatedAt, &block.CreatedAt, &block.DreamKeywords, &block.DreamTemporalValidatedAt)
+	err := pool.QueryRow(ctx, pickBlockSQL(scopeConjunct), args...).Scan(&block.ID, &block.Title, &block.Category, &block.Content, &block.Scope, &block.Sensitivity, &block.QualityScore, &block.UpdatedAt, &block.CreatedAt, &block.DreamKeywords, &block.TemporalDue)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -680,6 +673,29 @@ func PickBlock(ctx context.Context, pool *pgxpool.Pool, linkable []string, scope
 		return nil, fmt.Errorf("pick block: %w", err)
 	}
 	return &block, nil
+}
+
+// pickScopeConjunct binds PickBlock's pick to the scopes $3.
+const pickScopeConjunct = "\n\t\t\t  AND scope = ANY($3::text[])"
+
+// pickBlockSQL is PickBlock's statement, with scopeConjunct ("" or
+// pickScopeConjunct) in the pick's WHERE. RETURNING answers, for the row it
+// claimed, whether the temporal review is due (store.TemporalReviewDueCol,
+// issue #452): one primary-key read of context_temporal_reviews per pick.
+func pickBlockSQL(scopeConjunct string) string {
+	return `UPDATE context_blocks
+		SET dream_cooldown_until = now() + ($1 * interval '1 second')
+		WHERE id = (
+			SELECT id FROM context_blocks
+			WHERE ` + dreamEligibleWhere("$2") + `
+			  AND embedding IS NOT NULL
+			  AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now())` + scopeConjunct + `
+			ORDER BY dream_checked_at ASC NULLS FIRST, quality_score ASC
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, title, category, content, scope, sensitivity, quality_score, updated_at, created_at, dream_keywords,
+			` + store.TemporalReviewDueCol
 }
 
 // BackoffConfig is the Dream re-dream back-off policy (Wave-2, W49c;

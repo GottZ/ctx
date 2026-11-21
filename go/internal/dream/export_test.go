@@ -40,3 +40,7 @@ func ReplaceStaleLinksForTest(ctx context.Context, tx pgx.Tx, sourceID string, k
 	_, err = store.ReconcileSupersedesTargets(ctx, tx, targets, sourceID)
 	return err
 }
+
+// PickBlockSQLForTest is PickBlock's statement bound to scopes ($3), for the
+// plan test of issue #452.
+var PickBlockSQLForTest = pickBlockSQL(pickScopeConjunct)

@@ -840,7 +840,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusTooManyRequests, rejectionBody())
 			return
 		}
-		slog.Error("embedding failed",
+		logRequestError(ctx, "embedding failed",
 			"error", err,
 			"request_id", requestID,
 		)
@@ -985,7 +985,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		results, selectorDec, err = rrf.Search(ctx, h.pool, embedding, searchQuery, querySpaced, ar.ReadScopes, reqFilter.Category, reqFilter.Tags, internalLimit, temporal, queryOR, visibleTypes, dampedTypes, dampedFactors, reqFilter.CategoriesExclude, reqFilter.TypesExclude, grantedBlockIDs, selectorPolicy)
 	}
 	if err != nil {
-		slog.Error("rrf search failed",
+		logRequestError(ctx, "rrf search failed",
 			"error", err,
 			"request_id", requestID,
 		)
@@ -1478,7 +1478,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	synthResult, err := llm.Synthesize(ctx, h.pool, h.backendPool, h.quota, cfg.SynthesisSettings(), querySens, originalQuery, sources, temporalDates, ar.ApiKeyID, ar.HomeScope, h.admission())
 	if err != nil {
-		slog.Error("synthesis failed",
+		logRequestError(ctx, "synthesis failed",
 			"error", err,
 			"request_id", requestID,
 		)

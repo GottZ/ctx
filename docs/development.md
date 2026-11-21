@@ -408,6 +408,25 @@ cd go && go build ./cmd/ctx-goldbench
   -out report.json -md report.md      # -dry-run validates the dataset without HTTP
 ```
 
+A chat call goes only to the origin of `-endpoint` (scheme, host and port), by the
+rule the ctx CLI holds `CTX_BASE_URL` to ([CLI reference](cli.md#cli-reference)) and
+through the same code (`internal/clientkey`), with an API key and without one; the key
+(`-api-key`, else `GOLDBENCH_API_KEY`) goes along as a bearer token. A redirect within
+that origin is followed; one anywhere else — an `http` → `https` upgrade on the same
+host included — is refused before it is sent, so neither the key nor the prompt leaves.
+The one exception is a proxy the environment names: with `HTTP_PROXY` set and an
+`http://` endpoint that is not loopback, the call goes to that proxy, key and prompt
+included (Go's `ProxyFromEnvironment`; set `NO_PROXY` for the host, or use `https://`,
+where the proxy relays only the encrypted tunnel).
+The refusal stops the run, as in `ctx-armsweep`: every call goes to the same endpoint
+and would be refused the same way, and scoring those cases 0 would report the
+endpoint's configuration as the model's score. The run exits 1 with the refusal, which
+names the case and the target (for an upgrade, also the `-endpoint` to use), and writes
+no report; cases a `-dump-append` file already holds stay there for the resume. An
+`-endpoint` without an `http` or `https` host fails every call before it is sent.
+Before, a call without a key followed a redirect to any host, with the prompt on a 307
+or 308, and a refused redirect scored its case 0 and counted in `transport_errors`.
+
 `parse_rate` is a first-class metric on every axis: a model that cannot serve ctx's
 output contracts is unfit for ctx regardless of content quality. Since metric v2
 (`metric_version` in the report env stamp) the keyword/tagging axes score a
@@ -648,7 +667,13 @@ these labels yet. `-kappa-min` has **no default** on purpose — a threshold nam
 after seeing the data describes the result instead of testing it. An endpoint
 that is not on-prem aborts the run before the first cell, on both axes the
 registry offers (declared locality and the actual host), and model, endpoint and
-prompt digest reach the stamp.
+prompt digest reach the stamp. Every chat call of the tool — the G-Q generator, the
+generators of the multi-gold slices and the judge — follows a redirect only within the
+origin (scheme, host and port) of the backend's `base_url` and refuses one anywhere else
+before it is sent (`internal/clientkey`), so a redirect cannot carry block content past
+the on-prem check; before, a 307 or 308 to any host was followed with the body. A proxy
+the environment names is the exception, as for `ctx-goldbench` above: with
+`HTTP_PROXY` set and an `http://` `base_url` that is not loopback, the call goes to it.
 
 **`-draw` / `-calibrate`: calibrating on the population that decides.** The
 control draws `judge -kappa` reads are, by construction, disjoint from the pooled
@@ -830,6 +855,19 @@ Five properties are enforced by the tool, not by discipline:
   the effective query texts and therefore live inside the gold directory at 0600
   under the same path guard, with `-allow-outside-goldset` as the only override
   and `allow_outside_goldset: true` in the report when it was used.
+
+The API key (`-api-key`, else `CTX_KEY` or the config file) goes only to the
+origin of `-base-url` (scheme, host and port), by the rule the ctx CLI holds
+`CTX_BASE_URL` to ([CLI reference](cli.md#cli-reference)) and through the same
+code (`internal/clientkey`). A redirect within that origin is followed; one
+anywhere else — an `http` → `https` upgrade on the same host included — is
+refused before it is sent, neither the key nor the query leaves, and the run
+fails naming the target (for an upgrade, also the `-base-url` to use). A base
+URL without an `http` or `https` host is refused before any request is sent.
+Both are configuration errors, not transport faults: no case is retried or
+excluded for them, and the run exits `1`. Before, the driver followed such a
+redirect with the key, and `prime` against an unusable base URL excluded every
+case and exited `0`.
 
 `V0` and `V0'` are the same configuration on two independent dumps: their
 disagreement is the instrument's noise floor. Gate **G-NOISE** (Recall@5

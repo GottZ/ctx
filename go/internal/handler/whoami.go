@@ -10,7 +10,6 @@ package handler
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -192,7 +191,7 @@ func (h *WhoamiHandler) HandleWhoami(w http.ResponseWriter, r *http.Request) {
 
 	id, err := h.identityByKeyID(r.Context(), ar.ApiKeyID)
 	if err != nil {
-		slog.Error("whoami: identity lookup failed",
+		logRequestError(r.Context(), "whoami: identity lookup failed",
 			"error", err,
 			"request_id", RequestIDFromContext(r.Context()),
 		)

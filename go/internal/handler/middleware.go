@@ -5,18 +5,22 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"regexp"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/modelkey"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -208,7 +212,9 @@ func RequestID(next http.Handler) http.Handler {
 	})
 }
 
-// responseWriter wraps http.ResponseWriter to capture the status code.
+// responseWriter wraps http.ResponseWriter to capture the status code and,
+// for the request log and the handlers' error lines, whether the request's
+// client went away (issue #417, clientGone).
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
@@ -216,6 +222,160 @@ type responseWriter struct {
 	// itself (the model groups' access log, W06-9), so Logger stays
 	// silent — a request is one line, not two.
 	logClaimed bool
+	// reqCtx is the request's own context as Logger received it: the one
+	// net/http cancels when the client closes the connection or a write to
+	// it fails. nil for a writer built outside Logger.
+	reqCtx context.Context
+	// serverDeadline: a write, a flush or a read of the request body failed
+	// on a deadline of the connection while reqCtx was still alive. net/http
+	// then cancels reqCtx exactly as for a client that left, but it was the
+	// server's own deadline (http.Server.WriteTimeout or ReadTimeout, a
+	// stream's SetWriteDeadline window) that ended the request. Atomic: a
+	// stream's heartbeat writes from a goroutine of its own.
+	serverDeadline atomic.Bool
+	// verdict is clientGone's answer, fixed by Logger when the handler
+	// returned (issue #453): net/http then cancels reqCtx with the same plain
+	// cancellation a client that leaves causes (server.go: w.cancelCtx after
+	// ServeHTTP), so a goroutine that outlives the handler asks the request's
+	// verdict, not reqCtx. verdictOpen while the handler runs.
+	verdict atomic.Int32
+	// start is when Logger received the request: the duration a client-gone
+	// line states (issue #453).
+	start time.Time
+	// waited names what the request waited for when its client gave up
+	// (waitNone, waitPool, waitAdmission): set by the pool's acquire tracer
+	// (NoteAbandonedAcquire) or by an error line whose failure is an
+	// abandoned admission wait. The server had no slot ready — such an
+	// abort is logged at WARN (issue #453).
+	waited atomic.Int32
+}
+
+// The values of responseWriter.waited.
+const (
+	waitNone int32 = iota
+	waitPool
+	waitAdmission
+)
+
+// NoteAbandonedAcquire is pgxdb.AcquireWaitNoter: a pool acquire on a
+// context of this request ended on a cancellation. It counts only when the
+// request's own context has ended by then — a context the server cancelled
+// itself (a child with its own cancel) while the request lives is no client
+// that gave up.
+func (rw *responseWriter) NoteAbandonedAcquire() {
+	if rw.reqCtx != nil && rw.reqCtx.Err() == nil {
+		return
+	}
+	rw.waited.CompareAndSwap(waitNone, waitPool)
+}
+
+// waitedFor names what the request waited for when its client gave up, ""
+// for nothing.
+func (rw *responseWriter) waitedFor() string {
+	switch rw.waited.Load() {
+	case waitPool:
+		return "db_connection"
+	case waitAdmission:
+		return "admission"
+	}
+	return ""
+}
+
+// The values of responseWriter.verdict.
+const (
+	verdictOpen int32 = iota // the handler has not returned
+	verdictLive              // it returned with the client still there
+	verdictGone              // it returned after the client went away
+)
+
+// clientGone reports whether the request ended because its client went away
+// (issue #417): reqCtx carries net/http's plain cancellation — no deadline,
+// no cause of its own, which only a stage inside Logger could set — and no
+// write or body read failed on a connection deadline before it
+// (serverDeadline). Shutdown does not cancel reqCtx (it waits for the
+// request), and http.Server.ReadTimeout reaches it only through a body read
+// that runs past it, which requestBody notes; once the body is read, net/http
+// clears the read deadline before it watches the connection. Two cases count
+// as gone although the peer may still read: a client that half-closes its
+// sending side (net/http sees EOF; no proxy in front of ctxd does this), and
+// HTTP/2, where the WriteTimeout timer resets the stream before a write
+// fails — ctxd serves HTTP/1.1 only (newHTTPServer).
+//
+// Once the handler returned, the answer is the one Logger fixed at that
+// moment (verdict).
+func (rw *responseWriter) clientGone() bool {
+	switch rw.verdict.Load() {
+	case verdictLive:
+		return false
+	case verdictGone:
+		return true
+	}
+	return rw.clientLeft()
+}
+
+// clientLeft is clientGone's answer while the handler runs.
+func (rw *responseWriter) clientLeft() bool {
+	if rw.reqCtx == nil || rw.reqCtx.Err() != context.Canceled || context.Cause(rw.reqCtx) != context.Canceled { //nolint:errorlint // net/http's plain cancellation is exactly the sentinel
+		return false
+	}
+	return !rw.serverDeadline.Load()
+}
+
+// noteDeadline records a write, flush or body read that failed on a
+// connection deadline while the request was still alive (see
+// serverDeadline).
+func (rw *responseWriter) noteDeadline(alive bool, err error) {
+	if alive && err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
+		rw.serverDeadline.Store(true)
+	}
+}
+
+// settle fixes the verdict when the handler returned and reports it: net/http
+// has not cancelled reqCtx for the return yet (it does once Logger returns),
+// so a cancelled reqCtx here is the client's leaving.
+func (rw *responseWriter) settle() bool {
+	left := rw.clientLeft()
+	v := verdictLive
+	if left {
+		v = verdictGone
+	}
+	rw.verdict.Store(v)
+	return left
+}
+
+func (rw *responseWriter) alive() bool { return rw.reqCtx == nil || rw.reqCtx.Err() == nil }
+
+func (rw *responseWriter) Write(p []byte) (int, error) {
+	alive := rw.alive()
+	n, err := rw.ResponseWriter.Write(p)
+	rw.noteDeadline(alive, err)
+	return n, err
+}
+
+// requestBody wraps the request body for serverDeadline: a body read that
+// runs past http.Server.ReadTimeout fails with a timeout, and net/http
+// cancels the request context for it as for a client that left.
+type requestBody struct {
+	io.ReadCloser
+	rw *responseWriter
+}
+
+func (b *requestBody) Read(p []byte) (int, error) {
+	alive := b.rw.alive()
+	n, err := b.ReadCloser.Read(p)
+	b.rw.noteDeadline(alive, err)
+	return n, err
+}
+
+// FlushError is what http.ResponseController.Flush calls first: the flush
+// reaches the writer underneath as before (through its controller), and a
+// flush that fails on the write deadline is noted. No Flush method: an
+// http.Flusher assertion on this writer answers as it always did.
+func (rw *responseWriter) FlushError() error {
+	alive := rw.alive()
+	err := http.NewResponseController(rw.ResponseWriter).Flush()
+	rw.noteDeadline(alive, err)
+	return err
 }
 
 // claimRequestLog marks the request whose response chain w belongs to as
@@ -224,16 +384,8 @@ type responseWriter struct {
 // logs as usual — the failure direction is a second line, never a missing
 // one.
 func claimRequestLog(w http.ResponseWriter) {
-	for w != nil {
-		if rw, ok := w.(*responseWriter); ok {
-			rw.logClaimed = true
-			return
-		}
-		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
-		if !ok {
-			return
-		}
-		w = u.Unwrap()
+	if rw := loggedResponse(w); rw != nil {
+		rw.logClaimed = true
 	}
 }
 
@@ -258,23 +410,44 @@ func (rw *responseWriter) Unwrap() http.ResponseWriter {
 // claim, not a path prefix, decides: a /v1 path that never reaches the
 // group (no group mounted, or a raw path chi routes elsewhere) keeps its
 // line here.
+//
+// A request whose client went away before the handler returned
+// (responseWriter.clientGone, issue #417) is logged with status 499
+// (StatusClientClosedRequest) and the status the handler wrote into the dead
+// connection as handler_status; nothing reached the client. Every other
+// request keeps its line byte for byte. The writer travels in the request
+// context, so a handler's error line can ask the same question
+// (logRequestError).
 func Logger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK, reqCtx: r.Context(), start: start}
+		inner := r.WithContext(pgxdb.WithAcquireWaitNoter(context.WithValue(r.Context(), requestLogKey{}, rw), rw))
+		if r.Body != nil && r.Body != http.NoBody {
+			inner.Body = &requestBody{ReadCloser: r.Body, rw: rw}
+		}
 
-		next.ServeHTTP(rw, r)
+		next.ServeHTTP(rw, inner)
+		left := rw.settle()
 
 		if rw.logClaimed {
 			return
 		}
-		slog.Info("http request",
+		status, log := rw.statusCode, slog.Info
+		var gone []any
+		if left {
+			status, gone = StatusClientClosedRequest, []any{"handler_status", rw.statusCode}
+			if w := rw.waitedFor(); w != "" {
+				log, gone = slog.Warn, append(gone, "waited_for", w)
+			}
+		}
+		log("http request", append([]any{
 			"method", r.Method,
 			"path", r.URL.Path,
-			"status", rw.statusCode,
+			"status", status,
 			"duration_ms", time.Since(start).Milliseconds(),
 			"request_id", RequestIDFromContext(r.Context()),
-		)
+		}, gone...)...)
 	})
 }
 
@@ -462,7 +635,7 @@ func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			raw, isSession := requestCredential(r)
 			result, csrfSecret, err := resolveRequestCredential(r.Context(), pool, raw, isSession)
 			if err != nil {
-				slog.Error("auth failed",
+				logRequestError(r.Context(), "auth failed",
 					"error", err,
 					"request_id", RequestIDFromContext(r.Context()),
 				)

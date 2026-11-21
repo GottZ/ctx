@@ -169,7 +169,7 @@ func (h *ManageHandler) handleIssueGet(w http.ResponseWriter, r *http.Request, a
 	}
 	comments, err := store.ListComments(ctx, h.pool, issue.ID, ar.ReadScopes, grants)
 	if err != nil {
-		slog.Error("manage: issue-get comments", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: issue-get comments", "error", err, "request_id", reqID)
 		writeInternal(w)
 		return
 	}
@@ -211,7 +211,7 @@ func (h *ManageHandler) handleIssueList(w http.ResponseWriter, r *http.Request, 
 			})
 			return
 		}
-		slog.Error("manage: issue-list", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: issue-list", "error", err, "request_id", reqID)
 		writeInternal(w)
 		return
 	}
@@ -455,7 +455,7 @@ func writeIssueStoreError(w http.ResponseWriter, action string, err error, reqID
 	case errors.Is(err, errInvalidLinkClass):
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
 	default:
-		slog.Error(action+" error", "error", err, "request_id", reqID)
+		logResponseError(w, action+" error", "error", err, "request_id", reqID)
 		writeInternal(w)
 	}
 }

@@ -167,9 +167,12 @@ func updateDataFromCanonical(cw store.CanonicalWrite) store.UpdateBlockData {
 // title/metadata change (WF T4, design/01 §4.5 seam 5 — safe because
 // ClassifyBlockAfterUpsert only writes type_source='auto' blocks, and
 // deliberately match-only: a block whose new title stops matching keeps its
-// current type, the hook promotes and never demotes), temporal re-extraction
-// on content change (PopulateTemporal always runs: createdAt is the
-// meta-anchor even without content times). All non-fatal; reqID stamps every
+// current type, the hook promotes and never demotes; nothing is written once a
+// later write replaced the title or a metadata key the rules read — issue
+// #426), temporal re-extraction
+// on content change (store.RefreshTemporal; the rows always get createdAt as
+// the meta-anchor, even without content times, and nothing is written once a
+// later write replaced the content — issue #414). All non-fatal; reqID stamps every
 // line with the request it belongs to. The embedding reset on a changed title
 // or content is not afterwork: store.UpdateBlock clears the vector in the
 // update's own transaction.
@@ -181,6 +184,10 @@ func updateDataFromCanonical(cw store.CanonicalWrite) store.UpdateBlockData {
 // edits change the content as a new content does — each runs the same
 // afterwork.
 func finishBlockUpdate(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, data store.UpdateBlockData, block *store.Block, reqID string) {
+	// The update is committed: the afterwork runs detached from the client
+	// (issue #453).
+	ctx, cancel := followUpContext(ctx)
+	defer cancel()
 	if blocktypes != nil && (data.Title != nil || data.Metadata != nil || data.MetadataMerge != nil) {
 		set := blocktypes.SnapshotForRequest(ctx)
 		if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, block.ID, block.Title, block.Metadata); err != nil {
@@ -188,12 +195,8 @@ func finishBlockUpdate(ctx context.Context, pool *pgxpool.Pool, blocktypes *bloc
 		}
 	}
 	if data.Content != nil || data.Edits != nil {
-		times := store.ExtractDates(block.Content)
-		if err := store.UpdateContentTimes(ctx, pool, block.ID, times); err != nil {
-			slog.Error("update afterwork: content_times update failed", "error", err, "block_id", block.ID, "request_id", reqID)
-		}
-		if err := store.PopulateTemporal(ctx, pool, block.ID, times, block.CreatedAt); err != nil {
-			slog.Error("update afterwork: temporal populate failed", "error", err, "block_id", block.ID, "request_id", reqID)
+		if _, err := store.RefreshTemporal(ctx, pool, block.ID, block.Content, block.CreatedAt); err != nil {
+			logRequestError(ctx, "update afterwork: temporal refresh failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		}
 	}
 }
@@ -275,7 +278,7 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 			if rej := updateFailureReject(err); rej != nil {
 				return errResultReject(rej), nil, nil
 			}
-			slog.Error("mcp: update error", "error", err, "block_id", resolvedID)
+			logRequestError(ctx, "mcp: update error", "error", err, "block_id", resolvedID)
 			return errResult("update failed: internal error"), nil, nil
 		}
 		if block == nil {
@@ -313,7 +316,7 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inp
 	if rateLimit > 0 {
 		writeCount, err := store.CheckRateLimit(ctx, cfg.Pool, ar.ApiKeyID)
 		if err != nil {
-			slog.Error("mcp: stage update rate limit check error", "error", err)
+			logRequestError(ctx, "mcp: stage update rate limit check error", "error", err)
 			return errResult("stage failed: internal error"), nil, nil
 		}
 		if writeCount >= rateLimit {
@@ -330,7 +333,7 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inp
 	// nil type set (V-11): a TOCTOU fingerprint, not a read answer.
 	block, err := store.GetBlock(ctx, cfg.Pool, nil, resolvedID, writableBlockScopes(ar), nil)
 	if err != nil {
-		slog.Error("mcp: stage update base read failed", "error", err, "block_id", resolvedID)
+		logRequestError(ctx, "mcp: stage update base read failed", "error", err, "block_id", resolvedID)
 		return errResult("stage failed: internal error"), nil, nil
 	}
 	if block == nil {
@@ -379,7 +382,7 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inp
 	}
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, block.Scope, "update", "mcp", canonical, hash, ttl)
 	if err != nil {
-		slog.Error("mcp: stage pending update failed", "error", err)
+		logRequestError(ctx, "mcp: stage pending update failed", "error", err)
 		return errResult("stage failed: could not persist the staged write"), nil, nil
 	}
 

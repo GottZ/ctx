@@ -611,8 +611,12 @@ func TestAcquireWithCanceledCtx(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), onSlotPolicy(1))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := d.Acquire(withPrincipal(ctx, principal("a")), interactiveReq()); !errors.Is(err, context.Canceled) {
+	_, _, err := d.Acquire(withPrincipal(ctx, principal("a")), interactiveReq())
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled ctx: got %v want context.Canceled", err)
+	}
+	if AbandonedWait(err) {
+		t.Errorf("a context ended at the door waited for nothing, AbandonedWait = true (issue #453)")
 	}
 	ts := target(t, d)
 	if ts.Interactive.Waiting != 0 || ts.Inflight != 0 {
@@ -634,6 +638,9 @@ func TestWaiterCancelVacatesQueueSlot(t *testing.T) {
 	a := <-ch
 	if !errors.Is(a.err, context.Canceled) {
 		t.Fatalf("canceled waiter: got %v want context.Canceled", a.err)
+	}
+	if !AbandonedWait(a.err) || a.err.Error() != context.Canceled.Error() {
+		t.Errorf("canceled waiter: AbandonedWait(%v) = %v, want true with the context's own text (issue #453)", a.err, AbandonedWait(a.err))
 	}
 	if got := waitingInteractive(d); got != 0 {
 		t.Fatalf("canceled waiter left a queue entry: %d", got)

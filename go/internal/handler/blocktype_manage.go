@@ -95,7 +95,7 @@ func (h *ManageHandler) handleTypeList(w http.ResponseWriter, r *http.Request, a
 	ctx := r.Context()
 	types, err := store.ListBlockTypes(ctx, h.pool, typeVisibleScopes(ar))
 	if err != nil {
-		slog.Error("manage: type-list error", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "manage: type-list error", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -118,7 +118,7 @@ func (h *ManageHandler) handleTypeGet(w http.ResponseWriter, r *http.Request, ar
 	}
 	bt, err := store.GetBlockType(ctx, h.pool, req.ID, typeVisibleScopes(ar))
 	if err != nil {
-		slog.Error("manage: type-get error", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "manage: type-get error", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -191,7 +191,7 @@ func (h *ManageHandler) handleTypeCreate(w http.ResponseWriter, r *http.Request,
 	// write.internal_only=false. A gate on only the REST seam would be the
 	// divergent-gate anti-pattern the types_write.go header names (§5.1).
 	if msg, err := overlayWriteViolation(ctx, h.pool, p.Name, store.GlobalScope, pol); err != nil {
-		slog.Error("manage: type-create overlay base", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: type-create overlay base", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 		return
 	} else if msg != "" {
@@ -249,7 +249,7 @@ func (h *ManageHandler) handleTypeUpdate(w http.ResponseWriter, r *http.Request,
 	// identity (name/scope/builtin/is_default feed the cross-field rules).
 	cur, err := store.GetBlockType(ctx, h.pool, req.ID, typeVisibleScopes(ar))
 	if err != nil {
-		slog.Error("manage: type-update lookup error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: type-update lookup error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 		return
 	}
@@ -272,7 +272,7 @@ func (h *ManageHandler) handleTypeUpdate(w http.ResponseWriter, r *http.Request,
 		// gate on only the REST seam would be the divergent-gate anti-pattern
 		// the types_write.go header names (§5.1).
 		if msg, err := overlayWriteViolation(ctx, h.pool, cur.Name, cur.Scope, pol); err != nil {
-			slog.Error("manage: type-update overlay base", "error", err, "request_id", reqID)
+			logRequestError(ctx, "manage: type-update overlay base", "error", err, "request_id", reqID)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 			return
 		} else if msg != "" {
@@ -311,7 +311,7 @@ func (h *ManageHandler) handleTypeDelete(w http.ResponseWriter, r *http.Request,
 	}
 	cur, err := store.GetBlockType(ctx, h.pool, req.ID, typeVisibleScopes(ar))
 	if err != nil {
-		slog.Error("manage: type-delete lookup error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: type-delete lookup error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 		return
 	}
@@ -438,7 +438,7 @@ func writeBlockTypeStoreError(w http.ResponseWriter, action string, err error, r
 			"blocks":  map[string]int{"active": inUse.Active, "archived": inUse.Archived},
 		})
 	default:
-		slog.Error(action+" error", "error", err, "request_id", reqID)
+		logResponseError(w, action+" error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 	}
 }

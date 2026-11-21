@@ -21,7 +21,6 @@ package handler
 import (
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 
 	"github.com/GottZ/ctx/internal/oidc"
@@ -74,7 +73,7 @@ func (h *ManageHandler) handleOAuthIdentityLink(w http.ResponseWriter, r *http.R
 	}
 	provider, issuer, found, err := h.identityIssuerForSlug(r, data.ProviderSlug)
 	if err != nil {
-		slog.Error("oauth-identity-link: provider lookup", "error", err)
+		logRequestError(r.Context(), "oauth-identity-link: provider lookup", "error", err)
 		writeInternal(w)
 		return
 	}
@@ -102,7 +101,7 @@ func (h *ManageHandler) handleOAuthIdentityLink(w http.ResponseWriter, r *http.R
 			})
 			return
 		}
-		slog.Error("oauth-identity-link: store", "error", err)
+		logRequestError(r.Context(), "oauth-identity-link: store", "error", err)
 		writeInternal(w)
 		return
 	}
@@ -120,7 +119,7 @@ func (h *ManageHandler) handleOAuthIdentityList(w http.ResponseWriter, r *http.R
 	}
 	list, err := store.ListExternalIdentities(r.Context(), h.pool, data.PrincipalID)
 	if err != nil {
-		slog.Error("oauth-identity-list: store", "error", err)
+		logRequestError(r.Context(), "oauth-identity-list: store", "error", err)
 		writeInternal(w)
 		return
 	}
@@ -137,7 +136,7 @@ func (h *ManageHandler) handleOAuthIdentityUnlink(w http.ResponseWriter, r *http
 	}
 	_, issuer, found, err := h.identityIssuerForSlug(r, data.ProviderSlug)
 	if err != nil {
-		slog.Error("oauth-identity-unlink: provider lookup", "error", err)
+		logRequestError(r.Context(), "oauth-identity-unlink: provider lookup", "error", err)
 		writeInternal(w)
 		return
 	}
@@ -147,7 +146,7 @@ func (h *ManageHandler) handleOAuthIdentityUnlink(w http.ResponseWriter, r *http
 	}
 	removed, err := store.UnlinkExternalIdentity(r.Context(), h.pool, issuer, data.Subject)
 	if err != nil {
-		slog.Error("oauth-identity-unlink: store", "error", err)
+		logRequestError(r.Context(), "oauth-identity-unlink: store", "error", err)
 		writeInternal(w)
 		return
 	}

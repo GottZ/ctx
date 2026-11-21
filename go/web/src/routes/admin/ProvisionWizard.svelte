@@ -413,10 +413,14 @@
     flex-direction: column;
     gap: var(--space-2);
   }
+  /* A choice is a multi-line button: its description wraps, against the
+     nowrap of the plain buttons below, or the first choice is as wide as its
+     sentence and the dialog body scrolls sideways (#442). */
   .choice {
     display: flex;
     flex-direction: column;
     gap: var(--space-1);
+    white-space: normal;
     text-align: left;
     padding: var(--space-2) var(--space-3);
     background: var(--surface-2);

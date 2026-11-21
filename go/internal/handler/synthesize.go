@@ -227,7 +227,7 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{"ok": false, "error": "server busy — retry shortly"})
 			return
 		}
-		slog.Error("synthesize: daily report failed",
+		logRequestError(ctx, "synthesize: daily report failed",
 			"error", err,
 			"scope", scope,
 			"request_id", requestID,

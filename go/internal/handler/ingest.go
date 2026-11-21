@@ -239,7 +239,7 @@ func (h *IngestHandler) HandleIngest(w http.ResponseWriter, r *http.Request) {
 		}
 		claimed, err := store.ProvenanceClaimed(ctx, h.pool, chunk.Category, chunk.Title, writeScope)
 		if err != nil {
-			slog.Error("ingest: provenance claim probe failed", "error", err, "index", i, "request_id", reqID)
+			logRequestError(ctx, "ingest: provenance claim probe failed", "error", err, "index", i, "request_id", reqID)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"success": false, "error": "Internal server error",
 			})
@@ -310,7 +310,7 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 	match, matchErr := store.IdenticalContentMatch(ctx, h.pool, chunk.Content, scope, chunk.Category, chunk.Title,
 		chunk.Tags, chunk.Metadata, store.SensitivityWrite{}, "")
 	if matchErr != nil {
-		slog.Error("ingest: identical content match error",
+		logRequestError(ctx, "ingest: identical content match error",
 			"error", matchErr, "index", index, "request_id", reqID)
 		return IngestResult{Index: index, Status: "failed", Error: "hash check failed"}
 	}
@@ -333,7 +333,7 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 			      AND NOT is_archived AND lifecycle_state = 'chunk'
 			 )`, match.ID, chunk.SourceID, chunk.ChunkIndex).Scan(&sameSlot)
 		if err != nil && !pgxdb.MalformedUUID(err) {
-			slog.Error("ingest: chunk slot check error",
+			logRequestError(ctx, "ingest: chunk slot check error",
 				"error", err, "index", index, "request_id", reqID)
 			return IngestResult{Index: index, Status: "failed", Error: "chunk slot check failed"}
 		}
@@ -365,7 +365,7 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 			return IngestResult{Index: index, Status: "failed", Error: rej.Msg}
 		}
 		if err != nil {
-			slog.Error("ingest: insert chunk error",
+			logRequestError(ctx, "ingest: insert chunk error",
 				"error", err, "index", index, "source_id", chunk.SourceID, "request_id", reqID)
 			return IngestResult{Index: index, Status: "failed", Error: "insert chunk failed"}
 		}
@@ -385,7 +385,7 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 				return IngestResult{Index: index, Status: "failed",
 					Error: "block carries derived provenance — not client-writable"}
 			}
-			slog.Error("ingest: upsert block error",
+			logRequestError(ctx, "ingest: upsert block error",
 				"error", err, "index", index, "request_id", reqID)
 			return IngestResult{Index: index, Status: "failed", Error: "upsert failed"}
 		}
@@ -406,10 +406,14 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 		// about chunk rows — uq_context_category_title_scope has no lifecycle
 		// filter, so a block-mode write with new content naming a chunk row's
 		// (category, title, scope) lands on that row and classifies it here.
-		if _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
+		// The chunk is committed: its classification runs detached from the
+		// client (issue #453).
+		fctx, cancel := followUpContext(ctx)
+		if _, err := store.ClassifyBlockAfterUpsert(fctx, h.pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
 			slog.Warn("ingest: auto-classify failed",
 				"error", err, "index", index, "block_id", block.ID, "request_id", reqID)
 		}
+		cancel()
 	}
 
 	// 3. Log write (fire-and-forget).
@@ -425,14 +429,9 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		times := store.ExtractDates(block.Content)
-		if err := store.UpdateContentTimes(bgCtx, h.pool, block.ID, times); err != nil {
-			slog.Error("ingest: content_times update failed",
-				"error", err, "block_id", block.ID, "request_id", reqID)
-		}
-		// Always populate: createdAt is included as meta-anchor even without content times.
-		if err := store.PopulateTemporal(bgCtx, h.pool, block.ID, times, block.CreatedAt); err != nil {
-			slog.Error("ingest: temporal populate failed",
+		// Always populated: createdAt is included as meta-anchor even without content times.
+		if _, err := store.RefreshTemporal(bgCtx, h.pool, block.ID, block.Content, block.CreatedAt); err != nil {
+			slog.Error("ingest: temporal refresh failed",
 				"error", err, "block_id", block.ID, "request_id", reqID)
 		}
 	}()
@@ -467,7 +466,7 @@ func (h *IngestHandler) ingestRateLimited(w http.ResponseWriter, ctx context.Con
 	}
 	if err := store.LogAccess(ctx, h.pool, apiKeyID, "", ingestBucket); err != nil {
 		// Fail closed: an unbooked request would not count against the limit.
-		slog.Error("ingest: rate limit booking failed", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "ingest: rate limit booking failed", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 		return true
 	}

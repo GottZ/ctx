@@ -30,6 +30,7 @@ import { expect, test, type Page } from '@playwright/test'
 import type { LayoutMode } from '../../src/lib/layout/modes'
 import { runAxeGate } from './axe'
 import { captureShot } from './capture'
+import { expectViewportFit } from './fit'
 import { runFocusWalk } from './focus'
 import {
   gotoArea,
@@ -302,6 +303,7 @@ function visualTest(c: PageContract, state: PageState, theme: Theme, viewport: V
     // awaited inside captureShot (stabilize). Same settle as the PV3 suite —
     // the 13 committed baselines stay byte-valid.
     await page.waitForTimeout(600)
+    await expectViewportFit(page)
     await captureShot(page, `${c.name}--${state.name}--${theme}--${viewport}.png`, {
       mask: c.mask,
       maskBudgetOverride: c.maskBudgetOverride,
@@ -311,13 +313,32 @@ function visualTest(c: PageContract, state: PageState, theme: Theme, viewport: V
 }
 
 /**
+ * Mobile fit without a capture (#440): a contract that opts out of the mobile
+ * visual dimension has no mobile baselines, but its layout still has to fit
+ * 390 px. Same mount and settle as visualTest, the viewport fit instead of the
+ * capture. Tagged @visual because the fit depends on the font metrics of the
+ * pinned container just as the pixels do (system-ui stacks, e2e/Dockerfile);
+ * one theme, because the themes swap colour tokens, not boxes.
+ */
+function mobileFitTest(c: PageContract, state: PageState): void {
+  test(`${c.name} ${state.name} dark mobile fit`, { tag: '@visual' }, async ({ page }) => {
+    await mountState(page, c, state, 'dark')
+    await page.waitForTimeout(600)
+    await expectViewportFit(page)
+  })
+}
+
+/**
  * Generate the PV4 test family for one contract (design 06 §4.1 table —
  * flow/visual/deny/leak/scale; axe/ARIA/focus-walk join in PV5/PV6):
  *
  *   - primary flow            1 × @flow      (desktop, dark, default state)
  *   - toHaveScreenshot        states(+scale) × themes × viewports × @visual
- *                             (mobile halved away by a reasoned opt-out)
- *   - axe scan (PV5)          2 themes × 2 viewports × @a11y (default state)
+ *                             (mobile halved away by a reasoned opt-out);
+ *                             each capture asserts the viewport fit first
+ *   - mobile fit (#440)       states(+scale) × @visual (dark, 390 px; only
+ *                             for a mobile opt-out — the fit without capture)
+ *   - axe scan (PV5)         2 themes × 2 viewports × @a11y (default state)
  *                             — ALWAYS both viewports, independent of the
  *                             mobile VISUAL opt-out: axe needs no baselines,
  *                             and target-size (SC 2.5.8) bites hardest at
@@ -360,6 +381,11 @@ export function definePageContract(c: PageContract): void {
         for (const state of visualStates) {
           for (const theme of THEMES) visualTest(c, state, theme, 'mobile')
         }
+      })
+    } else {
+      test.describe(() => {
+        test.use({ viewport: VIEWPORTS.mobile })
+        for (const state of visualStates) mobileFitTest(c, state)
       })
     }
 

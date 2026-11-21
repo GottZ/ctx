@@ -108,7 +108,7 @@ func (h *OAuthHandler) resolveAuthorizeClient(r *http.Request, clientID, redirec
 	}
 	client, found, err := store.GetOAuthClientByClientID(r.Context(), h.pool, clientID)
 	if err != nil {
-		slog.Error("oauth: load client in authorize", "error", err)
+		logRequestError(r.Context(), "oauth: load client in authorize", "error", err)
 		return nil, nil, &authorizeReject{http.StatusInternalServerError, "Internal error", "Please try again later."}
 	}
 	if !found {
@@ -126,7 +126,7 @@ func (h *OAuthHandler) resolveAuthorizeClient(r *http.Request, clientID, redirec
 	if len(client.RedirectURIs) > 0 {
 		allowed, err := store.ClientAllowsRedirectURI(r.Context(), h.pool, clientID, redirectURI)
 		if err != nil {
-			slog.Error("oauth: check registered redirect_uri", "error", err)
+			logRequestError(r.Context(), "oauth: check registered redirect_uri", "error", err)
 			return nil, nil, &authorizeReject{http.StatusInternalServerError, "Internal error", "Please try again later."}
 		}
 		if !allowed {

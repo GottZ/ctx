@@ -189,7 +189,22 @@ export const contracts: PageContract[] = [
     role: 'member',
     mode: 'split',
     tenantScoped: true,
-    states: [{ name: 'default', seed: { role: 'server-admin' } }],
+    states: [
+      { name: 'default', seed: { role: 'server-admin' } },
+      {
+        // #439: the detail pane next to the list on desktop, stacked under it
+        // at 390 px (BlocksPage @container) — the layout the viewport fit has
+        // to hold in both.
+        name: 'detail',
+        seed: { role: 'server-admin' },
+        prepare: async (page) => {
+          // scroll: 'none' — the first hit is in view at both viewports; a
+          // retried click must not scroll the list (#416).
+          await page.locator('main.content ul.results li button').first().click({ scroll: 'none' })
+          await expect(page.locator('aside.detail-pane')).toContainText('canvas-first surface')
+        },
+      },
+    ],
     scale: {
       name: '10k',
       seed: { role: 'server-admin', state: '10k' },
@@ -385,7 +400,19 @@ export const contracts: PageContract[] = [
         seed: { anonymous: true },
         prepare: async (page) => {
           await page.getByLabel('API key').fill('wrong-key')
-          await page.getByRole('button', { name: 'Sign in' }).click()
+          // scroll: 'none' (#416): the button is still in its entrance
+          // animation, so the click can fail the stability check a few times.
+          // The attempt that passes scrolls with an alignment picked by its
+          // retry index (0 if needed, 1 end, 2 center, 3 start). Until #419
+          // the mask was 30 px taller than the viewport, so index 2 or 3
+          // scrolled the page and left the button under the resting pointer
+          // (:hover) in the capture. The mask now fits the viewport (the
+          // runner asserts it before every capture), so no alignment has
+          // anything to scroll.
+          // The option stays as an assertion: with it the click fails unless
+          // the button is already in the viewport, i.e. reachable without
+          // scrolling — the user's own picture at both viewports.
+          await page.getByRole('button', { name: 'Sign in' }).click({ scroll: 'none' })
           // R4: the reject comes from POST /auth/login — the real handler's
           // uniform sessionError string (auth_session.go).
           await expect(page.getByRole('alert')).toContainText('authentication failed')

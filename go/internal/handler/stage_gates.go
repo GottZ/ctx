@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -131,7 +130,7 @@ func runStageWriteGates(
 	if rateLimitWrite > 0 {
 		writeCount, err := store.CheckRateLimit(ctx, pool, ar.ApiKeyID)
 		if err != nil {
-			slog.Error("stage gates: rate limit check error", "error", err, "request_id", reqID)
+			logRequestError(ctx, "stage gates: rate limit check error", "error", err, "request_id", reqID)
 			return nil, classInternal.reject("Internal server error")
 		}
 		if writeCount >= rateLimitWrite {

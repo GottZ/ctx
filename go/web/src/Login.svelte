@@ -71,6 +71,9 @@
 
 <style>
   .screen {
+    /* The padding belongs inside the 100dvh, or the mask is two paddings
+       taller than the viewport and the page scrolls (#419). */
+    box-sizing: border-box;
     min-height: 100dvh;
     display: grid;
     place-items: center;
@@ -88,7 +91,12 @@
 
   .card {
     position: relative;
-    width: min(24rem, 100%);
+    /* The padding and the border belong inside the 100%, or the card is
+       wider than its column below 24rem plus both and sticks out on both
+       sides (#430). The first term is the width the card always had on
+       desktop: 24rem of content, two paddings, two 1px borders. */
+    box-sizing: border-box;
+    width: min(24rem + 2 * var(--space-4) + 2px, 100%);
     display: flex;
     flex-direction: column;
     gap: var(--space-2);

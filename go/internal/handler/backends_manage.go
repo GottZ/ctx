@@ -408,7 +408,7 @@ func writeBackendTxFailure(w http.ResponseWriter, stage string) {
 // client error; the NOTIFY path retries momentarily.
 func (h *ManageHandler) reloadAfterMutation(ctx context.Context, action string) {
 	if err := h.backendPool.Reload(ctx); err != nil {
-		slog.Error("backends: post-mutation reload failed — NOTIFY path will converge",
+		logRequestError(ctx, "backends: post-mutation reload failed — NOTIFY path will converge",
 			"action", action, "error", err)
 	}
 }

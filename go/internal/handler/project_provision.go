@@ -162,7 +162,7 @@ func (h *ManageHandler) handleProjectProvision(w http.ResponseWriter, r *http.Re
 		if h.forge == nil {
 			slog.Warn("provision: token supplied but sync engine not enabled", "project", res.Project.ID)
 		} else if terr := h.forge.SetToken(ctx, *res.Project, pr.Token); terr != nil {
-			slog.Error("provision: token seal failed (project provisioned, set the token later)", "project", res.Project.ID, "error", terr, "request_id", RequestIDFromContext(ctx))
+			logRequestError(ctx, "provision: token seal failed (project provisioned, set the token later)", "project", res.Project.ID, "error", terr, "request_id", RequestIDFromContext(ctx))
 		} else {
 			tokenSet = true
 		}
@@ -234,7 +234,7 @@ func writeProvisionError(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrProjectExists):
 		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "project identity already registered"})
 	default:
-		slog.Error("provision: compound failed", "error", err)
+		logResponseError(w, "provision: compound failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "provision failed"})
 	}
 }

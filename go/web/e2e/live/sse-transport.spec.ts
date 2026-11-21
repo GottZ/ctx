@@ -19,7 +19,10 @@ const state = readState()
 // Reads the real /api/events stream from the browser context (same origin as
 // ctxd, Bearer via X-Context-Key — native EventSource cannot set headers, so
 // the app and this probe both use fetch + ReadableStream). Resolves with the
-// first bytes seen, or '' on timeout.
+// first bytes seen, or '' on timeout. The fetch follows no redirect
+// (`redirect: 'error'`, #447): fetch keeps X-Context-Key — the run's admin key
+// — on a redirect to any origin that passes the CORS preflight, and the
+// throwaway ctxd never redirects /api/events, so a redirect fails the spec.
 async function firstSseBytes(page: import('@playwright/test').Page, key: string, ms: number): Promise<string> {
   return page.evaluate(
     async ([apiKey, timeoutMs]) => {
@@ -29,6 +32,7 @@ async function firstSseBytes(page: import('@playwright/test').Page, key: string,
         const res = await fetch('/api/events', {
           headers: { 'X-Context-Key': apiKey as string, Accept: 'text/event-stream' },
           signal: ctrl.signal,
+          redirect: 'error',
         })
         if (!res.ok || !res.body) return `HTTP ${res.status}`
         const reader = res.body.getReader()

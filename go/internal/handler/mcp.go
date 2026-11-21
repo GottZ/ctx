@@ -958,13 +958,11 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		// fatal: the block is written, and losing an audit row must not turn a
 		// completed write into an error result.
 		if err := store.LogAccess(ctx, cfg.Pool, ar.ApiKeyID, block.ID, "write"); err != nil {
-			slog.Error("mcp: write log error", "error", err, "block_id", block.ID)
+			logRequestError(ctx, "mcp: write log error", "error", err, "block_id", block.ID)
 		}
 
 		// Temporal enrichment (inline, not async — MCP calls are not latency-sensitive).
-		times := store.ExtractDates(block.Content)
-		_ = store.UpdateContentTimes(ctx, cfg.Pool, block.ID, times)
-		_ = store.PopulateTemporal(ctx, cfg.Pool, block.ID, times, block.CreatedAt)
+		_, _ = store.RefreshTemporal(ctx, cfg.Pool, block.ID, block.Content, block.CreatedAt)
 
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{textContent(fmt.Sprintf("Stored: %s (id: %s, category: %s%s)", block.Title, block.ID, block.Category,
@@ -1207,7 +1205,7 @@ func resolveGrants(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthResult)
 	grants, err := store.GrantedBlockIDs(ctx, pool, ar.TenantID)
 	if err != nil {
 		if errors.Is(err, store.ErrTooManyBlockGrants) {
-			slog.Error("block grant set exceeds the per-request bound — read refused", "error", err)
+			logRequestError(ctx, "block grant set exceeds the per-request bound — read refused", "error", err)
 			return nil, err
 		}
 		// fail-closed for grant visibility: proceed scope-only, never crash the read

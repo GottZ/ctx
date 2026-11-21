@@ -37,6 +37,28 @@ import (
 //     `AND type_source = 'auto'` — a manual block is never re-classified.
 //     applied=false in that case (rowsAffected 0).
 //
+//  4. The verdict is written only while the block still holds the inputs it
+//     was computed from (issue #426): the title and the part of the metadata
+//     set.Classify reads (classifyInputsSQL). The hook runs after the
+//     write committed, outside its lock, from the block the write returned;
+//     two writes A, B of one block that commit in that order can finish their
+//     hooks in the order B, A, and A's verdict must not land on B's title and
+//     metadata (in the reported case system-meta, retrieval=excluded, on a
+//     block whose metadata classify as audit-trail). A's UPDATE then matches
+//     no row and returns "". The version is the input itself, not updated_at:
+//     a write between the two that changes tags, content or a metadata key no
+//     rule reads (the guard's own keys among them) leaves the verdict valid.
+//     The flags compared are those of the set the verdict came from: a write
+//     under other type rules (another tenant's overlay on a shared scope, a
+//     registry reload in between) that changes only a flag this set does not
+//     know is not seen.
+//
+// The comparison sits in the WHERE of the one UPDATE (classifyUpdateSQL): no
+// extra statement and no lock beyond the row lock the UPDATE takes anyway. A
+// write of the block in flight makes the UPDATE wait; once it committed, READ
+// COMMITTED re-checks the WHERE against the row's newest version, so the
+// verdict is judged against the inputs that write left behind.
+//
 // The hook runs on /api/store (handler/context_store.go), MCP store
 // (handler/mcp.go), confirmed staged writes (handler/confirm_core.go),
 // block-mode /api/ingest (handler/ingest.go), the digest topic map and its
@@ -87,18 +109,61 @@ func ClassifyBlockAfterUpsert(ctx context.Context, pool *pgxpool.Pool, set *bloc
 		return "", nil
 	}
 
-	tag, err := pool.Exec(ctx,
-		`UPDATE context_blocks SET type_name = $1
-		  WHERE id = $2::uuid AND type_source = 'auto'`,
-		name, blockID,
-	)
+	flags := set.ClassifyMetadataFlags()
+	tag, err := pool.Exec(ctx, classifyUpdateSQL, name, blockID, flags, classifyInputs(flags, title, metadata))
 	if err != nil {
 		return "", fmt.Errorf("store: classify block: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		// manual override (or vanished row): nothing applied.
+		// manual override, a later write replaced the inputs (point 4), or
+		// a vanished row: nothing applied.
 		return "", nil
 	}
 
 	return name, nil
+}
+
+// classifyUpdateSQL writes the verdict $1 on block $2 while it is an auto
+// block that holds the inputs $4 (classifyInputs) under the flag keys $3.
+const classifyUpdateSQL = `UPDATE context_blocks SET type_name = $1
+	  WHERE id = $2::uuid AND type_source = 'auto'
+	    AND ` + classifyInputsSQL + ` = $4::jsonb`
+
+// classifyInputsSQL is what set.Classify reads of the stored row, as one jsonb
+// object: the title, and of the metadata "source" when its value is a string
+// and every flag key of $3 (Set.ClassifyMetadataFlags) whose value is true —
+// the verdict depends on nothing else. classifyInputs builds the same object
+// from the title and metadata the verdict was computed from, so the two are
+// equal exactly when the stored row would classify the same.
+//
+// One expression, so that no index can serve it and the primary key stays the
+// only way to the row: a bare `title = $n` beside `id = $2` is a condition the
+// trigram indexes on title (idx_trgm_title, idx_trgm_title_gist) support, and
+// on the reference instance the generic plan of that form scanned
+// idx_trgm_title_gist with the id as a filter. The comparison is evaluated
+// after the type_source test, so a manual block never reads its metadata here;
+// the metadata is read once (jsonb_each), from TOAST when it is stored out of
+// line. A NULL metadata reads as {}; one that is not an object, which no write
+// path stores (every one binds a map), fails the statement and the verdict is
+// not written.
+const classifyInputsSQL = `jsonb_build_object('title', context_blocks.title, 'metadata',
+	      (SELECT COALESCE(jsonb_object_agg(e.key, e.value), '{}'::jsonb)
+	         FROM jsonb_each(context_blocks.metadata) AS e
+	        WHERE (e.key = 'source' AND jsonb_typeof(e.value) = 'string')
+	           OR (e.key = ANY($3::text[]) AND e.value = 'true'::jsonb)))`
+
+// classifyInputs is classifyInputsSQL for the title and decoded metadata a
+// verdict was computed from, read the way set.Classify reads them: the source
+// as a string, a flag as the boolean true.
+func classifyInputs(flags []string, title string, metadata map[string]any) map[string]any {
+	md := map[string]any{}
+	if source, ok := metadata["source"].(string); ok {
+		md["source"] = source
+	}
+	for _, flag := range flags {
+		if v, ok := metadata[flag].(bool); ok && v {
+			md[flag] = true
+		}
+	}
+	return map[string]any{"title": title, "metadata": md}
 }

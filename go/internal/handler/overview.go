@@ -10,7 +10,6 @@ package handler
 
 import (
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"time"
@@ -144,7 +143,7 @@ func (h *GraphOverviewHandler) HandleOverview(w http.ResponseWriter, r *http.Req
 	start := time.Now()
 	result, err := store.GraphOverview(ctx, h.pool, params, authResult.ReadScopes)
 	if err != nil {
-		slog.Error("overview: query error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "overview: query error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 		return
 	}
@@ -153,7 +152,7 @@ func (h *GraphOverviewHandler) HandleOverview(w http.ResponseWriter, r *http.Req
 	// Telemetry after success only (block_id=NULL, like LogGraphAccess). No 404
 	// path here: an empty map is a legitimate 200 (overview has no focus block).
 	if err := store.LogGraphOverviewAccess(ctx, h.pool, authResult.ApiKeyID, len(result.Nodes), len(result.Edges)); err != nil {
-		slog.Error("overview: access log error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "overview: access log error", "error", err, "request_id", reqID)
 	}
 
 	writeJSON(w, http.StatusOK, buildOverviewResponse(result, params, elapsedMs))

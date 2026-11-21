@@ -146,7 +146,7 @@ func (h *BlobHandler) HandleBlobFetch(w http.ResponseWriter, r *http.Request) {
 		blob, err = store.GetBlobByCategoryTitle(ctx, h.pool, req.Category, req.Title, authResult.ReadScopes, req.MetaOnly)
 	}
 	if err != nil {
-		slog.Error("blob-fetch: query error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "blob-fetch: query error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -214,7 +214,7 @@ func (h *BlobHandler) HandleBlobSearch(w http.ResponseWriter, r *http.Request) {
 
 	results, err := store.SearchBlobs(ctx, h.pool, authResult.ReadScopes, req.Category, req.Tags, req.MimeType, req.Limit)
 	if err != nil {
-		slog.Error("blob-search: query error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "blob-search: query error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -356,7 +356,7 @@ func (h *BlobHandler) handleBlobStats(w http.ResponseWriter, r *http.Request, ar
 
 	stats, err := store.GetBlobStats(ctx, h.pool, ar.ReadScopes)
 	if err != nil {
-		slog.Error("blob-manage: stats error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "blob-manage: stats error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -382,7 +382,7 @@ func (h *BlobHandler) handleBlobGet(w http.ResponseWriter, r *http.Request, ar *
 
 	blob, err := store.GetBlobByID(ctx, h.pool, req.ID, ar.ReadScopes, true)
 	if err != nil {
-		slog.Error("blob-manage: get error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "blob-manage: get error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -407,7 +407,7 @@ func (h *BlobHandler) handleBlobList(w http.ResponseWriter, r *http.Request, ar 
 
 	blobs, err := store.ListBlobs(ctx, h.pool, ar.ReadScopes, req.Limit)
 	if err != nil {
-		slog.Error("blob-manage: list error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "blob-manage: list error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -434,7 +434,7 @@ func (h *BlobHandler) handleBlobDelete(w http.ResponseWriter, r *http.Request, a
 
 	blob, err := store.DeleteBlob(ctx, h.pool, req.ID, ar.HomeScope)
 	if err != nil {
-		slog.Error("blob-manage: delete error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "blob-manage: delete error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})

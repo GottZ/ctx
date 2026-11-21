@@ -78,7 +78,7 @@ const maxRedirects = 10
 //
 // A hop is followed only on the origin of the FIRST request — via[0], the
 // configured base_url that was vetted — or as an http→https upgrade of it on
-// the same host (sameOrigin). Every other hop returns the 3xx itself
+// the same host (SameOrigin). Every other hop returns the 3xx itself
 // (http.ErrUseLastResponse): the wires turn a non-200 into a StatusError,
 // which backends.Classify maps to ClassBadRequest. The refusal is logged once,
 // with both origins and the status — never a path or query, which can carry
@@ -87,8 +87,8 @@ func sameOriginRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxRedirects {
 		return fmt.Errorf("stopped after %d redirects", maxRedirects)
 	}
-	from, to := originOf(via[0].URL), originOf(req.URL)
-	if sameOrigin(from, to) {
+	from, to := OriginOf(via[0].URL), OriginOf(req.URL)
+	if SameOrigin(from, to) {
 		return nil
 	}
 	status := 0
@@ -99,30 +99,36 @@ func sameOriginRedirect(req *http.Request, via []*http.Request) error {
 	return http.ErrUseLastResponse
 }
 
-// origin is the (scheme, host, port) triple of a URL: scheme and host
+// Origin is the (scheme, host, port) triple of a URL: scheme and host
 // lowercased in the ASCII range only, the scheme's default port filled in.
-// Userinfo, path and query are not part of it.
-type origin struct{ scheme, host, port string }
+// Userinfo, path and query are not part of it. Two URLs are the same origin
+// exactly when their Origin values are equal (==). Exported for
+// internal/clientkey, which binds the API key of the CLI and of ctx-armsweep
+// to the origin of their base URL with this definition (#413, #423); the
+// http→https upgrade SameOrigin allows for the backend pools is a rule of
+// those pools, not part of the triple.
+type Origin struct{ Scheme, Host, Port string }
 
-func originOf(u *url.URL) origin {
+// OriginOf builds the Origin of u.
+func OriginOf(u *url.URL) Origin {
 	host := u.Hostname()
 	zone := ""
 	if i := strings.IndexByte(host, '%'); i >= 0 {
 		host, zone = host[:i], host[i:] // an IPv6 zone names an interface: case-sensitive
 	}
-	o := origin{scheme: asciiLower(u.Scheme), host: asciiLower(host) + zone, port: u.Port()}
-	if o.port == "" {
-		switch o.scheme {
+	o := Origin{Scheme: asciiLower(u.Scheme), Host: asciiLower(host) + zone, Port: u.Port()}
+	if o.Port == "" {
+		switch o.Scheme {
 		case "http":
-			o.port = "80"
+			o.Port = "80"
 		case "https":
-			o.port = "443"
+			o.Port = "443"
 		}
 	}
 	return o
 }
 
-func (o origin) String() string { return o.scheme + "://" + net.JoinHostPort(o.host, o.port) }
+func (o Origin) String() string { return o.Scheme + "://" + net.JoinHostPort(o.Host, o.Port) }
 
 // asciiLower folds A-Z only. strings.ToLower folds Unicode as well — U+0130
 // 'İ' becomes ASCII 'i' — while net/http dials the IDNA form of a non-ASCII
@@ -138,21 +144,22 @@ func asciiLower(s string) string {
 	return string(b)
 }
 
-// sameOrigin reports whether a redirect from → to stays on the vetted origin:
+// SameOrigin reports whether a redirect from → to stays on the vetted origin:
 // identical triple, or the http→https upgrade on the same host with port
 // 80→443 or the same explicit port. Host names compare as strings (ASCII
 // case aside) — a subdomain, a trailing dot, a non-ASCII spelling or an IP
 // literal for the same name is another origin (the refusal is the safe side
-// of every such ambiguity).
-func sameOrigin(from, to origin) bool {
-	if from.host != to.host {
+// of every such ambiguity). internal/clientkey does not follow the upgrade
+// with a key; it reads the relation to advise the base URL to set (#413).
+func SameOrigin(from, to Origin) bool {
+	if from.Host != to.Host {
 		return false
 	}
-	if from.scheme == to.scheme {
-		return from.port == to.port
+	if from.Scheme == to.Scheme {
+		return from.Port == to.Port
 	}
-	return from.scheme == "http" && to.scheme == "https" &&
-		(from.port == to.port || (from.port == "80" && to.port == "443"))
+	return from.Scheme == "http" && to.Scheme == "https" &&
+		(from.Port == to.Port || (from.Port == "80" && to.Port == "443"))
 }
 
 // errGuardRefused replaces ssrfguard's refusal on the backend path. The

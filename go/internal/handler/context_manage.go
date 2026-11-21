@@ -321,7 +321,7 @@ func (h *ManageHandler) handleStats(w http.ResponseWriter, r *http.Request, ar *
 
 	stats, err := store.GetStats(ctx, h.pool, ar.ReadScopes)
 	if err != nil {
-		slog.Error("manage: stats error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: stats error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -404,7 +404,7 @@ func (h *ManageHandler) driftCensus(w http.ResponseWriter, r *http.Request, ar *
 	ctx := r.Context()
 	census, err := store.GetDriftCensus(ctx, h.pool, ar.ReadScopes, h.retrievableTypes(ctx), d.GoldIDs)
 	if err != nil {
-		slog.Error("manage: drift census error", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "manage: drift census error", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -479,7 +479,7 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 			})
 			return
 		}
-		slog.Error("manage: resolve id error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: resolve id error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -497,7 +497,7 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 	types := h.typeSnapshot(ctx)
 	block, err := readBlockForGet(ctx, h.pool, types, ar, resolvedID, grants, req.IncludeArchived, opts.omit())
 	if err != nil {
-		slog.Error("manage: get error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: get error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -561,7 +561,7 @@ func (h *ManageHandler) handleListCategories(w http.ResponseWriter, r *http.Requ
 
 	categories, err := store.ListCategories(ctx, h.pool, ar.ReadScopes)
 	if err != nil {
-		slog.Error("manage: list-categories error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: list-categories error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -601,7 +601,7 @@ func (h *ManageHandler) handleListMeta(w http.ResponseWriter, r *http.Request, a
 	// legacy alias for types_exclude — both present ⇒ union (see manageRequest).
 	blocks, more, err := store.ListMeta(ctx, h.pool, ar.ReadScopes, req.Types, unionExcludes(req.TypesExclude, req.BlockRolesExclude), after)
 	if err != nil {
-		slog.Error("manage: list-meta error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: list-meta error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -670,13 +670,14 @@ func (h *ManageHandler) updateClaimReject(ctx context.Context, data store.Update
 // manage handlers' existing envelopes is explicitly out of scope (errcode.go's
 // SCOPE note). Neither refusal writes a log line of its own: each is the
 // caller's input, not a server fault, and the request log already carries its
-// status.
-func writeUpdateFailure(w http.ResponseWriter, err error, reqID string) {
+// status. attrs go into the fault's line: the update passes its write
+// outcome (issue #453).
+func writeUpdateFailure(w http.ResponseWriter, err error, reqID string, attrs ...any) {
 	if rej := updateFailureReject(err); rej != nil {
 		writeJSONReject(w, rej)
 		return
 	}
-	slog.Error("manage: block write error", "error", err, "request_id", reqID)
+	logResponseError(w, "manage: block write error", append([]any{"error", err, "request_id", reqID}, attrs...)...)
 	writeJSON(w, http.StatusInternalServerError, map[string]any{
 		"success": false, "error": "Internal server error",
 	})
@@ -771,7 +772,7 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 			})
 			return
 		}
-		slog.Error("manage: resolve id error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: resolve id error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -791,7 +792,7 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 
 	block, _, err := store.UpdateBlock(ctx, h.pool, resolvedID, data, writableBlockScopes(ar))
 	if err != nil {
-		writeUpdateFailure(w, err, reqID)
+		writeUpdateFailure(w, err, reqID, "write_outcome", writeOutcome(err))
 		return
 	}
 	if block == nil {
@@ -833,7 +834,7 @@ func (h *ManageHandler) applySensitivityGuard(ctx context.Context, ar *auth.Auth
 	}
 	curSens, found, err := store.GetBlockSensitivity(ctx, h.pool, resolvedID, writableBlockScopes(ar))
 	if err != nil {
-		slog.Error("manage: sensitivity read error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: sensitivity read error", "error", err, "request_id", reqID)
 		return http.StatusInternalServerError, "Internal server error"
 	}
 	if !found || newSens.Rank() >= curSens.Rank() {
@@ -886,7 +887,7 @@ func (h *ManageHandler) handleDelete(w http.ResponseWriter, r *http.Request, ar 
 			})
 			return
 		}
-		slog.Error("manage: resolve id error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: resolve id error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -931,7 +932,7 @@ func (h *ManageHandler) handleGuardList(w http.ResponseWriter, r *http.Request, 
 
 	items, err := store.GuardList(ctx, h.pool, ar.ReadScopes, req.Category, req.Status, req.Types, limit)
 	if err != nil {
-		slog.Error("manage: guard-list error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: guard-list error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -963,7 +964,7 @@ func (h *ManageHandler) handleGuardStats(w http.ResponseWriter, r *http.Request,
 		pending, dirtySince, err = guard.PendingStats(ctx, h.pool, ar.ReadScopes, h.guardCheckTypes())
 	}
 	if err != nil {
-		slog.Error("manage: guard-stats error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: guard-stats error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})
@@ -1032,7 +1033,7 @@ func (h *ManageHandler) handleGuardResolve(w http.ResponseWriter, r *http.Reques
 	if len(resolveData.IDs) > 0 {
 		resolved, skipped, err := store.GuardResolveBatch(ctx, h.pool, resolveData.IDs, resolveData.Resolution, writableBlockScopes(ar))
 		if err != nil {
-			slog.Error("manage: guard-resolve batch error", "error", err, "request_id", reqID)
+			logRequestError(ctx, "manage: guard-resolve batch error", "error", err, "request_id", reqID)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"success": false, "error": "Internal server error",
 			})
@@ -1418,7 +1419,7 @@ func (h *ManageHandler) handleMCPClientCreate(w http.ResponseWriter, r *http.Req
 		CreatedBy:  ar.ApiKeyID,
 	})
 	if err != nil {
-		slog.Error("manage: create oauth client failed", "error", err)
+		logRequestError(r.Context(), "manage: create oauth client failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -1435,7 +1436,7 @@ func (h *ManageHandler) handleMCPClientCreate(w http.ResponseWriter, r *http.Req
 func (h *ManageHandler) handleMCPClientList(w http.ResponseWriter, r *http.Request) {
 	clients, err := store.ListOAuthClients(r.Context(), h.pool)
 	if err != nil {
-		slog.Error("manage: list oauth clients failed", "error", err)
+		logRequestError(r.Context(), "manage: list oauth clients failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -1456,7 +1457,7 @@ func (h *ManageHandler) handleMCPClientDelete(w http.ResponseWriter, r *http.Req
 
 	deleted, err := store.DeleteOAuthClient(r.Context(), h.pool, data.ClientID)
 	if err != nil {
-		slog.Error("manage: delete oauth client failed", "error", err)
+		logRequestError(r.Context(), "manage: delete oauth client failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -1592,7 +1593,7 @@ func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err != nil {
-		slog.Error("manage: tenant limits lookup failed", "error", err)
+		logRequestError(r.Context(), "manage: tenant limits lookup failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -1616,7 +1617,7 @@ func (h *ManageHandler) handleApiKeyCreate(w http.ResponseWriter, r *http.Reques
 			// blind-writer. Client error, not a 500 (mirrors the reserved-scope 400).
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
 		default:
-			slog.Error("manage: create api key failed", "error", err)
+			logRequestError(r.Context(), "manage: create api key failed", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		}
 		return
@@ -1692,7 +1693,7 @@ func (h *ManageHandler) rejectScopeOutsideTenant(w http.ResponseWriter, r *http.
 	}
 	owned, err := store.TenantScopes(r.Context(), h.pool, ownerTenant)
 	if err != nil {
-		slog.Error("manage: tenant scopes lookup failed", "error", err)
+		logRequestError(r.Context(), "manage: tenant scopes lookup failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return true
 	}
@@ -1716,7 +1717,7 @@ func (h *ManageHandler) handleApiKeyList(w http.ResponseWriter, r *http.Request,
 	tenantFilter, activeOnly := resolveApiKeyListParams(req.Data, ar)
 	keys, err := store.ListApiKeys(r.Context(), h.pool, tenantFilter, activeOnly)
 	if err != nil {
-		slog.Error("manage: list api keys failed", "error", err)
+		logRequestError(r.Context(), "manage: list api keys failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -1783,7 +1784,7 @@ func (h *ManageHandler) handleApiKeyDelete(w http.ResponseWriter, r *http.Reques
 		case errors.Is(err, store.ErrLastOwner):
 			writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "cannot revoke the last active owner of the tenant"})
 		default:
-			slog.Error("manage: delete api key failed", "error", err)
+			logRequestError(r.Context(), "manage: delete api key failed", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		}
 		return
@@ -1881,7 +1882,7 @@ func (h *ManageHandler) handleApiKeyUpdate(w http.ResponseWriter, r *http.Reques
 		case errors.Is(err, store.ErrWriteScopeNotAllowed):
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
 		default:
-			slog.Error("manage: update api key failed", "error", err)
+			logRequestError(r.Context(), "manage: update api key failed", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		}
 		return

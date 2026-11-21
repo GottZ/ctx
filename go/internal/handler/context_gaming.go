@@ -190,6 +190,6 @@ func (h *ManageHandler) ejectShapeView(ctx context.Context) (gamingStateView, er
 // gamingInternalError logs with the request id and returns a generic 500 —
 // internal error strings never reach the client body.
 func (h *ManageHandler) gamingInternalError(w http.ResponseWriter, ctx context.Context, msg string, err error) {
-	slog.Error(msg, "error", err, "request_id", RequestIDFromContext(ctx))
+	logRequestError(ctx, msg, "error", err, "request_id", RequestIDFromContext(ctx))
 	writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 }

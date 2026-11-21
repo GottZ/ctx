@@ -183,7 +183,7 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		match, err := store.IdenticalContentMatch(ctx, h.pool, req.Content, res.WriteScope, req.Category, req.Title,
 			req.Tags, res.Metadata, res.Sens, req.Type)
 		if err != nil {
-			slog.Error("store: hash noop check error", "error", err, "request_id", reqID)
+			logRequestError(ctx, "store: hash noop check error", "error", err, "request_id", reqID)
 			h.reject(w, ctx, authResult, req, classInternal.reject("Internal server error"))
 			return
 		}
@@ -214,7 +214,7 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// I7/S3: the conflicting row is a derivative. The refusal is decided in
 		// the store (atomic with the row lock) and answered here as 403.
-		h.reject(w, ctx, authResult, req, upsertFailureReject(err, reqID))
+		h.reject(w, ctx, authResult, req, upsertFailureReject(ctx, err, reqID))
 		return
 	}
 
@@ -228,9 +228,13 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	// snapshot (rules are data now; type_source='manual' blocks are never
 	// re-classified). No-op when no rule matches (default type stays).
 	// The post-upsert classification reuses this request's set: one rule generation per request.
-	if _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
+	// The block is committed: a client that leaves now must not leave it
+	// unclassified (issue #453), so the classification runs detached.
+	fctx, cancel := followUpContext(ctx)
+	if _, err := store.ClassifyBlockAfterUpsert(fctx, h.pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
 		slog.Warn("store: auto-classify failed", "error", err, "block_id", block.ID, "request_id", reqID)
 	}
+	cancel()
 
 	// Log write (fire-and-forget in background).
 	go func() {
@@ -245,13 +249,9 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		times := store.ExtractDates(block.Content)
-		if err := store.UpdateContentTimes(bgCtx, h.pool, block.ID, times); err != nil {
-			slog.Error("store: content_times update failed", "error", err, "block_id", block.ID, "request_id", reqID)
-		}
-		// Always populate: createdAt is included as meta-anchor even without content times.
-		if err := store.PopulateTemporal(bgCtx, h.pool, block.ID, times, block.CreatedAt); err != nil {
-			slog.Error("store: temporal populate failed", "error", err, "block_id", block.ID, "request_id", reqID)
+		// Always populated: createdAt is included as meta-anchor even without content times.
+		if _, err := store.RefreshTemporal(bgCtx, h.pool, block.ID, block.Content, block.CreatedAt); err != nil {
+			slog.Error("store: temporal refresh failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		}
 	}()
 
@@ -321,7 +321,7 @@ func parentPreflight(ctx context.Context, pool *pgxpool.Pool, req storeRequest, 
 	}
 	if err := store.ParentLinkable(ctx, pool, parentID, writeScope, req.Category, req.Title); err != nil {
 		if !errors.Is(err, store.ErrLinkScopeViolation) {
-			slog.Error("store: parent lookup error", "error", err, "request_id", reqID)
+			logRequestError(ctx, "store: parent lookup error", "error", err, "request_id", reqID)
 			return classInternal.reject("Internal server error")
 		}
 		return classUnknownParent.reject(parentNotLinkableMsg)
@@ -360,8 +360,9 @@ func linkParent(ctx context.Context, pool *pgxpool.Pool, blockID, parentID, writ
 	if err == nil {
 		return nil
 	}
-	slog.Error("store: parent link failed after the upsert — the block exists without its parent",
-		"error", err, "block_id", blockID, "parent_id", parentID, "request_id", reqID)
+	logRequestError(ctx, "store: parent link failed after the upsert — the block exists without its parent",
+		"error", err, "block_id", blockID, "parent_id", parentID, "request_id", reqID,
+		"write_outcome", writeCommitted, "link_outcome", writeOutcome(err))
 	if errors.Is(err, store.ErrLinkScopeViolation) {
 		return classUnknownParent.reject(parentNotLinkableMsg)
 	}
@@ -494,7 +495,7 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		slog.Error("failed to encode JSON response", "error", err)
+		logEncodeError(w, "failed to encode JSON response", "error", err)
 	}
 }
 
@@ -521,13 +522,13 @@ func (h *StoreHandler) classifySet(ctx context.Context) *blocktype.Set {
 // Note the asymmetry that is deliberate: a refusal is NOT logged at error
 // level. It is a client being told no, not a server fault, and at the target
 // corpus scale a rejected write must not be able to fill the error log.
-func upsertFailureReject(err error, reqID string) *writeReject {
+func upsertFailureReject(ctx context.Context, err error, reqID string) *writeReject {
 	if rej := provenanceRejectOr(err, retypeBoundReject(err)); rej != nil {
 		return rej
 	}
 	if rej := supersedesReject(err); rej != nil {
 		return rej
 	}
-	slog.Error("store: upsert error", "error", err, "request_id", reqID)
+	logRequestError(ctx, "store: upsert error", "error", err, "request_id", reqID, "write_outcome", writeOutcome(err))
 	return classInternal.reject("Internal server error")
 }

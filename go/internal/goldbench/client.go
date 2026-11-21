@@ -10,8 +10,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/clientkey"
 	"github.com/GottZ/ctx/internal/llm"
 )
+
+// keyNames are ctx-goldbench's words in a refusal of internal/clientkey.
+var keyNames = clientkey.Names{Client: "ctx-goldbench", BaseURL: "-endpoint"}
 
 // SamplingOpts sind die pro Achse festgelegten Sampling-Parameter. Sie
 // spiegeln die llm.Options der jeweiligen ctx-Pipeline, soweit die
@@ -244,11 +248,8 @@ func (c *Client) ChatWithUsage(ctx context.Context, req ChatRequest) (ChatResult
 		return ChatResult{}, fmt.Errorf("goldbench: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
 
-	resp, err := c.hc.Do(httpReq)
+	resp, err := c.send(httpReq)
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("goldbench: chat call: %w", err)
 	}
@@ -300,6 +301,28 @@ func (c *Client) ChatWithUsage(ctx context.Context, req ChatRequest) (ChatResult
 		out.TopLogprobs = llm.FirstTokenLogprobs(first.Token, first.Logprob, alts)
 	}
 	return out, nil
+}
+
+// send is how a chat call leaves ctx-goldbench (#432, #446): through
+// internal/clientkey, by the rule of the ctx CLI and ctx-armsweep — the call
+// only to the origin (scheme, host, port) of the endpoint, and a redirect
+// followed only within that origin; one anywhere else is refused before it is
+// sent, the prompt with it. With an API key the key goes along as a bearer
+// token (net/http alone keeps Authorization on another port or scheme of the
+// same host name); without one no header is attached, and the rule still
+// holds the prompt, which net/http alone re-sends on a 307 or 308 to any host.
+func (c *Client) send(req *http.Request) (*http.Response, error) {
+	var kt clientkey.Transport
+	var err error
+	if c.apiKey == "" {
+		kt, err = clientkey.NewUnkeyed(c.url, keyNames)
+	} else {
+		kt, err = clientkey.NewBearer(c.url, c.apiKey, keyNames)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("-endpoint is not a usable URL: %w", err)
+	}
+	return kt.Do(c.hc, req)
 }
 
 // truncateErr kürzt Fehler-Bodies für die Fehlermeldung.

@@ -45,9 +45,11 @@ import datetime
 import json
 import os
 import ssl
+import string
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 EXIT_PASS = 0
@@ -82,6 +84,65 @@ def _ssl_context() -> ssl.SSLContext | None:
     return None
 
 
+_DEFAULT_PORTS = {"http": "80", "https": "443"}
+_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def _origin(url: str) -> tuple[str, str, str]:
+    """Scheme, host and port of url as internal/clientkey compares them (#432):
+    scheme and host folded in the ASCII range only — a non-ASCII host compares
+    exactly, a refusal is the safe side — an IPv6 zone as written, the
+    scheme's default port filled in, userinfo not part of it."""
+    parts = urllib.parse.urlsplit(url)
+    hostport = parts.netloc.rpartition("@")[2]
+    if hostport.startswith("["):
+        host, _, rest = hostport[1:].partition("]")
+        port = rest[1:]
+    else:
+        host, _, port = hostport.partition(":")
+    host, pct, zone = host.partition("%")
+    scheme = parts.scheme.translate(_ASCII_LOWER)
+    return scheme, host.translate(_ASCII_LOWER) + pct + zone, port or _DEFAULT_PORTS.get(scheme, "")
+
+
+def _written(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}"
+
+
+class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only within the origin of the request — every request
+    starts at --base-url — the rule of the ctx CLI's key (internal/clientkey,
+    #432). urllib's own handler copies every request header to any Location:
+    the admin key's X-Context-Key and the model key's Authorization with it.
+    A redirect anywhere else is refused before it is sent."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _origin(newurl) != _origin(req.full_url):
+            fp.close()
+            raise urllib.error.URLError(
+                f"refused a redirect (HTTP {code}) to {_written(newurl)}: smoke.py sends its keys only to the origin "
+                f"of --base-url, {_written(req.full_url)}, and follows a redirect only within it")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER: urllib.request.OpenerDirector | None = None
+
+
+def _open(req: urllib.request.Request, timeout: float):
+    """urllib.request.urlopen with _SameOriginRedirect as the redirect handler.
+    The opener is built once, as urlopen builds its own: building one loads
+    the CA store (about 6 ms)."""
+    global _OPENER
+    if _OPENER is None:
+        handlers = [_SameOriginRedirect]
+        ctx = _ssl_context()
+        if ctx is not None:
+            handlers.append(urllib.request.HTTPSHandler(context=ctx))
+        _OPENER = urllib.request.build_opener(*handlers)
+    return _OPENER.open(req, timeout=timeout)
+
+
 def http(method: str, url: str, body=None, headers=None, timeout: float = TIMEOUT_S):
     """One request without retries: (status, headers, raw body)."""
     data = None if body is None else json.dumps(body).encode()
@@ -89,7 +150,7 @@ def http(method: str, url: str, body=None, headers=None, timeout: float = TIMEOU
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as r:
+        with _open(req, timeout) as r:
             return r.status, r.headers, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.headers, e.read()
@@ -268,9 +329,22 @@ def _sdk(b: str, key: str):
         import openai  # noqa: PLC0415 — optional: only run/t25 need it
     except ImportError:
         return None
+
+    def same_origin(request):
+        # The SDK's HTTP client follows redirects and keeps Authorization on
+        # an http → https upgrade of the same host (port 80 → 443); every hop
+        # is held to the origin of --base-url instead, before it is sent (#432).
+        # The base is compared as the client writes it: a Unicode host in its
+        # IDNA form (xn--…), as the request carries it.
+        to = str(request.url)
+        if _origin(to) != _origin(str(type(request.url)(b))):
+            raise openai.OpenAIError(f"refused a request to {_written(to)}: smoke.py sends its keys only to the origin "
+                                     f"of --base-url, {_written(b)}, and follows a redirect only within it")
+
     # The SDK verifies TLS itself; CTX_SMOKE_INSECURE covers the raw probes
     # only (the shipped reverse proxy serves a certificate curl accepts).
-    return openai.OpenAI(base_url=b + "/v1/", api_key=key, max_retries=0, timeout=TIMEOUT_S)
+    return openai.OpenAI(base_url=b + "/v1/", api_key=key, max_retries=0, timeout=TIMEOUT_S,
+                         http_client=openai.DefaultHttpxClient(event_hooks={"request": [same_origin]}))
 
 
 def run(base_url: str, key: str, chat: str | None, embed: str | None, rerank: str | None, report) -> str:

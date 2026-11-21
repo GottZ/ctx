@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"log/slog"
 	"net/http"
 
 	"github.com/GottZ/ctx/internal/store"
@@ -21,7 +20,7 @@ func (h *ManageHandler) handleScopeOverview(w http.ResponseWriter, r *http.Reque
 
 	scopes, err := store.ScopeOverviews(ctx, h.pool)
 	if err != nil {
-		slog.Error("manage: scope-overview error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: scope-overview error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})

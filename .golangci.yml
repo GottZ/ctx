@@ -322,6 +322,20 @@ linters:
             - pkg: "math/rand/v2$"
               desc: "the hop token's nonce and the instance key are secrets: their only randomness source is crypto/rand — math/rand/v2 (also ChaCha8/PCG) is seedable and therefore predictable, and no test can tell its output from crypto/rand's"
 
+        # internal/clientkey (#423): the one rule that attaches the API key of
+        # a ctx client to a request, bound to the origin of its base URL —
+        # internal/cli and internal/armsweep both send through it. A leaf below
+        # them: it imports the standard library and internal/httpx (the Origin
+        # definition; httpx brings internal/ssrfguard) and nothing else, so a
+        # bench tool that sends through it links neither the command tree nor
+        # another server package. Tests are included.
+        clientkey-leaf:
+          files:
+            - "**/go/internal/clientkey/**"
+          allow:
+            - "$gostd"
+            - "github.com/GottZ/ctx/internal/httpx$"
+
         # internal/federation (F-W9, design/04 §4.5–§4.7): the ingress policy
         # of the model API — PeerIngress, ResolvePolicy, ScanRaise,
         # FilterChain. It takes the consumer through an injected accessor and

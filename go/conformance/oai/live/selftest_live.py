@@ -11,6 +11,7 @@ Not collected by the in-process harness (``pytest conformance/oai`` collects
 Every test names its gate. Nothing here talks to a real ctx or engine.
 """
 
+import importlib.util
 import json
 import os
 import pathlib
@@ -41,7 +42,11 @@ class Fake:
     no-ratelimit | reasoning | reasoning-stream | no-www-auth |
     rerank-ascending | create-no-key | proxy-ok | proxy-wrong | no-rerank |
     prefill-refused | retry-max | retry-proxy | retry-proxy-only |
-    retry-json-house | retry-html-door.
+    retry-json-house | retry-html-door | moved.
+
+    In mode moved every request first meets a redirect within the origin
+    (302 to the same path under /moved on this server), and /moved/… answers
+    as mode on (#432).
 
     In every retry-* mode each answer carries ``Server: openresty``: behind
     the reverse proxy ctx's own answers say so too (FOLGE-W, live probe
@@ -120,6 +125,10 @@ class Fake:
 
     def route(self, h, method, body):
         path = h.path.split("?")[0]
+        if self.mode == "moved":
+            if not path.startswith("/moved/"):
+                return h._send(302, b"", {"Location": "/moved" + h.path})
+            path = path[len("/moved"):]
         with self.lock:
             self.calls.append(body.get("action") if path == "/api/manage" else f"{method} {path}")
             self.n += 1
@@ -660,3 +669,222 @@ def test_measure_retry_after_ctx_shaped_429_is_judged(fake):
     rc, got, last, out = _retry(fake, 20)
     assert rc == 1 and got.get("ok") is False and got.get("violations"), f"{fake.mode}: {rc} {last!r}\n{out}"
     assert (got.get("ctx_429"), got.get("proxy_429")) == (10, 0), f"{fake.mode} hidden as proxy: {got}"
+
+
+# ── #432: the keys go only to the origin of --base-url ──────────────────────
+
+def _serve(handle):
+    """A local server whose every GET and POST is handle(h); (server, url)."""
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            if n:
+                self.rfile.read(n)
+            handle(self)
+
+        do_POST = do_GET
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+def _answer(h, status, headers=None, body=b""):
+    h.send_response(status)
+    for k, v in (headers or {}).items():
+        h.send_header(k, v)
+    h.send_header("Content-Length", str(len(body)))
+    h.end_headers()
+    h.wfile.write(body)
+
+
+@pytest.fixture
+def elsewhere():
+    """A second origin: (url, seen) — seen lists every request that reached it
+    with the credential headers it carried. It answers like a healthy server."""
+    seen = []
+
+    def handle(h):
+        seen.append((h.command, h.path, h.headers.get("X-Context-Key"), h.headers.get("Authorization")))
+        _answer(h, 200, {"Content-Type": "application/json"}, json.dumps({"status": "ok", "version": "elsewhere"}).encode())
+
+    srv, url = _serve(handle)
+    yield url, seen
+    srv.shutdown()
+
+
+# The subcommands whose first keyed request meets the redirect, and the codes
+# urllib follows for it: GET follows every 30x, a POST 301/302/303 only (as a
+# GET, headers kept); a POST 307/308 urllib never followed.
+_AWAY = [
+    (SMOKE, ("preflight", "--admin-key-env", "CTX_SELFTEST_ADMIN"), (302, 307)),
+    (SMOKE, ("run", "--key-env", "CTX_SELFTEST_KEY"), (302, 307)),
+    (MEASURE, ("retry-after", "--key-env", "CTX_SELFTEST_KEY", "--model", "chat", "--requests", "2", "--concurrency", "1"), (302, 303)),
+    (MEASURE, ("prefill", "--key-env", "CTX_SELFTEST_KEY", "--model", "chat", "--tokens", "20"), (302, 303)),
+]
+
+
+@pytest.mark.parametrize("script,args,code", [(s, a, c) for s, a, codes in _AWAY for c in codes],
+                         ids=[f"{s.stem}-{a[0]}-{c}" for s, a, codes in _AWAY for c in codes])
+def test_keys_never_follow_a_redirect_to_another_origin(elsewhere, script, args, code):
+    """#432: a redirect from --base-url to another origin (here the same host
+    on another port) is refused before it is sent, naming the target and the
+    rule. RED before #432: urllib's default redirect handler copies every
+    request header — X-Context-Key (the admin key of preflight) and
+    Authorization (the model key) included — to any Location."""
+    target, seen = elsewhere
+    home, home_url = _serve(lambda h: _answer(h, code, {"Location": target + h.path}))
+    try:
+        rc, last, out = _run(script, args[0], "--base-url", home_url, *args[1:])
+    finally:
+        home.shutdown()
+    leaked = [s for s in seen if ADMIN in str(s) or KEY in str(s)]
+    assert not leaked, f"{script.name} {args[0]} sent a key to the second origin: {leaked}"
+    assert not seen, f"{script.name} {args[0]} sent requests to the second origin: {seen}"
+    want = f"refused a redirect (HTTP {code}) to {target}: {script.name} sends its keys only to the origin of --base-url, {home_url}"
+    assert rc == 1 and want in out, f"{script.name} {args[0]}: {rc} {last!r}, want exit 1 saying {want!r}\n{out}"
+
+
+def _module(script):
+    spec = importlib.util.spec_from_file_location(f"{script.stem}_under_test", script)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+@pytest.mark.parametrize("fake", ["moved"], indirect=True)
+@pytest.mark.parametrize("script", [SMOKE, MEASURE], ids=["smoke", "measure"])
+def test_keys_follow_a_redirect_within_the_origin(fake, script):
+    """#432: a redirect within the origin of --base-url is followed as before,
+    with the key: /api/status answers only under /moved, and only to the
+    admin key."""
+    status, _, raw = _module(script).http("GET", fake.url + "/api/status", headers={"X-Context-Key": ADMIN})
+    assert status == 200 and "foreign_load" in json.loads(raw), f"{script.name}: {status} {raw[:160]!r}"
+    assert fake.calls.count("GET /api/status") == 1, f"{script.name}: the moved path was not reached once: {fake.calls}"
+
+
+def _host(name):
+    return "http://" + name + ".example"
+
+
+# (configured, redirect target, same origin) — internal/clientkey's table: the
+# host folds in the ASCII range only (U+0130 and the Kelvin sign U+212A would
+# fold to i and k in Unicode), an IPv6 zone keeps its case.
+_ORIGINS = [
+    ("http://ctx.example", "http://ctx.example/api/query?x=1", True),
+    ("http://ctx.example", "http://ctx.example:80/api", True),
+    ("https://ctx.example:443", "https://ctx.example/api", True),
+    ("http://CTX.Example", "http://ctx.example/api", True),
+    ("HTTP://ctx.example", "http://ctx.example/api", True),
+    ("http://ctx.example", "http://u:p@ctx.example/api", True),
+    ("http://[::1]:8080", "http://[::1]:8080/api", True),
+    ("http://ctx.example", "http://elsewhere.example/api", False),
+    ("http://ctx.example", "http://eu.ctx.example/api", False),
+    ("http://ctx.example", "http://ctx.example./api", False),
+    ("http://127.0.0.1:8080", "http://localhost:8080/api", False),
+    ("http://ctx.example", "http://ctx.example:8080/api", False),
+    ("http://ctx.example", "https://ctx.example/api", False),
+    ("https://ctx.example", "http://ctx.example/api", False),
+    (_host("ikey"), _host(chr(0x130) + "key") + "/api", False),
+    (_host("kkey"), _host(chr(0x212A) + "key") + "/api", False),
+    ("http://[fe80::1%25eth0]:8080", "http://[fe80::1%25ETH0]:8080/api", False),
+]
+
+
+def _sdk_against(handler, base="http://ctx.example"):
+    """smoke.py's SDK client for base (default port 80) with its HTTP
+    client's transport replaced by handler — no socket, no proxy."""
+    httpx2 = pytest.importorskip("httpx2")
+    sdk = _module(SMOKE)._sdk(base, KEY)
+    assert sdk is not None, "the OpenAI SDK is not installed"
+    sdk._client._mounts = {}
+    sdk._client._transport = httpx2.MockTransport(handler)
+    return sdk, httpx2
+
+
+def test_sdk_keeps_its_key_to_the_origin():
+    """#432: the SDK path of run/t25 (openai → httpx2, follow_redirects on)
+    keeps Authorization on an http → https upgrade of the same host (port 80
+    → 443), httpx2's one exception to its own origin rule. smoke.py holds
+    every hop of the SDK to the origin of --base-url as well. RED before
+    #432: the https hop carried the model key."""
+    seen = []
+
+    def handler(request):
+        seen.append((str(request.url), request.headers.get("Authorization")))
+        if request.url.scheme == "http":
+            return httpx2.Response(301, headers={"Location": "https://ctx.example/v1/models"})
+        return httpx2.Response(200, json={"object": "list", "data": []})
+
+    sdk, httpx2 = _sdk_against(handler)
+    with pytest.raises(Exception) as e:
+        sdk.models.list()
+    assert [s for s in seen if s[0].startswith("https://")] == [], f"the SDK followed the upgrade: {seen}"
+    want = "refused a request to https://ctx.example: smoke.py sends its keys only to the origin of --base-url, http://ctx.example"
+    assert want in str(e.value), f"{type(e.value).__name__}: {e.value}"
+
+
+def test_sdk_follows_a_redirect_within_the_origin():
+    """#432: a redirect within the origin is still followed by the SDK, with
+    the model key."""
+    seen = []
+
+    def handler(request):
+        seen.append((request.url.path, request.headers.get("Authorization")))
+        if not request.url.path.startswith("/moved/"):
+            return httpx2.Response(302, headers={"Location": "/moved" + request.url.path})
+        return httpx2.Response(200, json={"object": "list", "data": []})
+
+    sdk, httpx2 = _sdk_against(handler)
+    sdk.models.list()
+    assert seen == [("/v1/models", f"Bearer {KEY}"), ("/moved/v1/models", f"Bearer {KEY}")], seen
+
+
+def test_sdk_accepts_a_base_url_with_a_unicode_host():
+    """#432: httpx2 sends to the IDNA form of a Unicode host (xn--…); the
+    SDK's hop check compares that with --base-url as httpx2 writes it, so the
+    first request on the base URL's own origin goes through."""
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx2.Response(200, json={"object": "list", "data": []})
+
+    sdk, httpx2 = _sdk_against(handler, base="http://bücher.example")
+    sdk.models.list()
+    assert seen == ["http://xn--bcher-kva.example/v1/models"], seen
+
+
+@pytest.mark.parametrize("fake", ["on"], indirect=True)
+@pytest.mark.parametrize("script", [SMOKE, MEASURE], ids=["smoke", "measure"])
+def test_opener_is_built_once(fake, script, monkeypatch):
+    """#432: the redirect-holding opener is built once per process, as
+    urlopen builds its own — building one loads the CA store (about 6 ms),
+    which measure.py's stream_chat would count into first_byte_s and
+    prefill_s."""
+    import urllib.request
+
+    m = _module(script)
+    built = []
+    real = urllib.request.build_opener
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *h: built.append(h) or real(*h))
+    for _ in range(3):
+        status, _, _ = m.http("GET", fake.url + "/health")
+        assert status == 200
+    assert len(built) == 1, f"{script.name} built {len(built)} openers for 3 requests"
+
+
+@pytest.mark.parametrize("script", [SMOKE, MEASURE], ids=["smoke", "measure"])
+def test_origin_rule_is_clientkeys(script):
+    """#432: both scripts compare origins as internal/clientkey does —
+    scheme, host and port, the default port filled in, the host folded in the
+    ASCII range only, userinfo not part of it."""
+    m = _module(script)
+    wrong = [(a, b, same) for a, b, same in _ORIGINS if (m._origin(a) == m._origin(b)) != same]
+    assert not wrong, f"{script.name}: origin rule differs from internal/clientkey for {wrong}"

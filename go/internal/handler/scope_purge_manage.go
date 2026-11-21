@@ -113,7 +113,7 @@ func (h *ManageHandler) handlePurge(w http.ResponseWriter, r *http.Request, ar *
 			done = res.Deleted
 			body["deleted"] = done
 		}
-		slog.Error("manage: purge failed", "scope", spec.Scope, "error", err, "deleted", done,
+		logRequestError(runCtx, "manage: purge failed", "scope", spec.Scope, "error", err, "deleted", done,
 			"api_key_id", ar.ApiKeyID, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, body)
 		return

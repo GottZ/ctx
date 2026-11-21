@@ -66,6 +66,8 @@ export default defineConfig({
     environment: 'node',
     // e2e/perf/ carries the byte-budget RULES (budget-rules.ts) — pure
     // functions over measurements, no dist/ and no browser needed.
-    include: ['src/**/*.test.ts', 'tokens/**/*.test.ts', 'e2e/contract/**/*.test.ts', 'e2e/perf/**/*.test.ts'],
+    // e2e/live/ carries the seed's redirect gate (seed-redirect.test.ts, #432)
+    // — runSeed against local node:http servers, no compose stack.
+    include: ['src/**/*.test.ts', 'tokens/**/*.test.ts', 'e2e/contract/**/*.test.ts', 'e2e/perf/**/*.test.ts', 'e2e/live/**/*.test.ts'],
   },
 })

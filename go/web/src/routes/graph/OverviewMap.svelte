@@ -189,7 +189,11 @@
     display: none;
   }
   /* Cluster title + stats — overlay top-right; non-interactive → click-through
-     so the canvas pans under it. */
+     so the canvas pans under it. The max-width leaves the right inset as the
+     left gutter too. Under content-box sizing it never bound (the padding and
+     the border came on top), so on a phone the bar ran to x = 0 (#441); with
+     border-box the first term keeps the desktop width the bar always had:
+     32rem of content, two paddings, two 1px borders. */
   .bar {
     position: absolute;
     top: var(--space-3);
@@ -198,7 +202,8 @@
     display: flex;
     align-items: baseline;
     gap: var(--space-3);
-    max-width: min(32rem, calc(100% - 2 * var(--space-3)));
+    box-sizing: border-box;
+    max-width: min(32rem + 2 * var(--space-3) + 2px, 100% - 2 * var(--space-3));
     padding: var(--space-2) var(--space-3);
     border: 1px solid var(--border);
     border-radius: var(--radius);
