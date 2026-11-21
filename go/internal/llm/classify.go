@@ -6,7 +6,7 @@
 // uncalibrated, session-24 finding). A parse failure is NOT a verdict: the
 // caller keeps the block at credentials and stamps a retry cooldown.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package llm
 

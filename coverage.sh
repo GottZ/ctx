@@ -25,7 +25,7 @@
 # Output: $COV_OUT (default .gotmp/coverage/) — coverage.txt, the merged
 # profile merged.out, per-source profiles and logs.
 #
-# ctx — Your AI's save game. By GottZ (github.com/GottZ/ctx/graphs/contributors)
+# ctx — Your AI's save game. By GottZ and Damien Moon (github.com/GottZ/ctx/graphs/contributors)
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

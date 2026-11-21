@@ -1,6 +1,6 @@
 -- =============================================================================
 -- archive-legacy-topic-maps.sql — Ablösung Stufe 2 (Welle W-H)
--- Part of ctx by GottZ (https://github.com/GottZ/ctx)
+-- Part of ctx by GottZ and Damien Moon (https://github.com/GottZ/ctx)
 -- =============================================================================
 -- Achse 02 / Welle W-H (plan-cluster-topicmap design/02 §4.6/§7 "W-H";
 -- User-Entscheid E2-02 A, DECISIONS.md: "is_archived mit gepinntem

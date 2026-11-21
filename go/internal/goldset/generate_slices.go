@@ -4,7 +4,7 @@ package goldset
 // goes into the slice profile, so a later edit shows up as changed provenance
 // instead of as silent slice drift.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 
 import (

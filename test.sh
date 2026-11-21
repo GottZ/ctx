@@ -8,7 +8,7 @@
 # because neither needs an LLM — T13-T18 predate them inside the
 # --with-ollama block.
 #
-# ctx — Your AI's save game. By GottZ (github.com/GottZ/ctx/graphs/contributors)
+# ctx — Your AI's save game. By GottZ and Damien Moon (github.com/GottZ/ctx/graphs/contributors)
 # Implements GottZ 4-Way RRF verification and GottZ Scope Model tests.
 # Source: https://github.com/GottZ/ctx
 

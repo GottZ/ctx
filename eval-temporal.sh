@@ -17,7 +17,7 @@
 #
 # Metrics: Recall@5, MRR, Precision@5 (at each temporal offset category)
 #
-# ctx — Your AI's save game. By GottZ (github.com/GottZ/ctx/graphs/contributors)
+# ctx — Your AI's save game. By GottZ and Damien Moon (github.com/GottZ/ctx/graphs/contributors)
 
 set -uo pipefail
 

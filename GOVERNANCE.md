@@ -2,17 +2,26 @@
 
 How decisions are made in ctx, who may do what, and how code reaches `root`.
 The short version: everything lands through a reviewed pull request, the
-maintainer cuts releases, and write access is a tool for working in this
+maintainers cut releases, and write access is a tool for working in this
 repository, not a way around review.
 
 ## Roles
 
 | Role | Who | May |
 |---|---|---|
-| **Maintainer** | [@GottZ](https://github.com/GottZ) (owner) | everything below, plus: merge contributors' pull requests, cut release tags, change repository settings and rulesets, grant and revoke access, publish security advisories |
-| **Code owner** | [Damien Moon](https://github.com/DamieMoon), [derLonius](https://github.com/W4-NERF) and the maintainer, per [`.github/CODEOWNERS`](.github/CODEOWNERS) | a collaborator whose approval satisfies the review requirement on `root`; requested for review automatically; merges their own pull request once it is approved (see *Who merges*) |
+| **Maintainer** (co-owner) | [@GottZ](https://github.com/GottZ) and [Damien Moon](https://github.com/DamieMoon) | everything below, plus: merge contributors' pull requests, cut release tags, change repository settings and rulesets, grant and revoke access, publish security advisories |
+| **Code owner** | [derLonius](https://github.com/W4-NERF) and the maintainers, per [`.github/CODEOWNERS`](.github/CODEOWNERS) | a collaborator whose approval satisfies the review requirement on `root`; requested for review automatically; merges their own pull request once it is approved (see *Who merges*) |
 | **Collaborator** (GitHub role *write*) | invited by the maintainer; see [Becoming a collaborator](#becoming-a-collaborator) | push branches to this repository (no fork needed), review pull requests, triage issues, apply labels, approve CI runs of first-time contributors, re-run workflows |
 | **Contributor** | anyone | fork, open pull requests, report issues, join discussions |
+
+ctx has two maintainers, who own the project together and decide together.
+The repository is hosted on the personal account @GottZ, and GitHub gives
+the admin role of such a repository to that account alone. Whatever needs
+that role — the admin bypass, `v*` tags, repository settings and rulesets,
+granting access, publishing a security advisory — is therefore carried out
+through @GottZ's account, for both maintainers; where this file says what
+"the maintainer" does with the admin role, it means that account. Damien
+Moon's GitHub role is *write*, like a collaborator's.
 
 Write access does **not** include pushing to `root`, merging without the
 required review, or creating, moving or deleting `v*` tags. The repository
@@ -149,7 +158,7 @@ SSH key; the tag ruleset enforces who may create a tag, not its signature.
 - Direction and design are discussed in
   [GitHub Discussions](https://github.com/GottZ/ctx/discussions); concrete
   work is an issue; the change itself is argued in its pull request.
-- The maintainer decides where there is no consensus. Decisions with lasting
+- The maintainers decide where there is no consensus. Decisions with lasting
   effect are written down where they apply — `docs/`, this file,
   [CONTRIBUTING.md](CONTRIBUTING.md) — not only in a thread.
 - Review findings name the evidence they rest on (a run, a read code path,

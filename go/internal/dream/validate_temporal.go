@@ -1,5 +1,5 @@
 // validate_temporal.go — Temporal Validation Step.
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // ValidateTemporal runs after PickBlock and before keyword extraction.
 // Phase 1: deterministic re-extraction (ExtractDates + ExpandDimensions).

@@ -10,7 +10,7 @@
 // Mock-Treue: Jede Abweichung vom Original ist am Ort der Abweichung als
 // Kommentar mit file:line-Quelle dokumentiert (Suchanker: "ABWEICHUNG").
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package goldbench
 

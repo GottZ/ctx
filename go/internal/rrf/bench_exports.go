@@ -3,7 +3,7 @@
 // stages — temporal gravity, dream-graph expansion, cluster boost, rerank.
 //
 // bench_exports.go — Bench-Export-Shims für ctx-goldbench.
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // Diese Datei enthält AUSSCHLIESSLICH exportierte Accessoren auf unexportierte
 // Prompts, Builder und Parser dieses Pakets für den Benchmark-Harness

@@ -54,7 +54,7 @@
 # TMPDIR stay per wave and default to <worktree>/.gotmp/gates/ when unset.
 # Logs: ${CTX_GATES_LOG:-$TMPDIR/gates}/<stage>-<UTC time>/.
 #
-# ctx — Your AI's save game. By GottZ (github.com/GottZ/ctx/graphs/contributors)
+# ctx — Your AI's save game. By GottZ and Damien Moon (github.com/GottZ/ctx/graphs/contributors)
 
 set -u
 set -f # no globbing: package lists are split on purpose, paths carry no glob characters

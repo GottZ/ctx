@@ -1,5 +1,5 @@
 // tools.go — server-side web-chat harness (F6-C3/G36).
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // Source: https://github.com/GottZ/ctx
 //

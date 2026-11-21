@@ -13,7 +13,7 @@ package goldset
 // side records the file and its digest in the REPORT instead, which is where
 // the provenance of a scoring input belongs.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 
 import (

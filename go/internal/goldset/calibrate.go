@@ -19,7 +19,7 @@ package goldset
 // The number 0.6 is unchanged; what it decides is the REACH of the gold, not
 // the verdict of the gate. The gate authority moves to the metric flip.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 
 import (

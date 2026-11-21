@@ -5,7 +5,7 @@
 // prose strings — so those became data (blocksRunSpec) and the body became one
 // handler. Every string is carried verbatim: no answer changes.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package handler
 

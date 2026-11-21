@@ -1,5 +1,5 @@
 // Package ingest — Obsidian Markdown Parser
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // Parses Obsidian Markdown files: frontmatter, wikilinks, embeds,
 // inline tags, comments, dataview, highlights, callouts, templates.

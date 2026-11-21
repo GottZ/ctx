@@ -9,7 +9,7 @@ package main
 // there is no second measurement in it, so a noise pair would be a requirement
 // it cannot use.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 
 import (

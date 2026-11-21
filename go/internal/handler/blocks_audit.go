@@ -3,7 +3,7 @@
 // opsec direction, design 03 §3.5) and the status discloses block titles plus
 // classification topology.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package handler
 

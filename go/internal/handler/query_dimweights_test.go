@@ -1,5 +1,5 @@
 // Package handler — activated_dim_weights response contract (A-W1).
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // The eval-cyclic dim_weight_pass assert reads queryResponse.ActivatedDimWeights;
 // this pins the resolution contract to the gravity-boost semantics (Step 6a):

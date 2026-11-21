@@ -1,4 +1,4 @@
-// ctx by GottZ — Go monolith: ctx CLI + ctxd daemon (MPL-2.0).
+// ctx by GottZ and Damien Moon — Go monolith: ctx CLI + ctxd daemon (MPL-2.0).
 module github.com/GottZ/ctx
 
 go 1.27.0

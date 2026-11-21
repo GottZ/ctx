@@ -1,5 +1,5 @@
 // Package ingest — Obsidian Markdown Parser Tests (TDD: written before implementation)
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // Source: https://github.com/GottZ/ctx
 package ingest
