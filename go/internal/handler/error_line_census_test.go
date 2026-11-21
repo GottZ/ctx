@@ -19,6 +19,7 @@ package handler
 import (
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/constant"
 	"go/importer"
 	"go/parser"
@@ -26,6 +27,7 @@ import (
 	"go/types"
 	"log/slog"
 	"maps"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -201,6 +203,15 @@ func typeCheckHandlerPackage() (*typedPackage, error) {
 			return nil, fmt.Errorf("parse %s: %w", f, err)
 		}
 		tp.files = append(tp.files, file)
+	}
+	// Built with -trimpath (gates.sh, CI) the test binary cannot tell go/build
+	// where GOROOT is; the go command that runs the test can.
+	if build.Default.GOROOT == "" {
+		out, err := exec.Command("go", "env", "GOROOT").Output()
+		if err != nil {
+			return nil, fmt.Errorf("go env GOROOT: %w", err)
+		}
+		build.Default.GOROOT = strings.TrimSpace(string(out))
 	}
 	imp := censusImporter{slog: importer.ForCompiler(tp.fset, "source", nil)}
 	conf := types.Config{Importer: imp, Error: func(error) {}}
