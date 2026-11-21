@@ -1660,7 +1660,9 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 		return r
 	}
 
-	// Priority 3: Seit/Bis — linear-dominant + month (spans weeks/months)
+	// Priority 3: Seit/Bis and the open edges ab/vor/nach — linear-dominant +
+	// month (spans weeks/months; effectiveDimWeights drops the month for a
+	// window longer than a year and for an open one)
 	if r := matchSeit(query, now); takes(r) {
 		r.DimensionWeights = dwLinearMonthSeit()
 		return r
