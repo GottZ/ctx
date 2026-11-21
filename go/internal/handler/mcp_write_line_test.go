@@ -10,6 +10,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -159,5 +161,31 @@ func TestToolWriteNotesOutsideACall(t *testing.T) {
 	noteToolStaged(ctx, fmt.Errorf("stage: %w", &pgconn.PgError{Code: "P0001"}), false)
 	if tw.outcome != writeRolledBack || !tw.staged {
 		t.Errorf("record %+v, want rolled_back staged", tw)
+	}
+}
+
+// BenchmarkToolWriteLine — what the line adds to one write tool call: the
+// record, the context value and the JSON line (to io.Discard), against the
+// same handler unwrapped.
+func BenchmarkToolWriteLine(b *testing.B) {
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	b.Cleanup(func() { slog.SetDefault(prev) })
+	h := func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+		noteToolWrite(ctx, nil)
+		noteToolBlock(ctx, "01990000-0000-7000-8000-000000000453")
+		return nil, nil, nil
+	}
+	ctx := context.WithValue(context.Background(), requestIDKey, "0123456789abcdef")
+	for _, tc := range []struct {
+		name string
+		h    mcp.ToolHandlerFor[struct{}, any]
+	}{{"bare", h}, {"with line", withToolWriteLine("store", h)}} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				_, _, _ = tc.h(ctx, nil, struct{}{})
+			}
+		})
 	}
 }
