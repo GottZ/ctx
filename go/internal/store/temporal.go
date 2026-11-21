@@ -224,9 +224,11 @@ const contentVersionCol = `content_hash = encode(digest($2::text, 'sha256'), 'he
 // RecordEmbedFailureIfUnchanged) neither wait for this transaction nor skip
 // the block because of it. FOR UPDATE does, as it did before: the pre-read of
 // UpsertBlock and the lock pass of UpsertBlocks wait for the commit, and the
-// FOR UPDATE SKIP LOCKED pickers (the embed arm, the guard batch) skip the
-// block meanwhile. Before, the guard also took the row lock FOR NO KEY UPDATE
-// (the UPDATE of content_times) and held it to the commit.
+// FOR UPDATE SKIP LOCKED picks of the embed arm, the dream and the embed
+// migration skip the block meanwhile; the guard batch picks FOR NO KEY UPDATE
+// SKIP LOCKED (issue #359) and does not. Before, the guard also took the row
+// lock FOR NO KEY UPDATE (the UPDATE of content_times) and held it to the
+// commit.
 //
 // What the lock did is done by the turn the temporal writers of a block take
 // (temporalWriterLockSQL, below). The guard stays the last statement: a
