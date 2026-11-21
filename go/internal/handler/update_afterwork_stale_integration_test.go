@@ -218,11 +218,9 @@ poll:
 		t.Logf("A's afterwork finished without waiting on the in-flight write")
 	}
 
-	gotTimes, _ := i414Temporal(t, f, id)
-	staleTimes, _ := i414Derived(i414ContentA, time.Time{})
-	if slices.Equal(gotTimes, staleTimes) {
-		t.Errorf("content_times = %v: A's afterwork applied A's dates over content B", gotTimes)
-	}
+	// A's afterwork wrote nothing: the block still has the data of the
+	// content before A, neither column nor rows of A.
+	i414AssertDerivedFrom(t, f, id, i414Initial, "after A's afterwork over the in-flight write")
 
 	blockB, err := store.GetBlock(f.ctx, f.pool, nil, id, writableBlockScopes(f.directAR), nil)
 	if err != nil || blockB == nil {

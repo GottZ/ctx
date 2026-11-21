@@ -148,7 +148,7 @@ func BuildTemporalBatch(blockID string, times []time.Time, links ...[]string) (*
 // (writeTemporalGuarded).
 func PopulateTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content string, contentTimes []time.Time, createdAt time.Time) (applied bool, err error) {
 	return writeTemporalGuarded(ctx, pool, blockID, contentTimes, createdAt,
-		`SELECT 1 FROM context_blocks WHERE `+contentVersionWhere+` FOR NO KEY UPDATE`,
+		`SELECT `+contentVersionCol+` FROM context_blocks WHERE id = $1 FOR NO KEY UPDATE`,
 		blockID, content)
 }
 
@@ -169,39 +169,43 @@ func PopulateTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content 
 func RefreshTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content string, createdAt time.Time) (applied bool, err error) {
 	times := ExtractDates(content)
 	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt,
-		`UPDATE context_blocks SET content_times = $3::timestamptz[] WHERE `+contentVersionWhere,
+		`UPDATE context_blocks SET content_times = $3::timestamptz[] WHERE id = $1 RETURNING `+contentVersionCol,
 		blockID, content, times)
 }
 
-// contentVersionWhere selects the block $1 while it holds the content $2: the
-// stored content_hash (a generated column) against the same expression of $2,
-// the predicate identicalContentWhere uses. It reads the one row the guard
-// locks, through the primary key; the hash is in the row, so the comparison
-// reads no TOASTed content.
-const contentVersionWhere = `id = $1 AND content_hash = encode(digest($2::text, 'sha256'), 'hex')`
+// contentVersionCol answers whether the block row holds the content $2: the
+// stored content_hash (a generated column; content is NOT NULL, so it is never
+// NULL) against the same expression of $2, the comparison identicalContentWhere
+// makes. The guards return it as a column instead of filtering on it, so their
+// WHERE names the primary key alone: content_hash is not unique and has an
+// index of its own, and a planner that chose that index for a hash many blocks
+// share (identical contents are common) would read every one of them. The
+// comparison reads the row version the guard locked; the hash is in that row,
+// so no TOASTed content is read.
+const contentVersionCol = `content_hash = encode(digest($2::text, 'sha256'), 'hex')`
 
 // writeTemporalGuarded writes the dimension rows of a block and then runs
-// guardSQL, a statement on the block row that matches only while the block
-// holds the content the rows were derived from; it commits when the guard
-// matched one row and rolls back otherwise. After the BEGIN, the rows and the
-// guard travel in one round trip; the commit or rollback is the last.
+// guardSQL, a statement that locks the block row by its primary key and
+// answers contentVersionCol for it; it commits when the answer is true and
+// rolls back when it is false or the row is gone. After the BEGIN, the rows
+// and the guard travel in one round trip; the commit or rollback is the last.
 //
 // The guard is the LAST statement, and that is the whole design: it takes the
 // block's row lock (FOR NO KEY UPDATE, or the UPDATE's own lock, which is the
 // same), and a content write needs that lock, so from the guard to the commit
 // no content write can commit — the rows commit for exactly the content the
-// guard saw. A content write in flight makes the guard wait and, once it
-// committed, re-check the row (READ COMMITTED re-evaluates the WHERE on the
-// new row version): a changed content no longer matches and the rows roll
-// back. With the guard first, the lock would be held across the dimension
-// writes as well, and a concurrent update of the block would wait for them;
-// last, the lock is held about as long as the bare content_times UPDATE held
-// it before, which committed on its own.
+// guard saw. A content write in flight makes the guard wait; once it
+// committed, READ COMMITTED locks the row's newest version and the guard
+// answers for that version, so a changed content answers false and the rows
+// roll back. With the guard first, the lock would be held across the
+// dimension writes as well, and a concurrent update of the block would wait
+// for them; last, the lock is held about as long as the bare content_times
+// UPDATE held it before, which committed on its own.
 //
 // The rows are written before the guard knows whether they stay: a stale
-// caller writes and rolls back a batch it never needed — the rare case — so
-// that the common case holds the block's lock only from the guard to the
-// commit.
+// caller writes and rolls back a batch (and RefreshTemporal's UPDATE) it never
+// needed — the rare case — so that the common case holds the block's lock only
+// from the guard to the commit.
 func writeTemporalGuarded(ctx context.Context, pool *pgxpool.Pool, blockID string, contentTimes []time.Time, createdAt time.Time, guardSQL string, guardArgs ...any) (bool, error) {
 	allTimes := contentTimes
 	if !createdAt.IsZero() {
@@ -220,14 +224,18 @@ func writeTemporalGuarded(ctx context.Context, pool *pgxpool.Pool, blockID strin
 				return fmt.Errorf("store: temporal: batch query %d: %w", i, err)
 			}
 		}
-		tag, err := br.Exec()
+		var holds bool
+		err := br.QueryRow().Scan(&holds)
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = nil // the block is gone: holds stays false
+		}
 		if cerr := br.Close(); err == nil {
 			err = cerr
 		}
 		if err != nil {
 			return fmt.Errorf("store: temporal: content version guard: %w", err)
 		}
-		if tag.RowsAffected() == 0 {
+		if !holds {
 			// The block no longer holds the content (or is gone): the
 			// bracket's rollback drops the rows.
 			return pgxdb.ErrRollback
