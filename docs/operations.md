@@ -289,6 +289,19 @@ diff <(ctx settings get mcp.instructions --text base) <(ctx settings get mcp.ins
 
 The same comparison is in `GET /api/settings/mcp.instructions` (`instructions.state`, `.base`, `.current`, `.changed_since_base`, `.history` — [api](api.md#settings-api)), and `--text <id>` prints any shipped wording. Then decide: take the new wording with `ctx settings unset mcp.instructions` (the instance follows the shipped wording again), or edit your own text — the new write moves its base to the current wording, and the note disappears. Without an own text there is nothing to do: the instance already sends the new wording.
 
+## Requests the client gave up on
+
+A request whose client closed the connection before ctxd answered — a CLI or statusline timeout, a closed browser tab, a proxy that gave up — is not a server fault, and the log does not count it as one:
+
+- The request logger's `http request` line carries **`status=499`** (the status nginx logs for the same case) plus **`handler_status`**, the status the handler wrote into the closed connection. Nothing reached the client. The line stays at `INFO`.
+- The handler's own line about the cancelled work (for example `manage: stats error` with `error="store: get stats: context canceled"`) is written at **`INFO` with `client_gone=true`** instead of `ERROR`. A failure that is not that cancellation stays `ERROR`, gone client or not.
+- `POST /api/store` names what a failed write left behind in **`write_outcome`**: `rolled_back` (the transaction ended without a commit — nothing was written), `committed` (the block was written and a later step failed; on the parent link, `link_outcome` says the same for the link), or `unknown` (the `COMMIT` was sent and its answer never arrived — the request was cancelled or the connection broke during it; the database may have committed — read the block to know).
+- A stream the client closes (`/api/events`, project events, a `keepalive:true` query) is logged the same way: `status=499`, `handler_status=200`.
+
+Everything the server ends itself stays an `ERROR` with the status the handler wrote: a deadline of its own (a handler timeout, `statement_timeout`, the connection's write deadline — `WriteTimeout` 120 s or a stream's write window — and `ReadTimeout` 30 s on a request body that arrives too slowly), a cancelled context the server owns, a failure on a request whose client still waits, and a failure during shutdown (`Shutdown` lets running requests finish; their contexts are not cancelled). The decision is one rule in the request logger: the request's own context ended with net/http's plain cancellation, and no write and no body read had failed on a connection deadline before. A client that only half-closes its connection and still reads the answer also counts as gone (net/http cannot tell it apart; a reverse proxy does not do this).
+
+`499` exists only in this log line: no client receives it, and nothing in ctxd reads the logged status (no counter, quota or rate limit). A log check that counts `level=ERROR` no longer counts clients that gave up; one that counts `status>=500` sees `499` as a 4xx. The model API (`/v1`, `/v2`) keeps its own access log (`gateway request`, see [security](security.md#gateway-telemetry-v1-v2)); a client that left is not answered there either.
+
 ## Write rejections in the server log
 
 A write `POST /api/store` refuses after its body parsed leaves a `WARN` record `store: write rejected` — at most one per key, code and minute (see *Throttled* below); the request logger's `http request` line names method, path, status and `request_id`, but not the key, and `ctx persist --hook` is silent on the client by design. The record carries:

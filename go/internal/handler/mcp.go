@@ -958,7 +958,7 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		// fatal: the block is written, and losing an audit row must not turn a
 		// completed write into an error result.
 		if err := store.LogAccess(ctx, cfg.Pool, ar.ApiKeyID, block.ID, "write"); err != nil {
-			slog.Error("mcp: write log error", "error", err, "block_id", block.ID)
+			logRequestError(ctx, "mcp: write log error", "error", err, "block_id", block.ID)
 		}
 
 		// Temporal enrichment (inline, not async — MCP calls are not latency-sensitive).
@@ -1205,7 +1205,7 @@ func resolveGrants(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthResult)
 	grants, err := store.GrantedBlockIDs(ctx, pool, ar.TenantID)
 	if err != nil {
 		if errors.Is(err, store.ErrTooManyBlockGrants) {
-			slog.Error("block grant set exceeds the per-request bound — read refused", "error", err)
+			logRequestError(ctx, "block grant set exceeds the per-request bound — read refused", "error", err)
 			return nil, err
 		}
 		// fail-closed for grant visibility: proceed scope-only, never crash the read

@@ -203,7 +203,7 @@ func meterBlobWrite(ctx context.Context, pool *pgxpool.Pool, cfg ConfigStore, ar
 	if limit > 0 {
 		writeCount, err := store.CheckRateLimitByAction(ctx, pool, ar.ApiKeyID, store.ActionBlobWrite)
 		if err != nil {
-			slog.Error("blob-store: rate limit check error", "error", err, "request_id", reqID)
+			logRequestError(ctx, "blob-store: rate limit check error", "error", err, "request_id", reqID)
 			return "", classInternal.reject("Internal server error")
 		}
 		if writeCount >= limit {
@@ -217,7 +217,7 @@ func meterBlobWrite(ctx context.Context, pool *pgxpool.Pool, cfg ConfigStore, ar
 
 	logID, err := store.LogAccessRef(ctx, pool, ar.ApiKeyID, "", store.ActionBlobWrite)
 	if err != nil {
-		slog.Error("blob-store: write metering error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "blob-store: write metering error", "error", err, "request_id", reqID)
 		return "", classInternal.reject("Internal server error")
 	}
 	return logID, nil
@@ -338,7 +338,7 @@ func blobBlockRefGate(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthResu
 	}
 	visible, err := store.BlockVisible(ctx, pool, blockID, ar.ReadScopes)
 	if err != nil {
-		slog.Error("blob-store: block-ref visibility check error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "blob-store: block-ref visibility check error", "error", err, "request_id", reqID)
 		return classInternal.reject("Internal server error")
 	}
 	if !visible {
@@ -385,7 +385,7 @@ func executeBlobWrite(ctx context.Context, pool *pgxpool.Pool, cfg ConfigStore, 
 				},
 			}
 		}
-		slog.Error("blob-store: upsert error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "blob-store: upsert error", "error", err, "request_id", reqID)
 		return nil, blobRejection(classInternal.reject("Internal server error"))
 	}
 

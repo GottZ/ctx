@@ -384,7 +384,7 @@ func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		Resource:      p.Resource, // validated above — canonical or empty
 		ExpiresAt:     time.Now().Add(5 * time.Minute),
 	}); err != nil {
-		slog.Error("oauth: persist authorization code", "error", err)
+		logRequestError(r.Context(), "oauth: persist authorization code", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -537,7 +537,7 @@ func (h *OAuthHandler) authenticateClient(w http.ResponseWriter, r *http.Request
 	}
 	client, found, err := store.GetOAuthClientByClientID(r.Context(), h.pool, clientID)
 	if err != nil {
-		slog.Error("oauth: load client for token auth", "error", err)
+		logRequestError(r.Context(), "oauth: load client for token auth", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return nil, false
 	}
@@ -565,7 +565,7 @@ func (h *OAuthHandler) authenticateClient(w http.ResponseWriter, r *http.Request
 	}
 	ok, err := store.ValidateOAuthClientSecret(r.Context(), h.pool, clientID, secret)
 	if err != nil {
-		slog.Error("oauth: validate client secret", "error", err)
+		logRequestError(r.Context(), "oauth: validate client secret", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return nil, false
 	}
@@ -615,7 +615,7 @@ func (h *OAuthHandler) tokenRefresh(w http.ResponseWriter, r *http.Request, req 
 	pair, outcome, err := store.RotateRefreshToken(r.Context(), h.pool, req.refreshToken, req.client,
 		accessTokenTTL(), refreshTokenTTL(), refreshFamilyCap())
 	if err != nil {
-		slog.Error("oauth: rotate refresh token", "error", err)
+		logRequestError(r.Context(), "oauth: rotate refresh token", "error", err)
 		oauthError(w, "invalid_grant", "refresh token invalid or expired")
 		return
 	}
@@ -644,7 +644,7 @@ func (h *OAuthHandler) tokenAuthorizationCode(w http.ResponseWriter, r *http.Req
 	// the same order as the previous in-memory take (consume, then reject).
 	ac, err := store.TakeOAuthCode(r.Context(), h.pool, codeHash(req.code))
 	if err != nil {
-		slog.Error("oauth: take authorization code", "error", err)
+		logRequestError(r.Context(), "oauth: take authorization code", "error", err)
 		oauthError(w, "invalid_grant", "code expired or not found")
 		return
 	}
@@ -717,7 +717,7 @@ func (h *OAuthHandler) tokenAuthorizationCode(w http.ResponseWriter, r *http.Req
 		pair, err = store.MintAccessToken(r.Context(), h.pool, tok, accessTokenTTL())
 	}
 	if err != nil {
-		slog.Error("oauth: mint token pair", "error", err)
+		logRequestError(r.Context(), "oauth: mint token pair", "error", err)
 		oauthError(w, "invalid_grant", "code expired or not found")
 		return
 	}

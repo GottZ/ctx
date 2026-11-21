@@ -12,7 +12,6 @@ package handler
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"strings"
 	"unicode"
@@ -92,7 +91,7 @@ func (h *OAuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	if mode == "admin" {
 		ar, err := resolveCredential(r.Context(), h.pool, credentialFromRequest(r))
 		if err != nil {
-			slog.Error("oauth: dcr admin auth", "error", err)
+			logRequestError(r.Context(), "oauth: dcr admin auth", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -140,7 +139,7 @@ func (h *OAuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	client, secret, err := store.RegisterOAuthClient(r.Context(), h.pool, spec)
 	if err != nil {
-		slog.Error("oauth: dcr register client", "error", err)
+		logRequestError(r.Context(), "oauth: dcr register client", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

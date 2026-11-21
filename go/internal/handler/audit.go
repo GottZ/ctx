@@ -148,7 +148,7 @@ func (h *AuditHandler) HandleAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		slog.Error("audit: list failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "audit: list failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}

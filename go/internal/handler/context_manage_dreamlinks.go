@@ -37,7 +37,7 @@ func (h *ManageHandler) handleDreamBackoffRestamp(w http.ResponseWriter, r *http
 	linkable := h.dreamLinkableTypes(ctx)
 	restamped, skippedTransient, err := dream.RestampBackoff(ctx, h.pool, scopes, linkable, h.cfg.Snapshot().DreamBackoff()) //nolint:forbidigo // MT 06 BLIND: dream back-off is a server-global scheduler policy (the dream loop is process-wide), not tenant-scoped — same marker as handleDreamStats.
 	if err != nil {
-		slog.Error("manage: dream-backoff-restamp failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: dream-backoff-restamp failed", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "dream backoff restamp failed",
 		})
@@ -95,7 +95,7 @@ func (h *ManageHandler) handleDreamLinkResolve(w http.ResponseWriter, r *http.Re
 		data.SourceID, data.TargetID, data.Relationship, data.Resolution, data.Rationale,
 		writableBlockScopes(ar))
 	if err != nil {
-		slog.Error("manage: dream-link-resolve error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: dream-link-resolve error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})

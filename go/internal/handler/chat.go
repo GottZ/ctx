@@ -282,7 +282,7 @@ func (h *ChatHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		sess, err = store.CreateSession(r.Context(), h.pool, ar.HomeScope, ar.ReadScopes, ar.ApiKeyID, "")
 	}
 	if err != nil {
-		slog.Error("chat: load/create session", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "chat: load/create session", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -326,7 +326,7 @@ func (h *ChatHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		// the stream never started, so a clean 409 is still possible.
 		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "a turn is already running for this session"})
 	case !sink.committed():
-		slog.Error("chat: turn failed before stream start", "session", sess.ID, "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "chat: turn failed before stream start", "session", sess.ID, "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 	default:
 		// Stream already open: the client vanished or a mid-stream persist
@@ -409,7 +409,7 @@ func (h *ChatHandler) HandleListSessions(w http.ResponseWriter, r *http.Request)
 	limit := atoiDefault(r.URL.Query().Get("limit"), 50)
 	sessions, err := store.ListSessions(r.Context(), h.pool, ar.HomeScope, limit)
 	if err != nil {
-		slog.Error("chat: list sessions", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "chat: list sessions", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -419,7 +419,7 @@ func (h *ChatHandler) HandleListSessions(w http.ResponseWriter, r *http.Request)
 	}
 	counts, err := store.MessageCounts(r.Context(), h.pool, ids)
 	if err != nil {
-		slog.Error("chat: message counts", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "chat: message counts", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -446,7 +446,7 @@ func (h *ChatHandler) HandleGetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		slog.Error("chat: get session", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "chat: get session", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -454,7 +454,7 @@ func (h *ChatHandler) HandleGetSession(w http.ResponseWriter, r *http.Request) {
 	limit := atoiDefault(r.URL.Query().Get("limit"), 0)
 	msgs, err := store.ListMessages(r.Context(), h.pool, sess.ID, afterSeq, limit)
 	if err != nil {
-		slog.Error("chat: list messages", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "chat: list messages", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -477,7 +477,7 @@ func (h *ChatHandler) HandleDeleteSession(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err != nil {
-		slog.Error("chat: delete session", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "chat: delete session", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}

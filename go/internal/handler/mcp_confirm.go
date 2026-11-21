@@ -84,7 +84,7 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 			return errResultReject(rej), nil, nil
 		}
 		if err != nil {
-			slog.Error("mcp: stage supersedes check failed", "error", err, "request_id", reqID)
+			logRequestError(ctx, "mcp: stage supersedes check failed", "error", err, "request_id", reqID)
 			return classInternal.errResult("stage failed: cannot check supersedes"), nil, nil
 		}
 	}
@@ -115,7 +115,7 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, res.WriteScope, "store", "mcp", canonical, hash, ttl)
 	if err != nil {
-		slog.Error("mcp: stage pending write failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "mcp: stage pending write failed", "error", err, "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil
 	}
 
@@ -134,7 +134,7 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 	// one. Logged, never fatal: losing an audit row must not turn a persisted
 	// stage into an error result.
 	if err := store.LogAccess(ctx, cfg.Pool, ar.ApiKeyID, "", "write"); err != nil {
-		slog.Error("mcp: staged write log error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "mcp: staged write log error", "error", err, "request_id", reqID)
 	}
 
 	expiry := "never (writes.confirm_ttl = 0)"
@@ -243,7 +243,7 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 			noun := confirmBlockOpNoun(out.Op)
 			return errResult(fmt.Sprintf("confirmed %s failed to execute: block no longer accessible — the stage token is consumed; re-stage the %s", noun, noun)), nil, nil
 		default: // confirmInfraErr
-			slog.Error("mcp: confirm infrastructure error", "error", out.Err, "op", out.Op, "request_id", RequestIDFromContext(ctx))
+			logRequestError(ctx, "mcp: confirm infrastructure error", "error", out.Err, "op", out.Op, "request_id", RequestIDFromContext(ctx))
 			return errResult("confirm failed: internal error"), nil, nil
 		}
 	}

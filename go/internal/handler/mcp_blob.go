@@ -243,7 +243,7 @@ func mcpBlobLinkHandler(cfg MCPConfig) mcp.ToolHandlerFor[blobLinkInput, any] {
 
 		blob, err := store.UpdateBlobBlockRef(ctx, cfg.Pool, input.ID, input.ContextBlockID, writableBlockScopes(ar))
 		if err != nil {
-			slog.Error("mcp blob_link: update error", "error", err, "request_id", reqID)
+			logRequestError(ctx, "mcp blob_link: update error", "error", err, "request_id", reqID)
 			return classInternal.errResult("blob_link failed: internal error"), nil, nil
 		}
 		if blob == nil {
@@ -293,7 +293,7 @@ func mcpStageBlobLink(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, i
 
 	scope, err := store.BlobWriteScope(ctx, cfg.Pool, input.ID, writableBlockScopes(ar))
 	if err != nil {
-		slog.Error("mcp blob_link: stage scope lookup error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "mcp blob_link: stage scope lookup error", "error", err, "request_id", reqID)
 		return classInternal.errResult("stage failed: internal error"), nil, nil
 	}
 	if scope == "" {
@@ -317,7 +317,7 @@ func mcpStageBlobLink(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, i
 
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, scope, store.OpBlobLink, "mcp", canonical, hash, ttl)
 	if err != nil {
-		slog.Error("mcp: stage pending blob link failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "mcp: stage pending blob link failed", "error", err, "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil
 	}
 
@@ -443,7 +443,7 @@ func mcpStageBlobStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, 
 
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, writeScope, store.OpBlobStore, "mcp", canonical, hash, ttl)
 	if err != nil {
-		slog.Error("mcp: stage pending blob write failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "mcp: stage pending blob write failed", "error", err, "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil
 	}
 
@@ -493,7 +493,7 @@ func mcpBlobFetchHandler(cfg MCPConfig) mcp.ToolHandlerFor[blobFetchInput, any] 
 		// same ranged path — one range implementation, not one per selector.
 		blob, err := blobFetchTarget(ctx, cfg, ar, input, length)
 		if err != nil {
-			slog.Error("mcp blob_fetch: query error", "error", err, "request_id", RequestIDFromContext(ctx))
+			logRequestError(ctx, "mcp blob_fetch: query error", "error", err, "request_id", RequestIDFromContext(ctx))
 			return errResult(fmt.Sprintf("blob_fetch failed: %v", err)), nil, nil
 		}
 		if blob == nil {

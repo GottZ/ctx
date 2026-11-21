@@ -137,7 +137,7 @@ func HealthStatus(ctx context.Context, pool *pgxpool.Pool, snap []backends.Backe
 	services := make(map[string]string, len(roles)+1)
 	if dbErr != nil {
 		services["database"] = "error"
-		slog.Error("health check: database ping failed", "error", dbErr)
+		logRequestError(ctx, "health check: database ping failed", "error", dbErr)
 	} else {
 		services["database"] = "ok"
 	}
@@ -244,7 +244,7 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		slog.Error("health check: failed to encode response", "error", err)
+		logEncodeError(w, "health check: failed to encode response", "error", err)
 	}
 }
 

@@ -147,7 +147,7 @@ func stageBatchSupersedesCheck(ctx context.Context, cfg MCPConfig, set *blocktyp
 		}
 	}
 	if err != nil {
-		slog.Error("mcp: stage batch supersedes check failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "mcp: stage batch supersedes check failed", "error", err, "request_id", reqID)
 		return classInternal.errResult("stage failed: cannot check supersedes")
 	}
 	return nil
@@ -222,7 +222,7 @@ func stageBatchUnchanged(ctx context.Context, cfg MCPConfig, plan *storeBatchPla
 			return nil
 		})
 	if err != nil {
-		slog.Error("mcp: stage batch hash noop check error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "mcp: stage batch hash noop check error", "error", err, "request_id", reqID)
 		return nil, classInternal.reject("Internal server error")
 	}
 	return ids, nil
@@ -292,7 +292,7 @@ func mcpStageStoreBatch(ctx context.Context, cfg MCPConfig, set *blocktype.Set, 
 		return errResultReject(rej), nil, nil
 	}
 	if err != nil {
-		slog.Error("mcp: stage pending batch failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "mcp: stage pending batch failed", "error", err, "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil
 	}
 

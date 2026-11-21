@@ -68,7 +68,7 @@ func (h *DigestHandler) HandleDigest(w http.ResponseWriter, r *http.Request) {
 	// under (T12: tenant key == write scope on the request path).
 	err := digest.RunDigest(ctx, h.pool, h.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, authResult.HomeScope, authResult.HomeScope, window)
 	if err != nil {
-		slog.Error("digest: run error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "digest: run error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Digest generation failed",
 		})

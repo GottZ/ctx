@@ -18,7 +18,6 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strings"
 
@@ -131,7 +130,7 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 	case confirmUnreadable:
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "staged payload unreadable"})
 	case confirmExecErr:
-		slog.Error("confirm: confirmed write execute failed", "error", out.Err, "op", out.Op, "request_id", reqID)
+		logRequestError(r.Context(), "confirm: confirmed write execute failed", "error", out.Err, "op", out.Op, "request_id", reqID)
 		verb, noun := "write", "write"
 		if out.Op == "update" || out.Op == store.OpArchive {
 			verb = confirmBlockOpNoun(out.Op)
@@ -149,7 +148,7 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": gone})
 	default: // confirmInfraErr
-		slog.Error("confirm: infrastructure error", "error", out.Err, "request_id", reqID)
+		logRequestError(r.Context(), "confirm: infrastructure error", "error", out.Err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 	}
 }

@@ -23,7 +23,6 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 
 	"github.com/GottZ/ctx/internal/config"
@@ -368,6 +367,6 @@ func (h *SecretsHandler) deleteSealed(r *http.Request, name, scope string) (bool
 // fail logs the cause and answers a value-free 500 — secrets error paths
 // never echo request material.
 func (h *SecretsHandler) fail(w http.ResponseWriter, r *http.Request, msg string, err error) {
-	slog.Error(msg, "error", err, "request_id", RequestIDFromContext(r.Context()))
+	logRequestError(r.Context(), msg, "error", err, "request_id", RequestIDFromContext(r.Context()))
 	writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 }

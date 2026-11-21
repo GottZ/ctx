@@ -8,7 +8,6 @@
 package handler
 
 import (
-	"log/slog"
 	"net/http"
 
 	"github.com/GottZ/ctx/internal/events"
@@ -59,7 +58,7 @@ func (h *ManageHandler) writeBlocksAuditStatus(w http.ResponseWriter, r *http.Re
 	}
 	pending, bySource, err := store.AuditProgress(r.Context(), h.pool, scope)
 	if err != nil {
-		slog.Error("manage: audit progress query failed", "error", err)
+		logRequestError(r.Context(), "manage: audit progress query failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Failed to read audit progress",
 		})

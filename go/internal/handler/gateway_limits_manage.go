@@ -221,7 +221,7 @@ func (h *ManageHandler) writeGLStoreError(w http.ResponseWriter, kind gatewaylim
 		}
 		return
 	}
-	slog.Error("gateway limits: store", "error", err)
+	logResponseError(w, "gateway limits: store", "error", err)
 	writeConsumerError(w, http.StatusInternalServerError, "internal error")
 }
 

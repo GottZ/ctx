@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 
 	"github.com/GottZ/ctx/internal/forge"
@@ -94,7 +93,7 @@ func (h *ManageHandler) handleForgeTokenSet(w http.ResponseWriter, r *http.Reque
 	}
 	if err := h.forge.SetToken(r.Context(), *row, d.Token); err != nil {
 		// Never surface the error detail (may embed sealbox/secret context, §5.4).
-		slog.Error("forge: token-set failed", "project", row.ID, "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "forge: token-set failed", "project", row.ID, "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "failed to set token"})
 		return
 	}
@@ -129,7 +128,7 @@ func (h *ManageHandler) handleForgeSyncStart(w http.ResponseWriter, r *http.Requ
 			// The clear §6.4 refusal — pass the message (no sensitive content).
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
 		default:
-			slog.Error("forge: sync-start failed", "project", row.ID, "error", err, "request_id", RequestIDFromContext(r.Context()))
+			logRequestError(r.Context(), "forge: sync-start failed", "project", row.ID, "error", err, "request_id", RequestIDFromContext(r.Context()))
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "failed to start sync"})
 		}
 		return

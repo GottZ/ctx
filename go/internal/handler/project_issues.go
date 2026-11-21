@@ -93,7 +93,7 @@ func (h *ProjectIssuesHandler) resolveScope(w http.ResponseWriter, r *http.Reque
 	ar := AuthResultFromContext(ctx)
 	row, err := store.GetProjectByID(ctx, h.pool, chi.URLParam(r, "id"))
 	if err != nil {
-		slog.Error("project-issues: project load", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "project-issues: project load", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeInternal(w)
 		return "", false
 	}
@@ -206,7 +206,7 @@ func (h *ProjectIssuesHandler) HandleList(w http.ResponseWriter, r *http.Request
 			writeIssueListPage(w, []store.WorkflowBlockRow{}, nil)
 			return
 		}
-		slog.Error("project-issues: list", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "project-issues: list", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeInternal(w)
 		return
 	}
@@ -239,13 +239,13 @@ func (h *ProjectIssuesHandler) HandleDetail(w http.ResponseWriter, r *http.Reque
 			writeIssueNotFound(w)
 			return
 		}
-		slog.Error("project-issues: detail get", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "project-issues: detail get", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeInternal(w)
 		return
 	}
 	comments, next, err := store.ListCommentsPage(ctx, h.pool, issue.ID, scope, 0, nil)
 	if err != nil {
-		slog.Error("project-issues: detail comments", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "project-issues: detail comments", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeInternal(w)
 		return
 	}
@@ -279,7 +279,7 @@ func (h *ProjectIssuesHandler) HandleComments(w http.ResponseWriter, r *http.Req
 			writeIssueNotFound(w)
 			return
 		}
-		slog.Error("project-issues: comments parent", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "project-issues: comments parent", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeInternal(w)
 		return
 	}
@@ -299,7 +299,7 @@ func (h *ProjectIssuesHandler) HandleComments(w http.ResponseWriter, r *http.Req
 	}
 	comments, next, err := store.ListCommentsPage(ctx, h.pool, blockID, scope, limit, cursor)
 	if err != nil {
-		slog.Error("project-issues: comments list", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "project-issues: comments list", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeInternal(w)
 		return
 	}
@@ -339,7 +339,7 @@ func (h *ProjectIssuesHandler) HandleBoard(w http.ResponseWriter, r *http.Reques
 	}
 	columns, err := store.BoardColumns(ctx, h.pool, scope, set.WorkflowStates(store.IssueTypeName), labels, limit)
 	if err != nil {
-		slog.Error("project-issues: board", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "project-issues: board", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeInternal(w)
 		return
 	}

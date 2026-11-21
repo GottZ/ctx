@@ -80,7 +80,7 @@ func (h *LLMLogHandler) HandleLLMLog(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := h.pool.Query(r.Context(), sql, args...)
 	if err != nil {
-		slog.Error("llmlog: query failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "llmlog: query failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "internal error",
 		})
@@ -105,7 +105,7 @@ func (h *LLMLogHandler) HandleLLMLog(w http.ResponseWriter, r *http.Request) {
 		entries = append(entries, e)
 	}
 	if rows.Err() != nil {
-		slog.Error("llmlog: rows error", "error", rows.Err())
+		logRequestError(r.Context(), "llmlog: rows error", "error", rows.Err())
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "internal error",
 		})
@@ -172,7 +172,7 @@ func (h *LLMLogHandler) llmlogFilter(w http.ResponseWriter, r *http.Request) (ll
 		f.ConsumerIDs, err = store.TenantConsumerIDs(r.Context(), h.pool, tenant)
 	}
 	if err != nil {
-		slog.Error("llmlog: tenant attribution resolve failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "llmlog: tenant attribution resolve failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "internal error",
 		})
@@ -267,7 +267,7 @@ func (h *LLMLogHandler) HandleLLMLogDetail(w http.ResponseWriter, r *http.Reques
 		}
 		keys, kerr := store.TenantAPIKeyIDs(r.Context(), h.pool, tenant)
 		if kerr != nil {
-			slog.Error("llmlog: detail tenant key resolve failed", "error", kerr, "request_id", RequestIDFromContext(r.Context()))
+			logRequestError(r.Context(), "llmlog: detail tenant key resolve failed", "error", kerr, "request_id", RequestIDFromContext(r.Context()))
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"success": false, "error": "internal error",
 			})
@@ -295,7 +295,7 @@ func (h *LLMLogHandler) HandleLLMLogDetail(w http.ResponseWriter, r *http.Reques
 			writeLLMLogNotFound(w)
 			return
 		}
-		slog.Error("llmlog: detail query failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "llmlog: detail query failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "internal error",
 		})
