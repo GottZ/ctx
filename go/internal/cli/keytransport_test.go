@@ -112,9 +112,15 @@ func TestKeyRefusalAdvice(t *testing.T) {
 		base, to, advice string
 	}{
 		{"http://ctx.example", "https://ctx.example/api", "set CTX_BASE_URL to https://ctx.example if"},
-		{"http://ctx.example:8080", "https://ctx.example:8443/api", "set CTX_BASE_URL to https://ctx.example:8443 if"},
+		{"http://ctx.example:8080", "https://ctx.example:8080/api", "set CTX_BASE_URL to https://ctx.example:8080 if"},
+		// The path of CTX_BASE_URL is kept (a server under a path prefix),
+		// its userinfo is not repeated.
+		{"http://ctx.example/ctx", "https://ctx.example/ctx/api/whoami", "set CTX_BASE_URL to https://ctx.example/ctx if"},
+		{"http://u:pw@ctx.example/ctx/", "https://ctx.example/ctx/api", "set CTX_BASE_URL to https://ctx.example/ctx/ if"},
 		{"http://ctx.example", "https://elsewhere.example/api", ""},
 		{"http://ctx.example", "http://ctx.example:8080/api", ""},
+		{"http://ctx.example:8080", "https://ctx.example:8443/api", ""},
+		{"http://ctx.example", "https://ctx.example:8443/api", ""},
 		{"https://ctx.example", "http://ctx.example/api", ""},
 	}
 	for _, tc := range cases {
@@ -137,6 +143,9 @@ func TestKeyRefusalAdvice(t *testing.T) {
 		if tc.advice != "" && !strings.Contains(msg, tc.advice) {
 			t.Errorf("%s → %s: %q lacks %q", tc.base, tc.to, msg, tc.advice)
 		}
+		if strings.Contains(msg, "pw") {
+			t.Errorf("%s → %s: the refusal repeats userinfo: %q", tc.base, tc.to, msg)
+		}
 	}
 }
 
@@ -144,7 +153,7 @@ func TestKeyRefusalAdvice(t *testing.T) {
 // request helper that put the key on a request itself would bypass the origin
 // rule. So no CLI source spells a credential header — X-Context-Key, or
 // Authorization, which the server takes a key in as well — except the
-// keyHeader constant, and only keyTransport.RoundTrip uses that constant.
+// keyHeader constant, and only keyTransport.signed uses that constant.
 func TestKeyCredentialOnlyInKeyTransport(t *testing.T) {
 	credential := map[string]bool{"X-Context-Key": true, "Authorization": true}
 	var paths []string
@@ -215,11 +224,11 @@ func TestKeyCredentialOnlyInKeyTransport(t *testing.T) {
 		t.Errorf("a credential header is spelled outside keyHeader — attach the key through keyTransport (Client.send) instead: %v", literals)
 	}
 	if len(uses) == 0 {
-		t.Error("keyTransport.RoundTrip no longer uses keyHeader — this gate lost its subject")
+		t.Error("keyTransport.signed no longer uses keyHeader — this gate lost its subject")
 	}
 	for _, u := range uses {
-		if !strings.HasPrefix(u, "keyTransport.RoundTrip ") {
-			t.Errorf("keyHeader used outside keyTransport.RoundTrip: %s", u)
+		if !strings.HasPrefix(u, "keyTransport.signed ") {
+			t.Errorf("keyHeader used outside keyTransport.signed: %s", u)
 		}
 	}
 }

@@ -78,7 +78,7 @@ const maxRedirects = 10
 //
 // A hop is followed only on the origin of the FIRST request — via[0], the
 // configured base_url that was vetted — or as an http→https upgrade of it on
-// the same host (sameOrigin). Every other hop returns the 3xx itself
+// the same host (SameOrigin). Every other hop returns the 3xx itself
 // (http.ErrUseLastResponse): the wires turn a non-200 into a StatusError,
 // which backends.Classify maps to ClassBadRequest. The refusal is logged once,
 // with both origins and the status — never a path or query, which can carry
@@ -88,7 +88,7 @@ func sameOriginRedirect(req *http.Request, via []*http.Request) error {
 		return fmt.Errorf("stopped after %d redirects", maxRedirects)
 	}
 	from, to := OriginOf(via[0].URL), OriginOf(req.URL)
-	if sameOrigin(from, to) {
+	if SameOrigin(from, to) {
 		return nil
 	}
 	status := 0
@@ -104,7 +104,7 @@ func sameOriginRedirect(req *http.Request, via []*http.Request) error {
 // Userinfo, path and query are not part of it. Two URLs are the same origin
 // exactly when their Origin values are equal (==). Exported for the CLI, which
 // binds its API key to the origin of CTX_BASE_URL with this definition (#413);
-// the http→https upgrade sameOrigin allows for the backend pools is a rule of
+// the http→https upgrade SameOrigin allows for the backend pools is a rule of
 // those pools, not part of the triple.
 type Origin struct{ Scheme, Host, Port string }
 
@@ -143,13 +143,14 @@ func asciiLower(s string) string {
 	return string(b)
 }
 
-// sameOrigin reports whether a redirect from → to stays on the vetted origin:
+// SameOrigin reports whether a redirect from → to stays on the vetted origin:
 // identical triple, or the http→https upgrade on the same host with port
 // 80→443 or the same explicit port. Host names compare as strings (ASCII
 // case aside) — a subdomain, a trailing dot, a non-ASCII spelling or an IP
 // literal for the same name is another origin (the refusal is the safe side
-// of every such ambiguity).
-func sameOrigin(from, to Origin) bool {
+// of every such ambiguity). The CLI does not follow the upgrade with its key;
+// it reads the relation to advise the CTX_BASE_URL to set (#413).
+func SameOrigin(from, to Origin) bool {
 	if from.Host != to.Host {
 		return false
 	}

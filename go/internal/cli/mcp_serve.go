@@ -109,7 +109,7 @@ func NewMCPProxy(cfg Config, cfgErr error, allowFiles []string) (*MCPProxy, erro
 	p := &MCPProxy{cfgErr: cfgErr, connecting: make(chan struct{}, 1), connectWait: mcpServeConnectWait}
 	if cfgErr == nil {
 		p.endpoint = strings.TrimSuffix(cfg.BaseURL, "/") + "/mcp"
-		keyed, err := newKeyTransport(p.endpoint, cfg.Key, http.DefaultTransport)
+		keyed, err := newKeyTransport(cfg.BaseURL, cfg.Key, http.DefaultTransport)
 		if err != nil {
 			p.cfgErr = fmt.Errorf("CTX_BASE_URL is not a usable URL: %w", err)
 		}

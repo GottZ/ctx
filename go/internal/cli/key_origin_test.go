@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -236,6 +238,111 @@ func TestKeyRedirectChainLeavingTheOrigin(t *testing.T) {
 	}
 	if n := second.requests.Load(); n != 0 {
 		t.Errorf("the second host got %d requests", n)
+	}
+}
+
+// TestKeyBoundToCTXBaseURLNotToTheRequest: the origin is CTX_BASE_URL's, not
+// the first request's — Client.Get takes a whole URL, and one on another
+// origin is refused before it is sent.
+func TestKeyBoundToCTXBaseURLNotToTheRequest(t *testing.T) {
+	second := newSecondHost(t)
+	home := newSecondHost(t)
+	_, err := NewClient(Config{BaseURL: home.srv.URL, Key: keyOriginFixtureKey}).Get(second.srv.URL + "/health")
+	if err == nil || !strings.Contains(err.Error(), "refused a request to") {
+		t.Errorf("Get to another origin: err = %v, want a refusal", err)
+	}
+	if n := second.requests.Load(); n != 0 {
+		t.Errorf("the other origin got %d requests", n)
+	}
+}
+
+// TestKeyRequestsUseTheClientsOwnTransport: send keeps the transport of the
+// Client's http.Client (here the TLS test server's, which trusts its
+// certificate) for the first request and for a redirect within the origin.
+func TestKeyRequestsUseTheClientsOwnTransport(t *testing.T) {
+	var keyed atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/moved/") {
+			http.Redirect(w, r, "/moved"+r.URL.RequestURI(), http.StatusPermanentRedirect)
+			return
+		}
+		if r.Header.Get("X-Context-Key") == keyOriginFixtureKey {
+			keyed.Add(1)
+		}
+		_, _ = io.WriteString(w, keyOriginAnswer)
+	}))
+	t.Cleanup(srv.Close)
+	c := &Client{BaseURL: srv.URL, Key: keyOriginFixtureKey, HTTPClient: srv.Client()}
+	if _, err := c.Post("query", map[string]any{"query": "q"}); err != nil {
+		t.Fatalf("Post over the client's own TLS transport: %v", err)
+	}
+	if n := keyed.Load(); n != 1 {
+		t.Errorf("the key arrived %d times after the redirect, want 1", n)
+	}
+}
+
+// TestKeyedTimeoutKeepsNetHTTPText: a keyed request that runs out of its
+// budget fails with net/http's own timeout text, every time — send leaves the
+// client's *http.Transport in place, so the timeout stays net/http's context
+// path (a wrapped transport switches it to a timer that races the context).
+func TestKeyedTimeoutKeepsNetHTTPText(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	for i := range 20 {
+		c := NewClientWithTimeout(Config{BaseURL: srv.URL, Key: keyOriginFixtureKey}, 20*time.Millisecond, maxResponseSize)
+		_, err := c.Post("query", map[string]any{"query": "q"})
+		if err == nil || !strings.Contains(err.Error(), "(Client.Timeout exceeded while awaiting headers)") {
+			t.Fatalf("call %d: err = %v, want net/http's Client.Timeout text", i, err)
+		}
+	}
+}
+
+// TestKeyRedirectHopLimit: setting CheckRedirect replaces net/http's default,
+// so its ten-hop limit is restated — a chain within the origin ends after as
+// many requests, with the same text, as with a plain http.Client.
+func TestKeyRedirectHopLimit(t *testing.T) {
+	var hops atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hops.Add(1) > 50 {
+			_, _ = io.WriteString(w, keyOriginAnswer)
+			return
+		}
+		http.Redirect(w, r, "/api/loop", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(srv.Close)
+
+	// The reference: net/http's default redirect policy.
+	plainReq, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/api/loop", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, plainErr := http.DefaultClient.Do(plainReq)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	var plainURLErr *url.Error
+	if !errors.As(plainErr, &plainURLErr) {
+		t.Fatalf("plain err = %v, want net/http's hop limit as a *url.Error", plainErr)
+	}
+	plainHops := hops.Swap(0)
+
+	_, _, err = NewClient(Config{BaseURL: srv.URL, Key: keyOriginFixtureKey}).Do(http.MethodGet, "/api/loop", nil)
+	if err == nil {
+		t.Fatal("keyed client followed 50 redirects")
+	}
+	if got := hops.Load(); got != plainHops {
+		t.Errorf("keyed client made %d requests, a plain http.Client %d", got, plainHops)
+	}
+	want := plainURLErr.Err.Error()
+	if !strings.HasSuffix(err.Error(), want) {
+		t.Errorf("keyed error %q does not end in net/http's %q", err, want)
 	}
 }
 
