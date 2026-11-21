@@ -228,14 +228,15 @@ func (f *bfsFixture) writeAs(t *testing.T, keyCtx context.Context, title, scope,
 }
 
 // awaitWriteTail waits until the writers POST /api/store starts after it has
-// answered are through with the block (HandleStore: content_times, then
-// context_temporal, on one goroutine; the access-log row on another takes
+// answered are through with the block (HandleStore: store.RefreshTemporal on
+// one goroutine, which writes context_temporal and then content_times in one
+// transaction; the access-log row on another takes
 // no lock that conflicts). The content_times UPDATE holds the block's row
 // while it runs, and the failure memo of the query path skips a row another
 // transaction holds (store.RecordEmbedFailureIfUnchanged and
 // RecordEmbedRequestGoneIfUnchanged), so a probe whose query met that UPDATE
-// found no memo, or the earlier one (issue #393). The temporal rows are
-// written after the UPDATE has committed, and every write leaves at least one.
+// found no memo, or the earlier one (issue #393). The temporal rows
+// commit together with that UPDATE, and every write leaves at least one.
 // That signal holds for the first write of a block only: a second write of
 // the same title is an upsert of the same id, whose earlier rows are already
 // there; no probe writes a title twice.
