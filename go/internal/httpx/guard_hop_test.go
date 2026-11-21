@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // #459, tenant view: a tenant row's base_url passes the write-time check and
@@ -34,6 +35,9 @@ func guardedWithStandIn(t *testing.T, standIn string) *http.Client {
 		return guarded(ctx, network, addr)
 	}
 	c.Transport = tr
+	// A hop the layers let through to an unroutable address would otherwise
+	// wait for the kernel's connect timeout.
+	c.Timeout = 5 * time.Second
 	t.Cleanup(tr.CloseIdleConnections)
 	return c
 }
@@ -62,8 +66,13 @@ func TestGuardedPoolRedirectToInternalAddress(t *testing.T) {
 		// Layer 2, the same transport without the origin rule (a client
 		// whose CheckRedirect lets the hop through): the guard refuses the
 		// hop's dial by its resolved address.
+		// The direct request first: every dial of the client is judged, not
+		// only its first one.
 		open := guardedWithStandIn(t, row.addr())
 		open.CheckRedirect = nil
+		if _, err = postWithCredentials(t, open, loc); err == nil || !strings.Contains(err.Error(), "SSRF guard") {
+			t.Errorf("%s: the direct request was not refused by the guard: %v", loc, err)
+		}
 		_, err = postWithCredentials(t, open, "http://"+publicStandIn+"/v1/chat/completions")
 		if err == nil || !strings.Contains(err.Error(), "SSRF guard") {
 			t.Errorf("%s: the hop's dial was not refused by the guard: %v", loc, err)
