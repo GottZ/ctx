@@ -58,6 +58,36 @@ func TestExtractDates_MaerzAndMarz(t *testing.T) {
 	}
 }
 
+// --- #437 point 2: a no-break space between the parts of a date ---.
+
+// TestExtractDates_NoBreakSpaces: U+00A0 NO-BREAK SPACE and U+202F NARROW
+// NO-BREAK SPACE separate a month name from its year and a date from its time
+// as an ASCII space does — alone, repeated, mixed with \s and, in the ISO
+// form, with T. Other Unicode spaces do not, and neither do the bytes of a
+// no-break space on their own.
+func TestExtractDates_NoBreakSpaces(t *testing.T) {
+	may := []string{"2026-05-01T00:00:00Z"}
+	at1430 := []string{"2026-03-29T14:30:00Z"}
+	midnight := []string{"2026-03-29T00:00:00Z"}
+	wantDates(t, map[string][]string{
+		"Mai" + nbsp + "2026": may, "Mai" + nnbsp + "2026": may, "May" + nbsp + "2026": may,
+		"Mai" + nbsp + nbsp + "2026": may, "Mai " + nbsp + "\t" + nnbsp + "2026": may,
+		nbsp + "Mai" + nbsp + "2026" + nbsp: may, "März" + nnbsp + "2026": {"2026-03-01T00:00:00Z"},
+		"2026-03-29" + nbsp + "14:30": at1430, "2026-03-29" + nnbsp + "14:30": at1430,
+		"2026-03-29T" + nbsp + "14:30": at1430, "2026-03-29" + nbsp + "T14:30:00Z": at1430,
+		"29.03.2026" + nbsp + "14:30": at1430, "29.03.2026" + nnbsp + nbsp + "14:30": at1430,
+		// Word boundaries hold as with an ASCII space.
+		"Mai" + nbsp + "2026x": nil, "xMai" + nbsp + "2026": nil, "Mai" + nbsp + "20261": nil,
+		"29.03.2026" + nbsp + "14:30x": midnight,
+		// Only these two: THIN SPACE, FIGURE SPACE, EM SPACE and IDEOGRAPHIC
+		// SPACE separate nothing, and a lone byte of a no-break space is no
+		// space.
+		"Mai\u20092026": nil, "Mai\u20072026": nil, "Mai\u20032026": nil, "Mai\u30002026": nil,
+		"2026-03-29\u200914:30": midnight, "Mai\xa02026": nil, "Mai\xc22026": nil, "Mai\xc2 2026": nil,
+		"Mai\xe2\x80 2026": nil, "Mai\xe2\x80\xa02026": nil, "Mai\xa0\xc2\xa02026": nil,
+	})
+}
+
 // --- T25: ExtractDates rejects Go-normalized invalid dates ---.
 
 func TestExtractDates_T25_InvalidDateRejection(t *testing.T) {

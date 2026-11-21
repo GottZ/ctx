@@ -27,10 +27,10 @@ import (
 // keeps the expressions as they stood before #434, frozen, and the input
 // classes the deliberate changes since then affect):
 //
-//	ISO       \b(20[2-3]\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))(?:[T\s]+([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?Z?)?\b
-//	dot       \b(0[1-9]|[12]\d|3[01])\.(0[1-9]|1[0-2])\.(20[2-3]\d)(?:\s+([01]\d|2[0-3]):([0-5]\d))?\b
-//	German    (?i)\b(januar|februar|märz|maerz|april|mai|juni|juli|august|september|oktober|november|dezember)\s+(20[2-3]\d)\b
-//	English   (?i)\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(20[2-3]\d)\b
+//	ISO       \b(20[2-3]\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))(?:[T\s\x{A0}\x{202F}]+([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?Z?)?\b
+//	dot       \b(0[1-9]|[12]\d|3[01])\.(0[1-9]|1[0-2])\.(20[2-3]\d)(?:[\s\x{A0}\x{202F}]+([01]\d|2[0-3]):([0-5]\d))?\b
+//	German    (?i)\b(januar|februar|märz|maerz|april|mai|juni|juli|august|september|oktober|november|dezember)[\s\x{A0}\x{202F}]+(20[2-3]\d)\b
+//	English   (?i)\b(january|february|march|april|may|june|july|august|september|october|november|december)[\s\x{A0}\x{202F}]+(20[2-3]\d)\b
 //
 // Every match of every form contains a year token 20[2-3]\d at a place the
 // form fixes: at the start of an ISO date, behind the second dot of a dot
@@ -38,7 +38,9 @@ import (
 // tokens with strings.Index and tries each form only at that one place,
 // instead of running four automata, two of them case-insensitive, over every
 // byte. The regexp semantics carried over: \b and \d and \s are ASCII (\s is
-// [\t\n\f\r ], no \v); (?i) folds by Unicode simple case folding, so the
+// [\t\n\f\r ], no \v), and the date spaces between the parts of a date are \s
+// and the two no-break spaces U+00A0 and U+202F (dateSpaceAt); (?i) folds by
+// Unicode simple case folding, so the
 // Kelvin sign matches k and the long s matches s; the optional time parts are
 // greedy and fall back in the regexp's order of preference; the matches of
 // one form do not overlap, a later one starts at or after the end of the
@@ -99,14 +101,20 @@ func matchISODate(c string, s int) []int {
 
 // matchISOTime matches the optional time of the ISO form at i together with
 // the \b that ends the form, and returns the offset of the hour and the end,
-// or end -1. [T\s]+ is greedy and only its longest run can be followed by an
+// or end -1. The run of T and date spaces is greedy and only its longest run can be followed by an
 // hour digit. Of the optional seconds and Z the regexp prefers seconds with
 // Z, then seconds, then Z, then neither; the first whose end is a word
 // boundary is the match.
 func matchISOTime(c string, i int) (h, end int) {
 	h = i
-	for h < len(c) && (c[h] == 'T' || isRegexpSpace(c[h])) {
-		h++
+	for h < len(c) {
+		if c[h] == 'T' {
+			h++
+		} else if n := dateSpaceAt(c, h); n > 0 {
+			h += n
+		} else {
+			break
+		}
 	}
 	if h == i || h+5 > len(c) || !isHour2(c[h], c[h+1]) || c[h+2] != ':' || !isMinute2(c[h+3], c[h+4]) {
 		return 0, -1
@@ -138,8 +146,8 @@ func matchDotDate(c string, y int) []int {
 	}
 	d := y + 4
 	h := d
-	for h < len(c) && isRegexpSpace(c[h]) {
-		h++
+	for n := dateSpaceAt(c, h); n > 0; n = dateSpaceAt(c, h) {
+		h += n
 	}
 	if h > d && h+5 <= len(c) && isHour2(c[h], c[h+1]) && c[h+2] == ':' && isMinute2(c[h+3], c[h+4]) &&
 		isWordBoundary(c, h+5) {
@@ -152,17 +160,62 @@ func matchDotDate(c string, y int) []int {
 }
 
 // monthYearEnd checks the part of the month forms behind the month name for
-// the year token at y — \s+ before it, \b after it — and returns where the
-// month name has to end: the start of the whitespace run before y.
+// the year token at y — a run of date spaces before it, \b after it — and
+// returns where the month name has to end: the start of that run.
 func monthYearEnd(c string, y int) (w int, ok bool) {
 	if !isWordBoundary(c, y+4) {
 		return 0, false
 	}
 	w = y
-	for w > 0 && isRegexpSpace(c[w-1]) {
-		w--
+	for n := dateSpaceBefore(c, w); n > 0; n = dateSpaceBefore(c, w) {
+		w -= n
 	}
 	return w, w < y
+}
+
+// The no-break spaces that separate the parts of a date as \s does (issue
+// #437): a word processor, a web page (&nbsp;) or a typesetting system puts
+// U+00A0 between a month and its year or a date and its time to keep them on
+// one line, and U+202F, the narrow one, is what typographic and locale-aware
+// date formats use there.
+const (
+	noBreakSpace       = "\u00a0"
+	narrowNoBreakSpace = "\u202f"
+)
+
+// dateSpaceAt returns the length in bytes of the date space that starts at
+// c[i]: 1 for a byte of regexp's \s, the length of a no-break space, or 0.
+// The bytes of a no-break space are a lead byte and continuation bytes, so
+// they decode to that rune wherever they stand, whatever bytes precede them;
+// a lone byte of one is no space.
+func dateSpaceAt(c string, i int) int {
+	switch {
+	case i >= len(c):
+		return 0
+	case isRegexpSpace(c[i]):
+		return 1
+	case strings.HasPrefix(c[i:], noBreakSpace):
+		return len(noBreakSpace)
+	case strings.HasPrefix(c[i:], narrowNoBreakSpace):
+		return len(narrowNoBreakSpace)
+	}
+	return 0
+}
+
+// dateSpaceBefore returns the length in bytes of the date space that ends at
+// c[i], as dateSpaceAt does forwards.
+func dateSpaceBefore(c string, i int) int {
+	switch {
+	case i <= 0:
+		return 0
+	case isRegexpSpace(c[i-1]):
+		return 1
+	case strings.HasSuffix(c[:i], noBreakSpace):
+		return len(noBreakSpace)
+	case strings.HasSuffix(c[:i], narrowNoBreakSpace):
+		return len(narrowNoBreakSpace)
+	}
+	return 0
 }
 
 // matchMonthYear matches a month form whose month name ends at w and whose

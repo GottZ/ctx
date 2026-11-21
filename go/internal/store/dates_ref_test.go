@@ -18,6 +18,10 @@ package store
 //	#437/1  German month: m[aä]rz becomes märz|maerz — "Maerz" is March, the
 //	        spelling util.MonthDE carries; "Marz", which no table carries, no
 //	        longer matches.
+//	#437/2  The whitespace between the parts of a date — month and year, date
+//	        and time — is [\s\x{A0}\x{202F}] instead of \s (in the ISO form
+//	        [T\s\x{A0}\x{202F}] instead of [T\s]): U+00A0 NO-BREAK SPACE and
+//	        U+202F NARROW NO-BREAK SPACE separate them as an ASCII space does.
 //
 // extractDatesRefWith is the body of extractDates at 8d4a077a, verbatim except
 // that the four expressions and the bounds of the year window come from its
@@ -55,10 +59,10 @@ var (
 	}
 
 	refForms = refDateForms{
-		iso:     refFormsV434.iso,
-		dot:     refFormsV434.dot,
-		de:      regexp.MustCompile(`(?i)\b(januar|februar|märz|maerz|april|mai|juni|juli|august|september|oktober|november|dezember)\s+(20[2-3]\d)\b`),
-		en:      refFormsV434.en,
+		iso:     regexp.MustCompile(`\b(20[2-3]\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))(?:[T\s\x{A0}\x{202F}]+([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?Z?)?\b`),
+		dot:     regexp.MustCompile(`\b(0[1-9]|[12]\d|3[01])\.(0[1-9]|1[0-2])\.(20[2-3]\d)(?:[\s\x{A0}\x{202F}]+([01]\d|2[0-3]):([0-5]\d))?\b`),
+		de:      regexp.MustCompile(`(?i)\b(januar|februar|märz|maerz|april|mai|juni|juli|august|september|oktober|november|dezember)[\s\x{A0}\x{202F}]+(20[2-3]\d)\b`),
+		en:      regexp.MustCompile(`(?i)\b(january|february|march|april|may|june|july|august|september|october|november|december)[\s\x{A0}\x{202F}]+(20[2-3]\d)\b`),
 		minYear: 2020, maxYear: 2030,
 	}
 )

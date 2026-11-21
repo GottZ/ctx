@@ -40,6 +40,9 @@ var issue437Classes = []struct {
 	// before whitespace and a year token. (A differing match whose
 	// whitespace or year only the later changes accept is theirs.)
 	{"#437/1 maerz and marz", regexp.MustCompile(`(?i)mae?rz\s+20[23]\d`).MatchString, "Maerz 2026"},
+	// \s → [\s\x{A0}\x{202F}]: a match that differs has a no-break space in
+	// the run of date spaces (and, in the ISO form, T) before a digit.
+	{"#437/2 no-break spaces", regexp.MustCompile(`[\x{A0}\x{202F}][T\s\x{A0}\x{202F}]*\d`).MatchString, "Mai" + nbsp + "2026"},
 }
 
 // issue437Touched returns the name of the first class of issue437Classes
@@ -58,7 +61,8 @@ func issue437Touched(content string) string {
 const (
 	kelvinSign = "\xe2\x84\xaa" // U+212A KELVIN SIGN, folds to k
 	longS      = "\xc5\xbf"     // U+017F LATIN SMALL LETTER LONG S, folds to s
-	nbsp       = "\xc2\xa0"     // U+00A0 NO-BREAK SPACE, not in \s
+	nbsp       = "\xc2\xa0"     // U+00A0 NO-BREAK SPACE, not in \s, a date space since #437
+	nnbsp      = "\xe2\x80\xaf" // U+202F NARROW NO-BREAK SPACE, a date space since #437
 	umlautA    = "\xc3\xa4"     // ä
 	umlautCapA = "\xc3\x84"     // Ä
 )
@@ -102,6 +106,20 @@ func datesSeedCorpus() []string {
 		"Juni 2026 Juli 2026 June 2026 July 2026 May 2026 March 2026 February 2026 Februar 2026",
 		"Mai 202", "Mai 20", "Mai ", "Mai", "2026 Mai", "seit März", "im Mai 1999", "Mai 2019 Mai 2035",
 		"ümärz 2026", "_März 2026", "1März 2026", "März_2026", "März-2026", "März2026", "Mai2026.", "März\n\n\n2026\n",
+		// No-break spaces between the parts of a date (#437/2), next to word
+		// characters, \s, T, other spaces, and broken or partial sequences.
+		"Mai" + nnbsp + "2026", "Mai" + nbsp + nnbsp + " \t2026", nbsp + "Mai" + nbsp + "2026" + nbsp,
+		"Mai" + nbsp + "2026x", "xMai" + nbsp + "2026", "Mai" + nbsp + "20261", "Mai" + nbsp, nbsp + "2026",
+		"2026-03-29" + nnbsp + "14:30", "2026-03-29T" + nbsp + "14:30:00Z", "2026-03-29" + nbsp + "T" + nbsp + "14:30",
+		"2026-03-29" + nbsp + "14:30" + nbsp + "x", "2026-03-29" + nbsp + "14:2", "2026-03-29" + nbsp + nbsp,
+		"29.03.2026" + nnbsp + "14:30", "29.03.2026" + nbsp + "14:30x", "01.01.2026" + nbsp + "12:15.03.2026",
+		"29.03.2026" + nbsp + "T14:30", "29.03.2026" + nbsp,
+		"Mai\xa02026", "Mai\xc22026", "Mai\xc2 2026", "Mai\xe2\x80 2026", "Mai\xe2\x802026", "Mai\xe2\x80\xa02026",
+		"Mai\xa0\xc2\xa02026", "Mai\xc2\xc2\xa02026", "Mai\xe2\xc2\xa02026", "Mai\xe2\x80\xaf\xaf2026",
+		"Mai\xf0\x9f\xc2\xa02026", "M" + umlautA + "rz" + nbsp + "2026", "Ma" + umlautA + nbsp + "2026",
+		"2026-03-29\xc2" + "14:30", "2026-03-29\xa014:30", "2026-03-29\xe2\x80\xaf\x8014:30",
+		"Mai\u20092026", "Mai\u20072026", "Mai\u30002026", "2026-03-29\u200914:30",
+		"Mai" + strings.Repeat(nbsp, 2000) + "2026", "2026-03-29" + strings.Repeat(nnbsp+"T", 1000) + "14:30",
 		// Mixed, dense.
 		"Stand 21.11.2026 01:51, Release v5.71.0 am 2026-11-21T01:51:00Z; geplant: Dezember 2026 / December 2026.",
 		"| 2026-01-01 | 01.01.2026 | Januar 2026 | January 2026 |\n| 2026-01-01 00:00 | 01.01.2026 00:00 |",
@@ -475,7 +493,7 @@ var (
 	}
 	datesSeps = []string{
 		" ", " ", " ", "  ", "\t", "\n", "\v", "\f", "\r", nbsp, "", "", "-", ".", ":", "T", "Z", "_",
-		"x", "K", umlautA, "\xff", "\xc3", ",", "/", "1", "2",
+		"x", "K", umlautA, "\xff", "\xc3", ",", "/", "1", "2", nnbsp, "\xc2", "\xa0", "\xe2\x80",
 	}
 	datesMonthWords = strings.Fields("januar februar märz maerz marz april mai juni juli august " +
 		"september oktober november dezember january february march may june july october december")
