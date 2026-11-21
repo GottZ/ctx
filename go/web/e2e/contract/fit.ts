@@ -9,7 +9,9 @@ import { expect, type Page } from '@playwright/test'
 //      viewport.
 //   2. clipped  — an element that scrolls sideways only because it scrolls
 //      down holds no content wider than its padding box (scrollWidth <=
-//      clientWidth). overflow-y: auto alone computes overflow-x to auto, so a
+//      clientWidth), and no box inside it starts left of its padding box (the
+//      scroll range never reaches there, so scrollWidth does not count it).
+//      overflow-y: auto alone computes overflow-x to auto, so a
 //      box that is too wide inside such a region scrolls it sideways or is
 //      cut off, and the document check cannot see it: main.content (#440),
 //      the stacked blocks workbench (#439), a dialog body (#442). A region
@@ -67,6 +69,11 @@ interface FitMeasure {
  * opts out of the mobile capture (contract.ts).
  */
 export async function expectViewportFit(page: Page): Promise<void> {
+  // The fit measures text runs: wait for the web font (JetBrains Mono) as the
+  // capture does (stabilize, capture.ts), so a late font cannot move a box.
+  await page.evaluate(async () => {
+    await document.fonts.ready
+  })
   const m = await page.evaluate((slack): FitMeasure => {
     const root = document.documentElement
     const vw = root.clientWidth
@@ -142,15 +149,27 @@ export async function expectViewportFit(page: Page): Promise<void> {
         : `${label(worst)} (${px(worst.getBoundingClientRect().width)} px wide)`
     }
 
-    const visit = (el: Element, clipLeft: number, clipRight: number): void => {
+    // scroller/scrollerLeft: the nearest implied scroller above (layer 2) and
+    // its left padding edge; a box starting left of it is cut off for good.
+    const visit = (
+      el: Element,
+      clipLeft: number,
+      clipRight: number,
+      scroller: Element | null,
+      scrollerLeft: number,
+    ): void => {
       const cs = getComputedStyle(el)
       if (cs.display === 'none') return
       if (cs.clipPath !== 'none' || cs.clip !== 'auto') return
       let cl = clipLeft
       let cr = clipRight
+      let sc = scroller
+      let sl = scrollerLeft
       if (cs.position === 'fixed' || matches(el, ':modal') || matches(el, ':popover-open')) {
         cl = -Infinity
         cr = Infinity
+        sc = null
+        sl = -Infinity
       }
       if (cs.display !== 'contents') {
         const r = el.getBoundingClientRect()
@@ -161,6 +180,15 @@ export async function expectViewportFit(page: Page): Promise<void> {
             findings.push(
               `outside: ${label(el)} spans x ${px(left)}..${px(right)} in the ${vw} px viewport (${px(r.width)} px wide)`,
             )
+          }
+          if (sc !== null && r.left < sl - slack) {
+            findings.push(
+              `clipped: ${label(el)} starts at x ${px(r.left)}, left of the padding edge ${px(sl)} of ${label(sc)}, ` +
+                `which scrolls sideways only through overflow-y`,
+            )
+            // its descendants are cut off with it; one finding names the box
+            sc = null
+            sl = -Infinity
           }
         }
         if (el instanceof SVGElement || el instanceof HTMLCanvasElement) return
@@ -177,11 +205,14 @@ export async function expectViewportFit(page: Page): Promise<void> {
           }
           cl = Math.max(cl, padLeft)
           cr = Math.min(cr, padRight)
+          // a region that declares its sideways overflow owns what it clips
+          sc = exempt ? null : el
+          sl = exempt ? -Infinity : padLeft
         }
       }
-      for (const ch of Array.from(el.children)) visit(ch, cl, cr)
+      for (const ch of Array.from(el.children)) visit(ch, cl, cr, sc, sl)
     }
-    for (const ch of Array.from(document.body.children)) visit(ch, -Infinity, Infinity)
+    for (const ch of Array.from(document.body.children)) visit(ch, -Infinity, Infinity, null, -Infinity)
 
     return {
       scrollHeight: root.scrollHeight,
