@@ -408,18 +408,20 @@ cd go && go build ./cmd/ctx-goldbench
   -out report.json -md report.md      # -dry-run validates the dataset without HTTP
 ```
 
-The API key (`-api-key`, else `GOLDBENCH_API_KEY`) goes as a bearer token only to the
-origin of `-endpoint` (scheme, host and port), by the rule the ctx CLI holds
-`CTX_BASE_URL` to ([CLI reference](cli.md#cli-reference)) and through the same code
-(`internal/clientkey`). A redirect within that origin is followed; one anywhere else —
-an `http` → `https` upgrade on the same host included — is refused before it is sent,
-neither the key nor the prompt leaves, and the call fails naming the target (for an
-upgrade, also the `-endpoint` to use); its case scores 0 and counts in
-`transport_errors`, like any other failed call. With a
-key, an `-endpoint` without an `http` or `https` host fails every call before it is
-sent. Without a key nothing is bound and a redirect is followed as before. Before, the
-key went along on a redirect to another port or scheme of the endpoint's host name and
-to a subdomain of it.
+A chat call goes only to the origin of `-endpoint` (scheme, host and port), by the
+rule the ctx CLI holds `CTX_BASE_URL` to ([CLI reference](cli.md#cli-reference)) and
+through the same code (`internal/clientkey`), with an API key and without one; the key
+(`-api-key`, else `GOLDBENCH_API_KEY`) goes along as a bearer token. A redirect within
+that origin is followed; one anywhere else — an `http` → `https` upgrade on the same
+host included — is refused before it is sent, so neither the key nor the prompt leaves.
+The refusal stops the run, as in `ctx-armsweep`: every call goes to the same endpoint
+and would be refused the same way, and scoring those cases 0 would report the
+endpoint's configuration as the model's score. The run exits 1 with the refusal, which
+names the case and the target (for an upgrade, also the `-endpoint` to use), and writes
+no report; cases a `-dump-append` file already holds stay there for the resume. An
+`-endpoint` without an `http` or `https` host fails every call before it is sent.
+Before, a call without a key followed a redirect to any host, with the prompt on a 307
+or 308, and a refused redirect scored its case 0 and counted in `transport_errors`.
 
 `parse_rate` is a first-class metric on every axis: a model that cannot serve ctx's
 output contracts is unfit for ctx regardless of content quality. Since metric v2
@@ -661,7 +663,11 @@ these labels yet. `-kappa-min` has **no default** on purpose — a threshold nam
 after seeing the data describes the result instead of testing it. An endpoint
 that is not on-prem aborts the run before the first cell, on both axes the
 registry offers (declared locality and the actual host), and model, endpoint and
-prompt digest reach the stamp.
+prompt digest reach the stamp. Every chat call of the tool — generator, paraphrase
+and judge — follows a redirect only within the origin (scheme, host and port) of the
+backend's `base_url` and refuses one anywhere else before it is sent
+(`internal/clientkey`), so a redirect cannot carry block content past the on-prem
+check; before, a 307 or 308 to any host was followed with the body.
 
 **`-draw` / `-calibrate`: calibrating on the population that decides.** The
 control draws `judge -kappa` reads are, by construction, disjoint from the pooled
