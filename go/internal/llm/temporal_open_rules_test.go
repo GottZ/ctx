@@ -183,6 +183,16 @@ func TestRules_AYearBeforeAWordIsNoMonth(t *testing.T) {
 		"seit 2024 Oktober":                {"2024-10-01", "2026-11-21", "range"},
 		"since 2024 October":               {"2024-10-01", "2026-11-21", "range"},
 		"since May 2024":                   {"2024-05-01", "2026-11-21", "range"},
+		// After "since", "until" and "from" a bare "may", "march" or "august"
+		// is the word, not the month; "seit"/"bis" keep the German month.
+		"Wait until may I ask a question":   {"", "", ""},
+		"This may fail since may is a modal": {"", "", ""},
+		"since march the troops":            {"", "", ""},
+		"from may to june":                  {"", "", ""},
+		"since August 2024":                 {"2024-08-01", "2026-11-21", "range"},
+		"seit August":                       {"2026-08-01", "2026-11-21", "range"},
+		"bis August":                        {"2026-11-21", "2027-08-31", "range"},
+		"since June":                        {"2026-06-01", "2026-11-21", "range"},
 		"after May 2024":                   {"2024-06-01", "", DirFrom},
 	})
 }

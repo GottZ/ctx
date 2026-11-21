@@ -850,6 +850,10 @@ func matchRangeForm(query string, m []string, ref string, exact bool, now time.T
 	if startEdge.day.IsZero() || endEdge.day.IsZero() || exact && startEdge.fuzzy {
 		return nil
 	}
+	if english := strings.HasPrefix(m[0], "from") || strings.HasPrefix(m[0], "since"); english &&
+		(bareMonthWord(m[1], startEdge) || bareMonthWord(m[2], endEdge)) {
+		return nil
+	}
 	// A weekday or month after a day date could count from today ("bis
 	// Freitag") or from the date ("vom 01.03.2026 bis Ende März"); the rules
 	// do not guess, the date stays the day it names.
@@ -921,9 +925,10 @@ func matchSeit(query string, now time.Time) *TemporalResult {
 	if m == nil {
 		return nil
 	}
-	start := resolvePhrase(m[2], true, now)
+	e := resolvePhraseEdge(m[2], true, now)
+	start := e.day
 	// A start after today has no time since it yet ("seit morgen").
-	if start.IsZero() || start.After(truncDate(now)) {
+	if start.IsZero() || start.After(truncDate(now)) || m[1] == "since" && bareMonthWord(m[2], e) {
 		return nil
 	}
 	return rangeResult(m[1]+" "+m[2], fmtDate(start), fmtDate(truncDate(now)), "range")
@@ -944,7 +949,7 @@ func matchBis(query string, now time.Time) *TemporalResult {
 		return nil
 	}
 	e := resolvePhraseEdge(m[2], false, now)
-	if e.day.IsZero() {
+	if e.day.IsZero() || m[1] == "until" && bareMonthWord(m[2], e) {
 		return nil
 	}
 	// An end before today ("bis März 2015", "bis gestern") is the time up to
@@ -1501,6 +1506,17 @@ func resolveThreeWordPhrase(words []string, now time.Time) (phraseEdge, bool) {
 // year before one of them is no date ("Tests before 2024 may fail"); after
 // it, a year is ("May 2024"), as on the write side.
 var monthWords = toWordSet("may", "march", "august")
+
+// bareMonthWord reports whether phrase names a month by a bare name that is a
+// word of its own (monthWords). After the English "since", "until" and
+// "from" that word is far more often the modal, verb or adjective than the
+// month ("Wait until may I ask"), so those rules take it for no month; with
+// its year ("since May 2024") it is one, and "seit August" keeps its month
+// (issue #463).
+func bareMonthWord(phrase string, e phraseEdge) bool {
+	w := phraseWords(phrase)
+	return e.rel && e.month && len(w) > 0 && monthWords[w[0]]
+}
 
 // resolvePhrase resolves a 1-3 word temporal phrase like "letztem Montag", "nächsten Freitag",
 // "vorgestern", "August 2024", "Ende März 2025".
