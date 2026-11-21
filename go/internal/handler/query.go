@@ -387,6 +387,45 @@ func collectDimWeights(dimWeights map[string]float64) (linearWeight float64, cyc
 	return linearWeight, cyclicDims, cyclicWeightSum
 }
 
+// The distance a date may lie from the target and still draw linear gravity:
+// two weeks around a day, two months around a window's edges.
+const (
+	pointCutoffDays  = 14
+	windowCutoffDays = 60
+)
+
+// linearGravityParams derives the parameters of the linear gravity (Step 6a)
+// from the first resolved date of a query: target is its day (with the hour of
+// a time-of-day matcher), boostWeight the linear share of the boost budget.
+//
+// A date with End is the window from target to End and a DirUntil date the
+// window up to target (issue #463): every date inside earns the full gravity,
+// so "seit März 2024" rewards 2025 and 2026 like March 2024, and "bis März
+// 2015" rewards what lies before its end instead of today. A window whose End
+// does not parse or lies before its start (only an LLM answer can carry one)
+// keeps the day of target as before.
+func linearGravityParams(d llm.TemporalDate, target time.Time, boostWeight float64) rrf.GravityParams {
+	p := rrf.GravityParams{
+		TargetDate:  target,
+		Direction:   d.Dir,
+		Cutoff:      pointCutoffDays,
+		Power:       1.5,
+		BoostWeight: boostWeight,
+	}
+	switch {
+	case d.End != nil:
+		p.Cutoff = windowCutoffDays
+		if end, err := time.Parse("2006-01-02", *d.End); err == nil && !end.Before(target) {
+			p.WindowStart, p.WindowEnd = target, end
+		}
+	case d.Dir == llm.DirUntil:
+		p.Cutoff = windowCutoffDays
+		p.Direction = ""
+		p.WindowEnd = target
+	}
+	return p
+}
+
 // activatedDimWeights mirrors the gravity-boost weight resolution (Step 6a):
 // nil result or no dates → no temporal treatment (nil); dates without
 // DimensionWeights → the backward-compat pure-linear default; otherwise the
@@ -1058,10 +1097,6 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		if d.Hour != nil {
 			target = time.Date(target.Year(), target.Month(), target.Day(), *d.Hour, 0, 0, 0, target.Location())
 		}
-		cutoff := 14
-		if d.End != nil {
-			cutoff = 60
-		}
 
 		// Collect dimension weights (linear vs cyclic).
 		dimWeights := temporalResult.DimensionWeights
@@ -1112,13 +1147,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 					"request_id", requestID,
 				)
 			} else {
-				results = rrf.ApplyGravityBoost(results, blockDates, rrf.GravityParams{
-					TargetDate:  target,
-					Direction:   d.Dir,
-					Cutoff:      cutoff,
-					Power:       1.5,
-					BoostWeight: maxBoost * linearWeight,
-				})
+				results = rrf.ApplyGravityBoost(results, blockDates, linearGravityParams(d, target, maxBoost*linearWeight))
 				slog.Info("linear gravity scoring",
 					"linear_weight", linearWeight,
 					"blocks_with_dates", len(blockDates),

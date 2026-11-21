@@ -56,11 +56,38 @@ type GravityParams struct {
 	// (0.30 = up to +30%). Zero value: gravity is off and ApplyGravityBoost
 	// returns its input untouched. No default is substituted — 0 means off.
 	BoostWeight float64
+
+	// WindowStart and WindowEnd turn the target from the day TargetDate into
+	// the window from WindowStart to WindowEnd, both days included (issue
+	// #463): a date inside it is at distance 0 and earns the full gravity, a
+	// date outside it is as far away as the nearer edge, and Direction and
+	// Cutoff measure from that edge. A zero WindowStart opens the window
+	// towards the past ("bis März 2024"), a zero WindowEnd towards the future.
+	// Both zero (the zero value): no window, TargetDate is the target.
+	WindowStart, WindowEnd time.Time
+}
+
+// distanceDays returns how many days d lies after the target (negative:
+// before it) — after TargetDate, or after the window's end and before its
+// start, 0 inside it.
+func (p GravityParams) distanceDays(d time.Time) float64 {
+	if p.WindowStart.IsZero() && p.WindowEnd.IsZero() {
+		return d.Sub(p.TargetDate).Hours() / 24.0
+	}
+	if !p.WindowStart.IsZero() && d.Before(p.WindowStart) {
+		return d.Sub(p.WindowStart).Hours() / 24.0
+	}
+	// The end day is inside the window until its last instant; a date of the
+	// next day is a day or more past the end.
+	if !p.WindowEnd.IsZero() && !d.Before(p.WindowEnd.AddDate(0, 0, 1)) {
+		return d.Sub(p.WindowEnd).Hours() / 24.0
+	}
+	return 0
 }
 
 // ComputeGravity returns the total gravitational score for a set of dates
-// relative to a target date. Distance-only formula (no mass).
-// Pure function, no DB access.
+// relative to a target date or window (see GravityParams). Distance-only
+// formula (no mass). Pure function, no DB access.
 //
 // Forward Telescoping (B4 #2 / B5): older memories are coarser. The backward
 // power is scaled down by 1 + 0.3*ln(1 + age_days/30) so older blocks get a
@@ -84,7 +111,7 @@ func ComputeGravity(dates []time.Time, params GravityParams) float64 {
 
 	var total float64
 	for _, d := range dates {
-		distDays := d.Sub(params.TargetDate).Hours() / 24.0
+		distDays := params.distanceDays(d)
 
 		// Direction filter
 		if params.Direction == "past" && distDays > 0 {

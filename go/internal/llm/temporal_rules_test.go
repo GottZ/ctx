@@ -358,7 +358,8 @@ func TestMatchBis(t *testing.T) {
 		{"bis Mitte Juni", today, "2026-06-15"},
 
 		// Position + Month + Year after "bis" (3 tokens)
-		{"bis Ende März 2025 muss das fertig sein", today, "2025-03-31"},
+		// "bis Ende März 2025" lies before today: the time up to it, open
+		// towards the past (issue #463, TestRules_BisWithAPastEndIsOpenTowardsThePast).
 		{"bis Anfang Mai 2026 brauche ich das", today, "2026-05-01"},
 	}
 
@@ -567,9 +568,9 @@ func TestMatchISODate_T08_MultiDate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := matchISODate(tt.query)
+			result := matchDayDates(tt.query)
 			if result == nil {
-				t.Fatalf("matchISODate(%q) returned nil", tt.query)
+				t.Fatalf("matchDayDates(%q) returned nil", tt.query)
 			}
 
 			var gotDates []string
@@ -612,9 +613,9 @@ func TestMatchISODate_T08_NoMatch(t *testing.T) {
 	}
 	for _, q := range tests {
 		t.Run(q, func(t *testing.T) {
-			result := matchISODate(q)
+			result := matchDayDates(q)
 			if result != nil {
-				t.Errorf("matchISODate(%q) should return nil, got %+v", q, result.Dates)
+				t.Errorf("matchDayDates(%q) should return nil, got %+v", q, result.Dates)
 			}
 		})
 	}

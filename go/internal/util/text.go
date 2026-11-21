@@ -75,6 +75,17 @@ var MonthDE = map[string]time.Month{
 	"oktober": time.October, "november": time.November, "dezember": time.December,
 }
 
+// MonthKey returns the key of MonthDE or MonthEN for a month name in any
+// case. Lowercasing alone misses one rune (?i) lets match a letter of a month
+// name: the long s, which strings.ToLower keeps, so "Auguſt" would resolve to
+// no month (issue #451). Uppercasing first maps it to S and then to s, and
+// leaves every other rune of the fold orbits as lowercasing does (the Kelvin
+// sign becomes k either way). The date extraction of internal/store and the
+// temporal rules of internal/llm both look names up by it (issue #463).
+func MonthKey(name string) string {
+	return strings.ToLower(strings.ToUpper(name))
+}
+
 // MonthEN maps a lowercased English month name to its time.Month.
 //
 // READ ONLY, for the same reason as MonthDE.

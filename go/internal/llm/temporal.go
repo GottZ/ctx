@@ -40,6 +40,10 @@ const (
 // TemporalDate is a single resolved temporal reference.
 // Hour is optional — set by time-of-day matchers (morgens/abends/etc.) for
 // daily dimension phase calculation. nil Hour means "date only, midnight".
+//
+// A reference with End is the window from Date to End, both days included,
+// and the rules never yield one whose End lies before its Date. Dir DirUntil
+// (no End) is the window open towards the past that ends on Date (issue #463).
 type TemporalDate struct {
 	Ref  string  `json:"ref"`
 	Date string  `json:"date"`
@@ -47,6 +51,10 @@ type TemporalDate struct {
 	Dir  string  `json:"dir"`
 	Hour *int    `json:"hour,omitempty"`
 }
+
+// DirUntil is the Dir of a reference that is the time up to its Date, open
+// towards the past: "bis März 2015", "bis gestern". Only the rules yield it.
+const DirUntil = "until"
 
 // TemporalResult is the output of LLM temporal normalization.
 //

@@ -512,7 +512,7 @@ func runesMatchedBy(t *testing.T, expr string) []rune {
 // spelling each pattern was built from (the first rune of every fold orbit)
 // is a key of the table, every key has its pattern, and every spelling the
 // pattern matches — any rune of the orbit at every position — resolves
-// through monthKey to that key. Issue #437: m[aä]rz matched "Marz", absent
+// through util.MonthKey to that key. Issue #437: m[aä]rz matched "Marz", absent
 // from util.MonthDE, and missed its "maerz". Issue #451: "Auguſt" matched
 // and strings.ToLower kept the long s, so no key resolved it.
 func TestMonthPatterns_AreTheTableKeys(t *testing.T) {
@@ -530,8 +530,8 @@ func TestMonthPatterns_AreTheTableKeys(t *testing.T) {
 			name := b.String()
 			names = append(names, name)
 			for _, spelling := range monthSpellings(p) {
-				if key := monthKey(spelling); key != name {
-					t.Errorf("%s month pattern %q matches %q, which monthKey makes %q", form.name, name, spelling, key)
+				if key := util.MonthKey(spelling); key != name {
+					t.Errorf("%s month pattern %q matches %q, which util.MonthKey makes %q", form.name, name, spelling, key)
 				}
 			}
 		}
