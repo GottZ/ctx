@@ -405,6 +405,44 @@ func TestClientAbortFollowupsPoolWait(t *testing.T) {
 		}
 	})
 
+	t.Run("an acquire the server's own cancel ended while the request lived: no mark", func(t *testing.T) {
+		var held []*pgxpool.Conn
+		for int32(len(held)) < pool.Config().MaxConns {
+			c, err := pool.Acquire(ctx)
+			if err != nil {
+				t.Fatalf("hold connection %d: %v", len(held), err)
+			}
+			held = append(held, c)
+		}
+		defer func() {
+			for _, c := range held {
+				c.Release()
+			}
+		}()
+		logs := installRejectLogCapture(t)
+		ended := make(chan struct{}, 1)
+		srv, done := abortServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			child, cancel := context.WithCancel(r.Context())
+			time.AfterFunc(50*time.Millisecond, cancel)
+			if _, err := pool.Exec(child, `SELECT 1`); !errors.Is(err, context.Canceled) || r.Context().Err() != nil {
+				t.Errorf("fixture: the acquire ended with %v (request %v), want the child's cancellation on a live request", err, r.Context().Err())
+			}
+			ended <- struct{}{}
+			<-r.Context().Done()
+			internalError(w, r.Context(), msg, fmt.Errorf("store: probe: %w", r.Context().Err()))
+		}), nil)
+		cancelWhen(t, srv.URL+"/api/probe", func() { <-ended })
+		waitDone(t, done)
+		recs := logs.withMsg(msg)
+		if len(recs) != 1 || recs[0].level != slog.LevelInfo || recs[0].attrs["waited_for"] != nil {
+			t.Errorf("handler line = %+v, want one INFO line without waited_for (the wait ended by the server's own cancel)", recs)
+		}
+		if req := requestLogOf(t, logs); req.level != slog.LevelInfo || req.attrs["waited_for"] != nil {
+			t.Errorf("request log = %+v, want INFO without waited_for", req)
+		}
+	})
+
 	t.Run("a context that ended before the acquire waited for nothing: INFO", func(t *testing.T) {
 		logs := installRejectLogCapture(t)
 		late := make(chan struct{}, 1)

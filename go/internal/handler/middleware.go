@@ -257,9 +257,17 @@ const (
 	waitAdmission
 )
 
-// NoteAbandonedAcquire is pgxdb.AcquireWaitNoter: a pool acquire of this
-// request ended on the request's cancellation.
-func (rw *responseWriter) NoteAbandonedAcquire() { rw.waited.CompareAndSwap(waitNone, waitPool) }
+// NoteAbandonedAcquire is pgxdb.AcquireWaitNoter: a pool acquire on a
+// context of this request ended on a cancellation. It counts only when the
+// request's own context has ended by then — a context the server cancelled
+// itself (a child with its own cancel) while the request lives is no client
+// that gave up.
+func (rw *responseWriter) NoteAbandonedAcquire() {
+	if rw.reqCtx != nil && rw.reqCtx.Err() == nil {
+		return
+	}
+	rw.waited.CompareAndSwap(waitNone, waitPool)
+}
 
 // waitedFor names what the request waited for when its client gave up, ""
 // for nothing.
