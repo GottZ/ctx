@@ -115,7 +115,10 @@ func cmdQ(c *common, o qOpts) error {
 	}
 
 	start := time.Now()
-	cases, calls, rejected := generateQuestions(ctx, client, blocks, o.concurrency)
+	cases, calls, rejected, err := generateQuestions(ctx, client, blocks, o.concurrency)
+	if err != nil {
+		return err
+	}
 	elapsed := time.Since(start)
 
 	if err := writeSlice(g, c, goldset.SliceQ, fileQRaw, cases, func(s *goldset.SliceStamp) {
@@ -145,7 +148,10 @@ func cmdQ(c *common, o qOpts) error {
 
 // generateQuestions runs the frozen prompt over the blocks. Order is restored
 // after the parallel phase so the raw file is deterministic in block order.
-func generateQuestions(ctx context.Context, client *goldset.ChatClient, blocks []goldset.Block, conc int) ([]goldset.Case, int, int) {
+// A refused redirect stops it (stopOnRefusal) and is its error.
+func generateQuestions(ctx context.Context, client *goldset.ChatClient, blocks []goldset.Block, conc int) ([]goldset.Case, int, int, error) {
+	ctx, stop := newRefusalStop(ctx)
+	defer stop.cancel()
 	type result struct {
 		i    int
 		c    goldset.Case
@@ -160,8 +166,14 @@ func generateQuestions(ctx context.Context, client *goldset.ChatClient, blocks [
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
+				if stop.stopped() {
+					continue // drain: the run ends with the refusal
+				}
 				b := blocks[i]
 				ans, err := client.Ask(ctx, goldset.GQSystem(), goldset.GQPrompt(b), 160, 0.3)
+				if stop.record(err) {
+					continue
+				}
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "  block %s: %v\n", b.ID[:8], err)
 					out <- result{i: i, call: true}
@@ -204,7 +216,10 @@ func generateQuestions(ctx context.Context, client *goldset.ChatClient, blocks [
 	for _, i := range idx {
 		cases = append(cases, byIdx[i])
 	}
-	return cases, calls, rejected
+	if err := stop.err(); err != nil {
+		return nil, calls, rejected, err
+	}
+	return cases, calls, rejected, nil
 }
 
 // writeHandcheck lists a seeded sample for human reading. The sample carries
