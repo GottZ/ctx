@@ -207,11 +207,20 @@ const temporalReviewClearSQL = `DELETE FROM context_temporal_reviews WHERE block
 
 // temporalMark is the statement a temporal writer runs on the block's row of
 // context_temporal_reviews, in the transaction of its rows and before its
-// guard (writeTemporalGuarded).
+// guard (writeTemporalGuarded). skipSQL, when set, is a check that runs
+// right after the writer's advisory lock: when it answers true, the writer
+// writes nothing and reports applied (RefreshTemporal's
+// temporalReviewCoversSQL).
 type temporalMark struct {
-	sql  string
-	args []any
+	sql      string
+	args     []any
+	skipSQL  string
+	skipArgs []any
 }
+
+// errTemporalCovered ends a temporal writer's transaction whose skip check
+// answered true: nothing is written, and the writer reports applied.
+var errTemporalCovered = errors.New("store: temporal: rows already hold what the write would write")
 
 // temporalReviewClear is the temporalMark of a writer that is not the review.
 func temporalReviewClear(blockID string) temporalMark {
@@ -249,10 +258,11 @@ const temporalReviewCoversSQL = `SELECT EXISTS (
 // every date of content (temporalReviewCoversSQL); applied is then true. An
 // upsert that stores the content the block holds runs this afterwork, and
 // would otherwise replace the review's findings with the extraction's rows
-// while the review still covered the block (issue #452 point 3). The check is
-// a read before the transaction, without a lock: what it saw is what a write
-// would have found, and a temporal writer that commits after it is one whose
-// own rows and guard decide for its own content.
+// while the review still covered the block (issue #452 point 3). The check
+// runs in the writer's turn, right after the advisory lock
+// (writeTemporalGuarded's skip): a review of this content that held the turn
+// has committed by then and is seen, where a check before the turn would
+// have missed it and the write would have replaced its rows.
 //
 // The afterwork runs after the write committed, outside its lock, from the
 // block the write returned (issue #414). Two writes A, B of one block that
@@ -265,14 +275,9 @@ const temporalReviewCoversSQL = `SELECT EXISTS (
 // updated_at (now() is the transaction start).
 func RefreshTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content string, createdAt time.Time) (applied bool, err error) {
 	times := ExtractDates(content)
-	var covered bool
-	if err := pool.QueryRow(ctx, temporalReviewCoversSQL, blockID, content, temporalAnchors(times, createdAt)).Scan(&covered); err != nil {
-		return false, fmt.Errorf("store: temporal: review covers: %w", err)
-	}
-	if covered {
-		return true, nil
-	}
-	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt, temporalReviewClear(blockID), temporalContentGuardSQL, blockID, content)
+	mark := temporalReviewClear(blockID)
+	mark.skipSQL, mark.skipArgs = temporalReviewCoversSQL, []any{blockID, content, temporalAnchors(times, createdAt)}
+	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt, mark, temporalContentGuardSQL, blockID, content)
 }
 
 // backfillTemporalBlock is RefreshTemporal for the backfill, which writes the
@@ -379,15 +384,40 @@ const temporalReviewGuardSQL = `SELECT ` + temporalReviewVersionCol + ` FROM con
 // COMMITTED the second DELETE skipped the rows the first had deleted and did
 // not see the ones it had inserted: both date sets stayed.
 func writeTemporalGuarded(ctx context.Context, pool *pgxpool.Pool, blockID string, contentTimes []time.Time, createdAt time.Time, mark temporalMark, guardSQL string, guardArgs ...any) (bool, error) {
-	rows, rowCount := BuildTemporalBatch(blockID, temporalAnchors(contentTimes, createdAt))
+	rows, _ := BuildTemporalBatch(blockID, temporalAnchors(contentTimes, createdAt))
 	batch := &pgx.Batch{}
-	batch.Queue(temporalWriterLockSQL, blockID)
+	if mark.skipSQL == "" {
+		batch.Queue(temporalWriterLockSQL, blockID)
+	}
 	batch.QueuedQueries = append(batch.QueuedQueries, rows.QueuedQueries...)
 	batch.Queue(mark.sql, mark.args...)
-	queryCount := 1 + rowCount + 1
+	queryCount := len(batch.QueuedQueries)
 	batch.Queue(guardSQL, guardArgs...)
 
 	err := pgxdb.Write(ctx, pool, pgxdb.At("store: temporal"), func(tx pgx.Tx) error {
+		if mark.skipSQL != "" {
+			// The lock and the check first, in a round trip of their own:
+			// the check reads what every temporal writer before this one
+			// committed.
+			var covered bool
+			sb := &pgx.Batch{}
+			sb.Queue(temporalWriterLockSQL, blockID)
+			sb.Queue(mark.skipSQL, mark.skipArgs...)
+			sr := tx.SendBatch(ctx, sb)
+			_, err := sr.Exec()
+			if err == nil {
+				err = sr.QueryRow().Scan(&covered)
+			}
+			if cerr := sr.Close(); err == nil {
+				err = cerr
+			}
+			if err != nil {
+				return fmt.Errorf("store: temporal: lock and skip check: %w", err)
+			}
+			if covered {
+				return errTemporalCovered
+			}
+		}
 		br := tx.SendBatch(ctx, batch)
 		for i := 0; i < queryCount; i++ {
 			if _, err := br.Exec(); err != nil {
@@ -413,6 +443,9 @@ func writeTemporalGuarded(ctx context.Context, pool *pgxpool.Pool, blockID strin
 		}
 		return nil
 	})
+	if errors.Is(err, errTemporalCovered) {
+		return true, nil
+	}
 	if errors.Is(err, pgxdb.ErrRollback) || temporalBlockGone(err) {
 		return false, nil
 	}

@@ -322,3 +322,65 @@ func TestTemporalReviewCoversPlanUsesPrimaryKeys(t *testing.T) {
 		t.Errorf("the check scans a table, plan:\n%s", text)
 	}
 }
+
+// TestRefreshTemporalWaitsForAReviewInFlight (CodeRabbit on #464): the
+// afterwork of a same-content write runs while a review of that content
+// holds the block's temporal turn, uncommitted (held at its COMMIT). The
+// afterwork's check of the review's rows must come after the turn, so it
+// sees the review once committed and leaves its rows and version standing.
+// Before, the check ran before the transaction: it saw no review, and the
+// afterwork replaced the review's rows and deleted its version.
+func TestRefreshTemporalWaitsForAReviewInFlight(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+
+	title, content := "Budget notes", "Budget on 2026-05-04."
+	b, err := store.UpsertBlock(ctx, pool, "i452", title, content, nil, nil, "private", false, store.SensitivityWrite{}, "")
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if applied, err := store.RefreshTemporal(ctx, pool, b.ID, b.Content, b.CreatedAt); err != nil || !applied {
+		t.Fatalf("store afterwork: applied=%v err=%v", applied, err)
+	}
+	found := []time.Time{i414Day("2026-05-04"), i414Day("2026-05-11")}
+
+	holdPool, hold := testdb.HoldCommitPool(t, dsn, func(sql string) bool {
+		return strings.HasPrefix(strings.TrimSpace(sql), "INSERT INTO context_temporal_reviews")
+	})
+	reviewed := make(chan error, 1)
+	go func() {
+		applied, err := store.PopulateTemporalReview(ctx, holdPool, b.ID, title, content, found, b.CreatedAt)
+		if err == nil && !applied {
+			err = errNotApplied
+		}
+		reviewed <- err
+	}()
+	pid := hold.Wait(t)
+
+	refreshed := make(chan error, 1)
+	waiting := make(chan struct{})
+	go func() {
+		defer close(waiting)
+		_, err := store.RefreshTemporal(ctx, pool, b.ID, content, b.CreatedAt)
+		refreshed <- err
+	}()
+	testdb.WaitBlockedBy(t, pool, pid, waiting, "the afterwork", "advisory")
+	hold.Release()
+	if err := <-reviewed; err != nil {
+		t.Fatalf("review: %v", err)
+	}
+	if err := <-refreshed; err != nil {
+		t.Fatalf("afterwork: %v", err)
+	}
+
+	if got, want := i414Sources(t, pool, b.ID), i414Want(b.CreatedAt, found...); !slices.Equal(got, want) {
+		t.Errorf("source times = %v, want the review's %v", got, want)
+	}
+	if i452Due(t, pool, b.ID) {
+		t.Errorf("the afterwork deleted the version of the review that committed before its write")
+	}
+}
+
