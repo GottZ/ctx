@@ -140,13 +140,22 @@ class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+_OPENER: urllib.request.OpenerDirector | None = None
+
+
 def _open(req: urllib.request.Request, timeout: float):
-    """urllib.request.urlopen with _SameOriginRedirect as the redirect handler."""
-    handlers = [_SameOriginRedirect]
-    ctx = _ssl_context()
-    if ctx is not None:
-        handlers.append(urllib.request.HTTPSHandler(context=ctx))
-    return urllib.request.build_opener(*handlers).open(req, timeout=timeout)
+    """urllib.request.urlopen with _SameOriginRedirect as the redirect handler.
+    The opener is built once, as urlopen builds its own: building one loads
+    the CA store (about 6 ms, which stream_chat would otherwise count into
+    first_byte_s and prefill_s)."""
+    global _OPENER
+    if _OPENER is None:
+        handlers = [_SameOriginRedirect]
+        ctx = _ssl_context()
+        if ctx is not None:
+            handlers.append(urllib.request.HTTPSHandler(context=ctx))
+        _OPENER = urllib.request.build_opener(*handlers)
+    return _OPENER.open(req, timeout=timeout)
 
 
 def _request(method: str, url: str, body=None, headers=None):
