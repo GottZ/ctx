@@ -149,56 +149,120 @@ func BuildTemporalBatch(blockID string, times []time.Time, links ...[]string) (*
 // content, and reports applied=false. Guard and rows commit together
 // (writeTemporalGuarded, temporalContentGuardSQL).
 func PopulateTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content string, contentTimes []time.Time, createdAt time.Time) (applied bool, err error) {
-	return writeTemporalGuarded(ctx, pool, blockID, contentTimes, createdAt, temporalContentGuardSQL, blockID, content)
+	return writeTemporalGuarded(ctx, pool, blockID, contentTimes, createdAt, temporalReviewClear(blockID), temporalContentGuardSQL, blockID, content)
 }
 
-// PopulateTemporalReview is PopulateTemporal for the dates the dream's LLM
-// review found (issue #427). The review sends the block's title to the LLM as
-// well as its content, and a date read off one title is no finding for
-// another, so the rows are written only while the block holds both: the title
-// and the content the review read (temporalReviewGuardSQL). An update of tags
-// or metadata leaves them valid. The deterministic re-extraction before the
-// review reads the content alone and writes with PopulateTemporal.
+// PopulateTemporalReview writes the result of the dream's temporal review of
+// a block: the rows of times (the dates of the content and those the LLM
+// found; issue #427) and, in the same transaction, the version the rows stand
+// for — the title and the content the review read — in
+// context_temporal_reviews (issue #452). The review sends the block's title
+// to the LLM as well as its content, and a date read off one title is no
+// finding for another, so both are written only while the block holds the
+// title and the content the review read (temporalReviewGuardSQL). An update
+// of tags or metadata leaves them valid. The deterministic re-extraction
+// before the review reads the content alone and writes with PopulateTemporal.
+//
+// The rows are replaced whether or not the LLM found a date: rows a review of
+// an earlier title left (a date read off it) belong to no version the block
+// holds (issue #452 point 2). applied=false (the block changed, or is gone)
+// writes neither, and the block stays due (TemporalReviewDueCol).
 func PopulateTemporalReview(ctx context.Context, pool *pgxpool.Pool, blockID, title, content string, times []time.Time, createdAt time.Time) (applied bool, err error) {
-	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt, temporalReviewGuardSQL, blockID, content, title)
+	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt,
+		temporalMark{sql: temporalReviewMarkSQL, args: []any{blockID, content, title}},
+		temporalReviewGuardSQL, blockID, content, title)
 }
 
-// MarkTemporalReviewed records that the dream's temporal review has run for
-// the version of the block it read: title and content (issue #427). It sets
-// dream_temporal_validated_at to the block's updated_at while the block still
-// holds that title and content, and leaves the column as it is otherwise;
-// stamped reports which. The dream's pick reviews a block whose updated_at is
-// later than the column (or that has none), so a block whose title or content
-// was replaced during the review — which waits on an LLM for seconds — stays
-// due and its next pick reviews what it holds. An update of tags or metadata
-// during the review changes neither, so the review stands.
-//
-// The value is the block's updated_at, not the time of the stamp: a write
-// whose transaction began before the stamp and commits after it carries an
-// updated_at (now() is the transaction start) earlier than the stamp's own
-// now(), and would read as reviewed. The row's updated_at is earlier than any
-// later write's, unless that write began before the row's last writer did.
-//
-// The comparison is evaluated on the row version the UPDATE locks
-// (temporalReviewStampSQL): a write that holds the row makes the stamp wait,
-// and READ COMMITTED re-evaluates the expressions on the row that write left
-// behind. A block that is gone reports stamped=false.
-func MarkTemporalReviewed(ctx context.Context, pool *pgxpool.Pool, blockID, title, content string) (stamped bool, err error) {
-	err = pool.QueryRow(ctx, temporalReviewStampSQL, blockID, content, title).Scan(&stamped)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("store: temporal: mark reviewed: %w", err)
-	}
-	return stamped, nil
+// TemporalReviewDueCol answers, in a statement on context_blocks, whether the
+// dream's temporal review is due for the row: no row of
+// context_temporal_reviews carries the version of the row's title and
+// content (issue #452). The answer depends on what the block holds and what
+// the review wrote, not on when either happened: a write that began before a
+// review and committed after it leaves the block due, whatever updated_at it
+// carries, and a write of tags or metadata leaves a reviewed block reviewed.
+// It reads one row of context_temporal_reviews by its primary key; the dream's
+// pick reads it in its RETURNING, for the one block it hands out.
+const TemporalReviewDueCol = `NOT EXISTS (SELECT 1 FROM context_temporal_reviews r
+		 WHERE r.block_id = context_blocks.id
+		   AND r.version = ` + temporalReviewVersionOfRow + `)`
+
+// temporalReviewVersionOfRow is the version of the block row's title and
+// content: sha256 over content_hash and title. content_hash is the fixed-length
+// hex digest of the content (64 characters), so the concatenation is
+// unambiguous; the digest reads no TOASTed content.
+const temporalReviewVersionOfRow = `digest(context_blocks.content_hash || context_blocks.title, 'sha256')`
+
+// temporalReviewMarkSQL writes the version of the review of block $1 with
+// content $2 and title $3: the expression of temporalReviewVersionOfRow over
+// the review's input, whose content_hash part is the generated column's
+// expression (contentVersionCol).
+const temporalReviewMarkSQL = `INSERT INTO context_temporal_reviews (block_id, version)
+	VALUES ($1, digest(encode(digest($2::text, 'sha256'), 'hex') || $3::text, 'sha256'))
+	ON CONFLICT (block_id) DO UPDATE SET version = EXCLUDED.version`
+
+// temporalReviewClearSQL removes the review version of block $1: every
+// temporal writer but the review's own runs it with its rows, because the
+// rows it writes are not the review's (issue #452).
+const temporalReviewClearSQL = `DELETE FROM context_temporal_reviews WHERE block_id = $1`
+
+// temporalMark is the statement a temporal writer runs on the block's row of
+// context_temporal_reviews, in the transaction of its rows and before its
+// guard (writeTemporalGuarded). skipSQL, when set, is a check that runs
+// right after the writer's advisory lock: when it answers true, the writer
+// writes nothing and reports applied (RefreshTemporal's
+// temporalReviewCoversSQL).
+type temporalMark struct {
+	sql      string
+	args     []any
+	skipSQL  string
+	skipArgs []any
 }
+
+// errTemporalCovered ends a temporal writer's transaction whose skip check
+// answered true: nothing is written, and the writer reports applied.
+var errTemporalCovered = errors.New("store: temporal: rows already hold what the write would write")
+
+// temporalReviewClear is the temporalMark of a writer that is not the review.
+func temporalReviewClear(blockID string) temporalMark {
+	return temporalMark{sql: temporalReviewClearSQL, args: []any{blockID}}
+}
+
+// temporalReviewCoversSQL answers whether the rows of block $1 already hold
+// what RefreshTemporal would write for content $2: the block holds $2, its
+// rows are the review's of the title and content it holds (the version in
+// context_temporal_reviews, which every other temporal writer deletes), and
+// they hold each time of $3 (the creation time and the content's dates). The
+// review's rows are then a superset of the extraction's — the extraction's
+// dates plus the LLM's — of this very version. A time of $3 the rows lack (an
+// extraction that changed since the review) answers false.
+const temporalReviewCoversSQL = `SELECT EXISTS (
+	SELECT 1 FROM context_blocks
+	  JOIN context_temporal_reviews r ON r.block_id = context_blocks.id
+	 WHERE context_blocks.id = $1
+	   AND ` + contentVersionCol + `
+	   AND r.version = ` + temporalReviewVersionOfRow + `
+	   AND NOT EXISTS (
+		SELECT 1 FROM unnest($3::timestamptz[]) AS t(at)
+		 WHERE NOT EXISTS (SELECT 1 FROM context_temporal ct
+		                    WHERE ct.block_id = context_blocks.id AND ct.source_time = t.at)))`
 
 // RefreshTemporal is the temporal afterwork of a write that stored content on
 // a block: it writes the dimension rows PopulateTemporal writes, from the
 // dates of content, only while the block still holds content. The block's
 // content_times is not its part: the write set it in its own statement, from
 // the content it stored (issue #421; UpsertBlock, UpdateBlock, InsertChunk).
+//
+// It writes nothing when the rows already hold what it would write: the
+// block holds content, the dream's temporal review wrote the rows for the
+// title and content the block holds, and they hold the creation time and
+// every date of content (temporalReviewCoversSQL); applied is then true. An
+// upsert that stores the content the block holds runs this afterwork, and
+// would otherwise replace the review's findings with the extraction's rows
+// while the review still covered the block (issue #452 point 3). The check
+// runs in the writer's turn, right after the advisory lock
+// (writeTemporalGuarded's skip): a review of this content that held the turn
+// has committed by then and is seen, where a check before the turn would
+// have missed it and the write would have replaced its rows.
 //
 // The afterwork runs after the write committed, outside its lock, from the
 // block the write returned (issue #414). Two writes A, B of one block that
@@ -210,7 +274,10 @@ func MarkTemporalReviewed(ctx context.Context, pool *pgxpool.Pool, blockID, titl
 // not the content the dates belong to, and two writes can carry the same
 // updated_at (now() is the transaction start).
 func RefreshTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content string, createdAt time.Time) (applied bool, err error) {
-	return writeTemporalGuarded(ctx, pool, blockID, ExtractDates(content), createdAt, temporalContentGuardSQL, blockID, content)
+	times := ExtractDates(content)
+	mark := temporalReviewClear(blockID)
+	mark.skipSQL, mark.skipArgs = temporalReviewCoversSQL, []any{blockID, content, temporalAnchors(times, createdAt)}
+	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt, mark, temporalContentGuardSQL, blockID, content)
 }
 
 // backfillTemporalBlock is RefreshTemporal for the backfill, which writes the
@@ -225,7 +292,7 @@ func RefreshTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content s
 // backfill runs once, at startup, over blocks without rows.
 func backfillTemporalBlock(ctx context.Context, pool *pgxpool.Pool, blockID, content string, createdAt time.Time) (applied bool, err error) {
 	times := ExtractDates(content)
-	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt,
+	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt, temporalReviewClear(blockID),
 		`UPDATE context_blocks SET content_times = $3::timestamptz[] WHERE id = $1 RETURNING `+contentVersionCol,
 		blockID, content, times)
 }
@@ -259,25 +326,16 @@ const temporalReviewVersionCol = contentVersionCol + ` AND title = $3`
 // temporalContentGuardSQL.
 const temporalReviewGuardSQL = `SELECT ` + temporalReviewVersionCol + ` FROM context_blocks WHERE id = $1`
 
-// temporalReviewStampSQL is MarkTemporalReviewed's statement for the block
-// $1, reviewed with content $2 and title $3: the WHERE names the primary key
-// alone, the version decides the value written, and RETURNING reports it.
-// When the version does not hold, the column is written with its own value,
-// as the unconditional stamp before issue #427 wrote a row version on every
-// review.
-const temporalReviewStampSQL = `UPDATE context_blocks
-	SET dream_temporal_validated_at = CASE WHEN ` + temporalReviewVersionCol + `
-	        THEN updated_at ELSE dream_temporal_validated_at END
-	WHERE id = $1
-	RETURNING ` + temporalReviewVersionCol
-
-// writeTemporalGuarded writes the dimension rows of a block and then runs
-// guardSQL, a statement that reads the block row by its primary key and
-// answers contentVersionCol (temporalReviewVersionCol for the dream's LLM
-// findings) for it; it commits when the answer is true and
-// rolls back when it is false or the block is gone. After the BEGIN, the lock,
-// the rows and the guard travel in one round trip; the commit or rollback is
-// the last.
+// writeTemporalGuarded writes the dimension rows of a block, runs mark on the
+// block's row of context_temporal_reviews (the review writes its version,
+// every other writer deletes it; issue #452), and then runs guardSQL, a
+// statement that reads the block row by its primary key and answers
+// contentVersionCol (temporalReviewVersionCol for the dream's review) for
+// it; it commits when the answer is true and rolls back when it is false or
+// the block is gone — the version row with the rows. After the BEGIN, the
+// lock, the rows, the version row and the guard travel in one round trip; the
+// commit or rollback is the last. The version row's foreign key takes the
+// FOR KEY SHARE the dimension rows took already.
 //
 // A block deleted before the rows reach it (a purge, whose DELETE cascades
 // into context_temporal) refuses the first row on temporalBlockFK, before the
@@ -325,21 +383,41 @@ const temporalReviewStampSQL = `UPDATE context_blocks
 // dream's review, or two reviews) both passed the guard, and under READ
 // COMMITTED the second DELETE skipped the rows the first had deleted and did
 // not see the ones it had inserted: both date sets stayed.
-func writeTemporalGuarded(ctx context.Context, pool *pgxpool.Pool, blockID string, contentTimes []time.Time, createdAt time.Time, guardSQL string, guardArgs ...any) (bool, error) {
-	allTimes := contentTimes
-	if !createdAt.IsZero() {
-		allTimes = make([]time.Time, 0, len(contentTimes)+1)
-		allTimes = append(allTimes, createdAt)
-		allTimes = append(allTimes, contentTimes...)
-	}
-	rows, rowCount := BuildTemporalBatch(blockID, allTimes)
+func writeTemporalGuarded(ctx context.Context, pool *pgxpool.Pool, blockID string, contentTimes []time.Time, createdAt time.Time, mark temporalMark, guardSQL string, guardArgs ...any) (bool, error) {
+	rows, _ := BuildTemporalBatch(blockID, temporalAnchors(contentTimes, createdAt))
 	batch := &pgx.Batch{}
-	batch.Queue(temporalWriterLockSQL, blockID)
+	if mark.skipSQL == "" {
+		batch.Queue(temporalWriterLockSQL, blockID)
+	}
 	batch.QueuedQueries = append(batch.QueuedQueries, rows.QueuedQueries...)
-	queryCount := 1 + rowCount
+	batch.Queue(mark.sql, mark.args...)
+	queryCount := len(batch.QueuedQueries)
 	batch.Queue(guardSQL, guardArgs...)
 
 	err := pgxdb.Write(ctx, pool, pgxdb.At("store: temporal"), func(tx pgx.Tx) error {
+		if mark.skipSQL != "" {
+			// The lock and the check first, in a round trip of their own:
+			// the check reads what every temporal writer before this one
+			// committed.
+			var covered bool
+			sb := &pgx.Batch{}
+			sb.Queue(temporalWriterLockSQL, blockID)
+			sb.Queue(mark.skipSQL, mark.skipArgs...)
+			sr := tx.SendBatch(ctx, sb)
+			_, err := sr.Exec()
+			if err == nil {
+				err = sr.QueryRow().Scan(&covered)
+			}
+			if cerr := sr.Close(); err == nil {
+				err = cerr
+			}
+			if err != nil {
+				return fmt.Errorf("store: temporal: lock and skip check: %w", err)
+			}
+			if covered {
+				return errTemporalCovered
+			}
+		}
 		br := tx.SendBatch(ctx, batch)
 		for i := 0; i < queryCount; i++ {
 			if _, err := br.Exec(); err != nil {
@@ -365,6 +443,9 @@ func writeTemporalGuarded(ctx context.Context, pool *pgxpool.Pool, blockID strin
 		}
 		return nil
 	})
+	if errors.Is(err, errTemporalCovered) {
+		return true, nil
+	}
 	if errors.Is(err, pgxdb.ErrRollback) || temporalBlockGone(err) {
 		return false, nil
 	}
@@ -372,6 +453,17 @@ func writeTemporalGuarded(ctx context.Context, pool *pgxpool.Pool, blockID strin
 		return false, err
 	}
 	return true, nil
+}
+
+// temporalAnchors are the times a block's rows are written from: the
+// creation time (when known) and the content's dates.
+func temporalAnchors(contentTimes []time.Time, createdAt time.Time) []time.Time {
+	if createdAt.IsZero() {
+		return contentTimes
+	}
+	all := make([]time.Time, 0, len(contentTimes)+1)
+	all = append(all, createdAt)
+	return append(all, contentTimes...)
 }
 
 // temporalWriterLockSQL is the lock the temporal writers of a block ($1) take
