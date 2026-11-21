@@ -149,9 +149,12 @@
 
   /* ≤sm: the workbench stacks (BlocksPage @container) → the pane goes full-width
      and stops being its own scroller (the stacked workbench owns the single
-     scroll). Queries BlocksPage's .area inline-size container. */
+     scroll). Queries BlocksPage's .area inline-size container. The padding and
+     the border belong inside the 100%, or the pane is 2 × (space-3 + 1px)
+     wider than the workbench and the workbench scrolls it sideways (#439). */
   @container (max-width: 40rem) {
     .detail-pane {
+      box-sizing: border-box;
       width: 100%;
       max-width: none;
       overflow-y: visible;

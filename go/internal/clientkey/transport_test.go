@@ -305,6 +305,119 @@ func TestBearerTransport(t *testing.T) {
 	}
 }
 
+// TestUnkeyedTransport (#446): a Transport from NewUnkeyed attaches no header —
+// neither X-Context-Key nor Authorization, on no hop — and holds the request
+// to New's origin rule: a redirect within the origin is followed with the body
+// re-sent, a request or a redirect hop anywhere else is refused before it is
+// sent, the body of the refused request closed. It refuses a base URL New
+// refuses.
+func TestUnkeyedTransport(t *testing.T) {
+	var credential, moved, withBody, other atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := r.Header[keyHeader]; ok {
+			credential.Add(1)
+		}
+		if _, ok := r.Header[bearerHeader]; ok {
+			credential.Add(1)
+		}
+		if !strings.HasPrefix(r.URL.Path, "/moved/") {
+			http.Redirect(w, r, "/moved"+r.URL.RequestURI(), http.StatusPermanentRedirect)
+			return
+		}
+		moved.Add(1)
+		if b, _ := io.ReadAll(r.Body); string(b) == "private content" {
+			withBody.Add(1)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { other.Add(1) }))
+	t.Cleanup(elsewhere.Close)
+	names := Names{Client: "ctx-goldset", BaseURL: "the base_url of the -backend row"}
+	ut, err := NewUnkeyed(srv.URL, names)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader("private content"))
+	resp, err := ut.Do(&http.Client{}, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if credential.Load() != 0 || moved.Load() != 1 || withBody.Load() != 1 {
+		t.Errorf("credential headers=%d moved=%d body=%d, want no credential header and the redirect followed once with the body",
+			credential.Load(), moved.Load(), withBody.Load())
+	}
+
+	// A first request to another origin, through RoundTrip.
+	to, _ := url.Parse(elsewhere.URL + "/v1/chat/completions")
+	body := &closeRecorder{Reader: strings.NewReader("private content")}
+	_, err = ut.RoundTrip(&http.Request{Method: http.MethodPost, URL: to, Header: http.Header{}, Body: body})
+	if !errors.As(err, new(*Refusal)) || other.Load() != 0 || !body.closed {
+		t.Errorf("err=%v sent elsewhere %d times closed=%t, want a refusal before sending with the body closed", err, other.Load(), body.closed)
+	}
+
+	// A redirect hop to another origin, through Do.
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirecting.Close)
+	ut2, err := NewUnkeyed(redirecting.URL, names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hop, _ := http.NewRequest(http.MethodPost, redirecting.URL+"/v1/chat/completions", strings.NewReader("private content"))
+	_, err = ut2.Do(&http.Client{}, hop)
+	if !errors.As(err, new(*Refusal)) || !strings.Contains(err.Error(), "refused a redirect (HTTP 307)") || other.Load() != 0 {
+		t.Errorf("err=%v, sent elsewhere %d times — want the redirect hop refused before it is sent", err, other.Load())
+	}
+
+	for _, base := range []string{"", "ftp://ctx.example", "http://"} {
+		if _, err := NewUnkeyed(base, names); err == nil {
+			t.Errorf("NewUnkeyed(%q) accepted it", base)
+		}
+	}
+}
+
+// TestUnkeyedRefusalText pins the refusal of a Transport from NewUnkeyed byte
+// for byte: New's text, with the requests in place of a key the caller does
+// not have, and the advice for an upgrade.
+func TestUnkeyedRefusalText(t *testing.T) {
+	goldset := Names{Client: "ctx-goldset", BaseURL: "the base_url of the -backend row"}
+	goldbench := Names{Client: "ctx-goldbench", BaseURL: "-endpoint"}
+	cases := []struct {
+		names    Names
+		base, to string
+		status   int
+		want     string
+	}{
+		{goldset, "http://10.0.0.5:30000", "http://elsewhere.example/v1/chat/completions", http.StatusTemporaryRedirect,
+			"refused a redirect (HTTP 307) to http://elsewhere.example:80: ctx-goldset sends its requests only to the origin of the base_url of the -backend row, http://10.0.0.5:30000, and follows a redirect only within it"},
+		{goldbench, "http://ctx.example:8080/v1/chat/completions", "https://ctx.example:8080/v1/chat/completions", http.StatusPermanentRedirect,
+			"refused a redirect (HTTP 308) to https://ctx.example:8080: ctx-goldbench sends its requests only to the origin of -endpoint, http://ctx.example:8080, and follows a redirect only within it; set -endpoint to https://ctx.example:8080/v1/chat/completions if that is the server's address"},
+		{goldbench, "http://ctx.example", "http://ctx.example:8080/v1/chat/completions", 0,
+			"refused a request to http://ctx.example:8080: ctx-goldbench sends its requests only to the origin of -endpoint, http://ctx.example:80, and follows a redirect only within it"},
+	}
+	for _, tc := range cases {
+		ut, err := NewUnkeyed(tc.base, tc.names)
+		if err != nil {
+			t.Fatal(err)
+		}
+		to, err := url.Parse(tc.to)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := &http.Request{URL: to, Header: http.Header{}}
+		if tc.status != 0 {
+			req.Response = &http.Response{StatusCode: tc.status}
+		}
+		_, err = ut.RoundTrip(req)
+		if err == nil || err.Error() != tc.want {
+			t.Errorf("%s → %s:\n got %v\nwant %s", tc.base, tc.to, err, tc.want)
+		}
+	}
+}
+
 // TestKeyCredentialOnlyInKeyTransport is the structural half of #413, #423
 // and #432: a request helper that put the key on a request itself would bypass
 // the origin rule. So no source of a package that can hold a ctx API key

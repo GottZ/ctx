@@ -25,11 +25,12 @@ import (
 // same representation (time.Time compared with ==, which also compares the
 // location pointer), and nil where the reference returns nil.
 
-// issue437Classes lists, per deliberate change of issue #437, the contents
-// it may change. A content none of them touches gives what refFormsV434
-// gives: together the predicates cover every content on which the current
-// reference and the frozen one differ (each names the shape a differing
-// match needs, ignoring word boundaries and calendar validity).
+// issue437Classes lists, per deliberate change since #434 (issues #437 and
+// #451), the contents it may change. A content none of them touches gives
+// what refFormsV434 gives: together the predicates cover every content on
+// which the current reference and the frozen one differ (each names the
+// shape a differing match needs, ignoring word boundaries and calendar
+// validity).
 // TestIssue437Classes_EachIsNeeded shows that each one is needed,
 // TestIssue437Classes_LeaveOrdinaryContentsOutside that none has grown over
 // contents the changes do not affect.
@@ -53,6 +54,11 @@ var issue437Classes = []struct {
 	{"#437/3 years 2031-2099", regexp.MustCompile(`20(?:3[1-9]|[4-9]\d)-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])|` +
 		`(?:0[1-9]|[12]\d|3[01])\.(?:0[1-9]|1[0-2])\.20(?:3[1-9]|[4-9]\d)|` +
 		`(?i:` + issue437Months + `)[\s\x{A0}\x{202F}]+20(?:3[1-9]|[4-9]\d)`).MatchString, "Mai 2031"},
+	// #451/2, the long s in the table lookup: a match that differs is an
+	// "august" or a "september" with a long s for its s before date spaces
+	// and a year token.
+	{"#451/2 long s", regexp.MustCompile(`(?:(?i:augu)\x{17F}(?i:t)|\x{17F}(?i:eptember))[\s\x{A0}\x{202F}]+20[2-9]\d`).MatchString,
+		"Augu" + longS + "t 2026"},
 }
 
 // issue437Months are the month names of both month forms, before and after
@@ -228,7 +234,7 @@ func TestIssue437Classes_EachIsNeeded(t *testing.T) {
 func TestIssue437Classes_LeaveOrdinaryContentsOutside(t *testing.T) {
 	for _, c := range []string{
 		"Mai 2026", "März 2026", "MÄRZ 2030", "December 2030", "Januar 2020", "2026-03-29", "2026-03-29 14:30",
-		"2026-03-29T14:30:00Z", "29.03.2026", "29.03.2026 14:30", "Dezember\t\n2026",
+		"2026-03-29T14:30:00Z", "29.03.2026", "29.03.2026 14:30", "Dezember\t\n2026", "August 2026", "SEPTEMBER 2030",
 		"Stand 21.11.2026 01:51, Release v5.71.0 am 2026-11-21T01:51:00Z; geplant: Dezember 2026 / December 2026.",
 		"Port 2049, 2048 MB, RFC 2046, 20 2031 Zeilen, ids 2040-2045, offset 2099, v2.0.2045",
 		"5" + nbsp + "000 €", "um 14" + nbsp + "Uhr", "Seite" + nbsp + "2049", "Mai" + nbsp + "1999", "",
@@ -290,9 +296,10 @@ var (
 	outside437Spaces = strings.NewReplacer(nbsp, " ", nnbsp, " ")
 )
 
-// outside437 rewrites content out of every class of issue437Classes: the
-// years 2031-2099 become 2029, "maerz" and "marz" become "März", and the
-// no-break spaces become spaces.
+// outside437 rewrites content out of the classes of #437: the years
+// 2031-2099 become 2029, "maerz" and "marz" become "März", and the no-break
+// spaces become spaces. The contents it is used on carry no long s, so they
+// are outside the class of #451 too (assertMatchesFrozen checks every one).
 func outside437(content string) string {
 	content = outside437Years.ReplaceAllString(content, "2029")
 	content = outside437Maerz.ReplaceAllString(content, "März")
@@ -503,8 +510,11 @@ func runesMatchedBy(t *testing.T, expr string) []rune {
 // TestMonthPatterns_AreTheTableKeys pins that the month patterns and the
 // tables ExtractDates resolves their matches with name the same months: the
 // spelling each pattern was built from (the first rune of every fold orbit)
-// is a key of the table, and every key has its pattern. Issue #437: m[aä]rz
-// matched "Marz", absent from util.MonthDE, and missed its "maerz".
+// is a key of the table, every key has its pattern, and every spelling the
+// pattern matches — any rune of the orbit at every position — resolves
+// through monthKey to that key. Issue #437: m[aä]rz matched "Marz", absent
+// from util.MonthDE, and missed its "maerz". Issue #451: "Auguſt" matched
+// and strings.ToLower kept the long s, so no key resolved it.
 func TestMonthPatterns_AreTheTableKeys(t *testing.T) {
 	for _, form := range []struct {
 		name     string
@@ -517,7 +527,13 @@ func TestMonthPatterns_AreTheTableKeys(t *testing.T) {
 			for _, orbit := range p {
 				b.WriteRune(orbit[0])
 			}
-			names = append(names, b.String())
+			name := b.String()
+			names = append(names, name)
+			for _, spelling := range monthSpellings(p) {
+				if key := monthKey(spelling); key != name {
+					t.Errorf("%s month pattern %q matches %q, which monthKey makes %q", form.name, name, spelling, key)
+				}
+			}
 		}
 		for k := range form.table {
 			keys = append(keys, k)
@@ -554,6 +570,97 @@ func TestMonthPatterns_NoAlternativeEndsAnother(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestMonthForms_ListEveryAlternativeByItsLastLetter checks the dispatch of
+// matchMonthYear over all of Unicode: for every rune, endingWith returns
+// exactly the alternatives whose last position admits it, in the order of the
+// form. matchBefore checks that position first, so the dispatch leaves out
+// only alternatives that cannot match.
+func TestMonthForms_ListEveryAlternativeByItsLastLetter(t *testing.T) {
+	for _, form := range []struct {
+		name     string
+		patterns []monthPattern
+		form     *monthForm
+	}{{"German", deMonthPatterns, deMonthForm}, {"English", enMonthPatterns, enMonthForm}} {
+		listed := 0
+		for r := rune(0); r <= unicode.MaxRune; r++ {
+			var want []monthPattern
+			for _, p := range form.patterns {
+				if slices.Contains(p[len(p)-1], r) {
+					want = append(want, p)
+				}
+			}
+			if got := form.form.endingWith(r); !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s: endingWith(%q) = %q, want %q", form.name, r, got, want)
+			}
+			if want != nil {
+				listed++
+			}
+		}
+		if listed == 0 {
+			t.Fatalf("%s: no rune lists an alternative", form.name)
+		}
+	}
+}
+
+// TestScanDates_EveryMonthSpellingMatches runs every spelling a month pattern
+// matches — the product of the fold orbits of its letters — before a year,
+// behind runs of date spaces of every kind, through the scanner: each one is
+// the one match of its form, at the offsets of the name and the year, and
+// agrees with the reference. The dispatch of matchMonthYear by the rune
+// before the date spaces lets every one of them through. With -short (the
+// race runs, where the reference is slow) only the contents with the first
+// kind of date space go through the reference as well.
+func TestScanDates_EveryMonthSpellingMatches(t *testing.T) {
+	for _, form := range []struct {
+		name     string
+		patterns []monthPattern
+		matches  func(dateScan) [][]int
+	}{
+		{"German", deMonthPatterns, func(sc dateScan) [][]int { return sc.de }},
+		{"English", enMonthPatterns, func(sc dateScan) [][]int { return sc.en }},
+	} {
+		n := 0
+		for _, p := range form.patterns {
+			for _, name := range monthSpellings(p) {
+				// \b is ASCII: a name that starts with a rune beyond ASCII
+				// starts a match only behind a word character.
+				before := "am "
+				if name[0] >= utf8.RuneSelf {
+					before = "am x"
+				}
+				for i, sep := range []string{" ", "  \t\n", nbsp, " " + nbsp + nnbsp + "\r", nnbsp} {
+					c := before + name + sep + "2026."
+					s, y := len(before), len(c)-5
+					want := [][]int{{s, y + 4, s, s + len(name), y, y + 4}}
+					if got := form.matches(scanDates(c)); !reflect.DeepEqual(got, want) {
+						t.Fatalf("%s matches of %s: got %v, want %v", form.name, quoteHead(c), got, want)
+					}
+					if i == 0 || !testing.Short() {
+						assertMatchesReference(t, c)
+					}
+					n++
+				}
+			}
+		}
+		t.Logf("%s: %d contents", form.name, n)
+	}
+}
+
+// monthSpellings returns every spelling p matches: one rune of each position.
+func monthSpellings(p monthPattern) []string {
+	out := []string{""}
+	for _, orbit := range p {
+		next := make([]string, 0, len(out)*len(orbit))
+		for _, s := range out {
+			for _, r := range orbit {
+				next = append(next, s+string(r))
+			}
+		}
+		out = next
+	}
+	return out
 }
 
 // Generators of the differential and benchmark corpora.

@@ -67,7 +67,7 @@ export interface CaptureOptions {
  * #419, so it alone does not explain a sporadic shot (Playwright starts
  * headless Chromium with --hide-scrollbars); that cause stays open. The
  * contract runner now asserts that the document fits the viewport before
- * every capture (expectViewportFit, contract.ts). The style tag
+ * every capture (expectViewportFit, fit.ts). The style tag
  * stays: it covers every scroller, not only the document (main.content
  * scrolls on long pages), and the captures outside the runner
  * (smoke.spec.ts). Hiding via ::-webkit-scrollbar/display:none takes no

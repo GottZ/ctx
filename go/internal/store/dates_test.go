@@ -124,6 +124,22 @@ func TestIsYearAt_IsTheDateYearWindow(t *testing.T) {
 	}
 }
 
+// --- #451 point 2: the long s ---.
+
+// TestExtractDates_LongS: the long s, which (?i) lets the month patterns
+// match as s, is an s of the month name, as the Kelvin sign is a k: "Auguſt
+// 2026" is August 2026. A name that starts with it starts a match only behind
+// a word character, because \b is ASCII.
+func TestExtractDates_LongS(t *testing.T) {
+	aug, sep := []string{"2026-08-01T00:00:00Z"}, []string{"2026-09-01T00:00:00Z"}
+	wantDates(t, map[string][]string{
+		"Augu" + longS + "t 2026": aug, "AUGU" + longS + "T 2026": aug, "am augu" + longS + "t" + nbsp + "2026.": aug,
+		"x" + longS + "eptember 2026": sep, "x" + longS + "EPTEMBER 2026": sep,
+		"O" + kelvinSign + "tober 2026": {"2026-10-01T00:00:00Z"}, longS + "eptember 2026": nil,
+		"am " + longS + "eptember 2026": nil,
+	})
+}
+
 // --- T25: ExtractDates rejects Go-normalized invalid dates ---.
 
 func TestExtractDates_T25_InvalidDateRejection(t *testing.T) {

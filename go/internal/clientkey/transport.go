@@ -6,6 +6,10 @@
 // goes as a bearer token (NewBearer). TestKeyCredentialOnlyInKeyTransport
 // holds that no other code of theirs sets a credential header.
 //
+// The same rule holds a request that has no key to carry but whose body is
+// private content — a chat call of ctx-goldbench without a key, the chat call
+// of internal/goldset — to the origin of its base URL (NewUnkeyed, #446).
+//
 // A leaf below them: it imports the standard library and internal/httpx (the
 // Origin definition, which brings internal/ssrfguard) and nothing else, so a
 // bench tool that sends through it links neither the command tree nor another
@@ -71,6 +75,9 @@ type Transport struct {
 	next   http.RoundTripper // RoundTrip only; nil means http.DefaultTransport
 	names  Names
 	bearer bool // the key goes as "Authorization: Bearer <key>" (NewBearer), not as X-Context-Key
+	// unkeyed: there is no key (NewUnkeyed); no header is attached, and the
+	// origin rule holds the request and its body.
+	unkeyed bool
 }
 
 // New binds key to the origin of baseURL, which must be an http or https URL
@@ -99,13 +106,28 @@ func NewBearer(baseURL, key string, names Names) (Transport, error) {
 	return t, nil
 }
 
+// NewUnkeyed is New for a client that has no key to send but whose request
+// body is private content — the prompt of a ctx-goldbench chat call without a
+// key, the block content of a goldset chat call (#446). net/http alone
+// re-sends the body on a 307 or 308 to any host. No header is attached; the
+// origin rule and the refusal are New's, and RoundTrip sends through
+// http.DefaultTransport.
+func NewUnkeyed(baseURL string, names Names) (Transport, error) {
+	t, err := New(baseURL, "", nil, names)
+	if err != nil {
+		return Transport{}, err
+	}
+	t.unkeyed = true
+	return t, nil
+}
+
 // admit is the rule: nil for a request on the origin, the refusal otherwise.
 func (t Transport) admit(req *http.Request) error {
 	to := httpx.OriginOf(req.URL)
 	if to == t.origin {
 		return nil
 	}
-	refusal := &Refusal{to: to, origin: t.origin, names: t.names}
+	refusal := &Refusal{to: to, origin: t.origin, names: t.names, unkeyed: t.unkeyed}
 	if req.Response != nil { // set by http.Client on a redirect hop
 		refusal.status = req.Response.StatusCode
 	}
@@ -132,6 +154,9 @@ func (t Transport) signed(req *http.Request) (*http.Request, error) {
 			_ = req.Body.Close()
 		}
 		return nil, err
+	}
+	if t.unkeyed {
+		return req, nil
 	}
 	r := req.Clone(req.Context())
 	if t.bearer {
@@ -186,6 +211,7 @@ type Refusal struct {
 	status     int    // the status of the redirect that led here; 0 for a first request
 	advice     string // the base URL to set; empty when none is suggested
 	names      Names
+	unkeyed    bool // refused by a Transport from NewUnkeyed: there is no key to speak of
 }
 
 func (e *Refusal) Error() string {
@@ -193,8 +219,12 @@ func (e *Refusal) Error() string {
 	if e.status != 0 {
 		what = fmt.Sprintf("a redirect (HTTP %d)", e.status)
 	}
-	msg := fmt.Sprintf("refused %s to %s: %s sends its API key only to the origin of %s, %s, and follows a redirect only within it",
-		what, written(e.to), e.names.Client, e.names.BaseURL, e.origin)
+	sends := "its API key"
+	if e.unkeyed {
+		sends = "its requests"
+	}
+	msg := fmt.Sprintf("refused %s to %s: %s sends %s only to the origin of %s, %s, and follows a redirect only within it",
+		what, written(e.to), e.names.Client, sends, e.names.BaseURL, e.origin)
 	if e.advice != "" {
 		msg += fmt.Sprintf("; set %s to %s if that is the server's address", e.names.BaseURL, e.advice)
 	}

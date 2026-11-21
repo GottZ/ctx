@@ -83,6 +83,9 @@ zusätzlich am Ort der Abweichung als Code-Kommentar dokumentiert
    misst das Modell, nicht die ctx-Infrastruktur. Admission, Backend-Failover
    und Telemetrie sind bewusst außerhalb des Mocks; Transport-Fehler werden
    nicht retried (der Fall scored 0 und wird als `transport_errors` gezählt).
+   Ausnahme: eine abgewiesene Weiterleitung auf einen anderen Origin als den
+   von `-endpoint` beendet den Lauf (Exit 1, kein Report) — sie träfe jeden
+   Fall, mit und ohne `-api-key` (`docs/development.md`, #446).
 3. **keywords ohne Retry-Schleife**: `GenerateKeywords` retried bis zu 3× bei
    Parse-Fehlern/zu wenigen Keywords (`internal/dream/keywords.go:84-139`);
    der Bench wertet den ersten Wurf — Retries würden Parse-Schwächen des

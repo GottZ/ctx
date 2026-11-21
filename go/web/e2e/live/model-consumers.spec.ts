@@ -113,7 +113,10 @@ test('@live model-consumers: a ctxm_ model key at the login form gets the error 
 })
 
 test('@live model-consumers: POST /auth/login with a ctxm_ model key answers 401, no cookie', async ({ request }) => {
-  const res = await request.post('/auth/login', { data: { api_key: consumers.b.modelKey } })
+  // maxRedirects: 0 (#447): APIRequestContext follows a redirect, on 307/308
+  // with the body — B's model key — to any host; /auth/login never redirects,
+  // so a redirect answers its own status here and fails the expectation.
+  const res = await request.post('/auth/login', { data: { api_key: consumers.b.modelKey }, maxRedirects: 0 })
   expect(res.status()).toBe(401)
   expect(res.headers()['set-cookie']).toBeUndefined()
 })
