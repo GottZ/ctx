@@ -12,6 +12,9 @@ package handler
 //     upsert waits; the client leaves. The classification runs detached and
 //     lands; a shutdown waits for it, and its own bound ends it when the
 //     database never answers.
+//   - POST /api/store/batch and manage update (point 4): the write waits
+//     inside its transaction; the client leaves; the line names the write's
+//     outcome (rolled_back), as POST /api/store does.
 //
 //	go test -tags=integration ./internal/handler/ -run 'TestClientAbortFollowups' -count=1 -v
 
@@ -20,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -31,6 +35,7 @@ import (
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/oai"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -38,12 +43,12 @@ import (
 // abortManage serves h's /api/manage as ar behind the production RequestID
 // and Logger stages and gives up on the call once parked reports that the
 // route waits.
-func abortManage(t *testing.T, h *ManageHandler, ar *auth.AuthResult, action string, data any, parked <-chan struct{}) <-chan struct{} {
+func abortManage(t *testing.T, h *ManageHandler, ar *auth.AuthResult, request map[string]any, parked <-chan struct{}) <-chan struct{} {
 	t.Helper()
 	srv, done := abortServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.HandleManage(w, r.WithContext(context.WithValue(r.Context(), authResultKey, ar)))
 	}), nil)
-	body, err := json.Marshal(map[string]any{"action": action, "data": data})
+	body, err := json.Marshal(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +92,7 @@ func TestClientAbortFollowupsAliasPreview(t *testing.T) {
 	}, func(string) string { return "" })
 
 	logs := installRejectLogCapture(t)
-	waitDone(t, abortManage(t, h, admin, "model-alias-preview", map[string]any{"alias": "chat", "consumer_id": c.id}, parked))
+	waitDone(t, abortManage(t, h, admin, map[string]any{"action": "model-alias-preview", "data": map[string]any{"alias": "chat", "consumer_id": c.id}}, parked))
 
 	if got := statusOf(t, requestLogOf(t, logs)); got != clientClosedStatus {
 		t.Errorf("request log status = %d, want %d", got, clientClosedStatus)
@@ -256,6 +261,87 @@ func TestClientAbortFollowupsClassifyAfterCommit(t *testing.T) {
 		}
 		if err, _ := recs[0].attrs["error"].(error); !errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("classification ended with %v, want its own deadline", recs[0].attrs["error"])
+		}
+	})
+}
+
+// writeOutcomeOf returns the write outcome of the one line msg.
+func writeOutcomeOf(t *testing.T, logs *rejectLogCapture, msg string) string {
+	t.Helper()
+	recs := logs.withMsg(msg)
+	if len(recs) != 1 {
+		t.Fatalf("want one %q line, got %+v (all: %+v)", msg, recs, logs.all())
+	}
+	if recs[0].level >= slog.LevelError || recs[0].attrs["client_gone"] != true {
+		t.Errorf("%q = %+v, want INFO with client_gone=true", msg, recs[0])
+	}
+	s, _ := recs[0].attrs["write_outcome"].(string)
+	return s
+}
+
+// TestClientAbortFollowupsWriteOutcome — write_outcome beyond POST
+// /api/store: the batch store and manage update name what a write the client
+// gave up on left behind.
+func TestClientAbortFollowupsWriteOutcome(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	plain := abortKey(t, pool)
+	reg := blocktype.NewRegistry()
+	reg.Boot(ctx, pool)
+
+	t.Run("batch store", func(t *testing.T) {
+		h := NewStoreHandler(pool, staticConfigStore{cfg: &config.Config{
+			Pool:   config.PoolConfig{DefaultBlockSensitivity: backends.SensPublic},
+			Writes: config.WritesConfig{ConfirmTTL: 10 * time.Minute, BatchMaxItems: 100},
+		}}, reg)
+		installRejectLogCapture(t)
+		srv, done := abortRoute(t, pool, h.HandleStoreBatch)
+		// Fixture: the same batch on a live request writes (200).
+		probe, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/store/batch",
+			strings.NewReader(`{"items":[{"category":"i453","title":"i453-batch-probe","content":"batch probe"}]}`))
+		probe.Header.Set("Content-Type", "application/json")
+		probe.Header.Set("X-Context-Key", plain)
+		resp, err := http.DefaultClient.Do(probe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("fixture batch: %d %s", resp.StatusCode, raw)
+		}
+		waitDone(t, done)
+		logs := installRejectLogCapture(t)
+		release := lockedTx(t, pool, `LOCK TABLE context_blocks IN SHARE MODE`)
+		body := `{"items":[{"category":"i453","title":"i453-batch-abort","content":"batch abort probe"}]}`
+		abortAfter(t, srv.URL+"/api/store/batch", plain, body, func() { waitLockWaiters(t, pool, 1) })
+		waitDone(t, done)
+		release()
+		assertClientGone(t, logs)
+		if got := writeOutcomeOf(t, logs, "store batch: upsert error"); got != writeRolledBack {
+			t.Errorf("write_outcome = %q, want %s", got, writeRolledBack)
+		}
+	})
+
+	t.Run("manage update", func(t *testing.T) {
+		seed, err := store.UpsertBlock(ctx, pool, "i453", "i453-update-abort", "original", nil, nil, "private", false, store.SensitivityWrite{}, "")
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		mh := mcHandler(t, pool, false, false)
+		logs := installRejectLogCapture(t)
+		srv, done := abortRoute(t, pool, mh.HandleManage)
+		release := lockedTx(t, pool, `SELECT 1 FROM context_blocks WHERE id = $1::uuid FOR UPDATE`, seed.ID)
+		body := fmt.Sprintf(`{"action":"update","id":%q,"data":{"content":"changed while the client left"}}`, seed.ID)
+		abortAfter(t, srv.URL+"/api/manage", plain, body, func() { waitLockWaiters(t, pool, 1) })
+		waitDone(t, done)
+		release()
+		assertClientGone(t, logs)
+		if got := writeOutcomeOf(t, logs, "manage: block write error"); got != writeRolledBack {
+			t.Errorf("write_outcome = %q, want %s", got, writeRolledBack)
 		}
 	})
 }
