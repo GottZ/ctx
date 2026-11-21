@@ -42,8 +42,8 @@ func checkRules(t *testing.T, now time.Time, cases map[string]wantDate) {
 // is the time up to X — a window from today to X starts after it ends.
 func TestRules_BisWithAPastEndIsOpenTowardsThePast(t *testing.T) {
 	checkRules(t, now463, map[string]wantDate{
-		"bis März 2015":           {"2015-03-01", "", "until"},
-		"bis März 2024":           {"2024-03-01", "", "until"},
+		"bis März 2015":           {"2015-03-31", "", "until"},
+		"bis März 2024":           {"2024-03-31", "", "until"},
 		"was galt bis gestern":    {"2026-11-20", "", "until"},
 		"bis letztem Montag":      {"2026-11-16", "", "until"},
 		"bis Freitag":             {"2026-11-21", "2026-11-27", "range"},
@@ -57,7 +57,7 @@ func TestRules_BisWithAPastEndIsOpenTowardsThePast(t *testing.T) {
 	})
 	// The FTS expansion names the end the question names, not today.
 	tr := NormalizeTemporalRules("bis März 2015", now463)
-	if got := TemporalToFTSExpansion(tr.Dates); got != "2015-03-01 OR 2015-03" {
+	if got := TemporalToFTSExpansion(tr.Dates); got != "2015-03-31 OR 2015-03" {
 		t.Errorf("FTS of bis März 2015 = %q", got)
 	}
 }
@@ -143,12 +143,12 @@ func TestRules_RangeEndsAfterItsStart(t *testing.T) {
 		"letzten Freitag bis Montag":    {"2026-11-20", "2026-11-23", "range"},
 		"next friday through monday":    {"2026-11-27", "2026-11-30", "range"},
 		"friday through monday":         {"2026-11-27", "2026-11-30", "range"},
-		"von Dezember bis Januar":       {"2026-12-01", "2027-01-01", "range"},
+		"von Dezember bis Januar":       {"2026-12-01", "2027-01-31", "range"},
 		"von Montag bis Freitag":        {"2026-11-23", "2026-11-27", "range"},
 		"von gestern bis übermorgen":    {"2026-11-20", "2026-11-23", "range"},
 		"seit morgen":                   {"2026-11-22", "", "future"}, // no window since a day to come, the day alone
 		"von morgen bis gestern":        {"2026-11-20", "2026-11-22", "range"},
-		"von April 2024 bis März 2024":  {"2024-03-01", "2024-04-01", "range"},
+		"von April 2024 bis März 2024":  {"2024-03-01", "2024-04-30", "range"},
 		"von 2024-03-31 bis 2024-03-01": {"2024-03-01", "2024-03-31", "range"},
 		"2024-03-31 bis 2024-03-01":     {"2024-03-01", "2024-03-31", "range"},
 		"von 31.03.2024 bis 01.03.2024": {"2024-03-01", "2024-03-31", "range"},
@@ -381,12 +381,40 @@ func TestRules_ADayDateAfterVonStartsAWindowWithAFixedEnd(t *testing.T) {
 		"von 01.03.2026 bis heute":            {"2026-03-01", "2026-11-21", "range"},
 		"vom 01.03.2026 bis gestern":          {"2026-03-01", "2026-11-20", "range"},
 		"von 2026-12-31 bis gestern":          {"2026-11-20", "2026-12-31", "range"},
-		"von 2024-03-15 bis März 2025":        {"2024-03-15", "2025-03-01", "range"},
+		"von 2024-03-15 bis März 2025":        {"2024-03-15", "2025-03-31", "range"},
 		"von 2026-03-01 bis Freitag":          {"2026-03-01", "", "past"},
 		"von 2026-03-01 bis Ende März":        {"2026-03-01", "", "past"},
 		"von 2026-03-01 bis Projektende":      {"2026-03-01", "", "past"},
 		"von 2026-03-01":                      {"2026-03-01", "", "past"},
 		"Daten von 2026-03-01 und 2026-03-05": {"2026-03-01", "", "past"},
 		"von Montag bis 2026-12-31":           {"2026-11-23", "2026-12-31", "range"},
+	})
+}
+
+// TestRules_AMonthAtTheEndIncludesTheMonth: a window's end named by a month,
+// with or without its year, is the month's last day — the month it names is
+// inside the window ("von März 2024 bis April 2024" ends on 2024-04-30, "bis
+// März 2024" on 2024-03-31); a start named by a month is its 1st. An end that
+// names a day keeps it (issue #463). "bis" before a month decides between the
+// time up to it and a deadline by the month's 1st, as before.
+func TestRules_AMonthAtTheEndIncludesTheMonth(t *testing.T) {
+	checkRules(t, now463, map[string]wantDate{
+		"von März 2024 bis April 2024":       {"2024-03-01", "2024-04-30", "range"},
+		"von Februar 2024 bis Februar 2024":  {"2024-02-01", "2024-02-29", "range"},
+		"von 2024-03-15 bis März 2025":       {"2024-03-15", "2025-03-31", "range"},
+		"von März bis heute":                 {"2026-03-01", "2026-11-21", "range"},
+		"von Dezember bis Januar":            {"2026-12-01", "2027-01-31", "range"},
+		"Was lief von Dezember bis Januar?":  {"2025-12-01", "2026-01-31", "range"},
+		"von April 2024 bis März 2024":       {"2024-03-01", "2024-04-30", "range"},
+		"vom 01.03.2026 bis Ende März":       {"2026-03-01", "", "past"},
+		"bis März 2024":                      {"2024-03-31", "", "until"},
+		"bis letzten August 2024":            {"2024-08-31", "", "until"},
+		"bis November 2026":                  {"2026-11-30", "", "until"},
+		"bis März 2027":                      {"2026-11-21", "2027-03-31", "range"},
+		"bis März":                           {"2026-11-21", "2027-03-31", "range"},
+		"bis Ende März 2024":                 {"2024-03-31", "", "until"},
+		"bis Mitte März 2024":                {"2024-03-15", "", "until"},
+		"seit März 2024":                     {"2024-03-01", "2026-11-21", "range"},
+		"seit Ende März 2024":                {"2024-03-31", "2026-11-21", "range"},
 	})
 }

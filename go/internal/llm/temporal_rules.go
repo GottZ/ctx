@@ -759,22 +759,23 @@ func matchDayDates(query string, deferToSeitBis bool) *TemporalResult {
 // happened. A fixed end keeps the end in either tense ("von März bis heute"
 // is this year's March up to today), a fixed start the start. Two fixed edges
 // in the wrong order swap: the window between two named days is what they
-// span (issue #463).
-func orderWindow(start, end time.Time, startRel, endRel, backward bool, earlierStart, laterEnd func(time.Time) time.Time) (time.Time, time.Time) {
+// span (issue #463); swapped reports it, so that the caller ends the window
+// on the last day of what the start named.
+func orderWindow(start, end time.Time, startRel, endRel, backward bool, earlierStart, laterEnd func(time.Time) time.Time) (s, e time.Time, swapped bool) {
 	if !end.Before(start) {
-		return start, end
+		return start, end, false
 	}
 	if startRel && (backward || !endRel) {
 		if s := earlierStart(end); !s.After(end) {
-			return s, end
+			return s, end, false
 		}
 	}
 	if endRel {
 		if e := laterEnd(start); !e.Before(start) {
-			return start, e
+			return start, e, false
 		}
 	}
-	return end, start
+	return end, start, true
 }
 
 func matchVonBis(query string, now time.Time) *TemporalResult {
@@ -785,20 +786,25 @@ func matchVonBis(query string, now time.Time) *TemporalResult {
 	}
 	tense := DetectVerbTense(query)
 	backward := tense == "past"
-	start, startRel := resolvePhraseRel(m[1], backward, now)
-	end, endRel := resolvePhraseRel(m[2], backward, now)
-	if start.IsZero() || end.IsZero() {
+	startEdge := resolvePhraseEdge(m[1], backward, now)
+	endEdge := resolvePhraseEdge(m[2], backward, now)
+	if startEdge.day.IsZero() || endEdge.day.IsZero() {
 		return nil
 	}
 	// A weekday or month after a day date could count from today ("bis
 	// Freitag") or from the date ("vom 01.03.2026 bis Ende März"); the rules
 	// do not guess, the date stays the day it names.
-	if endRel && len(findDayDates(strings.ToUpper(m[1]))) > 0 {
+	if endEdge.rel && len(findDayDates(strings.ToUpper(m[1]))) > 0 {
 		return nil
 	}
-	start, end = orderWindow(start, end, startRel, endRel, backward,
+	start, end, swapped := orderWindow(startEdge.day, endEdge.day, startEdge.rel, endEdge.rel, backward,
 		func(to time.Time) time.Time { return resolvePhrase(m[1], true, to) },
 		func(from time.Time) time.Time { return resolvePhrase(m[2], false, from) })
+	// A month at the end includes the month: the window ends on its last day
+	// ("von März 2024 bis April 2024" ends on 2024-04-30, issue #463).
+	if swapped && startEdge.month || !swapped && endEdge.month {
+		end = lastOfMonth(end)
+	}
 	return rangeResult("von "+m[1]+" bis "+m[2], fmtDate(start), fmtDate(end), "range")
 }
 
@@ -815,7 +821,7 @@ func matchLetztenWDBis(query string, now time.Time) *TemporalResult {
 	d1 := resolveWeekdayDate(wd1, true, now)
 	d2 := resolveWeekdayDate(wd2, true, now)
 	// "letzten" names the start; only the end is counted again.
-	d1, d2 = orderWindow(d1, d2, false, true, false, nil, func(from time.Time) time.Time { return resolveWeekdayDate(wd2, false, from) })
+	d1, d2, _ = orderWindow(d1, d2, false, true, false, nil, func(from time.Time) time.Time { return resolveWeekdayDate(wd2, false, from) })
 	return rangeResult("letzten "+m[1]+" bis "+m[2], fmtDate(d1), fmtDate(d2), "range")
 }
 
@@ -827,7 +833,7 @@ func matchNextThrough(query string, now time.Time) *TemporalResult {
 		if ok1 && ok2 {
 			d1 := resolveWeekdayDate(wd1, false, now)
 			d2 := resolveWeekdayDate(wd2, false, now)
-			d1, d2 = orderWindow(d1, d2, false, true, false, nil, func(from time.Time) time.Time { return resolveWeekdayDate(wd2, false, from) })
+			d1, d2, _ = orderWindow(d1, d2, false, true, false, nil, func(from time.Time) time.Time { return resolveWeekdayDate(wd2, false, from) })
 			return rangeResult("next "+m[1]+" through "+m[2], fmtDate(d1), fmtDate(d2), "range")
 		}
 	}
@@ -845,7 +851,7 @@ func matchNextThrough(query string, now time.Time) *TemporalResult {
 	backward := tense == "past"
 	d1 := resolveWeekdayDate(wd1, backward, now)
 	d2 := resolveWeekdayDate(wd2, backward, now)
-	d1, d2 = orderWindow(d1, d2, true, true, backward,
+	d1, d2, _ = orderWindow(d1, d2, true, true, backward,
 		func(to time.Time) time.Time { return resolveWeekdayDate(wd1, true, to) },
 		func(from time.Time) time.Time { return resolveWeekdayDate(wd2, false, from) })
 	return rangeResult(m[1]+" through "+m[2], fmtDate(d1), fmtDate(d2), "range")
@@ -878,17 +884,19 @@ func matchBis(query string, now time.Time) *TemporalResult {
 	if m == nil {
 		return nil
 	}
-	end := resolvePhrase(m[1], false, now)
-	if end.IsZero() {
+	e := resolvePhraseEdge(m[1], false, now)
+	if e.day.IsZero() {
 		return nil
 	}
 	// An end before today ("bis März 2015", "bis gestern") is the time up to
 	// it, open towards the past: a window from today would start after it
-	// ends (issue #463). A later end is a deadline, the window from today.
-	if end.Before(truncDate(now)) {
-		return &TemporalResult{Dates: []TemporalDate{{Ref: "bis " + m[1], Date: fmtDate(end), Dir: DirUntil}}}
+	// ends (issue #463). A later end is a deadline, the window from today. A
+	// month includes the month: the window ends on its last day, and a month
+	// that began before today is the time up to its end.
+	if e.day.Before(truncDate(now)) {
+		return &TemporalResult{Dates: []TemporalDate{{Ref: "bis " + m[1], Date: fmtDate(e.last()), Dir: DirUntil}}}
 	}
-	return rangeResult("bis "+m[1], fmtDate(truncDate(now)), fmtDate(end), "range")
+	return rangeResult("bis "+m[1], fmtDate(truncDate(now)), fmtDate(e.last()), "range")
 }
 
 func matchWeekSegment(query string, now time.Time) *TemporalResult {
@@ -1315,13 +1323,45 @@ func resolveMonthPosition(pos string, year int, m time.Month, loc *time.Location
 	}
 }
 
+// phraseEdge is what a phrase at a window's edge names (issue #463).
+type phraseEdge struct {
+	// day is the day the phrase names, the 1st for a month; zero: the phrase
+	// names none.
+	day time.Time
+	// rel: the day is counted from the reference day the phrase is resolved
+	// at, so that a window may count it again from its other edge — a bare
+	// weekday or month name and a month position without a year ("Ende
+	// März"); a word naming a day from today (heute, gestern, "letzten
+	// Montag") and a phrase naming its own day (a day date, a month with its
+	// year) are fixed.
+	rel bool
+	// month: the phrase names a whole month (a month name with or without
+	// its year, not a day in it); as a window's end it stands for the month's
+	// last day (last).
+	month bool
+}
+
+// last is the last day of what the edge names: its day, and for a month
+// the month's last day.
+func (e phraseEdge) last() time.Time {
+	if e.month {
+		return lastOfMonth(e.day)
+	}
+	return e.day
+}
+
+// lastOfMonth returns the last day of t's month.
+func lastOfMonth(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month()+1, 0, 0, 0, 0, 0, t.Location())
+}
+
 // resolveThreeWordPhrase handles 3-token patterns: "Ende März 2025", "letzten August 2024".
-func resolveThreeWordPhrase(words []string, now time.Time) (time.Time, bool) {
+func resolveThreeWordPhrase(words []string, now time.Time) (phraseEdge, bool) {
 	// Position + Month + Year: "Ende März 2025" → last day of March 2025
 	if pos, ok := monthPositionModifiers[words[0]]; ok {
 		if m, mOk := lookupMonth(words[1]); mOk {
 			if y, yOk := isYear(words[2]); yOk {
-				return resolveMonthPosition(pos, y, m, now.Location()), true
+				return phraseEdge{day: resolveMonthPosition(pos, y, m, now.Location())}, true
 			}
 		}
 	}
@@ -1329,42 +1369,37 @@ func resolveThreeWordPhrase(words []string, now time.Time) (time.Time, bool) {
 	if explicitPastSet[words[0]] || explicitFutureSet[words[0]] {
 		if m, mOk := lookupMonth(words[1]); mOk {
 			if y, yOk := isYear(words[2]); yOk {
-				return resolveMonthYear(m, y, now), true
+				return phraseEdge{day: resolveMonthYear(m, y, now), month: true}, true
 			}
 		}
 	}
-	return time.Time{}, false
+	return phraseEdge{}, false
 }
 
 // resolvePhrase resolves a 1-3 word temporal phrase like "letztem Montag", "nächsten Freitag",
 // "vorgestern", "August 2024", "Ende März 2025".
 // For multi-word phrases, tries specific patterns first, then falls back to fewer words.
 func resolvePhrase(phrase string, defaultBackward bool, now time.Time) time.Time {
-	t, _ := resolvePhraseRel(phrase, defaultBackward, now)
-	return t
+	return resolvePhraseEdge(phrase, defaultBackward, now).day
 }
 
-// resolvePhraseRel is resolvePhrase and also reports whether the day is
-// counted from the reference day it is given, so that a window may count it
-// again from its other edge: a bare weekday or month name and a month position
-// without a year ("Ende März") are; a word naming a day from today (heute,
-// gestern, "letzten Montag") and a phrase naming its own day (a day date, a
-// month with its year) are fixed (issue #463).
-func resolvePhraseRel(phrase string, defaultBackward bool, now time.Time) (time.Time, bool) {
+// resolvePhraseEdge is resolvePhrase with everything a window's edge needs
+// to know of the phrase (phraseEdge).
+func resolvePhraseEdge(phrase string, defaultBackward bool, now time.Time) phraseEdge {
 	words := phraseWords(phrase)
 	if len(words) == 0 {
-		return time.Time{}, false
+		return phraseEdge{}
 	}
 
 	// Single word: delegate to resolveToken
 	if len(words) == 1 {
-		return resolveTokenRel(words[0], defaultBackward, now)
+		return resolveTokenEdge(words[0], defaultBackward, now)
 	}
 
 	// --- 3-word patterns ---
 	if len(words) >= 3 {
-		if t, ok := resolveThreeWordPhrase(words[:3], now); ok {
-			return t, false
+		if e, ok := resolveThreeWordPhrase(words[:3], now); ok {
+			return e
 		}
 	}
 
@@ -1374,22 +1409,23 @@ func resolvePhraseRel(phrase string, defaultBackward bool, now time.Time) (time.
 	// Month + Year: "August 2024" → 2024-08-01 (explicit year, no direction guessing)
 	if m, mOk := lookupMonth(w0); mOk {
 		if y, yOk := isYear(w1); yOk {
-			return resolveMonthYear(m, y, now), false
+			return phraseEdge{day: resolveMonthYear(m, y, now), month: true}
 		}
 	}
 
 	// Year + Month: "2024 August" → 2024-08-01
 	if y, yOk := isYear(w0); yOk {
 		if m, mOk := lookupMonth(w1); mOk {
-			return resolveMonthYear(m, y, now), false
+			return phraseEdge{day: resolveMonthYear(m, y, now), month: true}
 		}
 	}
 
 	// Direction modifier + keyword: "letztem Montag", "nächsten Freitag"
 	if explicitPastSet[w0] || explicitFutureSet[w0] {
 		if !resolveToken(w1, defaultBackward, now).IsZero() {
-			backward := explicitPastSet[w0]
-			return resolveToken(w1, backward, now), false
+			e := resolveTokenEdge(w1, explicitPastSet[w0], now)
+			e.rel = false
+			return e
 		}
 	}
 
@@ -1397,12 +1433,12 @@ func resolvePhraseRel(phrase string, defaultBackward bool, now time.Time) (time.
 	if pos, ok := monthPositionModifiers[w0]; ok {
 		if m, mOk := lookupMonth(w1); mOk {
 			base := resolveMonthDate(m, defaultBackward, now)
-			return resolveMonthPosition(pos, base.Year(), base.Month(), base.Location()), true
+			return phraseEdge{day: resolveMonthPosition(pos, base.Year(), base.Month(), base.Location()), rel: true}
 		}
 	}
 
 	// Fallback: try first word as standalone token (greedy regex captured a non-temporal second word)
-	return resolveTokenRel(words[0], defaultBackward, now)
+	return resolveTokenEdge(words[0], defaultBackward, now)
 }
 
 // phrasePunct are the runes a word of a phrase is trimmed of at both ends:
@@ -1425,41 +1461,40 @@ func phraseWords(phrase string) []string {
 
 // resolveToken resolves a single token to a date (for compound patterns).
 func resolveToken(tok string, backward bool, now time.Time) time.Time {
-	t, _ := resolveTokenRel(tok, backward, now)
-	return t
+	return resolveTokenEdge(tok, backward, now).day
 }
 
-// resolveTokenRel is resolveToken and also reports whether the day is counted
-// from the reference day (a weekday or month name), as resolvePhraseRel does.
-func resolveTokenRel(tok string, backward bool, now time.Time) (time.Time, bool) {
+// resolveTokenEdge is resolveToken with what a window's edge needs to know
+// of the token (phraseEdge), as resolvePhraseEdge.
+func resolveTokenEdge(tok string, backward bool, now time.Time) phraseEdge {
 	tok = strings.ToLower(strings.Trim(tok, ".,;:!?"))
 	// Simple keywords
 	for _, kw := range simpleKeywords {
 		if fuzzyMatch(tok, kw.word) {
-			return truncDate(kw.resolve(now)), false
+			return phraseEdge{day: truncDate(kw.resolve(now))}
 		}
 	}
 	// Weekdays
 	if wd, ok := weekdayMapDE[tok]; ok {
-		return resolveWeekdayDate(wd, backward, now), true
+		return phraseEdge{day: resolveWeekdayDate(wd, backward, now), rel: true}
 	}
 	if wd, ok := weekdayMapEN[tok]; ok {
-		return resolveWeekdayDate(wd, backward, now), true
+		return phraseEdge{day: resolveWeekdayDate(wd, backward, now), rel: true}
 	}
 	// Month names
 	if m, ok := lookupMonth(tok); ok {
-		return resolveMonthDate(m, backward, now), true
+		return phraseEdge{day: resolveMonthDate(m, backward, now), rel: true, month: true}
 	}
 	// A day date of either form the write side extracts, and an ISO date of
 	// any year, which this resolver took before the dot form joined it.
 	// The token is lowercased; the T and Z of an ISO time are upper case.
 	if t, ok := parseDayDate(strings.ToUpper(tok)); ok {
-		return t, false
+		return phraseEdge{day: t}
 	}
 	if t, err := time.Parse("2006-01-02", tok); err == nil {
-		return t, false
+		return phraseEdge{day: t}
 	}
-	return time.Time{}, false // zero = unresolved
+	return phraseEdge{} // zero = unresolved
 }
 
 // --- Main Entry Point ---.

@@ -68,19 +68,26 @@ type GravityParams struct {
 }
 
 // distanceDays returns how many days d lies after the target (negative:
-// before it) — after TargetDate, or after the window's end and before its
-// start, 0 inside it.
+// before it) — after TargetDate, or, with a window, how many days d's day
+// lies after the window's end day or before its start day, 0 inside it.
+//
+// A window's edges are days, so a date outside it counts by its day: every
+// time of the day before the start is a day away, as every time of the day
+// after the end day is (issue #463). Measured by the hour from the start's
+// 00:00 and the end day's 00:00, a time an hour before the start was half a
+// day away (the closest distance counted) and a time an hour after the end
+// day more than a day; a date at 00:00 lies as far away either way.
 func (p GravityParams) distanceDays(d time.Time) float64 {
 	if p.WindowStart.IsZero() && p.WindowEnd.IsZero() {
 		return d.Sub(p.TargetDate).Hours() / 24.0
 	}
 	if !p.WindowStart.IsZero() && d.Before(p.WindowStart) {
-		return d.Sub(p.WindowStart).Hours() / 24.0
+		return math.Floor(d.Sub(p.WindowStart).Hours() / 24.0)
 	}
 	// The end day is inside the window until its last instant; a date of the
 	// next day is a day or more past the end.
 	if !p.WindowEnd.IsZero() && !d.Before(p.WindowEnd.AddDate(0, 0, 1)) {
-		return d.Sub(p.WindowEnd).Hours() / 24.0
+		return math.Floor(d.Sub(p.WindowEnd).Hours() / 24.0)
 	}
 	return 0
 }
