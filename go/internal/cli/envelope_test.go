@@ -292,6 +292,12 @@ func envelopeInventory() map[string]inventoryEntry {
 		"models consumers deactivate": e1(-1, "models", "consumers", "deactivate", fixtureProject),
 		"models aliases list":         e1(-1, "models", "aliases", "list"),
 
+		// ── #408: a new command (no pre-T03-13 exit code) ──────────────────
+		// Its answer is one line made from the block, not the response body, so
+		// a refused update leaves stdout empty and the reason on stderr
+		// (`--json` prints the body; update_test.go pins both).
+		"update": mute(-1, "update", "b1", "--title", "x"),
+
 		// ── #318: ingest leaves the silent group, 0 → 1 ────────────────────
 		// It never ran in a hook. The vault is the one TestEnvelopeContractPerCommand
 		// writes into its working directory; the server's success:false fails the
