@@ -138,6 +138,17 @@ func TestParseTemporalReviewFences(t *testing.T) {
 // commentary around the JSON is not extracted. The stage's answer contract is
 // a single object, and a "grab the first {...}" scanner is the leniency class
 // the link parser's zero-link contract exists to refuse.
+func TestParseTemporalReviewNeedsTheDatesArray(t *testing.T) {
+	for _, raw := range []string{"null", "{}", `{"directions":[]}`, `{"dates":null}`} {
+		if _, err := parseTemporalReview(raw); err == nil {
+			t.Errorf("parseTemporalReview(%q) passed, want a parse failure (no dates array)", raw)
+		}
+	}
+	if review, err := parseTemporalReview(`{"dates":[]}`); err != nil || len(review.Dates) != 0 {
+		t.Errorf(`parseTemporalReview({"dates":[]}) = %v, %v; want an empty review`, review, err)
+	}
+}
+
 func TestParseTemporalReviewProse(t *testing.T) {
 	if _, err := parseTemporalReview("Here is the review: {\"dates\":[]}"); err == nil {
 		t.Error("prose-wrapped answer parsed, want a parse error")

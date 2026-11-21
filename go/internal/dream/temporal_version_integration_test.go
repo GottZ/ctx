@@ -605,6 +605,10 @@ func TestTemporalReviewFailedOnTheLLMStaysDue(t *testing.T) {
 	}{
 		{"the LLM call fails", func(context.Context, string) (string, error) { return "", errors.New("i452: backend down") }},
 		{"the answer does not parse", func(context.Context, string) (string, error) { return "the dates are 2026-05-18", nil }},
+		// Valid JSON that is no review (CodeRabbit on #464): it must not
+		// replace the rows as a review that found nothing would.
+		{"the answer is null", func(context.Context, string) (string, error) { return "null", nil }},
+		{"the answer has no dates", func(context.Context, string) (string, error) { return `{"directions":[]}`, nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rig := newI427Rig(t)

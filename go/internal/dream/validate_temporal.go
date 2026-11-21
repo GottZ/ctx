@@ -11,6 +11,7 @@ package dream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -93,13 +94,33 @@ type TemporalReview struct {
 // block without ever recording a review.
 // A relay that accepts the JSON-mode request and answers in a fence anyway
 // costs a block its temporal findings for good, and says so only in a WARN.
+//
+// An answer must carry its "dates" array, empty or not (issue #452): the
+// review records what it decoded and replaces the block's rows, so `null`,
+// which decodes without an error into an empty review, or an object without
+// "dates" would pass for a review that found nothing and remove the dates an
+// earlier review found. Such an answer is a parse failure.
 func parseTemporalReview(raw string) (*TemporalReview, error) {
+	body := []byte(llm.StripJSONFence(strings.TrimSpace(raw)))
+	var shape struct {
+		Dates *json.RawMessage `json:"dates"`
+	}
+	if err := json.Unmarshal(body, &shape); err != nil {
+		return nil, err
+	}
+	if shape.Dates == nil || string(*shape.Dates) == "null" {
+		return nil, errTemporalReviewNoDates
+	}
 	var review TemporalReview
-	if err := json.Unmarshal([]byte(llm.StripJSONFence(strings.TrimSpace(raw))), &review); err != nil {
+	if err := json.Unmarshal(body, &review); err != nil {
 		return nil, err
 	}
 	return &review, nil
 }
+
+// errTemporalReviewNoDates is the parse failure of an answer without a
+// "dates" array.
+var errTemporalReviewNoDates = errors.New(`temporal review: the answer carries no "dates" array`)
 
 // temporalTimeout resolves the Phase-2 LLM review timeout: the router's
 // configured value wins when the scheduler sets one (config key
