@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -37,6 +38,11 @@ func NewDigestHandler(pool *pgxpool.Pool, blocktypes *blocktype.Registry, cfg Co
 // hand every valid API key a lever on a job bounded only by
 // graph_overview.rebuild_timeout.
 func (h *DigestHandler) HandleDigest(w http.ResponseWriter, r *http.Request) {
+	// The route takes no body, but the CLI sends one ({"trigger":"manual"}):
+	// discarding it lets net/http see a client that leaves — it watches the
+	// connection only once the body is consumed (issue #483). The route's
+	// MaxBodySize bounds the read.
+	_, _ = io.Copy(io.Discard, r.Body)
 	ctx := r.Context()
 	reqID := RequestIDFromContext(ctx)
 

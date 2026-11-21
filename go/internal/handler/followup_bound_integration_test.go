@@ -537,16 +537,16 @@ func TestFollowupBoundDigest(t *testing.T) {
 		return fbServer(t, Auth(pool)(http.HandlerFunc(h.HandleDigest)))
 	}
 	// classifiedAfterLeave parks the classification of title on key, lets
-	// the client leave, then lets the classification go on. The request has
-	// no body: the handler never reads one, and net/http sees a client go
-	// only once the body is consumed — a client that sent one (the CLI sends
-	// {"trigger":"manual"}) leaves unseen until the answer is written.
+	// the client leave, then lets the classification go on. The request
+	// carries the body the CLI sends: net/http sees a client go only once the
+	// body is consumed, so the route discards it (issue #483) — before, such
+	// a client left unseen until the answer was written.
 	classifiedAfterLeave := func(t *testing.T, title string, key int64) {
 		t.Helper()
 		installRejectLogCapture(t)
 		srv, done, reqs := route(t)
 		release := lockedTx(t, pool, `SELECT pg_advisory_xact_lock($1)`, key)
-		q := fbSend(t, http.MethodPost, srv.URL+"/api/digest", plain, "")
+		q := fbSend(t, http.MethodPost, srv.URL+"/api/digest", plain, `{"trigger":"manual"}`)
 		waitLockWaiters(t, pool, 1)
 		q.leave(t, pool, reqs)
 		release()
