@@ -11,8 +11,10 @@ import (
 // Postgres image, and checked into the repo. It is embedded — not read from
 // disk at runtime — so the vertrag ships inside the same binary as the
 // migrations that define it (design/03 §3.2: "der Vertrag muss außerhalb
-// des Prüflings leben"). The pre-commit hook (.hooks/pre-commit) blocks a
-// staged migration without a staged manifest regeneration alongside it.
+// des Prüflings leben"). It names the migration chain it was generated from
+// (GeneratedAgainst.MigrationChainSHA256); the pre-commit hook
+// (.hooks/pre-commit, Gate 3) and TestManifestNamesTheMigrationChain refuse
+// a manifest that does not name the chain beside it.
 //
 //go:embed manifest.json
 var manifestJSON []byte
