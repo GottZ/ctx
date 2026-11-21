@@ -228,9 +228,13 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	// snapshot (rules are data now; type_source='manual' blocks are never
 	// re-classified). No-op when no rule matches (default type stays).
 	// The post-upsert classification reuses this request's set: one rule generation per request.
-	if _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
+	// The block is committed: a client that leaves now must not leave it
+	// unclassified (issue #453), so the classification runs detached.
+	fctx, cancel := followUpContext(ctx)
+	if _, err := store.ClassifyBlockAfterUpsert(fctx, h.pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
 		slog.Warn("store: auto-classify failed", "error", err, "block_id", block.ID, "request_id", reqID)
 	}
+	cancel()
 
 	// Log write (fire-and-forget in background).
 	go func() {

@@ -144,7 +144,7 @@ func storeBatchFailureReject(ctx context.Context, err error, reqID string) *writ
 	if rej := storeBatchRefusal(err); rej != nil {
 		return rej
 	}
-	logRequestError(ctx, "store batch: upsert error", "error", err, "request_id", reqID)
+	logRequestError(ctx, "store batch: upsert error", "error", err, "write_outcome", writeOutcome(err), "request_id", reqID)
 	return classInternal.reject("Internal server error")
 }
 
@@ -304,7 +304,7 @@ func executeConfirmedStoreBatch(ctx context.Context, pool *pgxpool.Pool, blockty
 		if rej := storeBatchRefusal(err); rej != nil {
 			return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmStoreBatchPrefix)}
 		}
-		logRequestError(ctx, "confirm: confirmed batch execute failed", "error", err, "pending_id", pendingID)
+		logRequestError(ctx, "confirm: confirmed batch execute failed", "error", err, "write_outcome", writeOutcome(err), "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
 	after := context.WithoutCancel(ctx)

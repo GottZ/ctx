@@ -453,6 +453,9 @@ func (q *v1Acquirer) attempt(host string, blocks []int) {
 // Bodies are generic: no origin, no number, no row name (B6).
 func (a *V1Admission) WriteAdmissionError(ctx context.Context, w http.ResponseWriter, err error) string {
 	if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
+		// Nothing reaches the client; the access line says whether it
+		// left while the request waited for a slot (issue #453).
+		markAbandonedWait(loggedRequest(ctx), err)
 		return ""
 	}
 	acquire := llm.IsAdmissionError(err)

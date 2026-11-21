@@ -55,6 +55,24 @@ type AdmissionError struct {
 func (e *AdmissionError) Error() string { return e.Err.Error() }
 func (e *AdmissionError) Unwrap() error { return e.Err }
 
+// waitAbandoned is the caller's context error when that context ended while
+// the request waited in the admission queue — not at the door (a context
+// already ended takes no wait slot), not after an admission. Error and
+// errors.Is answer as for the context error itself; AbandonedWait tells the
+// wait apart (issue #453: the request log marks a client that gave up while
+// the server had no slot for it).
+type waitAbandoned struct{ err error }
+
+func (e waitAbandoned) Error() string { return e.err.Error() }
+func (e waitAbandoned) Unwrap() error { return e.err }
+
+// AbandonedWait reports whether err is a context that ended while its
+// request waited in the admission queue.
+func AbandonedWait(err error) bool {
+	var w waitAbandoned
+	return errors.As(err, &w)
+}
+
 // IsAdmissionError reports whether err is a wire walk ended by a failed
 // acquire (no wire contact of its own) — the ONE check point for the
 // telemetry sites honoring the no-llmlog-line doctrine.

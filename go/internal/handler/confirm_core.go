@@ -328,7 +328,7 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 			return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmIdentityTakenPrefix)}
 		}
 		if err != nil {
-			logRequestError(ctx, "confirm: confirmed update execute failed", "error", err, "pending_id", pw.ID)
+			logRequestError(ctx, "confirm: confirmed update execute failed", "error", err, "write_outcome", writeOutcome(err), "pending_id", pw.ID)
 			return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 		}
 		if block == nil {
@@ -382,10 +382,14 @@ func executeConfirmedStore(ctx context.Context, pool *pgxpool.Pool, blocktypes *
 		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmSupersedesPrefix)}
 	}
 	if err != nil {
-		logRequestError(ctx, "confirm: confirmed write execute failed", "error", err, "pending_id", pendingID)
+		logRequestError(ctx, "confirm: confirmed write execute failed", "error", err, "write_outcome", writeOutcome(err), "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
 
+	// The confirmed write is committed: its afterwork runs detached from the
+	// client (issue #453).
+	ctx, cancel := followUpContext(ctx)
+	defer cancel()
 	if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
 		slog.Warn("confirm: auto-classify failed", "error", err, "block_id", block.ID)
 	}
@@ -461,7 +465,7 @@ func executeConfirmedBlobOp(ctx context.Context, pool *pgxpool.Pool, ar *auth.Au
 func executeConfirmedArchive(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthResult, cw store.CanonicalWrite, pendingID string) confirmOutcome {
 	block, err := store.DeleteBlock(ctx, pool, cw.ID, writableBlockScopes(ar))
 	if err != nil {
-		logRequestError(ctx, "confirm: confirmed archive execute failed", "error", err, "pending_id", pendingID)
+		logRequestError(ctx, "confirm: confirmed archive execute failed", "error", err, "write_outcome", writeOutcome(err), "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
 	if block == nil {
