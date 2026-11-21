@@ -218,8 +218,9 @@ const temporalReviewMarkSQL = `INSERT INTO context_temporal_reviews (block_id, v
 // bytea parameter $4 (temporalExtractionDigest): sha256 over both, so the
 // extraction a row carries holds for the version it was written with only.
 // The review of a binary before migration 190 rewrites an existing row's
-// version and leaves its extraction; bound to the version before, that
-// extraction covers no write of the new one.
+// version and leaves its extraction; where the version changed, that
+// extraction is bound to the one before and covers no write of the new one
+// (where it did not, the extraction stays in force).
 const (
 	temporalReviewMarkExtraction = `digest(v.version || $4::bytea, 'sha256')`
 	temporalReviewRowExtraction  = `digest(r.version || $4::bytea, 'sha256')`

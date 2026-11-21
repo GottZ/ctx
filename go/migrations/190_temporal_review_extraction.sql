@@ -20,8 +20,9 @@
 -- extraction of the version it holds and of the extraction in force: a
 -- changed extraction rewrites the rows from it and deletes the version, and
 -- the block is reviewed again. Bound to the version, so a version that an
--- older binary's review rewrites (its ON CONFLICT sets version only) leaves
--- an extraction that matches no write of the new version.
+-- older binary's review changes (its ON CONFLICT sets version only) leaves
+-- an extraction that matches no write of the new version; a review of the
+-- same version by an older binary leaves the extraction in force.
 --
 -- NULL is "extraction unknown": the rows taken over by migration 189 and
 -- those an older binary's review writes. Such a row covers no same-content
