@@ -263,28 +263,78 @@ func (p *MCPProxy) remote(ctx context.Context) (*mcp.ClientSession, error) {
 	if cs != nil {
 		return cs, nil
 	}
-	client := mcp.NewClient(&mcp.Implementation{Name: "ctx mcp serve", Version: Version}, nil)
-	// The session outlives this deadline: the SDK detaches the connection
-	// from the context Connect gets.
-	connectCtx, cancel := context.WithTimeout(ctx, p.connectWait)
-	defer cancel()
-	cs, err := client.Connect(connectCtx, &mcp.StreamableClientTransport{
-		Endpoint:   p.endpoint,
-		HTTPClient: p.http,
-		// The server is stateless and answers GET with 405; nothing comes on
-		// a standalone stream that the proxy would relay.
-		DisableStandaloneSSE: true,
-	}, nil)
+	cs, err := p.connect(ctx)
 	if err != nil {
-		if ctx.Err() == nil && errors.Is(connectCtx.Err(), context.DeadlineExceeded) {
-			return nil, fmt.Errorf("no MCP session within %s: the server took the connection and did not answer", p.connectWait)
-		}
 		return nil, err
 	}
 	p.mu.Lock()
 	p.session = cs
 	p.mu.Unlock()
 	return cs, nil
+}
+
+// connect opens a session to the remote and answers within connectWait. When
+// the deadline cuts the handshake, the SDK sends the server a cancellation
+// notice and its cleanup waits for that notice (up to five seconds against a
+// server that does not answer, go-sdk mcp/transport.go notifyCancellationTimeout);
+// that cleanup finishes in the background, so the caller gets its answer and
+// the connect token is free when the wait is over. A session the handshake
+// still produces after that is closed, not kept.
+func (p *MCPProxy) connect(ctx context.Context) (*mcp.ClientSession, error) {
+	client := mcp.NewClient(&mcp.Implementation{Name: "ctx mcp serve", Version: Version}, nil)
+	// The session outlives this deadline: the SDK detaches the connection
+	// from the context Connect gets.
+	connectCtx, cancel := context.WithTimeout(ctx, p.connectWait)
+	defer cancel()
+	type connected struct {
+		cs  *mcp.ClientSession
+		err error
+	}
+	done := make(chan connected, 1)
+	go func() {
+		cs, err := client.Connect(connectCtx, &mcp.StreamableClientTransport{
+			Endpoint:   p.endpoint,
+			HTTPClient: p.http,
+			// The server is stateless and answers GET with 405; nothing comes
+			// on a standalone stream that the proxy would relay.
+			DisableStandaloneSSE: true,
+		}, nil)
+		done <- connected{cs, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err == nil {
+			return r.cs, nil
+		}
+		return nil, p.connectFailure(ctx, connectCtx, r.err)
+	case <-connectCtx.Done():
+	}
+	select {
+	case r := <-done: // finished together with the deadline
+		if r.err == nil {
+			return r.cs, nil
+		}
+	default:
+		go func() {
+			if r := <-done; r.cs != nil {
+				_ = r.cs.Close()
+			}
+		}()
+	}
+	return nil, p.connectFailure(ctx, connectCtx, connectCtx.Err())
+}
+
+// connectFailure names a connect the wait ended; a cancelled request stays a
+// cancellation, and any other failure keeps its own cause.
+func (p *MCPProxy) connectFailure(ctx, connectCtx context.Context, err error) error {
+	switch {
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case errors.Is(connectCtx.Err(), context.DeadlineExceeded):
+		return fmt.Errorf("no MCP session within %s: the server took the connection and did not answer", p.connectWait)
+	default:
+		return err
+	}
 }
 
 // answer turns a failed forwarded request into what the local client gets.

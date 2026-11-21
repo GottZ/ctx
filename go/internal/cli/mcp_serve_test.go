@@ -502,8 +502,8 @@ func TestMCPServeConnectHasADeadline(t *testing.T) {
 			if err == nil || !strings.Contains(p.answer(context.Background(), nil, err).Error(), "within 300ms") {
 				t.Errorf("connect #%d against a silent server: %v, want the wait named", i+1, err)
 			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("connect #%d against a silent server did not end", i+1)
+		case <-time.After(2 * time.Second): // the wait, not the wait plus the SDK's cleanup
+			t.Fatalf("connect #%d against a silent server did not end within its wait", i+1)
 		}
 	}
 	u.holding.Store(false)
