@@ -388,10 +388,22 @@ func TestTemporalWriterVictimKeepsTheErrorWhenTheBlockStays(t *testing.T) {
 	}
 }
 
-// i465LoadOps bounds TestTemporalWritersAgainstHardDeletes: operations in
-// all (temporal writes and hard deletes with their re-stores), a count, not a
-// duration, so a slow runner does the same work.
-const i465LoadOps = 2400
+// i465WriterOps and i465DeleteOps are the quotas of
+// TestTemporalWritersAgainstHardDeletes: temporal writes per writer, and
+// hard deletes (each with its re-store) of the deleter — counts per actor,
+// not a duration and not one budget for all (#369, CodeRabbit on #470: with
+// a shared budget a deleter the scheduler starved failed the test's minimum
+// of deletes with every database operation intact). Four writers and one
+// deleter do the same 2400 operations as the shared budget did, at least.
+const (
+	i465WriterOps = 480
+	i465DeleteOps = 480
+)
+
+// i465OverlapGuard bounds the wait for the first write that meets a deleted
+// block (TestTemporalWritersAgainstHardDeletes). Writers cycle through all
+// blocks, so one meets it within a few writes; the bound only guards a hang.
+const i465OverlapGuard = 30 * time.Second
 
 // TestTemporalWritersAgainstHardDeletes is the load probe of the review of
 // PR #464 as a test: temporal writers (afterwork and review, in turn) of a
@@ -400,8 +412,13 @@ const i465LoadOps = 2400
 // no side may fail — before issue #465 a run of 45 761 operations saw 15
 // deadlocks (40P01), on the writer's first insert and on the delete, and a
 // run of this test on the base 8. The deadlock is pinned by the interleaving
-// tests above; this one sweeps for other failures under load, and asserts
-// that the deletes ran and that writers met blocks deleted under them.
+// tests above; this one sweeps for other failures under load.
+//
+// The overlap is built, not hoped for (#369): every actor has its own quota;
+// the deleter starts once every writer has written, the writers go on past
+// their quota until the deleter is done, so each delete runs against active
+// writers; and the first delete waits, before its re-store, until a writer
+// has met the deleted block (applied=false) — the overlap the test asserts.
 func TestTemporalWritersAgainstHardDeletes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -429,7 +446,7 @@ func TestTemporalWritersAgainstHardDeletes(t *testing.T) {
 		deletes int
 		gone    int
 	)
-	record := func(err error) bool {
+	record := func(err error) {
 		emu.Lock()
 		defer emu.Unlock()
 		if err != nil {
@@ -443,9 +460,15 @@ func TestTemporalWritersAgainstHardDeletes(t *testing.T) {
 			}
 		}
 		ops++
-		return ops < i465LoadOps
 	}
 
+	// wrote: every writer has written once (the deleter's start); metGone:
+	// a write met a deleted block; deleterDone: the deleter's quota is done.
+	var wrote sync.WaitGroup
+	wrote.Add(nWriters)
+	metGone := make(chan struct{})
+	var metOnce sync.Once
+	deleterDone := make(chan struct{})
 	var wg sync.WaitGroup
 	for w := 0; w < nWriters; w++ {
 		wg.Add(1)
@@ -458,9 +481,18 @@ func TestTemporalWritersAgainstHardDeletes(t *testing.T) {
 					emu.Lock()
 					gone++
 					emu.Unlock()
+					metOnce.Do(func() { close(metGone) })
 				}
-				if !record(err) {
-					return
+				record(err)
+				if i == w {
+					wrote.Done()
+				}
+				if i-w+1 >= i465WriterOps {
+					select {
+					case <-deleterDone:
+						return
+					default:
+					}
 				}
 			}
 		}(w)
@@ -468,13 +500,22 @@ func TestTemporalWritersAgainstHardDeletes(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := 0; ; i++ {
+		defer close(deleterDone)
+		wrote.Wait()
+		for i := 0; i < i465DeleteOps; i++ {
 			old := pick(i)
 			tag, err := pool.Exec(ctx, `DELETE FROM context_blocks WHERE id = $1`, old.ID)
 			if err == nil && tag.RowsAffected() == 1 {
 				emu.Lock()
 				deletes++
 				emu.Unlock()
+			}
+			if err == nil && i == 0 {
+				select {
+				case <-metGone:
+				case <-time.After(i465OverlapGuard):
+					t.Errorf("no write met the deleted block %s within %s", old.ID, i465OverlapGuard)
+				}
 			}
 			if err == nil {
 				nb, serr := store.UpsertBlock(ctx, pool, "i465", old.Title, old.Content, nil, nil, "private", false, store.SensitivityWrite{}, "")
@@ -485,9 +526,7 @@ func TestTemporalWritersAgainstHardDeletes(t *testing.T) {
 				}
 				err = serr
 			}
-			if !record(err) {
-				return
-			}
+			record(err)
 		}
 	}()
 	wg.Wait()
@@ -501,7 +540,7 @@ func TestTemporalWritersAgainstHardDeletes(t *testing.T) {
 		t.Errorf("%d operations, errors: %s", ops, strings.Join(codes, "; "))
 	}
 	t.Logf("%d operations: %d hard deletes, %d writes found their block gone", ops, deletes, gone)
-	if deletes < i465LoadOps/20 || gone == 0 {
-		t.Errorf("%d operations: %d hard deletes (want at least %d), %d writes found their block gone (want at least one): the load did not overlap", ops, deletes, i465LoadOps/20, gone)
+	if deletes != i465DeleteOps || gone == 0 {
+		t.Errorf("%d operations: %d hard deletes (want %d, one per turn of the deleter), %d writes found their block gone (want at least one)", ops, deletes, i465DeleteOps, gone)
 	}
 }
