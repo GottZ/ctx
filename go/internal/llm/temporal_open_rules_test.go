@@ -22,10 +22,23 @@ func TestRules_OpenWindowsBeforeADate(t *testing.T) {
 		"ab dem 15.03.2024":            {"2024-03-15", "", DirFrom},
 		"ab 15.03.2027":                {"2027-03-15", "", DirFrom},
 		"Was gilt ab März 2027?":       {"2027-03-01", "", DirFrom},
-		"Ab Montag bin ich im Urlaub":  {"2026-11-23", "", DirFrom},
+		"Ab nächstem Montag bin ich im Urlaub": {"2026-11-23", "", DirFrom},
+		"ab letztem Freitag":           {"2026-11-20", "", DirFrom},
 		"ab morgen":                    {"2026-11-22", "", DirFrom},
 		"ab heute":                     {"2026-11-21", "", DirFrom},
-		"Ab Mai lief es besser":        {"2026-05-01", "", DirFrom},
+		// A bare weekday or month names no day of its own: no rule, as before
+		// (the weekday is its day, the month goes to the LLM fallback).
+		"Ab Montag bin ich im Urlaub":         {"2026-11-23", "", "future"},
+		"Ab Mai lief es besser":               {"", "", ""},
+		"Was muss vor März erledigt werden?":  {"", "", ""},
+		"What is due before March?":           {"", "", ""},
+		"Was hat Tom nach August gesagt?":     {"", "", ""},
+		"after may I ask":                     {"", "", ""},
+		// A count of a time unit before the word measures a distance from the
+		// date: the date stays the day it names.
+		"Was passierte zwei Tage vor dem 15.03.2024?": {"2024-03-15", "", "past"},
+		"What happened a week after 2024-03-15?":      {"2024-03-15", "", "past"},
+		"Was war am Tag nach dem 2026-03-15":          {"2026-03-15", "", "past"},
 		"vor März 2024":                {"2024-02-29", "", DirUntil},
 		"vor 2024-03-15":               {"2024-03-14", "", DirUntil},
 		"Was war vor dem 15.03.2024?":  {"2024-03-14", "", DirUntil},
@@ -47,6 +60,11 @@ func TestRules_OpenWindowsBeforeADate(t *testing.T) {
 		"What happened before the 15.03.2024?": {"2024-03-14", "", DirUntil},
 		"after March 2024":             {"2024-04-01", "", DirFrom},
 		"after 2024-03-15":             {"2024-03-16", "", DirFrom},
+		// A day date the rules left to the windows is the edge of the one
+		// that stands: an earlier "ab" before a weekday does not drop it.
+		"Ab morgen prüfe ich, was vor dem 15.03.2024 lief": {"2024-03-14", "", DirUntil},
+		// Of several such words the first whose phrase is a date counts.
+		"Vor allem gilt das ab März 2027": {"2027-03-01", "", DirFrom},
 	})
 }
 
@@ -73,6 +91,14 @@ func TestRules_WindowsBetweenTwoDates(t *testing.T) {
 		"15.03.2026 – 20.03.2026":                     {"2026-03-15", "2026-03-20", "range"},
 		"ab März 2024 bis Mai 2024":                   {"2024-03-01", "2024-05-31", "range"},
 		"ab 01.03.2024 bis 31.03.2024":                {"2024-03-01", "2024-03-31", "range"},
+		"since March 2024 until May 2024":             {"2024-03-01", "2024-05-31", "range"},
+		"seit März 2024 bis Mai 2024":                 {"2024-03-01", "2024-05-31", "range"},
+		"seit 2026-03-01 bis heute":                   {"2026-03-01", "2026-11-21", "range"},
+		"seit Projektstart bis 05.03.2026":            {"2026-03-05", "", DirUntil},
+		// Two fixed edges in the wrong order swap; the end is the last day of
+		// what the edge that ends up there names.
+		"von April 2024 bis 2024-03-15":               {"2024-03-15", "2024-04-30", "range"},
+		"von 2024-04-15 bis März 2024":                {"2024-03-01", "2024-04-15", "range"},
 		// Not a window: no spaces around the hyphen, "und" without
 		// "zwischen", "zwischen" with one day date.
 		"15.03.2026-20.03.2026":                       {"2026-03-15", "", "past"},
@@ -91,6 +117,9 @@ func TestRules_AbBeforeAStartTheRulesCannotRead(t *testing.T) {
 		"Was lief ab Projektstart bis 05.03.2026?": {"2026-03-05", "", DirUntil},
 		"ab Projektstart bis 2026-03-05":           {"2026-03-05", "", DirUntil},
 		"vom Projektstart bis 05.03.2026":          {"2026-03-05", "", "past"},
+		// "from … until" is "von … bis": a start the rules cannot read leaves
+		// the day date the day it names, as "vom Projektstart bis …" does.
+		"What happened from the start until 2026-03-05?": {"2026-03-05", "", "past"},
 	})
 }
 
@@ -113,6 +142,9 @@ var negativeOpenRules = []string{
 	"from scratch to production", "What are the differences between context-search and context-agent?",
 	"before you push", "after login", "from the database to the cache", "until further notice", "since version 5",
 	"after 2048 tokens", "before 2048 bytes", "between 10 and 20 percent", "from 2048 to 4096 tokens", "until 2048 MB",
+	// "Morgan" is a typo of "morgen" to the keyword matching; "from" takes
+	// no such start.
+	"Tickets from Morgan until Friday",
 }
 
 func TestRules_NegativeCorpusOpensNoWindow(t *testing.T) {

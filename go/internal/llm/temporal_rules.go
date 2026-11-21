@@ -466,6 +466,8 @@ var (
 	// Y" when X is a date (issue #463).
 	reFromTo          = regexp.MustCompile(`(?i)\bfrom\s+((?:\S+\s+)?(?:\S+\s+)?\S+)\s+(?:to|until|through)\s+((?:\S+\s+)?(?:\S+\s+)?\S+)`)
 	reAbBis           = regexp.MustCompile(`(?i)\bab\s+(?:dem\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)\s+bis\s+(?:zu[mr]\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)`)
+	// "seit X bis Y" and "since X until Y": the window from X to Y (issue #463).
+	reSeitBis         = regexp.MustCompile(`(?i)\b(?:seit|since)\s+(?:dem\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)\s+(?:bis|until)\s+(?:zu[mr]\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)`)
 	// "ab", "vor", "nach", "before", "after" before a date (matchOpenEdge).
 	reOpenEdge        = regexp.MustCompile(`(?i)\b(ab|vor|nach|before|after)\s+(?:(?:dem|the)\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)`)
 	reThrough         = regexp.MustCompile(`(?i)(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+through\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)`)
@@ -810,7 +812,7 @@ func orderWindow(start, end time.Time, startRel, endRel, backward bool, earlierS
 
 // rangeForms are the forms of a window with a start and an end phrase:
 // "von X bis Y" (also "vom X bis zum Y"), "from X to Y" (also "until",
-// "through") and "ab X bis Y". "from" and "ab" are words of their own far more
+// "through"), "ab X bis Y" and "seit X bis Y" ("since X until Y"). "from" and "ab" are words of their own far more
 // often than the start of a window, so their X has to be a date spelt as
 // such (exact, phraseEdge.fuzzy); "ab X bis Y" whose X is none stays the
 // time up to Y, matchBis (issue #463).
@@ -822,6 +824,7 @@ var rangeForms = []struct {
 	{reVonBis, func(m []string) string { return "von " + m[1] + " bis " + m[2] }, false},
 	{reFromTo, func(m []string) string { return m[0] }, true},
 	{reAbBis, func(m []string) string { return "ab " + m[1] + " bis " + m[2] }, true},
+	{reSeitBis, func(m []string) string { return m[0] }, false},
 }
 
 func matchVonBis(query string, now time.Time) *TemporalResult {
@@ -960,27 +963,36 @@ func matchBis(query string, now time.Time) *TemporalResult {
 // from the day after X on, open towards the future; "vor X" is the time up to
 // the day before X, open towards the past. A month as X is the whole month
 // ("nach März 2024" starts on 2024-04-01). "ab" with a day to come is the
-// window into the future it names ("ab Montag bin ich im Urlaub"), and with
-// a past day the time from it on — unlike "seit", which names the time up to
-// today and so has none for a day to come.
+// window into the future it names ("ab nächstem Montag bin ich im Urlaub"),
+// and with a past day the time from it on — unlike "seit", which names the
+// time up to today and so has none for a day to come.
 //
 // The five are words of their own far more often than words before a date
 // ("nach Hause", "vor allem", "ab Werk", "after 3 retries"): a rule takes the
-// phrase only when it starts with a date spelt as such (a day date, a month,
-// a weekday, a day keyword like "heute" — not a typo resolveTokenEdge
-// forgives), and of several such words the first whose phrase is one. With
+// phrase only when it starts with a date spelt as such that names its day
+// itself — a day date, a month with its year, a day keyword like "heute", a
+// weekday or month after "nächsten"/"letzten" — and of several such words the
+// first whose phrase is one. A bare weekday or month is no such date: which
+// one it means would have to be guessed from the tense, and a month name is a
+// word of its own as well ("nach August", "after may I ask"); neither is a
+// typo resolveTokenEdge forgives. A count of a time unit before the word
+// ("zwei Tage vor dem 15.03.2024", "a week after 2024-03-15") makes it a
+// distance from the date, not an edge: the date stays the day it names. With
 // a day date the rules left to the windows (edge), only a phrase naming that
-// day counts. A weekday or a month without its year counts back in the past
-// tense and forward otherwise, as a bare weekday does.
+// day counts.
 func matchOpenEdge(query string, now time.Time, edge string) *TemporalResult {
-	backward := DetectVerbTense(query) == "past"
-	for _, m := range reOpenEdge.FindAllStringSubmatch(strings.ToLower(query), -1) {
-		e := resolvePhraseEdge(m[2], backward, now)
-		if e.day.IsZero() || e.fuzzy || edge != "" && fmtDate(e.day) != edge {
+	lower := strings.ToLower(query)
+	for _, m := range reOpenEdge.FindAllStringSubmatchIndex(lower, -1) {
+		if reTimeUnitBefore.MatchString(lower[:m[0]]) {
 			continue
 		}
-		ref := m[1] + " " + m[2]
-		switch m[1] {
+		word, phrase := lower[m[2]:m[3]], lower[m[4]:m[5]]
+		e := resolvePhraseEdge(phrase, false, now)
+		if e.day.IsZero() || e.fuzzy || e.rel || edge != "" && fmtDate(e.day) != edge {
+			continue
+		}
+		ref := word + " " + phrase
+		switch word {
 		case "ab":
 			return &TemporalResult{Dates: []TemporalDate{{Ref: ref, Date: fmtDate(e.day), Dir: DirFrom}}}
 		case "nach", "after":
@@ -991,6 +1003,11 @@ func matchOpenEdge(query string, now time.Time, edge string) *TemporalResult {
 	}
 	return nil
 }
+
+// reTimeUnitBefore matches a time unit right before "vor", "nach", "before"
+// or "after" ("zwei Tage vor", "a week after", "am Tag nach"): the word then
+// measures a distance from the date (matchOpenEdge).
+var reTimeUnitBefore = regexp.MustCompile(`(?i)\b(?:tag|tage|tagen|tages|woche|wochen|monat|monate|monaten|monats|jahr|jahre|jahren|jahres|stunde|stunden|minute|minuten|day|days|week|weeks|month|months|year|years|hour|hours|minutes)\s+$`)
 
 func matchWeekSegment(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
