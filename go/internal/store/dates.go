@@ -267,7 +267,9 @@ func isRegexpSpace(b byte) bool {
 func isDigit(b byte) bool { return '0' <= b && b <= '9' }
 
 // isMonth2 matches 0[1-9]|1[0-2].
-func isMonth2(a, b byte) bool { return a == '0' && '1' <= b && b <= '9' || a == '1' && '0' <= b && b <= '2' }
+func isMonth2(a, b byte) bool {
+	return a == '0' && '1' <= b && b <= '9' || a == '1' && '0' <= b && b <= '2'
+}
 
 // isDay2 matches 0[1-9]|[12]\d|3[01].
 func isDay2(a, b byte) bool {
@@ -275,7 +277,9 @@ func isDay2(a, b byte) bool {
 }
 
 // isHour2 matches [01]\d|2[0-3].
-func isHour2(a, b byte) bool { return (a == '0' || a == '1') && isDigit(b) || a == '2' && '0' <= b && b <= '3' }
+func isHour2(a, b byte) bool {
+	return (a == '0' || a == '1') && isDigit(b) || a == '2' && '0' <= b && b <= '3'
+}
 
 // isMinute2 matches [0-5]\d.
 func isMinute2(a, b byte) bool { return '0' <= a && a <= '5' && isDigit(b) }

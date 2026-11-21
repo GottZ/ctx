@@ -25,9 +25,11 @@ func BenchmarkExtractDates(b *testing.B) {
 	}{{"2KB", 2 << 10}, {"20KB", 20 << 10}, {"50KB", 50 << 10}, {"400KB", 400 << 10}}
 	for _, d := range densities {
 		for _, sz := range sizes {
-			content := datesDoc(1, sz.n, d.dense)
+			var content string
 			if d.name == "worst" {
 				content = datesWorstDoc(sz.n)
+			} else {
+				content = datesDoc(1, sz.n, d.dense)
 			}
 			b.Run(d.name+"/"+sz.name, func(b *testing.B) {
 				b.SetBytes(int64(len(content)))
