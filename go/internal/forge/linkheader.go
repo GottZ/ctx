@@ -11,6 +11,7 @@ package forge
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -33,12 +34,33 @@ var errLinkSyntax = errors.New("link: not RFC 8288")
 // silently; the header itself is the remote's text and is not quoted.
 var errLinkUnparseable error = &configError{"forge: the Link header of a page names a next page but does not parse as RFC 8288; the pull stopped there"}
 
+// maxLinkField bounds the Link field (all lines with the ", " that joins
+// them), 16 KiB (#474). The headers GitHub, Gitea, Forgejo and GitLab send
+// stay under 2 KiB — four links of a few hundred bytes — while net/http
+// admits response headers up to 10 MiB, and parsing such a field takes about
+// 50 times its size on the heap at its peak (a 10 MiB field of empty
+// parameters: about 580 MB) on each of the sync slots at once. A field over
+// the bound stops the pull before it is parsed.
+const maxLinkField = 16 << 10
+
+var errLinkTooLong error = &configError{fmt.Sprintf("forge: the Link header of a page is longer than %d KiB; the pull stopped there", maxLinkField>>10)}
+
 // nextTarget returns the target of the first link-value whose rel parameter
 // holds the relation type "next", "" when no link-value does. fields are the
 // response's Link field lines; RFC 9110 §5.3 combines several into one list.
 // A link-value with an anchor parameter is about another resource (RFC 8288
 // §3.2); this client does not apply anchors, so it ignores such a link.
 func nextTarget(fields []string) (string, error) {
+	size := 0
+	for i, f := range fields {
+		size += len(f)
+		if i > 0 {
+			size += len(", ")
+		}
+	}
+	if size > maxLinkField {
+		return "", errLinkTooLong
+	}
 	field := strings.Join(fields, ", ")
 	links, err := parseLinkField(field)
 	if err != nil {

@@ -94,6 +94,12 @@ func FuzzLinkHeader(f *testing.F) {
 	f.Fuzz(func(t *testing.T, field string) {
 		links, perr := parseLinkField(field)
 		target, terr := nextTarget([]string{field})
+		if len(field) > maxLinkField {
+			if !errors.Is(terr, errLinkTooLong) || target != "" {
+				t.Fatalf("a field of %d bytes: %q, %v; want the length bound", len(field), target, terr)
+			}
+			return
+		}
 		if perr == nil {
 			again, err := parseLinkField(canonical(links))
 			if err != nil || !reflect.DeepEqual(again, links) {
@@ -173,5 +179,33 @@ func TestMentionsNextIsLinear(t *testing.T) {
 	}
 	if a := testing.AllocsPerRun(3, func() { mentionsNext(field) }); a > 2 {
 		t.Fatalf("mentionsNext allocated %.0f times over one field; want at most 2 (one lowered copy)", a)
+	}
+}
+
+// TestLinkHeaderLengthBound: a Link field over maxLinkField bytes — the
+// forge's choice, up to net/http's 10 MiB, parsed into about 50 times its
+// size on the heap — stops the pull with a fixed error before it is parsed;
+// one at the bound still parses. Real headers stay under 2 KiB.
+func TestLinkHeaderLengthBound(t *testing.T) {
+	const next = `<https://api.github.com/x?page=2>; rel="next"`
+	pad := func(total int) []string {
+		head := next + `, <https://api.github.com/y>; rel="last"; title="`
+		return []string{head + strings.Repeat("a", total-len(head)-1) + `"`}
+	}
+	if target, err := nextTarget(pad(maxLinkField)); err != nil || target != "https://api.github.com/x?page=2" {
+		t.Fatalf("a field of exactly %d bytes: %q, %v; want the next target", maxLinkField, target, err)
+	}
+	_, err := nextTarget(pad(maxLinkField + 1))
+	if err == nil || !strings.Contains(err.Error(), "longer than") {
+		t.Fatalf("a field of %d bytes: err %v; want the length bound", maxLinkField+1, err)
+	}
+	var ce *configError
+	if !errors.As(err, &ce) {
+		t.Fatalf("the length bound is not a configError: %v", err)
+	}
+	// Several field lines count together, with the ", " that joins them.
+	half := strings.Repeat("a", maxLinkField/2)
+	if _, err := nextTarget([]string{next + `; t="` + half + `"`, `<https://api.github.com/z>; t="` + half + `"`}); err == nil {
+		t.Fatal("two field lines over the bound together were parsed")
 	}
 }
