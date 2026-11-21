@@ -117,6 +117,25 @@ func i452Edit(t *testing.T, ctx context.Context, q interface {
 	}
 }
 
+// i452NoCandidates: after a push that wrote what the block holds, no mapping
+// of the project is a candidate any more (the advance set synced_at to the
+// version's time, not -infinity).
+func i452NoCandidates(t *testing.T, pool *pgxpool.Pool, proj store.ProjectRow) {
+	t.Helper()
+	ctx := context.Background()
+	issues, err := store.ListIssuePushCandidates(ctx, pool, proj.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments, err := store.ListCommentPushCandidates(ctx, pool, proj.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 0 || len(comments) != 0 {
+		t.Errorf("after the push wrote the block's version, %d issue and %d comment mapping(s) are still push candidates", len(issues), len(comments))
+	}
+}
+
 // TestPushEditDuringThePatchIsPushedNext: a local edit commits while the push's
 // PATCH is on the wire. The advance must leave the mapping a candidate, so
 // the next run pushes the edit.
@@ -148,6 +167,7 @@ func TestPushEditDuringThePatchIsPushedNext(t *testing.T) {
 		if spy.patches[1].Patch.Title != nil {
 			t.Errorf("the second PATCH carries the title again (%q): the base must hold what the first PATCH wrote", *spy.patches[1].Patch.Title)
 		}
+		i452NoCandidates(t, pool, proj)
 	})
 	t.Run("comment", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
@@ -171,6 +191,7 @@ func TestPushEditDuringThePatchIsPushedNext(t *testing.T) {
 		if res.Pushed != 1 || len(spy.commentPatches) != 2 || spy.commentPatches[1].Body != "comment v3, edited during the patch" {
 			t.Fatalf("second push: pushed=%d comment patches=%+v, want the body edited during the first", res.Pushed, spy.commentPatches)
 		}
+		i452NoCandidates(t, pool, proj)
 	})
 }
 
@@ -215,6 +236,7 @@ func TestPushEditBegunBeforeTheAdvance(t *testing.T) {
 		*spy.patches[1].Patch.Body != "body of a write begun before the advance" {
 		t.Fatalf("second push: pushed=%d patches=%+v, want a PATCH of the body", res.Pushed, spy.patches)
 	}
+	i452NoCandidates(t, pool, proj)
 }
 
 // TestPushEditInFlightDuringTheAdvance: an edit whose transaction began before
@@ -277,6 +299,7 @@ func TestPushEditInFlightDuringTheAdvance(t *testing.T) {
 		*spy.patches[1].Patch.Body != "body of a write in flight" {
 		t.Fatalf("second push: pushed=%d patches=%+v, want a PATCH of the body written in flight", res2.Pushed, spy.patches)
 	}
+	i452NoCandidates(t, pool, proj)
 }
 
 // i452BeginHold holds the first transaction its pool begins, before the

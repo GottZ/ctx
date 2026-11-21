@@ -84,6 +84,31 @@ func TestGuardCheckFollowsTheText(t *testing.T) {
 				t.Errorf("the update's answer carries the check mark the write removed")
 			}
 		}, true},
+		// A person's keep is a verdict on the old vector too: the rename puts
+		// the block up for a check again (as a content change always did) and
+		// leaves the trace of the decision.
+		{"title update of a kept block", func(t *testing.T, pool *pgxpool.Pool) string {
+			b, err := store.UpsertBlock(context.Background(), pool, "learnings", "i452 kept", "kept body", nil, nil, scope, true, store.SensitivityWrite{}, "knowledge")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return b.ID
+		}, func(t *testing.T, pool *pgxpool.Pool, id string) {
+			ctx := context.Background()
+			if _, err := store.GuardResolve(ctx, pool, id, "keep", writable); err != nil {
+				t.Fatalf("guard resolve: %v", err)
+			}
+			if _, changed, err := store.UpdateBlock(ctx, pool, id, store.UpdateBlockData{Title: str("i452 kept, renamed")}, writable); err != nil || !changed {
+				t.Fatalf("update: changed=%v err=%v", changed, err)
+			}
+			var resolution string
+			if err := pool.QueryRow(ctx, `SELECT COALESCE(metadata->>'guard_resolution', '') FROM context_blocks WHERE id = $1::uuid`, id).Scan(&resolution); err != nil {
+				t.Fatal(err)
+			}
+			if resolution != "keep" {
+				t.Errorf("the rename dropped the trace of the person's decision: guard_resolution=%q", resolution)
+			}
+		}, true},
 		{"issue title", func(t *testing.T, pool *pgxpool.Pool) string { return newIssue(t, pool, "i452 crane") },
 			func(t *testing.T, pool *pgxpool.Pool, id string) {
 				i452Tx(t, pool, func(tx pgx.Tx) error {

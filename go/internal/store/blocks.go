@@ -1263,7 +1263,12 @@ func StoreEmbeddingNext(ctx context.Context, q pgxdb.Execer, blockID, model stri
 //     dropped too, and the guard checks the block again once its new vector
 //     is written (guardPendingWhere waits for it). The guard's own verdict
 //     write does not run this function, so a re-checked block stays checked.
-//     Both ride the UPDATE below: no statement is added.
+//     A person's guard-resolve verdict (keep) is a verdict on the old vector
+//     as well: the change puts the block up for a check again, as a content
+//     change always did, and metadata.guard_resolution stays as the trace.
+//     Both ride the UPDATE below: no statement is added, and a metadata
+//     document without the mark is passed through as it is (no rebuilt jsonb,
+//     no new TOAST value).
 //
 // This is the pgxdb.Execer-parameterized primitive (same pattern as
 // StoreEmbedding): it does NOT own a transaction, so a caller that needs the
@@ -1326,7 +1331,8 @@ func InvalidateEmbeddingTx(ctx context.Context, q pgxdb.Execer, blockID string) 
 		     embedding_next = NULL, embed_model_next = NULL,
 		     embed_excluded = NOT embed_excluded,
 		     dream_keywords = NULL, dream_keywords_generated_at = NULL,
-		     metadata = metadata - 'guard_checked_at'
+		     metadata = CASE WHEN metadata ? 'guard_checked_at'
+		                     THEN metadata - 'guard_checked_at' ELSE metadata END
 		 FROM r
 		 WHERE id = $1`,
 		blockID,

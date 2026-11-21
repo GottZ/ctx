@@ -237,7 +237,10 @@ type PushProjection func(b *Block) string
 //     the time of the version the forge now holds, not now(). A write whose
 //     transaction began before this advance but takes the row after it stores
 //     an updated_at that can lie below now() (updated_at is its transaction
-//     start); against the version's own time it is newer and stays a candidate.
+//     start); against the version's own time it is newer and stays a candidate
+//     — unless its transaction began even before the writer of that version
+//     began, which no timestamp can tell apart (it needs a version that
+//     advances in write order).
 //   - It does not (a write committed while the PATCH was on the wire, or it
 //     is gone): synced_at := -infinity, so the row stays a candidate whatever
 //     updated_at the write carried, and the next run diffs the block against

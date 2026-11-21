@@ -287,8 +287,9 @@ var coreTitlesSQL = fmt.Sprintf(coreTitlesTemplate, visibility.TypeVisible("b", 
 // commit and then finds no row, where a plain read would answer from the
 // snapshot of the old core — and the UPDATE's own wait for the topic row
 // re-checks only that row, not this subquery. The dropped call costs one
-// re-selection next tick, for the current core. Same order as the rebuild:
-// node rows before the topic row.
+// re-selection next tick, for the current core — also when the rebuild in
+// flight rewrote the same core (its new node row is not in this statement's
+// snapshot). Same order as the rebuild: node rows before the topic row.
 const writeSQL = `
 WITH core AS (
   SELECT 1 FROM graph_cluster_node
