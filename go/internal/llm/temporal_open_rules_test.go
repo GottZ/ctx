@@ -42,7 +42,7 @@ func TestRules_OpenWindowsBeforeADate(t *testing.T) {
 		"vor März 2024":                {"2024-02-29", "", DirUntil},
 		"vor 2024-03-15":               {"2024-03-14", "", DirUntil},
 		"Was war vor dem 15.03.2024?":  {"2024-03-14", "", DirUntil},
-		"vor 2027-01-01":               {"2026-12-31", "", DirUntil},
+		"vor 2027-01-01":               {"2026-11-21", "2026-12-31", "range"}, // a day to come: the deadline
 		"nach März 2024":               {"2024-04-01", "", DirFrom},
 		"nach 2024-03-15":              {"2024-03-16", "", DirFrom},
 		"Was kam nach dem 15.03.2024?": {"2024-03-16", "", DirFrom},

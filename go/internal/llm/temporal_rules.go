@@ -966,7 +966,8 @@ func matchBis(query string, now time.Time) *TemporalResult {
 // matchOpenEdge reads "ab", "vor", "nach", "before" and "after" right before
 // a date (issue #463): "ab X" is the time from X on and "nach X" the time
 // from the day after X on, open towards the future; "vor X" is the time up to
-// the day before X, open towards the past. A month as X is the whole month
+// the day before X, open towards the past, and with X after today the
+// deadline from today to the day before X. A month as X is the whole month
 // ("nach März 2024" starts on 2024-04-01). "ab" with a day to come is the
 // window into the future it names ("ab nächstem Montag bin ich im Urlaub"),
 // and with a past day the time from it on — unlike "seit", which names the
@@ -1010,6 +1011,12 @@ func matchOpenEdge(query string, now time.Time, edge string) *TemporalResult {
 		case "nach", "after":
 			return &TemporalResult{Dates: []TemporalDate{{Ref: ref, Date: fmtDate(e.last().AddDate(0, 0, 1)), Dir: DirFrom}}}
 		default: // vor, before
+			// A day to come is a deadline, the window from today to the day
+			// before it, as "bis" with a later end is one; a day that has
+			// begun is the time up to the day before it.
+			if today := truncDate(now); e.day.After(today) {
+				return rangeResult(ref, fmtDate(today), fmtDate(e.day.AddDate(0, 0, -1)), "range")
+			}
 			return &TemporalResult{Dates: []TemporalDate{{Ref: ref, Date: fmtDate(e.day.AddDate(0, 0, -1)), Dir: DirUntil}}}
 		}
 	}

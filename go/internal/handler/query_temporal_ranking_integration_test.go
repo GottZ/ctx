@@ -156,6 +156,9 @@ func TestQueryTemporalRanking(t *testing.T) {
 		{name: "A9 before ISO", query: "What happened before 2024-03-01?", kind: "window", to: day(2024, 2, 29)},
 		{name: "A10 after month", query: "What happened after March 2026?", kind: "window", from: day(2026, 4, 1)},
 		{name: "A11 from … to", query: "What happened from March 2025 to April 2025?", kind: "window", from: day(2025, 3, 1), to: day(2025, 4, 30)},
+		// Round 1: "vor" a day to come is the deadline from today; "nach" a
+		// past day stays open towards the future (A3).
+		{name: "A13 vor a day to come", query: "Was muss vor dem 01.12.2026 erledigt werden?", kind: "window", from: day(2026, 11, 21), to: day(2026, 11, 30)},
 		// Point 4: "ab" before a start the rules cannot read is no start.
 		{name: "A12 ab Projektstart bis", query: "Was lief ab Projektstart bis 05.03.2026?", kind: "window", to: day(2026, 3, 5)},
 		// Point 5: windows longer than the cycle of their cyclic dimension.
