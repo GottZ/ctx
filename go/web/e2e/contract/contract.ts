@@ -30,6 +30,7 @@ import { expect, test, type Page } from '@playwright/test'
 import type { LayoutMode } from '../../src/lib/layout/modes'
 import { runAxeGate } from './axe'
 import { captureShot } from './capture'
+import { expectViewportFit } from './fit'
 import { runFocusWalk } from './focus'
 import {
   gotoArea,
@@ -295,38 +296,6 @@ function ariaTest(c: PageContract, viewport: ViewportName): void {
   })
 }
 
-/**
- * Viewport fit (#419, #430): at the contract viewports the document itself
- * never scrolls, neither down nor sideways. The shell is a 100dvh grid whose
- * content region owns the scroll, and the login mask centres its card inside
- * one viewport. Outside that region, a box that adds padding or a border to
- * a 100dvh height or a 100% width under content-box sizing makes the page
- * taller or wider than the viewport — a scrollbar on platforms with classic
- * scrollbars, a page a retried click can scroll (#416), and for a centred box
- * an edge cut off on the left (#430). Inside the content region such a box
- * scrolls main.content or is clipped by an inner box instead, and is not
- * caught here. Neither is a box that sticks out on the left alone: the
- * scroll range only reaches right of x = 0 (a centred box sticks out on both
- * sides). Asserted on the settled state right before every capture, so each
- * visual state × theme × viewport carries it.
- */
-async function expectViewportFit(page: Page): Promise<void> {
-  const { scrollHeight, clientHeight, scrollWidth, clientWidth } = await page.evaluate(() => ({
-    scrollHeight: document.documentElement.scrollHeight,
-    clientHeight: document.documentElement.clientHeight,
-    scrollWidth: document.documentElement.scrollWidth,
-    clientWidth: document.documentElement.clientWidth,
-  }))
-  expect(
-    scrollHeight,
-    `the document is ${scrollHeight - clientHeight} px taller than the ${clientHeight} px viewport (#419)`,
-  ).toBe(clientHeight)
-  expect(
-    scrollWidth,
-    `the document is ${scrollWidth - clientWidth} px wider than the ${clientWidth} px viewport (#430)`,
-  ).toBe(clientWidth)
-}
-
 function visualTest(c: PageContract, state: PageState, theme: Theme, viewport: ViewportName): void {
   test(`${c.name} ${state.name} ${theme} ${viewport} visual`, { tag: '@visual' }, async ({ page }) => {
     await mountState(page, c, state, theme)
@@ -344,13 +313,32 @@ function visualTest(c: PageContract, state: PageState, theme: Theme, viewport: V
 }
 
 /**
+ * Mobile fit without a capture (#440): a contract that opts out of the mobile
+ * visual dimension has no mobile baselines, but its layout still has to fit
+ * 390 px. Same mount and settle as visualTest, the viewport fit instead of the
+ * capture. Tagged @visual because the fit depends on the font metrics of the
+ * pinned container just as the pixels do (system-ui stacks, e2e/Dockerfile);
+ * one theme, because the themes swap colour tokens, not boxes.
+ */
+function mobileFitTest(c: PageContract, state: PageState): void {
+  test(`${c.name} ${state.name} dark mobile fit`, { tag: '@visual' }, async ({ page }) => {
+    await mountState(page, c, state, 'dark')
+    await page.waitForTimeout(600)
+    await expectViewportFit(page)
+  })
+}
+
+/**
  * Generate the PV4 test family for one contract (design 06 §4.1 table —
  * flow/visual/deny/leak/scale; axe/ARIA/focus-walk join in PV5/PV6):
  *
  *   - primary flow            1 × @flow      (desktop, dark, default state)
  *   - toHaveScreenshot        states(+scale) × themes × viewports × @visual
- *                             (mobile halved away by a reasoned opt-out)
- *   - axe scan (PV5)          2 themes × 2 viewports × @a11y (default state)
+ *                             (mobile halved away by a reasoned opt-out);
+ *                             each capture asserts the viewport fit first
+ *   - mobile fit (#440)       states(+scale) × @visual (dark, 390 px; only
+ *                             for a mobile opt-out — the fit without capture)
+ *   - axe scan (PV5)         2 themes × 2 viewports × @a11y (default state)
  *                             — ALWAYS both viewports, independent of the
  *                             mobile VISUAL opt-out: axe needs no baselines,
  *                             and target-size (SC 2.5.8) bites hardest at
@@ -393,6 +381,11 @@ export function definePageContract(c: PageContract): void {
         for (const state of visualStates) {
           for (const theme of THEMES) visualTest(c, state, theme, 'mobile')
         }
+      })
+    } else {
+      test.describe(() => {
+        test.use({ viewport: VIEWPORTS.mobile })
+        for (const state of visualStates) mobileFitTest(c, state)
       })
     }
 

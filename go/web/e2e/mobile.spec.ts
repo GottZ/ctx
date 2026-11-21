@@ -24,3 +24,26 @@ test.describe('mobile drawer', () => {
     await page.screenshot({ path: 'e2e/.results/shots/mobile-drawer-open.png' })
   })
 })
+
+test.describe('mobile cluster map', () => {
+  // #441: the cluster title bar is anchored top-right with the gutter as its
+  // right inset; its max-width leaves the same gutter on the left. The bar
+  // fits the viewport either way, so the viewport fit cannot see a missing
+  // left gutter — this asserts it directly.
+  test('the cluster map bar keeps the gutter on both sides', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await gotoArea(page, '/graph')
+    await expect(page.locator('.overview .bar .stat')).toBeVisible()
+    const { left, right, width, stage } = await page.evaluate(() => {
+      const bar = document.querySelector('.overview .bar')?.getBoundingClientRect()
+      const st = document.querySelector('.overview')?.getBoundingClientRect()
+      if (!bar || !st) throw new Error('cluster map not mounted')
+      return { left: bar.left - st.left, right: st.right - bar.right, width: bar.width, stage: st.width }
+    })
+    expect(right, 'the bar keeps its right inset').toBeGreaterThan(0)
+    // Positive control: the fixture's stats line is longer than the bar may
+    // be, so the bar sits at its cap — otherwise the gap below proves nothing.
+    expect(width, 'the bar is as wide as its max-width allows').toBeCloseTo(stage - 2 * right, 0)
+    expect(left, `the bar leaves ${left} px on the left and ${right} px on the right`).toBeGreaterThanOrEqual(right - 0.5)
+  })
+})
