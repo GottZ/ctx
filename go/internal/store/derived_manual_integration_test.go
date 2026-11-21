@@ -113,16 +113,19 @@ func TestDerivedManualType_Integration(t *testing.T) {
 		// is what protects the manual row above — it would decline for the new
 		// reason. The probe therefore drives a non-derived claimable title
 		// (audit-trail), which is the type the pre-143 tree put on these rows.
+		//
+		// The row carries the title it is classified from: the hook writes a
+		// verdict only to a block that still holds its inputs (issue #426).
+		const auditTitle = "Audit of the retrieval lane"
 		var id string
 		if err := pool.QueryRow(ctx,
 			`INSERT INTO context_blocks (category, title, content, scope)
-			 VALUES ('learnings', 'w01 seed auto probe', 'body', 'private') RETURNING id`).Scan(&id); err != nil {
+			 VALUES ('learnings', $1, 'body', 'private') RETURNING id`, auditTitle).Scan(&id); err != nil {
 			t.Fatalf("seed auto row: %v", err)
 		}
 		if _, source := derivedTypeState(t, pool, id); source != "auto" {
 			t.Fatalf("seeded row is not type_source='auto' — the negative probe has no subject")
 		}
-		const auditTitle = "Audit of the retrieval lane"
 		want, matched := set.Classify(auditTitle, nil)
 		if !matched || derived.IsDerivedType(want) {
 			t.Fatalf("fixture: %q classifies to (%q, %v) — this probe needs a claimable NON-derived "+

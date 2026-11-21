@@ -29,6 +29,7 @@ type Set struct {
 	untrusted      []string // retrieval.untrusted (foreign-text framing, W02-4)
 	damped         []dampedEntry
 	classifyOrder  []Policy // sorted by (priority, name)
+	classifyFlags  []string // distinct classify.metadata_flags, in classify order
 	// structuralClasses is the sorted DISTINCT union of every type's
 	// structural_link_classes — the request-snapshot vocabulary for the
 	// link_class partition (GB5, design/02 §4.2/§4.5).
@@ -125,6 +126,13 @@ func NewSet(policies []Policy) (*Set, error) {
 		}
 		return s.classifyOrder[i].Name < s.classifyOrder[j].Name
 	})
+	for _, p := range s.classifyOrder {
+		for _, flag := range p.Classify.MetadataFlags {
+			if !slices.Contains(s.classifyFlags, flag) {
+				s.classifyFlags = append(s.classifyFlags, flag)
+			}
+		}
+	}
 	for c := range structSet {
 		s.structuralClasses = append(s.structuralClasses, c)
 	}
@@ -136,6 +144,13 @@ func NewSet(policies []Policy) (*Set, error) {
 // type's structural_link_classes — the accepted structural vocabulary for the
 // link_class partition (GB5). Precomputed, no allocation on the hot path.
 func (s *Set) StructuralClasses() []string { return s.structuralClasses }
+
+// ClassifyMetadataFlags returns the distinct metadata flag keys of every
+// type's classify rules, in classify order: with "source" they are all the
+// metadata keys Classify reads (store.ClassifyBlockAfterUpsert writes a
+// verdict only while the block still holds those inputs, issue #426).
+// Precomputed, no allocation on the hot path.
+func (s *Set) ClassifyMetadataFlags() []string { return s.classifyFlags }
 
 // Resolve returns the policy for name. ok=false means the name is not
 // registered — callers treat that fail-closed (§5.1: invisible, no
