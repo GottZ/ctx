@@ -145,15 +145,23 @@ func TestExtractDates_MatchesReference_SeedCorpus(t *testing.T) {
 
 // TestExtractDates_MatchesReference_RealShapedTexts runs the generated
 // documents of the benchmark (German and English prose, Markdown, code
-// blocks, tables; few and many dates) at every benchmark size.
+// blocks, tables; few and many dates) at every benchmark size. With -short
+// (the race runs, where the reference is slow) it runs one document per size
+// below 400 KB.
 func TestExtractDates_MatchesReference_RealShapedTexts(t *testing.T) {
+	seeds := uint64(4)
+	if testing.Short() {
+		seeds = 1
+	}
 	for _, dense := range []bool{false, true} {
 		for _, n := range []int{2 << 10, 20 << 10, 50 << 10} {
-			for seed := uint64(1); seed <= 4; seed++ {
+			for seed := uint64(1); seed <= seeds; seed++ {
 				assertMatchesReference(t, datesDoc(seed, n, dense))
 			}
 		}
-		assertMatchesReference(t, datesDoc(1, 400<<10, dense))
+		if !testing.Short() {
+			assertMatchesReference(t, datesDoc(1, 400<<10, dense))
+		}
 	}
 }
 
@@ -161,13 +169,18 @@ func TestExtractDates_MatchesReference_RealShapedTexts(t *testing.T) {
 // from the pieces the patterns distinguish: month names in random case and
 // fold variants, year tokens in and out of range, two-digit fields, date
 // shapes with and without time, and separators that are and are not \s or
-// word characters, including invalid UTF-8.
+// word characters, including invalid UTF-8. With -short it runs a quarter
+// of the texts.
 func TestExtractDates_MatchesReference_TrickyTexts(t *testing.T) {
+	small, large := 6000, 150
+	if testing.Short() {
+		small, large = 1500, 40
+	}
 	r := rand.New(rand.NewPCG(434, 1))
-	for range 6000 {
+	for range small {
 		assertMatchesReference(t, trickyDoc(r, 1+r.IntN(40)))
 	}
-	for range 150 {
+	for range large {
 		assertMatchesReference(t, trickyDoc(r, 200+r.IntN(800)))
 	}
 }
