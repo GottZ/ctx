@@ -25,8 +25,8 @@ import (
 // same representation (time.Time compared with ==, which also compares the
 // location pointer), and nil where the reference returns nil.
 
-// issue437Classes lists, per deliberate change since #434 (issues #437 and
-// #451), the contents it may change. A content none of them touches gives
+// issue437Classes lists, per deliberate change since #434 (issues #437, #451
+// and #463), the contents it may change. A content none of them touches gives
 // what refFormsV434 gives: together the predicates cover every content on
 // which the current reference and the frozen one differ (each names the
 // shape a differing match needs, ignoring word boundaries and calendar
@@ -55,10 +55,20 @@ var issue437Classes = []struct {
 		`(?:0[1-9]|[12]\d|3[01])\.(?:0[1-9]|1[0-2])\.20(?:3[1-9]|[4-9]\d)|` +
 		`(?i:` + issue437Months + `)[\s\x{A0}\x{202F}]+20(?:3[1-9]|[4-9]\d)`).MatchString, "Mai 2031"},
 	// #451/2, the long s in the table lookup: a match that differs is an
-	// "august" or a "september" with a long s for its s before date spaces
-	// and a year token.
-	{"#451/2 long s", regexp.MustCompile(`(?:(?i:augu)\x{17F}(?i:t)|\x{17F}(?i:eptember))[\s\x{A0}\x{202F}]+20[2-9]\d`).MatchString,
+	// "august" with a long s for its s before date spaces and a year token.
+	// (A "september" with a long s for its s, the first letter, is #463/1's:
+	// since that change it matches only where the frozen expression did not,
+	// and behind a word character, where the lookup made the difference of
+	// #451/2, not at all.)
+	{"#451/2 long s", regexp.MustCompile(`(?i:augu)\x{17F}(?i:t)[\s\x{A0}\x{202F}]+20[2-9]\d`).MatchString,
 		"Augu" + longS + "t 2026"},
+	// #463/1, the long s as the first letter: a match that differs is a
+	// "september" with a long s for its s before date spaces and a year
+	// token — behind an ASCII word character the frozen expression matched
+	// it and the scanner does not, anywhere else the scanner matches it and
+	// the frozen expression did not.
+	{"#463/1 long s as the first letter", regexp.MustCompile(`\x{17F}(?i:eptember)[\s\x{A0}\x{202F}]+20[2-9]\d`).MatchString,
+		longS + "eptember 2026"},
 }
 
 // issue437Months are the month names of both month forms, before and after
@@ -120,6 +130,12 @@ func datesSeedCorpus() []string {
 		"Maerzmaerz 2026", "xmaerz 2026", "maerz_2026", "Maer 2026", "Maerz Maerz 2026", "mAi 2027", "Mai\t\n 2028", "Mai\v2028", "Mai" + nbsp + "2028",
 		"Mai\f\r2029", "Januar 2030", "January 2031", "januar 2020", "JANUARY 2020",
 		longS + "eptember 2026", "x" + longS + "eptember 2026", "Augu" + longS + "t 2026",
+		// The long s as the first letter (#463/1) behind every kind of rune.
+		"Am " + longS + "eptember 2026", "\xe2\x80\x9e" + longS + "eptember 2026\xe2\x80\x9c", "(" + longS + "eptember 2026)",
+		nbsp + longS + "eptember 2026", "15." + nnbsp + longS + "eptember 2026", "2025" + longS + "eptember 2026",
+		"_" + longS + "eptember 2026", "\xc3\xa9" + longS + "eptember 2026", "\xc3" + longS + "eptember 2026",
+		longS + "EPTEMBER" + nbsp + "2026", longS + longS + "eptember 2026", "Mai 2026" + longS + "eptember 2027",
+		longS + "eptember 2026" + longS + "eptember 2027", "x" + longS + "eptember 2026 " + longS + "eptember 2027",
 		"O" + kelvinSign + "tober 2026", "x" + "o" + kelvinSign + "tober 2026", "OKTOBER 2026", "October 2026",
 		"DEZEMBER 2026", "december 2026", "Dezember 2026x", "Dezember 2026_", "Dezember 20261", "Dezember 2026.",
 		"Mai 2026Mai 2027", "Maimai 2026", "Mai Mai 2026", "€März 2026€", "\xc3März 2026", "M\xc3rz 2026",
@@ -419,20 +435,19 @@ func FuzzExtractDates(f *testing.F) {
 }
 
 // TestMonthPatterns_FoldLikeRegexp checks the month tables of the scanner
-// against the alternations of the reference expressions: the same
-// alternatives in the same order, and at every position exactly the runes the
-// compiled (?i) atom of the expression matches, over all of Unicode.
+// against the month names the reference expressions are built from
+// (refMonthsDE, refMonthsEN): the same alternatives in the same order, and at
+// every position exactly the runes the compiled (?i) atom of the name
+// matches, over all of Unicode.
 func TestMonthPatterns_FoldLikeRegexp(t *testing.T) {
 	matchers := map[string][]rune{}
 	for _, form := range []struct {
-		re       *regexp.Regexp
+		names    string
 		patterns []monthPattern
-	}{{refForms.de, deMonthPatterns}, {refForms.en, enMonthPatterns}} {
-		src := form.re.String()
-		start := strings.Index(src, `\b(`) + 3
-		alts := strings.Split(src[start:start+strings.IndexByte(src[start:], ')')], "|")
+	}{{refMonthsDE, deMonthPatterns}, {refMonthsEN, enMonthPatterns}} {
+		alts := strings.Split(form.names, "|")
 		if len(alts) != len(form.patterns) {
-			t.Fatalf("%d alternatives in %s, %d month patterns", len(alts), src, len(form.patterns))
+			t.Fatalf("%d alternatives in %s, %d month patterns", len(alts), form.names, len(form.patterns))
 		}
 		for i, alt := range alts {
 			atoms := regexpAtoms(alt)
@@ -624,12 +639,10 @@ func TestScanDates_EveryMonthSpellingMatches(t *testing.T) {
 		n := 0
 		for _, p := range form.patterns {
 			for _, name := range monthSpellings(p) {
-				// \b is ASCII: a name that starts with a rune beyond ASCII
-				// starts a match only behind a word character.
+				// A name that starts with a rune beyond ASCII (the long s of
+				// september) starts a match behind a space as any other does
+				// (#463/1).
 				before := "am "
-				if name[0] >= utf8.RuneSelf {
-					before = "am x"
-				}
 				for i, sep := range []string{" ", "  \t\n", nbsp, " " + nbsp + nnbsp + "\r", nnbsp} {
 					c := before + name + sep + "2026."
 					s, y := len(before), len(c)-5

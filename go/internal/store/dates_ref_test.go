@@ -28,6 +28,13 @@ package store
 //	        of a month name: "Auguſt 2026" is August 2026. Before, the month
 //	        expressions matched it and strings.ToLower kept the long s, so no
 //	        table resolved it.
+//	#463/1  The long s as the first letter of "september" starts a month
+//	        name where an s does: behind no ASCII word character. \b knows
+//	        ASCII only and took the long s for a non-word rune, so
+//	        "ſeptember 2026" matched only behind a word character
+//	        ("xſeptember 2026"). The month alternations put the s of
+//	        september in ASCII behind \b and the long s behind \B
+//	        (refMonthForm463).
 //
 // extractDatesRefWith is the body of extractDates at 8d4a077a, verbatim except
 // that the four expressions, the bounds of the year window and the key of a
@@ -70,12 +77,32 @@ var (
 	refForms = refDateForms{
 		iso:     regexp.MustCompile(`\b(20[2-9]\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))(?:[T\s\x{A0}\x{202F}]+([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?Z?)?\b`),
 		dot:     regexp.MustCompile(`\b(0[1-9]|[12]\d|3[01])\.(0[1-9]|1[0-2])\.(20[2-9]\d)(?:[\s\x{A0}\x{202F}]+([01]\d|2[0-3]):([0-5]\d))?\b`),
-		de:      regexp.MustCompile(`(?i)\b(januar|februar|märz|maerz|april|mai|juni|juli|august|september|oktober|november|dezember)[\s\x{A0}\x{202F}]+(20[2-9]\d)\b`),
-		en:      regexp.MustCompile(`(?i)\b(january|february|march|april|may|june|july|august|september|october|november|december)[\s\x{A0}\x{202F}]+(20[2-9]\d)\b`),
+		de:      refMonthForm463(refMonthsDE),
+		en:      refMonthForm463(refMonthsEN),
 		minYear: 2020, maxYear: 2099,
 		monthKey: func(name string) string { return strings.ToLower(strings.ReplaceAll(name, longS, "s")) },
 	}
 )
+
+// refMonthsDE and refMonthsEN are the month names of the two month forms in
+// the order of their alternation, each read case-insensitively; the scanner's
+// month patterns are built from the same names (TestMonthPatterns_FoldLikeRegexp).
+const (
+	refMonthsDE = "januar|februar|märz|maerz|april|mai|juni|juli|august|september|oktober|november|dezember"
+	refMonthsEN = "january|february|march|april|may|june|july|august|september|october|november|december"
+)
+
+// refMonthForm463 is the expression of a month form with the names of
+// names, as #463/1 left it: the names behind \b, except that the first
+// letter of "september" stands there only as an s in ASCII and its long s
+// behind \B — a long s at the start of a word has no ASCII word character
+// before it, as an s there has none. The long s is the one rune beyond ASCII
+// (?i) lets spell the first letter of a month name
+// (TestMonthPatterns_OnlySeptemberStartsBeyondASCII).
+func refMonthForm463(names string) *regexp.Regexp {
+	asWord := strings.Replace(names, "september", "(?-i:[sS])eptember", 1)
+	return regexp.MustCompile(`(?i)(\b(?:` + asWord + `)|\B(?-i:\x{17F})eptember)[\s\x{A0}\x{202F}]+(20[2-9]\d)\b`)
+}
 
 // extractDatesRefWith extracts all recognizable timestamps from text content.
 // Parses ISO dates (with optional HH:MM time) and German dot-format dates.

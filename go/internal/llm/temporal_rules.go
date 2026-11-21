@@ -457,10 +457,19 @@ var (
 	reNextWeek        = regexp.MustCompile(`(?i)next\s+week`)
 	reLastMonth       = regexp.MustCompile(`(?i)last\s+month(?:'s)?`)
 	reThisMonth       = regexp.MustCompile(`(?i)this\s+month`)
-	reSeit            = regexp.MustCompile(`(?i)\bseit\s+(?:dem\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)`)
-	reBis             = regexp.MustCompile(`(?i)\bbis\s+(?:zu[mr]\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)`)
+	// "since" and "until" are the English "seit" and "bis" (issue #463).
+	reSeit            = regexp.MustCompile(`(?i)\b(seit|since)\s+(?:dem\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)`)
+	reBis             = regexp.MustCompile(`(?i)\b(bis|until)\s+(?:zu[mr]\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)`)
 	// "vom" is "von dem"; "bis zum"/"bis zur" as in reBis (issue #463).
 	reVonBis          = regexp.MustCompile(`(?i)(?:von|\bvom)\s+((?:\S+\s+)?(?:\S+\s+)?\S+)\s+bis\s+(?:zu[mr]\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)`)
+	// "from X to Y" is the English "von X bis Y"; "ab X bis Y" is "von X bis
+	// Y" when X is a date (issue #463).
+	reFromTo          = regexp.MustCompile(`(?i)\bfrom\s+((?:\S+\s+)?(?:\S+\s+)?\S+)\s+(?:to|until|through)\s+((?:\S+\s+)?(?:\S+\s+)?\S+)`)
+	reAbBis           = regexp.MustCompile(`(?i)\bab\s+(?:dem\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)\s+bis\s+(?:zu[mr]\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)`)
+	// "seit X bis Y" and "since X until Y": the window from X to Y (issue #463).
+	reSeitBis         = regexp.MustCompile(`(?i)\b(?:seit|since)\s+(?:dem\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)\s+(?:bis|until)\s+(?:zu[mr]\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)`)
+	// "ab", "vor", "nach", "before", "after" before a date (matchOpenEdge).
+	reOpenEdge        = regexp.MustCompile(`(?i)\b(ab|vor|nach|before|after)\s+(?:(?:dem|the)\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)`)
 	reThrough         = regexp.MustCompile(`(?i)(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+through\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)`)
 	reAnfangWoche     = regexp.MustCompile(`(?i)anfang\s+(?:der|dieser)\s+woche`)
 	reEndeWoche       = regexp.MustCompile(`(?i)ende\s+(?:n[äa]chster|dieser|der)?\s*woche`)
@@ -639,8 +648,23 @@ var reISODateRangeIndicator = regexp.MustCompile(`(?i)(?:^|\s)(?:bis|to|through)
 // reSeitBisBefore matches "seit"/"bis" (with the article German puts between,
 // "seit dem", "bis zum") and "von"/"vom" right before a day date: the date is
 // then the start or the end of the window matchSeit, matchBis or matchVonBis
-// derive, not a day of its own.
-var reSeitBisBefore = regexp.MustCompile(`(?i)\b(?:seit(?:\s+dem)?|bis(?:\s+zu[mr])?|vo[nm])\s+$`)
+// derive, not a day of its own. So do their English kin "since", "until" and
+// "from", and the words of matchOpenEdge, "ab", "vor", "nach" (with "dem"),
+// "before" and "after" (with "the"), issue #463.
+var reSeitBisBefore = regexp.MustCompile(`(?i)\b(?:(?:seit|ab|vor|nach)(?:\s+dem)?|bis(?:\s+zu[mr])?|vo[nm]|since|until|from|(?:before|after)(?:\s+the)?)\s+$`)
+
+// reSpacedHyphen matches a hyphen between spaces, the whole text between two
+// day dates ("15.03.2026 - 20.03.2026"): a range word as a dash is. A
+// hyphen without spaces stays none — it is a part of the ISO form.
+var reSpacedHyphen = regexp.MustCompile(`^\s+-\s+$`)
+
+// reBetweenStart and reBetweenAnd match "zwischen"/"between" right before
+// the first of two day dates and "und"/"and" as the whole text between them
+// ("zwischen dem 01.03.2024 und dem 31.03.2024"): the window they span.
+var (
+	reBetweenStart = regexp.MustCompile(`(?i)\b(?:zwischen(?:\s+dem)?|between(?:\s+the)?)\s+$`)
+	reBetweenAnd   = regexp.MustCompile(`(?i)^\s+(?:und(?:\s+dem)?|and(?:\s+the)?)\s+$`)
+)
 
 // reYearlessStart matches a dot date without its year ("01.03.", "01.03")
 // and a range word right before a day date, the German "01.03. bis
@@ -727,12 +751,13 @@ func matchDayDates(query string, deferToSeitBis bool) *TemporalResult {
 	}
 	ref := func(m dayDate) string { return query[m.dateStart:m.dateEnd] }
 
-	// Two day dates with a range word between them: the window they span,
-	// whichever of the two the query names first.
+	// Two day dates with a range word between them, a hyphen between spaces,
+	// or "und" between them after "zwischen": the window they span, whichever
+	// of the two the query names first.
 	// A dot date and an ISO date can share their year ("29.03.2026-03-29"):
 	// both are day dates, as on the write side, with nothing between them.
 	if len(matches) == 2 && matches[0].dateEnd <= matches[1].dateStart &&
-		reISODateRangeIndicator.MatchString(query[matches[0].dateEnd:matches[1].dateStart]) {
+		spansWindow(query[:matches[0].start], query[matches[0].dateEnd:matches[1].dateStart]) {
 		first, second := matches[0].day, matches[1].day
 		if second.Before(first) {
 			first, second = second, first
@@ -748,6 +773,13 @@ func matchDayDates(query string, deferToSeitBis bool) *TemporalResult {
 	return multiResult(dates)
 }
 
+// spansWindow reports whether two day dates with the text between and the
+// text before the first make a window (matchDayDates).
+func spansWindow(before, between string) bool {
+	return reISODateRangeIndicator.MatchString(between) || reSpacedHyphen.MatchString(between) ||
+		reBetweenAnd.MatchString(between) && reBetweenStart.MatchString(before)
+}
+
 // orderWindow orders a window whose end resolved before its start. An edge
 // counted from a reference day (startRel/endRel: a bare weekday or month) is
 // counted again from the other edge; a fixed edge (heute, gestern, "letzten
@@ -759,47 +791,92 @@ func matchDayDates(query string, deferToSeitBis bool) *TemporalResult {
 // happened. A fixed end keeps the end in either tense ("von März bis heute"
 // is this year's March up to today), a fixed start the start. Two fixed edges
 // in the wrong order swap: the window between two named days is what they
-// span (issue #463).
-func orderWindow(start, end time.Time, startRel, endRel, backward bool, earlierStart, laterEnd func(time.Time) time.Time) (time.Time, time.Time) {
+// span (issue #463); swapped reports it, so that the caller ends the window
+// on the last day of what the start named.
+func orderWindow(start, end time.Time, startRel, endRel, backward bool, earlierStart, laterEnd func(time.Time) time.Time) (s, e time.Time, swapped bool) {
 	if !end.Before(start) {
-		return start, end
+		return start, end, false
 	}
 	if startRel && (backward || !endRel) {
 		if s := earlierStart(end); !s.After(end) {
-			return s, end
+			return s, end, false
 		}
 	}
 	if endRel {
 		if e := laterEnd(start); !e.Before(start) {
-			return start, e
+			return start, e, false
 		}
 	}
-	return end, start
+	return end, start, true
+}
+
+// rangeForms are the forms of a window with a start and an end phrase:
+// "von X bis Y" (also "vom X bis zum Y"), "from X to Y" (also "until",
+// "through"), "ab X bis Y" and "seit X bis Y" ("since X until Y"). "from" and "ab" are words of their own far more
+// often than the start of a window, so their X has to be a date spelt as
+// such (exact, phraseEdge.fuzzy); "ab X bis Y" whose X is none stays the
+// time up to Y, matchBis (issue #463).
+var rangeForms = []struct {
+	re    *regexp.Regexp
+	ref   func(m []string) string
+	exact bool
+}{
+	{reVonBis, func(m []string) string { return "von " + m[1] + " bis " + m[2] }, false},
+	{reFromTo, func(m []string) string { return m[0] }, true},
+	{reAbBis, func(m []string) string { return "ab " + m[1] + " bis " + m[2] }, true},
+	{reSeitBis, func(m []string) string { return m[0] }, false},
 }
 
 func matchVonBis(query string, now time.Time) *TemporalResult {
 	// "von Montag bis Mittwoch", "von letztem Montag bis nächsten Freitag", "von gestern bis übermorgen"
-	m := reVonBis.FindStringSubmatch(strings.ToLower(query))
-	if m == nil {
-		return nil
+	lower := strings.ToLower(query)
+	for _, f := range rangeForms {
+		if m := f.re.FindStringSubmatch(lower); m != nil {
+			if r := matchRangeForm(query, m, f.ref(m), f.exact, now); r != nil {
+				return r
+			}
+		}
 	}
+	return nil
+}
+
+// nowWords start a range form at today: "von jetzt bis Freitag", "from now
+// until Friday" (issue #463). They are no day keyword elsewhere — "now" in a
+// question rarely names a day to rank by.
+var nowWords = toWordSet("jetzt", "now")
+
+// matchRangeForm derives the window of a range form whose start phrase is
+// m[1] and whose end phrase is m[2].
+func matchRangeForm(query string, m []string, ref string, exact bool, now time.Time) *TemporalResult {
 	tense := DetectVerbTense(query)
 	backward := tense == "past"
-	start, startRel := resolvePhraseRel(m[1], backward, now)
-	end, endRel := resolvePhraseRel(m[2], backward, now)
-	if start.IsZero() || end.IsZero() {
+	startEdge := resolvePhraseEdge(m[1], backward, now)
+	if w := phraseWords(m[1]); len(w) > 0 && nowWords[w[0]] {
+		startEdge = phraseEdge{day: truncDate(now)}
+	}
+	endEdge := resolvePhraseEdge(m[2], backward, now)
+	if startEdge.day.IsZero() || endEdge.day.IsZero() || exact && startEdge.fuzzy {
+		return nil
+	}
+	if english := strings.HasPrefix(m[0], "from") || strings.HasPrefix(m[0], "since"); english &&
+		(bareMonthWord(m[1], startEdge) || bareMonthWord(m[2], endEdge)) {
 		return nil
 	}
 	// A weekday or month after a day date could count from today ("bis
 	// Freitag") or from the date ("vom 01.03.2026 bis Ende März"); the rules
 	// do not guess, the date stays the day it names.
-	if endRel && len(findDayDates(strings.ToUpper(m[1]))) > 0 {
+	if endEdge.rel && len(findDayDates(strings.ToUpper(m[1]))) > 0 {
 		return nil
 	}
-	start, end = orderWindow(start, end, startRel, endRel, backward,
+	start, end, swapped := orderWindow(startEdge.day, endEdge.day, startEdge.rel, endEdge.rel, backward,
 		func(to time.Time) time.Time { return resolvePhrase(m[1], true, to) },
 		func(from time.Time) time.Time { return resolvePhrase(m[2], false, from) })
-	return rangeResult("von "+m[1]+" bis "+m[2], fmtDate(start), fmtDate(end), "range")
+	// A month at the end includes the month: the window ends on its last day
+	// ("von März 2024 bis April 2024" ends on 2024-04-30, issue #463).
+	if swapped && startEdge.month || !swapped && endEdge.month {
+		end = lastOfMonth(end)
+	}
+	return rangeResult(ref, fmtDate(start), fmtDate(end), "range")
 }
 
 func matchLetztenWDBis(query string, now time.Time) *TemporalResult {
@@ -815,7 +892,7 @@ func matchLetztenWDBis(query string, now time.Time) *TemporalResult {
 	d1 := resolveWeekdayDate(wd1, true, now)
 	d2 := resolveWeekdayDate(wd2, true, now)
 	// "letzten" names the start; only the end is counted again.
-	d1, d2 = orderWindow(d1, d2, false, true, false, nil, func(from time.Time) time.Time { return resolveWeekdayDate(wd2, false, from) })
+	d1, d2, _ = orderWindow(d1, d2, false, true, false, nil, func(from time.Time) time.Time { return resolveWeekdayDate(wd2, false, from) })
 	return rangeResult("letzten "+m[1]+" bis "+m[2], fmtDate(d1), fmtDate(d2), "range")
 }
 
@@ -827,7 +904,7 @@ func matchNextThrough(query string, now time.Time) *TemporalResult {
 		if ok1 && ok2 {
 			d1 := resolveWeekdayDate(wd1, false, now)
 			d2 := resolveWeekdayDate(wd2, false, now)
-			d1, d2 = orderWindow(d1, d2, false, true, false, nil, func(from time.Time) time.Time { return resolveWeekdayDate(wd2, false, from) })
+			d1, d2, _ = orderWindow(d1, d2, false, true, false, nil, func(from time.Time) time.Time { return resolveWeekdayDate(wd2, false, from) })
 			return rangeResult("next "+m[1]+" through "+m[2], fmtDate(d1), fmtDate(d2), "range")
 		}
 	}
@@ -845,7 +922,7 @@ func matchNextThrough(query string, now time.Time) *TemporalResult {
 	backward := tense == "past"
 	d1 := resolveWeekdayDate(wd1, backward, now)
 	d2 := resolveWeekdayDate(wd2, backward, now)
-	d1, d2 = orderWindow(d1, d2, true, true, backward,
+	d1, d2, _ = orderWindow(d1, d2, true, true, backward,
 		func(to time.Time) time.Time { return resolveWeekdayDate(wd1, true, to) },
 		func(from time.Time) time.Time { return resolveWeekdayDate(wd2, false, from) })
 	return rangeResult(m[1]+" through "+m[2], fmtDate(d1), fmtDate(d2), "range")
@@ -856,17 +933,21 @@ func matchSeit(query string, now time.Time) *TemporalResult {
 	if m == nil {
 		return nil
 	}
-	start := resolvePhrase(m[1], true, now)
+	e := resolvePhraseEdge(m[2], true, now)
+	start := e.day
 	// A start after today has no time since it yet ("seit morgen").
-	if start.IsZero() || start.After(truncDate(now)) {
+	if start.IsZero() || start.After(truncDate(now)) || m[1] == "since" && bareMonthWord(m[2], e) {
 		return nil
 	}
-	return rangeResult("seit "+m[1], fmtDate(start), fmtDate(truncDate(now)), "range")
+	return rangeResult(m[1]+" "+m[2], fmtDate(start), fmtDate(truncDate(now)), "range")
 }
 
 func matchBis(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
-	// Skip if "von...bis" (handled by matchVonBis)
+	// Skip if "von...bis" (handled by matchVonBis). A "from … until" whose
+	// start the rules cannot read keeps its "until": "from the start until
+	// 2026-03-05" is the time up to that day, and in "from backlog to done
+	// until Friday" the "from … to" is no window at all (issue #463).
 	if reVonBis.MatchString(lower) {
 		return nil
 	}
@@ -878,18 +959,93 @@ func matchBis(query string, now time.Time) *TemporalResult {
 	if m == nil {
 		return nil
 	}
-	end := resolvePhrase(m[1], false, now)
-	if end.IsZero() {
+	e := resolvePhraseEdge(m[2], false, now)
+	if e.day.IsZero() || m[1] == "until" && bareMonthWord(m[2], e) {
 		return nil
 	}
 	// An end before today ("bis März 2015", "bis gestern") is the time up to
 	// it, open towards the past: a window from today would start after it
-	// ends (issue #463). A later end is a deadline, the window from today.
-	if end.Before(truncDate(now)) {
-		return &TemporalResult{Dates: []TemporalDate{{Ref: "bis " + m[1], Date: fmtDate(end), Dir: DirUntil}}}
+	// ends (issue #463). A later end is a deadline, the window from today. A
+	// month includes the month: the window ends on its last day, and a month
+	// that began before today is the time up to its end.
+	if e.day.Before(truncDate(now)) {
+		return &TemporalResult{Dates: []TemporalDate{{Ref: m[1] + " " + m[2], Date: fmtDate(e.last()), Dir: DirUntil}}}
 	}
-	return rangeResult("bis "+m[1], fmtDate(truncDate(now)), fmtDate(end), "range")
+	return rangeResult(m[1]+" "+m[2], fmtDate(truncDate(now)), fmtDate(e.last()), "range")
 }
+
+// matchOpenEdge reads "ab", "vor", "nach", "before" and "after" right before
+// a date (issue #463): "ab X" is the time from X on and "nach X" the time
+// from the day after X on, open towards the future; "vor X" is the time up to
+// the day before X, open towards the past, and with X after today the
+// deadline from today to the day before X. A month as X is the whole month
+// ("nach März 2024" starts on 2024-04-01). "ab" with a day to come is the
+// window into the future it names ("ab nächstem Montag bin ich im Urlaub"),
+// and with a past day the time from it on — unlike "seit", which names the
+// time up to today and so has none for a day to come.
+//
+// The five are words of their own far more often than words before a date
+// ("nach Hause", "vor allem", "ab Werk", "after 3 retries"): a rule takes the
+// phrase only when it starts with a date spelt as such that names its day
+// itself — a day date, a month with its year, a day keyword like "heute", a
+// weekday or month after "nächsten"/"letzten" — and of several such words the
+// first whose phrase is one. A bare weekday or month is no such date: which
+// one it means would have to be guessed from the tense, and a month name is a
+// word of its own as well ("nach August", "after may I ask"); neither is a
+// typo resolveTokenEdge forgives. A count of a time unit before the word
+// ("zwei Tage vor dem 15.03.2024", "a week after 2024-03-15") makes it a
+// distance from the date, not an edge: the date stays the day it names. With
+// a day date the rules left to the windows (edge), only a phrase naming that
+// day counts.
+func matchOpenEdge(query string, now time.Time, edge string) *TemporalResult {
+	lower := strings.ToLower(query)
+	for _, m := range reOpenEdge.FindAllStringSubmatchIndex(lower, -1) {
+		word, phrase := lower[m[2]:m[3]], lower[m[4]:m[5]]
+		if reTimeUnitBefore.MatchString(lower[:m[0]]) || word != "ab" && reNearBefore.MatchString(lower[:m[0]]) {
+			continue
+		}
+		// A year first is no edge here: "2024 Oktober" has no use, and "after
+		// 2025 may be deleted" names no month.
+		if w := phraseWords(phrase); len(w) > 0 {
+			if _, year := isYear(w[0]); year {
+				continue
+			}
+		}
+		e := resolvePhraseEdge(phrase, false, now)
+		if e.day.IsZero() || e.fuzzy || e.rel || edge != "" && fmtDate(e.day) != edge {
+			continue
+		}
+		ref := word + " " + phrase
+		switch word {
+		case "ab":
+			return &TemporalResult{Dates: []TemporalDate{{Ref: ref, Date: fmtDate(e.day), Dir: DirFrom}}}
+		case "nach", "after":
+			return &TemporalResult{Dates: []TemporalDate{{Ref: ref, Date: fmtDate(e.last().AddDate(0, 0, 1)), Dir: DirFrom}}}
+		default: // vor, before
+			// A day to come is a deadline, the window from today to the day
+			// before it, as "bis" with a later end is one; a day that has
+			// begun is the time up to the day before it.
+			if today := truncDate(now); e.day.After(today) {
+				return rangeResult(ref, fmtDate(today), fmtDate(e.day.AddDate(0, 0, -1)), "range")
+			}
+			return &TemporalResult{Dates: []TemporalDate{{Ref: ref, Date: fmtDate(e.day.AddDate(0, 0, -1)), Dir: DirUntil}}}
+		}
+	}
+	return nil
+}
+
+// reTimeUnitBefore matches a time unit or a time of day right before one of
+// the words of matchOpenEdge ("zwei Tage vor", "a week after", "am Abend
+// vor", "the night before", "das Wochenende vor"), reNearBefore a word of
+// nearness ("kurz vor", "shortly after"): the word then measures a distance
+// from the date, and the question keeps the day it names (matchOpenEdge).
+// Only the word right before counts ("Welche Tage waren vor dem …" is an
+// edge).
+var (
+	reTimeUnitBefore = regexp.MustCompile(`(?i)\b(?:sekunde|sekunden|minute|minuten|stunde|stunden|tag|tage|tagen|tages|nacht|nächte|abend|abende|morgen|vormittag|mittag|nachmittag|woche|wochen|wochenende|wochenenden|monat|monate|monaten|monats|quartal|quartale|quartals|jahr|jahre|jahren|jahres|` +
+		`second|seconds|minutes|hour|hours|day|days|night|nights|evening|evenings|morning|mornings|noon|afternoon|week|weeks|weekend|weekends|month|months|quarter|quarters|year|years)\s+$`)
+	reNearBefore = regexp.MustCompile(`(?i)\b(?:kurz|knapp|direkt|unmittelbar|gleich|shortly|right|just|immediately|soon)\s+$`)
+)
 
 func matchWeekSegment(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
@@ -1315,13 +1471,48 @@ func resolveMonthPosition(pos string, year int, m time.Month, loc *time.Location
 	}
 }
 
+// phraseEdge is what a phrase at a window's edge names (issue #463).
+type phraseEdge struct {
+	// day is the day the phrase names, the 1st for a month; zero: the phrase
+	// names none.
+	day time.Time
+	// rel: the day is counted from the reference day the phrase is resolved
+	// at, so that a window may count it again from its other edge — a bare
+	// weekday or month name and a month position without a year ("Ende
+	// März"); a word naming a day from today (heute, gestern, "letzten
+	// Montag") and a phrase naming its own day (a day date, a month with its
+	// year) are fixed.
+	rel bool
+	// month: the phrase names a whole month (a month name with or without
+	// its year, not a day in it); as a window's end it stands for the month's
+	// last day (last).
+	month bool
+	// fuzzy: the day comes from a word the rules take for a day keyword by
+	// its typo tolerance (fuzzyMatch), not by its spelling.
+	fuzzy bool
+}
+
+// last is the last day of what the edge names: its day, and for a month
+// the month's last day.
+func (e phraseEdge) last() time.Time {
+	if e.month {
+		return lastOfMonth(e.day)
+	}
+	return e.day
+}
+
+// lastOfMonth returns the last day of t's month.
+func lastOfMonth(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month()+1, 0, 0, 0, 0, 0, t.Location())
+}
+
 // resolveThreeWordPhrase handles 3-token patterns: "Ende März 2025", "letzten August 2024".
-func resolveThreeWordPhrase(words []string, now time.Time) (time.Time, bool) {
+func resolveThreeWordPhrase(words []string, now time.Time) (phraseEdge, bool) {
 	// Position + Month + Year: "Ende März 2025" → last day of March 2025
 	if pos, ok := monthPositionModifiers[words[0]]; ok {
 		if m, mOk := lookupMonth(words[1]); mOk {
 			if y, yOk := isYear(words[2]); yOk {
-				return resolveMonthPosition(pos, y, m, now.Location()), true
+				return phraseEdge{day: resolveMonthPosition(pos, y, m, now.Location())}, true
 			}
 		}
 	}
@@ -1329,42 +1520,54 @@ func resolveThreeWordPhrase(words []string, now time.Time) (time.Time, bool) {
 	if explicitPastSet[words[0]] || explicitFutureSet[words[0]] {
 		if m, mOk := lookupMonth(words[1]); mOk {
 			if y, yOk := isYear(words[2]); yOk {
-				return resolveMonthYear(m, y, now), true
+				return phraseEdge{day: resolveMonthYear(m, y, now), month: true}, true
 			}
 		}
 	}
-	return time.Time{}, false
+	return phraseEdge{}, false
+}
+
+// monthWords are the month names that are words of their own as well: the
+// English modal "may", the verb and noun "march", the adjective "august". A
+// year before one of them is no date ("Tests before 2024 may fail"); after
+// it, a year is ("May 2024"), as on the write side.
+var monthWords = toWordSet("may", "march", "august")
+
+// bareMonthWord reports whether phrase names a month by a bare name that is a
+// word of its own (monthWords). After the English "since", "until" and
+// "from" that word is far more often the modal, verb or adjective than the
+// month ("Wait until may I ask"), so those rules take it for no month; with
+// its year ("since May 2024") it is one, and "seit August" keeps its month
+// (issue #463).
+func bareMonthWord(phrase string, e phraseEdge) bool {
+	w := phraseWords(phrase)
+	return e.rel && e.month && len(w) > 0 && monthWords[w[0]]
 }
 
 // resolvePhrase resolves a 1-3 word temporal phrase like "letztem Montag", "nächsten Freitag",
 // "vorgestern", "August 2024", "Ende März 2025".
 // For multi-word phrases, tries specific patterns first, then falls back to fewer words.
 func resolvePhrase(phrase string, defaultBackward bool, now time.Time) time.Time {
-	t, _ := resolvePhraseRel(phrase, defaultBackward, now)
-	return t
+	return resolvePhraseEdge(phrase, defaultBackward, now).day
 }
 
-// resolvePhraseRel is resolvePhrase and also reports whether the day is
-// counted from the reference day it is given, so that a window may count it
-// again from its other edge: a bare weekday or month name and a month position
-// without a year ("Ende März") are; a word naming a day from today (heute,
-// gestern, "letzten Montag") and a phrase naming its own day (a day date, a
-// month with its year) are fixed (issue #463).
-func resolvePhraseRel(phrase string, defaultBackward bool, now time.Time) (time.Time, bool) {
-	words := strings.Fields(strings.ToLower(strings.Trim(phrase, ".,;:!?")))
+// resolvePhraseEdge is resolvePhrase with everything a window's edge needs
+// to know of the phrase (phraseEdge).
+func resolvePhraseEdge(phrase string, defaultBackward bool, now time.Time) phraseEdge {
+	words := phraseWords(phrase)
 	if len(words) == 0 {
-		return time.Time{}, false
+		return phraseEdge{}
 	}
 
 	// Single word: delegate to resolveToken
 	if len(words) == 1 {
-		return resolveTokenRel(words[0], defaultBackward, now)
+		return resolveTokenEdge(words[0], defaultBackward, now)
 	}
 
 	// --- 3-word patterns ---
 	if len(words) >= 3 {
-		if t, ok := resolveThreeWordPhrase(words[:3], now); ok {
-			return t, false
+		if e, ok := resolveThreeWordPhrase(words[:3], now); ok {
+			return e
 		}
 	}
 
@@ -1374,22 +1577,24 @@ func resolvePhraseRel(phrase string, defaultBackward bool, now time.Time) (time.
 	// Month + Year: "August 2024" → 2024-08-01 (explicit year, no direction guessing)
 	if m, mOk := lookupMonth(w0); mOk {
 		if y, yOk := isYear(w1); yOk {
-			return resolveMonthYear(m, y, now), false
+			return phraseEdge{day: resolveMonthYear(m, y, now), month: true}
 		}
 	}
 
-	// Year + Month: "2024 August" → 2024-08-01
+	// Year + Month: "2024 Oktober" → 2024-10-01 — not with a month name that
+	// is a word of its own ("Logs after 2025 may be deleted", issue #463).
 	if y, yOk := isYear(w0); yOk {
-		if m, mOk := lookupMonth(w1); mOk {
-			return resolveMonthYear(m, y, now), false
+		if m, mOk := lookupMonth(w1); mOk && !monthWords[w1] {
+			return phraseEdge{day: resolveMonthYear(m, y, now), month: true}
 		}
 	}
 
 	// Direction modifier + keyword: "letztem Montag", "nächsten Freitag"
 	if explicitPastSet[w0] || explicitFutureSet[w0] {
 		if !resolveToken(w1, defaultBackward, now).IsZero() {
-			backward := explicitPastSet[w0]
-			return resolveToken(w1, backward, now), false
+			e := resolveTokenEdge(w1, explicitPastSet[w0], now)
+			e.rel = false
+			return e
 		}
 	}
 
@@ -1397,54 +1602,78 @@ func resolvePhraseRel(phrase string, defaultBackward bool, now time.Time) (time.
 	if pos, ok := monthPositionModifiers[w0]; ok {
 		if m, mOk := lookupMonth(w1); mOk {
 			base := resolveMonthDate(m, defaultBackward, now)
-			return resolveMonthPosition(pos, base.Year(), base.Month(), base.Location()), true
+			return phraseEdge{day: resolveMonthPosition(pos, base.Year(), base.Month(), base.Location()), rel: true}
 		}
 	}
 
 	// Fallback: try first word as standalone token (greedy regex captured a non-temporal second word)
-	return resolveTokenRel(words[0], defaultBackward, now)
+	return resolveTokenEdge(words[0], defaultBackward, now)
+}
+
+// phrasePunct are the runes a word of a phrase is trimmed of at both ends:
+// the punctuation ruleTokenize trims, and the quotation marks and brackets a
+// text puts around a date ("seit „März 2024“", "seit (März 2024)"), which the
+// write side reads past as well (issue #463).
+const phrasePunct = ".,;:!?\"'()[]{}\u201e\u201c\u201d\u201a\u2018\u2019\u00ab\u00bb\u2039\u203a"
+
+// phraseWords splits a phrase into its lowercased words, each trimmed of
+// phrasePunct; a word that is nothing else is left out.
+func phraseWords(phrase string) []string {
+	var words []string
+	for _, w := range strings.Fields(strings.ToLower(phrase)) {
+		if w = strings.Trim(w, phrasePunct); w != "" {
+			words = append(words, w)
+		}
+	}
+	return words
 }
 
 // resolveToken resolves a single token to a date (for compound patterns).
 func resolveToken(tok string, backward bool, now time.Time) time.Time {
-	t, _ := resolveTokenRel(tok, backward, now)
-	return t
+	return resolveTokenEdge(tok, backward, now).day
 }
 
-// resolveTokenRel is resolveToken and also reports whether the day is counted
-// from the reference day (a weekday or month name), as resolvePhraseRel does.
-func resolveTokenRel(tok string, backward bool, now time.Time) (time.Time, bool) {
+// resolveTokenEdge is resolveToken with what a window's edge needs to know
+// of the token (phraseEdge), as resolvePhraseEdge.
+func resolveTokenEdge(tok string, backward bool, now time.Time) phraseEdge {
 	tok = strings.ToLower(strings.Trim(tok, ".,;:!?"))
 	// Simple keywords
 	for _, kw := range simpleKeywords {
 		if fuzzyMatch(tok, kw.word) {
-			return truncDate(kw.resolve(now)), false
+			return phraseEdge{day: truncDate(kw.resolve(now)), fuzzy: tok != kw.word}
 		}
 	}
 	// Weekdays
 	if wd, ok := weekdayMapDE[tok]; ok {
-		return resolveWeekdayDate(wd, backward, now), true
+		return phraseEdge{day: resolveWeekdayDate(wd, backward, now), rel: true}
 	}
 	if wd, ok := weekdayMapEN[tok]; ok {
-		return resolveWeekdayDate(wd, backward, now), true
+		return phraseEdge{day: resolveWeekdayDate(wd, backward, now), rel: true}
 	}
 	// Month names
 	if m, ok := lookupMonth(tok); ok {
-		return resolveMonthDate(m, backward, now), true
+		return phraseEdge{day: resolveMonthDate(m, backward, now), rel: true, month: true}
 	}
 	// A day date of either form the write side extracts, and an ISO date of
 	// any year, which this resolver took before the dot form joined it.
 	// The token is lowercased; the T and Z of an ISO time are upper case.
 	if t, ok := parseDayDate(strings.ToUpper(tok)); ok {
-		return t, false
+		return phraseEdge{day: t}
 	}
 	if t, err := time.Parse("2006-01-02", tok); err == nil {
-		return t, false
+		return phraseEdge{day: t}
 	}
-	return time.Time{}, false // zero = unresolved
+	return phraseEdge{} // zero = unresolved
 }
 
 // --- Main Entry Point ---.
+
+// dateSpaces turns the two no-break spaces into spaces before the rules read
+// a question: the write side reads U+00A0 and U+202F as the space between
+// the parts of a date (store.ExtractDates), and a word processor puts them
+// between a preposition and a date as well (U+00A0 after "seit"); the
+// rules' expressions, whose \s is ASCII, would not see them (issue #463).
+var dateSpaces = strings.NewReplacer("\u00a0", " ", "\u202f", " ")
 
 // NormalizeTemporalRules performs deterministic temporal resolution.
 // Returns nil if no temporal references are found.
@@ -1457,6 +1686,7 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 	if strings.TrimSpace(query) == "" {
 		return nil
 	}
+	query = dateSpaces.Replace(query)
 	now = truncDate(now)
 	tokens := ruleTokenize(query)
 	recur := hasRecurrence(tokens)
@@ -1486,12 +1716,18 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 		return r
 	}
 
-	// Priority 3: Seit/Bis — linear-dominant + month (spans weeks/months)
+	// Priority 3: Seit/Bis and the open edges ab/vor/nach — linear-dominant +
+	// month (spans weeks/months; effectiveDimWeights drops the month for a
+	// window longer than a year and for an open one)
 	if r := matchSeit(query, now); takes(r) {
 		r.DimensionWeights = dwLinearMonthSeit()
 		return r
 	}
 	if r := matchBis(query, now); takes(r) {
+		r.DimensionWeights = dwLinearMonthSeit()
+		return r
+	}
+	if r := matchOpenEdge(query, now, edge); r != nil {
 		r.DimensionWeights = dwLinearMonthSeit()
 		return r
 	}

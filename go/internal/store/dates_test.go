@@ -128,16 +128,50 @@ func TestIsYearAt_IsTheDateYearWindow(t *testing.T) {
 
 // TestExtractDates_LongS: the long s, which (?i) lets the month patterns
 // match as s, is an s of the month name, as the Kelvin sign is a k: "Auguſt
-// 2026" is August 2026. A name that starts with it starts a match only behind
-// a word character, because \b is ASCII.
+// 2026" is August 2026. A name that starts with it starts a match where a
+// name that starts with s does — behind no ASCII word character: at the start
+// of a text, behind a space, a quotation mark, a bracket, a no-break space or
+// a letter beyond ASCII — and not behind a letter, a digit or an underscore
+// in ASCII (issue #463; before, \b, which knows ASCII only, made it the other
+// way round).
 func TestExtractDates_LongS(t *testing.T) {
 	aug, sep := []string{"2026-08-01T00:00:00Z"}, []string{"2026-09-01T00:00:00Z"}
 	wantDates(t, map[string][]string{
 		"Augu" + longS + "t 2026": aug, "AUGU" + longS + "T 2026": aug, "am augu" + longS + "t" + nbsp + "2026.": aug,
-		"x" + longS + "eptember 2026": sep, "x" + longS + "EPTEMBER 2026": sep,
-		"O" + kelvinSign + "tober 2026": {"2026-10-01T00:00:00Z"}, longS + "eptember 2026": nil,
-		"am " + longS + "eptember 2026": nil,
+		"O" + kelvinSign + "tober 2026": {"2026-10-01T00:00:00Z"},
+		longS + "eptember 2026": sep, "am " + longS + "eptember 2026": sep, longS + "EPTEMBER 2026": sep,
+		"\xe2\x80\x9e" + longS + "eptember 2026\xe2\x80\x9c": sep, "(" + longS + "eptember 2026)": sep,
+		nbsp + longS + "eptember 2026": sep, "15." + nbsp + longS + "eptember 2026": sep,
+		"15." + nnbsp + longS + "eptember" + nnbsp + "2026": sep, "\xc3\xa9" + longS + "eptember 2026": sep,
+		"x" + longS + "eptember 2026": nil, "x" + longS + "EPTEMBER 2026": nil, "2025" + longS + "eptember 2026": nil,
+		"_" + longS + "eptember 2026": nil, "xseptember 2026": nil,
 	})
+}
+
+// TestMonthPatterns_OnlySeptemberStartsBeyondASCII pins what refMonthForm463
+// and matchBefore assume: of all month names, only "september" can start
+// with a rune beyond ASCII, and only with the long s.
+func TestMonthPatterns_OnlySeptemberStartsBeyondASCII(t *testing.T) {
+	for _, form := range []struct {
+		names    string
+		patterns []monthPattern
+	}{{refMonthsDE, deMonthPatterns}, {refMonthsEN, enMonthPatterns}} {
+		for i, name := range strings.Split(form.names, "|") {
+			var beyond []rune
+			for _, r := range form.patterns[i][0] {
+				if r >= 0x80 {
+					beyond = append(beyond, r)
+				}
+			}
+			want := []rune(nil)
+			if name == "september" {
+				want = []rune(longS)
+			}
+			if !slices.Equal(beyond, want) {
+				t.Errorf("%s starts with %q beyond ASCII, want %q", name, beyond, want)
+			}
+		}
+	}
 }
 
 // --- T25: ExtractDates rejects Go-normalized invalid dates ---.

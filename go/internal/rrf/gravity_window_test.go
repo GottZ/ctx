@@ -82,3 +82,67 @@ func TestComputeGravity_NoWindowIsThePoint(t *testing.T) {
 		t.Errorf("14 days from a point: gravity %.6f, want a small positive value", g)
 	}
 }
+
+// TestComputeGravity_WindowEdgesCountWholeDays (issue #463): a window's edges
+// are days, so a date outside it is as far from it as its day is — the day
+// before the start and the day after the end day are both one day away,
+// whatever the time of the date. Before, the distance after the window was
+// measured from the end day's 00:00, so a time one hour before the start
+// earned the gravity of a date half a day away and a time one hour after the
+// end day that of a date a day and an hour away.
+func TestComputeGravity_WindowEdgesCountWholeDays(t *testing.T) {
+	start, end := mustDate("2024-03-01"), mustDate("2024-03-31")
+	p := GravityParams{TargetDate: start, WindowStart: start, WindowEnd: end, Cutoff: 60, Power: 1.5}
+	g := func(d time.Time) float64 { return ComputeGravity([]time.Time{d}, p) }
+	hourBeforeStart, hourAfterEndDay := start.Add(-time.Hour), end.AddDate(0, 0, 1).Add(time.Hour)
+	if a, b := g(hourBeforeStart), g(hourAfterEndDay); math.Abs(a-b) > 1e-12 {
+		t.Errorf("an hour before the start %.4f, an hour after the end day %.4f: want the same", a, b)
+	}
+	// Every time of the day before the start counts as that day, every time of
+	// the day after the end day as that day; dates at 00:00 count as they did.
+	for k, day := range map[string]time.Time{"before": start.AddDate(0, 0, -1), "after": end.AddDate(0, 0, 1)} {
+		want := g(day)
+		if math.Abs(want-1.0) > 1e-12 {
+			t.Errorf("%s at 00:00: gravity %.4f, want 1 (one day away)", k, want)
+		}
+		for _, h := range []time.Duration{time.Hour, 9*time.Hour + 30*time.Minute, 23*time.Hour + 59*time.Minute} {
+			if got := g(day.Add(h)); math.Abs(got-want) > 1e-12 {
+				t.Errorf("%s +%v: gravity %.4f, want %.4f (the same day)", k, h, got, want)
+			}
+		}
+	}
+	// Two days away on either side: the day two days before the start, the
+	// day two days after the end day.
+	if a, b := g(start.AddDate(0, 0, -1).Add(-time.Hour)), g(start.AddDate(0, 0, -2)); math.Abs(a-b) > 1e-12 {
+		t.Errorf("23:00 two days before the start %.4f, 00:00 that day %.4f", a, b)
+	}
+	if a, b := g(end.AddDate(0, 0, 2).Add(22*time.Hour)), g(end.AddDate(0, 0, 2)); math.Abs(a-b) > 1e-12 {
+		t.Errorf("22:00 two days after the end day %.4f, 00:00 that day %.4f", a, b)
+	}
+	// Open towards the past: the same rule at the end.
+	open := GravityParams{TargetDate: end, WindowEnd: end, Cutoff: 60, Power: 1.5}
+	if a, b := ComputeGravity([]time.Time{end.AddDate(0, 0, 1).Add(5 * time.Hour)}, open), ComputeGravity([]time.Time{end.AddDate(0, 0, 1)}, open); math.Abs(a-b) > 1e-12 {
+		t.Errorf("open window: 05:00 the day after %.4f, 00:00 %.4f", a, b)
+	}
+}
+
+// TestDimensionCycle_CoversTheVocabulary: every cyclic dimension has a cycle
+// and every cycle a dimension, and every cycle is a positive span.
+func TestDimensionCycle_CoversTheVocabulary(t *testing.T) {
+	day := mustDate("2026-01-01")
+	for dim := range DimensionSigma {
+		c, ok := DimensionCycle[dim]
+		if !ok {
+			t.Errorf("%s has no cycle", dim)
+			continue
+		}
+		if !day.AddDate(c.Years, c.Months, c.Days).After(day) {
+			t.Errorf("%s: cycle %+v is no span", dim, c)
+		}
+	}
+	for dim := range DimensionCycle {
+		if _, ok := DimensionSigma[dim]; !ok {
+			t.Errorf("cycle of %s, which is no cyclic dimension", dim)
+		}
+	}
+}

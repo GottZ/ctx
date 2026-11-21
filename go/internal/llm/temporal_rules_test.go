@@ -247,7 +247,7 @@ func TestResolvePhrase(t *testing.T) {
 		{"Dezember 2030", true, "2030-12-01"},   // future year, explicit
 
 		// Year + Month: reversed order
-		{"2024 August", true, "2024-08-01"},     // year first
+		{"2024 Oktober", true, "2024-10-01"},    // year first ("2024 August" is none: monthWords)
 		{"2025 März", false, "2025-03-01"},      // year first, German
 
 		// Position + Month + Year (3 tokens)

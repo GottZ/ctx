@@ -398,8 +398,9 @@ const (
 // from the first resolved date of a query: target is its day (with the hour of
 // a time-of-day matcher), boostWeight the linear share of the boost budget.
 //
-// A date with End is the window from target to End and a DirUntil date the
-// window up to target (issue #463): every date inside earns the full gravity,
+// A date with End is the window from target to End, a DirUntil date the
+// window up to target and a DirFrom date the window from target on (issue
+// #463): every date inside earns the full gravity,
 // so "seit März 2024" rewards 2025 and 2026 like March 2024, and "bis März
 // 2015" rewards what lies before its end instead of today. A window whose
 // start or End does not parse, or whose End lies before its start (only an
@@ -427,22 +428,164 @@ func linearGravityParams(d llm.TemporalDate, target time.Time, boostWeight float
 		if startErr == nil {
 			p.WindowEnd = target
 		}
+	case d.Dir == llm.DirFrom:
+		p.Cutoff = windowCutoffDays
+		p.Direction = ""
+		if startErr == nil {
+			p.WindowStart = target
+		}
 	}
 	return p
 }
 
-// activatedDimWeights mirrors the gravity-boost weight resolution (Step 6a):
-// nil result or no dates → no temporal treatment (nil); dates without
-// DimensionWeights → the backward-compat pure-linear default; otherwise the
-// weights as parsed. Kept as a function so the eval contract is unit-testable.
+// activatedDimWeights is the gravity-boost weight resolution (Step 6a,
+// effectiveDimWeights): nil result or no dates → no temporal treatment
+// (nil); dates without DimensionWeights → the backward-compat pure-linear
+// default; otherwise the weights as parsed, less the cyclic dimensions a
+// window outlasts. Kept as a function so the eval contract is unit-testable.
 func activatedDimWeights(tr *llm.TemporalResult) map[string]float64 {
+	return effectiveDimWeights(tr)
+}
+
+// effectiveDimWeights returns the dimension weights the gravity of tr runs
+// with (Step 6a) and /api/query reports (activated_dim_weights): nil for no
+// temporal treatment, {"linear": 1} for dates without DimensionWeights, and
+// otherwise the weights of tr without the cyclic dimensions whose cycle the
+// window of its first date is longer than (rrf.DimensionCycle) — a window
+// open towards the past or the future is longer than every cycle. Such a
+// dimension would reward, in every year of the window, the phase of one of
+// its edges: "seit März 2025" (month 0.2) the Marches, "von März 2024 bis Mai
+// 2025" (weekday 0.4) the Fridays, while the window holds every phase alike
+// (issue #463). Its weight goes to the linear share, so the boost budget
+// stays what the rules gave the question; a window within the cycle, and a
+// single day, keep their weights as they are (the same map).
+func effectiveDimWeights(tr *llm.TemporalResult) map[string]float64 {
 	if tr == nil || len(tr.Dates) == 0 {
 		return nil
 	}
 	if tr.DimensionWeights == nil {
 		return map[string]float64{"linear": 1.0}
 	}
-	return tr.DimensionWeights
+	d := tr.Dates[0]
+	start, err := time.Parse("2006-01-02", d.Date)
+	if err != nil {
+		return tr.DimensionWeights
+	}
+	var outlasts func(years, months, days int) bool
+	switch {
+	case d.End != nil:
+		end, err := time.Parse("2006-01-02", *d.End)
+		if err != nil || end.Before(start) {
+			return tr.DimensionWeights // no window: linearGravityParams keeps the day
+		}
+		// Longer than the cycle: the window holds the day a whole cycle after
+		// its start.
+		outlasts = func(years, months, days int) bool { return !end.Before(start.AddDate(years, months, days)) }
+	case d.Dir == llm.DirUntil || d.Dir == llm.DirFrom:
+		outlasts = func(int, int, int) bool { return true }
+	default:
+		return tr.DimensionWeights
+	}
+	var freed float64
+	for dim, w := range tr.DimensionWeights {
+		if c, ok := rrf.DimensionCycle[dim]; ok && w > 0 && outlasts(c.Years, c.Months, c.Days) {
+			freed += w
+		}
+	}
+	if freed == 0 {
+		return tr.DimensionWeights
+	}
+	out := make(map[string]float64, len(tr.DimensionWeights))
+	for dim, w := range tr.DimensionWeights {
+		if c, ok := rrf.DimensionCycle[dim]; ok && w > 0 && outlasts(c.Years, c.Months, c.Days) {
+			continue
+		}
+		out[dim] = w
+	}
+	out["linear"] += freed
+	return out
+}
+
+// applyTemporalGravity is the query's Step 6a, the post-RRF temporal gravity
+// boost (GottZ Cyclic Phase Model), on the first resolved date of tr; a nil tr
+// or one without dates returns results as they are. Two paths based on
+// TemporalResult.DimensionWeights:
+//   - Linear: Distance-only gravity on content_times (existing path).
+//   - Cyclic: Multi-dimensional Gaussian decay on EAV context_temporal rows.
+//
+// Mixed weights (e.g. "am Dienstag" = {linear:0.6, weekday:0.4}) run both,
+// each scaled by its weight so total boost stays ≤0.30. A function of its own
+// so the ranking test runs the stage the handler runs (issue #463).
+func applyTemporalGravity(ctx context.Context, pool *pgxpool.Pool, results []rrf.SearchResult, tr *llm.TemporalResult, requestID string) []rrf.SearchResult {
+	if tr == nil || len(tr.Dates) == 0 {
+		return results
+	}
+	gravStart := time.Now()
+	d := tr.Dates[0]
+	target, _ := time.Parse("2006-01-02", d.Date)
+	// Time-of-day matchers (morgens/abends/etc.) set Hour for daily dimension phase.
+	if d.Hour != nil {
+		target = time.Date(target.Year(), target.Month(), target.Day(), *d.Hour, 0, 0, 0, target.Location())
+	}
+
+	// Collect dimension weights (linear vs cyclic).
+	dimWeights := effectiveDimWeights(tr)
+	linearWeight, cyclicDims, cyclicWeightSum := collectDimWeights(dimWeights)
+
+	ids := make([]string, len(results))
+	for i, r := range results {
+		ids[i] = r.ID
+	}
+
+	const maxBoost = 0.30
+
+	// Cyclic path: fetch EAV dimensions and apply multi-dim Gaussian decay.
+	if len(cyclicDims) > 0 {
+		blockDims, err := store.FetchBlockDimensions(ctx, pool, ids, cyclicDims)
+		if err != nil {
+			slog.Warn("cyclic gravity: fetch dimensions failed, skipping",
+				"error", err,
+				"request_id", requestID,
+			)
+		} else {
+			// Convert store.BlockDimension → rrf.TemporalDim
+			rrfDims := make(map[string][]rrf.TemporalDim, len(blockDims))
+			for blockID, dims := range blockDims {
+				td := make([]rrf.TemporalDim, len(dims))
+				for i, bd := range dims {
+					td[i] = rrf.TemporalDim{Dimension: bd.Dimension, Value: bd.Value}
+				}
+				rrfDims[blockID] = td
+			}
+			results = rrf.ApplyCyclicGravityBoost(results, rrfDims, dimWeights, target, maxBoost*cyclicWeightSum)
+			slog.Info("cyclic gravity scoring",
+				"cyclic_dims", cyclicDims,
+				"cyclic_weight_sum", cyclicWeightSum,
+				"blocks_with_dims", len(blockDims),
+				"gravity_latency_ms", float64(time.Since(gravStart).Milliseconds()),
+				"request_id", requestID,
+			)
+		}
+	}
+
+	// Linear path: distance-only gravity on content_times.
+	if linearWeight > 0 {
+		blockDates, err := store.FetchContentTimes(ctx, pool, ids)
+		if err != nil {
+			slog.Warn("linear gravity: fetch dates failed, skipping",
+				"error", err,
+				"request_id", requestID,
+			)
+		} else {
+			results = rrf.ApplyGravityBoost(results, blockDates, linearGravityParams(d, target, maxBoost*linearWeight))
+			slog.Info("linear gravity scoring",
+				"linear_weight", linearWeight,
+				"blocks_with_dates", len(blockDates),
+				"request_id", requestID,
+			)
+		}
+	}
+	return results
 }
 
 // sourceResponse is a single source in the query response.
@@ -1092,79 +1235,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 6a: Post-RRF temporal gravity boost (GottZ Cyclic Phase Model).
-	//
-	// Two paths based on TemporalResult.DimensionWeights:
-	//  - Linear: Distance-only gravity on content_times (existing path).
-	//  - Cyclic: Multi-dimensional Gaussian decay on EAV context_temporal rows.
-	// Mixed weights (e.g. "am Dienstag" = {linear:0.6, weekday:0.4}) run both,
-	// each scaled by its weight so total boost stays ≤0.30.
-	if temporalResult != nil && len(temporalResult.Dates) > 0 {
-		gravStart := time.Now()
-		d := temporalResult.Dates[0]
-		target, _ := time.Parse("2006-01-02", d.Date)
-		// Time-of-day matchers (morgens/abends/etc.) set Hour for daily dimension phase.
-		if d.Hour != nil {
-			target = time.Date(target.Year(), target.Month(), target.Day(), *d.Hour, 0, 0, 0, target.Location())
-		}
-
-		// Collect dimension weights (linear vs cyclic).
-		dimWeights := temporalResult.DimensionWeights
-		linearWeight, cyclicDims, cyclicWeightSum := collectDimWeights(dimWeights)
-
-		ids := make([]string, len(results))
-		for i, r := range results {
-			ids[i] = r.ID
-		}
-
-		const maxBoost = 0.30
-
-		// Cyclic path: fetch EAV dimensions and apply multi-dim Gaussian decay.
-		if len(cyclicDims) > 0 {
-			blockDims, err := store.FetchBlockDimensions(ctx, h.pool, ids, cyclicDims)
-			if err != nil {
-				slog.Warn("cyclic gravity: fetch dimensions failed, skipping",
-					"error", err,
-					"request_id", requestID,
-				)
-			} else {
-				// Convert store.BlockDimension → rrf.TemporalDim
-				rrfDims := make(map[string][]rrf.TemporalDim, len(blockDims))
-				for blockID, dims := range blockDims {
-					td := make([]rrf.TemporalDim, len(dims))
-					for i, bd := range dims {
-						td[i] = rrf.TemporalDim{Dimension: bd.Dimension, Value: bd.Value}
-					}
-					rrfDims[blockID] = td
-				}
-				results = rrf.ApplyCyclicGravityBoost(results, rrfDims, dimWeights, target, maxBoost*cyclicWeightSum)
-				slog.Info("cyclic gravity scoring",
-					"cyclic_dims", cyclicDims,
-					"cyclic_weight_sum", cyclicWeightSum,
-					"blocks_with_dims", len(blockDims),
-					"gravity_latency_ms", float64(time.Since(gravStart).Milliseconds()),
-					"request_id", requestID,
-				)
-			}
-		}
-
-		// Linear path: distance-only gravity on content_times.
-		if linearWeight > 0 {
-			blockDates, err := store.FetchContentTimes(ctx, h.pool, ids)
-			if err != nil {
-				slog.Warn("linear gravity: fetch dates failed, skipping",
-					"error", err,
-					"request_id", requestID,
-				)
-			} else {
-				results = rrf.ApplyGravityBoost(results, blockDates, linearGravityParams(d, target, maxBoost*linearWeight))
-				slog.Info("linear gravity scoring",
-					"linear_weight", linearWeight,
-					"blocks_with_dates", len(blockDates),
-					"request_id", requestID,
-				)
-			}
-		}
-	}
+	results = applyTemporalGravity(ctx, h.pool, results, temporalResult, requestID)
 
 	// Step 6-cluster: categorical prior (Cluster-Topic-Map C3, design/03 §4.5).
 	// Runs BEFORE the Dream-graph stage, and that order is a correctness

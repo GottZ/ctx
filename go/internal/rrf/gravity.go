@@ -68,19 +68,26 @@ type GravityParams struct {
 }
 
 // distanceDays returns how many days d lies after the target (negative:
-// before it) — after TargetDate, or after the window's end and before its
-// start, 0 inside it.
+// before it) — after TargetDate, or, with a window, how many days d's day
+// lies after the window's end day or before its start day, 0 inside it.
+//
+// A window's edges are days, so a date outside it counts by its day: every
+// time of the day before the start is a day away, as every time of the day
+// after the end day is (issue #463). Measured by the hour from the start's
+// 00:00 and the end day's 00:00, a time an hour before the start was half a
+// day away (the closest distance counted) and a time an hour after the end
+// day more than a day; a date at 00:00 lies as far away either way.
 func (p GravityParams) distanceDays(d time.Time) float64 {
 	if p.WindowStart.IsZero() && p.WindowEnd.IsZero() {
 		return d.Sub(p.TargetDate).Hours() / 24.0
 	}
 	if !p.WindowStart.IsZero() && d.Before(p.WindowStart) {
-		return d.Sub(p.WindowStart).Hours() / 24.0
+		return math.Floor(d.Sub(p.WindowStart).Hours() / 24.0)
 	}
 	// The end day is inside the window until its last instant; a date of the
 	// next day is a day or more past the end.
 	if !p.WindowEnd.IsZero() && !d.Before(p.WindowEnd.AddDate(0, 0, 1)) {
-		return d.Sub(p.WindowEnd).Hours() / 24.0
+		return math.Floor(d.Sub(p.WindowEnd).Hours() / 24.0)
 	}
 	return 0
 }
@@ -257,6 +264,23 @@ var DimensionSigma = map[string]float64{
 	"monthday": 0.10, // day-of-month ~30-cycle (Monatsanfang/-ende patterns)
 	"seasonal": 0.08, // day-of-year 365-cycle (annual seasonal patterns)
 	"daily":    0.08, // hour-of-day 24-cycle (morgens/abends patterns)
+}
+
+// DimensionCycle holds the length of one cycle of each cyclic dimension of
+// DimensionSigma, as the calendar span time.AddDate adds: a week for the
+// weekday, a month for the day of the month, a day for the hour, a year for
+// the month, the quarter, the ISO week and the day of the year. A window
+// longer than the cycle of a dimension holds every phase of it, so the phase
+// of the query's date — one edge of the window — says nothing about where in
+// the window a block lies (issue #463, the query's effectiveDimWeights).
+var DimensionCycle = map[string]struct{ Years, Months, Days int }{
+	"weekday":  {0, 0, 7},
+	"month":    {1, 0, 0},
+	"quarter":  {1, 0, 0},
+	"week":     {1, 0, 0},
+	"monthday": {0, 1, 0},
+	"seasonal": {1, 0, 0},
+	"daily":    {0, 0, 1},
 }
 
 // CyclicDistance returns the minimum wrap-around distance between two phases

@@ -137,3 +137,65 @@ func TestCollectDimWeights(t *testing.T) {
 		})
 	}
 }
+
+// TestEffectiveDimWeights (issue #463): a window longer than the cycle of a
+// cyclic dimension, and every open window, gives that dimension no weight; its
+// weight goes to the linear share, so the weights sum as before. A single day
+// and a window within the cycle keep the map the rules gave.
+func TestEffectiveDimWeights(t *testing.T) {
+	end := func(s string) *string { return &s }
+	seit := map[string]float64{"linear": 0.8, "month": 0.2}
+	vonBis := map[string]float64{"linear": 0.6, "weekday": 0.4}
+	cases := []struct {
+		name string
+		d    llm.TemporalDate
+		in   map[string]float64
+		want map[string]float64
+	}{
+		{"single day", llm.TemporalDate{Date: "2024-03-15", Dir: "past"}, vonBis, vonBis},
+		{"four days", llm.TemporalDate{Date: "2026-11-27", End: end("2026-11-30"), Dir: "range"}, vonBis, vonBis},
+		{"seven days, one cycle", llm.TemporalDate{Date: "2026-11-23", End: end("2026-11-29"), Dir: "range"}, vonBis, vonBis},
+		{"eight days", llm.TemporalDate{Date: "2026-11-23", End: end("2026-11-30"), Dir: "range"}, vonBis, map[string]float64{"linear": 1}},
+		{"15 months, weekday", llm.TemporalDate{Date: "2024-03-01", End: end("2025-05-31"), Dir: "range"}, vonBis, map[string]float64{"linear": 1}},
+		{"seit, 9 months", llm.TemporalDate{Date: "2026-03-01", End: end("2026-11-21"), Dir: "range"}, seit, seit},
+		{"one year exactly", llm.TemporalDate{Date: "2024-03-01", End: end("2025-02-28"), Dir: "range"}, seit, seit},
+		{"a year and a day", llm.TemporalDate{Date: "2024-03-01", End: end("2025-03-01"), Dir: "range"}, seit, map[string]float64{"linear": 1}},
+		{"until", llm.TemporalDate{Date: "2026-03-31", Dir: llm.DirUntil}, seit, map[string]float64{"linear": 1}},
+		{"from", llm.TemporalDate{Date: "2026-03-01", Dir: llm.DirFrom}, seit, map[string]float64{"linear": 1}},
+		{"letzten Monat", llm.TemporalDate{Date: "2026-10-01", End: end("2026-10-31"), Dir: "range"},
+			map[string]float64{"linear": 0.5, "month": 0.5}, map[string]float64{"linear": 0.5, "month": 0.5}},
+		{"two months, monthday and month", llm.TemporalDate{Date: "2026-01-01", End: end("2026-02-28"), Dir: "range"},
+			map[string]float64{"linear": 0.4, "monthday": 0.3, "month": 0.3}, map[string]float64{"linear": 0.7, "month": 0.3}},
+		// The day of the month cycles in a calendar month, not in 31 days:
+		// February 1 to March 1 is longer than a month (no producer puts the
+		// monthday on a window today; the cycle is pinned all the same).
+		{"one month and a day, monthday", llm.TemporalDate{Date: "2026-02-01", End: end("2026-03-01"), Dir: "range"},
+			map[string]float64{"linear": 0.5, "monthday": 0.5}, map[string]float64{"linear": 1}},
+		{"February, monthday", llm.TemporalDate{Date: "2026-02-01", End: end("2026-02-28"), Dir: "range"},
+			map[string]float64{"linear": 0.5, "monthday": 0.5}, map[string]float64{"linear": 0.5, "monthday": 0.5}},
+		{"no linear share", llm.TemporalDate{Date: "2026-01-01", Dir: llm.DirUntil},
+			map[string]float64{"weekday": 1}, map[string]float64{"linear": 1}},
+		{"unknown key stays", llm.TemporalDate{Date: "2026-01-01", Dir: llm.DirUntil},
+			map[string]float64{"linear": 0.6, "weekday": 0.4, "year": 1}, map[string]float64{"linear": 1, "year": 1}},
+		{"inverted window (LLM)", llm.TemporalDate{Date: "2026-11-21", End: end("2015-03-01"), Dir: "range"}, seit, seit},
+		{"unparsable end (LLM)", llm.TemporalDate{Date: "2026-11-21", End: end("soon"), Dir: "range"}, seit, seit},
+		{"unparsable start (LLM)", llm.TemporalDate{Date: "2026-03", End: end("2027-03-31"), Dir: "range"}, seit, seit},
+	}
+	for _, c := range cases {
+		got := effectiveDimWeights(&llm.TemporalResult{Dates: []llm.TemporalDate{c.d}, DimensionWeights: c.in})
+		if len(got) != len(c.want) {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+			continue
+		}
+		for k, v := range c.want {
+			if w, ok := got[k]; !ok || w < v-1e-12 || w > v+1e-12 {
+				t.Errorf("%s: %v, want %v", c.name, got, c.want)
+				break
+			}
+		}
+	}
+	// The map the rules gave is never written to.
+	if seit["linear"] != 0.8 || seit["month"] != 0.2 || len(seit) != 2 {
+		t.Errorf("input changed: %v", seit)
+	}
+}

@@ -29,15 +29,19 @@ import (
 //
 //	ISO       \b(20[2-9]\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))(?:[T\s\x{A0}\x{202F}]+([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?Z?)?\b
 //	dot       \b(0[1-9]|[12]\d|3[01])\.(0[1-9]|1[0-2])\.(20[2-9]\d)(?:[\s\x{A0}\x{202F}]+([01]\d|2[0-3]):([0-5]\d))?\b
-//	German    (?i)\b(januar|februar|märz|maerz|april|mai|juni|juli|august|september|oktober|november|dezember)[\s\x{A0}\x{202F}]+(20[2-9]\d)\b
-//	English   (?i)\b(january|february|march|april|may|june|july|august|september|october|november|december)[\s\x{A0}\x{202F}]+(20[2-9]\d)\b
+//	German    (?i)(\b(?:januar|februar|märz|maerz|april|mai|juni|juli|august|(?-i:[sS])eptember|oktober|november|dezember)|\B(?-i:\x{17F})eptember)[\s\x{A0}\x{202F}]+(20[2-9]\d)\b
+//	English   (?i)(\b(?:january|february|march|april|may|june|july|august|(?-i:[sS])eptember|october|november|december)|\B(?-i:\x{17F})eptember)[\s\x{A0}\x{202F}]+(20[2-9]\d)\b
+//
+// A month name starts where no ASCII word character stands before it: \b
+// before a first letter in ASCII, and \B before the long s, the one rune
+// beyond ASCII (?i) lets spell a first letter (issue #463; matchBefore).
 //
 // Every match of every form contains a year token 20[2-9]\d at a place the
 // form fixes: at the start of an ISO date, behind the second dot of a dot
 // date, behind the whitespace after a month name. scanDates finds the year
 // tokens with strings.Index and tries each form only at that one place,
 // instead of running four automata, two of them case-insensitive, over every
-// byte. The regexp semantics carried over: \b and \d and \s are ASCII (\s is
+// byte. The regexp semantics carried over: \b, \B, \d and \s are ASCII (\s is
 // [\t\n\f\r ], no \v), and the date spaces between the parts of a date are \s
 // and the two no-break spaces U+00A0 and U+202F (dateSpaceAt); (?i) folds by
 // Unicode simple case folding, so the Kelvin sign matches k and the long s
@@ -274,7 +278,14 @@ func (f *monthForm) endingWith(r rune) []monthPattern {
 type monthPattern [][]rune
 
 // matchBefore matches p backwards from w, decoding runes as the regexp does,
-// and returns the start of the match, or -1. The start has to be a \b.
+// and returns the start of the match, or -1. The start has to be a word
+// boundary before a word character: no ASCII word character may stand before
+// it. The first letter of a month name is a word character whatever rune
+// spells it — (?i) lets the long s spell the s of "september", and \b, which
+// knows ASCII only, took the long s for a non-word rune, so "ſeptember 2026"
+// started no match at the start of a text or behind a space, a quotation
+// mark or a no-break space, while "xſeptember 2026" did (issue #463). For a
+// first letter in ASCII the check is the \b it was.
 func (p monthPattern) matchBefore(c string, w int) int {
 	i := w
 	for k := len(p) - 1; k >= 0; k-- {
@@ -284,7 +295,7 @@ func (p monthPattern) matchBefore(c string, w int) int {
 		}
 		i -= size
 	}
-	if !isWordBoundary(c, i) {
+	if i > 0 && isWordByte(c[i-1]) {
 		return -1
 	}
 	return i
