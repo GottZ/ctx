@@ -53,8 +53,14 @@ type TemporalDate struct {
 }
 
 // DirUntil is the Dir of a reference that is the time up to its Date, open
-// towards the past: "bis März 2015", "bis gestern". Only the rules yield it.
+// towards the past: "bis März 2015", "bis gestern", "vor März 2024" (up to
+// the day before).
 const DirUntil = "until"
+
+// DirFrom is the Dir of a reference that is the time from its Date on, open
+// towards the future: "ab März 2024", "nach dem 15.03.2024" (from the day
+// after). Only the rules yield it (issue #463).
+const DirFrom = "from"
 
 // TemporalResult is the output of LLM temporal normalization.
 //

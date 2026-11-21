@@ -398,8 +398,9 @@ const (
 // from the first resolved date of a query: target is its day (with the hour of
 // a time-of-day matcher), boostWeight the linear share of the boost budget.
 //
-// A date with End is the window from target to End and a DirUntil date the
-// window up to target (issue #463): every date inside earns the full gravity,
+// A date with End is the window from target to End, a DirUntil date the
+// window up to target and a DirFrom date the window from target on (issue
+// #463): every date inside earns the full gravity,
 // so "seit März 2024" rewards 2025 and 2026 like March 2024, and "bis März
 // 2015" rewards what lies before its end instead of today. A window whose
 // start or End does not parse, or whose End lies before its start (only an
@@ -426,6 +427,12 @@ func linearGravityParams(d llm.TemporalDate, target time.Time, boostWeight float
 		p.Direction = ""
 		if startErr == nil {
 			p.WindowEnd = target
+		}
+	case d.Dir == llm.DirFrom:
+		p.Cutoff = windowCutoffDays
+		p.Direction = ""
+		if startErr == nil {
+			p.WindowStart = target
 		}
 	}
 	return p

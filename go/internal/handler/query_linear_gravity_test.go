@@ -34,6 +34,8 @@ func TestLinearGravityParams(t *testing.T) {
 		{"until, unparsable", llm.TemporalDate{Date: "x", Dir: llm.DirUntil}, 60, "", "", ""},
 		{"unparsable start with an hour (LLM)", llm.TemporalDate{Date: "März", End: end("2026-03-31"), Dir: "range", Hour: &nine}, 60, "range", "", ""},
 		{"until, unparsable, with an hour", llm.TemporalDate{Date: "x", Dir: llm.DirUntil, Hour: &nine}, 60, "", "", ""},
+		{"from", llm.TemporalDate{Date: "2024-03-01", Dir: llm.DirFrom}, 60, "", "2024-03-01", ""},
+		{"from, unparsable", llm.TemporalDate{Date: "x", Dir: llm.DirFrom}, 60, "", "", ""},
 	}
 	for _, c := range cases {
 		target, _ := time.Parse("2006-01-02", c.d.Date) // as the handler derives it
