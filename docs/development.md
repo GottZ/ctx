@@ -1099,9 +1099,62 @@ The README architecture infographic is a hand-authored animated SVG in two theme
 
 Enable with `git config core.hooksPath .hooks`:
 
-- **pre-commit** — golangci-lint on staged Go files.
+- **pre-commit** — refuses new files that look like secrets or private data and staged
+  copies of `.env` secret values, checks the schema-contract manifest against the
+  staged migrations (below), and runs `go vet -tags=integration` plus golangci-lint
+  when Go files are staged.
 - **commit-msg** — enforces a documentation review for `feat:` commits and schema migrations (`go/migrations/`): the commit must stage `README.md` **or** a `docs/*.md` file. Also enforces the `[baseline]` marker (above).
 - **pre-push** — rejects a direct push of `root` to the canonical repository
   (`root` moves only by merging a pull request, see [GOVERNANCE.md](../GOVERNANCE.md)),
   requires annotated `v*` tags with release notes, and runs the deadcode gates when a
   tag is pushed.
+
+### Migrations and the schema-contract manifest
+
+`go/internal/schemacontract/manifest.json` is generated, never hand-edited, and names the
+migration chain it was generated from: `generated_against.migration_chain_sha256` is the
+sha256 of what `LC_ALL=C sha256sum *.sql` prints in `go/migrations` — one line per
+top-level migration file, whose hash is the checksum the migration runner records in
+`_migrations`. Any byte change of a migration moves it, so an edit that leaves the schema
+as it was (a condition inside a `DO` block, the wording of a `RAISE WARNING`) still yields
+a different manifest — that field and nothing else — and there is always something to
+stage.
+
+Regenerate after every change to `go/migrations/*.sql`, comments included (a comment
+inside a function body is part of the definition the contract hashes):
+
+```bash
+cd go && go test -tags=genmanifest ./internal/schemacontract -run TestGenerateManifest
+git add internal/schemacontract/manifest.json
+```
+
+The generator needs Docker and runs the chain on the local prod image
+`pgvector-timescaledb:pg18` (built from `db-image/`; without it, it falls back to
+`timescale/timescaledb-ha:pg18` and records that in `generated_against.image`). It reads
+the migrations from the working tree, so unstaged migration edits end up in the
+fingerprint — stage or stash them first. The test itself takes about 5 s on a warm build
+cache.
+
+**pre-commit Gate 3.** Whenever a commit touches a top-level `go/migrations/*.sql` (added,
+edited, renamed or deleted) or the manifest, the hook recomputes the fingerprint over the
+staged files and refuses the commit unless the staged manifest names exactly that chain.
+It only hashes (about 20 ms for the chain of 76 files), needs no Docker, and a commit that
+touches neither path pays nothing beyond one `git diff --cached`. There is no
+comment-only exception any more and no reason for `--no-verify`: a regeneration is the
+way through for every migration change. `bash .hooks/pre-commit.test.sh` runs the hook's
+test matrix against throwaway repositories; CI runs it in the `lint` job.
+
+**CI.** `TestManifestNamesTheMigrationChain` (unit, no database) fails when the manifest
+does not name the chain beside it — the stale manifest a schema-neutral edit leaves
+behind, which the integration test `TestCheck_FreshDB_NoDrift` cannot see because the
+schema matches; that test in turn fails on any schema difference between the manifest
+and a freshly migrated database.
+
+**Extension minimums are policy.** The manifest's `extensions` section is
+`extensionMinimums` in `go/internal/schemacontract/chain_test.go`, not the versions of the
+database the generator happens to run on — a newer local image moves no pin, and an
+extension an image brings along (`timescaledb_toolkit` on the `-ha` image) is not pinned.
+A pin moves by editing that map in the change that moves `db-image/Dockerfile` to the
+version it names. A migration that creates an extension needs an entry there too; the
+generator refuses to run without one. `TestManifestExtensionsAreTheDeclaredMinimums`
+keeps the manifest and the map alike.

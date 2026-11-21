@@ -29,7 +29,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 HOOK=${1:-$HERE/pre-commit}
 HOOK=$(cd "$(dirname "$HOOK")" && pwd)/$(basename "$HOOK")
 SRC=$(git -C "$HERE" rev-parse --show-toplevel) || exit 2
-OBJECTS=$(cd "$(git -C "$SRC" rev-parse --git-common-dir)" && pwd)/objects
+OBJECTS=$(git -C "$SRC" rev-parse --path-format=absolute --git-common-dir)/objects
 BASE=$(git -C "$SRC" rev-parse HEAD) || exit 2
 MANIFEST=go/internal/schemacontract/manifest.json
 CHAIN=':(glob)go/migrations/*.sql'
