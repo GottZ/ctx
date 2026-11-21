@@ -14,8 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
-	"go/parser"
-	"go/token"
 	"go/types"
 	"io"
 	"log/slog"
@@ -148,35 +146,13 @@ var goroutineErrorLineCensus = map[string]int{
 }
 
 // TestNoErrorLineHelperInAGoroutine — issue #453 point 1: the census of
-// error-line helper calls inside goroutines. The package is type-checked
-// against empty stand-ins for its imports, so a call resolves exactly when it
-// names a function or a method of this package (on a receiver of this
-// package's types); a call through an interface or a function value is not
-// followed.
+// error-line helper calls inside goroutines. On the type-checked package
+// (typedHandlerPackage) a call resolves exactly when it names a function or a
+// method of this package (on a receiver of this package's types); a call
+// through an interface or a function value is not followed.
 func TestNoErrorLineHelperInAGoroutine(t *testing.T) {
-	names, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	fset := token.NewFileSet()
-	var files []*ast.File
-	for _, f := range names {
-		if strings.HasSuffix(f, "_test.go") {
-			continue
-		}
-		file, err := parser.ParseFile(fset, f, nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", f, err)
-		}
-		files = append(files, file)
-	}
-	info := &types.Info{
-		Defs:       map[*ast.Ident]types.Object{},
-		Uses:       map[*ast.Ident]types.Object{},
-		Selections: map[*ast.SelectorExpr]*types.Selection{},
-	}
-	conf := types.Config{Importer: emptyImporter{}, Error: func(error) {}}
-	pkg, _ := conf.Check("handler", fset, files, info)
+	tp := typedHandlerPackage(t)
+	fset, files, info, pkg := tp.fset, tp.files, tp.info, tp.pkg
 	bodies := map[*types.Func]*ast.BlockStmt{}
 	helpers := map[*types.Func]bool{}
 	for _, file := range files {
@@ -199,19 +175,10 @@ func TestNoErrorLineHelperInAGoroutine(t *testing.T) {
 		t.Fatalf("found %d of the %d error-line helpers — did their names change?", len(helpers), len(errorLineHelpers))
 	}
 	callee := func(call *ast.CallExpr) *types.Func {
-		var fn *types.Func
-		switch f := ast.Unparen(call.Fun).(type) {
-		case *ast.Ident:
-			fn, _ = info.Uses[f].(*types.Func)
-		case *ast.SelectorExpr:
-			if sel := info.Selections[f]; sel != nil {
-				fn, _ = sel.Obj().(*types.Func)
-			}
+		if fn := tp.callee(call); fn != nil && fn.Pkg() == pkg {
+			return fn
 		}
-		if fn == nil || fn.Pkg() != pkg {
-			return nil
-		}
-		return fn.Origin()
+		return nil
 	}
 	// reaches answers whether n calls a helper, directly or through the
 	// package's functions; a function on the current path counts as not
@@ -287,19 +254,4 @@ func TestNoErrorLineHelperInAGoroutine(t *testing.T) {
 		}
 	}
 	t.Logf("checked %d goroutine starts over %d function bodies", goroutines, len(bodies))
-}
-
-// emptyImporter stands in for every import with an empty, complete package:
-// the census needs this package's own functions resolved, nothing beyond it.
-type emptyImporter struct{}
-
-func (emptyImporter) Import(path string) (*types.Package, error) {
-	parts := strings.Split(path, "/")
-	name := parts[len(parts)-1]
-	if len(parts) > 1 && len(name) > 1 && name[0] == 'v' && strings.Trim(name[1:], "0123456789") == "" {
-		name = parts[len(parts)-2]
-	}
-	p := types.NewPackage(path, strings.ReplaceAll(name, "-", "_"))
-	p.MarkComplete()
-	return p, nil
 }
