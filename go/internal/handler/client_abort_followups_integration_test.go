@@ -345,3 +345,87 @@ func TestClientAbortFollowupsWriteOutcome(t *testing.T) {
 		}
 	})
 }
+
+// TestClientAbortFollowupsPoolWait — every connection of a production-shaped
+// pool (store.NewPool, with its acquire tracer) is taken; the request's
+// statement waits for one; its client leaves. The handler's line and the
+// request log say WARN with waited_for=db_connection. The same request on a
+// pool with a free connection, whose client leaves during the statement,
+// stays INFO.
+func TestClientAbortFollowupsPoolWait(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	_, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+	pool, err := store.NewPool(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	const msg = "probe: statement failed"
+	started := make(chan struct{}, 1)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		started <- struct{}{}
+		_, err := pool.Exec(r.Context(), `SELECT pg_sleep(30)`)
+		internalError(w, r.Context(), msg, fmt.Errorf("store: probe: %w", err))
+	})
+
+	t.Run("waiting for a connection", func(t *testing.T) {
+		var held []*pgxpool.Conn
+		for int32(len(held)) < pool.Config().MaxConns {
+			c, err := pool.Acquire(ctx)
+			if err != nil {
+				t.Fatalf("hold connection %d: %v", len(held), err)
+			}
+			held = append(held, c)
+		}
+		defer func() {
+			for _, c := range held {
+				c.Release()
+			}
+		}()
+		logs := installRejectLogCapture(t)
+		srv, done := abortServer(t, h, nil)
+		cancelWhen(t, srv.URL+"/api/probe", func() {
+			<-started
+			time.Sleep(50 * time.Millisecond)
+		})
+		waitDone(t, done)
+		if errs := errorLines(logs); len(errs) != 0 {
+			t.Errorf("a client that gave up produced ERROR lines: %+v", errs)
+		}
+		recs := logs.withMsg(msg)
+		if len(recs) != 1 || recs[0].level != slog.LevelWarn || recs[0].attrs["waited_for"] != "db_connection" {
+			t.Errorf("handler line = %+v, want one WARN line with waited_for=db_connection", recs)
+		}
+		if req := requestLogOf(t, logs); req.level != slog.LevelWarn || req.attrs["waited_for"] != "db_connection" {
+			t.Errorf("request log = %+v, want WARN with waited_for=db_connection", req)
+		}
+	})
+
+	t.Run("a free connection: the abort during the statement stays INFO", func(t *testing.T) {
+		logs := installRejectLogCapture(t)
+		srv, done := abortServer(t, h, nil)
+		cancelWhen(t, srv.URL+"/api/probe", func() {
+			<-started
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				var n int
+				if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM pg_stat_activity WHERE query = 'SELECT pg_sleep(30)' AND state = 'active'`).Scan(&n); err != nil {
+					t.Fatal(err)
+				}
+				if n == 1 || time.Now().After(deadline) {
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
+		waitDone(t, done)
+		recs := logs.withMsg(msg)
+		if len(recs) != 1 || recs[0].level != slog.LevelInfo || recs[0].attrs["waited_for"] != nil {
+			t.Errorf("handler line = %+v, want one INFO line without waited_for", recs)
+		}
+	})
+}

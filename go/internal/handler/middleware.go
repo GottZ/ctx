@@ -20,6 +20,7 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/modelkey"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -238,6 +239,38 @@ type responseWriter struct {
 	// ServeHTTP), so a goroutine that outlives the handler asks the request's
 	// verdict, not reqCtx. verdictOpen while the handler runs.
 	verdict atomic.Int32
+	// start is when Logger received the request: the duration a client-gone
+	// line states (issue #453).
+	start time.Time
+	// waited names what the request waited for when its client gave up
+	// (waitNone, waitPool, waitAdmission): set by the pool's acquire tracer
+	// (NoteAbandonedAcquire) or by an error line whose failure is an
+	// abandoned admission wait. The server had no slot ready — such an
+	// abort is logged at WARN (issue #453).
+	waited atomic.Int32
+}
+
+// The values of responseWriter.waited.
+const (
+	waitNone int32 = iota
+	waitPool
+	waitAdmission
+)
+
+// NoteAbandonedAcquire is pgxdb.AcquireWaitNoter: a pool acquire of this
+// request ended on the request's cancellation.
+func (rw *responseWriter) NoteAbandonedAcquire() { rw.waited.CompareAndSwap(waitNone, waitPool) }
+
+// waitedFor names what the request waited for when its client gave up, ""
+// for nothing.
+func (rw *responseWriter) waitedFor() string {
+	switch rw.waited.Load() {
+	case waitPool:
+		return "db_connection"
+	case waitAdmission:
+		return "admission"
+	}
+	return ""
 }
 
 // The values of responseWriter.verdict.
@@ -380,8 +413,8 @@ func (rw *responseWriter) Unwrap() http.ResponseWriter {
 func Logger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK, reqCtx: r.Context()}
-		inner := r.WithContext(context.WithValue(r.Context(), requestLogKey{}, rw))
+		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK, reqCtx: r.Context(), start: start}
+		inner := r.WithContext(pgxdb.WithAcquireWaitNoter(context.WithValue(r.Context(), requestLogKey{}, rw), rw))
 		if r.Body != nil && r.Body != http.NoBody {
 			inner.Body = &requestBody{ReadCloser: r.Body, rw: rw}
 		}
@@ -392,12 +425,15 @@ func Logger(next http.Handler) http.Handler {
 		if rw.logClaimed {
 			return
 		}
-		status := rw.statusCode
+		status, log := rw.statusCode, slog.Info
 		var gone []any
 		if left {
 			status, gone = StatusClientClosedRequest, []any{"handler_status", rw.statusCode}
+			if w := rw.waitedFor(); w != "" {
+				log, gone = slog.Warn, append(gone, "waited_for", w)
+			}
 		}
-		slog.Info("http request", append([]any{
+		log("http request", append([]any{
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", status,

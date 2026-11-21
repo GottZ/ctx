@@ -451,7 +451,7 @@ func (d *Dispatcher) Acquire(ctx context.Context, req Request) (*Lease, context.
 		}
 		d.mu.Unlock()
 		cancel(context.Canceled)
-		return nil, nil, ctx.Err()
+		return nil, nil, waitAbandoned{err: ctx.Err()}
 	case <-expiry:
 		lease, werr := d.expireWaiter(st, w)
 		if werr != nil {
