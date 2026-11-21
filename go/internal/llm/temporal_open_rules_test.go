@@ -1,6 +1,8 @@
 package llm
 
 import (
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -255,4 +257,54 @@ func TestRules_FromNowUntil(t *testing.T) {
 		// "seit" keeps the typo tolerance it has alone, also before "bis".
 		"seit gesten bis morgen":                              {"2026-11-20", "2026-11-22", "range"},
 	})
+}
+
+// TestRules_ReviewCorpus runs the 158 questions an independent reviewer of
+// the pull request wrote against the new rules (testdata/
+// temporal_corpus_463.tsv: question, then the first resolved date as
+// date|end|dir at the Saturday 2026-11-21, or nil): the words of the new rules
+// without a date behind them, distances before them, modal verbs after a
+// year, and the forms that are windows on purpose. Every question whose
+// answer is no window at that day is no window on any weekday as today.
+func TestRules_ReviewCorpus(t *testing.T) {
+	raw, err := os.ReadFile("testdata/temporal_corpus_463.tsv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		q, want, ok := strings.Cut(line, "\t")
+		if !ok {
+			t.Fatalf("malformed line %q", line)
+		}
+		n++
+		got := "nil"
+		if tr := NormalizeTemporalRules(q, now463); tr != nil && len(tr.Dates) > 0 {
+			d := tr.Dates[0]
+			end := ""
+			if d.End != nil {
+				end = *d.End
+			}
+			got = d.Date + "|" + end + "|" + d.Dir
+		}
+		if got != want {
+			t.Errorf("%q: got %s, want %s", q, got, want)
+		}
+		if want != "nil" && (!strings.Contains(want, "||") || strings.HasSuffix(want, "|"+DirFrom) || strings.HasSuffix(want, "|"+DirUntil)) {
+			continue // a window on purpose
+		}
+		for wd := 1; wd < 7; wd++ {
+			now := now463.AddDate(0, 0, wd)
+			if tr := NormalizeTemporalRules(q, now); tr != nil {
+				for _, d := range tr.Dates {
+					if d.End != nil || d.Dir == DirFrom || d.Dir == DirUntil {
+						t.Errorf("now %s, %q: window %+v", now.Format("Mon"), q, d)
+					}
+				}
+			}
+		}
+	}
+	if n != 158 {
+		t.Errorf("%d questions, want 158", n)
+	}
 }

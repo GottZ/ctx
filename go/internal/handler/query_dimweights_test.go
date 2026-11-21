@@ -166,6 +166,13 @@ func TestEffectiveDimWeights(t *testing.T) {
 			map[string]float64{"linear": 0.5, "month": 0.5}, map[string]float64{"linear": 0.5, "month": 0.5}},
 		{"two months, monthday and month", llm.TemporalDate{Date: "2026-01-01", End: end("2026-02-28"), Dir: "range"},
 			map[string]float64{"linear": 0.4, "monthday": 0.3, "month": 0.3}, map[string]float64{"linear": 0.7, "month": 0.3}},
+		// The day of the month cycles in a calendar month, not in 31 days:
+		// February 1 to March 1 is longer than a month (no producer puts the
+		// monthday on a window today; the cycle is pinned all the same).
+		{"one month and a day, monthday", llm.TemporalDate{Date: "2026-02-01", End: end("2026-03-01"), Dir: "range"},
+			map[string]float64{"linear": 0.5, "monthday": 0.5}, map[string]float64{"linear": 1}},
+		{"February, monthday", llm.TemporalDate{Date: "2026-02-01", End: end("2026-02-28"), Dir: "range"},
+			map[string]float64{"linear": 0.5, "monthday": 0.5}, map[string]float64{"linear": 0.5, "monthday": 0.5}},
 		{"no linear share", llm.TemporalDate{Date: "2026-01-01", Dir: llm.DirUntil},
 			map[string]float64{"weekday": 1}, map[string]float64{"linear": 1}},
 		{"unknown key stays", llm.TemporalDate{Date: "2026-01-01", Dir: llm.DirUntil},
