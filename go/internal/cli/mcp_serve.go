@@ -24,9 +24,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -111,7 +109,7 @@ func NewMCPProxy(cfg Config, cfgErr error, allowFiles []string) (*MCPProxy, erro
 	p := &MCPProxy{cfgErr: cfgErr, connecting: make(chan struct{}, 1), connectWait: mcpServeConnectWait}
 	if cfgErr == nil {
 		p.endpoint = strings.TrimSuffix(cfg.BaseURL, "/") + "/mcp"
-		origin, err := urlOrigin(p.endpoint)
+		keyed, err := newKeyTransport(cfg.BaseURL, cfg.Key, http.DefaultTransport)
 		if err != nil {
 			p.cfgErr = fmt.Errorf("CTX_BASE_URL is not a usable URL: %w", err)
 		}
@@ -119,7 +117,7 @@ func NewMCPProxy(cfg Config, cfgErr error, allowFiles []string) (*MCPProxy, erro
 		// keepalive holds it open, and the local client cancels a call it gives
 		// up on. Dial and TLS limits are http.DefaultTransport's; opening the
 		// session is bounded by connectWait.
-		p.http = &http.Client{Transport: mcpKeyTransport{key: cfg.Key, origin: origin, base: http.DefaultTransport}}
+		p.http = &http.Client{Transport: mcpKeyTransport{keyed: keyed}}
 	}
 	if len(allowFiles) > 0 {
 		roots, err := newMCPFileRoots(allowFiles)
@@ -416,29 +414,16 @@ func refusalResult(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}, IsError: true}
 }
 
-// mcpKeyTransport adds the key of the CLI configuration to requests to the
-// remote, as the CLI's own client does (X-Context-Key), and turns a 401 into
-// errMCPKeyRejected. It sends only to the origin of CTX_BASE_URL (scheme, host
-// and port): http.Client follows redirects and calls the transport for every
-// hop, so without this check a redirect to another host — a login gateway in
-// front of the server, say — would carry the key there. A redirect within the
-// origin is followed; any other request is refused before it is sent.
+// mcpKeyTransport sends the requests to the remote through keyTransport — the
+// key of the CLI configuration, only to the origin of CTX_BASE_URL, a redirect
+// followed only within it, exactly as for every other keyed request of the
+// CLI (keytransport.go) — and turns a 401 into errMCPKeyRejected.
 type mcpKeyTransport struct {
-	key    string
-	origin string
-	base   http.RoundTripper
+	keyed keyTransport
 }
 
 func (t mcpKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if o, err := urlOrigin(req.URL.String()); err != nil || o != t.origin {
-		if req.Body != nil {
-			_ = req.Body.Close()
-		}
-		return nil, fmt.Errorf("refused a redirect to %s: ctx mcp serve follows redirects only within %s, so the key never leaves the configured server", req.URL.Redacted(), t.origin)
-	}
-	r := req.Clone(req.Context())
-	r.Header.Set("X-Context-Key", t.key)
-	resp, err := t.base.RoundTrip(r)
+	resp, err := t.keyed.RoundTrip(req)
 	if err != nil {
 		return nil, err
 	}
@@ -447,24 +432,6 @@ func (t mcpKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, errMCPKeyRejected
 	}
 	return resp, nil
-}
-
-// urlOrigin is the scheme, host and port of a URL, the port spelled out when
-// the scheme's default is meant, so http://h and http://h:80 compare equal.
-func urlOrigin(raw string) (string, error) {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", err
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if (scheme != "http" && scheme != "https") || u.Hostname() == "" {
-		return "", fmt.Errorf("%s has no http or https host", u.Redacted())
-	}
-	port := u.Port()
-	if port == "" {
-		port = map[string]string{"http": "80", "https": "443"}[scheme]
-	}
-	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port), nil
 }
 
 func mcpServeCmd(getClient func() (*Client, error)) *cobra.Command {

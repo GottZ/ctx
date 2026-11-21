@@ -1088,9 +1088,8 @@ func postIngest(c *Client, url string, req ingestRequestPayload) (*ingestRespons
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-Context-Key", c.Key)
 
-	resp, err := c.HTTPClient.Do(httpReq)
+	resp, err := c.send(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request: %w", err)
 	}
