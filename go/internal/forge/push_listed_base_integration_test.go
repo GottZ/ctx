@@ -45,12 +45,21 @@ func i486SyncedAtIsMinusInfinity(t *testing.T, pool *pgxpool.Pool, blockID strin
 // wrote, and the mapping still listed (synced_at -infinity) so the next run
 // decides again; then that run writes nothing to the forge and leaves no
 // candidate.
-func i486AfterAMovedBase(t *testing.T, pool *pgxpool.Pool, proj store.ProjectRow, spy *pushSpyForge, kind string, forgeID int64, blockID, pulledBase string) {
+func i486AfterAMovedBase(t *testing.T, pool *pgxpool.Pool, proj store.ProjectRow, spy *pushSpyForge, kind string, forgeID int64, blockID, pulledBase string, pulledFields []byte) {
 	t.Helper()
 	ctx := context.Background()
 	base, conflict, _, _ := readMapping(t, pool, proj.ID, kind, forgeID)
 	if base != pulledBase || conflict {
 		t.Errorf("after the push the mapping base is the pull's: %v (conflict %v); the advance wrote the listed base over it", base == pulledBase, conflict)
+	}
+	// The field snapshot the next field-diff reads stays the pull's too.
+	var fieldsMatch bool
+	if err := pool.QueryRow(ctx,
+		`SELECT metadata->'base_fields' = $2::jsonb FROM context_project_sync_map WHERE block_id = $1::uuid`, blockID, string(pulledFields)).Scan(&fieldsMatch); err != nil {
+		t.Fatal(err)
+	}
+	if !fieldsMatch {
+		t.Errorf("after the push the mapping's base_fields are not the pull's snapshot")
 	}
 	if !i486SyncedAtIsMinusInfinity(t, pool, blockID) {
 		t.Errorf("synced_at is not -infinity: the mapping is not listed again for the next run to decide")
@@ -87,8 +96,8 @@ func TestPushAdvanceKeepsABaseAPullMoved(t *testing.T) {
 		if res, err := pusherWithRegistry(pool).PushProject(ctx, proj, spy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow); err != nil || res.Pushed != 1 {
 			t.Fatalf("first push: pushed=%d err=%v, want 1", res.Pushed, err)
 		}
-		_, pulledBase, _, _ := ForgeIssueBase(edited)
-		i486AfterAMovedBase(t, pool, proj, spy.pushSpyForge, "issue", 5, issueID, pulledBase)
+		pulledFields, pulledBase, _, _ := ForgeIssueBase(edited)
+		i486AfterAMovedBase(t, pool, proj, spy.pushSpyForge, "issue", 5, issueID, pulledBase, pulledFields)
 		if b := getBlock(t, pool, proj.Scope, issueID); b.Content != edited.Body {
 			t.Errorf("block body %q, want the pulled remote edit", b.Content)
 		}
@@ -115,8 +124,8 @@ func TestPushAdvanceKeepsABaseAPullMoved(t *testing.T) {
 		if res, err := pusherWithRegistry(pool).PushProject(ctx, proj, spy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow); err != nil || res.Pushed != 1 {
 			t.Fatalf("first push: pushed=%d err=%v, want 1", res.Pushed, err)
 		}
-		_, pulledBase, _, _ := ForgeCommentBase(edited)
-		i486AfterAMovedBase(t, pool, proj, spy.pushSpyForge, "comment", 700, commentID, pulledBase)
+		pulledFields, pulledBase, _, _ := ForgeCommentBase(edited)
+		i486AfterAMovedBase(t, pool, proj, spy.pushSpyForge, "comment", 700, commentID, pulledBase, pulledFields)
 	})
 
 	t.Run("in-sync row, pull before the advance", func(t *testing.T) {
@@ -156,7 +165,7 @@ func TestPushAdvanceKeepsABaseAPullMoved(t *testing.T) {
 		if spy.wireCalls() != 0 {
 			t.Fatalf("first push made %d wire writes for an in-sync row", spy.wireCalls())
 		}
-		_, pulledBase, _, _ := ForgeIssueBase(edited)
-		i486AfterAMovedBase(t, pool, proj, spy, "issue", 5, issueID, pulledBase)
+		pulledFields, pulledBase, _, _ := ForgeIssueBase(edited)
+		i486AfterAMovedBase(t, pool, proj, spy, "issue", 5, issueID, pulledBase, pulledFields)
 	})
 }
