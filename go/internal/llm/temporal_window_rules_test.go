@@ -281,6 +281,7 @@ func TestRules_AFixedEndKeepsItsDay(t *testing.T) {
 		"von Freitag bis Montag":           {"2026-11-27", "2026-11-30", "range"},
 		"Was lief von Freitag bis Montag?": {"2026-11-13", "2026-11-16", "range"},
 		"von gestern bis Montag":           {"2026-11-20", "2026-11-23", "range"},
+		"von Anfang März bis heute":        {"2026-03-01", "2026-11-21", "range"},
 	})
 	// Every weekday and every month before "heute", for every weekday and
 	// for the first and last day of a month as today: the window ends today
