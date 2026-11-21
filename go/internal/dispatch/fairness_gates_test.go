@@ -638,6 +638,17 @@ const (
 // hold and release in a loop; check runs after every admission. stop ends
 // them and waits.
 func backgroundLoad(d *Dispatcher, n int, hold time.Duration, check func()) (stop func()) {
+	return gatedBackgroundLoad(d, n, hold, nil, check)
+}
+
+// gatedBackgroundLoad is backgroundLoad whose workers end a lease only once
+// hold has passed AND release is closed (a nil release holds nothing back).
+// While the test keeps release open no background lease ends, so no unit
+// frees: a waiter that fits the next freed unit stays queued until the test
+// closes release — a state the test can wait for, where under the free
+// running load the next background release could end it between two polls
+// (issue #369).
+func gatedBackgroundLoad(d *Dispatcher, n int, hold time.Duration, release <-chan struct{}, check func()) (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
@@ -655,6 +666,12 @@ func backgroundLoad(d *Dispatcher, n int, hold time.Duration, check func()) (sto
 				select {
 				case <-time.After(hold):
 				case <-ctx.Done():
+				}
+				if release != nil {
+					select {
+					case <-release:
+					case <-ctx.Done():
+					}
 				}
 				l.Release()
 			}

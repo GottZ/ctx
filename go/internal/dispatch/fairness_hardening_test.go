@@ -138,13 +138,23 @@ func TestExternalHeavyHeadUnderLightStream(t *testing.T) {
 // unit and keeps it, the heavy head never fits the partition and ends with
 // ErrWaitExpired; with the reservation for the lightest head the light head
 // may not backfill and background fills every unit but one.
+//
+// Alone in the queue the light head fits the first freed unit (the wake
+// serves XU before background in o1), so under the free running load it
+// left the queue at the next background release — between two polls on a
+// loaded host, and the test then timed out waiting for it (issue #369). The
+// background leases therefore end only once the test closes release, after
+// both heads are queued; the bound is measured from that moment, when the
+// first unit can free (one hold time covers a lease admitted less than a
+// hold time before it).
 func TestExternalReservationServesTheFairnessFirstHead(t *testing.T) {
 	d, _ := newTestDispatcher(t, DefaultSettings(), weightPolicy())
 	bg := context.Background()
 	warm := mustAcquire(t, d, xctx(bg, "light", "tenant-a"), weightedReq(1))
 	time.Sleep(30 * time.Millisecond)
 	warm.Release()
-	stop := backgroundLoad(d, headGateBG, headGateHold, nil)
+	release := make(chan struct{})
+	stop := gatedBackgroundLoad(d, headGateBG, headGateHold, release, nil)
 	defer stop()
 	waitFor(t, "background saturates the target", func() bool { return target(t, d).HeldWeight == weightSlots })
 	ctx, cancel := context.WithCancel(bg)
@@ -153,20 +163,31 @@ func TestExternalReservationServesTheFairnessFirstHead(t *testing.T) {
 	lreq := weightedReq(1)
 	lreq.MaxWait = 5 * time.Second
 	startWaiter(xctx(ctx, "light", "tenant-a"), d, "light", lreq, lightCh)
-	waitFor(t, "light head queued", func() bool { return waitingExternal(d) == 1 })
-	req := weightedReq(weightE)
-	req.MaxWait = time.Second
-	l, took, err := timedAcquire(d, "heavy", "tenant-b", req)
-	t.Logf("fairness-first w=E head behind a waiting light head under %d background workers: err=%v after %v (bound %v)", headGateBG, err, took, headGateHold+headGateSlack)
-	if l != nil {
-		l.Release()
+	waitQueued(t, d, lightCh, 1, "light head queued")
+	heavyCh := make(chan admission, 1)
+	var heavyAt time.Time // written before the send on heavyCh, read after the receive
+	hreq := weightedReq(weightE)
+	hreq.MaxWait = time.Second
+	go func() {
+		l, _, err := d.Acquire(xctx(ctx, "heavy", "tenant-b"), hreq)
+		heavyAt = time.Now()
+		heavyCh <- admission{label: "heavy", lease: l, err: err}
+	}()
+	waitQueued(t, d, heavyCh, 2, "heavy head queued behind the light head")
+	released := time.Now()
+	close(release)
+	h := recvAdmission(t, heavyCh, "heavy head")
+	took := heavyAt.Sub(released)
+	t.Logf("fairness-first w=E head behind a waiting light head under %d background workers: err=%v %v after the background leases could end (bound %v)", headGateBG, h.err, took, headGateHold+headGateSlack)
+	if h.lease != nil {
+		h.lease.Release()
 	}
 	a := recvAdmission(t, lightCh, "light head")
 	if a.lease != nil {
 		a.lease.Release()
 	}
-	if err != nil || took > headGateHold+headGateSlack {
-		t.Fatalf("heavy w=E head: err=%v after %v, want admitted within one background hold time + %v — the reservation must follow the fairness-first head", err, took, headGateSlack)
+	if h.err != nil || took > headGateHold+headGateSlack {
+		t.Fatalf("heavy w=E head: err=%v after %v, want admitted within one background hold time + %v — the reservation must follow the fairness-first head", h.err, took, headGateSlack)
 	}
 	if a.err != nil {
 		t.Fatalf("light head: %v, want admitted after the heavy head", a.err)
