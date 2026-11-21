@@ -8,8 +8,8 @@
 
 **Beweist:** jede Registry-Seite rendert in jedem deklarierten Zustand pixel-identisch
 zur eingefrorenen Referenz (@visual, nur im digest-gepinnten Container), und das Dokument
-ist dabei nicht höher als der Viewport (vor jeder Aufnahme geprüft, #419); der primäre
-Nutzungspfad ist bedienbar (@flow); guard-gegatete Seiten weisen niedrigere Rollen ab
+ist dabei weder höher noch breiter als der Viewport (vor jeder Aufnahme geprüft, #419,
+#430); der primäre Nutzungspfad ist bedienbar (@flow); guard-gegatete Seiten weisen niedrigere Rollen ab
 (generierte Deny-Tests — CLIENT-Guard-Schicht); tenant-scoped Flächen rendern nie den
 Fremd-Sentinel (Leak-Probe mit Positiv-Kontrolle); Listen-Flächen halten den deklarierten
 DOM-Deckel bei 10k Fixture-Items (Scale-Zustand mit echtem Keyset-Cursor); kein `pageerror`.
