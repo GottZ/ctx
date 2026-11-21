@@ -141,8 +141,12 @@ func runRecurrentUnionCycle(t *testing.T, recurInEval bool) {
 	// handler runs on save); S gets the same created_at dimensions from the
 	// cycle's own temporal Phase 1 (step 1b, dream_temporal_validated_at is
 	// NULL on a fresh row). C gets none, so it cannot pair in Phase 1.
-	if err := store.PopulateTemporal(ctx, pool, ruRecurID, nil, tRef); err != nil {
-		t.Fatalf("populate D temporal: %v", err)
+	var recurContent string
+	if err := pool.QueryRow(ctx, `SELECT content FROM context_blocks WHERE id = $1::uuid`, ruRecurID).Scan(&recurContent); err != nil {
+		t.Fatalf("read D content: %v", err)
+	}
+	if applied, err := store.PopulateTemporal(ctx, pool, ruRecurID, recurContent, nil, tRef); err != nil || !applied {
+		t.Fatalf("populate D temporal: applied=%v err=%v", applied, err)
 	}
 
 	backend := crBackend()

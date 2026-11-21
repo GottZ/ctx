@@ -962,9 +962,7 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		}
 
 		// Temporal enrichment (inline, not async — MCP calls are not latency-sensitive).
-		times := store.ExtractDates(block.Content)
-		_ = store.UpdateContentTimes(ctx, cfg.Pool, block.ID, times)
-		_ = store.PopulateTemporal(ctx, cfg.Pool, block.ID, times, block.CreatedAt)
+		_, _ = store.RefreshTemporal(ctx, cfg.Pool, block.ID, block.Content, block.CreatedAt)
 
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{textContent(fmt.Sprintf("Stored: %s (id: %s, category: %s%s)", block.Title, block.ID, block.Category,

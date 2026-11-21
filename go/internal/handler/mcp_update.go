@@ -168,8 +168,9 @@ func updateDataFromCanonical(cw store.CanonicalWrite) store.UpdateBlockData {
 // ClassifyBlockAfterUpsert only writes type_source='auto' blocks, and
 // deliberately match-only: a block whose new title stops matching keeps its
 // current type, the hook promotes and never demotes), temporal re-extraction
-// on content change (PopulateTemporal always runs: createdAt is the
-// meta-anchor even without content times). All non-fatal; reqID stamps every
+// on content change (store.RefreshTemporal; the rows always get createdAt as
+// the meta-anchor, even without content times, and nothing is written once a
+// later write replaced the content — issue #414). All non-fatal; reqID stamps every
 // line with the request it belongs to. The embedding reset on a changed title
 // or content is not afterwork: store.UpdateBlock clears the vector in the
 // update's own transaction.
@@ -188,12 +189,8 @@ func finishBlockUpdate(ctx context.Context, pool *pgxpool.Pool, blocktypes *bloc
 		}
 	}
 	if data.Content != nil || data.Edits != nil {
-		times := store.ExtractDates(block.Content)
-		if err := store.UpdateContentTimes(ctx, pool, block.ID, times); err != nil {
-			slog.Error("update afterwork: content_times update failed", "error", err, "block_id", block.ID, "request_id", reqID)
-		}
-		if err := store.PopulateTemporal(ctx, pool, block.ID, times, block.CreatedAt); err != nil {
-			slog.Error("update afterwork: temporal populate failed", "error", err, "block_id", block.ID, "request_id", reqID)
+		if _, err := store.RefreshTemporal(ctx, pool, block.ID, block.Content, block.CreatedAt); err != nil {
+			slog.Error("update afterwork: temporal refresh failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		}
 	}
 }
