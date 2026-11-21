@@ -9,6 +9,7 @@
 package forge
 
 import (
+	"bytes"
 	"errors"
 	"strings"
 )
@@ -233,6 +234,9 @@ func isTchar(c byte) bool {
 // unparseable header named a next page. It errs towards yes — "next" in a
 // URL path counts — since a false yes stops the pull with an error and a
 // false no would end it silently.
+//
+// The field is the remote's and may be megabytes long: one lowered copy,
+// then a linear scan over it (no copy per hit).
 func mentionsNext(s string) bool {
 	low := []byte(s)
 	for i, c := range low {
@@ -241,7 +245,7 @@ func mentionsNext(s string) bool {
 		}
 	}
 	for from := 0; ; {
-		i := strings.Index(string(low[from:]), "next")
+		i := bytes.Index(low[from:], nextWord)
 		if i < 0 {
 			return false
 		}
@@ -254,6 +258,9 @@ func mentionsNext(s string) bool {
 		from = i + 1
 	}
 }
+
+// nextWord is what mentionsNext looks for.
+var nextWord = []byte("next")
 
 func isAlnum(c byte) bool {
 	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9'

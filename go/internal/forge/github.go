@@ -79,7 +79,8 @@ func (c *githubClient) send(req *http.Request) (*http.Response, error) {
 // whose host upgrades to https has sent the token in clear text on the first
 // hop already; following the upgrade hid that on every run, ended the pull
 // one page later at a next-page link "on another origin", and turned a write
-// answered with 301 or 302 into a GET of the target that reported success.
+// answered with 301 or 302 into a GET of the target — for an issue update a
+// GET of the issue, which reported success.
 // The upgrade is refused before a byte of the hop is sent, and the error says
 // which setting to change (the API takes no http api_base; such a row was
 // written past handler.validateForge).
@@ -103,7 +104,7 @@ func (e *configError) Error() string { return e.msg }
 
 var (
 	errAPIBaseUpgrade error = &configError{"forge: the host of forge.api_base redirects http to https, which the forge client does not follow: set forge.api_base to its https URL (this request went out over plain http)"}
-	errNextOffOrigin  error = &configError{"forge: the next-page link leaves the origin of the api_base; pagination stopped (set forge.api_base to the origin the forge names in its links)"}
+	errNextOffOrigin  error = &configError{"forge: the next-page link leaves the origin of the api_base; pagination stopped (set forge.api_base to the https origin the forge names in its links)"}
 )
 
 // errRedirectNotFollowed is the answer of a redirect send did not follow: its

@@ -3,7 +3,11 @@ package forge
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -160,5 +164,56 @@ func TestPaginationResolvedTargetStaysOnOrigin(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "other.example") {
 		t.Errorf("error %q names the target", err)
+	}
+}
+
+// TestPaginationResolvesAgainstTheURLThatAnswered: after a redirect within
+// the origin — GitHub's answer for a renamed repository — a relative target
+// resolves against the URL that answered (RFC 3986 §5.1.3), not the one the
+// client asked for: the next pages go to /repositories/1/…, and the old path
+// sees the first request only.
+func TestPaginationResolvesAgainstTheURLThatAnswered(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.URL.RequestURI())
+		mu.Unlock()
+		if strings.HasPrefix(r.URL.Path, "/repos/") {
+			http.Redirect(w, r, "/repositories/1/issues?"+r.URL.RawQuery, http.StatusMovedPermanently)
+			return
+		}
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page < 1 {
+			page = 1
+		}
+		if page < 3 {
+			w.Header().Set("Link", `<issues?page=`+strconv.Itoa(page+1)+`>; rel="next"`)
+		}
+		_, _ = fmt.Fprintf(w, `[{"number":%d,"title":"t","state":"open"}]`, page)
+	}))
+	t.Cleanup(srv.Close)
+	c := &githubClient{http: srv.Client()}
+	page, err := c.ListIssuesSince(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL}, time.Time{}, "")
+	var got []int64
+	for err == nil {
+		for _, it := range page.Issues {
+			got = append(got, it.Number)
+		}
+		if page.NextURL == "" || len(got) > 10 {
+			break
+		}
+		page, err = c.ListIssuesPage(context.Background(), page.NextURL)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	old := 0
+	for _, s := range seen {
+		if strings.HasPrefix(s, "/repos/") {
+			old++
+		}
+	}
+	if err != nil || fmt.Sprint(got) != "[1 2 3]" || old != 1 {
+		t.Fatalf("walk = %v, err %v, %d requests on the old path (want [1 2 3] and 1): %v", got, err, old, seen)
 	}
 }

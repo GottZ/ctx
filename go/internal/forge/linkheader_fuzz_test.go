@@ -155,3 +155,19 @@ func TestNextOnOriginKeepsRealTargets(t *testing.T) {
 		}
 	}
 }
+
+// TestMentionsNextIsLinear: the scan of an unparseable header for the word
+// next runs over a header the forge chose — up to net/http's 10 MiB limit,
+// and a tenant-admin may point forge.api_base at a host of their own. One
+// "next" every five bytes, none of them a word: the scan must not copy the
+// rest of the header per hit (a quadratic scan of 1 MiB took about a minute
+// and held a sync slot meanwhile).
+func TestMentionsNextIsLinear(t *testing.T) {
+	field := strings.Repeat("anext", 1<<18) // 1.25 MiB
+	if mentionsNext(field) {
+		t.Fatal("no word next in the field")
+	}
+	if a := testing.AllocsPerRun(3, func() { mentionsNext(field) }); a > 2 {
+		t.Fatalf("mentionsNext allocated %.0f times over one field; want at most 2 (one lowered copy)", a)
+	}
+}
