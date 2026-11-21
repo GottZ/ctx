@@ -1955,12 +1955,13 @@ SELECT block_id FROM (
  WHERE failed;
 ```
 
-then one transaction per batch of ids (50 000 per batch keeps the lock to about a second; readers go on, writers wait for the batch):
+then one transaction per batch of ids (50 000 per batch holds the lock about 0.6 s, 1.9 s without the `replica` line below; readers go on, writers wait for the batch):
 
 ```sql
 BEGIN;
 SET LOCAL lock_timeout = '3s';
 LOCK TABLE context_blocks IN SHARE ROW EXCLUSIVE MODE;
+SET LOCAL session_replication_role = replica;
 INSERT INTO context_temporal_reviews (block_id, version)
 SELECT b.id, digest(b.content_hash || b.title, 'sha256')
   FROM context_blocks b
@@ -1973,9 +1974,28 @@ ON CONFLICT (block_id) DO NOTHING;
 COMMIT;
 ```
 
-A block changed since the upgrade keeps what the binary wrote (`DO NOTHING`; the change moved `updated_at` past the stamp). The table lock keeps a write from committing between the batch's read of `updated_at` and its commit — without it, a same-content write in that window could run its temporal afterwork before the batch commits, and the batch would then record a review over the afterwork's rows. The batches write with the foreign key in place (a lock record and a full-page image per touched heap page); the WAL of a batch is not measured (the take-over without the key: 15.7 MB per 100 000 rows, with it 199 MB).
+A block changed since the upgrade keeps what the binary wrote (`DO NOTHING`; the change moved `updated_at` past the stamp). The table lock keeps a write from committing between the batch's read of `updated_at` and its commit — without it, a same-content write in that window could run its temporal afterwork before the batch commits, and the batch would then record a review over the afterwork's rows.
+
+`session_replication_role = replica` keeps the foreign key's check from running for the batch's rows, and it is safe here only because of the table lock: no block can be deleted between the batch's read of `context_blocks` and its commit, so every row it inserts references a block that exists. The check would lock each referenced block row (`FOR KEY SHARE`), which writes a lock record and, on the first touch of a heap page after a checkpoint, a full-page image. Measured on the test container, one batch of 50 000 ids at the live width (3 KB of word text, a 1024-dim vector; four rows per heap page), right after a checkpoint: with the check 103 MB of WAL (89 MB of it full-page images) in 1.9 s; with `replica` 11.4 MB in 0.57 s — about 20 GB against 2.3 GB at 10 M blocks. The setting needs a superuser, or a role granted `SET` on it (`GRANT SET ON PARAMETER session_replication_role TO …`, PostgreSQL 15+); without it, drop that line and the batch runs with the check (the WAL above). It is transaction-local (`SET LOCAL`) and `context_temporal_reviews` has no trigger besides the foreign key's.
 
 **Rolling deploy and way back.** `dream_temporal_validated_at` stays; this binary neither writes nor reads it, an older one (the rollback image) reads and writes it as before and ignores the new table — but its temporal writers do not delete a block's row of `context_temporal_reviews`, so a block whose rows an older writer replaced would stay reviewed for this binary. Stop every older instance before this binary starts (no mixed-version rolling deploy). After a rollback: stop the older instances, `TRUNCATE context_temporal_reviews;`, start this binary, and take the stamps over again by the RUNBOOK (the blocks reviewed in between are due once more under the old rule, their stamps did not move). The older binary's schema contract reports schema 189 as breaking (`migration_integrity` for `_migrations` 189 without an embedded file, `missing_object` for the dropped index, two param drifts for the new table): in contract mode `warn`, the default, it starts with `schema_contract` attention; in mode `enforce` it refuses to start — set `CTX_CONTRACT_MODE=warn` for the rollback image. To restore the catalog of migration 188: `SET lock_timeout = '3s'; DROP TABLE context_temporal_reviews; CREATE INDEX CONCURRENTLY idx_blocks_dream_temporal_pending ON context_blocks (id) WHERE dream_temporal_validated_at IS NULL AND NOT is_archived; DELETE FROM _migrations WHERE version = 189;` (out of band; `CONCURRENTLY` builds the index without holding writers).
+
+### Migration 190: a review records the extraction its rows hold
+
+The afterwork of a write that stores the content a block already holds (a same-content upsert) leaves the rows of the dream's temporal review standing when they cover what it would write. Until migration 190 that meant: the rows are the review's of the block's current title and content, and they hold every date the extraction yields now — a superset test. A date a later release's `ExtractDates` no longer yields (issue #437 dropped the years outside 2020–2099) therefore stayed on a reviewed block, and a backfill through the afterwork would skip it (issue #466). Since migration 190 the review records, beside the version, the extraction it wrote its rows from — `extraction` in `context_temporal_reviews`, sha256 over the version and a digest of the creation time and the content's dates — and the afterwork takes the rows as covering only when that is the extraction in force for the same version. What an operator notices:
+
+- **A changed extraction re-reviews.** After a release that changes which dates a content yields, the next same-content write of a reviewed block whose extraction changed writes the extraction's rows, deletes the version, and the block is reviewed again at its next pick (one LLM call). Blocks no write reaches keep their rows and stay reviewed: the pick reads the version only.
+- **Rows of before cover nothing.** A version row without `extraction` — every row taken over by migration 189 and every row a review of the binary before migration 190 wrote — does not say which extraction its rows hold. It keeps its block reviewed for the pick, but covers no same-content write: the first such write of the block rewrites its rows from the extraction and makes it due, one review each — until that review, the block's rows hold the extraction's dates only, not the LLM's, so a query by an LLM-found date misses it (the pick takes blocks by `dream_checked_at`, not by due-ness, so that can last a cycle of the corpus). On the reference instance (2026-11-21, read only) that is at most the 1 762 version rows, and only as same-content writes reach them. How many are left (one scan of `context_temporal_reviews`; out of band):
+
+  ```sql
+  SELECT count(*) FROM context_temporal_reviews WHERE extraction IS NULL;
+  ```
+
+- **No cost per review.** Measured on the test container at 360 000 temporal rows: 20 916 → 20 918 bytes of WAL per repeated review completion (the column is rewritten unchanged), 33 bytes more per newly inserted version row (73 → 106 bytes); the covered same-content afterwork stays at three round trips (begin, the turn with its check, rollback), and its median time moved within the run-to-run spread of the container (0.60–0.78 ms either way).
+
+**Size and locks.** `ADD COLUMN` of a nullable column without a default changes the catalog only — no row is read or rewritten, at any size, and there is no backfill (the extraction of a row of before is not known). It takes `ACCESS EXCLUSIVE` on `context_temporal_reviews` to the file's commit; `lock_timeout = '3s'` bounds the wait for a temporal writer or a pick in flight, and on `55P03` the file rolls back and the next boot retries.
+
+**Rolling deploy and way back.** The binary of migration 189 does not know the column. Its review inserts version rows without it (`NULL`: covers nothing for this binary) and, on a conflict, rewrites the version beside the earlier extraction. Where the version changed, that extraction is bound to the earlier one and covers no write of the new one. Where the older binary reviews the version this binary reviewed before, the extraction stays in force and covers the rows the older binary wrote from its own extraction — which is why the two binaries are not run side by side beyond the deploy itself. Its schema contract reports `_migrations` 190 without an embedded file (breaking) and the column as a param drift: in contract mode `warn`, the default, it starts with `schema_contract` attention; in mode `enforce` it refuses to start until `CTX_CONTRACT_MODE=warn`. To restore the catalog of migration 189 (out of band; first stop every instance of a release that embeds 190, whose runner would apply the file again): `SET lock_timeout = '3s'; ALTER TABLE context_temporal_reviews DROP COLUMN extraction; DELETE FROM _migrations WHERE version = 190;`.
 
 ### `graph_overview.csr_loader`: the rebuild's input substrate
 
