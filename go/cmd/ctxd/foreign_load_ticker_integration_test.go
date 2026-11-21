@@ -108,14 +108,19 @@ func TestForeignLoadTickerHeadless_Integration(t *testing.T) {
 	start := time.Now()
 
 	const suspected = "WARN status: foreign load suspected"
-	deadline := start.Add(6 * time.Second)
+	// The events are two rounds and one WARN without a status reader; the
+	// deadline only guards against a detector that never runs (#369: it was
+	// 6 s for two rounds at a 1-s interval, which a loaded host can miss).
+	// Generous on purpose — the loop ends at the events.
+	const roundsGuard = 30 * time.Second
+	deadline := start.Add(roundsGuard)
 	for (hits.Load() < 2 || logs.count(suspected) < 1) && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	got, warns := hits.Load(), logs.count(suspected)
 	t.Logf("no status read: %d /metrics GETs and %d suspected WARN after %v at a 1s interval", got, warns, time.Since(start).Round(time.Millisecond))
 	if got < 2 || warns != 1 {
-		t.Fatalf("%d /metrics GETs and %d suspected WARNs within 6s without a status reader, want >= 2 and 1 — the detector only measures while someone reads the status", got, warns)
+		t.Fatalf("%d /metrics GETs and %d suspected WARNs within %s without a status reader, want >= 2 and 1 — the detector only measures while someone reads the status", got, warns, roundsGuard)
 	}
 
 	cancel()

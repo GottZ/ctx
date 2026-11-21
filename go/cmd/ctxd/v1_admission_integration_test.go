@@ -130,7 +130,10 @@ func newHeraldRig(t *testing.T, wrap func(http.HandlerFunc) http.HandlerFunc) *h
 }
 
 // probe sends one request and, while the fake upstream holds it, reads the
-// herald and tries a background acquire on the other target.
+// herald and tries a background acquire on the other target — through the
+// dispatcher's try door, which answers at once by the same predicate as
+// Acquire (#369: a blocking Acquire on a 50-ms context made "at once" a
+// wall-clock race on a loaded host).
 func (h *heraldRig) probe(t *testing.T) (demand, status int, bgErr error) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
@@ -148,9 +151,7 @@ func (h *heraldRig) probe(t *testing.T) (demand, status int, bgErr error) {
 		t.Fatal("the fixture never reached its upstream")
 	}
 	demand = h.d.InteractiveDemand()
-	bgCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	l, _, bgErr := h.d.Acquire(bgCtx, dispatch.Request{Target: dispatch.Target{Origin: heraldOther}, Class: dispatch.ClassBackground, Role: "dream"})
-	cancel()
+	l, _, bgErr := h.d.TryAcquire(context.Background(), dispatch.Request{Target: dispatch.Target{Origin: heraldOther}, Class: dispatch.ClassBackground, Role: "dream"})
 	if l != nil {
 		l.Release()
 	}
@@ -161,10 +162,10 @@ func (h *heraldRig) probe(t *testing.T) (demand, status int, bgErr error) {
 
 // TestV1DoesNotRaiseHerald is gate (a), B11: WHILE a /v1 handler blocks
 // (the fake upstream holds its lease) the herald stays down — demand 0 —
-// and a background acquire on a second target is admitted at once (within
-// 50 ms). The control mounts the same route in WithScheduler: demand 1, the
-// background acquire blocks until its deadline — the probe can see the
-// herald.
+// and a background acquire on a second target is admitted at once (the try
+// door admits it). The control mounts the same route in WithScheduler:
+// demand 1, the try door would block (the herald term gates background) —
+// the probe can see the herald.
 func TestV1DoesNotRaiseHerald(t *testing.T) {
 	t.Run("model group", func(t *testing.T) {
 		h := newHeraldRig(t, func(f http.HandlerFunc) http.HandlerFunc { return f })
@@ -180,8 +181,8 @@ func TestV1DoesNotRaiseHerald(t *testing.T) {
 		})
 		d.Store(h.d)
 		demand, _, bgErr := h.probe(t)
-		if demand != 1 || !errors.Is(bgErr, context.DeadlineExceeded) {
-			t.Fatalf("WithScheduler control: demand %d, background acquire %v — want 1 and blocked (the probe must see a raised herald)", demand, bgErr)
+		if demand != 1 || !errors.Is(bgErr, dispatch.ErrWouldBlock) {
+			t.Fatalf("WithScheduler control: demand %d, background try %v — want 1 and %v (the probe must see a raised herald)", demand, bgErr, dispatch.ErrWouldBlock)
 		}
 	})
 }

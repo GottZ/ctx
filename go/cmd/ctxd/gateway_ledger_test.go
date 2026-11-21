@@ -219,6 +219,11 @@ func TestRejectionFlusherRetriesWithoutDoubleLogCount(t *testing.T) {
 // TestRejectionFlusherFinalCancelsAStuckTick (Fremd-Review F-3): a periodic
 // flush stuck on a slow database is cancelled by the shutdown step, whose
 // own flush then writes everything — the step takes one timeout, not two.
+//
+// The stuck write reads why its context ended (#369): context.Canceled is
+// final's cancel, context.DeadlineExceeded the tick's own timeout waited
+// out. The wall-clock bound it replaces (final under rejectionFlushTimeout/2)
+// meant the same event and is only logged now.
 func TestRejectionFlusherFinalCancelsAStuckTick(t *testing.T) {
 	cfg := config.Defaults().GatewaySettings()
 	ledger := keyquota.NewLedger(time.Now)
@@ -227,6 +232,7 @@ func TestRejectionFlusherFinalCancelsAStuckTick(t *testing.T) {
 	var mu sync.Mutex
 	var calls int
 	var written int64
+	var stuckEnd error
 	write := func(ctx context.Context, rows []llmusage.RejectionRow) error {
 		mu.Lock()
 		calls++
@@ -235,6 +241,9 @@ func TestRejectionFlusherFinalCancelsAStuckTick(t *testing.T) {
 		if first {
 			close(started)
 			<-ctx.Done() // the slow database
+			mu.Lock()
+			stuckEnd = ctx.Err()
+			mu.Unlock()
 			return ctx.Err()
 		}
 		mu.Lock()
@@ -258,12 +267,12 @@ func TestRejectionFlusherFinalCancelsAStuckTick(t *testing.T) {
 	f.final()
 	took := time.Since(begin)
 	<-tickDone
-	t.Logf("shutdown flush with a stuck tick: %s (bound %s)", took.Round(time.Millisecond), rejectionFlushTimeout)
-	if took >= rejectionFlushTimeout/2 {
-		t.Fatalf("final took %s with a stuck tick, want well under %s (the tick is cancelled, not waited out)", took, rejectionFlushTimeout)
-	}
+	t.Logf("shutdown flush with a stuck tick: %s (tick timeout %s)", took.Round(time.Millisecond), rejectionFlushTimeout)
 	mu.Lock()
 	defer mu.Unlock()
+	if !errors.Is(stuckEnd, context.Canceled) {
+		t.Fatalf("the stuck tick's write ended with %v after final took %s, want context.Canceled (final cancels the tick instead of waiting out its %s)", stuckEnd, took, rejectionFlushTimeout)
+	}
 	if written != 15 || calls != 2 {
 		t.Fatalf("written %d in %d write(s), want 15 in 2 (the stuck batch retried by final)", written, calls)
 	}
