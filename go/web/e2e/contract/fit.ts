@@ -22,13 +22,21 @@ import { expect, type Page } from '@playwright/test'
 //      columns, main.content[data-mode='board'] (AppShell), code blocks — and
 //      is not checked here; its own box still is, by layer 3.
 //   3. outside  — the visible part of every rendered element box (its border
-//      box, cut to the boxes of the clipping ancestors above it) lies between
-//      x = 0 and the viewport width. This catches what layers 1 and 2 cannot:
-//      a box that sticks out on the left only (the scroll range never reaches
-//      left of x = 0), and fixed and top-layer boxes (a modal dialog, a
-//      popover), whose containing block is the viewport, not a scroller —
+//      box, cut to the boxes of the clipping ancestors that clip it) lies
+//      between x = 0 and the viewport width. This catches what layers 1 and 2
+//      cannot: a box that sticks out on the left only (the scroll range never
+//      reaches left of x = 0), and fixed and top-layer boxes (a modal dialog,
+//      a popover), whose containing block is the viewport, not a scroller —
 //      unless an ancestor holds fixed boxes (a transform, containment), which
 //      then clips them like absolute ones.
+//
+// Clipping follows the containing block (#457): a box is cut by the clipping
+// ancestors of its containing block, not by every clipping element above it
+// in the DOM. An absolutely positioned box escapes a scroller that lies
+// between it and its containing block (the nearest positioned ancestor, or
+// one that holds fixed boxes): that scroller neither cuts it off (layer 2)
+// nor hides it from the edge check (layer 3). A fixed box is cut by the
+// clipping chain of the ancestor that holds it, else by the viewport alone.
 //
 // Layer 2 compares whole pixels, as the browser scrolls (#457, measured at
 // device scale 1 and 2): Chromium snaps a region's sideways scroll range to
@@ -52,12 +60,6 @@ import { expect, type Page } from '@playwright/test'
 //   - svg and canvas are leaves: their own box is checked, their insides are
 //     drawing coordinates, not layout.
 //
-// Known limit: an absolutely positioned box, and a fixed one whose ancestor
-// holds fixed boxes (holdsFixed below), is cut to every clipping ancestor
-// above it in the DOM, also to one that is not in its containing-block chain
-// and therefore does not clip it. That can hide such a box from layer 3, and
-// layer 2 can report it as starting left of such an ancestor although that
-// ancestor does not cut it off. No contract state has such a box.
 
 /**
  * Sub-pixel slack for layer 3: boxes are compared at fractional precision, and
@@ -220,33 +222,43 @@ export async function expectViewportFit(page: Page): Promise<void> {
       cs.contentVisibility === 'auto' ||
       /\b(transform|translate|rotate|scale|perspective|filter|contain)\b/.test(cs.willChange)
 
-    // scroller/scrollerLeft: the nearest implied scroller above (layer 2) and
-    // its left padding edge; a box starting left of it is cut off for good.
-    // fixedHeld: an ancestor holds position: fixed descendants (holdsFixed).
-    const visit = (
-      el: Element,
-      clipLeft: number,
-      clipRight: number,
-      scroller: Element | null,
-      scrollerLeft: number,
-      fixedHeld: boolean,
-    ): void => {
+    // The clipping a box is subject to: the horizontal clip of the clipping
+    // ancestors of its containing block (left, right), and the nearest
+    // implied scroller among them (layer 2) with its left padding edge — a box
+    // starting left of it is cut off for good.
+    interface Clip {
+      left: number
+      right: number
+      scroller: Element | null
+      scrollerLeft: number
+    }
+    const VIEWPORT: Clip = { left: -Infinity, right: Infinity, scroller: null, scrollerLeft: -Infinity }
+
+    // flow: the clip of the in-flow boxes here; abs: the clip of the
+    // containing block an absolutely positioned box here has (the nearest
+    // positioned ancestor, or one that holds fixed boxes); fixed: the clip of
+    // the ancestor that holds fixed boxes, else the viewport.
+    const visit = (el: Element, flow: Clip, abs: Clip, fixed: Clip): void => {
       const cs = getComputedStyle(el)
       if (cs.display === 'none') return
       if (cs.clipPath !== 'none' || cs.clip !== 'auto') return
-      let cl = clipLeft
-      let cr = clipRight
-      let sc = scroller
-      let sl = scrollerLeft
-      // A fixed box escapes the clipping above it unless an ancestor holds
-      // fixed boxes; the top layer escapes every ancestor.
-      if ((cs.position === 'fixed' && !fixedHeld) || matches(el, ':modal') || matches(el, ':popover-open')) {
-        cl = -Infinity
-        cr = Infinity
-        sc = null
-        sl = -Infinity
-      }
-      if (cs.display !== 'contents') {
+      // display: contents generates no box: position and transforms do not apply
+      const box = cs.display !== 'contents'
+      const pos = box ? cs.position : 'static'
+      // the top layer escapes every ancestor
+      const inc =
+        matches(el, ':modal') || matches(el, ':popover-open')
+          ? VIEWPORT
+          : pos === 'absolute'
+            ? abs
+            : pos === 'fixed'
+              ? fixed
+              : flow
+      let cl = inc.left
+      let cr = inc.right
+      let sc = inc.scroller
+      let sl = inc.scrollerLeft
+      if (box) {
         const r = el.getBoundingClientRect()
         if (r.width > 0 && r.height > 0 && cs.visibility !== 'hidden') {
           const left = Math.max(r.left, cl)
@@ -285,10 +297,13 @@ export async function expectViewportFit(page: Page): Promise<void> {
           sl = exempt ? -Infinity : padLeft
         }
       }
-      const held = fixedHeld || holdsFixed(cs)
-      for (const ch of Array.from(el.children)) visit(ch, cl, cr, sc, sl, held)
+      const out: Clip = { left: cl, right: cr, scroller: sc, scrollerLeft: sl }
+      const holds = box && holdsFixed(cs)
+      const childAbs = pos !== 'static' || holds ? out : abs
+      const childFixed = holds ? out : fixed
+      for (const ch of Array.from(el.children)) visit(ch, out, childAbs, childFixed)
     }
-    for (const ch of Array.from(document.body.children)) visit(ch, -Infinity, Infinity, null, -Infinity, false)
+    for (const ch of Array.from(document.body.children)) visit(ch, VIEWPORT, VIEWPORT, VIEWPORT)
 
     return {
       scrollHeight: root.scrollHeight,

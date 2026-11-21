@@ -172,6 +172,23 @@ test.describe('viewport fit (meta, #440)', () => {
     }
   })
 
+  test('an absolutely positioned box is cut only by the clipping ancestors of its containing block (#457)', async ({ page }) => {
+    // The scroller sits between the box and its containing block (the
+    // relative frame), so it neither clips nor scrolls the box.
+    const frame = (left: number, scrollerPos: string): string =>
+      `<div style="position:relative;margin-left:50px;width:300px"><div class="content" style="${scrollerPos}height:200px">` +
+      `<div style="position:absolute;left:${left}px;top:0;width:50px;height:20px"></div></div></div>`
+    // left of the scroller, inside the viewport: visible, nothing cut off
+    await page390(page, frame(-20, ''), '.content{overflow-y:auto}')
+    await expectViewportFit(page)
+    // left of the viewport: the scroller does not hide it from the edge check
+    await page390(page, frame(-60, ''), '.content{overflow-y:auto}')
+    await expect(expectViewportFit(page)).rejects.toThrow(/outside: div > div\.content > div spans x -10\.\.40/)
+    // control: a positioned scroller is the containing block and cuts it off
+    await page390(page, frame(-20, 'position:relative;'), '.content{overflow-y:auto}')
+    await expect(expectViewportFit(page)).rejects.toThrow(/clipped: div > div\.content > div starts at x 30, left of the padding edge 50/)
+  })
+
   test('a region that declares overflow-x may scroll sideways, its own box may not stick out', async ({ page }) => {
     await page390(page, '<div class="scroll"><div style="width:900px;height:20px"></div></div>', '.scroll{overflow-x:auto}')
     await expectViewportFit(page)
