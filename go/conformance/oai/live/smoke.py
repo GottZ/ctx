@@ -329,12 +329,15 @@ def _sdk(b: str, key: str):
         import openai  # noqa: PLC0415 — optional: only run/t25 need it
     except ImportError:
         return None
+
     def same_origin(request):
         # The SDK's HTTP client follows redirects and keeps Authorization on
         # an http → https upgrade of the same host (port 80 → 443); every hop
         # is held to the origin of --base-url instead, before it is sent (#432).
+        # The base is compared as the client writes it: a Unicode host in its
+        # IDNA form (xn--…), as the request carries it.
         to = str(request.url)
-        if _origin(to) != _origin(b):
+        if _origin(to) != _origin(str(type(request.url)(b))):
             raise openai.OpenAIError(f"refused a request to {_written(to)}: smoke.py sends its keys only to the origin "
                                      f"of --base-url, {_written(b)}, and follows a redirect only within it")
 

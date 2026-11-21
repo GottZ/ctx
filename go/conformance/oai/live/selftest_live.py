@@ -797,11 +797,11 @@ _ORIGINS = [
 ]
 
 
-def _sdk_against(handler):
-    """smoke.py's SDK client for http://ctx.example (port 80) with its HTTP
+def _sdk_against(handler, base="http://ctx.example"):
+    """smoke.py's SDK client for base (default port 80) with its HTTP
     client's transport replaced by handler — no socket, no proxy."""
     httpx2 = pytest.importorskip("httpx2")
-    sdk = _module(SMOKE)._sdk("http://ctx.example", KEY)
+    sdk = _module(SMOKE)._sdk(base, KEY)
     assert sdk is not None, "the OpenAI SDK is not installed"
     sdk._client._mounts = {}
     sdk._client._transport = httpx2.MockTransport(handler)
@@ -844,6 +844,40 @@ def test_sdk_follows_a_redirect_within_the_origin():
     sdk, httpx2 = _sdk_against(handler)
     sdk.models.list()
     assert seen == [("/v1/models", f"Bearer {KEY}"), ("/moved/v1/models", f"Bearer {KEY}")], seen
+
+
+def test_sdk_accepts_a_base_url_with_a_unicode_host():
+    """#432: httpx2 sends to the IDNA form of a Unicode host (xn--…); the
+    SDK's hop check compares that with --base-url as httpx2 writes it, so the
+    first request on the base URL's own origin goes through."""
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx2.Response(200, json={"object": "list", "data": []})
+
+    sdk, httpx2 = _sdk_against(handler, base="http://bücher.example")
+    sdk.models.list()
+    assert seen == ["http://xn--bcher-kva.example/v1/models"], seen
+
+
+@pytest.mark.parametrize("fake", ["on"], indirect=True)
+@pytest.mark.parametrize("script", [SMOKE, MEASURE], ids=["smoke", "measure"])
+def test_opener_is_built_once(fake, script, monkeypatch):
+    """#432: the redirect-holding opener is built once per process, as
+    urlopen builds its own — building one loads the CA store (about 6 ms),
+    which measure.py's stream_chat would count into first_byte_s and
+    prefill_s."""
+    import urllib.request
+
+    m = _module(script)
+    built = []
+    real = urllib.request.build_opener
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *h: built.append(h) or real(*h))
+    for _ in range(3):
+        status, _, _ = m.http("GET", fake.url + "/health")
+        assert status == 200
+    assert len(built) == 1, f"{script.name} built {len(built)} openers for 3 requests"
 
 
 @pytest.mark.parametrize("script", [SMOKE, MEASURE], ids=["smoke", "measure"])

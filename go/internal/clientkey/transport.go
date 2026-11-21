@@ -6,7 +6,7 @@
 // goes as a bearer token (NewBearer). TestKeyCredentialOnlyInKeyTransport
 // holds that no other code of theirs sets a credential header.
 //
-// A leaf below both: it imports the standard library and internal/httpx (the
+// A leaf below them: it imports the standard library and internal/httpx (the
 // Origin definition, which brings internal/ssrfguard) and nothing else, so a
 // bench tool that sends through it links neither the command tree nor another
 // server package (depguard clientkey-leaf).

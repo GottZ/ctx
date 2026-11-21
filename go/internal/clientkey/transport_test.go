@@ -284,6 +284,22 @@ func TestBearerTransport(t *testing.T) {
 		t.Errorf("err=%v (New: %v), sent elsewhere %d times — want New's refusal before sending", err, want, other.Load())
 	}
 
+	// Do holds every redirect hop to the origin: a redirect from the origin to
+	// the other server is refused before it is sent.
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirecting.Close)
+	kt2, err := NewBearer(redirecting.URL, fixtureKey, names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hop, _ := http.NewRequest(http.MethodPost, redirecting.URL+"/v1/chat/completions", strings.NewReader("{}"))
+	_, err = kt2.Do(&http.Client{}, hop)
+	if !errors.As(err, new(*Refusal)) || !strings.Contains(err.Error(), "refused a redirect (HTTP 307)") || other.Load() != 0 {
+		t.Errorf("err=%v, sent elsewhere %d times — want the redirect hop refused before it is sent", err, other.Load())
+	}
+
 	if _, err := NewBearer("ftp://ctx.example", fixtureKey, names); err == nil {
 		t.Error("NewBearer accepted a base URL without an http or https host")
 	}
@@ -293,7 +309,7 @@ func TestBearerTransport(t *testing.T) {
 // and #432: a request helper that put the key on a request itself would bypass
 // the origin rule. So no source of a package that can hold a ctx API key
 // spells a credential header — X-Context-Key, or Authorization, which the
-// server takes a key in as well — except the credentialConsts, only
+// server takes a key in as well — or calls SetBasicAuth, except the credentialConsts, only
 // Transport.signed uses them, and a header name those packages set in one of
 // the forms computedHeaderNames reads is a literal (a syntax scan, not a type
 // check: the rule itself is held by the transport, this test keeps the code
@@ -330,6 +346,12 @@ func TestKeyCredentialOnlyInKeyTransport(t *testing.T) {
 			}
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
+			// SetBasicAuth writes Authorization without spelling it.
+			if call, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SetBasicAuth" {
+					literals = append(literals, fset.Position(sel.Sel.Pos()).String()+" (SetBasicAuth)")
+				}
+			}
 			lit, ok := n.(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING || allowedLit[lit] {
 				return true
