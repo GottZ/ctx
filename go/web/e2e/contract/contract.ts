@@ -297,13 +297,15 @@ function ariaTest(c: PageContract, viewport: ViewportName): void {
 
 /**
  * Viewport fit (#419): at the contract viewports the document itself never
- * scrolls. The shell is a 100dvh grid whose content region owns the scroll,
- * and the login mask centres its card inside one viewport. A box that adds
- * padding or a border to a 100dvh height under content-box sizing makes the
- * page taller than the viewport — a scrollbar with nothing to scroll to on
- * platforms with classic scrollbars, and a page a retried click can scroll
- * (#416). Asserted on the settled state right before every capture, so each
- * visual state × theme × viewport carries it.
+ * scrolls vertically. The shell is a 100dvh grid whose content region owns
+ * the scroll, and the login mask centres its card inside one viewport. A box
+ * that adds padding or a border to a 100dvh height under content-box sizing
+ * makes the page taller than the viewport — a scrollbar with nothing to
+ * scroll to on platforms with classic scrollbars, and a page a retried click
+ * can scroll (#416). Asserted on the settled state right before every
+ * capture, so each visual state × theme × viewport carries it. The width is
+ * not asserted: at 390 px the login card is wider than its column, a
+ * separate defect.
  */
 async function expectViewportFit(page: Page): Promise<void> {
   const { scrollHeight, clientHeight } = await page.evaluate(() => ({

@@ -386,13 +386,14 @@ export const contracts: PageContract[] = [
         prepare: async (page) => {
           await page.getByLabel('API key').fill('wrong-key')
           // scroll: 'none' (#416): the button is still in its entrance
-          // animation, so the click can fail the stability check a few times,
-          // and each retry scrolls with an alignment picked by its retry index
-          // (0 if needed, 1 end, 2 center, 3 start). Until #419 the mask was
-          // 30 px taller than the viewport, so index 2 or 3 scrolled the page
-          // and left the button under the resting pointer (:hover) in the
-          // capture. The mask now fits the viewport (the runner asserts it
-          // before every capture), so no alignment has anything to scroll.
+          // animation, so the click can fail the stability check a few times.
+          // The attempt that passes scrolls with an alignment picked by its
+          // retry index (0 if needed, 1 end, 2 center, 3 start). Until #419
+          // the mask was 30 px taller than the viewport, so index 2 or 3
+          // scrolled the page and left the button under the resting pointer
+          // (:hover) in the capture. The mask now fits the viewport (the
+          // runner asserts it before every capture), so no alignment has
+          // anything to scroll.
           // The option stays as an assertion: with it the click fails unless
           // the button is already in the viewport, i.e. reachable without
           // scrolling — the user's own picture at both viewports.
