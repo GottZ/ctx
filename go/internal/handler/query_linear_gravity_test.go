@@ -12,15 +12,8 @@ import (
 // cutoff (issue #463), and a window the rules never yield (End unparsable or
 // before Date) keeps the start day as its point.
 func TestLinearGravityParams(t *testing.T) {
-	day := func(s string) time.Time {
-		t.Helper()
-		d, err := time.Parse("2006-01-02", s)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return d
-	}
 	end := func(s string) *string { return &s }
+	nine := 9
 	cases := []struct {
 		name       string
 		d          llm.TemporalDate
@@ -34,9 +27,18 @@ func TestLinearGravityParams(t *testing.T) {
 		{"until", llm.TemporalDate{Date: "2015-03-01", Dir: llm.DirUntil}, 60, "", "", "2015-03-01"},
 		{"inverted (LLM)", llm.TemporalDate{Date: "2026-11-21", End: end("2015-03-01"), Dir: "range"}, 60, "range", "", ""},
 		{"unparsable end (LLM)", llm.TemporalDate{Date: "2026-11-21", End: end("soon"), Dir: "range"}, 60, "range", "", ""},
+		// A start that does not parse leaves target at the zero time: no
+		// window from year 1 (Runde 1 of #469, L1).
+		{"unparsable start (LLM)", llm.TemporalDate{Date: "2026-03", End: end("2026-03-31"), Dir: "range"}, 60, "range", "", ""},
+		{"empty start (LLM)", llm.TemporalDate{Date: "", End: end("2026-03-31"), Dir: "range"}, 60, "range", "", ""},
+		{"until, unparsable", llm.TemporalDate{Date: "x", Dir: llm.DirUntil}, 60, "", "", ""},
+		{"unparsable start with an hour (LLM)", llm.TemporalDate{Date: "März", End: end("2026-03-31"), Dir: "range", Hour: &nine}, 60, "range", "", ""},
 	}
 	for _, c := range cases {
-		target := day(c.d.Date)
+		target, _ := time.Parse("2006-01-02", c.d.Date) // as the handler derives it
+		if c.d.Hour != nil {
+			target = time.Date(target.Year(), target.Month(), target.Day(), *c.d.Hour, 0, 0, 0, target.Location())
+		}
 		p := linearGravityParams(c.d, target, 0.24)
 		if p.Cutoff != c.cutoff || p.Direction != c.dir || p.BoostWeight != 0.24 || p.Power != 1.5 || !p.TargetDate.Equal(target) {
 			t.Errorf("%s: %+v", c.name, p)

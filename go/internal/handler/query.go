@@ -401,9 +401,11 @@ const (
 // A date with End is the window from target to End and a DirUntil date the
 // window up to target (issue #463): every date inside earns the full gravity,
 // so "seit März 2024" rewards 2025 and 2026 like March 2024, and "bis März
-// 2015" rewards what lies before its end instead of today. A window whose End
-// does not parse or lies before its start (only an LLM answer can carry one)
-// keeps the day of target as before.
+// 2015" rewards what lies before its end instead of today. A window whose
+// start or End does not parse, or whose End lies before its start (only an
+// LLM answer can carry one), keeps the day of target as before — with an
+// unparsable start that is the zero time (plus an hour), which no content
+// date is near.
 func linearGravityParams(d llm.TemporalDate, target time.Time, boostWeight float64) rrf.GravityParams {
 	p := rrf.GravityParams{
 		TargetDate:  target,
@@ -412,16 +414,19 @@ func linearGravityParams(d llm.TemporalDate, target time.Time, boostWeight float
 		Power:       1.5,
 		BoostWeight: boostWeight,
 	}
+	_, startErr := time.Parse("2006-01-02", d.Date)
 	switch {
 	case d.End != nil:
 		p.Cutoff = windowCutoffDays
-		if end, err := time.Parse("2006-01-02", *d.End); err == nil && !end.Before(target) {
+		if end, err := time.Parse("2006-01-02", *d.End); err == nil && startErr == nil && !end.Before(target) {
 			p.WindowStart, p.WindowEnd = target, end
 		}
 	case d.Dir == llm.DirUntil:
 		p.Cutoff = windowCutoffDays
 		p.Direction = ""
-		p.WindowEnd = target
+		if startErr == nil {
+			p.WindowEnd = target
+		}
 	}
 	return p
 }
