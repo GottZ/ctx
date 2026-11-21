@@ -431,7 +431,7 @@ func TestDerivedSweepCoverage_Integration(t *testing.T) {
 				t.Fatal("a derived row entered the G41 audit pick set — the audit would overwrite a folded classification")
 			}
 		}
-		applied, err := store.ApplyAuditVerdict(ctx, pool, audited, backends.SensPublic, md5Of(t, pool, audited))
+		applied, err := store.ApplyAuditVerdict(ctx, pool, audited, backends.SensPublic, md5Of(t, pool, audited), blockTitleMD5(t, pool, audited))
 		if err != nil {
 			t.Fatalf("apply audit verdict: %v", err)
 		}

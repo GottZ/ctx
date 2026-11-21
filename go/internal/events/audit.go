@@ -362,7 +362,8 @@ func (s *Scheduler) auditOneBlock(ctx context.Context, cfg *config.Config, blk s
 	// blk.ContentMD5 is the digest of the content the model was asked about AND
 	// the content clampVerdict scanned — binding it here is what keeps the
 	// verdict about a content version, not about a row id (design 04 §2.4-C).
-	applied, err := store.ApplyAuditVerdict(ctx, s.pool, blk.ID, verdict, blk.ContentMD5)
+	// blk.TitleMD5 binds the title the model was asked about (issue #452).
+	applied, err := store.ApplyAuditVerdict(ctx, s.pool, blk.ID, verdict, blk.ContentMD5, blk.TitleMD5)
 	if err != nil {
 		s.auditAbort(fmt.Sprintf("verdict write: %v", err))
 		return sample, true

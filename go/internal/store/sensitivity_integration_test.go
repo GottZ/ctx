@@ -70,6 +70,20 @@ func blockContentMD5(t *testing.T, pool *pgxpool.Pool, id string) string {
 	return sum
 }
 
+// blockTitleMD5 is blockContentMD5 for the title, the second half of the
+// version a verdict is bound to (issue #452).
+func blockTitleMD5(t *testing.T, pool *pgxpool.Pool, id string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var sum string
+	if err := pool.QueryRow(ctx,
+		`SELECT md5(title) FROM context_blocks WHERE id = $1`, id).Scan(&sum); err != nil {
+		t.Fatalf("read title digest: %v", err)
+	}
+	return sum
+}
+
 func blockSensState(t *testing.T, pool *pgxpool.Pool, id string) (sens, source string, auditedAt *time.Time) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -120,7 +134,7 @@ func TestSensitivityAudit_Integration(t *testing.T) {
 	})
 
 	t.Run("manual is untouchable by the source predicate", func(t *testing.T) {
-		applied, err := store.ApplyAuditVerdict(ctx, pool, manualID, backends.SensInternal, blockContentMD5(t, pool, manualID))
+		applied, err := store.ApplyAuditVerdict(ctx, pool, manualID, backends.SensInternal, blockContentMD5(t, pool, manualID), blockTitleMD5(t, pool, manualID))
 		if err != nil {
 			t.Fatalf("apply against manual: %v", err)
 		}
@@ -167,7 +181,7 @@ func TestSensitivityAudit_Integration(t *testing.T) {
 	})
 
 	t.Run("verdict write flips source and leaves the pick set", func(t *testing.T) {
-		applied, err := store.ApplyAuditVerdict(ctx, pool, defaultID, backends.SensInternal, blockContentMD5(t, pool, defaultID))
+		applied, err := store.ApplyAuditVerdict(ctx, pool, defaultID, backends.SensInternal, blockContentMD5(t, pool, defaultID), blockTitleMD5(t, pool, defaultID))
 		if err != nil {
 			t.Fatalf("apply: %v", err)
 		}
@@ -184,7 +198,7 @@ func TestSensitivityAudit_Integration(t *testing.T) {
 		if picked := pickIDs(t, pool, "private", 0); picked[defaultID] {
 			t.Error("classified block still in pick set")
 		}
-		applied, err = store.ApplyAuditVerdict(ctx, pool, defaultID, backends.SensPersonal, blockContentMD5(t, pool, defaultID))
+		applied, err = store.ApplyAuditVerdict(ctx, pool, defaultID, backends.SensPersonal, blockContentMD5(t, pool, defaultID), blockTitleMD5(t, pool, defaultID))
 		if err != nil {
 			t.Fatalf("second apply: %v", err)
 		}
