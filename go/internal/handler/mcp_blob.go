@@ -295,7 +295,7 @@ func mcpStageBlobLink(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, i
 		return errResultReject(rej), nil, nil
 	}
 
-	scope, err := store.BlobWriteScope(ctx, cfg.Pool, input.ID, writableBlockScopes(ar))
+	scope, blobID, err := store.BlobWriteScope(ctx, cfg.Pool, input.ID, writableBlockScopes(ar))
 	if err != nil {
 		logRequestError(ctx, "mcp blob_link: stage scope lookup error", "error", err, "request_id", reqID)
 		return classInternal.errResult("stage failed: internal error"), nil, nil
@@ -306,10 +306,12 @@ func mcpStageBlobLink(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, i
 
 	// ID carries the BLOB id here, not a block id — the field means "the row
 	// this op writes", which for op 'update' is a block and for op 'blob_link'
-	// is a blob (store.OpBlobLink documents the double use).
+	// is a blob (store.OpBlobLink documents the double use). The id as stored
+	// (issue #483): the card and both server lines name the blob the way the
+	// direct path does, not as the client spelled it.
 	cw := store.CanonicalWrite{
 		Op:             store.OpBlobLink,
-		ID:             input.ID,
+		ID:             blobID,
 		Scope:          scope,
 		ContextBlockID: input.ContextBlockID,
 	}
@@ -319,7 +321,7 @@ func mcpStageBlobLink(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, i
 		return classInternal.errResult("stage failed: cannot canonicalize payload"), nil, nil
 	}
 
-	noteToolBlob(ctx, input.ID)
+	noteToolBlob(ctx, blobID)
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, scope, store.OpBlobLink, "mcp", canonical, hash, ttl)
 	noteToolStaged(ctx, err, false)
 	if err != nil {

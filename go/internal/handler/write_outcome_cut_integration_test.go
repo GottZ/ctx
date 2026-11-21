@@ -58,12 +58,17 @@ const cutHoldLock = 483483
 const cutAppName = "i483-cut"
 
 // cutProxy forwards TCP connections to the database and cuts all of them on
-// demand: both sides closed, no message.
+// demand: both sides closed, no message — and until heal, a new connection
+// is closed at once: the database is out of reach. That keeps the cancel
+// request pgx sends on a new connection after a broken one
+// (pgconn.asyncClose) from cancelling the held commit, so whether the commit
+// lands does not race the test's release.
 type cutProxy struct {
-	ln     net.Listener
-	target string
-	mu     sync.Mutex
-	conns  []net.Conn
+	ln      net.Listener
+	target  string
+	mu      sync.Mutex
+	conns   []net.Conn
+	refused bool
 }
 
 func newCutProxy(t *testing.T, target string) *cutProxy {
@@ -87,6 +92,13 @@ func (p *cutProxy) serve() {
 		if err != nil {
 			return
 		}
+		p.mu.Lock()
+		refused := p.refused
+		p.mu.Unlock()
+		if refused {
+			_ = c.Close()
+			continue
+		}
 		s, err := net.Dial("tcp", p.target)
 		if err != nil {
 			_ = c.Close()
@@ -100,14 +112,23 @@ func (p *cutProxy) serve() {
 	}
 }
 
-// cut closes every connection the proxy carries, both sides.
+// cut closes every connection the proxy carries, both sides, and refuses new
+// ones until heal.
 func (p *cutProxy) cut() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.refused = true
 	for _, c := range p.conns {
 		_ = c.Close()
 	}
 	p.conns = nil
+}
+
+// heal lets new connections through again.
+func (p *cutProxy) heal() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refused = false
 }
 
 // cutFixture is a database with the hold trigger on the tables the write
@@ -182,7 +203,8 @@ func newCutFixture(t *testing.T) *cutFixture {
 
 // cutDuring runs call while the commit of a write to table waits on the hold
 // lock, cuts the handlers' connections once it waits, waits for call to
-// return, and then lets the held commit go on.
+// return, lets the held commit go on, and heals the proxy once the held
+// backend is gone.
 func (f *cutFixture) cutDuring(t *testing.T, table string, call func()) {
 	t.Helper()
 	ctx := context.Background()
@@ -212,6 +234,8 @@ func (f *cutFixture) cutDuring(t *testing.T, table string, call func()) {
 		t.Fatal("the call did not return after its connection was cut")
 	}
 	release()
+	f.quiesce(t)
+	f.proxy.heal()
 }
 
 // waitLanded polls query (a count) until it is positive: the held commit went
@@ -227,7 +251,8 @@ func (f *cutFixture) waitLanded(t *testing.T, query string, args ...any) {
 			return
 		}
 	}
-	t.Errorf("the held commit never landed (%s): the cut write was not committed after all (waiters at the cut: %v)", query, f.waiters)
+	t.Errorf("the held commit never landed (%s): the cut write was not committed after all (waiters at the cut: %v; backends now: %v)",
+		query, f.waiters, f.activity(t, `true`))
 }
 
 // activity lists the handlers' backends that match where: their state, wait

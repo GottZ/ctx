@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 
@@ -161,4 +162,58 @@ func TestMCPConfirmLine(t *testing.T) {
 		execFault(t, "context_blobs", `NEW.title = 'i483 confirm fault blob'`)
 		confirmFault(t, hash, "confirm: confirmed blob link execute failed", "blob_id", blob.ID)
 	})
+}
+
+// TestMCPStagedBlobLinkNamesTheStoredID — the staged blob_link names the blob
+// as stored, not as the client spelled the id (issue #483 point 5), on its
+// stage line and on the confirm's line, as the direct path does.
+func TestMCPStagedBlobLinkNamesTheStoredID(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := newMCPLineFixture(t)
+	ctx := context.Background()
+	ar, err := auth.AuthenticateRaw(ctx, f.pool, f.plain)
+	if err != nil || !ar.IsValid {
+		t.Fatalf("authenticate fixture key: %v", err)
+	}
+	ar.ConfirmWrites = true
+	block, err := store.UpsertBlock(ctx, f.pool, "i483", "i483 staged link target", "target", nil, nil, "private", false, store.SensitivityWrite{}, "")
+	if err != nil {
+		t.Fatalf("seed block: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		spell func(string) string
+	}{
+		{"upper case", strings.ToUpper},
+		{"braces", func(id string) string { return "{" + id + "}" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			blob, err := store.UpsertBlob(ctx, f.pool, "i483", "i483 staged link "+tc.name, "probe.txt", "text/plain", "private", []byte("payload"), nil, nil, "")
+			if err != nil {
+				t.Fatalf("seed blob: %v", err)
+			}
+			logs := installRejectLogCapture(t)
+			url, done := f.serve(t, ar, nil)
+			text, _ := callTool(t, url, "", "blob_link", map[string]any{"id": tc.spell(blob.ID), "context_block_id": block.ID})
+			waitDone(t, done)
+			m := confirmLineHashRE.FindStringSubmatch(text)
+			if m == nil {
+				t.Fatalf("blob_link did not stage: %s", text)
+			}
+			if line := toolLine(t, logs); line.attrs["staged"] != true || line.attrs["blob_id"] != blob.ID {
+				t.Errorf("stage line = %+v, want staged=true blob_id=%s (as stored)", line.attrs, blob.ID)
+			}
+			logs = installRejectLogCapture(t)
+			url, done = f.serve(t, ar, nil)
+			if text, isErr := callTool(t, url, "", "confirm", map[string]any{"payload_hash": m[1]}); isErr {
+				t.Fatalf("confirm failed: %s", text)
+			}
+			waitDone(t, done)
+			if line := toolLine(t, logs); line.attrs["write_outcome"] != writeCommitted || line.attrs["blob_id"] != blob.ID {
+				t.Errorf("confirm line = %+v, want write_outcome=committed blob_id=%s", line.attrs, blob.ID)
+			}
+		})
+	}
 }

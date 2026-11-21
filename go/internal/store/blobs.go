@@ -218,33 +218,33 @@ func UpdateBlobBlockRef(ctx context.Context, pool *pgxpool.Pool, id, contextBloc
 	return bm, nil
 }
 
-// BlobWriteScope resolves the scope of a blob the caller may WRITE, or the
-// empty string when there is no such blob (absent, outside writeScopes, or a
+// BlobWriteScope resolves the scope of a blob the caller may WRITE and its id
+// as stored (a caller may spell a uuid in upper case or in braces), or two
+// empty strings when there is no such blob (absent, outside writeScopes, or a
 // malformed id — one answer, as in UpdateBlobBlockRef).
 //
 // It is the stage-time twin of that UPDATE: a staged blob_link card has to
 // name the scope it will execute under (the confirm re-validates exactly that
 // scope against the key's current rights, D1-M1), and staging must not write.
 // Same question, same fail-closed reading, no row touched.
-func BlobWriteScope(ctx context.Context, pool *pgxpool.Pool, id string, writeScopes []string) (string, error) {
+func BlobWriteScope(ctx context.Context, pool *pgxpool.Pool, id string, writeScopes []string) (scope, storedID string, err error) {
 	if err := RequireScopes(writeScopes); err != nil { // T07 fail-closed (design/01 sec. 5.4)
-		return "", err
+		return "", "", err
 	}
 	if id == "" {
-		return "", nil
+		return "", "", nil
 	}
-	var scope string
-	err := pool.QueryRow(ctx,
-		`SELECT scope FROM context_blobs WHERE id = $1::uuid AND scope = ANY($2::text[]) LIMIT 1`,
+	err = pool.QueryRow(ctx,
+		`SELECT scope, id::text FROM context_blobs WHERE id = $1::uuid AND scope = ANY($2::text[]) LIMIT 1`,
 		id, writeScopes,
-	).Scan(&scope)
+	).Scan(&scope, &storedID)
 	if pgxdb.AbsentOrMalformed(err) {
-		return "", nil
+		return "", "", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("store: blob write scope: %w", err)
+		return "", "", fmt.Errorf("store: blob write scope: %w", err)
 	}
-	return scope, nil
+	return scope, storedID, nil
 }
 
 // GetBlobByID retrieves a blob by ID, filtered by readScopes.
