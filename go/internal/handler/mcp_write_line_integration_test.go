@@ -567,6 +567,22 @@ func TestMCPWriteLineReviewFixes(t *testing.T) {
 			t.Errorf("tool line %+v, want write_outcome=none", line.attrs)
 		}
 	})
+	t.Run("blob_link names the blob as stored, not the argument's spelling", func(t *testing.T) {
+		url, done := f.serve(t, nil, nil)
+		text, isErr := callTool(t, url, f.plain, "blob_store", map[string]any{"category": "i453", "title": "i453 review blob",
+			"filename": "probe.txt", "mime_type": "text/plain", "text": "blob payload"})
+		waitDone(t, done)
+		var env struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(text), &env); isErr || err != nil || env.ID == "" {
+			t.Fatalf("blob_store answered %q (%v)", text, err)
+		}
+		line := call(t, "blob_link", map[string]any{"id": strings.ToUpper(env.ID), "context_block_id": target})
+		if line.attrs["write_outcome"] != writeCommitted || line.attrs["blob_id"] != env.ID {
+			t.Errorf("tool line %+v, want write_outcome=committed and blob_id=%s (the stored id)", line.attrs, env.ID)
+		}
+	})
 	t.Run("store_batch whose items are all unchanged", func(t *testing.T) {
 		line := call(t, "store_batch", map[string]any{"items": []map[string]any{storeArgs("i453 review target", "target")}})
 		if line.attrs["write_outcome"] != writeNone {
