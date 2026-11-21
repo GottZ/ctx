@@ -108,8 +108,20 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 	pol issueTypePolicy, allow func() bool, c *store.IssuePushCandidate, res *PushResult) (bool, error) {
 
 	ctxFields, ctxH := CtxIssueBase(&c.Block, pol.terminalSet, pol.registryOK)
+	projected := func(b *store.Block) string {
+		_, h := CtxIssueBase(b, pol.terminalSet, pol.registryOK)
+		return h
+	}
 	if ctxH == c.BaseHash {
-		return true, nil // in-sync (updated_at bumped, content unchanged) — 0 wire
+		// In sync (a write that left the projection alone, or an edit undone
+		// since a PATCH): 0 wire, but the row was listed, so it leaves the
+		// candidates through the bound advance (issue #452) — otherwise it
+		// stays listed for good and, past pushBatchLimit, keeps later
+		// candidates out of the listing.
+		if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, ctxH, ctxFields, projected); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	ctxProj, _ := parseIssueProjection(ctxFields)
 	truncated := metaBool(c.Block.Metadata, "truncated")
@@ -129,7 +141,7 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 	}
 	if patch.empty() {
 		// Only a never-pushed field (milestone) diverged: advance base, 0 wire.
-		if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, ctxH, ctxFields); err != nil {
+		if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, ctxH, ctxFields, projected); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -141,7 +153,7 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 	if err := client.UpdateIssue(ctx, repo, c.ForgeID, patch); err != nil {
 		return false, err
 	}
-	if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, ctxH, ctxFields); err != nil {
+	if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, ctxH, ctxFields, projected); err != nil {
 		return false, err
 	}
 	res.Pushed++
@@ -195,8 +207,16 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 
 	block := &store.Block{Content: c.Content}
 	ctxFields, ctxH := CtxCommentBase(block)
+	projected := func(b *store.Block) string {
+		_, h := CtxCommentBase(b)
+		return h
+	}
 	if ctxH == c.BaseHash {
-		return true, nil // in-sync — 0 wire
+		// In sync — 0 wire; the row leaves the candidates as in pushIssue.
+		if err := store.AdvancePushBase(ctx, p.pool, c.BlockID, ctxH, ctxFields, projected); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	body, truncated := store.CapForgeBody(c.Content)
 
@@ -236,7 +256,7 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 	if err := client.UpdateComment(ctx, repo, c.ForgeID, body); err != nil {
 		return false, err
 	}
-	if err := store.AdvancePushBase(ctx, p.pool, c.BlockID, ctxH, ctxFields); err != nil {
+	if err := store.AdvancePushBase(ctx, p.pool, c.BlockID, ctxH, ctxFields, projected); err != nil {
 		return false, err
 	}
 	res.Pushed++

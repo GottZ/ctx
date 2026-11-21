@@ -79,7 +79,7 @@ func TestSensitivityAuditContentBinding_Integration(t *testing.T) {
 
 		rewriteContent(t, pool, id, "v2: AKIAIOSFODNN7EXAMPLE and other things the run never saw")
 
-		applied, err := store.ApplyAuditVerdict(ctx, pool, id, backends.SensInternal, blk.ContentMD5)
+		applied, err := store.ApplyAuditVerdict(ctx, pool, id, backends.SensInternal, blk.ContentMD5, blk.TitleMD5)
 		if err != nil {
 			t.Fatalf("apply: %v", err)
 		}
@@ -121,7 +121,7 @@ func TestSensitivityAuditContentBinding_Integration(t *testing.T) {
 		id := insertAuditBlock(t, pool, scope, "h10-unchanged", "default")
 		blk := pickOne(t, pool, scope)
 
-		applied, err := store.ApplyAuditVerdict(ctx, pool, id, backends.SensInternal, blk.ContentMD5)
+		applied, err := store.ApplyAuditVerdict(ctx, pool, id, backends.SensInternal, blk.ContentMD5, blk.TitleMD5)
 		if err != nil {
 			t.Fatalf("apply: %v", err)
 		}
@@ -147,7 +147,7 @@ func TestSensitivityAuditContentBinding_Integration(t *testing.T) {
 			t.Fatalf("manual reclassification: %v", err)
 		}
 
-		applied, err := store.ApplyAuditVerdict(ctx, pool, id, backends.SensInternal, blk.ContentMD5)
+		applied, err := store.ApplyAuditVerdict(ctx, pool, id, backends.SensInternal, blk.ContentMD5, blk.TitleMD5)
 		if err != nil {
 			t.Fatalf("apply: %v", err)
 		}

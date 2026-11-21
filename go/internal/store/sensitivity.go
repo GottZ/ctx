@@ -104,6 +104,10 @@ type AuditBlock struct {
 	// different digest", not collision resistance against an adversary who
 	// would have to hit a digest they cannot read.
 	ContentMD5 string
+	// TitleMD5 is the same digest of the TITLE as picked: the classifier is
+	// asked about the title and the content (issue #452), so the verdict is
+	// bound to both.
+	TitleMD5 string
 }
 
 // PickAuditBlocks loads up to limit unclassified blocks of the server's home
@@ -120,7 +124,7 @@ func PickAuditBlocks(ctx context.Context, pool *pgxpool.Pool, homeScope string,
 		order = "random()"
 	}
 	rows, err := pool.Query(ctx,
-		`SELECT id, title, content, md5(content) FROM context_blocks
+		`SELECT id, title, content, md5(content), md5(title) FROM context_blocks
 		 WHERE sensitivity_source = 'default' AND NOT is_archived AND scope = $1
 		   AND (sensitivity_audited_at IS NULL OR sensitivity_audited_at < now() - make_interval(secs => $2))
 		 ORDER BY `+order+` LIMIT $3`,
@@ -133,7 +137,7 @@ func PickAuditBlocks(ctx context.Context, pool *pgxpool.Pool, homeScope string,
 	var out []AuditBlock
 	for rows.Next() {
 		var b AuditBlock
-		if err := rows.Scan(&b.ID, &b.Title, &b.Content, &b.ContentMD5); err != nil {
+		if err := rows.Scan(&b.ID, &b.Title, &b.Content, &b.ContentMD5, &b.TitleMD5); err != nil {
 			return nil, fmt.Errorf("store: pick audit blocks scan: %w", err)
 		}
 		out = append(out, b)
@@ -159,12 +163,17 @@ func PickAuditBlocks(ctx context.Context, pool *pgxpool.Pool, homeScope string,
 // stale write would carry a "no secret here" decision about text nobody
 // scanned. A mismatch is the identical, already-modelled outcome as the manual
 // race: applied=false, Discarded++, block untouched, re-picked next run.
-func ApplyAuditVerdict(ctx context.Context, pool *pgxpool.Pool, id string, sens backends.Sensitivity, contentMD5 string) (applied bool, err error) {
+//
+// titleMD5 binds the title the same way (issue #452): the classifier is asked
+// about the title and the content, and a title-only write does not reset
+// sensitivity_source either, so a verdict about a title nobody classified
+// would otherwise take the block out of the pick set for good.
+func ApplyAuditVerdict(ctx context.Context, pool *pgxpool.Pool, id string, sens backends.Sensitivity, contentMD5, titleMD5 string) (applied bool, err error) {
 	tag, err := pool.Exec(ctx,
 		`UPDATE context_blocks
 		    SET sensitivity = $2, sensitivity_source = 'llm-audit', sensitivity_audited_at = now()
-		  WHERE id = $1 AND sensitivity_source = 'default' AND md5(content) = $3`,
-		id, string(sens), contentMD5)
+		  WHERE id = $1 AND sensitivity_source = 'default' AND md5(content) = $3 AND md5(title) = $4`,
+		id, string(sens), contentMD5, titleMD5)
 	if err != nil {
 		return false, fmt.Errorf("store: apply audit verdict: %w", err)
 	}

@@ -176,7 +176,7 @@ func (a *Applier) applyIssue(ctx context.Context, project store.ProjectRow, pol 
 	case base == ctxH && base == forgeH:
 		return ApplyResult{}, nil // (=,=): noop
 	case base == ctxH && base != forgeH:
-		return a.pullUpdateIssue(ctx, project, pol, writable, iss, m.BlockID, content, forgeH, forgeFields, &fUpdated)
+		return a.pullUpdateIssue(ctx, project, pol, writable, iss, m, content, forgeH, forgeFields, &fUpdated)
 	case base != ctxH && base == forgeH:
 		return ApplyResult{}, nil // ctx-ahead: push is I-H, I-G does nothing
 	case ctxH == forgeH:
@@ -210,21 +210,63 @@ func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow,
 	return ApplyResult{Applied: 1}, nil
 }
 
+// pullUpdateIssue writes a forge-ahead issue: the block, base := forgeH and the
+// references, in one transaction. The direction was decided on a read without
+// a lock, and a local write may have changed the block since (issue #452):
+// the block is locked and projected again first (LockPulledBlock), and a block
+// that no longer holds the base goes the matrix's way instead (stillAtBase).
 func (a *Applier) pullUpdateIssue(ctx context.Context, project store.ProjectRow, pol issueTypePolicy,
-	writable []string, iss IssueRemote, blockID string, content store.ForgeIssueContent, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
+	writable []string, iss IssueRemote, m store.SyncMap, content store.ForgeIssueContent, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
 
+	var res ApplyResult
 	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
-		if _, err := store.PullUpdateIssueBlock(ctx, tx, blockID, content); err != nil {
+		res = ApplyResult{}
+		cur, err := store.LockPulledBlock(ctx, tx, m.BlockID, writable)
+		if errors.Is(err, store.ErrIssueNotFound) {
+			return nil // archived/vanished since the read — skip, as the read does
+		}
+		if err != nil {
 			return err
 		}
-		if err := store.UpdateSyncMapBase(ctx, tx, blockID, forgeH, forgeFields, fUpdated); err != nil {
+		ctxFields, ctxH := CtxIssueBase(cur, pol.terminalSet, pol.registryOK)
+		if at, r, err := a.stillAtBase(ctx, tx, m, ctxH, ctxFields, forgeH, fUpdated); !at || err != nil {
+			res = r
 			return err
 		}
-		return a.applyReferences(ctx, tx, project, pol, writable, blockID, iss.Number, iss.Body)
+		if _, err := store.PullUpdateIssueBlock(ctx, tx, m.BlockID, content); err != nil {
+			return err
+		}
+		if err := store.UpdateSyncMapBase(ctx, tx, m.BlockID, forgeH, forgeFields, fUpdated); err != nil {
+			return err
+		}
+		res = ApplyResult{Applied: 1}
+		return a.applyReferences(ctx, tx, project, pol, writable, m.BlockID, iss.Number, iss.Body)
 	}); err != nil {
 		return ApplyResult{}, err
 	}
-	return ApplyResult{Applied: 1}, nil
+	return res, nil
+}
+
+// stillAtBase answers whether the locked block still projects to the
+// mapping's base (ctxH), the state the pull decided "forge-ahead" on. When a
+// local write moved it since the read, the pull must not overwrite it, and the
+// 3-way matrix decides again with both sides moved: the block now equals the
+// forge ⇒ converged (base := ctxH, no block write); otherwise ⇒ conflict (the
+// flag, no write either way; a mapping already flagged stays as it is, 0 new
+// conflicts, as on the read path).
+func (a *Applier) stillAtBase(ctx context.Context, tx pgx.Tx, m store.SyncMap, ctxH string, ctxFields json.RawMessage,
+	forgeH string, fUpdated *time.Time) (bool, ApplyResult, error) {
+
+	switch {
+	case ctxH == m.BaseHash:
+		return true, ApplyResult{}, nil
+	case ctxH == forgeH:
+		return false, ApplyResult{}, store.UpdateSyncMapBase(ctx, tx, m.BlockID, ctxH, ctxFields, fUpdated)
+	case m.Conflict:
+		return false, ApplyResult{}, nil
+	default:
+		return false, ApplyResult{Conflicts: 1}, store.FlagSyncMapConflict(ctx, tx, m.BlockID, a.clock())
+	}
 }
 
 // txBaseUpdate rewrites base_hash + the base-field snapshot alone (convergence)
@@ -316,7 +358,7 @@ func (a *Applier) applyComment(ctx context.Context, project store.ProjectRow, wr
 	case base == ctxH && base == forgeH:
 		return ApplyResult{}, nil
 	case base == ctxH && base != forgeH:
-		return a.pullUpdateComment(ctx, m.BlockID, cappedBody, forgeH, forgeFields, &fUpdated)
+		return a.pullUpdateComment(ctx, writable, m, cappedBody, forgeH, forgeFields, &fUpdated)
 	case base != ctxH && base == forgeH:
 		return ApplyResult{}, nil // ctx-ahead (I-H)
 	case ctxH == forgeH:
@@ -364,16 +406,32 @@ func (a *Applier) pullCreateComment(ctx context.Context, project store.ProjectRo
 	return ApplyResult{Applied: 1}, nil
 }
 
-func (a *Applier) pullUpdateComment(ctx context.Context, blockID, body, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
+// pullUpdateComment is pullUpdateIssue for a comment ({body} projection).
+func (a *Applier) pullUpdateComment(ctx context.Context, writable []string, m store.SyncMap, body, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
+	var res ApplyResult
 	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
-		if _, err := store.PullUpdateCommentBlock(ctx, tx, blockID, body); err != nil {
+		res = ApplyResult{}
+		cur, err := store.LockPulledBlock(ctx, tx, m.BlockID, writable)
+		if errors.Is(err, store.ErrIssueNotFound) {
+			return nil
+		}
+		if err != nil {
 			return err
 		}
-		return store.UpdateSyncMapBase(ctx, tx, blockID, forgeH, forgeFields, fUpdated)
+		ctxFields, ctxH := CtxCommentBase(cur)
+		if at, r, err := a.stillAtBase(ctx, tx, m, ctxH, ctxFields, forgeH, fUpdated); !at || err != nil {
+			res = r
+			return err
+		}
+		if _, err := store.PullUpdateCommentBlock(ctx, tx, m.BlockID, body); err != nil {
+			return err
+		}
+		res = ApplyResult{Applied: 1}
+		return store.UpdateSyncMapBase(ctx, tx, m.BlockID, forgeH, forgeFields, fUpdated)
 	}); err != nil {
 		return ApplyResult{}, err
 	}
-	return ApplyResult{Applied: 1}, nil
+	return res, nil
 }
 
 // issueRefRe extracts a "#<nr>" reference token with a boundary before the '#'

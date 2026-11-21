@@ -21,6 +21,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"unicode/utf8"
 
@@ -115,6 +116,29 @@ func PullCreateIssueBlock(ctx context.Context, tx pgx.Tx, scope string, c ForgeI
 	return b, nil
 }
 
+// LockPulledBlock reads an issue or comment block of scopes inside the pull's
+// transaction and locks it FOR NO KEY UPDATE — the lock the pull's own UPDATE
+// takes, which waits for a local writer still holding the row (UpdateIssueBlock
+// takes FOR UPDATE, UpdateBlock FOR NO KEY UPDATE) and keeps the next one out
+// until the pull commits. The pull decided its direction on a read without a
+// lock; it projects this row again before it writes (issue #452). A block that
+// is archived, gone or out of scopes reads as ErrIssueNotFound.
+func LockPulledBlock(ctx context.Context, tx pgx.Tx, blockID string, scopes []string) (*Block, error) {
+	b, err := scanIssue(tx.QueryRow(ctx, `
+		SELECT `+issueScanCols+`
+		  FROM context_blocks
+		 WHERE id = $1::uuid AND NOT is_archived AND scope = ANY($2::text[])
+		   AND type_name = ANY(ARRAY['`+IssueTypeName+`','`+CommentTypeName+`'])
+		   FOR NO KEY UPDATE`, blockID, scopes))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrIssueNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: lock pulled block: %w", err)
+	}
+	return b, nil
+}
+
 // PullUpdateIssueBlock applies a forge-ahead update to an existing issue block
 // (§4.5.2 pull row): title (the "#<nr>" prefix re-derived from the stable
 // number), content, the metadata patch (JSONB-merged so forge/local_seq survive),
@@ -123,6 +147,14 @@ func PullCreateIssueBlock(ctx context.Context, tx pgx.Tx, scope string, c ForgeI
 // marked stale, until the backfill writes the new one; a state- or label-only
 // change keeps it current, issue #236). Tx-bound (commits with the base_hash
 // rewrite). A local_seq (from a former #L draft) is left untouched.
+//
+// The guard's check mark, which the invalidation drops for a changed title or
+// body (issue #452), is stripped in the metadata expression this statement
+// writes anyway, the way UpdateBlock strips it for a content write
+// (updateMetadataExpr): the invalidation then finds no mark and passes the
+// document through, so the row's metadata is written once, not twice (one
+// TOAST value instead of two for a large document). title and content in the
+// SET expression are the stored row's values.
 func PullUpdateIssueBlock(ctx context.Context, tx pgx.Tx, blockID string, c ForgeIssueContent) (*Block, error) {
 	title := fmt.Sprintf("#%d %s", c.Number, c.Title)
 	var status any
@@ -131,7 +163,10 @@ func PullUpdateIssueBlock(ctx context.Context, tx pgx.Tx, blockID string, c Forg
 	}
 	row := tx.QueryRow(ctx, `
 		UPDATE context_blocks
-		   SET title = $2, content = $3, metadata = metadata || $4::jsonb,
+		   SET title = $2, content = $3,
+		       metadata = CASE WHEN title IS DISTINCT FROM $2 OR content IS DISTINCT FROM $3
+		                       THEN (metadata || $4::jsonb) - 'guard_checked_at'
+		                       ELSE metadata || $4::jsonb END,
 		       workflow_status = $5, updated_at = now()
 		 WHERE id = $1::uuid
 		RETURNING `+issueScanCols+`, `+textChangedCol,
