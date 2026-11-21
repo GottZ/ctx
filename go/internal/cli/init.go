@@ -332,6 +332,12 @@ func probeKey(baseURL, key string) keyProbe {
 	c := NewClientWithTimeout(Config{BaseURL: baseURL, Key: key}, 5*time.Second, 64<<10)
 	body, status, err := c.Do(http.MethodGet, "/api/whoami", nil)
 	if err != nil {
+		// A redirect off the origin was answered: the server is reachable,
+		// and the refusal says what to put into CTX_BASE_URL.
+		var refused *keyOriginRefusal
+		if errors.As(err, &refused) {
+			return keyProbe{verdict: keyUnverified, detail: refused.Error()}
+		}
 		return keyProbe{verdict: keyUnverified, detail: "server unreachable"}
 	}
 	if status == http.StatusUnauthorized {
@@ -771,8 +777,8 @@ type githubRelease struct {
 // stepVersion is the ONE call in the whole CLI that leaves the user's ctxd and
 // talks to a FOREIGN host. It therefore builds its OWN http.Client and must
 // never be routed through the package Client or newHTTPClient's twin from
-// stepServer: Client.Get/Post/Do set the header X-Context-Key unconditionally
-// (client.go), so a "one client for everything" merge would hand the user's API
+// stepServer: Client.Get/Post/Do attach X-Context-Key unconditionally
+// (keytransport.go), so a "one client for everything" merge would hand the user's API
 // key to a third party (design/03 §5.6). The rule is held by a grep invariant
 // and by TestForeignHostClientCarriesNoKey, not by this comment.
 func stepVersion() bool {
