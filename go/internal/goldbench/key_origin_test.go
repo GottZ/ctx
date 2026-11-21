@@ -140,19 +140,82 @@ func TestGoldbenchRefusalNamesTargetAndRule(t *testing.T) {
 }
 
 // TestGoldbenchRefusalOfASchemeChangeSaysWhatToSet: an http→https redirect on
-// the same host (a proxy upgrading the connection) is not followed — the key
-// already crossed in clear text — and the refusal names the -endpoint to use.
+// the same host (a proxy upgrading the connection) is not followed — the key,
+// or without one the prompt, already crossed in clear text — and the refusal
+// names the -endpoint to use.
 func TestGoldbenchRefusalOfASchemeChangeSaysWhatToSet(t *testing.T) {
-	var home *httptest.Server
-	home = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		u, _ := url.Parse(home.URL)
-		http.Redirect(w, r, "https://"+u.Host+r.URL.RequestURI(), http.StatusPermanentRedirect)
-	}))
-	t.Cleanup(home.Close)
-	u, _ := url.Parse(home.URL)
-	_, err := goldbenchChat(home.URL+"/v1", goldbenchFixtureKey)
-	if want := "set -endpoint to https://" + u.Host + "/v1/chat/completions if"; err == nil || !strings.Contains(err.Error(), want) {
-		t.Errorf("err = %v, want it to say %q", err, want)
+	for _, key := range []string{goldbenchFixtureKey, ""} {
+		t.Run(map[bool]string{true: "with key", false: "without key"}[key != ""], func(t *testing.T) {
+			var home *httptest.Server
+			home = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				u, _ := url.Parse(home.URL)
+				http.Redirect(w, r, "https://"+u.Host+r.URL.RequestURI(), http.StatusPermanentRedirect)
+			}))
+			t.Cleanup(home.Close)
+			u, _ := url.Parse(home.URL)
+			_, err := goldbenchChat(home.URL+"/v1", key)
+			if want := "set -endpoint to https://" + u.Host + "/v1/chat/completions if"; err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("err = %v, want it to say %q", err, want)
+			}
+		})
+	}
+}
+
+// TestGoldbenchWithoutKeyNeverFollowsARedirectToAnotherOrigin: without a key
+// the chat call still carries the gold case's prompt, so it is held to the
+// origin of -endpoint too (#446): for every redirect status, a redirect to
+// the same host on another port, or to another host name, is refused before
+// it is sent.
+//
+// RED before #446: without a key nothing was bound and net/http followed the
+// redirect to any host — on 307/308 with the prompt.
+func TestGoldbenchWithoutKeyNeverFollowsARedirectToAnotherOrigin(t *testing.T) {
+	for _, code := range goldbenchRedirectCodes {
+		for _, other := range []string{"other port", "other host"} {
+			t.Run(other+"/"+http.StatusText(code), func(t *testing.T) {
+				second := newGoldbenchHost(t)
+				target := second.srv.URL
+				if other == "other host" {
+					target = strings.Replace(target, "127.0.0.1", "localhost", 1)
+				}
+				var homeSeen atomic.Int32
+				home := goldbenchRedirecting(t, target, code, &homeSeen)
+				_, err := goldbenchChat(home.URL, "")
+
+				if n := second.requests.Load(); n != 0 {
+					t.Errorf("the second server got %d requests", n)
+				}
+				if n := homeSeen.Load(); n != 1 {
+					t.Errorf("the configured server saw %d requests, want 1", n)
+				}
+				if want := "refused a redirect (HTTP " + strconv.Itoa(code) + ")"; err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("err = %v, want it to say %q", err, want)
+				}
+			})
+		}
+	}
+}
+
+// TestGoldbenchWithoutKeyRefusalNamesTargetAndRule: the refusal of a keyless
+// call names where the redirect pointed, the origin of -endpoint and the
+// flag, and speaks of requests, not of a key the call does not have.
+func TestGoldbenchWithoutKeyRefusalNamesTargetAndRule(t *testing.T) {
+	second := newGoldbenchHost(t)
+	var seen atomic.Int32
+	home := goldbenchRedirecting(t, second.srv.URL, http.StatusTemporaryRedirect, &seen)
+	_, err := goldbenchChat(home.URL, "")
+	if err == nil {
+		t.Fatal("no error")
+	}
+	msg := err.Error()
+	t.Logf("refusal: %s", msg)
+	for _, want := range []string{second.srv.URL, home.URL, "HTTP 307", "ctx-goldbench sends its requests only to the origin of -endpoint"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal %q does not name %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "API key") {
+		t.Errorf("refusal of a keyless call speaks of an API key: %q", msg)
 	}
 }
 
@@ -198,35 +261,51 @@ func TestGoldbenchKeyFollowsARedirectWithinItsOrigin(t *testing.T) {
 	}
 }
 
-// TestGoldbenchWithoutKeySendsNoCredential: without a key nothing is bound —
-// no Authorization header, and a redirect is followed as net/http follows it,
-// as before #432.
+// TestGoldbenchWithoutKeySendsNoCredential: without a key no Authorization
+// header goes out on any hop, and a redirect within the origin of -endpoint is
+// followed, on 307/308 with the body re-sent.
 func TestGoldbenchWithoutKeySendsNoCredential(t *testing.T) {
-	var auth atomic.Int32
-	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := r.Header["Authorization"]; ok {
-			auth.Add(1)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, goldbenchAnswer)
-	}))
-	t.Cleanup(second.Close)
-	var seen atomic.Int32
-	home := goldbenchRedirecting(t, second.URL, http.StatusTemporaryRedirect, &seen)
-	res, err := goldbenchChat(home.URL, "")
-	if err != nil || res.Content != "ok" {
-		t.Fatalf("res=%+v err=%v, want the keyless call to follow the redirect as before", res, err)
-	}
-	if n := auth.Load(); n != 0 {
-		t.Errorf("a keyless call sent Authorization %d times", n)
+	for _, code := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			var auth, moved, withBody atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, ok := r.Header["Authorization"]; ok {
+					auth.Add(1)
+				}
+				if !strings.HasPrefix(r.URL.Path, "/moved/") {
+					http.Redirect(w, r, "/moved"+r.URL.RequestURI(), code)
+					return
+				}
+				moved.Add(1)
+				if b, _ := io.ReadAll(r.Body); strings.Contains(string(b), "the gold case's prompt") {
+					withBody.Add(1)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, goldbenchAnswer)
+			}))
+			t.Cleanup(srv.Close)
+			res, err := goldbenchChat(srv.URL, "")
+			if err != nil || res.Content != "ok" {
+				t.Fatalf("res=%+v err=%v, want the keyless call to follow the redirect within its origin", res, err)
+			}
+			if moved.Load() != 1 || withBody.Load() != 1 {
+				t.Errorf("moved=%d body=%d, want the redirect followed once with the body re-sent", moved.Load(), withBody.Load())
+			}
+			if n := auth.Load(); n != 0 {
+				t.Errorf("a keyless call sent Authorization %d times", n)
+			}
+		})
 	}
 }
 
-// TestGoldbenchKeyNeedsAnHTTPEndpoint: with a key, an -endpoint without an
-// http or https host is refused before any request, naming the flag.
+// TestGoldbenchKeyNeedsAnHTTPEndpoint: with a key and without one, an
+// -endpoint without an http or https host is refused before any request,
+// naming the flag.
 func TestGoldbenchKeyNeedsAnHTTPEndpoint(t *testing.T) {
-	_, err := goldbenchChat("ftp://ctx.example", goldbenchFixtureKey)
-	if want := "-endpoint is not a usable URL"; err == nil || !strings.Contains(err.Error(), want) {
-		t.Errorf("err = %v, want it to say %q", err, want)
+	for _, key := range []string{goldbenchFixtureKey, ""} {
+		_, err := goldbenchChat("ftp://ctx.example", key)
+		if want := "-endpoint is not a usable URL"; err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("key %t: err = %v, want it to say %q", key != "", err, want)
+		}
 	}
 }

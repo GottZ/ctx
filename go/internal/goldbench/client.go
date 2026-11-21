@@ -303,18 +303,22 @@ func (c *Client) ChatWithUsage(ctx context.Context, req ChatRequest) (ChatResult
 	return out, nil
 }
 
-// send is how a chat call leaves ctx-goldbench (#432). With an API key it goes
-// through internal/clientkey, by the rule of the ctx CLI and ctx-armsweep: the
-// key, as a bearer token, only to the origin (scheme, host, port) of the
-// endpoint, and a redirect followed only within that origin — one anywhere
-// else is refused before it is sent, key and prompt with it. net/http alone
-// keeps Authorization on another port or scheme of the same host name. Without
-// a key nothing is bound and the call follows redirects as net/http does.
+// send is how a chat call leaves ctx-goldbench (#432, #446): through
+// internal/clientkey, by the rule of the ctx CLI and ctx-armsweep — the call
+// only to the origin (scheme, host, port) of the endpoint, and a redirect
+// followed only within that origin; one anywhere else is refused before it is
+// sent, the prompt with it. With an API key the key goes along as a bearer
+// token (net/http alone keeps Authorization on another port or scheme of the
+// same host name); without one no header is attached, and the rule still
+// holds the prompt, which net/http alone re-sends on a 307 or 308 to any host.
 func (c *Client) send(req *http.Request) (*http.Response, error) {
+	var kt clientkey.Transport
+	var err error
 	if c.apiKey == "" {
-		return c.hc.Do(req)
+		kt, err = clientkey.NewUnkeyed(c.url, keyNames)
+	} else {
+		kt, err = clientkey.NewBearer(c.url, c.apiKey, keyNames)
 	}
-	kt, err := clientkey.NewBearer(c.url, c.apiKey, keyNames)
 	if err != nil {
 		return nil, fmt.Errorf("-endpoint is not a usable URL: %w", err)
 	}

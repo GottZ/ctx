@@ -7,6 +7,12 @@
 #        bash eval-cyclic.sh --reference-date YYYY-MM-DD — frozen reference date
 #        bash eval-cyclic.sh --branch <name>       — overrides git-branch im Output
 #        bash eval-cyclic.sh --internal            — bypass reverse-proxy (uses http://ctx:8080 from n8nintern network; override via CTX_INTERNAL_URL)
+#        CTX_EVAL_INSECURE=1 bash eval-cyclic.sh   — accept a self-signed TLS certificate (verification is on by default;
+#                                                    a certificate that does not verify stops the run)
+#
+# The key goes only to the base URL (and to the proxy http_proxy names, for an http:// one): a redirect is not
+# followed (urllib would copy X-Context-Key to any Location) and stops the run naming its target — set the base URL
+# to the address the server answers on.
 #
 # Misst Top-K-Overlap (k=5) gegen .project/eval-cyclic-gold.json (default, korpus-spezifisch im privaten Submodule).
 # Bewertungs-Methodologie: .project/eval-cyclic-methodology.md
@@ -32,7 +38,7 @@ while [[ $# -gt 0 ]]; do
     --reference-date) REFERENCE_DATE="$2"; shift 2 ;;
     --branch) BRANCH_OVERRIDE="$2"; shift 2 ;;
     --internal) INTERNAL=true; shift ;;
-    -h|--help) sed -n '1,16p' "$0"; exit 0 ;;
+    -h|--help) sed -n '1,22p' "$0"; exit 0 ;;
     *) echo "[FATAL] unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -56,37 +62,53 @@ fi
 # are unstable across restarts (W47-NEU-F), DNS-name is stable.
 if $INTERNAL; then
   WEBHOOK="${CTX_INTERNAL_URL:-http://ctx:8080}"
+  WEBHOOK_VAR=CTX_INTERNAL_URL
 else
   WEBHOOK="${WEBHOOK_BASE_URL:?WEBHOOK_BASE_URL not in .env}"
+  WEBHOOK_VAR=WEBHOOK_BASE_URL
 fi
 KEY_PRIVATE="${CONTEXT_API_KEY_PRIVATE:?CONTEXT_API_KEY_PRIVATE not in .env}"
 GIT_REF="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 BRANCH="${BRANCH_OVERRIDE:-$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)}"
 RESULTS_FILE="${SCRIPT_DIR}/.eval-cyclic-results-${BRANCH}.json"
 
-api_query() {
-  local query="$1"
-  local timeout="${2:-60}"
-  local payload
-  payload=$(python3 -c "import sys,json; print(json.dumps({'query':sys.argv[1]}))" "$query")
-  curl -sk --max-time "$timeout" -X POST "$WEBHOOK/api/query" \
-    -H "Content-Type: application/json" \
-    -H "X-Context-Key: $KEY_PRIVATE" \
-    -d "$payload" 2>/dev/null
-}
-
 run_eval() {
-  python3 - "$GOLD_FILE" "$REFERENCE_DATE" "$GIT_REF" "$BRANCH" "$TIMESTAMP" "$WEBHOOK" "$KEY_PRIVATE" <<'PY'
-import json, sys, urllib.request, urllib.error, ssl, statistics, os
+  python3 - "$GOLD_FILE" "$REFERENCE_DATE" "$GIT_REF" "$BRANCH" "$TIMESTAMP" "$WEBHOOK" "$KEY_PRIVATE" "$WEBHOOK_VAR" <<'PY'
+import json, sys, urllib.request, urllib.error, urllib.parse, ssl, statistics, os
 
-gold_path, ref_date, git_ref, branch, timestamp, webhook, api_key = sys.argv[1:8]
+gold_path, ref_date, git_ref, branch, timestamp, webhook, api_key, webhook_var = sys.argv[1:9]
 
 with open(gold_path) as f:
     gold = json.load(f)
 
+# CTX_EVAL_INSECURE=1 accepts the self-signed certificate of a local reverse
+# proxy; verification is on otherwise (#445).
 ctx = ssl.create_default_context()
-ctx.check_hostname = False
-ctx.verify_mode = ssl.CERT_NONE
+if os.environ.get("CTX_EVAL_INSECURE") == "1":
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+class RefusedRedirect(Exception):
+    pass
+
+def written(url):
+    """scheme://host[:port] of url, without userinfo, path or query."""
+    parts = urllib.parse.urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}"
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow no redirect (#445): urllib's own handler copies every request
+    header to any Location, X-Context-Key with it. ctx answers /api/query
+    itself, so a redirect means the base URL is not the server's address."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        fp.close()
+        raise RefusedRedirect(
+            f"refused a redirect (HTTP {code}) to {written(newurl)}: eval-cyclic.sh sends its key only to "
+            f"{webhook_var}, {written(webhook)}, and follows no redirect; "
+            f"set {webhook_var} to the address the server answers on")
+
+opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ctx))
 
 def query(q):
     body = json.dumps({"query": q}).encode("utf-8")
@@ -97,9 +119,15 @@ def query(q):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=120, context=ctx) as resp:
+        with opener.open(req, timeout=120) as resp:
             return json.loads(resp.read())
+    except RefusedRedirect as e:
+        sys.exit(f"[FATAL] {e}")
     except urllib.error.URLError as e:
+        if isinstance(e.reason, ssl.SSLCertVerificationError):
+            # Every case would fail the same way, and --baseline would store it.
+            sys.exit(f"[FATAL] the TLS certificate of {written(webhook)} does not verify ({e.reason.verify_message}); "
+                     "CTX_EVAL_INSECURE=1 accepts a self-signed one")
         return {"error": str(e), "results": []}
     except Exception as e:
         return {"error": str(e), "results": []}

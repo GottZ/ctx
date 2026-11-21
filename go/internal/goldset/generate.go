@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/GottZ/ctx/internal/clientkey"
 )
 
 // The G-Q prompt. Frozen: its sha256 goes into the stamp, so any later edit is
@@ -35,9 +37,16 @@ func PromptSHA256() string {
 // generation window on a production serving host.
 const maxBodyChars = 4000
 
+// chatPath is the path NewChatClient appends to a backend's base_url.
+const chatPath = "/v1/chat/completions"
+
+// chatNames are ctx-goldset's words in a refusal of internal/clientkey.
+var chatNames = clientkey.Names{Client: "ctx-goldset", BaseURL: "the base_url of the -backend row"}
+
 // ChatClient is a minimal OpenAI-compatible chat client. It is deliberately
 // separate from internal/llm: this tool must not be able to pick up a runtime
 // backend switch and silently send private block content somewhere else.
+// For the same reason Ask follows a redirect only within the origin of URL.
 type ChatClient struct {
 	URL       string
 	Model     string
@@ -65,7 +74,7 @@ func NewChatClient(b Backend, model string, timeout time.Duration) (*ChatClient,
 		return nil, fmt.Errorf("backend %q: no model in model_map.default", b.Name)
 	}
 	return &ChatClient{
-		URL:       strings.TrimSuffix(b.BaseURL, "/") + "/v1/chat/completions",
+		URL:       strings.TrimSuffix(b.BaseURL, "/") + chatPath,
 		Model:     model,
 		ExtraBody: extra,
 		HTTP:      &http.Client{Timeout: timeout},
@@ -109,7 +118,17 @@ func (c *ChatClient) Ask(ctx context.Context, system, user string, maxTokens int
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.HTTP.Do(req)
+	// The body is block content, sent to a backend that passed RequireOnPrem
+	// by its base_url; net/http alone re-sends it on a 307 or 308 to any host
+	// (#446). internal/clientkey holds every hop to the origin of URL and
+	// refuses one anywhere else before it is sent; the refusal advises the
+	// base_url, without the path appended here. Bound per call, so a
+	// ChatClient assembled as a literal holds the rule too.
+	bound, err := clientkey.NewUnkeyed(strings.TrimSuffix(c.URL, chatPath), chatNames)
+	if err != nil {
+		return "", fmt.Errorf("chat: the backend's base_url is not a usable URL: %w", err)
+	}
+	resp, err := bound.Do(c.HTTP, req)
 	if err != nil {
 		return "", err
 	}
