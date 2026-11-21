@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -137,6 +138,7 @@ type BatchResult struct {
 // way.
 func UpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUpsert, apiKeyID string, types *blocktype.Set, budget *WriteBudget) ([]BatchResult, error) {
 	var results []BatchResult
+	times := batchContentTimes(items)
 	err := pgxdb.Write(ctx, pool, pgxdb.At("store: upsert block batch"), func(tx pgx.Tx) error {
 		if budget != nil {
 			if err := budget.lock(ctx, tx); err != nil {
@@ -144,7 +146,7 @@ func UpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUpsert, 
 			}
 		}
 		var err error
-		if results, err = upsertBlocksTx(ctx, tx, items, apiKeyID, types, budget); err != nil {
+		if results, err = upsertBlocksTx(ctx, tx, items, times, apiKeyID, types, budget); err != nil {
 			return err
 		}
 		if budget == nil {
@@ -175,8 +177,9 @@ func UpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUpsert, 
 // promises a batch its confirm would refuse on today's rows; the confirm
 // decides again.
 func CheckUpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUpsert, apiKeyID string, types *blocktype.Set) error {
+	times := batchContentTimes(items)
 	err := pgxdb.Write(ctx, pool, pgxdb.At("store: check block batch"), func(tx pgx.Tx) error {
-		if _, err := upsertBlocksTx(ctx, tx, items, apiKeyID, types, nil); err != nil {
+		if _, err := upsertBlocksTx(ctx, tx, items, times, apiKeyID, types, nil); err != nil {
 			return err
 		}
 		return pgxdb.ErrRollback
@@ -196,11 +199,22 @@ type batchHold struct {
 	target supersedesTarget
 }
 
+// batchContentTimes is ExtractDates of every item's content, computed before
+// the batch's transaction (prepareUpsert says why).
+func batchContentTimes(items []BatchUpsert) [][]time.Time {
+	times := make([][]time.Time, len(items))
+	for i, it := range items {
+		times[i] = ExtractDates(it.Content)
+	}
+	return times
+}
+
 // upsertBlocksTx is the batch inside its transaction (see UpsertBlocks): the
 // scope locks, the lock pass over every item with its no-op decision, the
 // budget check for the items that write, then the writes. budget nil checks
-// nothing; its lock is the caller's, taken before this.
-func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, apiKeyID string, types *blocktype.Set, budget *WriteBudget) ([]BatchResult, error) {
+// nothing; its lock is the caller's, taken before this. times holds each
+// item's content_times (batchContentTimes).
+func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, times [][]time.Time, apiKeyID string, types *blocktype.Set, budget *WriteBudget) ([]BatchResult, error) {
 	for _, scope := range batchScopes(items) {
 		if err := LockSupersedesScope(ctx, tx, scope); err != nil {
 			return nil, err
@@ -230,7 +244,7 @@ func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, apiKeyI
 		if holds[i].match.Unchanged() {
 			continue
 		}
-		b, err := writeBatchItem(ctx, tx, items[i], holds[i], apiKeyID, types)
+		b, err := writeBatchItem(ctx, tx, items[i], times[i], holds[i], apiKeyID, types)
 		if err != nil {
 			return nil, &BatchItemError{Index: i, Err: err}
 		}
@@ -402,8 +416,8 @@ func ReserveWriteIntents(ctx context.Context, tx pgx.Tx, b WriteBudget, n int) e
 // written before it left that target (rereadSupersedesTarget): an earlier item
 // of the batch may have upserted the target's identity with another type, and
 // the lock pass read it before that write (review of #389).
-func writeBatchItem(ctx context.Context, tx pgx.Tx, it BatchUpsert, h batchHold, apiKeyID string, types *blocktype.Set) (*Block, error) {
-	u := prepareUpsert(it.Category, it.Title, it.Content, it.Tags, it.Metadata, it.Scope, it.ScopeExplicit, it.Sens, it.TypeName)
+func writeBatchItem(ctx context.Context, tx pgx.Tx, it BatchUpsert, contentTimes []time.Time, h batchHold, apiKeyID string, types *blocktype.Set) (*Block, error) {
+	u := prepareUpsert(it.Category, it.Title, it.Content, it.Tags, it.Metadata, it.Scope, it.ScopeExplicit, it.Sens, it.TypeName, contentTimes)
 	if it.Supersedes == "" {
 		return u.execHeld(ctx, tx, h.hadRow)
 	}

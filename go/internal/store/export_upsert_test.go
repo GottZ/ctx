@@ -12,7 +12,7 @@ import (
 // pre-read runs, the interleaving UpsertBlock's own transaction cannot be
 // paused in. Production never calls it.
 func UpsertBlockTxForTest(ctx context.Context, tx pgx.Tx, category, title, content, scope string) (*Block, error) {
-	return prepareUpsert(category, title, content, nil, nil, scope, false, SensitivityWrite{}, "").exec(ctx, tx)
+	return prepareUpsert(category, title, content, nil, nil, scope, false, SensitivityWrite{}, "", ExtractDates(content)).exec(ctx, tx)
 }
 
 // UpsertDerivedTxForTest is UpsertBlockTxForTest for a derived writer: the
@@ -21,5 +21,5 @@ func UpsertBlockTxForTest(ctx context.Context, tx pgx.Tx, category, title, conte
 // written but not yet committed while a second writer runs. Production never
 // calls it.
 func UpsertDerivedTxForTest(ctx context.Context, tx pgx.Tx, category, title, content string, metadata map[string]any, scope string, sens SensitivityWrite, typeName string) (*Block, error) {
-	return prepareUpsert(category, title, content, nil, metadata, scope, true, sens, typeName).exec(ctx, tx)
+	return prepareUpsert(category, title, content, nil, metadata, scope, true, sens, typeName, ExtractDates(content)).exec(ctx, tx)
 }

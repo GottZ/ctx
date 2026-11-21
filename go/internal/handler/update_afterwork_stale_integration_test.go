@@ -19,10 +19,12 @@ package handler
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/internal/testdb"
 )
 
 // i414Temporal reads what the temporal afterwork wrote for a block: the
@@ -167,11 +169,13 @@ func TestUpdateAfterworkStaleEditsSkipped(t *testing.T) {
 	i414AssertDerivedFrom(t, f, id, i414ContentB, "after A's late afterwork")
 }
 
-// TestUpdateAfterworkWaitsForInFlightContentWrite holds a content write open
-// on a second connection while A's afterwork runs: the afterwork has to wait
-// for that write and, once it commits, must not apply A's data over the new
-// content. The write's own afterwork then brings the block to its content.
-func TestUpdateAfterworkWaitsForInFlightContentWrite(t *testing.T) {
+// TestUpdateAfterworkDoesNotWaitForAnInFlightContentWrite holds a content
+// write B (store.UpdateBlock) at its COMMIT while A's afterwork runs: the
+// afterwork takes no lock on the block row that B holds (#421), so it does not
+// wait, and it applies A's data, the content the block still holds. Once B
+// committed, B's own afterwork brings the block to B's content: it takes its
+// turn after A's (#428).
+func TestUpdateAfterworkDoesNotWaitForAnInFlightContentWrite(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
@@ -181,64 +185,40 @@ func TestUpdateAfterworkWaitsForInFlightContentWrite(t *testing.T) {
 	dataA := i414Content(i414ContentA)
 	blockA := i414Update(t, f, id, dataA)
 
-	// The in-flight content write: the row's content replaced, not committed.
-	tx, err := f.pool.Begin(f.ctx)
-	if err != nil {
-		t.Fatalf("begin holder: %v", err)
+	// The in-flight content write: store.UpdateBlock held at its COMMIT.
+	holdPool, hold := testdb.HoldCommitPool(t, f.pool.Config().ConnString(), func(sql string) bool {
+		return strings.HasPrefix(strings.TrimSpace(sql), "UPDATE context_blocks SET content = ")
+	})
+	type upd struct {
+		b   *store.Block
+		err error
 	}
-	defer func() { _ = tx.Rollback(f.ctx) }()
-	var holderPID int32
-	if err := tx.QueryRow(f.ctx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil {
-		t.Fatalf("holder pid: %v", err)
-	}
-	if _, err := tx.Exec(f.ctx, `UPDATE context_blocks SET content = $1, updated_at = now() WHERE id = $2`, i414ContentB, id); err != nil {
-		t.Fatalf("holder write: %v", err)
-	}
+	writeDone := make(chan upd, 1)
+	go func() {
+		content := i414ContentB
+		b, _, err := store.UpdateBlock(f.ctx, holdPool, id, store.UpdateBlockData{Content: &content}, writableBlockScopes(f.directAR))
+		writeDone <- upd{b, err}
+	}()
+	hold.Wait(t)
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		finishBlockUpdate(f.ctx, f.pool, f.mcpCfg.Blocktypes, dataA, blockA, "i414-a")
 	}()
-	// Hook: release the holder only once A's afterwork waits on it. An
-	// afterwork that finishes first did not wait for the in-flight write, and
-	// one that has not waited by the deadline proves nothing either: both fail.
-	waited := false
-	for deadline := time.Now().Add(i414LockWait); !waited && time.Now().Before(deadline); {
-		select {
-		case <-done:
-			t.Fatalf("A's afterwork finished while the content write was still in flight: it did not wait for the row lock")
-		default:
-		}
-		if err := f.pool.QueryRow(f.ctx,
-			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid)))`, holderPID).Scan(&waited); err != nil {
-			t.Fatalf("poll lock wait: %v", err)
-		}
-		if !waited {
-			time.Sleep(2 * time.Millisecond)
-		}
-	}
-	if !waited {
-		t.Fatalf("A's afterwork never waited on the in-flight content write within %s", i414LockWait)
-	}
-	if err := tx.Commit(f.ctx); err != nil {
-		t.Fatalf("commit holder: %v", err)
-	}
 	select {
 	case <-done:
 	case <-time.After(i414LockWait):
-		t.Fatalf("A's afterwork did not finish within %s after the content write committed", i414LockWait)
+		t.Fatalf("A's afterwork waited on the content write held at its commit")
 	}
+	i414AssertDerivedFrom(t, f, id, i414ContentA, "after A's afterwork beside the in-flight write")
 
-	// A's afterwork wrote nothing: the block still has the data of the
-	// content before A, neither column nor rows of A.
-	i414AssertDerivedFrom(t, f, id, i414Initial, "after A's afterwork over the in-flight write")
-
-	blockB, err := store.GetBlock(f.ctx, f.pool, nil, id, writableBlockScopes(f.directAR), nil)
-	if err != nil || blockB == nil {
-		t.Fatalf("read block B: %v", err)
+	hold.Release()
+	w := <-writeDone
+	if w.err != nil || w.b == nil {
+		t.Fatalf("content write B: %v", w.err)
 	}
-	finishBlockUpdate(f.ctx, f.pool, f.mcpCfg.Blocktypes, i414Content(i414ContentB), blockB, "i414-b")
+	finishBlockUpdate(f.ctx, f.pool, f.mcpCfg.Blocktypes, i414Content(i414ContentB), w.b, "i414-b")
 	i414AssertDerivedFrom(t, f, id, i414ContentB, "after B's afterwork")
 }
 

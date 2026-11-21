@@ -16,11 +16,11 @@
 // (caller_block_first, newest_of_the_caller_first, arm_off_caller_first, the
 // two unservable_* ones) are red before the fix only when the unordered
 // LIMIT 1 returns another row than the one they want, and that follows the
-// physical row order: POST /api/store updates content_times after it has
-// answered, so the order of the heap need not be the order of the writes.
-// (Since issue #393 the fixture's write waits for that update, see
-// awaitWriteTail, so here the heap holds the rows in the order of the
-// writes.) arm_off_still_drains_everything passes before and after: it pins that the
+// physical row order. Until issue #421 POST /api/store updated content_times
+// after it had answered, a second tuple version of the block that need not
+// keep the order of the writes; since then the write sets the column in its
+// own statement, and the heap holds the rows in the order of the writes.
+// arm_off_still_drains_everything passes before and after: it pins that the
 // path stays the embedder of last resort.
 //
 // The probes from the review of #214 follow the eight above. They pin what
@@ -67,14 +67,6 @@ const (
 	bfsCallerOldest = "bfs caller block, written first of three"
 	bfsCallerMiddle = "bfs caller block, written second of three"
 	bfsCallerLatest = "bfs caller block, written third of three"
-
-	// bfsWriteTailWait bounds awaitWriteTail: longer than the 10 s the
-	// writers POST /api/store starts after it has answered give themselves
-	// (HandleStore), so a slow tail is waited for and one that gave up fails
-	// the probe with a message of its own.
-	bfsWriteTailWait = 15 * time.Second
-	// bfsWriteTailPoll is the interval of awaitWriteTail's reads.
-	bfsWriteTailPoll = 5 * time.Millisecond
 )
 
 // bfsPickCounter is a pgx QueryTracer that counts the pick statements of the
@@ -191,9 +183,22 @@ func (f *bfsFixture) write(t *testing.T, keyCtx context.Context, title string) {
 }
 
 // writeAs is write with a named scope and sensitivity ("" leaves the field
-// out of the request). It returns once the write's tail is through with the
-// block (awaitWriteTail).
+// out of the request). It returns when the handler has answered: the
+// temporal afterwork POST /api/store runs after that holds no lock on the
+// block row that the query path's failure memo needs (issue #421, see
+// write_tail_memo_integration_test.go).
 func (f *bfsFixture) writeAs(t *testing.T, keyCtx context.Context, title, scope, sens string) {
+	t.Helper()
+	f.post(t, keyCtx, title, scope, sens)
+	// Premise of every probe: the write path leaves the block pending.
+	if f.embedded(t, title) {
+		t.Fatalf("block %q carries a vector right after the write; the probes need it pending", title)
+	}
+}
+
+// post is the POST /api/store of writeAs, returning the written block's id
+// as soon as the handler answered.
+func (f *bfsFixture) post(t *testing.T, keyCtx context.Context, title, scope, sens string) string {
 	t.Helper()
 	body := map[string]any{
 		"category": "test", "title": title,
@@ -220,43 +225,7 @@ func (f *bfsFixture) writeAs(t *testing.T, keyCtx context.Context, title, scope,
 	if err := json.Unmarshal(rec.Body.Bytes(), &answer); err != nil || answer.Block.ID == "" {
 		t.Fatalf("store %q: no block id in the answer %s (%v)", title, rec.Body.String(), err)
 	}
-	f.awaitWriteTail(t, answer.Block.ID)
-	// Premise of every probe: the write path leaves the block pending.
-	if f.embedded(t, title) {
-		t.Fatalf("block %q carries a vector right after the write; the probes need it pending", title)
-	}
-}
-
-// awaitWriteTail waits until the writers POST /api/store starts after it has
-// answered are through with the block (HandleStore: store.RefreshTemporal on
-// one goroutine, which writes context_temporal and then content_times in one
-// transaction; the access-log row on another takes
-// no lock that conflicts). The content_times UPDATE holds the block's row
-// while it runs, and the failure memo of the query path skips a row another
-// transaction holds (store.RecordEmbedFailureIfUnchanged and
-// RecordEmbedRequestGoneIfUnchanged), so a probe whose query met that UPDATE
-// found no memo, or the earlier one (issue #393). The temporal rows
-// commit together with that UPDATE, and every write leaves at least one.
-// That signal holds for the first write of a block only: a second write of
-// the same title is an upsert of the same id, whose earlier rows are already
-// there; no probe writes a title twice.
-func (f *bfsFixture) awaitWriteTail(t *testing.T, blockID string) {
-	t.Helper()
-	deadline := time.Now().Add(bfsWriteTailWait)
-	for {
-		var done bool
-		if err := f.pool.QueryRow(context.Background(),
-			`SELECT EXISTS (SELECT 1 FROM context_temporal WHERE block_id = $1)`, blockID).Scan(&done); err != nil {
-			t.Fatalf("read the temporal rows of block %s: %v", blockID, err)
-		}
-		if done {
-			return
-		}
-		if !time.Now().Before(deadline) {
-			t.Fatalf("the writers POST /api/store starts after it has answered left block %s without temporal rows for %s", blockID, bfsWriteTailWait)
-		}
-		time.Sleep(bfsWriteTailPoll)
-	}
+	return answer.Block.ID
 }
 
 // query runs one POST /api/query as the caller, with the given inline cap and

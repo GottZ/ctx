@@ -15,6 +15,7 @@ package store_test
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,17 +124,18 @@ func TestPopulateTemporalSkipsReplacedContent(t *testing.T) {
 	}
 }
 
-// TestPopulateTemporalWaitsForInFlightContentWrite holds a content write open
-// on a second connection while the dream's write (PopulateTemporal with the
-// content it picked) runs: the guard has to wait for that write and, once it
-// committed, must answer for the new content and drop the rows. A guard that
-// read the row without locking it would see the committed old content, commit
-// its rows, and leave them beside the new content's.
-func TestPopulateTemporalWaitsForInFlightContentWrite(t *testing.T) {
+// TestPopulateTemporalLeavesAnInFlightContentWriteToItsAfterwork holds a
+// content write (store.UpdateBlock) at its COMMIT while the dream's write
+// (PopulateTemporal with the content it picked) runs: the dream's write does
+// not wait for it (its guard takes no lock a content writer holds, #421) and
+// applies the dates of the content the block still holds. Once the content
+// write committed, its own afterwork replaces them — it takes its turn after
+// every temporal write of the block before it (#428).
+func TestPopulateTemporalLeavesAnInFlightContentWriteToItsAfterwork(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
-	pool := testdb.SetupTestDB(t)
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
 	ctx := context.Background()
 
 	picked := "Standup on 2026-04-14."
@@ -145,18 +147,20 @@ func TestPopulateTemporalWaitsForInFlightContentWrite(t *testing.T) {
 		t.Fatalf("store afterwork: applied=%v err=%v", applied, err)
 	}
 
-	holder, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin holder: %v", err)
+	holdPool, hold := testdb.HoldCommitPool(t, dsn, func(sql string) bool {
+		return strings.HasPrefix(strings.TrimSpace(sql), "UPDATE context_blocks SET content = ")
+	})
+	moved := "Standup moved to 2026-05-19."
+	type upd struct {
+		b   *store.Block
+		err error
 	}
-	defer func() { _ = holder.Rollback(ctx) }()
-	var holderPID int32
-	if err := holder.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil {
-		t.Fatalf("holder pid: %v", err)
-	}
-	if _, err := holder.Exec(ctx, `UPDATE context_blocks SET content = $1, updated_at = now() WHERE id = $2`, "Standup moved to 2026-05-19.", b.ID); err != nil {
-		t.Fatalf("holder write: %v", err)
-	}
+	writeDone := make(chan upd, 1)
+	go func() {
+		u, _, err := store.UpdateBlock(ctx, holdPool, b.ID, store.UpdateBlockData{Content: &moved}, []string{"private"})
+		writeDone <- upd{u, err}
+	}()
+	hold.Wait(t)
 
 	type result struct {
 		applied bool
@@ -168,53 +172,39 @@ func TestPopulateTemporalWaitsForInFlightContentWrite(t *testing.T) {
 		applied, err := store.PopulateTemporal(ctx, pool, b.ID, picked, merged, b.CreatedAt)
 		done <- result{applied, err}
 	}()
-	// Hook: release the holder only once the guard waits on it. A write that
-	// finishes first did not wait for the in-flight write, and one that has
-	// not waited by the deadline proves nothing either: both fail.
-	waited := false
-	for deadline := time.Now().Add(i414LockWait); !waited && time.Now().Before(deadline); {
-		select {
-		case r := <-done:
-			t.Fatalf("populate finished (applied=%v err=%v) while the content write was still in flight: its guard did not wait for the row lock", r.applied, r.err)
-		default:
-		}
-		if err := pool.QueryRow(ctx,
-			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid)))`, holderPID).Scan(&waited); err != nil {
-			t.Fatalf("poll lock wait: %v", err)
-		}
-		if !waited {
-			time.Sleep(2 * time.Millisecond)
-		}
-	}
-	if !waited {
-		t.Fatalf("populate never waited on the in-flight content write within %s", i414LockWait)
-	}
-	if err := holder.Commit(ctx); err != nil {
-		t.Fatalf("commit holder: %v", err)
-	}
 	var r result
 	select {
 	case r = <-done:
 	case <-time.After(i414LockWait):
-		t.Fatalf("populate did not finish within %s after the content write committed", i414LockWait)
+		t.Fatalf("populate waited on the content write held at its commit")
 	}
-	if r.err != nil {
-		t.Fatalf("populate: %v", r.err)
+	if r.err != nil || !r.applied {
+		t.Fatalf("populate: applied=%v err=%v, want the picked content's dates applied (the content write has not committed)", r.applied, r.err)
 	}
-	if r.applied {
-		t.Errorf("populate applied the picked content's dates over the content committed while it waited")
+	if got, want := i414Sources(t, pool, b.ID), i414Want(b.CreatedAt, i414Day("2026-04-14"), i414Day("2026-04-15")); !slices.Equal(got, want) {
+		t.Errorf("source times = %v, want %v (the review's)", got, want)
 	}
-	if got, want := i414Sources(t, pool, b.ID), i414Want(b.CreatedAt, i414Day("2026-04-14")); !slices.Equal(got, want) {
-		t.Errorf("source times = %v, want %v (the store afterwork's, untouched)", got, want)
+
+	hold.Release()
+	w := <-writeDone
+	if w.err != nil || w.b == nil {
+		t.Fatalf("content write: %v", w.err)
+	}
+	if applied, err := store.RefreshTemporal(ctx, pool, w.b.ID, w.b.Content, w.b.CreatedAt); err != nil || !applied {
+		t.Fatalf("the content write's afterwork: applied=%v err=%v", applied, err)
+	}
+	if got, want := i414Sources(t, pool, b.ID), i414Want(b.CreatedAt, i414Day("2026-05-19")); !slices.Equal(got, want) {
+		t.Errorf("source times = %v, want %v (the content write's)", got, want)
 	}
 }
 
 // TestRefreshTemporalYieldsToAContentWriteDuringItsRows: while the afterwork
 // writes the dimension rows it holds no lock on the block row, so a content
 // update of the block lands without waiting for it; the afterwork then finds
-// the new content and drops both of its writes — content_times and rows — as
-// one. A second connection holds the block's dimension rows, which keeps the
-// afterwork inside its row writes until the test releases them.
+// the new content and drops its rows. content_times is the update's own,
+// written by its statement (issue #421). A second connection holds the
+// block's dimension rows, which keeps the afterwork inside its row writes
+// until the test releases them.
 func TestRefreshTemporalYieldsToAContentWriteDuringItsRows(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -316,8 +306,8 @@ func TestRefreshTemporalYieldsToAContentWriteDuringItsRows(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT COALESCE(content_times, '{}') FROM context_blocks WHERE id = $1`, b.ID).Scan(&times); err != nil {
 		t.Fatalf("read content_times: %v", err)
 	}
-	if len(times) != 1 || !times[0].Equal(i414Day("2026-01-20")) {
-		t.Errorf("content_times = %v, want the initial content's [2026-01-20]: A's afterwork must drop content_times together with its rows", times)
+	if len(times) != 1 || !times[0].Equal(i414Day("2026-08-08")) {
+		t.Errorf("content_times = %v, want content B's [2026-08-08], written by update B itself", times)
 	}
 	if got, want := i414Sources(t, pool, b.ID), i414Want(b.CreatedAt, i414Day("2026-01-20")); !slices.Equal(got, want) {
 		t.Errorf("source times = %v, want %v (the initial content's)", got, want)
@@ -386,7 +376,7 @@ func TestTemporalWritesOnAPurgedBlock(t *testing.T) {
 }
 
 // TestBackfillTemporalFillsBlocksWithoutRows: the backfill writes the data of
-// the content a block holds to a block that has none, through RefreshTemporal.
+// the content a block holds to a block that has none, with its content_times.
 func TestBackfillTemporalFillsBlocksWithoutRows(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -401,6 +391,11 @@ func TestBackfillTemporalFillsBlocksWithoutRows(t *testing.T) {
 	}
 	if got := i414Sources(t, pool, b.ID); len(got) != 0 {
 		t.Fatalf("fixture already has temporal rows: %v", got)
+	}
+	// The block as a writer that sets no content_times leaves it (the issue
+	// tracker's and the forge's inserts): the column's default.
+	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET content_times = DEFAULT WHERE id = $1`, b.ID); err != nil {
+		t.Fatalf("reset content_times: %v", err)
 	}
 
 	n, err := store.BackfillTemporal(ctx, pool)

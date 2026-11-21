@@ -859,7 +859,7 @@ func guardInsertPath(ctx context.Context, tx pgx.Tx, writer provenanceIdentity, 
 // validates the name against the registry snapshot (422 on unknown) — this
 // layer trusts its caller like it does for sensitivity levels.
 func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite, typeName string) (*Block, error) {
-	u := prepareUpsert(category, title, content, tags, metadata, scope, scopeExplicit, sens, typeName)
+	u := prepareUpsert(category, title, content, tags, metadata, scope, scopeExplicit, sens, typeName, ExtractDates(content))
 	var b *Block
 	if err := pgxdb.Write(ctx, pool, pgxdb.At("store: upsert block"), func(tx pgx.Tx) error {
 		var err error
@@ -885,7 +885,10 @@ type upsertStatement struct {
 }
 
 // prepareUpsert is the pure half of UpsertBlock (see there for the rules).
-func prepareUpsert(category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite, typeName string) upsertStatement {
+// contentTimes is ExtractDates(content), which the caller computes before it
+// opens the write's transaction: on a large content it takes milliseconds,
+// and inside the transaction it would extend the hold of the rows it locked.
+func prepareUpsert(category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite, typeName string, contentTimes []time.Time) upsertStatement {
 	if tags == nil {
 		tags = []string{}
 	}
@@ -970,6 +973,18 @@ func prepareUpsert(category, title, content string, tags []string, metadata map[
 			"type_name = EXCLUDED.type_name",
 			"type_source = 'manual'")
 	}
+
+	// content_times is derived from the content this statement stores
+	// (contentTimes), so the write sets it itself, in the same tuple (issue
+	// #421): before, the temporal afterwork set it with an UPDATE of the block
+	// row after the write had answered, which held the row while the query
+	// path's failure memo skips a held row, and wrote a second tuple version
+	// of every write. On the identical-content branch it is the value derived
+	// from the content already stored.
+	insertCols += ", content_times"
+	insertVals += fmt.Sprintf(", $%d::timestamptz[]", len(args)+1)
+	args = append(args, contentTimes)
+	setClauses = append(setClauses, "content_times = EXCLUDED.content_times")
 
 	// The WHERE of the DO UPDATE is the conflict half of the S3 gate (see
 	// provenanceWriter): it decides on the conflicting row as the statement
@@ -1856,17 +1871,24 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	// Edits are a content write as well; their argument is the content they
 	// resolve to, which exists only once runBlockUpdate holds the row, so the
 	// slot is reserved here and filled there (contentEditPlan).
+	//
+	// A content write sets content_times as well, from the content it stores
+	// (issue #421, see prepareUpsert); for edits that content, and so its
+	// dates, exist only once the row is held, and contentEditPlan fills both
+	// slots.
 	contentSent := data.Content != nil || data.Edits != nil
 	var edits *contentEditPlan
 	if contentSent {
-		setClauses = append(setClauses, fmt.Sprintf("content = $%d", argIdx))
+		setClauses = append(setClauses,
+			fmt.Sprintf("content = $%d", argIdx),
+			fmt.Sprintf("content_times = $%d::timestamptz[]", argIdx+1))
 		if data.Edits != nil {
 			edits = &contentEditPlan{edits: data.Edits, arg: len(args), writeScopes: writeScopes}
-			args = append(args, nil)
+			args = append(args, nil, nil)
 		} else {
-			args = append(args, *data.Content)
+			args = append(args, *data.Content, ExtractDates(*data.Content))
 		}
-		argIdx++
+		argIdx += 2
 	}
 	if data.Tags != nil {
 		setClauses = append(setClauses, fmt.Sprintf("tags = $%d", argIdx))
