@@ -605,9 +605,15 @@ func TestPushAdvanceWaitsForAnUpdateBlockInFlight(t *testing.T) {
 		return strings.Contains(sql, "UPDATE context_blocks SET")
 	})
 	const inFlight = "body written in flight by UpdateBlock"
+	// The writer runs under a deadline (issue #486): a stalled UpdateBlock
+	// fails the test within i452Wait — its statement is cancelled, and the
+	// held pool's connection is given back for the cleanup to close — instead
+	// of hanging it until the package timeout.
+	wctx, cancel := context.WithTimeout(ctx, i452Wait)
+	defer cancel()
 	updated := make(chan error, 1)
 	go func() {
-		_, _, err := store.UpdateBlock(ctx, held, issueID, store.UpdateBlockData{Content: str(inFlight)}, []string{proj.Scope})
+		_, _, err := store.UpdateBlock(wctx, held, issueID, store.UpdateBlockData{Content: str(inFlight)}, []string{proj.Scope})
 		updated <- err
 	}()
 	pid := hold.Wait(t)
@@ -623,8 +629,13 @@ func TestPushAdvanceWaitsForAnUpdateBlockInFlight(t *testing.T) {
 	}()
 	testdb.WaitBlockedBy(t, pool, pid, done, "the push's advance", "")
 	hold.Release()
-	if err := <-updated; err != nil {
-		t.Fatalf("UpdateBlock: %v", err)
+	select {
+	case err := <-updated:
+		if err != nil {
+			t.Fatalf("UpdateBlock: %v", err)
+		}
+	case <-wctx.Done():
+		t.Fatalf("UpdateBlock did not return within %s", i452Wait)
 	}
 	select {
 	case <-done:
