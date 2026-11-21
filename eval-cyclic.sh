@@ -181,9 +181,12 @@ def query(q):
     if not isinstance(doc, dict):
         return {"error": "the answer is not a JSON object"}
     # Every answer of ctx's /api/query carries success:true; an object without
-    # it comes from something else at that address.
-    if doc.get("success") is not True and not doc.get("error"):
-        doc["error"] = doc.get("error_code") or f"success is {doc.get('success')!r}, not true"
+    # it comes from something else at that address. A failed answer is its
+    # error and nothing else: its sources, confidence or dimension weights are
+    # no measurement, and need not have the shape the loop reads.
+    if doc.get("success") is not True:
+        return {"error": doc.get("error") or doc.get("error_code")
+                or f"success is {doc.get('success')!r}, not true"}
     return doc
 
 cases = gold.get("cases", gold) if isinstance(gold, dict) else gold

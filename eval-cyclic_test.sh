@@ -24,7 +24,9 @@
 #      nothing written, its target gets no request.
 #   4. One case of three without an answer: results with n_errors 1 and the
 #      error on that case, rc 1, the summary names it, and no baseline even
-#      with --baseline.
+#      with --baseline. A 200 with success:false is its error alone: none of
+#      its other fields (sources of any shape, confidence, dimension weights)
+#      reach the case.
 #   5. A TLS certificate that does not verify stops the run with the advice
 #      that fits it: self-signed → CTX_EVAL_INSECURE=1; a name the certificate
 #      does not carry → WEBHOOK_BASE_URL, without CTX_EVAL_INSECURE; expired →
@@ -276,6 +278,25 @@ def main(work):
               f"{label}: the summary counts and names it", p.stdout[-300:])
         if flag:
             check("baseline" in p.stderr and "not written" in p.stderr, "says the baseline was not written", say(p))
+    # A failed answer is an error and nothing else: none of its other fields
+    # reach the case, whatever their shape.
+    failed_answers = [
+        ("sources [null]", {"success": False, "error": "synthesis failed", "sources": [None]}),
+        ("a matching source", {"success": False, "error": "synthesis failed", "sources": [{"id": "b1"}],
+                               "confidence": "confident", "activated_dim_weights": {"month": 1.0}}),
+    ]
+    for name, body in failed_answers:
+        failed_answer = reply(200, "application/json", json.dumps(body).encode())
+        s = Server(lambda query, a=failed_answer: a(query) if query == "q two" else OK(query))
+        p, res, base = run(work, copy, f"http://127.0.0.1:{s.port}")
+        s.close()
+        c2 = next((c for c in res["case_results"] if c["id"] == "c2"), {}) if res else {}
+        check(p.returncode == 1 and res is not None and not base and res.get("n_errors") == 1
+              and c2.get("error") == "synthesis failed" and "Traceback" not in p.stderr,
+              f"200 success:false with {name} on c2: rc 1, results with n_errors 1 and its error, no baseline", say(p))
+        check(res is not None and c2.get("case_pass") is not True and not c2.get("top5")
+              and c2.get("confidence") is None and c2.get("activated_dim_weights") is None,
+              f"200 success:false with {name} on c2: none of its other fields reach the case", json.dumps(c2)[:300])
 
     print("--- 5. TLS: the advice fits the reason")
     good, good_ctx = cert(work, "good", "-days", "2")
