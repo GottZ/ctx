@@ -101,7 +101,7 @@ func FuzzLinkHeader(f *testing.F) {
 			}
 			want, wantErr := "", error(nil)
 			for _, lv := range links {
-				if lv.hasRelation("next") {
+				if lv.hasRelation("next") && !lv.hasParam("anchor") {
 					want = lv.target
 					if want == "" {
 						wantErr = errNextIsSelf

@@ -36,8 +36,8 @@ var errLinkUnparseable error = &configError{"forge: the Link header of a page na
 // nextTarget returns the target of the first link-value whose rel parameter
 // holds the relation type "next", "" when no link-value does. fields are the
 // response's Link field lines; RFC 9110 §5.3 combines several into one list.
-// The anchor parameter is not consulted: a forge's pagination links are
-// about the page that carries them.
+// A link-value with an anchor parameter is about another resource (RFC 8288
+// §3.2); this client does not apply anchors, so it ignores such a link.
 func nextTarget(fields []string) (string, error) {
 	field := strings.Join(fields, ", ")
 	links, err := parseLinkField(field)
@@ -48,7 +48,7 @@ func nextTarget(fields []string) (string, error) {
 		return "", nil
 	}
 	for _, lv := range links {
-		if lv.hasRelation("next") {
+		if lv.hasRelation("next") && !lv.hasParam("anchor") {
 			if lv.target == "" {
 				return "", errNextIsSelf // an empty reference is the page itself (RFC 3986 §4.4)
 			}
@@ -74,6 +74,16 @@ func (lv linkValue) hasRelation(rt string) bool {
 			}
 		}
 		return false
+	}
+	return false
+}
+
+// hasParam reports whether lv carries a parameter named name (lowercase).
+func (lv linkValue) hasParam(name string) bool {
+	for _, p := range lv.params {
+		if p.name == name {
+			return true
+		}
 	}
 	return false
 }

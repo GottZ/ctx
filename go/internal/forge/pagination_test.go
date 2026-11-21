@@ -68,6 +68,11 @@ func TestPaginationFollowsEveryRFC8288Spelling(t *testing.T) {
 			return lines(`<` + n[strings.Index(n, "/repos/"):] + `>; rel="next"`)
 		},
 		"first-rel-wins": func(n string) []string { return lines(`<` + n + `>; rel="next"; rel="prev"`) },
+		// RFC 8288 §3.2: a link with an anchor is about another resource; a
+		// client that does not apply the anchor ignores the link.
+		"anchored-next-skipped": func(n string) []string {
+			return lines(`</repos/o/r/issues?page=99>; rel=next; anchor="/other", <` + n + `>; rel=next`)
+		},
 	}
 	for name, link := range spellings {
 		t.Run(name, func(t *testing.T) {
@@ -91,6 +96,7 @@ func TestPaginationEndsWhereNoNextIsNamed(t *testing.T) {
 		"extension-rel":  func(n string) []string { return lines(`<` + n + `>; rel="https://example.com/rel/next"`) },
 		"next-in-title":  func(n string) []string { return lines(`<` + n + `>; rel="last"; title="next"`) },
 		"next-in-target": func(n string) []string { return lines(`<` + n + `&next=1>; rel="last"`) },
+		"anchored-only":  func(n string) []string { return lines(`<` + n + `>; rel="next"; anchor="#other"`) },
 	}
 	for name, link := range spellings {
 		t.Run(name, func(t *testing.T) {
