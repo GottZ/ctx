@@ -122,9 +122,10 @@ func (lv linkValue) hasParam(name string) bool {
 // or a quote (RFC 8288 Appendix B.3 reads up to ";" or ","; a media type
 // such as application/json is not a token, yet servers write it unquoted) —
 // except rel, whose unquoted value has to be a token (RFC 8288 §3.3).
+// A ";" that ends a link-value without a parameter after it is tolerated.
 // Anything else — a link-value without "<…>", an unterminated quoted-string,
-// a parameter without a name, text after a link-value that is neither ";"
-// nor "," — is errLinkSyntax.
+// a parameter without a name (an empty one between two ";" included), text
+// after a link-value that is neither ";" nor "," — is errLinkSyntax.
 func parseLinkField(s string) ([]linkValue, error) {
 	p := &linkParser{s: s}
 	var out []linkValue
@@ -186,6 +187,9 @@ func (p *linkParser) linkValue() (linkValue, error) {
 		}
 		p.i++
 		p.skipWS()
+		if p.eof() || p.s[p.i] == ',' {
+			return lv, nil // a trailing ";" without a parameter (RFC 8288 Appendix B.3 reads it)
+		}
 		param, err := p.param()
 		if err != nil {
 			return linkValue{}, err

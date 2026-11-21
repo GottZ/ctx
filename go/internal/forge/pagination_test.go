@@ -68,6 +68,10 @@ func TestPaginationFollowsEveryRFC8288Spelling(t *testing.T) {
 			return lines(`<` + n[strings.Index(n, "/repos/"):] + `>; rel="next"`)
 		},
 		"first-rel-wins": func(n string) []string { return lines(`<` + n + `>; rel="next"; rel="prev"`) },
+		// A trailing ";" without a parameter: RFC 8288 Appendix B.3 reads it,
+		// and the parser before #474 did.
+		"trailing-semicolon":       func(n string) []string { return lines(`<` + n + `>; rel="next";`) },
+		"trailing-semicolon-comma": func(n string) []string { return lines(`<` + n + `>; rel="next"; , <` + n + `&x=1>; rel="last"`) },
 		// RFC 8288 §3.2: a link with an anchor is about another resource; a
 		// client that does not apply the anchor ignores the link.
 		"anchored-next-skipped": func(n string) []string {
@@ -120,6 +124,11 @@ func TestPaginationUnparseableNextIsAnError(t *testing.T) {
 		"trailing-junk":      func(n string) []string { return lines(`<` + n + `>; rel="next" junk`) },
 		"no-param-name":      func(n string) []string { return lines(`<` + n + `>; ="next"`) },
 		"bad-second-element": func(n string) []string { return lines(`<` + n + `&page=9>; rel="last", next`) },
+		// Only a trailing ";" is tolerated; an empty parameter in the middle, a
+		// no-break space as whitespace and a bare token stay errors.
+		"empty-middle-param": func(n string) []string { return lines(`<` + n + `>; ; rel="next"`) },
+		"nbsp":               func(n string) []string { return lines(`<` + n + ">;\xc2\xa0rel=\"next\"") },
+		"bare-token-value":   func(n string) []string { return lines(`<` + n + `>; rel="next", last`) },
 		// An unquoted rel value is a token (RFC 8288 §3.3); "=" and "/" are not tchars.
 		"rel-not-a-token":   func(n string) []string { return lines(`<` + n + `>; rel=next=bad`) },
 		"rel-not-a-token-2": func(n string) []string { return lines(`<` + n + `>; rel=next/page`) },
