@@ -110,6 +110,20 @@ test.describe('viewport fit (meta, #440)', () => {
     await expect(expectViewportFit(page)).rejects.toThrow(/outside: div > div spans x 341\.\.391/)
   })
 
+  test('a fixed box inside an ancestor that contains fixed boxes is clipped like an absolute one', async ({ page }) => {
+    // transform and layout containment (container-type: inline-size) make the
+    // ancestor the containing block of position: fixed descendants, so its
+    // overflow clips them: the 900 px box scrolls inside the 300 px scroller.
+    for (const trap of ['transform:translateX(0)', 'container-type:inline-size']) {
+      await page390(
+        page,
+        `<div class="scroll" style="${trap};width:300px;height:100px"><div style="position:fixed;top:0;left:0;width:900px;height:20px"></div></div>`,
+        '.scroll{overflow-x:auto}',
+      )
+      await expectViewportFit(page)
+    }
+  })
+
   test('a modal dialog wider than the viewport fails, also opened inside a scrolling region', async ({ page }) => {
     // The second dialog leaves the UA's position: fixed and sticks out on the
     // left, where the document does not grow: in the top layer the region

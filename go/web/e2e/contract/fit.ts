@@ -26,7 +26,9 @@ import { expect, type Page } from '@playwright/test'
 //      x = 0 and the viewport width. This catches what layers 1 and 2 cannot:
 //      a box that sticks out on the left only (the scroll range never reaches
 //      left of x = 0), and fixed and top-layer boxes (a modal dialog, a
-//      popover), whose containing block is the viewport, not a scroller.
+//      popover), whose containing block is the viewport, not a scroller —
+//      unless an ancestor holds fixed boxes (a transform, containment), which
+//      then clips them like absolute ones.
 //
 // Structural exemptions, no per-page list:
 //   - a declared sideways scroller (layer 2, above). Rules inside @media and
@@ -41,7 +43,8 @@ import { expect, type Page } from '@playwright/test'
 //   - svg and canvas are leaves: their own box is checked, their insides are
 //     drawing coordinates, not layout.
 //
-// Known limit: an absolutely positioned box is cut to every clipping ancestor
+// Known limit: an absolutely positioned box, and a fixed one whose ancestor
+// holds fixed boxes (holdsFixed below), is cut to every clipping ancestor
 // above it in the DOM, also to one that is not in its containing-block chain
 // and therefore does not clip it. That can hide such a box from layer 3, and
 // layer 2 can report it as starting left of such an ancestor although that
@@ -157,14 +160,34 @@ export async function expectViewportFit(page: Page): Promise<void> {
         : `${label(worst)} (${px(worst.getBoundingClientRect().width)} px wide)`
     }
 
+    // An element that becomes the containing block of its position: fixed
+    // descendants (CSS Transforms, Filter Effects, Containment, Will Change):
+    // such a descendant is laid out and clipped like an absolute box in it.
+    const holdsFixed = (cs: CSSStyleDeclaration): boolean =>
+      cs.transform !== 'none' ||
+      cs.translate !== 'none' ||
+      cs.rotate !== 'none' ||
+      cs.scale !== 'none' ||
+      cs.perspective !== 'none' ||
+      cs.transformStyle === 'preserve-3d' ||
+      cs.filter !== 'none' ||
+      cs.backdropFilter !== 'none' ||
+      /\b(layout|paint|strict|content)\b/.test(cs.contain) ||
+      cs.containerType === 'size' ||
+      cs.containerType === 'inline-size' ||
+      cs.contentVisibility === 'auto' ||
+      /\b(transform|translate|rotate|scale|perspective|filter|contain)\b/.test(cs.willChange)
+
     // scroller/scrollerLeft: the nearest implied scroller above (layer 2) and
     // its left padding edge; a box starting left of it is cut off for good.
+    // fixedHeld: an ancestor holds position: fixed descendants (holdsFixed).
     const visit = (
       el: Element,
       clipLeft: number,
       clipRight: number,
       scroller: Element | null,
       scrollerLeft: number,
+      fixedHeld: boolean,
     ): void => {
       const cs = getComputedStyle(el)
       if (cs.display === 'none') return
@@ -173,7 +196,9 @@ export async function expectViewportFit(page: Page): Promise<void> {
       let cr = clipRight
       let sc = scroller
       let sl = scrollerLeft
-      if (cs.position === 'fixed' || matches(el, ':modal') || matches(el, ':popover-open')) {
+      // A fixed box escapes the clipping above it unless an ancestor holds
+      // fixed boxes; the top layer escapes every ancestor.
+      if ((cs.position === 'fixed' && !fixedHeld) || matches(el, ':modal') || matches(el, ':popover-open')) {
         cl = -Infinity
         cr = Infinity
         sc = null
@@ -218,9 +243,10 @@ export async function expectViewportFit(page: Page): Promise<void> {
           sl = exempt ? -Infinity : padLeft
         }
       }
-      for (const ch of Array.from(el.children)) visit(ch, cl, cr, sc, sl)
+      const held = fixedHeld || holdsFixed(cs)
+      for (const ch of Array.from(el.children)) visit(ch, cl, cr, sc, sl, held)
     }
-    for (const ch of Array.from(document.body.children)) visit(ch, -Infinity, Infinity, null, -Infinity)
+    for (const ch of Array.from(document.body.children)) visit(ch, -Infinity, Infinity, null, -Infinity, false)
 
     return {
       scrollHeight: root.scrollHeight,
