@@ -150,30 +150,40 @@ func (h *CommitHold) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQ
 func (h *CommitHold) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
 
 // WaitBlockedBy waits until a backend waits on a lock pid holds
-// (pg_blocking_pids) and returns what it waits on (wait_event, e.g.
-// "advisory" or "transactionid"); the test fails when none does within
-// CommitHoldBound. done, when it is closed first, fails the test as well: the
-// waiter it stands for finished without waiting.
-func WaitBlockedBy(t *testing.T, pool *pgxpool.Pool, pid uint32, done <-chan struct{}, what string) string {
+// (pg_blocking_pids) and, when event is not "", until that backend's
+// wait_event is event ("advisory", "transactionid", ...); it returns the
+// wait_event it saw. A backend's wait_event is not set in one step with its
+// entry in pg_blocking_pids, so an empty wait_event is read again, within the
+// same bound; a waiter on another event fails the test at once. The test
+// fails as well when no backend waits within CommitHoldBound, and when done
+// is closed first: the waiter it stands for finished without waiting.
+func WaitBlockedBy(t *testing.T, pool *pgxpool.Pool, pid uint32, done <-chan struct{}, what, event string) string {
 	t.Helper()
 	deadline := time.Now().Add(CommitHoldBound)
+	seen := "none"
 	for {
 		select {
 		case <-done:
 			t.Fatalf("%s finished without waiting on the held transaction (pid %d)", what, pid)
 		default:
 		}
-		var event string
+		var got string
 		err := pool.QueryRow(context.Background(),
-			`SELECT COALESCE(wait_event, '') FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid)) LIMIT 1`, int64(pid)).Scan(&event)
-		if err == nil {
-			return event
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
+			`SELECT COALESCE(wait_event, '') FROM pg_stat_activity
+			  WHERE $1::int = ANY(pg_blocking_pids(pid))
+			  ORDER BY COALESCE(wait_event, '') = $2 DESC LIMIT 1`, int64(pid), event).Scan(&got)
+		switch {
+		case err == nil && (event == "" || got == event):
+			return got
+		case err == nil && got != "":
+			t.Fatalf("%s waits on the held transaction (pid %d) on wait_event %q, want %q", what, pid, got, event)
+		case err == nil:
+			seen = "a waiter with no wait_event yet"
+		case !errors.Is(err, pgx.ErrNoRows):
 			t.Fatalf("poll lock wait: %v", err)
 		}
 		if !time.Now().Before(deadline) {
-			t.Fatalf("%s never waited on the held transaction (pid %d) within %s", what, pid, CommitHoldBound)
+			t.Fatalf("%s never waited on the held transaction (pid %d) on wait_event %q within %s (last seen: %s)", what, pid, event, CommitHoldBound, seen)
 		}
 		time.Sleep(2 * time.Millisecond)
 	}

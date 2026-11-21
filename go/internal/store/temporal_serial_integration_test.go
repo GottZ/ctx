@@ -78,8 +78,8 @@ func TestTemporalWritersOfOneBlockLeaveOneDateSet(t *testing.T) {
 		defer close(secondDone)
 		secondApplied, secondErr = store.PopulateTemporal(ctx, pool, b.ID, content, second, b.CreatedAt)
 	}()
-	event := testdb.WaitBlockedBy(t, pool, firstPID, secondDone, "the second temporal write")
-	t.Logf("the second temporal write waits on the first: wait_event=%s", event)
+	event := testdb.WaitBlockedBy(t, pool, firstPID, secondDone, "the second temporal write", "advisory")
+	t.Logf("the second temporal write waits on the first's turn lock: wait_event=%s", event)
 
 	hold.Release()
 	if err := <-firstDone; err != nil {
@@ -171,7 +171,7 @@ func TestTemporalAfterworkHeldAtCommitHoldsNoBlockRowLock(t *testing.T) {
 		defer close(bTail)
 		bApplied, bErr = store.RefreshTemporal(ctx, pool, bb.ID, bb.Content, bb.CreatedAt)
 	}()
-	event := testdb.WaitBlockedBy(t, pool, aPID, bTail, "B's afterwork")
+	event := testdb.WaitBlockedBy(t, pool, aPID, bTail, "B's afterwork", "advisory")
 	t.Logf("B's afterwork waits on A's: wait_event=%s", event)
 
 	hold.Release()
@@ -461,7 +461,7 @@ func TestEditsRecheckTheVersionAfterWaitingForAnInFlightWrite(t *testing.T) {
 				defer close(editDone)
 				got, _, editErr = store.UpdateBlock(ctx, pool, b.ID, store.UpdateBlockData{Edits: []store.ContentEdit{{Old: "2026-05-05", New: &repl}}}, []string{"private"})
 			}()
-			event := testdb.WaitBlockedBy(t, pool, writePID, editDone, "the edits")
+			event := testdb.WaitBlockedBy(t, pool, writePID, editDone, "the edits", "transactionid")
 			t.Logf("the edits wait on the held content write: wait_event=%s", event)
 			hold.Release()
 			if err := <-writeDone; err != nil {
