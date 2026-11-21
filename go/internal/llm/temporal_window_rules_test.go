@@ -265,3 +265,53 @@ func TestRules_PastRangeEndsBeforeToday(t *testing.T) {
 		"What happened friday through monday?": {"2026-11-13", "2026-11-16", "range"},
 	})
 }
+
+// TestRules_AFixedEndKeepsItsDay: heute, gestern, morgen and their kin name a
+// day from today, not from the window's start; a weekday or month before
+// such an end is counted back from it (Runde 1 of #469, M1).
+func TestRules_AFixedEndKeepsItsDay(t *testing.T) {
+	checkRules(t, now463, map[string]wantDate{
+		"von März bis heute":               {"2026-03-01", "2026-11-21", "range"},
+		"von Montag bis heute":             {"2026-11-16", "2026-11-21", "range"},
+		"von Freitag bis morgen":           {"2026-11-20", "2026-11-22", "range"},
+		"von Januar bis gestern":           {"2026-01-01", "2026-11-20", "range"},
+		"von Mittwoch bis gestern":         {"2026-11-18", "2026-11-20", "range"},
+		"von übermorgen bis morgen":        {"2026-11-22", "2026-11-23", "range"},
+		"von morgen bis gestern":           {"2026-11-20", "2026-11-22", "range"},
+		"von Freitag bis Montag":           {"2026-11-27", "2026-11-30", "range"},
+		"Was lief von Freitag bis Montag?": {"2026-11-13", "2026-11-16", "range"},
+		"von gestern bis Montag":           {"2026-11-20", "2026-11-23", "range"},
+	})
+	// Every weekday and every month before "heute", for every weekday and
+	// for the first and last day of a month as today: the window ends today
+	// and starts within the week or the year before it.
+	nows := []time.Time{time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC), time.Date(2026, 1, 31, 9, 0, 0, 0, time.UTC)}
+	for wd := 0; wd < 7; wd++ {
+		nows = append(nows, now463.AddDate(0, 0, wd))
+	}
+	for _, now := range nows {
+		today := fmtDate(truncDate(now))
+		for name := range weekdayMapDE {
+			if strings.HasSuffix(name, "s") {
+				continue
+			}
+			checkEndsToday(t, now, "von "+name+" bis heute", today, truncDate(now).AddDate(0, 0, -7))
+		}
+		for _, name := range []string{"januar", "februar", "märz", "april", "mai", "juni", "juli", "august", "september", "oktober", "november", "dezember"} {
+			checkEndsToday(t, now, "von "+name+" bis heute", today, truncDate(now).AddDate(-1, 0, 0))
+		}
+	}
+}
+
+func checkEndsToday(t *testing.T, now time.Time, q, today string, earliest time.Time) {
+	t.Helper()
+	tr := NormalizeTemporalRules(q, now)
+	if tr == nil || len(tr.Dates) == 0 || tr.Dates[0].End == nil {
+		t.Errorf("now %s, %q: no window (%+v)", today, q, tr)
+		return
+	}
+	d := tr.Dates[0]
+	if *d.End != today || d.Date > today || d.Date < fmtDate(earliest) {
+		t.Errorf("now %s, %q: window %s..%s, want ..%s starting after %s", today, q, d.Date, *d.End, today, fmtDate(earliest))
+	}
+}
