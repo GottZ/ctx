@@ -110,6 +110,21 @@ func (p issueTypePolicy) workflowStatusFor(forgeState string) string {
 	return p.forgeMap[forgeState]
 }
 
+// keepsStatus answers whether a pull update leaves the block's workflow status
+// as it stands (issue #486). The status is finer than the forge state —
+// several statuses map to one forge state (backlog and in-progress are both
+// open, done and wontfix both closed) — and the projection the 3-way decision
+// compares carries the forge state only, so a local move between two statuses
+// of one forge state does not show in it. The pull therefore writes the status
+// the remote state maps to only where that is news: the remote state differs
+// from the state the block projects to (open ↔ closed — with no status mapping
+// resolvable that writes NULL, as a status of the other state must not stay),
+// or the block carries no status yet. cur is the block the pull's transaction
+// locked, so a status moved after the unlocked read is the one kept.
+func (p issueTypePolicy) keepsStatus(cur *store.Block, remoteState string) bool {
+	return cur.WorkflowStatus != "" && ctxForgeState(cur, p.terminalSet, p.registryOK) == remoteState
+}
+
 // ApplyIssues is the IssueApplyFunc: one fetched page → the 3-way apply. The
 // mapping lookup is ONE batch query for the whole page (no N+1, §6). Every issue
 // applies in its own Tx; the first error aborts the page (cursor stays put).
@@ -215,6 +230,8 @@ func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow,
 // a lock, and a local write may have changed the block since (issue #452):
 // the block is locked and projected again first (LockPulledBlock), and a block
 // that no longer holds the base goes the matrix's way instead (stillAtBase).
+// The workflow status is written only where the forge state changed or the
+// block has none (keepsStatus, issue #486).
 func (a *Applier) pullUpdateIssue(ctx context.Context, project store.ProjectRow, pol issueTypePolicy,
 	writable []string, iss IssueRemote, m store.SyncMap, content store.ForgeIssueContent, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
 
@@ -233,6 +250,7 @@ func (a *Applier) pullUpdateIssue(ctx context.Context, project store.ProjectRow,
 			res = r
 			return err
 		}
+		content.KeepWorkflowStatus = pol.keepsStatus(cur, iss.State)
 		if _, err := store.PullUpdateIssueBlock(ctx, tx, m.BlockID, content); err != nil {
 			return err
 		}
