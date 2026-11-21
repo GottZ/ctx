@@ -281,6 +281,12 @@ type getInput struct {
 	// and the answer carries archived: true. Absent ⇒ the call is answered
 	// exactly as before the field existed.
 	IncludeArchived bool `json:"include_archived,omitempty" jsonschema:"also read an archived block: full block id only, within this key's own scopes (never through a grant); the answer then carries archived: true"`
+	// Fields and the content window (#407, get_fields.go): the keys and the
+	// part of the content a reader takes, checked and answered by the same
+	// functions as REST manage get. Absent ⇒ the whole block, as before.
+	Fields        []string `json:"fields,omitempty" jsonschema:"answer only these keys of the block: id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, type, lifecycle_state, type_source, untrusted, untrusted_origin, archived, created_at, updated_at. id always comes along, and untrusted, untrusted_origin and archived whenever they apply; omit for the whole block"`
+	ContentOffset *int     `json:"content_offset,omitempty" jsonschema:"first character of the content to answer, counted in characters (code points) from 0; with content_offset or content_limit the answer adds content_length (the whole content's length) and content_truncated (true when the content goes on after the window)"`
+	ContentLimit  *int     `json:"content_limit,omitempty" jsonschema:"at most this many characters (code points) of the content, from content_offset; 0 answers none and still reports content_length. When content_truncated is true the next window starts at content_offset + content_limit"`
 }
 
 type recentInput struct {
@@ -326,7 +332,7 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 	// get
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get",
-		Description: "Fetch a full block by ID.",
+		Description: "Fetch a block by ID: the whole block, or with fields only the named keys, and with content_offset/content_limit a window of its content.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, mcpGetHandler(cfg))
 
@@ -1050,6 +1056,11 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 		if archivedReadRefused(input.ID, input.IncludeArchived) {
 			return errResult(archivedReadNeedsFullIDMsg), nil, nil
 		}
+		// #407: fields and the content window, checked before any lookup.
+		opts, err := newGetOptions(input.Fields, input.ContentOffset, input.ContentLimit)
+		if err != nil {
+			return errResult(err.Error()), nil, nil
+		}
 		scopes := ar.ReadScopes
 
 		grants, err := resolveGrants(ctx, cfg.Pool, ar)
@@ -1072,7 +1083,7 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 			return errResult("block not found"), nil, nil
 		}
 
-		block, err := readBlockForGet(ctx, cfg.Pool, cfg.mcpTypeSnapshot(ctx), ar, resolvedID, grants, input.IncludeArchived)
+		block, err := readBlockForGet(ctx, cfg.Pool, cfg.mcpTypeSnapshot(ctx), ar, resolvedID, grants, input.IncludeArchived, opts.omit())
 		if err != nil {
 			return errResult(fmt.Sprintf("get failed: %v", err)), nil, nil
 		}
@@ -1082,11 +1093,15 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 		if block == nil {
 			return errResult("block not found"), nil, nil
 		}
+		answer, err := opts.answer(block)
+		if err != nil {
+			return errResult(fmt.Sprintf("get failed: %v", err)), nil, nil
+		}
 		// The read record (#345): booked only for a block this answer hands
 		// over — every refusal above leaves no row, as on REST manage-get.
 		store.RecordBlockReads(cfg.Pool, ar.ApiKeyID, store.ActionMCPGet, []string{block.ID})
 
-		data, _ := json.MarshalIndent(block, "", "  ")
+		data, _ := json.MarshalIndent(answer, "", "  ")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{textContent(string(data))},
 		}, nil, nil

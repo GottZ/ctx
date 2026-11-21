@@ -193,6 +193,12 @@ type manageRequest struct {
 	// decoded by list-meta alone, so a body of another action decodes exactly
 	// as it did before the field existed, whatever it carries under this key.
 	After json.RawMessage `json:"after"`
+	// Fields, ContentOffset and ContentLimit (#407) are get's selection of
+	// keys and its content window, decoded by get alone (decodeGetOptions) —
+	// raw for the reason After is.
+	Fields        json.RawMessage `json:"fields"`
+	ContentOffset json.RawMessage `json:"content_offset"`
+	ContentLimit  json.RawMessage `json:"content_limit"`
 }
 
 // handleOverviewRebuildStart kicks the cluster-overview rebuild ahead of its
@@ -435,6 +441,14 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 		})
 		return
 	}
+	// #407: fields and the content window, checked before any lookup.
+	opts, err := decodeGetOptions(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false, "error": err.Error(),
+		})
+		return
+	}
 
 	// Resolve the block-grant set for the caller's tenant (T40a, design/07 §4):
 	// a granted block becomes visible via the additive OR-arm. Fail-closed for
@@ -481,7 +495,7 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 	// One registry snapshot per request: GetBlock (untrusted framing) and
 	// graph_visible must answer from the same generation.
 	types := h.typeSnapshot(ctx)
-	block, err := readBlockForGet(ctx, h.pool, types, ar, resolvedID, grants, req.IncludeArchived)
+	block, err := readBlockForGet(ctx, h.pool, types, ar, resolvedID, grants, req.IncludeArchived, opts.omit())
 	if err != nil {
 		slog.Error("manage: get error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -492,6 +506,14 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 	if block == nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"success": false, "error": "Block not found",
+		})
+		return
+	}
+	answer, err := opts.answer(block)
+	if err != nil {
+		slog.Error("manage: get answer error", "error", err, "request_id", reqID)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success": false, "error": "Internal server error",
 		})
 		return
 	}
@@ -508,7 +530,7 @@ func (h *ManageHandler) handleGet(w http.ResponseWriter, r *http.Request, ar *au
 	writeJSON(w, http.StatusOK, map[string]any{
 		"action":  "get",
 		"success": true,
-		"block":   block,
+		"block":   answer,
 		// Graph-focusable? Membership in the retrieval allowlist the ego
 		// route serves (Set.GraphVisible). The UI hides "open in graph" for
 		// excluded types (system-meta, checkpoint, …) — a focus on those

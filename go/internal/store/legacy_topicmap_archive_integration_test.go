@@ -161,7 +161,7 @@ func TestArchiveLegacyTopicMaps(t *testing.T) {
 	if findable != 1 {
 		t.Errorf("%d findable topic maps, want 1 (only the active tenant's)", findable)
 	}
-	readBack, err := store.GetArchivedBlock(ctx, pool, nil, byTitle["topic-map-hth"].id, []string{"work"})
+	readBack, err := store.GetArchivedBlock(ctx, pool, nil, byTitle["topic-map-hth"].id, []string{"work"}, store.BlockReadOmit{})
 	if err != nil || readBack == nil {
 		t.Fatalf("archived read of the block: %v %v — the rollback path is broken", readBack, err)
 	}

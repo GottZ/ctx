@@ -49,11 +49,12 @@ func ownReadScopes(ar *auth.AuthResult) []string {
 // rows of the key's own scopes only (ownReadScopes: no block grant, no scope
 // grant), answered with archived: true. Unknown, foreign and (without the
 // opt-in) archived ids all come back nil, so each surface answers them with one
-// text.
-func readBlockForGet(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, ar *auth.AuthResult, id string, grants []string, includeArchived bool) (*store.Block, error) {
-	block, err := store.GetBlock(ctx, pool, set, id, ar.ReadScopes, grants)
+// text. omit leaves columns the answer does not carry unread (#407,
+// getOptions.omit); it never changes which block is found.
+func readBlockForGet(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, ar *auth.AuthResult, id string, grants []string, includeArchived bool, omit store.BlockReadOmit) (*store.Block, error) {
+	block, err := store.GetBlockOmitting(ctx, pool, set, id, ar.ReadScopes, grants, omit)
 	if err != nil || block != nil || !includeArchived {
 		return block, err
 	}
-	return store.GetArchivedBlock(ctx, pool, set, id, ownReadScopes(ar))
+	return store.GetArchivedBlock(ctx, pool, set, id, ownReadScopes(ar), omit)
 }
