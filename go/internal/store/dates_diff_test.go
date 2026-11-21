@@ -25,11 +25,12 @@ import (
 // same representation (time.Time compared with ==, which also compares the
 // location pointer), and nil where the reference returns nil.
 
-// issue437Classes lists, per deliberate change of issue #437, the contents
-// it may change. A content none of them touches gives what refFormsV434
-// gives: together the predicates cover every content on which the current
-// reference and the frozen one differ (each names the shape a differing
-// match needs, ignoring word boundaries and calendar validity).
+// issue437Classes lists, per deliberate change since #434 (issues #437 and
+// #451), the contents it may change. A content none of them touches gives
+// what refFormsV434 gives: together the predicates cover every content on
+// which the current reference and the frozen one differ (each names the
+// shape a differing match needs, ignoring word boundaries and calendar
+// validity).
 // TestIssue437Classes_EachIsNeeded shows that each one is needed,
 // TestIssue437Classes_LeaveOrdinaryContentsOutside that none has grown over
 // contents the changes do not affect.
@@ -53,6 +54,11 @@ var issue437Classes = []struct {
 	{"#437/3 years 2031-2099", regexp.MustCompile(`20(?:3[1-9]|[4-9]\d)-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])|` +
 		`(?:0[1-9]|[12]\d|3[01])\.(?:0[1-9]|1[0-2])\.20(?:3[1-9]|[4-9]\d)|` +
 		`(?i:` + issue437Months + `)[\s\x{A0}\x{202F}]+20(?:3[1-9]|[4-9]\d)`).MatchString, "Mai 2031"},
+	// #451/2, the long s in the table lookup: a match that differs is an
+	// "august" or a "september" with a long s for its s before date spaces
+	// and a year token.
+	{"#451/2 long s", regexp.MustCompile(`(?:(?i:augu)\x{17F}(?i:t)|\x{17F}(?i:eptember))[\s\x{A0}\x{202F}]+20[2-9]\d`).MatchString,
+		"Augu" + longS + "t 2026"},
 }
 
 // issue437Months are the month names of both month forms, before and after
@@ -228,7 +234,7 @@ func TestIssue437Classes_EachIsNeeded(t *testing.T) {
 func TestIssue437Classes_LeaveOrdinaryContentsOutside(t *testing.T) {
 	for _, c := range []string{
 		"Mai 2026", "März 2026", "MÄRZ 2030", "December 2030", "Januar 2020", "2026-03-29", "2026-03-29 14:30",
-		"2026-03-29T14:30:00Z", "29.03.2026", "29.03.2026 14:30", "Dezember\t\n2026",
+		"2026-03-29T14:30:00Z", "29.03.2026", "29.03.2026 14:30", "Dezember\t\n2026", "August 2026", "SEPTEMBER 2030",
 		"Stand 21.11.2026 01:51, Release v5.71.0 am 2026-11-21T01:51:00Z; geplant: Dezember 2026 / December 2026.",
 		"Port 2049, 2048 MB, RFC 2046, 20 2031 Zeilen, ids 2040-2045, offset 2099, v2.0.2045",
 		"5" + nbsp + "000 €", "um 14" + nbsp + "Uhr", "Seite" + nbsp + "2049", "Mai" + nbsp + "1999", "",
@@ -503,8 +509,11 @@ func runesMatchedBy(t *testing.T, expr string) []rune {
 // TestMonthPatterns_AreTheTableKeys pins that the month patterns and the
 // tables ExtractDates resolves their matches with name the same months: the
 // spelling each pattern was built from (the first rune of every fold orbit)
-// is a key of the table, and every key has its pattern. Issue #437: m[aä]rz
-// matched "Marz", absent from util.MonthDE, and missed its "maerz".
+// is a key of the table, every key has its pattern, and every spelling the
+// pattern matches — any rune of the orbit at every position — resolves
+// through monthKey to that key. Issue #437: m[aä]rz matched "Marz", absent
+// from util.MonthDE, and missed its "maerz". Issue #451: "Auguſt" matched
+// and strings.ToLower kept the long s, so no key resolved it.
 func TestMonthPatterns_AreTheTableKeys(t *testing.T) {
 	for _, form := range []struct {
 		name     string
@@ -517,7 +526,13 @@ func TestMonthPatterns_AreTheTableKeys(t *testing.T) {
 			for _, orbit := range p {
 				b.WriteRune(orbit[0])
 			}
-			names = append(names, b.String())
+			name := b.String()
+			names = append(names, name)
+			for _, spelling := range monthSpellings(p) {
+				if key := monthKey(spelling); key != name {
+					t.Errorf("%s month pattern %q matches %q, which monthKey makes %q", form.name, name, spelling, key)
+				}
+			}
 		}
 		for k := range form.table {
 			keys = append(keys, k)

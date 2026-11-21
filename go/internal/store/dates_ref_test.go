@@ -24,10 +24,14 @@ package store
 //	        U+202F NARROW NO-BREAK SPACE separate them as an ASCII space does.
 //	#437/3  The year token is 20[2-9]\d instead of 20[2-3]\d in all four
 //	        forms, and add keeps the years 2020-2099 instead of 2020-2030.
+//	#451/2  The long s, which (?i) lets match s, is an s in the table lookup
+//	        of a month name: "Auguſt 2026" is August 2026. Before, the month
+//	        expressions matched it and strings.ToLower kept the long s, so no
+//	        table resolved it.
 //
 // extractDatesRefWith is the body of extractDates at 8d4a077a, verbatim except
-// that the four expressions and the bounds of the year window come from its
-// refDateForms argument.
+// that the four expressions, the bounds of the year window and the key of a
+// month name come from its refDateForms argument.
 
 import (
 	"fmt"
@@ -41,10 +45,12 @@ import (
 )
 
 // refDateForms is one version of the reference: the expressions of the four
-// date forms and the year window add enforces.
+// date forms, the year window add enforces, and the table key of a matched
+// month name.
 type refDateForms struct {
 	iso, dot, de, en *regexp.Regexp
 	minYear, maxYear int
+	monthKey         func(string) string
 }
 
 var (
@@ -58,6 +64,7 @@ var (
 		// English month+year: "March 2026".
 		en:      regexp.MustCompile(`(?i)\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(20[2-3]\d)\b`),
 		minYear: 2020, maxYear: 2030,
+		monthKey: strings.ToLower,
 	}
 
 	refForms = refDateForms{
@@ -66,6 +73,7 @@ var (
 		de:      regexp.MustCompile(`(?i)\b(januar|februar|märz|maerz|april|mai|juni|juli|august|september|oktober|november|dezember)[\s\x{A0}\x{202F}]+(20[2-9]\d)\b`),
 		en:      regexp.MustCompile(`(?i)\b(january|february|march|april|may|june|july|august|september|october|november|december)[\s\x{A0}\x{202F}]+(20[2-9]\d)\b`),
 		minYear: 2020, maxYear: 2099,
+		monthKey: func(name string) string { return strings.ToLower(strings.ReplaceAll(name, longS, "s")) },
 	}
 )
 
@@ -129,7 +137,7 @@ func extractDatesRefWith(f refDateForms, content string) []time.Time {
 	// 3. German month+year → 1st of month
 	for _, m := range f.de.FindAllStringSubmatch(content, -1) {
 		if len(m) == 3 {
-			monthStr := strings.ToLower(m[1])
+			monthStr := f.monthKey(m[1])
 			if month, ok := util.MonthDE[monthStr]; ok {
 				ds := fmt.Sprintf("%s-%02d-01", m[2], int(month))
 				if t, err := time.Parse("2006-01-02", ds); err == nil {
@@ -142,7 +150,7 @@ func extractDatesRefWith(f refDateForms, content string) []time.Time {
 	// 4. English month+year → 1st of month
 	for _, m := range f.en.FindAllStringSubmatch(content, -1) {
 		if len(m) == 3 {
-			monthStr := strings.ToLower(m[1])
+			monthStr := f.monthKey(m[1])
 			if month, ok := util.MonthEN[monthStr]; ok {
 				ds := fmt.Sprintf("%s-%02d-01", m[2], int(month))
 				if t, err := time.Parse("2006-01-02", ds); err == nil {
