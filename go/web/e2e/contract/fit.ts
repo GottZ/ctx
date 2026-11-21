@@ -30,6 +30,12 @@ import { expect, type Page } from '@playwright/test'
 //      unless an ancestor holds fixed boxes (a transform, containment), which
 //      then clips them like absolute ones.
 //
+// Layer 2 compares whole pixels, as the browser scrolls (#457, measured at
+// device scale 1 and 2): Chromium snaps a region's sideways scroll range to
+// whole pixels and scrollWidth > clientWidth holds exactly when that range is
+// not 0, so the check reports a region the user can scroll sideways, and a
+// sub-pixel overhang with no scroll range passes.
+//
 // Structural exemptions, no per-page list:
 //   - a declared sideways scroller (layer 2, above). Rules inside @media and
 //     @supports count only while their condition holds; rules inside

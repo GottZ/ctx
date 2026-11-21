@@ -84,6 +84,37 @@ test.describe('viewport fit (meta, #440)', () => {
     await expect(expectViewportFit(page)).rejects.toThrow(/clipped: div\.frame holds 400 px of content in 300 px \(overflow-x hidden/)
   })
 
+  test('the region check follows the whole-pixel scroll range of the browser (#457)', async ({ browser }) => {
+    // Fractional overflow, measured: Chromium snaps a region's sideways scroll
+    // range to whole pixels, and scrollWidth > clientWidth holds exactly when
+    // that range is not 0 — at device scale 1 and 2. A box 0.4 px too wide
+    // leaves no range (cut by 0.4 px, nothing to scroll to); 0.6 px leaves
+    // 1 px; in a 300.6 px region a 0.6 px overhang leaves none.
+    for (const deviceScaleFactor of [1, 2]) {
+      const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor })
+      const page = await ctx.newPage()
+      for (const [w, over, scrolls] of [
+        [300, 0.4, false],
+        [300, 0.6, true],
+        [300.4, 0.4, true],
+        [300.6, 0.6, false],
+      ] as const) {
+        await page390(page, `<div class="x" style="width:${w}px;height:100px"><div style="width:${w + over}px;height:20px"></div></div>`, '.x{overflow-y:auto}')
+        const range = await page.evaluate(() => {
+          const x = document.querySelector('.x') as HTMLElement
+          x.scrollLeft = 1e6
+          const r = x.scrollLeft
+          x.scrollLeft = 0
+          return r
+        })
+        expect(range > 0, `scroll range of a ${w} px region with ${over} px overhang at dsf ${deviceScaleFactor}`).toBe(scrolls)
+        if (scrolls) await expect(expectViewportFit(page)).rejects.toThrow(/clipped: div\.x holds \d+ px of content in \d+ px/)
+        else await expectViewportFit(page)
+      }
+      await ctx.close()
+    }
+  })
+
   test('a region that declares overflow-x may scroll sideways, its own box may not stick out', async ({ page }) => {
     await page390(page, '<div class="scroll"><div style="width:900px;height:20px"></div></div>', '.scroll{overflow-x:auto}')
     await expectViewportFit(page)
