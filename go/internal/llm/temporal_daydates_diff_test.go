@@ -91,6 +91,47 @@ func TestDayDates_ReadTheYearsNoBlockCarries(t *testing.T) {
 	}
 }
 
+// TestMonthForms_ReadWhereTheWriteSideReadsThem (issue #463): a month
+// name before a year, in every case, with the long s for its s (the first
+// letter of september included), behind or around the runes a text puts
+// there — quotation marks, brackets, the two no-break spaces the write side
+// reads as date spaces — is the month store.ExtractDates yields for it, and
+// "seit" before it starts the read side's window on that month.
+func TestMonthForms_ReadWhereTheWriteSideReadsThem(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	wraps := []struct{ before, sep, after string }{
+		{"", " ", ""}, {"\u201e", " ", "\u201c"}, {"(", " ", ")"}, {"\u00bb", " ", "\u00ab"}, {"\"", " ", "\""},
+		{"", "\u00a0", ""}, {"", "\u202f", ""}, {"\u00a0", " ", ""}, {"\u202f", "\u00a0", "."},
+	}
+	n := 0
+	for _, table := range []map[string]time.Month{util.MonthDE, util.MonthEN} {
+		for name, month := range table {
+			want := time.Date(2024, month, 1, 0, 0, 0, 0, time.UTC)
+			spellings := []string{name, strings.ToUpper(name[:1]) + name[1:], strings.ToUpper(name)}
+			if strings.Contains(name, "s") {
+				spellings = append(spellings, strings.ReplaceAll(name, "s", "\u017f"))
+			}
+			for _, sp := range spellings {
+				for _, w := range wraps {
+					text := w.before + sp + w.sep + "2024" + w.after
+					if got := store.ExtractDates(text); len(got) != 1 || !got[0].Equal(want) {
+						t.Errorf("write side: %q yields %v, want %s", text, got, want.Format("2006-01-02"))
+					}
+					for _, prep := range []string{"seit ", "seit\u00a0", "Seit\u202f"} {
+						q := prep + text
+						tr := llm.NormalizeTemporalRules(q, now)
+						if tr == nil || len(tr.Dates) == 0 || tr.Dates[0].Date != want.Format("2006-01-02") {
+							t.Errorf("read side: %q gives %+v, want the window from %s", q, tr, want.Format("2006-01-02"))
+						}
+						n++
+					}
+				}
+			}
+		}
+	}
+	t.Logf("%d questions", n)
+}
+
 func FuzzDayDatesAgreeWithTheWriteSide(f *testing.F) {
 	for _, s := range dayFragments {
 		f.Add(s)

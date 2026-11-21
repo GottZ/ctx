@@ -1351,7 +1351,7 @@ func resolvePhrase(phrase string, defaultBackward bool, now time.Time) time.Time
 // gestern, "letzten Montag") and a phrase naming its own day (a day date, a
 // month with its year) are fixed (issue #463).
 func resolvePhraseRel(phrase string, defaultBackward bool, now time.Time) (time.Time, bool) {
-	words := strings.Fields(strings.ToLower(strings.Trim(phrase, ".,;:!?")))
+	words := phraseWords(phrase)
 	if len(words) == 0 {
 		return time.Time{}, false
 	}
@@ -1405,6 +1405,24 @@ func resolvePhraseRel(phrase string, defaultBackward bool, now time.Time) (time.
 	return resolveTokenRel(words[0], defaultBackward, now)
 }
 
+// phrasePunct are the runes a word of a phrase is trimmed of at both ends:
+// the punctuation ruleTokenize trims, and the quotation marks and brackets a
+// text puts around a date ("seit „März 2024“", "seit (März 2024)"), which the
+// write side reads past as well (issue #463).
+const phrasePunct = ".,;:!?\"'()[]{}\u201e\u201c\u201d\u201a\u2018\u2019\u00ab\u00bb\u2039\u203a"
+
+// phraseWords splits a phrase into its lowercased words, each trimmed of
+// phrasePunct; a word that is nothing else is left out.
+func phraseWords(phrase string) []string {
+	var words []string
+	for _, w := range strings.Fields(strings.ToLower(phrase)) {
+		if w = strings.Trim(w, phrasePunct); w != "" {
+			words = append(words, w)
+		}
+	}
+	return words
+}
+
 // resolveToken resolves a single token to a date (for compound patterns).
 func resolveToken(tok string, backward bool, now time.Time) time.Time {
 	t, _ := resolveTokenRel(tok, backward, now)
@@ -1446,6 +1464,13 @@ func resolveTokenRel(tok string, backward bool, now time.Time) (time.Time, bool)
 
 // --- Main Entry Point ---.
 
+// dateSpaces turns the two no-break spaces into spaces before the rules read
+// a question: the write side reads U+00A0 and U+202F as the space between
+// the parts of a date (store.ExtractDates), and a word processor puts them
+// between a preposition and a date as well (U+00A0 after "seit"); the
+// rules' expressions, whose \s is ASCII, would not see them (issue #463).
+var dateSpaces = strings.NewReplacer("\u00a0", " ", "\u202f", " ")
+
 // NormalizeTemporalRules performs deterministic temporal resolution.
 // Returns nil if no temporal references are found.
 // This is the PRIMARY path — LLM (NormalizeTemporal) is fallback only.
@@ -1457,6 +1482,7 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 	if strings.TrimSpace(query) == "" {
 		return nil
 	}
+	query = dateSpaces.Replace(query)
 	now = truncDate(now)
 	tokens := ruleTokenize(query)
 	recur := hasRecurrence(tokens)
