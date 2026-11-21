@@ -296,26 +296,33 @@ function ariaTest(c: PageContract, viewport: ViewportName): void {
 }
 
 /**
- * Viewport fit (#419): at the contract viewports the document itself never
- * scrolls vertically. The shell is a 100dvh grid whose content region owns
- * the scroll, and the login mask centres its card inside one viewport. A box
- * that adds padding or a border to a 100dvh height under content-box sizing
- * makes the page taller than the viewport — a scrollbar with nothing to
- * scroll to on platforms with classic scrollbars, and a page a retried click
- * can scroll (#416). Asserted on the settled state right before every
- * capture, so each visual state × theme × viewport carries it. The width is
- * not asserted: at 390 px the login card is wider than its column, a
- * separate defect.
+ * Viewport fit (#419, #430): at the contract viewports the document itself
+ * never scrolls, neither down nor sideways. The shell is a 100dvh grid whose
+ * content region owns the scroll, and the login mask centres its card inside
+ * one viewport. A box that adds padding or a border to a 100dvh height or a
+ * 100% width under content-box sizing makes the page taller or wider than the
+ * viewport — a scrollbar with nothing to scroll to on platforms with classic
+ * scrollbars, a page a retried click can scroll (#416), and for a centred box
+ * an edge cut off on the left (#430). The scroll range only reaches right of
+ * x = 0, so a box that sticks out on the left alone is not caught here; a
+ * centred one sticks out on both sides. Asserted on the settled state right
+ * before every capture, so each visual state × theme × viewport carries it.
  */
 async function expectViewportFit(page: Page): Promise<void> {
-  const { scrollHeight, clientHeight } = await page.evaluate(() => ({
+  const { scrollHeight, clientHeight, scrollWidth, clientWidth } = await page.evaluate(() => ({
     scrollHeight: document.documentElement.scrollHeight,
     clientHeight: document.documentElement.clientHeight,
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
   }))
   expect(
     scrollHeight,
     `the document is ${scrollHeight - clientHeight} px taller than the ${clientHeight} px viewport (#419)`,
   ).toBe(clientHeight)
+  expect(
+    scrollWidth,
+    `the document is ${scrollWidth - clientWidth} px wider than the ${clientWidth} px viewport (#430)`,
+  ).toBe(clientWidth)
 }
 
 function visualTest(c: PageContract, state: PageState, theme: Theme, viewport: ViewportName): void {
