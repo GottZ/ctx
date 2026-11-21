@@ -363,7 +363,8 @@ func TestBackfillTemporalFillsBlocksWithoutRows(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT COALESCE(content_times, '{}') FROM context_blocks WHERE id = $1`, b.ID).Scan(&times); err != nil {
 		t.Fatalf("read content_times: %v", err)
 	}
-	if len(times) != 2 {
-		t.Errorf("content_times = %v, want the two dates of the content", times)
+	want := []time.Time{i414Day("2026-09-01"), i414Day("2026-09-15")}
+	if !slices.EqualFunc(times, want, time.Time.Equal) {
+		t.Errorf("content_times = %v, want %v (the two dates of the content, in order)", times, want)
 	}
 }

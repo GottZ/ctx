@@ -26,8 +26,8 @@ import (
 )
 
 // i414Temporal reads what the temporal afterwork wrote for a block: the
-// content_times column and the distinct source times of its context_temporal
-// rows, each as sorted UTC strings.
+// content_times column as stored (order and repeats kept) and the distinct
+// source times of its context_temporal rows (sorted), as UTC strings.
 func i414Temporal(t *testing.T, f *i406Fixture, id string) (contentTimes, sources []string) {
 	t.Helper()
 	var times []time.Time
@@ -51,27 +51,31 @@ func i414Temporal(t *testing.T, f *i406Fixture, id string) (contentTimes, source
 	if err := rows.Err(); err != nil {
 		t.Fatalf("temporal rows: %v", err)
 	}
-	return i414Strings(times), i414Strings(srcs)
+	return i414Strings(times), i414Set(srcs)
 }
 
 // i414Derived is what the afterwork derives from content for a block created
-// at createdAt: the extracted dates, and those dates plus the creation time as
-// the source times of the dimension rows.
+// at createdAt: the extracted dates in their order, and those dates plus the
+// creation time as the set of source times of the dimension rows.
 func i414Derived(content string, createdAt time.Time) (contentTimes, sources []string) {
 	dates := store.ExtractDates(content)
-	return i414Strings(dates), i414Strings(append([]time.Time{createdAt}, dates...))
+	return i414Strings(dates), i414Set(append([]time.Time{createdAt}, dates...))
 }
 
+// i414Strings renders every time, in order.
 func i414Strings(ts []time.Time) []string {
-	out := make([]string, 0, len(ts))
-	for _, x := range ts {
-		s := x.UTC().Format(time.RFC3339Nano)
-		if !slices.Contains(out, s) {
-			out = append(out, s)
-		}
+	out := make([]string, len(ts))
+	for i, x := range ts {
+		out[i] = x.UTC().Format(time.RFC3339Nano)
 	}
-	slices.Sort(out)
 	return out
+}
+
+// i414Set renders the distinct times, sorted.
+func i414Set(ts []time.Time) []string {
+	out := i414Strings(ts)
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 func i414CreatedAt(t *testing.T, f *i406Fixture, id string) time.Time {
