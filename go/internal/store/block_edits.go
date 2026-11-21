@@ -184,8 +184,8 @@ func occurrences(s, sub string) int {
 }
 
 // contentEditPlan carries an update's edits into runBlockUpdate: the list, the
-// index of the content argument it fills, and the write scopes the row is
-// read within.
+// index of the content argument it fills (the content_times argument, the
+// content's dates, follows it), and the write scopes the row is read within.
 type contentEditPlan struct {
 	edits       []ContentEdit
 	arg         int
@@ -227,6 +227,7 @@ func (p *contentEditPlan) resolve(ctx context.Context, tx pgx.Tx, id string, arg
 		return false, err
 	}
 	args[p.arg] = edited
+	args[p.arg+1] = ExtractDates(edited)
 	return true, nil
 }
 

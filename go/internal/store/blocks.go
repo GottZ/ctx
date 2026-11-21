@@ -971,6 +971,18 @@ func prepareUpsert(category, title, content string, tags []string, metadata map[
 			"type_source = 'manual'")
 	}
 
+	// content_times is derived from the content this statement stores
+	// (ExtractDates, no I/O), so the write sets it itself, in the same tuple
+	// (issue #421): before, the temporal afterwork set it with an UPDATE of
+	// the block row after the write had answered, which held the row while
+	// the query path's failure memo skips a held row, and wrote a second
+	// tuple version of every write. On the identical-content branch it is the
+	// value already stored.
+	insertCols += ", content_times"
+	insertVals += fmt.Sprintf(", $%d::timestamptz[]", len(args)+1)
+	args = append(args, ExtractDates(content))
+	setClauses = append(setClauses, "content_times = EXCLUDED.content_times")
+
 	// The WHERE of the DO UPDATE is the conflict half of the S3 gate (see
 	// provenanceWriter): it decides on the conflicting row as the statement
 	// locked it, so a row that is not admitted is neither written nor
@@ -1856,17 +1868,24 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	// Edits are a content write as well; their argument is the content they
 	// resolve to, which exists only once runBlockUpdate holds the row, so the
 	// slot is reserved here and filled there (contentEditPlan).
+	//
+	// A content write sets content_times as well, from the content it stores
+	// (issue #421, see prepareUpsert); for edits that content, and so its
+	// dates, exist only once the row is held, and contentEditPlan fills both
+	// slots.
 	contentSent := data.Content != nil || data.Edits != nil
 	var edits *contentEditPlan
 	if contentSent {
-		setClauses = append(setClauses, fmt.Sprintf("content = $%d", argIdx))
+		setClauses = append(setClauses,
+			fmt.Sprintf("content = $%d", argIdx),
+			fmt.Sprintf("content_times = $%d::timestamptz[]", argIdx+1))
 		if data.Edits != nil {
 			edits = &contentEditPlan{edits: data.Edits, arg: len(args), writeScopes: writeScopes}
-			args = append(args, nil)
+			args = append(args, nil, nil)
 		} else {
-			args = append(args, *data.Content)
+			args = append(args, *data.Content, ExtractDates(*data.Content))
 		}
-		argIdx++
+		argIdx += 2
 	}
 	if data.Tags != nil {
 		setClauses = append(setClauses, fmt.Sprintf("tags = $%d", argIdx))
