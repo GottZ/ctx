@@ -156,6 +156,31 @@ func TestRefreshTemporalTakesNoExtractionOfAnotherVersion(t *testing.T) {
 	i466Refreshed(t, pool, u, true, i466Kept)
 }
 
+// TestRefreshTemporalKeepsTheReviewOfARenamedBlock: a review of a block whose
+// version row an earlier review of another title left (a rename runs no
+// temporal afterwork) rewrites the row — the version and the extraction of
+// its own review. A same-content write then keeps its rows; with the earlier
+// extraction left beside the new version, the write would rewrite them and
+// make the block due for a review it has.
+func TestRefreshTemporalKeepsTheReviewOfARenamedBlock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	b := i466Reviewed(t, pool, "Plan")
+	title := "Plan, renamed"
+	u, _, err := store.UpdateBlock(ctx, pool, b.ID, store.UpdateBlockData{Title: &title}, []string{"private"})
+	if err != nil || u == nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if !i452Due(t, pool, u.ID) {
+		t.Fatalf("the renamed block is not due")
+	}
+	i466Review(t, pool, u, title)
+	i466Refreshed(t, pool, u, false, i466Kept, i466Dropped, i466Found)
+}
+
 // TestMigration190AddsTheExtractionWithoutTouchingARow: migration 190 adds
 // context_temporal_reviews.extraction as a nullable column with no default —
 // a catalog change, no row rewritten: the version rows of schema 189 keep

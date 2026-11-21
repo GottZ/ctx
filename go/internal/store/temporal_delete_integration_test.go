@@ -264,18 +264,48 @@ func TestTemporalWriterAgainstADeleteThatComesSecond(t *testing.T) {
 	}
 }
 
-// i465VictimSetup stores a block, has a transaction of its own (20 s
-// deadlock_timeout: never the victim) lock one of the block's temporal rows,
-// starts the writer, which waits for that row (1 s, the default: the victim),
-// and then deletes the block in that transaction, which waits for the block
-// row the writer holds. PostgreSQL aborts the writer. It returns the
-// transaction, once its DELETE went through, and the writer's result channel.
+// i465VictimWriterTimeout is the deadlock_timeout of the writer in the victim
+// tests. PostgreSQL checks a lock wait for a cycle once, when the wait reaches
+// it: the cycle has to be closed by then (the other transaction's DELETE,
+// issued right after the writer is seen waiting), so it is wide enough for a
+// slow runner, and the other side's is far wider.
+const (
+	i465VictimWriterTimeout = "3s"
+	i465VictimOtherTimeout  = "60s"
+)
+
+// i465VictimPool is a pool of its own for the writer of the victim tests, its
+// connections at i465VictimWriterTimeout.
+func i465VictimPool(t *testing.T, dsn string) *pgxpool.Pool {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse dsn: %v", err)
+	}
+	cfg.MaxConns = 2
+	cfg.ConnConfig.RuntimeParams["deadlock_timeout"] = i465VictimWriterTimeout
+	p, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("writer pool: %v", err)
+	}
+	t.Cleanup(p.Close)
+	return p
+}
+
+// i465VictimSetup stores a block, has a transaction of its own
+// (i465VictimOtherTimeout: never the victim) lock one of the block's temporal
+// rows, starts the writer on a pool of its own (i465VictimWriterTimeout: the
+// victim), which waits for that row, and then deletes the block in that
+// transaction, which waits for the block row the writer holds. PostgreSQL
+// aborts the writer. It returns the transaction, once its DELETE went
+// through, and the writer's result channel.
 func i465VictimSetup(t *testing.T, pool *pgxpool.Pool, dsn string, w i465Writer) (pgx.Tx, uint32, *store.Block, <-chan i465Result, <-chan struct{}) {
 	t.Helper()
 	ctx := context.Background()
 	b := i465Block(t, pool, "Victim "+w.name)
+	writerPool := i465VictimPool(t, dsn)
 
-	conn := i465Conn(t, dsn, "20s")
+	conn := i465Conn(t, dsn, i465VictimOtherTimeout)
 	other, err := conn.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
@@ -291,7 +321,7 @@ func i465VictimSetup(t *testing.T, pool *pgxpool.Pool, dsn string, w i465Writer)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		applied, err := w.write(ctx, pool, b)
+		applied, err := w.write(ctx, writerPool, b)
 		written <- i465Result{applied, err}
 	}()
 	testdb.WaitBlockedBy(t, pool, pid, done, "the writer", "transactionid")
@@ -368,7 +398,10 @@ const i465LoadOps = 2400
 // small set of blocks against repeated hard deletes of those blocks, each
 // deleted block stored again. Writers of a deleted block report applied=false;
 // no side may fail — before issue #465 a run of 45 761 operations saw 15
-// deadlocks (40P01), on the writer's first insert and on the delete.
+// deadlocks (40P01), on the writer's first insert and on the delete, and a
+// run of this test on the base 8. The deadlock is pinned by the interleaving
+// tests above; this one sweeps for other failures under load, and asserts
+// that the deletes ran and that writers met blocks deleted under them.
 func TestTemporalWritersAgainstHardDeletes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -389,10 +422,12 @@ func TestTemporalWritersAgainstHardDeletes(t *testing.T) {
 	}
 
 	var (
-		emu    sync.Mutex
-		errs   = map[string]int{}
-		sample = map[string]string{}
-		ops    int
+		emu     sync.Mutex
+		errs    = map[string]int{}
+		sample  = map[string]string{}
+		ops     int
+		deletes int
+		gone    int
 	)
 	record := func(err error) bool {
 		emu.Lock()
@@ -418,7 +453,12 @@ func TestTemporalWritersAgainstHardDeletes(t *testing.T) {
 			defer wg.Done()
 			writer := i465Writers[w%len(i465Writers)]
 			for i := w; ; i++ {
-				_, err := writer.write(ctx, pool, pick(i))
+				applied, err := writer.write(ctx, pool, pick(i))
+				if err == nil && !applied {
+					emu.Lock()
+					gone++
+					emu.Unlock()
+				}
 				if !record(err) {
 					return
 				}
@@ -430,7 +470,12 @@ func TestTemporalWritersAgainstHardDeletes(t *testing.T) {
 		defer wg.Done()
 		for i := 0; ; i++ {
 			old := pick(i)
-			_, err := pool.Exec(ctx, `DELETE FROM context_blocks WHERE id = $1`, old.ID)
+			tag, err := pool.Exec(ctx, `DELETE FROM context_blocks WHERE id = $1`, old.ID)
+			if err == nil && tag.RowsAffected() == 1 {
+				emu.Lock()
+				deletes++
+				emu.Unlock()
+			}
 			if err == nil {
 				nb, serr := store.UpsertBlock(ctx, pool, "i465", old.Title, old.Content, nil, nil, "private", false, store.SensitivityWrite{}, "")
 				if serr == nil {
@@ -454,5 +499,9 @@ func TestTemporalWritersAgainstHardDeletes(t *testing.T) {
 		}
 		sort.Strings(codes)
 		t.Errorf("%d operations, errors: %s", ops, strings.Join(codes, "; "))
+	}
+	t.Logf("%d operations: %d hard deletes, %d writes found their block gone", ops, deletes, gone)
+	if deletes < i465LoadOps/20 || gone == 0 {
+		t.Errorf("%d operations: %d hard deletes (want at least %d), %d writes found their block gone (want at least one): the load did not overlap", ops, deletes, i465LoadOps/20, gone)
 	}
 }

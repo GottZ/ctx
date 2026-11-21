@@ -1955,7 +1955,7 @@ SELECT block_id FROM (
  WHERE failed;
 ```
 
-then one transaction per batch of ids (50 000 per batch keeps the lock to about a second; readers go on, writers wait for the batch):
+then one transaction per batch of ids (50 000 per batch holds the lock about 0.6 s, 1.9 s without the `replica` line below; readers go on, writers wait for the batch):
 
 ```sql
 BEGIN;
@@ -1985,7 +1985,7 @@ A block changed since the upgrade keeps what the binary wrote (`DO NOTHING`; the
 The afterwork of a write that stores the content a block already holds (a same-content upsert) leaves the rows of the dream's temporal review standing when they cover what it would write. Until migration 190 that meant: the rows are the review's of the block's current title and content, and they hold every date the extraction yields now — a superset test. A date a later release's `ExtractDates` no longer yields (issue #437 dropped the years outside 2020–2099) therefore stayed on a reviewed block, and a backfill through the afterwork would skip it (issue #466). Since migration 190 the review records, beside the version, the extraction it wrote its rows from — `extraction` in `context_temporal_reviews`, sha256 over the version and a digest of the creation time and the content's dates — and the afterwork takes the rows as covering only when that is the extraction in force for the same version. What an operator notices:
 
 - **A changed extraction re-reviews.** After a release that changes which dates a content yields, the next same-content write of a reviewed block whose extraction changed writes the extraction's rows, deletes the version, and the block is reviewed again at its next pick (one LLM call). Blocks no write reaches keep their rows and stay reviewed: the pick reads the version only.
-- **Rows of before cover nothing.** A version row without `extraction` — every row taken over by migration 189 and every row a review of the binary before migration 190 wrote — does not say which extraction its rows hold. It keeps its block reviewed for the pick, but covers no same-content write: the first such write of the block rewrites its rows from the extraction and makes it due, one review each. On the reference instance (2026-11-21, read only) that is at most the 1 762 version rows, and only as same-content writes reach them. How many are left (one scan of `context_temporal_reviews`; out of band):
+- **Rows of before cover nothing.** A version row without `extraction` — every row taken over by migration 189 and every row a review of the binary before migration 190 wrote — does not say which extraction its rows hold. It keeps its block reviewed for the pick, but covers no same-content write: the first such write of the block rewrites its rows from the extraction and makes it due, one review each — until that review, the block's rows hold the extraction's dates only, not the LLM's, so a query by an LLM-found date misses it (the pick takes blocks by `dream_checked_at`, not by due-ness, so that can last a cycle of the corpus). On the reference instance (2026-11-21, read only) that is at most the 1 762 version rows, and only as same-content writes reach them. How many are left (one scan of `context_temporal_reviews`; out of band):
 
   ```sql
   SELECT count(*) FROM context_temporal_reviews WHERE extraction IS NULL;
