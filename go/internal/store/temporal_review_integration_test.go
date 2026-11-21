@@ -1,12 +1,13 @@
 //go:build integration
 
 // Issue #427: MarkTemporalReviewed records the dream's temporal review only
-// for the title and content it read, as the block's updated_at, and reaches
-// the row by its primary key alone.
+// for the title and content it read, as the block's updated_at;
+// PopulateTemporalReview writes the review's findings only while the block
+// holds that title and content. Both reach the row by its primary key alone.
 //
 // Run with:
 //
-//	go test -tags=integration ./internal/store/ -run 'TestMarkTemporalReviewed|TestTemporalReview' -count=1 -v
+//	go test -tags=integration ./internal/store/ -run 'TestMarkTemporalReviewed|TestPopulateTemporalReview|TestTemporalReview' -count=1 -v
 package store_test
 
 import (
@@ -131,6 +132,68 @@ func i427PlanCorpus(t *testing.T, pool *pgxpool.Pool) {
 	}
 	if _, err := pool.Exec(ctx, `ANALYZE context_blocks`); err != nil {
 		t.Fatalf("analyze: %v", err)
+	}
+}
+
+// TestPopulateTemporalReviewNeedsTheReviewedTitle: the dream's LLM findings
+// land only while the block holds the title and content the review read; a
+// replaced title drops them, an update of tags keeps them.
+func TestPopulateTemporalReviewNeedsTheReviewedTitle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	title, content := "Review on 2026-03-15", "Notes of the review."
+	b, err := store.UpsertBlock(ctx, pool, "i427", title, content, nil, nil, "private", false, store.SensitivityWrite{}, "")
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if applied, err := store.RefreshTemporal(ctx, pool, b.ID, b.Content, b.CreatedAt); err != nil || !applied {
+		t.Fatalf("store afterwork: applied=%v err=%v", applied, err)
+	}
+	base := i414Want(b.CreatedAt)
+
+	// Tags only: the review read nothing that changed.
+	if u, _, err := store.UpdateBlock(ctx, pool, b.ID, store.UpdateBlockData{Tags: []string{"retro"}}, []string{"private"}); err != nil || u == nil {
+		t.Fatalf("tags update: %v", err)
+	}
+	found := []time.Time{i414Day("2026-03-15")}
+	if applied, err := store.PopulateTemporalReview(ctx, pool, b.ID, title, content, found, b.CreatedAt); err != nil || !applied {
+		t.Fatalf("tags-only: applied=%v err=%v, want applied", applied, err)
+	}
+	if got, want := i414Sources(t, pool, b.ID), i414Want(b.CreatedAt, found...); !slices.Equal(got, want) {
+		t.Fatalf("source times = %v, want %v", got, want)
+	}
+	if applied, err := store.RefreshTemporal(ctx, pool, b.ID, content, b.CreatedAt); err != nil || !applied {
+		t.Fatalf("reset rows: applied=%v err=%v", applied, err)
+	}
+
+	// The title is replaced: the date read off the old one stays out.
+	newTitle := "Review on 2026-07-20"
+	if u, _, err := store.UpdateBlock(ctx, pool, b.ID, store.UpdateBlockData{Title: &newTitle}, []string{"private"}); err != nil || u == nil {
+		t.Fatalf("title update: %v", err)
+	}
+	if applied, err := store.PopulateTemporalReview(ctx, pool, b.ID, title, content, found, b.CreatedAt); err != nil || applied {
+		t.Errorf("replaced title: applied=%v err=%v, want not applied", applied, err)
+	}
+	if got := i414Sources(t, pool, b.ID); !slices.Equal(got, base) {
+		t.Errorf("source times = %v, want %v (the rows of the block's own content)", got, base)
+	}
+}
+
+func TestTemporalReviewGuardPlanUsesPrimaryKey(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	i427PlanCorpus(t, pool)
+	text, conds := i427GenericPlan(t, pool, store.TemporalReviewGuardSQLForTest)
+	t.Logf("generic plan:\n%s", text)
+	if !strings.Contains(text, "Index Scan using context_blocks_pkey on context_blocks") ||
+		!slices.Equal(conds, []string{"Index Cond: (id = $1)"}) {
+		t.Errorf("the temporal review guard must reach the row by its primary key only, plan:\n%s", text)
 	}
 }
 

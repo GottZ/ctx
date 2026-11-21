@@ -239,10 +239,11 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 
 	if len(newTimes) > 0 {
 		// Re-populate with merged times — skipped when a write replaced the
-		// content during the review: the findings belong to the old one, and
-		// the block is left to its next review (dropped).
+		// title or the content during the review: the review read both, its
+		// findings belong to the old ones, and the block is left to its next
+		// review (dropped).
 		merged := append(contentTimes, newTimes...)
-		applied, err := store.PopulateTemporal(ctx, pool, block.ID, block.Content, merged, block.CreatedAt)
+		applied, err := store.PopulateTemporalReview(ctx, pool, block.ID, block.Title, block.Content, merged, block.CreatedAt)
 		if err != nil {
 			return false, fmt.Errorf("validate temporal: merge populate: %w", err)
 		}

@@ -152,6 +152,17 @@ func PopulateTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content 
 	return writeTemporalGuarded(ctx, pool, blockID, contentTimes, createdAt, temporalContentGuardSQL, blockID, content)
 }
 
+// PopulateTemporalReview is PopulateTemporal for the dates the dream's LLM
+// review found (issue #427). The review sends the block's title to the LLM as
+// well as its content, and a date read off one title is no finding for
+// another, so the rows are written only while the block holds both: the title
+// and the content the review read (temporalReviewGuardSQL). An update of tags
+// or metadata leaves them valid. The deterministic re-extraction before the
+// review reads the content alone and writes with PopulateTemporal.
+func PopulateTemporalReview(ctx context.Context, pool *pgxpool.Pool, blockID, title, content string, times []time.Time, createdAt time.Time) (applied bool, err error) {
+	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt, temporalReviewGuardSQL, blockID, content, title)
+}
+
 // MarkTemporalReviewed records that the dream's temporal review has run for
 // the version of the block it read: title and content (issue #427). It sets
 // dream_temporal_validated_at to the block's updated_at while the block still
@@ -243,6 +254,11 @@ const contentVersionCol = `content_hash = encode(digest($2::text, 'sha256'), 'he
 // trigram indexes on title support (store/classify.go, classifyInputsSQL).
 const temporalReviewVersionCol = contentVersionCol + ` AND title = $3`
 
+// temporalReviewGuardSQL is the guard of PopulateTemporalReview:
+// temporalReviewVersionCol for the block ($1), read without a row lock like
+// temporalContentGuardSQL.
+const temporalReviewGuardSQL = `SELECT ` + temporalReviewVersionCol + ` FROM context_blocks WHERE id = $1`
+
 // temporalReviewStampSQL is MarkTemporalReviewed's statement for the block
 // $1, reviewed with content $2 and title $3: the WHERE names the primary key
 // alone, the version decides the value written, and RETURNING reports it.
@@ -257,7 +273,8 @@ const temporalReviewStampSQL = `UPDATE context_blocks
 
 // writeTemporalGuarded writes the dimension rows of a block and then runs
 // guardSQL, a statement that reads the block row by its primary key and
-// answers contentVersionCol for it; it commits when the answer is true and
+// answers contentVersionCol (temporalReviewVersionCol for the dream's LLM
+// findings) for it; it commits when the answer is true and
 // rolls back when it is false or the block is gone. After the BEGIN, the lock,
 // the rows and the guard travel in one round trip; the commit or rollback is
 // the last.
@@ -268,7 +285,8 @@ const temporalReviewStampSQL = `UPDATE context_blocks
 // applied=false, no error (temporalBlockGone).
 //
 // The guard of RefreshTemporal and PopulateTemporal (temporalContentGuardSQL)
-// takes no row lock (issue #421). The transaction holds the block row only in
+// takes no row lock (issue #421), nor does PopulateTemporalReview's
+// (temporalReviewGuardSQL). The transaction holds the block row only in
 // the FOR KEY SHARE the dimension rows' foreign key takes, from the first row
 // to the commit. FOR NO KEY UPDATE does not conflict with it — UpdateBlock
 // and the query path's failure memo (FOR NO KEY UPDATE SKIP LOCKED,
