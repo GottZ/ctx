@@ -110,7 +110,13 @@ export async function expectViewportFit(page: Page): Promise<void> {
         // a cross-origin sheet hides its rules; the SPA ships none
       }
     }
-    const declaresX = (el: Element): boolean => {
+    // A matching declaration counts only while it is the value in effect: a
+    // later overflow: hidden that wins the cascade leaves no sideways scroller
+    // (cs is the element's computed style). Left open: a winning explicit
+    // overflow-x: visible next to a non-visible overflow-y computes to auto as
+    // well, and a losing auto declaration then still exempts the region.
+    const declaresX = (el: Element, cs: CSSStyleDeclaration): boolean => {
+      if (cs.overflowX !== 'auto' && cs.overflowX !== 'scroll') return false
       const inline = el instanceof HTMLElement ? el.style.overflowX : ''
       if (inline === 'auto' || inline === 'scroll') return true
       return declaredX.some((sel) => matches(el, sel))
@@ -198,7 +204,7 @@ export async function expectViewportFit(page: Page): Promise<void> {
           const padLeft = r.left + parseFloat(cs.borderLeftWidth)
           const padRight = padLeft + el.clientWidth
           const exempt =
-            cs.textOverflow === 'ellipsis' || matches(el, 'input, select, textarea') || declaresX(el)
+            cs.textOverflow === 'ellipsis' || matches(el, 'input, select, textarea') || declaresX(el, cs)
           if (!exempt && el.scrollWidth > el.clientWidth) {
             findings.push(
               `clipped: ${label(el)} holds ${el.scrollWidth} px of content in ${el.clientWidth} px ` +

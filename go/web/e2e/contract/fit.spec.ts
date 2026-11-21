@@ -73,6 +73,17 @@ test.describe('viewport fit (meta, #440)', () => {
     await expect(expectViewportFit(page)).rejects.toThrow(/clipped: div\.frame holds 301 px of content in 300 px \(overflow-x hidden/)
   })
 
+  test('a scroller declaration that loses the cascade does not exempt the region', async ({ page }) => {
+    // The later overflow: hidden wins; the earlier overflow-x: auto still
+    // matches the element but is not in effect.
+    await page390(
+      page,
+      '<div class="frame" style="width:300px;height:100px"><div style="width:400px;height:20px"></div></div>',
+      '.frame{overflow-x:auto}.frame{overflow:hidden}',
+    )
+    await expect(expectViewportFit(page)).rejects.toThrow(/clipped: div\.frame holds 400 px of content in 300 px \(overflow-x hidden/)
+  })
+
   test('a region that declares overflow-x may scroll sideways, its own box may not stick out', async ({ page }) => {
     await page390(page, '<div class="scroll"><div style="width:900px;height:20px"></div></div>', '.scroll{overflow-x:auto}')
     await expectViewportFit(page)
