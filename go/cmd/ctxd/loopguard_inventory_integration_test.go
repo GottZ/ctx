@@ -113,7 +113,12 @@ func inventoryRouter(t *testing.T) inventoryFixture {
 	ident := fedhop.NewIdentity("00000000-0000-4000-8000-0000000000f8", bytes.Repeat([]byte{0xf8}, 32))
 	// newRouter, the constructor main uses: the fixture also carries the
 	// router's own ingress registration (FR2-2 pins it).
-	router, ingress, _ := newRouter(fedhop.WithIdentity(ctx, ident), pool, cfgStore, scheduler, backendPool, blocktype.NewRegistry(), projectHub, d)
+	router, ingress, gw := newRouter(fedhop.WithIdentity(ctx, ident), pool, cfgStore, scheduler, backendPool, blocktype.NewRegistry(), projectHub, d)
+	// The production constructor runs the gateway's meter on time.Now: the
+	// meter clock of newModelGateway is a test's seam only (#369).
+	if !isWallClock(gw.meterClock) {
+		t.Fatal("newRouter: the gateway's meter does not run on time.Now")
+	}
 	return inventoryFixture{router: router, ingress: ingress, pool: pool, ident: ident, adminKey: inventoryAdminKey, modelKey: model.Plaintext(), peerKey: peer.Plaintext()}
 }
 

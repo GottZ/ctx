@@ -58,8 +58,9 @@ func newRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, 
 // wrapRoutes, when non-nil, replaces each group's route table (/v1's, then
 // /v2's; the patterns are relative to the prefix) before the mount — the
 // door census (v1door) puts its probe behind every real route this way.
-// Production passes nil.
-func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry, projectHub *events.ProjectHub, dispatcher *dispatch.Dispatcher, wrapRoutes func([]modelRoute) []modelRoute) (*chi.Mux, *fedhop.Ingress, *modelGateway) {
+// meterClock goes to newModelGateway (a test's clock for the meter).
+// Production passes nil and no clock.
+func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store, scheduler *events.Scheduler, backendPool *backends.Pool, blocktypeReg *blocktype.Registry, projectHub *events.ProjectHub, dispatcher *dispatch.Dispatcher, wrapRoutes func([]modelRoute) []modelRoute, meterClock ...func() time.Time) (*chi.Mux, *fedhop.Ingress, *modelGateway) {
 	r := chi.NewRouter()
 	ingress := &fedhop.Ingress{}
 	// F-W8 (design/04 §4.6, masterplan K14): the federation loop and depth
@@ -506,7 +507,7 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	// access log and one meter, and one set of handler dependencies. Mounted
 	// before the SPA fallback; each group's own catch-alls keep its prefix out
 	// of it. The route seam replaces each group's table alike.
-	gateway := newModelGateway(pool, cfgStore)
+	gateway := newModelGateway(pool, cfgStore, meterClock...)
 	// W01-8: the door's in-flight registry — the revoke actions end a dead
 	// key's running requests through it and report how many
 	// (cancelled_inflight), the NOTIFY listener (migration 165) feeds it.

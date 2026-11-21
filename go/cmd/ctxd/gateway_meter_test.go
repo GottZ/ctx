@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -46,15 +47,55 @@ func meterTestGateway(t *testing.T, cfgStore *config.Store) *modelGateway {
 	return gw
 }
 
-// meterTestGatewayUnseeded is meterTestGateway without opening the meter.
-func meterTestGatewayUnseeded(t *testing.T, cfgStore *config.Store) *modelGateway {
+// meterTestGatewayUnseeded is meterTestGateway without opening the meter;
+// meterClock goes to newModelGateway.
+func meterTestGatewayUnseeded(t *testing.T, cfgStore *config.Store, meterClock ...func() time.Time) *modelGateway {
 	t.Helper()
 	pool, err := pgxpool.New(context.Background(), "postgres://ctx:ctx@127.0.0.1:1/ctx?connect_timeout=1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	return newModelGateway(pool, cfgStore)
+	return newModelGateway(pool, cfgStore, meterClock...)
+}
+
+// isWallClock reports whether now is time.Now itself.
+func isWallClock(now func() time.Time) bool {
+	return now != nil && reflect.ValueOf(now).Pointer() == reflect.ValueOf(time.Now).Pointer()
+}
+
+// TestModelGatewayMeterClock (#369): the meter's clock seam of
+// newModelGateway is a test's only. Without a clock (as buildRouter calls it
+// for newRouter, the production path, which the loop-guard inventory fixture
+// pins on its router) the gateway's meter runs on time.Now; a nil clock counts
+// as none; handed a clock, the meter runs on that one — on a clock that
+// stands still the third request of RPM 2 waits exactly 60 s / 2.
+func TestModelGatewayMeterClock(t *testing.T) {
+	cfgStore := meterTestStore(t, map[string]string{"CTX_GATEWAY_CHAT_RPM_DEFAULT": "2"})
+	if gw := meterTestGatewayUnseeded(t, cfgStore); !isWallClock(gw.meterClock) {
+		t.Fatal("the model gateway's meter does not run on time.Now without a test clock")
+	}
+	if gw := meterTestGatewayUnseeded(t, cfgStore, nil); !isWallClock(gw.meterClock) {
+		t.Fatal("the model gateway's meter does not run on time.Now with a nil test clock")
+	}
+	frozen := time.Date(2026, 11, 21, 12, 40, 0, 0, time.UTC)
+	gw := meterTestGatewayUnseeded(t, cfgStore, func() time.Time { return frozen })
+	if isWallClock(gw.meterClock) {
+		t.Fatal("the model gateway kept time.Now although a test clock was handed")
+	}
+	gw.meter.MarkSeeded()
+	l := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, gw.meter, nil).Limiter
+	est := oai.Estimate{Op: llmlog.GatewayOpChat, ClientMaxTokens: true}
+	for i := range 2 {
+		res, ref := l.Admit(context.Background(), urgentConsumer("clock"), modelalias.Alias{}, est)
+		if ref != nil {
+			t.Fatalf("request %d refused: %+v", i+1, ref)
+		}
+		res.Settle(dispatch.Usage{})
+	}
+	if _, ref := l.Admit(context.Background(), urgentConsumer("clock"), modelalias.Alias{}, est); ref == nil || ref.RetryAfter != 30*time.Second {
+		t.Fatalf("request 3: %+v, want refused with Retry-After exactly 30s (the meter on the handed clock)", ref)
+	}
 }
 
 // TestGatewayDepsWiresTheMeter is the wiring pin of gate Z1: the model

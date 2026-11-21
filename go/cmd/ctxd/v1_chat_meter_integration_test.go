@@ -57,8 +57,9 @@ type v1MeterRig struct {
 }
 
 // newV1MeterRig builds the router as production does (buildRouter) under
-// env; wrap is the route seam (nil = production routes unchanged).
-func newV1MeterRig(t *testing.T, env map[string]string, wrap func([]modelRoute) []modelRoute) *v1MeterRig {
+// env; wrap is the route seam (nil = production routes unchanged), meterClock
+// the clock of the gateway's meter (none = time.Now, as in production).
+func newV1MeterRig(t *testing.T, env map[string]string, wrap func([]modelRoute) []modelRoute, meterClock ...func() time.Time) *v1MeterRig {
 	t.Helper()
 	seed, dsn := testdb.SetupTestDBWithDSN(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -104,7 +105,10 @@ func newV1MeterRig(t *testing.T, env map[string]string, wrap func([]modelRoute) 
 	sched.SetDispatcher(disp)
 	ident := fedhop.NewIdentity("00000000-0000-4000-8000-0000000f0610", bytes.Repeat([]byte{0x61}, 32))
 	sctx := fedhop.WithIdentity(ctx, ident)
-	router, _, gw := buildRouter(sctx, pool, cfgStore, sched, bp, blocktype.NewRegistry(), hub, disp, wrap)
+	router, _, gw := buildRouter(sctx, pool, cfgStore, sched, bp, blocktype.NewRegistry(), hub, disp, wrap, meterClock...)
+	if len(meterClock) == 0 && !isWallClock(gw.meterClock) {
+		t.Fatal("buildRouter without a meter clock: the gateway's meter does not run on time.Now")
+	}
 	next := *cfgStore.Snapshot()
 	next.Gateway.Enabled = true
 	if err := cfgStore.Replace(&next); err != nil {
@@ -169,10 +173,18 @@ func (a v1MeterAnswer) String() string {
 // 429 zuerst rot" (design/06 §7 W06-10) and the turn-around of the W02-07
 // limiter-nil pin (H-5): gateway.chat_rpm_default = 2 ⇒ requests 1 and 2 are
 // served (x-ratelimit-remaining-requests 1, then 0), request 3 is 429
-// rate_limit_exceeded with Retry-After in [1, 30], retry-after-ms and
+// rate_limit_exceeded with Retry-After 30, retry-after-ms 30000 and
 // x-should-retry: true; the engine saw 2 requests, the log holds 2 rows.
+//
+// The gateway's meter runs on a clock that stands still at the rig's start
+// (#369, the form of #461's meter tests): on the real clock the remaining
+// requests and the Retry-After drift with the time between the first and the
+// third request (the window [1, 30] broke after 29 s), and the refusal's
+// milliseconds could not be pinned. Frozen, the third request waits exactly
+// one emission interval, 60 s / 2.
 func TestV1ChatMeterOnTheRealRouter(t *testing.T) {
-	r := newV1MeterRig(t, map[string]string{"CTX_GATEWAY_CHAT_RPM_DEFAULT": "2"}, nil)
+	frozen := time.Now()
+	r := newV1MeterRig(t, map[string]string{"CTX_GATEWAY_CHAT_RPM_DEFAULT": "2"}, nil, func() time.Time { return frozen })
 	body := `{"model":"` + v1ChatAlias + `","messages":[{"role":"user","content":"hi"}]}`
 	var got []v1MeterAnswer
 	for range 3 {
@@ -225,11 +237,11 @@ func TestV1ChatMeterOnTheRealRouter(t *testing.T) {
 		string(env.Error.Param) != "null" || env.Error.Message == "" {
 		t.Errorf("request 3: %s — want 429 {type rate_limit_error, code rate_limit_exceeded, param null, message}", third)
 	}
-	if ra, err := strconv.Atoi(third.header.Get("Retry-After")); err != nil || ra < 1 || ra > 30 {
-		t.Errorf("request 3: Retry-After %q, want an integer in [1, 30]", third.header.Get("Retry-After"))
+	if v := third.header.Get("Retry-After"); v != "30" {
+		t.Errorf("request 3: Retry-After %q, want 30 (the emission interval of RPM 2 on a clock that stands still)", v)
 	}
-	if ms, err := strconv.Atoi(third.header.Get("retry-after-ms")); err != nil || ms < 1 || ms > 30000 {
-		t.Errorf("request 3: retry-after-ms %q, want an integer in [1, 30000]", third.header.Get("retry-after-ms"))
+	if v := third.header.Get("retry-after-ms"); v != "30000" {
+		t.Errorf("request 3: retry-after-ms %q, want 30000", v)
 	}
 	if v := third.header.Get("x-should-retry"); v != "true" {
 		t.Errorf("request 3: x-should-retry %q, want true", v)

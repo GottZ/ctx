@@ -129,6 +129,9 @@ type modelGateway struct {
 	usage    *store.ModelKeyUsage
 	budget   oai.Budget
 	meter    *keyquota.Meter
+	// meterClock is the clock meter runs on: time.Now, unless a test handed
+	// newModelGateway one.
+	meterClock func() time.Time
 	// seedRead is the meter's boot seed read (llmusage.SeedConsumers over
 	// the pool): run retries it while the meter is not seeded.
 	seedRead meterSeedRead
@@ -216,15 +219,23 @@ func meterSeedRows(rows []llmusage.ConsumerUsage) []keyquota.SeedRow {
 }
 
 // newModelGateway wires the gateway over pool and the live config store.
-// The door's trusted proxy is CTX_TRUSTED_PROXY as read at boot.
-func newModelGateway(pool *pgxpool.Pool, cfgStore *config.Store) *modelGateway {
+// The door's trusted proxy is CTX_TRUSTED_PROXY as read at boot. The meter
+// runs on time.Now; meterClock replaces that clock for a test (#369: a clock
+// that stands still makes the meter's time-derived answers exact). Only Go
+// code reaches it — no setting or environment variable — and the production
+// path (newRouter) passes none.
+func newModelGateway(pool *pgxpool.Pool, cfgStore *config.Store, meterClock ...func() time.Time) *modelGateway {
 	get := gatewaySettingsGetter(cfgStore)
 	usage := store.NewModelKeyUsage(pool)
+	now := time.Now
+	if len(meterClock) > 0 && meterClock[0] != nil {
+		now = meterClock[0]
+	}
 	// The meter opens with the boot seed of its day and month budgets from
 	// the rollup (W06-13): one read right here, before the server serves,
 	// so a healthy boot never answers warming; a failed read is retried by
 	// run (seedMeter) and /v1 answers 429 warming until it succeeds.
-	meter := keyquota.New(time.Now)
+	meter := keyquota.New(now)
 	read := func(ctx context.Context, now time.Time) ([]llmusage.ConsumerUsage, error) {
 		return llmusage.SeedConsumers(ctx, pool, now)
 	}
@@ -234,11 +245,12 @@ func newModelGateway(pool *pgxpool.Pool, cfgStore *config.Store) *modelGateway {
 	ring := handler.NewConsumerRing(nil)
 	access := handler.NewGatewayAccessLog(handler.GatewayAccessLogConfig{Settings: get, Ledger: ledger, Events: events, Ring: ring})
 	return &modelGateway{
-		events:   events,
-		ring:     ring,
-		meter:    meter,
-		seedRead: read,
-		ledger:   ledger,
+		events:     events,
+		ring:       ring,
+		meter:      meter,
+		meterClock: now,
+		seedRead:   read,
+		ledger:     ledger,
 		flusher: newRejectionFlusher(ledger, access, func(ctx context.Context, rows []llmusage.RejectionRow) error {
 			return llmusage.FlushRejections(ctx, pool, rows)
 		}),
