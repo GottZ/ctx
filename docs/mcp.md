@@ -539,6 +539,14 @@ that does not match gets no card. A `metadata_merge` stays a merge on the card a
 is merged into the metadata as it is at confirm time: a server-side key written in
 between without changing the block (a guard pass) survives it.
 
+**Several instances, mixed versions.** A card that carries a `metadata_merge` must
+be confirmed by an instance that knows the field. An instance older than the
+release that introduced it reads the card without the merge: it consumes the token
+and writes the card's other fields alone, or fails after the consume when the merge
+was the card's only field. With more than one `ctxd` behind one database, finish
+the rollout (or a rollback) before `confirm_writes` keys stage a `metadata_merge`;
+`edits` are not affected, since their card carries plain `content`.
+
 A `type` is checked exactly as the REST `manage update` action checks it, with the
 same codes and texts: `unknown_type` for a name the key's registry view does not
 hold (a type another tenant owns answers the same), `reserved_type` for a type the
