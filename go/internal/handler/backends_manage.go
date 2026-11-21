@@ -968,15 +968,22 @@ func dataCollectionEscapeOn(b *backends.Backend) bool {
 // guardedProbeClient serves backend-test's own GETs against tenant rows.
 var guardedProbeClient = httpx.GuardedPooledClient()
 
+// openProbeClient serves them against _global rows: http.DefaultClient's
+// transport, with the redirect rule of the row's chat wire — a hop only within
+// the origin of the base_url (#459). The probe carries the row's key
+// (x-api-key and extra_headers on an Anthropic row, a bearer token otherwise),
+// which net/http alone copies to any redirect target.
+var openProbeClient = &http.Client{CheckRedirect: httpx.SameOriginRedirect}
+
 // backendProbeClient picks backend-test's client by the wire clients' rule
 // (Backend.EgressGuarded, GHSA 2026-10-31 §3): a tenant row is probed only
 // through the ssrfguard dialer — the test must not reach what the row's real
-// calls cannot — while _global rows keep http.DefaultClient as before.
+// calls cannot — while _global rows keep http.DefaultClient's transport.
 func backendProbeClient(b *backends.Backend) *http.Client {
 	if b.EgressGuarded() {
 		return guardedProbeClient
 	}
-	return http.DefaultClient
+	return openProbeClient
 }
 
 func probeBackendURL(ctx context.Context, b *backends.Backend, checks map[string]string) bool {
@@ -1026,6 +1033,12 @@ func probeBackendURL(ctx context.Context, b *backends.Backend, checks map[string
 		checks["base_url"] = "ok"
 		checks["auth"] = fmt.Sprintf("error: status %d", resp.StatusCode)
 		return true
+	}
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		// A redirect the client did not follow: it leaves the base_url's
+		// origin, where the row's chat wire does not follow either.
+		checks["base_url"] = fmt.Sprintf("error: status %d (redirect not followed)", resp.StatusCode)
+		return false
 	}
 	if resp.StatusCode >= 400 {
 		checks["base_url"] = fmt.Sprintf("error: status %d", resp.StatusCode)

@@ -80,7 +80,7 @@ func TestSameOriginRedirectRule(t *testing.T) {
 			for _, v := range tc.via {
 				via = append(via, hop(t, v, 0))
 			}
-			err := sameOriginRedirect(hop(t, tc.to, http.StatusTemporaryRedirect), via)
+			err := SameOriginRedirect(hop(t, tc.to, http.StatusTemporaryRedirect), via)
 			switch {
 			case tc.followed && err != nil:
 				t.Errorf("%v → %s refused (%v), want followed", tc.via, tc.to, err)
@@ -99,11 +99,11 @@ func TestSameOriginRedirectHopLimit(t *testing.T) {
 	for range 9 {
 		via = append(via, hop(t, "http://api.example/v1", 0))
 	}
-	if err := sameOriginRedirect(hop(t, "http://api.example/v1", 307), via); err != nil {
+	if err := SameOriginRedirect(hop(t, "http://api.example/v1", 307), via); err != nil {
 		t.Fatalf("hop 10 refused: %v", err)
 	}
 	via = append(via, hop(t, "http://api.example/v1", 0))
-	err := sameOriginRedirect(hop(t, "http://api.example/v1", 307), via)
+	err := SameOriginRedirect(hop(t, "http://api.example/v1", 307), via)
 	if err == nil || err.Error() != "stopped after 10 redirects" || errors.Is(err, http.ErrUseLastResponse) {
 		t.Fatalf("hop 11: err = %v, want net/http's \"stopped after 10 redirects\"", err)
 	}
@@ -119,14 +119,14 @@ func TestSameOriginRedirectLog(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(old) })
 
 	via := []*http.Request{hop(t, "https://svc.example/v1/chat?sig=FROMSECRET", 0)}
-	if err := sameOriginRedirect(hop(t, "https://svc.example/v1/other", 307), via); err != nil {
+	if err := SameOriginRedirect(hop(t, "https://svc.example/v1/other", 307), via); err != nil {
 		t.Fatalf("same-origin hop refused: %v", err)
 	}
 	if buf.Len() != 0 {
 		t.Fatalf("a followed hop logged: %s", buf.String())
 	}
 
-	err := sameOriginRedirect(hop(t, "http://user:TOSECRET@Other.Example:8080/steal/path?token=TOSECRET", 308), via)
+	err := SameOriginRedirect(hop(t, "http://user:TOSECRET@Other.Example:8080/steal/path?token=TOSECRET", 308), via)
 	if !errors.Is(err, http.ErrUseLastResponse) {
 		t.Fatalf("err = %v, want http.ErrUseLastResponse", err)
 	}

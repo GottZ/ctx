@@ -28,7 +28,7 @@ import (
 // same hosts — a change in connection behaviour, not a de-duplication. If that
 // is ever wanted, it can be introduced here, in one place.
 //
-// Redirects follow sameOriginRedirect: a Location on another origin is not
+// Redirects follow SameOriginRedirect: a Location on another origin is not
 // followed, the caller gets the 3xx itself.
 func PooledClient() *http.Client {
 	return &http.Client{
@@ -37,7 +37,7 @@ func PooledClient() *http.Client {
 			MaxIdleConnsPerHost: 10,
 			IdleConnTimeout:     90 * time.Second,
 		},
-		CheckRedirect: sameOriginRedirect,
+		CheckRedirect: SameOriginRedirect,
 	}
 }
 
@@ -49,7 +49,7 @@ func PooledClient() *http.Client {
 // PooledClient's. ForceAttemptHTTP2 keeps HTTP/2 negotiation, which a custom
 // DialContext would otherwise switch off. The guard judges addresses, not
 // origins — a redirect to a foreign PUBLIC host passes it — so the client
-// carries the same sameOriginRedirect as PooledClient.
+// carries the same SameOriginRedirect as PooledClient.
 func GuardedPooledClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
@@ -59,7 +59,7 @@ func GuardedPooledClient() *http.Client {
 			MaxIdleConnsPerHost: 10,
 			IdleConnTimeout:     90 * time.Second,
 		},
-		CheckRedirect: sameOriginRedirect,
+		CheckRedirect: SameOriginRedirect,
 	}
 }
 
@@ -68,7 +68,7 @@ func GuardedPooledClient() *http.Client {
 // restated here: same-origin chains end exactly where they ended before.
 const maxRedirects = 10
 
-// sameOriginRedirect is the CheckRedirect of both pool clients (design/04 I17,
+// SameOriginRedirect is the CheckRedirect of both pool clients (design/04 I17,
 // S5). net/http re-sends a POST body on 307/308 — every wire builds its body
 // from a bytes.Reader, so GetBody is set — and copies every header except
 // Authorization/Cookie (x-api-key, a row's extra_headers) to any redirect
@@ -83,7 +83,14 @@ const maxRedirects = 10
 // which backends.Classify maps to ClassBadRequest. The refusal is logged once,
 // with both origins and the status — never a path or query, which can carry
 // tokens.
-func sameOriginRedirect(req *http.Request, via []*http.Request) error {
+//
+// Exported for the server's other clients that carry a credential to a host
+// an operator or a tenant configured (#459): the forge client (the project's
+// token, issue text), the GitHub userinfo calls of SSO (the user's access
+// token), and endpoint discovery and backend-test against an operator row
+// (the row's key and extra_headers — the request its chat wire sends, so the
+// same rule). Each of them sees the 3xx of a refused hop and fails the call.
+func SameOriginRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxRedirects {
 		return fmt.Errorf("stopped after %d redirects", maxRedirects)
 	}

@@ -94,7 +94,9 @@ type endpointEntry struct {
 // §3): a _global (operator) row is fetched unguarded — an operator may point
 // an openrouter-class row at a LAN-hosted OpenAI-compatible gateway — and a
 // tenant row (Backend.EgressGuarded) only through the ssrfguard dialer, since
-// a tenant-admin chooses its base_url.
+// a tenant-admin chooses its base_url. Both follow a redirect only within the
+// origin of the row's base_url (httpx.SameOriginRedirect, #459): the request
+// carries the row's key and extra_headers, as the chat wire's does.
 type EndpointCache struct {
 	mu      sync.Mutex
 	entries map[string]*endpointEntry
@@ -107,7 +109,7 @@ type EndpointCache struct {
 func NewEndpointCache() *EndpointCache {
 	return &EndpointCache{
 		entries: map[string]*endpointEntry{},
-		client:  &http.Client{},
+		client:  &http.Client{CheckRedirect: httpx.SameOriginRedirect},
 		guarded: httpx.GuardedPooledClient(),
 		now:     time.Now,
 	}

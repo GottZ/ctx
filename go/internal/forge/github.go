@@ -10,13 +10,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/httpx"
 	"github.com/GottZ/ctx/internal/ssrfguard"
 )
 
@@ -55,6 +58,30 @@ func apiBase(repo RepoRef) string {
 	return defaultAPIBase
 }
 
+// send issues req through a copy of c.http that follows a redirect only within
+// the origin of req (httpx.SameOriginRedirect, #459). net/http alone keeps the
+// PAT on a redirect to the same host name on another port or to a subdomain,
+// and re-sends a write's body (the issue text) on 307/308 to any host.
+// GitHub's own redirects — a renamed or transferred repository answers 301
+// (GET) or 307 (write) with /repositories/<id>/... — stay on the origin of the
+// api_base and are followed with token and body. A refused hop returns its
+// 3xx, which do and doWrite turn into an error. The rule sits here, not on
+// the client NewGitHubClient builds, so it holds for every client this type
+// is given.
+func (c *githubClient) send(req *http.Request) (*http.Response, error) {
+	hc := *c.http
+	hc.CheckRedirect = httpx.SameOriginRedirect
+	return hc.Do(req) //nolint:gosec // G704: url = base(api.github.com or PATCH-validated api_base) + owner/repo; SSRF enforced dial-time (internal/ssrfguard), every hop held to the origin of the request.
+}
+
+// errRedirectNotFollowed is the answer of a redirect send did not follow: its
+// Location leaves the origin of the request (or it has none). The status is
+// named; the Location is not — it is the remote's choice and the URL/token
+// never enter an error surface (§5.4).
+func errRedirectNotFollowed(status int) error {
+	return fmt.Errorf("forge: redirect status %d not followed: the forge client follows a redirect only within the origin of the api_base", status)
+}
+
 // do issues one GET with conditional/auth headers and maps the transport-level
 // forge semantics (304, rate limit) onto errors. On a normal 2xx it returns the
 // response for the caller to decode. The caller MUST close resp.Body.
@@ -71,7 +98,7 @@ func (c *githubClient) do(ctx context.Context, url, etag string) (*http.Response
 	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.send(req)
 	if err != nil {
 		// Never wrap the URL/token into the error surface (leak-scan line, §5.4).
 		return nil, fmt.Errorf("forge: request failed: %w", err)
@@ -84,6 +111,9 @@ func (c *githubClient) do(ctx context.Context, url, etag string) (*http.Response
 		rl := rateLimitFrom(resp)
 		_ = resp.Body.Close()
 		return nil, rl
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		_ = resp.Body.Close()
+		return nil, errRedirectNotFollowed(resp.StatusCode)
 	case resp.StatusCode >= 400:
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("forge: unexpected status %d", resp.StatusCode)
@@ -141,7 +171,7 @@ func (c *githubClient) doWrite(ctx context.Context, method, url string, payload 
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.send(req)
 	if err != nil {
 		return nil, fmt.Errorf("forge: write request failed: %w", err)
 	}
@@ -149,6 +179,8 @@ func (c *githubClient) doWrite(ctx context.Context, method, url string, payload 
 	switch {
 	case isRateLimited(resp):
 		return nil, rateLimitFrom(resp)
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		return nil, errRedirectNotFollowed(resp.StatusCode)
 	case resp.StatusCode >= 400:
 		return nil, fmt.Errorf("forge: unexpected write status %d", resp.StatusCode)
 	}
@@ -260,9 +292,13 @@ func (c *githubClient) fetchIssues(ctx context.Context, url, etag string) (Issue
 		return IssuePage{}, fmt.Errorf("forge: decode issues: %w", err)
 	}
 
+	next, err := nextOnOrigin(url, resp.Header.Get("Link"))
+	if err != nil {
+		return IssuePage{}, err
+	}
 	page := IssuePage{
 		ETag:    resp.Header.Get("ETag"),
-		NextURL: nextLink(resp.Header.Get("Link")),
+		NextURL: next,
 		Issues:  make([]IssueRemote, 0, len(items)),
 	}
 	for _, it := range items {
@@ -332,9 +368,13 @@ func (c *githubClient) fetchComments(ctx context.Context, url, etag string) (Com
 	if err := json.Unmarshal(raw, &items); err != nil {
 		return CommentPage{}, fmt.Errorf("forge: decode comments: %w", err)
 	}
+	next, err := nextOnOrigin(url, resp.Header.Get("Link"))
+	if err != nil {
+		return CommentPage{}, err
+	}
 	page := CommentPage{
 		ETag:     resp.Header.Get("ETag"),
-		NextURL:  nextLink(resp.Header.Get("Link")),
+		NextURL:  next,
 		Comments: make([]CommentRemote, 0, len(items)),
 	}
 	for _, it := range items {
@@ -355,6 +395,25 @@ func issueNumberFromURL(u string) int64 {
 	}
 	n, _ := strconv.ParseInt(u[i+1:], 10, 64)
 	return n
+}
+
+// nextOnOrigin is the rel="next" target of link when it is on the origin of
+// the page URL that returned it — by induction the origin of the api_base the
+// first page was built from. The next page is requested with the PAT, and its
+// URL is the response's choice, so a target on another origin is refused
+// like a redirect there (#459): GitHub paginates on api.github.com. The
+// target is not named in the error (§5.4).
+func nextOnOrigin(pageURL, link string) (string, error) {
+	next := nextLink(link)
+	if next == "" {
+		return "", nil
+	}
+	from, err1 := url.Parse(pageURL)
+	to, err2 := url.Parse(next)
+	if err1 != nil || err2 != nil || httpx.OriginOf(from) != httpx.OriginOf(to) {
+		return "", errors.New("forge: the next-page link leaves the origin of the api_base; pagination stopped")
+	}
+	return next, nil
 }
 
 // nextLink extracts the rel="next" target from a GitHub Link header. Returns ""
