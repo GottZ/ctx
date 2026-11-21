@@ -22,7 +22,7 @@ function scaleCell(c: PageContract): string {
 }
 
 function mobileCell(c: PageContract): string {
-  return c.mobile === undefined ? '✓ (390×844)' : 'OPT-OUT'
+  return c.mobile === undefined ? '✓ (390×844)' : 'OPT-OUT (Fit ohne Aufnahme, 390×844)'
 }
 
 function denyCell(c: PageContract): string {
@@ -45,7 +45,9 @@ export function renderCoverage(cs: readonly PageContract[] = contracts, pending:
   lines.push('**Beweist:** jede Registry-Seite rendert in jedem deklarierten Zustand pixel-identisch')
   lines.push('zur eingefrorenen Referenz (@visual, nur im digest-gepinnten Container), und das Dokument')
   lines.push('ist dabei weder höher noch breiter als der Viewport (vor jeder Aufnahme geprüft, #419,')
-  lines.push('#430); der primäre Nutzungspfad ist bedienbar (@flow); guard-gegatete Seiten weisen niedrigere Rollen ab')
+  lines.push('#430), und keine Box ragt seitlich aus dem Viewport oder wird von einem nur senkrecht scrollenden')
+  lines.push('Bereich abgeschnitten (#440; Mobile-Opt-outs prüfen das je Zustand ohne Aufnahme bei 390 px);')
+  lines.push('der primäre Nutzungspfad ist bedienbar (@flow); guard-gegatete Seiten weisen niedrigere Rollen ab')
   lines.push('(generierte Deny-Tests — CLIENT-Guard-Schicht); tenant-scoped Flächen rendern nie den')
   lines.push('Fremd-Sentinel (Leak-Probe mit Positiv-Kontrolle); Listen-Flächen halten den deklarierten')
   lines.push('DOM-Deckel bei 10k Fixture-Items (Scale-Zustand mit echtem Keyset-Cursor); kein `pageerror`.')
