@@ -1109,7 +1109,7 @@ Budgets were calibrated **inside the digest-pinned toolchain container** (brotli
 
 ## Visual baseline governance (Web e2e)
 
-Screenshot baselines (`go/web/e2e/__screenshots__/`) are the frozen "objectively good" reference for the UI: the taste judgement is made once, at baseline approval — afterwards every pixel deviation is a measurable diff, not an opinion. Baselines are only valid when rendered inside the digest-pinned toolchain container (`go/web/e2e/toolchain.lock` pins the image digests; `bash go/web/e2e-visual.sh --update` is the only regeneration path — CI has no update path and only compares).
+Screenshot baselines (`go/web/e2e/__screenshots__/`) are the frozen "objectively good" reference for the UI: the taste judgement is made once, at baseline approval — afterwards every pixel deviation is a measurable diff, not an opinion. Baselines are only valid when rendered inside the digest-pinned toolchain container (`go/web/e2e/toolchain.lock` pins the image digests; `bash go/web/e2e-visual.sh --update` is the only regeneration path — CI has no update path and only compares). `--update` runs Playwright with `--update-snapshots=changed`: a baseline is rewritten only when it fails the comparison (a missing one is written), so an unchanged shot keeps its bytes. Playwright arguments go after `--`, also with `--update`: `bash go/web/e2e-visual.sh --update -- e2e/smoke.spec.ts -g blocks` refreshes the matching baselines of one spec.
 
 The comparison runs at `maxDiffPixels: 0` (with a calibrated per-pixel `threshold` for compositing anti-alias jitter) — a deliberately strict global policy. The **only** sanctioned relaxations are per-shot (design 05-§8.E3 / 06 §4.3 escalation ladder: mask → stylePath → per-shot `maxDiffPixels`), never a global loosening. A per-shot budget lives on a `PageState.visualTolerance` (contract registry) with a mandatory reason + issue anchor and is validated structurally. The single current use is the board **empty** state: the self-hosted Mono draws accent-blue glyph edges against the wide `surface-0` field, and under parallel-worker load the pinned SwiftShader rasteriser wobbles one such edge pixel by ±1 LSB (deterministic in isolation, not retry-clearable on that sparse shot). Its `maxDiffPixels: 4` tolerates the measured 1-pixel jitter and stays orders of magnitude below any real regression on that shot.
 
@@ -1137,9 +1137,66 @@ The README architecture infographic is a hand-authored animated SVG in two theme
 
 Enable with `git config core.hooksPath .hooks`:
 
-- **pre-commit** — golangci-lint on staged Go files.
+- **pre-commit** — refuses new files that look like secrets or private data and staged
+  copies of `.env` secret values, checks the schema-contract manifest against the
+  staged migrations (below), and runs `go vet -tags=integration` plus golangci-lint
+  when Go files are staged.
 - **commit-msg** — enforces a documentation review for `feat:` commits and schema migrations (`go/migrations/`): the commit must stage `README.md` **or** a `docs/*.md` file. Also enforces the `[baseline]` marker (above).
 - **pre-push** — rejects a direct push of `root` to the canonical repository
   (`root` moves only by merging a pull request, see [GOVERNANCE.md](../GOVERNANCE.md)),
   requires annotated `v*` tags with release notes, and runs the deadcode gates when a
   tag is pushed.
+
+### Migrations and the schema-contract manifest
+
+`go/internal/schemacontract/manifest.json` is generated, never hand-edited, and names the
+migration chain it was generated from: `generated_against.migration_chain_sha256` is the
+sha256 of the `sha256sum` listing of every top-level `go/migrations/*.sql` in byte order of
+the names (names starting with `.` or `_` included, as `go:embed` includes them) — one
+line per file, whose hash is the checksum the migration runner records in `_migrations`.
+Any byte change of a migration moves it, so an edit that leaves the schema
+as it was (a condition inside a `DO` block, the wording of a `RAISE WARNING`) still yields
+a different manifest — that field and nothing else — and there is always something to
+stage.
+
+Regenerate after every change to `go/migrations/*.sql`, comments included (a comment
+inside a function body is part of the definition the contract hashes):
+
+```bash
+cd go && go test -tags=genmanifest ./internal/schemacontract -run TestGenerateManifest
+git add internal/schemacontract/manifest.json
+```
+
+The generator needs Docker and runs the chain on the local prod image
+`pgvector-timescaledb:pg18` (built from `db-image/`; without it, it falls back to
+`timescale/timescaledb-ha:pg18` and records that in `generated_against.image`). It reads
+the migrations from the working tree, so unstaged migration edits end up in the
+fingerprint — stage or stash them first. The test itself takes about 5 s on a warm build
+cache.
+
+**pre-commit Gate 3.** Whenever a commit touches a top-level `go/migrations/*.sql` (added,
+edited, renamed or deleted) or the manifest, the hook recomputes the fingerprint over the
+staged files and refuses the commit unless the staged manifest names exactly that chain.
+It hashes the bytes as staged, whatever `core.autocrlf` says: a working tree with CRLF
+line ends yields a manifest the hook refuses, because CI and every build see the committed
+bytes. It only hashes (the whole hook ran in about 35 ms for a commit to the chain of 76
+files, against about 25 ms before), needs no Docker, and a commit that touches neither
+path pays nothing beyond one `git diff --cached`. There is no comment-only exception any
+more and no reason for `--no-verify`: a regeneration is the
+way through for every migration change. `bash .hooks/pre-commit.test.sh` runs the hook's
+test matrix against throwaway repositories; CI runs it in the `lint` job.
+
+**CI.** `TestManifestNamesTheMigrationChain` (unit, no database) fails when the manifest
+does not name the chain beside it — the stale manifest a schema-neutral edit leaves
+behind, which the integration test `TestCheck_FreshDB_NoDrift` cannot see because the
+schema matches; that test in turn fails on any schema difference between the manifest
+and a freshly migrated database.
+
+**Extension minimums are policy.** The manifest's `extensions` section is
+`extensionMinimums` in `go/internal/schemacontract/chain_test.go`, not the versions of the
+database the generator happens to run on — a newer local image moves no pin, and an
+extension an image brings along (`timescaledb_toolkit` on the `-ha` image) is not pinned.
+A pin moves by editing that map in the change that moves `db-image/Dockerfile` to the
+version it names. A migration that creates an extension needs an entry there too; the
+generator refuses to run without one. `TestManifestExtensionsAreTheDeclaredMinimums`
+keeps the manifest and the map alike.

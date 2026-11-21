@@ -134,6 +134,13 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/deadcode.sh" testonly
 
+      # The test matrix of .hooks/pre-commit Gate 3 (issue #397): each case in
+      # a throwaway repository that borrows this checkout's objects, the hook
+      # run against a staged index. git and sha256sum only, seconds. The hook
+      # is the local half of TestManifestNamesTheMigrationChain (unit tests).
+      - name: pre-commit hook test matrix
+        run: bash .hooks/pre-commit.test.sh
+
       # Beobachtung, kein Gate: dupl misst Klon-Masse und schreibt sie in die
       # Job-Summary. `if: always()` liefert die Zahl auch dann, wenn ein Gate
       # davor rot war — gerade dann ist sie interessant. `|| true`, weil dupl
