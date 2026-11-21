@@ -248,6 +248,12 @@ type PushProjection func(b *Block) string
 //     updated_at the write carried, and the next run diffs the block against
 //     the base this advance wrote — the version the forge holds.
 //
+// synced_at is compared in SQL only (the candidate filter): '-infinity' is a
+// valid timestamptz, but pgx cannot scan it into a time.Time, so a reader that
+// selects the column has to cast or filter it in SQL
+// (TestSyncedAtIsComparedInSQLOnly holds every mention to an assignment or
+// the filter).
+//
 // Locks: the block row (FOR SHARE), then the mapping row — the order of the
 // pull's writes.
 func AdvancePushBase(ctx context.Context, pool *pgxpool.Pool, blockID, ctxHash string, ctxFields json.RawMessage, project PushProjection) error {
