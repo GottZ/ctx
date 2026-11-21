@@ -11,8 +11,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/clientkey"
 	"github.com/GottZ/ctx/internal/rrf"
 )
+
+// keyNames are the words the refusal of a request uses for this driver.
+// -base-url beats CTX_BASE_URL and the config file (cmd/ctx-armsweep), so it
+// is the setting the refusal names and advises.
+var keyNames = clientkey.Names{Client: "ctx-armsweep", BaseURL: "-base-url"}
 
 // maxResponseSize caps a single API response. An arm_ranks body over a 1M-block
 // corpus is thousands of rows of numbers, so the cap is generous — but a cap
@@ -30,7 +36,9 @@ var ErrRetryable = errors.New("retryable")
 // not carry the B-W2 seam yet (v5.5.0 does not).
 var ErrGateRefused = errors.New("measurement seam refused the request")
 
-// Client is the driver's view of one ctx instance.
+// Client is the driver's view of one ctx instance. Its key goes only to the
+// origin of BaseURL, and a redirect is followed only within it (#423): every
+// request leaves through clientkey.Transport, by the CLI's rule.
 type Client struct {
 	BaseURL string
 	Key     string
@@ -239,8 +247,14 @@ func (c *Client) PostStageState(ctx context.Context) (map[string]any, error) {
 	return out, nil
 }
 
-// do issues one request and classifies transport failures as retryable.
+// do issues one request and classifies transport failures as retryable. A
+// base URL the key cannot be bound to, and a request the key's origin rule
+// refused, are not: both answer the same way on every attempt.
 func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte, int, error) {
+	kt, err := clientkey.New(c.BaseURL, c.Key, nil, keyNames)
+	if err != nil {
+		return nil, 0, fmt.Errorf("-base-url is not a usable URL: %w", err)
+	}
 	var rdr io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -256,10 +270,12 @@ func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte,
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("X-Context-Key", c.Key)
 
-	resp, err := c.HTTP.Do(req)
+	resp, err := kt.Do(c.HTTP, req)
 	if err != nil {
+		if errors.As(err, new(*clientkey.Refusal)) {
+			return nil, 0, fmt.Errorf("request to %s: %w", path, err)
+		}
 		return nil, 0, fmt.Errorf("%w: request to %s: %w", ErrRetryable, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()

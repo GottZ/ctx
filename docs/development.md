@@ -831,6 +831,19 @@ Five properties are enforced by the tool, not by discipline:
   under the same path guard, with `-allow-outside-goldset` as the only override
   and `allow_outside_goldset: true` in the report when it was used.
 
+The API key (`-api-key`, else `CTX_KEY` or the config file) goes only to the
+origin of `-base-url` (scheme, host and port), by the rule the ctx CLI holds
+`CTX_BASE_URL` to ([CLI reference](cli.md#cli-reference)) and through the same
+code (`internal/clientkey`). A redirect within that origin is followed; one
+anywhere else — an `http` → `https` upgrade on the same host included — is
+refused before it is sent, neither the key nor the query leaves, and the run
+fails naming the target (for an upgrade, also the `-base-url` to use). A base
+URL without an `http` or `https` host is refused before any request is sent.
+Both are configuration errors, not transport faults: no case is retried or
+excluded for them, and the run exits `1`. Before, the driver followed such a
+redirect with the key, and `prime` against an unusable base URL excluded every
+case and exited `0`.
+
 `V0` and `V0'` are the same configuration on two independent dumps: their
 disagreement is the instrument's noise floor. Gate **G-NOISE** (Recall@5
 discordance ≤ 5 % and a paired 95 % CI of ΔnDCG@10 containing 0) must pass, or
