@@ -178,7 +178,8 @@ if $SYSTEM; then
   mkdir -p "$RUN_DIR"
   cp "$SCRIPT_DIR/test.sh" "$SCRIPT_DIR/eval.sh" "$RUN_DIR/"
   if [[ -f "$SCRIPT_DIR/.eval-baseline.json" ]]; then cp "$SCRIPT_DIR/.eval-baseline.json" "$RUN_DIR/"; fi
-  for l in go .gocache backups; do
+  # scripts/: the libraries test.sh and eval.sh source (scripts/lib).
+  for l in go .gocache backups scripts; do
     if [[ -e "$SCRIPT_DIR/$l" ]]; then ln -sfn "$SCRIPT_DIR/$l" "$RUN_DIR/$l"; fi
   done
   ( umask 077
