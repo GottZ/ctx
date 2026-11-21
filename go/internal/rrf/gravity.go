@@ -266,6 +266,23 @@ var DimensionSigma = map[string]float64{
 	"daily":    0.08, // hour-of-day 24-cycle (morgens/abends patterns)
 }
 
+// DimensionCycle holds the length of one cycle of each cyclic dimension of
+// DimensionSigma, as the calendar span time.AddDate adds: a week for the
+// weekday, a month for the day of the month, a day for the hour, a year for
+// the month, the quarter, the ISO week and the day of the year. A window
+// longer than the cycle of a dimension holds every phase of it, so the phase
+// of the query's date — one edge of the window — says nothing about where in
+// the window a block lies (issue #463, the query's effectiveDimWeights).
+var DimensionCycle = map[string]struct{ Years, Months, Days int }{
+	"weekday":  {0, 0, 7},
+	"month":    {1, 0, 0},
+	"quarter":  {1, 0, 0},
+	"week":     {1, 0, 0},
+	"monthday": {0, 1, 0},
+	"seasonal": {1, 0, 0},
+	"daily":    {0, 0, 1},
+}
+
 // CyclicDistance returns the minimum wrap-around distance between two phases
 // on a unit circle. Phases are in [0,1] — the interval is closed, because the
 // last value of a cycle normalizes to exactly 1.0 (week 53, seasonal 366).

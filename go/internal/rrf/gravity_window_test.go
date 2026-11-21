@@ -125,3 +125,24 @@ func TestComputeGravity_WindowEdgesCountWholeDays(t *testing.T) {
 		t.Errorf("open window: 05:00 the day after %.4f, 00:00 %.4f", a, b)
 	}
 }
+
+// TestDimensionCycle_CoversTheVocabulary: every cyclic dimension has a cycle
+// and every cycle a dimension, and every cycle is a positive span.
+func TestDimensionCycle_CoversTheVocabulary(t *testing.T) {
+	day := mustDate("2026-01-01")
+	for dim := range DimensionSigma {
+		c, ok := DimensionCycle[dim]
+		if !ok {
+			t.Errorf("%s has no cycle", dim)
+			continue
+		}
+		if !day.AddDate(c.Years, c.Months, c.Days).After(day) {
+			t.Errorf("%s: cycle %+v is no span", dim, c)
+		}
+	}
+	for dim := range DimensionCycle {
+		if _, ok := DimensionSigma[dim]; !ok {
+			t.Errorf("cycle of %s, which is no cyclic dimension", dim)
+		}
+	}
+}
