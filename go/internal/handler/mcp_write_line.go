@@ -193,8 +193,13 @@ func withToolWriteLine[In any](name string, h mcp.ToolHandlerFor[In, any]) mcp.T
 // it. What cannot be told apart from that stays unknown, the safe side: a
 // context that ended before the pool handed out a connection (pgx reports
 // the bare cancellation), a closed pool, an error of the caller's own between
-// two statements of an unlabeled bracket.
+// two statements of an unlabeled bracket, and pgconn.ErrConnClosed — pgx's
+// answer for a COMMIT whose connection broke while it waited (writeOutcome),
+// which it marks safe to retry.
 func statementOutcome(err error) string {
+	if errors.Is(err, pgconn.ErrConnClosed) {
+		return writeUnknown
+	}
 	var (
 		pgErr      *pgconn.PgError
 		connectErr *pgconn.ConnectError

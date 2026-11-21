@@ -334,6 +334,15 @@ type safeToRetryErr struct{}
 func (safeToRetryErr) Error() string     { return "probe: commit never sent" }
 func (safeToRetryErr) SafeToRetry() bool { return true }
 
+// connClosedErr is the shape of pgx's lock error on a closed connection:
+// safe to retry, pgconn.ErrConnClosed inside — what pgx v5 answers for a
+// COMMIT whose connection broke while it waited (issue #483).
+type connClosedErr struct{}
+
+func (connClosedErr) Error() string     { return "conn closed" }
+func (connClosedErr) SafeToRetry() bool { return true }
+func (connClosedErr) Unwrap() error     { return pgconn.ErrConnClosed }
+
 // TestWriteOutcome — what a failed labeled write bracket states.
 func TestWriteOutcome(t *testing.T) {
 	bracket := func(fnErr, commitErr error) error {
@@ -350,6 +359,8 @@ func TestWriteOutcome(t *testing.T) {
 		{"COMMIT answered as rollback", bracket(nil, pgx.ErrTxCommitRollback), writeRolledBack},
 		{"COMMIT refused by the database", bracket(nil, &pgconn.PgError{Code: "40001"}), writeRolledBack},
 		{"COMMIT never sent", bracket(nil, safeToRetryErr{}), writeRolledBack},
+		{"COMMIT whose connection broke while it waited", bracket(nil, connClosedErr{}), writeUnknown},
+		{"connection closed inside the transaction", bracket(connClosedErr{}, nil), writeRolledBack},
 	} {
 		if got := writeOutcome(tc.err); got != tc.want {
 			t.Errorf("%s: writeOutcome(%v) = %q, want %q", tc.name, tc.err, got, tc.want)
