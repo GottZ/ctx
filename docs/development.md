@@ -367,7 +367,9 @@ bash eval-instrument_test.sh        # census, baseline diff, category registry
 ```
 
 `eval-cyclic.sh` counts a case without an answer — no connection, a timeout, an HTTP
-error status, a body that is not a JSON object with `success:true` — in `n_errors`.
+error status, a body that is not a JSON object with `success:true` — in `n_errors`. Such
+a case is neither a pass nor a miss: it enters no pass rate, overlap or mean, and
+`per_bucket` counts it in its own `n_errors`.
 A run in which no case got an answer is no measurement: it stops with exit 1 and writes
 nothing, as do HTTP 401 (naming `CONTEXT_API_KEY_PRIVATE`), a redirect and a TLS
 certificate that does not verify. A run in which some cases got none writes its results

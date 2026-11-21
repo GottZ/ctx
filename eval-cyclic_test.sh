@@ -27,6 +27,11 @@
 #      with --baseline. A 200 with success:false is its error alone: none of
 #      its other fields (sources of any shape, confidence, dimension weights)
 #      reach the case.
+#   4b. A case without an answer is neither a pass nor a miss: no verdict, no
+#      overlap; per_bucket counts it in n and n_errors, and pass rate,
+#      overlap, dim_weight_pass_rate and mean_pass_rate are over the cases
+#      that got one (an unanswered N case used to pass, an unanswered C/M/L/F
+#      case to fail).
 #   5. A TLS certificate that does not verify stops the run with the advice
 #      that fits it: self-signed → CTX_EVAL_INSECURE=1; a name the certificate
 #      does not carry → WEBHOOK_BASE_URL, without CTX_EVAL_INSECURE; expired →
@@ -104,6 +109,32 @@ def status(code):
 
 def second_case_500(query):
     return status(500)(query) if query == "q two" else OK(query)
+
+
+# One answered and one unanswered case per kind of expectation: ids (C, M),
+# none (N: an unanswered case passed vacuously, an answer without sources
+# passes), dimension weights (F).
+MIXED_CASES = [
+    {"id": "c1", "bucket": "C", "query": "q c", "expected_top_k_block_ids": ["b1"]},
+    {"id": "m1", "bucket": "M", "query": "q m", "expected_top_k_block_ids": ["b1"]},
+    {"id": "n1", "bucket": "N", "query": "q n", "must_not_contain_block_ids": ["b9"]},
+    {"id": "n2", "bucket": "N", "query": "q n2", "must_not_contain_block_ids": ["b9"]},
+    {"id": "f1", "bucket": "F", "query": "q f", "expected_dim_weights": {"month": 1}},
+    {"id": "f2", "bucket": "F", "query": "q f2", "expected_dim_weights": {"month": 1}},
+]
+ANSWER_DW = json.dumps({"success": True, "sources": [{"id": "b1"}], "confidence": "confident",
+                        "activated_dim_weights": {"month": 0.5}}).encode()
+ANSWER_EMPTY = json.dumps({"success": True, "sources": [], "confidence": "none"}).encode()
+
+
+def mixed(query):
+    if query in ("q m", "q n", "q f"):
+        return status(500)(query)
+    if query == "q f2":
+        return (200, "application/json", ANSWER_DW)
+    if query == "q n2":
+        return (200, "application/json", ANSWER_EMPTY)
+    return OK(query)
 
 
 class Server:
@@ -298,6 +329,39 @@ def main(work):
               and c2.get("confidence") is None and c2.get("activated_dim_weights") is None,
               f"200 success:false with {name} on c2: none of its other fields reach the case", json.dumps(c2)[:300])
 
+    print("--- 4b. a case without an answer is neither a pass nor a miss")
+    s = Server(mixed)
+    p, res, base = run(work, copy, f"http://127.0.0.1:{s.port}", cases=MIXED_CASES)
+    s.close()
+    pb = res.get("per_bucket", {}) if res else {}
+    by_id = {c["id"]: c for c in res["case_results"]} if res else {}
+    check(p.returncode == 1 and res is not None and not base and res.get("n_errors") == 3,
+          "rc 1, results with n_errors 3, no baseline", say(p))
+    check(pb.get("N", {}).get("passes") == 1 and pb.get("N", {}).get("pass_rate") == 1.0
+          and by_id.get("n2", {}).get("case_pass") is True,
+          "N: the unanswered case without expectations is no pass, the empty success:true answer is one",
+          json.dumps(pb.get("N")))
+    check(pb.get("M", {}).get("pass_rate") is None and pb.get("M", {}).get("top_k_overlap_at_5") is None,
+          "M: the unanswered case is no miss (no pass rate, no overlap)", json.dumps(pb.get("M")))
+    check(pb.get("F", {}).get("passes") == 1 and pb.get("F", {}).get("pass_rate") == 1.0
+          and res.get("dim_weight_pass_rate") == 1.0,
+          "F: the rates are over the answered case (pass rate, dim_weight_pass_rate 1.0)",
+          json.dumps(pb.get("F")) + f" dwr={res.get('dim_weight_pass_rate') if res else None}")
+    check(res is not None and res.get("mean_pass_rate") == 1.0 and pb.get("C", {}).get("pass_rate") == 1.0,
+          "mean_pass_rate over the buckets with an answered case (C, N, F): 1.0", json.dumps(res.get("mean_pass_rate") if res else None))
+    check([pb.get(b, {}).get("n_errors") for b in "CMLNF"] == [0, 1, 0, 1, 1]
+          and [pb.get(b, {}).get("n") for b in "CMLNF"] == [1, 1, 0, 2, 2],
+          "per_bucket counts every case in n and the unanswered ones in n_errors",
+          json.dumps({b: [pb.get(b, {}).get("n"), pb.get(b, {}).get("n_errors")] for b in "CMLNF"}))
+    check(all(by_id.get(i, {}).get(k, "absent") is None for i in ("n1", "m1", "f1")
+              for k in ("case_pass", "top_k_pass", "must_not_pass", "dim_weight_pass", "top_k_overlap")),
+          "per case: an unanswered case carries no verdict and no overlap",
+          json.dumps({i: {k: by_id.get(i, {}).get(k) for k in ("case_pass", "top_k_pass", "must_not_pass",
+                                                              "dim_weight_pass", "top_k_overlap")}
+                      for i in ("n1", "m1", "f1")}))
+    check("  N: n=2 errors=1 passes=1 pass_rate=1.0" in p.stdout,
+          "the summary shows the errors per bucket", p.stdout[-400:])
+
     print("--- 5. TLS: the advice fits the reason")
     good, good_ctx = cert(work, "good", "-days", "2")
     try:
@@ -329,8 +393,8 @@ def main(work):
     p, _, _ = run(work, copy, "http://127.0.0.1:1", args=["--help"])
     lines = p.stdout.rstrip("\n").split("\n")
     check(p.returncode == 0 and "Usage:" in p.stdout and all(ln.startswith("#") for ln in lines)
-          and lines[-1] == "# Source: https://github.com/GottZ/ctx",
-          "the leading comment block, ending at its last line", repr(lines[-2:]))
+          and not lines[0].startswith("#!") and p.stdout.endswith("# Source: https://github.com/GottZ/ctx\n"),
+          "the leading comment block, without the shebang, ending at its last line", repr(lines[:1] + lines[-2:]))
 
 
 work = tempfile.mkdtemp(prefix="eval-cyclic-test.")

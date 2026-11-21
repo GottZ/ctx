@@ -16,7 +16,9 @@
 # to the address the server answers on.
 #
 # A case without an answer — no connection, a timeout, an HTTP error status, a body that is not a JSON object with
-# success:true — is counted in n_errors and keeps its error. Exit status:
+# success:true — is counted in n_errors and keeps its error. It is neither a pass nor a miss: it carries no verdict
+# and enters no pass rate, overlap or mean; per_bucket counts it in n_errors and rates the cases that got one.
+# Exit status:
 #   0  every case got an answer; the results (and with --baseline the baseline) are written.
 #   1  some case got none: the results are written, the baseline never; or the run stopped without writing
 #      anything — no case got an answer (that is no measurement), HTTP 401 (CONTEXT_API_KEY_PRIVATE is not a key
@@ -205,38 +207,43 @@ for case in cases:
     expected_dw = case.get("expected_dim_weights") or {}
 
     resp = query(q)
-    # /api/query returns "sources" (LLM-synthesis-filtered subset of RRF top-K).
-    # /api/search returns "results" (raw FTS+trigram). We use sources because that
-    # matches end-to-end user-facing retrieval — see methodology doc.
-    results = resp.get("sources", resp.get("results", [])) or []
-    top5 = [r.get("id") for r in results[:5]]
+    # A case without an answer is no measurement (#460): no verdict and no
+    # overlap — the vacuous passes below would make it a pass, an empty top 5
+    # a miss — and it enters no rate or mean.
+    top5 = top_k_pass = top_k_overlap = must_not_pass = dim_weight_pass = case_pass = None
+    activated_dw = {}
+    if resp.get("error") is None:
+        # /api/query returns "sources" (LLM-synthesis-filtered subset of RRF top-K).
+        # /api/search returns "results" (raw FTS+trigram). We use sources because that
+        # matches end-to-end user-facing retrieval — see methodology doc.
+        results = resp.get("sources", resp.get("results", [])) or []
+        top5 = [r.get("id") for r in results[:5]]
 
-    if expected:
-        if or_semantic:
-            top_k_pass = any(eid in top5 for eid in expected)
-            top_k_overlap = 1.0 if top_k_pass else 0.0
+        if expected:
+            if or_semantic:
+                top_k_pass = any(eid in top5 for eid in expected)
+                top_k_overlap = 1.0 if top_k_pass else 0.0
+            else:
+                hits = sum(1 for eid in expected if eid in top5)
+                top_k_pass = hits == len(expected)
+                top_k_overlap = hits / len(expected)
         else:
-            hits = sum(1 for eid in expected if eid in top5)
-            top_k_pass = hits == len(expected)
-            top_k_overlap = hits / len(expected)
-    else:
-        top_k_pass = True   # N-bucket: pass if no expectation set
-        top_k_overlap = None
+            top_k_pass = True   # N-bucket: pass if no expectation set
 
-    must_not_pass = not any(mid in top5 for mid in must_not) if must_not else True
+        must_not_pass = not any(mid in top5 for mid in must_not) if must_not else True
 
-    # dim_weight_pass (methodology): expected_dim_weights ⊆ activated_dim_weights —
-    # ungewichtete Vergleichsmenge, d.h. Key-Ebene: jede erwartete Dimension muss
-    # mit Gewicht > 0 aktiviert sein. activated_dim_weights liefert /api/query
-    # seit A-W1. Cases ohne expected_dim_weights: vacuous pass (Schiene inaktiv);
-    # heute trägt nur Bucket F das Feld, C/M/L-Semantik bleibt unverändert.
-    activated_dw = resp.get("activated_dim_weights") or {}
-    if expected_dw:
-        dim_weight_pass = all(activated_dw.get(k, 0) > 0 for k in expected_dw)
-    else:
-        dim_weight_pass = True
+        # dim_weight_pass (methodology): expected_dim_weights ⊆ activated_dim_weights —
+        # ungewichtete Vergleichsmenge, d.h. Key-Ebene: jede erwartete Dimension muss
+        # mit Gewicht > 0 aktiviert sein. activated_dim_weights liefert /api/query
+        # seit A-W1. Cases ohne expected_dim_weights: vacuous pass (Schiene inaktiv);
+        # heute trägt nur Bucket F das Feld, C/M/L-Semantik bleibt unverändert.
+        activated_dw = resp.get("activated_dim_weights") or {}
+        if expected_dw:
+            dim_weight_pass = all(activated_dw.get(k, 0) > 0 for k in expected_dw)
+        else:
+            dim_weight_pass = True
 
-    case_pass = top_k_pass and must_not_pass and dim_weight_pass
+        case_pass = top_k_pass and must_not_pass and dim_weight_pass
 
     case_results.append({
         "id": cid,
@@ -265,18 +272,18 @@ if n_errors == len(case_results):
     sys.exit(f"[FATAL] no case got an answer from {written(webhook)} ({webhook_var}): {n_errors} of {n_errors} failed, "
              f"the first with: {case_results[0]['error']}; that is no measurement — nothing was written")
 
+# n counts every case of the bucket, n_errors those without an answer; the
+# rates are over the cases that got one (all of them in a complete run).
 per_bucket = {}
 for b, items in buckets.items():
-    if not items:
-        per_bucket[b] = {"n": 0, "passes": 0, "pass_rate": None, "top_k_overlap_at_5": None}
-        continue
-    n = len(items)
-    passes = sum(1 for c in items if c["case_pass"])
-    overlaps = [c["top_k_overlap"] for c in items if c["top_k_overlap"] is not None]
+    answered = [c for c in items if c["error"] is None]
+    passes = sum(1 for c in answered if c["case_pass"])
+    overlaps = [c["top_k_overlap"] for c in answered if c["top_k_overlap"] is not None]
     per_bucket[b] = {
-        "n": n,
+        "n": len(items),
+        "n_errors": len(items) - len(answered),
         "passes": passes,
-        "pass_rate": round(passes/n, 4),
+        "pass_rate": round(passes/len(answered), 4) if answered else None,
         "top_k_overlap_at_5": round(statistics.mean(overlaps), 4) if overlaps else None,
     }
 
@@ -284,7 +291,7 @@ valid_rates = [v["pass_rate"] for v in per_bucket.values() if v["pass_rate"] is 
 mean_pass_rate = round(statistics.mean(valid_rates), 4) if valid_rates else 0.0
 
 # dim_weight-Schiene aggregiert über alle Cases, die sie messen (Branch W).
-dw_cases = [c for c in case_results if c["expected_dim_weights"]]
+dw_cases = [c for c in case_results if c["expected_dim_weights"] and c["error"] is None]
 dim_weight_pass_rate = (
     round(sum(1 for c in dw_cases if c["dim_weight_pass"]) / len(dw_cases), 4)
     if dw_cases else None
@@ -341,7 +348,7 @@ dwr = d.get("dim_weight_pass_rate")
 print(f"branch={d['branch']} ref={d['ref']} cases={d['n_cases']} errors={d['n_errors']} mean_pass={d['mean_pass_rate']} dim_weight_pass={dwr}")
 for b in ("C","M","L","N","F"):
     v = pb.get(b, {})
-    print(f"  {b}: n={v.get('n',0)} passes={v.get('passes',0)} pass_rate={v.get('pass_rate')} overlap@5={v.get('top_k_overlap_at_5')}")
+    print(f"  {b}: n={v.get('n',0)} errors={v.get('n_errors',0)} passes={v.get('passes',0)} pass_rate={v.get('pass_rate')} overlap@5={v.get('top_k_overlap_at_5')}")
 for c in d["case_results"]:
     if c.get("error") is not None:
         print(f"  no answer: {c['id']}: {c['error']}")
