@@ -145,3 +145,24 @@ func TestMonthTables(t *testing.T) {
 		}
 	}
 }
+
+// TestMonthKey: every spelling of a month name the case-insensitive month
+// patterns admit is a table key once keyed — the long s (U+017F) and the
+// Kelvin sign (U+212A) included, which strings.ToLower alone keeps or folds
+// differently (issues #451, #463).
+func TestMonthKey(t *testing.T) {
+	for in, want := range map[string]string{
+		"März": "märz", "MAERZ": "maerz", "Augu\u017Ft": "august", "\u017Feptember": "september",
+		"SEPTEMBER": "september", "O\u212Atober": "oktober", "Dezember": "dezember", "May": "may",
+	} {
+		got := MonthKey(in)
+		if got != want {
+			t.Errorf("MonthKey(%q) = %q, want %q", in, got, want)
+		}
+		if _, de := MonthDE[got]; !de {
+			if _, en := MonthEN[got]; !en {
+				t.Errorf("MonthKey(%q) = %q is no table key", in, got)
+			}
+		}
+	}
+}

@@ -292,9 +292,10 @@ func (p monthPattern) matchBefore(c string, w int) int {
 
 // The month names of the two month forms are the keys of util.MonthDE and
 // util.MonthEN, the tables ExtractDates reads the month from through
-// monthKey, so every name a pattern matches is one the table resolves (issue
-// #437: the expression m[aä]rz matched "Marz", which no table carries, and
-// missed "Maerz", which util.MonthDE does).
+// util.MonthKey (the long s of issue #451), so every name a pattern matches
+// is one the table resolves (issue #437: the expression m[aä]rz matched
+// "Marz", which no table carries, and missed "Maerz", which util.MonthDE
+// does).
 var (
 	deMonthPatterns = newMonthPatterns("januar", "februar", "märz", "maerz", "april", "mai", "juni", "juli",
 		"august", "september", "oktober", "november", "dezember")
@@ -304,16 +305,6 @@ var (
 	deMonthForm = newMonthForm(deMonthPatterns)
 	enMonthForm = newMonthForm(enMonthPatterns)
 )
-
-// monthKey returns the key of util.MonthDE or util.MonthEN for a month name
-// a month pattern matched. Lowercasing alone misses one rune (?i) lets match
-// a letter of a month name: the long s, which strings.ToLower keeps, so
-// "Auguſt 2026" matched and resolved to no month (issue #451). Uppercasing
-// first maps it to S and then to s, and leaves every other rune of the fold
-// orbits as lowercasing does (the Kelvin sign becomes k either way).
-func monthKey(name string) string {
-	return strings.ToLower(strings.ToUpper(name))
-}
 
 // newMonthPatterns builds the alternatives of a month form from lowercase
 // names. Each letter admits its Unicode simple case folding orbit, the set
@@ -486,7 +477,7 @@ func ExtractDates(content string) []time.Time {
 	// 3. German month+year → 1st of month
 	for _, m := range submatchStrings(content, sc.de) {
 		if len(m) == 3 {
-			monthStr := monthKey(m[1])
+			monthStr := util.MonthKey(m[1])
 			if month, ok := util.MonthDE[monthStr]; ok {
 				ds := fmt.Sprintf("%s-%02d-01", m[2], int(month))
 				if t, err := time.Parse("2006-01-02", ds); err == nil {
@@ -499,7 +490,7 @@ func ExtractDates(content string) []time.Time {
 	// 4. English month+year → 1st of month
 	for _, m := range submatchStrings(content, sc.en) {
 		if len(m) == 3 {
-			monthStr := monthKey(m[1])
+			monthStr := util.MonthKey(m[1])
 			if month, ok := util.MonthEN[monthStr]; ok {
 				ds := fmt.Sprintf("%s-%02d-01", m[2], int(month))
 				if t, err := time.Parse("2006-01-02", ds); err == nil {
