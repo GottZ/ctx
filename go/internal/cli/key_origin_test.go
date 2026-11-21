@@ -295,11 +295,28 @@ func TestKeyedTimeoutKeepsNetHTTPText(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() { close(release) })
+	const budget = 20 * time.Millisecond
+
+	// The reference: a plain http.Client with the same budget.
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/api/query", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := (&http.Client{Timeout: budget}).Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	var plain *url.Error
+	if !errors.As(err, &plain) || !strings.Contains(plain.Err.Error(), "Client.Timeout exceeded") {
+		t.Fatalf("plain client: err = %v, want net/http's timeout", err)
+	}
+	want := plain.Err.Error()
+
 	for i := range 20 {
-		c := NewClientWithTimeout(Config{BaseURL: srv.URL, Key: keyOriginFixtureKey}, 20*time.Millisecond, maxResponseSize)
+		c := NewClientWithTimeout(Config{BaseURL: srv.URL, Key: keyOriginFixtureKey}, budget, maxResponseSize)
 		_, err := c.Post("query", map[string]any{"query": "q"})
-		if err == nil || !strings.Contains(err.Error(), "(Client.Timeout exceeded while awaiting headers)") {
-			t.Fatalf("call %d: err = %v, want net/http's Client.Timeout text", i, err)
+		if err == nil || !strings.HasSuffix(err.Error(), want) {
+			t.Fatalf("call %d: err = %v, want it to end in net/http's %q", i, err, want)
 		}
 	}
 }
