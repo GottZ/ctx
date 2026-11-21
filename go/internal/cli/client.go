@@ -32,7 +32,8 @@ type Client struct {
 // times, 5 s is the init probe budget, 500 ms is the statusline's per-prompt
 // budget. Transport stays nil = http.DefaultTransport, which is what all four
 // hand-written constructions used — so proxy resolution (ProxyFromEnvironment)
-// and HTTP/2 negotiation are unchanged.
+// and HTTP/2 negotiation are unchanged. The key is not part of it: Client.send
+// attaches it per keyed request (keyTransport).
 //
 // The response cap is NOT a field of http.Client: it belongs to whoever reads
 // the body. Client carries it (maxResponse), and postIngest — which streams its
@@ -72,6 +73,29 @@ func (c *Client) withTimeout(d time.Duration) *Client {
 	return &cp
 }
 
+// send is how every keyed request of a Client leaves the CLI (#413): the
+// request gets the key from keyTransport only on the origin of BaseURL, and
+// goes out through c.HTTPClient — its budget, its own transport — with
+// keyTransport's checkRedirect, so every redirect hop is held to the same
+// origin and carries the key only there. The rule is applied per call rather
+// than at construction, so a Client assembled as a literal holds it too.
+func (c *Client) send(req *http.Request) (*http.Response, error) {
+	kt, err := newKeyTransport(c.BaseURL, c.Key, nil)
+	if err != nil {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, fmt.Errorf("CTX_BASE_URL is not a usable URL: %w", err)
+	}
+	signed, err := kt.signed(req)
+	if err != nil {
+		return nil, err
+	}
+	hc := *c.HTTPClient
+	hc.CheckRedirect = kt.checkRedirect
+	return hc.Do(signed)
+}
+
 // readLimit is the byte cap this client applies to a response body.
 func (c *Client) readLimit() int64 {
 	if c.maxResponse <= 0 {
@@ -94,9 +118,8 @@ func (c *Client) Post(endpoint string, body any) ([]byte, error) {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Context-Key", c.Key)
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.send(req)
 	if err != nil {
 		return nil, fmt.Errorf("request to %s: %w", url, err)
 	}
@@ -133,9 +156,8 @@ func (c *Client) Do(method, path string, body any) ([]byte, int, error) {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("X-Context-Key", c.Key)
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.send(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("request to %s: %w", url, err)
 	}
@@ -155,9 +177,8 @@ func (c *Client) Get(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("X-Context-Key", c.Key)
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.send(req)
 	if err != nil {
 		return nil, fmt.Errorf("request to %s: %w", url, err)
 	}
