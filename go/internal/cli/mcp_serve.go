@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GottZ/ctx/internal/clientkey"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
@@ -109,7 +110,7 @@ func NewMCPProxy(cfg Config, cfgErr error, allowFiles []string) (*MCPProxy, erro
 	p := &MCPProxy{cfgErr: cfgErr, connecting: make(chan struct{}, 1), connectWait: mcpServeConnectWait}
 	if cfgErr == nil {
 		p.endpoint = strings.TrimSuffix(cfg.BaseURL, "/") + "/mcp"
-		keyed, err := newKeyTransport(cfg.BaseURL, cfg.Key, http.DefaultTransport)
+		keyed, err := clientkey.New(cfg.BaseURL, cfg.Key, http.DefaultTransport, keyNames)
 		if err != nil {
 			p.cfgErr = fmt.Errorf("CTX_BASE_URL is not a usable URL: %w", err)
 		}
@@ -414,12 +415,12 @@ func refusalResult(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}, IsError: true}
 }
 
-// mcpKeyTransport sends the requests to the remote through keyTransport — the
-// key of the CLI configuration, only to the origin of CTX_BASE_URL, a redirect
-// followed only within it, exactly as for every other keyed request of the
-// CLI (keytransport.go) — and turns a 401 into errMCPKeyRejected.
+// mcpKeyTransport sends the requests to the remote through clientkey.Transport
+// — the key of the CLI configuration, only to the origin of CTX_BASE_URL, a
+// redirect followed only within it, exactly as for every other keyed request
+// of the CLI (Client.send) — and turns a 401 into errMCPKeyRejected.
 type mcpKeyTransport struct {
-	keyed keyTransport
+	keyed clientkey.Transport
 }
 
 func (t mcpKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {

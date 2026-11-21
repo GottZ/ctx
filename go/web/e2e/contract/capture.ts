@@ -58,13 +58,20 @@ export interface CaptureOptions {
  * document.fonts.ready ourselves instead of attributing it to the framework
  * (research §7.4 — costs nothing). Motion: animations:'disabled' is already
  * the toHaveScreenshot default policy (playwright.config.ts expect block).
- * Scrollbars: removed from rendering entirely (idempotent style tag). A
- * transient overflow — e.g. the login error band pushing the page past the
- * viewport for a frame — makes classic Chromium scrollbars STEAL layout
- * width, shifting every pixel left and failing the whole shot (v4.22.2
- * root-run: login--error--dark flaked across desktop AND mobile, diff =
- * uniform horizontal offset). Hiding via ::-webkit-scrollbar/display:none
- * takes no layout space, so overflowing and non-overflowing captures render
+ * Scrollbars: removed from rendering entirely (idempotent style tag). An
+ * overflowing page makes classic Chromium scrollbars STEAL layout width,
+ * shifting every pixel left and failing the whole shot (v4.22.2 root-run:
+ * login--error--dark flaked across desktop AND mobile, diff = uniform
+ * horizontal offset). The login overflow blamed for that run was not
+ * transient: the mask was 30 px taller than the viewport at every size until
+ * #419, so it alone does not explain a sporadic shot (Playwright starts
+ * headless Chromium with --hide-scrollbars); that cause stays open. The
+ * contract runner now asserts that the document fits the viewport height
+ * before every capture (expectViewportFit, contract.ts). The style tag
+ * stays: it covers every scroller, not only the document (main.content
+ * scrolls on long pages), and the captures outside the runner
+ * (smoke.spec.ts). Hiding via ::-webkit-scrollbar/display:none takes no
+ * layout space, so overflowing and non-overflowing captures render
  * identically to the committed scrollbar-free baselines.
  */
 export async function stabilize(page: Page): Promise<void> {
