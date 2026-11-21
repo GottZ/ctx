@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -59,7 +60,7 @@ func apiBase(repo RepoRef) string {
 }
 
 // send issues req through a copy of c.http that follows a redirect only within
-// the origin of req (httpx.SameOriginRedirect, #459). net/http alone keeps the
+// the origin of req (checkRedirect, #459, #474). net/http alone keeps the
 // PAT on a redirect to the same host name on another port or to a subdomain,
 // and re-sends a write's body (the issue text) on 307/308 to any host.
 // GitHub's own redirects — a renamed or transferred repository answers 301
@@ -70,16 +71,119 @@ func apiBase(repo RepoRef) string {
 // is given.
 func (c *githubClient) send(req *http.Request) (*http.Response, error) {
 	hc := *c.http
-	hc.CheckRedirect = httpx.SameOriginRedirect
+	hc.CheckRedirect = checkRedirect
 	return hc.Do(req) //nolint:gosec // G704: url = base(api.github.com or PATCH-validated api_base) + owner/repo; SSRF enforced dial-time (internal/ssrfguard), every hop held to the origin of the request.
 }
+
+// checkRedirect is httpx.SameOriginRedirect without the http→https upgrade
+// that rule lets through for the backend pools (#474). An api_base on http
+// whose host upgrades to https has sent the token in clear text on the first
+// hop already; following the upgrade hid that on every run, ended the pull
+// one page later at a next-page link "on another origin", and turned a write
+// answered with 301 or 302 into a GET of the target — for an issue update a
+// GET of the issue, which reported success.
+// The upgrade is refused before a byte of the hop is sent, and the error says
+// which setting to change (the API takes no http api_base; such a row was
+// written past handler.validateForge).
+//
+// A hop whose method differs from the first request's is refused too: net/http
+// repeats a POST or PATCH answered with 301, 302 or 303 as a GET of the
+// Location, without the body, and a GET of the moved issue answers 200 — the
+// write "succeeded" without happening, and the push leg advanced its base.
+// 307 and 308 keep method and body (GitHub's answer to a write on a renamed
+// repository) and stay followed.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if err := httpx.SameOriginRedirect(req, via); err != nil {
+		return err
+	}
+	if httpx.OriginOf(req.URL) != httpx.OriginOf(via[0].URL) {
+		return errAPIBaseUpgrade // the one hop off the origin SameOriginRedirect follows
+	}
+	if req.Method != via[0].Method {
+		status := 0
+		if req.Response != nil {
+			status = req.Response.StatusCode
+		}
+		return &configError{fmt.Sprintf("forge: the forge answered a %s with redirect status %d, which would repeat it as a GET without its body; not followed (check forge.api_base, owner and repo)", via[0].Method, status)}
+	}
+	return nil
+}
+
+// configError is a forge error whose text says what the operator has to
+// change. It is fixed text and at most a status code — never a URL, a token
+// or text the remote chose — so sanitizeErr hands it to last_error as it is,
+// where the operator reads it (§5.4 holds: nothing in it is token material).
+type configError struct{ msg string }
+
+func (e *configError) Error() string { return e.msg }
+
+var (
+	errAPIBaseUpgrade error = &configError{"forge: the host of forge.api_base redirects http to https, which the forge client does not follow: set forge.api_base to its https URL (this request went out over plain http)"}
+	errNextIsSelf     error = &configError{"forge: the next-page link names the page that carries it; the pull stopped there"}
+	errNextOffOrigin  error = &configError{"forge: the next-page link leaves the origin of the api_base; pagination stopped (set forge.api_base to the https origin the forge names in its links)"}
+)
 
 // errRedirectNotFollowed is the answer of a redirect send did not follow: its
 // Location leaves the origin of the request (or it has none). The status is
 // named; the Location is not — it is the remote's choice and the URL/token
 // never enter an error surface (§5.4).
 func errRedirectNotFollowed(status int) error {
-	return fmt.Errorf("forge: redirect status %d not followed: the forge client follows a redirect only within the origin of the api_base", status)
+	return &configError{fmt.Sprintf("forge: redirect status %d not followed: the forge client follows a redirect only within the origin of the api_base", status)}
+}
+
+// withoutURL is err as an error of the forge client: net/http's *url.Error
+// names the request URL — owner, repository, the since window, on a next page
+// the query the forge chose — and the URL never enters an error surface
+// (§5.4). The text below it is not safe either: a redirect whose Location
+// does not parse quotes the whole Location, a broken status line the bytes
+// the remote sent. So the error names its class only (transportFailure),
+// and keeps the cause for errors.Is and errors.As. A configError (a refused
+// hop, which checkRedirect returns through it) comes back as itself.
+func withoutURL(what string, err error) error {
+	var ce *configError
+	if errors.As(err, &ce) {
+		return ce
+	}
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		if ue.Op == "parse" {
+			return &transportFailure{what: what, class: "the URL does not parse", err: ue.Err}
+		}
+		err = ue.Err
+	}
+	return &transportFailure{what: what, class: failureClass(err), err: err}
+}
+
+// transportFailure is a failed request of the forge client: its text is what
+// failed and a class, its cause stays reachable through Unwrap.
+type transportFailure struct {
+	what, class string
+	err         error
+}
+
+func (e *transportFailure) Error() string { return e.what + ": " + e.class }
+func (e *transportFailure) Unwrap() error { return e.err }
+
+// failureClass names a transport failure without the text the remote chose:
+// a cancel, a timeout, or a network error as net.OpError writes it — the
+// operation and the address dialed (the api_base host, or the SSRF guard's
+// refusal of it), never a path or a query.
+func failureClass(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timed out"
+	}
+	var op *net.OpError
+	if errors.As(err, &op) {
+		return op.Error()
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return "timed out"
+	}
+	return "transport error"
 }
 
 // do issues one GET with conditional/auth headers and maps the transport-level
@@ -88,7 +192,7 @@ func errRedirectNotFollowed(status int) error {
 func (c *githubClient) do(ctx context.Context, url, etag string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // G107: url is base(api.github.com or a PATCH-validated api_base) + owner/repo; SSRF is enforced dial-time by the §5.7 guard (internal/ssrfguard), not on this string.
 	if err != nil {
-		return nil, fmt.Errorf("forge: build request: %w", err)
+		return nil, withoutURL("forge: build request", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -101,7 +205,7 @@ func (c *githubClient) do(ctx context.Context, url, etag string) (*http.Response
 	resp, err := c.send(req)
 	if err != nil {
 		// Never wrap the URL/token into the error surface (leak-scan line, §5.4).
-		return nil, fmt.Errorf("forge: request failed: %w", err)
+		return nil, withoutURL("forge: request failed", err)
 	}
 	switch {
 	case resp.StatusCode == http.StatusNotModified:
@@ -163,7 +267,7 @@ func (c *githubClient) doWrite(ctx context.Context, method, url string, payload 
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body)) //nolint:gosec // G107: url = base(api.github.com or PATCH-validated api_base) + owner/repo; SSRF enforced dial-time (internal/ssrfguard).
 	if err != nil {
-		return nil, fmt.Errorf("forge: build write request: %w", err)
+		return nil, withoutURL("forge: build write request", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -173,7 +277,7 @@ func (c *githubClient) doWrite(ctx context.Context, method, url string, payload 
 	}
 	resp, err := c.send(req)
 	if err != nil {
-		return nil, fmt.Errorf("forge: write request failed: %w", err)
+		return nil, withoutURL("forge: write request failed", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	switch {
@@ -292,7 +396,7 @@ func (c *githubClient) fetchIssues(ctx context.Context, url, etag string) (Issue
 		return IssuePage{}, fmt.Errorf("forge: decode issues: %w", err)
 	}
 
-	next, err := nextOnOrigin(url, resp.Header.Get("Link"))
+	next, err := nextOnOrigin(url, resp)
 	if err != nil {
 		return IssuePage{}, err
 	}
@@ -302,6 +406,9 @@ func (c *githubClient) fetchIssues(ctx context.Context, url, etag string) (Issue
 		Issues:  make([]IssueRemote, 0, len(items)),
 	}
 	for _, it := range items {
+		if it.UpdatedAt.After(page.Listed) {
+			page.Listed = it.UpdatedAt
+		}
 		if it.PullRequest != nil { // PR, not an issue — drop it (§4.5.1)
 			page.PRsSkipped++
 			continue
@@ -368,7 +475,7 @@ func (c *githubClient) fetchComments(ctx context.Context, url, etag string) (Com
 	if err := json.Unmarshal(raw, &items); err != nil {
 		return CommentPage{}, fmt.Errorf("forge: decode comments: %w", err)
 	}
-	next, err := nextOnOrigin(url, resp.Header.Get("Link"))
+	next, err := nextOnOrigin(url, resp)
 	if err != nil {
 		return CommentPage{}, err
 	}
@@ -397,46 +504,43 @@ func issueNumberFromURL(u string) int64 {
 	return n
 }
 
-// nextOnOrigin is the rel="next" target of link when it is on the origin of
-// the page URL that returned it — by induction the origin of the api_base the
-// first page was built from. The next page is requested with the PAT, and its
-// URL is the response's choice, so a target on another origin is refused
-// like a redirect there (#459): GitHub paginates on api.github.com. The
-// target is not named in the error (§5.4).
-func nextOnOrigin(pageURL, link string) (string, error) {
-	next := nextLink(link)
-	if next == "" {
-		return "", nil
+// nextOnOrigin is the page resp's Link header names as next (nextTarget,
+// RFC 8288), "" when it names none, held to the origin of pageURL — the URL
+// the client asked for, by induction the origin of the api_base the first
+// page was built from. The next page is requested with the PAT, and its URL
+// is the response's choice, so a target on another origin is refused like a
+// redirect there (#459): GitHub paginates on api.github.com. The target is
+// resolved against the URL that answered (RFC 8288 §3.1, RFC 3986 §5.1.3:
+// after a redirect within the origin, the last one), and the origin rule
+// judges the URL that is then requested — for GitHub's absolute targets the
+// string it wrote. GitHub docs: pagination MUST follow the Link header, never
+// a hand-built ?page= query. The target is not named in an error (§5.4).
+func nextOnOrigin(pageURL string, resp *http.Response) (string, error) {
+	target, err := nextTarget(resp.Header.Values("Link"))
+	if err != nil || target == "" {
+		return "", err
 	}
-	from, err1 := url.Parse(pageURL)
-	to, err2 := url.Parse(next)
-	if err1 != nil || err2 != nil || httpx.OriginOf(from) != httpx.OriginOf(to) {
-		return "", errors.New("forge: the next-page link leaves the origin of the api_base; pagination stopped")
+	from, err := url.Parse(pageURL)
+	if err != nil {
+		return "", errNextOffOrigin
 	}
-	return next, nil
-}
-
-// nextLink extracts the rel="next" target from a GitHub Link header. Returns ""
-// when there is no next page (last page or single page). GitHub docs: pagination
-// MUST follow the Link header, never a hand-built ?page= query.
-func nextLink(link string) string {
-	if link == "" {
-		return ""
+	ref, err := url.Parse(target)
+	if err != nil {
+		return "", errLinkUnparseable
 	}
-	for _, part := range strings.Split(link, ",") {
-		seg := strings.Split(strings.TrimSpace(part), ";")
-		if len(seg) < 2 {
-			continue
-		}
-		url := strings.TrimSpace(seg[0])
-		if !strings.HasPrefix(url, "<") || !strings.HasSuffix(url, ">") {
-			continue
-		}
-		for _, p := range seg[1:] {
-			if strings.TrimSpace(p) == `rel="next"` {
-				return url[1 : len(url)-1]
-			}
-		}
+	base := from
+	if resp.Request != nil && resp.Request.URL != nil {
+		base = resp.Request.URL
 	}
-	return ""
+	next := base.ResolveReference(ref)
+	if httpx.OriginOf(from) != httpx.OriginOf(next) {
+		return "", errNextOffOrigin
+	}
+	// The fragment never goes on the wire; without it, `<>`, `<#x>` or the
+	// page's own URL request the page again (#474).
+	next.Fragment, next.RawFragment = "", ""
+	if next.RequestURI() == from.RequestURI() || next.RequestURI() == base.RequestURI() {
+		return "", errNextIsSelf
+	}
+	return next.String(), nil
 }

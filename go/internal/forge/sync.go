@@ -126,6 +126,9 @@ type SyncManager struct {
 	// (test wiring built via struct literal). Sized once at boot (NewSyncManager /
 	// SetMaxConcurrent), before any sync starts — no resize race.
 	sem chan struct{}
+
+	// pageBound overrides maxPagesPerLeg (0 = the constant); tests only.
+	pageBound int
 }
 
 // NewSyncManager builds the manager with the production GitHub client factory and
@@ -306,11 +309,21 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 	// AFTER each successful page apply (I-G — I-F left the durable advance to us).
 	// A wire OR apply error backs off with the cursor UN-advanced (resume re-fetches
 	// from the last committed page, re-applies idempotently — no skip).
+	//
+	// A leg that met the page bound (errPageBound) read its share and committed
+	// its cursor; nothing failed at the forge. The comment leg still runs after
+	// a bounded issue leg, the push does not — a push after an incomplete pull
+	// could send a local edit over a newer forge version the pull has not
+	// reached yet — and the run ends with the bound in last_error (#474).
+	var bounded error
 	if err := m.pullIssues(ctx, project, client, repo, dryRun, etag, since); err != nil {
-		if errors.Is(err, ErrNotModified) {
+		switch {
+		case errors.Is(err, ErrNotModified):
 			// 304 on the FIRST issue page: nothing changed ⇒ issue cursor untouched.
 			// Comments may still have changed, so fall through to the comment leg.
-		} else {
+		case errors.Is(err, errPageBound):
+			bounded = err
+		default:
 			m.handleWireError(ctx, project.ID, runID, backoffN, err)
 			return
 		}
@@ -320,9 +333,16 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 	if m.applyComments != nil && !dryRun {
 		cEtag, cSince := readCommentCursor(project.SyncCursor)
 		if err := m.pullComments(ctx, project, client, repo, cEtag, cSince); err != nil && !errors.Is(err, ErrNotModified) {
-			m.handleWireError(ctx, project.ID, runID, backoffN, err)
-			return
+			if !errors.Is(err, errPageBound) {
+				m.handleWireError(ctx, project.ID, runID, backoffN, err)
+				return
+			}
+			bounded = err
 		}
+	}
+	if bounded != nil {
+		m.handleWireError(ctx, project.ID, runID, backoffN, bounded)
+		return
 	}
 
 	// Push leg (I-H): drain ctx-ahead entities back onto the forge (§4.5.3). Gated
@@ -368,7 +388,8 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 	}
 	firstETag := page.ETag
 	var maxSeen time.Time
-	for {
+	seen := map[string]bool{}
+	for n := 1; ; n++ {
 		if err := m.applyPage(ctx, project, dryRun, page); err != nil {
 			return err // cursor NOT advanced for this page (commit is below the apply)
 		}
@@ -377,12 +398,21 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 			if mu := maxIssueUpdated(page); mu.After(maxSeen) {
 				maxSeen = mu
 			}
+			// The pull requests the client dropped count too: a page of pull
+			// requests only must move since, or a bounded run that ends inside
+			// such a prefix leaves the cursor where it was for good (#474).
+			if page.Listed.After(maxSeen) {
+				maxSeen = page.Listed
+			}
 			if !maxSeen.IsZero() {
-				m.commitFetchCursor(ctx, project.ID, "issues", firstETag, maxSeen)
+				m.commitFetchCursor(ctx, project.ID, "issues", legETag(firstETag, n, page.NextURL), maxSeen)
 			}
 		}
 		if page.NextURL == "" {
 			return nil
+		}
+		if err := nextPageAllowed(seen, page.NextURL, n, m.legBound()); err != nil {
+			return err
 		}
 		if page, err = client.ListIssuesPage(ctx, page.NextURL); err != nil {
 			return err
@@ -399,7 +429,8 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 	}
 	firstETag := page.ETag
 	var maxSeen time.Time
-	for {
+	seen := map[string]bool{}
+	for n := 1; ; n++ {
 		res, err := m.applyComments(ctx, project, page.Comments)
 		if err != nil {
 			return err
@@ -414,15 +445,73 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 			maxSeen = mu
 		}
 		if !maxSeen.IsZero() {
-			m.commitFetchCursor(ctx, project.ID, "comments", firstETag, maxSeen)
+			m.commitFetchCursor(ctx, project.ID, "comments", legETag(firstETag, n, page.NextURL), maxSeen)
 		}
 		if page.NextURL == "" {
 			return nil
+		}
+		if err := nextPageAllowed(seen, page.NextURL, n, m.legBound()); err != nil {
+			return err
 		}
 		if page, err = client.ListCommentsPage(ctx, page.NextURL); err != nil {
 			return err
 		}
 	}
+}
+
+// maxPagesPerLeg bounds the pages one leg reads in one run (#474): 100 000
+// items at GitHub's 100 per page. A full first pull of the largest public
+// repositories is a few thousand issue pages (the issue listing returns pull
+// requests too; microsoft/vscode is past number 349 000) and far more comment
+// pages. Each page applied commits the since cursor, so the next run starts
+// where the bound stopped this one; 1000 requests are a fifth of a token's
+// hourly 5000 at GitHub. A forge that names a new page forever is stopped
+// after them instead of holding a sync slot for good — the run has no
+// deadline of its own.
+const maxPagesPerLeg = 1000
+
+var (
+	errPageBound = &configError{fmt.Sprintf("forge: a sync leg read %d pages in one run and stopped; the next sync continues where it stopped", maxPagesPerLeg)}
+	errNextCycle = &configError{"forge: the forge's next-page links run in a cycle; the pull stopped there"}
+)
+
+// legBound is the page bound of one leg: maxPagesPerLeg unless a test set
+// pageBound.
+func (m *SyncManager) legBound() int {
+	if m.pageBound > 0 {
+		return m.pageBound
+	}
+	return maxPagesPerLeg
+}
+
+// nextPageAllowed admits the next page of a leg after its page n: not past
+// the bound, and not a page the leg already requested in this run (a ring of
+// next links over several pages; a link to the page itself nextOnOrigin
+// refuses already). seen holds the next URLs requested so far.
+func nextPageAllowed(seen map[string]bool, next string, n, bound int) error {
+	if n >= bound {
+		return errPageBound
+	}
+	if seen[next] {
+		return errNextCycle
+	}
+	seen[next] = true
+	return nil
+}
+
+// legETag is the ETag a leg's cursor carries after its page n: the first
+// page's when that page was the whole listing (n == 1, no next page), ""
+// otherwise. The next run sends it as If-None-Match for its first page, and a
+// 304 ends the leg as unchanged — true only when the first page is all there
+// is. Saved after page 1 of a longer listing, it answered 304 for a retry
+// whose since had not moved (a failed page 2, more issues than a page on one
+// updated_at) and for a run where only a later page had changed: the pages
+// after the first were never read, and the 304 cleared the error (#474).
+func legETag(first string, n int, next string) string {
+	if n == 1 && next == "" {
+		return first
+	}
+	return ""
 }
 
 // commitFetchCursor durably advances the etag/since fetch cursor for one leg
@@ -593,7 +682,10 @@ func (m *SyncManager) resolveToken(ctx context.Context, project store.ProjectRow
 func strptr(s string) *string { return &s }
 
 // sanitizeErr reduces an error to a fixed short string per class — never the URL
-// or token material (leak-scan line, §5.4).
+// or token material (leak-scan line, §5.4). A configError is fixed text that
+// tells the operator what to change (a redirect not followed, a forge.api_base
+// on http, a next page on another origin, a Link header that does not parse);
+// it reaches last_error as it is (#474).
 func sanitizeErr(err error) string {
 	var rl *RateLimitError
 	if errors.As(err, &rl) {
@@ -601,6 +693,10 @@ func sanitizeErr(err error) string {
 	}
 	if errors.Is(err, ErrForgeKind) {
 		return ErrForgeKind.Error()
+	}
+	var ce *configError
+	if errors.As(err, &ce) {
+		return ce.msg
 	}
 	return "sync wire error"
 }
