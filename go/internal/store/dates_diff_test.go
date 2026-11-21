@@ -43,6 +43,12 @@ var issue437Classes = []struct {
 	// \s → [\s\x{A0}\x{202F}]: a match that differs has a no-break space in
 	// the run of date spaces (and, in the ISO form, T) before a digit.
 	{"#437/2 no-break spaces", regexp.MustCompile(`[\x{A0}\x{202F}][T\s\x{A0}\x{202F}]*\d`).MatchString, "Mai" + nbsp + "2026"},
+	// 20[2-3]\d → 20[2-9]\d, window 2020-2030 → 2020-2099: a match that
+	// differs has a year 2031-2099 where a form puts its year — before the
+	// "-" of an ISO date, behind the dot of a dot date, behind the date
+	// spaces after a month name. (2031-2039 matched before, without a date.)
+	{"#437/3 years 2031-2099", regexp.MustCompile(
+		`20(?:3[1-9]|[4-9]\d)-|\.20(?:3[1-9]|[4-9]\d)|[\s\x{A0}\x{202F}]20(?:3[1-9]|[4-9]\d)`).MatchString, "Mai 2031"},
 }
 
 // issue437Touched returns the name of the first class of issue437Classes
@@ -120,6 +126,12 @@ func datesSeedCorpus() []string {
 		"2026-03-29\xc2" + "14:30", "2026-03-29\xa014:30", "2026-03-29\xe2\x80\xaf\x8014:30",
 		"Mai\u20092026", "Mai\u20072026", "Mai\u30002026", "2026-03-29\u200914:30",
 		"Mai" + strings.Repeat(nbsp, 2000) + "2026", "2026-03-29" + strings.Repeat(nnbsp+"T", 1000) + "14:30",
+		// The years 2031-2099 (#437/3), the bounds of the window and the Go
+		// reference layout.
+		"2031-01-01 2039-12-31T23:59:59Z 2040-06-15 08:00 2099-12-31 2100-01-01 2019-12-31",
+		"15.06.2040 08:00 31.12.2099 01.01.2100 31.12.2019 29.02.2096 29.02.2100", "Dezember 2099 Januar 2100 May 2045",
+		"2099-12-31T23:59:59Z2100-01-01", "01.01.2045 12:15.03.2026", "Mai 2045Mai 2046", "2006-01-02 15:04:05",
+		"Mai 2031", "Mai" + nbsp + "2031", "Maerz 2031", "Maerz" + nnbsp + "2031", "2031-01-01" + nbsp + "12:00",
 		// Mixed, dense.
 		"Stand 21.11.2026 01:51, Release v5.71.0 am 2026-11-21T01:51:00Z; geplant: Dezember 2026 / December 2026.",
 		"| 2026-01-01 | 01.01.2026 | Januar 2026 | January 2026 |\n| 2026-01-01 00:00 | 01.01.2026 00:00 |",
@@ -228,16 +240,21 @@ func assertMatchesFrozen(t *testing.T, content string) {
 }
 
 // trickyDocOutside437 builds a trickyDoc of up to k pieces and leaves out
-// every piece that would put the text into a class of issue437Classes.
+// every piece that would put the text into a class of issue437Classes. A
+// piece can only complete a class match that ends in it, so the check reads
+// the last 256 bytes, which hold every match the pieces form short of a run
+// of over 200 whitespace pieces; assertMatchesFrozen checks the whole text
+// again and fails if one slipped through.
 func trickyDocOutside437(r *rand.Rand, k int) string {
+	const tail = 256
 	var b strings.Builder
 	for range k {
 		before := b.Len()
 		b.WriteString(trickyDoc(r, 1))
-		if issue437Touched(b.String()) != "" {
-			s := b.String()[:before]
+		s := b.String()
+		if issue437Touched(s[max(0, len(s)-tail):]) != "" {
 			b.Reset()
-			b.WriteString(s)
+			b.WriteString(s[:before])
 		}
 	}
 	return b.String()

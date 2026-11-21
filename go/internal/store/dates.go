@@ -27,12 +27,12 @@ import (
 // keeps the expressions as they stood before #434, frozen, and the input
 // classes the deliberate changes since then affect):
 //
-//	ISO       \b(20[2-3]\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))(?:[T\s\x{A0}\x{202F}]+([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?Z?)?\b
-//	dot       \b(0[1-9]|[12]\d|3[01])\.(0[1-9]|1[0-2])\.(20[2-3]\d)(?:[\s\x{A0}\x{202F}]+([01]\d|2[0-3]):([0-5]\d))?\b
-//	German    (?i)\b(januar|februar|märz|maerz|april|mai|juni|juli|august|september|oktober|november|dezember)[\s\x{A0}\x{202F}]+(20[2-3]\d)\b
-//	English   (?i)\b(january|february|march|april|may|june|july|august|september|october|november|december)[\s\x{A0}\x{202F}]+(20[2-3]\d)\b
+//	ISO       \b(20[2-9]\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))(?:[T\s\x{A0}\x{202F}]+([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?Z?)?\b
+//	dot       \b(0[1-9]|[12]\d|3[01])\.(0[1-9]|1[0-2])\.(20[2-9]\d)(?:[\s\x{A0}\x{202F}]+([01]\d|2[0-3]):([0-5]\d))?\b
+//	German    (?i)\b(januar|februar|märz|maerz|april|mai|juni|juli|august|september|oktober|november|dezember)[\s\x{A0}\x{202F}]+(20[2-9]\d)\b
+//	English   (?i)\b(january|february|march|april|may|june|july|august|september|october|november|december)[\s\x{A0}\x{202F}]+(20[2-9]\d)\b
 //
-// Every match of every form contains a year token 20[2-3]\d at a place the
+// Every match of every form contains a year token 20[2-9]\d at a place the
 // form fixes: at the start of an ISO date, behind the second dot of a dot
 // date, behind the whitespace after a month name. scanDates finds the year
 // tokens with strings.Index and tries each form only at that one place,
@@ -288,9 +288,29 @@ func foldOrbit(r rune) []rune {
 	return orbit
 }
 
-// isYearAt reports whether a year token 20[2-3]\d starts at i.
+// The years a content date may carry, minDateYear to maxDateYear: the year
+// token 20[2-9]\d (isYearAt, pinned to these bounds by
+// TestIsYearAt_IsTheDateYearWindow). The window is fixed, not relative to
+// the current time, so ExtractDates stays a pure function of the content:
+// the write's afterwork, the dream's re-extraction and the backfill compute
+// the same dates for the same content whenever they run, and the content
+// guard of their writes compares contents, not dates.
+//
+// The upper bound is the last year that starts with 20 (until issue #437 it
+// was 2030, and from 2031 on a block's own current dates would have given
+// nothing). The lower bound stays 2020, measured: on the repository's own
+// documents, code and test logs (127 MB) the years 2000-2019 add 87 matches,
+// nearly all of them Go's reference time layout "2006-01-02 15:04:05" and
+// time_bucket origins such as "2000-01-01 00:00:00", which are no dates;
+// 2031-2099 add 7, all of them date literals.
+const (
+	minDateYear = 2020
+	maxDateYear = 2099
+)
+
+// isYearAt reports whether a year token 20[2-9]\d starts at i.
 func isYearAt(c string, i int) bool {
-	return i+4 <= len(c) && c[i] == '2' && c[i+1] == '0' && (c[i+2] == '2' || c[i+2] == '3') && isDigit(c[i+3])
+	return i+4 <= len(c) && c[i] == '2' && c[i+1] == '0' && '2' <= c[i+2] && c[i+2] <= '9' && isDigit(c[i+3])
 }
 
 // isWordBoundary reports whether regexp's \b holds at offset i: an ASCII word
@@ -353,14 +373,15 @@ func submatchStrings(c string, all [][]int) [][]string {
 
 // ExtractDates extracts all recognizable timestamps from text content.
 // Parses ISO dates (with optional HH:MM time) and German dot-format dates.
-// Returns deduplicated, sorted timestamps at UTC. Rejects dates before 2020 or after 2030.
+// Returns deduplicated, sorted timestamps at UTC. Rejects dates before 2020 or after 2099
+// (minDateYear, maxDateYear).
 // Timestamps without explicit time default to midnight UTC.
 func ExtractDates(content string) []time.Time {
 	seen := make(map[string]bool)
 	var dates []time.Time
 
 	add := func(t time.Time) {
-		if t.Year() < 2020 || t.Year() > 2030 {
+		if t.Year() < minDateYear || t.Year() > maxDateYear {
 			return
 		}
 		// Key by full timestamp (incl. hour+minute) so same-day different-hour are kept distinct.

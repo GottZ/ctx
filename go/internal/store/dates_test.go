@@ -88,6 +88,42 @@ func TestExtractDates_NoBreakSpaces(t *testing.T) {
 	})
 }
 
+// --- #437 point 3: the years 2020-2099 ---.
+
+// TestExtractDates_YearWindow: every form yields its date for the years
+// 2020-2099. Before #437 the token was 20[2-3]\d and add dropped 2031-2039,
+// so from 2031 on a block's own current dates gave nothing. The years before
+// 2020 stay out: in code they are mostly Go's reference time layout.
+func TestExtractDates_YearWindow(t *testing.T) {
+	wantDates(t, map[string][]string{
+		"Mai 2031": {"2031-05-01T00:00:00Z"}, "May 2045": {"2045-05-01T00:00:00Z"},
+		"März 2099": {"2099-03-01T00:00:00Z"}, "Dezember 2039": {"2039-12-01T00:00:00Z"},
+		"2031-01-01": {"2031-01-01T00:00:00Z"}, "2039-12-31 23:59": {"2039-12-31T23:59:00Z"},
+		"2099-12-31T23:59:59Z": {"2099-12-31T23:59:00Z"}, "2040-01-01": {"2040-01-01T00:00:00Z"},
+		"01.01.2031": {"2031-01-01T00:00:00Z"}, "31.12.2099 23:59": {"2099-12-31T23:59:00Z"},
+		"29.02.2096": {"2096-02-29T00:00:00Z"}, "Januar 2020": {"2020-01-01T00:00:00Z"},
+		"2031-01-01 und 2030-12-31 und 2020-01-01": {"2020-01-01T00:00:00Z", "2030-12-31T00:00:00Z", "2031-01-01T00:00:00Z"},
+		// Outside the window, and invalid dates inside it.
+		"2019-12-31": nil, "2100-01-01": nil, "31.12.2019": nil, "01.01.2100": nil, "Mai 2019": nil,
+		"Mai 2100": nil, "Januar 2000": nil, "2097-02-29": nil, "30.02.2045": nil, "2045-13-01": nil,
+		`t.Format("2006-01-02 15:04:05")`: nil, `time.Parse("2006-01-02", s)`: nil,
+		// Numbers that are no date stay none: no form takes a bare year.
+		"Port 2049": nil, "RFC 2046": nil, "20 2031 Zeilen": nil, "2048 MB": nil, "listen 0.0.0.0:2049": nil,
+		"ids 2040-2045": nil, "v2.0.2045": nil, "10.0.2049": nil,
+	})
+}
+
+// TestIsYearAt_IsTheDateYearWindow pins the year token to the window: of all
+// four-digit numbers, isYearAt takes exactly minDateYear to maxDateYear.
+func TestIsYearAt_IsTheDateYearWindow(t *testing.T) {
+	for y := range 10000 {
+		s := pad4(y)
+		if got, want := isYearAt(s, 0), minDateYear <= y && y <= maxDateYear; got != want {
+			t.Errorf("isYearAt(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
 // --- T25: ExtractDates rejects Go-normalized invalid dates ---.
 
 func TestExtractDates_T25_InvalidDateRejection(t *testing.T) {
