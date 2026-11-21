@@ -10,8 +10,9 @@
 // forge_id=0 (a local draft, always) OR the block's updated_at is NEWER than the
 // mapping's synced_at — an in-sync block (last touched by the pull/base write, same
 // transaction now()) can never satisfy that, so the enumeration is bounded to
-// genuinely ctx-ahead rows, not the whole corpus. A base==ctxH row that slips
-// through (clock-equal) is skipped Go-side (0 wire writes).
+// genuinely ctx-ahead rows, not the whole corpus. A listed row that projects to
+// its base (a write that left the projection alone, e.g. tags) gets 0 wire
+// writes and is advanced (AdvancePushBase), so it leaves the candidates.
 package store
 
 import (
@@ -224,8 +225,9 @@ func FinalizePushCreateComment(ctx context.Context, pool *pgxpool.Pool, blockID 
 type PushProjection func(b *Block) string
 
 // AdvancePushBase advances base := ctxH (+ snapshot) after a successful PATCH (the
-// push made forge == the listed version). Also used for the 0-wire case where
-// only a never-pushed field (milestone) diverged.
+// push made forge == the listed version). Also used for the 0-wire cases: only
+// a never-pushed field (milestone) diverged, or the listed block projects to
+// its base already (in sync).
 //
 // synced_at decides whether the next run lists the row again (candidate filter
 // b.updated_at > m.synced_at), and the PATCH ran outside any transaction, so a

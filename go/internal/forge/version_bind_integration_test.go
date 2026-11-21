@@ -491,3 +491,99 @@ func TestPullLocalEditInFlightAcrossThePull(t *testing.T) {
 		t.Errorf("mapping conflict=false, want true: both sides moved")
 	}
 }
+
+// TestPushInSyncRowLeavesTheCandidates: a mapping whose block projects to the
+// base again — after a write that does not touch the projection (tags), or
+// after an edit made during a PATCH was undone before the next run — is
+// listed (updated_at > synced_at, or synced_at = -infinity) and skipped as in
+// sync. The skip must advance synced_at through the bound advance, or the row
+// is a candidate for good and, past the batch limit, keeps later candidates
+// out of the listing.
+func TestPushInSyncRowLeavesTheCandidates(t *testing.T) {
+	str := func(s string) *string { return &s }
+	t.Run("edit during the patch undone before the next run", func(t *testing.T) {
+		pool := testdb.SetupTestDB(t)
+		ctx := context.Background()
+		proj := enablePush(seedIFProject(t, pool, "i452insyncundo"))
+		issueID, _ := i452Pulled(t, pool, proj, false)
+		i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Title: str("Crane, renamed")})
+		spy := &hookSpy{pushSpyForge: newPushSpy()}
+		spy.setHook(func() {
+			i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Content: str("edited during the patch")})
+		})
+		p := pusherWithRegistry(pool)
+		if res, err := p.PushProject(ctx, proj, spy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow); err != nil || res.Pushed != 1 {
+			t.Fatalf("first push: pushed=%d err=%v, want 1", res.Pushed, err)
+		}
+		i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Content: str("forge body")})
+		for run := 2; run <= 3; run++ {
+			res, err := p.PushProject(ctx, proj, spy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow)
+			if err != nil || res.Pushed != 0 || spy.wireCalls() != 1 {
+				t.Fatalf("run %d: pushed=%d wire=%d err=%v, want 0 new wire writes (in sync)", run, res.Pushed, spy.wireCalls(), err)
+			}
+			i452NoCandidates(t, pool, proj)
+		}
+	})
+	t.Run("tags only, issue and comment", func(t *testing.T) {
+		pool := testdb.SetupTestDB(t)
+		ctx := context.Background()
+		proj := enablePush(seedIFProject(t, pool, "i452insynctags"))
+		issueID, commentID := i452Pulled(t, pool, proj, true)
+		i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Tags: []string{"field-work"}})
+		i452Edit(t, ctx, pool, proj.Scope, commentID, store.IssueUpdate{Tags: []string{"field-work"}})
+		issues, _ := store.ListIssuePushCandidates(ctx, pool, proj.ID, 10)
+		comments, _ := store.ListCommentPushCandidates(ctx, pool, proj.ID, 10)
+		if len(issues) != 1 || len(comments) != 1 {
+			t.Fatalf("precondition: %d issue / %d comment candidates after the tags writes, want 1/1", len(issues), len(comments))
+		}
+		spy := newPushSpy()
+		res, err := pusherWithRegistry(pool).PushProject(ctx, proj, spy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow)
+		if err != nil || res.Pushed != 0 || spy.wireCalls() != 0 {
+			t.Fatalf("push: pushed=%d wire=%d err=%v, want 0/0", res.Pushed, spy.wireCalls(), err)
+		}
+		i452NoCandidates(t, pool, proj)
+	})
+}
+
+// TestPushInSyncAdvanceSeesARealEdit: the in-sync skip advances through the
+// bound advance, so a real edit that commits between the listing and that
+// advance keeps the row a candidate, and the next run pushes it.
+func TestPushInSyncAdvanceSeesARealEdit(t *testing.T) {
+	str := func(s string) *string { return &s }
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+	proj := enablePush(seedIFProject(t, pool, "i452insyncreal"))
+	issueID, _ := i452Pulled(t, pool, proj, false)
+	i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Tags: []string{"field-work"}})
+
+	held, hold := i452HoldBeginPool(t, dsn)
+	spy := newPushSpy()
+	done := make(chan error, 1)
+	go func() {
+		_, err := pusherWithRegistry(held).PushProject(ctx, proj, spy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow)
+		done <- err
+	}()
+	select {
+	case <-hold.entered:
+	case err := <-done:
+		t.Fatalf("the push skipped the in-sync row without an advance (err %v)", err)
+	case <-time.After(i452Wait):
+		t.Fatalf("the push did not reach its advance within %s", i452Wait)
+	}
+	i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Content: str("body edited before the advance")})
+	close(hold.release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("first push: %v", err)
+		}
+	case <-time.After(i452Wait):
+		t.Fatalf("the first push did not finish within %s", i452Wait)
+	}
+	res, err := pusherWithRegistry(pool).PushProject(ctx, proj, spy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow)
+	if err != nil || res.Pushed != 1 || len(spy.patches) != 1 || spy.patches[0].Patch.Body == nil ||
+		*spy.patches[0].Patch.Body != "body edited before the advance" {
+		t.Fatalf("second push: pushed=%d patches=%+v err=%v, want a PATCH of the edit", res.Pushed, spy.patches, err)
+	}
+	i452NoCandidates(t, pool, proj)
+}
