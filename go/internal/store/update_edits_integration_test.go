@@ -21,16 +21,40 @@ import (
 
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func i406Edit(old, repl string) store.ContentEdit { return store.ContentEdit{Old: old, New: &repl} }
 
+// i406Deadline bounds every wait of the concurrency case: the lock waits of
+// the updates under test (through their context) and the test's own waits for
+// them. A regression that leaves a call blocked turns into a red test naming
+// what it waited for, not into the package timeout.
+const i406Deadline = 30 * time.Second
+
+// i406Conn opens a connection OUTSIDE the pool. The lock holder and the probe
+// that counts the waiters must not take pool slots the updates under test
+// need: testdb's pool has pgxpool's default size, max(4, NumCPU) — 4 on a
+// 2-core CI runner — and holder + three waiting updates fill it, so a probe
+// from the same pool waited for a slot that only the holder's commit, which
+// came after the probe, would free (PR #412: 8 minutes, then the package
+// timeout).
+func i406Conn(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *pgx.Conn {
+	t.Helper()
+	c, err := pgx.ConnectConfig(ctx, pool.Config().ConnConfig.Copy())
+	if err != nil {
+		t.Fatalf("connect outside the pool: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close(context.Background()) })
+	return c
+}
+
 // i406Waiters counts the backends of this database that wait for a lock.
-func i406Waiters(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int {
+func i406Waiters(t *testing.T, ctx context.Context, probe *pgx.Conn) int {
 	t.Helper()
 	var n int
-	if err := pool.QueryRow(ctx,
+	if err := probe.QueryRow(ctx,
 		`SELECT count(*) FROM pg_stat_activity
 		  WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0`).Scan(&n); err != nil {
 		t.Fatalf("count lock waiters: %v", err)
@@ -289,42 +313,47 @@ func TestUpdateBlockEdits(t *testing.T) {
 	// text and the later write would erase the earlier ones.
 	t.Run("concurrent edits on one block all survive", func(t *testing.T) {
 		b := upsert(t, "race", "alpha\nbeta\ngamma\n", map[string]any{"base": true})
-		holder, err := pool.Begin(ctx)
+		waitCtx, cancel := context.WithTimeout(ctx, i406Deadline)
+		defer cancel()
+		probe := i406Conn(t, waitCtx, pool)
+		holder, err := i406Conn(t, waitCtx, pool).Begin(waitCtx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer func() { _ = holder.Rollback(ctx) }()
-		if _, err := holder.Exec(ctx,
+		defer func() { _ = holder.Rollback(context.Background()) }()
+		if _, err := holder.Exec(waitCtx,
 			`UPDATE context_blocks SET content = replace(content, 'alpha', 'ALPHA'),
 			        metadata = metadata || '{"holder":1}', updated_at = now() WHERE id = $1`, b.ID); err != nil {
 			t.Fatal(err)
 		}
 		errs := make(chan error, 3)
-		go func() {
-			_, _, err := store.UpdateBlock(ctx, pool, b.ID, store.UpdateBlockData{Edits: []store.ContentEdit{i406Edit("beta", "BETA")}}, scopes)
-			errs <- err
-		}()
-		go func() {
-			_, _, err := store.UpdateBlock(ctx, pool, b.ID, store.UpdateBlockData{Edits: []store.ContentEdit{i406Edit("gamma", "GAMMA")}}, scopes)
-			errs <- err
-		}()
-		go func() {
-			_, _, err := store.UpdateBlock(ctx, pool, b.ID, store.UpdateBlockData{MetadataMerge: map[string]any{"merge": 2}}, scopes)
-			errs <- err
-		}()
-		deadline := time.Now().Add(10 * time.Second)
-		for i406Waiters(t, ctx, pool) < 3 {
-			if time.Now().After(deadline) {
-				t.Fatalf("%d of 3 updates reached the row lock", i406Waiters(t, ctx, pool))
+		for _, data := range []store.UpdateBlockData{
+			{Edits: []store.ContentEdit{i406Edit("beta", "BETA")}},
+			{Edits: []store.ContentEdit{i406Edit("gamma", "GAMMA")}},
+			{MetadataMerge: map[string]any{"merge": 2}},
+		} {
+			go func() {
+				_, _, err := store.UpdateBlock(waitCtx, pool, b.ID, data, scopes)
+				errs <- err
+			}()
+		}
+		for i406Waiters(t, waitCtx, probe) < 3 {
+			if waitCtx.Err() != nil {
+				t.Fatalf("%d of 3 updates reached the row lock within %s", i406Waiters(t, context.Background(), probe), i406Deadline)
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		if err := holder.Commit(ctx); err != nil {
+		if err := holder.Commit(waitCtx); err != nil {
 			t.Fatal(err)
 		}
-		for range 3 {
-			if err := <-errs; err != nil {
-				t.Fatalf("UpdateBlock: %v", err)
+		for i := range 3 {
+			select {
+			case err := <-errs:
+				if err != nil {
+					t.Fatalf("UpdateBlock: %v", err)
+				}
+			case <-time.After(i406Deadline):
+				t.Fatalf("%d of 3 updates still blocked %s after the holder committed", 3-i, i406Deadline)
 			}
 		}
 		r := read(t, b.ID)

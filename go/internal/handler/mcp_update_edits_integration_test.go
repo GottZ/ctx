@@ -14,12 +14,14 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/jackc/pgx/v5"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -181,42 +183,64 @@ func TestMCPUpdateEdits(t *testing.T) {
 	t.Run("staged: a change committed during the confirm is not overwritten", func(t *testing.T) {
 		id := f.block(t, "mcp-staged-race", "one two three", nil)
 		hash := stage(t, updateInput{ID: id, Edits: []updateEditInput{edit("two", "2")}})
-		holder, err := f.pool.Begin(f.ctx)
+		// The holder and the probe run on connections of their own, outside
+		// the pool the confirm draws from (pgxpool's default size is
+		// max(4, NumCPU), 4 on a 2-core CI runner); every wait is bounded, so a
+		// regression is a red test with a message, not a package timeout.
+		const deadline = 30 * time.Second
+		waitCtx, cancel := context.WithTimeout(f.ctx, deadline)
+		defer cancel()
+		ownConn := func() *pgx.Conn {
+			c, err := pgx.ConnectConfig(waitCtx, f.pool.Config().ConnConfig.Copy())
+			if err != nil {
+				t.Fatalf("connect outside the pool: %v", err)
+			}
+			t.Cleanup(func() { _ = c.Close(context.Background()) })
+			return c
+		}
+		probe := ownConn()
+		holder, err := ownConn().Begin(waitCtx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer func() { _ = holder.Rollback(f.ctx) }()
-		if _, err := holder.Exec(f.ctx,
+		defer func() { _ = holder.Rollback(context.Background()) }()
+		if _, err := holder.Exec(waitCtx,
 			`UPDATE context_blocks SET content = 'held one two three', updated_at = now() WHERE id = $1`, id); err != nil {
 			t.Fatal(err)
 		}
+		confirmCtx, cancelConfirm := context.WithTimeout(f.flaggedCtx, deadline)
+		defer cancelConfirm()
 		done := make(chan *mcp.CallToolResult, 1)
 		go func() {
-			r, _, _ := confirmTool(f.flaggedCtx, nil, confirmInput{PayloadHash: hash})
+			r, _, _ := confirmTool(confirmCtx, nil, confirmInput{PayloadHash: hash})
 			done <- r
 		}()
-		deadline := time.Now().Add(10 * time.Second)
 		for {
 			var waiting int
-			if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM pg_stat_activity
+			if err := probe.QueryRow(waitCtx, `SELECT count(*) FROM pg_stat_activity
 				WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0`).Scan(&waiting); err != nil {
-				t.Fatal(err)
+				t.Fatalf("count lock waiters (the confirm never waited for the held row within %s?): %v", deadline, err)
 			}
 			if waiting > 0 {
 				break
 			}
-			if time.Now().After(deadline) {
-				t.Fatal("the confirm never waited for the held row")
-			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		if err := holder.Commit(f.ctx); err != nil {
+		if err := holder.Commit(waitCtx); err != nil {
 			t.Fatal(err)
 		}
-		r := <-done
-		if r == nil || !r.IsError || !strings.Contains(resultText(t, r), "changed while this update was confirmed") ||
-			!strings.Contains(resultText(t, r), "the stage token is consumed") {
-			t.Fatalf("confirm answered %v, want the drift refusal after the consume", r)
+		var r *mcp.CallToolResult
+		select {
+		case r = <-done:
+		case <-time.After(deadline):
+			t.Fatalf("the confirm is still blocked %s after the holder committed", deadline)
+		}
+		if r == nil {
+			t.Fatal("the confirm returned no result")
+		}
+		if text := resultText(t, r); !r.IsError || !strings.Contains(text, "changed while this update was confirmed") ||
+			!strings.Contains(text, "the stage token is consumed") {
+			t.Fatalf("confirm answered %q (isError %v), want the drift refusal after the consume", text, r.IsError)
 		}
 		if got := f.row(t, id).content; got != "held one two three" {
 			t.Fatalf("content = %q, want the concurrent writer's text kept", got)
