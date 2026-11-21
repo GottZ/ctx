@@ -104,6 +104,7 @@ func (e *configError) Error() string { return e.msg }
 
 var (
 	errAPIBaseUpgrade error = &configError{"forge: the host of forge.api_base redirects http to https, which the forge client does not follow: set forge.api_base to its https URL (this request went out over plain http)"}
+	errNextIsSelf     error = &configError{"forge: the next-page link names the page that carries it; the pull stopped there"}
 	errNextOffOrigin  error = &configError{"forge: the next-page link leaves the origin of the api_base; pagination stopped (set forge.api_base to the https origin the forge names in its links)"}
 )
 
@@ -478,6 +479,12 @@ func nextOnOrigin(pageURL string, resp *http.Response) (string, error) {
 	next := base.ResolveReference(ref)
 	if httpx.OriginOf(from) != httpx.OriginOf(next) {
 		return "", errNextOffOrigin
+	}
+	// The fragment never goes on the wire; without it, `<>`, `<#x>` or the
+	// page's own URL request the page again (#474).
+	next.Fragment, next.RawFragment = "", ""
+	if next.RequestURI() == from.RequestURI() || next.RequestURI() == base.RequestURI() {
+		return "", errNextIsSelf
 	}
 	return next.String(), nil
 }

@@ -49,6 +49,9 @@ func nextTarget(fields []string) (string, error) {
 	}
 	for _, lv := range links {
 		if lv.hasRelation("next") {
+			if lv.target == "" {
+				return "", errNextIsSelf // an empty reference is the page itself (RFC 3986 §4.4)
+			}
 			return lv.target, nil
 		}
 	}

@@ -99,15 +99,18 @@ func FuzzLinkHeader(f *testing.F) {
 			if err != nil || !reflect.DeepEqual(again, links) {
 				t.Fatalf("canonical form %q of %q reads back as %v, %v; want %v", canonical(links), field, again, err, links)
 			}
-			want := ""
+			want, wantErr := "", error(nil)
 			for _, lv := range links {
 				if lv.hasRelation("next") {
 					want = lv.target
+					if want == "" {
+						wantErr = errNextIsSelf
+					}
 					break
 				}
 			}
-			if terr != nil || target != want {
-				t.Fatalf("nextTarget(%q) = %q, %v; want %q", field, target, terr, want)
+			if !errors.Is(terr, wantErr) || (wantErr == nil && target != want) {
+				t.Fatalf("nextTarget(%q) = %q, %v; want %q, %v", field, target, terr, want, wantErr)
 			}
 		} else {
 			if !errors.Is(perr, errLinkSyntax) {
@@ -148,8 +151,9 @@ func TestNextOnOriginKeepsRealTargets(t *testing.T) {
 			t.Fatalf("nextTarget(%q) = %q, %v", field, target, err)
 		}
 		page, _ := url.Parse(target)
+		page.Path, page.RawPath, page.RawQuery = "/the-page-before", "", "" // same origin, another page
 		resp := &http.Response{Header: http.Header{"Link": []string{field}}, Request: &http.Request{URL: page}}
-		next, err := nextOnOrigin(target, resp)
+		next, err := nextOnOrigin(page.String(), resp)
 		if err != nil || next != target {
 			t.Errorf("nextOnOrigin = %q, %v; want %q as written", next, err, target)
 		}

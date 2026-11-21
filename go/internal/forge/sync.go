@@ -368,6 +368,7 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 	}
 	firstETag := page.ETag
 	var maxSeen time.Time
+	seen := map[string]bool{}
 	for n := 1; ; n++ {
 		if err := m.applyPage(ctx, project, dryRun, page); err != nil {
 			return err // cursor NOT advanced for this page (commit is below the apply)
@@ -384,6 +385,9 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 		if page.NextURL == "" {
 			return nil
 		}
+		if err := nextPageAllowed(seen, page.NextURL, n); err != nil {
+			return err
+		}
 		if page, err = client.ListIssuesPage(ctx, page.NextURL); err != nil {
 			return err
 		}
@@ -399,6 +403,7 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 	}
 	firstETag := page.ETag
 	var maxSeen time.Time
+	seen := map[string]bool{}
 	for n := 1; ; n++ {
 		res, err := m.applyComments(ctx, project, page.Comments)
 		if err != nil {
@@ -419,10 +424,44 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 		if page.NextURL == "" {
 			return nil
 		}
+		if err := nextPageAllowed(seen, page.NextURL, n); err != nil {
+			return err
+		}
 		if page, err = client.ListCommentsPage(ctx, page.NextURL); err != nil {
 			return err
 		}
 	}
+}
+
+// maxPagesPerLeg bounds the pages one leg reads in one run (#474): 100 000
+// items at GitHub's 100 per page. A full first pull of the largest public
+// repositories is a few thousand issue pages (the issue listing returns pull
+// requests too; microsoft/vscode is past number 349 000) and far more comment
+// pages. Each page applied commits the since cursor, so the next run starts
+// where the bound stopped this one; 1000 requests are a fifth of a token's
+// hourly 5000 at GitHub. A forge that names a new page forever is stopped
+// after them instead of holding a sync slot for good — the run has no
+// deadline of its own.
+const maxPagesPerLeg = 1000
+
+var (
+	errPageBound = &configError{fmt.Sprintf("forge: a sync leg read %d pages in one run and stopped; the next sync continues where it stopped", maxPagesPerLeg)}
+	errNextCycle = &configError{"forge: the forge's next-page links run in a cycle; the pull stopped there"}
+)
+
+// nextPageAllowed admits the next page of a leg after its page n: not past
+// the bound, and not a page the leg already requested in this run (a ring of
+// next links over several pages; a link to the page itself nextOnOrigin
+// refuses already). seen holds the next URLs requested so far.
+func nextPageAllowed(seen map[string]bool, next string, n int) error {
+	if n >= maxPagesPerLeg {
+		return errPageBound
+	}
+	if seen[next] {
+		return errNextCycle
+	}
+	seen[next] = true
+	return nil
 }
 
 // legETag is the ETag a leg's cursor carries after its page n: the first
