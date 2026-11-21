@@ -43,7 +43,7 @@ type job struct {
 // concurrency cap is applied here rather than trusted to the caller — the
 // endpoint is production serving.
 //
-// A refused redirect stops it (stopOnRefusal) and is its error: it is the
+// A refused redirect stops it (refusalStop) and is its error: it is the
 // configuration of the -backend row, which every call meets alike (#459).
 func runGeneration(ctx context.Context, client *goldset.ChatClient, slice string, jobs []job, conc, want int) (cases []goldset.Case, calls, shape, redaction int, err error) {
 	ctx, stop := newRefusalStop(ctx)

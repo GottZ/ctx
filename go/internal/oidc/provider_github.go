@@ -163,6 +163,11 @@ func (p *githubProvider) getJSON(ctx context.Context, url, accessToken string, o
 		return fmt.Errorf("oidc: github: fetch %s: %w", url, err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		// A refused redirect: its body typically repeats the Location, path
+		// and query included, which the redirect rule keeps out of logs.
+		return fmt.Errorf("oidc: github: fetch %s returned %d (a redirect, not followed)", url, resp.StatusCode)
+	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBytes+1))
 	if err != nil {

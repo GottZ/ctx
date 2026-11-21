@@ -148,7 +148,7 @@ func cmdQ(c *common, o qOpts) error {
 
 // generateQuestions runs the frozen prompt over the blocks. Order is restored
 // after the parallel phase so the raw file is deterministic in block order.
-// A refused redirect stops it (stopOnRefusal) and is its error.
+// A refused redirect stops it (refusalStop) and is its error.
 func generateQuestions(ctx context.Context, client *goldset.ChatClient, blocks []goldset.Block, conc int) ([]goldset.Case, int, int, error) {
 	ctx, stop := newRefusalStop(ctx)
 	defer stop.cancel()

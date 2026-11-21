@@ -55,6 +55,10 @@ func (s *probeSink) count() int {
 func TestBackendTestProbeRedirectStaysOnOrigin(t *testing.T) {
 	ok := func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"data":{}}`)) }
 	rows := map[string]func(host string) *backends.Backend{
+		"generic": func(host string) *backends.Backend {
+			return &backends.Backend{Name: "g", Host: host, Scope: backends.GlobalScope, Protocol: backends.ProtocolOpenAI,
+				APIKey: "row-key-459"}
+		},
 		"anthropic": func(host string) *backends.Backend {
 			return &backends.Backend{Name: "a", Host: host, Scope: backends.GlobalScope, Protocol: backends.ProtocolAnthropic,
 				APIKey: "row-key-459", ExtraHeaders: map[string]string{"X-Row-Secret": "extra-459"}}
@@ -77,8 +81,10 @@ func TestBackendTestProbeRedirectStaysOnOrigin(t *testing.T) {
 				if n := other.count(); n != 0 {
 					t.Fatalf("the probe followed a %d to another origin: %s", code, other.log())
 				}
-				if reachable {
-					t.Errorf("a refused redirect reported the row reachable: %v", checks)
+				// The host answered: reachable, as a tenant row's probe
+				// always read a refused redirect.
+				if !reachable || checks["base_url"] != "ok" {
+					t.Errorf("a refused redirect: reachable %v, checks %v; want the host's answer read as reachable", reachable, checks)
 				}
 				if b.ProviderClass == backends.ProviderOpenRouter {
 					_ = openRouterDetails(context.Background(), b)

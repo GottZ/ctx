@@ -972,7 +972,10 @@ var guardedProbeClient = httpx.GuardedPooledClient()
 // transport, with the redirect rule of the row's chat wire — a hop only within
 // the origin of the base_url (#459). The probe carries the row's key
 // (x-api-key and extra_headers on an Anthropic row, a bearer token otherwise),
-// which net/http alone copies to any redirect target.
+// which net/http alone copies to any redirect target. A redirect it does not
+// follow is an answer of the host and reads as reachable, as it did for
+// tenant rows: a generic row's probe GETs the bare base_url, and where that
+// root points says nothing about the chat path.
 var openProbeClient = &http.Client{CheckRedirect: httpx.SameOriginRedirect}
 
 // backendProbeClient picks backend-test's client by the wire clients' rule
@@ -1033,12 +1036,6 @@ func probeBackendURL(ctx context.Context, b *backends.Backend, checks map[string
 		checks["base_url"] = "ok"
 		checks["auth"] = fmt.Sprintf("error: status %d", resp.StatusCode)
 		return true
-	}
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		// A redirect the client did not follow: it leaves the base_url's
-		// origin, where the row's chat wire does not follow either.
-		checks["base_url"] = fmt.Sprintf("error: status %d (redirect not followed)", resp.StatusCode)
-		return false
 	}
 	if resp.StatusCode >= 400 {
 		checks["base_url"] = fmt.Sprintf("error: status %d", resp.StatusCode)
