@@ -57,15 +57,15 @@ func TestBackendTestProbeRedirectStaysOnOrigin(t *testing.T) {
 	rows := map[string]func(host string) *backends.Backend{
 		"generic": func(host string) *backends.Backend {
 			return &backends.Backend{Name: "g", Host: host, Scope: backends.GlobalScope, Protocol: backends.ProtocolOpenAI,
-				APIKey: "row-key-459"}
+				APIKey: "row-key-459", APIKeyRef: "row-key"}
 		},
 		"anthropic": func(host string) *backends.Backend {
 			return &backends.Backend{Name: "a", Host: host, Scope: backends.GlobalScope, Protocol: backends.ProtocolAnthropic,
-				APIKey: "row-key-459", ExtraHeaders: map[string]string{"X-Row-Secret": "extra-459"}}
+				APIKey: "row-key-459", APIKeyRef: "row-key", ExtraHeaders: map[string]string{"X-Row-Secret": "extra-459"}}
 		},
 		"openrouter": func(host string) *backends.Backend {
 			return &backends.Backend{Name: "o", Host: host, Scope: backends.GlobalScope, Protocol: backends.ProtocolOpenAI,
-				ProviderClass: backends.ProviderOpenRouter, APIKey: "row-key-459"}
+				ProviderClass: backends.ProviderOpenRouter, APIKey: "row-key-459", APIKeyRef: "row-key"}
 		},
 	}
 	for name, row := range rows {
@@ -85,6 +85,15 @@ func TestBackendTestProbeRedirectStaysOnOrigin(t *testing.T) {
 				// always read a refused redirect.
 				if !reachable || checks["base_url"] != "ok" {
 					t.Errorf("a refused redirect: reachable %v, checks %v; want the host's answer read as reachable", reachable, checks)
+				}
+				// The key never reached a host that judged it: auth is not
+				// ok, and the redirect is named — a call on this path meets
+				// the same redirect.
+				if !strings.HasPrefix(checks["auth"], "unverified") {
+					t.Errorf("a refused redirect reported auth %q; want unverified (checks %v)", checks["auth"], checks)
+				}
+				if !strings.Contains(checks["redirect"], fmt.Sprint(code)) {
+					t.Errorf("a refused redirect: redirect check %q, want its status named (checks %v)", checks["redirect"], checks)
 				}
 				if b.ProviderClass == backends.ProviderOpenRouter {
 					_ = openRouterDetails(context.Background(), b)
@@ -107,7 +116,10 @@ func TestBackendTestProbeRedirectStaysOnOrigin(t *testing.T) {
 	})
 	b := rows["anthropic"](api.srv.URL)
 	checks := map[string]string{}
-	if !probeBackendURL(context.Background(), b, checks) || checks["base_url"] != "ok" {
+	if !probeBackendURL(context.Background(), b, checks) || checks["base_url"] != "ok" || checks["auth"] != "ok" {
 		t.Fatalf("same-origin redirect: checks %v; calls %s", checks, api.log())
+	}
+	if _, ok := checks["redirect"]; ok {
+		t.Errorf("a followed redirect is reported as not followed: %v", checks)
 	}
 }

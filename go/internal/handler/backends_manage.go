@@ -975,7 +975,8 @@ var guardedProbeClient = httpx.GuardedPooledClient()
 // which net/http alone copies to any redirect target. A redirect it does not
 // follow is an answer of the host and reads as reachable, as it did for
 // tenant rows: a generic row's probe GETs the bare base_url, and where that
-// root points says nothing about the chat path.
+// root points says nothing about the chat path. No host judged the key, so
+// probeBackendURL names the redirect and leaves auth unverified.
 var openProbeClient = &http.Client{CheckRedirect: httpx.SameOriginRedirect}
 
 // backendProbeClient picks backend-test's client by the wire clients' rule
@@ -1042,6 +1043,16 @@ func probeBackendURL(ctx context.Context, b *backends.Backend, checks map[string
 		return false
 	}
 	checks["base_url"] = "ok"
+	if resp.StatusCode >= 300 {
+		// A redirect the client did not follow: the host answered, but no
+		// host judged the key, and a call on this path meets the same
+		// redirect — named here, and auth is not reported ok (#459).
+		checks["redirect"] = fmt.Sprintf("status %d, not followed", resp.StatusCode)
+		if b.APIKeyRef != "" {
+			checks["auth"] = "unverified: redirect not followed"
+		}
+		return true
+	}
 	if b.APIKeyRef != "" {
 		checks["auth"] = "ok"
 	}
