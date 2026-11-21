@@ -137,3 +137,60 @@ func TestSanitizeErrPassesOperatorErrors(t *testing.T) {
 		t.Errorf("a transport failure reads %q in last_error; want the class", got)
 	}
 }
+
+// #474 R3: net/http repeats a POST or PATCH answered with 301, 302 or 303 as
+// a GET of the Location, without the body. Within the origin the redirect
+// rule let that hop through, and the GET of the moved issue answered 200:
+// UpdateIssue reported success for a write that never happened, and the
+// push leg advanced its base. A hop that changes the method is refused;
+// 307 and 308 keep method and body and stay followed.
+func TestForgeWriteRedirectThatTurnsIntoAGetRefused(t *testing.T) {
+	for _, code := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			var mu sync.Mutex
+			var seen []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				seen = append(seen, r.Method+" "+r.URL.Path+" body="+string(b))
+				mu.Unlock()
+				if strings.HasPrefix(r.URL.Path, "/repos/") {
+					w.Header().Set("Location", "/moved"+strings.TrimPrefix(r.URL.Path, "/repos/o/r"))
+					w.WriteHeader(code)
+					return
+				}
+				_, _ = io.WriteString(w, `{"number":7,"id":7,"title":"t","state":"open"}`)
+			}))
+			t.Cleanup(srv.Close)
+			c := &githubClient{http: srv.Client(), token: "pat-474"}
+			repo := RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL}
+			body := "ISSUE-TEXT-474"
+			errs := map[string]error{
+				"update":  c.UpdateIssue(context.Background(), repo, 7, IssuePatch{Body: &body}),
+				"comment": c.UpdateComment(context.Background(), repo, 7, body),
+			}
+			_, errs["create"] = c.CreateIssue(context.Background(), repo, IssueCreate{Title: "t", Body: body})
+			mu.Lock()
+			log := strings.Join(seen, " | ")
+			mu.Unlock()
+			for call, err := range errs {
+				switch code {
+				case http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+					if err != nil {
+						t.Errorf("%s: a %d keeps method and body and must be followed: %v", call, code, err)
+					}
+				default:
+					if err == nil || !strings.Contains(err.Error(), "GET") {
+						t.Errorf("%s: a %d that would repeat the write as a GET: err %v; want it refused", call, code, err)
+					}
+					if got := sanitizeErr(err); got == "sync wire error" {
+						t.Errorf("%s: last_error would read %q", call, got)
+					}
+				}
+			}
+			if code != http.StatusTemporaryRedirect && code != http.StatusPermanentRedirect && strings.Contains(log, "GET /moved") {
+				t.Fatalf("the %d write was repeated as a GET: %s", code, log)
+			}
+		})
+	}
+}

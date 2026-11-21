@@ -84,12 +84,26 @@ func (c *githubClient) send(req *http.Request) (*http.Response, error) {
 // The upgrade is refused before a byte of the hop is sent, and the error says
 // which setting to change (the API takes no http api_base; such a row was
 // written past handler.validateForge).
+//
+// A hop whose method differs from the first request's is refused too: net/http
+// repeats a POST or PATCH answered with 301, 302 or 303 as a GET of the
+// Location, without the body, and a GET of the moved issue answers 200 — the
+// write "succeeded" without happening, and the push leg advanced its base.
+// 307 and 308 keep method and body (GitHub's answer to a write on a renamed
+// repository) and stay followed.
 func checkRedirect(req *http.Request, via []*http.Request) error {
 	if err := httpx.SameOriginRedirect(req, via); err != nil {
 		return err
 	}
 	if httpx.OriginOf(req.URL) != httpx.OriginOf(via[0].URL) {
 		return errAPIBaseUpgrade // the one hop off the origin SameOriginRedirect follows
+	}
+	if req.Method != via[0].Method {
+		status := 0
+		if req.Response != nil {
+			status = req.Response.StatusCode
+		}
+		return &configError{fmt.Sprintf("forge: the forge answered a %s with redirect status %d, which would repeat it as a GET without its body; not followed (check forge.api_base, owner and repo)", via[0].Method, status)}
 	}
 	return nil
 }
