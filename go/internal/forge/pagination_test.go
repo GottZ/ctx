@@ -128,6 +128,26 @@ func TestPaginationUnparseableNextIsAnError(t *testing.T) {
 	}
 }
 
+// TestPaginationUnparseableWithoutNextEnds: a header that does not parse and
+// does not mention next — the word, not a part of one — names no next page;
+// the walk ends there without an error, as before.
+func TestPaginationUnparseableWithoutNextEnds(t *testing.T) {
+	spellings := map[string]func(next string) []string{
+		"no-closing-bracket": func(n string) []string { return lines(`<` + n + `; rel="last"`) },
+		"word-inside-host":   func(n string) []string { return lines(`<` + n + `&host=nextcloud.example; rel="last"`) },
+		"word-inside-path":   func(n string) []string { return lines(`<` + n + `&q=annexture; rel="last"`) },
+	}
+	for name, link := range spellings {
+		t.Run(name, func(t *testing.T) {
+			gh := newFakeGitHub(t, 2, link, fiveIssues()...)
+			got, err := walkIssues(t, gh)
+			if err != nil || fmt.Sprint(got) != "[1 2]" {
+				t.Fatalf("walk = %v, err %v; want the first page [1 2] without an error", got, err)
+			}
+		})
+	}
+}
+
 // TestPaginationResolvedTargetStaysOnOrigin: a relative target is resolved
 // against the page (RFC 8288 §3.1, RFC 3986 §5) and then held to the origin
 // rule of #459 like an absolute one — a network-path reference names another

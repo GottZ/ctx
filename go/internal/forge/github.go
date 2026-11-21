@@ -451,12 +451,12 @@ func issueNumberFromURL(u string) int64 {
 // the client asked for, by induction the origin of the api_base the first
 // page was built from. The next page is requested with the PAT, and its URL
 // is the response's choice, so a target on another origin is refused like a
-// redirect there (#459): GitHub paginates on api.github.com. A relative
-// target resolves against the URL that answered (RFC 8288 §3.1, RFC 3986
-// §5.1.3: after a redirect within the origin, the last one); an absolute one
-// is requested as the forge wrote it. GitHub docs: pagination MUST follow the
-// Link header, never a hand-built ?page= query. The target is not named in an
-// error (§5.4).
+// redirect there (#459): GitHub paginates on api.github.com. The target is
+// resolved against the URL that answered (RFC 8288 §3.1, RFC 3986 §5.1.3:
+// after a redirect within the origin, the last one), and the origin rule
+// judges the URL that is then requested — for GitHub's absolute targets the
+// string it wrote. GitHub docs: pagination MUST follow the Link header, never
+// a hand-built ?page= query. The target is not named in an error (§5.4).
 func nextOnOrigin(pageURL string, resp *http.Response) (string, error) {
 	target, err := nextTarget(resp.Header.Values("Link"))
 	if err != nil || target == "" {
@@ -477,9 +477,6 @@ func nextOnOrigin(pageURL string, resp *http.Response) (string, error) {
 	next := base.ResolveReference(ref)
 	if httpx.OriginOf(from) != httpx.OriginOf(next) {
 		return "", errNextOffOrigin
-	}
-	if ref.IsAbs() {
-		return target, nil
 	}
 	return next.String(), nil
 }

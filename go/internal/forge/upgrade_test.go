@@ -2,6 +2,7 @@ package forge
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -127,9 +128,12 @@ func TestForgeRefusesSchemeUpgrade(t *testing.T) {
 // the operator has to change reach last_error as they are; they consist of
 // fixed text and a status. Every other error stays reduced to its class.
 func TestSanitizeErrPassesOperatorErrors(t *testing.T) {
-	for _, err := range []error{errRedirectNotFollowed(http.StatusMovedPermanently)} {
+	for _, err := range []error{errRedirectNotFollowed(http.StatusMovedPermanently), errAPIBaseUpgrade, errNextOffOrigin, errLinkUnparseable} {
 		if got := sanitizeErr(err); got != err.Error() {
 			t.Errorf("sanitizeErr(%q) = %q; want the error itself", err, got)
 		}
+	}
+	if got := sanitizeErr(withoutURL("forge: request failed", errors.New("dial tcp: connection refused"))); got != "sync wire error" {
+		t.Errorf("a transport failure reads %q in last_error; want the class", got)
 	}
 }

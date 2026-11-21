@@ -136,3 +136,22 @@ func FuzzLinkHeader(f *testing.F) {
 		}
 	})
 }
+
+// TestNextOnOriginKeepsRealTargets: for the headers GitHub, Gitea, Forgejo
+// and GitLab sent, the next page is requested byte for byte as the forge
+// wrote it — the cursor and the encoded since of GitHub's issue listing
+// included.
+func TestNextOnOriginKeepsRealTargets(t *testing.T) {
+	for _, field := range linkSeeds[20:25] {
+		target, err := nextTarget([]string{field})
+		if err != nil || target == "" {
+			t.Fatalf("nextTarget(%q) = %q, %v", field, target, err)
+		}
+		page, _ := url.Parse(target)
+		resp := &http.Response{Header: http.Header{"Link": []string{field}}, Request: &http.Request{URL: page}}
+		next, err := nextOnOrigin(target, resp)
+		if err != nil || next != target {
+			t.Errorf("nextOnOrigin = %q, %v; want %q as written", next, err, target)
+		}
+	}
+}
