@@ -587,3 +587,192 @@ func TestPushInSyncAdvanceSeesARealEdit(t *testing.T) {
 	}
 	i452NoCandidates(t, pool, proj)
 }
+
+// TestPushAdvanceWaitsForAnUpdateBlockInFlight: the advance's FOR SHARE must
+// wait for a writer that holds the block row FOR NO KEY UPDATE (UpdateBlock,
+// the pull), not only for one that holds it FOR UPDATE (UpdateIssueBlock): a
+// FOR KEY SHARE would read past the uncommitted write and record the old
+// version as in sync.
+func TestPushAdvanceWaitsForAnUpdateBlockInFlight(t *testing.T) {
+	str := func(s string) *string { return &s }
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+	proj := enablePush(seedIFProject(t, pool, "i452pushnokey"))
+	issueID, _ := i452Pulled(t, pool, proj, false)
+	i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Title: str("Crane, renamed")})
+
+	held, hold := testdb.HoldCommitPool(t, dsn, func(sql string) bool {
+		return strings.Contains(sql, "UPDATE context_blocks SET")
+	})
+	const inFlight = "body written in flight by UpdateBlock"
+	updated := make(chan error, 1)
+	go func() {
+		_, _, err := store.UpdateBlock(ctx, held, issueID, store.UpdateBlockData{Content: str(inFlight)}, []string{proj.Scope})
+		updated <- err
+	}()
+	pid := hold.Wait(t)
+
+	spy := newPushSpy()
+	p := pusherWithRegistry(pool)
+	done := make(chan struct{})
+	var res PushResult
+	var perr error
+	go func() {
+		defer close(done)
+		res, perr = p.PushProject(ctx, proj, spy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow)
+	}()
+	testdb.WaitBlockedBy(t, pool, pid, done, "the push's advance", "")
+	hold.Release()
+	if err := <-updated; err != nil {
+		t.Fatalf("UpdateBlock: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(i452Wait):
+		t.Fatalf("the first push did not finish within %s", i452Wait)
+	}
+	if perr != nil || res.Pushed != 1 {
+		t.Fatalf("first push: pushed=%d err=%v, want 1", res.Pushed, perr)
+	}
+	res2, err := p.PushProject(ctx, proj, spy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow)
+	if err != nil || res2.Pushed != 1 || len(spy.patches) != 2 || spy.patches[1].Patch.Body == nil || *spy.patches[1].Patch.Body != inFlight {
+		t.Fatalf("second push: pushed=%d patches=%+v err=%v, want a PATCH of the body written in flight", res2.Pushed, spy.patches, err)
+	}
+	i452NoCandidates(t, pool, proj)
+}
+
+// i452RawBlock reads a block by id alone, archived or in any scope.
+func i452RawBlock(t *testing.T, pool *pgxpool.Pool, id string) (content, scope string, archived bool) {
+	t.Helper()
+	if err := pool.QueryRow(context.Background(),
+		`SELECT content, scope, is_archived FROM context_blocks WHERE id = $1::uuid`, id).Scan(&content, &scope, &archived); err != nil {
+		t.Fatal(err)
+	}
+	return content, scope, archived
+}
+
+// i452PullHeld runs one pull of issue #5 with body forgeBody on a pool whose
+// write transaction waits at its BEGIN; during the hold, between runs the read
+// and the write, it calls between.
+func i452PullHeld(t *testing.T, dsn string, proj store.ProjectRow, forgeBody string, between func()) ApplyResult {
+	t.Helper()
+	ctx := context.Background()
+	held, hold := i452HoldBeginPool(t, dsn)
+	a := applierWithRegistry(held)
+	type out struct {
+		res ApplyResult
+		err error
+	}
+	done := make(chan out, 1)
+	go func() {
+		r, err := a.ApplyIssues(ctx, proj, []IssueRemote{{Number: 5, Title: "Crane", Body: forgeBody, State: "open", UpdatedAt: time.Unix(3, 0).UTC()}})
+		done <- out{r, err}
+	}()
+	select {
+	case <-hold.entered:
+	case o := <-done:
+		t.Fatalf("the pull finished without a write transaction: %+v %v", o.res, o.err)
+	case <-time.After(i452Wait):
+		t.Fatalf("the pull did not reach its write within %s", i452Wait)
+	}
+	between()
+	close(hold.release)
+	select {
+	case o := <-done:
+		if o.err != nil {
+			t.Fatalf("pull: %v", o.err)
+		}
+		return o.res
+	case <-time.After(i452Wait):
+		t.Fatalf("the pull did not finish within %s", i452Wait)
+	}
+	return ApplyResult{}
+}
+
+// TestPullSkipsABlockThatLeftBetweenTheReadAndTheWrite: a block archived, or
+// moved out of the project's scope, after the pull read it is not written —
+// neither its text nor the mapping's base.
+func TestPullSkipsABlockThatLeftBetweenTheReadAndTheWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		leave func(t *testing.T, pool *pgxpool.Pool, proj store.ProjectRow, id string)
+	}{
+		{"archived", func(t *testing.T, pool *pgxpool.Pool, proj store.ProjectRow, id string) {
+			if _, err := store.DeleteBlock(context.Background(), pool, id, []string{proj.Scope}); err != nil {
+				t.Fatalf("archive: %v", err)
+			}
+		}},
+		{"moved to another scope", func(t *testing.T, pool *pgxpool.Pool, proj store.ProjectRow, id string) {
+			other := proj.Scope + "-elsewhere"
+			if _, _, err := store.UpdateBlock(context.Background(), pool, id, store.UpdateBlockData{Scope: &other}, []string{proj.Scope, other}); err != nil {
+				t.Fatalf("scope move: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, dsn := testdb.SetupTestDBWithDSN(t)
+			proj := seedIFProject(t, pool, "i452pullleft")
+			issueID, _ := i452Pulled(t, pool, proj, false)
+			baseBefore, _, _, _ := readMapping(t, pool, proj.ID, "issue", 5)
+
+			res := i452PullHeld(t, dsn, proj, "forge body, edited on the forge", func() { tc.leave(t, pool, proj, issueID) })
+
+			if content, scope, archived := i452RawBlock(t, pool, issueID); content != "forge body" {
+				t.Errorf("the pull wrote %q into a block that left (scope %s, archived %v)", content, scope, archived)
+			}
+			if base, conflict, _, _ := readMapping(t, pool, proj.ID, "issue", 5); base != baseBefore || conflict {
+				t.Errorf("mapping base moved (%v) or flagged (%v) for a block that left", base != baseBefore, conflict)
+			}
+			if res.Applied != 0 || res.Conflicts != 0 {
+				t.Errorf("pull result %+v, want nothing applied", res)
+			}
+		})
+	}
+}
+
+// TestPullDoesNotCountAFlaggedConflictAgain: the mapping is already flagged,
+// the block was brought back to the base, the pull reads "forge-ahead", and a
+// local edit moves the block again before the write. The re-decision lands on
+// the conflict the mapping already carries: no new conflict counted, no
+// write, synced_at untouched.
+func TestPullDoesNotCountAFlaggedConflictAgain(t *testing.T) {
+	str := func(s string) *string { return &s }
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+	proj := seedIFProject(t, pool, "i452pullflagged")
+	issueID, _ := i452Pulled(t, pool, proj, false)
+
+	// A real conflict: both sides moved.
+	i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Content: str("local v1")})
+	a := applierWithRegistry(pool)
+	if r, err := a.ApplyIssues(ctx, proj, []IssueRemote{{Number: 5, Title: "Crane", Body: "forge v1", State: "open", UpdatedAt: time.Unix(2, 0).UTC()}}); err != nil || r.Conflicts != 1 {
+		t.Fatalf("precondition: conflicts=%d err=%v, want the mapping flagged", r.Conflicts, err)
+	}
+	// The local side goes back to the base; the flag stays.
+	i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Content: str("forge body")})
+	var syncedBefore string
+	if err := pool.QueryRow(ctx, `SELECT synced_at::text FROM context_project_sync_map WHERE block_id = $1::uuid`, issueID).Scan(&syncedBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	res := i452PullHeld(t, dsn, proj, "forge v2", func() {
+		i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Content: str("local v2")})
+	})
+
+	if res.Conflicts != 0 || res.Applied != 0 {
+		t.Errorf("pull result %+v, want no new conflict and nothing applied", res)
+	}
+	var syncedAfter string
+	if err := pool.QueryRow(ctx, `SELECT synced_at::text FROM context_project_sync_map WHERE block_id = $1::uuid`, issueID).Scan(&syncedAfter); err != nil {
+		t.Fatal(err)
+	}
+	if syncedAfter != syncedBefore {
+		t.Errorf("the flagged mapping was written again: synced_at %s -> %s", syncedBefore, syncedAfter)
+	}
+	if _, conflict, _, _ := readMapping(t, pool, proj.ID, "issue", 5); !conflict {
+		t.Errorf("the conflict flag was cleared")
+	}
+	if b := getBlock(t, pool, proj.Scope, issueID); b.Content != "local v2" {
+		t.Errorf("block holds %q, want the local edit kept", b.Content)
+	}
+}

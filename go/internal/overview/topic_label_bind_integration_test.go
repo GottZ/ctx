@@ -125,6 +125,39 @@ func TestTopicLabelAnchor(t *testing.T) {
 		}
 	})
 
+	// The quiesce acknowledges the anchor without a model call, so its window
+	// is loadCore; the Floor callback runs at its end and is the seam.
+	t.Run("a rebuild persists a new core before the credentials quiesce", func(t *testing.T) {
+		pool := testdb.SetupTestDB(t)
+		const scope = "i452lbl4"
+		topic, second := i452Generations(t, pool, scope, "credentials")
+		calls, floors := 0, 0
+		chat := func(context.Context, topiclabel.Deps, backends.Sensitivity, string, string, []string) (string, string, error) {
+			calls++
+			return `{"label":"Harbour logistics"}`, "fake-model", nil
+		}
+		d := i452LabelDeps(pool, chat, true)
+		d.Floor = func(s backends.Sensitivity, _ string) backends.Sensitivity {
+			floors++
+			if floors == 1 {
+				w3Run(t, pool, scope, 45*24*time.Hour, second)
+			}
+			return s
+		}
+		ctx := context.Background()
+		topiclabel.Run(ctx, d, []string{scope})
+		if floors == 0 || calls != 0 {
+			t.Fatalf("precondition: floor calls %d, model calls %d; want the quiesce path", floors, calls)
+		}
+		i452AnchorOf(t, pool, topic).wantConsistent(t, "after the tick")
+
+		// The next tick acknowledges the core the topic holds now.
+		topiclabel.Run(ctx, d, []string{scope})
+		if a := i452AnchorOf(t, pool, topic); a.stale || a.anchor != a.nodeHash {
+			t.Errorf("next tick: state %+v, want the current core acknowledged", a)
+		}
+	})
+
 	for _, tc := range []struct {
 		name, sensitivity string
 		fallbackOnly      bool
