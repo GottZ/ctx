@@ -147,7 +147,7 @@ func TestRules_RangeEndsAfterItsStart(t *testing.T) {
 		"von Montag bis Freitag":        {"2026-11-23", "2026-11-27", "range"},
 		"von gestern bis übermorgen":    {"2026-11-20", "2026-11-23", "range"},
 		"seit morgen":                   {"2026-11-22", "", "future"}, // no window since a day to come, the day alone
-		"von morgen bis gestern":        {"2026-11-21", "2026-11-22", "range"},
+		"von morgen bis gestern":        {"2026-11-20", "2026-11-22", "range"},
 		"von April 2024 bis März 2024":  {"2024-03-01", "2024-04-01", "range"},
 		"von 2024-03-31 bis 2024-03-01": {"2024-03-01", "2024-03-31", "range"},
 		"2024-03-31 bis 2024-03-01":     {"2024-03-01", "2024-03-31", "range"},
@@ -186,4 +186,82 @@ func TestRules_MonthYearWithoutAPrepositionGoesToTheLLM(t *testing.T) {
 			t.Errorf("%q: no temporal intent, the LLM fallback would not run", q)
 		}
 	}
+}
+
+// TestRules_OverlappingDayDatesDoNotPanic: a dot date and an ISO date can
+// share their year ("29.03.2026-03-29"); both are day dates, as on the write
+// side, and the text between them is empty, not a negative slice.
+func TestRules_OverlappingDayDatesDoNotPanic(t *testing.T) {
+	for _, q := range []string{"Was war am 29.03.2026-03-29?", "2026-03-29.03.2026", "29.03.2026-03-29", "01.02.2026-03-04 bis 2026-05-06"} {
+		tr := NormalizeTemporalRules(q, now463)
+		if tr == nil || len(tr.Dates) == 0 {
+			t.Errorf("%q: no dates", q)
+		}
+	}
+}
+
+// FuzzNormalizeTemporalRules: no question makes the rules panic, and no
+// window they yield starts after it ends.
+func FuzzNormalizeTemporalRules(f *testing.F) {
+	for _, s := range []string{"29.03.2026-03-29", "seit 2024-03-15", "bis März 2015", "von Freitag bis Montag",
+		"2024-03-01 bis 2024-03-31", "gestern und vorgestern", "seit dem 15.03.2024", "letzten Freitag bis Montag"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, q string) {
+		tr := NormalizeTemporalRules(q, now463)
+		if tr == nil {
+			return
+		}
+		for _, d := range tr.Dates {
+			if d.End != nil && *d.End < d.Date {
+				t.Errorf("%q: window %s..%s starts after it ends", q, d.Date, *d.End)
+			}
+		}
+	})
+}
+
+// TestRules_ADayDateWhoseWindowFailsStaysADay: when "seit"/"bis" before a
+// day date yields no window, the date is the single day it was before #463,
+// not a question for the LLM fallback.
+func TestRules_ADayDateWhoseWindowFailsStaysADay(t *testing.T) {
+	checkRules(t, now463, map[string]wantDate{
+		"Was lief von Projektstart bis 2026-03-01?": {"2026-03-01", "", "past"},
+		"Von der Planung bis 01.03.2026":            {"2026-03-01", "", "past"},
+		"Was ist seit 2027-01-01 geplant?":          {"2027-01-01", "", "past"},
+	})
+}
+
+// TestRules_SeitBisTakeAnISODateWithItsTime: the phrase resolvers lowercase
+// their words; the ISO date with its T still reads.
+func TestRules_SeitBisTakeAnISODateWithItsTime(t *testing.T) {
+	checkRules(t, now463, map[string]wantDate{
+		"seit 2024-03-15T10:00":     {"2024-03-15", "2026-11-21", "range"},
+		"seit 2024-03-15T10:00:00Z": {"2024-03-15", "2026-11-21", "range"},
+		"bis 2024-03-15T10:00":      {"2024-03-15", "", "until"},
+		"am 2024-03-15T10:00":       {"2024-03-15", "", "past"},
+	})
+}
+
+// TestRules_RangeWordIsAWord: "to" inside a word between two day dates is
+// no range word ("Tomaten"); "bis zum" between them still is.
+func TestRules_RangeWordIsAWord(t *testing.T) {
+	tr := NormalizeTemporalRules("am 01.03.2024 bei den Tomaten und am 05.09.2024", now463)
+	if tr == nil || len(tr.Dates) != 2 || tr.Dates[0].End != nil {
+		t.Errorf("two days with a word holding \"to\" between them: %+v", tr)
+	}
+	checkRules(t, now463, map[string]wantDate{
+		"2024-03-01 bis zum 2024-03-31": {"2024-03-01", "2024-03-31", "range"},
+		"2024-03-01–2024-03-31":         {"2024-03-01", "2024-03-31", "range"},
+		"from 2024-03-01 to 2024-03-31": {"2024-03-01", "2024-03-31", "range"},
+	})
+}
+
+// TestRules_PastRangeEndsBeforeToday: in the past tense a range whose end
+// resolves before its start keeps the end and counts the start back from it
+// (the Friday before that Monday), so the span is one that has happened.
+func TestRules_PastRangeEndsBeforeToday(t *testing.T) {
+	checkRules(t, now463, map[string]wantDate{
+		"Was lief von Freitag bis Montag?":     {"2026-11-13", "2026-11-16", "range"},
+		"What happened friday through monday?": {"2026-11-13", "2026-11-16", "range"},
+	})
 }

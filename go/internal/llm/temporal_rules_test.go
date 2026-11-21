@@ -568,7 +568,7 @@ func TestMatchISODate_T08_MultiDate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := matchDayDates(tt.query)
+			result := matchDayDates(tt.query, true)
 			if result == nil {
 				t.Fatalf("matchDayDates(%q) returned nil", tt.query)
 			}
@@ -613,7 +613,7 @@ func TestMatchISODate_T08_NoMatch(t *testing.T) {
 	}
 	for _, q := range tests {
 		t.Run(q, func(t *testing.T) {
-			result := matchDayDates(q)
+			result := matchDayDates(q, true)
 			if result != nil {
 				t.Errorf("matchDayDates(%q) should return nil, got %+v", q, result.Dates)
 			}
