@@ -120,6 +120,13 @@ func TestMCPEveryWriteToolWritesItsLine(t *testing.T) {
 	}
 }
 
+// opaqueWrap wraps err without formatting it (a zero pgconn.ConnectError has
+// no config to print).
+type opaqueWrap struct{ err error }
+
+func (w opaqueWrap) Error() string { return "stage: failed" }
+func (w opaqueWrap) Unwrap() error { return w.err }
+
 // TestStatementOutcome — what a failed write without a labeled commit states.
 func TestStatementOutcome(t *testing.T) {
 	for _, tc := range []struct {
@@ -132,6 +139,8 @@ func TestStatementOutcome(t *testing.T) {
 		{"never sent", fmt.Errorf("stage: %w", safeToRetryErr{}), writeRolledBack},
 		{"sent, no answer", fmt.Errorf("stage: %w", errors.New("read tcp: connection reset by peer")), writeUnknown},
 		{"sent, cancelled", fmt.Errorf("stage: %w", context.Canceled), writeUnknown},
+		{"the commit was refused (unlabeled bracket)", fmt.Errorf("issue: %w", pgx.ErrTxCommitRollback), writeRolledBack},
+		{"no connection to the database", opaqueWrap{&pgconn.ConnectError{}}, writeRolledBack},
 	} {
 		if got := statementOutcome(tc.err); got != tc.want {
 			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)

@@ -103,7 +103,10 @@ func mcpGuardResolveHandler(cfg MCPConfig) mcp.ToolHandlerFor[guardResolveInput,
 
 		noteToolCount(ctx, len(input.IDs))
 		resolved, skipped, err := store.GuardResolveBatch(ctx, cfg.Pool, input.IDs, input.Resolution, writableBlockScopes(ar))
-		noteToolWrite(ctx, err)
+		if err != nil || len(resolved) > 0 {
+			// Every id skipped wrote nothing: the line keeps none.
+			noteToolWrite(ctx, err)
+		}
 		if err != nil {
 			logRequestError(ctx, "mcp: guard_resolve error", "error", err, "write_outcome", writeOutcome(err))
 			return errResult("guard_resolve failed: internal error"), nil, nil

@@ -8,10 +8,16 @@ package handler
 // a staged card, and requires its failure branch — the statements after the
 // call up to the `if err != nil` that handles it — to carry the
 // "write_outcome" key, directly or in a function of this package it calls
-// there. A call whose error is returned to the caller is the caller's to
-// name (a core both transports share). The paths below do not name it yet;
-// a new write path that does not fails this test. Name the outcome on its
-// line; a removed or named path lowers the count.
+// there. The paths below do not name it yet; a new direct write call that
+// does not fails this test. Name the outcome on its line; a removed or named
+// path lowers the count.
+//
+// Limits: a call whose error is returned to the caller (`return store.F(…)`,
+// a core both transports share) is counted, not followed — its callers name
+// the outcome or not (the REST issue writes do not yet; the MCP issue tools
+// do); the census sees the key, not which helper fills it (writeOutcome on an
+// unlabeled bracket would pass); and it knows only the store functions in
+// storeWrites.
 
 import (
 	"go/ast"

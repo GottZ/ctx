@@ -8,7 +8,8 @@ package handler
 // the store tool registered bare, mcp.AddTool without addMCPTool — without
 // it, alternating, on one database. The log goes to a JSON handler on
 // io.Discard: the formatting is paid, the sink is free. The line must not add
-// a statement: both variants send the same number per call.
+// a statement: both variants send the same number per call. The time per call
+// is logged; the wrapper alone is BenchmarkToolWriteLine.
 //
 //	go test -tags=integration ./internal/handler/ -run TestMCPStoreCallCost -count=1 -v
 
@@ -90,28 +91,30 @@ func TestMCPStoreCallCost(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	type sample struct{ ns, stmts, allocs float64 }
+	// A fixed number of calls per variant and round: the test runs in every
+	// integration run, so it measures a few dozen writes, not a benchmark's
+	// second per variant.
+	const rounds, calls = 3, 30
+	type sample struct{ ns, stmts float64 }
 	measure := func(url, variant string, round int) sample {
-		var stmts int64
-		res := testing.Benchmark(func(b *testing.B) {
-			b.ReportAllocs()
-			before := counter.n.Load()
-			for i := range b.N {
-				storeCall(t, url, plain, fmt.Sprintf("i453 bench %s %d %d %d", variant, round, b.N, i))
-			}
-			stmts = counter.n.Load() - before
-		})
-		return sample{ns: float64(res.NsPerOp()), stmts: float64(stmts) / float64(res.N), allocs: float64(res.AllocsPerOp())}
+		before, start := counter.n.Load(), time.Now()
+		for i := range calls {
+			storeCall(t, url, plain, fmt.Sprintf("i453 bench %s %d %d", variant, round, i))
+		}
+		return sample{ns: float64(time.Since(start).Nanoseconds()) / calls, stmts: float64(counter.n.Load()-before) / calls}
 	}
-	const rounds = 5
+	// Warm up both chains first: a connection the pool opens runs its own
+	// setup statements (AfterConnect), which would land in one round.
+	measure(withLine, "warm-line", -1)
+	measure(bare, "warm-bare", -1)
 	var a, z [rounds]sample
 	for r := range rounds {
 		a[r] = measure(withLine, "line", r)
 		z[r] = measure(bare, "bare", r)
 	}
 	for r := range rounds {
-		t.Logf("round %d: with line %.0f ns/op %.2f stmts/op %.0f allocs/op | bare %.0f ns/op %.2f stmts/op %.0f allocs/op",
-			r, a[r].ns, a[r].stmts, a[r].allocs, z[r].ns, z[r].stmts, z[r].allocs)
+		t.Logf("round %d: with line %.0f ns/call %.2f stmts/call | bare %.0f ns/call %.2f stmts/call",
+			r, a[r].ns, a[r].stmts, z[r].ns, z[r].stmts)
 		if a[r].stmts != z[r].stmts {
 			t.Errorf("round %d: %.2f statements per call with the line, %.2f without — the line must not add a database round trip", r, a[r].stmts, z[r].stmts)
 		}

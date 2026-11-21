@@ -535,3 +535,48 @@ func TestMCPWriteLineEveryWriteToolCommits(t *testing.T) {
 		}
 	})
 }
+
+// TestMCPWriteLineReviewFixes — the line names only ids the database
+// resolved (an argument that is no id never reaches it), and a call that
+// changed nothing says none on every tool.
+func TestMCPWriteLineReviewFixes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := newMCPLineFixture(t)
+	call := func(t *testing.T, tool string, args map[string]any) rejectLogRecord {
+		t.Helper()
+		logs := installRejectLogCapture(t)
+		url, done := f.serve(t, nil, nil)
+		callTool(t, url, f.plain, tool, args)
+		waitDone(t, done)
+		return toolLine(t, logs)
+	}
+	url, done := f.serve(t, nil, nil)
+	callTool(t, url, f.plain, "store", storeArgs("i453 review target", "target"))
+	waitDone(t, done)
+	target := blockIDByTitle(t, f.pool, "i453 review target")
+
+	t.Run("blob_link with an argument that is no id", func(t *testing.T) {
+		raw := "not-a-uuid " + strings.Repeat("A", 200)
+		line := call(t, "blob_link", map[string]any{"id": raw, "context_block_id": target})
+		if line.attrs["blob_id"] != nil || strings.Contains(line.text(), raw) {
+			t.Errorf("tool line %+v carries the client's argument", line.attrs)
+		}
+		if line.attrs["write_outcome"] != writeNone {
+			t.Errorf("tool line %+v, want write_outcome=none", line.attrs)
+		}
+	})
+	t.Run("store_batch whose items are all unchanged", func(t *testing.T) {
+		line := call(t, "store_batch", map[string]any{"items": []map[string]any{storeArgs("i453 review target", "target")}})
+		if line.attrs["write_outcome"] != writeNone {
+			t.Errorf("tool line %+v, want write_outcome=none (nothing was written)", line.attrs)
+		}
+	})
+	t.Run("guard_resolve whose ids are all skipped", func(t *testing.T) {
+		line := call(t, "guard_resolve", map[string]any{"ids": []string{target}, "resolution": "keep"})
+		if line.attrs["write_outcome"] != writeNone {
+			t.Errorf("tool line %+v, want write_outcome=none (the block is not flagged, nothing was written)", line.attrs)
+		}
+	})
+}

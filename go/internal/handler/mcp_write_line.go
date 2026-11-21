@@ -185,14 +185,22 @@ func withToolWriteLine[In any](name string, h mcp.ToolHandlerFor[In, any]) mcp.T
 // recognisable (writeOutcome needs a labeled bracket): one statement outside
 // a transaction (it commits on its own), or a bracket without a commit label
 // (the issue writes). Rolled back when the database answered with an error
-// (a statement or the COMMIT refused), the statement found no row to write,
-// or nothing left (pgconn.SafeToRetry); unknown otherwise — it was sent and
-// its answer never came, or came and could not be read, and the database may
-// have committed it. An error of the caller's own between two statements of
-// an unlabeled bracket also reads unknown: the claim stays on the safe side.
+// (a statement or the COMMIT refused — pgx.ErrTxCommitRollback for a
+// transaction that had failed), the statement found no row to write, no
+// connection was made (pgconn.ConnectError), or nothing left
+// (pgconn.SafeToRetry); unknown otherwise — it was sent and its answer never
+// came, or came and could not be read, and the database may have committed
+// it. What cannot be told apart from that stays unknown, the safe side: a
+// context that ended before the pool handed out a connection (pgx reports
+// the bare cancellation), a closed pool, an error of the caller's own between
+// two statements of an unlabeled bracket.
 func statementOutcome(err error) string {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) || errors.Is(err, pgx.ErrNoRows) || pgconn.SafeToRetry(err) {
+	var (
+		pgErr      *pgconn.PgError
+		connectErr *pgconn.ConnectError
+	)
+	if errors.As(err, &pgErr) || errors.As(err, &connectErr) || errors.Is(err, pgx.ErrNoRows) ||
+		errors.Is(err, pgx.ErrTxCommitRollback) || pgconn.SafeToRetry(err) {
 		return writeRolledBack
 	}
 	return writeUnknown

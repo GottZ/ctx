@@ -98,8 +98,10 @@ func runStoreBatch(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, 
 	if err != nil {
 		return nil, storeBatchFailureReject(ctx, err, reqID)
 	}
-	noteToolWrite(ctx, nil)
 	out := storeBatchOutcome(results)
+	if batchWrote(out) {
+		noteToolWrite(ctx, nil)
+	}
 	// The blocks and their booking are committed: the afterwork must not stop
 	// halfway because the client went away, and one bound ends all of it
 	// (followUpContext, issue #453) — not one per block, so a shutdown's
@@ -468,4 +470,15 @@ func finishStoredBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.S
 	if _, err := store.RefreshTemporal(ctx, pool, b.ID, b.Content, b.CreatedAt); err != nil {
 		logRequestError(ctx, "store batch: temporal refresh failed", "error", err, "block_id", b.ID, "request_id", reqID)
 	}
+}
+
+// batchWrote reports whether a batch wrote a block: a batch whose items all
+// matched what is stored committed nothing (the write tool's line says none).
+func batchWrote(items []storeBatchItem) bool {
+	for _, it := range items {
+		if it.Block != nil {
+			return true
+		}
+	}
+	return false
 }

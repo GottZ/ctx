@@ -241,7 +241,6 @@ func mcpBlobLinkHandler(cfg MCPConfig) mcp.ToolHandlerFor[blobLinkInput, any] {
 			return errResultReject(rej), nil, nil
 		}
 
-		noteToolBlob(ctx, input.ID)
 		blob, err := store.UpdateBlobBlockRef(ctx, cfg.Pool, input.ID, input.ContextBlockID, writableBlockScopes(ar))
 		if err != nil {
 			noteToolStatement(ctx, err)
@@ -251,7 +250,9 @@ func mcpBlobLinkHandler(cfg MCPConfig) mcp.ToolHandlerFor[blobLinkInput, any] {
 		if blob == nil {
 			return errResultReject(classConstraint.reject(blobLinkNotFoundMsg)), nil, nil
 		}
+		// The id the database matched, never the argument as sent.
 		noteToolWrite(ctx, nil)
+		noteToolBlob(ctx, blob.ID)
 
 		// Same attribution as a payload write (fire-and-forget): the booked row
 		// names the blob it paid for, or the audit trail loses the reference.

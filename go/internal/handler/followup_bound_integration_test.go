@@ -839,3 +839,52 @@ func TestFollowupBoundGamingReload(t *testing.T) {
 		}
 	}
 }
+
+// TestFollowupBoundGamingReloadsShareOneBound — the eject/gaming toggle runs
+// two reloads after its commit, the backend pool's and the settings'; one
+// followUpTimeout bounds both, so the pair stays inside the shutdown's drain
+// (two bounds of 10 s would be 20 s against its 15 s). The backend reload is
+// held on a table lock until it waits; the settings reload must then see a
+// deadline that began before the lock went away.
+func TestFollowupBoundGamingReloadsShareOneBound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	cfgStore := fbEnvConfig(t, pool)
+	bp := backends.NewPool(pool, nil)
+	if err := bp.Reload(context.Background()); err != nil {
+		t.Fatalf("pool reload: %v", err)
+	}
+	var lockRelease func()
+	prev := beforeGamingCommit
+	beforeGamingCommit = func() error {
+		lockRelease = lockedTx(t, pool, `LOCK TABLE context_backends IN ACCESS EXCLUSIVE MODE`)
+		return nil
+	}
+	t.Cleanup(func() { beforeGamingCommit = prev })
+	deadlines := make(chan time.Time, 1)
+	reload := func(ctx context.Context) error {
+		dl, _ := ctx.Deadline()
+		deadlines <- dl
+		return nil
+	}
+	h := NewManageHandler(pool, cfgStore, nil, bp, nil, reload, nil, nil)
+	installRejectLogCapture(t)
+	srv, done, _ := fbServer(t, fbAs(fbAdmin(t, pool), http.HandlerFunc(h.HandleManage)))
+	q := fbSend(t, http.MethodPost, srv.URL+"/api/manage", "", `{"action":"gaming-mode","data":{"mode":"on"}}`)
+	waitLockWaiters(t, pool, 1)
+	released := time.Now()
+	lockRelease()
+	var dl time.Time
+	select {
+	case dl = <-deadlines:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the settings reload never ran")
+	}
+	waitDone(t, done)
+	_ = q
+	if dl.IsZero() || !dl.Before(released.Add(followUpTimeout)) {
+		t.Errorf("the settings reload's deadline %v began after the backend reload ended (lock released %v): two bounds of %v, not one", dl, released, followUpTimeout)
+	}
+}

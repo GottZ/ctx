@@ -259,7 +259,9 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 func noteConfirmOutcome(ctx context.Context, out confirmOutcome) {
 	switch out.Kind {
 	case confirmOK:
-		noteToolWrite(ctx, nil)
+		if out.Op != store.OpStoreBatch || batchWrote(out.Batch) {
+			noteToolWrite(ctx, nil)
+		}
 	case confirmExecErr:
 		if out.Op == store.OpBlobStore || out.Op == store.OpBlobLink {
 			noteToolStatement(ctx, out.Err)
