@@ -175,6 +175,56 @@ func TestKeyRefusalNamesTargetAndRule(t *testing.T) {
 	}
 }
 
+// TestKeyRefusalTextOfTheCLI pins the CLI's refusal byte for byte, as Post
+// surfaces it: the wording names the ctx CLI and CTX_BASE_URL, and the advice
+// of an upgrade keeps the path of CTX_BASE_URL.
+func TestKeyRefusalTextOfTheCLI(t *testing.T) {
+	second := newSecondHost(t)
+	home := redirectingServer(t, second.srv.URL, http.StatusFound)
+	_, err := NewClient(Config{BaseURL: home.URL + "/ctx", Key: keyOriginFixtureKey}).Post("query", map[string]any{"query": "q"})
+	want := "request to " + home.URL + "/ctx/api/query: Post \"" + second.srv.URL + "/ctx/api/query\": refused a redirect (HTTP 302) to " + second.srv.URL +
+		": the ctx CLI sends its API key only to the origin of CTX_BASE_URL, " + home.URL + ", and follows a redirect only within it"
+	if err == nil || err.Error() != want {
+		t.Errorf("err = %v\nwant  %s", err, want)
+	}
+
+	up, _ := upgradingServer(t)
+	_, _, err = NewClient(Config{BaseURL: up.URL + "/ctx/", Key: keyOriginFixtureKey}).Do(http.MethodGet, "/api/whoami", nil)
+	https := "https://" + strings.TrimPrefix(up.URL, "http://")
+	want = "request to " + up.URL + "/ctx/api/whoami: Get \"" + https + "/ctx/api/whoami\": refused a redirect (HTTP 301) to " + https +
+		": the ctx CLI sends its API key only to the origin of CTX_BASE_URL, " + up.URL +
+		", and follows a redirect only within it; set CTX_BASE_URL to " + https + "/ctx/ if that is the server's address"
+	if err == nil || err.Error() != want {
+		t.Errorf("err = %v\nwant  %s", err, want)
+	}
+}
+
+// TestKeyRefusalOfAURLWithoutSchemeOrPort: Client.Get takes a whole URL, and
+// one without a scheme (protocol-relative) or without a port the scheme fills
+// in is named as written — //host:port, ftp://host — not with an empty scheme
+// or a dangling colon.
+func TestKeyRefusalOfAURLWithoutSchemeOrPort(t *testing.T) {
+	home := newSecondHost(t)
+	c := NewClient(Config{BaseURL: home.srv.URL, Key: keyOriginFixtureKey})
+	hostPort := strings.TrimPrefix(home.srv.URL, "http://")
+	for _, tc := range []struct{ to, named string }{
+		{"//" + hostPort + "/health", "//" + hostPort},
+		{"//ctx.example/health", "//ctx.example"},
+		{"//[::1]/health", "//[::1]"},
+		{"ftp://ctx.example/health", "ftp://ctx.example"},
+	} {
+		_, err := c.Get(tc.to)
+		want := "request to " + tc.to + ": refused a request to " + tc.named +
+			": the ctx CLI sends its API key only to the origin of CTX_BASE_URL, " + home.srv.URL + ", and follows a redirect only within it"
+		if err == nil || err.Error() != want {
+			t.Errorf("Get(%q): err = %v\nwant  %s", tc.to, err, want)
+		}
+	}
+	if n := home.requests.Load(); n != 0 {
+		t.Errorf("the configured server got %d requests", n)
+	}
+}
+
 // TestKeyRefusalOfASchemeChangeSaysWhatToSet: an http→https redirect on the
 // same host is the common benign case (a proxy upgrading the connection). The
 // key already crossed the wire in clear text on the first hop, so it is not

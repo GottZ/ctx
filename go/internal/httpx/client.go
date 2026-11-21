@@ -102,9 +102,10 @@ func sameOriginRedirect(req *http.Request, via []*http.Request) error {
 // Origin is the (scheme, host, port) triple of a URL: scheme and host
 // lowercased in the ASCII range only, the scheme's default port filled in.
 // Userinfo, path and query are not part of it. Two URLs are the same origin
-// exactly when their Origin values are equal (==). Exported for the CLI, which
-// binds its API key to the origin of CTX_BASE_URL with this definition (#413);
-// the http→https upgrade SameOrigin allows for the backend pools is a rule of
+// exactly when their Origin values are equal (==). Exported for
+// internal/clientkey, which binds the API key of the CLI and of ctx-armsweep
+// to the origin of their base URL with this definition (#413, #423); the
+// http→https upgrade SameOrigin allows for the backend pools is a rule of
 // those pools, not part of the triple.
 type Origin struct{ Scheme, Host, Port string }
 
@@ -148,8 +149,8 @@ func asciiLower(s string) string {
 // 80→443 or the same explicit port. Host names compare as strings (ASCII
 // case aside) — a subdomain, a trailing dot, a non-ASCII spelling or an IP
 // literal for the same name is another origin (the refusal is the safe side
-// of every such ambiguity). The CLI does not follow the upgrade with its key;
-// it reads the relation to advise the CTX_BASE_URL to set (#413).
+// of every such ambiguity). internal/clientkey does not follow the upgrade
+// with a key; it reads the relation to advise the base URL to set (#413).
 func SameOrigin(from, to Origin) bool {
 	if from.Host != to.Host {
 		return false

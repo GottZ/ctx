@@ -8,10 +8,16 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/GottZ/ctx/internal/clientkey"
 )
 
 // maxResponseSize is the maximum number of bytes read from API responses (10 MB).
 const maxResponseSize = 10 * 1024 * 1024
+
+// keyNames are the words the refusal of a keyed request uses for the CLI
+// (clientkey.Refusal).
+var keyNames = clientkey.Names{Client: "the ctx CLI", BaseURL: "CTX_BASE_URL"}
 
 // Client is the HTTP client for the context store API.
 type Client struct {
@@ -33,7 +39,7 @@ type Client struct {
 // budget. Transport stays nil = http.DefaultTransport, which is what all four
 // hand-written constructions used — so proxy resolution (ProxyFromEnvironment)
 // and HTTP/2 negotiation are unchanged. The key is not part of it: Client.send
-// attaches it per keyed request (keyTransport).
+// attaches it per keyed request (clientkey.Transport).
 //
 // The response cap is NOT a field of http.Client: it belongs to whoever reads
 // the body. Client carries it (maxResponse), and postIngest — which streams its
@@ -74,26 +80,20 @@ func (c *Client) withTimeout(d time.Duration) *Client {
 }
 
 // send is how every keyed request of a Client leaves the CLI (#413): the
-// request gets the key from keyTransport only on the origin of BaseURL, and
-// goes out through c.HTTPClient — its budget, its own transport — with
-// keyTransport's checkRedirect, so every redirect hop is held to the same
-// origin and carries the key only there. The rule is applied per call rather
-// than at construction, so a Client assembled as a literal holds it too.
+// request gets the key from clientkey.Transport only on the origin of
+// BaseURL, and goes out through c.HTTPClient — its budget, its own transport —
+// with every redirect hop held to the same origin, carrying the key only
+// there. The rule is applied per call rather than at construction, so a Client
+// assembled as a literal holds it too.
 func (c *Client) send(req *http.Request) (*http.Response, error) {
-	kt, err := newKeyTransport(c.BaseURL, c.Key, nil)
+	kt, err := clientkey.New(c.BaseURL, c.Key, nil, keyNames)
 	if err != nil {
 		if req.Body != nil {
 			_ = req.Body.Close()
 		}
 		return nil, fmt.Errorf("CTX_BASE_URL is not a usable URL: %w", err)
 	}
-	signed, err := kt.signed(req)
-	if err != nil {
-		return nil, err
-	}
-	hc := *c.HTTPClient
-	hc.CheckRedirect = kt.checkRedirect
-	return hc.Do(signed)
+	return kt.Do(c.HTTPClient, req)
 }
 
 // readLimit is the byte cap this client applies to a response body.
