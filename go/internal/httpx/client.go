@@ -87,7 +87,9 @@ const maxRedirects = 10
 // Exported for the server's other clients that carry a credential to a host
 // an operator or a tenant configured (#459): the forge client (the project's
 // token, issue text), the GitHub userinfo calls of SSO (the user's access
-// token), and endpoint discovery and backend-test against an operator row
+// token), the OIDC discovery and JWKS fetches of SSO (they name where the
+// code, verifier and client secret go and which ID token is valid), and
+// endpoint discovery and backend-test against an operator row
 // (the row's key and extra_headers — the request its chat wire sends, so the
 // same rule). Each of them sees the 3xx of a refused hop and fails the call.
 func SameOriginRedirect(req *http.Request, via []*http.Request) error {

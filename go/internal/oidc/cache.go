@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+
+	"github.com/GottZ/ctx/internal/httpx"
 )
 
 // Default TTLs and timeout — single source, callers pass empty Options
@@ -173,16 +175,32 @@ func (c *Cache) store(key string, body []byte, ttl time.Duration) {
 // fetch performs the actual HTTP GET. Non-200 → error, no cache insert
 // (negative caching is deliberately off). The body is hard-capped at
 // maxFetchBytes — an oversized response is a reject, not a truncate.
+//
+// A redirect is followed only within the origin of the requested URL
+// (httpx.SameOriginRedirect, #459): the discovery document names where the
+// token request sends the code, the PKCE verifier and the client secret, and
+// the JWKS decides which ID token is valid. The discovery URL is the issuer
+// plus a path, so its document comes from the issuer's origin; the jwks_uri
+// may lie on another origin (it is named by that document), and its keys
+// come from there. The rule is set per request on a copy, so it holds for
+// any client the cache is given.
 func (c *Cache) fetch(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("oidc: build request for %s: %w", url, err)
 	}
-	resp, err := c.client.Do(req)
+	client := *c.client
+	client.CheckRedirect = httpx.SameOriginRedirect
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("oidc: fetch %s: %w", url, err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		// A redirect not followed. Its body typically repeats the Location,
+		// which the redirect rule keeps out of logs.
+		return nil, fmt.Errorf("oidc: fetch %s returned %d (a redirect, not followed)", url, resp.StatusCode)
+	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBytes+1))
 	if err != nil {
