@@ -2,11 +2,16 @@ package store
 
 import (
 	"math/rand/v2"
+	"reflect"
+	"regexp"
+	"regexp/syntax"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Differential tests of ExtractDates against extractDatesRef, the frozen
@@ -82,15 +87,34 @@ func datesSeedCorpus() []string {
 	return seeds
 }
 
-// assertSameDates fails t when ExtractDates and the frozen reference disagree
-// on content.
-func assertSameDates(t testing.TB, content string) {
+// assertMatchesReference fails t when ExtractDates and the frozen reference
+// disagree on content, or when the scanner's matches of one date form differ
+// from what the form's reference expression finds (offsets of the match and
+// of every group, FindAllStringSubmatchIndex). The second check sees a
+// difference the deduplication and sorting of ExtractDates would hide.
+func assertMatchesReference(t testing.TB, content string) {
 	t.Helper()
 	got := ExtractDates(content)
 	want := extractDatesRef(content)
 	if (got == nil) != (want == nil) || !slices.Equal(got, want) {
 		t.Fatalf("ExtractDates differs from the reference for %s:\n got %s\nwant %s",
 			quoteHead(content), formatTimes(got), formatTimes(want))
+	}
+	sc := scanDates(content)
+	for _, form := range []struct {
+		name string
+		got  [][]int
+		re   *regexp.Regexp
+	}{
+		{"iso", sc.iso, refISODateExtract},
+		{"dot", sc.dot, refDotDateExtract},
+		{"de", sc.de, refDEMonthYearExtract},
+		{"en", sc.en, refENMonthYearExtract},
+	} {
+		if want := form.re.FindAllStringSubmatchIndex(content, -1); !reflect.DeepEqual(form.got, want) {
+			t.Fatalf("%s matches differ from the reference for %s:\n got %v\nwant %v",
+				form.name, quoteHead(content), form.got, want)
+		}
 	}
 }
 
@@ -115,7 +139,7 @@ func formatTimes(ts []time.Time) string {
 
 func TestExtractDates_MatchesReference_SeedCorpus(t *testing.T) {
 	for _, s := range datesSeedCorpus() {
-		assertSameDates(t, s)
+		assertMatchesReference(t, s)
 	}
 }
 
@@ -126,10 +150,10 @@ func TestExtractDates_MatchesReference_RealShapedTexts(t *testing.T) {
 	for _, dense := range []bool{false, true} {
 		for _, n := range []int{2 << 10, 20 << 10, 50 << 10} {
 			for seed := uint64(1); seed <= 4; seed++ {
-				assertSameDates(t, datesDoc(seed, n, dense))
+				assertMatchesReference(t, datesDoc(seed, n, dense))
 			}
 		}
-		assertSameDates(t, datesDoc(1, 400<<10, dense))
+		assertMatchesReference(t, datesDoc(1, 400<<10, dense))
 	}
 }
 
@@ -141,10 +165,10 @@ func TestExtractDates_MatchesReference_RealShapedTexts(t *testing.T) {
 func TestExtractDates_MatchesReference_TrickyTexts(t *testing.T) {
 	r := rand.New(rand.NewPCG(434, 1))
 	for range 6000 {
-		assertSameDates(t, trickyDoc(r, 1+r.IntN(40)))
+		assertMatchesReference(t, trickyDoc(r, 1+r.IntN(40)))
 	}
 	for range 150 {
-		assertSameDates(t, trickyDoc(r, 200+r.IntN(800)))
+		assertMatchesReference(t, trickyDoc(r, 200+r.IntN(800)))
 	}
 }
 
@@ -158,8 +182,122 @@ func FuzzExtractDates(f *testing.F) {
 	}
 	f.Add(datesDoc(7, 2<<10, true))
 	f.Fuzz(func(t *testing.T, content string) {
-		assertSameDates(t, content)
+		assertMatchesReference(t, content)
 	})
+}
+
+// TestMonthPatterns_FoldLikeRegexp checks the month tables of the scanner
+// against the alternations of the reference expressions: the same
+// alternatives in the same order, and at every position exactly the runes the
+// compiled (?i) atom of the expression matches, over all of Unicode.
+func TestMonthPatterns_FoldLikeRegexp(t *testing.T) {
+	matchers := map[string][]rune{}
+	for _, form := range []struct {
+		re       *regexp.Regexp
+		patterns []monthPattern
+	}{{refDEMonthYearExtract, deMonthPatterns}, {refENMonthYearExtract, enMonthPatterns}} {
+		src := form.re.String()
+		alts := strings.Split(src[strings.Index(src, `\b(`)+3:strings.Index(src, `)\s+`)], "|")
+		if len(alts) != len(form.patterns) {
+			t.Fatalf("%d alternatives in %s, %d month patterns", len(alts), src, len(form.patterns))
+		}
+		for i, alt := range alts {
+			atoms := regexpAtoms(alt)
+			if len(atoms) != len(form.patterns[i]) {
+				t.Fatalf("alternative %q has %d atoms, pattern %d has %d positions", alt, len(atoms), i, len(form.patterns[i]))
+			}
+			for j, atom := range atoms {
+				want, ok := matchers[atom]
+				if !ok {
+					want = runesMatchedBy(t, "(?i)"+atom)
+					matchers[atom] = want
+				}
+				got := slices.Clone(form.patterns[i][j])
+				slices.Sort(got)
+				if !slices.Equal(got, want) {
+					t.Errorf("alternative %q position %d (%s): pattern runes %q, regexp matches %q", alt, j, atom, got, want)
+				}
+			}
+		}
+	}
+}
+
+// regexpAtoms splits a month alternative of the reference expressions into
+// its atoms: single letters and bracket classes.
+func regexpAtoms(alt string) []string {
+	var atoms []string
+	for i := 0; i < len(alt); {
+		if alt[i] == '[' {
+			j := strings.IndexByte(alt[i:], ']')
+			atoms = append(atoms, alt[i:i+j+1])
+			i += j + 1
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(alt[i:])
+		atoms = append(atoms, alt[i:i+size])
+		i += size
+	}
+	return atoms
+}
+
+// runesMatchedBy returns, sorted, every rune the single rune instruction of
+// the compiled expression matches.
+func runesMatchedBy(t *testing.T, expr string) []rune {
+	t.Helper()
+	re, err := syntax.Parse(expr, syntax.Perl)
+	if err != nil {
+		t.Fatalf("parse %s: %v", expr, err)
+	}
+	prog, err := syntax.Compile(re.Simplify())
+	if err != nil {
+		t.Fatalf("compile %s: %v", expr, err)
+	}
+	var inst *syntax.Inst
+	for i := range prog.Inst {
+		switch prog.Inst[i].Op {
+		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
+			if inst != nil {
+				t.Fatalf("%s compiles to more than one rune instruction", expr)
+			}
+			inst = &prog.Inst[i]
+		}
+	}
+	if inst == nil {
+		t.Fatalf("%s compiles to no rune instruction", expr)
+	}
+	var out []rune
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if inst.MatchRune(r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// TestMonthPatterns_NoAlternativeEndsAnother pins the assumption of
+// matchMonthYear: no alternative of a month form can match the end of
+// another one, so matching backwards from the end of the month name finds at
+// most one alternative, the one the regexp's leftmost-first search finds.
+func TestMonthPatterns_NoAlternativeEndsAnother(t *testing.T) {
+	for _, patterns := range [][]monthPattern{deMonthPatterns, enMonthPatterns} {
+		for i, a := range patterns {
+			for j, b := range patterns {
+				if i == j || len(b) > len(a) {
+					continue
+				}
+				overlap := true
+				for k := range b {
+					if !slices.ContainsFunc(b[k], func(r rune) bool { return slices.Contains(a[len(a)-len(b)+k], r) }) {
+						overlap = false
+						break
+					}
+				}
+				if overlap {
+					t.Errorf("month pattern %d can match the end of month pattern %d", j, i)
+				}
+			}
+		}
+	}
 }
 
 // Generators of the differential and benchmark corpora.
