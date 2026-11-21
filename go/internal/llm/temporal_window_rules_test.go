@@ -368,3 +368,24 @@ func TestRules_ADeferredDayDateIsAWindowEdgeOrTheDay(t *testing.T) {
 		"bis 2026-12-31":                                                  {"2026-11-21", "2026-12-31", "range"},
 	})
 }
+
+// TestRules_ADayDateAfterVonStartsAWindowWithAFixedEnd: "von 2026-03-01 bis
+// heute" is the window the doc promises for "von X bis Y". A weekday or
+// month end after a day date stays the day: it could count from today
+// ("bis Freitag") or from the start ("bis Ende März"), and the rules do not
+// guess which (Runde 1 of #469, L3).
+func TestRules_ADayDateAfterVonStartsAWindowWithAFixedEnd(t *testing.T) {
+	checkRules(t, now463, map[string]wantDate{
+		"von 2026-03-01 bis heute":            {"2026-03-01", "2026-11-21", "range"},
+		"von 01.03.2026 bis heute":            {"2026-03-01", "2026-11-21", "range"},
+		"vom 01.03.2026 bis gestern":          {"2026-03-01", "2026-11-20", "range"},
+		"von 2026-12-31 bis gestern":          {"2026-11-20", "2026-12-31", "range"},
+		"von 2024-03-15 bis März 2025":        {"2024-03-15", "2025-03-01", "range"},
+		"von 2026-03-01 bis Freitag":          {"2026-03-01", "", "past"},
+		"von 2026-03-01 bis Ende März":        {"2026-03-01", "", "past"},
+		"von 2026-03-01 bis Projektende":      {"2026-03-01", "", "past"},
+		"von 2026-03-01":                      {"2026-03-01", "", "past"},
+		"Daten von 2026-03-01 und 2026-03-05": {"2026-03-01", "", "past"},
+		"von Montag bis 2026-12-31":           {"2026-11-23", "2026-12-31", "range"},
+	})
+}

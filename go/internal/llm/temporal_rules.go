@@ -637,9 +637,10 @@ func parseDayDate(tok string) (time.Time, bool) {
 var reISODateRangeIndicator = regexp.MustCompile(`(?i)(?:^|\s)(?:bis|to|through)(?:\s|$)|–|—`)
 
 // reSeitBisBefore matches "seit"/"bis" (with the article German puts between,
-// "seit dem", "bis zum") right before a day date: the date is then the start
-// or the end of the window matchSeit/matchBis derive, not a day of its own.
-var reSeitBisBefore = regexp.MustCompile(`(?i)\b(?:seit(?:\s+dem)?|bis(?:\s+zu[mr])?)\s+$`)
+// "seit dem", "bis zum") and "von"/"vom" right before a day date: the date is
+// then the start or the end of the window matchSeit, matchBis or matchVonBis
+// derive, not a day of its own.
+var reSeitBisBefore = regexp.MustCompile(`(?i)\b(?:seit(?:\s+dem)?|bis(?:\s+zu[mr])?|vo[nm])\s+$`)
 
 // reYearlessStart matches a dot date without its year ("01.03.", "01.03")
 // and a range word right before a day date, the German "01.03. bis
@@ -786,6 +787,12 @@ func matchVonBis(query string, now time.Time) *TemporalResult {
 	start, startRel := resolvePhraseRel(m[1], backward, now)
 	end, endRel := resolvePhraseRel(m[2], backward, now)
 	if start.IsZero() || end.IsZero() {
+		return nil
+	}
+	// A weekday or month after a day date could count from today ("bis
+	// Freitag") or from the date ("vom 01.03.2026 bis Ende März"); the rules
+	// do not guess, the date stays the day it names.
+	if endRel && len(findDayDates(strings.ToUpper(m[1]))) > 0 {
 		return nil
 	}
 	start, end = orderWindow(start, end, startRel, endRel, backward,
