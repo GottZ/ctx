@@ -118,6 +118,117 @@ func TestPopulateTemporalSkipsReplacedContent(t *testing.T) {
 	}
 }
 
+// TestRefreshTemporalYieldsToAContentWriteDuringItsRows: while the afterwork
+// writes the dimension rows it holds no lock on the block row, so a content
+// update of the block lands without waiting for it; the afterwork then finds
+// the new content and drops both of its writes — content_times and rows — as
+// one. A second connection holds the block's dimension rows, which keeps the
+// afterwork inside its row writes until the test releases them.
+func TestRefreshTemporalYieldsToAContentWriteDuringItsRows(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	initial := "Draft on 2026-01-20."
+	b, err := store.UpsertBlock(ctx, pool, "i414", "i414-yield", initial, nil, nil, "private", false, store.SensitivityWrite{}, "")
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if applied, err := store.RefreshTemporal(ctx, pool, b.ID, b.Content, b.CreatedAt); err != nil || !applied {
+		t.Fatalf("store afterwork: applied=%v err=%v", applied, err)
+	}
+	contentA := "Draft due 2026-03-03."
+	a, _, err := store.UpdateBlock(ctx, pool, b.ID, store.UpdateBlockData{Content: &contentA}, []string{"private"})
+	if err != nil || a == nil {
+		t.Fatalf("update A: %v", err)
+	}
+
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin holder: %v", err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	var holderPID int32
+	if err := holder.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil {
+		t.Fatalf("holder pid: %v", err)
+	}
+	if _, err := holder.Exec(ctx, `DELETE FROM context_temporal WHERE block_id = $1`, b.ID); err != nil {
+		t.Fatalf("holder delete: %v", err)
+	}
+
+	type result struct {
+		applied bool
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		applied, err := store.RefreshTemporal(ctx, pool, a.ID, a.Content, a.CreatedAt)
+		done <- result{applied, err}
+	}()
+	// Hook: wait until A's afterwork waits on the held rows.
+	blocked := false
+	for deadline := time.Now().Add(10 * time.Second); !blocked && time.Now().Before(deadline); {
+		if err := pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid)))`, holderPID).Scan(&blocked); err != nil {
+			t.Fatalf("poll lock wait: %v", err)
+		}
+		if !blocked {
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+	if !blocked {
+		t.Fatalf("A's afterwork never waited on the held dimension rows")
+	}
+
+	// The block row is free: a lock attempt that refuses to wait succeeds.
+	probe, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin probe: %v", err)
+	}
+	if _, err := probe.Exec(ctx, `SELECT 1 FROM context_blocks WHERE id = $1 FOR NO KEY UPDATE NOWAIT`, b.ID); err != nil {
+		_ = probe.Rollback(ctx)
+		t.Fatalf("the afterwork holds the block row while it writes the dimension rows: %v", err)
+	}
+	_ = probe.Rollback(ctx)
+
+	// So a content update lands now, while A's afterwork is mid-way.
+	contentB := "Draft due 2026-08-08."
+	bb, _, err := store.UpdateBlock(ctx, pool, b.ID, store.UpdateBlockData{Content: &contentB}, []string{"private"})
+	if err != nil || bb == nil {
+		t.Fatalf("update B: %v", err)
+	}
+
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatalf("release holder: %v", err)
+	}
+	r := <-done
+	if r.err != nil {
+		t.Fatalf("A's afterwork: %v", r.err)
+	}
+	if r.applied {
+		t.Errorf("A's afterwork applied over content B")
+	}
+	var times []time.Time
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(content_times, '{}') FROM context_blocks WHERE id = $1`, b.ID).Scan(&times); err != nil {
+		t.Fatalf("read content_times: %v", err)
+	}
+	if len(times) != 1 || !times[0].Equal(i414Day("2026-01-20")) {
+		t.Errorf("content_times = %v, want the initial content's [2026-01-20]: A's afterwork must drop content_times together with its rows", times)
+	}
+	if got, want := i414Sources(t, pool, b.ID), i414Want(b.CreatedAt, i414Day("2026-01-20")); !slices.Equal(got, want) {
+		t.Errorf("source times = %v, want %v (the initial content's)", got, want)
+	}
+
+	if applied, err := store.RefreshTemporal(ctx, pool, bb.ID, bb.Content, bb.CreatedAt); err != nil || !applied {
+		t.Fatalf("B's afterwork: applied=%v err=%v", applied, err)
+	}
+	if got, want := i414Sources(t, pool, b.ID), i414Want(b.CreatedAt, i414Day("2026-08-08")); !slices.Equal(got, want) {
+		t.Errorf("source times = %v, want %v (content B)", got, want)
+	}
+}
+
 // TestBackfillTemporalFillsBlocksWithoutRows: the backfill writes the data of
 // the content a block holds to a block that has none, through RefreshTemporal.
 func TestBackfillTemporalFillsBlocksWithoutRows(t *testing.T) {
