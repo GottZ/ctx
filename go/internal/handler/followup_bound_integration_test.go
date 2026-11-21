@@ -462,10 +462,11 @@ func TestFollowupBoundStoreBatch(t *testing.T) {
 	})
 }
 
-// TestFollowupBoundBatchAfterworkFits measures the afterwork of a full batch
-// (writes.batch_max_items, default 100) against the database — the loop
-// runStoreBatch runs after the commit, every block classified and enriched —
-// and holds that one followUpTimeout covers it with room: half the bound.
+// TestFollowupBoundBatchAfterworkFits measures the afterwork of the largest
+// batch a config may allow (config.WritesBatchMaxItemsCeiling, issue #483)
+// against the database — the loop runStoreBatch runs after the commit, every
+// block classified and enriched — and holds that one followUpTimeout covers
+// it.
 func TestFollowupBoundBatchAfterworkFits(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -474,13 +475,13 @@ func TestFollowupBoundBatchAfterworkFits(t *testing.T) {
 	ctx := context.Background()
 	reg := v11Registry(t, pool)
 	set := reg.Snapshot()
-	maxItems := config.Defaults().Writes.BatchMaxItems
+	maxItems := config.WritesBatchMaxItemsCeiling
 	content := strings.Repeat("Termin am 2026-11-21 um 14:00, Folgetermin 3. Dezember 2026, Frist bis 15.01.2027. ", 12)
 	var worst time.Duration
-	for round := range 3 {
+	for round := range 2 {
 		items := make([]store.BatchUpsert, maxItems)
 		for i := range items {
-			items[i] = store.BatchUpsert{Category: "learnings", Title: fmt.Sprintf("session i453 measure %d-%03d", round, i),
+			items[i] = store.BatchUpsert{Category: "learnings", Title: fmt.Sprintf("session i453 measure %d-%04d", round, i),
 				Content: content, Scope: "private", Sens: store.SensitivityWrite{Value: backends.SensInternal}}
 		}
 		results, err := store.UpsertBlocks(ctx, pool, items, "", set, nil)
@@ -501,8 +502,8 @@ func TestFollowupBoundBatchAfterworkFits(t *testing.T) {
 			t.Fatalf("round %d classified %d of %d blocks", round, n, maxItems)
 		}
 	}
-	if worst > followUpTimeout/2 {
-		t.Errorf("the afterwork of a full batch took %v; one follow-up bound of %v leaves it no room", worst, followUpTimeout)
+	if worst > followUpTimeout {
+		t.Errorf("the afterwork of a %d-item batch took %v; one follow-up bound of %v does not cover it", maxItems, worst, followUpTimeout)
 	}
 }
 

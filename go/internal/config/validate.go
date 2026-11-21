@@ -126,6 +126,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateQueryTranslate(c)...)
 	// V66 (#381): guard.ef_search in [guard.EfSearchMin, guard.EfSearchMax].
 	issues = append(issues, validateGuardEfSearch(c)...)
+	// V67 (#483): writes.batch_max_items at most WritesBatchMaxItemsCeiling.
+	issues = append(issues, validateWritesBatchMaxItems(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1607,6 +1609,34 @@ func validateGuardEfSearch(c *Config) []Issue {
 	return []Issue{{Field: "guard.ef_search", Severity: SeverityError,
 		Msg: fmt.Sprintf("guard.ef_search (%d) must be between %d (pgvector's default, the guard's window before the key existed) and %d (pgvector's maximum; a larger value fails every guard batch)",
 			ef, guard.EfSearchMin, guard.EfSearchMax)}}
+}
+
+// WritesBatchMaxItemsCeiling is the most items writes.batch_max_items may
+// allow (V67, issue #483). A batch's afterwork — the type classification and
+// temporal enrichment of every written block, after the commit — runs under
+// one follow-up bound of 10 s for the whole batch (internal/handler
+// followUpTimeout), inside the shutdown's 15 s HTTP drain, and nothing
+// classifies a block later but its next write. Measured on a test database
+// on a loaded host (2026-11-22): about 3 ms per item — 1 000 items 3.0 s,
+// 5 000 items 16.1 s (past the drain). The ceiling keeps the largest batch a
+// config can allow at under a third of the bound; the handler test
+// TestFollowupBoundBatchAfterworkFits holds a batch of this size inside it.
+const WritesBatchMaxItemsCeiling = 1000
+
+// validateWritesBatchMaxItems is V67 (issue #483): writes.batch_max_items at
+// most WritesBatchMaxItemsCeiling — above it the afterwork of a full batch
+// does not fit its bound and leaves blocks unclassified. 0 (batches off)
+// stays legitimate; a negative value is V35's report alone. Fatal like V43:
+// boot abort for the env value, a settings write answers 422, and a
+// psql-written row is dropped by the reload with a WARN.
+func validateWritesBatchMaxItems(c *Config) []Issue {
+	n := c.Writes.BatchMaxItems
+	if n <= WritesBatchMaxItemsCeiling {
+		return nil
+	}
+	return []Issue{{Field: "writes.batch_max_items", Severity: SeverityError,
+		Msg: fmt.Sprintf("writes.batch_max_items (%d) must be at most %d: the afterwork of a larger batch (classification and temporal enrichment of each block) does not fit its one follow-up bound",
+			n, WritesBatchMaxItemsCeiling)}}
 }
 
 // validateDreamDecideTieOdds is V36: dream.decide_tie_odds is an odds RATIO

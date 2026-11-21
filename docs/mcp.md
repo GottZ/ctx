@@ -486,7 +486,7 @@ The transaction writes the items in (scope, category, title) order, and an item 
 declares a `supersedes` is checked against its target as the items written before it
 left that target (an item may retype it). A refusal of the batch as a whole names no
 item: a batch without items answers `missing_fields` and more items than
-`writes.batch_max_items` (default 100, `0` switches batches off) `size_cap`, each with
+`writes.batch_max_items` (default 100, at most 1000, `0` switches batches off) `size_cap`, each with
 a text that opens with `items:`; a batch over the write budget (below) answers
 `rate_limit` with `Rate limit exceeded: …`. An item whose write would change nothing (the `store` tool's
 identical-content check) is not written and costs nothing; the batch decides that in its
