@@ -120,6 +120,9 @@ func TestPaginationUnparseableNextIsAnError(t *testing.T) {
 		"trailing-junk":      func(n string) []string { return lines(`<` + n + `>; rel="next" junk`) },
 		"no-param-name":      func(n string) []string { return lines(`<` + n + `>; ="next"`) },
 		"bad-second-element": func(n string) []string { return lines(`<` + n + `&page=9>; rel="last", next`) },
+		// An unquoted rel value is a token (RFC 8288 §3.3); "=" and "/" are not tchars.
+		"rel-not-a-token":   func(n string) []string { return lines(`<` + n + `>; rel=next=bad`) },
+		"rel-not-a-token-2": func(n string) []string { return lines(`<` + n + `>; rel=next/page`) },
 	}
 	for name, link := range spellings {
 		t.Run(name, func(t *testing.T) {

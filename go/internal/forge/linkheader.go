@@ -98,7 +98,8 @@ func (lv linkValue) hasParam(name string) bool {
 // URI-Reference runs to the first ">", so a comma or semicolon inside it is
 // part of the target. An unquoted value is read up to whitespace, ";", ","
 // or a quote (RFC 8288 Appendix B.3 reads up to ";" or ","; a media type
-// such as application/json is not a token, yet servers write it unquoted).
+// such as application/json is not a token, yet servers write it unquoted) —
+// except rel, whose unquoted value has to be a token (RFC 8288 §3.3).
 // Anything else — a link-value without "<…>", an unterminated quoted-string,
 // a parameter without a name, text after a link-value that is neither ";"
 // nor "," — is errLinkSyntax.
@@ -204,6 +205,9 @@ func (p *linkParser) param() (linkParam, error) {
 		return linkParam{}, errLinkSyntax
 	}
 	param.value = p.s[start:p.i]
+	if param.name == "rel" && !isToken(param.value) {
+		return linkParam{}, errLinkSyntax // an unquoted rel is a token (RFC 8288 §3.3)
+	}
 	return param, nil
 }
 
@@ -232,6 +236,16 @@ func (p *linkParser) quoted() (string, error) {
 }
 
 func isWSP(r rune) bool { return r == ' ' || r == '\t' }
+
+// isToken reports whether s is a token (RFC 9110 §5.6.2).
+func isToken(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !isTchar(s[i]) {
+			return false
+		}
+	}
+	return s != ""
+}
 
 // isTchar is RFC 9110 §5.6.2's tchar.
 func isTchar(c byte) bool {
