@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -133,18 +134,56 @@ func errRedirectNotFollowed(status int) error {
 // withoutURL is err as an error of the forge client: net/http's *url.Error
 // names the request URL — owner, repository, the since window, on a next page
 // the query the forge chose — and the URL never enters an error surface
-// (§5.4). The failure it wraps stays; a configError (a refused upgrade, which
-// checkRedirect returns through it) comes back as itself.
+// (§5.4). The text below it is not safe either: a redirect whose Location
+// does not parse quotes the whole Location, a broken status line the bytes
+// the remote sent. So the error names its class only (transportFailure),
+// and keeps the cause for errors.Is and errors.As. A configError (a refused
+// hop, which checkRedirect returns through it) comes back as itself.
 func withoutURL(what string, err error) error {
-	var ue *url.Error
-	if errors.As(err, &ue) {
-		err = ue.Err
-	}
 	var ce *configError
 	if errors.As(err, &ce) {
 		return ce
 	}
-	return fmt.Errorf("%s: %w", what, err)
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		if ue.Op == "parse" {
+			return &transportFailure{what: what, class: "the URL does not parse", err: ue.Err}
+		}
+		err = ue.Err
+	}
+	return &transportFailure{what: what, class: failureClass(err), err: err}
+}
+
+// transportFailure is a failed request of the forge client: its text is what
+// failed and a class, its cause stays reachable through Unwrap.
+type transportFailure struct {
+	what, class string
+	err         error
+}
+
+func (e *transportFailure) Error() string { return e.what + ": " + e.class }
+func (e *transportFailure) Unwrap() error { return e.err }
+
+// failureClass names a transport failure without the text the remote chose:
+// a cancel, a timeout, or a network error as net.OpError writes it — the
+// operation and the address dialed (the api_base host, or the SSRF guard's
+// refusal of it), never a path or a query.
+func failureClass(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timed out"
+	}
+	var op *net.OpError
+	if errors.As(err, &op) {
+		return op.Error()
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return "timed out"
+	}
+	return "transport error"
 }
 
 // do issues one GET with conditional/auth headers and maps the transport-level
