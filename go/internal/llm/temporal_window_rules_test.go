@@ -315,3 +315,41 @@ func checkEndsToday(t *testing.T, now time.Time, q, today string, earliest time.
 		t.Errorf("now %s, %q: window %s..%s, want ..%s starting after %s", today, q, d.Date, *d.End, today, fmtDate(earliest))
 	}
 }
+
+// TestRules_AYearlessStartTakesTheEndsYear: "01.03. bis 05.03.2026" names
+// its start without a year; it is the latest such day at or before the end,
+// in the end's year or the one before (Runde 1 of #469, M2).
+func TestRules_AYearlessStartTakesTheEndsYear(t *testing.T) {
+	checkRules(t, now463, map[string]wantDate{
+		"01.03. bis 05.03.2026":          {"2026-03-01", "2026-03-05", "range"},
+		"vom 01.03. bis zum 05.03.2026":  {"2026-03-01", "2026-03-05", "range"},
+		"28.02. bis 05.03.2026":          {"2026-02-28", "2026-03-05", "range"},
+		"01.03 bis 05.03.2026":           {"2026-03-01", "2026-03-05", "range"},
+		"vom 01.12. bis 05.12.2026":      {"2026-12-01", "2026-12-05", "range"},
+		"Urlaub 01.03.–05.03.2026":       {"2026-03-01", "2026-03-05", "range"},
+		"01.03. bis 2026-03-05":          {"2026-03-01", "2026-03-05", "range"},
+		"28.12. bis 03.01.2027":          {"2026-12-28", "2027-01-03", "range"},
+		"vom 28.12. bis zum 03.01.2027":  {"2026-12-28", "2027-01-03", "range"},
+		"29.02. bis 01.02.2029":          {"2028-02-29", "2029-02-01", "range"},
+		"29.02. bis 05.03.2027":          {"2027-03-05", "", "past"}, // no 29 February before it: the day
+		"Version 2.01.03 bis 05.03.2026": {"2026-03-05", "", DirUntil},
+	})
+}
+
+// TestRules_AnUnreadStartBeforeBisOpensNoWindow: "vom" is "von"; a start
+// the rules cannot read leaves the day date the day it names, as the ISO
+// form always was, instead of the time up to it. "bis" with nothing before
+// it stays the time up to its day (Runde 1 of #469, M2).
+func TestRules_AnUnreadStartBeforeBisOpensNoWindow(t *testing.T) {
+	checkRules(t, now463, map[string]wantDate{
+		"vom Projektstart bis 05.03.2026":             {"2026-03-05", "", "past"},
+		"vom Projektstart bis 2026-03-05":             {"2026-03-05", "", "past"},
+		"vom Projektstart bis zum 05.03.2026":         {"2026-03-05", "", "past"},
+		"von Projektstart bis 05.03.2026":             {"2026-03-05", "", "past"},
+		"bis 05.03.2026":                              {"2026-03-05", "", DirUntil},
+		"Projekt X lief bis 05.03.2026":               {"2026-03-05", "", DirUntil},
+		"vom Montag bis Freitag":                      {"2026-11-23", "2026-11-27", "range"},
+		"von Montag bis zum Freitag":                  {"2026-11-23", "2026-11-27", "range"},
+		"Was lief vom 1. Spatenstich bis 05.03.2026?": {"2026-03-05", "", "past"},
+	})
+}

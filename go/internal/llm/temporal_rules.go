@@ -459,7 +459,8 @@ var (
 	reThisMonth       = regexp.MustCompile(`(?i)this\s+month`)
 	reSeit            = regexp.MustCompile(`(?i)\bseit\s+(?:dem\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)`)
 	reBis             = regexp.MustCompile(`(?i)\bbis\s+(?:zu[mr]\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)`)
-	reVonBis          = regexp.MustCompile(`(?i)von\s+((?:\S+\s+)?(?:\S+\s+)?\S+)\s+bis\s+((?:\S+\s+)?(?:\S+\s+)?\S+)`)
+	// "vom" is "von dem"; "bis zum"/"bis zur" as in reBis (issue #463).
+	reVonBis          = regexp.MustCompile(`(?i)(?:von|\bvom)\s+((?:\S+\s+)?(?:\S+\s+)?\S+)\s+bis\s+(?:zu[mr]\s+)?((?:\S+\s+)?(?:\S+\s+)?\S+)`)
 	reThrough         = regexp.MustCompile(`(?i)(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+through\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)`)
 	reAnfangWoche     = regexp.MustCompile(`(?i)anfang\s+(?:der|dieser)\s+woche`)
 	reEndeWoche       = regexp.MustCompile(`(?i)ende\s+(?:n[äa]chster|dieser|der)?\s*woche`)
@@ -640,6 +641,33 @@ var reISODateRangeIndicator = regexp.MustCompile(`(?i)(?:^|\s)(?:bis|to|through)
 // or the end of the window matchSeit/matchBis derive, not a day of its own.
 var reSeitBisBefore = regexp.MustCompile(`(?i)\b(?:seit(?:\s+dem)?|bis(?:\s+zu[mr])?)\s+$`)
 
+// reYearlessStart matches a dot date without its year ("01.03.", "01.03")
+// and a range word right before a day date, the German "01.03. bis
+// 05.03.2026" and "01.03.–05.03.2026": the start takes the end's year. It
+// stands at the start of the text or behind a character that is neither a
+// letter, a digit nor a dot, so "2.01.03 bis" is no start.
+var reYearlessStart = regexp.MustCompile(`(?i)(?:^|[^0-9A-Za-z_.])((0[1-9]|[12]\d|3[01])\.(0[1-9]|1[0-2])\.?)(?:\s*[–—]\s*|\s+(?:bis(?:\s+zu[mr])?|to|through)\s+)$`)
+
+// yearlessStart returns the window a yearless start before the day date m
+// opens: the start is the latest such day at or before the end, in the end's
+// year or the year before ("28.12. bis 03.01.2027" starts in 2026).
+// matched reports that the text before m has the shape; a start the calendar
+// has in neither year ("29.02. bis 05.03.2027") opens no window (ok false).
+func yearlessStart(query string, m dayDate) (start time.Time, ref string, matched, ok bool) {
+	sm := reYearlessStart.FindStringSubmatchIndex(query[:m.start])
+	if sm == nil {
+		return time.Time{}, "", false, false
+	}
+	day, month := query[sm[4]:sm[5]], query[sm[6]:sm[7]]
+	for _, y := range []int{m.day.Year(), m.day.Year() - 1} {
+		t, err := time.Parse("2006-01-02", fmt.Sprintf("%04d-%s-%s", y, month, day))
+		if err == nil && !t.After(m.day) {
+			return t, query[sm[2]:sm[3]], true, true
+		}
+	}
+	return time.Time{}, "", true, false
+}
+
 // matchDayDates resolves the day dates of query. With deferToSeitBis a
 // single date right behind "seit"/"bis" is left to matchSeit/matchBis; the
 // rules call it again without, after them, so a date whose window those
@@ -649,7 +677,16 @@ func matchDayDates(query string, deferToSeitBis bool) *TemporalResult {
 	if len(matches) == 0 {
 		return nil
 	}
-	if deferToSeitBis && len(matches) == 1 && reSeitBisBefore.MatchString(query[:matches[0].start]) {
+	// A yearless start before the only day date: the window from it.
+	yearless := false
+	if len(matches) == 1 {
+		start, sref, matched, ok := yearlessStart(query, matches[0])
+		if ok {
+			return rangeResult(sref+" – "+query[matches[0].dateStart:matches[0].dateEnd], fmtDate(start), fmtDate(matches[0].day), "range")
+		}
+		yearless = matched
+	}
+	if deferToSeitBis && !yearless && len(matches) == 1 && reSeitBisBefore.MatchString(query[:matches[0].start]) {
 		return nil
 	}
 	tense := DetectVerbTense(query)
