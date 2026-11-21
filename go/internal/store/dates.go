@@ -22,12 +22,14 @@ import (
 
 // The extraction knows four date forms. Until issue #434 each was a regular
 // expression run over the whole content; the scanner below matches exactly
-// what they matched, with the same submatches, and the frozen copy of the
-// regexp implementation in dates_ref_test.go is the oracle of its tests:
+// what these expressions match, with the same submatches, and the regexp
+// implementation in dates_ref_test.go is the oracle of its tests (it also
+// keeps the expressions as they stood before #434, frozen, and the input
+// classes the deliberate changes since then affect):
 //
 //	ISO       \b(20[2-3]\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))(?:[T\s]+([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?Z?)?\b
 //	dot       \b(0[1-9]|[12]\d|3[01])\.(0[1-9]|1[0-2])\.(20[2-3]\d)(?:\s+([01]\d|2[0-3]):([0-5]\d))?\b
-//	German    (?i)\b(januar|februar|m[aä]rz|april|mai|juni|juli|august|september|oktober|november|dezember)\s+(20[2-3]\d)\b
+//	German    (?i)\b(januar|februar|märz|maerz|april|mai|juni|juli|august|september|oktober|november|dezember)\s+(20[2-3]\d)\b
 //	English   (?i)\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(20[2-3]\d)\b
 //
 // Every match of every form contains a year token 20[2-3]\d at a place the
@@ -196,35 +198,27 @@ func (p monthPattern) matchBefore(c string, w int) int {
 	return i
 }
 
+// The month names of the two month forms are the keys of util.MonthDE and
+// util.MonthEN, the tables ExtractDates reads the month from, so every name
+// a pattern matches is one the table resolves (issue #437: the expression
+// m[aä]rz matched "Marz", which no table carries, and missed "Maerz", which
+// util.MonthDE does).
 var (
-	deMonthPatterns = newMonthPatterns("januar", "februar", "m[aä]rz", "april", "mai", "juni", "juli",
+	deMonthPatterns = newMonthPatterns("januar", "februar", "märz", "maerz", "april", "mai", "juni", "juli",
 		"august", "september", "oktober", "november", "dezember")
 	enMonthPatterns = newMonthPatterns("january", "february", "march", "april", "may", "june", "july",
 		"august", "september", "october", "november", "december")
 )
 
 // newMonthPatterns builds the alternatives of a month form from lowercase
-// names; a bracket lists the letters one position admits, as [aä] in the
-// regular expression. Each letter admits its Unicode simple case folding
-// orbit, the set (?i) matches.
+// names. Each letter admits its Unicode simple case folding orbit, the set
+// (?i) matches.
 func newMonthPatterns(names ...string) []monthPattern {
 	patterns := make([]monthPattern, 0, len(names))
 	for _, name := range names {
 		var p monthPattern
-		var class []rune
-		inClass := false
 		for _, r := range name {
-			switch {
-			case r == '[':
-				inClass, class = true, nil
-			case r == ']':
-				inClass = false
-				p = append(p, class)
-			case inClass:
-				class = append(class, foldOrbit(r)...)
-			default:
-				p = append(p, foldOrbit(r))
-			}
+			p = append(p, foldOrbit(r))
 		}
 		patterns = append(patterns, p)
 	}

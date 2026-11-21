@@ -1,9 +1,62 @@
 package store
 
 import (
+	"slices"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/GottZ/ctx/internal/util"
 )
+
+// wantDates runs ExtractDates on each content and compares the result with
+// the RFC 3339 timestamps of want (nil: no date).
+func wantDates(t *testing.T, cases map[string][]string) {
+	t.Helper()
+	for content, want := range cases {
+		got := ExtractDates(content)
+		gotS := make([]string, len(got))
+		for i, d := range got {
+			gotS[i] = d.Format(time.RFC3339)
+		}
+		if len(got) != len(want) || !slices.Equal(gotS, want) {
+			t.Errorf("ExtractDates(%q) = %v, want %v", content, gotS, want)
+		}
+	}
+}
+
+// --- #437 point 1: "Maerz" is March, "Marz" is no month ---.
+
+// TestExtractDates_EveryTableMonthYieldsItsMonth: every key of the month
+// tables, in lower, title and upper case before a year, gives the 1st of its
+// month. util.MonthDE carries "maerz"; the pattern m[aä]rz never matched it.
+func TestExtractDates_EveryTableMonthYieldsItsMonth(t *testing.T) {
+	for _, table := range []map[string]time.Month{util.MonthDE, util.MonthEN} {
+		for name, month := range table {
+			want := []string{time.Date(2026, month, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)}
+			for _, spelling := range []string{name, strings.ToUpper(name[:1]) + name[1:], strings.ToUpper(name)} {
+				wantDates(t, map[string][]string{spelling + " 2026": want, "am " + spelling + " 2026.": want})
+			}
+		}
+	}
+}
+
+// TestExtractDates_MaerzAndMarz pins the spellings of March: "März" and
+// "Maerz" in any case are March; "Marz", which no table carries, matches no
+// month pattern at all (it matched m[aä]rz and then missed the table).
+func TestExtractDates_MaerzAndMarz(t *testing.T) {
+	march := []string{"2026-03-01T00:00:00Z"}
+	wantDates(t, map[string][]string{
+		"Maerz 2026": march, "maerz 2026": march, "MAERZ 2026": march, "MaErZ 2026": march,
+		"März 2026": march, "MÄRZ 2026": march, "Stand: Maerz 2026, danach April 2026": {"2026-03-01T00:00:00Z", "2026-04-01T00:00:00Z"},
+		"Marz 2026": nil, "MARZ 2026": nil, "Maerz2026": nil, "xMaerz 2026": nil, "Maerz 2026x": nil,
+	})
+	for _, c := range []string{"Marz 2026", "MARZ 2026", "marz 2026"} {
+		if de := scanDates(c).de; de != nil {
+			t.Errorf("scanDates(%q).de = %v, want no German month match", c, de)
+		}
+	}
+}
 
 // --- T25: ExtractDates rejects Go-normalized invalid dates ---.
 

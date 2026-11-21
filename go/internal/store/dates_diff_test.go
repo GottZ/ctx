@@ -12,13 +12,46 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/GottZ/ctx/internal/util"
 )
 
-// Differential tests of ExtractDates against extractDatesRef, the frozen
-// regexp implementation (dates_ref_test.go). The criterion is identity, not
-// similarity: the same timestamps, in the same order, with the same
-// representation (time.Time compared with ==, which also compares the
+// Differential tests of ExtractDates against the regexp implementation
+// (dates_ref_test.go), in two versions: every content against refForms, the
+// reference of the current extraction, and every content outside the input
+// classes of the deliberate changes (issue437Classes) also against
+// refFormsV434, the frozen extraction before #434. The criterion is
+// identity, not similarity: the same timestamps, in the same order, with the
+// same representation (time.Time compared with ==, which also compares the
 // location pointer), and nil where the reference returns nil.
+
+// issue437Classes lists, per deliberate change of issue #437, the contents
+// it may change. A content none of them touches gives what refFormsV434
+// gives: together the predicates cover every content on which the current
+// reference and the frozen one differ (each names the shape a differing
+// match needs, ignoring the word boundaries), and
+// TestIssue437Classes_EachIsNeeded shows that each one is needed.
+var issue437Classes = []struct {
+	name    string
+	touches func(string) bool
+	witness string // a content the change affects
+}{
+	// m[aä]rz → märz|maerz: a match that differs is a "marz" or "maerz"
+	// before whitespace and a year token. (A differing match whose
+	// whitespace or year only the later changes accept is theirs.)
+	{"#437/1 maerz and marz", regexp.MustCompile(`(?i)mae?rz\s+20[23]\d`).MatchString, "Maerz 2026"},
+}
+
+// issue437Touched returns the name of the first class of issue437Classes
+// content belongs to, or "".
+func issue437Touched(content string) string {
+	for _, c := range issue437Classes {
+		if c.touches(content) {
+			return c.name
+		}
+	}
+	return ""
+}
 
 // Runes the case-insensitive month patterns of the reference match beyond
 // ASCII case. Written as byte escapes so no editor normalizes them.
@@ -58,7 +91,8 @@ func datesSeedCorpus() []string {
 		"20.20.2026", "12.12.2026.12.2026", "29.03.2026\v14:30", "01.01.2030 00:00",
 		// Month names: case, umlaut, the spellings the regexp matches but the tables lack.
 		"März 2026", "märz 2026", "MÄRZ 2026", "M" + umlautCapA + "RZ 2026", "m" + umlautA + "rz 2026",
-		"Marz 2026", "Maerz 2026", "maerz 2026", "mAi 2027", "Mai\t\n 2028", "Mai\v2028", "Mai" + nbsp + "2028",
+		"Marz 2026", "Maerz 2026", "maerz 2026", "MAERZ 2026", "MaErZ 2026", "Ma" + umlautA + "erz 2026",
+		"Maerzmaerz 2026", "xmaerz 2026", "maerz_2026", "Maer 2026", "Maerz Maerz 2026", "mAi 2027", "Mai\t\n 2028", "Mai\v2028", "Mai" + nbsp + "2028",
 		"Mai\f\r2029", "Januar 2030", "January 2031", "januar 2020", "JANUARY 2020",
 		longS + "eptember 2026", "x" + longS + "eptember 2026", "Augu" + longS + "t 2026",
 		"O" + kelvinSign + "tober 2026", "x" + "o" + kelvinSign + "tober 2026", "OKTOBER 2026", "October 2026",
@@ -87,18 +121,28 @@ func datesSeedCorpus() []string {
 	return seeds
 }
 
-// assertMatchesReference fails t when ExtractDates and the frozen reference
-// disagree on content, or when the scanner's matches of one date form differ
-// from what the form's reference expression finds (offsets of the match and
-// of every group, FindAllStringSubmatchIndex). The second check sees a
-// difference the deduplication and sorting of ExtractDates would hide.
+// assertMatchesReference fails t when ExtractDates and the reference of the
+// current extraction disagree on content, or when the scanner's matches of
+// one date form differ from what the form's reference expression finds
+// (offsets of the match and of every group, FindAllStringSubmatchIndex). The
+// second check sees a difference the deduplication and sorting of
+// ExtractDates would hide. A content outside issue437Classes is held to the
+// frozen version refFormsV434 the same way.
 func assertMatchesReference(t testing.TB, content string) {
 	t.Helper()
+	assertMatchesForms(t, "reference", refForms, content)
+	if issue437Touched(content) == "" {
+		assertMatchesForms(t, "frozen #434 reference", refFormsV434, content)
+	}
+}
+
+func assertMatchesForms(t testing.TB, label string, f refDateForms, content string) {
+	t.Helper()
 	got := ExtractDates(content)
-	want := extractDatesRef(content)
+	want := extractDatesRefWith(f, content)
 	if (got == nil) != (want == nil) || !slices.Equal(got, want) {
-		t.Fatalf("ExtractDates differs from the reference for %s:\n got %s\nwant %s",
-			quoteHead(content), formatTimes(got), formatTimes(want))
+		t.Fatalf("ExtractDates differs from the %s for %s:\n got %s\nwant %s",
+			label, quoteHead(content), formatTimes(got), formatTimes(want))
 	}
 	sc := scanDates(content)
 	for _, form := range []struct {
@@ -106,16 +150,79 @@ func assertMatchesReference(t testing.TB, content string) {
 		got  [][]int
 		re   *regexp.Regexp
 	}{
-		{"iso", sc.iso, refISODateExtract},
-		{"dot", sc.dot, refDotDateExtract},
-		{"de", sc.de, refDEMonthYearExtract},
-		{"en", sc.en, refENMonthYearExtract},
+		{"iso", sc.iso, f.iso},
+		{"dot", sc.dot, f.dot},
+		{"de", sc.de, f.de},
+		{"en", sc.en, f.en},
 	} {
 		if want := form.re.FindAllStringSubmatchIndex(content, -1); !reflect.DeepEqual(form.got, want) {
-			t.Fatalf("%s matches differ from the reference for %s:\n got %v\nwant %v",
-				form.name, quoteHead(content), form.got, want)
+			t.Fatalf("%s matches differ from the %s for %s:\n got %v\nwant %v",
+				form.name, label, quoteHead(content), form.got, want)
 		}
 	}
+}
+
+// TestIssue437Classes_EachIsNeeded shows that every class of issue437Classes
+// is needed: its witness belongs to it, belongs to no class listed before it,
+// and gives a different result under the frozen version than now.
+func TestIssue437Classes_EachIsNeeded(t *testing.T) {
+	for i, c := range issue437Classes {
+		if !c.touches(c.witness) {
+			t.Errorf("%s: its witness %q is outside the class", c.name, c.witness)
+		}
+		for _, before := range issue437Classes[:i] {
+			if before.touches(c.witness) {
+				t.Errorf("%s: its witness %q already belongs to %s", c.name, c.witness, before.name)
+			}
+		}
+		now, frozen := ExtractDates(c.witness), extractDatesRefWith(refFormsV434, c.witness)
+		if slices.Equal(now, frozen) {
+			t.Errorf("%s: its witness %q gives %s, as the frozen version does", c.name, c.witness, formatTimes(now))
+		}
+	}
+}
+
+// TestExtractDates_MatchesFrozenReference_OutsideTheClasses runs generated
+// texts built like trickyDoc's but kept outside every class of
+// issue437Classes, so the frozen comparison runs on each of them; the
+// tricky corpus itself touches the classes often (its pieces are made of
+// month names and year tokens). With -short it runs a quarter of the texts.
+func TestExtractDates_MatchesFrozenReference_OutsideTheClasses(t *testing.T) {
+	small, large := 4000, 100
+	if testing.Short() {
+		small, large = 1000, 25
+	}
+	r := rand.New(rand.NewPCG(437, 1))
+	for range small {
+		assertMatchesFrozen(t, trickyDocOutside437(r, 1+r.IntN(40)))
+	}
+	for range large {
+		assertMatchesFrozen(t, trickyDocOutside437(r, 200+r.IntN(800)))
+	}
+}
+
+func assertMatchesFrozen(t *testing.T, content string) {
+	t.Helper()
+	if c := issue437Touched(content); c != "" {
+		t.Fatalf("generated content %s is in class %s", quoteHead(content), c)
+	}
+	assertMatchesReference(t, content)
+}
+
+// trickyDocOutside437 builds a trickyDoc of up to k pieces and leaves out
+// every piece that would put the text into a class of issue437Classes.
+func trickyDocOutside437(r *rand.Rand, k int) string {
+	var b strings.Builder
+	for range k {
+		before := b.Len()
+		b.WriteString(trickyDoc(r, 1))
+		if issue437Touched(b.String()) != "" {
+			s := b.String()[:before]
+			b.Reset()
+			b.WriteString(s)
+		}
+	}
+	return b.String()
 }
 
 func quoteHead(s string) string {
@@ -208,9 +315,10 @@ func TestMonthPatterns_FoldLikeRegexp(t *testing.T) {
 	for _, form := range []struct {
 		re       *regexp.Regexp
 		patterns []monthPattern
-	}{{refDEMonthYearExtract, deMonthPatterns}, {refENMonthYearExtract, enMonthPatterns}} {
+	}{{refForms.de, deMonthPatterns}, {refForms.en, enMonthPatterns}} {
 		src := form.re.String()
-		alts := strings.Split(src[strings.Index(src, `\b(`)+3:strings.Index(src, `)\s+`)], "|")
+		start := strings.Index(src, `\b(`) + 3
+		alts := strings.Split(src[start:start+strings.IndexByte(src[start:], ')')], "|")
 		if len(alts) != len(form.patterns) {
 			t.Fatalf("%d alternatives in %s, %d month patterns", len(alts), src, len(form.patterns))
 		}
@@ -285,6 +393,36 @@ func runesMatchedBy(t *testing.T, expr string) []rune {
 		}
 	}
 	return out
+}
+
+// TestMonthPatterns_AreTheTableKeys pins that the month patterns and the
+// tables ExtractDates resolves their matches with name the same months: the
+// spelling each pattern was built from (the first rune of every fold orbit)
+// is a key of the table, and every key has its pattern. Issue #437: m[aä]rz
+// matched "Marz", absent from util.MonthDE, and missed its "maerz".
+func TestMonthPatterns_AreTheTableKeys(t *testing.T) {
+	for _, form := range []struct {
+		name     string
+		patterns []monthPattern
+		table    map[string]time.Month
+	}{{"German", deMonthPatterns, util.MonthDE}, {"English", enMonthPatterns, util.MonthEN}} {
+		var names, keys []string
+		for _, p := range form.patterns {
+			var b strings.Builder
+			for _, orbit := range p {
+				b.WriteRune(orbit[0])
+			}
+			names = append(names, b.String())
+		}
+		for k := range form.table {
+			keys = append(keys, k)
+		}
+		slices.Sort(names)
+		slices.Sort(keys)
+		if !slices.Equal(names, keys) {
+			t.Errorf("%s month patterns %q, table keys %q", form.name, names, keys)
+		}
+	}
 }
 
 // TestMonthPatterns_NoAlternativeEndsAnother pins the assumption of
