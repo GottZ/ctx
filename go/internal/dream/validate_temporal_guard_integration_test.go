@@ -41,8 +41,13 @@ func TestValidateTemporalSkipsReviewWhenPhase1IsDropped(t *testing.T) {
 	}
 
 	// No router: reaching the LLM review would dereference it.
-	if err := ValidateTemporal(ctx, pool, nil, llm.Options{}, info); err != nil {
+	dropped, err := ValidateTemporal(ctx, pool, nil, llm.Options{}, info)
+	if err != nil {
 		t.Fatalf("validate: %v", err)
+	}
+	// Issue #427: the caller must not mark the block reviewed.
+	if !dropped {
+		t.Errorf("validate reported dropped=false for a validation whose phase-1 write was dropped")
 	}
 	var rows int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_temporal WHERE block_id = $1`, b.ID).Scan(&rows); err != nil {

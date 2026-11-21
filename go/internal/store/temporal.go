@@ -152,6 +152,37 @@ func PopulateTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content 
 	return writeTemporalGuarded(ctx, pool, blockID, contentTimes, createdAt, temporalContentGuardSQL, blockID, content)
 }
 
+// MarkTemporalReviewed records that the dream's temporal review has run for
+// the version of the block it read: title and content (issue #427). It sets
+// dream_temporal_validated_at to the block's updated_at while the block still
+// holds that title and content, and leaves the column as it is otherwise;
+// stamped reports which. The dream's pick reviews a block whose updated_at is
+// later than the column (or that has none), so a block whose title or content
+// was replaced during the review — which waits on an LLM for seconds — stays
+// due and its next pick reviews what it holds. An update of tags or metadata
+// during the review changes neither, so the review stands.
+//
+// The value is the block's updated_at, not the time of the stamp: a write
+// whose transaction began before the stamp and commits after it carries an
+// updated_at (now() is the transaction start) earlier than the stamp's own
+// now(), and would read as reviewed. The row's updated_at is earlier than any
+// later write's, unless that write began before the row's last writer did.
+//
+// The comparison is evaluated on the row version the UPDATE locks
+// (temporalReviewStampSQL): a write that holds the row makes the stamp wait,
+// and READ COMMITTED re-evaluates the expressions on the row that write left
+// behind. A block that is gone reports stamped=false.
+func MarkTemporalReviewed(ctx context.Context, pool *pgxpool.Pool, blockID, title, content string) (stamped bool, err error) {
+	err = pool.QueryRow(ctx, temporalReviewStampSQL, blockID, content, title).Scan(&stamped)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: temporal: mark reviewed: %w", err)
+	}
+	return stamped, nil
+}
+
 // RefreshTemporal is the temporal afterwork of a write that stored content on
 // a block: it writes the dimension rows PopulateTemporal writes, from the
 // dates of content, only while the block still holds content. The block's
@@ -203,6 +234,26 @@ const temporalContentGuardSQL = `SELECT ` + contentVersionCol + ` FROM context_b
 // comparison reads the row version the guard sees; the hash is in that row,
 // so no TOASTed content is read.
 const contentVersionCol = `content_hash = encode(digest($2::text, 'sha256'), 'hex')`
+
+// temporalReviewVersionCol answers whether the block row holds the input of
+// the dream's temporal review: the content $2 (contentVersionCol) and the
+// title $3, the two fields the review sends to the LLM. title is NOT NULL, so
+// the answer is never NULL. Like contentVersionCol it is a column, not a
+// filter: a `title = $n` in a WHERE beside the primary key is a condition the
+// trigram indexes on title support (store/classify.go, classifyInputsSQL).
+const temporalReviewVersionCol = contentVersionCol + ` AND title = $3`
+
+// temporalReviewStampSQL is MarkTemporalReviewed's statement for the block
+// $1, reviewed with content $2 and title $3: the WHERE names the primary key
+// alone, the version decides the value written, and RETURNING reports it.
+// When the version does not hold, the column is written with its own value,
+// as the unconditional stamp before issue #427 wrote a row version on every
+// review.
+const temporalReviewStampSQL = `UPDATE context_blocks
+	SET dream_temporal_validated_at = CASE WHEN ` + temporalReviewVersionCol + `
+	        THEN updated_at ELSE dream_temporal_validated_at END
+	WHERE id = $1
+	RETURNING ` + temporalReviewVersionCol
 
 // writeTemporalGuarded writes the dimension rows of a block and then runs
 // guardSQL, a statement that reads the block row by its primary key and

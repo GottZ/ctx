@@ -320,17 +320,26 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 	needsTemporal := block.DreamTemporalValidatedAt == nil ||
 		block.UpdatedAt.After(*block.DreamTemporalValidatedAt)
 	if needsTemporal {
-		if err := ValidateTemporal(ctx, pool, r, opts, block); err != nil {
+		dropped, err := ValidateTemporal(ctx, pool, r, opts, block)
+		if err != nil {
 			slog.Warn("dream: temporal validation failed (non-fatal)", "block_id", block.ID, "error", err)
 		}
 		// Mark validated even on non-fatal LLM failure — Phase 1 (deterministic)
 		// always ran and produced baseline findings. Next block-update will re-trigger.
-		if _, err := pool.Exec(ctx,
-			`UPDATE context_blocks SET dream_temporal_validated_at = now() WHERE id = $1`,
-			block.ID,
-		); err != nil {
-			slog.Warn("dream: temporal validation marker failed (non-fatal)",
-				"block_id", block.ID, "error", err)
+		// Marked only for the version reviewed (issue #427): not when a write
+		// of the validation was dropped because the block had changed, and
+		// not when the block no longer holds the title and content the review
+		// read — the review waits on its LLM, and a write in that window
+		// leaves the block due for its next pick.
+		if !dropped {
+			stamped, err := store.MarkTemporalReviewed(ctx, pool, block.ID, block.Title, block.Content)
+			if err != nil {
+				slog.Warn("dream: temporal validation marker failed (non-fatal)",
+					"block_id", block.ID, "error", err)
+			} else if !stamped {
+				slog.Info("dream: temporal validation not marked — the block's title or content changed since the pick, or it is gone",
+					"block_id", block.ID)
+			}
 		}
 	}
 

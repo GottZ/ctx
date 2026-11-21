@@ -86,7 +86,7 @@ type TemporalReview struct {
 //
 // The fence tolerance is not cosmetic. This decode is the only consumer of the
 // Phase-2 answer, and its failure path is NON-FATAL: ValidateTemporal logs a
-// WARN and returns nil, while the caller stamps dream_temporal_validated_at
+// WARN and returns no error, while the caller stamps dream_temporal_validated_at
 // regardless ("Mark validated even on non-fatal LLM failure", dream.go). So a
 // fenced answer is not retried — the dates the LLM found are dropped silently
 // until the block's CONTENT changes, which for a settled block can be never.
@@ -127,14 +127,21 @@ func (r *Router) temporalReview(ctx context.Context, block *BlockInfo, userPromp
 // Non-fatal — errors are logged but don't stop the dream cycle.
 // The Phase-2 prompt carries only the source block, so the chain resolves at
 // its effective sensitivity (design 03 §2.2, dream row).
-func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.Options, block *BlockInfo) error {
+//
+// dropped reports that a write of the validation found the block no longer
+// holding what it was picked with, or gone, and wrote nothing (issue #427):
+// the validation then stands for a version the block no longer holds, and the
+// caller must not mark the block reviewed (store.MarkTemporalReviewed). It is
+// false on every other return, the error returns included, which leave the
+// stamp to the caller as before.
+func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.Options, block *BlockInfo) (dropped bool, err error) {
 	// Phase 1: Deterministic re-extraction.
 	contentTimes := store.ExtractDates(block.Content)
 
 	// Get current dimensions from DB.
 	currentDims, err := getTemporalDimensions(ctx, pool, block.ID)
 	if err != nil {
-		return fmt.Errorf("validate temporal: get dims: %w", err)
+		return false, fmt.Errorf("validate temporal: get dims: %w", err)
 	}
 
 	// Check if deterministic extraction finds more times than stored.
@@ -159,14 +166,14 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 		// own content in its afterwork.
 		applied, err := store.PopulateTemporal(ctx, pool, block.ID, block.Content, contentTimes, block.CreatedAt)
 		if err != nil {
-			return fmt.Errorf("validate temporal: re-populate: %w", err)
+			return false, fmt.Errorf("validate temporal: re-populate: %w", err)
 		}
 		if !applied {
 			// The block no longer holds the picked content, or is gone: the
 			// review's merge would be dropped by the same guard, so the LLM
 			// call is skipped.
 			slog.Info("dream: temporal phase1 — block changed or gone since the pick, review skipped", "block_id", block.ID)
-			return nil
+			return true, nil
 		}
 		phase1Fixed = true
 	}
@@ -207,14 +214,14 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 	if err != nil {
 		// LLM failure is non-fatal — phase 1 already ran.
 		slog.Warn("dream: temporal phase2 LLM failed (non-fatal)", "block_id", block.ID, "error", err)
-		return nil
+		return false, nil
 	}
 
 	review, parseErr := parseTemporalReview(resp.Message.Content)
 	if parseErr != nil {
 		entry.Err = fmt.Errorf("parse: %w", parseErr)
 		slog.Warn("dream: temporal phase2 parse failed", "block_id", block.ID, "error", parseErr, "raw", resp.Message.Content)
-		return nil
+		return false, nil
 	}
 
 	// Apply LLM findings: merge new dates into temporal dimensions.
@@ -231,17 +238,24 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 	}
 
 	if len(newTimes) > 0 {
+		// Re-populate with merged times — skipped when a write replaced the
+		// content during the review: the findings belong to the old one, and
+		// the block is left to its next review (dropped).
+		merged := append(contentTimes, newTimes...)
+		applied, err := store.PopulateTemporal(ctx, pool, block.ID, block.Content, merged, block.CreatedAt)
+		if err != nil {
+			return false, fmt.Errorf("validate temporal: merge populate: %w", err)
+		}
+		if !applied {
+			slog.Info("dream: temporal phase2 — block changed or gone since the pick, findings dropped",
+				"block_id", block.ID, "new_dates", len(newTimes))
+			return true, nil
+		}
 		slog.Info("dream: temporal phase2 — LLM found additional dates",
 			"block_id", block.ID,
 			"new_dates", len(newTimes),
 			"phase1_fixed", phase1Fixed,
 		)
-		// Re-populate with merged times — skipped when a write replaced the
-		// content during the review: the findings belong to the old one.
-		merged := append(contentTimes, newTimes...)
-		if _, err := store.PopulateTemporal(ctx, pool, block.ID, block.Content, merged, block.CreatedAt); err != nil {
-			return fmt.Errorf("validate temporal: merge populate: %w", err)
-		}
 	}
 
 	// Log directions (future: gravity direction weighting).
@@ -259,7 +273,7 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 		)
 	}
 
-	return nil
+	return false, nil
 }
 
 // buildTemporalReviewPrompt creates the user prompt for LLM temporal review.
