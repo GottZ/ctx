@@ -98,6 +98,7 @@ func runStoreBatch(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, 
 	if err != nil {
 		return nil, storeBatchFailureReject(ctx, err, reqID)
 	}
+	noteToolWrite(ctx, nil)
 	out := storeBatchOutcome(results)
 	// The blocks and their booking are committed: the afterwork must not stop
 	// halfway because the client went away.
@@ -144,6 +145,7 @@ func storeBatchFailureReject(ctx context.Context, err error, reqID string) *writ
 	if rej := storeBatchRefusal(err); rej != nil {
 		return rej
 	}
+	noteToolWrite(ctx, err)
 	logRequestError(ctx, "store batch: upsert error", "error", err, "write_outcome", writeOutcome(err), "request_id", reqID)
 	return classInternal.reject("Internal server error")
 }

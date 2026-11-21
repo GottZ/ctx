@@ -39,12 +39,12 @@ const guardResolveDesc = "Resolve flagged blocks: 'keep' clears the flag, 'archi
 // registerTools (mcp.go). Own function so the tool set is one grep (the
 // registerIssueTools convention).
 func registerGuardTools(server *mcp.Server, cfg MCPConfig) {
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "guard_list",
 		Description: guardListDesc,
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, mcpGuardListHandler(cfg))
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "guard_resolve",
 		Description: guardResolveDesc,
 	}, mcpGuardResolveHandler(cfg))
@@ -101,9 +101,11 @@ func mcpGuardResolveHandler(cfg MCPConfig) mcp.ToolHandlerFor[guardResolveInput,
 			return errResult("archive is not available for confirm_writes keys (not stageable); use keep, or resolve via the REST manage path"), nil, nil
 		}
 
+		noteToolCount(ctx, len(input.IDs))
 		resolved, skipped, err := store.GuardResolveBatch(ctx, cfg.Pool, input.IDs, input.Resolution, writableBlockScopes(ar))
+		noteToolWrite(ctx, err)
 		if err != nil {
-			logRequestError(ctx, "mcp: guard_resolve error", "error", err)
+			logRequestError(ctx, "mcp: guard_resolve error", "error", err, "write_outcome", writeOutcome(err))
 			return errResult("guard_resolve failed: internal error"), nil, nil
 		}
 		body, err := json.Marshal(map[string]any{

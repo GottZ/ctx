@@ -36,7 +36,7 @@ const storeBatchToolDescription = "Save or update several knowledge blocks at on
 	"\"We cache …\"}, {\"category\": \"decisions\", \"title\": \"Decision index\", \"content\": \"- Cache layer\"}]}"
 
 func registerStoreBatchTool(server *mcp.Server, cfg MCPConfig) {
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "store_batch",
 		Description: storeBatchToolDescription,
 	}, mcpStoreBatchHandler(cfg))
@@ -81,6 +81,7 @@ func mcpStoreBatchHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeBatchInput, any
 			items[i] = it.storeRequest()
 		}
 		reqID := RequestIDFromContext(ctx)
+		noteToolCount(ctx, len(input.Items))
 
 		if ar.ConfirmWrites {
 			return mcpStageStoreBatch(ctx, cfg, set, ar, items, lim, ttl, reqID)
@@ -291,8 +292,9 @@ func mcpStageStoreBatch(ctx context.Context, cfg MCPConfig, set *blocktype.Set, 
 	if rej := storeBatchBudgetReject(err); rej != nil {
 		return errResultReject(rej), nil, nil
 	}
+	noteToolStaged(ctx, err, true)
 	if err != nil {
-		logRequestError(ctx, "mcp: stage pending batch failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "mcp: stage pending batch failed", "error", err, "write_outcome", writeOutcome(err), "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil
 	}
 
