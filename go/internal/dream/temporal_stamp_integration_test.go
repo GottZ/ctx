@@ -507,3 +507,149 @@ func TestTemporalReviewStampWaitsForAContentWriteInFlight(t *testing.T) {
 		t.Errorf("the stamp landed over the content the write in flight stored")
 	}
 }
+
+// TestValidateTemporalReportsADroppedMerge pins what ValidateTemporal tells
+// its caller: dropped=true when the merge of its findings was not applied
+// because the content was replaced during the review, dropped=false when the
+// findings landed.
+func TestValidateTemporalReportsADroppedMerge(t *testing.T) {
+	rig := newI427Rig(t)
+	ctx := context.Background()
+	b := rig.block(t, "Launch plan", "Launch on 2026-08-03.")
+	pick := func() *dream.BlockInfo {
+		t.Helper()
+		info, err := dream.PickBlock(ctx, rig.pool, rig.router.TypeSet(ctx).DreamLinkableTypes(), []string{i427Scope}, dream.PickClaimTTL(rig.router))
+		if err != nil || info == nil || info.ID != b.ID {
+			t.Fatalf("pick: info=%v err=%v", info, err)
+		}
+		return info
+	}
+
+	info := pick()
+	entered, release := rig.review.hold(i427Dates("2026-08-10"))
+	type result struct {
+		dropped bool
+		err     error
+	}
+	res := make(chan result, 1)
+	go func() {
+		dropped, err := dream.ValidateTemporal(ctx, rig.pool, rig.router, dream.DreamOptions(), info)
+		res <- result{dropped, err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(i427Wait):
+		t.Fatalf("the review did not begin within %s", i427Wait)
+	}
+	replaced := "Launch moved to 2026-08-24."
+	rig.update(t, rig.pool, b.ID, store.UpdateBlockData{Content: &replaced})
+	close(release)
+	if r := <-res; r.err != nil || !r.dropped {
+		t.Errorf("replaced during the review: dropped=%v err=%v, want dropped", r.dropped, r.err)
+	}
+
+	rig.endClaim(t, b.ID)
+	info = pick()
+	rig.review.record(i427Dates("2026-08-31"))
+	if dropped, err := dream.ValidateTemporal(ctx, rig.pool, rig.router, dream.DreamOptions(), info); err != nil || dropped {
+		t.Errorf("unchanged during the review: dropped=%v err=%v, want not dropped", dropped, err)
+	}
+	if n := rig.rowsAt(t, b.ID, "2026-08-31"); n != 8 {
+		t.Errorf("the finding has %d rows, want 8", n)
+	}
+}
+
+// TestTemporalReviewStampSkipsADroppedMergeWhenTheContentReturns: the
+// review's merge is dropped because the content was replaced (X to Y), and the
+// content is set back to X before the stamp. The block then holds what the
+// review read, but not its findings: it must stay due. The write back is
+// queued on the block row before the merge runs (a transaction holds the row
+// FOR NO KEY UPDATE, which the merge's foreign key share lock does not wait
+// for), so it commits between the merge and any stamp.
+func TestTemporalReviewStampSkipsADroppedMergeWhenTheContentReturns(t *testing.T) {
+	rig := newI427Rig(t)
+	ctx := context.Background()
+	picked := "Audit on 2026-10-05."
+	b := rig.block(t, "Audit plan", picked)
+
+	entered, release := rig.review.hold(i427Dates("2026-10-12"))
+	done := rig.cycle()
+	i427Entered(t, entered, done)
+	other := "Audit cancelled."
+	rig.update(t, rig.pool, b.ID, store.UpdateBlockData{Content: &other})
+
+	tx, err := rig.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin hold: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var holdPID uint32
+	if err := tx.QueryRow(ctx,
+		`SELECT pg_backend_pid() FROM context_blocks WHERE id = $1 FOR NO KEY UPDATE`, b.ID).Scan(&holdPID); err != nil {
+		t.Fatalf("hold row: %v", err)
+	}
+	back := make(chan struct{})
+	go func() {
+		defer close(back)
+		if _, _, err := store.UpdateBlock(ctx, rig.pool, b.ID, store.UpdateBlockData{Content: &picked}, []string{i427Scope}); err != nil {
+			t.Errorf("write back: %v", err)
+		}
+	}()
+	testdb.WaitBlockedBy(t, rig.pool, holdPID, back, "the write back", "transactionid")
+
+	// The review ends; its merge finds Y and is dropped. A stamp, if any,
+	// queues behind the write back.
+	close(release)
+	var cycleErr error
+	cycled := make(chan struct{})
+	go func() {
+		defer close(cycled)
+		cycleErr = <-done
+	}()
+	i427UntilDoneOrSecondWaiter(t, rig.pool, holdPID, cycled)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("release hold: %v", err)
+	}
+	<-back
+	select {
+	case <-cycled:
+	case <-time.After(i427Wait):
+		t.Fatalf("the cycle did not finish within %s", i427Wait)
+	}
+	if cycleErr != nil {
+		t.Fatalf("cycle: %v", cycleErr)
+	}
+
+	if n := rig.rowsAt(t, b.ID, "2026-10-12"); n != 0 {
+		t.Fatalf("the dropped merge landed: %d rows", n)
+	}
+	if !rig.due(t, b.ID) {
+		t.Errorf("the block is marked reviewed although the review's findings were dropped")
+	}
+}
+
+// i427UntilDoneOrSecondWaiter waits until the cycle is done or a second
+// backend waits on the hold (a stamp queued behind the write back).
+func i427UntilDoneOrSecondWaiter(t *testing.T, pool *pgxpool.Pool, holdPID uint32, done <-chan struct{}) {
+	t.Helper()
+	deadline := time.Now().Add(i427Wait)
+	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		var waiters int
+		if err := pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid))`, int64(holdPID)).Scan(&waiters); err != nil {
+			t.Fatalf("poll waiters: %v", err)
+		}
+		if waiters >= 2 {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("neither the cycle finished nor a stamp queued within %s", i427Wait)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
