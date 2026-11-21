@@ -8,7 +8,6 @@ package main
 
 import (
 	"context"
-	"strconv"
 	"testing"
 	"time"
 
@@ -87,10 +86,19 @@ func urgentConsumer(id string) *auth.ConsumerAuth {
 // with the planner), the refusal is 429 rate_limit_exceeded with the exact
 // Retry-After, the reservation settles dispatch.Usage and carries the
 // x-ratelimit-* headers.
+//
+// The meter runs on a clock that does not move (#461): on the real clock the
+// tokens refill at 1 per ms under a TPM of 60000, so a pause of one
+// millisecond between the two admissions of "settle" read 55001 remaining
+// tokens and failed the test (2 of 500 runs pinned to one busy core), and the
+// Retry-After depended on the time between the first and the fourth
+// admission. Frozen, both are exact.
 func TestMeterLimiterMapsTheContract(t *testing.T) {
 	cfgStore := meterTestStore(t, map[string]string{"CTX_GATEWAY_CHAT_RPM_DEFAULT": "4", "CTX_GATEWAY_CHAT_TPM_DEFAULT": "60000"})
-	gw := meterTestGateway(t, cfgStore)
-	l := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, gw.meter, nil).Limiter
+	now := time.Date(2026, 11, 21, 12, 40, 0, 0, time.UTC)
+	meter := keyquota.New(func() time.Time { return now })
+	meter.MarkSeeded()
+	l := gatewayDeps(context.Background(), nil, cfgStore, nil, nil, nil, nil, meter, nil).Limiter
 	ctx := context.Background()
 	est := func(tier string) oai.Estimate {
 		return oai.Estimate{Op: llmlog.GatewayOpChat, MaxTokens: 100, ClientMaxTokens: true, PromptRunes: 9, ServiceTier: tier}
@@ -110,10 +118,10 @@ func TestMeterLimiterMapsTheContract(t *testing.T) {
 		res.Settle(dispatch.Usage{PromptTokens: 1})
 	}
 	_, ref := l.Admit(ctx, ca, modelalias.Alias{}, est("flex"))
-	// The real clock moved a little since the first admission: the wait is
-	// the emission interval 15 s minus that.
-	if ref == nil || ref.Code != oai.CodeRateLimitExceeded || !ref.ShouldRetry || ref.RetryAfter > 15*time.Second || ref.RetryAfter < 14*time.Second {
-		t.Fatalf("flex 4: %+v, want 429 rate_limit_exceeded, retryable, Retry-After just under 15s", ref)
+	// The clock stands: the wait is the emission interval of the bulk
+	// lane's share, 60 s / 4 = 15 s.
+	if ref == nil || ref.Code != oai.CodeRateLimitExceeded || !ref.ShouldRetry || ref.RetryAfter != 15*time.Second {
+		t.Fatalf("flex 4: %+v, want 429 rate_limit_exceeded, retryable, Retry-After 15s", ref)
 	}
 	// The same consumer on its urgent lane passes.
 	res, ref := l.Admit(ctx, ca, modelalias.Alias{}, est(""))
@@ -125,13 +133,13 @@ func TestMeterLimiterMapsTheContract(t *testing.T) {
 	}
 
 	// Settle books dispatch.Usage: 5000 real tokens leave 55000 minus the
-	// next reservation.
+	// next reservation, which is empty (no prompt, a client maximum of 0).
 	ca2 := urgentConsumer("settle")
 	res, _ = l.Admit(ctx, ca2, modelalias.Alias{}, est(""))
 	res.Settle(dispatch.Usage{PromptTokens: 4000, CompletionTokens: 1000})
 	res, _ = l.Admit(ctx, ca2, modelalias.Alias{}, oai.Estimate{Op: llmlog.GatewayOpChat, ClientMaxTokens: true})
-	if got, _ := strconv.Atoi(res.Headers().Get("x-ratelimit-remaining-tokens")); got > 55000 || got < 54990 {
-		t.Errorf("remaining tokens %d after settling 5000, want ≈55000", got)
+	if got := res.Headers().Get("x-ratelimit-remaining-tokens"); got != "55000" {
+		t.Errorf("remaining tokens %q after settling 5000, want 55000", got)
 	}
 
 	// A bulk-ceiling consumer is bulk whatever the tier says.
