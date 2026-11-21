@@ -367,7 +367,7 @@ bash eval-instrument_test.sh        # census, baseline diff, category registry
 ```
 
 `eval-cyclic.sh` counts a case without an answer — no connection, a timeout, an HTTP
-status other than 200, a body that is not a JSON object, `success:false` — in `n_errors`.
+error status, a body that is not a JSON object with `success:true` — in `n_errors`.
 A run in which no case got an answer is no measurement: it stops with exit 1 and writes
 nothing, as do HTTP 401 (naming `CONTEXT_API_KEY_PRIVATE`), a redirect and a TLS
 certificate that does not verify. A run in which some cases got none writes its results

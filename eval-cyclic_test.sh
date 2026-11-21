@@ -14,17 +14,22 @@
 # Pinned:
 #   1. Every case answered: rc 0, results and (--baseline) baseline written,
 #      n_errors 0.
-#   2. No case answered (HTTP 500, a refused connection, a timeout, a 200
-#      whose body is not JSON, a 200 with success:false) or no case at all:
-#      rc 1, nothing written — a run without one answer is no measurement.
+#   2. No case answered (HTTP 500/503, a refused connection, a timeout, a 200
+#      whose body is not JSON, a JSON list, an object without success:true,
+#      success:false) or no case at all: rc 1, nothing written — a run
+#      without one answer is no measurement — and only the reason on stderr.
 #   3. HTTP 401: rc 1 after the first request, CONTEXT_API_KEY_PRIVATE named
-#      (the key itself not), nothing written.
+#      (the key itself not), nothing written. A key with a CR (a CRLF .env)
+#      does not reach any output either. A redirect stops the run (#445):
+#      nothing written, its target gets no request.
 #   4. One case of three without an answer: results with n_errors 1 and the
-#      error on that case, rc 1, and no baseline even with --baseline.
+#      error on that case, rc 1, the summary names it, and no baseline even
+#      with --baseline.
 #   5. A TLS certificate that does not verify stops the run with the advice
 #      that fits it: self-signed → CTX_EVAL_INSECURE=1; a name the certificate
 #      does not carry → WEBHOOK_BASE_URL, without CTX_EVAL_INSECURE; expired →
-#      renew, without CTX_EVAL_INSECURE. A trusted certificate runs.
+#      renew, without CTX_EVAL_INSECURE (SKIP where openssl cannot set the
+#      validity dates, -not_before needs OpenSSL 3.4). A trusted one runs.
 #   6. --help prints the leading comment block and stops before the code.
 
 set -uo pipefail
@@ -51,13 +56,19 @@ CASES = [
     {"id": "c2", "bucket": "M", "query": "q two", "expected_top_k_block_ids": ["b1"]},
     {"id": "c3", "bucket": "L", "query": "q three", "expected_top_k_block_ids": ["b1"]},
 ]
-ANSWER = json.dumps({"sources": [{"id": "b1"}], "confidence": "confident"}).encode()
+ANSWER = json.dumps({"success": True, "sources": [{"id": "b1"}], "confidence": "confident"}).encode()
 TIMEOUT_LINE, TIMEOUT_TEST_LINE = "\nTIMEOUT_S = 120\n", "\nTIMEOUT_S = 1\n"
 # A hanging server sleeps this long before it gives up on its request:
 # longer than the copy's 1-s timeout.
 HANG_S = 3
 
-passed = failed = 0
+passed = failed = skipped = 0
+
+
+def skip(name, why):
+    global skipped
+    skipped += 1
+    print(f"[SKIP] {name}  {why}")
 
 
 def check(ok, name, detail=""):
@@ -76,6 +87,9 @@ def reply(status, ctype, payload):
 
 OK = reply(200, "application/json", ANSWER)
 NOT_JSON = reply(200, "text/html", b"<html>a proxy page</html>")
+JSON_LIST = reply(200, "application/json", b"[]")
+# Another JSON service at the address: an object, but not ctx's answer.
+FOREIGN_JSON = reply(200, "application/json", json.dumps({"status": "ok", "results": []}).encode())
 UNSUCCESSFUL = reply(200, "application/json", json.dumps({"success": False, "error": "synthesis failed"}).encode())
 # The quota refusal carries error_code, not error.
 UNSUCCESSFUL_CODE = reply(200, "application/json", json.dumps({"success": False, "error_code": "quota_exceeded"}).encode())
@@ -94,7 +108,7 @@ class Server:
     """One local server on 127.0.0.1: answer(query) -> (status, type, body);
     a None status hangs past the client's timeout."""
 
-    def __init__(self, answer, tls=None):
+    def __init__(self, answer, tls=None, location=None):
         self.requests = 0
         outer = self
 
@@ -109,6 +123,12 @@ class Server:
                     query = json.loads(self.rfile.read(n) or b"{}").get("query")
                 except ValueError:
                     query = None
+                if location is not None:
+                    self.send_response(302)
+                    self.send_header("Location", location + self.path)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 code, ctype, payload = answer(query)
                 if code is None:
                     time.sleep(HANG_S)
@@ -141,11 +161,11 @@ def free_port():
     return port
 
 
-def run(work, copy, base_url, baseline=True, env_extra=None, args=None, cases=CASES):
+def run(work, copy, base_url, baseline=True, env_extra=None, args=None, cases=CASES, eol="\n"):
     d = tempfile.mkdtemp(dir=work)
     shutil.copyfile(copy, os.path.join(d, "eval-cyclic.sh"))
-    with open(os.path.join(d, ".env"), "w") as f:
-        f.write(f"WEBHOOK_BASE_URL={base_url}\nCONTEXT_API_KEY_PRIVATE={KEY}\n")
+    with open(os.path.join(d, ".env"), "w", newline="") as f:
+        f.write(f"WEBHOOK_BASE_URL={base_url}\nCONTEXT_API_KEY_PRIVATE={KEY}{eol}")
     gold = os.path.join(d, "gold.json")
     with open(gold, "w") as f:
         json.dump({"cases": cases}, f)
@@ -197,6 +217,7 @@ def main(work):
 
     print("--- 2. no case answered: nothing written, rc 1")
     dead = [("HTTP 500", status(500)), ("HTTP 503", status(503)), ("a body that is not JSON", NOT_JSON),
+            ("a JSON list", JSON_LIST), ("a JSON object without success:true", FOREIGN_JSON),
             ("200 with success:false", UNSUCCESSFUL), ("200 with success:false and error_code alone", UNSUCCESSFUL_CODE),
             ("a refused connection", None), ("a timeout", HANG)]
     for name, answer in dead:
@@ -209,8 +230,9 @@ def main(work):
         p, res, base = run(work, copy, f"http://127.0.0.1:{port}")
         if s:
             s.close()
-        check(p.returncode == 1 and res is None and not base and "no case got an answer" in p.stderr,
-              f"{name}: rc 1, no results, no baseline, said so", say(p))
+        check(p.returncode == 1 and res is None and not base and "no case got an answer" in p.stderr
+              and "empty result" not in p.stderr,
+              f"{name}: rc 1, no results, no baseline, said so (and only that)", say(p))
     s = Server(OK)
     p, res, base = run(work, copy, f"http://127.0.0.1:{s.port}", cases=[])
     s.close()
@@ -225,6 +247,18 @@ def main(work):
     check(s.requests == 1, "stopped after the first request", f"requests={s.requests}")
     check("CONTEXT_API_KEY_PRIVATE" in p.stderr and KEY not in p.stderr + p.stdout,
           "names CONTEXT_API_KEY_PRIVATE, not the key", say(p))
+    s = Server(OK)
+    p, res, base = run(work, copy, f"http://127.0.0.1:{s.port}", eol="\r\n")
+    s.close()
+    check(p.returncode == 1 and res is None and not base and KEY not in p.stderr + p.stdout,
+          "a key with a CR (CRLF .env): rc 1, nothing written, the key in no output", say(p))
+    target = Server(OK)
+    s = Server(OK, location=f"http://127.0.0.1:{target.port}")
+    p, res, base = run(work, copy, f"http://127.0.0.1:{s.port}")
+    s.close()
+    target.close()
+    check(p.returncode == 1 and res is None and not base and target.requests == 0 and "refused a redirect" in p.stderr,
+          "a redirect: rc 1, nothing written, its target got no request", f"target={target.requests} " + say(p))
 
     print("--- 4. one case of three without an answer")
     for flag in (True, False):
@@ -238,18 +272,25 @@ def main(work):
         check(res is not None and res.get("n_errors") == 1 and errors.get("c1") is None
               and errors.get("c3") is None and "500" in str(errors.get("c2")),
               f"{label}: n_errors 1, the error on case c2 alone", json.dumps(errors))
+        check("errors=1" in p.stdout and "no answer: c2:" in p.stdout,
+              f"{label}: the summary counts and names it", p.stdout[-300:])
         if flag:
             check("baseline" in p.stderr and "not written" in p.stderr, "says the baseline was not written", say(p))
 
     print("--- 5. TLS: the advice fits the reason")
     good, good_ctx = cert(work, "good", "-days", "2")
-    old, old_ctx = cert(work, "expired", "-not_before", "20200101000000Z", "-not_after", "20200102000000Z")
+    try:
+        old, old_ctx = cert(work, "expired", "-not_before", "20200101000000Z", "-not_after", "20200102000000Z")
+    except subprocess.CalledProcessError as e:
+        old = None
+        skip("expired", f"openssl cannot set the validity dates: {e.stderr.decode(errors='replace').strip()[:160]}")
     tls = [
         ("self-signed", good_ctx, "localhost", {}, ["CTX_EVAL_INSECURE=1"], []),
         ("name not on the certificate", good_ctx, "127.0.0.1", {"SSL_CERT_FILE": good},
          ["WEBHOOK_BASE_URL"], ["CTX_EVAL_INSECURE"]),
-        ("expired", old_ctx, "localhost", {"SSL_CERT_FILE": old}, ["renew"], ["CTX_EVAL_INSECURE"]),
     ]
+    if old is not None:
+        tls.append(("expired", old_ctx, "localhost", {"SSL_CERT_FILE": old}, ["renew"], ["CTX_EVAL_INSECURE"]))
     for name, ctx, host, env, want, unwanted in tls:
         s = Server(OK, ctx)
         p, res, base = run(work, copy, f"https://{host}:{s.port}", env_extra=env)
@@ -277,6 +318,6 @@ try:
 finally:
     shutil.rmtree(work, ignore_errors=True)
 print("")
-print(f"  {passed} passed, {failed} failed")
+print(f"  {passed} passed, {failed} failed, {skipped} skipped")
 sys.exit(1 if failed else 0)
 PY

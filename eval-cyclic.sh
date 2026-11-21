@@ -15,12 +15,13 @@
 # followed (urllib would copy X-Context-Key to any Location) and stops the run naming its target — set the base URL
 # to the address the server answers on.
 #
-# A case without an answer — no connection, a timeout, an HTTP status other than 200, a body that is not a JSON
-# object, or success:false in it — is counted in n_errors and keeps its error. Exit status:
+# A case without an answer — no connection, a timeout, an HTTP error status, a body that is not a JSON object with
+# success:true — is counted in n_errors and keeps its error. Exit status:
 #   0  every case got an answer; the results (and with --baseline the baseline) are written.
 #   1  some case got none: the results are written, the baseline never; or the run stopped without writing
 #      anything — no case got an answer (that is no measurement), HTTP 401 (CONTEXT_API_KEY_PRIVATE is not a key
 #      of that server), a redirect, or a TLS certificate that does not verify.
+#   2  an unknown argument.
 #
 # Misst Top-K-Overlap (k=5) gegen .project/eval-cyclic-gold.json (default, korpus-spezifisch im privaten Submodule).
 # Bewertungs-Methodologie: .project/eval-cyclic-methodology.md
@@ -141,8 +142,8 @@ def tls_advice(err):
 
 def query(q):
     """The server's answer to q, or {"error": …} when the case got none: no
-    connection, a timeout, an HTTP status other than 200, a body that is not a
-    JSON object, or success:false. A failure every case would share — a
+    connection, a timeout, an HTTP error status, a body that is not a JSON
+    object with success:true. A failure every case would share — a
     redirect, a certificate that does not verify, 401 — stops the run before
     anything is written: --baseline would store it."""
     body = json.dumps({"query": q}).encode("utf-8")
@@ -169,16 +170,20 @@ def query(q):
                      f"({e.reason.verify_message}){tls_advice(e.reason)}")
         return {"error": f"no answer: {e.reason}"}
     except Exception as e:
-        # A timeout while reading, a connection the server closed, a broken answer.
-        return {"error": f"no answer: {e!r}"}
+        # A timeout while reading, a connection the server closed, a broken
+        # answer. The type alone: the text of some (an invalid header value,
+        # e.g. a key with a CR from a CRLF .env) quotes the key.
+        return {"error": f"no answer: {type(e).__name__}"}
     try:
         doc = json.loads(raw)
     except ValueError:
         return {"error": "the answer is not JSON"}
     if not isinstance(doc, dict):
         return {"error": "the answer is not a JSON object"}
-    if doc.get("success") is False and not doc.get("error"):
-        doc["error"] = doc.get("error_code") or "success: false"
+    # Every answer of ctx's /api/query carries success:true; an object without
+    # it comes from something else at that address.
+    if doc.get("success") is not True and not doc.get("error"):
+        doc["error"] = doc.get("error_code") or f"success is {doc.get('success')!r}, not true"
     return doc
 
 cases = gold.get("cases", gold) if isinstance(gold, dict) else gold
@@ -301,6 +306,11 @@ PY
 
 echo "[eval-cyclic] gold=$GOLD_FILE branch=$BRANCH ref=$GIT_REF"
 RESULT_JSON=$(run_eval)
+RUN_RC=$?
+# A stopped run said why on stderr already, and writes nothing.
+if (( RUN_RC != 0 )); then
+  exit 1
+fi
 if [[ -z "$RESULT_JSON" ]]; then
   echo "[FATAL] empty result" >&2
   exit 1
