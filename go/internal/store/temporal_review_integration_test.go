@@ -1,13 +1,15 @@
 //go:build integration
 
-// Issue #427: MarkTemporalReviewed records the dream's temporal review only
-// for the title and content it read, as the block's updated_at;
-// PopulateTemporalReview writes the review's findings only while the block
-// holds that title and content. Both reach the row by its primary key alone.
+// Issue #427, #452: PopulateTemporalReview writes the review's rows and the
+// version they stand for (context_temporal_reviews) only while the block
+// holds the title and content the review read; every other temporal writer
+// deletes the version; TemporalReviewDueCol answers due for a block whose
+// title and content no version row carries. The statements reach their rows
+// by primary keys alone.
 //
 // Run with:
 //
-//	go test -tags=integration ./internal/store/ -run 'TestMarkTemporalReviewed|TestPopulateTemporalReview|TestTemporalReview' -count=1 -v
+//	go test -tags=integration ./internal/store/ -run 'TestPopulateTemporalReview|TestTemporalReview|TestRefreshTemporal' -count=1 -v
 package store_test
 
 import (
@@ -22,20 +24,34 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// i427Stamp reads the block's stamp and updated_at.
-func i427Stamp(t *testing.T, pool *pgxpool.Pool, id string) (*time.Time, time.Time) {
+// i452Due answers TemporalReviewDueCol for the block.
+func i452Due(t *testing.T, pool *pgxpool.Pool, id string) bool {
 	t.Helper()
-	var stamp *time.Time
-	var updated time.Time
+	var due bool
 	if err := pool.QueryRow(context.Background(),
-		`SELECT dream_temporal_validated_at, updated_at FROM context_blocks WHERE id = $1`, id).
-		Scan(&stamp, &updated); err != nil {
-		t.Fatalf("read stamp: %v", err)
+		`SELECT `+store.TemporalReviewDueCol+` FROM context_blocks WHERE id = $1`, id).Scan(&due); err != nil {
+		t.Fatalf("read due: %v", err)
 	}
-	return stamp, updated
+	return due
 }
 
-func TestMarkTemporalReviewedOnlyForTheReviewedVersion(t *testing.T) {
+// i452Versions counts the block's rows of context_temporal_reviews.
+func i452Versions(t *testing.T, pool *pgxpool.Pool, id string) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM context_temporal_reviews WHERE block_id = $1`, id).Scan(&n); err != nil {
+		t.Fatalf("count versions: %v", err)
+	}
+	return n
+}
+
+// TestTemporalReviewVersionFollowsTitleAndContent pins the due rule: a block
+// is due until a review of the title and content it holds is written, stays
+// reviewed through a tags write, and is due again once its title or content
+// differs — before any afterwork ran. A write of the extraction's rows
+// deletes the version.
+func TestTemporalReviewVersionFollowsTitleAndContent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
@@ -47,44 +63,131 @@ func TestMarkTemporalReviewedOnlyForTheReviewedVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-
+	if !i452Due(t, pool, b.ID) {
+		t.Fatalf("a block never reviewed is not due")
+	}
+	found := []time.Time{i414Day("2026-02-14")}
 	for _, tc := range []struct{ name, title, content string }{
 		{"other title", "Retro notes (old)", content},
 		{"other content", title, "Retro on 2026-02-03."},
 	} {
-		stamped, err := store.MarkTemporalReviewed(ctx, pool, b.ID, tc.title, tc.content)
-		if err != nil || stamped {
-			t.Errorf("%s: stamped=%v err=%v, want false", tc.name, stamped, err)
+		applied, err := store.PopulateTemporalReview(ctx, pool, b.ID, tc.title, tc.content, found, b.CreatedAt)
+		if err != nil || applied {
+			t.Errorf("%s: applied=%v err=%v, want not applied", tc.name, applied, err)
 		}
-		if stamp, _ := i427Stamp(t, pool, b.ID); stamp != nil {
-			t.Errorf("%s: the stamp was written: %v", tc.name, *stamp)
+		if n := i452Versions(t, pool, b.ID); n != 0 || !i452Due(t, pool, b.ID) {
+			t.Errorf("%s: %d version row(s), due=%v; want none and due", tc.name, n, i452Due(t, pool, b.ID))
 		}
 	}
 
-	stamped, err := store.MarkTemporalReviewed(ctx, pool, b.ID, title, content)
-	if err != nil || !stamped {
-		t.Fatalf("reviewed version: stamped=%v err=%v, want true", stamped, err)
+	if applied, err := store.PopulateTemporalReview(ctx, pool, b.ID, title, content, found, b.CreatedAt); err != nil || !applied {
+		t.Fatalf("reviewed version: applied=%v err=%v, want applied", applied, err)
 	}
-	stamp, updated := i427Stamp(t, pool, b.ID)
-	if stamp == nil || !stamp.Equal(updated) {
-		t.Fatalf("stamp = %v, want the block's updated_at %v", stamp, updated)
+	if i452Due(t, pool, b.ID) {
+		t.Fatalf("the reviewed version is due")
+	}
+	if u, _, err := store.UpdateBlock(ctx, pool, b.ID, store.UpdateBlockData{Tags: []string{"retro"}}, []string{"private"}); err != nil || u == nil {
+		t.Fatalf("tags update: %v", err)
+	}
+	if i452Due(t, pool, b.ID) {
+		t.Errorf("a tags write made the reviewed version due")
 	}
 
-	// A later version leaves the earlier stamp as it is.
 	newer := "Retro moved to 2026-02-17."
-	if u, _, err := store.UpdateBlock(ctx, pool, b.ID, store.UpdateBlockData{Content: &newer}, []string{"private"}); err != nil || u == nil {
+	u, _, err := store.UpdateBlock(ctx, pool, b.ID, store.UpdateBlockData{Content: &newer}, []string{"private"})
+	if err != nil || u == nil {
 		t.Fatalf("update: %v", err)
 	}
-	if stamped, err := store.MarkTemporalReviewed(ctx, pool, b.ID, title, content); err != nil || stamped {
-		t.Errorf("stale version: stamped=%v err=%v, want false", stamped, err)
+	if !i452Due(t, pool, b.ID) {
+		t.Errorf("a content write left the block reviewed before its afterwork ran")
 	}
-	if after, updatedAfter := i427Stamp(t, pool, b.ID); after == nil || !after.Equal(*stamp) || !updatedAfter.After(*after) {
-		t.Errorf("stamp after the stale mark = %v (updated_at %v), want %v and the block due", after, updatedAfter, *stamp)
+	if applied, err := store.RefreshTemporal(ctx, pool, u.ID, u.Content, u.CreatedAt); err != nil || !applied {
+		t.Fatalf("afterwork: applied=%v err=%v", applied, err)
+	}
+	if n := i452Versions(t, pool, b.ID); n != 0 {
+		t.Errorf("the afterwork of a content write left %d version row(s)", n)
 	}
 
-	// A block that is gone answers false, without an error.
-	if stamped, err := store.MarkTemporalReviewed(ctx, pool, "019d0000-0000-7000-9000-000000042700", title, content); err != nil || stamped {
-		t.Errorf("gone block: stamped=%v err=%v, want false and no error", stamped, err)
+	// A block that is gone answers not applied, without an error.
+	if applied, err := store.PopulateTemporalReview(ctx, pool, "019d0000-0000-7000-9000-000000042700", title, content, found, b.CreatedAt); err != nil || applied {
+		t.Errorf("gone block: applied=%v err=%v, want not applied and no error", applied, err)
+	}
+}
+
+// TestRefreshTemporalKeepsTheRowsOfTheReviewOfItsContent is point 3 of issue
+// #452 at the store: RefreshTemporal of the content the block holds, after
+// the review of that title and content, writes nothing and keeps the
+// review's findings; a content written away and back (X, Y, X) is due again
+// and gets the extraction's rows; rows that lack a date of the content are
+// rewritten.
+func TestRefreshTemporalKeepsTheRowsOfTheReviewOfItsContent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	title, content := "Budget notes", "Budget on 2026-05-04."
+	b, err := store.UpsertBlock(ctx, pool, "i452", title, content, nil, nil, "private", false, store.SensitivityWrite{}, "")
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if applied, err := store.RefreshTemporal(ctx, pool, b.ID, b.Content, b.CreatedAt); err != nil || !applied {
+		t.Fatalf("store afterwork: applied=%v err=%v", applied, err)
+	}
+	own := []time.Time{i414Day("2026-05-04")}
+	found := append(slices.Clone(own), i414Day("2026-05-11"))
+	review := func() {
+		t.Helper()
+		if applied, err := store.PopulateTemporalReview(ctx, pool, b.ID, title, content, found, b.CreatedAt); err != nil || !applied {
+			t.Fatalf("review: applied=%v err=%v", applied, err)
+		}
+	}
+	review()
+
+	if applied, err := store.RefreshTemporal(ctx, pool, b.ID, content, b.CreatedAt); err != nil || !applied {
+		t.Fatalf("same content: applied=%v err=%v", applied, err)
+	}
+	if got, want := i414Sources(t, pool, b.ID), i414Want(b.CreatedAt, found...); !slices.Equal(got, want) {
+		t.Errorf("same content: source times = %v, want the review's %v", got, want)
+	}
+	if i452Due(t, pool, b.ID) {
+		t.Errorf("same content: the block is due")
+	}
+
+	// Rows that lack a date of the content (an extraction that changed since
+	// the review) are rewritten, and the block is due again.
+	if _, err := pool.Exec(ctx, `DELETE FROM context_temporal WHERE block_id = $1 AND source_time = $2`, b.ID, own[0]); err != nil {
+		t.Fatalf("drop a date: %v", err)
+	}
+	if applied, err := store.RefreshTemporal(ctx, pool, b.ID, content, b.CreatedAt); err != nil || !applied {
+		t.Fatalf("rows short of a date: applied=%v err=%v", applied, err)
+	}
+	if got, want := i414Sources(t, pool, b.ID), i414Want(b.CreatedAt, own...); !slices.Equal(got, want) {
+		t.Errorf("rows short of a date: source times = %v, want the extraction's %v", got, want)
+	}
+	if !i452Due(t, pool, b.ID) {
+		t.Errorf("rows short of a date: the rewritten block is not due")
+	}
+
+	// X, Y, X: the content returns, the rows of Y's afterwork stand for
+	// neither, and the block is due.
+	review()
+	other := "Budget cancelled."
+	for _, c := range []string{other, content} {
+		u, _, err := store.UpdateBlock(ctx, pool, b.ID, store.UpdateBlockData{Content: &c}, []string{"private"})
+		if err != nil || u == nil {
+			t.Fatalf("update: %v", err)
+		}
+		if applied, err := store.RefreshTemporal(ctx, pool, u.ID, u.Content, u.CreatedAt); err != nil || !applied {
+			t.Fatalf("afterwork of %q: applied=%v err=%v", c, applied, err)
+		}
+	}
+	if got, want := i414Sources(t, pool, b.ID), i414Want(b.CreatedAt, own...); !slices.Equal(got, want) {
+		t.Errorf("X, Y, X: source times = %v, want the extraction's %v", got, want)
+	}
+	if !i452Due(t, pool, b.ID) {
+		t.Errorf("X, Y, X: the block is not due, its review's findings are gone")
 	}
 }
 
@@ -166,7 +269,9 @@ func TestPopulateTemporalReviewNeedsTheReviewedTitle(t *testing.T) {
 	if got, want := i414Sources(t, pool, b.ID), i414Want(b.CreatedAt, found...); !slices.Equal(got, want) {
 		t.Fatalf("source times = %v, want %v", got, want)
 	}
-	if applied, err := store.RefreshTemporal(ctx, pool, b.ID, content, b.CreatedAt); err != nil || !applied {
+	// The rows of the content's own dates again (phase 1's writer; the
+	// afterwork of a same-content write keeps a review's rows).
+	if applied, err := store.PopulateTemporal(ctx, pool, b.ID, content, store.ExtractDates(content), b.CreatedAt); err != nil || !applied {
 		t.Fatalf("reset rows: applied=%v err=%v", applied, err)
 	}
 
@@ -197,16 +302,23 @@ func TestTemporalReviewGuardPlanUsesPrimaryKey(t *testing.T) {
 	}
 }
 
-func TestTemporalReviewStampPlanUsesPrimaryKey(t *testing.T) {
+// TestTemporalReviewCoversPlanUsesPrimaryKeys: RefreshTemporal's check reads
+// the block, its version row and its temporal rows by their keys, whatever
+// the size of the tables.
+func TestTemporalReviewCoversPlanUsesPrimaryKeys(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
 	i427PlanCorpus(t, pool)
-	text, conds := i427GenericPlan(t, pool, store.TemporalReviewStampSQLForTest)
+	text, _ := i427GenericPlan(t, pool, store.TemporalReviewCoversSQLForTest)
 	t.Logf("generic plan:\n%s", text)
-	if !strings.Contains(text, "Index Scan using context_blocks_pkey on context_blocks") ||
-		!slices.Equal(conds, []string{"Index Cond: (id = $1)"}) {
-		t.Errorf("the temporal review stamp must reach the row by its primary key only, plan:\n%s", text)
+	for _, want := range []string{"context_blocks_pkey", "context_temporal_reviews_pkey"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the check must read %s, plan:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "Seq Scan") {
+		t.Errorf("the check scans a table, plan:\n%s", text)
 	}
 }

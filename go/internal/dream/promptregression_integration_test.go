@@ -148,14 +148,13 @@ func fetchBlockInfo(ctx context.Context, pool *pgxpool.Pool, id string) (*dream.
 		SELECT id::text, title, category, content, scope,
 		       COALESCE(quality_score, 0.5),
 		       updated_at, created_at,
-		       COALESCE(dream_keywords, ARRAY[]::text[]),
-		       dream_temporal_validated_at
+		       COALESCE(dream_keywords, ARRAY[]::text[])
 		FROM context_blocks
 		WHERE id = $1::uuid AND NOT is_archived
 	`, id).Scan(
 		&b.ID, &b.Title, &b.Category, &b.Content, &b.Scope,
 		&b.QualityScore, &b.UpdatedAt, &b.CreatedAt,
-		&b.DreamKeywords, &b.DreamTemporalValidatedAt,
+		&b.DreamKeywords,
 	)
 	if err != nil {
 		return nil, err

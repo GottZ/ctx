@@ -268,19 +268,18 @@ func (rig *i427Rig) endClaim(t *testing.T, id string) {
 	}
 }
 
-// due answers what the next pick decides for step 1b (needsTemporal in
-// RunDreamCycle): the block is due for a review when it was never stamped or
-// changed after the stamp.
+// due answers what the next pick decides for step 1b (BlockInfo.TemporalDue
+// in RunDreamCycle): the block is due for a review when no review of the
+// title and content it holds was recorded (store.TemporalReviewDueCol, issue
+// #452).
 func (rig *i427Rig) due(t *testing.T, id string) bool {
 	t.Helper()
-	var stamp *time.Time
-	var updated time.Time
+	var due bool
 	if err := rig.pool.QueryRow(context.Background(),
-		`SELECT dream_temporal_validated_at, updated_at FROM context_blocks WHERE id = $1`, id).
-		Scan(&stamp, &updated); err != nil {
-		t.Fatalf("read stamp: %v", err)
+		`SELECT `+store.TemporalReviewDueCol+` FROM context_blocks WHERE id = $1`, id).Scan(&due); err != nil {
+		t.Fatalf("read due: %v", err)
 	}
-	return stamp == nil || updated.After(*stamp)
+	return due
 }
 
 // rowsAt counts the block's temporal rows for the day day.
@@ -471,12 +470,14 @@ func TestTemporalReviewStampNormalCase(t *testing.T) {
 	}
 }
 
-// TestTemporalReviewStampWaitsForAContentWriteInFlight: a content write that
-// holds the block row when the stamp comes (here held at its COMMIT) makes the
-// stamp wait; the stamp must then judge the version that write left behind,
-// not the one it read before the wait. Before, the stamp was written
-// regardless.
-func TestTemporalReviewStampWaitsForAContentWriteInFlight(t *testing.T) {
+// TestTemporalReviewStampWithAContentWriteInFlight: a content write that
+// holds the block row when the review ends (here held at its COMMIT). Since
+// issue #452 the review's write does not wait for it (the write holds the row
+// FOR NO KEY UPDATE, the review's rows take FOR KEY SHARE): it records the
+// version it read, which the block holds no longer once the write commits —
+// the block must then be due. Before issue #427 the stamp was written
+// regardless; under #427 it waited for the write and judged what it left.
+func TestTemporalReviewStampWithAContentWriteInFlight(t *testing.T) {
 	rig := newI427Rig(t)
 	b := rig.block(t, "Offsite plan", "Offsite on 2026-06-02.")
 
@@ -497,26 +498,13 @@ func TestTemporalReviewStampWaitsForAContentWriteInFlight(t *testing.T) {
 	}()
 	updPID := hold.Wait(t)
 
-	// The review ends; the stamp comes while the write holds the row.
+	// The review ends while the write holds the row; its record does not
+	// wait for the write.
 	close(release)
-	stampWaits := make(chan struct{})
-	var cycleErr error
-	go func() {
-		defer close(stampWaits)
-		cycleErr = <-done
-	}()
-	event := testdb.WaitBlockedBy(t, rig.pool, updPID, stampWaits, "the temporal stamp", "transactionid")
-	t.Logf("the stamp waits on the content write: wait_event=%s", event)
+	i427Await(t, done, "cycle while the write holds the row")
+	t.Logf("the cycle finished while the content write (pid %d) held the row", updPID)
 	hold.Release()
 	<-updated
-	select {
-	case <-stampWaits:
-	case <-time.After(i427Wait):
-		t.Fatalf("the cycle did not finish within %s after the write committed", i427Wait)
-	}
-	if cycleErr != nil {
-		t.Fatalf("cycle: %v", cycleErr)
-	}
 
 	if !rig.due(t, b.ID) {
 		t.Errorf("the stamp landed over the content the write in flight stored")

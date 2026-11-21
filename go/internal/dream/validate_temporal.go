@@ -86,10 +86,11 @@ type TemporalReview struct {
 //
 // The fence tolerance is not cosmetic. This decode is the only consumer of the
 // Phase-2 answer, and its failure path is NON-FATAL: ValidateTemporal logs a
-// WARN and returns no error, while the caller stamps dream_temporal_validated_at
-// regardless ("Mark validated even on non-fatal LLM failure", dream.go). So a
-// fenced answer is not retried — the dates the LLM found are dropped silently
-// until the block's CONTENT changes, which for a settled block can be never.
+// WARN, records nothing and returns no error, so the block stays due and the
+// next pick asks again (issue #452; before, the block was stamped and a
+// fenced answer was not retried until its content changed). A relay that
+// answers every call in a fence would cost an LLM call per pick of every due
+// block without ever recording a review.
 // A relay that accepts the JSON-mode request and answers in a fence anyway
 // costs a block its temporal findings for good, and says so only in a WARN.
 func parseTemporalReview(raw string) (*TemporalReview, error) {
@@ -128,12 +129,17 @@ func (r *Router) temporalReview(ctx context.Context, block *BlockInfo, userPromp
 // The Phase-2 prompt carries only the source block, so the chain resolves at
 // its effective sensitivity (design 03 §2.2, dream row).
 //
+// The review is recorded by its last write (store.PopulateTemporalReview):
+// the rows of the content's dates and the LLM's, and the version of the title
+// and content it read, in one transaction (issue #452); it replaces rows an
+// earlier review left. A review that failed records nothing and the block
+// stays due with the rows it has: an error return (the database), an LLM
+// failure and an answer that does not parse (both non-fatal, no error). Before,
+// the caller stamped the block after each of them.
+//
 // dropped reports that a write of the validation found the block no longer
 // holding what it was picked with, or gone, and wrote nothing (issue #427):
-// the validation then stands for a version the block no longer holds, and the
-// caller must not mark the block reviewed (store.MarkTemporalReviewed). It is
-// false on every other return, the error returns included, which leave the
-// stamp to the caller as before.
+// the block stays due. It is false on every other return.
 func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.Options, block *BlockInfo) (dropped bool, err error) {
 	// Phase 1: Deterministic re-extraction.
 	contentTimes := store.ExtractDates(block.Content)
@@ -212,15 +218,16 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 	}
 
 	if err != nil {
-		// LLM failure is non-fatal — phase 1 already ran.
-		slog.Warn("dream: temporal phase2 LLM failed (non-fatal)", "block_id", block.ID, "error", err)
+		// LLM failure is non-fatal: nothing is recorded, the block stays due
+		// and keeps its rows (phase 1 already ran).
+		slog.Warn("dream: temporal phase2 LLM failed (non-fatal), the block stays due", "block_id", block.ID, "error", err)
 		return false, nil
 	}
 
 	review, parseErr := parseTemporalReview(resp.Message.Content)
 	if parseErr != nil {
 		entry.Err = fmt.Errorf("parse: %w", parseErr)
-		slog.Warn("dream: temporal phase2 parse failed", "block_id", block.ID, "error", parseErr, "raw", resp.Message.Content)
+		slog.Warn("dream: temporal phase2 parse failed, the block stays due", "block_id", block.ID, "error", parseErr, "raw", resp.Message.Content)
 		return false, nil
 	}
 
@@ -237,21 +244,14 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 		}
 	}
 
+	// Record the review: the content's dates and the LLM's — skipped when a
+	// write replaced the title or the content during the review: the review
+	// read both, its findings belong to the old ones, and the block is left
+	// to its next review (dropped).
+	if dropped, err := recordTemporalReview(ctx, pool, block, contentTimes, newTimes); err != nil || dropped {
+		return dropped, err
+	}
 	if len(newTimes) > 0 {
-		// Re-populate with merged times — skipped when a write replaced the
-		// title or the content during the review: the review read both, its
-		// findings belong to the old ones, and the block is left to its next
-		// review (dropped).
-		merged := append(contentTimes, newTimes...)
-		applied, err := store.PopulateTemporalReview(ctx, pool, block.ID, block.Title, block.Content, merged, block.CreatedAt)
-		if err != nil {
-			return false, fmt.Errorf("validate temporal: merge populate: %w", err)
-		}
-		if !applied {
-			slog.Info("dream: temporal phase2 — block changed or gone since the pick, findings dropped",
-				"block_id", block.ID, "new_dates", len(newTimes))
-			return true, nil
-		}
 		slog.Info("dream: temporal phase2 — LLM found additional dates",
 			"block_id", block.ID,
 			"new_dates", len(newTimes),
@@ -274,6 +274,25 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 		)
 	}
 
+	return false, nil
+}
+
+// recordTemporalReview writes the review of block: the rows of contentTimes
+// and newTimes and the version of the title and content the review read
+// (store.PopulateTemporalReview). dropped reports a block that changed since
+// the pick, or is gone: nothing was written.
+func recordTemporalReview(ctx context.Context, pool *pgxpool.Pool, block *BlockInfo, contentTimes, newTimes []time.Time) (dropped bool, err error) {
+	merged := make([]time.Time, 0, len(contentTimes)+len(newTimes))
+	merged = append(append(merged, contentTimes...), newTimes...)
+	applied, err := store.PopulateTemporalReview(ctx, pool, block.ID, block.Title, block.Content, merged, block.CreatedAt)
+	if err != nil {
+		return false, fmt.Errorf("validate temporal: record review: %w", err)
+	}
+	if !applied {
+		slog.Info("dream: temporal phase2 — block changed or gone since the pick, findings dropped",
+			"block_id", block.ID, "new_dates", len(newTimes))
+		return true, nil
+	}
 	return false, nil
 }
 

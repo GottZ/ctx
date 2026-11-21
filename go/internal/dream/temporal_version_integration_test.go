@@ -37,6 +37,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/internal/testdb"
 )
 
 // i452Apart keeps two transaction starts apart: now() has microsecond
@@ -588,7 +589,42 @@ func TestTemporalReviewThatAlwaysFailsDoesNotHoldThePick(t *testing.T) {
 	prompts = rig.review.record(finding)
 	i427Await(t, rig.cycle(), "third cycle")
 	i452WantReviewOf(t, *prompts, "Failing review on 2026-11-02.")
-	_ = other
+	if rig.due(t, other.ID) {
+		t.Errorf("the block reviewed in the second cycle is still due")
+	}
+}
+
+// TestTemporalReviewFailedOnTheLLMStaysDue: a review whose LLM call fails, or
+// whose answer does not parse, reviewed nothing; the block keeps the rows it
+// had and the next pick reviews it again. Before, the cycle stamped the block
+// after the failure and the version was not reviewed until it changed.
+func TestTemporalReviewFailedOnTheLLMStaysDue(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reply func(context.Context, string) (string, error)
+	}{
+		{"the LLM call fails", func(context.Context, string) (string, error) { return "", errors.New("i452: backend down") }},
+		{"the answer does not parse", func(context.Context, string) (string, error) { return "the dates are 2026-05-18", nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newI427Rig(t)
+			b := rig.block(t, "Budget plan", "Budget review on 2026-05-04.")
+			if p := rig.next(t, b.ID, i427Dates("2026-05-11")); len(p) != 1 {
+				t.Fatalf("first review: %d review(s), want 1", len(p))
+			}
+			title := "Budget plan, second draft"
+			rig.update(t, rig.pool, b.ID, store.UpdateBlockData{Title: &title})
+
+			rig.embed(t, b.ID)
+			rig.endClaim(t, b.ID)
+			rig.review.set(tc.reply)
+			i427Await(t, rig.cycle(), "failing cycle")
+			if n := rig.rowsAt(t, b.ID, "2026-05-11"); n != 8 {
+				t.Errorf("the failed review changed the rows: the earlier finding has %d rows, want 8", n)
+			}
+			i452WantReviewOf(t, rig.next(t, b.ID, i427Dates("2026-05-11")), title)
+		})
+	}
 }
 
 // i452Finding is the stub's answer to a review: one date derived from the
@@ -782,5 +818,47 @@ func i452Write(ctx context.Context, rig *i427Rig, id string, rnd *rand.Rand, w, 
 	if data.Content != nil || data.Title != nil {
 		v := i427Vec()
 		fail("embed", store.StoreEmbedding(ctx, rig.pool, id, i427Model, v.Slice()))
+	}
+}
+
+// TestPickBlockReadsTheReviewVersionByKey pins the pick's plan: the due-ness
+// in its RETURNING reads the one row of context_temporal_reviews by the
+// primary key, on the generic plan a driver-cached statement runs and on the
+// custom plan, over a corpus where half the blocks carry a version.
+func TestPickBlockReadsTheReviewVersionByKey(t *testing.T) {
+	rig := newI427Rig(t)
+	ctx := context.Background()
+	if _, err := rig.pool.Exec(ctx, `
+		INSERT INTO context_blocks (category, title, content, scope, embedding, embed_model)
+		SELECT 'decisions', 'Pick plan ' || g, 'Pick plan content ' || g, $1,
+		       array_fill(0.03::real, ARRAY[1024])::vector, $2
+		  FROM generate_series(1, 3000) g`, i427Scope, i427Model); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := rig.pool.Exec(ctx, `
+		INSERT INTO context_temporal_reviews (block_id, version)
+		SELECT id, digest(content_hash || title, 'sha256') FROM context_blocks WHERE title LIKE 'Pick plan %' AND right(title, 1) IN ('0','2','4','6','8')`); err != nil {
+		t.Fatalf("seed versions: %v", err)
+	}
+	if _, err := rig.pool.Exec(ctx, `ANALYZE context_blocks; ANALYZE context_temporal_reviews`); err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	linkable := rig.router.TypeSet(ctx).DreamLinkableTypes()
+	claim := int(dream.PickClaimTTL(rig.router).Seconds())
+	for _, plan := range []struct {
+		name string
+		cost testdb.PlanCost
+	}{
+		{"generic", testdb.ExplainGeneric(t, rig.pool, dream.PickBlockSQLForTest, claim, linkable, []string{i427Scope})},
+		{"custom", testdb.ExplainCustom(t, rig.pool, dream.PickBlockSQLForTest, claim, linkable, []string{i427Scope})},
+	} {
+		t.Logf("%s plan: %s", plan.name, plan.cost)
+		if !strings.Contains(plan.cost.Plan, "context_temporal_reviews_pkey") {
+			t.Errorf("%s plan: the due-ness does not read context_temporal_reviews by its key:\n%s", plan.name, plan.cost.Plan)
+		}
+		if strings.Contains(plan.cost.Plan, `"Relation Name": "context_temporal_reviews"`) &&
+			strings.Contains(plan.cost.Plan, `"Node Type": "Seq Scan",`+"\n"+`              "Parent Relationship": "SubPlan"`) {
+			t.Errorf("%s plan: a sequential scan of context_temporal_reviews:\n%s", plan.name, plan.cost.Plan)
+		}
 	}
 }
