@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // StdoutIsTTY reports whether stdout is an interactive terminal (not piped or
@@ -64,6 +65,23 @@ func renderOrJSON(resp []byte, render func(resp []byte) error) error {
 		return nil
 	}
 	return render(resp)
+}
+
+// lineCellBreaks are the bytes that would end a cell or a record of a
+// tab-separated line.
+var lineCellBreaks = strings.NewReplacer("\t", " ", "\r", " ", "\n", " ")
+
+// lineCell is one cell of a line-per-record answer (`ctx search --lines`, the
+// answer line of `ctx update`): a tab, a carriage return or a line break in
+// the text would split the record, so each becomes a space. On a terminal the
+// text passes the escape allowlist as well (titles are foreign text,
+// sanitize.go); in a pipe every other byte stays as the server sent it.
+func lineCell(s string, tty bool) string {
+	s = lineCellBreaks.Replace(s)
+	if tty {
+		s = sanitizeTerminal(s)
+	}
+	return s
 }
 
 // PrintRaw writes raw bytes to stdout.

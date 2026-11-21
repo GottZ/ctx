@@ -37,6 +37,7 @@ func RegisterCommands(root *cobra.Command) {
 	root.AddCommand(statsCmd(getClient))
 	root.AddCommand(categoriesCmd(getClient))
 	root.AddCommand(getCmd(getClient))
+	root.AddCommand(updateCmd(getClient))
 	root.AddCommand(deleteCmd(getClient))
 	root.AddCommand(listMetaCmd(getClient))
 	root.AddCommand(digestCmd(getClient))
@@ -307,7 +308,8 @@ func saveCmd(getClient func() (*Client, error)) *cobra.Command {
 // ── search ───────────────────────────────────────────────────────────.
 
 func searchCmd(getClient func() (*Client, error)) *cobra.Command {
-	return &cobra.Command{
+	var lines bool
+	cmd := &cobra.Command{
 		Use:     "search [category] [query:text] [tags:a,b] [tags_all:a,b] [types:a,b] [cluster:handle] [limit:N] [compact:false]",
 		Aliases: []string{"browse", "b"},
 		Short:   "Compact search (no LLM)",
@@ -327,7 +329,8 @@ func searchCmd(getClient func() (*Client, error)) *cobra.Command {
   ctx search decisions query:guard tags:security limit:5
   ctx search tags_all:acme,invoice
   ctx search index query:topic-map types:system-meta
-  ctx search cluster:019c9629-0000-7000-9000-00000000a001`,
+  ctx search cluster:019c9629-0000-7000-9000-00000000a001
+  ctx search learnings query:prompt --lines | cut -f1`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := getClient()
 			if err != nil {
@@ -372,10 +375,46 @@ func searchCmd(getClient func() (*Client, error)) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if lines {
+				return printSearchLines(resp)
+			}
 			PrintJSON(resp)
 			return checkEnvelope(resp, envelopeRequired)
 		},
 	}
+	cmd.Flags().BoolVar(&lines, "lines", false, "print one hit per line: id, category, title (tab-separated)")
+	return cmd
+}
+
+// printSearchLines is the --lines answer of `ctx search` (#408): one hit per
+// line, id, category and title tab-separated, after the precedent of `ctx guard
+// list --ids-only`. A failed search prints nothing on stdout, so `| cut -f1`
+// never reads an error body as ids; no hit, no line. A hit's V-11 framing
+// goes to stderr, one line per note, led by the hit's id (framingNotes).
+func printSearchLines(resp []byte) error {
+	if err := checkEnvelope(resp, envelopeRequired); err != nil {
+		return err
+	}
+	var answer struct {
+		Results []struct {
+			ID              string `json:"id"`
+			Category        string `json:"category"`
+			Title           string `json:"title"`
+			Untrusted       bool   `json:"untrusted"`
+			UntrustedOrigin string `json:"untrusted_origin"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(resp, &answer); err != nil {
+		return fmt.Errorf("unexpected answer: %s", truncateForError(resp))
+	}
+	tty := StdoutIsTTY()
+	for _, r := range answer.Results {
+		fmt.Println(lineCell(r.ID, tty) + "\t" + lineCell(r.Category, tty) + "\t" + lineCell(r.Title, tty))
+		for _, note := range framingNotes(r.Untrusted, r.UntrustedOrigin) {
+			Errorf("%s %s", r.ID, note)
+		}
+	}
+	return nil
 }
 
 // ── stats ────────────────────────────────────────────────────────────.
@@ -395,22 +434,69 @@ func categoriesCmd(getClient func() (*Client, error)) *cobra.Command {
 // ── get ──────────────────────────────────────────────────────────────.
 
 func getCmd(getClient func() (*Client, error)) *cobra.Command {
-	var includeArchived bool
-	cmd := simpleCmd("get <block-id>", []string{"g"}, "Fetch full block", "manage", cobra.ExactArgs(1),
-		func(args []string) map[string]any {
-			body := map[string]any{
-				"action": "get",
-				"id":     args[0],
+	var (
+		includeArchived bool
+		fields          []string
+		window          getWindow
+		cmd             *cobra.Command
+	)
+	body := func(args []string) map[string]any {
+		body := map[string]any{
+			"action": "get",
+			"id":     args[0],
+		}
+		// #201: absent unless asked, so a plain `ctx get` posts the bytes it
+		// always posted.
+		if includeArchived {
+			body["include_archived"] = true
+		}
+		// #408: the parts of a block (#407's fields and content window), each
+		// absent unless asked, for the same reason.
+		if len(fields) > 0 {
+			body["fields"] = fields
+		}
+		if cmd.Flags().Changed("offset") {
+			body["content_offset"] = window.offset
+		}
+		if cmd.Flags().Changed("limit") {
+			body["content_limit"] = window.limit
+		}
+		return body
+	}
+	cmd = simpleCmd("get <block-id>", []string{"g"}, "Fetch a block, or some of its fields", "manage", cobra.ExactArgs(1), body, getClient)
+	whole := cmd.RunE
+	cmd.RunE = func(c *cobra.Command, args []string) error {
+		if !c.Flags().Changed("field") {
+			return whole(c, args)
+		}
+		// An empty --field is what --field "$name" hands over when $name is
+		// empty: refused, never read as "the whole block".
+		names := make([]string, 0, len(fields))
+		for _, f := range fields {
+			if f = strings.TrimSpace(f); f != "" {
+				names = append(names, f)
 			}
-			// #201: absent unless asked, so a plain `ctx get` posts the bytes it
-			// always posted.
-			if includeArchived {
-				body["include_archived"] = true
-			}
-			return body
-		}, getClient)
+		}
+		if len(names) == 0 {
+			return fmt.Errorf("--field is empty — name a field of the block, e.g. --field content")
+		}
+		fields = names
+		cl, err := getClient()
+		if err != nil {
+			return err
+		}
+		resp, err := cl.Post("manage", body(args))
+		if err != nil {
+			return err
+		}
+		return printGetFields(resp, fields, window)
+	}
 	cmd.Flags().BoolVar(&includeArchived, "include-archived", false,
 		"also read an archived block (full block id only, your own scopes; the answer carries archived: true)")
+	cmd.Flags().StringSliceVar(&fields, "field", nil,
+		"print only this field of the block (repeatable or comma-separated): one prints its value raw, several a JSON object")
+	cmd.Flags().IntVar(&window.offset, "offset", 0, "first character of the content to read (counted from 0)")
+	cmd.Flags().IntVar(&window.limit, "limit", 0, "read at most this many characters of the content")
 	return cmd
 }
 
