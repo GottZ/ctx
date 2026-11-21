@@ -15,7 +15,7 @@ import (
 )
 
 // The chat call of ctx-goldset carries private block content — the G-Q
-// prompt, a paraphrase prompt, a judge excerpt — to a backend that passed
+// prompt, a multi-gold slice prompt, a judge excerpt — to a backend that passed
 // RequireOnPrem by its base_url. A redirect is followed only within the origin
 // (scheme, host, port) of that base_url, by the rule internal/clientkey holds
 // the ctx tools to (#446): net/http alone follows a 307/308 to any host with

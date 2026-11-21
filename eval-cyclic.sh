@@ -7,7 +7,8 @@
 #        bash eval-cyclic.sh --reference-date YYYY-MM-DD — frozen reference date
 #        bash eval-cyclic.sh --branch <name>       — overrides git-branch im Output
 #        bash eval-cyclic.sh --internal            — bypass reverse-proxy (uses http://ctx:8080 from n8nintern network; override via CTX_INTERNAL_URL)
-#        CTX_EVAL_INSECURE=1 bash eval-cyclic.sh   — accept a self-signed TLS certificate (verification is on by default)
+#        CTX_EVAL_INSECURE=1 bash eval-cyclic.sh   — accept a self-signed TLS certificate (verification is on by default;
+#                                                    a certificate that does not verify stops the run)
 #
 # The key goes only to the base URL (and to the proxy http_proxy names, for an http:// one): a redirect is not
 # followed (urllib would copy X-Context-Key to any Location) and stops the run naming its target — set the base URL
@@ -37,7 +38,7 @@ while [[ $# -gt 0 ]]; do
     --reference-date) REFERENCE_DATE="$2"; shift 2 ;;
     --branch) BRANCH_OVERRIDE="$2"; shift 2 ;;
     --internal) INTERNAL=true; shift ;;
-    -h|--help) sed -n '1,21p' "$0"; exit 0 ;;
+    -h|--help) sed -n '1,22p' "$0"; exit 0 ;;
     *) echo "[FATAL] unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -123,6 +124,10 @@ def query(q):
     except RefusedRedirect as e:
         sys.exit(f"[FATAL] {e}")
     except urllib.error.URLError as e:
+        if isinstance(e.reason, ssl.SSLCertVerificationError):
+            # Every case would fail the same way, and --baseline would store it.
+            sys.exit(f"[FATAL] the TLS certificate of {written(webhook)} does not verify ({e.reason.verify_message}); "
+                     "CTX_EVAL_INSECURE=1 accepts a self-signed one")
         return {"error": str(e), "results": []}
     except Exception as e:
         return {"error": str(e), "results": []}

@@ -88,6 +88,38 @@ func TestGoldbenchRunStopsOnARefusedRedirect(t *testing.T) {
 	}
 }
 
+// TestGoldbenchRunStopsOnARefusedRedirectWithWorkers: with four workers the
+// first refusal still ends the run — before the cases run out — and no worker
+// sends anything to the other server.
+func TestGoldbenchRunStopsOnARefusedRedirectWithWorkers(t *testing.T) {
+	var otherSeen, homeSeen atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		otherSeen.Add(1)
+		_, _ = io.WriteString(w, refusalAnswer)
+	}))
+	t.Cleanup(other.Close)
+	home := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		homeSeen.Add(1)
+		http.Redirect(w, r, other.URL+r.URL.RequestURI(), http.StatusPermanentRedirect)
+	}))
+	t.Cleanup(home.Close)
+
+	const cases = 200
+	cfg := Config{Endpoint: home.URL, Model: "m", Concurrency: 4, Seed: 1, TimeoutSec: 5, TempOverride: -1}
+	jobs, runs := refusalJobs(cases, false, 0)
+	err := executeJobs(context.Background(), cfg, jobs, runs, nil)
+
+	if !errors.As(err, new(*clientkey.Refusal)) {
+		t.Fatalf("err = %v, want the run to end with the refusal", err)
+	}
+	if n := homeSeen.Load(); n >= cases {
+		t.Errorf("the configured server saw %d chat calls for %d cases — the run did not stop", n, cases)
+	}
+	if n := otherSeen.Load(); n != 0 {
+		t.Errorf("the other server saw %d requests", n)
+	}
+}
+
 // TestGoldbenchRunStopsOnARefusedRedirectOfALaterSample: a refusal of sample
 // s>0 (-samples, temperature above 0) stops the run as well, not only a
 // refusal of the first call of a slot.

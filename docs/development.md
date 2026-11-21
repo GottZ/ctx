@@ -414,6 +414,10 @@ through the same code (`internal/clientkey`), with an API key and without one; t
 (`-api-key`, else `GOLDBENCH_API_KEY`) goes along as a bearer token. A redirect within
 that origin is followed; one anywhere else — an `http` → `https` upgrade on the same
 host included — is refused before it is sent, so neither the key nor the prompt leaves.
+The one exception is a proxy the environment names: with `HTTP_PROXY` set and an
+`http://` endpoint that is not loopback, the call goes to that proxy, key and prompt
+included (Go's `ProxyFromEnvironment`; set `NO_PROXY` for the host, or use `https://`,
+where the proxy relays only the encrypted tunnel).
 The refusal stops the run, as in `ctx-armsweep`: every call goes to the same endpoint
 and would be refused the same way, and scoring those cases 0 would report the
 endpoint's configuration as the model's score. The run exits 1 with the refusal, which
@@ -663,11 +667,13 @@ these labels yet. `-kappa-min` has **no default** on purpose — a threshold nam
 after seeing the data describes the result instead of testing it. An endpoint
 that is not on-prem aborts the run before the first cell, on both axes the
 registry offers (declared locality and the actual host), and model, endpoint and
-prompt digest reach the stamp. Every chat call of the tool — generator, paraphrase
-and judge — follows a redirect only within the origin (scheme, host and port) of the
-backend's `base_url` and refuses one anywhere else before it is sent
-(`internal/clientkey`), so a redirect cannot carry block content past the on-prem
-check; before, a 307 or 308 to any host was followed with the body.
+prompt digest reach the stamp. Every chat call of the tool — the G-Q generator, the
+generators of the multi-gold slices and the judge — follows a redirect only within the
+origin (scheme, host and port) of the backend's `base_url` and refuses one anywhere else
+before it is sent (`internal/clientkey`), so a redirect cannot carry block content past
+the on-prem check; before, a 307 or 308 to any host was followed with the body. A proxy
+the environment names is the exception, as for `ctx-goldbench` above: with
+`HTTP_PROXY` set and an `http://` `base_url` that is not loopback, the call goes to it.
 
 **`-draw` / `-calibrate`: calibrating on the population that decides.** The
 control draws `judge -kappa` reads are, by construction, disjoint from the pooled
