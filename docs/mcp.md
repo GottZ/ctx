@@ -35,6 +35,60 @@ A minimal client configuration (Claude Code):
 }
 ```
 
+## Local stdio server: `ctx mcp serve`
+
+`ctx mcp serve` runs the CLI as a local MCP server on stdin/stdout. It forwards to
+`<CTX_BASE_URL>/mcp` with the key of the CLI configuration (environment or config
+file, [CLI reference](cli.md)), so a local client needs neither a header nor an OAuth
+client:
+
+```sh
+claude mcp add ctx -- ctx mcp serve
+claude mcp add ctx -- ctx mcp serve --allow-files /home/me/notes
+```
+
+| | |
+|---|---|
+| Tools | the server's, mirrored: `tools/list` is answered from the server on every request, with its names, descriptions and schemas, so a tool added on the server appears without a CLI release. The proxy keeps no copy of the list |
+| Instructions | the server's, taken into the answer to `initialize` (and `server/discover`) as they were when the proxy opened its session to the server; a change of `mcp.instructions` reaches the next `ctx mcp serve` process. A server that does not complete the connect within 10 seconds leaves that one answer without instructions (the reason goes to stderr); the tools still work once it answers |
+| Answers and refusals | a call through the proxy has the effect and the answer of the same call against `/mcp`: the server's results, its tool errors and its JSON-RPC errors pass through with their values unchanged (decoded and encoded again by the go-sdk, so key order may differ and a field that SDK version does not know is not carried). Staged writes (`confirm_writes`) stage and confirm as they do on `/mcp`. The client's request `_meta` is not forwarded |
+| Failures | a server that cannot be reached, a key the server refuses (`401`) and a missing configuration are answered, not fatal: `tools/list` answers a JSON-RPC error and a tool call an error result, each naming the cause (`ctx mcp serve: cannot use the server at <url>/mcp: …`, `… refused the API key of the ctx configuration (HTTP 401)`, `… no usable ctx configuration: …`). The process keeps serving; after a server restart the next request reaches it again. The key is never part of an answer, a log line or the command line, and it goes only to the origin of `CTX_BASE_URL` (scheme, host and port): a redirect within that origin is followed, a redirect anywhere else is refused before it is sent and answered with its cause (`… refused a redirect to <url>: ctx mcp serve follows redirects only within <origin> …`) |
+| Session | one session to the server, opened on the first request; opening it (one `server/discover` or `initialize` exchange) waits at most 10 seconds, so a server that takes the connection and never answers ends in an error naming the wait instead of holding the requests behind it. A failure that leaves the connection intact (unreachable, `401`, a `429` or `5xx` the SDK treats as transient) keeps it; a failure that breaks it (an answer that is not JSON-RPC, a `403` or `404` from something in front of the server) drops it, and the next request opens a new one. A request waiting while another one connects gives up with its own deadline. Nothing in the proxy grows with the number of tools or the time it runs |
+| stdout | carries protocol frames only; diagnostics go to stderr |
+
+**Local files (`--allow-files DIR`, repeatable).** Without the flag the proxy offers no
+file access and forwards every argument unchanged. Each `DIR` must be an existing
+directory; an empty value is refused at start. With the flag, two parameters join the
+mirrored schemas (a parameter sent as `null` counts as absent):
+
+- `content_file` on every tool whose schema has a `content` string (today `store`,
+  `update`, `issue_create`, `issue_comment`): the proxy reads the file and sends its
+  text as `content`. Give `content` or `content_file`, not both; where `content` is
+  required, the schema the proxy lists no longer requires it, since `content_file` can
+  stand in. The file must be a regular, non-empty UTF-8 file of at most 50 KB (the
+  server's content cap). Otherwise the call is refused and nothing is sent.
+- `output_file` on `get`: the proxy writes the block's content to a temporary file
+  beside the target and renames it over the target, so a reader or a second `get` to
+  the same file sees a whole file, never a truncated or mixed one. A new file gets mode
+  `0600`; a replaced one keeps its permission bits (a hard link to the old file keeps
+  the old content). The answer is the block's JSON with
+  `"output_file": {"path": …, "bytes": …}` where `content` was. The target must be
+  absent or a regular file in an existing directory; this is checked before the `get`
+  is sent. A `get` the server refuses passes through unchanged and nothing is written.
+
+Both paths are confined to the given directories after symlink resolution: a relative
+path resolves against the directory the server was started in, symlinks are resolved
+as far as the path exists (a file that does not exist yet resolves through its
+directory), and the result must lie under one of the directories, which are resolved
+when the server starts. The file is then opened through Go's `os.Root` for that
+directory, which refuses any component that leads outside it, so a link that leaves
+the directory is refused also when it appears between the check and the open. Each
+directory is opened once at start and held, so a file is always opened in the
+directory that was named. Files are opened without blocking and checked to be regular
+files after the open, so a FIFO put in a file's place cannot hold a call. The same
+rules apply on Windows, where reserved device names such as `NUL` are refused. A stdio server that read any path a model asks for would hand the file's
+content to whatever the model stores it in; the directories bound that.
+
 ## Results and errors
 
 Every tool answers with one text content item. Depending on the tool that text is
