@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 189,
-    "migration_count": 77,
+    "migration_max": 190,
+    "migration_count": 78,
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -3803,6 +3803,12 @@
           "name": "version",
           "type": "bytea",
           "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "extraction",
+          "type": "bytea",
+          "not_null": false,
           "storage": "x"
         }
       ],
