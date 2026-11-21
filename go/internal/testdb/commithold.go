@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,8 +16,9 @@ import (
 )
 
 // CommitHoldBound bounds every wait of a CommitHold: how long a held COMMIT
-// waits for Release before it goes on by itself, and how long Wait waits for
-// a transaction to reach its COMMIT.
+// waits for Release before it goes on by itself — which fails the test, see
+// HoldCommitPool — and how long Wait waits for a transaction to reach its
+// COMMIT.
 const CommitHoldBound = 30 * time.Second
 
 // CommitHold holds one transaction at its COMMIT, with every lock it took
@@ -40,11 +42,16 @@ type CommitHold struct {
 	release  chan struct{}
 	relOnce  sync.Once
 	heldOnce sync.Once
+	// expired is set when the held COMMIT went on after CommitHoldBound
+	// without Release.
+	expired atomic.Bool
 }
 
 // HoldCommitPool returns a pool on the database at dsn whose first
 // transaction matching match is held at its COMMIT (CommitHold). The hold is
-// released and the pool closed when the test ends.
+// released and the pool closed when the test ends. A held COMMIT that went on
+// by itself after CommitHoldBound, before Release, fails the test then: the
+// test's waits ran against a transaction that was no longer held.
 func HoldCommitPool(t *testing.T, dsn string, match func(sql string) bool) (*pgxpool.Pool, *CommitHold) {
 	t.Helper()
 	h := &CommitHold{
@@ -65,6 +72,9 @@ func HoldCommitPool(t *testing.T, dsn string, match func(sql string) bool) (*pgx
 	t.Cleanup(func() {
 		h.Release()
 		pool.Close()
+		if h.expired.Load() {
+			t.Errorf("commit hold: the held COMMIT went on by itself after %s, before Release", CommitHoldBound)
+		}
 	})
 	return pool, h
 }
@@ -126,6 +136,7 @@ func (h *CommitHold) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data p
 		select {
 		case <-h.release:
 		case <-time.After(CommitHoldBound):
+			h.expired.Store(true)
 		}
 	}
 	return ctx
