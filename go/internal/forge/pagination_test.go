@@ -68,6 +68,14 @@ func TestPaginationFollowsEveryRFC8288Spelling(t *testing.T) {
 			return lines(`<` + n[strings.Index(n, "/repos/"):] + `>; rel="next"`)
 		},
 		"first-rel-wins": func(n string) []string { return lines(`<` + n + `>; rel="next"; rel="prev"`) },
+		// The first of two next links counts; REL is a parameter name in any
+		// case; a tab is whitespace; an unquoted value ends at the comma.
+		"first-of-two-next": func(n string) []string {
+			return lines(`<` + n + `>; rel="next", </repos/o/r/issues?page=99>; rel="next"`)
+		},
+		"param-name-case":         func(n string) []string { return lines(`<` + n + `>; REL="next"`) },
+		"tab-whitespace":          func(n string) []string { return lines("<" + n + ">;\trel=\"last\tnext\"") },
+		"unquoted-no-space-comma": func(n string) []string { return lines(`<` + n + `&x=9>; rel=last,<` + n + `>; rel=next`) },
 		// A trailing ";" without a parameter: RFC 8288 Appendix B.3 reads it,
 		// and the parser before #474 did.
 		"trailing-semicolon":       func(n string) []string { return lines(`<` + n + `>; rel="next";`) },
@@ -129,6 +137,14 @@ func TestPaginationUnparseableNextIsAnError(t *testing.T) {
 		"empty-middle-param": func(n string) []string { return lines(`<` + n + `>; ; rel="next"`) },
 		"nbsp":               func(n string) []string { return lines(`<` + n + ">;\xc2\xa0rel=\"next\"") },
 		"bare-token-value":   func(n string) []string { return lines(`<` + n + `>; rel="next", last`) },
+		// A target url.Parse refuses, text between two link-values, an empty
+		// unquoted value, a doubled quote inside a quoted-string, and the word
+		// next right after a word that only contains it.
+		"target-does-not-parse": func(n string) []string { return lines(`<%zz>; rel="next"`) },
+		"junk-between-values":   func(n string) []string { return lines(`<` + n + `&x=9>; rel="last" x<` + n + `>; rel="next"`) },
+		"empty-unquoted-value":  func(n string) []string { return lines(`<` + n + `&x=9>; title=, <` + n + `>; rel="next"`) },
+		"doubled-quote":         func(n string) []string { return lines(`<` + n + `>; title="a""b"; rel="next"`) },
+		"next-after-non-word":   func(n string) []string { return lines(`<` + n + `; rel="anext next"`) },
 		// An unquoted rel value is a token (RFC 8288 §3.3); "=" and "/" are not tchars.
 		"rel-not-a-token":   func(n string) []string { return lines(`<` + n + `>; rel=next=bad`) },
 		"rel-not-a-token-2": func(n string) []string { return lines(`<` + n + `>; rel=next/page`) },

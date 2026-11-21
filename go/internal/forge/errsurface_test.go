@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -112,6 +113,11 @@ func TestForgeErrorsKeepTheirClass(t *testing.T) {
 	for _, err := range []error{errCanceled, errDeadline, errRefused} {
 		if err == nil || !strings.HasPrefix(err.Error(), "forge: request failed: ") {
 			t.Errorf("error %v lost its forge prefix", err)
+		}
+		// The cause chain holds no *url.Error: a caller's errors.As would
+		// hand the request URL back out.
+		if ue := new(url.Error); errors.As(err, &ue) {
+			t.Errorf("error %v keeps net/http's *url.Error (%q) in its chain", err, ue.URL)
 		}
 	}
 }
