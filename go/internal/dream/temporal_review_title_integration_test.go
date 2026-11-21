@@ -92,8 +92,11 @@ func TestTemporalReviewTitleReplacedDuringReview(t *testing.T) {
 // the block only FOR KEY SHARE, and a title write runs no temporal afterwork
 // that would replace them. The findings of the old title land — and the stamp,
 // which compares after the merge committed, leaves the block due, so the next
-// review replaces them. The merge is held at its COMMIT (testdb.CommitHold),
-// so the order does not depend on timing.
+// review runs on the current title; here it finds that title's date, and its
+// merge replaces the rows. A next review that finds no date writes nothing and
+// leaves them, as after any title change: that is the missing temporal
+// afterwork of a title write, not this window. The merge is held at its
+// COMMIT (testdb.CommitHold), so the order does not depend on timing.
 func TestTemporalReviewTitleReplacedAfterTheMergeGuard(t *testing.T) {
 	rig := newI427Rig(t)
 	b := rig.block(t, "Review on 2026-04-14", "Notes of the review, nothing dated in here.")
