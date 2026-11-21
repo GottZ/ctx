@@ -368,7 +368,7 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 	}
 	firstETag := page.ETag
 	var maxSeen time.Time
-	for {
+	for n := 1; ; n++ {
 		if err := m.applyPage(ctx, project, dryRun, page); err != nil {
 			return err // cursor NOT advanced for this page (commit is below the apply)
 		}
@@ -378,7 +378,7 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 				maxSeen = mu
 			}
 			if !maxSeen.IsZero() {
-				m.commitFetchCursor(ctx, project.ID, "issues", firstETag, maxSeen)
+				m.commitFetchCursor(ctx, project.ID, "issues", legETag(firstETag, n, page.NextURL), maxSeen)
 			}
 		}
 		if page.NextURL == "" {
@@ -399,7 +399,7 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 	}
 	firstETag := page.ETag
 	var maxSeen time.Time
-	for {
+	for n := 1; ; n++ {
 		res, err := m.applyComments(ctx, project, page.Comments)
 		if err != nil {
 			return err
@@ -414,7 +414,7 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 			maxSeen = mu
 		}
 		if !maxSeen.IsZero() {
-			m.commitFetchCursor(ctx, project.ID, "comments", firstETag, maxSeen)
+			m.commitFetchCursor(ctx, project.ID, "comments", legETag(firstETag, n, page.NextURL), maxSeen)
 		}
 		if page.NextURL == "" {
 			return nil
@@ -423,6 +423,21 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 			return err
 		}
 	}
+}
+
+// legETag is the ETag a leg's cursor carries after its page n: the first
+// page's when that page was the whole listing (n == 1, no next page), ""
+// otherwise. The next run sends it as If-None-Match for its first page, and a
+// 304 ends the leg as unchanged — true only when the first page is all there
+// is. Saved after page 1 of a longer listing, it answered 304 for a retry
+// whose since had not moved (a failed page 2, more issues than a page on one
+// updated_at) and for a run where only a later page had changed: the pages
+// after the first were never read, and the 304 cleared the error (#474).
+func legETag(first string, n int, next string) string {
+	if n == 1 && next == "" {
+		return first
+	}
+	return ""
 }
 
 // commitFetchCursor durably advances the etag/since fetch cursor for one leg

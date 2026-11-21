@@ -1,6 +1,8 @@
 package forge
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -17,11 +19,14 @@ import (
 // pageSize per page, and a Link header naming the next page. link renders
 // the header field lines for a next-page URL, so a test chooses the spelling
 // (#474: RFC 8288 allows more than the one GitHub uses). The comments
-// listing answers an empty page.
+// listing answers an empty page. With etags, a page carries an ETag
+// derived from its body, as GitHub's do, and a matching If-None-Match is
+// answered 304.
 type fakeGitHub struct {
 	srv      *httptest.Server
 	pageSize int
 	link     func(next string) []string
+	etags    bool
 
 	mu     sync.Mutex
 	issues []fakeIssue
@@ -104,5 +109,15 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			"body": "", "state": "open", "updated_at": it.Updated.UTC().Format(time.RFC3339),
 		})
 	}
-	_ = json.NewEncoder(w).Encode(items)
+	body, _ := json.Marshal(items)
+	if f.etags {
+		sum := sha256.Sum256(body)
+		etag := `"` + hex.EncodeToString(sum[:8]) + `"`
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+	}
+	_, _ = w.Write(body)
 }
