@@ -8,9 +8,12 @@
 // / IssueCreatedListSQL / IssueBoardCountSQL) — no SQL copied into the test
 // (M072/M075 line). Proven here:
 //
-//   - status list rides idx_blocks_workflow_board (no Seq Scan, no Sort), P95<100ms;
-//   - q rides the FTS GIN idx_context_ts_de/_ts_en (no Seq Scan), P95<100ms;
-//   - sort=created rides idx_blocks_workflow_created (no Sort), P95<100ms;
+//   - status list rides idx_blocks_workflow_board (no Seq Scan, no Sort);
+//   - q rides the FTS GIN idx_context_ts_de/_ts_en (no Seq Scan);
+//   - sort=created rides idx_blocks_workflow_created (no Sort);
+//   - the three list paths read at most a tenth of the table's pages in the
+//     custom and the generic plan (gate F; the P95 against the 100-ms budget
+//     is logged, not judged);
 //   - board count is an Index Only Scan over the board index;
 //   - RED differential: with index/bitmap scans disabled the SAME query Seq-Scans
 //     the 210k table and runs an order of magnitude slower — the index earns its keep;
@@ -154,6 +157,13 @@ func w6Explain(t *testing.T, pool *pgxpool.Pool, name, q string, args ...any) (s
 // pool's Close in the cleanup.
 func w6GenericPlan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, label, decl, stmt, execArgs string) string {
 	t.Helper()
+	return w6GenericExplain(t, ctx, pool, label, "", decl, stmt, execArgs)
+}
+
+// w6GenericExplain is w6GenericPlan with EXPLAIN options (e.g. "(ANALYZE,
+// BUFFERS) ").
+func w6GenericExplain(t *testing.T, ctx context.Context, pool *pgxpool.Pool, label, opts, decl, stmt, execArgs string) string {
+	t.Helper()
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("%s: begin: %v", label, err)
@@ -169,7 +179,7 @@ func w6GenericPlan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, label,
 	if i := strings.IndexByte(decl, '('); i >= 0 {
 		name = decl[:i]
 	}
-	rows, err := tx.Query(ctx, "EXPLAIN EXECUTE "+name+execArgs)
+	rows, err := tx.Query(ctx, "EXPLAIN "+opts+"EXECUTE "+name+execArgs)
 	if err != nil {
 		t.Fatalf("%s: explain execute: %v", label, err)
 	}
@@ -191,16 +201,43 @@ func w6GenericPlan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, label,
 	return b.String()
 }
 
-// w6LatencyBudget is the P95 wall-clock budget for the live-endpoint gate (F).
-// Lokal strikt 100ms (design/03 §7-W6). Auf geteilten CI-Runnern (env CI, 4
-// vCPU, noisy neighbor) ×3 Headroom: Die Wall-Clock misst dort primär
-// Scheduler-Starvation, nicht die Query — der Fail-Lauf 28723663836 zeigte
-// ~50ms MITTLERE Wall-Clock pro Call bei lokal ~1ms P95 (Faktor ~50 reine
-// Runner-Last, kein Plan-Bezug; derselbe Commit war 20 min vorher und im
-// nightly grün). Das Regressions-Signal für den Index-Pfad tragen die
-// deterministischen Plan-Gates (A)–(E) (benannter Index, kein Seq Scan,
-// server-seitige Execution Time <100ms) — dieses Gate bleibt als
-// Wall-Clock-Decke gegen katastrophale Regressionen.
+// w6BufferShare is gate (F)'s bound (#369): a list path reads at most
+// 1/w6BufferShare of context_blocks' pages, counted as the root node's shared
+// buffers (hit + read) of EXPLAIN (ANALYZE, BUFFERS). A sequential scan reads
+// every page, and a path through the 200k backdrop reads most of them — the
+// order of magnitude the red differential (E) and design/03's "ROT ohne
+// Achse-02-Index" stand on. A count of the work, so a loaded host neither
+// fails nor passes it.
+const w6BufferShare = 10
+
+// w6BuffersRe pulls the counts of one "Buffers: shared hit=H read=R …" line.
+var w6BuffersRe = regexp.MustCompile(`Buffers: shared(?: hit=([0-9]+))?(?: read=([0-9]+))?`)
+
+// w6RootBuffers returns the shared buffers (hit + read) of the plan's first
+// Buffers line — the root node's, which counts its children's — and whether
+// the plan has one.
+func w6RootBuffers(plan string) (int64, bool) {
+	for line := range strings.Lines(plan) {
+		if strings.HasPrefix(strings.TrimSpace(line), "Planning:") {
+			return 0, false
+		}
+		m := w6BuffersRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		hit, _ := strconv.ParseInt(m[1], 10, 64)
+		read, _ := strconv.ParseInt(m[2], 10, 64)
+		return hit + read, true
+	}
+	return 0, false
+}
+
+// w6LatencyBudget is the P95 wall-clock budget gate (F) logs against: 100 ms
+// locally (design/03 §7-W6), 300 ms on shared CI runners (env CI), where the
+// wall clock measured mostly scheduler starvation (run 28723663836: about
+// 50 ms per call against about 1 ms P95 locally, no plan change). It was the
+// ceiling against catastrophic regressions; since #369 that ceiling is the
+// buffer bound (w6BufferShare), and the P95 is logged only.
 func w6LatencyBudget() time.Duration {
 	if os.Getenv("CI") != "" {
 		return 300 * time.Millisecond
@@ -333,23 +370,27 @@ func TestW6Explain_Integration(t *testing.T) {
 		}
 	})
 
-	// (E) RED differential: force seq scan on a dedicated conn; the SAME status
+	// (E) RED differential: force seq scan in a transaction of its own; the SAME status
 	// query Seq-Scans the 210k table and runs far slower than the indexed plan.
 	t.Run("red_differential_vs_seqscan", func(t *testing.T) {
 		_, idxMs := w6Explain(t, pool, "indexed",
 			store.WorkflowStatusListSQL, w6Scope, "issue", "backlog", w6Top, w6TopID, nil, 50)
 
-		conn, err := pool.Acquire(ctx)
+		// The planner switches are SET LOCAL in a transaction that rolls
+		// back (#369): a plain SET stayed on the pool connection after its
+		// release, and gate (F), next on that connection, measured the
+		// forced sequential scan instead of the indexed paths.
+		tx, err := pool.Begin(ctx)
 		if err != nil {
-			t.Fatalf("acquire: %v", err)
+			t.Fatalf("begin: %v", err)
 		}
-		defer conn.Release()
-		for _, guc := range []string{"SET enable_indexscan=off", "SET enable_bitmapscan=off", "SET enable_indexonlyscan=off"} {
-			if _, err := conn.Exec(ctx, guc); err != nil {
+		defer func() { _ = tx.Rollback(ctx) }()
+		for _, guc := range []string{"SET LOCAL enable_indexscan=off", "SET LOCAL enable_bitmapscan=off", "SET LOCAL enable_indexonlyscan=off"} {
+			if _, err := tx.Exec(ctx, guc); err != nil {
 				t.Fatalf("guc %q: %v", guc, err)
 			}
 		}
-		rows, err := conn.Query(ctx, "EXPLAIN (ANALYZE, BUFFERS) "+store.WorkflowStatusListSQL,
+		rows, err := tx.Query(ctx, "EXPLAIN (ANALYZE, BUFFERS) "+store.WorkflowStatusListSQL,
 			w6Scope, "issue", "backlog", w6Top, w6TopID, nil, 50)
 		if err != nil {
 			t.Fatalf("forced explain: %v", err)
@@ -375,55 +416,67 @@ func TestW6Explain_Integration(t *testing.T) {
 		}
 	})
 
-	// (F) P95 < budget over the live list endpoints (indexed paths). Budget:
-	// lokal 100ms, CI 300ms (w6LatencyBudget). Reißt eine Messung, wird EINMAL
-	// komplett neu gemessen; rot nur, wenn DIESELBE Metrik in beiden Messungen
-	// reißt — ein transienter noisy-neighbor-Spike heilt sich, eine echte
-	// Regression (deterministisch langsamer Pfad) reißt beide Male.
-	t.Run("p95_within_budget", func(t *testing.T) {
-		budget := w6LatencyBudget()
-		measure := func() (statusP95, qP95, createdP95 time.Duration) {
-			statusP95 = w6P95(t, 40, func() {
-				if _, _, err := store.ListWorkflowBlocks(ctx, pool, store.WorkflowListQuery{
-					Scopes: []string{w6Scope}, TypeName: "issue", Status: "backlog", Limit: 50,
-				}); err != nil {
-					t.Fatal(err)
+	// (F) The live list paths stay cheap at the target scale (design/03
+	// §7-W6: "P95 < 100 ms"). Judged as work, not as wall clock (#369, #474
+	// point 6): the P95 over the store functions failed under parallel load
+	// (119–143 ms against 100 ms, about 40 ms alone), and its retry did not
+	// help a host that stays loaded. Each path's statement — the one its
+	// store function runs, with its first-page binds — is EXPLAINed with
+	// ANALYZE and BUFFERS in the custom form and in the generic form pgx
+	// switches to from a connection's sixth execution, and reads at most
+	// 1/w6BufferShare of the table's pages (w6BufferShare). The P95 over 40
+	// calls of each store function is still measured and logged against the
+	// budget; it judges nothing on a shared host.
+	t.Run("list_paths_read_a_bounded_share", func(t *testing.T) {
+		var relpages int64
+		if err := pool.QueryRow(ctx, `SELECT relpages FROM pg_class WHERE oid = 'context_blocks'::regclass`).Scan(&relpages); err != nil {
+			t.Fatalf("relpages: %v", err)
+		}
+		top := "'2999-01-01'::timestamptz,'" + w6TopID + "'::uuid,NULL::text[],50)"
+		for _, p := range []struct {
+			label, sql, decl, execArgs string
+			args                       []any
+		}{
+			{"status", store.WorkflowStatusListSQL, "w6_f_status(text,text,text,timestamptz,uuid,text[],int)",
+				"('" + w6Scope + "','issue','backlog'," + top, []any{w6Scope, "issue", "backlog", w6Top, w6TopID, nil, 50}},
+			{"q", store.IssueSearchUpdatedSQL, "w6_f_q(text,text,text,text,timestamptz,uuid,text[],int)",
+				"('" + w6Scope + "','issue','','kanbanoid'," + top, []any{w6Scope, "issue", "", "kanbanoid", w6Top, w6TopID, nil, 50}},
+			{"created", store.IssueCreatedListSQL, "w6_f_created(text,text,text,timestamptz,uuid,text[],int)",
+				"('" + w6Scope + "','issue',''," + top, []any{w6Scope, "issue", "", w6Top, w6TopID, nil, 50}},
+		} {
+			custom, _ := w6Explain(t, pool, p.label+"-custom", p.sql, p.args...)
+			generic := w6GenericExplain(t, ctx, pool, p.label+"-generic", "(ANALYZE, BUFFERS) ", p.decl, p.sql, p.execArgs)
+			for form, plan := range map[string]string{"custom": custom, "generic": generic} {
+				n, ok := w6RootBuffers(plan)
+				t.Logf("%s (%s plan): %d shared buffers of %d table pages (bound %d)", p.label, form, n, relpages, relpages/w6BufferShare)
+				if !ok || n > relpages/w6BufferShare {
+					t.Errorf("%s (%s plan): %d shared buffers (plan has a count: %v), want at most %d — 1/%d of context_blocks' %d pages",
+						p.label, form, n, ok, relpages/w6BufferShare, w6BufferShare, relpages)
 				}
-			})
-			qP95 = w6P95(t, 40, func() {
-				if _, _, err := store.SearchIssues(ctx, pool, store.IssueReadQuery{
-					Scope: w6Scope, Q: "kanbanoid", Limit: 50,
-				}); err != nil {
-					t.Fatal(err)
-				}
-			})
-			createdP95 = w6P95(t, 40, func() {
-				if _, _, err := store.ListIssuesByCreated(ctx, pool, store.IssueReadQuery{
-					Scope: w6Scope, Limit: 50,
-				}); err != nil {
-					t.Fatal(err)
-				}
-			})
-			return statusP95, qP95, createdP95
+			}
 		}
-		statusP95, qP95, createdP95 := measure()
-		t.Logf("P95 (budget %v): status=%v q=%v created=%v", budget, statusP95, qP95, createdP95)
-		if statusP95 < budget && qP95 < budget && createdP95 < budget {
-			return
-		}
-		// Riss in Messung 1 → einmalige komplette Re-Messung (transienter
-		// Runner-Spike vs. echte Regression).
-		status2, q2, created2 := measure()
-		t.Logf("P95 re-measure (budget %v): status=%v q=%v created=%v", budget, status2, q2, created2)
-		if statusP95 >= budget && status2 >= budget {
-			t.Errorf("status P95 %v / re-measure %v ≥ budget %v", statusP95, status2, budget)
-		}
-		if qP95 >= budget && q2 >= budget {
-			t.Errorf("q P95 %v / re-measure %v ≥ budget %v", qP95, q2, budget)
-		}
-		if createdP95 >= budget && created2 >= budget {
-			t.Errorf("created P95 %v / re-measure %v ≥ budget %v", createdP95, created2, budget)
-		}
+		statusP95 := w6P95(t, 40, func() {
+			if _, _, err := store.ListWorkflowBlocks(ctx, pool, store.WorkflowListQuery{
+				Scopes: []string{w6Scope}, TypeName: "issue", Status: "backlog", Limit: 50,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+		qP95 := w6P95(t, 40, func() {
+			if _, _, err := store.SearchIssues(ctx, pool, store.IssueReadQuery{
+				Scope: w6Scope, Q: "kanbanoid", Limit: 50,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+		createdP95 := w6P95(t, 40, func() {
+			if _, _, err := store.ListIssuesByCreated(ctx, pool, store.IssueReadQuery{
+				Scope: w6Scope, Limit: 50,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+		t.Logf("P95 over 40 calls (budget %v, logged, not judged): status=%v q=%v created=%v", w6LatencyBudget(), statusP95, qP95, createdP95)
 	})
 
 	// (G) board count == actual (ground truth).
