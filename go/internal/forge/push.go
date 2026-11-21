@@ -118,7 +118,7 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 		// candidates through the bound advance (issue #452) — otherwise it
 		// stays listed for good and, past pushBatchLimit, keeps later
 		// candidates out of the listing.
-		if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, ctxH, ctxFields, projected); err != nil {
+		if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, c.BaseHash, ctxH, ctxFields, projected); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -141,7 +141,7 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 	}
 	if patch.empty() {
 		// Only a never-pushed field (milestone) diverged: advance base, 0 wire.
-		if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, ctxH, ctxFields, projected); err != nil {
+		if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, c.BaseHash, ctxH, ctxFields, projected); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -153,7 +153,7 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 	if err := client.UpdateIssue(ctx, repo, c.ForgeID, patch); err != nil {
 		return false, err
 	}
-	if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, ctxH, ctxFields, projected); err != nil {
+	if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, c.BaseHash, ctxH, ctxFields, projected); err != nil {
 		return false, err
 	}
 	res.Pushed++
@@ -213,7 +213,7 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 	}
 	if ctxH == c.BaseHash {
 		// In sync — 0 wire; the row leaves the candidates as in pushIssue.
-		if err := store.AdvancePushBase(ctx, p.pool, c.BlockID, ctxH, ctxFields, projected); err != nil {
+		if err := store.AdvancePushBase(ctx, p.pool, c.BlockID, c.BaseHash, ctxH, ctxFields, projected); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -256,7 +256,7 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 	if err := client.UpdateComment(ctx, repo, c.ForgeID, body); err != nil {
 		return false, err
 	}
-	if err := store.AdvancePushBase(ctx, p.pool, c.BlockID, ctxH, ctxFields, projected); err != nil {
+	if err := store.AdvancePushBase(ctx, p.pool, c.BlockID, c.BaseHash, ctxH, ctxFields, projected); err != nil {
 		return false, err
 	}
 	res.Pushed++

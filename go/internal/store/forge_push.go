@@ -248,6 +248,14 @@ type PushProjection func(b *Block) string
 //     updated_at the write carried, and the next run diffs the block against
 //     the base this advance wrote — the version the forge holds.
 //
+// The base is written only while the mapping still holds listedBase, the base
+// the listing read (issue #486). A pull of another ctxd instance on the same
+// database can move it between the listing and this advance — converge on
+// what the PATCH sent, then pull a remote edit — and the listed version is no
+// longer what the forge holds. Then base_hash and base_fields stay as that
+// pull wrote them and synced_at := -infinity: the row stays a candidate and
+// the next run decides again against the base the pull wrote.
+//
 // synced_at is compared in SQL only (the candidate filter): '-infinity' is a
 // valid timestamptz, but pgx cannot scan it into a time.Time, so a reader that
 // selects the column has to cast or filter it in SQL
@@ -255,8 +263,9 @@ type PushProjection func(b *Block) string
 // the filter).
 //
 // Locks: the block row (FOR SHARE), then the mapping row — the order of the
-// pull's writes.
-func AdvancePushBase(ctx context.Context, pool *pgxpool.Pool, blockID, ctxHash string, ctxFields json.RawMessage, project PushProjection) error {
+// pull's writes. The mapping row's base is compared in the UPDATE itself, on
+// the row version the UPDATE locks.
+func AdvancePushBase(ctx context.Context, pool *pgxpool.Pool, blockID, listedBase, ctxHash string, ctxFields json.RawMessage, project PushProjection) error {
 	return pgxdb.Write(ctx, pool,
 		pgxdb.Stages{Begin: "store: advance push base begin", Commit: "store: advance push base commit"},
 		func(tx pgx.Tx) error {
@@ -274,12 +283,14 @@ func AdvancePushBase(ctx context.Context, pool *pgxpool.Pool, blockID, ctxHash s
 			default:
 				holds = project(&b) == ctxHash
 			}
+			// In SET every column reference reads the row as it was before
+			// this UPDATE, so all three expressions test the stored base.
 			if _, err := tx.Exec(ctx, `
 				UPDATE context_project_sync_map
-				   SET base_hash = $2,
-				       synced_at = CASE WHEN $4 THEN $5::timestamptz ELSE '-infinity'::timestamptz END,
-				       metadata = metadata || $3::jsonb
-				 WHERE block_id = $1::uuid`, blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at); err != nil {
+				   SET base_hash = CASE WHEN base_hash = $6 THEN $2 ELSE base_hash END,
+				       synced_at = CASE WHEN base_hash = $6 AND $4 THEN $5::timestamptz ELSE '-infinity'::timestamptz END,
+				       metadata = CASE WHEN base_hash = $6 THEN metadata || $3::jsonb ELSE metadata END
+				 WHERE block_id = $1::uuid`, blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase); err != nil {
 				return fmt.Errorf("store: advance push base: %w", err)
 			}
 			return nil
