@@ -840,12 +840,20 @@ func matchVonBis(query string, now time.Time) *TemporalResult {
 	return nil
 }
 
+// nowWords start a range form at today: "von jetzt bis Freitag", "from now
+// until Friday" (issue #463). They are no day keyword elsewhere — "now" in a
+// question rarely names a day to rank by.
+var nowWords = toWordSet("jetzt", "now")
+
 // matchRangeForm derives the window of a range form whose start phrase is
 // m[1] and whose end phrase is m[2].
 func matchRangeForm(query string, m []string, ref string, exact bool, now time.Time) *TemporalResult {
 	tense := DetectVerbTense(query)
 	backward := tense == "past"
 	startEdge := resolvePhraseEdge(m[1], backward, now)
+	if w := phraseWords(m[1]); len(w) > 0 && nowWords[w[0]] {
+		startEdge = phraseEdge{day: truncDate(now)}
+	}
 	endEdge := resolvePhraseEdge(m[2], backward, now)
 	if startEdge.day.IsZero() || endEdge.day.IsZero() || exact && startEdge.fuzzy {
 		return nil
@@ -936,8 +944,11 @@ func matchSeit(query string, now time.Time) *TemporalResult {
 
 func matchBis(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
-	// Skip if "von...bis" or "from … until" (handled by matchVonBis)
-	if reVonBis.MatchString(lower) || reFromTo.MatchString(lower) {
+	// Skip if "von...bis" (handled by matchVonBis). A "from … until" whose
+	// start the rules cannot read keeps its "until": "from the start until
+	// 2026-03-05" is the time up to that day, and in "from backlog to done
+	// until Friday" the "from … to" is no window at all (issue #463).
+	if reVonBis.MatchString(lower) {
 		return nil
 	}
 	// Skip if "letzten X bis Y" (handled by matchLetztenWDBis)

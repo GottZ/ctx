@@ -117,9 +117,6 @@ func TestRules_AbBeforeAStartTheRulesCannotRead(t *testing.T) {
 		"Was lief ab Projektstart bis 05.03.2026?": {"2026-03-05", "", DirUntil},
 		"ab Projektstart bis 2026-03-05":           {"2026-03-05", "", DirUntil},
 		"vom Projektstart bis 05.03.2026":          {"2026-03-05", "", "past"},
-		// "from … until" is "von … bis": a start the rules cannot read leaves
-		// the day date the day it names, as "vom Projektstart bis …" does.
-		"What happened from the start until 2026-03-05?": {"2026-03-05", "", "past"},
 	})
 }
 
@@ -142,9 +139,6 @@ var negativeOpenRules = []string{
 	"from scratch to production", "What are the differences between context-search and context-agent?",
 	"before you push", "after login", "from the database to the cache", "until further notice", "since version 5",
 	"after 2048 tokens", "before 2048 bytes", "between 10 and 20 percent", "from 2048 to 4096 tokens", "until 2048 MB",
-	// "Morgan" is a typo of "morgen" to the keyword matching; "from" takes
-	// no such start.
-	"Tickets from Morgan until Friday",
 }
 
 func TestRules_NegativeCorpusOpensNoWindow(t *testing.T) {
