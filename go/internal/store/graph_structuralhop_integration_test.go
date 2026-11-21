@@ -194,12 +194,29 @@ func TestStructuralHop_FailClosedLoud(t *testing.T) {
 // tx re-creates the pre-M104 state and must produce a Sort over
 // sl.created_at. Assertions are limited to the LEGS (index usage, no sort) —
 // never the exact whole-plan shape (pgx generic-vs-custom plans).
+//
+// The plan is pinned in both states the tables pass through (#369): freshly
+// written and analyzed (visibility map empty), and vacuumed and analyzed
+// (visibility map set — the steady state of a table at the target, and what
+// autovacuum's insert-triggered vacuum leaves). With 20 000 filler blocks the
+// second state put an explicit Sort into the reverse leg (a merge join over
+// the whole context_blocks primary key: the blocks-first plan, cheap only
+// because the block table was small); whether an autovacuum had reached
+// context_structural_links before the EXPLAIN decided the outcome, which
+// fits the one CI failure on PR #400. With 100 000 filler blocks both
+// states take the index order (measured: 50 000 already, 20 000 not).
+// Autovacuum is off for the two tables, so no worker changes the state
+// between the steps.
 func TestStructuralHop_IndexPlan(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `ALTER TABLE context_structural_links SET (autovacuum_enabled = off);
+		ALTER TABLE context_blocks SET (autovacuum_enabled = off)`); err != nil {
+		t.Fatalf("autovacuum off: %v", err)
+	}
 
 	// Seed ~10^4 structural rows over 160 blocks (PK surface needs distinct
 	// pairs) + one degree-10^3 hub, then ANALYZE (stale stats flip plans
@@ -230,7 +247,7 @@ func TestStructuralHop_IndexPlan(t *testing.T) {
 		INSERT INTO context_blocks (id, category, title, content, scope)
 		SELECT ('019f6017-0024-7000-9000-' || lpad(to_hex(i), 12, '0'))::uuid,
 		       'learnings', 'w2 filler ' || i, 'x', 'w2'
-		FROM generate_series(0, 19999) AS i`); err != nil {
+		FROM generate_series(0, 99999) AS i`); err != nil {
 		t.Fatalf("seed filler blocks: %v", err)
 	}
 	// Degree hub in BOTH directions (the EXPLAIN frontier is the hub): block 0
@@ -265,23 +282,35 @@ func TestStructuralHop_IndexPlan(t *testing.T) {
 	if total < 6000 {
 		t.Fatalf("seed too small for a representative plan: %d rows", total)
 	}
-	if _, err := pool.Exec(ctx, `ANALYZE context_structural_links; ANALYZE context_blocks`); err != nil {
-		t.Fatalf("analyze: %v", err)
-	}
-
 	frontier := []string{"019f6017-0023-7000-9000-000000000000"}
 	binds := []any{
 		frontier, []string{"w2"}, nil, 25, nil, nil, nil, []string{}, []string{"knowledge"},
 	}
 
-	plan := explainPlan(t, pool, ctx, false, binds)
-	for _, idx := range []string{"idx_struct_links_graph_fwd", "idx_struct_links_graph_rev"} {
-		if !strings.Contains(plan, idx) {
-			t.Errorf("W2-G3: plan does not use %s:\n%s", idx, plan)
+	// One statement per Exec: VACUUM cannot run in the implicit transaction
+	// of a multi-statement query.
+	var plan string
+	for _, state := range []struct {
+		name  string
+		stmts []string
+	}{
+		{"analyzed", []string{`ANALYZE context_structural_links`, `ANALYZE context_blocks`}},
+		{"vacuumed and analyzed", []string{`VACUUM ANALYZE context_structural_links`, `VACUUM ANALYZE context_blocks`}},
+	} {
+		for _, stmt := range state.stmts {
+			if _, err := pool.Exec(ctx, stmt); err != nil {
+				t.Fatalf("%s: %s: %v", state.name, stmt, err)
+			}
 		}
-	}
-	if hasLegSortNode(plan) {
-		t.Errorf("W2-G3: explicit Sort NODE over sl.created_at in the legs (index order not used):\n%s", plan)
+		plan = explainPlan(t, pool, ctx, false, binds)
+		for _, idx := range []string{"idx_struct_links_graph_fwd", "idx_struct_links_graph_rev"} {
+			if !strings.Contains(plan, idx) {
+				t.Errorf("W2-G3 (%s): plan does not use %s:\n%s", state.name, idx, plan)
+			}
+		}
+		if hasLegSortNode(plan) {
+			t.Errorf("W2-G3 (%s): explicit Sort NODE over sl.created_at in the legs (index order not used):\n%s", state.name, plan)
+		}
 	}
 
 	// PERMANENT red probe: pre-M104 state inside a rolled-back tx — the plan
