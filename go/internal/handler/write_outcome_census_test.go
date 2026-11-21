@@ -8,16 +8,15 @@ package handler
 // a staged card, and requires its failure branch — the statements after the
 // call up to the `if err != nil` that handles it — to carry the
 // "write_outcome" key, directly or in a function of this package it calls
-// there. The paths below do not name it yet; a new direct write call that
-// does not fails this test. Name the outcome on its line; a removed or named
-// path lowers the count.
+// there. Every direct write call names it (issue #483); one that does not
+// fails this test. Name the outcome on its line.
 //
 // Limits: a call whose error is returned to the caller (`return store.F(…)`,
 // a core both transports share) is counted, not followed — its callers name
-// the outcome or not (the REST issue writes do not yet; the MCP issue tools
-// do); the census sees the key, not which helper fills it (writeOutcome on an
-// unlabeled bracket would pass); and it knows only the store functions in
-// storeWrites.
+// the outcome (the issue writes: writeIssueWriteError and mcpIssueError); the
+// census sees the key, not which helper fills it — which classifier a path
+// takes is held by the cut tests (write_outcome_cut_integration_test.go); and
+// it knows only the store functions in storeWrites.
 
 import (
 	"go/ast"
@@ -41,15 +40,8 @@ var storeWrites = []string{
 }
 
 // writesWithoutOutcome counts, per file, the write calls whose failure line
-// names no outcome yet.
-var writesWithoutOutcome = map[string]int{
-	"blob.go":                      1, // blob-manage delete
-	"chat_stage.go":                2, // the chat's staged store and update
-	"context_manage.go":            2, // manage delete, guard-resolve of one id
-	"context_manage_dreamlinks.go": 1, // dream-link-resolve
-	"ingest.go":                    1, // chunk mode
-	"scope_purge_manage.go":        1, // purge
-}
+// names no outcome. Empty since issue #483; an entry needs a reason.
+var writesWithoutOutcome = map[string]int{}
 
 func TestWriteFailureLinesNameTheOutcome(t *testing.T) {
 	// The list must name store functions that exist.

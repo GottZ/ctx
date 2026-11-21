@@ -434,7 +434,7 @@ func (h *BlobHandler) handleBlobDelete(w http.ResponseWriter, r *http.Request, a
 
 	blob, err := store.DeleteBlob(ctx, h.pool, req.ID, ar.HomeScope)
 	if err != nil {
-		logRequestError(ctx, "blob-manage: delete error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "blob-manage: delete error", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})

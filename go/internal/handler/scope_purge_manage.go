@@ -114,7 +114,7 @@ func (h *ManageHandler) handlePurge(w http.ResponseWriter, r *http.Request, ar *
 			body["deleted"] = done
 		}
 		logRequestError(runCtx, "manage: purge failed", "scope", spec.Scope, "error", err, "deleted", done,
-			"api_key_id", ar.ApiKeyID, "request_id", reqID)
+			"write_outcome", purgeOutcome(done, err), "api_key_id", ar.ApiKeyID, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, body)
 		return
 	}
@@ -131,6 +131,20 @@ func (h *ManageHandler) handlePurge(w http.ResponseWriter, r *http.Request, ar *
 			"api_key_id", ar.ApiKeyID, "request_id", reqID)
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// purgeOutcome is the write_outcome of a purge that failed: committed when a
+// batch before the failure removed something (each batch is its own
+// transaction, done counts what they removed), else what the failing
+// statement left behind. statementOutcome, because the blob drain's batches
+// are single statements; on a block batch's labeled commit it answers as
+// writeOutcome does, and a failure inside a batch that did not reach its
+// commit stays unknown where writeOutcome would say rolled_back.
+func purgeOutcome(done *store.PurgeDeleted, err error) string {
+	if done != nil && done.Blocks+done.DreamLinks+done.Blobs > 0 {
+		return writeCommitted
+	}
+	return statementOutcome(err)
 }
 
 // writePurgeRefusal answers a refused run: 409 with the fresh count, and what

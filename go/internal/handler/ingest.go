@@ -366,7 +366,7 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 		}
 		if err != nil {
 			logRequestError(ctx, "ingest: insert chunk error",
-				"error", err, "index", index, "source_id", chunk.SourceID, "request_id", reqID)
+				"error", err, "index", index, "source_id", chunk.SourceID, "request_id", reqID, "write_outcome", statementOutcome(err))
 			return IngestResult{Index: index, Status: "failed", Error: "insert chunk failed"}
 		}
 		action = "inserted"

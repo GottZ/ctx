@@ -35,6 +35,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -154,7 +155,7 @@ func newCutFixture(t *testing.T) *cutFixture {
 		   RETURN NULL;
 		 END $$`,
 	}
-	for _, tbl := range []string{"context_blocks", "context_blobs", "context_pending_writes"} {
+	for _, tbl := range []string{"context_blocks", "context_blobs", "context_pending_writes", "context_dream_links"} {
 		ddl = append(ddl, fmt.Sprintf(`CREATE CONSTRAINT TRIGGER i483_hold AFTER INSERT OR UPDATE OR DELETE ON %[1]s
 			DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION i483_hold('%[1]s')`, tbl))
 	}
@@ -188,7 +189,7 @@ func (f *cutFixture) cutDuring(t *testing.T, table string, call func()) {
 	// The work of an earlier call still running on the handlers' pool would
 	// wait on the hold too and pass for this call's commit.
 	f.quiesce(t)
-	if _, err := f.direct.Exec(ctx, `INSERT INTO i483_hold VALUES ($1)`, table); err != nil {
+	if _, err := f.direct.Exec(ctx, `INSERT INTO i483_hold VALUES ($1) ON CONFLICT DO NOTHING`, table); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -319,6 +320,36 @@ func (f *cutFixture) cutTool(t *testing.T, ar *auth.AuthResult, table, tool stri
 	waitDone(t, done)
 	text, isErr := toolAnswer(t, raw)
 	return text, isErr, logs
+}
+
+// cutREST posts body to h behind the production request chain (Auth on the
+// proxied pool, plain as the key) while the commit of its write to table is
+// held and cut, and checks the verdict: a 5xx (ingest answers per chunk),
+// and the failure line msg says unknown.
+func (f *cutFixture) cutREST(t *testing.T, h http.HandlerFunc, plain, table, path, body, msg string) {
+	t.Helper()
+	logs := installRejectLogCapture(t)
+	srv, done := abortRoute(t, f.pool, h)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Context-Key", plain)
+	var status int
+	f.cutDuring(t, table, func() {
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return
+		}
+		status = resp.StatusCode
+		_ = resp.Body.Close()
+	})
+	waitDone(t, done)
+	if status < http.StatusInternalServerError && !strings.HasPrefix(path, "/api/ingest") {
+		t.Errorf("%s answered %d, want a 5xx for the cut write", path, status)
+	}
+	wantCutUnknown(t, logs, msg, "", false)
 }
 
 // callOK makes one tools/call on the proxied pool without a cut and returns
@@ -578,28 +609,7 @@ func TestWriteOutcomeCutLabeledPaths(t *testing.T) {
 	// The REST-only paths: the client waits; the cut is the server's.
 	rest := func(t *testing.T, h http.HandlerFunc, path, body, msg string) {
 		t.Helper()
-		logs := installRejectLogCapture(t)
-		srv, done := abortRoute(t, f.pool, h)
-		req, err := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
-		if err != nil {
-			t.Fatal(err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Context-Key", f.plain)
-		var status int
-		f.cutDuring(t, "context_blocks", func() {
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				return
-			}
-			status = resp.StatusCode
-			_ = resp.Body.Close()
-		})
-		waitDone(t, done)
-		if status < http.StatusInternalServerError && !strings.HasPrefix(path, "/api/ingest") {
-			t.Errorf("%s answered %d, want a 5xx for the cut write", path, status)
-		}
-		wantCutUnknown(t, logs, msg, "", false)
+		f.cutREST(t, h, f.plain, "context_blocks", path, body, msg)
 	}
 	t.Run("REST manage update", func(t *testing.T) {
 		id := f.seedBlock(t, "i483 cut rest update")
@@ -803,4 +813,129 @@ func TestWriteOutcomeBrokenCommit(t *testing.T) {
 			f.waitLanded(t, `SELECT count(*)::int FROM i483_broken WHERE k = $1`, tc.name)
 		})
 	}
+}
+
+// TestWriteOutcomeCutRemainingPaths — the paths #482 left without
+// write_outcome (issue #483 point 8): their failure line names it, and a cut
+// commit says unknown. manage delete and dream-link-resolve are labeled
+// brackets; guard-resolve of one id, the chunk ingest, the blob delete and
+// the chat's staged writes are one statement; the issue writes run an
+// unlabeled bracket; a purge counts what earlier batches removed.
+func TestWriteOutcomeCutRemainingPaths(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := newCutFixture(t)
+	ctx := context.Background()
+	manage := NewManageHandler(f.pool, nil, nil, nil, nil, nil, nil, f.reg).HandleManage
+
+	t.Run("manage delete", func(t *testing.T) {
+		id := f.seedBlock(t, "i483 cut manage delete")
+		f.cutREST(t, manage, f.plain, "context_blocks", "/api/manage",
+			fmt.Sprintf(`{"action":"delete","id":%q}`, id), "manage: block write error")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_blocks WHERE id = $1::uuid AND is_archived`, id)
+	})
+	t.Run("guard-resolve of one id", func(t *testing.T) {
+		id := f.seedBlock(t, "i483 cut guard one")
+		f.flag(t, id)
+		f.cutREST(t, manage, f.plain, "context_blocks", "/api/manage",
+			fmt.Sprintf(`{"action":"guard-resolve","id":%q,"data":{"resolution":"keep"}}`, id), "manage: block write error")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_blocks WHERE id = $1::uuid AND guard_status IS DISTINCT FROM 'needs_review'`, id)
+	})
+	t.Run("dream-link-resolve", func(t *testing.T) {
+		src, dst := f.seedBlock(t, "i483 cut link source"), f.seedBlock(t, "i483 cut link target")
+		if _, err := f.direct.Exec(ctx, `INSERT INTO context_dream_links
+			(source_block_id, target_block_id, relationship, confidence, raw_confidence, scope)
+			VALUES ($1::uuid, $2::uuid, 'topical', 0.8, 0.8, 'private')`, src, dst); err != nil {
+			t.Fatalf("seed link: %v", err)
+		}
+		f.cutREST(t, manage, f.plain, "context_dream_links", "/api/manage",
+			fmt.Sprintf(`{"action":"dream-link-resolve","data":{"source_id":%q,"target_id":%q,"relationship":"topical","resolution":"confirm"}}`, src, dst),
+			"manage: dream-link-resolve error")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_dream_links WHERE source_block_id = $1::uuid AND pinned`, src)
+	})
+	t.Run("purge", func(t *testing.T) {
+		for i := range 3 {
+			if _, err := store.UpsertBlock(ctx, f.direct, "i483purge", fmt.Sprintf("i483 cut purge %d", i), "purged", nil, nil, "private", false, store.SensitivityWrite{}, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		k, admin, err := store.CreateApiKey(ctx, f.direct, "i483-cut-admin", "private", nil, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.direct.Exec(ctx, `UPDATE context_api_keys SET is_admin = true WHERE id = $1::uuid`, k.ID); err != nil {
+			t.Fatal(err)
+		}
+		f.cutREST(t, manage, admin, "context_blocks", "/api/manage",
+			`{"action":"purge","data":{"scope":"private","category":"i483purge","confirm_blocks":3}}`, "manage: purge failed")
+		f.waitLanded(t, `SELECT (count(*) = 0)::int FROM context_blocks WHERE category = 'i483purge'`)
+	})
+	t.Run("ingest in chunk mode", func(t *testing.T) {
+		source := seedSource(t, f.direct, "/i483/cut.md", "private")
+		raw, _ := json.Marshal(map[string]any{"source": "i483", "chunks": []map[string]any{{
+			"category": "i483", "title": "i483 cut chunk", "content": "cut during the commit", "source_id": source, "chunk_index": 0}}})
+		f.cutREST(t, NewIngestHandler(f.pool, nil, f.reg).HandleIngest, f.plain, "context_blocks", "/api/ingest", string(raw), "ingest: insert chunk error")
+		f.waitLanded(t, landedByTitle, "i483 cut chunk")
+	})
+	t.Run("blob delete", func(t *testing.T) {
+		id := f.seedBlob(t, "i483 cut blob delete")
+		f.cutREST(t, NewBlobHandler(f.pool, f.cfg.Cfg).HandleBlobManage, f.plain, "context_blobs", "/api/blob/manage",
+			fmt.Sprintf(`{"action":"delete","id":%q}`, id), "blob-manage: delete error")
+		f.waitLanded(t, `SELECT (count(*) = 0)::int FROM context_blobs WHERE id = $1::uuid`, id)
+	})
+
+	var issueID string
+	t.Run("manage issue-create", func(t *testing.T) {
+		f.cutREST(t, manage, f.plain, "context_blocks", "/api/manage",
+			`{"action":"issue-create","data":{"title":"i483 cut rest issue"}}`, "issue-create error")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_blocks WHERE title LIKE '%i483 cut rest issue'`)
+		if err := f.direct.QueryRow(ctx, `SELECT id::text FROM context_blocks WHERE title LIKE '%i483 cut rest issue'`).Scan(&issueID); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("manage issue-update", func(t *testing.T) {
+		f.cutREST(t, manage, f.plain, "context_blocks", "/api/manage",
+			fmt.Sprintf(`{"action":"issue-update","id":%q,"data":{"status":"in-progress"}}`, issueID), "issue-update error")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_blocks WHERE id = $1::uuid AND workflow_status = 'in-progress'`, issueID)
+	})
+	t.Run("manage issue-comment-create", func(t *testing.T) {
+		f.cutREST(t, manage, f.plain, "context_blocks", "/api/manage",
+			fmt.Sprintf(`{"action":"issue-comment-create","data":{"parent_id":%q,"content":"i483 cut rest comment"}}`, issueID), "issue-comment-create error")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_blocks WHERE content = 'i483 cut rest comment'`)
+	})
+	t.Run("project issue create", func(t *testing.T) {
+		var projectID string
+		if err := f.direct.QueryRow(ctx, `INSERT INTO context_projects (tenant_id, scope, identity) VALUES ($1::uuid, 'private', 'i483-cut') RETURNING id::text`,
+			store.DefaultTenantID).Scan(&projectID); err != nil {
+			t.Fatalf("seed project: %v", err)
+		}
+		r := chi.NewRouter()
+		MountProjectIssues(r, NewProjectIssuesHandler(f.pool, f.reg))
+		f.cutREST(t, r.ServeHTTP, f.plain, "context_blocks", "/api/project/"+projectID+"/issues",
+			`{"title":"i483 cut project issue"}`, "issue-create error")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_blocks WHERE title LIKE '%i483 cut project issue'`)
+	})
+
+	t.Run("chat's staged store and update", func(t *testing.T) {
+		ar, err := auth.AuthenticateRaw(ctx, f.direct, f.plain)
+		if err != nil || !ar.IsValid {
+			t.Fatalf("authenticate fixture key: %v", err)
+		}
+		cctx := context.WithValue(context.WithValue(ctx, authResultKey, ar), requestIDKey, "i483-chat-stage")
+		runner := &chatStageRunner{pool: f.pool, cfg: f.cfg.Cfg, blocktypes: f.reg}
+		logs := installRejectLogCapture(t)
+		f.cutDuring(t, "context_pending_writes", func() {
+			_, _, _ = runner.StageWrite(cctx, "i483", "i483 cut chat stage", "staged by the chat", nil, nil)
+		})
+		wantCutUnknown(t, logs, "chat: stage pending write failed", "", false)
+		id := f.seedBlock(t, "i483 cut chat update")
+		content := "changed by the chat"
+		logs = installRejectLogCapture(t)
+		f.cutDuring(t, "context_pending_writes", func() {
+			_, _, _ = runner.StageUpdate(cctx, id, nil, nil, &content, nil, nil)
+		})
+		wantCutUnknown(t, logs, "chat: stage pending update failed", "", false)
+		f.waitLanded(t, `SELECT count(*)::int FROM context_pending_writes WHERE origin = 'chat' AND op = 'update'`)
+	})
 }

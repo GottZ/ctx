@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/GottZ/ctx/internal/pgxdb"
+	"github.com/GottZ/ctx/internal/store"
 )
 
 // TestClientGoneKeepsOtherFailuresError — the client is gone, but the failure
@@ -364,6 +365,28 @@ func TestWriteOutcome(t *testing.T) {
 	} {
 		if got := writeOutcome(tc.err); got != tc.want {
 			t.Errorf("%s: writeOutcome(%v) = %q, want %q", tc.name, tc.err, got, tc.want)
+		}
+	}
+}
+
+// TestPurgeOutcome — a purge that failed after earlier batches removed
+// something says committed; one that removed nothing says what its failing
+// statement left behind (issue #483).
+func TestPurgeOutcome(t *testing.T) {
+	cut := fmt.Errorf("store: purge blobs: %w", errors.New("read tcp: connection reset by peer"))
+	for _, tc := range []struct {
+		name string
+		done *store.PurgeDeleted
+		err  error
+		want string
+	}{
+		{"blocks removed before the failure", &store.PurgeDeleted{Blocks: 2}, cut, writeCommitted},
+		{"only blobs removed before the failure", &store.PurgeDeleted{Blobs: 1}, cut, writeCommitted},
+		{"nothing removed, the statement was cut", &store.PurgeDeleted{}, cut, writeUnknown},
+		{"refused before the first delete", nil, &pgconn.PgError{Code: "57014"}, writeRolledBack},
+	} {
+		if got := purgeOutcome(tc.done, tc.err); got != tc.want {
+			t.Errorf("%s: purgeOutcome = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }

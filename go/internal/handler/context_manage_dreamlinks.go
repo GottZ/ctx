@@ -95,7 +95,7 @@ func (h *ManageHandler) handleDreamLinkResolve(w http.ResponseWriter, r *http.Re
 		data.SourceID, data.TargetID, data.Relationship, data.Resolution, data.Rationale,
 		writableBlockScopes(ar))
 	if err != nil {
-		logRequestError(ctx, "manage: dream-link-resolve error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "manage: dream-link-resolve error", "error", err, "write_outcome", writeOutcome(err), "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})

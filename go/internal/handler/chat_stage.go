@@ -91,7 +91,7 @@ func (s *chatStageRunner) StageWrite(ctx context.Context, category, title, conte
 	}
 	pw, err := store.StagePendingWrite(ctx, s.pool, ar.ApiKeyID, res.WriteScope, "store", "chat", canonical, hash, ttl)
 	if err != nil {
-		logRequestError(ctx, "chat: stage pending write failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "chat: stage pending write failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return nil, "", err
 	}
 
@@ -218,7 +218,7 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 	}
 	pw, err := store.StagePendingWrite(ctx, s.pool, ar.ApiKeyID, block.Scope, "update", "chat", canonical, hash, ttl)
 	if err != nil {
-		logRequestError(ctx, "chat: stage pending update failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "chat: stage pending update failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return nil, "", err
 	}
 
