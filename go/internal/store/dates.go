@@ -292,9 +292,10 @@ func (p monthPattern) matchBefore(c string, w int) int {
 
 // The month names of the two month forms are the keys of util.MonthDE and
 // util.MonthEN, the tables ExtractDates reads the month from through
-// util.MonthKey (the long s of issue #451), so every name a pattern matches is one the table resolves (issue
-// #437: the expression m[aä]rz matched "Marz", which no table carries, and
-// missed "Maerz", which util.MonthDE does).
+// util.MonthKey (the long s of issue #451), so every name a pattern matches
+// is one the table resolves (issue #437: the expression m[aä]rz matched
+// "Marz", which no table carries, and missed "Maerz", which util.MonthDE
+// does).
 var (
 	deMonthPatterns = newMonthPatterns("januar", "februar", "märz", "maerz", "april", "mai", "juni", "juli",
 		"august", "september", "oktober", "november", "dezember")

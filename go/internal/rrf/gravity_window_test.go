@@ -11,8 +11,10 @@ import (
 // measured to the nearer edge, and Direction and Cutoff measure from there.
 
 func TestComputeGravity_WindowRewardsItsWholeSpan(t *testing.T) {
+	// TargetDate lies inside the window on purpose: with a window, distances
+	// are measured from its edges, never from TargetDate.
 	p := GravityParams{
-		TargetDate: mustDate("2024-03-01"), WindowStart: mustDate("2024-03-01"), WindowEnd: mustDate("2026-11-21"),
+		TargetDate: mustDate("2025-01-01"), WindowStart: mustDate("2024-03-01"), WindowEnd: mustDate("2026-11-21"),
 		Cutoff: 60, Power: 1.5,
 	}
 	full := maxDateGravity(1.5)
