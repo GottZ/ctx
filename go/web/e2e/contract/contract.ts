@@ -295,6 +295,27 @@ function ariaTest(c: PageContract, viewport: ViewportName): void {
   })
 }
 
+/**
+ * Viewport fit (#419): at the contract viewports the document itself never
+ * scrolls. The shell is a 100dvh grid whose content region owns the scroll,
+ * and the login mask centres its card inside one viewport. A box that adds
+ * padding or a border to a 100dvh height under content-box sizing makes the
+ * page taller than the viewport — a scrollbar with nothing to scroll to on
+ * platforms with classic scrollbars, and a page a retried click can scroll
+ * (#416). Asserted on the settled state right before every capture, so each
+ * visual state × theme × viewport carries it.
+ */
+async function expectViewportFit(page: Page): Promise<void> {
+  const { scrollHeight, clientHeight } = await page.evaluate(() => ({
+    scrollHeight: document.documentElement.scrollHeight,
+    clientHeight: document.documentElement.clientHeight,
+  }))
+  expect(
+    scrollHeight,
+    `the document is ${scrollHeight - clientHeight} px taller than the ${clientHeight} px viewport (#419)`,
+  ).toBe(clientHeight)
+}
+
 function visualTest(c: PageContract, state: PageState, theme: Theme, viewport: ViewportName): void {
   test(`${c.name} ${state.name} ${theme} ${viewport} visual`, { tag: '@visual' }, async ({ page }) => {
     await mountState(page, c, state, theme)
@@ -302,6 +323,7 @@ function visualTest(c: PageContract, state: PageState, theme: Theme, viewport: V
     // awaited inside captureShot (stabilize). Same settle as the PV3 suite —
     // the 13 committed baselines stay byte-valid.
     await page.waitForTimeout(600)
+    await expectViewportFit(page)
     await captureShot(page, `${c.name}--${state.name}--${theme}--${viewport}.png`, {
       mask: c.mask,
       maskBudgetOverride: c.maskBudgetOverride,

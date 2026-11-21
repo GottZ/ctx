@@ -7,7 +7,8 @@
 ## Was ein grüner Mock-Tier-Lauf beweist — und was nicht (design 06 §5.1)
 
 **Beweist:** jede Registry-Seite rendert in jedem deklarierten Zustand pixel-identisch
-zur eingefrorenen Referenz (@visual, nur im digest-gepinnten Container); der primäre
+zur eingefrorenen Referenz (@visual, nur im digest-gepinnten Container), und das Dokument
+ist dabei nicht höher als der Viewport (vor jeder Aufnahme geprüft, #419); der primäre
 Nutzungspfad ist bedienbar (@flow); guard-gegatete Seiten weisen niedrigere Rollen ab
 (generierte Deny-Tests — CLIENT-Guard-Schicht); tenant-scoped Flächen rendern nie den
 Fremd-Sentinel (Leak-Probe mit Positiv-Kontrolle); Listen-Flächen halten den deklarierten
