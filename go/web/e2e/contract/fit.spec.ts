@@ -84,6 +84,63 @@ test.describe('viewport fit (meta, #440)', () => {
     await expect(expectViewportFit(page)).rejects.toThrow(/clipped: div\.frame holds 400 px of content in 300 px \(overflow-x hidden/)
   })
 
+  test('an overflow-x: visible that wins the cascade leaves no sideways scroller (#457)', async ({ page }) => {
+    // Next to overflow-y: auto, the winning visible computes to auto; the
+    // losing overflow-x: auto still matches the element and must not exempt
+    // it — by specificity, by cascade layer, and against an inline auto that
+    // loses to an !important visible.
+    const body = (attrs: string): string =>
+      `<div class="frame wins" ${attrs}style="width:300px;height:100px;${attrs === '' ? '' : 'overflow-x:auto'}"><div style="width:400px;height:20px"></div></div>`
+    const red = /clipped: div\.frame\.wins holds 400 px of content in 300 px \(overflow-x auto/
+    await page390(page, body(''), '.frame{overflow-x:auto}.frame.wins{overflow-x:visible;overflow-y:auto}')
+    await expect(expectViewportFit(page)).rejects.toThrow(red)
+    await page390(page, body(''), '@layer base{.frame.wins{overflow-x:auto}}.frame{overflow-x:visible;overflow-y:auto}')
+    await expect(expectViewportFit(page)).rejects.toThrow(red)
+    await page390(page, body(' '), '.frame{overflow-x:visible !important;overflow-y:auto}')
+    await expect(expectViewportFit(page)).rejects.toThrow(red)
+    // the probe outranks an !important overflow-y as well
+    await page390(page, body(''), '.frame{overflow-x:auto}.frame.wins{overflow-x:visible;overflow-y:auto !important}')
+    await expect(expectViewportFit(page)).rejects.toThrow(red)
+    // control: the winning declaration is auto, so the region scrolls by choice
+    await page390(page, body(''), '.frame.wins{overflow-x:visible;overflow-y:auto}.frame{overflow-x:auto !important}')
+    await expectViewportFit(page)
+  })
+
+  test('the fit leaves the page as it found it: style attributes and scroll offsets (#457)', async ({ page }) => {
+    // The cascade probe writes overflow-y inline on every declared sideways
+    // scroller and restores the attribute: the capture after the fit sees the
+    // page as it was, scrolled where it was scrolled.
+    await page390(
+      page,
+      '<div id="a" style="overflow:auto;width:300px;height:60px"><div style="width:400px;height:120px"></div></div>' +
+        '<div id="b" class="y"><div style="width:400px;height:20px"></div></div>' +
+        '<div id="c" class="v"><div style="width:100px;height:300px"></div></div>',
+      '.y{overflow-x:auto;width:300px}.v{overflow-y:auto;height:60px}',
+    )
+    const read = (): Promise<unknown> =>
+      page.evaluate(() =>
+        ['a', 'b', 'c'].map((id) => {
+          const el = document.getElementById(id) as HTMLElement
+          return [el.getAttribute('style'), el.scrollLeft, el.scrollTop]
+        }),
+      )
+    await page.evaluate(() => {
+      const [a, b, c] = ['a', 'b', 'c'].map((id) => document.getElementById(id) as HTMLElement)
+      a.scrollLeft = 50
+      a.scrollTop = 30
+      b.scrollLeft = 40
+      c.scrollTop = 70
+    })
+    const before = await read()
+    expect(before).toEqual([
+      ['overflow:auto;width:300px;height:60px', 50, 30],
+      [null, 40, 0],
+      [null, 0, 70],
+    ])
+    await expectViewportFit(page)
+    expect(await read()).toEqual(before)
+  })
+
   test('the region check follows the whole-pixel scroll range of the browser (#457)', async ({ browser }) => {
     // Fractional overflow, measured: Chromium snaps a region's sideways scroll
     // range to whole pixels, and scrollWidth > clientWidth holds exactly when

@@ -37,10 +37,13 @@ import { expect, type Page } from '@playwright/test'
 // sub-pixel overhang with no scroll range passes.
 //
 // Structural exemptions, no per-page list:
-//   - a declared sideways scroller (layer 2, above). Rules inside @media and
-//     @supports count only while their condition holds; rules inside
-//     @container count always (no API evaluates a container condition from
-//     script), which can only exempt more, never fail a fitting box.
+//   - a declared sideways scroller (layer 2, above): the overflow-x value that
+//     wins the element's cascade is auto or scroll (cascadedX below), and an
+//     author rule or the inline style declares it — the UA's overflow: auto
+//     on a modal dialog or a popover is no author's choice. Rules inside
+//     @media and @supports count only while their condition holds; rules
+//     inside @container count always (no API evaluates a container condition
+//     from script), which can only exempt more, never fail a fitting box.
 //   - text-overflow: ellipsis clips on purpose; input, select and textarea
 //     scroll their own value; layer 2 skips such an element.
 //   - a subtree under clip-path or clip (the visually-hidden pattern: a 1 px
@@ -119,16 +122,49 @@ export async function expectViewportFit(page: Page): Promise<void> {
         // a cross-origin sheet hides its rules; the SPA ships none
       }
     }
-    // A matching declaration counts only while it is the value in effect: a
-    // later overflow: hidden that wins the cascade leaves no sideways scroller
-    // (cs is the element's computed style). Left open: a winning explicit
-    // overflow-x: visible next to a non-visible overflow-y computes to auto as
-    // well, and a losing auto declaration then still exempts the region.
-    const declaresX = (el: Element, cs: CSSStyleDeclaration): boolean => {
-      if (cs.overflowX !== 'auto' && cs.overflowX !== 'scroll') return false
+    // An author declares overflow-x auto or scroll for the element: inline, or
+    // in a matching rule in effect (declaredX).
+    const authorDeclaresX = (el: Element): boolean => {
       const inline = el instanceof HTMLElement ? el.style.overflowX : ''
       if (inline === 'auto' || inline === 'scroll') return true
       return declaredX.some((sel) => matches(el, sel))
+    }
+
+    // The overflow-x value that won the cascade of each such element (#457).
+    // The computed value cannot tell: visible computes to auto next to a
+    // non-visible overflow-y, so a winning overflow-x: visible looks like a
+    // scroller, and a losing auto rule still matches the element. With
+    // overflow-y forced to visible (inline and !important, the strongest
+    // author declaration) overflow-x computes to the value that won — the
+    // browser's own cascade: specificity, order, layers, !important, inline.
+    // Batched: all writes, then all reads, then every style attribute
+    // restored as it was. Overflow is not inherited, so no element's probe
+    // moves another's value; where auto or scroll won, the element stays a
+    // scroll container throughout and keeps its scroll offset.
+    const cascadedX = new Map<Element, string>()
+    const scrollers = Array.from(document.body.querySelectorAll('*')).filter((el) => {
+      const x = getComputedStyle(el).overflowX
+      return (x === 'auto' || x === 'scroll') && authorDeclaresX(el)
+    }) as HTMLElement[]
+    const attrs = scrollers.map((el) => el.getAttribute('style'))
+    for (const el of scrollers) el.style.setProperty('overflow-y', 'visible', 'important')
+    for (const el of scrollers) cascadedX.set(el, getComputedStyle(el).overflowX)
+    scrollers.forEach((el, i) => {
+      const a = attrs[i]
+      // set first: removing an attribute whose inline style was written through
+      // the CSSOM leaves style="" behind in Chromium (measured)
+      el.setAttribute('style', a ?? '')
+      if (a === null) el.removeAttribute('style')
+    })
+
+    // A region is a declared sideways scroller when an author declared
+    // overflow-x auto or scroll and that value won its cascade: a later
+    // overflow: hidden or overflow-x: visible that wins leaves none (cs is the
+    // element's computed style).
+    const declaresX = (el: Element, cs: CSSStyleDeclaration): boolean => {
+      if (cs.overflowX !== 'auto' && cs.overflowX !== 'scroll') return false
+      const won = cascadedX.get(el)
+      return won === 'auto' || won === 'scroll'
     }
 
     const label = (el: Element): string => {
