@@ -111,18 +111,18 @@ type blobFetchInput struct {
 // unconditional, like every other tool file's: the tool list must not depend
 // on the calling key, or a client's tool cache would differ per principal.
 func registerBlobTools(server *mcp.Server, cfg MCPConfig) {
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "blob_store",
 		Description: "Store a binary or text payload as a blob. Upserts on (category, title, scope); writes the key's home scope unless an explicit scope the key may write is given. Runs the same gates as POST /api/blob/store; a key with the confirm_writes capability gets the call STAGED instead of executed.",
 	}, mcpBlobStoreHandler(cfg))
 
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "blob_fetch",
 		Description: "Read a blob by id (or category+title). Reads a BYTE RANGE by default (offset/length over the stored payload) so a large blob can be drilled into instead of pulled whole; meta_only returns metadata alone.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, mcpBlobFetchHandler(cfg))
 
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "blob_link",
 		Description: "Link an existing blob to a context block (phase 2 of the two-phase write): sets the blob's context_block_id in ONE indexed UPDATE without rewriting the payload. Books one blob write; a key with the confirm_writes capability gets the call STAGED instead of executed.",
 	}, mcpBlobLinkHandler(cfg))
@@ -243,12 +243,16 @@ func mcpBlobLinkHandler(cfg MCPConfig) mcp.ToolHandlerFor[blobLinkInput, any] {
 
 		blob, err := store.UpdateBlobBlockRef(ctx, cfg.Pool, input.ID, input.ContextBlockID, writableBlockScopes(ar))
 		if err != nil {
-			logRequestError(ctx, "mcp blob_link: update error", "error", err, "request_id", reqID)
+			noteToolStatement(ctx, err)
+			logRequestError(ctx, "mcp blob_link: update error", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 			return classInternal.errResult("blob_link failed: internal error"), nil, nil
 		}
 		if blob == nil {
 			return errResultReject(classConstraint.reject(blobLinkNotFoundMsg)), nil, nil
 		}
+		// The id the database matched, never the argument as sent.
+		noteToolWrite(ctx, nil)
+		noteToolBlob(ctx, blob.ID)
 
 		// Same attribution as a payload write (fire-and-forget): the booked row
 		// names the blob it paid for, or the audit trail loses the reference.
@@ -315,9 +319,11 @@ func mcpStageBlobLink(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, i
 		return classInternal.errResult("stage failed: cannot canonicalize payload"), nil, nil
 	}
 
+	noteToolBlob(ctx, input.ID)
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, scope, store.OpBlobLink, "mcp", canonical, hash, ttl)
+	noteToolStaged(ctx, err, false)
 	if err != nil {
-		logRequestError(ctx, "mcp: stage pending blob link failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "mcp: stage pending blob link failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil
 	}
 
@@ -442,8 +448,9 @@ func mcpStageBlobStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, 
 	}
 
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, writeScope, store.OpBlobStore, "mcp", canonical, hash, ttl)
+	noteToolStaged(ctx, err, false)
 	if err != nil {
-		logRequestError(ctx, "mcp: stage pending blob write failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "mcp: stage pending blob write failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil
 	}
 

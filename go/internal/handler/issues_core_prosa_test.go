@@ -17,6 +17,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -119,7 +120,7 @@ func TestIssueErrorProsaPerTransport(t *testing.T) {
 				t.Errorf("REST/manage body\n got %s\nwant %s", got, tc.restBody)
 			}
 
-			res := mcpIssueError("issue_create", tc.err)
+			res := mcpIssueError(context.Background(), "issue_create", tc.err)
 			if !res.IsError {
 				t.Errorf("MCP result is not marked as an error")
 			}
@@ -135,7 +136,7 @@ func TestIssueErrorProsaPerTransport(t *testing.T) {
 		rec := httptest.NewRecorder()
 		writeIssueStoreError(rec, "issue-create", err, "req-pin")
 		rest := strings.TrimRight(rec.Body.String(), "\n")
-		mcp := mcpText(mcpIssueError("issue_create", err))
+		mcp := mcpText(mcpIssueError(context.Background(), "issue_create", err))
 		if strings.Contains(rest, `"error":"`+mcp+`"`) {
 			t.Errorf("transports converged on one wording for %v: %s", err, rest)
 		}

@@ -152,7 +152,7 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Re
 	// (the run's ONE tenant-resolved set, WF T8). The topic-map's metadata
 	// key is_meta=true makes the system-meta rule fire. Idempotent — re-runs
 	// of RunDigest are no-ops at this layer.
-	if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, block.ID, block.Title, block.Metadata); err != nil {
+	if err := classifyAfterCommit(ctx, pool, set, block); err != nil {
 		// Non-fatal: the topic-map block exists, classification can be retried
 		// next cycle. Log + continue rather than fail the whole digest.
 		slog.Warn("digest: topic map auto-classify failed", "error", err, "block_id", block.ID)
@@ -166,6 +166,27 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Re
 	)
 
 	return nil
+}
+
+// classifyFollowUpTimeout bounds the type classification after a topic map's
+// upsert. The map is committed, so the classification no longer ends with the
+// caller's context — a client that leaves POST /api/digest, the scheduler's
+// shutdown — and this bound ends it instead (issue #453): the HTTP drain and
+// the scheduler's Wait wait for it no longer than this. Half the handlers'
+// follow-up bound (internal/handler followUpTimeout, 10 s), because POST
+// /api/digest runs this classification and the root map's
+// (rootmap.classifyFollowUpTimeout) in one request and their sum has to stay
+// inside ctxd's 15 s HTTP drain. A constant of this package: it may import
+// neither internal/config (depguard) nor internal/handler (which imports it).
+const classifyFollowUpTimeout = 5 * time.Second
+
+// classifyAfterCommit classifies a written topic map on ctx's values but not
+// its cancellation, within classifyFollowUpTimeout.
+func classifyAfterCommit(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, block *store.Block) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), classifyFollowUpTimeout)
+	defer cancel()
+	_, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, block.ID, block.Title, block.Metadata)
+	return err
 }
 
 // Digest modes (design/02 §4.6, wave W-E). See config.DigestConfig for what
@@ -282,7 +303,7 @@ func writeStub(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, home
 	// Same classify hook as the full map: is_meta=true keeps the stub on
 	// system-meta, so it stays out of retrieval and inside the browse channel
 	// that makes it findable at all.
-	if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, block.ID, block.Title, block.Metadata); err != nil {
+	if err := classifyAfterCommit(ctx, pool, set, block); err != nil {
 		slog.Warn("digest: stub auto-classify failed", "error", err, "block_id", block.ID)
 	}
 	slog.Info("digest: topic map replaced by stub", "scope", homeScope, "content_length", len(text))

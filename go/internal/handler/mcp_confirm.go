@@ -114,8 +114,9 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 	}
 
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, res.WriteScope, "store", "mcp", canonical, hash, ttl)
+	noteToolStaged(ctx, err, false)
 	if err != nil {
-		logRequestError(ctx, "mcp: stage pending write failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "mcp: stage pending write failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil
 	}
 
@@ -173,6 +174,7 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 		}
 
 		out := executeConfirm(ctx, cfg.Pool, cfg.Blocktypes, ar, input.PayloadHash)
+		noteConfirmOutcome(ctx, out)
 		switch out.Kind {
 		case confirmOK:
 			if out.Op == store.OpBlobLink {
@@ -246,5 +248,35 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 			logRequestError(ctx, "mcp: confirm infrastructure error", "error", out.Err, "op", out.Op, "request_id", RequestIDFromContext(ctx))
 			return errResult("confirm failed: internal error"), nil, nil
 		}
+	}
+}
+
+// noteConfirmOutcome notes on the call's server line (mcp_write_line.go) what
+// the confirm executed: the staged op's write — committed, or a fault's
+// outcome (the blob ops are one statement each, the block ops labeled
+// brackets) — and the block, blob or number of items it names. Every other
+// outcome executed no write of the op.
+func noteConfirmOutcome(ctx context.Context, out confirmOutcome) {
+	switch out.Kind {
+	case confirmOK:
+		if out.Op != store.OpStoreBatch || batchWrote(out.Batch) {
+			noteToolWrite(ctx, nil)
+		}
+	case confirmExecErr:
+		if out.Op == store.OpBlobStore || out.Op == store.OpBlobLink {
+			noteToolStatement(ctx, out.Err)
+		} else {
+			noteToolWrite(ctx, out.Err)
+		}
+	default:
+		return
+	}
+	switch {
+	case out.Block != nil:
+		noteToolBlock(ctx, out.Block.ID)
+	case out.Blob != nil:
+		noteToolBlob(ctx, out.Blob.ID)
+	case len(out.Batch) > 0:
+		noteToolCount(ctx, len(out.Batch))
 	}
 }

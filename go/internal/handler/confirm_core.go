@@ -429,7 +429,7 @@ func executeConfirmedBlobOp(ctx context.Context, pool *pgxpool.Pool, ar *auth.Au
 	if cw.Op == store.OpBlobLink {
 		blob, err := store.UpdateBlobBlockRef(ctx, pool, cw.ID, cw.ContextBlockID, writableBlockScopes(ar))
 		if err != nil {
-			logRequestError(ctx, "confirm: confirmed blob link execute failed", "error", err, "pending_id", pendingID)
+			logRequestError(ctx, "confirm: confirmed blob link execute failed", "error", err, "write_outcome", statementOutcome(err), "pending_id", pendingID)
 			return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 		}
 		if blob == nil {
@@ -449,7 +449,7 @@ func executeConfirmedBlobOp(ctx context.Context, pool *pgxpool.Pool, ar *auth.Au
 			Reject: classConstraint.rejectStatus(status, reason).prefixed(confirmBlobStorePrefix)}
 	}
 	if err != nil {
-		logRequestError(ctx, "confirm: confirmed blob write execute failed", "error", err, "pending_id", pendingID)
+		logRequestError(ctx, "confirm: confirmed blob write execute failed", "error", err, "write_outcome", statementOutcome(err), "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
 	return confirmOutcome{Kind: confirmOK, Op: cw.Op, Blob: blob}

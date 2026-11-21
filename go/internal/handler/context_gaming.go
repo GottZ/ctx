@@ -102,9 +102,14 @@ func (h *ManageHandler) handleGamingMode(w http.ResponseWriter, r *http.Request,
 		// carries the toggle, but stays wired as an idempotent config refresh —
 		// removing its plumbing would churn NewManageHandler's call sites and is
 		// out of this wave's scope.
-		h.reloadAfterMutation(ctx, "eject/gaming-mode")
+		// Committed: both reloads run on one follow-up context (issue
+		// #453) — one bound for the pair keeps it inside the shutdown's
+		// drain, where two would add up past it.
+		rctx, cancel := followUpContext(ctx)
+		defer cancel()
+		h.reloadBackendPool(rctx, "eject/gaming-mode")
 		if h.settingsReload != nil {
-			if err := h.settingsReload(ctx); err != nil {
+			if err := h.settingsReload(rctx); err != nil {
 				h.gamingInternalError(w, ctx, "eject/gaming-mode: persisted but reload failed", err)
 				return
 			}

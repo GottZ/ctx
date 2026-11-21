@@ -1033,7 +1033,7 @@ func (h *ManageHandler) handleGuardResolve(w http.ResponseWriter, r *http.Reques
 	if len(resolveData.IDs) > 0 {
 		resolved, skipped, err := store.GuardResolveBatch(ctx, h.pool, resolveData.IDs, resolveData.Resolution, writableBlockScopes(ar))
 		if err != nil {
-			logRequestError(ctx, "manage: guard-resolve batch error", "error", err, "request_id", reqID)
+			logRequestError(ctx, "manage: guard-resolve batch error", "error", err, "write_outcome", writeOutcome(err), "request_id", reqID)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"success": false, "error": "Internal server error",
 			})

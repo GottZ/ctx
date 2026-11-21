@@ -385,9 +385,12 @@ func executeBlobWrite(ctx context.Context, pool *pgxpool.Pool, cfg ConfigStore, 
 				},
 			}
 		}
-		logRequestError(ctx, "blob-store: upsert error", "error", err, "request_id", reqID)
+		noteToolStatement(ctx, err)
+		logRequestError(ctx, "blob-store: upsert error", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return nil, blobRejection(classInternal.reject("Internal server error"))
 	}
+	noteToolWrite(ctx, nil)
+	noteToolBlob(ctx, blob.ID)
 
 	// Attribute the stored blob to the row booked above (fire-and-forget). Only
 	// the ATTRIBUTION is async — the metering row itself already exists, so a

@@ -161,7 +161,13 @@ func (a *GatewayAccessLog) Handler(next http.Handler) http.Handler {
 		// before, by the status the handler wrote.
 		logged, gone, logf := status, []any(nil), a.log.Info
 		if rw := loggedResponse(w); rw != nil && rw.clientGone() {
-			logged, gone = StatusClientClosedRequest, []any{"handler_status", status}
+			// A handler that wrote nothing says 0, not the 200 a live
+			// client would have got (handlerWroteNothing).
+			handlerStatus := status
+			if aw.status == 0 {
+				handlerStatus = handlerWroteNothing
+			}
+			logged, gone = StatusClientClosedRequest, []any{"handler_status", handlerStatus}
 			if wf := rw.waitedFor(); wf != "" {
 				// It left while the server had no slot for it (WARN, as
 				// the request log of the knowledge paths).

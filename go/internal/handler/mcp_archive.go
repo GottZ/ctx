@@ -48,13 +48,15 @@ func mcpArchiveHandler(cfg MCPConfig) mcp.ToolHandlerFor[archiveInput, any] {
 		if miss != "" {
 			return errResult(miss), nil, nil
 		}
+		noteToolBlock(ctx, resolvedID)
 		block, err := store.DeleteBlock(ctx, cfg.Pool, resolvedID, writableBlockScopes(ar))
 		if err != nil {
 			// I7/S3: the target is a derivative — the 403 class REST answers.
 			if rej := provenanceRejectOr(err, nil); rej != nil {
 				return errResultReject(rej), nil, nil
 			}
-			logRequestError(ctx, "mcp: archive error", "error", err, "block_id", resolvedID, "request_id", RequestIDFromContext(ctx))
+			noteToolWrite(ctx, err)
+			logRequestError(ctx, "mcp: archive error", "error", err, "block_id", resolvedID, "write_outcome", writeOutcome(err), "request_id", RequestIDFromContext(ctx))
 			return classInternal.errResult("archive failed: internal error"), nil, nil
 		}
 		if block == nil {
@@ -62,6 +64,7 @@ func mcpArchiveHandler(cfg MCPConfig) mcp.ToolHandlerFor[archiveInput, any] {
 			// foreign block lands here and answers what an unknown id answers.
 			return errResult("Block not found (or not in a writable scope of this key)"), nil, nil
 		}
+		noteToolWrite(ctx, nil)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{textContent(fmt.Sprintf("Archived: %s (id: %s, category: %s)", block.Title, block.ID, block.Category))},
 		}, nil, nil
@@ -123,9 +126,11 @@ func mcpStageArchive(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, in
 		slog.Error("mcp: canonicalize staged archive failed", "error", err, "request_id", reqID)
 		return classInternal.errResult("stage failed: cannot canonicalize payload"), nil, nil
 	}
+	noteToolBlock(ctx, resolvedID)
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, block.Scope, store.OpArchive, "mcp", canonical, hash, ttl)
+	noteToolStaged(ctx, err, false)
 	if err != nil {
-		logRequestError(ctx, "mcp: stage pending archive failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "mcp: stage pending archive failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil
 	}
 	// Gap-C6-a: charge the write budget at INTENT, as the store and blob stage

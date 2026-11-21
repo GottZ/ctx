@@ -99,9 +99,15 @@ func runStoreBatch(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, 
 		return nil, storeBatchFailureReject(ctx, err, reqID)
 	}
 	out := storeBatchOutcome(results)
+	if batchWrote(out) {
+		noteToolWrite(ctx, nil)
+	}
 	// The blocks and their booking are committed: the afterwork must not stop
-	// halfway because the client went away.
-	after := context.WithoutCancel(ctx)
+	// halfway because the client went away, and one bound ends all of it
+	// (followUpContext, issue #453) — not one per block, so a shutdown's
+	// drain waits for a whole batch no longer than followUpTimeout.
+	after, cancel := followUpContext(ctx)
+	defer cancel()
 	for i, r := range results {
 		b := r.Block
 		if b == nil {
@@ -144,6 +150,7 @@ func storeBatchFailureReject(ctx context.Context, err error, reqID string) *writ
 	if rej := storeBatchRefusal(err); rej != nil {
 		return rej
 	}
+	noteToolWrite(ctx, err)
 	logRequestError(ctx, "store batch: upsert error", "error", err, "write_outcome", writeOutcome(err), "request_id", reqID)
 	return classInternal.reject("Internal server error")
 }
@@ -307,7 +314,9 @@ func executeConfirmedStoreBatch(ctx context.Context, pool *pgxpool.Pool, blockty
 		logRequestError(ctx, "confirm: confirmed batch execute failed", "error", err, "write_outcome", writeOutcome(err), "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
-	after := context.WithoutCancel(ctx)
+	// Committed: one bound for the whole afterwork, as on the direct path.
+	after, cancel := followUpContext(ctx)
+	defer cancel()
 	for _, r := range results {
 		if r.Block != nil {
 			finishStoredBlock(after, pool, set, r.Block, RequestIDFromContext(ctx))
@@ -461,4 +470,15 @@ func finishStoredBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.S
 	if _, err := store.RefreshTemporal(ctx, pool, b.ID, b.Content, b.CreatedAt); err != nil {
 		logRequestError(ctx, "store batch: temporal refresh failed", "error", err, "block_id", b.ID, "request_id", reqID)
 	}
+}
+
+// batchWrote reports whether a batch wrote a block: a batch whose items all
+// matched what is stored committed nothing (the write tool's line says none).
+func batchWrote(items []storeBatchItem) bool {
+	for _, it := range items {
+		if it.Block != nil {
+			return true
+		}
+	}
+	return false
 }

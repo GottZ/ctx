@@ -304,14 +304,14 @@ type recentInput struct {
 
 func registerTools(server *mcp.Server, cfg MCPConfig) {
 	// query
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "query",
 		Description: "Hybrid semantic + fulltext search with LLM synthesis. Ask a question, get a sourced answer. With synthesize false: the ranked sources only, as JSON, without the synthesis step.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, mcpQueryHandler(cfg))
 
 	// store
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "store",
 		Description: "Save or update a knowledge block. Upserts on (category, title, scope). Writes the key's home scope unless an explicit scope the key may write is given. With supersedes: the written block replaces that block of the same scope — the old block stays as history (a query with a date still finds it), a query without a date no longer returns it.",
 	}, mcpStoreHandler(cfg))
@@ -323,21 +323,21 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 	registerStoreBatchTool(server, cfg)
 
 	// search
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "search",
 		Description: "Lightweight search without LLM synthesis. Returns matching blocks with preview, at most 50 per call. With an empty query it lists the blocks of the filters newest first; pass after to page through all of them, and include_content to read their full text.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, mcpSearchHandler(cfg))
 
 	// get
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "get",
 		Description: "Fetch a block by ID: the whole block, or with fields only the named keys, and with content_offset/content_limit a window of its content.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, mcpGetHandler(cfg))
 
 	// recent
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "recent",
 		Description: "List recently created or updated blocks. Useful for temporal queries like 'what was saved this week'.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
@@ -346,14 +346,14 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 	// update (F6-C6 D-W6a): field-level block update, REST manage-update
 	// parity. Stages for confirm_writes keys (op 'update', TOCTOU-pinned).
 	// `type` since issue #203 (mcp_update.go).
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "update",
 		Description: "Update fields of an existing block (category, title, content, tags, metadata, type). To change part of the content, send edits (exact old → new replacements) instead of content; to add or remove metadata keys, send metadata_merge instead of metadata. Resolves the id within this key's writable scopes. A new type is checked against the block-type registry like the store tool's and kept as a manual choice; leaving a type marked untrusted records that type on the block as untrusted_origin, and a comment or an issue keeps its type.",
 	}, mcpUpdateHandler(cfg))
 
 	// archive (#201): manage-delete parity — archives one block the key may
 	// write. Stages for confirm_writes keys (op 'archive', drift-pinned).
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "archive",
 		Description: "Archive a block: it leaves query, search, recent and get, and stays readable by full id with get include_archived. Resolves the id within this key's writable scopes. There is no unarchive tool.",
 	}, mcpArchiveHandler(cfg))
@@ -361,7 +361,7 @@ func registerTools(server *mcp.Server, cfg MCPConfig) {
 	// confirm (F6-C6 D-W5/W6a): executes a staged write by payload hash. Only
 	// meaningful for confirm_writes keys — for everyone else every hash is a
 	// generic miss (the store/update tools never stage for them).
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "confirm",
 		Description: "Execute a staged write. A key with the confirm_writes capability gets store/update/archive calls STAGED (response carries a payload_hash); calling confirm with that hash executes the exact server-held write.",
 	}, mcpConfirmHandler(cfg))
@@ -854,6 +854,7 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 				Manual: input.Sensitivity != "",
 			}, input.Type)
 		if err == nil && match.Unchanged() && input.Supersedes == "" {
+			noteToolBlock(ctx, match.ID)
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{textContent(fmt.Sprintf("No change needed — identical content already exists (id: %s)", match.ID))},
 			}, nil, nil
@@ -934,9 +935,17 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 			if rej := retypeBoundReject(err); rej != nil {
 				return errResultReject(rej), nil, nil
 			}
-			return errResultReject(provenanceRejectOr(err,
-				classInternal.reject(fmt.Sprintf("store failed: %v", err)))), nil, nil
+			if rej := provenanceRejectOr(err, nil); rej != nil {
+				return errResultReject(rej), nil, nil
+			}
+			// A server fault: its line names what the write left behind, as
+			// POST /api/store's does (issue #453). The answer is unchanged.
+			noteToolWrite(ctx, err)
+			logRequestError(ctx, "mcp: store error", "error", err, "write_outcome", writeOutcome(err), "request_id", RequestIDFromContext(ctx))
+			return errResultReject(classInternal.reject(fmt.Sprintf("store failed: %v", err))), nil, nil
 		}
+		noteToolWrite(ctx, nil)
+		noteToolBlock(ctx, block.ID)
 
 		// Welle 44 / WF T4: Auto-classify type_name from the registry
 		// snapshot. MCP audit-blocks (welle promotes, ctx-system docs) used to

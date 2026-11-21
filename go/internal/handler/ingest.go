@@ -386,7 +386,7 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 					Error: "block carries derived provenance — not client-writable"}
 			}
 			logRequestError(ctx, "ingest: upsert block error",
-				"error", err, "index", index, "request_id", reqID)
+				"error", err, "index", index, "request_id", reqID, "write_outcome", writeOutcome(err))
 			return IngestResult{Index: index, Status: "failed", Error: "upsert failed"}
 		}
 		// UpsertBlock uses ON CONFLICT DO UPDATE, so both insert and update return a block.

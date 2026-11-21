@@ -64,7 +64,12 @@ type SettingsHandler struct {
 func NewSettingsHandler(pool *pgxpool.Pool, cfg *config.Store) *SettingsHandler {
 	h := &SettingsHandler{pool: pool, cfg: cfg}
 	h.reload = func(r *http.Request) error {
-		return settings.Reload(r.Context(), pool, cfg)
+		// The write is committed: the reload runs on a follow-up context
+		// (issue #453), not cut by a client that leaves, bounded for the
+		// shutdown's drain.
+		ctx, cancel := followUpContext(r.Context())
+		defer cancel()
+		return settings.Reload(ctx, pool, cfg)
 	}
 	return h
 }

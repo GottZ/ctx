@@ -269,6 +269,7 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 		if miss != "" {
 			return errResult(miss), nil, nil
 		}
+		noteToolBlock(ctx, resolvedID)
 		block, _, err := store.UpdateBlock(ctx, cfg.Pool, resolvedID, data, writableBlockScopes(ar))
 		if err != nil {
 			// I7/S3: the target is a derivative — 403 class, not a 500.
@@ -278,12 +279,14 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 			if rej := updateFailureReject(err); rej != nil {
 				return errResultReject(rej), nil, nil
 			}
-			logRequestError(ctx, "mcp: update error", "error", err, "block_id", resolvedID)
+			noteToolWrite(ctx, err)
+			logRequestError(ctx, "mcp: update error", "error", err, "block_id", resolvedID, "write_outcome", writeOutcome(err))
 			return errResult("update failed: internal error"), nil, nil
 		}
 		if block == nil {
 			return errResult("Block not found (or not in a writable scope of this key)"), nil, nil
 		}
+		noteToolWrite(ctx, nil)
 		finishBlockUpdate(ctx, cfg.Pool, cfg.Blocktypes, data, block, RequestIDFromContext(ctx))
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{textContent(fmt.Sprintf("Updated: %s (id: %s, category: %s)", block.Title, block.ID, block.Category))},
@@ -380,9 +383,11 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inp
 		slog.Error("mcp: canonicalize staged update failed", "error", err)
 		return errResult("stage failed: cannot canonicalize payload"), nil, nil
 	}
+	noteToolBlock(ctx, resolvedID)
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, block.Scope, "update", "mcp", canonical, hash, ttl)
+	noteToolStaged(ctx, err, false)
 	if err != nil {
-		logRequestError(ctx, "mcp: stage pending update failed", "error", err)
+		logRequestError(ctx, "mcp: stage pending update failed", "error", err, "write_outcome", statementOutcome(err))
 		return errResult("stage failed: could not persist the staged write"), nil, nil
 	}
 

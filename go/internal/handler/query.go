@@ -759,6 +759,10 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				"error", err,
 				"request_id", requestID,
 			)
+			// The pipeline goes on and fails later on the ended context: a
+			// client that gave up while the translation waited for its
+			// admission is marked here for the 499 line (issue #453).
+			markAbandonedWait(loggedRequest(ctx), err)
 		} else if translatedQuery != query {
 			searchQuery = translatedQuery
 			translated = true
@@ -1305,6 +1309,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 					// pre-rerank order.
 					slog.Warn("rerank admission rejected, using original order",
 						"error", rerr, "request_id", requestID)
+					// As at the translation: a wait the client gave up is
+					// marked for the 499 line (issue #453).
+					markAbandonedWait(loggedRequest(ctx), rerr)
 				} else {
 					if rerr == nil {
 						results = reranked

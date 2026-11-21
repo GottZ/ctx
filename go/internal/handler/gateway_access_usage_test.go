@@ -116,8 +116,10 @@ func TestGatewayAccessLogClientGone(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("%d gateway request lines, want 1", len(lines))
 	}
-	if lines[0]["status"] != int64(clientClosedStatus) || lines[0]["handler_status"] != int64(http.StatusOK) {
-		t.Errorf("status %v handler_status %v, want %d and 200 (the client left)", lines[0]["status"], lines[0]["handler_status"], clientClosedStatus)
+	// The handler wrote nothing into the gone connection: handler_status 0
+	// (issue #453), while the booking below stays that of an answered request.
+	if lines[0]["status"] != int64(clientClosedStatus) || lines[0]["handler_status"] != int64(0) {
+		t.Errorf("status %v handler_status %v, want %d and 0 (the client left, nothing was written)", lines[0]["status"], lines[0]["handler_status"], clientClosedStatus)
 	}
 	if n := len(sink.lines("gateway rejections")); n != 0 {
 		t.Errorf("a client that left was counted as a refusal (%d lines)", n)
@@ -174,5 +176,32 @@ func TestGatewayAccessLogClientGoneWhileWaitingForAdmission(t *testing.T) {
 	}
 	if lines[0]["level"] != "WARN" || lines[0]["waited_for"] != "admission" || lines[0]["status"] != int64(clientClosedStatus) {
 		t.Errorf("gateway line %+v, want WARN status 499 with waited_for=admission", lines[0])
+	}
+}
+
+// TestGatewayAccessLogClientGoneAfterTheHandlerWrote — a stream that sent its
+// 200 before the client left keeps that status as handler_status.
+func TestGatewayAccessLogClientGoneAfterTheHandlerWrote(t *testing.T) {
+	sink := &gwLogSink{}
+	settings := config.Defaults().GatewaySettings()
+	access := NewGatewayAccessLog(GatewayAccessLogConfig{
+		Settings: func() oai.Settings { return settings },
+		Logger:   slog.New(sink),
+	})
+	started := make(chan struct{})
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ar := oai.AccessRecordFrom(r.Context()); ar != nil {
+			ar.ConsumerID, ar.Op = "c1", "chat"
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = http.NewResponseController(w).Flush()
+		waitForTheClient(r, started)
+	})
+	srv, done := abortServer(t, access.Handler(inner), nil)
+	abortClient(t, srv.URL+"/v1/chat/completions", started)
+	waitDone(t, done)
+	lines := sink.lines("gateway request")
+	if len(lines) != 1 || lines[0]["status"] != int64(clientClosedStatus) || lines[0]["handler_status"] != int64(http.StatusOK) {
+		t.Errorf("gateway lines %+v, want one with status 499 and handler_status 200", lines)
 	}
 }

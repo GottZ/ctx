@@ -80,15 +80,15 @@ const (
 // registerIssueTools adds the three W12 issue-content write tools. Called from
 // registerTools (mcp.go). Kept in its own function so the tool set is one grep.
 func registerIssueTools(server *mcp.Server, cfg MCPConfig) {
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "issue_create",
 		Description: issueCreateDesc,
 	}, mcpIssueCreateHandler(cfg))
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "issue_comment",
 		Description: issueCommentDesc,
 	}, mcpIssueCommentHandler(cfg))
-	mcp.AddTool(server, &mcp.Tool{
+	addMCPTool(server, &mcp.Tool{
 		Name:        "issue_state",
 		Description: issueStateDesc,
 	}, mcpIssueStateHandler(cfg))
@@ -111,8 +111,10 @@ func mcpIssueCreateHandler(cfg MCPConfig) mcp.ToolHandlerFor[issueCreateInput, a
 			Title: input.Title, Content: input.Content, Tags: input.Tags, Metadata: input.Metadata,
 		}, input.Status)
 		if err != nil {
-			return mcpIssueError("issue_create", err), nil, nil
+			return mcpIssueError(ctx, "issue_create", err), nil, nil
 		}
+		noteToolWrite(ctx, nil)
+		noteToolBlock(ctx, b.ID)
 		return mcpIssueResult("issue", b), nil, nil
 	}
 }
@@ -133,8 +135,10 @@ func mcpIssueCommentHandler(cfg MCPConfig) mcp.ToolHandlerFor[issueCommentInput,
 			Author: input.Author, Content: input.Content, Metadata: input.Metadata,
 		})
 		if err != nil {
-			return mcpIssueError("issue_comment", err), nil, nil
+			return mcpIssueError(ctx, "issue_comment", err), nil, nil
 		}
+		noteToolWrite(ctx, nil)
+		noteToolBlock(ctx, b.ID)
 		return mcpIssueResult("comment", b), nil, nil
 	}
 }
@@ -160,8 +164,10 @@ func mcpIssueStateHandler(cfg MCPConfig) mcp.ToolHandlerFor[issueStateInput, any
 			Status: &status,
 		})
 		if err != nil {
-			return mcpIssueError("issue_state", err), nil, nil
+			return mcpIssueError(ctx, "issue_state", err), nil, nil
 		}
+		noteToolWrite(ctx, nil)
+		noteToolBlock(ctx, b.ID)
 		return mcpIssueResult("issue", b), nil, nil
 	}
 }
@@ -204,8 +210,10 @@ func mcpIssueResult(key string, b *store.Block) *mcp.CallToolResult {
 // not writable"; an out-of-policy transition / body-cap ⇒ the 422-equivalent
 // message; everything else ⇒ a generic message (logged, no wire detail). Every
 // branch sets IsError (errResult) — an invalid transition is NEVER a silent
-// success (the state-transition-policy gate).
-func mcpIssueError(tool string, err error) *mcp.CallToolResult {
+// success (the state-transition-policy gate). The generic branch is a server
+// fault: its outcome goes on the call's server line (mcp_write_line.go; the
+// issue transaction carries no commit label, statementOutcome).
+func mcpIssueError(ctx context.Context, tool string, err error) *mcp.CallToolResult {
 	// Issue #275: an identity collision is the caller's input, with the code
 	// and the wording of the REST mapper and the MCP update tool.
 	if rej := identityTakenReject(err); rej != nil {
@@ -234,7 +242,8 @@ func mcpIssueError(tool string, err error) *mcp.CallToolResult {
 		errors.Is(err, blocktype.ErrUnknownType):
 		return errResult(err.Error()) // 422-equivalent: policy-validated transition
 	default:
-		slog.Error("mcp "+tool+" error", "error", err)
+		noteToolStatement(ctx, err)
+		slog.Error("mcp "+tool+" error", "error", err, "write_outcome", statementOutcome(err))
 		return errResult("issue write failed")
 	}
 }

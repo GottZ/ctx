@@ -248,6 +248,25 @@ type responseWriter struct {
 	// abandoned admission wait. The server had no slot ready — such an
 	// abort is logged at WARN (issue #453).
 	waited atomic.Int32
+	// wrote: the handler wrote a status, a body byte or a flush. Until then
+	// statusCode holds its start value, the 200 net/http answers a live
+	// request whose handler wrote nothing — not a status the handler wrote
+	// into a gone connection (issue #453). Atomic: a stream writes from a
+	// heartbeat goroutine of its own.
+	wrote atomic.Bool
+}
+
+// handlerWroteNothing is the handler_status of a request whose client left
+// while its handler wrote nothing (issue #453): no status, no byte.
+const handlerWroteNothing = 0
+
+// handlerStatus is the handler_status of the 499 line: the status the
+// handler wrote, or handlerWroteNothing.
+func (rw *responseWriter) handlerStatus() int {
+	if !rw.wrote.Load() {
+		return handlerWroteNothing
+	}
+	return rw.statusCode
 }
 
 // The values of responseWriter.waited.
@@ -347,6 +366,7 @@ func (rw *responseWriter) alive() bool { return rw.reqCtx == nil || rw.reqCtx.Er
 
 func (rw *responseWriter) Write(p []byte) (int, error) {
 	alive := rw.alive()
+	rw.wrote.Store(true)
 	n, err := rw.ResponseWriter.Write(p)
 	rw.noteDeadline(alive, err)
 	return n, err
@@ -373,6 +393,7 @@ func (b *requestBody) Read(p []byte) (int, error) {
 // http.Flusher assertion on this writer answers as it always did.
 func (rw *responseWriter) FlushError() error {
 	alive := rw.alive()
+	rw.wrote.Store(true)
 	err := http.NewResponseController(rw.ResponseWriter).Flush()
 	rw.noteDeadline(alive, err)
 	return err
@@ -391,6 +412,7 @@ func claimRequestLog(w http.ResponseWriter) {
 
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
+	rw.wrote.Store(true)
 	rw.ResponseWriter.WriteHeader(code)
 }
 
@@ -414,7 +436,8 @@ func (rw *responseWriter) Unwrap() http.ResponseWriter {
 // A request whose client went away before the handler returned
 // (responseWriter.clientGone, issue #417) is logged with status 499
 // (StatusClientClosedRequest) and the status the handler wrote into the dead
-// connection as handler_status; nothing reached the client. Every other
+// connection as handler_status — 0 when it wrote nothing (issue #453);
+// nothing reached the client. Every other
 // request keeps its line byte for byte. The writer travels in the request
 // context, so a handler's error line can ask the same question
 // (logRequestError).
@@ -436,7 +459,7 @@ func Logger(next http.Handler) http.Handler {
 		status, log := rw.statusCode, slog.Info
 		var gone []any
 		if left {
-			status, gone = StatusClientClosedRequest, []any{"handler_status", rw.statusCode}
+			status, gone = StatusClientClosedRequest, []any{"handler_status", rw.handlerStatus()}
 			if w := rw.waitedFor(); w != "" {
 				log, gone = slog.Warn, append(gone, "waited_for", w)
 			}
