@@ -458,11 +458,7 @@ func finishStoredBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.S
 	if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, b.ID, b.Title, b.Metadata); err != nil {
 		slog.Warn("store batch: auto-classify failed", "error", err, "block_id", b.ID, "request_id", reqID)
 	}
-	times := store.ExtractDates(b.Content)
-	if err := store.UpdateContentTimes(ctx, pool, b.ID, times); err != nil {
-		slog.Error("store batch: content_times update failed", "error", err, "block_id", b.ID, "request_id", reqID)
-	}
-	if err := store.PopulateTemporal(ctx, pool, b.ID, times, b.CreatedAt); err != nil {
-		slog.Error("store batch: temporal populate failed", "error", err, "block_id", b.ID, "request_id", reqID)
+	if _, err := store.RefreshTemporal(ctx, pool, b.ID, b.Content, b.CreatedAt); err != nil {
+		slog.Error("store batch: temporal refresh failed", "error", err, "block_id", b.ID, "request_id", reqID)
 	}
 }

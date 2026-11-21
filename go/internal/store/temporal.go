@@ -9,12 +9,15 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -137,7 +140,80 @@ func BuildTemporalBatch(blockID string, times []time.Time, links ...[]string) (*
 // via ON CONFLICT handles timestamp overlap between sources.
 //
 // If createdAt is zero, only contentTimes is used (defensive fallback).
-func PopulateTemporal(ctx context.Context, pool *pgxpool.Pool, blockID string, contentTimes []time.Time, createdAt time.Time) error {
+//
+// content is the content contentTimes were read from. The rows are written
+// only while the block still holds it (issue #414): a caller that read the
+// block, spent time on it and writes afterwards — the dream's temporal review
+// waits on an LLM in between — writes nothing once another write replaced the
+// content, and reports applied=false. Guard and rows commit together
+// (writeTemporalGuarded).
+func PopulateTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content string, contentTimes []time.Time, createdAt time.Time) (applied bool, err error) {
+	return writeTemporalGuarded(ctx, pool, blockID, contentTimes, createdAt,
+		`SELECT `+contentVersionCol+` FROM context_blocks WHERE id = $1 FOR NO KEY UPDATE`,
+		blockID, content)
+}
+
+// RefreshTemporal is the temporal afterwork of a write that stored content on
+// a block: it extracts the dates of content and writes them twice, as the
+// block's content_times and as the dimension rows PopulateTemporal writes,
+// in one transaction and only while the block still holds content.
+//
+// The afterwork runs after the write committed, outside its lock, from the
+// block the write returned (issue #414). Two writes A, B of one block that
+// commit in that order can finish their afterwork in the order B, A; A's then
+// finds B's content on the block and writes nothing (applied=false), so the
+// block keeps the temporal data of the content it holds. The version is the
+// content itself (content_hash), not updated_at: an update of tags or
+// metadata between a content write and its afterwork changes updated_at but
+// not the content the dates belong to, and two writes can carry the same
+// updated_at (now() is the transaction start).
+func RefreshTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content string, createdAt time.Time) (applied bool, err error) {
+	times := ExtractDates(content)
+	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt,
+		`UPDATE context_blocks SET content_times = $3::timestamptz[] WHERE id = $1 RETURNING `+contentVersionCol,
+		blockID, content, times)
+}
+
+// contentVersionCol answers whether the block row holds the content $2: the
+// stored content_hash (a generated column; content is NOT NULL, so it is never
+// NULL) against the same expression of $2, the comparison identicalContentWhere
+// makes. The guards return it as a column instead of filtering on it, so their
+// WHERE names the primary key alone: content_hash is not unique and has an
+// index of its own, and a planner that chose that index for a hash many blocks
+// share (identical contents are common) would read every one of them. The
+// comparison reads the row version the guard locked; the hash is in that row,
+// so no TOASTed content is read.
+const contentVersionCol = `content_hash = encode(digest($2::text, 'sha256'), 'hex')`
+
+// writeTemporalGuarded writes the dimension rows of a block and then runs
+// guardSQL, a statement that locks the block row by its primary key and
+// answers contentVersionCol for it; it commits when the answer is true and
+// rolls back when it is false or the block is gone. After the BEGIN, the rows
+// and the guard travel in one round trip; the commit or rollback is the last.
+//
+// A block deleted before the rows reach it (a purge, whose DELETE cascades
+// into context_temporal) refuses the first row on temporalBlockFK, before the
+// guard runs; that refusal is the same answer as a guard that finds no row:
+// applied=false, no error (temporalBlockGone).
+//
+// The guard is the LAST statement, and that is the whole design: it takes the
+// block's row lock (FOR NO KEY UPDATE, or the UPDATE's own lock, which is the
+// same), and a content write needs that lock, so from the guard to the commit
+// no content write can commit — the rows commit for exactly the content the
+// guard saw. A content write in flight makes the guard wait; once it
+// committed, READ COMMITTED locks the row's newest version and the guard
+// answers for that version, so a changed content answers false and the rows
+// roll back. With the guard first, the lock would be held across the
+// dimension writes as well, and a concurrent update of the block would wait
+// for them; last, the lock is held as long as the bare content_times UPDATE
+// held it before, which committed on its own, plus the one round trip to the
+// COMMIT.
+//
+// The rows are written before the guard knows whether they stay: a stale
+// caller writes and rolls back a batch (and RefreshTemporal's UPDATE) it never
+// needed — the rare case — so that the common case holds the block's lock only
+// from the guard to the commit.
+func writeTemporalGuarded(ctx context.Context, pool *pgxpool.Pool, blockID string, contentTimes []time.Time, createdAt time.Time, guardSQL string, guardArgs ...any) (bool, error) {
 	allTimes := contentTimes
 	if !createdAt.IsZero() {
 		allTimes = make([]time.Time, 0, len(contentTimes)+1)
@@ -145,29 +221,55 @@ func PopulateTemporal(ctx context.Context, pool *pgxpool.Pool, blockID string, c
 		allTimes = append(allTimes, contentTimes...)
 	}
 	batch, queryCount := BuildTemporalBatch(blockID, allTimes)
+	batch.Queue(guardSQL, guardArgs...)
 
-	br := pool.SendBatch(ctx, batch)
-	defer func() { _ = br.Close() }()
-
-	for i := 0; i < queryCount; i++ {
-		if _, err := br.Exec(); err != nil {
-			return fmt.Errorf("store: temporal: batch query %d: %w", i, err)
+	err := pgxdb.Write(ctx, pool, pgxdb.At("store: temporal"), func(tx pgx.Tx) error {
+		br := tx.SendBatch(ctx, batch)
+		for i := 0; i < queryCount; i++ {
+			if _, err := br.Exec(); err != nil {
+				_ = br.Close()
+				return fmt.Errorf("store: temporal: batch query %d: %w", i, err)
+			}
 		}
+		var holds bool
+		err := br.QueryRow().Scan(&holds)
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = nil // the block is gone: holds stays false
+		}
+		if cerr := br.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return fmt.Errorf("store: temporal: content version guard: %w", err)
+		}
+		if !holds {
+			// The block no longer holds the content (or is gone): the
+			// bracket's rollback drops the rows.
+			return pgxdb.ErrRollback
+		}
+		return nil
+	})
+	if errors.Is(err, pgxdb.ErrRollback) || temporalBlockGone(err) {
+		return false, nil
 	}
-
-	return nil
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-// UpdateContentTimes sets the content_times array on a block.
-func UpdateContentTimes(ctx context.Context, pool *pgxpool.Pool, blockID string, times []time.Time) error {
-	_, err := pool.Exec(ctx,
-		`UPDATE context_blocks SET content_times = $1::timestamptz[] WHERE id = $2`,
-		times, blockID,
-	)
-	if err != nil {
-		return fmt.Errorf("store: temporal: update content_times: %w", err)
-	}
-	return nil
+// temporalBlockFK is the foreign key of context_temporal.block_id, the name
+// PostgreSQL gave the column's REFERENCES context_blocks(id) ON DELETE CASCADE
+// (migration 113).
+const temporalBlockFK = "context_temporal_block_id_fkey"
+
+// temporalBlockGone reports the refusal a dimension row gets when its block
+// does not exist: 23503 (foreign_key_violation) on temporalBlockFK. Any other
+// constraint's refusal, and any other code, is an error of its own and stays
+// one.
+func temporalBlockGone(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503" && pgErr.ConstraintName == temporalBlockFK
 }
 
 // FetchContentTimes retrieves content_times for multiple blocks.
@@ -292,23 +394,20 @@ func BackfillTemporal(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 		}
 
 		for _, b := range blocks {
-			times := ExtractDates(b.Content)
-
-			if err := UpdateContentTimes(ctx, pool, b.ID, times); err != nil {
-				slog.Warn("backfill: update content_times failed",
-					"block_id", b.ID, "error", err)
-				continue
-			}
-
 			// Always populate temporal — createdAt is passed as meta-anchor.
-			// Blocks without content times still get dimensions from their creation time.
-			if err := PopulateTemporal(ctx, pool, b.ID, times, b.CreatedAt); err != nil {
-				slog.Warn("backfill: populate temporal failed",
+			// Blocks without content times still get dimensions from their
+			// creation time. A block whose content changed since the read
+			// above is skipped and not counted: the afterwork of the write
+			// that changed it writes the data of its content.
+			applied, err := RefreshTemporal(ctx, pool, b.ID, b.Content, b.CreatedAt)
+			if err != nil {
+				slog.Warn("backfill: temporal refresh failed",
 					"block_id", b.ID, "error", err)
 				continue
 			}
-
-			processed++
+			if applied {
+				processed++
+			}
 		}
 
 		slog.Info("backfill: batch complete",

@@ -154,8 +154,19 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 			"stored", currentDims,
 			"expected", expectedDimCount,
 		)
-		if err := store.PopulateTemporal(ctx, pool, block.ID, contentTimes, block.CreatedAt); err != nil {
+		// Written only while the block still holds the content picked above
+		// (issue #414): a write that replaced it since writes the dates of its
+		// own content in its afterwork.
+		applied, err := store.PopulateTemporal(ctx, pool, block.ID, block.Content, contentTimes, block.CreatedAt)
+		if err != nil {
 			return fmt.Errorf("validate temporal: re-populate: %w", err)
+		}
+		if !applied {
+			// The block no longer holds the picked content, or is gone: the
+			// review's merge would be dropped by the same guard, so the LLM
+			// call is skipped.
+			slog.Info("dream: temporal phase1 — block changed or gone since the pick, review skipped", "block_id", block.ID)
+			return nil
 		}
 		phase1Fixed = true
 	}
@@ -225,9 +236,10 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 			"new_dates", len(newTimes),
 			"phase1_fixed", phase1Fixed,
 		)
-		// Re-populate with merged times.
+		// Re-populate with merged times — skipped when a write replaced the
+		// content during the review: the findings belong to the old one.
 		merged := append(contentTimes, newTimes...)
-		if err := store.PopulateTemporal(ctx, pool, block.ID, merged, block.CreatedAt); err != nil {
+		if _, err := store.PopulateTemporal(ctx, pool, block.ID, block.Content, merged, block.CreatedAt); err != nil {
 			return fmt.Errorf("validate temporal: merge populate: %w", err)
 		}
 	}
