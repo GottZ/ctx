@@ -24,3 +24,23 @@ test.describe('mobile drawer', () => {
     await page.screenshot({ path: 'e2e/.results/shots/mobile-drawer-open.png' })
   })
 })
+
+test.describe('mobile cluster map', () => {
+  // #441: the cluster title bar is anchored top-right with the gutter as its
+  // right inset; its max-width leaves the same gutter on the left. The bar
+  // fits the viewport either way, so the viewport fit cannot see a missing
+  // left gutter — this asserts it directly.
+  test('the cluster map bar keeps the gutter on both sides', async ({ page }) => {
+    await seedSession(page, { role: 'server-admin', theme: 'dark' })
+    await gotoArea(page, '/graph')
+    await expect(page.locator('.overview .bar .stat')).toBeVisible()
+    const { left, right } = await page.evaluate(() => {
+      const bar = document.querySelector('.overview .bar')?.getBoundingClientRect()
+      const stage = document.querySelector('.overview')?.getBoundingClientRect()
+      if (!bar || !stage) throw new Error('cluster map not mounted')
+      return { left: bar.left - stage.left, right: stage.right - bar.right }
+    })
+    expect(right, 'the bar keeps its right inset').toBeGreaterThan(0)
+    expect(left, `the bar leaves ${left} px on the left and ${right} px on the right`).toBeGreaterThanOrEqual(right - 0.5)
+  })
+})
