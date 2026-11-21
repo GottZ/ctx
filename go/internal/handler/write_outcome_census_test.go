@@ -11,6 +11,10 @@ package handler
 // there. Every direct write call names it (issue #483); one that does not
 // fails this test. Name the outcome on its line.
 //
+// It sees the call as `x, err := store.F(…)`, `err = store.F(…)`,
+// `if x, err := store.F(…); err != nil {…}` and `return store.F(…)`, under
+// whatever name the file imports the store package.
+//
 // Limits: a call whose error is returned to the caller (`return store.F(…)`,
 // a core both transports share) is counted, not followed — its callers name
 // the outcome (the issue writes: writeIssueWriteError and mcpIssueError); the
@@ -100,32 +104,13 @@ func TestWriteFailureLinesNameTheOutcome(t *testing.T) {
 	got := map[string]int{}
 	calls, returned := 0, 0
 	for _, file := range files {
-		ast.Inspect(file, func(n ast.Node) bool {
-			block, ok := n.(*ast.BlockStmt)
-			if !ok {
-				return true
-			}
-			for i, stmt := range block.List {
-				name, errVar, isReturn := storeWriteCall(stmt, writes)
-				if name == "" {
-					continue
-				}
-				calls++
-				if isReturn {
-					returned++
-					continue
-				}
-				switch failureBranch(block.List[i+1:], errVar, namers) {
-				case branchNamed:
-				case branchReturned:
-					returned++
-				default:
-					got[filepath.Base(fset.Position(stmt.Pos()).Filename)]++
-					t.Logf("%s: store.%s — failure line without write_outcome", fset.Position(stmt.Pos()), name)
-				}
-			}
-			return true
-		})
+		c := censusFile(fset, file, writes, namers)
+		calls += c.calls
+		returned += c.returned
+		for _, pos := range c.unnamed {
+			got[filepath.Base(pos.Filename)]++
+			t.Logf("%s — failure line without write_outcome", pos)
+		}
 	}
 	if calls == 0 {
 		t.Fatal("found no store write call — did the names change?")
@@ -144,12 +129,87 @@ func TestWriteFailureLinesNameTheOutcome(t *testing.T) {
 	}
 }
 
-// storeWriteCall reports the store write stmt makes — `x, err := store.F(…)`,
-// `err = store.F(…)` or `return store.F(…)` — with the variable its error
-// lands in.
-func storeWriteCall(stmt ast.Stmt, writes map[string]bool) (name, errVar string, isReturn bool) {
+// census is what censusFile counts in one file: the store write calls, those
+// whose error goes back to the caller, and the positions of those whose
+// failure line names no outcome.
+type census struct {
+	calls, returned int
+	unnamed         []token.Position
+}
+
+// censusFile walks every statement list of file for store write calls.
+func censusFile(fset *token.FileSet, file *ast.File, writes map[string]bool, namers map[string]bool) census {
+	var c census
+	pkg := storeImportName(file)
+	if pkg == "" {
+		return c
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		block, ok := n.(*ast.BlockStmt)
+		if !ok {
+			return true
+		}
+		for i, stmt := range block.List {
+			name, errVar, isReturn := storeWriteCall(stmt, writes, pkg)
+			if name == "" {
+				continue
+			}
+			c.calls++
+			if isReturn {
+				c.returned++
+				continue
+			}
+			rest := block.List[i+1:]
+			if is, ok := stmt.(*ast.IfStmt); ok {
+				// The call sits in the if's init: its body is the failure
+				// branch when the condition is `err != nil`.
+				rest = nil
+				if testsNotNil(is.Cond, errVar) {
+					rest = is.Body.List
+				}
+			}
+			switch failureBranch(rest, errVar, namers) {
+			case branchNamed:
+			case branchReturned:
+				c.returned++
+			default:
+				c.unnamed = append(c.unnamed, fset.Position(stmt.Pos()))
+			}
+		}
+		return true
+	})
+	return c
+}
+
+// storeImportPath is the store package the census looks for.
+const storeImportPath = "github.com/GottZ/ctx/internal/store"
+
+// storeImportName is the name file calls the store package by — its alias,
+// else "store" — and "" when the file does not import it.
+func storeImportName(file *ast.File) string {
+	for _, imp := range file.Imports {
+		if p, err := strconv.Unquote(imp.Path.Value); err != nil || p != storeImportPath {
+			continue
+		}
+		if imp.Name != nil {
+			return imp.Name.Name
+		}
+		return "store"
+	}
+	return ""
+}
+
+// storeWriteCall reports the store write stmt makes — `x, err := pkg.F(…)`,
+// `err = pkg.F(…)`, `if x, err := pkg.F(…); …` or `return pkg.F(…)` — with
+// the variable its error lands in.
+func storeWriteCall(stmt ast.Stmt, writes map[string]bool, pkg string) (name, errVar string, isReturn bool) {
 	var call *ast.CallExpr
 	switch s := stmt.(type) {
+	case *ast.IfStmt:
+		if s.Init == nil {
+			return "", "", false
+		}
+		return storeWriteCall(s.Init, writes, pkg)
 	case *ast.AssignStmt:
 		if len(s.Rhs) != 1 {
 			return "", "", false
@@ -172,7 +232,7 @@ func storeWriteCall(stmt ast.Stmt, writes map[string]bool) (name, errVar string,
 	if !ok {
 		return "", "", false
 	}
-	if x, ok := sel.X.(*ast.Ident); !ok || x.Name != "store" || !writes[sel.Sel.Name] {
+	if x, ok := sel.X.(*ast.Ident); !ok || x.Name != pkg || !writes[sel.Sel.Name] {
 		return "", "", false
 	}
 	return sel.Sel.Name, errVar, isReturn
@@ -248,4 +308,46 @@ func callsNamer(n ast.Node, namers map[string]bool) bool {
 		return !found
 	})
 	return found
+}
+
+// TestWriteOutcomeCensusSeesEveryForm — the census finds a write in the init
+// of an if and under an aliased import of the store package (issue #483).
+func TestWriteOutcomeCensusSeesEveryForm(t *testing.T) {
+	const src = `package handler
+
+import st "github.com/GottZ/ctx/internal/store"
+
+func unnamedInInit(ctx context.Context) {
+	if _, err := st.UpsertBlock(ctx); err != nil {
+		logRequestError(ctx, "x", "error", err)
+		return
+	}
+}
+
+func namedInInit(ctx context.Context) {
+	if _, err := st.DeleteBlob(ctx); err != nil {
+		logRequestError(ctx, "x", "error", err, "write_outcome", statementOutcome(err))
+	}
+}
+
+func unnamedAliased(ctx context.Context) {
+	_, err := st.UpdateBlock(ctx)
+	if err != nil {
+		return
+	}
+}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "probe.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writes := map[string]bool{"UpsertBlock": true, "DeleteBlob": true, "UpdateBlock": true}
+	c := censusFile(fset, file, writes, map[string]bool{})
+	if c.calls != 3 || len(c.unnamed) != 2 {
+		t.Fatalf("census = %d calls, unnamed at %v; want 3 calls, 2 unnamed (the if-init write without the key, the aliased one)", c.calls, c.unnamed)
+	}
+	if c.unnamed[0].Line != 6 || c.unnamed[1].Line != 19 {
+		t.Errorf("unnamed at %v, want lines 6 and 19", c.unnamed)
+	}
 }
