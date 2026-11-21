@@ -841,13 +841,29 @@ func TestFollowupBoundGamingReload(t *testing.T) {
 	}
 }
 
-// TestFollowupBoundGamingReloadsShareOneBound — the eject/gaming toggle runs
-// two reloads after its commit, the backend pool's and the settings'; one
-// followUpTimeout bounds both, so the pair stays inside the shutdown's drain
-// (two bounds of 10 s would be 20 s against its 15 s). The backend reload is
-// held on a table lock until it waits; the settings reload must then see a
-// deadline that began before the lock went away.
-func TestFollowupBoundGamingReloadsShareOneBound(t *testing.T) {
+// gamingToggle posts the gaming-mode toggle to h as the server admin and
+// returns the answer's status and body.
+func gamingToggle(t *testing.T, pool *pgxpool.Pool, h *ManageHandler) (int, map[string]any) {
+	t.Helper()
+	srv, done, _ := fbServer(t, fbAs(fbAdmin(t, pool), http.HandlerFunc(h.HandleManage)))
+	resp, err := http.Post(srv.URL+"/api/manage", "application/json", strings.NewReader(`{"action":"gaming-mode","data":{"mode":"on"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	waitDone(t, done)
+	return resp.StatusCode, body
+}
+
+// TestFollowupBoundGamingReloadsHaveTheirShares — the eject/gaming toggle
+// runs two reloads after its commit, the backend pool's and the settings';
+// each gets its own share of followUpTimeout (issue #483), so a backend
+// reload that hangs for its whole share leaves the settings reload a live
+// context, and the pair stays inside the shutdown's drain. The backend
+// reload is held on a table lock past its share.
+func TestFollowupBoundGamingReloadsHaveTheirShares(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
@@ -857,35 +873,74 @@ func TestFollowupBoundGamingReloadsShareOneBound(t *testing.T) {
 	if err := bp.Reload(context.Background()); err != nil {
 		t.Fatalf("pool reload: %v", err)
 	}
-	var lockRelease func()
 	prev := beforeGamingCommit
 	beforeGamingCommit = func() error {
-		lockRelease = lockedTx(t, pool, `LOCK TABLE context_backends IN ACCESS EXCLUSIVE MODE`)
+		lockedTx(t, pool, `LOCK TABLE context_backends IN ACCESS EXCLUSIVE MODE`)
 		return nil
 	}
 	t.Cleanup(func() { beforeGamingCommit = prev })
-	deadlines := make(chan time.Time, 1)
+	type seen struct {
+		err      error
+		deadline time.Time
+		at       time.Time
+	}
+	got := make(chan seen, 1)
 	reload := func(ctx context.Context) error {
 		dl, _ := ctx.Deadline()
-		deadlines <- dl
-		return nil
+		got <- seen{err: ctx.Err(), deadline: dl, at: time.Now()}
+		return ctx.Err()
 	}
 	h := NewManageHandler(pool, cfgStore, nil, bp, nil, reload, nil, nil)
-	installRejectLogCapture(t)
-	srv, done, _ := fbServer(t, fbAs(fbAdmin(t, pool), http.HandlerFunc(h.HandleManage)))
-	q := fbSend(t, http.MethodPost, srv.URL+"/api/manage", "", `{"action":"gaming-mode","data":{"mode":"on"}}`)
-	waitLockWaiters(t, pool, 1)
-	released := time.Now()
-	lockRelease()
-	var dl time.Time
-	select {
-	case dl = <-deadlines:
-	case <-time.After(15 * time.Second):
-		t.Fatal("the settings reload never ran")
+	logs := installRejectLogCapture(t)
+	begin := time.Now()
+	status, _ := gamingToggle(t, pool, h)
+	elapsed := time.Since(begin)
+	s := <-got
+	if s.err != nil {
+		t.Errorf("the settings reload ran on an ended context (%v): the hung backend reload used up its bound", s.err)
 	}
-	waitDone(t, done)
-	_ = q
-	if dl.IsZero() || !dl.Before(released.Add(followUpTimeout)) {
-		t.Errorf("the settings reload's deadline %v began after the backend reload ended (lock released %v): two bounds of %v, not one", dl, released, followUpTimeout)
+	if s.deadline.Sub(s.at) > followUpTimeout/2 {
+		t.Errorf("the settings reload's share is %v, want at most %v", s.deadline.Sub(s.at), followUpTimeout/2)
+	}
+	if status != http.StatusOK {
+		t.Errorf("toggle answered %d, want 200 (the settings reload succeeded)", status)
+	}
+	// ctxd's HTTP drain (cmd/ctxd shutdownHTTPTimeout) is 15 s.
+	if elapsed > followUpTimeout+2*time.Second {
+		t.Errorf("the toggle took %v: its two reloads together exceed %v", elapsed, followUpTimeout)
+	}
+	if recs := logs.withMsg("backends: post-mutation reload failed — NOTIFY path will converge"); len(recs) != 1 {
+		t.Errorf("want the hung backend reload's own line, got %+v", logs.all())
+	}
+}
+
+// TestFollowupBoundGamingReloadFailureSaysWritten — a settings reload that
+// fails after the toggle committed: the answer is no plain success, and it
+// says the toggle is written (issue #483).
+func TestFollowupBoundGamingReloadFailureSaysWritten(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	cfgStore := fbEnvConfig(t, pool)
+	bp := backends.NewPool(pool, nil)
+	if err := bp.Reload(context.Background()); err != nil {
+		t.Fatalf("pool reload: %v", err)
+	}
+	h := NewManageHandler(pool, cfgStore, nil, bp, nil, func(context.Context) error { return errors.New("i483 probe reload fault") }, nil, nil)
+	logs := installRejectLogCapture(t)
+	status, body := gamingToggle(t, pool, h)
+	if status != http.StatusInternalServerError || body["success"] != false || body["persisted"] != true {
+		t.Errorf("answer %d %v, want 500 with success=false and persisted=true", status, body)
+	}
+	if msg, _ := body["error"].(string); !strings.Contains(msg, "written") || strings.Contains(msg, "i483 probe") {
+		t.Errorf("error text %q, want one that says the toggle is written, without the cause", msg)
+	}
+	var active bool
+	if err := pool.QueryRow(context.Background(), `SELECT active FROM context_disable_profiles WHERE name = $1`, ejectProfileName).Scan(&active); err != nil || !active {
+		t.Errorf("eject profile active = %v (%v), want true: the toggle committed", active, err)
+	}
+	if recs := logs.withMsg("eject/gaming-mode: persisted but reload failed"); len(recs) != 1 || recs[0].level != slog.LevelError {
+		t.Errorf("want one ERROR line for the failed reload, got %+v", recs)
 	}
 }
