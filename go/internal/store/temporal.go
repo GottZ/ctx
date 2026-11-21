@@ -218,12 +218,15 @@ const contentVersionCol = `content_hash = encode(digest($2::text, 'sha256'), 'he
 //
 // The guard of RefreshTemporal and PopulateTemporal (temporalContentGuardSQL)
 // takes no row lock (issue #421). The transaction holds the block row only in
-// the FOR KEY SHARE the dimension rows' foreign key takes, which neither a
-// content write nor the query path's failure memo (FOR NO KEY UPDATE SKIP
-// LOCKED, RecordEmbedFailureIfUnchanged) conflicts with: neither waits for
-// this transaction, and the memo no longer skips a freshly written block
-// while its afterwork runs. Before, the guard took the row lock (the UPDATE
-// of content_times, FOR NO KEY UPDATE) and held it to the commit.
+// the FOR KEY SHARE the dimension rows' foreign key takes, from the first row
+// to the commit. FOR NO KEY UPDATE does not conflict with it — UpdateBlock
+// and the query path's failure memo (FOR NO KEY UPDATE SKIP LOCKED,
+// RecordEmbedFailureIfUnchanged) neither wait for this transaction nor skip
+// the block because of it. FOR UPDATE does, as it did before: the pre-read of
+// UpsertBlock and the lock pass of UpsertBlocks wait for the commit, and the
+// FOR UPDATE SKIP LOCKED pickers (the embed arm, the guard batch) skip the
+// block meanwhile. Before, the guard also took the row lock FOR NO KEY UPDATE
+// (the UPDATE of content_times) and held it to the commit.
 //
 // What the lock did is done by the turn the temporal writers of a block take
 // (temporalWriterLockSQL, below). The guard stays the last statement: a

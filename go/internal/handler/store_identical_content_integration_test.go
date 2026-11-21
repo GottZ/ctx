@@ -215,7 +215,7 @@ func TestStoreIdenticalContentTagsMetadata(t *testing.T) {
 	)
 	// guardPicks runs the production guard batch several times and sums what
 	// it processed. The handler's fire-and-forget writers (access log,
-	// content_times, context_temporal) briefly lock the row after every write,
+	// context_temporal) briefly lock the row after every write,
 	// and the batch picks FOR UPDATE SKIP LOCKED — one run can skip a pending
 	// block. Over several spaced runs a pending block is picked; a block that
 	// is not pending never is.

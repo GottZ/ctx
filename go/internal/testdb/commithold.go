@@ -22,7 +22,10 @@ const CommitHoldBound = 30 * time.Second
 // CommitHold holds one transaction at its COMMIT, with every lock it took
 // still held: the first transaction on its pool that runs a statement (or a
 // batch with a statement) for which match answers true waits before it sends
-// its COMMIT until Release. Later transactions pass. It is a pgx tracer, so
+// its COMMIT until Release; one that rolls back is not held. Later
+// transactions pass. match must name statements that run inside a
+// transaction: an autocommit statement arms its connection for the next
+// transaction that commits on it. It is a pgx tracer, so
 // the statements run are the production ones, unchanged; only the COMMIT is
 // delayed, on the client side.
 type CommitHold struct {
@@ -98,6 +101,14 @@ func (h *CommitHold) arm(conn *pgx.Conn, sql string) {
 // TraceQueryStart arms the connection on a matching statement and holds its
 // COMMIT once armed.
 func (h *CommitHold) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if strings.EqualFold(strings.TrimSpace(data.SQL), "rollback") {
+		// A matching transaction that rolls back is not the one to hold, and
+		// the connection's next transaction is another one.
+		h.mu.Lock()
+		delete(h.armed, conn)
+		h.mu.Unlock()
+		return ctx
+	}
 	if !strings.EqualFold(strings.TrimSpace(data.SQL), "commit") {
 		h.arm(conn, data.SQL)
 		return ctx

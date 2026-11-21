@@ -2,20 +2,21 @@
 
 // Issues #421 and #428: the temporal writes of one block (the afterwork of a
 // content write, the dream's review, the backfill) take turns, and none of
-// them holds the block row in a mode a content writer or the query path's
-// failure memo needs; a content write sets content_times itself, in its own
-// statement. The transactions held here are held at their COMMIT, with every
+// them holds the block row in a mode UpdateBlock or the query path's failure
+// memo (both FOR NO KEY UPDATE) conflicts with; a content write sets
+// content_times itself, in its own statement. The transactions held here are held at their COMMIT, with every
 // lock they took (testdb.HoldCommitPool), so the interleavings do not depend
 // on timing.
 //
 // Run with:
 //
-//	go test -tags=integration ./internal/store/ -run 'TestTemporalWriters|TestTemporalAfterworkHeld|TestContentWritesSetContentTimes|TestEditsComputeBeforeTheLock' -count=1 -v
+//	go test -tags=integration ./internal/store/ -run 'TestTemporalWriters|TestTemporalAfterworkHeld|TestContentWritesSetContentTimes|TestEditsComputeBeforeTheLock|TestEditsRecheck' -count=1 -v
 package store_test
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -104,7 +105,8 @@ var errNotApplied = errors.New("temporal write not applied")
 // TestTemporalAfterworkHeldAtCommitHoldsNoBlockRowLock is #421 at the store:
 // the afterwork of a content write A, held at its COMMIT, holds the block row
 // in no mode the query path's failure memo (FOR NO KEY UPDATE SKIP LOCKED) or
-// a content writer needs, so a content update B lands while it is held. B's
+// an update (FOR NO KEY UPDATE) conflicts with, so a content update B lands
+// while it is held. B's
 // own afterwork then waits for A's and replaces its rows: the block ends with
 // B's data, and content_times is B's from B's own statement.
 func TestTemporalAfterworkHeldAtCommitHoldsNoBlockRowLock(t *testing.T) {
@@ -410,4 +412,85 @@ func TestEditsComputeBeforeTheLockAndRedoOnAChangedRow(t *testing.T) {
 		t.Errorf("content = %q, want %q (the edit applied to the content written in the gap)", u.Content, want)
 	}
 	i421AssertContentTimes(t, pool, b.ID, want, "after the edits")
+}
+
+// TestEditsRecheckTheVersionAfterWaitingForAnInFlightWrite: a content write is
+// held at its COMMIT while an update's edits run; their unlocked read sees the
+// content before it, and their lock waits for it. Once it committed, READ
+// COMMITTED locks the newest row version and the version check fails, so the
+// edits run again on the content written: an edit that matched only the
+// earlier content is refused, one that matches only the newer applies, and
+// content_times is that of the content stored.
+func TestEditsRecheckTheVersionAfterWaitingForAnInFlightWrite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+	repl := "2026-05-09"
+
+	cases := []struct {
+		name, initial, inflight string
+		wantContent             string // "" = the edit is refused
+	}{
+		{"applies before and after", "Planned 2026-05-05, kept 2026-06-06.", "Moved: 2026-05-05 still, plus 2026-07-07.", "Moved: 2026-05-09 still, plus 2026-07-07."},
+		{"refused on the read, applies on the locked row", "Nothing dated here.", "Now on 2026-05-05.", "Now on 2026-05-09."},
+		{"applies on the read, refused on the locked row", "Planned 2026-05-05.", "No date any more.", ""},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := store.UpsertBlock(ctx, pool, "i421", fmt.Sprintf("i421-edit-inflight-%d", i), tc.initial, nil, nil, "private", false, store.SensitivityWrite{}, "")
+			if err != nil {
+				t.Fatalf("store: %v", err)
+			}
+			holdPool, hold := testdb.HoldCommitPool(t, dsn, func(sql string) bool {
+				return strings.HasPrefix(strings.TrimSpace(sql), "UPDATE context_blocks SET content = ")
+			})
+			writeDone := make(chan error, 1)
+			go func() {
+				c := tc.inflight
+				_, _, err := store.UpdateBlock(ctx, holdPool, b.ID, store.UpdateBlockData{Content: &c}, []string{"private"})
+				writeDone <- err
+			}()
+			writePID := hold.Wait(t)
+
+			editDone := make(chan struct{})
+			var got *store.Block
+			var editErr error
+			go func() {
+				defer close(editDone)
+				got, _, editErr = store.UpdateBlock(ctx, pool, b.ID, store.UpdateBlockData{Edits: []store.ContentEdit{{Old: "2026-05-05", New: &repl}}}, []string{"private"})
+			}()
+			event := testdb.WaitBlockedBy(t, pool, writePID, editDone, "the edits")
+			t.Logf("the edits wait on the held content write: wait_event=%s", event)
+			hold.Release()
+			if err := <-writeDone; err != nil {
+				t.Fatalf("content write: %v", err)
+			}
+			select {
+			case <-editDone:
+			case <-time.After(testdb.CommitHoldBound):
+				t.Fatalf("the edits did not finish within %s after the content write committed", testdb.CommitHoldBound)
+			}
+			if tc.wantContent == "" {
+				var ce *store.ContentEditError
+				if !errors.As(editErr, &ce) {
+					t.Errorf("edits: err=%v (block %v), want a ContentEditError", editErr, got)
+				}
+				var content string
+				if err := pool.QueryRow(ctx, `SELECT content FROM context_blocks WHERE id = $1`, b.ID).Scan(&content); err != nil || content != tc.inflight {
+					t.Errorf("stored content = %q (%v), want the content write's %q", content, err, tc.inflight)
+				}
+				i421AssertContentTimes(t, pool, b.ID, tc.inflight, "after the refused edit")
+				return
+			}
+			if editErr != nil || got == nil {
+				t.Fatalf("edits: %v", editErr)
+			}
+			if got.Content != tc.wantContent {
+				t.Errorf("content = %q, want %q", got.Content, tc.wantContent)
+			}
+			i421AssertContentTimes(t, pool, b.ID, tc.wantContent, "after the edits")
+		})
+	}
 }
