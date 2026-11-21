@@ -71,6 +71,9 @@
 
 <style>
   .screen {
+    /* The padding belongs inside the 100dvh, or the mask is two paddings
+       taller than the viewport and the page scrolls (#419). */
+    box-sizing: border-box;
     min-height: 100dvh;
     display: grid;
     place-items: center;

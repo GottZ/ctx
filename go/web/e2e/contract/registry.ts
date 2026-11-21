@@ -386,14 +386,16 @@ export const contracts: PageContract[] = [
         prepare: async (page) => {
           await page.getByLabel('API key').fill('wrong-key')
           // scroll: 'none' (#416): the button is still in its entrance
-          // animation, so the click can fail the stability check a few times.
-          // The attempt that passes scrolls with an alignment picked by its
-          // retry index (0 if needed, 1 end, 2 center, 3 start). The mask is
-          // 30 px taller than the viewport, so index 2 or 3 scrolls the page;
-          // when the error band grows the card, scroll anchoring settles at
-          // 8 px and keeps the button under the resting pointer (:hover). The
-          // capture then fails on whichever run drew index 2 or 3. The button
-          // is in view at both viewports, so no scroll is the user's own picture.
+          // animation, so the click can fail the stability check a few times,
+          // and each retry scrolls with an alignment picked by its retry index
+          // (0 if needed, 1 end, 2 center, 3 start). Until #419 the mask was
+          // 30 px taller than the viewport, so index 2 or 3 scrolled the page
+          // and left the button under the resting pointer (:hover) in the
+          // capture. The mask now fits the viewport (the runner asserts it
+          // before every capture), so no alignment has anything to scroll.
+          // The option stays as an assertion: with it the click fails unless
+          // the button is already in the viewport, i.e. reachable without
+          // scrolling — the user's own picture at both viewports.
           await page.getByRole('button', { name: 'Sign in' }).click({ scroll: 'none' })
           // R4: the reject comes from POST /auth/login — the real handler's
           // uniform sessionError string (auth_session.go).
