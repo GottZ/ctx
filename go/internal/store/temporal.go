@@ -213,6 +213,15 @@ const contentVersionCol = `content_hash = encode(digest($2::text, 'sha256'), 'he
 // caller writes and rolls back a batch (and RefreshTemporal's UPDATE) it never
 // needed — the rare case — so that the common case holds the block's lock only
 // from the guard to the commit.
+//
+// The temporal writers of one block take turns (issue #428): the first
+// statement takes temporalWriterLockSQL, a transaction-scoped advisory lock
+// of the block, so the DELETE runs only once every temporal write of the
+// block before it has committed and sees its rows. Without it, two writers of
+// one content with different dates (the write path's extraction and the
+// dream's review, or two reviews) both passed the guard, and under READ
+// COMMITTED the second DELETE skipped the rows the first had deleted and did
+// not see the ones it had inserted: both date sets stayed.
 func writeTemporalGuarded(ctx context.Context, pool *pgxpool.Pool, blockID string, contentTimes []time.Time, createdAt time.Time, guardSQL string, guardArgs ...any) (bool, error) {
 	allTimes := contentTimes
 	if !createdAt.IsZero() {
@@ -220,7 +229,11 @@ func writeTemporalGuarded(ctx context.Context, pool *pgxpool.Pool, blockID strin
 		allTimes = append(allTimes, createdAt)
 		allTimes = append(allTimes, contentTimes...)
 	}
-	batch, queryCount := BuildTemporalBatch(blockID, allTimes)
+	rows, rowCount := BuildTemporalBatch(blockID, allTimes)
+	batch := &pgx.Batch{}
+	batch.Queue(temporalWriterLockSQL, blockID)
+	batch.QueuedQueries = append(batch.QueuedQueries, rows.QueuedQueries...)
+	queryCount := 1 + rowCount
 	batch.Queue(guardSQL, guardArgs...)
 
 	err := pgxdb.Write(ctx, pool, pgxdb.At("store: temporal"), func(tx pgx.Tx) error {
@@ -257,6 +270,19 @@ func writeTemporalGuarded(ctx context.Context, pool *pgxpool.Pool, blockID strin
 	}
 	return true, nil
 }
+
+// temporalWriterLockSQL is the lock the temporal writers of a block ($1) take
+// in turn (writeTemporalGuarded): transaction-scoped, so it ends with the
+// commit or the rollback. The key is the pair (hashtext('ctx:temporal'),
+// hashtext(block id)), the two-key form the per-block lock of the guard's
+// archive uses (guard.go) under a namespace of its own; the two-key form is a
+// key space apart from the one-key locks. hashtext is 32 bits wide, so two
+// blocks can share a key: their temporal writes then wait for each other as
+// well. That costs a wait, never a wrong row — every writer still writes and
+// checks only its own block. Only writeTemporalGuarded takes this lock, as the
+// first statement of a transaction that holds nothing yet, so a writer
+// waiting for it holds nothing another writer could wait for.
+const temporalWriterLockSQL = `SELECT pg_advisory_xact_lock(hashtext('ctx:temporal'), hashtext($1::uuid::text))`
 
 // temporalBlockFK is the foreign key of context_temporal.block_id, the name
 // PostgreSQL gave the column's REFERENCES context_blocks(id) ON DELETE CASCADE
