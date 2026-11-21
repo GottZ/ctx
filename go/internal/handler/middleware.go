@@ -232,7 +232,20 @@ type responseWriter struct {
 	// stream's SetWriteDeadline window) that ended the request. Atomic: a
 	// stream's heartbeat writes from a goroutine of its own.
 	serverDeadline atomic.Bool
+	// verdict is clientGone's answer, fixed by Logger when the handler
+	// returned (issue #453): net/http then cancels reqCtx with the same plain
+	// cancellation a client that leaves causes (server.go: w.cancelCtx after
+	// ServeHTTP), so a goroutine that outlives the handler asks the request's
+	// verdict, not reqCtx. verdictOpen while the handler runs.
+	verdict atomic.Int32
 }
+
+// The values of responseWriter.verdict.
+const (
+	verdictOpen int32 = iota // the handler has not returned
+	verdictLive              // it returned with the client still there
+	verdictGone              // it returned after the client went away
+)
 
 // clientGone reports whether the request ended because its client went away
 // (issue #417): reqCtx carries net/http's plain cancellation — no deadline,
@@ -246,7 +259,21 @@ type responseWriter struct {
 // sending side (net/http sees EOF; no proxy in front of ctxd does this), and
 // HTTP/2, where the WriteTimeout timer resets the stream before a write
 // fails — ctxd serves HTTP/1.1 only (newHTTPServer).
+//
+// Once the handler returned, the answer is the one Logger fixed at that
+// moment (verdict).
 func (rw *responseWriter) clientGone() bool {
+	switch rw.verdict.Load() {
+	case verdictLive:
+		return false
+	case verdictGone:
+		return true
+	}
+	return rw.clientLeft()
+}
+
+// clientLeft is clientGone's answer while the handler runs.
+func (rw *responseWriter) clientLeft() bool {
 	if rw.reqCtx == nil || rw.reqCtx.Err() != context.Canceled || context.Cause(rw.reqCtx) != context.Canceled { //nolint:errorlint // net/http's plain cancellation is exactly the sentinel
 		return false
 	}
@@ -260,6 +287,19 @@ func (rw *responseWriter) noteDeadline(alive bool, err error) {
 	if alive && err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
 		rw.serverDeadline.Store(true)
 	}
+}
+
+// settle fixes the verdict when the handler returned and reports it: net/http
+// has not cancelled reqCtx for the return yet (it does once Logger returns),
+// so a cancelled reqCtx here is the client's leaving.
+func (rw *responseWriter) settle() bool {
+	left := rw.clientLeft()
+	v := verdictLive
+	if left {
+		v = verdictGone
+	}
+	rw.verdict.Store(v)
+	return left
 }
 
 func (rw *responseWriter) alive() bool { return rw.reqCtx == nil || rw.reqCtx.Err() == nil }
@@ -347,13 +387,14 @@ func Logger(next http.Handler) http.Handler {
 		}
 
 		next.ServeHTTP(rw, inner)
+		left := rw.settle()
 
 		if rw.logClaimed {
 			return
 		}
 		status := rw.statusCode
 		var gone []any
-		if rw.clientGone() {
+		if left {
 			status, gone = StatusClientClosedRequest, []any{"handler_status", rw.statusCode}
 		}
 		slog.Info("http request", append([]any{
