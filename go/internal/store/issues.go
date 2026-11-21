@@ -544,6 +544,7 @@ func UpdateIssueBlock(ctx context.Context, tx pgx.Tx, id string, u IssueUpdate, 
 		if err := InvalidateEmbeddingTx(ctx, tx, id); err != nil {
 			return nil, fmt.Errorf("store: update issue: %w", err)
 		}
+		dropInvalidatedMarks(b)
 	}
 	return b, nil
 }

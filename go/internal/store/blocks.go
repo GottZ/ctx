@@ -1254,6 +1254,16 @@ func StoreEmbeddingNext(ctx context.Context, q pgxdb.Execer, blockID, model stri
 //     takes every caller_timeout block. A caller_timeout memo of a block that
 //     has been embedded since is a leftover and is deleted, as is every
 //     other class.
+//   - Derived results of the text (issue #452): the dream's keywords
+//     (dream_keywords, dream_keywords_generated_at) are generated from the
+//     title and the content and reused by every later cycle, so they are
+//     dropped, and the next dream of the block generates them from the text
+//     it holds. The duplicate guard's check mark (metadata.guard_checked_at)
+//     is a verdict on the vector of the title and the content, so it is
+//     dropped too, and the guard checks the block again once its new vector
+//     is written (guardPendingWhere waits for it). The guard's own verdict
+//     write does not run this function, so a re-checked block stays checked.
+//     Both ride the UPDATE below: no statement is added.
 //
 // This is the pgxdb.Execer-parameterized primitive (same pattern as
 // StoreEmbedding): it does NOT own a transaction, so a caller that needs the
@@ -1314,7 +1324,9 @@ func InvalidateEmbeddingTx(ctx context.Context, q pgxdb.Execer, blockID string) 
 		     embedding = CASE WHEN r.keep THEN embedding END,
 		     embed_model = CASE WHEN r.keep THEN embed_model END,
 		     embedding_next = NULL, embed_model_next = NULL,
-		     embed_excluded = NOT embed_excluded
+		     embed_excluded = NOT embed_excluded,
+		     dream_keywords = NULL, dream_keywords_generated_at = NULL,
+		     metadata = metadata - 'guard_checked_at'
 		 FROM r
 		 WHERE id = $1`,
 		blockID,
@@ -1322,6 +1334,13 @@ func InvalidateEmbeddingTx(ctx context.Context, q pgxdb.Execer, blockID string) 
 		return fmt.Errorf("store: invalidate embedding: %w", err)
 	}
 	return nil
+}
+
+// dropInvalidatedMarks removes from a write's answer the metadata key
+// InvalidateEmbeddingTx removed from the row after the write's RETURNING read
+// it (the guard's check mark), so the answer shows the block as it was stored.
+func dropInvalidatedMarks(b *Block) {
+	delete(b.Metadata, "guard_checked_at")
 }
 
 // CheckRateLimit returns the number of write operations in the last 60 seconds
@@ -2166,6 +2185,7 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 			if err := InvalidateEmbeddingTx(ctx, tx, b.ID); err != nil {
 				return fmt.Errorf("store: update block: invalidate embedding: %w", err)
 			}
+			dropInvalidatedMarks(b)
 		}
 		return nil
 	}); err != nil {
