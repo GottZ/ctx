@@ -968,15 +968,26 @@ func dataCollectionEscapeOn(b *backends.Backend) bool {
 // guardedProbeClient serves backend-test's own GETs against tenant rows.
 var guardedProbeClient = httpx.GuardedPooledClient()
 
+// openProbeClient serves them against _global rows: http.DefaultClient's
+// transport, with the redirect rule of the row's chat wire — a hop only within
+// the origin of the base_url (#459). The probe carries the row's key
+// (x-api-key and extra_headers on an Anthropic row, a bearer token otherwise),
+// which net/http alone copies to any redirect target. A redirect it does not
+// follow is an answer of the host and reads as reachable, as it did for
+// tenant rows: a generic row's probe GETs the bare base_url, and where that
+// root points says nothing about the chat path. No host judged the key, so
+// probeBackendURL names the redirect and leaves auth unverified.
+var openProbeClient = &http.Client{CheckRedirect: httpx.SameOriginRedirect}
+
 // backendProbeClient picks backend-test's client by the wire clients' rule
 // (Backend.EgressGuarded, GHSA 2026-10-31 §3): a tenant row is probed only
 // through the ssrfguard dialer — the test must not reach what the row's real
-// calls cannot — while _global rows keep http.DefaultClient as before.
+// calls cannot — while _global rows keep http.DefaultClient's transport.
 func backendProbeClient(b *backends.Backend) *http.Client {
 	if b.EgressGuarded() {
 		return guardedProbeClient
 	}
-	return http.DefaultClient
+	return openProbeClient
 }
 
 func probeBackendURL(ctx context.Context, b *backends.Backend, checks map[string]string) bool {
@@ -1032,6 +1043,16 @@ func probeBackendURL(ctx context.Context, b *backends.Backend, checks map[string
 		return false
 	}
 	checks["base_url"] = "ok"
+	if resp.StatusCode >= 300 {
+		// A redirect the client did not follow: the host answered, but no
+		// host judged the key, and a call on this path meets the same
+		// redirect — named here, and auth is not reported ok (#459).
+		checks["redirect"] = fmt.Sprintf("status %d, not followed", resp.StatusCode)
+		if b.APIKeyRef != "" {
+			checks["auth"] = "unverified: redirect not followed"
+		}
+		return true
+	}
 	if b.APIKeyRef != "" {
 		checks["auth"] = "ok"
 	}

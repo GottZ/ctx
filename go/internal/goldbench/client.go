@@ -312,6 +312,18 @@ func (c *Client) ChatWithUsage(ctx context.Context, req ChatRequest) (ChatResult
 // same host name); without one no header is attached, and the rule still
 // holds the prompt, which net/http alone re-sends on a 307 or 308 to any host.
 func (c *Client) send(req *http.Request) (*http.Response, error) {
+	kt, err := c.transport()
+	if err != nil {
+		return nil, err
+	}
+	return kt.Do(c.hc, req)
+}
+
+// transport binds the key, or the body without one, to the origin of the
+// chat URL; an -endpoint without an http or https host is the error.
+// executeJobs asks it once before the first call (#459), so such an endpoint
+// ends the run instead of failing every case alike.
+func (c *Client) transport() (clientkey.Transport, error) {
 	var kt clientkey.Transport
 	var err error
 	if c.apiKey == "" {
@@ -320,9 +332,9 @@ func (c *Client) send(req *http.Request) (*http.Response, error) {
 		kt, err = clientkey.NewBearer(c.url, c.apiKey, keyNames)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("-endpoint is not a usable URL: %w", err)
+		return clientkey.Transport{}, fmt.Errorf("-endpoint is not a usable URL: %w", err)
 	}
-	return kt.Do(c.hc, req)
+	return kt, nil
 }
 
 // truncateErr kürzt Fehler-Bodies für die Fehlermeldung.

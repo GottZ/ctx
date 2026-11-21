@@ -42,7 +42,12 @@ type job struct {
 // phase so the slice file is deterministic in candidate order, and the
 // concurrency cap is applied here rather than trusted to the caller — the
 // endpoint is production serving.
-func runGeneration(ctx context.Context, client *goldset.ChatClient, slice string, jobs []job, conc, want int) (cases []goldset.Case, calls, shape, redaction int) {
+//
+// A refused redirect stops it (refusalStop) and is its error: it is the
+// configuration of the -backend row, which every call meets alike (#459).
+func runGeneration(ctx context.Context, client *goldset.ChatClient, slice string, jobs []job, conc, want int) (cases []goldset.Case, calls, shape, redaction int, err error) {
+	ctx, stop := newRefusalStop(ctx)
+	defer stop.cancel()
 	if conc > maxConcurrency {
 		conc = maxConcurrency
 	}
@@ -62,8 +67,14 @@ func runGeneration(ctx context.Context, client *goldset.ChatClient, slice string
 		go func() {
 			defer wg.Done()
 			for i := range in {
+				if stop.stopped() {
+					continue // drain: the run ends with the refusal
+				}
 				j := jobs[i]
 				ans, err := client.Ask(ctx, systemFor(slice), j.prompt, 160, 0.3)
+				if stop.record(err) {
+					continue
+				}
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "  %s case %d: %v\n", slice, i, err)
 					out <- result{i: i, verdict: goldset.VerdictShape}
@@ -121,7 +132,10 @@ func runGeneration(ctx context.Context, client *goldset.ChatClient, slice string
 			break
 		}
 	}
-	return cases, calls, shape, redaction
+	if err := stop.err(); err != nil {
+		return nil, calls, shape, redaction, err
+	}
+	return cases, calls, shape, redaction, nil
 }
 
 // maxConcurrency mirrors the cap of the `q` subcommand: the generator endpoint
@@ -313,7 +327,10 @@ func cmdSess(c *common, o slicesOpts, spanLen int) error {
 		return nil
 	}
 	start := time.Now()
-	cases, calls, shape, redaction := runGeneration(ctx, p.client, goldset.SliceSess, jobs, o.concurrency, o.n)
+	cases, calls, shape, redaction, err := runGeneration(ctx, p.client, goldset.SliceSess, jobs, o.concurrency, o.n)
+	if err != nil {
+		return err
+	}
 	return finish(p, c, o, goldset.SliceSess, goldset.FileSess, cases,
 		len(jobs), construction, redaction, shape, time.Since(start), calls,
 		fmt.Sprintf("%d daily reports (audit-trail/synthesis) forming %d windows", len(reports), len(windows)))
@@ -349,7 +366,10 @@ func cmdMH(c *common, o slicesOpts) error {
 		return nil
 	}
 	start := time.Now()
-	cases, calls, shape, redaction := runGeneration(ctx, p.client, goldset.SliceMH, jobs, o.concurrency, o.n)
+	cases, calls, shape, redaction, err := runGeneration(ctx, p.client, goldset.SliceMH, jobs, o.concurrency, o.n)
+	if err != nil {
+		return err
+	}
 	return finish(p, c, o, goldset.SliceMH, goldset.FileMH, cases,
 		len(jobs), construction, redaction, shape, time.Since(start), calls,
 		fmt.Sprintf("dream links at confidence >= %.2f between two retrievable blocks", goldset.MinDreamConfidence))
@@ -384,7 +404,10 @@ func cmdGlob(c *common, o slicesOpts, minBlocks, sampleTitles int) error {
 		return nil
 	}
 	start := time.Now()
-	cases, calls, shape, redaction := runGeneration(ctx, p.client, goldset.SliceGlob, jobs, o.concurrency, o.n)
+	cases, calls, shape, redaction, err := runGeneration(ctx, p.client, goldset.SliceGlob, jobs, o.concurrency, o.n)
+	if err != nil {
+		return err
+	}
 	return finish(p, c, o, goldset.SliceGlob, goldset.FileGlob, cases,
 		len(jobs), 0, redaction, shape, time.Since(start), calls,
 		fmt.Sprintf("corpus tags carrying >= %d retrievable blocks", minBlocks))
@@ -429,7 +452,10 @@ func cmdGlobKonstr(c *common, o slicesOpts, minMembers, sampleTitles int) error 
 		return nil
 	}
 	start := time.Now()
-	cases, calls, shape, redaction := runGeneration(ctx, p.client, goldset.SliceGlobKonstr, jobs, o.concurrency, o.n)
+	cases, calls, shape, redaction, err := runGeneration(ctx, p.client, goldset.SliceGlobKonstr, jobs, o.concurrency, o.n)
+	if err != nil {
+		return err
+	}
 	return finish(p, c, o, goldset.SliceGlobKonstr, goldset.FileGlobKonstr, cases,
 		len(jobs), construction, redaction, shape, time.Since(start), calls,
 		fmt.Sprintf("clusters with >= %d retrievable members, %d aspects each", minMembers, len(goldset.GlobAspects)))

@@ -15,6 +15,8 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+
+	"github.com/GottZ/ctx/internal/httpx"
 )
 
 // GitHubIssuer is the fixed issuer value stored in
@@ -150,11 +152,22 @@ func (p *githubProvider) getJSON(ctx context.Context, url, accessToken string, o
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	resp, err := p.cfg.Client.Do(req)
+	// The access token goes as a bearer header; net/http keeps it on a
+	// redirect to the same host name on another port or to a subdomain. A
+	// redirect is followed only within the origin of url — the API base —
+	// and a refused one ends in the non-200 reject below (#459).
+	hc := *p.cfg.Client
+	hc.CheckRedirect = httpx.SameOriginRedirect
+	resp, err := hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("oidc: github: fetch %s: %w", url, err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		// A refused redirect: its body typically repeats the Location, path
+		// and query included, which the redirect rule keeps out of logs.
+		return fmt.Errorf("oidc: github: fetch %s returned %d (a redirect, not followed)", url, resp.StatusCode)
+	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBytes+1))
 	if err != nil {

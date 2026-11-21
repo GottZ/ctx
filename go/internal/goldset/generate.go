@@ -128,7 +128,11 @@ func (c *ChatClient) Ask(ctx context.Context, system, user string, maxTokens int
 	if err != nil {
 		return "", fmt.Errorf("chat: the backend's base_url is not a usable URL: %w", err)
 	}
-	resp, err := bound.Do(c.HTTP, req)
+	hc := c.HTTP
+	if hc == nil { // a literal without HTTP: http.DefaultClient's settings, the same rule (#459)
+		hc = http.DefaultClient
+	}
+	resp, err := bound.Do(hc, req)
 	if err != nil {
 		return "", err
 	}

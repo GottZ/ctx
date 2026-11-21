@@ -619,11 +619,22 @@ func (h *SSOHandler) exchangeCode(ctx context.Context, tokenURL, code, redirectU
 		req.SetBasicAuth(url.QueryEscape(p.ClientID), url.QueryEscape(clientSecret))
 	}
 
-	resp, err := h.client.Do(req) //nolint:gosec // G704: see request construction above — allowlisted target, dial-time ssrfguard.
+	// No redirect is followed from the token endpoint (#459): the request
+	// carries the code, the PKCE verifier and, per token_auth, the client
+	// secret — net/http would re-send that body on 307/308 to any host and
+	// keep the Basic header on the same host name with another port. The
+	// endpoint is the URL the discovery document or the provider row names;
+	// a 3xx from it ends the exchange.
+	hc := *h.client
+	hc.CheckRedirect = refuseTokenRedirect
+	resp, err := hc.Do(req) //nolint:gosec // G704: see request construction above — allowlisted target, dial-time ssrfguard, no redirect followed.
 	if err != nil {
 		return oidc.Tokens{}, fmt.Errorf("sso: token exchange: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return oidc.Tokens{}, fmt.Errorf("sso: token endpoint answered %d (a redirect); the token request is not sent to its Location", resp.StatusCode)
+	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, ssoMaxTokenBody+1))
 	if err != nil {
@@ -643,6 +654,10 @@ func (h *SSOHandler) exchangeCode(ctx context.Context, tokenURL, code, redirectU
 	}
 	return tokens, nil
 }
+
+// refuseTokenRedirect is the CheckRedirect of the token request: no hop is
+// sent, the caller gets the 3xx itself.
+func refuseTokenRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // truncateString shortens s for log lines.
 func truncateString(s string, n int) string {

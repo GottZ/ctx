@@ -479,6 +479,9 @@ func executeJobs(parent context.Context, cfg Config, jobs []job, axisRuns map[st
 	if err := client.SetExtraBody(cfg.ExtraBody); err != nil {
 		return err
 	}
+	if _, err := client.transport(); err != nil {
+		return fmt.Errorf("goldbench: run abgebrochen vor dem ersten Call: %w", err)
+	}
 	conc := cfg.Concurrency
 	if conc < 1 {
 		conc = 1
