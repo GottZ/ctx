@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+#
+# Gate for eval-cyclic.sh's run rules (#460).
+#
+# Usage: bash eval-cyclic_test.sh
+#
+# Runs a copy of eval-cyclic.sh in a temporary directory, next to a throwaway
+# .env (a fake key, never a real one) and a three-case gold file, against
+# servers this test starts on 127.0.0.1: nothing leaves the host and no ctx
+# server is needed. The copy differs from eval-cyclic.sh in one line: its
+# request timeout TIMEOUT_S is 1 s instead of 120 s (that line has to match
+# exactly once, or the timeout case fails). Needs python3 and openssl.
+#
+# Pinned:
+#   1. Every case answered: rc 0, results and (--baseline) baseline written,
+#      n_errors 0.
+#   2. No case answered (HTTP 500, a refused connection, a timeout, a 200
+#      whose body is not JSON, a 200 with success:false) or no case at all:
+#      rc 1, nothing written — a run without one answer is no measurement.
+#   3. HTTP 401: rc 1 after the first request, CONTEXT_API_KEY_PRIVATE named
+#      (the key itself not), nothing written.
+#   4. One case of three without an answer: results with n_errors 1 and the
+#      error on that case, rc 1, and no baseline even with --baseline.
+#   5. A TLS certificate that does not verify stops the run with the advice
+#      that fits it: self-signed → CTX_EVAL_INSECURE=1; a name the certificate
+#      does not carry → WEBHOOK_BASE_URL, without CTX_EVAL_INSECURE; expired →
+#      renew, without CTX_EVAL_INSECURE. A trusted certificate runs.
+#   6. --help prints the leading comment block and stops before the code.
+
+set -uo pipefail
+
+TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+python3 -I - "${TEST_DIR}/eval-cyclic.sh" <<'PY'
+import http.server
+import json
+import os
+import shutil
+import socket
+import ssl
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+SCRIPT = sys.argv[1]
+KEY = "eval-cyclic-test-throwaway-key"
+CASES = [
+    {"id": "c1", "bucket": "C", "query": "q one", "expected_top_k_block_ids": ["b1"]},
+    {"id": "c2", "bucket": "M", "query": "q two", "expected_top_k_block_ids": ["b1"]},
+    {"id": "c3", "bucket": "L", "query": "q three", "expected_top_k_block_ids": ["b1"]},
+]
+ANSWER = json.dumps({"sources": [{"id": "b1"}], "confidence": "confident"}).encode()
+TIMEOUT_LINE, TIMEOUT_TEST_LINE = "\nTIMEOUT_S = 120\n", "\nTIMEOUT_S = 1\n"
+# A hanging server sleeps this long before it gives up on its request:
+# longer than the copy's 1-s timeout.
+HANG_S = 3
+
+passed = failed = 0
+
+
+def check(ok, name, detail=""):
+    global passed, failed
+    if ok:
+        passed += 1
+        print(f"[OK]   {name}")
+    else:
+        failed += 1
+        print(f"[FAIL] {name}  {detail}"[:600])
+
+
+def reply(status, ctype, payload):
+    return lambda query: (status, ctype, payload)
+
+
+OK = reply(200, "application/json", ANSWER)
+NOT_JSON = reply(200, "text/html", b"<html>a proxy page</html>")
+UNSUCCESSFUL = reply(200, "application/json", json.dumps({"success": False, "error": "synthesis failed"}).encode())
+# The quota refusal carries error_code, not error.
+UNSUCCESSFUL_CODE = reply(200, "application/json", json.dumps({"success": False, "error_code": "quota_exceeded"}).encode())
+HANG = reply(None, None, None)
+
+
+def status(code):
+    return reply(code, "application/json", json.dumps({"success": False, "error": f"status {code}"}).encode())
+
+
+def second_case_500(query):
+    return status(500)(query) if query == "q two" else OK(query)
+
+
+class Server:
+    """One local server on 127.0.0.1: answer(query) -> (status, type, body);
+    a None status hangs past the client's timeout."""
+
+    def __init__(self, answer, tls=None):
+        self.requests = 0
+        outer = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                outer.requests += 1
+                n = int(self.headers.get("Content-Length") or 0)
+                try:
+                    query = json.loads(self.rfile.read(n) or b"{}").get("query")
+                except ValueError:
+                    query = None
+                code, ctype, payload = answer(query)
+                if code is None:
+                    time.sleep(HANG_S)
+                    return
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.srv.daemon_threads = True
+        self.srv.block_on_close = False
+        if tls is not None:
+            self.srv.socket = tls.wrap_socket(self.srv.socket, server_side=True)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+def free_port():
+    """A port on 127.0.0.1 nobody listens on: bound once, then released."""
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def run(work, copy, base_url, baseline=True, env_extra=None, args=None, cases=CASES):
+    d = tempfile.mkdtemp(dir=work)
+    shutil.copyfile(copy, os.path.join(d, "eval-cyclic.sh"))
+    with open(os.path.join(d, ".env"), "w") as f:
+        f.write(f"WEBHOOK_BASE_URL={base_url}\nCONTEXT_API_KEY_PRIVATE={KEY}\n")
+    gold = os.path.join(d, "gold.json")
+    with open(gold, "w") as f:
+        json.dump({"cases": cases}, f)
+    env = {k: v for k, v in os.environ.items()
+           if not k.lower().endswith("_proxy") and k not in ("CTX_EVAL_INSECURE", "SSL_CERT_FILE", "SSL_CERT_DIR")}
+    env.update(env_extra or {})
+    if args is None:
+        args = ["--gold", gold, "--branch", "t"] + (["--baseline"] if baseline else [])
+    p = subprocess.run(["bash", os.path.join(d, "eval-cyclic.sh")] + args,
+                       capture_output=True, text=True, env=env, timeout=120)
+    res_path = os.path.join(d, ".eval-cyclic-results-t.json")
+    results = None
+    if os.path.exists(res_path):
+        with open(res_path) as f:
+            results = json.load(f)
+    return p, results, os.path.exists(os.path.join(d, ".eval-cyclic-baseline.json"))
+
+
+def say(p):
+    return f"rc={p.returncode} stderr={p.stderr.strip()[-300:]!r}"
+
+
+def cert(work, name, *validity):
+    c, k = os.path.join(work, name + ".pem"), os.path.join(work, name + ".key")
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", k, "-out", c,
+                    "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost", *validity],
+                   check=True, capture_output=True)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(c, k)
+    return c, ctx
+
+
+def main(work):
+    with open(SCRIPT) as f:
+        src = f.read()
+    lowered = src.count(TIMEOUT_LINE) == 1
+    copy = os.path.join(work, "eval-cyclic.sh")
+    with open(copy, "w") as f:
+        f.write(src.replace(TIMEOUT_LINE, TIMEOUT_TEST_LINE))
+
+    print("--- 1. every case answered")
+    s = Server(OK)
+    p, res, base = run(work, copy, f"http://127.0.0.1:{s.port}")
+    s.close()
+    check(p.returncode == 0 and res is not None and base and s.requests == 3,
+          "rc 0, results and baseline written, three requests", say(p))
+    check(res is not None and res.get("n_errors") == 0 and res.get("mean_pass_rate") == 1.0,
+          "results: n_errors 0, every case passes", json.dumps(res)[:300] if res else "no results")
+
+    print("--- 2. no case answered: nothing written, rc 1")
+    dead = [("HTTP 500", status(500)), ("HTTP 503", status(503)), ("a body that is not JSON", NOT_JSON),
+            ("200 with success:false", UNSUCCESSFUL), ("200 with success:false and error_code alone", UNSUCCESSFUL_CODE),
+            ("a refused connection", None), ("a timeout", HANG)]
+    for name, answer in dead:
+        if answer is HANG and not lowered:
+            check(False, f"{name}: rc 1, no results, no baseline",
+                  "eval-cyclic.sh carries no line 'TIMEOUT_S = 120' (exactly once) to lower")
+            continue
+        s = Server(answer) if answer is not None else None
+        port = s.port if s else free_port()
+        p, res, base = run(work, copy, f"http://127.0.0.1:{port}")
+        if s:
+            s.close()
+        check(p.returncode == 1 and res is None and not base and "no case got an answer" in p.stderr,
+              f"{name}: rc 1, no results, no baseline, said so", say(p))
+    s = Server(OK)
+    p, res, base = run(work, copy, f"http://127.0.0.1:{s.port}", cases=[])
+    s.close()
+    check(p.returncode == 1 and res is None and not base and "holds no cases" in p.stderr and s.requests == 0,
+          "a gold file without cases: rc 1, nothing written, said so", say(p))
+
+    print("--- 3. HTTP 401 stops at once and names the variable")
+    s = Server(status(401))
+    p, res, base = run(work, copy, f"http://127.0.0.1:{s.port}")
+    s.close()
+    check(p.returncode == 1 and res is None and not base, "rc 1, no results, no baseline", say(p))
+    check(s.requests == 1, "stopped after the first request", f"requests={s.requests}")
+    check("CONTEXT_API_KEY_PRIVATE" in p.stderr and KEY not in p.stderr + p.stdout,
+          "names CONTEXT_API_KEY_PRIVATE, not the key", say(p))
+
+    print("--- 4. one case of three without an answer")
+    for flag in (True, False):
+        s = Server(second_case_500)
+        p, res, base = run(work, copy, f"http://127.0.0.1:{s.port}", baseline=flag)
+        s.close()
+        label = "with --baseline" if flag else "without --baseline"
+        errors = {c["id"]: c.get("error") for c in res["case_results"]} if res else {}
+        check(p.returncode == 1 and res is not None and not base,
+              f"{label}: rc 1, results written, no baseline", say(p))
+        check(res is not None and res.get("n_errors") == 1 and errors.get("c1") is None
+              and errors.get("c3") is None and "500" in str(errors.get("c2")),
+              f"{label}: n_errors 1, the error on case c2 alone", json.dumps(errors))
+        if flag:
+            check("baseline" in p.stderr and "not written" in p.stderr, "says the baseline was not written", say(p))
+
+    print("--- 5. TLS: the advice fits the reason")
+    good, good_ctx = cert(work, "good", "-days", "2")
+    old, old_ctx = cert(work, "expired", "-not_before", "20200101000000Z", "-not_after", "20200102000000Z")
+    tls = [
+        ("self-signed", good_ctx, "localhost", {}, ["CTX_EVAL_INSECURE=1"], []),
+        ("name not on the certificate", good_ctx, "127.0.0.1", {"SSL_CERT_FILE": good},
+         ["WEBHOOK_BASE_URL"], ["CTX_EVAL_INSECURE"]),
+        ("expired", old_ctx, "localhost", {"SSL_CERT_FILE": old}, ["renew"], ["CTX_EVAL_INSECURE"]),
+    ]
+    for name, ctx, host, env, want, unwanted in tls:
+        s = Server(OK, ctx)
+        p, res, base = run(work, copy, f"https://{host}:{s.port}", env_extra=env)
+        s.close()
+        check(p.returncode == 1 and res is None and not base and s.requests == 0
+              and "does not verify" in p.stderr and all(w in p.stderr for w in want)
+              and not any(u in p.stderr for u in unwanted),
+              f"{name}: rc 1, nothing written, advice {want}, not {unwanted}", say(p))
+    s = Server(OK, good_ctx)
+    p, res, base = run(work, copy, f"https://localhost:{s.port}", env_extra={"SSL_CERT_FILE": good})
+    s.close()
+    check(p.returncode == 0 and res is not None and base, "trusted certificate: rc 0, written", say(p))
+
+    print("--- 6. --help")
+    p, _, _ = run(work, copy, "http://127.0.0.1:1", args=["--help"])
+    lines = p.stdout.rstrip("\n").split("\n")
+    check(p.returncode == 0 and "Usage:" in p.stdout and all(ln.startswith("#") for ln in lines)
+          and lines[-1] == "# Source: https://github.com/GottZ/ctx",
+          "the leading comment block, ending at its last line", repr(lines[-2:]))
+
+
+work = tempfile.mkdtemp(prefix="eval-cyclic-test.")
+try:
+    main(work)
+finally:
+    shutil.rmtree(work, ignore_errors=True)
+print("")
+print(f"  {passed} passed, {failed} failed")
+sys.exit(1 if failed else 0)
+PY

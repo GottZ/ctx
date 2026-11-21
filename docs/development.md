@@ -366,6 +366,19 @@ bash eval-matcher_test.sh           # negative-case matcher contract
 bash eval-instrument_test.sh        # census, baseline diff, category registry
 ```
 
+`eval-cyclic.sh` counts a case without an answer — no connection, a timeout, an HTTP
+status other than 200, a body that is not a JSON object, `success:false` — in `n_errors`.
+A run in which no case got an answer is no measurement: it stops with exit 1 and writes
+nothing, as do HTTP 401 (naming `CONTEXT_API_KEY_PRIVATE`), a redirect and a TLS
+certificate that does not verify. A run in which some cases got none writes its results
+and exits 1, and never writes a baseline. Its gate needs no ctx server and no `.env`: it
+runs a copy of the script against servers it starts on 127.0.0.1, with a throwaway key
+(python3 and openssl):
+
+```bash
+bash eval-cyclic_test.sh            # no-answer counting, 401, TLS advice, --help
+```
+
 MCP tool handlers return `Content[].text` (no structured output) — tested in `test.sh` T17/T18.
 
 ### Redaction & truncation marker register (`internal/redact`)
