@@ -353,3 +353,18 @@ func TestRules_AnUnreadStartBeforeBisOpensNoWindow(t *testing.T) {
 		"Was lief vom 1. Spatenstich bis 05.03.2026?": {"2026-03-05", "", "past"},
 	})
 }
+
+// TestRules_ADeferredDayDateIsAWindowEdgeOrTheDay: a day date Priority 1
+// leaves to the window rules is an edge of the window that stands, or the
+// day it names — never dropped for another "seit"/"bis"/"von … bis" of the
+// question (Runde 1 of #469, L2).
+func TestRules_ADeferredDayDateIsAWindowEdgeOrTheDay(t *testing.T) {
+	checkRules(t, now463, map[string]wantDate{
+		"Seit Montag frage ich mich, was bis 2026-12-31 fertig sein muss": {"2026-11-21", "2026-12-31", "range"},
+		"Seit Montag frage ich mich, was bis 05.03.2026 lief":             {"2026-03-05", "", DirUntil},
+		"von Montag bis Freitag, Abgabe bis 2026-12-31":                   {"2026-12-31", "", "past"},
+		"seit 2026-03-01 bis heute":                                       {"2026-03-01", "2026-11-21", "range"},
+		"seit dem 01.03.2026":                                             {"2026-03-01", "2026-11-21", "range"},
+		"bis 2026-12-31":                                                  {"2026-11-21", "2026-12-31", "range"},
+	})
+}

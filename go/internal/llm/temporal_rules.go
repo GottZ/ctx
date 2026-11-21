@@ -668,6 +668,38 @@ func yearlessStart(query string, m dayDate) (start time.Time, ref string, matche
 	return time.Time{}, "", true, false
 }
 
+// leftToWindow reports whether the only day date of query stands right
+// behind "seit"/"bis" and is left to the window rules: not behind a yearless
+// start, whose window matchDayDates opens itself.
+func leftToWindow(query string, matches []dayDate) bool {
+	if len(matches) != 1 || !reSeitBisBefore.MatchString(query[:matches[0].start]) {
+		return false
+	}
+	_, _, yearless, _ := yearlessStart(query, matches[0])
+	return !yearless
+}
+
+// dayDateLeftToWindow returns the day date of query left to the window
+// rules (leftToWindow), formatted, or "".
+func dayDateLeftToWindow(query string) string {
+	if ds := findDayDates(query); leftToWindow(query, ds) {
+		return fmtDate(ds[0].day)
+	}
+	return ""
+}
+
+// takesEdge reports whether a window rule's result stands: with a day date
+// left to the window rules (edge), only a window that has it as an edge
+// does, so a window another phrase of the question opens ("Seit Montag …,
+// was bis 2026-12-31 …") does not drop the date (issue #463).
+func takesEdge(r *TemporalResult, edge string) bool {
+	if r == nil || len(r.Dates) == 0 {
+		return false
+	}
+	d := r.Dates[0]
+	return edge == "" || d.Date == edge || (d.End != nil && *d.End == edge)
+}
+
 // matchDayDates resolves the day dates of query. With deferToSeitBis a
 // single date right behind "seit"/"bis" is left to matchSeit/matchBis; the
 // rules call it again without, after them, so a date whose window those
@@ -678,15 +710,12 @@ func matchDayDates(query string, deferToSeitBis bool) *TemporalResult {
 		return nil
 	}
 	// A yearless start before the only day date: the window from it.
-	yearless := false
 	if len(matches) == 1 {
-		start, sref, matched, ok := yearlessStart(query, matches[0])
-		if ok {
+		if start, sref, _, ok := yearlessStart(query, matches[0]); ok {
 			return rangeResult(sref+" – "+query[matches[0].dateStart:matches[0].dateEnd], fmtDate(start), fmtDate(matches[0].day), "range")
 		}
-		yearless = matched
 	}
-	if deferToSeitBis && !yearless && len(matches) == 1 && reSeitBisBefore.MatchString(query[:matches[0].start]) {
+	if deferToSeitBis && leftToWindow(query, matches) {
 		return nil
 	}
 	tense := DetectVerbTense(query)
@@ -1430,26 +1459,31 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 		return r
 	}
 
+	// A day date Priority 1 left to the window rules is an edge of the window
+	// that stands (takesEdge); Priority 3b resolves the day otherwise.
+	edge := dayDateLeftToWindow(query)
+	takes := func(r *TemporalResult) bool { return takesEdge(r, edge) }
+
 	// Priority 2: Compound range patterns — linear + weekday (range endpoints)
-	if r := matchLetztenWDBis(query, now); r != nil {
+	if r := matchLetztenWDBis(query, now); takes(r) {
 		r.DimensionWeights = dwLinearRange()
 		return r
 	}
-	if r := matchNextThrough(query, now); r != nil {
+	if r := matchNextThrough(query, now); takes(r) {
 		r.DimensionWeights = dwLinearRange()
 		return r
 	}
-	if r := matchVonBis(query, now); r != nil {
+	if r := matchVonBis(query, now); takes(r) {
 		r.DimensionWeights = dwLinearRange()
 		return r
 	}
 
 	// Priority 3: Seit/Bis — linear-dominant + month (spans weeks/months)
-	if r := matchSeit(query, now); r != nil {
+	if r := matchSeit(query, now); takes(r) {
 		r.DimensionWeights = dwLinearMonthSeit()
 		return r
 	}
-	if r := matchBis(query, now); r != nil {
+	if r := matchBis(query, now); takes(r) {
 		r.DimensionWeights = dwLinearMonthSeit()
 		return r
 	}
