@@ -26,7 +26,7 @@
 //     is a per-contract declaration; the 300-element literal returns as the
 //     default once the virtualized Achse-04 list surfaces land.
 
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Page, type TestInfo } from '@playwright/test'
 import type { LayoutMode } from '../../src/lib/layout/modes'
 import { runAxeGate } from './axe'
 import { captureShot } from './capture'
@@ -275,16 +275,135 @@ async function mountState(
   return session
 }
 
-function axeTest(c: PageContract, state: PageState, theme: Theme, viewport: ViewportName): void {
-  test(`${c.name} ${state.name} ${theme} ${viewport} axe`, { tag: '@a11y' }, async ({ page }, testInfo) => {
-    await mountState(page, c, state, theme)
-    await runAxeGate(page, c, theme, viewport, testInfo)
-  })
+/** The test families definePageContract generates (design 06 §4.1 table). */
+export type TestFamily = 'flow' | 'visual' | 'mobile-fit' | 'aria' | 'axe' | 'focus' | 'deny' | 'leak' | 'scale'
+
+/** One generated test: planned by planContract, registered by definePageContract. */
+export interface PlannedTest {
+  family: TestFamily
+  /** The Playwright title: it keys the test id, the CI history and (visual) the baseline. */
+  title: string
+  tag: '@flow' | '@visual' | '@aria' | '@a11y'
+  /** desktop = the project viewport (1440×900), mobile = VIEWPORTS.mobile. */
+  viewport: ViewportName
+  /** The state the test mounts; deny and the leak probe seed their own session. */
+  state?: PageState
+  theme?: Theme
 }
 
-function ariaTest(c: PageContract, viewport: ViewportName): void {
-  test(`${c.name} aria ${viewport}`, { tag: '@aria' }, async ({ page }) => {
-    await mountState(page, c, c.states.find((s) => s.name === 'default') as PageState, 'dark')
+/**
+ * The test plan of one contract (#457): every test definePageContract
+ * registers, in registration order. definePageContract registers exactly this
+ * list, renderCoverage counts it into COVERAGE.md, and plan.test.ts holds it
+ * against the §4.1 table and against Playwright's own collection — so a
+ * family or a state that drops out of the generation turns a permanent test
+ * red instead of shrinking the suite unnoticed.
+ */
+export function planContract(c: PageContract): PlannedTest[] {
+  const defaultState = c.states.find((s) => s.name === 'default') as PageState
+  const visualStates: PageState[] = [...c.states, ...(isScaleState(c.scale) ? [c.scale] : [])]
+  const plan: PlannedTest[] = []
+  const visual = (state: PageState, theme: Theme, viewport: ViewportName): PlannedTest => ({
+    family: 'visual',
+    title: `${c.name} ${state.name} ${theme} ${viewport} visual`,
+    tag: '@visual',
+    viewport,
+    state,
+    theme,
+  })
+  const axe = (theme: Theme, viewport: ViewportName): PlannedTest => ({
+    family: 'axe',
+    title: `${c.name} ${defaultState.name} ${theme} ${viewport} axe`,
+    tag: '@a11y',
+    viewport,
+    state: defaultState,
+    theme,
+  })
+  const aria = (viewport: ViewportName): PlannedTest => ({
+    family: 'aria',
+    title: `${c.name} aria ${viewport}`,
+    tag: '@aria',
+    viewport,
+    state: defaultState,
+    theme: 'dark',
+  })
+
+  plan.push({ family: 'flow', title: `${c.name} primary flow`, tag: '@flow', viewport: 'desktop', state: defaultState, theme: 'dark' })
+  for (const state of visualStates) for (const theme of THEMES) plan.push(visual(state, theme, 'desktop'))
+  if (c.mobile === undefined) {
+    for (const state of visualStates) for (const theme of THEMES) plan.push(visual(state, theme, 'mobile'))
+  } else {
+    for (const state of visualStates) {
+      plan.push({ family: 'mobile-fit', title: `${c.name} ${state.name} dark mobile fit`, tag: '@visual', viewport: 'mobile', state, theme: 'dark' })
+    }
+  }
+  plan.push(aria('desktop'))
+  if (c.mobile === undefined) plan.push(aria('mobile'))
+  for (const theme of THEMES) plan.push(axe(theme, 'desktop'))
+  for (const theme of THEMES) plan.push(axe(theme, 'mobile'))
+  plan.push({ family: 'focus', title: `${c.name} focus walk`, tag: '@a11y', viewport: 'desktop', state: defaultState, theme: 'dark' })
+  const lower = denyRoleFor(c.role)
+  if (lower !== null) plan.push({ family: 'deny', title: `${c.name} deny (${lower})`, tag: '@flow', viewport: 'desktop' })
+  if (c.tenantScoped === true) plan.push({ family: 'leak', title: `${c.name} tenant leak probe`, tag: '@flow', viewport: 'desktop' })
+  if (isScaleState(c.scale)) {
+    plan.push({ family: 'scale', title: `${c.name} scale ${c.scale.name}`, tag: '@flow', viewport: 'desktop', state: c.scale, theme: 'dark' })
+  }
+  return plan
+}
+
+type TestBody = (page: Page, c: PageContract, t: PlannedTest, testInfo: TestInfo) => Promise<void>
+
+/** A planned test's state and theme (every family but deny and leak carries both). */
+function stateOf(t: PlannedTest): { state: PageState; theme: Theme } {
+  if (t.state === undefined || t.theme === undefined) throw new Error(`planned test '${t.title}' has no state`)
+  return { state: t.state, theme: t.theme }
+}
+
+/** The body of each family; a Record, so a family without a body does not compile. */
+const BODIES: Record<TestFamily, TestBody> = {
+  // the human core path — W21: never only the side path
+  flow: async (page, c, t) => {
+    const errors = trackPageErrors(page)
+    const { state, theme } = stateOf(t)
+    const session = await mountState(page, c, state, theme)
+    await c.primaryFlow(page, session)
+    expect(errors, `uncaught page errors on ${navPath(c)}:\n${errors.join('\n')}`).toEqual([])
+  },
+
+  // compared only inside the pinned container (@visual)
+  visual: async (page, c, t) => {
+    const { state, theme } = stateOf(t)
+    await mountState(page, c, state, theme)
+    // Let the area settle (sigma boot / lazy chunk) before capture; fonts are
+    // awaited inside captureShot (stabilize). Same settle as the PV3 suite —
+    // the 13 committed baselines stay byte-valid.
+    await page.waitForTimeout(600)
+    await expectViewportFit(page)
+    await captureShot(page, `${c.name}--${state.name}--${theme}--${t.viewport}.png`, {
+      mask: c.mask,
+      maskBudgetOverride: c.maskBudgetOverride,
+      maxDiffPixels: state.visualTolerance?.maxDiffPixels,
+    })
+  },
+
+  // Mobile fit without a capture (#440): a contract that opts out of the
+  // mobile visual dimension has no mobile baselines, but its layout still has
+  // to fit 390 px. Same mount and settle as a capture, the viewport fit
+  // instead of the capture. Tagged @visual because the fit depends on the
+  // font metrics of the pinned container just as the pixels do (system-ui
+  // stacks, e2e/Dockerfile); one theme, because the themes swap colour
+  // tokens, not boxes.
+  'mobile-fit': async (page, c, t) => {
+    const { state, theme } = stateOf(t)
+    await mountState(page, c, state, theme)
+    await page.waitForTimeout(600)
+    await expectViewportFit(page)
+  },
+
+  // committed YAML snapshots (@aria, PV6)
+  aria: async (page, c, t) => {
+    const { state, theme } = stateOf(t)
+    await mountState(page, c, state, theme)
     // Same settle as the visual captures (async area data → the tree must be
     // the LOADED state, not "loading …" — the un-settled race froze exactly
     // that into the first status snapshot draft).
@@ -292,45 +411,86 @@ function ariaTest(c: PageContract, viewport: ViewportName): void {
     // Whole-page ARIA snapshot (PW ≥ 1.60): the YAML freezes role/name/
     // hierarchy — the structural gate that needs no container (§3.2).
     // {arg} keys the file next to the visual baselines: <page>--aria--<vp>.yml.
-    await expect(page.locator('body')).toMatchAriaSnapshot({ name: `${c.name}--aria--${viewport}.yml` })
-  })
-}
+    await expect(page.locator('body')).toMatchAriaSnapshot({ name: `${c.name}--aria--${t.viewport}.yml` })
+  },
 
-function visualTest(c: PageContract, state: PageState, theme: Theme, viewport: ViewportName): void {
-  test(`${c.name} ${state.name} ${theme} ${viewport} visual`, { tag: '@visual' }, async ({ page }) => {
+  // axe gate (@a11y, PV5)
+  axe: async (page, c, t, testInfo) => {
+    const { state, theme } = stateOf(t)
     await mountState(page, c, state, theme)
-    // Let the area settle (sigma boot / lazy chunk) before capture; fonts are
-    // awaited inside captureShot (stabilize). Same settle as the PV3 suite —
-    // the 13 committed baselines stay byte-valid.
-    await page.waitForTimeout(600)
-    await expectViewportFit(page)
-    await captureShot(page, `${c.name}--${state.name}--${theme}--${viewport}.png`, {
-      mask: c.mask,
-      maskBudgetOverride: c.maskBudgetOverride,
-      maxDiffPixels: state.visualTolerance?.maxDiffPixels,
-    })
-  })
+    await runAxeGate(page, c, theme, t.viewport, testInfo)
+  },
+
+  focus: async (page, c, t, testInfo) => {
+    const { state, theme } = stateOf(t)
+    await mountState(page, c, state, theme)
+    await runFocusWalk(page, testInfo)
+  },
+
+  // generated auth dimension (§4.1)
+  deny: async (page, c) => {
+    const lower = denyRoleFor(c.role) as Role
+    const landing = landingForRole(lower)
+    const session = await seedSession(page, { role: lower, theme: 'dark', capabilities: c.capabilities })
+    await page.goto(navPath(c))
+    await page.locator('.shell').waitFor({ state: 'visible', timeout: 10_000 })
+    // The guard redirect (guardArea → landingFor, guard.ts:55-63) must land
+    // the lower role on ITS landing — never mount the gated area.
+    await expect(page).toHaveURL(new RegExp(`${landing.replace(/\//g, '\\/')}$`))
+    await page.locator('main.content > *').first().waitFor({ state: 'attached', timeout: 10_000 })
+    const fired = session.calls.map((x) => x.action ?? x.path)
+    for (const a of c.adminCalls ?? []) {
+      expect(fired, `admin call '${a}' must not fire for a ${lower} session`).not.toContain(a)
+    }
+  },
+
+  // tenant-leak probe (generated, §5.6b — positive control first)
+  leak: async (page, c) => {
+    await seedSession(page, { role: c.role, theme: 'dark', tenant: 'B', capabilities: c.capabilities })
+    await gotoArea(page, navPath(c))
+    await waitForShell(page)
+    // (1) Positive control: the OWN sentinel is rendered in the data
+    // region — the detector provably sees data; an error state or empty
+    // store can no longer make the probe vacuously green.
+    await expect(page.locator('main.content')).toContainText(SENTINEL.B)
+    // (2) Absence: the FOREIGN sentinel appears nowhere in the DOM —
+    // visible text AND full markup (hidden nodes included).
+    await expect(page.locator('body')).not.toContainText(SENTINEL.A)
+    expect(await page.content(), `foreign sentinel ${SENTINEL.A} leaked into the DOM`).not.toContain(SENTINEL.A)
+  },
+
+  // the @flow half of a scale state; its @visual half is a visual entry
+  scale: async (page, c, t) => {
+    if (!isScaleState(c.scale)) throw new Error(`planned test '${t.title}' on a contract without a scale state`)
+    const s = c.scale
+    const session = await mountState(page, c, s, 'dark')
+    const rows = page.locator(s.domCap.selector)
+    // Positive control: the detector sees data (vacuity guard, §5.6b pattern).
+    await expect(rows.first()).toBeVisible()
+    const n = await rows.count()
+    expect(n, `scale positive control: '${s.domCap.selector}' must render rows`).toBeGreaterThan(0)
+    expect(
+      n,
+      `DOM ceiling: ${n} rendered rows exceed the declared cap ${s.domCap.max} at ${SCALE_LABEL}`,
+    ).toBeLessThanOrEqual(s.domCap.max)
+    if (s.flow) await s.flow(page, session)
+    // The page-typical interaction (load-more/scroll) must not blow the cap either.
+    expect(await rows.count(), 'DOM ceiling after the scale interaction').toBeLessThanOrEqual(s.domCap.max)
+  },
 }
 
-/**
- * Mobile fit without a capture (#440): a contract that opts out of the mobile
- * visual dimension has no mobile baselines, but its layout still has to fit
- * 390 px. Same mount and settle as visualTest, the viewport fit instead of the
- * capture. Tagged @visual because the fit depends on the font metrics of the
- * pinned container just as the pixels do (system-ui stacks, e2e/Dockerfile);
- * one theme, because the themes swap colour tokens, not boxes.
- */
-function mobileFitTest(c: PageContract, state: PageState): void {
-  test(`${c.name} ${state.name} dark mobile fit`, { tag: '@visual' }, async ({ page }) => {
-    await mountState(page, c, state, 'dark')
-    await page.waitForTimeout(600)
-    await expectViewportFit(page)
+/** Register one planned test; it first asserts the viewport its plan entry names. */
+function registerPlanned(c: PageContract, t: PlannedTest): void {
+  test(t.title, { tag: t.tag }, async ({ page }, testInfo) => {
+    expect(page.viewportSize(), `'${t.title}' is planned for the ${t.viewport} viewport`).toEqual(VIEWPORTS[t.viewport])
+    await BODIES[t.family](page, c, t, testInfo)
   })
 }
 
 /**
  * Generate the PV4 test family for one contract (design 06 §4.1 table —
- * flow/visual/deny/leak/scale; axe/ARIA/focus-walk join in PV5/PV6):
+ * flow/visual/deny/leak/scale; axe/ARIA/focus-walk join in PV5/PV6), from
+ * planContract:
  *
  *   - primary flow            1 × @flow      (desktop, dark, default state)
  *   - toHaveScreenshot        states(+scale) × themes × viewports × @visual
@@ -358,111 +518,17 @@ export function definePageContract(c: PageContract): void {
   if (problems.length > 0) {
     throw new Error(`invalid PageContract '${c.name}': ${problems.join('; ')}`)
   }
-  const path = navPath(c)
-  const defaultState = c.states.find((s) => s.name === 'default') as PageState
-  const visualStates: PageState[] = [...c.states, ...(isScaleState(c.scale) ? [c.scale] : [])]
-
   test.describe(`contract:${c.name}`, () => {
-    // ---- primary flow (the human core path — W21: never only the side path) ----
-    test(`${c.name} primary flow`, { tag: '@flow' }, async ({ page }) => {
-      const errors = trackPageErrors(page)
-      const session = await mountState(page, c, defaultState, 'dark')
-      await c.primaryFlow(page, session)
-      expect(errors, `uncaught page errors on ${path}:\n${errors.join('\n')}`).toEqual([])
-    })
-
-    // ---- visual dimension (@visual — compared only inside the pinned container) ----
-    for (const state of visualStates) {
-      for (const theme of THEMES) visualTest(c, state, theme, 'desktop')
-    }
-    if (c.mobile === undefined) {
-      test.describe(() => {
-        test.use({ viewport: VIEWPORTS.mobile })
-        for (const state of visualStates) {
-          for (const theme of THEMES) visualTest(c, state, theme, 'mobile')
-        }
-      })
-    } else {
-      test.describe(() => {
-        test.use({ viewport: VIEWPORTS.mobile })
-        for (const state of visualStates) mobileFitTest(c, state)
-      })
-    }
-
-    // ---- ARIA structure gate (@aria — committed YAML snapshots, PV6) ----
-    ariaTest(c, 'desktop')
-    if (c.mobile === undefined) {
-      test.describe(() => {
-        test.use({ viewport: VIEWPORTS.mobile })
-        ariaTest(c, 'mobile')
-      })
-    }
-
-    // ---- a11y dimension (@a11y — axe gate + focus walk, PV5) ----
-    for (const theme of THEMES) axeTest(c, defaultState, theme, 'desktop')
-    test.describe(() => {
-      test.use({ viewport: VIEWPORTS.mobile })
-      for (const theme of THEMES) axeTest(c, defaultState, theme, 'mobile')
-    })
-    test(`${c.name} focus walk`, { tag: '@a11y' }, async ({ page }, testInfo) => {
-      await mountState(page, c, defaultState, 'dark')
-      await runFocusWalk(page, testInfo)
-    })
-
-    // ---- deny (generated auth dimension, §4.1) ----
-    const lower = denyRoleFor(c.role)
-    if (lower !== null) {
-      const landing = landingForRole(lower)
-      test(`${c.name} deny (${lower})`, { tag: '@flow' }, async ({ page }) => {
-        const session = await seedSession(page, { role: lower, theme: 'dark', capabilities: c.capabilities })
-        await page.goto(path)
-        await page.locator('.shell').waitFor({ state: 'visible', timeout: 10_000 })
-        // The guard redirect (guardArea → landingFor, guard.ts:55-63) must land
-        // the lower role on ITS landing — never mount the gated area.
-        await expect(page).toHaveURL(new RegExp(`${landing.replace(/\//g, '\\/')}$`))
-        await page.locator('main.content > *').first().waitFor({ state: 'attached', timeout: 10_000 })
-        const fired = session.calls.map((x) => x.action ?? x.path)
-        for (const a of c.adminCalls ?? []) {
-          expect(fired, `admin call '${a}' must not fire for a ${lower} session`).not.toContain(a)
-        }
-      })
-    }
-
-    // ---- tenant-leak probe (generated, §5.6b — positive control first) ----
-    if (c.tenantScoped === true) {
-      test(`${c.name} tenant leak probe`, { tag: '@flow' }, async ({ page }) => {
-        await seedSession(page, { role: c.role, theme: 'dark', tenant: 'B', capabilities: c.capabilities })
-        await gotoArea(page, path)
-        await waitForShell(page)
-        // (1) Positive control: the OWN sentinel is rendered in the data
-        // region — the detector provably sees data; an error state or empty
-        // store can no longer make the probe vacuously green.
-        await expect(page.locator('main.content')).toContainText(SENTINEL.B)
-        // (2) Absence: the FOREIGN sentinel appears nowhere in the DOM —
-        // visible text AND full markup (hidden nodes included).
-        await expect(page.locator('body')).not.toContainText(SENTINEL.A)
-        expect(await page.content(), `foreign sentinel ${SENTINEL.A} leaked into the DOM`).not.toContain(SENTINEL.A)
-      })
-    }
-
-    // ---- scale (@flow half; the @visual half rides the visualStates loop) ----
-    if (isScaleState(c.scale)) {
-      const s = c.scale
-      test(`${c.name} scale ${s.name}`, { tag: '@flow' }, async ({ page }) => {
-        const session = await mountState(page, c, s, 'dark')
-        const rows = page.locator(s.domCap.selector)
-        // Positive control: the detector sees data (vacuity guard, §5.6b pattern).
-        await expect(rows.first()).toBeVisible()
-        const n = await rows.count()
-        expect(n, `scale positive control: '${s.domCap.selector}' must render rows`).toBeGreaterThan(0)
-        expect(
-          n,
-          `DOM ceiling: ${n} rendered rows exceed the declared cap ${s.domCap.max} at ${SCALE_LABEL}`,
-        ).toBeLessThanOrEqual(s.domCap.max)
-        if (s.flow) await s.flow(page, session)
-        // The page-typical interaction (load-more/scroll) must not blow the cap either.
-        expect(await rows.count(), 'DOM ceiling after the scale interaction').toBeLessThanOrEqual(s.domCap.max)
-      })
+    for (const t of planContract(c)) {
+      if (t.viewport === 'desktop') {
+        registerPlanned(c, t)
+      } else {
+        // an anonymous describe adds no title segment: the test ids stay put
+        test.describe(() => {
+          test.use({ viewport: VIEWPORTS.mobile })
+          registerPlanned(c, t)
+        })
+      }
     }
   })
 }
