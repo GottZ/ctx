@@ -127,9 +127,13 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 		res.Conflicts++
 		return true, nil // 0 wire writes
 	}
+	projected := func(b *store.Block) string {
+		_, h := CtxIssueBase(b, pol.terminalSet, pol.registryOK)
+		return h
+	}
 	if patch.empty() {
 		// Only a never-pushed field (milestone) diverged: advance base, 0 wire.
-		if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, ctxH, ctxFields); err != nil {
+		if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, ctxH, ctxFields, projected); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -141,7 +145,7 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 	if err := client.UpdateIssue(ctx, repo, c.ForgeID, patch); err != nil {
 		return false, err
 	}
-	if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, ctxH, ctxFields); err != nil {
+	if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, ctxH, ctxFields, projected); err != nil {
 		return false, err
 	}
 	res.Pushed++
@@ -236,7 +240,11 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 	if err := client.UpdateComment(ctx, repo, c.ForgeID, body); err != nil {
 		return false, err
 	}
-	if err := store.AdvancePushBase(ctx, p.pool, c.BlockID, ctxH, ctxFields); err != nil {
+	projected := func(b *store.Block) string {
+		_, h := CtxCommentBase(b)
+		return h
+	}
+	if err := store.AdvancePushBase(ctx, p.pool, c.BlockID, ctxH, ctxFields, projected); err != nil {
 		return false, err
 	}
 	res.Pushed++

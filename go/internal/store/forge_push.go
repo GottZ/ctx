@@ -17,6 +17,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -216,20 +217,62 @@ func FinalizePushCreateComment(ctx context.Context, pool *pgxpool.Pool, blockID 
 	return nil
 }
 
+// PushProjection hashes a block the way the push projected the version it
+// listed (forge.CtxIssueBase / CtxCommentBase): AdvancePushBase compares it
+// with the hash the push wrote. It reads Title, Content, Metadata and
+// WorkflowStatus.
+type PushProjection func(b *Block) string
+
 // AdvancePushBase advances base := ctxH (+ snapshot) after a successful PATCH (the
-// push made forge == ctx). synced_at = now() > the block's local-edit updated_at,
-// so the next run's candidate filter drops the row (idempotent). Also used for the
-// 0-wire case where only a never-pushed field (milestone) diverged.
-func AdvancePushBase(ctx context.Context, pool *pgxpool.Pool, blockID, ctxHash string, ctxFields json.RawMessage) error {
-	_, err := pool.Exec(ctx, `
-		UPDATE context_project_sync_map
-		   SET base_hash = $2, synced_at = now(),
-		       metadata = metadata || $3::jsonb
-		 WHERE block_id = $1::uuid`, blockID, ctxHash, baseFieldsMeta(ctxFields))
-	if err != nil {
-		return fmt.Errorf("store: advance push base: %w", err)
-	}
-	return nil
+// push made forge == the listed version). Also used for the 0-wire case where
+// only a never-pushed field (milestone) diverged.
+//
+// synced_at decides whether the next run lists the row again (candidate filter
+// b.updated_at > m.synced_at), and the PATCH ran outside any transaction, so a
+// local write may have changed the block since the listing (issue #452). The
+// advance therefore locks the block FOR SHARE — it waits for a writer still
+// holding the row — and projects it again:
+//
+//   - The block still projects to ctxHash: synced_at := the block's updated_at,
+//     the time of the version the forge now holds, not now(). A write whose
+//     transaction began before this advance but takes the row after it stores
+//     an updated_at that can lie below now() (updated_at is its transaction
+//     start); against the version's own time it is newer and stays a candidate.
+//   - It does not (a write committed while the PATCH was on the wire, or it
+//     is gone): synced_at := -infinity, so the row stays a candidate whatever
+//     updated_at the write carried, and the next run diffs the block against
+//     the base this advance wrote — the version the forge holds.
+//
+// Locks: the block row (FOR SHARE), then the mapping row — the order of the
+// pull's writes.
+func AdvancePushBase(ctx context.Context, pool *pgxpool.Pool, blockID, ctxHash string, ctxFields json.RawMessage, project PushProjection) error {
+	return pgxdb.Write(ctx, pool,
+		pgxdb.Stages{Begin: "store: advance push base begin", Commit: "store: advance push base commit"},
+		func(tx pgx.Tx) error {
+			var b Block
+			var at time.Time
+			holds := false
+			err := tx.QueryRow(ctx, `
+				SELECT title, content, metadata, COALESCE(workflow_status, ''), updated_at
+				  FROM context_blocks WHERE id = $1::uuid
+				   FOR SHARE`, blockID).Scan(&b.Title, &b.Content, &b.Metadata, &b.WorkflowStatus, &at)
+			switch {
+			case errors.Is(err, pgx.ErrNoRows):
+			case err != nil:
+				return fmt.Errorf("store: advance push base: lock block: %w", err)
+			default:
+				holds = project(&b) == ctxHash
+			}
+			if _, err := tx.Exec(ctx, `
+				UPDATE context_project_sync_map
+				   SET base_hash = $2,
+				       synced_at = CASE WHEN $4 THEN $5::timestamptz ELSE '-infinity'::timestamptz END,
+				       metadata = metadata || $3::jsonb
+				 WHERE block_id = $1::uuid`, blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at); err != nil {
+				return fmt.Errorf("store: advance push base: %w", err)
+			}
+			return nil
+		})
 }
 
 // FlagPushConflict flags a mapping conflict from the push side (a truncated body
