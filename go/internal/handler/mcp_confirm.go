@@ -173,8 +173,11 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 			return errResult("unauthorized: no resolved tenant identity"), nil, nil
 		}
 
+		// executeConfirm notes the executed write on the call's server line
+		// (mcp_write_line.go) where it ends — right after the commit, before
+		// the afterwork, and on a failed execute with the block or blob the
+		// card names — as every other write tool does (issue #483).
 		out := executeConfirm(ctx, cfg.Pool, cfg.Blocktypes, ar, input.PayloadHash)
-		noteConfirmOutcome(ctx, out)
 		switch out.Kind {
 		case confirmOK:
 			if out.Op == store.OpBlobLink {
@@ -248,35 +251,5 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 			logRequestError(ctx, "mcp: confirm infrastructure error", "error", out.Err, "op", out.Op, "request_id", RequestIDFromContext(ctx))
 			return errResult("confirm failed: internal error"), nil, nil
 		}
-	}
-}
-
-// noteConfirmOutcome notes on the call's server line (mcp_write_line.go) what
-// the confirm executed: the staged op's write — committed, or a fault's
-// outcome (the blob ops are one statement each, the block ops labeled
-// brackets) — and the block, blob or number of items it names. Every other
-// outcome executed no write of the op.
-func noteConfirmOutcome(ctx context.Context, out confirmOutcome) {
-	switch out.Kind {
-	case confirmOK:
-		if out.Op != store.OpStoreBatch || batchWrote(out.Batch) {
-			noteToolWrite(ctx, nil)
-		}
-	case confirmExecErr:
-		if out.Op == store.OpBlobStore || out.Op == store.OpBlobLink {
-			noteToolStatement(ctx, out.Err)
-		} else {
-			noteToolWrite(ctx, out.Err)
-		}
-	default:
-		return
-	}
-	switch {
-	case out.Block != nil:
-		noteToolBlock(ctx, out.Block.ID)
-	case out.Blob != nil:
-		noteToolBlob(ctx, out.Blob.ID)
-	case len(out.Batch) > 0:
-		noteToolCount(ctx, len(out.Batch))
 	}
 }
