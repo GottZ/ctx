@@ -189,6 +189,10 @@ func (k *queryKeepalive) close() {
 
 func (k *queryKeepalive) Header() http.Header { return k.hdr }
 
+// requestLogWriter names the writer under the keepalive for the request
+// record's walk (loggedResponse); w never changes after armQueryKeepalive.
+func (k *queryKeepalive) requestLogWriter() http.ResponseWriter { return k.w }
+
 // WriteHeader commits the handler's status, unless the keepalive's 200 is
 // already out: then the status is dropped and the body that follows carries the
 // answer.

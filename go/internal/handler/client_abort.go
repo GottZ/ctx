@@ -37,19 +37,30 @@ func loggedRequest(ctx context.Context) *responseWriter {
 
 // loggedResponse walks a handler's writer chain down to Logger's record, for
 // the writers that have no context at hand (writeJSON and the store-error
-// writers). A writer in between that does not unwrap ends the walk with nil.
+// writers). A writer in between that neither unwraps nor names the writer
+// under it (requestLogWriter) ends the walk with nil.
 func loggedResponse(w http.ResponseWriter) *responseWriter {
 	for w != nil {
-		if rw, ok := w.(*responseWriter); ok {
-			return rw
-		}
-		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
-		if !ok {
+		switch u := w.(type) {
+		case *responseWriter:
+			return u
+		case interface{ Unwrap() http.ResponseWriter }:
+			w = u.Unwrap()
+		case requestLogWriter:
+			w = u.requestLogWriter()
+		default:
 			return nil
 		}
-		w = u.Unwrap()
 	}
 	return nil
+}
+
+// requestLogWriter is a writer that guards the writer under it and so does
+// not unwrap (a caller would pass its lock: the /api/query keepalive), but
+// names it for the walk to Logger's record — the walk only reads that record
+// (issue #453).
+type requestLogWriter interface {
+	requestLogWriter() http.ResponseWriter
 }
 
 // clientGaveUp is the one rule (issue #417): a failure is the client's

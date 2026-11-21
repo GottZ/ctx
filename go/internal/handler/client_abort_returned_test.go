@@ -255,3 +255,49 @@ func TestNoErrorLineHelperInAGoroutine(t *testing.T) {
 	}
 	t.Logf("checked %d goroutine starts over %d function bodies", goroutines, len(bodies))
 }
+
+// TestEncodeErrorThroughTheQueryKeepaliveIsClientGone — issue #453 point 5:
+// a keepalive:true query whose client read the first keepalive byte and left;
+// the answer, too large for the buffer, fails to reach it. writeJSON's line
+// finds the request through the keepalive writer, which guards the writer
+// under it and does not unwrap: INFO with client_gone=true, like the same
+// write on Logger's writer.
+func TestEncodeErrorThroughTheQueryKeepaliveIsClientGone(t *testing.T) {
+	shrinkHeartbeat(t, 50*time.Millisecond, 2*time.Second)
+	logs := installRejectLogCapture(t)
+	answered := make(chan struct{})
+	srv, done := abortServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(answered)
+		_, _ = io.Copy(io.Discard, r.Body)
+		kw := armQueryKeepalive(r.Context(), w, true)
+		defer kw.close()
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+		writeJSON(kw, http.StatusOK, map[string]any{"success": true, "answer": strings.Repeat("x", 4<<20)})
+	}), nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/api/query", strings.NewReader(`{"query":"q","keepalive":true}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	buf := make([]byte, 1)
+	if _, err := io.ReadFull(resp.Body, buf); err != nil || buf[0] != ' ' {
+		t.Fatalf("first keepalive byte %q, %v", buf, err)
+	}
+	cancel()
+	resp.Body.Close()
+	<-answered
+	waitDone(t, done)
+
+	if errs := errorLines(logs); len(errs) != 0 {
+		t.Errorf("a client that left a keepalive query produced ERROR lines: %+v", errs)
+	}
+	if got := statusOf(t, requestLogOf(t, logs)); got != clientClosedStatus {
+		t.Errorf("request log status = %d, want %d", got, clientClosedStatus)
+	}
+}
