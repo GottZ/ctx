@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -128,6 +129,23 @@ func logFailure(gone bool, msg string, args []any) {
 		return
 	}
 	slog.Error(msg, args...)
+}
+
+// followUpTimeout bounds the follow-up of a committed write that no answer
+// depends on (the type classification after an upsert, issue #453): it runs
+// detached from the client, so a client that leaves after the commit no
+// longer cancels it, and this bound keeps it inside the HTTP drain of a
+// shutdown (ctxd's shutdownHTTPTimeout, 15 s) — http.Server.Shutdown waits
+// for the handler that runs it, and the pool closes after that. The same
+// 10 s bound the handlers' detached write-log and temporal goroutines carry.
+const followUpTimeout = 10 * time.Second
+
+// followUpContext is ctx detached from the request's cancellation, with its
+// values (request id, credentials, the tenant's settings) and
+// followUpTimeout: the context of a committed write's follow-up. A failure
+// on it is never a client abort (logRequestError keeps it ERROR).
+func followUpContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), followUpTimeout)
 }
 
 // Write outcomes a failed write states in its line (issue #417): the client

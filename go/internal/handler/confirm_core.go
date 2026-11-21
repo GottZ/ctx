@@ -386,6 +386,10 @@ func executeConfirmedStore(ctx context.Context, pool *pgxpool.Pool, blocktypes *
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
 
+	// The confirmed write is committed: its afterwork runs detached from the
+	// client (issue #453).
+	ctx, cancel := followUpContext(ctx)
+	defer cancel()
 	if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
 		slog.Warn("confirm: auto-classify failed", "error", err, "block_id", block.ID)
 	}

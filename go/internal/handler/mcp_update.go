@@ -184,6 +184,10 @@ func updateDataFromCanonical(cw store.CanonicalWrite) store.UpdateBlockData {
 // edits change the content as a new content does — each runs the same
 // afterwork.
 func finishBlockUpdate(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, data store.UpdateBlockData, block *store.Block, reqID string) {
+	// The update is committed: the afterwork runs detached from the client
+	// (issue #453).
+	ctx, cancel := followUpContext(ctx)
+	defer cancel()
 	if blocktypes != nil && (data.Title != nil || data.Metadata != nil || data.MetadataMerge != nil) {
 		set := blocktypes.SnapshotForRequest(ctx)
 		if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, block.ID, block.Title, block.Metadata); err != nil {

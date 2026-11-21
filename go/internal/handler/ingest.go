@@ -406,10 +406,14 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 		// about chunk rows — uq_context_category_title_scope has no lifecycle
 		// filter, so a block-mode write with new content naming a chunk row's
 		// (category, title, scope) lands on that row and classifies it here.
-		if _, err := store.ClassifyBlockAfterUpsert(ctx, h.pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
+		// The chunk is committed: its classification runs detached from the
+		// client (issue #453).
+		fctx, cancel := followUpContext(ctx)
+		if _, err := store.ClassifyBlockAfterUpsert(fctx, h.pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
 			slog.Warn("ingest: auto-classify failed",
 				"error", err, "index", index, "block_id", block.ID, "request_id", reqID)
 		}
+		cancel()
 	}
 
 	// 3. Log write (fire-and-forget).
