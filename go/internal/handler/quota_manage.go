@@ -115,6 +115,7 @@ func (h *ManageHandler) handleTenantQuotaSet(w http.ResponseWriter, r *http.Requ
 		Enabled:        enabled,
 	}
 	if err := store.UpsertTenantQuota(ctx, h.pool, spec.Scope, q, auditStamp(r, ar)); err != nil {
+		adminWriteFailed(r, "manage: tenant-quota-set failed", err, statementOutcome(err))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
