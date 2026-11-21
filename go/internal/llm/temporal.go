@@ -54,7 +54,8 @@ type TemporalDate struct {
 
 // DirUntil is the Dir of a reference that is the time up to its Date, open
 // towards the past: "bis März 2015", "bis gestern", "vor März 2024" (up to
-// the day before).
+// the day before). The rules yield it, and the LLM fallback's prompt asks for
+// it for "bis"/"until" with an end before today (rule 3).
 const DirUntil = "until"
 
 // DirFrom is the Dir of a reference that is the time from its Date on, open
@@ -113,7 +114,9 @@ DIRECTION RULES (strict priority):
    PAST (war/ging/hatte/musste/konnte/wurde/habe..gemacht/bin..gewesen) → use LAST from table
    FUTURE (will/werde/soll/muss/treffe/steht..an/fällt..aus/findet..statt) → use NEXT from table
    STATE-PLAN (habe frei/bin unterwegs/habe Urlaub) → use NEXT from table
-3. bis/until/by/deadline/frist = ALWAYS FORWARD (range from today)
+3. bis/until with an end before today = the time up to that end: date = the end, end = null, dir = "until".
+   bis/until/by/deadline/frist with an end from today on = a deadline: range from today to that end.
+   A month as the end stands for its last day (bis März 2024 = up to 2024-03-31).
 4. seit/since = start in past, end=today (range)
 5. Bare weekday (no tense, no marker) → use NEXT from WEEKDAY REFERENCE TABLE.
 6. No temporal reference → empty dates.
@@ -121,15 +124,17 @@ DIRECTION RULES (strict priority):
 
 Use the WEEKDAY REFERENCE TABLE above to look up dates. Do NOT calculate — just pick LAST or NEXT.
 
-JSON: {"dates":[{"ref":"matched text","date":"YYYY-MM-DD","end":"YYYY-MM-DD or null","dir":"past|future|today|range"}],"query":"original with dates inserted"}`
+JSON: {"dates":[{"ref":"matched text","date":"YYYY-MM-DD","end":"YYYY-MM-DD or null","dir":"past|future|today|range|until"}],"query":"original with dates inserted"}`
 
 // promptTemporal is the identity of the temporal-resolver template (E04-5).
 // The %s the template carries is the calendar of the request, not a second
 // body: one text, one identity. Version = the date the template text last
-// changed (82796166, the red/blue hardening pass) — the "V2" in the comment
-// above names the CALENDAR generation, not this prompt.
+// changed (issue #463: rule 3 asks for "bis"/"until" with a past end as the
+// time up to it, dir "until", as the rules read it, instead of a range from
+// today; before, 82796166, the red/blue hardening pass) — the "V2" in the
+// comment above names the CALENDAR generation, not this prompt.
 var promptTemporal = prompts.Register(
-	"llm.temporalPromptTemplate", "2026-03-30", "github.com/GottZ/ctx/internal/llm")
+	"llm.temporalPromptTemplate", "2026-11-21", "github.com/GottZ/ctx/internal/llm")
 
 // weekdayDE maps Go's time.Weekday to German weekday names.
 var weekdayNameDE = [7]string{"Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"}

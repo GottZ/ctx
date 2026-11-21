@@ -418,3 +418,61 @@ func TestRules_AMonthAtTheEndIncludesTheMonth(t *testing.T) {
 		"seit Ende März 2024":                {"2024-03-31", "2026-11-21", "range"},
 	})
 }
+
+// TestTemporalPrompt_BisWithAPastEndIsTheTimeUpToIt pins rule 3 of the LLM
+// fallback's prompt to the rules (issue #463): "bis"/"until" with an end
+// before today is the time up to it (dir "until"), a later end a deadline,
+// and the answer format offers "until". No LLM runs here: the answer parsing
+// takes either form as it comes (fake answers below); what the model makes
+// of the prompt is for the evals.
+func TestTemporalPrompt_BisWithAPastEndIsTheTimeUpToIt(t *testing.T) {
+	for _, want := range []string{
+		`3. bis/until with an end before today = the time up to that end: date = the end, end = null, dir = "until".`,
+		`with an end from today on = a deadline: range from today to that end.`,
+		`"dir":"past|future|today|range|until"`,
+	} {
+		if !strings.Contains(temporalPromptTemplate, want) {
+			t.Errorf("prompt lacks %q", want)
+		}
+	}
+	if strings.Contains(temporalPromptTemplate, "ALWAYS FORWARD") {
+		t.Error("prompt still asks for bis/until as a range from today whatever its end")
+	}
+}
+
+// TestParseTemporalResponse_BisAnswersOfBothForms: an answer in the form the
+// prompt asks for a past end (dir "until", no end) and one for a deadline (a
+// range from today) parse to the TemporalDate the query consumer reads as
+// the window up to the end and the window from today to the end
+// (linearGravityParams, effectiveDimWeights); an answer in the old form for
+// a past end (a range from today back to it) parses as it is, and the
+// consumer reads that inverted window as a point (TestLinearGravityParams).
+func TestParseTemporalResponse_BisAnswersOfBothForms(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want TemporalDate
+	}{
+		{`{"dates":[{"ref":"bis März 2015","date":"2015-03-31","end":null,"dir":"until"}],"query":"q"}`,
+			TemporalDate{Ref: "bis März 2015", Date: "2015-03-31", Dir: DirUntil}},
+		{"```json\n" + `{"dates":[{"ref":"until March 2015","date":"2015-03-31","end":null,"dir":"until"}],"query":"q"}` + "\n```",
+			TemporalDate{Ref: "until March 2015", Date: "2015-03-31", Dir: DirUntil}},
+		{`{"dates":[{"ref":"bis zur Abgabe am 15.01.","date":"2026-11-21","end":"2027-01-15","dir":"range"}],"query":"q"}`,
+			TemporalDate{Ref: "bis zur Abgabe am 15.01.", Date: "2026-11-21", End: ptrStr("2027-01-15"), Dir: "range"}},
+		{`{"dates":[{"ref":"bis März 2015","date":"2026-11-21","end":"2015-03-01","dir":"range"}],"query":"q"}`,
+			TemporalDate{Ref: "bis März 2015", Date: "2026-11-21", End: ptrStr("2015-03-01"), Dir: "range"}},
+	}
+	for _, c := range cases {
+		tr, err := parseTemporalResponse(c.raw, "Was galt bis März 2015?")
+		if err != nil || tr == nil || len(tr.Dates) != 1 {
+			t.Fatalf("%s: %+v, %v", c.raw, tr, err)
+		}
+		got := tr.Dates[0]
+		if got.Ref != c.want.Ref || got.Date != c.want.Date || got.Dir != c.want.Dir || (got.End == nil) != (c.want.End == nil) ||
+			got.End != nil && *got.End != *c.want.End {
+			t.Errorf("%s: got %+v, want %+v", c.raw, got, c.want)
+		}
+		if tr.DimensionWeights["linear"] < minLinearFallback {
+			t.Errorf("%s: derived weights %v lack the linear floor", c.raw, tr.DimensionWeights)
+		}
+	}
+}
