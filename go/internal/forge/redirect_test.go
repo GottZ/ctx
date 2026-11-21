@@ -76,8 +76,8 @@ func TestForgeRedirectStaysOnOrigin(t *testing.T) {
 			if n := other.hits(); n != 0 {
 				t.Fatalf("a %d redirect carried the request to another origin: %s", code, other.log())
 			}
-			if err == nil {
-				t.Fatalf("a %d redirect to another origin must fail the write", code)
+			if err == nil || !strings.Contains(err.Error(), "redirect status") {
+				t.Fatalf("a %d redirect to another origin must fail the write as a redirect not followed: %v", code, err)
 			}
 			if strings.Contains(err.Error(), "pat-459") {
 				t.Errorf("the error carries the token: %v", err)
@@ -95,8 +95,8 @@ func TestForgeRedirectStaysOnOrigin(t *testing.T) {
 			if n := other.hits(); n != 0 {
 				t.Fatalf("a %d redirect carried the GET to another origin: %s", code, other.log())
 			}
-			if err == nil {
-				t.Fatalf("a %d redirect to another origin must fail the fetch", code)
+			if err == nil || !strings.Contains(err.Error(), "redirect status") {
+				t.Fatalf("a %d redirect to another origin must fail the fetch as a redirect not followed: %v", code, err)
 			}
 		})
 	}
