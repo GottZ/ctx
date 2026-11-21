@@ -64,7 +64,8 @@ func TestGitHubUserinfoRedirectStaysOnOrigin(t *testing.T) {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			other := newGHSink(t, githubAPI)
 			api := newGHSink(t, func(w http.ResponseWriter, r *http.Request) {
-				http.Redirect(w, r, other.srv.URL+r.URL.Path, code)
+				// http.Redirect repeats the Location in the body of a GET.
+				http.Redirect(w, r, other.srv.URL+r.URL.Path+"?"+leakMarker, code)
 			})
 			p := NewGitHub(GitHubConfig{APIBase: api.srv.URL, Client: &http.Client{}})
 			_, err := p.Identity(context.Background(), Tokens{AccessToken: "gh-token-459"}, "")
@@ -73,6 +74,11 @@ func TestGitHubUserinfoRedirectStaysOnOrigin(t *testing.T) {
 			}
 			if err == nil {
 				t.Fatalf("a %d redirect to another origin must fail the identity lookup", code)
+			}
+			// The error reaches the log of a failed login: it names the
+			// redirect, not its target.
+			if s := err.Error(); !strings.Contains(s, "a redirect") || strings.Contains(s, leakMarker) {
+				t.Errorf("error %q: want the redirect named, its body and target left out", err)
 			}
 		})
 	}

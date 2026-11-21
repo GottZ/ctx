@@ -71,11 +71,15 @@ func TestExchangeCodeRefusesRedirect(t *testing.T) {
 							_, _ = io.WriteString(w, `{"access_token":"at","token_type":"Bearer"}`)
 							return
 						}
-						target := other.srv.URL + "/token"
+						target := other.srv.URL + "/token?leak-459"
 						if where == "same-origin" {
-							target = idp.srv.URL + "/moved-token"
+							target = idp.srv.URL + "/moved-token?leak-459"
 						}
-						http.Redirect(w, r, target, code)
+						// The Location repeated in the body, as servers
+						// commonly answer (http.Redirect writes none for POST).
+						w.Header().Set("Location", target)
+						w.WriteHeader(code)
+						_, _ = fmt.Fprintf(w, `<a href="%s">moved</a>`, target)
 					})
 					h := &SSOHandler{client: &http.Client{Timeout: 5 * time.Second}}
 					p := &store.OAuthProvider{Slug: "idp", Type: "oidc", ClientID: "client-459", TokenAuth: auth}
@@ -91,6 +95,11 @@ func TestExchangeCodeRefusesRedirect(t *testing.T) {
 					}
 					if s := err.Error(); strings.Contains(s, "secret-459") || strings.Contains(s, "verifier-459") {
 						t.Errorf("the error carries a credential: %v", err)
+					}
+					// The error reaches the server log: it names the
+					// redirect, not its target.
+					if s := err.Error(); !strings.Contains(s, "a redirect") || strings.Contains(s, "leak-459") {
+						t.Errorf("error %q: want the redirect named, its body and target left out", err)
 					}
 				})
 			}
