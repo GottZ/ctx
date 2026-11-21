@@ -10,8 +10,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GottZ/ctx/internal/clientkey"
 	"github.com/GottZ/ctx/internal/llm"
 )
+
+// keyNames are ctx-goldbench's words in a refusal of internal/clientkey.
+var keyNames = clientkey.Names{Client: "ctx-goldbench", BaseURL: "-endpoint"}
 
 // SamplingOpts sind die pro Achse festgelegten Sampling-Parameter. Sie
 // spiegeln die llm.Options der jeweiligen ctx-Pipeline, soweit die
@@ -244,11 +248,8 @@ func (c *Client) ChatWithUsage(ctx context.Context, req ChatRequest) (ChatResult
 		return ChatResult{}, fmt.Errorf("goldbench: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
 
-	resp, err := c.hc.Do(httpReq)
+	resp, err := c.send(httpReq)
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("goldbench: chat call: %w", err)
 	}
@@ -300,6 +301,24 @@ func (c *Client) ChatWithUsage(ctx context.Context, req ChatRequest) (ChatResult
 		out.TopLogprobs = llm.FirstTokenLogprobs(first.Token, first.Logprob, alts)
 	}
 	return out, nil
+}
+
+// send is how a chat call leaves ctx-goldbench (#432). With an API key it goes
+// through internal/clientkey, by the rule of the ctx CLI and ctx-armsweep: the
+// key, as a bearer token, only to the origin (scheme, host, port) of the
+// endpoint, and a redirect followed only within that origin — one anywhere
+// else is refused before it is sent, key and prompt with it. net/http alone
+// keeps Authorization on another port or scheme of the same host name. Without
+// a key nothing is bound and the call follows redirects as net/http does.
+func (c *Client) send(req *http.Request) (*http.Response, error) {
+	if c.apiKey == "" {
+		return c.hc.Do(req)
+	}
+	kt, err := clientkey.NewBearer(c.url, c.apiKey, keyNames)
+	if err != nil {
+		return nil, fmt.Errorf("-endpoint is not a usable URL: %w", err)
+	}
+	return kt.Do(c.hc, req)
 }
 
 // truncateErr kürzt Fehler-Bodies für die Fehlermeldung.
