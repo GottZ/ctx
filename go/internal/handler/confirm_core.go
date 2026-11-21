@@ -328,7 +328,7 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 			return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmIdentityTakenPrefix)}
 		}
 		if err != nil {
-			slog.Error("confirm: confirmed update execute failed", "error", err, "pending_id", pw.ID)
+			logRequestError(ctx, "confirm: confirmed update execute failed", "error", err, "pending_id", pw.ID)
 			return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 		}
 		if block == nil {
@@ -382,7 +382,7 @@ func executeConfirmedStore(ctx context.Context, pool *pgxpool.Pool, blocktypes *
 		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmSupersedesPrefix)}
 	}
 	if err != nil {
-		slog.Error("confirm: confirmed write execute failed", "error", err, "pending_id", pendingID)
+		logRequestError(ctx, "confirm: confirmed write execute failed", "error", err, "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
 
@@ -425,7 +425,7 @@ func executeConfirmedBlobOp(ctx context.Context, pool *pgxpool.Pool, ar *auth.Au
 	if cw.Op == store.OpBlobLink {
 		blob, err := store.UpdateBlobBlockRef(ctx, pool, cw.ID, cw.ContextBlockID, writableBlockScopes(ar))
 		if err != nil {
-			slog.Error("confirm: confirmed blob link execute failed", "error", err, "pending_id", pendingID)
+			logRequestError(ctx, "confirm: confirmed blob link execute failed", "error", err, "pending_id", pendingID)
 			return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 		}
 		if blob == nil {
@@ -445,7 +445,7 @@ func executeConfirmedBlobOp(ctx context.Context, pool *pgxpool.Pool, ar *auth.Au
 			Reject: classConstraint.rejectStatus(status, reason).prefixed(confirmBlobStorePrefix)}
 	}
 	if err != nil {
-		slog.Error("confirm: confirmed blob write execute failed", "error", err, "pending_id", pendingID)
+		logRequestError(ctx, "confirm: confirmed blob write execute failed", "error", err, "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
 	return confirmOutcome{Kind: confirmOK, Op: cw.Op, Blob: blob}
@@ -461,7 +461,7 @@ func executeConfirmedBlobOp(ctx context.Context, pool *pgxpool.Pool, ar *auth.Au
 func executeConfirmedArchive(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthResult, cw store.CanonicalWrite, pendingID string) confirmOutcome {
 	block, err := store.DeleteBlock(ctx, pool, cw.ID, writableBlockScopes(ar))
 	if err != nil {
-		slog.Error("confirm: confirmed archive execute failed", "error", err, "pending_id", pendingID)
+		logRequestError(ctx, "confirm: confirmed archive execute failed", "error", err, "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
 	if block == nil {

@@ -54,7 +54,7 @@ func mcpArchiveHandler(cfg MCPConfig) mcp.ToolHandlerFor[archiveInput, any] {
 			if rej := provenanceRejectOr(err, nil); rej != nil {
 				return errResultReject(rej), nil, nil
 			}
-			slog.Error("mcp: archive error", "error", err, "block_id", resolvedID, "request_id", RequestIDFromContext(ctx))
+			logRequestError(ctx, "mcp: archive error", "error", err, "block_id", resolvedID, "request_id", RequestIDFromContext(ctx))
 			return classInternal.errResult("archive failed: internal error"), nil, nil
 		}
 		if block == nil {
@@ -86,7 +86,7 @@ func mcpStageArchive(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, in
 	if rateLimit > 0 {
 		writeCount, err := store.CheckRateLimit(ctx, cfg.Pool, ar.ApiKeyID)
 		if err != nil {
-			slog.Error("mcp: stage archive rate limit check error", "error", err, "request_id", reqID)
+			logRequestError(ctx, "mcp: stage archive rate limit check error", "error", err, "request_id", reqID)
 			return classInternal.errResult("stage failed: internal error"), nil, nil
 		}
 		if writeCount >= rateLimit {
@@ -102,7 +102,7 @@ func mcpStageArchive(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, in
 	// set (V-11): a fingerprint, not a read answer.
 	block, err := store.GetBlock(ctx, cfg.Pool, nil, resolvedID, writableBlockScopes(ar), nil)
 	if err != nil {
-		slog.Error("mcp: stage archive base read failed", "error", err, "block_id", resolvedID, "request_id", reqID)
+		logRequestError(ctx, "mcp: stage archive base read failed", "error", err, "block_id", resolvedID, "request_id", reqID)
 		return classInternal.errResult("stage failed: internal error"), nil, nil
 	}
 	if block == nil {
@@ -125,13 +125,13 @@ func mcpStageArchive(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, in
 	}
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, block.Scope, store.OpArchive, "mcp", canonical, hash, ttl)
 	if err != nil {
-		slog.Error("mcp: stage pending archive failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "mcp: stage pending archive failed", "error", err, "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil
 	}
 	// Gap-C6-a: charge the write budget at INTENT, as the store and blob stage
 	// arms do — executeConfirm books nothing. Logged, never fatal.
 	if err := store.LogAccess(ctx, cfg.Pool, ar.ApiKeyID, "", "write"); err != nil {
-		slog.Error("mcp: staged archive log error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "mcp: staged archive log error", "error", err, "request_id", reqID)
 	}
 
 	expiry := "never (writes.confirm_ttl = 0)"

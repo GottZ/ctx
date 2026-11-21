@@ -134,7 +134,41 @@ func WriteOpts(ctx context.Context, db Beginner, opts pgx.TxOptions, s Stages, f
 	if err := fn(tx); err != nil {
 		return err
 	}
-	return wrap(s.Commit, tx.Commit(ctx))
+	return wrapCommit(s.Commit, tx.Commit(ctx))
+}
+
+// commitError is the failed COMMIT of a bracket whose Stages name the commit.
+// Its text is the one wrap always produced ("<label>: <driver error>") and
+// Unwrap hands errors.Is/As the driver error exactly as the %w form did; the
+// type only lets FailedAtCommit tell a failed COMMIT from a failure of fn.
+type commitError struct {
+	label string
+	err   error
+}
+
+func (e *commitError) Error() string { return e.label + ": " + e.err.Error() }
+func (e *commitError) Unwrap() error { return e.err }
+
+// wrapCommit is wrap for the commit stage: same text, and an empty label
+// still returns the driver error unchanged (its identity is the Stages
+// promise), so only a labeled commit failure is recognisable.
+func wrapCommit(label string, err error) error {
+	if err == nil || label == "" {
+		return err
+	}
+	return &commitError{label: label, err: err}
+}
+
+// FailedAtCommit reports whether err is the failed COMMIT of a Write,
+// WriteOpts or Read bracket whose Stages.Commit is set. A caller needs it to
+// say what a failed write left behind (issue #417): a failure inside fn
+// rolled the transaction back, a COMMIT cut off on the wire may have landed.
+// An unlabeled bracket's commit failure is the bare driver error and answers
+// false — false means "not known to be the commit", so only ask about
+// labeled brackets.
+func FailedAtCommit(err error) bool {
+	var ce *commitError
+	return errors.As(err, &ce)
 }
 
 // Read is WriteOpts with pgx.TxOptions{AccessMode: pgx.ReadOnly}. The

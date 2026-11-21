@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -254,7 +253,7 @@ func (h *UsageHandler) HandleUsage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	slog.Error("usage: read failed", "error", err, "request_id", RequestIDFromContext(ctx))
+	logRequestError(ctx, "usage: read failed", "error", err, "request_id", RequestIDFromContext(ctx))
 	writeUsageError(w, http.StatusInternalServerError, "internal error")
 }
 
@@ -350,7 +349,7 @@ func (h *UsageHandler) HandleUsageConsumers(w http.ResponseWriter, r *http.Reque
 	}
 	entries, err := h.consumerEntries(ctx, admin, tenant, consumer)
 	if err != nil {
-		slog.Error("usage: consumers failed", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "usage: consumers failed", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeUsageError(w, http.StatusInternalServerError, "internal error")
 		return
 	}

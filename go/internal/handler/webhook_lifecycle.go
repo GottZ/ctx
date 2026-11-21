@@ -24,7 +24,6 @@ package handler
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"log/slog"
 	"net/http"
 
 	"github.com/GottZ/ctx/internal/sealbox"
@@ -171,6 +170,6 @@ func (h *WebhookSecretHandler) ownedProject(w http.ResponseWriter, r *http.Reque
 // fail logs the cause and answers a value-free 500 — the secret error paths never
 // echo request or key material.
 func (h *WebhookSecretHandler) fail(w http.ResponseWriter, r *http.Request, msg string, err error) {
-	slog.Error(msg, "error", err, "request_id", RequestIDFromContext(r.Context()))
+	logRequestError(r.Context(), msg, "error", err, "request_id", RequestIDFromContext(r.Context()))
 	writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 }

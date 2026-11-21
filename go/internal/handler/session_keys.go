@@ -71,7 +71,7 @@ func (h *SessionHandler) HandleSessionKeys(w http.ResponseWriter, r *http.Reques
 		ar.PrincipalID,
 	)
 	if err != nil {
-		slog.Error("session keys: list", "error", err)
+		logRequestError(r.Context(), "session keys: list", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -89,7 +89,7 @@ func (h *SessionHandler) HandleSessionKeys(w http.ResponseWriter, r *http.Reques
 		keys = append(keys, e)
 	}
 	if err := rows.Err(); err != nil {
-		slog.Error("session keys: rows", "error", err)
+		logRequestError(r.Context(), "session keys: rows", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -154,7 +154,7 @@ func (h *SessionHandler) HandleSelectKey(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err != nil {
-		slog.Error("session select-key: ownership check", "error", err)
+		logRequestError(r.Context(), "session select-key: ownership check", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -170,7 +170,7 @@ func (h *SessionHandler) HandleSelectKey(w http.ResponseWriter, r *http.Request)
 		IssuedVia:   "login",
 	}, accessTokenTTL(), refreshTokenTTL())
 	if err != nil {
-		slog.Error("session select-key: mint pair", "error", err)
+		logRequestError(r.Context(), "session select-key: mint pair", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -186,7 +186,7 @@ func (h *SessionHandler) HandleSelectKey(w http.ResponseWriter, r *http.Request)
 	newSessionID, err := store.CreateWebSession(r.Context(), h.pool,
 		pair.AccessToken, ar.PrincipalID, csrfSecret, r.UserAgent(), clientIP(r, h.trustedProxy))
 	if err != nil {
-		slog.Error("session select-key: create overlay", "error", err)
+		logRequestError(r.Context(), "session select-key: create overlay", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -195,7 +195,7 @@ func (h *SessionHandler) HandleSelectKey(w http.ResponseWriter, r *http.Request)
 	// hier lässt die alte Session bestenfalls weiterleben (Reaper/GC räumt
 	// nach), er darf den vollzogenen Wechsel nicht mehr abbrechen.
 	if err := store.DestroyWebSession(r.Context(), h.pool, oldSessionID); err != nil {
-		slog.Error("session select-key: destroy old session", "error", err)
+		logRequestError(r.Context(), "session select-key: destroy old session", "error", err)
 	}
 
 	h.setSessionCookies(w, newSessionID, pair.RefreshToken)

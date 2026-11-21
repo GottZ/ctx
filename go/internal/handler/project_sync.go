@@ -25,7 +25,6 @@ package handler
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"slices"
 	"time"
@@ -99,7 +98,7 @@ func (h *ProjectSyncHandler) HandleStart(w http.ResponseWriter, r *http.Request)
 		if limit := h.cfg.SnapshotForRequest(ctx).Project.Sync.RateLimit; limit > 0 {
 			count, retryAfter, err := store.CountSyncRunsSince(ctx, h.pool, row.ID, syncRateWindow)
 			if err != nil {
-				slog.Error("project-sync: rate count", "error", err, "request_id", RequestIDFromContext(ctx))
+				logRequestError(ctx, "project-sync: rate count", "error", err, "request_id", RequestIDFromContext(ctx))
 				internalError(w, ctx, "project-sync: rate count", err)
 				return
 			}

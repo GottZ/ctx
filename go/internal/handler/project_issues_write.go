@@ -98,7 +98,7 @@ func (h *ProjectIssuesHandler) resolveProjectWriteScope(w http.ResponseWriter, r
 	ar := AuthResultFromContext(ctx)
 	row, err := store.GetProjectByID(ctx, h.pool, chi.URLParam(r, "id"))
 	if err != nil {
-		slog.Error("project-issues: write scope project load", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "project-issues: write scope project load", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeInternal(w)
 		return "", nil, false
 	}
@@ -148,7 +148,7 @@ func (h *ProjectIssuesHandler) writeRateBlocked(w http.ResponseWriter, r *http.R
 	}
 	count, err := store.CheckRateLimit(ctx, h.pool, ar.ApiKeyID)
 	if err != nil {
-		slog.Error("project-issues: rate limit check", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "project-issues: rate limit check", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeInternal(w)
 		return true
 	}

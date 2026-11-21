@@ -91,7 +91,7 @@ func (s *chatStageRunner) StageWrite(ctx context.Context, category, title, conte
 	}
 	pw, err := store.StagePendingWrite(ctx, s.pool, ar.ApiKeyID, res.WriteScope, "store", "chat", canonical, hash, ttl)
 	if err != nil {
-		slog.Error("chat: stage pending write failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "chat: stage pending write failed", "error", err, "request_id", reqID)
 		return nil, "", err
 	}
 
@@ -167,7 +167,7 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 	if rateLimit > 0 {
 		writeCount, err := store.CheckRateLimit(ctx, s.pool, ar.ApiKeyID)
 		if err != nil {
-			slog.Error("chat: stage update rate limit check error", "error", err, "request_id", reqID)
+			logRequestError(ctx, "chat: stage update rate limit check error", "error", err, "request_id", reqID)
 			return nil, "", err
 		}
 		if writeCount >= rateLimit {
@@ -187,7 +187,7 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 	// nil type set (V-11): a TOCTOU fingerprint, not a read answer.
 	block, err := store.GetBlock(ctx, s.pool, nil, resolvedID, writableBlockScopes(ar), nil)
 	if err != nil {
-		slog.Error("chat: stage update base read failed", "error", err, "block_id", resolvedID, "request_id", reqID)
+		logRequestError(ctx, "chat: stage update base read failed", "error", err, "block_id", resolvedID, "request_id", reqID)
 		return nil, "", err
 	}
 	if block == nil {
@@ -218,7 +218,7 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 	}
 	pw, err := store.StagePendingWrite(ctx, s.pool, ar.ApiKeyID, block.Scope, "update", "chat", canonical, hash, ttl)
 	if err != nil {
-		slog.Error("chat: stage pending update failed", "error", err, "request_id", reqID)
+		logRequestError(ctx, "chat: stage pending update failed", "error", err, "request_id", reqID)
 		return nil, "", err
 	}
 

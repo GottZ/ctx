@@ -192,7 +192,7 @@ func finishBlockUpdate(ctx context.Context, pool *pgxpool.Pool, blocktypes *bloc
 	}
 	if data.Content != nil || data.Edits != nil {
 		if _, err := store.RefreshTemporal(ctx, pool, block.ID, block.Content, block.CreatedAt); err != nil {
-			slog.Error("update afterwork: temporal refresh failed", "error", err, "block_id", block.ID, "request_id", reqID)
+			logRequestError(ctx, "update afterwork: temporal refresh failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		}
 	}
 }
@@ -274,7 +274,7 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 			if rej := updateFailureReject(err); rej != nil {
 				return errResultReject(rej), nil, nil
 			}
-			slog.Error("mcp: update error", "error", err, "block_id", resolvedID)
+			logRequestError(ctx, "mcp: update error", "error", err, "block_id", resolvedID)
 			return errResult("update failed: internal error"), nil, nil
 		}
 		if block == nil {
@@ -312,7 +312,7 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inp
 	if rateLimit > 0 {
 		writeCount, err := store.CheckRateLimit(ctx, cfg.Pool, ar.ApiKeyID)
 		if err != nil {
-			slog.Error("mcp: stage update rate limit check error", "error", err)
+			logRequestError(ctx, "mcp: stage update rate limit check error", "error", err)
 			return errResult("stage failed: internal error"), nil, nil
 		}
 		if writeCount >= rateLimit {
@@ -329,7 +329,7 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inp
 	// nil type set (V-11): a TOCTOU fingerprint, not a read answer.
 	block, err := store.GetBlock(ctx, cfg.Pool, nil, resolvedID, writableBlockScopes(ar), nil)
 	if err != nil {
-		slog.Error("mcp: stage update base read failed", "error", err, "block_id", resolvedID)
+		logRequestError(ctx, "mcp: stage update base read failed", "error", err, "block_id", resolvedID)
 		return errResult("stage failed: internal error"), nil, nil
 	}
 	if block == nil {
@@ -378,7 +378,7 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inp
 	}
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, block.Scope, "update", "mcp", canonical, hash, ttl)
 	if err != nil {
-		slog.Error("mcp: stage pending update failed", "error", err)
+		logRequestError(ctx, "mcp: stage pending update failed", "error", err)
 		return errResult("stage failed: could not persist the staged write"), nil, nil
 	}
 

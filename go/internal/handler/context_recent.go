@@ -112,7 +112,7 @@ func (h *RecentHandler) HandleRecent(w http.ResponseWriter, r *http.Request) {
 		// Same status class and prose as /api/search's store error: no route
 		// says out loud which of its guards refused. The MCP tool names the
 		// scope guard because a model needs the reason in its transcript.
-		slog.Error("recent: query error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "recent: query error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"success": false, "error": "Internal server error",
 		})

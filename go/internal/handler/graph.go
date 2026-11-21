@@ -248,7 +248,7 @@ func (h *GraphHandler) HandleAll(w http.ResponseWriter, r *http.Request) {
 	// later wave); the type allowlist comes from the registry snapshot (T6).
 	result, err := store.FullGraph(ctx, h.pool, params, authResult.ReadScopes, nil, snap.VisibleTypes())
 	if err != nil {
-		slog.Error("graph: full query error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "graph: full query error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 		return
 	}
@@ -256,7 +256,7 @@ func (h *GraphHandler) HandleAll(w http.ResponseWriter, r *http.Request) {
 
 	// Best effort, same bucket as ego (focus "" = load-all in the metadata).
 	if err := store.LogGraphAccess(ctx, h.pool, authResult.ApiKeyID, "", 0, params.Limit, len(result.Nodes), len(result.StructEdges)); err != nil {
-		slog.Error("graph: access log error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "graph: access log error", "error", err, "request_id", reqID)
 	}
 
 	// C2 (§4.2, Linse 2 / B5): /api/graph/all is the SECOND fetch site, not an
@@ -320,7 +320,7 @@ func (h *GraphHandler) HandleEgo(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "Block not found"})
 			return
 		}
-		slog.Error("graph: ego query error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "graph: ego query error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 		return
 	}
@@ -329,7 +329,7 @@ func (h *GraphHandler) HandleEgo(w http.ResponseWriter, r *http.Request) {
 	// Telemetry strictly AFTER the successful visibility check (design §2.7).
 	// Best effort: a failed audit insert must not fail a completed read.
 	if err := store.LogGraphAccess(ctx, h.pool, authResult.ApiKeyID, result.Focus, params.Hops, params.Limit, len(result.Nodes), len(result.StructEdges)); err != nil {
-		slog.Error("graph: access log error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "graph: access log error", "error", err, "request_id", reqID)
 	}
 
 	// C2 (§4.2): the annotation runs on BOTH arms — the SQL path above and the

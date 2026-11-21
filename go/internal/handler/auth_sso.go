@@ -205,7 +205,7 @@ func (h *SSOHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		ReturnTo:     safeReturnTo(r.URL.Query().Get("return_to")),
 	}, ssoStateTTL)
 	if err != nil {
-		slog.Error("sso: state store failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "sso: state store failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -256,7 +256,7 @@ func (h *SSOHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := store.ConsumeSSOState(ctx, h.pool, cookie.Value, store.SSOPurposeLogin)
 	if err != nil {
-		slog.Error("sso: state consume failed", "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "sso: state consume failed", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -338,7 +338,7 @@ func (h *SSOHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		secret, resErr := store.ResolveSecret(ctx, h.pool, box, store.OAuthProviderSecretName(p.Slug), store.GlobalScope)
 		if resErr != nil {
 			// ResolveSecret's error contract carries no secret material.
-			slog.Error("sso: client_secret resolution failed", "provider", p.Slug, "error", resErr)
+			logRequestError(ctx, "sso: client_secret resolution failed", "provider", p.Slug, "error", resErr)
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"success": false, "error": "login unavailable"})
 			return
 		}
@@ -373,7 +373,7 @@ func (h *SSOHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	principalID, found, err := store.TouchExternalIdentityLogin(ctx, h.pool, ident.Issuer, ident.Subject, verifiedEmail, ident.DisplayName)
 	if err != nil {
-		slog.Error("sso: identity mapping failed", "provider", p.Slug, "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "sso: identity mapping failed", "provider", p.Slug, "error", err, "request_id", RequestIDFromContext(ctx))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -407,7 +407,7 @@ func (h *SSOHandler) issueWebSession(w http.ResponseWriter, r *http.Request, slu
 	ctx := r.Context()
 	apiKeyID, hasKey, err := store.PickPrincipalKey(ctx, h.pool, principalID)
 	if err != nil {
-		slog.Error("sso: pick principal key", "provider", slug, "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "sso: pick principal key", "provider", slug, "error", err, "request_id", RequestIDFromContext(ctx))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -437,7 +437,7 @@ func (h *SSOHandler) issueWebSession(w http.ResponseWriter, r *http.Request, slu
 		IssuedVia:   "login",
 	}, accessTokenTTL(), refreshTokenTTL())
 	if err != nil {
-		slog.Error("sso: mint login pair", "provider", slug, "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "sso: mint login pair", "provider", slug, "error", err, "request_id", RequestIDFromContext(ctx))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -450,7 +450,7 @@ func (h *SSOHandler) issueWebSession(w http.ResponseWriter, r *http.Request, slu
 	sessionID, err := store.CreateWebSession(ctx, h.pool,
 		pair.AccessToken, result.PrincipalID, hex.EncodeToString(csrfBytes), r.UserAgent(), clientIP(r, h.trustedProxy))
 	if err != nil {
-		slog.Error("sso: create overlay", "provider", slug, "error", err, "request_id", RequestIDFromContext(ctx))
+		logRequestError(ctx, "sso: create overlay", "provider", slug, "error", err, "request_id", RequestIDFromContext(ctx))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -487,7 +487,7 @@ func (h *SSOHandler) activeProvider(ctx context.Context, slug string) *store.OAu
 	}
 	p, found, err := store.GetOAuthProviderBySlug(ctx, h.pool, slug)
 	if err != nil {
-		slog.Error("sso: provider lookup failed", "error", err)
+		logRequestError(ctx, "sso: provider lookup failed", "error", err)
 		return nil
 	}
 	if !found || !p.Active {

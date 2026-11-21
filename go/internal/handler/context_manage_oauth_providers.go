@@ -19,7 +19,6 @@ package handler
 import (
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -110,7 +109,7 @@ func (h *ManageHandler) handleOAuthProviderCreate(w http.ResponseWriter, r *http
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 				"success": false, "error": "secrets unavailable: CTX_SECRETS_KEY not configured"})
 		default:
-			slog.Error("manage: create oauth provider failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+			logRequestError(r.Context(), "manage: create oauth provider failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		}
 		return
@@ -124,7 +123,7 @@ func (h *ManageHandler) handleOAuthProviderCreate(w http.ResponseWriter, r *http
 func (h *ManageHandler) handleOAuthProviderList(w http.ResponseWriter, r *http.Request) {
 	providers, err := store.ListOAuthProviders(r.Context(), h.pool)
 	if err != nil {
-		slog.Error("manage: list oauth providers failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "manage: list oauth providers failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}
@@ -148,7 +147,7 @@ func (h *ManageHandler) handleOAuthProviderDelete(w http.ResponseWriter, r *http
 
 	deleted, err := store.DeleteOAuthProvider(r.Context(), h.pool, data.Slug)
 	if err != nil {
-		slog.Error("manage: delete oauth provider failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "manage: delete oauth provider failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
 		return
 	}

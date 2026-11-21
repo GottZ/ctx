@@ -144,7 +144,7 @@ func (h *OAuthHandler) dcrCapOK(w http.ResponseWriter, r *http.Request) bool {
 	var count int
 	if err := h.pool.QueryRow(r.Context(),
 		`SELECT COUNT(*) FROM context_oauth_clients`).Scan(&count); err != nil {
-		slog.Error("oauth: dcr client cap count", "error", err)
+		logRequestError(r.Context(), "oauth: dcr client cap count", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return false // fail-closed: unknown count never admits a write
 	}

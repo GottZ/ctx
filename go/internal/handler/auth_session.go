@@ -169,7 +169,7 @@ func (h *SessionHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		IssuedVia:   "login",
 	}, accessTokenTTL(), refreshTokenTTL())
 	if err != nil {
-		slog.Error("session: mint login pair", "error", err)
+		logRequestError(r.Context(), "session: mint login pair", "error", err)
 		sessionError(w, http.StatusInternalServerError)
 		return
 	}
@@ -185,7 +185,7 @@ func (h *SessionHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	sessionID, err := store.CreateWebSession(r.Context(), h.pool,
 		pair.AccessToken, result.PrincipalID, csrfSecret, r.UserAgent(), clientIP(r, h.trustedProxy))
 	if err != nil {
-		slog.Error("session: create overlay", "error", err)
+		logRequestError(r.Context(), "session: create overlay", "error", err)
 		sessionError(w, http.StatusInternalServerError)
 		return
 	}
@@ -271,7 +271,7 @@ func (h *SessionHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	pair, outcome, err := store.RotateRefreshToken(r.Context(), h.pool, refreshC.Value, "",
 		accessTokenTTL(), refreshTokenTTL(), refreshFamilyCap())
 	if err != nil {
-		slog.Error("session: rotate refresh", "error", err)
+		logRequestError(r.Context(), "session: rotate refresh", "error", err)
 		h.clearSessionCookies(w)
 		sessionError(w, http.StatusUnauthorized)
 		return
@@ -289,7 +289,7 @@ func (h *SessionHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	if err != nil || !ok {
 		// Family mismatch or vanished overlay — fail closed, force re-login.
 		if err != nil {
-			slog.Error("session: repoint overlay", "error", err)
+			logRequestError(r.Context(), "session: repoint overlay", "error", err)
 		}
 		h.clearSessionCookies(w)
 		sessionError(w, http.StatusUnauthorized)
@@ -306,7 +306,7 @@ func (h *SessionHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 func (h *SessionHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
 		if err := store.DestroyWebSession(r.Context(), h.pool, c.Value); err != nil {
-			slog.Error("session: destroy", "error", err)
+			logRequestError(r.Context(), "session: destroy", "error", err)
 			// Still clear the cookies — the client side of logout must win.
 		}
 	}

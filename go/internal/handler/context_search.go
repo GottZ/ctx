@@ -185,7 +185,7 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 				"success": false, "error": tooManyGrantsMsg,
 			})
 		default:
-			slog.Error("search: query error", "error", err, "request_id", reqID)
+			logRequestError(ctx, "search: query error", "error", err, "request_id", reqID)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"success": false, "error": "Internal server error",
 			})

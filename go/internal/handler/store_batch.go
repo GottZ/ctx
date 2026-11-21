@@ -96,7 +96,7 @@ func runStoreBatch(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, 
 	results, err := store.UpsertBlocks(ctx, pool, plan.upserts(), ar.ApiKeyID, set,
 		&store.WriteBudget{APIKeyID: ar.ApiKeyID, Limit: lim.RateLimitWrite})
 	if err != nil {
-		return nil, storeBatchFailureReject(err, reqID)
+		return nil, storeBatchFailureReject(ctx, err, reqID)
 	}
 	out := storeBatchOutcome(results)
 	// The blocks and their booking are committed: the afterwork must not stop
@@ -137,14 +137,14 @@ func storeBatchOutcome(results []store.BatchResult) []storeBatchItem {
 // storeBatchFailureReject renders a failed store.UpsertBlocks on the direct
 // path: the budget refusal, an item's refusal (storeBatchRefusal), else the
 // opaque 500 with the cause in the log.
-func storeBatchFailureReject(err error, reqID string) *writeReject {
+func storeBatchFailureReject(ctx context.Context, err error, reqID string) *writeReject {
 	if rej := storeBatchBudgetReject(err); rej != nil {
 		return rej
 	}
 	if rej := storeBatchRefusal(err); rej != nil {
 		return rej
 	}
-	slog.Error("store batch: upsert error", "error", err, "request_id", reqID)
+	logRequestError(ctx, "store batch: upsert error", "error", err, "request_id", reqID)
 	return classInternal.reject("Internal server error")
 }
 
@@ -304,7 +304,7 @@ func executeConfirmedStoreBatch(ctx context.Context, pool *pgxpool.Pool, blockty
 		if rej := storeBatchRefusal(err); rej != nil {
 			return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmStoreBatchPrefix)}
 		}
-		slog.Error("confirm: confirmed batch execute failed", "error", err, "pending_id", pendingID)
+		logRequestError(ctx, "confirm: confirmed batch execute failed", "error", err, "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
 	after := context.WithoutCancel(ctx)
@@ -459,6 +459,6 @@ func finishStoredBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.S
 		slog.Warn("store batch: auto-classify failed", "error", err, "block_id", b.ID, "request_id", reqID)
 	}
 	if _, err := store.RefreshTemporal(ctx, pool, b.ID, b.Content, b.CreatedAt); err != nil {
-		slog.Error("store batch: temporal refresh failed", "error", err, "block_id", b.ID, "request_id", reqID)
+		logRequestError(ctx, "store batch: temporal refresh failed", "error", err, "block_id", b.ID, "request_id", reqID)
 	}
 }

@@ -17,7 +17,6 @@ package handler
 
 import (
 	"errors"
-	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
@@ -149,7 +148,7 @@ func (h *GraphClusterHandler) HandleCluster(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "Cluster not found"})
 			return
 		}
-		slog.Error("cluster: query error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "cluster: query error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})
 		return
 	}
@@ -158,7 +157,7 @@ func (h *GraphClusterHandler) HandleCluster(w http.ResponseWriter, r *http.Reque
 	// Telemetry strictly AFTER a successful, visible read. Best effort: a failed
 	// audit insert must not fail a completed read.
 	if err := store.LogGraphClusterAccess(ctx, h.pool, authResult.ApiKeyID, len(result.Members), len(result.Neighbors)); err != nil {
-		slog.Error("cluster: access log error", "error", err, "request_id", reqID)
+		logRequestError(ctx, "cluster: access log error", "error", err, "request_id", reqID)
 	}
 
 	writeJSON(w, http.StatusOK, buildClusterResponse(result, params, elapsedMs))

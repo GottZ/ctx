@@ -601,7 +601,7 @@ func (h *SettingsHandler) checkSecretRef(r *http.Request, key, raw string, ar *a
 	for _, scope := range resolveScopes(ar, allowShared) {
 		exists, err := store.SecretExists(r.Context(), h.pool, raw, scope)
 		if err != nil {
-			slog.Error("settings: secret existence check failed", "error", err,
+			logRequestError(r.Context(), "settings: secret existence check failed", "error", err,
 				"request_id", RequestIDFromContext(r.Context()))
 			return http.StatusInternalServerError, "internal error"
 		}

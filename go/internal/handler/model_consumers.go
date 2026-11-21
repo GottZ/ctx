@@ -321,7 +321,7 @@ func writeConsumerStoreError(w http.ResponseWriter, r *http.Request, err error, 
 	case errors.As(err, &pgErr) && pgErr.Code == "23514" && pgErr.ConstraintName == "ck_model_consumers_plaintext_private":
 		writeConsumerError(w, http.StatusBadRequest, "allow_plaintext needs allowed_cidrs inside private networks (RFC 1918, ULA, loopback)")
 	default:
-		slog.Error("manage: "+op+" failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		logRequestError(r.Context(), "manage: "+op+" failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeConsumerError(w, http.StatusInternalServerError, "internal error")
 	}
 }
