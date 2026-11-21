@@ -218,16 +218,17 @@ func TestPushEditBegunBeforeTheAdvance(t *testing.T) {
 }
 
 // TestPushEditInFlightDuringTheAdvance: an edit whose transaction began before
-// the version the push lists holds the block row across the advance and
-// commits after it. Its updated_at is earlier than the listed version's, so no
-// timestamp shows it: the advance has to wait for it and see that the block no
-// longer holds the version the PATCH wrote.
+// the issue was even pulled — so before the mapping's last synced_at and the
+// version the push lists — holds the block row across the advance and commits
+// after it. Its updated_at is earlier than every time the mapping carries, so
+// no timestamp shows it: the advance has to wait for it, see that the block no
+// longer holds the version the PATCH wrote, and leave the row a candidate
+// whatever updated_at the edit stored.
 func TestPushEditInFlightDuringTheAdvance(t *testing.T) {
 	str := func(s string) *string { return &s }
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
 	proj := enablePush(seedIFProject(t, pool, "i452pushflight"))
-	issueID, _ := i452Pulled(t, pool, proj, false)
 
 	w, err := pool.Begin(ctx)
 	if err != nil {
@@ -238,6 +239,7 @@ func TestPushEditInFlightDuringTheAdvance(t *testing.T) {
 	if err := w.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&wPID); err != nil {
 		t.Fatal(err)
 	}
+	issueID, _ := i452Pulled(t, pool, proj, false)
 	i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Title: str("Crane, renamed")})
 
 	spy := &hookSpy{pushSpyForge: newPushSpy()}
