@@ -1215,3 +1215,88 @@ A pin moves by editing that map in the change that moves `db-image/Dockerfile` t
 version it names. A migration that creates an extension needs an entry there too; the
 generator refuses to run without one. `TestManifestExtensionsAreTheDeclaredMinimums`
 keeps the manifest and the map alike.
+
+### A migration with a row threshold
+
+The runner applies each file in one transaction, so `CREATE INDEX CONCURRENTLY` cannot run
+there, and a plain `CREATE INDEX` or `VALIDATE CONSTRAINT` holds its lock on the table to the
+commit while it reads the whole heap (`SHARE` for a build: readers go on, writers wait). Such a
+file does the work inline below a row threshold of the table and above it leaves it to an
+out-of-band runbook in its header, with a WARNING (115, 140, 171, 172, 173, 175, 176, 182,
+184–187). Decide the size with
+`ctx_migration_rows(<table>::regclass, <threshold>)` (migration 191), not with
+`pg_class.reltuples`, the live-row counter or the file size: each can trail the table — the
+estimate of the last `ANALYZE` a table that grew since, a `VACUUM`'s extrapolation all three
+together — and the files that copied a `reltuples` query built inline above their thresholds
+(issue #399, [operations](operations.md#migration-191-a-threshold-reads-the-current-size-of-a-table)).
+The function estimates from the stored statistics, summed over partitions and TimescaleDB
+chunks, and lets the estimate decide only "out of band": an estimate at or above the threshold
+is the answer, without a read of the table; below it the function counts the rows, stopping at
+the threshold. So the value is the exact row count below the threshold, and at or above it the
+estimate, or the threshold itself where a count stopped there — what the WARNING prints. It
+fails on a missing relation, a relation that is not a table and a threshold below 1, so no
+caller reads an error as "small". The pattern:
+
+```sql
+SET LOCAL lock_timeout = '3s';
+
+DO $do$
+DECLARE
+    -- Measured: the build at the threshold and what waits for it
+    -- (docs/operations.md, "Migration NNN").
+    inline_rows CONSTANT BIGINT := 500000;
+    v_def       TEXT;
+    v_valid     BOOLEAN;
+    v_rows      BIGINT;
+BEGIN
+    -- A usable index of the name (valid, the definition as PostgreSQL
+    -- deparses it) makes the file a no-op; anything else under the name is
+    -- left alone with a WARNING.
+    SELECT pg_get_indexdef(i.indexrelid), i.indisvalid INTO v_def, v_valid
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_index     i ON i.indexrelid = c.oid
+     WHERE n.nspname = 'public' AND c.relname = 'idx_example';
+    IF FOUND THEN
+        IF NOT (v_valid AND v_def = 'CREATE INDEX idx_example ON public.context_blocks USING btree (col)') THEN
+            RAISE WARNING 'idx_example exists but is not the index of migration NNN (valid=%): %. Runbook in the header of NNN_example.sql.',
+                v_valid, v_def;
+        END IF;
+        RETURN;
+    END IF;
+
+    v_rows := ctx_migration_rows('public.context_blocks', inline_rows);
+    IF v_rows >= inline_rows THEN
+        RAISE WARNING 'idx_example is missing at % rows: build it out of band (CREATE INDEX CONCURRENTLY, runbook in the header of NNN_example.sql); the schema-contract manifest stays red until then.',
+            v_rows;
+        RETURN;
+    END IF;
+
+    CREATE INDEX idx_example ON context_blocks (col);
+END
+$do$;
+```
+
+Name the table with its schema, as the index check does; compare with `>=` (the function
+returns the threshold itself for a larger table it had to count). The function takes `ACCESS
+SHARE` on each relation it measures and releases it at once, so it waits only behind an `ACCESS
+EXCLUSIVE` holder, up to the file's `lock_timeout`; its count holds `ACCESS SHARE` to the commit,
+as any read. The count reads at most the threshold's live rows. It runs wherever no estimate says
+"above": before an inline build, which reads the whole heap anyway, and also where the count
+itself then reaches the threshold and the file goes out of band. On a hypertable under writes the newest chunk is
+mostly not analysed yet, so the function counts, and the count holds `ACCESS SHARE` on every
+chunk (a slot of `max_locks_per_transaction` each).
+
+**Rows, not the heap.** An inline build or validation reads every page of the heap, dead or
+empty; the function counts live rows. A table whose heap is far larger than its rows (mass
+deletes or updates) passes as small and makes the file read its size — say so in the file's
+header and in its operations section, with the advice to compact such a table out of band
+(`pg_repack`, or `VACUUM FULL` in a maintenance window) or to build its index by the runbook
+before the upgrade: `VACUUM` empties such pages but returns only those that trail the heap
+(numbers in [operations](operations.md#migration-191-a-threshold-reads-the-current-size-of-a-table)).
+
+`TestMigrationsDecideSizeWithTheRowsFunction` (`go/migrations`) refuses a migration from 191 on
+whose code decides a size itself — reads `reltuples`, `relpages`, `n_live_tup`,
+`pg_stat_get_live_tuples`, `pg_relation_size`, `pg_total_relation_size` or `pg_table_size`
+outside a definition of the function, also beside a call of it; comments and string literals do
+not count as a definition.

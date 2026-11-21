@@ -1,9 +1,9 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 190,
-    "migration_count": 78,
-    "migration_chain_sha256": "304ded97b76467cc57a36a419febf20484a3fc9aad7e9ee8d6aac5e34011cfcc",
+    "migration_max": 191,
+    "migration_count": 79,
+    "migration_chain_sha256": "3100a7cf5ac121d1d8473c9cbcb491d4a7862b2b75c4a77e3a6eaf2d355de2a6",
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -6137,6 +6137,9 @@
     },
     "ctx_guard_check(p_block_id uuid, p_threshold_duplicate real, p_threshold_review real, p_candidate_types text[], p_same_scope_only boolean)": {
       "src_hash": "5df2a76f743954cfbfa862ffbb1dfbff1214cdd2e641c9e98f6337eefeacf6b8"
+    },
+    "ctx_migration_rows(p_rel regclass, p_threshold bigint)": {
+      "src_hash": "4029c6b45395dcdc3f8fd2886d8feff0a5b51d82b4a78358278a34f397c1add0"
     },
     "ctx_model_auth(p_key_hash text, p_client_ip inet, p_secure boolean)": {
       "src_hash": "4a53d01644bbb648173d964f2ffb2670e3cde0c9b81a1e98b9391edde7a20b45"
