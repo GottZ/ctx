@@ -12,13 +12,14 @@ var datesBenchSink []time.Time
 // (datesDoc) at 2 KB, 20 KB (about the median stored content), 50 KB (the
 // client maximum) and 400 KB, with few and with many dates, and on worst-case
 // contents that consist of nothing but date candidates of all four forms
-// (datesWorstDoc). The dates metric is the number of timestamps the
-// extraction returned.
+// (datesWorstDoc), the same with every year outside 2020-2039, the token of
+// the year window before #437 (wideworst, datesWideWorstDoc). The dates
+// metric is the number of timestamps the extraction returned.
 func BenchmarkExtractDates(b *testing.B) {
 	densities := []struct {
 		name  string
 		dense bool
-	}{{"few", false}, {"many", true}, {"worst", false}}
+	}{{"few", false}, {"many", true}, {"worst", false}, {"wideworst", false}}
 	sizes := []struct {
 		name string
 		n    int
@@ -26,9 +27,12 @@ func BenchmarkExtractDates(b *testing.B) {
 	for _, d := range densities {
 		for _, sz := range sizes {
 			var content string
-			if d.name == "worst" {
+			switch d.name {
+			case "worst":
 				content = datesWorstDoc(sz.n)
-			} else {
+			case "wideworst":
+				content = datesWideWorstDoc(sz.n)
+			default:
 				content = datesDoc(1, sz.n, d.dense)
 			}
 			b.Run(d.name+"/"+sz.name, func(b *testing.B) {
@@ -49,6 +53,15 @@ func BenchmarkExtractDates(b *testing.B) {
 func datesWorstDoc(n int) string {
 	const unit = "Mai 2026 2026-01-01T01:01:01Z 01.01.2026 01:01 M\u00e4rz   2030 2020-13-01 31.04.2026 " +
 		"May\t2027 december 2025 2026-02-29 2029\n"
+	s := strings.Repeat(unit, n/len(unit)+1)
+	return s[:n]
+}
+
+// datesWideWorstDoc is datesWorstDoc with every year outside 2020-2039: the
+// year tokens the window of #437 adds, each one a match or a near miss.
+func datesWideWorstDoc(n int) string {
+	const unit = "Mai 2046 2046-01-01T01:01:01Z 01.01.2046 01:01 M\u00e4rz   2099 2000-13-01 31.04.2046 " +
+		"May\t2047 december 2015 2046-02-29 2049\n"
 	s := strings.Repeat(unit, n/len(unit)+1)
 	return s[:n]
 }
