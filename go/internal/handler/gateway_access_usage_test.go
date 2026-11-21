@@ -14,8 +14,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/usageevents"
 )
@@ -125,5 +127,52 @@ func TestGatewayAccessLogClientGone(t *testing.T) {
 	}
 	if top := ring.Top(10, ""); len(top) != 1 || top[0] != (TopConsumer{ConsumerID: "c1", Requests: 1, Tokens: 42}) {
 		t.Errorf("ring %+v, want c1 with 1 request and 42 tokens as for an answered request", top)
+	}
+}
+
+// TestGatewayAccessLogClientGoneWhileWaitingForAdmission — issue #453: a
+// /v1 client that gives up while its request waits for an admission slot.
+// The route answers nothing (WriteAdmissionError on a cancelled request),
+// and its access line is the only one: WARN with waited_for=admission, like
+// the knowledge paths' request log.
+func TestGatewayAccessLogClientGoneWhileWaitingForAdmission(t *testing.T) {
+	installRequestPrincipalHook(t)
+	d := newGateDispatcher(t)
+	sink := &gwLogSink{}
+	settings := config.Defaults().GatewaySettings()
+	access := NewGatewayAccessLog(GatewayAccessLogConfig{
+		Settings: func() oai.Settings { return settings },
+		Logger:   slog.New(sink),
+	})
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		ctx := withAuthResult(r.Context(), testAuthResult())
+		_, _, err := d.Acquire(ctx, dispatch.Request{Target: dispatch.Target{Origin: gateHeldOrigin}, Class: dispatch.ClassInteractive, Role: "probe"})
+		if err == nil {
+			t.Error("fixture: the held slot admitted the request")
+			return
+		}
+		if code := (&V1Admission{}).WriteAdmissionError(ctx, w, &dispatch.AdmissionError{Err: err, Host: gateHeldOrigin}); code != "" {
+			t.Errorf("a cancelled request got an answer %q", code)
+		}
+	})
+	srv, done := abortServer(t, access.Handler(inner), nil)
+	cancelWhen(t, srv.URL+"/v1/chat/completions", func() {
+		deadline := time.Now().Add(10 * time.Second)
+		for targetSnap(d, gateHeldOrigin).Interactive.Waiting != 1 {
+			if time.Now().After(deadline) {
+				t.Fatal("the request never queued")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	})
+	waitDone(t, done)
+
+	lines := sink.lines("gateway request")
+	if len(lines) != 1 {
+		t.Fatalf("%d gateway request lines, want 1", len(lines))
+	}
+	if lines[0]["level"] != "WARN" || lines[0]["waited_for"] != "admission" || lines[0]["status"] != int64(clientClosedStatus) {
+		t.Errorf("gateway line %+v, want WARN status 499 with waited_for=admission", lines[0])
 	}
 }

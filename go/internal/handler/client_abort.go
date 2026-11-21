@@ -144,9 +144,7 @@ func logFailure(gone bool, rw *responseWriter, err error, msg string, args []any
 		return
 	}
 	out := append(append(make([]any, 0, len(args)+6), args...), "client_gone", true)
-	if dispatch.AbandonedWait(err) {
-		rw.waited.CompareAndSwap(waitNone, waitAdmission)
-	}
+	markAbandonedWait(rw, err)
 	out = append(out, "duration_ms", time.Since(rw.start).Milliseconds())
 	if w := rw.waitedFor(); w != "" {
 		slog.Warn(msg, append(out, "waited_for", w)...)
@@ -170,6 +168,19 @@ const followUpTimeout = 10 * time.Second
 // on it is never a client abort (logRequestError keeps it ERROR).
 func followUpContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), followUpTimeout)
+}
+
+// markAbandonedWait marks the request rw records as having waited for an
+// admission when err is an admission wait abandoned on the request's own
+// cancellation (dispatch.AbandonedWait, the request context ended): for the
+// request's 499 line and the /v1 access line, which a route that answers a
+// gone client with nothing (V1Admission.WriteAdmissionError) writes without
+// a handler line of its own.
+func markAbandonedWait(rw *responseWriter, err error) {
+	if rw == nil || (rw.reqCtx != nil && rw.reqCtx.Err() == nil) || !dispatch.AbandonedWait(err) {
+		return
+	}
+	rw.waited.CompareAndSwap(waitNone, waitAdmission)
 }
 
 // Write outcomes a failed write states in its line (issue #417): the client
