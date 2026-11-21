@@ -48,10 +48,12 @@ import { expect, type Page } from '@playwright/test'
 //   - a declared sideways scroller (layer 2, above): the overflow-x value that
 //     wins the element's cascade is auto or scroll (cascadedX below), and an
 //     author rule or the inline style declares it — the UA's overflow: auto
-//     on a modal dialog or a popover is no author's choice. Rules inside
-//     @media and @supports count only while their condition holds; rules
-//     inside @container count always (no API evaluates a container condition
-//     from script), which can only exempt more, never fail a fitting box.
+//     on a modal dialog or a popover is no author's choice. A rule whose
+//     @media, @supports or @container condition does not hold cannot win the
+//     cascade; the author check reads @media and @supports conditions and
+//     counts @container rules always (no API evaluates a container condition
+//     from script), so only a UA auto next to a matching but inactive
+//     @container rule can exempt more.
 //   - text-overflow: ellipsis clips on purpose; input, select and textarea
 //     scroll their own value; layer 2 skips such an element.
 //   - a subtree under clip-path or clip (the visually-hidden pattern: a 1 px
@@ -207,6 +209,9 @@ export async function expectViewportFit(page: Page): Promise<void> {
     // An element that becomes the containing block of its position: fixed
     // descendants (CSS Transforms, Filter Effects, Containment, Will Change):
     // such a descendant is laid out and clipped like an absolute box in it.
+    // container-type is not among them: it applies size and style
+    // containment, not layout containment (measured: a fixed or absolute box
+    // under container-type: inline-size is placed against the viewport).
     const holdsFixed = (cs: CSSStyleDeclaration): boolean =>
       cs.transform !== 'none' ||
       cs.translate !== 'none' ||
@@ -217,8 +222,6 @@ export async function expectViewportFit(page: Page): Promise<void> {
       cs.filter !== 'none' ||
       cs.backdropFilter !== 'none' ||
       /\b(layout|paint|strict|content)\b/.test(cs.contain) ||
-      cs.containerType === 'size' ||
-      cs.containerType === 'inline-size' ||
       cs.contentVisibility === 'auto' ||
       /\b(transform|translate|rotate|scale|perspective|filter|contain)\b/.test(cs.willChange)
 
@@ -245,15 +248,9 @@ export async function expectViewportFit(page: Page): Promise<void> {
       // display: contents generates no box: position and transforms do not apply
       const box = cs.display !== 'contents'
       const pos = box ? cs.position : 'static'
-      // the top layer escapes every ancestor
-      const inc =
-        matches(el, ':modal') || matches(el, ':popover-open')
-          ? VIEWPORT
-          : pos === 'absolute'
-            ? abs
-            : pos === 'fixed'
-              ? fixed
-              : flow
+      // the top layer escapes every ancestor, for its fixed descendants too
+      const top = matches(el, ':modal') || matches(el, ':popover-open')
+      const inc = top ? VIEWPORT : pos === 'absolute' ? abs : pos === 'fixed' ? fixed : flow
       let cl = inc.left
       let cr = inc.right
       let sc = inc.scroller
@@ -300,7 +297,7 @@ export async function expectViewportFit(page: Page): Promise<void> {
       const out: Clip = { left: cl, right: cr, scroller: sc, scrollerLeft: sl }
       const holds = box && holdsFixed(cs)
       const childAbs = pos !== 'static' || holds ? out : abs
-      const childFixed = holds ? out : fixed
+      const childFixed = holds ? out : top ? VIEWPORT : fixed
       for (const ch of Array.from(el.children)) visit(ch, out, childAbs, childFixed)
     }
     for (const ch of Array.from(document.body.children)) visit(ch, VIEWPORT, VIEWPORT, VIEWPORT)

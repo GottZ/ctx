@@ -122,27 +122,32 @@ test.describe('viewport fit (meta, #440)', () => {
       page,
       '<div id="a" style="overflow:auto;width:300px;height:60px"><div style="width:400px;height:120px"></div></div>' +
         '<div id="b" class="y"><div style="width:400px;height:20px"></div></div>' +
-        '<div id="c" class="v"><div style="width:100px;height:300px"></div></div>',
-      '.y{overflow-x:auto;width:300px}.v{overflow-y:auto;height:60px}',
+        '<div id="c" class="v"><div style="width:100px;height:300px"></div></div>' +
+        '<div id="d" class="w lose"><div style="width:100px;height:300px"></div></div>',
+      // #d is the case the probe exists for: a winning visible next to
+      // overflow-y: auto, so both axes are visible while it is probed
+      '.y{overflow-x:auto;width:300px}.v{overflow-y:auto;height:60px}.lose{overflow-x:auto}.w.lose{overflow-x:visible;overflow-y:auto;height:60px}',
     )
     const read = (): Promise<unknown> =>
       page.evaluate(() =>
-        ['a', 'b', 'c'].map((id) => {
+        ['a', 'b', 'c', 'd'].map((id) => {
           const el = document.getElementById(id) as HTMLElement
           return [el.getAttribute('style'), el.scrollLeft, el.scrollTop]
         }),
       )
     await page.evaluate(() => {
-      const [a, b, c] = ['a', 'b', 'c'].map((id) => document.getElementById(id) as HTMLElement)
+      const [a, b, c, d] = ['a', 'b', 'c', 'd'].map((id) => document.getElementById(id) as HTMLElement)
       a.scrollLeft = 50
       a.scrollTop = 30
       b.scrollLeft = 40
       c.scrollTop = 70
+      d.scrollTop = 70
     })
     const before = await read()
     expect(before).toEqual([
       ['overflow:auto;width:300px;height:60px', 50, 30],
       [null, 40, 0],
+      [null, 0, 70],
       [null, 0, 70],
     ])
     await expectViewportFit(page)
@@ -224,17 +229,33 @@ test.describe('viewport fit (meta, #440)', () => {
   })
 
   test('a fixed box inside an ancestor that contains fixed boxes is clipped like an absolute one', async ({ page }) => {
-    // transform and layout containment (container-type: inline-size) make the
-    // ancestor the containing block of position: fixed descendants, so its
-    // overflow clips them: the 900 px box scrolls inside the 300 px scroller.
-    for (const trap of ['transform:translateX(0)', 'container-type:inline-size']) {
-      await page390(
-        page,
-        `<div class="scroll" style="${trap};width:300px;height:100px"><div style="position:fixed;top:0;left:0;width:900px;height:20px"></div></div>`,
-        '.scroll{overflow-x:auto}',
-      )
+    // transform and layout containment make the ancestor the containing block
+    // of position: fixed descendants, so its overflow clips them: the 900 px
+    // box scrolls inside the 300 px scroller.
+    const trapped = (trap: string): string =>
+      `<div class="scroll" style="${trap};width:300px;height:100px"><div style="position:fixed;top:0;left:0;width:900px;height:20px"></div></div>`
+    for (const trap of ['transform:translateX(0)', 'contain:layout']) {
+      await page390(page, trapped(trap), '.scroll{overflow-x:auto}')
       await expectViewportFit(page)
     }
+    // container-type applies no layout containment (#457, measured): the box
+    // stays fixed to the viewport and sticks out of it
+    await page390(page, trapped('container-type:inline-size'), '.scroll{overflow-x:auto}')
+    await expect(expectViewportFit(page)).rejects.toThrow(/outside: div\.scroll > div spans x 0\.\.900/)
+  })
+
+  test('a fixed box inside a modal dialog is held by the viewport, not by a transform around the dialog (#457)', async ({ page }) => {
+    // The top layer escapes the transformed wrapper: measured, the fixed child
+    // sits at x -10, not at the wrapper's 50 - 10.
+    await page390(
+      page,
+      '<main class="content" style="height:200px"><div class="wrap" style="margin-left:50px;transform:translateX(0)">' +
+        '<dialog style="width:200px;height:40px;padding:0;border:0;max-width:none;overflow:visible">' +
+        '<div style="position:fixed;left:-10px;top:0;width:50px;height:20px"></div></dialog></div></main>',
+      '.content{overflow-y:auto}',
+    )
+    await page.evaluate(() => document.querySelector('dialog')?.showModal())
+    await expect(expectViewportFit(page)).rejects.toThrow(/^(?![\s\S]*clipped:)[\s\S]*outside: div\.wrap > dialog > div spans x -10\.\.40/)
   })
 
   test('a modal dialog wider than the viewport fails, also opened inside a scrolling region', async ({ page }) => {

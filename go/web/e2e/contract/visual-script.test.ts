@@ -44,7 +44,9 @@ describe('e2e-visual.sh arguments (#456)', () => {
   })
 
   it('builds arguments the pinned Playwright CLI accepts with a spec file', () => {
-    const args = playwrightArgs('--update', '--', 'e2e/smoke.spec.ts', '-g', 'contract:login', '--list')
+    // --reporter=list: the config's blob and json reporters would overwrite
+    // e2e/.results/ (report.json, blob) of the last e2e run
+    const args = playwrightArgs('--update', '--', 'e2e/smoke.spec.ts', '-g', 'contract:login', '--list', '--reporter=list')
     const r = spawnSync('bun', ['x', 'playwright', 'test', ...args], { cwd: WEB, encoding: 'utf8' })
     expect(r.stderr, 'the Playwright CLI rejected the arguments').not.toMatch(/is invalid/)
     expect(r.status, r.stderr).toBe(0)
