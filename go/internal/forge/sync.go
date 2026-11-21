@@ -593,7 +593,10 @@ func (m *SyncManager) resolveToken(ctx context.Context, project store.ProjectRow
 func strptr(s string) *string { return &s }
 
 // sanitizeErr reduces an error to a fixed short string per class — never the URL
-// or token material (leak-scan line, §5.4).
+// or token material (leak-scan line, §5.4). A configError is fixed text that
+// tells the operator what to change (a redirect not followed, a forge.api_base
+// on http, a next page on another origin, a Link header that does not parse);
+// it reaches last_error as it is (#474).
 func sanitizeErr(err error) string {
 	var rl *RateLimitError
 	if errors.As(err, &rl) {
@@ -601,6 +604,10 @@ func sanitizeErr(err error) string {
 	}
 	if errors.Is(err, ErrForgeKind) {
 		return ErrForgeKind.Error()
+	}
+	var ce *configError
+	if errors.As(err, &ce) {
+		return ce.msg
 	}
 	return "sync wire error"
 }
