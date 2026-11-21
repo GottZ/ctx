@@ -6,10 +6,12 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
@@ -35,17 +37,23 @@ func loggedRequest(ctx context.Context) *responseWriter {
 
 // loggedResponse walks a handler's writer chain down to Logger's record, for
 // the writers that have no context at hand (writeJSON and the store-error
-// writers). A writer in between that does not unwrap ends the walk with nil.
+// writers). The /api/query keepalive does not unwrap — it guards the writer
+// under it with its lock, which an Unwrap caller would pass — so the walk
+// steps through it by name (issue #453); w never changes after
+// armQueryKeepalive. Any other writer in between that does not unwrap ends
+// the walk with nil.
 func loggedResponse(w http.ResponseWriter) *responseWriter {
 	for w != nil {
-		if rw, ok := w.(*responseWriter); ok {
-			return rw
-		}
-		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
-		if !ok {
+		switch u := w.(type) {
+		case *responseWriter:
+			return u
+		case interface{ Unwrap() http.ResponseWriter }:
+			w = u.Unwrap()
+		case *queryKeepalive:
+			w = u.w
+		default:
 			return nil
 		}
-		w = u.Unwrap()
 	}
 	return nil
 }
@@ -69,14 +77,15 @@ func clientGaveUp(rw *responseWriter, err error) bool {
 // a call on a context detached from the request (context.WithoutCancel): it
 // never ends with the request.
 func logRequestError(ctx context.Context, msg string, args ...any) {
-	gone := ctx != nil && ctx.Err() != nil && clientGaveUp(loggedRequest(ctx), errorArg(args))
-	logFailure(gone, msg, args)
+	rw, err := loggedRequest(ctx), errorArg(args)
+	logFailure(ctx != nil && ctx.Err() != nil && clientGaveUp(rw, err), rw, err, msg, args)
 }
 
 // logResponseError is logRequestError for a writer that has the response but
 // no context: the request is found through w's chain.
 func logResponseError(w http.ResponseWriter, msg string, args ...any) {
-	logFailure(clientGaveUp(loggedResponse(w), errorArg(args)), msg, args)
+	rw, err := loggedResponse(w), errorArg(args)
+	logFailure(clientGaveUp(rw, err), rw, err, msg, args)
 }
 
 // logEncodeError writes the line of a response body that could not be
@@ -93,7 +102,7 @@ func logEncodeError(w http.ResponseWriter, msg string, args ...any) {
 	serverFault := errors.As(err, &unsupportedValue) || errors.As(err, &unsupportedType) || errors.As(err, &marshaler) ||
 		errors.Is(err, http.ErrBodyNotAllowed) || errors.Is(err, http.ErrHijacked) || errors.Is(err, http.ErrContentLength)
 	rw := loggedResponse(w)
-	logFailure(err != nil && !serverFault && rw != nil && rw.clientGone(), msg, args)
+	logFailure(err != nil && !serverFault && rw != nil && rw.clientGone(), rw, err, msg, args)
 }
 
 // errorArg returns the error value of the "error" key in slog-style
@@ -122,12 +131,56 @@ func errorArg(args []any) error {
 	return nil
 }
 
-func logFailure(gone bool, msg string, args []any) {
-	if gone {
-		slog.Info(msg, append(append(make([]any, 0, len(args)+2), args...), "client_gone", true)...)
+// logFailure writes the line: ERROR, or — the client gave up (gone, which
+// every caller decides on a non-nil rw) — the
+// same record at INFO with client_gone=true and the request's duration so far
+// (issue #453), at WARN with waited_for when the request waited for a
+// database connection or an admission when its client went away: the server
+// had no slot ready for it. A failure that is an abandoned admission wait
+// marks the request for its 499 line as well.
+func logFailure(gone bool, rw *responseWriter, err error, msg string, args []any) {
+	if !gone {
+		slog.Error(msg, args...)
 		return
 	}
-	slog.Error(msg, args...)
+	out := append(append(make([]any, 0, len(args)+6), args...), "client_gone", true)
+	markAbandonedWait(rw, err)
+	out = append(out, "duration_ms", time.Since(rw.start).Milliseconds())
+	if w := rw.waitedFor(); w != "" {
+		slog.Warn(msg, append(out, "waited_for", w)...)
+		return
+	}
+	slog.Info(msg, out...)
+}
+
+// followUpTimeout bounds the follow-up of a committed write that no answer
+// depends on (the type classification after an upsert, issue #453): it runs
+// detached from the client, so a client that leaves after the commit no
+// longer cancels it, and this bound keeps it inside the HTTP drain of a
+// shutdown (ctxd's shutdownHTTPTimeout, 15 s) — http.Server.Shutdown waits
+// for the handler that runs it, and the pool closes after that. The same
+// 10 s bound the handlers' detached write-log and temporal goroutines carry.
+const followUpTimeout = 10 * time.Second
+
+// followUpContext is ctx detached from the request's cancellation, with its
+// values (request id, credentials, the tenant's settings) and
+// followUpTimeout: the context of a committed write's follow-up. A failure
+// on it is never a client abort (logRequestError keeps it ERROR).
+func followUpContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), followUpTimeout)
+}
+
+// markAbandonedWait marks the request rw records as having waited for an
+// admission when err is an admission wait abandoned on the request's own
+// cancellation (dispatch.AbandonedWait, the request context ended): for the
+// request's 499 line and the /v1 access line, which a route that answers a
+// gone client with nothing (V1Admission.WriteAdmissionError) writes without
+// a handler line of its own.
+func markAbandonedWait(rw *responseWriter, err error) {
+	if rw == nil || (rw.reqCtx != nil && rw.reqCtx.Err() == nil) || !dispatch.AbandonedWait(err) {
+		return
+	}
+	rw.waited.CompareAndSwap(waitNone, waitAdmission)
 }
 
 // Write outcomes a failed write states in its line (issue #417): the client

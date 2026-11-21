@@ -155,13 +155,26 @@ func (a *GatewayAccessLog) Handler(next http.Handler) http.Handler {
 		if !a.settings().AccessLog {
 			return
 		}
-		a.log.Info("gateway request",
+		// A client that left before the handler returned got nothing: the
+		// line says 499 with the status the handler had, as the request log
+		// does (issue #453). Only the line: the success above is booked as
+		// before, by the status the handler wrote.
+		logged, gone, logf := status, []any(nil), a.log.Info
+		if rw := loggedResponse(w); rw != nil && rw.clientGone() {
+			logged, gone = StatusClientClosedRequest, []any{"handler_status", status}
+			if wf := rw.waitedFor(); wf != "" {
+				// It left while the server had no slot for it (WARN, as
+				// the request log of the knowledge paths).
+				logf, gone = a.log.Warn, append(gone, "waited_for", wf)
+			}
+		}
+		logf("gateway request", append([]any{
 			"consumer_id", rec.ConsumerID,
 			"model_key_id", rec.ModelKeyID,
 			"tenant_id", rec.TenantID,
 			"op", rec.Op,
 			"alias", rec.Alias,
-			"status", status,
+			"status", logged,
 			"stream", rec.Stream,
 			"prompt_tokens", rec.PromptTokens,
 			"completion_tokens", rec.CompletionTokens,
@@ -171,7 +184,7 @@ func (a *GatewayAccessLog) Handler(next http.Handler) http.Handler {
 			"class", rec.Class,
 			"hop", rec.Hop,
 			"request_id", RequestIDFromContext(r.Context()),
-		)
+		}, gone...)...)
 	})
 }
 

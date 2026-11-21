@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgxvec "github.com/pgvector/pgvector-go/pgx"
+
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // logPgNotice forwards a server notice to slog. WARNING and above land as
@@ -97,6 +99,9 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	// Steady-state traffic produces no notices — they come from DDL and from
 	// explicit RAISE, i.e. from the migration phase of a boot.
 	config.ConnConfig.OnNotice = logPgNotice
+	// An acquire a request's client gave up on is marked in the request log
+	// as a wait for a connection (issue #453, pgxdb.AcquireWaitTracer).
+	config.ConnConfig.Tracer = pgxdb.AcquireWaitTracer{}
 
 	tunePool(config)
 

@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"slices"
 	"time"
@@ -128,7 +127,7 @@ func (h *ManageHandler) previewChain(w http.ResponseWriter, r *http.Request, ar 
 			return
 		}
 	}
-	slog.ErrorContext(r.Context(), "model-alias-preview: chain dry run failed", "consumer_id", c.ID, "error", err)
+	logRequestError(r.Context(), "model-alias-preview: chain dry run failed", "consumer_id", c.ID, "error", err)
 	writeJSONCode(w, http.StatusServiceUnavailable, "service_unavailable", map[string]any{
 		"success": false, "error": "model-alias-preview: the chain dry run failed",
 	})

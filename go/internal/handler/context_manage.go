@@ -670,13 +670,14 @@ func (h *ManageHandler) updateClaimReject(ctx context.Context, data store.Update
 // manage handlers' existing envelopes is explicitly out of scope (errcode.go's
 // SCOPE note). Neither refusal writes a log line of its own: each is the
 // caller's input, not a server fault, and the request log already carries its
-// status.
-func writeUpdateFailure(w http.ResponseWriter, err error, reqID string) {
+// status. attrs go into the fault's line: the update passes its write
+// outcome (issue #453).
+func writeUpdateFailure(w http.ResponseWriter, err error, reqID string, attrs ...any) {
 	if rej := updateFailureReject(err); rej != nil {
 		writeJSONReject(w, rej)
 		return
 	}
-	logResponseError(w, "manage: block write error", "error", err, "request_id", reqID)
+	logResponseError(w, "manage: block write error", append([]any{"error", err, "request_id", reqID}, attrs...)...)
 	writeJSON(w, http.StatusInternalServerError, map[string]any{
 		"success": false, "error": "Internal server error",
 	})
@@ -791,7 +792,7 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 
 	block, _, err := store.UpdateBlock(ctx, h.pool, resolvedID, data, writableBlockScopes(ar))
 	if err != nil {
-		writeUpdateFailure(w, err, reqID)
+		writeUpdateFailure(w, err, reqID, "write_outcome", writeOutcome(err))
 		return
 	}
 	if block == nil {
