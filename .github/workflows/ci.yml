@@ -141,6 +141,18 @@ jobs:
       - name: pre-commit hook test matrix
         run: bash .hooks/pre-commit.test.sh
 
+      # The gates of the eval harnesses (issue #472): the negative-case
+      # matcher, the instrumentation, and the run rules of eval-cyclic.sh,
+      # eval.sh and eval-temporal.sh — copies of the scripts against servers
+      # the tests start on 127.0.0.1 with a throwaway key. No ctx server, no
+      # .env; bash, python3, curl and openssl, seconds.
+      - name: eval script gates
+        run: |
+          bash eval-matcher_test.sh
+          bash eval-instrument_test.sh
+          bash eval-cyclic_test.sh
+          bash eval-noanswer_test.sh
+
       # Beobachtung, kein Gate: dupl misst Klon-Masse und schreibt sie in die
       # Job-Summary. `if: always()` liefert die Zahl auch dann, wenn ein Gate
       # davor rot war — gerade dann ist sie interessant. `|| true`, weil dupl

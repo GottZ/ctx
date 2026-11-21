@@ -17,6 +17,21 @@
 #
 # Metrics: Recall@5, MRR, Precision@5 (at each temporal offset category)
 #
+# Results: a CSV under .eval-results/ next to this script (eval-temporal-<ts>-<rand>.csv,
+# mode 0600), or at the path EVAL_TEMPORAL_RESULTS names (created mode 0600; an existing
+# file keeps its mode).
+#
+# A request without an answer — no connection, a timeout, HTTP 401/403, 5xx or any
+# other status outside 2xx, a body that is not a JSON object with success:true — is
+# no measurement (#472): its row carries the class in no_answer and no target_found,
+# and it enters no rate. Exit status:
+#   0  every request got an answer; the CSV and the analysis are written.
+#   1  some request got none: the CSV and the analysis (over the answered ones, the
+#      count named) are written; or the run stopped without writing anything — no
+#      request got an answer (that is no measurement), HTTP 401
+#      (CONTEXT_API_KEY_PRIVATE is not a key of that server), no .env, no test blocks.
+#   2  no database container (CTX_DB_CONTAINER, scripts/lib/db-container.sh).
+#
 # ctx — Your AI's save game. By GottZ and Damien Moon (github.com/GottZ/ctx/graphs/contributors)
 
 set -uo pipefail
@@ -33,6 +48,11 @@ set -a; source "$ENV_FILE"; set +a
 WEBHOOK="${WEBHOOK_BASE_URL:-https://localhost}"
 KEY="${CONTEXT_API_KEY_PRIVATE:?CONTEXT_API_KEY_PRIVATE not set in .env}"
 
+# Requests go through eval_api_call, which keeps the HTTP status and classes a
+# request without an answer; HTTP 401 stops the run (#472).
+# shellcheck source=scripts/lib/eval-api.sh
+source "$SCRIPT_DIR/scripts/lib/eval-api.sh" || exit 1
+
 SEARCH_ONLY=false
 DRY_RUN=false
 for arg in "$@"; do
@@ -42,17 +62,24 @@ for arg in "$@"; do
   esac
 done
 
+# A results path that cannot be written stops the run before its first request,
+# not after the last one.
+if [[ -n "${EVAL_TEMPORAL_RESULTS:-}" ]]; then
+  if [[ -e "$EVAL_TEMPORAL_RESULTS" && ! -w "$EVAL_TEMPORAL_RESULTS" ]] \
+     || [[ ! -e "$EVAL_TEMPORAL_RESULTS" && ! -w "$(dirname -- "$EVAL_TEMPORAL_RESULTS")" ]]; then
+    echo "[FATAL] EVAL_TEMPORAL_RESULTS=$EVAL_TEMPORAL_RESULTS cannot be written" >&2
+    exit 1
+  fi
+fi
+
 # =====================================================================
 # Helpers
 # =====================================================================
 
-api() {
-  local timeout="${3:-120}"
-  curl -s --max-time "$timeout" -X POST "$1" \
-    -H "Content-Type: application/json" \
-    -H "X-Context-Key: $KEY" \
-    -d "$2" 2>/dev/null
-}
+# Seconds a request may take (curl --max-time). /api/query synthesises with
+# an LLM and streams a keepalive every 25 s while it works.
+QUERY_TIMEOUT_S=120
+SEARCH_TIMEOUT_S=30
 
 # =====================================================================
 # Phase 1: Extract Temporal Ground Truth from the Live Store
@@ -120,8 +147,10 @@ echo ""
 # For each offset, we create a query that mentions the shifted date
 # and check if the original block still appears in results.
 
-RESULTS_FILE="/tmp/eval-temporal-$(date +%s).csv"
-echo "test_id,block_id,block_title,block_date,query_date,offset_days,offset_category,endpoint,target_found,target_rank,result_count,latency_ms" > "$RESULTS_FILE"
+# The rows wait in memory and reach the CSV after the last request: a run that
+# stops (HTTP 401, no request answered) writes nothing.
+CSV_HEADER="test_id,block_id,block_title,block_date,query_date,offset_days,offset_category,endpoint,target_found,target_rank,result_count,latency_ms,no_answer"
+declare -a CSV_ROWS=()
 
 # =====================================================================
 # Phase 2b: Query Templates
@@ -192,6 +221,10 @@ fi
 TOTAL_TESTS=0
 TOTAL_FOUND=0
 TEST_NUM=0
+# Requests without an answer, the class of each, and the first (#472).
+NOT_MEASURED=0
+declare -a NO_ANSWER_CLASSES=()
+FIRST_NO_ANSWER=""
 
 echo "Phase 2: Generating test matrix..."
 
@@ -286,74 +319,90 @@ for tc in "${TEST_CASES[@]}"; do
 
     t_start=$(date +%s%3N)
 
+    # api/search lists its hits in results, api/query its sources.
     if $SEARCH_ONLY; then
-        resp=$(api "${WEBHOOK}/${ENDPOINT}" "{\"query\":$escaped_query,\"limit\":10}" 30)
-
-        # Parse search results — check if target block_id appears
-        result_info=$(echo "$resp" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    results = d.get('results', [])
-    count = len(results)
-    found = False
-    rank = 0
-    for i, r in enumerate(results):
-        if r.get('id') == '$block_id':
-            found = True
-            rank = i + 1
-            break
-    print(f'{found}|{rank}|{count}')
-except:
-    print('False|0|0')
-" 2>/dev/null)
+        timeout_s=$SEARCH_TIMEOUT_S
+        list_field=results
     else
-        resp=$(api "${WEBHOOK}/${ENDPOINT}" "{\"query\":$escaped_query,\"limit\":10}" 120)
+        timeout_s=$QUERY_TIMEOUT_S
+        list_field=sources
+    fi
+    eval_api_call "${WEBHOOK}/${ENDPOINT}" "{\"query\":$escaped_query,\"limit\":10}" "$timeout_s" "$KEY" CONTEXT_API_KEY_PRIVATE
 
-        # Parse agent results — check sources for target block_id
-        result_info=$(echo "$resp" | python3 -c "
+    # Check whether the target block_id is among the hits. An answer without a
+    # list there is no measurement either: no fallback turns it into a miss.
+    result_info=""
+    if [[ -z "$API_NO_ANSWER" ]]; then
+        result_info=$(printf '%s' "$API_BODY" | python3 -c "
 import sys, json
-try:
-    d = json.load(sys.stdin)
-    sources = d.get('sources', [])
-    count = len(sources)
-    found = False
-    rank = 0
-    for i, s in enumerate(sources):
-        if s.get('id') == '$block_id':
-            found = True
-            rank = i + 1
-            break
-    print(f'{found}|{rank}|{count}')
-except:
-    print('False|0|0')
-" 2>/dev/null)
+hits = json.load(sys.stdin).get(sys.argv[1]) or []
+if not isinstance(hits, list):
+    sys.exit(1)
+found, rank = False, 0
+for i, h in enumerate(hits):
+    if isinstance(h, dict) and h.get('id') == sys.argv[2]:
+        found, rank = True, i + 1
+        break
+print(f'{found}|{rank}|{len(hits)}')
+" "$list_field" "$block_id" 2>/dev/null) || {
+            API_NO_ANSWER=bad_body
+            API_DETAIL="HTTP $API_STATUS, the answer carries no list in $list_field"
+        }
     fi
 
     t_end=$(date +%s%3N)
     latency_ms=$(( t_end - t_start ))
 
-    IFS='|' read -r found rank result_count <<< "$result_info"
-
-    if [[ "$found" == "True" ]]; then
-        TOTAL_FOUND=$((TOTAL_FOUND + 1))
-        found_display="YES"
+    no_answer="$API_NO_ANSWER"
+    if [[ -n "$no_answer" ]]; then
+        found="" rank="" result_count=""
+        NOT_MEASURED=$((NOT_MEASURED + 1))
+        NO_ANSWER_CLASSES+=("$no_answer")
+        [[ -n "$FIRST_NO_ANSWER" ]] || FIRST_NO_ANSWER="test $TEST_NUM, $API_DETAIL"
+        found_display="n/a"
     else
-        found_display="no"
+        IFS='|' read -r found rank result_count <<< "$result_info"
+        if [[ "$found" == "True" ]]; then
+            TOTAL_FOUND=$((TOTAL_FOUND + 1))
+            found_display="YES"
+        else
+            found_display="no"
+        fi
     fi
 
     # Output progress line
     printf "%-6s %-8s %-10s %-8s %-4s %-6s %s\n" \
-        "$TEST_NUM/$TOTAL_PLANNED" "$offset" "$offset_cat" "$found_display" "$rank" "${latency_ms}" "${block_title:0:40}"
+        "$TEST_NUM/$TOTAL_PLANNED" "$offset" "$offset_cat" "$found_display" "$rank" "${latency_ms}" "${block_title:0:40}${no_answer:+  (no answer: $API_DETAIL)}"
 
-    # Write CSV
+    # CSV row
     # Escape title for CSV (replace commas and quotes)
     csv_title=$(echo "$block_title" | tr ',' ';' | tr '"' "'")
-    echo "$TEST_NUM,$block_id,$csv_title,$block_date,$query_date,$offset,$offset_cat,$ENDPOINT,$found,$rank,$result_count,$latency_ms" >> "$RESULTS_FILE"
+    CSV_ROWS+=("$TEST_NUM,$block_id,$csv_title,$block_date,$query_date,$offset,$offset_cat,$ENDPOINT,$found,$rank,$result_count,$latency_ms,$no_answer")
 done
 
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))
+
+# A run in which no request got an answer measured nothing (#472): its zeros
+# would read as "not found" everywhere and decide the hypotheses below.
+NO_ANSWER_SUMMARY=""
+if (( NOT_MEASURED > 0 )); then
+    NO_ANSWER_SUMMARY=$(eval_class_counts "${NO_ANSWER_CLASSES[@]}")
+fi
+if (( TOTAL_TESTS > 0 && NOT_MEASURED == TOTAL_TESTS )); then
+    echo "[FATAL] no test got an answer from $WEBHOOK: $NOT_MEASURED of $TOTAL_TESTS ($NO_ANSWER_SUMMARY), the first with: $FIRST_NO_ANSWER; that is no measurement — nothing was written" >&2
+    exit 1
+fi
+
+# The CSV: mode 0600 (it names blocks of the store), never under a shared /tmp.
+if [[ -n "${EVAL_TEMPORAL_RESULTS:-}" ]]; then
+    RESULTS_FILE="$EVAL_TEMPORAL_RESULTS"
+    ( umask 077; : > "$RESULTS_FILE" ) || { echo "[FATAL] cannot write $RESULTS_FILE (EVAL_TEMPORAL_RESULTS)" >&2; exit 1; }
+else
+    mkdir -p "${SCRIPT_DIR}/.eval-results"
+    RESULTS_FILE=$(mktemp "${SCRIPT_DIR}/.eval-results/eval-temporal-$(date +%s)-XXXXXX.csv") || exit 1
+fi
+printf '%s\n' "$CSV_HEADER" "${CSV_ROWS[@]}" > "$RESULTS_FILE"
 
 # =====================================================================
 # Phase 4: Analysis
@@ -365,22 +414,35 @@ echo "  ANALYSIS"
 echo "================================================================="
 echo ""
 
-python3 - "$RESULTS_FILE" <<'PYEOF'
+python3 - "$RESULTS_FILE" "$NO_ANSWER_SUMMARY" <<'PYEOF'
 import csv, sys
 from collections import defaultdict
 
-results_file = sys.argv[1]
+results_file, no_answer_summary = sys.argv[1], sys.argv[2]
 
+# A row whose request got no answer (#472) is no measurement: it enters no
+# rate, count or latency below — the analysis says how many there were.
 rows = []
+unanswered = 0
 with open(results_file) as f:
     reader = csv.DictReader(f)
     for row in reader:
+        if row.get('no_answer'):
+            unanswered += 1
+            continue
         row['target_found'] = row['target_found'] == 'True'
         row['target_rank'] = int(row['target_rank'])
         row['result_count'] = int(row['result_count'])
         row['latency_ms'] = int(row['latency_ms'])
         row['offset_days'] = int(row['offset_days'])
         rows.append(row)
+
+not_measured = ''
+if unanswered:
+    not_measured = (f"  NOT MEASURED: {unanswered} of {unanswered + len(rows)} tests got no answer "
+                    f"({no_answer_summary}) — every number below is over the {len(rows)} answered ones.")
+    print(not_measured)
+    print()
 
 if not rows:
     print("  No results to analyze.")
@@ -473,6 +535,9 @@ print("  =============================================")
 print("  HYPOTHESIS EVALUATION")
 print("  =============================================")
 print()
+if not_measured:
+    print(not_measured)
+    print()
 
 exact = cats.get('exact', {'total': 0, 'found': 0})
 exact_recall = exact['found'] / exact['total'] if exact['total'] > 0 else 0
@@ -538,4 +603,10 @@ PYEOF
 echo "================================================================="
 echo "  Completed in ${ELAPSED}s"
 echo "  Results: $RESULTS_FILE"
+if (( NOT_MEASURED > 0 )); then
+    echo "  Not measured: $NOT_MEASURED of $TOTAL_TESTS tests got no answer ($NO_ANSWER_SUMMARY) — no rate counts them (exit 1)"
+fi
 echo "================================================================="
+if (( NOT_MEASURED > 0 )); then
+    exit 1
+fi

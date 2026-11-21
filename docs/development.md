@@ -359,11 +359,45 @@ so a new case class means a new registry entry first. `G` (`derived`) is registe
 **deliberately has no cases yet**; the regression check lists it under `EMPTY
 CATEGORIES` rather than letting a category with nothing in it read as one that passed.
 
-Both script gates run without a server, without `.env` and without firing a query:
+#### A request without an answer is no measurement
+
+`eval.sh` and `eval-temporal.sh` send every request through `eval_api_call`
+(`scripts/lib/eval-api.sh`), which keeps the HTTP status. A request got an answer when
+curl ended without error, the status is 2xx and the body is a JSON object with
+`success:true`; anything else is counted by its class — `connection`, `timeout`,
+`http_401_403`, `http_5xx`, `http_other`, `bad_body` (a 2xx with another body, e.g.
+`success:false` after the query keepalive committed the status). HTTP 401 stops either
+script at once, naming `CONTEXT_API_KEY_PRIVATE`, before anything is written.
+
+In `eval.sh` a test without an answer is `NOT_MEASURED`: neither a pass nor a fail,
+whatever the case expects — a negative case or the expectation-free `T04` no longer
+passes on a server that answered 500. It enters no rate, count or latency; the results
+file carries `verdict: "NOT_MEASURED"` and the class (`no_answer`) on the test, and a
+top-level `not_measured` (`count`, `by_class`, `by_category`; `by_category` and `summary`
+count the measured tests, `summary.total` all of them). A baseline written before this
+field stays readable. Exit status: `0` all answered and passed, `1` all answered with a
+failure or regression — or the run stopped without writing anything (no answer in the
+preflight, HTTP 401, no test answered: that is no measurement), `3` some tests got no
+answer: the results are written, the baseline and its diff never, even with
+`--update-baseline`, and the last line says why.
+
+`eval-temporal.sh` marks such a row in the CSV column `no_answer` (with no
+`target_found`, so a failure never reads as "not found"), analyses the answered rows and
+says how many got none, and exits `1`; with no answer at all it writes nothing and exits
+`1`. Its CSV goes to `.eval-results/eval-temporal-<ts>-<random>.csv` next to the script
+(mode 0600; it names blocks of the store) or to the path `EVAL_TEMPORAL_RESULTS` names
+(created mode 0600, an existing file keeps its mode; a path that cannot be written stops
+the run before its first request) — no longer to a fixed path under `/tmp`.
+
+The script gates run without a ctx server, without `.env` and without firing a query at
+a real one — `eval-noanswer_test.sh` runs copies of both harnesses against servers it
+starts on 127.0.0.1 with a throwaway key (python3 and curl; `eval-temporal.sh` behind a
+`docker` shim). The CI `lint` job runs these three and `eval-cyclic_test.sh` (below):
 
 ```bash
 bash eval-matcher_test.sh           # negative-case matcher contract
 bash eval-instrument_test.sh        # census, baseline diff, category registry
+bash eval-noanswer_test.sh          # eval.sh / eval-temporal.sh: no-answer classes, 401, exit 3, CSV
 ```
 
 `eval-cyclic.sh` counts a case without an answer — no connection, a timeout, an HTTP

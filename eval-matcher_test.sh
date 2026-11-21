@@ -16,6 +16,7 @@
 #   * low_confidence != refusal
 #                             go/internal/llm/synthesize.go:275-283 (ClassifyConfidence
 #                             returns it for any mid-scoring query, real answer included)
+#   * a request without an answer is not measured, never a pass (#472)
 
 set -uo pipefail
 
@@ -98,8 +99,14 @@ check ok  "low + rejection text (via rescue regex, not via the enum)"  "low" "$R
 check ok  "none"                                                       "none" ""
 check ok  "no_relevant_blocks_found"                                   "no_relevant_blocks_found" ""
 check ok  "no_relevant_blocks_found + score-filter wording"            "no_relevant_blocks_found" "$NO_RESULTS_LC"
-check ok  "error (harness-side parse failure)"                         "error" ""
-check ok  "timeout (harness-side empty response)"                      "timeout" ""
+# --- a request without an answer is no pass (#472) ---------------------
+# It never reaches the matcher: run_synthesis_test records its test as
+# NOT_MEASURED (eval_no_answer_class, eval-noanswer_test.sh). The values the
+# harness used to make of it, "error" and "timeout", passed here until #472;
+# they are no confidence of the server and stay red on their own.
+check nok "error (no longer made by the harness; was a pass)"          "error" ""
+check nok "timeout (no longer made by the harness; was a pass)"        "timeout" ""
+check nok "missing (an answer without a confidence field)"             "missing" ""
 
 # --- confident: rescue regex, behaviour as before V-W2 ----------------
 check ok  "confident + rejection text in body (regex rescue)"          "confident" "$REFUSAL_LC"

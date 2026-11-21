@@ -7,10 +7,25 @@
 #        bash eval.sh --no-warmup       — skip the unscored warm-up pass (development runs)
 #        bash eval.sh --internal        — bypass reverse-proxy (uses http://ctx:8080 from n8nintern network; override via CTX_INTERNAL_URL)
 #
-# Requires: curl, python3, jq (optional, python3 fallback)
+# Requires: curl, python3, jq (optional, python3 fallback); scripts/lib/eval-api.sh next to it
 # Runtime: ~6-10 minutes — the warm-up pass fires the same queries as the scored
 #          pass, so the default run costs roughly twice a single pass.
 #          ~3-5 minutes with --no-warmup (Ollama on-prem, sequential queries).
+#
+# A test whose request got no answer — no connection, a timeout, HTTP 401/403,
+# 5xx or any other status outside 2xx, a body that is not a JSON object with
+# success:true — is NOT_MEASURED (#472): neither a pass nor a fail. It enters no
+# rate, count or latency; the results file counts it in not_measured, by class.
+# Exit status:
+#   0  every test got an answer and passed, no regression; with --update-baseline
+#      the baseline is written.
+#   1  every test got an answer, and a test failed or a regression was detected
+#      (results and, with --update-baseline, the baseline are written); or the
+#      run stopped without writing anything: no answer in the preflight, fewer
+#      than 100 blocks, HTTP 401 (CONTEXT_API_KEY_PRIVATE is not a key of that
+#      server), or no test got an answer (that is no measurement).
+#   3  some tests got no answer: the results are written with the count, the
+#      baseline never — the last line says so.
 #
 # ctx — Your AI's save game. By GottZ and Damien Moon (github.com/GottZ/ctx/graphs/contributors)
 # Evaluates GottZ 4-Way RRF retrieval and synthesis across 47 test queries.
@@ -45,6 +60,10 @@ ENV_FILE="${SCRIPT_DIR}/.env"
 #     answered one included. Accepting it unconditionally would leave the
 #     negative class unable to notice a retrievable type that turns refusals
 #     into answers — which is the one thing the negative class is for.
+#   * A request without an answer never reaches the matcher: its test is
+#     NOT_MEASURED (#472). Before, the harness turned it into the confidence
+#     "error" or "timeout", and this matcher passed both — a negative case
+#     passed on a server that answered 500.
 
 # NEGATIVE_REFUSAL_TEXT is llm.NoRelevantReplacement, lowercased: run_synthesis_test
 # extracts the answer with .lower() (see below), so the comparison folds case.
@@ -66,9 +85,8 @@ negative_conf_ok() {
   local confidence="$1" answer="$2"
 
   case "$confidence" in
-    none|no_relevant_blocks_found|error|timeout)
-      # none: legacy/other servers. error|timeout: harness-side, the request
-      # produced no usable answer — unchanged from before.
+    none|no_relevant_blocks_found)
+      # none: legacy/other servers.
       return 0
       ;;
     low_confidence)
@@ -297,13 +315,20 @@ with open(array_path) as fh:
 raw_census = sys.stdin.read().strip()
 census = json.loads(raw_census) if raw_census else {}
 
+# A test whose request got no answer is NOT_MEASURED (#472): neither a pass nor
+# a fail. It enters no rate, count or latency below — only total and
+# not_measured count it. A run in which every test got an answer aggregates
+# exactly as before.
+measured = [r for r in results if r['verdict'] != 'NOT_MEASURED']
+unmeasured = [r for r in results if r['verdict'] == 'NOT_MEASURED']
+
 # Compute aggregates
 total = len(results)
 passed = sum(1 for r in results if r['verdict'] == 'PASS')
 failed = sum(1 for r in results if r['verdict'] == 'FAIL')
 
 by_type = {}
-for r in results:
+for r in measured:
     t = r.get('type', 'unknown')
     if t not in by_type:
         by_type[t] = {'pass': 0, 'fail': 0, 'total': 0, 'latencies': []}
@@ -324,29 +349,36 @@ for t in by_type:
     del by_type[t]['latencies']
 
 # By category — prefixes come from the ONE registry (EVAL_CATEGORIES).
-categories = {name: {'prefix': prefix, 'pass': 0, 'fail': 0}
+categories = {name: {'prefix': prefix, 'pass': 0, 'fail': 0, 'not_measured': 0}
               for name, prefix in json.loads(os.environ['EVAL_CATEGORIES']).items()}
 for r in results:
     for cat, info in categories.items():
         if r['id'].startswith(info['prefix']):
-            if r['verdict'] == 'PASS':
+            if r['verdict'] == 'NOT_MEASURED':
+                info['not_measured'] += 1
+            elif r['verdict'] == 'PASS':
                 info['pass'] += 1
             else:
                 info['fail'] += 1
             break
 
+no_answer = {}
+for r in unmeasured:
+    cls = r.get('no_answer') or 'unknown'
+    no_answer[cls] = no_answer.get(cls, 0) + 1
+
 # All keyword stats
-total_kw_hits = sum(r.get('keyword_hits', 0) for r in results if r.get('keyword_total', 0) > 0)
-total_kw_expected = sum(r.get('keyword_total', 0) for r in results if r.get('keyword_total', 0) > 0)
+total_kw_hits = sum(r.get('keyword_hits', 0) for r in measured if r.get('keyword_total', 0) > 0)
+total_kw_expected = sum(r.get('keyword_total', 0) for r in measured if r.get('keyword_total', 0) > 0)
 keyword_hit_rate = round(total_kw_hits / total_kw_expected * 100, 1) if total_kw_expected else 0
 
 # False positive rate (negative tests that returned confident)
-neg_tests = [r for r in results if r['id'].startswith('N')]
+neg_tests = [r for r in measured if r['id'].startswith('N')]
 false_positives = sum(1 for r in neg_tests if r.get('confidence') == 'confident')
 fp_rate = round(false_positives / len(neg_tests) * 100, 1) if neg_tests else 0
 
 # Source-level assertion stats
-src_checked = [r for r in results if r.get('source_total', 0) > 0]
+src_checked = [r for r in measured if r.get('source_total', 0) > 0]
 src_total_patterns = sum(r['source_total'] for r in src_checked)
 src_total_hits = sum(r['source_hits'] for r in src_checked)
 src_tests_pass = sum(1 for r in src_checked if r['source_hits'] == r['source_total'])
@@ -366,7 +398,9 @@ output = {
         'total': total,
         'passed': passed,
         'failed': failed,
-        'pass_rate': round(passed / total * 100, 1) if total else 0,
+        # Over the measured tests: all of them in a run where every test got
+        # an answer, and no run with an unanswered test writes a baseline.
+        'pass_rate': round(passed / (passed + failed) * 100, 1) if passed + failed else 0,
         'keyword_hit_rate': keyword_hit_rate,
         'false_positive_rate': fp_rate,
         'source_checks': len(src_checked),
@@ -374,6 +408,13 @@ output = {
     },
     'by_type': by_type,
     'by_category': {k: {'pass': v['pass'], 'fail': v['fail'], 'total': v['pass'] + v['fail']} for k, v in categories.items()},
+    # The tests whose request got no answer (#472), by class and by category;
+    # by_category above counts the measured ones. count 0 in a complete run.
+    'not_measured': {
+        'count': len(unmeasured),
+        'by_class': no_answer,
+        'by_category': {k: v['not_measured'] for k, v in categories.items() if v['not_measured']},
+    },
     'results': results,
 }
 
@@ -394,6 +435,12 @@ eval_aggregate() {
 # through.
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
   return 0
+fi
+
+# shellcheck source=scripts/lib/eval-api.sh
+if ! source "${SCRIPT_DIR}/scripts/lib/eval-api.sh"; then
+    echo "[FATAL] ${SCRIPT_DIR}/scripts/lib/eval-api.sh not found (eval.sh runs from the repository root)"
+    exit 1
 fi
 
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -466,17 +513,31 @@ fi
 # Helpers
 # =====================================================================
 
-# api <url> <body> [timeout] [key] — key defaults to the harness key, so every
-# call that existed before this parameter behaves exactly as it did. Only the
-# block-type census (M-W6) passes a different one: its stats section is
-# admin-gated, and the harness key is not an admin key.
-api() {
-  local timeout="${3:-120}"
-  local key="${4:-$KEY_PRIVATE}"
-  curl -s --max-time "$timeout" -X POST "$1" \
-    -H "Content-Type: application/json" \
-    -H "X-Context-Key: $key" \
-    -d "$2" 2>/dev/null
+# Every request goes through eval_api_call (scripts/lib/eval-api.sh), which
+# keeps the HTTP status and classes a request without an answer (#472). The
+# harness key is passed with its variable name, so HTTP 401 stops the run;
+# only the block-type census (M-W6) passes a different key without one — its
+# stats section is admin-gated, the harness key is not an admin key, and a
+# refused census is recorded, not fatal.
+#
+# Seconds a request may take (curl --max-time), by endpoint. /api/query
+# synthesises with an LLM and streams a keepalive every 25 s while it works.
+QUERY_TIMEOUT_S=120
+SEARCH_TIMEOUT_S=30
+STATS_TIMEOUT_S=15
+CENSUS_TIMEOUT_S=60
+
+# record_not_measured <id> <type> <desc> <latency_ms> <extra-json-fields> —
+# the result of a test whose request got no answer (API_NO_ANSWER is set): no
+# verdict of its own, no counter but NOT_MEASURED (#472).
+record_not_measured() {
+  local id="$1" type="$2" desc="$3" latency_ms="$4" extra="$5"
+  NOT_MEASURED=$(( NOT_MEASURED + 1 ))
+  TOTAL=$(( TOTAL + 1 ))
+  NO_ANSWER_CLASSES+=("$API_NO_ANSWER")
+  [[ -n "$FIRST_NO_ANSWER" ]] || FIRST_NO_ANSWER="$id, $API_DETAIL"
+  printf "%s %-4s %-50s not measured: %s  %5dms\n" "[----]" "$id" "${desc:0:50}" "$API_DETAIL" "$latency_ms"
+  RESULTS_JSON+=("{\"id\":\"$id\",\"type\":\"$type\",\"verdict\":\"NOT_MEASURED\",\"no_answer\":\"$API_NO_ANSWER\",\"http_status\":$(( 10#$API_STATUS )),${extra}\"latency_ms\":$latency_ms,\"desc\":\"$desc\"}")
 }
 
 # Python helper: extract JSON field
@@ -590,6 +651,10 @@ PASS=0
 FAIL=0
 SKIP=0
 TOTAL=0
+# Tests whose request got no answer, the class of each, and the first (#472).
+NOT_MEASURED=0
+declare -a NO_ANSWER_CLASSES=()
+FIRST_NO_ANSWER=""
 SOURCE_CHECKS=0
 SOURCE_HITS=0
 SOURCE_MISSES=0
@@ -604,7 +669,8 @@ run_synthesis_test() {
   t_start=$(date +%s%3N)
   local escaped_query
   escaped_query=$(printf '%s' "$query" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
-  resp=$(api "$WEBHOOK/api/query" "{\"query\":$escaped_query}" 120)
+  eval_api_call "$WEBHOOK/api/query" "{\"query\":$escaped_query}" "$QUERY_TIMEOUT_S" "$KEY_PRIVATE" CONTEXT_API_KEY_PRIVATE
+  resp="$API_BODY"
   t_end=$(date +%s%3N)
   latency_ms=$(( t_end - t_start ))
 
@@ -612,24 +678,24 @@ run_synthesis_test() {
   # before any scoring so counters and RESULTS_JSON stay untouched.
   if ! $SCORING; then printf '.' >&3; return 0; fi
 
-  # Parse response — handle timeouts and error responses
+  # No answer: not measured — whatever the case expects (#472).
+  if [[ -n "$API_NO_ANSWER" ]]; then
+    record_not_measured "$id" synthesis "$desc" "$latency_ms" "\"expected_confidence\":\"$expected_conf\","
+    return 0
+  fi
+
+  # Parse the answer (a JSON object with success:true, eval_api_call checked)
   local source_titles_raw=""
-  if [[ -z "$resp" ]]; then
-    answer=""
-    confidence="timeout"
-    sources_count=0
-  else
-    answer=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('answer','').lower())" 2>/dev/null || echo "")
-    confidence=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('confidence','error'))" 2>/dev/null || echo "error")
-    sources_count=$(echo "$resp" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('sources',[])))" 2>/dev/null || echo "0")
-    # Extract source titles (newline-separated, lowercased)
-    source_titles_raw=$(echo "$resp" | python3 -c "
+  answer=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('answer','').lower())" 2>/dev/null || echo "")
+  confidence=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('confidence','missing'))" 2>/dev/null || echo "missing")
+  sources_count=$(echo "$resp" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('sources',[])))" 2>/dev/null || echo "0")
+  # Extract source titles (newline-separated, lowercased)
+  source_titles_raw=$(echo "$resp" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
 for s in d.get('sources',[]):
     print(s.get('title','').lower())
 " 2>/dev/null || echo "")
-  fi
 
   # Check confidence
   local conf_ok=false
@@ -747,13 +813,20 @@ run_retrieval_test() {
   t_start=$(date +%s%3N)
   local escaped_query
   escaped_query=$(printf '%s' "$query" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
-  resp=$(api "$WEBHOOK/api/search" "{\"query\":$escaped_query}" 30)
+  eval_api_call "$WEBHOOK/api/search" "{\"query\":$escaped_query}" "$SEARCH_TIMEOUT_S" "$KEY_PRIVATE" CONTEXT_API_KEY_PRIVATE
+  resp="$API_BODY"
   t_end=$(date +%s%3N)
   latency_ms=$(( t_end - t_start ))
 
   # Warm-up pass: the request was the point, the response is discarded. Return
   # before any scoring so counters and RESULTS_JSON stay untouched.
   if ! $SCORING; then printf '.' >&3; return 0; fi
+
+  # No answer: not measured (#472).
+  if [[ -n "$API_NO_ANSWER" ]]; then
+    record_not_measured "$id" retrieval "$desc" "$latency_ms" ""
+    return 0
+  fi
 
   count=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null || echo "0")
   titles=$(echo "$resp" | python3 -c "
@@ -839,7 +912,14 @@ echo ""
 
 # Preflight: verify connectivity
 echo "--- Preflight ---"
-preflight=$(api "$WEBHOOK/api/manage" '{"action":"stats"}' 15)
+# HTTP 401 stops here naming CONTEXT_API_KEY_PRIVATE (eval_api_call); any other
+# request without an answer is named by its class.
+eval_api_call "$WEBHOOK/api/manage" '{"action":"stats"}' "$STATS_TIMEOUT_S" "$KEY_PRIVATE" CONTEXT_API_KEY_PRIVATE
+if [[ -n "$API_NO_ANSWER" ]]; then
+  echo "ABORT: $WEBHOOK/api/manage gave no answer ($API_DETAIL). Is the system up?"
+  exit 1
+fi
+preflight="$API_BODY"
 total_blocks=$(echo "$preflight" | python3 -c "import sys,json; print(json.load(sys.stdin)['stats']['total_blocks'])" 2>/dev/null || echo "0")
 if (( total_blocks < 100 )); then
   echo "ABORT: Context store has only $total_blocks blocks (expected 100+). Is the system up?"
@@ -855,7 +935,8 @@ echo "Store OK: $total_blocks blocks"
 # tried (it is the admin key on some installs), and where that fails too the
 # run continues with by_block_type=null and the reason recorded in the results
 # file. No new secret has to be provisioned for an eval run.
-census=$(api "$WEBHOOK/api/manage" '{"action":"stats","data":{"drift":true}}' 60 "${CTX_ADMIN_KEY:-$KEY_PRIVATE}")
+eval_api_call "$WEBHOOK/api/manage" '{"action":"stats","data":{"drift":true}}' "$CENSUS_TIMEOUT_S" "${CTX_ADMIN_KEY:-$KEY_PRIVATE}"
+census="$API_BODY"
 CENSUS_JSON=$(printf '%s' "$census" | eval_census_json)
 echo "Census: $(printf '%s' "$CENSUS_JSON" | python3 -c "
 import sys, json
@@ -984,6 +1065,17 @@ run_all_tests
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))
 
+# A run in which no test got an answer measured nothing (#472): its zeros would
+# read as a retrieval result and --update-baseline would store them.
+NO_ANSWER_SUMMARY=""
+if (( NOT_MEASURED > 0 )); then
+  NO_ANSWER_SUMMARY=$(eval_class_counts "${NO_ANSWER_CLASSES[@]}")
+fi
+if (( TOTAL > 0 && NOT_MEASURED == TOTAL )); then
+  echo "[FATAL] no test got an answer from $WEBHOOK: $NOT_MEASURED of $TOTAL ($NO_ANSWER_SUMMARY), the first with: $FIRST_NO_ANSWER; that is no measurement — nothing was written" >&2
+  exit 1
+fi
+
 # =====================================================================
 # Results JSON
 # =====================================================================
@@ -1018,6 +1110,11 @@ s = data['summary']
 print(f'  Total tests:        {s[\"total\"]}')
 print(f'  Passed:             {s[\"passed\"]}')
 print(f'  Failed:             {s[\"failed\"]}')
+# Tests whose request got no answer (#472): in no rate, count or latency here.
+nm = data.get('not_measured') or {}
+if nm.get('count'):
+    classes = ', '.join(f'{n} {c}' for c, n in (nm.get('by_class') or {}).items())
+    print(f'  Not measured:       {nm[\"count\"]} (no answer: {classes}) — every rate below is over the {s[\"passed\"] + s[\"failed\"]} measured')
 print(f'  Pass rate:          {s[\"pass_rate\"]}%')
 print(f'  Keyword hit rate:   {s[\"keyword_hit_rate\"]}%')
 print(f'  False positive rate:{s[\"false_positive_rate\"]}%')
@@ -1073,6 +1170,14 @@ if failures:
         print(f'    - {detail}')
     print()
 
+# Tests without an answer: neither passed nor failed (#472).
+unmeasured = [r for r in data['results'] if r['verdict'] == 'NOT_MEASURED']
+if unmeasured:
+    print('  NOT MEASURED (no answer):')
+    for r in unmeasured:
+        print(f'    -- {r[\"id\"]}: {r[\"desc\"]} ({r.get(\"no_answer\")}, HTTP {r.get(\"http_status\")})')
+    print()
+
 # Source misses (informational)
 src_misses = [r for r in data['results'] if r.get('source_total', 0) > 0 and r['source_hits'] < r['source_total']]
 if src_misses:
@@ -1107,6 +1212,16 @@ LABELS = {'retrieval': 'search-endpt (/api/search)'}
 regressions = []
 improvements = []
 
+# A run with unanswered tests (#472) compares its rates over the measured
+# tests; a category none of whose tests got an answer says nothing. The
+# baseline is read as before — a baseline is never written from such a run,
+# and one written before #472 has no not_measured field.
+nm = current.get('not_measured') or {}
+nm_cats = nm.get('by_category') or {}
+if nm.get('count'):
+    print(f'  NOTE: {nm[\"count\"]} of {cs[\"total\"]} tests got no answer — the rates below are over the {cs[\"passed\"] + cs[\"failed\"]} measured.')
+    print()
+
 # Pass rate
 if cs['pass_rate'] < bs['pass_rate'] - 5:
     regressions.append(f'Pass rate: {bs[\"pass_rate\"]}% -> {cs[\"pass_rate\"]}% (REGRESSION)')
@@ -1134,9 +1249,13 @@ elif cs['false_positive_rate'] < bs['false_positive_rate'] - 10:
 # and a category that says nothing must not read as a category that passed.
 # It is informational — never a regression, so it does not move the exit code.
 empty = []
+unmeasured_cats = []
 for cat in json.loads(os.environ['EVAL_CATEGORIES']):
     cc = current['by_category'].get(cat, {'pass':0, 'total':0})
     bc = baseline['by_category'].get(cat, {'pass':0, 'total':0})
+    if cc['total'] == 0 and nm_cats.get(cat):
+        unmeasured_cats.append(f'{LABELS.get(cat, cat)} ({nm_cats[cat]} cases, baseline: {bc[\"total\"]} cases)')
+        continue
     if cc['total'] == 0:
         empty.append(f'{LABELS.get(cat, cat)} (baseline: {bc[\"total\"]} cases)')
         continue
@@ -1178,6 +1297,12 @@ if empty:
         print(f'    -- {e}')
     print()
 
+if unmeasured_cats:
+    print('  NOT MEASURED CATEGORIES (no test of them got an answer — not evaluated):')
+    for e in unmeasured_cats:
+        print(f'    -- {e}')
+    print()
+
 # Corpus drift (M-W6): a pass-rate move is only attributable against the
 # population it was measured on. Informational, never a regression.
 cp, bp = current.get('population'), baseline.get('population')
@@ -1207,7 +1332,9 @@ fi
 # Update Baseline
 # =====================================================================
 
-if $UPDATE_BASELINE; then
+# A baseline is a measurement of every test: a run with an unanswered test
+# writes its results and no baseline — neither the cp nor the diff (#472).
+if $UPDATE_BASELINE && (( NOT_MEASURED == 0 )); then
   # BEFORE the cp — afterwards the baseline this run replaces is gone. Moving a
   # gate is allowed; moving it without a trace is not (design/05 §4.6 (3)).
   eval_baseline_diff "$RESULTS_FILE" "$BASELINE_FILE" "$BASELINE_DIFF_FILE"
@@ -1222,7 +1349,11 @@ fi
 # =====================================================================
 
 echo "================================================================="
-if (( FAIL == 0 )) && (( REGRESSION_EXIT == 0 )); then
+if (( NOT_MEASURED > 0 )); then
+  REGRESSION_NOTE=""
+  (( REGRESSION_EXIT != 0 )) && REGRESSION_NOTE=", regressions detected"
+  echo "  VERDICT: NOT MEASURED ($NOT_MEASURED/$TOTAL tests got no answer: $NO_ANSWER_SUMMARY; $PASS/$(( PASS + FAIL )) measured tests passed${REGRESSION_NOTE})"
+elif (( FAIL == 0 )) && (( REGRESSION_EXIT == 0 )); then
   echo "  VERDICT: PASS ($PASS/$TOTAL tests, ${ELAPSED}s)"
 elif (( REGRESSION_EXIT != 0 )); then
   echo "  VERDICT: REGRESSION ($PASS/$TOTAL tests passed, regressions detected)"
@@ -1234,7 +1365,14 @@ echo ""
 echo "Results saved to: $RESULTS_FILE"
 
 # Exit code
-if (( FAIL > 0 )) || (( REGRESSION_EXIT != 0 )); then
+if (( NOT_MEASURED > 0 )); then
+  if $UPDATE_BASELINE; then
+    echo "Baseline not written: $NOT_MEASURED of $TOTAL tests got no answer ($NO_ANSWER_SUMMARY) — a baseline needs every test measured (exit 3)"
+  else
+    echo "Not measured: $NOT_MEASURED of $TOTAL tests got no answer ($NO_ANSWER_SUMMARY) — no rate counts them (exit 3)"
+  fi
+  exit 3
+elif (( FAIL > 0 )) || (( REGRESSION_EXIT != 0 )); then
   exit 1
 else
   exit 0
