@@ -22,7 +22,7 @@ package goldset
 // same separation PoolKey already holds, for the same reason: a stratum label
 // is a judge proxy, because S1 and S2 mean "the machine said relevant".
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 
 import (

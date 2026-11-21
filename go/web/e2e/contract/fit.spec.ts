@@ -84,6 +84,124 @@ test.describe('viewport fit (meta, #440)', () => {
     await expect(expectViewportFit(page)).rejects.toThrow(/clipped: div\.frame holds 400 px of content in 300 px \(overflow-x hidden/)
   })
 
+  test('an overflow-x: visible that wins the cascade leaves no sideways scroller (#457)', async ({ page }) => {
+    // Next to overflow-y: auto, the winning visible computes to auto; the
+    // losing overflow-x: auto still matches the element and must not exempt
+    // it — by specificity, by cascade layer, and against an inline auto that
+    // loses to an !important visible.
+    const body = (attrs: string): string =>
+      `<div class="frame wins" ${attrs}style="width:300px;height:100px;${attrs === '' ? '' : 'overflow-x:auto'}"><div style="width:400px;height:20px"></div></div>`
+    const red = /clipped: div\.frame\.wins holds 400 px of content in 300 px \(overflow-x auto/
+    await page390(page, body(''), '.frame{overflow-x:auto}.frame.wins{overflow-x:visible;overflow-y:auto}')
+    await expect(expectViewportFit(page)).rejects.toThrow(red)
+    await page390(page, body(''), '@layer base{.frame.wins{overflow-x:auto}}.frame{overflow-x:visible;overflow-y:auto}')
+    await expect(expectViewportFit(page)).rejects.toThrow(red)
+    await page390(page, body(' '), '.frame{overflow-x:visible !important;overflow-y:auto}')
+    await expect(expectViewportFit(page)).rejects.toThrow(red)
+    // the probe outranks an !important overflow-y as well
+    await page390(page, body(''), '.frame{overflow-x:auto}.frame.wins{overflow-x:visible;overflow-y:auto !important}')
+    await expect(expectViewportFit(page)).rejects.toThrow(red)
+    // control: the winning declaration is auto, so the region scrolls by choice
+    await page390(page, body(''), '.frame.wins{overflow-x:visible;overflow-y:auto}.frame{overflow-x:auto !important}')
+    await expectViewportFit(page)
+  })
+
+  test("a modal dialog's UA overflow: auto does not make it a declared sideways scroller (#457)", async ({ page }) => {
+    // auto wins the dialog's cascade, but from the UA stylesheet: no author
+    // chose to let the dialog scroll sideways, so its content must fit it.
+    await page390(page, '<dialog style="width:300px;height:40px;max-width:none;padding:0;border:0"><div style="width:400px;height:20px"></div></dialog>')
+    await page.evaluate(() => document.querySelector('dialog')?.showModal())
+    await expect(expectViewportFit(page)).rejects.toThrow(/clipped: dialog holds 400 px of content in 300 px \(overflow-x auto/)
+  })
+
+  test('the fit leaves the page as it found it: style attributes and scroll offsets (#457)', async ({ page }) => {
+    // The cascade probe writes overflow-y inline on every declared sideways
+    // scroller and restores the attribute: the capture after the fit sees the
+    // page as it was, scrolled where it was scrolled.
+    await page390(
+      page,
+      '<div id="a" style="overflow:auto;width:300px;height:60px"><div style="width:400px;height:120px"></div></div>' +
+        '<div id="b" class="y"><div style="width:400px;height:20px"></div></div>' +
+        '<div id="c" class="v"><div style="width:100px;height:300px"></div></div>' +
+        '<div id="d" class="w lose"><div style="width:100px;height:300px"></div></div>',
+      // #d is the case the probe exists for: a winning visible next to
+      // overflow-y: auto, so both axes are visible while it is probed
+      '.y{overflow-x:auto;width:300px}.v{overflow-y:auto;height:60px}.lose{overflow-x:auto}.w.lose{overflow-x:visible;overflow-y:auto;height:60px}',
+    )
+    const read = (): Promise<unknown> =>
+      page.evaluate(() =>
+        ['a', 'b', 'c', 'd'].map((id) => {
+          const el = document.getElementById(id) as HTMLElement
+          return [el.getAttribute('style'), el.scrollLeft, el.scrollTop]
+        }),
+      )
+    await page.evaluate(() => {
+      const [a, b, c, d] = ['a', 'b', 'c', 'd'].map((id) => document.getElementById(id) as HTMLElement)
+      a.scrollLeft = 50
+      a.scrollTop = 30
+      b.scrollLeft = 40
+      c.scrollTop = 70
+      d.scrollTop = 70
+    })
+    const before = await read()
+    expect(before).toEqual([
+      ['overflow:auto;width:300px;height:60px', 50, 30],
+      [null, 40, 0],
+      [null, 0, 70],
+      [null, 0, 70],
+    ])
+    await expectViewportFit(page)
+    expect(await read()).toEqual(before)
+  })
+
+  test('the region check follows the whole-pixel scroll range of the browser (#457)', async ({ browser }) => {
+    // Fractional overflow, measured: Chromium snaps a region's sideways scroll
+    // range to whole pixels, and scrollWidth > clientWidth holds exactly when
+    // that range is not 0 — at device scale 1 and 2. A box 0.4 px too wide
+    // leaves no range (cut by 0.4 px, nothing to scroll to); 0.6 px leaves
+    // 1 px; in a 300.6 px region a 0.6 px overhang leaves none.
+    for (const deviceScaleFactor of [1, 2]) {
+      const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor })
+      const page = await ctx.newPage()
+      for (const [w, over, scrolls] of [
+        [300, 0.4, false],
+        [300, 0.6, true],
+        [300.4, 0.4, true],
+        [300.6, 0.6, false],
+      ] as const) {
+        await page390(page, `<div class="x" style="width:${w}px;height:100px"><div style="width:${w + over}px;height:20px"></div></div>`, '.x{overflow-y:auto}')
+        const range = await page.evaluate(() => {
+          const x = document.querySelector('.x') as HTMLElement
+          x.scrollLeft = 1e6
+          const r = x.scrollLeft
+          x.scrollLeft = 0
+          return r
+        })
+        expect(range > 0, `scroll range of a ${w} px region with ${over} px overhang at dsf ${deviceScaleFactor}`).toBe(scrolls)
+        if (scrolls) await expect(expectViewportFit(page)).rejects.toThrow(/clipped: div\.x holds \d+ px of content in \d+ px/)
+        else await expectViewportFit(page)
+      }
+      await ctx.close()
+    }
+  })
+
+  test('an absolutely positioned box is cut only by the clipping ancestors of its containing block (#457)', async ({ page }) => {
+    // The scroller sits between the box and its containing block (the
+    // relative frame), so it neither clips nor scrolls the box.
+    const frame = (left: number, scrollerPos: string): string =>
+      `<div style="position:relative;margin-left:50px;width:300px"><div class="content" style="${scrollerPos}height:200px">` +
+      `<div style="position:absolute;left:${left}px;top:0;width:50px;height:20px"></div></div></div>`
+    // left of the scroller, inside the viewport: visible, nothing cut off
+    await page390(page, frame(-20, ''), '.content{overflow-y:auto}')
+    await expectViewportFit(page)
+    // left of the viewport: the scroller does not hide it from the edge check
+    await page390(page, frame(-60, ''), '.content{overflow-y:auto}')
+    await expect(expectViewportFit(page)).rejects.toThrow(/outside: div > div\.content > div spans x -10\.\.40/)
+    // control: a positioned scroller is the containing block and cuts it off
+    await page390(page, frame(-20, 'position:relative;'), '.content{overflow-y:auto}')
+    await expect(expectViewportFit(page)).rejects.toThrow(/clipped: div > div\.content > div starts at x 30, left of the padding edge 50/)
+  })
+
   test('a region that declares overflow-x may scroll sideways, its own box may not stick out', async ({ page }) => {
     await page390(page, '<div class="scroll"><div style="width:900px;height:20px"></div></div>', '.scroll{overflow-x:auto}')
     await expectViewportFit(page)
@@ -111,17 +229,33 @@ test.describe('viewport fit (meta, #440)', () => {
   })
 
   test('a fixed box inside an ancestor that contains fixed boxes is clipped like an absolute one', async ({ page }) => {
-    // transform and layout containment (container-type: inline-size) make the
-    // ancestor the containing block of position: fixed descendants, so its
-    // overflow clips them: the 900 px box scrolls inside the 300 px scroller.
-    for (const trap of ['transform:translateX(0)', 'container-type:inline-size']) {
-      await page390(
-        page,
-        `<div class="scroll" style="${trap};width:300px;height:100px"><div style="position:fixed;top:0;left:0;width:900px;height:20px"></div></div>`,
-        '.scroll{overflow-x:auto}',
-      )
+    // transform and layout containment make the ancestor the containing block
+    // of position: fixed descendants, so its overflow clips them: the 900 px
+    // box scrolls inside the 300 px scroller.
+    const trapped = (trap: string): string =>
+      `<div class="scroll" style="${trap};width:300px;height:100px"><div style="position:fixed;top:0;left:0;width:900px;height:20px"></div></div>`
+    for (const trap of ['transform:translateX(0)', 'contain:layout']) {
+      await page390(page, trapped(trap), '.scroll{overflow-x:auto}')
       await expectViewportFit(page)
     }
+    // container-type applies no layout containment (#457, measured): the box
+    // stays fixed to the viewport and sticks out of it
+    await page390(page, trapped('container-type:inline-size'), '.scroll{overflow-x:auto}')
+    await expect(expectViewportFit(page)).rejects.toThrow(/outside: div\.scroll > div spans x 0\.\.900/)
+  })
+
+  test('a fixed box inside a modal dialog is held by the viewport, not by a transform around the dialog (#457)', async ({ page }) => {
+    // The top layer escapes the transformed wrapper: measured, the fixed child
+    // sits at x -10, not at the wrapper's 50 - 10.
+    await page390(
+      page,
+      '<main class="content" style="height:200px"><div class="wrap" style="margin-left:50px;transform:translateX(0)">' +
+        '<dialog style="width:200px;height:40px;padding:0;border:0;max-width:none;overflow:visible">' +
+        '<div style="position:fixed;left:-10px;top:0;width:50px;height:20px"></div></dialog></div></main>',
+      '.content{overflow-y:auto}',
+    )
+    await page.evaluate(() => document.querySelector('dialog')?.showModal())
+    await expect(expectViewportFit(page)).rejects.toThrow(/^(?![\s\S]*clipped:)[\s\S]*outside: div\.wrap > dialog > div spans x -10\.\.40/)
   })
 
   test('a modal dialog wider than the viewport fails, also opened inside a scrolling region', async ({ page }) => {

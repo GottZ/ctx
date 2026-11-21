@@ -14,7 +14,7 @@
 // its seed as a parameter. That is what makes a report over this package
 // reproducible.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package evalscore
 

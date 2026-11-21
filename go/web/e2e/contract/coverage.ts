@@ -9,7 +9,7 @@
 
 import { readFileSync } from 'node:fs'
 import type { A11yLedger } from './a11y'
-import { isScaleState, type PageContract } from './contract'
+import { isScaleState, planContract, type PageContract, type TestFamily } from './contract'
 import { contracts, pendingContracts, type PendingContract } from './registry'
 
 /** The committed a11y debt ledger — rendered into the Ausnahmen-Ausweis. */
@@ -21,8 +21,8 @@ function scaleCell(c: PageContract): string {
   return isScaleState(c.scale) ? `\`${c.scale.name}\` (Deckel ${c.scale.domCap.max} @ \`${c.scale.domCap.selector}\`)` : `EXEMPT`
 }
 
-function mobileCell(c: PageContract): string {
-  return c.mobile === undefined ? '✓ (390×844)' : 'OPT-OUT (Fit ohne Aufnahme, 390×844)'
+function mobileCell(c: PageContract, fits: number): string {
+  return c.mobile === undefined ? '✓ (390×844)' : `OPT-OUT (${fits} Fit-Test${fits === 1 ? '' : 's'} ohne Aufnahme, 390×844)`
 }
 
 function denyCell(c: PageContract): string {
@@ -88,20 +88,29 @@ export function renderCoverage(cs: readonly PageContract[] = contracts, pending:
   lines.push('')
   lines.push('## Matrix')
   lines.push('')
-  lines.push('| Seite | Route | Rolle | States | Kern-Flow | Visual | ARIA | axe | Fokus-Walk | Mobile | Deny | Leak | Scale | Live |')
-  lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|')
+  lines.push('| Seite | Route | Rolle | States | Tests | Kern-Flow | Visual | ARIA | axe | Fokus-Walk | Mobile | Deny | Leak | Scale | Live |')
+  lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|')
+  let total = 0
   for (const c of cs) {
+    // Every count comes from the plan definePageContract registers (#457).
+    const plan = planContract(c)
+    const n = (f: TestFamily): number => plan.filter((t) => t.family === f).length
+    total += plan.length
     const states = c.states.map((s) => `\`${s.name}\``).join(', ')
-    const visualStates = c.states.length + (isScaleState(c.scale) ? 1 : 0)
     const vp = c.mobile === undefined ? 2 : 1
-    const visual = `✓ ${visualStates * 2 * vp} Shots (states×dark/light×${vp} VP)`
+    const visual = `✓ ${n('visual')} Shots (states×dark/light×${vp} VP)`
     const debt = ledger.entries.filter((e) => e.page === c.route).length
-    const axe = `✓ 4 Scans (dark/light × 2 VP)${debt > 0 ? ` — ${debt} Debt-Entr${debt === 1 ? 'y' : 'ies'}` : ''}`
-    const aria = c.mobile === undefined ? '✓ 2 (Desktop+Mobile)' : '✓ 1 (Desktop; Mobile fällt mit dem Opt-out)'
+    const axe = `✓ ${n('axe')} Scans (dark/light × 2 VP)${debt > 0 ? ` — ${debt} Debt-Entr${debt === 1 ? 'y' : 'ies'}` : ''}`
+    const aria = c.mobile === undefined ? `✓ ${n('aria')} (Desktop+Mobile)` : `✓ ${n('aria')} (Desktop; Mobile fällt mit dem Opt-out)`
     lines.push(
-      `| ${c.name} | \`${c.route}\` | ${c.role} | ${states} | ✓ | ${visual} | ${aria} | ${axe} | ✓ (1440, Tab-Walk) | ${mobileCell(c)} | ${denyCell(c)} | ${c.tenantScoped ? '✓ generiert (§5.6b)' : '—'} | ${scaleCell(c)} | — (PV10) |`,
+      `| ${c.name} | \`${c.route}\` | ${c.role} | ${states} | ${plan.length} | ✓ | ${visual} | ${aria} | ${axe} | ✓ (1440, Tab-Walk) | ${mobileCell(c, n('mobile-fit'))} | ${denyCell(c)} | ${c.tenantScoped ? '✓ generiert (§5.6b)' : '—'} | ${scaleCell(c)} | — (PV10) |`,
     )
   }
+  lines.push('')
+  lines.push(
+    `Generiert: ${total} Tests aus ${cs.length} Kontrakten (Spalte Tests, je Vertrag aus \`planContract\`; \`plan.test.ts\` hält den Plan`,
+  )
+  lines.push('gegen die §4.1-Tabelle und gegen Playwrights eigene Sammlung, `playwright test --list`).')
   lines.push('')
   lines.push('## Kern-Pfade (flowDoc — W21: „verifiziert" meint prüfbar den Hauptpfad)')
   lines.push('')

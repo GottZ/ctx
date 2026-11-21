@@ -26,7 +26,7 @@
 // weight that wins here wins at the fusion stage; whether it survives the
 // post-stages is a different question and needs a different instrument.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package armsweep
 

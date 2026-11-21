@@ -12,7 +12,7 @@
 # Idempotency:
 #   Running this on an existing DB must produce zero errors — only NOTICEs.
 # =============================================================================
-# Part of ctx by GottZ — The memory your LLM pretends to have.
+# Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 # Source: https://github.com/GottZ/ctx
 set -e
 

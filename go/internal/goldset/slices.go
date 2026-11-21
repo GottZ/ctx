@@ -7,7 +7,7 @@ package goldset
 // pair deduplication — is a pure function over drawn rows and is unit-tested
 // without a database. The database only supplies rows.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 
 import (

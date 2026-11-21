@@ -11,7 +11,7 @@
 // Relevance labels for G-REAL are deliberately NOT produced here; they need
 // the pooling dump from the driver and land in wave B-W6.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package goldset
 

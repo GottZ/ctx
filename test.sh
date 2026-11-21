@@ -8,7 +8,7 @@
 # because neither needs an LLM — T13-T18 predate them inside the
 # --with-ollama block.
 #
-# ctx — Your AI's save game. By GottZ (github.com/GottZ/ctx/graphs/contributors)
+# ctx — Your AI's save game. By GottZ and Damien Moon (github.com/GottZ/ctx/graphs/contributors)
 # Implements GottZ 4-Way RRF verification and GottZ Scope Model tests.
 # Source: https://github.com/GottZ/ctx
 
@@ -330,7 +330,8 @@ T="T07 SCHEMA_INTEGRITY"
 # context_blocks.embed_excluded und context_embed_excluded_reconcile hinzu →
 # 69 Tabellen, 45 Spalten; 176 fügt context_embed_excluded_queue hinzu → 70
 # Tabellen, Spalten unverändert; 189 fügt context_temporal_reviews hinzu → 71
-# Tabellen, Spalten unverändert).
+# Tabellen, Spalten unverändert; 190 fügt context_temporal_reviews.extraction
+# hinzu → 71 Tabellen, context_blocks-Spalten unverändert).
 T07_EXPECT_TABLES=71
 T07_EXPECT_COLUMNS=45
 
@@ -342,7 +343,7 @@ t07_count_fallback() {
   if [[ "$tc" == "$T07_EXPECT_TABLES" ]] && [[ "$col" == "$T07_EXPECT_COLUMNS" ]]; then
     pass "$T (contract-CLI nicht verfügbar — Zähl-Fallback (Prä-Deploy); tables=$tc, columns=$col; $reason)"
   else
-    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected $T07_EXPECT_TABLES tables + $T07_EXPECT_COLUMNS columns (Stand Mig 189), got tables=$tc columns=$col"
+    fail "$T" "Zähl-Fallback (Prä-Deploy, $reason): expected $T07_EXPECT_TABLES tables + $T07_EXPECT_COLUMNS columns (Stand Mig 190), got tables=$tc columns=$col"
   fi
 }
 

@@ -168,7 +168,9 @@ func TestResetRoundsUp(t *testing.T) {
 // from its probe): a time.Time whose wall reading steps by ±1 h while its
 // monotonic reading does not (built over the field layout of time.Time,
 // Go 1.25) leaves the meter untouched — no consumer locked out for an hour,
-// no bucket refilled.
+// no bucket refilled. The monotonic reading stands still (#461): on the
+// running clock the Retry-After of the third admission was the emission
+// interval minus the time since the first, an exact 30 s only at no time.
 func TestWallClockStepLeavesTheMeterAlone(t *testing.T) {
 	type rawTime struct {
 		wall uint64
@@ -189,10 +191,11 @@ func TestWallClockStepLeavesTheMeterAlone(t *testing.T) {
 	for _, step := range []time.Duration{-time.Hour, time.Hour} {
 		var mu sync.Mutex
 		wallStep := time.Duration(0)
+		frozen := time.Now()
 		now := func() time.Time {
 			mu.Lock()
 			defer mu.Unlock()
-			tm := time.Now()
+			tm := frozen
 			if wallStep != 0 {
 				tm = stepWall(tm, wallStep)
 			}
@@ -214,7 +217,7 @@ func TestWallClockStepLeavesTheMeterAlone(t *testing.T) {
 		_, d3 := m.Admit(chat(keyquota.LaneUrgent), l, keyquota.Estimate{})
 		t.Logf("wall step %v (monotonic unchanged): first %v; after the step: second %v, third %v Retry-After %v",
 			step, d1.Allowed, d2.Allowed, d3.Allowed, d3.RetryAfter)
-		if !d1.Allowed || !d2.Allowed || d3.Allowed || d3.RetryAfter > 31*time.Second || d3.RetryAfter < 29*time.Second {
+		if !d1.Allowed || !d2.Allowed || d3.Allowed || d3.RetryAfter != 30*time.Second {
 			t.Errorf("wall step %v changed the meter: %+v / %+v / %+v", step, d1, d2, d3)
 		}
 	}

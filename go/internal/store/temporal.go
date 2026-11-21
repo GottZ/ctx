@@ -1,5 +1,5 @@
 // temporal.go — Temporal EAV Dimension Functions
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // Manages the context_temporal table (block_id, dimension, value, source_time)
 // for O(log n) temporal queries via partial B-Tree indexes.
@@ -9,9 +9,12 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -167,9 +170,16 @@ func PopulateTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content 
 // an earlier title left (a date read off it) belong to no version the block
 // holds (issue #452 point 2). applied=false (the block changed, or is gone)
 // writes neither, and the block stays due (TemporalReviewDueCol).
+//
+// With the version it records the extraction the rows hold beside the LLM's
+// dates: the creation time and temporalExtraction of content, as RefreshTemporal
+// would write them (temporalExtractionDigest, issue #466 point 8). A
+// same-content write is covered by the review only while the extraction in
+// force yields the same.
 func PopulateTemporalReview(ctx context.Context, pool *pgxpool.Pool, blockID, title, content string, times []time.Time, createdAt time.Time) (applied bool, err error) {
+	extraction := temporalExtractionDigest(temporalAnchors(temporalExtraction(content), createdAt))
 	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt,
-		temporalMark{sql: temporalReviewMarkSQL, args: []any{blockID, content, title}},
+		temporalMark{sql: temporalReviewMarkSQL, args: []any{blockID, content, title, extraction}},
 		temporalReviewGuardSQL, blockID, content, title)
 }
 
@@ -193,12 +203,48 @@ const TemporalReviewDueCol = `NOT EXISTS (SELECT 1 FROM context_temporal_reviews
 const temporalReviewVersionOfRow = `digest(context_blocks.content_hash || context_blocks.title, 'sha256')`
 
 // temporalReviewMarkSQL writes the version of the review of block $1 with
-// content $2 and title $3: the expression of temporalReviewVersionOfRow over
+// content $2 and title $3 — the expression of temporalReviewVersionOfRow over
 // the review's input, whose content_hash part is the generated column's
-// expression (contentVersionCol).
-const temporalReviewMarkSQL = `INSERT INTO context_temporal_reviews (block_id, version)
-	VALUES ($1, digest(encode(digest($2::text, 'sha256'), 'hex') || $3::text, 'sha256'))
-	ON CONFLICT (block_id) DO UPDATE SET version = EXCLUDED.version`
+// expression (contentVersionCol) — and its extraction: the digest $4 of the
+// extraction's times (temporalExtractionDigest), bound to that version
+// (temporalReviewMarkExtraction, migration 190).
+const temporalReviewMarkSQL = `INSERT INTO context_temporal_reviews (block_id, version, extraction)
+	SELECT $1, v.version, ` + temporalReviewMarkExtraction + `
+	  FROM (SELECT digest(encode(digest($2::text, 'sha256'), 'hex') || $3::text, 'sha256') AS version) v
+	ON CONFLICT (block_id) DO UPDATE SET version = EXCLUDED.version, extraction = EXCLUDED.extraction`
+
+// temporalReviewMarkExtraction and temporalReviewRowExtraction are the
+// extraction column for a version — the mark's new one, a row's own — and the
+// bytea parameter $4 (temporalExtractionDigest): sha256 over both, so the
+// extraction a row carries holds for the version it was written with only.
+// The review of a binary before migration 190 rewrites an existing row's
+// version and leaves its extraction; where the version changed, that
+// extraction is bound to the one before and covers no write of the new one
+// (where it did not, the extraction stays in force).
+const (
+	temporalReviewMarkExtraction = `digest(v.version || $4::bytea, 'sha256')`
+	temporalReviewRowExtraction  = `digest(r.version || $4::bytea, 'sha256')`
+)
+
+// temporalExtractionDigest is the digest of the times the deterministic
+// extraction yields for a block (temporalAnchors: the creation time and the
+// content's dates): sha256 over their distinct values in microseconds since
+// the epoch (the resolution of timestamptz), ascending, eight bytes each.
+// The same set of times, in any order or repetition, has the same digest.
+func temporalExtractionDigest(anchors []time.Time) []byte {
+	us := make([]int64, 0, len(anchors))
+	for _, t := range anchors {
+		us = append(us, t.UnixMicro())
+	}
+	slices.Sort(us)
+	us = slices.Compact(us)
+	buf := make([]byte, 0, 8*len(us))
+	for _, u := range us {
+		buf = binary.BigEndian.AppendUint64(buf, uint64(u))
+	}
+	sum := sha256.Sum256(buf)
+	return sum[:]
+}
 
 // temporalReviewClearSQL removes the review version of block $1: every
 // temporal writer but the review's own runs it with its rows, because the
@@ -230,17 +276,22 @@ func temporalReviewClear(blockID string) temporalMark {
 // temporalReviewCoversSQL answers whether the rows of block $1 already hold
 // what RefreshTemporal would write for content $2: the block holds $2, its
 // rows are the review's of the title and content it holds (the version in
-// context_temporal_reviews, which every other temporal writer deletes), and
-// they hold each time of $3 (the creation time and the content's dates). The
-// review's rows are then a superset of the extraction's — the extraction's
-// dates plus the LLM's — of this very version. A time of $3 the rows lack (an
-// extraction that changed since the review) answers false.
+// context_temporal_reviews, which every other temporal writer deletes), the
+// review recorded the extraction $4 (temporalExtractionDigest of $3) for that
+// version (issue #466 point 8), and the rows hold each time of $3 (the
+// creation time and the content's dates). The review's rows are then the
+// extraction's plus the LLM's dates, of this very version and this very
+// extraction. An extraction that changed since the review answers false — a
+// date it no longer yields as well as one it yields now — and so does a row
+// without an extraction (NULL: taken over by migration 189, or written by a
+// binary before migration 190).
 const temporalReviewCoversSQL = `SELECT EXISTS (
 	SELECT 1 FROM context_blocks
 	  JOIN context_temporal_reviews r ON r.block_id = context_blocks.id
 	 WHERE context_blocks.id = $1
 	   AND ` + contentVersionCol + `
 	   AND r.version = ` + temporalReviewVersionOfRow + `
+	   AND r.extraction = ` + temporalReviewRowExtraction + `
 	   AND NOT EXISTS (
 		SELECT 1 FROM unnest($3::timestamptz[]) AS t(at)
 		 WHERE NOT EXISTS (SELECT 1 FROM context_temporal ct
@@ -254,8 +305,9 @@ const temporalReviewCoversSQL = `SELECT EXISTS (
 //
 // It writes nothing when the rows already hold what it would write: the
 // block holds content, the dream's temporal review wrote the rows for the
-// title and content the block holds, and they hold the creation time and
-// every date of content (temporalReviewCoversSQL); applied is then true. An
+// title and content the block holds and recorded the extraction this call
+// writes from, and they hold the creation time and every date of content
+// (temporalReviewCoversSQL); applied is then true. An
 // upsert that stores the content the block holds runs this afterwork, and
 // would otherwise replace the review's findings with the extraction's rows
 // while the review still covered the block (issue #452 point 3). The check
@@ -274,11 +326,18 @@ const temporalReviewCoversSQL = `SELECT EXISTS (
 // not the content the dates belong to, and two writes can carry the same
 // updated_at (now() is the transaction start).
 func RefreshTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content string, createdAt time.Time) (applied bool, err error) {
-	times := ExtractDates(content)
+	times := temporalExtraction(content)
+	anchors := temporalAnchors(times, createdAt)
 	mark := temporalReviewClear(blockID)
-	mark.skipSQL, mark.skipArgs = temporalReviewCoversSQL, []any{blockID, content, temporalAnchors(times, createdAt)}
+	mark.skipSQL, mark.skipArgs = temporalReviewCoversSQL, []any{blockID, content, anchors, temporalExtractionDigest(anchors)}
 	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt, mark, temporalContentGuardSQL, blockID, content)
 }
+
+// temporalExtraction is the extraction the temporal writers write their rows
+// from and the review records (ExtractDates); a variable only so a test can
+// stand in a different extraction for the same content, as a later release's
+// would be (issue #466 point 8).
+var temporalExtraction = ExtractDates
 
 // backfillTemporalBlock is RefreshTemporal for the backfill, which writes the
 // block's content_times as well: a block without rows was written by a path
@@ -291,7 +350,7 @@ func RefreshTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content s
 // the guard to the commit, as RefreshTemporal did before issue #421; the
 // backfill runs once, at startup, over blocks without rows.
 func backfillTemporalBlock(ctx context.Context, pool *pgxpool.Pool, blockID, content string, createdAt time.Time) (applied bool, err error) {
-	times := ExtractDates(content)
+	times := temporalExtraction(content)
 	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt, temporalReviewClear(blockID),
 		`UPDATE context_blocks SET content_times = $3::timestamptz[] WHERE id = $1 RETURNING `+contentVersionCol,
 		blockID, content, times)
@@ -333,20 +392,38 @@ const temporalReviewGuardSQL = `SELECT ` + temporalReviewVersionCol + ` FROM con
 // contentVersionCol (temporalReviewVersionCol for the dream's review) for
 // it; it commits when the answer is true and rolls back when it is false or
 // the block is gone — the version row with the rows. After the BEGIN, the
-// lock, the rows, the version row and the guard travel in one round trip; the
-// commit or rollback is the last. The version row's foreign key takes the
-// FOR KEY SHARE the dimension rows took already.
+// lock, the block row's lock, the rows, the version row and the guard travel
+// in one round trip; the commit or rollback is the last.
 //
-// A block deleted before the rows reach it (a purge, whose DELETE cascades
-// into context_temporal) refuses the first row on temporalBlockFK, before the
-// guard runs; that refusal is the same answer as a guard that finds no row:
-// applied=false, no error (temporalBlockGone).
+// The block row before the rows (issue #465): right after its turn, the
+// writer takes the block row FOR KEY SHARE (temporalBlockLockSQL), the lock
+// the foreign key of its first row would take, and only then deletes the
+// block's rows. A hard delete of the block (a purge; its DELETE cascades
+// into context_temporal and context_temporal_reviews) takes the block row
+// first and the rows in its cascade: both now take the block row before the
+// rows, and neither waits for the other while holding what the other waits
+// for. Before, the writer's DELETE held the block's rows while its first
+// insert waited for a block row the delete held, and the delete's cascade
+// waited for those rows: a deadlock (40P01), on either side. A writer that
+// waits for the block row holds only its turn, which no deleter takes. The
+// dimension rows' and the version row's foreign keys find the row locked
+// already.
+//
+// A block deleted before the writer locks it has no row to lock, and its
+// first row is refused on temporalBlockFK before the guard runs; that refusal
+// is the same answer as a guard that finds no row: applied=false, no error.
+// So is a deadlock the writer loses while the block goes — a cycle with a
+// transaction that took a row of the block before deleting it, which the
+// order above does not rule out: either refusal counts as the block going
+// only once the block is gone (temporalBlockGoing), read again after the
+// rollback and waiting for a delete in flight; a block still there leaves
+// the refusal the writer's error.
 //
 // The guard of RefreshTemporal and PopulateTemporal (temporalContentGuardSQL)
 // takes no row lock (issue #421), nor does PopulateTemporalReview's
 // (temporalReviewGuardSQL). The transaction holds the block row only in
-// the FOR KEY SHARE the dimension rows' foreign key takes, from the first row
-// to the commit. FOR NO KEY UPDATE does not conflict with it — UpdateBlock
+// FOR KEY SHARE, from right after its turn to the commit — before issue #465
+// from its first row, one statement later. FOR NO KEY UPDATE does not conflict with it — UpdateBlock
 // and the query path's failure memo (FOR NO KEY UPDATE SKIP LOCKED,
 // RecordEmbedFailureIfUnchanged) neither wait for this transaction nor skip
 // the block because of it. FOR UPDATE does, as it did before: the pre-read of
@@ -389,6 +466,7 @@ func writeTemporalGuarded(ctx context.Context, pool *pgxpool.Pool, blockID strin
 	if mark.skipSQL == "" {
 		batch.Queue(temporalWriterLockSQL, blockID)
 	}
+	batch.Queue(temporalBlockLockSQL, blockID)
 	batch.QueuedQueries = append(batch.QueuedQueries, rows.QueuedQueries...)
 	batch.Queue(mark.sql, mark.args...)
 	queryCount := len(batch.QueuedQueries)
@@ -446,13 +524,55 @@ func writeTemporalGuarded(ctx context.Context, pool *pgxpool.Pool, blockID strin
 	if errors.Is(err, errTemporalCovered) {
 		return true, nil
 	}
-	if errors.Is(err, pgxdb.ErrRollback) || temporalBlockGone(err) {
+	if errors.Is(err, pgxdb.ErrRollback) {
 		return false, nil
+	}
+	if temporalBlockGoing(err) {
+		gone, gerr := temporalBlockIsGone(ctx, pool, blockID)
+		switch {
+		case gerr != nil:
+			return false, errors.Join(err, gerr)
+		case gone:
+			return false, nil
+		}
 	}
 	if err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// temporalBlockLockSQL locks the block row ($1) FOR KEY SHARE, the lock the
+// foreign keys of the temporal rows take: the second statement of a temporal
+// writer, before it touches a row of the block (writeTemporalGuarded, issue
+// #465), and the read of temporalBlockIsGone.
+const temporalBlockLockSQL = `SELECT 1 FROM context_blocks WHERE id = $1 FOR KEY SHARE`
+
+// temporalBlockGoing reports a refusal a temporal writer meets when its block
+// is deleted beside it: the foreign-key refusal of its first row
+// (temporalBlockGone), or a deadlock (40P01) it lost. Whether the block went
+// is the read of temporalBlockIsGone.
+func temporalBlockGoing(err error) bool {
+	var pgErr *pgconn.PgError
+	return temporalBlockGone(err) || (errors.As(err, &pgErr) && pgErr.Code == "40P01")
+}
+
+// temporalBlockIsGone answers, after a writer's rollback, whether the block is
+// gone. The read locks the row FOR KEY SHARE (temporalBlockLockSQL), so it
+// waits for a delete in flight and answers for its outcome: a delete that
+// rolls back leaves the block, and the writer's refusal stays an error. A
+// block once gone does not come back (its id is not reused), so gone now is
+// gone at the refusal.
+func temporalBlockIsGone(ctx context.Context, pool *pgxpool.Pool, blockID string) (bool, error) {
+	var one int
+	err := pool.QueryRow(ctx, temporalBlockLockSQL, blockID).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: temporal: read the block after a refusal: %w", err)
+	}
+	return false, nil
 }
 
 // temporalAnchors are the times a block's rows are written from: the

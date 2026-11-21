@@ -24,7 +24,7 @@
 // DB, I/O). Tabelle und JSON-Datei entstehen auch bei 3 und 4: sie sind der
 // Beleg. Bei 2 entsteht nichts — der Lauf hat die Datenbank nie berührt.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package main
 

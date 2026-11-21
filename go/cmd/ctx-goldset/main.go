@@ -26,7 +26,7 @@
 // -allow-outside-goldset and it is recorded in the stamp. The database
 // connection is read-only.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package main
 

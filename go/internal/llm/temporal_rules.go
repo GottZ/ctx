@@ -1,5 +1,5 @@
 // temporal_rules.go — Deterministic Temporal Resolution
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // Rule-based temporal parser as PRIMARY resolution path.
 // The LLM (NormalizeTemporal) is fallback only — called when rules return nil

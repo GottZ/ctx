@@ -1,7 +1,7 @@
 // guard_wire.go — the XML escaper and the two wiring orders every prompt
 // builder in this tree uses for foreign text.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package promptguard
 

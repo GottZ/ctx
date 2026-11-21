@@ -1,6 +1,6 @@
 // dimweights_fallback.go — deterministic DimensionWeights post-derivation for the LLM
 // temporal fallback (Vorhaben A, wave W2, mechanism D-B).
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // The LLM fallback (NormalizeTemporal) resolves {dates, query} only — it is
 // NEVER asked for weights (design 01 §4 D-B: no Qwen number risk, ethos

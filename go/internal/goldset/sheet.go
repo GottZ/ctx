@@ -14,7 +14,7 @@ package goldset
 // calibration cells share one sheet in one hash-ranked order, so no row reveals
 // what it will be used for.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 
 import (

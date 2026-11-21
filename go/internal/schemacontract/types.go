@@ -111,10 +111,20 @@ type Report struct {
 // and reports unchecked (never a schema drift) on a major mismatch, because
 // pg_get_functiondef/pg_get_expr deparse can differ across majors.
 type GeneratedAgainst struct {
-	MigrationMax   int    `json:"migration_max"`
-	MigrationCount int    `json:"migration_count"`
-	PGMajor        int    `json:"pg_major"`
-	Image          string `json:"image"`
+	MigrationMax   int `json:"migration_max"`
+	MigrationCount int `json:"migration_count"`
+	// MigrationChainSHA256 names the migration chain the generator ran: the
+	// sha256 of the `sha256sum` listing of every go/migrations/*.sql in byte
+	// order of the names, whose per-file hashes are the checksums the runner
+	// records in _migrations. Any byte change of a migration changes it, a schema-neutral
+	// edit included, so a regenerated manifest always differs from a stale
+	// one. Nothing at runtime reads it — Check, the boot check and the API
+	// compare the schema — the pre-commit hook (Gate 3) and
+	// TestManifestNamesTheMigrationChain compare it with the chain beside the
+	// manifest (issue #397).
+	MigrationChainSHA256 string `json:"migration_chain_sha256"`
+	PGMajor              int    `json:"pg_major"`
+	Image                string `json:"image"`
 }
 
 // ExtSpec is the Manifest's expectation for one extension: a minimum

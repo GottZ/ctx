@@ -37,7 +37,7 @@
 # functions and methods, and NOT enforced anywhere for vars, consts and types —
 # a deliberate, documented limit rather than an assumed cover.
 #
-# ctx — Your AI's save game. By GottZ (github.com/GottZ/ctx/graphs/contributors)
+# ctx — Your AI's save game. By GottZ and Damien Moon (github.com/GottZ/ctx/graphs/contributors)
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

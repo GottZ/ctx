@@ -1,5 +1,5 @@
 // sensitivity.go — block sensitivity lookup (F3-P3 trust gating).
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // Source: https://github.com/GottZ/ctx
 package store

@@ -1,5 +1,5 @@
 // ingest.go — Ingest endpoint for bulk block import.
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // POST /api/ingest accepts up to 200 chunks per request.
 // Each chunk is validated, hash-checked, upserted, embedded, and temporally enriched.

@@ -20,7 +20,7 @@
 // runs BEFORE the dry-run return, so the N=30 operator sample shows what the
 // live run would write, not what the model said.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package events
 

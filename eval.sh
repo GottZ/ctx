@@ -12,7 +12,7 @@
 #          pass, so the default run costs roughly twice a single pass.
 #          ~3-5 minutes with --no-warmup (Ollama on-prem, sequential queries).
 #
-# ctx — Your AI's save game. By GottZ (github.com/GottZ/ctx/graphs/contributors)
+# ctx — Your AI's save game. By GottZ and Damien Moon (github.com/GottZ/ctx/graphs/contributors)
 # Evaluates GottZ 4-Way RRF retrieval and synthesis across 47 test queries.
 # Source: https://github.com/GottZ/ctx
 

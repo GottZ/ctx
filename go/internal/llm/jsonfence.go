@@ -1,5 +1,5 @@
 // jsonfence.go — the one lenient markdown-fence strip for LLM JSON answers.
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // Three packages carried a byte-similar copy of this trim (dream/parse.go,
 // dream/recurrence.go, goldbench/axis_keywords.go) and the copies had drifted

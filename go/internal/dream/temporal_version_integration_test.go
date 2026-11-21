@@ -22,13 +22,16 @@ package dream_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
 	"math/rand"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -51,6 +54,10 @@ const i452Apart = 5 * time.Millisecond
 // BEGIN while the transaction holds no row yet. With commit set, the same
 // transaction is held again before its COMMIT until ReleaseCommit, with
 // every lock it took. Later transactions pass.
+//
+// A hold that runs out (i427Wait) lets the transaction go on as if the test
+// had released it, in an order the test did not choose: the test fails
+// (issue #466 point 1), whatever it observed afterwards.
 type i452BeginHold struct {
 	commit bool
 
@@ -60,6 +67,7 @@ type i452BeginHold struct {
 	used      bool
 	committed bool
 	pid       uint32
+	expired   []string
 
 	held, atCommit           chan struct{}
 	release, releaseCommit   chan struct{}
@@ -87,8 +95,20 @@ func i452HoldAfterBegin(t *testing.T, dsn string, commit bool) (*pgxpool.Pool, *
 		h.Release()
 		h.ReleaseCommit()
 		pool.Close()
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		for _, what := range h.expired {
+			t.Errorf("begin hold: %s ran out after %s before the test released it; the transaction went on in an order the test did not choose", what, i427Wait)
+		}
 	})
 	return pool, h
+}
+
+// expire records a hold that ran out.
+func (h *i452BeginHold) expire(what string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.expired = append(h.expired, what)
 }
 
 // Wait waits until the held transaction has begun and waits before its first
@@ -137,6 +157,7 @@ func (h *i452BeginHold) statement(conn *pgx.Conn, sql string) {
 		select {
 		case <-h.releaseCommit:
 		case <-time.After(i427Wait):
+			h.expire("the hold before the COMMIT")
 		}
 		return
 	case h.begun[conn] && !h.used:
@@ -148,6 +169,7 @@ func (h *i452BeginHold) statement(conn *pgx.Conn, sql string) {
 		select {
 		case <-h.release:
 		case <-time.After(i427Wait):
+			h.expire("the hold after the BEGIN")
 		}
 		return
 	}
@@ -515,10 +537,42 @@ func i452FailInserts(t *testing.T, pool *pgxpool.Pool, id, when string) func() {
 	return drop
 }
 
+// i452Rows is the block's temporal rows as (dimension, value, source_time),
+// in order.
+func i452Rows(t *testing.T, pool *pgxpool.Pool, id string) []string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(),
+		`SELECT dimension, value, source_time FROM context_temporal WHERE block_id = $1 ORDER BY 1, 2, 3`, id)
+	if err != nil {
+		t.Fatalf("read rows: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var dim, value string
+		var at time.Time
+		if err := rows.Scan(&dim, &value, &at); err != nil {
+			t.Fatalf("scan row: %v", err)
+		}
+		out = append(out, fmt.Sprintf("%s=%s@%s", dim, value, at.UTC().Format(time.RFC3339Nano)))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read rows: %v", err)
+	}
+	return out
+}
+
 // TestTemporalReviewFailedOnTheDatabaseStaysDue is point 4: a review whose
 // write failed on the database — phase 1's re-extraction, or the write of
 // its findings — reviewed nothing that stuck, and the next pick must review
 // the block again. Before, the cycle stamped the block after the error.
+//
+// The failing cycle must have met the injected fault and reported it (issue
+// #466 point 2): a cycle that skipped the validation, or took the fault for
+// a block that changed, would leave the block due as well. And it must leave
+// the rows as they were before it (point 3): a write that committed the
+// deletion of the rows before the insert that failed would be rebuilt by the
+// next review, which the assertions after it cannot tell from a rollback.
 func TestTemporalReviewFailedOnTheDatabaseStaysDue(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -543,7 +597,15 @@ func TestTemporalReviewFailedOnTheDatabaseStaysDue(t *testing.T) {
 				when = tc.finding[0]
 			}
 			drop := i452FailInserts(t, rig.pool, b.ID, when)
+			before := i452Rows(t, rig.pool, b.ID)
+			failed := i452CaptureMessages(t, "temporal validation failed")
 			rig.next(t, b.ID, i427Dates(tc.finding...))
+			if msgs := failed.all(); len(msgs) != 1 || !strings.Contains(msgs[0], "i452: injected fault") {
+				t.Errorf("the failing cycle did not report the injected fault: %q", msgs)
+			}
+			if after := i452Rows(t, rig.pool, b.ID); !slices.Equal(after, before) {
+				t.Errorf("the failed review changed the rows:\nbefore %q\nafter  %q", before, after)
+			}
 			drop()
 
 			prompts := rig.next(t, b.ID, i427Dates(tc.finding...))
@@ -622,8 +684,25 @@ func TestTemporalReviewFailedOnTheLLMStaysDue(t *testing.T) {
 
 			rig.embed(t, b.ID)
 			rig.endClaim(t, b.ID)
-			rig.review.set(tc.reply)
+			// The failing cycle must have sent the review of the new title
+			// and received the scripted reply (issue #466 point 4): a cycle
+			// that never reached the LLM leaves the rows and the due-ness as
+			// a failed one does.
+			var mu sync.Mutex
+			var scripted []string
+			rig.review.set(func(ctx context.Context, p string) (string, error) {
+				mu.Lock()
+				scripted = append(scripted, p)
+				mu.Unlock()
+				return tc.reply(ctx, p)
+			})
 			i427Await(t, rig.cycle(), "failing cycle")
+			mu.Lock()
+			got := append([]string(nil), scripted...)
+			mu.Unlock()
+			if len(got) != 1 || !strings.Contains(got[0], "Title: "+title+"\n") {
+				t.Errorf("the failing cycle received the scripted reply for %d review(s) %q, want one of the title %q", len(got), got, title)
+			}
 			if n := rig.rowsAt(t, b.ID, "2026-05-11"); n != 8 {
 				t.Errorf("the failed review changed the rows: the earlier finding has %d rows, want 8", n)
 			}
@@ -650,6 +729,13 @@ func i452Finding(prompt string) string {
 // once. No statement may fail (a deadlock is 40P01), and once the writers are
 // done and the reviews have caught up, every block holds the finding of the
 // review of the version it holds, and is not due: no review was lost.
+//
+// The reviews must meet the writes (issue #466 point 5): the writers start
+// once the first review has reached its LLM call, that review answers only
+// after a content or title write of its block has committed, and it must
+// then be dropped by the guard of its write. Without it the writers could
+// finish before a reviewer reached the validation, and the catch-up alone
+// would decide the test.
 func TestTemporalWritersAgainstReviews(t *testing.T) {
 	if testing.Short() {
 		t.Skip("load test")
@@ -658,9 +744,63 @@ func TestTemporalWritersAgainstReviews(t *testing.T) {
 	ctx := context.Background()
 	const blocks, writers, rounds = 4, 8, 80
 
+	ids := make([]string, blocks)
+	versions := map[string]*atomic.Int64{} // block id → content and title writes committed
+	for i := range ids {
+		ids[i] = rig.block(t, fmt.Sprintf("Load plan %d", i), fmt.Sprintf("Load review %d on 2026-01-%02d.", i, i+1)).ID
+		versions[ids[i]] = &atomic.Int64{}
+	}
+
+	var (
+		first    atomic.Bool
+		held     = make(chan struct{}) // closed once the first review holds
+		heldID   string                // the block of the held review; set before held closes
+		heldMu   sync.Mutex
+		heldErr  string
+		writing  atomic.Int32 // writers running
+		overlaps atomic.Int32 // reviews answered while a writer ran
+	)
+	// holdFirst holds the first review — of a block whose title is still the
+	// one it was stored with — until a content or title write of that block
+	// has committed.
+	holdFirst := func(p string) {
+		at := -1
+		for i := range ids {
+			if strings.Contains(p, fmt.Sprintf("Title: Load plan %d\n", i)) {
+				at = i
+			}
+		}
+		if at < 0 {
+			heldMu.Lock()
+			heldErr = fmt.Sprintf("the first review read no stored title: %q", p)
+			heldMu.Unlock()
+			close(held)
+			return
+		}
+		heldID = ids[at]
+		was := versions[heldID].Load()
+		close(held)
+		deadline := time.Now().Add(i427Wait)
+		for versions[heldID].Load() == was {
+			if !time.Now().Before(deadline) {
+				heldMu.Lock()
+				heldErr = fmt.Sprintf("no content or title write of block %s committed within %s of its review", heldID, i427Wait)
+				heldMu.Unlock()
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
 	var mu sync.Mutex
 	seen := map[string]string{} // prompt → finding
 	answer := func(p string) string {
+		if first.CompareAndSwap(false, true) {
+			holdFirst(p)
+		}
+		if writing.Load() > 0 {
+			overlaps.Add(1)
+		}
 		f := i452Finding(p)
 		mu.Lock()
 		seen[p] = f
@@ -669,13 +809,9 @@ func TestTemporalWritersAgainstReviews(t *testing.T) {
 	}
 	rig.review.record(answer)
 	// A failed temporal write (a deadlock, a timeout) is logged and the
-	// cycle goes on to its throttle; the catch-up below would hide it.
-	failedWrites := i452CaptureMessages(t, "temporal validation failed")
-
-	ids := make([]string, blocks)
-	for i := range ids {
-		ids[i] = rig.block(t, fmt.Sprintf("Load plan %d", i), fmt.Sprintf("Load review %d on 2026-01-%02d.", i, i+1)).ID
-	}
+	// cycle goes on to its throttle; the catch-up below would hide it. A
+	// review whose block changed under it is dropped by its write's guard.
+	logs := i452CaptureMessages(t, "temporal validation failed", "findings dropped")
 
 	var failures sync.Map
 	fail := func(what string, err error) {
@@ -704,14 +840,24 @@ func TestTemporalWritersAgainstReviews(t *testing.T) {
 		}()
 	}
 
+	select {
+	case <-held:
+	case <-time.After(i427Wait):
+		close(stop)
+		reviewers.Wait()
+		t.Fatalf("no review reached its LLM call within %s", i427Wait)
+	}
+	versioned := func(id string) { versions[id].Add(1) }
 	var wg sync.WaitGroup
 	for w := 0; w < writers; w++ {
 		wg.Add(1)
+		writing.Add(1)
 		go func(w int) {
 			defer wg.Done()
+			defer writing.Add(-1)
 			rnd := rand.New(rand.NewSource(int64(w + 452)))
 			for round := 0; round < rounds; round++ {
-				i452Write(ctx, rig, ids[rnd.Intn(blocks)], rnd, w, round, fail)
+				i452Write(ctx, rig, ids[rnd.Intn(blocks)], rnd, w, round, fail, versioned)
 			}
 		}(w)
 	}
@@ -723,9 +869,23 @@ func TestTemporalWritersAgainstReviews(t *testing.T) {
 		t.Errorf("%s", k)
 		return true
 	})
-	if n := failedWrites.count(); n > 0 {
-		t.Errorf("%d temporal validation(s) failed during the load: %v", n, failedWrites.all())
+	if failed := logs.of("temporal validation failed", ""); len(failed) > 0 {
+		t.Errorf("%d temporal validation(s) failed during the load: %v", len(failed), failed)
 	}
+	heldMu.Lock()
+	if heldErr != "" {
+		t.Errorf("the held review: %s", heldErr)
+	}
+	heldMu.Unlock()
+	dropped := logs.of("findings dropped", heldID)
+	if len(dropped) == 0 {
+		t.Errorf("block %s: the review held until a write of the block committed was not dropped by the guard of its write", heldID)
+	}
+	if n := overlaps.Load(); n == 0 {
+		t.Errorf("no review was answered while a writer ran")
+	}
+	t.Logf("%d review(s) answered while the writers ran; %d review(s) dropped for a write during the review, %d of them of the held block %s",
+		overlaps.Load(), len(logs.of("findings dropped", "")), len(dropped), heldID)
 
 	// The reviews catch up: a cycle per block until none is due.
 	for _, id := range ids {
@@ -769,48 +929,62 @@ func TestTemporalWritersAgainstReviews(t *testing.T) {
 	}
 }
 
-// i452Messages records the log records whose message contains part, from
-// every block.
+// i452Messages records the log records whose message contains one of parts,
+// from every block: the message, the block id when the record names one, and
+// the error.
 type i452Messages struct {
-	part string
-	mu   sync.Mutex
-	msgs []string
+	parts []string
+	mu    sync.Mutex
+	msgs  []i452Message
 }
+
+type i452Message struct{ part, block, line string }
 
 func (m *i452Messages) Enabled(context.Context, slog.Level) bool { return true }
 func (m *i452Messages) WithAttrs([]slog.Attr) slog.Handler      { return m }
 func (m *i452Messages) WithGroup(string) slog.Handler           { return m }
 func (m *i452Messages) Handle(_ context.Context, r slog.Record) error {
-	if strings.Contains(r.Message, m.part) {
-		line := r.Message
+	for _, part := range m.parts {
+		if !strings.Contains(r.Message, part) {
+			continue
+		}
+		msg := i452Message{part: part, line: r.Message}
 		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "error" {
-				line += ": " + a.Value.String()
+			switch a.Key {
+			case "error":
+				msg.line += ": " + a.Value.String()
+			case "block_id":
+				msg.block = a.Value.String()
 			}
 			return true
 		})
 		m.mu.Lock()
-		m.msgs = append(m.msgs, line)
+		m.msgs = append(m.msgs, msg)
 		m.mu.Unlock()
+		return nil
 	}
 	return nil
 }
 
-func (m *i452Messages) count() int {
+// of returns the lines recorded for part, of the block id ("" for every
+// block).
+func (m *i452Messages) of(part, id string) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.msgs)
+	var out []string
+	for _, msg := range m.msgs {
+		if msg.part == part && (id == "" || msg.block == id) {
+			out = append(out, msg.line)
+		}
+	}
+	return out
 }
 
-func (m *i452Messages) all() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]string(nil), m.msgs...)
-}
+func (m *i452Messages) all() []string { return m.of(m.parts[0], "") }
 
-func i452CaptureMessages(t *testing.T, part string) *i452Messages {
+func i452CaptureMessages(t *testing.T, parts ...string) *i452Messages {
 	t.Helper()
-	m := &i452Messages{part: part}
+	m := &i452Messages{parts: parts}
 	prev := slog.Default()
 	slog.SetDefault(slog.New(m))
 	t.Cleanup(func() { slog.SetDefault(prev) })
@@ -830,8 +1004,9 @@ func i452Cycle(ctx context.Context, rig *i427Rig, fail func(string, error)) {
 	}
 }
 
-// i452Write is one round of a load-test writer on the block id.
-func i452Write(ctx context.Context, rig *i427Rig, id string, rnd *rand.Rand, w, round int, fail func(string, error)) {
+// i452Write is one round of a load-test writer on the block id; versioned
+// runs once a write of the title or the content has committed.
+func i452Write(ctx context.Context, rig *i427Rig, id string, rnd *rand.Rand, w, round int, fail func(string, error), versioned func(string)) {
 	var data store.UpdateBlockData
 	switch op := rnd.Intn(5); op {
 	case 0:
@@ -869,6 +1044,9 @@ func i452Write(ctx context.Context, rig *i427Rig, id string, rnd *rand.Rand, w, 
 	if err != nil || b == nil {
 		fail("update", err)
 		return
+	}
+	if data.Content != nil || data.Title != nil {
+		versioned(id)
 	}
 	if data.Content != nil {
 		_, err := store.RefreshTemporal(ctx, rig.pool, b.ID, b.Content, b.CreatedAt)
@@ -912,12 +1090,56 @@ func TestPickBlockReadsTheReviewVersionByKey(t *testing.T) {
 		{"custom", testdb.ExplainCustom(t, rig.pool, dream.PickBlockSQLForTest, claim, linkable, []string{i427Scope})},
 	} {
 		t.Logf("%s plan: %s", plan.name, plan.cost)
-		if !strings.Contains(plan.cost.Plan, "context_temporal_reviews_pkey") {
-			t.Errorf("%s plan: the due-ness does not read context_temporal_reviews by its key:\n%s", plan.name, plan.cost.Plan)
+		// Every read of context_temporal_reviews must be an index scan of its
+		// primary key whose Index Cond is the block's id (issue #466 point
+		// 6): a scan that names the key and applies the id as a filter reads
+		// the whole index.
+		reads := 0
+		for _, n := range i452PlanNodes(t, plan.cost.Plan) {
+			if n.Relation != "context_temporal_reviews" && n.Index != "context_temporal_reviews_pkey" {
+				continue
+			}
+			reads++
+			if (n.Type != "Index Scan" && n.Type != "Index Only Scan") || n.Index != "context_temporal_reviews_pkey" ||
+				!strings.Contains(n.IndexCond, "block_id") || !strings.Contains(n.IndexCond, "context_blocks.id") {
+				t.Errorf("%s plan: a read of context_temporal_reviews that is not a key lookup of the block: %s on %q, index %q, Index Cond %q, Filter %q:\n%s",
+					plan.name, n.Type, n.Relation, n.Index, n.IndexCond, n.Filter, plan.cost.Plan)
+			}
 		}
-		if strings.Contains(plan.cost.Plan, `"Relation Name": "context_temporal_reviews"`) &&
-			strings.Contains(plan.cost.Plan, `"Node Type": "Seq Scan",`+"\n"+`              "Parent Relationship": "SubPlan"`) {
-			t.Errorf("%s plan: a sequential scan of context_temporal_reviews:\n%s", plan.name, plan.cost.Plan)
+		if reads == 0 {
+			t.Errorf("%s plan: the due-ness does not read context_temporal_reviews:\n%s", plan.name, plan.cost.Plan)
 		}
 	}
+}
+
+// i452PlanNode is one node of an EXPLAIN (FORMAT JSON) plan.
+type i452PlanNode struct {
+	Type      string         `json:"Node Type"`
+	Relation  string         `json:"Relation Name"`
+	Index     string         `json:"Index Name"`
+	IndexCond string         `json:"Index Cond"`
+	Filter    string         `json:"Filter"`
+	Plans     []i452PlanNode `json:"Plans"`
+}
+
+// i452PlanNodes returns every node of the plan raw, sub plans and init plans
+// included.
+func i452PlanNodes(t *testing.T, raw string) []i452PlanNode {
+	t.Helper()
+	var doc []struct {
+		Plan i452PlanNode `json:"Plan"`
+	}
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil || len(doc) != 1 {
+		t.Fatalf("plan json: %v (%d documents)", err, len(doc))
+	}
+	var out []i452PlanNode
+	var walk func(n i452PlanNode)
+	walk = func(n i452PlanNode) {
+		out = append(out, n)
+		for _, c := range n.Plans {
+			walk(c)
+		}
+	}
+	walk(doc[0].Plan)
+	return out
 }

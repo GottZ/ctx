@@ -39,7 +39,7 @@
 // eine als Mess-Kopie gestempelte Instanz (§5 B4b) — Exit 5, wenn nicht;
 // Override -allow-live-instance, ebenfalls im Report ausgewiesen.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package main
 

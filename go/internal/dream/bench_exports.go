@@ -1,5 +1,5 @@
 // bench_exports.go — Bench-Export-Shims für ctx-goldbench.
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // Diese Datei enthält AUSSCHLIESSLICH exportierte Accessoren auf unexportierte
 // Prompts, Builder und Parser dieses Pakets, damit der Benchmark-Harness

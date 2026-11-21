@@ -32,6 +32,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/migrations"
 )
 
 // prodImage is the locally built, prod-identical image (docker-compose.yml
@@ -84,6 +85,15 @@ func TestGenerateManifest(t *testing.T) {
 		}
 	}
 
+	// What the image brings before the chain runs (plpgsql, the timescaledb
+	// startGeneratorDB creates, timescaledb_toolkit on the -ha image): only
+	// an extension the chain itself creates needs a pin of its own.
+	var preChain LiveSnapshot
+	preChain.Extensions = map[string]LiveExtension{}
+	if err := introspectExtensions(ctx, pool, &preChain); err != nil {
+		t.Fatalf("generator: introspect extensions before the chain: %v", err)
+	}
+
 	if err := store.RunMigrations(ctx, pool); err != nil {
 		t.Fatalf("generator: run migrations: %v", err)
 	}
@@ -107,9 +117,24 @@ func TestGenerateManifest(t *testing.T) {
 		}
 	}
 
-	extensions := make(map[string]ExtSpec, len(live.Extensions))
+	chainSHA256, err := migrationChainSHA256(migrations.FS)
+	if err != nil {
+		t.Fatalf("generator: fingerprint the migration chain: %v", err)
+	}
+
+	// The pins are extensionMinimums, never the live versions (chain_test.go).
+	extensions := declaredExtensions()
 	for name, ext := range live.Extensions {
-		extensions[name] = ExtSpec{MinVersion: ext.Version}
+		spec, pinned := extensions[name]
+		_, fromImage := preChain.Extensions[name]
+		switch {
+		case !pinned && !fromImage:
+			t.Fatalf("generator: the migration chain creates extension %s (%s), extensionMinimums has no pin for it", name, ext.Version)
+		case !pinned:
+			t.Logf("generator: extension %s %s comes with the image, not pinned", name, ext.Version)
+		case compareVersions(ext.Version, spec.MinVersion) > 0:
+			t.Logf("generator: extension %s runs %s here, the contract keeps its minimum %s", name, ext.Version, spec.MinVersion)
+		}
 	}
 
 	probes := append([]GucProbe(nil), hardcodedGucProbes...)
@@ -118,10 +143,11 @@ func TestGenerateManifest(t *testing.T) {
 	m := Manifest{
 		ManifestVersion: 1,
 		GeneratedAgainst: GeneratedAgainst{
-			MigrationMax:   migMax,
-			MigrationCount: len(embedded),
-			PGMajor:        live.PGMajor,
-			Image:          usedImage,
+			MigrationMax:         migMax,
+			MigrationCount:       len(embedded),
+			MigrationChainSHA256: chainSHA256,
+			PGMajor:              live.PGMajor,
+			Image:                usedImage,
 		},
 		Extensions:  extensions,
 		Tables:      live.Tables,
