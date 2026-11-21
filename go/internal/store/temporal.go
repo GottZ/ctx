@@ -199,8 +199,9 @@ const contentVersionCol = `content_hash = encode(digest($2::text, 'sha256'), 'he
 // answers for that version, so a changed content answers false and the rows
 // roll back. With the guard first, the lock would be held across the
 // dimension writes as well, and a concurrent update of the block would wait
-// for them; last, the lock is held about as long as the bare content_times
-// UPDATE held it before, which committed on its own.
+// for them; last, the lock is held as long as the bare content_times UPDATE
+// held it before, which committed on its own, plus the one round trip to the
+// COMMIT.
 //
 // The rows are written before the guard knows whether they stay: a stale
 // caller writes and rolls back a batch (and RefreshTemporal's UPDATE) it never

@@ -155,7 +155,8 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 			"expected", expectedDimCount,
 		)
 		// Written only while the block still holds the content picked above
-		// (issue #414): a write that replaced it since runs its own afterwork.
+		// (issue #414): a write that replaced it since writes the dates of its
+		// own content in its afterwork.
 		applied, err := store.PopulateTemporal(ctx, pool, block.ID, block.Content, contentTimes, block.CreatedAt)
 		if err != nil {
 			return fmt.Errorf("validate temporal: re-populate: %w", err)

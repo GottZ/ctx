@@ -118,6 +118,90 @@ func TestPopulateTemporalSkipsReplacedContent(t *testing.T) {
 	}
 }
 
+// TestPopulateTemporalWaitsForInFlightContentWrite holds a content write open
+// on a second connection while the dream's write (PopulateTemporal with the
+// content it picked) runs: the guard has to wait for that write and, once it
+// committed, must answer for the new content and drop the rows. A guard that
+// read the row without locking it would see the committed old content, commit
+// its rows, and leave them beside the new content's.
+func TestPopulateTemporalWaitsForInFlightContentWrite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	picked := "Standup on 2026-04-14."
+	b, err := store.UpsertBlock(ctx, pool, "i414", "i414-dream-inflight", picked, nil, nil, "private", false, store.SensitivityWrite{}, "")
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if applied, err := store.RefreshTemporal(ctx, pool, b.ID, b.Content, b.CreatedAt); err != nil || !applied {
+		t.Fatalf("store afterwork: applied=%v err=%v", applied, err)
+	}
+
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin holder: %v", err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	var holderPID int32
+	if err := holder.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil {
+		t.Fatalf("holder pid: %v", err)
+	}
+	if _, err := holder.Exec(ctx, `UPDATE context_blocks SET content = $1, updated_at = now() WHERE id = $2`, "Standup moved to 2026-05-19.", b.ID); err != nil {
+		t.Fatalf("holder write: %v", err)
+	}
+
+	type result struct {
+		applied bool
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		merged := append(store.ExtractDates(picked), i414Day("2026-04-15"))
+		applied, err := store.PopulateTemporal(ctx, pool, b.ID, picked, merged, b.CreatedAt)
+		done <- result{applied, err}
+	}()
+	// Hook: release the holder once the guard waits on it (or the write has
+	// finished without waiting, which the assertions below then judge).
+	var r result
+	finished := false
+poll:
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		select {
+		case r = <-done:
+			finished = true
+			break poll
+		default:
+		}
+		var waited bool
+		if err := pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid)))`, holderPID).Scan(&waited); err != nil {
+			t.Fatalf("poll lock wait: %v", err)
+		}
+		if waited {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatalf("commit holder: %v", err)
+	}
+	if !finished {
+		r = <-done
+	}
+	if r.err != nil {
+		t.Fatalf("populate: %v", r.err)
+	}
+	if r.applied {
+		t.Errorf("populate applied the picked content's dates over the content committed while it waited")
+	}
+	if got, want := i414Sources(t, pool, b.ID), i414Want(b.CreatedAt, i414Day("2026-04-14")); !slices.Equal(got, want) {
+		t.Errorf("source times = %v, want %v (the store afterwork's, untouched)", got, want)
+	}
+}
+
 // TestRefreshTemporalYieldsToAContentWriteDuringItsRows: while the afterwork
 // writes the dimension rows it holds no lock on the block row, so a content
 // update of the block lands without waiting for it; the afterwork then finds
