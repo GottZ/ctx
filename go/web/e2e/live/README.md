@@ -48,7 +48,10 @@ writes=0` + abort:
 
 1. **Env-gate** — `CTX_E2E_LIVE=1` AND baseURL host ∈ {localhost, 127.0.0.1,
    ctx-e2e, ctx}. The admin key comes ONLY from `CTX_E2E_ADMIN_KEY`, **never**
-   `~/.config/ctx/config`.
+   `~/.config/ctx/config`. No keyed request of the seed follows a redirect
+   (`redirect: 'error'`, #432): fetch would keep `X-Context-Key` on it to any
+   host, and the throwaway ctxd never redirects `/api/*`
+   (`seed-redirect.test.ts`, in the vitest suite).
 2. **Instance handshake** — `GET /api/whoami` must authenticate as exactly the
    per-run key AND carry label `e2e-bootstrap-<run-id>`. A production/foreign
    instance does not know the per-run random key ⇒ 401 ⇒ zero writes. The

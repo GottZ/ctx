@@ -241,47 +241,119 @@ func TestKeyDoLeavesTheClientAlone(t *testing.T) {
 	}
 }
 
-// TestKeyCredentialOnlyInKeyTransport is the structural half of #413 and #423:
-// a request helper that put the key on a request itself would bypass the
-// origin rule. So no source of a package that can hold a ctx API key spells a
-// credential header — X-Context-Key, or Authorization, which the server takes
-// a key in as well — except the keyHeader constant, only Transport.signed uses
-// that constant, and a header name those packages set in one of the forms
-// computedHeaderNames reads is a literal (a syntax scan, not a type check: the
-// rule itself is held by the transport, this test keeps the code from routing
-// around it by accident). The packages: this one, the two that send through it and
-// their binaries, and every other package that imports internal/clientconfig
-// (where the key is resolved) or this one — a new tool joins the scan by its
-// import. Subdirectories are scanned too.
+// TestBearerTransport (#432): a Transport from NewBearer sends the key as
+// "Authorization: Bearer <key>" and not as X-Context-Key, on New's origin
+// rule — another port of the same host is refused before it is sent, with
+// New's refusal — and refuses a base URL New refuses.
+func TestBearerTransport(t *testing.T) {
+	var bearer, contextKey, other atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer "+fixtureKey {
+			bearer.Add(1)
+		}
+		if r.Header.Get(keyHeader) != "" {
+			contextKey.Add(1)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { other.Add(1) }))
+	t.Cleanup(elsewhere.Close)
+	names := Names{Client: "ctx-goldbench", BaseURL: "-endpoint"}
+	kt, err := NewBearer(srv.URL+"/v1/chat/completions", fixtureKey, names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader("{}"))
+	resp, err := kt.Do(&http.Client{}, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if bearer.Load() != 1 || contextKey.Load() != 0 {
+		t.Errorf("bearer=%d X-Context-Key=%d, want the key once as a bearer token and never as X-Context-Key", bearer.Load(), contextKey.Load())
+	}
+	if req.Header.Get("Authorization") != "" {
+		t.Error("Do wrote the key into the caller's request")
+	}
+
+	away, _ := http.NewRequest(http.MethodPost, elsewhere.URL+"/v1/chat/completions", strings.NewReader("{}"))
+	_, err = kt.Do(&http.Client{}, away)
+	plain, _ := New(srv.URL+"/v1/chat/completions", fixtureKey, nil, names)
+	_, want := plain.Do(&http.Client{}, away.Clone(away.Context()))
+	if !errors.As(err, new(*Refusal)) || want == nil || err.Error() != want.Error() || other.Load() != 0 {
+		t.Errorf("err=%v (New: %v), sent elsewhere %d times — want New's refusal before sending", err, want, other.Load())
+	}
+
+	// Do holds every redirect hop to the origin: a redirect from the origin to
+	// the other server is refused before it is sent.
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirecting.Close)
+	kt2, err := NewBearer(redirecting.URL, fixtureKey, names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hop, _ := http.NewRequest(http.MethodPost, redirecting.URL+"/v1/chat/completions", strings.NewReader("{}"))
+	_, err = kt2.Do(&http.Client{}, hop)
+	if !errors.As(err, new(*Refusal)) || !strings.Contains(err.Error(), "refused a redirect (HTTP 307)") || other.Load() != 0 {
+		t.Errorf("err=%v, sent elsewhere %d times — want the redirect hop refused before it is sent", err, other.Load())
+	}
+
+	if _, err := NewBearer("ftp://ctx.example", fixtureKey, names); err == nil {
+		t.Error("NewBearer accepted a base URL without an http or https host")
+	}
+}
+
+// TestKeyCredentialOnlyInKeyTransport is the structural half of #413, #423
+// and #432: a request helper that put the key on a request itself would bypass
+// the origin rule. So no source of a package that can hold a ctx API key
+// spells a credential header — X-Context-Key, or Authorization, which the
+// server takes a key in as well — or calls SetBasicAuth, except the credentialConsts, only
+// Transport.signed uses them, and a header name those packages set in one of
+// the forms computedHeaderNames reads is a literal (a syntax scan, not a type
+// check: the rule itself is held by the transport, this test keeps the code
+// from routing around it by accident). The packages: this one, the three that
+// send through it and their binaries, and every other package that imports
+// internal/clientconfig (where the key is resolved) or this one — a new tool
+// joins the scan by its import. Subdirectories are scanned too.
 func TestKeyCredentialOnlyInKeyTransport(t *testing.T) {
 	credential := map[string]bool{"X-Context-Key": true, "Authorization": true}
 	paths := keyedSources(t)
 
 	fset := token.NewFileSet()
-	var literals, uses, computed []string
-	declared := 0
+	var literals, computed []string
+	declared, uses := map[string]int{}, map[string][]string{}
 	for _, path := range paths {
 		f, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var allowedLit *ast.BasicLit
+		allowedLit := map[*ast.BasicLit]bool{}
 		for _, d := range f.Decls {
 			if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.CONST {
 				for _, s := range gd.Specs {
 					vs := s.(*ast.ValueSpec)
 					for i, n := range vs.Names {
-						if n.Name == keyHeaderName && i < len(vs.Values) {
-							declared++
-							allowedLit, _ = vs.Values[i].(*ast.BasicLit)
+						if isCredentialConst(n.Name) && i < len(vs.Values) {
+							declared[n.Name]++
+							if lit, ok := vs.Values[i].(*ast.BasicLit); ok {
+								allowedLit[lit] = true
+							}
 						}
 					}
 				}
 			}
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
+			// SetBasicAuth writes Authorization without spelling it.
+			if call, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SetBasicAuth" {
+					literals = append(literals, fset.Position(sel.Sel.Pos()).String()+" (SetBasicAuth)")
+				}
+			}
 			lit, ok := n.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING || lit == allowedLit {
+			if !ok || lit.Kind != token.STRING || allowedLit[lit] {
 				return true
 			}
 			if v, err := strconv.Unquote(lit.Value); err == nil && credential[http.CanonicalHeaderKey(strings.TrimSpace(v))] {
@@ -296,38 +368,54 @@ func TestKeyCredentialOnlyInKeyTransport(t *testing.T) {
 				continue
 			}
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				if id, ok := n.(*ast.Ident); ok && id.Name == keyHeaderName {
-					uses = append(uses, funcName(fd)+" "+fset.Position(id.Pos()).String())
+				if id, ok := n.(*ast.Ident); ok && isCredentialConst(id.Name) {
+					uses[id.Name] = append(uses[id.Name], funcName(fd)+" "+fset.Position(id.Pos()).String())
 				}
 				return true
 			})
 		}
 	}
-	if declared != 1 {
-		t.Fatalf("%s declared %d times, want once", keyHeaderName, declared)
+	for _, name := range credentialConsts {
+		if declared[name] != 1 {
+			t.Fatalf("%s declared %d times, want once", name, declared[name])
+		}
 	}
 	if len(literals) != 0 {
-		t.Errorf("a credential header is spelled outside keyHeader — attach the key through clientkey.Transport instead: %v", literals)
+		t.Errorf("a credential header is spelled outside %v — attach the key through clientkey.Transport instead: %v", credentialConsts, literals)
 	}
 	if len(computed) != 0 {
 		t.Errorf("a header name is not a string literal, so this scan cannot tell whether it is a credential — spell it out, or attach the key through clientkey.Transport: %v", computed)
 	}
-	if len(uses) == 0 {
-		t.Error("Transport.signed no longer uses keyHeader — this gate lost its subject")
-	}
-	for _, u := range uses {
-		if !strings.HasPrefix(u, "Transport.signed ") {
-			t.Errorf("keyHeader used outside Transport.signed: %s", u)
+	for _, name := range credentialConsts {
+		if len(uses[name]) == 0 {
+			t.Errorf("Transport.signed no longer uses %s — this gate lost its subject", name)
+		}
+		for _, u := range uses[name] {
+			if !strings.HasPrefix(u, "Transport.signed ") {
+				t.Errorf("%s used outside Transport.signed: %s", name, u)
+			}
 		}
 	}
 }
 
-const keyHeaderName = "keyHeader"
+// credentialConsts are the constants that spell a credential header: the key
+// header of New and the bearer header of NewBearer. Each is declared once, in
+// this package, and used in Transport.signed only.
+var credentialConsts = []string{"keyHeader", "bearerHeader"}
 
-// keyedRoots are scanned whatever they import: this package, the two that
-// send through it, and the binaries built on those two (cmd/ctx imports
+func isCredentialConst(name string) bool {
+	for _, c := range credentialConsts {
+		if name == c {
+			return true
+		}
+	}
+	return false
+}
+
+// keyedRoots are scanned whatever they import: this package, the three that
+// send through it, and the binaries built on those three (cmd/ctx imports
 // internal/cli only).
-var keyedRoots = []string{".", "../cli", "../../cmd/ctx", "../armsweep", "../../cmd/ctx-armsweep"}
+var keyedRoots = []string{".", "../cli", "../../cmd/ctx", "../armsweep", "../../cmd/ctx-armsweep", "../goldbench", "../../cmd/ctx-goldbench"}
 
 // keyedSources lists the non-test Go files of keyedRoots and of every package
 // of the module that imports internal/clientconfig or this package, each
@@ -412,7 +500,7 @@ func keyedSources(t *testing.T) []string {
 }
 
 // computedHeaderNames lists every header name in f that is not a string
-// literal, except keyHeader itself, whose uses the caller checks. A literal is
+// literal, except the credentialConsts, whose uses the caller checks. A literal is
 // checked against the credential names; anything else (a constant from another
 // package, a concatenation) would slip past that check. It reads, by syntax:
 // the name argument of Set and Add called on a header — x.Header, x.Header(),
@@ -488,7 +576,7 @@ func computedHeaderNames(fset *token.FileSet, f *ast.File) []string {
 		if lit, ok := name.(*ast.BasicLit); ok && lit.Kind == token.STRING {
 			return
 		}
-		if id, ok := name.(*ast.Ident); ok && id.Name == keyHeaderName {
+		if id, ok := name.(*ast.Ident); ok && isCredentialConst(id.Name) {
 			return
 		}
 		out = append(out, fset.Position(name.Pos()).String())

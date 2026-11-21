@@ -1,11 +1,12 @@
 // Package clientkey is the one place a ctx client attaches its API key to a
-// request (#413, #423). internal/cli sends every keyed request of ctx through
-// it — the API client, the ingest upload, the statusline, the init probes and
-// ctx mcp serve — and internal/armsweep every request of ctx-armsweep.
-// TestKeyCredentialOnlyInKeyTransport holds that no other code of theirs sets
-// the key header.
+// request (#413, #423, #432). internal/cli sends every keyed request of ctx
+// through it — the API client, the ingest upload, the statusline, the init
+// probes and ctx mcp serve — internal/armsweep every request of ctx-armsweep,
+// and internal/goldbench every keyed chat call of ctx-goldbench, whose key
+// goes as a bearer token (NewBearer). TestKeyCredentialOnlyInKeyTransport
+// holds that no other code of theirs sets a credential header.
 //
-// A leaf below both: it imports the standard library and internal/httpx (the
+// A leaf below them: it imports the standard library and internal/httpx (the
 // Origin definition, which brings internal/ssrfguard) and nothing else, so a
 // bench tool that sends through it links neither the command tree nor another
 // server package (depguard clientkey-leaf).
@@ -23,6 +24,10 @@ import (
 
 // keyHeader carries the API key. Only Transport.signed uses it.
 const keyHeader = "X-Context-Key"
+
+// bearerHeader carries the API key of a Transport from NewBearer, as
+// "Bearer <key>". Only Transport.signed uses it.
+const bearerHeader = "Authorization"
 
 // maxRedirects is net/http's own hop limit (defaultCheckRedirect). Setting
 // CheckRedirect replaces that default, so checkRedirect restates the limit and
@@ -44,7 +49,8 @@ type Names struct {
 // before a byte of it is sent: the key, and with it the body of a POST, which
 // is the user's content. net/http's own redirect rule does not cover this: on
 // a host change it drops Authorization and Cookie, never a custom header such
-// as X-Context-Key.
+// as X-Context-Key, and it keeps Authorization on another port or scheme of
+// the same host name and on a subdomain.
 //
 // One rule, two hooks. As a RoundTripper it serves ctx mcp serve, whose
 // requests the MCP SDK builds: http.Client calls it once per hop. Do signs the
@@ -64,10 +70,11 @@ type Transport struct {
 	origin httpx.Origin
 	next   http.RoundTripper // RoundTrip only; nil means http.DefaultTransport
 	names  Names
+	bearer bool // the key goes as "Authorization: Bearer <key>" (NewBearer), not as X-Context-Key
 }
 
 // New binds key to the origin of baseURL, which must be an http or https URL
-// with a host.
+// with a host. The key goes as X-Context-Key.
 func New(baseURL, key string, next http.RoundTripper, names Names) (Transport, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {
@@ -77,6 +84,19 @@ func New(baseURL, key string, next http.RoundTripper, names Names) (Transport, e
 		return Transport{}, fmt.Errorf("%s has no http or https host", u.Redacted())
 	}
 	return Transport{key: key, base: u, origin: httpx.OriginOf(u), next: next, names: names}, nil
+}
+
+// NewBearer is New for a key that goes as a bearer token — "Authorization:
+// Bearer <key>", the form an OpenAI-compatible endpoint takes it in, ctx's
+// /v1 among them — instead of as X-Context-Key. The origin rule and the
+// refusal are New's; RoundTrip sends through http.DefaultTransport.
+func NewBearer(baseURL, key string, names Names) (Transport, error) {
+	t, err := New(baseURL, key, nil, names)
+	if err != nil {
+		return Transport{}, err
+	}
+	t.bearer = true
+	return t, nil
 }
 
 // admit is the rule: nil for a request on the origin, the refusal otherwise.
@@ -114,7 +134,11 @@ func (t Transport) signed(req *http.Request) (*http.Request, error) {
 		return nil, err
 	}
 	r := req.Clone(req.Context())
-	r.Header.Set(keyHeader, t.key)
+	if t.bearer {
+		r.Header.Set(bearerHeader, "Bearer "+t.key)
+	} else {
+		r.Header.Set(keyHeader, t.key)
+	}
 	return r, nil
 }
 

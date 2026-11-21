@@ -408,6 +408,19 @@ cd go && go build ./cmd/ctx-goldbench
   -out report.json -md report.md      # -dry-run validates the dataset without HTTP
 ```
 
+The API key (`-api-key`, else `GOLDBENCH_API_KEY`) goes as a bearer token only to the
+origin of `-endpoint` (scheme, host and port), by the rule the ctx CLI holds
+`CTX_BASE_URL` to ([CLI reference](cli.md#cli-reference)) and through the same code
+(`internal/clientkey`). A redirect within that origin is followed; one anywhere else —
+an `http` → `https` upgrade on the same host included — is refused before it is sent,
+neither the key nor the prompt leaves, and the call fails naming the target (for an
+upgrade, also the `-endpoint` to use); its case scores 0 and counts in
+`transport_errors`, like any other failed call. With a
+key, an `-endpoint` without an `http` or `https` host fails every call before it is
+sent. Without a key nothing is bound and a redirect is followed as before. Before, the
+key went along on a redirect to another port or scheme of the endpoint's host name and
+to a subdomain of it.
+
 `parse_rate` is a first-class metric on every axis: a model that cannot serve ctx's
 output contracts is unfit for ctx regardless of content quality. Since metric v2
 (`metric_version` in the report env stamp) the keyword/tagging axes score a

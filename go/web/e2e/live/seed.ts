@@ -9,7 +9,8 @@
 // FAIL-CLOSED TARGET GATE (§3.6, three layers, ALL before the first write):
 //   1. Env-gate: CTX_E2E_LIVE=1 AND the baseURL host is localhost/127.0.0.1 or
 //      a compose service name (ctx-e2e/ctx). The admin key is read ONLY from
-//      CTX_E2E_ADMIN_KEY — NEVER from ~/.config/ctx/config.
+//      CTX_E2E_ADMIN_KEY — NEVER from ~/.config/ctx/config. No keyed request
+//      follows a redirect (#432).
 //   2. Instance handshake: GET /api/whoami must authenticate as exactly the
 //      per-run key AND carry the label e2e-bootstrap-<run-id>. A production or
 //      foreign instance does not know the per-run random key ⇒ 401 ⇒ zero
@@ -82,9 +83,14 @@ function readConfig(): SeedConfig {
   }
 }
 
+// Every keyed fetch refuses a redirect (#432): fetch follows one by default
+// and keeps X-Context-Key on it to any host, and the env-gate checks only the
+// base URL's host. The throwaway ctxd never redirects /api/*, so a redirect
+// means another target — the request fails before the next hop is sent.
 async function whoami(baseURL: string, key: string): Promise<Record<string, unknown>> {
   const res = await fetch(`${baseURL}/api/whoami`, {
     headers: { 'X-Context-Key': key },
+    redirect: 'error',
   })
   if (!res.ok) throw new Error(`whoami ${res.status}`)
   return (await res.json()) as Record<string, unknown>
@@ -99,6 +105,7 @@ async function post(baseURL: string, key: string, path: string, body: unknown): 
     method: 'POST',
     headers: { 'X-Context-Key': key, 'content-type': 'application/json' },
     body: JSON.stringify(body),
+    redirect: 'error',
   })
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>
   if (!res.ok || json.success === false) {
