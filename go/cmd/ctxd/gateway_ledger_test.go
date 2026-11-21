@@ -48,7 +48,10 @@ func TestMeterLimiterDeclaresItsRefusals(t *testing.T) {
 		"CTX_GATEWAY_CONSUMER_CONCURRENCY_DEFAULT": "1",
 	})
 	settings := gatewaySettingsGetter(cfgStore)
-	meter := keyquota.New(time.Now)
+	// A clock that stands still (#461): the second request is refused for
+	// its rate however long the first took.
+	now := time.Date(2026, 11, 21, 12, 40, 0, 0, time.UTC)
+	meter := keyquota.New(func() time.Time { return now })
 	l := meterLimiter{meter: meter, settings: settings}
 	est := oai.Estimate{Op: llmlog.GatewayOpChat, PromptRunes: 10, MaxTokens: 10, ClientMaxTokens: true}
 	admit := func(ca string) (*oai.AccessRecord, oai.LimitReservation, *oai.LimitRefusal) {
