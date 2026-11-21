@@ -56,6 +56,11 @@ func i414Want(createdAt time.Time, dates ...time.Time) []string {
 	return slices.Compact(out)
 }
 
+// i414LockWait bounds every wait of the tests with a second connection: for a
+// write to start waiting on the held lock, and for it to finish once the lock
+// is released.
+const i414LockWait = 10 * time.Second
+
 func i414Day(s string) time.Time {
 	d, err := time.Parse("2006-01-02", s)
 	if err != nil {
@@ -163,33 +168,35 @@ func TestPopulateTemporalWaitsForInFlightContentWrite(t *testing.T) {
 		applied, err := store.PopulateTemporal(ctx, pool, b.ID, picked, merged, b.CreatedAt)
 		done <- result{applied, err}
 	}()
-	// Hook: release the holder once the guard waits on it (or the write has
-	// finished without waiting, which the assertions below then judge).
-	var r result
-	finished := false
-poll:
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+	// Hook: release the holder only once the guard waits on it. A write that
+	// finishes first did not wait for the in-flight write, and one that has
+	// not waited by the deadline proves nothing either: both fail.
+	waited := false
+	for deadline := time.Now().Add(i414LockWait); !waited && time.Now().Before(deadline); {
 		select {
-		case r = <-done:
-			finished = true
-			break poll
+		case r := <-done:
+			t.Fatalf("populate finished (applied=%v err=%v) while the content write was still in flight: its guard did not wait for the row lock", r.applied, r.err)
 		default:
 		}
-		var waited bool
 		if err := pool.QueryRow(ctx,
 			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid)))`, holderPID).Scan(&waited); err != nil {
 			t.Fatalf("poll lock wait: %v", err)
 		}
-		if waited {
-			break
+		if !waited {
+			time.Sleep(2 * time.Millisecond)
 		}
-		time.Sleep(2 * time.Millisecond)
+	}
+	if !waited {
+		t.Fatalf("populate never waited on the in-flight content write within %s", i414LockWait)
 	}
 	if err := holder.Commit(ctx); err != nil {
 		t.Fatalf("commit holder: %v", err)
 	}
-	if !finished {
-		r = <-done
+	var r result
+	select {
+	case r = <-done:
+	case <-time.After(i414LockWait):
+		t.Fatalf("populate did not finish within %s after the content write committed", i414LockWait)
 	}
 	if r.err != nil {
 		t.Fatalf("populate: %v", r.err)
@@ -251,9 +258,15 @@ func TestRefreshTemporalYieldsToAContentWriteDuringItsRows(t *testing.T) {
 		applied, err := store.RefreshTemporal(ctx, pool, a.ID, a.Content, a.CreatedAt)
 		done <- result{applied, err}
 	}()
-	// Hook: wait until A's afterwork waits on the held rows.
+	// Hook: wait until A's afterwork waits on the held rows; one that
+	// finishes first never reached them.
 	blocked := false
-	for deadline := time.Now().Add(10 * time.Second); !blocked && time.Now().Before(deadline); {
+	for deadline := time.Now().Add(i414LockWait); !blocked && time.Now().Before(deadline); {
+		select {
+		case r := <-done:
+			t.Fatalf("A's afterwork finished (applied=%v err=%v) without waiting on the held dimension rows", r.applied, r.err)
+		default:
+		}
 		if err := pool.QueryRow(ctx,
 			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid)))`, holderPID).Scan(&blocked); err != nil {
 			t.Fatalf("poll lock wait: %v", err)
@@ -287,7 +300,12 @@ func TestRefreshTemporalYieldsToAContentWriteDuringItsRows(t *testing.T) {
 	if err := holder.Rollback(ctx); err != nil {
 		t.Fatalf("release holder: %v", err)
 	}
-	r := <-done
+	var r result
+	select {
+	case r = <-done:
+	case <-time.After(i414LockWait):
+		t.Fatalf("A's afterwork did not finish within %s after the rows were released", i414LockWait)
+	}
 	if r.err != nil {
 		t.Fatalf("A's afterwork: %v", r.err)
 	}

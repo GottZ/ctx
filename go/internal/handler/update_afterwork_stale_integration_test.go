@@ -110,6 +110,11 @@ func i414Update(t *testing.T, f *i406Fixture, id string, data store.UpdateBlockD
 
 func i414Content(s string) store.UpdateBlockData { return store.UpdateBlockData{Content: &s} }
 
+// i414LockWait bounds the waits of the test with a second connection: for the
+// afterwork to start waiting on the held row, and for it to finish once the
+// row is released.
+const i414LockWait = 10 * time.Second
+
 const (
 	i414Initial  = "Initial note, written 2026-01-05."
 	i414ContentA = "Plan for the review on 2026-03-15."
@@ -191,31 +196,34 @@ func TestUpdateAfterworkWaitsForInFlightContentWrite(t *testing.T) {
 		defer close(done)
 		finishBlockUpdate(f.ctx, f.pool, f.mcpCfg.Blocktypes, dataA, blockA, "i414-a")
 	}()
-	// Hook: release the holder once A's afterwork waits on it (or has
-	// finished without waiting, which the assertions below then judge).
+	// Hook: release the holder only once A's afterwork waits on it. An
+	// afterwork that finishes first did not wait for the in-flight write, and
+	// one that has not waited by the deadline proves nothing either: both fail.
 	waited := false
-poll:
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+	for deadline := time.Now().Add(i414LockWait); !waited && time.Now().Before(deadline); {
 		select {
 		case <-done:
-			break poll
+			t.Fatalf("A's afterwork finished while the content write was still in flight: it did not wait for the row lock")
 		default:
 		}
 		if err := f.pool.QueryRow(f.ctx,
 			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid)))`, holderPID).Scan(&waited); err != nil {
 			t.Fatalf("poll lock wait: %v", err)
 		}
-		if waited {
-			break
+		if !waited {
+			time.Sleep(2 * time.Millisecond)
 		}
-		time.Sleep(2 * time.Millisecond)
+	}
+	if !waited {
+		t.Fatalf("A's afterwork never waited on the in-flight content write within %s", i414LockWait)
 	}
 	if err := tx.Commit(f.ctx); err != nil {
 		t.Fatalf("commit holder: %v", err)
 	}
-	<-done
-	if !waited {
-		t.Logf("A's afterwork finished without waiting on the in-flight write")
+	select {
+	case <-done:
+	case <-time.After(i414LockWait):
+		t.Fatalf("A's afterwork did not finish within %s after the content write committed", i414LockWait)
 	}
 
 	// A's afterwork wrote nothing: the block still has the data of the
