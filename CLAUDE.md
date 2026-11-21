@@ -8,7 +8,7 @@
 
 # ctx by GottZ and Damien Moon — Claude Code Instructions
 
-Go-Monolith (ctx CLI + ctxd Daemon), PostgreSQL 18 + pgvector, Custom Context Store, Ollama. MPL-2.0 Lizenz.
+Go-Monolith (ctx CLI + ctxd Daemon), PostgreSQL 18 + pgvector + TimescaleDB, Custom Context Store, Inferenz über den Backend-Pool (OpenAI-kompatibel, Ollama-nativ oder Anthropic; `ctx backends`). MPL-2.0 Lizenz.
 
 **Zuerst `.project/prompt.md` lesen** — Arbeitsweise, Architektur, Session-Übergabe. `.project/` ist ein privates Submodule (`GottZ/ctx-project`).
 

@@ -73,10 +73,9 @@ is about the checkpoint layer.
 The plugin is a plain Hermes **user plugin** — it lives in
 `$HERMES_HOME/plugins/ctx_checkpoint/`, whether the catalog or the installer
 put it there, and works in best-effort mode on a completely stock Hermes.
-Plugin 0.15.0 declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
+The plugin declares `requires_hermes: ">=0.23.1"`, the first Hermes whose
 `delegate_task` children inherit the provider under the fail-closed gate; the
-catalog pin (0.6.2) still declares ≥ 0.20.4 (since upstream v2026.8.18,
-provider text is forwarded into the compaction summary).
+catalog pin (0.14.0) declares the same.
 
 The fail-closed gate is what makes it a real guarantee: a memory system you
 only *hope* ran is not a memory system. The host-side contract is **upstream**
@@ -170,10 +169,10 @@ compaction settings setup writes only `compression.checkpoint_required`, and
 only when you choose a mode that differs from the current one; never the
 thresholds.
 
-The entry pins an exact commit of this repository — currently `9f98ff6`
-(release v5.29.6), plugin 0.6.2, re-pinned in
-[#147170](https://github.com/NousResearch/hermes-agent/pull/147170) — and
-Hermes enforces its `requires_hermes: ">=0.20.4"`. Changes
+The entry pins an exact commit of this repository — currently `5022140`
+(release v5.47.0), plugin 0.14.0, re-pinned in
+[#155890](https://github.com/NousResearch/hermes-agent/pull/155890) — and
+Hermes enforces its `requires_hermes: ">=0.23.1"`. Changes
 here reach catalog users only through a reviewed re-pin PR upstream that bumps
 the entry's `sha` and `version`; `hermes plugins update` then moves to the new
 pin. The catalog install does **not** probe the host: run the probes under
@@ -447,11 +446,13 @@ and manifest are deliberately small so routine recall stays cheap.
   compaction, and the chain write runs inside `budget_s` (default 60 s) with
   2/4/8 s backoff on rate-limited stores and a `max_parts` cap (default 80)
   that refuses before writing anything).
-- Catalog pin: 0.6.2 at `9f98ff6` (`plugin-catalog/ctx_checkpoint.yaml`
+- Catalog pin: 0.14.0 at `5022140` (`plugin-catalog/ctx_checkpoint.yaml`
   upstream; listed 2026-10-25 with 0.4.4 at `98749f3`, re-pinned 2026-10-29 in
-  #145302 to 0.5.0 at `ee8cb2e` and 2026-11-02 in
+  #145302 to 0.5.0 at `ee8cb2e`, 2026-11-02 in
   [#147170](https://github.com/NousResearch/hermes-agent/pull/147170) to
-  0.6.2). `VERSION` in this repository can run ahead of the pin until the
+  0.6.2 and 2026-11-17 in
+  [#155890](https://github.com/NousResearch/hermes-agent/pull/155890) to
+  0.14.0). `VERSION` in this repository can run ahead of the pin until the
   next re-pin PR lands.
 - Plugin contract ceiling: `PLUGIN_CHECKPOINT_API_MAX = 2` in
   `plugin/ctx_checkpoint/__init__.py` — the declared version is negotiated
