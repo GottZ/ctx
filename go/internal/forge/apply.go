@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
 	"strconv"
 	"time"
 
@@ -67,6 +68,7 @@ func NewApplier(pool *pgxpool.Pool, snapshot SnapshotFunc) *Applier {
 // issueTypePolicy is the resolved slice of the issue type config the apply needs.
 type issueTypePolicy struct {
 	registryOK  bool
+	states      []string // the workflow's configured statuses
 	terminalSet []string
 	forgeMap    map[string]string // forge state → ctx workflow status
 	refAllowed  bool              // 'references' ∈ structural_link_classes
@@ -94,6 +96,7 @@ func resolveIssuePolicy(set *blocktype.Set) issueTypePolicy {
 	}
 	return issueTypePolicy{
 		registryOK:  true,
+		states:      pol.Workflow.States,
 		terminalSet: pol.Workflow.Terminal,
 		forgeMap:    pol.Workflow.ForgeStateMap,
 		refAllowed:  refAllowed,
@@ -119,10 +122,18 @@ func (p issueTypePolicy) workflowStatusFor(forgeState string) string {
 // the remote state maps to only where that is news: the remote state differs
 // from the state the block projects to (open ↔ closed — with no status mapping
 // resolvable that writes NULL, as a status of the other state must not stay),
-// or the block carries no status yet. cur is the block the pull's transaction
-// locked, so a status moved after the unlocked read is the one kept.
+// or the block carries no status of the resolved workflow: none yet, or one a
+// change of the type's workflow dropped — no local verb can move the block
+// out of that (ValidateTransition refuses a source that is not a configured
+// status) and the board does not list it. With no workflow resolvable there
+// is no set to check against, and a status the block carries stays while its
+// forge state holds. cur is the block the pull's transaction locked, so a
+// status moved after the unlocked read is the one decided on.
 func (p issueTypePolicy) keepsStatus(cur *store.Block, remoteState string) bool {
-	return cur.WorkflowStatus != "" && ctxForgeState(cur, p.terminalSet, p.registryOK) == remoteState
+	if cur.WorkflowStatus == "" || (p.registryOK && !slices.Contains(p.states, cur.WorkflowStatus)) {
+		return false
+	}
+	return ctxForgeState(cur, p.terminalSet, p.registryOK) == remoteState
 }
 
 // ApplyIssues is the IssueApplyFunc: one fetched page → the 3-way apply. The
@@ -231,7 +242,7 @@ func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow,
 // the block is locked and projected again first (LockPulledBlock), and a block
 // that no longer holds the base goes the matrix's way instead (stillAtBase).
 // The workflow status is written only where the forge state changed or the
-// block has none (keepsStatus, issue #486).
+// block has none of the resolved workflow (keepsStatus, issue #486).
 func (a *Applier) pullUpdateIssue(ctx context.Context, project store.ProjectRow, pol issueTypePolicy,
 	writable []string, iss IssueRemote, m store.SyncMap, content store.ForgeIssueContent, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
 

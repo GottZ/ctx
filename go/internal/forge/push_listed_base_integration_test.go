@@ -20,6 +20,7 @@ package forge
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -126,6 +127,70 @@ func TestPushAdvanceKeepsABaseAPullMoved(t *testing.T) {
 		}
 		pulledFields, pulledBase, _, _ := ForgeCommentBase(edited)
 		i486AfterAMovedBase(t, pool, proj, spy.pushSpyForge, "comment", 700, commentID, pulledBase, pulledFields)
+	})
+
+	// Two instances push the same mapping and the later listing advances
+	// last: A lists C1 and PATCHes it; meanwhile a local edit makes C2, B
+	// lists C2 and PATCHes it (the forge holds C2); A advances (base := C1,
+	// the block no longer holds it); then B advances — the base moved off the
+	// one B listed, while the block still holds what B pushed. B must leave the
+	// row listed (synced_at -infinity), or the base stays on C1 while block and
+	// forge hold C2 and nothing lists the row again.
+	t.Run("two pushes, the later listing advances last", func(t *testing.T) {
+		pool := testdb.SetupTestDB(t)
+		ctx := context.Background()
+		proj := enablePush(seedIFProject(t, pool, "i486advtwo"))
+		issueID, _ := i452Pulled(t, pool, proj, false)
+		i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Title: str("Crane, renamed")})
+
+		bPatched, aDone := make(chan struct{}), make(chan struct{})
+		bSpy := &hookSpy{pushSpyForge: newPushSpy()}
+		bSpy.setHook(func() {
+			close(bPatched)
+			select {
+			case <-aDone:
+			case <-time.After(i452Wait):
+			}
+		})
+		bErr := make(chan error, 1)
+		aSpy := &hookSpy{pushSpyForge: newPushSpy()}
+		aSpy.setHook(func() {
+			i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Content: str("local body, second edit")})
+			go func() {
+				res, err := pusherWithRegistry(pool).PushProject(ctx, proj, bSpy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow)
+				if err == nil && res.Pushed != 1 {
+					err = fmt.Errorf("instance B pushed %d, want 1", res.Pushed)
+				}
+				bErr <- err
+			}()
+			select {
+			case <-bPatched:
+			case <-time.After(i452Wait):
+				t.Errorf("instance B did not reach its PATCH within %s", i452Wait)
+			}
+		})
+		resA, err := pusherWithRegistry(pool).PushProject(ctx, proj, aSpy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow)
+		close(aDone)
+		if err != nil || resA.Pushed != 1 {
+			t.Fatalf("instance A: pushed=%d err=%v, want 1", resA.Pushed, err)
+		}
+		select {
+		case err := <-bErr:
+			if err != nil {
+				t.Fatalf("instance B: %v", err)
+			}
+		case <-time.After(i452Wait):
+			t.Fatalf("instance B did not finish within %s", i452Wait)
+		}
+
+		if _, err := pusherWithRegistry(pool).PushProject(ctx, proj, newPushSpy(), RepoRef{Owner: "o", Repo: "r"}, alwaysAllow); err != nil {
+			t.Fatalf("next run: %v", err)
+		}
+		base, conflict, _, _ := readMapping(t, pool, proj.ID, "issue", 5)
+		if _, ctxH := CtxIssueBase(getBlock(t, pool, proj.Scope, issueID), []string{"done"}, true); base != ctxH || conflict {
+			t.Errorf("after the next run the base is the version block and forge hold: %v (conflict %v)", base == ctxH, conflict)
+		}
+		i452NoCandidates(t, pool, proj)
 	})
 
 	t.Run("in-sync row, pull before the advance", func(t *testing.T) {

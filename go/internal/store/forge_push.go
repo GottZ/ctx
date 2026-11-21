@@ -249,12 +249,14 @@ type PushProjection func(b *Block) string
 //     the base this advance wrote — the version the forge holds.
 //
 // The base is written only while the mapping still holds listedBase, the base
-// the listing read (issue #486). A pull of another ctxd instance on the same
-// database can move it between the listing and this advance — converge on
-// what the PATCH sent, then pull a remote edit — and the listed version is no
-// longer what the forge holds. Then base_hash and base_fields stay as that
-// pull wrote them and synced_at := -infinity: the row stays a candidate and
-// the next run decides again against the base the pull wrote.
+// the listing read (issue #486). Another ctxd instance on the same database
+// can move it between the listing and this advance — its pull converges on
+// what the PATCH sent and then pulls a remote edit, or its push of a later
+// version advances first — and the listed version is then not, or no longer
+// provably, what the forge holds. Then base_hash and base_fields stay as the
+// writer that moved them left them and synced_at := -infinity, also when the
+// block still holds the pushed version: the row stays a candidate and the
+// next run decides again against the stored base.
 //
 // synced_at is compared in SQL only (the candidate filter): '-infinity' is a
 // valid timestamptz, but pgx cannot scan it into a time.Time, so a reader that

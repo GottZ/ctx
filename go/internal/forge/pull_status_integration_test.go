@@ -23,6 +23,7 @@ package forge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -40,6 +41,13 @@ import (
 const i486TenantWorkflow = `{"v":1,"overview":{"include":false},"digest":{"include":false},
 	"workflow":{"states":["triage","backlog","in-progress","review","done","wontfix","duplicate"],
 	            "initial":"triage","terminal":["done","wontfix","duplicate"],
+	            "forge_state_map":{"open":"triage","closed":"done"}},
+	"structural_link_classes":["references","duplicate-of"]}`
+
+// i486WorkflowWithoutInProgress is a later version of a tenant's issue type
+// that no longer has the builtin's in-progress.
+const i486WorkflowWithoutInProgress = `{"v":1,"overview":{"include":false},"digest":{"include":false},
+	"workflow":{"states":["triage","review","done","wontfix"],"initial":"triage","terminal":["done","wontfix"],
 	            "forge_state_map":{"open":"triage","closed":"done"}},
 	"structural_link_classes":["references","duplicate-of"]}`
 
@@ -303,24 +311,112 @@ func TestPullWritesTheMappedStatusIntoABlockWithoutOne(t *testing.T) {
 	e.inSync(t, id, remote)
 }
 
+// TestPullHealsAStatusTheWorkflowNoLongerHas: the tenant changed its issue
+// type's workflow and dropped the status the block carries. No local verb can
+// move the block any more (ValidateTransition refuses a source that is not a
+// configured status), and the board does not list it; the next pull update
+// writes the status the forge state maps to, as it did before, instead of
+// keeping the stranded one.
+func TestPullHealsAStatusTheWorkflowNoLongerHas(t *testing.T) {
+	ctx := context.Background()
+	e := i486Setup(t, "i486strand", "")
+	e.pull(t, i486Remote("open", "Crane", "forge body", 1))
+	_, _, id, _ := readMapping(t, e.pool, e.proj.ID, "issue", 5)
+	e.move(t, id, "in-progress")
+	e.setTenantType(t, i486WorkflowWithoutInProgress)
+
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := "review"
+	if _, err := store.UpdateIssueBlock(ctx, tx, id, store.IssueUpdate{Status: &review}, e.set(), []string{e.proj.Scope}); !errors.Is(err, blocktype.ErrInvalidTransition) {
+		t.Fatalf("precondition: a local move out of the dropped status answered %v, want ErrInvalidTransition", err)
+	}
+	_ = tx.Rollback(ctx)
+
+	remote := i486Remote("open", "Crane", "body edited on the forge", 2)
+	if r := e.pull(t, remote); r.Applied != 1 || r.Conflicts != 0 {
+		t.Fatalf("pull-update: %+v, want one applied, no conflict", r)
+	}
+	if got := getBlock(t, e.pool, e.proj.Scope, id).WorkflowStatus; got != "triage" {
+		t.Errorf("status after the pull = %q, want triage (the mapped status of the workflow that resolves now)", got)
+	}
+	e.inSync(t, id, remote)
+}
+
+// pullHeld runs one pull of remote on a pool of the scope's registry
+// whose write transaction waits at its BEGIN; during the hold, between the
+// read and the write, it calls between.
+func (e i486Env) pullHeld(t *testing.T, remote IssueRemote, between func()) ApplyResult {
+	t.Helper()
+	ctx := context.Background()
+	held, hold := i452HoldBeginPool(t, e.dsn)
+	type out struct {
+		res ApplyResult
+		err error
+	}
+	done := make(chan out, 1)
+	go func() {
+		r, err := e.applier(held).ApplyIssues(ctx, e.proj, []IssueRemote{remote})
+		done <- out{r, err}
+	}()
+	select {
+	case <-hold.entered:
+	case o := <-done:
+		t.Fatalf("the pull finished without a write transaction: %+v %v", o.res, o.err)
+	case <-time.After(i452Wait):
+		t.Fatalf("the pull did not reach its write within %s", i452Wait)
+	}
+	between()
+	close(hold.release)
+	select {
+	case o := <-done:
+		if o.err != nil {
+			t.Fatalf("pull: %v", o.err)
+		}
+		return o.res
+	case <-time.After(i452Wait):
+		t.Fatalf("the pull did not finish within %s", i452Wait)
+	}
+	return ApplyResult{}
+}
+
 // TestPullKeepsAStatusMovedDuringThePull: the pull read the block, decided
 // "forge-ahead", and a local status move within the forge state commits
 // before the pull's transaction locks the block. The move leaves the
-// projection alone, so the pull still writes the remote edit — and keeps the
-// status of the block it locked, not the one it read.
+// projection alone, so the pull still writes the remote edit — and decides
+// on the block it locked, not the one it read: a block read without a status
+// and given one during the pull keeps it too.
 func TestPullKeepsAStatusMovedDuringThePull(t *testing.T) {
-	e := i486Setup(t, "i486during", "")
-	e.pull(t, i486Remote("open", "Crane", "forge body", 1))
-	_, _, id, _ := readMapping(t, e.pool, e.proj.ID, "issue", 5)
+	for _, tc := range []struct {
+		name       string
+		createType string // the tenant's issue type at the pull-create ("" = builtin)
+		pullType   string // the tenant's issue type from then on ("" = unchanged)
+		move       string
+	}{
+		{"a status set before", "", "", "in-progress"},
+		{"no status before (pulled without a workflow)", i486NoWorkflow, i486TenantWorkflow, "review"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := i486Setup(t, "i486during", tc.createType)
+			e.pull(t, i486Remote("open", "Crane", "forge body", 1))
+			_, _, id, _ := readMapping(t, e.pool, e.proj.ID, "issue", 5)
+			if tc.pullType != "" {
+				e.setTenantType(t, tc.pullType)
+			}
 
-	res := i452PullHeld(t, e.dsn, e.proj, "body edited on the forge", func() { e.move(t, id, "in-progress") })
+			remote := i486Remote("open", "Crane", "body edited on the forge", 2)
+			res := e.pullHeld(t, remote, func() { e.move(t, id, tc.move) })
 
-	if res.Applied != 1 || res.Conflicts != 0 {
-		t.Fatalf("pull: %+v, want one applied, no conflict", res)
+			if res.Applied != 1 || res.Conflicts != 0 {
+				t.Fatalf("pull: %+v, want one applied, no conflict", res)
+			}
+			b := getBlock(t, e.pool, e.proj.Scope, id)
+			if b.WorkflowStatus != tc.move || b.Content != remote.Body {
+				t.Errorf("after the pull: status %q body %q, want %q and the remote body", b.WorkflowStatus, b.Content, tc.move)
+			}
+			e.inSync(t, id, remote)
+		})
 	}
-	b := getBlock(t, e.pool, e.proj.Scope, id)
-	if b.WorkflowStatus != "in-progress" || b.Content != "body edited on the forge" {
-		t.Errorf("after the pull: status %q body %q, want in-progress and the remote body", b.WorkflowStatus, b.Content)
-	}
-	e.inSync(t, id, IssueRemote{Number: 5, Title: "Crane", Body: "body edited on the forge", State: "open"})
 }
