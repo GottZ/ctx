@@ -33,7 +33,7 @@ ctx get <block-id>                                      read one block in full
 - **Duplicates caught, links on request.** Guard compares each new block with the closest ones and, depending on
   the block type, archives a duplicate or flags it for you. Dream Mode, once you switch it on, reads blocks in the
   background, links related ones and marks what a newer block replaces.
-- **One store for every agent.** 16 MCP tools for Claude Code, claude.ai or any MCP client, a CLI for scripts,
+- **One store for every agent.** 17 MCP tools for Claude Code, claude.ai or any MCP client, a CLI for scripts,
   cron and hooks, and a plain HTTP API. In Claude Code, two hooks give each subagent the project's briefing when it
   starts and save the findings it marks when it ends.
 - **Several teams on one server.** Tenants hold scopes, scopes hold blocks. A key reads only the scopes it was
@@ -364,7 +364,7 @@ The full picture is in [Security](docs/security.md); reporting a vulnerability i
 | [Architecture](docs/architecture.md) | Retrieval pipeline, cyclic time model, Dream Mode, Guard, block types, backend pool |
 | [Multi-tenancy](docs/multi-tenancy.md) | Tenants, scopes and blocks, grants, admin tiers, per-tenant settings, secrets and quotas, onboarding |
 | [HTTP API](docs/api.md) | Endpoints, manage actions, graph, settings, backend pool, web chat, the OpenAI-compatible API |
-| [MCP reference](docs/mcp.md) | All 16 MCP tools with parameters, answers, error codes and staged writes |
+| [MCP reference](docs/mcp.md) | All 17 MCP tools with parameters, answers, error codes and staged writes |
 | [CLI reference](docs/cli.md) | The `ctx` commands, exit codes, tenants, quotas, keys, block grants, model consumers |
 | [Security](docs/security.md) | Admin tier, sealed secrets and break-glass, trust and sensitivity, audit trail |
 | [Operations](docs/operations.md) | Setup, environment variables, backends, models and hardware, backups, deploy and migrations |

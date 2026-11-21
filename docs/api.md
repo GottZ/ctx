@@ -604,7 +604,7 @@ External programs that hold a model key (`ctxm_…`, see [model consumers](#mode
 |---|---|---|
 | `GET` | `/v1/models` | `{"object":"list","data":[…]}` — the model aliases the key may use, sorted by `id`; nothing released ⇒ `"data":[]` |
 | `GET` | `/v1/models/{id}` | one model object, or `404 model_not_found`. Alias names may contain `/` (`qwen/x`); the path takes the name as is or percent-encoded (`qwen%2Fx`, what the SDKs send) |
-| `POST` | `/v1/chat/completions` | a chat completion, non-streamed ([chat completions](#chat-completions-post-v1chatcompletions)); `stream: true` is a `400` until streaming lands |
+| `POST` | `/v1/chat/completions` | a chat completion, non-streamed or streamed with `stream: true` ([chat completions](#chat-completions-post-v1chatcompletions), [streaming](#streaming-stream-true)) |
 | `POST` | `/v1/embeddings` | the embeddings of one text or a list of texts ([embeddings](#embeddings-post-v1embeddings)) |
 | `POST` | `/v1/rerank` | the documents ranked by relevance to a query, Jina's form ([rerank](#rerank-post-v1rerank-post-v2rerank)) |
 | `POST` | `/v2/rerank` | the same, Cohere v2's form |
