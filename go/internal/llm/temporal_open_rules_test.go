@@ -166,3 +166,89 @@ func TestRules_NegativeCorpusOpensNoWindow(t *testing.T) {
 		}
 	}
 }
+
+// TestRules_AYearBeforeAWordIsNoMonth (round 1, R1): a year followed by a
+// month name that is a word of its own ("may", "march", "august") is no edge
+// — "Logs after 2025 may be deleted" names no month. The open edges take no
+// year-first form at all; "seit"/"since" and the other window words keep it
+// for the other month names.
+func TestRules_AYearBeforeAWordIsNoMonth(t *testing.T) {
+	checkRules(t, now463, map[string]wantDate{
+		"Logs after 2025 may be deleted":   {"", "", ""},
+		"Tests before 2024 may fail":       {"", "", ""},
+		"Requests since 2024 may time out": {"", "", ""},
+		"Teams until 2024 march on":        {"", "", ""},
+		"after 2025 August":                {"", "", ""},
+		"nach 2025 Oktober":                {"", "", ""},
+		"seit 2024 Oktober":                {"2024-10-01", "2026-11-21", "range"},
+		"since 2024 October":               {"2024-10-01", "2026-11-21", "range"},
+		"since May 2024":                   {"2024-05-01", "2026-11-21", "range"},
+		"after May 2024":                   {"2024-06-01", "", DirFrom},
+	})
+}
+
+// TestRules_ANearnessOrUnitWordBeforeTheEdgeKeepsTheDay (round 1, R2): a
+// word of nearness ("kurz", "shortly", …) or a time unit or time of day
+// ("Abend", "night", "Wochenende", "Quartal", …) right before "vor", "nach",
+// "before" or "after" makes it a distance from the date: the question keeps
+// the day it names. Such a word further back does not.
+func TestRules_ANearnessOrUnitWordBeforeTheEdgeKeepsTheDay(t *testing.T) {
+	checkRules(t, now463, map[string]wantDate{
+		"kurz vor dem 24.12.2026":            {"2026-12-24", "", "past"},
+		"knapp nach dem 01.01.2026":          {"2026-01-01", "", "past"},
+		"unmittelbar vor dem 15.03.2026":     {"2026-03-15", "", "past"},
+		"shortly before 2024-12-24":          {"2024-12-24", "", "past"},
+		"right after 2024-12-24":             {"2024-12-24", "", "past"},
+		"the night before 2024-12-24":        {"2024-12-24", "", "past"},
+		"am Abend vor dem 24.12.2026":        {"2026-12-24", "", "past"},
+		"am Morgen nach dem 01.01.2026":      {"2026-01-01", "", "past"},
+		"das Wochenende vor dem 15.03.2026":  {"2026-03-15", "", "past"},
+		"the weekend after 2026-03-15":       {"2026-03-15", "", "past"},
+		"ein Quartal nach dem 01.01.2026":    {"2026-01-01", "", "past"},
+		"10 Sekunden vor 2026-01-01":         {"2026-01-01", "", "past"},
+		"Eine Woche nach dem 01.05.2026":     {"2026-05-01", "", "past"},
+		"zwei Wochen vor dem 01.05.2026":     {"2026-05-01", "", "past"},
+		"the morning after 2026-01-01":       {"2026-01-01", "", "past"},
+		// A unit or nearness word further back is no distance.
+		"Welche Tage waren vor dem 15.03.2026 frei?": {"2026-03-14", "", DirUntil},
+		"Kurz gesagt: was lief nach dem 15.03.2026?": {"2026-03-16", "", DirFrom},
+	})
+}
+
+// TestRules_VorAFutureDayIsADeadline (round 1, R3): "vor X" and "before X"
+// with X after today are the deadline from today to the day before X, as
+// "bis" with a later end is a deadline; with X before today they stay the
+// time up to the day before X. "nach X" with X before today stays the time
+// from the day after X on, open towards the future (for contents up to today
+// the same as up to today).
+func TestRules_VorAFutureDayIsADeadline(t *testing.T) {
+	checkRules(t, now463, map[string]wantDate{
+		"Was muss ich vor dem 01.12.2026 erledigen?":   {"2026-11-21", "2026-11-30", "range"},
+		"Was muss ich vor nächstem Freitag erledigen?": {"2026-11-21", "2026-11-26", "range"},
+		"before 2027-01-01":                            {"2026-11-21", "2026-12-31", "range"},
+		"vor März 2027":                                {"2026-11-21", "2027-02-28", "range"},
+		"vor morgen":                                   {"2026-11-21", "2026-11-21", "range"},
+		"vor heute":                                    {"2026-11-20", "", DirUntil},
+		"vor November 2026":                            {"2026-10-31", "", DirUntil},
+		"vor dem 15.03.2024":                           {"2024-03-14", "", DirUntil},
+		"nach dem 15.03.2024":                          {"2024-03-16", "", DirFrom},
+		"nach 2027-01-01":                              {"2027-01-02", "", DirFrom},
+	})
+}
+
+// TestRules_FromNowUntil (round 1, R4): "from now until Friday" and "von
+// jetzt bis Freitag" are the window from today to Friday; a "from" whose
+// start the rules cannot read does not keep "until" from its window.
+func TestRules_FromNowUntil(t *testing.T) {
+	checkRules(t, now463, map[string]wantDate{
+		"Which tickets stay open from now until Friday?":      {"2026-11-21", "2026-11-27", "range"},
+		"von jetzt bis Freitag":                               {"2026-11-21", "2026-11-27", "range"},
+		"ab jetzt bis Ende März 2027":                         {"2026-11-21", "2027-03-31", "range"},
+		"Move the tickets from backlog to done until Friday":  {"2026-11-21", "2026-11-27", "range"},
+		"Tickets from Morgan until Friday":                    {"2026-11-21", "2026-11-27", "range"},
+		"What happened from the start until 2026-03-05?":      {"2026-03-05", "", DirUntil},
+		"vom Projektstart bis 05.03.2026":                     {"2026-03-05", "", "past"},
+		// "seit" keeps the typo tolerance it has alone, also before "bis".
+		"seit gesten bis morgen":                              {"2026-11-20", "2026-11-22", "range"},
+	})
+}

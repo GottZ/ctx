@@ -987,6 +987,13 @@ func matchOpenEdge(query string, now time.Time, edge string) *TemporalResult {
 			continue
 		}
 		word, phrase := lower[m[2]:m[3]], lower[m[4]:m[5]]
+		// A year first is no edge here: "2024 Oktober" has no use, and "after
+		// 2025 may be deleted" names no month.
+		if w := phraseWords(phrase); len(w) > 0 {
+			if _, year := isYear(w[0]); year {
+				continue
+			}
+		}
 		e := resolvePhraseEdge(phrase, false, now)
 		if e.day.IsZero() || e.fuzzy || e.rel || edge != "" && fmtDate(e.day) != edge {
 			continue
@@ -1489,6 +1496,12 @@ func resolveThreeWordPhrase(words []string, now time.Time) (phraseEdge, bool) {
 	return phraseEdge{}, false
 }
 
+// monthWords are the month names that are words of their own as well: the
+// English modal "may", the verb and noun "march", the adjective "august". A
+// year before one of them is no date ("Tests before 2024 may fail"); after
+// it, a year is ("May 2024"), as on the write side.
+var monthWords = toWordSet("may", "march", "august")
+
 // resolvePhrase resolves a 1-3 word temporal phrase like "letztem Montag", "nächsten Freitag",
 // "vorgestern", "August 2024", "Ende März 2025".
 // For multi-word phrases, tries specific patterns first, then falls back to fewer words.
@@ -1526,9 +1539,10 @@ func resolvePhraseEdge(phrase string, defaultBackward bool, now time.Time) phras
 		}
 	}
 
-	// Year + Month: "2024 August" → 2024-08-01
+	// Year + Month: "2024 Oktober" → 2024-10-01 — not with a month name that
+	// is a word of its own ("Logs after 2025 may be deleted", issue #463).
 	if y, yOk := isYear(w0); yOk {
-		if m, mOk := lookupMonth(w1); mOk {
+		if m, mOk := lookupMonth(w1); mOk && !monthWords[w1] {
 			return phraseEdge{day: resolveMonthYear(m, y, now), month: true}
 		}
 	}
