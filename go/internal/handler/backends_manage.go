@@ -405,8 +405,12 @@ func writeBackendTxFailure(w http.ResponseWriter, stage string) {
 
 // reloadAfterMutation is the synchronous half of the snapshot propagation.
 // The mutation is committed — a reload failure must not turn it into a
-// client error; the NOTIFY path retries momentarily.
+// client error; the NOTIFY path retries momentarily. The reload runs on a
+// follow-up context (issue #453): a client that leaves no longer cuts it, and
+// followUpTimeout ends one that hangs inside the shutdown's drain.
 func (h *ManageHandler) reloadAfterMutation(ctx context.Context, action string) {
+	ctx, cancel := followUpContext(ctx)
+	defer cancel()
 	if err := h.backendPool.Reload(ctx); err != nil {
 		logRequestError(ctx, "backends: post-mutation reload failed — NOTIFY path will converge",
 			"action", action, "error", err)

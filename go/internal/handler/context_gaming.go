@@ -104,7 +104,11 @@ func (h *ManageHandler) handleGamingMode(w http.ResponseWriter, r *http.Request,
 		// out of this wave's scope.
 		h.reloadAfterMutation(ctx, "eject/gaming-mode")
 		if h.settingsReload != nil {
-			if err := h.settingsReload(ctx); err != nil {
+			// Committed: the reload runs on a follow-up context (issue #453).
+			rctx, cancel := followUpContext(ctx)
+			err := h.settingsReload(rctx)
+			cancel()
+			if err != nil {
 				h.gamingInternalError(w, ctx, "eject/gaming-mode: persisted but reload failed", err)
 				return
 			}

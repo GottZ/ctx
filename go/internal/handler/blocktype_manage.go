@@ -348,10 +348,17 @@ func (h *ManageHandler) handleTypeDelete(w http.ResponseWriter, r *http.Request,
 // /api/types writes ran identical copies that differed in nothing but the log
 // prefix, so the prefix is the parameter. Each transport keeps its own word in
 // the message ("manage:" / "types:") — the log line is what an operator greps.
+//
+// The write is committed: the reload runs on a follow-up context (issue
+// #453) — a client that leaves no longer cuts it, and followUpTimeout ends
+// one that hangs (holding the registry's reload lock, which the NOTIFY
+// listener waits on) inside the shutdown's drain.
 func reloadBlockTypes(ctx context.Context, reg *blocktype.Registry, pool *pgxpool.Pool, noun, reqID string) {
 	if reg == nil {
 		return
 	}
+	ctx, cancel := followUpContext(ctx)
+	defer cancel()
 	if err := reg.Reload(ctx, pool); err != nil {
 		slog.Warn(noun+": block-type registry reload after mutation failed — NOTIFY listener will retry",
 			"error", err, "request_id", reqID)

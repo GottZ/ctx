@@ -47,6 +47,17 @@ const (
 	// storeWriteCap mirrors handler.blockSizeLimit: what the public write API
 	// refuses, the background must not smuggle past it.
 	storeWriteCap = 50 * 1024
+	// classifyFollowUpTimeout bounds the type classification after the map's
+	// upsert. The map is committed, so the classification no longer ends with
+	// the caller's context — a client that leaves POST /api/digest, the
+	// scheduler's shutdown — and this bound ends it instead (issue #453).
+	// Half the handlers' follow-up bound (internal/handler followUpTimeout,
+	// 10 s): POST /api/digest runs this classification and the topic map's
+	// (digest.classifyFollowUpTimeout) in one request, and their sum has to
+	// stay inside ctxd's 15 s HTTP drain. A constant of this package: it may
+	// import neither internal/config (depguard) nor internal/handler (which
+	// imports it).
+	classifyFollowUpTimeout = 5 * time.Second
 )
 
 // operationalRationales names the types that are outside the topic map by
@@ -197,8 +208,13 @@ func Run(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, cfg Config
 
 	// Classify hook: metadata.is_meta=true makes the system-meta rule fire, and
 	// that is what keeps the map out of retrieval. Non-fatal — the block exists,
-	// the next cycle retries — but never silent.
-	if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, block.ID, block.Title, block.Metadata); err != nil {
+	// the next cycle retries — but never silent. The map is committed: the
+	// classification runs on ctx's values but not its cancellation, within
+	// classifyFollowUpTimeout (issue #453).
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), classifyFollowUpTimeout)
+	_, err = store.ClassifyBlockAfterUpsert(cctx, pool, set, block.ID, block.Title, block.Metadata)
+	cancel()
+	if err != nil {
 		slog.Warn("rootmap: classify failed", "error", err, "block_id", block.ID)
 	}
 

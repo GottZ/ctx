@@ -101,8 +101,11 @@ func runStoreBatch(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, 
 	noteToolWrite(ctx, nil)
 	out := storeBatchOutcome(results)
 	// The blocks and their booking are committed: the afterwork must not stop
-	// halfway because the client went away.
-	after := context.WithoutCancel(ctx)
+	// halfway because the client went away, and one bound ends all of it
+	// (followUpContext, issue #453) — not one per block, so a shutdown's
+	// drain waits for a whole batch no longer than followUpTimeout.
+	after, cancel := followUpContext(ctx)
+	defer cancel()
 	for i, r := range results {
 		b := r.Block
 		if b == nil {
@@ -309,7 +312,9 @@ func executeConfirmedStoreBatch(ctx context.Context, pool *pgxpool.Pool, blockty
 		logRequestError(ctx, "confirm: confirmed batch execute failed", "error", err, "write_outcome", writeOutcome(err), "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
-	after := context.WithoutCancel(ctx)
+	// Committed: one bound for the whole afterwork, as on the direct path.
+	after, cancel := followUpContext(ctx)
+	defer cancel()
 	for _, r := range results {
 		if r.Block != nil {
 			finishStoredBlock(after, pool, set, r.Block, RequestIDFromContext(ctx))
