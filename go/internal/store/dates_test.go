@@ -135,8 +135,8 @@ func TestExtractDates_LongS(t *testing.T) {
 	wantDates(t, map[string][]string{
 		"Augu" + longS + "t 2026": aug, "AUGU" + longS + "T 2026": aug, "am augu" + longS + "t" + nbsp + "2026.": aug,
 		"x" + longS + "eptember 2026": sep, "x" + longS + "EPTEMBER 2026": sep,
-		"O" + kelvinSign + "tober 2026": {"2026-10-01T00:00:00Z"},
-		longS + "eptember 2026": nil, "am " + longS + "eptember 2026": nil,
+		"O" + kelvinSign + "tober 2026": {"2026-10-01T00:00:00Z"}, longS + "eptember 2026": nil,
+		"am " + longS + "eptember 2026": nil,
 	})
 }
 

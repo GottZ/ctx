@@ -296,9 +296,10 @@ var (
 	outside437Spaces = strings.NewReplacer(nbsp, " ", nnbsp, " ")
 )
 
-// outside437 rewrites content out of every class of issue437Classes: the
-// years 2031-2099 become 2029, "maerz" and "marz" become "März", and the
-// no-break spaces become spaces.
+// outside437 rewrites content out of the classes of #437: the years
+// 2031-2099 become 2029, "maerz" and "marz" become "März", and the no-break
+// spaces become spaces. The contents it is used on carry no long s, so they
+// are outside the class of #451 too (assertMatchesFrozen checks every one).
 func outside437(content string) string {
 	content = outside437Years.ReplaceAllString(content, "2029")
 	content = outside437Maerz.ReplaceAllString(content, "März")
@@ -608,7 +609,9 @@ func TestMonthForms_ListEveryAlternativeByItsLastLetter(t *testing.T) {
 // behind runs of date spaces of every kind, through the scanner: each one is
 // the one match of its form, at the offsets of the name and the year, and
 // agrees with the reference. The dispatch of matchMonthYear by the rune
-// before the date spaces lets every one of them through.
+// before the date spaces lets every one of them through. With -short (the
+// race runs, where the reference is slow) only the contents with the first
+// kind of date space go through the reference as well.
 func TestScanDates_EveryMonthSpellingMatches(t *testing.T) {
 	for _, form := range []struct {
 		name     string
@@ -627,14 +630,16 @@ func TestScanDates_EveryMonthSpellingMatches(t *testing.T) {
 				if name[0] >= utf8.RuneSelf {
 					before = "am x"
 				}
-				for _, sep := range []string{" ", "  \t\n", nbsp, " " + nbsp + nnbsp + "\r", nnbsp} {
+				for i, sep := range []string{" ", "  \t\n", nbsp, " " + nbsp + nnbsp + "\r", nnbsp} {
 					c := before + name + sep + "2026."
 					s, y := len(before), len(c)-5
 					want := [][]int{{s, y + 4, s, s + len(name), y, y + 4}}
 					if got := form.matches(scanDates(c)); !reflect.DeepEqual(got, want) {
 						t.Fatalf("%s matches of %s: got %v, want %v", form.name, quoteHead(c), got, want)
 					}
-					assertMatchesReference(t, c)
+					if i == 0 || !testing.Short() {
+						assertMatchesReference(t, c)
+					}
 					n++
 				}
 			}
