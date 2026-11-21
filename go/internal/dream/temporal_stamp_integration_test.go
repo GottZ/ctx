@@ -503,6 +503,9 @@ func TestTemporalReviewStampWithAContentWriteInFlight(t *testing.T) {
 	close(release)
 	i427Await(t, done, "cycle while the write holds the row")
 	t.Logf("the cycle finished while the content write (pid %d) held the row", updPID)
+	if rig.due(t, b.ID) {
+		t.Fatalf("the review of the version it read was not recorded while the write held the row")
+	}
 	hold.Release()
 	<-updated
 

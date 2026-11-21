@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log/slog"
 	"math/rand"
 	"strings"
 	"sync"
@@ -667,6 +668,9 @@ func TestTemporalWritersAgainstReviews(t *testing.T) {
 		return i427Dates(f)(p)
 	}
 	rig.review.record(answer)
+	// A failed temporal write (a deadlock, a timeout) is logged and the
+	// cycle goes on to its throttle; the catch-up below would hide it.
+	failedWrites := i452CaptureMessages(t, "temporal validation failed")
 
 	ids := make([]string, blocks)
 	for i := range ids {
@@ -719,6 +723,9 @@ func TestTemporalWritersAgainstReviews(t *testing.T) {
 		t.Errorf("%s", k)
 		return true
 	})
+	if n := failedWrites.count(); n > 0 {
+		t.Errorf("%d temporal validation(s) failed during the load: %v", n, failedWrites.all())
+	}
 
 	// The reviews catch up: a cycle per block until none is due.
 	for _, id := range ids {
@@ -760,6 +767,54 @@ func TestTemporalWritersAgainstReviews(t *testing.T) {
 			t.Errorf("block %s: still due after the catch-up: %d review(s)", id, len(p))
 		}
 	}
+}
+
+// i452Messages records the log records whose message contains part, from
+// every block.
+type i452Messages struct {
+	part string
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (m *i452Messages) Enabled(context.Context, slog.Level) bool { return true }
+func (m *i452Messages) WithAttrs([]slog.Attr) slog.Handler      { return m }
+func (m *i452Messages) WithGroup(string) slog.Handler           { return m }
+func (m *i452Messages) Handle(_ context.Context, r slog.Record) error {
+	if strings.Contains(r.Message, m.part) {
+		line := r.Message
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "error" {
+				line += ": " + a.Value.String()
+			}
+			return true
+		})
+		m.mu.Lock()
+		m.msgs = append(m.msgs, line)
+		m.mu.Unlock()
+	}
+	return nil
+}
+
+func (m *i452Messages) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.msgs)
+}
+
+func (m *i452Messages) all() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.msgs...)
+}
+
+func i452CaptureMessages(t *testing.T, part string) *i452Messages {
+	t.Helper()
+	m := &i452Messages{part: part}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(m))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return m
 }
 
 // i452Cycle runs one dream cycle that ends after the temporal review; a

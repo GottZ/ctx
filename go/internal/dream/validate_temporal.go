@@ -154,9 +154,11 @@ func (r *Router) temporalReview(ctx context.Context, block *BlockInfo, userPromp
 // the rows of the content's dates and the LLM's, and the version of the title
 // and content it read, in one transaction (issue #452); it replaces rows an
 // earlier review left. A review that failed records nothing and the block
-// stays due with the rows it has: an error return (the database), an LLM
-// failure and an answer that does not parse (both non-fatal, no error). Before,
-// the caller stamped the block after each of them.
+// stays due with the rows it has — those phase 1 left, which may have
+// rewritten them from the content before the LLM call: an error return (the
+// database), an LLM failure and an answer that does not parse (both
+// non-fatal, no error). Before, the caller stamped the block after each of
+// them.
 //
 // dropped reports that a write of the validation found the block no longer
 // holding what it was picked with, or gone, and wrote nothing (issue #427):

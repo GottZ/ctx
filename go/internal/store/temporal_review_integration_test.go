@@ -108,6 +108,18 @@ func TestTemporalReviewVersionFollowsTitleAndContent(t *testing.T) {
 		t.Errorf("the afterwork of a content write left %d version row(s)", n)
 	}
 
+	// Phase 1's writer (PopulateTemporal) deletes the version as well: its
+	// rows are the extraction's, not the review's.
+	if applied, err := store.PopulateTemporalReview(ctx, pool, u.ID, title, newer, found, u.CreatedAt); err != nil || !applied {
+		t.Fatalf("review of the newer content: applied=%v err=%v", applied, err)
+	}
+	if applied, err := store.PopulateTemporal(ctx, pool, u.ID, newer, store.ExtractDates(newer), u.CreatedAt); err != nil || !applied {
+		t.Fatalf("phase 1: applied=%v err=%v", applied, err)
+	}
+	if n := i452Versions(t, pool, b.ID); n != 0 || !i452Due(t, pool, b.ID) {
+		t.Errorf("phase 1 left %d version row(s), due=%v; want none and due", n, i452Due(t, pool, b.ID))
+	}
+
 	// A block that is gone answers not applied, without an error.
 	if applied, err := store.PopulateTemporalReview(ctx, pool, "019d0000-0000-7000-9000-000000042700", title, content, found, b.CreatedAt); err != nil || applied {
 		t.Errorf("gone block: applied=%v err=%v, want not applied and no error", applied, err)
@@ -320,6 +332,9 @@ func TestTemporalReviewCoversPlanUsesPrimaryKeys(t *testing.T) {
 	}
 	if strings.Contains(text, "Seq Scan") {
 		t.Errorf("the check scans a table, plan:\n%s", text)
+	}
+	if !strings.Contains(text, "Index Cond: ((block_id = context_blocks.id) AND (source_time = t.at))") {
+		t.Errorf("the check does not read the block's temporal rows by (block_id, source_time), plan:\n%s", text)
 	}
 }
 
