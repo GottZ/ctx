@@ -114,9 +114,9 @@ type GeneratedAgainst struct {
 	MigrationMax   int `json:"migration_max"`
 	MigrationCount int `json:"migration_count"`
 	// MigrationChainSHA256 names the migration chain the generator ran: the
-	// sha256 of the `sha256sum *.sql` listing of go/migrations (LC_ALL=C
-	// order), whose per-file hashes are the checksums the runner records in
-	// _migrations. Any byte change of a migration changes it, a schema-neutral
+	// sha256 of the `sha256sum` listing of every go/migrations/*.sql in byte
+	// order of the names, whose per-file hashes are the checksums the runner
+	// records in _migrations. Any byte change of a migration changes it, a schema-neutral
 	// edit included, so a regenerated manifest always differs from a stale
 	// one. Nothing at runtime reads it — Check, the boot check and the API
 	// compare the schema — the pre-commit hook (Gate 3) and

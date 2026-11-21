@@ -1113,9 +1113,10 @@ Enable with `git config core.hooksPath .hooks`:
 
 `go/internal/schemacontract/manifest.json` is generated, never hand-edited, and names the
 migration chain it was generated from: `generated_against.migration_chain_sha256` is the
-sha256 of what `LC_ALL=C sha256sum *.sql` prints in `go/migrations` — one line per
-top-level migration file, whose hash is the checksum the migration runner records in
-`_migrations`. Any byte change of a migration moves it, so an edit that leaves the schema
+sha256 of the `sha256sum` listing of every top-level `go/migrations/*.sql` in byte order of
+the names (names starting with `.` or `_` included, as `go:embed` includes them) — one
+line per file, whose hash is the checksum the migration runner records in `_migrations`.
+Any byte change of a migration moves it, so an edit that leaves the schema
 as it was (a condition inside a `DO` block, the wording of a `RAISE WARNING`) still yields
 a different manifest — that field and nothing else — and there is always something to
 stage.
@@ -1138,9 +1139,12 @@ cache.
 **pre-commit Gate 3.** Whenever a commit touches a top-level `go/migrations/*.sql` (added,
 edited, renamed or deleted) or the manifest, the hook recomputes the fingerprint over the
 staged files and refuses the commit unless the staged manifest names exactly that chain.
-It only hashes (about 20 ms for the chain of 76 files), needs no Docker, and a commit that
-touches neither path pays nothing beyond one `git diff --cached`. There is no
-comment-only exception any more and no reason for `--no-verify`: a regeneration is the
+It hashes the bytes as staged, whatever `core.autocrlf` says: a working tree with CRLF
+line ends yields a manifest the hook refuses, because CI and every build see the committed
+bytes. It only hashes (the whole hook ran in about 35 ms for a commit to the chain of 76
+files, against about 25 ms before), needs no Docker, and a commit that touches neither
+path pays nothing beyond one `git diff --cached`. There is no comment-only exception any
+more and no reason for `--no-verify`: a regeneration is the
 way through for every migration change. `bash .hooks/pre-commit.test.sh` runs the hook's
 test matrix against throwaway repositories; CI runs it in the `lint` job.
 

@@ -76,7 +76,8 @@ chain_sha256() {
 # HEAD's manifest (see the header).
 regen_manifest() {
     local names count max fp
-    names=$(git -C "$1" ls-files -- "$CHAIN" | sed 's|.*/||')
+    # migration_max/count count numbered files only, as the generator does
+    names=$(git -C "$1" ls-files -- "$CHAIN" | sed 's|.*/||' | grep '^[0-9][0-9]*_')
     count=$(printf '%s\n' "$names" | grep -c .)
     max=$(printf '%s\n' "$names" | sed 's/_.*//' | sed 's/^0*//' | sort -n | tail -1)
     fp=$(chain_sha256 "$1")
@@ -97,17 +98,24 @@ newest() {
 
 PASSED=0
 FAILED=0
-# run_case <name> <want: accept|reject> <setup function>
+# run_case <name> <want: accept|reject> <setup function> [VAR=value ...]
+# The hook runs with the given environment, plus the lines a setup writes to
+# <repo>/.git/case-env (for values that name the throwaway repo).
 run_case() {
     local name=$1 want=$2 setup=$3 d out rc got
+    shift 3
     d=$(new_repo) || { echo "FAIL $name: setup of the throwaway repo"; FAILED=$((FAILED + 1)); return; }
     if ! "$setup" "$d"; then
         echo "FAIL $name: case setup"; FAILED=$((FAILED + 1)); return
     fi
-    out=$(cd "$d" && sh "$HOOK" 2>&1)
+    if [ -f "$d/.git/case-env" ]; then
+        while IFS= read -r line; do set -- "$@" "$line"; done < "$d/.git/case-env"
+    fi
+    out=$(cd "$d" && env "$@" sh "$HOOK" 2>&1)
     rc=$?
     if [ "$rc" = 0 ]; then got=accept; else got=reject; fi
-    if [ "$got" = reject ] && ! printf '%s\n' "$out" | grep -q 'REJECTED'; then
+    # a refusal counts only when it is Gate 3's
+    if [ "$got" = reject ] && ! printf '%s\n' "$out" | grep -q 'REJECTED.*manifest'; then
         got="error(rc=$rc)"
     fi
     if [ "$got" = "$want" ]; then
@@ -177,6 +185,29 @@ case_nested_sql_not_in_chain() {
     stage "$1" go/migrations/testdata/precommit_test_matrix.sql "$WORK/nested.sql"
 }
 
+# go:embed *.sql embeds a name starting with '.', so the chain counts it.
+case_dot_file_regenerated() {
+    printf 'SELECT 1;\n' > "$WORK/dot.sql"
+    stage "$1" go/migrations/.precommit_test_matrix.sql "$WORK/dot.sql" && stage_regen_manifest "$1"
+}
+
+# `git commit <paths>`, `-a` and `-i` hand the hook a temporary index in
+# GIT_INDEX_FILE: the hook has to read that one, not .git/index.
+alternate_index() {
+    cp "$1/.git/index" "$1/.git/alt-index" || return 1
+    echo "GIT_INDEX_FILE=$1/.git/alt-index" > "$1/.git/case-env"
+}
+case_alternate_index_not_regenerated() {
+    alternate_index "$1" && (export GIT_INDEX_FILE="$1/.git/alt-index"; case_neutral_edit_not_regenerated "$1")
+}
+case_alternate_index_regenerated() {
+    # .git/index gets the stale state, the temporary index the regenerated one
+    case_neutral_edit_not_regenerated "$1" || return 1
+    git -C "$1" read-tree HEAD && alternate_index "$1" || return 1
+    (export GIT_INDEX_FILE="$1/.git/alt-index"; case_neutral_edit_regenerated "$1") || return 1
+    case_neutral_edit_not_regenerated "$1"
+}
+
 echo "pre-commit Gate 3 matrix — hook: $HOOK, base: $BASE"
 run_case ordinary_commit                    accept case_ordinary
 run_case new_migration_with_manifest        accept case_new_migration_with_manifest
@@ -189,6 +220,16 @@ run_case manifest_of_other_edit             reject case_manifest_of_other_edit
 run_case manifest_alone_from_unstaged_edit  reject case_manifest_alone_from_unstaged_edit
 run_case deleted_migration_not_regenerated  reject case_deleted_migration_not_regenerated
 run_case nested_sql_not_in_chain            accept case_nested_sql_not_in_chain
+run_case dot_file_regenerated               accept case_dot_file_regenerated
+run_case alternate_index_not_regenerated    reject case_alternate_index_not_regenerated
+run_case alternate_index_regenerated        accept case_alternate_index_regenerated
+# A user's core.autocrlf (Git for Windows default) must not change the bytes
+# the hook hashes: the chain is what is staged.
+run_case autocrlf_user_config_regenerated   accept case_neutral_edit_regenerated \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.autocrlf GIT_CONFIG_VALUE_0=true
+# `git --literal-pathspecs commit` exports GIT_LITERAL_PATHSPECS=1 to hooks.
+run_case literal_pathspecs_not_regenerated  reject case_neutral_edit_not_regenerated \
+    GIT_LITERAL_PATHSPECS=1
 
 # The checked-in manifest names the checked-in chain: the Go generator and
 # the definition above agree on the real files.

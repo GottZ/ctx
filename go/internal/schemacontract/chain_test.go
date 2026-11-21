@@ -19,9 +19,10 @@ import (
 )
 
 // migrationChainSHA256 computes GeneratedAgainst.MigrationChainSHA256 for
-// the *.sql files at the top of fsys: sha256 over one line
+// the *.sql files at the top of fsys — every one go:embed takes, names
+// starting with '.' or '_' included: sha256 over one line
 // "<sha256 hex of the file>  <file name>\n" per file, in byte order of the
-// names — what `LC_ALL=C sha256sum *.sql | sha256sum` prints in
+// names, i.e. what `sha256sum <those files> | sha256sum` prints in
 // go/migrations. Each line's hash is the checksum the migration runner
 // records for that file (store.applyMigration), so the fingerprint moves
 // with every byte the runner would see move. .hooks/pre-commit (Gate 3)
@@ -74,11 +75,12 @@ func declaredExtensions() map[string]ExtSpec {
 
 // TestMigrationChainSHA256Definition pins the definition the pre-commit hook
 // shares: the expected value is the output of
-// `LC_ALL=C sha256sum *.sql | sha256sum` over these three files (99_early
-// sorts after 102_beta: byte order of the names, not version order), and
-// files that are not *.sql at the top level do not count.
+// `sha256sum .dot.sql 101_alpha.sql 102_beta.sql 99_early.sql | sha256sum`
+// (byte order of the names, not version order: 99_early sorts last, .dot
+// first), and files that are not *.sql at the top level do not count.
 func TestMigrationChainSHA256Definition(t *testing.T) {
 	fsys := fstest.MapFS{
+		".dot.sql":                {Data: []byte("SELECT 0;\n")},
 		"101_alpha.sql":           {Data: []byte("CREATE TABLE alpha (id int);\n")},
 		"102_beta.sql":            {Data: []byte("-- beta\nSELECT 1;\n")},
 		"99_early.sql":            {Data: []byte("SELECT 99;\n")},
@@ -89,7 +91,7 @@ func TestMigrationChainSHA256Definition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "d1cd5906e96e66174336f3782a6ea1fb9a2e59dc8c43244ae21061ce4cfb5106"
+	const want = "9437cf107fe32a3f2a9597ec79281a0ec0f0791dbd0e7bec90378421ebbfb8f2"
 	if got != want {
 		t.Errorf("migrationChainSHA256 = %s, want %s", got, want)
 	}

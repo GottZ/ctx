@@ -167,8 +167,9 @@ fi
 #
 # go/internal/schemacontract/manifest.json records the migration chain it
 # was generated from: generated_against.migration_chain_sha256 is the sha256
-# of the `sha256sum *.sql` listing of go/migrations (LC_ALL=C order) — each
-# line's hash is the checksum the migration runner records in _migrations.
+# of the `sha256sum` listing of every go/migrations/*.sql in byte order of
+# the names — each line's hash is the checksum the migration runner records
+# in _migrations.
 # Whenever a commit touches a top-level go/migrations/*.sql (added, edited,
 # renamed, deleted) or the manifest, the staged manifest has to name the
 # staged chain. Every byte counts: an edit that leaves the schema as it was
@@ -193,27 +194,36 @@ sha256_hex() {
     fi
 }
 
-# The fingerprint of the chain in the index: the staged files are written to
-# a temporary directory and listed the way the definition reads.
+# The fingerprint of the chain in the index. The staged files are written to
+# a temporary directory byte for byte as staged — core.autocrlf and core.eol
+# are overridden, and the repository sets no attributes for go/migrations —
+# and hashed in index order (byte order of the names), names starting with
+# '.' or '_' included, as go:embed includes them. GIT_LITERAL_PATHSPECS=0:
+# `git --literal-pathspecs commit` (exported to hooks) would otherwise turn
+# the :(glob) pattern into a literal path that matches nothing.
 staged_chain_sha256() {
+    gate3_names=$(GIT_LITERAL_PATHSPECS=0 git ls-files -- "$GATE3_CHAIN" | sed 's|.*/||')
+    [ -n "$gate3_names" ] || return 1
     gate3_tmp=$(mktemp -d) || return 1
-    git ls-files -z -- "$GATE3_CHAIN" | git checkout-index -z --stdin --prefix="$gate3_tmp/" &&
+    trap 'rm -rf "$gate3_tmp"; exit 1' HUP INT TERM
+    GIT_LITERAL_PATHSPECS=0 git ls-files -z -- "$GATE3_CHAIN" |
+        git -c core.autocrlf=false -c core.eol=lf checkout-index -z --stdin --prefix="$gate3_tmp/" &&
         (
-            LC_ALL=C
-            export LC_ALL
+            set -f
             cd "$gate3_tmp/go/migrations" || exit 1
             if command -v sha256sum >/dev/null 2>&1; then
-                sha256sum -- *.sql
+                sha256sum -- $gate3_names
             else
-                shasum -a 256 -- *.sql
+                shasum -a 256 -- $gate3_names
             fi
         ) | sha256_hex
     gate3_rc=$?
     rm -rf "$gate3_tmp"
+    trap - HUP INT TERM
     return $gate3_rc
 }
 
-GATE3_STAGED=$(git diff --cached --name-only -- "$GATE3_CHAIN" "$GATE3_MANIFEST" 2>/dev/null)
+GATE3_STAGED=$(GIT_LITERAL_PATHSPECS=0 git diff --cached --name-only -- "$GATE3_CHAIN" "$GATE3_MANIFEST" 2>/dev/null)
 if [ -n "$GATE3_STAGED" ]; then
     CHAIN_STAGED=$(staged_chain_sha256)
     CHAIN_NAMED=$(git show ":$GATE3_MANIFEST" 2>/dev/null |
