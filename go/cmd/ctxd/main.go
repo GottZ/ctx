@@ -768,7 +768,7 @@ func main() {
 
 	// Backfill temporal dimensions for blocks missing from context_temporal.
 	if n, err := store.BackfillTemporal(ctx, pool); err != nil {
-		slog.Error("temporal backfill failed", "error", err)
+		slog.Error("temporal backfill failed", "error", err, "blocks_processed", n)
 	} else if n > 0 {
 		slog.Info("temporal backfill complete", "blocks_processed", n)
 	}

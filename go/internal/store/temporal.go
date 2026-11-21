@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/pgxdb"
@@ -404,12 +405,39 @@ func FetchBlockDimensions(ctx context.Context, pool *pgxpool.Pool, blockIDs []st
 	return result, nil
 }
 
+// backfillAttempts bounds the writes BackfillTemporal makes for one block. A
+// block whose content changed between the backfill's read and its write
+// (issue #428) is read again and written with the content it holds then, up
+// to this many writes in all; a block whose content changed on every one of
+// them is left without rows and reported. It is a fixed bound, not a policy:
+// each further try costs a write and a read, and a content that changes
+// faster than the backfill writes is one whose own writes run the afterwork.
+const backfillAttempts = 3
+
+// backfillLeftShown bounds the block ids the backfill's report names.
+const backfillLeftShown = 10
+
+// backfillRereadSQL reads a block the backfill could not write ($1) again:
+// its content and creation time while it is live and still has no rows. A
+// block that has rows by now was written by another temporal writer (the
+// afterwork of the write that changed it); one that is gone or archived needs
+// none.
+const backfillRereadSQL = `SELECT cb.content, cb.created_at
+	 FROM context_blocks cb
+	 WHERE cb.id = $1 AND NOT cb.is_archived
+	   AND NOT EXISTS (SELECT 1 FROM context_temporal ct WHERE ct.block_id = cb.id)`
+
 // BackfillTemporal populates context_temporal for all blocks that don't have
 // temporal dimensions yet. Processes in batches of 50.
-// Returns the number of blocks processed.
+// Returns the number of blocks processed, and an error naming the blocks it
+// left without rows because their content changed on every try
+// (backfillAttempts); the other blocks are written all the same.
 func BackfillTemporal(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	const batchSize = 50
 	processed := 0
+	// left are the blocks given up on; the reads of later batches skip them,
+	// or a full batch of them would be read again and again.
+	left := []string{}
 
 	for {
 		rows, err := pool.Query(ctx,
@@ -417,21 +445,17 @@ func BackfillTemporal(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 			 FROM context_blocks cb
 			 WHERE NOT cb.is_archived
 			   AND NOT EXISTS (SELECT 1 FROM context_temporal ct WHERE ct.block_id = cb.id)
+			   AND cb.id <> ALL($2::uuid[])
 			 LIMIT $1`,
-			batchSize,
+			batchSize, left,
 		)
 		if err != nil {
 			return processed, fmt.Errorf("store: temporal: backfill query: %w", err)
 		}
 
-		type blockRow struct {
-			ID        string
-			Content   string
-			CreatedAt time.Time
-		}
-		var blocks []blockRow
+		var blocks []backfillBlock
 		for rows.Next() {
-			var b blockRow
+			var b backfillBlock
 			if err := rows.Scan(&b.ID, &b.Content, &b.CreatedAt); err != nil {
 				rows.Close()
 				return processed, fmt.Errorf("store: temporal: backfill scan: %w", err)
@@ -450,17 +474,18 @@ func BackfillTemporal(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 		for _, b := range blocks {
 			// Always populate temporal — createdAt is passed as meta-anchor.
 			// Blocks without content times still get dimensions from their
-			// creation time. A block whose content changed since the read
-			// above is skipped and not counted: the afterwork of the write
-			// that changed it writes the data of its content.
-			applied, err := backfillTemporalBlock(ctx, pool, b.ID, b.Content, b.CreatedAt)
+			// creation time.
+			written, gaveUp, err := b.write(ctx, pool)
 			if err != nil {
 				slog.Warn("backfill: temporal refresh failed",
 					"block_id", b.ID, "error", err)
 				continue
 			}
-			if applied {
+			if written {
 				processed++
+			}
+			if gaveUp {
+				left = append(left, b.ID)
 			}
 		}
 
@@ -472,5 +497,42 @@ func BackfillTemporal(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 		}
 	}
 
+	if len(left) > 0 {
+		shown := left[:min(len(left), backfillLeftShown)]
+		return processed, fmt.Errorf("store: temporal: backfill: %d block(s) left without rows, their content changed on each of %d tries: %s",
+			len(left), backfillAttempts, strings.Join(shown, ", "))
+	}
 	return processed, nil
+}
+
+// backfillBlock is one block the backfill read: its id, and the content and
+// creation time it read.
+type backfillBlock struct {
+	ID        string
+	Content   string
+	CreatedAt time.Time
+}
+
+// write writes the block's temporal data with the content read
+// (backfillTemporalBlock). When that content is no longer the block's, the
+// block is read again (backfillRereadSQL) and written with its current
+// content, up to backfillAttempts writes; gaveUp reports a block still live
+// and without rows after the last of them.
+func (b backfillBlock) write(ctx context.Context, pool *pgxpool.Pool) (written, gaveUp bool, err error) {
+	for attempt := 1; ; attempt++ {
+		applied, err := backfillTemporalBlock(ctx, pool, b.ID, b.Content, b.CreatedAt)
+		if err != nil || applied {
+			return applied, false, err
+		}
+		err = pool.QueryRow(ctx, backfillRereadSQL, b.ID).Scan(&b.Content, &b.CreatedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, false, nil // written by another writer, gone or archived
+		}
+		if err != nil {
+			return false, false, fmt.Errorf("store: temporal: backfill re-read: %w", err)
+		}
+		if attempt == backfillAttempts {
+			return false, true, nil
+		}
+	}
 }
