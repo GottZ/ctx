@@ -209,6 +209,45 @@ func TestClientAbortFollowupsClassifyAfterCommit(t *testing.T) {
 		}
 	})
 
+	t.Run("manage update: the re-classification lands after the client left", func(t *testing.T) {
+		reset(t)
+		seed, err := store.UpsertBlock(ctx, pool, "i453", "i453 update seed", "client abort after an update", nil, nil, "private", false, store.SensitivityWrite{}, "")
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		mh := NewManageHandler(pool, nil, nil, nil, nil, nil, nil, reg)
+		logs := installRejectLogCapture(t)
+		srv, done := abortRoute(t, pool, mh.HandleManage)
+		release := lockedTx(t, pool, `SELECT pg_advisory_xact_lock($1)`, classifyHoldLock)
+		update := fmt.Sprintf(`{"action":"update","id":%q,"data":{"title":%q}}`, seed.ID, classifyHoldTitle)
+		abortAfter(t, srv.URL+"/api/manage", plain, update, func() { waitLockWaiters(t, pool, 1) })
+		settleCancellation(t, pool)
+		release()
+		waitDone(t, done)
+		assertClientGone(t, logs)
+		if got := typeOf(t, pool, classifyHoldTitle); got != "audit-trail" {
+			t.Errorf("type after a client abort past the update = %q, want audit-trail (the afterwork ran on the request context)", got)
+		}
+	})
+
+	t.Run("ingest: the chunk's classification lands after the client left", func(t *testing.T) {
+		reset(t)
+		ih := NewIngestHandler(pool, nil, reg)
+		logs := installRejectLogCapture(t)
+		srv, done := abortRoute(t, pool, ih.HandleIngest)
+		release := lockedTx(t, pool, `SELECT pg_advisory_xact_lock($1)`, classifyHoldLock)
+		raw, _ := json.Marshal(map[string]any{"source": "i453", "chunks": []map[string]any{
+			{"category": "i453", "title": classifyHoldTitle, "content": "client abort after an ingest commit"}}})
+		abortAfter(t, srv.URL+"/api/ingest", plain, string(raw), func() { waitLockWaiters(t, pool, 1) })
+		settleCancellation(t, pool)
+		release()
+		waitDone(t, done)
+		assertClientGone(t, logs)
+		if got := typeOf(t, pool, classifyHoldTitle); got != "audit-trail" {
+			t.Errorf("type after a client abort past the ingest commit = %q, want audit-trail (the classification ran on the request context)", got)
+		}
+	})
+
 	t.Run("a shutdown waits for the detached classification", func(t *testing.T) {
 		reset(t)
 		installRejectLogCapture(t)
