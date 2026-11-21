@@ -484,7 +484,41 @@ func updateFailureReject(err error) *writeReject {
 	if rej := retypeBoundReject(err); rej != nil {
 		return rej
 	}
+	if rej := contentEditReject(err); rej != nil {
+		return rej
+	}
 	return provenanceRejectOr(err, identityTakenReject(err))
+}
+
+// contentEditReject maps the refusal of an update's edits (issue #406) onto
+// the write surfaces' verdict vocabulary: an edit that does not match is 409
+// edit_mismatch, an edit list that grows the content past the cap is 413
+// size_cap, both with the store's message, which names the edit. nil = err is
+// neither. The direct paths meet it from store.UpdateBlock, the stage branch
+// from store.ApplyContentEdits — one mapping for both, so a staged and a
+// direct edit are refused alike.
+func contentEditReject(err error) *writeReject {
+	var mismatch *store.ContentEditError
+	if errors.As(err, &mismatch) {
+		return classEditMismatch.reject(mismatch.Error())
+	}
+	if errors.Is(err, store.ErrEditedContentTooLarge) {
+		return classSizeCap.reject(err.Error())
+	}
+	return nil
+}
+
+// updateMetadataClaim is the metadata an update claims for the I7 gate
+// (reservedMetadataReject): the replacement object, or the merge object of
+// issue #406, whose keys are what the write touches — a null-valued
+// provenance key is refused as a set one is, because the key is not the
+// client's to name either way. store.CheckUpdatePatch keeps the two apart, so
+// at most one is non-nil.
+func updateMetadataClaim(metadata, merge map[string]any) map[string]any {
+	if metadata != nil {
+		return metadata
+	}
+	return merge
 }
 
 // identityTakenReject maps store.BlockIdentityTakenError onto the write

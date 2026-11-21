@@ -123,8 +123,8 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 	case confirmTOCTOUGone:
 		// 409: the stage is intact but the world moved — re-read and re-stage.
 		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": confirmTOCTOUGoneMsg(out.Op)})
-	case confirmTOCTOUDrift:
-		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": confirmTOCTOUDriftMsg(out.Op, out.BlockID)})
+	case confirmTOCTOUDrift, confirmExecDrift:
+		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": out.driftMsg()})
 	case confirmBlockRefGone:
 		// 409 like the TOCTOU rejects: the stage is intact, the world moved.
 		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": confirmBlockRefGoneMsg})

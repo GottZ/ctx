@@ -377,7 +377,7 @@ func blockSizeLimit(category, title, content string) string {
 		return "Category exceeds 100 characters"
 	case len(title) > 500:
 		return "Title exceeds 500 characters"
-	case len(content) > 50*1024:
+	case len(content) > store.MaxBlockContentBytes:
 		return "Content exceeds 50KB"
 	}
 	return ""

@@ -108,14 +108,14 @@ The codes are the ones the HTTP API uses for the same class:
 `unauthorized`, `invalid_body`, `missing_fields`, `invalid_sensitivity`,
 `invalid_encoding`, `scope_denied`, `size_cap`, `unknown_type`, `reserved_type`,
 `parent_required`, `unknown_parent`, `reserved_category`, `provenance_protected`,
-`reserved_metadata`, `unknown_action`, `constraint`, `rate_limit`, `internal`.
+`reserved_metadata`, `unknown_action`, `constraint`, `edit_mismatch`, `rate_limit`, `internal`.
 Other errors (an unknown id, an invalid type filter, a failed lookup) carry text only,
 so a client must not rely on a code being present.
 
 Which errors carry a code is a property of each tool's write path: `store`,
 `blob_store` and `blob_link` code every rejection; `update` codes the verdict of
-its gate chain and the identity collision (`constraint`, see [`update`](#update)),
-and, when it stages, `provenance_protected` for a target that carries the derived
+its gate chain, the identity collision (`constraint`, see [`update`](#update)) and
+a refused edit (`edit_mismatch`, `size_cap`), and, when it stages, `provenance_protected` for a target that carries the derived
 layer's provenance (no card is issued for an update the confirm cannot execute);
 `archive` codes `provenance_protected` and, when it stages,
 `rate_limit`; `confirm` codes the claim verdict and the identity collision of a
@@ -542,12 +542,64 @@ Change fields of an existing block.
 | `category` | string | | new category |
 | `title` | string | | new title |
 | `content` | string | | new content, at most 50 KB |
+| `edits` | object[] | | text edits of the content instead of a whole new `content` (not both): `{old, new, replace_all?}` each, see below |
 | `tags` | string[] | | replacement tag set; `[]` clears |
 | `metadata` | object | | replacement metadata object (no merge); `{}` clears; keep the source of the knowledge in `metadata.source` |
+| `metadata_merge` | object | | keys merged into the stored metadata instead of a replacement (not both with `metadata`): a value sets the key, `null` removes it, every other key stays |
 | `type` | string | | new block type from the registry (e.g. `reference`) |
 
 Omitted fields stay unchanged. **Answer:**
 `Updated: <title> (id: <uuid>, category: <category>)`. Staged for `confirm_writes` keys.
+
+**Edits and a metadata merge (issue #406).** `edits` changes part of the content
+without sending the rest: an ordered list of `{"old": …, "new": …}` (both required;
+`"new": ""` deletes `old`), applied one after the other to the block's current
+content, each to the text the edits before it left. An `old` must occur exactly
+once; with `"replace_all": true` it must occur at least once, and every
+non-overlapping occurrence is replaced from left to right. Matching compares the
+bytes of the UTF-8 text: no Unicode normalisation (a composed `ä` does not match `a`
+plus a combining diaeresis), no case or whitespace folding. Occurrences are counted
+at every position where `old` starts, overlapping ones included, so `aa` in `aaa`
+is two matches and refused rather than placed. An empty `old` is refused. An edit
+whose `new` equals its `old` changes nothing but still has to match once: it
+asserts that the text is there. All or none: when an edit matches zero times, or
+more than once without `replace_all`, nothing is written (the other fields of the
+call included) and the answer is `isError: true`, code `edit_mismatch`, text
+`edits[<i>]: old matches <n> times in the content (after the edits before it) — …`
+with the edit's 0-based index. The content after each edit is held to the 50 KB
+cap (`size_cap`, the edit named). Re-read the block and send an `old` that occurs
+once. The edits resolve against the block as the update holds it locked, so two
+callers that edit one block at the same time both keep their edit. The result is
+a content write like `content`: the vector goes stale when the text changed (not
+when the edits left it as it was), the dates are extracted anew, and the guard
+checks the block again.
+
+`metadata_merge` sets and removes single keys without resending the object; it is
+shallow (a nested object is replaced whole). A `provenance` key in it is refused
+with `reserved_metadata`, set or `null`, as in `metadata`. `content` with `edits`
+and `metadata` with `metadata_merge` are refused, as are an empty `edits` list and one of
+more than 100 edits (the edits apply while the update holds the block's row lock;
+for more, send the whole `content`).
+
+For a `confirm_writes` key the edits resolve when the update is **staged**,
+against the block the card pins: the card binds the content they produce, not the
+edits, and the confirm writes exactly that content — or is refused, keeping the
+stage token, when the block changed in between (`confirm rejected: block <uuid> changed since this update was staged`).
+A change that another writer commits while the confirm runs is not overwritten either:
+the confirmed statement writes only the block version the card names and otherwise
+answers `confirmed update not executed, the stage token is consumed: block <uuid> changed
+while this update was confirmed …` (this holds for every staged update). An edit
+that does not match gets no card. A `metadata_merge` stays a merge on the card and
+is merged into the metadata as it is at confirm time: a server-side key written in
+between without changing the block (a guard pass) survives it.
+
+**Several instances, mixed versions.** A card that carries a `metadata_merge` must
+be confirmed by an instance that knows the field. An instance older than the
+release that introduced it reads the card without the merge: it consumes the token
+and writes the card's other fields alone, or fails after the consume when the merge
+was the card's only field. With more than one `ctxd` behind one database, finish
+the rollout (or a rollback) before `confirm_writes` keys stage a `metadata_merge`;
+`edits` are not affected, since their card carries plain `content`.
 
 A `type` is checked exactly as the REST `manage update` action checks it, with the
 same codes and texts: `unknown_type` for a name the key's registry view does not

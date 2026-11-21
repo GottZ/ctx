@@ -2,6 +2,7 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1621,7 +1622,29 @@ type UpdateBlockData struct {
 	// (who/when/from→to) and merged into metadata.sensitivity_audit. Never
 	// client-supplied (json:"-").
 	SensitivityAudit map[string]any `json:"-"`
+	// Edits (issue #406) change the content by text replacement instead of
+	// replacing it: applied in order, all or none, to the content of the row
+	// UpdateBlock holds (ApplyContentEdits). Mutually exclusive with Content
+	// (CheckUpdatePatch).
+	Edits []ContentEdit `json:"edits,omitempty"`
+	// MetadataMerge (issue #406) is merged shallowly into the stored metadata:
+	// a key with a value is set, a key with null is removed, every other key
+	// stays. Mutually exclusive with Metadata (CheckUpdatePatch).
+	MetadataMerge map[string]any `json:"metadata_merge,omitempty"`
+	// ExpectUpdatedAt pins the row version a staged update was decided
+	// against (the confirm, issue #406): the statement writes only a row whose
+	// updated_at still holds this value, and a row that moved answers
+	// ErrBlockChanged. The confirm's drift check runs before the stage token is
+	// consumed and reads without a lock, so a writer whose transaction was open
+	// at that moment commits after it; without the pin the statement would wait
+	// for that writer and then overwrite its change. Never client-supplied.
+	ExpectUpdatedAt *time.Time `json:"-"`
 }
+
+// ErrBlockChanged is the refusal of an update pinned by ExpectUpdatedAt whose
+// row has another updated_at by the time the statement holds it. Nothing was
+// written.
+var ErrBlockChanged = errors.New("store: update block: the block changed since the update was staged")
 
 // blockIdentityIndex is the partial unique index that makes (category, title,
 // scope) the identity of an ACTIVE block (113_baseline.sql, the fold of
@@ -1799,7 +1822,17 @@ func guardIdentityMove(ctx context.Context, tx pgx.Tx, b *Block) error {
 // ErrRetypeBound; a re-type out of a type
 // marked untrusted records that type in untrusted_origin, which the answer
 // carries (both trg_block_retype, issue #280).
+//
+// Edits (issue #406) resolve against the content of the row this transaction
+// holds: the row is read FOR NO KEY UPDATE — the lock the UPDATE itself takes —
+// before the statement, so an edit never matches a content another writer
+// replaces in between. A refused edit returns *ContentEditError or
+// ErrEditedContentTooLarge and writes nothing. A MetadataMerge is one jsonb
+// expression of the statement and reads the row the statement locked.
 func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data UpdateBlockData, writeScopes []string) (*Block, bool, error) {
+	if err := CheckUpdatePatch(data); err != nil {
+		return nil, false, fmt.Errorf("store: update block: %w", err)
+	}
 	// Build SET clause dynamically.
 	setClauses := []string{}
 	args := []any{}
@@ -1819,10 +1852,20 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	// strip below, which this statement has to decide before it has seen the
 	// old row. Whether the embed input changed is read off the row instead
 	// (see the RETURNING clause).
-	contentSent := data.Content != nil
+	//
+	// Edits are a content write as well; their argument is the content they
+	// resolve to, which exists only once runBlockUpdate holds the row, so the
+	// slot is reserved here and filled there (contentEditPlan).
+	contentSent := data.Content != nil || data.Edits != nil
+	var edits *contentEditPlan
 	if contentSent {
 		setClauses = append(setClauses, fmt.Sprintf("content = $%d", argIdx))
-		args = append(args, *data.Content)
+		if data.Edits != nil {
+			edits = &contentEditPlan{edits: data.Edits, arg: len(args), writeScopes: writeScopes}
+			args = append(args, nil)
+		} else {
+			args = append(args, *data.Content)
+		}
 		argIdx++
 	}
 	if data.Tags != nil {
@@ -1830,31 +1873,10 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 		args = append(args, data.Tags)
 		argIdx++
 	}
-	// metadata expression: exactly ONE assignment per column is legal in SQL,
-	// so the guard_checked_at strip and the sensitivity_audit merge compose
-	// into a single expression.
-	metaExpr := ""
-	if data.Metadata != nil {
-		if contentSent {
-			// Merge provided metadata AND strip guard_checked_at in one expression.
-			metaExpr = fmt.Sprintf("$%d::jsonb - 'guard_checked_at'", argIdx)
-		} else {
-			metaExpr = fmt.Sprintf("$%d::jsonb", argIdx)
-		}
-		args = append(args, data.Metadata)
-		argIdx++
-	} else if contentSent {
-		// No explicit metadata update — strip guard_checked_at from existing metadata.
-		metaExpr = "metadata - 'guard_checked_at'"
-	}
-	if data.SensitivityAudit != nil {
-		if metaExpr == "" {
-			metaExpr = "COALESCE(metadata, '{}'::jsonb)"
-		}
-		metaExpr = fmt.Sprintf("(%s) || jsonb_build_object('sensitivity_audit', $%d::jsonb)", metaExpr, argIdx)
-		args = append(args, data.SensitivityAudit)
-		argIdx++
-	}
+	var metaExpr string
+	before := len(args)
+	metaExpr, args = updateMetadataExpr(data, contentSent, args)
+	argIdx += len(args) - before
 	if metaExpr != "" {
 		setClauses = append(setClauses, "metadata = "+metaExpr)
 	}
@@ -1890,6 +1912,11 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	argIdx++
 	args = append(args, writeScopes)
 	scopeIdx := argIdx
+	pinSQL := ""
+	if data.ExpectUpdatedAt != nil {
+		args = append(args, *data.ExpectUpdatedAt)
+		pinSQL = fmt.Sprintf(" AND updated_at = $%d", len(args))
+	}
 
 	// I7 / S3, second door (design D-01 §4.3.1): update-by-id reaches the same
 	// derivative WITHOUT naming its (category, title, scope) identity, so the
@@ -1932,11 +1959,11 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	query := fmt.Sprintf(
 		`UPDATE context_blocks SET %s
 		 WHERE id = $%d AND scope = ANY($%d::text[]) AND NOT is_archived
-		   AND `+notDerivedSQL+`
+		   AND `+notDerivedSQL+`%s
 		 RETURNING id, category, tags, title, content, %s, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at,
 		           `+untrustedOriginCol+`,
 		           (old.title IS DISTINCT FROM new.title OR old.content IS DISTINCT FROM new.content)%s`,
-		strings.Join(setClauses, ", "), idIdx, scopeIdx, guardRedactedMetadataSQL(fmt.Sprintf("$%d", scopeIdx)), movedCol,
+		strings.Join(setClauses, ", "), idIdx, scopeIdx, pinSQL, guardRedactedMetadataSQL(fmt.Sprintf("$%d", scopeIdx)), movedCol,
 	)
 
 	// The statement, the invalidation of the vector and (on a scope move) the
@@ -1951,7 +1978,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	if data.Scope != nil {
 		moveScopes = writeScopes
 	}
-	found, needsReEmbed, err := runBlockUpdate(ctx, pool, b, id, query, args, moveScopes, identitySent)
+	found, needsReEmbed, err := runBlockUpdate(ctx, pool, b, id, query, args, moveScopes, identitySent, edits)
 	var taken *BlockIdentityTakenError
 	if errors.As(err, &taken) {
 		taken.ConflictID = blockIdentityHolder(ctx, pool, id, data, writeScopes, taken.refusedKey)
@@ -1961,9 +1988,27 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 		return nil, false, err
 	}
 	if !found {
-		return nil, false, updateBlockMissReason(ctx, pool, id, writeScopes)
+		return nil, false, pinnedUpdateMissReason(ctx, pool, id, writeScopes, data.ExpectUpdatedAt != nil)
 	}
 	return b, needsReEmbed, nil
+}
+
+// pinnedUpdateMissReason is updateBlockMissReason for UpdateBlock, which may
+// carry the ExpectUpdatedAt pin: a pinned update that found no row while the
+// block is still live in the write scopes and not a derivative missed on the
+// pin, and answers ErrBlockChanged. Like updateBlockMissReason it decides the
+// message, never the outcome — the statement already wrote nothing.
+func pinnedUpdateMissReason(ctx context.Context, pool *pgxpool.Pool, id string, writeScopes []string, pinned bool) error {
+	if err := updateBlockMissReason(ctx, pool, id, writeScopes); err != nil || !pinned {
+		return err
+	}
+	var live bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM context_blocks WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived)`,
+		id, writeScopes).Scan(&live); err != nil || !live {
+		return nil //nolint:nilerr // a read fault leaves the not-found answer, as updateBlockMissReason does
+	}
+	return ErrBlockChanged
 }
 
 // updateBlockMissReason turns the 0-row outcome of a by-id block write into the
@@ -2013,7 +2058,12 @@ func updateBlockMissReason(ctx context.Context, pool *pgxpool.Pool, id string, w
 // identitySent says the query returns identityMovedCol as its last column (the
 // update names a category, a title or a scope); when the identity moved, the
 // archived-claim probe runs right after the statement (guardIdentityMove).
-func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query string, args []any, moveScopes []string, identitySent bool) (found, needsReEmbed bool, err error) {
+//
+// edits is nil unless the update carries edits (issue #406); then the row is
+// locked and read, and the content the edits produce fills its argument slot,
+// after the supersedes locks of a scope move (which lock the block first) and
+// before the statement.
+func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query string, args []any, moveScopes []string, identitySent bool, edits *contentEditPlan) (found, needsReEmbed bool, err error) {
 	var swept int
 	scopeMove := moveScopes != nil
 	write := pgxdb.Write
@@ -2027,6 +2077,9 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 			if supersedesTargets, err = lockSupersedesSource(ctx, tx, id, moveScopes); err != nil {
 				return err
 			}
+		}
+		if ok, err := edits.resolve(ctx, tx, id, args); !ok {
+			return cmp.Or(err, pgxdb.ErrRollback) // a miss writes nothing, as below
 		}
 		var moved bool
 		dest := []any{

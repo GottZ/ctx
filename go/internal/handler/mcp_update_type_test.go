@@ -24,7 +24,7 @@ func TestMCPUpdateTakesOptionalType(t *testing.T) {
 		got = append(got, name)
 	}
 	slices.Sort(got)
-	if want := []string{"category", "content", "id", "metadata", "tags", "title", "type"}; !slices.Equal(got, want) {
+	if want := []string{"category", "content", "edits", "id", "metadata", "metadata_merge", "tags", "title", "type"}; !slices.Equal(got, want) {
 		t.Errorf("update properties = %v, want %v", got, want)
 	}
 	if !slices.Equal(update.InputSchema.Required, []string{"id"}) {

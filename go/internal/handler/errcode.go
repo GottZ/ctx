@@ -116,6 +116,13 @@ var (
 	classReservedMetadata = rejectClass{http.StatusForbidden, "reserved_metadata"}
 	// classUnknownAction — the dispatcher has no handler for `action`.
 	classUnknownAction = rejectClass{http.StatusBadRequest, "unknown_action"}
+	// classEditMismatch — an edit of an update (issue #406) does not match the
+	// block's content: its old occurs zero times, or more than once without
+	// replace_all. 409 like supersedes_conflict: the payload is well-formed, the
+	// block's current text refuses it; the message names the edit's index and
+	// its number of matches. The remedy is to re-read the block and send an
+	// old that occurs once.
+	classEditMismatch = rejectClass{http.StatusConflict, "edit_mismatch"}
 	// classConstraint — the payload violates a DB integrity constraint. The
 	// only class whose status varies per case (409 uniqueness, else 422), so
 	// its call sites use rejectStatus.

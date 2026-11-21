@@ -58,6 +58,18 @@ type updateInput struct {
 	Tags     []string       `json:"tags,omitempty" jsonschema:"replacement tag set ([] clears all tags, omit = unchanged)"`
 	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"replacement metadata object ({} clears, omit = unchanged); keep the source of the knowledge in metadata.source"`
 	Type     string         `json:"type,omitempty" jsonschema:"new block type name from the registry (e.g. reference); written as a manual choice the title classifier no longer overrides; leaving a type marked untrusted records that type on the block as untrusted_origin (omit = unchanged)"`
+	// Issue #406: a change of part of a block without sending the whole of it.
+	Edits         []updateEditInput `json:"edits,omitempty" jsonschema:"text edits of the content instead of a whole new content (not together with content): applied in order to the block's current content, all or none; each old must occur exactly once (or at least once with replace_all), the answer names an edit that does not match"`
+	MetadataMerge map[string]any    `json:"metadata_merge,omitempty" jsonschema:"keys merged into the stored metadata instead of replacing it (not together with metadata): a value sets the key, null removes it, every other key stays"`
+}
+
+// updateEditInput is one edit of the update tool (store.ContentEdit on the
+// wire). Old and new are both required by the exported schema, so a call
+// without new is refused by the SDK instead of deleting the text.
+type updateEditInput struct {
+	Old        string `json:"old" jsonschema:"the exact text to replace (bytes of UTF-8, case-sensitive, no normalisation); must not be empty"`
+	New        string `json:"new" jsonschema:"the replacement text; an empty string deletes old"`
+	ReplaceAll bool   `json:"replace_all,omitempty" jsonschema:"replace every occurrence of old instead of requiring exactly one"`
 }
 
 // updateFieldsOf extracts the authoritative field list + UpdateBlockData from
@@ -65,7 +77,7 @@ type updateInput struct {
 // hash-binds — "clear tags" and "leave tags" must never collide (D-W6a).
 func updateFieldsOf(in updateInput) (store.UpdateBlockData, []string) {
 	var data store.UpdateBlockData
-	fields := make([]string, 0, 6)
+	fields := make([]string, 0, 8)
 	if in.Category != nil {
 		data.Category = in.Category
 		fields = append(fields, "category")
@@ -92,6 +104,18 @@ func updateFieldsOf(in updateInput) (store.UpdateBlockData, []string) {
 		t := in.Type
 		data.Type = &t
 		fields = append(fields, "type")
+	}
+	if in.Edits != nil {
+		data.Edits = make([]store.ContentEdit, len(in.Edits))
+		for i, e := range in.Edits {
+			repl := e.New
+			data.Edits[i] = store.ContentEdit{Old: e.Old, New: &repl, ReplaceAll: e.ReplaceAll}
+		}
+		fields = append(fields, "edits")
+	}
+	if in.MetadataMerge != nil {
+		data.MetadataMerge = in.MetadataMerge
+		fields = append(fields, "metadata_merge")
 	}
 	return data, fields
 }
@@ -128,6 +152,12 @@ func updateDataFromCanonical(cw store.CanonicalWrite) store.UpdateBlockData {
 		case "type":
 			v := cw.Type
 			data.Type = &v
+		case "metadata_merge":
+			m := cw.MetadataMerge
+			if m == nil {
+				m = map[string]any{}
+			}
+			data.MetadataMerge = m
 		}
 	}
 	return data
@@ -146,14 +176,18 @@ func updateDataFromCanonical(cw store.CanonicalWrite) store.UpdateBlockData {
 // Surface-neutral since D-W6c (pool+registry, not MCPConfig): the REST manage
 // path (context_manage.go handleUpdate), the MCP direct path AND the shared
 // confirm core (confirm_core.go) call it.
+//
+// Issue #406: a metadata_merge changes metadata as a replacement does, and
+// edits change the content as a new content does — each runs the same
+// afterwork.
 func finishBlockUpdate(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry, data store.UpdateBlockData, block *store.Block, reqID string) {
-	if blocktypes != nil && (data.Title != nil || data.Metadata != nil) {
+	if blocktypes != nil && (data.Title != nil || data.Metadata != nil || data.MetadataMerge != nil) {
 		set := blocktypes.SnapshotForRequest(ctx)
 		if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, block.ID, block.Title, block.Metadata); err != nil {
 			slog.Warn("update afterwork: re-classify failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		}
 	}
-	if data.Content != nil {
+	if data.Content != nil || data.Edits != nil {
 		times := store.ExtractDates(block.Content)
 		if err := store.UpdateContentTimes(ctx, pool, block.ID, times); err != nil {
 			slog.Error("update afterwork: content_times update failed", "error", err, "block_id", block.ID, "request_id", reqID)
@@ -196,6 +230,10 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 		if len(fields) == 0 {
 			return errResult("nothing to update — provide at least one of category, title, content, tags, metadata, type"), nil, nil
 		}
+		// Issue #406: the combinations an update cannot mean, REST parity.
+		if err := store.CheckUpdatePatch(data); err != nil {
+			return errResult(err.Error()), nil, nil
+		}
 		// Size limits — same gate as the direct store path (REST parity).
 		if msg := blockSizeLimit(strOrEmpty(data.Category), strOrEmpty(data.Title), strOrEmpty(data.Content)); msg != "" {
 			return errResult(msg), nil, nil
@@ -216,7 +254,7 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 		// internal-only refusals, and the parent gate, which refuses a
 		// required-parent type outright because this tool carries no parent.
 		// Ahead of the stage branch, so a flagged key gets no card either.
-		if rej := claimReject(set, strOrEmpty(data.Category), input.Type, "", data.Metadata); rej != nil {
+		if rej := claimReject(set, strOrEmpty(data.Category), input.Type, "", updateMetadataClaim(data.Metadata, data.MetadataMerge)); rej != nil {
 			return errResultReject(rej), nil, nil
 		}
 
@@ -256,6 +294,14 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 // the confirm will do (D1-M2 — gate parity between stage and execute). The
 // write rate limit counts staging as write intent (same reasoning as
 // runStageWriteGates).
+//
+// Edits (issue #406) are resolved here, against the block the card pins: the
+// stage reads content and updated_at in one statement, so the content the
+// edits produce belongs to exactly the base the confirm re-checks. The card
+// binds that content (op 'update' with field "content"), not the edits — the
+// confirm writes what the card names, or refuses because the block moved.
+// An edit that does not match gets no card (D1-M2). A metadata_merge stays a
+// merge (CanonicalWrite.MetadataMerge says why).
 func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, input updateInput, fields []string) (*mcp.CallToolResult, any, error) {
 	var ttl time.Duration
 	rateLimit := 0
@@ -297,18 +343,34 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inp
 		return errResultReject(rej), nil, nil
 	}
 
+	content := strOrEmpty(input.Content)
+	if input.Edits != nil {
+		data, _ := updateFieldsOf(input)
+		edited, err := store.ApplyContentEdits(block.Content, data.Edits)
+		if rej := contentEditReject(err); rej != nil {
+			return errResultReject(rej), nil, nil
+		}
+		if err != nil {
+			slog.Error("mcp: stage update edits failed", "error", err, "block_id", resolvedID)
+			return errResult("stage failed: internal error"), nil, nil
+		}
+		content = edited
+		fields = stagedEditFields(fields)
+	}
+
 	cw := store.CanonicalWrite{
 		Op:            "update",
 		ID:            resolvedID,
 		Scope:         block.Scope,
 		Category:      strOrEmpty(input.Category),
 		Title:         strOrEmpty(input.Title),
-		Content:       strOrEmpty(input.Content),
+		Content:       content,
 		Tags:          input.Tags,
 		Metadata:      input.Metadata,
 		Type:          input.Type,
 		UpdateFields:  fields,
 		BaseUpdatedAt: block.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		MetadataMerge: input.MetadataMerge,
 	}
 	hash, canonical, err := cw.PayloadHash()
 	if err != nil {
@@ -335,4 +397,18 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inp
 			"The server holds the authoritative payload; confirming cannot alter it. "+
 			"If the block changes before you confirm, the confirm is rejected and you must re-stage.",
 		block.Title, resolvedID, hash, expiry)), nil, nil
+}
+
+// stagedEditFields is the field list of a staged update whose edits were
+// resolved at stage time: "edits" becomes "content", the field the card binds
+// and updateDataFromCanonical rebuilds. The other fields keep their places.
+func stagedEditFields(fields []string) []string {
+	out := make([]string, len(fields))
+	for i, f := range fields {
+		if f == "edits" {
+			f = "content"
+		}
+		out[i] = f
+	}
+	return out
 }
