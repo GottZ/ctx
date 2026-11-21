@@ -433,14 +433,18 @@ const backfillRereadSQL = `SELECT cb.content, cb.created_at
 // BackfillTemporal populates context_temporal for all blocks that don't have
 // temporal dimensions yet. Processes in batches of 50.
 // Returns the number of blocks processed, and an error naming the blocks it
-// left without rows because their content changed on every try
-// (backfillAttempts); the other blocks are written all the same.
+// left without rows: those whose content changed on every try
+// (backfillAttempts) and those whose write failed (each failure is logged as
+// well); the other blocks are written all the same.
 func BackfillTemporal(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	const batchSize = 50
 	processed := 0
-	// left are the blocks given up on; the reads of later batches skip them,
-	// or a full batch of them would be read again and again.
-	left := []string{}
+	// left are the blocks given up on because their content kept changing,
+	// failed those whose write returned an error. The reads of later batches
+	// skip both (skip): a full batch of them would otherwise be read again
+	// and again, and every block behind it never — the backfill runs before
+	// ctxd's scheduler starts.
+	left, failed, skip := []string{}, []string{}, []string{}
 
 	for {
 		rows, err := pool.Query(ctx,
@@ -450,7 +454,7 @@ func BackfillTemporal(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 			   AND NOT EXISTS (SELECT 1 FROM context_temporal ct WHERE ct.block_id = cb.id)
 			   AND cb.id <> ALL($2::uuid[])
 			 LIMIT $1`,
-			batchSize, left,
+			batchSize, skip,
 		)
 		if err != nil {
 			return processed, fmt.Errorf("store: temporal: backfill query: %w", err)
@@ -479,16 +483,17 @@ func BackfillTemporal(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 			// Blocks without content times still get dimensions from their
 			// creation time.
 			written, gaveUp, err := b.write(ctx, pool)
-			if err != nil {
+			switch {
+			case err != nil:
 				slog.Warn("backfill: temporal refresh failed",
 					"block_id", b.ID, "error", err)
-				continue
-			}
-			if written {
-				processed++
-			}
-			if gaveUp {
+				failed = append(failed, b.ID)
+				skip = append(skip, b.ID)
+			case gaveUp:
 				left = append(left, b.ID)
+				skip = append(skip, b.ID)
+			case written:
+				processed++
 			}
 		}
 
@@ -500,10 +505,17 @@ func BackfillTemporal(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 		}
 	}
 
+	var report []string
 	if len(left) > 0 {
-		shown := left[:min(len(left), backfillLeftShown)]
-		return processed, fmt.Errorf("store: temporal: backfill: %d block(s) left without rows, their content changed on each of %d tries: %s",
-			len(left), backfillAttempts, strings.Join(shown, ", "))
+		report = append(report, fmt.Sprintf("%d block(s) left without rows, their content changed on each of %d tries: %s",
+			len(left), backfillAttempts, strings.Join(left[:min(len(left), backfillLeftShown)], ", ")))
+	}
+	if len(failed) > 0 {
+		report = append(report, fmt.Sprintf("%d block(s) left after an error (each logged): %s",
+			len(failed), strings.Join(failed[:min(len(failed), backfillLeftShown)], ", ")))
+	}
+	if len(report) > 0 {
+		return processed, fmt.Errorf("store: temporal: backfill: %s", strings.Join(report, "; "))
 	}
 	return processed, nil
 }

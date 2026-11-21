@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
@@ -144,4 +145,72 @@ func TestBackfillTemporalRereadsABlockWhoseContentChanged(t *testing.T) {
 			t.Errorf("the backfill read the block %d times, want it re-read after the first change", got)
 		}
 	})
+}
+
+// i428BackfillBound bounds a backfill run in TestBackfillTemporalReadsAFailingBlockOnce:
+// a run that read its failing blocks again and again would not end by itself.
+const i428BackfillBound = 30 * time.Second
+
+// TestBackfillTemporalReadsAFailingBlockOnce: a block whose temporal write
+// fails (a trigger of the fixture refuses its rows) is read once in a run and
+// reported in the backfill's error. There are more such blocks than one batch
+// holds, so a backfill that read them again would read the same full batch
+// for ever; the run is bounded, and that fails the test instead of hanging it.
+func TestBackfillTemporalReadsAFailingBlockOnce(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	const failing = 55 // more than one batch of the backfill (50)
+	if _, err := pool.Exec(ctx, `
+		CREATE TABLE i428_failing (block_id uuid PRIMARY KEY);
+		CREATE FUNCTION i428_refuse() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+		  IF EXISTS (SELECT 1 FROM i428_failing WHERE block_id = NEW.block_id) THEN
+		    RAISE EXCEPTION 'i428: temporal row of % refused', NEW.block_id;
+		  END IF;
+		  RETURN NEW;
+		END $$;
+		CREATE TRIGGER i428_refuse BEFORE INSERT ON context_temporal
+		  FOR EACH ROW EXECUTE FUNCTION i428_refuse();`); err != nil {
+		t.Fatalf("install the refusing trigger: %v", err)
+	}
+	items := make([]store.BatchUpsert, failing)
+	for i := range items {
+		items[i] = store.BatchUpsert{Category: "i428", Title: fmt.Sprintf("i428-failing-%02d", i),
+			Content: fmt.Sprintf("Failing block %d, dated 2026-10-%02d.", i, 1+i%28), Scope: "private"}
+	}
+	res, err := store.UpsertBlocks(ctx, pool, items, "", nil, nil)
+	if err != nil || len(res) != failing {
+		t.Fatalf("write the failing blocks: %v (%d results)", err, len(res))
+	}
+	for _, r := range res {
+		if _, err := pool.Exec(ctx, `INSERT INTO i428_failing VALUES ($1)`, r.Block.ID); err != nil {
+			t.Fatalf("mark a failing block: %v", err)
+		}
+	}
+	written, err := store.UpsertBlock(ctx, pool, "i428", "i428-writable", "Writable, dated 2026-11-11.", nil, nil, "private", false, store.SensitivityWrite{}, "")
+	if err != nil {
+		t.Fatalf("write the writable block: %v", err)
+	}
+	pending := i428Pending(t, pool)
+
+	runCtx, cancel := context.WithTimeout(ctx, i428BackfillBound)
+	defer cancel()
+	n, err := store.BackfillTemporal(runCtx, pool)
+	if runCtx.Err() != nil {
+		t.Fatalf("the backfill did not end within %s: it read its failing blocks again (n=%d err=%v)", i428BackfillBound, n, err)
+	}
+	want := fmt.Sprintf("%d block(s) left after an error", failing)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("backfill error = %v, want it to report %q", err, want)
+	}
+	if n != pending-failing {
+		t.Errorf("backfill processed %d blocks, want %d (every pending block but the failing ones)", n, pending-failing)
+	}
+	if got := i414Sources(t, pool, written.ID); len(got) == 0 {
+		t.Errorf("the writable block got no temporal rows")
+	}
 }
