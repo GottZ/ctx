@@ -17,6 +17,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -187,8 +188,13 @@ const contentVersionCol = `content_hash = encode(digest($2::text, 'sha256'), 'he
 // writeTemporalGuarded writes the dimension rows of a block and then runs
 // guardSQL, a statement that locks the block row by its primary key and
 // answers contentVersionCol for it; it commits when the answer is true and
-// rolls back when it is false or the row is gone. After the BEGIN, the rows
+// rolls back when it is false or the block is gone. After the BEGIN, the rows
 // and the guard travel in one round trip; the commit or rollback is the last.
+//
+// A block deleted before the rows reach it (a purge, whose DELETE cascades
+// into context_temporal) refuses the first row on temporalBlockFK, before the
+// guard runs; that refusal is the same answer as a guard that finds no row:
+// applied=false, no error (temporalBlockGone).
 //
 // The guard is the LAST statement, and that is the whole design: it takes the
 // block's row lock (FOR NO KEY UPDATE, or the UPDATE's own lock, which is the
@@ -243,13 +249,27 @@ func writeTemporalGuarded(ctx context.Context, pool *pgxpool.Pool, blockID strin
 		}
 		return nil
 	})
-	if errors.Is(err, pgxdb.ErrRollback) {
+	if errors.Is(err, pgxdb.ErrRollback) || temporalBlockGone(err) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// temporalBlockFK is the foreign key of context_temporal.block_id, the name
+// PostgreSQL gave the column's REFERENCES context_blocks(id) ON DELETE CASCADE
+// (migration 113).
+const temporalBlockFK = "context_temporal_block_id_fkey"
+
+// temporalBlockGone reports the refusal a dimension row gets when its block
+// does not exist: 23503 (foreign_key_violation) on temporalBlockFK. Any other
+// constraint's refusal, and any other code, is an error of its own and stays
+// one.
+func temporalBlockGone(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503" && pgErr.ConstraintName == temporalBlockFK
 }
 
 // FetchContentTimes retrieves content_times for multiple blocks.

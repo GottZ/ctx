@@ -331,6 +331,60 @@ func TestRefreshTemporalYieldsToAContentWriteDuringItsRows(t *testing.T) {
 	}
 }
 
+// TestTemporalWritesOnAPurgedBlock: a block purged (manage purge, the batched
+// DELETE with ON DELETE CASCADE into context_temporal) before its afterwork
+// or the dream's write runs is gone, and the write answers applied=false
+// without an error — the first dimension row is refused on the block's
+// foreign key before the guard can find the row missing.
+func TestTemporalWritesOnAPurgedBlock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+
+	key, _, err := store.CreateApiKey(ctx, pool, "i414-purge-admin", "private", nil, store.DefaultTenantID)
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	content := "Retired plan, due 2026-10-10."
+	b, err := store.UpsertBlock(ctx, pool, "i414-gone", "i414-purged", content, nil, nil, "private", false, store.SensitivityWrite{}, "")
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if applied, err := store.RefreshTemporal(ctx, pool, b.ID, b.Content, b.CreatedAt); err != nil || !applied {
+		t.Fatalf("store afterwork: applied=%v err=%v", applied, err)
+	}
+
+	q := store.PurgeQuery{Scope: "private", AllTenants: true, Filter: store.PurgeFilter{Category: "i414-gone"},
+		Stamp: store.APIStamp(key.ID, "req-i414")}
+	dry, err := store.PurgeScope(ctx, pool, q)
+	if err != nil {
+		t.Fatalf("purge dry run: %v", err)
+	}
+	if dry.Counted.Blocks != 1 {
+		t.Fatalf("purge would remove %d blocks, want the one fixture block", dry.Counted.Blocks)
+	}
+	q.ConfirmBlocks = confirm(dry.Counted.Blocks)
+	if _, err := store.PurgeScope(ctx, pool, q); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	var left int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_blocks WHERE id = $1`, b.ID).Scan(&left); err != nil || left != 0 {
+		t.Fatalf("block still there after the purge: count=%d err=%v", left, err)
+	}
+
+	if applied, err := store.RefreshTemporal(ctx, pool, b.ID, b.Content, b.CreatedAt); err != nil || applied {
+		t.Errorf("refresh of a purged block: applied=%v err=%v, want applied=false and no error", applied, err)
+	}
+	if applied, err := store.PopulateTemporal(ctx, pool, b.ID, b.Content, store.ExtractDates(b.Content), b.CreatedAt); err != nil || applied {
+		t.Errorf("populate of a purged block: applied=%v err=%v, want applied=false and no error", applied, err)
+	}
+	if got := i414Sources(t, pool, b.ID); len(got) != 0 {
+		t.Errorf("temporal rows of a purged block: %v", got)
+	}
+}
+
 // TestBackfillTemporalFillsBlocksWithoutRows: the backfill writes the data of
 // the content a block holds to a block that has none, through RefreshTemporal.
 func TestBackfillTemporalFillsBlocksWithoutRows(t *testing.T) {

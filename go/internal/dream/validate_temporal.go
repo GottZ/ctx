@@ -161,7 +161,14 @@ func ValidateTemporal(ctx context.Context, pool *pgxpool.Pool, r *Router, opts l
 		if err != nil {
 			return fmt.Errorf("validate temporal: re-populate: %w", err)
 		}
-		phase1Fixed = applied
+		if !applied {
+			// The block no longer holds the picked content, or is gone: the
+			// review's merge would be dropped by the same guard, so the LLM
+			// call is skipped.
+			slog.Info("dream: temporal phase1 — block changed or gone since the pick, review skipped", "block_id", block.ID)
+			return nil
+		}
+		phase1Fixed = true
 	}
 
 	// Phase 2: LLM review for implicit/missed references.
