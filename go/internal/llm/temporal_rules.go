@@ -988,10 +988,10 @@ func matchBis(query string, now time.Time) *TemporalResult {
 func matchOpenEdge(query string, now time.Time, edge string) *TemporalResult {
 	lower := strings.ToLower(query)
 	for _, m := range reOpenEdge.FindAllStringSubmatchIndex(lower, -1) {
-		if reTimeUnitBefore.MatchString(lower[:m[0]]) {
+		word, phrase := lower[m[2]:m[3]], lower[m[4]:m[5]]
+		if reTimeUnitBefore.MatchString(lower[:m[0]]) || word != "ab" && reNearBefore.MatchString(lower[:m[0]]) {
 			continue
 		}
-		word, phrase := lower[m[2]:m[3]], lower[m[4]:m[5]]
 		// A year first is no edge here: "2024 Oktober" has no use, and "after
 		// 2025 may be deleted" names no month.
 		if w := phraseWords(phrase); len(w) > 0 {
@@ -1016,10 +1016,18 @@ func matchOpenEdge(query string, now time.Time, edge string) *TemporalResult {
 	return nil
 }
 
-// reTimeUnitBefore matches a time unit right before "vor", "nach", "before"
-// or "after" ("zwei Tage vor", "a week after", "am Tag nach"): the word then
-// measures a distance from the date (matchOpenEdge).
-var reTimeUnitBefore = regexp.MustCompile(`(?i)\b(?:tag|tage|tagen|tages|woche|wochen|monat|monate|monaten|monats|jahr|jahre|jahren|jahres|stunde|stunden|minute|minuten|day|days|week|weeks|month|months|year|years|hour|hours|minutes)\s+$`)
+// reTimeUnitBefore matches a time unit or a time of day right before one of
+// the words of matchOpenEdge ("zwei Tage vor", "a week after", "am Abend
+// vor", "the night before", "das Wochenende vor"), reNearBefore a word of
+// nearness ("kurz vor", "shortly after"): the word then measures a distance
+// from the date, and the question keeps the day it names (matchOpenEdge).
+// Only the word right before counts ("Welche Tage waren vor dem …" is an
+// edge).
+var (
+	reTimeUnitBefore = regexp.MustCompile(`(?i)\b(?:sekunde|sekunden|minute|minuten|stunde|stunden|tag|tage|tagen|tages|nacht|nächte|abend|abende|morgen|vormittag|mittag|nachmittag|woche|wochen|wochenende|wochenenden|monat|monate|monaten|monats|quartal|quartale|quartals|jahr|jahre|jahren|jahres|` +
+		`second|seconds|minutes|hour|hours|day|days|night|nights|evening|evenings|morning|mornings|noon|afternoon|week|weeks|weekend|weekends|month|months|quarter|quarters|year|years)\s+$`)
+	reNearBefore = regexp.MustCompile(`(?i)\b(?:kurz|knapp|direkt|unmittelbar|gleich|shortly|right|just|immediately|soon)\s+$`)
+)
 
 func matchWeekSegment(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
