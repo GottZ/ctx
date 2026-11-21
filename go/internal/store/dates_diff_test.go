@@ -29,8 +29,10 @@ import (
 // it may change. A content none of them touches gives what refFormsV434
 // gives: together the predicates cover every content on which the current
 // reference and the frozen one differ (each names the shape a differing
-// match needs, ignoring the word boundaries), and
-// TestIssue437Classes_EachIsNeeded shows that each one is needed.
+// match needs, ignoring word boundaries and calendar validity).
+// TestIssue437Classes_EachIsNeeded shows that each one is needed,
+// TestIssue437Classes_LeaveOrdinaryContentsOutside that none has grown over
+// contents the changes do not affect.
 var issue437Classes = []struct {
 	name    string
 	touches func(string) bool
@@ -41,15 +43,22 @@ var issue437Classes = []struct {
 	// whitespace or year only the later changes accept is theirs.)
 	{"#437/1 maerz and marz", regexp.MustCompile(`(?i)mae?rz\s+20[23]\d`).MatchString, "Maerz 2026"},
 	// \s → [\s\x{A0}\x{202F}]: a match that differs has a no-break space in
-	// the run of date spaces (and, in the ISO form, T) before a digit.
-	{"#437/2 no-break spaces", regexp.MustCompile(`[\x{A0}\x{202F}][T\s\x{A0}\x{202F}]*\d`).MatchString, "Mai" + nbsp + "2026"},
+	// the run of date spaces between a month name and a year token, or
+	// between the last digit of a date and the "hh:" of its time.
+	{"#437/2 no-break spaces", regexp.MustCompile(`(?i:` + issue437Months + `)[\s\x{A0}\x{202F}]*[\x{A0}\x{202F}][\s\x{A0}\x{202F}]*20[2-9]\d|` +
+		`\d[T\s\x{A0}\x{202F}]*[\x{A0}\x{202F}][T\s\x{A0}\x{202F}]*\d\d:`).MatchString, "Mai" + nbsp + "2026"},
 	// 20[2-3]\d → 20[2-9]\d, window 2020-2030 → 2020-2099: a match that
-	// differs has a year 2031-2099 where a form puts its year — before the
-	// "-" of an ISO date, behind the dot of a dot date, behind the date
-	// spaces after a month name. (2031-2039 matched before, without a date.)
-	{"#437/3 years 2031-2099", regexp.MustCompile(
-		`20(?:3[1-9]|[4-9]\d)-|\.20(?:3[1-9]|[4-9]\d)|[\s\x{A0}\x{202F}]20(?:3[1-9]|[4-9]\d)`).MatchString, "Mai 2031"},
+	// differs is an ISO date, a dot date or a month name and year whose year
+	// is 2031-2099. (2031-2039 matched before, without a date.)
+	{"#437/3 years 2031-2099", regexp.MustCompile(`20(?:3[1-9]|[4-9]\d)-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])|` +
+		`(?:0[1-9]|[12]\d|3[01])\.(?:0[1-9]|1[0-2])\.20(?:3[1-9]|[4-9]\d)|` +
+		`(?i:` + issue437Months + `)[\s\x{A0}\x{202F}]+20(?:3[1-9]|[4-9]\d)`).MatchString, "Mai 2031"},
 }
+
+// issue437Months are the month names of both month forms, before and after
+// #437/1, as one alternation.
+const issue437Months = "januar|februar|märz|maerz|marz|april|mai|juni|juli|august|september|oktober|november|dezember|" +
+	"january|february|march|may|june|july|october|december"
 
 // issue437Touched returns the name of the first class of issue437Classes
 // content belongs to, or "".
@@ -212,23 +221,82 @@ func TestIssue437Classes_EachIsNeeded(t *testing.T) {
 	}
 }
 
+// TestIssue437Classes_LeaveOrdinaryContentsOutside guards the frozen
+// comparison against a class that has grown too wide: dates of every form in
+// the old window with ASCII whitespace, and numbers that are no dates, belong
+// to no class.
+func TestIssue437Classes_LeaveOrdinaryContentsOutside(t *testing.T) {
+	for _, c := range []string{
+		"Mai 2026", "März 2026", "MÄRZ 2030", "December 2030", "Januar 2020", "2026-03-29", "2026-03-29 14:30",
+		"2026-03-29T14:30:00Z", "29.03.2026", "29.03.2026 14:30", "Dezember\t\n2026",
+		"Stand 21.11.2026 01:51, Release v5.71.0 am 2026-11-21T01:51:00Z; geplant: Dezember 2026 / December 2026.",
+		"Port 2049, 2048 MB, RFC 2046, 20 2031 Zeilen, ids 2040-2045, offset 2099, v2.0.2045",
+		"5" + nbsp + "000 €", "um 14" + nbsp + "Uhr", "Seite" + nbsp + "2049", "Mai" + nbsp + "1999", "",
+	} {
+		if cl := issue437Touched(c); cl != "" {
+			t.Errorf("%q is in class %s", c, cl)
+		}
+	}
+}
+
 // TestExtractDates_MatchesFrozenReference_OutsideTheClasses runs generated
 // texts built like trickyDoc's but kept outside every class of
 // issue437Classes, so the frozen comparison runs on each of them; the
 // tricky corpus itself touches the classes often (its pieces are made of
-// month names and year tokens). With -short it runs a quarter of the texts.
+// month names and year tokens). Enough of them must yield a date for the
+// comparison to mean something. With -short it runs a quarter of the texts.
 func TestExtractDates_MatchesFrozenReference_OutsideTheClasses(t *testing.T) {
-	small, large := 4000, 100
+	small, large := 3000, 60
 	if testing.Short() {
-		small, large = 1000, 25
+		small, large = 750, 15
 	}
 	r := rand.New(rand.NewPCG(437, 1))
+	withDates := 0
 	for range small {
-		assertMatchesFrozen(t, trickyDocOutside437(r, 1+r.IntN(40)))
+		c := trickyDocOutside437(r, 1+r.IntN(40))
+		assertMatchesFrozen(t, c)
+		if len(ExtractDates(c)) > 0 {
+			withDates++
+		}
 	}
 	for range large {
 		assertMatchesFrozen(t, trickyDocOutside437(r, 200+r.IntN(800)))
 	}
+	if withDates*10 < small {
+		t.Errorf("only %d of %d generated texts outside the classes yield a date", withDates, small)
+	}
+}
+
+// TestExtractDates_MatchesFrozenReference_RealShapedTexts runs the documents
+// of TestExtractDates_MatchesReference_RealShapedTexts against the frozen
+// version as well, rewritten by outside437 so that no class touches them.
+func TestExtractDates_MatchesFrozenReference_RealShapedTexts(t *testing.T) {
+	seeds := uint64(4)
+	if testing.Short() {
+		seeds = 1
+	}
+	for _, dense := range []bool{false, true} {
+		for _, n := range []int{2 << 10, 20 << 10, 50 << 10} {
+			for seed := uint64(1); seed <= seeds; seed++ {
+				assertMatchesFrozen(t, outside437(datesDoc(seed, n, dense)))
+			}
+		}
+	}
+}
+
+var (
+	outside437Years  = regexp.MustCompile(`20(?:3[1-9]|[4-9]\d)`)
+	outside437Maerz  = regexp.MustCompile(`(?i)mae?rz`)
+	outside437Spaces = strings.NewReplacer(nbsp, " ", nnbsp, " ")
+)
+
+// outside437 rewrites content out of every class of issue437Classes: the
+// years 2031-2099 become 2029, "maerz" and "marz" become "März", and the
+// no-break spaces become spaces.
+func outside437(content string) string {
+	content = outside437Years.ReplaceAllString(content, "2029")
+	content = outside437Maerz.ReplaceAllString(content, "März")
+	return outside437Spaces.Replace(content)
 }
 
 func assertMatchesFrozen(t *testing.T, content string) {
@@ -241,18 +309,20 @@ func assertMatchesFrozen(t *testing.T, content string) {
 
 // trickyDocOutside437 builds a trickyDoc of up to k pieces and leaves out
 // every piece that would put the text into a class of issue437Classes. A
-// piece can only complete a class match that ends in it, so the check reads
-// the last 256 bytes, which hold every match the pieces form short of a run
-// of over 200 whitespace pieces; assertMatchesFrozen checks the whole text
+// piece can only complete a class match that ends in it, and every class
+// match ends with a digit or a colon, so only such pieces are checked, on
+// the last 128 bytes, which hold every match the pieces form short of a run
+// of over 60 whitespace pieces; assertMatchesFrozen checks the whole text
 // again and fails if one slipped through.
 func trickyDocOutside437(r *rand.Rand, k int) string {
-	const tail = 256
+	const tail = 128
 	var b strings.Builder
 	for range k {
 		before := b.Len()
-		b.WriteString(trickyDoc(r, 1))
+		piece := trickyDoc(r, 1)
+		b.WriteString(piece)
 		s := b.String()
-		if issue437Touched(s[max(0, len(s)-tail):]) != "" {
+		if strings.ContainsAny(piece, "0123456789:") && issue437Touched(s[max(0, len(s)-tail):]) != "" {
 			b.Reset()
 			b.WriteString(s[:before])
 		}

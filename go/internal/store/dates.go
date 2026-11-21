@@ -40,11 +40,10 @@ import (
 // byte. The regexp semantics carried over: \b and \d and \s are ASCII (\s is
 // [\t\n\f\r ], no \v), and the date spaces between the parts of a date are \s
 // and the two no-break spaces U+00A0 and U+202F (dateSpaceAt); (?i) folds by
-// Unicode simple case folding, so the
-// Kelvin sign matches k and the long s matches s; the optional time parts are
-// greedy and fall back in the regexp's order of preference; the matches of
-// one form do not overlap, a later one starts at or after the end of the
-// previous one.
+// Unicode simple case folding, so the Kelvin sign matches k and the long s
+// matches s; the optional time parts are greedy and fall back in the regexp's
+// order of preference; the matches of one form do not overlap, a later one
+// starts at or after the end of the previous one.
 
 // dateScan holds, per date form, the submatch offsets of its matches in
 // content order — what FindAllStringSubmatchIndex of the form's regular
@@ -101,10 +100,10 @@ func matchISODate(c string, s int) []int {
 
 // matchISOTime matches the optional time of the ISO form at i together with
 // the \b that ends the form, and returns the offset of the hour and the end,
-// or end -1. The run of T and date spaces is greedy and only its longest run can be followed by an
-// hour digit. Of the optional seconds and Z the regexp prefers seconds with
-// Z, then seconds, then Z, then neither; the first whose end is a word
-// boundary is the match.
+// or end -1. The run of T and date spaces is greedy and only its longest run
+// can be followed by an hour digit. Of the optional seconds and Z the regexp
+// prefers seconds with Z, then seconds, then Z, then neither; the first whose
+// end is a word boundary is the match.
 func matchISOTime(c string, i int) (h, end int) {
 	h = i
 	for h < len(c) {
