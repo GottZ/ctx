@@ -167,7 +167,9 @@ func updateDataFromCanonical(cw store.CanonicalWrite) store.UpdateBlockData {
 // title/metadata change (WF T4, design/01 §4.5 seam 5 — safe because
 // ClassifyBlockAfterUpsert only writes type_source='auto' blocks, and
 // deliberately match-only: a block whose new title stops matching keeps its
-// current type, the hook promotes and never demotes), temporal re-extraction
+// current type, the hook promotes and never demotes; nothing is written once a
+// later write replaced the title or a metadata key the rules read — issue
+// #426), temporal re-extraction
 // on content change (store.RefreshTemporal; the rows always get createdAt as
 // the meta-anchor, even without content times, and nothing is written once a
 // later write replaced the content — issue #414). All non-fatal; reqID stamps every
