@@ -210,12 +210,15 @@ func (rig *i427Rig) update(t *testing.T, pool *pgxpool.Pool, id string, data sto
 }
 
 // cycle runs one dream cycle in the background; it ends after step 1b.
-func (rig *i427Rig) cycle() <-chan error {
+func (rig *i427Rig) cycle() <-chan error { return rig.cycleOn(rig.pool) }
+
+// cycleOn is cycle with the dream's statements on pool.
+func (rig *i427Rig) cycleOn(pool *pgxpool.Pool) <-chan error {
 	done := make(chan error, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), i427Wait)
 		defer cancel()
-		_, err := dream.RunDreamCycle(ctx, rig.pool, rig.router, dream.DreamOptions(),
+		_, err := dream.RunDreamCycle(ctx, pool, rig.router, dream.DreamOptions(),
 			dream.BackoffConfig{Mode: "exp", Factor: 1.6, MinHours: 12, CapHours: 1080, InertOffset: 7},
 			[]string{i427Scope}, i427StopAfterTemporal)
 		switch {
@@ -354,47 +357,59 @@ func i427CaptureLogs(t *testing.T, block string) *i427Logs {
 }
 
 // TestTemporalReviewStampSkipsContentReplacedDuringReview is the issue's
-// case: the content is replaced while the review waits on its LLM. The review
-// found a date in the content it read; its merge is dropped (the content
-// guard of #414), and the block must stay due, so the next pick reviews the
-// content it holds. Before, the cycle stamped now() after the review, later
-// than the new content's updated_at, and the new content was never reviewed.
+// case: the content is replaced while the review waits on its LLM. The block
+// must stay due, so the next pick reviews the content it holds. Before, the
+// cycle stamped now() after the review, later than the new content's
+// updated_at, and the new content was never reviewed. With a finding, the
+// review's merge is dropped (the content guard of #414) and ValidateTemporal
+// reports it; without one, nothing is written and the stamp's own comparison
+// alone keeps the block due.
 func TestTemporalReviewStampSkipsContentReplacedDuringReview(t *testing.T) {
-	rig := newI427Rig(t)
-	picked := "Kickoff on 2026-03-15, the retro a week later."
-	b := rig.block(t, "Kickoff plan", picked)
-	logs := i427CaptureLogs(t, b.ID)
+	for _, tc := range []struct {
+		name    string
+		finding []string
+	}{
+		{"with a finding", []string{"2026-03-22"}},
+		{"without a finding", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newI427Rig(t)
+			picked := "Kickoff on 2026-03-15, the retro a week later."
+			b := rig.block(t, "Kickoff plan", picked)
+			logs := i427CaptureLogs(t, b.ID)
 
-	entered, release := rig.review.hold(i427Dates("2026-03-22"))
-	done := rig.cycle()
-	if p := i427Entered(t, entered, done); !strings.Contains(p, picked) {
-		t.Fatalf("the review was sent %q, want the picked content", p)
-	}
-	replaced := "Kickoff moved to 2026-07-20."
-	rig.update(t, rig.pool, b.ID, store.UpdateBlockData{Content: &replaced})
-	close(release)
-	i427Await(t, done, "first cycle")
+			entered, release := rig.review.hold(i427Dates(tc.finding...))
+			done := rig.cycle()
+			if p := i427Entered(t, entered, done); !strings.Contains(p, picked) {
+				t.Fatalf("the review was sent %q, want the picked content", p)
+			}
+			replaced := "Kickoff moved to 2026-07-20."
+			rig.update(t, rig.pool, b.ID, store.UpdateBlockData{Content: &replaced})
+			close(release)
+			i427Await(t, done, "first cycle")
 
-	if !rig.due(t, b.ID) {
-		t.Errorf("the block is marked reviewed although its content was replaced during the review")
-	}
-	if n := rig.rowsAt(t, b.ID, "2026-03-22"); n != 0 {
-		t.Errorf("the review's finding for the replaced content landed: %d rows", n)
-	}
-	if logs.has("LLM found additional dates") {
-		t.Errorf("the dropped merge was logged as findings of the block: %q", logs.msgs)
-	}
+			if !rig.due(t, b.ID) {
+				t.Errorf("the block is marked reviewed although its content was replaced during the review")
+			}
+			if n := rig.rowsAt(t, b.ID, "2026-03-22"); n != 0 {
+				t.Errorf("the review's finding for the replaced content landed: %d rows", n)
+			}
+			if logs.has("LLM found additional dates") {
+				t.Errorf("the dropped merge was logged as findings of the block: %q", logs.msgs)
+			}
 
-	// The next pick reviews the content the block holds.
-	rig.embed(t, b.ID)
-	rig.endClaim(t, b.ID)
-	prompts := rig.review.record(i427Dates())
-	i427Await(t, rig.cycle(), "second cycle")
-	if len(*prompts) != 1 || !strings.Contains((*prompts)[0], replaced) {
-		t.Errorf("the next cycle sent %d review(s) %q, want one of the replaced content", len(*prompts), *prompts)
-	}
-	if rig.due(t, b.ID) {
-		t.Errorf("the block is still due after the review of its current content")
+			// The next pick reviews the content the block holds.
+			rig.embed(t, b.ID)
+			rig.endClaim(t, b.ID)
+			prompts := rig.review.record(i427Dates())
+			i427Await(t, rig.cycle(), "second cycle")
+			if len(*prompts) != 1 || !strings.Contains((*prompts)[0], replaced) {
+				t.Errorf("the next cycle sent %d review(s) %q, want one of the replaced content", len(*prompts), *prompts)
+			}
+			if rig.due(t, b.ID) {
+				t.Errorf("the block is still due after the review of its current content")
+			}
+		})
 	}
 }
 
@@ -606,7 +621,7 @@ func TestTemporalReviewStampSkipsADroppedMergeWhenTheContentReturns(t *testing.T
 		defer close(cycled)
 		cycleErr = <-done
 	}()
-	i427UntilDoneOrSecondWaiter(t, rig.pool, holdPID, cycled)
+	i427UntilDoneOrSecondWaiter(t, rig.pool, cycled)
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("release hold: %v", err)
 	}
@@ -629,10 +644,13 @@ func TestTemporalReviewStampSkipsADroppedMergeWhenTheContentReturns(t *testing.T
 }
 
 // i427UntilDoneOrSecondWaiter waits until the cycle is done or a second
-// backend waits on the hold (a stamp queued behind the write back).
-func i427UntilDoneOrSecondWaiter(t *testing.T, pool *pgxpool.Pool, holdPID uint32, done <-chan struct{}) {
+// backend of the test database waits on a lock: a stamp queued behind the
+// write back. It queues on the tuple lock the write back holds while that
+// waits for the hold, so pg_blocking_pids names the write back, not the
+// hold; the test database is the test's own, so the count is these two.
+func i427UntilDoneOrSecondWaiter(t *testing.T, pool *pgxpool.Pool, done <-chan struct{}) {
 	t.Helper()
-	deadline := time.Now().Add(i427Wait)
+	deadline := time.Now().Add(i427Wait / 2)
 	for {
 		select {
 		case <-done:
@@ -641,14 +659,15 @@ func i427UntilDoneOrSecondWaiter(t *testing.T, pool *pgxpool.Pool, holdPID uint3
 		}
 		var waiters int
 		if err := pool.QueryRow(context.Background(),
-			`SELECT count(*) FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid))`, int64(holdPID)).Scan(&waiters); err != nil {
+			`SELECT count(*) FROM pg_stat_activity
+			  WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiters); err != nil {
 			t.Fatalf("poll waiters: %v", err)
 		}
 		if waiters >= 2 {
 			return
 		}
 		if !time.Now().Before(deadline) {
-			t.Fatalf("neither the cycle finished nor a stamp queued within %s", i427Wait)
+			t.Fatalf("neither the cycle finished nor a stamp queued within %s", i427Wait/2)
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
