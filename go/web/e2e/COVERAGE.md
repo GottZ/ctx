@@ -9,8 +9,9 @@
 **Beweist:** jede Registry-Seite rendert in jedem deklarierten Zustand pixel-identisch
 zur eingefrorenen Referenz (@visual, nur im digest-gepinnten Container), und das Dokument
 ist dabei weder höher noch breiter als der Viewport (vor jeder Aufnahme geprüft, #419,
-#430), und keine Box ragt seitlich aus dem Viewport oder wird von einem nur senkrecht scrollenden
-Bereich abgeschnitten (#440; Mobile-Opt-outs prüfen das je Zustand ohne Aufnahme bei 390 px);
+#430), und keine Box ragt seitlich aus dem Viewport oder wird von einem Bereich abgeschnitten,
+der nicht als Seitwärts-Scroller deklariert ist (#440; Mobile-Opt-outs prüfen das je Zustand ohne
+Aufnahme bei 390 px);
 der primäre Nutzungspfad ist bedienbar (@flow); guard-gegatete Seiten weisen niedrigere Rollen ab
 (generierte Deny-Tests — CLIENT-Guard-Schicht); tenant-scoped Flächen rendern nie den
 Fremd-Sentinel (Leak-Probe mit Positiv-Kontrolle); Listen-Flächen halten den deklarierten

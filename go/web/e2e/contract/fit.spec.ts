@@ -68,6 +68,11 @@ test.describe('viewport fit (meta, #440)', () => {
     await expect(expectViewportFit(page)).rejects.toThrow(/clipped: main\.content\[data-mode='split'\]/)
   })
 
+  test('a frame that declares overflow: hidden may not cut a box off sideways', async ({ page }) => {
+    await page390(page, '<div class="frame" style="width:300px;height:100px"><div style="width:301px;height:20px"></div></div>', '.frame{overflow:hidden}')
+    await expect(expectViewportFit(page)).rejects.toThrow(/clipped: div\.frame holds 301 px of content in 300 px \(overflow-x hidden/)
+  })
+
   test('a region that declares overflow-x may scroll sideways, its own box may not stick out', async ({ page }) => {
     await page390(page, '<div class="scroll"><div style="width:900px;height:20px"></div></div>', '.scroll{overflow-x:auto}')
     await expectViewportFit(page)

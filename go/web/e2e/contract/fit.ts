@@ -7,19 +7,20 @@ import { expect, type Page } from '@playwright/test'
 //      (#419 height, #430 width). The shell is a 100dvh grid whose content
 //      region owns the scroll, and the login mask centres its card inside one
 //      viewport.
-//   2. clipped  — an element that scrolls sideways only because it scrolls
-//      down holds no content wider than its padding box (scrollWidth <=
-//      clientWidth), and no box inside it starts left of its padding box (the
-//      scroll range never reaches there, so scrollWidth does not count it).
-//      overflow-y: auto alone computes overflow-x to auto, so a
+//   2. clipped  — an element that clips sideways without being declared a
+//      sideways scroller holds no content wider than its padding box
+//      (scrollWidth <= clientWidth), and no box inside it starts left of its
+//      padding box (the scroll range never reaches there, so scrollWidth does
+//      not count it). overflow-y: auto alone computes overflow-x to auto, so a
 //      box that is too wide inside such a region scrolls it sideways or is
 //      cut off, and the document check cannot see it: main.content (#440),
-//      the stacked blocks workbench (#439), a dialog body (#442). A region
-//      whose stylesheet declares overflow-x (or the overflow shorthand) other
-//      than visible chose to clip or scroll sideways — the table wrappers of
-//      lib/ui/Table.svelte, the board columns, main.content[data-mode='board']
-//      (AppShell), code blocks — and is not checked here; its own box still
-//      is, by layer 3.
+//      the stacked blocks workbench (#439), a dialog body (#442); overflow
+//      hidden or clip cuts it off where nobody can scroll to it (the graph and
+//      chat page frames). A region whose stylesheet declares overflow-x auto
+//      or scroll (also through the overflow shorthand) is a sideways scroller
+//      by choice — the table wrappers of lib/ui/Table.svelte, the board
+//      columns, main.content[data-mode='board'] (AppShell), code blocks — and
+//      is not checked here; its own box still is, by layer 3.
 //   3. outside  — the visible part of every rendered element box (its border
 //      box, cut to the boxes of the clipping ancestors above it) lies between
 //      x = 0 and the viewport width. This catches what layers 1 and 2 cannot:
@@ -28,7 +29,7 @@ import { expect, type Page } from '@playwright/test'
 //      popover), whose containing block is the viewport, not a scroller.
 //
 // Structural exemptions, no per-page list:
-//   - declared sideways overflow (layer 2, above). Rules inside @media and
+//   - a declared sideways scroller (layer 2, above). Rules inside @media and
 //     @supports count only while their condition holds; rules inside
 //     @container count always (no API evaluates a container condition from
 //     script), which can only exempt more, never fail a fitting box.
@@ -42,8 +43,9 @@ import { expect, type Page } from '@playwright/test'
 //
 // Known limit: an absolutely positioned box is cut to every clipping ancestor
 // above it in the DOM, also to one that is not in its containing-block chain
-// and therefore does not clip it. That can hide such a box from layer 3; it
-// cannot make a fitting box fail.
+// and therefore does not clip it. That can hide such a box from layer 3, and
+// layer 2 can report it as starting left of such an ancestor although that
+// ancestor does not cut it off. No contract state has such a box.
 
 /**
  * Sub-pixel slack for layer 3: boxes are compared at fractional precision, and
@@ -87,14 +89,14 @@ export async function expectViewportFit(page: Page): Promise<void> {
       }
     }
 
-    // Selectors of the style rules that declare overflow-x other than visible
-    // (the overflow shorthand sets overflow-x too), in effect right now.
+    // Selectors of the style rules that declare overflow-x auto or scroll (the
+    // overflow shorthand sets overflow-x too), in effect right now.
     const declaredX: string[] = []
     const collect = (rules: CSSRuleList): void => {
       for (const rule of Array.from(rules)) {
         if (rule instanceof CSSStyleRule) {
           const x = rule.style.overflowX
-          if (x !== '' && x !== 'visible') declaredX.push(rule.selectorText)
+          if (x === 'auto' || x === 'scroll') declaredX.push(rule.selectorText)
         }
         if (rule instanceof CSSMediaRule && !window.matchMedia(rule.conditionText).matches) continue
         if (rule instanceof CSSSupportsRule && !CSS.supports(rule.conditionText)) continue
@@ -110,7 +112,7 @@ export async function expectViewportFit(page: Page): Promise<void> {
     }
     const declaresX = (el: Element): boolean => {
       const inline = el instanceof HTMLElement ? el.style.overflowX : ''
-      if (inline !== '' && inline !== 'visible') return true
+      if (inline === 'auto' || inline === 'scroll') return true
       return declaredX.some((sel) => matches(el, sel))
     }
 
@@ -184,7 +186,7 @@ export async function expectViewportFit(page: Page): Promise<void> {
           if (sc !== null && r.left < sl - slack) {
             findings.push(
               `clipped: ${label(el)} starts at x ${px(r.left)}, left of the padding edge ${px(sl)} of ${label(sc)}, ` +
-                `which scrolls sideways only through overflow-y`,
+                `which is not declared a sideways scroller`,
             )
             // its descendants are cut off with it; one finding names the box
             sc = null
@@ -200,12 +202,12 @@ export async function expectViewportFit(page: Page): Promise<void> {
           if (!exempt && el.scrollWidth > el.clientWidth) {
             findings.push(
               `clipped: ${label(el)} holds ${el.scrollWidth} px of content in ${el.clientWidth} px ` +
-                `(overflow-x ${cs.overflowX} only through overflow-y ${cs.overflowY}); widest: ${culprit(el, padLeft, padRight)}`,
+                `(overflow-x ${cs.overflowX}, not declared a sideways scroller); widest: ${culprit(el, padLeft, padRight)}`,
             )
           }
           cl = Math.max(cl, padLeft)
           cr = Math.min(cr, padRight)
-          // a region that declares its sideways overflow owns what it clips
+          // a declared sideways scroller owns what it scrolls
           sc = exempt ? null : el
           sl = exempt ? -Infinity : padLeft
         }
