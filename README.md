@@ -402,4 +402,4 @@ If you want those numbers to exist: [GitHub Sponsors](https://github.com/sponsor
 
 ## License
 
-[MPL-2.0](LICENSE). By [GottZ](https://github.com/GottZ).
+[MPL-2.0](LICENSE). By [GottZ](https://github.com/GottZ) and [Damien Moon](https://github.com/DamieMoon); the copyright notice is in [COPYRIGHT](COPYRIGHT).

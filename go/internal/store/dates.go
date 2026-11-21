@@ -1,5 +1,5 @@
 // dates.go — Date Extraction for content_dates enrichment
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // ExtractDates extracts all recognizable dates from text content
 // for populating the content_dates column (GottZ Temporal Gravity).

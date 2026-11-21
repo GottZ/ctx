@@ -6,7 +6,7 @@
 # Evaluates live system state from real data sources.
 # Run at session start to verify handover accuracy.
 #
-# ctx — Your AI's save game. By GottZ (github.com/GottZ/ctx/graphs/contributors)
+# ctx — Your AI's save game. By GottZ and Damien Moon (github.com/GottZ/ctx/graphs/contributors)
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

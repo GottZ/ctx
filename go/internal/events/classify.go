@@ -8,7 +8,7 @@
 // CPU + DB — no GPU, no LLM — so, unlike the audit, it does not yield to live
 // queries; it just stays shutdown-aware and never panics the process.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package events
 

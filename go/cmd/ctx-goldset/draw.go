@@ -9,7 +9,7 @@ package main
 // calibrated in one breath would report a number nobody could have contradicted
 // in between.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 
 import (

@@ -11,7 +11,7 @@
 // known token prefixes, entropy-gated secret assignments) over generic
 // hex/base64 blobs that collide with this corpus's git SHAs and content hashes.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package sensitivity
 

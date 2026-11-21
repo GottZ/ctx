@@ -1,5 +1,5 @@
 // chat.go — web-chat sessions + messages (F6-C2/G35).
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // Source: https://github.com/GottZ/ctx
 //

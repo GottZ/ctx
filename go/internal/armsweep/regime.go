@@ -7,7 +7,7 @@ package armsweep
 // in §4.4b: local and global have measured OPPOSITE winners, so a single G-REAL
 // figure is a mean over two regimes that cancel each other out.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 
 import (

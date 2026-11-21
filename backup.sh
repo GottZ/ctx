@@ -4,7 +4,7 @@
 # Runs pg_dump via docker exec against the compose service `db`
 # Stores backups in /compose/n8n/backups/ with 7-day rotation
 # =============================================================================
-# Part of ctx by GottZ (github.com/GottZ/ctx/graphs/contributors)
+# Part of ctx by GottZ and Damien Moon (github.com/GottZ/ctx/graphs/contributors)
 # Source: https://github.com/GottZ/ctx
 #
 # Extension points (site-local, NOT tracked — see .gitignore `backup.d/`):

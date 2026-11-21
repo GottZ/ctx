@@ -22,7 +22,7 @@ func main() {
 	root := &cobra.Command{
 		Use:   "ctx",
 		Short: "Your AI's save game",
-		Long:  "ctx — The memory your LLM pretends to have. By GottZ.",
+		Long:  "ctx — The memory your LLM pretends to have. By GottZ and Damien Moon.",
 	}
 
 	cli.Version = version

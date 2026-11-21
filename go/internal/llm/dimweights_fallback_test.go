@@ -1,5 +1,5 @@
 // Package llm — D-B post-derivation unit tests (Vorhaben A, wave W2).
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // In-package on purpose: parseTemporalResponse is unexported, and this file
 // must not import rrf (rrf imports llm — cycle). The vocabulary assertion

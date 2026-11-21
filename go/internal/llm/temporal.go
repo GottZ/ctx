@@ -1,5 +1,5 @@
 // temporal.go — Temporal Normalization
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // GottZ Temporal Gravity: Physics-inspired temporal scoring where knowledge
 // blocks are masses in time-space with gravitational fields. Novel approach

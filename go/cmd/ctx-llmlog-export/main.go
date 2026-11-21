@@ -16,7 +16,7 @@
 // 3 = Count-Gate verletzt · 1 = alles andere (Perimeter, Config, DB,
 // I/O). Das Summary geht in jedem Fall zuerst auf stderr.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package main
 

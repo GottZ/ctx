@@ -4,7 +4,7 @@
 // block titles and the classification topology (same opsec surface as the G41
 // audit). Scope-bound to the caller's home_scope by the store layer (2.3d).
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package handler
 

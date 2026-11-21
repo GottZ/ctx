@@ -1,5 +1,5 @@
 // temporal.go — Temporal EAV Dimension Functions
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // Manages the context_temporal table (block_id, dimension, value, source_time)
 // for O(log n) temporal queries via partial B-Tree indexes.

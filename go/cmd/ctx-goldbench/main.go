@@ -7,7 +7,7 @@
 //	go run ./cmd/ctx-goldbench -endpoint http://host:8080 -model qwen3.5:9b -axes all
 //	go run ./cmd/ctx-goldbench -data /path/to/ctx-bench/data -dry-run -axes all
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package main
 

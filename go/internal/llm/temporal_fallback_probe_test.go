@@ -1,5 +1,5 @@
 // Package llm — W0/W1 fallback-reachability probes (Vorhaben A, DimensionWeights).
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // Re-materialized 2026-07-05 (A-W1): the original W0 harness was deleted with
 // a stopped build worktree; verdicts below carry over the documented probe set

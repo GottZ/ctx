@@ -11,7 +11,7 @@
 // so a mapping-persist without block creation is structurally impossible; the
 // im-Zweifel "I-F = Mapping-Persist" fallback therefore does not apply here.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package forge
 

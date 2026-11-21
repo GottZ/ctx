@@ -1,5 +1,5 @@
 // gravity.go — Post-RRF Temporal Gravity Reranker
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // Two gravity formulas:
 //  1. Linear (Distance-only): Power-Law p=1.5 on absolute day distance.

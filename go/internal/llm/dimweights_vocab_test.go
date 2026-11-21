@@ -1,5 +1,5 @@
 // Package llm — vocabulary gate for the D-B derivation (Vorhaben A, W2).
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 //
 // External test package on purpose: rrf imports llm (rerank.go), so the
 // vocabulary truth rrf.DimensionSigma is only reachable from OUTSIDE the llm

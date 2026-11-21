@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # archive-legacy-topic-maps.sh — geführter Betriebs-Schritt der Welle W-H
-# Part of ctx by GottZ (https://github.com/GottZ/ctx)
+# Part of ctx by GottZ and Damien Moon (https://github.com/GottZ/ctx)
 # =============================================================================
 # Archiviert die beiden toten Zeilen-Maps `topic-map-work` und `topic-map-hth`
 # (design/02 §4.6/§7 "W-H", User-Entscheid E2-02 A). KEIN DELETE — die Blöcke

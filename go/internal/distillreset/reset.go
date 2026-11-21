@@ -55,7 +55,7 @@
 // Abgeleitete Blöcke (metadata.provenance, D-01 §4.5) werden gemeldet und
 // übersprungen: ihre Provenienz-Kette gehört nicht dem Arm.
 //
-// Part of ctx by GottZ — The memory your LLM pretends to have.
+// Part of ctx by GottZ and Damien Moon — The memory your LLM pretends to have.
 // Source: https://github.com/GottZ/ctx
 package distillreset
 
