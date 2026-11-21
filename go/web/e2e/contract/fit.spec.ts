@@ -106,6 +106,14 @@ test.describe('viewport fit (meta, #440)', () => {
     await expectViewportFit(page)
   })
 
+  test("a modal dialog's UA overflow: auto does not make it a declared sideways scroller (#457)", async ({ page }) => {
+    // auto wins the dialog's cascade, but from the UA stylesheet: no author
+    // chose to let the dialog scroll sideways, so its content must fit it.
+    await page390(page, '<dialog style="width:300px;height:40px;max-width:none;padding:0;border:0"><div style="width:400px;height:20px"></div></dialog>')
+    await page.evaluate(() => document.querySelector('dialog')?.showModal())
+    await expect(expectViewportFit(page)).rejects.toThrow(/clipped: dialog holds 400 px of content in 300 px \(overflow-x auto/)
+  })
+
   test('the fit leaves the page as it found it: style attributes and scroll offsets (#457)', async ({ page }) => {
     // The cascade probe writes overflow-y inline on every declared sideways
     // scroller and restores the attribute: the capture after the fit sees the
