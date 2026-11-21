@@ -1268,7 +1268,12 @@ func StoreEmbeddingNext(ctx context.Context, q pgxdb.Execer, blockID, model stri
 //     change always did, and metadata.guard_resolution stays as the trace.
 //     Both ride the UPDATE below: no statement is added, and a metadata
 //     document without the mark is passed through as it is (no rebuilt jsonb,
-//     no new TOAST value).
+//     no new TOAST value). A document that carries the mark is rebuilt without
+//     it — one more metadata value per change, a new TOAST value when the
+//     document is large. That happens where the write's own statement did not
+//     strip the mark already: a title-only UpdateBlock, an UpdateIssueBlock of
+//     the title or body, the push rename; UpdateBlock and UpsertBlock strip it
+//     for a content write, PullUpdateIssueBlock in its metadata expression.
 //
 // This is the pgxdb.Execer-parameterized primitive (same pattern as
 // StoreEmbedding): it does NOT own a transaction, so a caller that needs the

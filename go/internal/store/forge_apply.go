@@ -147,6 +147,14 @@ func LockPulledBlock(ctx context.Context, tx pgx.Tx, blockID string, scopes []st
 // marked stale, until the backfill writes the new one; a state- or label-only
 // change keeps it current, issue #236). Tx-bound (commits with the base_hash
 // rewrite). A local_seq (from a former #L draft) is left untouched.
+//
+// The guard's check mark, which the invalidation drops for a changed title or
+// body (issue #452), is stripped in the metadata expression this statement
+// writes anyway, the way UpdateBlock strips it for a content write
+// (updateMetadataExpr): the invalidation then finds no mark and passes the
+// document through, so the row's metadata is written once, not twice (one
+// TOAST value instead of two for a large document). title and content in the
+// SET expression are the stored row's values.
 func PullUpdateIssueBlock(ctx context.Context, tx pgx.Tx, blockID string, c ForgeIssueContent) (*Block, error) {
 	title := fmt.Sprintf("#%d %s", c.Number, c.Title)
 	var status any
@@ -155,7 +163,10 @@ func PullUpdateIssueBlock(ctx context.Context, tx pgx.Tx, blockID string, c Forg
 	}
 	row := tx.QueryRow(ctx, `
 		UPDATE context_blocks
-		   SET title = $2, content = $3, metadata = metadata || $4::jsonb,
+		   SET title = $2, content = $3,
+		       metadata = CASE WHEN title IS DISTINCT FROM $2 OR content IS DISTINCT FROM $3
+		                       THEN (metadata || $4::jsonb) - 'guard_checked_at'
+		                       ELSE metadata || $4::jsonb END,
 		       workflow_status = $5, updated_at = now()
 		 WHERE id = $1::uuid
 		RETURNING `+issueScanCols+`, `+textChangedCol,
