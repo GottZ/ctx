@@ -405,6 +405,24 @@ func TestClientAbortFollowupsPoolWait(t *testing.T) {
 		}
 	})
 
+	t.Run("a context that ended before the acquire waited for nothing: INFO", func(t *testing.T) {
+		logs := installRejectLogCapture(t)
+		late := make(chan struct{}, 1)
+		srv, done := abortServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			late <- struct{}{}
+			<-r.Context().Done()
+			_, err := pool.Exec(r.Context(), `SELECT 1`)
+			internalError(w, r.Context(), msg, fmt.Errorf("store: probe: %w", err))
+		}), nil)
+		cancelWhen(t, srv.URL+"/api/probe", func() { <-late })
+		waitDone(t, done)
+		recs := logs.withMsg(msg)
+		if len(recs) != 1 || recs[0].level != slog.LevelInfo || recs[0].attrs["waited_for"] != nil {
+			t.Errorf("handler line = %+v, want one INFO line without waited_for (the acquire began on an ended context)", recs)
+		}
+	})
+
 	t.Run("a free connection: the abort during the statement stays INFO", func(t *testing.T) {
 		logs := installRejectLogCapture(t)
 		srv, done := abortServer(t, h, nil)

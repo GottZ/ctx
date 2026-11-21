@@ -297,6 +297,9 @@ func TestEncodeErrorThroughTheQueryKeepaliveIsClientGone(t *testing.T) {
 	if errs := errorLines(logs); len(errs) != 0 {
 		t.Errorf("a client that left a keepalive query produced ERROR lines: %+v", errs)
 	}
+	if recs := logs.withMsg("failed to encode JSON response"); len(recs) != 1 || recs[0].attrs["client_gone"] != true {
+		t.Errorf("encode line = %+v, want one line with client_gone=true (the write to the gone client failed)", recs)
+	}
 	if got := statusOf(t, requestLogOf(t, logs)); got != clientClosedStatus {
 		t.Errorf("request log status = %d, want %d", got, clientClosedStatus)
 	}

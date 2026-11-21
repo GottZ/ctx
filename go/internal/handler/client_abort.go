@@ -37,8 +37,11 @@ func loggedRequest(ctx context.Context) *responseWriter {
 
 // loggedResponse walks a handler's writer chain down to Logger's record, for
 // the writers that have no context at hand (writeJSON and the store-error
-// writers). A writer in between that neither unwraps nor names the writer
-// under it (requestLogWriter) ends the walk with nil.
+// writers). The /api/query keepalive does not unwrap — it guards the writer
+// under it with its lock, which an Unwrap caller would pass — so the walk
+// steps through it by name (issue #453); w never changes after
+// armQueryKeepalive. Any other writer in between that does not unwrap ends
+// the walk with nil.
 func loggedResponse(w http.ResponseWriter) *responseWriter {
 	for w != nil {
 		switch u := w.(type) {
@@ -46,21 +49,13 @@ func loggedResponse(w http.ResponseWriter) *responseWriter {
 			return u
 		case interface{ Unwrap() http.ResponseWriter }:
 			w = u.Unwrap()
-		case requestLogWriter:
-			w = u.requestLogWriter()
+		case *queryKeepalive:
+			w = u.w
 		default:
 			return nil
 		}
 	}
 	return nil
-}
-
-// requestLogWriter is a writer that guards the writer under it and so does
-// not unwrap (a caller would pass its lock: the /api/query keepalive), but
-// names it for the walk to Logger's record — the walk only reads that record
-// (issue #453).
-type requestLogWriter interface {
-	requestLogWriter() http.ResponseWriter
 }
 
 // clientGaveUp is the one rule (issue #417): a failure is the client's
@@ -136,7 +131,8 @@ func errorArg(args []any) error {
 	return nil
 }
 
-// logFailure writes the line: ERROR, or — the client gave up (gone) — the
+// logFailure writes the line: ERROR, or — the client gave up (gone, which
+// every caller decides on a non-nil rw) — the
 // same record at INFO with client_gone=true and the request's duration so far
 // (issue #453), at WARN with waited_for when the request waited for a
 // database connection or an admission when its client went away: the server
@@ -148,10 +144,6 @@ func logFailure(gone bool, rw *responseWriter, err error, msg string, args []any
 		return
 	}
 	out := append(append(make([]any, 0, len(args)+6), args...), "client_gone", true)
-	if rw == nil {
-		slog.Info(msg, out...)
-		return
-	}
 	if dispatch.AbandonedWait(err) {
 		rw.waited.CompareAndSwap(waitNone, waitAdmission)
 	}
