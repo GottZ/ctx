@@ -21,6 +21,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"unicode/utf8"
 
@@ -111,6 +112,29 @@ func PullCreateIssueBlock(ctx context.Context, tx pgx.Tx, scope string, c ForgeI
 	b, err := scanIssue(row)
 	if err != nil {
 		return nil, fmt.Errorf("store: pull-create issue: %w", err)
+	}
+	return b, nil
+}
+
+// LockPulledBlock reads an issue or comment block of scopes inside the pull's
+// transaction and locks it FOR NO KEY UPDATE — the lock the pull's own UPDATE
+// takes, which waits for a local writer still holding the row (UpdateIssueBlock
+// takes FOR UPDATE, UpdateBlock FOR NO KEY UPDATE) and keeps the next one out
+// until the pull commits. The pull decided its direction on a read without a
+// lock; it projects this row again before it writes (issue #452). A block that
+// is archived, gone or out of scopes reads as ErrIssueNotFound.
+func LockPulledBlock(ctx context.Context, tx pgx.Tx, blockID string, scopes []string) (*Block, error) {
+	b, err := scanIssue(tx.QueryRow(ctx, `
+		SELECT `+issueScanCols+`
+		  FROM context_blocks
+		 WHERE id = $1::uuid AND NOT is_archived AND scope = ANY($2::text[])
+		   AND type_name = ANY(ARRAY['`+IssueTypeName+`','`+CommentTypeName+`'])
+		   FOR NO KEY UPDATE`, blockID, scopes))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrIssueNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: lock pulled block: %w", err)
 	}
 	return b, nil
 }
