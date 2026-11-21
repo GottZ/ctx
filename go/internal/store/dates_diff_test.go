@@ -556,6 +556,93 @@ func TestMonthPatterns_NoAlternativeEndsAnother(t *testing.T) {
 	}
 }
 
+// TestMonthForms_ListEveryAlternativeByItsLastLetter checks the dispatch of
+// matchMonthYear over all of Unicode: for every rune, endingWith returns
+// exactly the alternatives whose last position admits it, in the order of the
+// form. matchBefore checks that position first, so the dispatch leaves out
+// only alternatives that cannot match.
+func TestMonthForms_ListEveryAlternativeByItsLastLetter(t *testing.T) {
+	for _, form := range []struct {
+		name     string
+		patterns []monthPattern
+		form     *monthForm
+	}{{"German", deMonthPatterns, deMonthForm}, {"English", enMonthPatterns, enMonthForm}} {
+		listed := 0
+		for r := rune(0); r <= unicode.MaxRune; r++ {
+			var want []monthPattern
+			for _, p := range form.patterns {
+				if slices.Contains(p[len(p)-1], r) {
+					want = append(want, p)
+				}
+			}
+			if got := form.form.endingWith(r); !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s: endingWith(%q) = %q, want %q", form.name, r, got, want)
+			}
+			if want != nil {
+				listed++
+			}
+		}
+		if listed == 0 {
+			t.Fatalf("%s: no rune lists an alternative", form.name)
+		}
+	}
+}
+
+// TestScanDates_EveryMonthSpellingMatches runs every spelling a month pattern
+// matches — the product of the fold orbits of its letters — before a year,
+// behind runs of date spaces of every kind, through the scanner: each one is
+// the one match of its form, at the offsets of the name and the year, and
+// agrees with the reference. The dispatch of matchMonthYear by the rune
+// before the date spaces lets every one of them through.
+func TestScanDates_EveryMonthSpellingMatches(t *testing.T) {
+	for _, form := range []struct {
+		name     string
+		patterns []monthPattern
+		matches  func(dateScan) [][]int
+	}{
+		{"German", deMonthPatterns, func(sc dateScan) [][]int { return sc.de }},
+		{"English", enMonthPatterns, func(sc dateScan) [][]int { return sc.en }},
+	} {
+		n := 0
+		for _, p := range form.patterns {
+			for _, name := range monthSpellings(p) {
+				// \b is ASCII: a name that starts with a rune beyond ASCII
+				// starts a match only behind a word character.
+				before := "am "
+				if name[0] >= utf8.RuneSelf {
+					before = "am x"
+				}
+				for _, sep := range []string{" ", "  \t\n", nbsp, " " + nbsp + nnbsp + "\r", nnbsp} {
+					c := before + name + sep + "2026."
+					s, y := len(before), len(c)-5
+					want := [][]int{{s, y + 4, s, s + len(name), y, y + 4}}
+					if got := form.matches(scanDates(c)); !reflect.DeepEqual(got, want) {
+						t.Fatalf("%s matches of %s: got %v, want %v", form.name, quoteHead(c), got, want)
+					}
+					assertMatchesReference(t, c)
+					n++
+				}
+			}
+		}
+		t.Logf("%s: %d contents", form.name, n)
+	}
+}
+
+// monthSpellings returns every spelling p matches: one rune of each position.
+func monthSpellings(p monthPattern) []string {
+	out := []string{""}
+	for _, orbit := range p {
+		next := make([]string, 0, len(out)*len(orbit))
+		for _, s := range out {
+			for _, r := range orbit {
+				next = append(next, s+string(r))
+			}
+		}
+		out = next
+	}
+	return out
+}
+
 // Generators of the differential and benchmark corpora.
 
 var (

@@ -43,7 +43,9 @@ import (
 // Unicode simple case folding, so the Kelvin sign matches k and the long s
 // matches s; the optional time parts are greedy and fall back in the regexp's
 // order of preference; the matches of one form do not overlap, a later one
-// starts at or after the end of the previous one.
+// starts at or after the end of the previous one. A month form is tried
+// only with the month names that can end with the rune before the date
+// spaces (monthForm).
 
 // dateScan holds, per date form, the submatch offsets of its matches in
 // content order — what FindAllStringSubmatchIndex of the form's regular
@@ -75,8 +77,8 @@ func scanDates(content string) dateScan {
 		accept(&sc.iso, &isoEnd, matchISODate(content, y))
 		accept(&sc.dot, &dotEnd, matchDotDate(content, y))
 		if w, ok := monthYearEnd(content, y); ok {
-			accept(&sc.de, &deEnd, matchMonthYear(content, w, y, deMonthPatterns))
-			accept(&sc.en, &enEnd, matchMonthYear(content, w, y, enMonthPatterns))
+			accept(&sc.de, &deEnd, matchMonthYear(content, w, y, deMonthForm))
+			accept(&sc.en, &enEnd, matchMonthYear(content, w, y, enMonthForm))
 		}
 	}
 	return sc
@@ -219,14 +221,52 @@ func dateSpaceBefore(c string, i int) int {
 
 // matchMonthYear matches a month form whose month name ends at w and whose
 // year token is at y. No alternative of a form ends with another one
-// (TestMonthPatterns_NoAlternativeEndsAnother), so at most one matches.
-func matchMonthYear(c string, w, y int, patterns []monthPattern) []int {
-	for _, p := range patterns {
+// (TestMonthPatterns_NoAlternativeEndsAnother), so at most one matches, and
+// only the alternatives the form lists for the rune before w are tried (issue
+// #451: most numbers 2020-2099 behind a space are no date, and trying all 25
+// alternatives on each made number-heavy text up to 15 times slower once the
+// window reached 2099).
+func matchMonthYear(c string, w, y int, form *monthForm) []int {
+	r, _ := utf8.DecodeLastRuneInString(c[:w])
+	for _, p := range form.endingWith(r) {
 		if s := p.matchBefore(c, w); s >= 0 {
 			return []int{s, y + 4, s, w, y, y + 4}
 		}
 	}
 	return nil
+}
+
+// monthForm holds the alternatives of a month form by the runes their last
+// letter admits. matchBefore checks the rune before the date spaces against
+// the last letter first, so an alternative not listed for that rune cannot
+// match there, and behind a rune no month name ends with (a digit, most
+// letters) none is tried at all.
+type monthForm struct {
+	ascii [utf8.RuneSelf][]monthPattern
+	other map[rune][]monthPattern
+}
+
+func newMonthForm(patterns []monthPattern) *monthForm {
+	f := &monthForm{other: map[rune][]monthPattern{}}
+	for _, p := range patterns {
+		for _, r := range p[len(p)-1] {
+			if r < utf8.RuneSelf {
+				f.ascii[r] = append(f.ascii[r], p)
+			} else {
+				f.other[r] = append(f.other[r], p)
+			}
+		}
+	}
+	return f
+}
+
+// endingWith returns, in the order of the form, the alternatives whose last
+// letter admits r.
+func (f *monthForm) endingWith(r rune) []monthPattern {
+	if 0 <= r && r < utf8.RuneSelf {
+		return f.ascii[r]
+	}
+	return f.other[r]
 }
 
 // monthPattern is one alternative of a month form: per letter, the runes
@@ -260,6 +300,9 @@ var (
 		"august", "september", "oktober", "november", "dezember")
 	enMonthPatterns = newMonthPatterns("january", "february", "march", "april", "may", "june", "july",
 		"august", "september", "october", "november", "december")
+
+	deMonthForm = newMonthForm(deMonthPatterns)
+	enMonthForm = newMonthForm(enMonthPatterns)
 )
 
 // newMonthPatterns builds the alternatives of a month form from lowercase
