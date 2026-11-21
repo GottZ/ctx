@@ -101,8 +101,11 @@ func TestMigration188ReplacesTheFunctionInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// 188 alone: a later migration may lock context_blocks (189 does, for
+	// its foreign key) and would wait for the open transaction on its own
+	// account, not on 188's.
 	start := time.Now()
-	err = store.RunMigrations(ctx, pool)
+	err = store.RunMigrationsUpTo(ctx, pool, 188)
 	took := time.Since(start)
 	if err != nil {
 		t.Fatalf("migration 188 next to an open guard transaction: %v (after %s)", err, took)
