@@ -275,11 +275,30 @@ var coreTitlesSQL = fmt.Sprintf(coreTitlesTemplate, visibility.TypeVisible("b", 
 // tombstone — the call is lost either way, the clause only makes sure it leaves
 // no state behind. label_source <> 'manual' is the second half of the E5-01
 // pinning rule.
+//
+// The core CTE binds the write to the core the name was made for (issue
+// #452): the name and its anchor land only while the topic's node row still
+// carries the core_hash the selection read ($3, node located by $5 = scope and
+// $1 over uq_gcn_scope_topic). A rebuild that persisted another core in the
+// meantime has already set label_stale for the new one (W5); written
+// unbound, the old core's name would clear it and the topic would leave the
+// selection until the next rebuild. FOR SHARE, not a plain read: a rebuild in
+// flight has deleted the node row and holds it, so the statement waits for its
+// commit and then finds no row, where a plain read would answer from the
+// snapshot of the old core — and the UPDATE's own wait for the topic row
+// re-checks only that row, not this subquery. The dropped call costs one
+// re-selection next tick, for the current core. Same order as the rebuild:
+// node rows before the topic row.
 const writeSQL = `
+WITH core AS (
+  SELECT 1 FROM graph_cluster_node
+   WHERE scope = $5 AND topic_id = $1::uuid AND core_hash = $3
+     FOR SHARE)
 UPDATE graph_cluster_topic
    SET label = $2, label_source = 'llm', label_built_at = now(),
        label_core_hash = $3, label_model = $4, label_attempts = 0, label_stale = false
- WHERE topic_id = $1::uuid AND label_source <> 'manual' AND retired_at IS NULL`
+ WHERE topic_id = $1::uuid AND label_source <> 'manual' AND retired_at IS NULL
+   AND EXISTS (SELECT 1 FROM core)`
 
 // failSQL records one attempt. Same two guards, same reason.
 const failSQL = `
@@ -315,10 +334,18 @@ UPDATE graph_cluster_topic
 //	   AND retired_at IS NULL;
 //
 // documented in docs/operations.md next to the knob.
+//
+// It acknowledges the anchor the selection read, so it is bound to it the way
+// writeSQL is ($2 = that core_hash, $3 = the topic's scope).
 const quiesceSQL = `
+WITH core AS (
+  SELECT 1 FROM graph_cluster_node
+   WHERE scope = $3 AND topic_id = $1::uuid AND core_hash = $2
+     FOR SHARE)
 UPDATE graph_cluster_topic
    SET label_core_hash = $2, label_stale = false
- WHERE topic_id = $1::uuid AND label_source <> 'manual' AND retired_at IS NULL`
+ WHERE topic_id = $1::uuid AND label_source <> 'manual' AND retired_at IS NULL
+   AND EXISTS (SELECT 1 FROM core)`
 
 // Run executes ONE label tick over the given scopes (the tenant's owned set).
 //
@@ -465,13 +492,13 @@ func labelOne(ctx context.Context, d Deps, c candidate, st *Stats) time.Duration
 		// credentials, so the chain would already refuse — quiesce instead of
 		// re-selecting this topic every interval.
 		st.Quiesced++
-		d.exec(ctx, quiesceSQL, c.topicID, c.coreHash)
+		d.exec(ctx, quiesceSQL, c.topicID, c.coreHash, c.scope)
 		return 0
 	}
 	// A01-3 stage 3, opt-in: a core carrying credentials never reaches a model.
 	if d.Cfg.CredentialsFallbackOnly && required == backends.SensCredentials {
 		st.Quiesced++
-		d.exec(ctx, quiesceSQL, c.topicID, c.coreHash)
+		d.exec(ctx, quiesceSQL, c.topicID, c.coreHash, c.scope)
 		return 0
 	}
 
@@ -525,7 +552,7 @@ func labelOne(ctx context.Context, d Deps, c candidate, st *Stats) time.Duration
 	switch rej {
 	case rejectNone:
 		st.Labeled++
-		d.exec(ctx, writeSQL, c.topicID, label, c.coreHash, model)
+		d.exec(ctx, writeSQL, c.topicID, label, c.coreHash, model, c.scope)
 	case rejectScan:
 		st.RejectedScan++
 		st.Failed++
