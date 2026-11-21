@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -192,43 +193,83 @@ type contentEditPlan struct {
 	writeScopes []string
 }
 
-// lockEditTargetSQL reads the content an update's edits apply to and locks the
-// row with the strength the UPDATE that follows takes anyway (FOR NO KEY
-// UPDATE: two editors queue on it, a link insert's FOR KEY SHARE does not).
-// Under READ COMMITTED a reader that waited for the lock gets the row version
-// the holder committed, so the match runs on the text the write replaces. The
-// WHERE is UpdateBlock's: a block outside the write scopes, an archived block
-// and a derivative are a miss here as there — no match count is computed over
-// text the caller may not write.
-const lockEditTargetSQL = `SELECT content FROM context_blocks
+// editTargetWhere is the WHERE of the reads of an update's edits: UpdateBlock's,
+// so a block outside the write scopes, an archived block and a derivative are
+// a miss here as there — no match count is computed over text the caller may
+// not write.
+const editTargetWhere = `
 	 WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
-	   AND ` + notDerivedSQL + `
+	   AND ` + notDerivedSQL
+
+// readEditTargetSQL reads the content an update's edits apply to, and its
+// version (content_hash), without a lock.
+const readEditTargetSQL = `SELECT content, content_hash FROM context_blocks` + editTargetWhere
+
+// lockEditTargetSQL locks the row with the strength the UPDATE that follows
+// takes anyway (FOR NO KEY UPDATE: two editors queue on it, a link insert's
+// FOR KEY SHARE does not) and answers whether it still holds the version
+// readEditTargetSQL read ($3). Under READ COMMITTED a reader that waited for
+// the lock gets the row version the holder committed.
+const lockEditTargetSQL = `SELECT content_hash = $3 FROM context_blocks` + editTargetWhere + `
 	 FOR NO KEY UPDATE`
+
+// relockedEditTargetSQL reads the content of a row this transaction holds.
+const relockedEditTargetSQL = `SELECT content FROM context_blocks WHERE id = $1`
 
 // resolve locks the update's row, applies the edits to its content and puts
 // the result into args. ok=false with a nil error is a miss (no row the update
 // may write): the caller rolls back and UpdateBlock names the reason as for
 // any 0-row update. ok=false with an error is a refused edit or a read fault.
 // A nil plan (an update without edits) is ok and does nothing.
+//
+// The edits and the dates of their result (ExtractDates, which takes
+// milliseconds on a large content, issue #421) are computed on the content
+// read before the row is locked, so the lock is not held while they run; the
+// lock then confirms the row still holds that version. A row another writer
+// changed in between is edited again, under the lock, on the content it holds
+// now: the match always runs on the text the write replaces.
 func (p *contentEditPlan) resolve(ctx context.Context, tx pgx.Tx, id string, args []any) (bool, error) {
 	if p == nil {
 		return true, nil
 	}
-	var content string
-	err := tx.QueryRow(ctx, lockEditTargetSQL, id, p.writeScopes).Scan(&content)
+	var content, version string
+	err := tx.QueryRow(ctx, readEditTargetSQL, id, p.writeScopes).Scan(&content, &version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: update block: read edit target: %w", err)
+	}
+	edited, times, editErr := applyEditsAndDates(content, p.edits)
+	var same bool
+	err = tx.QueryRow(ctx, lockEditTargetSQL, id, p.writeScopes, version).Scan(&same)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("store: update block: lock edit target: %w", err)
 	}
-	edited, err := ApplyContentEdits(content, p.edits)
-	if err != nil {
-		return false, err
+	if !same {
+		if err := tx.QueryRow(ctx, relockedEditTargetSQL, id).Scan(&content); err != nil {
+			return false, fmt.Errorf("store: update block: re-read edit target: %w", err)
+		}
+		edited, times, editErr = applyEditsAndDates(content, p.edits)
+	}
+	if editErr != nil {
+		return false, editErr
 	}
 	args[p.arg] = edited
-	args[p.arg+1] = ExtractDates(edited)
+	args[p.arg+1] = times
 	return true, nil
+}
+
+// applyEditsAndDates is ApplyContentEdits plus the dates of its result.
+func applyEditsAndDates(content string, edits []ContentEdit) (string, []time.Time, error) {
+	edited, err := ApplyContentEdits(content, edits)
+	if err != nil {
+		return "", nil, err
+	}
+	return edited, ExtractDates(edited), nil
 }
 
 // updateMetadataExpr builds the one assignment of the metadata column an

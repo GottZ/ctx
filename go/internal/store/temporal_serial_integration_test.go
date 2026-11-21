@@ -10,7 +10,7 @@
 //
 // Run with:
 //
-//	go test -tags=integration ./internal/store/ -run 'TestTemporalWriters|TestTemporalAfterworkHeld|TestContentWritesSetContentTimes' -count=1 -v
+//	go test -tags=integration ./internal/store/ -run 'TestTemporalWriters|TestTemporalAfterworkHeld|TestContentWritesSetContentTimes|TestEditsComputeBeforeTheLock' -count=1 -v
 package store_test
 
 import (
@@ -18,11 +18,14 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -313,4 +316,98 @@ func TestContentWritesSetContentTimes(t *testing.T) {
 		i421AssertContentTimes(t, pool, res[0].Block.ID, ca, "batch insert")
 		i421AssertContentTimes(t, pool, res[1].Block.ID, cb, "batch conflict")
 	})
+}
+
+// i421EditGap runs, once, when the unlocked read of an update's edits has
+// ended: a lock probe that refuses to wait (the read must have taken no lock),
+// then a content write of another connection, between the read and the lock.
+type i421EditGap struct {
+	t       *testing.T
+	pool    *pgxpool.Pool
+	id      string
+	content string
+	once    sync.Once
+	ran     atomic.Bool
+	probe   error
+}
+
+func (g *i421EditGap) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if strings.HasPrefix(strings.TrimSpace(data.SQL), "SELECT content, content_hash FROM context_blocks") {
+		return context.WithValue(ctx, i421EditReadKey{}, true)
+	}
+	return ctx
+}
+
+type i421EditReadKey struct{}
+
+func (g *i421EditGap) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	if ctx.Value(i421EditReadKey{}) == nil || data.Err != nil {
+		return
+	}
+	g.once.Do(func() {
+		g.ran.Store(true)
+		bg := context.Background()
+		tx, err := g.pool.Begin(bg)
+		if err != nil {
+			g.probe = err
+			return
+		}
+		_, g.probe = tx.Exec(bg, `SELECT 1 FROM context_blocks WHERE id = $1 FOR NO KEY UPDATE NOWAIT`, g.id)
+		_ = tx.Rollback(bg)
+		if g.probe != nil {
+			return // the write below would wait for the transaction this hook runs in
+		}
+		c := g.content
+		if _, _, err := store.UpdateBlock(bg, g.pool, g.id, store.UpdateBlockData{Content: &c}, []string{"private"}); err != nil {
+			g.t.Errorf("content write in the gap: %v", err)
+		}
+	})
+}
+
+// TestEditsComputeBeforeTheLockAndRedoOnAChangedRow: an update's edits read
+// the row without a lock and compute the edited content and its dates there
+// (ExtractDates takes milliseconds on a large content, which a row lock would
+// be held through, issue #421); the lock then confirms the version. A content
+// write landing between the read and the lock makes the edits run again, on
+// the content the row holds then: the concurrent write is not lost, and
+// content_times is that of the content stored.
+func TestEditsComputeBeforeTheLockAndRedoOnAChangedRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+
+	b, err := store.UpsertBlock(ctx, pool, "i421", "i421-edit-gap", "Planned 2026-05-05, kept 2026-06-06.", nil, nil, "private", false, store.SensitivityWrite{}, "")
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	gap := &i421EditGap{t: t, pool: pool, id: b.ID, content: "Moved: 2026-05-05 still, plus 2026-07-07."}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse dsn: %v", err)
+	}
+	cfg.ConnConfig.Tracer = gap
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	defer traced.Close()
+
+	repl := "2026-05-09"
+	u, _, err := store.UpdateBlock(ctx, traced, b.ID, store.UpdateBlockData{Edits: []store.ContentEdit{{Old: "2026-05-05", New: &repl}}}, []string{"private"})
+	if err != nil || u == nil {
+		t.Fatalf("edits: %v", err)
+	}
+	if !gap.ran.Load() {
+		t.Fatalf("premise: no unlocked read of the edit target ran before the lock")
+	}
+	if gap.probe != nil {
+		t.Errorf("the read of the edit target locked the row: %v", gap.probe)
+	}
+	want := "Moved: 2026-05-09 still, plus 2026-07-07."
+	if u.Content != want {
+		t.Errorf("content = %q, want %q (the edit applied to the content written in the gap)", u.Content, want)
+	}
+	i421AssertContentTimes(t, pool, b.ID, want, "after the edits")
 }
