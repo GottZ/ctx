@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
@@ -47,6 +48,13 @@ func adminFailLine(t *testing.T, logs *rejectLogCapture, msg, outcome, reqID str
 		recs[0].attrs["request_id"] != reqID {
 		t.Fatalf("%q = %+v, want one ERROR line with write_outcome=%s request_id=%s (all: %+v)", msg, recs, outcome, reqID, logs.all())
 	}
+	wantNoLeak(t, logs)
+	return recs[0]
+}
+
+// wantNoLeak checks that no record of the run carries a leak value.
+func wantNoLeak(t *testing.T, logs *rejectLogCapture) {
+	t.Helper()
 	for _, r := range logs.all() {
 		txt := r.text()
 		for _, leak := range []string{i483LeakUser, i483LeakPass, i483LeakKey} {
@@ -55,7 +63,6 @@ func adminFailLine(t *testing.T, logs *rejectLogCapture, msg, outcome, reqID str
 			}
 		}
 	}
-	return recs[0]
 }
 
 // noAdminFailLine checks that no line of the run says msg.
@@ -198,6 +205,17 @@ func TestBackendWriteFailureLines(t *testing.T) {
 		}
 		adminFailLine(t, logs, "manage: backend-delete failed", writeRolledBack, "i483-bd")
 	})
+	t.Run("backend-reorder whose lock read fails", func(t *testing.T) {
+		seq := []string{"tenant-embed", "chat-b", "gpu-embed", "chat-a", "tenant-chat", "only-rerank"}
+		data := ph.reorderData(seq, nil)
+		dbFault(t, ph.pool, []string{`ALTER TABLE context_backends RENAME COLUMN i483_priority TO priority`},
+			`ALTER TABLE context_backends RENAME COLUMN priority TO i483_priority`)
+		status, resp, logs := manage(t, "i483-brl", map[string]any{"action": "backend-reorder", "data": data})
+		if status != http.StatusInternalServerError || resp["error"] != "reorder lock failed" {
+			t.Fatalf("backend-reorder answered %d %v, want 500 reorder lock failed", status, resp)
+		}
+		adminFailLine(t, logs, "manage: backend-reorder failed", writeRolledBack, "i483-brl")
+	})
 	t.Run("backend-reorder refused by the database", func(t *testing.T) {
 		rowFault(t, ph.pool, "context_backends", "UPDATE")
 		seq := []string{"tenant-embed", "chat-b", "gpu-embed", "chat-a", "tenant-chat", "only-rerank"}
@@ -207,6 +225,29 @@ func TestBackendWriteFailureLines(t *testing.T) {
 		}
 		adminFailLine(t, logs, "manage: backend-reorder failed", writeRolledBack, "i483-br")
 	})
+}
+
+// TestBackendWriteBeginFailureLine — a BEGIN that fails wrote nothing: the
+// line says rolled_back whatever the error (here a closed pool, which
+// statementOutcome would read as unknown).
+func TestBackendWriteBeginFailureLine(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	admin, _ := kaServerAdmin(context.Background(), t, pool)
+	closed, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed.Close()
+	h := NewManageHandler(closed, nil, nil, backends.NewPool(nil, nil), nil, nil, nil, nil)
+	logs := installRejectLogCapture(t)
+	status, resp := kaManage(t, h, admin, "i483-bb", map[string]any{"action": "backend-create", "data": leakyBackend("i483-begin")})
+	if status != http.StatusInternalServerError || resp["error"] != "transaction begin failed" {
+		t.Fatalf("backend-create answered %d %v, want 500 transaction begin failed", status, resp)
+	}
+	adminFailLine(t, logs, "manage: backend-create failed", writeRolledBack, "i483-bb")
 }
 
 // TestModelAliasWriteFailureLines — the three model-alias routes share the
@@ -268,6 +309,46 @@ func TestEmbedMigrationWriteFailureLines(t *testing.T) {
 		noAdminFailLine(t, logs, "manage: embed-migration-resume failed")
 	})
 
+	t.Run("purge after one cleared block", func(t *testing.T) {
+		b, err := store.UpsertBlock(ctx, pool, "i483", "i483 purge leftover", "leftover", nil, nil, "private", false, store.SensitivityWrite{}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		vec := "[" + strings.Repeat("0,", 1023) + "1]"
+		if _, err := pool.Exec(ctx, `UPDATE context_blocks SET embedding_next = $2::vector, embed_model_next = 'i483-next' WHERE id = $1::uuid`, b.ID, vec); err != nil {
+			t.Fatalf("seed leftover embedding_next: %v", err)
+		}
+		// The first batch clears the one block and commits; the second (no
+		// row left) is refused.
+		dbFault(t, pool, []string{`DROP TRIGGER i483_purge_fault ON context_blocks`, `DROP FUNCTION i483_purge_fault()`, `DROP SEQUENCE i483_purge_seq`},
+			`CREATE SEQUENCE i483_purge_seq`,
+			`CREATE FUNCTION i483_purge_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+			   IF nextval('i483_purge_seq') > 1 THEN RAISE EXCEPTION 'i483 probe fault'; END IF; RETURN NULL; END $$`,
+			`CREATE TRIGGER i483_purge_fault AFTER UPDATE ON context_blocks FOR EACH STATEMENT EXECUTE FUNCTION i483_purge_fault()`)
+		status, resp, logs := run(t, "i483-em-purge-one", map[string]any{"action": "embed-migration-purge"})
+		if status != http.StatusInternalServerError {
+			t.Fatalf("purge answered %d %v, want 500 for the refused second batch", status, resp)
+		}
+		adminFailLine(t, logs, "manage: embed-migration-purge failed", writeCommitted, "i483-em-purge-one")
+		var left int
+		if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM context_blocks WHERE embedding_next IS NOT NULL`).Scan(&left); err != nil || left != 0 {
+			t.Fatalf("leftover rows after the first batch = %d (%v), want 0: the probe tested nothing", left, err)
+		}
+	})
+	t.Run("a create refused 409 writes no line", func(t *testing.T) {
+		emcSeedModels(t, pool)
+		emcSeedBackend(t, pool)
+		create := map[string]any{"action": "embed-migration-create",
+			"data": map[string]any{"from_model": emcFromModel, "to_model": emcToModel, "to_backend": emcBackendName}}
+		if status, resp, _ := run(t, "i483-em-create-1", create); status != http.StatusOK {
+			t.Fatalf("first create answered %d %v", status, resp)
+		}
+		status, resp, logs := run(t, "i483-em-create-2", create)
+		if status != http.StatusConflict {
+			t.Fatalf("second create answered %d %v, want 409", status, resp)
+		}
+		noAdminFailLine(t, logs, "manage: embed-migration-create failed")
+	})
 	// From here on every route's first read fails: the tables it reads are gone.
 	dbFault(t, pool, []string{
 		`ALTER TABLE i483_gone_migrations RENAME TO context_embed_migrations`,
