@@ -9,15 +9,19 @@
 // docker-compose.yml sets for every installation that does not override it.
 //
 //   - Phase A (no backend of role dream/chat): one real minute at the default
-//     dream.idle_wait (20 s). The loop must skip before the pick at idle
-//     cadence — no busy loop, no ERROR line naming Dream — and /health says
-//     what an operator sees.
+//     dream.idle_wait (20 s). The loop skips before the pick, no ERROR line
+//     names Dream, /health says what an operator sees — and the operator gets
+//     one WARN that says what is missing and how to fix it, not three WARN
+//     and six INFO lines a minute and worker (issue #495; the idle cadence of
+//     the skip, now logged at DEBUG, is pinned by the events test
+//     TestDreamLoopReportsAMissingDreamBackendOncePerChange).
 //
 //   - Phase B (same child): an OpenAI-wire stub serves embeddings and the
 //     dream chat stages; the pool is seeded with exactly the rows
 //     `ctx backends seed` writes (POST /api/manage backend-create), two pairs
 //     of related blocks are stored over POST /api/store/batch, and the dream
-//     loop must link each pair without the child being restarted.
+//     loop must link each pair without the child being restarted; one INFO
+//     line says that a backend of role dream serves again.
 //
 //   - Phase C (issue #495, same child): does a query bring in a linked block
 //     through the graph expansion? The stub gives every text a vector of its
@@ -56,16 +60,27 @@ import (
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
+// The lines of a dream loop without a backend of role dream (issue #495).
 const (
-	// dreamSkipNoBackendLog is the line RunDreamCycle's step 0 logs when no
-	// backend serves the dream role (internal/dream/dream.go).
+	// dreamSkipNoBackendLog is the per-cycle skip line (DEBUG since #495, an
+	// INFO line before).
 	dreamSkipNoBackendLog = `"msg":"dream: no eligible dream backend`
+	// dreamEmptyChainLog is backends.Pool.Chain's WARN for an empty chain; the
+	// skip path asked Chain until #495 and logged it once per cycle.
+	dreamEmptyChainLog = `"msg":"backends: empty chain","role":"dream"`
+	// dreamIdleLog is the scheduler's idle line; a skipped cycle logged it
+	// until #495.
+	dreamIdleLog = `"msg":"scheduler: dream idle, waiting"`
+	// dreamMissingNotice is dream.BackendNotice's WARN when the loop first
+	// finds no backend of role dream; dreamServesNotice its INFO when one
+	// serves again.
+	dreamMissingNotice = `"level":"WARN","msg":"dream: no backend of role dream`
+	dreamServesNotice  = `"level":"INFO","msg":"dream: a backend of role dream serves again`
+)
+
+const (
 	// phaseAWindow is the observation window of phase A: one real minute.
 	phaseAWindow = 60 * time.Second
-	// phaseAMaxSkipsPerWindow is the busy-loop gate: at the default idle wait
-	// of 20 s one worker skips about 3 times a minute; more than twice that is
-	// a loop that does not take its idle wait.
-	phaseAMaxSkipsPerWindow = 6
 	// phaseBLinkDeadline bounds the wait from the seed to the links.
 	phaseBLinkDeadline = 4 * time.Minute
 	// stubEmbedDims is the dimension of context_blocks.embedding.
@@ -144,10 +159,12 @@ func freshInstallDSN(t *testing.T) string {
 
 // phaseAResult is what one observation window of a booted child showed.
 type phaseAResult struct {
-	skips        int      // dreamSkipNoBackendLog lines in the window
-	errorLines   []string // every "level":"ERROR" line in the window
-	healthStatus string
-	services     map[string]string
+	skips, emptyChains, idles int            // the per-cycle lines of the skip path in the window
+	warns, infos              int            // every WARN and INFO line in the window
+	byMsg                     map[string]int // WARN and INFO lines in the window by level and message
+	errorLines                []string       // every "level":"ERROR" line in the window
+	healthStatus              string
+	services                  map[string]string
 }
 
 // observeWindow lets the child run for d and reads what it logged meanwhile
@@ -158,12 +175,26 @@ func observeWindow(t *testing.T, c *dreamBootChild, d time.Duration) phaseAResul
 	time.Sleep(d)
 	status, services := c.health(t)
 	window := c.out.String()[from:]
-	var r phaseAResult
+	r := phaseAResult{byMsg: map[string]int{}}
 	for _, line := range strings.Split(window, "\n") {
-		if strings.Contains(line, dreamSkipNoBackendLog) {
+		switch {
+		case strings.Contains(line, dreamSkipNoBackendLog):
 			r.skips++
+		case strings.Contains(line, dreamEmptyChainLog):
+			r.emptyChains++
+		case strings.Contains(line, dreamIdleLog):
+			r.idles++
 		}
-		if strings.Contains(line, `"level":"ERROR"`) {
+		var rec struct{ Level, Msg string }
+		_ = json.Unmarshal([]byte(line), &rec)
+		switch {
+		case strings.Contains(line, `"level":"WARN"`):
+			r.warns++
+			r.byMsg[rec.Level+" "+rec.Msg]++
+		case strings.Contains(line, `"level":"INFO"`):
+			r.infos++
+			r.byMsg[rec.Level+" "+rec.Msg]++
+		case strings.Contains(line, `"level":"ERROR"`):
 			r.errorLines = append(r.errorLines, line)
 		}
 	}
@@ -610,16 +641,21 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 
 	// ---- Phase A: Dream on, no backend of role dream/chat.
 	a := observeWindow(t, child, phaseAWindow)
-	t.Logf("phase A: %d × %q in %s; /health %q services %v; %d ERROR line(s)",
-		a.skips, dreamSkipNoBackendLog, phaseAWindow, a.healthStatus, a.services, len(a.errorLines))
+	notices := strings.Count(child.out.String(), dreamMissingNotice) // since the boot
+	t.Logf("phase A, lines in %s: %d WARN (%d × empty chain role=dream), %d INFO (%d × skip, %d × idle); since the boot %d × the missing-backend notice; /health %q services %v; %d ERROR line(s)",
+		phaseAWindow, a.warns, a.emptyChains, a.infos, a.skips, a.idles, notices, a.healthStatus, a.services, len(a.errorLines))
+	for msg, n := range a.byMsg {
+		t.Logf("phase A line ×%d: %s", n, msg)
+	}
 	for _, l := range a.errorLines {
 		t.Logf("phase A ERROR: %s", l)
 	}
-	if a.skips == 0 {
-		t.Errorf("phase A: no %q line in %s — the dream loop did not run its backend probe", dreamSkipNoBackendLog, phaseAWindow)
+	if notices != 1 {
+		t.Errorf("phase A: the missing-backend notice logged %d times since the boot, want once — it says what is missing and how to fix it", notices)
 	}
-	if a.skips > phaseAMaxSkipsPerWindow {
-		t.Errorf("phase A: %d skips in %s, want at most %d — the loop does not take its idle wait", a.skips, phaseAWindow, phaseAMaxSkipsPerWindow)
+	if a.emptyChains+a.skips+a.idles != 0 {
+		t.Errorf("phase A: %d empty-chain WARN, %d skip INFO, %d idle INFO in %s — a skipped cycle logs nothing above DEBUG",
+			a.emptyChains, a.skips, a.idles, phaseAWindow)
 	}
 	for _, l := range a.errorLines {
 		if strings.Contains(strings.ToLower(l), "dream") {
@@ -779,6 +815,9 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 	}
 	if between != len(linkRows) {
 		t.Errorf("phase B: %d of %d link(s) join the blocks of one pair", between, len(linkRows))
+	}
+	if n := strings.Count(child.out.String()[phaseBFrom:], dreamServesNotice); n != 1 {
+		t.Errorf("phase B: %q logged %d times after the seed, want once", dreamServesNotice, n)
 	}
 
 	// ---- Phase C: a query brings the linked block in through the graph.

@@ -330,6 +330,11 @@ type Scheduler struct {
 	emptyWindowMu    sync.Mutex
 	emptyWindowNoted map[string]string
 
+	// dreamBackend tells the operator once per change of state, for all dream
+	// workers at once, that no backend serves the dream role and when one
+	// serves again (issue #495; dream.BackendNotice).
+	dreamBackend dream.BackendNotice
+
 	// Sensitivity audit (G41): run state + the LLM seam (dreamCycleFunc
 	// pattern — the decision-table test swaps classify without a backend).
 	audit    auditState
@@ -1927,7 +1932,12 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 		// policy. The tenant takes the idle wait like a tenant with nothing
 		// pickable, so the round-robin keeps its cadence. (The backfill above
 		// stays: it is bounded by owned, not by the read window.)
-		if s.dreamWindowClosed(bt, cfg.Scheduler.ReadScopes, readWindow) {
+		//
+		// The same idle wait, before the cycle and without its per-cycle lines,
+		// when no backend serves the dream role for this tenant (a new
+		// installation before `ctx backends seed`, a disable profile, disabled
+		// rows) — the notice logs the change of state (issue #495).
+		if s.dreamGated(bt, cfg.Scheduler.ReadScopes, readWindow, router) {
 			waitDreamIdle(ctx, cfg) // a cancel ends the wait; the loop head returns
 			continue
 		}
@@ -2000,6 +2010,15 @@ func (s *Scheduler) dreamWindowClosed(bt backgroundTenant, readScopes, window []
 	slog.Warn("scheduler: dream skipped for tenant — read window is empty (scheduler.read_scopes ∩ owned scopes); add the tenant's scopes to scheduler.read_scopes or set a tenant override",
 		"tenant_scope", bt.scope, "read_scopes", readScopes, "owned", bt.owned)
 	return true
+}
+
+// dreamGated reports whether the dream loop skips the iterated tenant's cycle
+// before it starts: its clamped read window is empty (dreamWindowClosed), or
+// no backend serves the dream role for it (dream.BackendNotice, issue #495).
+// The window gate is asked first — a tenant that may read nothing is not
+// reported as missing a backend.
+func (s *Scheduler) dreamGated(bt backgroundTenant, readScopes, window []string, router *dream.Router) bool {
+	return s.dreamWindowClosed(bt, readScopes, window) || s.dreamBackend.Skip(router)
 }
 
 // waitDreamIdle sleeps the iteration's dream idle wait (dream.idle_wait, else
