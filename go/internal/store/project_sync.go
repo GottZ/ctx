@@ -320,9 +320,12 @@ func LockSyncMap(ctx context.Context, tx pgx.Tx, blockID string) (SyncMap, bool,
 // caller holds the block locked and it still is that version: the pull's own
 // write (its updated_at), or the version a convergence found. The candidate
 // filter (b.updated_at > m.synced_at) then lists every later local write
-// whose transaction began after that version was written — a write whose
-// transaction began before this one and writes after it included, which
-// now() would hide (issue #491). nil means the block moved past the version
+// whose transaction began after that version was written — for a
+// convergence that includes a write whose transaction began before the
+// convergence's and writes after it, which now() would hide (issue #491); a
+// pull-update's version is its own write, so a write begun before the pull's
+// transaction and blocked on its row lock is the residual AdvancePushBase
+// documents. nil means the block moved past the version
 // since (a convergence the pull read, and a local write committed before the
 // lock): synced_at := -infinity, so the row stays a push candidate whatever
 // updated_at that write stored, and the push diffs it against the base this
