@@ -64,6 +64,17 @@ func (h *DigestHandler) HandleDigest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The answer goes out through the keepalive of /api/query (issue #505),
+	// as purge's does: http.Server's WriteTimeout (120 s) is a deadline fixed
+	// when the request was read, and a digest's time grows with the blocks of
+	// its window. Every heartbeatInterval the ticker rolls the write deadline
+	// without writing a byte, so a digest that runs longer still answers with
+	// its status and body — the CLI waits for it (digestCallBudget). The run
+	// still ends with its client (issue #490): the ticker ends with ctx.
+	ka := armQueryKeepalive(ctx, w, false)
+	defer ka.close()
+	w = ka
+
 	// The read window every artefact of this request is built over: the key's
 	// read_scopes clamped to its tenant's own scopes (GHSA §5), the same clamp
 	// the background digest/root map apply.
