@@ -132,12 +132,15 @@ func HealthStatus(ctx context.Context, pool *pgxpool.Pool, snap []backends.Backe
 	for i, r := range roles {
 		wg.Go(func() { reached[i] = roleReachable(ctx, snap, r.role, probes) })
 	}
+	if !dreamEnabled {
+		healthLines.forgetRole(backends.RoleDream)
+	}
 	wg.Wait()
 
 	services := make(map[string]string, len(roles)+1)
+	healthLines.database(ctx, dbErr)
 	if dbErr != nil {
 		services["database"] = "error"
-		logRequestError(ctx, "health check: database ping failed", "error", dbErr)
 	} else {
 		services["database"] = "ok"
 	}
@@ -253,7 +256,9 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 // check: any HTTP response below 500 counts as reachable — cloud API roots
 // answer 404/405 on GET / and auth-gated APIs answer 401/403, all of which
 // prove the host is up and serving (see pingHost). Errors log the backend name
-// to slog ONLY — the response carries the aggregate.
+// to slog ONLY — the response carries the aggregate — and once per change of
+// state (healthNotice, issue #504): a role without an enabled backend, a
+// backend that stops answering.
 //
 // Only operator rows (_global/unscoped) are pinged: /health is anonymous, and a
 // tenant row's base_url is tenant-admin input — pinging it would hand every
@@ -267,21 +272,25 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 // probes only removes repeats — a base URL another role of the same call
 // already probed is not requested again.
 func roleReachable(ctx context.Context, snap []backends.Backend, role string, probes *hostProbes) string {
-	candidates := 0
+	rows := 0
+	var candidates []*backends.Backend
 	for i := range snap {
 		b := &snap[i]
-		if !b.Enabled || !b.HasRole(role) || b.EgressGuarded() {
+		if !b.HasRole(role) || b.EgressGuarded() {
 			continue
 		}
-		candidates++
-		if err := probes.ping(ctx, b.Host); err != nil {
-			slog.Warn("health check: backend ping failed", "backend", b.Name, "role", role, "error", err)
-			continue
+		rows++
+		if b.Enabled {
+			candidates = append(candidates, b)
 		}
-		return "ok"
 	}
-	if candidates == 0 {
-		slog.Warn("health check: no enabled backend for role", "role", role)
+	healthLines.roleProbed(role, rows, candidates)
+	for _, b := range candidates {
+		err := probes.ping(ctx, b.Host)
+		healthLines.pinged(ctx, role, b, err)
+		if err == nil {
+			return "ok"
+		}
 	}
 	return "error"
 }
