@@ -50,9 +50,10 @@ func TestRules_DifferentialAgainstTheBase(t *testing.T) {
 				continue
 			}
 			col := strings.Split(sc.Text(), "\t")
-			if len(col) != 5 {
-				t.Fatalf("%s:%d: %d columns, want 5", file, line, len(col))
+			if len(col) != 2 && len(col) != 5 {
+				t.Fatalf("%s:%d: %d columns, want 2 (unchanged) or 5 (changed)", file, line, len(col))
 			}
+			col = append(col, "", "", "")[:5]
 			q, base, verdict, judged := col[0], col[1], col[2], col[3]
 			got := rulesOutput(q, now)
 			c.checked++

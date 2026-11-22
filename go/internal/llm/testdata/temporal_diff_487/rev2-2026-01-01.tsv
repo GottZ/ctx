@@ -1,5 +1,5 @@
 # Differential test of the temporal rules (issue #487): corpus rev2, asked on 2026-01-01 at noon UTC.
-# question, rules output at 36b915f8 (v5.75.0), verdict of a changed output (fixed / disputed / broken), the output now, note.
+# question, rules output at 36b915f8 (v5.75.0); for a changed output also its verdict (fixed / disputed / broken), the output now and a note.
 Was lief seit 2026?	nil	fixed	["seit 2026?|2026-01-01..2026-01-01|range"] linear=1.00	read by hand
 Was lief bis 2026?	nil	fixed	["bis 2026?|2026-01-01..2026-12-31|range"] linear=1.00	read by hand
 Was lief vor 2026?	nil	fixed	["vor 2026?|2025-12-31..|until"] linear=1.00	read by hand

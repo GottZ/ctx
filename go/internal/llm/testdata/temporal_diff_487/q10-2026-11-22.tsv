@@ -1,5 +1,5 @@
 # Differential test of the temporal rules (issue #487): corpus q10, asked on 2026-11-22 at noon UTC.
-# question, rules output at 36b915f8 (v5.75.0), verdict of a changed output (fixed / disputed / broken), the output now, note.
+# question, rules output at 36b915f8 (v5.75.0); for a changed output also its verdict (fixed / disputed / broken), the output now and a note.
 Was lief von 28.12.2026 bis 2026?	["28.12.2026|2026-12-28..|past"] linear=1.00	disputed	["von 28.12.2026 bis 2026?|2026-12-28..2026-12-31|range"] linear=1.00	a past question with a window that starts after the day it is asked: the start lies in the year of the end, as the issue decided
 Was lief von 28.12.2025 bis 2025?	["28.12.2025|2025-12-28..|past"] linear=1.00	fixed	["von 28.12.2025 bis 2025?|2025-12-28..2025-12-31|range"] linear=1.00	read by hand
 Was lief seit Dezember bis 2026?	["seit dezember bis 2026?|2025-12-01..2026-11-22|range"] linear=0.80,month=0.20	disputed	["seit dezember bis 2026?|2025-12-01..2026-12-31|range"] linear=1.00	the end of 2026 is still to come; before, the rules read "seit Dezember" up to today

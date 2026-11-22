@@ -1,7 +1,7 @@
 # Differential test of the temporal rules (issue #487): corpus q7, asked on 2026-11-22 at noon UTC.
-# question, rules output at 36b915f8 (v5.75.0), verdict of a changed output (fixed / disputed / broken), the output now, note.
-was geschah im Mai	nil			
-was war im März	nil			
-reviews im April	nil			
-was passierte im Juni	nil			
-was lief im Februar	nil			
+# question, rules output at 36b915f8 (v5.75.0); for a changed output also its verdict (fixed / disputed / broken), the output now and a note.
+was geschah im Mai	nil
+was war im März	nil
+reviews im April	nil
+was passierte im Juni	nil
+was lief im Februar	nil
