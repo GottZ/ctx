@@ -601,8 +601,15 @@ func buildPrompt(originalQuery string, sources []Source, temporalDates []Tempora
 				systemPrompt += ", "
 			}
 			systemPrompt += fmt.Sprintf("%s = %s", d.Ref, d.Date)
-			if d.End != nil {
+			// A window open towards the future or the past names its
+			// direction: "= date" alone reads as the single day (issue #487).
+			switch {
+			case d.End != nil:
 				systemPrompt += " to " + *d.End
+			case d.Dir == DirFrom:
+				systemPrompt += " and later"
+			case d.Dir == DirUntil:
+				systemPrompt += " and earlier"
 			}
 		}
 		systemPrompt += ". Use this to interpret temporal references in the question and sources.</context>"

@@ -1,0 +1,136 @@
+# Differential test of the temporal rules (issue #487): corpus q2b, asked on 2026-11-22 at noon UTC.
+# question, rules output at 36b915f8 (v5.75.0); for a changed output also its verdict (fixed / disputed / broken), the output now and a note.
+Was haben wir am Montag festgelegt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag festgelegt haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag übersehen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag übersehen haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag vergessen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag vergessen haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag verschoben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag verschoben haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag verworfen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag verworfen haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag bemerkt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag bemerkt haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag bestätigt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag bestätigt haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag beantwortet?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag beantwortet haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag entfernt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag entfernt haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag erreicht?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag erreicht haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag bekommen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag bekommen haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag erhalten?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag erhalten haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag vorbereitet?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag vorbereitet haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag zurückgerollt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag zurückgerollt haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag hochgeladen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag hochgeladen haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag runtergefahren?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag runtergefahren haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag hochgefahren?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag hochgefahren haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag zusammengeführt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag zusammengeführt haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag durchgeführt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag durchgeführt haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag freigegeben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag freigegeben haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag fertiggestellt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag fertiggestellt haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag umgesetzt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag umgesetzt haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag eingeführt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag eingeführt haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag abgestimmt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag abgestimmt haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag vereinbart?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag vereinbart haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag angelegt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag angelegt haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag aktualisiert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag aktualisiert haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag dokumentiert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag dokumentiert haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag implementiert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag implementiert haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag gemergt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag gemergt haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag gepusht?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag gepusht haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag getestet?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag getestet haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag gebaut?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag gebaut haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag gefunden?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag gefunden haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag gelernt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag gelernt haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag gesehen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag gesehen haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag gemacht?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag gemacht haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag besprochen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag besprochen haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag beschlossen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag beschlossen haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag entschieden?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag entschieden haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag behoben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag behoben haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag erstellt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag erstellt haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag verändert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag verändert haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag geändert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag geändert haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag gelöscht?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag gelöscht haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag geprüft?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag geprüft haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag repariert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag repariert haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag verbessert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag verbessert haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag verloren?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag verloren haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag verursacht?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag verursacht haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag zerstört?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag zerstört haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag kaputtgegangen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag kaputtgegangen ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag schiefgelaufen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag schiefgelaufen ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag abgestürzt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag abgestürzt ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag ausgefallen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag ausgefallen ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag gescheitert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag gescheitert ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag aufgetreten?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag aufgetreten ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag passiert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag passiert ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag eskaliert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag eskaliert ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag erschienen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag erschienen ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag entstanden?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag entstanden ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag verschwunden?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag verschwunden ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag hängengeblieben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag hängengeblieben ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag fehlgeschlagen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag fehlgeschlagen ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag zurückgegangen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag zurückgegangen ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag gestiegen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag gestiegen ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag gewachsen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Zeig mir, was am Montag gewachsen ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40

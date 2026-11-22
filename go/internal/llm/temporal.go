@@ -327,9 +327,22 @@ func parseTemporalResponse(raw, query string) (*TemporalResult, error) {
 		return nil, nil
 	}
 
+	// A dir outside the prompt's vocabulary is no direction (issue #487): the
+	// query path reads "until" and "from" as open windows, and only the
+	// rules yield "from".
+	for i := range result.Dates {
+		if !fallbackDirs[result.Dates[i].Dir] {
+			result.Dates[i].Dir = ""
+		}
+	}
+
 	result.DimensionWeights = DeriveDimensionWeights(query, result.Dates)
 	return &result, nil
 }
+
+// fallbackDirs are the values of "dir" the temporal prompt asks the model
+// for (temporalPromptTemplate); parseTemporalResponse clears any other.
+var fallbackDirs = map[string]bool{"past": true, "future": true, "today": true, "range": true, DirUntil: true}
 
 // maxFTSDates caps the number of unique dates that get per-day FTS expansion
 // (ISO date + YYYY-MM prefix). At 1M+ blocks, each OR-term triggers a GIN

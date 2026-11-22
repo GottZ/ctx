@@ -23,3 +23,8 @@ func DayDatesForTest(s string) []time.Time {
 	}
 	return out
 }
+
+// MaxYearsAheadForTest exposes how many years after the current one a bare
+// year may name as a window's edge (maxYearsAhead) to the external test that
+// holds the years of a year edge against the write side's window.
+const MaxYearsAheadForTest = maxYearsAhead

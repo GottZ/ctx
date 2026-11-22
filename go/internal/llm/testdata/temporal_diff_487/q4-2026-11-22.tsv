@@ -1,0 +1,60 @@
+# Differential test of the temporal rules (issue #487): corpus q4, asked on 2026-11-22 at noon UTC.
+# question, rules output at 36b915f8 (v5.75.0); for a changed output also its verdict (fixed / disputed / broken), the output now and a note.
+Was kam nach 2025?	nil	fixed	["nach 2025?|2026-01-01..|from"] linear=1.00	a year as a window edge
+Was galt bis 2024?	nil	fixed	["bis 2024?|2024-12-31..|until"] linear=1.00	a year as a window edge
+Was galt vor 2025?	nil	fixed	["vor 2025?|2024-12-31..|until"] linear=1.00	read by hand
+Was hat sich seit 2024 geändert?	nil	fixed	["seit 2024 geändert?|2024-01-01..2026-11-22|range"] linear=1.00	a year as a window edge
+Was gilt ab 2025?	nil	fixed	["ab 2025?|2025-01-01..|from"] linear=1.00	a year as a window edge
+Was passierte between 2024 and 2026?	nil	fixed	["between 2024 and 2026?|2024-01-01..2026-12-31|range"] linear=1.00	read by hand
+What happened between 2024 and 2026?	nil	fixed	["between 2024 and 2026?|2024-01-01..2026-12-31|range"] linear=1.00	a year as a window edge
+Was lief von 2026 bis 2024?	nil	fixed	["von 2026 bis 2024?|2024-01-01..2026-12-31|range"] linear=1.00	read by hand
+Was lief von 2024 bis 2024?	nil	fixed	["von 2024 bis 2024?|2024-01-01..2024-12-31|range"] linear=1.00	read by hand
+Was lief zwischen 2026 und 2024?	nil	fixed	["zwischen 2026 und 2024?|2024-01-01..2026-12-31|range"] linear=1.00	read by hand
+What happened between 2026 and 2024?	nil	fixed	["between 2026 and 2024?|2024-01-01..2026-12-31|range"] linear=1.00	read by hand
+What happened from 2026 to 2024?	nil	fixed	["from 2026 to 2024?|2024-01-01..2026-12-31|range"] linear=1.00	read by hand
+Was gilt bis 2026?	nil	fixed	["bis 2026?|2026-12-31..|until"] linear=1.00	read by hand
+Was galt vor 2026?	nil	fixed	["vor 2026?|2025-12-31..|until"] linear=1.00	read by hand
+Was kam nach 2026?	nil	fixed	["nach 2026?|2027-01-01..|from"] linear=1.00	read by hand
+Was gilt ab 2026?	nil	fixed	["ab 2026?|2026-01-01..|from"] linear=1.00	read by hand
+Was hat sich seit 2026 geändert?	nil	fixed	["seit 2026 geändert?|2026-01-01..2026-11-22|range"] linear=1.00	read by hand
+Was gilt bis 2027?	nil	fixed	["bis 2027?|2026-11-22..2027-12-31|range"] linear=1.00	a year as a window edge
+Was gilt vor 2027?	nil	fixed	["vor 2027?|2026-11-22..2026-12-31|range"] linear=1.00	read by hand
+Was kam nach 1900?	nil
+Was kam nach 2100?	nil
+Was kam nach 9999?	nil
+Was kam nach 0000?	nil
+Was kam nach 2019?	nil
+Was kam nach 2020?	nil	fixed	["nach 2020?|2021-01-01..|from"] linear=1.00	read by hand
+Was kam nach 2099?	nil
+Was galt bis 2099?	nil
+Was galt vor 2020?	nil	fixed	["vor 2020?|2019-12-31..|until"] linear=1.00	read by hand
+Was hat sich seit 2099 geändert?	nil
+Was lief von 2020 bis 2099?	nil
+Was lief von 2019 bis 2025?	nil
+Was lief von 2024 bis 2100?	nil
+Was lief seit 2026 bis 2024?	nil	disputed	["seit 2026 bis 2024?|2024-01-01..2026-12-31|range"] linear=1.00	an end before its start; the swap is one reading of a question that names none
+Was lief ab 2026 bis 2024?	nil	disputed	["ab 2026 bis 2024?|2024-01-01..2026-12-31|range"] linear=1.00	an end before its start; the swap is one reading of a question that names none
+Was lief von 2025 bis Juni?	nil	fixed	["von 2025 bis juni?|2025-01-01..2026-06-30|range"] linear=1.00	read by hand
+Was lief von Juni bis 2026?	nil	fixed	["von juni bis 2026?|2026-06-01..2026-12-31|range"] linear=1.00	read by hand
+Was lief von Juni bis 2024?	nil	fixed	["von juni bis 2024?|2024-06-01..2024-12-31|range"] linear=1.00	read by hand
+Was lief von Dezember bis 2025?	nil	fixed	["von dezember bis 2025?|2025-12-01..2025-12-31|range"] linear=1.00	read by hand
+Was lief von 2024 bis heute?	["heute|2026-11-22..|today"] linear=1.00	fixed	["von 2024 bis heute?|2024-01-01..2026-11-22|range"] linear=1.00	read by hand
+Was lief von 2027 bis heute?	["heute|2026-11-22..|today"] linear=1.00	disputed	["von 2027 bis heute?|2026-11-22..2027-12-31|range"] linear=1.00	a start after its end; the swap is one reading of a question that names none
+Was lief von heute bis 2024?	["heute|2026-11-22..|today"] linear=1.00	disputed	["von heute bis 2024?|2024-01-01..2026-11-22|range"] linear=1.00	an end before its start; the swap is one reading of a question that names none
+Was lief von 2024 bis März 2025?	nil	fixed	["von 2024 bis märz 2025?|2024-01-01..2025-03-31|range"] linear=1.00	read by hand
+Was lief von März 2024 bis 2025?	nil	fixed	["von märz 2024 bis 2025?|2024-03-01..2025-12-31|range"] linear=1.00	read by hand
+Was lief von 2025 bis März 2024?	nil	fixed	["von 2025 bis märz 2024?|2024-03-01..2025-12-31|range"] linear=1.00	read by hand
+Was lief von März 2025 bis 2024?	nil	fixed	["von märz 2025 bis 2024?|2024-01-01..2025-03-31|range"] linear=1.00	read by hand
+Was lief von 15.03.2024 bis 2025?	["15.03.2024|2024-03-15..|past"] linear=1.00	fixed	["von 15.03.2024 bis 2025?|2024-03-15..2025-12-31|range"] linear=1.00	read by hand
+Was lief von 2024 bis 15.03.2025?	["15.03.2025|2025-03-15..|past"] linear=1.00	fixed	["von 2024 bis 15.03.2025?|2024-01-01..2025-03-15|range"] linear=1.00	read by hand
+Was lief von 2025 bis 15.03.2024?	["15.03.2024|2024-03-15..|past"] linear=1.00	fixed	["von 2025 bis 15.03.2024?|2024-03-15..2025-12-31|range"] linear=1.00	read by hand
+Was lief zwischen 2024 und 2024?	nil	fixed	["zwischen 2024 und 2024?|2024-01-01..2024-12-31|range"] linear=1.00	read by hand
+Was lief zwischen 2024 und März 2025?	nil
+What happened since 2024 until 2025?	nil	fixed	["since 2024 until 2025?|2024-01-01..2025-12-31|range"] linear=1.00	read by hand
+What happened from 2024 until 2026?	nil	fixed	["from 2024 until 2026?|2024-01-01..2026-12-31|range"] linear=1.00	read by hand
+What happened from 2024 through 2026?	nil	fixed	["from 2024 through 2026?|2024-01-01..2026-12-31|range"] linear=1.00	read by hand
+Was lief von 2024 bis 2026, und was danach?	nil	fixed	["von 2024 bis 2026, und was|2024-01-01..2026-12-31|range"] linear=1.00	read by hand
+Was lief seit 2024, Oktober?	["seit 2024, oktober?|2024-10-01..2026-11-22|range"] linear=0.80,month=0.20
+Seit 2024 Oktober, was lief?	["seit 2024 oktober, was|2024-10-01..2026-11-22|range"] linear=0.80,month=0.20
+Was kam nach 2025 Oktober?	nil
+Was lief nach dem 2025?	nil	fixed	["nach 2025?|2026-01-01..|from"] linear=1.00	read by hand
