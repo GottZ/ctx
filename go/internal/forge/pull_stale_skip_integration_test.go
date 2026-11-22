@@ -149,6 +149,101 @@ func TestPullReportsAFetchOlderThanItsMappingRecords(t *testing.T) {
 	}
 }
 
+// i509RunStored runs one sync of the project as ctxd starts it: from the
+// project row as the database holds it, its saved fetch cursor included
+// (the leg sends since and the ETag it saved). It returns the run's state.
+func (e i491Env) i509RunStored(t *testing.T) SyncStatus {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := e.pool.Exec(ctx, `UPDATE context_projects SET forge = $2::jsonb WHERE id = $1::uuid`,
+		e.proj.ID, `{"kind":"github","owner":"o","repo":"r","api_base":"`+e.gh.srv.URL+`"}`); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := store.GetProjectByID(ctx, e.pool, e.proj.ID)
+	if err != nil || proj == nil {
+		t.Fatalf("project row: %v", err)
+	}
+	m := mgr(e.pool, okTenant, okPolicy, e.gh.client(), e.applier(e.pool).ApplyIssues)
+	if _, err := m.StartSync(ctx, *proj, false); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	st := waitDone(t, m, e.proj.ID)
+	if st.Aborted || st.LastError != "" {
+		t.Fatalf("the run failed: %+v", st)
+	}
+	return st
+}
+
+// TestTheWayOutOfAForgeStampThatWentBackTakesBothSteps executes the way out
+// docs/architecture.md names for a forge whose updated_at went back behind
+// the stamp a mapping records: the mapping's forge_updated_at set to NULL AND
+// the leg's fetch cursor dropped. The fake forge answers since and
+// If-None-Match as GitHub does: items updated at or after since, an ETag
+// derived from the listing's body, 304 when it matches.
+func TestTheWayOutOfAForgeStampThatWentBackTakesBothSteps(t *testing.T) {
+	const remote = "remote edit after the forge's clock went back"
+	resetMapping := func(t *testing.T, e i491Env) {
+		t.Helper()
+		if _, err := e.pool.Exec(context.Background(), `UPDATE context_project_sync_map SET forge_updated_at = NULL WHERE block_id = $1::uuid`, e.id(t)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dropCursor := func(t *testing.T, e i491Env) {
+		t.Helper()
+		if _, err := e.pool.Exec(context.Background(), `UPDATE context_projects SET sync_cursor = sync_cursor - 'issues' WHERE id = $1::uuid`, e.proj.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// setup: one run saves the issue leg's cursor (since = the stamp of #5,
+	// its ETag); then the forge's clock goes back and a remote edit carries a
+	// stamp an hour before the one the mapping recorded.
+	setup := func(t *testing.T, slug string) i491Env {
+		t.Helper()
+		e := i491Setup(t, slug, "", fakeIssue{Title: "Crane", Body: "forge body"})
+		e.gh.setETags()
+		e.i509RunStored(t)
+		var since string
+		if err := e.pool.QueryRow(context.Background(), `SELECT COALESCE(sync_cursor->'issues'->>'since', '') FROM context_projects WHERE id = $1::uuid`, e.proj.ID).Scan(&since); err != nil || since == "" {
+			t.Fatalf("precondition: no saved issue cursor (%q, %v)", since, err)
+		}
+		recorded := e.gh.issue(t, 5).Updated
+		e.gh.editAt(t, 5, recorded.Add(-time.Hour), func(it *fakeIssue) { it.Body = remote })
+		return e
+	}
+	applied := func(t *testing.T, e i491Env, st SyncStatus, want bool, step string) {
+		t.Helper()
+		if got := e.body(t) == remote; got != want || (st.Applied == 1) != want {
+			t.Errorf("%s: block %q, run %+v — want the remote edit applied: %v", step, e.body(t), st, want)
+		}
+	}
+
+	t.Run("the mapping reset alone, then the cursor dropped", func(t *testing.T) {
+		e := setup(t, "i509wayout")
+		resetMapping(t, e)
+		applied(t, e, e.i509RunStored(t), false, "the mapping reset alone (since lists nothing older than the cursor)")
+		dropCursor(t, e)
+		applied(t, e, e.i509RunStored(t), true, "both steps")
+		if base, conflict := e.mapping(t); conflict || base != e.forgeH(t) {
+			t.Errorf("mapping flagged %v, base is the forge's %v", conflict, base == e.forgeH(t))
+		}
+	})
+	t.Run("the cursor dropped alone, then the mapping reset", func(t *testing.T) {
+		e := setup(t, "i509wayout2")
+		dropCursor(t, e)
+		st := e.i509RunStored(t)
+		applied(t, e, st, false, "the cursor dropped alone (the fetch is older than the recorded stamp)")
+		if st.PullSkipped != 1 {
+			t.Errorf("the run after the cursor drop: %+v, want the skip counted", st)
+		}
+		// That run saved a cursor again: since = the stamp that went back,
+		// and the ETag of that listing, which answers 304 while it holds.
+		resetMapping(t, e)
+		applied(t, e, e.i509RunStored(t), false, "the mapping reset after a run saved a cursor again (304)")
+		dropCursor(t, e)
+		applied(t, e, e.i509RunStored(t), true, "both steps, the cursor dropped after the reset")
+	})
+}
+
 // TestPullOfAnOlderFetchOfTheBaseVersionSaysNothing: the ordinary older
 // fetch. This pull fetched a version; the forge bumps its updated_at without
 // changing what the projection carries (a comment, a reaction), and another
