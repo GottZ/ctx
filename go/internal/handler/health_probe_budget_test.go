@@ -89,8 +89,13 @@ func TestHealthProbesEndWithTheirClient(t *testing.T) {
 		giveUp   = 100 * time.Millisecond
 		settle   = 500 * time.Millisecond
 		// slack covers the goroutines of the servers' connections that are
-		// still closing.
-		slack = 20
+		// still closing and those of the package's other tests: the count is
+		// process-wide, and the CI runner's two cores were one goroutine over
+		// a slack of 20. Probes that outlive their requests keep about five
+		// goroutines per request (1,014 for these 200), so half a goroutine
+		// per request still tells the two apart; the connections open at the
+		// hanging backend are the exact measure.
+		slack = requests / 2
 	)
 	// The probes' transport (http.DefaultTransport) keeps up to two idle
 	// connections per host, also one it finished dialing for a request that
