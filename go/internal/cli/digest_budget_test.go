@@ -96,6 +96,7 @@ func TestDigestEndsAtItsBudget(t *testing.T) {
 		}
 		t.Logf("the digest gave up after %v: %v", time.Since(start).Round(time.Millisecond), err)
 	case <-time.After(5 * time.Second):
+		srv.CloseClientConnections() // so the deferred Close does not wait for the call
 		t.Fatal("the digest call is still waiting 5 s into a 200 ms budget")
 	}
 	select {

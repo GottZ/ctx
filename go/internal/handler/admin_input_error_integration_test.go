@@ -205,6 +205,9 @@ func TestAdminWriteInputErrorsBackendRoutes(t *testing.T) {
 			nul(route, "NUL in metadata", "metadata", withID(spec("i505-m", "metadata", map[string]any{"note": i505NUL}))),
 			nul(route, "NUL in extra_body", "extra_body", withID(spec("i505-b", "extra_body", map[string]any{"opt": i505NUL}))),
 			nul(route, "NUL in a metadata key", "metadata", withID(spec("i505-k", "metadata", map[string]any{i505NUL: "v"}))),
+			// api_key is no backend field (api_key_ref names the key): the write
+			// ignores it, and answered 200 before the NUL check.
+			nul(route, "NUL in a key the write does not read", "api_key", withID(spec("i505-a", "api_key", i505NUL))),
 			c(route, "out of range", withID(spec("i505-r", "priority", 1e12))),
 			c(route, "invalid JSON field", withID(spec("i505-j", "priority", "high"))),
 		)
@@ -215,7 +218,8 @@ func TestAdminWriteInputErrorsBackendRoutes(t *testing.T) {
 		"scope", i505Long[:51], "base_url", "https://i505.example.org")}))
 	want := map[string]int{"backend-create | too long scope": 422}
 	for _, route := range []string{"backend-create", "backend-update"} {
-		for _, input := range []string{"NUL in extra_headers", "NUL in metadata", "NUL in extra_body", "NUL in a metadata key", "out of range"} {
+		for _, input := range []string{"NUL in extra_headers", "NUL in metadata", "NUL in extra_body", "NUL in a metadata key",
+			"NUL in a key the write does not read", "out of range"} {
 			want[route+" | "+input] = 422
 		}
 		want[route+" | invalid JSON field"] = 400
