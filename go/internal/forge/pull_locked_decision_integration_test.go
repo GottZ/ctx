@@ -188,7 +188,12 @@ func TestPullConvergenceKeepsALocalEditMadeDuringIt(t *testing.T) {
 // BEGIN; between the read and the write it calls between.
 func (e i491Env) pullHeldOn(t *testing.T, between func()) ApplyResult {
 	t.Helper()
-	issues := e.fetch(t)
+	return e.pullHeldOnPage(t, e.fetch(t), between)
+}
+
+// pullHeldOnPage is pullHeldOn for a page fetched earlier.
+func (e i491Env) pullHeldOnPage(t *testing.T, issues []IssueRemote, between func()) ApplyResult {
+	t.Helper()
 	held, hold := i452HoldBeginPool(t, e.dsn)
 	type out struct {
 		res ApplyResult

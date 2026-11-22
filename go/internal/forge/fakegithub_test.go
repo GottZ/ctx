@@ -120,6 +120,32 @@ func (f *fakeGitHub) edit(t *testing.T, n int64, change func(*fakeIssue)) {
 	t.Fatalf("the fake forge holds no issue #%d", n)
 }
 
+// editInSecond changes issue n like edit but keeps its updated_at: a second
+// write within the same second, which GitHub's updated_at (whole seconds)
+// cannot tell from the first.
+func (f *fakeGitHub) editInSecond(t *testing.T, n int64, change func(*fakeIssue)) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.issues {
+		if f.issues[i].Number == n {
+			at := f.issues[i].Updated
+			change(&f.issues[i])
+			f.issues[i].Updated = at
+			return
+		}
+	}
+	t.Fatalf("the fake forge holds no issue #%d", n)
+}
+
+// setETags makes the listing carry ETags and answer a matching If-None-Match
+// with 304, as GitHub does.
+func (f *fakeGitHub) setETags() {
+	f.mu.Lock()
+	f.etags = true
+	f.mu.Unlock()
+}
+
 // landed returns the issue PATCHes that landed so far.
 func (f *fakeGitHub) landed() []fakePatch {
 	f.mu.Lock()

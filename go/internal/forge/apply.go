@@ -251,22 +251,76 @@ func (a *Applier) applyIssue(ctx context.Context, project store.ProjectRow, pol 
 	})
 }
 
-// fetchedBefore answers whether another instance's pull recorded a newer
-// observation of the forge entity since this pull read the mapping: the base
-// moved, and the locked row's forge_updated_at — the forge's own updated_at
-// of the version a pull last applied or converged on — lies after the one
-// this pull fetched. Its fetch is then older than what the row records, and
-// writing it would put an older forge version into a block another pull
-// brought level with a newer one; with the since cursor past the newer
-// version, nothing would bring it back. The write is skipped. This orders two
-// observations of the forge on the forge's clock; it is no direction input
-// (W16: ctx-ahead or forge-ahead stays a matter of content hashes), and it is
-// consulted only when the base moved — a push advance moves the base without
-// touching forge_updated_at, so a pull after another instance's push still
-// decides on the locked rows (issue #491).
-func fetchedBefore(locked, read store.SyncMap, fetched *time.Time) bool {
-	return locked.BaseHash != read.BaseHash && locked.ForgeUpdatedAt != nil && fetched != nil &&
-		fetched.Before(*locked.ForgeUpdatedAt)
+// fetchOrder places this pull's fetch against the observation of the forge
+// entity the locked mapping row records: its forge_updated_at, the forge's
+// own updated_at of the version a pull last applied or converged on (only
+// pulls write it; a push advance leaves it). It orders two observations of
+// the forge on the forge's clock and is no direction input (W16: ctx-ahead
+// or forge-ahead stays a matter of content hashes). Issue #491.
+type fetchOrder int
+
+const (
+	fetchNewer     fetchOrder = iota // later than the recorded observation, or none to compare with
+	fetchSameStamp                   // the same updated_at: the forge's clock cannot order the two
+	fetchOlder                       // earlier than the recorded observation
+)
+
+// orderFetch compares at the database's precision (timestamptz keeps
+// microseconds). GitHub's updated_at has whole seconds, so two versions
+// written within one second carry the same stamp.
+func orderFetch(locked store.SyncMap, fetched *time.Time) fetchOrder {
+	if locked.ForgeUpdatedAt == nil || fetched == nil {
+		return fetchNewer
+	}
+	f, r := fetched.Truncate(time.Microsecond), locked.ForgeUpdatedAt.Truncate(time.Microsecond)
+	switch {
+	case f.Before(r):
+		return fetchOlder
+	case f.Equal(r):
+		return fetchSameStamp
+	}
+	return fetchNewer
+}
+
+// olderOrUnordered decides a fetch the locked mapping row's observation does
+// not show to be newer (issue #491). It answers handled=false when the matrix
+// decides on the locked rows, and otherwise the conflict count of what it did.
+//
+//   - Older than the recorded observation: nothing is written, whether or not
+//     the base moved since the read. Another pull applied a newer version (it
+//     may even have committed between this pull's fetch and its read of the
+//     mapping); writing the older one would set the block back, and the cursor
+//     of the instance that pulled the newer version may answer 304 from then
+//     on, so no later pull would correct it. The block holds a version at
+//     least as new as the fetch, and a later forge change carries a stamp at
+//     or after the recorded one, which the since cursor of every instance
+//     lists again (the cursor never passes the newest stamp of a page it
+//     applied).
+//   - The same stamp, after another instance moved the base since the read:
+//     the other pull's version and this one cannot be ordered. When they are
+//     the same version there is nothing to do; otherwise the mapping is
+//     flagged and nothing is written either way — the conservative answer
+//     the base write before issue #491 gave, because writing the fetch loses
+//     the other version when it was the newer one (and, with a 304 after it,
+//     for good), and keeping the row loses this one in the other order. A
+//     base another instance's push moved after a pull of that same stamp is
+//     flagged as well: the stamp then belongs to a version the push
+//     replaced. Without a moved base the same stamp is the next version of
+//     one second, pulled run after run, and the matrix decides — also when
+//     another instance pulled the other version of that second between this
+//     pull's fetch and its read of the mapping, which reads the same (a
+//     known limit, pinned by TestPullOfASameSecondFetch).
+func olderOrUnordered(locked, read store.SyncMap, forgeH string, fetched *time.Time) (handled bool, conflict bool) {
+	switch orderFetch(locked, fetched) {
+	case fetchOlder:
+		return true, false
+	case fetchSameStamp:
+		if locked.BaseHash == read.BaseHash {
+			return false, false
+		}
+		return true, forgeH != locked.BaseHash && !locked.Conflict
+	}
+	return false, false
 }
 
 // decision is one cell of the 3-way matrix (see the package doc).
@@ -334,12 +388,18 @@ type pulled struct {
 //   - The mapping's base moved (another instance pushed and advanced it, or
 //     pulled): the read's decision was made against a base that is gone, and
 //     the matrix runs on the locked block and the locked row alone — unless
-//     the other instance pulled a newer version than this pull fetched
-//     (fetchedBefore), then nothing is written. Where
+//     the row's observation of the forge does not show this fetch to be
+//     newer (olderOrUnordered): an older fetch writes nothing, one with the
+//     same stamp as a version another instance pulled meanwhile is flagged
+//     unless it is that version. Where
 //     another instance pushed a local edit, the block equals the new base and
 //     the forge is ahead of it — a pull, not the conflict the read's base
 //     would make of it; what the pull fetched before that push landed comes
 //     back with the next pull, the forge holding the pushed edit.
+//
+// A fetch older than the row's observation writes nothing in either case: a
+// pull of another instance may have applied the newer version between this
+// pull's fetch and its read.
 //
 // A block that is gone, archived or out of scope, or that lost its mapping,
 // is skipped, as the read does.
@@ -364,8 +424,12 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 		if err != nil || !ok {
 			return err
 		}
-		if fetchedBefore(locked, m, p.fUpdated) {
-			return nil
+		if handled, conflict := olderOrUnordered(locked, m, p.forgeH, p.fUpdated); handled {
+			if !conflict {
+				return nil
+			}
+			res.Conflicts = 1
+			return store.FlagSyncMapConflict(ctx, tx, m.BlockID, a.clock())
 		}
 		ctxH := p.project(cur, locked.BaseFields)
 		d := decide(locked.BaseHash, ctxH, p.forgeH)
