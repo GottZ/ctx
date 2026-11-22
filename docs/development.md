@@ -1350,7 +1350,8 @@ statement. Refused:
   it). A column of that name in a user table is no read of the catalog: unqualified, or qualified
   by the table, its alias or the row of a `FOR … IN` over it in the same statement;
 - a `SELECT count(*)` of every row of one table (with `INTO`, an alias or a cast, without
-  `WHERE`, join or grouping; a `LIMIT` on the count's one row bounds nothing), which reads the
+  `WHERE`, join or grouping — a clause word after the table is no alias of it; a `LIMIT` on the
+  count's one row bounds nothing), which reads the
   whole table. A count stopped at the threshold in a subquery, as the function counts, passes;
   whether a table has rows at all is an `EXISTS`.
 

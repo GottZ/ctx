@@ -104,13 +104,19 @@ var (
 	// statement (joinTokens): an INTO before or after the count, a cast and
 	// an alias of it, and after the table at most an INTO and a LIMIT or
 	// OFFSET on the count's one row — no WHERE, join or grouping. The table
-	// may be a format() placeholder. Group 1 is the table.
+	// may be a format() placeholder. Group 1 is the table, group 2 its alias
+	// (a clauseWord there is no alias: the count has a clause).
 	countEveryRow = regexp.MustCompile(`\bselect(?: into (?:strict )?` + sqlName + `)? count \( (?:\*|[0-9]+|` +
 		sqlName + `(?: \. ` + sqlName + `)?) \)(?: : : ` + sqlName + `)?(?: (?:as )?` + sqlName + `)?` +
 		`(?: into (?:strict )?` + sqlName + `)?` +
 		` from (?:only )?((?:% [a-z]|` + sqlName + `)(?: \. (?:% [a-z]|` + sqlName + `))?)` +
-		`(?: (?:as )?` + sqlName + `)?(?: into (?:strict )?` + sqlName + `)?` +
+		`(?: (?:as )?(` + sqlName + `))?(?: into (?:strict )?` + sqlName + `)?` +
 		`(?: (?:limit|offset) [^()']*)?(?: \)| '|$)`)
+	// clauseWord opens a clause after a table and is never its alias.
+	clauseWord = map[string]bool{"where": true, "group": true, "having": true, "window": true, "order": true,
+		"limit": true, "offset": true, "fetch": true, "for": true, "join": true, "inner": true, "left": true,
+		"right": true, "full": true, "cross": true, "natural": true, "union": true, "intersect": true,
+		"except": true, "tablesample": true}
 	// statementStart is a token after which a PL/pgSQL statement begins.
 	statementStart = map[string]bool{";": true, "then": true, "else": true, "loop": true, "begin": true}
 )
@@ -624,8 +630,10 @@ func sizeDecisionIn(stmt []sqlToken) string {
 			}
 		}
 	}
-	if m := countEveryRow.FindStringSubmatch(joinTokens(stmt)); m != nil {
-		return "counts every row of " + strings.ReplaceAll(m[1], " ", "") + " (whether a table has rows: EXISTS)"
+	for _, m := range countEveryRow.FindAllStringSubmatch(joinTokens(stmt), -1) {
+		if !clauseWord[m[2]] {
+			return "counts every row of " + strings.ReplaceAll(m[1], " ", "") + " (whether a table has rows: EXISTS)"
+		}
 	}
 	return ""
 }
@@ -1100,6 +1108,8 @@ UPDATE context_page_marks SET relpages = relpages + 1 WHERE relid = 'public.cont
 		src: inDo(`    SELECT count(*) INTO v_rows FROM context_blocks b JOIN context_block_grants g ON g.block_id = b.id;`)},
 	{class: "pin", name: "a count stopped at the threshold, as ctx_migration_rows counts",
 		src: inDo(`    SELECT count(*) INTO v_rows FROM (SELECT 1 FROM context_blocks LIMIT inline_rows) t;`)},
+	{class: "pin", name: "a filtered count whose condition starts with a string",
+		src: inDo(`    SELECT count(*) INTO v_rows FROM context_blocks WHERE 'archived' = guard_status;`)},
 	{class: "pin", name: "a count of the rows a constraint would reject",
 		src: inDo(`    SELECT count(*) INTO v_rows FROM context_blocks WHERE created_at IS NULL;
     IF v_rows > 0 THEN
