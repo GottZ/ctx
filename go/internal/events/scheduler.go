@@ -1123,6 +1123,28 @@ func (s *Scheduler) nextOverviewTenant(ctx context.Context, cursor *uint64) back
 	return bt
 }
 
+// nextDreamTenant is the dream loop's turn of the round robin over the
+// authoritative tenant list (the default tenant when the list is empty): the
+// tenant of this iteration, advancing *cursor. At the start of each round it
+// hands the list to the backend notice, which forgets the tenants no longer
+// in it (issue #495) — a deleted tenant must not stay in its state.
+func (s *Scheduler) nextDreamTenant(ctx context.Context, cursor *uint64) backgroundTenant {
+	tenants := s.backgroundTenantsFn(ctx)
+	if len(tenants) == 0 {
+		tenants = []backgroundTenant{{scope: store.GlobalScope}}
+	}
+	i := *cursor % uint64(len(tenants))
+	*cursor++
+	if i == 0 {
+		scopes := make([]string, len(tenants))
+		for j := range tenants {
+			scopes[j] = tenants[j].scope
+		}
+		s.dreamBackend.Retain(scopes)
+	}
+	return tenants[i]
+}
+
 // yieldThenRebuildOverview defers the rebuild while queries are active (demand
 // interruption, B2-M1 — the dream pattern: wait and re-check rather than skip
 // a whole interval), then runs one rebuild. Sustained query load defers
@@ -1907,12 +1929,7 @@ func (s *Scheduler) runDreamLoop(ctx context.Context) {
 		// takes it explicitly). Single-tenant: the list is [{_global, nil}], so the
 		// cursor stays on the base generation, the Chain stays shared-only and the
 		// window is the raw read_scopes — byte-identical to the pre-T13 single pass.
-		tenants := s.backgroundTenantsFn(ctx)
-		if len(tenants) == 0 {
-			tenants = []backgroundTenant{{scope: store.GlobalScope}}
-		}
-		bt := tenants[tenantCursor%uint64(len(tenants))]
-		tenantCursor++
+		bt := s.nextDreamTenant(ctx, &tenantCursor)
 		cfg := s.cfg.SnapshotForTenant(ctx, bt.scope)
 		router := s.newRouter(cfg, bt.scope)
 		readWindow := store.IntersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
