@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
+	"math"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -121,9 +124,15 @@ func applySpec(b *backends.Backend, spec *backendSpec, keys map[string]json.RawM
 		b.Timeouts = spec.Timeouts
 	}
 	if spec.NumCtx != nil {
+		if err := int4Field("num_ctx", *spec.NumCtx); err != nil {
+			return err
+		}
 		b.NumCtx = *spec.NumCtx
 	}
 	if spec.Priority != nil {
+		if err := int4Field("priority", *spec.Priority); err != nil {
+			return err
+		}
 		b.Priority = *spec.Priority
 	}
 	if spec.Enabled != nil {
@@ -415,11 +424,61 @@ func writeBackendTxFailure(w http.ResponseWriter, r *http.Request, action, stage
 // errors carry their statement's PostgreSQL error, whose text leaves out the
 // DETAIL (a failing row would name every column), and no value of the
 // request but that name.
+//
+// A value the database cannot store (callerDataError: a number out of its
+// column's range; a NUL character nulField refuses before) is the caller's
+// refusal as well and writes no line (issue #505).
 func writeBackendStoreError(w http.ResponseWriter, r *http.Request, action string, err error) {
-	if !errors.Is(err, store.ErrBackendNameExists) {
+	if !errors.Is(err, store.ErrBackendNameExists) && callerDataError(err) == nil {
 		adminWriteFailed(r, "manage: "+action+" failed", err, writeRolledBack)
 	}
 	writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+}
+
+// int4Field refuses a value of an INTEGER column outside its range (issue
+// #505): pgx would refuse to encode it at the store, a failure the backend
+// surface answered 422 with an ERROR line — the caller's number all the same.
+func int4Field(name string, v int) error {
+	if v < math.MinInt32 || v > math.MaxInt32 {
+		return fmt.Errorf("%s %d is out of range (%d to %d)", name, v, math.MinInt32, math.MaxInt32)
+	}
+	return nil
+}
+
+// nulFieldMessage is the field error of a value with a NUL character.
+const nulFieldMessage = "carries a NUL character (U+0000), which the database stores neither in text nor in JSON"
+
+// nulField returns the first field (in key order) of a backend write's data
+// whose value — or a key or string anywhere inside it — carries a NUL
+// character, "" when none does (issue #505). The database refuses such a
+// value (22021 in text, 22P05 in JSON); refused here, the caller gets a 422
+// naming the field and the server writes no line.
+func nulField(keys map[string]json.RawMessage) string {
+	for _, k := range slices.Sorted(maps.Keys(keys)) {
+		var v any
+		if strings.ContainsRune(k, 0) || (json.Unmarshal(keys[k], &v) == nil && carriesNUL(v)) {
+			return k
+		}
+	}
+	return ""
+}
+
+// carriesNUL reports whether a decoded JSON value holds a NUL character in a
+// string or an object key, at any depth.
+func carriesNUL(v any) bool {
+	switch x := v.(type) {
+	case string:
+		return strings.ContainsRune(x, 0)
+	case []any:
+		return slices.ContainsFunc(x, carriesNUL)
+	case map[string]any:
+		for k, e := range x {
+			if strings.ContainsRune(k, 0) || carriesNUL(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // reloadAfterMutation is the synchronous half of the snapshot propagation.
@@ -460,6 +519,10 @@ func (h *ManageHandler) handleBackendCreate(w http.ResponseWriter, r *http.Reque
 	spec, keys, err := parseBackendSpec(req.Data)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	if f := nulField(keys); f != "" {
+		writeBackendValidation(w, []backends.FieldError{{Field: f, Message: nulFieldMessage}})
 		return
 	}
 
@@ -640,6 +703,10 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 	spec, keys, err := parseBackendSpec(req.Data)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	if f := nulField(keys); f != "" {
+		writeBackendValidation(w, []backends.FieldError{{Field: f, Message: nulFieldMessage}})
 		return
 	}
 

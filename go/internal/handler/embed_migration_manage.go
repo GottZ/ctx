@@ -199,6 +199,12 @@ func (h *ManageHandler) handleEmbedMigrationCreate(w http.ResponseWriter, r *htt
 		ReuseExisting: d.ReuseExisting,
 	}, embedmigration.StatfsChecker(embedMigrationDiskCheckPath))
 	if err != nil {
+		// A model or backend name the database cannot store (a NUL
+		// character) is the caller's mistake: 400 without a line (issue
+		// #505).
+		if writeCallerDataError(w, http.StatusBadRequest, err) {
+			return
+		}
 		// The write is the one INSERT at the end; a read before it that
 		// was cut off says unknown as well, the safe side.
 		embedMigrationMechErr(w, r, req.Action, err, statementOutcome(err))
@@ -415,6 +421,11 @@ func (h *ManageHandler) handleEmbedMigrationAbort(w http.ResponseWriter, r *http
 	}
 	if err := embedmigration.Transition(ctx, h.pool, id, cur, embedmigration.StatusAborted,
 		embedmigration.WithAbortReason(d.Reason)); err != nil {
+		// A reason the database cannot store is the caller's mistake (issue
+		// #505); the transition is one statement and wrote nothing.
+		if writeCallerDataError(w, http.StatusBadRequest, err) {
+			return
+		}
 		embedMigrationMechErr(w, r, req.Action, err, statementOutcome(err))
 		return
 	}

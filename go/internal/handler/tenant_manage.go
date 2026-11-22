@@ -210,8 +210,7 @@ func (h *ManageHandler) handleTenantLimitSet(w http.ResponseWriter, r *http.Requ
 			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
 			return
 		}
-		adminWriteFailed(r, "manage: tenant-limit-set failed", err, statementOutcome(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "set tenant limits failed"})
+		writeAdminFailure(w, r, "manage: tenant-limit-set failed", err, statementOutcome(err), "set tenant limits failed")
 		return
 	}
 	// Echo the canonical stored row. SetTenantLimits already committed, so a re-read
@@ -446,6 +445,52 @@ func adminWriteFailed(r *http.Request, msg string, err error, outcome string) {
 	logRequestError(ctx, msg, "error", err, "write_outcome", outcome, "request_id", RequestIDFromContext(ctx))
 }
 
+// callerDataCodes are the data exceptions (SQLSTATE class 22) a value of the
+// request causes on an admin write: a NUL character in text (22021) or in a
+// JSON value (22P05), a value longer than its column (22001), a number out of
+// its column's range (22003), a text that is no literal of its column's type
+// (22P02). The rest of class 22 stays a server fault — a division by zero, a
+// vector of the wrong dimension (pgvector's 22000) come from the server's own
+// statements and data.
+var callerDataCodes = map[string]bool{"22001": true, "22003": true, "22021": true, "22P02": true, "22P05": true}
+
+// callerDataError returns the PostgreSQL error of a write the database
+// refused for a value of the request (callerDataCodes, issue #505), nil for
+// any other error. Such a refusal is the caller's mistake, like a taken name:
+// the route answers it 4xx and writes no line, so an admin key cannot write
+// ERROR lines at will.
+func callerDataError(err error) *pgconn.PgError {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && callerDataCodes[pgErr.Code] {
+		return pgErr
+	}
+	return nil
+}
+
+// writeCallerDataError answers err with status and the database's message
+// (never its DETAIL, which can quote the refused row) when it is a
+// callerDataError, and reports whether it did.
+func writeCallerDataError(w http.ResponseWriter, status int, err error) bool {
+	pgErr := callerDataError(err)
+	if pgErr == nil {
+		return false
+	}
+	writeJSON(w, status, map[string]any{"success": false,
+		"error": "the database cannot store a value of the request: " + pgErr.Message})
+	return true
+}
+
+// writeAdminFailure answers a failed admin write: 400 without a line when the
+// database refused a value of the request (writeCallerDataError), else 500
+// with text and the route's failure line (adminWriteFailed).
+func writeAdminFailure(w http.ResponseWriter, r *http.Request, msg string, err error, outcome, text string) {
+	if writeCallerDataError(w, http.StatusBadRequest, err) {
+		return
+	}
+	adminWriteFailed(r, msg, err, outcome)
+	writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": text})
+}
+
 // writeBootstrapError maps a compound tenant-create failure to its HTTP status. A
 // rolled-back tx means NO partial tenant escaped (the atomicity guarantee), so each
 // of these is a clean terminal response. The 22001 (value too long) from the
@@ -463,8 +508,7 @@ func writeBootstrapError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.As(err, &pgErr) && pgErr.Code == "22001":
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "scope name too long (max 50 chars including the tenant prefix)"})
 	default:
-		adminWriteFailed(r, "manage: tenant-create failed", err, writeOutcome(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "create tenant failed"})
+		writeAdminFailure(w, r, "manage: tenant-create failed", err, writeOutcome(err), "create tenant failed")
 	}
 }
 
@@ -523,8 +567,7 @@ func (h *ManageHandler) handleTenantUpdate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err != nil {
-		adminWriteFailed(r, "manage: tenant-update failed", err, statementOutcome(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "update tenant failed"})
+		writeAdminFailure(w, r, "manage: tenant-update failed", err, statementOutcome(err), "update tenant failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "tenant": tn})
@@ -568,8 +611,7 @@ func (h *ManageHandler) handleTenantDelete(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		// PruneTenant deletes in several statements, each committing on its
 		// own: what an earlier one removed is not known here.
-		adminWriteFailed(r, "manage: tenant-delete failed", err, writeUnknown)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "delete tenant failed"})
+		writeAdminFailure(w, r, "manage: tenant-delete failed", err, writeUnknown, "delete tenant failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": req.ID})
@@ -614,8 +656,7 @@ func (h *ManageHandler) handleTenantGrantCreate(w http.ResponseWriter, r *http.R
 	case errors.Is(err, store.ErrGrantUnknownTarget):
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "unknown grantee tenant or unregistered scope"})
 	case err != nil:
-		adminWriteFailed(r, "manage: tenant-grant-create failed", err, statementOutcome(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "create grant failed"})
+		writeAdminFailure(w, r, "manage: tenant-grant-create failed", err, statementOutcome(err), "create grant failed")
 	default:
 		writeJSON(w, http.StatusOK, map[string]any{"success": true, "grant": g})
 	}
@@ -646,8 +687,7 @@ func (h *ManageHandler) handleTenantGrantDelete(w http.ResponseWriter, r *http.R
 		return
 	}
 	if err != nil {
-		adminWriteFailed(r, "manage: tenant-grant-delete failed", err, statementOutcome(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "delete grant failed"})
+		writeAdminFailure(w, r, "manage: tenant-grant-delete failed", err, statementOutcome(err), "delete grant failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": req.ID})
@@ -731,8 +771,7 @@ func (h *ManageHandler) handleScopeCreate(w http.ResponseWriter, r *http.Request
 		case errors.Is(err, store.ErrTenantNotFound):
 			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
 		default:
-			adminWriteFailed(r, "manage: scope-create failed", err, writeOutcome(err))
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "assign scope failed"})
+			writeAdminFailure(w, r, "manage: scope-create failed", err, writeOutcome(err), "assign scope failed")
 		}
 		return
 	}
