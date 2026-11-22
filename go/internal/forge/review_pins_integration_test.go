@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
@@ -217,6 +218,63 @@ func TestPushAdvanceKeepsAShareLockerWaiting(t *testing.T) {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "55P03" {
 		t.Errorf("a FOR SHARE lock of the block during the advance: %v, want it to wait (SQLSTATE 55P03 at the lock timeout)", err)
+	}
+	close(hold.release)
+	select {
+	case o := <-done:
+		if o.err != nil || o.res.Pushed != 1 || o.res.Conflicts != 0 {
+			t.Errorf("push: %+v %v, want one push", o.res, o.err)
+		}
+	case <-time.After(i452Wait):
+		t.Fatalf("the push did not finish within %s", i452Wait)
+	}
+}
+
+// TestPushLockIsHeldThroughTheRecord (second review, P2): the section gives
+// its push lock back only after the record transaction ended. While the
+// advance runs — held at its mapping statement — another instance's try of
+// the entity's lock fails; given back before the record, that instance could
+// list the entity at the old base, PATCH and record over the advance.
+func TestPushLockIsHeldThroughTheRecord(t *testing.T) {
+	e := i491Setup(t, "i491lockrecord", "", fakeIssue{Title: "Crane", Body: "forge body"})
+	ctx := context.Background()
+	e.edit(t, store.IssueUpdate{Title: str("Crane, A")})
+	held, hold := i491HoldStatementPool(t, e.dsn, func(sql string) bool {
+		return strings.Contains(sql, "UPDATE context_project_sync_map") && strings.Contains(sql, "synced_at = CASE WHEN")
+	})
+	type out struct {
+		res PushResult
+		err error
+	}
+	done := make(chan out, 1)
+	go func() {
+		r, err := e.pushOnErr(held)
+		done <- out{r, err}
+	}()
+	select {
+	case <-hold.entered:
+	case o := <-done:
+		t.Fatalf("the push finished without reaching its record: %+v %v", o.res, o.err)
+	case <-time.After(i452Wait):
+		t.Fatalf("the push did not reach its record within %s", i452Wait)
+	}
+	other, err := pgxpool.New(ctx, e.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	conn, err := other.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, _ := e.mapping(t)
+	locked, skip, err := store.TryLockPushEntity(ctx, conn, e.id(t), base)
+	if locked {
+		_, _ = store.UnlockPushEntity(ctx, conn, e.id(t))
+	}
+	conn.Release()
+	if err != nil || locked || skip != store.PushSkipInFlight {
+		t.Errorf("another instance's try of the push lock during the record: locked %v, skip %q, %v — want it refused (in flight)", locked, skip, err)
 	}
 	close(hold.release)
 	select {
