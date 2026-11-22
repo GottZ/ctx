@@ -115,6 +115,8 @@ func TestRules_AnEnglishPassiveAfterBeIsNoPast(t *testing.T) {
 		"What is the commit that broke the build on Monday?": last506["montag"],
 		"Who is the person that deployed on Friday?":         last506["freitag"],
 		"Is it true that the backup failed on Saturday?":     last506["samstag"],
+		"What is the reason the job crashed on Saturday?":    last506["samstag"],
+		"Is the build of the service deployed on Monday?":    next506["montag"],
 		"Is it planned for Monday?":                          next506["montag"],
 		"Are they merged by Friday?":                         next506["freitag"],
 	})

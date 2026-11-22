@@ -1070,6 +1070,14 @@ var (
 	englishNotPassive  = toWordSet("been", "was", "were", "has", "have", "had", "did", "do", "does", "wasn't", "weren't", "hasn't", "haven't", "hadn't", "didn't")
 	englishSubjects    = toWordSet("i", "we", "you", "they", "he", "she", "it", "someone", "somebody", "anyone", "anybody", "everyone", "everybody", "nobody", "who")
 	englishWhSubjects  = toWordSet("what", "which", "whose", "that")
+	// englishDeterminers start a noun phrase; behind a word that is no
+	// englishNPJoiners (a preposition, a conjunction or a determiner) it
+	// starts the subject of a relative clause without its pronoun
+	// (englishPassiveAt).
+	englishDeterminers = toWordSet("the", "a", "an", "this", "these", "those", "my", "our", "your", "their", "his", "her", "its")
+	englishNPJoiners   = toWordSet("of", "on", "at", "in", "for", "from", "to", "by", "with", "about", "into", "during",
+		"after", "before", "since", "until", "over", "under", "and", "or", "the", "a", "an", "this", "that", "these", "those",
+		"my", "our", "your", "their", "his", "her", "its", "all", "both", "what", "which", "whose")
 	// englishClauseOpeners open a relative or embedded clause, which ends
 	// the search of englishPassiveAt.
 	englishClauseOpeners = toWordSet("that", "which", "who", "whom", "whose", "where", "when", "whether", "if", "because")
@@ -1087,7 +1095,10 @@ var (
 // the clause the form stands in: the opener of a relative or embedded
 // clause ("What is the name of the job that failed on Friday?") or its
 // subject ("Is this the PR you merged on Tuesday?"), unless a form of "be"
-// right before the subject asks the question ("Is it planned?").
+// right before the subject asks the question ("Is it planned?"), and a
+// determiner right behind a noun, which starts a relative clause without its
+// pronoun ("What is the reason the job crashed on Saturday?"; "Is the build
+// of the service deployed?" joins its noun phrase by "of").
 func englishPassiveAt(words []string, i int) bool {
 	for j := i - 1; j >= 0; j-- {
 		w := words[j]
@@ -1096,7 +1107,8 @@ func englishPassiveAt(words []string, i int) bool {
 			scanned(i - j)
 			return true
 		case englishNotPassive[w] || pastVerbSet[w] || englishParticiple(w) || englishClauseOpeners[w],
-			englishSubjects[w] && w != "who" && (j == 0 || !englishBeForms[words[j-1]]):
+			englishSubjects[w] && w != "who" && (j == 0 || !englishBeForms[words[j-1]]),
+			englishDeterminers[w] && j > 0 && !englishBeForms[words[j-1]] && !englishNPJoiners[words[j-1]]:
 			scanned(i - j)
 			return false
 		}
