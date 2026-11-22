@@ -59,6 +59,12 @@ func TestRules_YearEdges(t *testing.T) {
 		"seit 2024 im Einsatz":              {"2024-01-01", "2026-11-21", "range"},
 		// A year to come has no time since it yet.
 		"seit 2027": {},
+		// "zwischen … und" with edges other than two years stays as it was:
+		// two weekdays are the two days, a year and a month no window.
+		"zwischen Montag und Freitag":      {"2026-11-23", "", "future"},
+		"between Monday and Friday":        {"2026-11-23", "", "future"},
+		"zwischen 2024 und März 2026":      {},
+		"zwischen März 2024 und Mai 2024":  {},
 	})
 }
 
