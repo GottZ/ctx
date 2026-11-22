@@ -1,17 +1,16 @@
 //go:build integration
 
-// Issue #509: a conflict flag goes once block, base and forge agree. Before,
-// the noop cell of the matrix wrote nothing and the push advance kept the
-// flag (conflict = conflict OR …), so a mapping flagged while both sides
-// moved stayed flagged after they came level: the push lists no flagged
-// mapping, and a later local edit was never pushed. A pull that finds the
-// block and the forge at one version on the rows it locks now clears the
-// flag and records that version as the base — also when the base was
-// already that version; a push advance whose block still holds the version
-// its PATCH sent clears it as well. A flag over a real divergence of both
-// sides stays.
+// Issue #509: a conflict flag goes once a pull finds block, base and forge
+// in agreement. Before, the noop cell of the matrix wrote nothing, so a
+// mapping flagged while both sides moved stayed flagged after they came
+// level: the push lists no flagged mapping, and a later local edit was never
+// pushed. A pull that finds the block and the forge at one version on the
+// rows it locks now clears the flag and records that version as the base —
+// also when the base was already that version. The push advance clears no
+// flag: it does not know what the forge holds since its PATCH landed. A flag
+// over a real divergence of both sides stays.
 //
-//	go test -tags=integration ./internal/forge/ -run 'TestAPullClearsAFlag|TestAPushAdvanceClearsAFlag|TestAFlagOverARealDivergenceStays' -count=1 -v
+//	go test -tags=integration ./internal/forge/ -run 'TestAPullClearsAFlag|TestAPushAdvanceKeepsAFlag|TestAFlagOverARealDivergenceStays' -count=1 -v
 package forge
 
 import (
@@ -94,12 +93,14 @@ func TestAPullClearsAFlagThePushRecordKept(t *testing.T) {
 	}
 }
 
-// TestAPushAdvanceClearsAFlagWhenTheBlockHoldsTheSentVersion: the same, but
-// the edit is undone while the PATCH is still on the wire: the advance finds
-// the block at the version it sent, the base at the listed one — block, base
-// and forge agree on the sent version — and clears the flag the other
-// instance's pull set.
-func TestAPushAdvanceClearsAFlagWhenTheBlockHoldsTheSentVersion(t *testing.T) {
+// TestAPushAdvanceKeepsAFlagTheNextPullClears: the same, but the edit is
+// undone while the PATCH is still on the wire: the advance finds the block
+// at the version it sent and records it as the base, and it keeps the flag
+// the other instance's pull set — the advance does not know what the forge
+// holds since its PATCH landed (a remote edit after it is what such a flag
+// can stand for, TestAFlagSetAcrossAPushAdvanceIsResolvedByTheNextRun). The
+// next pull finds block, base and forge at the sent version and clears it.
+func TestAPushAdvanceKeepsAFlagTheNextPullClears(t *testing.T) {
 	e := i491Setup(t, "i509clearadv", "", fakeIssue{Title: "Crane", Body: "forge body"})
 	e.edit(t, store.IssueUpdate{Title: str("Crane, A")})
 	other := e.otherInstance(t)
@@ -113,8 +114,14 @@ func TestAPushAdvanceClearsAFlagWhenTheBlockHoldsTheSentVersion(t *testing.T) {
 	if r := e.pushOn(t, e.pool); r.Pushed != 1 || r.Conflicts != 0 {
 		t.Fatalf("push: %+v", r)
 	}
+	if base, conflict := e.mapping(t); !conflict || base != e.forgeH(t) {
+		t.Fatalf("after the advance: flagged %v, base is the forge's %v — want the sent version recorded and the flag kept", conflict, base == e.forgeH(t))
+	}
+	if r := e.pullOn(t, e.pool); r.Applied != 0 || r.Conflicts != 0 {
+		t.Errorf("the pull after the advance: %+v, want nothing written to the block and nothing flagged", r)
+	}
 	if base, conflict := e.mapping(t); conflict || base != e.forgeH(t) {
-		t.Fatalf("after the advance: flagged %v, base is the forge's %v — want the flag gone", conflict, base == e.forgeH(t))
+		t.Fatalf("after the next pull: flagged %v, base is the forge's %v — want the flag gone", conflict, base == e.forgeH(t))
 	}
 	if n := e.cycles(t, 2); n != 0 {
 		t.Errorf("two runs landed %d PATCH(es), want 0", n)

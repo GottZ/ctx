@@ -57,12 +57,21 @@ type ApplyResult struct {
 	// differs from the recorded base (Applier.applyLocked, issue #491) — once
 	// per entity and run.
 	Skipped int
-	// Unordered counts the fetched entities the pull could not order against
-	// the version their mapping records: the same forge stamp after another
-	// writer moved the base, with other content (olderOrUnordered). The leg
-	// saves no ETag for such a page, so the next run lists the entity again
-	// instead of a 304 (issue #509).
-	Unordered int
+	// Relist is the earliest forge updated_at of the fetched entities this
+	// apply flagged anew, or could not order against the version their
+	// mapping records (the same forge stamp after another writer moved the
+	// base, with other content — olderOrUnordered); zero for none. The leg
+	// saves its cursor no further than it and without an ETag (legCursor),
+	// so the next run lists those entities again (issue #509).
+	Relist time.Time
+}
+
+// relistAt is the earlier of two Relist stamps; a zero one is none.
+func relistAt(a, b time.Time) time.Time {
+	if a.IsZero() || (!b.IsZero() && b.Before(a)) {
+		return b
+	}
+	return a
 }
 
 // IssueApplyFunc applies one fetched page of issues to the corpus — Welle I-G
@@ -403,7 +412,7 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 		return err
 	}
 	firstETag := page.ETag
-	var maxSeen time.Time
+	var maxSeen, relist time.Time
 	seen := map[string]bool{}
 	for n := 1; ; n++ {
 		res, err := m.applyPage(ctx, project, dryRun, page)
@@ -421,8 +430,10 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 			if page.Listed.After(maxSeen) {
 				maxSeen = page.Listed
 			}
+			relist = relistAt(relist, res.Relist)
 			if !maxSeen.IsZero() {
-				m.commitFetchCursor(ctx, project.ID, "issues", pageETag(firstETag, n, page.NextURL, res), maxSeen)
+				etag, at := legCursor(firstETag, n, page.NextURL, maxSeen, relist)
+				m.commitFetchCursor(ctx, project.ID, "issues", etag, at)
 			}
 		}
 		if page.NextURL == "" {
@@ -445,7 +456,7 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 		return err
 	}
 	firstETag := page.ETag
-	var maxSeen time.Time
+	var maxSeen, relist time.Time
 	seen := map[string]bool{}
 	for n := 1; ; n++ {
 		res, err := m.applyComments(ctx, project, page.Comments)
@@ -456,8 +467,10 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 		if mu := maxCommentUpdated(page); mu.After(maxSeen) {
 			maxSeen = mu
 		}
+		relist = relistAt(relist, res.Relist)
 		if !maxSeen.IsZero() {
-			m.commitFetchCursor(ctx, project.ID, "comments", pageETag(firstETag, n, page.NextURL, res), maxSeen)
+			etag, at := legCursor(firstETag, n, page.NextURL, maxSeen, relist)
+			m.commitFetchCursor(ctx, project.ID, "comments", etag, at)
 		}
 		if page.NextURL == "" {
 			return nil
@@ -526,18 +539,35 @@ func legETag(first string, n int, next string) string {
 	return ""
 }
 
-// pageETag is the ETag a leg's cursor saves after its page n (legETag), ""
-// when the page's apply left an entity it could not order against the
-// version its mapping records (ApplyResult.Unordered, issue #509): with the
-// listing's ETag saved, the next run's first page answers 304 while nothing
-// else changes, and the entity — flagged, its version unpulled — is not
-// listed again. Without it the next run lists it again (since is
-// inclusive) and pulls it where the block did not move.
-func pageETag(first string, n int, next string, res ApplyResult) string {
-	if res.Unordered > 0 {
-		return ""
+// legCursor is the cursor a leg saves after its page n: since the newest
+// updated_at the leg has seen in this run (maxSeen) and the ETag legETag
+// names — unless an apply of this run's pages flagged an entity anew or
+// left a version it could not order (relist, the earliest such stamp,
+// ApplyResult.Relist; issue #509). Then since goes no further than relist
+// and no ETag is saved, for the page that found it and every later page of
+// the leg: the next run lists the entity again (since is inclusive) instead
+// of a 304 or a since past it, and the pull decides on it — a flag a push's
+// advance kept, over a remote edit the flagging run fetched, is pulled where
+// block and base hold the pushed version. With since at the newest stamp of
+// the page, a later issue on the same listing moved it past the entity, and
+// with the listing's ETag the next run's first page answered 304 while
+// nothing else changed: the entity stayed flagged, its forge version
+// unpulled, and only a new flag over a later remote edit listed it again.
+//
+// Only the run that flags anew or finds the disorder holds the cursor: a
+// mapping flagged already is decided on the read and holds nothing, so the
+// run after the flagging one lists the entities from relist on once — the
+// cost of the rule — and saves the cursor as before. The listing is
+// ascending by updated_at, so relist is never below the since the run asked
+// with, and the cursor of an earlier page is never above it.
+func legCursor(first string, n int, next string, maxSeen, relist time.Time) (string, time.Time) {
+	if relist.IsZero() {
+		return legETag(first, n, next), maxSeen
 	}
-	return legETag(first, n, next)
+	if relist.Before(maxSeen) {
+		return "", relist
+	}
+	return "", maxSeen
 }
 
 // commitFetchCursor durably advances the etag/since fetch cursor for one leg

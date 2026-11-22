@@ -211,7 +211,7 @@ func (a *Applier) ApplyIssues(ctx context.Context, project store.ProjectRow, iss
 		res.Applied += r.Applied
 		res.Conflicts += r.Conflicts
 		res.Skipped += r.Skipped
-		res.Unordered += r.Unordered
+		res.Relist = relistAt(res.Relist, r.Relist)
 	}
 	return res, nil
 }
@@ -478,6 +478,13 @@ type pulled struct {
 // level, out of the push's listing for good. It records that version as
 // the base (synced_at the block's updated_at) like a convergence.
 //
+// A flag this pull sets anew, and a version it cannot order, report the
+// fetch's stamp (ApplyResult.Relist): the leg saves its cursor no further
+// than it and no ETag, so the next run lists the entity again and decides
+// on it (issue #509) — the flag may stand for a remote edit no later run
+// would list otherwise. A conflict the mapping carries already reports
+// nothing.
+//
 // A block that is gone, archived or out of scope, or that lost its mapping,
 // is skipped, as the read does.
 func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.SyncMap, read decision, p pulled) (ApplyResult, error) {
@@ -509,7 +516,7 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 			if stale {
 				reportStale(ctx, &res, m.BlockID, p.fUpdated, locked.ForgeUpdatedAt)
 			} else if p.forgeH != locked.BaseHash {
-				res.Unordered = 1 // the same stamp as another version: listed again next run (issue #509)
+				res.Relist = stampOf(p.fUpdated) // the same stamp as another version: listed again next run (issue #509)
 			}
 			if !conflict {
 				return nil
@@ -549,6 +556,7 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 				return nil
 			}
 			res.Conflicts = 1
+			res.Relist = stampOf(p.fUpdated) // flagged anew: listed again next run (issue #509)
 			return store.FlagSyncMapConflict(ctx, tx, m.BlockID, a.clock())
 		}
 		return nil // ctx-ahead on the locked rows
@@ -556,6 +564,14 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 		return ApplyResult{}, err
 	}
 	return res, nil
+}
+
+// stampOf is a fetch's forge stamp, zero for none.
+func stampOf(fetched *time.Time) time.Time {
+	if fetched == nil {
+		return time.Time{}
+	}
+	return *fetched
 }
 
 // endsOnRead answers whether the read's decision is carried out without a
@@ -657,7 +673,7 @@ func (a *Applier) ApplyComments(ctx context.Context, project store.ProjectRow, c
 		res.Applied += r.Applied
 		res.Conflicts += r.Conflicts
 		res.Skipped += r.Skipped
-		res.Unordered += r.Unordered
+		res.Relist = relistAt(res.Relist, r.Relist)
 	}
 	return res, nil
 }

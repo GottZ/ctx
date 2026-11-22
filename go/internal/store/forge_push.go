@@ -311,8 +311,9 @@ type PushProjection func(b *Block) string
 // that read the mapping before this advance and writes after it cannot
 // order the two versions of that second and flags the mapping, and the pull
 // after it pulls the edit and clears the flag (block and base still at the
-// pushed version; the flagging run saves no ETag, so that pull lists the
-// entity again — forge.pageETag).
+// pushed version; the flagging run saves its cursor no further than the
+// entity's stamp and no ETag, so that pull lists the entity again —
+// forge.legCursor).
 //
 // Locks: the block row (FOR NO KEY UPDATE, the lock StampForgeState's UPDATE
 // takes — no lock upgrade), then the mapping row — the order of the pull's
@@ -322,22 +323,22 @@ type PushProjection func(b *Block) string
 // the connection that holds the entity's push lock (TryLockPushEntity, issue
 // #491).
 //
+// A flag a pull set since the section's check stays, whatever the block
+// holds (issue #509): the advance knows what the forge held in the fields
+// its PATCH sent when it answered, not what the forge holds since. Such a
+// flag can stand for a remote edit that landed after the PATCH, which the
+// flagging run fetched; that run saved its cursor no further than the
+// entity's stamp and no ETag (forge.legCursor), so the next pull lists the
+// entity again and decides on it — it pulls the edit and clears the flag
+// where block and base hold the sent version, and clears the flag alone
+// where block, base and forge agree. An advance that cleared the flag (the
+// first form of this change, where the block still held the sent version)
+// left the remote edit behind a 304 or a since past it, and a later local
+// edit was pushed over it without a flag.
+//
 // sent says that a wire write carried ctxHash (false: the advance alone, the
 // listed block projecting to its base already, or only a never-pushed field
-// diverging). A flag a pull set since the section's check goes when the
-// base write records what was sent and the block still holds it: block and
-// base hold the sent version, and the forge held it in the fields the PATCH
-// sent when it answered (issue #509). Where the forge holds something else
-// — it moved past the PATCH since, or a remote edit the PATCH overwrote in
-// part left its other fields — the next pull finds block and base at the
-// sent version and pulls the forge's state, which is what it would have
-// done with the flag kept (a flagged pull-update clears it); GitHub has no
-// conditional PATCH, so the overwritten fields are gone either way. A flag stays when the block
-// moved since the listing (it does not hold the sent version), and an
-// advance without a wire write clears none: nothing tells it what the forge
-// holds.
-//
-// An advance without a wire write writes only while the row still holds
+// diverging). An advance without a wire write writes only while the row still holds
 // listedBase (issue #509): it sent nothing, so a base a pull moved since the
 // section's check is the forge's own, and there is nothing to record, flag
 // or stamp — before, it recorded the base unknown and flagged the mapping as
@@ -368,10 +369,8 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 		       synced_at = CASE WHEN $4 THEN $5::timestamptz ELSE '-infinity'::timestamptz END,
 		       metadata = CASE WHEN base_hash IN ($6, $2) THEN metadata || $3::jsonb ELSE metadata - 'base_fields' END,
 		       forge_updated_at = CASE WHEN base_hash IN ($6, $2) THEN GREATEST(forge_updated_at, $8::timestamptz) ELSE forge_updated_at END,
-		       conflict = CASE WHEN base_hash NOT IN ($6, $2) THEN true ELSE conflict AND NOT ($9 AND $4) END,
-		       conflict_at = CASE WHEN base_hash NOT IN ($6, $2) THEN COALESCE(conflict_at, now())
-		                          WHEN $9 AND $4 THEN NULL
-		                          ELSE conflict_at END
+		       conflict = conflict OR base_hash NOT IN ($6, $2),
+		       conflict_at = CASE WHEN base_hash IN ($6, $2) THEN conflict_at ELSE COALESCE(conflict_at, now()) END
 		 WHERE block_id = $1::uuid AND ($9 OR base_hash = $6)
 		RETURNING old.base_hash NOT IN ($6, $2)`,
 		blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash, forgeUpdatedAt, sent).Scan(&moved)

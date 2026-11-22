@@ -24,9 +24,9 @@ import (
 // pageSize per page, and a Link header naming the next page. link renders
 // the header field lines for a next-page URL, so a test chooses the spelling
 // (#474: RFC 8288 allows more than the one GitHub uses). The comments
-// listing answers an empty page. With etags, a page carries an ETag
-// derived from its body, as GitHub's do, and a matching If-None-Match is
-// answered 304.
+// listing answers the comments the fake holds on one page. With etags, a
+// page of either listing carries an ETag derived from its body, as GitHub's
+// do, and a matching If-None-Match is answered 304.
 //
 // It also takes the push's writes the way GitHub does (#491): a PATCH of an
 // issue changes the fields it carries and moves the issue's updated_at, a
@@ -149,6 +149,30 @@ func (f *fakeGitHub) addComment(id, n int64, body string) time.Time {
 	at := f.nextUpdated()
 	f.comments = append(f.comments, fakeComment{ID: id, Issue: n, Body: body, Updated: at})
 	return at
+}
+
+// editComment changes comment id's body on the forge, as a remote user
+// does, and moves its updated_at, which it returns.
+func (f *fakeGitHub) editComment(t *testing.T, id int64, body string) time.Time {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.comments {
+		if f.comments[i].ID == id {
+			f.comments[i].Body = body
+			f.comments[i].Updated = f.nextUpdated()
+			return f.comments[i].Updated
+		}
+	}
+	t.Fatalf("the fake forge holds no comment %d", id)
+	return time.Time{}
+}
+
+// addIssue puts another issue on the forge.
+func (f *fakeGitHub) addIssue(it fakeIssue) {
+	f.mu.Lock()
+	f.issues = append(f.issues, it)
+	f.mu.Unlock()
 }
 
 // comment returns a copy of what the forge holds for comment id.
@@ -335,6 +359,25 @@ func (f *fakeGitHub) serveCommentListing(w http.ResponseWriter, r *http.Request)
 		})
 	}
 	body, _ := json.Marshal(items)
+	f.writeListing(w, r, body)
+}
+
+// writeListing writes a listing's body; with etags it carries an ETag
+// derived from the body, and a matching If-None-Match is answered 304, as
+// GitHub answers both listings.
+func (f *fakeGitHub) writeListing(w http.ResponseWriter, r *http.Request, body []byte) {
+	f.mu.Lock()
+	etags := f.etags
+	f.mu.Unlock()
+	if etags {
+		sum := sha256.Sum256(body)
+		etag := `"` + hex.EncodeToString(sum[:8]) + `"`
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+	}
 	_, _ = w.Write(body)
 }
 
@@ -567,14 +610,5 @@ func (f *fakeGitHub) serveListing(w http.ResponseWriter, r *http.Request) {
 		items = append(items, item)
 	}
 	body, _ := json.Marshal(items)
-	if f.etags {
-		sum := sha256.Sum256(body)
-		etag := `"` + hex.EncodeToString(sum[:8]) + `"`
-		if r.Header.Get("If-None-Match") == etag {
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
-		w.Header().Set("ETag", etag)
-	}
-	_, _ = w.Write(body)
+	f.writeListing(w, r, body)
 }
