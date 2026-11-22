@@ -77,7 +77,23 @@ type v1ChatEngine struct {
 	bodies  [][]byte
 	headers []http.Header
 	hits    atomic.Int64
-	hold    atomic.Int64 // ns each request is held before the answer (W06-11 concurrency gates)
+	// gate, when set, holds every request until it is closed or the request
+	// ends (W06-11 concurrency gates; holdUntilReleased).
+	gate atomic.Pointer[chan struct{}]
+}
+
+// holdUntilReleased makes the engine hold every request until release runs
+// (or the test ends): the concurrency gates release the held requests after
+// the parallel one was answered — an event, where a fixed hold time made the
+// parallel request race the clock (#369).
+func (e *v1ChatEngine) holdUntilReleased(t *testing.T) (release func()) {
+	t.Helper()
+	ch := make(chan struct{})
+	e.gate.Store(&ch)
+	var once sync.Once
+	release = func() { once.Do(func() { close(ch) }) }
+	t.Cleanup(release)
+	return release
 }
 
 func newV1ChatEngine(t *testing.T, status int) *v1ChatEngine {
@@ -86,8 +102,11 @@ func newV1ChatEngine(t *testing.T, status int) *v1ChatEngine {
 	e.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		e.hits.Add(1)
 		raw, _ := io.ReadAll(r.Body)
-		if d := time.Duration(e.hold.Load()); d > 0 {
-			time.Sleep(d)
+		if g := e.gate.Load(); g != nil {
+			select {
+			case <-*g:
+			case <-r.Context().Done():
+			}
 		}
 		e.mu.Lock()
 		e.bodies = append(e.bodies, raw)

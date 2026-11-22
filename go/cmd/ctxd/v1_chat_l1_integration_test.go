@@ -67,18 +67,42 @@ func (r *v1MeterRig) waitHits(t *testing.T, n int64) {
 	}
 }
 
+// l1AnswerGuard bounds answerOrRelease's wait for a refusal: a guard against
+// a hang, generous on purpose (a refusal comes before the engine).
+const l1AnswerGuard = 30 * time.Second
+
+// answerOrRelease returns the answer of the request on ch while the engine
+// holds the admitted ones. When the engine sees more than admitted requests,
+// this one was admitted instead of refused: the held requests are released
+// so it answers and the gate fails on its status instead of hanging.
+func (r *v1MeterRig) answerOrRelease(t *testing.T, ch <-chan v1MeterAnswer, admitted int64, release func()) v1MeterAnswer {
+	t.Helper()
+	for guard := time.Now().Add(l1AnswerGuard); ; {
+		select {
+		case a := <-ch:
+			return a
+		case <-time.After(5 * time.Millisecond):
+		}
+		if r.engine.hits.Load() > admitted || time.Now().After(guard) {
+			release()
+			return <-ch
+		}
+	}
+}
+
 // TestV1ChatConcurrencyOnTheRealRouter is the masterplan gate "3.
 // Parallelanfrage ⇒ 429" (briefing W06-11): the engine holds every answer
-// 2 s, the concurrency limit is the registry default 2 — of three parallel
-// requests of one consumer two are served and one is 429
-// concurrency_limit_exceeded with Retry-After 1; after a running one ended,
-// the next is served.
+// until the third was answered, the concurrency limit is the registry
+// default 2 — of three parallel requests of one consumer two are served and
+// one is 429 concurrency_limit_exceeded with Retry-After 1; after a running
+// one ended, the next is served.
 func TestV1ChatConcurrencyOnTheRealRouter(t *testing.T) {
 	r := newV1MeterRig(t, map[string]string{}, nil)
-	r.engine.hold.Store(int64(2 * time.Second))
+	release := r.engine.holdUntilReleased(t)
 	running := r.parallelChat(2)
 	r.waitHits(t, 2)
-	third := <-r.parallelChat(1)
+	third := r.answerOrRelease(t, r.parallelChat(1), 2, release)
+	release()
 	got := []v1MeterAnswer{<-running, <-running}
 	fourth := <-r.parallelChat(1)
 	rows := r.chatRows(t)
@@ -112,10 +136,11 @@ func TestV1ChatConcurrencyOnTheRealRouter(t *testing.T) {
 // is 429 concurrency_limit_exceeded; after the first ended the next is served.
 func TestV1ChatConcurrencyOneOnTheRealRouter(t *testing.T) {
 	r := newV1MeterRig(t, map[string]string{"CTX_GATEWAY_CONSUMER_CONCURRENCY_DEFAULT": "1"}, nil)
-	r.engine.hold.Store(int64(time.Second))
+	release := r.engine.holdUntilReleased(t)
 	first := r.parallelChat(1)
 	r.waitHits(t, 1)
-	second := <-r.parallelChat(1)
+	second := r.answerOrRelease(t, r.parallelChat(1), 1, release)
+	release()
 	a := <-first
 	next := <-r.parallelChat(1)
 	t.Logf("first: %s", a)
@@ -143,7 +168,7 @@ func TestV1ChatConcurrencyOneOnTheRealRouter(t *testing.T) {
 // served.
 func TestV1ChatConcurrencyBulkLaneOnTheRealRouter(t *testing.T) {
 	r := newV1MeterRig(t, map[string]string{}, nil)
-	r.engine.hold.Store(int64(2 * time.Second))
+	release := r.engine.holdUntilReleased(t)
 	flex := `{"model":"` + v1ChatAlias + `","messages":[{"role":"user","content":"hi"}],"service_tier":"flex"}`
 	urgent := `{"model":"` + v1ChatAlias + `","messages":[{"role":"user","content":"hi"}]}`
 	send := func(body string) <-chan v1MeterAnswer {
@@ -156,9 +181,10 @@ func TestV1ChatConcurrencyBulkLaneOnTheRealRouter(t *testing.T) {
 	}
 	first := send(flex)
 	r.waitHits(t, 1)
-	second := <-send(flex)
+	second := r.answerOrRelease(t, send(flex), 1, release)
 	third := send(urgent)
 	r.waitHits(t, 2)
+	release()
 	a1, a3 := <-first, <-third
 	t.Logf("flex, held: %s", a1)
 	t.Logf("flex, parallel: %s", second)

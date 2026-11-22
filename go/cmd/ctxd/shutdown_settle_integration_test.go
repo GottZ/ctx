@@ -4,8 +4,11 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -130,6 +133,14 @@ func TestShutdownSequenceSettlesLLMLog(t *testing.T) {
 
 // TestSettleLLMLogRespectsTimeout: the shutdown settle gives up at its budget
 // instead of holding the process past the stop grace period.
+//
+// The event (#369): settleLLMLog's outcome line is the incomplete-settle WARN
+// with the budget's deadline as its error — it returned while rows were
+// still pending (50 rows at 50 ms per insert, four at a time, need about
+// 650 ms; the budget is 20 ms). A settle that waited for the rows answers
+// "settled" instead. The wall-clock bound it replaces (returned within 2 s)
+// could not tell the two apart — waiting for every row takes 650 ms — and is
+// only logged now.
 func TestSettleLLMLogRespectsTimeout(t *testing.T) {
 	_, dsn := testdb.SetupTestDBWithDSN(t)
 	pool := slowShutdownPool(t, dsn)
@@ -138,12 +149,86 @@ func TestSettleLLMLogRespectsTimeout(t *testing.T) {
 	for range 50 {
 		llmlog.Record(pool, llmlog.Entry{Pipeline: "w06-1-timeout", Model: "m", Host: "h"})
 	}
+	logs := captureJSONLog(t)
 	begin := time.Now()
 	settleLLMLog(pool, 20*time.Millisecond, "http")
-	if el := time.Since(begin); el > 2*time.Second {
-		t.Errorf("settleLLMLog with a 20ms budget returned after %s", el)
+	el := time.Since(begin)
+	t.Logf("settleLLMLog with a 20ms budget returned after %s", el.Round(time.Millisecond))
+	// A guard against a settle that gives up and then hangs, not a
+	// measurement: the production budget, 250 times this one.
+	if el >= llmlogSettleTimeout {
+		t.Errorf("settleLLMLog with a 20ms budget returned after %s, at or past the production budget %s", el, llmlogSettleTimeout)
+	}
+	var outcome []map[string]any
+	for _, level := range []string{"INFO", "WARN"} {
+		for _, l := range logLevel(t, logs, level) {
+			if m, _ := l["msg"].(string); strings.HasPrefix(m, "llmlog: settle") {
+				outcome = append(outcome, l)
+			}
+		}
+	}
+	if len(outcome) != 1 || outcome[0]["msg"] != "llmlog: settle at shutdown incomplete, pending rows are lost" {
+		t.Fatalf("settle outcome lines %v, want one incomplete-settle WARN (it gave up at its budget, rows pending)", outcome)
+	}
+	if e, _ := outcome[0]["error"].(string); !strings.HasSuffix(e, ": "+context.DeadlineExceeded.Error()) {
+		t.Errorf("incomplete-settle WARN error %q, want the budget's deadline (…: %v)", e, context.DeadlineExceeded)
 	}
 }
+
+// settleEndSignal is the default logger's handler during a test that needs
+// to know when settleLLMLog after one shutdown step returned: it closes ended
+// at that settle's outcome line ("llmlog: settle…", either outcome), which
+// settleLLMLog writes as it returns.
+type settleEndSignal struct {
+	slog.Handler
+	after string
+	once  *sync.Once
+	ended chan struct{}
+}
+
+func (h settleEndSignal) Handle(ctx context.Context, r slog.Record) error {
+	if strings.HasPrefix(r.Message, "llmlog: settle") {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "after" && a.Value.String() == h.after {
+				h.once.Do(func() { close(h.ended) })
+				return false
+			}
+			return true
+		})
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h settleEndSignal) WithAttrs(as []slog.Attr) slog.Handler {
+	h.Handler = h.Handler.WithAttrs(as)
+	return h
+}
+
+func (h settleEndSignal) WithGroup(name string) slog.Handler {
+	h.Handler = h.Handler.WithGroup(name)
+	return h
+}
+
+// signalSettleEnd routes the default logger through settleEndSignal for the
+// settle after step until the test ends; the channel closes when it returned.
+// The lines go to stderr through a handler of their own: wrapping the
+// default logger's handler would loop, since slog.SetDefault routes the log
+// package — which that handler writes through — back into slog.
+func signalSettleEnd(t *testing.T, step string) <-chan struct{} {
+	t.Helper()
+	prev := slog.Default()
+	h := settleEndSignal{Handler: slog.NewTextHandler(os.Stderr, nil), after: step, once: &sync.Once{}, ended: make(chan struct{})}
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return h.ended
+}
+
+// settleOverlapGuard bounds how long the gateway stop step of
+// TestShutdownGatewayStopRunsAlongsideTheSettle waits for the first settle to
+// end. Side by side that settle ends at its 5-s budget, about 1 s after the
+// stop (a 4-s flush window); one after the other it never ends inside the
+// stop step. A guard against a hang, not a measurement: generous on purpose.
+const settleOverlapGuard = 30 * time.Second
 
 // TestShutdownSettlesHTTPRowsBeforeSchedulerWait is the W06-1 hardening probe
 // (H1): the rows the HTTP side recorded must be in the database BEFORE the
@@ -184,8 +269,15 @@ func TestShutdownSettlesHTTPRowsBeforeSchedulerWait(t *testing.T) {
 // (queued inserts wait) — and the scheduler stand-in releases the locks, so
 // the second settle drains at once. Twelve rows are three waves of llmlog's
 // four concurrent inserts, each wave held for its 5 s insert deadline: the
-// settle has pending work for 15 s, wherever it starts. Side by side the
-// sequence takes about 5 s, one after the other at least 9 s.
+// settle has pending work for 15 s, wherever it starts.
+//
+// Side by side is read as events (#369), not as the sequence's duration (it
+// was "under 8 s", about 5 s side by side and at least 9 s one after the
+// other): the first settle has not ended when the gateway stop step begins,
+// and it ends while that step is still open — the step waits for the
+// settle's outcome line after the stop returned (settleOverlapGuard). One
+// after the other, the settle either ended before the step began or starts
+// only after the step closed.
 func TestShutdownGatewayStopRunsAlongsideTheSettle(t *testing.T) {
 	ref, dsn := testdb.SetupTestDBWithDSN(t)
 	ctx := context.Background()
@@ -217,27 +309,36 @@ func TestShutdownGatewayStopRunsAlongsideTheSettle(t *testing.T) {
 		llmlog.Record(pool, llmlog.Entry{Pipeline: "w02-05-l-b", Model: "m", Host: "h"})
 	}
 
+	settleEnded := signalSettleEnd(t, "http")
 	var stopTook time.Duration
+	var endedBefore, endedInside bool
 	timed := func() {
+		select {
+		case <-settleEnded:
+			endedBefore = true
+		default:
+		}
 		b := time.Now()
 		stop()
 		stopTook = time.Since(b)
+		select {
+		case <-settleEnded:
+			endedInside = !endedBefore
+		case <-time.After(settleOverlapGuard):
+		}
 	}
 	sched := drainingScheduler{wait: func() { _ = lock.Rollback(ctx) }}
 	begin := time.Now()
 	shutdownSequence(&http.Server{}, sched, pool, gw.forceSettle, gw.flushRejections, timed)
 	total := time.Since(begin)
-	t.Logf("shutdown sequence %s, gateway stop %s (budgets: gateway stop %s, settle %s)",
-		total.Round(time.Millisecond), stopTook.Round(time.Millisecond), gatewayStopTimeout, llmlogSettleTimeout)
+	t.Logf("shutdown sequence %s, gateway stop %s (budgets: gateway stop %s, settle %s); first settle ended before the stop step %v, inside it %v",
+		total.Round(time.Millisecond), stopTook.Round(time.Millisecond), gatewayStopTimeout, llmlogSettleTimeout, endedBefore, endedInside)
 	// The probe is only a probe while the stop really blocked for the flush
 	// window.
 	if stopTook < store.ModelKeyUsageFinalFlushTimeout-time.Second {
 		t.Fatalf("gateway stop took %s — the lock did not hold the final flush, the probe proves nothing", stopTook)
 	}
-	// Side by side: about max(stop, settle) = 5 s; in sequence at least
-	// 4 s + 5 s = 9 s (both wait for their deadline). The threshold, 8 s,
-	// leaves 3 s for host load.
-	if limit := store.ModelKeyUsageFinalFlushTimeout + llmlogSettleTimeout - time.Second; total >= limit {
-		t.Errorf("shutdown sequence %s >= %s — the gateway stop and the first settle ran one after the other", total.Round(time.Millisecond), limit)
+	if endedBefore || !endedInside {
+		t.Errorf("first settle ended before the gateway stop step began: %v, while it was open: %v — want false and true (the stop and the first settle ran one after the other)", endedBefore, endedInside)
 	}
 }

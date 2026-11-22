@@ -52,7 +52,12 @@ import (
 type v1Tracer struct {
 	knowledge                            v1door.KnowledgeAuthTracer
 	all, modelAuth, grantSQL, usageFlush atomic.Int64
+	// usageFlushEnded counts the usage flush statements that have returned.
+	usageFlushEnded atomic.Int64
 }
+
+// v1UsageFlushQuery marks a usage flush statement's context for TraceQueryEnd.
+type v1UsageFlushQuery struct{}
 
 func (v *v1Tracer) TraceQueryStart(ctx context.Context, c *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
 	v.knowledge.TraceQueryStart(ctx, c, d)
@@ -65,11 +70,16 @@ func (v *v1Tracer) TraceQueryStart(ctx context.Context, c *pgx.Conn, d pgx.Trace
 	}
 	if strings.Contains(d.SQL, "UPDATE context_model_keys k SET last_used_at") {
 		v.usageFlush.Add(1)
+		ctx = context.WithValue(ctx, v1UsageFlushQuery{}, true)
 	}
 	return ctx
 }
 
-func (v *v1Tracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+func (v *v1Tracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
+	if ctx.Value(v1UsageFlushQuery{}) != nil {
+		v.usageFlushEnded.Add(1)
+	}
+}
 
 const v1AdminKey = "02050000000000000000000000000000feedfacefeedfacefeedfacefeedface"
 
@@ -597,18 +607,27 @@ func TestV1ModelKeyUsageFinalFlushWaitsForALockedKey(t *testing.T) {
 	// plus the first one and one of slack.
 	maxAttempts := int64(store.ModelKeyUsageFinalFlushTimeout/store.ModelKeyUsageFinalFlushRetry) + 2
 
-	t.Run("lock_released_after_200ms", func(t *testing.T) {
+	// The lock goes once the final flush's first attempt has returned (#369):
+	// that attempt met the lock by construction, so the retry after the
+	// release is what writes the stamp. It used to go after 200 ms, which
+	// assumed the first attempt came sooner (and failed n >= 2 when it did
+	// not). The wait for the attempt is a guard against a hang, generous on
+	// purpose.
+	t.Run("lock_released_after_the_first_attempt", func(t *testing.T) {
 		f, stop, hold, lastUsed := begin(t)
 		logs := captureJSONLog(t)
+		ended := f.tracer.usageFlushEnded.Load()
 		released := make(chan struct{})
 		go func() {
 			defer close(released)
-			time.Sleep(200 * time.Millisecond)
+			for guard := time.Now().Add(30 * time.Second); f.tracer.usageFlushEnded.Load() == ended && time.Now().Before(guard); {
+				time.Sleep(time.Millisecond)
+			}
 			_ = hold.Rollback(context.Background())
 		}()
 		took, n := attempts(f, stop)
 		<-released
-		t.Logf("gateway stop %s, %d flush attempt(s) (lock released after 200ms, stop budget %s)", took.Round(time.Millisecond), n, gatewayStopTimeout)
+		t.Logf("gateway stop %s, %d flush attempt(s) (lock released after the first attempt returned, stop budget %s)", took.Round(time.Millisecond), n, gatewayStopTimeout)
 		if at := lastUsed(); at == nil {
 			t.Error("last_used_at still NULL — the final flush skipped the locked key and did not retry it after the lock was gone")
 		}
@@ -623,30 +642,34 @@ func TestV1ModelKeyUsageFinalFlushWaitsForALockedKey(t *testing.T) {
 		}
 	})
 
+	// The WARN line with stamps=1 is what holds that the final flush left the
+	// stamp unwritten (Pending at Run's answer). The test no longer reads
+	// last_used_at after the release (#369): that read failed once in 30 runs
+	// on a loaded host although all 40 attempts had skipped the locked row —
+	// the last attempt, abandoned by the client at the window's end, can
+	// still run on the server and write once the lock is gone — and read
+	// while the lock holds it could never fail.
 	t.Run("lock_held_past_the_deadline", func(t *testing.T) {
-		f, stop, hold, lastUsed := begin(t)
+		f, stop, hold, _ := begin(t)
+		defer func() { _ = hold.Rollback(context.Background()) }()
 		logs := captureJSONLog(t)
 		took, n := attempts(f, stop)
-		_ = hold.Rollback(context.Background())
 		t.Logf("gateway stop %s, %d flush attempt(s) (flush window %s, stop budget %s)", took.Round(time.Millisecond), n, store.ModelKeyUsageFinalFlushTimeout, gatewayStopTimeout)
 		w := logLevel(t, logs, "WARN")
 		if len(w) != 1 || w[0]["msg"] != usageLeftWarn || w[0]["stamps"] != float64(1) {
 			t.Errorf("WARN lines at shutdown: %v, want exactly one %q with stamps=1", w, usageLeftWarn)
 		}
-		if at := lastUsed(); at != nil {
-			t.Errorf("last_used_at %v — written although its row stayed locked", at)
-		}
 		// The final flush kept retrying for its whole window, at its pause,
 		// and the stop step still had Run's answer before its own bound ran
-		// out.
+		// out. That last part is the WARN line above (#369): the step writes
+		// usageLeftWarn only on Run's answer and another line when its timer
+		// fired, so the line is the event the former wall-clock bound
+		// (took < gatewayStopTimeout, 1 s above the flush window) stood for.
 		if n < 2 || n > maxAttempts {
 			t.Errorf("%d flush attempts in the window, want 2..%d (one every %s)", n, maxAttempts, store.ModelKeyUsageFinalFlushRetry)
 		}
 		if took < store.ModelKeyUsageFinalFlushTimeout {
 			t.Errorf("gateway stop took %s, below the flush window %s — the final flush gave up on the locked key early", took.Round(time.Millisecond), store.ModelKeyUsageFinalFlushTimeout)
-		}
-		if took >= gatewayStopTimeout {
-			t.Errorf("gateway stop took %s, its whole budget %s — the final flush outlasted the stop step", took.Round(time.Millisecond), gatewayStopTimeout)
 		}
 	})
 }
