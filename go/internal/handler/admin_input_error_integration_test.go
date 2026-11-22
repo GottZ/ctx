@@ -37,6 +37,7 @@ type inputErrorCase struct {
 	h            *ManageHandler
 	as           *auth.AuthResult
 	payload      map[string]any
+	field        string // the field the 422 names (fields[].field), when the route refuses before the store
 }
 
 const i505NUL = "i505\x00nul"
@@ -65,6 +66,9 @@ func runInputErrorCases(t *testing.T, cases []inputErrorCase) {
 			if len(lines) != 0 {
 				t.Errorf("%s with %s wrote %v, want no line above DEBUG", c.route, c.input, lines)
 			}
+			if c.field != "" && !namesField(resp, c.field) {
+				t.Errorf("%s with %s answered %v, want a 422 naming the field %q (refused before the store)", c.route, c.input, resp, c.field)
+			}
 			for _, r := range logs.all() {
 				if strings.Contains(r.text(), "i505") && strings.Contains(r.text(), "nul") {
 					t.Errorf("a line carries the request's value: %s", r.text())
@@ -74,6 +78,17 @@ func runInputErrorCases(t *testing.T, cases []inputErrorCase) {
 	}
 	sort.Strings(table)
 	t.Logf("route × input error ⇒ status, lines above DEBUG:\n| route | input | status | lines |\n|---|---|---|---|\n%s", strings.Join(table, "\n"))
+}
+
+// namesField reports whether a validation answer lists field in its fields.
+func namesField(resp map[string]any, field string) bool {
+	fields, _ := resp["fields"].([]any)
+	for _, f := range fields {
+		if m, _ := f.(map[string]any); m["field"] == field {
+			return true
+		}
+	}
+	return false
 }
 
 func TestAdminWriteInputErrorsTenantRoutes(t *testing.T) {
@@ -141,6 +156,11 @@ func TestAdminWriteInputErrorsBackendRoutes(t *testing.T) {
 		payload["action"] = route
 		return inputErrorCase{route: route, input: input, h: ph.h, as: ph.admin, payload: payload}
 	}
+	nul := func(route, input, field string, payload map[string]any) inputErrorCase {
+		ic := c(route, input, payload)
+		ic.field = field
+		return ic
+	}
 	spec := func(name string, kv ...any) map[string]any {
 		d := map[string]any{"name": name, "base_url": "http://" + name, "roles": []string{"chat"},
 			"model_map": map[string]any{"default": "stub-model"}}
@@ -162,10 +182,10 @@ func TestAdminWriteInputErrorsBackendRoutes(t *testing.T) {
 			return p
 		}
 		cases = append(cases,
-			c(route, "NUL in extra_headers", withID(spec("i505-h", "extra_headers", map[string]any{"X-I505": i505NUL}))),
-			c(route, "NUL in metadata", withID(spec("i505-m", "metadata", map[string]any{"note": i505NUL}))),
-			c(route, "NUL in extra_body", withID(spec("i505-b", "extra_body", map[string]any{"opt": i505NUL}))),
-			c(route, "NUL in a metadata key", withID(spec("i505-k", "metadata", map[string]any{i505NUL: "v"}))),
+			nul(route, "NUL in extra_headers", "extra_headers", withID(spec("i505-h", "extra_headers", map[string]any{"X-I505": i505NUL}))),
+			nul(route, "NUL in metadata", "metadata", withID(spec("i505-m", "metadata", map[string]any{"note": i505NUL}))),
+			nul(route, "NUL in extra_body", "extra_body", withID(spec("i505-b", "extra_body", map[string]any{"opt": i505NUL}))),
+			nul(route, "NUL in a metadata key", "metadata", withID(spec("i505-k", "metadata", map[string]any{i505NUL: "v"}))),
 			c(route, "out of range", withID(spec("i505-r", "priority", 1e12))),
 			c(route, "invalid JSON field", withID(spec("i505-j", "priority", "high"))),
 		)
