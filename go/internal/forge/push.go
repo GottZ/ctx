@@ -25,9 +25,14 @@ package forge
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log/slog"
 	"time"
 
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -40,6 +45,7 @@ const pushBatchLimit = 500
 type PushResult struct {
 	Pushed    int  // entities written to the forge (create + update + comment)
 	Conflicts int  // mappings flagged: a truncated body that diverged (never written), or a base another instance moved during the push
+	Skipped   int  // entities left to the next run: another instance's push held them, wrote them since the listing, or a pull flagged them since (a DEBUG line names which, issue #491)
 	Throttled bool // the token bucket ran dry — the pass stopped early
 }
 
@@ -107,10 +113,13 @@ func (p *Pusher) PushProject(ctx context.Context, project store.ProjectRow, clie
 func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client Forge, repo RepoRef,
 	pol issueTypePolicy, allow func() bool, c *store.IssuePushCandidate, res *PushResult) (bool, error) {
 
-	ctxFields, ctxH := CtxIssueBase(&c.Block, pol.terminalSet, pol.registryOK)
+	ctxFields, ctxH := pol.ctxIssueBase(&c.Block, c.BaseFields)
 	projected := func(b *store.Block) string {
-		_, h := CtxIssueBase(b, pol.terminalSet, pol.registryOK)
+		_, h := pol.ctxIssueBase(b, c.BaseFields)
 		return h
+	}
+	advanceOnly := func(tx pgx.Tx) error {
+		return p.advance(ctx, tx, c.Block.ID, c.BaseHash, ctxH, ctxFields, projected, res)
 	}
 	if ctxH == c.BaseHash {
 		// In sync (a write that left the projection alone, or an edit undone
@@ -118,10 +127,9 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 		// candidates through the bound advance (issue #452) — otherwise it
 		// stays listed for good and, past pushBatchLimit, keeps later
 		// candidates out of the listing.
-		if err := p.advance(ctx, c.Block.ID, c.BaseHash, ctxH, ctxFields, projected, res); err != nil {
-			return false, err
-		}
-		return true, nil
+		skip, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, advanceOnly)
+		noteSkip(res, c.Block.ID, skip)
+		return true, err
 	}
 	ctxProj, _ := parseIssueProjection(ctxFields)
 	truncated := metaBool(c.Block.Metadata, "truncated")
@@ -141,22 +149,133 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 	}
 	if patch.empty() {
 		// Only a never-pushed field (milestone) diverged: advance base, 0 wire.
-		if err := p.advance(ctx, c.Block.ID, c.BaseHash, ctxH, ctxFields, projected, res); err != nil {
-			return false, err
-		}
-		return true, nil
+		skip, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, advanceOnly)
+		noteSkip(res, c.Block.ID, skip)
+		return true, err
 	}
-	if !allow() {
+	return p.wireSection(ctx, c.Block.ID, c.BaseHash, allow, res,
+		func() error { return client.UpdateIssue(ctx, repo, c.ForgeID, patch) }, advanceOnly)
+}
+
+// errThrottled leaves a push section without its record when the token
+// bucket ran dry inside it.
+var errThrottled = errors.New("forge: push throttled")
+
+// pushUnlockGrace bounds the statement that gives a section's push lock back.
+// It runs on a context detached from the caller's (a canceled run must still
+// give the lock back) and is the budget of one statement on an open
+// connection; a connection that does not answer in it is closed instead.
+const pushUnlockGrace = 5 * time.Second
+
+// section runs one write of the push about an entity — the wire write and
+// the advance that records it, or the advance alone — under the entity's
+// push lock (store.TryLockPushEntity, issue #491): a session-level advisory
+// lock on one pool connection the section holds until it ends. An entity
+// another instance is writing now, wrote since this push listed it or
+// flagged since (its pull saw both sides move), is left to the next run:
+// nothing runs, nothing is written, the pass goes on with the next
+// candidate, and skip says why.
+//
+// wire (nil for the advance alone) runs with no transaction open on the
+// section's connection, so the forge's answer time holds no snapshot and no
+// relation lock in the database; record runs afterwards in one short
+// transaction on that connection. The connection stays out of the pool
+// across the wire write — one per running push leg, the legs are bounded by
+// project.sync.max_concurrent (V68 caps it against the pool size). The lock
+// is given back on every way out; a connection whose unlock is not proven
+// (the lock statement failed with an unknown outcome, the unlock failed or
+// found no lock) is closed, and the server releases a closed session's
+// advisory locks — a pooled connection never keeps an entity locked.
+func (p *Pusher) section(ctx context.Context, blockID, listedBase string, wire func() error, record func(tx pgx.Tx) error) (store.PushSkip, error) {
+	conn, err := p.pool.Acquire(ctx)
+	if err != nil {
+		return "", fmt.Errorf("forge: push section: acquire a connection: %w", err)
+	}
+	locked, skip, err := store.TryLockPushEntity(ctx, conn, blockID, listedBase)
+	switch {
+	case locked:
+		defer unlockPushEntity(ctx, conn, blockID)
+	case err != nil:
+		closePushConn(ctx, conn)
+		return "", err
+	default:
+		conn.Release()
+		return skip, nil
+	}
+	if err != nil || skip != "" {
+		return skip, err
+	}
+	if wire != nil {
+		if err := wire(); err != nil {
+			return "", err
+		}
+	}
+	return "", pgxdb.Write(ctx, conn.Conn(), pgxdb.Stages{Begin: "forge: push record begin", Commit: "forge: push record commit"}, record)
+}
+
+// noteSkip counts an entity a section left to the next run, in the
+// result the sync run reports (push_skipped), and names the reason at DEBUG.
+func noteSkip(res *PushResult, blockID string, skip store.PushSkip) {
+	if skip == "" {
+		return
+	}
+	res.Skipped++
+	slog.Debug("forge: push left an entity to the next run", "block", blockID, "reason", string(skip))
+}
+
+// unlockPushEntity gives a section's push lock back and returns conn to the
+// pool, or closes conn when the release is not proven.
+func unlockPushEntity(ctx context.Context, conn *pgxpool.Conn, blockID string) {
+	uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pushUnlockGrace)
+	defer cancel()
+	released, err := store.UnlockPushEntity(uctx, conn, blockID)
+	if err != nil || !released {
+		slog.Warn("forge: push lock not released on its connection — closing the connection, the server releases the lock with the session",
+			"block", blockID, "released", released, "error", err)
+		closePushConn(ctx, conn)
+		return
+	}
+	conn.Release()
+}
+
+// closePushConn closes conn and hands it back; the pool destroys a closed
+// connection instead of pooling it.
+func closePushConn(ctx context.Context, conn *pgxpool.Conn) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pushUnlockGrace)
+	defer cancel()
+	_ = conn.Conn().Close(cctx)
+	conn.Release()
+}
+
+// wireSection is section with a content write: the throttle is asked once
+// the section holds the entity (a busy entity costs no token), then send
+// writes the forge and record advances the base. It answers cont=false when
+// the bucket ran dry (the caller stops the pass).
+func (p *Pusher) wireSection(ctx context.Context, blockID, listedBase string, allow func() bool, res *PushResult,
+	send func() error, record func(tx pgx.Tx) error) (bool, error) {
+
+	sent := false
+	skip, err := p.section(ctx, blockID, listedBase, func() error {
+		if !allow() {
+			return errThrottled
+		}
+		if err := send(); err != nil {
+			return err
+		}
+		sent = true
+		return nil
+	}, record)
+	noteSkip(res, blockID, skip)
+	switch {
+	case errors.Is(err, errThrottled):
 		res.Throttled = true
 		return false, nil
-	}
-	if err := client.UpdateIssue(ctx, repo, c.ForgeID, patch); err != nil {
+	case err != nil:
 		return false, err
 	}
-	if err := p.advance(ctx, c.Block.ID, c.BaseHash, ctxH, ctxFields, projected, res); err != nil {
-		return false, err
+	if sent {
+		res.Pushed++
 	}
-	res.Pushed++
 	return true, nil
 }
 
@@ -211,12 +330,14 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 		_, h := CtxCommentBase(b)
 		return h
 	}
+	advanceOnly := func(tx pgx.Tx) error {
+		return p.advance(ctx, tx, c.BlockID, c.BaseHash, ctxH, ctxFields, projected, res)
+	}
 	if ctxH == c.BaseHash {
 		// In sync — 0 wire; the row leaves the candidates as in pushIssue.
-		if err := p.advance(ctx, c.BlockID, c.BaseHash, ctxH, ctxFields, projected, res); err != nil {
-			return false, err
-		}
-		return true, nil
+		skip, err := p.section(ctx, c.BlockID, c.BaseHash, nil, advanceOnly)
+		noteSkip(res, c.BlockID, skip)
+		return true, err
 	}
 	body, truncated := store.CapForgeBody(c.Content)
 
@@ -249,26 +370,19 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 		res.Conflicts++
 		return true, nil
 	}
-	if !allow() {
-		res.Throttled = true
-		return false, nil
-	}
-	if err := client.UpdateComment(ctx, repo, c.ForgeID, body); err != nil {
-		return false, err
-	}
-	if err := p.advance(ctx, c.BlockID, c.BaseHash, ctxH, ctxFields, projected, res); err != nil {
-		return false, err
-	}
-	res.Pushed++
-	return true, nil
+	return p.wireSection(ctx, c.BlockID, c.BaseHash, allow, res,
+		func() error { return client.UpdateComment(ctx, repo, c.ForgeID, body) }, advanceOnly)
 }
 
 // advance records the pushed (or in-sync) version as the mapping's base
-// through store.AdvancePushBase. listed is the base the listing read; when
-// another instance moved the base since, the advance flags the mapping instead
-// of writing either version (issue #486) and the pass counts the conflict.
-func (p *Pusher) advance(ctx context.Context, blockID, listed, ctxH string, ctxFields []byte, projected store.PushProjection, res *PushResult) error {
-	moved, err := store.AdvancePushBase(ctx, p.pool, blockID, listed, ctxH, ctxFields, projected)
+// through store.AdvancePushBase, in the entity's push section. listed is the
+// base the listing read; when another instance's pull moved the base since
+// (the section keeps other pushes out, not pulls) to a version other than the
+// one this push sent, the advance flags the mapping instead of writing either
+// version (issue #486) and the pass counts the conflict; a pull that
+// converged on the sent version leaves nothing to decide (issue #491).
+func (p *Pusher) advance(ctx context.Context, tx pgx.Tx, blockID, listed, ctxH string, ctxFields []byte, projected store.PushProjection, res *PushResult) error {
+	moved, err := store.AdvancePushBase(ctx, tx, blockID, listed, ctxH, ctxFields, projected)
 	if err != nil {
 		return err
 	}

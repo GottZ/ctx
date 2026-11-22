@@ -128,6 +128,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateGuardEfSearch(c)...)
 	// V67 (#483): writes.batch_max_items at most WritesBatchMaxItemsCeiling.
 	issues = append(issues, validateWritesBatchMaxItems(c)...)
+	// V68 (#491): project.sync.max_concurrent clamped below the database pool.
+	issues = append(issues, validateProjectSyncMaxConcurrent(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1639,6 +1641,42 @@ func validateWritesBatchMaxItems(c *Config) []Issue {
 	return []Issue{{Field: "writes.batch_max_items", Severity: SeverityError,
 		Msg: fmt.Sprintf("writes.batch_max_items (%d) must be at most %d: the afterwork of a larger batch (classification and temporal enrichment of each block) does not fit its one follow-up bound",
 			n, WritesBatchMaxItemsCeiling)}}
+}
+
+// forgeSyncConnsPerRun is the most database pool connections one running
+// forge sync holds at once: the pull's write transaction of an issue and,
+// inside it, the pool read of its body's reference targets
+// (forge.Applier.applyReferences); the push section holds one connection
+// across its wire write and records on that same connection. A fixed count
+// of the code, not policy.
+const forgeSyncConnsPerRun = 2
+
+// validateProjectSyncMaxConcurrent is V68 (issue #491): the forge syncs
+// project.sync.max_concurrent lets run side by side may hold at most
+// forgeSyncConnsPerRun pool connections each, and the push section keeps its
+// connection for as long as the forge takes to answer a write (the client
+// gives it 30 s). At the pool size (gatewayDBPoolConns, the mirror V40 reads)
+// a slow forge could hold every connection and stall the HTTP surface, guard,
+// dream and every other arm behind it. A count at or above that bound is
+// clamped to the largest that stays below it — WARN, the V10 shape:
+// the key is mut:"restart" and env-only (a restart key takes no settings
+// override), so an operator reads the clamp in the boot log next to the
+// start-up, and a CTX_PROJECT_SYNC_MAX_CONCURRENT that booted before this
+// rule still boots. Values below 1 stay with V35 and with the semaphore's
+// own fallback (forge.SyncManager.SetMaxConcurrent).
+func validateProjectSyncMaxConcurrent(c *Config) []Issue {
+	n := c.Project.Sync.MaxConcurrent
+	// Compared against the quotient, not n times the per-run count: that
+	// product overflows for an env value near the int range and would wave a
+	// huge count through.
+	ceiling := (gatewayDBPoolConns - 1) / forgeSyncConnsPerRun
+	if n <= ceiling {
+		return nil
+	}
+	c.Project.Sync.MaxConcurrent = ceiling
+	return []Issue{{Field: "project.sync.max_concurrent", Severity: SeverityWarn,
+		Msg: fmt.Sprintf("project.sync.max_concurrent %d clamped to %d: each running forge sync holds up to %d of the %d database pool connections (a push holds one for as long as the forge takes to answer), so %d syncs could hold the whole pool",
+			n, ceiling, forgeSyncConnsPerRun, gatewayDBPoolConns, n)}}
 }
 
 // validateDreamDecideTieOdds is V36: dream.decide_tie_odds is an odds RATIO

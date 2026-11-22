@@ -728,6 +728,39 @@ func validateWorkflow(p *Policy) error {
 	return nil
 }
 
+// Forge states the forge sync maps (GitHub's issue state is binary).
+const (
+	forgeStateOpen   = "open"
+	forgeStateClosed = "closed"
+)
+
+// WorkflowForgeMapViolation reports a workflow whose forge_state_map
+// contradicts its terminal set (issue #491): "closed" mapped to a status that
+// is not terminal, or "open" to one that is. The forge sync projects a block's
+// state by terminal-set membership, so with such a map every pulled closed
+// issue projects to open — ahead of its closed base — and the first push of
+// any local edit reopens it on the forge (and an "open" onto a terminal status
+// closes every open one). Empty string = admissible.
+//
+// A WRITE rule, like NarrowingViolation: the type write paths refuse such a
+// config (handler.overlayWriteViolation, 422), and the registry loads a row
+// that already has it with a warning (Reload, buildTenantSet) — a rule that
+// failed the decode would put a stored '_global' row into builtin-fallback and
+// serve a tenant the base set instead of its own types, at boot. validateWorkflow
+// keeps its own rules; this one is checked on top of a policy that decoded.
+func WorkflowForgeMapViolation(p Policy) string {
+	w := p.Workflow
+	if s, ok := w.ForgeStateMap[forgeStateClosed]; ok && !slices.Contains(w.Terminal, s) {
+		return fmt.Sprintf("blocktype %q: workflow.forge_state_map[%q]=%q is not in workflow.terminal %v — every pulled closed issue would project to open and the next push would reopen it",
+			p.Name, forgeStateClosed, s, w.Terminal)
+	}
+	if s, ok := w.ForgeStateMap[forgeStateOpen]; ok && slices.Contains(w.Terminal, s) {
+		return fmt.Sprintf("blocktype %q: workflow.forge_state_map[%q]=%q is in workflow.terminal %v — every pulled open issue would project to closed and the next push would close it",
+			p.Name, forgeStateOpen, s, w.Terminal)
+	}
+	return ""
+}
+
 // checkStrings enforces the R1 array caps (§3.3) with the field path in the
 // error.
 func checkStrings(typeName, field string, arr []string) error {

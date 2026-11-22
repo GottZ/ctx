@@ -240,6 +240,7 @@ func (r *Registry) buildTenantSet(ctx context.Context, base *Set, pool *pgxpool.
 		if err != nil {
 			return nil, err // corrupt tenant row: caller falls back to base
 		}
+		warnWorkflowForgeMap(p)
 		tenantPolicies = append(tenantPolicies, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -288,6 +289,17 @@ func (r *Registry) buildTenantSet(ctx context.Context, base *Set, pool *pgxpool.
 		policies = append(policies, merged[n])
 	}
 	return NewSet(policies)
+}
+
+// warnWorkflowForgeMap logs a stored type whose forge_state_map contradicts
+// its terminal set (WorkflowForgeMapViolation, issue #491). The row loads:
+// the write paths refuse such a config, and a row stored before they did, or
+// written past them, must not fail a reload or a tenant's set.
+func warnWorkflowForgeMap(p Policy) {
+	if msg := WorkflowForgeMapViolation(p); msg != "" {
+		slog.Warn("blocktype: stored type has a workflow.forge_state_map that contradicts its terminal set — loaded as stored; the forge sync reopens or closes issues by it until the row is fixed",
+			"name", p.Name, "scope", p.Scope, "violation", msg)
+	}
 }
 
 // InvalidateTenant drops exactly one tenant's cached generation; the next
@@ -408,6 +420,7 @@ func (r *Registry) Reload(ctx context.Context, pool *pgxpool.Pool) error {
 		if err != nil {
 			return err // corrupt row: whole reload fails, previous snapshot stays
 		}
+		warnWorkflowForgeMap(p)
 		merged[p.Name] = p
 		seen[p.Name] = true
 	}

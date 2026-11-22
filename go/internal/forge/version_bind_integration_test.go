@@ -606,7 +606,7 @@ func TestPushInSyncAdvanceSeesARealEdit(t *testing.T) {
 	i452NoCandidates(t, pool, proj)
 }
 
-// TestPushAdvanceWaitsForAnUpdateBlockInFlight: the advance's FOR SHARE must
+// TestPushAdvanceWaitsForAnUpdateBlockInFlight: the advance's row lock must
 // wait for a writer that holds the block row FOR NO KEY UPDATE (UpdateBlock,
 // the pull), not only for one that holds it FOR UPDATE (UpdateIssueBlock): a
 // FOR KEY SHARE would read past the uncommitted write and record the old

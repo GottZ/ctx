@@ -110,11 +110,16 @@ func ForgeIssueBase(iss IssueRemote) (fields []byte, hash, cappedBody string, tr
 // prefix-stripped; body is (defensively) re-capped so a block that predates the
 // cap still projects to the capped bytes.
 func CtxIssueBase(b *store.Block, terminalSet []string, registryOK bool) (fields []byte, hash string) {
+	return ctxIssueBaseWithState(b, ctxForgeState(b, terminalSet, registryOK))
+}
+
+// ctxIssueBaseWithState is the block's projection with the state field given.
+func ctxIssueBaseWithState(b *store.Block, state string) (fields []byte, hash string) {
 	body, _ := store.CapForgeBody(b.Content)
 	return issueProjectionJSON(issueProjection{
 		Title:     stripIssuePrefix(b.Title),
 		Body:      body,
-		State:     ctxForgeState(b, terminalSet, registryOK),
+		State:     state,
 		Labels:    metaStrings(b.Metadata, "labels"),
 		Assignees: metaStrings(b.Metadata, "assignees"),
 		Milestone: metaString(b.Metadata, "milestone"),
