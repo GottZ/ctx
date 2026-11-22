@@ -56,8 +56,13 @@ func TestForgeStateStampOfAnUnchangedStateWritesNothing(t *testing.T) {
 	}
 	wctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
 	defer cancel()
-	if n, err := lc.WaitForNotification(wctx); err == nil {
+	// Only the wait's own deadline is a quiet window; an observer that failed
+	// otherwise saw nothing and proves nothing (issue #509).
+	switch n, err := lc.WaitForNotification(wctx); {
+	case err == nil:
 		t.Errorf("the push fired %s for the block: %.120s", n.Channel, n.Payload)
+	case !errors.Is(err, context.DeadlineExceeded):
+		t.Fatalf("the notification observer failed instead of timing out: %v", err)
 	}
 	if fs := metaString(getBlock(t, e.pool, e.proj.Scope, e.id(t)).Metadata, "forge_state"); fs != "open" {
 		t.Errorf("metadata.forge_state is %q, want open", fs)

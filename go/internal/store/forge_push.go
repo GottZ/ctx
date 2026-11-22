@@ -332,6 +332,13 @@ type PushProjection func(b *Block) string
 // moved since the listing (it does not hold the sent version), and an
 // advance without a wire write clears none: nothing tells it what the forge
 // holds.
+//
+// An advance without a wire write writes only while the row still holds
+// listedBase (issue #509): it sent nothing, so a base a pull moved since the
+// section's check is the forge's own, and there is nothing to record, flag
+// or stamp — before, it recorded the base unknown and flagged the mapping as
+// if a PATCH had been on the wire. It stamps metadata.forge_state only with
+// a base it wrote.
 func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHash string, ctxFields json.RawMessage, forgeUpdatedAt *time.Time, sent bool, project PushProjection) (moved bool, err error) {
 	var b Block
 	var at time.Time
@@ -361,11 +368,13 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 		       conflict_at = CASE WHEN base_hash NOT IN ($6, $2) THEN COALESCE(conflict_at, now())
 		                          WHEN $9 AND $4 THEN NULL
 		                          ELSE conflict_at END
-		 WHERE block_id = $1::uuid
+		 WHERE block_id = $1::uuid AND ($9 OR base_hash = $6)
 		RETURNING old.base_hash NOT IN ($6, $2)`,
 		blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash, forgeUpdatedAt, sent).Scan(&moved)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
+		// The mapping is gone, or an advance without a wire write found the
+		// base moved off the listed one: nothing to record.
 		return false, nil
 	case err != nil:
 		return false, fmt.Errorf("store: advance push base: %w", err)

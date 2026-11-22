@@ -211,6 +211,10 @@ func TestPushAdvanceOffItsListedBaseLeavesTheDecisionToThePull(t *testing.T) {
 		i486Converged(t, pool, proj, "comment", 700, forgeH, wire)
 	})
 
+	// An in-sync row is advanced without a wire write. Since issue #509 such
+	// an advance leaves a base a pull moved alone — it sent nothing, so the
+	// pulled base is the forge's — instead of recording it unknown and
+	// flagging the mapping as if a PATCH had been on the wire.
 	t.Run("in-sync row, pull before the advance", func(t *testing.T) {
 		pool, dsn := testdb.SetupTestDBWithDSN(t)
 		ctx := context.Background()
@@ -247,8 +251,8 @@ func TestPushAdvanceOffItsListedBaseLeavesTheDecisionToThePull(t *testing.T) {
 		close(hold.release)
 		select {
 		case o := <-done:
-			if o.err != nil || o.res.Conflicts != 1 {
-				t.Errorf("first push: %+v %v, want one conflict (its base moved)", o.res, o.err)
+			if o.err != nil || o.res.Conflicts != 0 {
+				t.Errorf("first push: %+v %v, want no conflict (nothing was sent)", o.res, o.err)
 			}
 		case <-time.After(i452Wait):
 			t.Fatalf("the first push did not finish within %s", i452Wait)
@@ -256,8 +260,8 @@ func TestPushAdvanceOffItsListedBaseLeavesTheDecisionToThePull(t *testing.T) {
 		if spy.wireCalls() != 0 {
 			t.Fatalf("first push made %d wire writes for an in-sync row", spy.wireCalls())
 		}
-		ctxH, forgeH := issueHashes(t, pool, proj, issueID, edited)
-		i486Undecided(t, pool, proj, "issue", 5, issueID, ctxH, "")
+		_, forgeH := issueHashes(t, pool, proj, issueID, edited)
+		i486Converged(t, pool, proj, "issue", 5, forgeH, 0)
 		wire := i486Cycles(t, pool, proj, i486PullIssue(t, pool, proj, edited))
 		i486Converged(t, pool, proj, "issue", 5, forgeH, wire)
 	})

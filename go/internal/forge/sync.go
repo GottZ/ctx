@@ -361,10 +361,8 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 	if m.push != nil && !dryRun && project.PushEnabled && token != "" {
 		key := pushThrottleKey(project.Forge, token)
 		pres, err := m.push(ctx, project, client, repo, func() bool { return m.throttle.Allow(key) })
-		if err != nil {
-			m.handleWireError(ctx, project.ID, runID, backoffN, err)
-			return
-		}
+		// The counts of a failed pass go into the run's status too: its
+		// writes happened (issue #509).
 		m.mu.Lock()
 		if st := m.runs[project.ID]; st != nil {
 			st.Pushed += pres.Pushed
@@ -372,6 +370,10 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 			st.Conflicts += pres.Conflicts
 		}
 		m.mu.Unlock()
+		if err != nil {
+			m.handleWireError(ctx, project.ID, runID, backoffN, err)
+			return
+		}
 	}
 
 	// SUCCESS. Backoff/error are cleared and last_sync_at stamped; backoff_n reset.
@@ -440,16 +442,10 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 	seen := map[string]bool{}
 	for n := 1; ; n++ {
 		res, err := m.applyComments(ctx, project, page.Comments)
+		m.addApplied(project.ID, res) // a failed page's committed writes count too (issue #509)
 		if err != nil {
 			return err
 		}
-		m.mu.Lock()
-		if st := m.runs[project.ID]; st != nil {
-			st.Applied += res.Applied
-			st.Conflicts += res.Conflicts
-			st.PullSkipped += res.Skipped
-		}
-		m.mu.Unlock()
 		if mu := maxCommentUpdated(page); mu.After(maxSeen) {
 			maxSeen = mu
 		}
@@ -565,17 +561,22 @@ func (m *SyncManager) applyPage(ctx context.Context, project store.ProjectRow, d
 		return nil
 	}
 	res, err := m.applyIssues(ctx, project, page.Issues)
-	if err != nil {
-		return err
-	}
+	m.addApplied(project.ID, res) // a failed page's committed writes count too (issue #509)
+	return err
+}
+
+// addApplied adds what an apply of a page did to the run's status — also
+// for a page that failed midway: the issues before the failure committed
+// (each applies in its own transaction), and a failed run's status names
+// them, its skips included (issue #509).
+func (m *SyncManager) addApplied(projectID string, res ApplyResult) {
 	m.mu.Lock()
-	if st := m.runs[project.ID]; st != nil {
+	if st := m.runs[projectID]; st != nil {
 		st.Applied += res.Applied
 		st.Conflicts += res.Conflicts
 		st.PullSkipped += res.Skipped
 	}
 	m.mu.Unlock()
-	return nil
 }
 
 // handleWireError stamps backoff_until (Retry-After if the forge gave one, else

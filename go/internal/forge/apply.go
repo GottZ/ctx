@@ -480,7 +480,7 @@ type pulled struct {
 // A block that is gone, archived or out of scope, or that lost its mapping,
 // is skipped, as the read does.
 func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.SyncMap, read decision, p pulled) (ApplyResult, error) {
-	if res, done := endsOnRead(read, m); done {
+	if res, done := endsOnRead(ctx, read, m, p); done {
 		return res, nil
 	}
 	var targets []string
@@ -560,14 +560,23 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 // on an unflagged mapping, and a conflict the mapping carries already
 // (idempotent, 0 new conflicts). A noop on a flagged mapping goes on to the
 // locked rows, which clear the flag (issue #509).
-func endsOnRead(read decision, m store.SyncMap) (ApplyResult, bool) {
+//
+// A fetch older than the observation the flagged row records is reported
+// (reportStale: pull_skipped and the WARN) before the conflict ends here —
+// before, it returned uncounted (issue #509). A conflict decision means the
+// fetch differs from the base, so such a skip always carries other content.
+func endsOnRead(ctx context.Context, read decision, m store.SyncMap, p pulled) (ApplyResult, bool) {
+	var res ApplyResult
 	switch {
 	case read == decCtxAhead, read == decNoop && !m.Conflict:
-		return ApplyResult{}, true
+		return res, true
 	case read == decConflict && m.Conflict:
-		return ApplyResult{}, true
+		if orderFetch(m, p.fUpdated) == fetchOlder {
+			reportStale(ctx, &res, m.BlockID, p.fUpdated, m.ForgeUpdatedAt)
+		}
+		return res, true
 	}
-	return ApplyResult{}, false
+	return res, false
 }
 
 func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow, pol issueTypePolicy,
