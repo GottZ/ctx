@@ -1379,5 +1379,6 @@ not name passes. It does not see a name spelled to get past it — an escape in 
 a `U&` identifier, a name concatenated from strings, a catalog column renamed by a column alias
 list — nor a read it would have to follow through the file: a copy of `pg_class` in a table the
 file creates, a view or function the file defines, a count with further columns or a table name
-built from strings. `reviewedForms` in `threshold_test.go` lists each form with its decision
-(issue #493).
+built from strings. Nor does it resolve the scopes of SQL: a column named `raise` after `THEN` or
+`ELSE` in a `CASE` expression is taken for a `RAISE` that reports, and a read after it passes.
+`reviewedForms` in `threshold_test.go` lists each form with its decision (issue #493).

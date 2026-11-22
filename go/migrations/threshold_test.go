@@ -71,8 +71,10 @@ import (
 // concatenated from strings, a catalog column renamed by a column alias list
 // — nor a read it would have to follow through the file: a copy of pg_class
 // in a table the file creates, a view or function the file defines, a count
-// with further columns or a table name built from strings. reviewedForms
-// lists such forms as "limit".
+// with further columns or a table name built from strings. Nor does it
+// resolve the scopes of SQL: a column named raise after THEN or ELSE in a
+// CASE expression is taken for a RAISE that reports (the read after it
+// passes). reviewedForms lists such forms as "limit".
 
 // rowsFunctionSince is the migration that creates ctx_migration_rows (issue
 // #399). From it on, a file that decides by the size of a table asks the
@@ -934,9 +936,10 @@ type sizeForm struct {
 	// class says why the form is in the table: "too loose" and "too strict"
 	// are the review's findings, "never covered" the forms it found the gate
 	// never covered, "limit" a form only an author who wants past the gate
-	// writes or a read the gate does not follow (it passes, see the head of
-	// this file), "pin" a decision of the rebuilt gate that a regression of
-	// its lexer, statement scope or report rule would turn.
+	// writes, a read the gate does not follow or a scope it does not resolve
+	// (the table pins the decision it makes, see the head of this file),
+	// "pin" a decision of the rebuilt gate that a regression of its lexer,
+	// statement scope or report rule would turn.
 	class string
 }
 
@@ -1281,6 +1284,8 @@ $do$;
 	{class: "limit", name: "a copy of pg_class in a table the file creates",
 		src: "CREATE TEMP TABLE m193_catalog AS SELECT * FROM pg_class WHERE oid = 'public.context_blocks'::regclass;\n" +
 			inDo("    SELECT reltuples::bigint INTO v_rows FROM m193_catalog;")},
+	{class: "limit", name: "a column named raise in a CASE arm before a size read",
+		src: inDo(`    SELECT CASE WHEN enabled THEN raise ELSE pg_relation_size('public.context_blocks') END INTO v_rows FROM settings;`)},
 	{class: "limit", name: "a count with a further column",
 		src: inDo(`    SELECT count(*), max(created_at) INTO v_rows, v_heap FROM context_blocks;`)},
 
