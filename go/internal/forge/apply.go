@@ -262,10 +262,11 @@ func (a *Applier) applyIssue(ctx context.Context, project store.ProjectRow, pol 
 
 // fetchOrder places this pull's fetch against the observation of the forge
 // entity the locked mapping row records: its forge_updated_at, the forge's
-// own updated_at of the version a pull last applied or converged on (only
-// pulls write it; a push advance leaves it). It orders two observations of
-// the forge on the forge's clock and is no direction input (W16: ctx-ahead
-// or forge-ahead stays a matter of content hashes). Issue #491.
+// own updated_at of the version a pull last applied or converged on, or of
+// the write a push last recorded (the PATCH's answer, never older than the
+// row's, issue #509). It orders two observations of the forge on the
+// forge's clock and is no direction input (W16: ctx-ahead or forge-ahead
+// stays a matter of content hashes). Issue #491.
 type fetchOrder int
 
 const (
@@ -298,13 +299,14 @@ func orderFetch(locked store.SyncMap, fetched *time.Time) fetchOrder {
 //   - Older than the recorded observation: nothing is written, whether or not
 //     the base moved since the read. Another pull applied a newer version (it
 //     may even have committed between this pull's fetch and its read of the
-//     mapping); writing the older one would set the block back, and the cursor
-//     of the instance that pulled the newer version may answer 304 from then
-//     on, so no later pull would correct it. The block holds a version at
-//     least as new as the fetch, and a later forge change carries a stamp at
-//     or after the recorded one, which the since cursor of every instance
-//     lists again (the cursor never passes the newest stamp of a page it
-//     applied).
+//     mapping), or a push recorded its write, which the fetch predates
+//     (issue #509); writing the older one would set the block back, and the
+//     cursor of the instance that pulled the newer version may answer 304
+//     from then on, so no later pull would correct it. The block holds a
+//     version at least as new as the fetch, and a later forge change carries
+//     a stamp at or after the recorded one, which the since cursor of every
+//     instance lists again (the cursor never passes the newest stamp of a
+//     page it applied).
 //   - The same stamp, after another instance moved the base since the read:
 //     the other pull's version and this one cannot be ordered. When they are
 //     the same version there is nothing to do; otherwise the mapping is
@@ -312,11 +314,9 @@ func orderFetch(locked store.SyncMap, fetched *time.Time) fetchOrder {
 //     the base write before issue #491 gave, because writing the fetch loses
 //     the other version when it was the newer one (and, with a 304 after it,
 //     for good), and keeping the row loses this one in the other order. A
-//     base another instance's push moved after a pull of that same stamp is
-//     flagged as well: the stamp then belongs to a version the push
-//     replaced; that flag, like any set here, stays while block, base and
-//     forge agree — the noop cell writes nothing (a known limit, pinned by
-//     TestPullOfASameSecondFetch).
+//     push that recorded its write since the read moved the base as well:
+//     a remote edit in the second of its PATCH carries the stamp it recorded
+//     and is flagged here, and the next pull pulls it.
 //   - The same stamp without a moved base: the next version of one second,
 //     pulled run after run, and the matrix decides — also when another
 //     instance pulled the other version of that second between this pull's
@@ -371,8 +371,9 @@ func firstStale(ctx context.Context, blockID string) bool {
 // reportStale makes a skipped older fetch whose content differs from the
 // locked row's base visible (issue #491): the forge carries something the
 // block does not, and this pull does not write it. Once, it is the ordinary
-// trace of a race — another instance pulled a newer version, and the next
-// pull lists that one. Run after run for the same block, the forge's
+// trace of a race — another instance pulled a newer version or pushed a
+// write the fetch predates, and the next pull lists the forge's version.
+// Run after run for the same block, the forge's
 // updated_at went back behind the stamp the mapping records (a clock set
 // back, a restore of the forge from a backup, a manual change): every pull
 // skips the entity, and a later local edit is pushed over the forge's
@@ -383,7 +384,7 @@ func reportStale(ctx context.Context, res *ApplyResult, blockID string, fetched,
 		return
 	}
 	res.Skipped = 1
-	slog.Warn("forge: a pull skipped a fetch older than the forge version its mapping records, and the forge's content differs from the recorded base — not written; once is a race with another instance's pull, every run means the forge's updated_at went back (clock, restore)",
+	slog.Warn("forge: a pull skipped a fetch older than the forge version its mapping records, and the forge's content differs from the recorded base — not written; once is a race with another instance's pull or push, every run means the forge's updated_at went back (clock, restore)",
 		"block", blockID, "fetched_updated_at", fetched, "recorded_updated_at", recorded)
 }
 

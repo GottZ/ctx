@@ -118,8 +118,11 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 		_, h := pol.ctxIssueBase(b, c.BaseFields)
 		return h
 	}
+	// stamp is the forge's updated_at the PATCH answered (issue #509); the
+	// advance records it, and an advance without a wire write has none.
+	var stamp *time.Time
 	advanceOnly := func(tx pgx.Tx) error {
-		return p.advance(ctx, tx, c.Block.ID, c.BaseHash, ctxH, ctxFields, projected, res)
+		return p.advance(ctx, tx, c.Block.ID, c.BaseHash, ctxH, ctxFields, stamp, projected, res)
 	}
 	if ctxH == c.BaseHash {
 		// In sync (a write that left the projection alone, or an edit undone
@@ -153,8 +156,11 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 		noteSkip(res, c.Block.ID, skip)
 		return true, err
 	}
-	return p.wireSection(ctx, c.Block.ID, c.BaseHash, allow, res,
-		func() error { return client.UpdateIssue(ctx, repo, c.ForgeID, patch) }, advanceOnly)
+	return p.wireSection(ctx, c.Block.ID, c.BaseHash, allow, res, func() error {
+		var err error
+		stamp, err = client.UpdateIssue(ctx, repo, c.ForgeID, patch)
+		return err
+	}, advanceOnly)
 }
 
 // errThrottled leaves a push section without its record when the token
@@ -289,7 +295,7 @@ func (p *Pusher) createIssue(ctx context.Context, project store.ProjectRow, clie
 		res.Throttled = true
 		return false, nil
 	}
-	number, err := client.CreateIssue(ctx, repo, IssueCreate{
+	number, stamp, err := client.CreateIssue(ctx, repo, IssueCreate{
 		Title: ctxProj.Title, Body: ctxProj.Body, Labels: ctxProj.Labels, Assignees: ctxProj.Assignees,
 	})
 	if err != nil {
@@ -301,7 +307,7 @@ func (p *Pusher) createIssue(ctx context.Context, project store.ProjectRow, clie
 			// Rare: created open but bucket dry before the close. Finalise at the
 			// created (open) state — the next run's field-diff pushes the close.
 			openFields, openH := issueBaseWithState(ctxProj, "open")
-			if err := store.FinalizePushCreateIssue(ctx, p.pool, c.Block.ID, number, openH, openFields); err != nil {
+			if err := store.FinalizePushCreateIssue(ctx, p.pool, c.Block.ID, number, openH, openFields, stamp); err != nil {
 				return false, err
 			}
 			res.Pushed++
@@ -309,11 +315,15 @@ func (p *Pusher) createIssue(ctx context.Context, project store.ProjectRow, clie
 			return false, nil
 		}
 		st := "closed"
-		if err := client.UpdateIssue(ctx, repo, number, IssuePatch{State: &st}); err != nil {
+		closed, err := client.UpdateIssue(ctx, repo, number, IssuePatch{State: &st})
+		if err != nil {
 			return false, err
 		}
+		if closed != nil {
+			stamp = closed // the version the close left is the one finalised
+		}
 	}
-	if err := store.FinalizePushCreateIssue(ctx, p.pool, c.Block.ID, number, ctxH, ctxFields); err != nil {
+	if err := store.FinalizePushCreateIssue(ctx, p.pool, c.Block.ID, number, ctxH, ctxFields, stamp); err != nil {
 		return false, err
 	}
 	res.Pushed++
@@ -330,8 +340,9 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 		_, h := CtxCommentBase(b)
 		return h
 	}
+	var stamp *time.Time // the PATCH's answer, as in pushIssue
 	advanceOnly := func(tx pgx.Tx) error {
-		return p.advance(ctx, tx, c.BlockID, c.BaseHash, ctxH, ctxFields, projected, res)
+		return p.advance(ctx, tx, c.BlockID, c.BaseHash, ctxH, ctxFields, stamp, projected, res)
 	}
 	if ctxH == c.BaseHash {
 		// In sync — 0 wire; the row leaves the candidates as in pushIssue.
@@ -349,11 +360,11 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 			res.Throttled = true
 			return false, nil
 		}
-		id, err := client.CreateComment(ctx, repo, c.ParentForgeID, body)
+		id, created, err := client.CreateComment(ctx, repo, c.ParentForgeID, body)
 		if err != nil {
 			return false, err
 		}
-		if err := store.FinalizePushCreateComment(ctx, p.pool, c.BlockID, id, ctxH, ctxFields); err != nil {
+		if err := store.FinalizePushCreateComment(ctx, p.pool, c.BlockID, id, ctxH, ctxFields, created); err != nil {
 			return false, err
 		}
 		res.Pushed++
@@ -370,8 +381,11 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 		res.Conflicts++
 		return true, nil
 	}
-	return p.wireSection(ctx, c.BlockID, c.BaseHash, allow, res,
-		func() error { return client.UpdateComment(ctx, repo, c.ForgeID, body) }, advanceOnly)
+	return p.wireSection(ctx, c.BlockID, c.BaseHash, allow, res, func() error {
+		var err error
+		stamp, err = client.UpdateComment(ctx, repo, c.ForgeID, body)
+		return err
+	}, advanceOnly)
 }
 
 // advance records the pushed (or in-sync) version as the mapping's base
@@ -381,8 +395,10 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 // one this push sent, the advance flags the mapping instead of writing either
 // version (issue #486) and the pass counts the conflict; a pull that
 // converged on the sent version leaves nothing to decide (issue #491).
-func (p *Pusher) advance(ctx context.Context, tx pgx.Tx, blockID, listed, ctxH string, ctxFields []byte, projected store.PushProjection, res *PushResult) error {
-	moved, err := store.AdvancePushBase(ctx, tx, blockID, listed, ctxH, ctxFields, projected)
+// stamp is the forge's updated_at of the PATCH's answer (nil: none), the
+// mapping's forge stamp with the base (issue #509).
+func (p *Pusher) advance(ctx context.Context, tx pgx.Tx, blockID, listed, ctxH string, ctxFields []byte, stamp *time.Time, projected store.PushProjection, res *PushResult) error {
+	moved, err := store.AdvancePushBase(ctx, tx, blockID, listed, ctxH, ctxFields, stamp, projected)
 	if err != nil {
 		return err
 	}

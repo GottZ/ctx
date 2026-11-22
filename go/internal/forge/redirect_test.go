@@ -71,7 +71,7 @@ func TestForgeRedirectStaysOnOrigin(t *testing.T) {
 				http.Redirect(w, r, other.srv.URL+r.URL.Path, code)
 			})
 			c := newTestClient(api.srv, "pat-459")
-			_, err := c.CreateIssue(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: api.srv.URL},
+			_, _, err := c.CreateIssue(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: api.srv.URL},
 				IssueCreate{Title: "t", Body: forgeIssueMarker})
 			if n := other.hits(); n != 0 {
 				t.Fatalf("a %d redirect carried the request to another origin: %s", code, other.log())
@@ -115,7 +115,7 @@ func TestForgeRedirectWithinOriginFollowed(t *testing.T) {
 		_, _ = io.WriteString(w, `{"number":9}`)
 	})
 	c := newTestClient(api.srv, "pat-459")
-	n, err := c.CreateIssue(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: api.srv.URL},
+	n, _, err := c.CreateIssue(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: api.srv.URL},
 		IssueCreate{Title: "t", Body: forgeIssueMarker})
 	if err != nil || n != 9 {
 		t.Fatalf("CreateIssue through a same-origin 307 = %d, %v; want 9", n, err)

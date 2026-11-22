@@ -146,7 +146,7 @@ func TestGuardCheckFollowsTheText(t *testing.T) {
 		}, true},
 		{"forge push rename", func(t *testing.T, pool *pgxpool.Pool) string { return newIssue(t, pool, "i452 pushed") },
 			func(t *testing.T, pool *pgxpool.Pool, id string) {
-				if err := store.FinalizePushCreateIssue(context.Background(), pool, id, 77, "h", []byte(`{}`)); err != nil {
+				if err := store.FinalizePushCreateIssue(context.Background(), pool, id, 77, "h", []byte(`{}`), nil); err != nil {
 					t.Fatalf("finalize push create: %v", err)
 				}
 			}, true},

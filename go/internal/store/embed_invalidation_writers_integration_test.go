@@ -224,7 +224,7 @@ func TestBlockTextWritersMarkTheVector(t *testing.T) {
 		issue := newIssue(t, "i236 pushed")
 		cm := newComment(t, issue.ID, "erin")
 		i236Embed(t, pool, issue.ID, cm.ID)
-		if err := store.FinalizePushCreateIssue(ctx, pool, issue.ID, 77, "h", []byte(`{}`)); err != nil {
+		if err := store.FinalizePushCreateIssue(ctx, pool, issue.ID, 77, "h", []byte(`{}`), nil); err != nil {
 			t.Fatalf("finalize push create: %v", err)
 		}
 		is, cs := i236Read(t, pool, issue.ID), i236Read(t, pool, cm.ID)

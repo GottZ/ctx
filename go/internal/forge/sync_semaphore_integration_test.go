@@ -63,14 +63,18 @@ func (b *blockingForge) ListCommentsSince(context.Context, RepoRef, time.Time, s
 func (b *blockingForge) ListCommentsPage(context.Context, string) (CommentPage, error) {
 	return CommentPage{}, nil
 }
-func (b *blockingForge) CreateIssue(context.Context, RepoRef, IssueCreate) (int64, error) {
-	return 0, nil
+func (b *blockingForge) CreateIssue(context.Context, RepoRef, IssueCreate) (int64, *time.Time, error) {
+	return 0, nil, nil
 }
-func (b *blockingForge) UpdateIssue(context.Context, RepoRef, int64, IssuePatch) error { return nil }
-func (b *blockingForge) CreateComment(context.Context, RepoRef, int64, string) (int64, error) {
-	return 0, nil
+func (b *blockingForge) UpdateIssue(context.Context, RepoRef, int64, IssuePatch) (*time.Time, error) {
+	return nil, nil
 }
-func (b *blockingForge) UpdateComment(context.Context, RepoRef, int64, string) error { return nil }
+func (b *blockingForge) CreateComment(context.Context, RepoRef, int64, string) (int64, *time.Time, error) {
+	return 0, nil, nil
+}
+func (b *blockingForge) UpdateComment(context.Context, RepoRef, int64, string) (*time.Time, error) {
+	return nil, nil
+}
 
 func semManager(pool *pgxpool.Pool, fake Forge, maxConcurrent int) *SyncManager {
 	m := mgr(pool, okTenant, okPolicy, fake, nil) // nil apply = I-F no-op (0 block writes)

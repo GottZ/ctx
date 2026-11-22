@@ -94,13 +94,15 @@ func TestPushAdvanceOffItsBaseStampsNoForgeState(t *testing.T) {
 // TestPullConvergenceReadDecidesOnTheLockedRowsOnceAPushMovedTheBase: the
 // pull read a convergence (block and forge renamed alike); before it writes,
 // a local edit and another instance's push of it move the base. The read's
-// convergence was made against a base that is gone, so the matrix decides on
-// the locked rows: the block equals the pushed base and the fetch differs —
-// forge-ahead (the documented answer: what the pull fetched before that push
-// landed comes back with the next pull). The next run brings the block level
-// with the forge without a wire write. Recording the read's convergence over
-// the pushed base instead would make the next push send the pushed edit a
-// second time.
+// convergence was made against a base that is gone, so the pull decides on
+// the locked rows: the push recorded the stamp of its PATCH (issue #509),
+// and the fetch predates it — nothing is written, the skip is counted (its
+// content differs from the pushed base). Before #509 the row kept the
+// pulled version's stamp, the matrix read forge-ahead and wrote the fetch
+// over the pushed edit, a step back the next pull healed. The next run
+// brings the block level with the forge without a wire write. Recording the
+// read's convergence over the pushed base instead would make the next push
+// send the pushed edit a second time.
 func TestPullConvergenceReadDecidesOnTheLockedRowsOnceAPushMovedTheBase(t *testing.T) {
 	e := i491Converging(t, "i491convpushed")
 	const body = "body edited locally"
@@ -110,8 +112,8 @@ func TestPullConvergenceReadDecidesOnTheLockedRowsOnceAPushMovedTheBase(t *testi
 			t.Fatalf("other instance's push: %+v", r)
 		}
 	})
-	if res.Applied != 1 || res.Conflicts != 0 {
-		t.Errorf("the converging pull after the push: %+v, want the matrix on the locked rows (forge-ahead of the pushed base)", res)
+	if res.Applied != 0 || res.Conflicts != 0 || res.Skipped != 1 {
+		t.Errorf("the converging pull after the push: %+v, want nothing written (a fetch older than the push's stamp) and the skip counted", res)
 	}
 	if n := e.cycles(t, 3); n != 0 {
 		t.Errorf("three runs landed %d PATCH(es), want 0 (the forge holds the pushed edit)", n)

@@ -50,35 +50,35 @@ type pushSpyForge struct {
 
 func newPushSpy() *pushSpyForge { return &pushSpyForge{nextIssue: 41, nextComment: 900} }
 
-func (s *pushSpyForge) CreateIssue(_ context.Context, _ RepoRef, in IssueCreate) (int64, error) {
+func (s *pushSpyForge) CreateIssue(_ context.Context, _ RepoRef, in IssueCreate) (int64, *time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.wire++
 	s.nextIssue++
 	s.creates = append(s.creates, in)
-	return s.nextIssue, nil
+	return s.nextIssue, nil, nil
 }
-func (s *pushSpyForge) UpdateIssue(_ context.Context, _ RepoRef, n int64, p IssuePatch) error {
+func (s *pushSpyForge) UpdateIssue(_ context.Context, _ RepoRef, n int64, p IssuePatch) (*time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.wire++
 	s.patches = append(s.patches, recordedPatch{n, p})
-	return nil
+	return nil, nil
 }
-func (s *pushSpyForge) CreateComment(_ context.Context, _ RepoRef, issue int64, body string) (int64, error) {
+func (s *pushSpyForge) CreateComment(_ context.Context, _ RepoRef, issue int64, body string) (int64, *time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.wire++
 	s.nextComment++
 	s.comments = append(s.comments, recordedComment{issue, body})
-	return s.nextComment, nil
+	return s.nextComment, nil, nil
 }
-func (s *pushSpyForge) UpdateComment(_ context.Context, _ RepoRef, id int64, body string) error {
+func (s *pushSpyForge) UpdateComment(_ context.Context, _ RepoRef, id int64, body string) (*time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.wire++
 	s.commentPatches = append(s.commentPatches, recordedComment{id, body})
-	return nil
+	return nil, nil
 }
 
 func (s *pushSpyForge) wireCalls() int {

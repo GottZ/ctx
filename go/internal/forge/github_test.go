@@ -168,7 +168,7 @@ func TestCreateIssue_PostsAndReturnsNumber(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := newTestClient(srv, "tok")
-	n, err := c.CreateIssue(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL},
+	n, _, err := c.CreateIssue(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL},
 		IssueCreate{Title: "Fix it", Body: "steps", Labels: []string{"bug"}})
 	if err != nil || n != 42 {
 		t.Fatalf("CreateIssue = %d err=%v, want 42", n, err)
@@ -195,7 +195,7 @@ func TestUpdateIssue_FieldDiffOmitsBody(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(srv, "tok")
 	st := "closed"
-	if err := c.UpdateIssue(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL}, 5,
+	if _, err := c.UpdateIssue(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL}, 5,
 		IssuePatch{State: &st}); err != nil {
 		t.Fatalf("UpdateIssue: %v", err)
 	}
@@ -220,12 +220,58 @@ func TestCreateComment_PostsAndReturnsID(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := newTestClient(srv, "tok")
-	id, err := c.CreateComment(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL}, 42, "hi")
+	id, _, err := c.CreateComment(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL}, 42, "hi")
 	if err != nil || id != 900 {
 		t.Fatalf("CreateComment = %d err=%v, want 900", id, err)
 	}
 	if !strings.HasSuffix(gotPath, "/issues/42/comments") {
 		t.Fatalf("comment path = %s, want .../issues/42/comments", gotPath)
+	}
+}
+
+// TestPushWritesReadTheForgeStampOfTheAnswer (issue #509): every push write
+// returns the updated_at of GitHub's answer — the entity the write left —
+// and nil when the answer carries none, a null or one that does not parse;
+// none of those is an error (the write landed).
+func TestPushWritesReadTheForgeStampOfTheAnswer(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		field string // the updated_at member of the answer, "" for none
+		want  *time.Time
+	}{
+		{"served", `,"updated_at":"2026-03-04T05:06:07Z"`, &at},
+		{"absent", ``, nil},
+		{"null", `,"updated_at":null`, nil},
+		{"unreadable", `,"updated_at":"yesterday"`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"number":42,"id":900` + tc.field + `}`))
+			}))
+			defer srv.Close()
+			c := newTestClient(srv, "tok")
+			repo := RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL}
+			st := "closed"
+			got := map[string]*time.Time{}
+			var errs []error
+			n, s, err := c.CreateIssue(context.Background(), repo, IssueCreate{Title: "t"})
+			got["create issue"], errs = s, append(errs, err)
+			s, err = c.UpdateIssue(context.Background(), repo, 42, IssuePatch{State: &st})
+			got["update issue"], errs = s, append(errs, err)
+			id, s, err := c.CreateComment(context.Background(), repo, 42, "hi")
+			got["create comment"], errs = s, append(errs, err)
+			s, err = c.UpdateComment(context.Background(), repo, 900, "hi")
+			got["update comment"], errs = s, append(errs, err)
+			if err := errors.Join(errs...); err != nil || n != 42 || id != 900 {
+				t.Fatalf("writes: number %d, id %d, err %v — want 42, 900 and no error", n, id, err)
+			}
+			for call, s := range got {
+				if (s == nil) != (tc.want == nil) || (s != nil && !s.Equal(*tc.want)) {
+					t.Errorf("%s: stamp %v, want %v", call, s, tc.want)
+				}
+			}
+		})
 	}
 }
 
@@ -239,7 +285,7 @@ func TestUpdateIssue_RateLimit(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(srv, "tok")
 	st := "open"
-	err := c.UpdateIssue(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL}, 5, IssuePatch{State: &st})
+	_, err := c.UpdateIssue(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL}, 5, IssuePatch{State: &st})
 	var rl *RateLimitError
 	if !errors.As(err, &rl) || rl.RetryAfter != 30*time.Second {
 		t.Fatalf("want RateLimitError RetryAfter=30s, got %v", err)
