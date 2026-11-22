@@ -320,14 +320,21 @@ func LockSyncMap(ctx context.Context, tx pgx.Tx, blockID string) (SyncMap, bool,
 // caller holds the block locked and it still is that version: the pull's own
 // write (its updated_at), or the version a convergence found. The candidate
 // filter (b.updated_at > m.synced_at) then lists every later local write
-// whose transaction began after that version was written — for a
+// whose transaction began after the writer of that version began — for a
 // convergence that includes a write whose transaction began before the
-// convergence's and writes after it, which now() would hide (issue #491); a
-// pull-update's version is its own write, so a write begun before the pull's
-// transaction and blocked on its row lock is the residual AdvancePushBase
-// documents. nil means the block moved past the version
-// since (a convergence the pull read, and a local write committed before the
-// lock): synced_at := -infinity, so the row stays a push candidate whatever
+// convergence's and writes after it, which now() would hide (issue #491).
+// It does not list a write whose transaction began even before that writer
+// began and that takes the row only after this base write committed: its
+// updated_at, its transaction start, lies below syncedAt. That is a known
+// limit, the same for the pull-update (its version is its own write) and for
+// AdvancePushBase, pinned by
+// TestPullConvergenceKnownLimitWriteBegunBeforeTheRecordedVersion: no
+// timestamp tells such a write apart, closing it needs a write counter that
+// advances in the order writers take the row.
+//
+// nil means the block moved past the version since (a convergence the pull
+// read, and a local write committed before the lock): synced_at :=
+// -infinity, so the row stays a push candidate whatever
 // updated_at that write stored, and the push diffs it against the base this
 // writes — the version the forge holds. synced_at is compared in SQL only
 // (AdvancePushBase).

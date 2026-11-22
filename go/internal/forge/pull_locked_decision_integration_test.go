@@ -10,7 +10,10 @@
 // updated_at < synced_at: no push candidate, never pushed, and nothing said
 // so. The convergence now locks the block, records the version both sides
 // held as the base, and sets synced_at to the time of that version while the
-// block still holds it, -infinity once a local write moved it.
+// block still holds it, -infinity once a local write moved it. A write whose
+// transaction began even before the writer of that version began stays
+// hidden — a known limit, pinned by
+// TestPullConvergenceKnownLimitWriteBegunBeforeTheRecordedVersion.
 //
 // Point 3. A pull that decided "forge-ahead" on its read compared the locked
 // block with the base of the page-wide read, not with the mapping row:
@@ -182,6 +185,50 @@ func TestPullConvergenceKeepsALocalEditMadeDuringIt(t *testing.T) {
 		}
 		i452NoCandidates(t, pool, proj)
 	})
+}
+
+// TestPullConvergenceKnownLimitWriteBegunBeforeTheRecordedVersion pins a
+// KNOWN LIMIT, an open point of issue #491: a local write whose transaction
+// began before the writer of the version a convergence records began, and
+// that writes once the convergence committed. updated_at is the writing
+// transaction's start, so it stores an updated_at below the synced_at the
+// convergence set (that version's updated_at): the mapping is no push
+// candidate, three runs send nothing, nothing is flagged, and the forge keeps
+// the old body while the block holds the local one — until the block is
+// written again. No timestamp tells such a write apart; closing it needs a
+// write counter that advances in the order writers take the row (a schema
+// change). The same holds for a pull-update and for the push advance. If
+// this test turns red because the edit now reaches the forge, the limit is
+// closed: turn the assertions around and update docs/architecture.md and the
+// comment of store.UpdateSyncMapBase.
+func TestPullConvergenceKnownLimitWriteBegunBeforeTheRecordedVersion(t *testing.T) {
+	e := i491Setup(t, "i491convlimit", "", fakeIssue{Title: "Crane", Body: "forge body"})
+	ctx := context.Background()
+	w := e.begun(t)
+	var began time.Time
+	if err := w.QueryRow(ctx, `SELECT now()`).Scan(&began); err != nil {
+		t.Fatal(err)
+	}
+	e.edit(t, store.IssueUpdate{Title: str("Crane, renamed")}) // the version the convergence records
+	if v := getBlock(t, e.pool, e.proj.Scope, e.id(t)); !v.UpdatedAt.After(began) {
+		t.Skipf("the clock did not advance between the two transaction starts (%s, %s)", began, v.UpdatedAt)
+	}
+	e.gh.edit(t, 5, func(it *fakeIssue) { it.Title = "Crane, renamed" })
+	if r := e.pullOn(t, e.pool); r.Applied != 0 || r.Conflicts != 0 {
+		t.Fatalf("converging pull: %+v", r)
+	}
+	const body = "body of a write begun before the version the convergence recorded"
+	e.editIn(t, w, store.IssueUpdate{Content: str(body)})
+	if err := w.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	n := e.cycles(t, 3)
+	b := getBlock(t, e.pool, e.proj.Scope, e.id(t))
+	it := e.gh.issue(t, 5)
+	_, conflict := e.mapping(t)
+	if n != 0 || conflict || b.Content != body || it.Body != "forge body" {
+		t.Errorf("the pin expects the local edit unpushed and unflagged (the known limit): %d PATCH(es) in three runs, flagged %v, block %q, forge %q", n, conflict, b.Content, it.Body)
+	}
 }
 
 // pullHeldOn runs one pull on a pool whose write transaction waits at its
