@@ -320,7 +320,19 @@ type PushProjection func(b *Block) string
 // Tx-bound: the push runs it in a short transaction after the wire write, on
 // the connection that holds the entity's push lock (TryLockPushEntity, issue
 // #491).
-func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHash string, ctxFields json.RawMessage, forgeUpdatedAt *time.Time, project PushProjection) (moved bool, err error) {
+//
+// sent says that a wire write carried ctxHash (false: the advance alone, the
+// listed block projecting to its base already, or only a never-pushed field
+// diverging). A flag a pull set since the section's check goes when the
+// base write records what was sent and the block still holds it — block,
+// base and forge agree on the sent version, the answer the pull's noop cell
+// gives as well (issue #509). Where the forge moved past the PATCH since,
+// the next pull finds block and base at the sent version and pulls the
+// forge's, as it would have with the flag. A flag stays when the block
+// moved since the listing (it does not hold the sent version), and an
+// advance without a wire write clears none: nothing tells it what the forge
+// holds.
+func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHash string, ctxFields json.RawMessage, forgeUpdatedAt *time.Time, sent bool, project PushProjection) (moved bool, err error) {
 	var b Block
 	var at time.Time
 	holds := false
@@ -345,11 +357,13 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 		       synced_at = CASE WHEN $4 THEN $5::timestamptz ELSE '-infinity'::timestamptz END,
 		       metadata = CASE WHEN base_hash IN ($6, $2) THEN metadata || $3::jsonb ELSE metadata - 'base_fields' END,
 		       forge_updated_at = CASE WHEN base_hash IN ($6, $2) THEN GREATEST(forge_updated_at, $8::timestamptz) ELSE forge_updated_at END,
-		       conflict = conflict OR base_hash NOT IN ($6, $2),
-		       conflict_at = CASE WHEN base_hash IN ($6, $2) THEN conflict_at ELSE COALESCE(conflict_at, now()) END
+		       conflict = CASE WHEN base_hash NOT IN ($6, $2) THEN true ELSE conflict AND NOT ($9 AND $4) END,
+		       conflict_at = CASE WHEN base_hash NOT IN ($6, $2) THEN COALESCE(conflict_at, now())
+		                          WHEN $9 AND $4 THEN NULL
+		                          ELSE conflict_at END
 		 WHERE block_id = $1::uuid
 		RETURNING old.base_hash NOT IN ($6, $2)`,
-		blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash, forgeUpdatedAt).Scan(&moved)
+		blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash, forgeUpdatedAt, sent).Scan(&moved)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return false, nil

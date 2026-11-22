@@ -122,7 +122,10 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 	// advance records it, and an advance without a wire write has none.
 	var stamp *time.Time
 	advanceOnly := func(tx pgx.Tx) error {
-		return p.advance(ctx, tx, c.Block.ID, c.BaseHash, ctxH, ctxFields, stamp, projected, res)
+		return p.advance(ctx, tx, c.Block.ID, c.BaseHash, ctxH, ctxFields, stamp, false, projected, res)
+	}
+	advanceSent := func(tx pgx.Tx) error {
+		return p.advance(ctx, tx, c.Block.ID, c.BaseHash, ctxH, ctxFields, stamp, true, projected, res)
 	}
 	if ctxH == c.BaseHash {
 		// In sync (a write that left the projection alone, or an edit undone
@@ -160,7 +163,7 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 		var err error
 		stamp, err = client.UpdateIssue(ctx, repo, c.ForgeID, patch)
 		return err
-	}, advanceOnly)
+	}, advanceSent)
 }
 
 // errThrottled leaves a push section without its record when the token
@@ -342,7 +345,10 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 	}
 	var stamp *time.Time // the PATCH's answer, as in pushIssue
 	advanceOnly := func(tx pgx.Tx) error {
-		return p.advance(ctx, tx, c.BlockID, c.BaseHash, ctxH, ctxFields, stamp, projected, res)
+		return p.advance(ctx, tx, c.BlockID, c.BaseHash, ctxH, ctxFields, stamp, false, projected, res)
+	}
+	advanceSent := func(tx pgx.Tx) error {
+		return p.advance(ctx, tx, c.BlockID, c.BaseHash, ctxH, ctxFields, stamp, true, projected, res)
 	}
 	if ctxH == c.BaseHash {
 		// In sync — 0 wire; the row leaves the candidates as in pushIssue.
@@ -385,7 +391,7 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 		var err error
 		stamp, err = client.UpdateComment(ctx, repo, c.ForgeID, body)
 		return err
-	}, advanceOnly)
+	}, advanceSent)
 }
 
 // advance records the pushed (or in-sync) version as the mapping's base
@@ -396,9 +402,10 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 // version (issue #486) and the pass counts the conflict; a pull that
 // converged on the sent version leaves nothing to decide (issue #491).
 // stamp is the forge's updated_at of the PATCH's answer (nil: none), the
-// mapping's forge stamp with the base (issue #509).
-func (p *Pusher) advance(ctx context.Context, tx pgx.Tx, blockID, listed, ctxH string, ctxFields []byte, stamp *time.Time, projected store.PushProjection, res *PushResult) error {
-	moved, err := store.AdvancePushBase(ctx, tx, blockID, listed, ctxH, ctxFields, stamp, projected)
+// mapping's forge stamp with the base (issue #509); sent says that a PATCH
+// carried ctxH (store.AdvancePushBase).
+func (p *Pusher) advance(ctx context.Context, tx pgx.Tx, blockID, listed, ctxH string, ctxFields []byte, stamp *time.Time, sent bool, projected store.PushProjection, res *PushResult) error {
+	moved, err := store.AdvancePushBase(ctx, tx, blockID, listed, ctxH, ctxFields, stamp, sent, projected)
 	if err != nil {
 		return err
 	}

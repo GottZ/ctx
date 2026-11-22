@@ -8,7 +8,7 @@
 // returns for the block, forgeH = the hash ForgeIssueBase returns for the fetch:
 //
 //	no mapping           ⇒ pull-CREATE  (block + mapping + base := forgeH)
-//	(=,=)                ⇒ noop
+//	(=,=)                ⇒ noop         (a flagged mapping: flag cleared, issue #509)
 //	(base=ctxH, ≠forgeH) ⇒ pull-UPDATE  (block-update + base := forgeH)
 //	(≠ctxH, base=forgeH) ⇒ ctx-ahead    (NOTHING — push is I-H)
 //	(≠,≠, ctxH=forgeH)   ⇒ converged     (base := ctxH, NO block write)
@@ -433,8 +433,9 @@ type pulled struct {
 
 // applyLocked carries out the matrix decision the read path made on a page
 // read without locks (read), in one transaction. A decision that writes
-// nothing ends on the read: noop, ctx-ahead (the push's), and a conflict the
-// mapping already carries (idempotent, 0 new conflicts). Every other one is
+// nothing ends on the read (endsOnRead): noop on an unflagged mapping,
+// ctx-ahead (the push's), and a conflict the mapping already carries
+// (idempotent, 0 new conflicts). Every other one is
 // decided again on the rows the transaction locks — the block together with
 // the targets of its references in ascending id order (LockPulledBlock,
 // issue #503), then its mapping row (LockSyncMap), the order of every writer
@@ -469,14 +470,18 @@ type pulled struct {
 // pull of another instance may have applied the newer version between this
 // pull's fetch and its read.
 //
+// A flag goes once block and forge agree on the locked rows (issue #509):
+// the convergence clears it as it always did, and so does the noop cell —
+// block, base and forge at one version — which before wrote nothing, so a
+// mapping flagged while both sides moved stayed flagged after they came
+// level, out of the push's listing for good. It records that version as
+// the base (synced_at the block's updated_at) like a convergence.
+//
 // A block that is gone, archived or out of scope, or that lost its mapping,
 // is skipped, as the read does.
 func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.SyncMap, read decision, p pulled) (ApplyResult, error) {
-	switch {
-	case read == decNoop, read == decCtxAhead:
-		return ApplyResult{}, nil
-	case read == decConflict && m.Conflict:
-		return ApplyResult{}, nil // already flagged — idempotent, 0 new conflicts
+	if res, done := endsOnRead(read, m); done {
+		return res, nil
 	}
 	var targets []string
 	if p.targets != nil {
@@ -522,7 +527,10 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 			}
 			res.Applied = 1
 			return store.UpdateSyncMapBase(ctx, tx, m.BlockID, p.forgeH, p.forgeFields, p.fUpdated, &b.UpdatedAt)
-		case decConverge:
+		case decNoop, decConverge:
+			if d == decNoop && !locked.Conflict {
+				return nil // in sync and unflagged: nothing to record
+			}
 			var heldAt *time.Time
 			if ctxH == p.forgeH {
 				heldAt = &cur.UpdatedAt
@@ -540,11 +548,26 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 			res.Conflicts = 1
 			return store.FlagSyncMapConflict(ctx, tx, m.BlockID, a.clock())
 		}
-		return nil // noop or ctx-ahead on the locked rows
+		return nil // ctx-ahead on the locked rows
 	}); err != nil {
 		return ApplyResult{}, err
 	}
 	return res, nil
+}
+
+// endsOnRead answers whether the read's decision is carried out without a
+// transaction (done), and what it counts: ctx-ahead (the push's), a noop
+// on an unflagged mapping, and a conflict the mapping carries already
+// (idempotent, 0 new conflicts). A noop on a flagged mapping goes on to the
+// locked rows, which clear the flag (issue #509).
+func endsOnRead(read decision, m store.SyncMap) (ApplyResult, bool) {
+	switch {
+	case read == decCtxAhead, read == decNoop && !m.Conflict:
+		return ApplyResult{}, true
+	case read == decConflict && m.Conflict:
+		return ApplyResult{}, true
+	}
+	return ApplyResult{}, false
 }
 
 func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow, pol issueTypePolicy,
