@@ -14,6 +14,10 @@
 //	(≠,≠, ctxH=forgeH)   ⇒ converged     (base := ctxH, NO block write)
 //	(≠,≠,≠)              ⇒ CONFLICT      (conflict flag, 0 writes both ways)
 //
+// The decision is made on a page read without locks and, for every cell that
+// writes, made again on the block and the mapping row its transaction locks
+// (applyLocked, issues #452 and #491).
+//
 // Direction is CONTENT-hash only — never a timestamp (W16). Each issue applies in
 // its OWN transaction (block + mapping + references atomic), so a mid-page failure
 // leaves the earlier issues committed and the fetch cursor UN-advanced (the sync
@@ -203,24 +207,146 @@ func (a *Applier) applyIssue(ctx context.Context, project store.ProjectRow, pol 
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	ctxFields, ctxH := CtxIssueBase(block, pol.terminalSet, pol.registryOK)
-	base := m.BaseHash
+	projectBlock := func(b *store.Block) string {
+		_, h := CtxIssueBase(b, pol.terminalSet, pol.registryOK)
+		return h
+	}
+	return a.applyLocked(ctx, writable, m, decide(m.BaseHash, projectBlock(block), forgeH), pulled{
+		forgeH: forgeH, forgeFields: forgeFields, fUpdated: &fUpdated, project: projectBlock,
+		// The workflow status is written only where the forge state changed
+		// or the block has none of the resolved workflow (keepsStatus, issue
+		// #486), decided on the block the transaction locked.
+		write: func(tx pgx.Tx, cur *store.Block) (*store.Block, error) {
+			content.KeepWorkflowStatus = pol.keepsStatus(cur, iss.State)
+			b, err := store.PullUpdateIssueBlock(ctx, tx, m.BlockID, content)
+			if err != nil {
+				return nil, err
+			}
+			return b, a.applyReferences(ctx, tx, project, pol, writable, m.BlockID, iss.Number, iss.Body)
+		},
+	})
+}
 
+// decision is one cell of the 3-way matrix (see the package doc).
+type decision int
+
+const (
+	decNoop     decision = iota // (=,=)
+	decPull                     // forge-ahead: pull-UPDATE
+	decCtxAhead                 // the push's (I-H)
+	decConverge                 // block and forge agree, the base is behind
+	decConflict                 // both moved apart
+)
+
+// decide is the 3-way matrix: base = the mapping's base_hash, ctxH = the
+// block's projection, forgeH = the fetched entity's.
+func decide(base, ctxH, forgeH string) decision {
 	switch {
 	case base == ctxH && base == forgeH:
-		return ApplyResult{}, nil // (=,=): noop
-	case base == ctxH && base != forgeH:
-		return a.pullUpdateIssue(ctx, project, pol, writable, iss, m, content, forgeH, forgeFields, &fUpdated)
-	case base != ctxH && base == forgeH:
-		return ApplyResult{}, nil // ctx-ahead: push is I-H, I-G does nothing
+		return decNoop
+	case base == ctxH:
+		return decPull
+	case base == forgeH:
+		return decCtxAhead
 	case ctxH == forgeH:
-		return ApplyResult{}, a.txBaseUpdate(ctx, m.BlockID, ctxH, ctxFields, &fUpdated) // converged
+		return decConverge
 	default:
-		if m.Conflict {
-			return ApplyResult{}, nil // already flagged — idempotent, 0 new conflicts
-		}
-		return a.flagConflict(ctx, m.BlockID)
+		return decConflict
 	}
+}
+
+// pulled is one fetched entity the locked apply decides about: the forge
+// side's projection, the block's projection (CtxIssueBase or CtxCommentBase,
+// bound to the scope's policy) and the pull-UPDATE's block write.
+type pulled struct {
+	forgeH      string
+	forgeFields json.RawMessage
+	fUpdated    *time.Time
+	project     func(b *store.Block) string
+	write       func(tx pgx.Tx, cur *store.Block) (*store.Block, error)
+}
+
+// applyLocked carries out the matrix decision the read path made on a page
+// read without locks (read), in one transaction. A decision that writes
+// nothing ends on the read: noop, ctx-ahead (the push's), and a conflict the
+// mapping already carries (idempotent, 0 new conflicts). Every other one is
+// decided again on the rows the transaction locks — the block
+// (LockPulledBlock), then its mapping row (LockSyncMap), the order of every
+// writer of both — because a local write can move the block and another
+// ctxd instance the mapping between the read and the write (issues #452,
+// #491):
+//
+//   - The mapping still holds the base the read decided on. The read's
+//     convergence stands whatever the block holds now: the read saw block
+//     and forge at one version, the forge still holds it, so it is the base
+//     both sides last agreed on; a local write since is ahead of it and goes
+//     out with the next push (synced_at -infinity, UpdateSyncMapBase). Any
+//     other decision is taken again on the locked block — forge-ahead stays
+//     forge-ahead only while the block still projects to the base; a block a
+//     local write moved is a convergence when it now equals the forge, a
+//     conflict otherwise (the read path's own matrix, issue #452).
+//   - The mapping's base moved (another instance pushed and advanced it, or
+//     pulled): the read's decision was made against a base that is gone, and
+//     the matrix runs on the locked block and the locked row alone. Where
+//     another instance pushed a local edit, the block equals the new base and
+//     the forge is ahead of it — a pull, not the conflict the read's base
+//     would make of it; what the pull fetched before that push landed comes
+//     back with the next pull, the forge holding the pushed edit.
+//
+// A block that is gone, archived or out of scope, or that lost its mapping,
+// is skipped, as the read does.
+func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.SyncMap, read decision, p pulled) (ApplyResult, error) {
+	switch {
+	case read == decNoop, read == decCtxAhead:
+		return ApplyResult{}, nil
+	case read == decConflict && m.Conflict:
+		return ApplyResult{}, nil // already flagged — idempotent, 0 new conflicts
+	}
+	var res ApplyResult
+	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		res = ApplyResult{}
+		cur, err := store.LockPulledBlock(ctx, tx, m.BlockID, writable)
+		if errors.Is(err, store.ErrIssueNotFound) {
+			return nil // archived/vanished since the read — skip, as the read does
+		}
+		if err != nil {
+			return err
+		}
+		locked, ok, err := store.LockSyncMap(ctx, tx, m.BlockID)
+		if err != nil || !ok {
+			return err
+		}
+		ctxH := p.project(cur)
+		d := decide(locked.BaseHash, ctxH, p.forgeH)
+		if locked.BaseHash == m.BaseHash && read == decConverge {
+			d = decConverge
+		}
+		switch d {
+		case decPull:
+			b, err := p.write(tx, cur)
+			if err != nil {
+				return err
+			}
+			res.Applied = 1
+			return store.UpdateSyncMapBase(ctx, tx, m.BlockID, p.forgeH, p.forgeFields, p.fUpdated, &b.UpdatedAt)
+		case decConverge:
+			var heldAt *time.Time
+			if ctxH == p.forgeH {
+				heldAt = &cur.UpdatedAt
+			}
+			return store.UpdateSyncMapBase(ctx, tx, m.BlockID, p.forgeH, p.forgeFields, p.fUpdated, heldAt)
+		case decConflict:
+			if locked.Conflict {
+				return nil
+			}
+			res.Conflicts = 1
+			return store.FlagSyncMapConflict(ctx, tx, m.BlockID, a.clock())
+		}
+		return nil // noop or ctx-ahead on the locked rows
+	}); err != nil {
+		return ApplyResult{}, err
+	}
+	return res, nil
 }
 
 func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow, pol issueTypePolicy,
@@ -242,85 +368,6 @@ func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow,
 		return ApplyResult{}, err
 	}
 	return ApplyResult{Applied: 1}, nil
-}
-
-// pullUpdateIssue writes a forge-ahead issue: the block, base := forgeH and the
-// references, in one transaction. The direction was decided on a read without
-// a lock, and a local write may have changed the block since (issue #452):
-// the block is locked and projected again first (LockPulledBlock), and a block
-// that no longer holds the base goes the matrix's way instead (stillAtBase).
-// The workflow status is written only where the forge state changed or the
-// block has none of the resolved workflow (keepsStatus, issue #486).
-func (a *Applier) pullUpdateIssue(ctx context.Context, project store.ProjectRow, pol issueTypePolicy,
-	writable []string, iss IssueRemote, m store.SyncMap, content store.ForgeIssueContent, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
-
-	var res ApplyResult
-	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
-		res = ApplyResult{}
-		cur, err := store.LockPulledBlock(ctx, tx, m.BlockID, writable)
-		if errors.Is(err, store.ErrIssueNotFound) {
-			return nil // archived/vanished since the read — skip, as the read does
-		}
-		if err != nil {
-			return err
-		}
-		ctxFields, ctxH := CtxIssueBase(cur, pol.terminalSet, pol.registryOK)
-		if at, r, err := a.stillAtBase(ctx, tx, m, ctxH, ctxFields, forgeH, fUpdated); !at || err != nil {
-			res = r
-			return err
-		}
-		content.KeepWorkflowStatus = pol.keepsStatus(cur, iss.State)
-		if _, err := store.PullUpdateIssueBlock(ctx, tx, m.BlockID, content); err != nil {
-			return err
-		}
-		if err := store.UpdateSyncMapBase(ctx, tx, m.BlockID, forgeH, forgeFields, fUpdated); err != nil {
-			return err
-		}
-		res = ApplyResult{Applied: 1}
-		return a.applyReferences(ctx, tx, project, pol, writable, m.BlockID, iss.Number, iss.Body)
-	}); err != nil {
-		return ApplyResult{}, err
-	}
-	return res, nil
-}
-
-// stillAtBase answers whether the locked block still projects to the
-// mapping's base (ctxH), the state the pull decided "forge-ahead" on. When a
-// local write moved it since the read, the pull must not overwrite it, and the
-// 3-way matrix decides again with both sides moved: the block now equals the
-// forge ⇒ converged (base := ctxH, no block write); otherwise ⇒ conflict (the
-// flag, no write either way; a mapping already flagged stays as it is, 0 new
-// conflicts, as on the read path).
-func (a *Applier) stillAtBase(ctx context.Context, tx pgx.Tx, m store.SyncMap, ctxH string, ctxFields json.RawMessage,
-	forgeH string, fUpdated *time.Time) (bool, ApplyResult, error) {
-
-	switch {
-	case ctxH == m.BaseHash:
-		return true, ApplyResult{}, nil
-	case ctxH == forgeH:
-		return false, ApplyResult{}, store.UpdateSyncMapBase(ctx, tx, m.BlockID, ctxH, ctxFields, fUpdated)
-	case m.Conflict:
-		return false, ApplyResult{}, nil
-	default:
-		return false, ApplyResult{Conflicts: 1}, store.FlagSyncMapConflict(ctx, tx, m.BlockID, a.clock())
-	}
-}
-
-// txBaseUpdate rewrites base_hash + the base-field snapshot alone (convergence)
-// — 0 block writes.
-func (a *Applier) txBaseUpdate(ctx context.Context, blockID, baseHash string, baseFields json.RawMessage, fUpdated *time.Time) error {
-	return pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
-		return store.UpdateSyncMapBase(ctx, tx, blockID, baseHash, baseFields, fUpdated)
-	})
-}
-
-func (a *Applier) flagConflict(ctx context.Context, blockID string) (ApplyResult, error) {
-	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
-		return store.FlagSyncMapConflict(ctx, tx, blockID, a.clock())
-	}); err != nil {
-		return ApplyResult{}, err
-	}
-	return ApplyResult{Conflicts: 1}, nil
 }
 
 // ApplyComments is the CommentApplyFunc: one fetched page of comments → the
@@ -389,23 +436,16 @@ func (a *Applier) applyComment(ctx context.Context, project store.ProjectRow, wr
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	ctxFields, ctxH := CtxCommentBase(block)
-	base := m.BaseHash
-	switch {
-	case base == ctxH && base == forgeH:
-		return ApplyResult{}, nil
-	case base == ctxH && base != forgeH:
-		return a.pullUpdateComment(ctx, writable, m, cappedBody, forgeH, forgeFields, &fUpdated)
-	case base != ctxH && base == forgeH:
-		return ApplyResult{}, nil // ctx-ahead (I-H)
-	case ctxH == forgeH:
-		return ApplyResult{}, a.txBaseUpdate(ctx, m.BlockID, ctxH, ctxFields, &fUpdated)
-	default:
-		if m.Conflict {
-			return ApplyResult{}, nil
-		}
-		return a.flagConflict(ctx, m.BlockID)
+	projectBlock := func(b *store.Block) string {
+		_, h := CtxCommentBase(b)
+		return h
 	}
+	return a.applyLocked(ctx, writable, m, decide(m.BaseHash, projectBlock(block), forgeH), pulled{
+		forgeH: forgeH, forgeFields: forgeFields, fUpdated: &fUpdated, project: projectBlock,
+		write: func(tx pgx.Tx, _ *store.Block) (*store.Block, error) {
+			return store.PullUpdateCommentBlock(ctx, tx, m.BlockID, cappedBody)
+		},
+	})
 }
 
 func (a *Applier) pullCreateComment(ctx context.Context, project store.ProjectRow, c CommentRemote,
@@ -441,34 +481,6 @@ func (a *Applier) pullCreateComment(ctx context.Context, project store.ProjectRo
 		return ApplyResult{}, err
 	}
 	return ApplyResult{Applied: 1}, nil
-}
-
-// pullUpdateComment is pullUpdateIssue for a comment ({body} projection).
-func (a *Applier) pullUpdateComment(ctx context.Context, writable []string, m store.SyncMap, body, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
-	var res ApplyResult
-	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
-		res = ApplyResult{}
-		cur, err := store.LockPulledBlock(ctx, tx, m.BlockID, writable)
-		if errors.Is(err, store.ErrIssueNotFound) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		ctxFields, ctxH := CtxCommentBase(cur)
-		if at, r, err := a.stillAtBase(ctx, tx, m, ctxH, ctxFields, forgeH, fUpdated); !at || err != nil {
-			res = r
-			return err
-		}
-		if _, err := store.PullUpdateCommentBlock(ctx, tx, m.BlockID, body); err != nil {
-			return err
-		}
-		res = ApplyResult{Applied: 1}
-		return store.UpdateSyncMapBase(ctx, tx, m.BlockID, forgeH, forgeFields, fUpdated)
-	}); err != nil {
-		return ApplyResult{}, err
-	}
-	return res, nil
 }
 
 // issueRefRe extracts a "#<nr>" reference token with a boundary before the '#'

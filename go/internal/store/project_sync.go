@@ -283,19 +283,60 @@ func baseFieldsMeta(fields json.RawMessage) string {
 	return string(obj)
 }
 
+// LockSyncMap reads the mapping row of blockID inside the pull's transaction
+// and locks it FOR NO KEY UPDATE, the lock the row's own UPDATE takes (no key
+// column of it changes on the pull side). The pull decided its direction on a
+// page-wide read without a lock, and another ctxd instance can write the row
+// since — its push advances the base, its pull converges or flags it; the pull
+// decides again on the row this returns (issue #491). Lock order: the block
+// row first (LockPulledBlock), then this one — the order of every writer of
+// both (AdvancePushBase, FinalizePushCreateIssue's rename aside, which runs
+// on a forge_id 0 row no pull reads). ok=false: the block has no mapping row.
+func LockSyncMap(ctx context.Context, tx pgx.Tx, blockID string) (SyncMap, bool, error) {
+	var m SyncMap
+	err := tx.QueryRow(ctx,
+		`SELECT project_id::text, entity_kind, forge_id, block_id::text, base_hash, conflict, forge_updated_at,
+		        metadata->'base_fields'
+		   FROM context_project_sync_map
+		  WHERE block_id = $1::uuid
+		    FOR NO KEY UPDATE`, blockID).Scan(&m.ProjectID, &m.EntityKind, &m.ForgeID, &m.BlockID, &m.BaseHash,
+		&m.Conflict, &m.ForgeUpdatedAt, &m.BaseFields)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SyncMap{}, false, nil
+	}
+	if err != nil {
+		return SyncMap{}, false, fmt.Errorf("store: lock sync map: %w", err)
+	}
+	return m, true, nil
+}
+
 // UpdateSyncMapBase rewrites base_hash after a pull-apply (base := forgeH) or a
-// convergence (base := ctxH == forgeH). It CLEARS any conflict flag — a resolved
-// direction ends the conflict. Keyed on block_id (the per-block unique index).
-// Tx-bound so it commits with the block update (or, for convergence, alone: no
-// block write, only the base advance, §4.5.2).
-func UpdateSyncMapBase(ctx context.Context, tx pgx.Tx, blockID, baseHash string, baseFields json.RawMessage, forgeUpdatedAt *time.Time) error {
+// convergence (base := the version block and forge agreed on). It CLEARS any
+// conflict flag — a resolved direction ends the conflict. Keyed on block_id
+// (the per-block unique index). Tx-bound so it commits with the block update
+// (or, for convergence, alone: no block write, only the base advance, §4.5.2).
+//
+// syncedAt is the time of the block version the base records, while the
+// caller holds the block locked and it still is that version: the pull's own
+// write (its updated_at), or the version a convergence found. The candidate
+// filter (b.updated_at > m.synced_at) then lists every later local write
+// whose transaction began after that version was written — a write whose
+// transaction began before this one and writes after it included, which
+// now() would hide (issue #491). nil means the block moved past the version
+// since (a convergence the pull read, and a local write committed before the
+// lock): synced_at := -infinity, so the row stays a push candidate whatever
+// updated_at that write stored, and the push diffs it against the base this
+// writes — the version the forge holds. synced_at is compared in SQL only
+// (AdvancePushBase).
+func UpdateSyncMapBase(ctx context.Context, tx pgx.Tx, blockID, baseHash string, baseFields json.RawMessage, forgeUpdatedAt, syncedAt *time.Time) error {
 	_, err := tx.Exec(ctx,
 		`UPDATE context_project_sync_map
-		    SET base_hash = $2, forge_updated_at = $3, synced_at = now(),
+		    SET base_hash = $2, forge_updated_at = $3,
+		        synced_at = COALESCE($5::timestamptz, '-infinity'::timestamptz),
 		        conflict = false, conflict_at = NULL,
 		        metadata = metadata || $4::jsonb
 		  WHERE block_id = $1::uuid`,
-		blockID, baseHash, forgeUpdatedAt, baseFieldsMeta(baseFields))
+		blockID, baseHash, forgeUpdatedAt, baseFieldsMeta(baseFields), syncedAt)
 	if err != nil {
 		return fmt.Errorf("store: update sync map base: %w", err)
 	}
