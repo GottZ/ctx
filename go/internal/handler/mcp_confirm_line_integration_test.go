@@ -140,6 +140,20 @@ func TestMCPConfirmLine(t *testing.T) {
 		return b.ID
 	}
 
+	t.Run("a confirmed store_batch names its count", func(t *testing.T) {
+		hash := stage(t, "store_batch", map[string]any{"items": []map[string]any{
+			storeArgs("i483 confirm count one", "one"), storeArgs("i483 confirm count two", "two")}})
+		logs := installRejectLogCapture(t)
+		url, done := f.serve(t, ar, nil)
+		if text, isErr := callTool(t, url, "", "confirm", map[string]any{"payload_hash": hash}); isErr {
+			t.Fatalf("confirm failed: %s", text)
+		}
+		waitDone(t, done)
+		line := toolLine(t, logs)
+		if line.attrs["write_outcome"] != writeCommitted || line.attrs["count"] != int64(2) {
+			t.Errorf("confirm line = %+v, want write_outcome=committed count=2", line.attrs)
+		}
+	})
 	t.Run("a confirmed update whose execute fails names its block", func(t *testing.T) {
 		id := seed(t, "i483 confirm fault update")
 		hash := stage(t, "update", map[string]any{"id": id, "content": "refused at the confirm"})

@@ -184,7 +184,8 @@ func newCutFixture(t *testing.T) *cutFixture {
 		 END $$`,
 	}
 	for _, tbl := range []string{"context_blocks", "context_blobs", "context_pending_writes", "context_dream_links",
-		"context_tenants", "context_tenant_grants", "context_block_grants", "context_tenant_quota"} {
+		"context_tenants", "context_tenant_scopes", "context_tenant_grants", "context_block_grants", "context_tenant_quota",
+		"context_structural_links"} {
 		ddl = append(ddl, fmt.Sprintf(`CREATE CONSTRAINT TRIGGER i483_hold AFTER INSERT OR UPDATE OR DELETE ON %[1]s
 			DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION i483_hold('%[1]s')`, tbl))
 	}
@@ -984,10 +985,11 @@ func TestWriteOutcomeCutRemainingPaths(t *testing.T) {
 	})
 }
 
-// TestWriteOutcomeCutAdminPaths — the admin writes of point 9 whose store
-// function is one statement or an unlabeled bracket (statementOutcome): a cut
-// commit says unknown on their failure line; writeOutcome would say
-// rolled_back.
+// TestWriteOutcomeCutAdminPaths — the admin writes of point 9: those whose
+// store function is one statement or an unlabeled bracket take
+// statementOutcome, tenant-create and scope-create a labeled bracket
+// (writeOutcome); a cut commit says unknown on every failure line — the
+// constant rolled_back, or writeOutcome on an unlabeled commit, would not.
 func TestWriteOutcomeCutAdminPaths(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -1030,6 +1032,14 @@ func TestWriteOutcomeCutAdminPaths(t *testing.T) {
 		f.cutREST(t, manage, adminPlain, table, "/api/manage", body, msg)
 	}
 
+	t.Run("tenant-create", func(t *testing.T) {
+		cut(t, "context_tenants", `{"action":"tenant-create","data":{"slug":"i483-cut-c","display_name":"I483 cut c"}}`, "manage: tenant-create failed")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_tenants WHERE slug = 'i483-cut-c'`)
+	})
+	t.Run("scope-create", func(t *testing.T) {
+		cut(t, "context_tenant_scopes", fmt.Sprintf(`{"action":"scope-create","data":{"name":"cutx","tenant_id":%q}}`, a.id), "manage: scope-create failed")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_tenant_scopes WHERE scope = 'i483-cut-a:cutx'`)
+	})
 	t.Run("tenant-update", func(t *testing.T) {
 		cut(t, "context_tenants", fmt.Sprintf(`{"action":"tenant-update","id":%q,"data":{"display_name":"I483 cut renamed"}}`, a.id), "manage: tenant-update failed")
 		f.waitLanded(t, `SELECT count(*)::int FROM context_tenants WHERE id = $1::uuid AND display_name = 'I483 cut renamed'`, a.id)
