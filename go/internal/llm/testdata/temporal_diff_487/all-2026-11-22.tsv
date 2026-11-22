@@ -234,7 +234,7 @@ Wer war seit 2024 Maintainer?	nil
 Since 2024 who maintains it?	nil	fixed	["since 2024 who maintains|2024-01-01..2026-11-22|range"] linear=1.00	a year as a window edge
 After 2025 who maintains it?	nil	fixed	["after 2025 who maintains|2026-01-01..|from"] linear=1.00	a year as a window edge
 Was lief seit 2024 schief?	nil
-Was kam nach 2024 und vor 2026?	nil	disputed	["nach 2024 und vor|2025-01-01..|from"] linear=1.00	the window reads "nach 2024" and leaves "vor 2026" out
+Was kam nach 2024 und vor 2026?	nil	fixed	["nach 2024 und vor 2026?|2025-01-01..2025-12-31|range"] linear=1.00	an edge of each direction is one window: 2025, not the time from 2025 on
 Was gab es zwischen 2025 und 2026?	nil	fixed	["zwischen 2025 und 2026?|2025-01-01..2026-12-31|range"] linear=1.00	a year as a window edge
 Was ist am Montag?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40	fixed	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40	present or future
 Was steht am Montag an?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40

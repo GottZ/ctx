@@ -200,6 +200,13 @@ func TestRules_OverlappingDayDatesDoNotPanic(t *testing.T) {
 	}
 }
 
+// maxFuzzQuestion bounds the input of the fuzz targets of the rules (issue
+// #506): a fuzzer that grows its strings without bound spends its time on
+// ever longer inputs — the run of the review round fell to 0 executions per
+// second — while the rules' forms all lie within a few hundred bytes, and the
+// cost of a long question has its own test (TestRules_CostIsLinearInTheQuestion).
+const maxFuzzQuestion = 512
+
 // FuzzNormalizeTemporalRules: no question makes the rules panic, and no
 // window they yield starts after it ends.
 func FuzzNormalizeTemporalRules(f *testing.F) {
@@ -208,6 +215,9 @@ func FuzzNormalizeTemporalRules(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, q string) {
+		if len(q) > maxFuzzQuestion {
+			return
+		}
 		tr := NormalizeTemporalRules(q, now463)
 		if tr == nil {
 			return

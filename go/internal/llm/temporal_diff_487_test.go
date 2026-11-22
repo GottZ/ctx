@@ -3,6 +3,7 @@ package llm
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,24 +17,45 @@ import (
 // round: over the question corpora of the independent review (four-digit
 // numbers that are no year, years, the tense of German and English questions,
 // German Perfekt questions, the edges of a window at year precision, the F
-// bucket) and the lead's own, asked on the days the review asked them, no
-// question whose answer the rules changed against 36b915f8 (v5.75.0, the
-// "base" column of testdata/temporal_diff_487) may be one they now answer
-// wrong. Every changed answer carries a verdict given by hand — fixed, or
-// disputed where both readings stand — and the answer it was given for; an
-// answer that changes again fails until it is judged again, and a verdict
-// "broken" fails always. The base column is the rules' output at the base,
-// byte for byte the review's own run of the base on the same corpora.
+// bucket), the lead's own, the holdout of that round and the questions of
+// issue #506, asked on the days the review asked them, no question whose
+// answer the rules changed against 36b915f8 (v5.75.0, the "base" column of
+// testdata/temporal_diff_487) may be one they now answer wrong. Every changed
+// answer carries a verdict given by hand — fixed, or disputed where both
+// readings stand — and the answer it was given for; an answer that changes
+// again fails until it is judged again, and a verdict "broken" fails always.
+// The base column is the rules' output at the base, byte for byte the
+// review's own run of the base on the same corpora.
 func TestRules_DifferentialAgainstTheBase(t *testing.T) {
-	files, err := filepath.Glob("testdata/temporal_diff_487/*.tsv")
+	checkDifferential(t, "testdata/temporal_diff_487")
+}
+
+// TestRules_DifferentialAgainstTheSecondBase is the same gate against
+// aa1354ea (v5.76.1, issue #506): the base column of
+// testdata/temporal_diff_506 is the rules' output there, over the same
+// corpora, so that no question the rules answer right since issue #487 is
+// answered wrong now.
+func TestRules_DifferentialAgainstTheSecondBase(t *testing.T) {
+	checkDifferential(t, "testdata/temporal_diff_506")
+}
+
+// checkDifferential runs the differential gate over the corpora in dir. A
+// gate that checks no question proves nothing: a directory without a corpus
+// file, and a file without a question, fail it (issue #506).
+func checkDifferential(t testing.TB, dir string) {
+	t.Helper()
+	files, err := filepath.Glob(dir + "/*.tsv")
 	if err != nil || len(files) == 0 {
-		t.Fatalf("no corpus: %v", err)
+		t.Fatalf("no corpus in %s: %v", dir, err)
 	}
 	type counts struct{ checked, changed, fixed, broken, disputed int }
 	var total counts
 	var disputed []string
 	for _, file := range files {
 		name := strings.TrimSuffix(filepath.Base(file), ".tsv")
+		if len(name) < len("2006-01-02") {
+			t.Fatalf("%s: no reference day in the name", file)
+		}
 		now, err := time.Parse("2006-01-02", name[len(name)-len("2006-01-02"):])
 		if err != nil {
 			t.Fatalf("%s: no reference day in the name: %v", file, err)
@@ -84,6 +106,9 @@ func TestRules_DifferentialAgainstTheBase(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.Close()
+		if c.checked == 0 {
+			t.Errorf("%s: the corpus holds no question", file)
+		}
 		t.Logf("%s: checked %d, changed %d, fixed %d, broken %d, disputed %d", name, c.checked, c.changed, c.fixed, c.broken, c.disputed)
 		total.checked += c.checked
 		total.changed += c.changed
@@ -91,8 +116,61 @@ func TestRules_DifferentialAgainstTheBase(t *testing.T) {
 		total.broken += c.broken
 		total.disputed += c.disputed
 	}
+	if total.checked == 0 {
+		t.Fatalf("%s: no question checked", dir)
+	}
 	t.Logf("total: checked %d, changed %d, fixed %d, broken %d, disputed %d", total.checked, total.changed, total.fixed, total.broken, total.disputed)
 	t.Logf("disputed:\n  %s", strings.Join(disputed, "\n  "))
+}
+
+// TestCheckDifferential_AnEmptyCorpusFails: the gate fails on a directory
+// without a corpus file and on a corpus file that holds only its header —
+// before issue #506 both passed, checking nothing.
+func TestCheckDifferential_AnEmptyCorpusFails(t *testing.T) {
+	empty := t.TempDir()
+	headerOnly := t.TempDir()
+	if err := os.WriteFile(filepath.Join(headerOnly, "all-2026-11-22.tsv"), []byte("# header\n# columns\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, dir := range map[string]string{"no file": empty, "header only": headerOnly} {
+		rec := &gateRecorder{TB: t}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					if err, ok := r.(error); !ok || !errors.Is(err, errGateStopped) {
+						panic(r)
+					}
+				}
+			}()
+			checkDifferential(rec, dir)
+		}()
+		if len(rec.failures) == 0 {
+			t.Errorf("%s: the differential gate passes without a question", name)
+		}
+	}
+}
+
+// gateRecorder records the failures a gate reports instead of failing the
+// test that runs it; a fatal failure stops the gate (errGateStopped).
+type gateRecorder struct {
+	testing.TB
+	failures []string
+}
+
+var errGateStopped = errors.New("gate stopped")
+
+func (r *gateRecorder) Helper()             {}
+func (r *gateRecorder) Logf(string, ...any) {}
+func (r *gateRecorder) Errorf(format string, a ...any) {
+	r.failures = append(r.failures, fmt.Sprintf(format, a...))
+}
+func (r *gateRecorder) Fatalf(format string, a ...any) {
+	r.failures = append(r.failures, fmt.Sprintf(format, a...))
+	panic(errGateStopped)
+}
+func (r *gateRecorder) Fatal(a ...any) {
+	r.failures = append(r.failures, fmt.Sprint(a...))
+	panic(errGateStopped)
 }
 
 // rulesOutput is the answer of the rules to q at now in the form of the

@@ -132,12 +132,19 @@ func TestMonthForms_ReadWhereTheWriteSideReadsThem(t *testing.T) {
 	t.Logf("%d questions", n)
 }
 
+// maxFuzzDayText bounds the input of FuzzDayDatesAgreeWithTheWriteSide as
+// maxFuzzQuestion bounds the rules' fuzz targets (issue #506).
+const maxFuzzDayText = 512
+
 func FuzzDayDatesAgreeWithTheWriteSide(f *testing.F) {
 	for _, s := range dayFragments {
 		f.Add(s)
 	}
 	f.Add("am 29.03.2026 14:30 und 2026-03-29T14:30:00Z")
 	f.Fuzz(func(t *testing.T, s string) {
+		if len(s) > maxFuzzDayText {
+			return
+		}
 		if hasMonthName(s) {
 			t.Skip("month form: not a day form")
 		}

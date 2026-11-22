@@ -26,8 +26,11 @@
 // and those of the rest hit none. A variant replaces the base form only if
 // it brings fewer in-window blocks into the first ten in no question and
 // more in at least one; the test holds the query path's expansion
-// (llm.TemporalToFTSExpansion) to that rule, which the base form itself
-// meets trivially — the guard is for a later change of the expansion.
+// (llm.TemporalToFTSExpansion) to that rule: where it differs from the base
+// form in any question, it brings fewer in-window blocks in none and more in
+// at least one, and where it is the base form in every question it passes
+// unchanged (issue #506: a replacement that ties the base everywhere is no
+// improvement).
 
 package handler
 
@@ -168,6 +171,7 @@ func TestQueryTemporalFTSExpansionAfterGravity(t *testing.T) {
 	worse := map[string]int{}
 	better := map[string]int{}
 	var queryPathWorse []string
+	queryPathDiffers, queryPathBetter := 0, 0
 	for _, q := range questions {
 		tr := llm.NormalizeTemporalRules(q.query, now)
 		if tr == nil || len(tr.Dates) != 1 || tr.Dates[0].End != nil || (tr.Dates[0].Dir != llm.DirFrom && tr.Dates[0].Dir != llm.DirUntil) {
@@ -209,6 +213,12 @@ func TestQueryTemporalFTSExpansionAfterGravity(t *testing.T) {
 		if pathCount < counts["base"] {
 			queryPathWorse = append(queryPathWorse, fmt.Sprintf("%q: %d < %d", q.query, pathCount, counts["base"]))
 		}
+		if path != terms["base"] {
+			queryPathDiffers++
+		}
+		if pathCount > counts["base"] {
+			queryPathBetter++
+		}
 		hin, hout := questionWordHits(t, ctx, pool, q.query, inWindow)
 		fmt.Fprintf(&report, "%s | %s %s | %d/%d | %d / %d / %d / %d | %q %d\n", q.query, d.Date, d.Dir, hin, hout,
 			counts["base"], counts["none"], counts["named"], counts["hybrid"], path, pathCount)
@@ -225,6 +235,34 @@ func TestQueryTemporalFTSExpansionAfterGravity(t *testing.T) {
 		t.Errorf("the query path's expansion brings fewer in-window blocks into the first ten than the base form:\n  %s",
 			strings.Join(queryPathWorse, "\n  "))
 	}
+	if err := replacementImproves(queryPathDiffers, queryPathBetter); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestReplacementImproves: a replacement of the base form that ties it in
+// every question where it differs is refused; one with an improvement and the
+// base form itself pass (issue #506).
+func TestReplacementImproves(t *testing.T) {
+	for _, c := range []struct {
+		differs, better int
+		ok              bool
+	}{{0, 0, true}, {3, 0, false}, {3, 1, true}, {21, 0, false}} {
+		if err := replacementImproves(c.differs, c.better); (err == nil) != c.ok {
+			t.Errorf("differs %d, better %d: %v, want ok=%v", c.differs, c.better, err, c.ok)
+		}
+	}
+}
+
+// replacementImproves is the second half of the replacement rule: an
+// expansion that differs from the base form in differs questions replaces it
+// only with more in-window blocks in at least one (better); one that ties the
+// base form wherever it differs is refused.
+func replacementImproves(differs, better int) error {
+	if differs > 0 && better == 0 {
+		return fmt.Errorf("the query path's expansion differs from the base form in %d questions and brings more in-window blocks into the first ten in none", differs)
+	}
+	return nil
 }
 
 // hybridExpansion is the hybrid variant of the expansion of the open window

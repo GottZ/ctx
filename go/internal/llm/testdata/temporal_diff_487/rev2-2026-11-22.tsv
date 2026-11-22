@@ -18,16 +18,16 @@ Was besprachen wir am Montag?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0
 Was entschieden wir am Freitag?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
 Was beschlossen wir am Freitag?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
 Was lernten wir am Freitag?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
-Was wollten wir am Freitag deployen?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
-Was sollten wir am Freitag tun?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was wollten wir am Freitag deployen?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40	disputed	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40	"wollten" is the simple past and the past subjunctive in one form; a plan recalled for the coming Friday reads as well as last Friday's
+Was sollten wir am Freitag tun?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40	disputed	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40	"sollten" is the simple past and the past subjunctive in one form; "what should we do on Friday" reads as well as "what were we to do"
 Was lief am Freitag schief?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
 Was änderte sich von Montag bis Mittwoch?	["von montag bis mittwoch?|2026-11-16..2026-11-18|range"] linear=0.60,weekday=0.40
 Was fehlte am Wochenende?	["am Wochenende|2026-11-21..2026-11-22|past"] weekday=1.00
 Was fehlte Montag oder Dienstag?	["Montag|2026-11-16..|past","Dienstag|2026-11-17..|past"] linear=0.60,weekday=0.40
-Welche Fehler traten am Freitag auf?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
-Welche Tests schlugen am Freitag fehl?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
-Wer deployte am Freitag?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
-Wer fixte am Montag den Bug?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Welche Fehler traten am Freitag auf?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40	fixed	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40	"traten" behind the noun of the "welche" phrase is the simple past
+Welche Tests schlugen am Freitag fehl?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40	fixed	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40	"schlugen" behind the noun of the "welche" phrase is the simple past
+Wer deployte am Freitag?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40	fixed	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40	"deployte" behind "wer" is the simple past of a loan verb
+Wer fixte am Montag den Bug?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40	fixed	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40	"fixte" behind "wer" is the simple past of a loan verb
 Was haben wir am Montag, nach dem Standup, besprochen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
 Was hast du am Freitag, bevor du gegangen bist, deployed?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
 Was hat Damien am Montag, als der Build brach, gemacht?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
@@ -109,7 +109,7 @@ Was ist am Freitag vorgefallen?	["Freitag|2026-11-20..|past"] linear=0.60,weekda
 Was ist uns am Freitag aufgefallen?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
 Was ist am Freitag ausgerollt?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40	disputed	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40	"sein" with a participle of a verb that takes "haben": a state or the Perfekt
 Was ist am Freitag ausgerollt worden?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
-Wie viele Blöcke seit 2024?	nil
+Wie viele Blöcke seit 2024?	nil	disputed	["seit 2024?|2024-01-01..2026-11-22|range"] linear=1.00	the count phrase counts blocks, a noun no count word names: the time since 2024 reads as well as the count question the base left to the LLM
 Zeig mir Block nach 2024.	nil	disputed	["nach 2024.|2025-01-01..|from"] linear=1.00	a block number or a year
 Was liegt zwischen 2020 und 2025?	nil	disputed	["zwischen 2020 und 2025?|2020-01-01..2025-12-31|range"] linear=1.00	numbers or years between
 Wer hat ab 2020 Dienst?	nil
@@ -182,7 +182,7 @@ Bis 2027 muss die Migration fertig sein	nil	fixed	["bis 2027 muss die|2026-11-22
 Vor 2027 muss die Migration fertig sein	nil	fixed	["vor 2027 muss die|2026-11-22..2026-12-31|range"] linear=1.00	read by hand
 Was muss vor 2027 passieren?	nil
 Was war vor 2024?	nil	fixed	["vor 2024?|2023-12-31..|until"] linear=1.00	read by hand
-Was war nach 2024 und vor 2026?	nil	disputed	["nach 2024 und vor|2025-01-01..|from"] linear=1.00	the window reads "nach 2024" and leaves "vor 2026" out
+Was war nach 2024 und vor 2026?	nil	fixed	["nach 2024 und vor 2026?|2025-01-01..2025-12-31|range"] linear=1.00	an edge of each direction is one window: 2025, not the time from 2025 on
 von 2024 bis 2026	nil	fixed	["von 2024 bis 2026|2024-01-01..2026-12-31|range"] linear=1.00	read by hand
 von 2024 bis 2026 Zeilen	nil
 vom 2024 bis 2026	nil	fixed	["von 2024 bis 2026|2024-01-01..2026-12-31|range"] linear=1.00	read by hand
@@ -287,7 +287,7 @@ Am Montag, was ist da passiert?	["Montag|2026-11-16..|past"] linear=0.60,weekday
 Sie sagten, wir treffen uns am Montag	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
 Ich will wissen, was am Montag passiert ist	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
 We deployed on Friday, what broke on Monday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
-What did we ship on Monday, and what is planned for Friday?	["Monday|2026-11-16..|past","Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+What did we ship on Monday, and what is planned for Friday?	["Monday|2026-11-16..|past","Friday|2026-11-20..|past"] linear=0.60,weekday=0.40	fixed	["Monday|2026-11-16..|past","Friday|2026-11-27..|future"] linear=0.60,weekday=0.40	each weekday by the tense of its own clause: the Monday shipped, the Friday planned
 Wer hat gestern gesagt, dass wir am Montag deployen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40	fixed	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40	read by hand
 Damien hat gesagt, dass wir am Montag deployen.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40	fixed	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40	read by hand
 Damien sagte, dass wir am Montag deployen.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40	fixed	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40	read by hand

@@ -71,7 +71,7 @@ Ab 2027 gilt die neue Lizenz.	nil	fixed	["ab 2027 gilt die|2027-01-01..|from"] l
 Bis 2030 wollen wir klimaneutral sein.	nil
 Was passiert ab 2048?	nil
 Welche Tickets wurden seit 2024 geschlossen?	nil
-Wie viele Blöcke gibt es seit 2024?	nil
+Wie viele Blöcke gibt es seit 2024?	nil	disputed	["seit 2024?|2024-01-01..2026-11-22|range"] linear=1.00	the count phrase counts blocks, a noun no count word names: the time since 2024 reads as well as the count question the base left to the LLM
 Was ist mit den Requests ab 2024?	nil
 Zeig mir die Logzeilen nach 2025.	nil
-Was kam nach 2024 und vor 2026?	nil	disputed	["nach 2024 und vor|2025-01-01..|from"] linear=1.00	the window reads "nach 2024" and leaves "vor 2026" out
+Was kam nach 2024 und vor 2026?	nil	fixed	["nach 2024 und vor 2026?|2025-01-01..2025-12-31|range"] linear=1.00	an edge of each direction is one window: 2025, not the time from 2025 on

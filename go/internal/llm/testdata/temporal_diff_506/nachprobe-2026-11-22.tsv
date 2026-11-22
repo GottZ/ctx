@@ -1,0 +1,22 @@
+# Differential test of the temporal rules (issue #506): corpus nachprobe, asked on 2026-11-22 at noon UTC.
+# question, rules output at aa1354ea (v5.76.1); for a changed output also its verdict (fixed / disputed / broken), the output now and a note.
+Was latency high on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was gab's am Freitag Neues?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40	fixed	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
+am montag was kaputt gemacht?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40	fixed	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
+Was ham wir am Dienstag deployed?	["Dienstag|2026-11-24..|future"] linear=0.60,weekday=0.40	fixed	["Dienstag|2026-11-17..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
+Was ham die am Donnerstag geändert?	["Donnerstag|2026-11-26..|future"] linear=0.60,weekday=0.40	fixed	["Donnerstag|2026-11-19..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
+Was throughput low on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was memory usage high on Tuesday?	["Tuesday|2026-11-17..|past"] linear=0.60,weekday=0.40
+Was disk full on Wednesday?	["Wednesday|2026-11-18..|past"] linear=0.60,weekday=0.40
+Was spark down on Thursday?	["Thursday|2026-11-19..|past"] linear=0.60,weekday=0.40
+gab's am Dienstag Probleme?	["Dienstag|2026-11-24..|future"] linear=0.60,weekday=0.40	fixed	["Dienstag|2026-11-17..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
+Hab am Montag was deployed, wo ist das Log?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag gemerged, gibt's da Regressions?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ham wir am Montag gemerged?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40	fixed	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
+What will be merged on Thursday?	["Thursday|2026-11-19..|past"] linear=0.60,weekday=0.40	fixed	["Thursday|2026-11-26..|future"] linear=0.60,weekday=0.40	right by the review criterion (expected future, rule ja)
+Which PRs will be reviewed on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40	fixed	["Friday|2026-11-27..|future"] linear=0.60,weekday=0.40	right by the review criterion (expected future, rule ja)
+What should be deployed on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40	fixed	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40	right by the review criterion (expected future, rule ja)
+What has to be finished by Tuesday?	["Tuesday|2026-11-17..|past"] linear=0.60,weekday=0.40	fixed	["Tuesday|2026-11-24..|future"] linear=0.60,weekday=0.40	right by the review criterion (expected future, rule ja)
+Wer deployte am Dienstag?	["Dienstag|2026-11-24..|future"] linear=0.60,weekday=0.40	fixed	["Dienstag|2026-11-17..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
+Was meldete der Guard am Mittwoch?	["Mittwoch|2026-11-18..|past"] linear=0.60,weekday=0.40
+Welche Jobs scheiterten am Donnerstag?	["Donnerstag|2026-11-26..|future"] linear=0.60,weekday=0.40	fixed	["Donnerstag|2026-11-19..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)

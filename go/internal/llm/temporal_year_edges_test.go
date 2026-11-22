@@ -149,6 +149,9 @@ func FuzzYearEdges(f *testing.F) {
 		f.Add(q)
 	}
 	f.Fuzz(func(t *testing.T, q string) {
+		if len(q) > maxFuzzQuestion {
+			return
+		}
 		tr := NormalizeTemporalRules(q, now463)
 		if tr == nil {
 			return
