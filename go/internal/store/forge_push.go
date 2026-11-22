@@ -269,7 +269,8 @@ type PushProjection func(b *Block) string
 // (conflict, conflict_at): the push lists no flagged mapping, and the next
 // pull's 3-way decision converges when block and forge agree (base := their
 // hash, flag cleared) and keeps the conflict otherwise. The returned moved
-// reports that case.
+// reports that case. synced_at is then of no account: the push lists no
+// flagged mapping, and the convergence that clears the flag sets it.
 //
 // synced_at is compared in SQL only (the candidate filter): '-infinity' is a
 // valid timestamptz, but pgx cannot scan it into a time.Time, so a reader that
@@ -303,7 +304,7 @@ func AdvancePushBase(ctx context.Context, pool *pgxpool.Pool, blockID, listedBas
 			err = tx.QueryRow(ctx, `
 				UPDATE context_project_sync_map
 				   SET base_hash = CASE WHEN base_hash = $6 THEN $2 ELSE $7 END,
-				       synced_at = CASE WHEN base_hash = $6 AND $4 THEN $5::timestamptz ELSE '-infinity'::timestamptz END,
+				       synced_at = CASE WHEN $4 THEN $5::timestamptz ELSE '-infinity'::timestamptz END,
 				       metadata = CASE WHEN base_hash = $6 THEN metadata || $3::jsonb ELSE metadata - 'base_fields' END,
 				       conflict = conflict OR base_hash <> $6,
 				       conflict_at = CASE WHEN base_hash = $6 THEN conflict_at ELSE COALESCE(conflict_at, now()) END
