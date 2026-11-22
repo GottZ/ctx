@@ -379,3 +379,37 @@ func TestPushAdvanceOffItsListedBaseLeavesTheDecisionToThePull(t *testing.T) {
 		i486Converged(t, pool, proj, "issue", 5, forgeH, wire)
 	})
 }
+
+// TestPushMilestoneOnlyEditLeavesTheCandidates: a local edit of the milestone
+// alone — a field the push never sends — is listed, gets no wire write and is
+// advanced with the base its listing read (push.go, the empty-patch branch):
+// the mapping then holds the block's projection, carries no flag, and no run
+// lists it again.
+func TestPushMilestoneOnlyEditLeavesTheCandidates(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	proj := enablePush(seedIFProject(t, pool, "i486milestone"))
+	issueID, _ := i452Pulled(t, pool, proj, false)
+	i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Metadata: map[string]any{"milestone": "v9"}})
+	if cands, err := store.ListIssuePushCandidates(ctx, pool, proj.ID, 10); err != nil || len(cands) != 1 {
+		t.Fatalf("precondition: %d candidates after the milestone edit (err %v), want 1", len(cands), err)
+	}
+	wire := 0
+	for run := 1; run <= 3; run++ {
+		spy := newPushSpy()
+		res, err := pusherWithRegistry(pool).PushProject(ctx, proj, spy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow)
+		if err != nil || res.Pushed != 0 || res.Conflicts != 0 {
+			t.Fatalf("run %d: %+v %v, want nothing pushed and no conflict", run, res, err)
+		}
+		wire += spy.wireCalls()
+		base, conflict, _, _ := readMapping(t, pool, proj.ID, "issue", 5)
+		_, ctxH := CtxIssueBase(getBlock(t, pool, proj.Scope, issueID), []string{"done"}, true)
+		if base != ctxH || conflict {
+			t.Errorf("run %d: base is the block's projection %v, flagged %v — want the milestone edit recorded as the base", run, base == ctxH, conflict)
+		}
+		i452NoCandidates(t, pool, proj)
+	}
+	if wire != 0 {
+		t.Errorf("a milestone-only edit made %d wire writes", wire)
+	}
+}
