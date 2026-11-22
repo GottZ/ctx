@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -395,12 +396,30 @@ func writeBackendValidation(w http.ResponseWriter, errs []backends.FieldError) {
 // with the wording the backend surface has always used: a failed BeginTx is
 // "transaction begin failed", a failed Commit is "commit failed" — both a 500
 // carrying only that text, never the driver's own (§2.9: no wire detail).
-func writeBackendTxFailure(w http.ResponseWriter, stage string) {
-	msg := "commit failed"
+// The failure goes into action's line (adminWriteFailed, issue #483): a
+// failed BeginTx wrote nothing; the bracket's commit carries no label
+// (answeredTx), so a failed Commit is statementOutcome's.
+func writeBackendTxFailure(w http.ResponseWriter, r *http.Request, action, stage string, err error) {
+	msg, outcome := "commit failed", statementOutcome(err)
 	if stage == "begin" {
-		msg = "transaction begin failed"
+		msg, outcome = "transaction begin failed", writeRolledBack
 	}
+	adminWriteFailed(r, "manage: "+action+" failed", err, outcome)
 	writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": msg})
+}
+
+// writeBackendStoreError answers a store error inside a backend write's
+// transaction with the 422 and the error's text the backend surface has
+// always answered; unless it is the caller's taken name, the failure goes
+// into action's line — the transaction rolls back (issue #483). The store
+// errors carry their statement's PostgreSQL error, whose text leaves out the
+// DETAIL (a failing row would name every column), and no value of the
+// request but that name.
+func writeBackendStoreError(w http.ResponseWriter, r *http.Request, action string, err error) {
+	if !errors.Is(err, store.ErrBackendNameExists) {
+		adminWriteFailed(r, "manage: "+action+" failed", err, writeRolledBack)
+	}
+	writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
 }
 
 // reloadAfterMutation is the synchronous half of the snapshot propagation.
@@ -527,17 +546,17 @@ func (h *ManageHandler) handleBackendCreate(w http.ResponseWriter, r *http.Reque
 
 	by := actorID(r)
 	var id string
-	if !answeredTx(ctx, h.pool, func(stage string, _ error) { writeBackendTxFailure(w, stage) }, func(tx pgx.Tx) bool {
+	if !answeredTx(ctx, h.pool, func(stage string, err error) { writeBackendTxFailure(w, r, "backend-create", stage, err) }, func(tx pgx.Tx) bool {
 		var err error
 		id, err = store.CreateBackend(ctx, tx, b, by)
 		if err != nil {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+			writeBackendStoreError(w, r, "backend-create", err)
 			return false
 		}
 		// Join-sync in the SAME tx as the backend insert (per-backend atomic).
 		if syncProfiles {
 			if err := store.SyncBackendDisableProfiles(ctx, tx, id, profileIDs, by); err != nil {
-				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+				writeBackendStoreError(w, r, "backend-create", err)
 				return false
 			}
 		}
@@ -692,13 +711,13 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 	}
 
 	by := actorID(r)
-	if !answeredTx(ctx, h.pool, func(stage string, _ error) { writeBackendTxFailure(w, stage) }, func(tx pgx.Tx) bool {
+	if !answeredTx(ctx, h.pool, func(stage string, err error) { writeBackendTxFailure(w, r, "backend-update", stage, err) }, func(tx pgx.Tx) bool {
 		// Store-layer scope gate (fail-closed backstop, §5.5): nil for a server-
 		// admin, []string{ar.HomeScope} for a tenant-admin. A foreign row matches
 		// zero rows atomically → found=false → 404 (no TOCTOU, no second call path).
 		found, err := store.UpdateBackend(ctx, tx, &next, by, backendWriteScopes(ar))
 		if err != nil {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+			writeBackendStoreError(w, r, "backend-update", err)
 			return false
 		}
 		if !found {
@@ -708,7 +727,7 @@ func (h *ManageHandler) handleBackendUpdate(w http.ResponseWriter, r *http.Reque
 		// Join-sync in the SAME tx as the backend update (per-backend atomic).
 		if syncProfiles {
 			if err := store.SyncBackendDisableProfiles(ctx, tx, next.ID, profileIDs, by); err != nil {
-				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
+				writeBackendStoreError(w, r, "backend-update", err)
 				return false
 			}
 		}
@@ -736,11 +755,12 @@ func (h *ManageHandler) handleBackendDelete(w http.ResponseWriter, r *http.Reque
 	}
 	by := actorID(r)
 	var name string
-	if !answeredTx(ctx, h.pool, func(stage string, _ error) { writeBackendTxFailure(w, stage) }, func(tx pgx.Tx) bool {
+	if !answeredTx(ctx, h.pool, func(stage string, err error) { writeBackendTxFailure(w, r, "backend-delete", stage, err) }, func(tx pgx.Tx) bool {
 		// Store-layer scope gate (§4.6/§5.5): a tenant-admin deleting a foreign/
 		// _global id matches zero rows → found=false → 404 (no oracle, no TOCTOU).
 		deleted, found, err := store.DeleteBackend(ctx, tx, req.ID, by, backendWriteScopes(ar))
 		if err != nil {
+			adminWriteFailed(r, "manage: backend-delete failed", err, writeRolledBack)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "delete failed"})
 			return false
 		}

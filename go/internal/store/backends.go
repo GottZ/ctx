@@ -74,8 +74,14 @@ func backendWriteArgs(b *backends.Backend) []any {
 	}
 }
 
+// ErrBackendNameExists is the unique-name refusal of CreateBackend and
+// UpdateBackend: a refusal of the caller's request, not a failure of the
+// write (issue #483). Its text completes "backend name %q", so the error
+// reads as it always did.
+var ErrBackendNameExists = errors.New("already exists")
+
 // CreateBackend inserts one pool row and returns its id. The unique name
-// constraint surfaces as a caller-ready error.
+// constraint surfaces as a caller-ready error (ErrBackendNameExists).
 func CreateBackend(ctx context.Context, tx pgx.Tx, b *backends.Backend, by *string) (string, error) {
 	if err := setTxActor(ctx, tx, by); err != nil {
 		return "", err
@@ -90,7 +96,7 @@ func CreateBackend(ctx context.Context, tx pgx.Tx, b *backends.Backend, by *stri
 		RETURNING id`, backendWriteArgs(b)...).Scan(&id)
 	if err != nil {
 		if pgxdb.UniqueViolation(err) {
-			return "", fmt.Errorf("backend name %q already exists", b.Name)
+			return "", fmt.Errorf("backend name %q %w", b.Name, ErrBackendNameExists)
 		}
 		return "", fmt.Errorf("store: create backend: %w", err)
 	}
@@ -122,7 +128,7 @@ func UpdateBackend(ctx context.Context, tx pgx.Tx, b *backends.Backend, by *stri
 		WHERE id=$19 AND ($20::text[] IS NULL OR scope = ANY($20))`, args...)
 	if err != nil {
 		if pgxdb.UniqueViolation(err) {
-			return false, fmt.Errorf("backend name %q already exists", b.Name)
+			return false, fmt.Errorf("backend name %q %w", b.Name, ErrBackendNameExists)
 		}
 		return false, fmt.Errorf("store: update backend: %w", err)
 	}

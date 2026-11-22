@@ -699,7 +699,7 @@ func (h *ManageHandler) handleModelAliasCreate(w http.ResponseWriter, r *http.Re
 	}
 	from, to := backends.SensCredentials, backends.Sensitivity(a.Sensitivity)
 	var out store.ModelAlias
-	if !answeredTx(ctx, h.pool, func(stage string, _ error) { writeBackendTxFailure(w, stage) }, func(tx pgx.Tx) bool {
+	if !answeredTx(ctx, h.pool, func(stage string, err error) { writeBackendTxFailure(w, r, "model-alias-create", stage, err) }, func(tx pgx.Tx) bool {
 		if err := store.LockModelAliasName(ctx, tx, a.Name); err != nil {
 			internalError(w, ctx, "model-alias-create: name lock failed", err)
 			return false
@@ -757,7 +757,7 @@ func (h *ManageHandler) handleModelAliasUpdate(w http.ResponseWriter, r *http.Re
 		out      store.ModelAlias
 		warnings []string
 	)
-	if !answeredTx(ctx, h.pool, func(stage string, _ error) { writeBackendTxFailure(w, stage) }, func(tx pgx.Tx) bool {
+	if !answeredTx(ctx, h.pool, func(stage string, err error) { writeBackendTxFailure(w, r, "model-alias-update", stage, err) }, func(tx pgx.Tx) bool {
 		var ok bool
 		out, warnings, ok = h.updateModelAliasTx(ctx, w, r, tx, ar, req.ID, spec, keys, ceilings)
 		return ok
@@ -833,7 +833,7 @@ func (h *ManageHandler) handleModelAliasDelete(w http.ResponseWriter, r *http.Re
 		return
 	}
 	var out store.ModelAlias
-	if !answeredTx(ctx, h.pool, func(stage string, _ error) { writeBackendTxFailure(w, stage) }, func(tx pgx.Tx) bool {
+	if !answeredTx(ctx, h.pool, func(stage string, err error) { writeBackendTxFailure(w, r, "model-alias-delete", stage, err) }, func(tx pgx.Tx) bool {
 		var (
 			found bool
 			err   error

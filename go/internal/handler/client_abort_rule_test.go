@@ -377,6 +377,30 @@ func TestWriteOutcome(t *testing.T) {
 	}
 }
 
+// TestCutoverOutcome — a confirm or rollback whose result came back with its
+// error committed its swap; otherwise its labeled bracket decides (issue
+// #483).
+func TestCutoverOutcome(t *testing.T) {
+	bracket := func(commitErr error) error {
+		return pgxdb.Write(context.Background(), outcomeDB{tx: &outcomeTx{commitErr: commitErr}}, pgxdb.At("embed-cutover: swap tx"),
+			func(pgx.Tx) error { return nil })
+	}
+	for _, tc := range []struct {
+		name    string
+		swapped bool
+		err     error
+		want    string
+	}{
+		{"a step after the committed swap failed", true, errors.New("embed-cutover: post-commit pool reload: boom"), writeCommitted},
+		{"refused before the swap", false, &pgconn.PgError{Code: "42P01"}, writeRolledBack},
+		{"the swap's COMMIT cut off", false, bracket(connClosedErr{}), writeUnknown},
+	} {
+		if got := cutoverOutcome(tc.swapped, tc.err); got != tc.want {
+			t.Errorf("%s: cutoverOutcome = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestPurgeOutcome — a purge that failed after earlier batches removed
 // something says committed; one that removed nothing says what its failing
 // statement left behind (issue #483).
