@@ -182,7 +182,7 @@ Bis 2027 muss die Migration fertig sein	["bis 2027 muss die|2026-11-22..2027-12-
 Vor 2027 muss die Migration fertig sein	["vor 2027 muss die|2026-11-22..2026-12-31|range"] linear=1.00
 Was muss vor 2027 passieren?	nil
 Was war vor 2024?	["vor 2024?|2023-12-31..|until"] linear=1.00
-Was war nach 2024 und vor 2026?	["nach 2024 und vor|2025-01-01..|from"] linear=1.00
+Was war nach 2024 und vor 2026?	["nach 2024 und vor|2025-01-01..|from"] linear=1.00	fixed	["nach 2024 und vor 2026?|2025-01-01..2025-12-31|range"] linear=1.00	an edge of each direction is one window: 2025, not the time from 2025 on
 von 2024 bis 2026	["von 2024 bis 2026|2024-01-01..2026-12-31|range"] linear=1.00
 von 2024 bis 2026 Zeilen	nil
 vom 2024 bis 2026	["von 2024 bis 2026|2024-01-01..2026-12-31|range"] linear=1.00

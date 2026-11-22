@@ -255,3 +255,21 @@ func TestRules_EdgesOrderByCalendarDay(t *testing.T) {
 		})
 	}
 }
+
+// TestRules_TheHandoverRests (point 6): two open edges of opposite direction
+// in one question are the window between them; an edge word coordinated
+// with another shares its date and opens none; a lower-case noun of
+// participle shape behind "haben" is no participle, a participle is.
+func TestRules_TheHandoverRests(t *testing.T) {
+	checkRules(t, sunday487, map[string]wantDate{
+		"Was kam nach 2024 und vor 2026?":           {"2025-01-01", "2025-12-31", "range"},
+		"Was lief ab März 2024 und vor Juni 2024?":  {"2024-03-01", "2024-05-31", "range"},
+		"What happened after 2024 and before 2026?": {"2025-01-01", "2025-12-31", "range"},
+		"Was war vor und nach dem 15.03.2026?":      {"2026-03-15", "", "past"},
+		// Edges in the wrong order make no window: the first one stands.
+		"Was kam vor 2024 und nach 2026?":   {"2023-12-31", "", DirUntil},
+		"haben wir am montag verlust":       next506["montag"],
+		"haben wir am montag einen bericht": next506["montag"],
+		"haben wir am montag deployed":      last506["montag"],
+	})
+}

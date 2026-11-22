@@ -182,7 +182,7 @@ Bis 2027 muss die Migration fertig sein	nil	fixed	["bis 2027 muss die|2026-11-22
 Vor 2027 muss die Migration fertig sein	nil	fixed	["vor 2027 muss die|2026-11-22..2026-12-31|range"] linear=1.00	read by hand
 Was muss vor 2027 passieren?	nil
 Was war vor 2024?	nil	fixed	["vor 2024?|2023-12-31..|until"] linear=1.00	read by hand
-Was war nach 2024 und vor 2026?	nil	disputed	["nach 2024 und vor|2025-01-01..|from"] linear=1.00	the window reads "nach 2024" and leaves "vor 2026" out
+Was war nach 2024 und vor 2026?	nil	fixed	["nach 2024 und vor 2026?|2025-01-01..2025-12-31|range"] linear=1.00	an edge of each direction is one window: 2025, not the time from 2025 on
 von 2024 bis 2026	nil	fixed	["von 2024 bis 2026|2024-01-01..2026-12-31|range"] linear=1.00	read by hand
 von 2024 bis 2026 Zeilen	nil
 vom 2024 bis 2026	nil	fixed	["von 2024 bis 2026|2024-01-01..2026-12-31|range"] linear=1.00	read by hand

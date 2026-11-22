@@ -1186,9 +1186,14 @@ const separablePrefixes = `ab|an|auf|aus|bei|dar|durch|ein|fehl|fest|fertig|fort
 
 // participleExceptions are words of the shape of broadParticiplePat that a
 // German question puts at the end of its clause as an adjective or adverb,
-// and "geöffnet", which with "haben" asks for opening hours ("Hat das Büro am
-// Samstag geöffnet?").
-var participleExceptions = toWordSet("bereit", "bestimmt", "beliebt", "berühmt", "gesamt", "verrückt", "verwandt", "geöffnet", "gestern", "genau")
+// "geöffnet", which with "haben" asks for opening hours ("Hat das Büro am
+// Samstag geöffnet?"), and the nouns of that shape that are the participle of
+// no verb (issue #506): written in lower case they lose the only mark of a
+// noun the form has ("haben wir am montag verlust"), so which word is a
+// participle only the word tells.
+var participleExceptions = toWordSet("bereit", "bestimmt", "beliebt", "berühmt", "gesamt", "verrückt", "verwandt", "geöffnet", "gestern", "genau",
+	"verlust", "bericht", "gericht", "gewicht", "gesicht", "geschäft", "gebiet", "gerät", "gehalt", "verbot", "gebot",
+	"verdienst", "beirat", "geist")
 
 var knownParticiples = toWordSet(
 	"gewesen", "gemacht", "gegangen", "gehabt", "gewollt", "gemusst",
@@ -2241,7 +2246,10 @@ func seitStartsAhead(lower string, now time.Time) bool {
 // ("zwei Tage vor dem 15.03.2024", "a week after 2024-03-15") makes it a
 // distance from the date, not an edge: the date stays the day it names. With
 // a day date the rules left to the windows (edge), only a phrase naming that
-// day counts.
+// day counts. An edge towards the future and one towards the past in the same
+// question are the window between them (issue #506): "nach 2024 und vor
+// 2026" is 2025 — when the second ends after the first begins, and with a
+// deferred day date when one of them names it.
 func matchOpenEdge(query string, now time.Time, edge string) *TemporalResult {
 	lower := strings.ToLower(query)
 	var proof *yearProof // the year check of the question's candidates, read once
@@ -2251,41 +2259,125 @@ func matchOpenEdge(query string, now time.Time, edge string) *TemporalResult {
 		}
 		return proof.stands(off)
 	}
-	for _, m := range reOpenEdge.FindAllStringSubmatchIndex(lower, -1) {
-		word, phrase := lower[m[2]:m[3]], lower[m[4]:m[5]]
-		before := wordBefore(lower, m[0])
-		if lookBehind(reTimeUnitBefore, before) || word != "ab" && lookBehind(reNearBefore, before) {
-			continue
+	var first, from, until *openHit
+	// The candidates may overlap: a phrase of three words swallows the next
+	// edge word ("nach 2024 und vor 2026"), so the search goes on from the
+	// phrase, not from the end of the match (issue #506).
+	for pos := 0; pos < len(lower); {
+		m := reOpenEdge.FindStringSubmatchIndex(lower[pos:])
+		if m == nil {
+			break
 		}
-		// A year first is an edge here only as the year (yearEdge, issue
-		// #487): "2024 Oktober" has no use, and "after 2025 may be deleted"
-		// names no month but the year.
-		yearFirst := false
-		if w := phraseWords(phrase); len(w) > 0 {
-			_, yearFirst = isYear(w[0])
-		}
-		e := resolvePhraseEdge(phrase, false, now)
-		if e.day.IsZero() || e.fuzzy || e.rel || yearFirst && !e.year || edge != "" && fmtDate(e.day) != edge ||
-			e.year && !stands(m[0]) {
-			continue
-		}
-		ref := word + " " + phrase
-		switch word {
-		case "ab":
-			return yearWeighted(&TemporalResult{Dates: []TemporalDate{{Ref: ref, Date: fmtDate(e.day), Dir: DirFrom}}}, e)
-		case "nach", "after":
-			return yearWeighted(&TemporalResult{Dates: []TemporalDate{{Ref: ref, Date: fmtDate(e.last().AddDate(0, 0, 1)), Dir: DirFrom}}}, e)
-		default: // vor, before
-			// A day to come is a deadline, the window from today to the day
-			// before it, as "bis" with a later end is one; a day that has
-			// begun is the time up to the day before it.
-			if today := truncDate(now); e.day.After(today) {
-				return yearWeighted(rangeResult(ref, fmtDate(today), fmtDate(e.day.AddDate(0, 0, -1)), "range"), e)
+		for k := range m {
+			if m[k] >= 0 {
+				m[k] += pos
 			}
-			return yearWeighted(&TemporalResult{Dates: []TemporalDate{{Ref: ref, Date: fmtDate(e.day.AddDate(0, 0, -1)), Dir: DirUntil}}}, e)
+		}
+		pos = m[4]
+		h := openEdgeHit(lower, m, now, stands)
+		if h == nil {
+			continue
+		}
+		if first == nil && (edge == "" || fmtDate(h.e.day) == edge) {
+			first = h
+		}
+		if h.from() && from == nil {
+			from = h
+		} else if !h.from() && until == nil {
+			until = h
 		}
 	}
-	return nil
+	// An edge of each direction is one window, between them (issue #506):
+	// "Was kam nach 2024 und vor 2026?" is 2025.
+	if from != nil && until != nil && (edge == "" || fmtDate(from.e.day) == edge || fmtDate(until.e.day) == edge) {
+		start, end := from.start(), until.e.day.AddDate(0, 0, -1)
+		if !end.Before(start) {
+			ref := lower[min(from.start0, until.start0):max(from.end1, until.end1)]
+			return yearWeighted(rangeResult(ref, fmtDate(start), fmtDate(end), "range"), from.e, until.e)
+		}
+	}
+	if first == nil {
+		return nil
+	}
+	return first.result(now)
+}
+
+// openEdgeHit returns the edge the candidate m of reOpenEdge in lower
+// names, or nil (matchOpenEdge): not after a unit or a word of nearness, not
+// coordinated with another edge word, a date spelt as such that names its
+// day itself, a year only with the proof of stands.
+func openEdgeHit(lower string, m []int, now time.Time, stands func(int) bool) *openHit {
+	word, phrase := lower[m[2]:m[3]], lower[m[4]:m[5]]
+	before := wordBefore(lower, m[0])
+	if lookBehind(reTimeUnitBefore, before) || word != "ab" && lookBehind(reNearBefore, before) ||
+		coordinatedEdge(lower, m[0]-len(before), before) {
+		return nil
+	}
+	// A year first is an edge here only as the year (yearEdge, issue
+	// #487): "2024 Oktober" has no use, and "after 2025 may be deleted"
+	// names no month but the year.
+	yearFirst := false
+	if w := phraseWords(phrase); len(w) > 0 {
+		_, yearFirst = isYear(w[0])
+	}
+	e := resolvePhraseEdge(phrase, false, now)
+	if e.day.IsZero() || e.fuzzy || e.rel || yearFirst && !e.year || e.year && !stands(m[0]) {
+		return nil
+	}
+	return &openHit{word: word, ref: word + " " + phrase, e: e, start0: m[0], end1: m[1]}
+}
+
+// edgeWords and edgeConjunctions: an edge word behind another one and a
+// conjunction shares its date with it ("vor und nach dem 15.03.2026",
+// "before and after the release"): the two name the time around the date,
+// and the date stays the day it names (matchOpenEdge).
+var (
+	edgeWords        = toWordSet("ab", "vor", "nach", "before", "after")
+	edgeConjunctions = toWordSet("und", "oder", "bzw", "and", "or")
+)
+
+// coordinatedEdge reports whether the word before (wordBefore, starting at
+// the byte offset at of lower) is a conjunction with an edge word before it.
+func coordinatedEdge(lower string, at int, before string) bool {
+	return edgeConjunctions[strings.TrimRight(before, asciiSpace)] &&
+		edgeWords[strings.TrimRight(wordBefore(lower, at), asciiSpace)]
+}
+
+// openHit is a phrase matchOpenEdge takes as an edge: its word, its
+// reference, what it names and where its match starts and ends.
+type openHit struct {
+	word, ref     string
+	e             phraseEdge
+	start0, end1 int
+}
+
+// from reports whether the hit opens a window towards the future ("ab",
+// "nach", "after").
+func (h *openHit) from() bool {
+	return h.word == "ab" || h.word == "nach" || h.word == "after"
+}
+
+// start is the first day of the window a hit towards the future opens:
+// the day of "ab", the day after what "nach" and "after" name.
+func (h *openHit) start() time.Time {
+	if h.word == "ab" {
+		return h.e.day
+	}
+	return h.e.last().AddDate(0, 0, 1)
+}
+
+// result is the window of the hit alone.
+func (h *openHit) result(now time.Time) *TemporalResult {
+	if h.from() {
+		return yearWeighted(&TemporalResult{Dates: []TemporalDate{{Ref: h.ref, Date: fmtDate(h.start()), Dir: DirFrom}}}, h.e)
+	}
+	// vor, before: a day to come is a deadline, the window from today to
+	// the day before it, as "bis" with a later end is one; a day that has
+	// begun is the time up to the day before it.
+	if today := truncDate(now); h.e.day.After(today) {
+		return yearWeighted(rangeResult(h.ref, fmtDate(today), fmtDate(h.e.day.AddDate(0, 0, -1)), "range"), h.e)
+	}
+	return yearWeighted(&TemporalResult{Dates: []TemporalDate{{Ref: h.ref, Date: fmtDate(h.e.day.AddDate(0, 0, -1)), Dir: DirUntil}}}, h.e)
 }
 
 // asciiSpace are the runes \s matches in the rules' expressions (RE2's
