@@ -1372,7 +1372,7 @@ its body: that exact signature (the types also as `pg_catalog.regclass`, `int8` 
 catalog names `"regclass"`, `"int8"`), the name unqualified or under `public`, from `CREATE` to the end
 of its body (a closed string after `AS`, `BEGIN ATOMIC` to its `END` — a `begin` used as a name
 opens nothing —, `RETURN` to the end of the statement). An overload is another function, and its body is checked, as is a definition inside a
-`DO` block or a string.
+`DO` block, a string or another routine's `BEGIN ATOMIC` body.
 
 The lint has named limits. It refuses the reads above as a file spells them; a size read it does
 not name passes. It does not see a name spelled to get past it — an escape in an `E''` string or

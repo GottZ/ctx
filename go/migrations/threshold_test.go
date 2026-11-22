@@ -63,7 +63,7 @@ import (
 // from CREATE to the end of that body (a closed string after AS, BEGIN ATOMIC
 // to its END, RETURN to the end of the statement) and no further; an overload
 // is another function, and its body is checked, as is a definition inside a
-// DO block or a string.
+// DO block, a string or another routine's BEGIN ATOMIC body.
 //
 // Named limits. The gate refuses the reads named above as a file spells them;
 // a size read it does not name passes. It does not see a name spelled to get
@@ -322,6 +322,15 @@ func withoutRowsFnDefinitions(toks []sqlToken) []sqlToken {
 	out := make([]sqlToken, 0, len(toks))
 	for i := 0; i < len(toks); i++ {
 		end, ok := rowsFnDefinition(toks, i)
+		if !ok && isWordAt(toks, i, "begin") && isWordAt(toks, i+1, "atomic") {
+			// Another routine's BEGIN ATOMIC body: a definition in it is not
+			// at the top level of the file, so it stays and is checked.
+			if end, ok = atomicEnd(toks, i+2); ok {
+				out = append(out, toks[i:end+1]...)
+				i = end
+				continue
+			}
+		}
 		switch {
 		case ok:
 			i = end
@@ -1010,6 +1019,10 @@ var reviewedForms = []sizeForm{
 		src: "CREATE OR REPLACE FUNCTION pg_temp.ctx_migration_rows(p_rel regclass, p_threshold bigint)\n" + overloadBody},
 	{class: "pin", refuse: true, name: "an upper-case quoted name is another function",
 		src: "CREATE OR REPLACE FUNCTION \"CTX_MIGRATION_ROWS\"(p_rel regclass, p_threshold bigint)\n" + overloadBody},
+	{class: "pin", refuse: true, name: "the function redefined in a procedure's BEGIN ATOMIC body is checked",
+		src: "CREATE PROCEDURE m193_redefine() LANGUAGE sql\nBEGIN ATOMIC\n" +
+			"    CREATE OR REPLACE FUNCTION ctx_migration_rows(p_rel regclass, p_threshold bigint)\n" +
+			"    RETURNS bigint LANGUAGE sql AS $fn$ SELECT reltuples::bigint FROM pg_class WHERE oid = p_rel $fn$;\nEND;\n"},
 	{class: "pin", refuse: true, name: "the function redefined inside a DO block is checked",
 		src: "DO $do$\nBEGIN\n    CREATE OR REPLACE FUNCTION ctx_migration_rows(p_rel regclass, p_threshold bigint)\n" +
 			"    RETURNS bigint LANGUAGE sql AS $fn$ SELECT reltuples::bigint FROM pg_class WHERE oid = p_rel $fn$;\nEND\n$do$;\n"},
