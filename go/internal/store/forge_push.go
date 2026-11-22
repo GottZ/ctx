@@ -393,7 +393,7 @@ const (
 // another one's wire call, however long that one hangs. err with locked =
 // false means the lock statement's outcome is unknown; the caller closes the
 // connection, so a lock it may hold ends with the session.
-func TryLockPushEntity(ctx context.Context, conn pgxdb.Rower, blockID, listedBase string) (locked bool, skip PushSkip, err error) {
+func TryLockPushEntity(ctx context.Context, conn *pgxpool.Conn, blockID, listedBase string) (locked bool, skip PushSkip, err error) {
 	if err := conn.QueryRow(ctx, pushLockSQL, blockID).Scan(&locked); err != nil {
 		return false, "", fmt.Errorf("store: push lock: %w", err)
 	}
@@ -419,7 +419,7 @@ func TryLockPushEntity(ctx context.Context, conn pgxdb.Rower, blockID, listedBas
 
 // UnlockPushEntity gives back the push lock TryLockPushEntity took on conn
 // and answers whether the session held it.
-func UnlockPushEntity(ctx context.Context, conn pgxdb.Rower, blockID string) (bool, error) {
+func UnlockPushEntity(ctx context.Context, conn *pgxpool.Conn, blockID string) (bool, error) {
 	var released bool
 	if err := conn.QueryRow(ctx, pushUnlockSQL, blockID).Scan(&released); err != nil {
 		return false, fmt.Errorf("store: push unlock: %w", err)

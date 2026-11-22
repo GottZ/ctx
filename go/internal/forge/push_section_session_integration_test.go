@@ -104,7 +104,9 @@ type failingPatch struct{ Forge }
 
 var errI491Wire = errors.New("the forge answered 502")
 
-func (failingPatch) UpdateIssue(context.Context, RepoRef, int64, IssuePatch) error { return errI491Wire }
+func (failingPatch) UpdateIssue(context.Context, RepoRef, int64, IssuePatch) error {
+	return errI491Wire
+}
 
 func TestPushSectionGivesItsLockBackOnEveryWayOut(t *testing.T) {
 	// otherInstance pushes from a pool of its own: a connection of the first

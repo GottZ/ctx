@@ -19,9 +19,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
+
+// i491KeepsBaseFields: the mapping carries the field snapshot of its base —
+// the next push diffs against it instead of falling back to a full push.
+func i491KeepsBaseFields(t *testing.T, pool *pgxpool.Pool, blockID string) {
+	t.Helper()
+	var has bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT metadata ? 'base_fields' FROM context_project_sync_map WHERE block_id = $1::uuid`, blockID).Scan(&has); err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Errorf("the mapping lost its base field snapshot")
+	}
+}
 
 func TestPushAdvanceAcceptsTheSentVersionAsBase(t *testing.T) {
 	// The mapping holds the listed base when the advance runs: the plain push.
@@ -56,6 +72,7 @@ func TestPushAdvanceAcceptsTheSentVersionAsBase(t *testing.T) {
 		if base, conflict := e.mapping(t); conflict || base != e.forgeH(t) {
 			t.Errorf("mapping flagged %v, base is the forge's %v — the advance must take the sent version as its base", conflict, base == e.forgeH(t))
 		}
+		i491KeepsBaseFields(t, e.pool, e.id(t))
 		if n := e.cycles(t, 3); n != 0 {
 			t.Errorf("three runs landed %d PATCH(es), want 0", n)
 		}
@@ -81,6 +98,7 @@ func TestPushAdvanceAcceptsTheSentVersionAsBase(t *testing.T) {
 		if _, base, conflict := mapByBlock(t, pool, commentID); conflict || base != forgeH {
 			t.Errorf("mapping flagged %v, base is the sent version's %v", conflict, base == forgeH)
 		}
+		i491KeepsBaseFields(t, pool, commentID)
 		i452NoCandidates(t, pool, proj)
 	})
 }

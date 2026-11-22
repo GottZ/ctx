@@ -198,9 +198,12 @@ func ConflictCount(ctx context.Context, pool *pgxpool.Pool, projectID string) (i
 // every write below carries a block_id (NOT NULL, 080), so a mapping row is
 // structurally inseparable from a real block — the ownership boundary in the 080
 // header. base_hash is the sha256 canonical projection at last successful sync
-// (§3.6, W16 — never a timestamp); forge_updated_at is telemetry ONLY, never a
-// direction input. Every write is Tx-bound (the apply couples block + mapping in
-// one Tx so a half-written mapping can never exist).
+// (§3.6, W16 — never a timestamp); forge_updated_at is never a direction input
+// either: it is the forge's updated_at of the version a pull last applied, and
+// the pull uses it only to order its fetch against that observation (an older
+// fetch writes nothing, the same stamp after a moved base is flagged —
+// forge.olderOrUnordered, issue #491). Every write is Tx-bound (the apply
+// couples block + mapping in one Tx so a half-written mapping can never exist).
 
 // SyncMap is one context_project_sync_map row as the 3-way apply needs it: the
 // stored base_hash + the conflict flag drive the direction decision (§4.5.2).

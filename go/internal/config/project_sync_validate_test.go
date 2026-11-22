@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -22,6 +23,7 @@ func TestValidateProjectSyncMaxConcurrent(t *testing.T) {
 		{"one above the ceiling", ceiling + 1, ceiling, true},
 		{"the pool size", gatewayDBPoolConns, ceiling, true},
 		{"far above", 500, ceiling, true},
+		{"beyond the product's range", math.MaxInt, ceiling, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := Defaults()

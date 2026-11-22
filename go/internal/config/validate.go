@@ -1666,10 +1666,13 @@ const forgeSyncConnsPerRun = 2
 // own fallback (forge.SyncManager.SetMaxConcurrent).
 func validateProjectSyncMaxConcurrent(c *Config) []Issue {
 	n := c.Project.Sync.MaxConcurrent
-	if n*forgeSyncConnsPerRun < gatewayDBPoolConns {
+	// Compared against the quotient, not n times the per-run count: that
+	// product overflows for an env value near the int range and would wave a
+	// huge count through.
+	ceiling := (gatewayDBPoolConns - 1) / forgeSyncConnsPerRun
+	if n <= ceiling {
 		return nil
 	}
-	ceiling := (gatewayDBPoolConns - 1) / forgeSyncConnsPerRun
 	c.Project.Sync.MaxConcurrent = ceiling
 	return []Issue{{Field: "project.sync.max_concurrent", Severity: SeverityWarn,
 		Msg: fmt.Sprintf("project.sync.max_concurrent %d clamped to %d: each running forge sync holds up to %d of the %d database pool connections (a push holds one for as long as the forge takes to answer), so %d syncs could hold the whole pool",

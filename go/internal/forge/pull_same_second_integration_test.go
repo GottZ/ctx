@@ -179,6 +179,70 @@ func TestPullOfASameSecondFetch(t *testing.T) {
 		}
 	})
 
+	// A mapping another instance flagged after it moved the base: the same
+	// stamp is decided as above, but the flag is not counted a second time.
+	t.Run("older fetch, the mapping flagged since", func(t *testing.T) {
+		e := i491Setup(t, "i491ssflagged", "", fakeIssue{Title: "Crane", Body: "forge body"})
+		since := e.gh.issue(t, 5).Updated
+		e.gh.edit(t, 5, func(it *fakeIssue) { it.Body = first })
+		pageA := e.i491Page(t, since, "")
+		res := e.pullHeldOnPage(t, pageA.Issues, func() {
+			e.gh.editInSecond(t, 5, func(it *fakeIssue) { it.Body = second })
+			if r := e.applyPage(t, e.i491Page(t, since, "").Issues); r.Applied != 1 {
+				t.Fatalf("B's pull of the second version: %+v", r)
+			}
+			// Both sides move on and a third pull flags it; the flag does
+			// not touch forge_updated_at.
+			e.edit(t, store.IssueUpdate{Title: str("Crane, edited locally")})
+			e.gh.editInSecond(t, 5, func(it *fakeIssue) { it.Body = "body edited on the forge, third" })
+			if r := e.applyPage(t, e.i491Page(t, since, "").Issues); r.Conflicts != 1 {
+				t.Fatalf("the third pull: %+v, want the conflict flagged", r)
+			}
+		})
+		if res.Applied != 0 || res.Conflicts != 0 {
+			t.Errorf("A's pull of the first version: %+v, want nothing written and the conflict not counted again", res)
+		}
+		if _, conflict := e.mapping(t); !conflict {
+			t.Errorf("the flag is gone")
+		}
+	})
+
+	// KNOWN LIMIT, an open point (issue #491): another instance pulls the
+	// version this pull fetched and pushes a local edit over it before this
+	// pull writes. The push leaves forge_updated_at at the stamp of the pulled
+	// version, so the fetch carries the stamp the row records while the base
+	// moved: it is flagged like an unordered same-second version, although
+	// block, base and forge all hold the pushed edit. Such a flag stays — the
+	// noop cell writes nothing, no surface resolves a flag, and a later local
+	// edit is not pushed; a remote edit clears it only while the block has not
+	// moved. Telling this case apart needs a marker of which writer set the
+	// base. This pins today's behaviour.
+	t.Run("known limit: the same version pulled and pushed over meanwhile", func(t *testing.T) {
+		e := i491Setup(t, "i491sspushed", "", fakeIssue{Title: "Crane", Body: "forge body"})
+		e.gh.edit(t, 5, func(it *fakeIssue) { it.Body = first })
+		page := e.fetch(t)
+		res := e.pullHeldOnPage(t, page, func() {
+			if r := e.applyPage(t, page); r.Applied != 1 {
+				t.Fatalf("B's pull: %+v", r)
+			}
+			e.edit(t, store.IssueUpdate{Title: str("Crane, edited locally")})
+			if r := e.pushOn(t, e.pool); r.Pushed != 1 {
+				t.Fatalf("B's push: %+v", r)
+			}
+		})
+		if res.Applied != 0 || res.Conflicts != 1 {
+			t.Errorf("A's pull: %+v — the pin expects the mapping flagged (the known limit)", res)
+		}
+		if n := e.cycles(t, 3); n != 0 {
+			t.Errorf("three runs landed %d PATCH(es), want 0", n)
+		}
+		b := getBlock(t, e.pool, e.proj.Scope, e.id(t))
+		_, conflict := e.mapping(t)
+		if !conflict || b.Title != "#5 Crane, edited locally" || e.gh.issue(t, 5).Title != "Crane, edited locally" {
+			t.Errorf("after three runs: flagged %v, block %q, forge %q — the pin expects the flag kept while both sides hold the pushed edit", conflict, b.Title, e.gh.issue(t, 5).Title)
+		}
+	})
+
 	// KNOWN LIMIT, an open point (issue #491): another instance pulls the
 	// second version of the same second after this pull fetched the first one
 	// and before this pull reads the mapping. The read decides on the second

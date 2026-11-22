@@ -308,11 +308,14 @@ func orderFetch(locked store.SyncMap, fetched *time.Time) fetchOrder {
 //     for good), and keeping the row loses this one in the other order. A
 //     base another instance's push moved after a pull of that same stamp is
 //     flagged as well: the stamp then belongs to a version the push
-//     replaced. Without a moved base the same stamp is the next version of
-//     one second, pulled run after run, and the matrix decides — also when
-//     another instance pulled the other version of that second between this
-//     pull's fetch and its read of the mapping, which reads the same (a
-//     known limit, pinned by TestPullOfASameSecondFetch).
+//     replaced; that flag, like any set here, stays while block, base and
+//     forge agree — the noop cell writes nothing (a known limit, pinned by
+//     TestPullOfASameSecondFetch).
+//   - The same stamp without a moved base: the next version of one second,
+//     pulled run after run, and the matrix decides — also when another
+//     instance pulled the other version of that second between this pull's
+//     fetch and its read of the mapping, which reads the same (a known
+//     limit, pinned by TestPullOfASameSecondFetch).
 func olderOrUnordered(locked, read store.SyncMap, forgeH string, fetched *time.Time) (handled bool, conflict bool) {
 	switch orderFetch(locked, fetched) {
 	case fetchOlder:
