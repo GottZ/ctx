@@ -57,6 +57,21 @@ type ApplyResult struct {
 	// differs from the recorded base (Applier.applyLocked, issue #491) — once
 	// per entity and run.
 	Skipped int
+	// Relist is the earliest forge updated_at of the fetched entities this
+	// apply flagged anew, or could not order against the version their
+	// mapping records (the same forge stamp after another writer moved the
+	// base, with other content — olderOrUnordered); zero for none. The leg
+	// saves its cursor no further than it and without an ETag (legCursor),
+	// so the next run lists those entities again (issue #509).
+	Relist time.Time
+}
+
+// relistAt is the earlier of two Relist stamps; a zero one is none.
+func relistAt(a, b time.Time) time.Time {
+	if a.IsZero() || (!b.IsZero() && b.Before(a)) {
+		return b
+	}
+	return a
 }
 
 // IssueApplyFunc applies one fetched page of issues to the corpus — Welle I-G
@@ -361,10 +376,8 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 	if m.push != nil && !dryRun && project.PushEnabled && token != "" {
 		key := pushThrottleKey(project.Forge, token)
 		pres, err := m.push(ctx, project, client, repo, func() bool { return m.throttle.Allow(key) })
-		if err != nil {
-			m.handleWireError(ctx, project.ID, runID, backoffN, err)
-			return
-		}
+		// The counts of a failed pass go into the run's status too: its
+		// writes happened (issue #509).
 		m.mu.Lock()
 		if st := m.runs[project.ID]; st != nil {
 			st.Pushed += pres.Pushed
@@ -372,6 +385,10 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 			st.Conflicts += pres.Conflicts
 		}
 		m.mu.Unlock()
+		if err != nil {
+			m.handleWireError(ctx, project.ID, runID, backoffN, err)
+			return
+		}
 	}
 
 	// SUCCESS. Backoff/error are cleared and last_sync_at stamped; backoff_n reset.
@@ -395,10 +412,11 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 		return err
 	}
 	firstETag := page.ETag
-	var maxSeen time.Time
+	var maxSeen, relist time.Time
 	seen := map[string]bool{}
 	for n := 1; ; n++ {
-		if err := m.applyPage(ctx, project, dryRun, page); err != nil {
+		res, err := m.applyPage(ctx, project, dryRun, page)
+		if err != nil {
 			return err // cursor NOT advanced for this page (commit is below the apply)
 		}
 		m.addPageStats(project.ID, page)
@@ -412,8 +430,10 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 			if page.Listed.After(maxSeen) {
 				maxSeen = page.Listed
 			}
+			relist = relistAt(relist, res.Relist)
 			if !maxSeen.IsZero() {
-				m.commitFetchCursor(ctx, project.ID, "issues", legETag(firstETag, n, page.NextURL), maxSeen)
+				etag, at := legCursor(firstETag, n, page.NextURL, maxSeen, relist)
+				m.commitFetchCursor(ctx, project.ID, "issues", etag, at)
 			}
 		}
 		if page.NextURL == "" {
@@ -436,25 +456,21 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 		return err
 	}
 	firstETag := page.ETag
-	var maxSeen time.Time
+	var maxSeen, relist time.Time
 	seen := map[string]bool{}
 	for n := 1; ; n++ {
 		res, err := m.applyComments(ctx, project, page.Comments)
+		m.addApplied(project.ID, res) // a failed page's committed writes count too (issue #509)
 		if err != nil {
 			return err
 		}
-		m.mu.Lock()
-		if st := m.runs[project.ID]; st != nil {
-			st.Applied += res.Applied
-			st.Conflicts += res.Conflicts
-			st.PullSkipped += res.Skipped
-		}
-		m.mu.Unlock()
 		if mu := maxCommentUpdated(page); mu.After(maxSeen) {
 			maxSeen = mu
 		}
+		relist = relistAt(relist, res.Relist)
 		if !maxSeen.IsZero() {
-			m.commitFetchCursor(ctx, project.ID, "comments", legETag(firstETag, n, page.NextURL), maxSeen)
+			etag, at := legCursor(firstETag, n, page.NextURL, maxSeen, relist)
+			m.commitFetchCursor(ctx, project.ID, "comments", etag, at)
 		}
 		if page.NextURL == "" {
 			return nil
@@ -523,6 +539,37 @@ func legETag(first string, n int, next string) string {
 	return ""
 }
 
+// legCursor is the cursor a leg saves after its page n: since the newest
+// updated_at the leg has seen in this run (maxSeen) and the ETag legETag
+// names — unless an apply of this run's pages flagged an entity anew or
+// left a version it could not order (relist, the earliest such stamp,
+// ApplyResult.Relist; issue #509). Then since goes no further than relist
+// and no ETag is saved, for the page that found it and every later page of
+// the leg: the next run lists the entity again (since is inclusive) instead
+// of a 304 or a since past it, and the pull decides on it — a flag a push's
+// advance kept, over a remote edit the flagging run fetched, is pulled where
+// block and base hold the pushed version. With since at the newest stamp of
+// the page, a later issue on the same listing moved it past the entity, and
+// with the listing's ETag the next run's first page answered 304 while
+// nothing else changed: the entity stayed flagged, its forge version
+// unpulled, and only a new flag over a later remote edit listed it again.
+//
+// Only the run that flags anew or finds the disorder holds the cursor: a
+// mapping flagged already is decided on the read and holds nothing, so the
+// run after the flagging one lists the entities from relist on once — the
+// cost of the rule — and saves the cursor as before. The listing is
+// ascending by updated_at, so relist is never below the since the run asked
+// with, and the cursor of an earlier page is never above it.
+func legCursor(first string, n int, next string, maxSeen, relist time.Time) (string, time.Time) {
+	if relist.IsZero() {
+		return legETag(first, n, next), maxSeen
+	}
+	if relist.Before(maxSeen) {
+		return "", relist
+	}
+	return "", maxSeen
+}
+
 // commitFetchCursor durably advances the etag/since fetch cursor for one leg
 // (leg = "issues" | "comments") after a successful page apply. jsonb `||` replaces
 // only that leg's sub-object; backoff_n and the other leg survive.
@@ -560,22 +607,27 @@ func maxCommentUpdated(page CommentPage) time.Time {
 // applyPage streams one page to the Pull-APPLY hook (I-G). On I-F (nil hook) it is
 // a no-op — the page is fetched and counted, nothing is written. dryRun also skips
 // apply (fetch-only preview).
-func (m *SyncManager) applyPage(ctx context.Context, project store.ProjectRow, dryRun bool, page IssuePage) error {
+func (m *SyncManager) applyPage(ctx context.Context, project store.ProjectRow, dryRun bool, page IssuePage) (ApplyResult, error) {
 	if m.applyIssues == nil || dryRun {
-		return nil
+		return ApplyResult{}, nil
 	}
 	res, err := m.applyIssues(ctx, project, page.Issues)
-	if err != nil {
-		return err
-	}
+	m.addApplied(project.ID, res) // a failed page's committed writes count too (issue #509)
+	return res, err
+}
+
+// addApplied adds what an apply of a page did to the run's status — also
+// for a page that failed midway: the issues before the failure committed
+// (each applies in its own transaction), and a failed run's status names
+// them, its skips included (issue #509).
+func (m *SyncManager) addApplied(projectID string, res ApplyResult) {
 	m.mu.Lock()
-	if st := m.runs[project.ID]; st != nil {
+	if st := m.runs[projectID]; st != nil {
 		st.Applied += res.Applied
 		st.Conflicts += res.Conflicts
 		st.PullSkipped += res.Skipped
 	}
 	m.mu.Unlock()
-	return nil
 }
 
 // handleWireError stamps backoff_until (Retry-After if the forge gave one, else

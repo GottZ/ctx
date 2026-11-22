@@ -8,7 +8,7 @@
 // returns for the block, forgeH = the hash ForgeIssueBase returns for the fetch:
 //
 //	no mapping           ⇒ pull-CREATE  (block + mapping + base := forgeH)
-//	(=,=)                ⇒ noop
+//	(=,=)                ⇒ noop         (a flagged mapping: flag cleared, issue #509)
 //	(base=ctxH, ≠forgeH) ⇒ pull-UPDATE  (block-update + base := forgeH)
 //	(≠ctxH, base=forgeH) ⇒ ctx-ahead    (NOTHING — push is I-H)
 //	(≠,≠, ctxH=forgeH)   ⇒ converged     (base := ctxH, NO block write)
@@ -211,6 +211,7 @@ func (a *Applier) ApplyIssues(ctx context.Context, project store.ProjectRow, iss
 		res.Applied += r.Applied
 		res.Conflicts += r.Conflicts
 		res.Skipped += r.Skipped
+		res.Relist = relistAt(res.Relist, r.Relist)
 	}
 	return res, nil
 }
@@ -243,26 +244,30 @@ func (a *Applier) applyIssue(ctx context.Context, project store.ProjectRow, pol 
 	}
 	return a.applyLocked(ctx, writable, m, decide(m.BaseHash, projectBlock(block, m.BaseFields), forgeH), pulled{
 		forgeH: forgeH, forgeFields: forgeFields, fUpdated: &fUpdated, project: projectBlock,
+		targets: func(ctx context.Context) ([]string, error) {
+			return a.referenceTargets(ctx, project, pol, iss.Number, iss.Body)
+		},
 		// The workflow status is written only where the forge state changed
 		// or the block has none of the resolved workflow (keepsStatus, issue
 		// #486), decided on the block the transaction locked.
-		write: func(tx pgx.Tx, cur *store.Block) (*store.Block, error) {
+		write: func(tx pgx.Tx, cur *store.Block, targets []string) (*store.Block, error) {
 			content.KeepWorkflowStatus = pol.keepsStatus(cur, iss.State)
 			b, err := store.PullUpdateIssueBlock(ctx, tx, m.BlockID, content)
 			if err != nil {
 				return nil, err
 			}
-			return b, a.applyReferences(ctx, tx, project, pol, writable, m.BlockID, iss.Number, iss.Body)
+			return b, applyReferences(ctx, tx, writable, m.BlockID, targets)
 		},
 	})
 }
 
 // fetchOrder places this pull's fetch against the observation of the forge
 // entity the locked mapping row records: its forge_updated_at, the forge's
-// own updated_at of the version a pull last applied or converged on (only
-// pulls write it; a push advance leaves it). It orders two observations of
-// the forge on the forge's clock and is no direction input (W16: ctx-ahead
-// or forge-ahead stays a matter of content hashes). Issue #491.
+// own updated_at of the version a pull last applied or converged on, or of
+// the write a push last recorded (the PATCH's answer, never older than the
+// row's, issue #509). It orders two observations of the forge on the
+// forge's clock and is no direction input (W16: ctx-ahead or forge-ahead
+// stays a matter of content hashes). Issue #491.
 type fetchOrder int
 
 const (
@@ -295,13 +300,14 @@ func orderFetch(locked store.SyncMap, fetched *time.Time) fetchOrder {
 //   - Older than the recorded observation: nothing is written, whether or not
 //     the base moved since the read. Another pull applied a newer version (it
 //     may even have committed between this pull's fetch and its read of the
-//     mapping); writing the older one would set the block back, and the cursor
-//     of the instance that pulled the newer version may answer 304 from then
-//     on, so no later pull would correct it. The block holds a version at
-//     least as new as the fetch, and a later forge change carries a stamp at
-//     or after the recorded one, which the since cursor of every instance
-//     lists again (the cursor never passes the newest stamp of a page it
-//     applied).
+//     mapping), or a push recorded its write, which the fetch predates
+//     (issue #509); writing the older one would set the block back, and the
+//     cursor of the instance that pulled the newer version may answer 304
+//     from then on, so no later pull would correct it. The block holds a
+//     version at least as new as the fetch, and a later forge change carries
+//     a stamp at or after the recorded one, which the since cursor of every
+//     instance lists again (the cursor never passes the newest stamp of a
+//     page it applied).
 //   - The same stamp, after another instance moved the base since the read:
 //     the other pull's version and this one cannot be ordered. When they are
 //     the same version there is nothing to do; otherwise the mapping is
@@ -309,11 +315,9 @@ func orderFetch(locked store.SyncMap, fetched *time.Time) fetchOrder {
 //     the base write before issue #491 gave, because writing the fetch loses
 //     the other version when it was the newer one (and, with a 304 after it,
 //     for good), and keeping the row loses this one in the other order. A
-//     base another instance's push moved after a pull of that same stamp is
-//     flagged as well: the stamp then belongs to a version the push
-//     replaced; that flag, like any set here, stays while block, base and
-//     forge agree — the noop cell writes nothing (a known limit, pinned by
-//     TestPullOfASameSecondFetch).
+//     push that recorded its write since the read moved the base as well:
+//     a remote edit in the second of its PATCH carries the stamp it recorded
+//     and is flagged here, and the next pull pulls it.
 //   - The same stamp without a moved base: the next version of one second,
 //     pulled run after run, and the matrix decides — also when another
 //     instance pulled the other version of that second between this pull's
@@ -368,8 +372,9 @@ func firstStale(ctx context.Context, blockID string) bool {
 // reportStale makes a skipped older fetch whose content differs from the
 // locked row's base visible (issue #491): the forge carries something the
 // block does not, and this pull does not write it. Once, it is the ordinary
-// trace of a race — another instance pulled a newer version, and the next
-// pull lists that one. Run after run for the same block, the forge's
+// trace of a race — another instance pulled a newer version or pushed a
+// write the fetch predates, and the next pull lists the forge's version.
+// Run after run for the same block, the forge's
 // updated_at went back behind the stamp the mapping records (a clock set
 // back, a restore of the forge from a backup, a manual change): every pull
 // skips the entity, and a later local edit is pushed over the forge's
@@ -380,7 +385,7 @@ func reportStale(ctx context.Context, res *ApplyResult, blockID string, fetched,
 		return
 	}
 	res.Skipped = 1
-	slog.Warn("forge: a pull skipped a fetch older than the forge version its mapping records, and the forge's content differs from the recorded base — not written; once is a race with another instance's pull, every run means the forge's updated_at went back (clock, restore)",
+	slog.Warn("forge: a pull skipped a fetch older than the forge version its mapping records, and the forge's content differs from the recorded base — not written; once is a race with another instance's pull or push, every run means the forge's updated_at went back (clock, restore)",
 		"block", blockID, "fetched_updated_at", fetched, "recorded_updated_at", recorded)
 }
 
@@ -414,25 +419,29 @@ func decide(base, ctxH, forgeH string) decision {
 
 // pulled is one fetched entity the locked apply decides about: the forge
 // side's projection, the block's projection against a base snapshot
-// (issueTypePolicy.ctxIssueBase or CtxCommentBase) and the pull-UPDATE's
-// block write.
+// (issueTypePolicy.ctxIssueBase or CtxCommentBase), the blocks the
+// pull-UPDATE links the block to (targets, nil for none — resolved before
+// the transaction, which locks those below the block's id before the block,
+// issue #503) and the pull-UPDATE's block write.
 type pulled struct {
 	forgeH      string
 	forgeFields json.RawMessage
 	fUpdated    *time.Time
 	project     func(b *store.Block, baseFields json.RawMessage) string
-	write       func(tx pgx.Tx, cur *store.Block) (*store.Block, error)
+	targets     func(ctx context.Context) ([]string, error)
+	write       func(tx pgx.Tx, cur *store.Block, targets []string) (*store.Block, error)
 }
 
 // applyLocked carries out the matrix decision the read path made on a page
 // read without locks (read), in one transaction. A decision that writes
-// nothing ends on the read: noop, ctx-ahead (the push's), and a conflict the
-// mapping already carries (idempotent, 0 new conflicts). Every other one is
-// decided again on the rows the transaction locks — the block
-// (LockPulledBlock), then its mapping row (LockSyncMap), the order of every
-// writer of both — because a local write can move the block and another
-// ctxd instance the mapping between the read and the write (issues #452,
-// #491):
+// nothing ends on the read (endsOnRead): noop on an unflagged mapping,
+// ctx-ahead (the push's), and a conflict the mapping already carries
+// (idempotent, 0 new conflicts). Every other one is
+// decided again on the rows the transaction locks — the targets of its
+// references whose id lies below the block's, in ascending order, then the
+// block (LockPulledBlock, issue #503), then its mapping row (LockSyncMap),
+// the order of every writer of both — because a local write can move the block and another ctxd
+// instance the mapping between the read and the write (issues #452, #491):
 //
 //   - The mapping still holds the base the read decided on. The read's
 //     convergence stands whatever the block holds now: the read saw block
@@ -462,19 +471,37 @@ type pulled struct {
 // pull of another instance may have applied the newer version between this
 // pull's fetch and its read.
 //
+// A flag goes once block and forge agree on the locked rows (issue #509):
+// the convergence clears it as it always did, and so does the noop cell —
+// block, base and forge at one version — which before wrote nothing, so a
+// mapping flagged while both sides moved stayed flagged after they came
+// level, out of the push's listing for good. It records that version as
+// the base (synced_at the block's updated_at) like a convergence.
+//
+// A flag this pull sets anew, and a version it cannot order, report the
+// fetch's stamp (ApplyResult.Relist): the leg saves its cursor no further
+// than it and no ETag, so the next run lists the entity again and decides
+// on it (issue #509) — the flag may stand for a remote edit no later run
+// would list otherwise. A conflict the mapping carries already reports
+// nothing.
+//
 // A block that is gone, archived or out of scope, or that lost its mapping,
 // is skipped, as the read does.
 func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.SyncMap, read decision, p pulled) (ApplyResult, error) {
-	switch {
-	case read == decNoop, read == decCtxAhead:
-		return ApplyResult{}, nil
-	case read == decConflict && m.Conflict:
-		return ApplyResult{}, nil // already flagged — idempotent, 0 new conflicts
+	if res, done := endsOnRead(ctx, read, m, p); done {
+		return res, nil
+	}
+	var targets []string
+	if p.targets != nil {
+		var err error
+		if targets, err = p.targets(ctx); err != nil {
+			return ApplyResult{}, err
+		}
 	}
 	var res ApplyResult
 	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
 		res = ApplyResult{}
-		cur, err := store.LockPulledBlock(ctx, tx, m.BlockID, writable)
+		cur, err := store.LockPulledBlock(ctx, tx, m.BlockID, writable, targets)
 		if errors.Is(err, store.ErrIssueNotFound) {
 			return nil // archived/vanished since the read — skip, as the read does
 		}
@@ -488,6 +515,8 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 		if handled, conflict, stale := olderOrUnordered(locked, m, p.forgeH, p.fUpdated); handled {
 			if stale {
 				reportStale(ctx, &res, m.BlockID, p.fUpdated, locked.ForgeUpdatedAt)
+			} else if p.forgeH != locked.BaseHash {
+				res.Relist = stampOf(p.fUpdated) // the same stamp as another version: listed again next run (issue #509)
 			}
 			if !conflict {
 				return nil
@@ -502,13 +531,16 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 		}
 		switch d {
 		case decPull:
-			b, err := p.write(tx, cur)
+			b, err := p.write(tx, cur, targets)
 			if err != nil {
 				return err
 			}
 			res.Applied = 1
 			return store.UpdateSyncMapBase(ctx, tx, m.BlockID, p.forgeH, p.forgeFields, p.fUpdated, &b.UpdatedAt)
-		case decConverge:
+		case decNoop, decConverge:
+			if d == decNoop && !locked.Conflict {
+				return nil // in sync and unflagged: nothing to record
+			}
 			var heldAt *time.Time
 			if ctxH == p.forgeH {
 				heldAt = &cur.UpdatedAt
@@ -524,19 +556,59 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 				return nil
 			}
 			res.Conflicts = 1
+			res.Relist = stampOf(p.fUpdated) // flagged anew: listed again next run (issue #509)
 			return store.FlagSyncMapConflict(ctx, tx, m.BlockID, a.clock())
 		}
-		return nil // noop or ctx-ahead on the locked rows
+		return nil // ctx-ahead on the locked rows
 	}); err != nil {
 		return ApplyResult{}, err
 	}
 	return res, nil
 }
 
+// stampOf is a fetch's forge stamp, zero for none.
+func stampOf(fetched *time.Time) time.Time {
+	if fetched == nil {
+		return time.Time{}
+	}
+	return *fetched
+}
+
+// endsOnRead answers whether the read's decision is carried out without a
+// transaction (done), and what it counts: ctx-ahead (the push's), a noop
+// on an unflagged mapping, and a conflict the mapping carries already
+// (idempotent, 0 new conflicts). A noop on a flagged mapping goes on to the
+// locked rows, which clear the flag (issue #509).
+//
+// A fetch older than the observation the flagged row records is reported
+// (reportStale: pull_skipped and the WARN) before the conflict ends here —
+// before, it returned uncounted (issue #509). A conflict decision means the
+// fetch differs from the base, so such a skip always carries other content.
+func endsOnRead(ctx context.Context, read decision, m store.SyncMap, p pulled) (ApplyResult, bool) {
+	var res ApplyResult
+	switch {
+	case read == decCtxAhead, read == decNoop && !m.Conflict:
+		return res, true
+	case read == decConflict && m.Conflict:
+		if orderFetch(m, p.fUpdated) == fetchOlder {
+			reportStale(ctx, &res, m.BlockID, p.fUpdated, m.ForgeUpdatedAt)
+		}
+		return res, true
+	}
+	return res, false
+}
+
 func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow, pol issueTypePolicy,
 	writable []string, iss IssueRemote, content store.ForgeIssueContent, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
 
+	targets, err := a.referenceTargets(ctx, project, pol, iss.Number, iss.Body)
+	if err != nil {
+		return ApplyResult{}, err
+	}
 	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		// The new block is no other transaction's to lock or to wait for
+		// (its id is unknown until the commit), so the reference write may
+		// take the targets after it (issue #503).
 		b, err := store.PullCreateIssueBlock(ctx, tx, project.Scope, content)
 		if err != nil {
 			return err
@@ -547,7 +619,7 @@ func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow,
 		}); err != nil {
 			return err
 		}
-		return a.applyReferences(ctx, tx, project, pol, writable, b.ID, iss.Number, iss.Body)
+		return applyReferences(ctx, tx, writable, b.ID, targets)
 	}); err != nil {
 		return ApplyResult{}, err
 	}
@@ -601,6 +673,7 @@ func (a *Applier) ApplyComments(ctx context.Context, project store.ProjectRow, c
 		res.Applied += r.Applied
 		res.Conflicts += r.Conflicts
 		res.Skipped += r.Skipped
+		res.Relist = relistAt(res.Relist, r.Relist)
 	}
 	return res, nil
 }
@@ -627,7 +700,7 @@ func (a *Applier) applyComment(ctx context.Context, project store.ProjectRow, wr
 	}
 	return a.applyLocked(ctx, writable, m, decide(m.BaseHash, projectBlock(block, m.BaseFields), forgeH), pulled{
 		forgeH: forgeH, forgeFields: forgeFields, fUpdated: &fUpdated, project: projectBlock,
-		write: func(tx pgx.Tx, _ *store.Block) (*store.Block, error) {
+		write: func(tx pgx.Tx, _ *store.Block, _ []string) (*store.Block, error) {
 			return store.PullUpdateCommentBlock(ctx, tx, m.BlockID, cappedBody)
 		},
 	})
@@ -684,18 +757,25 @@ func parseIssueRefs(body string) map[int64]bool {
 	return out
 }
 
-// applyReferences materialises the 'references' fact edges from a body (§4.5.7):
-// each "#<nr>" resolves to a target block via the mapping — a number with NO
-// mapping yields NO edge (no phantom links; the next run that pulls the target
-// adds the edge idempotently via the PK). Self-references are dropped and the
-// structural-link-class gate is honoured. 0 forge requests (pure local parsing).
-// The target lookup rides the pool (the targets are committed blocks of other
-// issues); the edge write rides the caller's Tx (atomic with the source block).
-func (a *Applier) applyReferences(ctx context.Context, tx pgx.Tx, project store.ProjectRow,
-	pol issueTypePolicy, writable []string, sourceID string, sourceNum int64, body string) error {
+// referenceTargets resolves the 'references' fact edges of a body (§4.5.7)
+// to their target blocks: each "#<nr>" resolves via the mapping — a number
+// with NO mapping yields NO edge (no phantom links; a later pull-update of
+// the source adds it, idempotently via the PK — a pull of the target does
+// not). Self-references are dropped and the structural-link-class gate is
+// honoured. 0 forge requests (pure local parsing). The ids come back sorted
+// and distinct.
+//
+// It runs on the pool before the pull's write transaction begins (the
+// targets are committed blocks of other issues): the transaction locks
+// those below the source block's id before the block and links exactly
+// these (issue #503) — a target mapped meanwhile gets its edge from a later
+// pull-update of the source, as an unmapped one does. Resolving them inside the transaction also
+// needed a second pool connection while the first held the block.
+func (a *Applier) referenceTargets(ctx context.Context, project store.ProjectRow,
+	pol issueTypePolicy, sourceNum int64, body string) ([]string, error) {
 
 	if !pol.refAllowed {
-		return nil
+		return nil, nil
 	}
 	refs := parseIssueRefs(body)
 	targetNums := make([]int64, 0, len(refs))
@@ -705,19 +785,33 @@ func (a *Applier) applyReferences(ctx context.Context, tx pgx.Tx, project store.
 		}
 	}
 	if len(targetNums) == 0 {
-		return nil
+		return nil, nil
 	}
 	tmaps, err := store.GetSyncMapsByForge(ctx, a.pool, project.ID, entityKindIssue, targetNums)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	ids := make([]string, 0, len(tmaps))
 	for _, n := range targetNums {
-		tm, ok := tmaps[n]
-		if !ok {
-			continue // unknown number ⇒ NO phantom edge (§4.5.7)
+		if tm, ok := tmaps[n]; ok { // unknown number ⇒ NO phantom edge (§4.5.7)
+			ids = append(ids, tm.BlockID)
 		}
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids), nil
+}
+
+// applyReferences writes the 'references' edges from sourceID to targets
+// (referenceTargets) in the caller's Tx, atomic with the source block.
+// PutStructuralLink's validation locks each target FOR SHARE: a pull-update
+// holds those below its block's id already (LockPulledBlock) and takes
+// those above it here, after its block, in ascending order (targets are
+// sorted); a pull-create's block is new, no other transaction's to wait
+// for.
+func applyReferences(ctx context.Context, tx pgx.Tx, writable []string, sourceID string, targets []string) error {
+	for _, id := range targets {
 		err := store.PutStructuralLink(ctx, tx, store.StructuralLink{
-			SourceID: sourceID, TargetID: tm.BlockID,
+			SourceID: sourceID, TargetID: id,
 			LinkClass: structLinkReferences, Origin: originForgeSync,
 		}, writable)
 		if err != nil && !errors.Is(err, store.ErrLinkScopeViolation) {

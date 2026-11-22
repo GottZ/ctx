@@ -90,12 +90,13 @@ func TestForgeRefusesSchemeUpgrade(t *testing.T) {
 			return err
 		},
 		"create": func(c *githubClient) error {
-			_, err := c.CreateIssue(context.Background(), repo, IssueCreate{Title: "t", Body: "ISSUE-TEXT-474"})
+			_, _, err := c.CreateIssue(context.Background(), repo, IssueCreate{Title: "t", Body: "ISSUE-TEXT-474"})
 			return err
 		},
 		"update": func(c *githubClient) error {
 			body := "ISSUE-TEXT-474"
-			return c.UpdateIssue(context.Background(), repo, 7, IssuePatch{Body: &body})
+			_, err := c.UpdateIssue(context.Background(), repo, 7, IssuePatch{Body: &body})
+			return err
 		},
 	}
 	for _, code := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
@@ -165,11 +166,10 @@ func TestForgeWriteRedirectThatTurnsIntoAGetRefused(t *testing.T) {
 			c := &githubClient{http: srv.Client(), token: "pat-474"}
 			repo := RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL}
 			body := "ISSUE-TEXT-474"
-			errs := map[string]error{
-				"update":  c.UpdateIssue(context.Background(), repo, 7, IssuePatch{Body: &body}),
-				"comment": c.UpdateComment(context.Background(), repo, 7, body),
-			}
-			_, errs["create"] = c.CreateIssue(context.Background(), repo, IssueCreate{Title: "t", Body: body})
+			errs := map[string]error{}
+			_, errs["update"] = c.UpdateIssue(context.Background(), repo, 7, IssuePatch{Body: &body})
+			_, errs["comment"] = c.UpdateComment(context.Background(), repo, 7, body)
+			_, _, errs["create"] = c.CreateIssue(context.Background(), repo, IssueCreate{Title: "t", Body: body})
 			mu.Lock()
 			log := strings.Join(seen, " | ")
 			mu.Unlock()

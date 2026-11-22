@@ -293,52 +293,77 @@ func (c *githubClient) doWrite(ctx context.Context, method, url string, payload 
 
 // ── push (Welle I-H) ─────────────────────────────────────────────────────────.
 
-func (c *githubClient) CreateIssue(ctx context.Context, repo RepoRef, in IssueCreate) (int64, error) {
+func (c *githubClient) CreateIssue(ctx context.Context, repo RepoRef, in IssueCreate) (int64, *time.Time, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/issues", apiBase(repo), repo.Owner, repo.Repo)
 	raw, err := c.doWrite(ctx, http.MethodPost, url, in)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	var out struct {
 		Number int64 `json:"number"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return 0, fmt.Errorf("forge: decode created issue: %w", err)
+		return 0, nil, fmt.Errorf("forge: decode created issue: %w", err)
 	}
 	if out.Number <= 0 {
-		return 0, fmt.Errorf("forge: created issue has no number")
+		return 0, nil, fmt.Errorf("forge: created issue has no number")
 	}
-	return out.Number, nil
+	return out.Number, answerStamp(raw), nil
 }
 
-func (c *githubClient) UpdateIssue(ctx context.Context, repo RepoRef, number int64, p IssuePatch) error {
+func (c *githubClient) UpdateIssue(ctx context.Context, repo RepoRef, number int64, p IssuePatch) (*time.Time, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d", apiBase(repo), repo.Owner, repo.Repo, number)
-	_, err := c.doWrite(ctx, http.MethodPatch, url, p)
-	return err
+	raw, err := c.doWrite(ctx, http.MethodPatch, url, p)
+	if err != nil {
+		return nil, err
+	}
+	return answerStamp(raw), nil
 }
 
-func (c *githubClient) CreateComment(ctx context.Context, repo RepoRef, issueNumber int64, body string) (int64, error) {
+func (c *githubClient) CreateComment(ctx context.Context, repo RepoRef, issueNumber int64, body string) (int64, *time.Time, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", apiBase(repo), repo.Owner, repo.Repo, issueNumber)
 	raw, err := c.doWrite(ctx, http.MethodPost, url, map[string]string{"body": body})
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	var out struct {
 		ID int64 `json:"id"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return 0, fmt.Errorf("forge: decode created comment: %w", err)
+		return 0, nil, fmt.Errorf("forge: decode created comment: %w", err)
 	}
 	if out.ID <= 0 {
-		return 0, fmt.Errorf("forge: created comment has no id")
+		return 0, nil, fmt.Errorf("forge: created comment has no id")
 	}
-	return out.ID, nil
+	return out.ID, answerStamp(raw), nil
 }
 
-func (c *githubClient) UpdateComment(ctx context.Context, repo RepoRef, commentID int64, body string) error {
+func (c *githubClient) UpdateComment(ctx context.Context, repo RepoRef, commentID int64, body string) (*time.Time, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/issues/comments/%d", apiBase(repo), repo.Owner, repo.Repo, commentID)
-	_, err := c.doWrite(ctx, http.MethodPatch, url, map[string]string{"body": body})
-	return err
+	raw, err := c.doWrite(ctx, http.MethodPatch, url, map[string]string{"body": body})
+	if err != nil {
+		return nil, err
+	}
+	return answerStamp(raw), nil
+}
+
+// answerStamp reads the updated_at of a write's answer: GitHub answers a
+// POST or PATCH with the issue or comment the write left, its updated_at
+// included (issue #509). nil when the answer carries none, a null, or one
+// that does not parse as a timestamp — the write landed all the same, so
+// that is no error; the push then records the write without a stamp.
+func answerStamp(raw []byte) *time.Time {
+	var out struct {
+		UpdatedAt json.RawMessage `json:"updated_at"`
+	}
+	if json.Unmarshal(raw, &out) != nil || len(out.UpdatedAt) == 0 {
+		return nil
+	}
+	var at time.Time
+	if json.Unmarshal(out.UpdatedAt, &at) != nil || at.IsZero() {
+		return nil
+	}
+	return &at
 }
 
 // ── issues ─────────────────────────────────────────────────────────────────.

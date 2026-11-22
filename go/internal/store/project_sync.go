@@ -199,9 +199,10 @@ func ConflictCount(ctx context.Context, pool *pgxpool.Pool, projectID string) (i
 // structurally inseparable from a real block — the ownership boundary in the 080
 // header. base_hash is the sha256 canonical projection at last successful sync
 // (§3.6, W16 — never a timestamp); forge_updated_at is never a direction input
-// either: it is the forge's updated_at of the version a pull last applied, and
-// the pull uses it only to order its fetch against that observation (an older
-// fetch writes nothing, the same stamp after a moved base is flagged —
+// either: it is the forge's updated_at of the version a pull last applied, or
+// of the write a push last recorded (its answer's, issue #509), and the pull
+// uses it only to order its fetch against that observation (an older fetch
+// writes nothing, the same stamp after a moved base is flagged —
 // forge.olderOrUnordered, issue #491). Every write is Tx-bound (the apply
 // couples block + mapping in one Tx so a half-written mapping can never exist).
 
@@ -292,7 +293,8 @@ func baseFieldsMeta(fields json.RawMessage) string {
 // page-wide read without a lock, and another ctxd instance can write the row
 // since — its push advances the base, its pull converges or flags it; the pull
 // decides again on the row this returns (issue #491). Lock order: the block
-// row first (LockPulledBlock), then this one — the order of every writer of
+// row first (LockPulledBlock, after the targets of its references below its
+// id, issue #503), then this one — the order of every writer of
 // both (AdvancePushBase, FinalizePushCreateIssue's rename aside, which runs
 // on a forge_id 0 row no pull reads). ok=false: the block has no mapping row.
 func LockSyncMap(ctx context.Context, tx pgx.Tx, blockID string) (SyncMap, bool, error) {

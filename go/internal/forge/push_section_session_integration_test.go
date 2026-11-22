@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -104,8 +105,8 @@ type failingPatch struct{ Forge }
 
 var errI491Wire = errors.New("the forge answered 502")
 
-func (failingPatch) UpdateIssue(context.Context, RepoRef, int64, IssuePatch) error {
-	return errI491Wire
+func (failingPatch) UpdateIssue(context.Context, RepoRef, int64, IssuePatch) (*time.Time, error) {
+	return nil, errI491Wire
 }
 
 func TestPushSectionGivesItsLockBackOnEveryWayOut(t *testing.T) {

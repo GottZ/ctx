@@ -132,7 +132,25 @@ func PullCreateIssueBlock(ctx context.Context, tx pgx.Tx, scope string, c ForgeI
 // until the pull commits. The pull decided its direction on a read without a
 // lock; it projects this row again before it writes (issue #452). A block that
 // is archived, gone or out of scopes reads as ErrIssueNotFound.
-func LockPulledBlock(ctx context.Context, tx pgx.Tx, blockID string, scopes []string) (*Block, error) {
+//
+// targets are the blocks the pull links the block to (its "#<nr>"
+// references), which PutStructuralLink's validation locks FOR SHARE: the
+// targets whose id lies below the block's are locked here first, FOR SHARE
+// and in ascending id order, before the block (issue #503); those above it
+// the reference write takes after the block. Two pulls of issues that
+// reference each other locked their own block first and the other's FOR
+// SHARE in the reference write, each waiting for the other's FOR NO KEY
+// UPDATE: a deadlock (40P01). Now a pull holds no block when it waits for
+// one below its own, and it waits for one above its own only while that
+// block's pull is not waiting for its block — the later of the two waits
+// before it holds a row the earlier one needs. FOR SHARE stays: a scope move
+// takes the row FOR NO KEY UPDATE (a scope is no key column), which FOR KEY
+// SHARE would let through, and the target's scope must not change under the
+// link.
+func LockPulledBlock(ctx context.Context, tx pgx.Tx, blockID string, scopes, targets []string) (*Block, error) {
+	if err := lockLinkTargetsBelow(ctx, tx, targets, blockID); err != nil {
+		return nil, err
+	}
 	b, err := scanIssue(tx.QueryRow(ctx, `
 		SELECT `+issueScanCols+`
 		  FROM context_blocks

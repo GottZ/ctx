@@ -207,17 +207,16 @@ func TestPullOfASameSecondFetch(t *testing.T) {
 		}
 	})
 
-	// KNOWN LIMIT, an open point (issue #491): another instance pulls the
-	// version this pull fetched and pushes a local edit over it before this
-	// pull writes. The push leaves forge_updated_at at the stamp of the pulled
-	// version, so the fetch carries the stamp the row records while the base
-	// moved: it is flagged like an unordered same-second version, although
-	// block, base and forge all hold the pushed edit. Such a flag stays — the
-	// noop cell writes nothing, no surface resolves a flag, and a later local
-	// edit is not pushed; a remote edit clears it only while the block has not
-	// moved. Telling this case apart needs a marker of which writer set the
-	// base. This pins today's behaviour.
-	t.Run("known limit: the same version pulled and pushed over meanwhile", func(t *testing.T) {
+	// Another instance pulls the version this pull fetched and pushes a local
+	// edit over it before this pull writes. Its advance records the stamp of
+	// its PATCH (issue #509), so the fetch is older than the row's
+	// observation: nothing is written and nothing flagged, the skip is
+	// reported once (the content differs from the pushed base), and block,
+	// base and forge hold the pushed edit. Before #509 the push left the
+	// stamp of the pulled version, the fetch read like an unordered version
+	// of the same second, and the mapping stayed flagged while all three
+	// agreed (the known limit this subtest pinned).
+	t.Run("the same version pulled and pushed over meanwhile", func(t *testing.T) {
 		e := i491Setup(t, "i491sspushed", "", fakeIssue{Title: "Crane", Body: "forge body"})
 		e.gh.edit(t, 5, func(it *fakeIssue) { it.Body = first })
 		page := e.fetch(t)
@@ -230,16 +229,15 @@ func TestPullOfASameSecondFetch(t *testing.T) {
 				t.Fatalf("B's push: %+v", r)
 			}
 		})
-		if res.Applied != 0 || res.Conflicts != 1 {
-			t.Errorf("A's pull: %+v — the pin expects the mapping flagged (the known limit)", res)
+		if res.Applied != 0 || res.Conflicts != 0 || res.Skipped != 1 {
+			t.Errorf("A's pull: %+v, want nothing written, nothing flagged and the skip of a fetch older than B's push counted", res)
 		}
 		if n := e.cycles(t, 3); n != 0 {
 			t.Errorf("three runs landed %d PATCH(es), want 0", n)
 		}
 		b := getBlock(t, e.pool, e.proj.Scope, e.id(t))
-		_, conflict := e.mapping(t)
-		if !conflict || b.Title != "#5 Crane, edited locally" || e.gh.issue(t, 5).Title != "Crane, edited locally" {
-			t.Errorf("after three runs: flagged %v, block %q, forge %q — the pin expects the flag kept while both sides hold the pushed edit", conflict, b.Title, e.gh.issue(t, 5).Title)
+		if base, conflict := e.mapping(t); conflict || base != e.forgeH(t) || b.Title != "#5 Crane, edited locally" || e.gh.issue(t, 5).Title != "Crane, edited locally" {
+			t.Errorf("after three runs: flagged %v, base is the forge's %v, block %q, forge %q — want both sides at the pushed edit, unflagged", conflict, base == e.forgeH(t), b.Title, e.gh.issue(t, 5).Title)
 		}
 	})
 

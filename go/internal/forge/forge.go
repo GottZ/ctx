@@ -135,6 +135,11 @@ func (p IssuePatch) empty() bool {
 // writes ctx-ahead entities back: CreateIssue/UpdateIssue as a FIELD-DIFF,
 // CreateComment/UpdateComment for the comment leg. Every push method is a
 // content-POST governed by the token-scoped throttle (§6.1) at the call site.
+//
+// Every push method returns the forge's updated_at of the entity its write
+// left, read from the forge's answer, which the push records as the mapping's
+// forge stamp (issue #509); nil when the answer carries no updated_at it can
+// read — the write landed all the same, and that is no error.
 type Forge interface {
 	ListIssuesSince(ctx context.Context, repo RepoRef, since time.Time, etag string) (IssuePage, error)
 	ListIssuesPage(ctx context.Context, pageURL string) (IssuePage, error)
@@ -142,12 +147,12 @@ type Forge interface {
 	ListCommentsPage(ctx context.Context, pageURL string) (CommentPage, error)
 
 	// CreateIssue POSTs a new issue and returns its forge number (§4.5.2 create).
-	CreateIssue(ctx context.Context, repo RepoRef, c IssueCreate) (number int64, err error)
+	CreateIssue(ctx context.Context, repo RepoRef, c IssueCreate) (number int64, updatedAt *time.Time, err error)
 	// UpdateIssue PATCHes an existing issue with the field-diff (empty patch is a
 	// programming error the caller avoids via IssuePatch.empty()).
-	UpdateIssue(ctx context.Context, repo RepoRef, number int64, p IssuePatch) error
+	UpdateIssue(ctx context.Context, repo RepoRef, number int64, p IssuePatch) (updatedAt *time.Time, err error)
 	// CreateComment POSTs a comment on an issue and returns its forge comment id.
-	CreateComment(ctx context.Context, repo RepoRef, issueNumber int64, body string) (id int64, err error)
+	CreateComment(ctx context.Context, repo RepoRef, issueNumber int64, body string) (id int64, updatedAt *time.Time, err error)
 	// UpdateComment PATCHes an existing comment's body.
-	UpdateComment(ctx context.Context, repo RepoRef, commentID int64, body string) error
+	UpdateComment(ctx context.Context, repo RepoRef, commentID int64, body string) (updatedAt *time.Time, err error)
 }

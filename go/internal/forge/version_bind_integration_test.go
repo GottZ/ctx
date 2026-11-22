@@ -59,16 +59,16 @@ func (s *hookSpy) runHook() {
 	}
 }
 
-func (s *hookSpy) UpdateIssue(ctx context.Context, r RepoRef, n int64, p IssuePatch) error {
-	err := s.pushSpyForge.UpdateIssue(ctx, r, n, p)
+func (s *hookSpy) UpdateIssue(ctx context.Context, r RepoRef, n int64, p IssuePatch) (*time.Time, error) {
+	at, err := s.pushSpyForge.UpdateIssue(ctx, r, n, p)
 	s.runHook()
-	return err
+	return at, err
 }
 
-func (s *hookSpy) UpdateComment(ctx context.Context, r RepoRef, id int64, body string) error {
-	err := s.pushSpyForge.UpdateComment(ctx, r, id, body)
+func (s *hookSpy) UpdateComment(ctx context.Context, r RepoRef, id int64, body string) (*time.Time, error) {
+	at, err := s.pushSpyForge.UpdateComment(ctx, r, id, body)
 	s.runHook()
-	return err
+	return at, err
 }
 
 func (s *hookSpy) setHook(h func()) {

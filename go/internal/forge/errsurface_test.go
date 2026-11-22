@@ -50,7 +50,7 @@ func TestForgeErrorsCarryNoURL(t *testing.T) {
 			return err
 		},
 		"write": func() error {
-			_, err := c.CreateIssue(context.Background(), repo, IssueCreate{Title: "t", Body: "b"})
+			_, _, err := c.CreateIssue(context.Background(), repo, IssueCreate{Title: "t", Body: "b"})
 			return err
 		},
 		"malformed-location": func() error {

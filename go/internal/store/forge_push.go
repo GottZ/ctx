@@ -131,7 +131,11 @@ func ListCommentPushCandidates(ctx context.Context, pool *pgxpool.Pool, projectI
 // The GitHub POST happened BEFORE this Tx (a wire create can not roll back); if
 // this commit fails the forge issue exists without a local number and a re-run
 // would create a duplicate — the documented dual-write window (v1; §4.5.3).
-func FinalizePushCreateIssue(ctx context.Context, pool *pgxpool.Pool, blockID string, number int64, ctxHash string, ctxFields json.RawMessage) error {
+//
+// forgeUpdatedAt is the forge's updated_at the create's answer carried (nil:
+// none it could read): the mapping's forge stamp, as a pull records it
+// (issue #509).
+func FinalizePushCreateIssue(ctx context.Context, pool *pgxpool.Pool, blockID string, number int64, ctxHash string, ctxFields json.RawMessage, forgeUpdatedAt *time.Time) error {
 	return pgxdb.Write(ctx, pool,
 		pgxdb.Stages{Begin: "store: finalize push create begin", Commit: "store: finalize push create commit"},
 		func(tx pgx.Tx) error {
@@ -141,9 +145,10 @@ func FinalizePushCreateIssue(ctx context.Context, pool *pgxpool.Pool, blockID st
 			UPDATE context_project_sync_map
 			   SET forge_id = $2, base_hash = $3, synced_at = now(),
 			       conflict = false, conflict_at = NULL,
-			       metadata = metadata || $4::jsonb
+			       metadata = metadata || $4::jsonb,
+			       forge_updated_at = COALESCE($5::timestamptz, forge_updated_at)
 			 WHERE block_id = $1::uuid AND entity_kind = 'issue'`,
-				blockID, number, ctxHash, baseFieldsMeta(ctxFields)); err != nil {
+				blockID, number, ctxHash, baseFieldsMeta(ctxFields), forgeUpdatedAt); err != nil {
 				return fmt.Errorf("store: finalize push create mapping: %w", err)
 			}
 			// Block title rename "#L<seq>"→"#<nr>" ($2 is the fully built "#<nr>" prefix,
@@ -204,16 +209,19 @@ func renamedBlockIDs(ctx context.Context, tx pgx.Tx, sql string, args ...any) ([
 }
 
 // FinalizePushCreateComment closes a comment push-create: forge_id 0→id, base :=
-// ctxH + snapshot. No title rename (the comment title was already cascaded to
-// "#<nr>.cL<n>" when its parent issue was pushed). Keyed on block_id.
-func FinalizePushCreateComment(ctx context.Context, pool *pgxpool.Pool, blockID string, commentID int64, ctxHash string, ctxFields json.RawMessage) error {
+// ctxH + snapshot, and the forge's updated_at of the create's answer as the
+// forge stamp (nil keeps the row's, issue #509). No title rename (the comment
+// title was already cascaded to "#<nr>.cL<n>" when its parent issue was
+// pushed). Keyed on block_id.
+func FinalizePushCreateComment(ctx context.Context, pool *pgxpool.Pool, blockID string, commentID int64, ctxHash string, ctxFields json.RawMessage, forgeUpdatedAt *time.Time) error {
 	_, err := pool.Exec(ctx, `
 		UPDATE context_project_sync_map
 		   SET forge_id = $2, base_hash = $3, synced_at = now(),
 		       conflict = false, conflict_at = NULL,
-		       metadata = metadata || $4::jsonb
+		       metadata = metadata || $4::jsonb,
+		       forge_updated_at = COALESCE($5::timestamptz, forge_updated_at)
 		 WHERE block_id = $1::uuid AND entity_kind = 'comment'`,
-		blockID, commentID, ctxHash, baseFieldsMeta(ctxFields))
+		blockID, commentID, ctxHash, baseFieldsMeta(ctxFields), forgeUpdatedAt)
 	if err != nil {
 		return fmt.Errorf("store: finalize push create comment: %w", err)
 	}
@@ -287,6 +295,26 @@ type PushProjection func(b *Block) string
 // writes that version's state into the block's metadata.forge_state
 // (StampForgeState, issue #491); an unknown base writes none.
 //
+// With that base it records forgeUpdatedAt, the forge's updated_at the
+// PATCH's answer carried, as the mapping's forge stamp (issue #509), never
+// one older than the row records (GREATEST: a pull may have recorded a later
+// observation of the same version meanwhile); nil — the answer carried none
+// it could read, or nothing was sent — keeps the row's. Before, the stamp
+// stayed at the version a pull last saw, and with the same stamp and an
+// unmoved base the pull's matrix decided about a fetch older than this
+// push: a spurious conflict after a later local edit, a local revert to the
+// older version lost, or a step back of the block. Now such a fetch is
+// older than the row's observation and writes nothing (forge.olderOrUnordered).
+// A remote edit that lands in the second of the PATCH (GitHub's updated_at
+// has whole seconds) carries the recorded stamp: the next pull reads the
+// mapping after this advance, finds the base unmoved and pulls it; a pull
+// that read the mapping before this advance and writes after it cannot
+// order the two versions of that second and flags the mapping, and the pull
+// after it pulls the edit and clears the flag (block and base still at the
+// pushed version; the flagging run saves its cursor no further than the
+// entity's stamp and no ETag, so that pull lists the entity again —
+// forge.legCursor).
+//
 // Locks: the block row (FOR NO KEY UPDATE, the lock StampForgeState's UPDATE
 // takes — no lock upgrade), then the mapping row — the order of the pull's
 // writes. The mapping row's base is compared in the UPDATE itself, on
@@ -294,7 +322,29 @@ type PushProjection func(b *Block) string
 // Tx-bound: the push runs it in a short transaction after the wire write, on
 // the connection that holds the entity's push lock (TryLockPushEntity, issue
 // #491).
-func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHash string, ctxFields json.RawMessage, project PushProjection) (moved bool, err error) {
+//
+// A flag a pull set since the section's check stays, whatever the block
+// holds (issue #509): the advance knows what the forge held in the fields
+// its PATCH sent when it answered, not what the forge holds since. Such a
+// flag can stand for a remote edit that landed after the PATCH, which the
+// flagging run fetched; that run saved its cursor no further than the
+// entity's stamp and no ETag (forge.legCursor), so the next pull lists the
+// entity again and decides on it — it pulls the edit and clears the flag
+// where block and base hold the sent version, and clears the flag alone
+// where block, base and forge agree. An advance that cleared the flag (the
+// first form of this change, where the block still held the sent version)
+// left the remote edit behind a 304 or a since past it, and a later local
+// edit was pushed over it without a flag.
+//
+// sent says that a wire write carried ctxHash (false: the advance alone, the
+// listed block projecting to its base already, or only a never-pushed field
+// diverging). An advance without a wire write writes only while the row still holds
+// listedBase (issue #509): it sent nothing, so a base a pull moved since the
+// section's check is the forge's own, and there is nothing to record, flag
+// or stamp — before, it recorded the base unknown and flagged the mapping as
+// if a PATCH had been on the wire. It stamps metadata.forge_state only with
+// a base it wrote.
+func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHash string, ctxFields json.RawMessage, forgeUpdatedAt *time.Time, sent bool, project PushProjection) (moved bool, err error) {
 	var b Block
 	var at time.Time
 	holds := false
@@ -318,13 +368,16 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 		   SET base_hash = CASE WHEN base_hash IN ($6, $2) THEN $2 ELSE $7 END,
 		       synced_at = CASE WHEN $4 THEN $5::timestamptz ELSE '-infinity'::timestamptz END,
 		       metadata = CASE WHEN base_hash IN ($6, $2) THEN metadata || $3::jsonb ELSE metadata - 'base_fields' END,
+		       forge_updated_at = CASE WHEN base_hash IN ($6, $2) THEN GREATEST(forge_updated_at, $8::timestamptz) ELSE forge_updated_at END,
 		       conflict = conflict OR base_hash NOT IN ($6, $2),
 		       conflict_at = CASE WHEN base_hash IN ($6, $2) THEN conflict_at ELSE COALESCE(conflict_at, now()) END
-		 WHERE block_id = $1::uuid
+		 WHERE block_id = $1::uuid AND ($9 OR base_hash = $6)
 		RETURNING old.base_hash NOT IN ($6, $2)`,
-		blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash).Scan(&moved)
+		blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash, forgeUpdatedAt, sent).Scan(&moved)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
+		// The mapping is gone, or an advance without a wire write found the
+		// base moved off the listed one: nothing to record.
 		return false, nil
 	case err != nil:
 		return false, fmt.Errorf("store: advance push base: %w", err)
