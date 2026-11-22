@@ -43,6 +43,8 @@ func TestRules_ColloquialGermanAuxiliaries(t *testing.T) {
 		// "is" in an English question stays the English copula.
 		"What is planned for Monday?":   next506["montag"],
 		"Is the build green on Friday?": next506["freitag"],
+		// With "ist" the clause has its finite verb: a state, no elliptic Perfekt.
+		"Is am Montag was geändert?": next506["montag"],
 	})
 	for q, want := range map[string]string{"Was gab's im Oktober Neues?": "past", "welche configs gabs nach 2017": "past"} {
 		if got := DetectVerbTense(q); got != want {
@@ -56,10 +58,9 @@ func TestRules_ColloquialGermanAuxiliaries(t *testing.T) {
 // have been "haben" or "sein" of a Perfekt — the participle of a verb that
 // takes "sein" (no state passive has one), or an indefinite object before
 // the participle ("was", "etwas", "nichts"), which makes the clause active.
-// A key-word question that ends with any other participle reads as the
-// elided state passive or a plan ("Deployment [ist] geplant") and stays
-// neutral: a wrong past moves the date a week back and drops the
-// superseded filter, a wrong neutral only moves the date.
+// A key-word question that ends with any other participle may be the
+// elided state passive or a plan ("Deployment [ist] geplant"): the form
+// cannot tell, and the tense stays neutral.
 func TestRules_AnEllipticPerfekt(t *testing.T) {
 	checkRules(t, sunday487, map[string]wantDate{
 		"am freitag was kaputt gemacht?":     last506["freitag"],
@@ -79,6 +80,7 @@ func TestRules_AnEllipticPerfekt(t *testing.T) {
 		"am Freitag was geplant?":          next506["freitag"],
 		// A finite verb the rules do not know opens the clause, or the
 		// form is the present right behind the interrogative.
+		"Bekommen wir am Montag was geliefert?":            next506["montag"],
 		"Kriegen wir am Montag was gefixt?":                next506["montag"],
 		"Was passiert am Montag, wenn der Spark ausfällt?": next506["montag"],
 		"Am Montag, was passiert?":                         next506["montag"],
@@ -106,6 +108,15 @@ func TestRules_AnEnglishPassiveAfterBeIsNoPast(t *testing.T) {
 		"What has been deployed on Wednesday?": last506["mittwoch"],
 		"Which PRs were merged on Friday?":     last506["freitag"],
 		"What failed on Wednesday?":            last506["mittwoch"],
+		// "be" before the clause a past form stands in makes no passive (the
+		// review of #506).
+		"What is the name of the job that failed on Friday?": last506["freitag"],
+		"Is this the PR you merged on Tuesday?":              last506["dienstag"],
+		"What is the commit that broke the build on Monday?": last506["montag"],
+		"Who is the person that deployed on Friday?":         last506["freitag"],
+		"Is it true that the backup failed on Saturday?":     last506["samstag"],
+		"Is it planned for Monday?":                          next506["montag"],
+		"Are they merged by Friday?":                         next506["freitag"],
 	})
 }
 
@@ -138,7 +149,7 @@ func TestRules_TheGermanSimplePastByItsPlace(t *testing.T) {
 		"Was steht am Montag auf der Karte?":             next506["montag"],
 		"Welche Daten brauchen wir am Freitag?":          next506["freitag"],
 		"Wann ist die Deadline für die Route am Montag?": next506["montag"],
-		"Was Pakete am Montag angeht, ist alles klar?":   next506["montag"],
+		"Was Karten am Montag angeht, ist alles klar?":   next506["montag"],
 		"wo finde ich am montag die route":               next506["montag"],
 		// The present of a verb on -t: the stem on -ei or -ie, or a listed form.
 		"Was bereiten wir am Montag vor?":            next506["montag"],
@@ -146,6 +157,19 @@ func TestRules_TheGermanSimplePastByItsPlace(t *testing.T) {
 		"Wann beachten wir das am Montag?":           next506["montag"],
 		"Wer bietet am Freitag die Demo an?":         next506["freitag"],
 		"Wer bereitete am Montag die Migration vor?": last506["montag"],
+		// The present of a verb on -t shows its stem: a doubled -t or a single
+		// vowel before -te/-ten (the review of #506).
+		"Wann updaten wir am Montag die Server?":   next506["montag"],
+		"Weißt du, ob wir am Montag updaten?":      next506["montag"],
+		"Worauf achten wir am Montag beim Deploy?": next506["montag"],
+		"Wie lauten die Zugangsdaten für Montag?":  next506["montag"],
+		"Welche Nodes rebooten am Freitag?":        next506["freitag"],
+		"Wann update ich am Montag die Config?":    next506["montag"],
+		"Wann chatten wir am Freitag?":             next506["freitag"],
+		"Wer updatete am Montag die Config?":       last506["montag"],
+		"Welche Nodes rebooteten am Freitag?":      last506["freitag"],
+		"Wann chattete er am Freitag?":             last506["freitag"],
+		"Wer baute am Montag den Release?":         last506["montag"],
 		// The past subjunctive of a modal asks for the present.
 		"Was könnten wir am Montag tun?":        next506["montag"],
 		"Wann sollten wir am Freitag deployen?": next506["freitag"],
@@ -206,6 +230,7 @@ func TestRules_TheElevenEdgesOfTheReview(t *testing.T) {
 		// A count phrase governs no number outside its clause.
 		"Since 2024, how many outages have we had?":  {"2024-01-01", "2026-11-22", "range"},
 		"Seit 2022 – wie viele Ausfälle hatten wir?": {"2022-01-01", "2026-11-22", "range"},
+		"Seit 2022 - wie viele Ausfälle hatten wir?": {"2022-01-01", "2026-11-22", "range"},
 		// The day date of a range's end does not stop the range.
 		"From 2024 to 2026-06-15": {"2024-01-01", "2026-06-15", "range"},
 	})

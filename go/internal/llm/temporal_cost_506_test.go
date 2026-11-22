@@ -20,7 +20,9 @@ import (
 // without a verb, which the German Perfekt searches for a closing participle;
 // many English past forms, each of which looks back for "be"; many day
 // dates and weekdays, in one clause or in many, each of which counts by the
-// tense of its clause; and a plain question for comparison.
+// tense of its clause; many sentences without a word of either language,
+// each of which falls back to the question's language; and a plain question
+// for comparison.
 var longQuestionShapes = []struct{ name, lead, unit string }{
 	{"nach-hause", "", "nach Hause "},
 	{"vor-allem", "", "vor allem kurz vor "},
@@ -30,6 +32,8 @@ var longQuestionShapes = []struct{ name, lead, unit string }{
 	{"day-dates", "Was lief ", "am 2026-03-01 und "},
 	{"day-date-clauses", "Was lief ", "am 2026-03-01, "},
 	{"weekdays", "Was war ", "am Montag und am Freitag, "},
+	{"sentences", "Am Montag? ", "ok. "},
+	{"config-lines", "Was war am Montag? ", "timeout: 30s\n"},
 	{"plain", "", "Was haben wir am Montag deployed? "},
 }
 
@@ -42,7 +46,8 @@ func longQuestion(lead, unit string, n int) string {
 // the rules' per-candidate checks read (ruleScanHook) for each shape at 1, 5
 // and 10 KB: the count grows with the length of the question and not with
 // its square — at 10 KB at most twelve times the count at 1 KB, and never
-// more than the question has bytes, four times over. A count is the same on
+// more than the question has bytes, eight times over (the matchers read the
+// question a fixed number of times each). A count is the same on
 // a loaded host as on an idle one, so the bound does not flap.
 func TestRules_CostIsLinearInTheQuestion(t *testing.T) {
 	steps := 0
@@ -56,7 +61,7 @@ func TestRules_CostIsLinearInTheQuestion(t *testing.T) {
 			steps = 0
 			NormalizeTemporalRules(q, now)
 			counts[kb] = steps
-			if steps > 4*len(q) {
+			if steps > 8*len(q) {
 				t.Errorf("%s at %d KB: %d steps for %d bytes", sh.name, kb, steps, len(q))
 			}
 		}

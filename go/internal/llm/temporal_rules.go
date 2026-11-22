@@ -58,6 +58,9 @@ type clauseWords struct {
 	// closing caches the table of closingParticiples, filled once per
 	// question by the first clause that needs it (issue #506).
 	closing *[]int
+	// lang is the language of the whole question (questionLanguage), read
+	// once by clauseTokens.
+	lang int
 }
 
 // clauseTokens tokenizes query into clauseWords.
@@ -111,6 +114,7 @@ func clauseTokens(query string) clauseWords {
 		i = j
 	}
 	c.markJoins(lower)
+	c.lang = c.languageOf(0, len(c.words))
 	// A question written in capitals, or with every word capitalized, says
 	// nothing by its case.
 	n, m := 0, 0
@@ -126,6 +130,9 @@ func clauseTokens(query string) clauseWords {
 		clear(c.caps)
 	}
 	c.colloquial()
+	// The spoken forms colloquial maps are words of the language as well
+	// ("gab's" counts as "gab").
+	c.lang = c.languageOf(0, len(c.words))
 	return c
 }
 
@@ -521,7 +528,10 @@ var (
 	)
 )
 
-// questionLanguage reads the language of a question from its words
+// questionLanguage is the language of a question, read from its words once
+// by clauseTokens (languageOf; issue #506: read anew per sentence, the
+// fallback of sentenceLanguage cost time quadratic in the number of
+// sentences). It reads it from its words
 // (issue #487): German when it has German marker words, weekday or month
 // names and no English ones, English the other way round, and mixed
 // otherwise. A word in capitals is an acronym and "am" or "um" after a
@@ -530,11 +540,12 @@ var (
 // ("Was Jürgen there on Monday?" is German to it) and needs two stopwords or
 // a domain term ("Was kommt am Montag?" is not German to it).
 func questionLanguage(c clauseWords) int {
-	return c.languageOf(0, len(c.words))
+	return c.lang
 }
 
 // languageOf is questionLanguage for the words [s, e) of c.
 func (c clauseWords) languageOf(s, e int) int {
+	scanned(e - s)
 	de, en := 0, 0
 	for i := s; i < e; i++ {
 		w := c.words[i]
@@ -1003,6 +1014,9 @@ var (
 	englishNotPassive  = toWordSet("been", "was", "were", "has", "have", "had", "did", "do", "does", "wasn't", "weren't", "hasn't", "haven't", "hadn't", "didn't")
 	englishSubjects    = toWordSet("i", "we", "you", "they", "he", "she", "it", "someone", "somebody", "anyone", "anybody", "everyone", "everybody", "nobody", "who")
 	englishWhSubjects  = toWordSet("what", "which", "whose")
+	// englishClauseOpeners open a relative or embedded clause, which ends
+	// the search of englishPassiveAt.
+	englishClauseOpeners = toWordSet("that", "which", "who", "whom", "whose", "where", "when", "whether", "if", "because")
 	englishAfterFinite = toWordSet("the", "a", "an", "this", "that", "these", "those", "my", "our", "your", "their", "his",
 		"her", "its", "some", "any", "all", "no", "it", "them", "him", "me", "us", "you", "on", "at", "in", "to", "from",
 		"by", "for", "with", "into", "during", "after", "before", "since", "until", "over", "up", "down", "out", "off",
@@ -1013,7 +1027,11 @@ var (
 // participle of a passive or a state (issue #506): the nearest auxiliary
 // before it is a form of "be" — "What will be deployed on Wednesday?", "What
 // must be finished by Wednesday?", "Is the meeting on Wednesday cancelled?".
-// A perfect, a past or another verb before it ends the search.
+// A perfect, a past or another verb before it ends the search, and so does
+// the clause the form stands in: the opener of a relative or embedded
+// clause ("What is the name of the job that failed on Friday?") or its
+// subject ("Is this the PR you merged on Tuesday?"), unless a form of "be"
+// right before the subject asks the question ("Is it planned?").
 func englishPassiveAt(words []string, i int) bool {
 	for j := i - 1; j >= 0; j-- {
 		w := words[j]
@@ -1021,7 +1039,8 @@ func englishPassiveAt(words []string, i int) bool {
 		case englishBeForms[w]:
 			scanned(i - j)
 			return true
-		case englishNotPassive[w] || pastVerbSet[w] || englishParticiple(w):
+		case englishNotPassive[w] || pastVerbSet[w] || englishParticiple(w) || englishClauseOpeners[w],
+			englishSubjects[w] && w != "who" && (j == 0 || !englishBeForms[words[j-1]]):
 			scanned(i - j)
 			return false
 		}
@@ -1075,6 +1094,7 @@ var presentTForms = []string{
 	// -achten whose simple past has no form of "machen" or "denken" in it,
 	// read where a finite verb stands (finitePast, issue #506).
 	"werten", "werte", "beachten", "beachte", "betrachten", "betrachte", "beobachten", "beobachte",
+	"lauten", "laute", "antworten", "antworte",
 }
 
 // germanPastShape reports whether w has the shape of the German simple
@@ -1111,7 +1131,42 @@ func germanPastShape(w string) bool {
 			return strings.HasSuffix(stem, "t") || strings.HasSuffix(stem, "d")
 		}
 	}
-	return strings.HasSuffix(w, "te") || strings.HasSuffix(w, "ten")
+	base, ok := strings.CutSuffix(w, "ten")
+	if !ok {
+		if base, ok = strings.CutSuffix(w, "te"); !ok {
+			return false
+		}
+	}
+	return !tStemPresent(w, base)
+}
+
+// presentTWords are present forms of verbs on -t that end like the simple
+// past of a verb whose name is their own tail ("achten" ends like
+// "machten"): read as words, not as endings.
+var presentTWords = toWordSet("achten", "achte")
+
+// tStemPresent reports whether w, a form on -te or -ten whose part before
+// that ending is base, is the present of a verb whose stem ends in -t
+// (issue #506): the simple past of such a verb ends in -tete, so the form is
+// none. Its shape shows it where the stem's -t follows a doubled -t
+// ("chatten", "splitten", "retten"; "hatte" is the past of "haben") or a
+// single vowel ("updaten", "rebooten", "routen", "löten" — no weak verb
+// puts its past ending right behind a, i, o, u, ä, ö or ü, while au, eu and
+// äu do: "bauten", "freuten"), and a few verbs whose stem the shape does not
+// show are words of presentTWords.
+func tStemPresent(w, base string) bool {
+	if presentTWords[w] {
+		return true
+	}
+	if strings.HasSuffix(base, "t") && !strings.HasPrefix(w, "hat") {
+		return true
+	}
+	r, size := utf8.DecodeLastRuneInString(base)
+	if !strings.ContainsRune("aiouäöü", r) {
+		return false
+	}
+	prev, _ := utf8.DecodeLastRuneInString(base[:len(base)-size])
+	return r != 'u' || !strings.ContainsRune("aeä", prev)
 }
 
 // hasSeparableVerb reports a separable verb of separableVerbPairs with its
@@ -1509,9 +1564,10 @@ var planParticiples = toWordSet("geplant", "eingeplant", "vorgesehen", "angesetz
 // ("Was passiert, wenn …?").
 // Any other clause ending with a participle ("Montag Deployment geplant",
 // "Freitag Release freigegeben?", "Bug am Montag gefixt?") may as well be
-// the state passive or a plan with "ist" dropped: it stays neutral, since a
-// wrong past moves the date back and drops the superseded filter, while a
-// wrong neutral only moves the date.
+// the state passive or a plan with "ist" dropped: the form cannot tell, and
+// where it cannot the tense stays neutral. Either wrong reading moves the
+// date by a week; the superseded filter is off for every question a rule
+// answers, whatever its tense (query.go Step 6d).
 func (c clauseWords) ellipticPerfekt(s, e int) bool {
 	for cs := s; cs < e; {
 		_, ce := c.clauseOf(cs)
