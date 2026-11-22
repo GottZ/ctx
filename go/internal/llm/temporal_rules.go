@@ -28,18 +28,42 @@ import (
 
 // ruleTokenize splits query on whitespace and hyphens, trims punctuation, lowercases.
 func ruleTokenize(query string) []string {
+	tokens, _, _ := clauseTokens(query)
+	return tokens
+}
+
+// clauseTokens is ruleTokenize with, per token, whether it starts a clause
+// (starts: the first token and a token after a word that ends with a comma,
+// semicolon, colon or the end of a sentence) and whether it follows a German
+// coordinating conjunction (afterConj, germanClauseConjunctions): "Und was ist
+// am Montag?", "Zeig mir, was am Freitag ansteht" (issue #487). A
+// conjunction joins words as often as clauses ("am Montag und Dienstag
+// gemacht"), so it ends no clause.
+func clauseTokens(query string) (tokens []string, starts, afterConj []bool) {
 	lower := strings.ToLower(query)
 	expanded := strings.ReplaceAll(lower, "-", " ")
 	raw := strings.Fields(expanded)
-	out := make([]string, 0, len(raw))
-	for _, w := range raw {
-		w = strings.Trim(w, ".,;:!?\"'()[]{}–—/\\")
-		if w != "" {
-			out = append(out, w)
+	tokens = make([]string, 0, len(raw))
+	starts = make([]bool, 0, len(raw))
+	afterConj = make([]bool, 0, len(raw))
+	start, conj := true, false
+	for _, f := range raw {
+		if w := strings.Trim(f, ".,;:!?\"'()[]{}–—/\\"); w != "" {
+			tokens = append(tokens, w)
+			starts = append(starts, start)
+			afterConj = append(afterConj, conj)
+			start, conj = false, germanClauseConjunctions[w]
+		}
+		if r, _ := utf8.DecodeLastRuneInString(f); strings.ContainsRune(",;:.!?", r) {
+			start, conj = true, false
 		}
 	}
-	return out
+	return tokens, starts, afterConj
 }
+
+// germanClauseConjunctions are the German conjunctions behind which a
+// "was" may open a clause (clauseTokens).
+var germanClauseConjunctions = toWordSet("und", "aber", "oder", "doch", "sondern", "also")
 
 // --- Levenshtein (lightweight) ---.
 
@@ -203,10 +227,11 @@ var pastVerbSet = toWordSet(
 	"sprach", "fuhr", "zog", "hielt", "rief", "stieg", "verlor",
 	"waren",
 	// The verbs of a German past question that leaned on its "Was" until
-	// the word stopped counting (startsWithGermanWas, issue #487), and the
-	// plural of the forms above it asks with.
+	// the word stopped counting (germanWasAt, issue #487), and the plural of
+	// the forms above it asks with — not "sollten" and "wollten", which are
+	// the subjunctive as well ("Sollten wir am Freitag deployen?").
 	"geschah", "geschahen", "passierte", "passierten", "ereignete", "ereigneten",
-	"gingen", "hatten", "wollten", "mussten", "wurden", "konnten", "sollten",
+	"gingen", "hatten", "mussten", "wurden", "konnten",
 	"machten", "fanden", "kamen", "nahmen", "liefen", "fielen", "taten",
 	"sagten", "sahen", "wussten", "standen", "blieben", "schrieben",
 	"begannen", "sprachen", "hielten",
@@ -237,7 +262,16 @@ var explicitFutureSet = toWordSet(
 	"next", "upcoming",
 )
 
-var perfektAux = toWordSet("habe", "hab", "hat", "haben", "hatte", "hatten", "bin", "ist", "sind")
+var perfektAux = toWordSet("habe", "hab", "hast", "hat", "haben", "habt", "hatte", "hatten", "bin", "bist", "ist", "sind", "seid")
+
+// seinAux are the forms of "sein" in perfektAux: behind them a participle on
+// -iert is a state ("ist reserviert") unless its verb takes "sein" in the
+// Perfekt (seinIerenParticiples), issue #487.
+var seinAux = toWordSet("bin", "bist", "ist", "sind", "seid")
+
+// seinIerenParticiples are the participles on -iert whose verb takes "sein"
+// in the Perfekt ("ist passiert", "ist eskaliert").
+var seinIerenParticiples = toWordSet("passiert", "eskaliert", "explodiert", "kollabiert")
 
 var perfektParticiplePat = regexp.MustCompile(`^(ab|an|auf|aus|bei|ein|mit|nach|um|vor|weg|zu|über|unter)?ge\w+(t|en)$`)
 
@@ -250,19 +284,18 @@ var knownParticiples = toWordSet(
 	"gehalten", "gerufen", "gestiegen", "verloren",
 	"deployed", "gefixt", "geplant", "gestartet", "besprochen", "gearbeitet",
 	"worden",
-	// Participles without "ge" a German past question asks with (issue
-	// #487); those of the verbs on -ieren ("passiert") hasPerfektForm reads
-	// by their ending.
+	// Participles a German past question asks with that the pattern does not
+	// read — without "ge", or with an umlaut (issue #487); those of the verbs
+	// on -ieren ("passiert") participleAfter reads by their ending.
 	"verändert", "erstellt", "erledigt", "behoben", "entschieden", "beschlossen",
-	"veröffentlicht", "erschienen", "entstanden",
+	"veröffentlicht", "erschienen", "entstanden", "erklärt",
+	"geändert", "gelöscht", "geprüft", "geführt", "gehört", "gewählt", "geöffnet",
 )
 
 // englishSubjectAfterWas are the words an English yes/no question puts right
 // behind its "was" ("Was it …", "Was there …", "Was the build …"): with one of
-// them a question-initial "was" is the English past of "to be"
-// (startsWithGermanWas). "an" is left out: it is a German preposition as
-// well ("Was an Daten fehlt …"), and the German reading costs the English
-// question only the tense of this one word.
+// them a "was" at the start of a clause is the English past of "to be"
+// (germanWasAt), whatever its shape.
 var englishSubjectAfterWas = toWordSet(
 	"it", "there", "this", "that", "these", "those", "the", "a",
 	"i", "he", "she", "we", "you", "they",
@@ -272,20 +305,45 @@ var englishSubjectAfterWas = toWordSet(
 	"no", "any", "every", "each",
 )
 
-// startsWithGermanWas reports whether a question starts with the German
-// interrogative pronoun "Was" ("Was ist am Montag?", "Was steht Freitag an?")
-// rather than with the English "was" of a yes/no question, which puts its
-// subject right behind it (englishSubjectAfterWas). The German pronoun says
-// nothing about the tense, so DetectVerbTense does not count it as the
-// English past (issue #487); a "was" further on ("What was …", "It was …")
-// stays the English past.
+// germanAfterWas are words that follow the German interrogative "was" and
+// are none of its finite verbs (germanWasAt reads those by their shape):
+// particles, pronouns, articles, prepositions, and the finite forms that end
+// neither in -t nor in -en.
+var germanAfterWas = toWordSet(
+	"für", "genau", "alles", "denn", "noch", "sonst", "davon", "dazu", "damit", "eigentlich", "so",
+	"es", "das", "der", "die", "den", "dem", "man", "ich", "wir", "du", "ihr", "sie", "er", "sich",
+	"uns", "mir", "dir", "am", "im", "vom", "auf", "mit", "zum", "zur", "um", "bei",
+	"sind", "war", "muss", "soll", "kann", "darf", "mag",
+)
+
+// germanWasAt reports whether tokens[i] is the German interrogative pronoun
+// "was" ("Was ist am Montag?", "Zeig mir, was am Freitag ansteht") rather
+// than the English past of "to be" (issue #487). The German pronoun starts
+// its clause or follows a conjunction (clauseTokens) and is followed by a
+// German finite verb — a word on -t or -en, one with a letter beyond ASCII,
+// a verb the tense detection knows — or by a word of germanAfterWas, or by
+// nothing. An
+// English "was" at the start of a clause opens a yes/no question with its
+// subject behind it ("Was it …", "Was the build …", "Was CI green …"); a
+// "was" inside a clause ("What was …", "It was …") is English.
 //
-// The question's language is decided by the word behind "was", not by
-// DetectGerman: that heuristic needs an umlaut, a German term or two German
-// stopwords, so it reads "was geschah im Mai" and "Was kommt am Montag?" as
-// not German, and "What was decided with Jürgen on Monday?" as German.
-func startsWithGermanWas(tokens []string) bool {
-	return len(tokens) > 0 && tokens[0] == "was" && (len(tokens) == 1 || !englishSubjectAfterWas[tokens[1]])
+// The language is read from the word behind "was", not from DetectGerman:
+// that heuristic needs an umlaut, a German term or two German stopwords, so
+// it reads "was geschah im Mai" and "Was kommt am Montag?" as not German and
+// "What was decided with Jürgen on Monday?" as German.
+func germanWasAt(tokens []string, starts, afterConj []bool, i int) bool {
+	if tokens[i] != "was" || !starts[i] && !afterConj[i] {
+		return false
+	}
+	if i+1 == len(tokens) || starts[i+1] {
+		return true
+	}
+	n := tokens[i+1]
+	if englishSubjectAfterWas[n] {
+		return false
+	}
+	return germanAfterWas[n] || pastVerbSet[n] || futureVerbSet[n] || perfektAux[n] ||
+		strings.HasSuffix(n, "t") || strings.HasSuffix(n, "en") || utf8.RuneCountInString(n) != len(n)
 }
 
 var futureIntentPhraseList = []string{
@@ -318,7 +376,7 @@ var separableArticleSet = toWordSet(
 // DetectVerbTense returns "past", "future", or "neutral" based on deterministic verb analysis.
 func DetectVerbTense(query string) string {
 	lower := strings.ToLower(query)
-	tokens := ruleTokenize(query)
+	tokens, starts, afterConj := clauseTokens(query)
 
 	pastScore := 0
 	futureScore := 0
@@ -333,10 +391,9 @@ func DetectVerbTense(query string) string {
 		}
 	}
 
-	// Past verbs; a question-initial German "Was" is none (issue #487).
-	germanWas := startsWithGermanWas(tokens)
+	// Past verbs; the German "was" is none (issue #487).
 	for i, tok := range tokens {
-		if pastVerbSet[tok] && (i > 0 || !germanWas) {
+		if pastVerbSet[tok] && !germanWasAt(tokens, starts, afterConj, i) {
 			pastScore++
 		}
 	}
@@ -349,7 +406,7 @@ func DetectVerbTense(query string) string {
 	}
 
 	// Perfekt constructions: "habe ... gemacht", "bin ... gewesen"
-	if hasPerfektForm(tokens) {
+	if hasPerfektForm(tokens, starts) {
 		pastScore += 2
 	}
 
@@ -398,7 +455,11 @@ func DetectVerbTense(query string) string {
 	return "past" // tie: conservative
 }
 
-func hasPerfektForm(tokens []string) bool {
+// hasPerfektForm reports an auxiliary of the Perfekt with a participle in
+// the five words behind it or, the German sentence bracket, as the last word
+// of its clause however far behind ("Was haben wir am Montag im Meeting
+// besprochen?", issue #487; starts as clauseTokens gives them).
+func hasPerfektForm(tokens []string, starts []bool) bool {
 	for i, tok := range tokens {
 		if !perfektAux[tok] {
 			continue
@@ -408,19 +469,35 @@ func hasPerfektForm(tokens []string) bool {
 			end = len(tokens)
 		}
 		for j := i + 1; j < end; j++ {
-			if knownParticiples[tokens[j]] || perfektParticiplePat.MatchString(tokens[j]) || ierenParticiple(tokens[j]) {
+			if participleAfter(tok, tokens[j]) {
 				return true
 			}
+		}
+		last := i
+		for last+1 < len(tokens) && !starts[last+1] {
+			last++
+		}
+		if last > i && participleAfter(tok, tokens[last]) {
+			return true
 		}
 	}
 	return false
 }
 
+// participleAfter reports whether w is a participle behind the auxiliary
+// aux: a known one, one of the "ge" pattern, or one on -iert — behind a form
+// of "sein" only of a verb that takes "sein" (seinAux, issue #487).
+func participleAfter(aux, w string) bool {
+	return knownParticiples[w] || perfektParticiplePat.MatchString(w) ||
+		ierenParticiple(w) && (!seinAux[aux] || seinIerenParticiples[w])
+}
+
 // ierenParticiple reports whether tok is the participle of a German verb on
 // -ieren, which takes no "ge" ("passiert", "migriert"): behind an auxiliary
-// it makes the Perfekt ("Was ist am Montag
-// passiert?", issue #487). Without one the same form is the present tense
-// ("Was passiert am Montag?"), which hasPerfektForm never reads.
+// it makes the Perfekt ("Was ist am Montag passiert?", "Wer hat die
+// Datenbank migriert?", issue #487; participleAfter). Without one the same
+// form is the present tense ("Was passiert am Montag?"), which hasPerfektForm
+// never reads.
 func ierenParticiple(tok string) bool {
 	return utf8.RuneCountInString(tok) > len("iert") && strings.HasSuffix(tok, "iert")
 }
@@ -889,8 +966,8 @@ var rangeForms = []struct {
 }
 
 // reBetweenYears matches "zwischen X und Y" and "between X and Y" with one
-// word as X and Y and the word after it (yearEdge reads it): the form of
-// rangeForms for two years.
+// word as X, and as Y one word with the word after it (yearEdge reads it):
+// the form of rangeForms for two years.
 var reBetweenYears = regexp.MustCompile(`(?i)\b(?:zwischen|between)\s+(\S+)\s+(?:und|and)\s+((?:\S+\s+)?\S+)`)
 
 func matchVonBis(query string, now time.Time) *TemporalResult {
@@ -934,9 +1011,19 @@ func matchRangeForm(query string, m []string, ref string, exact, years bool, now
 	if endEdge.rel && len(findDayDates(strings.ToUpper(m[1]))) > 0 {
 		return nil
 	}
-	start, end, swapped := orderWindow(startEdge.day, endEdge.day, startEdge.rel, endEdge.rel, backward,
+	// A year at the end is ordered by its last day: a month of that year
+	// lies inside the window ("von Juni bis 2026" starts in June 2026), and a
+	// year before the start swaps from its first (issue #487).
+	endDay := endEdge.day
+	if endEdge.year {
+		endDay = endEdge.last()
+	}
+	start, end, swapped := orderWindow(startEdge.day, endDay, startEdge.rel, endEdge.rel, backward,
 		func(to time.Time) time.Time { return resolvePhrase(m[1], true, to) },
 		func(from time.Time) time.Time { return resolvePhrase(m[2], false, from) })
+	if swapped && endEdge.year {
+		start = endEdge.day
+	}
 	// A month at the end includes the month: the window ends on its last day
 	// ("von März 2024 bis April 2024" ends on 2024-04-30, issue #463), and a
 	// year the year ("von 2024 bis 2026" ends on 2026-12-31, issue #487).
@@ -1642,34 +1729,46 @@ var yearFollowers = toWordSet(
 )
 
 // yearFollower reports whether w may follow a bare year at a window's edge
-// (yearFollowers).
+// (yearFollowers). The "ge" pattern of the participles is no follower: German
+// nouns take its shape as well ("nach 2048 Generationen", "nach 2025
+// Angeboten").
 func yearFollower(w string) bool {
 	return yearFollowers[w] || pastVerbSet[w] || futureVerbSet[w] || perfektAux[w] || knownParticiples[w] ||
-		perfektParticiplePat.MatchString(w) || ierenParticiple(w)
+		ierenParticiple(w)
 }
 
 // clauseEnd are the runes after which a year ends its clause: a count's noun
 // would follow it within the clause ("since 2024, lines have grown").
 const clauseEnd = ",.;:!?)"
 
-// yearEdge resolves a phrase that starts with a bare year in the window of
-// the years a content date carries (minYearEdge to maxYearEdge) to that year
-// as a window's edge: the year alone, before the end of its clause or before
-// a word that is no counted noun (yearFollower). matched reports that the
-// phrase starts with such a year at all; ok that it names the year (issue
-// #487). "2024-03", "2024,5", "#2024" and "2024ms" start with no year.
-func yearEdge(phrase string, words []string, now time.Time) (e phraseEdge, matched, ok bool) {
+// yearEdge resolves a phrase whose words (phraseWords) start with a bare
+// year in the window of the years a content date carries (minYearEdge to
+// maxYearEdge) to that year as a window's edge (issue #487): the year alone
+// or before the end of its clause, and a year that has begun also before a
+// word that is no counted noun (yearFollower). A year to come stands before
+// such a word no less often as a count — the four-digit counts of this
+// domain, 2048 tokens or bytes and the ports of the 2000s, lie after the
+// current year ("ab 2048 im Kontext", "zwischen 2020 und 2030 sind frei").
+// A month name behind the year makes the phrase the month ("2024, Oktober",
+// resolvePhraseEdge). "2024-03", "2024,5", "#2024" and "2024ms" start with
+// no year.
+func yearEdge(phrase string, words []string, now time.Time) (phraseEdge, bool) {
 	if len(words[0]) != 4 {
-		return phraseEdge{}, false, false
+		return phraseEdge{}, false
 	}
 	y, err := strconv.Atoi(words[0])
 	if err != nil || y < minYearEdge || y > maxYearEdge {
-		return phraseEdge{}, false, false
+		return phraseEdge{}, false
 	}
-	if len(words) > 1 && !endsClause(phrase) && !yearFollower(words[1]) {
-		return phraseEdge{}, true, false
+	if len(words) > 1 {
+		if _, month := lookupMonth(words[1]); month && !monthWords[words[1]] {
+			return phraseEdge{}, false
+		}
+		if !endsClause(phrase) && (y > now.Year() || !yearFollower(words[1])) {
+			return phraseEdge{}, false
+		}
 	}
-	return phraseEdge{day: time.Date(y, time.January, 1, 0, 0, 0, 0, now.Location()), year: true}, true, true
+	return phraseEdge{day: time.Date(y, time.January, 1, 0, 0, 0, 0, now.Location()), year: true}, true
 }
 
 // endsClause reports whether the first word of phrase (phraseWords), as it
@@ -1743,9 +1842,10 @@ func resolvePhraseEdge(phrase string, defaultBackward bool, now time.Time) phras
 	}
 
 	// A bare year: the whole year, not before a counted noun (issue #487). A
-	// month name after it is the month ("2024 Oktober", below) — no month
-	// name is a yearFollower.
-	if e, _, ok := yearEdge(phrase, words, now); ok {
+	// month name after it is the month ("2024 Oktober", below): no month name
+	// is a yearFollower but "may", which after a year is the modal
+	// (monthWords).
+	if e, ok := yearEdge(phrase, words, now); ok {
 		return e
 	}
 
@@ -1907,8 +2007,8 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 
 	// Priority 3: Seit/Bis and the open edges ab/vor/nach — linear-dominant +
 	// month (spans weeks/months; effectiveDimWeights drops the month for a
-	// window longer than a year and for an open one); a window that starts
-	// with a year is linear alone (yearWeighted)
+	// window longer than a year and for an open one); a window edged by a
+	// year is linear alone (yearWeighted)
 	if r := matchSeit(query, now); takes(r) {
 		return withWeights(r, dwLinearMonthSeit)
 	}

@@ -48,8 +48,19 @@ func TestRules_YearEdges(t *testing.T) {
 		"Seit 2024 gibt es pgvector 0.8":    {"2024-01-01", "2026-11-21", "range"},
 		"Nach 2025 kam nichts mehr":         {"2026-01-01", "", DirFrom},
 		"Vor 2020 war alles anders":         {"2019-12-31", "", DirUntil},
-		"Bis 2030 wollen wir 1M Blöcke":     {"2026-11-21", "2030-12-31", "range"},
-		"Ab 2027 gilt die neue Lizenz":      {"2027-01-01", "", DirFrom},
+		// A year to come is an edge where it ends its clause; before a word
+		// it reads as a count as often (TestRules_ANumberThatIsNoYearIsNoEdge).
+		"bis 2030?":                {"2026-11-21", "2030-12-31", "range"},
+		"Was passiert ab 2048?":    {"2048-01-01", "", DirFrom},
+		"Bis 2030 wollen wir 1M Blöcke": {},
+		"Ab 2027 gilt die neue Lizenz":  {},
+		// A month without its year before a year as the end lies in that
+		// year; a month after a year is the month.
+		"Was lief von Juni bis 2026?": {"2026-06-01", "2026-12-31", "range"},
+		"von März bis 2026":           {"2026-03-01", "2026-12-31", "range"},
+		"von 2026 bis 2024":           {"2024-01-01", "2026-12-31", "range"},
+		"von März 2026 bis 2024":      {"2024-01-01", "2026-03-31", "range"},
+		"Seit 2024, Oktober":          {"2024-10-01", "2026-11-21", "range"},
 		"Logs after 2025 may be deleted":    {"2026-01-01", "", DirFrom},
 		"Tests before 2024 may fail":        {"2023-12-31", "", DirUntil},
 		"Requests since 2024 may time out":  {"2024-01-01", "2026-11-21", "range"},
@@ -81,6 +92,11 @@ func TestRules_ANumberThatIsNoYearIsNoEdge(t *testing.T) {
 		"nach 2024.5", "seit 2019", "bis 2100", "nach 1999", "zwischen 2024 und 2025 Einträgen",
 		"von 2024 bis 2026 Zeilen", "between 2024 and 2048 bytes", "from 2024 to 2048 tokens",
 		"Wie viele Tage vor 2025?", "kurz vor 2025", "seit 2024er Zeiten", "nach 2025ms",
+		// Review round: a count after which a word stands that could follow
+		// a year, and a noun shaped like a participle.
+		"Was passiert ab 2048 im Kontext?", "Was ändert sich ab 2048 bei num_ctx?", "after 2048 the context is truncated",
+		"Welche Ports zwischen 2020 und 2030 sind frei?", "bis 2048 und mehr", "Was passiert nach 2048 Generationen?",
+		"nach 2025 Angeboten",
 	} {
 		if tr := NormalizeTemporalRules(q, now463); tr != nil {
 			t.Errorf("%q: %+v, want no window and no date", q, tr.Dates)

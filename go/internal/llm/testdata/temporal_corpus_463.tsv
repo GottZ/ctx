@@ -37,8 +37,8 @@ Was liegt zwischen Port 3000 und 3010?	nil
 Seit 2024 gibt es pgvector 0.8	2024-01-01|2026-11-21|range
 Nach 2025 kam nichts mehr	2026-01-01||from
 Vor 2020 war alles anders	2019-12-31||until
-Bis 2030 wollen wir 1M Blöcke	2026-11-21|2030-12-31|range
-Ab 2027 gilt die neue Lizenz	2027-01-01||from
+Bis 2030 wollen wir 1M Blöcke	nil
+Ab 2027 gilt die neue Lizenz	nil
 What happens after 3 retries?	nil
 Retry before 2 retries fail?	nil
 Which changes since version 5.73.0?	nil

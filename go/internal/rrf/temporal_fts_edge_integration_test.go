@@ -132,6 +132,10 @@ func TestTemporalFTSExpansionOfAnOpenEdge(t *testing.T) {
 			shifted: "2024-12-31 OR 2024-12", named: "2025"},
 		{name: "seit ISO day (closed, control)", query: "Was hat sich seit 2024-03-15 geändert?", from: day(2024, 3, 15), to: day(2026, 11, 22),
 			shifted: "2024-03-15 OR 2024-03 OR 2026-11-22 OR 2026-11", named: "2024-03-15 OR 2024-03", control: true},
+		{name: "seit year (closed, control)", query: "Was hat sich seit 2024 geändert?", from: day(2024, 1, 1), to: day(2026, 11, 22),
+			shifted: "2024-01-01 OR 2024-01 OR 2026-11-22 OR 2026-11", named: "2024", control: true},
+		{name: "von year bis year (closed, control)", query: "Was lief von 2024 bis 2025?", from: day(2024, 1, 1), to: day(2025, 12, 31),
+			shifted: "2024-01-01 OR 2024-01 OR 2025-12-31 OR 2025-12", named: "2024 OR 2025", control: true},
 	}
 
 	var report strings.Builder

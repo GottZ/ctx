@@ -64,6 +64,36 @@ func TestDetectVerbTense_GermanWasIsNoPastTense(t *testing.T) {
 		{"Was it am Montag?", "past"},
 		{"Was ist mit dem deploy vom Montag?", "neutral"},
 		{"Was ist the status for Monday?", "neutral"},
+		// Review round: the German Perfekt closes its clause with the
+		// participle, however far behind the auxiliary, and knows "hast",
+		// "habt", "bist" and "seid".
+		{"Was haben wir am Montag im Meeting besprochen?", "past"},
+		{"Was hat Jürgen am Freitag zum Release gesagt?", "past"},
+		{"Was ist am Montag im großen Meeting passiert?", "past"},
+		{"Was hast du am Montag gemacht?", "past"},
+		{"Was habt ihr am Freitag beschlossen?", "past"},
+		{"Was haben wir von Montag bis Mittwoch am Server geändert?", "past"},
+		{"Was bist du am Montag gefahren?", "past"},
+		{"Was haben wir am Montag und Dienstag gemacht?", "past"},
+		// An English yes/no question with a name or a noun as its subject.
+		{"Was CI green on Friday?", "past"},
+		{"Was Postgres down on Monday?", "past"},
+		{"Was production broken on Friday?", "past"},
+		// The German "was" after a comma or a conjunction.
+		{"Und was ist am Montag?", "neutral"},
+		{"Sag mal, was steht am Montag auf dem Plan?", "future"}, // "plan" is a future verb of the set
+		{"Zeig mir, was am Freitag ansteht", "neutral"},
+		{"Weißt du, was am Montag ist?", "neutral"},
+		{"The deploy failed, was it fixed on Monday?", "past"},
+		// "sollten"/"wollten" are the subjunctive as well; a participle on
+		// -iert behind a form of "sein" is a state unless the verb takes
+		// "sein" in the Perfekt.
+		{"Sollten wir am Freitag deployen?", "neutral"},
+		{"Wir sollten am Montag das Release machen", "neutral"},
+		{"Ist der Raum am Freitag reserviert?", "neutral"},
+		{"Das Meeting ist am Freitag terminiert", "neutral"},
+		{"Ist das Ticket am Montag eskaliert?", "past"},
+		{"Wer hat am Montag die Datenbank migriert?", "past"},
 	}
 	if len(cases) < 30 {
 		t.Fatalf("%d questions, the issue asks for at least thirty", len(cases))
@@ -87,5 +117,8 @@ func TestRules_GermanWasAsksForTheNextWeekday(t *testing.T) {
 		"Was ist am Montag passiert?":  {"2026-11-16", "", "past"},
 		"What was deployed on Monday?": {"2026-11-16", "", "past"},
 		"Was it deployed on Monday?":   {"2026-11-16", "", "past"},
+		"Was haben wir am Montag im Meeting besprochen?": {"2026-11-16", "", "past"},
+		"Was CI green on Friday?":                        {"2026-11-20", "", "past"},
+		"Zeig mir, was am Freitag ansteht":               {"2026-11-27", "", "future"},
 	})
 }
