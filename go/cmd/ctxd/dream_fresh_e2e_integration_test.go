@@ -450,19 +450,32 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 	}
 
 	status, services := child.health(t)
-	rows, err := links.Query(ctx, `SELECT row_to_json(l)::text FROM context_dream_links l ORDER BY created_at`)
+	// One statement reads the rows and whether each joins the two stored
+	// blocks: Dream keeps running, and a count read separately could see a
+	// link the row read did not.
+	rows, err := links.Query(ctx, `SELECT row_to_json(l)::text,
+		       l.source_block_id = ANY($1::uuid[]) AND l.target_block_id = ANY($1::uuid[])
+		  FROM context_dream_links l ORDER BY created_at`, blockIDs)
 	if err != nil {
 		t.Fatalf("read context_dream_links: %v", err)
 	}
 	var linkRows []string
+	var between int
 	for rows.Next() {
 		var s string
-		if err := rows.Scan(&s); err != nil {
+		var joins bool
+		if err := rows.Scan(&s, &joins); err != nil {
 			t.Fatalf("scan link: %v", err)
 		}
 		linkRows = append(linkRows, s)
+		if joins {
+			between++
+		}
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read context_dream_links: %v", err)
+	}
 
 	t.Logf("phase B: first link %s after the seed; %d link(s): %v", firstLink.Round(100*time.Millisecond), len(linkRows), linkRows)
 	t.Logf("phase B: stub %s", stub.report())
@@ -476,11 +489,6 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 	}
 	if stub.eval.Load() == 0 {
 		t.Errorf("phase B: a link without a link-evaluation call at the stub: %s", stub.report())
-	}
-	var between int
-	if err := links.QueryRow(ctx, `SELECT count(*) FROM context_dream_links
-		WHERE source_block_id = ANY($1::uuid[]) AND target_block_id = ANY($1::uuid[])`, blockIDs).Scan(&between); err != nil {
-		t.Fatalf("count links between the stored blocks: %v", err)
 	}
 	if between != len(linkRows) {
 		t.Errorf("phase B: %d of %d link(s) join the two stored blocks %v", between, len(linkRows), blockIDs)
