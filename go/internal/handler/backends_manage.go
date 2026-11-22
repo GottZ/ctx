@@ -424,12 +424,8 @@ func writeBackendTxFailure(w http.ResponseWriter, r *http.Request, action, stage
 // errors carry their statement's PostgreSQL error, whose text leaves out the
 // DETAIL (a failing row would name every column), and no value of the
 // request but that name.
-//
-// A value the database cannot store (callerDataError: a number out of its
-// column's range; a NUL character nulField refuses before) is the caller's
-// refusal as well and writes no line (issue #505).
 func writeBackendStoreError(w http.ResponseWriter, r *http.Request, action string, err error) {
-	if !errors.Is(err, store.ErrBackendNameExists) && callerDataError(err) == nil {
+	if !errors.Is(err, store.ErrBackendNameExists) {
 		adminWriteFailed(r, "manage: "+action+" failed", err, writeRolledBack)
 	}
 	writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
