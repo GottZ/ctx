@@ -155,7 +155,7 @@ func TestHealthLogsAnUnreachableBackendOncePerChange(t *testing.T) {
 		debug int
 	}{
 		{"the backend stops answering", true, slog.LevelWarn, "backend ping failed", n - 1},
-		{"the backend answers again", false, slog.LevelInfo, "answers again", 0},
+		{"the backend answers again", false, slog.LevelInfo, "answers again", recoveryAnswers - 1}, // two answers at DEBUG, the INFO with the third
 		{"second outage", true, slog.LevelWarn, "backend ping failed", n - 1},
 	} {
 		t.Run(step.name, func(t *testing.T) {
@@ -177,7 +177,7 @@ func TestHealthLogsAnUnreachableBackendOncePerChange(t *testing.T) {
 
 	t.Run("a probe its caller abandoned changes nothing", func(t *testing.T) {
 		down.Store(false)
-		healthCalls(t, snap, 1) // answers again: INFO, the state is "up"
+		healthCalls(t, snap, recoveryAnswers) // answers again: INFO, the state is "up"
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		pool := brokenPool(t)
@@ -244,21 +244,19 @@ func TestHealthOneLinePerChangeUnderConcurrency(t *testing.T) {
 		backend string
 		level   slog.Level
 		want    string
+		debug   int
 	}{
-		{"the roles lose their backend", nil, false, "", slog.LevelWarn, "ctx backends seed"},
-		{"the roles get it back", serving, false, "", slog.LevelInfo, "enabled again"},
-		{"the backend stops answering", serving, true, row.Name, slog.LevelWarn, "backend ping failed"},
-		{"the backend answers again", serving, false, row.Name, slog.LevelInfo, "answers again"},
+		{"the roles lose their backend", nil, false, "", slog.LevelWarn, "ctx backends seed", 31},
+		{"the roles get it back", serving, false, "", slog.LevelInfo, "enabled again", 0},
+		{"the backend stops answering", serving, true, row.Name, slog.LevelWarn, "backend ping failed", 31},
+		// two answers at DEBUG, the INFO with the third, nothing after it
+		{"the backend answers again", serving, false, row.Name, slog.LevelInfo, "answers again", recoveryAnswers - 1},
 	} {
 		t.Run(step.name, func(t *testing.T) {
 			down.Store(step.down)
 			logs := burst(t, step.snap)
-			debug := 31
-			if step.level == slog.LevelInfo {
-				debug = 0
-			}
 			for _, role := range i504Roles {
-				wantOneLine(t, logs, role, step.backend, step.level, step.want, debug)
+				wantOneLine(t, logs, role, step.backend, step.level, step.want, step.debug)
 			}
 		})
 	}
@@ -286,9 +284,9 @@ func TestHealthForgetsABackendTheWalkDidNotReach(t *testing.T) {
 		wantOneLine(t, logs, role, fallback.Name, slog.LevelWarn, "backend ping failed", 1)
 	}
 	primaryDown.Store(false)
-	logs = healthCalls(t, snap, 2)
+	logs = healthCalls(t, snap, recoveryAnswers)
 	for _, role := range i504Roles {
-		wantOneLine(t, logs, role, primary.Name, slog.LevelInfo, "answers again", 0)
+		wantOneLine(t, logs, role, primary.Name, slog.LevelInfo, "answers again", recoveryAnswers-1)
 		if recs := healthRoleLines(logs, slog.LevelDebug, role, fallback.Name); len(recs) != 0 {
 			t.Errorf("role %s: the fallback was probed behind an answering primary: %+v", role, recs)
 		}

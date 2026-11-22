@@ -30,7 +30,9 @@ import (
 //     changes, an INFO says when a backend of the role is enabled again;
 //   - per role and backend (name and base URL), a probe that found the
 //     backend unreachable (pinged): a WARN when it stops answering, an INFO
-//     when it answers again. A backend the last walk of its role did not
+//     when it answers again — after healthRecoveryAnswers probes in a row
+//     that it answered, so a backend that flaps logs its first failure and
+//     nothing after it. A backend the last walk of its role did not
 //     reach (walked) — an earlier candidate answered, or it is no candidate
 //     any more: disabled, deleted, its role or base URL changed — is
 //     forgotten without a line, so what it does unobserved is no state, and
@@ -45,10 +47,19 @@ import (
 // forgotten.
 type healthNotice struct {
 	mu          sync.Mutex
-	roles       map[string]roleProbe  // role → what its last probe found
-	unreachable map[probeKey]struct{} // role and backend the last probe found unreachable
+	roles       map[string]roleProbe // role → what its last probe found
+	unreachable map[probeKey]int     // role and backend found unreachable → probes in a row it answered since
 	dbDown      bool
 }
+
+// healthRecoveryAnswers is the number of probes in a row a backend found
+// unreachable has to answer before the INFO says it answers again; a failed
+// probe in between starts the count anew. A backend that flaps — every
+// second probe fails — then logs one WARN and no INFO, where a line per
+// failure and per answer wrote twice what the WARN per request wrote before
+// issue #504. Fixed by design, not a tuning knob: the first failure is
+// logged at once, only the all-clear waits.
+const healthRecoveryAnswers = 3
 
 // healthLines is the process's healthNotice (see healthNotice).
 var healthLines = &healthNotice{}
@@ -145,22 +156,26 @@ func (n *healthNotice) pinged(ctx context.Context, role string, b *backends.Back
 	key := probeKey{role: role, name: b.Name, host: b.Host}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	_, down := n.unreachable[key]
+	answers, down := n.unreachable[key]
 	switch {
+	case err == nil && !down:
+	case err == nil && answers+1 < healthRecoveryAnswers:
+		n.unreachable[key] = answers + 1
+		slog.Debug("health check: backend answers, not yet often enough in a row to count as back", "backend", b.Name, "role", role,
+			"answers_in_a_row", answers+1)
 	case err == nil:
-		if down {
-			delete(n.unreachable, key)
-			slog.Info("health check: backend answers again", "backend", b.Name, "role", role)
-		}
+		delete(n.unreachable, key)
+		slog.Info("health check: backend answers again", "backend", b.Name, "role", role, "answers_in_a_row", healthRecoveryAnswers)
 	case callerLeft(ctx, err):
 		slog.Debug("health check: backend ping abandoned, its caller left", "backend", b.Name, "role", role, "error", err)
 	case down:
+		n.unreachable[key] = 0
 		slog.Debug("health check: backend ping failed", "backend", b.Name, "role", role, "error", err)
 	default:
 		if n.unreachable == nil {
-			n.unreachable = make(map[probeKey]struct{})
+			n.unreachable = make(map[probeKey]int)
 		}
-		n.unreachable[key] = struct{}{}
+		n.unreachable[key] = 0
 		slog.Warn("health check: backend ping failed", "backend", b.Name, "role", role, "error", err)
 	}
 }
