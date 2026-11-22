@@ -55,10 +55,12 @@ func TestRules_BisWithAPastEndIsOpenTowardsThePast(t *testing.T) {
 		"bis 2027-01-15 erledigt": {"2026-11-21", "2027-01-15", "range"},
 		"bis Ende März 2025 muss das fertig sein": {"2025-03-31", "", "until"},
 	})
-	// The FTS expansion names the end the question names, not today.
+	// The FTS expansion names neither today nor the end: a window open
+	// towards the past expands to nothing (issue #487; until then the end
+	// and its month, since #469 instead of today).
 	tr := NormalizeTemporalRules("bis März 2015", now463)
-	if got := TemporalToFTSExpansion(tr.Dates); got != "2015-03-31 OR 2015-03" {
-		t.Errorf("FTS of bis März 2015 = %q", got)
+	if got := TemporalToFTSExpansion(tr.Dates); got != "" {
+		t.Errorf("FTS of bis März 2015 = %q, want none", got)
 	}
 }
 

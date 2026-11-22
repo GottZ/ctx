@@ -353,6 +353,17 @@ const maxFTSTermsTotal = 20
 //   - YYYY-MM prefix (2026-03) — month-scoped, still precise
 //
 // At 1M+ blocks: 2 terms per date × 2 FTS channels = 4 GIN scans per date.
+//
+// A window open towards the past or the future (Dir DirUntil or DirFrom)
+// expands to nothing (issue #487): its only date is an edge, the day the
+// rules shift past what the question names ("nach dem 15.03.2024" starts on
+// 2024-03-16) or the day the question names, and its month reaches across
+// the edge — "2024-03" matched the 1st to the 15th of March as well, and
+// lifted them over the blocks inside the window, measured with the full-text
+// arms in rrf's TestTemporalFTSExpansionOfAnOpenEdge (204 pairs for "nach
+// 2024-03-15", 114 for "bis 01.06.2024"; the named date instead of the
+// shifted one lifted in six of seven questions). The post-RRF gravity
+// rewards the whole window; the full-text arms keep the question's words.
 func TemporalToFTSExpansion(dates []TemporalDate) string {
 	if len(dates) == 0 {
 		return ""
@@ -374,6 +385,9 @@ func TemporalToFTSExpansion(dates []TemporalDate) string {
 		allDates = append(allDates, t)
 	}
 	for _, d := range dates {
+		if d.End == nil && (d.Dir == DirFrom || d.Dir == DirUntil) {
+			continue // an open window: no term (see above)
+		}
 		collectDate(d.Date)
 		if d.End != nil {
 			collectDate(*d.End)
