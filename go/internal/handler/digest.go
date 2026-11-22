@@ -70,10 +70,9 @@ func (h *DigestHandler) HandleDigest(w http.ResponseWriter, r *http.Request) {
 	// its window. Every heartbeatInterval the ticker rolls the write deadline
 	// without writing a byte, so a digest that runs longer still answers with
 	// its status and body — the CLI waits for it (digestCallBudget). The run
-	// still ends with its client (issue #490): the ticker ends with ctx.
-	ka := armQueryKeepalive(ctx, w, false)
-	defer ka.close()
-	w = ka
+	// still ends with its client (issue #490): the ticker ends with ctx. The
+	// ticks write no byte, so the handler's writes need not pass through it.
+	defer armQueryKeepalive(ctx, w, false).close()
 
 	// The read window every artefact of this request is built over: the key's
 	// read_scopes clamped to its tenant's own scopes (GHSA §5), the same clamp
