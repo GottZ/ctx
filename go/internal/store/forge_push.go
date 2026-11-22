@@ -333,8 +333,9 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 // transaction: it takes the entity's push lock — a transaction-level
 // advisory lock keyed on the block id, released at the commit or rollback —
 // without waiting, and answers whether the section may write: the lock was
-// free AND the mapping row still holds listedBase, the base the push's
-// listing read (issue #491).
+// free AND the mapping row is still the candidate the push's listing read —
+// at listedBase, the base the listing saw, and not conflict-flagged (issue
+// #491).
 //
 // The push writes an entity to the forge and records that write (the
 // advance) inside the section, so two ctxd instances never have the writes
@@ -345,9 +346,11 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 // the older version over the newer one on both sides.
 //
 // false means another instance is writing the entity now (its PATCH may be
-// on the wire), or it wrote it since this push listed it, or the mapping is
+// on the wire), or it wrote it since this push listed it, or another
+// instance's pull flagged it since (both sides moved: the push must not send
+// the local version over the remote edit the pull saw), or the mapping is
 // gone: the caller leaves the entity to its next run, which lists it again
-// against the base it finds. Not waiting is the bound: no push leg waits on
+// against the row it finds. Not waiting is the bound: no push leg waits on
 // another one's wire call, however long that one hangs. The base is read
 // after the lock is held — a statement of its own, so it sees the row as the
 // lock holder left it.
@@ -362,7 +365,7 @@ func TryLockPushEntity(ctx context.Context, tx pgx.Tx, blockID, listedBase strin
 	}
 	var holds bool
 	err := tx.QueryRow(ctx,
-		`SELECT base_hash = $2 FROM context_project_sync_map WHERE block_id = $1::uuid`, blockID, listedBase).Scan(&holds)
+		`SELECT base_hash = $2 AND NOT conflict FROM context_project_sync_map WHERE block_id = $1::uuid`, blockID, listedBase).Scan(&holds)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}

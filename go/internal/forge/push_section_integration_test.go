@@ -268,3 +268,51 @@ func TestPushSectionSkipsAListingAnotherPushOvertook(t *testing.T) {
 		t.Errorf("three more runs landed %d PATCH(es), want 0", n)
 	}
 }
+
+// TestPushSectionSkipsAMappingFlaggedSinceTheListing: the push lists a local
+// edit; before its section opens, another instance pulls a remote edit of the
+// same issue and flags the conflict (both sides moved). The section must not
+// send the listed local version over the remote edit the pull saw.
+func TestPushSectionSkipsAMappingFlaggedSinceTheListing(t *testing.T) {
+	e := i491Setup(t, "i491flagged", "", fakeIssue{Title: "Crane", Body: "forge body"})
+	e.edit(t, store.IssueUpdate{Content: str("body edited locally")})
+	held, hold := i452HoldBeginPool(t, e.dsn)
+	type out struct {
+		res PushResult
+		err error
+	}
+	done := make(chan out, 1)
+	go func() {
+		res, err := NewPusher(held, e.reg.SnapshotForTenant).PushProject(context.Background(), e.proj, e.gh.client(), e.gh.repo(), alwaysAllow)
+		done <- out{res, err}
+	}()
+	select {
+	case <-hold.entered: // listed, waiting at its section's BEGIN
+	case o := <-done:
+		t.Fatalf("the push finished without opening a section: %+v %v", o.res, o.err)
+	case <-time.After(i452Wait):
+		t.Fatalf("the push did not reach its section within %s", i452Wait)
+	}
+	e.gh.edit(t, 5, func(it *fakeIssue) { it.Body = "body edited on the forge" })
+	if r := e.pullOn(t, e.pool); r.Conflicts != 1 {
+		t.Fatalf("other instance's pull: %+v, want the conflict flagged", r)
+	}
+	close(hold.release)
+	select {
+	case o := <-done:
+		if o.err != nil || o.res.Pushed != 0 {
+			t.Errorf("push after the flag: %+v %v, want nothing pushed", o.res, o.err)
+		}
+	case <-time.After(i452Wait):
+		t.Fatalf("the push did not finish within %s", i452Wait)
+	}
+	if got := e.gh.landed(); len(got) != 0 {
+		t.Errorf("PATCHes landed over a flagged mapping: %+v", got)
+	}
+	if it := e.gh.issue(t, 5); it.Body != "body edited on the forge" {
+		t.Errorf("the forge holds %q, want the remote edit kept", it.Body)
+	}
+	if _, conflict := e.mapping(t); !conflict {
+		t.Errorf("the conflict flag is gone")
+	}
+}

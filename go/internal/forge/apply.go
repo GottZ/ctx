@@ -303,9 +303,12 @@ type pulled struct {
 //
 //   - The mapping still holds the base the read decided on. The read's
 //     convergence stands whatever the block holds now: the read saw block
-//     and forge at one version, the forge still holds it, so it is the base
-//     both sides last agreed on; a local write since is ahead of it and goes
-//     out with the next push (synced_at -infinity, UpdateSyncMapBase). Any
+//     and forge at one version, so it is the base both sides last agreed
+//     on; a local write since is ahead of it and goes out with the next push
+//     (synced_at -infinity, UpdateSyncMapBase) — unless another instance
+//     flagged the mapping since the read: its pull saw the forge move past
+//     what this pull fetched, and the push must not send the local write
+//     over that remote edit, so the matrix decides on the locked rows. Any
 //     other decision is taken again on the locked block — forge-ahead stays
 //     forge-ahead only while the block still projects to the base; a block a
 //     local write moved is a convergence when it now equals the forge, a
@@ -343,7 +346,7 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 		}
 		ctxH := p.project(cur, locked.BaseFields)
 		d := decide(locked.BaseHash, ctxH, p.forgeH)
-		if locked.BaseHash == m.BaseHash && read == decConverge {
+		if read == decConverge && locked.BaseHash == m.BaseHash && locked.Conflict == m.Conflict {
 			d = decConverge
 		}
 		switch d {

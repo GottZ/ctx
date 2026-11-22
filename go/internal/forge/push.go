@@ -157,8 +157,9 @@ var errThrottled = errors.New("forge: push throttled")
 // section runs one write of the push about an entity — the wire write and
 // the advance that records it, or the advance alone — in one transaction
 // that holds the entity's push lock (store.TryLockPushEntity, issue #491).
-// An entity another instance is writing now, or wrote since this push listed
-// it, is left to the next run: fn does not run, nothing is written, the pass
+// An entity another instance is writing now, wrote since this push listed it
+// or flagged since (its pull saw both sides move), is left to the next run:
+// fn does not run, nothing is written, the pass
 // goes on with the next candidate. The transaction keeps one pool connection
 // across the wire write — one per running push leg, the legs are bounded by
 // project.sync.max_concurrent — and fn runs its database writes on it.

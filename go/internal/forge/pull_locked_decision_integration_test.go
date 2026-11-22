@@ -122,6 +122,33 @@ func TestPullConvergenceKeepsALocalEditMadeDuringIt(t *testing.T) {
 		i491PushesTheEdit(t, e, body)
 	})
 
+	// Another instance flags the mapping while this pull waits: it pulled a
+	// remote edit made after this pull fetched, and the local edit made
+	// during the wait — both sides moved. The convergence this pull read must
+	// not clear that flag and let the next push send the local edit over the
+	// remote one.
+	t.Run("conflict flagged by another instance during the pull", func(t *testing.T) {
+		e := i491Converging(t, "i491convflag")
+		e.pullHeldOn(t, func() {
+			e.edit(t, store.IssueUpdate{Content: str("body edited locally during the pull")})
+			e.gh.edit(t, 5, func(it *fakeIssue) { it.Body = "body edited on the forge after the fetch" })
+			if r := e.pullOn(t, e.pool); r.Conflicts != 1 {
+				t.Fatalf("other instance's pull: %+v, want the conflict flagged", r)
+			}
+		})
+		if _, conflict := e.mapping(t); !conflict {
+			t.Errorf("the converging pull cleared the flag another instance set during it")
+		}
+		landed := len(e.gh.landed())
+		e.pushOn(t, e.pool)
+		if n := len(e.gh.landed()) - landed; n != 0 {
+			t.Errorf("the push sent %d PATCH(es) over the flagged mapping", n)
+		}
+		if it := e.gh.issue(t, 5); it.Body != "body edited on the forge after the fetch" {
+			t.Errorf("the forge holds %q, want the remote edit kept", it.Body)
+		}
+	})
+
 	// A comment converges through the same write.
 	t.Run("comment, edit committed between the read and the write", func(t *testing.T) {
 		pool, dsn := testdb.SetupTestDBWithDSN(t)
