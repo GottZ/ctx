@@ -523,35 +523,21 @@ func DetectVerbTense(query string) string {
 // that clause has a verb of its own ("Sie sagten, wir treffen uns am Montag"
 // asks for the coming Monday, "Ich will wissen, was am Montag passiert ist"
 // for the last one), and otherwise — the question is one clause, the date
-// stands in a clause without a verb ("Am Montag, was ist da passiert?"), or
-// its clause opens a Perfekt that a later clause closes ("Was haben wir am
-// Montag, nach dem Standup, besprochen?") — the tense of the whole question
-// (DetectVerbTense). The language is the whole question's.
+// stands in a clause without a verb ("Am Montag, was ist da passiert?") —
+// the tense of the whole question (DetectVerbTense). A clause whose Perfekt
+// a later clause closes ("Was haben wir am Montag, nach dem Standup,
+// besprochen?") reads that participle (hasPerfektForm). The language is the
+// whole question's.
 func tenseAt(query string, off int) string {
 	c := clauseTokens(query)
 	// The offsets are those of the lowercased question; where lowercasing
 	// changes the length (a few letters beyond ASCII), the whole question.
 	if i := c.wordAt(off); i >= 0 && len(strings.ToLower(query)) == len(query) {
-		if s, e := c.clauseOf(i); (s > 0 || e < len(c.words)) && c.hasOwnVerb(s, e) && !c.bracketOpenAt(s, e) {
+		if s, e := c.clauseOf(i); (s > 0 || e < len(c.words)) && c.hasOwnVerb(s, e) {
 			return c.tense(s, e, questionLanguage(c))
 		}
 	}
 	return DetectVerbTense(query)
-}
-
-// bracketOpenAt reports whether the clause [s, e) holds an auxiliary whose
-// participle closes the bracket behind inserted clauses ("Was hast du am
-// Freitag, bevor du gegangen bist, deployed?"): its tense is the whole
-// question's.
-func (c clauseWords) bracketOpenAt(s, e int) bool {
-	for i := s; i < e; i++ {
-		if perfektAux[c.words[i]] {
-			if _, ok := c.closingParticiple(e); ok {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // tense scores the words [s, e) of c in the language lang.

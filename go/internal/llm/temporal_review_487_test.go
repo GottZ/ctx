@@ -329,6 +329,7 @@ func TestRules_TheSecondReview(t *testing.T) {
 		"Was Grafana down at 3 am on Friday?":                       friday,
 		"Was ES down on Monday?":                                    monday,
 		"Was steht im Protokoll vom Montag?":                        monday,
+		"Wir hätten am Montag deployen sollen.":                     monday,
 	})
 	for _, q := range []string{
 		"ab 2026 bis 2028 Dimensionen wird es langsam", "Meeting ab 2020 bis 2130?", "Ab 2024 im Speicher",
