@@ -140,3 +140,39 @@ func TestDroppedStatusLocalReopenStillPushes(t *testing.T) {
 		})
 	}
 }
+
+// TestDroppedStatusUnpushedLocalCloseIsNotPushed pins the other direction of
+// a status the workflow drops (issue #491, documented next to the reopen in
+// docs/architecture.md): a local close into a terminal status that no push
+// has sent yet, and that a change of the type's workflow then drops. The
+// dropped status projects the state of the base — open — so the block reads
+// as level with the forge, and the close is not pushed: the forge issue stays
+// open, run after run. No local verb can move the block out of the dropped
+// status (ValidateTransition refuses a source the workflow does not carry);
+// the next remote edit writes the status the forge state maps to, and the
+// local close is gone. Closing the issue again takes a move to a terminal
+// status the workflow carries.
+func TestDroppedStatusUnpushedLocalCloseIsNotPushed(t *testing.T) {
+	e := i491Setup(t, "i491dropclose", i486TenantWorkflow, fakeIssue{Title: "Crane", Body: "forge body"})
+	e.move(t, e.id(t), "wontfix")
+	e.setTenantType(t, i491WorkflowWithoutWontfix)
+	if n := e.cycles(t, 3); n != 0 {
+		t.Errorf("three runs after the workflow dropped the unpushed close landed %d PATCH(es), want 0", n)
+	}
+	if it := e.gh.issue(t, 5); it.servedState() != "open" {
+		t.Errorf("the forge issue is %s, want open: the pin expects the dropped close not pushed", it.servedState())
+	}
+	if b := getBlock(t, e.pool, e.proj.Scope, e.id(t)); b.WorkflowStatus != "wontfix" {
+		t.Errorf("the block's status is %q, want the dropped wontfix kept", b.WorkflowStatus)
+	}
+	e.gh.edit(t, 5, func(it *fakeIssue) { it.Body = "body edited on the forge" })
+	if r := e.pullOn(t, e.pool); r.Applied != 1 || r.Conflicts != 0 {
+		t.Fatalf("pull of the remote edit: %+v, want one applied, no conflict", r)
+	}
+	if b := getBlock(t, e.pool, e.proj.Scope, e.id(t)); b.WorkflowStatus != "triage" || b.Content != "body edited on the forge" {
+		t.Errorf("after the remote edit: status %q body %q, want triage (the open state's mapping) and the remote body", b.WorkflowStatus, b.Content)
+	}
+	if n := e.cycles(t, 3); n != 0 {
+		t.Errorf("three runs after the remote edit landed %d PATCH(es), want 0", n)
+	}
+}

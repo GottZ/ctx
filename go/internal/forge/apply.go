@@ -155,7 +155,10 @@ func (p issueTypePolicy) keepsStatus(cur *store.Block, remoteState string) bool 
 // issue (issue #491). It projects the state of the base instead — the last
 // version both sides held — so it never moves the state by itself;
 // reopening an issue the forge holds closed takes a local status change
-// against that base, to a status of the workflow that is not terminal. A
+// against that base, to a status of the workflow that is not terminal. The
+// same holds the other way: an unpushed local close into a terminal status
+// the workflow then drops projects the open base and is not pushed
+// (TestDroppedStatusUnpushedLocalCloseIsNotPushed). A
 // base without a snapshot (a legacy row, or a base the push recorded as
 // unknown) yields to metadata.forge_state, the state the last base write
 // left on the block, and a block without either keeps the terminal-set rule.
