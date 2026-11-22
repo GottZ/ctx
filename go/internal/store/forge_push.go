@@ -218,6 +218,14 @@ func FinalizePushCreateComment(ctx context.Context, pool *pgxpool.Pool, blockID 
 	return nil
 }
 
+// UnknownBaseHash is the base_hash of a mapping whose base an advance found
+// moved off the base its listing read (AdvancePushBase, issue #486): neither
+// side's version is known to be what the forge holds. Projection hashes are
+// 64 lowercase hex digits (sha256), so no block or forge projection can equal
+// it, and the 3-way decision sees both sides moved — converged when they
+// agree, a conflict otherwise. It fits base_hash (VARCHAR(64) NOT NULL).
+const UnknownBaseHash = "unknown"
+
 // PushProjection hashes a block the way the push projected the version it
 // listed (forge.CtxIssueBase / CtxCommentBase): AdvancePushBase compares it
 // with the hash the push wrote. It reads Title, Content, Metadata and
@@ -250,13 +258,18 @@ type PushProjection func(b *Block) string
 //
 // The base is written only while the mapping still holds listedBase, the base
 // the listing read (issue #486). Another ctxd instance on the same database
-// can move it between the listing and this advance — its pull converges on
+// can move it between the listing and this advance: its pull converges on
 // what the PATCH sent and then pulls a remote edit, or its push of a later
-// version advances first — and the listed version is then not, or no longer
-// provably, what the forge holds. Then base_hash and base_fields stay as the
-// writer that moved them left them and synced_at := -infinity, also when the
-// block still holds the pushed version: the row stays a candidate and the
-// next run decides again against the stored base.
+// local version advances first. Which PATCH reached the forge last is then
+// unknown — keeping the moved base loses the newer local version when this
+// advance's PATCH landed last (the next pull reads the forge as ahead of a
+// block that equals the base and writes the older version into it), and
+// writing the listed base is wrong when the other writer was right. So the
+// advance records UnknownBaseHash, drops base_fields and flags the mapping
+// (conflict, conflict_at): the push lists no flagged mapping, and the next
+// pull's 3-way decision converges when block and forge agree (base := their
+// hash, flag cleared) and keeps the conflict otherwise. The returned moved
+// reports that case.
 //
 // synced_at is compared in SQL only (the candidate filter): '-infinity' is a
 // valid timestamptz, but pgx cannot scan it into a time.Time, so a reader that
@@ -266,9 +279,9 @@ type PushProjection func(b *Block) string
 //
 // Locks: the block row (FOR SHARE), then the mapping row — the order of the
 // pull's writes. The mapping row's base is compared in the UPDATE itself, on
-// the row version the UPDATE locks.
-func AdvancePushBase(ctx context.Context, pool *pgxpool.Pool, blockID, listedBase, ctxHash string, ctxFields json.RawMessage, project PushProjection) error {
-	return pgxdb.Write(ctx, pool,
+// the row version the UPDATE locks. A mapping that is gone is no error.
+func AdvancePushBase(ctx context.Context, pool *pgxpool.Pool, blockID, listedBase, ctxHash string, ctxFields json.RawMessage, project PushProjection) (moved bool, err error) {
+	err = pgxdb.Write(ctx, pool,
 		pgxdb.Stages{Begin: "store: advance push base begin", Commit: "store: advance push base commit"},
 		func(tx pgx.Tx) error {
 			var b Block
@@ -286,17 +299,27 @@ func AdvancePushBase(ctx context.Context, pool *pgxpool.Pool, blockID, listedBas
 				holds = project(&b) == ctxHash
 			}
 			// In SET every column reference reads the row as it was before
-			// this UPDATE, so all three expressions test the stored base.
-			if _, err := tx.Exec(ctx, `
+			// this UPDATE, so every expression tests the stored base.
+			err = tx.QueryRow(ctx, `
 				UPDATE context_project_sync_map
-				   SET base_hash = CASE WHEN base_hash = $6 THEN $2 ELSE base_hash END,
+				   SET base_hash = CASE WHEN base_hash = $6 THEN $2 ELSE $7 END,
 				       synced_at = CASE WHEN base_hash = $6 AND $4 THEN $5::timestamptz ELSE '-infinity'::timestamptz END,
-				       metadata = CASE WHEN base_hash = $6 THEN metadata || $3::jsonb ELSE metadata END
-				 WHERE block_id = $1::uuid`, blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase); err != nil {
+				       metadata = CASE WHEN base_hash = $6 THEN metadata || $3::jsonb ELSE metadata - 'base_fields' END,
+				       conflict = conflict OR base_hash <> $6,
+				       conflict_at = CASE WHEN base_hash = $6 THEN conflict_at ELSE COALESCE(conflict_at, now()) END
+				 WHERE block_id = $1::uuid
+				RETURNING old.base_hash <> $6`,
+				blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash).Scan(&moved)
+			switch {
+			case errors.Is(err, pgx.ErrNoRows):
+				moved = false
+				return nil
+			case err != nil:
 				return fmt.Errorf("store: advance push base: %w", err)
 			}
 			return nil
 		})
+	return moved, err
 }
 
 // FlagPushConflict flags a mapping conflict from the push side (a truncated body
