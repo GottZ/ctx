@@ -83,3 +83,36 @@ func TestGuardSearchKeys(t *testing.T) {
 		}
 	}
 }
+
+// TestWritesBatchMaxItemsCeiling (#483): V67 keeps writes.batch_max_items at
+// most WritesBatchMaxItemsCeiling; 0 (batches off) and the default pass, a
+// negative value is V35's report alone.
+func TestWritesBatchMaxItemsCeiling(t *testing.T) {
+	const key = "writes.batch_max_items"
+	for _, tc := range []struct {
+		val  int
+		want Severity
+	}{
+		{0, -1},
+		{100, -1},
+		{WritesBatchMaxItemsCeiling, -1},
+		{WritesBatchMaxItemsCeiling + 1, SeverityError},
+		{5000, SeverityError},
+		{-1, SeverityError}, // V35
+	} {
+		c, _ := cfgFrom(t, map[string]string{key: strconv.Itoa(tc.val)})
+		issues := Validate(c)
+		if got := severityFor(issues, key); got != tc.want {
+			t.Errorf("%s=%d: severity %d, want %d (%v)", key, tc.val, got, tc.want, issues)
+		}
+		n := 0
+		for _, is := range issues {
+			if is.Field == key {
+				n++
+			}
+		}
+		if n > 1 {
+			t.Errorf("%s=%d: %d issues, want at most one (%v)", key, tc.val, n, issues)
+		}
+	}
+}

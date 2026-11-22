@@ -105,6 +105,7 @@ func (h *ManageHandler) handleBlockGrantCreate(w http.ResponseWriter, r *http.Re
 	case errors.Is(err, store.ErrBlockGrantUnknownTarget):
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "unknown block or grantee tenant"})
 	case err != nil:
+		adminWriteFailed(r, "manage: block-grant-create failed", err, statementOutcome(err))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "create block grant failed"})
 	default:
 		writeJSON(w, http.StatusOK, map[string]any{"success": true, "grant": g})
@@ -155,6 +156,7 @@ func (h *ManageHandler) handleBlockGrantRevoke(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if err != nil {
+		adminWriteFailed(r, "manage: block-grant-revoke failed", err, statementOutcome(err))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "revoke block grant failed"})
 		return
 	}

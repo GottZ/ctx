@@ -141,6 +141,7 @@ func TestStatementOutcome(t *testing.T) {
 		{"sent, cancelled", fmt.Errorf("stage: %w", context.Canceled), writeUnknown},
 		{"the commit was refused (unlabeled bracket)", fmt.Errorf("issue: %w", pgx.ErrTxCommitRollback), writeRolledBack},
 		{"no connection to the database", opaqueWrap{&pgconn.ConnectError{}}, writeRolledBack},
+		{"a commit whose connection broke while it waited (pgx: conn closed, safe to retry)", connClosedErr{}, writeUnknown},
 	} {
 		if got := statementOutcome(tc.err); got != tc.want {
 			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)

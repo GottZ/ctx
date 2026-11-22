@@ -203,9 +203,19 @@ const (
 // back the commit, or the commit never left). For an unlabeled bracket the commit is not
 // recognisable and the answer would claim too much — use it only on labeled
 // ones.
+//
+// A COMMIT whose connection broke while it waited for the answer is unknown
+// too, although pgx says it was never sent: pgx v5 reports that break as
+// pgconn.ErrConnClosed, the lock error of a call on a connection it had
+// already closed, marked safe to retry (its MultiResultReader drops the read
+// error, issue #483). The two cannot be told apart, so it stays unknown.
 func writeOutcome(err error) string {
+	if !pgxdb.FailedAtCommit(err) {
+		return writeRolledBack
+	}
 	var pgErr *pgconn.PgError
-	if pgxdb.FailedAtCommit(err) && !errors.As(err, &pgErr) && !errors.Is(err, pgx.ErrTxCommitRollback) && !pgconn.SafeToRetry(err) {
+	if errors.Is(err, pgconn.ErrConnClosed) ||
+		(!errors.As(err, &pgErr) && !errors.Is(err, pgx.ErrTxCommitRollback) && !pgconn.SafeToRetry(err)) {
 		return writeUnknown
 	}
 	return writeRolledBack

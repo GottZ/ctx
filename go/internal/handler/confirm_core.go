@@ -313,8 +313,10 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 		// statement itself refuse a row that moved since (issue #406), so a
 		// staged content — an edit list resolved at stage time included — never
 		// overwrites a change it did not see.
+		noteToolBlock(ctx, cw.ID)
 		base, err := time.Parse(time.RFC3339Nano, cw.BaseUpdatedAt)
 		if err != nil {
+			noteToolWrite(ctx, err)
 			slog.Error("confirm: staged update base unreadable", "error", err, "pending_id", pw.ID)
 			return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 		}
@@ -328,6 +330,7 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 			return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmIdentityTakenPrefix)}
 		}
 		if err != nil {
+			noteToolWrite(ctx, err)
 			logRequestError(ctx, "confirm: confirmed update execute failed", "error", err, "write_outcome", writeOutcome(err), "pending_id", pw.ID)
 			return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 		}
@@ -336,6 +339,9 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 			// consumed (rejected finding D1-m2 behaviour sentence).
 			return confirmOutcome{Kind: confirmExecGone, Op: cw.Op, BlockID: cw.ID}
 		}
+		// Committed: noted before the afterwork, so a fault there leaves the
+		// MCP line saying what was written (issue #483).
+		noteToolWrite(ctx, nil)
 		finishBlockUpdate(ctx, pool, blocktypes, data, block, RequestIDFromContext(ctx))
 		return confirmOutcome{Kind: confirmOK, Op: cw.Op, Block: block}
 	}
@@ -382,9 +388,12 @@ func executeConfirmedStore(ctx context.Context, pool *pgxpool.Pool, blocktypes *
 		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmSupersedesPrefix)}
 	}
 	if err != nil {
+		noteToolWrite(ctx, err)
 		logRequestError(ctx, "confirm: confirmed write execute failed", "error", err, "write_outcome", writeOutcome(err), "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
+	noteToolWrite(ctx, nil)
+	noteToolBlock(ctx, block.ID)
 
 	// The confirmed write is committed: its afterwork runs detached from the
 	// client (issue #453).
@@ -427,14 +436,18 @@ func confirmOpKnown(op string) bool {
 // client re-stages (rejected finding D1-m2).
 func executeConfirmedBlobOp(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthResult, cw store.CanonicalWrite, pendingID string) confirmOutcome {
 	if cw.Op == store.OpBlobLink {
+		noteToolBlob(ctx, cw.ID)
 		blob, err := store.UpdateBlobBlockRef(ctx, pool, cw.ID, cw.ContextBlockID, writableBlockScopes(ar))
 		if err != nil {
+			noteToolStatement(ctx, err)
 			logRequestError(ctx, "confirm: confirmed blob link execute failed", "error", err, "write_outcome", statementOutcome(err), "pending_id", pendingID)
 			return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 		}
 		if blob == nil {
 			return confirmOutcome{Kind: confirmExecGone, Op: cw.Op}
 		}
+		noteToolWrite(ctx, nil)
+		noteToolBlob(ctx, blob.ID)
 		return confirmOutcome{Kind: confirmOK, Op: cw.Op, Blob: blob}
 	}
 
@@ -449,9 +462,12 @@ func executeConfirmedBlobOp(ctx context.Context, pool *pgxpool.Pool, ar *auth.Au
 			Reject: classConstraint.rejectStatus(status, reason).prefixed(confirmBlobStorePrefix)}
 	}
 	if err != nil {
+		noteToolStatement(ctx, err)
 		logRequestError(ctx, "confirm: confirmed blob write execute failed", "error", err, "write_outcome", statementOutcome(err), "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
+	noteToolWrite(ctx, nil)
+	noteToolBlob(ctx, blob.ID)
 	return confirmOutcome{Kind: confirmOK, Op: cw.Op, Blob: blob}
 }
 
@@ -463,14 +479,17 @@ func executeConfirmedBlobOp(ctx context.Context, pool *pgxpool.Pool, ar *auth.Au
 // token is spent, the client re-stages (rejected finding D1-m2). No booking:
 // the budget was charged at stage time, as for every staged op.
 func executeConfirmedArchive(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthResult, cw store.CanonicalWrite, pendingID string) confirmOutcome {
+	noteToolBlock(ctx, cw.ID)
 	block, err := store.DeleteBlock(ctx, pool, cw.ID, writableBlockScopes(ar))
 	if err != nil {
+		noteToolWrite(ctx, err)
 		logRequestError(ctx, "confirm: confirmed archive execute failed", "error", err, "write_outcome", writeOutcome(err), "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
 	}
 	if block == nil {
 		return confirmOutcome{Kind: confirmExecGone, Op: cw.Op, BlockID: cw.ID}
 	}
+	noteToolWrite(ctx, nil)
 	return confirmOutcome{Kind: confirmOK, Op: cw.Op, Block: block}
 }
 

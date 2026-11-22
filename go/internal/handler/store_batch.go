@@ -306,13 +306,19 @@ func executeConfirmedStoreBatch(ctx context.Context, pool *pgxpool.Pool, blockty
 			TypeName: it.Type, Supersedes: it.Supersedes,
 		}
 	}
+	noteToolCount(ctx, len(batch))
 	results, err := store.UpsertBlocks(ctx, pool, batch, ar.ApiKeyID, set, nil)
 	if err != nil {
 		if rej := storeBatchRefusal(err); rej != nil {
 			return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmStoreBatchPrefix)}
 		}
+		noteToolWrite(ctx, err)
 		logRequestError(ctx, "confirm: confirmed batch execute failed", "error", err, "write_outcome", writeOutcome(err), "pending_id", pendingID)
 		return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
+	}
+	out := storeBatchOutcome(results)
+	if batchWrote(out) {
+		noteToolWrite(ctx, nil)
 	}
 	// Committed: one bound for the whole afterwork, as on the direct path.
 	after, cancel := followUpContext(ctx)
@@ -322,7 +328,7 @@ func executeConfirmedStoreBatch(ctx context.Context, pool *pgxpool.Pool, blockty
 			finishStoredBlock(after, pool, set, r.Block, RequestIDFromContext(ctx))
 		}
 	}
-	return confirmOutcome{Kind: confirmOK, Op: cw.Op, Batch: storeBatchOutcome(results)}
+	return confirmOutcome{Kind: confirmOK, Op: cw.Op, Batch: out}
 }
 
 // storeBatchShapeReject refuses a batch without items or above the cap.

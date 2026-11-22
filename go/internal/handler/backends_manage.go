@@ -411,17 +411,20 @@ func writeBackendTxFailure(w http.ResponseWriter, stage string) {
 func (h *ManageHandler) reloadAfterMutation(ctx context.Context, action string) {
 	ctx, cancel := followUpContext(ctx)
 	defer cancel()
-	h.reloadBackendPool(ctx, action)
+	_ = h.reloadBackendPool(ctx, action)
 }
 
 // reloadBackendPool is reloadAfterMutation on a context the caller already
 // detached and bounded — for a route with more than one reload after its
-// commit, which share one bound (the eject/gaming toggle).
-func (h *ManageHandler) reloadBackendPool(ctx context.Context, action string) {
-	if err := h.backendPool.Reload(ctx); err != nil {
+// commit (the eject/gaming toggle, whose answer the failure decides). It logs
+// a failure and returns it.
+func (h *ManageHandler) reloadBackendPool(ctx context.Context, action string) error {
+	err := h.backendPool.Reload(ctx)
+	if err != nil {
 		logRequestError(ctx, "backends: post-mutation reload failed — NOTIFY path will converge",
 			"action", action, "error", err)
 	}
+	return err
 }
 
 func (h *ManageHandler) poolBackendByID(id string) *backends.Backend {

@@ -904,7 +904,7 @@ func (h *ManageHandler) handleDelete(w http.ResponseWriter, r *http.Request, ar 
 	if err != nil {
 		// I7/S3: a derivative is not client-archivable either — 403, decided in
 		// the store's WHERE. Same renderer as the update path.
-		writeUpdateFailure(w, err, reqID)
+		writeUpdateFailure(w, err, reqID, "write_outcome", writeOutcome(err))
 		return
 	}
 	if block == nil {
@@ -1054,8 +1054,9 @@ func (h *ManageHandler) handleGuardResolve(w http.ResponseWriter, r *http.Reques
 	block, err := store.GuardResolve(ctx, h.pool, req.ID, resolveData.Resolution, writableBlockScopes(ar))
 	if err != nil {
 		// I7/S3: guard-resolve 'archive' is the second archive verb — a
-		// derivative is not archivable through it either (403, not 500).
-		writeUpdateFailure(w, err, reqID)
+		// derivative is not archivable through it either (403, not 500). One
+		// statement: statementOutcome.
+		writeUpdateFailure(w, err, reqID, "write_outcome", statementOutcome(err))
 		return
 	}
 	if block == nil {

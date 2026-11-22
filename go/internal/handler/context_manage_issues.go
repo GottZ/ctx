@@ -109,7 +109,7 @@ func (h *ManageHandler) handleIssueCreate(w http.ResponseWriter, r *http.Request
 		Title: p.Title, Content: p.Content, Tags: p.Tags, Metadata: p.Metadata,
 	}, p.Status)
 	if err != nil {
-		h.writeIssueError(w, "issue-create", err, reqID)
+		writeIssueWriteError(w, "issue-create", err, reqID)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -140,7 +140,7 @@ func (h *ManageHandler) handleIssueUpdate(w http.ResponseWriter, r *http.Request
 		Title: p.Title, Content: p.Content, Tags: p.Tags, Metadata: p.Metadata, Status: p.Status,
 	})
 	if err != nil {
-		h.writeIssueError(w, "issue-update", err, reqID)
+		writeIssueWriteError(w, "issue-update", err, reqID)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -244,7 +244,7 @@ func (h *ManageHandler) handleIssueCommentCreate(w http.ResponseWriter, r *http.
 		Author: p.Author, Content: p.Content, Metadata: p.Metadata,
 	})
 	if err != nil {
-		h.writeIssueError(w, "issue-comment-create", err, reqID)
+		writeIssueWriteError(w, "issue-comment-create", err, reqID)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -408,11 +408,19 @@ func (h *ManageHandler) writeIssueError(w http.ResponseWriter, action string, er
 	writeIssueStoreError(w, action, err, reqID)
 }
 
+// writeIssueWriteError is writeIssueStoreError for an issue write: its 500
+// line names what the write left behind. The issue transaction carries no
+// commit label (issueTx), so the outcome is statementOutcome's.
+func writeIssueWriteError(w http.ResponseWriter, action string, err error, reqID string) {
+	writeIssueStoreError(w, action, err, reqID, "write_outcome", statementOutcome(err))
+}
+
 // writeIssueStoreError maps the issue store sentinels onto HTTP statuses:
 // not-found/scope violations ⇒ uniform 404 (no oracle); a non-writable requested
 // scope ⇒ 403; transition + body-cap + class ⇒ 422; everything else ⇒ 500
 // (logged, no wire detail). Shared by the manage transport and the REST W7 writes.
-func writeIssueStoreError(w http.ResponseWriter, action string, err error, reqID string) {
+// attrs go on the 500's line: the issue writes pass their write_outcome.
+func writeIssueStoreError(w http.ResponseWriter, action string, err error, reqID string, attrs ...any) {
 	// A title the write builds names another active block's identity (issue
 	// #275): the 409 the block update surfaces answer (#227), coded, no ERROR
 	// line — the caller resolves it with another title.
@@ -455,7 +463,7 @@ func writeIssueStoreError(w http.ResponseWriter, action string, err error, reqID
 	case errors.Is(err, errInvalidLinkClass):
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
 	default:
-		logResponseError(w, action+" error", "error", err, "request_id", reqID)
+		logResponseError(w, action+" error", append([]any{"error", err, "request_id", reqID}, attrs...)...)
 		writeInternal(w)
 	}
 }

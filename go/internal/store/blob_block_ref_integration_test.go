@@ -25,6 +25,7 @@ package store_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -168,18 +169,18 @@ func TestBlobBlockRef(t *testing.T) {
 			"absent":        "00000000-0000-0000-0000-0000000000ff",
 			"malformed":     "not-a-uuid",
 		} {
-			scope, err := store.BlobWriteScope(ctx, pool, id, []string{"private"})
+			scope, storedID, err := store.BlobWriteScope(ctx, pool, id, []string{"private"})
 			if err != nil {
 				t.Errorf("BlobWriteScope(%s): error %v, want the empty answer", name, err)
 			}
-			if scope != "" {
-				t.Errorf("BlobWriteScope(%s) = %q, want the empty string", name, scope)
+			if scope != "" || storedID != "" {
+				t.Errorf("BlobWriteScope(%s) = %q, %q, want the empty strings", name, scope, storedID)
 			}
 		}
-		if scope, err := store.BlobWriteScope(ctx, pool, foreign.ID, []string{"w210x"}); err != nil || scope != "w210x" {
-			t.Errorf("BlobWriteScope of a writable blob = %q (%v), want w210x", scope, err)
+		if scope, storedID, err := store.BlobWriteScope(ctx, pool, strings.ToUpper(foreign.ID), []string{"w210x"}); err != nil || scope != "w210x" || storedID != foreign.ID {
+			t.Errorf("BlobWriteScope of a writable blob = %q, %q (%v), want w210x and the stored id %s", scope, storedID, err, foreign.ID)
 		}
-		if _, err := store.BlobWriteScope(ctx, pool, foreign.ID, nil); err == nil {
+		if _, _, err := store.BlobWriteScope(ctx, pool, foreign.ID, nil); err == nil {
 			t.Error("BlobWriteScope with an empty scope set returned no error — the read must fail closed")
 		}
 	})

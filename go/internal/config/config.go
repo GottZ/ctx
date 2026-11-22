@@ -1257,7 +1257,9 @@ type WritesConfig struct {
 	// keeps dream batches, archives, scope moves, declarations and other
 	// batches of those scopes waiting. 0 switches batches off (every batch is
 	// refused by name); the 1 MB body cap of both routes bounds the bytes.
-	// global-only: the lock time is spent in the shared database.
+	// global-only: the lock time is spent in the shared database. At most
+	// WritesBatchMaxItemsCeiling (V67, issue #483): the batch's afterwork
+	// runs under one follow-up bound.
 	BatchMaxItems int `key:"writes.batch_max_items" env:"CTX_WRITES_BATCH_MAX_ITEMS" default:"100" mut:"hot" parse:"strict" tenancy:"global-only"`
 }
 

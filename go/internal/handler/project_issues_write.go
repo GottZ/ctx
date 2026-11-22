@@ -188,7 +188,7 @@ func (h *ProjectIssuesHandler) HandleCreate(w http.ResponseWriter, r *http.Reque
 		Title: p.Title, Content: p.Content, Tags: p.Tags, Metadata: p.Metadata,
 	}, p.Status)
 	if err != nil {
-		writeIssueStoreError(w, "issue-create", err, reqID)
+		writeIssueWriteError(w, "issue-create", err, reqID)
 		return
 	}
 	logIssueWrite(h.pool, env.ApiKeyID, b.ID, reqID)
@@ -229,7 +229,7 @@ func (h *ProjectIssuesHandler) HandlePatch(w http.ResponseWriter, r *http.Reques
 		Title: p.Title, Content: p.Content, Tags: p.Tags, Metadata: p.Metadata, Status: p.Status,
 	})
 	if err != nil {
-		writeIssueStoreError(w, "issue-update", err, reqID)
+		writeIssueWriteError(w, "issue-update", err, reqID)
 		return
 	}
 	logIssueWrite(h.pool, env.ApiKeyID, b.ID, reqID)
@@ -266,7 +266,7 @@ func (h *ProjectIssuesHandler) HandleCommentCreate(w http.ResponseWriter, r *htt
 		Author: p.Author, Content: p.Content, Metadata: p.Metadata,
 	})
 	if err != nil {
-		writeIssueStoreError(w, "issue-comment-create", err, reqID)
+		writeIssueWriteError(w, "issue-comment-create", err, reqID)
 		return
 	}
 	logIssueWrite(h.pool, env.ApiKeyID, b.ID, reqID)
