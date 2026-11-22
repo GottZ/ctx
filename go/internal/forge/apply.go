@@ -420,8 +420,8 @@ func decide(base, ctxH, forgeH string) decision {
 // side's projection, the block's projection against a base snapshot
 // (issueTypePolicy.ctxIssueBase or CtxCommentBase), the blocks the
 // pull-UPDATE links the block to (targets, nil for none — resolved before
-// the transaction, which locks them with the block, issue #503) and the
-// pull-UPDATE's block write.
+// the transaction, which locks those below the block's id before the block,
+// issue #503) and the pull-UPDATE's block write.
 type pulled struct {
 	forgeH      string
 	forgeFields json.RawMessage
@@ -436,10 +436,10 @@ type pulled struct {
 // nothing ends on the read (endsOnRead): noop on an unflagged mapping,
 // ctx-ahead (the push's), and a conflict the mapping already carries
 // (idempotent, 0 new conflicts). Every other one is
-// decided again on the rows the transaction locks — the block together with
-// the targets of its references in ascending id order (LockPulledBlock,
-// issue #503), then its mapping row (LockSyncMap), the order of every writer
-// of both — because a local write can move the block and another ctxd
+// decided again on the rows the transaction locks — the targets of its
+// references whose id lies below the block's, in ascending order, then the
+// block (LockPulledBlock, issue #503), then its mapping row (LockSyncMap),
+// the order of every writer of both — because a local write can move the block and another ctxd
 // instance the mapping between the read and the write (issues #452, #491):
 //
 //   - The mapping still holds the base the read decided on. The read's
@@ -746,7 +746,7 @@ func parseIssueRefs(body string) map[int64]bool {
 //
 // It runs on the pool before the pull's write transaction begins (the
 // targets are committed blocks of other issues): the transaction locks
-// exactly these with the source block in one order of ids and links exactly
+// those below the source block's id before the block and links exactly
 // these (issue #503) — a target mapped meanwhile gets its edge from a later
 // pull, as an unmapped one does. Resolving them inside the transaction also
 // needed a second pool connection while the first held the block.
@@ -781,10 +781,12 @@ func (a *Applier) referenceTargets(ctx context.Context, project store.ProjectRow
 }
 
 // applyReferences writes the 'references' edges from sourceID to targets
-// (referenceTargets) in the caller's Tx, atomic with the source block. A
-// pull-update holds the targets locked already (LockPulledBlock), so
-// PutStructuralLink's validation waits for nothing; a pull-create's block
-// is new, and its validation takes them.
+// (referenceTargets) in the caller's Tx, atomic with the source block.
+// PutStructuralLink's validation locks each target FOR SHARE: a pull-update
+// holds those below its block's id already (LockPulledBlock) and takes
+// those above it here, after its block, in ascending order (targets are
+// sorted); a pull-create's block is new, no other transaction's to wait
+// for.
 func applyReferences(ctx context.Context, tx pgx.Tx, writable []string, sourceID string, targets []string) error {
 	for _, id := range targets {
 		err := store.PutStructuralLink(ctx, tx, store.StructuralLink{

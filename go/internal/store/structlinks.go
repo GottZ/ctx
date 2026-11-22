@@ -80,24 +80,20 @@ func blockScopes(ctx context.Context, tx pgx.Tx, ids []string) (map[string]strin
 	return out, rows.Err()
 }
 
-// The link-target locks of a writer that takes a block for writing and links
-// it to other blocks (LockPulledBlock, issue #503): FOR SHARE — the lock
-// blockScopes takes, so PutStructuralLink finds them held and waits for
-// nothing — in ascending id order (ORDER BY id puts the sort under the row
-// locks, so the rows are taken in that order), the targets below the block
-// the writer locks between them ($2), then those above it.
-const (
-	lockLinkTargetsBelowSQL = `SELECT 1 FROM context_blocks WHERE id = ANY($1::uuid[]) AND id < $2::uuid ORDER BY id FOR SHARE`
-	lockLinkTargetsAboveSQL = `SELECT 1 FROM context_blocks WHERE id = ANY($1::uuid[]) AND id > $2::uuid ORDER BY id FOR SHARE`
-)
+// lockLinkTargetsBelowSQL locks the link targets of a writer that takes a
+// block for writing and links it to them (LockPulledBlock, issue #503) whose
+// id lies below that block's ($2): FOR SHARE — the lock blockScopes takes,
+// so PutStructuralLink finds them held — in ascending id order (ORDER BY id
+// puts the sort under the row locks, so the rows are taken in that order).
+const lockLinkTargetsBelowSQL = `SELECT 1 FROM context_blocks WHERE id = ANY($1::uuid[]) AND id < $2::uuid ORDER BY id FOR SHARE`
 
-// lockLinkTargets runs one of the link-target locks over targets (no
-// statement for none) around the block pivot.
-func lockLinkTargets(ctx context.Context, tx pgx.Tx, sql string, targets []string, pivot string) error {
+// lockLinkTargetsBelow runs lockLinkTargetsBelowSQL over targets (no
+// statement for none) below the block pivot.
+func lockLinkTargetsBelow(ctx context.Context, tx pgx.Tx, targets []string, pivot string) error {
 	if len(targets) == 0 {
 		return nil
 	}
-	rows, err := tx.Query(ctx, sql, targets, pivot)
+	rows, err := tx.Query(ctx, lockLinkTargetsBelowSQL, targets, pivot)
 	if err != nil {
 		return fmt.Errorf("structural link: lock targets: %w", err)
 	}

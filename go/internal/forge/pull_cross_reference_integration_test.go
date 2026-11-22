@@ -6,14 +6,16 @@
 // reads its target FOR SHARE, which keeps the target's scope from moving
 // under the link. A pull that locked its target only after its own block met
 // the other pull doing the same the other way round, and PostgreSQL ended one
-// of them with 40P01. The pull now locks the targets of its references and
-// its own block in ascending id order before it writes, so of two such pulls
-// one waits before it holds a row the other one needs.
+// of them with 40P01. The pull now locks the targets of its references whose
+// id lies below its block's first, in ascending order, and its block after
+// them, so of two such pulls one waits before it holds a row the other one
+// needs.
 //
 // The window is opened by a hold on each pull's pool at its first statement
 // that takes a FOR SHARE lock — before the fix the reference lock after the
-// block lock, after it the first target lock in id order — until both pulls
-// are there; then both go on.
+// block lock; after it, for the pull whose target lies below its block, the
+// target lock before its block — until both pulls are there; then both go
+// on.
 //
 //	go test -tags=integration ./internal/forge/ -run TestPullsOfIssuesThatReferenceEachOther -count=1 -v
 package forge

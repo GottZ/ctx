@@ -134,18 +134,21 @@ func PullCreateIssueBlock(ctx context.Context, tx pgx.Tx, scope string, c ForgeI
 // is archived, gone or out of scopes reads as ErrIssueNotFound.
 //
 // targets are the blocks the pull links the block to (its "#<nr>"
-// references): they are locked FOR SHARE, the lock PutStructuralLink's
-// validation takes on a link's endpoints, together with the block in
-// ascending id order — the targets below the block's id, the block, the
-// targets above it (issue #503). Two pulls of issues that reference each
-// other locked their own block first and the other's FOR SHARE in the
-// reference write, each waiting for the other's FOR NO KEY UPDATE: a
-// deadlock (40P01). In one order of ids the later of the two waits before it
-// holds a row the earlier one needs. FOR SHARE stays: a scope move takes the
-// row FOR NO KEY UPDATE (a scope is no key column), which FOR KEY SHARE would
-// let through, and the target's scope must not change under the link.
+// references), which PutStructuralLink's validation locks FOR SHARE: the
+// targets whose id lies below the block's are locked here first, FOR SHARE
+// and in ascending id order, before the block (issue #503); those above it
+// the reference write takes after the block. Two pulls of issues that
+// reference each other locked their own block first and the other's FOR
+// SHARE in the reference write, each waiting for the other's FOR NO KEY
+// UPDATE: a deadlock (40P01). Now a pull holds no block when it waits for
+// one below its own, and it waits for one above its own only while that
+// block's pull is not waiting for its block — the later of the two waits
+// before it holds a row the earlier one needs. FOR SHARE stays: a scope move
+// takes the row FOR NO KEY UPDATE (a scope is no key column), which FOR KEY
+// SHARE would let through, and the target's scope must not change under the
+// link.
 func LockPulledBlock(ctx context.Context, tx pgx.Tx, blockID string, scopes, targets []string) (*Block, error) {
-	if err := lockLinkTargets(ctx, tx, lockLinkTargetsBelowSQL, targets, blockID); err != nil {
+	if err := lockLinkTargetsBelow(ctx, tx, targets, blockID); err != nil {
 		return nil, err
 	}
 	b, err := scanIssue(tx.QueryRow(ctx, `
@@ -159,9 +162,6 @@ func LockPulledBlock(ctx context.Context, tx pgx.Tx, blockID string, scopes, tar
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: lock pulled block: %w", err)
-	}
-	if err := lockLinkTargets(ctx, tx, lockLinkTargetsAboveSQL, targets, blockID); err != nil {
-		return nil, err
 	}
 	return b, nil
 }

@@ -12,7 +12,7 @@
 // with an error (a deadlock would surface as SQLSTATE 40P01, a wait cycle
 // through the pool as the deadline). The pulls apply two issues that
 // reference each other, in opposite orders (issue #503): each locks the
-// targets of its references and its own block in ascending id order.
+// targets of its references below its block's id before the block.
 //
 //	taskset -c 0-1 go test -tags=integration ./internal/forge/ -run TestForgeLocksUnderConcurrency -count=3 -v
 package forge
