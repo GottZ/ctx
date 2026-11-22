@@ -112,7 +112,24 @@ func TestRules_SecondHoldoutAgainstTheBase(t *testing.T) {
 		fmt.Fprintf(&report, "%s: %d / %d / %d / %d / %d\n", k, c.n, c.base, c.now, c.worse, c.better)
 	}
 	t.Logf("holdout of #506 by its own criterion, disputed questions left out:\n%s", report.String())
+	// The base column judged by the port is what evaluate.py counted for it:
+	// a port that judges more leniently fails here, not silently.
+	if got := byClass["total"].base; got != holdout506RightAtTheBase {
+		t.Errorf("right at aa1354ea by the port: %d, evaluate.py counted %d — the criterion drifted", got, holdout506RightAtTheBase)
+	}
+	if got := byClass["total"].now; got < holdout506RightAtThePR {
+		t.Errorf("right now: %d, fewer than the %d of issue #506's pull request", got, holdout506RightAtThePR)
+	}
 }
+
+// holdout506RightAtTheBase is the number of undisputed questions of the
+// holdout that evaluate.py counts right at aa1354ea without its tense part
+// (275 of 481); holdout506RightAtThePR the number right when issue #506's
+// pull request landed (303), a floor that keeps its improvements counted.
+const (
+	holdout506RightAtTheBase = 275
+	holdout506RightAtThePR   = 303
+)
 
 // holdout506Right is the criterion of the holdout's evaluation (evaluate.py
 // of issue #506's holdout), ported without its tense part — the tense of a

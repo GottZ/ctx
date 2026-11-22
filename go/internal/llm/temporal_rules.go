@@ -146,15 +146,16 @@ func germanFiniteVerb(w string) bool {
 	return germanPastVerbs[w] || perfektAux[w] || germanFiniteWords[w]
 }
 
-// germanWordsOnS are the words that end in "s" behind a finite verb the
-// rules know (germanFiniteVerb) and are German words of their own, not that
-// verb with "es" glued to it (issue #506): the imperative of "lassen" ("lass
-// uns am Freitag releasen" asks for the coming Friday, "las" is the simple
-// past of "lesen"); the genitive or plural of a noun ("des Stands", "des
-// Lags", "des Stiegs", "des Solls"); the genitive of an infinitive used as a
-// noun ("des Könnens"); and the participle used as an adjective ("ein
-// passiertes Problem"). Every other word "<verb>s" of the verbs the rules
-// know is no German word.
+// germanWordsOnS are the words that are a finite verb the rules know
+// (germanFiniteVerb) followed by "s" and a German word of their own (issue
+// #506): the imperative of "lassen" ("lass uns am Freitag releasen" asks for
+// the coming Friday, "las" is the simple past of "lesen"); the genitive or
+// plural of a noun ("des Stands", "des Lags", "des Stiegs", "des Solls"); the
+// genitive of an infinitive used as a noun ("des Könnens"); and the
+// participle used as an adjective ("ein passiertes Problem"). Some are the
+// verb with "es" as well ("woran lag's", "was soll's"); the word decides, as
+// it did before the glued "s" was cut at all. Every other word "<verb>s" of
+// the verbs the rules know is no German word.
 var germanWordsOnS = toWordSet(
 	"lass",
 	"stands", "lags", "stiegs", "solls",

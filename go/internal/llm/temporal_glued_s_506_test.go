@@ -29,6 +29,17 @@ func TestRules_AnImperativeOfLassenIsNoPast(t *testing.T) {
 	})
 }
 
+// TestRules_ANounOnSIsNoVerbInTheSimplePast (issue #506): a noun whose
+// genitive or plural is a simple past the rules know followed by "s" stays
+// the noun — "Stands" is no "stand", "Lags" no "lag" — and the question asks
+// for the coming day.
+func TestRules_ANounOnSIsNoVerbInTheSimplePast(t *testing.T) {
+	checkRules(t, sunday487, map[string]wantDate{
+		"Welche Stands bauen wir am Freitag auf?": next506["freitag"],
+		"Welche Lags erwarten wir am Montag?":     next506["montag"],
+	})
+}
+
 // sWordsOfTheirOwn are, by this test's own reading, the words "<verb>s" of
 // a finite verb the rules know that are German words of their own: the
 // imperative of "lassen"; the genitive or plural of a noun ("des Stands",
