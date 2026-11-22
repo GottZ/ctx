@@ -214,6 +214,12 @@
   .badge.source-env {
     color: var(--text-dim);
   }
+  /* The installation's default (migration 192, today dream.enabled only):
+     recorded once by the database, so it reads like env, outlined. */
+  .badge.source-install {
+    color: var(--text-dim);
+    border-color: var(--text-dim);
+  }
   .badge.sensitive {
     color: var(--warn);
     border-color: var(--warn);
