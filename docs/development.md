@@ -408,11 +408,16 @@ a real one — `eval-noanswer_test.sh` runs copies of both harnesses against ser
 starts on 127.0.0.1 with a throwaway key (python3 and curl; `eval-temporal.sh` behind a
 `docker` shim), `test-noanswer_test.sh` does the same for `test.sh` (shims for `docker`,
 `ctx` and `uv`; every test's requests answered empty, 500, 401 or `success:false` in
-turn). The CI `lint` job runs these four and `eval-cyclic_test.sh` (below):
+turn). `eval-instrument_test.sh` brings its golden inputs along
+(`scripts/testdata/eval-results-golden*.json`, two results `eval.sh` wrote: one of the
+current shape, one from before `not_measured`) instead of taking whatever lies in
+`.eval-results/`, so its golden runs in CI too; `EVAL_GOLDEN_RESULTS` adds one more
+result file to the check. The CI `lint` job runs these four and `eval-cyclic_test.sh`
+(below):
 
 ```bash
 bash eval-matcher_test.sh           # negative-case matcher contract
-bash eval-instrument_test.sh        # census, baseline diff, category registry
+bash eval-instrument_test.sh        # census, baseline diff, category registry, golden results
 bash eval-noanswer_test.sh          # eval.sh / eval-temporal.sh: no-answer classes, 401, exit 3, CSV
 bash test-noanswer_test.sh          # test.sh: no-answer per test, refusal bodies, corpus gate, timeouts
 ```

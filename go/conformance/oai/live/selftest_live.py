@@ -57,9 +57,10 @@ class Fake:
     "container memory" to ``mem_file``: 100 MB + 20 MB per open stream, so
     the measured peak follows the flood instead of a timer (S2: the S1 test
     raced a writer thread against the tool's start). The modes heap-refused,
-    heap-partial and heap-budget refuse streams (#478, HEAP_REFUSALS): every
-    one, every second one with the consumer's 429, every second one with the
-    in-flight budget's 503 server_overloaded; the others run as in mode heap."""
+    heap-budget-only, heap-partial and heap-budget refuse streams (#478,
+    HEAP_REFUSALS): every one with the consumer's 429, every one with the
+    in-flight budget's 503 server_overloaded, every second one with the 429,
+    every second one with the 503; the others run as in mode heap."""
 
     MEM_BASE, MEM_PER_STREAM = 100_000_000, 20_000_000
 
@@ -278,6 +279,7 @@ HEAP_REFUSALS = {
     "heap-refused": ("concurrency",),
     "heap-partial": ("concurrency", "ok"),
     "heap-budget": ("budget", "ok"),
+    "heap-budget-only": ("budget",),
 }
 
 
@@ -441,6 +443,7 @@ def test_measure_heap(fake, tmp_path):
 
 @pytest.mark.parametrize("fake,ok,admitted,needle", [
     ("heap-refused", False, 0, "no stream was admitted"),
+    ("heap-budget-only", False, 0, "no stream was admitted"),
     ("heap-partial", False, 2, "refused by something other than the in-flight budget"),
     ("heap-budget", True, 2, None),
 ], indirect=["fake"])
