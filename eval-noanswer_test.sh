@@ -18,7 +18,8 @@
 #   0. eval_no_answer_class (scripts/lib/eval-api.sh): a request got an answer
 #      only with curl exit 0, a 2xx status and a JSON object with success:true;
 #      otherwise its class is timeout, connection, http_401_403, http_5xx,
-#      http_other or bad_body.
+#      http_other or bad_body. With ANSWER ok, ok:true; with jsonrpc, a
+#      result object without error and without isError:true (#478).
 #   1. eval.sh, every request answered: rc 0, results, baseline and diff written.
 #   2. eval.sh, no answer in the preflight (refused connection, HTTP 500, a
 #      timeout): rc 1, nothing written, the reason named. HTTP 401, in the
@@ -298,10 +299,10 @@ def last_line(p):
     return lines[-1] if lines else ""
 
 
-def classify(rc, code, text):
+def classify(rc, code, text, *answer):
     lib = os.path.join(REPO, "scripts", "lib", "eval-api.sh")
-    p = subprocess.run(["bash", "-c", 'source "$1" && eval_no_answer_class "$2" "$3" "$4"', "_", lib,
-                        str(rc), code, text], capture_output=True, text=True)
+    p = subprocess.run(["bash", "-c", 'source "$1" && shift && eval_no_answer_class "$@"', "_", lib,
+                        str(rc), code, text, *answer], capture_output=True, text=True)
     return p.stdout.strip() if p.returncode == 0 else f"<rc {p.returncode}: {p.stderr.strip()[:120]}>"
 
 
@@ -332,6 +333,22 @@ def main(work):
     ]:
         got = classify(rc, code, text)
         check(got == want, f"curl {rc}, HTTP {code}, body {text[:30]!r}: {want or 'an answer'}", f"got {got!r}")
+    # The ANSWER shapes test.sh uses (#478): ok for /api/synthesize/daily,
+    # jsonrpc for /mcp; an unknown shape is never met.
+    for answer, text, want in [
+        ("success", '{"success":true}', ""),
+        ("ok", '{"ok":true,"block_id":"b"}', ""),
+        ("ok", '{"ok":false,"error":"synthesis failed"}', "bad_body"),
+        ("ok", '{"success":true}', "bad_body"),
+        ("jsonrpc", '{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}', ""),
+        ("jsonrpc", '{"jsonrpc":"2.0","id":2,"result":{"content":[],"isError":true}}', "bad_body"),
+        ("jsonrpc", '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"m"}}', "bad_body"),
+        ("jsonrpc", '{"jsonrpc":"2.0","id":1}', "bad_body"),
+        ("jsonrpc", '{"jsonrpc":"2.0","id":1,"result":[]}', "bad_body"),
+        ("no-such-shape", '{"success":true}', "bad_body"),
+    ]:
+        got = classify(0, "200", text, answer)
+        check(got == want, f"answer {answer}, body {text[:40]!r}: {want or 'an answer'}", f"got {got!r}")
 
     print("--- 1. eval.sh: every request answered")
     s = Server(healthy)

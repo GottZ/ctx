@@ -40,8 +40,20 @@ failed, 2 on usage:
     while sampling ``--mem-file`` (a cgroup ``memory.current`` of the ctx
     container, or a file a sampler rewrites) every 50 ms from before the
     flood to its end: ``{"base_bytes", "peak_bytes", "budget_bytes",
-    "streams", "failed_streams", "samples", "ok"}``, ok = peak − base <
-    budget.
+    "streams", "admitted_streams", "budget_refused_streams", "refusals",
+    "failed_streams", "samples", "ok"}``, ok = the run is a measurement and
+    peak − base < budget. peak − base grows with the admitted streams (each
+    books its relay buffer, allocated in full when the stream starts —
+    operations.md "Streams per in-flight budget"), so the run is a
+    measurement only when at least one stream was admitted (HTTP 200) and
+    every other one was refused by the in-flight budget itself (503
+    server_overloaded: the budget doing what the measurement asserts). A
+    stream refused by anything else — a consumer's 429, the dispatcher's 429
+    server_busy, 401, another 503, no connection — counts in ``refusals``
+    (status and code) and makes the run
+    exit 1 with an ``error``: the flood was smaller than ``--streams``, and
+    the peak of a smaller flood says nothing about this one (#478).
+    ``failed_streams`` counts the streams that did not reach ``[DONE]``.
 ``retry-after --base-url URL --key-env NAME --model M --requests N [--concurrency C]``
     N non-streamed chats (C at a time):
     ``{"requests", "status": {…}, "ctx_429", "proxy_429", "proxy_servers":
@@ -338,9 +350,29 @@ def heap(base_url: str, keys: list[str], model: str, streams: int, mem_file: str
     th.join()
     peak = max(samples)
     failed = sum(1 for r in results if not r["done"])
-    ok = peak - base_bytes < budget
-    return ok, {"base_bytes": base_bytes, "peak_bytes": peak, "budget_bytes": budget, "streams": streams,
-                "failed_streams": failed, "samples": len(samples), "ok": ok}
+    admitted = sum(1 for r in results if r["status"] == 200)
+    budget_refused = sum(1 for r in results if r["status"] == 503 and r["error"] == "server_overloaded")
+    refusals: dict[str, int] = {}
+    for r in results:
+        if r["status"] == 200 or (r["status"] == 503 and r["error"] == "server_overloaded"):
+            continue
+        why = f"{r['status']} {r['error']}" if r["status"] is not None else str(r["error"]).split(":")[0]
+        refusals[why] = refusals.get(why, 0) + 1
+    # A measurement: the admitted streams are as many as the budget let in.
+    measured = admitted >= 1 and admitted + budget_refused == streams
+    ok = measured and peak - base_bytes < budget
+    res = {"base_bytes": base_bytes, "peak_bytes": peak, "budget_bytes": budget, "streams": streams,
+           "admitted_streams": admitted, "budget_refused_streams": budget_refused, "refusals": refusals,
+           "failed_streams": failed, "samples": len(samples), "ok": ok}
+    if admitted == 0:
+        res["error"] = (f"no stream was admitted ({budget_refused} refused by the in-flight budget, others {refusals}) — "
+                        "peak − base is the idle process, not a flood; no measurement")
+    elif not measured:
+        res["error"] = (f"{streams - admitted - budget_refused} of {streams} streams were refused by something other than "
+                        f"the in-flight budget ({refusals}) — the flood was smaller than --streams and peak − base grows "
+                        "with the admitted streams; lift the limit refusals names (a consumer's concurrency or rate, "
+                        "the dispatcher's server_busy queue, the door's auth_overloaded) and run again")
+    return ok, res
 
 
 # ── retry-after ─────────────────────────────────────────────────────────────

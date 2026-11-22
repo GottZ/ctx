@@ -389,15 +389,39 @@ says how many got none, and exits `1`; with no answer at all it writes nothing a
 (created mode 0600, an existing file keeps its mode; a path that cannot be written stops
 the run before its first request) — no longer to a fixed path under `/tmp`.
 
+`test.sh` sends every request through `eval_api_request`, the general form of the same
+call (any method; the credential header on curl's stdin, off the process list; always a
+`--max-time` — `/mcp` gets `MCP_TIMEOUT_S`, 30 s). Its answer is the endpoint's:
+`success:true`, `ok:true` for `/api/synthesize/daily`, a JSON-RPC result without
+`isError` for `/mcp`. A test that expects an answer and gets none fails and names the
+class. A test whose promise is a refusal — `T01` (401), the 403 of `T20`/`T21`/`T24`,
+`T22`'s unconfirmed downgrade (400), `T24`'s classify backend (422), `T19`'s two 404 —
+checks the status and ctx's error body (a JSON object with a non-empty `error`, no
+`success:true`): an empty reply, a 500 or a proxy's page is no refusal. The corpus gate
+is the first request: without an answer (or without an integer `stats.total_blocks`)
+the run stops before any test with exit `1`, naming `CONTEXT_API_KEY_PRIVATE` on a 401;
+a SKIP stays for what the run documents as missing (fewer than 100 blocks, no
+`--with-ollama`, no `ctx` CLI, no `uv`).
+
 The script gates run without a ctx server, without `.env` and without firing a query at
 a real one — `eval-noanswer_test.sh` runs copies of both harnesses against servers it
 starts on 127.0.0.1 with a throwaway key (python3 and curl; `eval-temporal.sh` behind a
-`docker` shim). The CI `lint` job runs these three and `eval-cyclic_test.sh` (below):
+`docker` shim), `test-noanswer_test.sh` does the same for `test.sh` (shims for `docker`,
+`ctx` and `uv`; the corpus gate, every test's first request, each follow-up step and
+each refusal step answered empty, 500, 401 or `success:false` in turn; it stops before
+the first run when `TMPDIR` is mounted `noexec`, where the shell would skip the shims and
+run the real programs). `eval-instrument_test.sh` brings its golden inputs along
+(`scripts/testdata/eval-results-golden*.json`, two results `eval.sh` wrote: one of the
+current shape, one from before `not_measured`) instead of taking whatever lies in
+`.eval-results/`, so its golden runs in CI too; `EVAL_GOLDEN_RESULTS` adds one more
+result file to the check. The CI `lint` job runs these four and `eval-cyclic_test.sh`
+(below):
 
 ```bash
 bash eval-matcher_test.sh           # negative-case matcher contract
-bash eval-instrument_test.sh        # census, baseline diff, category registry
+bash eval-instrument_test.sh        # census, baseline diff, category registry, golden results
 bash eval-noanswer_test.sh          # eval.sh / eval-temporal.sh: no-answer classes, 401, exit 3, CSV
+bash test-noanswer_test.sh          # test.sh: no-answer per test, refusal bodies, corpus gate, timeouts
 ```
 
 `eval-cyclic.sh` counts a case without an answer — no connection, a timeout, an HTTP

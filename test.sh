@@ -8,6 +8,18 @@
 # because neither needs an LLM — T13-T18 predate them inside the
 # --with-ollama block.
 #
+# A request without an answer passes no test (#478). Every request goes
+# through eval_api_request (scripts/lib/eval-api.sh), which keeps the HTTP
+# status and a --max-time: no connection, a timeout, a status outside 2xx or a
+# body that is not the endpoint's answer (success:true; ok:true for the daily
+# synthesis; a JSON-RPC result without isError for /mcp) fails a test that
+# expects an answer, naming the class. A test whose promise is a refusal (T01,
+# the 403 of T20/T21/T24, T22's unconfirmed downgrade, T24's classify backend,
+# T19's 404) checks the status and ctx's error body of that refusal. The corpus
+# gate is the first request: without an answer the run stops before any test.
+# Exit status: 0 every test passed (SKIPs allowed), 1 a test failed or the
+# corpus gate got no answer.
+#
 # ctx — Your AI's save game. By GottZ and Damien Moon (github.com/GottZ/ctx/graphs/contributors)
 # Implements GottZ 4-Way RRF verification and GottZ Scope Model tests.
 # Source: https://github.com/GottZ/ctx
@@ -28,10 +40,18 @@ KEY_PRIVATE="${CONTEXT_API_KEY_PRIVATE:?CONTEXT_API_KEY_PRIVATE not set in .env}
 # brauchen IRGENDEINEN fremden home_scope, keinen mit Bestandsdaten.
 KEY_ISO="${CONTEXT_API_KEY_ISOTEST:?CONTEXT_API_KEY_ISOTEST not set in .env}"
 KEY_INVALID="deadbeef_invalid_key_0000000000000000000000000000000000000000"
+# The request timeout of T17/T18 (/mcp: tools/list and the recent tool).
+MCP_TIMEOUT_S=30
 
 # DB container: env → running compose service `db` → exit 2 (issues #19, #40).
 source "$SCRIPT_DIR/scripts/lib/db-container.sh"
 ctx_resolve_db_container "$SCRIPT_DIR/docker-compose.yml" || exit 2
+
+# shellcheck source=scripts/lib/eval-api.sh
+if ! source "$SCRIPT_DIR/scripts/lib/eval-api.sh"; then
+  echo "[FATAL] $SCRIPT_DIR/scripts/lib/eval-api.sh not found (test.sh runs from the repository root)"
+  exit 1
+fi
 
 export PGPASSWORD="${CONTEXT_DB_PASSWORD:?CONTEXT_DB_PASSWORD not set in .env}"
 DB_CMD="docker exec -e PGPASSWORD ${DB_CONTAINER} psql -U ${CONTEXT_DB_USER:-context_user} -d ${CONTEXT_DB:-context_store} -t -A"
@@ -64,20 +84,57 @@ skip() {
   ((SKIP++))
 }
 
-# curl wrapper: $1=url, $2=key, $3=body, $4=timeout (default 10)
+# api URL KEY BODY [TIMEOUT_S] — POST BODY with X-Context-Key: KEY (timeout
+# default 10 s) through eval_api_request. Sets, in this shell — call it
+# directly, never inside $(…): API_BODY, API_STATUS (000 without a
+# response), API_NO_ANSWER ('' for an answer, else its class) and API_DETAIL
+# (the class in words). The key reaches curl on its stdin, off the process list.
 api() {
-  local timeout="${4:-10}"
-  curl -s --max-time "$timeout" -X POST "$1" \
-    -H "Content-Type: application/json" \
-    -H "X-Context-Key: $2" \
-    -d "$3" 2>/dev/null
+  eval_api_request POST "$1" "$3" "${4:-10}" "X-Context-Key: $2"
+}
+
+# get URL KEY [TIMEOUT_S] — the same for a GET.
+get() {
+  eval_api_request GET "$1" "" "${3:-10}" "X-Context-Key: $2"
+}
+
+# answered T — true when the last request got an answer; otherwise a FAIL line
+# for T that names the class, and false.
+answered() {
+  [[ -z "$API_NO_ANSWER" ]] && return 0
+  fail "$1" "no answer: $API_DETAIL"
+  return 1
+}
+
+# refused STATUS [NEEDLE] — whether the last request was refused the way ctx
+# refuses: HTTP STATUS and a JSON object whose error is a non-empty string and
+# whose success is not true; with NEEDLE, the error or the field errors name
+# it. An empty reply, a 500 or a proxy's page is no refusal.
+refused() {
+  [[ "$API_STATUS" == "$1" ]] || return 1
+  printf '%s' "$API_BODY" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+ok = isinstance(d, dict) and d.get("success") is not True and isinstance(d.get("error"), str) and d["error"] != ""
+if ok and sys.argv[1]:
+    ok = sys.argv[1] in d["error"] or sys.argv[1] in json.dumps(d.get("fields"), ensure_ascii=False)
+sys.exit(0 if ok else 1)' "${2:-}" 2>/dev/null
+}
+
+# seen — the last answer in words, on one line, for a FAIL line.
+seen() {
+  local b="${API_BODY:0:100}"
+  b="${b//$'\r'/}"
+  printf '%s %s' "${API_DETAIL:-HTTP $API_STATUS}" "${b//$'\n'/ }"
 }
 
 # Cleanup trap: always delete temp block
 cleanup() {
   if [[ -n "$CLEANUP_ID" ]]; then
-    api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
-      "{\"action\":\"delete\",\"id\":\"$CLEANUP_ID\"}" 10 >/dev/null 2>&1
+    api "$WEBHOOK/api/manage" "$KEY_PRIVATE" "{\"action\":\"delete\",\"id\":\"$CLEANUP_ID\"}" 10
   fi
 }
 trap cleanup EXIT
@@ -100,13 +157,33 @@ echo ""
 # grown store (home deployment: thousands of blocks). Fresh deployments would
 # fail them spuriously — below CORPUS_MIN blocks they SKIP instead. Behavior
 # tests (auth, CRUD, settings, …) always run. Same stats surface as T02.
+# The gate is the run's first request: without an answer (or an answer without
+# stats.total_blocks) no test would mean anything, so the run stops here with
+# exit 1 — a SKIP stays for a store that answered with fewer blocks (#478).
 CORPUS_MIN=100
-corpus_resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"stats"}')
-CORPUS_TOTAL=$(echo "$corpus_resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['stats']['total_blocks'])" 2>/dev/null)
+api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"stats"}'
+if [[ -n "$API_NO_ANSWER" ]]; then
+  if [[ "$API_STATUS" == 401 ]]; then
+    echo "[FATAL] corpus gate: $WEBHOOK answered HTTP 401 — CONTEXT_API_KEY_PRIVATE is not a key of that server; no test ran"
+  else
+    echo "[FATAL] corpus gate: $WEBHOOK/api/manage stats got no answer ($API_DETAIL); no test ran"
+  fi
+  echo "=== Results: no test ran, the corpus gate got no answer ==="
+  exit 1
+fi
+CORPUS_TOTAL=$(printf '%s' "$API_BODY" | python3 -c "
+import sys, json
+n = json.load(sys.stdin)['stats']['total_blocks']
+print(n if isinstance(n, int) and not isinstance(n, bool) else '')" 2>/dev/null)
+if [[ -z "$CORPUS_TOTAL" ]]; then
+  echo "[FATAL] corpus gate: $WEBHOOK/api/manage stats answered without an integer stats.total_blocks; no test ran"
+  echo "=== Results: no test ran, the corpus gate got no answer ==="
+  exit 1
+fi
 CORPUS_OK=true
-if [[ -z "$CORPUS_TOTAL" ]] || (( CORPUS_TOTAL < CORPUS_MIN )); then
+if (( CORPUS_TOTAL < CORPUS_MIN )); then
   CORPUS_OK=false
-  echo "Corpus: total_blocks=${CORPUS_TOTAL:-unknown} < $CORPUS_MIN — corpus-bound tests will SKIP"
+  echo "Corpus: total_blocks=$CORPUS_TOTAL < $CORPUS_MIN — corpus-bound tests will SKIP"
   echo ""
 fi
 
@@ -131,11 +208,12 @@ fi
 
 # T01 AUTH_REJECT
 T="T01 AUTH_REJECT"
-resp=$(api "$WEBHOOK/api/manage" "$KEY_INVALID" '{"action":"stats"}')
-if echo "$resp" | grep -qi "unauthorized\|\"success\":false"; then
+# The promise is the refusal itself: HTTP 401 with ctx's error body (handler.Auth).
+api "$WEBHOOK/api/manage" "$KEY_INVALID" '{"action":"stats"}'
+if refused 401 unauthorized; then
   pass "$T"
 else
-  fail "$T" "expected Unauthorized or success:false, got: ${resp:0:100}"
+  fail "$T" "expected HTTP 401 with error unauthorized, got: $(seen)"
 fi
 
 # T02 AUTH_PRIVATE
@@ -143,43 +221,47 @@ T="T02 AUTH_PRIVATE"
 if ! $CORPUS_OK; then
   skip "$T" "corpus-bound (total_blocks=${CORPUS_TOTAL:-unknown} < $CORPUS_MIN)"
 else
-resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"stats"}')
-total=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['stats']['total_blocks'])" 2>/dev/null)
+api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"stats"}'
+if answered "$T"; then
+total=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['stats']['total_blocks'])" 2>/dev/null)
 if [[ -n "$total" ]] && (( total >= 180 )); then
   pass "$T (total_blocks=$total)"
 else
   fail "$T" "expected total_blocks >= 180, got: $total"
 fi
 fi
+fi
 
 # T03 AUTH_ISOTEST
 T="T03 AUTH_ISOTEST"
-resp=$(api "$WEBHOOK/api/manage" "$KEY_ISO" '{"action":"stats"}')
-total=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['stats']['total_blocks'])" 2>/dev/null)
+api "$WEBHOOK/api/manage" "$KEY_ISO" '{"action":"stats"}'
+if answered "$T"; then
+total=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['stats']['total_blocks'])" 2>/dev/null)
 if [[ -n "$total" ]] && (( total < 30 )); then
   pass "$T (total_blocks=$total)"
 else
   fail "$T" "expected total_blocks < 30 (scope isolation), got: $total"
 fi
+fi
 
-# T04 SCOPE_ISOLATION
+# T04 SCOPE_ISOLATION — guard-list is open to every key and answers the
+# blocks of the key's read scopes: the isotest key must get an answer with a
+# blocks list that holds no private block. No answer is no evidence of
+# isolation (an empty reply used to pass here).
 T="T04 SCOPE_ISOLATION"
-resp=$(api "$WEBHOOK/api/manage" "$KEY_ISO" '{"action":"guard-list"}')
-if [[ -z "$resp" ]]; then
-  # Empty response = no blocks visible (scope isolation working)
-  pass "$T (empty response, no private blocks leaked)"
-else
-  has_private=$(echo "$resp" | python3 -c "
+api "$WEBHOOK/api/manage" "$KEY_ISO" '{"action":"guard-list"}'
+if answered "$T"; then
+  has_private=$(printf '%s' "$API_BODY" | python3 -c "
 import sys,json
-d=json.load(sys.stdin)
-blocks=d.get('blocks',[])
-private=[b for b in blocks if b.get('scope')=='private']
-print(len(private))
+blocks=json.load(sys.stdin).get('blocks')
+print(len([b for b in blocks if b.get('scope')=='private']) if isinstance(blocks, list) else '')
 " 2>/dev/null)
-  if [[ "$has_private" == "0" ]] || [[ -z "$has_private" ]]; then
+  if [[ "$has_private" == "0" ]]; then
     pass "$T"
+  elif [[ -z "$has_private" ]]; then
+    fail "$T" "the answer carries no blocks list: ${API_BODY:0:100}"
   else
-    fail "$T" "found $has_private private-scope blocks via WORK key"
+    fail "$T" "found $has_private private-scope blocks via the isotest key"
   fi
 fi
 
@@ -189,41 +271,46 @@ t05_ok=true
 t05_msg=""
 
 # Save
-resp=$(api "$WEBHOOK/api/store" "$KEY_PRIVATE" \
-  "{\"category\":\"test\",\"title\":\"$TEST_TITLE\",\"content\":\"benchmark crud test content $(date +%s)\",\"tags\":[\"benchmark\"]}")
-if ! echo "$resp" | grep -q '"success":true'; then
-  t05_ok=false; t05_msg="save failed: ${resp:0:100}"
+api "$WEBHOOK/api/store" "$KEY_PRIVATE" \
+  "{\"category\":\"test\",\"title\":\"$TEST_TITLE\",\"content\":\"benchmark crud test content $(date +%s)\",\"tags\":[\"benchmark\"]}"
+if [[ -n "$API_NO_ANSWER" ]]; then
+  t05_ok=false; t05_msg="save: no answer: $API_DETAIL"
 fi
 
 # Search to get ID
 if $t05_ok; then
   sleep 1
-  resp=$(api "$WEBHOOK/api/search" "$KEY_PRIVATE" \
-    "{\"query\":\"$TEST_TITLE\"}")
-  CLEANUP_ID=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['results'][0]['id'])" 2>/dev/null)
-  if [[ -z "$CLEANUP_ID" ]]; then
-    t05_ok=false; t05_msg="search returned no results for $TEST_TITLE"
+  api "$WEBHOOK/api/search" "$KEY_PRIVATE" "{\"query\":\"$TEST_TITLE\"}"
+  if [[ -n "$API_NO_ANSWER" ]]; then
+    t05_ok=false; t05_msg="search: no answer: $API_DETAIL"
+  else
+    CLEANUP_ID=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['results'][0]['id'])" 2>/dev/null)
+    if [[ -z "$CLEANUP_ID" ]]; then
+      t05_ok=false; t05_msg="search returned no results for $TEST_TITLE"
+    fi
   fi
 fi
 
 # Get by ID
 if $t05_ok; then
-  resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
-    "{\"action\":\"get\",\"id\":\"$CLEANUP_ID\"}")
-  got_title=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['block']['title'])" 2>/dev/null)
-  if [[ "$got_title" != "$TEST_TITLE" ]]; then
-    t05_ok=false; t05_msg="get returned wrong title: $got_title"
+  api "$WEBHOOK/api/manage" "$KEY_PRIVATE" "{\"action\":\"get\",\"id\":\"$CLEANUP_ID\"}"
+  if [[ -n "$API_NO_ANSWER" ]]; then
+    t05_ok=false; t05_msg="get: no answer: $API_DETAIL"
+  else
+    got_title=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['block']['title'])" 2>/dev/null)
+    if [[ "$got_title" != "$TEST_TITLE" ]]; then
+      t05_ok=false; t05_msg="get returned wrong title: $got_title"
+    fi
   fi
 fi
 
 # Delete
 if $t05_ok; then
-  resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
-    "{\"action\":\"delete\",\"id\":\"$CLEANUP_ID\"}")
-  if echo "$resp" | grep -q '"success":true'; then
+  api "$WEBHOOK/api/manage" "$KEY_PRIVATE" "{\"action\":\"delete\",\"id\":\"$CLEANUP_ID\"}"
+  if [[ -z "$API_NO_ANSWER" ]]; then
     CLEANUP_ID=""  # already cleaned up
   else
-    t05_ok=false; t05_msg="delete failed: ${resp:0:100}"
+    t05_ok=false; t05_msg="delete: no answer: $API_DETAIL"
   fi
 fi
 
@@ -241,36 +328,38 @@ t06_msg=""
 t06_id=""
 
 # First save
-resp=$(api "$WEBHOOK/api/store" "$KEY_PRIVATE" \
-  "{\"category\":\"test\",\"title\":\"$t06_title\",\"content\":\"upsert noop test content\",\"tags\":[\"benchmark\"]}")
-if ! echo "$resp" | grep -q '"success":true'; then
-  t06_ok=false; t06_msg="first save failed: ${resp:0:100}"
+api "$WEBHOOK/api/store" "$KEY_PRIVATE" \
+  "{\"category\":\"test\",\"title\":\"$t06_title\",\"content\":\"upsert noop test content\",\"tags\":[\"benchmark\"]}"
+if [[ -n "$API_NO_ANSWER" ]]; then
+  t06_ok=false; t06_msg="first save: no answer: $API_DETAIL"
 fi
 
 # Second save (identical content)
 if $t06_ok; then
-  resp=$(api "$WEBHOOK/api/store" "$KEY_PRIVATE" \
-    "{\"category\":\"test\",\"title\":\"$t06_title\",\"content\":\"upsert noop test content\",\"tags\":[\"benchmark\"]}")
-  action=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('action',''))" 2>/dev/null)
-  t06_id=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('existing_id',''))" 2>/dev/null)
-  if [[ "$action" == "noop" ]]; then
-    pass "$T (action=noop)"
+  api "$WEBHOOK/api/store" "$KEY_PRIVATE" \
+    "{\"category\":\"test\",\"title\":\"$t06_title\",\"content\":\"upsert noop test content\",\"tags\":[\"benchmark\"]}"
+  if [[ -n "$API_NO_ANSWER" ]]; then
+    t06_ok=false; t06_msg="second save: no answer: $API_DETAIL"
   else
-    t06_ok=false; t06_msg="expected action=noop, got: $action"
+    action=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('action',''))" 2>/dev/null)
+    t06_id=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('existing_id',''))" 2>/dev/null)
+    if [[ "$action" == "noop" ]]; then
+      pass "$T (action=noop)"
+    else
+      t06_ok=false; t06_msg="expected action=noop, got: $action"
+    fi
   fi
 fi
 
 # Cleanup
 if [[ -n "$t06_id" ]]; then
-  api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
-    "{\"action\":\"delete\",\"id\":\"$t06_id\"}" 10 >/dev/null 2>&1
+  api "$WEBHOOK/api/manage" "$KEY_PRIVATE" "{\"action\":\"delete\",\"id\":\"$t06_id\"}" 10
 else
   # Try to find and delete by search
   sleep 1
-  resp=$(api "$WEBHOOK/api/search" "$KEY_PRIVATE" "{\"query\":\"$t06_title\"}")
-  found_id=$(echo "$resp" | python3 -c "import sys,json; r=json.load(sys.stdin).get('results',[]); print(r[0]['id'] if r else '')" 2>/dev/null)
-  [[ -n "$found_id" ]] && api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
-    "{\"action\":\"delete\",\"id\":\"$found_id\"}" 10 >/dev/null 2>&1
+  api "$WEBHOOK/api/search" "$KEY_PRIVATE" "{\"query\":\"$t06_title\"}"
+  found_id=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; r=json.load(sys.stdin).get('results',[]); print(r[0]['id'] if r else '')" 2>/dev/null)
+  [[ -n "$found_id" ]] && api "$WEBHOOK/api/manage" "$KEY_PRIVATE" "{\"action\":\"delete\",\"id\":\"$found_id\"}" 10
 fi
 
 if ! $t06_ok; then
@@ -394,28 +483,29 @@ esac
 
 # T08 GUARD_STATS
 T="T08 GUARD_STATS"
-resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"guard-stats"}')
-if echo "$resp" | grep -q '"success":true'; then
+api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"guard-stats"}'
+if answered "$T"; then
   pass "$T"
-else
-  fail "$T" "expected success:true, got: ${resp:0:100}"
 fi
 
-# T09 GUARD_LIST_FILTER
+# T09 GUARD_LIST_FILTER — an answer with a blocks list, every block clean (an
+# error body without blocks used to pass as "0 non-clean").
 T="T09 GUARD_LIST_FILTER"
-resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"guard-list","status":"clean"}')
-non_clean=$(echo "$resp" | python3 -c "
+api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"guard-list","status":"clean"}'
+if answered "$T"; then
+non_clean=$(printf '%s' "$API_BODY" | python3 -c "
 import sys,json
-d=json.load(sys.stdin)
-blocks=d.get('blocks',[])
-non_clean=[b for b in blocks if b.get('guard_status')!='clean']
-print(len(non_clean))
+blocks=json.load(sys.stdin).get('blocks')
+print(len([b for b in blocks if b.get('guard_status')!='clean']) if isinstance(blocks, list) else '')
 " 2>/dev/null)
 if [[ "$non_clean" == "0" ]]; then
-  count=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null)
+  count=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null)
   pass "$T (all $count blocks are clean)"
+elif [[ -z "$non_clean" ]]; then
+  fail "$T" "the answer carries no blocks list: ${API_BODY:0:100}"
 else
   fail "$T" "found $non_clean non-clean blocks in filtered result"
+fi
 fi
 
 # T10 BACKUP_EXISTS
@@ -434,22 +524,18 @@ fi
 
 # T11 DREAM_STATS
 T="T11 DREAM_STATS"
-resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"dream-stats"}')
-if echo "$resp" | grep -q '"success":true'; then
-  checked=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('dream_checked',0))" 2>/dev/null)
-  links=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('dream_links',0))" 2>/dev/null)
+api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"dream-stats"}'
+if answered "$T"; then
+  checked=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('dream_checked',0))" 2>/dev/null)
+  links=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('dream_links',0))" 2>/dev/null)
   pass "$T (checked=$checked, links=$links)"
-else
-  fail "$T" "dream-stats failed"
 fi
 
 # T12 DREAM_REVIEW
 T="T12 DREAM_REVIEW"
-resp=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"dream-review"}')
-if echo "$resp" | grep -q '"success":true'; then
+api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"dream-review"}'
+if answered "$T"; then
   pass "$T"
-else
-  fail "$T" "dream-review failed"
 fi
 
 # T19 GRAPH_EGO — GET /api/graph/ego (G07/F5-W1). Four assertions per the
@@ -477,9 +563,9 @@ t19_focus=$($DB_CMD -c "SELECT b.id FROM context_blocks b
 if [[ -z "$t19_focus" ]]; then
   fail "$T" "no linked block found to use as focus"
 else
-  resp=$(curl -s --max-time 15 "$WEBHOOK/api/graph/ego?block=$t19_focus&hops=2" \
-    -H "X-Context-Key: $KEY_PRIVATE" 2>/dev/null)
-  t19_check=$(echo "$resp" | python3 -c "
+  get "$WEBHOOK/api/graph/ego?block=$t19_focus&hops=2" "$KEY_PRIVATE" 15
+  if answered "$T"; then
+  t19_check=$(printf '%s' "$API_BODY" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 stats = d.get('stats', {})
@@ -492,23 +578,24 @@ if any('content' in n for n in d.get('nodes', [])): problems.append('content fie
 print(';'.join(problems) if problems else 'OK ' + str(stats.get('nodes')) + ' nodes ' + str(stats.get('edges')) + ' edges')
 " 2>/dev/null)
   if [[ "$t19_check" != OK* ]]; then
-    fail "$T" "payload check: ${t19_check:-unparseable response: ${resp:0:100}}"
+    fail "$T" "payload check: ${t19_check:-unparseable response: ${API_BODY:0:100}}"
   else
     # 404-equality: a private block (invisible to KEY_ISO) and a nonexistent
-    # UUID must produce byte-identical 404 bodies.
+    # UUID must produce byte-identical 404 bodies — each ctx's error body.
     t19_priv=$($DB_CMD -c "SELECT id FROM context_blocks WHERE scope='private' AND NOT is_archived LIMIT 1;" 2>/dev/null | tr -d '[:space:]')
     t19_missing="00000000-0000-7000-8000-000000000000"
-    t19_b1=$(curl -s --max-time 10 -w '\n%{http_code}' "$WEBHOOK/api/graph/ego?block=$t19_priv" \
-      -H "X-Context-Key: $KEY_ISO" 2>/dev/null)
-    t19_b2=$(curl -s --max-time 10 -w '\n%{http_code}' "$WEBHOOK/api/graph/ego?block=$t19_missing" \
-      -H "X-Context-Key: $KEY_ISO" 2>/dev/null)
-    t19_code1="${t19_b1##*$'\n'}"; t19_body1="${t19_b1%$'\n'*}"
-    t19_code2="${t19_b2##*$'\n'}"; t19_body2="${t19_b2%$'\n'*}"
-    if [[ "$t19_code1" == "404" && "$t19_code2" == "404" && "$t19_body1" == "$t19_body2" ]]; then
+    get "$WEBHOOK/api/graph/ego?block=$t19_priv" "$KEY_ISO" 10
+    t19_ok1=false; refused 404 && t19_ok1=true
+    t19_code1="$API_STATUS"; t19_body1="$API_BODY"
+    get "$WEBHOOK/api/graph/ego?block=$t19_missing" "$KEY_ISO" 10
+    t19_ok2=false; refused 404 && t19_ok2=true
+    t19_code2="$API_STATUS"; t19_body2="$API_BODY"
+    if $t19_ok1 && $t19_ok2 && [[ "$t19_body1" == "$t19_body2" ]]; then
       pass "$T (${t19_check#OK }, 404-equality holds)"
     else
-      fail "$T" "404-oracle: invisible=$t19_code1 missing=$t19_code2 bodies_equal=$([[ "$t19_body1" == "$t19_body2" ]] && echo yes || echo no)"
+      fail "$T" "404-oracle: invisible=$t19_code1 missing=$t19_code2 error_bodies=$($t19_ok1 && $t19_ok2 && echo yes || echo no) bodies_equal=$([[ "$t19_body1" == "$t19_body2" ]] && echo yes || echo no)"
     fi
+  fi
   fi
 fi
 fi
@@ -521,27 +608,29 @@ T="T20 SETTINGS_ROUNDTRIP"
 if [[ -z "${CTX_ADMIN_KEY:-}" ]]; then
   fail "$T" "CTX_ADMIN_KEY not set in .env (host-only admin key, G09 bootstrap)"
 else
-  t20_403=$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' "$WEBHOOK/api/settings" \
-    -H "X-Context-Key: $KEY_PRIVATE" 2>/dev/null)
-  t20_cur=$(curl -s --max-time 10 "$WEBHOOK/api/settings/rerank.blend_weight" \
-    -H "X-Context-Key: $CTX_ADMIN_KEY" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['setting']['value'])" 2>/dev/null)
-  if [[ "$t20_403" != "403" ]]; then
-    fail "$T" "non-admin GET expected 403, got $t20_403"
+  get "$WEBHOOK/api/settings" "$KEY_PRIVATE" 10
+  t20_403=false; refused 403 && t20_403=true
+  t20_403_seen=$(seen)
+  get "$WEBHOOK/api/settings/rerank.blend_weight" "$CTX_ADMIN_KEY" 10
+  t20_cur=""; t20_cur_na="$API_DETAIL"
+  [[ -z "$API_NO_ANSWER" ]] && t20_cur=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['setting']['value'])" 2>/dev/null)
+  if ! $t20_403; then
+    fail "$T" "non-admin GET expected HTTP 403 with an error body, got: $t20_403_seen"
   elif [[ -z "$t20_cur" ]]; then
-    fail "$T" "could not read current rerank.blend_weight via admin key"
+    fail "$T" "could not read current rerank.blend_weight via admin key${t20_cur_na:+ (no answer: $t20_cur_na)}"
   else
-    t20_put=$(curl -s --max-time 15 -X PUT "$WEBHOOK/api/settings/rerank.blend_weight" \
-      -H "Content-Type: application/json" -H "X-Context-Key: $CTX_ADMIN_KEY" \
-      -d "{\"value\":$t20_cur}" 2>/dev/null)
-    t20_src=$(echo "$t20_put" | python3 -c "import sys,json; print(json.load(sys.stdin).get('source',''))" 2>/dev/null)
-    t20_del=$(curl -s --max-time 15 -X DELETE "$WEBHOOK/api/settings/rerank.blend_weight" \
-      -H "X-Context-Key: $CTX_ADMIN_KEY" 2>/dev/null)
-    t20_dsrc=$(echo "$t20_del" | python3 -c "import sys,json; print(json.load(sys.stdin).get('source',''))" 2>/dev/null)
+    eval_api_request PUT "$WEBHOOK/api/settings/rerank.blend_weight" "{\"value\":$t20_cur}" 15 "X-Context-Key: $CTX_ADMIN_KEY"
+    t20_src=""; t20_put_na="$API_DETAIL"
+    [[ -z "$API_NO_ANSWER" ]] && t20_src=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('source',''))" 2>/dev/null)
+    # The DELETE runs whatever the PUT answered: a PUT without an answer may
+    # still have written the override.
+    eval_api_request DELETE "$WEBHOOK/api/settings/rerank.blend_weight" "" 15 "X-Context-Key: $CTX_ADMIN_KEY"
+    t20_dsrc=""; t20_del_na="$API_DETAIL"
+    [[ -z "$API_NO_ANSWER" ]] && t20_dsrc=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('source',''))" 2>/dev/null)
     if [[ "$t20_src" == "db" && -n "$t20_dsrc" && "$t20_dsrc" != "db" ]]; then
       pass "$T (403 enforced, override db→$t20_dsrc, value=$t20_cur)"
     else
-      fail "$T" "put_source=${t20_src:-unparseable} delete_source=${t20_dsrc:-unparseable}"
+      fail "$T" "put_source=${t20_src:-${t20_put_na:-unparseable}} delete_source=${t20_dsrc:-${t20_del_na:-unparseable}}"
     fi
   fi
 fi
@@ -553,17 +642,16 @@ T="T21 BACKEND_POOL"
 if [[ -z "${CTX_ADMIN_KEY:-}" ]]; then
   fail "$T" "CTX_ADMIN_KEY not set in .env (host-only admin key)"
 else
-  t21_403=$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' -X POST "$WEBHOOK/api/manage" \
-    -H "Content-Type: application/json" -H "X-Context-Key: $KEY_PRIVATE" \
-    -d '{"action":"backend-list"}' 2>/dev/null)
-  t21_count=$(curl -s --max-time 10 -X POST "$WEBHOOK/api/manage" \
-    -H "Content-Type: application/json" -H "X-Context-Key: $CTX_ADMIN_KEY" \
-    -d '{"action":"backend-list"}' 2>/dev/null \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d['backends']) if d.get('success') else 0)" 2>/dev/null)
-  if [[ "$t21_403" != "403" ]]; then
-    fail "$T" "non-admin backend-list expected 403, got $t21_403"
+  api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"backend-list"}'
+  t21_403=false; refused 403 && t21_403=true
+  t21_403_seen=$(seen)
+  api "$WEBHOOK/api/manage" "$CTX_ADMIN_KEY" '{"action":"backend-list"}'
+  t21_count=""; t21_na="$API_DETAIL"
+  [[ -z "$API_NO_ANSWER" ]] && t21_count=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(len(json.load(sys.stdin)['backends']))" 2>/dev/null)
+  if ! $t21_403; then
+    fail "$T" "non-admin backend-list expected HTTP 403 with an error body, got: $t21_403_seen"
   elif [[ -z "$t21_count" || "$t21_count" -lt 3 ]]; then
-    fail "$T" "expected >=3 bootstrapped backends, got ${t21_count:-unparseable}"
+    fail "$T" "expected >=3 bootstrapped backends, got ${t21_count:-${t21_na:+no answer: }${t21_na:-unparseable}}"
   else
     pass "$T (403 enforced, $t21_count pool rows)"
   fi
@@ -573,24 +661,33 @@ fi
 # source=manual, an unconfirmed downgrade is rejected (the confirm-gated
 # direction), a confirmed one applies + audits. No LLM: pure write surface.
 T="T22 BLOCK_SENSITIVITY"
-t22_block=$(api "$WEBHOOK/api/store" "$KEY_PRIVATE" \
-  '{"category":"reference","title":"__t22_sensitivity_probe","content":"sensitivity gate probe '"$(date +%s)"'","sensitivity":"personal"}' 15)
-t22_id=$(echo "$t22_block" | python3 -c "import sys,json; d=json.load(sys.stdin); b=d.get('block') or {}; print(b.get('id','') if d.get('success') else '')" 2>/dev/null)
-t22_sens=$(echo "$t22_block" | python3 -c "import sys,json; b=json.load(sys.stdin).get('block') or {}; print(b.get('sensitivity',''), b.get('sensitivity_source',''))" 2>/dev/null)
-if [[ -z "$t22_id" ]]; then
-  fail "$T" "store with sensitivity failed: $(echo "$t22_block" | head -c 200)"
+api "$WEBHOOK/api/store" "$KEY_PRIVATE" \
+  '{"category":"reference","title":"__t22_sensitivity_probe","content":"sensitivity gate probe '"$(date +%s)"'","sensitivity":"personal"}' 15
+t22_id=""; t22_sens=""
+if [[ -z "$API_NO_ANSWER" ]]; then
+  t22_id=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; b=json.load(sys.stdin).get('block') or {}; print(b.get('id',''))" 2>/dev/null)
+  t22_sens=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; b=json.load(sys.stdin).get('block') or {}; print(b.get('sensitivity',''), b.get('sensitivity_source',''))" 2>/dev/null)
+fi
+if [[ -n "$API_NO_ANSWER" ]]; then
+  fail "$T" "store with sensitivity: no answer: $API_DETAIL"
+elif [[ -z "$t22_id" ]]; then
+  fail "$T" "store with sensitivity answered without a block id: ${API_BODY:0:200}"
 elif [[ "$t22_sens" != "personal manual" ]]; then
   fail "$T" "expected sensitivity='personal manual', got '$t22_sens'"
 else
-  t22_deny=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
-    '{"action":"update","id":"'"$t22_id"'","data":{"sensitivity":"public"}}' 15)
-  t22_deny_ok=$(echo "$t22_deny" | python3 -c "import sys,json; d=json.load(sys.stdin); print('denied' if not d.get('success') and 'confirm_sensitivity_downgrade' in d.get('error','') else 'leaked')" 2>/dev/null)
-  t22_conf=$(api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
-    '{"action":"update","id":"'"$t22_id"'","data":{"sensitivity":"public","confirm_sensitivity_downgrade":true}}' 15)
-  t22_conf_state=$(echo "$t22_conf" | python3 -c "import sys,json; d=json.load(sys.stdin); b=d.get('block') or {}; a=(b.get('metadata') or {}).get('sensitivity_audit') or {}; print(b.get('sensitivity',''), 'audited' if a.get('from')=='personal' and a.get('to')=='public' else 'unaudited')" 2>/dev/null)
-  api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"delete","id":"'"$t22_id"'"}' 15 >/dev/null 2>&1
-  if [[ "$t22_deny_ok" != "denied" ]]; then
-    fail "$T" "unconfirmed downgrade not rejected: $(echo "$t22_deny" | head -c 200)"
+  # The promise of this step is the refusal: HTTP 400 with an error naming
+  # confirm_sensitivity_downgrade (manage update, applySensitivityGuard).
+  api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
+    '{"action":"update","id":"'"$t22_id"'","data":{"sensitivity":"public"}}' 15
+  t22_deny_ok=false; refused 400 confirm_sensitivity_downgrade && t22_deny_ok=true
+  t22_deny_seen=$(seen)
+  api "$WEBHOOK/api/manage" "$KEY_PRIVATE" \
+    '{"action":"update","id":"'"$t22_id"'","data":{"sensitivity":"public","confirm_sensitivity_downgrade":true}}' 15
+  t22_conf_state="no answer: $API_DETAIL"
+  [[ -z "$API_NO_ANSWER" ]] && t22_conf_state=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); b=d.get('block') or {}; a=(b.get('metadata') or {}).get('sensitivity_audit') or {}; print(b.get('sensitivity',''), 'audited' if a.get('from')=='personal' and a.get('to')=='public' else 'unaudited')" 2>/dev/null)
+  api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"delete","id":"'"$t22_id"'"}' 15
+  if ! $t22_deny_ok; then
+    fail "$T" "unconfirmed downgrade expected HTTP 400 naming confirm_sensitivity_downgrade, got: $t22_deny_seen"
   elif [[ "$t22_conf_state" != "public audited" ]]; then
     fail "$T" "confirmed downgrade expected 'public audited', got '$t22_conf_state'"
   else
@@ -606,30 +703,29 @@ T="T24 SENSITIVITY_AUDIT_SURFACE"
 if [[ -z "${CTX_ADMIN_KEY:-}" ]]; then
   fail "$T" "CTX_ADMIN_KEY not set in .env (host-only admin key)"
 else
-  t24_403=$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' -X POST "$WEBHOOK/api/manage" \
-    -H "Content-Type: application/json" -H "X-Context-Key: $KEY_PRIVATE" \
-    -d '{"action":"blocks-audit-status"}' 2>/dev/null)
-  t24_status=$(curl -s --max-time 10 -X POST "$WEBHOOK/api/manage" \
-    -H "Content-Type: application/json" -H "X-Context-Key: $CTX_ADMIN_KEY" \
-    -d '{"action":"blocks-audit-status"}' 2>/dev/null \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); print('ok' if d.get('success') and 'pending' in d and isinstance(d.get('by_source'),dict) else 'bad')" 2>/dev/null)
-  t24_extern=$(curl -s --max-time 10 -X POST "$WEBHOOK/api/manage" \
-    -H "Content-Type: application/json" -H "X-Context-Key: $CTX_ADMIN_KEY" \
-    -d '{"action":"backend-create","data":{"name":"__t24_classify_probe","base_url":"https://api.example.com/v1","protocol":"openai","provider_class":"generic","trust":"public","locality":"external","roles":["classify"],"model_map":{"default":"m"},"confirm_trust_elevation":true,"metadata":{"embed_equivalence_verified":true}}}' 2>/dev/null)
-  t24_extern_ok=$(echo "$t24_extern" | python3 -c "import sys,json; d=json.load(sys.stdin); print('blocked' if not d.get('success') and 'classify' in json.dumps(d) else 'leaked')" 2>/dev/null)
-  if [[ "$t24_extern_ok" == "leaked" ]]; then
-    # If the probe row was created, remove it before failing.
-    t24_pid=$(echo "$t24_extern" | python3 -c "import sys,json; b=json.load(sys.stdin).get('backend') or {}; print(b.get('id',''))" 2>/dev/null)
-    [[ -n "$t24_pid" ]] && curl -s --max-time 10 -X POST "$WEBHOOK/api/manage" \
-      -H "Content-Type: application/json" -H "X-Context-Key: $CTX_ADMIN_KEY" \
-      -d '{"action":"backend-delete","id":"'"$t24_pid"'"}' >/dev/null 2>&1
+  api "$WEBHOOK/api/manage" "$KEY_PRIVATE" '{"action":"blocks-audit-status"}'
+  t24_403=false; refused 403 && t24_403=true
+  t24_403_seen=$(seen)
+  api "$WEBHOOK/api/manage" "$CTX_ADMIN_KEY" '{"action":"blocks-audit-status"}'
+  t24_status="no answer: $API_DETAIL"
+  [[ -z "$API_NO_ANSWER" ]] && t24_status=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print('ok' if 'pending' in d and isinstance(d.get('by_source'),dict) else 'malformed')" 2>/dev/null)
+  # The promise of this step is the refusal: HTTP 422 whose field errors name
+  # the classify role (backends.Validate, writeBackendValidation).
+  api "$WEBHOOK/api/manage" "$CTX_ADMIN_KEY" \
+    '{"action":"backend-create","data":{"name":"__t24_classify_probe","base_url":"https://api.example.com/v1","protocol":"openai","provider_class":"generic","trust":"public","locality":"external","roles":["classify"],"model_map":{"default":"m"},"confirm_trust_elevation":true,"metadata":{"embed_equivalence_verified":true}}}'
+  t24_extern_ok=false; refused 422 classify && t24_extern_ok=true
+  t24_extern_seen=$(seen)
+  if [[ -z "$API_NO_ANSWER" ]]; then
+    # The probe row was created: remove it before failing.
+    t24_pid=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; b=json.load(sys.stdin).get('backend') or {}; print(b.get('id',''))" 2>/dev/null)
+    [[ -n "$t24_pid" ]] && api "$WEBHOOK/api/manage" "$CTX_ADMIN_KEY" '{"action":"backend-delete","id":"'"$t24_pid"'"}'
   fi
-  if [[ "$t24_403" != "403" ]]; then
-    fail "$T" "non-admin blocks-audit-status expected 403, got $t24_403"
+  if ! $t24_403; then
+    fail "$T" "non-admin blocks-audit-status expected HTTP 403 with an error body, got: $t24_403_seen"
   elif [[ "$t24_status" != "ok" ]]; then
-    fail "$T" "admin status response malformed"
-  elif [[ "$t24_extern_ok" != "blocked" ]]; then
-    fail "$T" "classify+external backend-create not rejected: $(echo "$t24_extern" | head -c 200)"
+    fail "$T" "admin status: ${t24_status:-unparseable}"
+  elif ! $t24_extern_ok; then
+    fail "$T" "classify+external backend-create expected HTTP 422 naming classify, got: $t24_extern_seen"
   else
     pass "$T (403 enforced, status shape, classify hard-local 422)"
   fi
@@ -679,13 +775,14 @@ if $WITH_OLLAMA; then
   if ! $CORPUS_OK; then
     skip "$T" "corpus-bound (total_blocks=${CORPUS_TOTAL:-unknown} < $CORPUS_MIN)"
   else
-  resp=$(api "$WEBHOOK/api/search" "$KEY_PRIVATE" \
-    '{"query":"Write Guard"}' 120)
-  count=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null)
+  api "$WEBHOOK/api/search" "$KEY_PRIVATE" '{"query":"Write Guard"}' 120
+  if answered "$T"; then
+  count=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null)
   if [[ -n "$count" ]] && (( count >= 1 )); then
     pass "$T (count=$count)"
   else
     fail "$T" "expected >= 1 result, got count=$count"
+  fi
   fi
   fi
 
@@ -694,23 +791,25 @@ if $WITH_OLLAMA; then
   if ! $CORPUS_OK; then
     skip "$T" "corpus-bound (total_blocks=${CORPUS_TOTAL:-unknown} < $CORPUS_MIN)"
   else
-  resp=$(api "$WEBHOOK/api/query" "$KEY_PRIVATE" \
-    '{"query":"How does the Write Guard work?"}' 120)
-  confidence=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('confidence',''))" 2>/dev/null)
-  answer=$(echo "$resp" | python3 -c "import sys,json; a=json.load(sys.stdin).get('answer',''); print('nonempty' if len(a)>10 else 'empty')" 2>/dev/null)
+  api "$WEBHOOK/api/query" "$KEY_PRIVATE" '{"query":"How does the Write Guard work?"}' 120
+  if answered "$T"; then
+  confidence=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('confidence',''))" 2>/dev/null)
+  answer=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; a=json.load(sys.stdin).get('answer',''); print('nonempty' if len(a)>10 else 'empty')" 2>/dev/null)
   if [[ "$confidence" == "confident" ]] && [[ "$answer" == "nonempty" ]]; then
     pass "$T (confidence=$confidence)"
   else
     fail "$T" "expected confidence=confident + nonempty answer, got confidence=$confidence answer=$answer"
   fi
   fi
+  fi
 
-  # T15 AGENT_NEGATIVE
+  # T15 AGENT_NEGATIVE — a rejection is an answer that says so; a request
+  # without an answer is no rejection.
   T="T15 AGENT_NEGATIVE"
-  resp=$(api "$WEBHOOK/api/query" "$KEY_PRIVATE" \
-    '{"query":"Rezept fuer Kartoffelsuppe"}' 120)
-  answer=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('answer',''))" 2>/dev/null)
-  confidence=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('confidence',''))" 2>/dev/null)
+  api "$WEBHOOK/api/query" "$KEY_PRIVATE" '{"query":"Rezept fuer Kartoffelsuppe"}' 120
+  if answered "$T"; then
+  answer=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('answer',''))" 2>/dev/null)
+  confidence=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('confidence',''))" 2>/dev/null)
   # The test goal is "no hallucinated answer". Accepted shapes: an explicit
   # refusal string, or a non-confident classification. "low_confidence" is the
   # actual ClassifyConfidence constant (was never "low"); with the rerank blend
@@ -723,16 +822,18 @@ if $WITH_OLLAMA; then
   else
     fail "$T" "expected rejection, got confidence=$confidence answer=${answer:0:80}"
   fi
+  fi
 
   # T16 AGENT_BILINGUAL
   T="T16 AGENT_BILINGUAL"
-  resp=$(api "$WEBHOOK/api/query" "$KEY_PRIVATE" \
-    '{"query":"PostgreSQL Mount-Pfad"}' 120)
-  answer=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('answer','').lower())" 2>/dev/null)
+  api "$WEBHOOK/api/query" "$KEY_PRIVATE" '{"query":"PostgreSQL Mount-Pfad"}' 120
+  if answered "$T"; then
+  answer=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('answer','').lower())" 2>/dev/null)
   if echo "$answer" | grep -qi "postgresql\|mount\|/var/lib"; then
     pass "$T"
   else
     fail "$T" "expected answer containing postgresql/mount, got: ${answer:0:80}"
+  fi
   fi
 
   # T17 MCP_TOOLS_LIST — /mcp endpoint returns all 17 registered tools
@@ -747,32 +848,33 @@ if $WITH_OLLAMA; then
   # ohne Nachzug faellt dort schon im -short-Lauf auf, nicht erst hier.
   # Added after Session 24 bug: noOutput struct{} triggered outputSchema generation,
   # making clients show empty {} instead of Content[].text. Fixed in v0.27.1.
+  # Both /mcp requests: a JSON-RPC result without isError is the answer (a
+  # tool that failed answers 200 with isError:true), bounded by MCP_TIMEOUT_S.
   T="T17 MCP_TOOLS_LIST"
-  mcp_resp=$(curl -sS -X POST "$WEBHOOK/mcp" \
-    -H "Authorization: Bearer $KEY_PRIVATE" \
-    -H "Content-Type: application/json" \
-    -H "Accept: application/json, text/event-stream" \
-    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' 2>/dev/null)
-  tool_count=$(echo "$mcp_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('result',{}).get('tools',[])))" 2>/dev/null)
+  eval_api_request POST "$WEBHOOK/mcp" '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$MCP_TIMEOUT_S" \
+    "Authorization: Bearer $KEY_PRIVATE" jsonrpc
+  if answered "$T"; then
+  tool_count=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('result',{}).get('tools',[])))" 2>/dev/null)
   if [[ "$tool_count" == "17" ]]; then
     pass "$T (tools=$tool_count)"
   else
-    fail "$T" "expected 17 tools, got: $tool_count (resp: ${mcp_resp:0:200})"
+    fail "$T" "expected 17 tools, got: $tool_count (resp: ${API_BODY:0:200})"
+  fi
   fi
 
   # T18 MCP_TOOL_CALL — recent tool returns actual text content (not empty {}).
   # Guards against regression of v0.27.1 MCP structuredContent bug.
   T="T18 MCP_TOOL_CALL"
-  mcp_call=$(curl -sS -X POST "$WEBHOOK/mcp" \
-    -H "Authorization: Bearer $KEY_PRIVATE" \
-    -H "Content-Type: application/json" \
-    -H "Accept: application/json, text/event-stream" \
-    -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"recent","arguments":{"limit":1}}}' 2>/dev/null)
-  content_text=$(echo "$mcp_call" | python3 -c "import sys,json; d=json.load(sys.stdin); c=d.get('result',{}).get('content',[]); print(c[0].get('text','') if c else '')" 2>/dev/null)
+  eval_api_request POST "$WEBHOOK/mcp" \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"recent","arguments":{"limit":1}}}' "$MCP_TIMEOUT_S" \
+    "Authorization: Bearer $KEY_PRIVATE" jsonrpc
+  if answered "$T"; then
+  content_text=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); c=d.get('result',{}).get('content',[]); print(c[0].get('text','') if c else '')" 2>/dev/null)
   if [[ -n "$content_text" ]] && [[ "$content_text" != "{}" ]]; then
     pass "$T (got content, ${#content_text} chars)"
   else
-    fail "$T" "expected non-empty content, got: '${content_text:0:100}' (resp: ${mcp_call:0:200})"
+    fail "$T" "expected non-empty content, got: '${content_text:0:100}' (resp: ${API_BODY:0:200})"
+  fi
   fi
 
   # T23 DIGEST_TRIGGER_LLMLOG (F3-P4/G28) — the manual daily-synthesis
@@ -784,10 +886,14 @@ if $WITH_OLLAMA; then
   if ! $CORPUS_OK; then
     skip "$T" "corpus-bound (total_blocks=${CORPUS_TOTAL:-unknown} < $CORPUS_MIN)"
   else
-  t23_resp=$(api "$WEBHOOK/api/synthesize/daily" "$KEY_PRIVATE" '{}' 200)
-  t23_block=$(echo "$t23_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('block_id','') if d.get('ok') else '')" 2>/dev/null)
-  if [[ -z "$t23_block" ]]; then
-    fail "$T" "trigger failed or no_activity: $(echo "$t23_resp" | head -c 200)"
+  # The daily synthesis answers ok:true, not success:true.
+  eval_api_request POST "$WEBHOOK/api/synthesize/daily" '{}' 200 "X-Context-Key: $KEY_PRIVATE" ok
+  t23_block=""
+  [[ -z "$API_NO_ANSWER" ]] && t23_block=$(printf '%s' "$API_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('block_id',''))" 2>/dev/null)
+  if [[ -n "$API_NO_ANSWER" ]]; then
+    fail "$T" "no answer: $API_DETAIL ${API_BODY:0:150}"
+  elif [[ -z "$t23_block" ]]; then
+    fail "$T" "trigger answered without a block_id (no_activity?): ${API_BODY:0:200}"
   else
     t23_row=""
     for _ in 1 2 3 4 5; do

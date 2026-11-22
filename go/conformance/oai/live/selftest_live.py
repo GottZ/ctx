@@ -56,7 +56,11 @@ class Fake:
     In mode heap every stream takes ~0.6 s and the fake writes its own
     "container memory" to ``mem_file``: 100 MB + 20 MB per open stream, so
     the measured peak follows the flood instead of a timer (S2: the S1 test
-    raced a writer thread against the tool's start)."""
+    raced a writer thread against the tool's start). The modes heap-refused,
+    heap-budget-only, heap-partial and heap-budget refuse streams (#478,
+    HEAP_REFUSALS): every one with the consumer's 429, every one with the
+    in-flight budget's 503 server_overloaded, every second one with the 429,
+    every second one with the 503; the others run as in mode heap."""
 
     MEM_BASE, MEM_PER_STREAM = 100_000_000, 20_000_000
 
@@ -215,6 +219,14 @@ class Fake:
         if method == "POST" and path == "/v1/chat/completions":
             if self.mode == "bad-chat":
                 return h._send(200, {"choices": "nope"})
+            if self.mode in HEAP_REFUSALS and body.get("stream"):
+                kind = HEAP_REFUSALS[self.mode][n % len(HEAP_REFUSALS[self.mode])]
+                if kind == "concurrency":
+                    return h._send(429, _envelope("concurrency_limit_exceeded", "rate_limit_error"),
+                                   {"x-should-retry": "true", "Retry-After": "1"})
+                if kind == "budget":
+                    return h._send(503, _envelope("server_overloaded", "service_unavailable_error"),
+                                   {"x-should-retry": "true", "Retry-After": "1"})
             if body.get("stream"):
                 return _stream(h, self)
             if self.mode == "no-ratelimit":
@@ -259,6 +271,17 @@ RETRY_MIX = {
     "retry-html-door": ("html-door", "ok"),
 }
 
+# The answer per request number n (n % len) to a streamed chat in the heap
+# refusal modes (#478): concurrency = the consumer's 429
+# concurrency_limit_exceeded, budget = the in-flight budget's 503
+# server_overloaded, ok = a stream as in mode heap.
+HEAP_REFUSALS = {
+    "heap-refused": ("concurrency",),
+    "heap-partial": ("concurrency", "ok"),
+    "heap-budget": ("budget", "ok"),
+    "heap-budget-only": ("budget",),
+}
+
 
 def _chat():
     return {"id": "c", "object": "chat.completion", "created": 0, "model": "chat",
@@ -282,7 +305,7 @@ def _stream(h, fake=None):
         h.wfile.write(b": keepalive\n\n")
         h.wfile.flush()
         time.sleep(0.4)
-    if mode == "heap":
+    if mode.startswith("heap"):
         fake.set_mem(+1)
         time.sleep(0.6)
     base = {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "chat"}
@@ -299,7 +322,7 @@ def _stream(h, fake=None):
         h.wfile.flush()
     h.wfile.write(b"data: [DONE]\n\n")
     h.wfile.flush()
-    if mode == "heap":
+    if mode.startswith("heap"):
         fake.set_mem(-1)
 
 
@@ -416,6 +439,34 @@ def test_measure_heap(fake, tmp_path):
         assert got.get("base_bytes") == Fake.MEM_BASE and got.get("peak_bytes", 0) >= Fake.MEM_BASE + Fake.MEM_PER_STREAM, \
             f"heap with budget {budget}: base/peak {got.get('base_bytes')}/{got.get('peak_bytes')} do not follow the flood"
         assert got.get("failed_streams") == 0, f"streams failed under the fake: {got}"
+
+
+@pytest.mark.parametrize("fake,ok,admitted,needle", [
+    ("heap-refused", False, 0, "no stream was admitted"),
+    ("heap-budget-only", False, 0, "no stream was admitted"),
+    ("heap-partial", False, 2, "refused by something other than the in-flight budget"),
+    ("heap-budget", True, 2, None),
+], indirect=["fake"])
+def test_measure_heap_counts_only_a_flood_that_reached_the_budget(fake, ok, admitted, needle, tmp_path):
+    """#478: peak − base scales with the admitted streams (each books its
+    relay buffer, allocated in full at the stream's start), so a heap run is
+    a measurement only when at least one stream was admitted and every other
+    one was refused by the in-flight budget itself (503 server_overloaded).
+    A flood the consumers' limits turned away — all of it or a part — is
+    exit 1 with an error, never ok on the idle base."""
+    mem = tmp_path / "memory.current"
+    fake.mem_file = mem
+    fake.set_mem(0)
+    rc, last, out = _run(MEASURE, "heap", "--base-url", fake.url, "--key-env", "CTX_SELFTEST_KEY", "--model", "chat",
+                         "--streams", "4", "--consumers-keys-env", "CTX_SELFTEST_KEY", "--mem-file", str(mem),
+                         "--budget-bytes", str(256 << 20))
+    got = json.loads(last) if last.startswith("{") else {}
+    assert got.get("ok") is ok and rc == (0 if ok else 1), f"heap against {fake.mode}: {rc} {last!r}, want ok={ok}\n{out}"
+    assert got.get("admitted_streams") == admitted, f"heap against {fake.mode}: admitted_streams {got}"
+    if needle:
+        assert needle in (got.get("error") or ""), f"heap against {fake.mode}: error does not say {needle!r}: {got}"
+    else:
+        assert got.get("budget_refused_streams") == 2 and "error" not in got, f"heap against {fake.mode}: {got}"
 
 
 @pytest.mark.parametrize("fake,cut", [("slow-prefill", False), ("cut", True)], indirect=["fake"])

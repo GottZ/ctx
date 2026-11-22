@@ -9,10 +9,10 @@
 # eval_aggregate only — eval.sh returns before its .env preflight when it is
 # sourced rather than executed, so this test needs neither .env nor a running
 # server, fires no query and never runs an eval pass. Every fixture is
-# synthetic; the one real file it touches is a past eval result, read-only, for
-# the golden case.
+# synthetic except the golden inputs: two past eval results in
+# scripts/testdata (and EVAL_GOLDEN_RESULTS, when set), read-only.
 #
-# Three things are under test:
+# Four things are under test:
 #   1. by_block_type / population in the results file — the corpus census the
 #      run measured against (design/05 §4.6 (2)).
 #   2. .eval-baseline.diff — the record --update-baseline leaves behind
@@ -20,6 +20,9 @@
 #      a variant that only does the cp, the way the branch looked before M-W6.
 #   3. Category 'derived' (prefix G) in the ONE registry, deliberately WITHOUT
 #      test cases (design/05 §2.2c N-01) — reported as empty, never as passed.
+#   4. The golden: a real result fed back through eval_aggregate reproduces
+#      itself; a result from before a field existed gains only its empty form
+#      (#478 — the inputs travel with the test).
 
 set -uo pipefail
 
@@ -51,7 +54,6 @@ T_SKIP=0
 
 pass() { T_PASS=$(( T_PASS + 1 )); printf '[OK]   %s\n' "$1"; }
 failed() { T_FAIL=$(( T_FAIL + 1 )); printf '[FAIL] %-64s %s\n' "$1" "$2"; }
-skip() { T_SKIP=$(( T_SKIP + 1 )); printf '[SKIP] %-64s %s\n' "$1" "$2"; }
 
 # assert_eq <name> <expected> <actual>
 assert_eq() {
@@ -303,50 +305,77 @@ assert_eq "no previous baseline: single line, not a fabricated delta" "no previo
   "$(cat "$D_FIRST")"
 
 echo ""
-echo "--- 5. Golden: a real past result through the new aggregation ---"
+echo "--- 5. Golden: real past results through the aggregation ---"
 
-GOLDEN="${EVAL_GOLDEN_RESULTS:-}"
-if [[ -z "$GOLDEN" ]]; then
-  if [[ -f "${TEST_DIR}/.eval-results/eval-results-1787770683.json" ]]; then
-    GOLDEN="${TEST_DIR}/.eval-results/eval-results-1787770683.json"
-  else
-    GOLDEN=$(find "${TEST_DIR}/.eval-results" -maxdepth 1 -name 'eval-results-*.json' 2>/dev/null | sort | tail -1)
-  fi
+# The inputs travel with the test (#478): two results eval.sh wrote — one of
+# the current shape, one from before not_measured (#472) — so the golden runs
+# wherever the test runs, CI included, and never depends on which results
+# happen to lie in .eval-results/ (it used to take the newest one there, and
+# skip in a checkout without any). EVAL_GOLDEN_RESULTS names one more file.
+GOLDEN_DIR="${TEST_DIR}/scripts/testdata"
+GOLDEN_FILES=("$GOLDEN_DIR/eval-results-golden.json" "$GOLDEN_DIR/eval-results-golden-pre472.json")
+if [[ -n "${EVAL_GOLDEN_RESULTS:-}" ]]; then
+  GOLDEN_FILES+=("$EVAL_GOLDEN_RESULTS")
 fi
 
-if [[ -z "$GOLDEN" || ! -f "$GOLDEN" ]]; then
-  skip "golden: past result reproduces its own summary/by_category" \
-       "no eval-results-*.json found (set EVAL_GOLDEN_RESULTS)"
-else
+assert_eq "golden inputs: one of the current shape, one from before not_measured" "True False" \
+  "$(python3 -c "
+import json, sys
+print(*('not_measured' in json.load(open(p)) for p in sys.argv[1:]))" "${GOLDEN_FILES[@]:0:2}" 2>/dev/null)"
+
+GOLDEN_COMPARED=0
+for GOLDEN in "${GOLDEN_FILES[@]}"; do
+  if [[ ! -f "$GOLDEN" ]]; then
+    failed "golden ($(basename "$GOLDEN")): the input exists" "missing: $GOLDEN"
+    continue
+  fi
   python3 -c "
 import json, sys
 json.dump(json.load(open(sys.argv[1]))['results'], open(sys.argv[2], 'w'))" "$GOLDEN" "$WORK/golden-array.json"
   G_TB=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['total_blocks'])" "$GOLDEN")
   G_EL=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['elapsed_seconds'])" "$GOLDEN")
   G_TS=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['timestamp'])" "$GOLDEN")
-  printf '' | eval_aggregate "$WORK/golden-array.json" "$G_TB" "$G_EL" "$G_TS" "$WORK/golden-out.json" >/dev/null
+  # The census the run took, back on stdin; none for a result from before M-W6.
+  G_CENSUS=$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+if 'census_source' in d:
+    print(json.dumps({k: d.get(k) for k in ('by_block_type', 'population', 'census_source')}))" "$GOLDEN")
+  printf '%s' "$G_CENSUS" | eval_aggregate "$WORK/golden-array.json" "$G_TB" "$G_EL" "$G_TS" "$WORK/golden-out.json" >/dev/null
   GOLD_DIFF=$(python3 -c "
 import json, sys
 old = json.load(open(sys.argv[1]))
 new = json.load(open(sys.argv[2]))
+# What the aggregation adds to a result written before a field existed: the
+# field's empty form, nothing else.
+ADDED = {
+    'not_measured': {'count': 0, 'by_class': {}, 'by_category': {}},  # #472
+    'by_block_type': None, 'population': None,                        # M-W6, no census
+    'census_source': 'unavailable: no census taken',
+}
 bad = []
-for key in ('summary', 'by_type', 'results', 'timestamp', 'total_blocks', 'elapsed_seconds'):
-    if old.get(key) != new.get(key):
-        bad.append(key)
-# by_category: the established categories must be identical; 'derived' is the
-# one additive key and must be empty on a corpus that has no G-cases.
-for cat, val in old['by_category'].items():
-    if new['by_category'].get(cat) != val:
-        bad.append('by_category.' + cat)
-extra = set(new['by_category']) - set(old['by_category'])
-if extra != {'derived'}:
-    bad.append('by_category extra keys: %s' % sorted(extra))
-if new['by_category'].get('derived') != {'pass': 0, 'fail': 0, 'total': 0}:
-    bad.append('derived not empty')
+for key in sorted(set(old) | set(new)):
+    if key not in new:
+        bad.append('missing ' + key)
+    elif key == 'by_category':
+        # The established categories must be identical; 'derived' (prefix G)
+        # is the one category a result may lack, and then it must be empty.
+        for cat in sorted(set(old[key]) | set(new[key])):
+            if cat in old[key]:
+                if new[key].get(cat) != old[key][cat]:
+                    bad.append('by_category.' + cat)
+            elif cat != 'derived' or new[key][cat] != {'pass': 0, 'fail': 0, 'total': 0}:
+                bad.append('by_category extra ' + cat)
+    elif key in old:
+        if old[key] != new[key]:
+            bad.append(key)
+    elif key not in ADDED or new[key] != ADDED[key]:
+        bad.append('added ' + key)
 print(','.join(bad) if bad else 'identical')" "$GOLDEN" "$WORK/golden-out.json")
-  assert_eq "golden ($(basename "$GOLDEN")): summary/by_type/by_category/results unchanged" \
-    "identical" "$GOLD_DIFF"
-fi
+  assert_eq "golden ($(basename "$GOLDEN")): the aggregation reproduces the result" "identical" "$GOLD_DIFF"
+  GOLDEN_COMPARED=$(( GOLDEN_COMPARED + 1 ))
+done
+assert_eq "golden: every input compared" "${#GOLDEN_FILES[@]}" "$GOLDEN_COMPARED"
 
 echo ""
 echo "-----------------------------------------------------------------"
