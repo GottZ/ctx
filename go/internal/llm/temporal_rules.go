@@ -926,12 +926,13 @@ func englishParticiple(w string) bool {
 //   - the past subjunctive of "haben" with a modal infinitive at the end
 //     ("Was hätten wir am Montag tun sollen?").
 func (c clauseWords) hasPerfektForm(s, e int) bool {
+	var closing []int
 	for cs := s; cs < e; {
 		_, ce := c.clauseOf(cs)
 		if ce > e {
 			ce = e
 		}
-		if c.clausePerfekt(cs, ce) {
+		if c.clausePerfekt(cs, ce, &closing) {
 			return true
 		}
 		cs = ce
@@ -941,8 +942,9 @@ func (c clauseWords) hasPerfektForm(s, e int) bool {
 
 // clausePerfekt is hasPerfektForm for the one clause [s, e); an auxiliary
 // whose clause does not end with its participle may find it at the end of a
-// later clause of the sentence (closingParticiple).
-func (c clauseWords) clausePerfekt(s, e int) bool {
+// later clause of the sentence (closingParticiples, a table the first
+// clause that needs it fills).
+func (c clauseWords) clausePerfekt(s, e int, closing *[]int) bool {
 	last := e - 1
 	if last > s && perfektAux[c.words[last]] && c.participleAt(s, last-1) &&
 		(!seinAux[c.words[last]] || seinParticiple(c.words[last-1])) {
@@ -959,7 +961,10 @@ func (c clauseWords) clausePerfekt(s, e int) bool {
 		if c.closedBy(aux, s, last) {
 			return true
 		}
-		if cs, ok := c.closingParticiple(e); ok && c.closedBy(aux, cs, c.clauseEnd(cs)-1) {
+		if *closing == nil {
+			*closing = c.closingParticiples()
+		}
+		if cs, ok := closingAt(*closing, e); ok && c.closedBy(aux, cs, c.clauseEnd(cs)-1) {
 			return true
 		}
 		if seinAux[aux] {
@@ -987,31 +992,51 @@ func (c clauseWords) clauseEnd(s int) int {
 	return e
 }
 
-// closingParticiple returns the start of the clause behind the clause that
-// ends at e whose last word may close the bracket an auxiliary opened before
-// e, within the same sentence (issue #487): the first following clause
+// closingParticiples returns, for every clause start e of c, the closing
+// participle of the clause that ends at e: the start of the clause behind it
+// whose last word may close the bracket an auxiliary opened before e, within
+// the same sentence (issue #487), the first following clause
 // without an auxiliary that ends with a participle ("…, nach dem Standup,
 // besprochen?", "…, glaube ich, was beschlossen?"). Clauses without either
 // are passed, and so are clauses with an auxiliary that a subordinating word
 // or an interrogative opens ("…, bevor du gegangen bist, deployed?"); any
 // other clause with an auxiliary of its own ends the search ("…, und was ist
-// geplant?").
-func (c clauseWords) closingParticiple(e int) (int, bool) {
-	for cs := e; cs < len(c.words) && !c.sentence[cs]; {
-		ce := c.clauseEnd(cs)
+// geplant?"). The entry of a clause start is the start found, -1 for none.
+// The table is filled from the last clause to the first, each clause read
+// once (issue #506): searched clause by clause from every auxiliary, the
+// search cost time quadratic in the number of clauses.
+func (c clauseWords) closingParticiples() []int {
+	res := make([]int, len(c.words)+1)
+	for i := range res {
+		res[i] = -1
+	}
+	for ce := len(c.words); ce > 0; {
+		cs, _ := c.clauseOf(ce - 1)
+		scanned(ce - cs)
 		aux := false
 		for k := cs; k < ce; k++ {
 			aux = aux || perfektAux[c.words[k]]
 		}
 		switch {
-		case aux && !clauseOpeners[c.words[cs]]:
-			return 0, false
+		case c.sentence[cs], aux && !clauseOpeners[c.words[cs]]:
+			res[cs] = -1
 		case !aux && c.participleAt(cs, ce-1):
-			return cs, true
+			res[cs] = cs
+		default:
+			res[cs] = res[ce]
 		}
-		cs = ce
+		ce = cs
 	}
-	return 0, false
+	return res
+}
+
+// closingAt reads the closing participle of the clause that ends at e from
+// the table of closingParticiples.
+func closingAt(table []int, e int) (int, bool) {
+	if e >= len(table) || table[e] < 0 {
+		return 0, false
+	}
+	return table[e], true
 }
 
 // ierenParticiple reports whether tok is the participle of a German verb on
@@ -1758,17 +1783,17 @@ func matchBis(query string, now time.Time) *TemporalResult {
 // day counts.
 func matchOpenEdge(query string, now time.Time, edge string) *TemporalResult {
 	lower := strings.ToLower(query)
-	var words *clauseWords // the question's words for the year check, read once
+	var proof *yearProof // the year check of the question's candidates, read once
 	stands := func(off int) bool {
-		if words == nil {
-			c := clauseTokens(lower)
-			words = &c
+		if proof == nil {
+			proof = newYearProof(lower, clauseTokens(lower))
 		}
-		return yearEdgeStands(lower, *words, off)
+		return proof.stands(off)
 	}
 	for _, m := range reOpenEdge.FindAllStringSubmatchIndex(lower, -1) {
 		word, phrase := lower[m[2]:m[3]], lower[m[4]:m[5]]
-		if reTimeUnitBefore.MatchString(lower[:m[0]]) || word != "ab" && reNearBefore.MatchString(lower[:m[0]]) {
+		before := wordBefore(lower, m[0])
+		if lookBehind(reTimeUnitBefore, before) || word != "ab" && lookBehind(reNearBefore, before) {
 			continue
 		}
 		// A year first is an edge here only as the year (yearEdge, issue
@@ -1800,6 +1825,56 @@ func matchOpenEdge(query string, now time.Time, edge string) *TemporalResult {
 		}
 	}
 	return nil
+}
+
+// asciiSpace are the runes \s matches in the rules' expressions (RE2's
+// \s: tab, line feed, form feed, carriage return and space).
+const asciiSpace = "\t\n\f\r "
+
+// wordBefore returns the end of lower before the byte offset at that an
+// expression anchored at the end ("…\s+$") can match: the whitespace right
+// before at and the run of other runes before it, the last word with what is
+// glued to it (issue #506). Matching reTimeUnitBefore or reNearBefore on it
+// answers as on lower[:at] — the word they look for has no space in it and
+// stands right before the whitespace, and the start of the returned text is a
+// word boundary as the space before it is — but reads only that word, not the
+// whole text before every candidate: over the whole text, the check cost
+// time quadratic in the length of a question with many candidates ("nach
+// Hause" repeated to 10 KB took two seconds).
+func wordBefore(lower string, at int) string {
+	i := at
+	for i > 0 && strings.IndexByte(asciiSpace, lower[i-1]) >= 0 {
+		i--
+	}
+	if i == at {
+		return ""
+	}
+	j := i
+	for j > 0 && strings.IndexByte(asciiSpace, lower[j-1]) < 0 {
+		j--
+	}
+	return lower[j:at]
+}
+
+// ruleScanHook is the test seam of the rules' cost (issue #506): nil in
+// production; a test that does not run in parallel sets it to count the
+// bytes, words and clauses the per-candidate checks read
+// (TestRules_CostIsLinearInTheQuestion), a measure no load on the host
+// changes. The runtimeIndexDDLHook precedent.
+var ruleScanHook func(n int)
+
+// scanned reports n units of work to ruleScanHook.
+func scanned(n int) {
+	if ruleScanHook != nil {
+		ruleScanHook(n)
+	}
+}
+
+// lookBehind matches re, an expression anchored at the end, on the text
+// before a candidate (wordBefore).
+func lookBehind(re *regexp.Regexp, before string) bool {
+	scanned(len(before))
+	return before != "" && re.MatchString(before)
 }
 
 // reTimeUnitBefore matches a time unit or a time of day right before one of
@@ -2451,26 +2526,69 @@ var (
 // have grown" names the year. Such a question goes to the LLM fallback, as
 // before.
 func yearEdgeStands(lower string, c clauseWords, off int) bool {
-	for _, p := range countPhrases {
-		if strings.Contains(lower, p) {
-			return false
-		}
-	}
-	s, e := 0, len(c.words)
-	if i := c.wordAt(off); i >= 0 {
-		s, e = c.clauseOf(i)
-	}
-	for _, w := range c.words[s:e] {
-		if countWords[w] {
-			return false
-		}
-		for _, end := range countWordEndings {
-			if len(w) > len(end)+2 && strings.HasSuffix(w, end) {
-				return false
+	return newYearProof(lower, c).stands(off)
+}
+
+// yearProof answers yearEdgeStands for the year candidates of one question
+// (matchOpenEdge asks it per candidate), reading the question for a count
+// phrase once and each clause for a count word once (issue #506): read anew
+// per candidate, the check cost time quadratic in the length of a question
+// with many candidates.
+type yearProof struct {
+	lower string
+	c     clauseWords
+	// asked: count holds whether the question asks for a count.
+	asked, count bool
+	// counted holds, per clause start, whether the clause has a count word.
+	counted map[int]bool
+}
+
+func newYearProof(lower string, c clauseWords) *yearProof {
+	return &yearProof{lower: lower, c: c, counted: map[int]bool{}}
+}
+
+// stands is yearEdgeStands for the year after the word at the byte offset
+// off.
+func (p *yearProof) stands(off int) bool {
+	if !p.asked {
+		p.asked = true
+		scanned(len(p.lower))
+		for _, phrase := range countPhrases {
+			if strings.Contains(p.lower, phrase) {
+				p.count = true
 			}
 		}
 	}
-	return true
+	if p.count {
+		return false
+	}
+	s, e := 0, len(p.c.words)
+	if i := p.c.wordAt(off); i >= 0 {
+		s, e = p.c.clauseOf(i)
+	}
+	counted, ok := p.counted[s]
+	if !ok {
+		scanned(e - s)
+		counted = hasCountWord(p.c.words[s:e])
+		p.counted[s] = counted
+	}
+	return !counted
+}
+
+// hasCountWord reports whether words hold a word of countWords or one that
+// ends with a head of countWordEndings.
+func hasCountWord(words []string) bool {
+	for _, w := range words {
+		if countWords[w] {
+			return true
+		}
+		for _, end := range countWordEndings {
+			if len(w) > len(end)+2 && strings.HasSuffix(w, end) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // lastOfMonth returns the last day of t's month.
