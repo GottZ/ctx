@@ -33,7 +33,10 @@ type BackendNotice struct {
 // Skip reports whether the dream cycle of r's tenant must be skipped because
 // no backend serves the dream role for it, and logs the change of state (see
 // BackendNotice). It reads the pool through the probes that write no log line
-// (Router.available, Pool.TrustCeilings, Pool.RoleConfiguredFor).
+// (Router.available, Pool.TrustCeilings, Pool.RoleConfiguredFor). The WARN
+// describes the shared pool, whichever tenant's cycle skipped first: it names
+// no tenant, and it tells "no row of the role" from "rows of the role, none
+// serving" in the shared view, so the remedy it names is the shared pool's.
 func (n *BackendNotice) Skip(r *Router) bool {
 	if r.available(backends.RoleDream) {
 		if n.missing.Load() && r.Pool.TrustCeilings(backends.RoleDream).Shared >= backends.SensPublic.Rank() &&
@@ -46,15 +49,13 @@ func (n *BackendNotice) Skip(r *Router) bool {
 		slog.Debug("dream: no eligible dream backend — cycle skipped before pick", "tenant_scope", r.Tenant)
 		return true
 	}
-	if r.Pool.RoleConfiguredFor(backends.RoleDream, r.Tenant) {
-		slog.Warn("dream: every backend of role dream is disabled or held by a disable profile — Dream skips its cycles "+
-			"until one serves again; `ctx backends` lists the rows. This line repeats only after a backend served in between",
-			"tenant_scope", r.Tenant)
+	if r.Pool.RoleConfiguredFor(backends.RoleDream, backends.GlobalScope) {
+		slog.Warn("dream: every backend of role dream is disabled or held by a disable profile — Dream skips its cycles " +
+			"until one serves again; `ctx backends` lists the rows. This line repeats only after a backend served in between")
 		return true
 	}
-	slog.Warn("dream: no backend of role dream — Dream skips its cycles until one serves; `ctx backends seed` seeds the pool "+
-		"(a chat and an embed backend), `ctx backends create` adds a backend with role dream. This line repeats only after "+
-		"a backend served in between",
-		"tenant_scope", r.Tenant)
+	slog.Warn("dream: no backend of role dream — Dream skips its cycles until one serves; `ctx backends seed` seeds the pool " +
+		"(a chat and an embed backend), `ctx backends create` adds a backend with role dream. This line repeats only after " +
+		"a backend served in between")
 	return true
 }

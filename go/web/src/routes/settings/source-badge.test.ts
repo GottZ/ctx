@@ -18,7 +18,8 @@ describe('settings source badge', () => {
   })
   for (const source of sources.filter((s) => s !== 'default')) {
     it(`styles the badge of source ${source}`, () => {
-      expect(field).toMatch(new RegExp(`\\.badge\\.source-${source}\\s*\\{[^}]*\\bcolor:`))
+      // `color:` as a declaration of its own — not the tail of border-color.
+      expect(field).toMatch(new RegExp(`\\.badge\\.source-${source}\\s*\\{[^}]*[{;\\s]color:`))
     })
   }
 })

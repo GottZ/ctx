@@ -29,8 +29,11 @@
 //     queries than the linked blocks push those out of the semantic arm (its
 //     cap is 75, migration 147), and their texts share no lexeme with the
 //     queries — the measurement's arm_ranks block shows that no arm of the
-//     fusion found them. A query on the first block of each pair must bring
-//     the second one exactly while graph.enabled is on.
+//     fusion found them. For both pairs the second block is a source only
+//     while graph.enabled is on (never with it off, never through an arm);
+//     the factual pair's must be the query's second source, the topical
+//     pair's position is logged (its placement, 0.3 x the top score, falls
+//     below the twentieth source — see the log line).
 //
 // Run it alone (about 2½ minutes: one boot, one minute of phase A, B and C):
 //
@@ -783,6 +786,7 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 	}
 	var linkRows []string
 	var between int
+	forwardType := map[string]string{} // pair name → relationship of its seed → linked row
 	for rows.Next() {
 		var src, dst, rel string
 		var conf float64
@@ -792,6 +796,9 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 		linkRows = append(linkRows, fmt.Sprintf("%s → %s %s %.2f", label[src], label[dst], rel, conf))
 		if p := pairOf[src]; p != "" && p == pairOf[dst] {
 			between++
+		}
+		if strings.HasSuffix(label[src], "/seed") && strings.HasSuffix(label[dst], "/linked") {
+			forwardType[pairOf[src]] = rel
 		}
 	}
 	rows.Close()
@@ -815,6 +822,14 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 	}
 	if between != len(linkRows) {
 		t.Errorf("phase B: %d of %d link(s) join the blocks of one pair", between, len(linkRows))
+	}
+	// Phase C weighs the link by its type: the forward link of each pair must
+	// carry the type the stub answered (dream keeps factual only across two
+	// categories, coerceCategoryFactual).
+	for _, c := range graphCases {
+		if forwardType[c.name] != c.linkType {
+			t.Errorf("phase B: the forward link of the %s pair is %q, want %q", c.name, forwardType[c.name], c.linkType)
+		}
 	}
 	if n := strings.Count(child.out.String()[phaseBFrom:], dreamServesNotice); n != 1 {
 		t.Errorf("phase B: %q logged %d times after the seed, want once", dreamServesNotice, n)

@@ -35,15 +35,19 @@ func (s *syncBuf) String() string {
 // "acme" serves — the WARN comes once, and "acme"'s serving cycles neither
 // announce a recovery nor re-arm the WARN for "beta"'s next turn. A shared
 // row ends it with one INFO; a shared row that only exists disabled gets the
-// WARN that names it instead of the seed hint. Nothing asks Chain (no
-// "backends: empty chain" line).
+// WARN that names it instead of the seed hint. The WARN describes the shared
+// pool: it names no tenant, and a tenant's own disabled row does not turn the
+// seed hint into the disabled one. Nothing asks Chain (no "backends: empty
+// chain" line).
 func TestBackendNoticeOneLinePerChangeOfTheSharedView(t *testing.T) {
 	logs := &syncBuf{}
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	defer slog.SetDefault(prev)
 
-	acmeOnly := []backends.Backend{tenantDreamRow("acme-dream", "acme", 100)}
+	betaDisabled := tenantDreamRow("beta-dream", "beta", 100)
+	betaDisabled.Enabled = false
+	acmeOnly := []backends.Backend{tenantDreamRow("acme-dream", "acme", 100), betaDisabled}
 	shared := tenantDreamRow("shared-dream", backends.GlobalScope, 100)
 	p := backends.NewPool(nil, nil)
 	p.SeedSnapshotForTest(acmeOnly)
@@ -69,8 +73,15 @@ func TestBackendNoticeOneLinePerChangeOfTheSharedView(t *testing.T) {
 	if w, s := count(warnMissing), count(infoServes); w != 1 || s != 0 {
 		t.Fatalf("after 5 turns of the round robin: %d WARN, %d INFO, want 1 and 0 — one line per change of state", w, s)
 	}
-	if !strings.Contains(logs.String(), "ctx backends seed") || !strings.Contains(logs.String(), "tenant_scope=beta") {
-		t.Errorf("the WARN must name the remedy (ctx backends seed) and the tenant that skipped:\n%s", logs.String())
+	// beta's own row exists, disabled: the shared pool still has no row of
+	// the role, so the WARN is the seed hint, not the disabled one.
+	if !strings.Contains(logs.String(), "ctx backends seed") || count(warnDisabled) != 0 {
+		t.Errorf("the WARN must name the shared pool's remedy (ctx backends seed):\n%s", logs.String())
+	}
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "level=WARN") && strings.Contains(line, "tenant_scope=") {
+			t.Errorf("the WARN describes the shared pool and names no tenant: %s", line)
+		}
 	}
 
 	p.SeedSnapshotForTest(append([]backends.Backend{shared}, acmeOnly...))
