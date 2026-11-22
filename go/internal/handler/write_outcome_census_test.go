@@ -244,12 +244,21 @@ func censusCallee(call *ast.CallExpr) string {
 	return ""
 }
 
+// slogWriters are slog's top-level functions that write a line. Its other
+// functions build values (slog.Any, slog.String, slog.Group, …): a call of
+// slog.Any("error", err) inside a line is that line's attribute, not a line
+// of its own (issue #505).
+var slogWriters = map[string]bool{
+	"Debug": true, "Info": true, "Warn": true, "Error": true, "Log": true, "LogAttrs": true,
+	"DebugContext": true, "InfoContext": true, "WarnContext": true, "ErrorContext": true,
+}
+
 // writesLine reports whether call writes a log line: slog's top-level
-// functions, or a logger of the package.
+// functions that write one, or a logger of the package.
 func (pf pkgFuncs) writesLine(call *ast.CallExpr, imports map[string]bool) bool {
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 		if x, ok := sel.X.(*ast.Ident); ok && x.Name == "slog" && imports["slog"] {
-			return true
+			return slogWriters[sel.Sel.Name]
 		}
 	}
 	return pf.loggers[censusCallee(call)]
@@ -674,11 +683,14 @@ func callsNamer(n ast.Node, pf pkgFuncs, imports map[string]bool) bool {
 // call, and inside a function literal whose error the statement that runs it
 // handles (not one stored in a variable or run by a call that drops the
 // error); a failure line without the key in one sub-branch of the error
-// branch is unnamed even when another sub-branch names it.
+// branch is unnamed even when another sub-branch names it. The error goes on
+// the line as "error", err or as slog.Any("error", err) (issue #505): an
+// attribute constructor of slog writes no line of its own.
 func TestWriteOutcomeCensusSeesEveryForm(t *testing.T) {
 	const src = `package handler
 
 import st "github.com/GottZ/ctx/internal/store"
+import "log/slog"
 
 func unnamedInInit(ctx context.Context) {
 	if _, err := st.UpsertBlock(ctx); err != nil {
@@ -795,6 +807,20 @@ func namedInClosure(ctx context.Context) {
 		logRequestError(ctx, "x", "error", err, "write_outcome", writeOutcome(err))
 	}
 }
+
+func namedSlogAny(ctx context.Context) {
+	_, err := st.UpsertBlock(ctx)
+	if err != nil {
+		slog.Warn("x", slog.Any("error", err), "write_outcome", statementOutcome(err))
+	}
+}
+
+func unnamedSlogAny(ctx context.Context) {
+	_, err := st.UpsertBlock(ctx)
+	if err != nil {
+		slog.Error("x", slog.Any("error", err))
+	}
+}
 `
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "probe.go", src, parser.SkipObjectResolution)
@@ -808,9 +834,9 @@ func namedInClosure(ctx context.Context) {
 	for _, pos := range c.unnamed {
 		lines = append(lines, pos.Line)
 	}
-	want := []int{6, 19, 28, 36, 43, 51, 55, 59, 63, 86, 95, 106}
-	if c.calls != 15 || !slices.Equal(lines, want) {
-		t.Fatalf("census = %d calls, unnamed at lines %v; want 15 calls, unnamed at %v", c.calls, lines, want)
+	want := []int{7, 20, 29, 37, 44, 52, 56, 60, 64, 87, 96, 107, 130}
+	if c.calls != 17 || !slices.Equal(lines, want) {
+		t.Fatalf("census = %d calls, unnamed at lines %v; want 17 calls, unnamed at %v", c.calls, lines, want)
 	}
 }
 
