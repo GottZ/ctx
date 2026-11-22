@@ -148,6 +148,8 @@ func TestStatementOutcome(t *testing.T) {
 		{"a localized PANIC", &pgconn.PgError{Severity: "PANIK", SeverityUnlocalized: "PANIC", Code: "XX000"}, writeUnknown},
 		{"a FATAL without the unlocalized severity", &pgconn.PgError{Severity: "FATAL", Code: "57P01"}, writeUnknown},
 		{"a localized ERROR", &pgconn.PgError{Severity: "FEHLER", SeverityUnlocalized: "ERROR", Code: "23505"}, writeRolledBack},
+		{"a query cancel (may follow an implicit commit)", fmt.Errorf("stage: %w", &pgconn.PgError{Severity: "ERROR", SeverityUnlocalized: "ERROR", Code: "57014"}), writeUnknown},
+		{"a lock timeout", &pgconn.PgError{Severity: "ERROR", SeverityUnlocalized: "ERROR", Code: "55P03"}, writeRolledBack},
 	} {
 		if got := statementOutcome(tc.err); got != tc.want {
 			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)

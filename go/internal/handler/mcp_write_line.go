@@ -185,7 +185,8 @@ func withToolWriteLine[In any](name string, h mcp.ToolHandlerFor[In, any]) mcp.T
 // recognisable (writeOutcome needs a labeled bracket): one statement outside
 // a transaction (it commits on its own), or a bracket without a commit label
 // (the issue writes). Rolled back when the database answered with an error
-// of severity ERROR (a statement or the COMMIT refused —
+// of severity ERROR other than a query cancel (a statement or the COMMIT
+// refused —
 // pgx.ErrTxCommitRollback for a transaction that had failed), the statement
 // found no row to write, no connection was made (pgconn.ConnectError, also
 // when the server refused it with a FATAL), or nothing left
@@ -196,9 +197,11 @@ func withToolWriteLine[In any](name string, h mcp.ToolHandlerFor[In, any]) mcp.T
 // the bare cancellation), a closed pool, an error of the caller's own between
 // two statements of an unlabeled bracket, pgconn.ErrConnClosed — pgx's
 // answer for a COMMIT whose connection broke while it waited (writeOutcome),
-// which it marks safe to retry — and an error that ended the session
-// (sessionEnded): it may follow an implicit or unlabeled commit that landed,
-// and from here it reads the same as one that cut a statement off.
+// which it marks safe to retry — and an error that says nothing about a
+// commit (commitAmbiguous: the session ended, or a query cancel, 57014): it
+// may follow an implicit or unlabeled commit that landed, and from here it
+// reads the same as one that cut a statement off (a statement_timeout's
+// 57014 included).
 func statementOutcome(err error) string {
 	if errors.Is(err, pgconn.ErrConnClosed) {
 		return writeUnknown
@@ -213,7 +216,7 @@ func statementOutcome(err error) string {
 		// FATAL inside, and nothing was sent on it.
 		return writeRolledBack
 	case errors.As(err, &pgErr):
-		if sessionEnded(pgErr) {
+		if commitAmbiguous(pgErr) {
 			return writeUnknown
 		}
 		return writeRolledBack

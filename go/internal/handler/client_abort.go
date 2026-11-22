@@ -191,8 +191,9 @@ const (
 	writeCommitted  = "committed"   // the write committed; a later step failed
 	// writeUnknown: the COMMIT was sent and its answer never arrived (the
 	// request was cancelled or the connection broke during it), or the
-	// server ended the session while it committed — the database may have
-	// committed the transaction.
+	// answer says nothing about it (commitAmbiguous: the server ended the
+	// session or cancelled the query while it committed) — the database may
+	// have committed the transaction.
 	writeUnknown = "unknown"
 )
 
@@ -200,10 +201,11 @@ const (
 // WriteOpts) whose Stages name the commit: unknown when the COMMIT was sent
 // and its answer never came back (no PostgreSQL error answer, not the
 // rollback answer pgx reports as ErrTxCommitRollback, not refused before
-// sending — pgconn.SafeToRetry) or came back as the end of the session
-// (sessionEnded), rolled back for everything else (a statement inside the
-// transaction failed, the database refused or rolled back the commit with an
-// ERROR, or the commit never left). For an unlabeled bracket the commit is
+// sending — pgconn.SafeToRetry) or came back as an error that says nothing
+// about the COMMIT (commitAmbiguous), rolled back for everything else (a
+// statement inside the transaction failed — a cancel or timeout there too —,
+// the database refused or rolled back the commit with another ERROR, or the
+// commit never left). For an unlabeled bracket the commit is
 // not recognisable and the answer would claim too much — use it only on
 // labeled ones.
 //
@@ -221,7 +223,7 @@ func writeOutcome(err error) string {
 	case errors.Is(err, pgconn.ErrConnClosed):
 		return writeUnknown
 	case errors.As(err, &pgErr):
-		if sessionEnded(pgErr) {
+		if commitAmbiguous(pgErr) {
 			return writeUnknown
 		}
 		return writeRolledBack
@@ -229,6 +231,20 @@ func writeOutcome(err error) string {
 		return writeRolledBack
 	}
 	return writeUnknown
+}
+
+// commitAmbiguous reports whether pgErr says nothing about a COMMIT it
+// answers (issue #483): an error that ended the session (sessionEnded), or a
+// query cancel (SQLSTATE 57014) — PostgreSQL holds a cancel
+// (pg_cancel_backend) while it commits as it holds a terminate, and with a
+// duration log reports it after the COMMIT's CommandComplete, as ERROR 57014
+// for a transaction that committed. statement_timeout raises 57014 as well:
+// in a labeled bracket one that cut a statement before the COMMIT never
+// reaches this (writeOutcome asks only about the COMMIT), and ctx sets
+// statement_timeout on read paths only. lock_timeout raises 55P03, an ERROR
+// that stays rolled back.
+func commitAmbiguous(pgErr *pgconn.PgError) bool {
+	return sessionEnded(pgErr) || pgErr.Code == "57014"
 }
 
 // sessionEnded reports whether pgErr ends the session — severity FATAL or

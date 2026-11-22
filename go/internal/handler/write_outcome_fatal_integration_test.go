@@ -24,6 +24,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -94,10 +95,17 @@ func fatalPool(t *testing.T, dsn string) *pgxpool.Pool {
 	return pool
 }
 
-// terminateAt runs call and terminates its backend once that backend
-// matches where (a condition on pg_stat_activity with $1 the statement it
-// runs); it fails the test when the call returns before.
+// terminateAt is signalAt with pg_terminate_backend.
 func terminateAt(t *testing.T, direct *pgxpool.Pool, where, query string, call func() error) error {
+	t.Helper()
+	return signalAt(t, direct, "pg_terminate_backend", where, query, call)
+}
+
+// signalAt runs call and sends its backend signal (pg_terminate_backend or
+// pg_cancel_backend) once that backend matches where (a condition on
+// pg_stat_activity with $1 the statement it runs); it fails the test when
+// the call returns before.
+func signalAt(t *testing.T, direct *pgxpool.Pool, signal, where, query string, call func() error) error {
 	t.Helper()
 	errc := make(chan error, 1)
 	go func() { errc <- call() }()
@@ -114,8 +122,8 @@ func terminateAt(t *testing.T, direct *pgxpool.Pool, where, query string, call f
 			query).Scan(&pid)
 		if err == nil {
 			var ok bool
-			if err := direct.QueryRow(context.Background(), `SELECT pg_terminate_backend($1::int)`, pid).Scan(&ok); err != nil || !ok {
-				t.Fatalf("terminate %d: %v %v", pid, ok, err)
+			if err := direct.QueryRow(context.Background(), `SELECT `+signal+`($1::int)`, pid).Scan(&ok); err != nil || !ok {
+				t.Fatalf("%s %d: %v %v", signal, pid, ok, err)
 			}
 			break
 		}
@@ -131,7 +139,7 @@ func terminateAt(t *testing.T, direct *pgxpool.Pool, where, query string, call f
 	case err := <-errc:
 		return err
 	case <-time.After(20 * time.Second):
-		t.Fatal("the call did not return after its backend was terminated")
+		t.Fatal("the call did not return after its backend was signalled")
 		return nil
 	}
 }
@@ -145,9 +153,15 @@ const inCommitDelay = `state = 'active' AND clock_timestamp() - state_change > i
 // wantFatal checks that err is the FATAL of a terminated backend.
 func wantFatal(t *testing.T, err error) {
 	t.Helper()
+	wantPgError(t, err, "FATAL", "57P01")
+}
+
+// wantPgError checks that err carries a PgError of severity and code.
+func wantPgError(t *testing.T, err error, severity, code string) {
+	t.Helper()
 	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "57P01" || pgErr.SeverityUnlocalized != "FATAL" {
-		t.Fatalf("error = %v, want FATAL 57P01 from the terminated backend", err)
+	if !errors.As(err, &pgErr) || pgErr.Code != code || pgErr.SeverityUnlocalized != severity {
+		t.Fatalf("error = %v, want %s %s", err, severity, code)
 	}
 }
 
@@ -235,6 +249,82 @@ func TestWriteOutcomeFatalAfterTheCommitRecord(t *testing.T) {
 			t.Errorf("statementOutcome = %q, want unknown: it cannot tell a statement from a commit", got)
 		}
 	})
+
+	// Issue #483, second review: PostgreSQL holds a query cancel while it
+	// commits as it holds a terminate, and reports it at the duration log
+	// after the COMMIT's CommandComplete — ERROR 57014 for a write that landed.
+	t.Run("COMMIT of a labeled bracket, cancelled", func(t *testing.T) {
+		err := signalAt(t, direct, "pg_cancel_backend", inCommitDelay, "commit", func() error {
+			return pgxdb.Write(ctx, pool, pgxdb.At("probe: write"), func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, `INSERT INTO i483_fatal VALUES (5)`)
+				return err
+			})
+		})
+		wantPgError(t, err, "ERROR", "57014")
+		if !pgxdb.FailedAtCommit(err) {
+			t.Fatalf("error %v is not the bracket's COMMIT", err)
+		}
+		if fatalRows(t, direct, 5) != 1 {
+			t.Fatal("the row is absent: the cancel came before the commit record, the probe tested nothing")
+		}
+		if got := writeOutcome(err); got != writeUnknown {
+			t.Errorf("writeOutcome = %q, want unknown for a cancel held across a committed COMMIT", got)
+		}
+		if got := statementOutcome(err); got != writeUnknown {
+			t.Errorf("statementOutcome = %q, want unknown", got)
+		}
+	})
+
+	t.Run("implicit commit of a single statement, cancelled", func(t *testing.T) {
+		err := signalAt(t, direct, "pg_cancel_backend", inCommitDelay, `INSERT INTO i483_fatal VALUES (6)`, func() error {
+			_, err := pool.Exec(ctx, `INSERT INTO i483_fatal VALUES (6)`)
+			return err
+		})
+		wantPgError(t, err, "ERROR", "57014")
+		if fatalRows(t, direct, 6) != 1 {
+			t.Fatal("the row is absent: the cancel came before the commit record, the probe tested nothing")
+		}
+		if got := statementOutcome(err); got != writeUnknown {
+			t.Errorf("statementOutcome = %q, want unknown for a cancel held across the implicit commit", got)
+		}
+	})
+
+	// The timeouts that end a statement waiting on a lock, before the COMMIT:
+	// statement_timeout raises 57014 too — writeOutcome keeps rolled_back by
+	// the stage, statementOutcome cannot tell it from a held cancel — and
+	// lock_timeout raises 55P03, an ERROR both read as rolled_back.
+	release := lockedTx(t, direct, `SELECT pg_advisory_xact_lock(483484)`)
+	defer release()
+	for _, tc := range []struct {
+		name, set, code, statement string
+		row                        int
+	}{
+		{"statement_timeout before the COMMIT", `SET LOCAL statement_timeout = '200ms'`, "57014", writeUnknown, 7},
+		{"lock_timeout before the COMMIT", `SET LOCAL lock_timeout = '200ms'`, "55P03", writeRolledBack, 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := pgxdb.Write(ctx, pool, pgxdb.At("probe: write"), func(tx pgx.Tx) error {
+				if _, err := tx.Exec(ctx, fmt.Sprintf(`INSERT INTO i483_fatal VALUES (%d)`, tc.row)); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(ctx, tc.set); err != nil {
+					return err
+				}
+				_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(483484)`)
+				return err
+			})
+			wantPgError(t, err, "ERROR", tc.code)
+			if fatalRows(t, direct, tc.row) != 0 {
+				t.Fatal("the row is present: the timeout did not end the transaction")
+			}
+			if got := writeOutcome(err); got != writeRolledBack {
+				t.Errorf("writeOutcome = %q, want rolled_back: the error came before the COMMIT", got)
+			}
+			if got := statementOutcome(err); got != tc.statement {
+				t.Errorf("statementOutcome = %q, want %s", got, tc.statement)
+			}
+		})
+	}
 
 	t.Run("at connect time", func(t *testing.T) {
 		cfg, err := pgxpool.ParseConfig(dsn)

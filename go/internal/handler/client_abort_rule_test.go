@@ -369,6 +369,8 @@ func TestWriteOutcome(t *testing.T) {
 		{"COMMIT answered with a localized PANIC", bracket(nil, &pgconn.PgError{Severity: "PANIK", SeverityUnlocalized: "PANIC", Code: "XX000"}), writeUnknown},
 		{"COMMIT answered with FATAL, no unlocalized severity", bracket(nil, &pgconn.PgError{Severity: "FATAL", Code: "57P01"}), writeUnknown},
 		{"COMMIT refused with a localized ERROR", bracket(nil, &pgconn.PgError{Severity: "FEHLER", SeverityUnlocalized: "ERROR", Code: "40001"}), writeRolledBack},
+		{"COMMIT answered with a query cancel held across it", bracket(nil, &pgconn.PgError{Severity: "ERROR", SeverityUnlocalized: "ERROR", Code: "57014"}), writeUnknown},
+		{"query cancel inside the transaction", bracket(&pgconn.PgError{Severity: "ERROR", SeverityUnlocalized: "ERROR", Code: "57014"}, nil), writeRolledBack},
 		{"FATAL inside the transaction", bracket(&pgconn.PgError{Severity: "FATAL", SeverityUnlocalized: "FATAL", Code: "57P01"}, nil), writeRolledBack},
 	} {
 		if got := writeOutcome(tc.err); got != tc.want {
@@ -415,7 +417,11 @@ func TestPurgeOutcome(t *testing.T) {
 		{"blocks removed before the failure", &store.PurgeDeleted{Blocks: 2}, cut, writeCommitted},
 		{"only blobs removed before the failure", &store.PurgeDeleted{Blobs: 1}, cut, writeCommitted},
 		{"nothing removed, the statement was cut", &store.PurgeDeleted{}, cut, writeUnknown},
-		{"refused before the first delete", nil, &pgconn.PgError{Code: "57014"}, writeRolledBack},
+		{"refused before the first delete", nil, &pgconn.PgError{Code: "42501"}, writeRolledBack},
+		// A purge batch commits on its own: a 57014 may be a cancel PostgreSQL
+		// held across that commit (issue #483), so nothing removed is not
+		// known — before, this case expected rolled_back for 57014.
+		{"nothing removed, a query cancel", nil, &pgconn.PgError{Code: "57014"}, writeUnknown},
 	} {
 		if got := purgeOutcome(tc.done, tc.err); got != tc.want {
 			t.Errorf("%s: purgeOutcome = %q, want %q", tc.name, got, tc.want)
