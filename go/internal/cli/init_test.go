@@ -778,6 +778,74 @@ func TestStepDreamReportsTheServersDream(t *testing.T) {
 	}
 }
 
+// TestRunInitDreamLineFollowsTheServer pins the call condition of the Dream
+// line in runInit (issue #495): the line reads the server's /health, so it
+// stands wherever the server answered — also when the backend step did not
+// succeed (a key below server-admin may not seed, the pool is the
+// operator's) — and stands nowhere when there is no server to ask. The whole
+// wizard runs: config from the environment, hooks and statusline already in
+// place (no question asked), no version check.
+func TestRunInitDreamLineFollowsTheServer(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	claudeDir := t.TempDir()
+	settings := `{"hooks":{` +
+		`"SubagentStart":[{"hooks":[{"type":"command","command":"` + hookCmdBrief + `"}]}],` +
+		`"SubagentStop":[{"hooks":[{"type":"command","command":"` + hookCmdPersist + `"}]}]},` +
+		`"statusLine":{"type":"command","command":"` + statuslineCmd2 + `"}}`
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatalf("settings.json: %v", err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("CTX_KEY", strings.Repeat("ab", 32))
+
+	t.Run("backend_step_refused", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/health":
+				_, _ = w.Write([]byte(`{"status":"ok","services":{"database":"ok","embed":"ok","chat":"ok","dream":"ok"}}`))
+			case "/api/whoami":
+				// Accepted, but no server-admin: the backend step refuses to seed.
+				_, _ = w.Write([]byte(`{"success":true,"admin":false,"role":"member","home_scope":"acme"}`))
+			default:
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		t.Setenv("CTX_BASE_URL", srv.URL)
+		out := captureStdout(t, func() {
+			if err := runInit(true); err != nil {
+				t.Errorf("runInit: %v", err)
+			}
+		})
+		if !strings.Contains(out, "requires a server-admin key") {
+			t.Fatalf("fixture: the backend step did not refuse:\n%s", out)
+		}
+		if !strings.Contains(out, label("Dream", "on %s", okMark())) || !strings.Contains(out, "ctx dream throttle") {
+			t.Errorf("no Dream line after a refused backend step — the server answered /health:\n%s", out)
+		}
+	})
+
+	t.Run("no_server", func(t *testing.T) {
+		ln := httptest.NewServer(http.NotFoundHandler())
+		dead := ln.URL
+		ln.Close() // the port answers nothing any more
+		t.Setenv("CTX_BASE_URL", dead)
+		out := captureStdout(t, func() {
+			if err := runInit(true); err != nil {
+				t.Errorf("runInit: %v", err)
+			}
+		})
+		if !strings.Contains(out, "(unreachable)") {
+			t.Fatalf("fixture: the server step did not fail:\n%s", out)
+		}
+		if strings.Contains(out, "Dream ") {
+			t.Errorf("a Dream line without a server to ask:\n%s", out)
+		}
+	})
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
 }
