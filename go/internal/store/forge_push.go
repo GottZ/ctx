@@ -291,8 +291,9 @@ type PushProjection func(b *Block) string
 // takes — no lock upgrade), then the mapping row — the order of the pull's
 // writes. The mapping row's base is compared in the UPDATE itself, on
 // the row version the UPDATE locks. A mapping that is gone is no error.
-// Tx-bound: the push runs it in the transaction that holds the entity's push
-// lock across the wire write (TryLockPushEntity, issue #491).
+// Tx-bound: the push runs it in a short transaction after the wire write, on
+// the connection that holds the entity's push lock (TryLockPushEntity, issue
+// #491).
 func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHash string, ctxFields json.RawMessage, project PushProjection) (moved bool, err error) {
 	var b Block
 	var at time.Time
@@ -334,50 +335,96 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 	return false, StampForgeState(ctx, tx, blockID, ctxFields)
 }
 
-// TryLockPushEntity opens the push's section of one entity in the caller's
-// transaction: it takes the entity's push lock — a transaction-level
-// advisory lock keyed on the block id, released at the commit or rollback —
-// without waiting, and answers whether the section may write: the lock was
-// free AND the mapping row is still the candidate the push's listing read —
-// at listedBase, the base the listing saw, and not conflict-flagged (issue
-// #491).
+// PushSkip names why a push section leaves an entity to the next run; ""
+// means the section may write (TryLockPushEntity).
+type PushSkip string
+
+const (
+	// PushSkipInFlight: another session holds the entity's push lock — an
+	// instance whose wire write of the entity may be on its way now.
+	PushSkipInFlight PushSkip = "in flight"
+	// PushSkipOvertaken: the mapping's base moved since the push listed the
+	// entity — another instance wrote it since, or a pull moved it.
+	PushSkipOvertaken PushSkip = "overtaken"
+	// PushSkipFlagged: the mapping was flagged since the listing (a pull saw
+	// both sides move).
+	PushSkipFlagged PushSkip = "flagged"
+	// PushSkipGone: the mapping row is gone.
+	PushSkipGone PushSkip = "gone"
+)
+
+// pushLockSQL and pushUnlockSQL take and give back the advisory lock of one
+// entity's push section: the two-key form, class key first, keyed on the
+// block id.
+const (
+	pushLockSQL   = `SELECT pg_try_advisory_lock(hashtext('ctx:forge-push'), hashtext($1::text))`
+	pushUnlockSQL = `SELECT pg_advisory_unlock(hashtext('ctx:forge-push'), hashtext($1::text))`
+)
+
+// TryLockPushEntity opens the push's section of one entity on conn, a
+// connection the caller holds out of the pool with no transaction open on
+// it: it takes the entity's push lock — a session-level advisory lock keyed
+// on the block id — without waiting, and answers why the section may not
+// write (skip, "" when it may): the lock was held by another session, or the
+// mapping row is no longer the candidate the push's listing read — at
+// listedBase, the base the listing saw, and not conflict-flagged (issue
+// #491). locked reports that this call holds the lock now; the caller gives
+// it back with UnlockPushEntity on the same connection, whatever skip says.
 //
 // The push writes an entity to the forge and records that write (the
-// advance) inside the section, so two ctxd instances never have the writes
-// of one entity in flight at once. Without it, B's PATCH and advance of a
-// newer local version could run while A's PATCH of an older one was on the
-// wire; A's landing last left the forge at the older version, and a pull in
+// advance) under the lock, so two ctxd instances never have the writes of
+// one entity in flight at once. Without it, B's PATCH and advance of a newer
+// local version could run while A's PATCH of an older one was on the wire;
+// A's landing last left the forge at the older version, and a pull in
 // between found the block at B's base and the forge ahead of it, and wrote
 // the older version over the newer one on both sides.
 //
-// false means another instance is writing the entity now (its PATCH may be
-// on the wire), or it wrote it since this push listed it, or another
-// instance's pull flagged it since (both sides moved: the push must not send
-// the local version over the remote edit the pull saw), or the mapping is
-// gone: the caller leaves the entity to its next run, which lists it again
+// A session-level lock, not a transaction-level one: the wire write runs
+// between the lock and the advance, and a transaction kept open across it
+// held a snapshot (backend_xmin, the vacuum horizon of the whole database)
+// and an AccessShareLock on context_project_sync_map for as long as the
+// forge took to answer — an ALTER TABLE on the table queued behind it, and
+// every later access of the table behind the ALTER. The base check below
+// runs in a statement of its own after the lock is held, so it sees the row
+// as the previous holder left it.
+//
+// A skip leaves the entity to the caller's next run, which lists it again
 // against the row it finds. Not waiting is the bound: no push leg waits on
-// another one's wire call, however long that one hangs. The base is read
-// after the lock is held — a statement of its own, so it sees the row as the
-// lock holder left it.
-func TryLockPushEntity(ctx context.Context, tx pgx.Tx, blockID, listedBase string) (bool, error) {
-	var locked bool
-	if err := tx.QueryRow(ctx,
-		`SELECT pg_try_advisory_xact_lock(hashtext('ctx:forge-push'), hashtext($1::text))`, blockID).Scan(&locked); err != nil {
-		return false, fmt.Errorf("store: push lock: %w", err)
+// another one's wire call, however long that one hangs. err with locked =
+// false means the lock statement's outcome is unknown; the caller closes the
+// connection, so a lock it may hold ends with the session.
+func TryLockPushEntity(ctx context.Context, conn pgxdb.Rower, blockID, listedBase string) (locked bool, skip PushSkip, err error) {
+	if err := conn.QueryRow(ctx, pushLockSQL, blockID).Scan(&locked); err != nil {
+		return false, "", fmt.Errorf("store: push lock: %w", err)
 	}
 	if !locked {
-		return false, nil
+		return false, PushSkipInFlight, nil
 	}
-	var holds bool
-	err := tx.QueryRow(ctx,
-		`SELECT base_hash = $2 AND NOT conflict FROM context_project_sync_map WHERE block_id = $1::uuid`, blockID, listedBase).Scan(&holds)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+	var base string
+	var conflict bool
+	err = conn.QueryRow(ctx,
+		`SELECT base_hash, conflict FROM context_project_sync_map WHERE block_id = $1::uuid`, blockID).Scan(&base, &conflict)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return true, PushSkipGone, nil
+	case err != nil:
+		return true, "", fmt.Errorf("store: push lock: read base: %w", err)
+	case base != listedBase:
+		return true, PushSkipOvertaken, nil
+	case conflict:
+		return true, PushSkipFlagged, nil
 	}
-	if err != nil {
-		return false, fmt.Errorf("store: push lock: read base: %w", err)
+	return true, "", nil
+}
+
+// UnlockPushEntity gives back the push lock TryLockPushEntity took on conn
+// and answers whether the session held it.
+func UnlockPushEntity(ctx context.Context, conn pgxdb.Rower, blockID string) (bool, error) {
+	var released bool
+	if err := conn.QueryRow(ctx, pushUnlockSQL, blockID).Scan(&released); err != nil {
+		return false, fmt.Errorf("store: push unlock: %w", err)
 	}
-	return holds, nil
+	return released, nil
 }
 
 // FlagPushConflict flags a mapping conflict from the push side (a truncated body

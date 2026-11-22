@@ -145,7 +145,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: Schl√
 	"project.events.ping_interval":                   "Seconds between SSE keepalive pings on the project event stream; keep below the fronting proxy's read timeout",
 	"project.events.coalesce_threshold":              "Blocks per project per tick above which the event frame degrades to a count-only issues-bulk refetch signal",
 	"project.sync.rate_limit":                        "Manual forge-sync runs allowed per project per hour, shared across all API keys of the project; excess gets 429 with Retry-After",
-	"project.sync.max_concurrent":                    "Process-wide cap on simultaneously running forge syncs; the semaphore is sized at boot, so changes require a restart",
+	"project.sync.max_concurrent":                    "Process-wide cap on simultaneously running forge syncs; the semaphore is sized at boot, so changes require a restart. Clamped at boot to 9 (each sync holds up to 2 of the 20 database pool connections)",
 	"llmlog.max_limit":                               "Upper bound on the limit parameter of one GET /api/llmlog page, keeping a single read over the telemetry hypertable bounded",
 	"audit.max_limit":                                "Upper bound on the limit parameter of one GET /api/audit page, and the page size when the parameter is absent; 0 falls back to the default",
 	"webchat.enabled":                                "Gates the web-chat streaming and session API routes; off returns 404 and the web UI hides the chat feature",

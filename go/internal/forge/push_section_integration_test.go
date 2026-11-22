@@ -14,8 +14,9 @@
 // Points 1 and 3 do not close this: the pull decides on the locked rows,
 // and they say exactly "forge-ahead". What makes it a loss is a second push
 // writing the same entity while the first one's PATCH is unrecorded. The
-// push now writes an entity, and records the write, inside a transaction
-// that holds the entity's advisory lock; another instance that finds the
+// push now writes an entity, and records the write, under the entity's
+// advisory lock (session-level, on the connection the section holds;
+// push_section_session_integration_test.go); another instance that finds the
 // lock taken leaves the entity to its next run instead of waiting.
 //
 // The other instances run inside the fake forge's PATCH of A (fakegithub
@@ -92,6 +93,10 @@ func i491HoldStatementPool(t *testing.T, dsn string, match func(sql string) bool
 	})
 	return pool, h
 }
+
+// i491AtThePushLock matches the statement that tries an entity's push lock,
+// the first statement of a push section (store.TryLockPushEntity).
+func i491AtThePushLock(sql string) bool { return strings.Contains(sql, "pg_try_advisory_lock") }
 
 // i491TitleSent is the title an issue PATCH carried ("" when none).
 func i491TitleSent(p fakePatch) string {
@@ -218,7 +223,7 @@ func TestPushSectionLeavesAnEntityInFlightToTheNextRun(t *testing.T) {
 func TestPushSectionSkipsAListingAnotherPushOvertook(t *testing.T) {
 	e := i491Setup(t, "i491overtook", "", fakeIssue{Title: "Crane", Body: "forge body"})
 	e.edit(t, store.IssueUpdate{Title: str("Crane, A")})
-	held, hold := i452HoldBeginPool(t, e.dsn)
+	held, hold := i491HoldStatementPool(t, e.dsn, i491AtThePushLock)
 	type out struct {
 		res PushResult
 		err error
@@ -231,7 +236,7 @@ func TestPushSectionSkipsAListingAnotherPushOvertook(t *testing.T) {
 			bOut <- out{res, err}
 		}()
 		select {
-		case <-hold.entered: // B listed and waits at its section's BEGIN
+		case <-hold.entered: // B listed and waits at its section's push lock
 		case o := <-bOut:
 			t.Errorf("instance B finished without opening a section: %+v %v", o.res, o.err)
 		case <-time.After(i452Wait):
@@ -276,7 +281,7 @@ func TestPushSectionSkipsAListingAnotherPushOvertook(t *testing.T) {
 func TestPushSectionSkipsAMappingFlaggedSinceTheListing(t *testing.T) {
 	e := i491Setup(t, "i491flagged", "", fakeIssue{Title: "Crane", Body: "forge body"})
 	e.edit(t, store.IssueUpdate{Content: str("body edited locally")})
-	held, hold := i452HoldBeginPool(t, e.dsn)
+	held, hold := i491HoldStatementPool(t, e.dsn, i491AtThePushLock)
 	type out struct {
 		res PushResult
 		err error
@@ -287,7 +292,7 @@ func TestPushSectionSkipsAMappingFlaggedSinceTheListing(t *testing.T) {
 		done <- out{res, err}
 	}()
 	select {
-	case <-hold.entered: // listed, waiting at its section's BEGIN
+	case <-hold.entered: // listed, waiting at its section's push lock
 	case o := <-done:
 		t.Fatalf("the push finished without opening a section: %+v %v", o.res, o.err)
 	case <-time.After(i452Wait):

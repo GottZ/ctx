@@ -26,6 +26,8 @@ package forge
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/GottZ/ctx/internal/pgxdb"
@@ -124,7 +126,8 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 		// candidates through the bound advance (issue #452) — otherwise it
 		// stays listed for good and, past pushBatchLimit, keeps later
 		// candidates out of the listing.
-		return true, p.section(ctx, c.Block.ID, c.BaseHash, advanceOnly)
+		_, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, advanceOnly)
+		return true, err
 	}
 	ctxProj, _ := parseIssueProjection(ctxFields)
 	truncated := metaBool(c.Block.Metadata, "truncated")
@@ -144,41 +147,91 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 	}
 	if patch.empty() {
 		// Only a never-pushed field (milestone) diverged: advance base, 0 wire.
-		return true, p.section(ctx, c.Block.ID, c.BaseHash, advanceOnly)
+		_, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, advanceOnly)
+		return true, err
 	}
 	return p.wireSection(ctx, c.Block.ID, c.BaseHash, allow, res,
 		func() error { return client.UpdateIssue(ctx, repo, c.ForgeID, patch) }, advanceOnly)
 }
 
-// errThrottled leaves a push section without its commit when the token
+// errThrottled leaves a push section without its record when the token
 // bucket ran dry inside it.
 var errThrottled = errors.New("forge: push throttled")
 
+// pushUnlockGrace bounds the statement that gives a section's push lock back.
+// It runs on a context detached from the caller's (a canceled run must still
+// give the lock back) and is the budget of one statement on an open
+// connection; a connection that does not answer in it is closed instead.
+const pushUnlockGrace = 5 * time.Second
+
 // section runs one write of the push about an entity — the wire write and
-// the advance that records it, or the advance alone — in one transaction
-// that holds the entity's push lock (store.TryLockPushEntity, issue #491).
-// An entity another instance is writing now, wrote since this push listed it
-// or flagged since (its pull saw both sides move), is left to the next run:
-// fn does not run, nothing is written, the pass
-// goes on with the next candidate. The transaction keeps one pool connection
+// the advance that records it, or the advance alone — under the entity's
+// push lock (store.TryLockPushEntity, issue #491): a session-level advisory
+// lock on one pool connection the section holds until it ends. An entity
+// another instance is writing now, wrote since this push listed it or
+// flagged since (its pull saw both sides move), is left to the next run:
+// nothing runs, nothing is written, the pass goes on with the next
+// candidate, and skip says why.
+//
+// wire (nil for the advance alone) runs with no transaction open on the
+// section's connection, so the forge's answer time holds no snapshot and no
+// relation lock in the database; record runs afterwards in one short
+// transaction on that connection. The connection stays out of the pool
 // across the wire write — one per running push leg, the legs are bounded by
-// project.sync.max_concurrent — and fn runs its database writes on it.
-func (p *Pusher) section(ctx context.Context, blockID, listedBase string, fn func(tx pgx.Tx) error) error {
-	err := pgxdb.Write(ctx, p.pool, pgxdb.Stages{Begin: "forge: push section begin", Commit: "forge: push section commit"},
-		func(tx pgx.Tx) error {
-			ok, err := store.TryLockPushEntity(ctx, tx, blockID, listedBase)
-			if err != nil {
-				return err
-			}
-			if !ok {
-				return pgxdb.ErrRollback
-			}
-			return fn(tx)
-		})
-	if errors.Is(err, pgxdb.ErrRollback) {
-		return nil
+// project.sync.max_concurrent (V68 caps it against the pool size). The lock
+// is given back on every way out; a connection whose unlock is not proven
+// (the lock statement failed with an unknown outcome, the unlock failed or
+// found no lock) is closed, and the server releases a closed session's
+// advisory locks — a pooled connection never keeps an entity locked.
+func (p *Pusher) section(ctx context.Context, blockID, listedBase string, wire func() error, record func(tx pgx.Tx) error) (store.PushSkip, error) {
+	conn, err := p.pool.Acquire(ctx)
+	if err != nil {
+		return "", fmt.Errorf("forge: push section: acquire a connection: %w", err)
 	}
-	return err
+	locked, skip, err := store.TryLockPushEntity(ctx, conn, blockID, listedBase)
+	switch {
+	case locked:
+		defer unlockPushEntity(ctx, conn, blockID)
+	case err != nil:
+		closePushConn(ctx, conn)
+		return "", err
+	default:
+		conn.Release()
+		return skip, nil
+	}
+	if err != nil || skip != "" {
+		return skip, err
+	}
+	if wire != nil {
+		if err := wire(); err != nil {
+			return "", err
+		}
+	}
+	return "", pgxdb.Write(ctx, conn.Conn(), pgxdb.Stages{Begin: "forge: push record begin", Commit: "forge: push record commit"}, record)
+}
+
+// unlockPushEntity gives a section's push lock back and returns conn to the
+// pool, or closes conn when the release is not proven.
+func unlockPushEntity(ctx context.Context, conn *pgxpool.Conn, blockID string) {
+	uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pushUnlockGrace)
+	defer cancel()
+	released, err := store.UnlockPushEntity(uctx, conn, blockID)
+	if err != nil || !released {
+		slog.Warn("forge: push lock not released on its connection — closing the connection, the server releases the lock with the session",
+			"block", blockID, "released", released, "error", err)
+		closePushConn(ctx, conn)
+		return
+	}
+	conn.Release()
+}
+
+// closePushConn closes conn and hands it back; the pool destroys a closed
+// connection instead of pooling it.
+func closePushConn(ctx context.Context, conn *pgxpool.Conn) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pushUnlockGrace)
+	defer cancel()
+	_ = conn.Conn().Close(cctx)
+	conn.Release()
 }
 
 // wireSection is section with a content write: the throttle is asked once
@@ -189,7 +242,7 @@ func (p *Pusher) wireSection(ctx context.Context, blockID, listedBase string, al
 	send func() error, record func(tx pgx.Tx) error) (bool, error) {
 
 	sent := false
-	err := p.section(ctx, blockID, listedBase, func(tx pgx.Tx) error {
+	_, err := p.section(ctx, blockID, listedBase, func() error {
 		if !allow() {
 			return errThrottled
 		}
@@ -197,8 +250,8 @@ func (p *Pusher) wireSection(ctx context.Context, blockID, listedBase string, al
 			return err
 		}
 		sent = true
-		return record(tx)
-	})
+		return nil
+	}, record)
 	switch {
 	case errors.Is(err, errThrottled):
 		res.Throttled = true
@@ -268,7 +321,8 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 	}
 	if ctxH == c.BaseHash {
 		// In sync — 0 wire; the row leaves the candidates as in pushIssue.
-		return true, p.section(ctx, c.BlockID, c.BaseHash, advanceOnly)
+		_, err := p.section(ctx, c.BlockID, c.BaseHash, nil, advanceOnly)
+		return true, err
 	}
 	body, truncated := store.CapForgeBody(c.Content)
 
