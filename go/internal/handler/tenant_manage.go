@@ -15,6 +15,7 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
+	"github.com/google/uuid"
 )
 
 // Tenant lifecycle manage-actions (MT T05a + T05b, Achse 01-T5; design/01 §4.3).
@@ -449,11 +450,12 @@ func adminWriteFailed(r *http.Request, msg string, err error, outcome string) {
 // callerDataCodes are the data exceptions (SQLSTATE class 22) a value of the
 // request causes on an admin write: a NUL character in text (22021) or in a
 // JSON value (22P05), a value longer than its column (22001), a number out of
-// its column's range (22003), a text that is no literal of its column's type
-// (22P02). The rest of class 22 stays a server fault — a division by zero, a
-// vector of the wrong dimension (pgvector's 22000) come from the server's own
-// statements and data.
-var callerDataCodes = map[string]bool{"22001": true, "22003": true, "22021": true, "22P02": true, "22P05": true}
+// its column's range (22003). The rest of class 22 stays a server fault — a
+// division by zero, a vector of the wrong dimension (pgvector's 22000) come
+// from the server's own statements and data, and so does a text that is no
+// literal of its type (22P02): no admin route casts a request's value
+// unchecked, while the audit stamp casts a server value (the actor key id).
+var callerDataCodes = map[string]bool{"22001": true, "22003": true, "22021": true, "22P05": true}
 
 // callerDataError returns the PostgreSQL error of a write the database
 // refused for a value of the request (callerDataCodes, issue #505), nil for
@@ -593,6 +595,12 @@ const defaultTenantID = store.DefaultTenantID
 // batched mass-DELETE of the tenant's scope-carried data, its keys, then the
 // tenant row (design/01 §4.3.1). Admin-gated upstream (actionRequiresAdmin); the
 // default tenant is additionally guarded (400). Unknown/malformed id → 404.
+//
+// The id is checked before PruneTenant runs (issue #505): an id that is no
+// uuid names no tenant, and its NUL character would otherwise reach the
+// database as a 22021. Every failure PruneTenant returns is then the
+// server's — 500 with its line — since its statements commit one by one and
+// write_outcome must say that an earlier one may have removed something.
 func (h *ManageHandler) handleTenantDelete(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	if req.ID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "id required"})
@@ -600,6 +608,10 @@ func (h *ManageHandler) handleTenantDelete(w http.ResponseWriter, r *http.Reques
 	}
 	if req.ID == defaultTenantID {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "the default tenant cannot be deleted"})
+		return
+	}
+	if _, err := uuid.Parse(req.ID); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
 		return
 	}
 	// The key hard-delete is recorded as via='offboarding' with this server-admin
@@ -612,7 +624,8 @@ func (h *ManageHandler) handleTenantDelete(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		// PruneTenant deletes in several statements, each committing on its
 		// own: what an earlier one removed is not known here.
-		writeAdminFailure(w, r, "manage: tenant-delete failed", err, writeUnknown, "delete tenant failed")
+		adminWriteFailed(r, "manage: tenant-delete failed", err, writeUnknown)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "delete tenant failed"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": req.ID})

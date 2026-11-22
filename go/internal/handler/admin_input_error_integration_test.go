@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strings"
 	"testing"
@@ -44,13 +45,18 @@ const i505NUL = "i505\x00nul"
 
 var i505Long = strings.Repeat("l", 4096)
 
-// runInputErrorCases runs every case and checks that each is answered 4xx
-// without a line above DEBUG; it prints the table.
-func runInputErrorCases(t *testing.T, cases []inputErrorCase) {
+// runInputErrorCases runs every case and checks that each is answered with
+// the status want names for it ("route | input") and without a line above
+// DEBUG; it prints the table.
+func runInputErrorCases(t *testing.T, cases []inputErrorCase, want map[string]int) {
 	t.Helper()
 	var table []string
 	for i, c := range cases {
 		t.Run(c.route+" "+c.input, func(t *testing.T) {
+			wantStatus, ok := want[c.route+" | "+c.input]
+			if !ok {
+				t.Fatalf("no expected status for %s | %s", c.route, c.input)
+			}
 			logs := installRejectLogCapture(t)
 			status, resp := kaManage(t, c.h, c.as, fmt.Sprintf("i505-%d", i), c.payload)
 			var lines []string
@@ -60,8 +66,8 @@ func runInputErrorCases(t *testing.T, cases []inputErrorCase) {
 				}
 			}
 			table = append(table, fmt.Sprintf("| %s | %s | %d | %s |", c.route, c.input, status, strings.Join(lines, "; ")))
-			if status < 400 || status >= 500 {
-				t.Errorf("%s with %s answered %d %v, want 4xx: the request's value is the caller's mistake", c.route, c.input, status, resp)
+			if status != wantStatus {
+				t.Errorf("%s with %s answered %d %v, want %d: the request's value is the caller's mistake", c.route, c.input, status, resp, wantStatus)
 			}
 			if len(lines) != 0 {
 				t.Errorf("%s with %s wrote %v, want no line above DEBUG", c.route, c.input, lines)
@@ -147,7 +153,20 @@ func TestAdminWriteInputErrorsTenantRoutes(t *testing.T) {
 		c("tenant-delete", "NUL", nil, map[string]any{"id": i505NUL}),
 		c("tenant-delete", "too long", nil, map[string]any{"id": i505Long}),
 	}
-	runInputErrorCases(t, cases)
+	runInputErrorCases(t, cases, map[string]int{
+		"tenant-create | NUL": 400, "tenant-create | invalid JSON field": 400,
+		"tenant-update | NUL": 400, "tenant-update | invalid JSON field": 400,
+		"tenant-limit-set | out of range": 400, "tenant-limit-set | invalid JSON field": 400,
+		"scope-create | NUL": 400, "scope-create | too long": 400, "scope-create | invalid JSON field": 400,
+		"tenant-grant-create | NUL": 400, "tenant-grant-create | too long": 400, "tenant-grant-create | invalid JSON field": 400,
+		"tenant-grant-delete | NUL": 400, "tenant-grant-delete | too long": 404,
+		"tenant-quota-set | NUL": 422, "tenant-quota-set | out of range": 400, "tenant-quota-set | invalid JSON field": 400,
+		"tenant-quota-set | calls out of range": 400,
+		"block-grant-create | NUL": 400, "block-grant-create | too long": 400, "block-grant-create | invalid JSON field": 400,
+		"block-grant-revoke | NUL": 400, "block-grant-revoke | too long": 404,
+		// An id that is no uuid names no tenant: 404 before PruneTenant runs.
+		"tenant-delete | NUL": 404, "tenant-delete | too long": 404,
+	})
 }
 
 func TestAdminWriteInputErrorsBackendRoutes(t *testing.T) {
@@ -194,7 +213,14 @@ func TestAdminWriteInputErrorsBackendRoutes(t *testing.T) {
 	// tenant row may not point at a private base_url, so the host is public.
 	cases = append(cases, c("backend-create", "too long scope", map[string]any{"data": spec("i505-s",
 		"scope", i505Long[:51], "base_url", "https://i505.example.org")}))
-	runInputErrorCases(t, cases)
+	want := map[string]int{"backend-create | too long scope": 422}
+	for _, route := range []string{"backend-create", "backend-update"} {
+		for _, input := range []string{"NUL in extra_headers", "NUL in metadata", "NUL in extra_body", "NUL in a metadata key", "out of range"} {
+			want[route+" | "+input] = 422
+		}
+		want[route+" | invalid JSON field"] = 400
+	}
+	runInputErrorCases(t, cases, want)
 }
 
 func TestAdminWriteInputErrorsModelAliasRoutes(t *testing.T) {
@@ -214,7 +240,11 @@ func TestAdminWriteInputErrorsModelAliasRoutes(t *testing.T) {
 		c("model-alias-delete", "NUL", map[string]any{"id": i505NUL}),
 		c("model-alias-delete", "too long", map[string]any{"id": i505Long}),
 	}
-	runInputErrorCases(t, cases)
+	runInputErrorCases(t, cases, map[string]int{
+		"model-alias-create | NUL": 422, "model-alias-create | NUL in policy": 422, "model-alias-create | too long": 422,
+		"model-alias-create | invalid JSON field": 400, "model-alias-update | NUL in policy": 422,
+		"model-alias-update | invalid JSON field": 400, "model-alias-delete | NUL": 404, "model-alias-delete | too long": 404,
+	})
 }
 
 func TestAdminWriteInputErrorsEmbedMigrationRoutes(t *testing.T) {
@@ -240,6 +270,10 @@ func TestAdminWriteInputErrorsEmbedMigrationRoutes(t *testing.T) {
 		c("embed-migration-create", "invalid JSON field", create(5, emcToModel, emcBackendName)),
 		c("embed-migration-pause", "NUL", map[string]any{"id": i505NUL}),
 		c("embed-migration-rollback", "NUL in the reason", map[string]any{"id": "01900000-0000-7000-8000-000000000505", "data": map[string]any{"reason": i505NUL}}),
+	}, map[string]int{
+		"embed-migration-create | NUL": 400, "embed-migration-create | NUL in a model": 400, "embed-migration-create | too long": 400,
+		"embed-migration-create | invalid JSON field": 400, "embed-migration-pause | NUL": 404,
+		"embed-migration-rollback | NUL in the reason": 404,
 	})
 	// A migration the abort finds: its reason reaches the database.
 	status, resp := kaManage(t, h, admin, "i505-live", map[string]any{"action": "embed-migration-create",
@@ -250,5 +284,51 @@ func TestAdminWriteInputErrorsEmbedMigrationRoutes(t *testing.T) {
 	}
 	runInputErrorCases(t, []inputErrorCase{
 		c("embed-migration-abort", "NUL in the reason", map[string]any{"id": live, "data": map[string]any{"reason": i505NUL}}),
-	})
+	}, map[string]int{"embed-migration-abort | NUL in the reason": 400})
+}
+
+// TestTenantDeleteFailureKeepsItsLine — tenant-delete refuses an id that is
+// no uuid before PruneTenant runs (404, as an unknown tenant), and by the
+// time a later statement of PruneTenant fails, earlier ones have committed:
+// every failure it returns is the server's, 500 with the ERROR line and
+// write_outcome=unknown, whatever its SQLSTATE — here a class-22 refusal of
+// a server value in the audit stamp (the actor key id, the request id) after
+// the tenant's blocks are gone.
+func TestTenantDeleteFailureKeepsItsLine(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	admin, _ := kaServerAdmin(ctx, t, pool)
+	h := mcHandler(t, pool, false, false)
+	for _, c := range []struct{ name, keyID, requestID, code, slug string }{
+		{"actor key id that is no uuid", "i505-not-a-uuid", "i505-del", "22P02", "i505-del-a"},
+		{"NUL in the request id", admin.ApiKeyID, "i505\x00del", "22021", "i505-del-b"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tn := auMakeTenant(ctx, t, pool, h, admin, c.slug)
+			block := mustBlock(t, pool, tn.scope)
+			as := *admin
+			as.ApiKeyID = c.keyID
+			logs := installRejectLogCapture(t)
+			status, resp := kaManage(t, h, &as, c.requestID, map[string]any{"action": "tenant-delete", "id": tn.id})
+			if status != http.StatusInternalServerError {
+				t.Fatalf("tenant-delete failing with %s answered %d %v, want 500", c.code, status, resp)
+			}
+			lines := logs.withMsg("manage: tenant-delete failed")
+			if len(lines) != 1 || lines[0].level != slog.LevelError || lines[0].attrs["write_outcome"] != writeUnknown ||
+				!strings.Contains(lines[0].text(), c.code) {
+				t.Errorf("lines %+v, want one ERROR naming %s with write_outcome=%s", logs.all(), c.code, writeUnknown)
+			}
+			var blocks, tenants int
+			if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM context_blocks WHERE id = $1::uuid),
+				(SELECT count(*) FROM context_tenants WHERE id = $2::uuid)`, block, tn.id).Scan(&blocks, &tenants); err != nil {
+				t.Fatal(err)
+			}
+			if blocks != 0 || tenants != 1 {
+				t.Errorf("after the failure: %d blocks of the tenant, %d tenant rows, want 0 and 1 — the fixture did not fail after a committed step", blocks, tenants)
+			}
+		})
+	}
 }
