@@ -460,13 +460,15 @@ func rowsFnBodyEnd(toks []sqlToken, j int) (int, bool) {
 }
 
 // atomicEnd returns the index of the END that closes a BEGIN ATOMIC body
-// whose first token is toks[k], or bodyRunsToEnd.
+// whose first token is toks[k], or bodyRunsToEnd. A nested BEGIN ATOMIC and
+// a CASE open what an END closes; begin alone is an unreserved word a column
+// alias may take.
 func atomicEnd(toks []sqlToken, k int) (int, bool) {
 	depth := 1
 	for ; k < len(toks); k++ {
 		definitionSteps++
 		switch {
-		case isWordAt(toks, k, "begin"), isWordAt(toks, k, "case"):
+		case isWordAt(toks, k, "begin") && isWordAt(toks, k+1, "atomic"), isWordAt(toks, k, "case"):
 			depth++
 		case isWordAt(toks, k, "end"):
 			depth--
@@ -1056,6 +1058,9 @@ UPDATE context_page_marks SET relpages = relpages + 1 WHERE relid = 'public.cont
 		src: "CREATE OR REPLACE FUNCTION ctx_migration_rows(p_rel regclass, p_threshold bigint)\n" +
 			"RETURNS bigint LANGUAGE sql\nBEGIN ATOMIC\n" +
 			"    SELECT CASE WHEN c.reltuples > 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = p_rel;\nEND;\n"},
+	{class: "too strict", name: "the function redefined with a BEGIN ATOMIC body that aliases a column begin",
+		src: "CREATE OR REPLACE FUNCTION ctx_migration_rows(p_rel regclass, p_threshold bigint)\n" +
+			"RETURNS bigint LANGUAGE sql\nBEGIN ATOMIC\n    SELECT c.reltuples::bigint AS begin FROM pg_class c WHERE c.oid = p_rel;\nEND;\n"},
 	{class: "too strict", name: "a nested block comment that holds a query",
 		src: "/* runbook /* step 1 */ SELECT reltuples FROM pg_class WHERE relname = 'context_blocks'; */\n" + inDo(asksAndBuilds)},
 
