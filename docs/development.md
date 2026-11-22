@@ -1354,7 +1354,59 @@ before the upgrade: `VACUUM` empties such pages but returns only those that trai
 (numbers in [operations](operations.md#migration-191-a-threshold-reads-the-current-size-of-a-table)).
 
 `TestMigrationsDecideSizeWithTheRowsFunction` (`go/migrations`) refuses a migration from 191 on
-whose code decides a size itself — reads `reltuples`, `relpages`, `n_live_tup`,
-`pg_stat_get_live_tuples`, `pg_relation_size`, `pg_total_relation_size` or `pg_table_size`
-outside a definition of the function, also beside a call of it; comments and string literals do
-not count as a definition.
+whose code decides a size itself, also beside a call of the function. It reads the file as the
+PostgreSQL lexer does — comments separate tokens and nest, a `--` comment ends at a line feed or a
+carriage return, a quote ends where PostgreSQL ends it —
+and reads the content of every string and dollar-quoted body again as SQL, so dynamic SQL counts;
+a body after `DO` or `AS` holds statements of its own, while a `;` inside any other string ends no
+statement. Refused:
+
+- `pg_relation_size`, `pg_total_relation_size`, `pg_table_size` and `pg_indexes_size`; the
+  statistics views `pg_stat_[xact_]{all,user,sys}_tables`; the statistics functions that count a
+  table's tuples (`pg_stat_get_live_tuples`, `pg_stat_get_dead_tuples`,
+  `pg_stat_get_[xact_]tuples_{inserted,deleted}`, `pg_stat_get_ins_since_vacuum`,
+  `pg_stat_get_mod_since_analyze`); the TimescaleDB estimates and sizes of a hypertable
+  (`approximate_row_count`, `hypertable_size`, `hypertable_detailed_size`,
+  `hypertable_approximate_size`, `hypertable_approximate_detailed_size`, `hypertable_index_size`,
+  `chunks_detailed_size`); and `EXPLAIN` as a command, the planner's estimate (followed by its
+  options or the statement it plans; a column named `explain` is none);
+- `reltuples` and `relpages` in a statement that names `pg_class`, or qualified by a name that is
+  no relation of the statement (`r.reltuples`, `(r).reltuples`: a row variable, whatever filled
+  it). A column of that name in a user table is no read of the catalog: unqualified, or qualified
+  by the table, its alias or the row of a `FOR … IN` over it in the same statement;
+- a `SELECT count(*)` of every row of one table, or the PL/pgSQL assignment `v := count(*) FROM t`
+  that PostgreSQL evaluates as one (with `INTO`, an alias or a cast, without
+  `WHERE`, join or grouping — a clause word after the table is no alias of it; an `ORDER BY`,
+  `LIMIT` or `OFFSET` on the count's one row, in parentheses or not, bounds nothing), which reads the
+  whole table. A count stopped at the threshold in a subquery, as the function counts, passes;
+  whether a table has rows at all is an `EXISTS`.
+
+A size the file only reports passes: a read inside a `RAISE` (its message, arguments and `USING`
+options) or a `COMMENT ON` cannot steer the file. The same read anywhere else is refused, an
+assignment included — the lint follows no variable to its readers, so a size the WARNING prints
+goes into the `RAISE` itself:
+
+```sql
+RAISE WARNING 'idx_example is missing at % rows (heap %): build it out of band ...',
+    v_rows, pg_size_pretty(pg_relation_size('public.context_blocks'));
+```
+
+A later file may redefine `ctx_migration_rows(regclass, bigint)` at its top level and read inside
+its body: that exact signature (the types also as `pg_catalog.regclass`, `int8` or the quoted
+catalog names `"regclass"`, `"int8"`), the name unqualified or under `public`, from `CREATE` to the end
+of its body (a closed string after `AS`, `BEGIN ATOMIC` to its `END` — a `begin` used as a name
+opens nothing —, `RETURN` to the end of the statement). An overload is another function, and its body is checked, as is a definition inside a
+`DO` block, a string or another routine's `BEGIN ATOMIC` body.
+
+The lint has named limits. It refuses the reads above as a file spells them; a size read it does
+not name passes. It does not see a name spelled to get past it — an escape in an `E''` string or
+a `U&` identifier, a name concatenated from strings, a catalog column renamed by a column alias
+list — nor a read it would have to follow through the file: a copy of `pg_class` in a table the
+file creates, a view or function the file defines, a count with further columns or a table name
+built from strings. Nor does it resolve the scopes of SQL: a column named `raise` after `THEN` or
+`ELSE` in a `CASE` expression is taken for a `RAISE` that reports, and a read after it passes; an
+alias anywhere in a statement counts as a relation of all of it, so a subquery alias named like a
+row variable hides that row's `r.reltuples`, which passes; and a statement that names `pg_class`
+counts every `relpages` and `reltuples` in it, so a user table's column beside a join on
+`pg_class` is refused (split the statement).
+`reviewedForms` in `threshold_test.go` lists each form with its decision (issue #493).
