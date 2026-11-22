@@ -538,8 +538,26 @@ func TestPushInSyncRowLeavesTheCandidates(t *testing.T) {
 		}
 		spy := newPushSpy()
 		res, err := pusherWithRegistry(pool).PushProject(ctx, proj, spy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow)
-		if err != nil || res.Pushed != 0 || spy.wireCalls() != 0 {
-			t.Fatalf("push: pushed=%d wire=%d err=%v, want 0/0", res.Pushed, spy.wireCalls(), err)
+		if err != nil || res.Pushed != 0 || res.Conflicts != 0 || spy.wireCalls() != 0 {
+			t.Fatalf("push: pushed=%d conflicts=%d wire=%d err=%v, want 0/0/0", res.Pushed, res.Conflicts, spy.wireCalls(), err)
+		}
+		// The advance recorded the listed base again, not a moved one: both
+		// mappings keep their base and carry no flag (issue #486).
+		for _, m := range []struct {
+			kind  string
+			id    int64
+			block string
+		}{{"issue", 5, issueID}, {"comment", 700, commentID}} {
+			base, conflict, _, _ := readMapping(t, pool, proj.ID, m.kind, m.id)
+			var ctxH string
+			if m.kind == "issue" {
+				_, ctxH = CtxIssueBase(getBlock(t, pool, proj.Scope, m.block), []string{"done"}, true)
+			} else {
+				_, ctxH = CtxCommentBase(getBlock(t, pool, proj.Scope, m.block))
+			}
+			if base != ctxH || conflict {
+				t.Errorf("%s mapping after the in-sync advance: base is the block's projection %v, flagged %v", m.kind, base == ctxH, conflict)
+			}
 		}
 		i452NoCandidates(t, pool, proj)
 	})
