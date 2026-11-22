@@ -297,6 +297,17 @@ func TestHealthClientThatLeavesFirstChangesNothing(t *testing.T) {
 			t.Errorf("%d DEBUG lines for the backend still down, want 1", len(lines))
 		}
 	})
+	t.Run("an answer count in progress survives a client that leaves", func(t *testing.T) {
+		mode.Store(backendDown)
+		healthCalls(t, snap, 1) // down (known or new)
+		mode.Store(backendUp)
+		healthCalls(t, snap, 2) // two answers in a row, not yet back
+		mode.Store(backendHangs)
+		early(t)
+		mode.Store(backendUp)
+		logs := healthCalls(t, snap, 1)
+		wantOneLine(t, logs, backends.RoleSynthesis, "row-i504-early", slog.LevelInfo, "answers again", 0)
+	})
 	t.Run("a database that hangs while the client leaves", func(t *testing.T) {
 		mode.Store(backendUp)
 		healthCalls(t, snap, 3) // the backend answers again (the INFO comes here)
