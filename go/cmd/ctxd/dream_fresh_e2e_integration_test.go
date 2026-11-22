@@ -29,11 +29,12 @@
 //     queries than the linked blocks push those out of the semantic arm (its
 //     cap is 75, migration 147), and their texts share no lexeme with the
 //     queries — the measurement's arm_ranks block shows that no arm of the
-//     fusion found them. For both pairs the second block is a source only
-//     while graph.enabled is on (never with it off, never through an arm);
-//     the factual pair's must be the query's second source, the topical
-//     pair's position is logged (its placement, 0.3 x the top score, falls
-//     below the twentieth source — see the log line).
+//     fusion found them. For both pairs the test asserts two negatives: no
+//     arm finds the second block, and with graph.enabled off it is never a
+//     source. With graph.enabled on the factual pair's second block must be
+//     the query's second source; the topical pair's position is only logged
+//     (its placement, 0.3 x the top score, falls below the twentieth source,
+//     so it is no source at all — issue #499).
 //
 // Run it alone (about 2½ minutes: one boot, one minute of phase A, B and C):
 //
