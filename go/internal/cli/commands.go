@@ -539,15 +539,18 @@ func listMetaCmd(getClient func() (*Client, error)) *cobra.Command {
 
 // ── digest ───────────────────────────────────────────────────────────.
 
-// digestCallBudget is the client budget of `ctx digest`: none, like
-// purgeCallBudget (issue #505). The digest ends with its client (issue
-// #490), so the main client's 120 s would cut a digest that runs longer and
-// leave the topic map unwritten; its time grows with the blocks of the read
-// window (measured: about 55 µs per block on a test database, no model call),
-// and the server rolls its write deadline while it runs. The call ends when
-// the server answers or the connection breaks, or with Ctrl-C — which ends
-// the digest too.
-const digestCallBudget time.Duration = 0
+// digestCallBudget is the client budget of `ctx digest` (issue #505). The
+// digest ends with its client (issue #490), so the main client's 120 s would
+// cut a digest that runs longer and leave the topic map unwritten; its time
+// grows with the blocks of the read window (measured: about 55 µs per block
+// on a test database, no model call — extrapolated, about one minute at 1 M
+// blocks and ten at 10 M), and the server rolls its write deadline while it
+// runs. 30 minutes is above that and still ends a digest that hangs (on a
+// lock, say), which without a budget held the CLI until Ctrl-C. Unlike
+// purge, whose run goes on on the server whatever the client does, the
+// digest ends with the call. The CLI has no --timeout option; the budgets
+// are named per command. A variable for tests.
+var digestCallBudget = 30 * time.Minute
 
 func digestCmd(getClient func() (*Client, error)) *cobra.Command {
 	get := func() (*Client, error) {
