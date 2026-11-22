@@ -1,9 +1,9 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 191,
-    "migration_count": 79,
-    "migration_chain_sha256": "3100a7cf5ac121d1d8473c9cbcb491d4a7862b2b75c4a77e3a6eaf2d355de2a6",
+    "migration_max": 192,
+    "migration_count": 80,
+    "migration_chain_sha256": "4963e9bc5118a3eb209d6dfe58d74f2932b5ad79123fcd4a84a051d65253d4b8",
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -1902,6 +1902,29 @@
           "name": "pending_count",
           "type": "integer",
           "not_null": false,
+          "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_install": {
+      "columns": [
+        {
+          "name": "singleton",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "dream_default",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "decided_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
           "storage": "p"
         }
       ],
@@ -5258,6 +5281,9 @@
     },
     "context_guard_state_pkey": {
       "def_hash": "4f029a2e2fbfd3d351585f6bd8577bf4738e452a548a0640005e82f9516ce488"
+    },
+    "context_install_pkey": {
+      "def_hash": "c31347e24e85f8b4ae5a3549b314ae9ede60b8419b112c6739aa43cd92a7abfb"
     },
     "context_instance_pkey": {
       "def_hash": "95cca95bd2d121809b03fd3857570a8cfe4f015f3d4ca504d9c9c6d7a5424493"

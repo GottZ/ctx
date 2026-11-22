@@ -658,6 +658,12 @@ func main() {
 	// fatal). Boot-only — the NOTIFY reload path stays read-only by contract.
 	settings.ReencryptSweep(ctx, pool)
 
+	// Issue #492: the installation's defaults (migration 192) — read after the
+	// migrations that record them and before the first config generation that
+	// serves. A database installed with Dream on re-parses the env layer, so
+	// dream.enabled reports the source "install" from here on.
+	cc, issues = bootInstallDefaults(ctx, pool, cc, issues)
+
 	// F2-W4, §2.1 steps 4–7: overlay the context_settings overrides (DB >
 	// env > default; secret_refs resolve in-memory via the sealbox) onto the
 	// validated env config and publish the EFFECTIVE generation as the
@@ -668,6 +674,7 @@ func main() {
 	effCfg, effIssues := settings.Bootstrap(ctx, pool, cc, issues)
 	cfgStore := config.NewStore(effCfg)
 	slog.Info("config: effective", config.BootDumpArgs(cfgStore.Snapshot(), effIssues)...) //nolint:forbidigo // MT 06 BLIND: boot-time effective-config dump — the _global generation, no tenant exists at boot.
+	logDreamInstallDefault(effCfg)
 
 	// A06-A1 / K4 (design/06 §3.4 + §3.5): the retirement's own boot channel,
 	// both halves side by side — env vars the loader no longer sees, and

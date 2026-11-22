@@ -149,6 +149,39 @@ var ErrMigrationLockTimeout = errors.New("timed out waiting for the migration lo
 // version another runner recorded while this one waited for the lock.
 var errAppliedMeanwhile = errors.New("migration applied by another runner")
 
+// freshInstallSetting tells a migration file whether it runs as part of a new
+// installation: 'on' for every file of a run that began on a database without
+// migration history (checkBaselinePrecondition's fresh install), 'off' for
+// every file of any other run. The runner sets it in every file's transaction
+// either way, so a value the session brings along — a database or role
+// default, PGOPTIONS, an earlier transaction of the same pooled connection —
+// never reaches a file. A file reads it with current_setting('ctx.fresh_install',
+// true) = 'on'.
+//
+// It exists for the decisions a release takes differently for new and for
+// upgraded installations without changing an upgraded one: migration 192
+// records with it whether this database runs Dream by default (issue #492).
+// Such a decision belongs to the run, not to the database's contents: a
+// database restored from a dump carries its migration history, so its next
+// run is no fresh install whatever the tables hold. A second runner on the
+// same database (issue #398) decides for itself when it starts: before the
+// first one committed the baseline it reads the empty history too ('on' —
+// the database is new); after that it reads a history and applies the files
+// it gets to with 'off', the old default, never the new one.
+const freshInstallSetting = "ctx.fresh_install"
+
+// freshInstallSQL sets freshInstallSetting for the rest of the transaction;
+// its one argument is 'on' or 'off' (freshInstallValue).
+const freshInstallSQL = `SELECT set_config('` + freshInstallSetting + `', $1, true)`
+
+// freshInstallValue is freshInstallSetting's value for a run.
+func freshInstallValue(fresh bool) string {
+	if fresh {
+		return "on"
+	}
+	return "off"
+}
+
 // runMigrations is RunMigrationsUpTo over the migration files of fsys, with
 // lockWait as the bound of the wait for the migration lock.
 func runMigrations(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS, maxVersion int, lockWait time.Duration) error {
@@ -156,7 +189,8 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS, maxVersi
 		return err
 	}
 
-	if err := checkBaselinePrecondition(ctx, pool, maxVersion); err != nil {
+	fresh, err := checkBaselinePrecondition(ctx, pool, maxVersion)
+	if err != nil {
 		return err
 	}
 
@@ -219,7 +253,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS, maxVersi
 			return fmt.Errorf("reading migration %s: %w", m.filename, err)
 		}
 
-		err = applyMigration(ctx, pool, m.version, m.filename, sql, lockWait)
+		err = applyMigration(ctx, pool, m.version, m.filename, sql, fresh, lockWait)
 		if errors.Is(err, errAppliedMeanwhile) {
 			slog.Info("migration applied by another instance", "version", m.version, "file", m.filename)
 			continue
@@ -289,7 +323,10 @@ func sqlState(err error) string {
 // database or role default) the transaction's snapshot would be the one of
 // its first statement, taken before the wait, and the check would miss the
 // version the other runner committed meanwhile.
-func applyMigration(ctx context.Context, pool *pgxpool.Pool, version int, filename string, sql []byte, lockWait time.Duration) error {
+//
+// fresh is checkBaselinePrecondition's verdict for this run; the file runs
+// with freshInstallSetting set to it for its transaction.
+func applyMigration(ctx context.Context, pool *pgxpool.Pool, version int, filename string, sql []byte, fresh bool, lockWait time.Duration) error {
 	return pgxdb.WriteOpts(ctx, pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, pgxdb.Stages{
 		Begin:  fmt.Sprintf("beginning transaction for migration %d", version),
 		Commit: fmt.Sprintf("committing migration %d", version),
@@ -307,6 +344,10 @@ func applyMigration(ctx context.Context, pool *pgxpool.Pool, version int, filena
 		}
 		if recorded {
 			return errAppliedMeanwhile
+		}
+
+		if _, err := tx.Exec(ctx, freshInstallSQL, freshInstallValue(fresh)); err != nil {
+			return fmt.Errorf("telling migration %d whether it runs on a fresh install: %w", version, err)
 		}
 
 		if _, err := tx.Exec(ctx, string(sql)); err != nil {
@@ -376,11 +417,14 @@ var ErrPreBaselineDatabase = errors.New("database predates the migration baselin
 // Deliberately keyed on _migrations rows, not on schema shape: a database
 // with zero rows is a fresh install by the same definition the runner has
 // always used, and everything else has to be able to name where it stands.
-func checkBaselinePrecondition(ctx context.Context, pool *pgxpool.Pool, maxVersion int) error {
+// fresh reports exactly that case; the runner hands it to every file it
+// applies in this run (freshInstallSetting).
+func checkBaselinePrecondition(ctx context.Context, pool *pgxpool.Pool, maxVersion int) (fresh bool, err error) {
 	if maxVersion < migrations.BaselineVersion {
 		// The caller asked for a prefix of the chain that does not reach the
-		// baseline at all (capped test setups). Nothing to enforce.
-		return nil
+		// baseline at all (capped test setups). Nothing to enforce, and no
+		// file this run applies could read fresh.
+		return false, nil
 	}
 
 	// One aggregate, one round trip. All three verdicts come from the same
@@ -398,16 +442,16 @@ func checkBaselinePrecondition(ctx context.Context, pool *pgxpool.Pool, maxVersi
 		"SELECT count(*), COALESCE(max(version), 0), COALESCE(bool_or(version = $1), false) FROM _migrations",
 		migrations.BaselineVersion,
 	).Scan(&applied, &maxApplied, &hasBaseline); err != nil {
-		return fmt.Errorf("reading migration history: %w", err)
+		return false, fmt.Errorf("reading migration history: %w", err)
 	}
 	if applied == 0 {
-		return nil // fresh install — the baseline is the whole history
+		return true, nil // fresh install — the baseline is the whole history
 	}
 	if hasBaseline {
-		return nil
+		return false, nil
 	}
 
-	return fmt.Errorf("%w: highest applied migration is %d, baseline folds 001-%d — "+
+	return false, fmt.Errorf("%w: highest applied migration is %d, baseline folds 001-%d — "+
 		"upgrade this database with the last v4.x release (v4.38.0) first, then come back "+
 		"(docs/operations.md, \"The v4.x hop is mandatory\")",
 		ErrPreBaselineDatabase, maxApplied, migrations.BaselineVersion)

@@ -769,6 +769,53 @@ func legacyDefaultRow(row backendRow) bool {
 	return legacyDefaultNames[row.Name] && strings.TrimSuffix(row.BaseURL, "/") == legacyDefaultHost
 }
 
+// ── Step 4, closing line: Dream ────────────────────────────────────.
+
+// dreamOnHint is what the Dream line adds when the server runs Dream (issue
+// #492: a new installation does so by default): what it does with the chat
+// backend, and the ways to slow it or switch it off.
+const dreamOnHint = "it calls the chat model of the pool (role dream) in the background, one block after another, " +
+	"for as long as the server runs — on a metered backend that is cost. Slow it: `ctx dream throttle`; " +
+	"stop it until the next restart: `ctx dream off`; off for good: CTX_DREAM_ENABLED=false in the server's .env " +
+	"and a restart"
+
+// dreamOffHint is the Dream line's hint when the server does not run Dream.
+const dreamOffHint = "CTX_DREAM_ENABLED=true in the server's .env and a restart switch it on"
+
+// stepDream reports whether the server runs Dream. /health lists a "dream"
+// service exactly while dream.enabled is effectively true on the server
+// (handler.HealthStatus), so the public route answers without the key. It is a
+// report, not a question: dream.enabled is a restart-class server setting
+// that only the server's environment sets, beyond the reach of a client, and
+// the line already names the one step that switches Dream off. Not summed into
+// the closing verdict — either state is a valid installation.
+func stepDream(cfg Config) {
+	baseURL := strings.TrimSuffix(cfg.BaseURL, "/")
+	client := newHTTPClient(5 * time.Second)
+	resp, err := client.Get(baseURL + "/health")
+	if err != nil {
+		fmt.Println(label("Dream", "unknown (no /health answer) %s", skipMark()))
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	var health struct {
+		Status   string            `json:"status"`
+		Services map[string]string `json:"services"`
+	}
+	if err := json.Unmarshal(body, &health); err != nil || health.Status == "" {
+		fmt.Println(label("Dream", "unknown (invalid /health answer) %s", skipMark()))
+		return
+	}
+	if _, on := health.Services["dream"]; on {
+		fmt.Println(label("Dream", "on %s", okMark()))
+		fmt.Println(indentHint(dreamOnHint))
+		return
+	}
+	fmt.Println(label("Dream", "off %s", skipMark()))
+	fmt.Println(indentHint(dreamOffHint))
+}
+
 // ── Step 5: Version check ──────────────────────────────────────────.
 
 type githubRelease struct {
@@ -1314,7 +1361,8 @@ func initCmd() *cobra.Command {
      form-checked (64 lowercase hex characters) and probed before it is saved
   2. Server connection — /health endpoint reachability
   3. API key — authenticated probe (GET /api/whoami): does the server accept it?
-  4. Backend pool — seeds chat + embed backends when none serve (server-admin key)
+  4. Backend pool — seeds chat + embed backends when none serve (server-admin key),
+     then says whether the server runs Dream on them and how to slow or stop it
   5. Version — compare local version against latest GitHub release
   6. Claude Code hooks — SubagentStart/SubagentStop in settings.json
   7. Statusline — ctx statusline in settings.json
@@ -1381,6 +1429,10 @@ func runInit(noUpdateCheck bool) error {
 		fmt.Println(label("Backends", "skipped (key not verified) %s", skipMark()))
 	default:
 		result.BackendsOK = stepBackends(cfg)
+	}
+	// Step 4's closing line: does the server run Dream on that pool?
+	if result.ConfigOK && result.ServerOK {
+		stepDream(cfg)
 	}
 
 	// Step 5: Version

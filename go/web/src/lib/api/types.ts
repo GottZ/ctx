@@ -70,8 +70,9 @@ export interface WhoamiResponse {
   csrf_token?: string
 }
 
-/** Effective-value provenance (handler/settings.go apiSource). */
-export type SettingSource = 'default' | 'env' | 'db'
+/** Effective-value provenance (handler/settings.go apiSource). `install`: the
+ * installation's default, which only dream.enabled carries (migration 192). */
+export type SettingSource = 'default' | 'env' | 'db' | 'install'
 
 // Source: go/internal/handler/settings.go (settingView). `type` is the
 // registry typeName (string|int|float|bool|protocol|think|seconds|hours|
