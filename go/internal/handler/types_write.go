@@ -157,7 +157,12 @@ func overlayWriteViolation(ctx context.Context, pool *pgxpool.Pool, name, scope 
 	// (measured: TestC24OverlayWriteGate/A2 red on exactly that string). Every
 	// scope, because unlike the axes above its base is COMPILED IN rather than
 	// a row, so the base namespace is the one place it has something to say.
-	return internalOnlyWriteViolation(name, overlay), nil
+	if msg := internalOnlyWriteViolation(name, overlay); msg != "" {
+		return msg, nil
+	}
+	// Issue #491, every scope: a forge_state_map that contradicts the
+	// terminal set (the registry loads such a row with a warning only).
+	return blocktype.WorkflowForgeMapViolation(overlay), nil
 }
 
 // internalOnlyWriteViolation is the Zero-Value bolt of wave C2-8 (design D-02
