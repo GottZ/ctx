@@ -311,7 +311,8 @@ type PushProjection func(b *Block) string
 // that read the mapping before this advance and writes after it cannot
 // order the two versions of that second and flags the mapping, and the pull
 // after it pulls the edit and clears the flag (block and base still at the
-// pushed version).
+// pushed version; the flagging run saves no ETag, so that pull lists the
+// entity again — forge.pageETag).
 //
 // Locks: the block row (FOR NO KEY UPDATE, the lock StampForgeState's UPDATE
 // takes — no lock upgrade), then the mapping row — the order of the pull's
@@ -324,11 +325,14 @@ type PushProjection func(b *Block) string
 // sent says that a wire write carried ctxHash (false: the advance alone, the
 // listed block projecting to its base already, or only a never-pushed field
 // diverging). A flag a pull set since the section's check goes when the
-// base write records what was sent and the block still holds it — block,
-// base and forge agree on the sent version, the answer the pull's noop cell
-// gives as well (issue #509). Where the forge moved past the PATCH since,
-// the next pull finds block and base at the sent version and pulls the
-// forge's, as it would have with the flag. A flag stays when the block
+// base write records what was sent and the block still holds it: block and
+// base hold the sent version, and the forge held it in the fields the PATCH
+// sent when it answered (issue #509). Where the forge holds something else
+// — it moved past the PATCH since, or a remote edit the PATCH overwrote in
+// part left its other fields — the next pull finds block and base at the
+// sent version and pulls the forge's state, which is what it would have
+// done with the flag kept (a flagged pull-update clears it); GitHub has no
+// conditional PATCH, so the overwritten fields are gone either way. A flag stays when the block
 // moved since the listing (it does not hold the sent version), and an
 // advance without a wire write clears none: nothing tells it what the forge
 // holds.

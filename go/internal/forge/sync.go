@@ -57,6 +57,12 @@ type ApplyResult struct {
 	// differs from the recorded base (Applier.applyLocked, issue #491) — once
 	// per entity and run.
 	Skipped int
+	// Unordered counts the fetched entities the pull could not order against
+	// the version their mapping records: the same forge stamp after another
+	// writer moved the base, with other content (olderOrUnordered). The leg
+	// saves no ETag for such a page, so the next run lists the entity again
+	// instead of a 304 (issue #509).
+	Unordered int
 }
 
 // IssueApplyFunc applies one fetched page of issues to the corpus — Welle I-G
@@ -400,7 +406,8 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 	var maxSeen time.Time
 	seen := map[string]bool{}
 	for n := 1; ; n++ {
-		if err := m.applyPage(ctx, project, dryRun, page); err != nil {
+		res, err := m.applyPage(ctx, project, dryRun, page)
+		if err != nil {
 			return err // cursor NOT advanced for this page (commit is below the apply)
 		}
 		m.addPageStats(project.ID, page)
@@ -415,7 +422,7 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 				maxSeen = page.Listed
 			}
 			if !maxSeen.IsZero() {
-				m.commitFetchCursor(ctx, project.ID, "issues", legETag(firstETag, n, page.NextURL), maxSeen)
+				m.commitFetchCursor(ctx, project.ID, "issues", pageETag(firstETag, n, page.NextURL, res), maxSeen)
 			}
 		}
 		if page.NextURL == "" {
@@ -450,7 +457,7 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 			maxSeen = mu
 		}
 		if !maxSeen.IsZero() {
-			m.commitFetchCursor(ctx, project.ID, "comments", legETag(firstETag, n, page.NextURL), maxSeen)
+			m.commitFetchCursor(ctx, project.ID, "comments", pageETag(firstETag, n, page.NextURL, res), maxSeen)
 		}
 		if page.NextURL == "" {
 			return nil
@@ -519,6 +526,20 @@ func legETag(first string, n int, next string) string {
 	return ""
 }
 
+// pageETag is the ETag a leg's cursor saves after its page n (legETag), ""
+// when the page's apply left an entity it could not order against the
+// version its mapping records (ApplyResult.Unordered, issue #509): with the
+// listing's ETag saved, the next run's first page answers 304 while nothing
+// else changes, and the entity — flagged, its version unpulled — is not
+// listed again. Without it the next run lists it again (since is
+// inclusive) and pulls it where the block did not move.
+func pageETag(first string, n int, next string, res ApplyResult) string {
+	if res.Unordered > 0 {
+		return ""
+	}
+	return legETag(first, n, next)
+}
+
 // commitFetchCursor durably advances the etag/since fetch cursor for one leg
 // (leg = "issues" | "comments") after a successful page apply. jsonb `||` replaces
 // only that leg's sub-object; backoff_n and the other leg survive.
@@ -556,13 +577,13 @@ func maxCommentUpdated(page CommentPage) time.Time {
 // applyPage streams one page to the Pull-APPLY hook (I-G). On I-F (nil hook) it is
 // a no-op — the page is fetched and counted, nothing is written. dryRun also skips
 // apply (fetch-only preview).
-func (m *SyncManager) applyPage(ctx context.Context, project store.ProjectRow, dryRun bool, page IssuePage) error {
+func (m *SyncManager) applyPage(ctx context.Context, project store.ProjectRow, dryRun bool, page IssuePage) (ApplyResult, error) {
 	if m.applyIssues == nil || dryRun {
-		return nil
+		return ApplyResult{}, nil
 	}
 	res, err := m.applyIssues(ctx, project, page.Issues)
 	m.addApplied(project.ID, res) // a failed page's committed writes count too (issue #509)
-	return err
+	return res, err
 }
 
 // addApplied adds what an apply of a page did to the run's status — also

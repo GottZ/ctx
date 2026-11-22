@@ -309,4 +309,44 @@ func TestASameSecondRemoteEditAfterAPushIsPulled(t *testing.T) {
 			t.Errorf("two runs landed %d PATCH(es), want 0", n)
 		}
 	})
+	// The same as a sync run that saves its cursor (since, the listing's
+	// ETag; the review of this change): the run that flags saves no ETag, so
+	// the next run lists the issue again instead of a 304 and pulls it.
+	t.Run("a sync run that read the mapping before the advance", func(t *testing.T) {
+		ctx := context.Background()
+		e := i491Setup(t, "i509samesecrun", "", fakeIssue{Title: "Crane", Body: "forge body"})
+		e.gh.setETags()
+		e.i509RunStored(t)
+		e.edit(t, store.IssueUpdate{Title: str("Crane, edited locally")})
+		proj, err := store.GetProjectByID(ctx, e.pool, e.proj.ID)
+		if err != nil || proj == nil {
+			t.Fatalf("project row: %v", err)
+		}
+		held, hold := i452HoldBeginPool(t, e.dsn)
+		m := mgr(e.pool, okTenant, okPolicy, e.gh.client(), e.applier(held).ApplyIssues)
+		e.gh.seam(nil, func() {
+			e.gh.editInSecond(t, 5, func(it *fakeIssue) { it.Body = remote })
+			if _, err := m.StartSync(ctx, *proj, false); err != nil {
+				t.Errorf("start: %v", err)
+			}
+			select {
+			case <-hold.entered:
+			case <-time.After(i452Wait):
+				t.Error("the held run did not reach its write")
+			}
+		})
+		if r := e.pushOn(t, e.pool); r.Pushed != 1 {
+			t.Fatalf("push: %+v", r)
+		}
+		close(hold.release)
+		if st := waitDone(t, m, e.proj.ID); st.Conflicts != 1 || st.Applied != 0 {
+			t.Fatalf("precondition: the run across the advance %+v, want the two versions of one second flagged", st)
+		}
+		if st := e.i509RunStored(t); st.Applied != 1 || st.Conflicts != 0 {
+			t.Errorf("the next run: %+v, want the remote edit pulled (no 304 behind the saved cursor)", st)
+		}
+		if base, conflict := e.mapping(t); conflict || base != e.forgeH(t) || e.body(t) != remote {
+			t.Errorf("flagged %v, base is the forge's %v, block %q", conflict, base == e.forgeH(t), e.body(t))
+		}
+	})
 }

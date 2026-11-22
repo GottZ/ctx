@@ -211,6 +211,7 @@ func (a *Applier) ApplyIssues(ctx context.Context, project store.ProjectRow, iss
 		res.Applied += r.Applied
 		res.Conflicts += r.Conflicts
 		res.Skipped += r.Skipped
+		res.Unordered += r.Unordered
 	}
 	return res, nil
 }
@@ -507,6 +508,8 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 		if handled, conflict, stale := olderOrUnordered(locked, m, p.forgeH, p.fUpdated); handled {
 			if stale {
 				reportStale(ctx, &res, m.BlockID, p.fUpdated, locked.ForgeUpdatedAt)
+			} else if p.forgeH != locked.BaseHash {
+				res.Unordered = 1 // the same stamp as another version: listed again next run (issue #509)
 			}
 			if !conflict {
 				return nil
@@ -654,6 +657,7 @@ func (a *Applier) ApplyComments(ctx context.Context, project store.ProjectRow, c
 		res.Applied += r.Applied
 		res.Conflicts += r.Conflicts
 		res.Skipped += r.Skipped
+		res.Unordered += r.Unordered
 	}
 	return res, nil
 }
@@ -739,16 +743,17 @@ func parseIssueRefs(body string) map[int64]bool {
 
 // referenceTargets resolves the 'references' fact edges of a body (§4.5.7)
 // to their target blocks: each "#<nr>" resolves via the mapping — a number
-// with NO mapping yields NO edge (no phantom links; the next run that pulls
-// the target adds the edge idempotently via the PK). Self-references are
-// dropped and the structural-link-class gate is honoured. 0 forge requests
-// (pure local parsing). The ids come back sorted and distinct.
+// with NO mapping yields NO edge (no phantom links; a later pull-update of
+// the source adds it, idempotently via the PK — a pull of the target does
+// not). Self-references are dropped and the structural-link-class gate is
+// honoured. 0 forge requests (pure local parsing). The ids come back sorted
+// and distinct.
 //
 // It runs on the pool before the pull's write transaction begins (the
 // targets are committed blocks of other issues): the transaction locks
 // those below the source block's id before the block and links exactly
 // these (issue #503) — a target mapped meanwhile gets its edge from a later
-// pull, as an unmapped one does. Resolving them inside the transaction also
+// pull-update of the source, as an unmapped one does. Resolving them inside the transaction also
 // needed a second pool connection while the first held the block.
 func (a *Applier) referenceTargets(ctx context.Context, project store.ProjectRow,
 	pol issueTypePolicy, sourceNum int64, body string) ([]string, error) {
