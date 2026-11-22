@@ -318,6 +318,8 @@ type initMock struct {
 	whoami    map[string]any
 	rows      []map[string]any
 	reachable map[string]bool
+	// createWarnings are the "warnings" backend-create answers, by row name.
+	createWarnings map[string][]string
 
 	mu      sync.Mutex
 	creates []map[string]any
@@ -390,8 +392,13 @@ func (m *initMock) manage(w http.ResponseWriter, r *http.Request) {
 			"base_url": req.Data["base_url"], "roles": req.Data["roles"],
 		})
 		m.reachable["id-"+name] = true
+		warnings := m.createWarnings[name]
 		m.mu.Unlock()
-		writeMockJSON(w, map[string]any{"success": true})
+		answer := map[string]any{"success": true}
+		if warnings != nil {
+			answer["warnings"] = warnings
+		}
+		writeMockJSON(w, answer)
 	case "backend-test":
 		m.mu.Lock()
 		ok := m.reachable[req.ID]

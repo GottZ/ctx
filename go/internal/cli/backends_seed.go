@@ -123,6 +123,12 @@ type seedResult struct {
 	// They are neither created (the name is taken) nor skipped as fine — they
 	// are the reason success is false.
 	Unserved []string `json:"unserved,omitempty"`
+	// Warnings are the server's warnings on the rows this run created, by row
+	// name: backend-create answers them next to its success (a dream role on
+	// a local row without a dream timeout, a role outside the core set). The
+	// seed is a fresh installation's first contact with its pool; a warning it
+	// swallowed reached nobody (issue #495).
+	Warnings map[string][]string `json:"warnings,omitempty"`
 }
 
 // seedBlocker is a present target row that cannot serve the leg it occupies.
@@ -410,13 +416,22 @@ func runBackendsSeed(getClient func() (*Client, error), spec seedSpec, force boo
 		return err
 	}
 	for _, r := range missing {
-		created, err := seedCreateRow(c, r)
+		created, warnings, err := seedCreateRow(c, r)
 		if err != nil {
 			return withOrphanSecretNote(err, res.Secrets)
 		}
 		if created {
 			Errorf("%s: created", r.name)
 			res.Created = append(res.Created, r.name)
+			for _, w := range warnings {
+				Errorf("%s: warning: %s", r.name, w)
+			}
+			if len(warnings) > 0 {
+				if res.Warnings == nil {
+					res.Warnings = map[string][]string{}
+				}
+				res.Warnings[r.name] = warnings
+			}
 		} else {
 			Errorf("%s: already present — skipped", r.name)
 			res.Skipped = append(res.Skipped, r.name)
@@ -638,36 +653,44 @@ func seedSealboxUnavailable(resp []byte) error {
 		"Then re-run the seed. See docs/operations.md#backends. Nothing was written to the pool", detail)
 }
 
-// seedCreateRow posts one backend-create. A name collision (concurrent seed,
-// or a row that appeared between the list and the create) is the idempotent
-// case, not a failure: the store maps the UNIQUE (scope, name) violation to
-// "backend name … already exists".
-func seedCreateRow(c *Client, r seedRow) (bool, error) {
+// seedCreateRow posts one backend-create and returns the server's warnings
+// on the created row. A name collision (concurrent seed, or a row that
+// appeared between the list and the create) is the idempotent case, not a
+// failure: the store maps the UNIQUE (scope, name) violation to "backend name
+// … already exists".
+func seedCreateRow(c *Client, r seedRow) (bool, []string, error) {
 	data, err := json.Marshal(r.payload)
 	if err != nil {
-		return false, fmt.Errorf("%s: marshal payload: %w", r.name, err)
+		return false, nil, fmt.Errorf("%s: marshal payload: %w", r.name, err)
 	}
 	resp, status, err := c.Do(http.MethodPost, "/api/manage", map[string]any{
 		"action": "backend-create",
 		"data":   json.RawMessage(data),
 	})
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if cerr := checkEnvelope(resp, envelopeRequired); cerr != nil {
 		if status == http.StatusConflict || strings.Contains(cerr.Error(), "already exists") {
-			return false, nil
+			return false, nil, nil
 		}
-		return false, fmt.Errorf("creating %s: %w", r.name, cerr)
+		return false, nil, fmt.Errorf("creating %s: %w", r.name, cerr)
 	}
-	return true, nil
+	// The envelope passed, so the answer is a JSON object; a "warnings" of
+	// another shape leaves the list empty rather than failing a done create.
+	var answer struct {
+		Warnings []string `json:"warnings"`
+	}
+	_ = json.Unmarshal(resp, &answer)
+	return true, answer.Warnings, nil
 }
 
 func printSeedResult(res seedResult) error {
 	// The seed result is built locally, not received: it has to be marshalled
 	// before the pipe branch can print it. Marshalling first (instead of inside
 	// the branch) is the one ordering change — seedResult holds a bool, a
-	// string and four []string (:116-126), so json.Marshal has no failing input.
+	// string, four []string and a map of []string, so json.Marshal has no
+	// failing input.
 	out, err := json.Marshal(res)
 	if err != nil {
 		return err
