@@ -1,0 +1,8 @@
+# Differential test of the temporal rules (issue #487): corpus q4b, asked on 2026-01-01 at noon UTC.
+# question, rules output at 36b915f8 (v5.75.0), verdict of a changed output (fixed / disputed / broken), the output now, note.
+Was steht von Juni bis 2026 an?	nil	fixed	["von juni bis 2026 an?|2026-06-01..2026-12-31|range"] linear=1.00	read by hand
+Was lief von Juni bis 2026?	nil	disputed	["von juni bis 2026?|2026-06-01..2026-12-31|range"] linear=1.00	a past question with a window that starts after the day it is asked: the start lies in the year of the end, as the issue decided
+Was ist von Juni bis 2026 geplant?	nil	fixed	["von juni bis 2026 geplant?|2026-06-01..2026-12-31|range"] linear=1.00	read by hand
+Was lief von März bis 2026?	nil	disputed	["von märz bis 2026?|2026-03-01..2026-12-31|range"] linear=1.00	a past question with a window that starts after the day it is asked: the start lies in the year of the end, as the issue decided
+Was lief von Oktober bis 2026?	nil	disputed	["von oktober bis 2026?|2026-10-01..2026-12-31|range"] linear=1.00	a past question with a window that starts after the day it is asked: the start lies in the year of the end, as the issue decided
+Was lief von Montag bis 2026?	["Montag|2025-12-29..|past"] linear=0.60,weekday=0.40	disputed	["von montag bis 2026?|2025-12-29..2026-12-31|range"] linear=1.00	a weekday to a year names no window anyone asks for; before, the rules read the Monday alone

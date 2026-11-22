@@ -173,7 +173,7 @@ func TestRules_AYearBeforeAWordIsNoMonth(t *testing.T) {
 	checkRules(t, now463, map[string]wantDate{
 		"Logs after 2025 may be deleted":   {"2026-01-01", "", DirFrom},
 		"Tests before 2024 may fail":       {"2023-12-31", "", DirUntil},
-		"Requests since 2024 may time out": {"2024-01-01", "2026-11-21", "range"},
+		"Requests since 2024 may time out": {"", "", ""}, // a counted noun in the year's clause (yearEdgeStands)
 		"Teams until 2024 march on":        {"", "", ""},
 		"after 2025 August":                {"", "", ""},
 		"nach 2025 Oktober":                {"", "", ""},

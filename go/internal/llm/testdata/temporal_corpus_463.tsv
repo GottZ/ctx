@@ -38,7 +38,7 @@ Seit 2024 gibt es pgvector 0.8	2024-01-01|2026-11-21|range
 Nach 2025 kam nichts mehr	2026-01-01||from
 Vor 2020 war alles anders	2019-12-31||until
 Bis 2030 wollen wir 1M Blöcke	nil
-Ab 2027 gilt die neue Lizenz	nil
+Ab 2027 gilt die neue Lizenz	2027-01-01||from
 What happens after 3 retries?	nil
 Retry before 2 retries fail?	nil
 Which changes since version 5.73.0?	nil
@@ -54,7 +54,7 @@ Since the migration, what broke?	nil
 Between you and me, is it fast?	nil
 Logs after 2025 may be deleted	2026-01-01||from
 Tests before 2024 may fail	2023-12-31||until
-Requests since 2024 may time out	2024-01-01|2026-11-21|range
+Requests since 2024 may time out	nil
 Errors from 10.13.37.11 to 10.13.37.12?	nil
 Price from $19.99 to $29.99?	nil
 From 12.30 to 14.00 is lunch	nil

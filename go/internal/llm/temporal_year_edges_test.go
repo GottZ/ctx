@@ -48,12 +48,16 @@ func TestRules_YearEdges(t *testing.T) {
 		"Seit 2024 gibt es pgvector 0.8":    {"2024-01-01", "2026-11-21", "range"},
 		"Nach 2025 kam nichts mehr":         {"2026-01-01", "", DirFrom},
 		"Vor 2020 war alles anders":         {"2019-12-31", "", DirUntil},
-		// A year to come is an edge where it ends its clause; before a word
-		// it reads as a count as often (TestRules_ANumberThatIsNoYearIsNoEdge).
-		"bis 2030?":                {"2026-11-21", "2030-12-31", "range"},
-		"Was passiert ab 2048?":    {"2048-01-01", "", DirFrom},
+		// Of the years to come only those up to maxYearsAhead after the
+		// current one are edges, before a word as at the end of a clause; a
+		// later one is a count as often (2048 tokens, the ports of the 2000s,
+		// 20:30 written "2030"), and the end of its clause alone is no proof.
+		"bis 2028?":                     {"2026-11-21", "2028-12-31", "range"},
+		"bis 2029?":                     {},
+		"bis 2030?":                     {},
+		"Was passiert ab 2048?":         {},
 		"Bis 2030 wollen wir 1M Blöcke": {},
-		"Ab 2027 gilt die neue Lizenz":  {},
+		"Ab 2027 gilt die neue Lizenz":  {"2027-01-01", "", DirFrom},
 		// A month without its year before a year as the end lies in that
 		// year; a month after a year is the month.
 		"Was lief von Juni bis 2026?": {"2026-06-01", "2026-12-31", "range"},
@@ -63,7 +67,9 @@ func TestRules_YearEdges(t *testing.T) {
 		"Seit 2024, Oktober":          {"2024-10-01", "2026-11-21", "range"},
 		"Logs after 2025 may be deleted":    {"2026-01-01", "", DirFrom},
 		"Tests before 2024 may fail":        {"2023-12-31", "", DirUntil},
-		"Requests since 2024 may time out":  {"2024-01-01", "2026-11-21", "range"},
+		// A counted noun in the year's clause makes the number a count as
+		// often: the rules leave the question to the LLM fallback.
+		"Requests since 2024 may time out":  {},
 		"since 2024, lines have grown":      {"2024-01-01", "2026-11-21", "range"},
 		"seit (2024)":                       {"2024-01-01", "2026-11-21", "range"},
 		"Welche Blöcke gibt es seit 2024?":  {"2024-01-01", "2026-11-21", "range"},
