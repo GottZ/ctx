@@ -136,6 +136,58 @@ exactly that error (`wait for reaper …: context deadline exceeded`), logging
 60 s longer instead of failing; every other setup error fails at once as
 before, and a second failure names both attempts.
 
+**Integration tests against the production image.** `CTX_TEST_PG_IMAGE` names
+the image `internal/testdb` starts; unset, it is `timescale/timescaledb-ha:pg18`,
+the image CI runs. Set to `pgvector-timescaledb:pg18` (built from `db-image/`,
+the image a deployment runs), any integration package runs against the
+production image. `testdb` takes the name as given, without a fallback, so the
+image has to exist locally first (it is not published):
+
+```bash
+docker build -t pgvector-timescaledb:pg18 db-image
+cd go && CTX_TEST_PG_IMAGE=pgvector-timescaledb:pg18 go test -tags=integration -p 1 -count=1 -timeout 30m ./internal/store/
+```
+
+The two images differ in more than their versions, and plan and cost pins see
+the difference:
+
+| | `timescale/timescaledb-ha:pg18` (CI) | `pgvector-timescaledb:pg18` (production) |
+|---|---|---|
+| Versions | PostgreSQL 18.7, TimescaleDB 2.32.1 on 2026-11-22 (the tag floats) | PostgreSQL 18.6, TimescaleDB 2.31.0 (`db-image/Dockerfile` pins the base image by digest and the TimescaleDB packages by version) |
+| Planner inputs | set by `timescaledb-tune` at start, sized from the `TS_TUNE_MEMORY=2GB` and `TS_TUNE_NUM_CPUS=2` that `testdb` passes (so they do not follow the host): `random_page_cost` 1.1, `work_mem` 32 MB, `effective_cache_size` about 1.9 GB, `max_parallel_workers_per_gather` 1 | PostgreSQL's defaults: `random_page_cost` 4, `work_mem` 4 MB, `effective_cache_size` 4 GB, `max_parallel_workers_per_gather` 2 |
+| JIT | not available (`pg_jit_available()` is false), `jit = off` | available, `jit = on` |
+| Collation of the cluster | `C.UTF-8` | `en_US.utf8` |
+
+A deployment prices pages with `random_page_cost` 4 unless its operator set
+another value, so on that input the production image plans as a deployment
+does and the CI image does not. Three tests need JIT and skip on the CI image:
+`TestMigration177_JitOfAFirstCallDoesNotStick`,
+`TestTransitionTablePlansDoNotKeepJit` and
+`TestMigration180ReplansABackendThatKeptJit`. A plan or cost pin that fails on
+one image only: run it on each image with the other image's setting, through
+`PGOPTIONS` (pgx reads it for every connection the test binary opens, the
+test's own `SET`s still win):
+
+```bash
+cd go && PGOPTIONS='-c random_page_cost=4' go test -tags=integration -p 1 -count=1 -run '<test>' ./internal/store/
+cd go && CTX_TEST_PG_IMAGE=pgvector-timescaledb:pg18 PGOPTIONS='-c random_page_cost=1.1' go test -tags=integration -p 1 -count=1 -run '<test>' ./internal/store/
+```
+
+A result that follows the setting on both images is not tied to an image: the
+setting decides it, and a deployment on the default gets the result of 4.
+
+Expected red on the production image (`internal/store`, measured for issue
+#485, where the follow-up issues are linked): `TestBlockCounts_StatsCostIndependentOfCorpus`
+(at `random_page_cost` 4 the oldest/newest entry of `GetStats` walks
+`idx_context_created` instead of reading one entry of
+`idx_context_scope_active` per scope) and
+`TestEmbedExcludedTenantEntryCostBothDirections` (at `random_page_cost` 4 the
+reconcile's batches walk `context_blocks_pkey` and `idx_context_scope`
+instead of the scope's range of their partial indexes). Both are product
+findings, not image artefacts: the same plans and buffer counts appear on the
+CI image under `random_page_cost` 4. In one run of the whole package on each
+image (2026-11-22, 633 top-level tests) every other test passed.
+
 ### Gates by impact (`go/gates.sh`)
 
 Most changes touch one package, yet the complete local list (build, vet, `-short`
