@@ -163,7 +163,8 @@ func TestTransitionTableFunctionsRunWithoutJit(t *testing.T) {
 // auto_explain notice: the block counters of 170, the guard counter of 177,
 // the project delete notification. The guard counter (mark_guard_dirty) left
 // the schema with migration 181 (issue #341): a database at head runs no
-// plan of it, one at 179 does (TestMigration180ReplansABackendThatKeptJit).
+// plan of it; one at 179, where TestMigration180ReplansABackendThatKeptJit
+// starts, still has the function.
 var transitionQueries = []string{
 	"INSERT INTO context_block_count_deltas",
 	"IS DISTINCT FROM 'index'",
