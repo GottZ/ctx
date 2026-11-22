@@ -295,9 +295,13 @@ func checkAuditClassification(ctx context.Context, pool *pgxpool.Pool) []string 
 		}
 
 		// (2) the whitelist projection emits exactly the audited keys. A NULL row
-		// still yields every key (jsonb_build_object keeps NULL values).
+		// still yields every key (jsonb_build_object keeps NULL values). The keys
+		// are sorted in byte order, as sortedJoin sorts the classification: the
+		// database's default collation is not that order everywhere (an
+		// en_US.utf8 cluster, as the production image initialises, sorts
+		// allowed_cidrs before allow_plaintext; a C.UTF-8 cluster after it).
 		keys, err := stringList(ctx, pool, fmt.Sprintf(
-			`SELECT k FROM jsonb_object_keys(%s(NULL::%s)) AS k ORDER BY k`, c.stateFn, c.table))
+			`SELECT k FROM jsonb_object_keys(%s(NULL::%s)) AS k ORDER BY k COLLATE "C"`, c.stateFn, c.table))
 		if err != nil {
 			bad = append(bad, fmt.Sprintf("%s: %s(): %v", c.table, c.stateFn, err))
 		} else if got, want := strings.Join(keys, ","), sortedJoin(c.audited); got != want {
