@@ -18,14 +18,14 @@
 -- would switch Dream on for it with the upgrade — cost on a metered backend
 -- nobody ordered. Whether a database is new is known to exactly one party:
 -- the migration runner, at the run that finds no migration history
--- (store.checkBaselinePrecondition). That run sets the transaction-local
--- setting ctx.fresh_install = 'on' for every file it applies
--- (store.freshInstallSetting); this file reads it. A run on a database with
--- history leaves it unset, so the row says false.
+-- (store.checkBaselinePrecondition). The runner sets the transaction-local
+-- setting ctx.fresh_install for every file it applies (store.freshInstallSetting):
+-- 'on' on that run, 'off' on every other, whatever the session brings along.
+-- This file reads it; on a database with history the row says false.
 --
 -- What counts as an upgrade. Everything with a migration history: an
--- installation of an earlier release, and a database restored from a dump
--- into a new instance (the dump carries its _migrations rows). A dump
+-- installation of an earlier release, and a dump of one restored into a new
+-- instance (the dump carries its _migrations rows). A dump
 -- restored over a database this release had already installed, without
 -- dropping it first, arrives without this file in its history: the next boot
 -- applies the file again, and ON CONFLICT DO UPDATE writes false over the
@@ -37,8 +37,10 @@
 -- killed container) leaves a history behind; the next run is no fresh run and
 -- the row says false. So does a second ctxd instance that starts on the same
 -- empty database after the first committed the baseline and applies this file
--- itself (issue #398, several instances booting together). Both fail toward
--- the old default; CTX_DREAM_ENABLED=true switches Dream on.
+-- itself (issue #398, several instances booting together); one that started
+-- before that commit read the empty history too and writes true. Both
+-- failures fall toward the old default; CTX_DREAM_ENABLED=true switches Dream
+-- on.
 --
 -- Cost and locks. One new table of one row; nothing else is read or locked.
 --

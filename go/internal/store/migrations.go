@@ -151,25 +151,36 @@ var errAppliedMeanwhile = errors.New("migration applied by another runner")
 
 // freshInstallSetting tells a migration file whether it runs as part of a new
 // installation: 'on' for every file of a run that began on a database without
-// migration history (checkBaselinePrecondition's fresh install), not set at
-// all otherwise. A file reads it with current_setting('ctx.fresh_install',
-// true) = 'on' — NULL (never set on the connection) and '' (set in an earlier
-// transaction of the same pooled connection) both read as "not fresh".
+// migration history (checkBaselinePrecondition's fresh install), 'off' for
+// every file of any other run. The runner sets it in every file's transaction
+// either way, so a value the session brings along — a database or role
+// default, PGOPTIONS, an earlier transaction of the same pooled connection —
+// never reaches a file. A file reads it with current_setting('ctx.fresh_install',
+// true) = 'on'.
 //
 // It exists for the decisions a release takes differently for new and for
 // upgraded installations without changing an upgraded one: migration 192
 // records with it whether this database runs Dream by default (issue #492).
 // Such a decision belongs to the run, not to the database's contents: a
 // database restored from a dump carries its migration history, so its next
-// run is no fresh install whatever the tables hold. The one run that can see
-// the empty history is the one that applies the baseline; a second runner
-// that starts while it works (issue #398) sees the history the first one
-// committed and decides "not fresh" for the files it applies itself — the
-// failure direction is the old default, never the new one.
+// run is no fresh install whatever the tables hold. A second runner on the
+// same database (issue #398) decides for itself when it starts: before the
+// first one committed the baseline it reads the empty history too ('on' —
+// the database is new); after that it reads a history and applies the files
+// it gets to with 'off', the old default, never the new one.
 const freshInstallSetting = "ctx.fresh_install"
 
-// freshInstallSQL sets freshInstallSetting for the rest of the transaction.
-const freshInstallSQL = `SELECT set_config('` + freshInstallSetting + `', 'on', true)`
+// freshInstallSQL sets freshInstallSetting for the rest of the transaction;
+// its one argument is 'on' or 'off' (freshInstallValue).
+const freshInstallSQL = `SELECT set_config('` + freshInstallSetting + `', $1, true)`
+
+// freshInstallValue is freshInstallSetting's value for a run.
+func freshInstallValue(fresh bool) string {
+	if fresh {
+		return "on"
+	}
+	return "off"
+}
 
 // runMigrations is RunMigrationsUpTo over the migration files of fsys, with
 // lockWait as the bound of the wait for the migration lock.
@@ -313,8 +324,8 @@ func sqlState(err error) string {
 // its first statement, taken before the wait, and the check would miss the
 // version the other runner committed meanwhile.
 //
-// fresh is checkBaselinePrecondition's verdict for this run; on a fresh run
-// the file runs with freshInstallSetting set for its transaction.
+// fresh is checkBaselinePrecondition's verdict for this run; the file runs
+// with freshInstallSetting set to it for its transaction.
 func applyMigration(ctx context.Context, pool *pgxpool.Pool, version int, filename string, sql []byte, fresh bool, lockWait time.Duration) error {
 	return pgxdb.WriteOpts(ctx, pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, pgxdb.Stages{
 		Begin:  fmt.Sprintf("beginning transaction for migration %d", version),
@@ -335,10 +346,8 @@ func applyMigration(ctx context.Context, pool *pgxpool.Pool, version int, filena
 			return errAppliedMeanwhile
 		}
 
-		if fresh {
-			if _, err := tx.Exec(ctx, freshInstallSQL); err != nil {
-				return fmt.Errorf("marking migration %d as part of a fresh install: %w", version, err)
-			}
+		if _, err := tx.Exec(ctx, freshInstallSQL, freshInstallValue(fresh)); err != nil {
+			return fmt.Errorf("telling migration %d whether it runs on a fresh install: %w", version, err)
 		}
 
 		if _, err := tx.Exec(ctx, string(sql)); err != nil {

@@ -7,6 +7,9 @@
 //
 //   - fresh: no history (testdb's cap 0 leaves _migrations empty) — true;
 //   - upgrade: a database of the release before (history through 191) — false;
+//   - upgrade_with_the_setting_preset: the same with ctx.fresh_install = 'on'
+//     as a database default, which every new session starts with — false:
+//     the runner's 'off' for its own files wins;
 //   - interrupted_first_boot: a first boot that stopped after 150 — its next
 //     run finds a history, so false (the old default);
 //   - restored_over_a_fresh_install: an old dump restored over a database
@@ -23,6 +26,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/store"
@@ -59,6 +63,33 @@ func TestDreamInstallDefault(t *testing.T) {
 		migrate(t, pool)
 		if load(t, pool) {
 			t.Error("a database upgraded from 191 reads dream_default = true, want false")
+		}
+	})
+
+	// A database (or role) default of the setting is not the runner's
+	// verdict: an upgrade run must write false even when every session
+	// starts with ctx.fresh_install = 'on'.
+	t.Run("upgrade_with_the_setting_preset", func(t *testing.T) {
+		pool, dsn := testdb.SetupTestDBUpToWithDSN(t, 191)
+		var db string
+		if err := pool.QueryRow(ctx, `SELECT current_database()`).Scan(&db); err != nil {
+			t.Fatalf("current_database: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `ALTER DATABASE `+pgx.Identifier{db}.Sanitize()+` SET ctx.fresh_install = 'on'`); err != nil {
+			t.Fatalf("preset the setting: %v", err)
+		}
+		preset, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Fatalf("pool: %v", err)
+		}
+		defer preset.Close()
+		var got string
+		if err := preset.QueryRow(ctx, `SELECT current_setting('ctx.fresh_install', true)`).Scan(&got); err != nil || got != "on" {
+			t.Fatalf("fixture: a new session reads ctx.fresh_install = %q (err %v), want on", got, err)
+		}
+		migrate(t, preset)
+		if load(t, preset) {
+			t.Error("an upgrade with ctx.fresh_install preset to on reads dream_default = true, want false")
 		}
 	})
 
