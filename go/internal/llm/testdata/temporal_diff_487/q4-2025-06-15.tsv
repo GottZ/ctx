@@ -32,7 +32,7 @@ Was hat sich seit 2099 geändert?	nil
 Was lief von 2020 bis 2099?	nil
 Was lief von 2019 bis 2025?	nil
 Was lief von 2024 bis 2100?	nil
-Was lief seit 2026 bis 2024?	nil	disputed	["seit 2026 bis 2024?|2024-01-01..2026-12-31|range"] linear=1.00	an end before its start; the swap is one reading of a question that names none
+Was lief seit 2026 bis 2024?	nil
 Was lief ab 2026 bis 2024?	nil	disputed	["ab 2026 bis 2024?|2024-01-01..2026-12-31|range"] linear=1.00	an end before its start; the swap is one reading of a question that names none
 Was lief von 2025 bis Juni?	nil	fixed	["von 2025 bis juni?|2025-01-01..2025-06-30|range"] linear=1.00	read by hand
 Was lief von Juni bis 2026?	nil	disputed	["von juni bis 2026?|2026-06-01..2026-12-31|range"] linear=1.00	a past question with a window that starts after the day it is asked: the start lies in the year of the end, as the issue decided

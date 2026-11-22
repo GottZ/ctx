@@ -32,7 +32,7 @@ Was hat sich seit 2099 geändert?	nil
 Was lief von 2020 bis 2099?	nil
 Was lief von 2019 bis 2025?	nil
 Was lief von 2024 bis 2100?	nil
-Was lief seit 2026 bis 2024?	["seit 2026 bis 2024?|2024-01-01..2026-12-31|range"] linear=1.00
+Was lief seit 2026 bis 2024?	["seit 2026 bis 2024?|2024-01-01..2026-12-31|range"] linear=1.00	disputed	nil	asked in June 2025, "seit 2026" names a start ahead: no since-window (the LLM fallback reads it); the swapped window 2024..2026 was a reading as well
 Was lief ab 2026 bis 2024?	["ab 2026 bis 2024?|2024-01-01..2026-12-31|range"] linear=1.00
 Was lief von 2025 bis Juni?	["von 2025 bis juni?|2025-01-01..2025-06-30|range"] linear=1.00
 Was lief von Juni bis 2026?	["von juni bis 2026?|2026-06-01..2026-12-31|range"] linear=1.00

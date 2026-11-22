@@ -405,8 +405,8 @@ What did we deprecate after 2018?	nil
 What did the stack look like before 2020?	nil	fixed	["before 2020?|2019-12-31..|until"] linear=1.00	right by the review criterion (expected past, rule ja)
 Who maintained the repo from 2017 to 2019?	nil
 Ab 2030 soll alles auf IPv6 laufen, was fehlt noch?	nil
-Since 2022, how many outages did we have?	nil
-Seit 2022 – wie viele Ausfälle hatten wir?	nil
+Since 2022, how many outages did we have?	nil	fixed	["since 2022, how many|2022-01-01..2026-11-22|range"] linear=1.00	right by the review criterion (expected past, rule ja)
+Seit 2022 – wie viele Ausfälle hatten wir?	nil	fixed	["seit 2022 – wie|2022-01-01..2026-11-22|range"] linear=1.00	right by the review criterion (expected past, rule ja)
 Nach 2015 gab es kein Windows mehr im Stack, oder?	nil
 Before 2010 was everything on-prem?	nil
 Bis 2035 wollen wir CO2-neutral sein, was heißt das für den Spark?	nil

@@ -136,9 +136,10 @@ var colloquialForms = map[string]string{"ham": "haben", "hamma": "haben", "hamse
 // the verb (issue #506): a word of colloquialForms; a known German finite
 // verb with the clitic "es" glued to it ("gab's", "hat's", "war's", "gibt's",
 // written with ' or ’), which the English "it's" or "what's" is not; and in a
-// German question "is", which spoken German writes for "ist" and which, as
+// German sentence "is", which spoken German writes for "ist" and which, as
 // the English copula as well, says nothing of the language of the question
-// (questionLanguage).
+// (questionLanguage). An English sentence starts a clause at each embedded
+// clause it opens (embeddedClauses).
 func (c *clauseWords) colloquial() {
 	for i, w := range c.words {
 		if f, ok := colloquialForms[w]; ok {
@@ -151,15 +152,19 @@ func (c *clauseWords) colloquial() {
 			}
 		}
 	}
-	switch questionLanguage(*c) {
-	case langGerman:
-		for i, w := range c.words {
-			if w == "is" {
-				c.words[i] = "ist"
+	for ss := 0; ss < len(c.words); {
+		_, se := c.sentenceOf(ss)
+		switch c.sentenceLanguage(ss, se) {
+		case langGerman:
+			for i := ss; i < se; i++ {
+				if c.words[i] == "is" {
+					c.words[i] = "ist"
+				}
 			}
+		case langEnglish:
+			c.embeddedClauses(ss, se)
 		}
-	case langEnglish:
-		c.embeddedClauses()
+		ss = se
 	}
 }
 
@@ -171,11 +176,11 @@ func (c *clauseWords) colloquial() {
 var englishEmbedOpeners = toWordSet("which", "what", "who", "whom", "whose", "when", "where", "why", "how", "whether", "because")
 
 // embeddedClauses starts a clause at each English embedded-clause opener of
-// c (issue #506): an English sentence marks its subordinate clauses by the
-// word that opens them, not by a comma, and the tense of the clause a date
-// stands in decides (tenseAt).
-func (c *clauseWords) embeddedClauses() {
-	for i := 1; i < len(c.words); i++ {
+// the sentence [s, e) of c (issue #506): an English sentence marks its
+// subordinate clauses by the word that opens them, not by a comma, and the
+// tense of the clause a date stands in decides (tenseAt).
+func (c *clauseWords) embeddedClauses(s, e int) {
+	for i := s + 1; i < e; i++ {
 		if englishEmbedOpeners[c.words[i]] {
 			c.starts[i] = true
 		}
@@ -522,8 +527,14 @@ var (
 // ("Was Jürgen there on Monday?" is German to it) and needs two stopwords or
 // a domain term ("Was kommt am Montag?" is not German to it).
 func questionLanguage(c clauseWords) int {
+	return c.languageOf(0, len(c.words))
+}
+
+// languageOf is questionLanguage for the words [s, e) of c.
+func (c clauseWords) languageOf(s, e int) int {
 	de, en := 0, 0
-	for i, w := range c.words {
+	for i := s; i < e; i++ {
+		w := c.words[i]
 		if c.upper[i] || (w == "am" || w == "um") && i > 0 && (c.words[i-1] == "i" || strings.Trim(c.words[i-1], "0123456789") == "") {
 			continue // an acronym ("ES"), the English "3 am" and "I am"
 		}
@@ -543,6 +554,31 @@ func questionLanguage(c clauseWords) int {
 		return langEnglish
 	}
 	return langMixed
+}
+
+// sentenceOf returns the words [s, e) of the sentence that holds word i.
+func (c clauseWords) sentenceOf(i int) (s, e int) {
+	s = i
+	for s > 0 && !c.sentence[s] {
+		s--
+	}
+	e = i + 1
+	for e < len(c.words) && !c.sentence[e] {
+		e++
+	}
+	return s, e
+}
+
+// sentenceLanguage is the language of the sentence [s, e) of c where its
+// words decide it, and the language of the whole question where they do not
+// (issue #506): "Was Robert available on Monday? Ist das klar?" asks its
+// first sentence in English and its second in German, and the question as a
+// whole is of both.
+func (c clauseWords) sentenceLanguage(s, e int) int {
+	if l := c.languageOf(s, e); l != langMixed {
+		return l
+	}
+	return questionLanguage(c)
 }
 
 // monthOnlyIn reports whether w is a month name of the table in and of no
@@ -628,9 +664,17 @@ func DetectVerbTense(query string) string {
 	return c.wholeTense()
 }
 
-// wholeTense is the tense of the whole question c.
+// wholeTense is the tense of the whole question c, each sentence scored in
+// its own language (sentenceLanguage).
 func (c clauseWords) wholeTense() string {
-	return c.tense(0, len(c.words), questionLanguage(c))
+	past, future := 0, 0
+	for ss := 0; ss < len(c.words); {
+		_, se := c.sentenceOf(ss)
+		p, f := c.scores(ss, se, c.sentenceLanguage(ss, se))
+		past, future = past+p, future+f
+		ss = se
+	}
+	return verdict(past, future)
 }
 
 // firstDateWord returns the byte offset of the first word of query that
@@ -674,14 +718,15 @@ var dayKeywords = func() map[string]bool {
 // the tense of the whole question (wholeTense). A clause whose Perfekt
 // a later clause closes ("Was haben wir am Montag, nach dem Standup,
 // besprochen?") reads that participle (hasPerfektForm). The language is the
-// whole question's.
+// sentence's (sentenceLanguage).
 func tenseAt(query string, off int) string {
 	c := clauseTokens(query)
 	// The offsets are those of the lowercased question; where lowercasing
 	// changes the length (a few letters beyond ASCII), the whole question.
 	if i := c.wordAt(off); i >= 0 && len(strings.ToLower(query)) == len(query) {
 		if s, e := c.clauseOf(i); (s > 0 || e < len(c.words)) && c.hasOwnVerb(s, e) {
-			return c.tense(s, e, questionLanguage(c))
+			ss, se := c.sentenceOf(s)
+			return c.tense(s, e, c.sentenceLanguage(ss, se))
 		}
 	}
 	return c.wholeTense()
@@ -689,9 +734,29 @@ func tenseAt(query string, off int) string {
 
 // tense scores the words [s, e) of c in the language lang.
 func (c clauseWords) tense(s, e, lang int) string {
+	return verdict(c.scores(s, e, lang))
+}
+
+// verdict is the tense of a past and a future score: neutral without
+// either, the higher one, and past for a tie (conservative).
+func verdict(pastScore, futureScore int) string {
+	if pastScore == 0 && futureScore == 0 {
+		return "neutral"
+	}
+	if pastScore > futureScore {
+		return "past"
+	}
+	if futureScore > pastScore {
+		return "future"
+	}
+	return "past" // tie: conservative
+}
+
+// scores is the past and the future score of the words [s, e) of c in the
+// language lang (tense).
+func (c clauseWords) scores(s, e, lang int) (pastScore, futureScore int) {
 	words := c.words[s:e]
 	joined := strings.Join(words, " ")
-	pastScore, futureScore := 0, 0
 
 	// Explicit direction markers (strong signal)
 	for _, tok := range words {
@@ -742,17 +807,7 @@ func (c clauseWords) tense(s, e, lang int) string {
 	if hasSeparableVerb(words) {
 		futureScore += 2
 	}
-
-	if pastScore == 0 && futureScore == 0 {
-		return "neutral"
-	}
-	if pastScore > futureScore {
-		return "past"
-	}
-	if futureScore > pastScore {
-		return "future"
-	}
-	return "past" // tie: conservative
+	return pastScore, futureScore
 }
 
 // pastVerbs counts the past verbs of words in the language lang (tense).
@@ -1294,8 +1349,9 @@ func (c clauseWords) clauseEnd(s int) int {
 // besprochen?", "…, glaube ich, was beschlossen?"). Clauses without either
 // are passed, and so are clauses with an auxiliary that a subordinating word
 // or an interrogative opens ("…, bevor du gegangen bist, deployed?"); any
-// other clause with an auxiliary of its own ends the search ("…, und was ist
-// geplant?"). The entry of a clause start is the start found, -1 for none.
+// other clause with an auxiliary or another finite verb the rules know
+// ends the search ("…, und was ist geplant?", "…, oder wird da
+// gearbeitet?": the participle is that clause's own, issue #506). The entry of a clause start is the start found, -1 for none.
 // The table is filled from the last clause to the first, each clause read
 // once (issue #506): searched clause by clause from every auxiliary, the
 // search cost time quadratic in the number of clauses.
@@ -1309,7 +1365,8 @@ func (c clauseWords) closingParticiples() []int {
 		scanned(ce - cs)
 		aux := false
 		for k := cs; k < ce; k++ {
-			aux = aux || perfektAux[c.words[k]]
+			w := c.words[k]
+			aux = aux || perfektAux[w] || germanFiniteWords[w] || germanPastVerbs[w]
 		}
 		switch {
 		case c.sentence[cs], aux && !clauseOpeners[c.words[cs]]:
@@ -1707,7 +1764,7 @@ var reISODateRangeIndicator = regexp.MustCompile(`(?i)(?:^|\s)(?:bis|to|through)
 // derive, not a day of its own. So do their English kin "since", "until" and
 // "from", and the words of matchOpenEdge, "ab", "vor", "nach" (with "dem"),
 // "before" and "after" (with "the"), issue #463.
-var reSeitBisBefore = regexp.MustCompile(`(?i)\b(?:(?:seit|ab|vor|nach)(?:\s+dem)?|bis(?:\s+zu[mr])?|vo[nm]|since|until|from|(?:before|after)(?:\s+the)?)\s+$`)
+var reSeitBisBefore = regexp.MustCompile(`(?i)\b(?:(?:seit|ab|vor|nach)(?:\s+dem)?|bis(?:\s+zu[mr])?|vo[nm]|since|until|from|to|through|(?:before|after)(?:\s+the)?)\s+$`)
 
 // reSpacedHyphen matches a hyphen between spaces, the whole text between two
 // day dates ("15.03.2026 - 20.03.2026"): a range word as a dash is. A
@@ -1800,11 +1857,6 @@ func matchDayDates(query string, deferToSeitBis bool) *TemporalResult {
 	if deferToSeitBis && leftToWindow(query, matches) {
 		return nil
 	}
-	tense := tenseAt(query, matches[0].start)
-	dir := "past"
-	if tense == "future" {
-		dir = "future"
-	}
 	ref := func(m dayDate) string { return query[m.dateStart:m.dateEnd] }
 
 	// Two day dates with a range word between them, a hyphen between spaces,
@@ -1821,9 +1873,15 @@ func matchDayDates(query string, deferToSeitBis bool) *TemporalResult {
 		return rangeResult(ref(matches[0])+" – "+ref(matches[1]), fmtDate(first), fmtDate(second), "range")
 	}
 
-	// One date, two without a range word, or more: single entries.
+	// One date, two without a range word, or more: single entries, each
+	// with the direction of its own clause's tense (tenseAt): "We deployed
+	// on 2026-11-16, and we will deploy on 2026-11-23" (issue #506).
 	dates := make([]TemporalDate, 0, len(matches))
 	for _, m := range matches {
+		dir := "past"
+		if tenseAt(query, m.start) == "future" {
+			dir = "future"
+		}
 		dates = append(dates, TemporalDate{Ref: ref(m), Date: fmtDate(m.day), Dir: dir})
 	}
 	return multiResult(dates)
@@ -1932,7 +1990,10 @@ func submatches(s string, idx []int) []string {
 func matchRangeForm(query string, m []string, off int, ref string, exact, years bool, now time.Time) *TemporalResult {
 	tense := tenseAt(query, off)
 	backward := tense == "past"
-	startEdge := resolvePhraseEdge(m[1], backward, now)
+	// "seit" and "since" name a start that has begun, as matchSeit reads
+	// it: a bare weekday or month is the last one (issue #506).
+	since := strings.HasPrefix(m[0], "seit") || strings.HasPrefix(m[0], "since")
+	startEdge := resolvePhraseEdge(m[1], backward || since, now)
 	if w := phraseWords(m[1]); len(w) > 0 && nowWords[w[0]] {
 		startEdge = phraseEdge{day: truncDate(now)}
 	}
@@ -1941,6 +2002,9 @@ func matchRangeForm(query string, m []string, off int, ref string, exact, years 
 		return nil
 	}
 	startEdge = startInEndYear(m, startEdge, endEdge, now)
+	if since && startEdge.day.After(truncDate(now)) {
+		return nil // "seit 2027 bis 2028" asked in 2026 has no time since yet
+	}
 	// A year at the end is ordered by its last day, and a year before the
 	// start swaps from its first (issue #487).
 	endDay := endEdge.day
@@ -1989,7 +2053,7 @@ func rangeEdgesStand(query string, m []string, off int, startEdge, endEdge phras
 		return true
 	}
 	lower := strings.ToLower(query)
-	return yearEdgeStands(lower, clauseTokens(lower), off)
+	return yearEdgeStands(clauseTokens(lower), off)
 }
 
 // startInEndYear returns the start edge of a range form whose end is a year
@@ -2098,7 +2162,7 @@ func matchSeit(query string, now time.Time) *TemporalResult {
 	start := e.day
 	// A start after today has no time since it yet ("seit morgen").
 	if start.IsZero() || start.After(truncDate(now)) || m[1] == "since" && bareMonthWord(m[2], e) ||
-		e.year && !yearEdgeStands(lower, clauseTokens(lower), idx[0]) {
+		e.year && !yearEdgeStands(clauseTokens(lower), idx[0]) {
 		return nil
 	}
 	return yearWeighted(rangeResult(m[1]+" "+m[2], fmtDate(start), fmtDate(truncDate(now)), "range"), e)
@@ -2117,13 +2181,18 @@ func matchBis(query string, now time.Time) *TemporalResult {
 	if reLastWDToWD.MatchString(lower) {
 		return nil
 	}
+	// A "seit X bis Y" whose start lies ahead names no time (issue #506):
+	// its "bis" is no deadline of its own.
+	if seitStartsAhead(lower, now) {
+		return nil
+	}
 	idx := reBis.FindStringSubmatchIndex(lower)
 	if idx == nil {
 		return nil
 	}
 	m := submatches(lower, idx)
 	e := resolvePhraseEdge(m[2], false, now)
-	if e.day.IsZero() || m[1] == "until" && bareMonthWord(m[2], e) || e.year && !yearEdgeStands(lower, clauseTokens(lower), idx[0]) {
+	if e.day.IsZero() || m[1] == "until" && bareMonthWord(m[2], e) || e.year && !yearEdgeStands(clauseTokens(lower), idx[0]) {
 		return nil
 	}
 	// An end before today ("bis März 2015", "bis gestern") is the time up to
@@ -2135,6 +2204,19 @@ func matchBis(query string, now time.Time) *TemporalResult {
 		return yearWeighted(&TemporalResult{Dates: []TemporalDate{{Ref: m[1] + " " + m[2], Date: fmtDate(e.last()), Dir: DirUntil}}}, e)
 	}
 	return yearWeighted(rangeResult(m[1]+" "+m[2], fmtDate(truncDate(now)), fmtDate(e.last()), "range"), e)
+}
+
+// seitStartsAhead reports whether lower holds "seit X bis Y" ("since X
+// until Y") whose start X reads as a day after today, the last such weekday
+// or month included: a since-window that has not begun, which no rule
+// answers (issue #506).
+func seitStartsAhead(lower string, now time.Time) bool {
+	idx := reSeitBis.FindStringSubmatchIndex(lower)
+	if idx == nil {
+		return false
+	}
+	start := resolvePhraseEdge(lower[idx[2]:idx[3]], true, now)
+	return !start.day.IsZero() && start.day.After(truncDate(now))
 }
 
 // matchOpenEdge reads "ab", "vor", "nach", "before" and "after" right before
@@ -2165,7 +2247,7 @@ func matchOpenEdge(query string, now time.Time, edge string) *TemporalResult {
 	var proof *yearProof // the year check of the question's candidates, read once
 	stands := func(off int) bool {
 		if proof == nil {
-			proof = newYearProof(lower, clauseTokens(lower))
+			proof = newYearProof(clauseTokens(lower))
 		}
 		return proof.stands(off)
 	}
@@ -2565,15 +2647,17 @@ func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 	}
 	weekdays = weekdays[:n]
 	if len(weekdays) >= 2 {
-		tense := tenseAt(query, c.offs[weekdays[0].idx])
-		backward := tense == "past"
-		dir := "future"
-		if backward {
-			dir = "past"
-		}
+		// Each weekday by the tense of its own clause (tenseAt): "We
+		// deployed on Monday, and we will deploy on Monday" names two days
+		// (issue #506); weekdays of one clause share its tense.
 		var dates []TemporalDate
 		seen := make(map[string]bool)
 		for _, w := range weekdays {
+			backward := tenseAt(query, c.offs[w.idx]) == "past"
+			dir := "future"
+			if backward {
+				dir = "past"
+			}
 			d := resolveWeekdayDate(w.wd, backward, now)
 			key := fmtDate(d)
 			if !seen[key] {
@@ -2754,6 +2838,14 @@ type phraseEdge struct {
 	year bool
 }
 
+// inZone returns e with its day as the same calendar day at midnight in the
+// zone of now.
+func (e phraseEdge) inZone(now time.Time) phraseEdge {
+	y, m, d := e.day.Date()
+	e.day = time.Date(y, m, d, 0, 0, 0, 0, now.Location())
+	return e
+}
+
 // last is the last day of what the edge names: its day, for a month the
 // month's last day and for a year the year's.
 func (e phraseEdge) last() time.Time {
@@ -2865,13 +2957,19 @@ func yearEdge(phrase string, words []string, now time.Time) (phraseEdge, bool) {
 		if _, month := lookupMonth(words[1]); month && !monthWords[words[1]] {
 			return phraseEdge{}, false
 		}
-		if !endsClause(phrase) && (!yearFollower(words[1]) ||
+		if !endsClause(phrase) && !dashWord(words[1]) && (!yearFollower(words[1]) ||
 			yearConjunctions[words[1]] && len(words) > 2 && quantityWords[words[2]] ||
 			rangeWords[words[1]] && len(words) > 2 && strings.Trim(words[2], "0123456789") == "") {
 			return phraseEdge{}, false
 		}
 	}
 	return phraseEdge{day: time.Date(y, time.January, 1, 0, 0, 0, 0, now.Location()), year: true}, true
+}
+
+// dashWord reports whether w is a dash of its own, which ends a clause as a
+// comma does ("Seit 2022 – wie viele Ausfälle hatten wir?"), issue #506.
+func dashWord(w string) bool {
+	return w != "" && strings.Trim(w, "-\u2013\u2014") == ""
 }
 
 // yearInWindow reports whether y is a year a bare number may name as a
@@ -2882,12 +2980,16 @@ func yearInWindow(y int, now time.Time) bool {
 }
 
 // endsClause reports whether the first word of phrase (phraseWords), as it
-// stands in the phrase, ends with one of the runes of clauseEnd.
+// stands in the phrase, ends with one of the runes of clauseEnd — a closing
+// parenthesis only when the parenthesis opened before the word.
 func endsClause(phrase string) bool {
 	for _, f := range strings.Fields(phrase) {
 		if strings.Trim(f, phrasePunct) != "" {
 			r, _ := utf8.DecodeLastRuneInString(f)
-			return strings.ContainsRune(clauseEnd, r)
+			// A parenthesis the word opens itself closes the word, not a
+			// clause: in "After (2024) failures" the noun follows the year
+			// (issue #506).
+			return strings.ContainsRune(clauseEnd, r) && (r != ')' || !strings.Contains(f, "("))
 		}
 	}
 	return false
@@ -2927,63 +3029,88 @@ var (
 )
 
 // yearEdgeStands reports whether a bare year after the word at the byte
-// offset off of the lowercased question lower, whose words are c
-// (clauseTokens of lower), may stand as a window's edge
+// offset off of the lowercased question, whose words are c (clauseTokens of
+// it), may stand as a window's edge
 // (issue #487): a year needs, beside the window of yearInWindow and the word
 // behind it (yearEdge), a clause without a word that makes the number a
-// count, a position or a name (countWords) and a question that asks for no
-// count — the end of its clause alone is no proof ("Zeig mir die Zeilen ab
-// 2024.", "Nach wie vielen Requests, ab 2024?"), while "since 2024, lines
-// have grown" names the year. Such a question goes to the LLM fallback, as
-// before.
-func yearEdgeStands(lower string, c clauseWords, off int) bool {
-	return newYearProof(lower, c).stands(off)
+// count, a position or a name (countWords) and without a phrase that asks for
+// a count (countPhrases) — the end of its clause alone is no proof ("Zeig mir
+// die Zeilen ab 2024.") —, and no other clause that asks for a count of such
+// a noun ("Nach wie vielen Requests, ab 2024?"). A count phrase in another
+// clause that counts no such noun governs no number of the year's clause
+// (issue #506): "Since 2024, how many outages have we had?" names the year,
+// as "since 2024, lines have grown" does. Such a question goes to the LLM
+// fallback, as before.
+func yearEdgeStands(c clauseWords, off int) bool {
+	return newYearProof(c).stands(off)
 }
 
 // yearProof answers yearEdgeStands for the year candidates of one question
-// (matchOpenEdge asks it per candidate), reading the question for a count
-// phrase once and each clause for a count word once (issue #506): read anew
-// per candidate, the check cost time quadratic in the length of a question
-// with many candidates.
+// (matchOpenEdge asks it per candidate), reading each clause for a count
+// word and a count phrase once (issue #506): read anew per candidate, the
+// check cost time quadratic in the length of a question with many
+// candidates.
 type yearProof struct {
-	lower string
-	c     clauseWords
-	// asked: count holds whether the question asks for a count.
-	asked, count bool
-	// counted holds, per clause start, whether the clause has a count word.
-	counted map[int]bool
+	c clauseWords
+	// clauses holds, per clause start, what the clause has; read: every
+	// clause of the question is in it.
+	clauses map[int]clauseCount
+	read    bool
+	// counting holds the starts of the clauses with a count phrase and a
+	// count word, at most two (read once, when read is set).
+	counting []int
 }
 
-func newYearProof(lower string, c clauseWords) *yearProof {
-	return &yearProof{lower: lower, c: c, counted: map[int]bool{}}
+// clauseCount is what yearProof reads of a clause: a count word, a count
+// phrase.
+type clauseCount struct{ word, phrase bool }
+
+func newYearProof(c clauseWords) *yearProof {
+	return &yearProof{c: c, clauses: map[int]clauseCount{}}
+}
+
+// clause returns what the clause that starts at s and ends at e has.
+func (p *yearProof) clause(s, e int) clauseCount {
+	if k, ok := p.clauses[s]; ok {
+		return k
+	}
+	scanned(e - s)
+	words := p.c.words[s:e]
+	k := clauseCount{word: hasCountWord(words)}
+	joined := strings.Join(words, " ")
+	for _, phrase := range countPhrases {
+		k.phrase = k.phrase || strings.Contains(joined, phrase)
+	}
+	p.clauses[s] = k
+	return k
 }
 
 // stands is yearEdgeStands for the year after the word at the byte offset
 // off.
 func (p *yearProof) stands(off int) bool {
-	if !p.asked {
-		p.asked = true
-		scanned(len(p.lower))
-		for _, phrase := range countPhrases {
-			if strings.Contains(p.lower, phrase) {
-				p.count = true
-			}
-		}
-	}
-	if p.count {
-		return false
-	}
 	s, e := 0, len(p.c.words)
 	if i := p.c.wordAt(off); i >= 0 {
 		s, e = p.c.clauseOf(i)
 	}
-	counted, ok := p.counted[s]
-	if !ok {
-		scanned(e - s)
-		counted = hasCountWord(p.c.words[s:e])
-		p.counted[s] = counted
+	if k := p.clause(s, e); k.word || k.phrase {
+		return false
 	}
-	return !counted
+	if !p.read {
+		p.read = true
+		for cs := 0; cs < len(p.c.words); {
+			_, ce := p.c.clauseOf(cs)
+			if k := p.clause(cs, ce); k.word && k.phrase && len(p.counting) < 2 {
+				p.counting = append(p.counting, cs)
+			}
+			cs = ce
+		}
+	}
+	for _, cs := range p.counting {
+		if cs != s {
+			return false
+		}
+	}
+	return true
 }
 
 // hasCountWord reports whether words hold a word of countWords or one that
@@ -3166,11 +3293,14 @@ func resolveTokenEdge(tok string, backward bool, now time.Time) phraseEdge {
 	// A day date of either form the write side extracts, and an ISO date of
 	// any year, which this resolver took before the dot form joined it.
 	// The token is lowercased; the T and Z of an ISO time are upper case.
+	// The day is a calendar day in the zone of now, as the days of the other
+	// edges are: ordered by instant, a day date at UTC midnight and a year at
+	// local midnight came apart west of UTC (issue #506).
 	if t, ok := parseDayDate(strings.ToUpper(tok)); ok {
-		return phraseEdge{day: t}
+		return phraseEdge{day: t}.inZone(now)
 	}
 	if t, err := time.Parse("2006-01-02", tok); err == nil {
-		return phraseEdge{day: t}
+		return phraseEdge{day: t}.inZone(now)
 	}
 	return phraseEdge{} // zero = unresolved
 }

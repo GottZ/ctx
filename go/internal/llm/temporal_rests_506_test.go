@@ -2,6 +2,7 @@ package llm
 
 import (
 	"testing"
+	"time"
 )
 
 // Issue #506: the rests of the temporal rules round of issue #487, asked on
@@ -189,4 +190,68 @@ func TestRules_AWeekdayInACompoundIsNoDate(t *testing.T) {
 		"Was ist am Montag-Abend passiert?": last506["montag"],
 		"Was lief am Freitag-Nachmittag?":   last506["freitag"],
 	})
+}
+
+// TestRules_TheElevenEdgesOfTheReview (point 4): the findings of the bot
+// review of #502, each executed.
+func TestRules_TheElevenEdgesOfTheReview(t *testing.T) {
+	checkRules(t, sunday487, map[string]wantDate{
+		// The clause's own language decides where it is clear.
+		"Was Robert available on Monday? Ist das klar?": last506["montag"],
+		// A passive clause with its own "wird" lends the first clause no participle.
+		"Haben wir Montag frei, oder wird da gearbeitet?": next506["montag"],
+		// A count phrase governs no number outside its clause.
+		"Since 2024, how many outages have we had?":  {"2024-01-01", "2026-11-22", "range"},
+		"Seit 2022 – wie viele Ausfälle hatten wir?": {"2022-01-01", "2026-11-22", "range"},
+		// The day date of a range's end does not stop the range.
+		"From 2024 to 2026-06-15": {"2024-01-01", "2026-06-15", "range"},
+	})
+	for _, q := range []string{"After (2024) failures, restart", "seit 2027 bis 2028", "Wie viele Requests, ab 2024?"} {
+		if tr := NormalizeTemporalRules(q, sunday487); tr != nil {
+			t.Errorf("%q: %+v, want no window", q, tr.Dates)
+		}
+	}
+	// "seit Juni bis 2026" asked on 2026-01-01: the June that has been.
+	checkRules(t, time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC), map[string]wantDate{
+		"seit Juni bis 2026": {"2025-06-01", "2026-12-31", "range"},
+	})
+	// Each date by the tense of its own clause.
+	for q, want := range map[string][]TemporalDate{
+		"We deployed on Monday, and we will deploy on Monday": {
+			{Date: "2026-11-16", Dir: "past"}, {Date: "2026-11-23", Dir: "future"}},
+		"We deployed on 2026-11-16, and we will deploy on 2026-11-23": {
+			{Date: "2026-11-16", Dir: "past"}, {Date: "2026-11-23", Dir: "future"}},
+	} {
+		tr := NormalizeTemporalRules(q, sunday487)
+		if tr == nil || len(tr.Dates) != len(want) {
+			t.Errorf("%q: %+v, want %+v", q, tr, want)
+			continue
+		}
+		for i, d := range tr.Dates {
+			if d.Date != want[i].Date || d.Dir != want[i].Dir || d.End != nil {
+				t.Errorf("%q: date %d is %s/%s, want %s/%s", q, i, d.Date, d.Dir, want[i].Date, want[i].Dir)
+			}
+		}
+	}
+}
+
+// TestRules_EdgesOrderByCalendarDay (point 4): the edges of a window are
+// ordered by their calendar day in any time zone — a bare year and a day
+// date give the same window east and west of UTC as under UTC — and a day
+// date is today in the zone of the question ("seit 22.11.2026" asked on that
+// day in Tokyo).
+func TestRules_EdgesOrderByCalendarDay(t *testing.T) {
+	for _, zone := range []string{"UTC", "America/New_York", "America/Los_Angeles", "Asia/Tokyo", "Pacific/Auckland"} {
+		loc, err := time.LoadLocation(zone)
+		if err != nil {
+			t.Skipf("no zone data: %v", err)
+		}
+		at := time.Date(2026, 11, 22, 9, 0, 0, 0, loc)
+		checkRules(t, at, map[string]wantDate{
+			"von 2026 bis 01.01.2026": {"2026-01-01", "2026-01-01", "range"},
+			"seit 22.11.2026":         {"2026-11-22", "2026-11-22", "range"},
+			"vor dem 23.11.2026":      {"2026-11-22", "2026-11-22", "range"},
+			"von 01.01.2026 bis 2026": {"2026-01-01", "2026-12-31", "range"},
+		})
+	}
 }
