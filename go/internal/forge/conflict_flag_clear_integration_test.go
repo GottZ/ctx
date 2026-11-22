@@ -51,6 +51,10 @@ func TestAPullClearsAFlagWhenBlockBaseAndForgeAgree(t *testing.T) {
 	if base, conflict := e.mapping(t); conflict || base != e.forgeH(t) || e.body(t) != body {
 		t.Fatalf("flagged %v, base is the forge's %v, block %q — want the flag gone", conflict, base == e.forgeH(t), e.body(t))
 	}
+	// The flag's time goes with it: a later flag records its own.
+	if _, _, _, at := readMapping(t, e.pool, e.proj.ID, "issue", 5); at != nil {
+		t.Errorf("conflict_at is %v after the flag went, want none", at)
+	}
 	// The mapping is a push candidate again: a local edit goes out.
 	e.edit(t, store.IssueUpdate{Title: str("Crane, edited locally")})
 	if n := e.cycles(t, 2); n != 1 {

@@ -118,23 +118,16 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 		_, h := pol.ctxIssueBase(b, c.BaseFields)
 		return h
 	}
-	// stamp is the forge's updated_at the PATCH answered (issue #509); the
-	// advance records it, and an advance without a wire write has none.
-	var stamp *time.Time
-	advanceOnly := func(tx pgx.Tx) error {
-		return p.advance(ctx, tx, c.Block.ID, c.BaseHash, ctxH, ctxFields, stamp, false, projected, res)
-	}
-	advanceSent := func(tx pgx.Tx) error {
-		return p.advance(ctx, tx, c.Block.ID, c.BaseHash, ctxH, ctxFields, stamp, true, projected, res)
-	}
+	rec := pushRecord{blockID: c.Block.ID, listed: c.BaseHash, ctxH: ctxH, ctxFields: ctxFields, projected: projected}
 	if ctxH == c.BaseHash {
 		// In sync (a write that left the projection alone, or an edit undone
 		// since a PATCH): 0 wire, but the row was listed, so it leaves the
 		// candidates through the bound advance (issue #452) — otherwise it
 		// stays listed for good and, past pushBatchLimit, keeps later
 		// candidates out of the listing.
-		skip, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, advanceOnly)
+		skip, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, rec.advance(ctx, false))
 		noteSkip(res, c.Block.ID, skip)
+		rec.count(res, err)
 		return true, err
 	}
 	ctxProj, _ := parseIssueProjection(ctxFields)
@@ -155,15 +148,18 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 	}
 	if patch.empty() {
 		// Only a never-pushed field (milestone) diverged: advance base, 0 wire.
-		skip, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, advanceOnly)
+		skip, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, rec.advance(ctx, false))
 		noteSkip(res, c.Block.ID, skip)
+		rec.count(res, err)
 		return true, err
 	}
-	return p.wireSection(ctx, c.Block.ID, c.BaseHash, allow, res, func() error {
+	cont, err := p.wireSection(ctx, c.Block.ID, c.BaseHash, allow, res, func() error {
 		var err error
-		stamp, err = client.UpdateIssue(ctx, repo, c.ForgeID, patch)
+		rec.stamp, err = client.UpdateIssue(ctx, repo, c.ForgeID, patch)
 		return err
-	}, advanceSent)
+	}, rec.advance(ctx, true))
+	rec.count(res, err)
+	return cont, err
 }
 
 // errThrottled leaves a push section without its record when the token
@@ -343,17 +339,12 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 		_, h := CtxCommentBase(b)
 		return h
 	}
-	var stamp *time.Time // the PATCH's answer, as in pushIssue
-	advanceOnly := func(tx pgx.Tx) error {
-		return p.advance(ctx, tx, c.BlockID, c.BaseHash, ctxH, ctxFields, stamp, false, projected, res)
-	}
-	advanceSent := func(tx pgx.Tx) error {
-		return p.advance(ctx, tx, c.BlockID, c.BaseHash, ctxH, ctxFields, stamp, true, projected, res)
-	}
+	rec := pushRecord{blockID: c.BlockID, listed: c.BaseHash, ctxH: ctxH, ctxFields: ctxFields, projected: projected}
 	if ctxH == c.BaseHash {
 		// In sync — 0 wire; the row leaves the candidates as in pushIssue.
-		skip, err := p.section(ctx, c.BlockID, c.BaseHash, nil, advanceOnly)
+		skip, err := p.section(ctx, c.BlockID, c.BaseHash, nil, rec.advance(ctx, false))
 		noteSkip(res, c.BlockID, skip)
+		rec.count(res, err)
 		return true, err
 	}
 	body, truncated := store.CapForgeBody(c.Content)
@@ -387,32 +378,55 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 		res.Conflicts++
 		return true, nil
 	}
-	return p.wireSection(ctx, c.BlockID, c.BaseHash, allow, res, func() error {
+	cont, err := p.wireSection(ctx, c.BlockID, c.BaseHash, allow, res, func() error {
 		var err error
-		stamp, err = client.UpdateComment(ctx, repo, c.ForgeID, body)
+		rec.stamp, err = client.UpdateComment(ctx, repo, c.ForgeID, body)
 		return err
-	}, advanceSent)
+	}, rec.advance(ctx, true))
+	rec.count(res, err)
+	return cont, err
 }
 
-// advance records the pushed (or in-sync) version as the mapping's base
-// through store.AdvancePushBase, in the entity's push section. listed is the
-// base the listing read; when another instance's pull moved the base since
-// (the section keeps other pushes out, not pulls) to a version other than the
-// one this push sent, the advance flags the mapping instead of writing either
-// version (issue #486) and the pass counts the conflict; a pull that
-// converged on the sent version leaves nothing to decide (issue #491).
-// stamp is the forge's updated_at of the PATCH's answer (nil: none), the
-// mapping's forge stamp with the base (issue #509); sent says that a PATCH
-// carried ctxH (store.AdvancePushBase).
-func (p *Pusher) advance(ctx context.Context, tx pgx.Tx, blockID, listed, ctxH string, ctxFields []byte, stamp *time.Time, sent bool, projected store.PushProjection, res *PushResult) error {
-	moved, err := store.AdvancePushBase(ctx, tx, blockID, listed, ctxH, ctxFields, stamp, sent, projected)
-	if err != nil {
+// pushRecord is the record of one candidate's push section: the advance
+// that writes the pushed (or in-sync) version as the mapping's base through
+// store.AdvancePushBase. listed is the base the listing read; when another
+// instance's pull moved the base since (the section keeps other pushes out,
+// not pulls) to a version other than the one this push sent, the advance
+// flags the mapping instead of writing either version (issue #486) and the
+// pass counts the conflict; a pull that converged on the sent version
+// leaves nothing to decide (issue #491). stamp is the forge's updated_at
+// the PATCH answered, which the wire write sets (nil: none, and an advance
+// without a wire write has none) — the mapping's forge stamp with the base
+// (issue #509).
+//
+// moved keeps what the advance found, and count adds the conflict once the
+// section's transaction committed (issue #509): counted inside it, a COMMIT
+// that failed counted a conflict that was rolled back, and a failed leg's
+// counts reach the run's status.
+type pushRecord struct {
+	blockID, listed, ctxH string
+	ctxFields             []byte
+	stamp                 *time.Time
+	projected             store.PushProjection
+	moved                 bool
+}
+
+// advance is the section's record; sent says that a PATCH carried ctxH
+// (store.AdvancePushBase).
+func (r *pushRecord) advance(ctx context.Context, sent bool) func(tx pgx.Tx) error {
+	return func(tx pgx.Tx) error {
+		var err error
+		r.moved, err = store.AdvancePushBase(ctx, tx, r.blockID, r.listed, r.ctxH, r.ctxFields, r.stamp, sent, r.projected)
 		return err
 	}
-	if moved {
+}
+
+// count adds the advance's conflict to res once its section returned
+// without an error — the record committed.
+func (r *pushRecord) count(res *PushResult, err error) {
+	if err == nil && r.moved {
 		res.Conflicts++
 	}
-	return nil
 }
 
 // diffIssue builds the field-diff PATCH (§4.5.2). base is the last-synced
