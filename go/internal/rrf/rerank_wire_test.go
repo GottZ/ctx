@@ -15,9 +15,9 @@ import (
 
 // LLM-judge call site: Rerank must hit the endpoint of the chat tuple's
 // protocol (/api/chat vs /v1/chat/completions). The judge is fail-open — on a
-// wrong wire path the LLM error is swallowed and the pre-rerank order is
-// silently kept, so the PATH assertion (not the returned order or error) is
-// what catches a call site reading the wrong protocol field (F1 risk 1).
+// wrong wire path the pre-rerank order is kept and the LLM error is handed to
+// the caller (issue #483), so the PATH assertion and err == nil together
+// catch a call site reading the wrong protocol field (F1 risk 1).
 func TestRerankWirePath(t *testing.T) {
 	cases := []struct {
 		name     string

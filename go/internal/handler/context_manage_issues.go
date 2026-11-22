@@ -291,7 +291,7 @@ func (h *ManageHandler) handleIssueLinkCreate(w http.ResponseWriter, r *http.Req
 		}, writableBlockScopes(ar))
 	})
 	if err != nil {
-		h.writeIssueError(w, "issue-link-create", err, reqID)
+		writeIssueWriteError(w, "issue-link-create", err, reqID)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -320,7 +320,7 @@ func (h *ManageHandler) handleIssueLinkDelete(w http.ResponseWriter, r *http.Req
 		return nil, store.DeleteStructuralLink(ctx, tx, p.SourceID, p.TargetID, p.LinkClass, writableBlockScopes(ar))
 	})
 	if err != nil {
-		h.writeIssueError(w, "issue-link-delete", err, reqID)
+		writeIssueWriteError(w, "issue-link-delete", err, reqID)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -408,7 +408,8 @@ func (h *ManageHandler) writeIssueError(w http.ResponseWriter, action string, er
 	writeIssueStoreError(w, action, err, reqID)
 }
 
-// writeIssueWriteError is writeIssueStoreError for an issue write: its 500
+// writeIssueWriteError is writeIssueStoreError for an issue write — the issue
+// writes and the structural-link writes (issue-link-create, -delete): its 500
 // line names what the write left behind. The issue transaction carries no
 // commit label (issueTx), so the outcome is statementOutcome's.
 func writeIssueWriteError(w http.ResponseWriter, action string, err error, reqID string) {

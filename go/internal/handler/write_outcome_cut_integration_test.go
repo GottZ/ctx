@@ -184,7 +184,8 @@ func newCutFixture(t *testing.T) *cutFixture {
 		 END $$`,
 	}
 	for _, tbl := range []string{"context_blocks", "context_blobs", "context_pending_writes", "context_dream_links",
-		"context_tenants", "context_tenant_grants", "context_block_grants", "context_tenant_quota"} {
+		"context_tenants", "context_tenant_scopes", "context_tenant_grants", "context_block_grants", "context_tenant_quota",
+		"context_structural_links", "context_backends", "context_embed_migrations"} {
 		ddl = append(ddl, fmt.Sprintf(`CREATE CONSTRAINT TRIGGER i483_hold AFTER INSERT OR UPDATE OR DELETE ON %[1]s
 			DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION i483_hold('%[1]s')`, tbl))
 	}
@@ -948,6 +949,30 @@ func TestWriteOutcomeCutRemainingPaths(t *testing.T) {
 			fmt.Sprintf(`{"action":"issue-comment-create","data":{"parent_id":%q,"content":"i483 cut rest comment"}}`, issueID), "issue-comment-create error")
 		f.waitLanded(t, `SELECT count(*)::int FROM context_blocks WHERE content = 'i483 cut rest comment'`)
 	})
+	var linkTarget string
+	t.Run("manage issue-link-create", func(t *testing.T) {
+		ar, err := auth.AuthenticateRaw(ctx, f.direct, f.plain)
+		if err != nil || !ar.IsValid {
+			t.Fatalf("authenticate fixture key: %v", err)
+		}
+		_, resp := callManage(t, NewManageHandler(f.direct, nil, nil, nil, nil, nil, nil, f.reg), ar, "issue-create", "",
+			map[string]any{"title": "i483 cut link target"})
+		issue, _ := resp["issue"].(map[string]any)
+		linkTarget, _ = issue["id"].(string)
+		if linkTarget == "" {
+			t.Fatalf("seed link target: %v", resp)
+		}
+		f.cutREST(t, manage, f.plain, "context_structural_links", "/api/manage",
+			fmt.Sprintf(`{"action":"issue-link-create","data":{"source_id":%q,"target_id":%q,"link_class":"references"}}`, issueID, linkTarget),
+			"issue-link-create error")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_structural_links WHERE source_block_id = $1::uuid AND target_block_id = $2::uuid`, issueID, linkTarget)
+	})
+	t.Run("manage issue-link-delete", func(t *testing.T) {
+		f.cutREST(t, manage, f.plain, "context_structural_links", "/api/manage",
+			fmt.Sprintf(`{"action":"issue-link-delete","data":{"source_id":%q,"target_id":%q,"link_class":"references"}}`, issueID, linkTarget),
+			"issue-link-delete error")
+		f.waitLanded(t, `SELECT (count(*) = 0)::int FROM context_structural_links WHERE source_block_id = $1::uuid AND target_block_id = $2::uuid`, issueID, linkTarget)
+	})
 	t.Run("project issue create", func(t *testing.T) {
 		var projectID string
 		if err := f.direct.QueryRow(ctx, `INSERT INTO context_projects (tenant_id, scope, identity) VALUES ($1::uuid, 'private', 'i483-cut') RETURNING id::text`,
@@ -984,10 +1009,14 @@ func TestWriteOutcomeCutRemainingPaths(t *testing.T) {
 	})
 }
 
-// TestWriteOutcomeCutAdminPaths — the admin writes of point 9 whose store
-// function is one statement or an unlabeled bracket (statementOutcome): a cut
-// commit says unknown on their failure line; writeOutcome would say
-// rolled_back.
+// TestWriteOutcomeCutAdminPaths — the admin writes of point 9: those whose
+// store function is one statement or an unlabeled bracket take
+// statementOutcome, tenant-create and scope-create a labeled bracket
+// (writeOutcome), backend-create the unlabeled commit of answeredTx
+// (statementOutcome in writeBackendTxFailure), embed-migration-pause one
+// UPDATE (statementOutcome); a cut commit says unknown on
+// every failure line — the constant rolled_back, or writeOutcome on an
+// unlabeled commit, would not.
 func TestWriteOutcomeCutAdminPaths(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -1030,6 +1059,29 @@ func TestWriteOutcomeCutAdminPaths(t *testing.T) {
 		f.cutREST(t, manage, adminPlain, table, "/api/manage", body, msg)
 	}
 
+	t.Run("tenant-create", func(t *testing.T) {
+		cut(t, "context_tenants", `{"action":"tenant-create","data":{"slug":"i483-cut-c","display_name":"I483 cut c"}}`, "manage: tenant-create failed")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_tenants WHERE slug = 'i483-cut-c'`)
+	})
+	t.Run("scope-create", func(t *testing.T) {
+		cut(t, "context_tenant_scopes", fmt.Sprintf(`{"action":"scope-create","data":{"name":"cutx","tenant_id":%q}}`, a.id), "manage: scope-create failed")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_tenant_scopes WHERE scope = 'i483-cut-a:cutx'`)
+	})
+	t.Run("backend-create", func(t *testing.T) {
+		cut(t, "context_backends", `{"action":"backend-create","data":{"name":"i483-cut-backend","base_url":"http://i483-cut-backend",`+
+			`"roles":["chat"],"model_map":{"default":"stub-model"}}}`, "manage: backend-create failed")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_backends WHERE name = 'i483-cut-backend'`)
+	})
+	t.Run("embed-migration-pause", func(t *testing.T) {
+		emcSeedModels(t, f.direct)
+		emcSeedBackend(t, f.direct)
+		emc := emcHandler(f.direct)
+		mustSuccess(t, manageAdmin(t, emc, map[string]any{"action": "embed-migration-create",
+			"data": map[string]any{"from_model": emcFromModel, "to_model": emcToModel, "to_backend": emcBackendName}}))
+		mustSuccess(t, manageAdmin(t, emc, map[string]any{"action": "embed-migration-resume"}))
+		cut(t, "context_embed_migrations", `{"action":"embed-migration-pause"}`, "manage: embed-migration-pause failed")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_embed_migrations WHERE status = 'paused'`)
+	})
 	t.Run("tenant-update", func(t *testing.T) {
 		cut(t, "context_tenants", fmt.Sprintf(`{"action":"tenant-update","id":%q,"data":{"display_name":"I483 cut renamed"}}`, a.id), "manage: tenant-update failed")
 		f.waitLanded(t, `SELECT count(*)::int FROM context_tenants WHERE id = $1::uuid AND display_name = 'I483 cut renamed'`, a.id)

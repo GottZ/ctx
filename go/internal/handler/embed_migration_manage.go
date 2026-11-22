@@ -121,8 +121,10 @@ func parseEmbedMigrationData(req manageRequest) embedMigrationData {
 // benannte Fehlertexte durchreichen"). Validation/precondition refusals are 400,
 // the single-active race is 409 (conflict), not-found is 404; anything else is a
 // genuine 500. errors.As on *embedmigration.DiskEstimate keeps the actual byte
-// numbers in the returned text.
-func embedMigrationMechErr(w http.ResponseWriter, err error) {
+// numbers in the returned text. A 500 goes into action's line with outcome,
+// what the write left behind (adminWriteFailed, issue #483); a refusal it
+// answers 4xx is the caller's and writes none.
+func embedMigrationMechErr(w http.ResponseWriter, r *http.Request, action string, err error, outcome string) {
 	status := http.StatusInternalServerError
 	switch {
 	case errors.Is(err, embedmigration.ErrActiveMigrationExists):
@@ -168,7 +170,21 @@ func embedMigrationMechErr(w http.ResponseWriter, err error) {
 		errors.Is(err, events.ErrCutoverBackendPoolRequired):
 		status = http.StatusBadRequest
 	}
+	if status == http.StatusInternalServerError {
+		adminWriteFailed(r, "manage: "+action+" failed", err, outcome)
+	}
 	writeJSON(w, status, map[string]any{"success": false, "error": err.Error()})
+}
+
+// cutoverOutcome is the write_outcome of a failed confirm or rollback: the
+// swap is one labeled bracket after read-only checks (writeOutcome), and a
+// result that came back with the error says the swap committed and a step
+// after it failed.
+func cutoverOutcome(swapped bool, err error) string {
+	if swapped {
+		return writeCommitted
+	}
+	return writeOutcome(err)
 }
 
 // handleEmbedMigrationCreate validates + inserts a new migration row
@@ -183,7 +199,9 @@ func (h *ManageHandler) handleEmbedMigrationCreate(w http.ResponseWriter, r *htt
 		ReuseExisting: d.ReuseExisting,
 	}, embedmigration.StatfsChecker(embedMigrationDiskCheckPath))
 	if err != nil {
-		embedMigrationMechErr(w, err)
+		// The write is the one INSERT at the end; a read before it that
+		// was cut off says unknown as well, the safe side.
+		embedMigrationMechErr(w, r, req.Action, err, statementOutcome(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "id": id})
@@ -191,13 +209,21 @@ func (h *ManageHandler) handleEmbedMigrationCreate(w http.ResponseWriter, r *htt
 
 // resolveMigrationID returns req.ID when set, else the single active migration's
 // id (idx_embed_migration_single_active guarantees at most one). ok=false with a
-// 404 already written when neither is available — the caller returns.
-func (h *ManageHandler) resolveMigrationID(w http.ResponseWriter, ctx context.Context, req manageRequest) (string, bool) {
+// 404 already written when neither is available — the caller returns. A failed
+// read is answered 500 and goes into the action's line: nothing was written.
+// An id that is no uuid names no migration: the 404 of an unknown id, before
+// the database refuses the cast with the input in its error (issue #483).
+func (h *ManageHandler) resolveMigrationID(w http.ResponseWriter, r *http.Request, req manageRequest) (string, bool) {
 	if req.ID != "" {
+		if !uuidRe.MatchString(req.ID) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "embed-migration: migration id not found"})
+			return "", false
+		}
 		return req.ID, true
 	}
-	m, err := embedmigration.Active(ctx, h.pool)
+	m, err := embedmigration.Active(r.Context(), h.pool)
 	if err != nil {
+		adminWriteFailed(r, "manage: "+req.Action+" failed", err, writeRolledBack)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
 		return "", false
 	}
@@ -316,12 +342,13 @@ func arithmeticPending(total, migrated, failed, skipped int64) int64 {
 // race (status already moved) verbatim — fail-closed, no silent no-op.
 func (h *ManageHandler) handleEmbedMigrationTransition(w http.ResponseWriter, r *http.Request, req manageRequest, from, to embedmigration.Status) {
 	ctx := r.Context()
-	id, ok := h.resolveMigrationID(w, ctx, req)
+	id, ok := h.resolveMigrationID(w, r, req)
 	if !ok {
 		return
 	}
 	if err := embedmigration.Transition(ctx, h.pool, id, from, to); err != nil {
-		embedMigrationMechErr(w, err)
+		// Transition is one UPDATE.
+		embedMigrationMechErr(w, r, req.Action, err, statementOutcome(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "id": id, "status": string(to)})
@@ -334,11 +361,11 @@ func (h *ManageHandler) handleEmbedMigrationTransition(w http.ResponseWriter, r 
 // (ErrTransitionNotAllowed). started_at is stamped on the pending→running edge.
 func (h *ManageHandler) handleEmbedMigrationResume(w http.ResponseWriter, r *http.Request, req manageRequest) {
 	ctx := r.Context()
-	id, ok := h.resolveMigrationID(w, ctx, req)
+	id, ok := h.resolveMigrationID(w, r, req)
 	if !ok {
 		return
 	}
-	cur, ok := h.loadMigrationStatus(w, ctx, id)
+	cur, ok := h.loadMigrationStatus(w, r, req.Action, id)
 	if !ok {
 		return
 	}
@@ -347,23 +374,25 @@ func (h *ManageHandler) handleEmbedMigrationResume(w http.ResponseWriter, r *htt
 		opts = append(opts, embedmigration.WithStartedAt())
 	}
 	if err := embedmigration.Transition(ctx, h.pool, id, cur, embedmigration.StatusRunning, opts...); err != nil {
-		embedMigrationMechErr(w, err)
+		embedMigrationMechErr(w, r, req.Action, err, statementOutcome(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "id": id, "status": string(embedmigration.StatusRunning)})
 }
 
 // loadMigrationStatus reads one migration row's current status. ok=false with the
-// HTTP error already written when the row is missing or the read fails.
-func (h *ManageHandler) loadMigrationStatus(w http.ResponseWriter, ctx context.Context, id string) (embedmigration.Status, bool) {
+// HTTP error already written when the row is missing or the read fails; a
+// failed read goes into action's line: nothing was written.
+func (h *ManageHandler) loadMigrationStatus(w http.ResponseWriter, r *http.Request, action, id string) (embedmigration.Status, bool) {
 	var cur string
-	if err := h.pool.QueryRow(ctx,
+	if err := h.pool.QueryRow(r.Context(),
 		`SELECT status FROM context_embed_migrations WHERE id = $1::uuid`, id,
 	).Scan(&cur); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "embed-migration: migration id not found"})
 			return "", false
 		}
+		adminWriteFailed(r, "manage: "+action+" failed", err, writeRolledBack)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
 		return "", false
 	}
@@ -376,17 +405,17 @@ func (h *ManageHandler) loadMigrationStatus(w http.ResponseWriter, ctx context.C
 func (h *ManageHandler) handleEmbedMigrationAbort(w http.ResponseWriter, r *http.Request, req manageRequest) {
 	ctx := r.Context()
 	d := parseEmbedMigrationData(req)
-	id, ok := h.resolveMigrationID(w, ctx, req)
+	id, ok := h.resolveMigrationID(w, r, req)
 	if !ok {
 		return
 	}
-	cur, ok := h.loadMigrationStatus(w, ctx, id)
+	cur, ok := h.loadMigrationStatus(w, r, req.Action, id)
 	if !ok {
 		return
 	}
 	if err := embedmigration.Transition(ctx, h.pool, id, cur, embedmigration.StatusAborted,
 		embedmigration.WithAbortReason(d.Reason)); err != nil {
-		embedMigrationMechErr(w, err)
+		embedMigrationMechErr(w, r, req.Action, err, statementOutcome(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "id": id, "status": string(embedmigration.StatusAborted)})
@@ -397,13 +426,13 @@ func (h *ManageHandler) handleEmbedMigrationAbort(w http.ResponseWriter, r *http
 // count, memos re-homed, flipped backends (§4.8 Restmengen).
 func (h *ManageHandler) handleEmbedMigrationConfirm(w http.ResponseWriter, r *http.Request, req manageRequest) {
 	ctx := r.Context()
-	id, ok := h.resolveMigrationID(w, ctx, req)
+	id, ok := h.resolveMigrationID(w, r, req)
 	if !ok {
 		return
 	}
 	res, err := events.ConfirmEmbedMigration(ctx, h.pool, h.backendPool, id)
 	if err != nil {
-		embedMigrationMechErr(w, err)
+		embedMigrationMechErr(w, r, req.Action, err, cutoverOutcome(res != nil, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -425,13 +454,13 @@ func (h *ManageHandler) handleEmbedMigrationConfirm(w http.ResponseWriter, r *ht
 func (h *ManageHandler) handleEmbedMigrationRollback(w http.ResponseWriter, r *http.Request, req manageRequest) {
 	ctx := r.Context()
 	d := parseEmbedMigrationData(req)
-	id, ok := h.resolveMigrationID(w, ctx, req)
+	id, ok := h.resolveMigrationID(w, r, req)
 	if !ok {
 		return
 	}
 	res, err := events.RollbackEmbedMigration(ctx, h.pool, h.backendPool, id, d.Reason)
 	if err != nil {
-		embedMigrationMechErr(w, err)
+		embedMigrationMechErr(w, r, req.Action, err, cutoverOutcome(res != nil, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -449,12 +478,13 @@ func (h *ManageHandler) handleEmbedMigrationRollback(w http.ResponseWriter, r *h
 // a new migration in the opposite direction (§4.10).
 func (h *ManageHandler) handleEmbedMigrationCleanup(w http.ResponseWriter, r *http.Request, req manageRequest) {
 	ctx := r.Context()
-	id, ok := h.resolveMigrationID(w, ctx, req)
+	id, ok := h.resolveMigrationID(w, r, req)
 	if !ok {
 		return
 	}
 	if err := events.CleanupEmbedMigration(ctx, h.pool, id); err != nil {
-		embedMigrationMechErr(w, err)
+		// One labeled bracket after read-only checks.
+		embedMigrationMechErr(w, r, req.Action, err, writeOutcome(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "id": id, "cleaned": true})
@@ -465,7 +495,14 @@ func (h *ManageHandler) handleEmbedMigrationCleanup(w http.ResponseWriter, r *ht
 func (h *ManageHandler) handleEmbedMigrationPurge(w http.ResponseWriter, r *http.Request) {
 	cleared, err := embedmigration.Purge(r.Context(), h.pool, 0)
 	if err != nil {
-		embedMigrationMechErr(w, err)
+		// Each batch is one UPDATE that commits on its own: cleared counts
+		// what earlier batches wrote (a cut-off read before the first one
+		// says unknown, the safe side).
+		outcome := statementOutcome(err)
+		if cleared > 0 {
+			outcome = writeCommitted
+		}
+		embedMigrationMechErr(w, r, "embed-migration-purge", err, outcome)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "cleared": cleared})

@@ -362,9 +362,43 @@ func TestWriteOutcome(t *testing.T) {
 		{"COMMIT never sent", bracket(nil, safeToRetryErr{}), writeRolledBack},
 		{"COMMIT whose connection broke while it waited", bracket(nil, connClosedErr{}), writeUnknown},
 		{"connection closed inside the transaction", bracket(connClosedErr{}, nil), writeRolledBack},
+		// Issue #483: a backend terminated while it commits dies after its
+		// commit record — its FATAL says nothing about the COMMIT.
+		{"COMMIT answered with FATAL", bracket(nil, &pgconn.PgError{Severity: "FATAL", SeverityUnlocalized: "FATAL", Code: "57P01"}), writeUnknown},
+		{"COMMIT answered with a localized FATAL", bracket(nil, &pgconn.PgError{Severity: "KATASTROFALNY", SeverityUnlocalized: "FATAL", Code: "57P01"}), writeUnknown},
+		{"COMMIT answered with a localized PANIC", bracket(nil, &pgconn.PgError{Severity: "PANIK", SeverityUnlocalized: "PANIC", Code: "XX000"}), writeUnknown},
+		{"COMMIT answered with FATAL, no unlocalized severity", bracket(nil, &pgconn.PgError{Severity: "FATAL", Code: "57P01"}), writeUnknown},
+		{"COMMIT refused with a localized ERROR", bracket(nil, &pgconn.PgError{Severity: "FEHLER", SeverityUnlocalized: "ERROR", Code: "40001"}), writeRolledBack},
+		{"COMMIT answered with a query cancel held across it", bracket(nil, &pgconn.PgError{Severity: "ERROR", SeverityUnlocalized: "ERROR", Code: "57014"}), writeUnknown},
+		{"query cancel inside the transaction", bracket(&pgconn.PgError{Severity: "ERROR", SeverityUnlocalized: "ERROR", Code: "57014"}, nil), writeRolledBack},
+		{"FATAL inside the transaction", bracket(&pgconn.PgError{Severity: "FATAL", SeverityUnlocalized: "FATAL", Code: "57P01"}, nil), writeRolledBack},
 	} {
 		if got := writeOutcome(tc.err); got != tc.want {
 			t.Errorf("%s: writeOutcome(%v) = %q, want %q", tc.name, tc.err, got, tc.want)
+		}
+	}
+}
+
+// TestCutoverOutcome — a confirm or rollback whose result came back with its
+// error committed its swap; otherwise its labeled bracket decides (issue
+// #483).
+func TestCutoverOutcome(t *testing.T) {
+	bracket := func(commitErr error) error {
+		return pgxdb.Write(context.Background(), outcomeDB{tx: &outcomeTx{commitErr: commitErr}}, pgxdb.At("embed-cutover: swap tx"),
+			func(pgx.Tx) error { return nil })
+	}
+	for _, tc := range []struct {
+		name    string
+		swapped bool
+		err     error
+		want    string
+	}{
+		{"a step after the committed swap failed", true, errors.New("embed-cutover: post-commit pool reload: boom"), writeCommitted},
+		{"refused before the swap", false, &pgconn.PgError{Code: "42P01"}, writeRolledBack},
+		{"the swap's COMMIT cut off", false, bracket(connClosedErr{}), writeUnknown},
+	} {
+		if got := cutoverOutcome(tc.swapped, tc.err); got != tc.want {
+			t.Errorf("%s: cutoverOutcome = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }
@@ -383,7 +417,11 @@ func TestPurgeOutcome(t *testing.T) {
 		{"blocks removed before the failure", &store.PurgeDeleted{Blocks: 2}, cut, writeCommitted},
 		{"only blobs removed before the failure", &store.PurgeDeleted{Blobs: 1}, cut, writeCommitted},
 		{"nothing removed, the statement was cut", &store.PurgeDeleted{}, cut, writeUnknown},
-		{"refused before the first delete", nil, &pgconn.PgError{Code: "57014"}, writeRolledBack},
+		{"refused before the first delete", nil, &pgconn.PgError{Code: "42501"}, writeRolledBack},
+		// A purge batch commits on its own: a 57014 may be a cancel PostgreSQL
+		// held across that commit (issue #483), so nothing removed is not
+		// known — before, this case expected rolled_back for 57014.
+		{"nothing removed, a query cancel", nil, &pgconn.PgError{Code: "57014"}, writeUnknown},
 	} {
 		if got := purgeOutcome(tc.done, tc.err); got != tc.want {
 			t.Errorf("%s: purgeOutcome = %q, want %q", tc.name, got, tc.want)

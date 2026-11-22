@@ -111,6 +111,12 @@ var jsonArrayPattern = regexp.MustCompile(`\[\s*[\d\s,]+\]`)
 // 2026-10-31 §4); a gated-out judge fails open like any other judge error.
 // Returns the results re-sorted by blended score (0.6*rerank_norm + 0.4*rrf_norm).
 // If fewer than RerankMinResults, returns results unchanged.
+//
+// Fail-open: a judge that fails — its call (an admission it did not get, a
+// quota stop, a backend error) or an answer that does not parse — returns
+// results in their input order, unscored, together with that error (logged
+// here at WARN), so the caller can mark a wait for an admission slot its
+// client gave up (issue #483). The error never changes the order returned.
 func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quota *backends.QuotaAccountant, scope string, required backends.Sensitivity, query string, results []SearchResult, apiKeyID string, adm llm.Admission) ([]SearchResult, error) {
 	if len(results) < RerankMinResults {
 		slog.Debug("rerank: skipping, fewer than min results",
@@ -150,14 +156,14 @@ func Rerank(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quota *
 	}.Do(ctx, db, adm)
 	if err != nil {
 		slog.Warn("rerank: LLM call failed, returning original order", "error", err)
-		return results, nil
+		return results, err
 	}
 
 	// Parse the JSON array of scores from the response.
 	scores, err := parseRerankScores(resp.Message.Content, len(docsToRerank))
 	if err != nil {
 		slog.Warn("rerank: score parsing failed, returning original order", "error", err)
-		return results, nil
+		return results, err
 	}
 
 	// Apply blending and re-sort.

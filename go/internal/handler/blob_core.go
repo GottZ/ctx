@@ -374,7 +374,8 @@ func executeBlobWrite(ctx context.Context, pool *pgxpool.Pool, cfg ConfigStore, 
 		if errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "23") {
 			status, reason := blobConstraintError(pgErr)
 			slog.Warn("blob-store: constraint violation", "error", err,
-				"sqlstate", pgErr.Code, "constraint", pgErr.ConstraintName, "request_id", reqID)
+				"sqlstate", pgErr.Code, "constraint", pgErr.ConstraintName, "request_id", reqID,
+				"write_outcome", statementOutcome(err))
 			// Keeps the class-23 detail fields (sqlstate, constraint) the B1
 			// wave added — the code is one more field beside them, not a
 			// replacement.

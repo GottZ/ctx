@@ -2,6 +2,7 @@ package rrf
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,8 +15,8 @@ import (
 // TestRerankJudgeQuotaGated (GHSA 2026-10-31 §4): the LLM judge resolves the
 // synthesis chain through ChainCall, which gates it by the caller tenant's
 // quota. A tenant over its call budget keeps the pre-rerank order (the judge
-// stays fail-open) and the judge backend is never reached; an un-quota'd
-// scope runs the judge.
+// stays fail-open, and says why — issue #483) and the judge backend is never
+// reached; an un-quota'd scope runs the judge.
 func TestRerankJudgeQuotaGated(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -36,8 +37,9 @@ func TestRerankJudgeQuotaGated(t *testing.T) {
 
 	results := []SearchResult{rc("A", 0.008, "a"), rc("B", 0.006, "b"), rc("C", 0.004, "c")}
 	out, err := Rerank(context.Background(), nil, bpool, acc, "t-over", backends.SensPublic, "q", results, "", rerankTestAdmission(t))
-	if err != nil {
-		t.Fatalf("Rerank must stay fail-open on a quota stop: %v", err)
+	var quotaErr *backends.ErrQuotaExceeded
+	if !errors.As(err, &quotaErr) {
+		t.Fatalf("Rerank on a quota stop: err = %v, want the quota stop handed out", err)
 	}
 	if n := hits.Load(); n != 0 {
 		t.Fatalf("judge hits = %d; want 0 — the call budget must stop the judge before the wire", n)

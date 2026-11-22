@@ -125,12 +125,13 @@ func (h *ManageHandler) handleBackendReorder(w http.ResponseWriter, r *http.Requ
 	}
 
 	by := actorID(r)
-	if !answeredTx(ctx, h.pool, func(stage string, _ error) { writeBackendTxFailure(w, stage) }, func(tx pgx.Tx) bool {
+	if !answeredTx(ctx, h.pool, func(stage string, err error) { writeBackendTxFailure(w, r, "backend-reorder", stage, err) }, func(tx pgx.Tx) bool {
 		// Lock the whole writable set (scope-gated in the statement, T37) — the
 		// coverage and staleness checks below read a stable snapshot, and a
 		// concurrent reorder/update serializes behind the lock instead of racing.
 		rows, err := store.LockBackendPriorities(ctx, tx, by, backendWriteScopes(ar))
 		if err != nil {
+			adminWriteFailed(r, "manage: backend-reorder failed", err, writeRolledBack)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "reorder lock failed"})
 			return false
 		}
@@ -157,6 +158,7 @@ func (h *ManageHandler) handleBackendReorder(w http.ResponseWriter, r *http.Requ
 				continue
 			}
 			if err := store.UpdateBackendPriority(ctx, tx, id, want); err != nil {
+				adminWriteFailed(r, "manage: backend-reorder failed", err, writeRolledBack)
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "reorder write failed"})
 				return false
 			}
