@@ -109,7 +109,7 @@ Was ist am Freitag vorgefallen?	["Freitag|2026-11-20..|past"] linear=0.60,weekda
 Was ist uns am Freitag aufgefallen?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
 Was ist am Freitag ausgerollt?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
 Was ist am Freitag ausgerollt worden?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
-Wie viele Blöcke seit 2024?	nil
+Wie viele Blöcke seit 2024?	nil	disputed	["seit 2024?|2024-01-01..2026-11-22|range"] linear=1.00	the count phrase counts blocks, a noun no count word names: the time since 2024 reads as well as the count question the base left to the LLM
 Zeig mir Block nach 2024.	["nach 2024.|2025-01-01..|from"] linear=1.00
 Was liegt zwischen 2020 und 2025?	["zwischen 2020 und 2025?|2020-01-01..2025-12-31|range"] linear=1.00
 Wer hat ab 2020 Dienst?	nil

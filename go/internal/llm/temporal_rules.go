@@ -138,15 +138,21 @@ func clauseTokens(query string) clauseWords {
 
 // colloquialForms are spoken forms of German auxiliaries and verbs a
 // question writes, mapped to the form the tense detection reads (issue #506):
-// "ham", "hamma", "hamse" (haben, haben wir, haben sie), "gabs" (gab es),
-// "wars" (war es), "isses" (ist es).
-var colloquialForms = map[string]string{"ham": "haben", "hamma": "haben", "hamse": "haben", "gabs": "gab", "wars": "war", "isses": "ist"}
+// "ham", "hamma", "hamse" (haben, haben wir, haben sie), "isses" (ist es).
+var colloquialForms = map[string]string{"ham": "haben", "hamma": "haben", "hamse": "haben", "isses": "ist"}
+
+// germanFiniteVerb reports whether w is a finite German verb the rules know.
+func germanFiniteVerb(w string) bool {
+	return germanPastVerbs[w] || perfektAux[w] || germanFiniteWords[w]
+}
 
 // colloquial maps the words of c that are a spoken form of a German verb to
 // the verb (issue #506): a word of colloquialForms; a known German finite
-// verb with the clitic "es" glued to it ("gab's", "hat's", "war's", "gibt's",
-// written with ' or ’), which the English "it's" or "what's" is not; and in a
-// German sentence "is", which spoken German writes for "ist" and which, as
+// verb with the clitic "es" or "denn" glued to it ("gab's", "hat's", "war's",
+// "gibt's", "war'n", written with ' or ’), which the English "it's" or
+// "what's" is not; in a German sentence a known finite verb with "s" glued to
+// it ("gabs", "wars", "gings", "gibts"); and in a German sentence "is", which
+// spoken German writes for "ist" and which, as
 // the English copula as well, says nothing of the language of the question
 // (questionLanguage). An English sentence starts a clause at each embedded
 // clause it opens (embeddedClauses).
@@ -156,7 +162,7 @@ func (c *clauseWords) colloquial() {
 			c.words[i] = f
 			continue
 		}
-		for _, clitic := range []string{"'s", "\u2019s"} {
+		for _, clitic := range []string{"'s", "\u2019s", "'n", "\u2019n"} {
 			if stem, ok := strings.CutSuffix(w, clitic); ok && (germanPastVerbs[stem] || perfektAux[stem] || germanMarkers[stem]) {
 				c.words[i] = stem
 			}
@@ -167,8 +173,11 @@ func (c *clauseWords) colloquial() {
 		switch c.sentenceLanguage(ss, se) {
 		case langGerman:
 			for i := ss; i < se; i++ {
-				if c.words[i] == "is" {
+				w := c.words[i]
+				if w == "is" {
 					c.words[i] = "ist"
+				} else if stem, ok := strings.CutSuffix(w, "s"); ok && germanFiniteVerb(stem) {
+					c.words[i] = stem // "gabs", "wars", "gings", "gibts", "hats": the verb with "es"
 				}
 			}
 		case langEnglish:
@@ -947,7 +956,9 @@ var (
 // "welche" phrase ("Welche Jobs scheiterten am Donnerstag?"), at its end when a
 // subordinating conjunction opens it ("…, ob der Job am Montag scheiterte")
 // or an interrogative behind a clause with a verb of its own ("Mich
-// interessiert, warum der Deploy am Mittwoch fehlschlug.").
+// interessiert, warum der Deploy am Mittwoch fehlschlug."), and behind the
+// first constituent of a main clause where its end can be told
+// (afterFirstConstituent: "Am Donnerstag crashte der Server").
 // The verbs of that place are read by their shape (finitePastAt), since the
 // simple past of the weak and the loan verbs is an open class no list holds;
 // the place keeps out the nouns and adjectives on -te ("die Liste", "die
@@ -984,7 +995,52 @@ func (c clauseWords) clauseFinitePast(s, e int) bool {
 	case germanSubordinators[w]:
 		return c.finitePastAt(e-1, e)
 	}
+	if v := c.afterFirstConstituent(s, e); v > s {
+		return c.finitePastAt(v, e)
+	}
 	return false
+}
+
+// The first constituents of a German main clause whose end
+// afterFirstConstituent finds: a subject pronoun, a day keyword, a
+// preposition before a date word, and an article before its noun.
+var (
+	firstSubjects     = toWordSet("ich", "du", "er", "sie", "es", "wir", "ihr", "man", "jemand", "keiner", "niemand")
+	firstPrepositions = toWordSet("am", "im", "an", "in", "seit", "bis", "nach", "vor", "ab", "um", "letzten", "letzte", "vergangenen", "vorigen")
+	firstArticles     = toWordSet("der", "die", "das", "den", "dem", "ein", "eine", "einen", "kein", "keine", "unser", "unsere")
+	firstDayKeywords  = toWordSet("gestern", "vorgestern", "heute", "vorhin", "damals", "neulich")
+)
+
+// afterFirstConstituent returns the word behind the first constituent of
+// the clause [s, e), the place of the finite verb of a German main clause
+// (issue #506): "Wir mergten am Donnerstag …", "Gestern scheiterte …", "Am
+// Donnerstag crashte der Server", "Der Job scheiterte am Mittwoch". Of the
+// constituents only the forms it can delimit count — a subject pronoun, a
+// day keyword, a preposition or "letzten" before a date word, an article
+// before one word —; for any other first word it returns s.
+func (c clauseWords) afterFirstConstituent(s, e int) int {
+	if s+1 >= e {
+		return s
+	}
+	w := c.words[s]
+	switch {
+	case firstSubjects[w] || firstDayKeywords[w]:
+		return s + 1
+	case firstPrepositions[w] && dateWord(c.words[s+1]), firstArticles[w]:
+		return s + 2
+	}
+	return s
+}
+
+// dateWord reports whether w names a day, a week, a month or a year: a
+// weekday, the weekend, a month name, a four-digit year or a day date.
+func dateWord(w string) bool {
+	_, de := weekdayMapDE[w]
+	_, en := weekdayMapEN[w]
+	_, month := lookupMonth(w)
+	_, year := isYear(w)
+	_, day := parseDayDate(strings.ToUpper(w))
+	return de || en || month || year || day || w == "wochenende" || w == "woche" || w == "monat" || w == "jahr"
 }
 
 // finitePastAt reports whether word i, before e, has the shape of the German
@@ -1010,10 +1066,10 @@ func (c clauseWords) finitePastAt(i, e int) bool {
 // it is one only before a word a noun cannot be ("which commits landed on
 // Monday", not "what scheduled jobs").
 var (
-	englishBeForms     = toWordSet("be", "is", "are", "being", "isn't", "aren't")
+	englishBeForms     = toWordSet("be", "is", "are", "being", "isn't", "aren't", "get", "gets", "getting")
 	englishNotPassive  = toWordSet("been", "was", "were", "has", "have", "had", "did", "do", "does", "wasn't", "weren't", "hasn't", "haven't", "hadn't", "didn't")
 	englishSubjects    = toWordSet("i", "we", "you", "they", "he", "she", "it", "someone", "somebody", "anyone", "anybody", "everyone", "everybody", "nobody", "who")
-	englishWhSubjects  = toWordSet("what", "which", "whose")
+	englishWhSubjects  = toWordSet("what", "which", "whose", "that")
 	// englishClauseOpeners open a relative or embedded clause, which ends
 	// the search of englishPassiveAt.
 	englishClauseOpeners = toWordSet("that", "which", "who", "whom", "whose", "where", "when", "whether", "if", "because")
@@ -1545,7 +1601,8 @@ var indefiniteWords = toWordSet("was", "etwas", "irgendwas", "nichts", "nix", "j
 // Perfekt names the date of what is planned, which lies ahead ("am Freitag
 // was geplant?"), and which of the two a question means only the verb tells,
 // not the form of the clause.
-var planParticiples = toWordSet("geplant", "eingeplant", "vorgesehen", "angesetzt", "terminiert", "vorgemerkt", "angekündigt", "angedacht")
+var planParticiples = toWordSet("geplant", "eingeplant", "vorgesehen", "angesetzt", "terminiert", "vorgemerkt", "angekündigt", "angedacht",
+	"bestellt", "eingeteilt", "reserviert", "gebucht", "eingetragen", "angemeldet")
 
 // ellipticPerfekt reports a German Perfekt without its auxiliary in a clause
 // of [s, e) (issue #506): spoken German drops "haben" or "sein" ("am Freitag
@@ -1556,7 +1613,8 @@ var planParticiples = toWordSet("geplant", "eingeplant", "vorgesehen", "angesetz
 //     whose state no passive names, or
 //   - an indefinite pronoun stands before it (indefiniteWords; "was" not as
 //     the interrogative that opens the clause): the clause is active, its
-//     auxiliary "haben" — and the participle is no plan's.
+//     auxiliary "haben" — and the participle is no plan's, and no date in
+//     the clause stands after "für", which names what is arranged for it.
 //
 // A clause with a subject pronoun right behind its first word has a finite
 // verb there the rules do not know ("Kriegen wir am Montag was gefixt?"),
@@ -1603,6 +1661,11 @@ func (c clauseWords) clauseEllipsis(s, e int) bool {
 	for i := s; i < last; i++ {
 		w := c.words[i]
 		if germanPastVerbs[w] || perfektAux[w] || germanFiniteWords[w] {
+			return false
+		}
+		// A date after "für" is what something is arranged for, not when
+		// it happened ("Für Dienstag was reserviert?").
+		if (w == "für" || w == "for") && i+1 < last && dateWord(c.words[i+1]) {
 			return false
 		}
 		if indefiniteWords[w] && (i > s || w != "was") && !planParticiples[c.words[last]] {
@@ -3127,14 +3190,14 @@ var yearFollowers = toWordSet(
 	"nicht", "kein", "keine", "hier", "jetzt", "heute", "ist", "sind", "wird", "hat", "haben", "kann",
 	"können", "muss", "müssen", "darf", "dürfen", "will", "wollen", "gibt", "gilt", "galt", "gelten",
 	"kommt", "kommen", "geht", "gehen", "läuft", "laufen", "steht", "stehen", "bleibt", "fehlt",
-	"fehlen", "passiert", "existiert",
+	"fehlen", "passiert", "existiert", "alle", "jede", "jeden", "jeder", "jedes", "sämtliche", "beide",
 	// English
 	"and", "or", "but", "to", "through", "till", "on", "at", "for", "from", "of", "by", "with",
 	"about", "into", "over", "under", "during", "onwards", "onward", "the", "a", "it", "i", "we",
 	"they", "you", "he", "she", "there", "this", "that", "these", "those", "is", "are", "be", "been",
 	"has", "have", "will", "would", "can", "could", "should", "must", "may", "might", "shall", "do",
 	"does", "not", "ever", "still", "already", "only", "also", "again", "yet", "then", "when", "where",
-	"what", "which", "who", "how", "why", "here", "now",
+	"what", "which", "who", "how", "why", "here", "now", "all", "every", "each", "both",
 )
 
 // yearFollower reports whether w may follow a bare year at a window's edge
@@ -3143,8 +3206,13 @@ var yearFollowers = toWordSet(
 // Angeboten").
 func yearFollower(w string) bool {
 	return yearFollowers[w] || pastVerbSet[w] || futureVerbSet[w] || perfektAux[w] || knownParticiples[w] ||
-		ierenParticiple(w)
+		ierenParticiple(w) || strongPastSet[w]
 }
+
+// strongPastSet is strongPastForms as words: a strong simple past behind a
+// year is a verb, not the noun the year counts ("Bis 2025 galten andere
+// Limits"), issue #506.
+var strongPastSet = toWordSet(strongPastForms...)
 
 // yearConjunctions and quantityWords: a conjunction behind a number with a
 // word of quantity behind it makes the number a count ("ab 2024 und mehr",
@@ -3318,7 +3386,7 @@ func (p *yearProof) stands(off int) bool {
 	if i := p.c.wordAt(off); i >= 0 {
 		s, e = p.c.clauseOf(i)
 	}
-	if k := p.clause(s, e); k.word || k.phrase {
+	if p.clause(s, e).word {
 		return false
 	}
 	if !p.read {
