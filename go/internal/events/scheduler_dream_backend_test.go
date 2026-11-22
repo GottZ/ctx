@@ -171,6 +171,43 @@ func runDreamLoopUntil(t *testing.T, s *Scheduler, stopAt int64, list func(n int
 	}
 }
 
+// TestDreamGateAsksTheWindowFirst (issue #495, review of the linked PR): a
+// bound tenant whose read window is empty, on a pool without any backend,
+// meets the window gate only — its notice once, no missing-backend WARN, no
+// cycle. A tenant that may read nothing is not reported as missing a backend.
+func TestDreamGateAsksTheWindowFirst(t *testing.T) {
+	logs := &lockedBuf{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	defer slog.SetDefault(prev)
+
+	base := captureTestConfig(t, 12)
+	base.Scheduler.ReadScopes = []string{"private", "shared", "work"}
+	base.Dream.IdleWait = 2 * time.Millisecond
+	bpool := backends.NewPool(nil, nil)
+	bpool.SeedSnapshotForTest([]backends.Backend{})
+	s := NewScheduler(deadPool(t), config.NewStore(base), bpool, StartupConfig{})
+	var cycles atomic.Int64
+	s.runCycle = func(_ context.Context, _ *pgxpool.Pool, _ *dream.Router, _ llm.Options, _ dream.BackoffConfig, _ []string, _ dream.Throttle) (int, error) {
+		cycles.Add(1)
+		return 0, nil
+	}
+	runDreamLoopUntil(t, s, 6, func(int64) []backgroundTenant {
+		return []backgroundTenant{{scope: "ew-g:main", owned: []string{"ew-g:main"}}}
+	})
+
+	out := logs.String()
+	if n := strings.Count(out, emptyWindowNotice); n != 1 {
+		t.Errorf("window notice logged %d times, want once", n)
+	}
+	if n := strings.Count(out, `msg="dream: no backend of role dream`); n != 0 {
+		t.Errorf("the missing-backend WARN logged %d times for a tenant whose window is empty — the window gate comes first:\n%s", n, out)
+	}
+	if c := cycles.Load(); c != 0 {
+		t.Errorf("%d dream cycle(s) ran", c)
+	}
+}
+
 // TestDreamLoopForgetsTenantsThatLeftTheList: the loop hands the tenant list
 // to the backend notice at the start of each round. Tenant "gone" skips on
 // its own disabled row (one WARN), leaves the list for a while, comes back
