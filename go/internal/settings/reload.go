@@ -123,7 +123,8 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, envCfg *config.Config, e
 // Reload is the F2 contract function (§2.4): LoadOverrides → Build (with
 // secret_ref resolution) → Validate → store.Replace. Callers are the
 // settings/secrets handlers (W5/W6) and the NOTIFY listener (G16). On any
-// error the previous snapshot stays active — the WARN names what failed.
+// error the previous snapshot stays active — the WARN names what failed;
+// a ctx that ended before the replace is such an error.
 //
 // X2 (G16) ended here in β7. Reload used to flush context_embed_cache after a
 // swap that moved the effective embed host or protocol; both values left the
@@ -149,6 +150,14 @@ func Reload(ctx context.Context, pool *pgxpool.Pool, st *config.Store) error {
 	cfg, issues := BuildFromRows(ctx, pool, rows, []string{store.GlobalScope})
 	logIssues(issues)
 
+	// The build resolved every secret_ref on ctx; one that ended meanwhile
+	// cut those resolutions short, and config.Build kept the env/default
+	// value for each (a WARN apiece). Such a snapshot may lack secrets the
+	// rows name, so the active one stays (issue #483).
+	if err := ctx.Err(); err != nil {
+		slog.Warn("settings: reload context ended before the snapshot was replaced — keeping the active snapshot", "error", err)
+		return fmt.Errorf("settings: reload: %w", err)
+	}
 	if err := st.Replace(cfg); err != nil {
 		// Replace re-validates; errors here mean an env-level invariant broke
 		// (unreachable while env is immutable per process, but never silent).
