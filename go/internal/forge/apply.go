@@ -128,13 +128,10 @@ func (p issueTypePolicy) workflowStatusFor(forgeState string) string {
 // no status of the resolved workflow: none yet, or one a change of the type's
 // workflow dropped — no local verb can move the block out of that
 // (ValidateTransition refuses a source that is not a configured status) and
-// the board does not list it. That reaches only a dropped status that was not
-// terminal: the pull updates a block that projects to its base, and a dropped
-// terminal status is no member of the new terminal set, so it projects to
-// "open" against a closed base (ctxForgeState) — the block reads as ahead,
-// the pull takes the conflict or ctx-ahead branch, and a later push sends
-// state open. That reopen is older than #486 and not changed here. With no
-// workflow resolvable the
+// the board does not list it. A dropped status, terminal or not, projects
+// the state of the base (ctxIssueBase, issue #491), so such a block reaches
+// this write on a remote edit and gets the status the remote state maps to.
+// With no workflow resolvable the
 // pull writes the status as before #486 (NULL, the metadata-only fallback):
 // there is no set to tell a kept status from a stale one, and a kept status
 // is read again once a workflow resolves — an unpushed local close would then
@@ -146,6 +143,33 @@ func (p issueTypePolicy) keepsStatus(cur *store.Block, remoteState string) bool 
 		return false
 	}
 	return ctxForgeState(cur, p.terminalSet, true) == remoteState
+}
+
+// ctxIssueBase is the block's projection as the 3-way decision and the push
+// compare it with baseFields, the mapping's base snapshot: CtxIssueBase under
+// the scope's workflow — except for a status the resolved workflow does not
+// carry (a change of the type's workflow dropped it). Such a status says
+// nothing about the forge state any more: as a member of the old terminal
+// set it is no member of the new one and would project "open" against a
+// closed base, and the next push of any local edit would reopen the forge
+// issue (issue #491). It projects the state of the base instead — the last
+// version both sides held — so it never moves the state by itself;
+// reopening an issue the forge holds closed takes a local status change
+// against that base, to a status of the workflow that is not terminal. A
+// base without a snapshot (a legacy row, or a base the push recorded as
+// unknown) yields to metadata.forge_state, the state the last base write
+// left on the block, and a block without either keeps the terminal-set rule.
+func (p issueTypePolicy) ctxIssueBase(b *store.Block, baseFields json.RawMessage) ([]byte, string) {
+	if !p.registryOK || b.WorkflowStatus == "" || slices.Contains(p.states, b.WorkflowStatus) {
+		return CtxIssueBase(b, p.terminalSet, p.registryOK)
+	}
+	if base, ok := parseIssueProjection(baseFields); ok && base.State != "" {
+		return ctxIssueBaseWithState(b, base.State)
+	}
+	if fs := metaString(b.Metadata, "forge_state"); fs != "" {
+		return ctxIssueBaseWithState(b, fs)
+	}
+	return CtxIssueBase(b, p.terminalSet, p.registryOK)
 }
 
 // ApplyIssues is the IssueApplyFunc: one fetched page → the 3-way apply. The
@@ -207,11 +231,11 @@ func (a *Applier) applyIssue(ctx context.Context, project store.ProjectRow, pol 
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	projectBlock := func(b *store.Block) string {
-		_, h := CtxIssueBase(b, pol.terminalSet, pol.registryOK)
+	projectBlock := func(b *store.Block, baseFields json.RawMessage) string {
+		_, h := pol.ctxIssueBase(b, baseFields)
 		return h
 	}
-	return a.applyLocked(ctx, writable, m, decide(m.BaseHash, projectBlock(block), forgeH), pulled{
+	return a.applyLocked(ctx, writable, m, decide(m.BaseHash, projectBlock(block, m.BaseFields), forgeH), pulled{
 		forgeH: forgeH, forgeFields: forgeFields, fUpdated: &fUpdated, project: projectBlock,
 		// The workflow status is written only where the forge state changed
 		// or the block has none of the resolved workflow (keepsStatus, issue
@@ -256,13 +280,14 @@ func decide(base, ctxH, forgeH string) decision {
 }
 
 // pulled is one fetched entity the locked apply decides about: the forge
-// side's projection, the block's projection (CtxIssueBase or CtxCommentBase,
-// bound to the scope's policy) and the pull-UPDATE's block write.
+// side's projection, the block's projection against a base snapshot
+// (issueTypePolicy.ctxIssueBase or CtxCommentBase) and the pull-UPDATE's
+// block write.
 type pulled struct {
 	forgeH      string
 	forgeFields json.RawMessage
 	fUpdated    *time.Time
-	project     func(b *store.Block) string
+	project     func(b *store.Block, baseFields json.RawMessage) string
 	write       func(tx pgx.Tx, cur *store.Block) (*store.Block, error)
 }
 
@@ -316,7 +341,7 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 		if err != nil || !ok {
 			return err
 		}
-		ctxH := p.project(cur)
+		ctxH := p.project(cur, locked.BaseFields)
 		d := decide(locked.BaseHash, ctxH, p.forgeH)
 		if locked.BaseHash == m.BaseHash && read == decConverge {
 			d = decConverge
@@ -436,11 +461,11 @@ func (a *Applier) applyComment(ctx context.Context, project store.ProjectRow, wr
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	projectBlock := func(b *store.Block) string {
+	projectBlock := func(b *store.Block, _ json.RawMessage) string {
 		_, h := CtxCommentBase(b)
 		return h
 	}
-	return a.applyLocked(ctx, writable, m, decide(m.BaseHash, projectBlock(block), forgeH), pulled{
+	return a.applyLocked(ctx, writable, m, decide(m.BaseHash, projectBlock(block, m.BaseFields), forgeH), pulled{
 		forgeH: forgeH, forgeFields: forgeFields, fUpdated: &fUpdated, project: projectBlock,
 		write: func(tx pgx.Tx, _ *store.Block) (*store.Block, error) {
 			return store.PullUpdateCommentBlock(ctx, tx, m.BlockID, cappedBody)

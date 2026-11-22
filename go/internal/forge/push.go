@@ -110,9 +110,9 @@ func (p *Pusher) PushProject(ctx context.Context, project store.ProjectRow, clie
 func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client Forge, repo RepoRef,
 	pol issueTypePolicy, allow func() bool, c *store.IssuePushCandidate, res *PushResult) (bool, error) {
 
-	ctxFields, ctxH := CtxIssueBase(&c.Block, pol.terminalSet, pol.registryOK)
+	ctxFields, ctxH := pol.ctxIssueBase(&c.Block, c.BaseFields)
 	projected := func(b *store.Block) string {
-		_, h := CtxIssueBase(b, pol.terminalSet, pol.registryOK)
+		_, h := pol.ctxIssueBase(b, c.BaseFields)
 		return h
 	}
 	advanceOnly := func(tx pgx.Tx) error {
