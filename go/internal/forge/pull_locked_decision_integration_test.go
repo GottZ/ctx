@@ -256,3 +256,29 @@ func TestPullDecidesOnTheLockedMapping(t *testing.T) {
 		t.Errorf("mapping flagged %v, base is the forge's %v", conflict, base == e.forgeH(t))
 	}
 }
+
+// TestPullOfAnOlderFetchLeavesANewerPull: this pull fetched the issue and
+// read the block at the base; before it writes, the forge changes again and
+// another instance pulls that newer version (block and base at it). This
+// pull's fetch is older than what the mapping now records: it must not
+// write it, or the block falls back to the older version — and with the
+// since cursor past the newer one, no later pull would bring it back.
+func TestPullOfAnOlderFetchLeavesANewerPull(t *testing.T) {
+	e := i491Setup(t, "i491olderfetch", "", fakeIssue{Title: "Crane", Body: "forge body"})
+	e.gh.edit(t, 5, func(it *fakeIssue) { it.Body = "body edited on the forge, first" })
+	res := e.pullHeldOn(t, func() {
+		e.gh.edit(t, 5, func(it *fakeIssue) { it.Body = "body edited on the forge, second" })
+		if r := e.pullOn(t, e.pool); r.Applied != 1 {
+			t.Fatalf("other instance's pull of the newer version: %+v", r)
+		}
+	})
+	if res.Applied != 0 || res.Conflicts != 0 {
+		t.Errorf("the pull of the older fetch: %+v, want nothing written", res)
+	}
+	if b := getBlock(t, e.pool, e.proj.Scope, e.id(t)); b.Content != "body edited on the forge, second" {
+		t.Errorf("the block holds %q, want the newer version kept", b.Content)
+	}
+	if base, conflict := e.mapping(t); conflict || base != e.forgeH(t) {
+		t.Errorf("mapping flagged %v, base is the forge's %v", conflict, base == e.forgeH(t))
+	}
+}

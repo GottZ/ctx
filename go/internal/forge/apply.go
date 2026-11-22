@@ -251,6 +251,24 @@ func (a *Applier) applyIssue(ctx context.Context, project store.ProjectRow, pol 
 	})
 }
 
+// fetchedBefore answers whether another instance's pull recorded a newer
+// observation of the forge entity since this pull read the mapping: the base
+// moved, and the locked row's forge_updated_at — the forge's own updated_at
+// of the version a pull last applied or converged on — lies after the one
+// this pull fetched. Its fetch is then older than what the row records, and
+// writing it would put an older forge version into a block another pull
+// brought level with a newer one; with the since cursor past the newer
+// version, nothing would bring it back. The write is skipped. This orders two
+// observations of the forge on the forge's clock; it is no direction input
+// (W16: ctx-ahead or forge-ahead stays a matter of content hashes), and it is
+// consulted only when the base moved — a push advance moves the base without
+// touching forge_updated_at, so a pull after another instance's push still
+// decides on the locked rows (issue #491).
+func fetchedBefore(locked, read store.SyncMap, fetched *time.Time) bool {
+	return locked.BaseHash != read.BaseHash && locked.ForgeUpdatedAt != nil && fetched != nil &&
+		fetched.Before(*locked.ForgeUpdatedAt)
+}
+
 // decision is one cell of the 3-way matrix (see the package doc).
 type decision int
 
@@ -315,7 +333,9 @@ type pulled struct {
 //     conflict otherwise (the read path's own matrix, issue #452).
 //   - The mapping's base moved (another instance pushed and advanced it, or
 //     pulled): the read's decision was made against a base that is gone, and
-//     the matrix runs on the locked block and the locked row alone. Where
+//     the matrix runs on the locked block and the locked row alone — unless
+//     the other instance pulled a newer version than this pull fetched
+//     (fetchedBefore), then nothing is written. Where
 //     another instance pushed a local edit, the block equals the new base and
 //     the forge is ahead of it — a pull, not the conflict the read's base
 //     would make of it; what the pull fetched before that push landed comes
@@ -343,6 +363,9 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 		locked, ok, err := store.LockSyncMap(ctx, tx, m.BlockID)
 		if err != nil || !ok {
 			return err
+		}
+		if fetchedBefore(locked, m, p.fUpdated) {
+			return nil
 		}
 		ctxH := p.project(cur, locked.BaseFields)
 		d := decide(locked.BaseHash, ctxH, p.forgeH)
