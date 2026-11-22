@@ -1380,5 +1380,7 @@ a `U&` identifier, a name concatenated from strings, a catalog column renamed by
 list — nor a read it would have to follow through the file: a copy of `pg_class` in a table the
 file creates, a view or function the file defines, a count with further columns or a table name
 built from strings. Nor does it resolve the scopes of SQL: a column named `raise` after `THEN` or
-`ELSE` in a `CASE` expression is taken for a `RAISE` that reports, and a read after it passes.
+`ELSE` in a `CASE` expression is taken for a `RAISE` that reports, and a read after it passes; an
+alias anywhere in a statement counts as a relation of all of it, so a subquery alias named like a
+row variable hides that row's `r.reltuples`, which passes.
 `reviewedForms` in `threshold_test.go` lists each form with its decision (issue #493).

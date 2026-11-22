@@ -74,7 +74,9 @@ import (
 // with further columns or a table name built from strings. Nor does it
 // resolve the scopes of SQL: a column named raise after THEN or ELSE in a
 // CASE expression is taken for a RAISE that reports (the read after it
-// passes). reviewedForms lists such forms as "limit".
+// passes), and an alias anywhere in a statement counts as a relation of all
+// of it, so a subquery alias named like a row variable hides r.reltuples of
+// the row (it passes). reviewedForms lists such forms as "limit".
 
 // rowsFunctionSince is the migration that creates ctx_migration_rows (issue
 // #399). From it on, a file that decides by the size of a table asks the
@@ -1286,6 +1288,18 @@ $do$;
 			inDo("    SELECT reltuples::bigint INTO v_rows FROM m193_catalog;")},
 	{class: "limit", name: "a column named raise in a CASE arm before a size read",
 		src: inDo(`    SELECT CASE WHEN enabled THEN raise ELSE pg_relation_size('public.context_blocks') END INTO v_rows FROM settings;`)},
+	{class: "limit", name: "a subquery alias named like the row variable it hides",
+		src: `DO $do$
+DECLARE
+    r pg_class%ROWTYPE;
+BEGIN
+    r := m193_catalog_row('public.context_blocks');
+    IF r.reltuples > 500000 AND EXISTS (SELECT 1 FROM settings r) THEN
+        RETURN;
+    END IF;
+END
+$do$;
+`},
 	{class: "limit", name: "a count with a further column",
 		src: inDo(`    SELECT count(*), max(created_at) INTO v_rows, v_heap FROM context_blocks;`)},
 
