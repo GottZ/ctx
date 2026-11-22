@@ -15,7 +15,8 @@ import (
 // migration that decides "inline or runbook" by the size of a table asks
 // ctx_migration_rows; checkSizeDecision refuses a file that decides a size
 // itself. It reads a file as the PostgreSQL lexer does: a comment separates
-// tokens (block comments nest), a quote ends where PostgreSQL ends it ('…'
+// tokens (block comments nest, a -- comment ends at a line feed or a carriage
+// return), a quote ends where PostgreSQL ends it ('…'
 // with '', E'…' with its backslash escapes, $tag$…$tag$ at the first closing
 // tag, "…" for an identifier with its case), and the content of every string
 // and dollar-quoted body is read again as SQL. A body after DO or AS is code
@@ -153,7 +154,7 @@ func nextToken(src string, i int) (next int, t sqlToken, ok bool) {
 	case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v':
 		return i + 1, t, false
 	case strings.HasPrefix(src[i:], "--"):
-		if end := strings.IndexByte(src[i:], '\n'); end >= 0 {
+		if end := strings.IndexAny(src[i:], "\r\n"); end >= 0 {
 			return i + end + 1, t, false
 		}
 		return len(src), t, false
@@ -1217,6 +1218,8 @@ $do$;
 		src: inDo(`    SELECT count(*), max(created_at) INTO v_rows, v_heap FROM context_blocks;`)},
 
 	// The lexer: quotes, comments and bodies end where PostgreSQL ends them.
+	{class: "pin", refuse: true, name: "a line comment ends at a carriage return",
+		src: "-- size check\rSELECT reltuples FROM pg_class WHERE relname = 'context_blocks';\n"},
 	{class: "pin", refuse: true, name: "a dollar-quoted apostrophe inside the definition hides no read after it",
 		src: "CREATE OR REPLACE FUNCTION ctx_migration_rows(p_rel regclass, p_threshold bigint)\n" +
 			"RETURNS bigint LANGUAGE plpgsql AS $fn$\nBEGIN\n    RAISE NOTICE $m$it's 191's function$m$;\n    RETURN p_threshold;\nEND\n$fn$;\n" +

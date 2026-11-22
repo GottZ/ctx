@@ -1331,7 +1331,8 @@ before the upgrade: `VACUUM` empties such pages but returns only those that trai
 
 `TestMigrationsDecideSizeWithTheRowsFunction` (`go/migrations`) refuses a migration from 191 on
 whose code decides a size itself, also beside a call of the function. It reads the file as the
-PostgreSQL lexer does — comments separate tokens and nest, a quote ends where PostgreSQL ends it —
+PostgreSQL lexer does — comments separate tokens and nest, a `--` comment ends at a line feed or a
+carriage return, a quote ends where PostgreSQL ends it —
 and reads the content of every string and dollar-quoted body again as SQL, so dynamic SQL counts;
 a body after `DO` or `AS` holds statements of its own, while a `;` inside any other string ends no
 statement. Refused:
