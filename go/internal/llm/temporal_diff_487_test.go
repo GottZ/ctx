@@ -159,9 +159,11 @@ type gateRecorder struct {
 
 var errGateStopped = errors.New("gate stopped")
 
-func (r *gateRecorder) Helper()                       {}
-func (r *gateRecorder) Logf(string, ...any)           {}
-func (r *gateRecorder) Errorf(format string, a ...any) { r.failures = append(r.failures, fmt.Sprintf(format, a...)) }
+func (r *gateRecorder) Helper()             {}
+func (r *gateRecorder) Logf(string, ...any) {}
+func (r *gateRecorder) Errorf(format string, a ...any) {
+	r.failures = append(r.failures, fmt.Sprintf(format, a...))
+}
 func (r *gateRecorder) Fatalf(format string, a ...any) {
 	r.failures = append(r.failures, fmt.Sprintf(format, a...))
 	panic(errGateStopped)

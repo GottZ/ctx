@@ -18,9 +18,9 @@ import (
 // expectation the review wrote for each question, by the review's own
 // criterion (holdoutJudge), asked on 2026-11-22. Each row carries whether
 // the rules answered it right at 36b915f8 (v5.75.0) and at aa1354ea
-// (v5.76.1); a question answered right at aa1354ea fails the test when it is
-// answered wrong now, unless the review marked its expectation as disputed.
-// The counts per class are logged (issue #506).
+// (v5.76.1); a question answered right at either base fails the test when it
+// is answered wrong now, unless the review marked its expectation as
+// disputed. The counts per class are logged (issue #506).
 func TestRules_HoldoutExpectations(t *testing.T) {
 	files, err := filepath.Glob("testdata/temporal_holdout_487/*.tsv")
 	if err != nil || len(files) == 0 {
@@ -69,8 +69,9 @@ func TestRules_HoldoutExpectations(t *testing.T) {
 			c.wrong36 += b2i(!ok && ok36)
 			c.rightAA += b2i(ok && !okAA)
 			c.wrongAA += b2i(!ok && okAA)
-			if !ok && okAA && !e.disputed {
-				t.Errorf("%s:%d [%s] %q: answered right at aa1354ea, wrong now: %s", file, line, e.class, e.q, why)
+			if !ok && (ok36 || okAA) && !e.disputed {
+				t.Errorf("%s:%d [%s] %q: answered right at a base (36b915f8 %v, aa1354ea %v), wrong now: %s",
+					file, line, e.class, e.q, ok36, okAA, why)
 			}
 		}
 		if err := sc.Err(); err != nil {

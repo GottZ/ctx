@@ -113,7 +113,43 @@ func clauseTokens(query string) clauseWords {
 	if 2*n > m {
 		clear(c.caps)
 	}
+	c.colloquial()
 	return c
+}
+
+// colloquialForms are spoken forms of German auxiliaries and verbs a
+// question writes, mapped to the form the tense detection reads (issue #506):
+// "ham", "hamma", "hamse" (haben, haben wir, haben sie), "gabs" (gab es),
+// "wars" (war es), "isses" (ist es).
+var colloquialForms = map[string]string{"ham": "haben", "hamma": "haben", "hamse": "haben", "gabs": "gab", "wars": "war", "isses": "ist"}
+
+// colloquial maps the words of c that are a spoken form of a German verb to
+// the verb (issue #506): a word of colloquialForms; a known German finite
+// verb with the clitic "es" glued to it ("gab's", "hat's", "war's", "gibt's",
+// written with ' or ’), which the English "it's" or "what's" is not; and in a
+// German question "is", which spoken German writes for "ist" and which, as
+// the English copula as well, says nothing of the language of the question
+// (questionLanguage).
+func (c *clauseWords) colloquial() {
+	for i, w := range c.words {
+		if f, ok := colloquialForms[w]; ok {
+			c.words[i] = f
+			continue
+		}
+		for _, clitic := range []string{"'s", "\u2019s"} {
+			if stem, ok := strings.CutSuffix(w, clitic); ok && (germanPastVerbs[stem] || perfektAux[stem] || germanMarkers[stem]) {
+				c.words[i] = stem
+			}
+		}
+	}
+	if questionLanguage(*c) != langGerman {
+		return
+	}
+	for i, w := range c.words {
+		if w == "is" {
+			c.words[i] = "ist"
+		}
+	}
 }
 
 // abbreviations are words that end with a dot and end no clause ("Dr.
@@ -383,7 +419,7 @@ const (
 // function words, auxiliaries and day keywords that belong to one of the two
 // languages and are no word of the other. A word both languages spell alike
 // ("was", "in", "an", "so", "will", "hat", "war", "man", "also") is in
-// neither; the weekday names and the month names that differ between the
+// neither, and so is "is", which spoken German writes for "ist" (issue #506); the weekday names and the month names that differ between the
 // languages are counted by questionLanguage itself.
 var (
 	germanMarkers = toWordSet(
@@ -399,7 +435,7 @@ var (
 		"woche", "monat", "jahr", "wochenende",
 	)
 	englishMarkers = toWordSet(
-		"the", "a", "is", "are", "were", "been", "be", "did", "do", "does", "done", "has", "have",
+		"the", "a", "are", "were", "been", "be", "did", "do", "does", "done", "has", "have",
 		"had", "on", "at", "of", "to", "for", "from", "with", "by", "it", "its", "this", "that",
 		"these", "those", "there", "what", "which", "who", "whom", "whose", "when", "where", "why",
 		"how", "we", "you", "they", "he", "she", "i", "my", "our", "your", "their", "his",
@@ -582,8 +618,10 @@ func (c clauseWords) tense(s, e, lang int) string {
 		}
 	}
 
-	// The German Perfekt and the past subjunctive (hasPerfektForm).
-	if c.hasPerfektForm(s, e) {
+	// The German Perfekt and the past subjunctive (hasPerfektForm), and the
+	// Perfekt a German question writes without its auxiliary
+	// (ellipticPerfekt).
+	if c.hasPerfektForm(s, e) || lang != langEnglish && c.ellipticPerfekt(s, e) {
 		pastScore += 2
 	}
 
@@ -1037,6 +1075,91 @@ func closingAt(table []int, e int) (int, bool) {
 		return 0, false
 	}
 	return table[e], true
+}
+
+// germanFiniteWords are the finite verbs of a German clause the rules know
+// beside germanPastVerbs and perfektAux: the forms of "sein", "werden" and
+// the modals, and the present of the verbs a question asks with.
+var germanFiniteWords = toWordSet(
+	"bin", "bist", "ist", "sind", "seid", "wird", "wirst", "werde", "werden", "werdet", "wurde", "wurden",
+	"muss", "musst", "müssen", "soll", "sollst", "sollen", "kann", "kannst", "können", "darf", "darfst", "dürfen",
+	"mag", "will", "willst", "wollen", "möchte", "möchten", "gibt", "gilt", "steht", "kommt", "läuft", "geht",
+	"fehlt", "bleibt", "liegt", "braucht", "brauchen", "kriegt", "kriegen", "bekommt",
+)
+
+// indefiniteWords are the pronouns that make a clause active: an object
+// ("was" for "etwas", "nichts") or a subject ("jemand", "keiner") of the verb
+// whose participle ends the clause.
+var indefiniteWords = toWordSet("was", "etwas", "irgendwas", "nichts", "nix", "jemand", "irgendwer", "irgendjemand", "niemand", "keiner")
+
+// planParticiples are the participles of the verbs that make a plan: their
+// Perfekt names the date of what is planned, which lies ahead ("am Freitag
+// was geplant?"), and which of the two a question means only the verb tells,
+// not the form of the clause.
+var planParticiples = toWordSet("geplant", "eingeplant", "vorgesehen", "angesetzt", "terminiert", "vorgemerkt", "angekündigt", "angedacht")
+
+// ellipticPerfekt reports a German Perfekt without its auxiliary in a clause
+// of [s, e) (issue #506): spoken German drops "haben" or "sein" ("am Freitag
+// was kaputt gemacht?", "Server am Freitag abgestürzt?"). A clause counts
+// when it has no finite verb the rules know, ends with a participle and the
+// auxiliary it dropped can only be that of a Perfekt:
+//   - the participle is one of a verb that takes "sein" (seinParticiple),
+//     whose state no passive names, or
+//   - an indefinite pronoun stands before it (indefiniteWords; "was" not as
+//     the interrogative that opens the clause): the clause is active, its
+//     auxiliary "haben" — and the participle is no plan's.
+//
+// A clause with a subject pronoun right behind its first word has a finite
+// verb there the rules do not know ("Kriegen wir am Montag was gefixt?"),
+// and a participle right behind an opening interrogative is the present
+// ("Was passiert, wenn …?").
+// Any other clause ending with a participle ("Montag Deployment geplant",
+// "Freitag Release freigegeben?", "Bug am Montag gefixt?") may as well be
+// the state passive or a plan with "ist" dropped: it stays neutral, since a
+// wrong past moves the date back and drops the superseded filter, while a
+// wrong neutral only moves the date.
+func (c clauseWords) ellipticPerfekt(s, e int) bool {
+	for cs := s; cs < e; {
+		_, ce := c.clauseOf(cs)
+		if ce > e {
+			ce = e
+		}
+		if c.clauseEllipsis(cs, ce) {
+			return true
+		}
+		cs = ce
+	}
+	return false
+}
+
+// clauseEllipsis is ellipticPerfekt for the one clause [s, e).
+func (c clauseWords) clauseEllipsis(s, e int) bool {
+	last := e - 1
+	if last <= s || !c.participleAt(s, last) || last > s+1 && subjectWords[c.words[s+1]] {
+		return false
+	}
+	// Right behind an opening interrogative the form is the finite verb, the
+	// present of a verb on -ieren or -t ("Was passiert, wenn …?").
+	if clauseOpeners[c.words[s]] {
+		v := s + 1
+		for v < last && wasParticles[c.words[v]] {
+			v++
+		}
+		if v == last {
+			return false
+		}
+	}
+	proof := seinParticiple(c.words[last])
+	for i := s; i < last; i++ {
+		w := c.words[i]
+		if germanPastVerbs[w] || perfektAux[w] || germanFiniteWords[w] {
+			return false
+		}
+		if indefiniteWords[w] && (i > s || w != "was") && !planParticiples[c.words[last]] {
+			proof = true
+		}
+	}
+	return proof
 }
 
 // ierenParticiple reports whether tok is the participle of a German verb on

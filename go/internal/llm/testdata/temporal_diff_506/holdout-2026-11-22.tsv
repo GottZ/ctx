@@ -14,7 +14,7 @@ Was wurde im Dezember beschlossen?	nil
 Welche Server sind im Juli ausgefallen?	nil
 Wann hatte Damien am Dienstag den Hotfix eingespielt	["Dienstag|2026-11-17..|past"] linear=0.60,weekday=0.40
 Am Montag hat jemand die Config kaputt gemacht, wer war das?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
-Montag deployment kaputt gegangen?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Montag deployment kaputt gegangen?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40	fixed	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
 Die Datenbank lief am Mittwoch voll, warum?	["Mittwoch|2026-11-18..|past"] linear=0.60,weekday=0.40
 Warum brach der Build am Donnerstag ab?	["Donnerstag|2026-11-19..|past"] linear=0.60,weekday=0.40
 Wieso fiel der Spark am Freitag aus?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
@@ -37,7 +37,7 @@ Was war am Dienstag mit dem Ollama los?	["Dienstag|2026-11-17..|past"] linear=0.
 Wie oft ist der Guard am Freitag angesprungen?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
 Warum sind am Mittwoch so viele Requests abgelehnt worden?	["Mittwoch|2026-11-18..|past"] linear=0.60,weekday=0.40
 Welche Migrationen hatten wir im Februar zurückgerollt?	nil
-am freitag was kaputt gemacht?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+am freitag was kaputt gemacht?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40	fixed	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
 wer hat am montag den master force-gepusht	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
 Hat jemand am Donnerstag die Backups geprüft?	["Donnerstag|2026-11-19..|past"] linear=0.60,weekday=0.40
 Sind am Wochenende Alerts gekommen?	["am Wochenende|2026-11-21..2026-11-22|past"] weekday=1.00
@@ -264,7 +264,7 @@ Haben wir im Juli die API gebreakt?	nil
 Was wurde im Mai gedeprecated?	nil
 Welche Services hatten am Dienstag Downtime?	["Dienstag|2026-11-17..|past"] linear=0.60,weekday=0.40
 Wer hat am Freitag den Prod-Cluster gescaled?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
-Was ham wir am Montag gemerged, gibt's da Regressions?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was ham wir am Montag gemerged, gibt's da Regressions?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40	fixed	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
 Wurde der Release am Donnerstag getaggt?	["Donnerstag|2026-11-19..|past"] linear=0.60,weekday=0.40
 Was wurde am Wochenende upgedated?	["am Wochenende|2026-11-21..2026-11-22|past"] weekday=1.00
 welche features sind im juni gelauncht worden	nil
