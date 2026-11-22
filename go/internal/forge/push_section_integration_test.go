@@ -157,11 +157,11 @@ func TestPushSectionLeavesAnEntityInFlightToTheNextRun(t *testing.T) {
 			bRes = e.pushOn(t, e.pool)
 		}, nil)
 		aRes := e.pushOn(t, e.pool)
-		if bRes.Pushed != 0 || bRes.Conflicts != 0 {
-			t.Errorf("instance B during A's PATCH: %+v, want nothing pushed and no conflict", bRes)
+		if bRes.Pushed != 0 || bRes.Conflicts != 0 || bRes.Skipped != 1 {
+			t.Errorf("instance B during A's PATCH: %+v, want nothing pushed, no conflict and the entity counted as skipped", bRes)
 		}
-		if aRes.Pushed != 1 || aRes.Conflicts != 0 {
-			t.Errorf("instance A: %+v, want one push and no conflict", aRes)
+		if aRes.Pushed != 1 || aRes.Conflicts != 0 || aRes.Skipped != 0 {
+			t.Errorf("instance A: %+v, want one push, no conflict, nothing skipped", aRes)
 		}
 		if got := e.gh.landed(); len(got) != 1 || i491TitleSent(got[0]) != "Crane, A" {
 			t.Fatalf("PATCHes landed: %+v, want A's alone", got)
@@ -199,8 +199,8 @@ func TestPushSectionLeavesAnEntityInFlightToTheNextRun(t *testing.T) {
 		if err != nil || aRes.Pushed != 1 || aRes.Conflicts != 0 {
 			t.Errorf("instance A: %+v %v, want one push and no conflict", aRes, err)
 		}
-		if bRes.Pushed != 0 || bRes.Conflicts != 0 || bSpy.wireCalls() != 0 {
-			t.Errorf("instance B during A's PATCH: %+v, %d wire writes — want none", bRes, bSpy.wireCalls())
+		if bRes.Pushed != 0 || bRes.Conflicts != 0 || bRes.Skipped != 1 || bSpy.wireCalls() != 0 {
+			t.Errorf("instance B during A's PATCH: %+v, %d wire writes — want none, the entity counted as skipped", bRes, bSpy.wireCalls())
 		}
 		if _, _, conflict := mapByBlock(t, pool, commentID); conflict {
 			t.Fatalf("the mapping is flagged after A's advance")
@@ -249,8 +249,8 @@ func TestPushSectionSkipsAListingAnotherPushOvertook(t *testing.T) {
 	close(hold.release)
 	select {
 	case o := <-bOut:
-		if o.err != nil || o.res.Pushed != 0 || o.res.Conflicts != 0 {
-			t.Errorf("instance B after A's advance: %+v %v, want nothing pushed and no conflict", o.res, o.err)
+		if o.err != nil || o.res.Pushed != 0 || o.res.Conflicts != 0 || o.res.Skipped != 1 {
+			t.Errorf("instance B after A's advance: %+v %v, want nothing pushed, no conflict, the entity counted as skipped", o.res, o.err)
 		}
 	case <-time.After(i452Wait):
 		t.Fatalf("instance B did not finish within %s", i452Wait)
@@ -305,8 +305,8 @@ func TestPushSectionSkipsAMappingFlaggedSinceTheListing(t *testing.T) {
 	close(hold.release)
 	select {
 	case o := <-done:
-		if o.err != nil || o.res.Pushed != 0 {
-			t.Errorf("push after the flag: %+v %v, want nothing pushed", o.res, o.err)
+		if o.err != nil || o.res.Pushed != 0 || o.res.Skipped != 1 {
+			t.Errorf("push after the flag: %+v %v, want nothing pushed and the entity counted as skipped", o.res, o.err)
 		}
 	case <-time.After(i452Wait):
 		t.Fatalf("the push did not finish within %s", i452Wait)

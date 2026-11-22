@@ -45,6 +45,7 @@ const pushBatchLimit = 500
 type PushResult struct {
 	Pushed    int  // entities written to the forge (create + update + comment)
 	Conflicts int  // mappings flagged: a truncated body that diverged (never written), or a base another instance moved during the push
+	Skipped   int  // entities left to the next run: another instance's push held them, wrote them since the listing, or a pull flagged them since (a DEBUG line names which, issue #491)
 	Throttled bool // the token bucket ran dry — the pass stopped early
 }
 
@@ -126,7 +127,8 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 		// candidates through the bound advance (issue #452) — otherwise it
 		// stays listed for good and, past pushBatchLimit, keeps later
 		// candidates out of the listing.
-		_, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, advanceOnly)
+		skip, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, advanceOnly)
+		noteSkip(res, c.Block.ID, skip)
 		return true, err
 	}
 	ctxProj, _ := parseIssueProjection(ctxFields)
@@ -147,7 +149,8 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 	}
 	if patch.empty() {
 		// Only a never-pushed field (milestone) diverged: advance base, 0 wire.
-		_, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, advanceOnly)
+		skip, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, advanceOnly)
+		noteSkip(res, c.Block.ID, skip)
 		return true, err
 	}
 	return p.wireSection(ctx, c.Block.ID, c.BaseHash, allow, res,
@@ -210,6 +213,16 @@ func (p *Pusher) section(ctx context.Context, blockID, listedBase string, wire f
 	return "", pgxdb.Write(ctx, conn.Conn(), pgxdb.Stages{Begin: "forge: push record begin", Commit: "forge: push record commit"}, record)
 }
 
+// noteSkip counts an entity a section left to the next run, in the
+// result the sync run reports (push_skipped), and names the reason at DEBUG.
+func noteSkip(res *PushResult, blockID string, skip store.PushSkip) {
+	if skip == "" {
+		return
+	}
+	res.Skipped++
+	slog.Debug("forge: push left an entity to the next run", "block", blockID, "reason", string(skip))
+}
+
 // unlockPushEntity gives a section's push lock back and returns conn to the
 // pool, or closes conn when the release is not proven.
 func unlockPushEntity(ctx context.Context, conn *pgxpool.Conn, blockID string) {
@@ -242,7 +255,7 @@ func (p *Pusher) wireSection(ctx context.Context, blockID, listedBase string, al
 	send func() error, record func(tx pgx.Tx) error) (bool, error) {
 
 	sent := false
-	_, err := p.section(ctx, blockID, listedBase, func() error {
+	skip, err := p.section(ctx, blockID, listedBase, func() error {
 		if !allow() {
 			return errThrottled
 		}
@@ -252,6 +265,7 @@ func (p *Pusher) wireSection(ctx context.Context, blockID, listedBase string, al
 		sent = true
 		return nil
 	}, record)
+	noteSkip(res, blockID, skip)
 	switch {
 	case errors.Is(err, errThrottled):
 		res.Throttled = true
@@ -321,7 +335,8 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 	}
 	if ctxH == c.BaseHash {
 		// In sync — 0 wire; the row leaves the candidates as in pushIssue.
-		_, err := p.section(ctx, c.BlockID, c.BaseHash, nil, advanceOnly)
+		skip, err := p.section(ctx, c.BlockID, c.BaseHash, nil, advanceOnly)
+		noteSkip(res, c.BlockID, skip)
 		return true, err
 	}
 	body, truncated := store.CapForgeBody(c.Content)

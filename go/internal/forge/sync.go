@@ -78,21 +78,22 @@ type PushFunc func(ctx context.Context, project store.ProjectRow, client Forge, 
 // (forge-sync-status surface). DB-side history (last run row, conflict count) is
 // merged by the handler.
 type SyncStatus struct {
-	ProjectID  string    `json:"project_id"`
-	Running    bool      `json:"running"`
-	DryRun     bool      `json:"dry_run"`
-	StartedAt  time.Time `json:"started_at,omitzero"`
-	FinishedAt time.Time `json:"finished_at,omitzero"`
-	Fetched    int       `json:"fetched"`     // issues fetched (PRs excluded)
-	PRsSkipped int       `json:"prs_skipped"` // pull_request items dropped (§6.1)
-	Pages      int       `json:"pages"`
-	Applied    int       `json:"applied"`   // I-G writes; 0 in I-F (no-op apply)
-	Pushed     int       `json:"pushed"`    // I-H: entities written back to the forge
-	Conflicts  int       `json:"conflicts"` // I-G pull + I-H push (truncated data-loss guard)
-	Aborted    bool      `json:"aborted"`
-	BackoffSet bool      `json:"backoff_set"`
-	RunID      string    `json:"run_id,omitempty"`
-	LastError  string    `json:"last_error,omitempty"`
+	ProjectID   string    `json:"project_id"`
+	Running     bool      `json:"running"`
+	DryRun      bool      `json:"dry_run"`
+	StartedAt   time.Time `json:"started_at,omitzero"`
+	FinishedAt  time.Time `json:"finished_at,omitzero"`
+	Fetched     int       `json:"fetched"`     // issues fetched (PRs excluded)
+	PRsSkipped  int       `json:"prs_skipped"` // pull_request items dropped (§6.1)
+	Pages       int       `json:"pages"`
+	Applied     int       `json:"applied"`      // I-G writes; 0 in I-F (no-op apply)
+	Pushed      int       `json:"pushed"`       // I-H: entities written back to the forge
+	PushSkipped int       `json:"push_skipped"` // I-H: entities the push left to the next run (another instance's push held them, wrote them since the listing, or a pull flagged them since)
+	Conflicts   int       `json:"conflicts"`    // I-G pull + I-H push (truncated data-loss guard)
+	Aborted     bool      `json:"aborted"`
+	BackoffSet  bool      `json:"backoff_set"`
+	RunID       string    `json:"run_id,omitempty"`
+	LastError   string    `json:"last_error,omitempty"`
 }
 
 // TenantStatusFn resolves the owning tenant's status for a scope; found=false ⇒
@@ -361,6 +362,7 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 		m.mu.Lock()
 		if st := m.runs[project.ID]; st != nil {
 			st.Pushed += pres.Pushed
+			st.PushSkipped += pres.Skipped
 			st.Conflicts += pres.Conflicts
 		}
 		m.mu.Unlock()
@@ -657,7 +659,7 @@ func (m *SyncManager) finish(projectID, runID, errMsg string, aborted, backoffSe
 	stats, _ := json.Marshal(map[string]int{
 		"fetched": statsSnapshot.Fetched, "prs_skipped": statsSnapshot.PRsSkipped,
 		"pages": statsSnapshot.Pages, "applied": statsSnapshot.Applied,
-		"pushed": statsSnapshot.Pushed, "conflicts": statsSnapshot.Conflicts,
+		"pushed": statsSnapshot.Pushed, "push_skipped": statsSnapshot.PushSkipped, "conflicts": statsSnapshot.Conflicts,
 	})
 	_ = store.FinishSyncRun(context.Background(), m.pool, runID, dbStatus, errMsg, stats)
 }
