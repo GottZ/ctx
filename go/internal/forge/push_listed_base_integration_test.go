@@ -26,7 +26,6 @@ package forge
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -55,6 +54,18 @@ func i486Undecided(t *testing.T, pool *pgxpool.Pool, proj store.ProjectRow, kind
 		t.Errorf("after the race the mapping still carries a base field snapshot for a base it does not know")
 	}
 	i452NoCandidates(t, pool, proj)
+}
+
+// i486StillConflicted: block and forge differ; the local version stays in
+// the block, the mapping stays flagged, and nothing was written to the forge.
+func i486StillConflicted(t *testing.T, pool *pgxpool.Pool, proj store.ProjectRow, kind string, forgeID int64, blockID, wantContent, wantTitle string, wire int) {
+	t.Helper()
+	b := getBlock(t, pool, proj.Scope, blockID)
+	_, conflict, _, _ := readMapping(t, pool, proj.ID, kind, forgeID)
+	if !conflict || wire != 0 || b.Content != wantContent || (wantTitle != "" && b.Title != wantTitle) {
+		t.Errorf("after three cycles: flagged %v, wire writes %d, block %q / %q — want the conflict kept, no wire write and the local version %q / %q",
+			conflict, wire, b.Title, b.Content, wantTitle, wantContent)
+	}
 }
 
 // i486Cycles runs three pull-and-push cycles (pull applies the forge state,
@@ -142,6 +153,36 @@ func TestPushAdvanceOffItsListedBaseLeavesTheDecisionToThePull(t *testing.T) {
 		}
 	})
 
+	// The promise of #486 that the advance's unknown base keeps: when block
+	// and forge then differ — a local edit and a remote edit after the race —
+	// the next pulls keep the conflict, the push writes nothing, and the
+	// local version stays in the block for the user.
+	t.Run("issue, both sides move on after the unknown base", func(t *testing.T) {
+		pool := testdb.SetupTestDB(t)
+		ctx := context.Background()
+		proj := enablePush(seedIFProject(t, pool, "i486advdiverge"))
+		issueID, _ := i452Pulled(t, pool, proj, false)
+		i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Title: str("Crane, renamed")})
+		other := applierWithRegistry(pool)
+		edited := IssueRemote{Number: 5, Title: "Crane, renamed", Body: "body edited on the forge", State: "open", UpdatedAt: time.Unix(3, 0).UTC()}
+		spy := &hookSpy{pushSpyForge: newPushSpy()}
+		spy.setHook(func() {
+			if r, err := other.ApplyIssues(ctx, proj, []IssueRemote{{Number: 5, Title: "Crane, renamed", Body: "forge body", State: "open", UpdatedAt: time.Unix(2, 0).UTC()}}); err != nil || r.Applied != 0 || r.Conflicts != 0 {
+				t.Errorf("other instance, converging pull: %+v %v", r, err)
+			}
+			if r, err := other.ApplyIssues(ctx, proj, []IssueRemote{edited}); err != nil || r.Applied != 1 {
+				t.Errorf("other instance, pull of the remote edit: %+v %v", r, err)
+			}
+		})
+		if res, err := pusherWithRegistry(pool).PushProject(ctx, proj, spy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow); err != nil || res.Conflicts != 1 {
+			t.Fatalf("first push: %+v %v, want the conflict of the moved base", res, err)
+		}
+		i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Content: str("body edited locally after the race")})
+		remote := IssueRemote{Number: 5, Title: "Crane, renamed", Body: "body edited on the forge again", State: "open"}
+		wire := i486Cycles(t, pool, proj, i486PullIssue(t, pool, proj, remote))
+		i486StillConflicted(t, pool, proj, "issue", 5, issueID, "body edited locally after the race", "#5 Crane, renamed", wire)
+	})
+
 	t.Run("comment, pull during the PATCH", func(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		ctx := context.Background()
@@ -177,9 +218,11 @@ func TestPushAdvanceOffItsListedBaseLeavesTheDecisionToThePull(t *testing.T) {
 		issueID, _ := i452Pulled(t, pool, proj, false)
 		i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Tags: []string{"field-work"}})
 
-		// Held at the advance's first statement, inside the push section
-		// (the section's base check has passed).
-		held, hold := i491HoldStatementPool(t, dsn, func(sql string) bool { return strings.Contains(sql, "FOR NO KEY UPDATE") })
+		// Held at the BEGIN of the advance's transaction — the push's first
+		// transaction: the listing and the section's lock and base check are
+		// statements of their own, and they have passed. Where the advance
+		// locks the block is TestPushAdvanceKeepsAShareLockerWaiting's.
+		held, hold := i452HoldBeginPool(t, dsn)
 		spy := newPushSpy()
 		type out struct {
 			res PushResult
