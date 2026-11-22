@@ -55,6 +55,9 @@ type clauseWords struct {
 	// joinedNext: the word is joined to the next one by a hyphen
 	// ("Wochenende-Flag", "friday-deploy-script"), issue #506.
 	joinedNext []bool
+	// closing caches the table of closingParticiples, filled once per
+	// question by the first clause that needs it (issue #506).
+	closing *[]int
 }
 
 // clauseTokens tokenizes query into clauseWords.
@@ -62,7 +65,7 @@ func clauseTokens(query string) clauseWords {
 	lower := strings.ToLower(query)
 	expanded := strings.ReplaceAll(lower, "-", " ")
 	sameLength := len(lower) == len(query)
-	var c clauseWords
+	c := clauseWords{closing: new([]int)}
 	start, sentence := true, true
 	for i := 0; i < len(expanded); {
 		r, size := utf8.DecodeRuneInString(expanded[i:])
@@ -720,16 +723,85 @@ var dayKeywords = func() map[string]bool {
 // besprochen?") reads that participle (hasPerfektForm). The language is the
 // sentence's (sentenceLanguage).
 func tenseAt(query string, off int) string {
-	c := clauseTokens(query)
-	// The offsets are those of the lowercased question; where lowercasing
-	// changes the length (a few letters beyond ASCII), the whole question.
-	if i := c.wordAt(off); i >= 0 && len(strings.ToLower(query)) == len(query) {
-		if s, e := c.clauseOf(i); (s > 0 || e < len(c.words)) && c.hasOwnVerb(s, e) {
-			ss, se := c.sentenceOf(s)
-			return c.tense(s, e, c.sentenceLanguage(ss, se))
+	return newTenseReader(query).at(off)
+}
+
+// tenseReader answers tenseAt for every date of one question from one
+// reading of it (issue #506): the words once, each clause's and each
+// sentence's tense and language once, the whole question's tense at most
+// once. Read anew per date, a question with many dates cost time quadratic in
+// its length.
+type tenseReader struct {
+	c clauseWords
+	// offsets: the offsets of c are those of the question as written;
+	// where lowercasing changes the length (a few letters beyond ASCII), every
+	// date counts by the whole question.
+	offsets bool
+	// clauseStart and sentenceStart hold, per word, the start of its clause
+	// and of its sentence.
+	clauseStart, sentenceStart []int
+	clauses                    map[int]string // per clause start: its tense, "" without a verb of its own
+	langs                      map[int]int    // per sentence start: its language
+	whole                      string
+}
+
+func newTenseReader(query string) *tenseReader {
+	r := &tenseReader{c: clauseTokens(query), offsets: len(strings.ToLower(query)) == len(query),
+		clauses: map[int]string{}, langs: map[int]int{}}
+	r.clauseStart = make([]int, len(r.c.words))
+	r.sentenceStart = make([]int, len(r.c.words))
+	for i := range r.c.words {
+		if i > 0 && !r.c.starts[i] {
+			r.clauseStart[i] = r.clauseStart[i-1]
+		} else {
+			r.clauseStart[i] = i
+		}
+		if i > 0 && !r.c.sentence[i] {
+			r.sentenceStart[i] = r.sentenceStart[i-1]
+		} else {
+			r.sentenceStart[i] = i
 		}
 	}
-	return c.wholeTense()
+	return r
+}
+
+// at is tenseAt for the date at the byte offset off.
+func (r *tenseReader) at(off int) string {
+	if i := r.c.wordAt(off); i >= 0 && r.offsets {
+		s := r.clauseStart[i]
+		t, ok := r.clauses[s]
+		if !ok {
+			e := s + 1
+			for e < len(r.c.words) && !r.c.starts[e] {
+				e++
+			}
+			scanned(e - s)
+			if (s > 0 || e < len(r.c.words)) && r.c.hasOwnVerb(s, e) {
+				t = r.c.tense(s, e, r.language(r.sentenceStart[s]))
+			}
+			r.clauses[s] = t
+		}
+		if t != "" {
+			return t
+		}
+	}
+	if r.whole == "" {
+		r.whole = r.c.wholeTense()
+	}
+	return r.whole
+}
+
+// language is sentenceLanguage for the sentence that starts at ss, read
+// once.
+func (r *tenseReader) language(ss int) int {
+	if l, ok := r.langs[ss]; ok {
+		return l
+	}
+	_, se := r.c.sentenceOf(ss)
+	scanned(se - ss)
+	l := r.c.sentenceLanguage(ss, se)
+	r.langs[ss] = l
+	return l
 }
 
 // tense scores the words [s, e) of c in the language lang.
@@ -755,6 +827,7 @@ func verdict(pastScore, futureScore int) string {
 // scores is the past and the future score of the words [s, e) of c in the
 // language lang (tense).
 func (c clauseWords) scores(s, e, lang int) (pastScore, futureScore int) {
+	scanned(e - s)
 	words := c.words[s:e]
 	joined := strings.Join(words, " ")
 
@@ -1280,13 +1353,16 @@ func englishParticiple(w string) bool {
 //   - the past subjunctive of "haben" with a modal infinitive at the end
 //     ("Was hätten wir am Montag tun sollen?").
 func (c clauseWords) hasPerfektForm(s, e int) bool {
-	var closing []int
+	closing := c.closing
+	if closing == nil {
+		closing = new([]int)
+	}
 	for cs := s; cs < e; {
 		_, ce := c.clauseOf(cs)
 		if ce > e {
 			ce = e
 		}
-		if c.clausePerfekt(cs, ce, &closing) {
+		if c.clausePerfekt(cs, ce, closing) {
 			return true
 		}
 		cs = ce
@@ -1297,7 +1373,7 @@ func (c clauseWords) hasPerfektForm(s, e int) bool {
 // clausePerfekt is hasPerfektForm for the one clause [s, e); an auxiliary
 // whose clause does not end with its participle may find it at the end of a
 // later clause of the sentence (closingParticiples, a table the first
-// clause that needs it fills).
+// clause of the question that needs it fills).
 func (c clauseWords) clausePerfekt(s, e int, closing *[]int) bool {
 	last := e - 1
 	if last > s && perfektAux[c.words[last]] && c.participleAt(s, last-1) &&
@@ -1882,9 +1958,10 @@ func matchDayDates(query string, deferToSeitBis bool) *TemporalResult {
 	// with the direction of its own clause's tense (tenseAt): "We deployed
 	// on 2026-11-16, and we will deploy on 2026-11-23" (issue #506).
 	dates := make([]TemporalDate, 0, len(matches))
+	tr := newTenseReader(query)
 	for _, m := range matches {
 		dir := "past"
-		if tenseAt(query, m.start) == "future" {
+		if tr.at(m.start) == "future" {
 			dir = "future"
 		}
 		dates = append(dates, TemporalDate{Ref: ref(m), Date: fmtDate(m.day), Dir: dir})
@@ -2742,10 +2819,11 @@ func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 		// Each weekday by the tense of its own clause (tenseAt): "We
 		// deployed on Monday, and we will deploy on Monday" names two days
 		// (issue #506); weekdays of one clause share its tense.
+		tr := newTenseReader(query)
 		var dates []TemporalDate
 		seen := make(map[string]bool)
 		for _, w := range weekdays {
-			backward := tenseAt(query, c.offs[w.idx]) == "past"
+			backward := tr.at(c.offs[w.idx]) == "past"
 			dir := "future"
 			if backward {
 				dir = "past"
