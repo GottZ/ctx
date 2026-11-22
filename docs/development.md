@@ -1349,7 +1349,8 @@ statement. Refused:
   no relation of the statement (`r.reltuples`, `(r).reltuples`: a row variable, whatever filled
   it). A column of that name in a user table is no read of the catalog: unqualified, or qualified
   by the table, its alias or the row of a `FOR … IN` over it in the same statement;
-- a `SELECT count(*)` of every row of one table (with `INTO`, an alias or a cast, without
+- a `SELECT count(*)` of every row of one table, or the PL/pgSQL assignment `v := count(*) FROM t`
+  that PostgreSQL evaluates as one (with `INTO`, an alias or a cast, without
   `WHERE`, join or grouping — a clause word after the table is no alias of it; an `ORDER BY`,
   `LIMIT` or `OFFSET` on the count's one row, in parentheses or not, bounds nothing), which reads the
   whole table. A count stopped at the threshold in a subquery, as the function counts, passes;
