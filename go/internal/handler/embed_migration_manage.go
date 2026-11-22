@@ -211,8 +211,14 @@ func (h *ManageHandler) handleEmbedMigrationCreate(w http.ResponseWriter, r *htt
 // id (idx_embed_migration_single_active guarantees at most one). ok=false with a
 // 404 already written when neither is available — the caller returns. A failed
 // read is answered 500 and goes into the action's line: nothing was written.
+// An id that is no uuid names no migration: the 404 of an unknown id, before
+// the database refuses the cast with the input in its error (issue #483).
 func (h *ManageHandler) resolveMigrationID(w http.ResponseWriter, r *http.Request, req manageRequest) (string, bool) {
 	if req.ID != "" {
+		if !uuidRe.MatchString(req.ID) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "embed-migration: migration id not found"})
+			return "", false
+		}
 		return req.ID, true
 	}
 	m, err := embedmigration.Active(r.Context(), h.pool)

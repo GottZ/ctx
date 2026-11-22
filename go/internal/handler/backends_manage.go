@@ -753,6 +753,13 @@ func (h *ManageHandler) handleBackendDelete(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "id required"})
 		return
 	}
+	// An id that is no uuid names no backend: the 404 of an unknown id,
+	// before the database refuses the cast with the input in its error
+	// (issue #483).
+	if !uuidRe.MatchString(req.ID) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "backend not found"})
+		return
+	}
 	by := actorID(r)
 	var name string
 	if !answeredTx(ctx, h.pool, func(stage string, err error) { writeBackendTxFailure(w, r, "backend-delete", stage, err) }, func(tx pgx.Tx) bool {

@@ -197,6 +197,14 @@ func TestBackendWriteFailureLines(t *testing.T) {
 		}
 		adminFailLine(t, logs, "manage: backend-update failed", writeRolledBack, "i483-buc")
 	})
+	t.Run("backend-delete of an id that is no uuid", func(t *testing.T) {
+		status, resp, logs := manage(t, "i483-bdx", map[string]any{"action": "backend-delete", "id": i483LeakKey})
+		if status != http.StatusNotFound {
+			t.Fatalf("backend-delete answered %d %v, want 404 for an id that is no uuid", status, resp)
+		}
+		noAdminFailLine(t, logs, "manage: backend-delete failed")
+		wantNoLeak(t, logs)
+	})
 	t.Run("backend-delete refused by the database", func(t *testing.T) {
 		rowFault(t, ph.pool, "context_backends", "DELETE")
 		status, resp, logs := manage(t, "i483-bd", map[string]any{"action": "backend-delete", "id": ph.byID["only-rerank"]})
@@ -349,6 +357,19 @@ func TestEmbedMigrationWriteFailureLines(t *testing.T) {
 		}
 		noAdminFailLine(t, logs, "manage: embed-migration-create failed")
 	})
+	for _, action := range []string{"embed-migration-pause", "embed-migration-resume", "embed-migration-abort",
+		"embed-migration-confirm", "embed-migration-rollback", "embed-migration-cleanup"} {
+		t.Run(action+" of an id that is no uuid", func(t *testing.T) {
+			status, resp, logs := run(t, "i483-em-x-"+action, map[string]any{"action": action, "id": i483LeakKey,
+				"data": map[string]any{"reason": "i483"}})
+			if status != http.StatusNotFound {
+				t.Fatalf("%s answered %d %v, want 404 for an id that is no uuid", action, status, resp)
+			}
+			noAdminFailLine(t, logs, "manage: "+action+" failed")
+			wantNoLeak(t, logs)
+		})
+	}
+
 	// From here on every route's first read fails: the tables it reads are gone.
 	dbFault(t, pool, []string{
 		`ALTER TABLE i483_gone_migrations RENAME TO context_embed_migrations`,
