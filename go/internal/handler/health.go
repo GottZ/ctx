@@ -132,12 +132,15 @@ func HealthStatus(ctx context.Context, pool *pgxpool.Pool, snap []backends.Backe
 	for i, r := range roles {
 		wg.Go(func() { reached[i] = roleReachable(ctx, snap, r.role, probes) })
 	}
+	if !dreamEnabled {
+		healthLines.forgetRole(backends.RoleDream)
+	}
 	wg.Wait()
 
 	services := make(map[string]string, len(roles)+1)
+	healthLines.database(ctx, dbErr)
 	if dbErr != nil {
 		services["database"] = "error"
-		logRequestError(ctx, "health check: database ping failed", "error", dbErr)
 	} else {
 		services["database"] = "ok"
 	}
@@ -222,7 +225,14 @@ func foldSchemaContractStatus(status, schemaContract string) string {
 // Health serves the public /health endpoint, wrapping HealthStatus with the
 // HTTP status-code mapping (unhealthy → 503, else 200).
 func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	// The probes end with the request (issue #504): /health is anonymous, and
+	// a probe that outlived its client would let every request hold one probe
+	// of each hanging backend for the whole budget. healthProbeBudget ends
+	// before the compose healthcheck gives up, so the healthcheck waits for
+	// the answer and a backend that hangs is observed to the budget; a client
+	// that leaves first ends the probes, and what they did not finish changes
+	// no state (healthNotice).
+	ctx, cancel := context.WithTimeout(r.Context(), healthProbeBudget)
 	defer cancel()
 
 	cfg := h.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: /health is public/anonymous — no tenant in reach; dream.enabled is server-global.
@@ -248,12 +258,25 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// healthProbeBudget bounds the probes of one HealthStatus call, for /health
+// and the status collector alike: both feed the same healthNotice, and two
+// budgets would judge a backend that answers between them reachable in one
+// and unreachable in the other. 4 s is under the 5 s timeout of the compose
+// healthcheck (docker-compose.yml), whose clock starts before its request:
+// Docker reads the health document — whose database verdict alone fails the
+// container — instead of a timeout while a backend hangs. It is also under
+// the status collector's tick (events.tick_interval, 5 s by default). A
+// variable for tests.
+var healthProbeBudget = 4 * time.Second
+
 // roleReachable reports ok when at least one enabled backend of the role
 // answers its base URL. This is a REACHABILITY probe, not a model-availability
 // check: any HTTP response below 500 counts as reachable — cloud API roots
 // answer 404/405 on GET / and auth-gated APIs answer 401/403, all of which
 // prove the host is up and serving (see pingHost). Errors log the backend name
-// to slog ONLY — the response carries the aggregate.
+// to slog ONLY — the response carries the aggregate — and once per change of
+// state (healthNotice, issue #504): a role without an enabled backend, a role
+// none of whose candidates answers, a backend that stops answering.
 //
 // Only operator rows (_global/unscoped) are pinged: /health is anonymous, and a
 // tenant row's base_url is tenant-admin input — pinging it would hand every
@@ -267,22 +290,33 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 // probes only removes repeats — a base URL another role of the same call
 // already probed is not requested again.
 func roleReachable(ctx context.Context, snap []backends.Backend, role string, probes *hostProbes) string {
-	candidates := 0
+	rows := 0
+	var candidates []*backends.Backend
 	for i := range snap {
 		b := &snap[i]
-		if !b.Enabled || !b.HasRole(role) || b.EgressGuarded() {
+		if !b.HasRole(role) || b.EgressGuarded() {
 			continue
 		}
-		candidates++
-		if err := probes.ping(ctx, b.Host); err != nil {
-			slog.Warn("health check: backend ping failed", "backend", b.Name, "role", role, "error", err)
-			continue
+		rows++
+		if b.Enabled {
+			candidates = append(candidates, b)
 		}
-		return "ok"
 	}
-	if candidates == 0 {
-		slog.Warn("health check: no enabled backend for role", "role", role)
+	healthLines.roleProbed(role, rows, candidates)
+	for i, b := range candidates {
+		err := probes.ping(ctx, b.Host)
+		healthLines.pinged(ctx, role, b, err)
+		switch {
+		case err == nil:
+			healthLines.walked(role, candidates[:i+1], true)
+			return "ok"
+		case callerLeft(ctx, err):
+			// The caller left: the walk observed nothing more, so it neither
+			// forgets the candidates it did not reach nor changes the role.
+			return "error"
+		}
 	}
+	healthLines.walked(role, candidates, false)
 	return "error"
 }
 

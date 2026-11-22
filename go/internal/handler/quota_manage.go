@@ -103,6 +103,15 @@ func (h *ManageHandler) handleTenantQuotaSet(w http.ResponseWriter, r *http.Requ
 		})
 		return
 	}
+	// pgx refuses to encode a daily_calls outside INTEGER before the
+	// statement is sent — no PgError, so writeAdminFailure would log it as a
+	// server fault with the number in the line (issue #505).
+	if spec.DailyCalls != nil {
+		if err := int4Field("daily_calls", *spec.DailyCalls); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+	}
 	enabled := true
 	if spec.Enabled != nil {
 		enabled = *spec.Enabled
@@ -115,8 +124,7 @@ func (h *ManageHandler) handleTenantQuotaSet(w http.ResponseWriter, r *http.Requ
 		Enabled:        enabled,
 	}
 	if err := store.UpsertTenantQuota(ctx, h.pool, spec.Scope, q, auditStamp(r, ar)); err != nil {
-		adminWriteFailed(r, "manage: tenant-quota-set failed", err, statementOutcome(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})
+		writeAdminFailure(w, r, "manage: tenant-quota-set failed", err, statementOutcome(err), "internal error")
 		return
 	}
 	// Refresh the accountant so the new policy is live immediately (the 063

@@ -238,11 +238,14 @@ func writeOutcome(err error) string {
 // query cancel (SQLSTATE 57014) — PostgreSQL holds a cancel
 // (pg_cancel_backend) while it commits as it holds a terminate, and with a
 // duration log reports it after the COMMIT's CommandComplete, as ERROR 57014
-// for a transaction that committed. statement_timeout raises 57014 as well:
-// in a labeled bracket one that cut a statement before the COMMIT never
-// reaches this (writeOutcome asks only about the COMMIT), and ctx sets
-// statement_timeout on read paths only. lock_timeout raises 55P03, an ERROR
-// that stays rolled back.
+// for a transaction that committed. statement_timeout raises 57014 as well,
+// and it too can follow a commit (issue #505, executed on PostgreSQL 18.6):
+// disable_statement_timeout skips a timer that already fired, so a timeout
+// that fired after the statement's last interrupt check is reported after
+// the commit of a single statement, or as the answer to the bracket's
+// COMMIT, which then never ran — only the localized message tells it from a
+// cancel. ctx sets statement_timeout on read paths only. lock_timeout raises
+// 55P03, an ERROR that stays rolled back.
 func commitAmbiguous(pgErr *pgconn.PgError) bool {
 	return sessionEnded(pgErr) || pgErr.Code == "57014"
 }
