@@ -147,4 +147,28 @@ func (e i491Env) forgeH(t *testing.T) string {
 	return ""
 }
 
+// otherInstance is a pool of its own on the test database: another ctxd
+// instance.
+func (e i491Env) otherInstance(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	p, err := pgxpool.New(context.Background(), e.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Close)
+	return p
+}
+
+// recordedStamp is the forge stamp (forge_updated_at) the mapping of blockID
+// records.
+func (e i491Env) recordedStamp(t *testing.T, blockID string) *time.Time {
+	t.Helper()
+	var at *time.Time
+	if err := e.pool.QueryRow(context.Background(),
+		`SELECT forge_updated_at FROM context_project_sync_map WHERE block_id = $1::uuid`, blockID).Scan(&at); err != nil {
+		t.Fatalf("read the mapping's forge stamp: %v", err)
+	}
+	return at
+}
+
 func str(s string) *string { return &s }

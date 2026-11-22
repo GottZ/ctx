@@ -243,16 +243,19 @@ func (a *Applier) applyIssue(ctx context.Context, project store.ProjectRow, pol 
 	}
 	return a.applyLocked(ctx, writable, m, decide(m.BaseHash, projectBlock(block, m.BaseFields), forgeH), pulled{
 		forgeH: forgeH, forgeFields: forgeFields, fUpdated: &fUpdated, project: projectBlock,
+		targets: func(ctx context.Context) ([]string, error) {
+			return a.referenceTargets(ctx, project, pol, iss.Number, iss.Body)
+		},
 		// The workflow status is written only where the forge state changed
 		// or the block has none of the resolved workflow (keepsStatus, issue
 		// #486), decided on the block the transaction locked.
-		write: func(tx pgx.Tx, cur *store.Block) (*store.Block, error) {
+		write: func(tx pgx.Tx, cur *store.Block, targets []string) (*store.Block, error) {
 			content.KeepWorkflowStatus = pol.keepsStatus(cur, iss.State)
 			b, err := store.PullUpdateIssueBlock(ctx, tx, m.BlockID, content)
 			if err != nil {
 				return nil, err
 			}
-			return b, a.applyReferences(ctx, tx, project, pol, writable, m.BlockID, iss.Number, iss.Body)
+			return b, applyReferences(ctx, tx, writable, m.BlockID, targets)
 		},
 	})
 }
@@ -414,25 +417,28 @@ func decide(base, ctxH, forgeH string) decision {
 
 // pulled is one fetched entity the locked apply decides about: the forge
 // side's projection, the block's projection against a base snapshot
-// (issueTypePolicy.ctxIssueBase or CtxCommentBase) and the pull-UPDATE's
-// block write.
+// (issueTypePolicy.ctxIssueBase or CtxCommentBase), the blocks the
+// pull-UPDATE links the block to (targets, nil for none — resolved before
+// the transaction, which locks them with the block, issue #503) and the
+// pull-UPDATE's block write.
 type pulled struct {
 	forgeH      string
 	forgeFields json.RawMessage
 	fUpdated    *time.Time
 	project     func(b *store.Block, baseFields json.RawMessage) string
-	write       func(tx pgx.Tx, cur *store.Block) (*store.Block, error)
+	targets     func(ctx context.Context) ([]string, error)
+	write       func(tx pgx.Tx, cur *store.Block, targets []string) (*store.Block, error)
 }
 
 // applyLocked carries out the matrix decision the read path made on a page
 // read without locks (read), in one transaction. A decision that writes
 // nothing ends on the read: noop, ctx-ahead (the push's), and a conflict the
 // mapping already carries (idempotent, 0 new conflicts). Every other one is
-// decided again on the rows the transaction locks — the block
-// (LockPulledBlock), then its mapping row (LockSyncMap), the order of every
-// writer of both — because a local write can move the block and another
-// ctxd instance the mapping between the read and the write (issues #452,
-// #491):
+// decided again on the rows the transaction locks — the block together with
+// the targets of its references in ascending id order (LockPulledBlock,
+// issue #503), then its mapping row (LockSyncMap), the order of every writer
+// of both — because a local write can move the block and another ctxd
+// instance the mapping between the read and the write (issues #452, #491):
 //
 //   - The mapping still holds the base the read decided on. The read's
 //     convergence stands whatever the block holds now: the read saw block
@@ -471,10 +477,17 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 	case read == decConflict && m.Conflict:
 		return ApplyResult{}, nil // already flagged — idempotent, 0 new conflicts
 	}
+	var targets []string
+	if p.targets != nil {
+		var err error
+		if targets, err = p.targets(ctx); err != nil {
+			return ApplyResult{}, err
+		}
+	}
 	var res ApplyResult
 	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
 		res = ApplyResult{}
-		cur, err := store.LockPulledBlock(ctx, tx, m.BlockID, writable)
+		cur, err := store.LockPulledBlock(ctx, tx, m.BlockID, writable, targets)
 		if errors.Is(err, store.ErrIssueNotFound) {
 			return nil // archived/vanished since the read — skip, as the read does
 		}
@@ -502,7 +515,7 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 		}
 		switch d {
 		case decPull:
-			b, err := p.write(tx, cur)
+			b, err := p.write(tx, cur, targets)
 			if err != nil {
 				return err
 			}
@@ -536,7 +549,16 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow, pol issueTypePolicy,
 	writable []string, iss IssueRemote, content store.ForgeIssueContent, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
 
+	targets, err := a.referenceTargets(ctx, project, pol, iss.Number, iss.Body)
+	if err != nil {
+		return ApplyResult{}, err
+	}
 	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		// The new block is no other transaction's to lock; its targets are
+		// taken in id order before it exists (issue #503).
+		if err := store.LockLinkTargets(ctx, tx, targets); err != nil {
+			return err
+		}
 		b, err := store.PullCreateIssueBlock(ctx, tx, project.Scope, content)
 		if err != nil {
 			return err
@@ -547,7 +569,7 @@ func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow,
 		}); err != nil {
 			return err
 		}
-		return a.applyReferences(ctx, tx, project, pol, writable, b.ID, iss.Number, iss.Body)
+		return applyReferences(ctx, tx, writable, b.ID, targets)
 	}); err != nil {
 		return ApplyResult{}, err
 	}
@@ -627,7 +649,7 @@ func (a *Applier) applyComment(ctx context.Context, project store.ProjectRow, wr
 	}
 	return a.applyLocked(ctx, writable, m, decide(m.BaseHash, projectBlock(block, m.BaseFields), forgeH), pulled{
 		forgeH: forgeH, forgeFields: forgeFields, fUpdated: &fUpdated, project: projectBlock,
-		write: func(tx pgx.Tx, _ *store.Block) (*store.Block, error) {
+		write: func(tx pgx.Tx, _ *store.Block, _ []string) (*store.Block, error) {
 			return store.PullUpdateCommentBlock(ctx, tx, m.BlockID, cappedBody)
 		},
 	})
@@ -684,18 +706,24 @@ func parseIssueRefs(body string) map[int64]bool {
 	return out
 }
 
-// applyReferences materialises the 'references' fact edges from a body (§4.5.7):
-// each "#<nr>" resolves to a target block via the mapping — a number with NO
-// mapping yields NO edge (no phantom links; the next run that pulls the target
-// adds the edge idempotently via the PK). Self-references are dropped and the
-// structural-link-class gate is honoured. 0 forge requests (pure local parsing).
-// The target lookup rides the pool (the targets are committed blocks of other
-// issues); the edge write rides the caller's Tx (atomic with the source block).
-func (a *Applier) applyReferences(ctx context.Context, tx pgx.Tx, project store.ProjectRow,
-	pol issueTypePolicy, writable []string, sourceID string, sourceNum int64, body string) error {
+// referenceTargets resolves the 'references' fact edges of a body (§4.5.7)
+// to their target blocks: each "#<nr>" resolves via the mapping — a number
+// with NO mapping yields NO edge (no phantom links; the next run that pulls
+// the target adds the edge idempotently via the PK). Self-references are
+// dropped and the structural-link-class gate is honoured. 0 forge requests
+// (pure local parsing). The ids come back sorted and distinct.
+//
+// It runs on the pool before the pull's write transaction begins (the
+// targets are committed blocks of other issues): the transaction locks
+// exactly these with the source block in one order of ids and links exactly
+// these (issue #503) — a target mapped meanwhile gets its edge from a later
+// pull, as an unmapped one does. Resolving them inside the transaction also
+// needed a second pool connection while the first held the block.
+func (a *Applier) referenceTargets(ctx context.Context, project store.ProjectRow,
+	pol issueTypePolicy, sourceNum int64, body string) ([]string, error) {
 
 	if !pol.refAllowed {
-		return nil
+		return nil, nil
 	}
 	refs := parseIssueRefs(body)
 	targetNums := make([]int64, 0, len(refs))
@@ -705,19 +733,30 @@ func (a *Applier) applyReferences(ctx context.Context, tx pgx.Tx, project store.
 		}
 	}
 	if len(targetNums) == 0 {
-		return nil
+		return nil, nil
 	}
 	tmaps, err := store.GetSyncMapsByForge(ctx, a.pool, project.ID, entityKindIssue, targetNums)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	ids := make([]string, 0, len(tmaps))
 	for _, n := range targetNums {
-		tm, ok := tmaps[n]
-		if !ok {
-			continue // unknown number ⇒ NO phantom edge (§4.5.7)
+		if tm, ok := tmaps[n]; ok { // unknown number ⇒ NO phantom edge (§4.5.7)
+			ids = append(ids, tm.BlockID)
 		}
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids), nil
+}
+
+// applyReferences writes the 'references' edges from sourceID to targets
+// (referenceTargets) in the caller's Tx, atomic with the source block. The
+// caller holds the targets locked already (LockPulledBlock or
+// LockLinkTargets), so PutStructuralLink's validation waits for nothing.
+func applyReferences(ctx context.Context, tx pgx.Tx, writable []string, sourceID string, targets []string) error {
+	for _, id := range targets {
 		err := store.PutStructuralLink(ctx, tx, store.StructuralLink{
-			SourceID: sourceID, TargetID: tm.BlockID,
+			SourceID: sourceID, TargetID: id,
 			LinkClass: structLinkReferences, Origin: originForgeSync,
 		}, writable)
 		if err != nil && !errors.Is(err, store.ErrLinkScopeViolation) {

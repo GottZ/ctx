@@ -10,7 +10,9 @@
 // its comment from several goroutines on a pool of four connections — the CI
 // runner's pool on its two cores — and requires every call to finish, none
 // with an error (a deadlock would surface as SQLSTATE 40P01, a wait cycle
-// through the pool as the deadline).
+// through the pool as the deadline). The pulls apply two issues that
+// reference each other, in opposite orders (issue #503): each locks the
+// targets of its references and its own block in ascending id order.
 //
 //	taskset -c 0-1 go test -tags=integration ./internal/forge/ -run TestForgeLocksUnderConcurrency -count=3 -v
 package forge
@@ -38,6 +40,10 @@ func TestForgeLocksUnderConcurrency(t *testing.T) {
 	setupPool, dsn := testdb.SetupTestDBWithDSN(t)
 	proj := enablePush(seedIFProject(t, setupPool, "i491locks"))
 	issueID, commentID := i452Pulled(t, setupPool, proj, true)
+	if _, err := applierWithRegistry(setupPool).ApplyIssues(context.Background(), proj, []IssueRemote{
+		{Number: 6, Title: "Hoist", Body: "see #5", State: "open", UpdatedAt: time.Unix(1, 0).UTC()}}); err != nil {
+		t.Fatalf("pull-create #6: %v", err)
+	}
 
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
@@ -99,8 +105,17 @@ func TestForgeLocksUnderConcurrency(t *testing.T) {
 			if round%3 == 0 {
 				title = fmt.Sprintf("Crane %d", round)
 			}
-			if _, err := a.ApplyIssues(ctx, proj, []IssueRemote{{Number: 5, Title: title, Body: fmt.Sprintf("forge body %s%d", inst, round%4),
-				State: "open", UpdatedAt: time.Unix(int64(10+round), 0).UTC()}}); err != nil {
+			// #5 and #6 reference each other (issue #503), and the two
+			// instances apply them in opposite orders.
+			at := time.Unix(int64(10+round), 0).UTC()
+			page := []IssueRemote{
+				{Number: 5, Title: title, Body: fmt.Sprintf("forge body %s%d, see #6", inst, round%4), State: "open", UpdatedAt: at},
+				{Number: 6, Title: "Hoist", Body: fmt.Sprintf("see #5, %s%d", inst, round%4), State: "open", UpdatedAt: at},
+			}
+			if inst == "B" {
+				page[0], page[1] = page[1], page[0]
+			}
+			if _, err := a.ApplyIssues(ctx, proj, page); err != nil {
 				return err
 			}
 			_, err := a.ApplyComments(ctx, proj, []CommentRemote{{ID: 700, IssueNumber: 5, Body: fmt.Sprintf("forge comment %d", round%4),

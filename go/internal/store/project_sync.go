@@ -292,7 +292,8 @@ func baseFieldsMeta(fields json.RawMessage) string {
 // page-wide read without a lock, and another ctxd instance can write the row
 // since — its push advances the base, its pull converges or flags it; the pull
 // decides again on the row this returns (issue #491). Lock order: the block
-// row first (LockPulledBlock), then this one — the order of every writer of
+// row first (LockPulledBlock, with the targets of its references in one
+// order of ids, issue #503), then this one — the order of every writer of
 // both (AdvancePushBase, FinalizePushCreateIssue's rename aside, which runs
 // on a forge_id 0 row no pull reads). ok=false: the block has no mapping row.
 func LockSyncMap(ctx context.Context, tx pgx.Tx, blockID string) (SyncMap, bool, error) {

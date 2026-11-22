@@ -56,7 +56,11 @@ type StructuralLink struct {
 
 // blockScopes fetches id→scope for the given block ids with FOR SHARE, so the
 // rows cannot be deleted between validation and the dependent write inside the
-// same Tx (FK race guard). Missing ids are simply absent from the map.
+// same Tx (FK race guard), and their scope cannot move either: a scope move
+// (UpdateBlock) takes the row FOR NO KEY UPDATE — a scope is no key column —
+// which waits for FOR SHARE but not for FOR KEY SHARE, and its link sweep then
+// finds the committed link (issue #503). Missing ids are simply absent from
+// the map.
 func blockScopes(ctx context.Context, tx pgx.Tx, ids []string) (map[string]string, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT id::text, scope FROM context_blocks WHERE id = ANY($1::uuid[]) FOR SHARE`,
@@ -74,6 +78,50 @@ func blockScopes(ctx context.Context, tx pgx.Tx, ids []string) (map[string]strin
 		out[id] = scope
 	}
 	return out, rows.Err()
+}
+
+// The link-target locks of a writer that holds or takes a block for writing
+// and links it to other blocks (LockPulledBlock, LockLinkTargets, issue
+// #503): FOR SHARE — the lock blockScopes takes, so PutStructuralLink finds
+// them held and waits for nothing — in ascending id order (ORDER BY id puts
+// the sort under the row locks, so the rows are taken in that order). The
+// bounded forms take the targets below or above the block the writer locks
+// between them ($2).
+const (
+	lockLinkTargetsSQL      = `SELECT 1 FROM context_blocks WHERE id = ANY($1::uuid[]) ORDER BY id FOR SHARE`
+	lockLinkTargetsBelowSQL = `SELECT 1 FROM context_blocks WHERE id = ANY($1::uuid[]) AND id < $2::uuid ORDER BY id FOR SHARE`
+	lockLinkTargetsAboveSQL = `SELECT 1 FROM context_blocks WHERE id = ANY($1::uuid[]) AND id > $2::uuid ORDER BY id FOR SHARE`
+)
+
+// lockLinkTargets runs one of the link-target locks over targets (no
+// statement for none); pivot binds $2 of a bounded form.
+func lockLinkTargets(ctx context.Context, tx pgx.Tx, sql string, targets []string, pivot string) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	args := []any{targets}
+	if sql != lockLinkTargetsSQL {
+		args = append(args, pivot)
+	}
+	rows, err := tx.Query(ctx, sql, args...)
+	if err != nil {
+		return fmt.Errorf("structural link: lock targets: %w", err)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("structural link: lock targets: %w", err)
+	}
+	return nil
+}
+
+// LockLinkTargets locks targets FOR SHARE in ascending id order, for a
+// writer whose own block no other transaction can lock yet — a block it
+// inserts in this transaction (the pull-create, issue #503) — before it
+// links that block to them. A writer that links a block other transactions
+// can lock takes the targets with the block in one order of ids instead
+// (LockPulledBlock).
+func LockLinkTargets(ctx context.Context, tx pgx.Tx, targets []string) error {
+	return lockLinkTargets(ctx, tx, lockLinkTargetsSQL, targets, "")
 }
 
 // scopeWritable reports whether scope is in the caller's writable set.

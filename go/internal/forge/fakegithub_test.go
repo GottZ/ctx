@@ -1,9 +1,12 @@
 package forge
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -32,19 +35,50 @@ import (
 // functions that run inside the next issue PATCH: before while the request
 // is on the wire and has not landed, after once it landed and before the
 // response leaves — the window between a push's PATCH and its advance.
+//
+// A write is answered as GitHub answers it, with the entity it left and
+// that entity's updated_at (#509); stampAnswer makes the answer carry no
+// updated_at or one that does not parse. Comments are held, listed and
+// patched like issues (comment), on the same clock.
+//
+// client is the production client pointed at the fake, and it dials the
+// fake's listener only: a request to any other host — api.github.com when a
+// test leaves the api_base empty — is refused before a byte leaves and fails
+// the test.
 type fakeGitHub struct {
 	srv      *httptest.Server
 	pageSize int
 	link     func(next string) []string
 	etags    bool
+	http     *http.Client
 
 	commentPages atomic.Int64 // comment-listing requests served
+	foreignDials atomic.Int64 // dials to a host other than the fake, refused
 
-	mu      sync.Mutex
-	issues  []fakeIssue
-	patches []fakePatch // issue PATCHes that landed, in landing order
-	before  func()      // one-shot seam of the next issue PATCH
-	after   func()
+	mu          sync.Mutex
+	issues      []fakeIssue
+	comments    []fakeComment
+	patches     []fakePatch // issue PATCHes that landed, in landing order
+	before      func()      // one-shot seam of the next issue PATCH
+	after       func()
+	stampAnswer fakeStampAnswer
+}
+
+// fakeStampAnswer is what a write's answer carries as updated_at.
+type fakeStampAnswer int
+
+const (
+	fakeStampServed     fakeStampAnswer = iota // the entity's updated_at, as GitHub answers
+	fakeStampAbsent                            // no updated_at field
+	fakeStampUnreadable                        // an updated_at that is no timestamp
+)
+
+// fakeComment is one issue comment as the forge holds it.
+type fakeComment struct {
+	ID      int64
+	Issue   int64
+	Body    string
+	Updated time.Time
 }
 
 // fakeIssue is one issue as the forge holds it. A zero Title, State is served
@@ -71,6 +105,22 @@ func newFakeGitHub(t *testing.T, pageSize int, link func(next string) []string, 
 	f := &fakeGitHub{pageSize: pageSize, link: link, issues: issues}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
+	own := f.srv.Listener.Addr().String()
+	tr := &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if addr != own {
+			f.foreignDials.Add(1)
+			return nil, fmt.Errorf("fake forge: refused a dial to %s, a host other than the fake", addr)
+		}
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}}
+	f.http = &http.Client{Transport: tr}
+	t.Cleanup(func() {
+		tr.CloseIdleConnections()
+		if n := f.foreignDials.Load(); n > 0 {
+			t.Errorf("%d request(s) of the test went to a host other than the fake forge", n)
+		}
+	})
 	return f
 }
 
@@ -79,8 +129,41 @@ func quotedNext(next string) []string { return []string{`<` + next + `>; rel="ne
 
 func (f *fakeGitHub) repo() RepoRef { return RepoRef{Owner: "o", Repo: "r", APIBase: f.srv.URL} }
 
-// client is the production GitHub client pointed at the fake.
-func (f *fakeGitHub) client() *githubClient { return &githubClient{http: f.srv.Client()} }
+// client is the production GitHub client pointed at the fake; it reaches no
+// other host (see fakeGitHub).
+func (f *fakeGitHub) client() *githubClient { return &githubClient{http: f.http} }
+
+// setStampAnswer sets what the answers of the writes from now on carry as
+// updated_at.
+func (f *fakeGitHub) setStampAnswer(a fakeStampAnswer) {
+	f.mu.Lock()
+	f.stampAnswer = a
+	f.mu.Unlock()
+}
+
+// addComment puts comment id on issue n, as a remote user writes it, and
+// returns its updated_at.
+func (f *fakeGitHub) addComment(id, n int64, body string) time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	at := f.nextUpdated()
+	f.comments = append(f.comments, fakeComment{ID: id, Issue: n, Body: body, Updated: at})
+	return at
+}
+
+// comment returns a copy of what the forge holds for comment id.
+func (f *fakeGitHub) comment(t *testing.T, id int64) fakeComment {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.comments {
+		if c.ID == id {
+			return c
+		}
+	}
+	t.Fatalf("the fake forge holds no comment %d", id)
+	return fakeComment{}
+}
 
 // seam arms the next issue PATCH (see fakeGitHub).
 func (f *fakeGitHub) seam(before, after func()) {
@@ -178,14 +261,37 @@ func (f *fakeGitHub) nextUpdated() time.Time {
 			at = it.Updated
 		}
 	}
+	for _, c := range f.comments {
+		if c.Updated.After(at) {
+			at = c.Updated
+		}
+	}
 	return at.Add(time.Second)
+}
+
+// answer writes a write's answer: the entity's fields and its updated_at as
+// stampAnswer says. Caller holds no lock.
+func (f *fakeGitHub) answer(w http.ResponseWriter, status int, fields map[string]any, updated time.Time) {
+	f.mu.Lock()
+	mode := f.stampAnswer
+	f.mu.Unlock()
+	switch mode {
+	case fakeStampServed:
+		fields["updated_at"] = updated.UTC().Format(time.RFC3339)
+	case fakeStampUnreadable:
+		fields["updated_at"] = "yesterday"
+	}
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(fields)
 }
 
 func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/comments":
 		f.commentPages.Add(1)
-		_, _ = w.Write([]byte(`[]`))
+		f.serveCommentListing(w, r)
+	case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/repos/o/r/issues/comments/"):
+		f.serveCommentPatch(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues":
 		f.serveListing(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues":
@@ -195,6 +301,72 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// serveCommentListing lists the comments updated at or after since,
+// ascending by updated_at, on one page (GitHub's
+// /repos/{owner}/{repo}/issues/comments?sort=updated&direction=asc&since=).
+func (f *fakeGitHub) serveCommentListing(w http.ResponseWriter, r *http.Request) {
+	var since time.Time
+	if s := r.URL.Query().Get("since"); s != "" {
+		since, _ = time.Parse(time.RFC3339, s)
+	}
+	f.mu.Lock()
+	var match []fakeComment
+	for _, c := range f.comments {
+		if !c.Updated.Before(since) {
+			match = append(match, c)
+		}
+	}
+	f.mu.Unlock()
+	sort.SliceStable(match, func(i, j int) bool {
+		if !match[i].Updated.Equal(match[j].Updated) {
+			return match[i].Updated.Before(match[j].Updated)
+		}
+		return match[i].ID < match[j].ID
+	})
+	items := make([]map[string]any, 0, len(match))
+	for _, c := range match {
+		items = append(items, map[string]any{
+			"id": c.ID, "body": c.Body, "updated_at": c.Updated.UTC().Format(time.RFC3339),
+			"issue_url": f.srv.URL + "/repos/o/r/issues/" + strconv.FormatInt(c.Issue, 10),
+		})
+	}
+	body, _ := json.Marshal(items)
+	_, _ = w.Write(body)
+}
+
+// serveCommentPatch applies a comment PATCH (its body) and moves the
+// comment's updated_at.
+func (f *fakeGitHub) serveCommentPatch(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/repos/o/r/issues/comments/"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	var in struct {
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	f.mu.Lock()
+	var out *fakeComment
+	for i := range f.comments {
+		if f.comments[i].ID == id {
+			f.comments[i].Body = in.Body
+			f.comments[i].Updated = f.nextUpdated()
+			c := f.comments[i]
+			out = &c
+		}
+	}
+	f.mu.Unlock()
+	if out == nil {
+		http.NotFound(w, r)
+		return
+	}
+	f.answer(w, http.StatusOK, map[string]any{"id": out.ID, "body": out.Body}, out.Updated)
 }
 
 func (f *fakeGitHub) serveCreate(w http.ResponseWriter, r *http.Request) {
@@ -214,11 +386,11 @@ func (f *fakeGitHub) serveCreate(w http.ResponseWriter, r *http.Request) {
 		n = max(n, it.Number)
 	}
 	n++
-	f.issues = append(f.issues, fakeIssue{Number: n, Updated: f.nextUpdated(), Title: in.Title, Body: in.Body,
+	at := f.nextUpdated()
+	f.issues = append(f.issues, fakeIssue{Number: n, Updated: at, Title: in.Title, Body: in.Body,
 		State: "open", Labels: in.Labels, Assignees: in.Assignees})
 	f.mu.Unlock()
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(map[string]any{"number": n})
+	f.answer(w, http.StatusCreated, map[string]any{"number": n, "title": in.Title, "state": "open"}, at)
 }
 
 // servePatch applies an issue PATCH. The seams run outside the lock: they
@@ -251,6 +423,7 @@ func (f *fakeGitHub) servePatch(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	found := false
+	var landed fakeIssue
 	for i := range f.issues {
 		if f.issues[i].Number != n {
 			continue
@@ -274,6 +447,7 @@ func (f *fakeGitHub) servePatch(w http.ResponseWriter, r *http.Request) {
 		}
 		it.Updated = f.nextUpdated()
 		f.patches = append(f.patches, fakePatch{Number: n, Fields: fields})
+		landed = *it
 	}
 	f.mu.Unlock()
 	if !found {
@@ -283,7 +457,7 @@ func (f *fakeGitHub) servePatch(w http.ResponseWriter, r *http.Request) {
 	if after != nil {
 		after()
 	}
-	_, _ = w.Write([]byte(`{}`))
+	f.answer(w, http.StatusOK, map[string]any{"number": n, "title": landed.Title, "state": landed.State}, landed.Updated)
 }
 
 func (it fakeIssue) servedTitle() string {
