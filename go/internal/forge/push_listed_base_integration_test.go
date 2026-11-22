@@ -4,33 +4,29 @@
 // version the push listed. Another ctxd instance on the same database can move
 // the mapping's base between the push's listing and its advance (within one
 // process a run pulls before it pushes and a second run of the project is
-// refused, the single-flight state is in memory):
-//
-//   - its pull converges on what the PATCH sent and then pulls a remote edit;
-//   - its push of a later local version advances first, and which of the two
-//     PATCHes reached the forge last is unknown to both.
+// refused, the single-flight state is in memory): its pull converges on what
+// the PATCH sent and then pulls a remote edit. (Its push no longer can: since
+// #491 the push writes and advances an entity inside a section that keeps
+// other instances' pushes of it out — push_section_integration_test.go.)
 //
 // Writing the listed base over the moved one (the advance before #486) is
 // wrong when the other writer was right; keeping the moved one is wrong when
-// the advance's own PATCH landed last — then the next pull reads the forge as
-// ahead of a block that equals the base and writes the older version over
-// the newer local one, on both sides, without a conflict. The advance cannot
-// know what the forge holds, so it records a base no projection can equal and
-// flags the mapping: the next pull's 3-way decision converges when block and
-// forge agree and keeps the conflict otherwise, and the push leaves a flagged
-// mapping alone.
+// the advance's own PATCH landed last. The advance cannot know what the forge
+// holds, so it records a base no projection can equal and flags the mapping:
+// the next pull's 3-way decision converges when block and forge agree and
+// keeps the conflict otherwise, and the push leaves a flagged mapping alone.
 //
 // The other instance runs inside the spy's wire write (after the PATCH,
-// before the advance) or while the advance's transaction waits at its BEGIN;
-// the writes are the production ones. Each case then runs three
-// pull-and-push cycles against the forge state of its order and counts the
-// wire writes.
+// before the advance) or while the advance's statement is held; the writes
+// are the production ones. Each case then runs three pull-and-push cycles
+// against the forge state of its order and counts the wire writes.
 //
 //	go test -tags=integration ./internal/forge/ -run TestPushAdvanceOffItsListedBase -count=1 -v
 package forge
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,171 +102,13 @@ func i486Converged(t *testing.T, pool *pgxpool.Pool, proj store.ProjectRow, kind
 	i452NoCandidates(t, pool, proj)
 }
 
-// i486StillConflicted: block and forge differ; the local version stays in
-// the block, the mapping stays flagged, nothing was written to the forge.
-func i486StillConflicted(t *testing.T, pool *pgxpool.Pool, proj store.ProjectRow, kind string, forgeID int64, blockID, wantContent, wantTitle string, wire int) {
-	t.Helper()
-	b := getBlock(t, pool, proj.Scope, blockID)
-	_, conflict, _, _ := readMapping(t, pool, proj.ID, kind, forgeID)
-	if !conflict || wire != 0 || b.Content != wantContent || (wantTitle != "" && b.Title != wantTitle) {
-		t.Errorf("after three cycles: flagged %v, wire writes %d, block %q / %q — want the conflict kept, no wire write and the local version %q / %q",
-			conflict, wire, b.Title, b.Content, wantTitle, wantContent)
-	}
-}
-
-// i486TwoIssuePushes: A lists "Crane, A" and PATCHes it; while A's PATCH is
-// on the wire a local edit makes "Crane, B", and instance B lists, PATCHes and
-// advances it (its listed base still holds). Then A advances off its listed
-// base.
-func i486TwoIssuePushes(t *testing.T, pool *pgxpool.Pool, proj store.ProjectRow) string {
-	t.Helper()
-	str := func(s string) *string { return &s }
-	ctx := context.Background()
-	issueID, _ := i452Pulled(t, pool, proj, false)
-	i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Title: str("Crane, A")})
-	aSpy := &hookSpy{pushSpyForge: newPushSpy()}
-	aSpy.setHook(func() {
-		i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Title: str("Crane, B")})
-		if res, err := pusherWithRegistry(pool).PushProject(ctx, proj, newPushSpy(), RepoRef{Owner: "o", Repo: "r"}, alwaysAllow); err != nil || res.Pushed != 1 {
-			t.Errorf("instance B: %+v %v, want one push", res, err)
-		}
-	})
-	if res, err := pusherWithRegistry(pool).PushProject(ctx, proj, aSpy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow); err != nil || res.Pushed != 1 || res.Conflicts != 1 {
-		t.Errorf("instance A: %+v %v, want one push and one conflict (its base moved)", res, err)
-	}
-	return issueID
-}
-
-// i486TwoCommentPushes is i486TwoIssuePushes for comment 700.
-func i486TwoCommentPushes(t *testing.T, pool *pgxpool.Pool, proj store.ProjectRow) string {
-	t.Helper()
-	str := func(s string) *string { return &s }
-	ctx := context.Background()
-	_, commentID := i452Pulled(t, pool, proj, true)
-	i452Edit(t, ctx, pool, proj.Scope, commentID, store.IssueUpdate{Content: str("comment, A")})
-	aSpy := &hookSpy{pushSpyForge: newPushSpy()}
-	aSpy.setHook(func() {
-		i452Edit(t, ctx, pool, proj.Scope, commentID, store.IssueUpdate{Content: str("comment, B")})
-		if res, err := pusherWithRegistry(pool).PushProject(ctx, proj, newPushSpy(), RepoRef{Owner: "o", Repo: "r"}, alwaysAllow); err != nil || res.Pushed != 1 {
-			t.Errorf("instance B: %+v %v, want one push", res, err)
-		}
-	})
-	if res, err := pusherWithRegistry(pool).PushProject(ctx, proj, aSpy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow); err != nil || res.Pushed != 1 || res.Conflicts != 1 {
-		t.Errorf("instance A: %+v %v, want one push and one conflict (its base moved)", res, err)
-	}
-	return commentID
-}
-
 func TestPushAdvanceOffItsListedBaseLeavesTheDecisionToThePull(t *testing.T) {
 	str := func(s string) *string { return &s }
-	crane := func(title string) IssueRemote {
-		return IssueRemote{Number: 5, Title: title, Body: "forge body", State: "open"}
-	}
 	issueHashes := func(t *testing.T, pool *pgxpool.Pool, proj store.ProjectRow, id string, forge IssueRemote) (string, string) {
 		_, ctxH := CtxIssueBase(getBlock(t, pool, proj.Scope, id), []string{"done"}, true)
 		_, forgeH, _, _ := ForgeIssueBase(forge)
 		return ctxH, forgeH
 	}
-
-	t.Run("two issue pushes, A's PATCH landed last", func(t *testing.T) {
-		pool := testdb.SetupTestDB(t)
-		proj := enablePush(seedIFProject(t, pool, "i486twoalast"))
-		id := i486TwoIssuePushes(t, pool, proj)
-		forge := crane("Crane, A")
-		ctxH, forgeH := issueHashes(t, pool, proj, id, forge)
-		i486Undecided(t, pool, proj, "issue", 5, id, ctxH, forgeH)
-		wire := i486Cycles(t, pool, proj, i486PullIssue(t, pool, proj, forge))
-		i486StillConflicted(t, pool, proj, "issue", 5, id, "forge body", "#5 Crane, B", wire)
-	})
-	t.Run("two issue pushes, B's PATCH landed last", func(t *testing.T) {
-		pool := testdb.SetupTestDB(t)
-		proj := enablePush(seedIFProject(t, pool, "i486twoblast"))
-		id := i486TwoIssuePushes(t, pool, proj)
-		forge := crane("Crane, B")
-		ctxH, forgeH := issueHashes(t, pool, proj, id, forge)
-		i486Undecided(t, pool, proj, "issue", 5, id, ctxH, "")
-		wire := i486Cycles(t, pool, proj, i486PullIssue(t, pool, proj, forge))
-		i486Converged(t, pool, proj, "issue", 5, forgeH, wire)
-		if forgeH != ctxH {
-			t.Errorf("precondition: block and forge were meant to agree")
-		}
-	})
-	t.Run("two comment pushes, A's PATCH landed last", func(t *testing.T) {
-		pool := testdb.SetupTestDB(t)
-		proj := enablePush(seedIFProject(t, pool, "i486twocalast"))
-		id := i486TwoCommentPushes(t, pool, proj)
-		_, ctxH := CtxCommentBase(getBlock(t, pool, proj.Scope, id))
-		_, forgeH, _, _ := ForgeCommentBase("comment, A")
-		i486Undecided(t, pool, proj, "comment", 700, id, ctxH, forgeH)
-		wire := i486Cycles(t, pool, proj, i486PullComment(t, pool, proj, "comment, A"))
-		i486StillConflicted(t, pool, proj, "comment", 700, id, "comment, B", "", wire)
-	})
-	t.Run("two comment pushes, B's PATCH landed last", func(t *testing.T) {
-		pool := testdb.SetupTestDB(t)
-		proj := enablePush(seedIFProject(t, pool, "i486twocblast"))
-		id := i486TwoCommentPushes(t, pool, proj)
-		_, ctxH := CtxCommentBase(getBlock(t, pool, proj.Scope, id))
-		i486Undecided(t, pool, proj, "comment", 700, id, ctxH, "")
-		wire := i486Cycles(t, pool, proj, i486PullComment(t, pool, proj, "comment, B"))
-		_, forgeH, _, _ := ForgeCommentBase("comment, B")
-		i486Converged(t, pool, proj, "comment", 700, forgeH, wire)
-	})
-
-	// A's advance runs first and records its version (its listed base still
-	// holds); B's PATCH landed last and B advances off its listed base.
-	t.Run("two issue pushes, the later listing advances last", func(t *testing.T) {
-		pool := testdb.SetupTestDB(t)
-		ctx := context.Background()
-		proj := enablePush(seedIFProject(t, pool, "i486advtwo"))
-		issueID, _ := i452Pulled(t, pool, proj, false)
-		i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Title: str("Crane, A")})
-
-		bPatched, aDone := make(chan struct{}), make(chan struct{})
-		bSpy := &hookSpy{pushSpyForge: newPushSpy()}
-		bSpy.setHook(func() {
-			close(bPatched)
-			select {
-			case <-aDone:
-			case <-time.After(i452Wait):
-			}
-		})
-		type out struct {
-			res PushResult
-			err error
-		}
-		bOut := make(chan out, 1)
-		aSpy := &hookSpy{pushSpyForge: newPushSpy()}
-		aSpy.setHook(func() {
-			i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Title: str("Crane, B")})
-			go func() {
-				res, err := pusherWithRegistry(pool).PushProject(ctx, proj, bSpy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow)
-				bOut <- out{res, err}
-			}()
-			select {
-			case <-bPatched:
-			case <-time.After(i452Wait):
-				t.Errorf("instance B did not reach its PATCH within %s", i452Wait)
-			}
-		})
-		resA, err := pusherWithRegistry(pool).PushProject(ctx, proj, aSpy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow)
-		close(aDone)
-		if err != nil || resA.Pushed != 1 || resA.Conflicts != 0 {
-			t.Fatalf("instance A: %+v %v, want one push and no conflict (its listed base held)", resA, err)
-		}
-		select {
-		case o := <-bOut:
-			if o.err != nil || o.res.Pushed != 1 || o.res.Conflicts != 1 {
-				t.Errorf("instance B: %+v %v, want one push and one conflict (its base moved)", o.res, o.err)
-			}
-		case <-time.After(i452Wait):
-			t.Fatalf("instance B did not finish within %s", i452Wait)
-		}
-		forge := crane("Crane, B")
-		ctxH, forgeH := issueHashes(t, pool, proj, issueID, forge)
-		i486Undecided(t, pool, proj, "issue", 5, issueID, ctxH, "")
-		wire := i486Cycles(t, pool, proj, i486PullIssue(t, pool, proj, forge))
-		i486Converged(t, pool, proj, "issue", 5, forgeH, wire)
-	})
 
 	// The other instance's pull: it converges on what A's PATCH sent, then
 	// pulls a remote edit (block and forge hold the edit).
@@ -339,7 +177,9 @@ func TestPushAdvanceOffItsListedBaseLeavesTheDecisionToThePull(t *testing.T) {
 		issueID, _ := i452Pulled(t, pool, proj, false)
 		i452Edit(t, ctx, pool, proj.Scope, issueID, store.IssueUpdate{Tags: []string{"field-work"}})
 
-		held, hold := i452HoldBeginPool(t, dsn)
+		// Held at the advance's first statement, inside the push section
+		// (the section's base check has passed).
+		held, hold := i491HoldStatementPool(t, dsn, func(sql string) bool { return strings.Contains(sql, "FOR SHARE") })
 		spy := newPushSpy()
 		type out struct {
 			res PushResult

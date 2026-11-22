@@ -238,8 +238,8 @@ type PushProjection func(b *Block) string
 // its base already (in sync).
 //
 // synced_at decides whether the next run lists the row again (candidate filter
-// b.updated_at > m.synced_at), and the PATCH ran outside any transaction, so a
-// local write may have changed the block since the listing (issue #452). The
+// b.updated_at > m.synced_at), and the PATCH ran without a lock on the block,
+// so a local write may have changed the block since the listing (issue #452). The
 // advance therefore locks the block FOR SHARE — it waits for a writer still
 // holding the row — and projects it again:
 //
@@ -258,13 +258,12 @@ type PushProjection func(b *Block) string
 //
 // The base is written only while the mapping still holds listedBase, the base
 // the listing read (issue #486). Another ctxd instance on the same database
-// can move it between the listing and this advance: its pull converges on
-// what the PATCH sent and then pulls a remote edit, or its push of a later
-// local version advances first. Which PATCH reached the forge last is then
-// unknown — keeping the moved base loses the newer local version when this
-// advance's PATCH landed last (the next pull reads the forge as ahead of a
-// block that equals the base and writes the older version into it), and
-// writing the listed base is wrong when the other writer was right. So the
+// can move it between the section's check (TryLockPushEntity) and this
+// advance: its pull converges on what the PATCH sent and then pulls a remote
+// edit. (Its push cannot: the section keeps other pushes of the entity out,
+// issue #491.) What the forge holds is then unknown — keeping the moved base
+// is wrong when this advance's PATCH landed after the pulled edit, writing
+// the listed base is wrong when the pulled edit is newer. So the
 // advance records UnknownBaseHash, drops base_fields and flags the mapping
 // (conflict, conflict_at): the push lists no flagged mapping, and the next
 // pull's 3-way decision converges when block and forge agree (base := their
@@ -281,46 +280,85 @@ type PushProjection func(b *Block) string
 // Locks: the block row (FOR SHARE), then the mapping row — the order of the
 // pull's writes. The mapping row's base is compared in the UPDATE itself, on
 // the row version the UPDATE locks. A mapping that is gone is no error.
-func AdvancePushBase(ctx context.Context, pool *pgxpool.Pool, blockID, listedBase, ctxHash string, ctxFields json.RawMessage, project PushProjection) (moved bool, err error) {
-	err = pgxdb.Write(ctx, pool,
-		pgxdb.Stages{Begin: "store: advance push base begin", Commit: "store: advance push base commit"},
-		func(tx pgx.Tx) error {
-			var b Block
-			var at time.Time
-			holds := false
-			err := tx.QueryRow(ctx, `
-				SELECT title, content, metadata, COALESCE(workflow_status, ''), updated_at
-				  FROM context_blocks WHERE id = $1::uuid
-				   FOR SHARE`, blockID).Scan(&b.Title, &b.Content, &b.Metadata, &b.WorkflowStatus, &at)
-			switch {
-			case errors.Is(err, pgx.ErrNoRows):
-			case err != nil:
-				return fmt.Errorf("store: advance push base: lock block: %w", err)
-			default:
-				holds = project(&b) == ctxHash
-			}
-			// In SET every column reference reads the row as it was before
-			// this UPDATE, so every expression tests the stored base.
-			err = tx.QueryRow(ctx, `
-				UPDATE context_project_sync_map
-				   SET base_hash = CASE WHEN base_hash = $6 THEN $2 ELSE $7 END,
-				       synced_at = CASE WHEN $4 THEN $5::timestamptz ELSE '-infinity'::timestamptz END,
-				       metadata = CASE WHEN base_hash = $6 THEN metadata || $3::jsonb ELSE metadata - 'base_fields' END,
-				       conflict = conflict OR base_hash <> $6,
-				       conflict_at = CASE WHEN base_hash = $6 THEN conflict_at ELSE COALESCE(conflict_at, now()) END
-				 WHERE block_id = $1::uuid
-				RETURNING old.base_hash <> $6`,
-				blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash).Scan(&moved)
-			switch {
-			case errors.Is(err, pgx.ErrNoRows):
-				moved = false
-				return nil
-			case err != nil:
-				return fmt.Errorf("store: advance push base: %w", err)
-			}
-			return nil
-		})
-	return moved, err
+// Tx-bound: the push runs it in the transaction that holds the entity's push
+// lock across the wire write (TryLockPushEntity, issue #491).
+func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHash string, ctxFields json.RawMessage, project PushProjection) (moved bool, err error) {
+	var b Block
+	var at time.Time
+	holds := false
+	err = tx.QueryRow(ctx, `
+		SELECT title, content, metadata, COALESCE(workflow_status, ''), updated_at
+		  FROM context_blocks WHERE id = $1::uuid
+		   FOR SHARE`, blockID).Scan(&b.Title, &b.Content, &b.Metadata, &b.WorkflowStatus, &at)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+	case err != nil:
+		return false, fmt.Errorf("store: advance push base: lock block: %w", err)
+	default:
+		holds = project(&b) == ctxHash
+	}
+	// In SET every column reference reads the row as it was before this
+	// UPDATE, so every expression tests the stored base.
+	err = tx.QueryRow(ctx, `
+		UPDATE context_project_sync_map
+		   SET base_hash = CASE WHEN base_hash = $6 THEN $2 ELSE $7 END,
+		       synced_at = CASE WHEN $4 THEN $5::timestamptz ELSE '-infinity'::timestamptz END,
+		       metadata = CASE WHEN base_hash = $6 THEN metadata || $3::jsonb ELSE metadata - 'base_fields' END,
+		       conflict = conflict OR base_hash <> $6,
+		       conflict_at = CASE WHEN base_hash = $6 THEN conflict_at ELSE COALESCE(conflict_at, now()) END
+		 WHERE block_id = $1::uuid
+		RETURNING old.base_hash <> $6`,
+		blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash).Scan(&moved)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("store: advance push base: %w", err)
+	}
+	return moved, nil
+}
+
+// TryLockPushEntity opens the push's section of one entity in the caller's
+// transaction: it takes the entity's push lock — a transaction-level
+// advisory lock keyed on the block id, released at the commit or rollback —
+// without waiting, and answers whether the section may write: the lock was
+// free AND the mapping row still holds listedBase, the base the push's
+// listing read (issue #491).
+//
+// The push writes an entity to the forge and records that write (the
+// advance) inside the section, so two ctxd instances never have the writes
+// of one entity in flight at once. Without it, B's PATCH and advance of a
+// newer local version could run while A's PATCH of an older one was on the
+// wire; A's landing last left the forge at the older version, and a pull in
+// between found the block at B's base and the forge ahead of it, and wrote
+// the older version over the newer one on both sides.
+//
+// false means another instance is writing the entity now (its PATCH may be
+// on the wire), or it wrote it since this push listed it, or the mapping is
+// gone: the caller leaves the entity to its next run, which lists it again
+// against the base it finds. Not waiting is the bound: no push leg waits on
+// another one's wire call, however long that one hangs. The base is read
+// after the lock is held — a statement of its own, so it sees the row as the
+// lock holder left it.
+func TryLockPushEntity(ctx context.Context, tx pgx.Tx, blockID, listedBase string) (bool, error) {
+	var locked bool
+	if err := tx.QueryRow(ctx,
+		`SELECT pg_try_advisory_xact_lock(hashtext('ctx:forge-push'), hashtext($1::text))`, blockID).Scan(&locked); err != nil {
+		return false, fmt.Errorf("store: push lock: %w", err)
+	}
+	if !locked {
+		return false, nil
+	}
+	var holds bool
+	err := tx.QueryRow(ctx,
+		`SELECT base_hash = $2 FROM context_project_sync_map WHERE block_id = $1::uuid`, blockID, listedBase).Scan(&holds)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: push lock: read base: %w", err)
+	}
+	return holds, nil
 }
 
 // FlagPushConflict flags a mapping conflict from the push side (a truncated body
