@@ -2,7 +2,7 @@
 
 // Issue #491: the pull's locked decision takes the block row and then the
 // mapping row; the push's section takes the entity's advisory lock, holds it
-// across the wire write and then takes the block row (FOR SHARE) and the
+// across the wire write and then takes the block row (FOR NO KEY UPDATE) and the
 // mapping row in its advance; the local writes take the block row alone
 // (UpdateIssueBlock FOR UPDATE, UpdateBlock FOR NO KEY UPDATE). No path
 // takes the mapping row before the block row, and the advisory lock is only

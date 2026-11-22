@@ -23,6 +23,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"unicode/utf8"
@@ -192,6 +193,45 @@ func PullUpdateIssueBlock(ctx context.Context, tx pgx.Tx, blockID string, c Forg
 		}
 	}
 	return b, nil
+}
+
+// StampForgeState writes the state of a base snapshot (the "state" field of
+// the canonical projection the caller records as the mapping's base) into the
+// block's metadata.forge_state, the state an issue projects when no workflow
+// resolves (§4.5.4). The pull writes it with every block write; the push
+// (create and update) and the convergence record a base without writing the
+// block, and left it at what the last pull saw — "open" after a pushed or a
+// converged close, which with the workflow lost made any later local edit
+// project the issue as open against the closed base and the push reopen it
+// (issue #491). They call this with the snapshot they record: what the PATCH
+// made the forge hold, what the pull read from it.
+//
+// A snapshot without a state (a comment's {body}) writes nothing, and so does
+// a value the block already holds: the row is rewritten — and its write
+// notifications fire — only when the forge state changed. updated_at stays:
+// the stamp is the forge's state, not a local edit, and moving updated_at
+// would list the mapping as a push candidate. The caller holds the block row
+// locked (FOR NO KEY UPDATE), Tx-bound.
+func StampForgeState(ctx context.Context, tx pgx.Tx, blockID string, baseFields json.RawMessage) error {
+	var snap struct {
+		State *string `json:"state"`
+	}
+	if len(baseFields) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(baseFields, &snap); err != nil {
+		return fmt.Errorf("store: stamp forge state: decode base snapshot: %w", err)
+	}
+	if snap.State == nil || *snap.State == "" {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE context_blocks
+		   SET metadata = jsonb_set(metadata, '{forge_state}', to_jsonb($2::text))
+		 WHERE id = $1::uuid AND metadata->>'forge_state' IS DISTINCT FROM $2`, blockID, *snap.State); err != nil {
+		return fmt.Errorf("store: stamp forge state: %w", err)
+	}
+	return nil
 }
 
 // PullUpdateCommentBlock applies a forge-ahead body change to a comment block

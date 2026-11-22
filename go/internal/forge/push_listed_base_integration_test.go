@@ -179,7 +179,7 @@ func TestPushAdvanceOffItsListedBaseLeavesTheDecisionToThePull(t *testing.T) {
 
 		// Held at the advance's first statement, inside the push section
 		// (the section's base check has passed).
-		held, hold := i491HoldStatementPool(t, dsn, func(sql string) bool { return strings.Contains(sql, "FOR SHARE") })
+		held, hold := i491HoldStatementPool(t, dsn, func(sql string) bool { return strings.Contains(sql, "FOR NO KEY UPDATE") })
 		spy := newPushSpy()
 		type out struct {
 			res PushResult

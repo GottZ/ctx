@@ -174,7 +174,9 @@ func FinalizePushCreateIssue(ctx context.Context, pool *pgxpool.Pool, blockID st
 					return fmt.Errorf("store: finalize push create: %w", err)
 				}
 			}
-			return nil
+			// The forge state the create left (open, or closed after the
+			// follow-up PATCH), issue #491.
+			return StampForgeState(ctx, tx, blockID, ctxFields)
 		})
 }
 
@@ -240,8 +242,9 @@ type PushProjection func(b *Block) string
 // synced_at decides whether the next run lists the row again (candidate filter
 // b.updated_at > m.synced_at), and the PATCH ran without a lock on the block,
 // so a local write may have changed the block since the listing (issue #452). The
-// advance therefore locks the block FOR SHARE — it waits for a writer still
-// holding the row — and projects it again:
+// advance therefore locks the block FOR NO KEY UPDATE — it waits for a writer
+// still holding the row, and it may write the row's forge state below — and
+// projects it again:
 //
 //   - The block still projects to ctxHash: synced_at := the block's updated_at,
 //     the time of the version the forge now holds, not now(). A write whose
@@ -277,8 +280,13 @@ type PushProjection func(b *Block) string
 // (TestSyncedAtIsComparedInSQLOnly holds every mention to an assignment or
 // the filter).
 //
-// Locks: the block row (FOR SHARE), then the mapping row — the order of the
-// pull's writes. The mapping row's base is compared in the UPDATE itself, on
+// A base it writes is the version the PATCH made the forge hold, so it also
+// writes that version's state into the block's metadata.forge_state
+// (StampForgeState, issue #491); an unknown base writes none.
+//
+// Locks: the block row (FOR NO KEY UPDATE, the lock StampForgeState's UPDATE
+// takes — no lock upgrade), then the mapping row — the order of the pull's
+// writes. The mapping row's base is compared in the UPDATE itself, on
 // the row version the UPDATE locks. A mapping that is gone is no error.
 // Tx-bound: the push runs it in the transaction that holds the entity's push
 // lock across the wire write (TryLockPushEntity, issue #491).
@@ -289,7 +297,7 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 	err = tx.QueryRow(ctx, `
 		SELECT title, content, metadata, COALESCE(workflow_status, ''), updated_at
 		  FROM context_blocks WHERE id = $1::uuid
-		   FOR SHARE`, blockID).Scan(&b.Title, &b.Content, &b.Metadata, &b.WorkflowStatus, &at)
+		   FOR NO KEY UPDATE`, blockID).Scan(&b.Title, &b.Content, &b.Metadata, &b.WorkflowStatus, &at)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:
@@ -315,7 +323,10 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 	case err != nil:
 		return false, fmt.Errorf("store: advance push base: %w", err)
 	}
-	return moved, nil
+	if moved {
+		return true, nil
+	}
+	return false, StampForgeState(ctx, tx, blockID, ctxFields)
 }
 
 // TryLockPushEntity opens the push's section of one entity in the caller's

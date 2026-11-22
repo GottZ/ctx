@@ -359,7 +359,12 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 			if ctxH == p.forgeH {
 				heldAt = &cur.UpdatedAt
 			}
-			return store.UpdateSyncMapBase(ctx, tx, m.BlockID, p.forgeH, p.forgeFields, p.fUpdated, heldAt)
+			if err := store.UpdateSyncMapBase(ctx, tx, m.BlockID, p.forgeH, p.forgeFields, p.fUpdated, heldAt); err != nil {
+				return err
+			}
+			// The forge state the pull read, as a pull-update writes it
+			// (issue #491); a comment's snapshot carries none.
+			return store.StampForgeState(ctx, tx, m.BlockID, p.forgeFields)
 		case decConflict:
 			if locked.Conflict {
 				return nil
