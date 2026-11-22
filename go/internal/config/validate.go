@@ -1617,10 +1617,12 @@ func validateGuardEfSearch(c *Config) []Issue {
 // one follow-up bound of 10 s for the whole batch (internal/handler
 // followUpTimeout), inside the shutdown's 15 s HTTP drain, and nothing
 // classifies a block later but its next write. Measured on a test database
-// on a loaded host (2026-11-22): about 3 ms per item — 1 000 items 3.0 s,
-// 5 000 items 16.1 s (past the drain). The ceiling keeps the largest batch a
-// config can allow at under a third of the bound; the handler test
-// TestFollowupBoundBatchAfterworkFits holds a batch of this size inside it.
+// on a loaded host (2026-11-22): about 3 ms per item — 1 000 items 2.7–3.0 s,
+// 5 000 items 16.1 s (past the drain). The handler test
+// TestFollowupBoundBatchAfterworkFits holds a batch of this size inside the
+// bound. The ceiling came after the key: the live installation sets no
+// environment value (2026-11-22, .env without CTX_WRITES_BATCH_MAX_ITEMS);
+// a settings row was not checked.
 const WritesBatchMaxItemsCeiling = 1000
 
 // validateWritesBatchMaxItems is V67 (issue #483): writes.batch_max_items at

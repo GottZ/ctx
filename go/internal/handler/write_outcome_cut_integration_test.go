@@ -124,6 +124,13 @@ func (p *cutProxy) cut() {
 	p.conns = nil
 }
 
+// refuseNew refuses new connections until heal and leaves the open ones be.
+func (p *cutProxy) refuseNew() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refused = true
+}
+
 // heal lets new connections through again.
 func (p *cutProxy) heal() {
 	p.mu.Lock()
@@ -176,7 +183,8 @@ func newCutFixture(t *testing.T) *cutFixture {
 		   RETURN NULL;
 		 END $$`,
 	}
-	for _, tbl := range []string{"context_blocks", "context_blobs", "context_pending_writes", "context_dream_links"} {
+	for _, tbl := range []string{"context_blocks", "context_blobs", "context_pending_writes", "context_dream_links",
+		"context_tenants", "context_tenant_grants", "context_block_grants", "context_tenant_quota"} {
 		ddl = append(ddl, fmt.Sprintf(`CREATE CONSTRAINT TRIGGER i483_hold AFTER INSERT OR UPDATE OR DELETE ON %[1]s
 			DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION i483_hold('%[1]s')`, tbl))
 	}
@@ -693,7 +701,12 @@ func TestStatementOutcomeDeadlineAtCommit(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
-	pool := testdb.SetupTestDB(t)
+	// The writes run on the proxied pool: pgx sends a cancel request on a new
+	// connection after the deadline's read error, and the proxy refuses it
+	// until the held commit went on (cutProxy), so whether it lands does not
+	// race the release.
+	f := newCutFixture(t)
+	pool, direct := f.pool, f.direct
 	ctx := context.Background()
 	for _, q := range []string{
 		`CREATE TABLE i483_deadline (k text NOT NULL)`,
@@ -702,7 +715,7 @@ func TestStatementOutcomeDeadlineAtCommit(t *testing.T) {
 		`CREATE CONSTRAINT TRIGGER i483_deadline_hold AFTER INSERT ON i483_deadline
 		 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION i483_deadline_hold()`,
 	} {
-		if _, err := pool.Exec(ctx, q); err != nil {
+		if _, err := direct.Exec(ctx, q); err != nil {
 			t.Fatalf("fixture DDL: %v", err)
 		}
 	}
@@ -716,7 +729,7 @@ func TestStatementOutcomeDeadlineAtCommit(t *testing.T) {
 		t.Helper()
 		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
 			var n int
-			if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM i483_deadline WHERE k = $1`, k).Scan(&n); err != nil {
+			if err := direct.QueryRow(ctx, `SELECT count(*)::int FROM i483_deadline WHERE k = $1`, k).Scan(&n); err != nil {
 				t.Fatal(err)
 			}
 			if n == 1 {
@@ -729,14 +742,17 @@ func TestStatementOutcomeDeadlineAtCommit(t *testing.T) {
 	// and returns the error.
 	run := func(t *testing.T, write func(ctx context.Context) error) error {
 		t.Helper()
-		release := lockedTx(t, pool, `SELECT pg_advisory_xact_lock($1)`, 483484)
+		release := lockedTx(t, direct, `SELECT pg_advisory_xact_lock($1)`, 483484)
 		dctx := newCutDeadline()
 		errc := make(chan error, 1)
 		go func() { errc <- write(dctx) }()
-		waitLockWaiters(t, pool, 1)
+		waitLockWaiters(t, direct, 1)
+		f.proxy.refuseNew()
 		dctx.pass()
 		err := <-errc
 		release()
+		f.quiesce(t)
+		f.proxy.heal()
 		return err
 	}
 	check := func(t *testing.T, err error, wantWrite string) {
@@ -775,7 +791,7 @@ func TestStatementOutcomeDeadlineAtCommit(t *testing.T) {
 		// waits on the lock until after Commit returned, so the deadline can
 		// only pass while it waits (a deadline passed before sending would
 		// fail the SafeToRetry check above, not pass silently).
-		release := lockedTx(t, pool, `SELECT pg_advisory_xact_lock($1)`, 483484)
+		release := lockedTx(t, direct, `SELECT pg_advisory_xact_lock($1)`, 483484)
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -785,8 +801,11 @@ func TestStatementOutcomeDeadlineAtCommit(t *testing.T) {
 		}
 		dctx, cancel := context.WithTimeout(ctx, time.Second)
 		defer cancel()
+		f.proxy.refuseNew()
 		err = tx.Commit(dctx)
 		release()
+		f.quiesce(t)
+		f.proxy.heal()
 		check(t, err, writeRolledBack)
 		landed(t, "real")
 	})
@@ -962,5 +981,81 @@ func TestWriteOutcomeCutRemainingPaths(t *testing.T) {
 		})
 		wantCutUnknown(t, logs, "chat: stage pending update failed", "", false)
 		f.waitLanded(t, `SELECT count(*)::int FROM context_pending_writes WHERE origin = 'chat' AND op = 'update'`)
+	})
+}
+
+// TestWriteOutcomeCutAdminPaths — the admin writes of point 9 whose store
+// function is one statement or an unlabeled bracket (statementOutcome): a cut
+// commit says unknown on their failure line; writeOutcome would say
+// rolled_back.
+func TestWriteOutcomeCutAdminPaths(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := newCutFixture(t)
+	ctx := context.Background()
+	k, adminPlain, err := store.CreateApiKey(ctx, f.direct, "i483-cut-admin", "private", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.direct.Exec(ctx, `UPDATE context_api_keys SET is_admin = true WHERE id = $1::uuid`, k.ID); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := auth.AuthenticateRaw(ctx, f.direct, adminPlain)
+	if err != nil || !admin.IsValid {
+		t.Fatalf("authenticate admin: %v", err)
+	}
+	seedH := mcHandler(t, f.direct, false, false)
+	a := auMakeTenant(ctx, t, f.direct, seedH, admin, "i483-cut-a")
+	b := auMakeTenant(ctx, t, f.direct, seedH, admin, "i483-cut-b")
+	if _, err := f.direct.Exec(ctx, `INSERT INTO context_settings (key, scope, value) VALUES ($1, $2, 'true')`,
+		store.AllowCrossTenantBlockGrantKey, admin.TenantID); err != nil {
+		t.Fatalf("opt in: %v", err)
+	}
+	granted, revoked := f.seedBlock(t, "i483 cut granted"), f.seedBlock(t, "i483 cut revoked")
+	if status, resp := kaManage(t, seedH, admin, "i483-seed", map[string]any{"action": "block-grant-create",
+		"data": map[string]any{"block_id": revoked, "grantee_tenant": b.id}}); status != http.StatusOK {
+		t.Fatalf("seed block grant: %d %v", status, resp)
+	}
+	_, resp := kaManage(t, seedH, admin, "i483-seed-grant", map[string]any{"action": "tenant-grant-create",
+		"data": map[string]any{"grantee_tenant": b.id, "granted_scope": a.scope}})
+	grant, _ := resp["grant"].(map[string]any)
+	grantID, _ := grant["id"].(string)
+	if grantID == "" {
+		t.Fatalf("seed tenant grant: %v", resp)
+	}
+	manage := mcHandler(t, f.pool, false, false).HandleManage
+	cut := func(t *testing.T, table, body, msg string) {
+		t.Helper()
+		f.cutREST(t, manage, adminPlain, table, "/api/manage", body, msg)
+	}
+
+	t.Run("tenant-update", func(t *testing.T) {
+		cut(t, "context_tenants", fmt.Sprintf(`{"action":"tenant-update","id":%q,"data":{"display_name":"I483 cut renamed"}}`, a.id), "manage: tenant-update failed")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_tenants WHERE id = $1::uuid AND display_name = 'I483 cut renamed'`, a.id)
+	})
+	t.Run("tenant-limit-set", func(t *testing.T) {
+		cut(t, "context_tenants", fmt.Sprintf(`{"action":"tenant-limit-set","id":%q,"data":{"max_scopes":7,"max_keys":7}}`, a.id), "manage: tenant-limit-set failed")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_tenants WHERE id = $1::uuid AND max_scopes = 7`, a.id)
+	})
+	t.Run("tenant-grant-create", func(t *testing.T) {
+		cut(t, "context_tenant_grants", fmt.Sprintf(`{"action":"tenant-grant-create","data":{"grantee_tenant":%q,"granted_scope":%q}}`, a.id, b.scope), "manage: tenant-grant-create failed")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_tenant_grants WHERE grantee_tenant = $1::uuid`, a.id)
+	})
+	t.Run("tenant-grant-delete", func(t *testing.T) {
+		cut(t, "context_tenant_grants", fmt.Sprintf(`{"action":"tenant-grant-delete","id":%q}`, grantID), "manage: tenant-grant-delete failed")
+		f.waitLanded(t, `SELECT (count(*) = 0)::int FROM context_tenant_grants WHERE id = $1::uuid`, grantID)
+	})
+	t.Run("tenant-quota-set", func(t *testing.T) {
+		cut(t, "context_tenant_quota", fmt.Sprintf(`{"action":"tenant-quota-set","data":{"scope":%q,"daily_calls":5}}`, a.scope), "manage: tenant-quota-set failed")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_tenant_quota WHERE scope = $1`, a.scope)
+	})
+	t.Run("block-grant-create", func(t *testing.T) {
+		cut(t, "context_block_grants", fmt.Sprintf(`{"action":"block-grant-create","data":{"block_id":%q,"grantee_tenant":%q}}`, granted, a.id), "manage: block-grant-create failed")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_block_grants WHERE block_id = $1::uuid`, granted)
+	})
+	t.Run("block-grant-revoke", func(t *testing.T) {
+		cut(t, "context_block_grants", fmt.Sprintf(`{"action":"block-grant-revoke","data":{"block_id":%q,"grantee_tenant":%q}}`, revoked, b.id), "manage: block-grant-revoke failed")
+		f.waitLanded(t, `SELECT (count(*) = 0)::int FROM context_block_grants WHERE block_id = $1::uuid`, revoked)
 	})
 }

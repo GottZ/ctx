@@ -106,20 +106,22 @@ func (h *ManageHandler) handleGamingMode(w http.ResponseWriter, r *http.Request,
 		// share of followUpTimeout (issues #453, #483) — the pair stays
 		// inside the shutdown's drain, and a backend reload that hangs for
 		// its whole share no longer ends the settings reload before it
-		// starts.
+		// starts. Either one failing is a toggle persisted but not live.
 		bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gamingReloadShare)
-		h.reloadBackendPool(bctx, "eject/gaming-mode")
+		reloadErr := h.reloadBackendPool(bctx, "eject/gaming-mode")
 		cancel()
 		if h.settingsReload != nil {
 			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gamingReloadShare)
-			err := h.settingsReload(sctx)
-			cancel()
-			if err != nil {
-				logRequestError(ctx, "eject/gaming-mode: persisted but reload failed", "error", err, "request_id", RequestIDFromContext(ctx))
-				writeJSON(w, http.StatusInternalServerError, map[string]any{
-					"success": false, "persisted": true, "error": gamingReloadFailedMsg})
-				return
+			if err := h.settingsReload(sctx); err != nil {
+				reloadErr = errors.Join(reloadErr, err)
 			}
+			cancel()
+		}
+		if reloadErr != nil {
+			logRequestError(ctx, "eject/gaming-mode: persisted but reload failed", "error", reloadErr, "request_id", RequestIDFromContext(ctx))
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"success": false, "persisted": true, "error": gamingReloadFailedMsg})
+			return
 		}
 		slog.Info("eject/gaming-mode: toggled", "active", active,
 			"request_id", RequestIDFromContext(ctx))
@@ -204,9 +206,9 @@ func (h *ManageHandler) ejectShapeView(ctx context.Context) (gamingStateView, er
 // shutdown's drain.
 const gamingReloadShare = followUpTimeout / 2
 
-// gamingReloadFailedMsg answers a toggle whose settings reload failed after
-// the commit: not a plain success, and not a failure of the write either.
-const gamingReloadFailedMsg = "persisted but reload failed — the toggle is written and takes effect on this instance once its snapshot reloads (the settings listener retries)"
+// gamingReloadFailedMsg answers a toggle whose reload failed after the
+// commit: not a plain success, and not a failure of the write either.
+const gamingReloadFailedMsg = "persisted but reload failed — the toggle is written and takes effect on this instance once its snapshot reloads (the NOTIFY listeners retry)"
 
 // gamingInternalError logs with the request id and returns a generic 500 —
 // internal error strings never reach the client body.

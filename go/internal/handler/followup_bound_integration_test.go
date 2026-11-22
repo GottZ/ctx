@@ -862,7 +862,8 @@ func gamingToggle(t *testing.T, pool *pgxpool.Pool, h *ManageHandler) (int, map[
 // each gets its own share of followUpTimeout (issue #483), so a backend
 // reload that hangs for its whole share leaves the settings reload a live
 // context, and the pair stays inside the shutdown's drain. The backend
-// reload is held on a table lock past its share.
+// reload is held on a table lock past its share: the toggle is persisted but
+// not live, which the answer says (500, persisted=true).
 func TestFollowupBoundGamingReloadsHaveTheirShares(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -893,7 +894,7 @@ func TestFollowupBoundGamingReloadsHaveTheirShares(t *testing.T) {
 	h := NewManageHandler(pool, cfgStore, nil, bp, nil, reload, nil, nil)
 	logs := installRejectLogCapture(t)
 	begin := time.Now()
-	status, _ := gamingToggle(t, pool, h)
+	status, body := gamingToggle(t, pool, h)
 	elapsed := time.Since(begin)
 	s := <-got
 	if s.err != nil {
@@ -902,8 +903,8 @@ func TestFollowupBoundGamingReloadsHaveTheirShares(t *testing.T) {
 	if s.deadline.Sub(s.at) > followUpTimeout/2 {
 		t.Errorf("the settings reload's share is %v, want at most %v", s.deadline.Sub(s.at), followUpTimeout/2)
 	}
-	if status != http.StatusOK {
-		t.Errorf("toggle answered %d, want 200 (the settings reload succeeded)", status)
+	if status != http.StatusInternalServerError || body["persisted"] != true {
+		t.Errorf("toggle answered %d %v, want 500 with persisted=true (the backend pool, which carries the toggle, did not reload)", status, body)
 	}
 	// ctxd's HTTP drain (cmd/ctxd shutdownHTTPTimeout) is 15 s.
 	if elapsed > followUpTimeout+2*time.Second {

@@ -12,8 +12,9 @@ package handler
 // fails this test. Name the outcome on its line.
 //
 // It sees the call as `x, err := store.F(…)`, `err = store.F(…)`,
-// `if x, err := store.F(…); err != nil {…}` and `return store.F(…)`, under
-// whatever name the file imports the store package.
+// `if x, err := store.F(…); err != nil {…}` and `return store.F(…)`, in any
+// block or switch/select case, under whatever name the file imports the
+// store package.
 //
 // Limits: a call whose error is returned to the caller (`return store.F(…)`,
 // a core both transports share) is counted, not followed — its callers name
@@ -145,11 +146,20 @@ func censusFile(fset *token.FileSet, file *ast.File, writes map[string]bool, nam
 		return c
 	}
 	ast.Inspect(file, func(n ast.Node) bool {
-		block, ok := n.(*ast.BlockStmt)
-		if !ok {
+		// Every statement list: blocks, and the bodies of switch and select
+		// cases (not blocks in go/ast).
+		var list []ast.Stmt
+		switch b := n.(type) {
+		case *ast.BlockStmt:
+			list = b.List
+		case *ast.CaseClause:
+			list = b.Body
+		case *ast.CommClause:
+			list = b.Body
+		default:
 			return true
 		}
-		for i, stmt := range block.List {
+		for i, stmt := range list {
 			name, errVar, isReturn := storeWriteCall(stmt, writes, pkg)
 			if name == "" {
 				continue
@@ -159,7 +169,7 @@ func censusFile(fset *token.FileSet, file *ast.File, writes map[string]bool, nam
 				c.returned++
 				continue
 			}
-			rest := block.List[i+1:]
+			rest := list[i+1:]
 			if is, ok := stmt.(*ast.IfStmt); ok {
 				// The call sits in the if's init: its body is the failure
 				// branch when the condition is `err != nil`.
@@ -336,6 +346,16 @@ func unnamedAliased(ctx context.Context) {
 		return
 	}
 }
+
+func unnamedInCase(ctx context.Context, op string) {
+	switch op {
+	case "x":
+		_, err := st.UpsertBlock(ctx)
+		if err != nil {
+			return
+		}
+	}
+}
 `
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "probe.go", src, parser.SkipObjectResolution)
@@ -344,10 +364,10 @@ func unnamedAliased(ctx context.Context) {
 	}
 	writes := map[string]bool{"UpsertBlock": true, "DeleteBlob": true, "UpdateBlock": true}
 	c := censusFile(fset, file, writes, map[string]bool{})
-	if c.calls != 3 || len(c.unnamed) != 2 {
-		t.Fatalf("census = %d calls, unnamed at %v; want 3 calls, 2 unnamed (the if-init write without the key, the aliased one)", c.calls, c.unnamed)
+	if c.calls != 4 || len(c.unnamed) != 3 {
+		t.Fatalf("census = %d calls, unnamed at %v; want 4 calls, 3 unnamed (the if-init write without the key, the aliased one, the one in a case)", c.calls, c.unnamed)
 	}
-	if c.unnamed[0].Line != 6 || c.unnamed[1].Line != 19 {
-		t.Errorf("unnamed at %v, want lines 6 and 19", c.unnamed)
+	if c.unnamed[0].Line != 6 || c.unnamed[1].Line != 19 || c.unnamed[2].Line != 28 {
+		t.Errorf("unnamed at %v, want lines 6, 19 and 28", c.unnamed)
 	}
 }

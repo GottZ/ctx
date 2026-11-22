@@ -6,8 +6,9 @@ package handler
 // its error and write_outcome, joined to the request by request_id — where it
 // answered a bare 500 before: tenants, scopes, tenant grants, block grants
 // and quotas (rights and budgets that changed or did not, with no trace).
-// The database refuses each write with a trigger; the line carries no owner
-// key and no display name.
+// The database refuses each write with a trigger; no line carries the
+// display name of the request. Which classifier each route takes is held by
+// TestWriteOutcomeCutAdminPaths.
 //
 //	go test -tags=integration ./internal/handler/ -run 'TestAdminWriteFailureLines' -count=1 -v
 

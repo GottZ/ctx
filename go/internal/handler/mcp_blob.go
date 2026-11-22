@@ -307,8 +307,10 @@ func mcpStageBlobLink(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, i
 	// ID carries the BLOB id here, not a block id — the field means "the row
 	// this op writes", which for op 'update' is a block and for op 'blob_link'
 	// is a blob (store.OpBlobLink documents the double use). The id as stored
-	// (issue #483): the card and both server lines name the blob the way the
-	// direct path does, not as the client spelled it.
+	// (issue #483): the staged card and the stage's and the confirm's server
+	// lines name the blob the way the direct path does, not as the client
+	// spelled it (the answer text below echoes the client's spelling). Two
+	// spellings of one link therefore stage one card.
 	cw := store.CanonicalWrite{
 		Op:             store.OpBlobLink,
 		ID:             blobID,
