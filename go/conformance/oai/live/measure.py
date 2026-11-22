@@ -48,8 +48,9 @@ failed, 2 on usage:
     measurement only when at least one stream was admitted (HTTP 200) and
     every other one was refused by the in-flight budget itself (503
     server_overloaded: the budget doing what the measurement asserts). A
-    stream refused by anything else — a consumer's 429, 401, another 503, no
-    connection — counts in ``refusals`` (status and code) and makes the run
+    stream refused by anything else — a consumer's 429, the dispatcher's 429
+    server_busy, 401, another 503, no connection — counts in ``refusals``
+    (status and code) and makes the run
     exit 1 with an ``error``: the flood was smaller than ``--streams``, and
     the peak of a smaller flood says nothing about this one (#478).
     ``failed_streams`` counts the streams that did not reach ``[DONE]``.
@@ -369,7 +370,8 @@ def heap(base_url: str, keys: list[str], model: str, streams: int, mem_file: str
     elif not measured:
         res["error"] = (f"{streams - admitted - budget_refused} of {streams} streams were refused by something other than "
                         f"the in-flight budget ({refusals}) — the flood was smaller than --streams and peak − base grows "
-                        "with the admitted streams; lift the consumers' limits and run again")
+                        "with the admitted streams; lift the limit refusals names (a consumer's concurrency or rate, "
+                        "the dispatcher's server_busy queue, the door's auth_overloaded) and run again")
     return ok, res
 
 

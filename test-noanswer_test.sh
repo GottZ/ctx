@@ -27,8 +27,13 @@
 #                  isError:true for /mcp
 #   foreign        the status a refusal test expects, with a proxy's HTML page
 #                  instead of the API's error body (refusal steps only)
+#   noblocks       guard-list answering success:true without a blocks list
+#                  (T04 and T09 only)
 #
 # Pinned:
+#   0. docker, ctx and uv resolve to the shims — on a TMPDIR mounted noexec the
+#      shell would skip them and run the real programs, so the test stops
+#      before any run of test.sh (set TMPDIR to a directory that allows exec).
 #   1. Healthy stub, with and without --with-ollama: rc 0, every test OK (T25
 #      SKIP), and no key on a curl command line.
 #   2. Fewer than 100 blocks: the corpus-bound tests SKIP with their reason,
@@ -39,8 +44,11 @@
 #   4. The first request of every test without an answer (each form): every
 #      test that sends one FAILs naming it, rc 1 — T01 alone passes on the
 #      401, which is the refusal it expects.
-#   5. The follow-up requests without an answer (each form): T05, T06, T19,
-#      T20, T21, T22 and T24 FAIL, rc 1.
+#   5. The follow-up requests without an answer, one step at a time (each
+#      form): step 2 fails T05, T06, T19, T20, T21, T22 and T24; step 3 T05
+#      (get), T20 (PUT), T22 (confirm) and T24; step 4 T05 (delete) and T20
+#      (DELETE); rc 1. A guard-list answer without a blocks list fails T04
+#      and T09.
 #   6. The refusal steps (T01; the 403 of T20, T21, T24; T22's unconfirmed
 #      downgrade; T24's classify backend; T19's two 404) answered with
 #      another form or with the expected status and a proxy's page: each
@@ -81,7 +89,11 @@ FORMS = ("empty", "500", "401", "success:false")
 # Every test that sends a request of its own, and the ones with follow-up steps.
 HTTP_TESTS = ["T01", "T02", "T03", "T04", "T05", "T06", "T08", "T09", "T11", "T12", "T19", "T20", "T21",
               "T22", "T24", "T13", "T14", "T15", "T16", "T17", "T18", "T23"]
-LATER_TESTS = ["T05", "T06", "T19", "T20", "T21", "T22", "T24"]
+# Per follow-up step, the tests whose verdict rests on it (T05: 2 search,
+# 3 get, 4 delete; T20: 2 read, 3 PUT, 4 DELETE; T22: 2 refusal, 3 confirm;
+# T24: 2 admin status, 3 refusal; T06/T19/T21: 2).
+LATER_STEPS = {2: ["T05", "T06", "T19", "T20", "T21", "T22", "T24"], 3: ["T05", "T20", "T22", "T24"],
+               4: ["T05", "T20"]}
 # The steps whose promise is a refusal, with the status ctx refuses them with.
 REFUSAL_STEPS = {("T01", 1): 401, ("T20", 1): 403, ("T21", 1): 403, ("T24", 1): 403,
                  ("T22", 2): 400, ("T24", 3): 422, ("T19", 2): 404}
@@ -279,6 +291,8 @@ class Stub:
         if form == "foreign":
             code = REFUSAL_STEPS[(test, step)]
             return (code, PROXY_PAGE.replace(b"{code}", str(code).encode()), {"Content-Type": "text/html"})
+        if form == "noblocks":
+            return (200, js({"success": True, "action": "guard-list", "count": 0}))
         raise ValueError(form)
 
     def healthy(self, test, step, method, key, doc):
@@ -433,10 +447,25 @@ class Copy:
                     "CONTEXT_DB_PASSWORD=test-noanswer-not-a-password\n")
         self.argv_log = os.path.join(self.dir, "curl-argv.log")
 
+    def unshimmed(self, path, spy=False):
+        """'' when docker, ctx and uv (and curl, with spy) resolve to this
+        copy's shims on path, else why not. On a TMPDIR mounted noexec the
+        shell skips a shim and runs the real program next on PATH — the real
+        ctx would talk to whatever server its default names."""
+        want = {n: os.path.join(self.shim, n) for n in ("docker", "ctx", "uv")}
+        if spy:
+            want["curl"] = os.path.join(self.dir, "spy", "curl")
+        for name, shim in want.items():
+            got = shutil.which(name, path=path)
+            if got != shim:
+                return (f"{name} resolves to {got}, not to the shim {shim} — is TMPDIR "
+                        f"({os.path.dirname(self.dir)}) mounted noexec? Set TMPDIR to a directory that allows exec.")
+        return ""
+
     def run(self, args, spy=False):
         env = {k: v for k, v in os.environ.items()
                if not k.lower().endswith("_proxy")
-               and not k.startswith(("CTX_", "CONTEXT_", "WEBHOOK_", "EVAL_", "OLLAMA_", "T25_", "PG"))}
+               and not k.startswith(("CTX_", "CONTEXT_", "WEBHOOK_", "EVAL_", "OLLAMA_", "T25_", "PG", "XDG_"))}
         env["PATH"] = self.shim + ":" + env.get("PATH", "/usr/bin:/bin")
         if spy:
             # A curl first on PATH that writes its arguments to argv_log and runs
@@ -450,6 +479,9 @@ class Copy:
         env["HOME"] = self.dir
         env["CURL_HOME"] = self.dir
         env["CTX_DB_CONTAINER"] = "test-noanswer-no-such-container"
+        wrong = self.unshimmed(env["PATH"], spy)
+        if wrong:
+            raise RuntimeError(wrong)
         return subprocess.run(["bash", os.path.join(self.dir, "test.sh")] + args, capture_output=True,
                               text=True, env=env, timeout=240, cwd=self.dir)
 
@@ -490,8 +522,11 @@ def run_case(work, args, pick=None, form=None, total_blocks=500, spy=False):
 MODES = {
     "gate": lambda t, s: t == "gate",
     "first": lambda t, s: s == 1 and t not in ("gate", "cleanup", "unknown"),
-    "later": lambda t, s: s >= 2 and t not in ("cleanup", "unknown"),
+    "step2": lambda t, s: s == 2 and t not in ("cleanup", "unknown"),
+    "step3": lambda t, s: s == 3 and t not in ("cleanup", "unknown"),
+    "step4": lambda t, s: s == 4 and t not in ("cleanup", "unknown"),
     "refusal": lambda t, s: (t, s) in REFUSAL_STEPS,
+    "guardlist": lambda t, s: (t, s) in (("T04", 1), ("T09", 1)),
     "mcp": lambda t, s: t in ("T17", "T18"),
 }
 
@@ -501,13 +536,19 @@ def table(name, res):
 
 
 def main(work):
+    probe = Copy(work, 9)
+    wrong = probe.unshimmed(probe.shim + ":" + os.environ.get("PATH", "/usr/bin:/bin"))
+    check(not wrong, "the shims run instead of docker, ctx and uv", wrong)
+    if wrong:
+        return
     plan = [("healthy", ["--with-ollama"], None, None, 500, True),
             ("healthy-system", [], None, None, 500, False),
             ("small-corpus", ["--with-ollama"], None, None, 50, False)]
-    for mode in ("gate", "first", "later", "refusal"):
+    for mode in ("gate", "first", "step2", "step3", "step4", "refusal"):
         for form in FORMS:
             plan.append((f"{mode}/{form}", ["--with-ollama"], MODES[mode], form, 500, False))
     plan.append(("refusal/foreign", ["--with-ollama"], MODES["refusal"], "foreign", 500, False))
+    plan.append(("guardlist/noblocks", ["--with-ollama"], MODES["guardlist"], "noblocks", 500, False))
     plan.append(("mcp/hang", ["--with-ollama"], MODES["mcp"], "hang", 500, False))
     with ThreadPoolExecutor(max_workers=4) as pool:
         futs = {name: pool.submit(run_case, work, args, pick, form, tb, spy) for name, args, pick, form, tb, spy in plan}
@@ -557,12 +598,17 @@ def main(work):
               f"{form}: each FAIL names the missing answer; T07 and T10 (no request) unaffected",
               f"unnamed={[r.lines.get(t) for t in unnamed][:3]}")
 
-    print("--- 5. the follow-up requests without an answer")
-    for form in FORMS:
-        r = res[f"later/{form}"]
-        got = {t: r.verdicts.get(t) for t in LATER_TESTS}
-        check(r.rc == 1 and got == {t: "FAIL" for t in LATER_TESTS}, f"{form}: {', '.join(LATER_TESTS)} FAIL, rc 1",
-              f"rc={r.rc} got={got}")
+    print("--- 5. the follow-up requests without an answer, one step at a time")
+    for step, tests in LATER_STEPS.items():
+        for form in FORMS:
+            r = res[f"step{step}/{form}"]
+            got = {t: r.verdicts.get(t) for t in tests}
+            check(r.rc == 1 and got == {t: "FAIL" for t in tests},
+                  f"step {step}, {form}: {', '.join(tests)} FAIL, rc 1", f"rc={r.rc} got={got}")
+    r = res["guardlist/noblocks"]
+    got = {t: r.verdicts.get(t) for t in ("T04", "T09")}
+    check(r.rc == 1 and got == {"T04": "FAIL", "T09": "FAIL"},
+          "guard-list answering success:true without a blocks list: T04 and T09 FAIL", f"rc={r.rc} got={got}")
 
     print("--- 6. the refusal steps")
     for form in FORMS + ("foreign",):

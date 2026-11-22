@@ -407,8 +407,10 @@ The script gates run without a ctx server, without `.env` and without firing a q
 a real one — `eval-noanswer_test.sh` runs copies of both harnesses against servers it
 starts on 127.0.0.1 with a throwaway key (python3 and curl; `eval-temporal.sh` behind a
 `docker` shim), `test-noanswer_test.sh` does the same for `test.sh` (shims for `docker`,
-`ctx` and `uv`; every test's requests answered empty, 500, 401 or `success:false` in
-turn). `eval-instrument_test.sh` brings its golden inputs along
+`ctx` and `uv`; the corpus gate, every test's first request, each follow-up step and
+each refusal step answered empty, 500, 401 or `success:false` in turn; it stops before
+the first run when `TMPDIR` is mounted `noexec`, where the shell would skip the shims and
+run the real programs). `eval-instrument_test.sh` brings its golden inputs along
 (`scripts/testdata/eval-results-golden*.json`, two results `eval.sh` wrote: one of the
 current shape, one from before `not_measured`) instead of taking whatever lies in
 `.eval-results/`, so its golden runs in CI too; `EVAL_GOLDEN_RESULTS` adds one more
