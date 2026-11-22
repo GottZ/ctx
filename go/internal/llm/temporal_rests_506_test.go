@@ -76,6 +76,7 @@ func TestRules_AnEllipticPerfekt(t *testing.T) {
 		"Bug am Montag gefixt?":            next506["montag"],
 		"am Montag Release freigegeben?":   next506["montag"],
 		"Montag Wartungsfenster geöffnet?": next506["montag"],
+		"am Freitag was geplant?":          next506["freitag"],
 		// A finite verb the rules do not know opens the clause, or the
 		// form is the present right behind the interrogative.
 		"Kriegen wir am Montag was gefixt?":                next506["montag"],
@@ -137,6 +138,8 @@ func TestRules_TheGermanSimplePastByItsPlace(t *testing.T) {
 		"Was steht am Montag auf der Karte?":             next506["montag"],
 		"Welche Daten brauchen wir am Freitag?":          next506["freitag"],
 		"Wann ist die Deadline für die Route am Montag?": next506["montag"],
+		"Was Pakete am Montag angeht, ist alles klar?":   next506["montag"],
+		"wo finde ich am montag die route":               next506["montag"],
 		// The present of a verb on -t: the stem on -ei or -ie, or a listed form.
 		"Was bereiten wir am Montag vor?":            next506["montag"],
 		"Welche Tests bewerten wir am Freitag?":      next506["freitag"],
@@ -272,4 +275,24 @@ func TestRules_TheHandoverRests(t *testing.T) {
 		"haben wir am montag einen bericht": next506["montag"],
 		"haben wir am montag deployed":      last506["montag"],
 	})
+}
+
+// TestDetectVerbTense_TheClauseOfTheFirstDate (point 2): the tense of a
+// whole question is the tense its first date word counts by, so that a
+// clause that frames the question does not decide for the clause that asks
+// ("Ich habe vergessen, …": the Perfekt of the frame made the whole question
+// past; its asking clause is neutral, the coming Monday).
+func TestDetectVerbTense_TheClauseOfTheFirstDate(t *testing.T) {
+	for q, want := range map[string]string{
+		"I need to know which commits landed on Monday":             "past",
+		"Ich habe vergessen, was am Montag ansteht.":                "neutral",
+		"Can you check whether someone wiped the cache on Tuesday?": "past",
+		"Weißt du noch, was wir am Montag beschlossen haben?":       "past",
+		"Was haben wir gestern gemacht?":                            "past",
+		"Wie funktioniert der Cache?":                               "neutral",
+	} {
+		if got := DetectVerbTense(q); got != want {
+			t.Errorf("DetectVerbTense(%q) = %q, want %q", q, got, want)
+		}
+	}
 }
