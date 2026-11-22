@@ -161,7 +161,9 @@ func TestTransitionTableFunctionsRunWithoutJit(t *testing.T) {
 
 // transitionQueries marks the plans of the transition table queries in an
 // auto_explain notice: the block counters of 170, the guard counter of 177,
-// the project delete notification.
+// the project delete notification. The guard counter (mark_guard_dirty) left
+// the schema with migration 181 (issue #341): a database at head runs no
+// plan of it, one at 179 does (TestMigration180ReplansABackendThatKeptJit).
 var transitionQueries = []string{
 	"INSERT INTO context_block_count_deltas",
 	"IS DISTINCT FROM 'index'",
@@ -312,9 +314,13 @@ func TestTransitionTablePlansDoNotKeepJit(t *testing.T) {
 	for _, n := range compiled {
 		t.Errorf("a one-row write on a backend whose first statement of its kind was compiled compiles again:\n%s", n)
 	}
-	// update: counters + guard; insert: counters + guard; delete: counters + project notification.
-	if seen[transitionQueries[0]] != 3 || seen[transitionQueries[1]] != 2 || seen[transitionQueries[2]] != 1 {
-		t.Fatalf("plans of the transition table queries in the one-row writes: %v, want 3 / 2 / 1", seen)
+	// update: counters; insert: counters; delete: counters + project
+	// notification. No guard counter: migration 181 dropped it. The count of
+	// 2 this line wanted until then went stale unseen, as the test skips on
+	// the CI image (no JIT); on the production image it failed at 3 / 0 / 1
+	// with no compiled plan (issue #485).
+	if seen[transitionQueries[0]] != 3 || seen[transitionQueries[1]] != 0 || seen[transitionQueries[2]] != 1 {
+		t.Fatalf("plans of the transition table queries in the one-row writes: %v, want 3 / 0 / 1", seen)
 	}
 }
 
