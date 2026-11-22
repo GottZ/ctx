@@ -1344,7 +1344,8 @@ statement. Refused:
   `pg_stat_get_mod_since_analyze`); the TimescaleDB estimates and sizes of a hypertable
   (`approximate_row_count`, `hypertable_size`, `hypertable_detailed_size`,
   `hypertable_approximate_size`, `hypertable_approximate_detailed_size`, `hypertable_index_size`,
-  `chunks_detailed_size`); and `EXPLAIN`, the planner's estimate;
+  `chunks_detailed_size`); and `EXPLAIN` as a command, the planner's estimate (followed by its
+  options or the statement it plans; a column named `explain` is none);
 - `reltuples` and `relpages` in a statement that names `pg_class`, or qualified by a name that is
   no relation of the statement (`r.reltuples`, `(r).reltuples`: a row variable, whatever filled
   it). A column of that name in a user table is no read of the catalog: unqualified, or qualified

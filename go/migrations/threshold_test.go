@@ -34,7 +34,9 @@ import (
 //     hypertable (approximate_row_count, hypertable_size,
 //     hypertable_detailed_size, hypertable_approximate_size,
 //     hypertable_approximate_detailed_size, hypertable_index_size,
-//     chunks_detailed_size); and EXPLAIN, the planner's estimate;
+//     chunks_detailed_size); and EXPLAIN as a command, the planner's estimate
+//     (followed by its options or the statement it plans; a column named
+//     explain is none);
 //   - the pg_class columns reltuples and relpages, in a statement that names
 //     pg_class, or qualified by a name that is no relation of the statement
 //     (r.reltuples, (r).reltuples: a row variable, whatever filled it);
@@ -90,13 +92,17 @@ var (
 	migrationVersion = regexp.MustCompile(`^(\d+)_.*\.sql$`)
 	// sizeCall is a name that reads a table's size by itself: the file
 	// sizes, the statistics views, the statistics functions that count a
-	// table's tuples, the TimescaleDB estimates and sizes of a hypertable,
-	// and EXPLAIN.
+	// table's tuples and the TimescaleDB estimates and sizes of a
+	// hypertable. EXPLAIN is explainCommand.
 	sizeCall = regexp.MustCompile(`^(pg_relation_size|pg_total_relation_size|pg_table_size|pg_indexes_size|` +
 		`pg_stat_(xact_)?(all|user|sys)_tables|` +
 		`pg_stat_get_(live_tuples|dead_tuples|(xact_)?tuples_(inserted|deleted)|ins_since_vacuum|mod_since_analyze)|` +
-		`approximate_row_count|hypertable_(detailed_|approximate_|approximate_detailed_|index_)?size|chunks_detailed_size|` +
-		`explain)$`)
+		`approximate_row_count|hypertable_(detailed_|approximate_|approximate_detailed_|index_)?size|chunks_detailed_size)$`)
+	// explainCommand is what follows EXPLAIN as a command — its option list
+	// or the statement it plans; after any other token "explain" is a name.
+	explainCommand = map[string]bool{"(": true, "analyze": true, "analyse": true, "verbose": true, "select": true,
+		"with": true, "values": true, "table": true, "insert": true, "update": true, "delete": true, "merge": true,
+		"execute": true, "create": true, "declare": true}
 	// catalogColumn is a column of pg_class that holds a size; the same name
 	// in a user table is no read of it.
 	catalogColumn = map[string]bool{"reltuples": true, "relpages": true}
@@ -632,6 +638,10 @@ func sizeDecisionIn(stmt []sqlToken) string {
 			if catalogColumn[w] && (catalog || qualifiedByRow(stmt, i)) {
 				return "reads pg_class." + w
 			}
+		}
+		if isWordAt(stmt, i, "explain") && i+1 < len(stmt) && (stmt[i+1].kind == tWord || stmt[i+1].kind == tOther) &&
+			explainCommand[stmt[i+1].text] {
+			return "reads the planner's estimate (EXPLAIN)"
 		}
 	}
 	for _, m := range countEveryRow.FindAllStringSubmatch(joinTokens(stmt), -1) {
@@ -1206,6 +1216,14 @@ $do$;
 	{class: "never covered", refuse: true, name: "the planner's estimate through EXPLAIN decides",
 		src: inDo(`    EXECUTE 'EXPLAIN (FORMAT JSON) SELECT 1 FROM public.context_blocks' INTO v_plan;
     v_rows := (v_plan->0->'Plan'->>'Plan Rows')::bigint;`)},
+	{class: "never covered", refuse: true, name: "EXPLAIN as the query of a FOR loop",
+		src: inDo(`    FOR v_plan IN EXPLAIN SELECT 1 FROM public.context_blocks LOOP
+        v_rows := v_rows + 1;
+    END LOOP;`)},
+	{class: "pin", name: "a column named explain",
+		src: "CREATE TABLE migration_notes (id bigint PRIMARY KEY, explain text);\n" +
+			inDo(`    SELECT count(explain) INTO v_rows FROM migration_notes WHERE id > 0;
+    UPDATE migration_notes SET explain = 'checked' WHERE explain IS NULL;`)},
 
 	// Limits: a name an author spells to get past the gate, and a read the
 	// gate would have to follow through the file. These pass; the head of
