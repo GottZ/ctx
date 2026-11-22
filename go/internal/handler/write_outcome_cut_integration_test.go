@@ -949,6 +949,30 @@ func TestWriteOutcomeCutRemainingPaths(t *testing.T) {
 			fmt.Sprintf(`{"action":"issue-comment-create","data":{"parent_id":%q,"content":"i483 cut rest comment"}}`, issueID), "issue-comment-create error")
 		f.waitLanded(t, `SELECT count(*)::int FROM context_blocks WHERE content = 'i483 cut rest comment'`)
 	})
+	var linkTarget string
+	t.Run("manage issue-link-create", func(t *testing.T) {
+		ar, err := auth.AuthenticateRaw(ctx, f.direct, f.plain)
+		if err != nil || !ar.IsValid {
+			t.Fatalf("authenticate fixture key: %v", err)
+		}
+		_, resp := callManage(t, NewManageHandler(f.direct, nil, nil, nil, nil, nil, nil, f.reg), ar, "issue-create", "",
+			map[string]any{"title": "i483 cut link target"})
+		issue, _ := resp["issue"].(map[string]any)
+		linkTarget, _ = issue["id"].(string)
+		if linkTarget == "" {
+			t.Fatalf("seed link target: %v", resp)
+		}
+		f.cutREST(t, manage, f.plain, "context_structural_links", "/api/manage",
+			fmt.Sprintf(`{"action":"issue-link-create","data":{"source_id":%q,"target_id":%q,"link_class":"references"}}`, issueID, linkTarget),
+			"issue-link-create error")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_structural_links WHERE source_block_id = $1::uuid AND target_block_id = $2::uuid`, issueID, linkTarget)
+	})
+	t.Run("manage issue-link-delete", func(t *testing.T) {
+		f.cutREST(t, manage, f.plain, "context_structural_links", "/api/manage",
+			fmt.Sprintf(`{"action":"issue-link-delete","data":{"source_id":%q,"target_id":%q,"link_class":"references"}}`, issueID, linkTarget),
+			"issue-link-delete error")
+		f.waitLanded(t, `SELECT (count(*) = 0)::int FROM context_structural_links WHERE source_block_id = $1::uuid AND target_block_id = $2::uuid`, issueID, linkTarget)
+	})
 	t.Run("project issue create", func(t *testing.T) {
 		var projectID string
 		if err := f.direct.QueryRow(ctx, `INSERT INTO context_projects (tenant_id, scope, identity) VALUES ($1::uuid, 'private', 'i483-cut') RETURNING id::text`,

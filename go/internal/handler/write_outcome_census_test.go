@@ -63,6 +63,7 @@ var storeWrites = []string{
 	"GuardResolve", "GuardResolveBatch", "DreamLinkResolve", "PurgeScope", "InsertChunk",
 	"InsertIssueBlock", "UpdateIssueBlock", "InsertCommentBlock",
 	"StagePendingWrite", "UpsertBlob", "UpdateBlobBlockRef", "DeleteBlob",
+	"PutStructuralLink", "DeleteStructuralLink",
 }
 
 // writesWithoutOutcome counts, per file, the write calls whose failure line
@@ -744,5 +745,33 @@ func namedInClosure(ctx context.Context) {
 	want := []int{6, 19, 28, 36, 43, 51, 55, 59, 63, 86}
 	if c.calls != 13 || !slices.Equal(lines, want) {
 		t.Fatalf("census = %d calls, unnamed at lines %v; want 13 calls, unnamed at %v", c.calls, lines, want)
+	}
+}
+
+// TestWriteOutcomeCensusFollowsTheIssueLinkRoutes — the structural-link
+// writes of manage issue-link-create and issue-link-delete run in a function
+// literal (inIssueTx); the census follows each to the route's failure line and
+// finds write_outcome there (issue #483).
+func TestWriteOutcomeCensusFollowsTheIssueLinkRoutes(t *testing.T) {
+	fset := token.NewFileSet()
+	files := parsePackage(t, fset)
+	writes := map[string]bool{}
+	for _, n := range storeWrites {
+		writes[n] = true
+	}
+	pkgFuncs := packageFuncs(files)
+	named := map[string]int{}
+	for _, f := range files {
+		if filepath.Base(fset.Position(f.Pos()).Filename) != "context_manage_issues.go" {
+			continue
+		}
+		for _, call := range censusFile(fset, f, writes, pkgFuncs).followed {
+			named[call]++
+		}
+	}
+	for _, fn := range []string{"PutStructuralLink", "DeleteStructuralLink"} {
+		if named[fn] != 1 {
+			t.Errorf("census followed store.%s to a named failure line %d times in context_manage_issues.go, want 1 (followed: %v)", fn, named[fn], named)
+		}
 	}
 }
