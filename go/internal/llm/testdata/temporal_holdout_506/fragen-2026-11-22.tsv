@@ -1,0 +1,485 @@
+# Holdout of issue #506's pull request: questions with the expectation written for each before the diff was read (sha256 of the original list e279fdc428d7adf1), asked on 2026-11-22 at noon UTC.
+# Expected dates: "-" none, "*" any; otherwise alternatives split by " OR ", the dates of one alternative by ";", the readings of one date by "/". A date is YYYY-MM-DD, A..B, >=A, <=B or ~A..B (every date of the answer lies within A..B); M2026-03 is a month, Y2024 a year, WEP the past weekend, WEF the coming one, WEA either, LW last week, NW next week, NOV the running November, U+X until X ahead, U-X until X behind, S-X since X.
+# class, expected tense (past/future/neutral/any; not judged), expected rule (ja/nein/egal), expected dates, disputed (s or -), question, the dates of the rules at aa1354ea (v5.76.1) as JSON, or nil.
+A	past	ja	2026-11-20	-	Was haben wir am Freitag beschlossen?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]
+A	past	ja	2026-11-17	-	Was wurde am Dienstag eingespielt?	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]
+A	past	ja	2026-11-18	-	Welche Bugs fanden wir am Mittwoch?	[{"ref":"Mittwoch","date":"2026-11-18","end":null,"dir":"past"}]
+A	past	ja	2026-11-19	-	Woran arbeitete Damien am Donnerstag?	[{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]
+A	past	ja	2026-11-16	-	Wer reparierte am Montag den Guard?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]
+A	past	ja	M2026-03	-	Was hatten wir im März entschieden?	nil
+A	past	ja	2026-11-21	-	Welche Migration lief am Samstag?	[{"ref":"Samstag","date":"2026-11-21","end":null,"dir":"past"}]
+A	past	ja	WEP	-	Am Wochenende ist der Spark abgestürzt, warum?	[{"ref":"am Wochenende","date":"2026-11-21","end":"2026-11-22","dir":"past"}]
+A	past	ja	M2026-10	-	Was ging im Oktober schief?	nil
+A	past	ja	M2026-09	-	Was kam im September raus?	nil
+A	past	ja	2026-11-16..2026-11-18	-	Was ist von Montag bis Mittwoch passiert?	[{"ref":"von montag bis mittwoch passiert?","date":"2026-11-16","end":"2026-11-18","dir":"range"}]
+A	past	ja	2026-11-20;2026-11-21	-	Freitag eingespielt, Samstag kaputt – was war los?	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]
+A	past	ja	M2026-08	-	Was war im August mit dem Backup?	nil
+A	past	ja	2026-11-17	-	Wieso hat's am Dienstag gekracht?	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]
+A	past	ja	2026-11-18	-	Hab ich am Mittwoch den Key rotiert?	[{"ref":"Mittwoch","date":"2026-11-18","end":null,"dir":"past"}]
+A	past	ja	2026-11-20	-	Was hamma am Freitag gemacht?	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]
+A	past	ja	2026-11-16	-	was is am montag passiert	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]
+A	past	ja	2026-11-22/2026-11-15	-	Wann genau wurde der Index am Sonntag neu gebaut?	[{"ref":"Sonntag","date":"2026-11-15","end":null,"dir":"past"}]
+A	past	ja	2026-11-16	-	Nachdem wir am Montag migriert hatten, was fiel aus?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]
+A	past	ja	M2026-07	-	Was wurde im Juli repariert?	nil
+A	past	ja	M2026-01	-	Welche Tickets wurden im Januar geschlossen?	nil
+A	past	ja	2026-11-17	-	Die Tests liefen am Dienstag rot. Warum?	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]
+A	past	ja	2026-11-19	-	Warum stürzte der Daemon am Donnerstag ab?	[{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]
+A	past	ja	M2026-02	-	Was brachte das Update im Februar?	nil
+A	past	ja	2026-11-20	-	Welche Entscheidung fiel am Freitag?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]
+A	past	ja	2026-11-21	-	Woran scheiterte der Rollout am Samstag	[{"ref":"Samstag","date":"2026-11-28","end":null,"dir":"future"}]
+A	past	ja	M2026-06	-	Was stand im Juni im Changelog?	nil
+A	past	ja	2026-11-18	-	Wer war am Mittwoch in Rufbereitschaft?	[{"ref":"Mittwoch","date":"2026-11-18","end":null,"dir":"past"}]
+A	past	ja	M2026-04	-	Was wussten wir im April über das Speicherleck?	nil
+A	past	ja	2026-11-16	-	Was mussten wir am Montag zurückrollen?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]
+A	past	ja	2026-11-17	-	Konnten wir am Dienstag den Fehler reproduzieren?	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]
+A	past	ja	M2026-05	-	Wurde im Mai schon auf PG18 migriert?	nil
+A	past	ja	2026-11-17..2026-11-19	-	Was war von Dienstag bis Donnerstag los?	[{"ref":"von dienstag bis donnerstag los?","date":"2026-11-17","end":"2026-11-19","dir":"range"}]
+A	past	ja	2026-11-16..2026-11-18	-	Zwischen Montag und Mittwoch – welche Änderungen wurden zusammengeführt?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"},{"ref":"Mittwoch","date":"2026-11-18","end":null,"dir":"past"}]
+A	past	ja	2026-11-20	-	Letzten Freitag: was ist mit dem Cron passiert?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]
+A	past	ja	WEP	-	Was haben wir letztes Wochenende am Spark umgebaut?	[{"ref":"am Wochenende","date":"2026-11-21","end":"2026-11-22","dir":"past"}]
+A	past	ja	2026-11-17	-	Wurde am Dienstagabend noch was eingecheckt?	nil
+A	past	ja	2026-11-16	-	Was lief am Montagmorgen schief?	nil
+A	past	ja	2026-11-20/2026-11-20..2026-11-21/2026-11-21	-	Welche Alarme kamen Freitagnacht?	nil
+A	past	ja	M2026-10	-	Im Oktober hatte der Dream noch eine andere Schwelle, oder?	nil
+A	past	ja	M2026-09	-	Was hatte Damien im September vorgeschlagen?	nil
+A	past	ja	M2025-12	-	Was ist im Dezember aufgefallen?	nil
+A	past	ja	M2026-01	-	Was gab's im Januar für Releases?	nil
+A	past	ja	M2026-03	-	Wann wurde im März das Embedding getauscht	nil
+A	past	ja	2026-03-01..2026-05-31	-	Was wurde zwischen März und Mai alles umgebaut?	nil
+A	past	ja	2026-09-01..2026-10-31	-	Von September bis Oktober lief das Benchmarking – mit welchem Ergebnis?	[{"ref":"von september bis oktober lief das","date":"2026-09-01","end":"2026-10-31","dir":"range"}]
+A	past	ja	2026-11-20	-	Was ist am Freitag rausgegangen	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]
+A	past	ja	2026-11-16;2026-11-17	-	Am Montag repariert, am Dienstag wieder kaputt?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]
+A	past	ja	2026-11-19	-	Was schrieb Jan am Donnerstag ins Issue?	[{"ref":"Donnerstag","date":"2026-11-19","end":null,"dir":"past"}]
+A	past	ja	2026-11-21	-	Wie verlief die Migration am Samstag?	[{"ref":"Samstag","date":"2026-11-28","end":null,"dir":"future"}]
+A	past	ja	M2026-08	-	Was bewirkte der Patch im August?	nil
+A	past	ja	M2026-07	-	Hatten wir im Juli nicht schon mal das Problem?	nil
+A	past	ja	2026-11-21	-	das backup am samstag lief durch oder?	[{"ref":"Samstag","date":"2026-11-21","end":null,"dir":"past"}]
+A	past	ja	2026-11-17	-	was wurd am dienstag gemacht	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]
+A	past	ja	2026-11-18	-	Welche Config wurde am Mitwoch geändert?	nil
+A	past	ja	2026-11-19	-	Welche Mails gingen am Donnerstag raus?	[{"ref":"Donnerstag","date":"2026-11-19","end":null,"dir":"past"}]
+A	past	ja	M2025-12	-	Im Dezember wurden die Backups verschlüsselt, oder?	nil
+A	past	ja	2026-11-21	-	Samstag hats den Spark zerlegt	[{"ref":"Samstag","date":"2026-11-28","end":null,"dir":"future"}]
+A	past	ja	2026-11-20	-	Am Freitag war der Guard aus?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]
+A	past	ja	M2026-10	-	Welche Blöcke wurden im Oktober archiviert?	nil
+B	future	ja	2026-11-27	-	Was steht am Freitag an?	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]
+B	future	ja	2026-11-24	-	Was spielen wir am Dienstag ein?	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]
+B	future	ja	2026-11-23	-	Wer übernimmt am Montag die Rufbereitschaft?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]
+B	future	ja	2026-11-28	-	Welche Migration läuft am Samstag?	[{"ref":"Samstag","date":"2026-11-28","end":null,"dir":"future"}]
+B	future	ja	2026-11-25	-	Wird am Mittwoch gewartet?	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]
+B	future	ja	M2026-12	-	Was werden wir im Dezember veröffentlichen?	nil
+B	future	ja	M2027-03	-	Was ist für März geplant?	nil
+B	future	ja	2026-11-26	-	Ist der Termin am Donnerstag abgesagt?	[{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]
+B	future	ja	2026-11-27	-	Sollten wir am Freitag nochmal neu starten?	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]
+B	future	ja	M2027-01	-	Könnten wir im Januar auf Go 1.26 gehen?	nil
+B	future	ja	2026-11-28	-	Plane den Restore für Samstag ein	[{"ref":"Samstag","date":"2026-11-28","end":null,"dir":"future"}]
+B	future	ja	2026-11-23	-	Erinner mich am Montag an den Review	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]
+B	future	ja	U+2026-11-27	-	Was muss bis Freitag fertig sein?	[{"ref":"bis freitag fertig sein?","date":"2026-11-22","end":"2026-11-27","dir":"range"}]
+B	future	ja	2026-11-23..2026-11-25	-	Was passiert von Montag bis Mittwoch?	[{"ref":"von montag bis mittwoch?","date":"2026-11-23","end":"2026-11-25","dir":"range"}]
+B	future	ja	2026-11-24..2026-11-26	-	Welche Termine haben wir zwischen Dienstag und Donnerstag?	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"},{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]
+B	future	ja	WEF	-	Wer hat nächstes Wochenende Bereitschaft?	[{"ref":"am Wochenende","date":"2026-11-28","end":"2026-11-29","dir":"future"}]
+B	future	ja	M2027-02	-	Was kommt im Februar?	nil
+B	future	ja	M2027-01	-	Wird das Upgrade im Januar eingespielt?	nil
+B	future	ja	2026-11-24	-	Muss der Spark am Dienstag runter?	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]
+B	future	ja	2026-11-27	-	Darf ich am Freitag den Branch zusammenführen?	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]
+B	future	ja	2026-11-28	-	Kann der Bench am Samstag laufen?	[{"ref":"Samstag","date":"2026-11-28","end":null,"dir":"future"}]
+B	future	ja	2026-11-26	-	Wir treffen uns am Donnerstag – was ist die Agenda?	[{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]
+B	future	ja	M2027-03	-	Gibt es im März eine neue Version?	nil
+B	future	ja	M2027-04	-	Was ist im April fällig?	nil
+B	future	ja	M2026-12	-	Was liegt im Dezember an?	nil
+B	future	ja	2026-11-25	-	Welche Tickets sind für Mittwoch eingeplant?	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]
+B	future	ja	2026-11-23	-	Ist das Release am Montag freigegeben?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]
+B	future	ja	2026-11-24	-	Am Dienstag ist der Server gesperrt?	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]
+B	future	ja	2026-11-25	-	Wer moderiert die Runde am Mittwoch?	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]
+B	future	ja	2026-11-26..2026-11-28	-	Was steht von Donnerstag bis Samstag auf dem Plan?	[{"ref":"von donnerstag bis samstag auf dem","date":"2026-11-26","end":"2026-11-28","dir":"range"}]
+B	future	ja	M2027-01	-	Was sollten wir im Januar priorisieren?	nil
+B	future	ja	M2027-02	-	Könnte man den Umzug auf Februar legen?	nil
+B	future	ja	2026-11-27	-	Wäre Freitag ein guter Tag für das Major-Release?	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]
+B	future	ja	2026-11-23	-	Hätten wir am Montag Zeit für den Review?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]
+B	future	ja	2026-11-28	-	Würde ein Neustart am Samstag stören?	[{"ref":"Samstag","date":"2026-11-28","end":null,"dir":"future"}]
+B	future	ja	2026-11-26	-	Bitte am Donnerstag die Keys rotieren	[{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]
+B	future	ja	2026-11-23	-	Mach am Montag ein Backup vor der Migration	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]
+B	future	ja	M2026-12	-	Was ist der Plan für Dezember?	nil
+B	future	ja	M2027-01	-	Wie viel RAM brauchen wir im Januar?	nil
+B	future	ja	2026-11-27	-	Steht am Freitag ein Release an oder nicht	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]
+B	future	ja	2026-11-25	-	Fällt das Standup am Mittwoch aus?	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]
+B	future	ja	M2026-12	-	Wird im Dezember noch was zusammengeführt?	nil
+B	future	ja	2026-11-28	-	Läuft der Dream am Samstag?	[{"ref":"Samstag","date":"2026-11-28","end":null,"dir":"future"}]
+B	future	ja	U+2026-11-24	-	Bleibt der Cluster bis Dienstag gesperrt?	[{"ref":"bis dienstag gesperrt?","date":"2026-11-22","end":"2026-11-24","dir":"range"}]
+B	future	ja	M2027-06	-	Ist für Juni ein Hardware-Upgrade vorgesehen?	nil
+B	future	ja	M2027-03	-	wann kommt das update im märz	nil
+B	future	ja	2026-11-27	-	geht am freitag was live	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]
+B	future	ja	2026-11-22/2026-11-29	-	Soll das Backup am Sonntag laufen?	[{"ref":"Sonntag","date":"2026-11-29","end":null,"dir":"future"}]
+B	future	ja	2027-01-01..2027-03-31	-	Was erwartet uns von Januar bis März?	[{"ref":"von januar bis märz?","date":"2027-01-01","end":"2027-03-31","dir":"range"}]
+B	future	ja	2026-11-23..2026-11-25	-	Wird der Spark von Montag bis Mittwoch gebraucht?	[{"ref":"von montag bis mittwoch gebraucht?","date":"2026-11-23","end":"2026-11-25","dir":"range"}]
+B	future	ja	2026-11-24	-	Ist das Meeting am Dienstag verschoben?	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]
+B	future	ja	2026-11-26	-	Das Fenster am Donnerstag ist reserviert, oder?	[{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]
+B	future	ja	2026-11-27	-	Freitag wird eingefroren, richtig?	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]
+B	future	ja	2026-11-24	-	Dienstagabend Wartung – wer ist dabei?	nil
+C	past	ja	2026-11-20	-	What did we decide on Friday?	[{"ref":"Friday","date":"2026-11-20","end":null,"dir":"past"}]
+C	past	ja	2026-11-17	-	What was deployed on Tuesday?	[{"ref":"Tuesday","date":"2026-11-17","end":null,"dir":"past"}]
+C	past	ja	2026-11-16	-	Who fixed the guard on Monday?	[{"ref":"Monday","date":"2026-11-16","end":null,"dir":"past"}]
+C	past	ja	WEP	-	What broke last weekend?	[{"ref":"am Wochenende","date":"2026-11-21","end":"2026-11-22","dir":"past"}]
+C	past	ja	M2026-03	-	Which migrations ran in March?	nil
+C	past	ja	M2026-10	-	What had we planned for October before the outage?	nil
+C	past	ja	2026-11-18	-	Was the release on Wednesday blocked by CI?	[{"ref":"Wednesday","date":"2026-11-18","end":null,"dir":"past"}]
+C	past	ja	2026-11-16..2026-11-18	-	What happened from Monday to Wednesday?	[{"ref":"from monday to wednesday?","date":"2026-11-16","end":"2026-11-18","dir":"range"}]
+C	past	ja	2026-11-17..2026-11-19	-	Which PRs were merged between Tuesday and Thursday?	[{"ref":"Tuesday","date":"2026-11-17","end":null,"dir":"past"},{"ref":"Thursday","date":"2026-11-19","end":null,"dir":"past"}]
+C	past	ja	2026-11-21	-	Why did the daemon crash on Saturday?	[{"ref":"Saturday","date":"2026-11-21","end":null,"dir":"past"}]
+C	past	ja	M2026-09	-	What have we shipped in September?	nil
+C	past	ja	2026-11-19	-	What did Damien say on Thursday?	[{"ref":"Thursday","date":"2026-11-19","end":null,"dir":"past"}]
+C	past	ja	2026-11-21	-	the backup on saturday failed, why	[{"ref":"Saturday","date":"2026-11-21","end":null,"dir":"past"}]
+C	past	ja	2026-11-20	-	Was Friday's deploy rolled back?	nil
+C	past	ja	2026-11-16	-	What was the outcome of Monday's review?	nil
+C	past	ja	2026-11-18	-	Did the bench finish on Wednesday?	[{"ref":"Wednesday","date":"2026-11-18","end":null,"dir":"past"}]
+C	past	ja	M2026-08	-	What changed in August?	nil
+C	past	ja	2026-11-20	-	Who was on call last Friday?	[{"ref":"Friday","date":"2026-11-20","end":null,"dir":"past"}]
+C	past	ja	2026-11-19/2026-11-19..2026-11-20/2026-11-20	-	Which alerts fired Thursday night?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]
+C	past	ja	M2026-07	-	When we upgraded in July, what broke?	nil
+C	past	ja	2026-11-17	-	After we migrated on Tuesday, which tests failed?	[{"ref":"Tuesday","date":"2026-11-24","end":null,"dir":"future"}]
+C	past	ja	U-2026-11-20	-	What had been fixed by Friday?	[{"ref":"Friday","date":"2026-11-20","end":null,"dir":"past"}]
+C	past	ja	2026-11-22/2026-11-15	-	Were the logs rotated on Sunday?	[{"ref":"Sunday","date":"2026-11-15","end":null,"dir":"past"}]
+C	past	ja	M2026-06	-	What did we learn in June?	nil
+C	past	ja	M2026-01	-	Which tickets got closed in January?	nil
+C	past	ja	M2025-12	-	What went wrong in December?	nil
+C	past	ja	2026-11-16	-	What was Jan working on on Monday?	[{"ref":"Monday","date":"2026-11-16","end":null,"dir":"past"}]
+C	past	ja	M2026-02	-	What was released in February?	nil
+C	past	ja	M2026-10	-	What were the results of the bench in October?	nil
+C	past	ja	2026-11-17	-	Was it Tuesday when the index got corrupted?	[{"ref":"Tuesday","date":"2026-11-17","end":null,"dir":"past"}]
+C	past	ja	2026-11-21	-	What did the dream run produce on Saturday	[{"ref":"Saturday","date":"2026-11-21","end":null,"dir":"past"}]
+C	past	ja	2026-11-18	-	Who approved the PR on Wednesday?	[{"ref":"Wednesday","date":"2026-11-25","end":null,"dir":"future"}]
+C	past	ja	2026-11-19	-	Which config did we change on Thursday?	[{"ref":"Thursday","date":"2026-11-19","end":null,"dir":"past"}]
+C	past	ja	2026-03-01..2026-05-31	-	What was decided between March and May?	nil
+C	past	ja	2026-09-01..2026-10-31	-	From September to October we ran benchmarks; what were the numbers?	[{"ref":"from september to october we ran","date":"2026-09-01","end":"2026-10-31","dir":"range"}]
+C	past	ja	2026-11-16	-	What had broken before we rolled back on Monday?	[{"ref":"Monday","date":"2026-11-16","end":null,"dir":"past"}]
+C	past	ja	2026-11-20	-	Had the cert expired on Friday already?	[{"ref":"Friday","date":"2026-11-20","end":null,"dir":"past"}]
+C	past	ja	2026-11-20	-	what got deployed friday	[{"ref":"Friday","date":"2026-11-20","end":null,"dir":"past"}]
+C	past	ja	M2026-04	-	which version did we run in april	nil
+C	past	ja	2026-11-17	-	Was the cluster down on Tuesday morning?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]
+C	past	ja	2026-11-21	-	Who restarted spark on saturday night?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]
+C	past	ja	NOV	-	What issues were opened in November?	nil
+C	past	ja	2026-11-16/2026-11-09	-	What did we do last Monday?	[{"ref":"Monday","date":"2026-11-16","end":null,"dir":"past"}]
+C	past	ja	M2026-05	-	Didn't we already rotate keys in May?	nil
+C	past	ja	2026-11-18	-	How long did the migration take on Wednesday?	[{"ref":"Wednesday","date":"2026-11-18","end":null,"dir":"past"}]
+C	past	ja	2026-11-19	-	What was the root cause of the outage on Thursday?	[{"ref":"Thursday","date":"2026-11-19","end":null,"dir":"past"}]
+C	past	ja	2026-11-16	-	the tests were red on monday — why?	[{"ref":"Monday","date":"2026-11-16","end":null,"dir":"past"}]
+C	past	ja	2026-11-20	-	What was the state of the queue on Friday afternoon?	[{"ref":"nachmittags","date":"2026-11-22","end":null,"dir":"today","hour":15}]
+C	past	ja	M2026-03	-	We'd switched embedders in March, right?	nil
+C	past	ja	2026-11-20..2026-11-21	-	Which nodes were rebooted between Friday and Saturday?	[{"ref":"Friday","date":"2026-11-20","end":null,"dir":"past"},{"ref":"Saturday","date":"2026-11-21","end":null,"dir":"past"}]
+C	past	ja	M2026-08;M2026-09 OR 2026-08-01..2026-09-30	-	What did we ship in August and September?	nil
+C	past	ja	2026-11-17	-	Tuesday's incident — what was the trigger?	nil
+D	future	ja	2026-11-27	-	What's planned for Friday?	[{"ref":"Friday","date":"2026-11-27","end":null,"dir":"future"}]
+D	future	ja	2026-11-24	-	What will we deploy on Tuesday?	[{"ref":"Tuesday","date":"2026-11-24","end":null,"dir":"future"}]
+D	future	ja	2026-11-23	-	Who is on call on Monday?	[{"ref":"Monday","date":"2026-11-23","end":null,"dir":"future"}]
+D	future	ja	M2026-12	-	Are we going to migrate in December?	nil
+D	future	ja	2026-11-25	-	Is the maintenance on Wednesday cancelled?	[{"ref":"Wednesday","date":"2026-11-18","end":null,"dir":"past"}]
+D	future	ja	2026-11-28	-	Will the bench run on Saturday?	[{"ref":"Saturday","date":"2026-11-28","end":null,"dir":"future"}]
+D	future	ja	U+2026-11-27	-	What should be done by Friday?	[{"ref":"Friday","date":"2026-11-27","end":null,"dir":"future"}]
+D	future	ja	2026-11-23..2026-11-25	-	What happens from Monday to Wednesday?	[{"ref":"from monday to wednesday?","date":"2026-11-23","end":"2026-11-25","dir":"range"}]
+D	future	ja	2026-11-26	-	We're upgrading on Thursday, what's the checklist?	[{"ref":"Thursday","date":"2026-11-26","end":null,"dir":"future"}]
+D	future	ja	2026-11-23	-	Is the release on Monday blocked?	[{"ref":"Monday","date":"2026-11-23","end":null,"dir":"future"}]
+D	future	ja	2026-11-27	-	Is the deploy scheduled for Friday?	[{"ref":"Friday","date":"2026-11-27","end":null,"dir":"future"}]
+D	future	ja	M2027-03	-	What's coming in March?	nil
+D	future	ja	M2027-01	-	Will the keys be rotated in January?	nil
+D	future	ja	2026-11-28	-	Can the index be rebuilt on Saturday?	[{"ref":"Saturday","date":"2026-11-28","end":null,"dir":"future"}]
+D	future	ja	2026-11-24	-	Should we pause the dream on Tuesday?	[{"ref":"Tuesday","date":"2026-11-24","end":null,"dir":"future"}]
+D	future	ja	M2027-02	-	What's due in February?	nil
+D	future	ja	2026-11-26	-	Who's presenting on Thursday?	[{"ref":"Thursday","date":"2026-11-26","end":null,"dir":"future"}]
+D	future	ja	2026-11-27/2026-12-04	-	next friday deploy checklist	[{"ref":"Friday","date":"2026-11-27","end":null,"dir":"future"}]
+D	future	ja	2026-11-23	-	Remind me on Monday to review PR 506	[{"ref":"Monday","date":"2026-11-23","end":null,"dir":"future"}]
+D	future	ja	2026-11-25	-	Is Wednesday's standup moved?	nil
+D	future	ja	2026-11-26..2026-11-29	-	Are we freezing merges from Thursday to Sunday?	[{"ref":"from thursday to sunday?","date":"2026-11-26","end":"2026-11-29","dir":"range"}]
+D	future	ja	U+2026-11-24	-	Which tickets are blocked until Tuesday?	[{"ref":"until tuesday?","date":"2026-11-22","end":"2026-11-24","dir":"range"}]
+D	future	ja	2026-11-27	-	Is the cluster reserved on Friday?	[{"ref":"Friday","date":"2026-11-27","end":null,"dir":"future"}]
+D	future	ja	M2026-12	-	What's the plan for December?	nil
+D	future	ja	M2027-01	-	Will there be a release in January?	nil
+D	future	ja	2026-11-28	-	Are the logs going to be archived on Saturday?	[{"ref":"Saturday","date":"2026-11-28","end":null,"dir":"future"}]
+D	future	ja	2026-11-23;2026-11-24	-	Do we deploy on Monday or Tuesday?	[{"ref":"Monday","date":"2026-11-23","end":null,"dir":"future"},{"ref":"Tuesday","date":"2026-11-24","end":null,"dir":"future"}]
+D	future	ja	2026-11-25	-	Is the meeting on Wednesday still on?	[{"ref":"Wednesday","date":"2026-11-25","end":null,"dir":"future"}]
+D	future	ja	U+2026-11-26	-	What must be finished before Friday?	[{"ref":"Friday","date":"2026-11-20","end":null,"dir":"past"}]
+D	future	ja	M2027-03	-	Could we move the upgrade to March?	nil
+D	future	ja	2026-11-26	-	Would Thursday work for the rollout?	[{"ref":"Thursday","date":"2026-11-26","end":null,"dir":"future"}]
+D	future	ja	2026-11-23..2026-11-25	-	Is spark needed between Monday and Wednesday?	[{"ref":"Monday","date":"2026-11-23","end":null,"dir":"future"},{"ref":"Wednesday","date":"2026-11-25","end":null,"dir":"future"}]
+D	future	ja	2026-11-27	-	Let's ship it on Friday	[{"ref":"Friday","date":"2026-11-27","end":null,"dir":"future"}]
+D	future	ja	2026-11-28	-	Please schedule the restore for Saturday	[{"ref":"Saturday","date":"2026-11-28","end":null,"dir":"future"}]
+D	future	ja	2026-11-24	-	Who is going to review on Tuesday?	[{"ref":"Tuesday","date":"2026-11-24","end":null,"dir":"future"}]
+D	future	ja	2026-11-28	-	What's running this Saturday?	[{"ref":"Saturday","date":"2026-11-28","end":null,"dir":"future"}]
+D	future	ja	2026-11-24	-	When is the next dream run, Tuesday?	[{"ref":"Tuesday","date":"2026-11-24","end":null,"dir":"future"}]
+D	future	ja	2026-11-26	-	Is the window on Thursday reserved for the migration?	[{"ref":"Thursday","date":"2026-11-26","end":null,"dir":"future"}]
+D	future	ja	2026-11-23	-	Does the cron fire on Monday?	[{"ref":"Monday","date":"2026-11-23","end":null,"dir":"future"}]
+D	future	ja	M2027-04	-	what's happening in april	nil
+D	future	ja	M2027-06	-	Will the old API be removed in June?	nil
+D	future	ja	2026-11-25	-	Is the hotfix going out on Wednesday?	[{"ref":"Wednesday","date":"2026-11-25","end":null,"dir":"future"}]
+D	future	ja	2026-11-27	-	Are we blocked on Friday by the freeze?	[{"ref":"Friday","date":"2026-11-27","end":null,"dir":"future"}]
+D	future	ja	2026-11-28..2026-11-30	-	Is the data center offline from Saturday to Monday?	[{"ref":"from saturday to monday?","date":"2026-11-28","end":"2026-11-30","dir":"range"}]
+D	future	ja	2026-11-22/2026-11-29	-	Should the backup run on Sunday?	[{"ref":"Sunday","date":"2026-11-29","end":null,"dir":"future"}]
+D	future	ja	M2026-12	-	Must the cert be renewed in December?	nil
+D	future	ja	U+2026-11-23	-	What needs to be ready by Monday?	[{"ref":"Monday","date":"2026-11-23","end":null,"dir":"future"}]
+D	future	ja	2026-11-26	-	The demo is scheduled for Thursday, right?	[{"ref":"Thursday","date":"2026-11-26","end":null,"dir":"future"}]
+D	future	ja	M2027-02	-	Can we expect the fix in February?	nil
+D	future	ja	2026-11-23/2026-11-30	-	Who will be presenting next Monday?	[{"ref":"Monday","date":"2026-11-23","end":null,"dir":"future"}]
+D	future	ja	WEA	-	Is the build pipeline frozen during the weekend?	[{"ref":"am Wochenende","date":"2026-11-28","end":"2026-11-29","dir":"future"}]
+D	future	ja	2026-11-24	-	Tuesday maintenance is cancelled?	[{"ref":"Tuesday","date":"2026-11-17","end":null,"dir":"past"}]
+E	past	ja	2026-11-20	-	Was haben wir am Freitag deployed?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]
+E	past	ja	2026-11-16	-	Wurde der Fix am Montag gemerged?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]
+E	past	ja	2026-11-21	-	Wer hat am Samstag den Cluster gerebootet?	[{"ref":"Samstag","date":"2026-11-21","end":null,"dir":"past"}]
+E	future	ja	2026-11-24	-	Wann wird das Feature am Dienstag geshipped?	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]
+E	future	ja	2026-11-26	-	Wir deployen am Donnerstag, passt das?	[{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]
+E	past	ja	M2026-10	-	Haben wir im Oktober das Schema gerefactored?	nil
+E	past	ja	2026-11-18	-	Ist der Hotfix am Mittwoch gepusht worden?	[{"ref":"Mittwoch","date":"2026-11-18","end":null,"dir":"past"}]
+E	future	ja	2026-11-27	-	Lass uns am Freitag releasen	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]
+E	past	ja	2026-11-20	-	Was haben wir last Friday gefixt?	[{"ref":"Friday","date":"2026-11-20","end":null,"dir":"past"}]
+E	future	ja	2026-11-23/2026-11-30	-	next Monday deployen wir die neue Version	[{"ref":"Monday","date":"2026-11-23","end":null,"dir":"future"}]
+E	past	ja	2026-11-16	-	Das Meeting am Montag wurde gecancelt	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]
+E	future	ja	2026-11-23	-	Wird das Meeting am Montag gecancelt?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]
+E	past	ja	M2026-09	-	Welche Branches wurden im September gelöscht und welche gerebased?	nil
+E	past	ja	2026-11-17	-	Hat jemand am Dienstag die Pipeline getriggert?	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]
+E	future	ja	2026-11-25	-	Wer committet am Mittwoch die Config?	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]
+E	past	ja	2026-11-21	-	Der Cron hat am Samstag nicht gefired	[{"ref":"Samstag","date":"2026-11-21","end":null,"dir":"past"}]
+E	past	ja	M2026-03	-	Wurde im März das Model gefinetuned?	nil
+E	past	ja	2026-11-18	-	Warum crashte der Container am Mittwoch?	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]
+E	past	ja	2026-11-16;2026-11-18	-	Am Montag gelauncht, am Mittwoch gerollbackt – warum?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]
+E	future	ja	2026-11-24	-	Wir müssen am Dienstag noch upgraden	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]
+E	future	ja	M2026-12	-	Was wird im Dezember gesunsettet?	nil
+E	past	ja	M2026-08	-	Wer hat im August den Key geleakt?	nil
+E	past	ja	WEP	-	Haben wir das Backup am Wochenende gechecked?	[{"ref":"am Wochenende","date":"2026-11-21","end":"2026-11-22","dir":"past"}]
+E	future	ja	2026-11-27	-	Was steht am Freitag im Sprint-Review an?	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]
+E	future	ja	2026-11-23	-	Kannst du am Montag das PR reviewen?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]
+E	past	ja	2026-11-19	-	Wurde am Donnerstag schon gemerget?	[{"ref":"Donnerstag","date":"2026-11-19","end":null,"dir":"past"}]
+E	past	ja	2026-11-17	-	Der Build ist am Dienstag gefailed, warum?	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]
+E	past	ja	M2026-07	-	Wann haben wir im Juli auf qwen gewitcht?	nil
+E	future	ja	2026-11-28	-	Wird der Spark am Samstag upgedated?	[{"ref":"Samstag","date":"2026-11-28","end":null,"dir":"future"}]
+E	past	ja	2026-11-18	-	Hast du am Mittwoch die Logs gegrept?	[{"ref":"Mittwoch","date":"2026-11-18","end":null,"dir":"past"}]
+E	past	ja	2026-11-20	-	Ich hab am Freitag den Container gekillt	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]
+E	future	ja	M2027-01	-	Wir sollten im Januar das Monitoring aufsetzen und alerts tunen	nil
+E	future	ja	2026-11-23	-	Ist das Release am Montag geblockt?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]
+E	past	ja	2026-11-16..2026-11-18	-	Welche Jobs wurden zwischen Montag und Mittwoch gequeued?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"},{"ref":"Mittwoch","date":"2026-11-18","end":null,"dir":"past"}]
+E	future	ja	2026-11-24..2026-11-26	-	Was deployen wir von Dienstag bis Donnerstag?	[{"ref":"von dienstag bis donnerstag?","date":"2026-11-24","end":"2026-11-26","dir":"range"}]
+E	past	ja	2026-11-20	-	Wer hat letzten Freitag das Deployment approved?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]
+E	future	ja	2026-11-28	-	Am Samstag wird der Index gerebuildet	[{"ref":"Samstag","date":"2026-11-28","end":null,"dir":"future"}]
+E	past	ja	M2026-06	-	Haben wir im Juni das Caching getuned?	nil
+E	past	ja	2026-11-17	-	Warum wurde am Dienstag der Job gekickt?	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]
+E	future	ja	2026-11-26;2026-11-27	-	Plan: am Donnerstag forken, am Freitag mergen	[{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]
+E	past	ja	M2026-05	-	Wer hat im Mai das Dashboard gebuildet?	nil
+E	future	ja	M2027-03	-	Werden wir im März auf die neue API migraten?	nil
+E	past	ja	2026-11-16	-	Der Alert hat am Montag getriggert, wer hat geackt?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]
+E	past	ja	M2026-04	-	Was haben wir im April gebencht?	nil
+E	future	ja	2026-11-25	-	Wird der Merge am Mittwoch gescheduled?	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]
+E	future	ja	2026-11-27	-	Am Freitag ist alles gefreezed	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]
+E	past	ja	2026-11-22/2026-11-15	-	Wer hat am Sonntag gedebuggt?	[{"ref":"Sonntag","date":"2026-11-15","end":null,"dir":"past"}]
+E	past	ja	M2026-01	-	Haben wir im Januar die Certs renewed?	nil
+E	past	ja	2026-11-17	-	die pipeline am dienstag hat gefailt	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]
+E	future	ja	2026-11-25	-	lass mal am mittwoch pairen	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]
+E	past	ja	2026-11-19	-	Habt ihr am Donnerstag schon gestaged?	[{"ref":"Donnerstag","date":"2026-11-19","end":null,"dir":"past"}]
+E	future	ja	M2027-02	-	Wird im Februar gesharded?	nil
+E	past	ja	2026-11-21	-	Wer hat am Samstag den Rollout gepaused?	[{"ref":"Samstag","date":"2026-11-21","end":null,"dir":"past"}]
+F	neutral	nein	-	-	Was passiert nach 2048 Retries?	nil
+F	neutral	nein	-	-	Warum bricht der Import ab 2000 Zeilen ab?	nil
+F	neutral	nein	-	-	Ab 2049 Verbindungen verweigert Postgres neue Clients	nil
+F	neutral	nein	-	-	Seit 2024 Blöcken ist die Suche langsamer	nil
+F	neutral	nein	-	-	Bis 2000 Tokens ist der Prompt noch okay?	nil
+F	neutral	nein	-	-	Bleibt die Latenz bis 2050 Requests pro Sekunde stabil?	nil
+F	neutral	nein	-	-	Nach 1999 Iterationen konvergiert der Optimizer nicht mehr	nil
+F	neutral	nein	-	-	Warum steigt der RAM-Verbrauch ab 2100 MB an?	nil
+F	neutral	nein	-	-	The health check fails after 2010 ms, why?	nil
+F	neutral	nein	-	-	Why does the import stall after 2048 rows?	nil
+F	neutral	nein	-	-	Does the queue drop messages before 2000 entries are reached?	nil
+F	neutral	nein	-	-	Latency is fine until 2047 concurrent users	nil
+F	neutral	nein	-	-	between 1995 and 2005 ms the p99 jumps	nil
+F	neutral	nein	-	-	from 2000 to 2050 tokens the model starts truncating	nil
+F	neutral	nein	-	-	Von 2000 bis 2048 Zeichen wird abgeschnitten?	nil
+F	neutral	nein	-	-	zwischen 2010 und 2020 Einträgen pro Batch	nil
+F	past	nein	-	-	Was hat sich nach PR 2031 geändert?	nil
+F	neutral	nein	-	-	Seit Commit 2025 ist der Test flaky	nil
+F	neutral	nein	-	-	Ab 2000 Euro Cloud-Kosten müssen wir Alarm schlagen	nil
+F	neutral	nein	-	-	Bis 2048 Einträge passt die Tabelle in den Cache	nil
+F	neutral	nein	-	-	Ab 2019 gleichzeitigen Nutzern hängt der Proxy	nil
+F	past	nein	-	-	Nach 2026 Durchläufen war der Speicher voll	nil
+F	neutral	nein	-	-	Vor 2027 Millisekunden kommt keine Antwort	nil
+F	neutral	nein	-	-	after 2026 requests the pod restarts	nil
+F	neutral	nein	-	-	before 2025 tokens, the summary is skipped	nil
+F	neutral	nein	-	-	until 2023 bytes are flushed, the writer blocks	nil
+F	neutral	nein	-	-	Warum werden ab 2024 Zeichen die Embeddings schlechter?	nil
+F	neutral	nein	-	-	Bis 2025 Dokumente geht's schnell, danach nicht mehr	nil
+F	neutral	nein	-	-	Nach 2022 Fehlversuchen sperrt der Guard den Key?	nil
+F	neutral	nein	-	-	Ab 1998 Byte Payload bricht der Webhook	nil
+F	neutral	nein	-	-	Why do we get errors after 2049 open files?	nil
+F	neutral	nein	-	-	Up until 2000 records the query uses the index	nil
+F	neutral	nein	-	-	Between 2048 and 2096 bytes the chunker splits twice	nil
+F	neutral	nein	-	-	After 2021 failed logins the account locks	[{"ref":"after 2021 failed logins","date":"2022-01-01","end":null,"dir":"from"}]
+F	neutral	nein	-	-	before 2030 rows are scanned the planner switches to seq scan?	nil
+F	neutral	nein	-	-	ab 2050 punkten gilt der block als relevant	nil
+F	neutral	nein	-	-	seit 2000 iterationen keine verbesserung	nil
+F	neutral	nein	-	-	bis 2100 MB ist alles im grünen Bereich	nil
+F	neutral	nein	-	-	Wie verhält sich RRF nach 2000 Kandidaten?	nil
+F	neutral	nein	-	-	Was kostet ein Lauf ab 2048 Tokens Kontext?	nil
+F	neutral	nein	-	-	Ab 2000 gleichzeitigen Requests droppt nginx	nil
+F	neutral	nein	-	-	Seit 2005 Einträgen im Log ist die Platte voll	nil
+F	neutral	nein	-	-	Bis 2030 Requests/s skaliert der Daemon linear	nil
+F	neutral	nein	-	-	since 2048 is a power of two, why does the buffer size use 2047?	nil
+F	neutral	nein	-	-	Seit 2048 die Default-Größe ist, läuft der Batch schneller	nil
+F	neutral	nein	-	-	from 1990 to 2010 px wide the layout breaks	nil
+F	neutral	nein	-	-	Wieso loggt der Daemon nach 2001 Sekunden einen Timeout?	nil
+F	neutral	nein	-	-	Nach 2099 Versuchen gibt der Retry-Loop auf	nil
+F	neutral	nein	-	-	before 2099 iterations the loop exits?	nil
+F	neutral	nein	-	-	Läuft der Cache bis 2064 Einträge im RAM?	nil
+F	neutral	nein	-	-	Von 2010 bis 2020 Iterationen bleibt der Loss flach	nil
+F	neutral	nein	-	-	Was bedeutet Fehler 2006 nach dem Upgrade?	nil
+F	neutral	nein	-	-	Ab 2026 parallelen Workern kippt der Durchsatz	nil
+G	past	ja	Y2024	-	Was haben wir 2024 deployed?	nil
+G	past	ja	Y2025	-	Welche Entscheidungen fielen im Jahr 2025?	nil
+G	past	ja	S-2024-01-01	-	Was wurde seit 2024 am Guard geändert?	[{"ref":"seit 2024 am guard","date":"2024-01-01","end":"2026-11-22","dir":"range"}]
+G	past	ja	U-2022-12-31	-	Was war vor 2023 der Standard-Embedder?	[{"ref":"vor 2023 der standard-embedder?","date":"2022-12-31","end":null,"dir":"until"}]
+G	past	ja	>=2024-01-01;<=2025-12-31 OR 2024-01-01..2025-12-31	-	Welche Releases gab es nach 2023 und vor 2026?	[{"ref":"nach 2023 und vor","date":"2024-01-01","end":null,"dir":"from"}]
+G	past	ja	>=2024-01-01;<=2025-12-31 OR 2024-01-01..2025-12-31	-	Was gab es vor 2026 und nach 2023 an Releases?	[{"ref":"vor 2026 und nach","date":"2025-12-31","end":null,"dir":"until"}]
+G	past	ja	2022-01-01..2024-12-31	-	Welche Bugs gab es zwischen 2022 und 2024?	[{"ref":"zwischen 2022 und 2024?","date":"2022-01-01","end":"2024-12-31","dir":"range"}]
+G	past	ja	2021-01-01..2023-12-31	-	Was lief von 2021 bis 2023 auf dem alten Host?	[{"ref":"von 2021 bis 2023 auf dem","date":"2021-01-01","end":"2023-12-31","dir":"range"}]
+G	any	ja	2023-01-01..2024-12-31	-	Releases (2023–2024)?	nil
+G	past	ja	Y2025	-	Was wurde 2025 gebaut?	nil
+G	past	ja	Y2025	-	What did we ship in 2025?	nil
+G	past	ja	S-2023-01-01	-	What changed since 2023?	[{"ref":"since 2023?","date":"2023-01-01","end":"2026-11-22","dir":"range"}]
+G	past	ja	U-2023-12-31	-	Which decisions were made before 2024?	[{"ref":"before 2024?","date":"2023-12-31","end":null,"dir":"until"}]
+G	past	ja	S-2023-01-01	-	What happened after 2022?	[{"ref":"after 2022?","date":"2023-01-01","end":null,"dir":"from"}]
+G	past	ja	2021-01-01..2023-12-31	-	What was released between 2021 and 2023?	[{"ref":"between 2021 and 2023?","date":"2021-01-01","end":"2023-12-31","dir":"range"}]
+G	neutral	ja	2020-01-01..2022-12-31	-	Show me everything from 2020 to 2022	[{"ref":"from 2020 to 2022","date":"2020-01-01","end":"2022-12-31","dir":"range"}]
+G	future	ja	U+2027-12-31	-	Was ist bis 2027 geplant?	[{"ref":"bis 2027 geplant?","date":"2026-11-22","end":"2027-12-31","dir":"range"}]
+G	future	ja	Y2027	-	Was planen wir für 2027?	nil
+G	future	ja	Y2027	-	Was steht 2027 an?	nil
+G	future	ja	Y2028	-	What's planned for 2028?	nil
+G	past	ja	M2024-03	-	Was haben wir im März 2024 entschieden?	nil
+G	past	ja	2025-07-01..2025-09-30	-	Welche Releases gab es im Q3 2025?	nil
+G	past	ja	~2023-01-01..2023-12-31	-	Was war Ende 2023 der Stand?	nil
+G	past	ja	~2025-01-01..2025-12-31	-	Was haben wir Anfang 2025 umgestellt?	nil
+G	any	ja	S-2022-01-01	-	Seit 2022 nutzen wir pgvector – welche Probleme gab es?	nil
+G	any	ja	S-2023-01-01	-	(seit 2023) welche Migrationen?	[{"ref":"seit 2023) welche migrationen?","date":"2023-01-01","end":"2026-11-22","dir":"range"}]
+G	past	ja	>=2025-01-01;<=2025-12-31 OR Y2025	-	Was wurde nach 2024, aber vor 2026 entschieden?	[{"ref":"nach 2024, aber vor","date":"2025-01-01","end":null,"dir":"from"}]
+G	past	ja	Y2023	-	Was gab's 2023?	nil
+G	past	ja	Y2022	-	was haben wir 2022 gemacht	nil
+G	any	ja	S-2024-01-01	-	Releases nach 2023?	[{"ref":"nach 2023?","date":"2024-01-01","end":null,"dir":"from"}]
+G	any	ja	U-2024-12-31	-	Releases vor 2025.	[{"ref":"vor 2025.","date":"2024-12-31","end":null,"dir":"until"}]
+G	past	ja	Y2024	-	in 2024, what broke most often?	nil
+G	any	ja	Y2024	-	2024: welche Incidents?	nil
+G	past	ja	Y2025	-	Wie viele Blöcke kamen 2025 dazu?	nil
+G	past	ja	2019-01-01..2021-12-31	-	Was haben wir zwischen 2019 und 2021 eingesetzt?	nil
+G	past	ja	>=2023-01-01;<=2024-12-31 OR 2023-01-01..2024-12-31	-	Before 2025 and after 2022, which embedders did we use?	[{"ref":"before 2025 and after","date":"2024-12-31","end":null,"dir":"until"}]
+G	past	ja	2024-01-01..2026-11-22/2024-01-01..2026-11-21/>=2024-01-01	-	Was war von 2024 bis heute anders?	[{"ref":"von 2024 bis heute anders?","date":"2024-01-01","end":"2026-11-22","dir":"range"}]
+G	past	ja	U-2025-12-31	-	Bis 2025 lief alles auf Ollama, oder?	[{"ref":"bis 2025 lief alles","date":"2025-12-31","end":null,"dir":"until"}]
+G	neutral	ja	S-2026-01-01	-	Ab 2026 nutzen wir Spark?	nil
+G	past	ja	~2025-05-01..2025-09-30	-	Was gab es im Sommer 2025?	nil
+G	past	ja	M2025-12	-	What happened in December 2025?	nil
+G	past	ja	Y2024;Y2025 OR 2024-01-01..2025-12-31	-	Was wurde im Jahr 2024 und im Jahr 2025 gebaut?	nil
+G	past	ja	Y2022	-	Welche Releases gab es [2022]?	nil
+G	past	ja	Y2023;Y2024 OR 2023-01-01..2024-12-31	-	Was haben wir 2023/2024 umgebaut?	nil
+G	past	ja	Y2021	-	Wie war die Lage 2021?	nil
+G	any	ja	>=2021-01-01;<=2022-12-31 OR 2021-01-01..2022-12-31	-	Projekte nach 2020, vor 2023	[{"ref":"nach 2020, vor 2023","date":"2021-01-01","end":null,"dir":"from"}]
+G	neutral	ja	S-2025-01-01	-	Was ist seit 2025 neu?	nil
+G	past	ja	S-2024-01-01	-	since 2024, which defaults changed?	[{"ref":"since 2024, which defaults","date":"2024-01-01","end":"2026-11-22","dir":"range"}]
+G	past	ja	U-2024-12-31	-	What did we use until 2024?	[{"ref":"until 2024?","date":"2024-12-31","end":null,"dir":"until"}]
+G	past	ja	Y2019	-	Was war 2019 der Stack?	nil
+G	future	ja	Y2027	-	Was werden wir 2027 abschalten?	nil
+G	future	ja	S-2026-01-01/>=2026-01-01	-	Was nach 2025 kommt, ist offen – was ist geplant?	[{"ref":"nach 2025 kommt, ist","date":"2026-01-01","end":null,"dir":"from"}]
+G	past	ja	Y2024	-	Releases im Jahr 2024, welche waren kaputt?	nil
+H	neutral	nein	-	-	Was ist der Unterschied zwischen RRF und BM25?	nil
+H	neutral	nein	-	-	was ist ein advisory lock	nil
+H	neutral	nein	-	-	Wie leite ich nach dem Login weiter?	nil
+H	neutral	nein	-	-	Welche Regel steht vor der Deny-Regel?	nil
+H	neutral	nein	-	-	Ab welcher Version gibt es HNSW in pgvector?	nil
+H	neutral	nein	-	-	Bis wohin reicht das Kontextfenster von qwen?	nil
+H	neutral	nein	-	-	Seit wann gibt es den Guard?	nil
+H	neutral	nein	-	-	May I use the admin key from CI?	nil
+H	neutral	nein	-	-	What does Project March cover?	nil
+H	neutral	nein	-	-	Wo liegt das Friday-Deploy-Skript?	[{"ref":"Friday","date":"2026-11-27","end":null,"dir":"future"}]
+H	neutral	nein	-	-	Gibt es eine Montagsrunde-Vorlage?	nil
+H	neutral	nein	-	-	Welcher Branch ist der August-Release-Branch?	nil
+H	past	nein	-	-	Was hat Herr Freitag zum Schema gesagt?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]
+H	neutral	nein	-	-	Was sagt Jan zum Guard?	nil
+H	neutral	nein	-	-	How do I march the iterator forward in Go?	nil
+H	neutral	nein	-	-	What is the sun parameter in the solar plugin?	nil
+H	neutral	nein	-	-	Which column is wed in the legacy schema?	nil
+H	neutral	nein	-	-	Was macht die Funktion sundayFirst?	nil
+H	neutral	nein	-	-	Wer ist Max Montag?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]
+H	past	nein	-	-	what was the default port of redis	nil
+H	past	nein	-	-	Was war nochmal der Default für max_connections?	nil
+H	neutral	nein	-	-	Was passiert nach dem Commit im Hook?	nil
+H	neutral	nein	-	-	Vor dem Merge immer gates.sh laufen lassen?	nil
+H	neutral	nein	-	-	Ab welchem Score gilt ein Treffer als relevant?	nil
+H	neutral	nein	-	-	Bis zu wie vielen Tokens geht der Rerank?	nil
+H	past	nein	-	-	Wie lange war der Timeout vor dem Fix?	nil
+H	neutral	nein	-	-	Wo finde ich das Sonntagsfrage-Plugin?	nil
+H	neutral	nein	-	-	Das Dienstagsmeeting-Protokoll – welche Vorlage nehmen wir?	nil
+H	neutral	nein	-	-	Was ist der Freitagsbier-Kanal?	nil
+H	neutral	nein	-	-	Die Mittwochsrunde-Notizen liegen wo?	nil
+H	neutral	nein	-	-	Who maintains the Sunday-cleanup job?	[{"ref":"Sunday","date":"2026-11-29","end":null,"dir":"future"}]
+H	neutral	nein	-	-	Was macht MaiLib?	nil
+H	neutral	nein	-	-	Wie heißt die Augusta-Instanz?	nil
+H	neutral	nein	-	-	what is mayday mode in the guard	nil
+H	neutral	nein	-	-	Wie konfiguriere ich den March-Exporter?	nil
+H	neutral	nein	-	-	Ist Sun Microsystems' JDK noch relevant?	nil
+H	neutral	nein	-	s	Was ist das April-Flag in der Config?	nil
+H	past	nein	-	-	Was war der Grund für die Umstellung auf Go?	nil
+H	neutral	nein	-	-	Was ist nach RRF der nächste Schritt in der Pipeline?	nil
+H	neutral	nein	-	-	Steht der Guard vor oder nach dem Rerank?	nil
+H	neutral	nein	-	-	may the scheduler run two dreams in parallel	nil
+H	neutral	nein	-	-	Was bedeutet 'wed' im Cron-Ausdruck?	nil
+H	neutral	nein	-	-	Wie viele Einträge hat die Tabelle context_blocks?	nil
+H	neutral	nein	-	-	Wer ist Frau Sonntag aus dem Datenschutz?	[{"ref":"Sonntag","date":"2026-11-29","end":null,"dir":"future"}]
+H	past	nein	-	-	Was hat Jan Mai im Review angemerkt?	nil
+H	neutral	nein	-	-	Was macht der Montag-Parser in temporal_rules?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]
+H	neutral	nein	-	-	Ab wann gilt ein Block als veraltet?	nil
+H	neutral	nein	-	-	Bis wann muss ein Guard-Konflikt aufgelöst sein?	nil
+H	past	nein	-	-	Was war der Fehler in der FridayCheck-Action?	nil
+H	neutral	nein	-	-	Kann man nach Kategorie und Tag filtern?	nil
+H	neutral	nein	-	-	Seit dem Umbau auf Go – wie viele Zeilen hat das Repo?	nil
+H	neutral	nein	-	-	Was macht der Parameter sat_threshold?	nil
+H	past	nein	-	-	Who wrote the Monday-report generator?	[{"ref":"Monday","date":"2026-11-16","end":null,"dir":"past"}]
+I	any	ja	2026-11-20;2026-11-23/2026-11-30	-	Was haben wir letzten Freitag entschieden und was steht nächsten Montag an?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"},{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]
+I	any	ja	M2026-03;M2027-06	-	Im März haben wir den Embedder getauscht – was planen wir für Juni?	nil
+I	any	ja	S-2026-11-16;U+2026-11-27	-	Seit Montag läuft der Bench, bis Freitag muss er fertig sein	[{"ref":"seit montag läuft der","date":"2026-11-16","end":"2026-11-22","dir":"range"}]
+I	any	ja	2026-11-17;2026-11-26	-	Was wurde am Dienstag gemerged und was wird am Donnerstag deployed?	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"},{"ref":"Donnerstag","date":"2026-11-19","end":null,"dir":"past"}]
+I	any	ja	2026-11-16;2026-11-27	-	What did we fix on Monday and what will we ship on Friday?	[{"ref":"Monday","date":"2026-11-16","end":null,"dir":"past"},{"ref":"Friday","date":"2026-11-20","end":null,"dir":"past"}]
+I	any	ja	Y2024;2026-11-18	-	2024 haben wir migriert, was war letzten Mittwoch?	[{"ref":"Mittwoch","date":"2026-11-18","end":null,"dir":"past"}]
+I	any	ja	M2026-10;M2026-12	-	Was lief im Oktober schief und was ist für Dezember geplant?	nil
+I	any	ja	WEP;2026-11-24	-	Last weekend the spark crashed; is the next maintenance on Tuesday?	[{"ref":"am Wochenende","date":"2026-11-21","end":"2026-11-22","dir":"past"}]
+I	any	ja	2026-11-21;2026-11-23	-	Gestern kaputt, morgen wieder heil?	[{"ref":"gestern","date":"2026-11-21","end":null,"dir":"past"},{"ref":"morgen","date":"2026-11-23","end":null,"dir":"future"}]
+I	past	ja	2026-11-20;2026-11-16	-	Was haben wir am Freitag und am Montag deployed?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"},{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]
+I	future	ja	2026-11-23;2026-11-24	-	Wird am Montag oder Dienstag gewartet?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"},{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]
+I	any	ja	U-2024-12-31;M2026-03/S-2026-03-01	-	Vor 2025 nutzten wir Ollama, seit März Spark – stimmt das?	[{"ref":"seit märz spark –","date":"2026-03-01","end":"2026-11-22","dir":"range"}]
+I	any	ja	2026-11-16..2026-11-18;2026-11-26..2026-11-28	-	Was ist zwischen Montag und Mittwoch passiert und was kommt von Donnerstag bis Samstag?	[{"ref":"von donnerstag bis samstag?","date":"2026-11-26","end":"2026-11-28","dir":"range"}]
+I	any	ja	M2026-08;M2027-01	-	In August we migrated, in January we will upgrade again	nil
+I	past	ja	M2026-09;M2026-10	-	Was hatten wir im September vor und was haben wir im Oktober tatsächlich gemacht?	nil
+I	any	ja	2026-11-17;2026-11-23	-	Was war letzten Dienstag, und was ist morgen?	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]
+I	any	ja	2026-11-21;2026-11-25	-	Did the bench run on Saturday, and will it run again on Wednesday?	[{"ref":"Saturday","date":"2026-11-21","end":null,"dir":"past"},{"ref":"Wednesday","date":"2026-11-18","end":null,"dir":"past"}]
+I	any	ja	Y2025;Y2027	-	Was haben wir 2025 gebaut und was bauen wir 2027?	nil
+I	any	ja	2026-11-03;2026-12-04	-	Was wurde am 3. November entschieden und was steht am 4. Dezember an?	nil
+I	any	ja	M2024-03;M2027-03	-	Welche Releases gab es im März 2024, und welche kommen im März?	nil
+I	any	ja	2026-11-20;2026-11-24	-	Was haben wir vorgestern gebaut, und was deployen wir übermorgen?	[{"ref":"gestern und übermorgen","date":"2026-11-20","end":"2026-11-24","dir":"range"}]
+I	any	ja	2026-11-21;NW	-	What broke yesterday and what's planned for next week?	[{"ref":"nächste Woche","date":"2026-11-23","end":"2026-11-29","dir":"range"}]
+I	any	ja	LW;NW	-	Letzte Woche Dream aus, nächste Woche wieder an?	[{"ref":"letzte Woche","date":"2026-11-09","end":"2026-11-15","dir":"range"}]
+I	any	ja	2026-11-20;2026-11-24	-	Am Freitag hat Damien gesagt, dass wir am Dienstag releasen	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]
+I	any	ja	2026-11-16;M2027-01	-	Am Montag wurde beschlossen, im Januar zu migrieren	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]
+I	any	ja	2026-11-17;M2027-03	-	On Tuesday we decided to migrate in March	[{"ref":"Tuesday","date":"2026-11-24","end":null,"dir":"future"}]
+I	any	ja	2026-11-21;2026-11-28	-	Was war am Samstag mit dem Backup und läuft es nächsten Samstag wieder?	[{"ref":"Samstag","date":"2026-11-28","end":null,"dir":"future"}]
+I	any	ja	S-2026-11-16;U+2026-11-27	-	Was haben wir seit Montag geändert und was ändern wir bis Freitag?	[{"ref":"seit montag geändert und","date":"2026-11-16","end":"2026-11-22","dir":"range"}]
+I	any	ja	U-2023-12-31;>=2027-01-01	-	Was lief vor 2024 und was läuft nach 2026?	[{"ref":"vor 2024 und was","date":"2023-12-31","end":null,"dir":"until"}]
+I	any	ja	2026-11-20;2026-11-27	-	Wer hatte letzten Freitag Dienst und wer hat am Freitag Dienst?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]
+I	any	ja	M2026-05;M2027-02	-	Haben wir im Mai gebencht und benchen wir im Februar wieder?	nil
+I	any	ja	2026-11-16;2026-11-25	-	Was ist am Montag passiert, was passiert am Mittwoch?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]
+I	any	ja	2026-11-19;2026-11-23	-	Which PRs were merged on Thursday, and which are scheduled for Monday?	[{"ref":"Thursday","date":"2026-11-19","end":null,"dir":"past"},{"ref":"Monday","date":"2026-11-16","end":null,"dir":"past"}]
+I	any	ja	NOV;M2026-12	-	Was haben wir im November gemacht und was machen wir im Dezember?	nil
+I	any	ja	2026-11-17;2026-11-26	-	Am Dienstag kaputt gegangen, am Donnerstag wird repariert	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]
+I	any	ja	WEP;WEF	-	Was kam letztes Wochenende raus und was kommt nächstes Wochenende?	[{"ref":"am Wochenende","date":"2026-11-21","end":"2026-11-22","dir":"past"}]
+I	any	ja	Y2025;U+2027-12-31/Y2027	-	We moved off ollama in 2025 and will drop it entirely by 2027	nil
+I	any	ja	S-2026-11-20;U+2026-11-25	-	Was ist seit Freitag offen und muss bis Mittwoch zu sein?	[{"ref":"seit freitag offen und","date":"2026-11-20","end":"2026-11-22","dir":"range"}]
+I	any	ja	M2026-01;M2027-01	-	Was war im Januar und was wird im Januar?	nil
+I	any	ja	2026-11-13;2026-11-27	-	Freitag letzte Woche vs. Freitag nächste Woche – was ist anders?	[{"ref":"letzte Woche","date":"2026-11-09","end":"2026-11-15","dir":"range"}]
+I	any	ja	2026-11-20;2026-11-27	-	Was haben wir am 20.11. deployed und was am 27.11.?	nil
+I	any	ja	M2026-10;M2026-12	-	What did we decide in October and what will we decide in December?	nil
+I	any	ja	Y2023;M2027-03	-	Was wurde 2023 eingeführt und was wird im März abgeschafft?	nil
+I	any	ja	2026-11-21;2026-11-24	-	Was haben wir gestern gefixt und was müssen wir am Dienstag noch fixen?	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]
+I	any	ja	2026-11-16/2026-11-09;2026-11-23/2026-11-30	-	Last Monday we had an outage; next Monday is the postmortem	[{"ref":"Monday","date":"2026-11-16","end":null,"dir":"past"}]
+I	any	ja	2026-03-01..2026-05-31;2027-01-01..2027-03-31	-	Was lief zwischen März und Mai, was läuft zwischen Januar und März?	nil
+I	any	ja	M2025-10 OR M2025-10;2026-11-22	-	Welche Bugs gab es im Oktober 2025 und welche gibt es jetzt?	nil
+I	any	ja	2026-11-18;2026-11-27	-	Am Mittwoch hatten wir 3 Incidents, am Freitag werden wir das Postmortem halten	[{"ref":"Mittwoch","date":"2026-11-18","end":null,"dir":"past"}]
+I	any	ja	2026-11-21;2026-11-28	-	Wurde am Samstag deployed? Und wird am Samstag wieder deployed?	[{"ref":"Samstag","date":"2026-11-21","end":null,"dir":"past"}]
+I	any	ja	M2026-06;M2027-02	-	Wir haben im Juni angefangen und wollen im Februar fertig sein	nil
+I	any	ja	2026-11-19;2026-11-24	-	Der Fix kam Donnerstag, das Release folgt Dienstag	[{"ref":"Donnerstag","date":"2026-11-19","end":null,"dir":"past"}]
+I	any	ja	M2026-09;2026-11-26	-	Im September eingeführt; wird am Donnerstag entfernt?	[{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]

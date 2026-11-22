@@ -146,12 +146,29 @@ func germanFiniteVerb(w string) bool {
 	return germanPastVerbs[w] || perfektAux[w] || germanFiniteWords[w]
 }
 
+// germanWordsOnS are the words that end in "s" behind a finite verb the
+// rules know (germanFiniteVerb) and are German words of their own, not that
+// verb with "es" glued to it (issue #506): the imperative of "lassen" ("lass
+// uns am Freitag releasen" asks for the coming Friday, "las" is the simple
+// past of "lesen"); the genitive or plural of a noun ("des Stands", "des
+// Lags", "des Stiegs", "des Solls"); the genitive of an infinitive used as a
+// noun ("des Könnens"); and the participle used as an adjective ("ein
+// passiertes Problem"). Every other word "<verb>s" of the verbs the rules
+// know is no German word.
+var germanWordsOnS = toWordSet(
+	"lass",
+	"stands", "lags", "stiegs", "solls",
+	"habens", "werdens", "müssens", "sollens", "könnens", "dürfens", "wollens", "brauchens", "kriegens",
+	"passiertes", "ereignetes",
+)
+
 // colloquial maps the words of c that are a spoken form of a German verb to
 // the verb (issue #506): a word of colloquialForms; a known German finite
 // verb with the clitic "es" or "denn" glued to it ("gab's", "hat's", "war's",
 // "gibt's", "war'n", written with ' or ’), which the English "it's" or
 // "what's" is not; in a German sentence a known finite verb with "s" glued to
-// it ("gabs", "wars", "gings", "gibts"); and in a German sentence "is", which
+// it ("gabs", "wars", "gings", "gibts") where the word is no German word of
+// its own (germanWordsOnS: "lass" stays); and in a German sentence "is", which
 // spoken German writes for "ist" and which, as
 // the English copula as well, says nothing of the language of the question
 // (questionLanguage). An English sentence starts a clause at each embedded
@@ -176,7 +193,7 @@ func (c *clauseWords) colloquial() {
 				w := c.words[i]
 				if w == "is" {
 					c.words[i] = "ist"
-				} else if stem, ok := strings.CutSuffix(w, "s"); ok && germanFiniteVerb(stem) {
+				} else if stem, ok := strings.CutSuffix(w, "s"); ok && germanFiniteVerb(stem) && !germanWordsOnS[w] {
 					c.words[i] = stem // "gabs", "wars", "gings", "gibts", "hats": the verb with "es"
 				}
 			}
