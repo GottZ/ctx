@@ -169,7 +169,9 @@ func TestHealthFirstObservationIsNoChange(t *testing.T) {
 	healthLines = &healthNotice{}
 	t.Cleanup(func() { healthLines = prev })
 	up := slowBackend(t, 0, nil)
-	logs := healthCalls(t, []backends.Backend{operatorRow("i504-first", up, i504Roles...)}, 2)
+	// As many calls as a recovery takes: a first state read as "unserved" or
+	// "down" would log its all-clear within them.
+	logs := healthCalls(t, []backends.Backend{operatorRow("i504-first", up, i504Roles...)}, recoveryAnswers)
 	for _, r := range healthLinesAbove(logs) {
 		if _, ok := r.attrs["role"]; ok {
 			t.Errorf("first observation of a served role wrote %s %s", r.level, r.text())
