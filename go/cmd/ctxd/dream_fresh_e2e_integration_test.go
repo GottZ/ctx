@@ -5,20 +5,38 @@
 // restart in between. The child is the production main() booted against an
 // empty database through the harness of dream_install_default_integration_test.go
 // (startDreamBootChild), with CTX_DREAM_ENABLED unset: Dream runs on the
-// installation's default.
+// installation's default. CTX_GRAPH_EXPAND_ENABLED=true is what the shipped
+// docker-compose.yml sets for every installation that does not override it.
 //
 //   - Phase A (no backend of role dream/chat): one real minute at the default
-//     dream.idle_wait (20 s). The loop must skip before the pick at idle
-//     cadence — no busy loop, no ERROR line naming Dream — and /health says
-//     what an operator sees.
+//     dream.idle_wait (20 s). The loop skips before the pick, no ERROR line
+//     names Dream, /health says what an operator sees — and the operator gets
+//     one WARN that says what is missing and how to fix it, not three WARN
+//     and six INFO lines a minute and worker (issue #495; the idle cadence of
+//     the skip, now logged at DEBUG, is pinned by the events test
+//     TestDreamLoopReportsAMissingDreamBackendOncePerChange).
 //
 //   - Phase B (same child): an OpenAI-wire stub serves embeddings and the
 //     dream chat stages; the pool is seeded with exactly the rows
-//     `ctx backends seed` writes (POST /api/manage backend-create), two
-//     related blocks are stored over POST /api/store, and the dream loop must
-//     write a context_dream_links row without the child being restarted.
+//     `ctx backends seed` writes (POST /api/manage backend-create), two pairs
+//     of related blocks are stored over POST /api/store/batch, and the dream
+//     loop must link each pair without the child being restarted; one INFO
+//     line says that a backend of role dream serves again.
 //
-// Run it alone (about 90 s: one boot, one minute of phase A, phase B):
+//   - Phase C (issue #495, same child): does a query bring in a linked block
+//     through the graph expansion? The stub gives every text a vector of its
+//     own (rows of a Hadamard matrix), 80 unrelated blocks closer to the
+//     queries than the linked blocks push those out of the semantic arm (its
+//     cap is 75, migration 147), and their texts share no lexeme with the
+//     queries — the measurement's arm_ranks block shows that no arm of the
+//     fusion found them. For both pairs the test asserts two negatives: no
+//     arm finds the second block, and with graph.enabled off it is never a
+//     source. With graph.enabled on the factual pair's second block must be
+//     the query's second source; the topical pair's position is only logged
+//     (its placement, 0.3 x the top score, falls below the twentieth source,
+//     so it is no source at all — issue #499).
+//
+// Run it alone (about 2½ minutes: one boot, one minute of phase A, B and C):
 //
 //	go test -tags=integration -p 1 -count=1 -v -run 'TestDreamFreshInstallE2E' ./cmd/ctxd/
 package main
@@ -29,6 +47,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"math/bits"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -44,28 +64,88 @@ import (
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
+// The lines of a dream loop without a backend of role dream (issue #495).
 const (
-	// dreamSkipNoBackendLog is the line RunDreamCycle's step 0 logs when no
-	// backend serves the dream role (internal/dream/dream.go).
+	// dreamSkipNoBackendLog is the per-cycle skip line (DEBUG since #495, an
+	// INFO line before).
 	dreamSkipNoBackendLog = `"msg":"dream: no eligible dream backend`
+	// dreamEmptyChainLog is backends.Pool.Chain's WARN for an empty chain; the
+	// skip path asked Chain until #495 and logged it once per cycle.
+	dreamEmptyChainLog = `"msg":"backends: empty chain","role":"dream"`
+	// dreamIdleLog is the scheduler's idle line; a skipped cycle logged it
+	// until #495.
+	dreamIdleLog = `"msg":"scheduler: dream idle, waiting"`
+	// dreamMissingNotice is dream.BackendNotice's WARN when the loop first
+	// finds no backend of role dream; dreamServesNotice its INFO when one
+	// serves again.
+	dreamMissingNotice = `"level":"WARN","msg":"dream: no backend of role dream`
+	dreamServesNotice  = `"level":"INFO","msg":"dream: a backend of role dream serves again`
+)
+
+const (
 	// phaseAWindow is the observation window of phase A: one real minute.
 	phaseAWindow = 60 * time.Second
-	// phaseAMaxSkipsPerWindow is the busy-loop gate: at the default idle wait
-	// of 20 s one worker skips about 3 times a minute; more than twice that is
-	// a loop that does not take its idle wait.
-	phaseAMaxSkipsPerWindow = 6
-	// phaseBLinkDeadline bounds the wait from the seed to the first link.
+	// phaseBLinkDeadline bounds the wait from the seed to the links.
 	phaseBLinkDeadline = 4 * time.Minute
 	// stubEmbedDims is the dimension of context_blocks.embedding.
 	stubEmbedDims = 1024
-	// stubEmbedComponent is the magnitude of every component of the stub's
-	// one vector, sign alternating: all inputs embed to the same point, so
-	// every block is a vector-arm candidate of every keyword. 1/32 over 1024
-	// dimensions gives norm 1 and variance 1/1024 — the embed quality gate
-	// (internal/embed qualityGate: norm in [0.99, 1.01], variance ≥ 0.0001)
-	// refuses a constant vector such as all components 0.02.
-	stubEmbedComponent = 1.0 / 32
+	// phaseCDistractors is the number of unrelated blocks phase C stores: more
+	// than the semantic arm's cap of 75 (ctx_rrf_arms p_cap_semantic,
+	// migration 147), all of them closer to the queries than the linked
+	// blocks, so no linked block is a semantic candidate of a query.
+	phaseCDistractors = 80
 )
+
+// Hadamard rows the stub builds its vectors from. Row r of the 1024×1024
+// Sylvester matrix has the component sign (-1)^popcount(r&i); two different
+// rows are orthogonal, every row but 0 has mean 0, so a unit combination of
+// rows has norm 1 and variance 1/1024 — inside the embed quality gate
+// (internal/embed qualityGate: norm in [0.99, 1.01], variance ≥ 0.0001).
+const (
+	rowQueryHangar     = 1
+	rowQueryLighthouse = 2
+	rowDefault         = 3 // every text no rule names: dream keywords, probes
+	rowHangarOwn       = 10
+	rowLighthouseOwn   = 11
+	rowDistractorBase  = 100 // distractor j uses row rowDistractorBase+j
+	rowLinkedHangar    = 900
+	rowLinkedLight     = 901
+)
+
+// stubVector is the unit vector Σ w·row / ‖w‖.
+func stubVector(weights map[int]float64) []float64 {
+	var norm float64
+	for _, w := range weights {
+		norm += w * w
+	}
+	norm = math.Sqrt(norm)
+	vec := make([]float64, stubEmbedDims)
+	for i := range vec {
+		var x float64
+		for r, w := range weights {
+			if bits.OnesCount(uint(r&i))%2 == 0 {
+				x += w
+			} else {
+				x -= w
+			}
+		}
+		vec[i] = x / norm / math.Sqrt(stubEmbedDims)
+	}
+	return vec
+}
+
+// stubVecRule gives every embedding input that contains marker the vector vec.
+type stubVecRule struct {
+	marker string
+	vec    []float64
+}
+
+// stubPair is one pair of related blocks by title: the link-evaluation call of
+// either one answers a link to the other, of the given type.
+type stubPair struct {
+	partner string
+	typ     string
+}
 
 // freshInstallDSN is the harness's fresh database: no migration history and
 // the four extensions init-data.sh creates as superuser.
@@ -83,10 +163,12 @@ func freshInstallDSN(t *testing.T) string {
 
 // phaseAResult is what one observation window of a booted child showed.
 type phaseAResult struct {
-	skips        int      // dreamSkipNoBackendLog lines in the window
-	errorLines   []string // every "level":"ERROR" line in the window
-	healthStatus string
-	services     map[string]string
+	skips, emptyChains, idles int            // the per-cycle lines of the skip path in the window
+	warns, infos              int            // every WARN and INFO line in the window
+	byMsg                     map[string]int // WARN and INFO lines in the window by level and message
+	errorLines                []string       // every "level":"ERROR" line in the window
+	healthStatus              string
+	services                  map[string]string
 }
 
 // observeWindow lets the child run for d and reads what it logged meanwhile
@@ -97,12 +179,26 @@ func observeWindow(t *testing.T, c *dreamBootChild, d time.Duration) phaseAResul
 	time.Sleep(d)
 	status, services := c.health(t)
 	window := c.out.String()[from:]
-	var r phaseAResult
+	r := phaseAResult{byMsg: map[string]int{}}
 	for _, line := range strings.Split(window, "\n") {
-		if strings.Contains(line, dreamSkipNoBackendLog) {
+		switch {
+		case strings.Contains(line, dreamSkipNoBackendLog):
 			r.skips++
+		case strings.Contains(line, dreamEmptyChainLog):
+			r.emptyChains++
+		case strings.Contains(line, dreamIdleLog):
+			r.idles++
 		}
-		if strings.Contains(line, `"level":"ERROR"`) {
+		var rec struct{ Level, Msg string }
+		_ = json.Unmarshal([]byte(line), &rec)
+		switch {
+		case strings.Contains(line, `"level":"WARN"`):
+			r.warns++
+			r.byMsg[rec.Level+" "+rec.Msg]++
+		case strings.Contains(line, `"level":"INFO"`):
+			r.infos++
+			r.byMsg[rec.Level+" "+rec.Msg]++
+		case strings.Contains(line, `"level":"ERROR"`):
 			r.errorLines = append(r.errorLines, line)
 		}
 	}
@@ -118,16 +214,48 @@ type dreamStub struct {
 	keywords, eval, evalLinks, temporal, recurrence atomic.Int64
 	otherChat, otherPath                            atomic.Int64
 	mu                                              sync.Mutex
-	otherPrompts                                    map[string]int // first line of an unclassified system prompt
-	otherPaths                                      map[string]int // method + path of an unserved request
+	vecRules                                        []stubVecRule       // first match wins
+	pairs                                           map[string]stubPair // by title
+	otherPrompts                                    map[string]int      // first line of an unclassified system prompt
+	otherPaths                                      map[string]int      // method + path of an unserved request
 }
 
-// stubCandidateID reads a candidate id out of the link-evaluation prompt
-// (dream.buildEvalPrompt: <block id="…" title=…>).
-var stubCandidateID = regexp.MustCompile(`<block id="([0-9a-fA-F-]{36})"`)
+// stubCandidate reads a candidate's id and title out of the link-evaluation
+// prompt (dream.buildEvalPrompt: <block id="…" title="…" …>); stubSourceTitle
+// reads the source block's title line.
+var (
+	stubCandidate   = regexp.MustCompile(`<block id="([0-9a-fA-F-]{36})" title="([^"]*)"`)
+	stubSourceTitle = regexp.MustCompile(`(?m)^Title: (.*)$`)
+)
 
 func newDreamStub() *dreamStub {
-	return &dreamStub{otherPrompts: map[string]int{}, otherPaths: map[string]int{}}
+	return &dreamStub{pairs: map[string]stubPair{}, otherPrompts: map[string]int{}, otherPaths: map[string]int{}}
+}
+
+// setVectors installs the embedding rules; setPair links two titles.
+func (s *dreamStub) setVectors(rules []stubVecRule) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.vecRules = rules
+}
+
+func (s *dreamStub) setPair(a, b, typ string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pairs[a] = stubPair{partner: b, typ: typ}
+	s.pairs[b] = stubPair{partner: a, typ: typ}
+}
+
+// vectorFor is the vector of one embedding input.
+func (s *dreamStub) vectorFor(text string) []float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.vecRules {
+		if strings.Contains(text, r.marker) {
+			return r.vec
+		}
+	}
+	return stubVector(map[int]float64{rowDefault: 1})
 }
 
 func (s *dreamStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -154,34 +282,60 @@ func (s *dreamStub) serveEmbeddings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	n := 1
-	if list, ok := req.Input.([]any); ok {
-		n = len(list)
-	}
-	s.embedCalls.Add(1)
-	s.embedInputs.Add(int64(n))
-	vec := make([]float64, stubEmbedDims)
-	for i := range vec {
-		vec[i] = stubEmbedComponent
-		if i%2 == 1 {
-			vec[i] = -stubEmbedComponent
+	var inputs []string
+	switch in := req.Input.(type) {
+	case string:
+		inputs = []string{in}
+	case []any:
+		for _, x := range in {
+			str, _ := x.(string)
+			inputs = append(inputs, str)
 		}
 	}
+	s.embedCalls.Add(1)
+	s.embedInputs.Add(int64(len(inputs)))
 	type entry struct {
 		Object    string    `json:"object"`
 		Index     int       `json:"index"`
 		Embedding []float64 `json:"embedding"`
 	}
-	data := make([]entry, n)
-	for i := range data {
-		data[i] = entry{Object: "embedding", Index: i, Embedding: vec}
+	data := make([]entry, len(inputs))
+	for i, in := range inputs {
+		data[i] = entry{Object: "embedding", Index: i, Embedding: s.vectorFor(in)}
 	}
+	n := len(inputs)
 	writeStubJSON(w, map[string]any{
 		"object": "list",
 		"model":  req.Model,
 		"data":   data,
 		"usage":  map[string]int{"prompt_tokens": 4 * n, "total_tokens": 4 * n},
 	})
+}
+
+// evalAnswer links the source block to its pair partner when the partner is
+// among the candidates, and to nothing else.
+func (s *dreamStub) evalAnswer(user string) string {
+	type link struct {
+		TargetID   string  `json:"target_id"`
+		Type       string  `json:"type"`
+		Confidence float64 `json:"confidence"`
+	}
+	links := []link{}
+	if m := stubSourceTitle.FindStringSubmatch(user); m != nil {
+		s.mu.Lock()
+		pair, ok := s.pairs[strings.TrimSpace(m[1])]
+		s.mu.Unlock()
+		if ok {
+			for _, c := range stubCandidate.FindAllStringSubmatch(user, -1) {
+				if c[2] == pair.partner {
+					links = append(links, link{TargetID: c[1], Type: pair.typ, Confidence: 0.9})
+				}
+			}
+		}
+	}
+	s.evalLinks.Add(int64(len(links)))
+	raw, _ := json.Marshal(links)
+	return string(raw)
 }
 
 func (s *dreamStub) serveChat(w http.ResponseWriter, r *http.Request) {
@@ -213,18 +367,7 @@ func (s *dreamStub) serveChat(w http.ResponseWriter, r *http.Request) {
 		content = `["dream link probe","fresh installation","backend seed","knowledge graph","semantic neighbour"]`
 	case strings.Contains(system, "source block and candidate blocks"):
 		s.eval.Add(1)
-		type link struct {
-			TargetID   string  `json:"target_id"`
-			Type       string  `json:"type"`
-			Confidence float64 `json:"confidence"`
-		}
-		links := []link{}
-		for _, m := range stubCandidateID.FindAllStringSubmatch(user, 5) {
-			links = append(links, link{TargetID: m[1], Type: "topical", Confidence: 0.9})
-		}
-		s.evalLinks.Add(int64(len(links)))
-		raw, _ := json.Marshal(links)
-		content = string(raw)
+		content = s.evalAnswer(user)
 	case strings.HasPrefix(system, "You are a temporal reference extractor"):
 		s.temporal.Add(1)
 		content = `{"dates":[],"directions":[],"false_positives":[]}`
@@ -331,6 +474,159 @@ func seedPayloads(host string) []map[string]any {
 	}
 }
 
+// graphCase is one pair of phase C: the block a query finds (seed) and the one
+// Dream linked to it (linked), with the link type the stub answers.
+type graphCase struct {
+	name                         string
+	query                        string
+	linkType                     string
+	seedTitle, seedContent       string
+	linkedTitle, linkedContent   string
+	linkedCategory               string
+	queryRow, seedRow, linkedRow int
+}
+
+// graphCases share no lexeme between a query and its linked block (nor with
+// the distractors), and the linked block's title shares at most two trigrams
+// with the query (pg_trgm similarity < 0.05, the trigram arm's threshold) —
+// the linked block can come only through the graph. The two link types are
+// the lowest (topical, weight 0.5) and a high one (factual, weight 0.9) of
+// the graph.weight_* defaults.
+var graphCases = []graphCase{
+	{
+		name:          "topical",
+		query:         "Zeppelin hangar gas boiler frost reserve?",
+		linkType:      "topical",
+		seedTitle:     "Zeppelin hangar heating decision",
+		seedContent:   "The Zeppelin hangar is heated by a heat pump from October on; the gas boiler stays as a frost reserve below minus ten degrees.",
+		linkedTitle:   "Electrician bookings",
+		linkedContent: "Three electricians and one welder are booked for the heat pump retrofit; work starts on Monday.",
+		// Same category as the seed: a topical tie (dream keeps factual only
+		// across categories, coerceCategoryFactual).
+		linkedCategory: "decisions",
+		queryRow:       rowQueryHangar, seedRow: rowHangarOwn, linkedRow: rowLinkedHangar,
+	},
+	{
+		name:          "factual",
+		query:         "Lighthouse halogen lamp spare storeroom?",
+		linkType:      "factual",
+		seedTitle:     "Lighthouse lamp replacement decision",
+		seedContent:   "The lighthouse lamp was replaced by an LED array in March; the old halogen lamp stays in the storeroom as a spare.",
+		linkedTitle:   "Nordlicht invoice terms",
+		linkedContent: "Nordlicht GmbH delivers the LED array with a five year warranty; invoices go to the harbour office.",
+		// Another category than the seed's: dream coerces a factual link
+		// between two blocks of one category to topical (V10,
+		// coerceCategoryFactual), so the factual pair spans two.
+		linkedCategory: "projects",
+		queryRow:       rowQueryLighthouse, seedRow: rowLighthouseOwn, linkedRow: rowLinkedLight,
+	},
+}
+
+// distractor j of phase C.
+func distractorTitle(j int) string { return fmt.Sprintf("Depot inventory sheet %02d", j) }
+func distractorContent(j int) string {
+	return fmt.Sprintf("Pallet count %02d for the north depot lists crates, shelving units and forklift batteries.", j)
+}
+
+// stubVectorRules: each query embeds to its own row; each seed block close to
+// its query (cosine 0.95); each linked block to a row of its own (cosine 0
+// with every query); every distractor to cosine 0.5 with both queries, so the
+// 80 of them rank before every linked block in the semantic arm.
+func stubVectorRules() []stubVecRule {
+	var rules []stubVecRule
+	for _, c := range graphCases {
+		rules = append(rules,
+			// Without the question mark: the marker must survive whatever the
+			// query path does to punctuation before it embeds.
+			stubVecRule{strings.TrimSuffix(c.query, "?"), stubVector(map[int]float64{c.queryRow: 1})},
+			stubVecRule{c.seedContent, stubVector(map[int]float64{c.queryRow: 0.95, c.seedRow: 0.3122})},
+			stubVecRule{c.linkedContent, stubVector(map[int]float64{c.linkedRow: 1})},
+		)
+	}
+	for j := 1; j <= phaseCDistractors; j++ {
+		rules = append(rules, stubVecRule{distractorContent(j), stubVector(map[int]float64{
+			rowQueryHangar: 0.5, rowQueryLighthouse: 0.5, rowDistractorBase + j: 0.7071,
+		})})
+	}
+	return rules
+}
+
+// storeBatch writes items over POST /api/store/batch (all or none) and
+// returns the block id of each item, by title.
+func (c *dreamBootChild) storeBatch(t *testing.T, items []map[string]any) map[string]string {
+	t.Helper()
+	st, resp := c.adminCall(t, http.MethodPost, "/api/store/batch", map[string]any{"items": items})
+	answers, _ := resp["items"].([]any)
+	if st != http.StatusOK || resp["success"] != true || len(answers) != len(items) {
+		t.Fatalf("store batch of %d: HTTP %d %v", len(items), st, resp)
+	}
+	ids := make(map[string]string, len(items))
+	for i, a := range answers {
+		m, _ := a.(map[string]any)
+		b, _ := m["block"].(map[string]any)
+		id, _ := b["id"].(string)
+		if id == "" {
+			t.Fatalf("store batch item %d (%v): no block in the answer %v", i, items[i]["title"], m)
+		}
+		ids[items[i]["title"].(string)] = id
+	}
+	return ids
+}
+
+// graphQuery is one retrieval-only query with the arm_ranks measurement: the
+// source ids in answer order and the ids any arm of the fusion found.
+func (c *dreamBootChild) graphQuery(t *testing.T, query string, limit int) (sources []string, scores []float64, armIDs map[string]bool) {
+	t.Helper()
+	st, resp := c.adminCall(t, http.MethodPost, "/api/query", map[string]any{
+		"query": query, "limit": limit, "synthesize": false, "arm_ranks": true,
+	})
+	if st != http.StatusOK || resp["success"] != true {
+		t.Fatalf("query %q: HTTP %d %v", query, st, resp)
+	}
+	list, _ := resp["sources"].([]any)
+	for _, s := range list {
+		m, _ := s.(map[string]any)
+		id, _ := m["id"].(string)
+		score, _ := m["score"].(float64)
+		sources = append(sources, id)
+		scores = append(scores, score)
+	}
+	armIDs = map[string]bool{}
+	ranks, _ := resp["arm_ranks"].(map[string]any)
+	rows, _ := ranks["rows"].([]any)
+	for _, r := range rows {
+		m, _ := r.(map[string]any)
+		id, _ := m["id"].(string)
+		armIDs[id] = true
+	}
+	return sources, scores, armIDs
+}
+
+// setGraphEnabled writes graph.enabled over the settings API and waits until
+// the served snapshot carries it (the write reaches the store through the
+// settings NOTIFY).
+func (c *dreamBootChild) setGraphEnabled(t *testing.T, on bool) {
+	t.Helper()
+	if st, resp := c.adminCall(t, http.MethodPut, "/api/settings/graph.enabled", map[string]any{"value": on}); st != http.StatusOK || resp["success"] != true {
+		t.Fatalf("PUT graph.enabled=%v: HTTP %d %v", on, st, resp)
+	}
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+		if v, _ := c.settingSource(t, "graph.enabled"); v == on {
+			return
+		}
+	}
+	t.Fatalf("graph.enabled did not become %v within 30 s", on)
+}
+
+func indexOf(list []string, id string) int {
+	for i, x := range list {
+		if x == id {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestDreamFreshInstallE2E(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -339,7 +635,8 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 	dsn := freshInstallDSN(t)
 
 	// CTX_DREAM_ENABLED stays unset: Dream runs on the installation's default.
-	child := startDreamBootChild(t, dsn, nil)
+	// The graph expansion is on as the shipped docker-compose.yml sets it.
+	child := startDreamBootChild(t, dsn, map[string]string{"CTX_GRAPH_EXPAND_ENABLED": "true"})
 	pid := child.cmd.Process.Pid
 
 	if value, source := child.settingSource(t, "dream.enabled"); value != true || source != "install" {
@@ -348,16 +645,21 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 
 	// ---- Phase A: Dream on, no backend of role dream/chat.
 	a := observeWindow(t, child, phaseAWindow)
-	t.Logf("phase A: %d × %q in %s; /health %q services %v; %d ERROR line(s)",
-		a.skips, dreamSkipNoBackendLog, phaseAWindow, a.healthStatus, a.services, len(a.errorLines))
+	notices := strings.Count(child.out.String(), dreamMissingNotice) // since the boot
+	t.Logf("phase A, lines in %s: %d WARN (%d × empty chain role=dream), %d INFO (%d × skip, %d × idle); since the boot %d × the missing-backend notice; /health %q services %v; %d ERROR line(s)",
+		phaseAWindow, a.warns, a.emptyChains, a.infos, a.skips, a.idles, notices, a.healthStatus, a.services, len(a.errorLines))
+	for msg, n := range a.byMsg {
+		t.Logf("phase A line ×%d: %s", n, msg)
+	}
 	for _, l := range a.errorLines {
 		t.Logf("phase A ERROR: %s", l)
 	}
-	if a.skips == 0 {
-		t.Errorf("phase A: no %q line in %s — the dream loop did not run its backend probe", dreamSkipNoBackendLog, phaseAWindow)
+	if notices != 1 {
+		t.Errorf("phase A: the missing-backend notice logged %d times since the boot, want once — it says what is missing and how to fix it", notices)
 	}
-	if a.skips > phaseAMaxSkipsPerWindow {
-		t.Errorf("phase A: %d skips in %s, want at most %d — the loop does not take its idle wait", a.skips, phaseAWindow, phaseAMaxSkipsPerWindow)
+	if a.emptyChains+a.skips+a.idles != 0 {
+		t.Errorf("phase A: %d empty-chain WARN, %d skip INFO, %d idle INFO in %s — a skipped cycle logs nothing above DEBUG",
+			a.emptyChains, a.skips, a.idles, phaseAWindow)
 	}
 	for _, l := range a.errorLines {
 		if strings.Contains(strings.ToLower(l), "dream") {
@@ -367,6 +669,10 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 
 	// ---- Phase B: seed without a restart, then links.
 	stub := newDreamStub()
+	stub.setVectors(stubVectorRules())
+	for _, c := range graphCases {
+		stub.setPair(c.seedTitle, c.linkedTitle, c.linkType)
+	}
 	srv := httptest.NewServer(stub)
 	t.Cleanup(srv.Close)
 
@@ -408,28 +714,42 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 		t.Logf("backend-create %s: HTTP %d, locality %v, trust %v, warnings %v", p["name"], st, b["locality"], b["trust"], resp["warnings"])
 	}
 
-	// Two related blocks in scope private — inside the default read window
-	// (scheduler.read_scopes = private,shared,work), so no CTX_READ_SCOPES.
-	var blockIDs []string
-	for _, blk := range []struct{ title, content string }{
-		{"Zeppelin hangar heating decision",
-			"The Zeppelin hangar is heated by a heat pump from October on; the gas boiler stays as a reserve for frost below minus ten degrees."},
-		{"Zeppelin hangar heat pump installation",
-			"The heat pump for the Zeppelin hangar was installed in September and replaces the gas boiler as the primary heating of the hangar."},
-	} {
-		st, resp := child.adminCall(t, http.MethodPost, "/api/store", map[string]any{
-			"category": "decisions", "title": blk.title, "content": blk.content, "scope": "private",
-		})
-		b, _ := resp["block"].(map[string]any)
-		id, _ := b["id"].(string)
-		if st != http.StatusOK || resp["success"] != true || id == "" {
-			t.Fatalf("store %q: HTTP %d %v", blk.title, st, resp)
-		}
-		t.Logf("stored %s %q (type %v, lifecycle %v, sensitivity %v)", id, blk.title, b["type"], b["lifecycle_state"], b["sensitivity"])
-		blockIDs = append(blockIDs, id)
+	// Two pairs of related blocks in scope private — inside the default read
+	// window (scheduler.read_scopes = private,shared,work), so no
+	// CTX_READ_SCOPES — in one batch: the dream loop sees all four or none,
+	// so no block is picked before its partner exists.
+	var items []map[string]any
+	for _, c := range graphCases {
+		items = append(items,
+			map[string]any{"category": "decisions", "title": c.seedTitle, "content": c.seedContent, "scope": "private"},
+			map[string]any{"category": c.linkedCategory, "title": c.linkedTitle, "content": c.linkedContent, "scope": "private"},
+		)
+	}
+	ids := child.storeBatch(t, items)
+	label := map[string]string{}
+	for _, c := range graphCases {
+		label[ids[c.seedTitle]] = c.name + "/seed"
+		label[ids[c.linkedTitle]] = c.name + "/linked"
+		t.Logf("stored %s %q and %s %q", ids[c.seedTitle], c.seedTitle, ids[c.linkedTitle], c.linkedTitle)
 	}
 
-	var firstLink time.Duration
+	// The forward link of each pair (seed → linked) is the edge the directed
+	// expansion (graph.directed default true) follows from the seed.
+	forwardLinks := func() int {
+		var n int
+		for _, c := range graphCases {
+			var ok bool
+			if err := links.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM context_dream_links
+				WHERE source_block_id = $1 AND target_block_id = $2)`, ids[c.seedTitle], ids[c.linkedTitle]).Scan(&ok); err != nil {
+				t.Fatalf("read forward link: %v", err)
+			}
+			if ok {
+				n++
+			}
+		}
+		return n
+	}
+	var firstLink, allForward time.Duration
 	for deadline := time.Now().Add(phaseBLinkDeadline); ; {
 		select {
 		case err := <-child.done:
@@ -437,12 +757,15 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 			t.Fatalf("phase B: the child exited (%v); output tail:\n%s", err, tailLines(child.out.String(), 80))
 		default:
 		}
-		if countLinks() > 0 {
+		if firstLink == 0 && countLinks() > 0 {
 			firstLink = time.Since(seedAt)
+		}
+		if forwardLinks() == len(graphCases) {
+			allForward = time.Since(seedAt)
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Errorf("phase B: no context_dream_links row within %s of the seed; stub: %s", phaseBLinkDeadline, stub.report())
+			t.Errorf("phase B: %d of %d forward links within %s of the seed; stub: %s", forwardLinks(), len(graphCases), phaseBLinkDeadline, stub.report())
 			t.Logf("phase B output:\n%s", tailLines(child.out.String()[phaseBFrom:], 120))
 			return
 		}
@@ -450,26 +773,33 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 	}
 
 	status, services := child.health(t)
-	// One statement reads the rows and whether each joins the two stored
-	// blocks: Dream keeps running, and a count read separately could see a
-	// link the row read did not.
-	rows, err := links.Query(ctx, `SELECT row_to_json(l)::text,
-		       l.source_block_id = ANY($1::uuid[]) AND l.target_block_id = ANY($1::uuid[])
-		  FROM context_dream_links l ORDER BY created_at`, blockIDs)
+	// One statement reads the rows and whether each joins the blocks of one
+	// pair: Dream keeps running, and a count read separately could see a link
+	// the row read did not.
+	pairOf := map[string]string{}
+	for _, c := range graphCases {
+		pairOf[ids[c.seedTitle]], pairOf[ids[c.linkedTitle]] = c.name, c.name
+	}
+	rows, err := links.Query(ctx, `SELECT l.source_block_id::text, l.target_block_id::text, l.relationship, l.raw_confidence
+		  FROM context_dream_links l ORDER BY created_at`)
 	if err != nil {
 		t.Fatalf("read context_dream_links: %v", err)
 	}
 	var linkRows []string
 	var between int
+	forwardType := map[string]string{} // pair name → relationship of its seed → linked row
 	for rows.Next() {
-		var s string
-		var joins bool
-		if err := rows.Scan(&s, &joins); err != nil {
+		var src, dst, rel string
+		var conf float64
+		if err := rows.Scan(&src, &dst, &rel, &conf); err != nil {
 			t.Fatalf("scan link: %v", err)
 		}
-		linkRows = append(linkRows, s)
-		if joins {
+		linkRows = append(linkRows, fmt.Sprintf("%s → %s %s %.2f", label[src], label[dst], rel, conf))
+		if p := pairOf[src]; p != "" && p == pairOf[dst] {
 			between++
+		}
+		if strings.HasSuffix(label[src], "/seed") && strings.HasSuffix(label[dst], "/linked") {
+			forwardType[pairOf[src]] = rel
 		}
 	}
 	rows.Close()
@@ -477,7 +807,8 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 		t.Fatalf("read context_dream_links: %v", err)
 	}
 
-	t.Logf("phase B: first link %s after the seed; %d link(s): %v", firstLink.Round(100*time.Millisecond), len(linkRows), linkRows)
+	t.Logf("phase B: first link %s, both forward links %s after the seed; %d link(s): %v",
+		firstLink.Round(100*time.Millisecond), allForward.Round(100*time.Millisecond), len(linkRows), linkRows)
 	t.Logf("phase B: stub %s", stub.report())
 	t.Logf("phase B: /health %q services %v", status, services)
 
@@ -491,7 +822,109 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 		t.Errorf("phase B: a link without a link-evaluation call at the stub: %s", stub.report())
 	}
 	if between != len(linkRows) {
-		t.Errorf("phase B: %d of %d link(s) join the two stored blocks %v", between, len(linkRows), blockIDs)
+		t.Errorf("phase B: %d of %d link(s) join the blocks of one pair", between, len(linkRows))
+	}
+	// Phase C weighs the link by its type: the forward link of each pair must
+	// carry the type the stub answered (dream keeps factual only across two
+	// categories, coerceCategoryFactual).
+	for _, c := range graphCases {
+		if forwardType[c.name] != c.linkType {
+			t.Errorf("phase B: the forward link of the %s pair is %q, want %q", c.name, forwardType[c.name], c.linkType)
+		}
+	}
+	if n := strings.Count(child.out.String()[phaseBFrom:], dreamServesNotice); n != 1 {
+		t.Errorf("phase B: %q logged %d times after the seed, want once", dreamServesNotice, n)
+	}
+	// What the seed of a loopback backend adds to the log besides (issue
+	// #495, read decision): the dispatch layer's coverage WARN, once per
+	// policy derivation — at the boot and at each pool reload — for a local
+	// origin with background roles and no limits.slots.
+	const coverageWarn = `"msg":"dispatch: background-reachable local target without slots cap`
+	t.Logf("phase B: %d × dispatch coverage WARN before the seed, %d after it",
+		strings.Count(child.out.String()[:phaseBFrom], coverageWarn), strings.Count(child.out.String()[phaseBFrom:], coverageWarn))
+
+	// ---- Phase C: a query brings the linked block in through the graph.
+	var distractors []map[string]any
+	for j := 1; j <= phaseCDistractors; j++ {
+		distractors = append(distractors, map[string]any{
+			"category": "reference", "title": distractorTitle(j), "content": distractorContent(j), "scope": "private",
+		})
+	}
+	for title, id := range child.storeBatch(t, distractors) {
+		label[id] = "distractor/" + strings.TrimPrefix(title, "Depot inventory sheet ")
+	}
+	// Every block carries its vector before the queries run: a block without
+	// one is no semantic candidate, and the measurement needs the 80 in the arm.
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(500 * time.Millisecond) {
+		var missing int
+		if err := links.QueryRow(ctx, `SELECT count(*) FROM context_blocks WHERE embedding IS NULL AND NOT is_archived`).Scan(&missing); err != nil {
+			t.Fatalf("count unembedded blocks: %v", err)
+		}
+		if missing == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("phase C: %d block(s) still without a vector after a minute", missing)
+		}
+	}
+
+	type measured struct {
+		on5, on20, off5, off20 []string
+		onScores5              []float64
+		arms                   map[string]bool
+	}
+	render := func(list []string, scores []float64) string {
+		parts := make([]string, len(list))
+		for i, id := range list {
+			parts[i] = label[id]
+			if scores != nil {
+				parts[i] += fmt.Sprintf(" %.5f", scores[i])
+			}
+		}
+		return strings.Join(parts, ", ")
+	}
+	got := map[string]*measured{}
+	for _, c := range graphCases {
+		m := &measured{}
+		m.on5, m.onScores5, m.arms = child.graphQuery(t, c.query, 5)
+		var scores20 []float64
+		m.on20, scores20, _ = child.graphQuery(t, c.query, 20)
+		got[c.name] = m
+		t.Logf("phase C %s graph on, limit 5: [%s]", c.name, render(m.on5, m.onScores5))
+		t.Logf("phase C %s graph on, limit 20: [%s]", c.name, render(m.on20, scores20))
+	}
+	child.setGraphEnabled(t, false)
+	for _, c := range graphCases {
+		m := got[c.name]
+		m.off5, _, _ = child.graphQuery(t, c.query, 5)
+		m.off20, _, _ = child.graphQuery(t, c.query, 20)
+		t.Logf("phase C %s graph off, limit 5: [%s]", c.name, render(m.off5, nil))
+	}
+
+	phaseCLog := child.out.String()
+	t.Logf("phase C: child logged %d × \"graph expansion active without reranker noise-filter\", %d × \"graph expand failed\"",
+		strings.Count(phaseCLog, "graph expansion active without reranker noise-filter"), strings.Count(phaseCLog, "graph expand failed"))
+	for _, c := range graphCases {
+		m, seed, linked := got[c.name], ids[c.seedTitle], ids[c.linkedTitle]
+		// The precondition of the measurement: the query finds the seed first,
+		// and no arm of the fusion finds the linked block.
+		if indexOf(m.on5, seed) != 0 || indexOf(m.off5, seed) != 0 {
+			t.Errorf("phase C %s: the seed is not the first source (graph on: %d, off: %d)", c.name, indexOf(m.on5, seed), indexOf(m.off5, seed))
+		}
+		if m.arms[linked] {
+			t.Errorf("phase C %s: an arm of the fusion found the linked block — it is a direct hit, the measurement proves nothing", c.name)
+		}
+		if indexOf(m.off20, linked) >= 0 {
+			t.Errorf("phase C %s: the linked block is a source with graph.enabled off (position %d) — it does not depend on the link", c.name, indexOf(m.off20, linked))
+		}
+		t.Logf("phase C %s (%s link): linked block at position %d of the limit-5 answer, %d of the limit-20 answer with graph.enabled on (-1 = absent)",
+			c.name, c.linkType, indexOf(m.on5, linked), indexOf(m.on20, linked))
+	}
+	// The factual link (weight 0.9) places its neighbour at 0.54 × the top
+	// score, above every block only the semantic arm found: it is the second
+	// source of the default-sized answer. The topical one is logged above.
+	if f := got["factual"]; indexOf(f.on5, ids[graphCases[1].linkedTitle]) < 0 {
+		t.Errorf("phase C factual: the linked block is not among the 5 sources with graph.enabled on — the graph expansion did not bring it")
 	}
 
 	// ERROR lines from the seed up to the SIGTERM, and those of the shutdown.
@@ -512,6 +945,11 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 			t.Logf("phase B ERROR (%s): %s", w.name, l)
 			if w.name == "before the stop" && strings.Contains(strings.ToLower(l), "dream") {
 				t.Errorf("phase B: ERROR line naming dream: %s", l)
+			}
+			// Issue #495: the listener's context ending with the SIGTERM is the
+			// stop, not a fault — deploy.sh counts ERROR lines after a deploy.
+			if w.name == "during the shutdown" && strings.Contains(l, `"msg":"listener: pgxlisten error"`) {
+				t.Errorf("phase B: the listener's stop logged at ERROR: %s", l)
 			}
 		}
 	}

@@ -167,16 +167,22 @@ func (r *Router) FloorSens(s backends.Sensitivity, scope string) backends.Sensit
 // pre-pick cycle-skip check (eject profile, disabled rows, missing role).
 // SensPublic is the weakest gate: trust exclusions are per-block and surface
 // later at the per-call chains.
+//
+// It asks the pool the way a probe has to (issue #495): TrustCeilings answers
+// what Chain(role, SensPublic, r.Tenant) answers — same gates, held against
+// each other by TestTrustCeilingsMatchChain — without the WARN Chain writes
+// for every empty chain. The answer "no" is a state the dream loop reports
+// once per change (BackendNotice), not once per skipped cycle.
 func (r *Router) available(role string) bool {
 	// TENANT-DECISION(dream-tenant): the background path passes r.Tenant — the
 	// iterated tenant's egress scope (04-W6/T38). The scheduler sets it per
 	// tenant via newRouter, sourced EXCLUSIVELY from the authoritative register
-	// (never request input). Chain() then sees only '_global' ∪ this tenant's
-	// backends, never a foreign tenant-private one. The default tenant's
-	// '_global' (and the "" zero value) is the fail-closed shared-only view, so a
-	// single-tenant run is byte-identical to the pre-T38 hardcoded "".
-	_, err := r.Pool.Chain(role, backends.SensPublic, r.Tenant)
-	return err == nil
+	// (never request input). The ceiling is then that of '_global' ∪ this
+	// tenant's backends, never of a foreign tenant-private one. The default
+	// tenant's '_global' (and the "" zero value) is the fail-closed shared-only
+	// view, so a single-tenant run is byte-identical to the pre-T38
+	// hardcoded "".
+	return r.Pool.TrustCeilings(role).For(r.Tenant) >= backends.SensPublic.Rank()
 }
 
 // chat is the call of the four dream stages that PARSE their answer (eval,

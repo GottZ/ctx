@@ -356,3 +356,78 @@ func TestSeedRowsAnthropicChatLeg(t *testing.T) {
 		t.Errorf("embed payload = %v, want the ollama default", rows[seedEmbedName].payload)
 	}
 }
+
+// captureStderr runs fn with os.Stderr redirected and returns what it wrote.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	done := make(chan string)
+	go func() {
+		var b strings.Builder
+		buf := make([]byte, 4096)
+		for {
+			n, e := r.Read(buf)
+			b.Write(buf[:n])
+			if e != nil {
+				break
+			}
+		}
+		done <- b.String()
+	}()
+	fn()
+	_ = w.Close()
+	os.Stderr = orig
+	return <-done
+}
+
+// TestSeedShowsTheServersWarnings (issue #495): backend-create answers
+// warnings next to its success — for the seed's chat row on a loopback host
+// the server warns that a dream role on a local backend has no dream timeout.
+// `ctx backends create` prints the whole answer; the seed dropped the field,
+// so a fresh installation's operator never saw it. The seed now names each
+// warning on stderr next to the row it belongs to, and the result document
+// carries them by row name.
+func TestSeedShowsTheServersWarnings(t *testing.T) {
+	const warning = "dream role on a local backend without a dream timeout override: CPU-class inference tears the DreamTimeout code default and corrupts back-off statistics"
+	m := newInitMock(t, serverAdmin, nil)
+	m.createWarnings = map[string][]string{seedChatName: {warning}}
+	spec := seedSpec{
+		Chat:  seedBackend{Host: "http://127.0.0.1:11434", Model: "qwen3"},
+		Embed: seedBackend{Host: "http://127.0.0.1:11434", Model: "qwen3-embedding"},
+	}
+	var runErr error
+	var stdout string
+	stderr := captureStderr(t, func() {
+		stdout = captureStdout(t, func() {
+			runErr = runBackendsSeed(func() (*Client, error) { return m.client(), nil }, spec, false)
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("runBackendsSeed: %v", runErr)
+	}
+	if !strings.Contains(stderr, seedChatName+": warning: "+warning) {
+		t.Errorf("stderr does not name the chat row's warning:\n%s", stderr)
+	}
+	if strings.Contains(stderr, seedEmbedName+": warning") {
+		t.Errorf("stderr names a warning for the embed row, which got none:\n%s", stderr)
+	}
+	// Decoded as the pipe consumer reads it: the wire document, not the Go type.
+	var res struct {
+		Success  bool                `json:"success"`
+		Warnings map[string][]string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &res); err != nil || !res.Success {
+		t.Fatalf("result document (stdout is a pipe, so JSON): %v\n%s", err, stdout)
+	}
+	if got := res.Warnings[seedChatName]; len(got) != 1 || got[0] != warning {
+		t.Errorf("result warnings = %v, want the chat row's one warning", res.Warnings)
+	}
+	if _, ok := res.Warnings[seedEmbedName]; ok {
+		t.Errorf("result warnings name the embed row: %v", res.Warnings)
+	}
+}

@@ -274,8 +274,12 @@ func RunDreamCycle(ctx context.Context, pool *pgxpool.Pool, r *Router, opts llm.
 	// Returning (0, nil) sends the scheduler loop into its idle wait WITHOUT
 	// claiming a block — the skip must not touch any block cooldown, or
 	// gaming sessions would smear the back-off statistics (design 03 §2.4).
+	// The scheduler's loop asks first (BackendNotice, which tells the
+	// operator once per change of state); this check is the guard of every
+	// other caller and of a pool that changed in between, so it logs at
+	// DEBUG (issue #495).
 	if !r.available(backends.RoleDream) {
-		slog.Info("dream: no eligible dream backend — cycle skipped before pick")
+		slog.Debug("dream: no eligible dream backend — cycle skipped before pick", "tenant_scope", r.Tenant)
 		return 0, nil
 	}
 

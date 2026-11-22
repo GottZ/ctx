@@ -10,6 +10,9 @@
 //   - upgrade_with_the_setting_preset: the same with ctx.fresh_install = 'on'
 //     as a database default, which every new session starts with — false:
 //     the runner's 'off' for its own files wins;
+//   - history_of_one_row: a v4.x database that applied migration 001 alone
+//     (issue #495) — refused with the hop: one row is a history, only none
+//     is a fresh install;
 //   - interrupted_first_boot: a first boot that stopped after 150 — its next
 //     run finds a history, so false (the old default);
 //   - restored_over_a_fresh_install: an old dump restored over a database
@@ -24,6 +27,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -31,6 +35,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
+	"github.com/GottZ/ctx/migrations"
 )
 
 func TestDreamInstallDefault(t *testing.T) {
@@ -90,6 +95,36 @@ func TestDreamInstallDefault(t *testing.T) {
 		migrate(t, preset)
 		if load(t, preset) {
 			t.Error("an upgrade with ctx.fresh_install preset to on reads dream_default = true, want false")
+		}
+	})
+
+	// Issue #495: the smallest history there is — one row. The baseline
+	// records 112 (001–113), so a history of one row is a database of the
+	// v4.x line that applied migration 001 alone: the section of 001 as that
+	// runner applied it, and its row. One row is a history like any other —
+	// the runner refuses it with the v4.x hop, it never takes it for a fresh
+	// install (which would apply the baseline over its schema and record
+	// dream_default = true).
+	t.Run("history_of_one_row", func(t *testing.T) {
+		pool := testdb.SetupTestDBUpTo(t, 0)
+		first := migrations.Folded()[0]
+		body, err := migrations.Section(first.Filename)
+		if err != nil {
+			t.Fatalf("section %s: %v", first.Filename, err)
+		}
+		if _, err := pool.Exec(ctx, string(body)); err != nil {
+			t.Fatalf("apply %s: %v", first.Filename, err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO _migrations (version, filename, checksum) VALUES ($1, $2, $3)`,
+			first.Version, first.Filename, first.Checksum); err != nil {
+			t.Fatalf("record %s: %v", first.Filename, err)
+		}
+		var rows int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM _migrations`).Scan(&rows); err != nil || rows != 1 {
+			t.Fatalf("fixture: _migrations holds %d rows (err %v), want exactly 1", rows, err)
+		}
+		if err := store.RunMigrations(ctx, pool); !errors.Is(err, store.ErrPreBaselineDatabase) {
+			t.Errorf("RunMigrations on a history of one row = %v, want the pre-baseline refusal — one row is no fresh install", err)
 		}
 	})
 
