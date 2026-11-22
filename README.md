@@ -30,9 +30,10 @@ ctx get <block-id>                                      read one block in full
 - **Time counts.** Every block keeps the day it was written and the full dates it names (2026-03-29, 29.03.2026,
   March 2026). A question that names a time, such as "every Tuesday", "at Christmas" or "immer dienstags", ranks
   the matching blocks higher.
-- **Duplicates caught, links on request.** Guard compares each new block with the closest ones and, depending on
-  the block type, archives a duplicate or flags it for you. Dream Mode, once you switch it on, reads blocks in the
-  background, links related ones and marks what a newer block replaces.
+- **Duplicates caught, links found.** Guard compares each new block with the closest ones and, depending on the
+  block type, archives a duplicate or flags it for you. Dream Mode reads blocks in the background, links related
+  ones and marks what a newer block replaces. A new installation runs it from the start; an upgraded one keeps it
+  as it was.
 - **One store for every agent.** 17 MCP tools for Claude Code, claude.ai or any MCP client, a CLI for scripts,
   cron and hooks, and a plain HTTP API. In Claude Code, two hooks give each subagent the project's briefing when it
   starts and save the findings it marks when it ends.
@@ -54,12 +55,13 @@ ctx get <block-id>                                      read one block in full
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/how-ctx-works-dark.svg">
-    <img alt="How ctx works: four ways in (MCP, CLI, HTTP, web UI) lead to one Go server on PostgreSQL. Storing a block records its dates, computes an embedding and checks for duplicates. A question is searched four ways, weighted by time and by links, and answered by the chat model. A topic map groups the blocks, and the optional Dream Mode links them in the background." src="docs/how-ctx-works.svg" width="100%">
+    <img alt="How ctx works: four ways in (MCP, CLI, HTTP, web UI) lead to one Go server on PostgreSQL. Storing a block records its dates, computes an embedding and checks for duplicates. A question is searched four ways, weighted by time and by links, and answered by the chat model. A topic map groups the blocks, and Dream Mode links them in the background." src="docs/how-ctx-works.svg" width="100%">
   </picture>
 </p>
 
 One Go server (`ctxd`) on PostgreSQL 18 with pgvector and TimescaleDB. The models run wherever its backend pool
-points. Dream Mode, shown in the picture, runs only when you switch it on. A block takes this path:
+points. Dream Mode, shown in the picture, runs on a new installation from the first boot on and calls the chat model
+while it runs; an upgraded installation keeps it as it was. A block takes this path:
 
 | Step | What happens |
 |---|---|
@@ -215,9 +217,15 @@ Below v4.19.0, v5 refuses the database. Path and rollback:
    claude.ai and other remote clients sign in with OAuth 2.1: register one with `ctx mcp add "Claude AI"` and add
    `https://your-ctx-host.example/mcp` as a connector. For Hermes, see [Hermes plugins](#hermes-plugins).
 
-4. **Optional.** Dream Mode: set `CTX_DREAM_ENABLED=true` in `.env` and run `docker compose up -d ctx` again. It
-   keeps calling your chat model in the background; `ctx dream throttle` adds a pause between its calls. The
-   OpenAI-compatible API: [enabling it](docs/operations.md#upgrading-to-5330-enabling-the-openai-compatible-api).
+4. **Dream Mode is on.** A new installation runs it from the first boot; it keeps calling your chat model in the
+   background as soon as the pool from step 1 serves, and on a metered backend that is cost. `ctx init` and the
+   boot log say so. `ctx dream throttle` adds a pause between its calls, `ctx dream off` stops it until the next
+   restart, and `CTX_DREAM_ENABLED=false` in `.env` with `docker compose up -d ctx` switches it off
+   ([details](docs/operations.md#dream-on-a-new-installation)). An upgraded installation keeps Dream as it was:
+   on only with `CTX_DREAM_ENABLED=true`.
+
+5. **Optional.** The OpenAI-compatible API:
+   [enabling it](docs/operations.md#upgrading-to-5330-enabling-the-openai-compatible-api).
 
 The full walk-through, with every option, is in [Operations](docs/operations.md#first-run-ctx-init).
 
@@ -345,7 +353,8 @@ Three plugins for [Hermes](https://github.com/NousResearch/hermes-agent) live in
   Calls through `/v1` keep no text unless you switch that on. Web chat sessions, kept until you set
   `CTX_WEBCHAT_SESSION_RETENTION`. A log of block reads.
 - **Background work, server:** embeddings and duplicate checks for new blocks; on days with new activity, a daily
-  report at 03:00 per tenant, written by the chat model and saved as a block; Dream Mode, once you switch it on.
+  report at 03:00 per tenant, written by the chat model and saved as a block; Dream Mode, on a new installation from
+  the start, on an upgraded one as it was.
 - **Stored by the CLI:** a config file with the server address and your key, in `$XDG_CONFIG_HOME/ctx`,
   `%APPDATA%\ctx` on Windows, else `~/.config/ctx`. With `ctx init`, the hooks and the statusline in Claude Code's
   `settings.json`, with a backup copy before each change. With `ctx project init`, a repository key in

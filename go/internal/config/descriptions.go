@@ -15,7 +15,7 @@ var keyDescriptions = map[string]string{ //nolint:gosec // G101-Fehlalarm: SchlÃ
 	"server.db_sslmode":                              "libpq sslmode for the database connection (disable, require, verify-full, ...); applied on restart",
 	"server.listen_addr":                             "host:port the HTTP API binds to; the default 127.0.0.1:8080 is loopback-only, :8080 binds every interface (the container image and compose set that); applied on restart",
 	"server.instance_kind":                           "What this instance is: live (default) or measure-copy â€” a corpus restored for the shadow measurement programme; the armsweep driver refuses shadow_types against anything but measure-copy, applied on restart",
-	"dream.enabled":                                  "Master switch for the background dream pipeline (link discovery, keywords, temporal review); takes effect on restart",
+	"dream.enabled":                                  "Master switch for the background dream pipeline (link discovery, keywords, temporal review), which calls the chat model while it runs; unset, a new installation runs it and an upgraded one does not (source install); takes effect on restart",
 	"dream.idle_wait":                                "Seconds the dream scheduler sleeps when no block is eligible; eligible blocks are still processed back-to-back",
 	"dream.parallelism":                              "Number of concurrent dream workers (clamped to 1-16, restart required); higher values load the chat backend harder",
 	"dream.language":                                 "Language tag for the daily-synthesis report; empty or de keeps the legacy German Tagesbericht series, other tags localize title and prompt",

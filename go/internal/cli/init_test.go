@@ -726,6 +726,58 @@ func TestStepServerRejectsUnparseableBody(t *testing.T) {
 	}
 }
 
+// TestStepDreamReportsTheServersDream pins the Dream line of step 4 (issue
+// #492): it reads the public /health, says "on" with what Dream does to the
+// chat backend and how to slow or stop it while the server lists a dream
+// service (an unhealthy 503 of an empty pool included — that is the state of a
+// new installation before the seed), "off" with the switch otherwise, and asks
+// nothing.
+func TestStepDreamReportsTheServersDream(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	for _, c := range []struct {
+		name   string
+		code   int
+		body   string
+		want   []string
+		reject []string
+	}{
+		{"on_before_the_seed", http.StatusServiceUnavailable,
+			`{"status":"unhealthy","services":{"database":"ok","embed":"error","chat":"error","dream":"error"}}`,
+			[]string{"Dream", "on [ok]", "chat model", "metered backend", "ctx dream throttle", "ctx dream off", "CTX_DREAM_ENABLED=false"},
+			[]string{"CTX_DREAM_ENABLED=true"}},
+		{"on_after_the_seed", http.StatusOK,
+			`{"status":"ok","services":{"database":"ok","embed":"ok","chat":"ok","dream":"ok"}}`,
+			[]string{"on [ok]", "ctx dream throttle"}, nil},
+		{"off", http.StatusOK,
+			`{"status":"ok","services":{"database":"ok","embed":"ok","chat":"ok"}}`,
+			[]string{"off [skip]", "CTX_DREAM_ENABLED=true"},
+			[]string{"ctx dream throttle", "on [ok]"}},
+		{"invalid", http.StatusOK, `not json`, []string{"unknown"}, []string{"on [ok]", "off [skip]"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/health" {
+					t.Errorf("request to %s, want /health only", r.URL.Path)
+				}
+				w.WriteHeader(c.code)
+				_, _ = w.Write([]byte(c.body))
+			}))
+			defer srv.Close()
+			out := captureStdout(t, func() { stepDream(Config{BaseURL: srv.URL, Key: "k"}) })
+			for _, w := range c.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("output lacks %q:\n%s", w, out)
+				}
+			}
+			for _, r := range c.reject {
+				if strings.Contains(out, r) {
+					t.Errorf("output carries %q:\n%s", r, out)
+				}
+			}
+		})
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
 }

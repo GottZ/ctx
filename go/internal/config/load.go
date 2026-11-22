@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -340,11 +341,13 @@ func Defaults() *Config {
 }
 
 // FromEnv parses the environment into a Config: fromSources with an env
-// lookup (registry maps key → env var; env:"-" fields skip the env source).
-// Callers run Validate afterwards and abort on HasErrors.
+// lookup (registry maps key → env var; env:"-" fields skip the env source),
+// then the installation's defaults on the keys the environment left at their
+// built-in default (applyInstallDefaults). Callers run Validate afterwards
+// and abort on HasErrors.
 func FromEnv() (*Config, []Issue) {
 	byKey := envVarByKey()
-	return fromSources(func(key string) (string, bool) {
+	c, issues := fromSources(func(key string) (string, bool) {
 		envVar := byKey[key]
 		if envVar == "" {
 			return "", false
@@ -355,4 +358,37 @@ func FromEnv() (*Config, []Issue) {
 		}
 		return v, true
 	})
+	applyInstallDefaults(c)
+	return c, issues
+}
+
+// SourceInstall is the sources label of a key that carries the installation's
+// default instead of the built-in one: the database decided it when it was
+// installed (migration 192, issue #492), the environment did not set the key.
+// The settings API passes it through as "install".
+const SourceInstall = "install"
+
+// dreamInstallDefault is this process's installation default of
+// dream.enabled: true when the database recorded at its first migration run
+// that it is a new installation (context_install.dream_default). Set once at
+// boot, after the migrations and before the first config generation that
+// serves (cmd/ctxd); every later FromEnv — the boot's, each reload's and each
+// tenant overlay's candidate build (config.Build) — reads it, so no generation
+// can fall back to the built-in false while the dream workers run.
+var dreamInstallDefault atomic.Bool
+
+// SetDreamInstallDefault records the installation's default of dream.enabled
+// (see dreamInstallDefault).
+func SetDreamInstallDefault(on bool) { dreamInstallDefault.Store(on) }
+
+// applyInstallDefaults puts the installation's defaults on c. Only a key the
+// environment left unset takes one ("default" in the sources map): an
+// explicit CTX_DREAM_ENABLED decides in both directions, and since booleans
+// match "true" exactly, any other value it carries is an explicit false.
+func applyInstallDefaults(c *Config) {
+	const key = "dream.enabled"
+	if dreamInstallDefault.Load() && c.sources[key] == "default" {
+		c.Dream.Enabled = true
+		c.sources[key] = SourceInstall
+	}
 }
