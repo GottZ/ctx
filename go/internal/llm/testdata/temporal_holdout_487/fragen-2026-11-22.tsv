@@ -1,0 +1,490 @@
+# Holdout of issue #487 (the holdout of the review round (fragen.tsv)), asked on 2026-11-22 at noon UTC: written before that round's diff was read.
+# class, expected tense (past/future/neutral/egal), expected rule (ja/nein/egal), disputed (s), question, answered right at 36b915f8 (1/0), answered right at aa1354ea (1/0).
+A	past	ja	-	Was haben wir am Montag deployed?	1	1
+A	past	ja	-	was wurde am dienstag gemerged	1	1
+A	past	ja	-	Welche PRs sind am Mittwoch reingekommen?	0	1
+A	past	ja	-	Wer hat am Donnerstag die Migration eingespielt?	1	1
+A	past	ja	-	Was ging am Freitag schief?	1	1
+A	past	ja	-	Woran haben wir am Samstag gearbeitet?	1	1
+A	past	ja	-	Welche Bugs wurden am Wochenende gefixt?	0	1
+A	past	ja	-	Was ist im Oktober passiert?	0	0
+A	past	ja	-	Welche Releases gab es im September?	0	0
+A	past	ja	-	Was hatten wir im Dezember entschieden?	0	0
+A	past	ja	-	Was wurde im Dezember beschlossen?	0	0
+A	past	ja	-	Welche Server sind im Juli ausgefallen?	0	0
+A	past	ja	-	Wann hatte Damien am Dienstag den Hotfix eingespielt	1	1
+A	past	ja	-	Am Montag hat jemand die Config kaputt gemacht, wer war das?	1	1
+A	past	ja	-	Montag deployment kaputt gegangen?	0	0
+A	past	ja	-	Die Datenbank lief am Mittwoch voll, warum?	1	1
+A	past	ja	-	Warum brach der Build am Donnerstag ab?	1	1
+A	past	ja	-	Wieso fiel der Spark am Freitag aus?	1	1
+A	past	ja	-	Welche Tickets sind von Montag bis Mittwoch geschlossen worden?	1	1
+A	past	ja	-	Was ist von Dienstag bis Donnerstag refactored worden?	1	1
+A	past	ja	-	Was hat sich am Wochenende am Index verändert?	1	1
+A	past	ja	-	Zeig mir, was am Freitag gepusht wurde	1	1
+A	past	ja	-	Ich will wissen, welche Commits am Montag gepusht wurden.	0	1
+A	past	ja	-	Kannst du nachsehen, ob am Dienstag jemand den Cache geleert hat?	0	1
+A	past	ja	-	Weißt du noch, was wir im August besprochen hatten?	0	0
+A	past	ja	-	Mich interessiert, warum der Deploy am Mittwoch fehlschlug.	0	0
+A	past	ja	-	Was hat Jan am Donnerstag reviewed?	1	1
+A	past	ja	-	Welche Configs wurden am Samstag überschrieben?	0	1
+A	past	ja	-	Wer verstand im Oktober noch die Retry-Logik?	0	0
+A	past	ja	-	Wir schrieben im Juni einen Migrationsplan, wo liegt der?	0	0
+A	past	ja	-	Welche Entscheidung fiel im März zum Schema?	0	0
+A	past	ja	-	Wer nahm am Montag den alten Server vom Netz?	1	1
+A	past	ja	-	Was lief am Wochenende im Cron?	1	1
+A	past	ja	-	Was war am Dienstag mit dem Ollama los?	1	1
+A	past	ja	-	Wie oft ist der Guard am Freitag angesprungen?	1	1
+A	past	ja	-	Warum sind am Mittwoch so viele Requests abgelehnt worden?	0	1
+A	past	ja	-	Welche Migrationen hatten wir im Februar zurückgerollt?	0	0
+A	past	ja	-	am freitag was kaputt gemacht?	1	0
+A	past	ja	-	wer hat am montag den master force-gepusht	0	1
+A	past	ja	-	Hat jemand am Donnerstag die Backups geprüft?	0	1
+A	past	ja	-	Sind am Wochenende Alerts gekommen?	1	1
+A	past	ja	-	Wurde im Mai das Embedding-Modell gewechselt?	0	0
+A	past	ja	-	Wurden im April die Keys rotiert?	0	0
+A	past	ja	-	Gab es am Dienstag einen Ausfall?	1	1
+A	past	ja	-	War der Spark am Samstag erreichbar?	1	1
+A	past	ja	-	Wer hatte am Mittwoch Rufbereitschaft gehabt?	1	1
+A	past	ja	-	Welche Fehler traten am Donnerstag in den Logs auf?	0	0
+A	past	ja	-	Wann genau startete der Container am Freitag neu?	0	0
+A	past	ja	-	Was haben wir im Januar migriert?	0	0
+A	past	ja	-	Was ist im Dezember schiefgelaufen?	0	0
+A	past	ja	-	Was ging im Dezember live?	0	0
+A	past	ja	-	Welche Features sind im Dezember released worden?	0	0
+A	past	ja	-	Was wurde von Montag bis Freitag deployed?	1	1
+A	past	ja	-	Welche Issues haben wir von Dienstag bis Samstag abgearbeitet?	0	1
+A	past	ja	-	Wer committete am Montag die kaputten Tests?	0	0
+A	past	ja	-	Was hat Damien am Wochenende gemerged	1	1
+A	past	ja	-	Was gab's im Oktober Neues?	0	0
+A	past	ja	-	Was hab ich am Dienstag eigentlich gemacht	1	1
+A	past	ja	s	Was ham wir am mitwoch gefixt	0	0
+A	past	ja	-	Letzten Freitag – was wurde da abgekündigt?	1	1
+A	past	ja	-	Vergangenen Dienstag ist der Index neu gebaut worden, wie lange dauerte das?	1	1
+A	past	ja	-	Welche Alerts waren am Donnerstag offen?	1	1
+A	past	ja	-	Wer war am Montag im Call?	1	1
+A	past	ja	-	nachdem wir am Mittwoch upgegradet hatten, was ging kaputt?	1	1
+A	past	ja	-	Welcher Commit hat am Freitag die Latenz verdoppelt?	0	1
+A	past	ja	-	Was haben die Tests am Samstag gemeldet?	1	1
+B	future	ja	-	Was steht am Montag an?	1	1
+B	future	ja	-	Was ist für Dienstag geplant?	0	1
+B	future	ja	-	Was deployen wir am Mittwoch?	0	1
+B	future	ja	-	Wer hat am Donnerstag Rufbereitschaft?	1	1
+B	future	ja	-	Wer übernimmt am Freitag das Release?	1	1
+B	future	ja	s	Was machen wir am Wochenende mit dem Wartungsfenster?	0	1
+B	future	ja	-	Was wird am Montag deployed?	0	1
+B	future	ja	-	Was wird im Dezember released?	0	0
+B	future	ja	-	Welche Migrationen werden im Januar eingespielt?	0	0
+B	future	ja	-	Was haben wir im Dezember vor?	0	0
+B	future	ja	s	Was haben wir für März geplant?	0	0
+B	future	ja	-	Was ist für März geplant?	0	0
+B	future	ja	-	Ist das Upgrade für Februar geplant?	0	0
+B	future	ja	-	Steht am Mittwoch noch ein Review an?	1	1
+B	future	ja	-	Wann soll am Dienstag der Freeze beginnen?	1	1
+B	future	ja	-	Müssen wir am Freitag die Zertifikate erneuern?	1	1
+B	future	ja	-	Können wir am Samstag den Server neu starten?	1	1
+B	future	ja	-	Sollen wir im April auf PG 19 gehen?	0	0
+B	future	ja	-	Werden wir im Mai die Lizenz verlängern?	0	0
+B	future	ja	-	Wird der Spark am Donnerstag gewartet?	1	1
+B	future	ja	-	Was läuft von Montag bis Mittwoch im Wartungsfenster?	0	1
+B	future	ja	-	Wer ist von Dienstag bis Freitag im Urlaub?	1	1
+B	future	ja	-	Ist der Cluster am Montag schon migriert?	1	1
+B	future	ja	-	Ist das Backup für Mittwoch eingeplant?	0	1
+B	future	ja	-	Welche Tickets sind für Freitag eingeplant?	0	1
+B	future	ja	-	Wir wollen im Juni refactoren, was muss vorher passieren?	0	0
+B	future	ja	-	Ich plane am Donnerstag ein Rollback, was muss ich beachten?	1	1
+B	future	ja	-	Wann beginnt am Montag der Deploy?	1	1
+B	future	ja	-	Was kommt im Dezember auf uns zu?	0	0
+B	future	ja	-	Geht der neue Release am Dienstag raus?	1	1
+B	future	ja	-	Fällt das Meeting am Mittwoch aus?	1	1
+B	future	ja	-	Wer spielt am Freitag das Update ein?	1	1
+B	future	ja	-	Was müssen wir bis Freitag erledigen?	0	1
+B	future	ja	-	Was ist bis Mittwoch fertig zu machen?	0	1
+B	future	ja	-	Wird bis Donnerstag gemerged?	1	1
+B	future	ja	-	Bis Montag muss der Fix gepusht sein – wer macht das?	1	1
+B	future	ja	-	Bis Dienstag sollte alles refactored sein, schaffen wir das?	0	0
+B	future	ja	-	Was ist im Januar fällig?	0	0
+B	future	ja	-	Welche Zertifikate laufen im Februar ab?	0	0
+B	future	ja	-	Welche Lizenzen laufen im Dezember aus?	0	0
+B	future	ja	-	Was steht im Oktober an?	0	0
+B	future	ja	-	was steht am samstag so an	1	1
+B	future	ja	-	samstag wartung geplant?	1	1
+B	future	ja	s	montag release?	1	1
+B	future	ja	-	Haben wir am Dienstag ein Wartungsfenster?	1	1
+B	future	ja	-	Hast du am Mittwoch Zeit für ein Review?	1	1
+B	future	ja	-	Habt ihr am Freitag Deploy-Freeze?	1	1
+B	future	ja	-	Sind am Donnerstag Deploys erlaubt?	1	1
+B	future	ja	s	Ist am Wochenende jemand erreichbar?	1	1
+B	future	ja	-	Was erwartet uns im März?	0	0
+B	future	ja	-	Was werden wir im April angehen?	0	0
+B	future	ja	-	Wann wird im Mai das Audit durchgeführt?	0	0
+B	future	ja	-	Was haben wir am Montag auf dem Plan?	0	1
+B	future	ja	-	Was hat am Dienstag Priorität?	0	1
+B	future	ja	-	Wer hat im Dezember Bereitschaft?	0	0
+B	future	ja	-	Was gibt es am Freitag zu tun?	0	1
+B	future	ja	-	Welche Deadlines liegen im Januar?	0	0
+B	future	ja	-	Was wollen wir von Mittwoch bis Freitag schaffen?	0	1
+B	future	ja	-	Ab Montag gilt der neue Freeze, was heißt das?	0	1
+C	past	ja	-	What did we deploy on Monday?	1	1
+C	past	ja	-	what got merged on tuesday	1	1
+C	past	ja	-	Which PRs were merged on Wednesday?	1	1
+C	past	ja	-	Who broke the build on Thursday?	1	1
+C	past	ja	-	What went wrong on Friday?	1	1
+C	past	ja	-	What did we work on over the weekend?	1	1
+C	past	ja	-	What happened in October?	0	0
+C	past	ja	-	Which releases shipped in September?	0	0
+C	past	ja	-	What had we decided in December?	0	0
+C	past	ja	-	What was decided in December?	0	0
+C	past	ja	-	Which servers went down in July?	0	0
+C	past	ja	-	Have we rotated the keys since Monday?	0	0
+C	past	ja	-	What has changed since Tuesday?	1	1
+C	past	ja	-	What has been deployed since Wednesday?	1	1
+C	past	ja	-	Has anyone touched the index since Friday?	0	0
+C	past	ja	-	Which tickets were closed between Monday and Wednesday?	1	1
+C	past	ja	-	What was refactored from Tuesday to Thursday?	1	1
+C	past	ja	-	Was Damien on call on Saturday?	1	1
+C	past	ja	-	Was Spark reachable on Thursday?	1	1
+C	past	ja	-	Were backups running on Monday?	1	1
+C	past	ja	-	Was migration finished on Tuesday?	1	1
+C	past	ja	-	Was the cache cleared on Wednesday?	1	1
+C	past	ja	-	Was ollama slow on friday?	1	1
+C	past	ja	-	Was it slow on Friday?	1	1
+C	past	ja	-	Were the alerts noisy on the weekend?	1	1
+C	past	ja	-	Was latency high in August?	0	0
+C	past	ja	-	Was retrieval broken in June?	0	0
+C	past	ja	-	Was CI red on Thursday?	1	1
+C	past	ja	-	Was deploy successful on monday	1	1
+C	past	ja	-	Was rollback needed in March?	0	0
+C	past	ja	-	Was Jan around on Tuesday?	1	1
+C	past	ja	-	Why did the container restart on Wednesday?	1	1
+C	past	ja	-	When did the guard fire on Saturday?	1	1
+C	past	ja	-	Who had pushed the hotfix on Thursday?	1	1
+C	past	ja	-	What had broken by Friday?	1	1
+C	past	ja	-	Tell me what we shipped in May.	0	0
+C	past	ja	-	I need to know which commits landed on Monday	0	0
+C	past	ja	-	Can you check whether someone wiped the cache on Tuesday?	0	0
+C	past	ja	-	Do you remember what we discussed in April?	0	0
+C	past	ja	-	Did we upgrade Postgres in February?	0	0
+C	past	ja	-	Did anything fail on Friday?	1	1
+C	past	ja	-	did the nightly run on saturday	1	1
+C	past	ja	-	What did Damien review on Thursday?	1	1
+C	past	ja	-	Which configs got overwritten on Wednesday?	1	1
+C	past	ja	-	What changed in January?	0	0
+C	past	ja	-	What broke in December?	0	0
+C	past	ja	-	What went live in December?	0	0
+C	past	ja	-	Which features were released in December?	0	0
+C	past	ja	-	What was deployed from Monday to Friday?	1	1
+C	past	ja	-	Which issues did we close between Tuesday and Saturday?	1	1
+C	past	ja	-	Who committed the broken tests on Monday?	0	0
+C	past	ja	-	What did the tests report on Saturday?	1	1
+C	past	ja	-	monday outage - what caused it?	0	0
+C	past	ja	-	friday deploy failed, why	1	1
+C	past	ja	-	Last Tuesday the index was rebuilt - how long did it take?	1	1
+C	past	ja	-	How many requests got rejected on Wednesday?	1	1
+C	past	ja	-	Were there any incidents in October?	0	0
+C	past	ja	-	Was there a release in September?	0	0
+C	past	ja	-	Wich bugs were fixd on thursday	1	1
+C	past	ja	-	What was the root cause of the outage on Friday?	1	1
+D	future	ja	-	What's planned for Monday?	1	1
+D	future	ja	-	What are we deploying on Tuesday?	1	1
+D	future	ja	-	What will be deployed on Wednesday?	0	0
+D	future	ja	-	Who is on call on Thursday?	1	1
+D	future	ja	-	Who takes over the release on Friday?	1	1
+D	future	ja	-	What's scheduled for Saturday?	1	1
+D	future	ja	-	What are we doing in December?	0	0
+D	future	ja	-	What will we migrate in January?	0	0
+D	future	ja	-	Which certificates expire in February?	0	0
+D	future	ja	-	What is planned for March?	0	0
+D	future	ja	-	Is the upgrade scheduled for April?	0	0
+D	future	ja	-	Do we have a maintenance window on Monday?	1	1
+D	future	ja	-	Does anyone have time on Tuesday for a review?	1	1
+D	future	ja	s	Has Damien got time on Wednesday?	0	0
+D	future	ja	-	Should we restart the server on Friday?	1	1
+D	future	ja	-	Can we roll out the patch on Thursday?	1	1
+D	future	ja	-	Are we going to upgrade in May?	0	0
+D	future	ja	-	Is Spark going to be maintained on Thursday?	1	1
+D	future	ja	-	What needs to be done by Friday?	1	1
+D	future	ja	-	What must be finished by Wednesday?	0	0
+D	future	ja	-	Will it be merged by Thursday?	0	0
+D	future	ja	-	Is the fix going to be pushed by Monday?	1	1
+D	future	ja	-	Is the cluster migrated by Monday?	1	1
+D	future	ja	-	Are deploys allowed on Thursday?	1	1
+D	future	ja	-	Is the backup scheduled for Wednesday?	1	1
+D	future	ja	-	Which tickets are planned for Friday?	1	1
+D	future	ja	-	We want to refactor in June, what needs to happen first?	0	0
+D	future	ja	-	I'm planning a rollback on Thursday, anything to watch out for?	1	1
+D	future	ja	-	When does the deploy start on Monday?	1	1
+D	future	ja	-	What's coming up in December?	0	0
+D	future	ja	-	Is the new release going out on Tuesday?	1	1
+D	future	ja	-	Is the meeting on Wednesday cancelled?	0	0
+D	future	ja	-	Who rolls out the update on Friday?	1	1
+D	future	ja	-	What's due in January?	0	0
+D	future	ja	-	Which licenses run out in December?	0	0
+D	future	ja	-	What's on the agenda for October?	0	0
+D	future	ja	-	whats up on saturday	1	1
+D	future	ja	s	saturday maintenance planned?	1	1
+D	future	ja	s	monday release?	1	1
+D	future	ja	-	Do you have time on Wednesday?	1	1
+D	future	ja	s	Is anyone around over the weekend?	1	1
+D	future	ja	-	What awaits us in March?	0	0
+D	future	ja	-	What will we tackle in April?	0	0
+D	future	ja	-	When is the audit in May?	0	0
+D	future	ja	-	What's on the plan for Monday?	1	1
+D	future	ja	-	What has priority on Tuesday?	1	1
+D	future	ja	-	Who has on-call duty in December?	0	0
+D	future	ja	-	What's left to do on Friday?	1	1
+D	future	ja	-	Which deadlines fall in January?	0	0
+D	future	ja	-	What do we want to get done from Wednesday to Friday?	1	1
+D	future	ja	-	Starting Monday the new freeze applies, what does that mean?	1	1
+D	future	ja	-	Who is going to be on vacation from Tuesday to Friday?	1	1
+D	future	ja	-	Will the index be rebuilt on Thursday?	1	1
+D	future	ja	-	Are we shipping in February?	0	0
+D	future	ja	-	Does the cron run on Saturday?	1	1
+D	future	ja	-	Is the release blocked until Wednesday?	1	1
+D	future	ja	-	Until Friday, who owns the pager?	1	1
+E	past	ja	-	Was haben wir am Monday deployed?	1	1
+E	past	ja	-	Wer hat on Friday den Hotfix gepusht?	1	1
+E	past	ja	-	Was wurde last Tuesday gemerged?	1	1
+E	past	ja	-	Welche PRs sind am Mittwoch gemerged worden, any blockers?	1	1
+E	past	ja	-	Hat jemand am Thursday den Cache gewiped?	0	1
+E	past	ja	-	Was ist übers Weekend passiert?	1	1
+E	past	ja	-	welche commits wurden im october gepusht	0	0
+E	past	ja	-	Was haben wir im December released?	0	0
+E	past	ja	-	Was hatten wir im August gerollbackt?	0	0
+E	past	ja	-	Wer hat am Montag den Branch rebased?	0	1
+E	past	ja	-	Was wurde am Freitag gehotfixt?	1	1
+E	past	ja	-	Am Dienstag wurde der Index reindexed, warum?	1	1
+E	past	ja	-	Warum ist der Build am Mittwoch gefailed?	0	0
+E	past	ja	-	Warum hat die Pipeline am Donnerstag gefailt?	1	1
+E	past	ja	-	Welche Tests sind am Samstag geflaked?	0	0
+E	past	ja	-	Was haben wir von Monday bis Wednesday geshipped?	1	1
+E	past	ja	-	Wer hat im September das Schema gedroppt?	0	0
+E	past	ja	-	Was war am Friday mit dem Deployment los?	1	1
+E	past	ja	-	Haben wir im Juli die API gebreakt?	0	0
+E	past	ja	-	Was wurde im Mai gedeprecated?	0	0
+E	past	ja	-	Welche Services hatten am Dienstag Downtime?	0	1
+E	past	ja	-	Wer hat am Freitag den Prod-Cluster gescaled?	0	1
+E	past	ja	-	Was ham wir am Montag gemerged, gibt's da Regressions?	1	0
+E	past	ja	-	Wurde der Release am Donnerstag getaggt?	1	1
+E	past	ja	-	Was wurde am Wochenende upgedated?	1	1
+E	past	ja	-	welche features sind im juni gelauncht worden	0	0
+E	past	ja	-	Wer reviewte am Mittwoch den PR?	0	0
+E	past	ja	-	Wer pushte am Freitag direkt auf root?	0	0
+E	past	ja	-	Was hat der Guard am Montag geflaggt?	1	1
+E	past	ja	-	Was wurde von Dienstag bis Freitag gebenchmarkt?	1	1
+E	past	ja	-	Welche Embeddings wurden im März recomputed?	0	0
+E	past	ja	-	Wann haben wir im Februar released?	0	0
+E	past	ja	-	Was hat Damien am weekend gecommittet?	1	1
+E	future	ja	-	Was deployen wir on Monday?	0	1
+E	future	ja	-	Wer übernimmt am Friday das Release?	1	1
+E	future	ja	-	Was ist für next Tuesday geplant?	0	1
+E	future	ja	-	Wird am Mittwoch gemerged?	1	1
+E	future	ja	-	Sollen wir am Donnerstag rebasen?	1	1
+E	future	ja	-	Was steht im December an?	0	0
+E	future	ja	-	Wann wird im January migriert?	0	0
+E	future	ja	-	Müssen wir bis Friday alles refactoren?	1	1
+E	future	ja	-	Was ist am Montag das Go-Live?	0	1
+E	future	ja	-	Wer hat am Dienstag on-call?	1	1
+E	future	ja	-	Ist der Rollout für Mittwoch gescheduled?	1	1
+E	future	ja	-	Sind die Deploys am Freitag geblockt?	0	1
+E	future	ja	-	Wird der Spark am Samstag gepatcht?	1	1
+E	future	ja	-	Was shippen wir im März?	0	0
+E	future	ja	-	Können wir am Montag den Branch force-pushen?	1	1
+E	future	ja	-	Wir wollen im April das Embedding upgraden, was blockt?	0	0
+E	future	ja	-	Ist das Feature bis Donnerstag gemerged?	1	1
+E	future	ja	-	Bis Montag muss das gedeployed sein, schaffen wir das?	1	1
+E	future	ja	-	Was ist am Freitag der Plan für den Rollout?	0	1
+E	future	ja	-	Werden wir im Mai auf Go 1.27 bumpen?	0	0
+E	future	ja	-	Haben wir am Mittwoch ein Standup?	1	1
+E	future	ja	-	Wann ist am Donnerstag das Deployment?	1	1
+E	future	ja	-	Wann releasen wir im Februar?	0	0
+F	neutral	nein	-	Welche Dateien sind bis 2048 Zeilen lang?	1	1
+F	neutral	nein	-	zeig mir chunks ab 2000 tokens	1	1
+F	neutral	nein	-	Warum bricht der Upload nach 2048 Bytes ab?	1	1
+F	neutral	nein	-	Was passiert bei Payloads von 1999 bis 2048 Bytes?	0	1
+F	neutral	nein	-	Welche Services laufen auf Ports von 2000 bis 2100?	1	1
+F	neutral	nein	-	Ab 2048 Tokens wird abgeschnitten, wo ist das konfiguriert?	1	1
+F	neutral	nein	-	Wie verhält sich der Embedder bei Texten mit bis 2000 Zeichen?	1	1
+F	neutral	nein	-	Wie viele Blöcke liegen zwischen 1999 und 2048 Zeichen?	1	1
+F	past	nein	-	Was hat sich seit PR 2031 geändert?	1	1
+F	past	nein	-	Welche Commits kamen nach PR 2041?	0	1
+F	past	nein	-	Was wurde seit Issue #2034 gefixt?	1	1
+F	neutral	nein	-	Welche Issues zwischen 2001 und 2050 sind noch offen?	1	1
+F	neutral	nein	s	Zeig alle Issues von 2010 bis 2020	1	1
+F	neutral	nein	-	Was steht in den Logs vor Zeile 1995?	0	1
+F	neutral	nein	-	Was steht nach Zeile 2048 in der Config?	0	1
+F	neutral	nein	-	Welche Einträge kommen nach ID 2077?	1	1
+F	neutral	nein	-	Liste alle Blöcke ab ID 2000	1	1
+F	neutral	nein	-	Was ändert sich ab Build 2034?	0	1
+F	past	nein	-	Was hat sich seit Build 2019 geändert?	1	1
+F	neutral	nein	-	Welche Server gibt es bis 2000 Euro?	1	1
+F	neutral	nein	-	Welche GPUs gibt es ab 1999 Euro?	1	1
+F	neutral	nein	-	Welche Touren gehen von 2000 bis 2100 Höhenmeter?	1	1
+F	neutral	nein	-	Welche Fehlercodes ab 2000 sind Netzwerkfehler?	1	1
+F	neutral	nein	-	Was passiert nach Fehler 2003?	0	1
+F	neutral	nein	-	Warum kommt nach 2048 Requests ein Timeout?	1	1
+F	neutral	nein	-	Wie skaliert pgvector bis 2048 Dimensionen?	1	1
+F	neutral	nein	-	Unterstützt das Modell Vektoren bis 2048 Dimensionen?	1	1
+F	neutral	nein	-	Ab 2000 gleichzeitigen Verbindungen wird es langsam, warum?	1	1
+F	neutral	nein	-	Welche Queries brauchen ab 2000 ms?	1	1
+F	neutral	nein	-	Wie verhält sich der Cache nach 2000 Einträgen?	1	1
+F	neutral	nein	-	Wird vor 2048 Einträgen geflusht?	1	1
+F	neutral	nein	-	Bis 2047 Bytes passt alles in den Header?	1	1
+F	neutral	nein	-	Which services listen on ports from 2000 to 2100?	1	1
+F	neutral	nein	-	show me chunks after 2048 tokens	1	1
+F	neutral	nein	-	Why does the upload stop after 2048 bytes?	1	1
+F	neutral	nein	-	What happens to payloads between 1999 and 2048 bytes?	1	1
+F	past	nein	-	What changed since PR 2031?	1	1
+F	past	nein	-	Which commits landed after PR 2041?	0	0
+F	past	nein	-	What was fixed since issue #2034?	1	1
+F	neutral	nein	-	What is written in the log before line 1995?	1	1
+F	neutral	nein	-	What comes after line 2048 in the config?	1	1
+F	neutral	nein	-	List all blocks from ID 2000 onwards	1	1
+F	neutral	nein	-	What changes from build 2034 on?	1	1
+F	neutral	nein	-	Which GPUs are available from 1999 dollars?	1	1
+F	neutral	nein	-	Which error codes from 2000 up are network errors?	1	1
+F	neutral	nein	-	Why do we hit a timeout after 2048 requests?	1	1
+F	neutral	nein	-	Does HNSW still work until 2000 dimensions?	1	1
+F	neutral	nein	-	After 2000 concurrent connections latency explodes, why?	1	1
+F	neutral	nein	-	How does the cache behave after 2000 entries?	1	1
+F	neutral	nein	-	Is the buffer flushed before 2048 entries?	1	1
+F	neutral	nein	-	Which tokens are cut off since 2048 is the limit?	1	1
+F	neutral	nein	-	Why is the context truncated since 2048 is our max?	1	1
+F	neutral	nein	-	Wie verhält sich ctx bis 2000 Blöcke?	1	1
+F	neutral	nein	-	Welche Ports nach 2049 sind frei?	1	1
+F	neutral	nein	-	Ab 2000 Zeilen wird die Datei nicht mehr indiziert?	1	1
+F	neutral	nein	-	Ab 2000 Euro brauchen wir eine Freigabe, wer gibt die?	1	1
+F	neutral	nein	-	Welche Messwerte liegen zwischen 2000 und 2100 Watt?	1	1
+F	neutral	nein	-	Wie lange brauchen Embeddings von 1990 bis 2010 Tokens?	1	1
+F	neutral	nein	-	Ist der Speicher seit 2000 Requests konstant?	1	1
+F	neutral	nein	-	Is memory flat since 2000 requests?	1	1
+F	neutral	nein	-	Welche Blöcke haben eine ID vor 2050?	1	1
+F	neutral	nein	-	Gibt es Tickets nach #2040?	1	1
+F	neutral	nein	-	Kostet das Upgrade ab 2099 Euro mehr?	1	1
+G	past	ja	-	Was hat sich seit 2019 an der Architektur geändert?	0	0
+G	past	ja	-	Welche Entscheidungen gab es bis 2024?	0	1
+G	past	ja	-	Was wurde nach 2020 eingeführt?	0	0
+G	past	ja	-	Was lief vor 2022 auf Bare Metal?	0	1
+G	future	ja	-	Was ändert sich ab 2027?	0	1
+G	past	ja	-	Welche Systeme liefen von 2018 bis 2021?	0	0
+G	future	ja	-	Was planen wir bis 2030?	0	0
+G	past	ja	-	What changed since 2019?	0	0
+G	past	ja	-	Which decisions were made until 2024?	0	1
+G	past	ja	-	What was introduced after 2020?	0	1
+G	past	ja	-	What ran on bare metal before 2022?	0	1
+G	past	ja	-	Which systems ran between 2018 and 2021?	0	0
+G	past	ja	-	What happened from 2015 to 2017?	0	0
+G	future	ja	-	What are we planning until 2030?	0	0
+G	future	ja	-	What changes after 2027?	0	1
+G	past	ja	-	seit 2023 neue mitarbeiter?	0	0
+G	past	ja	-	Was haben wir seit 2021 migriert?	0	1
+G	past	ja	-	Welche Server gab es vor 2000?	0	0
+G	past	ja	-	Was war vor 1999 der Standard für Logging?	0	0
+G	past	ja	-	Wer hat seit 2016 am Projekt mitgearbeitet?	0	0
+G	future	ja	-	Welche Lizenzen gelten bis 2028?	0	1
+G	future	ja	-	Was steht ab 2028 an?	0	1
+G	past	ja	-	Was hat sich nach 2010 in der Infrastruktur getan?	0	0
+G	past	ja	-	since 2020 what did we drop?	0	1
+G	past	ja	-	What did we use before 2015?	0	0
+G	past	ja	-	Which tools were popular from 2005 to 2010?	0	0
+G	past	ja	-	Was the API stable after 2021?	0	1
+G	future	ja	-	Is the roadmap fixed until 2029?	0	0
+G	past	ja	-	Which incidents happened since 2024?	0	1
+G	past	ja	-	Was ist seit 2025 an Incidents passiert?	0	1
+G	past	ja	-	Welche Releases gab es von 2023 bis 2025?	0	1
+G	past	ja	-	Zeig mir Entscheidungen ab 2024	0	0
+G	past	ja	-	Was wurde zwischen 2019 und 2022 deployed?	0	0
+G	past	ja	-	Welche Bugs sind seit 2026 offen?	0	0
+G	past	ja	-	What's been open since 2025?	0	0
+G	future	ja	-	What's on the roadmap after 2026?	0	1
+G	past	ja	-	Wie sah der Stack vor 2020 aus?	0	1
+G	past	ja	-	Wie war der Stack bis 2019 aufgebaut?	0	0
+G	past	ja	-	Welche Kunden hatten wir von 2012 bis 2016?	0	0
+G	past	ja	-	Was haben wir nach 2018 abgeschaltet?	0	0
+G	past	ja	-	What did we deprecate after 2018?	0	0
+G	past	ja	-	What did the stack look like before 2020?	0	1
+G	past	ja	-	Who maintained the repo from 2017 to 2019?	0	0
+G	future	ja	-	Ab 2030 soll alles auf IPv6 laufen, was fehlt noch?	0	0
+G	past	ja	-	Since 2022, how many outages did we have?	0	0
+G	past	ja	-	Seit 2022 – wie viele Ausfälle hatten wir?	0	0
+G	past	ja	-	Nach 2015 gab es kein Windows mehr im Stack, oder?	0	0
+G	past	ja	-	Before 2010 was everything on-prem?	0	0
+G	future	ja	-	Bis 2035 wollen wir CO2-neutral sein, was heißt das für den Spark?	0	0
+G	past	ja	-	Welche Themen hatten wir von 2020 bis heute?	0	1
+G	past	ja	-	Was ging seit 1995 an Daten verloren?	0	0
+G	past	ja	-	What was the main database before 1998?	0	0
+G	future	ja	-	Was ist bis 2040 geplant?	0	0
+G	past	ja	-	Ab 2019 haben wir Kubernetes genutzt – warum?	0	0
+G	past	ja	-	From 2016 until 2018 we used Mesos, why did we switch?	0	0
+G	past	ja	-	wurde vor 2021 schon gebackupt?	0	1
+G	past	ja	-	welche configs gabs nach 2017	0	0
+H	neutral	nein	-	Was ist der Unterschied zwischen RRF und Rerank?	0	1
+H	neutral	nein	-	Was ist ein Mutex?	0	1
+H	neutral	nein	-	was macht der guard eigentlich	0	1
+H	neutral	nein	-	Wie suche ich nach Blöcken mit Tag infra?	1	1
+H	neutral	nein	-	Nach welchem Schema werden IDs vergeben?	1	1
+H	neutral	nein	-	Wonach sortiert die Volltextsuche?	1	1
+H	neutral	nein	-	Vor allem: wie skaliert pgvector?	1	1
+H	neutral	nein	-	Was steht vor dem Doppelpunkt in der DSN?	0	1
+H	neutral	nein	-	Ab welcher Blockgröße lohnt sich Chunking?	1	1
+H	neutral	nein	-	Wie schaltet man das Logging ab?	1	1
+H	neutral	nein	-	Bis auf den Guard läuft alles, was fehlt?	0	1
+H	neutral	nein	-	Wie weit bis zum Limit sind wir?	1	1
+H	neutral	nein	-	May I delete the old embeddings?	1	1
+H	neutral	nein	-	The migration may fail on large tables - how do we guard against that?	1	1
+H	neutral	nein	-	It may be a race condition, how do I debug that?	1	1
+H	neutral	nein	-	How do I march through all blocks in a category?	1	1
+H	neutral	nein	-	Which Sun JDK flags still matter?	1	1
+H	neutral	nein	-	Does ctx run on SunOS?	1	1
+H	neutral	nein	-	Was ist Sun RPC?	0	1
+H	past	nein	-	Wer war der Autor des Guard-Moduls?	1	1
+H	past	nein	-	Who wrote the RRF fusion code?	1	1
+H	past	nein	-	Was hat Jan zum Schema gesagt?	1	1
+H	neutral	nein	-	Was meint August mit Dream-Modus?	0	1
+H	egal	nein	-	Was war nochmal das Passwort-Schema für Keys?	1	1
+H	neutral	nein	-	So, wie konfiguriere ich nginx als Reverse Proxy?	1	1
+H	neutral	nein	-	Do I need a GPU for embeddings?	1	1
+H	neutral	nein	-	Wie lese ich die Tabelle context_blocks aus?	1	1
+H	past	nein	-	What was the reason for choosing Go?	1	1
+H	past	nein	-	Why was pgvector chosen over Qdrant?	1	1
+H	neutral	nein	-	Was bedeutet scope=private?	0	1
+H	neutral	nein	-	Was kostet eine Anfrage an den Spark?	0	1
+H	neutral	nein	-	Wie funktioniert die Embedding-Pipeline?	1	1
+H	neutral	nein	-	welche kategorien gibt es	1	1
+H	neutral	nein	-	Warum ist die Latenz so hoch?	1	1
+H	neutral	nein	-	Wo liegt die Config für Dream?	1	1
+H	neutral	nein	-	Wie rotiere ich API-Keys?	1	1
+H	neutral	nein	-	Nach dem Login kommt ein 403, warum?	1	1
+H	neutral	nein	-	Vor dem Deploy muss was gemacht werden?	0	1
+H	neutral	nein	-	Ab und zu hängt der Container, woran liegt das?	1	1
+H	neutral	nein	-	Bis wohin reicht der Cache?	1	1
+H	neutral	nein	-	After the migration, which indexes are needed?	1	1
+H	neutral	nein	-	Before deploying, what should I check?	1	1
+H	neutral	nein	-	Since the embedder is slow, should we batch?	1	1
+H	neutral	nein	-	Until the guard passes, can I merge?	1	1
+H	neutral	nein	-	Was ist eigentlich ein Tag in ctx?	0	1
+H	neutral	nein	-	Welcher Git-Tag ist live?	1	1
+H	neutral	nein	-	Was macht die Funktion NormalizeTemporalRules?	0	1
+H	neutral	nein	-	Was ist der Status von Spark?	0	1
+H	neutral	nein	-	what is the default port of postgres	1	1
+H	neutral	nein	-	Which fields does a block have?	1	1
+H	neutral	nein	-	How is the score computed in RRF?	1	1
+H	neutral	nein	-	Was ist der Monat-Parameter in der API?	0	1
+H	neutral	nein	-	Wie viel RAM braucht der Embedder?	1	1
+H	neutral	nein	s	Was ist das Wochenende-Flag in der Cron-Config?	0	0
+H	neutral	nein	s	Wie heißt der Mittwochs-Job im Cron?	0	0
+H	past	nein	-	Who was the maintainer of the plugin?	1	1
+H	neutral	nein	-	Welche Felder hat ein Checkpoint?	1	1
+H	neutral	nein	-	Is there a may-flag for optional fields?	1	1
+H	neutral	nein	-	sun is shining, should I go outside or debug?	1	1
+H	neutral	nein	-	Hat der Guard eine Allowlist?	1	1
+H	neutral	nein	-	Haben wir einen Rate-Limiter?	1	1
+H	past	nein	-	Wurde das schon mal diskutiert?	1	1
+H	past	nein	-	Wer hat den Dream-Modus erfunden?	0	1
+H	neutral	nein	-	Wie lange dauert ein Reindex?	1	1
+H	neutral	nein	-	Was passiert, wenn der Spark ausfällt?	0	1
+H	neutral	nein	-	Bis zu wie vielen Blöcken skaliert die Suche?	1	1
+H	neutral	nein	-	Nach Kategorie filtern – wie?	1	1
+H	neutral	nein	-	Seit dem Refactoring ist der Guard langsam, warum?	1	1
+H	past	nein	-	Was war los mit dem Index?	1	1
+H	past	nein	-	Was the index rebuilt with the new model?	1	1

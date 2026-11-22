@@ -1,0 +1,8 @@
+# Differential test of the temporal rules (issue #506): corpus q4b, asked on 2026-03-01 at noon UTC.
+# question, rules output at aa1354ea (v5.76.1); for a changed output also its verdict (fixed / disputed / broken), the output now and a note.
+Was steht von Juni bis 2026 an?	["von juni bis 2026 an?|2026-06-01..2026-12-31|range"] linear=1.00
+Was lief von Juni bis 2026?	["von juni bis 2026?|2026-06-01..2026-12-31|range"] linear=1.00
+Was ist von Juni bis 2026 geplant?	["von juni bis 2026 geplant?|2026-06-01..2026-12-31|range"] linear=1.00
+Was lief von März bis 2026?	["von märz bis 2026?|2026-03-01..2026-12-31|range"] linear=1.00
+Was lief von Oktober bis 2026?	["von oktober bis 2026?|2026-10-01..2026-12-31|range"] linear=1.00
+Was lief von Montag bis 2026?	["von montag bis 2026?|2026-02-23..2026-12-31|range"] linear=1.00

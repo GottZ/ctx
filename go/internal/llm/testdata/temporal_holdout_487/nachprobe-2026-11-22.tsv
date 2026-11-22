@@ -1,0 +1,22 @@
+# Holdout of issue #487 (the second probe of the review round (nachprobe.tsv)), asked on 2026-11-22 at noon UTC: written before that round's diff was read.
+# class, expected tense (past/future/neutral/egal), expected rule (ja/nein/egal), disputed (s), question, answered right at 36b915f8 (1/0), answered right at aa1354ea (1/0).
+N	past	ja	-	Was latency high on Friday?	1	1
+N	past	ja	-	Was gab's am Freitag Neues?	1	0
+N	past	ja	-	am montag was kaputt gemacht?	1	0
+N	past	ja	-	Was ham wir am Dienstag deployed?	1	0
+N	past	ja	-	Was ham die am Donnerstag geändert?	1	0
+N	past	ja	-	Was throughput low on Monday?	1	1
+N	past	ja	-	Was memory usage high on Tuesday?	1	1
+N	past	ja	-	Was disk full on Wednesday?	1	1
+N	past	ja	-	Was spark down on Thursday?	1	1
+N	past	ja	-	gab's am Dienstag Probleme?	0	0
+N	past	ja	-	Hab am Montag was deployed, wo ist das Log?	1	1
+N	past	ja	-	Was haben wir am Montag gemerged, gibt's da Regressions?	1	1
+N	past	ja	-	Was ham wir am Montag gemerged?	1	0
+N	future	ja	-	What will be merged on Thursday?	0	0
+N	future	ja	-	Which PRs will be reviewed on Friday?	0	0
+N	future	ja	-	What should be deployed on Monday?	0	0
+N	future	ja	-	What has to be finished by Tuesday?	0	0
+N	past	ja	-	Wer deployte am Dienstag?	0	0
+N	past	ja	-	Was meldete der Guard am Mittwoch?	1	1
+N	past	ja	-	Welche Jobs scheiterten am Donnerstag?	0	0
