@@ -76,7 +76,9 @@ import (
 // CASE expression is taken for a RAISE that reports (the read after it
 // passes), and an alias anywhere in a statement counts as a relation of all
 // of it, so a subquery alias named like a row variable hides r.reltuples of
-// the row (it passes). reviewedForms lists such forms as "limit".
+// the row (it passes); and a statement that names pg_class counts every
+// relpages and reltuples in it, a user table's beside a join on pg_class
+// too (it is refused). reviewedForms lists such forms as "limit".
 
 // rowsFunctionSince is the migration that creates ctx_migration_rows (issue
 // #399). From it on, a file that decides by the size of a table asks the
@@ -1300,6 +1302,8 @@ BEGIN
 END
 $do$;
 `},
+	{class: "limit", refuse: true, name: "a user table's relpages beside a join on pg_class",
+		src: inDo(`    SELECT m.relpages INTO v_rows FROM context_page_marks m JOIN pg_class c ON c.oid = m.relid;`)},
 	{class: "limit", name: "a count with a further column",
 		src: inDo(`    SELECT count(*), max(created_at) INTO v_rows, v_heap FROM context_blocks;`)},
 

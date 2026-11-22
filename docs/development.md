@@ -1382,5 +1382,7 @@ file creates, a view or function the file defines, a count with further columns 
 built from strings. Nor does it resolve the scopes of SQL: a column named `raise` after `THEN` or
 `ELSE` in a `CASE` expression is taken for a `RAISE` that reports, and a read after it passes; an
 alias anywhere in a statement counts as a relation of all of it, so a subquery alias named like a
-row variable hides that row's `r.reltuples`, which passes.
+row variable hides that row's `r.reltuples`, which passes; and a statement that names `pg_class`
+counts every `relpages` and `reltuples` in it, so a user table's column beside a join on
+`pg_class` is refused (split the statement).
 `reviewedForms` in `threshold_test.go` lists each form with its decision (issue #493).
