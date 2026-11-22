@@ -39,7 +39,7 @@ const pushBatchLimit = 500
 // PushResult is what the push pass reports back to the sync run.
 type PushResult struct {
 	Pushed    int  // entities written to the forge (create + update + comment)
-	Conflicts int  // truncated-body divergences flagged, never written
+	Conflicts int  // mappings flagged: a truncated body that diverged (never written), or a base another instance moved during the push
 	Throttled bool // the token bucket ran dry — the pass stopped early
 }
 
@@ -118,7 +118,7 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 		// candidates through the bound advance (issue #452) — otherwise it
 		// stays listed for good and, past pushBatchLimit, keeps later
 		// candidates out of the listing.
-		if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, ctxH, ctxFields, projected); err != nil {
+		if err := p.advance(ctx, c.Block.ID, c.BaseHash, ctxH, ctxFields, projected, res); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -141,7 +141,7 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 	}
 	if patch.empty() {
 		// Only a never-pushed field (milestone) diverged: advance base, 0 wire.
-		if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, ctxH, ctxFields, projected); err != nil {
+		if err := p.advance(ctx, c.Block.ID, c.BaseHash, ctxH, ctxFields, projected, res); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -153,7 +153,7 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 	if err := client.UpdateIssue(ctx, repo, c.ForgeID, patch); err != nil {
 		return false, err
 	}
-	if err := store.AdvancePushBase(ctx, p.pool, c.Block.ID, ctxH, ctxFields, projected); err != nil {
+	if err := p.advance(ctx, c.Block.ID, c.BaseHash, ctxH, ctxFields, projected, res); err != nil {
 		return false, err
 	}
 	res.Pushed++
@@ -213,7 +213,7 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 	}
 	if ctxH == c.BaseHash {
 		// In sync — 0 wire; the row leaves the candidates as in pushIssue.
-		if err := store.AdvancePushBase(ctx, p.pool, c.BlockID, ctxH, ctxFields, projected); err != nil {
+		if err := p.advance(ctx, c.BlockID, c.BaseHash, ctxH, ctxFields, projected, res); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -256,11 +256,26 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 	if err := client.UpdateComment(ctx, repo, c.ForgeID, body); err != nil {
 		return false, err
 	}
-	if err := store.AdvancePushBase(ctx, p.pool, c.BlockID, ctxH, ctxFields, projected); err != nil {
+	if err := p.advance(ctx, c.BlockID, c.BaseHash, ctxH, ctxFields, projected, res); err != nil {
 		return false, err
 	}
 	res.Pushed++
 	return true, nil
+}
+
+// advance records the pushed (or in-sync) version as the mapping's base
+// through store.AdvancePushBase. listed is the base the listing read; when
+// another instance moved the base since, the advance flags the mapping instead
+// of writing either version (issue #486) and the pass counts the conflict.
+func (p *Pusher) advance(ctx context.Context, blockID, listed, ctxH string, ctxFields []byte, projected store.PushProjection, res *PushResult) error {
+	moved, err := store.AdvancePushBase(ctx, p.pool, blockID, listed, ctxH, ctxFields, projected)
+	if err != nil {
+		return err
+	}
+	if moved {
+		res.Conflicts++
+	}
+	return nil
 }
 
 // diffIssue builds the field-diff PATCH (§4.5.2). base is the last-synced

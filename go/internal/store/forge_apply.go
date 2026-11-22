@@ -16,7 +16,9 @@
 // metadata.forge_state (always — the §4.5.4 fail-safe) and labels/assignees/
 // milestone at metadata top level (the board label post-filter reads
 // metadata->'labels', §3.3). workflow_status is the registry-mapped board value
-// (NULL when the registry is not resolvable — the metadata-only fallback §4.5.4).
+// (NULL when the registry is not resolvable — the metadata-only fallback §4.5.4);
+// an update leaves the block's own status where the forge state did not change
+// (ForgeIssueContent.KeepWorkflowStatus, issue #486).
 package store
 
 import (
@@ -54,16 +56,22 @@ func CapForgeBody(s string) (string, bool) {
 // Title is the PREFIX-FREE forge title; the primitive derives the "#<nr>" block
 // title. Body is ALREADY capped by the caller (CapForgeBody) so the stored body
 // and the base_hash agree. WorkflowStatus "" ⇒ NULL (the §4.5.4 fallback).
+//
+// KeepWorkflowStatus makes PullUpdateIssueBlock leave workflow_status as the
+// row holds it instead of writing WorkflowStatus (issue #486): the caller sets
+// it when the forge state did not change, so a local move between two statuses
+// of one forge state survives a remote edit. PullCreateIssueBlock ignores it.
 type ForgeIssueContent struct {
-	Number         int64
-	Title          string
-	Body           string
-	Truncated      bool
-	ForgeState     string
-	Labels         []string
-	Assignees      []string
-	Milestone      string
-	WorkflowStatus string
+	Number             int64
+	Title              string
+	Body               string
+	Truncated          bool
+	ForgeState         string
+	Labels             []string
+	Assignees          []string
+	Milestone          string
+	WorkflowStatus     string
+	KeepWorkflowStatus bool
 }
 
 // forgeIssueMeta builds the metadata patch for a pulled issue. labels/assignees
@@ -142,7 +150,9 @@ func LockPulledBlock(ctx context.Context, tx pgx.Tx, blockID string, scopes []st
 // PullUpdateIssueBlock applies a forge-ahead update to an existing issue block
 // (§4.5.2 pull row): title (the "#<nr>" prefix re-derived from the stable
 // number), content, the metadata patch (JSONB-merged so forge/local_seq survive),
-// workflow_status, and — when the title or the body now differs — the vector
+// workflow_status (unless c.KeepWorkflowStatus: then the status the row holds
+// stays — the caller holds the row locked, LockPulledBlock, so that is the
+// status it decided on), and — when the title or the body now differs — the vector
 // invalidated for re-embedding (InvalidateEmbeddingTx: it stays searchable,
 // marked stale, until the backfill writes the new one; a state- or label-only
 // change keeps it current, issue #236). Tx-bound (commits with the base_hash
@@ -167,10 +177,10 @@ func PullUpdateIssueBlock(ctx context.Context, tx pgx.Tx, blockID string, c Forg
 		       metadata = CASE WHEN title IS DISTINCT FROM $2 OR content IS DISTINCT FROM $3
 		                       THEN (metadata || $4::jsonb) - 'guard_checked_at'
 		                       ELSE metadata || $4::jsonb END,
-		       workflow_status = $5, updated_at = now()
+		       workflow_status = CASE WHEN $6 THEN workflow_status ELSE $5 END, updated_at = now()
 		 WHERE id = $1::uuid
 		RETURNING `+issueScanCols+`, `+textChangedCol,
-		blockID, title, c.Body, forgeIssueMeta(c), status)
+		blockID, title, c.Body, forgeIssueMeta(c), status, c.KeepWorkflowStatus)
 	var textChanged bool
 	b, err := scanIssue(row, &textChanged)
 	if err != nil {

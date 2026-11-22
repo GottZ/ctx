@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
 	"strconv"
 	"time"
 
@@ -67,6 +68,7 @@ func NewApplier(pool *pgxpool.Pool, snapshot SnapshotFunc) *Applier {
 // issueTypePolicy is the resolved slice of the issue type config the apply needs.
 type issueTypePolicy struct {
 	registryOK  bool
+	states      []string // the workflow's configured statuses
 	terminalSet []string
 	forgeMap    map[string]string // forge state → ctx workflow status
 	refAllowed  bool              // 'references' ∈ structural_link_classes
@@ -94,6 +96,7 @@ func resolveIssuePolicy(set *blocktype.Set) issueTypePolicy {
 	}
 	return issueTypePolicy{
 		registryOK:  true,
+		states:      pol.Workflow.States,
 		terminalSet: pol.Workflow.Terminal,
 		forgeMap:    pol.Workflow.ForgeStateMap,
 		refAllowed:  refAllowed,
@@ -108,6 +111,37 @@ func (p issueTypePolicy) workflowStatusFor(forgeState string) string {
 		return ""
 	}
 	return p.forgeMap[forgeState]
+}
+
+// keepsStatus answers whether a pull update leaves the block's workflow status
+// as it stands (issue #486). The status is finer than the forge state —
+// several statuses map to one forge state (backlog and in-progress are both
+// open, done and wontfix both closed) — and the projection the 3-way decision
+// compares carries the forge state only, so a local move between two statuses
+// of one forge state does not show in it. The pull therefore writes the status
+// the remote state maps to only where that is news: the remote state differs
+// from the state the block projects to (open ↔ closed), or the block carries
+// no status of the resolved workflow: none yet, or one a change of the type's
+// workflow dropped — no local verb can move the block out of that
+// (ValidateTransition refuses a source that is not a configured status) and
+// the board does not list it. That reaches only a dropped status that was not
+// terminal: the pull updates a block that projects to its base, and a dropped
+// terminal status is no member of the new terminal set, so it projects to
+// "open" against a closed base (ctxForgeState) — the block reads as ahead,
+// the pull takes the conflict or ctx-ahead branch, and a later push sends
+// state open. That reopen is older than #486 and not changed here. With no
+// workflow resolvable the
+// pull writes the status as before #486 (NULL, the metadata-only fallback):
+// there is no set to tell a kept status from a stale one, and a kept status
+// is read again once a workflow resolves — an unpushed local close would then
+// project to "closed" against an open base and forge with nothing to push it.
+// cur is the block the pull's transaction locked, so a status moved after the
+// unlocked read is the one decided on.
+func (p issueTypePolicy) keepsStatus(cur *store.Block, remoteState string) bool {
+	if !p.registryOK || !slices.Contains(p.states, cur.WorkflowStatus) {
+		return false
+	}
+	return ctxForgeState(cur, p.terminalSet, true) == remoteState
 }
 
 // ApplyIssues is the IssueApplyFunc: one fetched page → the 3-way apply. The
@@ -215,6 +249,8 @@ func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow,
 // a lock, and a local write may have changed the block since (issue #452):
 // the block is locked and projected again first (LockPulledBlock), and a block
 // that no longer holds the base goes the matrix's way instead (stillAtBase).
+// The workflow status is written only where the forge state changed or the
+// block has none of the resolved workflow (keepsStatus, issue #486).
 func (a *Applier) pullUpdateIssue(ctx context.Context, project store.ProjectRow, pol issueTypePolicy,
 	writable []string, iss IssueRemote, m store.SyncMap, content store.ForgeIssueContent, forgeH string, forgeFields json.RawMessage, fUpdated *time.Time) (ApplyResult, error) {
 
@@ -233,6 +269,7 @@ func (a *Applier) pullUpdateIssue(ctx context.Context, project store.ProjectRow,
 			res = r
 			return err
 		}
+		content.KeepWorkflowStatus = pol.keepsStatus(cur, iss.State)
 		if _, err := store.PullUpdateIssueBlock(ctx, tx, m.BlockID, content); err != nil {
 			return err
 		}

@@ -538,8 +538,26 @@ func TestPushInSyncRowLeavesTheCandidates(t *testing.T) {
 		}
 		spy := newPushSpy()
 		res, err := pusherWithRegistry(pool).PushProject(ctx, proj, spy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow)
-		if err != nil || res.Pushed != 0 || spy.wireCalls() != 0 {
-			t.Fatalf("push: pushed=%d wire=%d err=%v, want 0/0", res.Pushed, spy.wireCalls(), err)
+		if err != nil || res.Pushed != 0 || res.Conflicts != 0 || spy.wireCalls() != 0 {
+			t.Fatalf("push: pushed=%d conflicts=%d wire=%d err=%v, want 0/0/0", res.Pushed, res.Conflicts, spy.wireCalls(), err)
+		}
+		// The advance recorded the listed base again, not a moved one: both
+		// mappings keep their base and carry no flag (issue #486).
+		for _, m := range []struct {
+			kind  string
+			id    int64
+			block string
+		}{{"issue", 5, issueID}, {"comment", 700, commentID}} {
+			base, conflict, _, _ := readMapping(t, pool, proj.ID, m.kind, m.id)
+			var ctxH string
+			if m.kind == "issue" {
+				_, ctxH = CtxIssueBase(getBlock(t, pool, proj.Scope, m.block), []string{"done"}, true)
+			} else {
+				_, ctxH = CtxCommentBase(getBlock(t, pool, proj.Scope, m.block))
+			}
+			if base != ctxH || conflict {
+				t.Errorf("%s mapping after the in-sync advance: base is the block's projection %v, flagged %v", m.kind, base == ctxH, conflict)
+			}
 		}
 		i452NoCandidates(t, pool, proj)
 	})
@@ -605,9 +623,16 @@ func TestPushAdvanceWaitsForAnUpdateBlockInFlight(t *testing.T) {
 		return strings.Contains(sql, "UPDATE context_blocks SET")
 	})
 	const inFlight = "body written in flight by UpdateBlock"
+	// The writer is bounded once the hold is released (issue #486): its
+	// context is cancelled i452Wait after Release, so a stalled UpdateBlock
+	// fails the test — its statement is cancelled, and the held pool's
+	// connection is given back for the cleanup to close — instead of hanging
+	// it until the package timeout.
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	updated := make(chan error, 1)
 	go func() {
-		_, _, err := store.UpdateBlock(ctx, held, issueID, store.UpdateBlockData{Content: str(inFlight)}, []string{proj.Scope})
+		_, _, err := store.UpdateBlock(wctx, held, issueID, store.UpdateBlockData{Content: str(inFlight)}, []string{proj.Scope})
 		updated <- err
 	}()
 	pid := hold.Wait(t)
@@ -623,8 +648,15 @@ func TestPushAdvanceWaitsForAnUpdateBlockInFlight(t *testing.T) {
 	}()
 	testdb.WaitBlockedBy(t, pool, pid, done, "the push's advance", "")
 	hold.Release()
-	if err := <-updated; err != nil {
-		t.Fatalf("UpdateBlock: %v", err)
+	deadline := time.AfterFunc(i452Wait, cancel)
+	defer deadline.Stop()
+	select {
+	case err := <-updated:
+		if err != nil {
+			t.Fatalf("UpdateBlock: %v", err)
+		}
+	case <-wctx.Done():
+		t.Fatalf("UpdateBlock did not return within %s after the hold was released", i452Wait)
 	}
 	select {
 	case <-done:
