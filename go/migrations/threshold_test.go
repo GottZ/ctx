@@ -39,8 +39,8 @@ import (
 //     pg_class, or qualified by a name that is no relation of the statement
 //     (r.reltuples, (r).reltuples: a row variable, whatever filled it);
 //   - a SELECT count(*) of every row of one table (with INTO, an alias or a
-//     cast, and no WHERE, join or grouping; a LIMIT on the count's one row
-//     bounds nothing). A count stopped at the threshold in a subquery, as
+//     cast, and no WHERE, join or grouping; an ORDER BY, LIMIT or OFFSET on
+//     the count's one row bounds nothing). A count stopped at the threshold in a subquery, as
 //     ctx_migration_rows counts, is no estimate and passes.
 //
 // Not a decision: a size a statement only reports. A RAISE (its message, its
@@ -102,8 +102,9 @@ var (
 	wordIn = regexp.MustCompile(sqlName)
 	// countEveryRow is a count of every row of one table in the text of a
 	// statement (joinTokens): an INTO before or after the count, a cast and
-	// an alias of it, and after the table at most an INTO and a LIMIT or
-	// OFFSET on the count's one row — no WHERE, join or grouping. The table
+	// an alias of it, and after the table at most an INTO and an ORDER BY,
+	// LIMIT or OFFSET on the count's one row (with one level of parentheses)
+	// — no WHERE, join or grouping. The table
 	// may be a format() placeholder. Group 1 is the table, group 2 its alias
 	// (a clauseWord there is no alias: the count has a clause).
 	countEveryRow = regexp.MustCompile(`\bselect(?: into (?:strict )?` + sqlName + `)? count \( (?:\*|[0-9]+|` +
@@ -111,7 +112,7 @@ var (
 		`(?: into (?:strict )?` + sqlName + `)?` +
 		` from (?:only )?((?:% [a-z]|` + sqlName + `)(?: \. (?:% [a-z]|` + sqlName + `))?)` +
 		`(?: (?:as )?(` + sqlName + `))?(?: into (?:strict )?` + sqlName + `)?` +
-		`(?: (?:limit|offset) [^()']*)?(?: \)| '|$)`)
+		`(?: (?:order by|limit|offset) (?:[^()']|\( [^()']* \))*)?(?: \)| '|$)`)
 	// clauseWord opens a clause after a table and is never its alias.
 	clauseWord = map[string]bool{"where": true, "group": true, "having": true, "window": true, "order": true,
 		"limit": true, "offset": true, "fetch": true, "for": true, "join": true, "inner": true, "left": true,
@@ -1094,6 +1095,10 @@ UPDATE context_page_marks SET relpages = relpages + 1 WHERE relid = 'public.cont
     END IF;`)},
 	{class: "never covered", refuse: true, name: "a LIMIT on the one row of a count bounds nothing",
 		src: inDo(`    SELECT count(*) INTO v_rows FROM context_blocks LIMIT 500000;`)},
+	{class: "never covered", refuse: true, name: "a LIMIT in parentheses on the one row of a count bounds nothing",
+		src: inDo(`    SELECT count(*) INTO v_rows FROM context_blocks LIMIT (500000);`)},
+	{class: "never covered", refuse: true, name: "an ORDER BY on the one row of a count",
+		src: inDo(`    SELECT count(*) INTO v_rows FROM context_blocks ORDER BY count(*);`)},
 	{class: "never covered", refuse: true, name: "an unbounded count(*) in dynamic SQL",
 		src: inDo(`    EXECUTE format('SELECT count(*) FROM %I', 'context_blocks') INTO v_rows;`)},
 	{class: "never covered", refuse: true, name: "an unbounded count(*) of a schema-qualified format() table",
