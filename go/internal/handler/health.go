@@ -275,8 +275,8 @@ var healthProbeBudget = 4 * time.Second
 // answer 404/405 on GET / and auth-gated APIs answer 401/403, all of which
 // prove the host is up and serving (see pingHost). Errors log the backend name
 // to slog ONLY — the response carries the aggregate — and once per change of
-// state (healthNotice, issue #504): a role without an enabled backend, a
-// backend that stops answering.
+// state (healthNotice, issue #504): a role without an enabled backend, a role
+// none of whose candidates answers, a backend that stops answering.
 //
 // Only operator rows (_global/unscoped) are pinged: /health is anonymous, and a
 // tenant row's base_url is tenant-admin input — pinging it would hand every
@@ -303,17 +303,21 @@ func roleReachable(ctx context.Context, snap []backends.Backend, role string, pr
 		}
 	}
 	healthLines.roleProbed(role, rows, candidates)
-	reached, walked := "error", candidates
 	for i, b := range candidates {
 		err := probes.ping(ctx, b.Host)
 		healthLines.pinged(ctx, role, b, err)
-		if err == nil {
-			reached, walked = "ok", candidates[:i+1]
-			break
+		switch {
+		case err == nil:
+			healthLines.walked(role, candidates[:i+1], true)
+			return "ok"
+		case callerLeft(ctx, err):
+			// The caller left: the walk observed nothing more, so it neither
+			// forgets the candidates it did not reach nor changes the role.
+			return "error"
 		}
 	}
-	healthLines.walked(role, walked)
-	return reached
+	healthLines.walked(role, candidates, false)
+	return "error"
 }
 
 // hostProbes is the probe memo of ONE HealthStatus call (#265): the first role

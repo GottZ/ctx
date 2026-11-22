@@ -70,8 +70,8 @@ func TestHealthBackendAnswersAgainAfterThreeProbesInARow(t *testing.T) {
 }
 
 // TestHealthFlappingBackendLogsOneWarn — every second probe of the chat
-// backend fails: 60 calls write one WARN for the backend and no INFO
-// (before: 30 WARN and 29 INFO).
+// backend fails: 60 calls write one WARN for the backend and one for its
+// role, which it alone serves, and no INFO (before: 30 WARN and 29 INFO).
 func TestHealthFlappingBackendLogsOneWarn(t *testing.T) {
 	var n atomic.Int64
 	flap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -97,16 +97,20 @@ func TestHealthFlappingBackendLogsOneWarn(t *testing.T) {
 		}
 		return m
 	}
-	b := count(row.Name)
-	t.Logf("60 calls with a backend that fails every second probe: backend %v", b)
+	b, role := count(row.Name), count("")
+	t.Logf("60 calls with a backend that fails every second probe: backend %v, role %v", b, role)
 	if b[slog.LevelWarn] != 1 || b[slog.LevelInfo] != 0 {
 		t.Errorf("backend: %d WARN, %d INFO, want 1 and 0", b[slog.LevelWarn], b[slog.LevelInfo])
+	}
+	if role[slog.LevelWarn] != 1 || role[slog.LevelInfo] != 0 {
+		t.Errorf("role: %d WARN, %d INFO, want 1 and 0", role[slog.LevelWarn], role[slog.LevelInfo])
 	}
 }
 
 // TestHealthRecoveryOneLineUnderConcurrency — 64 calls at the same time for
-// each change: exactly one WARN for the backend when it stops answering,
-// exactly one INFO when it answers again.
+// each change: exactly one WARN for the backend and one for the role it alone
+// serves when it stops answering, exactly one INFO each when it answers
+// again.
 func TestHealthRecoveryOneLineUnderConcurrency(t *testing.T) {
 	var down atomic.Bool
 	up := slowBackend(t, 0, nil)
@@ -114,7 +118,7 @@ func TestHealthRecoveryOneLineUnderConcurrency(t *testing.T) {
 	snap := []backends.Backend{operatorRow("i504-c64-e", up, backends.RoleEmbed, backends.RoleDream), row}
 	healthCalls(t, snap, recoveryAnswers) // a known state
 	pool := brokenPool(t)
-	burst := func(t *testing.T, isDown bool) map[slog.Level]int {
+	burst := func(t *testing.T, isDown bool) (backend, role map[slog.Level]int) {
 		t.Helper()
 		down.Store(isDown)
 		logs := installRejectLogCapture(t)
@@ -128,14 +132,18 @@ func TestHealthRecoveryOneLineUnderConcurrency(t *testing.T) {
 		}
 		close(start)
 		wg.Wait()
-		backend := map[slog.Level]int{}
+		backend, role = map[slog.Level]int{}, map[slog.Level]int{}
 		for _, r := range logs.all() {
-			if strings.HasPrefix(r.msg, "health check") && r.attrs["role"] == backends.RoleSynthesis && r.level >= slog.LevelInfo &&
-				r.attrs["backend"] == row.Name {
+			if !strings.HasPrefix(r.msg, "health check") || r.attrs["role"] != backends.RoleSynthesis || r.level < slog.LevelInfo {
+				continue
+			}
+			if r.attrs["backend"] == row.Name {
 				backend[r.level]++
+			} else if _, ok := r.attrs["backend"]; !ok {
+				role[r.level]++
 			}
 		}
-		return backend
+		return backend, role
 	}
 	for _, s := range []struct {
 		name  string
@@ -146,15 +154,16 @@ func TestHealthRecoveryOneLineUnderConcurrency(t *testing.T) {
 		{"recovery", false, slog.LevelInfo},
 		{"second outage", true, slog.LevelWarn},
 	} {
-		if b := burst(t, s.down); len(b) != 1 || b[s.level] != 1 {
-			t.Errorf("%s: backend %v, want exactly one %v", s.name, b, s.level)
+		if b, r := burst(t, s.down); len(b) != 1 || b[s.level] != 1 || len(r) != 1 || r[s.level] != 1 {
+			t.Errorf("%s: backend %v, role %v, want exactly one %v for each", s.name, b, r, s.level)
 		}
 	}
 }
 
 // TestHealthFirstObservationIsNoChange — a fresh process (a new healthNotice):
 // the first call that finds every role served by an answering backend logs
-// nothing above DEBUG for any role — no "enabled again", no "answers again".
+// nothing above DEBUG for any role — no "enabled again", no "answers again",
+// no "served again".
 func TestHealthFirstObservationIsNoChange(t *testing.T) {
 	prev := healthLines
 	healthLines = &healthNotice{}

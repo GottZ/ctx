@@ -101,7 +101,7 @@ func TestHealthLinesPerMinute(t *testing.T) {
 			prepare: func(*testing.T) { chatDown.Store(true) },
 			code:    http.StatusOK, status: "degraded",
 			services: map[string]string{"database": "ok", "embed": "ok", "chat": "error", "dream": "error"},
-			want:     []int{2}, // one WARN per role the chat row serves (synthesis, dream)
+			want:     []int{4}, // per role the chat row alone serves (synthesis, dream): its WARN and the role's
 		},
 	}
 	for _, p := range phases {

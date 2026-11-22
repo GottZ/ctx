@@ -28,6 +28,14 @@ import (
 //     has no row of the role, or its rows are all disabled. A WARN names the
 //     reason and the remedy when a role stops being served or its reason
 //     changes, an INFO says when a backend of the role is enabled again;
+//   - per role with candidates, whether its walk reached one that answers
+//     (walked): a WARN naming the number of candidates when none of them
+//     answers any more — a role can stop being served while each of its
+//     backends already logged its outage, when the one that served it is
+//     disabled — and an INFO when it is served again, after
+//     healthRecoveryAnswers walks in a row that reached an answering
+//     candidate. A role without candidates has the line of the reason above
+//     instead, not a second one;
 //   - per role and backend (name and base URL), a probe that found the
 //     backend unreachable (pinged): a WARN when it stops answering, an INFO
 //     when it answers again — after healthRecoveryAnswers probes in a row
@@ -47,8 +55,9 @@ import (
 // forgotten.
 type healthNotice struct {
 	mu          sync.Mutex
-	roles       map[string]roleProbe // role → what its last probe found
-	unreachable map[probeKey]int     // role and backend found unreachable → probes in a row it answered since
+	roles       map[string]roleProbe  // role → what its last probe found
+	served      map[string]roleServed // role with candidates → whether its walk reached one that answers
+	unreachable map[probeKey]int      // role and backend found unreachable → probes in a row it answered since
 	dbDown      bool
 }
 
@@ -79,6 +88,14 @@ func (p roleProbe) reason() string {
 		return "no_backend_of_role"
 	}
 	return "none_enabled"
+}
+
+// roleServed is the served state of a role with candidates: unserved while
+// its walks reach no candidate that answers, and from the first walk that
+// reaches one again, how many in a row have.
+type roleServed struct {
+	unserved bool
+	answers  int
 }
 
 // probeKey names a backend's probe for one role: the row's name and the base
@@ -122,12 +139,42 @@ func (n *healthNotice) roleProbed(role string, rows int, candidates []*backends.
 	}
 }
 
-// walked forgets the unreachable backends of role that the walk of the
-// role's candidates did not reach (see healthNotice).
-func (n *healthNotice) walked(role string, reached []*backends.Backend) {
+// walked records the end of a walk over the candidates of role: reached are
+// the candidates it probed, served whether the last of them answered. It
+// forgets the unreachable backends of role the walk did not reach and logs a
+// change of the role's served state (see healthNotice). A walk without
+// candidates leaves the role to roleProbed's line and forgets its served
+// state. A walk its caller abandoned does not end here.
+func (n *healthNotice) walked(role string, reached []*backends.Backend, served bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.retain(role, reached)
+	if len(reached) == 0 {
+		delete(n.served, role)
+		return
+	}
+	if n.served == nil {
+		n.served = make(map[string]roleServed)
+	}
+	s, seen := n.served[role]
+	switch {
+	case served && !s.unserved: // also the first walk the process observes: no change
+		n.served[role] = roleServed{}
+	case served && s.answers+1 < healthRecoveryAnswers:
+		n.served[role] = roleServed{unserved: true, answers: s.answers + 1}
+		slog.Debug("health check: a backend of this role answers, not yet often enough in a row to count as served", "role", role,
+			"answers_in_a_row", s.answers+1)
+	case served:
+		n.served[role] = roleServed{}
+		slog.Info("health check: the role is served again — a backend of it answers", "role", role, "answers_in_a_row", healthRecoveryAnswers)
+	case seen && s.unserved:
+		n.served[role] = roleServed{unserved: true}
+		slog.Debug("health check: no backend of this role answers", "role", role, "candidates", len(reached))
+	default:
+		n.served[role] = roleServed{unserved: true}
+		slog.Warn("health check: no backend of this role answers — /health reports the role as error until one does; each "+
+			"backend's own line names its failure", "role", role, "candidates", len(reached))
+	}
 }
 
 // retain forgets the unreachable backends of role that are not among
@@ -185,6 +232,7 @@ func (n *healthNotice) forgetRole(role string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	delete(n.roles, role)
+	delete(n.served, role)
 	n.retain(role, nil)
 }
 
