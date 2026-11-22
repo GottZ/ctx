@@ -121,10 +121,16 @@ func (p issueTypePolicy) workflowStatusFor(forgeState string) string {
 // of one forge state does not show in it. The pull therefore writes the status
 // the remote state maps to only where that is news: the remote state differs
 // from the state the block projects to (open ↔ closed), or the block carries
-// no status of the resolved workflow: none yet, or one a
-// change of the type's workflow dropped — no local verb can move the block
-// out of that (ValidateTransition refuses a source that is not a configured
-// status) and the board does not list it. With no workflow resolvable the
+// no status of the resolved workflow: none yet, or one a change of the type's
+// workflow dropped — no local verb can move the block out of that
+// (ValidateTransition refuses a source that is not a configured status) and
+// the board does not list it. That reaches only a dropped status that was not
+// terminal: the pull updates a block that projects to its base, and a dropped
+// terminal status is no member of the new terminal set, so it projects to
+// "open" against a closed base (ctxForgeState) — the block reads as ahead,
+// the pull takes the conflict or ctx-ahead branch, and a later push sends
+// state open. That reopen is older than #486 and not changed here. With no
+// workflow resolvable the
 // pull writes the status as before #486 (NULL, the metadata-only fallback):
 // there is no set to tell a kept status from a stale one, and a kept status
 // is read again once a workflow resolves — an unpushed local close would then

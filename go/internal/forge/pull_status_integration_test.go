@@ -333,7 +333,9 @@ func TestPullWritesTheMappedStatusIntoABlockWithoutOne(t *testing.T) {
 }
 
 // TestPullHealsAStatusTheWorkflowNoLongerHas: the tenant changed its issue
-// type's workflow and dropped the status the block carries. No local verb can
+// type's workflow and dropped the (non-terminal) status the block carries — a
+// dropped terminal status projects to "open" against the closed base and
+// never reaches the pull update (keepsStatus). No local verb can
 // move the block any more (ValidateTransition refuses a source that is not a
 // configured status), and the board does not list it; the next pull update
 // writes the status the forge state maps to, as it did before, instead of
