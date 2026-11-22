@@ -362,6 +362,14 @@ func TestWriteOutcome(t *testing.T) {
 		{"COMMIT never sent", bracket(nil, safeToRetryErr{}), writeRolledBack},
 		{"COMMIT whose connection broke while it waited", bracket(nil, connClosedErr{}), writeUnknown},
 		{"connection closed inside the transaction", bracket(connClosedErr{}, nil), writeRolledBack},
+		// Issue #483: a backend terminated while it commits dies after its
+		// commit record — its FATAL says nothing about the COMMIT.
+		{"COMMIT answered with FATAL", bracket(nil, &pgconn.PgError{Severity: "FATAL", SeverityUnlocalized: "FATAL", Code: "57P01"}), writeUnknown},
+		{"COMMIT answered with a localized FATAL", bracket(nil, &pgconn.PgError{Severity: "KATASTROFALNY", SeverityUnlocalized: "FATAL", Code: "57P01"}), writeUnknown},
+		{"COMMIT answered with a localized PANIC", bracket(nil, &pgconn.PgError{Severity: "PANIK", SeverityUnlocalized: "PANIC", Code: "XX000"}), writeUnknown},
+		{"COMMIT answered with FATAL, no unlocalized severity", bracket(nil, &pgconn.PgError{Severity: "FATAL", Code: "57P01"}), writeUnknown},
+		{"COMMIT refused with a localized ERROR", bracket(nil, &pgconn.PgError{Severity: "FEHLER", SeverityUnlocalized: "ERROR", Code: "40001"}), writeRolledBack},
+		{"FATAL inside the transaction", bracket(&pgconn.PgError{Severity: "FATAL", SeverityUnlocalized: "FATAL", Code: "57P01"}, nil), writeRolledBack},
 	} {
 		if got := writeOutcome(tc.err); got != tc.want {
 			t.Errorf("%s: writeOutcome(%v) = %q, want %q", tc.name, tc.err, got, tc.want)

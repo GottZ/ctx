@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -189,8 +190,9 @@ const (
 	writeRolledBack = "rolled_back" // the transaction ended without a commit
 	writeCommitted  = "committed"   // the write committed; a later step failed
 	// writeUnknown: the COMMIT was sent and its answer never arrived (the
-	// request was cancelled or the connection broke during it) — the
-	// database may have committed the transaction.
+	// request was cancelled or the connection broke during it), or the
+	// server ended the session while it committed — the database may have
+	// committed the transaction.
 	writeUnknown = "unknown"
 )
 
@@ -198,11 +200,12 @@ const (
 // WriteOpts) whose Stages name the commit: unknown when the COMMIT was sent
 // and its answer never came back (no PostgreSQL error answer, not the
 // rollback answer pgx reports as ErrTxCommitRollback, not refused before
-// sending — pgconn.SafeToRetry), rolled back for everything else (a
-// statement inside the transaction failed, the database refused or rolled
-// back the commit, or the commit never left). For an unlabeled bracket the commit is not
-// recognisable and the answer would claim too much — use it only on labeled
-// ones.
+// sending — pgconn.SafeToRetry) or came back as the end of the session
+// (sessionEnded), rolled back for everything else (a statement inside the
+// transaction failed, the database refused or rolled back the commit with an
+// ERROR, or the commit never left). For an unlabeled bracket the commit is
+// not recognisable and the answer would claim too much — use it only on
+// labeled ones.
 //
 // A COMMIT whose connection broke while it waited for the answer is unknown
 // too, although pgx says it was never sent: pgx v5 reports that break as
@@ -214,9 +217,34 @@ func writeOutcome(err error) string {
 		return writeRolledBack
 	}
 	var pgErr *pgconn.PgError
-	if errors.Is(err, pgconn.ErrConnClosed) ||
-		(!errors.As(err, &pgErr) && !errors.Is(err, pgx.ErrTxCommitRollback) && !pgconn.SafeToRetry(err)) {
+	switch {
+	case errors.Is(err, pgconn.ErrConnClosed):
 		return writeUnknown
+	case errors.As(err, &pgErr):
+		if sessionEnded(pgErr) {
+			return writeUnknown
+		}
+		return writeRolledBack
+	case errors.Is(err, pgx.ErrTxCommitRollback), pgconn.SafeToRetry(err):
+		return writeRolledBack
 	}
-	return writeRolledBack
+	return writeUnknown
+}
+
+// sessionEnded reports whether pgErr ends the session — severity FATAL or
+// PANIC — rather than one statement (ERROR). Such an error says nothing about
+// a COMMIT it answers (issue #483): PostgreSQL holds interrupts while it
+// commits, so a backend terminated in that window (pg_terminate_backend, a
+// fast shutdown) writes its commit record first and sends the FATAL at its
+// next interrupt check, which with a duration log (log_min_duration_statement
+// or log_duration) comes after the COMMIT's CommandComplete — pgx returns the
+// FATAL for a transaction that committed. The unlocalized severity decides
+// (the localized one follows lc_messages); a server that sends none leaves
+// the localized one.
+func sessionEnded(pgErr *pgconn.PgError) bool {
+	sev := pgErr.SeverityUnlocalized
+	if sev == "" {
+		sev = pgErr.Severity
+	}
+	return strings.EqualFold(sev, "FATAL") || strings.EqualFold(sev, "PANIC")
 }

@@ -142,6 +142,12 @@ func TestStatementOutcome(t *testing.T) {
 		{"the commit was refused (unlabeled bracket)", fmt.Errorf("issue: %w", pgx.ErrTxCommitRollback), writeRolledBack},
 		{"no connection to the database", opaqueWrap{&pgconn.ConnectError{}}, writeRolledBack},
 		{"a commit whose connection broke while it waited (pgx: conn closed, safe to retry)", connClosedErr{}, writeUnknown},
+		// Issue #483: a FATAL may follow an implicit or unlabeled commit.
+		{"the server's FATAL", fmt.Errorf("stage: %w", &pgconn.PgError{Severity: "FATAL", SeverityUnlocalized: "FATAL", Code: "57P01"}), writeUnknown},
+		{"a localized FATAL", &pgconn.PgError{Severity: "KATASTROFALNY", SeverityUnlocalized: "FATAL", Code: "57P01"}, writeUnknown},
+		{"a localized PANIC", &pgconn.PgError{Severity: "PANIK", SeverityUnlocalized: "PANIC", Code: "XX000"}, writeUnknown},
+		{"a FATAL without the unlocalized severity", &pgconn.PgError{Severity: "FATAL", Code: "57P01"}, writeUnknown},
+		{"a localized ERROR", &pgconn.PgError{Severity: "FEHLER", SeverityUnlocalized: "ERROR", Code: "23505"}, writeRolledBack},
 	} {
 		if got := statementOutcome(tc.err); got != tc.want {
 			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
