@@ -210,7 +210,8 @@ func (h *ManageHandler) handleTenantLimitSet(w http.ResponseWriter, r *http.Requ
 			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
 			return
 		}
-		writeAdminFailure(w, r, "manage: tenant-limit-set failed", err, statementOutcome(err), "set tenant limits failed")
+		adminWriteFailed(r, "manage: tenant-limit-set failed", err, statementOutcome(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "set tenant limits failed"})
 		return
 	}
 	// Echo the canonical stored row. SetTenantLimits already committed, so a re-read
@@ -771,7 +772,8 @@ func (h *ManageHandler) handleScopeCreate(w http.ResponseWriter, r *http.Request
 		case errors.Is(err, store.ErrTenantNotFound):
 			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
 		default:
-			writeAdminFailure(w, r, "manage: scope-create failed", err, writeOutcome(err), "assign scope failed")
+			adminWriteFailed(r, "manage: scope-create failed", err, writeOutcome(err))
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "assign scope failed"})
 		}
 		return
 	}

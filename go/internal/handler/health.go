@@ -225,7 +225,13 @@ func foldSchemaContractStatus(status, schemaContract string) string {
 // Health serves the public /health endpoint, wrapping HealthStatus with the
 // HTTP status-code mapping (unhealthy → 503, else 200).
 func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	// The probes run on the request's values but not its cancellation (issue
+	// #504): they are what healthNotice learns the state from, and a client
+	// that gives up first — the compose healthcheck's 5 s clock starts before
+	// its request does — would cut every probe of a backend that hangs, which
+	// then never logged its outage. healthProbeBudget still ends them, and
+	// Health returns only after all of them.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), healthProbeBudget)
 	defer cancel()
 
 	cfg := h.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: /health is public/anonymous — no tenant in reach; dream.enabled is server-global.
@@ -250,6 +256,13 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 		logEncodeError(w, "health check: failed to encode response", "error", err)
 	}
 }
+
+// healthProbeBudget bounds the probes of one HealthStatus call, for /health
+// and the status collector alike: both feed the same healthNotice, and two
+// budgets would judge a backend that answers between them reachable in one
+// and unreachable in the other, a WARN and an INFO for every alternation. A
+// variable for tests; 5 s is the budget /health always had.
+var healthProbeBudget = 5 * time.Second
 
 // roleReachable reports ok when at least one enabled backend of the role
 // answers its base URL. This is a REACHABILITY probe, not a model-availability
@@ -285,14 +298,17 @@ func roleReachable(ctx context.Context, snap []backends.Backend, role string, pr
 		}
 	}
 	healthLines.roleProbed(role, rows, candidates)
-	for _, b := range candidates {
+	reached, walked := "error", candidates
+	for i, b := range candidates {
 		err := probes.ping(ctx, b.Host)
 		healthLines.pinged(ctx, role, b, err)
 		if err == nil {
-			return "ok"
+			reached, walked = "ok", candidates[:i+1]
+			break
 		}
 	}
-	return "error"
+	healthLines.walked(role, walked)
+	return reached
 }
 
 // hostProbes is the probe memo of ONE HealthStatus call (#265): the first role

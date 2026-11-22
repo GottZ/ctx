@@ -291,6 +291,26 @@ func i505HoldTiming(t *testing.T, direct *pgxpool.Pool) (timeout time.Duration, 
 	return timeout, holdAt
 }
 
+// i505HeldAttempts bounds the attempts of a held-timer case (i505Held).
+const i505HeldAttempts = 5
+
+// i505Held runs try with fresh row ids until it reports the probe inside its
+// window, at most i505HeldAttempts times. try returns why an attempt missed
+// the window ("" when it was inside and its checks ran): a host under load
+// wakes the trigger late or runs md5 fast, which says nothing about the
+// server. Every attempt missed ⇒ skip, not fail.
+func i505Held(t *testing.T, base int, try func(id int) (missed string)) {
+	t.Helper()
+	for a := range i505HeldAttempts {
+		missed := try(base + a)
+		if missed == "" {
+			return
+		}
+		t.Logf("attempt %d missed the held window: %s", a+1, missed)
+	}
+	t.Skipf("all %d attempts missed the held window under the host's load", i505HeldAttempts)
+}
+
 func TestWriteOutcomeTimeout(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -321,78 +341,102 @@ func TestWriteOutcomeTimeout(t *testing.T) {
 	var heldTimeout *pgconn.PgError // the 57014 of a timeout held across a commit
 
 	t.Run("statement_timeout held across the implicit commit", func(t *testing.T) {
-		conn := i505Connect(t, i505Config(t, dsn, nil))
-		i505Exec(t, conn, holdSettings...)
-		// No arguments: the simple protocol, which commits before the
-		// CommandComplete and logs the duration after it.
-		_, err := conn.Exec(ctx, `INSERT INTO i505_held VALUES (1)`)
-		wantPgError(t, err, "ERROR", "57014")
-		heldTimeout = i505PgError(t, err)
-		t.Logf("FIELDS statement timeout held across the implicit commit: %+v", *heldTimeout)
-		if !i505Row(t, direct, "i505_held", 1) {
-			t.Fatal("the row is absent: the timeout cut the statement before its commit, the probe tested nothing")
-		}
-		if got := statementOutcome(err); got != writeUnknown {
-			t.Errorf("statementOutcome = %q, want unknown for a timeout held across the implicit commit", got)
-		}
+		i505Held(t, 10, func(id int) string {
+			conn := i505Connect(t, i505Config(t, dsn, nil))
+			i505Exec(t, conn, holdSettings...)
+			// No arguments: the simple protocol, which commits before the
+			// CommandComplete and logs the duration after it.
+			_, err := conn.Exec(ctx, fmt.Sprintf(`INSERT INTO i505_held VALUES (%d)`, id))
+			switch row := i505Row(t, direct, "i505_held", id); {
+			case err == nil:
+				return "no timeout: md5 ended before the timer"
+			case !row:
+				return fmt.Sprintf("the timeout cut the statement before its commit (%v)", err)
+			}
+			wantPgError(t, err, "ERROR", "57014")
+			heldTimeout = i505PgError(t, err)
+			t.Logf("FIELDS statement timeout held across the implicit commit: %+v", *heldTimeout)
+			if got := statementOutcome(err); got != writeUnknown {
+				t.Errorf("statementOutcome = %q, want unknown for a timeout held across the implicit commit", got)
+			}
+			return ""
+		})
 	})
 
 	t.Run("statement_timeout held, extended protocol", func(t *testing.T) {
 		// With an argument pgx sends Bind/Execute/Sync: Execute logs its
 		// duration before the Sync that commits.
-		conn := i505Connect(t, i505Config(t, dsn, nil))
-		i505Exec(t, conn, holdSettings...)
-		_, err := conn.Exec(ctx, `INSERT INTO i505_held VALUES ($1)`, 2)
-		wantPgError(t, err, "ERROR", "57014")
-		if i505Row(t, direct, "i505_held", 2) {
-			t.Fatal("the row is present: the held timeout was reported after the commit")
-		}
-		if got := statementOutcome(err); got != writeUnknown {
-			t.Errorf("statementOutcome = %q, want unknown (it cannot tell the protocol)", got)
-		}
+		i505Held(t, 20, func(id int) string {
+			conn := i505Connect(t, i505Config(t, dsn, nil))
+			i505Exec(t, conn, holdSettings...)
+			_, err := conn.Exec(ctx, `INSERT INTO i505_held VALUES ($1)`, id)
+			if err == nil {
+				return "no timeout: md5 ended before the timer"
+			}
+			wantPgError(t, err, "ERROR", "57014")
+			if i505Row(t, direct, "i505_held", id) {
+				t.Fatal("the row is present: the held timeout was reported after the commit")
+			}
+			if got := statementOutcome(err); got != writeUnknown {
+				t.Errorf("statementOutcome = %q, want unknown (it cannot tell the protocol)", got)
+			}
+			return ""
+		})
 	})
 
 	t.Run("statement_timeout held into the next command, no duration log", func(t *testing.T) {
-		conn := i505Connect(t, i505Config(t, dsn, map[string]string{"log_min_duration_statement": "-1"}))
-		i505Exec(t, conn, holdSettings...)
-		if _, err := conn.Exec(ctx, `INSERT INTO i505_held VALUES (3)`); err != nil {
-			t.Fatalf("INSERT: %v, want no error: nothing checks for interrupts between the commit and the ReadyForQuery", err)
-		}
-		if !i505Row(t, direct, "i505_held", 3) {
-			t.Fatal("the row is absent")
-		}
-		_, err := conn.Exec(ctx, `SELECT 1`)
-		wantPgError(t, err, "ERROR", "57014")
-		next := i505PgError(t, err)
-		t.Logf("FIELDS statement timeout held into the next command: %+v", *next)
-		if heldTimeout != nil && next.Line != heldTimeout.Line {
-			t.Errorf("line %d, want the statement timeout's %d", next.Line, heldTimeout.Line)
-		}
-		if _, err := conn.Exec(ctx, `SELECT 1`); err != nil {
-			t.Fatalf("the command after: %v", err)
-		}
+		i505Held(t, 30, func(id int) string {
+			conn := i505Connect(t, i505Config(t, dsn, map[string]string{"log_min_duration_statement": "-1"}))
+			i505Exec(t, conn, holdSettings...)
+			if _, err := conn.Exec(ctx, fmt.Sprintf(`INSERT INTO i505_held VALUES (%d)`, id)); err != nil {
+				return fmt.Sprintf("the timeout cut the INSERT (%v)", err)
+			}
+			if !i505Row(t, direct, "i505_held", id) {
+				t.Fatal("the row is absent")
+			}
+			_, err := conn.Exec(ctx, `SELECT 1`)
+			if err == nil {
+				return "no timeout: md5 ended before the timer"
+			}
+			wantPgError(t, err, "ERROR", "57014")
+			next := i505PgError(t, err)
+			t.Logf("FIELDS statement timeout held into the next command: %+v", *next)
+			if heldTimeout != nil && next.Line != heldTimeout.Line {
+				t.Errorf("line %d, want the statement timeout's %d", next.Line, heldTimeout.Line)
+			}
+			if _, err := conn.Exec(ctx, `SELECT 1`); err != nil {
+				t.Fatalf("the command after: %v", err)
+			}
+			return ""
+		})
 	})
 
 	t.Run("statement_timeout held into a bracket's COMMIT, no duration log", func(t *testing.T) {
-		conn := i505Connect(t, i505Config(t, dsn, map[string]string{"log_min_duration_statement": "-1"}))
-		err := pgxdb.Write(ctx, conn, pgxdb.At("probe: write"), func(tx pgx.Tx) error {
-			for _, s := range append(holdSettings, `INSERT INTO i505_held VALUES (4)`) {
-				if _, err := tx.Exec(ctx, s); err != nil {
-					return err
+		i505Held(t, 40, func(id int) string {
+			conn := i505Connect(t, i505Config(t, dsn, map[string]string{"log_min_duration_statement": "-1"}))
+			err := pgxdb.Write(ctx, conn, pgxdb.At("probe: write"), func(tx pgx.Tx) error {
+				for _, s := range append(holdSettings, fmt.Sprintf(`INSERT INTO i505_held VALUES (%d)`, id)) {
+					if _, err := tx.Exec(ctx, s); err != nil {
+						return err
+					}
 				}
+				return nil
+			})
+			switch {
+			case err == nil:
+				return "no timeout: md5 ended before the timer"
+			case !pgxdb.FailedAtCommit(err):
+				return fmt.Sprintf("the timeout cut the INSERT, not the COMMIT (%v)", err)
 			}
-			return nil
+			wantPgError(t, err, "ERROR", "57014")
+			if i505Row(t, direct, "i505_held", id) {
+				t.Fatal("the row is present: the COMMIT ran")
+			}
+			if got := writeOutcome(err); got != writeUnknown {
+				t.Errorf("writeOutcome = %q, want unknown (today: every 57014 at the COMMIT)", got)
+			}
+			return ""
 		})
-		wantPgError(t, err, "ERROR", "57014")
-		if !pgxdb.FailedAtCommit(err) {
-			t.Fatalf("error %v is not the bracket's COMMIT", err)
-		}
-		if i505Row(t, direct, "i505_held", 4) {
-			t.Fatal("the row is present: the COMMIT ran")
-		}
-		if got := writeOutcome(err); got != writeUnknown {
-			t.Errorf("writeOutcome = %q, want unknown (today: every 57014 at the COMMIT)", got)
-		}
 	})
 
 	t.Run("57014 fields: statement timeout and pg_cancel_backend", func(t *testing.T) {

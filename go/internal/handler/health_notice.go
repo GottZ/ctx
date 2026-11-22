@@ -18,9 +18,11 @@ import (
 // answer. The answer of /health does not change.
 //
 // One value serves the process (healthLines): /health and the status
-// collector (StatusCollector.buildCheap) probe through the same HealthStatus,
-// and a change of state logs once however many of their calls observe it at
-// the same time. The state is kept where its reason is found:
+// collector (StatusCollector.buildCheap) probe through the same HealthStatus
+// with the same budget, and a change of state logs once however many of
+// their calls observe the same state at the same time (calls that observe
+// different states, on snapshots taken before and after a reload, log each
+// change they apply). The state is kept where its reason is found:
 //
 //   - per role, why no backend of it is probed (roleProbed): the shared pool
 //     has no row of the role, or its rows are all disabled. A WARN names the
@@ -28,9 +30,11 @@ import (
 //     changes, an INFO says when a backend of the role is enabled again;
 //   - per role and backend (name and base URL), a probe that found the
 //     backend unreachable (pinged): a WARN when it stops answering, an INFO
-//     when it answers again. A backend that is no candidate of the role any
-//     more (disabled, deleted, its role or base URL changed) is forgotten
-//     without a line, so its next outage after it returns is a WARN again;
+//     when it answers again. A backend the last walk of its role did not
+//     reach (walked) — an earlier candidate answered, or it is no candidate
+//     any more: disabled, deleted, its role or base URL changed — is
+//     forgotten without a line, so what it does unobserved is no state, and
+//     the next walk that finds it down logs a WARN again;
 //   - the database ping (database): an ERROR when it starts failing, an INFO
 //     when it answers again.
 //
@@ -71,8 +75,7 @@ type probeKey struct{ role, name, host string }
 
 // roleProbed records which candidates the probe of role found (rows: the
 // shared pool's rows of the role, enabled or not) and logs a change of the
-// role's state. It forgets the unreachable backends of the role that are not
-// among candidates.
+// role's state.
 func (n *healthNotice) roleProbed(role string, rows int, candidates []*backends.Backend) {
 	probe := roleCandidates
 	switch {
@@ -84,7 +87,6 @@ func (n *healthNotice) roleProbed(role string, rows int, candidates []*backends.
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.retain(role, candidates)
 	prev, seen := n.roles[role]
 	if n.roles == nil {
 		n.roles = make(map[string]roleProbe)
@@ -106,6 +108,14 @@ func (n *healthNotice) roleProbed(role string, rows int, candidates []*backends.
 			"error until one is enabled; `ctx backends` lists the rows. This line repeats only after a backend of the role "+
 			"was enabled in between", "role", role)
 	}
+}
+
+// walked forgets the unreachable backends of role that the walk of the
+// role's candidates did not reach (see healthNotice).
+func (n *healthNotice) walked(role string, reached []*backends.Backend) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.retain(role, reached)
 }
 
 // retain forgets the unreachable backends of role that are not among

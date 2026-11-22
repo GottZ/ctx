@@ -123,6 +123,7 @@ func TestAdminWriteInputErrorsTenantRoutes(t *testing.T) {
 		c("tenant-quota-set", "NUL", nil, map[string]any{"data": data("scope", a.scope, "on_exceed", i505NUL)}),
 		c("tenant-quota-set", "out of range", nil, map[string]any{"data": data("scope", a.scope, "daily_cost_usd", 1e300)}),
 		c("tenant-quota-set", "invalid JSON field", nil, map[string]any{"data": data("scope", a.scope, "daily_calls", "x")}),
+		c("tenant-quota-set", "calls out of range", nil, map[string]any{"data": data("scope", a.scope, "daily_calls", 3000000000)}),
 		c("block-grant-create", "NUL", nil, map[string]any{"data": data("block_id", block, "grantee_tenant", i505NUL)}),
 		c("block-grant-create", "too long", nil, map[string]any{"data": data("block_id", block, "grantee_tenant", i505Long)}),
 		c("block-grant-create", "invalid JSON field", nil, map[string]any{"data": data("block_id", 5, "grantee_tenant", a.id)}),
@@ -169,6 +170,10 @@ func TestAdminWriteInputErrorsBackendRoutes(t *testing.T) {
 			c(route, "invalid JSON field", withID(spec("i505-j", "priority", "high"))),
 		)
 	}
+	// The scope column is VARCHAR(50); scope is immutable through update. A
+	// tenant row may not point at a private base_url, so the host is public.
+	cases = append(cases, c("backend-create", "too long scope", map[string]any{"data": spec("i505-s",
+		"scope", i505Long[:51], "base_url", "https://i505.example.org")}))
 	runInputErrorCases(t, cases)
 }
 

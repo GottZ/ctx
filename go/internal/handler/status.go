@@ -1147,8 +1147,9 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	failsBefore := c.dbFails.Load()
 	// Health: same source + shape as /health (shared HealthStatus), from ONE
 	// pool snapshot. The ping context is capped so a hung backend cannot stall
-	// the dashboard refresh.
-	hctx, hcancel := context.WithTimeout(ctx, 4*time.Second)
+	// the dashboard refresh — with /health's budget, since both feed one
+	// healthNotice (issue #504).
+	hctx, hcancel := context.WithTimeout(ctx, healthProbeBudget)
 	health := HealthStatus(hctx, c.pool, c.backendPool.Snapshot(), cfg.Dream.Enabled, blocktypeHealthValue(c.blocktypes))
 	hcancel()
 	// N3 doctrine ("same source, same shape" — never drift between /health
