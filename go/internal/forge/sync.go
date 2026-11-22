@@ -52,6 +52,11 @@ var (
 type ApplyResult struct {
 	Applied   int
 	Conflicts int
+	// Skipped counts the fetched entities left unwritten because the fetch is
+	// older than the forge observation the mapping records while its content
+	// differs from the recorded base (Applier.applyLocked, issue #491) — once
+	// per entity and run.
+	Skipped int
 }
 
 // IssueApplyFunc applies one fetched page of issues to the corpus — Welle I-G
@@ -89,6 +94,7 @@ type SyncStatus struct {
 	Applied     int       `json:"applied"`      // I-G writes; 0 in I-F (no-op apply)
 	Pushed      int       `json:"pushed"`       // I-H: entities written back to the forge
 	PushSkipped int       `json:"push_skipped"` // I-H: entities the push left to the next run (another instance's push held them, wrote them since the listing, or a pull flagged them since)
+	PullSkipped int       `json:"pull_skipped"` // I-G: fetched entities not written — older than the forge observation their mapping records, with content other than the recorded base (a WARN names each)
 	Conflicts   int       `json:"conflicts"`    // I-G pull + I-H push (truncated data-loss guard)
 	Aborted     bool      `json:"aborted"`
 	BackoffSet  bool      `json:"backoff_set"`
@@ -277,7 +283,7 @@ func (m *SyncManager) StartSync(ctx context.Context, project store.ProjectRow, d
 	}
 	m.setRunID(project.ID, run.ID)
 
-	go m.runSync(context.WithoutCancel(ctx), project, dryRun, run.ID)
+	go m.runSync(withStaleSeen(context.WithoutCancel(ctx)), project, dryRun, run.ID)
 	return m.Status(project.ID), nil
 }
 
@@ -441,6 +447,7 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 		if st := m.runs[project.ID]; st != nil {
 			st.Applied += res.Applied
 			st.Conflicts += res.Conflicts
+			st.PullSkipped += res.Skipped
 		}
 		m.mu.Unlock()
 		if mu := maxCommentUpdated(page); mu.After(maxSeen) {
@@ -565,6 +572,7 @@ func (m *SyncManager) applyPage(ctx context.Context, project store.ProjectRow, d
 	if st := m.runs[project.ID]; st != nil {
 		st.Applied += res.Applied
 		st.Conflicts += res.Conflicts
+		st.PullSkipped += res.Skipped
 	}
 	m.mu.Unlock()
 	return nil
@@ -659,7 +667,7 @@ func (m *SyncManager) finish(projectID, runID, errMsg string, aborted, backoffSe
 	stats, _ := json.Marshal(map[string]int{
 		"fetched": statsSnapshot.Fetched, "prs_skipped": statsSnapshot.PRsSkipped,
 		"pages": statsSnapshot.Pages, "applied": statsSnapshot.Applied,
-		"pushed": statsSnapshot.Pushed, "push_skipped": statsSnapshot.PushSkipped, "conflicts": statsSnapshot.Conflicts,
+		"pushed": statsSnapshot.Pushed, "push_skipped": statsSnapshot.PushSkipped, "pull_skipped": statsSnapshot.PullSkipped, "conflicts": statsSnapshot.Conflicts,
 	})
 	_ = store.FinishSyncRun(context.Background(), m.pool, runID, dbStatus, errMsg, stats)
 }

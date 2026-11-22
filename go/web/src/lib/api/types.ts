@@ -1427,6 +1427,7 @@ export interface SyncRunStatus {
   applied: number
   pushed: number
   push_skipped: number
+  pull_skipped: number
   conflicts: number
   aborted: boolean
   backoff_set: boolean

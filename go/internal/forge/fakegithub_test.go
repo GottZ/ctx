@@ -138,6 +138,22 @@ func (f *fakeGitHub) editInSecond(t *testing.T, n int64, change func(*fakeIssue)
 	t.Fatalf("the fake forge holds no issue #%d", n)
 }
 
+// editAt changes issue n like edit and gives it the updated_at at — earlier
+// than before when the forge's clock went back (a restore, a clock set back).
+func (f *fakeGitHub) editAt(t *testing.T, n int64, at time.Time, change func(*fakeIssue)) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.issues {
+		if f.issues[i].Number == n {
+			change(&f.issues[i])
+			f.issues[i].Updated = at
+			return
+		}
+	}
+	t.Fatalf("the fake forge holds no issue #%d", n)
+}
+
 // setETags makes the listing carry ETags and answer a matching If-None-Match
 // with 304, as GitHub does.
 func (f *fakeGitHub) setETags() {

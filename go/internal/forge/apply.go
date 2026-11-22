@@ -29,9 +29,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"regexp"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/GottZ/ctx/internal/blocktype"
@@ -208,6 +210,7 @@ func (a *Applier) ApplyIssues(ctx context.Context, project store.ProjectRow, iss
 		}
 		res.Applied += r.Applied
 		res.Conflicts += r.Conflicts
+		res.Skipped += r.Skipped
 	}
 	return res, nil
 }
@@ -316,17 +319,69 @@ func orderFetch(locked store.SyncMap, fetched *time.Time) fetchOrder {
 //     instance pulled the other version of that second between this pull's
 //     fetch and its read of the mapping, which reads the same (a known
 //     limit, pinned by TestPullOfASameSecondFetch).
-func olderOrUnordered(locked, read store.SyncMap, forgeH string, fetched *time.Time) (handled bool, conflict bool) {
+func olderOrUnordered(locked, read store.SyncMap, forgeH string, fetched *time.Time) (handled, conflict, stale bool) {
 	switch orderFetch(locked, fetched) {
 	case fetchOlder:
-		return true, false
+		return true, false, forgeH != locked.BaseHash
 	case fetchSameStamp:
 		if locked.BaseHash == read.BaseHash {
-			return false, false
+			return false, false, false
 		}
-		return true, forgeH != locked.BaseHash && !locked.Conflict
+		return true, forgeH != locked.BaseHash && !locked.Conflict, false
 	}
-	return false, false
+	return false, false, false
+}
+
+// staleSeenKey carries, in a sync run's context, the entities whose skipped
+// older fetch the run reported already (withStaleSeen).
+type staleSeenKey struct{}
+
+type staleSeen struct {
+	mu     sync.Mutex
+	blocks map[string]bool
+}
+
+// withStaleSeen gives a sync run the set behind firstStale, so a skipped
+// older fetch is reported once per entity and run however often the entity
+// is listed (a write between two pages lists it again).
+func withStaleSeen(ctx context.Context) context.Context {
+	return context.WithValue(ctx, staleSeenKey{}, &staleSeen{blocks: map[string]bool{}})
+}
+
+// firstStale answers whether this is the first skipped older fetch of
+// blockID in the run; without a run set (a direct ApplyIssues call) every
+// one is the first.
+func firstStale(ctx context.Context, blockID string) bool {
+	s, _ := ctx.Value(staleSeenKey{}).(*staleSeen)
+	if s == nil {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.blocks[blockID] {
+		return false
+	}
+	s.blocks[blockID] = true
+	return true
+}
+
+// reportStale makes a skipped older fetch whose content differs from the
+// locked row's base visible (issue #491): the forge carries something the
+// block does not, and this pull does not write it. Once, it is the ordinary
+// trace of a race — another instance pulled a newer version, and the next
+// pull lists that one. Run after run for the same block, the forge's
+// updated_at went back behind the stamp the mapping records (a clock set
+// back, a restore of the forge from a backup, a manual change): every pull
+// skips the entity, and a later local edit is pushed over the forge's
+// version. docs/architecture.md names the way out (the mapping's
+// forge_updated_at set to NULL).
+func reportStale(ctx context.Context, res *ApplyResult, blockID string, fetched, recorded *time.Time) {
+	if !firstStale(ctx, blockID) {
+		return
+	}
+	res.Skipped = 1
+	slog.Warn("forge: a pull skipped a fetch older than the forge version its mapping records, and the forge's content differs from the recorded base — not written; once is a race with another instance's pull, every run means the forge's updated_at went back (clock, restore)",
+		"block", blockID, "fetched_updated_at", fetched, "recorded_updated_at", recorded)
 }
 
 // decision is one cell of the 3-way matrix (see the package doc).
@@ -430,7 +485,10 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 		if err != nil || !ok {
 			return err
 		}
-		if handled, conflict := olderOrUnordered(locked, m, p.forgeH, p.fUpdated); handled {
+		if handled, conflict, stale := olderOrUnordered(locked, m, p.forgeH, p.fUpdated); handled {
+			if stale {
+				reportStale(ctx, &res, m.BlockID, p.fUpdated, locked.ForgeUpdatedAt)
+			}
 			if !conflict {
 				return nil
 			}
@@ -542,6 +600,7 @@ func (a *Applier) ApplyComments(ctx context.Context, project store.ProjectRow, c
 		}
 		res.Applied += r.Applied
 		res.Conflicts += r.Conflicts
+		res.Skipped += r.Skipped
 	}
 	return res, nil
 }
