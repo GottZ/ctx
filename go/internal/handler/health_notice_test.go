@@ -24,7 +24,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
 )
@@ -299,38 +298,5 @@ func TestHealthForgetsABackendTheWalkDidNotReach(t *testing.T) {
 	for _, role := range i504Roles {
 		wantOneLine(t, logs, role, primary.Name, slog.LevelWarn, "backend ping failed", 1)
 		wantOneLine(t, logs, role, fallback.Name, slog.LevelWarn, "backend ping failed", 1)
-	}
-}
-
-// TestHealthObservesABackendThatHangsPastItsClient — a backend that accepts
-// the connection and never answers, and a /health client that gives up
-// before the probe's budget ends (the compose healthcheck's clock starts
-// before its request): the probe runs to its budget all the same and the
-// outage is a WARN (review of issue #504; before, the client's leaving cut
-// the probe and the outage stayed at DEBUG).
-func TestHealthObservesABackendThatHangsPastItsClient(t *testing.T) {
-	prev := healthProbeBudget
-	healthProbeBudget = 300 * time.Millisecond
-	t.Cleanup(func() { healthProbeBudget = prev })
-
-	up := slowBackend(t, 0, nil)
-	hanging := slowBackend(t, time.Minute, nil)
-	healthCalls(t, []backends.Backend{operatorRow("i504-hang", up, i504Roles...)}, 1) // a known state: it answers
-
-	st := &swapStore{}
-	st.p.Store(healthTestConfig())
-	bp := backends.NewPool(nil, nil)
-	bp.SeedSnapshotForTest([]backends.Backend{operatorRow("i504-hang", hanging, i504Roles...)})
-	h := NewHealthHandler(brokenPool(t), st, bp, nil)
-	logs := installRejectLogCapture(t)
-	for range 2 {
-		req := httptest.NewRequest(http.MethodGet, "/health", nil)
-		ctx, cancel := context.WithCancel(req.Context())
-		time.AfterFunc(50*time.Millisecond, cancel) // the client leaves before the budget ends
-		h.Health(httptest.NewRecorder(), req.WithContext(ctx))
-		cancel()
-	}
-	for _, role := range i504Roles {
-		wantOneLine(t, logs, role, "row-i504-hang", slog.LevelWarn, "backend ping failed", 1)
 	}
 }

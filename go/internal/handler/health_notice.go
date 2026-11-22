@@ -39,9 +39,10 @@ import (
 //     when it answers again.
 //
 // A probe whose caller left (its context cancelled: the client of /health
-// went away, the status collector stopped) observes nothing about the target
-// and changes no state. A role that is not probed (dream while dream.enabled
-// is off) is forgotten.
+// went away, the status collector stopped) observes nothing about the target:
+// it is neither an outage nor a recovery, logs at DEBUG only and changes no
+// state. A role that is not probed (dream while dream.enabled is off) is
+// forgotten.
 type healthNotice struct {
 	mu          sync.Mutex
 	roles       map[string]roleProbe  // role → what its last probe found
@@ -173,13 +174,12 @@ func (n *healthNotice) forgetRole(role string) {
 }
 
 // database records the result of the database ping (err nil: it answered)
-// and logs a change of state. A failure that is its caller's leaving keeps
-// the line it always had (logRequestError: INFO with client_gone when the
-// client of /health gave up) and changes nothing.
+// and logs a change of state. A ping its caller abandoned observed nothing:
+// DEBUG, and the state stays.
 func (n *healthNotice) database(ctx context.Context, err error) {
 	const msg = "health check: database ping failed"
 	if err != nil && callerLeft(ctx, err) {
-		logRequestError(ctx, msg, "error", err)
+		slog.Debug("health check: database ping abandoned, its caller left", "error", err)
 		return
 	}
 	n.mu.Lock()

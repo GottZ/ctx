@@ -225,13 +225,14 @@ func foldSchemaContractStatus(status, schemaContract string) string {
 // Health serves the public /health endpoint, wrapping HealthStatus with the
 // HTTP status-code mapping (unhealthy → 503, else 200).
 func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
-	// The probes run on the request's values but not its cancellation (issue
-	// #504): they are what healthNotice learns the state from, and a client
-	// that gives up first — the compose healthcheck's 5 s clock starts before
-	// its request does — would cut every probe of a backend that hangs, which
-	// then never logged its outage. healthProbeBudget still ends them, and
-	// Health returns only after all of them.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), healthProbeBudget)
+	// The probes end with the request (issue #504): /health is anonymous, and
+	// a probe that outlived its client would let every request hold one probe
+	// of each hanging backend for the whole budget. healthProbeBudget ends
+	// before the compose healthcheck gives up, so the healthcheck waits for
+	// the answer and a backend that hangs is observed to the budget; a client
+	// that leaves first ends the probes, and what they did not finish changes
+	// no state (healthNotice).
+	ctx, cancel := context.WithTimeout(r.Context(), healthProbeBudget)
 	defer cancel()
 
 	cfg := h.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: /health is public/anonymous — no tenant in reach; dream.enabled is server-global.
@@ -260,9 +261,13 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 // healthProbeBudget bounds the probes of one HealthStatus call, for /health
 // and the status collector alike: both feed the same healthNotice, and two
 // budgets would judge a backend that answers between them reachable in one
-// and unreachable in the other, a WARN and an INFO for every alternation. A
-// variable for tests; 5 s is the budget /health always had.
-var healthProbeBudget = 5 * time.Second
+// and unreachable in the other. 4 s is under the 5 s timeout of the compose
+// healthcheck (docker-compose.yml), whose clock starts before its request:
+// Docker reads the health document — whose database verdict alone fails the
+// container — instead of a timeout while a backend hangs. It is also under
+// the status collector's tick (events.tick_interval, 5 s by default). A
+// variable for tests.
+var healthProbeBudget = 4 * time.Second
 
 // roleReachable reports ok when at least one enabled backend of the role
 // answers its base URL. This is a REACHABILITY probe, not a model-availability
