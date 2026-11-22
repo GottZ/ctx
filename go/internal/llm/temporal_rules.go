@@ -982,7 +982,7 @@ func (c clauseWords) clauseFinitePast(s, e int) bool {
 	// An interrogative behind a clause with a verb of its own opens an
 	// indirect question, which puts its verb last; behind a phrase without
 	// one ("Am Montag, was …?") it opens the main clause.
-	indirect := !c.sentence[s] && s > 0 && c.hasOwnVerb(c.clauseOf(s - 1))
+	indirect := !c.sentence[s] && s > 0 && c.hasOwnVerb(c.clauseOf(s-1))
 	switch w := c.words[s]; {
 	case germanInterrogatives[w]:
 		v := s + 1
@@ -1066,10 +1066,10 @@ func (c clauseWords) finitePastAt(i, e int) bool {
 // it is one only before a word a noun cannot be ("which commits landed on
 // Monday", not "what scheduled jobs").
 var (
-	englishBeForms     = toWordSet("be", "is", "are", "being", "isn't", "aren't", "get", "gets", "getting")
-	englishNotPassive  = toWordSet("been", "was", "were", "has", "have", "had", "did", "do", "does", "wasn't", "weren't", "hasn't", "haven't", "hadn't", "didn't")
-	englishSubjects    = toWordSet("i", "we", "you", "they", "he", "she", "it", "someone", "somebody", "anyone", "anybody", "everyone", "everybody", "nobody", "who")
-	englishWhSubjects  = toWordSet("what", "which", "whose", "that")
+	englishBeForms    = toWordSet("be", "is", "are", "being", "isn't", "aren't", "get", "gets", "getting")
+	englishNotPassive = toWordSet("been", "was", "were", "has", "have", "had", "did", "do", "does", "wasn't", "weren't", "hasn't", "haven't", "hadn't", "didn't")
+	englishSubjects   = toWordSet("i", "we", "you", "they", "he", "she", "it", "someone", "somebody", "anyone", "anybody", "everyone", "everybody", "nobody", "who")
+	englishWhSubjects = toWordSet("what", "which", "whose", "that")
 	// englishDeterminers start a noun phrase; behind a word that is no
 	// englishNPJoiners (a preposition, a conjunction or a determiner) it
 	// starts the subject of a relative clause without its pronoun
@@ -1081,7 +1081,7 @@ var (
 	// englishClauseOpeners open a relative or embedded clause, which ends
 	// the search of englishPassiveAt.
 	englishClauseOpeners = toWordSet("that", "which", "who", "whom", "whose", "where", "when", "whether", "if", "because")
-	englishAfterFinite = toWordSet("the", "a", "an", "this", "that", "these", "those", "my", "our", "your", "their", "his",
+	englishAfterFinite   = toWordSet("the", "a", "an", "this", "that", "these", "those", "my", "our", "your", "their", "his",
 		"her", "its", "some", "any", "all", "no", "it", "them", "him", "me", "us", "you", "on", "at", "in", "to", "from",
 		"by", "for", "with", "into", "during", "after", "before", "since", "until", "over", "up", "down", "out", "off",
 		"back", "again", "yesterday", "last", "today", "there", "here", "when", "while", "because", "and", "or", "but")
@@ -2548,8 +2548,8 @@ func coordinatedEdge(lower string, at int, before string) bool {
 // openHit is a phrase matchOpenEdge takes as an edge: its word, its
 // reference, what it names and where its match starts and ends.
 type openHit struct {
-	word, ref     string
-	e             phraseEdge
+	word, ref    string
+	e            phraseEdge
 	start0, end1 int
 }
 
