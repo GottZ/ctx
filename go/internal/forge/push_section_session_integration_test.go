@@ -176,7 +176,8 @@ func TestPushSectionGivesItsLockBackOnEveryWayOut(t *testing.T) {
 		obs := e.i491Observer(t)
 		e.gh.seam(func() {
 			if _, err := obs.Exec(context.Background(), `
-				SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND granted`); err != nil {
+				SELECT pg_terminate_backend(pid) FROM pg_locks
+				 WHERE locktype = 'advisory' AND granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`); err != nil {
 				t.Error(err)
 			}
 		}, nil)
