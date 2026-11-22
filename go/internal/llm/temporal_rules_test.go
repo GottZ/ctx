@@ -142,16 +142,17 @@ func TestDetectVerbTense_WCases(t *testing.T) {
 }
 
 func TestDetectVerbTense_NoCases(t *testing.T) {
-	// N-cases: non-temporal queries. "was" triggers pastVerbSet (English past of "to be"),
-	// so queries containing "was" return "past" — a known false positive for German interrogative.
+	// N-cases: non-temporal queries. A question-initial German "was" is the
+	// interrogative pronoun, no longer the English past of "to be" (issue
+	// #487 — the known false positive these two cases pinned until then).
 	tests := []struct {
 		query    string
 		expected string
 	}{
-		{"was ist der RRF-Score?", "past"},                                       // "was" in pastVerbSet
+		{"was ist der RRF-Score?", "neutral"},                                    // German "was", no verb match
 		{"wie funktioniert der Guard?", "neutral"},                               // no verb match
 		{"show me all blocks with category infrastructure", "neutral"},            // no verb match
-		{"was ist der Unterschied zwischen shared und private scope?", "past"},    // "was" in pastVerbSet
+		{"was ist der Unterschied zwischen shared und private scope?", "neutral"}, // German "was", no verb match
 	}
 	for _, tt := range tests {
 		t.Run(tt.query, func(t *testing.T) {

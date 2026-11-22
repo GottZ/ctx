@@ -202,6 +202,14 @@ var pastVerbSet = toWordSet(
 	"schrieb", "las", "fing", "schlug", "traf", "begann", "brach",
 	"sprach", "fuhr", "zog", "hielt", "rief", "stieg", "verlor",
 	"waren",
+	// The verbs of a German past question that leaned on its "Was" until
+	// the word stopped counting (startsWithGermanWas, issue #487), and the
+	// plural of the forms above it asks with.
+	"geschah", "geschahen", "passierte", "passierten", "ereignete", "ereigneten",
+	"gingen", "hatten", "wollten", "mussten", "wurden", "konnten", "sollten",
+	"machten", "fanden", "kamen", "nahmen", "liefen", "fielen", "taten",
+	"sagten", "sahen", "wussten", "standen", "blieben", "schrieben",
+	"begannen", "sprachen", "hielten",
 	"was", "were", "had", "went", "did",
 	"fixed", "deployed", "cancelled", "canceled", "happened",
 	"broke", "crashed", "failed", "finished", "started", "created",
@@ -242,7 +250,43 @@ var knownParticiples = toWordSet(
 	"gehalten", "gerufen", "gestiegen", "verloren",
 	"deployed", "gefixt", "geplant", "gestartet", "besprochen", "gearbeitet",
 	"worden",
+	// Participles without "ge" a German past question asks with (issue
+	// #487); those of the verbs on -ieren ("passiert") hasPerfektForm reads
+	// by their ending.
+	"verändert", "erstellt", "erledigt", "behoben", "entschieden", "beschlossen",
+	"veröffentlicht", "erschienen", "entstanden",
 )
+
+// englishSubjectAfterWas are the words an English yes/no question puts right
+// behind its "was" ("Was it …", "Was there …", "Was the build …"): with one of
+// them a question-initial "was" is the English past of "to be"
+// (startsWithGermanWas). "an" is left out: it is a German preposition as
+// well ("Was an Daten fehlt …"), and the German reading costs the English
+// question only the tense of this one word.
+var englishSubjectAfterWas = toWordSet(
+	"it", "there", "this", "that", "these", "those", "the", "a",
+	"i", "he", "she", "we", "you", "they",
+	"my", "our", "your", "his", "her", "its", "their",
+	"anyone", "anybody", "anything", "everyone", "everybody", "everything",
+	"someone", "somebody", "something", "nobody", "nothing",
+	"no", "any", "every", "each",
+)
+
+// startsWithGermanWas reports whether a question starts with the German
+// interrogative pronoun "Was" ("Was ist am Montag?", "Was steht Freitag an?")
+// rather than with the English "was" of a yes/no question, which puts its
+// subject right behind it (englishSubjectAfterWas). The German pronoun says
+// nothing about the tense, so DetectVerbTense does not count it as the
+// English past (issue #487); a "was" further on ("What was …", "It was …")
+// stays the English past.
+//
+// The question's language is decided by the word behind "was", not by
+// DetectGerman: that heuristic needs an umlaut, a German term or two German
+// stopwords, so it reads "was geschah im Mai" and "Was kommt am Montag?" as
+// not German, and "What was decided with Jürgen on Monday?" as German.
+func startsWithGermanWas(tokens []string) bool {
+	return len(tokens) > 0 && tokens[0] == "was" && (len(tokens) == 1 || !englishSubjectAfterWas[tokens[1]])
+}
 
 var futureIntentPhraseList = []string{
 	"habe vor", "hab vor",
@@ -289,9 +333,10 @@ func DetectVerbTense(query string) string {
 		}
 	}
 
-	// Past verbs
-	for _, tok := range tokens {
-		if pastVerbSet[tok] {
+	// Past verbs; a question-initial German "Was" is none (issue #487).
+	germanWas := startsWithGermanWas(tokens)
+	for i, tok := range tokens {
+		if pastVerbSet[tok] && (i > 0 || !germanWas) {
 			pastScore++
 		}
 	}
@@ -363,12 +408,21 @@ func hasPerfektForm(tokens []string) bool {
 			end = len(tokens)
 		}
 		for j := i + 1; j < end; j++ {
-			if knownParticiples[tokens[j]] || perfektParticiplePat.MatchString(tokens[j]) {
+			if knownParticiples[tokens[j]] || perfektParticiplePat.MatchString(tokens[j]) || ierenParticiple(tokens[j]) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// ierenParticiple reports whether tok is the participle of a German verb on
+// -ieren, which takes no "ge" ("passiert", "migriert"): behind an auxiliary
+// it makes the Perfekt ("Was ist am Montag
+// passiert?", issue #487). Without one the same form is the present tense
+// ("Was passiert am Montag?"), which hasPerfektForm never reads.
+func ierenParticiple(tok string) bool {
+	return utf8.RuneCountInString(tok) > len("iert") && strings.HasSuffix(tok, "iert")
 }
 
 // --- Date Computation ---.
