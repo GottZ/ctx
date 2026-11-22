@@ -1,6 +1,8 @@
 package llm
 
 import (
+	"fmt"
+	"math/rand/v2"
 	"testing"
 	"time"
 )
@@ -76,6 +78,8 @@ func TestRules_AStateIsNoPast(t *testing.T) {
 		"Hätten wir am Montag Zeit?":            {"2026-11-23", "", "future"},
 		"Wird am Montag deployed?":              {"2026-11-23", "", "future"},
 		"Was ist am Wochenende geplant?":        {"2026-11-28", "2026-11-29", "future"},
+		"Haben wir am Montag Verlust?":          {"2026-11-23", "", "future"},
+		"haben wir am montag einen bericht":     {"2026-11-23", "", "future"},
 	})
 }
 
@@ -194,4 +198,97 @@ func TestParseTemporalResponse_AnUnknownDirIsNoDirection(t *testing.T) {
 			t.Errorf("date %s: dir %q, want %q", d.Ref, d.Dir, want[i])
 		}
 	}
+}
+
+// TestRules_TheReviewsSurvivingMutants (finding F7): the places the
+// review's surviving mutants changed that still exist — an -iert participle
+// as a word behind a year (M11), the colon as the end of a clause (M13), and
+// the end of a clause as the end of the main clause of a Perfekt (M20). The
+// places of M01, M05, M06 and M09 are gone (the year to come before a word,
+// the shape of the word behind "was", the conjunctions before "was").
+func TestRules_TheReviewsSurvivingMutants(t *testing.T) {
+	checkRules(t, sunday487, map[string]wantDate{
+		"Was hat sich seit 2024 etabliert?":                  {"2024-01-01", "2026-11-22", "range"},
+		"Ports: seit 2024 gibt es neue Regeln.":              {"2024-01-01", "2026-11-22", "range"},
+		"Was haben wir am Montag festgelegt, und wer kommt?": {"2026-11-16", "", "past"},
+	})
+}
+
+// TestRules_YearEdgesAgainstAnOracle: the year forms at random reference days
+// from 2021 to 2030 and random years from 2020 to 2099 against an oracle
+// written apart from the rules — the window of each form, none for a year
+// more than two years ahead and for "seit" a year to come, the linear weight
+// alone, and every window starting on or before the day it ends (the
+// review's property test, taken over with the window of the years ahead).
+func TestRules_YearEdgesAgainstAnOracle(t *testing.T) {
+	rng := rand.New(rand.NewPCG(2026, 11))
+	ymd := func(y int, m time.Month, d int) string { return fmt.Sprintf("%04d-%02d-%02d", y, m, d) }
+	type form struct {
+		q              string
+		date, end, dir string // date "" = no window
+	}
+	rounds := 10000
+	if testing.Short() {
+		rounds = 2000
+	}
+	checked, failed := 0, 0
+	for i := 0; i < rounds; i++ {
+		now := time.Date(2021, 1, 1, 12, 0, 0, 0, time.UTC).AddDate(0, 0, rng.IntN(3650))
+		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+		tf := today.Format("2006-01-02")
+		y, y2 := 2020+rng.IntN(80), 2020+rng.IntN(80)
+		edge := func(y int) bool { return y <= now.Year()+2 }
+		jan1 := func(y int) time.Time { return time.Date(y, 1, 1, 0, 0, 0, 0, time.UTC) }
+		var forms []form
+		add := func(ok bool, f form) {
+			if !ok {
+				f.date, f.end, f.dir = "", "", ""
+			}
+			forms = append(forms, f)
+		}
+		add(edge(y), form{fmt.Sprintf("Was kam nach %d?", y), ymd(y+1, 1, 1), "", DirFrom})
+		add(edge(y), form{fmt.Sprintf("Was gilt ab %d?", y), ymd(y, 1, 1), "", DirFrom})
+		add(edge(y) && y <= now.Year(), form{fmt.Sprintf("Was hat sich seit %d geändert?", y), ymd(y, 1, 1), tf, "range"})
+		if jan1(y).Before(today) {
+			add(edge(y), form{fmt.Sprintf("Was galt bis %d?", y), ymd(y, 12, 31), "", DirUntil})
+		} else {
+			add(edge(y), form{fmt.Sprintf("Was galt bis %d?", y), tf, ymd(y, 12, 31), "range"})
+		}
+		if jan1(y).After(today) {
+			add(edge(y), form{fmt.Sprintf("Was galt vor %d?", y), tf, ymd(y-1, 12, 31), "range"})
+		} else {
+			add(edge(y), form{fmt.Sprintf("Was galt vor %d?", y), ymd(y-1, 12, 31), "", DirUntil})
+		}
+		lo, hi := min(y, y2), max(y, y2)
+		both := edge(y) && edge(y2)
+		add(both, form{fmt.Sprintf("Was lief von %d bis %d?", y, y2), ymd(lo, 1, 1), ymd(hi, 12, 31), "range"})
+		add(both, form{fmt.Sprintf("What happened between %d and %d?", y, y2), ymd(lo, 1, 1), ymd(hi, 12, 31), "range"})
+		add(both, form{fmt.Sprintf("Was lief zwischen %d und %d?", y, y2), ymd(lo, 1, 1), ymd(hi, 12, 31), "range"})
+		add(both, form{fmt.Sprintf("What happened from %d to %d?", y, y2), ymd(lo, 1, 1), ymd(hi, 12, 31), "range"})
+		for _, f := range forms {
+			checked++
+			tr := NormalizeTemporalRules(f.q, now)
+			got, gotEnd, gotDir := "", "", ""
+			if tr != nil && len(tr.Dates) > 0 {
+				d := tr.Dates[0]
+				got, gotDir = d.Date, d.Dir
+				if d.End != nil {
+					gotEnd = *d.End
+				}
+				if gotEnd != "" && gotEnd < got {
+					t.Errorf("now %s %q: window %s..%s starts after it ends", tf, f.q, got, gotEnd)
+				}
+				if len(tr.Dates) != 1 || len(tr.DimensionWeights) != 1 || tr.DimensionWeights["linear"] != 1 {
+					t.Errorf("now %s %q: %+v, weights %v, want one window with the linear weight alone", tf, f.q, tr.Dates, tr.DimensionWeights)
+				}
+			}
+			if got != f.date || gotEnd != f.end || gotDir != f.dir {
+				failed++
+				if failed <= 20 {
+					t.Errorf("now %s %q: got %s..%s %s, want %s..%s %s", tf, f.q, got, gotEnd, gotDir, f.date, f.end, f.dir)
+				}
+			}
+		}
+	}
+	t.Logf("checked %d, failed %d", checked, failed)
 }
