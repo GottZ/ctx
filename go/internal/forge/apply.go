@@ -587,11 +587,9 @@ func (a *Applier) pullCreateIssue(ctx context.Context, project store.ProjectRow,
 		return ApplyResult{}, err
 	}
 	if err := pgxdb.Write(ctx, a.pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
-		// The new block is no other transaction's to lock; its targets are
-		// taken in id order before it exists (issue #503).
-		if err := store.LockLinkTargets(ctx, tx, targets); err != nil {
-			return err
-		}
+		// The new block is no other transaction's to lock or to wait for
+		// (its id is unknown until the commit), so the reference write may
+		// take the targets after it (issue #503).
 		b, err := store.PullCreateIssueBlock(ctx, tx, project.Scope, content)
 		if err != nil {
 			return err
@@ -783,9 +781,10 @@ func (a *Applier) referenceTargets(ctx context.Context, project store.ProjectRow
 }
 
 // applyReferences writes the 'references' edges from sourceID to targets
-// (referenceTargets) in the caller's Tx, atomic with the source block. The
-// caller holds the targets locked already (LockPulledBlock or
-// LockLinkTargets), so PutStructuralLink's validation waits for nothing.
+// (referenceTargets) in the caller's Tx, atomic with the source block. A
+// pull-update holds the targets locked already (LockPulledBlock), so
+// PutStructuralLink's validation waits for nothing; a pull-create's block
+// is new, and its validation takes them.
 func applyReferences(ctx context.Context, tx pgx.Tx, writable []string, sourceID string, targets []string) error {
 	for _, id := range targets {
 		err := store.PutStructuralLink(ctx, tx, store.StructuralLink{

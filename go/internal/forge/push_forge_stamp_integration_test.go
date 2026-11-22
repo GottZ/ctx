@@ -124,6 +124,50 @@ func TestPushRecordsTheForgeStampOfItsWrite(t *testing.T) {
 	}
 }
 
+// TestPushCreateRecordsTheForgeStamp: a push-create records the stamp of the
+// create's answer — for an issue created closed, the stamp of the PATCH
+// that closed it, the version the finalize records.
+func TestPushCreateRecordsTheForgeStamp(t *testing.T) {
+	t.Run("an issue", func(t *testing.T) {
+		e := i491Setup(t, "i509cri", "", fakeIssue{Title: "Crane", Body: "forge body"})
+		id := seedLocalIssue(t, e.pool, e.proj, 1, "Fresh", "draft body")
+		if r := e.pushOn(t, e.pool); r.Pushed != 1 {
+			t.Fatalf("push: %+v", r)
+		}
+		n, _, _ := mapByBlock(t, e.pool, id)
+		if got, want := e.recordedStamp(t, id), e.gh.issue(t, n).Updated; !i509SameStamp(got, want) {
+			t.Errorf("the mapping of the created #%d records %v, want %v", n, got, want)
+		}
+	})
+	t.Run("an issue created closed", func(t *testing.T) {
+		e := i491Setup(t, "i509cric", "", fakeIssue{Title: "Crane", Body: "forge body"})
+		id := seedLocalIssue(t, e.pool, e.proj, 1, "Fresh", "draft body")
+		e.move(t, id, "done")
+		if r := e.pushOn(t, e.pool); r.Pushed != 1 {
+			t.Fatalf("push: %+v", r)
+		}
+		n, _, _ := mapByBlock(t, e.pool, id)
+		it := e.gh.issue(t, n)
+		if it.State != "closed" {
+			t.Fatalf("the forge holds #%d %s, want it closed", n, it.State)
+		}
+		if got := e.recordedStamp(t, id); !i509SameStamp(got, it.Updated) {
+			t.Errorf("the mapping of the created #%d records %v, want %v, the close's", n, got, it.Updated)
+		}
+	})
+	t.Run("a comment", func(t *testing.T) {
+		e := i491Setup(t, "i509crc", "", fakeIssue{Title: "Crane", Body: "forge body"})
+		cid := seedLocalComment(t, e.pool, e.proj, e.id(t), "#5.cL1", "local comment")
+		if r := e.pushOn(t, e.pool); r.Pushed != 1 {
+			t.Fatalf("push: %+v", r)
+		}
+		n, _, _ := mapByBlock(t, e.pool, cid)
+		if got, want := e.recordedStamp(t, cid), e.gh.comment(t, n).Updated; !i509SameStamp(got, want) {
+			t.Errorf("the mapping of the created comment %d records %v, want %v", n, got, want)
+		}
+	})
+}
+
 // TestAFetchOlderThanAnOwnPushWritesNothing: another instance fetched the
 // issue before this instance's push landed and applies the fetch after the
 // push's advance (the probes of the review of #501).

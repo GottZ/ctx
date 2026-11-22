@@ -296,6 +296,8 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		f.serveListing(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues":
 		f.serveCreate(w, r)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/repos/o/r/issues/") && strings.HasSuffix(r.URL.Path, "/comments"):
+		f.serveCommentCreate(w, r)
 	case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/repos/o/r/issues/"):
 		f.servePatch(w, r)
 	default:
@@ -334,6 +336,32 @@ func (f *fakeGitHub) serveCommentListing(w http.ResponseWriter, r *http.Request)
 	}
 	body, _ := json.Marshal(items)
 	_, _ = w.Write(body)
+}
+
+// serveCommentCreate creates a comment on the issue the path names, under
+// the next comment id.
+func (f *fakeGitHub) serveCommentCreate(w http.ResponseWriter, r *http.Request) {
+	n, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/repos/o/r/issues/"), "/comments"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	var in struct {
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	f.mu.Lock()
+	id := int64(900)
+	for _, c := range f.comments {
+		id = max(id, c.ID+1)
+	}
+	at := f.nextUpdated()
+	f.comments = append(f.comments, fakeComment{ID: id, Issue: n, Body: in.Body, Updated: at})
+	f.mu.Unlock()
+	f.answer(w, http.StatusCreated, map[string]any{"id": id, "body": in.Body}, at)
 }
 
 // serveCommentPatch applies a comment PATCH (its body) and moves the
