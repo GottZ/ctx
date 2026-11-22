@@ -870,23 +870,35 @@ func orderWindow(start, end time.Time, startRel, endRel, backward bool, earlierS
 // often than the start of a window, so their X has to be a date spelt as
 // such (exact, phraseEdge.fuzzy); "ab X bis Y" whose X is none stays the
 // time up to Y, matchBis (issue #463).
+//
+// "zwischen X und Y" and "between X and Y" are a range form when X and Y are
+// both years (years): with two day dates matchDayDates spans them, and the
+// form with other edges stays as it was — "zwischen Montag und Freitag" is
+// the two days (issue #487).
 var rangeForms = []struct {
 	re    *regexp.Regexp
 	ref   func(m []string) string
 	exact bool
+	years bool
 }{
-	{reVonBis, func(m []string) string { return "von " + m[1] + " bis " + m[2] }, false},
-	{reFromTo, func(m []string) string { return m[0] }, true},
-	{reAbBis, func(m []string) string { return "ab " + m[1] + " bis " + m[2] }, true},
-	{reSeitBis, func(m []string) string { return m[0] }, false},
+	{reVonBis, func(m []string) string { return "von " + m[1] + " bis " + m[2] }, false, false},
+	{reFromTo, func(m []string) string { return m[0] }, true, false},
+	{reAbBis, func(m []string) string { return "ab " + m[1] + " bis " + m[2] }, true, false},
+	{reSeitBis, func(m []string) string { return m[0] }, false, false},
+	{reBetweenYears, func(m []string) string { return m[0] }, true, true},
 }
+
+// reBetweenYears matches "zwischen X und Y" and "between X and Y" with one
+// word as X and Y and the word after it (yearEdge reads it): the form of
+// rangeForms for two years.
+var reBetweenYears = regexp.MustCompile(`(?i)\b(?:zwischen|between)\s+(\S+)\s+(?:und|and)\s+((?:\S+\s+)?\S+)`)
 
 func matchVonBis(query string, now time.Time) *TemporalResult {
 	// "von Montag bis Mittwoch", "von letztem Montag bis nächsten Freitag", "von gestern bis übermorgen"
 	lower := strings.ToLower(query)
 	for _, f := range rangeForms {
 		if m := f.re.FindStringSubmatch(lower); m != nil {
-			if r := matchRangeForm(query, m, f.ref(m), f.exact, now); r != nil {
+			if r := matchRangeForm(query, m, f.ref(m), f.exact, f.years, now); r != nil {
 				return r
 			}
 		}
@@ -900,8 +912,8 @@ func matchVonBis(query string, now time.Time) *TemporalResult {
 var nowWords = toWordSet("jetzt", "now")
 
 // matchRangeForm derives the window of a range form whose start phrase is
-// m[1] and whose end phrase is m[2].
-func matchRangeForm(query string, m []string, ref string, exact bool, now time.Time) *TemporalResult {
+// m[1] and whose end phrase is m[2]; with years, only of two years.
+func matchRangeForm(query string, m []string, ref string, exact, years bool, now time.Time) *TemporalResult {
 	tense := DetectVerbTense(query)
 	backward := tense == "past"
 	startEdge := resolvePhraseEdge(m[1], backward, now)
@@ -909,7 +921,7 @@ func matchRangeForm(query string, m []string, ref string, exact bool, now time.T
 		startEdge = phraseEdge{day: truncDate(now)}
 	}
 	endEdge := resolvePhraseEdge(m[2], backward, now)
-	if startEdge.day.IsZero() || endEdge.day.IsZero() || exact && startEdge.fuzzy {
+	if startEdge.day.IsZero() || endEdge.day.IsZero() || exact && startEdge.fuzzy || years && (!startEdge.year || !endEdge.year) {
 		return nil
 	}
 	if english := strings.HasPrefix(m[0], "from") || strings.HasPrefix(m[0], "since"); english &&
@@ -926,11 +938,32 @@ func matchRangeForm(query string, m []string, ref string, exact bool, now time.T
 		func(to time.Time) time.Time { return resolvePhrase(m[1], true, to) },
 		func(from time.Time) time.Time { return resolvePhrase(m[2], false, from) })
 	// A month at the end includes the month: the window ends on its last day
-	// ("von März 2024 bis April 2024" ends on 2024-04-30, issue #463).
-	if swapped && startEdge.month || !swapped && endEdge.month {
+	// ("von März 2024 bis April 2024" ends on 2024-04-30, issue #463), and a
+	// year the year ("von 2024 bis 2026" ends on 2026-12-31, issue #487).
+	first, last := startEdge, endEdge
+	if swapped {
+		first, last = endEdge, startEdge
+	}
+	switch {
+	case last.year:
+		end = lastOfYear(end)
+	case last.month:
 		end = lastOfMonth(end)
 	}
-	return rangeResult(ref, fmtDate(start), fmtDate(end), "range")
+	return yearWeighted(rangeResult(ref, fmtDate(start), fmtDate(end), "range"), first)
+}
+
+// yearWeighted gives a window whose edge is a year (issue #487) — the edge of
+// "seit", "bis" and the open edges, the start of a range form — linear
+// weights alone: the question names no month, week or weekday, and the
+// window's start, the 1st of January or today, is a phase it does not name
+// either, which a cyclic dimension would reward. NormalizeTemporalRules keeps
+// weights a matcher set (withWeights). Other windows pass as they are.
+func yearWeighted(r *TemporalResult, start phraseEdge) *TemporalResult {
+	if start.year {
+		r.DimensionWeights = dwLinear()
+	}
+	return r
 }
 
 func matchLetztenWDBis(query string, now time.Time) *TemporalResult {
@@ -993,7 +1026,7 @@ func matchSeit(query string, now time.Time) *TemporalResult {
 	if start.IsZero() || start.After(truncDate(now)) || m[1] == "since" && bareMonthWord(m[2], e) {
 		return nil
 	}
-	return rangeResult(m[1]+" "+m[2], fmtDate(start), fmtDate(truncDate(now)), "range")
+	return yearWeighted(rangeResult(m[1]+" "+m[2], fmtDate(start), fmtDate(truncDate(now)), "range"), e)
 }
 
 func matchBis(query string, now time.Time) *TemporalResult {
@@ -1023,9 +1056,9 @@ func matchBis(query string, now time.Time) *TemporalResult {
 	// month includes the month: the window ends on its last day, and a month
 	// that began before today is the time up to its end.
 	if e.day.Before(truncDate(now)) {
-		return &TemporalResult{Dates: []TemporalDate{{Ref: m[1] + " " + m[2], Date: fmtDate(e.last()), Dir: DirUntil}}}
+		return yearWeighted(&TemporalResult{Dates: []TemporalDate{{Ref: m[1] + " " + m[2], Date: fmtDate(e.last()), Dir: DirUntil}}}, e)
 	}
-	return rangeResult(m[1]+" "+m[2], fmtDate(truncDate(now)), fmtDate(e.last()), "range")
+	return yearWeighted(rangeResult(m[1]+" "+m[2], fmtDate(truncDate(now)), fmtDate(e.last()), "range"), e)
 }
 
 // matchOpenEdge reads "ab", "vor", "nach", "before" and "after" right before
@@ -1058,31 +1091,31 @@ func matchOpenEdge(query string, now time.Time, edge string) *TemporalResult {
 		if reTimeUnitBefore.MatchString(lower[:m[0]]) || word != "ab" && reNearBefore.MatchString(lower[:m[0]]) {
 			continue
 		}
-		// A year first is no edge here: "2024 Oktober" has no use, and "after
-		// 2025 may be deleted" names no month.
+		// A year first is an edge here only as the year (yearEdge, issue
+		// #487): "2024 Oktober" has no use, and "after 2025 may be deleted"
+		// names no month but the year.
+		yearFirst := false
 		if w := phraseWords(phrase); len(w) > 0 {
-			if _, year := isYear(w[0]); year {
-				continue
-			}
+			_, yearFirst = isYear(w[0])
 		}
 		e := resolvePhraseEdge(phrase, false, now)
-		if e.day.IsZero() || e.fuzzy || e.rel || edge != "" && fmtDate(e.day) != edge {
+		if e.day.IsZero() || e.fuzzy || e.rel || yearFirst && !e.year || edge != "" && fmtDate(e.day) != edge {
 			continue
 		}
 		ref := word + " " + phrase
 		switch word {
 		case "ab":
-			return &TemporalResult{Dates: []TemporalDate{{Ref: ref, Date: fmtDate(e.day), Dir: DirFrom}}}
+			return yearWeighted(&TemporalResult{Dates: []TemporalDate{{Ref: ref, Date: fmtDate(e.day), Dir: DirFrom}}}, e)
 		case "nach", "after":
-			return &TemporalResult{Dates: []TemporalDate{{Ref: ref, Date: fmtDate(e.last().AddDate(0, 0, 1)), Dir: DirFrom}}}
+			return yearWeighted(&TemporalResult{Dates: []TemporalDate{{Ref: ref, Date: fmtDate(e.last().AddDate(0, 0, 1)), Dir: DirFrom}}}, e)
 		default: // vor, before
 			// A day to come is a deadline, the window from today to the day
 			// before it, as "bis" with a later end is one; a day that has
 			// begun is the time up to the day before it.
 			if today := truncDate(now); e.day.After(today) {
-				return rangeResult(ref, fmtDate(today), fmtDate(e.day.AddDate(0, 0, -1)), "range")
+				return yearWeighted(rangeResult(ref, fmtDate(today), fmtDate(e.day.AddDate(0, 0, -1)), "range"), e)
 			}
-			return &TemporalResult{Dates: []TemporalDate{{Ref: ref, Date: fmtDate(e.day.AddDate(0, 0, -1)), Dir: DirUntil}}}
+			return yearWeighted(&TemporalResult{Dates: []TemporalDate{{Ref: ref, Date: fmtDate(e.day.AddDate(0, 0, -1)), Dir: DirUntil}}}, e)
 		}
 	}
 	return nil
@@ -1544,15 +1577,111 @@ type phraseEdge struct {
 	// fuzzy: the day comes from a word the rules take for a day keyword by
 	// its typo tolerance (fuzzyMatch), not by its spelling.
 	fuzzy bool
+	// year: the phrase names a whole year (a bare year, yearEdge); day is its
+	// 1st of January, and as a window's end it stands for its 31st of
+	// December (last), as a month does for its last day (issue #487).
+	year bool
 }
 
-// last is the last day of what the edge names: its day, and for a month
-// the month's last day.
+// last is the last day of what the edge names: its day, for a month the
+// month's last day and for a year the year's.
 func (e phraseEdge) last() time.Time {
-	if e.month {
+	switch {
+	case e.year:
+		return lastOfYear(e.day)
+	case e.month:
 		return lastOfMonth(e.day)
 	}
 	return e.day
+}
+
+// lastOfYear returns the 31st of December of t's year.
+func lastOfYear(t time.Time) time.Time {
+	return time.Date(t.Year(), time.December, 31, 0, 0, 0, 0, t.Location())
+}
+
+// The years a bare year may name as a window's edge (yearEdge): those a
+// content date can carry, the write side's window (store.ExtractDates,
+// minDateYear to maxDateYear; TestYearEdges_TakeTheYearsAContentDateCarries
+// holds the two together). A window edged by another year would reward every
+// dated block or none, and the numbers below 2020 are far more often counts
+// ("nach 2000 Blöcken") than years. The day dates of a question read
+// 2000-2099 (reISODayDate): their form says they are dates, a bare number
+// does not (issue #487).
+const (
+	minYearEdge = 2020
+	maxYearEdge = 2099
+)
+
+// yearFollowers are the words that may follow a bare year as a window's edge
+// without making it a count: words of their own that never are the counted
+// noun — conjunctions, prepositions, articles, pronouns, auxiliaries and
+// modals, a few adverbs and the verbs a question about a time asks with —
+// beside the verbs and participles the tense detection knows (yearFollower).
+// A noun after the number makes it a count ("seit 2024 Zeilen", "bis 2048
+// Tokens"); since the nouns cannot be listed, the words that may follow are,
+// and a year before any other word is no edge (the LLM fallback reads it).
+var yearFollowers = toWordSet(
+	// German
+	"und", "oder", "bzw", "sowie", "aber", "bis", "im", "in", "am", "an", "auf", "aus", "bei", "mit",
+	"nach", "von", "vom", "zu", "zum", "zur", "für", "über", "unter", "um", "gegen", "ohne", "seit",
+	"ab", "vor", "durch", "der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "einem",
+	"einer", "eines", "es", "ich", "wir", "man", "er", "sie", "du", "ihr", "noch", "schon", "auch",
+	"nur", "immer", "nie", "bereits", "wieder", "so", "da", "dann", "als", "wie", "wo", "was", "wer",
+	"nicht", "kein", "keine", "hier", "jetzt", "heute", "ist", "sind", "wird", "hat", "haben", "kann",
+	"können", "muss", "müssen", "darf", "dürfen", "will", "wollen", "gibt", "gilt", "galt", "gelten",
+	"kommt", "kommen", "geht", "gehen", "läuft", "laufen", "steht", "stehen", "bleibt", "fehlt",
+	"fehlen", "passiert", "existiert",
+	// English
+	"and", "or", "but", "to", "through", "till", "on", "at", "for", "from", "of", "by", "with",
+	"about", "into", "over", "under", "during", "onwards", "onward", "the", "a", "it", "i", "we",
+	"they", "you", "he", "she", "there", "this", "that", "these", "those", "is", "are", "be", "been",
+	"has", "have", "will", "would", "can", "could", "should", "must", "may", "might", "shall", "do",
+	"does", "not", "ever", "still", "already", "only", "also", "again", "yet", "then", "when", "where",
+	"what", "which", "who", "how", "why", "here", "now",
+)
+
+// yearFollower reports whether w may follow a bare year at a window's edge
+// (yearFollowers).
+func yearFollower(w string) bool {
+	return yearFollowers[w] || pastVerbSet[w] || futureVerbSet[w] || perfektAux[w] || knownParticiples[w] ||
+		perfektParticiplePat.MatchString(w) || ierenParticiple(w)
+}
+
+// clauseEnd are the runes after which a year ends its clause: a count's noun
+// would follow it within the clause ("since 2024, lines have grown").
+const clauseEnd = ",.;:!?)"
+
+// yearEdge resolves a phrase that starts with a bare year in the window of
+// the years a content date carries (minYearEdge to maxYearEdge) to that year
+// as a window's edge: the year alone, before the end of its clause or before
+// a word that is no counted noun (yearFollower). matched reports that the
+// phrase starts with such a year at all; ok that it names the year (issue
+// #487). "2024-03", "2024,5", "#2024" and "2024ms" start with no year.
+func yearEdge(phrase string, words []string, now time.Time) (e phraseEdge, matched, ok bool) {
+	if len(words[0]) != 4 {
+		return phraseEdge{}, false, false
+	}
+	y, err := strconv.Atoi(words[0])
+	if err != nil || y < minYearEdge || y > maxYearEdge {
+		return phraseEdge{}, false, false
+	}
+	if len(words) > 1 && !endsClause(phrase) && !yearFollower(words[1]) {
+		return phraseEdge{}, true, false
+	}
+	return phraseEdge{day: time.Date(y, time.January, 1, 0, 0, 0, 0, now.Location()), year: true}, true, true
+}
+
+// endsClause reports whether the first word of phrase (phraseWords), as it
+// stands in the phrase, ends with one of the runes of clauseEnd.
+func endsClause(phrase string) bool {
+	for _, f := range strings.Fields(phrase) {
+		if strings.Trim(f, phrasePunct) != "" {
+			r, _ := utf8.DecodeLastRuneInString(f)
+			return strings.ContainsRune(clauseEnd, r)
+		}
+	}
+	return false
 }
 
 // lastOfMonth returns the last day of t's month.
@@ -1611,6 +1740,13 @@ func resolvePhraseEdge(phrase string, defaultBackward bool, now time.Time) phras
 	words := phraseWords(phrase)
 	if len(words) == 0 {
 		return phraseEdge{}
+	}
+
+	// A bare year: the whole year, not before a counted noun (issue #487). A
+	// month name after it is the month ("2024 Oktober", below) — no month
+	// name is a yearFollower.
+	if e, _, ok := yearEdge(phrase, words, now); ok {
+		return e
 	}
 
 	// Single word: delegate to resolveToken
@@ -1766,24 +1902,21 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 		return r
 	}
 	if r := matchVonBis(query, now); takes(r) {
-		r.DimensionWeights = dwLinearRange()
-		return r
+		return withWeights(r, dwLinearRange)
 	}
 
 	// Priority 3: Seit/Bis and the open edges ab/vor/nach — linear-dominant +
 	// month (spans weeks/months; effectiveDimWeights drops the month for a
-	// window longer than a year and for an open one)
+	// window longer than a year and for an open one); a window that starts
+	// with a year is linear alone (yearWeighted)
 	if r := matchSeit(query, now); takes(r) {
-		r.DimensionWeights = dwLinearMonthSeit()
-		return r
+		return withWeights(r, dwLinearMonthSeit)
 	}
 	if r := matchBis(query, now); takes(r) {
-		r.DimensionWeights = dwLinearMonthSeit()
-		return r
+		return withWeights(r, dwLinearMonthSeit)
 	}
 	if r := matchOpenEdge(query, now, edge); r != nil {
-		r.DimensionWeights = dwLinearMonthSeit()
-		return r
+		return withWeights(r, dwLinearMonthSeit)
 	}
 	// Priority 3b: a day date Priority 1 left to the window rules that no
 	// window took as an edge — the day itself, as Priority 1 resolves it.
@@ -1880,6 +2013,15 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 }
 
 // --- Helpers ---.
+
+// withWeights gives r the weights of its matcher, dw, unless the matcher set
+// its own (yearWeighted).
+func withWeights(r *TemporalResult, dw func() map[string]float64) *TemporalResult {
+	if r.DimensionWeights == nil {
+		r.DimensionWeights = dw()
+	}
+	return r
+}
 
 func toWordSet(words ...string) map[string]bool {
 	m := make(map[string]bool, len(words))

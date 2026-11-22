@@ -34,11 +34,11 @@ Gibt es ab 100 Blöcken Probleme?	nil
 Was steht in Kapitel 3 nach Abschnitt 2?	nil
 Zeig mir den Block vor 01a1ff63	nil
 Was liegt zwischen Port 3000 und 3010?	nil
-Seit 2024 gibt es pgvector 0.8	nil
-Nach 2025 kam nichts mehr	nil
-Vor 2020 war alles anders	nil
-Bis 2030 wollen wir 1M Blöcke	nil
-Ab 2027 gilt die neue Lizenz	nil
+Seit 2024 gibt es pgvector 0.8	2024-01-01|2026-11-21|range
+Nach 2025 kam nichts mehr	2026-01-01||from
+Vor 2020 war alles anders	2019-12-31||until
+Bis 2030 wollen wir 1M Blöcke	2026-11-21|2030-12-31|range
+Ab 2027 gilt die neue Lizenz	2027-01-01||from
 What happens after 3 retries?	nil
 Retry before 2 retries fail?	nil
 Which changes since version 5.73.0?	nil
@@ -52,9 +52,9 @@ Wait until the build finishes	nil
 Until further notice the server stays down	nil
 Since the migration, what broke?	nil
 Between you and me, is it fast?	nil
-Logs after 2025 may be deleted	nil
-Tests before 2024 may fail	nil
-Requests since 2024 may time out	nil
+Logs after 2025 may be deleted	2026-01-01||from
+Tests before 2024 may fail	2023-12-31||until
+Requests since 2024 may time out	2024-01-01|2026-11-21|range
 Errors from 10.13.37.11 to 10.13.37.12?	nil
 Price from $19.99 to $29.99?	nil
 From 12.30 to 14.00 is lunch	nil
@@ -67,10 +67,10 @@ from now on	nil
 after all, what's the plan?	nil
 before long we need a rewrite	nil
 after 5.3.2026 release	nil
-since 2024	nil
-after 2025	nil
-from 2024 to 2025	nil
-between 2024 and 2026	nil
+since 2024	2024-01-01|2026-11-21|range
+after 2025	2026-01-01||from
+from 2024 to 2025	2024-01-01|2025-12-31|range
+between 2024 and 2026	2024-01-01|2026-12-31|range
 Upgrade from 5.72.0 to 5.73.0	nil
 Go from 1.24 to 1.25	nil
 from top to bottom	nil

@@ -164,15 +164,16 @@ func TestRules_NegativeCorpusOpensNoWindow(t *testing.T) {
 }
 
 // TestRules_AYearBeforeAWordIsNoMonth (round 1, R1): a year followed by a
-// month name that is a word of its own ("may", "march", "august") is no edge
-// — "Logs after 2025 may be deleted" names no month. The open edges take no
-// year-first form at all; "seit"/"since" and the other window words keep it
-// for the other month names.
+// month name that is a word of its own ("may", "march", "august") names no
+// month — "Logs after 2025 may be deleted" names the year 2025, an edge at
+// year precision since issue #487, before the modal "may". The open edges take
+// no year-first month form at all; "seit"/"since" and the other window words
+// keep it for the other month names.
 func TestRules_AYearBeforeAWordIsNoMonth(t *testing.T) {
 	checkRules(t, now463, map[string]wantDate{
-		"Logs after 2025 may be deleted":   {"", "", ""},
-		"Tests before 2024 may fail":       {"", "", ""},
-		"Requests since 2024 may time out": {"", "", ""},
+		"Logs after 2025 may be deleted":   {"2026-01-01", "", DirFrom},
+		"Tests before 2024 may fail":       {"2023-12-31", "", DirUntil},
+		"Requests since 2024 may time out": {"2024-01-01", "2026-11-21", "range"},
 		"Teams until 2024 march on":        {"", "", ""},
 		"after 2025 August":                {"", "", ""},
 		"nach 2025 Oktober":                {"", "", ""},
