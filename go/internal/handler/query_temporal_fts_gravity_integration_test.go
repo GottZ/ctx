@@ -19,12 +19,15 @@
 //   - hybrid: the edge's month only where the whole month lies inside the
 //     window, the edge's day only where the question names that day.
 //
-// The corpus has blocks the question's words hit inside and outside the
-// window ("Deploy der Suche am …", "Deploy der Suche im März 2024"), so the
-// question's own full-text arm competes with the expansion as it does live.
-// A variant replaces the base form only if it brings fewer in-window blocks
-// into the first ten in no question and more in at least one; the test holds
-// the query path's expansion (llm.TemporalToFTSExpansion) to that rule.
+// The corpus has blocks the question's words hit ("Deploy der Suche am …",
+// "Deploy der Suche im März 2024"); the full-text arms AND every word of a
+// question, its date fragments included, so the words of seven of the 21
+// questions hit blocks — inside the window for some, outside for others —
+// and those of the rest hit none. A variant replaces the base form only if
+// it brings fewer in-window blocks into the first ten in no question and
+// more in at least one; the test holds the query path's expansion
+// (llm.TemporalToFTSExpansion) to that rule, which the base form itself
+// meets trivially — the guard is for a later change of the expansion.
 
 package handler
 

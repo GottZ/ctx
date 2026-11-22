@@ -292,3 +292,51 @@ func TestRules_YearEdgesAgainstAnOracle(t *testing.T) {
 	}
 	t.Logf("checked %d, failed %d", checked, failed)
 }
+
+// TestRules_TheSecondReview: the findings of a fresh reviewer of the review
+// round, each on its questions — the German simple past behind "was" (read
+// by its shape, not a list), English participles in a German Perfekt,
+// abbreviations and inserted clauses inside the Perfekt's bracket, the
+// participles on -ungen and the verbs that take "sein", English questions
+// with "am" or an acronym, counts after which a range word or a place of
+// counting stands, and "vom Montag".
+func TestRules_TheSecondReview(t *testing.T) {
+	monday, friday := wantDate{"2026-11-16", "", "past"}, wantDate{"2026-11-20", "", "past"}
+	checkRules(t, sunday487, map[string]wantDate{
+		"Was fehlte am Montag?":                                     monday,
+		"Was änderte sich am Montag?":                               monday,
+		"Was besprachen wir am Montag?":                             monday,
+		"Was crashte am Freitag?":                                   friday,
+		"Was brachte das Meeting am Montag?":                        monday,
+		"Was genau dauerte am Freitag so lange?":                    friday,
+		"Was änderte sich von Montag bis Mittwoch?":                 {"2026-11-16", "2026-11-18", "range"},
+		"Was fehlte am Wochenende?":                                 {"2026-11-21", "2026-11-22", "past"},
+		"Was haben wir am Montag released?":                         monday,
+		"Wer hat am Montag gemerged?":                               monday,
+		"Was testen wir am Montag?":                                 {"2026-11-23", "", "future"},
+		"Was kostet der Server am Montag?":                          {"2026-11-23", "", "future"},
+		"Was hat Dr. Müller am Montag gesagt?":                      monday,
+		"Was hat z.B. Damien am Montag gemacht?":                    monday,
+		"Was hat ca. 3 Std. am Montag gedauert?":                    monday,
+		"Was haben wir am Montag, nach dem Standup, besprochen?":    monday,
+		"Was ist am Freitag, kurz vor Feierabend, passiert?":        friday,
+		"Was hast du am Freitag, bevor du gegangen bist, deployed?": friday,
+		"Am Montag haben wir, glaube ich, was beschlossen?":         monday,
+		"Wer ist am Montag eingesprungen?":                          monday,
+		"Was ist am Freitag misslungen?":                            friday,
+		"Welche Pods sind am Freitag gecrasht?":                     friday,
+		"Was haben wir am Montag in der großen Runde erzwungen?":    monday,
+		"Was Grafana down at 3 am on Friday?":                       friday,
+		"Was ES down on Monday?":                                    monday,
+		"Was steht im Protokoll vom Montag?":                        monday,
+	})
+	for _, q := range []string{
+		"ab 2026 bis 2028 Dimensionen wird es langsam", "Meeting ab 2020 bis 2130?", "Ab 2024 im Speicher",
+		"after 2024 in memory", "Welche Scores liegen zwischen 2024 und 2026?", "Timeout nach 2025 in der Schleife",
+		"Ab 2024 auf einmal", "between 2024 and 2026 in size",
+	} {
+		if tr := NormalizeTemporalRules(q, sunday487); tr != nil {
+			t.Errorf("%q: %+v, want no window and no date", q, tr.Dates)
+		}
+	}
+}

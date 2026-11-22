@@ -46,6 +46,12 @@ type clauseWords struct {
 	starts []bool
 	caps   []bool
 	offs   []int
+	// sentence: the word starts a sentence (the first word, a word after one
+	// that ends with a semicolon, colon or the end of a sentence; a comma
+	// starts a clause, not a sentence). upper: the word is written in capitals
+	// throughout, an acronym ("ES", "CI").
+	sentence []bool
+	upper    []bool
 }
 
 // clauseTokens tokenizes query into clauseWords.
@@ -54,7 +60,7 @@ func clauseTokens(query string) clauseWords {
 	expanded := strings.ReplaceAll(lower, "-", " ")
 	sameLength := len(lower) == len(query)
 	var c clauseWords
-	start := true
+	start, sentence := true, true
 	for i := 0; i < len(expanded); {
 		r, size := utf8.DecodeRuneInString(expanded[i:])
 		if unicode.IsSpace(r) {
@@ -71,20 +77,25 @@ func clauseTokens(query string) clauseWords {
 		}
 		f := expanded[i:j]
 		lead := len(f) - len(strings.TrimLeft(f, wordTrim))
-		if w := strings.Trim(f, wordTrim); w != "" {
+		w := strings.Trim(f, wordTrim)
+		if w != "" {
 			c.words = append(c.words, w)
 			c.starts = append(c.starts, start)
+			c.sentence = append(c.sentence, sentence)
 			c.offs = append(c.offs, i+lead)
-			upper := false
+			upper, allUpper := false, false
 			if sameLength {
-				r, _ := utf8.DecodeRuneInString(query[i+lead:])
+				orig := query[i+lead : i+lead+len(w)]
+				r, _ := utf8.DecodeRuneInString(orig)
 				upper = unicode.IsUpper(r)
+				allUpper = utf8.RuneCountInString(orig) > 1 && strings.ToUpper(orig) == orig && strings.ToLower(orig) != orig
 			}
 			c.caps = append(c.caps, upper)
-			start = false
+			c.upper = append(c.upper, allUpper)
+			start, sentence = false, false
 		}
-		if r, _ := utf8.DecodeLastRuneInString(f); strings.ContainsRune(",;:.!?", r) {
-			start = true
+		if r, _ := utf8.DecodeLastRuneInString(f); strings.ContainsRune(",;:.!?", r) && (r != '.' || !abbreviation(w)) {
+			start, sentence = true, r != ','
 		}
 		i = j
 	}
@@ -103,6 +114,23 @@ func clauseTokens(query string) clauseWords {
 		clear(c.caps)
 	}
 	return c
+}
+
+// abbreviations are words that end with a dot and end no clause ("Dr.
+// Müller", "z.B.", "bzw."), issue #487.
+var abbreviations = toWordSet("dr", "prof", "bzw", "ca", "etc", "usw", "vgl", "nr", "st", "hr", "fr", "ggf", "evtl",
+	"inkl", "zzgl", "bspw", "dipl", "ing", "mr", "mrs", "ms", "vs", "approx", "jr", "sr", "abs", "allg", "geb", "max", "min",
+	"std", "sek", "mio", "mrd", "tsd", "kw", "tel", "str", "abt", "bzgl", "gem", "lt", "mind", "uvm", "usf")
+
+// abbreviation reports whether w, a word that ended with a dot, is an
+// abbreviation or an ordinal rather than the end of a clause: one of
+// abbreviations, a single letter, a word with a dot inside ("z.b", "d.h",
+// "01.03"), or a number of one or two digits ("am 15. März").
+func abbreviation(w string) bool {
+	if abbreviations[w] || utf8.RuneCountInString(w) == 1 || strings.Contains(w, ".") {
+		return true
+	}
+	return len(w) <= 2 && strings.Trim(w, "0123456789") == ""
 }
 
 // clauseOf returns the words [s, e) of the clause that holds word i.
@@ -385,13 +413,17 @@ var (
 // questionLanguage reads the language of a question from its words
 // (issue #487): German when it has German marker words, weekday or month
 // names and no English ones, English the other way round, and mixed
-// otherwise. DetectGerman, the detection of the translation step, does not
+// otherwise. A word in capitals is an acronym and "am" or "um" after a
+// number or "I" English, so neither counts. DetectGerman, the detection of the translation step, does not
 // decide it: it answers only "German or not", counts the umlaut of a name
 // ("Was Jürgen there on Monday?" is German to it) and needs two stopwords or
 // a domain term ("Was kommt am Montag?" is not German to it).
-func questionLanguage(words []string) int {
+func questionLanguage(c clauseWords) int {
 	de, en := 0, 0
-	for _, w := range words {
+	for i, w := range c.words {
+		if c.upper[i] || (w == "am" || w == "um") && i > 0 && (c.words[i-1] == "i" || strings.Trim(c.words[i-1], "0123456789") == "") {
+			continue // an acronym ("ES"), the English "3 am" and "I am"
+		}
 		_, wdDE := weekdayMapDE[w]
 		_, wdEN := weekdayMapEN[w]
 		switch {
@@ -483,27 +515,43 @@ var separableArticleSet = toWordSet(
 // verb analysis of the whole question.
 func DetectVerbTense(query string) string {
 	c := clauseTokens(query)
-	return c.tense(0, len(c.words), questionLanguage(c.words))
+	return c.tense(0, len(c.words), questionLanguage(c))
 }
 
 // tenseAt is the tense a date at the byte offset off of the lowercased
 // question counts by (issue #487): the tense of the clause it stands in when
 // that clause has a verb of its own ("Sie sagten, wir treffen uns am Montag"
 // asks for the coming Monday, "Ich will wissen, was am Montag passiert ist"
-// for the last one), and otherwise — the question is one clause, or the date
-// stands in a clause without a verb ("Am Montag, was ist da passiert?") —
-// the tense of the whole question. The language is the whole question's.
+// for the last one), and otherwise — the question is one clause, the date
+// stands in a clause without a verb ("Am Montag, was ist da passiert?"), or
+// its clause opens a Perfekt that a later clause closes ("Was haben wir am
+// Montag, nach dem Standup, besprochen?") — the tense of the whole question
+// (DetectVerbTense). The language is the whole question's.
 func tenseAt(query string, off int) string {
 	c := clauseTokens(query)
-	lang := questionLanguage(c.words)
 	// The offsets are those of the lowercased question; where lowercasing
 	// changes the length (a few letters beyond ASCII), the whole question.
 	if i := c.wordAt(off); i >= 0 && len(strings.ToLower(query)) == len(query) {
-		if s, e := c.clauseOf(i); (s > 0 || e < len(c.words)) && c.hasOwnVerb(s, e) {
-			return c.tense(s, e, lang)
+		if s, e := c.clauseOf(i); (s > 0 || e < len(c.words)) && c.hasOwnVerb(s, e) && !c.bracketOpenAt(s, e) {
+			return c.tense(s, e, questionLanguage(c))
 		}
 	}
-	return c.tense(0, len(c.words), lang)
+	return DetectVerbTense(query)
+}
+
+// bracketOpenAt reports whether the clause [s, e) holds an auxiliary whose
+// participle closes the bracket behind inserted clauses ("Was hast du am
+// Freitag, bevor du gegangen bist, deployed?"): its tense is the whole
+// question's.
+func (c clauseWords) bracketOpenAt(s, e int) bool {
+	for i := s; i < e; i++ {
+		if perfektAux[c.words[i]] {
+			if _, ok := c.closingParticiple(e); ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // tense scores the words [s, e) of c in the language lang.
@@ -523,7 +571,11 @@ func (c clauseWords) tense(s, e, lang int) string {
 	}
 
 	// Past verbs: German ones always, English ones outside a German question,
-	// "was" as englishWasAt reads it (issue #487).
+	// "was" as englishWasAt reads it (issue #487), and the German simple past
+	// in the place of the finite verb behind a German "was" (wasPastVerb).
+	if lang != langEnglish && c.wasPastVerb(s, e) {
+		pastScore++
+	}
 	for i, tok := range words {
 		switch {
 		case germanPastVerbs[tok]:
@@ -577,6 +629,86 @@ func (c clauseWords) tense(s, e, lang int) string {
 	return "past" // tie: conservative
 }
 
+// wasParticles stand between a clause-opening German "was" and its finite
+// verb ("Was genau fehlte am Montag?").
+var wasParticles = toWordSet("genau", "denn", "noch", "sonst", "eigentlich", "alles", "so")
+
+// wasPastVerb reports whether a clause of [s, e) opens with the German "was"
+// and has a verb in the simple past in the place of its finite verb (issue
+// #487): a German question asked the past with it before the word stopped
+// counting as the English "was" ("Was fehlte am Montag?", "Was änderte sich
+// am Montag?", "Was besprachen wir am Montag?"). The verbs of that place are
+// read by their shape (germanPastShape), since the simple past of the weak
+// verbs is an open class no list holds.
+func (c clauseWords) wasPastVerb(s, e int) bool {
+	for cs := s; cs < e; {
+		_, ce := c.clauseOf(cs)
+		if c.words[cs] == "was" {
+			v := cs + 1
+			for v < ce && wasParticles[c.words[v]] {
+				v++
+			}
+			if v < ce && v < e && germanPastShape(c.words[v]) {
+				return true
+			}
+		}
+		cs = ce
+	}
+	return false
+}
+
+// strongPastForms are the simple past of the strong and mixed German verbs a
+// question asks with; a verb behind "was" ending in one is in the past
+// ("besprachen", "entschieden", "ergab", "verlief").
+var strongPastForms = []string{
+	"sprach", "sprachen", "schied", "schieden", "gab", "gaben", "kam", "kamen", "nahm", "nahmen", "fand", "fanden",
+	"schloss", "schlossen", "zog", "zogen", "hielt", "hielten", "ließ", "ließen", "lief", "liefen", "fiel", "fielen",
+	"ging", "gingen", "stand", "standen", "sah", "sahen", "trat", "traten", "brach", "brachen", "warf", "warfen",
+	"wies", "wiesen", "rief", "riefen", "schrieb", "schrieben", "blieb", "blieben", "stieg", "stiegen", "fuhr", "fuhren",
+	"trug", "trugen", "bot", "boten", "bat", "baten", "galt", "galten", "schlug", "schlugen", "traf", "trafen",
+	"begann", "begannen", "gewann", "gewannen", "verlor", "wuchs", "wuchsen", "sank", "sanken", "lag", "lagen",
+	"tat", "taten", "las", "lasen", "aß", "saß", "saßen", "flog", "flogen", "floss", "flossen", "schien", "schienen",
+	"stieß", "stießen",
+}
+
+// presentTForms are present forms of German verbs whose stem ends in -t,
+// which take the shape of the weak simple past ("Was testen wir am Montag?",
+// "Was kosten die Server?"); germanPastShape reads them as present.
+var presentTForms = []string{
+	"warten", "warte", "halten", "halte", "starten", "starte", "kosten", "koste", "testen", "teste", "leisten",
+	"leiste", "richten", "richte", "arbeiten", "arbeite", "gelten", "schalten", "schalte",
+	"gestalten", "verwalten", "raten", "rate", "bitten", "bitte", "fürchten", "fürchte", "melden", "bieten", "biete",
+	"treten", "trete", "posten", "poste", "hosten", "hoste", "listen", "liste", "mieten", "miete", "beten",
+}
+
+// germanPastShape reports whether w has the shape of the German simple
+// past: a strong form of strongPastForms at its end, or the weak ending
+// -te/-ten — after a stem in -t or -d as -ete/-eten ("testete") — but not a
+// present form of a verb whose stem ends in -t (presentTForms) and not the
+// ending -tet, which is the present of such a verb ("kostet").
+func germanPastShape(w string) bool {
+	for _, f := range strongPastForms {
+		if strings.HasSuffix(w, f) {
+			return true
+		}
+	}
+	for _, f := range presentTForms {
+		if strings.HasSuffix(w, f) {
+			return false
+		}
+	}
+	if utf8.RuneCountInString(w) < 4 {
+		return false
+	}
+	for _, end := range []string{"ete", "eten"} {
+		if strings.HasSuffix(w, end) {
+			stem := strings.TrimSuffix(w, end)
+			return strings.HasSuffix(stem, "t") || strings.HasSuffix(stem, "d")
+		}
+	}
+	return strings.HasSuffix(w, "te") || strings.HasSuffix(w, "ten")
+}
+
 // hasSeparableVerb reports a separable verb of separableVerbPairs with its
 // prefix behind its stem (T20: not a prefix that is a preposition before an
 // article).
@@ -608,7 +740,8 @@ var (
 	subjectWords  = toWordSet("ich", "du", "er", "sie", "es", "wir", "ihr", "man", "i", "you", "he", "she", "it", "we", "they")
 	clauseOpeners = toWordSet(
 		"was", "wer", "wie", "wann", "wo", "warum", "wieso", "weshalb", "welche", "welcher", "welches",
-		"dass", "ob", "weil", "wenn", "als", "what", "who", "how", "when", "where", "why", "which",
+		"dass", "ob", "weil", "wenn", "als", "bevor", "nachdem", "während", "obwohl", "damit", "sobald", "wie",
+		"what", "who", "how", "when", "where", "why", "which",
 		"that", "if", "because", "whether",
 	)
 	// copulaWords are the forms of "sein", "werden", "to be" and the modals
@@ -676,13 +809,14 @@ var (
 	seinParticipleEndings = []string{
 		"gangen", "kommen", "laufen", "fallen", "treten", "stürzt", "scheitert", "schehen",
 		"schienen", "schwunden", "blieben", "stiegen", "wachsen", "sunken", "storben", "flogen",
-		"sprungen", "lungen", "glückt", "platzt",
+		"sprungen", "lungen", "glückt", "platzt", "taucht", "crasht",
 	}
 	seinParticiples = toWordSet(
 		"passiert", "eskaliert", "explodiert", "kollabiert", "gewesen", "geworden", "gefahren",
 		"gereist", "verreist", "abgereist", "gelandet", "gestartet", "gefolgt", "begegnet",
 		"entstanden", "aufgestanden", "eingeschlafen", "aufgewacht", "umgezogen", "fehlgeschlagen",
-		"gekippt", "abgebrochen", "zusammengebrochen", "eingebrochen", "ausgebrochen", "worden",
+		"gekippt", "abgebrochen", "zusammengebrochen", "eingebrochen", "ausgebrochen", "worden", "abgeschmiert",
+		"gewechselt",
 	)
 )
 
@@ -751,8 +885,18 @@ var articleBefore = toWordSet(
 // "Ergebnissen").
 var nounEndings = []string{"schaft", "schaften", "heit", "heiten", "keit", "keiten", "ungen", "ionen", "täten", "nissen"}
 
-// nounEnding reports whether w ends with one of nounEndings.
+// participleUngen are the endings of participles on -ungen, which nouns do
+// not take ("eingesprungen", "erzwungen", "misslungen").
+var participleUngen = []string{"sprungen", "zwungen", "gelungen", "misslungen", "gedrungen", "gesungen", "besungen"}
+
+// nounEnding reports whether w ends with one of nounEndings and is none of
+// the participles of participleUngen.
 func nounEnding(w string) bool {
+	for _, end := range participleUngen {
+		if strings.HasSuffix(w, end) {
+			return false
+		}
+	}
 	for _, end := range nounEndings {
 		if strings.HasSuffix(w, end) {
 			return true
@@ -774,7 +918,13 @@ func (c clauseWords) participleAt(s, i int) bool {
 	if participleExceptions[w] || i > s && articleBefore[c.words[i-1]] || c.caps[i] && i > s || nounEnding(w) {
 		return false
 	}
-	return knownParticiples[w] || broadParticiplePat.MatchString(w) || ierenParticiple(w)
+	return knownParticiples[w] || broadParticiplePat.MatchString(w) || ierenParticiple(w) || englishParticiple(w)
+}
+
+// englishParticiple reports an English participle a German Perfekt takes as
+// its own ("Was haben wir am Montag released?", "gemerged"), issue #487.
+func englishParticiple(w string) bool {
+	return utf8.RuneCountInString(w) >= 5 && strings.HasSuffix(w, "ed") && !strings.HasSuffix(w, "eed")
 }
 
 // hasPerfektForm reports the German Perfekt or the past subjunctive in the
@@ -803,7 +953,9 @@ func (c clauseWords) hasPerfektForm(s, e int) bool {
 	return false
 }
 
-// clausePerfekt is hasPerfektForm for the one clause [s, e).
+// clausePerfekt is hasPerfektForm for the one clause [s, e); an auxiliary
+// whose clause does not end with its participle may find it at the end of a
+// later clause of the sentence (closingParticiple).
 func (c clauseWords) clausePerfekt(s, e int) bool {
 	last := e - 1
 	if last > s && perfektAux[c.words[last]] && c.participleAt(s, last-1) &&
@@ -818,14 +970,14 @@ func (c clauseWords) clausePerfekt(s, e int) bool {
 		if subjunctiveAux[aux] && modalInfinitives[c.words[last]] && last > i+1 {
 			return true
 		}
-		if seinAux[aux] {
-			if c.participleAt(s, last) && seinParticiple(c.words[last]) {
-				return true
-			}
-			continue
-		}
-		if c.participleAt(s, last) {
+		if c.closedBy(aux, s, last) {
 			return true
+		}
+		if cs, ok := c.closingParticiple(e); ok && c.closedBy(aux, cs, c.clauseEnd(cs)-1) {
+			return true
+		}
+		if seinAux[aux] {
+			continue
 		}
 		for j := i + 1; j < e && j <= i+5; j++ {
 			if w := c.words[j]; knownParticiples[w] && !participleExceptions[w] || perfektParticiplePat.MatchString(w) || ierenParticiple(w) {
@@ -834,6 +986,46 @@ func (c clauseWords) clausePerfekt(s, e int) bool {
 		}
 	}
 	return false
+}
+
+// closedBy reports whether word last of the clause starting at s is a
+// participle that closes the bracket of aux: behind a form of "sein" one of
+// a verb that takes "sein".
+func (c clauseWords) closedBy(aux string, s, last int) bool {
+	return c.participleAt(s, last) && (!seinAux[aux] || seinParticiple(c.words[last]))
+}
+
+// clauseEnd returns the end of the clause that starts at s.
+func (c clauseWords) clauseEnd(s int) int {
+	_, e := c.clauseOf(s)
+	return e
+}
+
+// closingParticiple returns the start of the clause behind the clause that
+// ends at e whose last word may close the bracket an auxiliary opened before
+// e, within the same sentence (issue #487): the first following clause
+// without an auxiliary that ends with a participle ("…, nach dem Standup,
+// besprochen?", "…, glaube ich, was beschlossen?"). Clauses without either
+// are passed, and so are clauses with an auxiliary that a subordinating word
+// or an interrogative opens ("…, bevor du gegangen bist, deployed?"); any
+// other clause with an auxiliary of its own ends the search ("…, und was ist
+// geplant?").
+func (c clauseWords) closingParticiple(e int) (int, bool) {
+	for cs := e; cs < len(c.words) && !c.sentence[cs]; {
+		ce := c.clauseEnd(cs)
+		aux := false
+		for k := cs; k < ce; k++ {
+			aux = aux || perfektAux[c.words[k]]
+		}
+		switch {
+		case aux && !clauseOpeners[c.words[cs]]:
+			return 0, false
+		case !aux && c.participleAt(cs, ce-1):
+			return cs, true
+		}
+		cs = ce
+	}
+	return 0, false
 }
 
 // ierenParticiple reports whether tok is the participle of a German verb on
@@ -1403,7 +1595,11 @@ func rangeEdgesStand(query string, m []string, off int, startEdge, endEdge phras
 	if endEdge.rel && len(findDayDates(strings.ToUpper(m[1]))) > 0 {
 		return false
 	}
-	return !startEdge.year && !endEdge.year || yearEdgeStands(strings.ToLower(query), off)
+	if !startEdge.year && !endEdge.year {
+		return true
+	}
+	lower := strings.ToLower(query)
+	return yearEdgeStands(lower, clauseTokens(lower), off)
 }
 
 // startInEndYear returns the start edge of a range form whose end is a year
@@ -1512,7 +1708,7 @@ func matchSeit(query string, now time.Time) *TemporalResult {
 	start := e.day
 	// A start after today has no time since it yet ("seit morgen").
 	if start.IsZero() || start.After(truncDate(now)) || m[1] == "since" && bareMonthWord(m[2], e) ||
-		e.year && !yearEdgeStands(lower, idx[0]) {
+		e.year && !yearEdgeStands(lower, clauseTokens(lower), idx[0]) {
 		return nil
 	}
 	return yearWeighted(rangeResult(m[1]+" "+m[2], fmtDate(start), fmtDate(truncDate(now)), "range"), e)
@@ -1537,7 +1733,7 @@ func matchBis(query string, now time.Time) *TemporalResult {
 	}
 	m := submatches(lower, idx)
 	e := resolvePhraseEdge(m[2], false, now)
-	if e.day.IsZero() || m[1] == "until" && bareMonthWord(m[2], e) || e.year && !yearEdgeStands(lower, idx[0]) {
+	if e.day.IsZero() || m[1] == "until" && bareMonthWord(m[2], e) || e.year && !yearEdgeStands(lower, clauseTokens(lower), idx[0]) {
 		return nil
 	}
 	// An end before today ("bis März 2015", "bis gestern") is the time up to
@@ -1576,6 +1772,14 @@ func matchBis(query string, now time.Time) *TemporalResult {
 // day counts.
 func matchOpenEdge(query string, now time.Time, edge string) *TemporalResult {
 	lower := strings.ToLower(query)
+	var words *clauseWords // the question's words for the year check, read once
+	stands := func(off int) bool {
+		if words == nil {
+			c := clauseTokens(lower)
+			words = &c
+		}
+		return yearEdgeStands(lower, *words, off)
+	}
 	for _, m := range reOpenEdge.FindAllStringSubmatchIndex(lower, -1) {
 		word, phrase := lower[m[2]:m[3]], lower[m[4]:m[5]]
 		if reTimeUnitBefore.MatchString(lower[:m[0]]) || word != "ab" && reNearBefore.MatchString(lower[:m[0]]) {
@@ -1590,7 +1794,7 @@ func matchOpenEdge(query string, now time.Time, edge string) *TemporalResult {
 		}
 		e := resolvePhraseEdge(phrase, false, now)
 		if e.day.IsZero() || e.fuzzy || e.rel || yearFirst && !e.year || edge != "" && fmtDate(e.day) != edge ||
-			e.year && !yearEdgeStands(lower, m[0]) {
+			e.year && !stands(m[0]) {
 			continue
 		}
 		ref := word + " " + phrase
@@ -1966,7 +2170,10 @@ func matchWeekday(query string, tokens []string, now time.Time) *TemporalResult 
 	// "Mittwoch Morgen" — morgen is morning; no action needed here.
 
 	tense := tenseAt(query, clauseTokens(query).offs[wdIdx])
-	backward := tense == "past"
+	// "vom Montag" names where something comes from — the Monday that has
+	// been ("das Protokoll vom Montag", "der Test vom Freitag"), unless a
+	// word of the question points forward (issue #487).
+	backward := tense == "past" || wdIdx > 0 && tokens[wdIdx-1] == "vom" && tense != "future"
 	// neutral = forward (bare weekday default)
 	d := resolveWeekdayDate(wd, backward, now)
 	dir := "future"
@@ -2152,9 +2359,13 @@ func yearFollower(w string) bool {
 // yearConjunctions and quantityWords: a conjunction behind a number with a
 // word of quantity behind it makes the number a count ("ab 2024 und mehr",
 // "after 2025 or more requests"), issue #487.
+// rangeWords before a second number make the year a range's start, which
+// the range forms decide alone ("ab 2026 bis 2028 Dimensionen" is no window
+// from 2026, issue #487).
 var (
+	rangeWords       = toWordSet("bis", "und", "to", "and", "until", "through", "till")
 	yearConjunctions = toWordSet("und", "oder", "bzw", "and", "or")
-	quantityWords    = toWordSet("mehr", "weniger", "darüber", "darunter", "drüber", "drunter", "more", "less", "fewer", "above", "below", "higher", "lower")
+	quantityWords    = toWordSet("mehr", "weniger", "darüber", "darunter", "drüber", "drunter", "aufwärts", "abwärts", "more", "less", "fewer", "above", "below", "higher", "lower", "upward", "upwards", "downward", "downwards")
 )
 
 // clauseEnd are the runes after which a year ends its clause: a count's noun
@@ -2183,7 +2394,8 @@ func yearEdge(phrase string, words []string, now time.Time) (phraseEdge, bool) {
 			return phraseEdge{}, false
 		}
 		if !endsClause(phrase) && (!yearFollower(words[1]) ||
-			yearConjunctions[words[1]] && len(words) > 2 && quantityWords[words[2]]) {
+			yearConjunctions[words[1]] && len(words) > 2 && quantityWords[words[2]] ||
+			rangeWords[words[1]] && len(words) > 2 && strings.Trim(words[2], "0123456789") == "") {
 			return phraseEdge{}, false
 		}
 	}
@@ -2230,7 +2442,9 @@ var (
 		"pages", "treffer", "hits", "versuch", "versuche", "versuchen", "retry", "retries",
 		"iteration", "iterationen", "iterations", "durchlauf", "durchläufe", "durchläufen", "limit",
 		"liste", "list", "tabelle", "table", "datei", "file", "queue", "warteschlange", "buffer",
-		"puffer", "batch", "kontext", "context", "ausgabe", "output", "uhr", "euro", "eur", "dollar", "dollars", "cent", "budget", "preis",
+		"puffer", "batch", "kontext", "context", "ausgabe", "output", "speicher", "ram", "cache", "prompt", "memory",
+		"stück", "score", "scores", "schleife", "loop", "size", "größe", "länge", "length", "kontextfenster", "einmal",
+		"once", "platte", "disk", "folge", "heap", "parallel", "uhr", "euro", "eur", "dollar", "dollars", "cent", "budget", "preis",
 		"price", "kostet", "kosten", "cost", "costs", "zähle", "zählen", "zähl", "gezählt", "count",
 		"counted", "counting", "scroll", "scrolle", "skip", "überspring", "überspringe", "spring",
 		"springe", "lies", "lese", "read", "reading",
@@ -2241,7 +2455,8 @@ var (
 )
 
 // yearEdgeStands reports whether a bare year after the word at the byte
-// offset off of the lowercased question lower may stand as a window's edge
+// offset off of the lowercased question lower, whose words are c
+// (clauseTokens of lower), may stand as a window's edge
 // (issue #487): a year needs, beside the window of yearInWindow and the word
 // behind it (yearEdge), a clause without a word that makes the number a
 // count, a position or a name (countWords) and a question that asks for no
@@ -2249,13 +2464,12 @@ var (
 // 2024.", "Nach wie vielen Requests, ab 2024?"), while "since 2024, lines
 // have grown" names the year. Such a question goes to the LLM fallback, as
 // before.
-func yearEdgeStands(lower string, off int) bool {
+func yearEdgeStands(lower string, c clauseWords, off int) bool {
 	for _, p := range countPhrases {
 		if strings.Contains(lower, p) {
 			return false
 		}
 	}
-	c := clauseTokens(lower)
 	s, e := 0, len(c.words)
 	if i := c.wordAt(off); i >= 0 {
 		s, e = c.clauseOf(i)

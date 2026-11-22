@@ -1,0 +1,4 @@
+# Differential test of the temporal rules (issue #487): corpus rev2, asked on 2025-06-15 at noon UTC.
+# question, rules output at 36b915f8 (v5.75.0), verdict of a changed output (fixed / disputed / broken), the output now, note.
+Was gilt ab 2027?	nil	fixed	["ab 2027?|2027-01-01..|from"] linear=1.00	read by hand
+Was gilt ab 2028?	nil			
