@@ -1168,8 +1168,8 @@ var presentTForms = []string{
 // germanPastShape reports whether w has the shape of the German simple
 // past: a strong form of strongPastForms at its end, or the weak ending
 // -te/-ten — after a stem in -t or -d as -ete/-eten ("testete") — but not a
-// present form of a verb whose stem ends in -t (presentTForms, and every
-// stem on -ei or -ie before -te/-ten) and not the ending -tet, which is the
+// present form of a verb whose stem ends in -t (presentTForms, and the forms
+// whose stem shows it, tStemPresent) and not the ending -tet, which is the
 // present of such a verb ("kostet").
 func germanPastShape(w string) bool {
 	for _, f := range strongPastForms {
@@ -1184,14 +1184,6 @@ func germanPastShape(w string) bool {
 	}
 	if utf8.RuneCountInString(w) < 4 {
 		return false
-	}
-	// A stem on -ei or -ie before -te/-ten is the stem of a verb on -t
-	// ("bereiten", "leiten", "arbeiten", "bieten", "mieten"): the form is its
-	// present, whose simple past ends in -ete (issue #506).
-	for _, end := range []string{"eite", "eiten", "iete", "ieten"} {
-		if strings.HasSuffix(w, end) {
-			return false
-		}
 	}
 	for _, end := range []string{"ete", "eten"} {
 		if strings.HasSuffix(w, end) {
@@ -1218,10 +1210,12 @@ var presentTWords = toWordSet("achten", "achte")
 // (issue #506): the simple past of such a verb ends in -tete, so the form is
 // none. Its shape shows it where the stem's -t follows a doubled -t
 // ("chatten", "splitten", "retten"; "hatte" is the past of "haben") or a
-// single vowel ("updaten", "rebooten", "routen", "löten" — no weak verb
-// puts its past ending right behind a, i, o, u, ä, ö or ü, while au, eu and
-// äu do: "bauten", "freuten"), and a few verbs whose stem the shape does not
-// show are words of presentTWords.
+// single vowel ("updaten", "rebooten", "routen", "löten", "bereiten",
+// "leiten" — no weak verb puts its past ending right behind a, i, o, u, ä, ö
+// or ü, while au, eu and äu do: "bauten", "freuten"), and a few verbs whose
+// stem the shape does not show are words of presentTWords. A stem on -ie is
+// not read ("bieten" is the present, "kniete" the past of "knien"):
+// presentTForms holds "bieten" and "mieten".
 func tStemPresent(w, base string) bool {
 	if presentTWords[w] {
 		return true
