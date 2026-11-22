@@ -5,6 +5,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"maps"
 	"strings"
@@ -530,9 +531,7 @@ func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *S
 		Connect: func(ctx context.Context) (*pgx.Conn, error) {
 			return pgx.Connect(ctx, dsn)
 		},
-		LogError: func(ctx context.Context, err error) {
-			slog.Error("listener: pgxlisten error", "error", err)
-		},
+		LogError:       logListenerError,
 		ReconnectDelay: reconnectDelay,
 	}
 
@@ -568,6 +567,23 @@ func NewPgxlistenListener(dsn string, reconnectDelay time.Duration, scheduler *S
 	}
 
 	return listener
+}
+
+// logListenerError is the listener's error log (pgxlisten's LogError). The
+// end of the listener's own context is no fault: the scheduler cancels it at
+// shutdown (SIGTERM), and pgxlisten reports the interrupted wait for a
+// notification ("waiting for notification: context canceled") once more
+// before Listen returns — DEBUG, so a normal stop adds no ERROR line to the
+// count deploy.sh takes after a deploy (issue #495). Every other error stays
+// ERROR: one while the listener runs (a broken connection, a handler that
+// failed — a context.Canceled from a handler's own context included), and one
+// that is not the cancellation even though the context has ended.
+func logListenerError(ctx context.Context, err error) {
+	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		slog.Debug("listener: stopped with its context", "error", err)
+		return
+	}
+	slog.Error("listener: pgxlisten error", "error", err)
 }
 
 // reloadGatewayLimits schedules a reload of the limits registry (the

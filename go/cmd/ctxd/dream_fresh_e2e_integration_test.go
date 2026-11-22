@@ -923,6 +923,11 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 			if w.name == "before the stop" && strings.Contains(strings.ToLower(l), "dream") {
 				t.Errorf("phase B: ERROR line naming dream: %s", l)
 			}
+			// Issue #495: the listener's context ending with the SIGTERM is the
+			// stop, not a fault — deploy.sh counts ERROR lines after a deploy.
+			if w.name == "during the shutdown" && strings.Contains(l, `"msg":"listener: pgxlisten error"`) {
+				t.Errorf("phase B: the listener's stop logged at ERROR: %s", l)
+			}
 		}
 	}
 }
