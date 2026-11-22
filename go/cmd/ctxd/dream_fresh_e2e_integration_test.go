@@ -819,6 +819,13 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 	if n := strings.Count(child.out.String()[phaseBFrom:], dreamServesNotice); n != 1 {
 		t.Errorf("phase B: %q logged %d times after the seed, want once", dreamServesNotice, n)
 	}
+	// What the seed of a loopback backend adds to the log besides (issue
+	// #495, read decision): the dispatch layer's coverage WARN, once per
+	// policy derivation — at the boot and at each pool reload — for a local
+	// origin with background roles and no limits.slots.
+	const coverageWarn = `"msg":"dispatch: background-reachable local target without slots cap`
+	t.Logf("phase B: %d × dispatch coverage WARN before the seed, %d after it",
+		strings.Count(child.out.String()[:phaseBFrom], coverageWarn), strings.Count(child.out.String()[phaseBFrom:], coverageWarn))
 
 	// ---- Phase C: a query brings the linked block in through the graph.
 	var distractors []map[string]any
