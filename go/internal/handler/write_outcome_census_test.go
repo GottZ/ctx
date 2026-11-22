@@ -21,8 +21,10 @@ package handler
 // `store.F(…)` statement — has no failure line and is unnamed. A call inside
 // a function literal whose error the literal returns (a transaction helper's
 // body: `err := inTx(ctx, func(tx pgx.Tx) error { return store.F(…) })`) is
-// followed to the statement that runs the literal, and that statement's
-// failure branch decides. A failure branch whose key sits in one sub-branch
+// followed to the statement that runs the literal — it passes the literal to
+// a call and assigns, declares or returns that call's result — and that
+// statement's failure branch decides; a literal stored in a variable, or run
+// by a call that drops the error, is unnamed. A failure branch whose key sits in one sub-branch
 // is named only when no other line about the same error — a call of slog, of
 // a package function that writes a line, with the error variable among its
 // arguments — goes without it.
@@ -32,8 +34,8 @@ package handler
 // information and no handler stores a write in a variable; a statement before
 // the `if err != nil` that carries the key (a success line naming
 // write_outcome) counts as naming it — telling success from failure there
-// needs control flow; a call whose error a named function returns to its
-// callers (`return store.F(…)`, a core both transports share) is counted, not
+// needs control flow; a call whose error a named function — or a function
+// literal at package level — returns to its callers (`return store.F(…)`, a core both transports share) is counted, not
 // followed — its callers name the outcome (the issue writes:
 // writeIssueWriteError and mcpIssueError), and following them needs a call
 // graph across functions; a method is neither a namer nor a line writer to
@@ -360,8 +362,14 @@ func censusFile(fset *token.FileSet, file *ast.File, writes map[string]bool, pf 
 				if !ok {
 					break
 				}
-				lit = site.in.lit
 				outer := site.in.list[site.i]
+				if !runsLiteral(outer, lit) {
+					// The literal is stored (fn := func…) or its call drops
+					// the error: the census cannot follow it to a failure line.
+					verdict = branchUnnamed
+					break
+				}
+				lit = site.in.lit
 				if _, isReturn := outer.(*ast.ReturnStmt); isReturn {
 					continue // its result goes back further
 				}
@@ -382,6 +390,45 @@ func censusFile(fset *token.FileSet, file *ast.File, writes map[string]bool, pf 
 		}
 	}
 	return c
+}
+
+// runsLiteral reports whether stmt runs lit and keeps the error: lit is an
+// argument of a call whose result the statement assigns, declares (also in an
+// if's init) or returns. A literal stored in a variable, or passed to a call
+// whose result go, defer or a bare statement drops, is not followed.
+func runsLiteral(stmt ast.Stmt, lit *ast.FuncLit) bool {
+	var exprs []ast.Expr
+	switch s := stmt.(type) {
+	case *ast.IfStmt:
+		if s.Init == nil {
+			return false
+		}
+		return runsLiteral(s.Init, lit)
+	case *ast.AssignStmt:
+		exprs = s.Rhs
+	case *ast.DeclStmt:
+		if gd, ok := s.Decl.(*ast.GenDecl); ok && gd.Tok == token.VAR && len(gd.Specs) == 1 {
+			if vs, ok := gd.Specs[0].(*ast.ValueSpec); ok {
+				exprs = vs.Values
+			}
+		}
+	case *ast.ReturnStmt:
+		exprs = s.Results
+	}
+	found := false
+	for _, e := range exprs {
+		ast.Inspect(e, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				for _, a := range call.Args {
+					if a == ast.Expr(lit) {
+						found = true
+					}
+				}
+			}
+			return !found
+		})
+	}
+	return found
 }
 
 // statementBranch is what follows stmt as its failure branch: the body of an
@@ -624,8 +671,9 @@ func callsNamer(n ast.Node, pf pkgFuncs, imports map[string]bool) bool {
 // TestWriteOutcomeCensusSeesEveryForm — the census finds a write in the init
 // of an if and under an aliased import of the store package (issue #483), in
 // a var declaration, nested in another call, discarded by go, defer or a bare
-// call, and inside a function literal whose error the enclosing statement
-// handles; a failure line without the key in one sub-branch of the error
+// call, and inside a function literal whose error the statement that runs it
+// handles (not one stored in a variable or run by a call that drops the
+// error); a failure line without the key in one sub-branch of the error
 // branch is unnamed even when another sub-branch names it.
 func TestWriteOutcomeCensusSeesEveryForm(t *testing.T) {
 	const src = `package handler
@@ -720,6 +768,24 @@ func unnamedInClosure(ctx context.Context) {
 	}
 }
 
+func unnamedStoredLiteral(ctx context.Context) {
+	fn := func(tx pgx.Tx) error {
+		return st.DeleteBlob(ctx, tx)
+	}
+	err := inTx(ctx, fn)
+	if err != nil {
+		logRequestError(ctx, "x", "error", err)
+	}
+	slog.Info("later", "write_outcome", "committed")
+}
+
+func unnamedDroppedLiteral(ctx context.Context) {
+	inTx(ctx, func(tx pgx.Tx) error {
+		return st.DeleteBlob(ctx, tx)
+	})
+	slog.Info("later", "write_outcome", "committed")
+}
+
 func namedInClosure(ctx context.Context) {
 	err := inTx(ctx, func(tx pgx.Tx) error {
 		_, err := st.UpdateBlock(ctx, tx)
@@ -742,9 +808,9 @@ func namedInClosure(ctx context.Context) {
 	for _, pos := range c.unnamed {
 		lines = append(lines, pos.Line)
 	}
-	want := []int{6, 19, 28, 36, 43, 51, 55, 59, 63, 86}
-	if c.calls != 13 || !slices.Equal(lines, want) {
-		t.Fatalf("census = %d calls, unnamed at lines %v; want 13 calls, unnamed at %v", c.calls, lines, want)
+	want := []int{6, 19, 28, 36, 43, 51, 55, 59, 63, 86, 95, 106}
+	if c.calls != 15 || !slices.Equal(lines, want) {
+		t.Fatalf("census = %d calls, unnamed at lines %v; want 15 calls, unnamed at %v", c.calls, lines, want)
 	}
 }
 

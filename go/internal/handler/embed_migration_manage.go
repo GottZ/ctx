@@ -199,7 +199,8 @@ func (h *ManageHandler) handleEmbedMigrationCreate(w http.ResponseWriter, r *htt
 		ReuseExisting: d.ReuseExisting,
 	}, embedmigration.StatfsChecker(embedMigrationDiskCheckPath))
 	if err != nil {
-		// The write is the one INSERT at the end.
+		// The write is the one INSERT at the end; a read before it that
+		// was cut off says unknown as well, the safe side.
 		embedMigrationMechErr(w, r, req.Action, err, statementOutcome(err))
 		return
 	}
@@ -489,7 +490,8 @@ func (h *ManageHandler) handleEmbedMigrationPurge(w http.ResponseWriter, r *http
 	cleared, err := embedmigration.Purge(r.Context(), h.pool, 0)
 	if err != nil {
 		// Each batch is one UPDATE that commits on its own: cleared counts
-		// what earlier batches wrote.
+		// what earlier batches wrote (a cut-off read before the first one
+		// says unknown, the safe side).
 		outcome := statementOutcome(err)
 		if cleared > 0 {
 			outcome = writeCommitted

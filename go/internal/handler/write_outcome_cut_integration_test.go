@@ -185,7 +185,7 @@ func newCutFixture(t *testing.T) *cutFixture {
 	}
 	for _, tbl := range []string{"context_blocks", "context_blobs", "context_pending_writes", "context_dream_links",
 		"context_tenants", "context_tenant_scopes", "context_tenant_grants", "context_block_grants", "context_tenant_quota",
-		"context_structural_links", "context_backends"} {
+		"context_structural_links", "context_backends", "context_embed_migrations"} {
 		ddl = append(ddl, fmt.Sprintf(`CREATE CONSTRAINT TRIGGER i483_hold AFTER INSERT OR UPDATE OR DELETE ON %[1]s
 			DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION i483_hold('%[1]s')`, tbl))
 	}
@@ -1013,7 +1013,8 @@ func TestWriteOutcomeCutRemainingPaths(t *testing.T) {
 // store function is one statement or an unlabeled bracket take
 // statementOutcome, tenant-create and scope-create a labeled bracket
 // (writeOutcome), backend-create the unlabeled commit of answeredTx
-// (statementOutcome in writeBackendTxFailure); a cut commit says unknown on
+// (statementOutcome in writeBackendTxFailure), embed-migration-pause one
+// UPDATE (statementOutcome); a cut commit says unknown on
 // every failure line — the constant rolled_back, or writeOutcome on an
 // unlabeled commit, would not.
 func TestWriteOutcomeCutAdminPaths(t *testing.T) {
@@ -1070,6 +1071,16 @@ func TestWriteOutcomeCutAdminPaths(t *testing.T) {
 		cut(t, "context_backends", `{"action":"backend-create","data":{"name":"i483-cut-backend","base_url":"http://i483-cut-backend",`+
 			`"roles":["chat"],"model_map":{"default":"stub-model"}}}`, "manage: backend-create failed")
 		f.waitLanded(t, `SELECT count(*)::int FROM context_backends WHERE name = 'i483-cut-backend'`)
+	})
+	t.Run("embed-migration-pause", func(t *testing.T) {
+		emcSeedModels(t, f.direct)
+		emcSeedBackend(t, f.direct)
+		emc := emcHandler(f.direct)
+		mustSuccess(t, manageAdmin(t, emc, map[string]any{"action": "embed-migration-create",
+			"data": map[string]any{"from_model": emcFromModel, "to_model": emcToModel, "to_backend": emcBackendName}}))
+		mustSuccess(t, manageAdmin(t, emc, map[string]any{"action": "embed-migration-resume"}))
+		cut(t, "context_embed_migrations", `{"action":"embed-migration-pause"}`, "manage: embed-migration-pause failed")
+		f.waitLanded(t, `SELECT count(*)::int FROM context_embed_migrations WHERE status = 'paused'`)
 	})
 	t.Run("tenant-update", func(t *testing.T) {
 		cut(t, "context_tenants", fmt.Sprintf(`{"action":"tenant-update","id":%q,"data":{"display_name":"I483 cut renamed"}}`, a.id), "manage: tenant-update failed")
