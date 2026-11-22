@@ -945,6 +945,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				"error", err,
 				"request_id", requestID,
 			)
+			// As at the translation: a wait the client gave up is marked
+			// for the 499 line (issue #483).
+			markAbandonedWait(loggedRequest(ctx), err)
 		} else if temporalResult != nil {
 			temporal = llm.TemporalToFTSExpansion(temporalResult.Dates)
 			slog.Info("temporal normalization (LLM fallback)",
@@ -1404,10 +1407,10 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			required := rerankRequired(querySens, results, rrf.RerankMaxDocs)
 			results, err = rrf.Rerank(ctx, h.pool, h.backendPool, h.quota, ar.HomeScope, required, originalQuery, results, ar.ApiKeyID, h.admission())
 			if err != nil {
-				slog.Warn("rerank failed, using original order",
-					"error", err,
-					"request_id", requestID,
-				)
+				// Rerank logged the failure and kept the input order; a
+				// wait the client gave up is marked for the 499 line, as at
+				// the cross-encoder (issue #483).
+				markAbandonedWait(loggedRequest(ctx), err)
 			}
 		}
 	}
@@ -2100,7 +2103,10 @@ func (h *QueryHandler) backfillPending(ctx context.Context, callerFloor config.S
 			// genuine wire failure most often means the backend itself is
 			// unavailable, and hammering it for the rest of the sync-cap
 			// budget within one request helps nobody. A block cut by the
-			// budget ends the loop as well: the budget is spent.
+			// budget ends the loop as well: the budget is spent. A wait for
+			// the embed slot the client gave up is marked for the 499 line
+			// (issue #483).
+			markAbandonedWait(loggedRequest(ctx), err)
 			h.recordBackfillFailure(ctx, cfg, row, err, callerCut, requestGone, armRuns || count == 0)
 			break
 		}
