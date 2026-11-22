@@ -120,20 +120,22 @@ func (p issueTypePolicy) workflowStatusFor(forgeState string) string {
 // compares carries the forge state only, so a local move between two statuses
 // of one forge state does not show in it. The pull therefore writes the status
 // the remote state maps to only where that is news: the remote state differs
-// from the state the block projects to (open ↔ closed — with no status mapping
-// resolvable that writes NULL, as a status of the other state must not stay),
-// or the block carries no status of the resolved workflow: none yet, or one a
+// from the state the block projects to (open ↔ closed), or the block carries
+// no status of the resolved workflow: none yet, or one a
 // change of the type's workflow dropped — no local verb can move the block
 // out of that (ValidateTransition refuses a source that is not a configured
-// status) and the board does not list it. With no workflow resolvable there
-// is no set to check against, and a status the block carries stays while its
-// forge state holds. cur is the block the pull's transaction locked, so a
-// status moved after the unlocked read is the one decided on.
+// status) and the board does not list it. With no workflow resolvable the
+// pull writes the status as before #486 (NULL, the metadata-only fallback):
+// there is no set to tell a kept status from a stale one, and a kept status
+// is read again once a workflow resolves — an unpushed local close would then
+// project to "closed" against an open base and forge with nothing to push it.
+// cur is the block the pull's transaction locked, so a status moved after the
+// unlocked read is the one decided on.
 func (p issueTypePolicy) keepsStatus(cur *store.Block, remoteState string) bool {
-	if cur.WorkflowStatus == "" || (p.registryOK && !slices.Contains(p.states, cur.WorkflowStatus)) {
+	if !p.registryOK || !slices.Contains(p.states, cur.WorkflowStatus) {
 		return false
 	}
-	return ctxForgeState(cur, p.terminalSet, p.registryOK) == remoteState
+	return ctxForgeState(cur, p.terminalSet, true) == remoteState
 }
 
 // ApplyIssues is the IssueApplyFunc: one fetched page → the 3-way apply. The

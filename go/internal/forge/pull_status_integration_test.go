@@ -243,26 +243,34 @@ func TestPullKeepsATerminalStatusThePushClosedWith(t *testing.T) {
 }
 
 // TestPullWithoutAWorkflowStatusMapping: the tenant redefined its issue type
-// without a workflow, so the pull resolves no status (registryOK=false). An
-// edit of the same forge state leaves the status the block carries; a forge
-// state change writes NULL, as before — the status it held belongs to the
-// other forge state, and a non-terminal status on a closed issue would make
-// the block project to "open" once a workflow resolves again and push a
-// reopen.
+// without a workflow, so the pull resolves no status (registryOK=false) and
+// projects the forge state from metadata.forge_state. A pull update then
+// writes NULL, as it did before #486, whatever status the block carries: with
+// no workflow there is no set to tell a kept status from a stale one, and a
+// kept status is read again once a workflow resolves — a local close that was
+// never pushed (done on an open issue) would then project to "closed" against
+// an "open" base and forge, with no push candidate to carry it, or a terminal
+// status on a closed issue would read against a later workflow's terminal set.
 func TestPullWithoutAWorkflowStatusMapping(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
+		pulled string // forge state of the pull-create
+		move   string // local move before the workflow is lost ("" = none)
 		remote IssueRemote
-		want   string
 	}{
-		{"same forge state, remote body edit", i486Remote("open", "Crane", "body edited on the forge", 2), "in-progress"},
-		{"the forge closes the issue", i486Remote("closed", "Crane", "forge body", 2), ""},
+		{"open, in-progress, remote body edit", "open", "in-progress", i486Remote("open", "Crane", "body edited on the forge", 2)},
+		{"open, a local close never pushed, remote body edit", "open", "done", i486Remote("open", "Crane", "body edited on the forge", 2)},
+		{"closed, done, remote body edit", "closed", "", i486Remote("closed", "Crane", "body edited on the forge", 2)},
+		{"open, in-progress, the forge closes the issue", "open", "in-progress", i486Remote("closed", "Crane", "forge body", 2)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := i486Setup(t, "i486nowf", "")
-			e.pull(t, i486Remote("open", "Crane", "forge body", 1))
+			e.proj = enablePush(e.proj)
+			e.pull(t, i486Remote(tc.pulled, "Crane", "forge body", 1))
 			_, _, id, _ := readMapping(t, e.pool, e.proj.ID, "issue", 5)
-			e.move(t, id, "in-progress")
+			if tc.move != "" {
+				e.move(t, id, tc.move)
+			}
 			e.setTenantType(t, i486NoWorkflow)
 			if pol := resolveIssuePolicy(e.set()); pol.registryOK {
 				t.Fatalf("precondition: the tenant's issue type still resolves a workflow")
@@ -272,17 +280,30 @@ func TestPullWithoutAWorkflowStatusMapping(t *testing.T) {
 				t.Fatalf("pull-update: %+v, want one applied, no conflict", r)
 			}
 			b := getBlock(t, e.pool, e.proj.Scope, id)
-			if b.WorkflowStatus != tc.want {
-				t.Errorf("status after the pull = %q, want %q", b.WorkflowStatus, tc.want)
+			if b.WorkflowStatus != "" {
+				t.Errorf("status after the pull = %q, want NULL (no workflow resolves)", b.WorkflowStatus)
 			}
 			if fs, _ := b.Metadata["forge_state"].(string); fs != tc.remote.State {
 				t.Errorf("metadata.forge_state = %q, want %q", fs, tc.remote.State)
 			}
 			e.inSync(t, id, tc.remote)
 
-			// The workflow resolves again: the block still projects onto the
-			// base, so neither side is ahead.
+			// The workflow resolves again: the block projects onto the base,
+			// so neither side is ahead, and three cycles write nothing.
 			e.setTenantType(t, i486TenantWorkflow)
+			e.inSync(t, id, tc.remote)
+			wire := 0
+			for run := 1; run <= 3; run++ {
+				e.pull(t, tc.remote)
+				spy := newPushSpy()
+				if _, err := e.pusher().PushProject(context.Background(), e.proj, spy, RepoRef{Owner: "o", Repo: "r"}, alwaysAllow); err != nil {
+					t.Fatalf("run %d push: %v", run, err)
+				}
+				wire += spy.wireCalls()
+			}
+			if wire != 0 {
+				t.Errorf("three cycles after the workflow came back wrote %d times to the forge", wire)
+			}
 			e.inSync(t, id, tc.remote)
 		})
 	}
