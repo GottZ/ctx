@@ -308,9 +308,10 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 // advance records the pushed (or in-sync) version as the mapping's base
 // through store.AdvancePushBase, in the entity's push section. listed is the
 // base the listing read; when another instance's pull moved the base since
-// (the section keeps other pushes out, not pulls), the advance flags the
-// mapping instead of writing either version (issue #486) and the pass counts
-// the conflict.
+// (the section keeps other pushes out, not pulls) to a version other than the
+// one this push sent, the advance flags the mapping instead of writing either
+// version (issue #486) and the pass counts the conflict; a pull that
+// converged on the sent version leaves nothing to decide (issue #491).
 func (p *Pusher) advance(ctx context.Context, tx pgx.Tx, blockID, listed, ctxH string, ctxFields []byte, projected store.PushProjection, res *PushResult) error {
 	moved, err := store.AdvancePushBase(ctx, tx, blockID, listed, ctxH, ctxFields, projected)
 	if err != nil {

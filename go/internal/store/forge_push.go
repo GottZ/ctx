@@ -260,8 +260,11 @@ type PushProjection func(b *Block) string
 //     the base this advance wrote — the version the forge holds.
 //
 // The base is written only while the mapping still holds listedBase, the base
-// the listing read (issue #486). Another ctxd instance on the same database
-// can move it between the section's check (TryLockPushEntity) and this
+// the listing read (issue #486), or ctxHash itself: another instance's pull
+// that ran after the PATCH landed found block and forge at the sent version
+// and converged on it, which is what this advance records anyway (issue
+// #491). Another ctxd instance on the same database can also move it to a
+// third base between the section's check (TryLockPushEntity) and this
 // advance: its pull converges on what the PATCH sent and then pulls a remote
 // edit. (Its push cannot: the section keeps other pushes of the entity out,
 // issue #491.) What the forge holds is then unknown — keeping the moved base
@@ -306,16 +309,18 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 		holds = project(&b) == ctxHash
 	}
 	// In SET every column reference reads the row as it was before this
-	// UPDATE, so every expression tests the stored base.
+	// UPDATE, so every expression tests the stored base: the listed one ($6)
+	// or the version the PATCH sent ($2), on which another instance's pull
+	// may have converged in the meantime.
 	err = tx.QueryRow(ctx, `
 		UPDATE context_project_sync_map
-		   SET base_hash = CASE WHEN base_hash = $6 THEN $2 ELSE $7 END,
+		   SET base_hash = CASE WHEN base_hash IN ($6, $2) THEN $2 ELSE $7 END,
 		       synced_at = CASE WHEN $4 THEN $5::timestamptz ELSE '-infinity'::timestamptz END,
-		       metadata = CASE WHEN base_hash = $6 THEN metadata || $3::jsonb ELSE metadata - 'base_fields' END,
-		       conflict = conflict OR base_hash <> $6,
-		       conflict_at = CASE WHEN base_hash = $6 THEN conflict_at ELSE COALESCE(conflict_at, now()) END
+		       metadata = CASE WHEN base_hash IN ($6, $2) THEN metadata || $3::jsonb ELSE metadata - 'base_fields' END,
+		       conflict = conflict OR base_hash NOT IN ($6, $2),
+		       conflict_at = CASE WHEN base_hash IN ($6, $2) THEN conflict_at ELSE COALESCE(conflict_at, now()) END
 		 WHERE block_id = $1::uuid
-		RETURNING old.base_hash <> $6`,
+		RETURNING old.base_hash NOT IN ($6, $2)`,
 		blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash).Scan(&moved)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
