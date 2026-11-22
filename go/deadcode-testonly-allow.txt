@@ -167,6 +167,8 @@ internal/handler/v1door/v1door.go	probe.ServeHTTP	# v1door: integration-getaggte
 internal/handler/v1door/v1door.go	probe.take	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
 internal/handler/v1door/v1door.go	routeTargets	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
 internal/handler/v1door/v1door.go	underModelPrefix	# v1door: integration-getaggter Tür-Gate-Testhelfer (W01-6; Pflicht im Mount-PR W02-05, K-02-2), 0 Prod by design — wie testdb
+internal/llm/temporal_rules.go	DetectVerbTense	# Messnaht (#506): das Tempus einer ganzen Frage, wie es TestRules_HoldoutExpectations (das Kriterium der Holdout-Prüfung) und die Tempus-Tests lesen; seit tenseAt jedes Datum nach seinem eigenen Teilsatz liest (tenseReader), hat es keinen Produktions-Aufrufer
+internal/llm/temporal_rules.go	clauseWords.firstDateWord	# nur DetectVerbTense (Zeile darüber)
 internal/llmusage/seed.go	SeedSQL	# Messnaht (W06-13): TestSeedPlanAtOneMillionRows erklärt mit EXPLAIN (ANALYZE, BUFFERS) genau das Produktions-Statement von SeedConsumers, keine Kopie
 internal/louvain/quality.go	ARI	# Kennzahl von Gate S4-G2; nur louvain_test.go:169, components_test.go:120, overview/louvain_bench_test.go
 internal/louvain/refine.go	DisconnectedCommunities	# Messgröße von Gate S5-G1; nur refine_test.go:53/61/112, der Rebuild schreibt sie noch nicht ins Journal
