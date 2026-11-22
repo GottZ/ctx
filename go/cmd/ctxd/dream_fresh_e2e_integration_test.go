@@ -835,13 +835,19 @@ func TestDreamFreshInstallE2E(t *testing.T) {
 	if n := strings.Count(child.out.String()[phaseBFrom:], dreamServesNotice); n != 1 {
 		t.Errorf("phase B: %q logged %d times after the seed, want once", dreamServesNotice, n)
 	}
-	// What the seed of a loopback backend adds to the log besides (issue
-	// #495, read decision): the dispatch layer's coverage WARN, once per
-	// policy derivation — at the boot and at each pool reload — for a local
-	// origin with background roles and no limits.slots.
+	// What the seed of a loopback backend adds to the log besides: nothing
+	// from the dispatch layer (issue #504). Its coverage WARN — a local
+	// origin with background roles and no limits.slots — came once per policy
+	// derivation, at the boot and at each pool reload (2 after the seed),
+	// although a seeded pool carries no slots: its policy is empty and
+	// Enforcing off whatever the coverage. It is logged for a non-empty
+	// policy only.
 	const coverageWarn = `"msg":"dispatch: background-reachable local target without slots cap`
-	t.Logf("phase B: %d × dispatch coverage WARN before the seed, %d after it",
-		strings.Count(child.out.String()[:phaseBFrom], coverageWarn), strings.Count(child.out.String()[phaseBFrom:], coverageWarn))
+	before, after := strings.Count(child.out.String()[:phaseBFrom], coverageWarn), strings.Count(child.out.String()[phaseBFrom:], coverageWarn)
+	t.Logf("phase B: %d × dispatch coverage WARN before the seed, %d after it", before, after)
+	if before != 0 || after != 0 {
+		t.Errorf("dispatch coverage WARN %d× before the seed and %d× after it, want 0 and 0: the seeded pool's policy is empty", before, after)
+	}
 
 	// ---- Phase C: a query brings the linked block in through the graph.
 	var distractors []map[string]any

@@ -13,7 +13,8 @@ import (
 // coverageWithoutOption1 is deriveCoverage as of 79f39b30 (F-W7), without
 // the logging: every origin's rows as projected, External as the projection
 // set it. It is the oracle of the ctx-free invariance of Option 1 (F-W5) and
-// the lower bound of the ctx case.
+// the lower bound of the ctx case. Its WARN set follows the rule of issue
+// #504: an empty policy logs none, the coverage term is the same.
 func coverageWithoutOption1(byOrigin map[string][]BackendRow, targets map[string]TargetPolicy) (bool, []string) {
 	covered := true
 	var warns []string
@@ -24,6 +25,9 @@ func coverageWithoutOption1(byOrigin map[string][]BackendRow, targets map[string
 		}
 		covered = false
 		warns = append(warns, origin+" "+strings.Join(roles, ","))
+	}
+	if len(targets) == 0 {
+		warns = nil
 	}
 	sort.Strings(warns)
 	return covered, warns

@@ -51,9 +51,12 @@ const providerClassCtx = "ctx"
 // hold up to A's door (design/04 §4.14) — the owner-side projection never
 // marks a provider_class ctx row External, whatever its locality (F-W7) —
 // as long as the row's limits count for its origin (coverageRows, F-W5).
-// Each uncovered origin logs ONE WARN per derivation (reload), naming origin
-// + the background roles that reach it — the operator sees WHY Enforcing is
-// off.
+// Within a non-empty policy each uncovered origin logs ONE WARN per
+// derivation (reload), naming origin + the background roles that reach it —
+// the operator sees WHY Enforcing is off. An empty policy — no row carries a
+// dispatch key, as on a freshly seeded pool — enforces nothing whatever the
+// coverage (Enforcing), so the WARN would name nothing to act on and is not
+// logged (issue #504); the coverage term is computed all the same.
 func deriveCoverage(byOrigin map[string][]BackendRow, targets map[string]TargetPolicy, logger *slog.Logger) bool {
 	origins := make([]string, 0, len(byOrigin))
 	for o := range byOrigin {
@@ -67,6 +70,9 @@ func deriveCoverage(byOrigin map[string][]BackendRow, targets map[string]TargetP
 			continue
 		}
 		covered = false
+		if len(targets) == 0 {
+			continue
+		}
 		logger.Warn("dispatch: background-reachable local target without slots cap, Enforcing degraded to fallback",
 			"origin", origin, "roles", strings.Join(roles, ","))
 	}
