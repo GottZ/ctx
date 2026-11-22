@@ -310,8 +310,10 @@ func TestASameSecondRemoteEditAfterAPushIsPulled(t *testing.T) {
 		}
 	})
 	// The same as a sync run that saves its cursor (since, the listing's
-	// ETag; the review of this change): the run that flags saves no ETag, so
-	// the next run lists the issue again instead of a 304 and pulls it.
+	// ETag; the review of this change): the run that flags saves since no
+	// further than the issue's stamp and no ETag, so the next run lists the
+	// issue again instead of a 304 and pulls it (with a newer issue on the
+	// same listing: TestAnUnorderedVersionIsListedAgainBehindANewerIssue).
 	t.Run("a sync run that read the mapping before the advance", func(t *testing.T) {
 		ctx := context.Background()
 		e := i491Setup(t, "i509samesecrun", "", fakeIssue{Title: "Crane", Body: "forge body"})
