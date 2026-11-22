@@ -1368,7 +1368,8 @@ RAISE WARNING 'idx_example is missing at % rows (heap %): build it out of band .
 ```
 
 A later file may redefine `ctx_migration_rows(regclass, bigint)` at its top level and read inside
-its body: that exact signature, the name unqualified or under `public`, from `CREATE` to the end
+its body: that exact signature (the types also as `pg_catalog.regclass`, `int8` or the quoted
+catalog names `"regclass"`, `"int8"`), the name unqualified or under `public`, from `CREATE` to the end
 of its body (a closed string after `AS`, `BEGIN ATOMIC` to its `END`, `RETURN` to the end of the
 statement). An overload is another function, and its body is checked, as is a definition inside a
 `DO` block or a string.

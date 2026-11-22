@@ -57,7 +57,8 @@ import (
 // same statement.
 //
 // A definition of ctx_migration_rows(regclass, bigint) itself at the top level
-// of a file — this exact signature, the name unqualified or under public — may
+// of a file — this exact signature (the types also as their catalog names,
+// quoted or not), the name unqualified or under public — may
 // read in its body (a later file that fixes the function). The exemption runs
 // from CREATE to the end of that body (a closed string after AS, BEGIN ATOMIC
 // to its END, RETURN to the end of the statement) and no further; an overload
@@ -405,7 +406,9 @@ func rowsParams(toks []sqlToken, i int) (int, bool) {
 }
 
 // paramOfType reports whether a parameter is an input of one of types:
-// [IN] [name] [pg_catalog.]type [DEFAULT …].
+// [IN] [name] [pg_catalog.]type [DEFAULT …]. A quoted type is its catalog
+// name, case and all ("regclass", "int8"); "bigint" quoted names no type,
+// since bigint is a key word, not a catalog name.
 func paramOfType(p []sqlToken, types ...string) bool {
 	for k := range p {
 		if isWordAt(p, k, "default") || isPunct(p, k, "=") {
@@ -417,11 +420,11 @@ func paramOfType(p []sqlToken, types ...string) bool {
 		p = p[1:]
 	}
 	n := len(p)
-	if n == 0 || p[n-1].kind != tWord || !slices.Contains(types, p[n-1].text) {
+	if n == 0 || !slices.Contains(types, p[n-1].text) || p[n-1].kind != tWord && (p[n-1].kind != tIdent || p[n-1].text == "bigint") {
 		return false
 	}
 	p = p[:n-1]
-	if len(p) >= 2 && isPunct(p, len(p)-1, ".") && isWordAt(p, len(p)-2, "pg_catalog") {
+	if len(p) >= 2 && isPunct(p, len(p)-1, ".") && isNameAt(p, len(p)-2, "pg_catalog") {
 		p = p[:len(p)-2]
 	}
 	if len(p) == 0 {
@@ -1042,6 +1045,10 @@ UPDATE context_page_marks SET relpages = relpages + 1 WHERE relid = 'public.cont
 		src: "COMMENT ON FUNCTION ctx_migration_rows(regclass, bigint) IS 'Rows, not pg_relation_size: the heap is the runbook''s business.';\n"},
 	{class: "too strict", name: "the function redefined under its schema with the catalog names of its types",
 		src: "CREATE OR REPLACE FUNCTION public.ctx_migration_rows(p_rel pg_catalog.regclass, p_threshold int8)\n" + redefinitionBody},
+	{class: "too strict", name: "the function redefined with quoted catalog type names",
+		src: "CREATE OR REPLACE FUNCTION ctx_migration_rows(p_rel pg_catalog.\"regclass\", p_threshold \"pg_catalog\".\"int8\")\n" + redefinitionBody},
+	{class: "pin", refuse: true, name: "a quoted \"bigint\" names no type of the function",
+		src: "CREATE OR REPLACE FUNCTION ctx_migration_rows(p_rel regclass, p_threshold \"bigint\")\n" + redefinitionBody},
 	{class: "too strict", name: "the function redefined with a single-quoted body",
 		src: "CREATE OR REPLACE FUNCTION ctx_migration_rows(p_rel regclass, p_threshold bigint)\n" +
 			"RETURNS bigint LANGUAGE sql AS 'SELECT greatest(reltuples, pg_stat_get_live_tuples(oid))::bigint FROM pg_class WHERE oid = p_rel';\n"},
