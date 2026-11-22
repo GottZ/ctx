@@ -82,3 +82,111 @@ func TestRules_AnEllipticPerfekt(t *testing.T) {
 		"Am Montag, was passiert?":                         next506["montag"],
 	})
 }
+
+// TestRules_AnEnglishPassiveAfterBeIsNoPast (point 2): the participle behind
+// "be" — after "will", a modal, "has to", "is going to" — or behind "is" and
+// "are" is no simple past: the future and modal passive and the state ask
+// for the day to come.
+func TestRules_AnEnglishPassiveAfterBeIsNoPast(t *testing.T) {
+	checkRules(t, sunday487, map[string]wantDate{
+		"What will be deployed on Wednesday?":     next506["mittwoch"],
+		"Will it be merged by Thursday?":          next506["donnerstag"],
+		"What must be finished by Wednesday?":     next506["mittwoch"],
+		"What should be deployed on Monday?":      next506["montag"],
+		"What has to be finished by Tuesday?":     next506["dienstag"],
+		"Is the meeting on Wednesday cancelled?":  next506["mittwoch"],
+		"What is going to be released on Friday?": next506["freitag"],
+		"Which PRs will be reviewed on Friday?":   next506["freitag"],
+		"What can be merged on Thursday?":         next506["donnerstag"],
+		"Are the tests on Friday finished?":       next506["freitag"],
+		// The past stays.
+		"What was deployed on Wednesday?":      last506["mittwoch"],
+		"What has been deployed on Wednesday?": last506["mittwoch"],
+		"Which PRs were merged on Friday?":     last506["freitag"],
+		"What failed on Wednesday?":            last506["mittwoch"],
+	})
+}
+
+// TestRules_TheGermanSimplePastByItsPlace (point 2): a weak or loan verb in
+// the simple past ("deployte", "committete", "scheiterten", "startete … neu")
+// is read by its shape where a finite verb stands — behind the interrogative
+// that opens a main clause, behind a "welche" phrase, at the end of a
+// subordinate clause — and a verb that takes "sein" ("gefailed", "geflaked")
+// makes the Perfekt with it. A noun or adjective on -te elsewhere ("die
+// Liste", "die Route", "die letzte Version") reads as nothing.
+func TestRules_TheGermanSimplePastByItsPlace(t *testing.T) {
+	checkRules(t, sunday487, map[string]wantDate{
+		"Mich interessiert, warum der Deploy am Mittwoch fehlschlug.": last506["mittwoch"],
+		"Welche Fehler traten am Donnerstag in den Logs auf?":         last506["donnerstag"],
+		"Wann genau startete der Container am Freitag neu?":           last506["freitag"],
+		"Wer committete am Montag die kaputten Tests?":                last506["montag"],
+		"Wer reviewte am Mittwoch den PR?":                            last506["mittwoch"],
+		"Wer pushte am Freitag direkt auf root?":                      last506["freitag"],
+		"Wer deployte am Dienstag?":                                   last506["dienstag"],
+		"Welche Jobs scheiterten am Donnerstag?":                      last506["donnerstag"],
+		"wer deployte am dienstag":                                    last506["dienstag"],
+		"Ich frage mich, ob der Job am Montag scheiterte.":            last506["montag"],
+		"Warum ist der Build am Mittwoch gefailed?":                   last506["mittwoch"],
+		"Welche Tests sind am Samstag geflaked?":                      last506["samstag"],
+		// No verb on -te where a finite verb stands.
+		"Wo ist die Liste für Freitag?":                  next506["freitag"],
+		"Welche Route nehmen wir am Montag?":             next506["montag"],
+		"Wer testet am Freitag?":                         next506["freitag"],
+		"Wer wartet am Montag die Server?":               next506["montag"],
+		"Was steht am Montag auf der Karte?":             next506["montag"],
+		"Welche Daten brauchen wir am Freitag?":          next506["freitag"],
+		"Wann ist die Deadline für die Route am Montag?": next506["montag"],
+		// The present of a verb on -t: the stem on -ei or -ie, or a listed form.
+		"Was bereiten wir am Montag vor?":            next506["montag"],
+		"Welche Tests bewerten wir am Freitag?":      next506["freitag"],
+		"Wann beachten wir das am Montag?":           next506["montag"],
+		"Wer bietet am Freitag die Demo an?":         next506["freitag"],
+		"Wer bereitete am Montag die Migration vor?": last506["montag"],
+		// The past subjunctive of a modal asks for the present.
+		"Was könnten wir am Montag tun?":        next506["montag"],
+		"Wann sollten wir am Freitag deployen?": next506["freitag"],
+	})
+}
+
+// TestRules_AnEnglishPastInItsOwnClause (point 2): the tense of the clause
+// the date stands in decides in English as in German — an embedded clause
+// opened by "which", "what", "whether" and the like is a clause of its own,
+// and a verb on -ed right behind its subject ("which commits landed", "who
+// committed", "someone wiped") is a simple past; before a noun ("planned
+// maintenance", "scheduled jobs") the same form is an adjective.
+func TestRules_AnEnglishPastInItsOwnClause(t *testing.T) {
+	checkRules(t, sunday487, map[string]wantDate{
+		"I need to know which commits landed on Monday":             last506["montag"],
+		"Who committed the broken tests on Monday?":                 last506["montag"],
+		"monday outage - what caused it?":                           last506["montag"],
+		"Can you check whether someone wiped the cache on Tuesday?": last506["dienstag"],
+		"Have we rotated the keys on Monday?":                       last506["montag"],
+		"I want to know what we discussed on Friday":                last506["freitag"],
+		"Is there planned maintenance on Monday?":                   next506["montag"],
+		"What scheduled jobs run on Friday?":                        next506["freitag"],
+		"Which planned tasks are due on Friday?":                    next506["freitag"],
+		"I need to know which commits land on Monday":               next506["montag"],
+	})
+}
+
+// TestRules_AWeekdayInACompoundIsNoDate (point 2): a weekday or the weekend
+// joined by a hyphen to a word that is neither a weekday nor a time of day
+// names a thing ("Wochenende-Flag", "Mittwochs-Job", "friday-deploy-script"),
+// not a day; so does a compound written as one word ("Montagsmeeting"),
+// which no rule reads. Joined to a time of day or another weekday it is
+// still a day.
+func TestRules_AWeekdayInACompoundIsNoDate(t *testing.T) {
+	for _, q := range []string{
+		"Was ist das Wochenende-Flag in der Cron-Config?", "Wie heißt der Mittwochs-Job im Cron?",
+		"Wo liegt die Montagsmeeting-Vorlage?", "Where is the friday-deploy-script?", "Was war im Montagsmeeting?",
+		"Was macht der Weekend-Mode?", "Ist das Sonntags-Backup aktiv?",
+	} {
+		if tr := NormalizeTemporalRules(q, sunday487); tr != nil {
+			t.Errorf("%q: %+v, want no date", q, tr.Dates)
+		}
+	}
+	checkRules(t, sunday487, map[string]wantDate{
+		"Was ist am Montag-Abend passiert?": last506["montag"],
+		"Was lief am Freitag-Nachmittag?":   last506["freitag"],
+	})
+}

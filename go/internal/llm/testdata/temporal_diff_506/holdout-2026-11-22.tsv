@@ -25,7 +25,7 @@ Zeig mir, was am Freitag gepusht wurde	["Freitag|2026-11-20..|past"] linear=0.60
 Ich will wissen, welche Commits am Montag gepusht wurden.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
 Kannst du nachsehen, ob am Dienstag jemand den Cache geleert hat?	["Dienstag|2026-11-17..|past"] linear=0.60,weekday=0.40
 Weißt du noch, was wir im August besprochen hatten?	nil
-Mich interessiert, warum der Deploy am Mittwoch fehlschlug.	["Mittwoch|2026-11-25..|future"] linear=0.60,weekday=0.40
+Mich interessiert, warum der Deploy am Mittwoch fehlschlug.	["Mittwoch|2026-11-25..|future"] linear=0.60,weekday=0.40	fixed	["Mittwoch|2026-11-18..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
 Was hat Jan am Donnerstag reviewed?	["Donnerstag|2026-11-19..|past"] linear=0.60,weekday=0.40
 Welche Configs wurden am Samstag überschrieben?	["Samstag|2026-11-21..|past"] linear=0.60,weekday=0.40
 Wer verstand im Oktober noch die Retry-Logik?	nil
@@ -46,15 +46,15 @@ Wurden im April die Keys rotiert?	nil
 Gab es am Dienstag einen Ausfall?	["Dienstag|2026-11-17..|past"] linear=0.60,weekday=0.40
 War der Spark am Samstag erreichbar?	["Samstag|2026-11-21..|past"] linear=0.60,weekday=0.40
 Wer hatte am Mittwoch Rufbereitschaft gehabt?	["Mittwoch|2026-11-18..|past"] linear=0.60,weekday=0.40
-Welche Fehler traten am Donnerstag in den Logs auf?	["Donnerstag|2026-11-26..|future"] linear=0.60,weekday=0.40
-Wann genau startete der Container am Freitag neu?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Welche Fehler traten am Donnerstag in den Logs auf?	["Donnerstag|2026-11-26..|future"] linear=0.60,weekday=0.40	fixed	["Donnerstag|2026-11-19..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
+Wann genau startete der Container am Freitag neu?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40	fixed	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
 Was haben wir im Januar migriert?	nil
 Was ist im Dezember schiefgelaufen?	nil
 Was ging im Dezember live?	nil
 Welche Features sind im Dezember released worden?	nil
 Was wurde von Montag bis Freitag deployed?	["von montag bis freitag deployed?|2026-11-16..2026-11-20|range"] linear=0.60,weekday=0.40
 Welche Issues haben wir von Dienstag bis Samstag abgearbeitet?	["von dienstag bis samstag abgearbeitet?|2026-11-17..2026-11-21|range"] linear=0.60,weekday=0.40
-Wer committete am Montag die kaputten Tests?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Wer committete am Montag die kaputten Tests?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40	fixed	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
 Was hat Damien am Wochenende gemerged	["am Wochenende|2026-11-21..2026-11-22|past"] weekday=1.00
 Was gab's im Oktober Neues?	nil
 Was hab ich am Dienstag eigentlich gemacht	["Dienstag|2026-11-17..|past"] linear=0.60,weekday=0.40
@@ -161,8 +161,8 @@ When did the guard fire on Saturday?	["Saturday|2026-11-21..|past"] linear=0.60,
 Who had pushed the hotfix on Thursday?	["Thursday|2026-11-19..|past"] linear=0.60,weekday=0.40
 What had broken by Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
 Tell me what we shipped in May.	nil
-I need to know which commits landed on Monday	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40
-Can you check whether someone wiped the cache on Tuesday?	["Tuesday|2026-11-24..|future"] linear=0.60,weekday=0.40
+I need to know which commits landed on Monday	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40	fixed	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
+Can you check whether someone wiped the cache on Tuesday?	["Tuesday|2026-11-24..|future"] linear=0.60,weekday=0.40	fixed	["Tuesday|2026-11-17..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
 Do you remember what we discussed in April?	nil
 Did we upgrade Postgres in February?	nil
 Did anything fail on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
@@ -175,9 +175,9 @@ What went live in December?	nil
 Which features were released in December?	nil
 What was deployed from Monday to Friday?	["from monday to friday?|2026-11-16..2026-11-20|range"] linear=0.60,weekday=0.40
 Which issues did we close between Tuesday and Saturday?	["Tuesday|2026-11-17..|past","Saturday|2026-11-21..|past"] linear=0.60,weekday=0.40
-Who committed the broken tests on Monday?	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40
+Who committed the broken tests on Monday?	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40	fixed	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
 What did the tests report on Saturday?	["Saturday|2026-11-21..|past"] linear=0.60,weekday=0.40
-monday outage - what caused it?	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40
+monday outage - what caused it?	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40	fixed	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
 friday deploy failed, why	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
 Last Tuesday the index was rebuilt - how long did it take?	["Tuesday|2026-11-17..|past"] linear=0.60,weekday=0.40
 How many requests got rejected on Wednesday?	["Wednesday|2026-11-18..|past"] linear=0.60,weekday=0.40
@@ -187,7 +187,7 @@ Wich bugs were fixd on thursday	["Thursday|2026-11-19..|past"] linear=0.60,weekd
 What was the root cause of the outage on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
 What's planned for Monday?	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40
 What are we deploying on Tuesday?	["Tuesday|2026-11-24..|future"] linear=0.60,weekday=0.40
-What will be deployed on Wednesday?	["Wednesday|2026-11-18..|past"] linear=0.60,weekday=0.40
+What will be deployed on Wednesday?	["Wednesday|2026-11-18..|past"] linear=0.60,weekday=0.40	fixed	["Wednesday|2026-11-25..|future"] linear=0.60,weekday=0.40	right by the review criterion (expected future, rule ja)
 Who is on call on Thursday?	["Thursday|2026-11-26..|future"] linear=0.60,weekday=0.40
 Who takes over the release on Friday?	["Friday|2026-11-27..|future"] linear=0.60,weekday=0.40
 What's scheduled for Saturday?	["Saturday|2026-11-28..|future"] linear=0.60,weekday=0.40
@@ -204,8 +204,8 @@ Can we roll out the patch on Thursday?	["Thursday|2026-11-26..|future"] linear=0
 Are we going to upgrade in May?	nil
 Is Spark going to be maintained on Thursday?	["Thursday|2026-11-26..|future"] linear=0.60,weekday=0.40
 What needs to be done by Friday?	["Friday|2026-11-27..|future"] linear=0.60,weekday=0.40
-What must be finished by Wednesday?	["Wednesday|2026-11-18..|past"] linear=0.60,weekday=0.40
-Will it be merged by Thursday?	["Thursday|2026-11-19..|past"] linear=0.60,weekday=0.40
+What must be finished by Wednesday?	["Wednesday|2026-11-18..|past"] linear=0.60,weekday=0.40	fixed	["Wednesday|2026-11-25..|future"] linear=0.60,weekday=0.40	right by the review criterion (expected future, rule ja)
+Will it be merged by Thursday?	["Thursday|2026-11-19..|past"] linear=0.60,weekday=0.40	fixed	["Thursday|2026-11-26..|future"] linear=0.60,weekday=0.40	right by the review criterion (expected future, rule ja)
 Is the fix going to be pushed by Monday?	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40
 Is the cluster migrated by Monday?	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40
 Are deploys allowed on Thursday?	["Thursday|2026-11-26..|future"] linear=0.60,weekday=0.40
@@ -216,7 +216,7 @@ I'm planning a rollback on Thursday, anything to watch out for?	["Thursday|2026-
 When does the deploy start on Monday?	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40
 What's coming up in December?	nil
 Is the new release going out on Tuesday?	["Tuesday|2026-11-24..|future"] linear=0.60,weekday=0.40
-Is the meeting on Wednesday cancelled?	["Wednesday|2026-11-18..|past"] linear=0.60,weekday=0.40
+Is the meeting on Wednesday cancelled?	["Wednesday|2026-11-18..|past"] linear=0.60,weekday=0.40	fixed	["Wednesday|2026-11-25..|future"] linear=0.60,weekday=0.40	right by the review criterion (expected future, rule ja)
 Who rolls out the update on Friday?	["Friday|2026-11-27..|future"] linear=0.60,weekday=0.40
 What's due in January?	nil
 Which licenses run out in December?	nil
@@ -254,9 +254,9 @@ Was hatten wir im August gerollbackt?	nil
 Wer hat am Montag den Branch rebased?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
 Was wurde am Freitag gehotfixt?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
 Am Dienstag wurde der Index reindexed, warum?	["Dienstag|2026-11-17..|past"] linear=0.60,weekday=0.40
-Warum ist der Build am Mittwoch gefailed?	["Mittwoch|2026-11-25..|future"] linear=0.60,weekday=0.40
+Warum ist der Build am Mittwoch gefailed?	["Mittwoch|2026-11-25..|future"] linear=0.60,weekday=0.40	fixed	["Mittwoch|2026-11-18..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
 Warum hat die Pipeline am Donnerstag gefailt?	["Donnerstag|2026-11-19..|past"] linear=0.60,weekday=0.40
-Welche Tests sind am Samstag geflaked?	["Samstag|2026-11-28..|future"] linear=0.60,weekday=0.40
+Welche Tests sind am Samstag geflaked?	["Samstag|2026-11-28..|future"] linear=0.60,weekday=0.40	fixed	["Samstag|2026-11-21..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
 Was haben wir von Monday bis Wednesday geshipped?	["von monday bis wednesday geshipped?|2026-11-16..2026-11-18|range"] linear=0.60,weekday=0.40
 Wer hat im September das Schema gedroppt?	nil
 Was war am Friday mit dem Deployment los?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
@@ -268,8 +268,8 @@ Was ham wir am Montag gemerged, gibt's da Regressions?	["Montag|2026-11-23..|fut
 Wurde der Release am Donnerstag getaggt?	["Donnerstag|2026-11-19..|past"] linear=0.60,weekday=0.40
 Was wurde am Wochenende upgedated?	["am Wochenende|2026-11-21..2026-11-22|past"] weekday=1.00
 welche features sind im juni gelauncht worden	nil
-Wer reviewte am Mittwoch den PR?	["Mittwoch|2026-11-25..|future"] linear=0.60,weekday=0.40
-Wer pushte am Freitag direkt auf root?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Wer reviewte am Mittwoch den PR?	["Mittwoch|2026-11-25..|future"] linear=0.60,weekday=0.40	fixed	["Mittwoch|2026-11-18..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
+Wer pushte am Freitag direkt auf root?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40	fixed	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40	right by the review criterion (expected past, rule ja)
 Was hat der Guard am Montag geflaggt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
 Was wurde von Dienstag bis Freitag gebenchmarkt?	["von dienstag bis freitag gebenchmarkt?|2026-11-17..2026-11-20|range"] linear=0.60,weekday=0.40
 Welche Embeddings wurden im März recomputed?	nil
@@ -471,8 +471,8 @@ Which fields does a block have?	nil
 How is the score computed in RRF?	nil
 Was ist der Monat-Parameter in der API?	nil
 Wie viel RAM braucht der Embedder?	nil
-Was ist das Wochenende-Flag in der Cron-Config?	["am Wochenende|2026-11-28..2026-11-29|future"] weekday=1.00
-Wie heißt der Mittwochs-Job im Cron?	["Mittwoch|2026-11-25..|future"] weekday=1.00
+Was ist das Wochenende-Flag in der Cron-Config?	["am Wochenende|2026-11-28..2026-11-29|future"] weekday=1.00	disputed	nil	the review marked the expectation as disputed
+Wie heißt der Mittwochs-Job im Cron?	["Mittwoch|2026-11-25..|future"] weekday=1.00	disputed	nil	the review marked the expectation as disputed
 Who was the maintainer of the plugin?	nil
 Welche Felder hat ein Checkpoint?	nil
 Is there a may-flag for optional fields?	nil

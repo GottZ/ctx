@@ -18,12 +18,14 @@ import (
 // many year candidates in a clause with a count word ("Port nach 2024 und"),
 // and many subordinate clauses with an auxiliary behind a date in a clause
 // without a verb, which the German Perfekt searches for a closing participle;
-// and a plain question for comparison.
+// many English past forms, each of which looks back for "be"; and a plain
+// question for comparison.
 var longQuestionShapes = []struct{ name, lead, unit string }{
 	{"nach-hause", "", "nach Hause "},
 	{"vor-allem", "", "vor allem kurz vor "},
 	{"port-year", "", "Port nach 2024 und "},
 	{"aux-clauses", "Am Montag, ", "wenn habe ich, "},
+	{"en-passive", "On Monday, ", "is it a thing we fixed "},
 	{"plain", "", "Was haben wir am Montag deployed? "},
 }
 

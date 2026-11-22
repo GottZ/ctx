@@ -18,16 +18,16 @@ Was besprachen wir am Montag?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0
 Was entschieden wir am Freitag?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
 Was beschlossen wir am Freitag?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
 Was lernten wir am Freitag?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
-Was wollten wir am Freitag deployen?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
-Was sollten wir am Freitag tun?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was wollten wir am Freitag deployen?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40	disputed	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40	"wollten" is the simple past and the past subjunctive in one form; a plan recalled for the coming Friday reads as well as last Friday's
+Was sollten wir am Freitag tun?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40	disputed	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40	"sollten" is the simple past and the past subjunctive in one form; "what should we do on Friday" reads as well as "what were we to do"
 Was lief am Freitag schief?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
 Was änderte sich von Montag bis Mittwoch?	["von montag bis mittwoch?|2026-11-16..2026-11-18|range"] linear=0.60,weekday=0.40
 Was fehlte am Wochenende?	["am Wochenende|2026-11-21..2026-11-22|past"] weekday=1.00
 Was fehlte Montag oder Dienstag?	["Montag|2026-11-16..|past","Dienstag|2026-11-17..|past"] linear=0.60,weekday=0.40
-Welche Fehler traten am Freitag auf?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
-Welche Tests schlugen am Freitag fehl?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
-Wer deployte am Freitag?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
-Wer fixte am Montag den Bug?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Welche Fehler traten am Freitag auf?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40	fixed	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40	"traten" behind the noun of the "welche" phrase is the simple past
+Welche Tests schlugen am Freitag fehl?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40	fixed	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40	"schlugen" behind the noun of the "welche" phrase is the simple past
+Wer deployte am Freitag?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40	fixed	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40	"deployte" behind "wer" is the simple past of a loan verb
+Wer fixte am Montag den Bug?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40	fixed	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40	"fixte" behind "wer" is the simple past of a loan verb
 Was haben wir am Montag, nach dem Standup, besprochen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
 Was hast du am Freitag, bevor du gegangen bist, deployed?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
 Was hat Damien am Montag, als der Build brach, gemacht?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
