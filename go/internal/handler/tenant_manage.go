@@ -606,17 +606,20 @@ func (h *ManageHandler) handleTenantDelete(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "id required"})
 		return
 	}
-	if req.ID == defaultTenantID {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "the default tenant cannot be deleted"})
+	id, err := uuid.Parse(req.ID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
 		return
 	}
-	if _, err := uuid.Parse(req.ID); err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
+	// The parsed id, not the string: PostgreSQL reads the default tenant's id
+	// in capitals, in braces or without hyphens as the same uuid.
+	if id.String() == defaultTenantID {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "the default tenant cannot be deleted"})
 		return
 	}
 	// The key hard-delete is recorded as via='offboarding' with this server-admin
 	// as actor (PruneTenant pins the channel; migration 160).
-	err := store.PruneTenant(r.Context(), h.pool, req.ID, auditStamp(r, ar))
+	err = store.PruneTenant(r.Context(), h.pool, req.ID, auditStamp(r, ar))
 	if errors.Is(err, store.ErrTenantNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
 		return

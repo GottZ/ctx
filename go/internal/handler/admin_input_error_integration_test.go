@@ -336,3 +336,38 @@ func TestTenantDeleteFailureKeepsItsLine(t *testing.T) {
 		})
 	}
 }
+
+// TestTenantDeleteGuardsTheDefaultTenantInEverySpelling — the default tenant
+// cannot be deleted, however its id is spelled: PostgreSQL reads an id in
+// capitals, in braces or without hyphens as the same uuid, so the guard
+// compares the parsed id, not the string. Before, such a spelling passed the
+// guard and pruned the default tenant.
+func TestTenantDeleteGuardsTheDefaultTenantInEverySpelling(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	admin, _ := kaServerAdmin(ctx, t, pool)
+	h := mcHandler(t, pool, false, false)
+	block := mustBlock(t, pool, "private")
+	for _, id := range []string{
+		store.DefaultTenantID,
+		strings.ToUpper(store.DefaultTenantID),
+		"{" + store.DefaultTenantID + "}",
+		strings.ReplaceAll(store.DefaultTenantID, "-", ""),
+	} {
+		status, resp := kaManage(t, h, admin, "i505-default", map[string]any{"action": "tenant-delete", "id": id})
+		if status != http.StatusBadRequest {
+			t.Errorf("tenant-delete %q answered %d %v, want 400: the default tenant cannot be deleted", id, status, resp)
+		}
+	}
+	var blocks, tenants int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM context_blocks WHERE id = $1::uuid),
+		(SELECT count(*) FROM context_tenants WHERE id = $2::uuid)`, block, store.DefaultTenantID).Scan(&blocks, &tenants); err != nil {
+		t.Fatal(err)
+	}
+	if blocks != 1 || tenants != 1 {
+		t.Fatalf("after the refused deletes: %d blocks in private, %d default tenant rows, want 1 and 1", blocks, tenants)
+	}
+}
