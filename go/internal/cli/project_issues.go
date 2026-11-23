@@ -508,10 +508,11 @@ func printConflicts(resp []byte) error {
 		fmt.Println("No conflicts.")
 	} else {
 		w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
+		// The full block id: resolve and stamp-reset take it as their argument.
 		_, _ = fmt.Fprintln(w, "BLOCK\tKIND\tNR\tCELL\tFLAGGED\tFORGE_UPDATED\tTITLE\tFLAG")
 		for _, c := range payload.Conflicts {
 			_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
-				shortID(c.BlockID), sanitizeTerminal(c.EntityKind), c.ForgeID, sanitizeTerminal(c.Cell),
+				sanitizeTerminal(c.BlockID), sanitizeTerminal(c.EntityKind), c.ForgeID, sanitizeTerminal(c.Cell),
 				stampCell(c.ConflictAt), stampCell(c.Forge.UpdatedAt), sanitizeTerminal(oneLine(c.Title)), sanitizeTerminal(c.Flag))
 		}
 		_ = w.Flush()

@@ -116,7 +116,8 @@ func TestIssuesConflictsTTY(t *testing.T) {
 		t.Fatalf("header %q, want %v", lines[0], want)
 	}
 	row := lines[1]
-	for _, part := range []string{"33333333", "issue", "5", "diverged", "2026-11-01 11:00:00", "2026-11-01 11:00:00", "#5 Crane]0;pwned jib", "0123456789abcdef"} {
+	// The full block id: resolve and stamp-reset take it as their argument.
+	for _, part := range []string{"33333333-3333-3333-3333-333333333333", "issue", "5", "diverged", "2026-11-01 11:00:00", "2026-11-01 11:00:00", "#5 Crane]0;pwned jib", "0123456789abcdef"} {
 		if !strings.Contains(row, part) {
 			t.Errorf("row %q lacks %q", row, part)
 		}

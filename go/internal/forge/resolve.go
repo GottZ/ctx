@@ -260,8 +260,11 @@ func (r *Resolver) ListConflicts(ctx context.Context, project store.ProjectRow, 
 //     — the forge keeps its changes in the others, and the pull after the
 //     push brings them to the block. An unknown base (the advance could
 //     not tell what the forge holds) stays unknown: the push sends every
-//     pushed field. Refused for an issue whose truncated body differs from
-//     the basis (ErrLocalTruncated).
+//     pushed field, but the PATCH that left it unknown moved the forge's
+//     stamp, so the next run lists the entity before the push and flags it
+//     again — now with a snapshot, which a second local resolution diffs
+//     against. Refused for an issue whose truncated body differs from the
+//     basis (ErrLocalTruncated).
 //   - remote: the base becomes the block's own projection (synced_at the
 //     block's updated_at, so the push leaves it alone), and the fetch leg
 //     of the entity is held at the row's forge stamp (store.HoldFetchCursor;

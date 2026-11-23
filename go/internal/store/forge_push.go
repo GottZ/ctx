@@ -387,7 +387,11 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 	// reverted (R below): a pull saw the forge after this PATCH landed — its
 	// observation is later than the PATCH's answer — holding the listed
 	// base's content, while the row still holds that base (issue #509).
-	const reverted = `($9 AND base_hash = $6 AND base_hash <> $2 AND $8::timestamptz IS NOT NULL AND forge_updated_at > $8::timestamptz)`
+	// Only an observation of the base's content counts: a flag the pull set
+	// in the window raises the stamp too, over other content, and keeps it
+	// in forge_seen — that is a divergence, not a revert.
+	const reverted = `($9 AND base_hash = $6 AND base_hash <> $2 AND $8::timestamptz IS NOT NULL AND forge_updated_at > $8::timestamptz
+		AND COALESCE(metadata->'forge_seen'->>'hash', base_hash) = base_hash)`
 	var revert bool
 	err = tx.QueryRow(ctx, `
 		UPDATE context_project_sync_map

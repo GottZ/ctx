@@ -9,8 +9,10 @@
 // All three are tierTenantAdmin like the forge-* sync family: they decide
 // which side of a mirrored issue wins and steer the next sync run. Ownership
 // is re-checked per project (loadOwnedProject: a foreign or absent project is
-// the uniform 404, no oracle), and every input is checked before the first
-// database access, so a malformed id is a 400 and never reaches a uuid cast.
+// the uniform 404, no oracle), and block_id and after are checked before
+// the first database access, so a malformed id is a 400 and never reaches a
+// uuid cast (project_id goes through loadOwnedProject like the other forge
+// actions).
 // The payloads decode strictly: a misspelt expect or all would otherwise drop
 // the guard it names. A resolution and a reset record who did what in
 // context_settings_audit (entity_type forge_sync, store.WriteForgeSyncAudit),

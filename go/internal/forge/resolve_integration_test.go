@@ -517,3 +517,46 @@ func TestResolveLocalOnATruncatedIssueWithoutASnapshotIsRefused(t *testing.T) {
 		t.Fatalf("resolve remote: %+v", r)
 	}
 }
+
+// A flag a pull set inside the push window over a local edit, with a forge
+// write after the PATCH that only moves the stamp (a comment): the advance
+// must not take the raised stamp for a revert to the base and replace the
+// forge version the flag recorded — keeping the local version then pulled
+// the forge's version over it without a flag (found by the review of #509).
+func TestResolveLocalKeepsAnEditFlaggedInsideThePushWindow(t *testing.T) {
+	for _, relist := range []int{0, 2} {
+		t.Run(map[int]string{0: "resolved right after the push", 2: "relisted before the resolution"}[relist], func(t *testing.T) {
+			e := i509WithSix(t, "rlw", true)
+			e.edit(t, store.IssueUpdate{Content: str("body L, pushed")})
+			e.gh.seam(nil, func() {
+				e.gh.edit(t, 5, func(*fakeIssue) {})
+				e.edit(t, store.IssueUpdate{Title: str("Crane T2"), Content: str("forge body")})
+				if r := e.pullOn(t, e.pool); r.Conflicts != 1 {
+					t.Errorf("the pull in the window: %+v, want a flag", r)
+				}
+			})
+			e.pushOn(t, e.pool)
+			for k := 0; k < relist; k++ {
+				e.i509MustRun(t)
+			}
+			cs, _, err := e.resolverOn(e.pool).ListConflicts(context.Background(), e.proj, "", 0)
+			if err != nil || len(cs) != 1 {
+				t.Fatalf("list: %+v %v", cs, err)
+			}
+			if cs[0].Forge.SeenCurrent && cs[0].Forge.Seen.Hash != e.forgeH(t) {
+				t.Fatalf("the listed forge side is current but is not what the forge holds: %s", cs[0].Forge.Seen.Fields)
+			}
+			e.resolve(t, ResolveLocal)
+			for k := 0; k < 2; k++ {
+				e.i509MustRun(t)
+				e.pushOn(t, e.pool)
+			}
+			b := getBlock(t, e.pool, e.proj.Scope, e.id(t))
+			base, flagged := e.mapping(t)
+			kept := b.Content == "forge body" && strings.HasSuffix(b.Title, "Crane T2")
+			if !flagged && (!kept || base != e.forgeH(t)) {
+				t.Errorf("SILENT LOSS of the kept local version: block %q %q, forge %q %q, no flag", b.Title, b.Content, e.gh.issue(t, 5).Title, e.gh.issue(t, 5).Body)
+			}
+		})
+	}
+}
