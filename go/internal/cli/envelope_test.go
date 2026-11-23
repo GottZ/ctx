@@ -298,6 +298,11 @@ func envelopeInventory() map[string]inventoryEntry {
 		// (`--json` prints the body; update_test.go pins both).
 		"update": mute(-1, "update", "b1", "--title", "x"),
 
+		// ── #509: new commands (no pre-T03-13 exit code) ───────────────────
+		"project issues conflicts":   e1(-1, "project", "issues", "conflicts", "--project", fixtureProject),
+		"project issues resolve":     e1(-1, "project", "issues", "resolve", "i1", "--keep", "local", "--project", fixtureProject),
+		"project issues stamp-reset": e1(-1, "project", "issues", "stamp-reset", "--all", "--project", fixtureProject),
+
 		// ── #318: ingest leaves the silent group, 0 → 1 ────────────────────
 		// It never ran in a hook. The vault is the one TestEnvelopeContractPerCommand
 		// writes into its working directory; the server's success:false fails the

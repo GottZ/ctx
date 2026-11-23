@@ -63,6 +63,10 @@ type ManageHandler struct {
 	// (server.go) rather than the constructor to avoid churning its 28 call
 	// sites; nil ⇒ the forge-* actions answer 503.
 	forge ForgeController
+	// forgeResolver feeds forge-conflict-list, forge-conflict-resolve and
+	// forge-stamp-reset (issue #509). Wired via SetForgeResolver (server.go),
+	// same rationale as SetForgeController; nil ⇒ the three actions answer 503.
+	forgeResolver ForgeResolver
 	// admitter is the dispatch admission layer for the backend-test chat
 	// probe (MW3, design/01 §4.6 N8b: I-D1 knows no exception — every
 	// exception is a future unadmitted call site). Wired via SetAdmitter
