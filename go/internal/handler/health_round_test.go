@@ -507,6 +507,9 @@ func TestHealthDatabaseAttemptEndsAtTheConnectTimeout(t *testing.T) {
 	if testing.Short() {
 		t.Skip("waits for the connect timeout")
 	}
+	// The default is what this test waits for: an operator's PGCONNECT_TIMEOUT
+	// in the test process (0 = no timeout) would keep the attempt open.
+	t.Setenv("PGCONNECT_TIMEOUT", "")
 	setHealthBudget(t, 300*time.Millisecond)
 	db := newCountingHangHost(t)
 	up := slowBackend(t, 0, nil)
