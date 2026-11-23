@@ -433,18 +433,17 @@ func TestForgeConflictManage(t *testing.T) {
 			t.Fatalf("resolve remote: %d %s, want 200 changed with the issue leg held", code, raw)
 		}
 		var base string
-		var conflict, syncedAtBlock, held bool
+		var conflict, pushGated, held bool
 		if err := e.pool.QueryRow(ctx,
-			`SELECT m.base_hash, m.conflict, m.synced_at = b.updated_at, p.sync_cursor->'issues'->'hold' IS NOT NULL
+			`SELECT m.base_hash, m.conflict, m.synced_at = 'infinity'::timestamptz, p.sync_cursor->'holds'->'issues' IS NOT NULL
 			   FROM context_project_sync_map m
-			   JOIN context_blocks b ON b.id = m.block_id
 			   JOIN context_projects p ON p.id = m.project_id
-			  WHERE m.block_id = $1::uuid`, id).Scan(&base, &conflict, &syncedAtBlock, &held); err != nil {
+			  WHERE m.block_id = $1::uuid`, id).Scan(&base, &conflict, &pushGated, &held); err != nil {
 			t.Fatal(err)
 		}
-		if conflict || !syncedAtBlock || !held || base != listed.Block.Hash {
-			t.Errorf("flagged %v, synced_at at the block %v, issue leg held %v, base is the block's %v — want the flag gone, the base at the block and the leg held",
-				conflict, syncedAtBlock, held, base == listed.Block.Hash)
+		if conflict || !pushGated || !held || base != listed.Block.Hash {
+			t.Errorf("flagged %v, push gated until a pull %v, issue leg held %v, base is the block's %v — want the flag gone, the base at the block, the push gated and the leg held",
+				conflict, pushGated, held, base == listed.Block.Hash)
 		}
 		e.checkAudit(t, id, "resolve-remote", proj.Scope)
 
@@ -564,7 +563,7 @@ func TestForgeConflictManage(t *testing.T) {
 		}
 		held := func() string {
 			var at string
-			if err := e.pool.QueryRow(ctx, `SELECT COALESCE(sync_cursor->'issues'->'hold'->>'at', '') FROM context_projects WHERE id = $1::uuid`, proj.ID).Scan(&at); err != nil {
+			if err := e.pool.QueryRow(ctx, `SELECT COALESCE(sync_cursor->'holds'->'issues'->>'at', '') FROM context_projects WHERE id = $1::uuid`, proj.ID).Scan(&at); err != nil {
 				t.Fatal(err)
 			}
 			return at
