@@ -278,21 +278,34 @@ func writeStub(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, home
 	return nil
 }
 
-// scanMapRows streams the non-archived blocks of the given scopes into b,
-// restricted to the digest.include type allowlist (WF T8). digestTypes is a
-// code-owned bind value from the run's policy snapshot, never user input; an
-// empty list is legitimate policy ("nothing digests") and yields no rows. The
-// order by category is what b relies on (rows grouped by category); the order
-// by title within keeps the order the uncapped map's ties have always had.
-func scanMapRows(ctx context.Context, pool *pgxpool.Pool, readScopes, digestTypes []string, b *mapBuilder) error {
-	rows, err := pool.Query(ctx,
-		`SELECT id, title, category, scope
+// mapSourceQuery reads the map's source: the non-archived blocks of the read
+// window ($1) whose type the digest includes ($2), grouped by category — the
+// one property of the order the builder relies on (mapBuilder.add closes a
+// category when the next row names another). Everything else about the order
+// is the builder's own: it orders categories, and titles within a category, by
+// bytes with the id as the last key (renderFull, lineBefore), so no row order
+// of the database reaches the map.
+//
+// The grouping sorts in the "C" collation, by bytes, rather than in the
+// database's collation (issue #525): a cluster initialised with a glibc
+// locale such as en_US.utf8 — the production image — compares two strings
+// through strcoll, whose cost grows steeply with the runes outside its
+// tables (1,500 titles of 70 emoji each took 15.6 s to sort there, against
+// 7 ms in "C"); the CI image's C.UTF-8 compares by bytes anyway. The map
+// never needed that order, so the database's collation decided the run time
+// and nothing else.
+const mapSourceQuery = `SELECT id, title, category, scope
 		FROM context_blocks
 		WHERE scope = ANY($1::text[]) AND NOT is_archived
 		  AND type_name = ANY($2::text[])
-		ORDER BY category, title`,
-		readScopes, digestTypes,
-	)
+		ORDER BY category COLLATE "C"`
+
+// scanMapRows streams the source of the map (mapSourceQuery) into b,
+// restricted to the digest.include type allowlist (WF T8). digestTypes is a
+// code-owned bind value from the run's policy snapshot, never user input; an
+// empty list is legitimate policy ("nothing digests") and yields no rows.
+func scanMapRows(ctx context.Context, pool *pgxpool.Pool, readScopes, digestTypes []string, b *mapBuilder) error {
+	rows, err := pool.Query(ctx, mapSourceQuery, readScopes, digestTypes)
 	if err != nil {
 		return fmt.Errorf("query block meta: %w", err)
 	}
