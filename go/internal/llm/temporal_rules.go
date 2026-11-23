@@ -1311,8 +1311,11 @@ func dateWord(w string) bool {
 // simple past (germanPastShape) and is no noun — written with an upper-case
 // letter where no clause starts —, no day word on -te ("heute", "letzte",
 // "nächste", "Mitte") and no past subjunctive of a modal (modalSubjunctives).
+// A clause has one finite verb: a word right before a finite verb the rules
+// know is none, whatever its shape ("ab 2050 punkten gilt der Block als
+// relevant": "punkten" is the noun the number counts), issue #517.
 func (c clauseWords) finitePastAt(i, e int) bool {
-	if i < 0 || i >= e || c.caps[i] && !c.starts[i] {
+	if i < 0 || i >= e || c.caps[i] && !c.starts[i] || i+1 < e && germanFiniteVerb(c.words[i+1]) {
 		return false
 	}
 	w := c.words[i]
@@ -1549,7 +1552,7 @@ var (
 // Montag zu deployen"). A clause with none of them ("Am Montag,", "On
 // Monday,") takes the tense of the question.
 func (c clauseWords) hasOwnVerb(s, e int) bool {
-	if clauseOpeners[c.words[s]] {
+	if clauseOpeners[c.words[s]] || hortatives[c.words[s]] {
 		return true
 	}
 	for i := s; i < e; i++ {
@@ -1561,6 +1564,14 @@ func (c clauseWords) hasOwnVerb(s, e int) bool {
 	}
 	return c.participleAt(s, e-1)
 }
+
+// hortatives are the imperative of "lassen" that opens a German clause of a
+// proposal ("Lass uns am Freitag reden", "Lasst uns …", "Lassen Sie uns
+// …"): the clause has a verb of its own, the imperative, which names no past
+// (issue #517). Without it the clause took the tense of the whole question —
+// in "Lass uns am Freitag über den Bug reden, den wir am Montag hatten" the
+// past of the relative clause.
+var hortatives = toWordSet("lass", "lasst", "lassen")
 
 // perfektAux are the finite forms of "haben" and "sein", and the past
 // subjunctive of both ("hätte gemacht", "wäre gegangen"), that make the

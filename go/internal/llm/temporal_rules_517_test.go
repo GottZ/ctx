@@ -152,3 +152,30 @@ func TestRules_AYearBeforeAParticipleAndItsNoun(t *testing.T) {
 		"Before 2024 merged branches were squashed":           "2023-12-31/until",
 	})
 }
+
+// TestRules_OneFiniteVerbAndTheImperativeOfLassen (issue #517 class 6): a
+// word at a finite verb's place right before a finite verb the rules know is
+// none, whatever its shape; a clause opened by the imperative of "lassen"
+// has a verb of its own and names no past, so a relative clause's past does
+// not reach its date.
+func TestRules_OneFiniteVerbAndTheImperativeOfLassen(t *testing.T) {
+	check517(t, now517, want517{
+		"Lass uns am Freitag nochmal über den Bug reden, den wir am Montag hatten": "2026-11-27/future 2026-11-16/past",
+		"Lass uns am Montag deployen, das hatten wir so besprochen":                "2026-11-23/future",
+		"Lass uns am Mittwoch reden. Am Montag war alles kaputt.":                  "2026-11-25/future 2026-11-16/past",
+		// counter-cases
+		"Lass uns klären, was am Freitag passiert ist": "2026-11-20/past",
+		"Lass die Logs vom Montag liegen":              "2026-11-16/past",
+		"Der Bug am Montag, den wir gefixt hatten?":    "2026-11-16/past",
+		"Am Freitag parkten wir das Thema":             "2026-11-20/past",
+		"Welche Jobs scheiterten am Donnerstag?":       "2026-11-19/past",
+	})
+	for _, q := range []string{"ab 2050 punkten gilt der block als relevant", "ab 2025 punkten gilt der block als relevant"} {
+		if got := DetectVerbTense(q); got == "past" {
+			t.Errorf("%q: tense %s, want no past", q, got)
+		}
+	}
+	if got := DetectVerbTense("Ab 2024 galten neue Limits"); got != "past" {
+		t.Errorf("Ab 2024 galten neue Limits: tense %s, want past", got)
+	}
+}
