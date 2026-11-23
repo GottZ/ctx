@@ -106,6 +106,9 @@ type ForgeSide struct {
 // matrix cell of block, base and the forge version seen (diverged,
 // forge_ahead, ctx_ahead, converged, level), or forge_unknown without a
 // current snapshot.
+//
+// Gated marks a row of the gated list (ListGated): not flagged, behind the
+// push gate of a remote resolution until a pull decides over its entity.
 type Conflict struct {
 	BlockID    string       `json:"block_id"`
 	EntityKind string       `json:"entity_kind"`
@@ -118,6 +121,7 @@ type Conflict struct {
 	BlockAt    time.Time    `json:"block_updated_at"`
 	Base       ConflictSide `json:"base"`
 	Forge      ForgeSide    `json:"forge"`
+	Gated      bool         `json:"gated,omitempty"`
 }
 
 // ResolveResult is what a resolution did. Changed=false: the mapping was not
@@ -125,7 +129,8 @@ type Conflict struct {
 // Basis (local): forge_seen — the push diffs the block against the forge
 // version the flag recorded; base — no current snapshot, the push diffs
 // against the row's base; unknown — the base is unknown and the push sends
-// every pushed field. HeldSince (remote): the
+// every pushed field; gate — the row was behind the push gate of a remote
+// resolution, which the local resolution opened. HeldSince (remote): the
 // fetch leg (Leg) lists every entity updated at or after it on its next run.
 type ResolveResult struct {
 	BlockID   string     `json:"block_id"`
@@ -204,13 +209,30 @@ func cellName(d decision) string {
 // page ("" for none). limit ≤ 0 is the default, above the maximum the
 // maximum.
 func (r *Resolver) ListConflicts(ctx context.Context, project store.ProjectRow, after string, limit int) ([]Conflict, string, error) {
+	return r.list(ctx, project, after, limit, store.ListFlaggedSyncMaps)
+}
+
+// ListGated returns a page of the project's mappings behind the push gate of
+// a remote resolution (issue #509), in the shape of ListConflicts with Gated
+// set: the push leaves them alone until a pull decides over the entity, and
+// an entity the forge no longer lists (deleted, transferred) never gets
+// that pull: its block is archived (the push lists no archived block, and
+// the list leaves it out). A local resolution of a gated row opens the gate
+// of an entity the forge still has (ResolveConflict).
+func (r *Resolver) ListGated(ctx context.Context, project store.ProjectRow, after string, limit int) ([]Conflict, string, error) {
+	return r.list(ctx, project, after, limit, store.ListGatedSyncMaps)
+}
+
+// list is a page of the mappings page reads, in block id order after after.
+func (r *Resolver) list(ctx context.Context, project store.ProjectRow, after string, limit int,
+	page func(context.Context, *pgxpool.Pool, string, string, string, int) ([]store.FlaggedSyncMap, error)) ([]Conflict, string, error) {
 	if limit <= 0 {
 		limit = conflictPageDefault
 	}
 	if limit > conflictPageMax {
 		limit = conflictPageMax
 	}
-	rows, err := store.ListFlaggedSyncMaps(ctx, r.pool, project.ID, project.Scope, after, limit+1)
+	rows, err := page(ctx, r.pool, project.ID, project.Scope, after, limit+1)
 	if err != nil {
 		return nil, "", err
 	}
@@ -230,6 +252,7 @@ func (r *Resolver) ListConflicts(ctx context.Context, project store.ProjectRow, 
 			Block: ConflictSide{Hash: h, Fields: fields}, BlockAt: m.Block.UpdatedAt,
 			Base:  ConflictSide{Hash: m.BaseHash, Fields: m.BaseFields},
 			Forge: ForgeSide{UpdatedAt: m.ForgeUpdatedAt, SeenCurrent: m.SeenValid()},
+			Gated: m.PullGate && !m.Conflict,
 		}
 		if m.Seen != nil {
 			c.Forge.Seen = &ConflictSide{Hash: m.Seen.Hash, Fields: m.Seen.Fields}
@@ -251,7 +274,8 @@ func (r *Resolver) ListConflicts(ctx context.Context, project store.ProjectRow, 
 //     field the block holds otherwise; a pull that lists that same version
 //     reads ctx-ahead and leaves it to the push, a newer remote edit is a
 //     conflict again. Without a current snapshot (a flag a push advance
-//     kept, which drops it; the push's data-loss guard; a flag set before
+//     kept, which drops a snapshot no younger than its PATCH's answer; the
+//     push's data-loss guard; a flag set before
 //     snapshots were kept) the base stays: where the forge holds the base
 //     (the flag a push advance kept over a local edit) the push sends the
 //     block's changes and a pull of that version reads ctx-ahead; where it
@@ -260,10 +284,13 @@ func (r *Resolver) ListConflicts(ctx context.Context, project store.ProjectRow, 
 //     — the forge keeps its changes in the others, and the pull after the
 //     push brings them to the block. An unknown base (the advance could
 //     not tell what the forge holds) stays unknown: the push sends every
-//     pushed field, but the PATCH that left it unknown moved the forge's
-//     stamp, so the next run lists the entity before the push and flags it
-//     again — now with a snapshot, which a second local resolution diffs
-//     against. Refused for an issue whose truncated body differs from the
+//     pushed field. The advance that left it unknown held the entity's
+//     fetch leg (store.AdvancePushBase, issue #509): where that held run
+//     comes after this resolution, it lists the entity before the push and
+//     flags it again — now with a snapshot, which a second local resolution
+//     diffs against; where it came before, it recorded a newer forge
+//     version as the flag's forge side already, and the base is unknown
+//     here only when the forge's version carries the row's stamp. Refused for an issue whose truncated body differs from the
 //     basis (ErrLocalTruncated).
 //   - remote: the base becomes the block's own projection, the fetch leg
 //     of the entity is held at the row's forge stamp (store.HoldFetchCursor;
@@ -281,11 +308,24 @@ func (r *Resolver) ListConflicts(ctx context.Context, project store.ProjectRow, 
 //
 // Both clear the flag, its time and the forge snapshot, keep the row's
 // forge stamp (it orders the next pull's fetch) and record who resolved
-// which way when (store.WriteForgeSyncAudit). The resolution runs under the
+// which way when (store.WriteForgeSyncAudit).
+//
+// A row that is not flagged but behind the push gate of a remote resolution
+// (ListGated) takes local as well (issue #509): the gate opens — synced_at
+// -infinity, store.OpenPullGate — and the next push diffs the block against
+// the base the remote resolution wrote (the block's projection then), so it
+// sends the edits made since; Basis gate, with the locks, the expect check
+// and the audit row of every resolution. Before, an entity the forge no
+// longer lists — deleted, or transferred to another repository — kept its
+// gate for good: no pull decides over it, and a resolution answered
+// changed:false; archiving its block is the way out. Opened, its push gets
+// the forge's answer for any mapping of a gone entity (404, or a refused
+// 301) and fails the push leg on every run. The resolution runs under the
 // locks of the sync, in their order: the entity's push lock (tried — a push
-// on the wire is not waited for, ErrPushInFlight), then, for remote, the
-// project row (the cursor), then the block and the mapping row, FOR NO KEY
-// UPDATE, the order of the pull and of the push advance. A pull or a push
+// on the wire is not waited for, ErrPushInFlight), then the project row (the
+// cursor: remote holds the leg, local sets a hold a push advance left
+// pending), then the block and the mapping row, FOR NO KEY UPDATE, the order
+// of the pull and of the push advance. A pull or a push
 // advance of the entity therefore runs wholly before or after it. expect,
 // when set, must name the row's flag (Conflict.Flag), else ErrFlagChanged.
 // A mapping that is not flagged is no error: Changed=false, nothing written
@@ -321,14 +361,12 @@ func (r *Resolver) ResolveConflict(ctx context.Context, project store.ProjectRow
 func (r *Resolver) resolveLocked(ctx context.Context, tx pgx.Tx, project store.ProjectRow, blockID, direction, expect string,
 	stamp store.AuditStamp, res *ResolveResult) error {
 
-	if direction == ResolveRemote {
-		ok, err := store.LockProjectForCursor(ctx, tx, project.ID)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return ErrConflictNotFound
-		}
+	ok, err := store.LockProjectForCursor(ctx, tx, project.ID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrConflictNotFound
 	}
 	cur, err := store.LockPulledBlock(ctx, tx, blockID, []string{project.Scope}, nil)
 	if errors.Is(err, store.ErrIssueNotFound) {
@@ -344,7 +382,7 @@ func (r *Resolver) resolveLocked(ctx context.Context, tx pgx.Tx, project store.P
 	if !ok {
 		return ErrConflictNotFound
 	}
-	if !m.Conflict {
+	if !m.Conflict && (direction != ResolveLocal || !m.PullGate) {
 		return nil
 	}
 	if expect != "" && expect != flagToken(m) {
@@ -353,22 +391,26 @@ func (r *Resolver) resolveLocked(ctx context.Context, tx pgx.Tx, project store.P
 	}
 	pol := resolveIssuePolicy(r.snapshot(ctx, project.Scope))
 	ctxFields, ctxH := projectSide(pol, m.EntityKind, cur, m.BaseFields)
+	if !m.Conflict {
+		return r.openGate(ctx, tx, project, cur, m, ctxFields, ctxH, stamp, res)
+	}
 	var w store.SyncMapResolution
 	switch direction {
 	case ResolveLocal:
-		switch {
-		case m.SeenValid():
-			w = store.SyncMapResolution{BaseHash: m.Seen.Hash, BaseFields: m.Seen.Fields}
-			res.Basis = "forge_seen"
-		case m.BaseHash == store.UnknownBaseHash:
-			w = store.SyncMapResolution{BaseHash: m.BaseHash}
-			res.Basis = "unknown"
-		default:
-			w = store.SyncMapResolution{BaseHash: m.BaseHash, BaseFields: m.BaseFields}
-			res.Basis = "base"
-		}
+		w, res.Basis = localBasis(m)
 		if m.EntityKind == entityKindIssue && metaBool(cur.Metadata, "truncated") && !sameBody(w.BaseFields, ctxFields) {
 			return ErrLocalTruncated
+		}
+		// A hold a push advance marked as pending (its hold write failed,
+		// issue #509) is set here: the resolution drops the mark with the
+		// flag, and the held listing is what flags the entity again with a
+		// snapshot when the forge moved.
+		if at, pending, err := store.PendingHoldOf(ctx, tx, blockID); err != nil {
+			return err
+		} else if pending {
+			if err := store.HoldFetchCursor(ctx, tx, project.ID, legOf(m.EntityKind), at); err != nil {
+				return err
+			}
 		}
 	case ResolveRemote:
 		w = store.SyncMapResolution{BaseHash: ctxH, BaseFields: ctxFields, PullGate: true}
@@ -390,6 +432,35 @@ func (r *Resolver) resolveLocked(ctx context.Context, tx pgx.Tx, project store.P
 		map[string]any{"project_id": project.ID, "entity_kind": m.EntityKind, "forge_id": m.ForgeID,
 			"base_hash": m.BaseHash, "conflict_at": m.ConflictAt, "forge_updated_at": m.ForgeUpdatedAt, "block_hash": ctxH},
 		map[string]any{"base_hash": w.BaseHash, "basis": res.Basis, "leg": res.Leg, "held_since": res.HeldSince})
+}
+
+// localBasis is what a local resolution of the flagged row m writes as the
+// base, and the basis it names (ResolveConflict).
+func localBasis(m store.FlaggedSyncMap) (store.SyncMapResolution, string) {
+	switch {
+	case m.SeenValid():
+		return store.SyncMapResolution{BaseHash: m.Seen.Hash, BaseFields: m.Seen.Fields}, "forge_seen"
+	case m.BaseHash == store.UnknownBaseHash:
+		return store.SyncMapResolution{BaseHash: m.BaseHash}, "unknown"
+	}
+	return store.SyncMapResolution{BaseHash: m.BaseHash, BaseFields: m.BaseFields}, "base"
+}
+
+// openGate is the local resolution of a gated row (ResolveConflict).
+func (r *Resolver) openGate(ctx context.Context, tx pgx.Tx, project store.ProjectRow, cur *store.Block, m store.FlaggedSyncMap,
+	ctxFields json.RawMessage, ctxH string, stamp store.AuditStamp, res *ResolveResult) error {
+	if m.EntityKind == entityKindIssue && metaBool(cur.Metadata, "truncated") && !sameBody(m.BaseFields, ctxFields) {
+		return ErrLocalTruncated
+	}
+	opened, err := store.OpenPullGate(ctx, tx, m.BlockID)
+	if err != nil || !opened {
+		return err
+	}
+	res.Changed, res.Basis = true, "gate"
+	return store.WriteForgeSyncAudit(ctx, tx, stamp, project.TenantID, project.Scope, m.BlockID, "resolve-"+ResolveLocal,
+		map[string]any{"project_id": project.ID, "entity_kind": m.EntityKind, "forge_id": m.ForgeID,
+			"base_hash": m.BaseHash, "gated": true, "forge_updated_at": m.ForgeUpdatedAt, "block_hash": ctxH},
+		map[string]any{"base_hash": m.BaseHash, "basis": res.Basis})
 }
 
 // ResetStamps runs the way out of a forge stamp that went back behind the

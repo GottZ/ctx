@@ -10,7 +10,7 @@
 //	ctx project issues create  <title> | --title t        # body via --body OR stdin
 //	ctx project issues comment <block-id>                 # body via --body OR stdin
 //	ctx project issues status  <block-id> <new-status>    # verb is `status` (K15)
-//	ctx project issues conflicts [--after cur] [--limit n] # conflict-flagged forge mappings (#509)
+//	ctx project issues conflicts [--after cur] [--limit n] [--gated] # conflict-flagged forge mappings (#509)
 //	ctx project issues resolve <block-id> --keep local|remote [--expect flag]
 //	ctx project issues stamp-reset [<block-id>] [--all]
 //
@@ -314,6 +314,7 @@ func printSyncStatus(resp []byte) {
 		LastSyncAt *string `json:"last_sync_at"`
 		LastError  *string `json:"last_error"`
 		Conflicts  int     `json:"conflicts"`
+		Gated      int     `json:"gated"`
 		Run        syncRun `json:"run"`
 	}
 	if err := json.Unmarshal(resp, &payload); err != nil {
@@ -325,6 +326,9 @@ func printSyncStatus(resp []byte) {
 		fmt.Printf("last sync: %s\n", shortDate(*payload.LastSyncAt))
 	}
 	fmt.Printf("conflicts: %d\n", payload.Conflicts)
+	if payload.Gated > 0 {
+		fmt.Printf("gated:     %d (behind a remote resolution's push gate; ctx project issues conflicts --gated)\n", payload.Gated)
+	}
 	if payload.LastError != nil && *payload.LastError != "" {
 		fmt.Printf("last error: %s\n", sanitizeTerminal(*payload.LastError))
 	}
@@ -335,6 +339,7 @@ func printSyncStatus(resp []byte) {
 func issuesConflictsCmd(getClient func() (*Client, error), project *string) *cobra.Command {
 	var after string
 	var limit int
+	var gated bool
 	cmd := &cobra.Command{
 		Use:   "conflicts",
 		Short: "List the project's conflict-flagged forge mappings with both sides",
@@ -346,16 +351,27 @@ func issuesConflictsCmd(getClient func() (*Client, error), project *string) *cob
 			"recorded is no longer current), when the flag was set, the newest forge stamp\n" +
 			"the database records, and the flag token for `resolve --expect`. The list sends\n" +
 			"no request to the forge, so whether the forge changed after the last pull saw it\n" +
-			"is not known. Piped, the JSON carries both sides' fields. Needs a tenant-admin key.",
+			"is not known. Piped, the JSON carries both sides' fields. Needs a tenant-admin key.\n\n" +
+			"--gated lists, in the same columns, the mappings behind the push gate of a remote\n" +
+			"resolution instead: not flagged, but left alone by the push until a sync decided\n" +
+			"over the entity. An issue deleted on the forge or moved to another repository is\n" +
+			"never listed again and keeps its gate: archive its block, and the push and the\n" +
+			"count leave it out. For an issue the forge still has, `resolve --keep local` opens\n" +
+			"the gate: the next push sends the edits made since over the forge's version of the\n" +
+			"fields they touch, without a flag — also over a forge change no pull has seen yet\n" +
+			"(a gated row's forge side is forge_unknown). `ctx project issues sync --status`\n" +
+			"counts them as gated.",
 		Example: `  ctx project issues conflicts
-  ctx project issues conflicts --limit 20 --after <cursor>`,
+  ctx project issues conflicts --limit 20 --after <cursor>
+  ctx project issues conflicts --gated`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runIssuesConflicts(getClient, *project, after, limit)
+			return runIssuesConflicts(getClient, *project, after, limit, gated)
 		},
 	}
 	cmd.Flags().StringVar(&after, "after", "", "cursor from a previous page (a block id; fetch the next page)")
 	cmd.Flags().IntVar(&limit, "limit", 0, "page size (server default when 0)")
+	cmd.Flags().BoolVar(&gated, "gated", false, "list the mappings behind a remote resolution's push gate instead")
 	return cmd
 }
 
@@ -369,7 +385,11 @@ func issuesResolveCmd(getClient func() (*Client, error), project *string) *cobra
 			"  --keep remote  the next pull writes the forge's version over the block\n" +
 			"Pass the flag token `conflicts` printed as --expect, and the resolution is refused\n" +
 			"(exit 1) if the flag changed since it was listed. A mapping that is no longer\n" +
-			"flagged is left unchanged. Needs a tenant-admin key; each resolution is audited.",
+			"flagged is left unchanged — except one behind the push gate of a remote\n" +
+			"resolution (`conflicts --gated`): --keep local opens its gate, and the next push\n" +
+			"sends the edits made since over the forge's version of the fields they touch,\n" +
+			"without a flag — also over a forge change no pull has seen yet (a gated row's\n" +
+			"forge side is forge_unknown). Needs a tenant-admin key; each resolution is audited.",
 		Example: `  ctx project issues resolve <block-id> --keep remote
   ctx project issues resolve <block-id> --keep local --expect <flag>`,
 		Args: cobra.ExactArgs(1),
@@ -438,10 +458,13 @@ func issuesManage(getClient func() (*Client, error), project, action string, dat
 	return resp, nil
 }
 
-func runIssuesConflicts(getClient func() (*Client, error), project, after string, limit int) error {
+func runIssuesConflicts(getClient func() (*Client, error), project, after string, limit int, gated bool) error {
 	data := map[string]any{}
 	if after != "" {
 		data["after"] = after
+	}
+	if gated {
+		data["gated"] = true
 	}
 	if limit > 0 {
 		data["limit"] = limit
@@ -449,6 +472,9 @@ func runIssuesConflicts(getClient func() (*Client, error), project, after string
 	resp, err := issuesManage(getClient, project, "forge-conflict-list", data)
 	if err != nil {
 		return err
+	}
+	if gated {
+		return renderOrJSON(resp, printGated)
 	}
 	return renderOrJSON(resp, printConflicts)
 }
@@ -523,6 +549,19 @@ func printConflicts(resp []byte) error {
 	return nil
 }
 
+// printGated renders the gated list (conflicts --gated) in the columns of
+// the conflict list; an empty one says so in its own words.
+func printGated(resp []byte) error {
+	var payload struct {
+		Conflicts []json.RawMessage `json:"conflicts"`
+	}
+	if err := json.Unmarshal(resp, &payload); err == nil && len(payload.Conflicts) == 0 {
+		fmt.Println("No gated mappings.")
+		return nil
+	}
+	return printConflicts(resp)
+}
+
 // stampCell renders a timestamp cell to the second in UTC; "-" for none.
 func stampCell(ts *string) string {
 	if ts == nil || *ts == "" {
@@ -557,6 +596,8 @@ func printResolved(resp []byte) error {
 	switch {
 	case !r.Changed:
 		fmt.Printf("%s: not flagged — nothing changed\n", id)
+	case r.Direction == "local" && r.Basis == "gate":
+		fmt.Printf("%s: push gate opened, keep local: the next push sends the block's changes since the remote resolution\n", id)
 	case r.Direction == "local" && r.Basis == "unknown":
 		fmt.Printf("%s resolved, keep local: the forge side is not known, the next push sends every pushed field\n", id)
 	case r.Direction == "local" && r.Basis == "base":

@@ -216,7 +216,8 @@ func (h *ProjectHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 
 	// forge.api_base SSRF deny-list at create time too (a create can seed the same
 	// dangerous api_base a PATCH would reject; §5.7).
-	if msg := validateForge(req.Forge); msg != "" {
+	forge, msg := validateForge(req.Forge)
+	if msg != "" {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": msg})
 		return
 	}
@@ -235,7 +236,7 @@ func (h *ProjectHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		MaxScopes:   maxScopes,
 		Identity:    identity,
 		DisplayName: strings.TrimSpace(req.DisplayName),
-		Forge:       req.Forge,
+		Forge:       forge,
 		CreatedBy:   ar.ApiKeyID,
 	})
 	if err != nil {
@@ -329,11 +330,12 @@ func (h *ProjectHandler) HandlePatch(w http.ResponseWriter, r *http.Request) {
 		req.DisplayName = &s
 	}
 	if rawForge, ok := raw["forge"]; ok {
-		req.Forge = rawForge
-		if msg := validateForge(req.Forge); msg != "" {
+		forge, msg := validateForge(rawForge)
+		if msg != "" {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": msg})
 			return
 		}
+		req.Forge = forge
 	}
 
 	updated, err := store.UpdateProject(ctx, h.pool, row.ID, req.DisplayName, req.Forge)
@@ -398,34 +400,53 @@ func validIdentity(identity string) bool {
 	return false
 }
 
-// validateForge returns a non-empty error message if forge carries an api_base
-// that violates the §5.7 SSRF deny-list, "" if forge is absent/valid. PATCH-time
-// enforcement only (scheme + IP-literal deny-list); DNS-rebinding is the
-// dial-time Achse-02 guard (§5.7 point 2), out of this wave's scope.
-func validateForge(forge json.RawMessage) string {
-	if len(forge) == 0 {
-		return ""
-	}
-	var f struct {
-		APIBase string `json:"api_base"`
-	}
-	if err := json.Unmarshal(forge, &f); err != nil {
-		return "forge must be a JSON object"
+// validateForge checks a forge value an API write carries and answers the
+// form to store (store.ParseForgeConfig: the decoded config, serialised), or
+// a non-empty error message: a key outside kind, owner, repo and api_base —
+// another spelling of one of them included — or a key twice, a value that is
+// not a string, or an api_base that violates the §5.7 SSRF deny-list or
+// carries credentials. Write-time enforcement only (scheme + IP-literal
+// deny-list); DNS-rebinding is the dial-time Achse-02 guard (§5.7 point 2),
+// out of this wave's scope.
+//
+// The row stores the form this checked (issue #474): before, the check read
+// an encoding/json decode of the request — keys matched without regard to
+// case, the last of duplicate keys winning — and the row stored the
+// request's text, which JSONB keeps with "api_base" and "API_BASE" as two
+// keys; a second spelling carried credentials, an http:// or a loopback
+// api_base past the check, and the row served it.
+//
+// Userinfo is refused as a backend row's base_url refuses it
+// (backends/validate.go, issue #474): the project row serves its forge config
+// to every member of the scope (GET /api/project), and a sync without a token
+// sent it to the forge as Basic credentials. The token goes through
+// forge-token-set, sealed. The message echoes nothing of the input
+// (url.Redacted keeps the user name).
+func validateForge(forge json.RawMessage) (json.RawMessage, string) {
+	f, stored, err := store.ParseForgeConfig(forge)
+	switch {
+	case errors.Is(err, store.ErrForgeConfigKeys):
+		return nil, err.Error()
+	case err != nil:
+		return nil, "forge must be a JSON object whose values are strings"
 	}
 	if f.APIBase == "" {
-		return ""
+		return stored, ""
 	}
 	u, err := url.Parse(f.APIBase)
 	if err != nil {
-		return "forge.api_base is not a valid URL"
+		return nil, "forge.api_base is not a valid URL"
+	}
+	if u.User != nil {
+		return nil, "forge.api_base must not carry credentials (user:password@) — they would be served to every member of the scope; set the token with forge-token-set instead"
 	}
 	if u.Scheme != "https" {
-		return "forge.api_base must be https"
+		return nil, "forge.api_base must be https"
 	}
 	if isDeniedHost(u.Hostname()) {
-		return "forge.api_base must not target a private, loopback or link-local address"
+		return nil, "forge.api_base must not target a private, loopback or link-local address"
 	}
-	return ""
+	return stored, ""
 }
 
 // isDeniedHost reports whether host is a forbidden SSRF target: the literal

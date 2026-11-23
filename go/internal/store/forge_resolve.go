@@ -46,7 +46,10 @@ type FlaggedSyncMap struct {
 	ConflictAt     *time.Time
 	ForgeUpdatedAt *time.Time
 	Seen           *ForgeSeen
-	Block          Block // Title, Content, Metadata, WorkflowStatus, UpdatedAt, Scope
+	// PullGate: the row is behind the push gate of a remote resolution
+	// (synced_at 'infinity', SyncMapResolution.PullGate).
+	PullGate bool
+	Block    Block // Title, Content, Metadata, WorkflowStatus, UpdatedAt, Scope
 }
 
 // SeenValid answers whether the row's forge snapshot describes the newest
@@ -60,13 +63,14 @@ func (m FlaggedSyncMap) SeenValid() bool {
 
 const flaggedCols = `m.project_id::text, m.entity_kind, m.forge_id, m.block_id::text, m.base_hash,
 	m.metadata->'base_fields', m.conflict, m.conflict_at, m.forge_updated_at, m.metadata->'forge_seen',
+	m.synced_at = 'infinity'::timestamptz,
 	b.title, b.content, b.metadata, COALESCE(b.workflow_status, ''), b.updated_at, b.scope`
 
 func scanFlagged(row pgx.Row) (FlaggedSyncMap, error) {
 	var m FlaggedSyncMap
 	var seen []byte
 	if err := row.Scan(&m.ProjectID, &m.EntityKind, &m.ForgeID, &m.BlockID, &m.BaseHash,
-		&m.BaseFields, &m.Conflict, &m.ConflictAt, &m.ForgeUpdatedAt, &seen,
+		&m.BaseFields, &m.Conflict, &m.ConflictAt, &m.ForgeUpdatedAt, &seen, &m.PullGate,
 		&m.Block.Title, &m.Block.Content, &m.Block.Metadata, &m.Block.WorkflowStatus, &m.Block.UpdatedAt, &m.Block.Scope); err != nil {
 		return m, err
 	}
@@ -89,6 +93,24 @@ func scanFlagged(row pgx.Row) (FlaggedSyncMap, error) {
 // (a keyset index on (project_id, block_id) WHERE conflict would need a
 // migration).
 func ListFlaggedSyncMaps(ctx context.Context, pool *pgxpool.Pool, projectID, scope, afterBlockID string, limit int) ([]FlaggedSyncMap, error) {
+	return listSyncMaps(ctx, pool, `m.conflict`, projectID, scope, afterBlockID, limit)
+}
+
+// ListGatedSyncMaps returns up to limit mappings of a project behind the push
+// gate of a remote resolution (synced_at 'infinity', issue #509) whose block
+// is live in scope, in block id order after afterBlockID — the rows the push
+// leaves alone until a pull decided over their entity, which an entity the
+// forge no longer lists never gets. No index holds the gate, so a page reads
+// the project's mappings through the primary key and filters them: its cost
+// grows with the mappings of the project (a partial index on (project_id,
+// block_id) WHERE synced_at = 'infinity' would need a migration).
+func ListGatedSyncMaps(ctx context.Context, pool *pgxpool.Pool, projectID, scope, afterBlockID string, limit int) ([]FlaggedSyncMap, error) {
+	return listSyncMaps(ctx, pool, `m.synced_at = 'infinity'::timestamptz`, projectID, scope, afterBlockID, limit)
+}
+
+// listSyncMaps is a keyset page of a project's mappings that match which (a
+// fixed SQL predicate on m).
+func listSyncMaps(ctx context.Context, pool *pgxpool.Pool, which, projectID, scope, afterBlockID string, limit int) ([]FlaggedSyncMap, error) {
 	var after any
 	if afterBlockID != "" {
 		after = afterBlockID
@@ -97,20 +119,20 @@ func ListFlaggedSyncMaps(ctx context.Context, pool *pgxpool.Pool, projectID, sco
 		SELECT `+flaggedCols+`
 		  FROM context_project_sync_map m
 		  JOIN context_blocks b ON b.id = m.block_id
-		 WHERE m.project_id = $1::uuid AND m.conflict
+		 WHERE m.project_id = $1::uuid AND `+which+`
 		   AND ($2::uuid IS NULL OR m.block_id > $2::uuid)
 		   AND b.scope = $3 AND NOT b.is_archived
 		 ORDER BY m.block_id
 		 LIMIT $4`, projectID, after, scope, limit)
 	if err != nil {
-		return nil, fmt.Errorf("store: list flagged sync maps: %w", err)
+		return nil, fmt.Errorf("store: list sync maps: %w", err)
 	}
 	defer rows.Close()
 	out := make([]FlaggedSyncMap, 0, limit)
 	for rows.Next() {
 		m, err := scanFlagged(rows)
 		if err != nil {
-			return nil, fmt.Errorf("store: scan flagged sync map: %w", err)
+			return nil, fmt.Errorf("store: scan sync map: %w", err)
 		}
 		out = append(out, m)
 	}
@@ -166,7 +188,7 @@ func ResolveSyncMapConflict(ctx context.Context, tx pgx.Tx, blockID string, r Sy
 		UPDATE context_project_sync_map
 		   SET base_hash = $2,
 		       metadata = (CASE WHEN $3::jsonb IS NULL THEN metadata - 'base_fields'
-		                        ELSE metadata || jsonb_build_object('base_fields', $3::jsonb) END) - 'forge_seen',
+		                        ELSE metadata || jsonb_build_object('base_fields', $3::jsonb) END) - 'forge_seen' - 'hold_pending',
 		       synced_at = CASE WHEN $5 THEN 'infinity'::timestamptz ELSE COALESCE($4::timestamptz, '-infinity'::timestamptz) END,
 		       conflict = false, conflict_at = NULL
 		 WHERE block_id = $1::uuid AND conflict`, blockID, r.BaseHash, fields, r.SyncedAt, r.PullGate)
@@ -202,15 +224,39 @@ func RecordForgeObservation(ctx context.Context, tx pgx.Tx, blockID string, at *
 // .PullGate) on the locked mapping row of blockID: a pull found the forge at
 // the base, so the forge holds no version the push could send over unseen,
 // and synced_at becomes -infinity — the block's edit since the resolution is
-// a push candidate. A row without the gate is left as it is.
-func OpenPullGate(ctx context.Context, tx pgx.Tx, blockID string) error {
-	if _, err := tx.Exec(ctx, `
+// a push candidate. The local resolution of a gated row opens it the same
+// way (issue #509). A row without the gate is left as it is; opened reports
+// whether the row had it.
+func OpenPullGate(ctx context.Context, tx pgx.Tx, blockID string) (opened bool, err error) {
+	tag, err := tx.Exec(ctx, `
 		UPDATE context_project_sync_map
 		   SET synced_at = '-infinity'::timestamptz
-		 WHERE block_id = $1::uuid AND synced_at = 'infinity'::timestamptz`, blockID); err != nil {
-		return fmt.Errorf("store: open pull gate: %w", err)
+		 WHERE block_id = $1::uuid AND synced_at = 'infinity'::timestamptz`, blockID)
+	if err != nil {
+		return false, fmt.Errorf("store: open pull gate: %w", err)
 	}
-	return nil
+	return tag.RowsAffected() == 1, nil
+}
+
+// GatedCount returns the number of mappings of a project behind the push gate
+// of a remote resolution (synced_at 'infinity', issue #509) whose block is
+// live in scope — the rows ListGatedSyncMaps pages through — for the
+// forge-sync-status surfaces beside ConflictCount. An archived block's
+// mapping is not counted: the push lists no archived block, so archiving is
+// the other way out of a gate whose entity left the forge. No index holds
+// the gate: the count reads the project's mappings through the primary key
+// (a partial index WHERE synced_at = 'infinity' would need a migration).
+func GatedCount(ctx context.Context, pool *pgxpool.Pool, projectID, scope string) (int, error) {
+	var n int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM context_project_sync_map m
+		  JOIN context_blocks b ON b.id = m.block_id
+		 WHERE m.project_id = $1::uuid AND m.synced_at = 'infinity'::timestamptz
+		   AND b.scope = $2 AND NOT b.is_archived`,
+		projectID, scope).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: gated count: %w", err)
+	}
+	return n, nil
 }
 
 // forgeSeenJSON is the metadata.forge_seen value of seen, nil for none.
@@ -351,7 +397,7 @@ func utcJSON(expr string) string {
 // there, and a run lists from hold.at, so a leg that stops at its page bound
 // goes on from where it stopped instead of reading the same pages again.
 // Every other hold stays (HoldFetchCursor). top (a JSON object, nil for none) is merged into
-// sync_cursor beside the legs — the comment leg's held orphans. The other
+// sync_cursor beside the legs — the comment leg's orphan record. The other
 // keys of the cursor survive.
 func CommitFetchCursor(ctx context.Context, pool *pgxpool.Pool, projectID, leg, etag string, since time.Time, readHold string, last bool, top json.RawMessage) error {
 	if len(top) == 0 {

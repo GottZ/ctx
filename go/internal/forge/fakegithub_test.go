@@ -61,7 +61,14 @@ type fakeGitHub struct {
 	patches     []fakePatch // issue PATCHes that landed, in landing order
 	before      func()      // one-shot seam of the next issue PATCH
 	after       func()
+	commentNext func() // one-shot seam after the next comment PATCH landed, before its answer (commentSeam)
+	commentPage int    // comments per listing page; 0 = one page (setCommentPages)
+	commentHold func(page int) // runs before a comment listing page is served (nil = none)
 	stampAnswer fakeStampAnswer
+	pageHolds   map[int]chan struct{} // issue-listing pages held until closed (holdPage)
+	pagesServed atomic.Int64          // issue-listing requests served
+	auths       []string              // the Authorization header of every request, in order
+	moved       map[int64]string      // removed issues a PATCH is redirected for (301), by number
 }
 
 // fakeStampAnswer is what a write's answer carries as updated_at.
@@ -205,6 +212,57 @@ func (f *fakeGitHub) seam(before, after func()) {
 	f.mu.Unlock()
 }
 
+// commentSeam arms the next comment PATCH: after runs once the PATCH
+// landed, before the forge answers it.
+func (f *fakeGitHub) commentSeam(after func()) {
+	f.mu.Lock()
+	f.commentNext = after
+	f.mu.Unlock()
+}
+
+// setCommentPages makes the comment listing answer n comments per page,
+// with a next link as the issue listing has (issue #509, P7 of PR #529).
+func (f *fakeGitHub) setCommentPages(n int) {
+	f.mu.Lock()
+	f.commentPage = n
+	f.mu.Unlock()
+}
+
+// holdPage makes the issue listing's page n (of any listing) wait until
+// release is closed or the client gives the request up — a forge that does
+// not answer a page (issue #474).
+func (f *fakeGitHub) holdPage(n int, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pageHolds == nil {
+		f.pageHolds = map[int]chan struct{}{}
+	}
+	f.pageHolds[n] = release
+}
+
+// remove takes issue n off the forge, as a delete or a transfer to another
+// repository does: the listing no longer carries it, and a PATCH of it is
+// answered 404 — or, with movedTo (a transfer), 301 to that path, as GitHub
+// redirects a transferred issue (issue #509).
+func (f *fakeGitHub) remove(t *testing.T, n int64, movedTo string) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.issues {
+		if f.issues[i].Number == n {
+			f.issues = append(f.issues[:i], f.issues[i+1:]...)
+			if movedTo != "" {
+				if f.moved == nil {
+					f.moved = map[int64]string{}
+				}
+				f.moved[n] = movedTo
+			}
+			return
+		}
+	}
+	t.Fatalf("the fake forge holds no issue #%d", n)
+}
+
 // issue returns a copy of what the forge holds for issue n.
 func (f *fakeGitHub) issue(t *testing.T, n int64) fakeIssue {
 	t.Helper()
@@ -319,6 +377,9 @@ func (f *fakeGitHub) answer(w http.ResponseWriter, status int, fields map[string
 }
 
 func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.auths = append(f.auths, r.Header.Get("Authorization"))
+	f.mu.Unlock()
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/comments":
 		f.commentPages.Add(1)
@@ -360,6 +421,27 @@ func (f *fakeGitHub) serveCommentListing(w http.ResponseWriter, r *http.Request)
 		}
 		return match[i].ID < match[j].ID
 	})
+	f.mu.Lock()
+	per, hook := f.commentPage, f.commentHold
+	f.mu.Unlock()
+	if per > 0 {
+		q := r.URL.Query()
+		page, _ := strconv.Atoi(q.Get("page"))
+		if page < 1 {
+			page = 1
+		}
+		if hook != nil {
+			hook(page)
+		}
+		lo, hi := min((page-1)*per, len(match)), min(page*per, len(match))
+		if hi < len(match) {
+			q.Set("page", strconv.Itoa(page+1))
+			for _, line := range f.link(f.srv.URL + r.URL.Path + "?" + q.Encode()) {
+				w.Header().Add("Link", line)
+			}
+		}
+		match = match[lo:hi]
+	}
 	items := make([]map[string]any, 0, len(match))
 	for _, c := range match {
 		items = append(items, map[string]any{
@@ -441,10 +523,15 @@ func (f *fakeGitHub) serveCommentPatch(w http.ResponseWriter, r *http.Request) {
 			out = &c
 		}
 	}
+	next := f.commentNext
+	f.commentNext = nil
 	f.mu.Unlock()
 	if out == nil {
 		http.NotFound(w, r)
 		return
+	}
+	if next != nil {
+		next()
 	}
 	f.answer(w, http.StatusOK, map[string]any{"id": out.ID, "body": out.Body}, out.Updated)
 }
@@ -529,7 +616,12 @@ func (f *fakeGitHub) servePatch(w http.ResponseWriter, r *http.Request) {
 		f.patches = append(f.patches, fakePatch{Number: n, Fields: fields})
 		landed = *it
 	}
+	movedTo := f.moved[n]
 	f.mu.Unlock()
+	if !found && movedTo != "" {
+		http.Redirect(w, r, movedTo, http.StatusMovedPermanently)
+		return
+	}
 	if !found {
 		http.NotFound(w, r)
 		return
@@ -563,6 +655,17 @@ func (f *fakeGitHub) serveListing(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(q.Get("page"))
 	if page < 1 {
 		page = 1
+	}
+	f.pagesServed.Add(1)
+	f.mu.Lock()
+	hold := f.pageHolds[page]
+	f.mu.Unlock()
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-r.Context().Done():
+			return // the client gave the request up
+		}
 	}
 
 	f.mu.Lock()

@@ -111,7 +111,8 @@ func (h *ManageHandler) handleProjectProvision(w http.ResponseWriter, r *http.Re
 
 	// forge.api_base SSRF deny-list at provision time too (a provision can seed the
 	// same dangerous api_base a PATCH would reject; §5.7).
-	if msg := validateForge(pr.Forge); msg != "" {
+	forge, msg := validateForge(pr.Forge)
+	if msg != "" {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": msg})
 		return
 	}
@@ -129,7 +130,7 @@ func (h *ManageHandler) handleProjectProvision(w http.ResponseWriter, r *http.Re
 		DisplayName: displayName,
 		Scope:       scope,
 		Identity:    identity,
-		Forge:       pr.Forge,
+		Forge:       forge,
 		SeedScopes:  pr.MaxScopes,
 		SeedKeys:    pr.MaxKeys,
 		Quota:       quota,

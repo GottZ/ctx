@@ -1169,6 +1169,12 @@ type ProjectEventsConfig struct {
 type ProjectSyncConfig struct {
 	RateLimit     int `key:"project.sync.rate_limit" env:"CTX_PROJECT_SYNC_RATE_LIMIT" default:"6" mut:"hot" parse:"strict" tenancy:"tenant-overridable"`
 	MaxConcurrent int `key:"project.sync.max_concurrent" env:"CTX_PROJECT_SYNC_MAX_CONCURRENT" default:"3" mut:"restart" parse:"strict" tenancy:"global-only"`
+	// RunTimeout is the deadline of one sync run (issue #474): a forge that
+	// answers each page slowly gives the slot back after it, and the next run
+	// goes on from the saved cursor. The default (4 h) leaves each page of the
+	// two pull legs' 1000-page bound 7.2 s. Process-global like the slot it
+	// bounds, read at boot.
+	RunTimeout time.Duration `key:"project.sync.run_timeout" env:"CTX_PROJECT_SYNC_RUN_TIMEOUT" default:"14400" mut:"restart" tenancy:"global-only"`
 }
 
 // LLMLogConfig is the telemetry read surface. The retention knob (body-NULLing

@@ -213,6 +213,8 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	// (project.sync.max_concurrent, §4.4). Boot-only (restart-only key), before the
 	// router serves — the SetApplyIssues happens-before pattern, no resize race.
 	forgeSync.SetMaxConcurrent(cfgStore.Snapshot().Project.Sync.MaxConcurrent) //nolint:forbidigo // MT 06 BLIND: boot-time read of the restart-only, global-only project.sync.max_concurrent — no tenant exists at router construction, and a process-global semaphore cannot carry a per-tenant override.
+	// The deadline of one sync run (project.sync.run_timeout, issue #474).
+	forgeSync.SetRunTimeout(cfgStore.Snapshot().Project.Sync.RunTimeout) //nolint:forbidigo // MT 06 BLIND: boot-time read of the restart-only, global-only project.sync.run_timeout — it bounds a process-global sync slot, no tenant exists at router construction.
 	// I-G Pull-APPLY: the 3-way direction logic + block/comment create-update +
 	// mapping + references edges (design/02 §4.5.2/§4.5.7). The applier resolves
 	// the issue type config per scope for the workflow_status mapping (the

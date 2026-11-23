@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -36,6 +37,11 @@ const (
 	// (project.sync.max_concurrent, §4.4). NewSyncManager seeds this; SetMaxConcurrent
 	// overrides it from config at boot.
 	defaultMaxConcurrent = 3
+	// defaultRunTimeout is the deadline of one sync run when SetRunTimeout was
+	// not called (project.sync.run_timeout, issue #474; config.go carries the
+	// same default). Four hours give each of the two pull legs' 1000 pages
+	// (maxPagesPerLeg) 7.2 s for its request and its apply.
+	defaultRunTimeout = 4 * time.Hour
 )
 
 // Sentinel errors surfaced to the manage handler (mapped to 409/422/…).
@@ -125,6 +131,10 @@ type SyncStatus struct {
 	BackoffSet  bool      `json:"backoff_set"`
 	RunID       string    `json:"run_id,omitempty"`
 	LastError   string    `json:"last_error,omitempty"`
+	// advanced: a pull leg of this run saved a fetch cursor past the one it
+	// started from (noteAdvanced); with Applied and Pushed it is what
+	// truncated asks of a run a bound cut.
+	advanced bool
 }
 
 // TenantStatusFn resolves the owning tenant's status for a scope; found=false ⇒
@@ -161,6 +171,10 @@ type SyncManager struct {
 
 	// pageBound overrides maxPagesPerLeg (0 = the constant); tests only.
 	pageBound int
+
+	// runTimeout is the deadline of one sync run (SetRunTimeout; 0 =
+	// defaultRunTimeout).
+	runTimeout time.Duration
 }
 
 // NewSyncManager builds the manager with the production GitHub client factory and
@@ -189,6 +203,24 @@ func (m *SyncManager) SetMaxConcurrent(n int) {
 		n = defaultMaxConcurrent
 	}
 	m.sem = make(chan struct{}, n)
+}
+
+// SetRunTimeout sets the deadline of one sync run from config
+// (project.sync.run_timeout, issue #474); d <= 0 falls back to the default.
+// Call once at boot, before serving, like SetMaxConcurrent.
+func (m *SyncManager) SetRunTimeout(d time.Duration) {
+	if d <= 0 {
+		d = defaultRunTimeout
+	}
+	m.runTimeout = d
+}
+
+// runDeadline is the deadline of one sync run.
+func (m *SyncManager) runDeadline() time.Duration {
+	if m.runTimeout > 0 {
+		return m.runTimeout
+	}
+	return defaultRunTimeout
 }
 
 // SetApplyIssues wires the I-G Pull-APPLY hook (idempotent; call once at boot).
@@ -315,16 +347,54 @@ func (m *SyncManager) StartSync(ctx context.Context, project store.ProjectRow, d
 // runSync is the background fetch loop. It never panics the process (§4.5.5
 // recover), records the run row on exit, and treats every wire/rate-limit error
 // as backoff — never a conflict.
-func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dryRun bool, runID string) {
+//
+// The run's work — the forge's reads, the applies, the push's listing and the
+// start of each push section — runs under a deadline (project.sync.run_timeout,
+// issue #474); the run's own bookkeeping does not: base carries no deadline,
+// and the fetch cursor commits, the error and backoff stamp, the success
+// stamp and the run row are written on it, so a run that meets its deadline
+// leaves the cursor of its last applied page, a last_error that names the
+// deadline, and a released slot, and the next run goes on from that cursor.
+// A push write on the wire when the deadline passes is not cut: it runs to
+// its answer (the forge client's own timeout bounds it) and its advance
+// commits (Pusher.section, issue #474) — a cut PATCH may still land after
+// the push lock went back, the class of a session that ends during the
+// PATCH (issue #509). Before, a run had no deadline: a forge that answered
+// each page just under the client's 30 s timeout held a sync slot for up to
+// 1000 pages × 30 s per leg.
+func (m *SyncManager) runSync(base context.Context, project store.ProjectRow, dryRun bool, runID string) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("forge: sync run panicked", "project", project.ID, "panic", r, "stack", string(debug.Stack()))
 			m.finish(project.ID, runID, "panic during sync", true, false)
 		}
 	}()
+	ctx, cancel := context.WithTimeout(base, m.runDeadline())
+	defer cancel()
+	if c, ok := m.setPendingHolds(ctx, project.ID); ok {
+		project.SyncCursor = c
+	}
+	etag, since, backoffN := readCursor(project.SyncCursor)
+	// failed ends the run on err; a run its deadline cut is no failure at
+	// the forge and ends as truncated.
+	failed := func(err error) {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+				// What failed besides the deadline is named nowhere else.
+				slog.Warn("forge: a step of the sync run failed after its deadline passed", "project", project.ID, "error", err)
+			}
+			m.truncated(base, project.ID, runID, backoffN, errRunDeadline(m.runDeadline()))
+			return
+		}
+		m.handleWireError(base, project.ID, runID, backoffN, err)
+	}
 
 	token, err := m.resolveToken(ctx, project)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			failed(err)
+			return
+		}
 		m.finish(project.ID, runID, "token resolve failed", true, false)
 		return
 	}
@@ -334,8 +404,6 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 		return
 	}
 	client := m.newForge(token)
-
-	etag, since, backoffN := readCursor(project.SyncCursor)
 
 	// Issue leg: fetch + 3-way apply per page, committing the etag/since cursor
 	// AFTER each successful page apply (I-G — I-F left the durable advance to us).
@@ -356,7 +424,7 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 		case errors.Is(err, errPageBound):
 			bounded = err
 		default:
-			m.handleWireError(ctx, project.ID, runID, backoffN, err)
+			failed(err)
 			return
 		}
 	}
@@ -366,14 +434,14 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 		cEtag, cSince := readCommentCursor(project.SyncCursor)
 		if err := m.pullComments(ctx, project, client, repo, cEtag, cSince, bounded == nil); err != nil && !errors.Is(err, ErrNotModified) {
 			if !errors.Is(err, errPageBound) {
-				m.handleWireError(ctx, project.ID, runID, backoffN, err)
+				failed(err)
 				return
 			}
 			bounded = err
 		}
 	}
 	if bounded != nil {
-		m.handleWireError(ctx, project.ID, runID, backoffN, bounded)
+		m.truncated(base, project.ID, runID, backoffN, bounded)
 		return
 	}
 
@@ -396,19 +464,73 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 		}
 		m.mu.Unlock()
 		if err != nil {
-			m.handleWireError(ctx, project.ID, runID, backoffN, err)
+			failed(err)
 			return
 		}
 	}
 
-	// SUCCESS. Backoff/error are cleared and last_sync_at stamped; backoff_n reset.
+	// SUCCESS — also where the deadline passed while the push's last write
+	// was on the wire: the write is let finish (Pusher.section) and the pass
+	// had nothing left, so the deadline cut nothing (issue #474). Backoff/error are cleared and last_sync_at stamped; backoff_n reset.
 	// The etag/since fetch cursors were advanced per page inside the legs above (I-F
 	// with applyIssues==nil advances nothing — no apply happened).
-	_ = store.SetProjectSyncState(ctx, m.pool, project.ID, store.SyncStatePatch{
+	_ = store.SetProjectSyncState(base, m.pool, project.ID, store.SyncStatePatch{
 		SyncStatus: strptr("idle"), ClearError: true, ClearBackoff: true, SetLastSync: true,
 	})
-	_ = store.MergeProjectSyncCursor(ctx, m.pool, project.ID, json.RawMessage(`{"backoff_n":0}`))
+	_ = store.MergeProjectSyncCursor(base, m.pool, project.ID, json.RawMessage(`{"backoff_n":0}`))
 	m.finish(project.ID, runID, "", false, false)
+}
+
+// setPendingHolds sets the holds push advances marked as pending and no
+// hold write set (store.AdvancePushBase: the write failed, or the process
+// ended before it; issue #509), before the run reads its cursor, and
+// answers the project's sync_cursor with them (ok=false: none set, the run
+// reads the cursor it started with). The check reads the project's flagged
+// mapping rows over the partial index idx_sync_map_conflict; the holds are
+// written under the project row, then the mapping rows, in one transaction
+// that drops the marks. A failure is logged and the run goes on: the marks
+// stay for the next run.
+func (m *SyncManager) setPendingHolds(ctx context.Context, projectID string) (json.RawMessage, bool) {
+	if has, err := store.HasPendingHolds(ctx, m.pool, projectID); err != nil || !has {
+		if err != nil {
+			slog.Warn("forge: reading the pending holds failed; the next run sets them", "project", projectID, "error", err)
+		}
+		return nil, false
+	}
+	var cur json.RawMessage
+	err := pgxdb.Write(ctx, m.pool, pgxdb.Stages{Begin: "forge: pending holds begin", Commit: "forge: pending holds commit"}, func(tx pgx.Tx) error {
+		ok, err := store.LockProjectForCursor(ctx, tx, projectID)
+		if err != nil || !ok {
+			return err
+		}
+		holds, err := store.LockPendingHolds(ctx, tx, projectID)
+		if err != nil {
+			return err
+		}
+		at := map[string]time.Time{}
+		ids := make([]string, 0, len(holds))
+		for _, h := range holds {
+			leg := legOf(h.EntityKind)
+			if a, seen := at[leg]; !seen || h.At.Before(a) {
+				at[leg] = h.At
+			}
+			ids = append(ids, h.BlockID)
+		}
+		for leg, a := range at {
+			if err := store.HoldFetchCursor(ctx, tx, projectID, leg, a); err != nil {
+				return err
+			}
+		}
+		if err := store.DropPendingHolds(ctx, tx, ids); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT sync_cursor FROM context_projects WHERE id = $1::uuid`, projectID).Scan(&cur)
+	})
+	if err != nil {
+		slog.Warn("forge: setting the pending holds failed; the next run sets them", "project", projectID, "error", err)
+		return nil, false
+	}
+	return cur, cur != nil
 }
 
 // pullIssues runs the issue fetch loop: each page is 3-way applied, then the
@@ -445,6 +567,7 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 			if !maxSeen.IsZero() {
 				etag, at := legCursor(firstETag, n, page.NextURL, maxSeen, relist)
 				m.commitFetchCursor(ctx, project.ID, "issues", etag, at, hold, page.NextURL == "", nil)
+				m.noteAdvanced(project.ID, since, at)
 			}
 		}
 		if page.NextURL == "" {
@@ -472,7 +595,7 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 	}
 	firstETag := page.ETag
 	hold := readHold(project.SyncCursor, "comments")
-	orphans := orphanHolds{prev: readOrphans(project.SyncCursor), maxIssue: -1, issuesDone: issuesDone}
+	orphans := orphanHolds{until: decodeCursor(project.SyncCursor).OrphansUntil, maxIssue: -1, issuesDone: issuesDone}
 	var maxSeen, relist time.Time
 	seen := map[string]bool{}
 	for n := 1; ; n++ {
@@ -491,7 +614,8 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 		relist = relistAt(relistAt(relist, res.Relist), at)
 		if !maxSeen.IsZero() {
 			etag, at := legCursor(firstETag, n, page.NextURL, maxSeen, relist)
-			m.commitFetchCursor(ctx, project.ID, "comments", etag, at, hold, page.NextURL == "", orphans.extra())
+			m.commitFetchCursor(ctx, project.ID, "comments", etag, at, hold, page.NextURL == "", orphansUntil(maxSeen, page.NextURL != ""))
+			m.noteAdvanced(project.ID, since, at)
 		}
 		if page.NextURL == "" {
 			return nil
@@ -512,14 +636,20 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 // pages. Each page applied commits the since cursor, so the next run starts
 // where the bound stopped this one; 1000 requests are a fifth of a token's
 // hourly 5000 at GitHub. A forge that names a new page forever is stopped
-// after them instead of holding a sync slot for good — the run has no
-// deadline of its own.
+// after them instead of holding a sync slot for good; the run's deadline
+// (project.sync.run_timeout) bounds a forge that answers each page slowly.
 const maxPagesPerLeg = 1000
 
 var (
 	errPageBound = &configError{fmt.Sprintf("forge: a sync leg read %d pages in one run and stopped; the next sync continues where it stopped", maxPagesPerLeg)}
 	errNextCycle = &configError{"forge: the forge's next-page links run in a cycle; the pull stopped there"}
 )
+
+// errRunDeadline is the end of a run that met its deadline d (runSync, issue
+// #474): fixed text and a duration, so sanitizeErr hands it to last_error.
+func errRunDeadline(d time.Duration) error {
+	return &configError{fmt.Sprintf("forge: the sync run reached its deadline of %s (project.sync.run_timeout) and stopped; the next sync continues where it stopped", d)}
+}
 
 // legBound is the page bound of one leg: maxPagesPerLeg unless a test set
 // pageBound.
@@ -598,30 +728,46 @@ func legCursor(first string, n int, next string, maxSeen, relist time.Time) (str
 // page: a hold a resolution or a stamp reset set (store.HoldFetchCursor,
 // issue #509) keeps a run that did not read it from saving a since past
 // hold.at or an ETag, and goes once a run that read it read the leg to its
-// end (store.CommitFetchCursor).
+// end (store.CommitFetchCursor). The commit is the run's bookkeeping and runs
+// outside the run's deadline (runSync, issue #474): a page applied just
+// before the deadline keeps its cursor.
 func (m *SyncManager) commitFetchCursor(ctx context.Context, projectID, leg, etag string, since time.Time, hold string, last bool, extra json.RawMessage) {
-	_ = store.CommitFetchCursor(ctx, m.pool, projectID, leg, etag, since, hold, last, extra)
+	_ = store.CommitFetchCursor(context.WithoutCancel(ctx), m.pool, projectID, leg, etag, since, hold, last, extra)
 }
 
 // orphanHolds is the comment leg's account of comments whose parent issue
-// has no mapping (issue #509): prev, the ones the previous run held already
-// (sync_cursor.orphans, beside the legs); held, the ones this run holds; maxIssue,
-// the highest issue number the project maps (-1 until read); issuesDone,
-// whether this run's issue leg read its listing to the end.
+// has no mapping (issue #509): until, the newest comment stamp the previous
+// run's comment leg listed (sync_cursor.orphans_until, beside the legs);
+// maxIssue, the highest issue number the project maps (-1 until read);
+// issuesDone, whether this run's issue leg read its listing to the end.
 type orphanHolds struct {
-	prev       map[int64]bool
-	held       []int64
+	until      time.Time
 	maxIssue   int64
 	issuesDone bool
 }
 
-// extra is the cursor key, beside the legs, that carries the held orphans.
-func (o *orphanHolds) extra() json.RawMessage {
-	held := o.held
-	if held == nil {
-		held = []int64{}
+// orphansUntil is the cursor key, beside the legs, that records up to where
+// the leg listed every comment so far in this run: a comment at or before
+// it was listed by this run, so a later run knows it held it already if it
+// was an orphan (holdOrphans). After the leg's last page that is maxSeen,
+// the newest comment stamp it listed; after a page with a next page it lies
+// just before maxSeen (more): GitHub stamps whole seconds, and the comments
+// of maxSeen's second can go on on the next page, which a leg that stops
+// there — its page bound, the run's deadline, the process's end — has not
+// listed. With maxSeen there, an orphan on that next page in that second
+// counted as held, the next run moved the cursor past it without holding
+// it, and once its parent issue was mapped no run listed it again (P7 of
+// PR #529). One timestamp, written with each page's cursor (issue #474):
+// the list of held comment ids it replaces was written again after every
+// comment page and carried in every later cursor commit — in a bounded
+// catch-up of 1000 pages of 100 orphans 0.9 MB of JSON, about 240 MB of WAL
+// and 20–28 s of database time per run.
+func orphansUntil(maxSeen time.Time, more bool) json.RawMessage {
+	until := maxSeen.UTC()
+	if more {
+		until = until.Add(-time.Nanosecond)
 	}
-	b, _ := json.Marshal(map[string]any{"orphans": held})
+	b, _ := json.Marshal(map[string]time.Time{"orphans_until": until})
 	return b
 }
 
@@ -633,27 +779,31 @@ func (o *orphanHolds) extra() json.RawMessage {
 //     may be any issue the leg has not reached yet;
 //   - after an issue leg that read its listing to the end, an orphan whose
 //     parent number lies above every issue number the project maps and that
-//     the previous run did not hold: an issue the forge created after this
-//     run's issue leg listed, whose comment the comment leg lists already.
-//     The next run's issue leg lists that issue (it was created after the
-//     listing) and its comment leg lists the comment again.
+//     the previous run did not list (its stamp lies after the newest one
+//     that run's comment leg listed, orphansUntil): an issue the forge
+//     created after this run's issue leg listed, whose comment the comment
+//     leg lists already. The next run's issue leg lists that issue (it was
+//     created after the listing) and its comment leg lists the comment
+//     again.
 //
-// An orphan the previous run held, or one on an issue or pull request at
-// or below the newest mapped issue, is not held after a complete issue leg:
-// the forge listed every issue updated since the leg's cursor and none of
-// them is its parent — a pull request (the issue listing drops those, so
-// its parent is never mapped) or an issue the listing does not carry. A
-// comment on a pull request so holds the cursor once after a complete issue
-// leg, and on every run of a catch-up whose issue leg stops at the bound —
-// never beyond it. Before, the comment cursor moved past an orphan on an
-// issue the bounded leg had not reached when the parent's number was below
-// the newest mapped one, or when the previous run had held it, and the
-// comment was not listed again until it was edited (issue #509).
+// An orphan the previous run listed — and held, if it was an orphan then —
+// or one on an issue or pull request at or below the newest mapped issue,
+// is not held after a complete issue leg: the forge listed every issue
+// updated since the leg's cursor and none of them is its parent — a pull
+// request (the issue listing drops those, so its parent is never mapped)
+// or an issue the listing does not carry. A comment on a pull request so
+// holds the cursor once after a complete issue leg (once more after an
+// edit, which moves its stamp), and on every run of a catch-up whose issue
+// leg stops at the bound — never beyond it. Before, the comment cursor
+// moved past an orphan on an issue the bounded leg had not reached when
+// the parent's number was below the newest mapped one, or when the
+// previous run had held it, and the comment was not listed again until it
+// was edited (issue #509).
 func (m *SyncManager) holdOrphans(ctx context.Context, projectID string, o *orphanHolds, page []orphanComment) (time.Time, error) {
 	var at time.Time
 	for _, c := range page {
 		if o.issuesDone {
-			if o.prev[c.id] {
+			if !c.at.After(o.until) {
 				continue
 			}
 			if o.maxIssue < 0 {
@@ -667,7 +817,6 @@ func (m *SyncManager) holdOrphans(ctx context.Context, projectID string, o *orph
 				continue
 			}
 		}
-		o.held = append(o.held, c.id)
 		at = relistAt(at, c.at)
 	}
 	return at, nil
@@ -720,6 +869,49 @@ func (m *SyncManager) addApplied(projectID string, res ApplyResult) {
 		st.PullSkipped += res.Skipped
 	}
 	m.mu.Unlock()
+}
+
+// noteAdvanced records that a leg saved a fetch cursor at past since, the
+// one the run started the leg from (truncated).
+func (m *SyncManager) noteAdvanced(projectID string, since, at time.Time) {
+	if !at.After(since) {
+		return
+	}
+	m.mu.Lock()
+	if st := m.runs[projectID]; st != nil {
+		st.advanced = true
+	}
+	m.mu.Unlock()
+}
+
+// truncated ends a run that a bound cut — a leg's page bound (errPageBound)
+// or the run's deadline (errRunDeadline) — before its work was done (issue
+// #474). Neither is a failure at the forge: last_error names the bound and
+// sync_status is error, as before, and the next run goes on from the saved
+// cursor. A run that moved on — a leg saved a fetch cursor past where it
+// started, or an entity was applied or pushed — sets backoff_n to 0 and
+// clears backoff_until, as a success does: the forge answered. One that did
+// not ends as a wire error does (handleWireError, the backoff grows): a
+// forge that answers nothing, or no page within the deadline, is not
+// started against back to back by a caller that reads the backoff. Before,
+// every such run went through handleWireError: a first sync that needs
+// several runs stood at backoff_n 6 and a backoff of 32 min when it was
+// done, although every run moved on.
+func (m *SyncManager) truncated(ctx context.Context, projectID, runID string, backoffN int, err error) {
+	m.mu.Lock()
+	st := m.runs[projectID]
+	advanced := st != nil && (st.advanced || st.Applied > 0 || st.Pushed > 0)
+	m.mu.Unlock()
+	if !advanced {
+		m.handleWireError(ctx, projectID, runID, backoffN, err)
+		return
+	}
+	msg := sanitizeErr(err)
+	_ = store.SetProjectSyncState(ctx, m.pool, projectID, store.SyncStatePatch{
+		SyncStatus: strptr("error"), LastError: &msg, ClearBackoff: true,
+	})
+	_ = store.MergeProjectSyncCursor(ctx, m.pool, projectID, json.RawMessage(`{"backoff_n":0}`))
+	m.finish(projectID, runID, msg, true, false)
 }
 
 // handleWireError stamps backoff_until (Retry-After if the forge gave one, else
@@ -855,14 +1047,6 @@ func sanitizeErr(err error) string {
 	return "sync wire error"
 }
 
-// forgeCfg is the {kind,owner,repo,api_base?} shape of context_projects.forge.
-type forgeCfg struct {
-	Kind    string `json:"kind"`
-	Owner   string `json:"owner"`
-	Repo    string `json:"repo"`
-	APIBase string `json:"api_base"`
-}
-
 // pushThrottleKey builds the token-scoped throttle key (§6.1). The design keys on
 // (forge_kind, token_secret NAME, secret scope); under masterplan K14 each project
 // seals its OWN secret ("forge.token.<project_id>"), so the NAME is per-repo and
@@ -872,22 +1056,25 @@ type forgeCfg struct {
 // SAME PAT hash to the same bucket. The hash is in-memory only, never logged.
 func pushThrottleKey(forge json.RawMessage, token string) string {
 	kind := "github"
-	var f forgeCfg
-	if len(forge) > 0 {
-		if err := json.Unmarshal(forge, &f); err == nil && f.Kind != "" {
-			kind = f.Kind
-		}
+	if f, err := store.ReadForgeConfig(forge); err == nil && f.Kind != "" {
+		kind = f.Kind
 	}
 	sum := sha256.Sum256([]byte(token))
 	return kind + "\x00" + hex.EncodeToString(sum[:])
 }
 
+// repoRefFromForge reads the run's repository from the project's forge
+// config as every reader of the row reads it (store.ReadForgeConfig, issue
+// #474): a row that names a key in two spellings does not sync — which of
+// its values was meant is not known, and before, the run used the one that
+// sorts last in JSONB while the project API served the other.
 func repoRefFromForge(raw json.RawMessage) (RepoRef, error) {
-	var f forgeCfg
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &f); err != nil {
-			return RepoRef{}, fmt.Errorf("forge: invalid forge config: %w", err)
-		}
+	f, err := store.ReadForgeConfig(raw)
+	switch {
+	case errors.Is(err, store.ErrForgeConfigSpellings):
+		return RepoRef{}, errForgeSpellings
+	case err != nil:
+		return RepoRef{}, fmt.Errorf("forge: invalid forge config: %w", err)
 	}
 	if f.Kind != "" && f.Kind != "github" {
 		return RepoRef{}, ErrForgeKind
@@ -895,8 +1082,37 @@ func repoRefFromForge(raw json.RawMessage) (RepoRef, error) {
 	if f.Owner == "" || f.Repo == "" {
 		return RepoRef{}, fmt.Errorf("forge: owner/repo required in forge config")
 	}
+	if f.APIBase != "" {
+		u, err := url.Parse(f.APIBase)
+		switch {
+		case err != nil:
+			return RepoRef{}, errAPIBaseUnparsable
+		case u.User != nil:
+			return RepoRef{}, errAPIBaseCredentials
+		}
+	}
 	return RepoRef{Owner: f.Owner, Repo: f.Repo, APIBase: f.APIBase}, nil
 }
+
+// errAPIBaseCredentials ends a run whose forge.api_base carries userinfo
+// (issue #474), before its first request. The API refuses such an api_base
+// since issue #474 (handler.validateForge); a row written before still
+// syncs nothing until the userinfo is gone. Before, a run without a token
+// sent it to the forge as Basic credentials (net/http takes them from the
+// URL when the request carries no Authorization header), and with a token
+// it went unused. Refusing names the change; ignoring it would turn an
+// unauthenticated sync that relied on it into a 401 or 404 without a hint.
+var errAPIBaseCredentials = &configError{"forge: forge.api_base carries credentials (user:password@); the sync does not run with them: remove them from forge.api_base and set the token with forge-token-set"}
+
+// errAPIBaseUnparsable ends a run whose forge.api_base does not parse as a
+// URL (a row written before the API refused it), before its first request:
+// the project API leaves such an api_base out of its answers, and the run
+// ended every time in an unnamed wire error, its backoff growing.
+var errAPIBaseUnparsable = &configError{"forge: forge.api_base does not parse as a URL; the sync does not run: set forge again with PATCH /api/project/{id}"}
+
+// errForgeSpellings ends a run whose forge config names a key in two
+// spellings (repoRefFromForge), before its first request.
+var errForgeSpellings = &configError{"forge: the forge config names a key in more than one spelling (e.g. api_base and API_BASE); the sync does not run: set forge again with PATCH /api/project/{id}"}
 
 // cursor is the sync_cursor JSONB shape this wave reads/writes: an independent
 // etag/since leg per entity kind (issues, comments — a comment-only change does
@@ -905,10 +1121,10 @@ type cursor struct {
 	Issues   legCursorJSON `json:"issues"`
 	Comments legCursorJSON `json:"comments"`
 	BackoffN int           `json:"backoff_n"`
-	// Holds and Orphans sit beside the legs (issue #509): a cursor commit
-	// replaces a leg's object, theirs survives it.
-	Holds   map[string]*holdJSON `json:"holds,omitempty"`
-	Orphans []int64              `json:"orphans,omitempty"`
+	// Holds and OrphansUntil sit beside the legs (issue #509): a cursor
+	// commit replaces a leg's object, theirs survives it.
+	Holds        map[string]*holdJSON `json:"holds,omitempty"`
+	OrphansUntil time.Time            `json:"orphans_until,omitzero"`
 }
 
 // legCursorJSON is one leg's cursor: the ETag and since the next run asks
@@ -947,16 +1163,6 @@ func (l legCursorJSON) start(h *holdJSON) (string, time.Time) {
 		return "", h.At
 	}
 	return "", l.Since
-}
-
-// readOrphans is the set of comment ids the previous run held as orphans.
-func readOrphans(raw json.RawMessage) map[int64]bool {
-	c := decodeCursor(raw)
-	out := make(map[int64]bool, len(c.Orphans))
-	for _, id := range c.Orphans {
-		out[id] = true
-	}
-	return out
 }
 
 // readHold is the nonce of leg's hold in raw, "" for none.

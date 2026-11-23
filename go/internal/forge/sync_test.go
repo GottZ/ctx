@@ -120,4 +120,10 @@ func TestRepoRefFromForge(t *testing.T) {
 	if err != nil || ref.Owner != "o" || ref.APIBase != "https://ghe.example/api/v3" {
 		t.Fatalf("parse: %+v err=%v", ref, err)
 	}
+	// Credentials in the api_base end the run before its first request (#474).
+	for _, ab := range []string{"https://u:p@ghe.example/api/v3", "https://u@ghe.example/api/v3"} {
+		if _, err := repoRefFromForge([]byte(`{"kind":"github","owner":"o","repo":"r","api_base":"` + ab + `"}`)); !errors.Is(err, errAPIBaseCredentials) || sanitizeErr(err) != errAPIBaseCredentials.msg {
+			t.Errorf("api_base %q: %v — want errAPIBaseCredentials as last_error", ab, err)
+		}
+	}
 }

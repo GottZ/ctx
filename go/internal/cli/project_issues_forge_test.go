@@ -285,3 +285,41 @@ func TestIssuesForgeCommandsExitOnFailure(t *testing.T) {
 		})
 	}
 }
+
+// TestIssuesConflictsGated: --gated asks for the rows behind a remote
+// resolution's push gate (issue #509), and the TTY says so when there are
+// none; the sync status names their count, and a local resolution of one
+// says the gate opened.
+func TestIssuesConflictsGated(t *testing.T) {
+	var m manageCapture
+	srv := m.server(t, http.StatusOK, `{"success":true,"project_id":"p","conflicts":[],"next_cursor":null}`)
+	root := newIssuesRoot(srv)
+	root.SetArgs([]string{"project", "issues", "conflicts", "--project", testProjectUUID, "--gated"})
+	var execErr error
+	_ = captureStdout(t, func() { execErr = root.Execute() })
+	if execErr != nil {
+		t.Fatalf("conflicts --gated: %v", execErr)
+	}
+	if action, data := m.only(t); action != "forge-conflict-list" || data["gated"] != true {
+		t.Errorf("request %s %v, want forge-conflict-list with gated:true", action, data)
+	}
+	var err error
+	got := captureStdout(t, func() { err = printGated([]byte(`{"success":true,"conflicts":[],"next_cursor":null}`)) })
+	if err != nil || got != "No gated mappings.\n" {
+		t.Errorf("empty gated list: %q %v", got, err)
+	}
+	got = captureStdout(t, func() { printSyncStatus([]byte(`{"success":true,"sync_status":"idle","conflicts":0,"gated":2,"run":{}}`)) })
+	if !strings.Contains(got, "gated:     2") {
+		t.Errorf("sync status %q lacks the gated count", got)
+	}
+	got = captureStdout(t, func() { printSyncStatus([]byte(`{"success":true,"sync_status":"idle","conflicts":0,"run":{}}`)) })
+	if strings.Contains(got, "gated") {
+		t.Errorf("sync status without gated rows names them: %q", got)
+	}
+	got = captureStdout(t, func() {
+		err = printResolved([]byte(`{"success":true,"result":{"block_id":"` + testBlockUUID + `","direction":"local","changed":true,"basis":"gate"}}`))
+	})
+	if err != nil || !strings.Contains(got, "push gate opened") {
+		t.Errorf("a local resolution of a gated row: %q %v", got, err)
+	}
+}
