@@ -1445,6 +1445,11 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		results = filterSuperseded(results, supersedesMap)
 	}
 
+	// Step 6d-title (issue #507): a question that is the title of exactly one
+	// candidate keeps that block among the first limit results — behind every
+	// stage that reorders, ahead of the truncation (floorTitleMatch).
+	results = floorTitleMatch(results, originalQuery, limit, req.ShadowTypes)
+
 	// Step 6e: Truncate to user-facing limit after reranking and filtering.
 	if len(results) > limit {
 		results = results[:limit]
