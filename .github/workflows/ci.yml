@@ -141,6 +141,14 @@ jobs:
       - name: pre-commit hook test matrix
         run: bash .hooks/pre-commit.test.sh
 
+      # The decisions of the nightly report (issue #514, job nightly-report
+      # below) against a stubbed gh: one issue on a red night, a comment while
+      # it stays red, closed on green, nothing written on a dry run or a
+      # failed lookup; and that the job waits for every job a schedule runs.
+      # bash and jq, seconds.
+      - name: nightly report script test
+        run: bash .github/scripts/nightly-report.test.sh
+
       # The gates of the eval harnesses (issue #472) and of test.sh (#478):
       # the negative-case matcher, the instrumentation, and the run rules of
       # eval-cyclic.sh, eval.sh, eval-temporal.sh and test.sh — copies of the
@@ -1130,6 +1138,64 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
         run: bash .github/scripts/production-image.sh jit-tests "$SHARD" "$RUNNER_TEMP/go-test.log"
+
+  # ─── Nightly: one issue while the nightly is red (#514, not required) ────────
+  # A red scheduled run used to reach nobody but the account that last changed
+  # the cron line (GitHub's default notification for scheduled workflows).
+  # This job waits for every job a schedule runs — every job of this file but
+  # docker, docker-attest and dependency-graph, which never run on a schedule;
+  # .github/scripts/nightly-report.test.sh fails when the list falls behind
+  # the file — and runs .github/scripts/nightly-report.sh: a failed or
+  # cancelled job (a timeout ends a job cancelled) opens one issue, labelled
+  # nightly-red and assigned to both maintainers (GOVERNANCE.md), or comments
+  # on the open one; the first green run closes it. Only this job may write
+  # (issues: write), only on a schedule run and never on a fork; a dispatch
+  # runs it read-only and puts what it would do into the job summary.
+  # !cancelled(): it runs when a job it waits for failed, not when the run
+  # itself was cancelled. GitHub disables the schedule of a public repository
+  # after 60 days without activity (docs/development.md); then no run, and no
+  # report, happens until it is enabled again.
+  nightly-report:
+    name: Nightly report (one issue while red)
+    needs:
+      - lint
+      - web
+      - web-live
+      - web-trend
+      - web-lhci
+      - unit-tests
+      - conformance
+      - gateway-sdk-smoke
+      - cross-compile
+      - windows-unit-tests
+      - integration-tests
+      - integration-production-image-shards
+      - integration-production-image
+      - build
+    if: >-
+      !cancelled() &&
+      github.repository == 'GottZ/ctx' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Open, update or close the nightly issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MODE: ${{ github.event_name == 'schedule' && 'write' || 'dry-run' }}
+          ASSIGNEES: GottZ,DamieMoon
+        run: bash .github/scripts/nightly-report.sh
 
   # ─── Stage 4: Build Binary ────────────────────────────────────────────────────
   # This job is a flag-parity pre-probe, not a release build: it is the only

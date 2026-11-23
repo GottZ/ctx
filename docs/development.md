@@ -185,6 +185,22 @@ jobs is a finding about one of the differences below: run it on each image with
 the other image's setting (further down) to tell an image artefact from a
 result of the planner input.
 
+**A red nightly opens an issue.** The last job of `ci.yml`, `nightly-report`,
+waits for every job of a scheduled run and runs
+`.github/scripts/nightly-report.sh`: when one of them failed or was cancelled
+(a job that ran out of its time), it opens one issue with the label
+`nightly-red`, assigned to both maintainers, naming the red jobs and linking
+the run — or, while such an issue is open, adds a comment to it, so a red
+streak stays one issue; when every job is green again it closes the issue with
+a comment that links the green run. Only that job may write (`issues: write`),
+only on a schedule run in this repository (not on a fork); a dispatch runs it
+read-only and writes what it would do to the job summary. The label is created
+on the first red run. `bash .github/scripts/nightly-report.test.sh` checks the
+script's decisions against a stubbed `gh` (the `lint` job runs it). GitHub
+disables a scheduled workflow of a public repository after 60 days without
+activity in the repository; then there is no nightly run and no report until
+the workflow is enabled again in the Actions tab.
+
 The two images differ in more than their versions, and plan and cost pins see
 the difference:
 
