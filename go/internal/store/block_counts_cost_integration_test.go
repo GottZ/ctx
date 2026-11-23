@@ -102,6 +102,16 @@ func TestBlockCounts_StatsCostIndependentOfCorpus(t *testing.T) {
 	for _, s := range []string{"cost-y", "cost-z"} {
 		seedCostBlocks(t, pool, s, 1, 50)
 	}
+	// cost-w: 50 blocks dated a day ahead of every other, so its oldest block
+	// lies behind the whole corpus in created_at order — the mirror of cost-y
+	// and cost-z, whose newest block lies before cost-x's (issue #512: a probe
+	// that walks idx_context_created reads every block in between).
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO context_blocks (category, title, content, scope, created_at)
+		 SELECT 'cost-w', 'cost w ' || g, 'cost body ' || g, 'cost-w', now() + interval '1 day' + make_interval(secs => g)
+		   FROM generate_series(1, 50) g`); err != nil {
+		t.Fatal(err)
+	}
 	seedCostBlocks(t, pool, "cost-x", 1, small)
 
 	statements := []struct{ name, sql string }{
@@ -109,7 +119,7 @@ func TestBlockCounts_StatsCostIndependentOfCorpus(t *testing.T) {
 		{"guard-stats", store.GuardStatsSQLForTest},
 		{"list-categories", store.ListCategoriesSQLForTest},
 	}
-	windows := [][]string{{"cost-x"}, {"cost-x", "cost-y", "cost-z"}}
+	windows := [][]string{{"cost-x"}, {"cost-x", "cost-y", "cost-z"}, {"cost-w"}}
 	planners := map[string]*pgxpool.Pool{}
 	for _, rpc := range testdb.RandomPageCosts {
 		planners[rpc] = testdb.WithRandomPageCost(t, pool, rpc)
