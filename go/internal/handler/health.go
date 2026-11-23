@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -250,8 +251,9 @@ var healthProbeBudget = 4 * time.Second
 // reachable one, as before: a role never requests more than its own ordered
 // walk, and the bound of a call stays the operator rows of the probed roles.
 // probes only removes repeats — a base URL another role of the same round
-// already probed is not requested again. Each candidate probes with its share
-// of what is left of the budget (budgetShare, issue #519): a first candidate
+// already probed is not requested again, unless that probe ran out of a
+// shorter share than this role's. Each candidate probes with its share of
+// what is left of the budget (budgetShare, issue #519): a first candidate
 // that hangs no longer leaves a later one "probed" with a spent budget and
 // logged as failed without having been requested.
 func (n *healthNotice) roleReachable(ctx context.Context, seq uint64, snap []backends.Backend, role string, probes *hostProbes) string {
@@ -282,48 +284,69 @@ func (n *healthNotice) roleReachable(ctx context.Context, seq uint64, snap []bac
 
 // hostProbes is the probe memo of ONE probe round (#265): the first role that
 // needs a base URL requests it, every other role of the same round that needs
-// it waits for that result. Keyed by the probe target pingHost requests (the
-// base URL without trailing slashes), so "http://h/" and "http://h" are one
-// probe. It lives exactly as long as the round — a later round probes afresh,
-// nothing is cached across rounds.
+// it waits for that result — within its own share of the budget (issue
+// #519). Keyed by the probe target pingHost requests (the base URL without
+// trailing slashes), so "http://h/" and "http://h" are one probe. It lives
+// exactly as long as the round — a later round probes afresh, nothing is
+// cached across rounds.
 type hostProbes struct {
 	mu sync.Mutex
 	m  map[string]*hostProbe
 }
 
 // hostProbe is one in-flight or finished probe. err is written once, before
-// done is closed, and read only after done is closed.
+// done is closed, and read only after done is closed; deadline, the end of
+// the owner's share (zero without one), is set before the probe is shared.
 type hostProbe struct {
-	done chan struct{}
-	err  error
+	done     chan struct{}
+	err      error
+	deadline time.Time
 }
 
 func newHostProbes() *hostProbes {
 	return &hostProbes{m: make(map[string]*hostProbe)}
 }
 
-// ping returns pingHost's result for host, requesting it at most once per memo,
-// with the share of ctx's budget of a candidate that has left candidates of
-// its role still to probe, itself included (budgetShare). A role that finds
-// the probe already started waits for its result and nothing else: the owner
-// runs on the same round context, so the wait ends when it does, and the
-// answer does not depend on which of the two finished first.
+// ping returns pingHost's result for host with the share of ctx's budget of
+// a candidate that has left candidates of its role still to probe, itself
+// included (budgetShare). The first role that needs host requests it; a role
+// that finds the probe started waits for it within its own share, so a role
+// with several candidates never spends more of its budget on a base URL it
+// shares with another role than on one of its own (issue #519): when its
+// share ends first, the host did not answer within it; when the owner's
+// shorter share ended in its deadline and this role has time left, it probes
+// once more with the rest of its share. A finished result stands whatever
+// the waiting role's context says, so the answer does not depend on which
+// of the two finished first.
 func (p *hostProbes) ping(ctx context.Context, host string, left int) error {
 	key := strings.TrimRight(host, "/")
+	sctx, cancel := budgetShare(ctx, left)
+	defer cancel()
+	share, _ := sctx.Deadline()
 	p.mu.Lock()
-	if pr, ok := p.m[key]; ok {
-		p.mu.Unlock()
-		<-pr.done
+	pr, joined := p.m[key]
+	if !joined {
+		pr = &hostProbe{done: make(chan struct{}), deadline: share}
+		p.m[key] = pr
+	}
+	p.mu.Unlock()
+	if !joined {
+		pr.err = pingHost(sctx, host)
+		close(pr.done)
 		return pr.err
 	}
-	pr := &hostProbe{done: make(chan struct{})}
-	p.m[key] = pr
-	p.mu.Unlock()
-
-	pctx, cancel := budgetShare(ctx, left)
-	pr.err = pingHost(pctx, host)
-	cancel()
-	close(pr.done)
+	select {
+	case <-pr.done:
+	default:
+		select {
+		case <-pr.done:
+		case <-sctx.Done():
+			return fmt.Errorf("connecting to host: %w", sctx.Err())
+		}
+	}
+	if errors.Is(pr.err, context.DeadlineExceeded) && share.After(pr.deadline) && sctx.Err() == nil {
+		return pingHost(sctx, host)
+	}
 	return pr.err
 }
 

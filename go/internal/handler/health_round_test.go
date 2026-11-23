@@ -525,3 +525,77 @@ func TestHealthDatabaseAttemptEndsAtTheConnectTimeout(t *testing.T) {
 		t.Errorf("%d connection attempts still open %v after the round, want 0 — the attempt has no connect timeout", n, defaultDBConnectTimeoutForTest+5*time.Second)
 	}
 }
+
+// TestHealthSharedBaseURLKeepsEachRolesShare — y serves embed and chat and
+// hangs, z serves chat and answers: whichever role requests y first, chat
+// waits for y only within its own share and then requests z, which serves
+// it; embed, whose only candidate y is, is judged by its whole budget (the
+// review of the linked pull request: chat waited for embed's probe of y and
+// had no budget left for z).
+func TestHealthSharedBaseURLKeepsEachRolesShare(t *testing.T) {
+	setHealthBudget(t, 400*time.Millisecond)
+	var zHits atomic.Int32
+	y := operatorRow("i519-shared-y", slowBackend(t, time.Hour, nil), backends.RoleEmbed, backends.RoleSynthesis)
+	z := operatorRow("i519-shared-z", slowBackend(t, 0, &zHits), backends.RoleSynthesis)
+	d := operatorRow("i519-shared-d", slowBackend(t, 0, nil), backends.RoleDream)
+	h := roundHandler(brokenPool(t), seededBackends(y, z, d))
+	t.Cleanup(func() { waitHealthRounds(t) })
+	logs := installRejectLogCapture(t)
+	const rounds = 10
+	for i := range rounds {
+		got := askHealth(h, 0)
+		if got["chat"] != "ok" || got["embed"] != "error" {
+			t.Errorf("round %d: services %v, want chat ok (z serves it) and embed error (y hangs)", i, got)
+		}
+	}
+	waitHealthRounds(t)
+	if n := zHits.Load(); n != rounds {
+		t.Errorf("z saw %d requests in %d rounds, want one per round", n, rounds)
+	}
+	wantLines(t, logs, backends.RoleSynthesis, z.Name, 0, 0)
+	if w := linesAt(logs, slog.LevelWarn, backends.RoleEmbed, y.Name); len(w) != 1 {
+		t.Errorf("y for embed: %d WARN %+v, want 1", len(w), w)
+	}
+}
+
+// TestHealthCallerThatLeavesReturnsBeforeItsRound — a client that leaves
+// gets no answer and its request returns while its round still runs: the
+// request does not wait for the round (review of the linked pull request).
+func TestHealthCallerThatLeavesReturnsBeforeItsRound(t *testing.T) {
+	setHealthBudget(t, 2*time.Second)
+	up := slowBackend(t, 0, nil)
+	chat := operatorRow("i519-leaves", slowBackend(t, time.Hour, nil), backends.RoleSynthesis)
+	h := roundHandler(brokenPool(t), seededBackends(operatorRow("i519-leaves-e", up, backends.RoleEmbed, backends.RoleDream), chat))
+	t.Cleanup(func() { waitHealthRounds(t) })
+	installRejectLogCapture(t)
+	got := askHealth(h, 50*time.Millisecond)
+	healthLines.mu.Lock()
+	inFlight := len(healthLines.rounds)
+	healthLines.mu.Unlock()
+	if got != nil || inFlight != 1 {
+		t.Errorf("a client gone after 50 ms: answer %v, %d rounds in flight when its request returned, want no answer and its round still running", got, inFlight)
+	}
+}
+
+// TestHealthSharedBaseURLSlowWithinTheLongerShare — y answers after 150 ms
+// and serves embed (its only candidate, the whole 400 ms) and chat (the
+// first of three, a third of it): when chat's shorter share ended its probe
+// of y, embed probes y once more with the rest of its own and finds it up;
+// y is never logged down for embed, and chat is served either way.
+func TestHealthSharedBaseURLSlowWithinTheLongerShare(t *testing.T) {
+	setHealthBudget(t, 400*time.Millisecond)
+	y := operatorRow("i519-slowshare-y", slowBackend(t, 150*time.Millisecond, nil), backends.RoleEmbed, backends.RoleSynthesis)
+	z1 := operatorRow("i519-slowshare-z1", slowBackend(t, 0, nil), backends.RoleSynthesis)
+	z2 := operatorRow("i519-slowshare-z2", slowBackend(t, 0, nil), backends.RoleSynthesis)
+	d := operatorRow("i519-slowshare-d", slowBackend(t, 0, nil), backends.RoleDream)
+	h := roundHandler(brokenPool(t), seededBackends(y, z1, z2, d))
+	t.Cleanup(func() { waitHealthRounds(t) })
+	logs := installRejectLogCapture(t)
+	for i := range 10 {
+		if got := askHealth(h, 0); got["embed"] != "ok" || got["chat"] != "ok" {
+			t.Errorf("round %d: services %v, want embed ok (y answers within embed's budget) and chat ok", i, got)
+		}
+	}
+	waitHealthRounds(t)
+	wantLines(t, logs, backends.RoleEmbed, y.Name, 0, 0)
+}
