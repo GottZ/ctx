@@ -389,8 +389,11 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 	// base's content, while the row still holds that base (issue #509).
 	// Only an observation of the base's content counts: a flag the pull set
 	// in the window raises the stamp too, over other content, and keeps it
-	// in forge_seen — that is a divergence, not a revert.
-	const reverted = `($9 AND base_hash = $6 AND base_hash <> $2 AND $8::timestamptz IS NOT NULL AND forge_updated_at > $8::timestamptz
+	// in forge_seen — that is a divergence, not a revert. A row without a
+	// forge stamp (a stamp reset, a mapping from before stamps were kept)
+	// holds no observation: the comparison is false, not NULL — a NULL here
+	// made conflict NULL and the advance failed (23502) after the PATCH.
+	const reverted = `($9 AND base_hash = $6 AND base_hash <> $2 AND COALESCE(forge_updated_at > $8::timestamptz, false)
 		AND COALESCE(metadata->'forge_seen'->>'hash', base_hash) = base_hash)`
 	var revert bool
 	err = tx.QueryRow(ctx, `
