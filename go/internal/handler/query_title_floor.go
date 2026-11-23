@@ -3,6 +3,8 @@ package handler
 import (
 	"strings"
 
+	"golang.org/x/text/unicode/norm"
+
 	"github.com/GottZ/ctx/internal/rrf"
 )
 
@@ -22,8 +24,9 @@ import (
 // the candidate window and changes no statement.
 //
 // The rule, deliberately narrow:
-//   - the question equals the candidate's title after lower-casing and
-//     white-space collapsing (foldTitle) — no similarity threshold, so a
+//   - the question equals the candidate's title in their folded form
+//     (foldTitle: normal form, quotes, case, white space, closing
+//     punctuation) — no similarity threshold, so a
 //     question about a family's topic, or one that contains a short title,
 //     moves nothing;
 //   - it names exactly ONE candidate: a second candidate with the same title,
@@ -95,8 +98,33 @@ func floorTitleMatch(results []rrf.SearchResult, question string, limit int, ski
 	return out
 }
 
-// foldTitle is the comparison form of a title and of a question: lower case,
-// runs of white space as one space, no space at either end.
+// foldTitle is the comparison form of a title and of a question, the same on
+// both sides (issue #507, round 1): Unicode NFKC, typographic quotes and
+// apostrophes as their ASCII forms, lower case, runs of white space as one
+// space, and no closing punctuation (titleCloseCutset) or space at the end.
+//
+// NFKC and strings.ToLower are the form the repository already compares
+// titles in (derived.Normalize, topiclabel's echo guard): a question typed in
+// one normal form, or with full-width characters, names the title stored in
+// another. Punctuation inside stays: "v5.75.1", "(2026-11-22)" and
+// "2026.08.31" remain what tells one block of a family from the next — only
+// the closing "?", ".", "!", ":" or "…" a person adds to a question is dropped.
+// "ß" is not folded to "ss": that would join two words ("Maße", "Masse").
 func foldTitle(s string) string {
-	return strings.ToLower(strings.Join(strings.Fields(s), " "))
+	s = typographicQuotes.Replace(norm.NFKC.String(s))
+	s = strings.ToLower(strings.Join(strings.Fields(s), " "))
+	return strings.TrimRight(s, titleCloseCutset)
 }
+
+// titleCloseCutset is the closing punctuation foldTitle drops from the end of a
+// title or question, with the spaces before it. NFKC has already turned "…"
+// into "..." and the full-width forms into these.
+const titleCloseCutset = "?.!: "
+
+// typographicQuotes maps typographic quotation marks and apostrophes to the
+// ASCII forms, so a title written with „…“ or “…” and a question typed with
+// "…" (or the reverse) fold alike.
+var typographicQuotes = strings.NewReplacer(
+	"\u201c", `"`, "\u201d", `"`, "\u201e", `"`, "\u201f", `"`, "\u00ab", `"`, "\u00bb", `"`,
+	"\u2018", "'", "\u2019", "'", "\u201a", "'", "\u201b", "'", "\u2039", "'", "\u203a", "'",
+)

@@ -97,6 +97,9 @@ func TestFloorTitleMatchLeavesTheOrder(t *testing.T) {
 			titleFloorList("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "Release notes", "Release notes"),
 			"Release notes", 10, nil},
 		{"a shadow row is never placed", fam, "Orbit nightly report 2026-08-13", 10, []string{"knowledge"}},
+		{"a title that differs from the question only in a closing mark other titles contain",
+			titleFloorList("Deploy runbook 1", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "Deploy."),
+			"deploy?", 10, nil},
 		{"no more candidates than the limit", fam[:10], "Orbit nightly report 2026-08-10", 10, nil},
 		{"empty question", fam, "   ", 10, nil},
 	}
@@ -170,5 +173,45 @@ func TestFloorTitleMatchLimitOne(t *testing.T) {
 	out := floorTitleMatch(in, "Orbit nightly report 2026-08-13", 1, nil)
 	if out[0].ID != in[12].ID || titleFloorIDs(out[1:4]) != "b00,b01,b02" {
 		t.Errorf("limit 1: %s", titleFloorIDs(out[:4]))
+	}
+}
+
+// The folded form (issue #507, round 1): what people add to a question or type
+// differently folds away; what tells two titles of one family apart stays.
+func TestFoldTitle(t *testing.T) {
+	same := [][2]string{
+		{"Orbit nightly report 2026-08-31?", "orbit nightly report 2026-08-31"},
+		{"Orbit nightly report 2026-08-31 ?!", "Orbit nightly report 2026-08-31"},
+		{"Orbit nightly report 2026-08-31…", "Orbit nightly report 2026-08-31"},
+		{"Orbit nightly report 2026-08-31？", "Orbit nightly report 2026-08-31"},
+		{"Release notes:", "release notes"},
+		{"Plan „Zielbild B“", "Plan \"Zielbild B\""},
+		{"Plan “Zielbild B”", "Plan \"Zielbild B\""},
+		{"Plan »Zielbild B«", "Plan \"Zielbild B\""},
+		{"Orbit’s report", "Orbit's report"},
+		{"Übergabe 2026-08-31", "Übergabe 2026-08-31"},
+		{"Ｏｒｂｉｔ report", "Orbit report"},
+		{"  Orbit\tnightly\n report  ", "orbit nightly report"},
+	}
+	for _, c := range same {
+		if foldTitle(c[0]) != foldTitle(c[1]) {
+			t.Errorf("fold(%q) = %q, fold(%q) = %q: want equal", c[0], foldTitle(c[0]), c[1], foldTitle(c[1]))
+		}
+	}
+	different := [][2]string{
+		{"ctx v5.75.1 release", "ctx v5751 release"},
+		{"Orbit nightly report (2026-08-31)", "Orbit nightly report 2026-08-31"},
+		{"Orbit nightly report 2026.08.31", "Orbit nightly report 2026-08-31"},
+		{"Plan \"Zielbild B\"", "Plan Zielbild B"},
+		{"Straße 2026", "Strasse 2026"},
+		{"? Orbit report", "Orbit report"},
+	}
+	for _, c := range different {
+		if foldTitle(c[0]) == foldTitle(c[1]) {
+			t.Errorf("fold(%q) = fold(%q) = %q: want different", c[0], c[1], foldTitle(c[0]))
+		}
+	}
+	if got := foldTitle(" ?! "); got != "" {
+		t.Errorf("fold of punctuation only = %q, want empty", got)
 	}
 }

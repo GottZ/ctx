@@ -56,17 +56,25 @@ type titleFloorEnv struct {
 	h      *QueryHandler
 	ids    map[string]string // title -> id
 	target string
+	twins  []string // two blocks whose titles fold to the same form
 }
 
 func titleFloorSetup(t *testing.T) *titleFloorEnv {
+	t.Helper()
+	return titleFloorSetupWith(t, nil)
+}
+
+// titleFloorSetupWith builds the corpus and a handler whose configuration mod
+// may adjust (the confidence thresholds of the synthesis tests).
+func titleFloorSetupWith(t *testing.T, mod func(*config.Config)) *titleFloorEnv {
 	t.Helper()
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
 	env := &titleFloorEnv{ids: map[string]string{}}
 	k := 0
-	put := func(title, content string, cos float64) {
+	putIn := func(category, title, content string, cos float64) {
 		t.Helper()
-		b, err := store.UpsertBlock(ctx, pool, "learnings", title, content, nil, nil, titleFloorScope, true, store.SensitivityWrite{}, "knowledge")
+		b, err := store.UpsertBlock(ctx, pool, category, title, content, nil, nil, titleFloorScope, true, store.SensitivityWrite{}, "knowledge")
 		if err != nil {
 			t.Fatalf("seed %q: %v", title, err)
 		}
@@ -74,8 +82,12 @@ func titleFloorSetup(t *testing.T) *titleFloorEnv {
 			t.Fatalf("seed %q: embedding: %v", title, err)
 		}
 		k++
-		env.ids[title] = b.ID
+		env.ids[category+"/"+title] = b.ID
+		if category == "learnings" {
+			env.ids[title] = b.ID
+		}
 	}
+	put := func(title, content string, cos float64) { t.Helper(); putIn("learnings", title, content, cos) }
 	day := func(i int) string { return time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, i).Format("2006-01-02") }
 
 	// The family: 45 nightly reports, one per day, the day in the title only
@@ -110,33 +122,64 @@ func titleFloorSetup(t *testing.T) *titleFloorEnv {
 			0.60-0.01*float64(j))
 	}
 
-	// The stub: one vector, axis 0, for every question.
+	// Two blocks carrying the same title (two categories), far from the
+	// question vector; the first sits nearer to it.
+	// Their title is every word of fifteen artefact indexes, which repeat it
+	// and so outrank them in the full-text arms (and sit nearer the question
+	// vector).
+	for j := 0; j < 15; j++ {
+		put(fmt.Sprintf("Artefact index %02d", j),
+			strings.Repeat("build log batch 2026-08, ", 6)+fmt.Sprintf("artefacts of index %02d.", j), 0.50-0.005*float64(j))
+	}
+	putIn("learnings", "Build log batch 2026-08", "Summary, first copy.", 0.03)
+	putIn("decisions", "Build log batch 2026-08", "Summary, second copy.", 0.02)
+	env.twins = []string{env.ids["learnings/Build log batch 2026-08"], env.ids["decisions/Build log batch 2026-08"]}
+
+	// The stub: one vector, axis 0, for every question; a fixed answer for
+	// the synthesis.
 	qvec := make([]float64, 1024)
 	qvec[0] = 1
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path != "/api/embed" {
+		switch r.URL.Path {
+		case "/api/embed":
+			_ = json.NewEncoder(w).Encode(map[string]any{"embeddings": [][]float64{qvec}})
+		case "/api/chat":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"message": map[string]any{"role": "assistant", "content": "The report says the build was green [1]."},
+				"done":    true, "eval_count": 1, "prompt_eval_count": 1,
+			})
+		default:
 			w.WriteHeader(http.StatusNotFound)
-			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"embeddings": [][]float64{qvec}})
 	}))
 	t.Cleanup(srv.Close)
 	bpool := backends.NewPool(nil, nil)
-	bpool.SeedSnapshotForTest([]backends.Backend{{ID: "e", Name: "tf507-embed", Host: srv.URL,
-		Protocol: backends.ProtocolOllama, Model: "stub-tf507", Trust: backends.TrustFull, Enabled: true,
-		Priority: 1, Roles: []string{backends.RoleEmbed}}})
+	bpool.SeedSnapshotForTest([]backends.Backend{
+		{ID: "e", Name: "tf507-embed", Host: srv.URL, Protocol: backends.ProtocolOllama, Model: "stub-tf507",
+			Trust: backends.TrustFull, Enabled: true, Priority: 1, Roles: []string{backends.RoleEmbed}},
+		{ID: "s", Name: "tf507-synthesis", Host: srv.URL, Protocol: backends.ProtocolOllama, Model: "stub-chat",
+			Trust: backends.TrustFull, Enabled: true, Priority: 1, NumCtx: 8192, Roles: []string{backends.RoleSynthesis}},
+	})
 	cfg := bw2Config()
-	cfg.Query.Translate = "off"
+	q := config.Defaults().Query
+	q.Timezone = time.UTC
+	q.Translate = "off"
+	cfg.Query = q
+	if mod != nil {
+		mod(cfg)
+	}
 	env.h = NewQueryHandler(pool, config.NewStore(cfg), bpool, nil, blocktype.NewRegistry(), snapshotTestAdmitter(t))
 	return env
 }
 
 type titleFloorResp struct {
-	Sources []struct {
-		ID    string  `json:"id"`
-		Title string  `json:"title"`
-		Score float64 `json:"score"`
+	Confidence string `json:"confidence"`
+	Sources    []struct {
+		ID            string  `json:"id"`
+		Title         string  `json:"title"`
+		Score         float64 `json:"score"`
+		CitationIndex *int    `json:"citation_index"`
 	} `json:"sources"`
 	ArmRanks *struct {
 		FusionOrder []string `json:"fusion_order"`
@@ -150,6 +193,13 @@ func (e *titleFloorEnv) ask(t *testing.T, q string, limit int, armRanks bool) ti
 
 // askPinned is ask with a pinned translation (measurement seam, admin only):
 // retrieval then runs on the pinned text while the caller's question stays q.
+// askSynth asks with synthesis (the stub answers); a source carries
+// citation_index exactly when it stood in the synthesis prompt.
+func (e *titleFloorEnv) askSynth(t *testing.T, q string, limit int) titleFloorResp {
+	t.Helper()
+	return e.do(t, q, map[string]any{"query": q, "limit": limit}, false)
+}
+
 func (e *titleFloorEnv) askPinned(t *testing.T, q string, limit int, armRanks bool, pinned string) titleFloorResp {
 	t.Helper()
 	body := map[string]any{"query": q, "limit": limit, "synthesize": false}
@@ -159,6 +209,11 @@ func (e *titleFloorEnv) askPinned(t *testing.T, q string, limit int, armRanks bo
 	if pinned != "" {
 		body["pinned_translation"] = pinned
 	}
+	return e.do(t, q, body, armRanks)
+}
+
+func (e *titleFloorEnv) do(t *testing.T, q string, body map[string]any, armRanks bool) titleFloorResp {
+	t.Helper()
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/query", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
@@ -171,7 +226,7 @@ func (e *titleFloorEnv) askPinned(t *testing.T, q string, limit int, armRanks bo
 		t.Fatalf("%q: status %d: %s", q, rec.Code, rec.Body.String())
 	}
 	var out titleFloorResp
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+	if err := json.Unmarshal(bytes.TrimSpace(rec.Body.Bytes()), &out); err != nil {
 		t.Fatalf("%q: decode: %v", q, err)
 	}
 	return out
