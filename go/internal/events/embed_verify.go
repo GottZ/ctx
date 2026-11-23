@@ -104,8 +104,14 @@ const (
 // seq-scan at 10M (and `cleanup` would silently drop the only carriers).
 // The swap tx (W04-6) renames them canonically. The two pick indexes of
 // migration 171 joined the class (issue #239), the guard pick index of
-// migration 182 too (issue #360); the guard pending index of 113 left it
-// with migration 183, which drops it and its twin.
+// migration 182 too (issue #360), and the embed-excluded mark's index of
+// migration 193 (issue #527); the recall probe's covering index of migration
+// 111 was in it from the start and joined the list with issue #527 (before,
+// a swap left it on embedding_old and the cleanup dropped it with that
+// column); the guard pending index of 113 left it with migration 183, which
+// drops it and its twin.
+// TestAttnumClassIsTheCutoverList holds every index of context_blocks whose
+// key or predicate names the embedding column against this list.
 var verifySisterIndexes = []struct{ name, ddl string }{
 	// Twin of idx_embedding_pending (migration 109): the regular backfill
 	// pending predicate on the post-cutover serving column.
@@ -121,10 +127,26 @@ var verifySisterIndexes = []struct{ name, ddl string }{
 	{"idx_embedding_pending_sens_next", `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_embedding_pending_sens_next
 		ON context_blocks (sensitivity, created_at, id)
 		WHERE embedding_next IS NULL AND NOT is_archived AND NOT embed_excluded`},
+	// Twin of idx_embedding_pending_type_scope (migration 193, issue #527):
+	// the embed-excluded mark's range of a name and a scope on the
+	// post-cutover serving column. A re-embed migration that reached
+	// verifying before 193 has none; the gate builds it, or on a green
+	// verdict the index repair alone (issue #333).
+	{"idx_embedding_pending_type_scope_next", `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_embedding_pending_type_scope_next
+		ON context_blocks (type_name, scope, id)
+		WHERE embedding_next IS NULL AND NOT is_archived AND NOT embed_excluded`},
 	// Twin of idx_dream_pending (016_dream.sql:11-13), embedding →
 	// embedding_next.
 	{"idx_dream_pending_next", `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_dream_pending_next
 		ON context_blocks (dream_checked_at ASC NULLS FIRST, quality_score ASC)
+		WHERE NOT is_archived AND embedding_next IS NOT NULL`},
+	// Twin of idx_blocks_stratify_covering (migration 111): the recall probe's
+	// distinct scopes and per-scope counts of the embedded live blocks
+	// (recall.PlanStrata) on the post-cutover serving column. A re-embed
+	// migration that reached verifying before issue #527 has none; the gate
+	// builds it, or on a green verdict the index repair alone (issue #333).
+	{"idx_blocks_stratify_covering_next", `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_blocks_stratify_covering_next
+		ON context_blocks (scope, type_name)
 		WHERE NOT is_archived AND embedding_next IS NOT NULL`},
 	// Twin of idx_guard_pending_type (migration 182, issue #360): the guard
 	// pick's ranges per type on the post-cutover serving column. A re-embed

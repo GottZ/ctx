@@ -136,13 +136,16 @@ var cutoverColumnRenames = [][2]string{
 	{"embed_model_next", "embed_model"},
 }
 
-// cutoverIndexRenames is §4.8 (3)+(3b): the HNSW pair plus the five
+// cutoverIndexRenames is §4.8 (3)+(3b): the HNSW pair plus the seven
 // partial-index pairs of the Attnum class (two of them since migration 171,
-// one since migration 182; the pair of idx_guard_pending left with migration
-// 183, which drops that index). Without (3b) the old exemplars'
+// one since migration 182, one since migration 193, and the pair of the
+// recall probe's covering index of migration 111 since issue #527; the pair
+// of idx_guard_pending left with migration 183, which drops that index).
+// Without (3b) the old exemplars'
 // predicates would silently follow embedding_old while the Go queries mean
-// the new column by NAME — backfill peek, dream queue scan and guard
-// pending scan would all seq-scan at 10M (the e2e gate pins the EXPLAINs).
+// the new column by NAME — backfill peek, dream queue scan, guard pending
+// scan and embed-excluded mark would all read past their range at 10M (the
+// e2e gate pins the EXPLAINs).
 var cutoverIndexRenames = [][2]string{
 	{"idx_embedding_hnsw", "idx_embedding_hnsw_old"},
 	{verifyNextHNSWIndexName, "idx_embedding_hnsw"},
@@ -152,8 +155,12 @@ var cutoverIndexRenames = [][2]string{
 	{"idx_embedding_pending_scope_sens_next", "idx_embedding_pending_scope_sens"},
 	{"idx_embedding_pending_sens", "idx_embedding_pending_sens_old"},
 	{"idx_embedding_pending_sens_next", "idx_embedding_pending_sens"},
+	{"idx_embedding_pending_type_scope", "idx_embedding_pending_type_scope_old"},
+	{"idx_embedding_pending_type_scope_next", "idx_embedding_pending_type_scope"},
 	{"idx_dream_pending", "idx_dream_pending_old"},
 	{"idx_dream_pending_next", "idx_dream_pending"},
+	{"idx_blocks_stratify_covering", "idx_blocks_stratify_covering_old"},
+	{"idx_blocks_stratify_covering_next", "idx_blocks_stratify_covering"},
 	{"idx_guard_pending_type", "idx_guard_pending_type_old"},
 	{"idx_guard_pending_type_next", "idx_guard_pending_type"},
 }
@@ -162,9 +169,12 @@ var cutoverIndexRenames = [][2]string{
 // (§4.8 "Alt-Bestand") — the exact objects `cleanup` drops BY NAME and the
 // rollback preflight requires to exist (fail-closed).
 // cutoverOptionalIndexes are the canonical and _old names of the two
-// backfill pick indexes of migration 171 (issue #239) and of the guard pick
-// index of migration 182 (issue #360). Both migrations build inline below
-// 500 000 rows only, and a swap done before them left no _old anchors, so
+// backfill pick indexes of migration 171 (issue #239), of the guard pick
+// index of migration 182 (issue #360), of the embed-excluded mark's index
+// of migration 193 (issue #527), and of the recall probe's covering index of
+// migration 111, which joined the list with issue #527. Migrations 171, 182
+// and 193 build inline below 500 000 rows only, and a swap done before them
+// — or, for the covering index, before issue #527 — left no _old anchors, so
 // their absence before the swap, at a rollback or at a cleanup is not a
 // missing rollback anchor: the swap renames such a canonical index only when
 // it exists, and the _next twin, which the preflight requires, becomes the
@@ -173,6 +183,8 @@ var cutoverOptionalIndexes = map[string]bool{
 	"idx_embedding_pending_scope_sens": true, "idx_embedding_pending_scope_sens_old": true,
 	"idx_embedding_pending_sens": true, "idx_embedding_pending_sens_old": true,
 	"idx_guard_pending_type": true, "idx_guard_pending_type_old": true,
+	"idx_embedding_pending_type_scope": true, "idx_embedding_pending_type_scope_old": true,
+	"idx_blocks_stratify_covering": true, "idx_blocks_stratify_covering_old": true,
 }
 
 // renameIndexIfPresent runs ALTER INDEX from RENAME TO to; an optional
@@ -196,7 +208,7 @@ func renameIndexIfPresent(ctx context.Context, tx pgx.Tx, from, to string) error
 var (
 	cutoverOldIndexNames = []string{"idx_embedding_hnsw_old", "idx_embedding_pending_old",
 		"idx_embedding_pending_scope_sens_old", "idx_embedding_pending_sens_old", "idx_dream_pending_old",
-		"idx_guard_pending_type_old"}
+		"idx_guard_pending_type_old", "idx_embedding_pending_type_scope_old", "idx_blocks_stratify_covering_old"}
 	cutoverOldColumnNames = []string{"embedding_old", "embed_model_old"}
 )
 
@@ -660,6 +672,21 @@ func runRollbackSwapTx(ctx context.Context, db *pgxpool.Pool, migrationID, reaso
 		}
 		for i := len(cutoverIndexRenames) - 1; i >= 0; i-- {
 			r := cutoverIndexRenames[i]
+			if cutoverOptionalIndexes[r[1]] && !strings.HasSuffix(r[1], "_old") {
+				// An optional canonical index goes back onto its twin's name
+				// only when it is the twin: on the column that is
+				// embedding_next again. A swap by a release before the index
+				// joined the class renamed nothing of it and left it on the
+				// old column, which is embedding again now: it keeps its
+				// name (issue #527).
+				twin, err := indexDependsOn(ctx, tx, r[1], "embedding_next")
+				if err != nil {
+					return err
+				}
+				if !twin {
+					continue
+				}
+			}
 			if err := renameIndexIfPresent(ctx, tx, r[1], r[0]); err != nil {
 				return err
 			}
@@ -679,7 +706,7 @@ func runRollbackSwapTx(ctx context.Context, db *pgxpool.Pool, migrationID, reaso
 }
 
 // CleanupEmbedMigration drops the rollback anchor (§4.8 Alt-Bestand): the
-// _old indexes BY NAME (those of migrations 171 and 182 when present), then the two _old columns. Operator-explicit,
+// _old indexes BY NAME (those of migrations 111, 171, 182 and 193 when present), then the two _old columns. Operator-explicit,
 // only from status done (E-04-2: cleanup destroys the instant-rollback
 // path — after this, RollbackEmbedMigration refuses via its _old preflight
 // and the only way back is a NEW migration in the opposite direction,
@@ -901,6 +928,22 @@ func columnExists(ctx context.Context, q embedmigration.Querier, column string) 
 		return false, fmt.Errorf("embed-cutover: column probe (%s): %w", column, err)
 	}
 	return ok, nil
+}
+
+// indexDependsOn reports whether the index name exists and depends on
+// column of context_blocks: a key column, an expression or the predicate
+// names it (pg_depend).
+func indexDependsOn(ctx context.Context, q embedmigration.Querier, name, column string) (bool, error) {
+	var on bool
+	if err := q.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_depend d
+		   JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+		  WHERE d.classid = 'pg_class'::regclass AND d.objid = to_regclass('public.' || $1)
+		    AND d.refclassid = 'pg_class'::regclass AND d.refobjid = 'context_blocks'::regclass
+		    AND a.attname = $2 AND NOT a.attisdropped)`, name, column).Scan(&on); err != nil {
+		return false, fmt.Errorf("embed-cutover: index column probe (%s on %s): %w", name, column, err)
+	}
+	return on, nil
 }
 
 // indexValidity reports existence and pg_index.indisvalid for an index name.
