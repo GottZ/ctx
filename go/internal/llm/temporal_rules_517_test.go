@@ -74,6 +74,7 @@ func TestRules_AWeekdayBehindATitleIsASurname(t *testing.T) {
 		"Mr. Smith, Monday was a disaster":         "2026-11-16/past",
 		"Treffen wir Herrn Schulz am Montag?":      "2026-11-23/future",
 		"Is the DR Monday drill still planned?":    "2026-11-23/future",
+		"Ist DR Montag noch geplant?":              "2026-11-23/future",
 		"Am Montag hat Max Montag den PR gemerged": "2026-11-16/past",
 	})
 }
