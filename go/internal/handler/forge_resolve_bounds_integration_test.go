@@ -51,3 +51,31 @@ func TestForgeResolveBlockIDInUpperCase(t *testing.T) {
 		t.Errorf("audit rows keyed on the stored block id: %+v", rows)
 	}
 }
+
+// A stamp reset of an archived block's mapping answers the 404 a resolution
+// gives there, and writes nothing — no NULL stamp, no hold on the leg.
+func TestForgeResolveArchivedBlockStampReset(t *testing.T) {
+	e := newFCMEnv(t)
+	ctx := context.Background()
+	proj := e.project(t, "rba")
+	id := e.flag(t, proj, 1)
+	if _, err := e.pool.Exec(ctx, `UPDATE context_blocks SET is_archived = true WHERE id = $1::uuid`, id); err != nil {
+		t.Fatal(err)
+	}
+	before := e.snapshot(t, []string{id}, []string{proj.ID})
+	for _, data := range []map[string]any{
+		{"project_id": proj.ID, "block_id": id, "direction": "remote"},
+		{"project_id": proj.ID, "block_id": id},
+	} {
+		action := "forge-conflict-resolve"
+		if _, ok := data["direction"]; !ok {
+			action = "forge-stamp-reset"
+		}
+		if code, _, raw := e.do(t, e.h, e.adminA, action, data); code != http.StatusNotFound {
+			t.Errorf("%s on an archived block: %d %s, want 404", action, code, raw)
+		}
+	}
+	if after := e.snapshot(t, []string{id}, []string{proj.ID}); after != before {
+		t.Errorf("a refused call on an archived block changed state:\nbefore %s\nafter  %s", before, after)
+	}
+}

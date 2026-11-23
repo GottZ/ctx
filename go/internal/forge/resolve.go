@@ -412,11 +412,11 @@ func (r *Resolver) ResetStamps(ctx context.Context, project store.ProjectRow, bl
 		if !ok {
 			return ErrConflictNotFound
 		}
-		n, kinds, err := store.ResetForgeStamps(ctx, tx, project.ID, blockID)
+		found, n, kinds, err := store.ResetForgeStamps(ctx, tx, project.ID, project.Scope, blockID)
 		if err != nil {
 			return err
 		}
-		if blockID != "" && n == 0 {
+		if !found {
 			return ErrConflictNotFound
 		}
 		res.Reset = n

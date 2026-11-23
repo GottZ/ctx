@@ -226,15 +226,30 @@ func forgeSeenJSON(seen *ForgeSeen) (any, error) {
 }
 
 // ResetForgeStamps sets forge_updated_at to NULL — on the mapping of blockID
-// when it belongs to projectID, on every mapping of the project when blockID
-// is "" — and drops their forge snapshots: the way out of a forge stamp that
-// went back behind the recorded one (docs/architecture.md, forge sync), whose
-// fetches every pull skipped as older. It returns the rows it reset and the
-// entity kinds among them (the legs whose fetch cursor the caller holds).
-// Tx-bound.
-func ResetForgeStamps(ctx context.Context, tx pgx.Tx, projectID, blockID string) (int, []string, error) {
+// when it belongs to projectID and its block is live in scope, on every
+// mapping of the project when blockID is "" — and drops their forge
+// snapshots: the way out of a forge stamp that went back behind the recorded
+// one (docs/architecture.md, forge sync), whose fetches every pull skipped
+// as older. found=false: blockID names no such mapping (an archived block, a
+// block out of the project's scope — the 404 a resolution gives there;
+// nothing written). It returns the rows it reset and the entity kinds among
+// them (the legs whose fetch cursor the caller holds). Tx-bound; the caller
+// holds the project row, the mapping rows come after it.
+func ResetForgeStamps(ctx context.Context, tx pgx.Tx, projectID, scope, blockID string) (found bool, n int, kinds []string, err error) {
 	var block any
 	if blockID != "" {
+		var one int
+		err := tx.QueryRow(ctx, `
+			SELECT 1 FROM context_project_sync_map m
+			  JOIN context_blocks b ON b.id = m.block_id
+			 WHERE m.project_id = $1::uuid AND m.block_id = $2::uuid AND b.scope = $3 AND NOT b.is_archived
+			   FOR NO KEY UPDATE OF m`, projectID, blockID, scope).Scan(&one)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, 0, nil, nil
+		}
+		if err != nil {
+			return false, 0, nil, fmt.Errorf("store: reset forge stamps: %w", err)
+		}
 		block = blockID
 	}
 	rows, err := tx.Query(ctx, `
@@ -243,16 +258,14 @@ func ResetForgeStamps(ctx context.Context, tx pgx.Tx, projectID, blockID string)
 		 WHERE project_id = $1::uuid AND ($2::uuid IS NULL OR block_id = $2::uuid)
 		RETURNING entity_kind`, projectID, block)
 	if err != nil {
-		return 0, nil, fmt.Errorf("store: reset forge stamps: %w", err)
+		return false, 0, nil, fmt.Errorf("store: reset forge stamps: %w", err)
 	}
 	defer rows.Close()
-	n := 0
 	seen := map[string]bool{}
-	var kinds []string
 	for rows.Next() {
 		var k string
 		if err := rows.Scan(&k); err != nil {
-			return 0, nil, fmt.Errorf("store: reset forge stamps: %w", err)
+			return false, 0, nil, fmt.Errorf("store: reset forge stamps: %w", err)
 		}
 		n++
 		if !seen[k] {
@@ -260,7 +273,7 @@ func ResetForgeStamps(ctx context.Context, tx pgx.Tx, projectID, blockID string)
 			kinds = append(kinds, k)
 		}
 	}
-	return n, kinds, rows.Err()
+	return true, n, kinds, rows.Err()
 }
 
 // LockProjectForCursor locks the project row FOR NO KEY UPDATE inside the
