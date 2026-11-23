@@ -105,49 +105,16 @@ type healthResponse struct {
 //   - Blocktype registry on builtin-fallback → "degraded" (WF T3: reads work,
 //     but the visibility policy runs on compiled-in defaults)
 //
-// The database ping and the roles run concurrently (#265), so the answer takes
-// as long as the slowest role (its candidates in order), not the sum of all
-// roles; a base URL that several roles share is requested once per call
-// (hostProbes). Every probe
-// runs on ctx and HealthStatus returns only after all of them returned, so a
-// cancelled caller ends every probe and none outlives the call.
-func HealthStatus(ctx context.Context, pool *pgxpool.Pool, snap []backends.Backend, dreamEnabled bool, blocktypeRegistry string) healthResponse {
-	// The service keys keep their historical names ("chat" = the
-	// synthesis-serving class).
-	roles := []struct{ service, role string }{
-		{"embed", backends.RoleEmbed},
-		{"chat", backends.RoleSynthesis},
-	}
-	if dreamEnabled {
-		roles = append(roles, struct{ service, role string }{"dream", backends.RoleDream})
-	}
-
-	var (
-		wg      sync.WaitGroup
-		dbErr   error
-		reached = make([]string, len(roles)) // one slot per goroutine, read after Wait
-		probes  = newHostProbes()
-	)
-	wg.Go(func() { dbErr = pool.Ping(ctx) })
-	for i, r := range roles {
-		wg.Go(func() { reached[i] = roleReachable(ctx, snap, r.role, probes) })
-	}
-	if !dreamEnabled {
-		healthLines.forgetRole(backends.RoleDream)
-	}
-	wg.Wait()
-
-	services := make(map[string]string, len(roles)+1)
-	healthLines.database(ctx, dbErr)
-	if dbErr != nil {
-		services["database"] = "error"
-	} else {
-		services["database"] = "ok"
-	}
-	for i, r := range roles {
-		services[r.service] = reached[i]
-	}
-
+// The probes run in a round of the process (healthRound, issue #519) over the
+// snapshot backendPool holds when the round begins: the database ping and the
+// roles concurrently (#265), so the answer takes as long as the slowest role,
+// a base URL that several roles share requested once, and the whole round
+// bounded by healthProbeBudget. A call that arrives while a round over the
+// same inputs runs waits for it; a call whose ctx ends first returns every
+// service as "error" and leaves the round to finish and record what it finds.
+// backendPool may be nil: no backend, every role without one.
+func HealthStatus(ctx context.Context, pool *pgxpool.Pool, backendPool *backends.Pool, dreamEnabled bool, blocktypeRegistry string) healthResponse {
+	services := healthLines.observe(ctx, pool, backendPool, dreamEnabled)
 	return healthResponse{
 		Status:            aggregateHealthStatus(services, blocktypeRegistry),
 		Services:          services,
@@ -225,19 +192,13 @@ func foldSchemaContractStatus(status, schemaContract string) string {
 // Health serves the public /health endpoint, wrapping HealthStatus with the
 // HTTP status-code mapping (unhealthy → 503, else 200).
 func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
-	// The probes end with the request (issue #504): /health is anonymous, and
-	// a probe that outlived its client would let every request hold one probe
-	// of each hanging backend for the whole budget. healthProbeBudget ends
-	// before the compose healthcheck gives up, so the healthcheck waits for
-	// the answer and a backend that hangs is observed to the budget; a client
-	// that leaves first ends the probes, and what they did not finish changes
-	// no state (healthNotice).
-	ctx, cancel := context.WithTimeout(r.Context(), healthProbeBudget)
-	defer cancel()
-
+	// The probes do not end with the request (issue #519): they run in a round
+	// bounded by healthProbeBudget that the request waits for, and a client
+	// that leaves first stops waiting. A round is shared by every request that
+	// arrives while it runs, so an anonymous storm holds one probe per base URL
+	// and one database ping, not one per request (issue #504).
 	cfg := h.cfg.Snapshot() //nolint:forbidigo // MT 06 BLIND: /health is public/anonymous — no tenant in reach; dream.enabled is server-global.
-	snap := h.backendPool.Snapshot()
-	resp := HealthStatus(ctx, h.pool, snap, cfg.Dream.Enabled, blocktypeHealthValue(h.blocktypes))
+	resp := HealthStatus(r.Context(), h.pool, h.backendPool, cfg.Dream.Enabled, blocktypeHealthValue(h.blocktypes))
 
 	// Evokoa-Clean-Room design/03 §4.6: fold in the schema-contract report
 	// AFTER HealthStatus returns (HealthStatus's own signature stays
@@ -258,15 +219,15 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// healthProbeBudget bounds the probes of one HealthStatus call, for /health
-// and the status collector alike: both feed the same healthNotice, and two
-// budgets would judge a backend that answers between them reachable in one
-// and unreachable in the other. 4 s is under the 5 s timeout of the compose
-// healthcheck (docker-compose.yml), whose clock starts before its request:
-// Docker reads the health document — whose database verdict alone fails the
-// container — instead of a timeout while a backend hangs. It is also under
-// the status collector's tick (events.tick_interval, 5 s by default). A
-// variable for tests.
+// healthProbeBudget bounds a probe round (healthRound), for /health and the
+// status collector alike — one budget, applied in one place: both feed the
+// same healthNotice, and two budgets would judge a backend that answers
+// between them reachable in one and unreachable in the other. 4 s is under
+// the 5 s timeout of the compose healthcheck (docker-compose.yml), whose
+// clock starts before its request: Docker reads the health document — whose
+// database verdict alone fails the container — instead of a timeout while a
+// backend hangs. It is also under the status collector's tick
+// (events.tick_interval, 5 s by default). A variable for tests.
 var healthProbeBudget = 4 * time.Second
 
 // roleReachable reports ok when at least one enabled backend of the role
@@ -276,7 +237,8 @@ var healthProbeBudget = 4 * time.Second
 // prove the host is up and serving (see pingHost). Errors log the backend name
 // to slog ONLY — the response carries the aggregate — and once per change of
 // state (healthNotice, issue #504): a role without an enabled backend, a role
-// none of whose candidates answers, a backend that stops answering.
+// none of whose candidates answers, a backend that stops answering. seq is the
+// round's number (healthNotice.current).
 //
 // Only operator rows (_global/unscoped) are pinged: /health is anonymous, and a
 // tenant row's base_url is tenant-admin input — pinging it would hand every
@@ -287,9 +249,12 @@ var healthProbeBudget = 4 * time.Second
 // The candidates of one role stay in order and the role stops at the first
 // reachable one, as before: a role never requests more than its own ordered
 // walk, and the bound of a call stays the operator rows of the probed roles.
-// probes only removes repeats — a base URL another role of the same call
-// already probed is not requested again.
-func roleReachable(ctx context.Context, snap []backends.Backend, role string, probes *hostProbes) string {
+// probes only removes repeats — a base URL another role of the same round
+// already probed is not requested again. Each candidate probes with its share
+// of what is left of the budget (budgetShare, issue #519): a first candidate
+// that hangs no longer leaves a later one "probed" with a spent budget and
+// logged as failed without having been requested.
+func (n *healthNotice) roleReachable(ctx context.Context, seq uint64, snap []backends.Backend, role string, probes *hostProbes) string {
 	rows := 0
 	var candidates []*backends.Backend
 	for i := range snap {
@@ -302,30 +267,25 @@ func roleReachable(ctx context.Context, snap []backends.Backend, role string, pr
 			candidates = append(candidates, b)
 		}
 	}
-	healthLines.roleProbed(role, rows, candidates)
+	n.roleProbed(seq, role, rows, candidates)
 	for i, b := range candidates {
-		err := probes.ping(ctx, b.Host)
-		healthLines.pinged(ctx, role, b, err)
-		switch {
-		case err == nil:
-			healthLines.walked(role, candidates[:i+1], true)
+		err := probes.ping(ctx, b.Host, len(candidates)-i)
+		n.pinged(seq, role, b, err)
+		if err == nil {
+			n.walked(seq, role, candidates[:i+1], true)
 			return "ok"
-		case callerLeft(ctx, err):
-			// The caller left: the walk observed nothing more, so it neither
-			// forgets the candidates it did not reach nor changes the role.
-			return "error"
 		}
 	}
-	healthLines.walked(role, candidates, false)
+	n.walked(seq, role, candidates, false)
 	return "error"
 }
 
-// hostProbes is the probe memo of ONE HealthStatus call (#265): the first role
-// that needs a base URL requests it, every other role of the same call that
-// needs it waits for that result. Keyed by the probe target pingHost requests
-// (the base URL without trailing slashes), so "http://h/" and "http://h" are
-// one probe. It lives exactly as long as the call — a later /health request
-// probes afresh, nothing is cached across calls.
+// hostProbes is the probe memo of ONE probe round (#265): the first role that
+// needs a base URL requests it, every other role of the same round that needs
+// it waits for that result. Keyed by the probe target pingHost requests (the
+// base URL without trailing slashes), so "http://h/" and "http://h" are one
+// probe. It lives exactly as long as the round — a later round probes afresh,
+// nothing is cached across rounds.
 type hostProbes struct {
 	mu sync.Mutex
 	m  map[string]*hostProbe
@@ -342,11 +302,13 @@ func newHostProbes() *hostProbes {
 	return &hostProbes{m: make(map[string]*hostProbe)}
 }
 
-// ping returns pingHost's result for host, requesting it at most once per memo.
-// A role that finds the probe already started waits for its result and
-// nothing else: the owner runs on the same ctx, so the wait ends when ctx
-// does, and the answer does not depend on which of the two finished first.
-func (p *hostProbes) ping(ctx context.Context, host string) error {
+// ping returns pingHost's result for host, requesting it at most once per memo,
+// with the share of ctx's budget of a candidate that has left candidates of
+// its role still to probe, itself included (budgetShare). A role that finds
+// the probe already started waits for its result and nothing else: the owner
+// runs on the same round context, so the wait ends when it does, and the
+// answer does not depend on which of the two finished first.
+func (p *hostProbes) ping(ctx context.Context, host string, left int) error {
 	key := strings.TrimRight(host, "/")
 	p.mu.Lock()
 	if pr, ok := p.m[key]; ok {
@@ -358,7 +320,9 @@ func (p *hostProbes) ping(ctx context.Context, host string) error {
 	p.m[key] = pr
 	p.mu.Unlock()
 
-	pr.err = pingHost(ctx, host)
+	pctx, cancel := budgetShare(ctx, left)
+	pr.err = pingHost(pctx, host)
+	cancel()
 	close(pr.done)
 	return pr.err
 }
@@ -386,6 +350,12 @@ func (p *hostProbes) ping(ctx context.Context, host string) error {
 // health question without ever putting a secret on the wire — a 401 is proof
 // of life just like a 200. Keep it that way.
 //
+// The probe is an answer only once it has read the answer (issue #519): a
+// bounded prefix of the body, to its end or to the cap. A backend that sends
+// its headers and then holds its body is unreachable — the read runs into the
+// budget, and that error is the probe's result, where it was dropped before
+// and the probe counted as an answer.
+//
 // The returned error carries the cause class ("status 503" vs. the wrapped
 // transport error) because it is the only diagnostic the /health warn log has.
 func pingHost(ctx context.Context, host string) error {
@@ -409,10 +379,13 @@ func pingHost(ctx context.Context, host string) error {
 	// Drain a bounded prefix before Close so the transport can reuse the
 	// connection; an unread body makes it drop the socket. The cap keeps a
 	// chatty/hostile endpoint from streaming into the health path.
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	_, readErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 
 	if resp.StatusCode >= http.StatusInternalServerError {
 		return fmt.Errorf("host unhealthy: status %d", resp.StatusCode)
+	}
+	if readErr != nil {
+		return fmt.Errorf("reading the answer: %w", readErr)
 	}
 
 	return nil
