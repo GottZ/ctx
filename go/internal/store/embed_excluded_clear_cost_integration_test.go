@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -58,9 +59,26 @@ func TestEmbedExcludedTenantEntryCostBothDirections(t *testing.T) {
 		t.Fatal(err)
 	}
 	reconcile(t, pool)
+	// planner returns the pool that plans with random_page_cost rpc and the
+	// SET LOCAL settings of a traced transaction, one per combination: a
+	// fresh connection reads the catalog on its first statements, which a
+	// replay would count.
 	planners := map[string]*pgxpool.Pool{}
-	for _, rpc := range testdb.RandomPageCosts {
-		planners[rpc] = testdb.WithRandomPageCost(t, pool, rpc)
+	planner := func(rpc string, local map[string]string) *pgxpool.Pool {
+		settings := map[string]string{"random_page_cost": rpc}
+		for k, v := range local {
+			settings[k] = v
+		}
+		keys := make([]string, 0, len(settings))
+		for k, v := range settings {
+			keys = append(keys, k+"="+v)
+		}
+		sort.Strings(keys)
+		key := strings.Join(keys, ",")
+		if planners[key] == nil {
+			planners[key] = testdb.WithSessionSettings(t, pool, settings)
+		}
+		return planners[key]
 	}
 	// entryCost returns the entry's buffers per plan (random_page_cost and
 	// plan form).
@@ -87,8 +105,19 @@ func TestEmbedExcludedTenantEntryCostBothDirections(t *testing.T) {
 			t.Fatalf("%s: reconcile: %v", label, err)
 		}
 		sums := map[string]int64{}
+		// local holds the SET LOCAL settings of the traced transaction a
+		// statement ran in (the mark batch turns sorts off), so the replay
+		// plans it as it ran.
+		var local map[string]string
 		for _, st := range tracer.take() {
-			if !strings.Contains(st.sql, "context_blocks") {
+			switch {
+			case st.sql == "begin" || st.sql == "commit" || st.sql == "rollback":
+				local = nil
+				continue
+			case strings.HasPrefix(st.sql, "SET LOCAL "):
+				local = setLocals(t, st.sql)
+				continue
+			case !strings.Contains(st.sql, "context_blocks"):
 				continue
 			}
 			head := strings.Join(strings.Fields(st.sql), " ")
@@ -96,12 +125,19 @@ func TestEmbedExcludedTenantEntryCostBothDirections(t *testing.T) {
 				head = head[:60]
 			}
 			for _, rpc := range testdb.RandomPageCosts {
-				plans := map[string]testdb.PlanCost{"custom": testdb.ExplainCustom(t, planners[rpc], st.sql, st.args...)}
+				p := planner(rpc, local)
+				// One unmeasured execution first, as the stats pin does: the
+				// rows the pass changed have left the statement's range, so it
+				// writes nothing.
+				if _, err := p.Exec(ctx, st.sql, st.args...); err != nil {
+					t.Fatalf("%s: warm-up: %v", label, err)
+				}
+				plans := map[string]testdb.PlanCost{"custom": testdb.ExplainCustom(t, p, st.sql, st.args...)}
 				// The pass without a created_at is constant false since
 				// migration 186 (NOT NULL): its plan names no parameter, so it
 				// has no generic plan to read.
 				if !strings.Contains(st.sql, "created_at IS NULL") {
-					plans["generic"] = testdb.ExplainGeneric(t, planners[rpc], st.sql, st.args...)
+					plans["generic"] = testdb.ExplainGeneric(t, p, st.sql, st.args...)
 				}
 				for form, c := range plans {
 					plan := form + " random_page_cost=" + rpc
@@ -169,4 +205,23 @@ func TestEmbedExcludedTenantEntryCostBothDirections(t *testing.T) {
 			}
 		}
 	}
+}
+
+// setLocals parses a traced "SET LOCAL name = value; SET LOCAL ..." into its
+// settings.
+func setLocals(t *testing.T, sql string) map[string]string {
+	t.Helper()
+	m := map[string]string{}
+	for _, part := range strings.Split(sql, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(strings.TrimPrefix(part, "SET LOCAL "), "=", 2)
+		if len(kv) != 2 || !strings.HasPrefix(part, "SET LOCAL ") {
+			t.Fatalf("traced setting %q: not SET LOCAL name = value", part)
+		}
+		m[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+	}
+	return m
 }
