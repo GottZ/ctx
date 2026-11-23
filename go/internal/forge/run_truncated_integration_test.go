@@ -72,11 +72,22 @@ func TestATruncatedRunThatMovesOnGrowsNoBackoff(t *testing.T) {
 		}, "project.sync.run_timeout"},
 		// A leg that reads 3 pages per run (the bound of 1000, scaled down).
 		{"page bound", func(m *SyncManager) { m.pageBound = 3 }, "pages in one run"},
+		// The same over issues the corpus holds already (a stamp reset's
+		// full listing): nothing is applied, only the cursor moves on.
+		{"page bound, nothing to apply", func(m *SyncManager) { m.pageBound = 3 }, "pages in one run"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			e := i491Env{i486Env: i486Setup(t, "rtr"+c.name[:2], "")}
+			e := i491Env{i486Env: i486Setup(t, "rtr"+string(rune('a'+len(c.name)%26))+c.name[:2], "")}
 			e.gh = newFakeGitHub(t, 1, quotedNext, i474Catalog(14)...)
+			if strings.HasSuffix(c.name, "nothing to apply") {
+				if _, err := e.i509Run(e.pool); err != nil {
+					t.Fatalf("the first sync: %v", err)
+				}
+				if _, err := e.resolverOn(e.pool).ResetStamps(context.Background(), e.proj, "", store.AuditStamp{}); err != nil {
+					t.Fatalf("stamp reset: %v", err)
+				}
+			}
 			runs := 0
 			for ; runs < 12; runs++ {
 				m := e.i509Mgr(e.pool)
