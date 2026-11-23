@@ -180,13 +180,32 @@ tier, the LHCI and trend jobs, the SDK smoke:
 gh workflow run ci.yml --ref <branch> -f publish_images=false
 ```
 
-The job is expected green, with one known exception until its test pins its
-plan: `TestVW4TrigramInnerTiebreak` (`internal/rrf`) wants the GiST index for
-its first plan, and at `random_page_cost` 4 the planner prefers a sequential
-scan of the test's 72 rows. A test that is red there and green in the per-PR
+The job is expected green. A test that is red there and green in the per-PR
 jobs is a finding about one of the differences below: run it on each image with
 the other image's setting (further down) to tell an image artefact from a
 result of the planner input.
+
+**A red nightly opens an issue.** The last job of `ci.yml`, `nightly-report`,
+waits for every job of a scheduled run and runs
+`.github/scripts/nightly-report.sh`: when one of them failed or was cancelled
+(a job that ran out of its time), it opens one issue titled "Nightly CI run is
+red" with the label `nightly-red`, naming the red jobs and linking the run,
+and assigns it to both maintainers — or, while such an issue is open, adds a
+comment to the oldest one, so a red streak stays one issue; when every job is
+green again it closes every such issue with a comment that links the green
+run. It finds its issue by label and exact title in the REST list of open
+issues (not the search index, which can lag behind an issue opened moments
+before), and writes nothing when that read fails; an assignment that fails
+leaves the issue and a warning. Only that job may write (`issues: write`),
+only on a schedule run in this repository (not on a fork); a dispatch runs it
+read-only and writes what it would do to the job summary. The label is created
+on the first red run. `bash .github/scripts/nightly-report.test.sh` checks the
+script's decisions against a stubbed `gh` over consecutive nights, and that
+the job waits for every job a schedule runs (the `lint` job runs it; locally
+`TMPDIR` must allow executables). GitHub disables a scheduled workflow of a
+public repository after 60 days without activity in the repository; then
+there is no nightly run and no report until the workflow is enabled again in
+the Actions tab.
 
 The two images differ in more than their versions, and plan and cost pins see
 the difference:
@@ -194,32 +213,42 @@ the difference:
 | | `timescale/timescaledb-ha:pg18` (CI) | `pgvector-timescaledb:pg18` (production) |
 |---|---|---|
 | Versions | PostgreSQL 18.7, TimescaleDB 2.32.1 on 2026-11-22 (the tag floats) | PostgreSQL 18.6, TimescaleDB 2.31.0 (`db-image/Dockerfile` pins the base image by digest and the TimescaleDB packages by version) |
-| Planner inputs | set by `timescaledb-tune` at start, sized from the `TS_TUNE_MEMORY=2GB` and `TS_TUNE_NUM_CPUS=2` that `testdb` passes (so they do not follow the host): `random_page_cost` 1.1, `work_mem` 32 MB, `effective_cache_size` about 1.9 GB, `max_parallel_workers_per_gather` 1 | PostgreSQL's defaults: `random_page_cost` 4, `work_mem` 4 MB, `effective_cache_size` 4 GB, `max_parallel_workers_per_gather` 2 |
+| Planner inputs | set by `timescaledb-tune` at start, sized from the `TS_TUNE_MEMORY=2GB` and `TS_TUNE_NUM_CPUS=2` that `testdb` passes (so they do not follow the host): `work_mem` 32 MB, `effective_cache_size` 1.5 GB, `max_parallel_workers_per_gather` 1; its `random_page_cost` 1.1 is overridden to 4 by `testdb` (below) | PostgreSQL's defaults: `random_page_cost` 4, `work_mem` 4 MB, `effective_cache_size` 4 GB, `max_parallel_workers_per_gather` 2 |
 | JIT | not available (`pg_jit_available()` is false), `jit = off` | available, `jit = on` |
 | Collation of the cluster | `C.UTF-8` | `en_US.utf8` |
 
 A deployment prices pages with `random_page_cost` 4 unless its operator set
-another value, so on that input the production image plans as a deployment
-does and the CI image does not. Three tests need JIT and skip on the CI image:
+another value. Every container `testdb` starts, on either image, runs with
+`-c random_page_cost=4` (`testdb.DeploymentRandomPageCost`; the command line
+wins over the CI image's `postgresql.conf`), so a test that sets no value of
+its own plans with a deployment's page cost in the per-PR jobs and in the
+nightly job on the production image alike (issue #514: the per-PR jobs used to
+run at the CI image's 1.1, where two cost pins and a plan pin that failed at 4
+passed in every pull request). A schedule or dispatch run of
+`integration-tests` sets `PGOPTIONS='-c random_page_cost=1.1'`, so every night
+also runs the whole suite at 1.1, the value an operator tuning for SSD storage
+sets. The other planner inputs in the table still differ. Three tests need JIT and skip on the CI image:
 `TestMigration177_JitOfAFirstCallDoesNotStick`,
 `TestTransitionTablePlansDoNotKeepJit` and
 `TestMigration180ReplansABackendThatKeptJit`. A plan or cost pin that fails on
-one image only: run it on each image with the other image's setting, through
-`PGOPTIONS` (pgx reads it for every connection the test binary opens, the
-test's own `SET`s still win):
+one image only: run it on the other image, and on either at the other page
+cost, through `PGOPTIONS` (pgx reads it for every connection the test binary
+opens and the server takes it over its command line; the test's own `SET`s
+and a `testdb.WithRandomPageCost` pool still win):
 
 ```bash
-cd go && PGOPTIONS='-c random_page_cost=4' go test -tags=integration -p 1 -count=1 -run '<test>' ./internal/store/
-cd go && CTX_TEST_PG_IMAGE=pgvector-timescaledb:pg18 PGOPTIONS='-c random_page_cost=1.1' go test -tags=integration -p 1 -count=1 -run '<test>' ./internal/store/
+cd go && CTX_TEST_PG_IMAGE=pgvector-timescaledb:pg18 go test -tags=integration -p 1 -count=1 -run '<test>' ./internal/store/
+cd go && PGOPTIONS='-c random_page_cost=1.1' go test -tags=integration -p 1 -count=1 -run '<test>' ./internal/store/
 ```
 
 A result that follows the setting on both images is not tied to an image: the
 setting decides it, and a deployment on the default gets the result of 4.
 
 A pin whose plan depends on `random_page_cost` states its assertions under
-both values instead of the container's own: `testdb.RandomPageCosts` lists 1.1
-and 4, and `testdb.WithRandomPageCost(t, pool, value)` returns a pool on the
-test's database whose every connection plans with that value (a startup
+both values, not only the container's 4: an operator who tunes for SSD storage
+sets 1.1, and that is the plan such a deployment gets. `testdb.RandomPageCosts`
+lists 1.1 and 4, and `testdb.WithRandomPageCost(t, pool, value)` returns a pool
+on the test's database whose every connection plans with that value (a startup
 parameter of the connection, so it holds for prepared statements and their
 generic plans, survives `RESET`, and wins over `PGOPTIONS`).
 `TestBlockCounts_StatsCostIndependentOfCorpus`,
@@ -231,7 +260,12 @@ and the reconcile's batches `context_blocks_pkey`, `idx_context_scope` and
 they are red on either image when a statement takes such a plan under one of
 the two values. The two embed-excluded pins replay a statement that ran in a
 transaction under that transaction's `SET LOCAL` settings, and a statement
-trigger checks that the settings were in effect when the batch ran.
+trigger checks that the settings were in effect when the batch ran. A pin that
+compares two plans forces each of them instead: `TestVW4TrigramInnerTiebreak`
+(`internal/rrf`) runs the trigram arm of the installed `ctx_rrf` once on the
+GiST index (sequential scans, bitmap scans and explicit sorts off) and once on
+a sequential scan, under both values — on its 72 rows the planner left to
+itself takes a sequential scan at 4 and the GiST index at 1.1.
 
 ### Gates by impact (`go/gates.sh`)
 

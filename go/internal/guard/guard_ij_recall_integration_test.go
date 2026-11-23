@@ -23,9 +23,16 @@
 //   - repo-small (100 blocks): ctx_guard_check finds the 0.99 dup among 100k
 //     foreign (the literal fixture / core deliverable); EXPLAIN logs the exact
 //     scope-index plan (finding evidence).
-//   - repo-big (large scope, natural HNSW plan): EXPLAIN asserts the HNSW plan;
+//   - repo-big (large scope, HNSW plan): EXPLAIN asserts the HNSW plan;
 //     iterative_scan='off' MISSES the dup while 'relaxed_order' (M074) FINDS
 //     it — the GUC is load-bearing exactly there; ctx_guard_check finds it too.
+//     The plan is forced (ijHNSWPlan) as the guard's index branch forces it
+//     (guardIndexPlanOn, checkpath.go): left to the planner, 8 000 rows sit at
+//     the edge between the HNSW index and the scope index plus a sort at
+//     random_page_cost 4 — the HNSW plan priced 787 to 905 in seven runs on
+//     both images, the scope index plus sort 849, and the natural planner
+//     took the scope index in a run of the whole package (issue #514) — so
+//     the regime this gate is about is not left to a coin.
 //
 // M074 status verified in-tree: 074_guard_check_type_policy.sql:126 already sets
 // relaxed_order in the same-scope branch — this wave adds NO migration (K1).
@@ -62,11 +69,14 @@ const (
 	ijBigDup     = "019f2211-0000-7000-9000-00000000f004"
 )
 
+// ijHNSWPlan is guardIndexPlanOn (checkpath.go): with no sequential scan,
+// bitmap scan or sort to choose, the planner takes the HNSW index.
+const ijHNSWPlan = "SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off; SET LOCAL enable_sort = off"
+
 // annSelect is the same-scope filtered-ANN SELECT that M074's function body
 // runs (candidate filter + scope conjunct + halfvec cosine ORDER BY). The test
-// runs it directly (sort enabled — relaxed_order needs the sort node) to show
-// the recall delta between iterative_scan off and on; the production path goes
-// through ctx_guard_check.
+// runs it directly, on the HNSW plan, to show the recall delta between
+// iterative_scan off and on; the production path goes through ctx_guard_check.
 const annSelect = `
 	SELECT cb.id::text
 	FROM context_blocks cb
@@ -191,7 +201,7 @@ func TestIJRecallFilteredANN(t *testing.T) {
 
 	qVec := pgvec.NewVector(qEmb)
 
-	// annMatch runs annSelect (natural planner, sort enabled) after setting
+	// annMatch runs annSelect on the HNSW plan (ijHNSWPlan) after setting
 	// hnsw.iterative_scan to the given mode, in a tx-scoped SET LOCAL. Returns
 	// the matched id, or "" when the filtered window yields no same-scope row.
 	annMatch := func(mode, scope, queryID string) string {
@@ -202,6 +212,9 @@ func TestIJRecallFilteredANN(t *testing.T) {
 		defer tx.Rollback(ctx) //nolint:errcheck
 		if _, err := tx.Exec(ctx, "SET LOCAL hnsw.iterative_scan = '"+mode+"'"); err != nil {
 			t.Fatalf("set iterative_scan=%s: %v", mode, err)
+		}
+		if _, err := tx.Exec(ctx, ijHNSWPlan); err != nil {
+			t.Fatalf("force the HNSW plan: %v", err)
 		}
 		var matched string
 		err = tx.QueryRow(ctx, annSelect, qVec, queryID, candidateTypes, scope).Scan(&matched)
@@ -278,14 +291,14 @@ func TestIJRecallFilteredANN(t *testing.T) {
 			strings.Contains(plan, "idx_embedding_hnsw"), strings.Contains(plan, "idx_context_scope"), plan)
 	})
 
-	// HNSW-regime gate: at the large repo-big scope the natural planner prefers
-	// the HNSW index — verified by EXPLAIN. This is the filtered-ANN regime the
-	// design §4.7 targets and where iterative_scan is load-bearing.
+	// HNSW-regime gate: at the large repo-big scope the plan annMatch runs is
+	// the HNSW index plan — verified by EXPLAIN. This is the filtered-ANN
+	// regime the design §4.7 targets and where iterative_scan is load-bearing.
 	t.Run("BigScopeUsesHNSWPlan", func(t *testing.T) {
-		plan := explainPlan(t, "repo-big", ijBigQuery, "SET LOCAL hnsw.iterative_scan = 'off'")
-		t.Logf("repo-big natural plan:\n%s", plan)
+		plan := explainPlan(t, "repo-big", ijBigQuery, "SET LOCAL hnsw.iterative_scan = 'off'", ijHNSWPlan)
+		t.Logf("repo-big plan:\n%s", plan)
 		if !strings.Contains(plan, "idx_embedding_hnsw") {
-			t.Fatalf("repo-big natural plan is NOT the HNSW plan (bigN=%d too small to flip the planner; raise CTX_IJ_RECALL_BIG_N):\n%s", bigN, plan)
+			t.Fatalf("repo-big plan with %q is NOT the HNSW plan (bigN=%d):\n%s", ijHNSWPlan, bigN, plan)
 		}
 		if strings.Contains(plan, "Seq Scan on context_blocks") {
 			t.Errorf("repo-big plan seq-scans context_blocks:\n%s", plan)
